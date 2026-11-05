@@ -234,7 +234,7 @@ test("a joiner over the ratio gets a fresh header", async () => {
 		[2, [3]],
 		[3, [4, 1]],
 	] as const) {
-		const track = new Track.Producer("test").accept({ refresh: 1 });
+		const track = new Track.Producer("test").accept({ refresh: 1, maxAge: null });
 		const producer = new Producer<Rec>({ track });
 		producer.push({ value: { n: 1000 } });
 		for (let n = 0; n < pushes; n++) producer.push({ value: { n } });
@@ -249,7 +249,7 @@ test("a joiner over the ratio gets a fresh header", async () => {
 });
 
 test("a window refresh reuses the newest timestamp", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 0 });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 0, maxAge: null });
 	const producer = new Producer<Rec>({ track });
 	producer.push({ value: { n: 0 }, at: Time.Timestamp.fromMillis(10) });
 	producer.push({ value: { n: 1 }, at: Time.Timestamp.fromMillis(20) });
@@ -272,7 +272,7 @@ test("a window refresh reuses the newest timestamp", async () => {
 });
 
 test("a window refresh after an older edit starts at the newest timestamp", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 0 });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 0, maxAge: null });
 	const producer = new Producer<Rec>({ track });
 	producer.push({ value: { n: 0 }, at: Time.Timestamp.fromMillis(30) });
 	// Ops may carry timestamps older than their group's first frame.

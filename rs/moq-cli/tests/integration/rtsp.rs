@@ -118,7 +118,7 @@ async fn finished(child: &mut Child, mut catalogs: hang::catalog::Consumer) {
 
 #[tokio::test]
 async fn every_rtsp_session_is_a_fresh_broadcast() {
-	let _ = moq_tokio::crypto::install_default();
+	moq_tokio::crypto::install_default().unwrap();
 	let fixture = moq_relay::test_relay().await.expect("test relay");
 	let ready = fixture.relay.ready();
 	tokio::spawn(fixture.relay.run());

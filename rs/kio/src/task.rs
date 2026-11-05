@@ -53,7 +53,7 @@ use std::{
 		Arc, Mutex,
 		atomic::{AtomicBool, AtomicU64, Ordering},
 	},
-	task::{Context, Poll, RawWakerVTable, Wake, Waker},
+	task::{Context, Poll, Wake, Waker},
 };
 
 use crate::waiter::{Park, Waiter};
@@ -169,11 +169,17 @@ std::thread_local! {
 	static POLLING: Polling = const { Polling { open: RefCell::new(Vec::new()), held: RefCell::new(Vec::new()) } };
 }
 
-/// A waker's identity: what [`Waker::will_wake`] compares.
-type Identity = (*const (), *const RawWakerVTable);
+/// A waker's identity: its data pointer, the task it wakes.
+///
+/// Not the vtable pointer [`Waker::will_wake`] also compares: a vtable is a promoted
+/// constant with no unique address, so a clone of an `Arc`-backed waker may carry a
+/// different one than the original (Miri varies it on purpose), and a batch would
+/// miss its own task's wakes. A foreign waker sharing a batch's data pointer only
+/// has its wake held until that batch returns.
+type Identity = *const ();
 
 fn identity(waker: &Waker) -> Identity {
-	(waker.data(), waker.vtable())
+	waker.data()
 }
 
 /// The [`Waiter::batch`]es running on this thread, and the wakes held for them.

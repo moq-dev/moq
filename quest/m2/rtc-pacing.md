@@ -63,7 +63,7 @@ its argument list rather than adding a fifth argument. Wire: none.
 
 ## Required
 
-- [Vendor and trim the stack](/quest/m2/webrtc/vendor.md) - the vendored str0m this adds the NACK hook to
+- [Vendor and trim the stack](/quest/m1/webrtc-vendor.md) - the vendored str0m this adds the NACK hook to
 
 ## Related
 

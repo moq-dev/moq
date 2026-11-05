@@ -7,7 +7,7 @@ the wire: ANNOUNCE_REQUEST carries an initial route credit, the subscriber
 raises it later on its side of the stream, and the publisher never holds more
 live advertisements on the stream than the credit. A peer that floods distinct
 paths is held to the credit instead of closing the session at the 100k
-announce cap, so a flood of `.dial/*` sockets cannot drop a cluster link or the
+announce cap, so a flood of distinct paths cannot drop a cluster link or the
 other announcements it carries. Rust and JS implement it on the next
 unpublished lite version after lite-07.
 
@@ -30,8 +30,8 @@ Decided 2026-11-01 with the maintainer (the follow-up to the
   budget.
 - Declined: per-route refusal (frees the subscriber but not the publisher,
   and the flood still crosses the wire once), and aggregating to a covering
-  prefix at the limit (loses the per-path inventory a socket `Listener`
-  needs).
+  prefix at the limit (loses the per-path inventory a reader watching many
+  broadcasts needs).
 - The publisher withholds routes beyond the credit, coalesced to the latest
   state per path as it already does, and sends them as an ANNOUNCE_END or a
   credit raise frees room. Which withheld route goes first is the
@@ -42,6 +42,13 @@ Decided 2026-11-01 with the maintainer (the follow-up to the
   the session advertises, and the session never closes for count.
   moq-transport and older lite versions have no credit and keep today's
   close at the cap.
+- Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-afk and /quest-complete runs): weigh per-socket stream credit here,
+  like QUIC's MAX_STREAMS. With
+  [moq-dev/moq#7677](https://github.com/moq-dev/moq/pull/7677)'s sockets, a peer can keep
+  as many live socket streams listed as the session's announce cap allows,
+  with no per-socket bound. Decide whether the route credit covers it or a
+  socket needs its own, for byte streams and the mesh. Options shown: m0;
+  m1; ✅ m2, in this quest.
 - Settle and record here how SYNCED behaves when the initial set exceeds the
   credit. For example, SYNCED could follow the credited part, and the rest
   arrives as live updates.

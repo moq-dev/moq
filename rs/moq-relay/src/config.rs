@@ -85,11 +85,6 @@ pub struct Config {
 	#[serde(default)]
 	pub web: web::Config,
 
-	/// Automatic certificates from an ACME directory. Disabled unless `acme.domains` is set.
-	#[usage(flatten)]
-	#[serde(default)]
-	pub acme: crate::acme::Config,
-
 	/// Optional public STUN Binding listener, available with the `stun` feature.
 	#[cfg(feature = "stun")]
 	#[usage(flatten)]
@@ -322,7 +317,6 @@ impl Config {
 		deprecated.extend(self.connect.deprecated());
 		deprecated.extend(self.cluster.deprecated());
 		deprecated.extend(self.auth.deprecated());
-		deprecated.extend(self.acme.deprecated());
 		if let Some(server) = &self.server {
 			deprecated.toml("[server]", "[listen]", None);
 			deprecated.extend(server.deprecated());
@@ -347,8 +341,6 @@ impl Config {
 		// dial clients would otherwise check `[quic]` late or never. `[limits.peer.quic]`
 		// is checked by `Cluster::new`, which embedders call directly.
 		self.quic.validate().context("invalid [quic]")?;
-		#[cfg(not(feature = "acme"))]
-		self.acme.refuse_unsupported()?;
 
 		self.quic
 			.max_streams
@@ -363,7 +355,7 @@ mod tests {
 
 	/// Each renamed setting: its old flag, old variable, a value equal to the old default,
 	/// and the replacement its refusal names.
-	const OBSOLETE_ROLE_SOURCES: [(&str, &str, &str, &str); 6] = [
+	const OBSOLETE_ROLE_SOURCES: [(&str, &str, &str, &str); 5] = [
 		(
 			"--session-announces",
 			"MOQ_SESSION_ANNOUNCES",
@@ -376,7 +368,6 @@ mod tests {
 			"100000",
 			"--limits-peer-announces",
 		),
-		("--acme-dir", "MOQ_ACME_DIR", "cache", "--acme-cache"),
 		(
 			"--cluster-connect-api",
 			"MOQ_CLUSTER_CONNECT_API",
@@ -429,7 +420,6 @@ mod tests {
 		for (body, replacement) in [
 			("[session]\nannounces = 1000", "[limits.client]"),
 			("[peer]\nannounces = 100000", "[limits.peer]"),
-			("[acme]\ndir = 'cache'", "[acme] cache"),
 			("[cluster]\nconnect_api = 'peers.json'", "[cluster.api] url"),
 			("[cluster]\nconnect_api_tls_root = []", "[cluster.api.tls] root"),
 			("[auth]\nverifications = 128", "fixed per-session verification policy"),
@@ -439,16 +429,6 @@ mod tests {
 				Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).unwrap_err();
 			assert!(error.to_string().contains(replacement), "{body}: {error}");
 		}
-	}
-
-	#[cfg(not(feature = "acme"))]
-	#[test]
-	fn an_acme_free_build_refuses_configured_issuance() {
-		let mut config = Config::default();
-		config.resolve().unwrap();
-		config.acme.domains.push("relay.example.com".into());
-		let error = config.resolve().unwrap_err();
-		assert!(error.to_string().contains("acme feature"), "{error}");
 	}
 
 	/// The moq-transport extension choices are file-only, so the loader must carry them through.
@@ -902,8 +882,7 @@ root = ["ca.pem"]
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert!(config.stats.enabled);
-		let cluster = cluster::Cluster::spawn(cluster::Options::default()).expect("cluster");
-		let _ = config.stats.build(cluster.origin.clone()).expect("stats build");
+		let _ = cluster::Cluster::new(cluster::Options::default().with_stats(config.stats)).expect("stats build");
 	}
 
 	/// Bare defaults loaded from TOML survive when the CLI does not mention them.

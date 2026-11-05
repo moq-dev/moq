@@ -1,17 +1,7 @@
-The `/py` uv workspace. Extends the root `AGENTS.md` and `rs/moq-ffi/AGENTS.md`.
+The `/py` uv workspace. Run recipes via `just py <recipe>`. See also `rs/moq-ffi/AGENTS.md`.
 
-# Packages
-
-- `moq-ffi/` (`import moq_ffi`): the generated uniffi layer over `rs/moq-ffi`, built with Maturin. One wheel covers everything moq-ffi exposes. Keep it thin: `__init__.py` re-exports generated symbols, no hand-written ergonomics.
-- `moq-rs/` (`import moq`, since `moq` was taken on PyPI): the ergonomic wrapper consumers use.
-
-# moq-rs
-
-`moq/__init__.py` is the public surface for the moq-net root and defines `__all__`; each layer above it is a public submodule (`moq.json`) with its own `__all__`. Modules map to roles; keep names aligned with the Rust crate they mirror.
-
-# Conventions
-
+- `moq-ffi/` (`import moq_ffi`) is the generated uniffi layer: re-exports only, no hand-written ergonomics. `moq-rs/` (`import moq`) is the ergonomic wrapper.
+- Each layer above the moq-net root is a submodule (`moq.json`) with its own `__all__`, named after the Rust crate it mirrors.
 - `Client`/`Server` are async context managers; iterate announcements and tracks with `async for`.
-- Keyword-only args with defaults (`*, ...`) instead of an options object; that is how Python extends additively.
-- The package ships `py.typed`: types and docstrings are the API, so document public symbols.
-- `just py <recipe>` for everything. Tests live under each package's `tests/`.
+- Extend with keyword-only args with defaults (`*, ...`), not options objects.
+- The package ships `py.typed`: document public symbols.

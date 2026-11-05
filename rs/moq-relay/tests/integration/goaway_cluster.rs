@@ -15,9 +15,12 @@ use moq_relay::{
 };
 use url::Url;
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond track with no publisher max age: the frames written here carry timestamps,
+/// and superseded groups stay readable.
 fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
 }
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -110,7 +113,7 @@ fn drain_session_with_zero_timeout_closes_at_once() {
 /// the wire, so passing the window straight through left the session with no
 /// force-close at all and `drain_session` awaiting a peer that never leaves.
 async fn drain_session_with_zero_timeout_closes_at_once_inner() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let origin = moq_tokio::origin::spawn();
 	let (port, mut accepted, _handle) = spawn_upstream(origin).await;
@@ -146,7 +149,7 @@ fn cluster_continues_a_group_split_by_goaway() {
 /// A GOAWAY that lands mid-group hands the rest of the group to the reader already
 /// holding it, and the next group after it, never the split group a second time.
 async fn cluster_continues_a_group_split_by_goaway_inner() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let upstream_origin = moq_tokio::origin::spawn();
 	let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
@@ -284,7 +287,7 @@ async fn spawn_upstream(
 /// never retracts on the cluster origin (route re-pricing and the sibling's
 /// announce surface as metadata updates, not churn).
 async fn cluster_migrates_on_upstream_goaway_inner() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		// ── the shared "live" broadcast both siblings can serve ─────────
@@ -404,7 +407,7 @@ async fn spawn_relay_with_upstream(
 	upstream_url: &str,
 	accept_notify: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> (u16, tokio::task::JoinHandle<()>) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let (port, mut server) = listen_tcp().await;
 
@@ -478,7 +481,7 @@ async fn spawn_relay_with_upstream(
 /// 5. No GOAWAY leaks to the subscriber's own session, and the path never
 ///    retracts under the subscriber.
 async fn cluster_diamond_goaway_seamless_failover_inner() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	// ── TOP: origin server serving the same broadcast to both mids ──────
 	let top_origin = moq_tokio::origin::spawn();
@@ -791,7 +794,7 @@ fn goaway_handover_is_enforced_while_the_replacement_dial_hangs() {
 /// then says nothing, so the handshake hangs, and the predecessor must still be
 /// closed on schedule rather than held for as long as the dial takes.
 async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let upstream_origin = moq_tokio::origin::spawn();
 	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin).await;

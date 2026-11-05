@@ -224,6 +224,12 @@ impl Client {
 		self
 	}
 
+	/// Share `viewers` with every session this client dials.
+	pub(crate) fn with_viewers(mut self, viewers: moq_net::bandwidth::Viewers) -> Self {
+		self.moq = self.moq.with_viewers(viewers);
+		self
+	}
+
 	/// Price the links this client dials; see [`moq_net::Client::with_cost`].
 	pub fn with_cost(mut self, cost: u64) -> Self {
 		self.moq = self.moq.with_cost(cost);
@@ -268,10 +274,24 @@ impl Client {
 		Connection::new(self.clone(), addrs.into())
 	}
 
+	#[cfg(feature = "quic")]
+	pub(crate) fn quic_closed(&self) -> bool {
+		self.quic.as_ref().is_some_and(|quic| quic.is_closed())
+	}
+
+	#[cfg(feature = "quic")]
+	pub(crate) fn fresh_port(&mut self) -> crate::Result<()> {
+		if let Some(quic) = &mut self.quic {
+			quic.fresh_port()?;
+		}
+		Ok(())
+	}
+
 	/// Close every QUIC connection this client dialed, once each peer has been sent the
 	/// close.
 	///
-	/// Clones share one endpoint, so this closes theirs too. Dropping the connections
+	/// Clones share ownership of their endpoints, so this closes theirs too, including
+	/// fresh sockets opened after failed dials. Dropping the connections
 	/// only queues the close, which nothing sends once the runtime stops: a process
 	/// that exits without this leaves each peer waiting out its idle timeout.
 	///
@@ -463,14 +483,9 @@ impl Client {
 		#[cfg(feature = "quic")]
 		if let Some(quic) = self.quic.as_ref() {
 			let quic_addr = addr.clone();
-			let address = match quic_transport(&url) {
-				crate::Transport::Quic => moq_net::transport::Address::Setup,
-				_ => moq_net::transport::Address::Uri,
-			};
 			let quic_handle = async {
 				quic.connect(&self.tls, quic_addr, &self.versions)
 					.await
-					.map(|session| crate::transport::Session::new(session, address))
 					.map_err(Error::from)
 			};
 
@@ -1064,10 +1079,7 @@ mod tests {
 		// Hold QUIC until the fallback has been refused, so the 403 is always exercised.
 		let quic = Box::pin(async move {
 			forbid.await.unwrap().expect("fallback listener failed");
-			quic.connect(&tls, quic_addr, &versions)
-				.await
-				.map(|session| crate::transport::Session::new(session, moq_net::transport::Address::Uri))
-				.map_err(Error::from)
+			quic.connect(&tls, quic_addr, &versions).await.map_err(Error::from)
 		});
 
 		let dialed = kio::clock::timeout(
@@ -1159,10 +1171,7 @@ mod tests {
 			let quic = dialer.quic.as_ref().expect("QUIC backend");
 			let session = quic.connect(&dialer.tls, quic_addr, &dialer.versions).await?;
 			connected.send(()).expect("fallback listener alive");
-			Ok::<_, crate::Error>(crate::transport::Session::new(
-				session,
-				moq_net::transport::Address::Uri,
-			))
+			Ok::<_, crate::Error>(session)
 		});
 		let cc = client
 			.race_moq_connect(&client.moq, ws_addr, quic)

@@ -1,8 +1,3 @@
-<header>
-	<h1>MoQ CARLA</h1>
-	<button class="wheel" id="wheel" type="button" hidden></button>
-	<span class="status" id="conn">Connecting…</span>
-</header>
 <div id="wheel-cal" hidden>
 	<div class="cal-box">
 		<h2>CALIBRATE STEERING WHEEL</h2>
@@ -36,7 +31,11 @@
 			<div id="scale" hidden><span class="label"></span><div class="bar"></div></div>
 			<div id="map-note" hidden></div>
 			<div id="offline" role="status" hidden><h2>Connecting to the relay…</h2><p></p></div>
+			<div class="map-status">
+				<span class="status" id="conn">Connecting…</span>
+				<button class="wheel" id="wheel" type="button" hidden></button>
+			</div>
 		</div>
 	</section>
 </main>
-<footer><details><summary>Controls</summary><p>Select a vehicle, then choose <strong>Take control</strong> or use a drive key. <kbd>W</kbd> throttle · <kbd>S</kbd> brake · <kbd>A</kbd> / <kbd>D</kbd> steer · <kbd>C</kbd> center · <kbd>Space</kbd> / <kbd>G</kbd> gear while braking.</p><p><kbd>E</kbd> emergency stop · <kbd>R</kbd> reset stop · <kbd>Esc</kbd> release control, then return to the map. Keyboard inputs hold when released.</p><p>Plug in a steering wheel and turn it to connect. Select its name in the header to calibrate. Move it with the throttle released to take over.</p></details><span>A generic <a href="https://moq.dev">MoQ</a> relay carries the video, telemetry, and controls.</span></footer>
+<footer><p>Select a vehicle, then choose <strong>Take control</strong> or use a drive key. <kbd>W</kbd> throttle · <kbd>S</kbd> brake · <kbd>A</kbd> / <kbd>D</kbd> steer · <kbd>C</kbd> center · <kbd>Space</kbd> / <kbd>G</kbd> gear while braking.</p><p><kbd>E</kbd> emergency stop · <kbd>R</kbd> reset stop · <kbd>Esc</kbd> release control, then return to the map. Keyboard inputs hold when released.</p><p>Plug in a steering wheel and turn it to connect. Select its name on the map to calibrate. Move it with the throttle released to take over.</p></footer>

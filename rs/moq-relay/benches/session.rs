@@ -43,13 +43,11 @@ impl Backend for Relay {
 		options.config.id = Some(id);
 		// The shared sweeps include more announcements than a default ordinary client.
 		options.session.announces = options.peer.announces;
-		let (cluster, driver) = cluster::Cluster::new(options.with_cache(cache)).unwrap();
-		tokio::spawn(driver.run());
 		let mut stats = stats::Config::default();
 		stats.enabled = true;
 		stats.node = Some(id.to_string());
-		let (producer, publisher) = stats.build(cluster.origin.clone()).unwrap();
-		let cluster = cluster.with_stats(producer, publisher);
+		let (cluster, driver) = cluster::Cluster::new(options.with_cache(cache).with_stats(stats)).unwrap();
+		tokio::spawn(driver.run());
 
 		let (auth, mut admissions) = auth::Auth::embedded(format!("bench-{id}"));
 		let decider = tokio::spawn(async move {

@@ -43,7 +43,7 @@ pub(crate) const MAX_GROUPED_PAYLOAD: usize = 32 * 1024 * 1024;
 /// Largest plaintext a grouped frame can carry: 32 MiB minus the tag.
 pub const MAX_GROUPED_PLAINTEXT: usize = MAX_GROUPED_PAYLOAD - TAG_LEN;
 
-/// moq-lite datagram body cap, including Type, Subscribe ID, Group Sequence, and Timestamp.
+/// moq-lite datagram body cap, including Type, Subscribe ID, Sequence, and Timestamp.
 pub(crate) const MAX_DATAGRAM_BODY: usize = 1200;
 
 /// Widest moq-lite datagram header: lite-07's one-byte Type and three 9-byte leading-ones varints.

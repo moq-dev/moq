@@ -71,7 +71,6 @@ pub struct Log {
 	/// How long the trail and the stops were at the first session close.
 	closed_at: Arc<Mutex<Option<(usize, usize)>>>,
 	bi_opens: Arc<AtomicUsize>,
-	pub request_attempts: Arc<AtomicUsize>,
 	priorities: Arc<Mutex<Vec<i64>>>,
 	/// Hands each send group its id.
 	group_ids: Arc<AtomicUsize>,
@@ -538,17 +537,6 @@ impl poll::Session for DeadStreamSession {
 		)))
 	}
 
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: crate::transport::poll::SendOptions<
-			'_,
-			<Self::SendStream as crate::transport::poll::SendStream>::Group,
-		>,
-	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
-		self.poll_open_bi(waiter, options).map_ok(Some)
-	}
-
 	fn poll_open_uni(
 		&self,
 		_waiter: &kio::Waiter,
@@ -779,17 +767,6 @@ impl poll::Session for SinkSession {
 		Poll::Ready(Ok((send, PendingRecv)))
 	}
 
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: crate::transport::poll::SendOptions<
-			'_,
-			<Self::SendStream as crate::transport::poll::SendStream>::Group,
-		>,
-	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
-		self.poll_open_bi(waiter, options).map_ok(Some)
-	}
-
 	fn poll_open_uni(
 		&self,
 		waiter: &kio::Waiter,
@@ -982,7 +959,6 @@ pub struct ScriptedSession {
 	unacked_fin: bool,
 	/// Set by [`Self::with_unacked_uni_fins`]; shared, so every clone counts down one budget.
 	unacked_unis: Arc<AtomicUsize>,
-	datagram_size: usize,
 	/// Set by [`Self::with_groups`].
 	groups: bool,
 	/// Set by [`Self::with_send_window`].
@@ -1004,11 +980,6 @@ impl ScriptedSession {
 		self
 	}
 
-	pub fn with_datagrams(mut self, max_size: usize) -> Self {
-		self.datagram_size = max_size;
-		self
-	}
-
 	pub fn new(script: Vec<u8>) -> Self {
 		Self {
 			log: Log::default(),
@@ -1024,7 +995,6 @@ impl ScriptedSession {
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			unacked_fin: false,
 			unacked_unis: Default::default(),
-			datagram_size: 0,
 			groups: false,
 			send_window: None,
 		}
@@ -1236,21 +1206,6 @@ impl poll::Session for ScriptedSession {
 		)))
 	}
 
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: crate::transport::poll::SendOptions<
-			'_,
-			<Self::SendStream as crate::transport::poll::SendStream>::Group,
-		>,
-	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
-		self.log.request_attempts.fetch_add(1, Ordering::Relaxed);
-		if !*self.credit.read() {
-			return Poll::Ready(Ok(None));
-		}
-		self.poll_open_bi(waiter, options).map_ok(Some)
-	}
-
 	fn poll_open_uni(
 		&self,
 		waiter: &kio::Waiter,
@@ -1288,7 +1243,7 @@ impl poll::Session for ScriptedSession {
 	}
 
 	fn max_datagram_size(&self) -> usize {
-		self.datagram_size
+		0
 	}
 
 	fn address(&self) -> crate::transport::Address {

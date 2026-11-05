@@ -7,9 +7,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::sign::error::{Error, Result};
-use crate::sign::key::{PublicKey, SecretKey};
 use crate::sign::scope::Scope;
 use crate::sign::track;
+use crate::sign::{PublicKey, SecretKey};
 
 /// The publishing side of a signed broadcast.
 ///

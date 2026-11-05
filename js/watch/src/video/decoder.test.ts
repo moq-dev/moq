@@ -376,7 +376,9 @@ async function guardedPlayback(
 	const enabled = new Signal(true);
 	// Published before the decoder subscribes, since a broadcast with no request handler refuses
 	// an unknown track.
-	const track = live ? mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI }) : undefined;
+	const track = live
+		? mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE })
+		: undefined;
 	const decoder = new Decoder({ source, sync, enabled });
 	await microtasks();
 	return {
@@ -435,7 +437,7 @@ async function guardedPlayback(
 				? new Moq.Origin.Producer().createBroadcast(Moq.Path.from(path)).broadcast
 				: new Moq.Broadcast.Producer();
 			const track = live
-				? mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI })
+				? mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE })
 				: undefined;
 			media.set(mediaProducer.consume());
 			return track;
@@ -1124,7 +1126,12 @@ it("a renamed video track keeps the delay, so audio neither skips nor goes silen
 		(playback.track as Moq.Track.Producer).finish();
 		(playback.track as Moq.Track.Producer).close();
 		playback.switchRendition("video/1");
-		video.replace(playback.producer.createTrack("video/1", { timescale: Moq.Time.Timescale.MILLI }));
+		video.replace(
+			playback.producer.createTrack("video/1", {
+				timescale: Moq.Time.Timescale.MILLI,
+				maxAge: Container.MAX_AGE,
+			}),
+		);
 		await run(20_000, 26_000);
 
 		// The replacement read the new track and showed it.

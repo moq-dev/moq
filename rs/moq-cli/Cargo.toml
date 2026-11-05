@@ -123,7 +123,7 @@ moq-rtmp = { workspace = true }
 moq-rtsp = { workspace = true }
 moq-srt = { workspace = true }
 # Raw qmux listeners are part of the CLI surface. `uds` compiles only on Unix.
-moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "tcp", "uds"] }
+moq-tokio = { workspace = true, default-features = false, features = ["tcp", "uds"] }
 moq-transcode = { workspace = true, optional = true }
 moq-video = { workspace = true, optional = true }
 object_store = { workspace = true, features = ["fs"] }
@@ -167,7 +167,7 @@ test-env = { path = "../test-env" }
 # exporter drain timeouts instantly instead of waiting on the wall clock.
 tokio = { workspace = true, features = ["test-util"] }
 # Plays the `announced` view's frames on a virtual terminal, scrolling included.
-vt100 = "0.17.0"
+vt100 = "0.18.1"
 workspace-hack = { path = "../workspace-hack" }
 
 [target.'cfg(unix)'.dev-dependencies]

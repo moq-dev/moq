@@ -128,6 +128,7 @@ class Drive:
         self._instance: str | None = None
         self._sequence: int | None = None
         self._state = DriveState.stopped()
+        self._takeover_pedals: tuple[float, float] | None = None
         self._estopped = False
         self._estop_by: str | None = None
 
@@ -158,13 +159,6 @@ class Drive:
     def accepted(self) -> Accepted:
         return Accepted(state=self._state, estopped=self._estopped)
 
-    def synchronize(self, state: DriveState) -> bool:
-        """Adopt live vehicle feedback before an unclaimed manual handoff."""
-        if self._driver is not None or self._estopped:
-            return False
-        self._state = state.sanitized()
-        return True
-
     def apply(self, command: Command) -> bool:
         """Apply a command, returning whether it changed or refreshed state."""
         if command.kind == "drive":
@@ -175,11 +169,16 @@ class Drive:
             self._instance = command.instance
             self._sequence = command.sequence
             state = (command.state or DriveState.stopped()).sanitized()
-            if (
-                state.gear is not self._state.gear
-                and not self._can_shift(state)
-                and not (claiming and self._can_initialize_takeover(self._state, state))
-            ):
+            pedals = (state.throttle, state.brake)
+            if claiming:
+                self._takeover_pedals = pedals
+            if self._takeover_pedals == pedals:
+                # Heartbeats can repeat the autopilot's demand indefinitely.
+                # Only a pedal change releases the takeover brake.
+                state = replace(state, throttle=0.0, brake=1.0)
+            else:
+                self._takeover_pedals = None
+            if state.gear is not self._state.gear and not self._can_shift(state):
                 state = replace(state, gear=self._state.gear)
             self._state = state
 
@@ -227,19 +226,9 @@ class Drive:
         """Require some brake and a released throttle for a gear change."""
         return state.brake > 0.0 and state.throttle <= SHIFT_MAX_THROTTLE
 
-    @staticmethod
-    def _can_initialize_takeover(current: DriveState, requested: DriveState) -> bool:
-        """Let a new CARLA lease synchronize into forward without touching either pedal."""
-        return (
-            current.gear is Gear.NEUTRAL
-            and requested.gear is Gear.FORWARD
-            and requested.steering == 0.0
-            and requested.throttle == 0.0
-            and requested.brake == 0.0
-        )
-
     def _clear_driver(self) -> None:
         self._driver = None
         self._instance = None
         self._sequence = None
         self._state = DriveState.stopped()
+        self._takeover_pedals = None

@@ -21,3 +21,17 @@ test("sparse raw audio expires on the clock without more capture", () => {
 	expect(backlog.shift()).toBeUndefined();
 	expect(backlog.deadline).toBeUndefined();
 });
+
+test("a break mark is reported once, on the frame that carries it", () => {
+	const backlog = new Backlog(Micro(1_000_000), 48_000);
+	expect(backlog.empty).toBe(true);
+	backlog.push({ timestamp: Micro(0), channels: [new Float32Array(960)] }, Micro(20_000), Micro(0));
+	backlog.push({ timestamp: Micro(100_000), channels: [new Float32Array(960)] }, Micro(120_000), Micro(0), true);
+	expect(backlog.empty).toBe(false);
+	expect(backlog.takeCut()).toBe(false);
+	backlog.shift();
+	expect(backlog.takeCut()).toBe(true);
+	expect(backlog.takeCut()).toBe(false);
+	expect(backlog.shift()?.timestamp).toBe(Micro(100_000));
+	expect(backlog.empty).toBe(true);
+});

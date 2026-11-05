@@ -176,6 +176,71 @@ func (r *Reservation) Update(maxBps uint64) {
 	r.inner.Update(maxBps)
 }
 
+// Viewers returns the session's viewers, dividing the connection's receive
+// estimate among the broadcasts watched over it. Every call returns a handle to
+// the same registry, and the session sends what its viewers' ceilings add up to
+// as its PROBE target. A client handle survives reconnects: a viewer reads nil
+// while disconnected and resumes on the next connection.
+func (s *Session) Viewers() *Viewers {
+	return &Viewers{inner: s.inner.Viewers()}
+}
+
+// Viewers divides one connection's receive estimate among the broadcasts
+// watched over it, max-min fair by each viewer's ceiling.
+type Viewers struct {
+	inner *ffi.MoqViewers
+}
+
+// Watch claims up to maxBps for a broadcast, returning its viewer. maxBps is a
+// ceiling: what the largest rendition the player would switch to needs, not what
+// it is receiving. Holding the viewer requests the receive estimate, like
+// Session.RecvBandwidth; Close it once the broadcast stops being watched.
+// Errors with ErrOutOfRange, watching nothing, when the ceilings would sum
+// above 2^53 - 1.
+func (v *Viewers) Watch(maxBps uint64) (*Viewer, error) {
+	inner, err := v.inner.Watch(maxBps)
+	if err != nil {
+		return nil, err
+	}
+	return &Viewer{inner: inner}, nil
+}
+
+// SetTarget sends targetBps as the PROBE target instead of the viewers' sum, or
+// nil to follow them again. Zero sends no target. Errors with ErrOutOfRange,
+// keeping the previous override, above 2^53 - 1.
+func (v *Viewers) SetTarget(targetBps *uint64) error {
+	return v.inner.SetTarget(targetBps)
+}
+
+// Viewer is one watched broadcast's standing claim on Viewers.
+//
+// Rate is a snapshot: nil means no receive estimate, so hold the current
+// selection, and 0 is a real zero rate.
+type Viewer struct {
+	inner *ffi.MoqViewer
+}
+
+// Rate returns this viewer's slice of the receive estimate right now, in bits
+// per second.
+func (v *Viewer) Rate() *uint64 {
+	return v.inner.Rate()
+}
+
+// Update changes the ceiling, keeping the same claim, as when a catalog enables
+// or disables a rendition. Errors with ErrOutOfRange, keeping the previous
+// ceiling, when the ceilings would sum above 2^53 - 1.
+func (v *Viewer) Update(maxBps uint64) error {
+	return v.inner.Update(maxBps)
+}
+
+// Close releases the claim, handing its share to the other viewers, lowering
+// the PROBE target, and ending its receive-estimate demand without waiting for
+// garbage collection. Call it from the goroutine that last used the viewer;
+// the viewer is unusable afterwards.
+func (v *Viewer) Close() {
+	v.inner.Destroy()
+}
+
 // RatePolicy maps a reservation's grant onto a sender's bitrate: MaxBps caps it,
 // and LowerBps, the next lower rendition's MaxBps, disables this rendition while
 // the grant is below (MaxBps + 2*LowerBps) / 3 and a session probes for it.

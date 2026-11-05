@@ -19,8 +19,8 @@ slow-timeout = { period = "30s", terminate-after = 2 }
 # race until proven otherwise (see Root Cause First in AGENTS.md).
 retries = 0
 
-# PR recipes build library, binary, and integration-test targets. Nightly keeps
-# the exhaustive target compile, but executes benches through cargo bench smokes.
+# The PR gate compiles benches to lint them, but never runs them here; Nightly
+# executes them through cargo bench smokes.
 default-filter = "not kind(bench)"
 
 # Limit ring concurrency within one invocation. Unit-test workers use small

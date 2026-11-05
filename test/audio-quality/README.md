@@ -84,8 +84,9 @@ buffer it plays into 128-frame quanta at the device rate and classifies each by 
 supplied (`moq_audio::playback::Observer`). The meanings are the browser's, with three differences
 in what the native player does:
 
-- Its ring never stalls to refill. A dry ring underruns until the player pads it back to the target
-  with silence, which `silence` counts, so native `stalled` is only a sink with nothing written yet.
+- Its ring stretches received PCM toward the target. A ring that still runs dry
+  emits emergency silence while received PCM refills it; `silence` counts that padding.
+  Native `stalled` is only a sink with nothing written yet.
 - The playhead is projected from the player's last write at the wall rate and held at its end.
 - `device` is the host's reported output latency, with no `baseLatency`, and `render_load` is
   unmeasured.
@@ -121,6 +122,57 @@ changed during the live run. The observer only
 records frames delivered under the player's maximum age, so a replay cannot recover groups the
 transport already discarded.
 
+## Push-to-talk
+
+```bash
+just test push-to-talk
+```
+
+This separate, roughly nine-minute run drives the shipped publish and watch elements in one Chromium
+page. A constant tone loops through the fake microphone, encoded as 128 kbit/s Opus with 60 ms
+frames. The listener holds a fixed 300 ms delay. After warmup and a mute, it measures 22 presses,
+alternating two and three seconds: the first after the warmup's five-second mute, seven with no
+intervening wait, seven after five seconds, and seven after sixty seconds. Both elements reach a
+local relay directly over WebTransport, with no shaping, loss, or queueing, so every millisecond
+measured belongs to the media pipeline rather than the path.
+
+`presses.json` records captured chunks at each press, WebCodecs encoder and decoder inputs and
+outputs, container writes, frame arrivals before reordering, and audible output onsets. Publisher,
+receiver, and worklet observations share the page's monotonic clock. A listening worklet detects
+each nonzero output onset. Its render time is mapped through the context's render clock, read with
+the page clock when the port message lands, so a late message moves neither boundary; its projected
+output comes from `getOutputTimestamp`. This measures the browser's projected device output, not
+acoustic output from a physical speaker. Zero-gap presses can remain continuously audible, and a
+later onset can belong to the preceding utterance. Their audible latency is always null. Only
+separated presses have an identifiable onset.
+
+`summary.json` matches inputs, outputs, writes, and arrivals by media timestamp, so a late arrival
+is still attributed to its utterance. The command checks pipeline completeness, not the epic's
+latency verdict. It refuses missing encoder inputs, a head that never reaches the listener or never
+decodes, submitted frames that never encode or reach the container, written frames that never reach
+the listener, reopened capture, a new encoder (a probe or a rebuilt codec) or subscription, and
+separated utterances with no audible output. It also fails on a broken driver or invalid capture.
+
+The latency goal is at most 300 ms of playout added on top of one-way delivery. For each separated
+press, `delivery` is the slowest of the utterance's frames that arrived before its onset, measured
+from that frame's first sample (its media offset after the press). `playout` is what remains of the
+render onset after the press and that delivery, and `output` is the projected device output after
+that onset. `path` follows the head frame from the press to projected output in parts that sum to
+it: `capture` (worklet delivery and framing, after the media the frame still needed),
+`packetization` (that media, placed on the media clock by the newest chunk captured before the
+press), `encode` (codec and container write), `network` (write to arrival, through the relay),
+`decode` (arrival to decoded PCM), `jitter_buffer` (the head's PCM to the first PCM that fills the
+playout delay), `render` (that PCM to the render onset: the worklet hand-off and the context's
+render callback), and `device`, as the stages below name them. `spread` is how far an utterance's frames
+stray from a steady arrival: the latest arrival relative to its media timestamp minus the earliest,
+which on this ideal path is the capture graph's cadence and what `"auto"`'s jitter estimate measures.
+The release's flushed lookahead chunk is not one of the utterance's frames and is left out. `latency`
+and `path` give each one's min, median and max.
+
+The command prints `latency`, `path`, and the completeness counts, and keeps its run directory
+even when it passes (set `HARNESS_KEEP=0` to drop it). Nightly runs it and keeps the raw evidence
+alongside the audio quality rows.
+
 ## Traces
 
 The shaper's profiles are synthetic. [`traces/`](traces) holds real arrivals, each graded as a
@@ -128,10 +180,10 @@ The shaper's profiles are synthetic. [`traces/`](traces) holds real arrivals, ea
 
 | Trace | Recorded from |
 | --- | --- |
-| `relay-bbb` | the public relay's `bbb.hang`: one AAC frame per group, flushed in bursts of about seven, the flush-span shape #3477 measured |
-| `local-aac` | this harness's AAC publisher through a local relay: the shallow control |
+| `relay-bbb` | the public relay's `bbb.hang`: one AAC frame per group, flushed in bursts of about seven, the flush-span shape #3477 measured, from before `moq import ts` grouped each PES |
+| `local-aac` | this harness's AAC publisher through a local relay, from before it grouped each PES: the shallow control |
 | `relay-mic` | `<moq-publish>` through the public relay: a real microphone with `--mic-broadcast` (the checked-in one is Chrome on a MacBook Air, its built-in microphone), otherwise headless Chromium's fake capture device |
-| `bursty-aac` | a nightly `bursty` AAC row's capture: each flush delivered newest first, which kept the player re-stalling until the estimator measured reordered frames |
+| `bursty-aac` | a nightly `bursty` AAC row's capture, from when the publisher sent each frame as its own group: each flush delivered newest first, which kept the player re-stalling until the estimator measured reordered frames |
 | `relay-mic-rtt40` | a page playing a real microphone (Chrome on a MacBook Air) through the public relay with 40 ms of added round trip: the steady-state re-stalls time stretch must remove |
 
 A trace is a [`Trace`](clients/js/src/schema.ts): the catalog's audio rendition, the smallest

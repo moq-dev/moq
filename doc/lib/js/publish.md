@@ -31,7 +31,8 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | `url`, `name` | Relay URL (with `?jwt=` if needed) and broadcast name. |
 | `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-18,moq-lite-06`. Every stable version by default. |
 | `source` | `camera`, `screen`, or `file`. |
-| `muted`, `invisible` | Stop publishing audio or video. The microphone and camera stay open, so unmuting or unhiding is instant and the browser's capture indicators stay lit; clear `source` or remove the element to release them. `source` covers both devices, so releasing one while keeping the other takes the library: toggle `Source.Microphone` or `Source.Camera` `enabled`. |
+| `muted`, `invisible` | Stop publishing audio or video. By default the microphone and camera stay open, so unmuting or unhiding is instant and the browser's capture indicators stay lit. |
+| `capture` | What a muted or invisible track does with its device: `hold` (default) keeps it open, `release` closes it so its capture indicator goes dark, and resuming reopens it. A screen share or file stops once both tracks are off. Clearing `source` or removing the element releases everything either way. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
 | `backend` | How a `<canvas>` preview is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
 | `announce` | When to advertise: once the `source` is live (default), or `always`. Nobody can see or subscribe to the broadcast until it is announced. To keep it out of discovery, use a hidden name with a `.`-prefixed segment; it is still subscribable by name. |
@@ -75,8 +76,15 @@ a late subscription's `delay.max` or a fetch. The cache keeps an idle group for
 30 seconds whatever `maxAge` says; `maxAge` only bounds how far back a reader
 may reach into it. Audio keeps raw PCM while nobody listens, then encodes that
 history ahead of live audio when a subscriber arrives. Raw audio keeps up to
-`maxAge`, or at most 30 seconds without one (about 11.5 MB for 48 kHz stereo
-f32). Capture stays open.
+`maxAge`, which for media defaults to 30 seconds (about 11.5 MB for 48 kHz
+stereo f32). With `maxAge: null`, which sets no publisher limit on the media, raw
+audio still keeps 30 seconds, since raw history needs a bound. The catalog and
+HLS record tracks keep `@moq/net`'s zero default, since a viewer needs only
+their newest group. Capture stays open. Disabling an audio encoder keeps what it retained: a
+subscriber still gets that history, and it expires on its own. Players skip a
+disabled rendition, so that history reaches subscribers that are already held
+on it or that subscribe directly. The codec stays
+configured across the disable, so re-enabling resumes at once.
 
 Pass `onDemand: false` to `Publish.Broadcast` to encode audio continuously too.
 `onDemand: true` also gates video, which then loses its unsubscribed past.
@@ -89,7 +97,11 @@ Codec, resolution, framerate, and bitrate are tunable through
 `el.video.config`, and `el.video.cut()` asks for an extra keyframe. A viewer
 who joins once a group's deltas outweigh twice its keyframe gets a fresh one,
 so `keyframeInterval` is only the longest a group runs. Through a moq-lite
-relay, only the join that opens the relay's upstream subscription counts. Size,
+relay, only the join that opens the relay's upstream subscription counts.
+The broadcast declares the longest group among its renditions as the catalog's
+`media.join.interval` when it first lists one, which an HLS or DASH export cuts
+its segments on. It stays fixed for the network broadcast, so raising
+`keyframeInterval` later overruns that grid. Size,
 bitrate, and framerate change in place, while a codec or audio format change
 keeps the rendition's catalog ID under a fresh `track` name that viewers
 follow through the catalog. For
@@ -103,7 +115,7 @@ streams, at the cost of coarser loss: a viewer that falls behind skips a whole
 group. Frames still forward as they are encoded.
 
 Timestamps are `@moq/clock`'s `now()` in microseconds, so every source shares one
-timeline. The catalog's `clock` maps it to wall time. Stamp your own tracks
+timeline. The catalog's `media.clock` maps it to wall time. Stamp your own tracks
 (e.g. text cues) on the same timeline to stay in sync.
 
 ## Custom tracks

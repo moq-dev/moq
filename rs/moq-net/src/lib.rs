@@ -66,8 +66,8 @@
 //! [`origin::Producer::new`] also returns a producer and driver. Its driver runs
 //! route changes, serving, linger, teardown, and the origin's cache expiration.
 //! Standalone caches expose [`cache::Pool::poll`]. Frame read/write methods
-//! clear their expiration timestamp for the next cleanup pass. Datagrams use a bounded
-//! FIFO; model read/write APIs take no time argument, though a frame write stamps
+//! clear their expiration timestamp for the next cleanup pass. Datagram tracks keep a
+//! short buffer and no cache; model read/write APIs take no time argument, though a frame write stamps
 //! its arrival from the ambient clock ([`frame::Frame::arrived`]).
 //!
 //! Both drivers implement [`time::Driver`]. `moq-uring` drives thread-local

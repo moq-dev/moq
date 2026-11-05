@@ -20,17 +20,27 @@ capture or playback is enabled.
 | `decode` | Opus (up to 7.1), PCM, and AAC-LC (mono or stereo) back to PCM, resampled to the rate you want |
 | `playback` | One output device mixing every track in a call, with click-free volume ramps |
 | `aec` | Acoustic echo cancellation (a port of WebRTC's) for caller-supplied PCM or the built-in devices |
+| `bus` | Routes sources into several mixes, each with its own meter and mix-minus, advanced on the caller's clock |
 
 Open one `capture::Producer`, give a consumer to each bus channel or encoder,
 and run the producer alongside them. They share samples and capture timestamps;
 a slow reader loses only its own expired audio. Dropping the producer releases
 the device, and a device failure ends every reader with the same error.
 
+The bus owns no clock: whoever owns the audio clock, such as a program
+clock on `kio::clock` or a device callback, advances its one driver by the
+frames that clock moved, so tests step it on virtual time. Each mix sums only
+the sources routed into it, and its readers get blocks stamped with their
+position on that clock, so a reader that falls behind skips its own audio
+without stalling the mix.
+
 Without a subscriber the encoder keeps raw PCM
 up to the track's `max_age`, then encodes that history before continuing live when
-someone subscribes. With no declared retention it keeps at most 30 seconds
+someone subscribes. With an unlimited `max_age` it keeps at most 30 seconds
 (about 11.5 MB for 48 kHz stereo f32). Set `encode::Capture::on_demand` to false
-to encode continuously instead. Stopping an encoder leaves the shared capture running. Its consumer can be swapped without
+to encode continuously instead. Stopping an encoder leaves the shared capture running, and the
+history it retained stays on the track until it is subscribed or expires; a device failure keeps
+it the same way before the encoder returns the error. Its consumer can be swapped without
 changing the track subscribers know. Opus packs 20 ms per packet by default,
 or 10 ms with a shorter `frame_duration`. Groups carry at least 20 ms by default,
 so 10 ms packets pair up. `encode::Options::group_duration`
@@ -53,7 +63,7 @@ cargo add moq-audio                   # PCM echo processing needs no device feat
 cargo add moq-audio --features capture,pipewire
 ```
 
-`pipewire` and `pulseaudio` only take effect alongside `capture` or `playback`.
+`pipewire` and `pulseaudio` only take effect alongside `capture` or `playback`, and only on Linux and the BSDs; elsewhere they compile to nothing, so a dependent can enable them on every platform.
 
 API: [docs.rs/moq-audio](https://docs.rs/moq-audio). Pair with
 [`moq-video`](/lib/rs/moq-video). The playout target `moq play` and

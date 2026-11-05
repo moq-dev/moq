@@ -69,15 +69,25 @@ type VideoInit struct {
 	Label *string
 	// Hint carries catalog fields the stream cannot reveal itself.
 	Hint *VideoHint
-	// Lower is the next lower rendition of the same source: this track then sits one
-	// priority below it, so a bandwidth allocator funds that one first.
-	Lower *TrackProducer
+	// Lower is the next lower rendition of the same source, a *TrackProducer or a
+	// *TrackStreamProducer: this track then sits one priority below it, so a bandwidth
+	// allocator funds that one first.
+	Lower Producer
+}
+
+// Producer is a single-track producer of either kind, *TrackProducer or
+// *TrackStreamProducer, such as a video rendition's Lower.
+type Producer interface {
+	// producer is nil for a nil pointer, which means no producer, as a nil Lower does.
+	producer() ffi.MoqMediaProducer
 }
 
 func (init VideoInit) ffi() ffi.MoqVideoInit {
-	var lower **ffi.MoqMediaTrackProducer
+	var lower *ffi.MoqMediaProducer
 	if init.Lower != nil {
-		lower = &init.Lower.inner
+		if producer := init.Lower.producer(); producer != nil {
+			lower = &producer
+		}
 	}
 	return ffi.MoqVideoInit{Format: init.Format, Data: init.Data, Label: init.Label, Hint: init.Hint, Lower: lower}
 }
@@ -439,6 +449,13 @@ func (m *TrackProducer) Finish() error {
 	return m.inner.Finish()
 }
 
+func (m *TrackProducer) producer() ffi.MoqMediaProducer {
+	if m == nil {
+		return nil
+	}
+	return ffi.MoqMediaProducerTrack{Producer: m.inner}
+}
+
 // ContainerProducer publishes a container, which demuxes and publishes its own
 // tracks. Unlike TrackProducer there is no per-frame timestamp: a container
 // carries its tracks' timing itself.
@@ -488,9 +505,25 @@ func (m *TrackStreamProducer) Write(payload []byte) error {
 	return m.inner.Write(payload)
 }
 
+// SetEnabled stops or resumes publishing this rendition, advertised as its catalog
+// enabled flag. Disable it when its sender stops for lack of bandwidth: this marks a
+// discontinuity and drops everything written until it is enabled again, so the stream
+// may keep flowing. Enabled again, it resumes, and advertises itself enabled, at the
+// next keyframe in the stream.
+func (m *TrackStreamProducer) SetEnabled(enabled bool) error {
+	return m.inner.SetEnabled(enabled)
+}
+
 // Finish closes the stream.
 func (m *TrackStreamProducer) Finish() error {
 	return m.inner.Finish()
+}
+
+func (m *TrackStreamProducer) producer() ffi.MoqMediaProducer {
+	if m == nil {
+		return nil
+	}
+	return ffi.MoqMediaProducerStream{Producer: m.inner}
 }
 
 // Read is one encoded frame, a ReadGap, or a ReadEnd, in delivery order.

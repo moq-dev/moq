@@ -23,7 +23,10 @@ async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast
-		.create_track("audio", moq_net::track::Info::default().with_timescale(None))
+		.create_track(
+			"audio",
+			moq_net::track::Info::default().with_timescale(None).with_max_age(None),
+		)
 		.unwrap();
 	broadcast.announce(Default::default()).unwrap();
 

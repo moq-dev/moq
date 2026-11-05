@@ -42,8 +42,8 @@ Contributions welcome; it's just markdown.
 A checkout already includes instructions. Start the agent at the repository
 root and have it read `AGENTS.md`, then each nested `AGENTS.md` along the path
 to the files being changed. `rg --files -g AGENTS.md` finds those files. Keep
-`CONTRIBUTING.md` in scope for PR work and read `PROMPTING.md` before changing
-agent instructions.
+`CONTRIBUTING.md` in scope for PR work and follow Prompting in `quest context`
+before changing agent instructions.
 
 Use the [repository map](/setup/repository) to locate source, examples, and
 tests, and [Development](/setup/dev) for the build loop. In a checkout, read

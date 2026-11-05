@@ -266,6 +266,7 @@ pub struct Server {
 impl Server {
 	/// Bind an RTMP listener on `addr` (RTMP's well-known port is 1935).
 	pub async fn bind(addr: SocketAddr) -> Result<Self> {
+		rind::cpu::check().map_err(std::io::Error::other)?;
 		let listener = TcpListener::bind(addr).await?;
 
 		Ok(Self {
@@ -572,8 +573,8 @@ pub struct Publish<S = Conn> {
 	stream_key: String,
 	tc_url: Option<String>,
 	peer: SocketAddr,
-	/// Retention declared on the media tracks this publish mints, or `None` for hang's
-	/// own default. Override with [`with_max_age`](Self::with_max_age).
+	/// Max age declared on the media tracks this publish mints, or `None` for no publisher
+	/// limit. Override with [`with_max_age`](Self::with_max_age).
 	max_age: Option<Duration>,
 	/// Connection allocator each passthrough track claims its peak-hold bitrate on.
 	/// Override with [`with_bandwidth`](Self::with_bandwidth).
@@ -608,14 +609,14 @@ impl<S: Stream> Publish<S> {
 		self.peer
 	}
 
-	/// Set how long relays keep a non-latest group of this publish's media tracks
-	/// fetchable. `None` keeps hang's own default.
+	/// Set how long a superseded group of this publish's media tracks stays fresh, or
+	/// `None` for no publisher limit. Defaults to
+	/// [`MAX_AGE`](hang::container::MAX_AGE).
 	///
-	/// A retention budget, not a delivery one: it never makes a subscriber play further
+	/// A freshness bound, not a delivery one: it never makes a subscriber play further
 	/// behind live, it caps how far back a FETCH can still reach. The default suits a
 	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
-	/// advertise segments that are still fetchable. Lower it when nothing reads history
-	/// and the memory matters.
+	/// advertise segments that are still fetchable. Lower it when nothing reads history.
 	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
 		self.max_age = max_age.into();
 		self
@@ -1197,7 +1198,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							tc_url,
 							peer,
-							max_age: None,
+							max_age: Some(hang::container::MAX_AGE),
 							bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 							linger: moq_mux::Linger::DEFAULT,
 						})));
@@ -1469,7 +1470,7 @@ async fn feed_input<S: Stream>(
 /// Perform the RTMP server handshake, returning any leftover bytes that followed
 /// the client's final handshake packet (the start of the chunk stream).
 async fn run_handshake<S: Stream>(stream: &mut S, peer: SocketAddr) -> anyhow::Result<Vec<u8>> {
-	let mut handshake = Handshake::new(PeerType::Server);
+	let mut handshake = Handshake::new(PeerType::Server)?;
 	let mut buffer = [0u8; 4096];
 	loop {
 		let n = stream.read(&mut buffer).await?;
@@ -1958,7 +1959,7 @@ mod tests {
 
 	/// The client half of the RTMP handshake, returning the bytes read past it.
 	async fn client_handshake<S: Stream>(stream: &mut S) -> Vec<u8> {
-		let mut handshake = Handshake::new(PeerType::Client);
+		let mut handshake = Handshake::new(PeerType::Client).unwrap();
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -2039,7 +2040,7 @@ mod tests {
 		media: tokio::sync::mpsc::UnboundedSender<Media>,
 	) {
 		// Handshake.
-		let mut handshake = Handshake::new(PeerType::Client);
+		let mut handshake = Handshake::new(PeerType::Client).unwrap();
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -2127,7 +2128,7 @@ mod tests {
 			None
 		}
 
-		let mut handshake = Handshake::new(PeerType::Client);
+		let mut handshake = Handshake::new(PeerType::Client).unwrap();
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -2198,10 +2199,10 @@ mod tests {
 		}
 	}
 
-	/// The retention a publish declares has to reach the media tracks the FLV importer
+	/// The max age a publish declares has to reach the media tracks the FLV importer
 	/// mints, not stop at the catalog producer it was set on.
 	#[tokio::test]
-	async fn publisher_declares_the_configured_retention() {
+	async fn publisher_declares_the_configured_max_age() {
 		let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
 		vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
 		vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
@@ -2881,7 +2882,7 @@ mod tests {
 		let mut stream = TcpStream::connect(addr).await.unwrap();
 
 		// Client handshake.
-		let mut handshake = Handshake::new(PeerType::Client);
+		let mut handshake = Handshake::new(PeerType::Client).unwrap();
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -3049,7 +3050,7 @@ mod tests {
 			}
 		}
 
-		let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+		let provider = Arc::new(rind_rustls::default_provider().unwrap());
 
 		let mut tls = moq_tokio::tls::Listen::default();
 		tls.generate = vec!["localhost".to_string()];
