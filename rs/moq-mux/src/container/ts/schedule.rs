@@ -882,7 +882,7 @@ impl Schedule {
 		keyframe: bool,
 		mut frames: Vec<(u128, usize)>,
 	) -> anyhow::Result<()> {
-		let gap = std::mem::take(&mut self.gap);
+		let mut gap = std::mem::take(&mut self.gap);
 		if gap {
 			// The resumed unit keeps its send-ahead, rather than taking the slot after the
 			// old unit as though they ran continuously across the missing interval.
@@ -908,11 +908,14 @@ impl Schedule {
 			};
 			// The unit they lead keeps its own start.
 			let last = self.last;
-			self.enqueue(pmt, lead, Vec::new(), Some(program));
+			// The tables release first, so a long outage's clock jump lands on them.
+			self.enqueue(pmt, lead, Vec::new(), Some(program)).gap = std::mem::take(&mut gap);
 			self.last = last;
 			self.retable();
 		}
 		if packets.is_empty() {
+			// The loss waits for the next unit that goes out.
+			self.gap |= gap;
 			return Ok(());
 		}
 		if frames.len() < 2 {
@@ -1861,6 +1864,64 @@ mod tests {
 		);
 		let tables: usize = slots.iter().filter_map(|(_, pids, _)| pids.get(&100)).sum();
 		assert_eq!(tables, 2);
+	}
+
+	/// A long loss ahead of a placed unit flags the PCR its clock jumps to, though the tables
+	/// leading the unit release slots before it.
+	#[test]
+	fn a_skip_flags_the_jump_to_the_tables_leading_a_placed_unit() {
+		for rate in [None, Some(RATE)] {
+			let mut schedule = Schedule::new(Duration::ZERO);
+			schedule.set_rate(rate);
+			schedule.set_tables(100);
+			set_psi(&mut schedule);
+			schedule.set_clock(1);
+			let tables = || Tables {
+				rate,
+				added: Vec::new(),
+			};
+			let mut slots = Vec::new();
+			for (place, skip) in [(ms(1_000), false), (ms(10_000), true)] {
+				if skip {
+					schedule.skip();
+				}
+				schedule.lead(tables());
+				schedule
+					.push_placed(7, (place, place), 0, unit(7, 1), true, Vec::new())
+					.unwrap();
+				while let Some(slot) = schedule.next(None).unwrap() {
+					slots.push((slot.index, slot.discontinuity));
+				}
+			}
+			let flagged: Vec<u128> = slots
+				.iter()
+				.filter(|(_, flag)| *flag)
+				.map(|&(index, _)| index)
+				.collect();
+			let jumps: Vec<u128> = slots
+				.windows(2)
+				.filter(|pair| pair[1].0 > pair[0].0 + 1)
+				.map(|pair| pair[1].0)
+				.collect();
+			assert_eq!(
+				flagged,
+				jumps.last().copied().into_iter().collect::<Vec<_>>(),
+				"rate {rate:?}"
+			);
+		}
+	}
+
+	/// An empty unit carries no loss, so the next unit that goes out does.
+	#[test]
+	fn a_skip_waits_for_a_unit_with_packets() {
+		let mut schedule = Schedule::new(Duration::ZERO);
+		schedule.skip();
+		schedule.push(1, timing(100), Vec::new(), true).unwrap();
+		schedule.push(1, timing(120), unit(1, 1), true).unwrap();
+		let flagged = std::iter::from_fn(|| schedule.next(None).unwrap())
+			.filter(|slot| slot.discontinuity)
+			.count();
+		assert_eq!(flagged, 1);
 	}
 
 	/// A timeline that opens holds a placed unit until a PCR interval has followed its first

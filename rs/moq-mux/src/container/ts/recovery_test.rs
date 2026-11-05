@@ -1552,6 +1552,25 @@ async fn a_short_outage_across_both_tracks_flags_once() {
 	assert_eq!(run.stats.release.gaps, 2, "both tracks skipped media");
 }
 
+/// Audio loses an interval that ends before video's, though video's send-ahead releases its
+/// loss first. Disjoint losses each flag the PCR, whichever is muxed first.
+#[tokio::test(start_paused = true)]
+async fn disjoint_outages_across_both_tracks_flag_twice() {
+	let run = recover(
+		arm(Profile::Closed, |slot| {
+			let missing = if slot.video {
+				slot.group == 5 && slot.frame == 11
+			} else {
+				(SPLICE - 5 * FRAME..SPLICE - 4 * FRAME).contains(&slot.nominal)
+			};
+			if missing { Delivery::Omitted } else { clean(slot) }
+		})
+		.breaks(2),
+	)
+	.await;
+	assert_eq!(run.stats.release.gaps, 2, "both tracks skipped media");
+}
+
 /// Hold what is `held` and due in [1.92 s, 4.4 s) until the end, delivering the rest cleanly.
 fn hold(held: bool, slot: Slot) -> Delivery {
 	let (from, until) = (Duration::from_millis(1920), Duration::from_millis(4400));

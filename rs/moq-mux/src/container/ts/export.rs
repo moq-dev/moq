@@ -199,8 +199,8 @@ where
 	/// Generation of the last returned frame, updated only at the output boundary.
 	emitted_epoch: u64,
 	pcr_discontinuity: bool,
-	/// Furthest presentation time reached by a signalled delivery gap, shared across tracks.
-	gap_until: Option<Timestamp>,
+	/// The presentation interval of the last signalled delivery loss, shared across tracks.
+	lost: Option<(Timestamp, Timestamp)>,
 	/// Lays the muxed packets onto the PCR grid.
 	schedule: Schedule,
 	/// Read each track from the oldest group the delay still reaches, rather than the live
@@ -1598,7 +1598,7 @@ where
 			epoch: 0,
 			emitted_epoch: 0,
 			pcr_discontinuity: false,
-			gap_until: None,
+			lost: None,
 			schedule: Schedule::new(Duration::ZERO),
 			slot_timer: None,
 			replay: false,
@@ -3024,7 +3024,7 @@ where
 		}
 		self.program.video_start = None;
 		self.program.pcr_discontinuity = true;
-		self.program.gap_until = None;
+		self.program.lost = None;
 		self.program.tables.clear();
 		if let Some(psi) = &mut self.program.psi {
 			psi.sending.clear();
@@ -3524,17 +3524,15 @@ where
 		let after = track.last_timestamp.unwrap_or(frame.timestamp);
 		track.last_timestamp = Some(after.max(frame.timestamp));
 		let skipped = skipped && {
-			// Audio and video can resume the same outage in different release slots. One
-			// flag covers their overlapping missing intervals, including a later read
-			// on another track that extends the interval already signalled. Presentation
-			// time shares the content's timeline across their different decode reserves.
-			let separate = self.program.gap_until.is_none_or(|until| after >= until);
-			self.program.gap_until = Some(
-				self.program
-					.gap_until
-					.map_or(frame.timestamp, |until| until.max(frame.timestamp)),
-			);
-			separate
+			// Audio and video can resume the same outage in different release slots, and in
+			// either order. One flag covers their overlapping missing intervals, including a
+			// later read on another track that extends the interval already signalled.
+			// Presentation time shares the content's timeline across their different decode
+			// reserves.
+			let (start, end) = (after, frame.timestamp);
+			let shared = self.program.lost.filter(|&(first, last)| start < last && first < end);
+			self.program.lost = Some(shared.map_or((start, end), |(first, last)| (first.min(start), last.max(end))));
+			shared.is_none()
 		};
 		let kind = &track.kind;
 		let is_video = matches!(kind, Kind::Video(_));
