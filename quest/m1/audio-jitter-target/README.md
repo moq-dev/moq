@@ -33,8 +33,8 @@ target, and `moq play` copies NetEq's stretch in m1 as
 [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md), sharing
 one algorithm and its vectors with the browser's.
 
-Decided 2026-11-04 (maintainer), for push-to-talk's [silence
-suppression](/quest/m1/push-to-talk/dtx.md): a silence the publisher declares
+Decided 2026-11-04 (maintainer), for push-to-talk's silence suppression
+([moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942)): a silence the publisher declares
 with an end marker is not idle, so the estimator folds no idle intervals for
 it and keeps its estimate, where an undeclared gap still relaxes toward the
 prior. The document's `silence` corpus case holds both implementations to it.
