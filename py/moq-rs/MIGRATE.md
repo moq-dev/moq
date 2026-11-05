@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Announcements are a listing of present and absent paths
+
+`AnnounceConsumer` yields `AnnounceEventPresent` when a route starts covering a path and `AnnounceEventAbsent` when none covers it any more, each carrying an `Announce` as `announce`.
+`AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, `AnnounceEventRestart`, and `AnnounceEventTakeover` are removed: read `AnnounceEventStart` as `AnnounceEventPresent` and `AnnounceEventEnd` as `AnnounceEventAbsent`, and drop the `Update` branch, since a re-priced route is no longer reported.
+Another publisher instance taking a path over keeps it present and is not listed. Where you requested the path again on `AnnounceEventRestart`, hold `follow(path)` instead and read each `BroadcastConsumer` that `await following.available()` returns, dropping what you read from the previous one.
+
+### `Following.available()` returns `None` once the path goes offline
+
+`await following.available()` (or `await following`) returns `BroadcastConsumer | None`.
+Later calls return `None` when the path goes offline, or, when following an `instance`, when another instance takes it over, then the next broadcast once something serves the path again; the first call never returns `None`.
+Stop reading the previous broadcast on `None` and call `available()` again. A caller that only awaits the first broadcast can assert it is not `None`.
+
 ### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
 
 `Video` and `Audio` gain `warmup`, the catalog's decoder warmup; it defaults to `None` as the last field, so existing code keeps working. `TrackConsumer` and the audio and video consumers read it from the rendition and start that much earlier.

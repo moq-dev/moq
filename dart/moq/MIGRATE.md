@@ -4,6 +4,28 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Following.available()` returns null once the path goes offline
+
+`await following.available()` returns `BroadcastConsumer?`.
+After the first call, it returns null once the followed path goes offline, or, for a `follow(path, instance: ...)` pinned to an instance, once another instance takes it over; the next call returns whatever serves the path next. The first call never returns null.
+Drop what you read from the previous broadcast either way. A caller that only waits for the first broadcast can take it with `!`.
+
+### Announcements are a listing
+
+`announced(...).updates()` yields `AnnounceEventPresent` when a path becomes present and `AnnounceEventAbsent` when it goes, each carrying an `Announce`.
+`AnnounceEventStart` is `AnnounceEventPresent` and `AnnounceEventEnd` is `AnnounceEventAbsent`.
+`AnnounceEventUpdate`, `AnnounceEventRestart`, and `AnnounceEventTakeover` are gone: a path whose route or publisher instance changes stays present and is not reported again.
+Where you requested the path again on a restart, hold `follow(path)` instead; each `available()` returns the next instance's broadcast.
+
+```dart
+final following = moq.follow('live/camera');
+while (true) {
+  final broadcast = await following.available();
+  if (broadcast == null) continue; // offline until the next instance
+  play(broadcast);
+}
+```
+
 ### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
 
 `Video` and `Audio` gain `warmup`, the catalog's decoder warmup; it defaults to `null`, so existing constructors still compile. `TrackConsumer` and the audio and video consumers read it from the rendition and start that much earlier.

@@ -27,7 +27,7 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 					accept({ url, transport: pair.server, publish: publish.consume() }),
 				])),
 			);
-			const announcements = consume.announced();
+			const announcements = consume.routes();
 			try {
 				while ((await announcements.next())?.kind !== "start") {}
 			} finally {

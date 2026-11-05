@@ -79,6 +79,15 @@ measure the change.
 
 Public API: none. Wire: none.
 
+Decided 2026-11-05 (maintainer, follow-up from
+[moq-dev/moq#7736](https://github.com/moq-dev/moq/pull/7736)): ✅ fold this
+case into the redesign instead of patching code it deletes. In
+`js/net/src/resume.ts`, `#update` skips a copy whose upstream subscription
+closed, so a closed copy that still holds groups keeps picking under the
+reader's old `delay.max` after an update. It was found by review and not
+reproduced. The redesign's tests must cover a preference update after the
+serving copy's upstream closed, followed by a read.
+
 ## Required
 
 - [Release cut](/quest/m2/release/cut.md) - wait for the release in flight to ship

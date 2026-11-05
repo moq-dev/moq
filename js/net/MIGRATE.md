@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`Announce.Event` is `{ kind: "present" | "absent" } & Announce`. Another instance taking a path over keeps it present, and a route's cost or hops changing is not reported, so `start`, `update`, `restart` and `end` are gone.
+Map `"start"` to `"present"` and `"end"` to `"absent"`, and drop `"update"` branches. Where you requested the path again on `"restart"`, hold `origin.follow(path)`: its `active` moves to each new instance's broadcast.
+
 ### Opens wait their turn for stream credit ([#7894](https://github.com/moq-dev/moq/pull/7894))
 
 `NoStreamCredit` is removed: a request no longer fails when the peer grants no more streams. Every open waits for credit, and returning credit goes to the open with the highest `sendOrder`. A request's 10s deadline runs only while none of its streams waits to open.

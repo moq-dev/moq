@@ -10,6 +10,35 @@ A reader that reaches a frame its group copy shed no longer gets `Error::Evicted
 Accept it as usual and write from that frame, waiting on `group::Producer::ready` so its readers pace it, and stop once `Fill::is_wanted` is false and the group's `demand()` has no reader: they left it for the live copy.
 A handler that cannot serve old frames refuses the fill (`Fill::refuse_groups` or dropping it), and the reader falls back to refresh or `Evicted` as before. A track without a handler is unchanged.
 
+### Announcements are a listing; `follow` reports the path going offline ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`origin::Consumer::announced()` lists paths: `announce::Event` is `Present(Announce)` or `Absent(Announce)`.
+Another instance taking a path over keeps it present, and a route's cost or hops changing is not reported, so `Start`, `Update`, `End`, `Restart` and `Takeover` are gone.
+Map `Start` to `Present` and `End` to `Absent`, and drop `Update` arms.
+Where you requested the path again on `Restart`, hold `consumer.follow(path, None)` instead: each `available()` returns the next instance's broadcast.
+
+`Following::available()` returns `Result<Option<broadcast::Consumer>, Error>`: `None` reports the path going offline (or, when pinned, another instance taking it over), and the next `Some` is whatever serves it again.
+The first call never returns `None`. After a resolution failure, such as a handler refusing the path, the next `available()` waits for the serving route to change instead of asking the same handler again, so keep the follower rather than dropping it.
+
+```rust
+// Before
+match announced.next().await {
+    Some(announce::Event::Start(a) | announce::Event::Restart(a)) => play(consumer.request(&a.prefix, None).await?),
+    _ => {}
+}
+let broadcast = consumer.follow(path, None)?.available().await?;
+// After
+if let Some(announce::Event::Present(a)) = announced.next().await {
+    let mut following = consumer.follow(&a.prefix, None)?;
+    while let Some(broadcast) = following.available().await? {
+        play(broadcast);
+    }
+}
+let broadcast = consumer.follow(path, None)?.available().await?.expect("the first change is an instance");
+```
+
+Relays and stats that forward every route change call `consumer.routes()`, a hidden `origin::Routes` stream of `origin::RouteEvent`, which keeps the old five variants.
+
 ### Opens wait their turn for stream credit ([#7894](https://github.com/moq-dev/moq/pull/7894))
 
 A request no longer fails with `Error::NoStreamCredit` when the peer grants no more streams: every stream a session opens waits for credit, and returning credit goes to the open whose stream the transport would send first. The variant is removed; drop any arm matching it.

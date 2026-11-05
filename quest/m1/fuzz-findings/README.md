@@ -1,4 +1,4 @@
-# Media fuzz findings
+# [S] Media fuzz findings
 
 ## Goal
 
@@ -16,9 +16,9 @@ maintainer). Its short local runs found the bugs the children fix; the
 minimized inputs are in [its PR comment](https://github.com/moq-dev/moq/pull/7313#issuecomment-6520535160).
 
 Each child commits its input under `regressions/` with its fix, since an
-input committed before the fix would fail the merge gate. After the last
-child, run every target nightly for a few sessions; a new finding becomes a
-child here.
+input committed before the fix would fail the merge gate. Every known finding
+is now fixed: run every target nightly for a few sessions; a new finding
+becomes a child here.
 
 For the crates outside the `kixelated` and `moq-dev` orgs, moq-mux fixes
 the bug on its own side and the bug is reported upstream (decided
@@ -33,7 +33,3 @@ maintainer's approval.
 webm-iterable's block parsing with moq-mux's own block-header reader, which
 fixed the MKV block-header panic; its input is
 `rs/moq-mux/fuzz/regressions/mkv/short-block-header`.
-
-## Required
-
-- [A catalog update reuses its encoder](/quest/m1/fuzz-findings/catalog-encoder.md) - republishing a compressed catalog or HLS group stops allocating a fresh DEFLATE encoder (about 200 KB) each time

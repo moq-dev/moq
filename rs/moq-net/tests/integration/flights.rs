@@ -146,7 +146,8 @@ async fn chain(version: &str, replays: bool) {
 	let remote = kio::clock::timeout(TIMEOUT, lower.consume().follow("live", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.expect("an instance");
 	let subscription = || {
 		track::Subscription::default()
 			.with_range(0..)

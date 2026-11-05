@@ -57,7 +57,7 @@ try {
 					for (;;) {
 						const event = await announcements.next();
 						assert(event, "replacement announcements ended");
-						if (event.kind === "start" && event.prefix === "handover") break;
+						if (event.kind === "present" && event.prefix === "handover") break;
 					}
 				} finally {
 					announcements.close();

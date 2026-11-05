@@ -35,6 +35,9 @@
 //! flight admits they share one, further apart each asks its own. Each reader hands over
 //! to the live copy once it catches up, and its flight stops.
 //!
+//! `group_compressed_updates` republishes single-frame compressed groups, swept over
+//! tracks and overlapping groups, to expose encoder allocation on the update path.
+//!
 //! Run with `cargo bench -p moq-net`.
 
 #![expect(
@@ -499,6 +502,56 @@ fn bench_inflate(c: &mut Criterion) {
 							}
 						}
 						(broadcast, track, consumers)
+					},
+					BatchSize::SmallInput,
+				);
+			});
+		}
+	}
+	g.finish();
+}
+
+/// Repeated single-frame compressed updates on independent tracks. Groups overlap
+/// within each update so only the one spare per track can be reused.
+fn bench_compressed_updates(c: &mut Criterion) {
+	const UPDATES: usize = 32;
+	let payload = Bytes::from(format!("{{\"status\":\"{}\"}}", "ready".repeat(100)));
+	let mut g = c.benchmark_group("group_compressed_updates");
+	for tracks in [1usize, 16] {
+		for concurrent in [1usize, 4] {
+			g.throughput(Throughput::Elements((UPDATES * tracks * concurrent) as u64));
+			g.bench_function(BenchmarkId::new(format!("tracks{tracks}"), concurrent), |b| {
+				b.iter_batched(
+					|| {
+						let broadcast = broadcast::Info::default().produce();
+						let producers: Vec<_> = (0..tracks)
+							.map(|i| {
+								let track = broadcast
+									.create_track(format!("bench{i}"), track::Info::default().with_compress(true))
+									.unwrap();
+								let mut group = track.append_group().unwrap();
+								group.write_frame(None, payload.clone()).unwrap();
+								group.finish().unwrap();
+								track
+							})
+							.collect();
+						(broadcast, producers, Vec::with_capacity(concurrent))
+					},
+					|(broadcast, producers, mut groups)| {
+						for _ in 0..UPDATES {
+							for track in &producers {
+								for _ in 0..concurrent {
+									let mut group = track.append_group().unwrap();
+									group.write_frame(None, payload.clone()).unwrap();
+									groups.push(group);
+								}
+								for group in &mut groups {
+									group.finish().unwrap();
+								}
+								groups.clear();
+							}
+						}
+						(broadcast, producers, groups)
 					},
 					BatchSize::SmallInput,
 				);
@@ -1096,6 +1149,7 @@ criterion_group!(
 	bench_stamp,
 	bench_relay_frames,
 	bench_inflate,
+	bench_compressed_updates,
 	bench_contended,
 	bench_streaming,
 	bench_shed,
