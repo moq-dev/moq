@@ -28,3 +28,28 @@ reproduce in a reasonable number of runs, report that and the runs tried
 rather than changing the test blind.
 
 Public API: none. Wire: none.
+
+### Reproduction attempts
+
+2026-11-04: no reproduction on the unchanged claim based on `origin/main`.
+
+- `quest gate bun test --cwd js/net --rerun-each 20 --only-failures`
+  ran all 20 reload-file rounds without a drain-case failure. The package
+  batch also exposes unrelated rerun failures in the benchmark import test
+  and connection fallback tests; it is not a clean package validation.
+- A four-file batch (`connection/reload`, `connection/pool`, `connection/close`,
+  and `lite/connection`) filtered to `closing the loop|teardown by|a URL change`
+  with `--rerun-each 5` passed 40 tests, zero failures. A scratch preload
+  stubbed `performance.now()` to advance 5 ms on each budget clock read,
+  forcing the shared stream budgets to yield at each clock check.
+- The earlier lite fixture fix suggests checking setup-group completion,
+  but neither run supports changing this fixture yet. No test or production
+  code changed, per the reproduce-first requirement.
+
+## Waiting
+
+- moq-dev/moq: retain failure output or a reproducer for a reload drain case.
+  The original one-off failure had no saved output, and the repeated runs
+  above did not reproduce it. Recommended: keep this quest and capture the
+  next failure before choosing a fix; alternatively abandon it if the
+  failure no longer warrants investigation.
