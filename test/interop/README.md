@@ -15,6 +15,11 @@ broadcast and confirms every subscriber sees data flowing before the timeout.
 Most subscribers check for a non-empty video frame. The browser additionally verifies
 WebCodecs output painted to a canvas and drives the player's pause/resume controls.
 
+The native JS tail lanes also resolve on-demand claims on lite-07, under Node
+and Bun over WebSocket and WebTransport. Fresh readers request or follow the
+claim's own path and child paths. A reader-first case checks that an absent
+request ends while its follower waits for the publisher to arrive.
+
 Every publisher also sends an Opus tone, one sine per channel, and every subscriber
 decodes it. Python and C++ send a mono 440 Hz tone; the rest send 440 Hz left and
 660 Hz right, so a channel swap fails too. The Rust CLI imports it from ffmpeg in
@@ -51,9 +56,12 @@ The normal run also checks a finite raw track through the relay. Its publisher
 announces end 4 before writing four 256 KiB groups; the reader verifies every byte,
 exactly groups 0 through 3, and a clean end at 4. Rust-to-Rust always runs. Selecting
 native JS adds both Rust-to-JS and JS-to-Rust under that runtime, so `--all` covers
-Node and Bun. The current CLI also FETCHes group 1 of a finished track from the Rust
-publisher and each selected native JS runtime, requires exactly its three objects, each
-with its own bytes, and closes under the relay idle-out check.
+Node and Bun. The FETCH round crosses Rust and each selected native JS runtime as both
+publisher and subscriber. Each reader fetches group 1 of a finished track, requires exactly
+its three objects, each with its own bytes, and closes under the relay idle-out check. Each native JS runtime also serves
+that FETCH to all three subscribers from history (`CLI FETCH history`): its publisher writes only group 3 live and answers
+groups 0 through 2, which it never cached, from an in-memory responder on `track.requests()`.
+This runs on moq-lite and every supported IETF draft.
 
 A late-join lane runs Rust-to-Rust and Rust/Node/Bun in both directions. The publisher
 writes the first two objects of group 0 before any subscriber exists and leaves the group
@@ -66,6 +74,13 @@ head with a joining FETCH before draft 22 and a fill from it.
 
 `--tail` runs the FETCH round, the late joins, and the five finite-tail lanes. The
 wire-compat lanes, which swap in released relays and clients, skip them.
+
+On lite-07, Node and Bun also replace tracks in a claimed broadcast through the
+relay over WebSocket and WebTransport. Pre-connected readers subscribe immediately
+after each replacement while an existing reader resumes. The case also repeats the
+automatic failed-source lifecycle 64 times. A missing-group FETCH
+crosses both hops with the unlimited subscriber budget, checking its optional
+millisecond encoding at the safe-integer boundary.
 
 The finite clients keep their session alive until the harness acknowledges the
 reader's complete clean end over stdin, so a lane tests delivery rather than
@@ -210,11 +225,6 @@ one cell. The tails check their own connections, so a fallback fails the lane.
 
 The in-tree control lanes also run with `--tail`:
 
-- Four untimed 900-byte datagrams cross the relay in both directions between Rust
-  and each native JS runtime. The subscriber acknowledges resolved metadata before
-  sending begins, then acknowledges each packet, so this checks framing and bytes
-  rather than best-effort burst capacity. The publisher stays open until the read is
-  acknowledged, keeping a reliable track end from overtaking the datagrams.
 - A JS wire requester gets the Rust publisher's exact largest location through
   TRACK\_STATUS on every draft. Rust also queries the JS publisher's
   non-default priority before subscribing, when the answer can describe a track.
@@ -228,7 +238,7 @@ The in-tree control lanes also run with `--tail`:
 
 The standalone control endpoints use OS-assigned ports and production QMux,
 SETUP codecs, and request sessions. They verify their negotiated version directly.
-The datagram and query lanes through moq-relay use its usual version-log check.
+The query lanes through moq-relay use their usual version-log check.
 
 Some cases change shape on moq-transport:
 
@@ -545,7 +555,7 @@ clients/
   rust/audio.rs           the Rust subscriber's audio decode via rs/moq-audio (`interop-audio`)
   rust/tail.rs            the finite raw-track client (`interop-tail`)
   rust/catalog.rs         the compressed-catalog publisher (`interop-catalog`)
-  rust/hls.rs             the HLS-records publisher and reader (`interop-hls`)
+  rust/hls.rs             the HLS grid publisher and reader (`interop-hls`)
   python/interop.py       publish/subscribe via py/moq-rs (import moq)
   go/main.go              publish/subscribe via go/wrapper (import moq-go/moq)
   cpp/main.cpp            publish/subscribe via cpp/moq (find_package(moq-cpp))
@@ -563,7 +573,7 @@ clients/
     src/close.ts          the refused session, read off `WebTransport.closed`
   js-native/subscribe.ts  subscribe via @moq/net + @moq/hang + the WebTransport polyfill
   js-native/catalog.ts    the compressed-catalog reader, pinned to one version
-  js-native/hls.ts        the HLS-records publisher via @moq/hang
+  js-native/hls.ts        the HLS grid publisher via @moq/hang
   c/subscribe.c           subscribe via rs/moq-c
 ```
 
@@ -649,8 +659,9 @@ readers at once, each pinned to lite-07, lite-06, or moq-transport-22 and readin
 inflated copy, so `moq_relay_inflated_bytes_total` must grow by exactly the catalog's
 inflated size. The harness enables the relay's `[stats]` and `[internal]` listener for it.
 
-The HLS-records lane has the Rust publisher (moq-mux) and each native JS runtime
-(`@moq/hang`'s recorder) publish one fixed frame schedule, with GOPs on and off the 4 s
-grid, a discontinuity, and a finish, and the Rust reader prints each broadcast's
-declared `hls` durations and every record. The two readouts must be identical, so a
-browser-published broadcast exports as HLS like a native one.
+The HLS grid lane has the Rust publisher (moq-mux) and each native JS runtime
+(`@moq/hang`) publish one fixed frame schedule, with GOPs on and off the 2 s grid, a
+discontinuity, and a finish, and the Rust reader prints each broadcast's declared
+`media.join.interval` and every rendition's groups with their first pts, the input an HLS
+edge numbers segments from. The two readouts must be identical, so a browser-published
+broadcast exports as HLS like a native one.

@@ -51,6 +51,12 @@ impl Backlog {
 		}
 	}
 
+	/// Whether audio ending at `end` is past retention at `now`.
+	#[cfg(any(feature = "capture", test))]
+	pub fn expired(&self, end: Timestamp, now: Timestamp) -> bool {
+		Duration::from(end).saturating_add(self.retention) <= Duration::from(now)
+	}
+
 	pub fn deadline(&self) -> Option<Duration> {
 		Some(Duration::from(self.frames.front()?.end).saturating_add(self.retention))
 	}

@@ -327,8 +327,6 @@ fn lite_varint_interop() {
 			sequence: 300,
 			timestamp: Some((1 << 50) + 5),
 			payload: bytes::Bytes::from_static(b"x"),
-			inflated: None,
-			ietf: None,
 		}
 		.encode_bytes(version)
 		.unwrap();
@@ -352,8 +350,6 @@ fn lite_varint_interop() {
 			sequence: 1 << 30,
 			timestamp: None,
 			payload: bytes::Bytes::from_static(b"untimed"),
-			inflated: None,
-			ietf: None,
 		}
 		.encode_bytes(version);
 		let untimed_datagram = match untimed {
@@ -413,7 +409,7 @@ fn lite_varint_interop() {
 		assert_eq!(echo.padding, padding, "{version}: padding");
 		if version.has_padding() {
 			assert!(
-				lite::Datagram::decode(echo.padding.into(), version, false, |_| {
+				lite::Datagram::decode(echo.padding.into(), version, |_| {
 					panic!("padding must not look up a subscription")
 				})
 				.unwrap()

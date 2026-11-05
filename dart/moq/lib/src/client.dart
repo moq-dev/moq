@@ -247,6 +247,16 @@ final class Moq {
   /// the room back.
   Allocator allocator() => session.allocator();
 
+  /// The session's viewers, dividing the connection's receive estimate among
+  /// the broadcasts watched over it.
+  ///
+  /// Every call returns a handle to the same registry, and the session sends
+  /// what its viewers' ceilings add up to as its PROBE target. [Viewers.watch]
+  /// a broadcast with the ceiling of the largest rendition the player would
+  /// switch to, read its slice with [Viewer.rate], and dispose the [Viewer]
+  /// once the broadcast stops being watched.
+  Viewers viewers() => session.viewers();
+
   /// Follow the grant the peer gave this session.
   ///
   /// Listen to [GrantConsumerUpdates.updates] for the current grant and each

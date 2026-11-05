@@ -16,8 +16,9 @@ previous-start links instead. Starts are `bigint`, as group IDs already are,
 so they are carried past 2^53 (decided 2026-11-03, maintainer).
 
 The spike found no sparse-ID breakage in direct `@moq/net` sessions over
-lite-06 and lite-07; its relay fills follow Rust's once
-[JS ranges](/quest/m1/subscribe-ranges/js.md) land. Decided 2026-10-27
+lite-06 and lite-07; its relay fills follow Rust's once JavaScript received
+copies fill, which JS ranges ([moq-dev/moq#7696](https://github.com/moq-dev/moq/pull/7696))
+left as a follow-up. Decided 2026-10-27
 (maintainer): this requires JS ranges, so the ranges it rekeys exist first.
 
 Public API: breaking, mirroring Rust's. Wire: as the lite-07 quest.
@@ -25,4 +26,3 @@ Public API: breaking, mirroring Rust's. Wire: as the lite-07 quest.
 ## Required
 
 - [Lite-07 by start](/quest/m1/time-addressing/lite07.md) - the wire this speaks
-- [JS ranges](/quest/m1/subscribe-ranges/js.md) - the JS range model and relay fills this moves onto starts

@@ -735,6 +735,18 @@ mod tests {
 		assert_eq!(drain(&mut tracks), ["+a"]);
 	}
 
+	/// TRACK_INFO can't say a track is datagrams, so a listing never carries one.
+	#[test]
+	fn a_datagram_track_is_never_listed() {
+		let broadcast = Info::new().produce();
+		let _early = broadcast.create_datagrams("early", Default::default()).unwrap();
+		let mut tracks = broadcast.consume().tracks().unwrap();
+		assert_eq!(drain(&mut tracks), ["synced"]);
+		let _late = broadcast.create_datagrams("late", Default::default()).unwrap();
+		let _a = broadcast.create_track("a", None).unwrap();
+		assert_eq!(drain(&mut tracks), ["+a"]);
+	}
+
 	#[test]
 	fn a_listed_track_reports_its_info() {
 		let broadcast = Info::new().produce();

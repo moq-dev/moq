@@ -16,19 +16,31 @@
 //! the broadcast by the same application path, independent of where a relay mounts it.
 //!
 //! A broadcast that needs no signature, the identity level, uses `moq-net` directly.
+//!
+//! Without the `sign` feature, this module holds only [`PublicKey`] and its text codec.
 
 #![warn(missing_docs)]
 
+#[cfg(feature = "sign")]
 pub mod broadcast;
+#[cfg(feature = "sign")]
 pub mod group;
+#[cfg(feature = "sign")]
 pub mod track;
 
+#[cfg(feature = "sign")]
 mod error;
 mod key;
+#[cfg(feature = "sign")]
 mod scope;
+#[cfg(feature = "sign")]
+mod secret;
 
+#[cfg(feature = "sign")]
 pub use error::{Error, Result};
-pub use key::{InvalidKey, PublicKey, SecretKey};
+pub use key::{InvalidKey, PublicKey};
+#[cfg(feature = "sign")]
+pub use secret::SecretKey;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sign"))]
 mod tests;

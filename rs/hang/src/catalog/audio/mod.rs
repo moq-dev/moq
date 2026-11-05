@@ -217,11 +217,6 @@ pub struct AudioConfig {
 	#[serde_as(as = "MillisCeil")]
 	#[serde(default, skip_serializing_if = "crate::catalog::millis::no_delay")]
 	pub delay: Option<std::time::Duration>,
-	/// This rendition's HLS segment records, when the publisher opted in. Without it the rendition
-	/// is not HLS-renderable. An undecodable value is absent, so it can never reject the media.
-	#[serde(default)]
-	#[serde_as(as = "serde_with::DefaultOnError<_>")]
-	pub hls: Option<crate::catalog::Hls>,
 }
 
 impl AudioConfig {
@@ -248,7 +243,6 @@ impl AudioConfig {
 			jitter: None,
 			warmup: None,
 			delay: None,
-			hls: None,
 		}
 	}
 

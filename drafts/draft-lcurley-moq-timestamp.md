@@ -168,7 +168,7 @@ On an update, absence leaves the subscription's budget unchanged; presence repla
 A publisher receiving MAX_AGE MUST apply the budget as specified in {{age}} and MUST NOT translate it into OBJECT_DELIVERY_TIMEOUT or SUBGROUP_DELIVERY_TIMEOUT.
 Those timeouts can expire the newest group and do not express this policy.
 
-A relay combining subscribers MUST request at least the most tolerant subscriber's max age upstream, bounded by the publisher's retention policy.
+A relay combining subscribers MUST request at least the most tolerant subscriber's max age upstream, bounded by any age limit the publisher declares.
 One subscriber's shorter budget MUST NOT tighten another subscriber's budget.
 
 

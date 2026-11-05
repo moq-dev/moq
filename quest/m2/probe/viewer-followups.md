@@ -16,7 +16,7 @@ left are closed:
 ## Plan
 
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run), from [moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090),
-which finishes [viewer targets](/quest/m2/probe/viewer-target.md).
+which finishes viewer targets.
 
 - Pooled reconnect: the `Reload`/pool `viewers` wiring
   (`js/net/src/connection/reload.ts`) is covered only by type checks and
@@ -37,7 +37,3 @@ viewer once they adapt renditions is [players](/quest/m2/probe/players.md)'
 work, not this quest's.
 
 Public API: none (tests and docs). Wire: none.
-
-## Required
-
-- [Viewer probe targets and grants](/quest/m2/probe/viewer-target.md) - its PR, [moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090), adds the handles and PROBE wiring these test

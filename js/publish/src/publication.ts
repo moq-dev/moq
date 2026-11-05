@@ -1,4 +1,4 @@
-import type * as Hls from "@moq/hang/hls";
+import type * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
 import { type Getter, Signal } from "@moq/signals";
@@ -36,8 +36,6 @@ export type Entry = {
 	// The network track serving it. Kept after its rendition leaves, so registering the ID again
 	// continues it.
 	track?: Moq.Track.Producer;
-	// The HLS records accompanying this track.
-	recorder?: Hls.Recorder;
 	// The registration that last served `track`.
 	owner?: Rendition<unknown>;
 	// What the registration's producer keeps for this ID.
@@ -66,6 +64,12 @@ export class Publication {
 	/** Bumped on every rename, so the catalog fold and the track loop pick up the new name. */
 	readonly renames: Getter<number> = this.#renames;
 
+	/**
+	 * The catalog's `media.join.interval` in milliseconds, fixed when the catalog first lists a video
+	 * or audio rendition here, since an export numbers this network broadcast's segments on it.
+	 */
+	join?: Catalog.U53;
+
 	// Names outside this publication that a minted name must also avoid.
 	readonly #reserved: () => Iterable<string>;
 
@@ -79,11 +83,6 @@ export class Publication {
 			this.#entries.set(id, { id, kind, name: id, slot: new Slot() });
 			this.#names.set(id, { id, identity });
 		}
-	}
-
-	/** Whether a catalog ID holds or held a rendition here. */
-	has(id: string): boolean {
-		return this.#entries.has(id);
 	}
 
 	/** Throw unless `id` may register as `kind`. */
@@ -158,10 +157,7 @@ export class Publication {
 
 	/** End every track. */
 	close(): void {
-		for (const { track, recorder } of this.#entries.values()) {
-			track?.finish();
-			recorder?.finish();
-		}
+		for (const { track } of this.#entries.values()) track?.finish();
 		for (const { track } of this.#entries.values()) track?.close();
 	}
 }

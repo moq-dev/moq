@@ -12,4 +12,4 @@ Public API: none. Wire: capped answers gain `b=AS`.
 
 ## Required
 
-- [Vendor and trim the stack](/quest/m2/webrtc/vendor.md) - the parser this changes
+- [Vendor and trim the stack](/quest/m1/webrtc-vendor.md) - the parser this changes

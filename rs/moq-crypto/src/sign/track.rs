@@ -6,8 +6,8 @@ use std::task::{Poll, ready};
 
 use crate::sign::error::Result;
 use crate::sign::group;
-use crate::sign::key::{PublicKey, SecretKey};
 use crate::sign::scope::Scope;
+use crate::sign::{PublicKey, SecretKey};
 
 /// Producer for one signed track.
 ///

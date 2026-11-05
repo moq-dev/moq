@@ -108,3 +108,22 @@ export function named<T extends z.ZodMiniType>(schema: T, key: string) {
 		]),
 	);
 }
+
+/**
+ * Like {@link section}, for a section recognized by being an object at all (`media`): any other
+ * value, `null` and arrays included, is someone else's and decodes as absent, while an object is
+ * checked by `schema` and fails the catalog when malformed. Mirrors the Rust `deserialize_media`.
+ *
+ * @param schema - the section's own schema, applied when the value is an object.
+ */
+export function object<T extends z.ZodMiniType>(schema: T) {
+	return z.optional(
+		z.union([
+			schema,
+			z.pipe(
+				z.custom<unknown>((value) => typeof value !== "object" || value === null || Array.isArray(value)),
+				z.transform(() => undefined),
+			),
+		]),
+	);
+}

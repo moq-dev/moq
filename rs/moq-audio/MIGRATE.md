@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Playback follows a changing latency with received-audio stretch
+
+`Sink::set_latency(duration)?` updates the device callback's playout target
+without replacing the sink. The duration must fit the current ring (the target
+at the last device open or rebuild plus three seconds, less a 30 ms window) and
+remain within `Input::LATENCY_MAX`. Existing callers need no change: sinks
+stretch toward `Input::latency` by default. `buffered()` includes output staged
+by the stretcher, and `finish()` drains it. Missing input still plays silence;
+this adds no packet loss concealment.
+
 ### The bus routes sources into several mixes, advanced by a driver
 
 `Bus::new(config)?` returns `(Bus, Driver)`. The `Bus` stays the cloneable
@@ -57,8 +67,9 @@ only after the capture has opened and its actual input format is known.
 takes another capture consumer and returns an error, keeping the current one, when
 its layout cannot be converted into the track's input. They never open or release
 the device. A capture
-failure ends the driver with `Status::Failed`; recovery requires a new capture
-and publication. There is no automatic device reopen. Dropping the capture
+failure sets `Status::Failed` at once; the driver keeps serving retained
+on-demand audio until it is served or expires, then returns the failure.
+Recovery requires a new capture and publication. There is no automatic device reopen. Dropping the capture
 producer stops every consumer; dropping one consumer leaves the others running.
 Capture readers share immutable f32 buffers, a fixed `encode::Input`, an `Instant`
 for the first sample, and a gap flag that also reports that reader's overruns.

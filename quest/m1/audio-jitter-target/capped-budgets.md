@@ -1,4 +1,4 @@
-# [XS] Re-measure the browser budgets after the estimator capped one observation's weight
+# [S] Re-measure the browser budgets after the estimator capped one observation's weight, and group AAC bursts
 
 ## Goal
 
@@ -7,7 +7,9 @@ began capping how much weight one observation takes, the player changes
 that followed, and the relay history-fill fix, show the AAC `bursty` browser rows discarding
 about as much audio a minute as the Opus `bursty` rows, and the Opus
 `near-zero` row holding a 60 ms target with no underrun episodes. `test/audio-quality/budgets.json`
-carries every browser row's ceilings re-measured from them.
+carries every browser row's ceilings re-measured from them. The AAC
+publisher stops sending each seven-frame flush as seven groups newest
+first, so AAC `wide` stops running dry.
 
 ## Waiting
 
@@ -18,6 +20,19 @@ carries every browser row's ceilings re-measured from them.
   for the seventh.
 
 ## Plan
+
+Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-afk and /quest-complete runs): plan the AAC publisher fix here. On
+[moq-dev/moq#7679](https://github.com/moq-dev/moq/pull/7679)'s runs AAC
+`wide` ran dry 1 to 4 times a minute at a 323 ms target. The publisher sends
+each seven-frame PES flush as seven one-frame groups, delivered newest first,
+so the oldest frame waits behind every newer group (the cause predicted
+below). Send a flush so its oldest frame goes first, for example as one
+group or in ascending order, and re-measure the AAC rows after it. Options
+shown:
+
+- m0
+- ✅ m1, in this quest
+- m2
 
 Decided 2026-10-30 (maintainer): the count restarts at the 2026-10-29
 nightly, the first after

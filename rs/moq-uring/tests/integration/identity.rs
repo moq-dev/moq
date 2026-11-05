@@ -64,7 +64,7 @@ fn an_endpoint_refuses_a_stopped_worker() {
 	let sock = socket(&worker.handle());
 	drop(worker);
 
-	let err = quic::Endpoint::new(sock, quic::endpoint::Config::default()).expect_err("endpoint on a stopped worker");
+	let err = quic::Endpoint::new(quic::endpoint::Config::default(), sock).expect_err("endpoint on a stopped worker");
 	assert!(
 		matches!(err, quic::Error::Io(_)),
 		"refused as a dead socket, got {err:?}"
@@ -79,8 +79,8 @@ fn a_stopped_worker_fails_dials_and_accepts() {
 	let certs = support::certs().expect("certificates");
 	let sock = socket(&worker.handle());
 	let endpoint = quic::Endpoint::new(
-		sock,
 		quic::endpoint::Config::default().with_server(server_config(&certs)),
+		sock,
 	)
 	.expect("endpoint");
 	let peer = endpoint.local_addr();
@@ -107,8 +107,8 @@ fn an_endpoint_runs_on_the_worker_that_adopted_its_socket() {
 
 	let sock = socket(&owner.handle());
 	let endpoint = quic::Endpoint::new(
-		sock,
 		quic::endpoint::Config::default().with_server(server_config(&certs)),
+		sock,
 	)
 	.expect("endpoint");
 	let addr = endpoint.local_addr();
@@ -158,7 +158,7 @@ fn an_endpoint_runs_on_the_worker_that_adopted_its_socket() {
 		.block_on(async {
 			let accepted = endpoint.accept().await.expect("accept on the owner");
 			assert_eq!(accepted.protocol(), Some(ALPN), "negotiated ALPN");
-			accepted.close(moq_uring::quic::VarInt::from_u32(0), b"done");
+			accepted.close(moq_uring::quic::VarInt::from_u32(0), "done");
 			accepted.closed().await;
 		})
 		.expect("owner loop");

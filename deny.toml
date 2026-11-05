@@ -18,6 +18,12 @@ ignore = [
     # tikv-jemalloc-ctl (moq-tokio's `jemalloc` feature; 0.7 still uses it).
     "RUSTSEC-2024-0436",
 
+    # proc-macro-error2 is unmaintained (proc-macro, build-time only). moq-auth's
+    # rind crypto stack reaches it through libcrux-intrinsics -> core-models
+    # 0.0.7 -> hax-lib 0.3.7 -> hax-lib-macros, only under cfg(hax).
+    # Drop when core-models releases its migration to hax-lib 0.4 or newer.
+    "RUSTSEC-2026-0173",
+
     # ttf-parser is unmaintained, with no upgrade available. Reachable only via
     # winit -> sctk-adwaita -> ab_glyph, which parses the system font used to
     # draw Wayland client-side decorations for `moq play`. Dropping winit's

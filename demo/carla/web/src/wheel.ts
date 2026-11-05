@@ -213,6 +213,49 @@ export function failSafe(current: DriveState): Pick<DriveState, "steering" | "th
 	return { steering: current.steering, throttle: 0, brake: 1 };
 }
 
+/**
+ * Hold a takeover's pedals until a wheel pedal moves.
+ *
+ * A takeover starts at zero throttle and full brake, and the truck keeps them
+ * until the driver changes a pedal. The wheel is absolute, so chasing pedals
+ * that sit wherever they were left would release that brake, or ramp up an
+ * accelerator held down across the handoff, without the driver touching either.
+ * While held, the wheel steers but leaves the pedals alone.
+ */
+export class PedalHold {
+	#held = false;
+	/** The wheel's pedals when the hold started, captured from the first sample. */
+	#baseline: Pick<WheelSample, "throttle" | "brake"> | undefined;
+
+	/** Start holding, after a takeover or calibration reset the pedals to rest. */
+	start() {
+		this.#held = true;
+		this.#baseline = undefined;
+	}
+
+	/** Stop holding, because another input changed the pedals. */
+	stop() {
+		this.#held = false;
+	}
+
+	/** Track this frame's sample and return whether the pedals are still held. */
+	update(sample: Pick<WheelSample, "throttle" | "brake"> | undefined): boolean {
+		if (!this.#held) return false;
+		if (!sample) {
+			// A replacement device has its own resting positions.
+			this.#baseline = undefined;
+		} else if (!this.#baseline) {
+			this.#baseline = { throttle: sample.throttle, brake: sample.brake };
+		} else if (
+			Math.abs(sample.throttle - this.#baseline.throttle) > MOVE_EPSILON ||
+			Math.abs(sample.brake - this.#baseline.brake) > MOVE_EPSILON
+		) {
+			this.#held = false;
+		}
+		return this.#held;
+	}
+}
+
 /** Device-id fragments that identify a wheel outright, lowercased. */
 const WHEEL_HINTS = [
 	"wheel",
