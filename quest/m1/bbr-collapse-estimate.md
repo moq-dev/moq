@@ -18,8 +18,9 @@ Evidence from #7671's sparse harness: after the path fell from 2 Mbit/s to
 100 kbit/s, the estimate held 1.32 Mbit/s for about 11 s, and in the FFI run
 the top rung disabled 5.6 s after the 500 kbit/s step. The probe idles while
 the estimate covers the target, and the reported estimate
-(`max_bw.min(bw_delay)`) ignores the loss bound BBR3 keeps
-(`inflight_longterm` and its short-term bounds in
-`rs/moq-congestion/src/bbr3/mod.rs`). Measure first, change second, and
-record both runs. Keep the change inside the reported estimate unless the
-measurement shows the control loop itself is late.
+(`max_bw.min(bw_delay)` in `metrics`, `rs/moq-congestion/src/bbr3/mod.rs`)
+ignores the loss bounds BBR3 keeps: `bw_shortterm`, which
+`bound_bw_for_model` already folds into the model's `bw`, and the inflight
+bounds `inflight_longterm` and `inflight_shortterm`. Measure first, change
+second, and record both runs. Keep the change inside the reported estimate
+unless the measurement shows the control loop itself is late.
