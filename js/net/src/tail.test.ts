@@ -57,7 +57,7 @@ async function readAll(reader: Ordered): Promise<string[]> {
 	}
 }
 
-// moq-lite carries the end in SUBSCRIBE_END as soon as it is declared, so a subscriber
+// moq-lite carries the end in SUBSCRIBE_FINISH as soon as it is declared, so a subscriber
 // learns it while the last group is still to come.
 test.each([Lite.ALPN_05, Lite.ALPN_06])(
 	"%s: an end declared ahead of the live edge reaches the subscriber",

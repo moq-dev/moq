@@ -16,8 +16,11 @@ import { max, min, saturatingSub, UNBOUNDED } from "./util/sequence.ts";
 /** A run of group sequences `[start, end)`; an open run ends at {@link UNBOUNDED}. */
 export type Run = { start: bigint; end: bigint };
 
-/** One range resolved to groups: from `start` up to the exclusive `end`, undefined while open. */
-export type Resolved = { start: bigint; end?: bigint };
+/**
+ * One range resolved to groups: from `start` up to the exclusive `end`, undefined while open.
+ * `floored` says whether the start names a group, rather than reaching back to the oldest one.
+ */
+export type Resolved = { start: bigint; end?: bigint; floored: boolean };
 
 /** Everything from the latest group onward. */
 export const LIVE: Range = Object.freeze({ start: Object.freeze({ relative: 0n }) });
@@ -677,15 +680,21 @@ export class Window {
 	}
 
 	/**
-	 * Each range resolved, in the order given: undefined for one that is empty or whose start
-	 * still waits. An unsettled time end is reported open, never at its cap.
+	 * Each range resolved, in the order given: undefined for one whose start still waits. One
+	 * empty as given, or that only resolves empty, ends at or below its start. An unsettled time
+	 * end is reported open, never at its cap. Mirrors the Rust `Window::resolved`.
 	 */
 	resolved(): (Resolved | undefined)[] {
-		const resolved: (Resolved | undefined)[] = this.ranges.map(() => undefined);
+		const resolved: (Resolved | undefined)[] = this.ranges.map((range) => {
+			if (!isEmpty(range)) return undefined;
+			const end = absolute(range.end) ?? 0n;
+			return { start: (range.start && absolute(range.start)) ?? end, end, floored: true };
+		});
 		for (const span of this.#spans) {
 			resolved[span.index] = {
 				start: span.start,
 				end: span.end !== "open" && "before" in span.end ? span.end.before : undefined,
+				floored: span.floored,
 			};
 		}
 		return resolved;

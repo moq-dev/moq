@@ -4626,9 +4626,11 @@ version = "0.5.11"
 dependencies = [
  "async-trait",
  "axum",
+ "bench-harness",
  "bytes",
  "futures",
  "hang",
+ "http-body",
  "humantime",
  "kio",
  "m3u8-rs",
@@ -7010,6 +7012,7 @@ name = "qmux"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "bench-harness",
  "bytes",
  "futures",
  "kio",

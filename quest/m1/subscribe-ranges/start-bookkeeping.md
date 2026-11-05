@@ -38,7 +38,3 @@ generations of "start".
 
 Public API: none expected. Wire: lite-07 (unpublished) may send a START per
 update; published versions are unchanged.
-
-## Required
-
-- [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 range fill this bookkeeping is rebuilt around
