@@ -182,12 +182,17 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 	// backend opens.
 	let mut decoder = moq_video::decode::Sink::open(&inner.config, &inner.decoder).await?;
 
-	// The feed serves whichever rungs are active, so there is no single
-	// downstream subscription to mirror; live-edge defaults fit every rung.
-	// Arrival order on purpose: group order doesn't matter here, since every group
-	// decodes independently from its own keyframe, so there is nothing for a sequence
-	// cursor to buy. Either one drops whatever falls behind the live edge.
-	let mut subscriber = inner.broadcast.track(&inner.name)?.subscribe(None).await?;
+	// Starts at the live edge, but keeps a superseded group for as long as its
+	// publisher does: every rung mirrors each source group as a whole, so a tail
+	// dropped because the next group began costs viewers the entire output group.
+	// Ascending, since this loop finishes one group before it reads the next.
+	// Reading stays in arrival order: every group decodes independently from its
+	// own keyframe, so there is nothing for a sequence cursor to buy.
+	let subscription = moq_net::track::Subscription::default()
+		.with_ranges([moq_net::track::Range::live()])
+		.with_order(moq_net::track::Order::Ascending)
+		.with_delay(moq_net::track::Delay::default().with_max(None));
+	let mut subscriber = inner.broadcast.track(&inner.name)?.subscribe(subscription).await?;
 
 	while let Some(mut group) = subscriber.recv_group().await? {
 		// Sends only fail with zero receivers, which is fine: teardown aborts
@@ -195,7 +200,17 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 		let _ = sender.send(Item::Group(group.sequence));
 
 		let mut first = true;
-		while let Some(wire) = group.read_frame().await? {
+		let complete = loop {
+			let wire = match group.read_frame().await {
+				Ok(Some(wire)) => wire,
+				Ok(None) => break true,
+				// A failed group read loses that group alone, such as one its
+				// publisher gave up; a failed track ends `recv_group` above instead.
+				Err(err) => {
+					tracing::debug!(%err, group = group.sequence, "lost a source group");
+					break false;
+				}
+			};
 			for frame in container.decode(wire)? {
 				let timestamp = frame.timestamp;
 				// The first frame of a group is a keyframe by construction. This drives
@@ -208,14 +223,19 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 					let _ = sender.send(Item::Frame(Arc::new(decoded)));
 				}
 			}
-		}
+		};
 		// A buffered decoder still owns this group's tail. Drain it before the
 		// boundary so those frames stay in this group rather than appearing after
 		// the next group's keyframe.
-		for decoded in decoder.flush().await? {
-			let _ = sender.send(Item::Frame(Arc::new(decoded)));
+		let tail = decoder.flush().await?;
+		// A lost group gets no End, so every rung aborts its copy at the next Group
+		// rather than finishing it short.
+		if complete {
+			for decoded in tail {
+				let _ = sender.send(Item::Frame(Arc::new(decoded)));
+			}
+			let _ = sender.send(Item::End);
 		}
-		let _ = sender.send(Item::End);
 	}
 	Ok(())
 }
