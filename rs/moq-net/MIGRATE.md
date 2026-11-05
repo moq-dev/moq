@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### Readers at a shed frame ask a `track::Requests` handler for a flight ([#7944](https://github.com/moq-dev/moq/pull/7944))
 
-A reader that reaches a frame its group copy shed no longer gets `Error::Evicted` when the track has a live `track::Requests` handle: the handler receives a `Fill` of that one group from that frame (`Fill::start`), even though the group is still cached and live.
+A reader that reaches a frame its group copy shed no longer gets `Error::Evicted` when the track has a live `track::Requests` handle: the handler receives a `Fill` of that one group from that frame (`Fill::start`), or from frame 0 on a compressed track, even though the group is still cached and live.
 Accept it as usual and write from that frame, waiting on `group::Producer::ready` so its readers pace it, and stop once `Fill::is_wanted` is false and the group's `demand()` has no reader: they left it for the live copy.
 A handler that cannot serve old frames refuses the fill (`Fill::refuse_groups` or dropping it), and the reader falls back to refresh or `Evicted` as before. A track without a handler is unchanged.
 
