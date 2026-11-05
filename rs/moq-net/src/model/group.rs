@@ -6246,6 +6246,7 @@ mod test {
 	/// Every group starts cold even when a finished encoder is reused. Open groups
 	/// keep independent windows, and aborting one does not consume another's spare.
 	#[test]
+	#[cfg(feature = "async")]
 	fn reused_encoders_start_independent_group_streams() {
 		let pool = cache::Pool::unbounded();
 		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
