@@ -23,32 +23,19 @@ the catalog root. Its why I wanted to call the section `include` originally."
   such as moq-hls treat a contribution as on the root's PTS timeline and grid,
   with no clock or interval comparison; a mismatch is the publisher's bug.
   #7836 implements that for HLS.
-- **The name is the open decision.** `include` is the maintainer's original
-  preference; confirm it (or another) in this quest's PR before renaming, then
-  rename the field, the types (`Contribution`), the watch method and the draft
-  section consistently in Rust, JS and the bindings that expose them.
+- ✅ **The name is `include`** (Decided 2026-11-05 (maintainer, /quest-plan)).
+  Not chosen: `includes`; keeping `contributions`. Rename the field, the
+  `Contribution` types to `Include`, `broadcast.contribution()` to
+  `broadcast.include()`, the HLS listing, and the draft section consistently
+  in Rust, JS and the bindings that expose them.
 - The field arrived in [moq-dev/moq#7312](https://github.com/moq-dev/moq/pull/7312)
   (2026-11-01) and isn't on `release`, so no compatibility alias is needed and
   the catalog `version` stays.
 - Update the HLS listing's code, landed in
   [moq-dev/moq#7836](https://github.com/moq-dev/moq/pull/7836), to the new name.
 
-The shared-timeline rule is now stated in the draft and concept guide. The
-rename remains unimplemented pending the naming decision below.
-
-Public API: breaking but unreleased (Rust `hang`, `@moq/hang`, `@moq/watch`).
-Wire: the catalog JSON key changes; unreleased.
-
-## Waiting
-
-- Maintainer: confirm the public name before the breaking rename, as required
-  by the Plan. Options: `include` (recommended, the original preference),
-  `includes` (plural for the map), or keep `contributions`. An agent cannot
-  settle the explicitly reserved naming decision. Record the choice in
-  [the implementation PR](https://github.com/moq-dev/moq/pull/7943), then rename
-  Rust and JS types, schemas, watch API, HLS, fixtures, and draft references
-  together, with Unreleased migration notes. No service or repository setting
-  change is needed.
+Public API: breaking but unreleased (Rust `hang`, `moq-hls`, `@moq/hang`,
+`@moq/watch`). Wire: the catalog JSON key changes; unreleased.
 
 ## Related
 
