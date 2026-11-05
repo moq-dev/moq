@@ -164,7 +164,7 @@ let
           fi
           if ! test -e "$STATE_DIRECTORY/root.raw"; then
             if test -e "$STATE_DIRECTORY/root.qcow2"; then
-              echo "Delete the legacy $STATE_DIRECTORY/root.qcow2 so ${name} boots a fresh image." >&2
+              echo "Delete the legacy $STATE_DIRECTORY/root.qcow2 and install a fresh registration token at ${cfg.tokenFile} so ${name} boots and registers a fresh image (see nix/runner/README.md)." >&2
               exit 1
             fi
             cp --reflink=auto ${guest.config.system.build.image}/${guest.config.image.fileName} "$STATE_DIRECTORY/root.raw.tmp"
