@@ -336,6 +336,30 @@ test("fill: a fill names the most urgent priority and loosest budget among its r
 	broadcast.close();
 });
 
+// A stale verdict settles only the readers it covers, so a fetch it does not settle keeps its fill.
+// Rust records a stale run without answering any fill.
+test("fill: a stale verdict leaves an outstanding fill owed", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video", { maxAge: null });
+	const requests = track.requests();
+	track.createGroup(3n).finish();
+	const fetching = wireOf(broadcast).fetchGroup("video", 2n);
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	expect(fill.wanted()).toBe(2n);
+
+	hooks.dropTrackGroups(track, 2n, 3n, staleHole(500));
+	expect(fill.wanted()).toBe(2n);
+	const group = fill.accept(2n);
+	group.writeFrame({ payload: enc.encode("filled") });
+	group.finish();
+	expect(await frames(await fetching)).toEqual(["filled"]);
+
+	fill.close();
+	requests.close();
+	broadcast.close();
+});
+
 test("fill: a group arriving live answers the fill", async () => {
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("video", { maxAge: null });

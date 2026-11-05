@@ -1220,8 +1220,9 @@ export class Producer {
 				}
 			}
 		}
-		// A fill no longer owes what the track gave up.
-		this.#fills.dropped(start, end);
+		// A fill no longer owes what the track gave up for good. A stale verdict settles only
+		// the readers it covers, so a fill asked by any other is still owed.
+		if (hole.stale === undefined) this.#fills.dropped(start, end);
 		for (const state of [this.#state, ...this.#sinks]) {
 			state.drops.update((drops) =>
 				runs.reduce((drops, run) => insertDrop(drops, run.start, run.end, hole), drops),
