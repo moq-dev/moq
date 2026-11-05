@@ -3,8 +3,8 @@
 //! A [`Network`] binds a [`Socket`] per address for [`Endpoint::new`](super::endpoint::Endpoint::new).
 //! Each datagram crosses the [`Path`] from its sender to its destination: the [`Link`]'s
 //! bottleneck queue, a fixed one-way latency, then its loss, duplication, jitter, and
-//! reordering, all drawn from the network's seed so a seed replays a run exactly. A
-//! destination nobody bound drops the datagram, as UDP does.
+//! reordering, all drawn from the network's seed. With each endpoint's `rng_seed` set too, a
+//! seed replays a run exactly. A destination nobody bound drops the datagram, as UDP does.
 //!
 //! Not part of the public API. It runs only inside `kio::clock::sim::run`, where every
 //! arrival is a simulated timer.

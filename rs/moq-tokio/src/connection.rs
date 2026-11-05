@@ -1096,10 +1096,14 @@ impl Connection {
 		Ok(self)
 	}
 
-	/// Poll for the next connection status change since this handle last reported one.
+	/// The connection status, once it changes from what this handle last reported, or the error
+	/// once the loop has stopped (the give-up error, or a generic one when the handle is dropped).
 	///
-	/// `Ready(Ok(status))` on a change, `Ready(Err)` once the loop has stopped (the give-up error,
-	/// or a generic one when the handle is dropped), `Pending` otherwise.
+	/// The loop moves between `Connected`, `Disconnected`, and `Migrating` (a GOAWAY handover, where
+	/// the old session is still serving), so successive calls report changes rather than a fixed
+	/// alternation; a status that flips and flips back before the caller polls is reported once.
+	/// This tracks the *current* state, not every edge.
+	#[kio::wrapper]
 	pub fn poll_status(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Status>> {
 		let last = self.last_reported;
 		let status = match ready!(self.state.poll(waiter, |state| match state.status {
@@ -1112,17 +1116,6 @@ impl Connection {
 
 		self.last_reported = Some(status);
 		Poll::Ready(Ok(status))
-	}
-
-	/// Wait until the connection status changes from what this handle last reported.
-	///
-	/// Returns the current [`Status`]. The loop moves between `Connected`,
-	/// `Disconnected`, and `Migrating` (a GOAWAY handover, where the old session is
-	/// still serving), so successive calls report changes rather than a fixed
-	/// alternation; a status that flips and flips back before the caller polls is
-	/// reported once. This tracks the *current* state, not every edge.
-	pub async fn status(&mut self) -> crate::Result<Status> {
-		kio::wait(|waiter| self.poll_status(waiter)).await
 	}
 
 	/// Whether a session is currently connected.
@@ -1208,22 +1201,16 @@ impl Connection {
 		self.viewers.clone()
 	}
 
-	/// Poll whether the connection loop has stopped.
-	///
-	/// `Ready(Err)` if it permanently gave up (reconnect timeout exceeded, an auth
-	/// rejection, or the session ending in one-shot mode), `Ready(Ok(()))` if stopped
-	/// by dropping the handle, `Pending` while it's still running.
+	/// Resolves once the connection loop stops: an error if it permanently gave up (reconnect
+	/// timeout exceeded, an auth rejection, or the session ending in one-shot mode), `Ok(())` if
+	/// stopped by dropping the handle.
+	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<crate::Result<()>> {
 		ready!(self.state.poll_closed(waiter));
 		Poll::Ready(match &self.state.read().error {
 			Some(err) => Err(err.clone()),
 			None => Ok(()),
 		})
-	}
-
-	/// Wait until the connection loop stops.
-	pub async fn closed(&self) -> crate::Result<()> {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
 	/// The auth handle every session of this connection is built on: its tokens are
@@ -1632,7 +1619,7 @@ mod tests {
 	/// A client that trusts the self-signed [`live`] listener.
 	#[cfg(feature = "tcp")]
 	fn client() -> Client {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		crate::crypto::install_default().unwrap();
 
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
@@ -2427,6 +2414,7 @@ mod tests {
 		let cam = kio::clock::timeout(WAIT, consumer.follow("cam", None).unwrap().available())
 			.await
 			.unwrap()
+			.unwrap()
 			.unwrap();
 		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
 
@@ -2510,6 +2498,7 @@ mod tests {
 		kio::clock::timeout(WAIT, subscriber.consume().follow("late", None).unwrap().available())
 			.await
 			.expect("the drained session stopped serving")
+			.unwrap()
 			.unwrap();
 		assert!(
 			connection
@@ -2628,7 +2617,7 @@ mod tests {
 			.await
 			.expect("the broadcast never reached the server")
 			.expect("the server's origin closed");
-		assert!(matches!(arrived, moq_net::announce::Event::Start(update) if update.prefix.as_str() == "room"));
+		assert!(matches!(arrived, moq_net::announce::Event::Present(update) if update.prefix.as_str() == "room"));
 		assert!(
 			connection.connected() && connection.connects() == 1,
 			"the session closed before the configured token was answered"

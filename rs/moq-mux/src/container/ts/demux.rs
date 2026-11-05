@@ -158,6 +158,11 @@ impl Demux {
 		Some((self.position + found as u64, pkt))
 	}
 
+	/// The whole PAT `pkt`, the next packet on PID 0, would complete, read without routing it.
+	pub fn pat_after(&self, pkt: &[u8; TsPacket::SIZE]) -> Option<psi::Pat> {
+		self.pat.clone().push(pkt, &mut 0)
+	}
+
 	/// The input pushed but not yet framed: what [`next`](Self::next) would read on.
 	pub fn remainder(&self) -> Bytes {
 		Bytes::copy_from_slice(&self.scratch[self.off..])

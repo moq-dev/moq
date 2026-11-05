@@ -1,6 +1,10 @@
 //! A MoQ session handle and a snapshot of its connection statistics.
 
-use std::{sync::Arc, task::Poll, time::Duration};
+use std::{
+	sync::Arc,
+	task::{Poll, ready},
+	time::Duration,
+};
 
 use crate::transport::poll::Session as _;
 use crate::transport::{Error as _, Metrics as _};
@@ -26,6 +30,20 @@ struct Ended {
 	err: Error,
 	/// The drain's outcome, when a drain is what closed the transport.
 	drain: Option<Result<(), Error>>,
+}
+
+/// Resolve with `read` of how the session ended, or [`kio::Closed`] once the driver dropped
+/// without publishing it.
+fn poll_ended<R>(
+	closed: &kio::Consumer<Option<Ended>>,
+	waiter: &kio::Waiter,
+	read: impl FnOnce(&Ended) -> R,
+) -> Poll<Result<R, kio::Closed>> {
+	let ended = closed.poll(waiter, |state| match &**state {
+		Some(ended) => Poll::Ready(read(ended)),
+		None => Poll::Pending,
+	});
+	ended.map(|ended| ended.map_err(|_| kio::Closed))
 }
 
 /// How this side closed the transport, shared by every clone of it.
@@ -191,25 +209,23 @@ impl Session {
 	/// 01-04), or the session ended first. Peer-controlled: use it for logs and
 	/// rollout counts, never to authorize.
 	pub async fn peer_implementation(&self) -> Option<String> {
+		kio::wait(|waiter| self.poll_peer_implementation(waiter)).await
+	}
+
+	/// See [`Self::peer_implementation`].
+	fn poll_peer_implementation(&self, waiter: &kio::Waiter) -> Poll<Option<String>> {
 		// The slot closes only when the driver drops, which a caller holding a finished
 		// one never does, so the transport's end is watched too.
-		kio::wait(|waiter| {
-			let slot = self.peer_implementation.poll(waiter, |slot| match &**slot {
-				Some(value) => Poll::Ready(value.clone()),
-				None => Poll::Pending,
-			});
-			match slot {
-				Poll::Ready(Ok(value)) => return Poll::Ready(value),
-				Poll::Ready(Err(_)) => return Poll::Ready(None),
-				Poll::Pending => {}
-			}
-			let ended = self.closed.poll(waiter, |ended| match &**ended {
-				Some(_) => Poll::Ready(()),
-				None => Poll::Pending,
-			});
-			ended.map(|_| None)
-		})
-		.await
+		let slot = self.peer_implementation.poll(waiter, |slot| match &**slot {
+			Some(value) => Poll::Ready(value.clone()),
+			None => Poll::Pending,
+		});
+		match slot {
+			Poll::Ready(Ok(value)) => return Poll::Ready(value),
+			Poll::Ready(Err(_)) => return Poll::Ready(None),
+			Poll::Pending => {}
+		}
+		poll_ended(&self.closed, waiter, |_| ()).map(|_| None)
 	}
 
 	/// Returns a consumer for the estimated send bitrate (from the congestion controller).
@@ -304,16 +320,13 @@ impl Session {
 		let closed = self.closed.clone();
 		drop(self);
 
-		match closed
-			.wait(|state| match &**state {
-				Some(ended) => Poll::Ready(ended.clone()),
-				None => Poll::Pending,
+		kio::wait(|waiter| {
+			Poll::Ready(match ready!(poll_ended(&closed, waiter, Ended::clone)) {
+				Ok(ended) => ended.drain.unwrap_or(Err(ended.err)),
+				Err(kio::Closed) => Err(Error::Cancel),
 			})
-			.await
-		{
-			Ok(ended) => ended.drain.unwrap_or(Err(ended.err)),
-			Err(kio::Closed) => Err(Error::Cancel),
-		}
+		})
+		.await
 	}
 
 	/// Block until the transport session is closed, returning the reason.
@@ -337,15 +350,13 @@ impl Session {
 
 	/// Poll form of [`closed`](Self::closed).
 	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		match self.closed.poll(waiter, |state| match &**state {
-			Some(ended) => Poll::Ready(ended.err.clone()),
-			None => Poll::Pending,
-		}) {
-			Poll::Ready(Ok(err)) => Poll::Ready(err),
-			// The driver was dropped before it could observe the close.
-			Poll::Ready(Err(_)) => Poll::Ready(Error::Cancel),
-			Poll::Pending => Poll::Pending,
-		}
+		Poll::Ready(
+			match ready!(poll_ended(&self.closed, waiter, |ended| ended.err.clone())) {
+				Ok(err) => err,
+				// The driver was dropped before it could observe the close.
+				Err(kio::Closed) => Error::Cancel,
+			},
+		)
 	}
 
 	/// Start the drain [`close`](Self::close) runs, without waiting for it or giving up this handle.
@@ -387,20 +398,14 @@ impl Session {
 		self.goaway.consumer()
 	}
 
-	/// Poll until the session carries no subscription or fetch, in either direction.
+	/// Resolves once the session carries no subscription or fetch, in either direction.
 	///
 	/// Ready at once while it carries none. A track request still being set up, waiting
 	/// on authorization or the track's info, counts too. Announcements and the other
 	/// control streams don't, so a session can be idle while it still serves discovery.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.work.poll_idle(waiter)
-	}
-
-	/// Wait until the session carries no subscription or fetch, in either direction.
-	///
-	/// See [`poll_idle`](Self::poll_idle).
-	pub async fn idle(&self) {
-		kio::wait(|waiter| self.poll_idle(waiter)).await
 	}
 
 	/// The tokens this side presented and the grant they earned, plus the tokens

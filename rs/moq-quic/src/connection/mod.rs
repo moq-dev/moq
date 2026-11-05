@@ -320,6 +320,7 @@ impl Connection {
 			client_hello: None,
 		});
 		let mut rng = StdRng::from_seed(rng_seed);
+		let path = PathData::new(remote, allow_mtud, None, 0, now, rng.random(), &config);
 		let mut this = Self {
 			grease_quic_bit,
 			qlog: config.qlog_sink(),
@@ -332,7 +333,7 @@ impl Connection {
 				now,
 				if pref_addr_cid.is_some() { 2 } else { 1 },
 			),
-			path: PathData::new(remote, allow_mtud, None, 0, now, &config),
+			path,
 			path_counter: 0,
 			allow_mtud,
 			local_ip,
@@ -705,7 +706,7 @@ impl Connection {
 			let bandwidth_probe =
 				space_id == SpaceId::Data
 					&& can_send.is_empty()
-					&& !close && match self.bandwidth_probe_ready(now, segment_size as u64 + untracked_bytes) {
+					&& !close && match self.bandwidth_probe_ready(now, untracked_bytes, segment_size as u64) {
 					bandwidth_probe::Ready::Idle => false,
 					bandwidth_probe::Ready::Blocked(until) => {
 						if let Some(until) = until {
@@ -1667,7 +1668,7 @@ impl Connection {
 	/// configuration in the [`transport::Config`].
 	#[cfg(test)]
 	pub(crate) fn path_changed(&mut self, now: Instant) {
-		self.path.reset(now, &self.config);
+		self.path.reset(now, self.rng.random(), &self.config);
 		self.path.congestion.on_probe_target(self.bandwidth_probe.target());
 		// The rebuilt controller never sees state the old one gave packets still in flight.
 		for space in SpaceId::iter() {
@@ -3423,6 +3424,7 @@ impl Connection {
 				Some(peer_max_udp_payload_size),
 				self.path_counter,
 				now,
+				self.rng.random(),
 				&self.config,
 			)
 		};
@@ -4526,10 +4528,16 @@ mod tests {
 		endpoint::{self, Dial, Endpoint},
 	};
 
-	#[cfg(feature = "ring")]
 	#[test]
 	fn large_initial_token_leaves_room_for_close() {
-		let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+		let cert = (|| -> std::result::Result<_, rcgen::Error> {
+			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+			params.serial_number = Some(1u64.into());
+			let cert = params.self_signed(&signing_key)?;
+			Ok(rcgen::CertifiedKey { cert, signing_key })
+		})()
+		.unwrap();
 		let mut roots = rustls::RootCertStore::empty();
 		roots.add(cert.cert.der().clone()).unwrap();
 		let config = client::Config::with_root_certificates(Arc::new(roots)).unwrap();

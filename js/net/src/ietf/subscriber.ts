@@ -27,13 +27,13 @@ import { finalSequence, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { receiveFrame, skipPayload } from "../payload.ts";
-import { type Cursor, Reader, type Stream } from "../stream.ts";
+import type { Cursor, Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import type { Timescale, Timestamp } from "../time.ts";
+import type { Timescale } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
-import { Deadline, requestOptions } from "../util/deadline.ts";
+import { Deadline } from "../util/deadline.ts";
 import { abandoned as demandAbandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { min } from "../util/sequence.ts";
@@ -48,14 +48,7 @@ import { isDraft20 } from "./filter.ts";
 import { Join } from "./join.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import {
-	decodeFetchObject,
-	decodeObjectTime,
-	EndOfTrackProperties,
-	Frame,
-	type Group as GroupMessage,
-	ObjectIdGap,
-} from "./object.ts";
+import { decodeFetchObject, EndOfTrackProperties, Frame, type Group as GroupMessage, ObjectIdGap } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { DEFAULT_WIRE, fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishDoneStatus, publishDoneClean } from "./publish.ts";
@@ -110,11 +103,12 @@ type SubscribeSetupState = {
 	registeredAlias?: bigint;
 	requests?: Requests;
 	/**
-	 * Whether the caller has given up. Setup checks this once the stream exists so a request
-	 * opened after the timeout still unwinds: nothing else settles setup if the peer has
-	 * gone quiet, and the cleanup that fired first saw no stream to tear down.
+	 * Aborts once the caller has given up. An open still waiting leaves the line, and setup
+	 * checks it once the stream exists so a request opened after the timeout still unwinds:
+	 * nothing else settles setup if the peer has gone quiet, and the cleanup that fired first
+	 * saw no stream to tear down.
 	 */
-	cancelled?: boolean;
+	cancel: AbortController;
 	/**
 	 * Whether the publisher answered with an error. It has torn the request down already, so
 	 * there is nothing left to cancel and ours ends cleanly.
@@ -329,7 +323,7 @@ export class Subscriber {
 	 * The request goes out once every overlapping request already closed here is off the
 	 * wire, so a peer that refuses overlapping requests never sees this one beside them.
 	 */
-	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
+	routes(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Routes {
 		// The wire speaks announce interest by prefix.
 		const prefix = scopeHead(scope);
 		const filter: Asking = {
@@ -529,7 +523,7 @@ export class Subscriber {
 
 		try {
 			const deadline = new Deadline();
-			const request = await deadline.wait(RequestStream.open(this.#session, deadline, this.#quic));
+			const request = await deadline.wait(RequestStream.open(this.#session, deadline, { quic: this.#quic }));
 
 			const run = async () => {
 				const msg = new SubscribeNamespace({ namespace: prefix, requestId, hidden });
@@ -702,6 +696,13 @@ export class Subscriber {
 				void this.#runSubscribe(path, request, instance.validity?.signal);
 			}
 		})();
+		void (async () => {
+			for (;;) {
+				const request = await wireOf(consumer).requestedDatagrams();
+				if (!request) return;
+				request.reject(new NotFound("datagram tracks over moq-transport"));
+			}
+		})();
 		return this.#consumes.insert(path, instance, consumer);
 	}
 
@@ -788,7 +789,7 @@ export class Subscriber {
 		// Open the stream and wait for SUBSCRIBE_OK under a timeout. State
 		// flows back via `state` so the timeout path can clean up the stream
 		// and any registration if setup eventually finishes.
-		const state: SubscribeSetupState = {};
+		const state: SubscribeSetupState = { cancel: new AbortController() };
 		const deadline = new Deadline();
 		const setup = this.#openSubscribe(state, broadcast, request, requestId, deadline, known?.producer);
 
@@ -840,7 +841,7 @@ export class Subscriber {
 			// the first pass. The request ends once: a deadline failure already reset it through
 			// the same stream, so a second end here does nothing.
 			const cleanup = () => {
-				state.cancelled = true;
+				state.cancel.abort(e);
 
 				// A fill stream waiting on SUBSCRIBE_OK gets nothing, and a head already started goes.
 				state.fill?.(undefined);
@@ -1018,7 +1019,7 @@ export class Subscriber {
 			const setup = async () => {
 				const id = await this.#session.nextRequestId(signal);
 				if (id === undefined) throw await this.#closedSession();
-				stream = await RequestStream.open(this.#session, deadline, this.#quic);
+				stream = await RequestStream.open(this.#session, deadline, { quic: this.#quic, signal });
 				if (signal.aborted) {
 					stream.abort(signal.reason);
 					signal.throwIfAborted();
@@ -1182,7 +1183,7 @@ export class Subscriber {
 			active.throwIfAborted();
 			if (id === undefined) throw await this.#closedSession();
 			this.#ranges.set(id, accepted.promise);
-			stream = new RequestStream(await this.#session.openBi(requestOptions), this.#session, this.#quic);
+			stream = new RequestStream(await this.#session.openBi({ signal: active }), this.#session, this.#quic);
 			if (active.aborted) {
 				stream.abort(active.reason);
 				active.throwIfAborted();
@@ -1451,11 +1452,11 @@ export class Subscriber {
 			this.#fetches.set(fetchId, Promise.resolve(subscription));
 			subscription.fetchIds.push(fetchId);
 
-			request = new RequestStream(
-				await untilAborted(Promise.resolve(this.#session.openBi(requestOptions)), signal),
-				this.#session,
-				this.#quic,
-			);
+			request = new RequestStream(await this.#session.openBi({ signal }), this.#session, this.#quic);
+			if (signal.aborted) {
+				request.abort(signal.reason);
+				signal.throwIfAborted();
+			}
 			const msg = new Fetch({
 				requestId: fetchId,
 				type: { kind: "relativeJoining", subscription: subscribeId, offset: 0n },
@@ -1528,12 +1529,12 @@ export class Subscriber {
 	}> {
 		const version = this.#session.version;
 
-		state.stream = await RequestStream.open(this.#session, deadline, this.#quic);
+		const cancelled = state.cancel.signal;
+		state.stream = await RequestStream.open(this.#session, deadline, { quic: this.#quic, signal: cancelled });
 
-		// The timeout can fire while the open is still in flight, in which case cleanup ran
-		// with nothing to release. Bail now that the stream is recorded, so settling this
-		// promise hands it back to be torn down.
-		if (state.cancelled) throw new Error("subscribe cancelled before it was sent");
+		// Cleanup can run as the open hands over its stream, with nothing to release. Bail now
+		// that the stream is recorded, so settling this promise hands it back to be torn down.
+		if (cancelled.aborted) throw new Error("subscribe cancelled before it was sent");
 
 		const msg = new Subscribe({
 			requestId,
@@ -1559,7 +1560,7 @@ export class Subscriber {
 
 		// The caller may have given up while that write was in flight, resetting the request
 		// under it.
-		if (state.cancelled) throw new Error("subscribe cancelled while it was being sent");
+		if (cancelled.aborted) throw new Error("subscribe cancelled while it was being sent");
 		console.debug(`subscribe written: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 
 		const response = await state.stream.next();
@@ -1580,7 +1581,7 @@ export class Subscriber {
 		}
 
 		const ok = await SubscribeOk.decode(response.reader, version);
-		if (state.cancelled) throw new Error("subscribe cancelled before acceptance");
+		if (cancelled.aborted) throw new Error("subscribe cancelled before acceptance");
 		const maxCacheDuration = ok.properties.maxCacheDuration;
 		if (maxCacheDuration !== undefined && maxCacheDuration > BigInt(Number.MAX_SAFE_INTEGER)) {
 			throw new RangeError("max cache duration exceeds safe milliseconds");
@@ -2153,67 +2154,10 @@ export class Subscriber {
 		}
 	}
 
-	/**
-	 * Deliver one OBJECT_DATAGRAM as a datagram on its subscription's track: a single-frame
-	 * group at the Group ID.
-	 *
-	 * One the model cannot carry is dropped like any lost datagram: an Object past ID 0 (the
-	 * group would need a second object), a status other than Normal, an alias that is not
-	 * bound yet (the draft lets us drop rather than buffer), or no Timestamp on a track that
-	 * declared a timescale.
-	 */
+	// Stream subscriptions never admit datagrams; the separate IETF datagram-track adapter
+	// owns mapping DATAGRAMS demand onto SUBSCRIBE/OBJECT_DATAGRAM.
 	async #recvDatagram(data: Uint8Array): Promise<void> {
-		const version = this.#session.version;
-		const datagram = await ObjectDatagram.decode(data, version);
-		const { trackAlias: alias, groupId: sequence } = datagram;
-
-		if ((datagram.objectId ?? 0n) !== 0n) {
-			console.debug(`dropping a datagram past object 0: alias=${alias} group=${sequence}`);
-			return;
-		}
-		let payload: Uint8Array;
-		if ("status" in datagram.body) {
-			if (datagram.body.status !== 0) {
-				console.debug(
-					`dropping a datagram status: alias=${alias} group=${sequence} status=${datagram.body.status}`,
-				);
-				return;
-			}
-			payload = new Uint8Array();
-		} else {
-			payload = datagram.body.payload;
-		}
-
-		const subscription = this.#aliases.peek(alias);
-		if (!subscription) {
-			console.debug(`dropping a datagram for an unbound alias: alias=${alias} group=${sequence}`);
-			return;
-		}
-
-		// Like a subgroup object: a track that declared no timescale is untimed.
-		const timescale = this.#timescales.get(alias);
-		let timestamp: Timestamp | undefined;
-		if (timescale !== undefined && datagram.properties !== undefined) {
-			try {
-				timestamp = await new Reader(undefined, datagram.properties, version).decode((c) =>
-					decodeObjectTime(c, timescale),
-				);
-			} catch (err: unknown) {
-				throw new ProtocolViolation(`malformed OBJECT_DATAGRAM properties: ${reason(error(err))}`, {
-					cause: err,
-				});
-			}
-		}
-		if (timescale !== undefined && timestamp === undefined) {
-			console.debug(`dropping an unstamped datagram: alias=${alias} group=${sequence}`);
-			return;
-		}
-
-		try {
-			subscription.track.insertDatagram(sequence, timestamp, payload);
-		} catch (err: unknown) {
-			console.debug(`dropping datagram: alias=${alias} group=${sequence} error=${reason(error(err))}`);
-		}
+		await ObjectDatagram.decode(data, this.#session.version);
 	}
 }
 

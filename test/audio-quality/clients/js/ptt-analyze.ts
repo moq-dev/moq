@@ -48,6 +48,10 @@ const presses = result.presses
 			return [arrival[0] - press.at - (frame.timestamp - head) / 1000];
 		});
 		const delivery = waited.length ? Math.max(...waited) : null;
+		// What "auto"'s jitter estimate reads off this utterance: how far its frames' arrivals stray
+		// from their media timestamps, slowest minus fastest. An ideal path leaves only capture cadence.
+		const offsets = received.map(([at, media]) => at - media);
+		const spread = offsets.length ? Math.max(...offsets) - Math.min(...offsets) : null;
 		// The head frame's path from the press to projected output, one boundary after another, so
 		// the parts sum to `audible`. Capture and packetization split at the head frame's end on the
 		// media clock, placed against the newest captured chunk delivered before the press.
@@ -95,12 +99,13 @@ const presses = result.presses
 			arrival: earliest ? earliest[0] - press.at : null,
 			audible: audible ? audible.at - press.at : null,
 			delivery,
+			spread,
 			playout: audible && delivery !== null ? audible.rendered - press.at - delivery : null,
 			output: audible ? audible.at - audible.rendered : null,
 			path,
 		};
 	});
-const spread = (values: (number | null)[]) => {
+const summarize = (values: (number | null)[]) => {
 	const sorted = values.flatMap((value) => (value === null ? [] : [value])).toSorted((a, b) => a - b);
 	if (!sorted.length) return null;
 	const middle = sorted.length / 2;
@@ -111,11 +116,14 @@ const parts = ["capture", "packetization", "encode", "network", "decode", "jitte
 const summary = {
 	// The goal: at most 300 ms of playout added on top of one-way delivery.
 	latency: {
-		delivery: spread(presses.map((press) => press.delivery)),
-		playout: spread(presses.map((press) => press.playout)),
-		output: spread(presses.map((press) => press.output)),
+		delivery: summarize(presses.map((press) => press.delivery)),
+		playout: summarize(presses.map((press) => press.playout)),
+		output: summarize(presses.map((press) => press.output)),
+		spread: summarize(presses.map((press) => press.spread)),
 	},
-	path: Object.fromEntries(parts.map((part) => [part, spread(presses.map((press) => press.path?.[part] ?? null))])),
+	path: Object.fromEntries(
+		parts.map((part) => [part, summarize(presses.map((press) => press.path?.[part] ?? null))]),
+	),
 	delay: result.state?.delay,
 	presses,
 	captures: result.captures,

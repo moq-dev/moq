@@ -395,8 +395,10 @@ Under light congestion video drops the tail of a group; under heavy congestion
 video stops and audio lags by at most 500 ms. No protocol change, just knobs.
 
 A long group is paced by its fastest reader instead. Each hop receives at most
-16 MB of a group past its fastest reader, then stops reading the group's stream,
-so stream flow control pushes back hop by hop to the publisher, and a reader
+its stream receive window of a group past its fastest reader, capped at 16 MB
+(half the group's tail), then stops reading the group's stream, so the hop
+holds about what its upstream peer can have in flight on that stream and
+stream flow control pushes back hop by hop to the publisher. A reader
 that keeps up loses nothing. A slower reader is never waited on: one that trails
 the fastest by more than the group's 32 MB tail reaches a shed frame, and asks
 for a new group on tracks that opt into [refresh](#refresh) or ends with
@@ -447,7 +449,8 @@ datagrams and `audio` as streams are two independent tracks. Nothing on the
 wire says which kind a name is: the application knows from its catalog or by
 convention, so a broadcast's track listing never includes a datagram track. In
 Rust, `broadcast.create_datagrams(name, info)` publishes one and
-`broadcast.datagrams(name)` reads it.
+`broadcast.datagrams(name)` reads it. In JavaScript use
+`broadcast.createDatagrams(name, info)` and `broadcast.datagrams(name)`.
 
 A datagram subscription is live from when it starts: it has no ranges, order,
 or max delay, only a priority, which a subscriber can change. A datagram still

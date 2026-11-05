@@ -14,11 +14,19 @@ Viewer ceilings and PROBE target overrides are refused with the new `MOQ_ERROR_O
 
 ### Media setup refusals are typed
 
-Audio and video subscribe setup now reports `MOQ_ERROR_UNSUPPORTED_CONFIG` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+Audio and video subscribe setup now reports `MOQ_ERROR_UNSUPPORTED_CONFIG` when the decoder refuses a codec, layout, or description, or when every video decoder for the codec reports that this device cannot decode the stream. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a missing driver or no device, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
 
 ## moq-c 0.7, the hand-written ABI
 
 The hand-written crate never published as moq-c: a libmoq 0.6 user applies these entries before moving to the generated API.
+
+### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`moq_announce_kind` is `MOQ_ANNOUNCE_KIND_PRESENT` (0) or `MOQ_ANNOUNCE_KIND_ABSENT` (1), and `moq_announce_event` loses `predecessor` and `predecessor_len`, changing the C ABI.
+Another instance taking a path over keeps it present, and a route's cost changing is not reported.
+Map `_START` to `_PRESENT` and `_END` to `_ABSENT`, and drop `_UPDATE` handling. Where you requested the path again on `_RESTART` or `_TAKEOVER`, call `moq_origin_follow`, whose callback delivers a broadcast handle for each new instance.
+
+`moq_origin_follow` takes a `moq_follow_callback`, `(void *user_data, moq_follow_event event, int32_t code)`, instead of a `moq_status_callback`. `MOQ_FOLLOW_EVENT_ONLINE` carries each broadcast handle (where a positive code did), `MOQ_FOLLOW_EVENT_OFFLINE` reports the path going offline (or, for a follow pinned to an instance, another instance taking it over) with code `0`, and `MOQ_FOLLOW_EVENT_END` is the terminal callback, with `0` or a negative error that `moq_error()` explains (where a code `<= 0` was). Release `user_data` on `MOQ_FOLLOW_EVENT_END`.
 
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 

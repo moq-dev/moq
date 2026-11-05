@@ -8,11 +8,12 @@
 //! A session speaks one of two protocols:
 //!
 //! - `tcp`: one reliable, ordered byte pipe each way, as TCP gives. Each half is a single
-//!   group. Dial with [`Endpoint::dial_tcp`], accept with [`Endpoint::accept_tcp`], and
-//!   read and write a [`TcpStream`].
+//!   group. Dial with [`Endpoint::dial_tcp`], accept with `accept_tcp` or
+//!   [`Endpoint::poll_accept_tcp`], and read and write a [`TcpStream`].
 //! - `track`: each half is a whole track, so messages are groups, with the track's own
 //!   priority, delay budget and order. Dial with [`Endpoint::dial_track`], accept with
-//!   [`Endpoint::accept_track`], and read and write a [`TrackStream`].
+//!   `accept_track` or [`Endpoint::poll_accept_track`], and read and write a
+//!   [`TrackStream`].
 //!
 //! A dialer `A` picks a random session id `S` and subscribes to `<prefix>/.socket/<B>` for
 //! the track `<protocol>/A/B/S`. Endpoint `B` surfaces that request as an [`Incoming`] dial
@@ -126,6 +127,8 @@ mod sealed {
 		pub(super) tasks: crate::util::TasksWeak,
 		/// This endpoint's broadcast.
 		pub(super) publication: origin::Publication,
+		/// The sessions withholding the broadcast from their peer.
+		pub(super) withheld: origin::HiddenWithheld,
 		pub(super) state: kio::Lock<State>,
 	}
 
@@ -252,7 +255,7 @@ impl sealed::Open for TcpStream {
 			local: Some(local),
 			pending: None,
 		};
-		shared.tasks.push(kio::Pending::new(pump));
+		shared.tasks.push(pump);
 		Self {
 			producer,
 			consumer,
@@ -496,6 +499,16 @@ impl Shared {
 		next
 	}
 
+	/// Fail with [`Error::Unsupported`] while a session withholds this endpoint's broadcast
+	/// from its peer, so no peer beyond it can find it: a moq-lite client session before
+	/// 07, whose peer can't ask for hidden broadcasts.
+	fn poll_reachable(&self, waiter: &kio::Waiter) -> Result<(), Error> {
+		match self.withheld.poll(waiter) {
+			Poll::Ready(()) => Err(Error::Unsupported),
+			Poll::Pending => Ok(()),
+		}
+	}
+
 	/// Poll for the endpoint's end, registering `waiter` for it.
 	fn poll_end(&self, waiter: &kio::Waiter) -> Result<(), Error> {
 		if let Some(err) = &self.state.lock().end {
@@ -558,6 +571,14 @@ impl Shared {
 /// its [`TrackStream::consumer`], which the application owns: drop the streams too, which
 /// releases the subscriptions.
 ///
+/// Every hop between two endpoints must carry hidden broadcasts: moq-lite-07 or
+/// moq-transport. While the origin has a moq-lite client session before 07, whose peer
+/// never hears the endpoint's broadcast, dials and accepts fail with
+/// [`Error::Unsupported`]; a session whose publish half opts into hidden broadcasts
+/// ([`origin::Consumer::with_hidden`]) carries it and doesn't count. Nothing tells a
+/// dialer that the peer sits behind such a hop, so a dial to it waits as for a peer not
+/// announced yet, while the peer's own accepts fail.
+///
 /// `tcp` sessions run a task on the origin's driver, which must keep running.
 pub struct Endpoint {
 	shared: Arc<Shared>,
@@ -578,11 +599,13 @@ impl Endpoint {
 		let prefix = crate::path::convert(prefix)?;
 		let publication = origin.create_broadcast(endpoint_path(&prefix, id)?)?;
 		publication.announce(Route::default())?;
+		let consumer = origin.consume();
 		Ok(Self {
 			shared: Arc::new(Shared {
 				id: id.into(),
 				prefix,
-				origin: origin.consume(),
+				withheld: consumer.hidden_withheld(),
+				origin: consumer,
 				tasks: origin.tasks(),
 				publication,
 				state: kio::Lock::new(State {
@@ -611,7 +634,8 @@ impl Endpoint {
 	/// Waits for as long as the peer takes to accept: drop the returned future to give up,
 	/// which resets the session. That includes waiting for the peer's endpoint to be
 	/// announced. Fails with the peer's reset when it rejects the dial, or does not accept
-	/// `tcp` sessions, and with [`Error::Unsupported`] for a dial to this endpoint itself.
+	/// `tcp` sessions, and with [`Error::Unsupported`] for a dial to this endpoint itself
+	/// or across a hop that can't carry it (see [`Endpoint`]).
 	pub fn dial_tcp(&self, peer: &str) -> Result<kio::Pending<Dialing<TcpStream>>, Error> {
 		self.dial(peer, None)
 	}
@@ -659,6 +683,7 @@ impl Endpoint {
 
 	fn poll_accept<S: Stream>(&self, waiter: &kio::Waiter) -> Poll<Result<Incoming<S>, Error>> {
 		let shared = &self.shared;
+		shared.poll_reachable(waiter)?;
 		let request = ready!(shared.poll_dial(S::PROTOCOL, waiter))?;
 		let name = parse(request.name()).expect("sorted as a dial");
 		Poll::Ready(Ok(Incoming {
@@ -670,30 +695,21 @@ impl Endpoint {
 		}))
 	}
 
-	/// Poll for the next `tcp` dial from a peer; fails with [`Error::Closed`] once the
-	/// endpoint closed.
+	/// The next `tcp` dial from a peer; fails with [`Error::Closed`] once the
+	/// endpoint closed, and with [`Error::Unsupported`] while no peer can reach it (see
+	/// [`Endpoint`]).
 	///
 	/// The first call starts accepting `tcp` dials. They queue until taken, or until their
 	/// dialer gives up, so keep accepting, and accept or reject each one.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_accept_tcp(&self, waiter: &kio::Waiter) -> Poll<Result<Incoming<TcpStream>, Error>> {
 		self.poll_accept(waiter)
 	}
 
-	/// Wait for the next `tcp` dial from a peer; see [`Self::poll_accept_tcp`].
-	#[cfg(feature = "async")]
-	pub async fn accept_tcp(&self) -> Result<Incoming<TcpStream>, Error> {
-		kio::wait(|waiter| self.poll_accept_tcp(waiter)).await
-	}
-
-	/// Poll for the next `track` dial from a peer; see [`Self::poll_accept_tcp`].
+	/// The next `track` dial from a peer; see [`Self::poll_accept_tcp`].
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_accept_track(&self, waiter: &kio::Waiter) -> Poll<Result<Incoming<TrackStream>, Error>> {
 		self.poll_accept(waiter)
-	}
-
-	/// Wait for the next `track` dial from a peer; see [`Self::poll_accept_tcp`].
-	#[cfg(feature = "async")]
-	pub async fn accept_track(&self) -> Result<Incoming<TrackStream>, Error> {
-		kio::wait(|waiter| self.poll_accept_track(waiter)).await
 	}
 
 	/// Close the endpoint; see [`Endpoint`].
@@ -708,7 +724,8 @@ impl Drop for Endpoint {
 	}
 }
 
-/// A dial from a peer, from [`Endpoint::accept_tcp`] or [`Endpoint::accept_track`]: accept
+/// A dial from a peer, from [`Endpoint::poll_accept_tcp`] or
+/// [`Endpoint::poll_accept_track`] (or their async `accept_tcp` and `accept_track`): accept
 /// or reject it.
 ///
 /// Dropping it rejects it with [`Error::Cancel`].
@@ -813,7 +830,8 @@ impl Step {
 		loop {
 			match self {
 				Self::Resolving(following) => {
-					let broadcast = ready!(following.poll_available(waiter))?;
+					// Only the first call is made here, and it never reports the path offline.
+					let broadcast = ready!(following.poll_available(waiter))?.expect("the first call is never offline");
 					let subscribing = broadcast.track(track)?.subscribe(reliable()).into_inner();
 					*self = Self::Subscribing(subscribing);
 				}
@@ -920,6 +938,7 @@ impl<S: Stream> Dialing<S> {
 
 	fn poll_inner(&mut self, waiter: &kio::Waiter) -> Poll<Result<S, Error>> {
 		self.shared.poll_end(waiter)?;
+		self.shared.poll_reachable(waiter)?;
 
 		// The peer asks for this side's half when it accepts: serve it, which proves to the
 		// peer that this endpoint dialed.
@@ -987,9 +1006,10 @@ impl<S: Stream> Accepting<S> {
 	/// Poll for the dialer to answer, which proves it dialed.
 	///
 	/// Waits for the dialer's endpoint to be announced for as long as the dial stays open,
-	/// and fails with [`Error::Cancel`] once the dialer gives up. Fails with the dialer's
-	/// reset when it never dialed this session, such as a dial forged in its name, and
-	/// resets the dialer's request with the same error.
+	/// and fails with [`Error::Cancel`] once the dialer gives up, or with
+	/// [`Error::Unsupported`] while this endpoint can't reach it (see [`Endpoint`]). Fails
+	/// with the dialer's reset when it never dialed this session, such as a dial forged in
+	/// its name, and resets the dialer's request with the same error.
 	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<S, Error>> {
 		let result = self.poll_inner(waiter);
 		if let Poll::Ready(Err(err)) = &result {
@@ -1003,6 +1023,7 @@ impl<S: Stream> Accepting<S> {
 
 	fn poll_inner(&mut self, waiter: &kio::Waiter) -> Poll<Result<S, Error>> {
 		self.shared.poll_end(waiter)?;
+		self.shared.poll_reachable(waiter)?;
 		if self.demand.poll_state(waiter) != track::DemandState::Active {
 			return Poll::Ready(Err(Error::Cancel));
 		}

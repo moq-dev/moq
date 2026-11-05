@@ -838,10 +838,11 @@ impl Default for Messages {
 				priority: 4,
 				max_delay: Duration::from_millis(500),
 				min_delay: None,
-				ranges: vec![lite::Range {
+				// Lite-06, the bench's version, restates the ranges.
+				ranges: lite::RangeEdit::Replace(vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
-				}],
+				}]),
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
 				largest: None,
@@ -1859,7 +1860,7 @@ mod tests {
 		let tier = crate::stats::Tier::new(crate::Path::from_static("t"));
 		let session = registry.tier(tier.clone()).session(crate::Path::from_static("root"));
 		let _broadcast = origin.publish("room/1", crate::origin::Route::default()).unwrap();
-		let mut cursor = origin.consume().with_stats(session).announced();
+		let mut cursor = origin.consume().with_stats(session).routes();
 		while cursor.next().now_or_never().flatten().is_some() {}
 
 		bump_publisher_bytes(&registry, crate::Path::from_static("room/1"), &tier, 5);

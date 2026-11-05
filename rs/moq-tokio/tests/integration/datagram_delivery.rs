@@ -103,7 +103,8 @@ impl Viewer {
 		let broadcast = kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
-			.expect("broadcast resolves");
+			.expect("broadcast resolves")
+			.unwrap();
 		let datagrams = broadcast.datagrams("audio").expect("datagram track");
 		// Answered once the publisher's session reads the track, so what it sends next arrives.
 		kio::clock::timeout(TIMEOUT, datagrams.info())
@@ -194,7 +195,7 @@ impl Report {
 
 /// Publish datagrams at `cell`'s rate to a loopback viewer and a bufferbloated one.
 async fn measure(version: &str, cell: Cell) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let version: moq_net::Version = version.parse().expect("version");
 
 	let publisher = moq_tokio::origin::spawn();

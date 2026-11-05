@@ -885,6 +885,7 @@ impl Encoder {
 			Some((sink, _)) => sink,
 			None => {
 				let mut sink = rung.encode(color).await?;
+				rung.rendition.opened(sink.applied());
 				if std::mem::take(&mut self.pending_cut) {
 					sink.cut().await?;
 				}
@@ -1118,9 +1119,13 @@ mod tests {
 
 		let mut encoder = Encoder::default();
 		encoder.cut().await.unwrap();
+		assert_eq!(rung.rendition.applied(), None);
 		let mut encoded = encoder.encode(&rung, frame).await.unwrap();
 		encoded.extend(encoder.finish().await.unwrap());
 		assert!(encoded.first().expect("the frame").keyframe);
+		// The rendition reports the opened encoder's preset, the one the caller requested by default.
+		let applied = rung.rendition.applied().expect("the encoder opened");
+		assert_eq!(applied.preset, Some(moq_video::encode::Preset::LowLatency));
 	}
 
 	/// A fetched NVDEC group reaches the encoder at native size when

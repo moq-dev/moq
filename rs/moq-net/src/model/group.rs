@@ -391,18 +391,15 @@ impl Flate {
 	/// Compress a locally written frame, returning its stored slice.
 	fn deflate(&mut self, payload: &[u8]) -> Bytes {
 		let plain = &self.plain;
-		let encoder = self.encoder.get_or_insert_with(|| {
-			plain.bill.add(flate::ENCODER_HEAP);
-			flate::Encoder::new()
-		});
+		let encoder = self.encoder.get_or_insert_with(|| plain.bill.take_encoder());
 		encoder.frame(payload)
 	}
 
-	/// Drop the codec state once no frame follows at `fin`: the encoder, and the decoder if
-	/// its readers already inflated every frame.
+	/// Park the encoder once no frame follows at `fin`, and drop the decoder if its readers
+	/// already inflated every frame.
 	fn finish(&mut self, fin: Option<usize>) {
-		if self.encoder.take().is_some() {
-			self.plain.bill.sub(flate::ENCODER_HEAP);
+		if let Some(encoder) = self.encoder.take() {
+			self.plain.bill.park_encoder(encoder);
 		}
 		let Some(fin) = fin else {
 			return;
@@ -2206,13 +2203,7 @@ impl Producer {
 		err
 	}
 
-	/// Block until the group's outcome is final: `Ok` once finished, or the abort error,
-	/// including eviction.
-	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Result<()> {
-		kio::wait(|waiter| self.handle.poll_closed(waiter)).await
-	}
-	/// Poll until a reader holds the group and the next frame, described by `frame`, fits
+	/// Resolves once a reader holds the group and the next frame, described by `frame`, fits
 	/// within 16 MB past the end of the last frame its fastest reader took, so a local writer
 	/// runs no further ahead than the live tail keeps behind that reader.
 	///
@@ -2221,20 +2212,17 @@ impl Producer {
 	/// for a frame larger than the window, and one whose next frame was shed has fallen off
 	/// the group and is not waited on. Writing without waiting never fails: the group sheds
 	/// its front instead.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_ready(&self, waiter: &kio::Waiter, frame: &frame::Info) -> Poll<()> {
-		ready!(self.poll_paced(waiter, frame.size));
+		ready!(self.poll_paced(waiter, frame.size, super::pace::AHEAD));
 		// A closed group reports `Closed`, which is ready too.
 		self.handle.state.poll_wanted_changed(waiter, false).map(|_| ())
 	}
 
-	/// Wait until a reader holds the group and `frame` fits; see [`Self::poll_ready`].
-	pub async fn ready(&self, frame: &frame::Info) {
-		kio::wait(|waiter| self.poll_ready(waiter, frame)).await
-	}
-
 	/// Poll until the writer may take more from upstream, `partial` bytes into a frame
-	/// it has not committed: until it is at most [`super::pace::AHEAD`] past the end of the last
-	/// frame its fastest reader took.
+	/// it has not committed: until it is at most `window` bytes past the end of the last
+	/// frame its fastest reader took. Ingest passes its stream's receive credit (see
+	/// [`super::pace::window`]); a local writer passes [`super::pace::AHEAD`].
 	///
 	/// Ready at once while no reader holds the group, so a group nobody watches keeps
 	/// writing and sheds its front, and once it is closed, so the next write surfaces why.
@@ -2243,16 +2231,16 @@ impl Producer {
 	/// fallen off the group and is not waited on.
 	///
 	/// A session's ingest waits on this; a local writer waits on [`Self::poll_ready`].
-	pub(crate) fn poll_paced(&self, waiter: &kio::Waiter, partial: u64) -> Poll<()> {
+	pub(crate) fn poll_paced(&self, waiter: &kio::Waiter, partial: u64, window: u64) -> Poll<()> {
 		let pace = &self.handle.alive.pace;
-		if !pace.ahead(partial) {
+		if !pace.ahead(partial, window) {
 			return Poll::Ready(());
 		}
 		// Either wakes the writer: the last reader leaving, or the group closing.
 		if self.handle.poll_unwanted(waiter).is_ready() || self.handle.state.poll_closed(waiter).is_ready() {
 			return Poll::Ready(());
 		}
-		match pace.paced(pace.park(waiter), partial) {
+		match pace.paced(pace.park(waiter), partial, window) {
 			true => Poll::Pending,
 			false => Poll::Ready(()),
 		}
@@ -2289,8 +2277,9 @@ impl Producer {
 		self.handle.consume()
 	}
 
-	/// Poll until the group's outcome is final: `Ok` once finished, or the abort error,
+	/// Resolves once the group's outcome is final: `Ok` once finished, or the abort error,
 	/// including eviction.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		self.handle.poll_closed(waiter)
 	}
@@ -2997,14 +2986,9 @@ impl Demand {
 		!self.state.is_closed() && self.state.wanted()
 	}
 
-	/// Return [`wanted`](Self::wanted) once it differs from what this handle last returned:
+	/// [`wanted`](Self::wanted) once it differs from what this handle last returned:
 	/// immediately on the first call, then on each change. Errors once the group is closed.
-	#[cfg(feature = "async")]
-	pub async fn wanted_changed(&mut self) -> Result<bool> {
-		kio::wait(|waiter| self.poll_wanted_changed(waiter)).await
-	}
-
-	/// Poll for [`wanted`](Self::wanted) to differ from what this handle last returned.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<bool>> {
 		loop {
 			if self.state.is_closed() {
@@ -3020,13 +3004,8 @@ impl Demand {
 		}
 	}
 
-	/// Wait until the group's outcome is final: `Ok` once finished, or the abort error.
-	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Result<()> {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
-	}
-
-	/// Poll until the group's outcome is final: `Ok` once finished, or the abort error.
+	/// Resolves once the group's outcome is final: `Ok` once finished, or the abort error.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		settle(self.state.consume_weak().poll(waiter, |state| state.poll_outcome()))
 	}
@@ -3802,16 +3781,11 @@ impl Consumer {
 		state.fin.unwrap_or(state.next_index)
 	}
 
-	/// Return a consumer for the next frame for chunked reading.
-	#[cfg(feature = "async")]
-	pub async fn next_frame(&mut self) -> Result<Option<frame::Consumer>> {
-		kio::wait(|waiter| self.poll_next_frame(waiter)).await
-	}
-
-	/// Poll for the next frame, without blocking.
+	/// The next frame, as a consumer for chunked reading.
 	///
 	/// Returns None if the group is finished and the index is out of range, or the cursor
 	/// passed the [`Self::with_range`] cap.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
 		let res = match self.recover.is_none() {
 			true => {
@@ -4019,11 +3993,17 @@ impl Consumer {
 		Ok(out.filled_mut())
 	}
 
-	/// Poll until the group terminates, or this cursor reaches the end of its range, returning
-	/// its next frame index.
+	/// This cursor's next frame index once the group terminates, or this cursor reaches
+	/// the end of its range.
+	///
+	/// This answers for the cursor, not the group: a reader that drained every frame gets the
+	/// clean end even if the group was aborted afterwards to release its cache, while one that
+	/// stopped short gets that abort. A prior [`Self::skip_to`] contributes to the index even
+	/// though those frames were not read. Use [`Self::frame_count`] for the producer's total.
 	///
 	/// An error means the frames this cursor has yet to read are gone (evicted, cut, or
 	/// failed upstream) and no route will continue them.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
 		let res = match self.recover.is_none() {
 			true => self.poll_finished_once(waiter),
@@ -4057,18 +4037,6 @@ impl Consumer {
 			.poll(waiter, |state| state.poll_end(index, unread, raw))
 			.map(|res| res.map(|()| index as u64));
 		self.poll_expired_if_blocked(waiter, res)
-	}
-
-	/// Block until the group terminates, or this cursor reaches the end of its range, returning
-	/// its next frame index.
-	///
-	/// This answers for the cursor, not the group: a reader that drained every frame gets the
-	/// clean end even if the group was aborted afterwards to release its cache, while one that
-	/// stopped short gets that abort. A prior [`Self::skip_to`] contributes to the index even
-	/// though those frames were not read. Use [`Self::frame_count`] for the producer's total.
-	#[cfg(feature = "async")]
-	pub async fn finished(&mut self) -> Result<u64> {
-		kio::wait(|waiter| self.poll_finished(waiter)).await
 	}
 }
 
@@ -5310,6 +5278,7 @@ mod test {
 
 	/// A frame count past the old 8192-frame cap is held whole while it fits the tail.
 	#[test]
+	#[cfg_attr(miri, ignore = "each write takes Miri ~30 ms, so 10,000 run past its SLOW mark")]
 	fn a_group_has_no_frame_cap() {
 		let mut producer = Info { sequence: 0 }.produce();
 		for _ in 0..10_000 {
@@ -6274,6 +6243,48 @@ mod test {
 		);
 	}
 
+	/// Every group starts cold even when a finished encoder is reused. Open groups
+	/// keep independent windows, and aborting one does not consume another's spare.
+	#[test]
+	#[cfg(feature = "async")]
+	fn reused_encoders_start_independent_group_streams() {
+		let pool = cache::Pool::unbounded();
+		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let info = track::Info::default().with_compress(true);
+		let mut concurrent = Producer::new(0u64.into(), info.clone(), account.clone());
+		concurrent.write_frame(None, verbose(0)).unwrap();
+		for sequence in 1..5u64 {
+			let mut group = Producer::new(sequence.into(), info.clone(), account.clone());
+			let mut reference = flate::Encoder::new();
+			let frames = [verbose(0), Bytes::new(), verbose(sequence as usize)];
+			let slices: Vec<_> = frames.iter().map(|frame| reference.frame(frame)).collect();
+			for frame in &frames {
+				group.write_frame(None, frame.clone()).unwrap();
+			}
+			group.finish().unwrap();
+			group.finish().unwrap();
+			let mut raw = group.consume().compressed();
+			let mut decoder = flate::Decoder::new();
+			for (frame, expected) in frames.iter().zip(&slices) {
+				let Poll::Ready(Ok(Some(object))) = raw.poll_read_object(&kio::Waiter::noop()) else {
+					panic!("a stored slice is ready");
+				};
+				let slice = object.frame.payload.contiguous(0);
+				assert_eq!(slice, *expected, "reuse must emit a cold stream");
+				assert_eq!(decoder.frame(&slice, frame.len()).unwrap(), *frame);
+			}
+		}
+		concurrent.write_frame(None, verbose(1)).unwrap();
+		let mut reader = concurrent.consume();
+		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(0));
+		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(1));
+		concurrent.abort(Error::Cancel).unwrap();
+		drop(reader);
+		assert_eq!(pool.used(), flate::ENCODER_HEAP, "the spare survives a sibling's abort");
+		drop(account);
+		assert_eq!(pool.used(), 0);
+	}
+
 	/// A compressed group stores DEFLATE slices, hands plain readers the frames as written
 	/// from one shared inflated copy, and hands egress the slices with their sizes.
 	#[test]
@@ -6304,7 +6315,7 @@ mod test {
 		}
 		reference.finish().unwrap();
 		assert!(
-			stored + (plain as u64) / 2 < uncompressed.used(),
+			stored - flate::ENCODER_HEAP + (plain as u64) / 2 < uncompressed.used(),
 			"slices are stored: {stored} against {}",
 			uncompressed.used()
 		);
@@ -6531,8 +6542,8 @@ mod test {
 		assert_eq!(metered(), stored);
 	}
 
-	/// The codec state counts toward the pool while it lives: the encoder until the group
-	/// finishes, and a reader's decoder until the last frame inflates.
+	/// The codec state counts toward the pool while it lives: the encoder moves to its
+	/// track when the group finishes, and a decoder drops when the last frame inflates.
 	#[test]
 	#[cfg(feature = "async")]
 	fn codec_state_is_billed_while_held() {
@@ -6553,7 +6564,11 @@ mod test {
 		assert_eq!(group.handle.cache_size(), held, "an open group keeps both");
 
 		group.finish().unwrap();
-		assert_eq!(group.handle.cache_size(), stored + inflated, "finishing drops both");
+		assert_eq!(
+			group.handle.cache_size(),
+			stored + inflated,
+			"finishing releases both from the group"
+		);
 		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(1));
 
 		// A finished group's decoder goes with the last frame it inflates.
@@ -6860,13 +6875,17 @@ mod test {
 		group.abort(Error::Evicted).unwrap();
 		assert_eq!(
 			pool.used(),
-			Flate::RELEASE_HEAP,
-			"the job still owns the new guard allocation"
+			Flate::RELEASE_HEAP + flate::ENCODER_HEAP,
+			"the job owns its guard, and the account owns its spare"
 		);
 		assert!(matches!(job.get(0), Err(Error::Evicted)));
 		drop(job);
-		assert_eq!(pool.used(), Flate::RELEASE_HEAP, "clones share one intrinsic charge");
+		assert_eq!(
+			pool.used(),
+			Flate::RELEASE_HEAP + flate::ENCODER_HEAP,
+			"clones share one intrinsic charge"
+		);
 		drop(retained);
-		assert_eq!(pool.used(), 0, "the final guard releases its own charge");
+		assert_eq!(pool.used(), 0, "the final guard also releases its account's spare");
 	}
 }

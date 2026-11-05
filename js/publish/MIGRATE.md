@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The capture graph renders to no output device ([#7881](https://github.com/moq-dev/moq/pull/7881))
+
+`Audio.Capture`'s and `Audio.Encoder`'s `root` now sit in an `AudioContext` built with `sinkId: { type: "none" }`, which shortens the bursts capture hands the encoder.
+Tapping `root` for analysis works as before, but where the browser supports `sinkId`, anything connected to that context's `destination` is no longer heard.
+To monitor the microphone, play the track through a context of your own.
+
 ### `maxAge: null` is unlimited, and the catalog takes the zero default ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 `Broadcast`'s `maxAge` input accepts `null` for no publisher limit on its media tracks; omitted is still 30 seconds (`Container.MAX_AGE` from `@moq/hang`). With `null`, on-demand audio keeps 30 seconds of raw PCM, since raw history needs a finite bound.

@@ -744,11 +744,12 @@ mod tests {
 		run(async {});
 	}
 
+	/// One child more than the limit, so counting the set as one poll would trip it.
 	#[crate::test]
 	async fn a_large_task_set_counts_each_child_alone() {
 		let producer = crate::Producer::new(());
 		let mut tasks = crate::Tasks::new();
-		for _ in 0..10_000 {
+		for _ in 0..=crate::coop::READY_LIMIT {
 			let consumer = producer.consume();
 			tasks.push(move |waiter: &crate::Waiter| consumer.poll(waiter, |_| Poll::Ready(())).map(drop));
 		}

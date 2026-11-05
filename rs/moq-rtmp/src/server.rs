@@ -266,6 +266,7 @@ pub struct Server {
 impl Server {
 	/// Bind an RTMP listener on `addr` (RTMP's well-known port is 1935).
 	pub async fn bind(addr: SocketAddr) -> Result<Self> {
+		rind::cpu::check().map_err(std::io::Error::other)?;
 		let listener = TcpListener::bind(addr).await?;
 
 		Ok(Self {
@@ -836,7 +837,7 @@ impl<S: Stream> Play<S> {
 				}
 			}
 		};
-		let Ok(broadcast) = broadcast else {
+		let Ok(Some(broadcast)) = broadcast else {
 			tracing::debug!(peer = %self.peer, %path, "play broadcast unavailable");
 			return self.reject("stream not found").await;
 		};
@@ -1469,7 +1470,7 @@ async fn feed_input<S: Stream>(
 /// Perform the RTMP server handshake, returning any leftover bytes that followed
 /// the client's final handshake packet (the start of the chunk stream).
 async fn run_handshake<S: Stream>(stream: &mut S, peer: SocketAddr) -> anyhow::Result<Vec<u8>> {
-	let mut handshake = Handshake::new(PeerType::Server);
+	let mut handshake = Handshake::new(PeerType::Server)?;
 	let mut buffer = [0u8; 4096];
 	loop {
 		let n = stream.read(&mut buffer).await?;
@@ -1900,7 +1901,13 @@ mod tests {
 		let (mut client, server) = tokio::io::duplex(64 * 1024);
 		let accept = tokio::spawn(accept_publish(server, origin.clone(), Duration::ZERO));
 		let catalog = async {
-			let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
+			let broadcast = consumer
+				.follow("live/cam0", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap()
+				.unwrap();
 			let track = broadcast.track(hang::Catalog::DEFAULT_NAME).unwrap();
 			track.subscribe(None).await.unwrap()
 		};
@@ -1952,7 +1959,7 @@ mod tests {
 
 	/// The client half of the RTMP handshake, returning the bytes read past it.
 	async fn client_handshake<S: Stream>(stream: &mut S) -> Vec<u8> {
-		let mut handshake = Handshake::new(PeerType::Client);
+		let mut handshake = Handshake::new(PeerType::Client).unwrap();
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -2033,7 +2040,7 @@ mod tests {
 		media: tokio::sync::mpsc::UnboundedSender<Media>,
 	) {
 		// Handshake.
-		let mut handshake = Handshake::new(PeerType::Client);
+		let mut handshake = Handshake::new(PeerType::Client).unwrap();
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -2121,7 +2128,7 @@ mod tests {
 			None
 		}
 
-		let mut handshake = Handshake::new(PeerType::Client);
+		let mut handshake = Handshake::new(PeerType::Client).unwrap();
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -2210,7 +2217,13 @@ mod tests {
 		publisher.push(flv::TAG_VIDEO, 0, &vseq).unwrap();
 
 		let consumer = origin.consume();
-		let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
+		let broadcast = consumer
+			.follow("live/cam0", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let info = broadcast.track("0.flv-v").unwrap().info().await.unwrap();
 		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
@@ -2343,12 +2356,13 @@ mod tests {
 		assert_eq!(next().await.1[..2], [0x17, 0x01]);
 
 		let instance = moq_net::Instance::random();
-		let mut instances = moq_mux::follow::Instances::new(&consumer, "live/cam0", Some(&instance)).unwrap();
+		let mut instances = consumer.follow("live/cam0", instance.clone()).unwrap();
 		let (_new, _new_catalog) = publish_avc(&origin, instance, &[0x65, 0x99, 0x99, 0x99, 0x99]);
-		kio::clock::timeout(Duration::from_secs(5), instances.next())
+		kio::clock::timeout(Duration::from_secs(5), instances.available())
 			.await
 			.expect("the new publisher takes over")
-			.unwrap();
+			.unwrap()
+			.expect("the new publisher serves");
 
 		let mut delta = vec![0x27, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, OLD_DELTA.len() as u8];
 		delta.extend_from_slice(OLD_DELTA);
@@ -2802,7 +2816,13 @@ mod tests {
 		let stale_client = tokio::spawn(async move {
 			run_client(TcpStream::connect(addr).await.unwrap(), ClientMode::Publish).await;
 		});
-		let stale = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
+		let stale = consumer
+			.follow("live/cam0", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let mut catalog = stale
 			.track(hang::Catalog::DEFAULT_NAME)
 			.unwrap()
@@ -2810,12 +2830,12 @@ mod tests {
 			.await
 			.unwrap();
 
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 		let fresh_client = tokio::spawn(async move {
 			run_client(TcpStream::connect(addr).await.unwrap(), ClientMode::Publish).await;
 		});
 		kio::clock::timeout(Duration::from_secs(5), async {
-			while !matches!(announced.next().await, Some(moq_net::announce::Event::Restart(_))) {}
+			while !matches!(announced.next().await, Some(moq_net::origin::RouteEvent::Restart(_))) {}
 		})
 		.await
 		.expect("the reconnect restarts the broadcast");
@@ -2862,7 +2882,7 @@ mod tests {
 		let mut stream = TcpStream::connect(addr).await.unwrap();
 
 		// Client handshake.
-		let mut handshake = Handshake::new(PeerType::Client);
+		let mut handshake = Handshake::new(PeerType::Client).unwrap();
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -3030,7 +3050,7 @@ mod tests {
 			}
 		}
 
-		let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+		let provider = Arc::new(rind_rustls::default_provider().unwrap());
 
 		let mut tls = moq_tokio::tls::Listen::default();
 		tls.generate = vec!["localhost".to_string()];

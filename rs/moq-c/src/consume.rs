@@ -283,20 +283,17 @@ impl Consume {
 
 		let driver = origin.as_ref().map(|origin| origin.driver.clone()).unwrap_or_default();
 
-		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task
-		// to keep this entrypoint non-blocking.
+		// Reads wait on SUBSCRIBE_OK, so run them inside the task to keep this entrypoint
+		// non-blocking.
 		self.catalog_task.spawn(
 			on_catalog,
 			|state| &mut state.consume.catalog_task,
-			|mut close| async move {
+			|close| async move {
 				driver
 					.watch(async move {
-						let subscription = hang::catalog::Catalog::default_subscription();
-						let subscribe = Self::subscribe(&broadcast, hang::catalog::Catalog::DEFAULT_NAME, subscription);
-						let Some(catalog) = Self::until_closed(&mut close, subscribe).await? else {
-							return Ok(());
-						};
-						Self::run_catalog(on_catalog, broadcast.clone(), origin, catalog.into(), close).await
+						// The consumer subscribes itself at catalog priority.
+						let catalog = broadcast.track(hang::catalog::Catalog::DEFAULT_NAME)?.into();
+						Self::run_catalog(on_catalog, broadcast.clone(), origin, catalog, close).await
 					})
 					.await
 			},
@@ -533,7 +530,7 @@ impl Consume {
 		// instead of assuming Legacy, otherwise CMAF/fMP4 sources (e.g. ffmpeg moqenc,
 		// browser @moq/publish) are misread as raw frames.
 		let container = moq_mux::catalog::hang::Container::try_from(config)?;
-		let warmup = config.warmup();
+		let playout = moq_mux::container::Playout::new(delay, config.warmup());
 		// The rendition may live in a sibling broadcast, so resolve its reference rather than
 		// assuming the catalog's own broadcast serves the track.
 		let reference = config.broadcast().cloned();
@@ -548,10 +545,9 @@ impl Consume {
 			|mut close| async move {
 				driver
 					.watch(async move {
-						let subscription = moq_net::track::Subscription::default()
-							.with_priority(C::PRIORITY)
-							// The publisher must retain the history the decoder needs too.
-							.with_delay(delay.with_max(delay.max.map(|max| max.saturating_add(warmup))));
+						// The publisher must retain the history the decoder needs too.
+						let subscription =
+							playout.subscription(moq_net::track::Subscription::default().with_priority(C::PRIORITY));
 						// Resolving a sibling broadcast can wait too, so the close races both steps.
 						let setup = async {
 							let broadcast = resolve(broadcast, origin, reference).await?;
@@ -560,9 +556,7 @@ impl Consume {
 						let Some(track) = Self::until_closed(&mut close, setup).await? else {
 							return Ok(());
 						};
-						let track = moq_mux::container::Consumer::new(track, container)
-							.with_warmup(warmup)
-							.with_delay(delay);
+						let track = playout.consumer(track, container);
 						Self::run_track(on_read, track, close).await
 					})
 					.await
@@ -967,20 +961,19 @@ impl Consume {
 		let broadcast = context.broadcast.clone();
 		let name = name.to_string();
 
-		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
+		// Reads wait on SUBSCRIBE_OK, so run them inside the task.
 		self.json_task.spawn(
 			on_value,
 			|state| &mut state.consume.json_task,
-			|mut close| async move {
+			|close| async move {
 				driver
 					.watch(async move {
-						let Some(track) =
-							Self::until_closed(&mut close, Self::subscribe(&broadcast, &name, None)).await?
-						else {
-							return Ok(());
-						};
-						let consumer =
-							moq_json::snapshot::Consumer::<serde_json::Value>::new(track, Default::default());
+						// The consumer subscribes itself; `run_json_snapshot` keeps a close ahead of
+						// a SUBSCRIBE_OK that never comes.
+						let consumer = moq_json::snapshot::Consumer::<serde_json::Value>::new(
+							broadcast.track(&name)?,
+							Default::default(),
+						);
 						Self::run_json_snapshot(on_value, consumer, close).await
 					})
 					.await

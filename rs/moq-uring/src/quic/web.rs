@@ -534,11 +534,11 @@ struct Opening {
 	park: kio::Park,
 	uni: Option<(SendStream, Bytes)>,
 	bi: Option<(SendStream, RecvStream, Bytes)>,
-	request: Option<(SendStream, RecvStream, Bytes)>,
 }
 
 impl Session {
-	/// Poll for a unidirectional stream after its session header.
+	/// The next unidirectional stream, after its session header.
+	#[kio::wrapper]
 	pub fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<RecvStream, Error>> {
 		let Some(web) = &self.web else {
 			return self
@@ -570,7 +570,8 @@ impl Session {
 		})
 	}
 
-	/// Poll for a bidirectional stream after its session header.
+	/// The next bidirectional stream, after its session header.
+	#[kio::wrapper]
 	pub fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(SendStream, RecvStream), Error>> {
 		let Some(web) = &self.web else {
 			return self.conn.poll_accept_bi(waiter).map_ok(|(send, recv)| {
@@ -607,7 +608,8 @@ impl Session {
 		})
 	}
 
-	/// Poll to open a unidirectional stream scheduled by `options`.
+	/// Open a unidirectional stream scheduled by `options`.
+	#[kio::wrapper]
 	pub fn poll_open_uni(
 		&self,
 		waiter: &kio::Waiter,
@@ -636,71 +638,46 @@ impl Session {
 		})
 	}
 
-	/// Poll to open a bidirectional stream scheduled by `options`.
+	/// Open a bidirectional stream scheduled by `options`.
+	#[kio::wrapper]
 	pub fn poll_open_bi(
 		&self,
 		waiter: &kio::Waiter,
 		options: driver_send::Options<'_>,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		self.poll_open_pair(waiter, options, false)
-			.map_ok(|pair| pair.expect("ordinary opens wait for credit"))
-	}
-
-	/// Open a request without waiting for stream credit; pending only while writing its header.
-	pub fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: driver_send::Options<'_>,
-	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>> {
-		self.poll_open_pair(waiter, options, true)
-	}
-
-	fn poll_open_pair(
-		&self,
-		waiter: &kio::Waiter,
-		options: driver_send::Options<'_>,
-		request: bool,
-	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>> {
 		self.opening.poll(waiter, |opening, cx| {
-			let slot = if request { &mut opening.request } else { &mut opening.bi };
-			if slot.is_none() {
-				let (mut send, recv) = if request {
-					let Some(pair) = self.conn.open_request().map_err(|e| self.map_err(e))? else {
-						return Poll::Ready(Ok(None));
-					};
-					pair
-				} else {
-					ready!(self.conn.poll_open_bi(
-						opening.park.hold(cx),
-						driver_send::Options {
-							group: None,
-							priority: i64::MAX
-						}
-					))
-					.map_err(|e| self.map_err(e))?
-				};
+			if opening.bi.is_none() {
+				let (mut send, recv) = ready!(self.conn.poll_open_bi(
+					opening.park.hold(cx),
+					driver_send::Options {
+						group: None,
+						priority: i64::MAX
+					}
+				))
+				.map_err(|e| self.map_err(e))?;
 				send.set_priority(i64::MAX);
 				let header = self.web.as_ref().map(|web| web.header_bi.clone()).unwrap_or_default();
-				*slot = Some((
+				opening.bi = Some((
 					SendStream::new(send, &self.handles, None),
 					RecvStream::new(recv, &self.handles),
 					header,
 				));
 			}
-			let (send, _, header) = slot.as_mut().unwrap();
+			let (send, _, header) = opening.bi.as_mut().unwrap();
 			let result = ready!(send.poll_header(opening.park.hold(cx), header)).map_err(Error::from);
-			let (mut send, recv, _) = slot.take().unwrap();
+			let (mut send, recv, _) = opening.bi.take().unwrap();
 			result?;
 			send.set_priority(options.priority);
 			send.set_group(options.group);
-			Poll::Ready(Ok(Some((send, recv))))
+			Poll::Ready(Ok((send, recv)))
 		})
 	}
 
-	/// Poll for the next datagram after its session header.
+	/// The next datagram, with its session header removed.
 	///
 	/// A datagram that does not name this session, such as another session's on the same
 	/// connection, is dropped: datagrams are unreliable, so a stray one must not end the session.
+	#[kio::wrapper]
 	pub fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
 		loop {
 			let datagram = ready!(self.conn.poll_recv_datagram(waiter)).map_err(|e| self.map_err(e))?;
@@ -743,7 +720,8 @@ impl Session {
 	pub fn close(&self, code: u32, reason: &str) {
 		close(&self.conn, self.web.as_ref(), code, reason);
 	}
-	/// Poll until the session's connection has closed.
+	/// Why the session's connection closed, once it has.
+	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		let err = ready!(self.conn.poll_closed(waiter));
 		Poll::Ready(
@@ -760,30 +738,6 @@ impl Session {
 	/// The QUIC connection carrying this session.
 	pub fn connection(&self) -> &Connection {
 		&self.conn
-	}
-	/// Accept the next unidirectional stream after its session header.
-	pub async fn accept_uni(&self) -> Result<RecvStream, Error> {
-		kio::wait(|w| self.poll_accept_uni(w)).await
-	}
-	/// Accept the next bidirectional stream after its session header.
-	pub async fn accept_bi(&self) -> Result<(SendStream, RecvStream), Error> {
-		kio::wait(|w| self.poll_accept_bi(w)).await
-	}
-	/// Open a unidirectional stream scheduled by `options`.
-	pub async fn open_uni(&self, options: driver_send::Options<'_>) -> Result<SendStream, Error> {
-		kio::wait(|w| self.poll_open_uni(w, options)).await
-	}
-	/// Open a bidirectional stream scheduled by `options`.
-	pub async fn open_bi(&self, options: driver_send::Options<'_>) -> Result<(SendStream, RecvStream), Error> {
-		kio::wait(|w| self.poll_open_bi(w, options)).await
-	}
-	/// Receive a datagram with its session header removed.
-	pub async fn recv_datagram(&self) -> Result<Bytes, Error> {
-		kio::wait(|w| self.poll_recv_datagram(w)).await
-	}
-	/// Wait until the session's connection has closed.
-	pub async fn closed(&self) -> Error {
-		kio::wait(|w| self.poll_closed(w)).await
 	}
 }
 
@@ -817,20 +771,6 @@ impl moq_net::transport::poll::Session for Session {
 		options: moq_net::transport::poll::SendOptions<'_, driver_send::Group>,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
 		Self::poll_open_bi(
-			self,
-			waiter,
-			driver_send::Options {
-				group: options.group,
-				priority: options.priority,
-			},
-		)
-	}
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: moq_net::transport::poll::SendOptions<'_, driver_send::Group>,
-	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>> {
-		Self::poll_open_request(
 			self,
 			waiter,
 			driver_send::Options {
@@ -889,6 +829,10 @@ impl moq_net::transport::poll::Session for Session {
 	}
 	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
 		Some(Self::receive_window(self))
+	}
+	/// The connection's credit, which every WebTransport session on it shares.
+	fn stream_credit(&self, dir: moq_net::transport::Dir) -> Option<moq_net::transport::StreamCredit> {
+		Some(self.conn.stream_credit(dir))
 	}
 }
 

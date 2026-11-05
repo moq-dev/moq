@@ -136,6 +136,7 @@ impl Relay {
 	/// the cache governor and stats publisher, is only stored, and no session is admitted until
 	/// [`Self::run`] drives both.
 	pub async fn load(config: Config) -> anyhow::Result<Self> {
+		moq_tokio::crypto::check()?;
 		// Keep the large debug state machine off the embedder's main-thread stack.
 		Box::pin(Self::load_inner(config)).await
 	}
@@ -852,9 +853,10 @@ async fn drain(
 
 	tokio::select! {
 		() = signal() => {
-			tracing::warn!(open = shutdown.tally().live, "second shutdown signal; exiting immediately");
+			let tally = shutdown.tally();
+			tracing::warn!(open = tally.open, ending = tally.ending, "second shutdown signal; exiting immediately");
 		}
-		() = shutdown.drained() => {}
+		_ = shutdown.drained() => {}
 	}
 }
 
@@ -1015,9 +1017,9 @@ mod tests {
 		tokio::pin!(draining);
 		assert!(draining.as_mut().now_or_never().is_none());
 
-		// Arrives before the drain observes the count reach zero: it is counted.
-		drop(last);
+		// Arrives before the last connection leaves: it is counted.
 		let arrival = activity.enter().expect("admitted before the drain committed");
+		drop(last);
 		assert!(
 			draining.as_mut().now_or_never().is_none(),
 			"drain exited under an admitted arrival"

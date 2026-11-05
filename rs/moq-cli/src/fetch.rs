@@ -122,7 +122,8 @@ async fn fetch_from<C>(
 			.follow(path, None)?
 			.available()
 			.await
-			.with_context(|| format!("broadcast `{}` not found", crate::display_name(path)))?;
+			.with_context(|| format!("broadcast `{}` not found", crate::display_name(path)))?
+			.context("went offline before serving")?;
 		let track = broadcast.track(&args.track)?;
 		let mut group = moq_relay::fetch_group(&track, args.group)
 			.await
@@ -250,7 +251,7 @@ mod tests {
 	impl NetworkFixture {
 		/// Publish [`Fixture`]'s `demo` through a relay that also holds `.hidden`.
 		async fn new() -> Self {
-			let _ = moq_tokio::crypto::install_default();
+			moq_tokio::crypto::install_default().unwrap();
 			let fixture = moq_relay::test_relay().await.expect("test relay");
 			// A dot-prefixed broadcast on the relay itself, like its `.stats`, which
 			// announce listings hide unless asked for by name.

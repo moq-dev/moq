@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### `Following::available()` reports the path going offline ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`moq::Following::available()` resolves to a null `std::shared_ptr<moq::BroadcastConsumer>` once the path goes offline (or, for a follow pinned to an instance, once another instance takes it over), then the next broadcast when something serves the path again. The first call is never null. Check for null before using a later result, and treat it like the previous instance ending.
+
 ### Separate datagram tracks
 
 Replace stream-track datagram methods with `BroadcastProducer::create_datagrams(name, info)` and `BroadcastConsumer::datagrams(name)`. The generated `DatagramProducer` exposes `append(timestamp, payload)` and `insert(Datagram)`; `DatagramConsumer::recv()` returns an optional datagram through a future. `DatagramInfo` has only priority and optional timescale. Demand is aggregate subscriber `priority()` / `priority_changed(last)`; on-demand datagram requests come from `BroadcastRequests::datagrams()` / `DatagramRequests::requested()`. Stream tracks of the same name are independent.
@@ -20,7 +24,7 @@ Viewer ceilings and PROBE target overrides are refused with the new `moq::Error:
 
 ### Media setup refusals are typed
 
-Audio and video subscribe setup now reports `moq::Error::kUnsupportedConfig` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+Audio and video subscribe setup now reports `moq::Error::kUnsupportedConfig` when the decoder refuses a codec, layout, or description, or when every video decoder for the codec reports that this device cannot decode the stream. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a missing driver or no device, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
 
 ### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 

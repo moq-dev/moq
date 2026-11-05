@@ -79,15 +79,19 @@ lite-07; bitrate enforcement is not part of this release.
 - [Media stats](/quest/m2/stats/README.md) - publishers announce a stats track in the catalog, viewers answer a soliciting catalog through a per-catalog `.echo` broadcast, and one model turns both into a health verdict and a preflight report
 - [Perf](/quest/m2/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model
 - [Wire stats](/quest/m2/wire-stats/README.md) - `Presence` counts each root's transport bytes on the wire, `wire_tx` and `wire_rx`, from QUIC, WebSocket, and embedder gateway sources
+- [Session outcome records](/quest/m2/session-outcome-records.md) - relay stats publish each refusal and abnormal session end as a record per label, bounded under a flood, beside the counters
 - [Performance survey follow-ups](/quest/m2/performance-survey/README.md) - benchmark the source audit's transport, browser, media and serving risks before optimizing
 - [Transport x version benches](/quest/m2/bench-transport-sweep.md) - the session benches sweep transports as well as versions
 - [Shared group serving and ingest](/quest/m2/shared-serve.md) - Rust's moq-lite and moq-transport sessions serve and ingest groups through one poll machine each, with only wire encoding per protocol
 - [Shared group serving and ingest in JS](/quest/m2/shared-serve-js.md) - the same split in js/net, following the Rust seam
 - [Paired bench BASE](/quest/m2/bench-base-paired.md) - `just bench <base>` uses the nightly's paired comparison and the old one is deleted
+- [Audio renditions carry a language](/quest/m2/audio-lang.md) - audio renditions have an optional BCP-47 `lang`, and watch auto-picks within one language
 - [Receive pool](/quest/m2/receive-pool.md) - one byte budget per worker covers every connection's receive credit and the cache, billing each frame once
 - [Front parking](/quest/m2/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
+- [A refused follower asks a replacement handler](/quest/m2/follow-refused-retry.md) - a same-instance handler swap with identical route details re-asks a refused `Following`, while listeners still see no change
 - [Route wakes](/quest/m2/route-wakes.md) - a route change wakes only the fronts it can move, so pool churn stops scaling with served paths
 - [A route stream's interest is a set of prefixes](/quest/m2/route-interest-prefixes.md) - one Announce Stream covers several subtrees, with floors and certification proved over the set
+- [A socket dial learns its peer is behind an older hop](/quest/m2/socket-old-hop-signal.md) - a relay finds the dialed endpoint behind its older moq-lite session and marks that path, so the dial fails `Unsupported` while one to an absent peer still waits
 - [Fewer allocations in announce fan-out](/quest/m2/announce-fanout-allocs.md) - a deep path costs no more allocations per subscriber than a shallow one
 - [moq-room scales to large rooms](/quest/m2/room-bench.md) - a benchmark measures `Room` with large participant counts, and polling narrows only if it shows a slope
 - [Route health](/quest/m2/route-health/README.md) - epoch-only active/passive track recovery over metadata-only subscriptions
@@ -127,6 +131,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [Synced data playback](/quest/m2/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
 - [Watch decode gate](/quest/m2/watch-decode-gate.md) - video lookahead stays encoded until it is near presentation, like audio
 - [moqsrc A/V sync](/quest/m2/moqsrc-av-sync.md) - a nightly test measures A/V skew from `moqsrc` through clock-synced sinks
+- [WebCodecs audio priming](/quest/m2/webcodecs-priming.md) - `@moq/publish` measures each browser's `AudioEncoder` priming and corrects AAC timestamps and Opus pre-skip, so audio decodes at its capture timestamp
+- [macOS browser lane](/quest/m2/macos-browser-lane.md) - nightly CI runs the priming browser test in Chrome and Safari, which have the AAC encoders Linux lacks
 - [fMP4 ambisonic layout](/quest/m2/mux-vr-ambisonic-fmp4.md) - fMP4 Opus import fills `ambisonic` from the `dOps` mapping table
 - [Linux decoded frames](/quest/m2/obs-decode-linux.md) - present supported native decoded surfaces with visible CPU fallback
 - [Windows decoded frames](/quest/m2/obs-decode-windows.md) - present decoded D3D11 surfaces in OBS without CPU readback
@@ -268,6 +274,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [OBS simulcast layers reach moq-watch from a live OBS, including the dock's Go Live](/quest/m2/obs-multitrack-check.md) - A live OBS 32.2.2 run, recorded in the PR, shows the `WHIPSimulcastTotalLayers` profile setting attaching two or more scaled video encoders to `moq_output`, each published as its own rendition and watched in `<moq-watch>`, both through the obs-websocket recipe in `doc/bin/obs.md` and through the MoQ dock's Go Live, which honors the profile's layer count instead of creating a single encoder
 - [Opus export never writes a channel mapping it can't stand behind](/quest/m2/opus-surround-export.md) - exporting a catalog Opus rendition with 3 to 8 channels and no description writes a `dOps` with the Vorbis family 1 mapping table, as the TS importer assumes, instead of an invalid family 0 `dOps`
 - [Open-GOP MPEG-2 export trims leading B-pictures in zero-stuffed CBR streams](/quest/m2/pes-hold-open-gop.md) - A TS export starting or resuming inside an open GOP of MPEG-2 video drops the orphaned leading B-pictures even when their PES ends on zero stuffing, as CBR encoders emit, without ever trimming part of a reference picture whose start code straddles two PES packets
+- [A multi-program TS import survives a source switch](/quest/m2/ts-multi-program-restart.md) - `--program all` restarts each affected program on an unannounced source switch, as a single-program import does after moq-dev/moq#7780, instead of ending the whole import
 - [The lite publisher tells transport faults from cancels](/quest/m2/publish-cancel-classify.md) - `rs/moq-net`'s lite publisher no longer counts every `Error::Transport` as a clean cancel
 - [moq-publish hides previews that show nothing](/quest/m2/publish-empty-previews.md) - `<moq-publish>` hides a preview that renders nothing
 - [A loading video preview takes no space](/quest/m2/publish-video-loading.md) - a `<video>` preview stays hidden until it reports its media size, so the empty publish player never keeps the 300x150 placeholder ratio
@@ -299,3 +306,4 @@ lite-07; bitrate enforcement is not part of this release.
 - [The publish support panel lists only codecs publishing accepts](/quest/m2/publish-support-probe.md) - the settings panel runs the publisher's Annex B encoder probe
 - [A hung Python test fails instead of hanging the suite](/quest/m2/py-test-timeouts.md) - one pytest-timeout bound covers every `py/` test
 - [Chromium's Opus encoder stamps chunks from their input](/quest/m2/chromium-opus-timestamps.md) - waiting on Chromium; unlocks native `usedtx` for push-to-talk
+- [TLS reload follows symlinked certificate files](/quest/m2/watch-symlink-targets.md) - in-place rewrites of symlink targets in other directories reload roots, served chains, and client certificates

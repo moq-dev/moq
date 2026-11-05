@@ -5,6 +5,18 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`MoqAnnounceEvent` is `Present { announce }` or `Absent { announce }`. `Start`, `Update`, `End`, `Restart` and `Takeover` (with its `predecessor`) are gone: another instance taking a path over keeps it present, and a route's cost changing is not reported.
+Map `Start` to `Present` and `End` to `Absent`, and drop `Update` handling. Where you requested the path again on `Restart`, hold `MoqOriginConsumer::follow(path)` and await `available()` for each new instance.
+
+`MoqFollowing::available()` returns `Option<Arc<MoqBroadcastConsumer>>`: `None` once the path goes offline (or, for a follow pinned to an `instance`, once another instance takes it over), then the next broadcast when something serves the path again. The first call never returns `None`. Handle `None` as offline: drop what you read from the last broadcast and call `available()` again.
+
+### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
+
+`MoqVideo` and `MoqAudio` gain `warmup`, the catalog's decoder warmup, null when absent. `MoqMediaTrackConsumer::subscribe` reads it from the rendition: it starts that much further back than the subscription's min delay and asks the publisher for its max delay plus the warmup, while it still skips at the max delay alone. `MoqAudioConsumer::subscribe` and `MoqVideoConsumer::subscribe` now honor it too.
+The field defaults to null, so only code that builds these records exhaustively, such as a Rust struct literal or an unkeyed Go literal, changes. Pass the rendition from the catalog unchanged to keep its warmup. Regenerate bindings and rebuild the matching native library together.
+
 ### Separate datagram tracks
 
 `MoqTrackProducer::{append_datagram, insert_datagram}` and `MoqTrackConsumer::recv_datagram` are removed. Use `MoqBroadcastProducer::create_datagrams(name, info)` and `MoqBroadcastConsumer::datagrams(name)` for separate `MoqDatagramProducer`/`MoqDatagramConsumer` handles. `append(timestamp, payload)` assigns a sequence; `insert(MoqDatagram)` preserves one; `recv()` reads it. `MoqDatagramInfo` has only priority and optional timescale. Watch aggregate subscriber priority with `priority()` / `priority_changed(last)`, and handle dynamic tracks with `MoqBroadcastRequests::datagrams()` / `MoqDatagramRequests::requested()`. Stream and datagram tracks of the same name have independent demand and lifetimes.
@@ -13,6 +25,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 A null `MoqTrackInfo.max_age`, and a null `MoqTrackInfo`, now advertise a zero max age, serving only the live edge, instead of no publisher limit. Set the new `max_age_unlimited`, which ignores `max_age`, where you relied on null meaning no limit.
 A received track's `info()` sets `max_age_unlimited` when its publisher advertised no limit, so the record republishes unchanged.
+
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`MoqJsonSnapshotConsumer::new(broadcast, name, priority)` takes a `MoqBroadcastConsumer`, the track name, and the subscription's priority (default 0) instead of a `MoqTrackConsumer`, and subscribes to the track itself at a zero `delay.max`. Drop the `subscribe_track` call; a refused subscription now fails the first read. `next()` skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes.
 
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
@@ -24,7 +40,7 @@ Viewer ceilings and PROBE target overrides are refused with the new `MoqError::O
 
 ### Media setup refusals are typed
 
-Audio and video subscribe setup now reports `UnsupportedConfig` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+Audio and video subscribe setup now reports `UnsupportedConfig` when the decoder refuses a codec, layout, or description, or when every video decoder for the codec reports that this device cannot decode the stream. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a missing driver or no device, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
 
 ### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 

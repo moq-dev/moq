@@ -22,7 +22,8 @@ use super::idle;
 use super::skipped::Skipped;
 use crate::ledger::{self, Ledger};
 
-use super::subscription::{Accounted, Containing, Held, Holdings, Layered, Resolved, Runs, Seen, Window, later};
+pub(crate) use super::subscription::Resolved;
+use super::subscription::{Accounted, Containing, Held, Holdings, Layered, Runs, Seen, Window, later};
 pub use super::subscription::{Anchor, Delay, Order, Position, Range, Subscription};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
@@ -3706,6 +3707,12 @@ impl Producer {
 		self.state.read().start_sequence
 	}
 
+	/// Evict group `sequence` from the cache, as expiry does.
+	#[cfg(test)]
+	pub(crate) fn evict(&self, sequence: u64) {
+		self.modify().unwrap().evict_group(sequence, Error::Evicted);
+	}
+
 	/// The exclusive end, once [`Self::finish`] or [`Self::finish_at`] declared one.
 	///
 	/// `None` while the track is still open ended. Both methods reject a second end, so
@@ -3771,17 +3778,10 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Block until the track's outcome is final: `Ok` once its declared end is reached (its
-	/// error, if declared with one), or the abort error, or [`Error::Dropped`] once every
+	/// Resolves once the track's outcome is final: `Ok` once its declared end is reached
+	/// (its error, if declared with one), or the abort error, or [`Error::Dropped`] once every
 	/// producer left without either.
-	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Result<()> {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
-	}
-
-	/// Poll until the track's outcome is final: `Ok` once its declared end is reached (its
-	/// error, if declared with one), or the abort error, or [`Error::Dropped`] once every
-	/// producer left without either.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		TrackState::settle(self.state.poll_ref(waiter, |state| state.poll_outcome(waiter)))
 	}
@@ -3903,16 +3903,6 @@ impl Producer {
 		}
 	}
 
-	/// Block until the aggregate subscription changes, then return the new value.
-	///
-	/// Yields the most demanding request across all live subscribers, or `None`
-	/// once the last one drops. Used by relays to forward downstream demand
-	/// upstream (e.g. SUBSCRIBE_UPDATE).
-	#[cfg(feature = "async")]
-	pub async fn subscription_changed(&mut self) -> Result<Option<Subscription>> {
-		kio::wait(|waiter| self.poll_subscription_changed(waiter)).await
-	}
-
 	/// A non-blocking snapshot of the current aggregate subscription, or `None`
 	/// when there are no live subscribers. Unlike [`Self::subscription`], this
 	/// doesn't wait for a change or advance the change cursor.
@@ -3928,9 +3918,11 @@ impl Producer {
 		snapshot_subscription(&subs, bound)
 	}
 
-	/// Poll for a changed subscription: the
-	/// aggregate subscription whenever it changes, or `None` once nobody is subscribed.
-	/// Errors once the track is aborted.
+	/// The aggregate subscription once it changes: the most demanding request across all
+	/// live subscribers, or `None` once the last one drops. Errors once the track is aborted.
+	///
+	/// Used by relays to forward downstream demand upstream (e.g. SUBSCRIBE_UPDATE).
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_subscription_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Subscription>>> {
 		// Surface an abort as the stream ending. `poll_closed` parks on the closed
 		// waiters, so per-group churn on the track state never wakes this poll.
@@ -4011,34 +4003,24 @@ impl Requests {
 		&self.name
 	}
 
-	/// Block until readers miss a run of groups, returning a [`Fill`] to serve via
-	/// [`Fill::accept`] and [`Fill::drop_groups`].
+	/// The next run of groups readers miss, as a [`Fill`] to serve via [`Fill::accept`]
+	/// and [`Fill::drop_groups`].
 	///
 	/// A relay fetches the run upstream; an origin already has its groups cached, so
 	/// nothing reaches here. Errors once the track is aborted.
-	#[cfg(feature = "async")]
-	pub async fn requested_fill(&self) -> Result<Fill> {
-		kio::wait(|waiter| self.poll_requested_fill(waiter)).await
-	}
-
-	/// Poll for a fill to serve.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_requested_fill(&self, waiter: &kio::Waiter) -> Poll<Result<Fill>> {
 		fill::poll_requested(&self.state, &self.fills, waiter)
 	}
 
 	/// The next fill, which a test expects to name a single group.
 	#[cfg(test)]
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub(crate) fn poll_requested_fill_group(&self, waiter: &kio::Waiter) -> Poll<Result<GroupFill>> {
 		self.poll_requested_fill(waiter).map_ok(|fill| {
 			assert_eq!(fill.end() - fill.start().group, 1, "a one-group fill");
 			fill.group(fill.start().group)
 		})
-	}
-
-	/// [`Self::poll_requested_fill_group`], awaited.
-	#[cfg(all(test, feature = "async"))]
-	pub(crate) async fn requested_fill_group(&self) -> Result<GroupFill> {
-		kio::wait(|waiter| self.poll_requested_fill_group(waiter)).await
 	}
 
 	/// Watch subscriber demand without keeping the track alive.
@@ -4424,23 +4406,18 @@ impl Demand {
 		Some(wanted)
 	}
 
-	/// Return [`wanted`](Self::wanted) once it differs from what this handle last returned:
-	/// immediately on the first call, then on each change. Errors once the track is closed
-	/// or aborted.
-	///
-	/// So `while let Some(n) = demand.wanted_changed().await?` runs while anyone wants the
-	/// track, and `while demand.wanted_changed().await?.is_none()` waits for someone to.
-	#[cfg(feature = "async")]
-	pub async fn wanted_changed(&mut self) -> Result<Option<u64>> {
-		kio::wait(|waiter| self.poll_wanted_changed(waiter)).await
-	}
-
 	/// The demand aggregate.
 	fn subscriptions(&self) -> kio::Lock<Subscriptions> {
 		self.state.read().subscriptions.clone()
 	}
 
-	/// Poll for [`wanted`](Self::wanted) to differ from what this handle last returned.
+	/// [`wanted`](Self::wanted) once it differs from what this handle last returned:
+	/// immediately on the first call, then on each change. Errors once the track is closed
+	/// or aborted.
+	///
+	/// So `while let Some(n) = demand.wanted_changed().await?` runs while anyone wants the
+	/// track, and `while demand.wanted_changed().await?.is_none()` waits for someone to.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<u64>>> {
 		let active = match self.poll_state(waiter) {
 			DemandState::Closed => return Poll::Ready(Err(self.abort_reason())),
@@ -4456,17 +4433,14 @@ impl Demand {
 		Poll::Ready(Ok(next))
 	}
 
-	/// Block until the track's outcome is final; see [`Producer::closed`].
-	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Result<()> {
-		kio::wait(|waiter| {
-			TrackState::settle(
-				self.state
-					.consume_weak()
-					.poll(waiter, |state| state.poll_outcome(waiter)),
-			)
-		})
-		.await
+	/// Resolves once the track's outcome is final; see [`Producer::poll_closed`].
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		TrackState::settle(
+			self.state
+				.consume_weak()
+				.poll(waiter, |state| state.poll_outcome(waiter)),
+		)
 	}
 
 	/// The publisher's tie-break priority, as set in [`Info::priority`].
@@ -5233,7 +5207,9 @@ impl Consumer {
 		})
 	}
 
-	/// Poll for the track's largest location: the current one, then each newer one, and `None` once the track ends.
+	/// The track's largest location, its newest group at the newest frame (0 while empty):
+	/// the current one, then each newer one, and `None` once the track ends.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		let mut seen = self.largest;
 		let next = self.poll_largest_after(&mut seen, Bounds::default(), waiter);
@@ -5270,12 +5246,6 @@ impl Consumer {
 				),
 			}
 		})
-	}
-
-	/// The track's largest location, its newest group at the newest frame (0 while empty): the current one, then each newer one, and `None` once the track ends.
-	#[cfg(feature = "async")]
-	pub async fn largest(&mut self) -> Option<Position> {
-		kio::wait(|waiter| self.poll_largest(waiter)).await
 	}
 
 	pub(crate) fn latest_sequence(&self) -> Option<u64> {
@@ -8111,7 +8081,7 @@ impl Subscriber {
 		}
 	}
 
-	/// Poll for the next group in arrival order, without blocking.
+	/// The next group in arrival order.
 	///
 	/// Returns each group it delivers exactly once, in the order it landed on the wire,
 	/// which may be out of sequence due to network reordering or loss. Use
@@ -8128,7 +8098,7 @@ impl Subscriber {
 	/// Groups are semi-reliable, and the [`Delay::max`] budget is the other
 	/// thing (alongside eviction and a moving start) that decides which of them arrive:
 	/// one that has drifted further behind the live edge than the budget tolerates is
-	/// skipped rather than handed over, so a single poll walks off a whole backlog. The
+	/// skipped rather than handed over, so a single read walks off a whole backlog. The
 	/// default is [`Duration::ZERO`], which takes the live
 	/// edge and writes the rest off; raise it to read history. [`Self::with_range`] and
 	/// [`Subscription::ranges`] are filters, not exemptions: backfill needs a budget that
@@ -8158,10 +8128,9 @@ impl Subscriber {
 	/// they cover there. One missing the frames asked for reads [`Error::Lagged`] rather
 	/// than starting short.
 	///
-	/// Returns `Poll::Ready(Ok(Some(group)))` when a group is available,
-	/// `Poll::Ready(Ok(None))` when the track is finished or the ranges are read,
-	/// `Poll::Ready(Err(e))` when the track has been aborted, or
-	/// `Poll::Pending` when no group is available yet.
+	/// Returns `Ok(Some(group))` when a group is available, `Ok(None)` when the track is
+	/// finished or the ranges are read, or the error when the track has been aborted.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		self.poll_group(false, waiter)
 	}
@@ -8414,19 +8383,6 @@ impl Subscriber {
 				}) || owed())
 	}
 
-	/// Receive the next group in arrival order.
-	///
-	/// Every group sequence is returned at most once, in the order it landed on the wire, which may
-	/// be out of sequence due to network reordering or loss. Use [`Self::ordered`] if you
-	/// only want groups whose sequence number is higher than any previously returned.
-	/// See [`Self::poll_recv_group`] for how [`Self::with_range`] applies.
-	/// Once a bounded range returns `Ok(None)`, later reads return it immediately too;
-	/// widening the ranges with [`Self::update`] resumes reading the newly covered groups.
-	#[cfg(feature = "async")]
-	pub async fn recv_group(&mut self) -> Result<Option<group::Consumer>> {
-		kio::wait(|waiter| self.poll_recv_group(waiter)).await
-	}
-
 	/// The sequence cursor behind [`Ordered`], which owns the only public door to it.
 	pub(super) fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		self.poll_group(true, waiter)
@@ -8500,6 +8456,21 @@ impl Subscriber {
 				cursor.filter.window.starts(from)
 			}
 			Inner::Resume(resume, _) => resume.starts(from),
+		}
+	}
+
+	/// Each of this subscriber's ranges as resolved here, by index: its first group and
+	/// exclusive end, `None` while open, or `None` for one whose start still waits on the
+	/// live feed or a lookup. One empty as given, or that only resolves empty, ends at or
+	/// below its start.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn resolved(&mut self) -> Vec<Option<Resolved>> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+				cursor.filter.window.resolved()
+			}
+			Inner::Resume(resume, _) => resume.resolved(),
 		}
 	}
 
@@ -8642,25 +8613,20 @@ impl Subscriber {
 		}
 	}
 
-	/// Poll for the track's declared exclusive end, without blocking.
+	/// The track's declared exclusive end position, or the cause on an abort. See
+	/// [`Producer::finish_at`] for what the position means.
+	///
+	/// Resolves as soon as the end is known, which may be ahead of the live edge
+	/// when the producer finished via [`Producer::finish_at`]. This reports the declared
+	/// end, not that every group has arrived. A local session close without a declared
+	/// end returns [`Error::Closed`]. Read [`Self::poll_recv_group`] (or
+	/// [`Ordered::poll_next_group`]) until it yields `None` to observe the track fully drained.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.poll_finished(waiter),
 			Inner::Resume(resume, _) => resume.poll_finished(waiter),
 		}
-	}
-
-	/// Block until the track declares its end, returning the exclusive end position, or the
-	/// cause on an abort. See [`Producer::finish_at`] for what the position means.
-	///
-	/// Resolves as soon as the end is known, which may be ahead of the live edge
-	/// when the producer finished via [`Producer::finish_at`]. This reports the declared
-	/// end, not that every group has arrived. A local session close without a declared
-	/// end returns [`Error::Closed`]. Drive [`Self::recv_group`] (or
-	/// [`Ordered::next_group`]) until it yields `None` to observe the track fully drained.
-	#[cfg(feature = "async")]
-	pub async fn finished(&mut self) -> Result<Position> {
-		kio::wait(|waiter| self.poll_finished(waiter)).await
 	}
 
 	/// Limit subsequent reads to these group sequences, returning `self` for chaining.
@@ -8762,6 +8728,7 @@ impl Subscriber {
 	/// the cache does not stand in for it, so a cap moved below the largest stays pending.
 	/// Moving the bounds wakes a parked poll, which reports the largest once it is within
 	/// them and newer than the last report.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		if self.largest.ended {
 			return Poll::Ready(None);
@@ -8796,12 +8763,6 @@ impl Subscriber {
 			}
 			Inner::Resume(resume, _) => resume.poll_largest(seen, bounds, waiter),
 		}
-	}
-
-	/// The largest location within [`Self::with_range`]; see [`Self::poll_largest`].
-	#[cfg(feature = "async")]
-	pub async fn largest(&mut self) -> Option<Position> {
-		kio::wait(|waiter| self.poll_largest(waiter)).await
 	}
 
 	/// The track's largest location known now, ignoring [`Self::with_range`], without waiting
@@ -8902,8 +8863,7 @@ impl Ordered {
 		self.inner.broadcast()
 	}
 
-	/// Poll for the next group with a higher sequence number than any previously
-	/// returned, without blocking.
+	/// The next group with a higher sequence number than any previously returned.
 	///
 	/// Honors the group range set by [`Self::with_range`]:
 	/// a group past the cap stays in the producer's cache and becomes eligible again if
@@ -8912,22 +8872,12 @@ impl Ordered {
 	/// Later reads return `Ok(None)` immediately too; widening the ranges with
 	/// [`Self::update`] resumes reading above the last sequence returned.
 	///
-	/// Returns `Poll::Ready(Ok(Some(group)))` when a group is available,
-	/// `Poll::Ready(Ok(None))` when the track is finished (including an abort after its
-	/// declared end settled, see [`Producer::abort`]) or the ranges are read,
-	/// `Poll::Ready(Err(e))` when the track has been aborted short of its end, or
-	/// `Poll::Pending` when no group is available yet.
+	/// Returns `Ok(Some(group))` when a group is available, `Ok(None)` when the track is
+	/// finished (including an abort after its declared end settled, see [`Producer::abort`])
+	/// or the ranges are read, or the error when the track has been aborted short of its end.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		self.inner.poll_next_group(waiter)
-	}
-
-	/// Return the next group with a higher sequence number than any previously returned.
-	///
-	/// Once a bounded range returns `Ok(None)`, later reads return it immediately too;
-	/// widening the ranges with [`Self::update`] resumes reading above the last sequence returned.
-	#[cfg(feature = "async")]
-	pub async fn next_group(&mut self) -> Result<Option<group::Consumer>> {
-		kio::wait(|waiter| self.poll_next_group(waiter)).await
 	}
 
 	/// Limit subsequent reads to these group sequences, returning `self` for chaining.
@@ -8962,24 +8912,19 @@ impl Ordered {
 		self.inner.update(subscription)
 	}
 
-	/// Block until the track declares its end, returning the exclusive end position.
+	/// The exclusive end position, once the track declares its end.
 	///
-	/// See [`Subscriber::finished`]: this reports the declared end, not that every group
+	/// See [`Subscriber::poll_finished`]: this reports the declared end, not that every group
 	/// has arrived.
-	#[cfg(feature = "async")]
-	pub async fn finished(&mut self) -> Result<Position> {
-		kio::wait(|waiter| self.inner.poll_finished(waiter)).await
-	}
-
-	/// Poll for the largest location within [`Self::with_range`]; see [`Subscriber::poll_largest`].
-	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
-		self.inner.poll_largest(waiter)
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
+		self.inner.poll_finished(waiter)
 	}
 
 	/// The largest location within [`Self::with_range`]; see [`Subscriber::poll_largest`].
-	#[cfg(feature = "async")]
-	pub async fn largest(&mut self) -> Option<Position> {
-		kio::wait(|waiter| self.poll_largest(waiter)).await
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
+		self.inner.poll_largest(waiter)
 	}
 
 	/// Whether `other` reads the same underlying track state.
@@ -9280,14 +9225,9 @@ impl Request {
 		snapshot_subscription(&subs, bound)
 	}
 
-	/// Block until the aggregate [`subscription`](Self::subscription) changes,
-	/// yielding `None` once nobody is waiting.
-	#[cfg(feature = "async")]
-	pub async fn subscription_changed(&mut self) -> Option<Subscription> {
-		kio::wait(|waiter| self.poll_subscription_changed(waiter)).await
-	}
-
-	/// Poll for a changed subscription.
+	/// The aggregate [`subscription`](Self::subscription) once it changes, or `None` once
+	/// nobody is waiting.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_subscription_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<Subscription>> {
 		let state = self.state.read();
 		let (subs, bound) = (state.subscriptions.clone(), state.demand_bound());
@@ -22121,7 +22061,11 @@ mod test {
 			let mut subscriber = producer.subscribe(replay().with_ranges(ranges));
 			assert_eq!(
 				subscriber.resolved_ranges(),
-				vec![Some(Resolved { start: 0, end: None })],
+				vec![Some(Resolved {
+					start: 0,
+					end: None,
+					floored: true
+				})],
 				"group 1 may still start before the end"
 			);
 			if dropped {
@@ -22129,7 +22073,11 @@ mod test {
 				assert_eq!(drain(&mut subscriber), vec![0]);
 				assert_eq!(
 					subscriber.resolved_ranges(),
-					vec![Some(Resolved { start: 0, end: Some(2) })],
+					vec![Some(Resolved {
+						start: 0,
+						end: Some(2),
+						floored: true
+					})],
 					"the drop settles the end"
 				);
 				continue;
@@ -22169,7 +22117,11 @@ mod test {
 			assert_eq!(reader.drain(), Vec::<u64>::new(), "ordered: {ordered}");
 			assert_eq!(
 				reader.resolved(),
-				vec![Some(Resolved { start: 0, end: Some(1) })],
+				vec![Some(Resolved {
+					start: 0,
+					end: Some(1),
+					floored: true
+				})],
 				"1 starting past the end settles it"
 			);
 		}
@@ -22219,7 +22171,11 @@ mod test {
 			.unwrap();
 		assert_eq!(
 			subscriber.resolved_ranges(),
-			vec![Some(Resolved { start: 0, end: Some(3) })]
+			vec![Some(Resolved {
+				start: 0,
+				end: Some(3),
+				floored: true
+			})]
 		);
 	}
 

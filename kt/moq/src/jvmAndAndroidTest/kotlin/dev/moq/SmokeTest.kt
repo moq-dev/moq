@@ -24,6 +24,8 @@ import dev.moq.video.FrameRate as VideoFrameRate
 import dev.moq.video.Producer as VideoProducer
 import dev.moq.video.ProducerOptions as VideoProducerOptions
 import dev.moq.video.ReadFrame as VideoReadFrame
+import java.net.DatagramSocket
+import java.net.InetAddress
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -557,7 +559,7 @@ class SmokeTest {
             val config = SnapshotConfig(deltas = true)
             val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
             SnapshotProducer(broadcast, track, config).use { producer ->
-                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                val consumer = SnapshotConsumer(broadcast.consume(), "status")
                 for (n in 1..4) producer.update(
                     Status(state = "live$n"),
                     timestamp = n.milliseconds.toTimestamp(),
@@ -627,7 +629,7 @@ class SmokeTest {
                 assertEquals("status", demand.name())
                 assertEquals(null, demand.wanted())
 
-                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                val consumer = SnapshotConsumer(broadcast.consume(), "status")
                 while (demand.wantedChanged() == null) {}
                 consumer.cancel()
                 while (demand.wantedChanged() != null) {}
@@ -645,7 +647,7 @@ class SmokeTest {
                 val demand: TrackDemand = producer.demand()
                 producer.update(Status(state = "live"), Timestamp(1uL, 1_000uL))
 
-                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                val consumer = SnapshotConsumer(broadcast.consume(), "status")
                 while (demand.wantedChanged() == null) {}
                 // `first` cancels the collection, which must release the subscription without an
                 // explicit cancel.
@@ -667,7 +669,7 @@ class SmokeTest {
             SnapshotProducer(broadcast, track, config).use { producer ->
                 producer.update("""{"state":"raw"}""", Timestamp(1uL, 1_000uL))
 
-                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                val consumer = SnapshotConsumer(broadcast.consume(), "status")
                 assertEquals(
                     Timed(Status(state = "raw"), Timestamp(1uL, 1_000uL)),
                     consumer.valuesAs<Status>().first(),
@@ -777,16 +779,16 @@ class SmokeTest {
 
                 publication.announce(AnnounceRoute())
                 val announced = consumer.announced(AnnounceConfig())
-                val first = assertIs<AnnounceEventStart>(announced.nextRoute())
+                val first = assertIs<AnnounceEventPresent>(announced.nextRoute())
                 assertEquals("live", first.announce.prefix)
 
                 publication.unannounce()
-                val retracted = assertIs<AnnounceEventEnd>(announced.nextRoute())
+                val retracted = assertIs<AnnounceEventAbsent>(announced.nextRoute())
                 assertEquals("live", retracted.announce.prefix)
                 assertFailsWith<MoqException> { consumer.request("live") }
 
                 publication.announce(AnnounceRoute())
-                assertIs<AnnounceEventStart>(announced.nextRoute())
+                assertIs<AnnounceEventPresent>(announced.nextRoute())
                 consumer.request("live")
             }
         }
@@ -800,11 +802,11 @@ class SmokeTest {
             val publication = origin.createBroadcast("live")
             publication.broadcast().use { broadcast ->
                 publication.use { it.announce(AnnounceRoute()) }
-                assertIs<AnnounceEventStart>(announced.nextRoute())
+                assertIs<AnnounceEventPresent>(announced.nextRoute())
                 consumer.request("live")
 
                 broadcast.end()
-                assertIs<AnnounceEventEnd>(announced.nextRoute())
+                assertIs<AnnounceEventAbsent>(announced.nextRoute())
                 assertFailsWith<MoqException> { consumer.request("live") }
             }
         }
@@ -829,22 +831,48 @@ class SmokeTest {
     }
 
     @Test
-    fun `a new instance restarts announce consumers`() = runTest {
+    fun `a new instance restarts followers but stays listed`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            val announced = origin.consume().announced(AnnounceConfig())
+            val consumer = origin.consume()
+            val announced = consumer.announced(AnnounceConfig())
+            val following = consumer.follow("instance", null)
             origin.createBroadcast("instance").use { publication ->
                 publication.announce(AnnounceRoute())
-                val start = assertIs<AnnounceEventStart>(announced.nextRoute())
-                assertTrue(start.announce.route.instance.isNotEmpty())
+                val present = assertIs<AnnounceEventPresent>(announced.nextRoute())
+                assertTrue(present.announce.route.instance.isNotEmpty())
+                assertNotNull(following.available()).close()
 
                 publication.announce(AnnounceRoute(instance = "camera", epoch = 1uL))
-                val restart = assertIs<AnnounceEventRestart>(announced.nextRoute())
-                assertEquals("camera", restart.announce.route.instance)
+                assertNotNull(following.available()).close()
+
+                // The takeover was not listed, so the next event is the path going absent.
+                publication.unannounce()
+                val absent = assertIs<AnnounceEventAbsent>(announced.nextRoute())
+                assertEquals("camera", absent.announce.route.instance)
 
                 assertFailsWith<MoqException.InvalidInstance> {
                     publication.announce(AnnounceRoute(instance = ""))
                 }
             }
+            following.cancel()
+        }
+    }
+
+    @Test
+    fun `a follower reports the path going offline and the next broadcast`() = runTest {
+        OriginProducer(OriginConfig()).use { origin ->
+            val following = origin.consume().follow("offline", null)
+            origin.createBroadcast("offline").use { publication ->
+                publication.announce(AnnounceRoute())
+                assertNotNull(following.available()).close()
+
+                publication.unannounce()
+                assertNull(following.available())
+
+                publication.announce(AnnounceRoute())
+                assertNotNull(following.available()).close()
+            }
+            following.cancel()
         }
     }
 
@@ -855,7 +883,7 @@ class SmokeTest {
                 origin.consume().announced(AnnounceConfig(prefix = "room", filter = "*/chat"))
             origin.createBroadcast("room/alice/chat").use { publication ->
                 publication.announce(AnnounceRoute())
-                val update = assertIs<AnnounceEventStart>(announced.nextRoute())
+                val update = assertIs<AnnounceEventPresent>(announced.nextRoute())
                 assertEquals("room/alice/chat", update.announce.prefix)
                 assertEquals(listOf("alice"), update.announce.captures)
             }
@@ -990,25 +1018,24 @@ class SmokeTest {
     /** The returned Session owns its pending dial even after Client cancellation. */
     @Test
     fun `session owns and cancels its first dial`() = runTest {
-        Server.listen(
-                ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))
-            )
-            .use { server ->
-                val client =
-                    Client(
-                        ClientConfig(
-                            bind = "127.0.0.1:0",
-                            tls = ClientTls(insecure = true),
-                            once = true,
-                        )
+        // A bound socket that never answers keeps the first dial pending, so `connects`
+        // cannot advance between the read below and the cancel.
+        DatagramSocket(0, InetAddress.getByName("127.0.0.1")).use { silent ->
+            val client =
+                Client(
+                    ClientConfig(
+                        bind = "127.0.0.1:0",
+                        tls = ClientTls(insecure = true),
+                        once = true,
                     )
-                val session = client.connect("https://${server.localAddr}")
-                client.cancel()
-                assertEquals(0uL, session.state().connects)
-                session.cancel(0u)
-                session.closed()
-                assertEquals(ConnectionPhase.CLOSED, session.state().phase)
-            }
+                )
+            val session = client.connect("https://127.0.0.1:${silent.localPort}")
+            client.cancel()
+            assertEquals(0uL, session.state().connects)
+            session.cancel(0u)
+            session.closed()
+            assertEquals(ConnectionPhase.CLOSED, session.state().phase)
+        }
     }
 
     /**

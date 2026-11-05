@@ -4,6 +4,22 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Announcements are a listing of present and absent paths
+
+`AnnounceConsumer` yields `AnnounceEventPresent` when a route starts covering a path and `AnnounceEventAbsent` when none covers it any more, each carrying an `Announce` as `announce`.
+`AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, `AnnounceEventRestart`, and `AnnounceEventTakeover` are removed: read `AnnounceEventStart` as `AnnounceEventPresent` and `AnnounceEventEnd` as `AnnounceEventAbsent`, and drop the `Update` branch, since a re-priced route is no longer reported.
+Another publisher instance taking a path over keeps it present and is not listed. Where you requested the path again on `AnnounceEventRestart`, hold `follow(path)` instead and read each `BroadcastConsumer` that `await following.available()` returns, dropping what you read from the previous one.
+
+### `Following.available()` returns `None` once the path goes offline
+
+`await following.available()` (or `await following`) returns `BroadcastConsumer | None`.
+Later calls return `None` when the path goes offline, or, when following an `instance`, when another instance takes it over, then the next broadcast once something serves the path again; the first call never returns `None`.
+Stop reading the previous broadcast on `None` and call `available()` again. A caller that only awaits the first broadcast can assert it is not `None`.
+
+### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
+
+`Video` and `Audio` gain `warmup`, the catalog's decoder warmup; it defaults to `None` as the last field, so existing code keeps working. `TrackConsumer` and the audio and video consumers read it from the rendition and start that much earlier.
+
 ### Separate datagram tracks
 
 Replace stream-track `append_datagram` / `insert_datagram` / `recv_datagram` with `broadcast.create_datagrams(name, info)` and `broadcast.consume().datagrams(name)`. The returned `DatagramProducer` uses `append(payload, timestamp=...)` and `insert(Datagram(...))`; `DatagramConsumer` supports `recv()` and async iteration. `DatagramInfo` contains priority and optional timescale. Demand is `priority()` / `await priority_changed(last)`; on-demand handlers come from `broadcast.requests().datagrams()`. Stream tracks of the same name are independent.
@@ -11,6 +27,10 @@ Replace stream-track `append_datagram` / `insert_datagram` / `recv_datagram` wit
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 `TrackInfo.max_age` defaults to `timedelta(0)`, like `Delay.max`, so a bare `TrackInfo()` and an omitted one now advertise a zero max age, serving only the live edge, instead of no publisher limit. `None` still means no limit: pass `max_age=None` where you relied on the default.
+
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`moq.json.SnapshotConsumer(broadcast, name, *, priority=0)` takes the `BroadcastConsumer` and the track name instead of a `TrackConsumer`, and subscribes to the track itself at a zero `delay.max` and `priority`. Drop the `subscribe_track` call; a refused subscription now raises from the first read. Iteration skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
 
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
@@ -22,7 +42,7 @@ The `lower=` argument of `TrackProducer.video` and `TrackStreamProducer.video` a
 
 ### Media setup refusals are typed
 
-Audio and video subscribe setup now reports `UnsupportedConfig` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+Audio and video subscribe setup now reports `UnsupportedConfig` when the decoder refuses a codec, layout, or description, or when every video decoder for the codec reports that this device cannot decode the stream. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a missing driver or no device, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
 
 ### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 
@@ -179,7 +199,7 @@ and native library together; application calls are unchanged.
 ### JSON consumers yield `json.Timed` (#5677)
 
 `json.SnapshotConsumer` and `json.StreamConsumer` yield `Timed(value, timestamp)` instead of the bare value; `timestamp` is a `timedelta`, or `None` when untimed.
-Iterating a snapshot consumer now yields every state in order; `await consumer.latest()` returns the newest.
+Iterating a snapshot consumer now yields each state in order, skipping every group a newer one supersedes (see the zero-delay entry above); `await consumer.latest()` returns the newest.
 Timestamps are rounded down to a whole microsecond.
 
 ### Ranges filter reads (#5929)

@@ -8,7 +8,7 @@
 import { type Instant, Milli } from "@moq/clock";
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import type { Datagram } from "./datagram.ts";
+import type * as datagram from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
 import { toStreamCode } from "./error.ts";
 import type { Frame, FrameConsumer, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
@@ -30,7 +30,7 @@ import type {
 } from "./track.ts";
 import { max, min } from "./util/sequence.ts";
 import * as Varint from "./varint.ts";
-import type { Window } from "./window.ts";
+import type { Resolved, Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
 /** What a null {@link Delay.max} goes out as: the largest value every peer can read, as Rust sends for `None`. */
@@ -313,13 +313,6 @@ export interface Replacement {
 	discard(): void;
 }
 
-/** A datagram read that does not wait. */
-export type RecvDatagram =
-	| { kind: "datagram"; datagram: Datagram }
-	| { kind: "idle" }
-	| { kind: "done" }
-	| { kind: "error"; error: Error };
-
 /**
  * Which groups of a track's live feed to ask whether one may still land: one the feed has not
  * accounted for, the publisher did not drop, and the feed reaches, in a gap a later arrival
@@ -353,11 +346,6 @@ export interface ResumeSource {
 	/** The next run no copy may still deliver, reported once as a `drop`, without taking a group. */
 	tryDrop(delivered: Delivered): (Recv & { kind: "drop" }) | undefined;
 	/**
-	 * The next datagram in arrival order, without waiting. `delivered` is the group record, so a
-	 * copy that still holds a group for a later group read is kept.
-	 */
-	tryDatagram(delivered: Delivered): RecvDatagram;
-	/**
 	 * Whether the reader's bounded `window` has nothing left to deliver, judged by the serving
 	 * copy against what it and the logical reader (`delivered`) handed out. A copy that may still
 	 * deliver keeps it open. Mirrors the Rust `Reader::exhausted`.
@@ -375,6 +363,8 @@ export interface ResumeSource {
 	end(): Position | undefined;
 	/** Where each range starts on the serving copy once delivery starts at `from`, undefined without one. */
 	starts(from: bigint): (bigint | undefined)[] | undefined;
+	/** Each range as the serving copy resolved it, undefined without one. */
+	resolved(): (Resolved | undefined)[] | undefined;
 	/** The runs of `[start, end)` the serving copy reads, undefined without one. */
 	runs(start: bigint, end: bigint): Run[] | undefined;
 	/**
@@ -444,9 +434,6 @@ export interface FillStarts {
 	fillsFromStart?: boolean;
 }
 
-/** Maximum buffered datagrams per subscriber; mirrors Rust's bounded send buffer. */
-export const MAX_DATAGRAMS = 64;
-
 /** The first group an exclusive track end excludes whole: one past the last group that may exist. */
 export function finalSequence(end: Position): bigint {
 	return end.group + (end.frame === 0 ? 0n : 1n);
@@ -454,6 +441,14 @@ export function finalSequence(end: Position): bigint {
 
 /** Hooks assigned in static blocks by the owning class. */
 export const hooks: {
+	/** Make a request for an unanswered datagram track. */
+	datagramRequest: (producer: datagram.Producer, pending: Set<datagram.Request>) => datagram.Request;
+	/** End a received datagram track if its last consumer left. */
+	closeUnusedDatagrams: (producer: datagram.Producer) => boolean;
+	/** Follow this consumer's subscriber priority for transport scheduling. */
+	datagramPriority: (consumer: datagram.Consumer) => Getter<number>;
+	/** Settles once this consumer is closed, the end of whatever request it serves. */
+	datagramClosed: (consumer: datagram.Consumer) => GetPromise<Error | null>;
 	/**
 	 * Declare the end a wire subscription received: repeating it is a no-op, and a mid-group
 	 * end may refine the group boundary it falls just before. Throws `ProtocolViolation` on
@@ -586,19 +581,19 @@ export const hooks: {
 	 * with no group there: what lite-07 SUBSCRIBE_START answers. Assigned by `track.ts`.
 	 */
 	servingStarts: (subscriber: Subscriber, from: bigint) => (bigint | undefined)[];
+	/**
+	 * Each of a subscriber's ranges as resolved where it is served, undefined for one whose start
+	 * still waits: what lite-07 SUBSCRIBE_STARTED answers. Assigned by `track.ts`.
+	 */
+	servingResolved: (subscriber: Subscriber) => (Resolved | undefined)[];
 	/** The lowest buffered candidate, which an ordered take may wait below; `floor` passes sequences taken on other copies. */
 	peekGroup: (subscriber: Subscriber, ordered: boolean, floor?: bigint) => bigint | undefined;
 	/** Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival order. */
 	tryNextGroup: (subscriber: Subscriber, floor?: bigint) => Recv;
-	/** Wake once a subscriber's datagram cursor may read differently; fires at most once. */
-	datagramChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
-	/** Take the next datagram in arrival order without waiting. */
-	tryRecvDatagram: (subscriber: Subscriber) => RecvDatagram;
 	/** Whether a buffered group in `[start, end)` that `delivered` lacks still waits to be read. */
 	hasUnreadGroup: (subscriber: Subscriber, start: bigint, end: bigint | undefined, delivered: Delivered) => boolean;
 	/**
-	 * Whether a subscriber's track ended and it holds nothing left to read: no datagram within its
-	 * cursor, and no group in `[start, end)` that `delivered` lacks.
+	 * Whether a subscriber's track ended and it holds nothing left to read: no group in `[start, end)` that `delivered` lacks.
 	 */
 	spent: (subscriber: Subscriber, start: bigint, end: bigint | undefined, delivered: Delivered) => boolean;
 	/**
@@ -664,8 +659,6 @@ export const hooks: {
 	 * is refused. Throws `TimestampMismatch` if a buffered frame already disagrees.
 	 */
 	bindGroupTimed: (group: GroupProducer, track: Info) => void;
-	/** Admit a datagram in its stored wire form. */
-	writeDatagram: (producer: Producer, datagram: Datagram, inflated?: number) => void;
 	/** Bind the group to its immutable track codec. */
 	bindGroupCompression: (group: GroupProducer, compressed: boolean) => void;
 	/** Admit a received stored slice without recompressing it. */
@@ -747,6 +740,18 @@ export const hooks: {
 	/** Whether a broadcast handle was {@link stampUnlisted marked unlisted}. */
 	unlisted: (target: BroadcastConsumer) => boolean;
 } = {
+	datagramRequest: () => {
+		throw new Error("datagram module not loaded");
+	},
+	closeUnusedDatagrams: () => {
+		throw new Error("datagram module not loaded");
+	},
+	datagramPriority: () => {
+		throw new Error("datagram module not loaded");
+	},
+	datagramClosed: () => {
+		throw new Error("datagram module not loaded");
+	},
 	endTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -793,6 +798,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	servingStarts: () => {
+		throw new Error("track.ts not loaded");
+	},
+	servingResolved: () => {
 		throw new Error("track.ts not loaded");
 	},
 	makeRequest: () => {
@@ -849,16 +857,10 @@ export const hooks: {
 	unreport: () => {
 		throw new Error("track.ts not loaded");
 	},
-	tryRecvDatagram: () => {
-		throw new Error("track.ts not loaded");
-	},
 	deliveredRuns: () => {
 		throw new Error("track.ts not loaded");
 	},
 	handedOut: () => {
-		throw new Error("track.ts not loaded");
-	},
-	datagramChanged: () => {
 		throw new Error("track.ts not loaded");
 	},
 	hasUnreadGroup: () => {
@@ -913,9 +915,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	askFetch: () => {
-		throw new Error("track.ts not loaded");
-	},
-	writeDatagram: () => {
 		throw new Error("track.ts not loaded");
 	},
 	bindGroupCompression: () => {

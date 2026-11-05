@@ -5,6 +5,27 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Shutdown reports deadline cuts separately from end reports
+
+`shutdown::Observer::drained()` now returns `shutdown::Drained` instead of `()`.
+Callers that match its result against `()` should discard it or read the summary.
+An embedder's drain alert can page on `forced`: sessions still open at the deadline.
+`ending` counts sessions already closed strictly before it but still reporting their end,
+and `elapsed` measures the drain itself, even when the first observer arrives later.
+Sample `Observer::tally()` or await `Observer::changed()` for the live `Tally { open, ending }`.
+
+`session::View` adds `closed: Option<kio::clock::Wall>`; add it to struct literals.
+`GET /sessions` omits `closed` while open and includes its Unix seconds timestamp
+while the session finishes reporting its end. Refused SETUP replies remain refusals,
+not forced cuts. No protocol wire change.
+
+### Transport and HTTP cryptography use rind
+
+The relay checks rind CPU support at startup, including `Relay::load` for embedders.
+Its HTTP clients and HTTPS listener use rustls without enabling another crypto provider.
+x86\_64 CPUs without crypto extensions and aarch64 Raspberry Pi 4, CM4, and Zero 2 W remain supported through rind's software paths; aarch64 requires NEON and armv7 remains supported.
+No configuration or wire format changes.
+
 ### Built-in ACME is removed ([#7803](https://github.com/moq-dev/moq/pull/7803))
 
 Remove the `acme` Cargo feature, `[acme]` table, `--acme-*` flags, and `MOQ_ACME_*` variables.
