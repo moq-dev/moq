@@ -461,7 +461,12 @@ measure_criterion() {
         (cd "$WORKTREE" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE" comparison-base)
         printf 'Criterion paired with base %s\n' "$BASE"
         printf 'Base build log: %s/base-build.log\n' "$RUN"
-        if ! criterion_build_base "$base" 2>&1 | tee "$RUN/base-build.log" >&2; then
+        local build_status=(0 0)
+        criterion_build_base "$base" 2>&1 | tee "$RUN/base-build.log" >&2 || build_status=("${PIPESTATUS[@]}")
+        if ((build_status[1] != 0)); then
+            printf 'Failed to write base build log: %s/base-build.log\n' "$RUN" >&2
+        fi
+        if ((build_status[0] != 0)); then
             : >"$base"
             for key in "${targets[@]}"; do unavailable "$key" "base build failed"; done
         fi

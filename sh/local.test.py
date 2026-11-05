@@ -108,6 +108,7 @@ class LocalGate(unittest.TestCase):
             self.assertEqual(result.returncode, 7, result.stderr)
             self.assertEqual(result.stderr.splitlines(), [f"Dev-shell quest: {quest}", "pinned build failed"])
 
+    @unittest.skipIf(sys.platform in ("win32", "cygwin"), "quest.sh selects the host toolchain on msys and cygwin")
     def test_outside_shell_resolves_the_checkout_pin(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

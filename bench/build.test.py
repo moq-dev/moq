@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class Builds(unittest.TestCase):
     def test_base_builds_report_errors_and_distinguish_new_targets(self):
         (ROOT / ".tmp").mkdir(exist_ok=True)
-        for base in ("broken", "existing", "new"):
+        for base in ("broken", "existing", "new", "log-failure"):
             with self.subTest(base=base), tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
                 repo = Path(directory) / "repo"
                 repo.mkdir()
@@ -64,9 +64,20 @@ class Builds(unittest.TestCase):
                 )
                 (package / "Cargo.toml").write_text(manifest + target)
                 bench.write_text('fn main() { println!("current catalog ran"); }\n')
+                if base == "log-failure":
+                    tools = repo / ".tmp/tools"
+                    tools.mkdir(parents=True)
+                    tee = tools / "tee"
+                    tee.write_text(
+                        '#!/usr/bin/env bash\n'
+                        'if [[ $1 == */base-build.log ]]; then cat; exit 1; fi\n'
+                        f'exec {shutil.which("tee")} "$@"\n'
+                    )
+                    tee.chmod(0o755)
+                    env["PATH"] = str(tools) + os.pathsep + env["PATH"]
                 result = run("bash", "bench/run.sh", "--criterion", "-p", "moq-relay", "--bench", "catalog")
                 (evidence,) = (repo / ".tmp/bench").glob("run.*")
-                log = (evidence / "base-build.log").read_text()
+                log = (evidence / "base-build.log").read_text() if base != "log-failure" else ""
                 report = json.loads((evidence / "paired.json").read_text())
                 self.assertIn("current catalog ran", result.stdout)
                 self.assertIn(str(evidence / "base-build.log"), result.stdout)
@@ -79,7 +90,10 @@ class Builds(unittest.TestCase):
                     self.assertEqual((evidence / "criterion-base.targets").read_text(), "")
                 else:
                     self.assertEqual(report["unavailable"], [])
-                    self.assertEqual("base catalog ran" in result.stdout, base == "existing")
+                    self.assertEqual("base catalog ran" in result.stdout, base in ("existing", "log-failure"))
+                if base == "log-failure":
+                    self.assertIn("Failed to write base build log:", result.stderr)
+                    self.assertNotEqual((evidence / "criterion-base.targets").read_text(), "")
                 self.assertEqual(len(run("git", "worktree", "list", "--porcelain").stdout.split("worktree ")) - 1, 1)
 
 
