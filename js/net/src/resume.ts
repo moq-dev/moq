@@ -489,7 +489,7 @@ class Reader implements ResumeSource {
 		copy.sub.info().then(
 			(info) => {
 				record(info, source);
-				shell.commit(info, hooks.requestedSequence(copy.sub));
+				shell.commit(info);
 			},
 			() => {},
 		);
@@ -1154,6 +1154,11 @@ class Reader implements ResumeSource {
 	forgetPastBudget(delivered: Delivered): void {
 		const newest = this.#copies.at(-1);
 		if (newest) hooks.forgetPastBudget(newest.sub, delivered);
+	}
+
+	received(): boolean {
+		const serving = this.#serving();
+		return serving !== undefined && hooks.received(serving.sub);
 	}
 
 	latest(): bigint | undefined {

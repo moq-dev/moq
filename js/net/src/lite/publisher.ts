@@ -472,6 +472,19 @@ function carriesMaxDelay(version: Version): boolean {
 }
 
 /**
+ * How long a lite-03/04 join on a received copy that held no group on arrival waits past the
+ * answer before it takes the newest group as the live edge. Lite-01..06 answers carry no
+ * largest group (lite-03/04's SUBSCRIBE_OK names only the requested start), so the newest
+ * group to arrive soon after the answer stands in, and a later one older than it is skipped.
+ */
+const SETTLE = Nano.fromMilli(Milli(50));
+
+/** Whether a join on this version keeps the floor its arrival gave, as lite-01/02 do in Rust. */
+function arrivalOnly(version: Version): boolean {
+	return version === Version.DRAFT_01 || version === Version.DRAFT_02;
+}
+
+/**
  * The floor of a subscription's read cursor for the wire serving it.
  *
  * On lite-06 it is the group the subscription named (or 0), and its max delay decides what
@@ -1029,20 +1042,24 @@ export class Publisher {
 			// priority.
 			const info = await untilAborted(track.info(), left.signal);
 			const publisher = info.priority;
-			// A SUBSCRIBE can arrive before its track resolves, such as one a relay serves from a
-			// copy still fetching upstream, an on-demand track, or on lite-05 one sent alongside
-			// its TRACK, when no group is known yet. The newest as of the request is then the
-			// newest the answer held, or the first group when it held none: cached history below
-			// it is skipped, and anything written since, even for this demand, is delivered.
-			const resolved = cursorFloor(this.version, msg.startGroup, hooks.requestedSequence(track));
-			if (
-				this.version !== Version.DRAFT_01 &&
-				this.version !== Version.DRAFT_02 &&
-				latest === undefined &&
-				resolved !== floor
-			) {
-				floor = resolved;
-				track.withRange({ start: { included: floor } });
+			// Without a newest group on arrival, such as a SUBSCRIBE that beat its track
+			// resolving, the newest once it resolves stands in, as it would for one sent after.
+			// A lite-03/04 copy's newest group then is not what its source's answer brings, but
+			// an older one cached or none yet: it waits {@link SETTLE} past the answer and starts
+			// at the newest group known by then, including a largest the answer reported.
+			// Lite-01/02 keep the floor their arrival gave, as Rust does.
+			if (latest === undefined && msg.startGroup === undefined && !arrivalOnly(this.version)) {
+				const settles =
+					(this.version === Version.DRAFT_03 || this.version === Version.DRAFT_04) && hooks.received(track);
+				if (settles) await sleep(SETTLE, { signal: left.signal });
+				const known = hooks.latestSequence(track);
+				const reported = settles ? hooks.peekLargest(track).largest?.group : undefined;
+				const newest = known === undefined ? reported : reported === undefined ? known : max(known, reported);
+				const resolved = cursorFloor(this.version, msg.startGroup, newest);
+				if (resolved !== floor) {
+					floor = resolved;
+					track.withRange({ start: { included: floor } });
+				}
 			}
 			// Older drafts carry no timestamps.
 			let stamp: Stamp | undefined;

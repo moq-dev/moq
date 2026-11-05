@@ -718,9 +718,6 @@ class TrackState {
 	update: Signal<Subscription | undefined>;
 	/** Resolved once the producer commits the immutable properties. */
 	info = new Signal<Info | undefined>(undefined);
-	// The newest group as of this reader's request, recorded as {@link info} resolves: the
-	// track's newest then, or what its answer held for a request that beat it. `null` for none.
-	requested?: bigint | null;
 	/** Newest group head, datagram, frame, or location reported by the publisher. */
 	largest = new Signal<Position | undefined>(undefined);
 	// The group {@link largest} first named, where a relative anchor resolved before any group
@@ -805,6 +802,8 @@ let owedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run &
 let owedGroup: (producer: Producer, start: bigint, end: bigint) => { sequence: bigint; folds?: number } | undefined;
 let fillEdge: (producer: Producer) => bigint | undefined;
 let sourceStart: (producer: Producer) => bigint | "pending" | undefined;
+// Whether a wire subscription feeds the producer; assigned in its static block.
+let fed: (producer: Producer) => boolean;
 // The lowest group a reader naming `named` asks a fill for; see `Producer.#fillFloor`.
 let fillFloor: (producer: Producer, named: bigint | undefined) => bigint | undefined;
 // The producer's checked group starts, sorted by sequence; assigned in its static block.
@@ -1022,6 +1021,7 @@ export class Producer {
 			!producer.#subscribed && producer.#state.info.peek()?.ietf !== undefined
 				? producer.#state.largest.peek()?.group
 				: undefined;
+		fed = (producer) => producer.#subscribed;
 		hooks.receiveTrack = (producer, starts = {}) => {
 			producer.#subscribed = true;
 			producer.#starts = starts;
@@ -1232,8 +1232,6 @@ export class Producer {
 			throw err;
 		}
 		this.#state.info.set(resolved);
-		// What the answer holds, written before accept, is where a sink that beat it joins.
-		const requested = this.#state.latest ?? null;
 		// Propagate to any sink handed out before accept (the on-demand path).
 		const compressed = new Map<Datagram, Stored>();
 		for (const sink of this.#sinks) {
@@ -1250,7 +1248,6 @@ export class Producer {
 					}
 				});
 			}
-			sink.requested ??= requested;
 			sink.info.set(resolved);
 		}
 		this.#updateSubscription();
@@ -1320,10 +1317,7 @@ export class Producer {
 	#addSink(sink: TrackState): void {
 		sink.producer = this;
 		const info = this.#state.info.peek();
-		if (info) {
-			sink.requested = this.#state.latest ?? null;
-			sink.info.set(info);
-		}
+		if (info) sink.info.set(info);
 		sink.largest.set(this.#state.largest.peek());
 		sink.first = this.#state.largest.peek()?.group;
 		sink.largestEnded.set(this.#state.largestEnded.peek());
@@ -3009,10 +3003,8 @@ export class Subscriber {
 				cursor: subscriber.#cursor,
 				closed: state.closed,
 				info: () => state.info.peek(),
-				commit: (info, requested) => {
-					if (state.info.peek() !== undefined) return;
-					state.requested = requested ?? null;
-					state.info.set(info);
+				commit: (info) => {
+					if (state.info.peek() === undefined) state.info.set(info);
 				},
 				close: (abort) => {
 					closeTrackState(state, abort);
@@ -3022,7 +3014,11 @@ export class Subscriber {
 		};
 		hooks.latestSequence = (subscriber) =>
 			subscriber.#resume ? subscriber.#resume.latest() : subscriber.#state.latest;
-		hooks.requestedSequence = (subscriber) => subscriber.#state.requested ?? undefined;
+		hooks.received = (subscriber) => {
+			if (subscriber.#resume) return subscriber.#resume.received();
+			const producer = subscriber.#state.producer;
+			return producer !== undefined && fed(producer);
+		};
 		hooks.bufferedLargest = (subscriber) => subscriber.#bufferedLargest();
 		hooks.objectLargest = (subscriber) => {
 			if (subscriber.#resume) return subscriber.#resume.objectLargest();

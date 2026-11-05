@@ -74,11 +74,6 @@ struct Route {
 	staged: Option<(u64, track::Consumer)>,
 	/// The stage the serving copy was spliced from, if any.
 	spliced: Option<u64>,
-	/// The newest sequence as of the front's request for the serving copy, where a
-	/// subscription made before the track resolved joins; see [`track::Subscriber::requested_sequence`].
-	resolved: Option<u64>,
-	/// Shared by requests waiting for the next splice, then frozen for those requests.
-	answer: Arc<std::sync::OnceLock<Option<u64>>>,
 	/// The id the next stage takes.
 	next_stage: u64,
 }
@@ -197,23 +192,18 @@ impl Producer {
 	/// Serve the track from `copy` from now on, subscribing every reader to it.
 	#[cfg(test)]
 	pub(super) fn serve(&self, copy: track::Consumer) {
-		let resolved = copy.latest_sequence();
-		self.serve_from(copy, None, resolved);
+		self.serve_from(copy, None);
 	}
 
 	/// Serve the track from `copy`, the one `staged` was made for, subscribing every reader
-	/// to it: what was fetched from it is handed out from here on. `resolved` is the newest
-	/// sequence as of the front's request for it.
-	pub(super) fn splice(&self, copy: track::Consumer, staged: Staged, resolved: Option<u64>) {
-		self.serve_from(copy, Some(staged.id), resolved);
+	/// to it: what was fetched from it is handed out from here on.
+	pub(super) fn splice(&self, copy: track::Consumer, staged: Staged) {
+		self.serve_from(copy, Some(staged.id));
 	}
 
-	fn serve_from(&self, copy: track::Consumer, stage: Option<u64>, resolved: Option<u64>) {
+	fn serve_from(&self, copy: track::Consumer, stage: Option<u64>) {
 		if let Ok(mut route) = self.state.write() {
 			route.generation += 1;
-			let _ = route.answer.set(resolved);
-			route.answer = Default::default();
-			route.resolved = resolved;
 			route.copy = Some(copy);
 			route.parked = None;
 			route.spliced = stage;
@@ -325,34 +315,6 @@ impl Consumer {
 	/// The serving route's copy, if any.
 	pub(super) fn serving(&self) -> Option<track::Consumer> {
 		self.state.read().copy.clone()
-	}
-
-	/// The first copy's answer for a request that has no arrival snapshot.
-	pub(super) fn answer(&self) -> Arc<std::sync::OnceLock<Option<u64>>> {
-		let route = self.state.read();
-		if route.copy.is_some() || route.parked.is_some() {
-			Arc::new(std::sync::OnceLock::from(route.resolved))
-		} else {
-			route.answer.clone()
-		}
-	}
-
-	/// Wait for a copy to supply a join snapshot, or for the route to end.
-	pub(super) fn poll_join(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.state
-			.poll(waiter, |route| {
-				if route.copy.is_some() || route.parked.is_some() || route.phase.terminal() {
-					Poll::Ready(())
-				} else {
-					Poll::Pending
-				}
-			})
-			.map(|_| ())
-	}
-
-	/// The newest sequence as of the front's request for the serving copy, as it was spliced.
-	pub(super) fn resolved(&self) -> Option<u64> {
-		self.state.read().resolved
 	}
 
 	/// The copy the front parked, while it serves none and may still serve one again.
@@ -965,6 +927,14 @@ impl Subscriber {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn latest(&self) -> Option<u64> {
 		self.reader().latest()
+	}
+
+	/// Whether the copy serving, or parked, was received from a remote publisher.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn is_received(&self) -> bool {
+		let reader = self.reader();
+		let copy = reader.route.serving().or_else(|| reader.route.parked());
+		copy.is_some_and(|copy| copy.is_received())
 	}
 
 	/// Poll for a largest location within `bounds` newer than `seen`; see [`Consumer::poll_largest`].
@@ -2559,61 +2529,22 @@ mod test {
 			.accept(crate::track::Info::timed())
 	}
 
+	/// A front's reader is fed remotely when its serving copy is, or its parked one.
 	#[test]
-	fn a_wire_join_waits_for_a_copy_despite_retained_metadata() {
+	fn a_front_reader_is_received_through_its_copy() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
-		let pending = logical.consume().subscribe(None);
-		let noop = kio::Waiter::noop();
-		assert!(pending.poll_wire(&noop).is_pending());
-		let copy = copy();
-		copy.create_group(group::Info { sequence: 7 })
-			.unwrap()
-			.finish()
-			.unwrap();
-		routes.serve(copy.consume());
-		copy.create_group(group::Info { sequence: 8 })
-			.unwrap()
-			.finish()
-			.unwrap();
-		let Poll::Ready(Ok(sub)) = pending.poll_wire(&noop) else {
-			panic!("the copy supplies the snapshot");
-		};
-		assert_eq!(sub.requested_sequence(), Some(7));
-	}
-
-	#[test]
-	fn a_pending_wire_join_keeps_the_first_answer_across_splices() {
-		let routes = Producer::new();
-		let logical = logical(&routes);
-		let pending = logical.consume().subscribe(None);
-		let info = pending.info();
-		let first = copy();
-		first
-			.create_group(group::Info { sequence: 7 })
-			.unwrap()
-			.finish()
-			.unwrap();
-		routes.serve(first.consume());
+		let reader = subscribe(&logical, Duration::from_secs(1));
+		assert!(!reader.is_received(), "no copy serves yet");
+		let local = copy();
+		routes.serve(local.consume());
+		assert!(!reader.is_received(), "a local copy");
+		let remote = copy();
+		remote.received();
+		routes.serve(remote.consume());
+		assert!(reader.is_received(), "a received copy");
 		routes.park();
-		routes.unpark();
-		let second_pending = logical.consume().subscribe(None);
-		let second = copy();
-		second
-			.create_group(group::Info { sequence: 9 })
-			.unwrap()
-			.finish()
-			.unwrap();
-		routes.serve(second.consume());
-		let Poll::Ready(Ok(first_sub)) = pending.poll_wire(&kio::Waiter::noop()) else {
-			panic!("first answer");
-		};
-		let Poll::Ready(Ok(second_sub)) = second_pending.poll_wire(&kio::Waiter::noop()) else {
-			panic!("second answer");
-		};
-		assert_eq!(first_sub.requested_sequence(), Some(7));
-		assert_eq!(info.requested_sequence(), Some(7));
-		assert_eq!(second_sub.requested_sequence(), Some(9));
+		assert!(reader.is_received(), "a parked received copy");
 	}
 
 	fn subscribe(logical: &track::Producer, max_delay: Duration) -> track::Subscriber {
@@ -3629,7 +3560,7 @@ mod test {
 		);
 
 		let _logical = logical.accept(crate::track::Info::timed());
-		routes.splice(copy.consume(), staged, None);
+		routes.splice(copy.consume(), staged);
 		let mut fetched = fetching.now_or_never().expect("spliced").unwrap();
 		assert_eq!(read(&mut fetched), Some(b"early".to_vec()));
 	}
@@ -3666,7 +3597,7 @@ mod test {
 		group.write_frame(ts(0), b"right".as_ref()).unwrap();
 		group.finish().unwrap();
 		let _logical = logical.accept(crate::track::Info::timed());
-		routes.splice(copy.consume(), staged, None);
+		routes.splice(copy.consume(), staged);
 		let mut fetched = fetching.now_or_never().expect("spliced").unwrap();
 		assert_eq!(read(&mut fetched), Some(b"right".to_vec()));
 	}

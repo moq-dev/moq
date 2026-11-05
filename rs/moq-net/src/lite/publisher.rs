@@ -123,6 +123,12 @@ fn serving_max_delay(version: Version, requested: Duration) -> Option<Duration> 
 	version.carries_max_delay().then_some(requested)
 }
 
+/// How long a lite-03/04 join on a received copy that held no group on arrival waits past the
+/// answer before it takes the newest group as the live edge. Lite01-06 answers carry no
+/// largest group (lite-03/04's SUBSCRIBE_OK names only the requested start), so the newest
+/// group to arrive soon after the answer stands in, and a later one older than it is skipped.
+const SETTLE: Duration = Duration::from_millis(50);
+
 /// The floor of a subscription's read cursor for the wire serving it.
 ///
 /// On lite-06 there is nothing to do: `Consumer::subscribe` resolves the cursor from the
@@ -135,14 +141,14 @@ fn serving_max_delay(version: Version, requested: Duration) -> Option<Duration> 
 /// an unbounded budget so nothing is dropped under them (see [`serving_max_delay`]), which
 /// must not read as a request to replay the whole cache on join.
 ///
-/// `latest` is the newest group when the SUBSCRIBE arrived, not once the subscription
-/// resolved: anything written in between is newer, so it is delivered. On lite03-05, a
-/// SUBSCRIBE on a copy still resolving (fetching upstream, served on request, or alongside
-/// its TRACK on lite-05) learns that newest group from the answer: the newest the copy held
-/// once it resolved ([`track::Subscriber::requested_sequence`]), or the first group when it
-/// held none. Cached history below it is skipped, and anything written after it, even in
-/// response to this subscription's demand, is delivered. Lite01/02 keep a zero floor when no
-/// group was known on arrival.
+/// `latest` is the newest group when the SUBSCRIBE arrived: anything written since is newer,
+/// so it is delivered. A SUBSCRIBE that found none, such as one that beat its track resolving,
+/// takes the newest group once the track resolves. On a lite-03/04 copy received from a
+/// remote publisher that group is not what the source's answer brings, but an older one
+/// cached or none yet: the join waits [`SETTLE`] past the answer and starts at the newest group
+/// known by then, which includes the largest a source's answer reported (lite-07's
+/// SUBSCRIBE_START, moq-transport's SUBSCRIBE_OK). Lite01/02 keep a zero floor when no group
+/// was known on arrival.
 fn cursor_floor(version: Version, start_group: Option<u64>, latest: Option<u64>) -> u64 {
 	if version.resolves_start() || start_group.is_some() {
 		return 0;
@@ -2278,6 +2284,17 @@ enum SubscribeServe {
 		update: Option<LiveUpdate>,
 		legacy: Option<Box<Legacy>>,
 	},
+	/// A lite-03/04 join on a received copy, waiting [`SETTLE`] past the answer for the newest
+	/// group it brings; see [`cursor_floor`].
+	Settle {
+		/// Boxed: the request is far larger than the other states' handles.
+		msg: Box<lite::Subscribe<'static>>,
+		bounds: Bounds,
+		track: Box<track::Subscriber>,
+		due: crate::time::Deadline,
+		update: Option<LiveUpdate>,
+		legacy: Option<Box<Legacy>>,
+	},
 	/// Streaming groups. Boxed: by far the largest state, and the enum is moved on every
 	/// transition.
 	Run(Box<TrackRun>),
@@ -2357,7 +2374,9 @@ impl Request for SubscribeServe {
 
 	fn update(&mut self, update: LiveUpdate) {
 		match self {
-			Self::Query { update: pending, .. } | Self::Confirm { update: pending, .. } => *pending = Some(update),
+			Self::Query { update: pending, .. }
+			| Self::Confirm { update: pending, .. }
+			| Self::Settle { update: pending, .. } => *pending = Some(update),
 			Self::Run(run) => run.update(update),
 			Self::Datagrams {
 				consumer,
@@ -2433,7 +2452,7 @@ impl Request for SubscribeServe {
 					subscribing, legacy, ..
 				} => {
 					let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
-					let track = match subscribing.poll_wire(waiter) {
+					let track = match subscribing.poll_ok(waiter) {
 						Poll::Ready(track) => track,
 						Poll::Pending => {
 							let consumer = ready!(Legacy::poll_datagrams(legacy, waiter));
@@ -2474,68 +2493,53 @@ impl Request for SubscribeServe {
 							continue;
 						}
 					};
-					crate::ietf::flate::egress(track.info(), shared.version.has_compression())?;
-
-					// `None` omits the per-frame timestamp prefix: an untimed track on
-					// Lite07+, or any track before Lite05 (whose frames still carry
-					// timestamps in the model, just not on this wire).
-					let stamp = Stamp::new(shared.version, track.info().timescale);
-
-					// Lite05+ accepts implicitly: no SUBSCRIBE_OK, the immutable properties
-					// live in TRACK_INFO, and the resolved range arrives as
-					// SUBSCRIBE_START/END from the run loop. Older drafts still acknowledge
-					// with SUBSCRIBE_OK here.
-					if !shared.version.has_track_stream() {
-						let info = lite::SubscribeOk {
-							priority: msg.priority,
-							max_delay: Duration::ZERO,
-							start_group: None,
-							end_group: None,
+					// A copy's newest group then is not what its source's answer brings: an older
+					// one cached, or none yet.
+					if latest.is_none()
+						&& bounds.groups().start().is_none()
+						&& matches!(shared.version, Version::Lite03 | Version::Lite04)
+						&& track.is_received()
+					{
+						*self = Self::Settle {
+							msg,
+							bounds,
+							track: Box::new(track),
+							due: crate::time::Deadline::after(&shared.runtime, SETTLE),
+							update,
+							legacy,
 						};
-						writer.buffer(&lite::SubscribeResponse::Ok(info))?;
+						continue;
 					}
-
-					// Track-level subscriber priority and group order. SUBSCRIBE_UPDATE
-					// messages broadcast new values to the run loop (so future groups inherit
-					// them) and the in-flight group machines (so they update via
-					// PriorityHandle::steer).
-					let steer = Steer {
-						priority: msg.priority,
-						order: msg.order,
-					};
-					let steer_tx = kio::Producer::new(steer);
-
-					let session = shared.session.clone();
-					let publisher = track.info().priority;
-					let timescale = track.info().timescale;
-					let group = session.send_group(crate::priority::group(msg.priority, publisher));
-					let sub = Subscription {
-						session,
-						id: msg.id,
-						track_name: Arc::from(track.name()),
-						priority: shared.priority.clone(),
-						publisher,
-						group,
-						steer: steer_tx.consume(),
-						steer_seen: steer,
-						version: shared.version,
-						stamp,
-						runtime: shared.runtime.clone(),
-						outcomes: Default::default(),
-						ietf,
-					};
-
+					// A local track's newest group once it resolves is its answer's.
 					let latest = match shared.version {
 						Version::Lite01 | Version::Lite02 => latest,
-						_ => latest.or_else(|| track.requested_sequence()),
+						_ => latest.or_else(|| track.latest_sequence()),
 					};
-					let floor = cursor_floor(shared.version, bounds.groups().start(), latest);
-					let mut run = TrackRun::new(sub, track, bounds, floor, steer_tx);
-					run.datagrams = LegacyDatagrams::join(legacy, msg.id, msg.priority, timescale);
-					if let Some(update) = update {
-						run.update(update);
-					}
-					*self = Self::Run(Box::new(run));
+					*self = Self::run(shared, *msg, bounds, track, latest, update, legacy, ietf, writer)?;
+				}
+				Self::Settle { due, .. } => {
+					let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
+					ready!(due.poll(waiter));
+					let Self::Settle {
+						msg,
+						bounds,
+						mut track,
+						update,
+						legacy,
+						..
+					} = std::mem::replace(
+						self,
+						Self::Drain {
+							children: Default::default(),
+							_track: None,
+						},
+					)
+					else {
+						unreachable!()
+					};
+					// Past what the cache holds once the source reported a newer group.
+					let latest = track.peek_largest().map(|largest| largest.group);
+					*self = Self::run(shared, *msg, bounds, *track, latest, update, legacy, ietf, writer)?;
 				}
 				Self::Run(run) => {
 					// One datagram a step, beside the groups.
@@ -2955,6 +2959,80 @@ impl SubscribeServe {
 			update,
 			legacy,
 		}
+	}
+
+	/// Serve the confirmed `track` from `latest`, the newest group as the join starts; see
+	/// [`cursor_floor`].
+	#[allow(clippy::too_many_arguments)]
+	fn run(
+		shared: &Shared,
+		msg: lite::Subscribe<'static>,
+		bounds: Bounds,
+		track: track::Subscriber,
+		latest: Option<u64>,
+		update: Option<LiveUpdate>,
+		legacy: Option<Box<Legacy>>,
+		ietf: bool,
+		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
+	) -> Result<Self, Error> {
+		crate::ietf::flate::egress(track.info(), shared.version.has_compression())?;
+
+		// `None` omits the per-frame timestamp prefix: an untimed track on
+		// Lite07+, or any track before Lite05 (whose frames still carry
+		// timestamps in the model, just not on this wire).
+		let stamp = Stamp::new(shared.version, track.info().timescale);
+
+		// Lite05+ accepts implicitly: no SUBSCRIBE_OK, the immutable properties
+		// live in TRACK_INFO, and the resolved range arrives as
+		// SUBSCRIBE_START/END from the run loop. Older drafts still acknowledge
+		// with SUBSCRIBE_OK here.
+		if !shared.version.has_track_stream() {
+			let info = lite::SubscribeOk {
+				priority: msg.priority,
+				max_delay: Duration::ZERO,
+				start_group: None,
+				end_group: None,
+			};
+			writer.buffer(&lite::SubscribeResponse::Ok(info))?;
+		}
+
+		// Track-level subscriber priority and group order. SUBSCRIBE_UPDATE
+		// messages broadcast new values to the run loop (so future groups inherit
+		// them) and the in-flight group machines (so they update via
+		// PriorityHandle::steer).
+		let steer = Steer {
+			priority: msg.priority,
+			order: msg.order,
+		};
+		let steer_tx = kio::Producer::new(steer);
+
+		let session = shared.session.clone();
+		let publisher = track.info().priority;
+		let timescale = track.info().timescale;
+		let group = session.send_group(crate::priority::group(msg.priority, publisher));
+		let sub = Subscription {
+			session,
+			id: msg.id,
+			track_name: Arc::from(track.name()),
+			priority: shared.priority.clone(),
+			publisher,
+			group,
+			steer: steer_tx.consume(),
+			steer_seen: steer,
+			version: shared.version,
+			stamp,
+			runtime: shared.runtime.clone(),
+			outcomes: Default::default(),
+			ietf,
+		};
+
+		let floor = cursor_floor(shared.version, bounds.groups().start(), latest);
+		let mut run = TrackRun::new(sub, track, bounds, floor, steer_tx);
+		run.datagrams = LegacyDatagrams::join(legacy, msg.id, msg.priority, timescale);
+		if let Some(update) = update {
+			run.update(update);
+		}
+		Ok(Self::Run(Box::new(run)))
 	}
 
 	/// Serve `msg` from the name's datagram track, at the priority of its latest `update`.
@@ -9460,18 +9538,46 @@ mod tests {
 		}
 	}
 
-	/// A join on an unresolved copy floors at the newest group as of its request, which the
-	/// answer gives: history the answer holds is skipped, and groups written after it, even
-	/// before the subscription is served, are delivered. Named starts and joins whose live
-	/// edge was already known keep their original floor.
+	/// A lite-03/04 join that beats a received copy resolving waits [`SETTLE`] past the
+	/// answer and starts at the newest group known by then: one the answer reported but has
+	/// yet to deliver, or the newest delivered. A later group older than it is skipped, while
+	/// groups first arriving past the settle are all delivered. A local track's join, and any
+	/// on lite-05, starts at the newest group as it resolves. Named starts, lite-06, and joins
+	/// whose newest group was known on arrival keep their floors.
 	#[kio::test]
-	async fn a_pending_subscribe_joins_where_the_answer_stood() {
+	async fn a_pending_subscribe_joins_the_newest_group_after_the_answer() {
 		use crate::lite::test_transport::{Log, Sent};
 
+		enum Answer {
+			/// Groups 0, 3, and 7 written before the SUBSCRIBE arrives.
+			Resolved,
+			/// The answer holds groups 0, 3, and 7.
+			Cached,
+			/// Groups 0, 3, and 7 arrive within the settle.
+			Settling,
+			/// The answer holds group 3 and reports group 9 as its largest.
+			Reported,
+			/// Groups 0, 3, and 7 arrive only past the settle.
+			Late,
+		}
+
+		fn write(track: &mut track::Producer, sequences: &[u64]) {
+			for &sequence in sequences {
+				let mut group = track.create_group(group::Info { sequence }).unwrap();
+				group.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
+				group.finish().unwrap();
+			}
+		}
+
 		for version in [Version::Lite03, Version::Lite04, Version::Lite05, Version::Lite06] {
-			// Unresolved on arrival: whether the answer holds the groups, or they follow it.
-			for (unresolved, cached) in [(true, true), (true, false), (false, false)] {
-				for start in [None, Some(0)] {
+			for answer in [
+				Answer::Resolved,
+				Answer::Cached,
+				Answer::Settling,
+				Answer::Reported,
+				Answer::Late,
+			] {
+				for (start, received) in [(None, false), (None, true), (Some(0), true)] {
 					let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 					let broadcast = origin.create_broadcast("room").unwrap();
 					let mut dynamic = broadcast.requests();
@@ -9480,16 +9586,16 @@ mod tests {
 					let held = copy.info().into_inner();
 					assert!(held.poll_ok(&kio::Waiter::noop()).is_pending());
 					let request = dynamic.requested_track().await.unwrap();
-					let staged = request.stage(track::Info::timed());
-					if !unresolved {
-						for sequence in [0, 3] {
-							let mut group = staged.create_group(group::Info { sequence }).unwrap();
-							group.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
-							group.finish().unwrap();
-						}
+					let mut staged = Some(request.stage(track::Info::timed()));
+					if received {
+						staged.as_ref().unwrap().received();
 					}
-					let mut staged = Some(staged);
-					let mut track = (!unresolved).then(|| staged.take().unwrap().commit());
+					let mut track = None;
+					if let Answer::Resolved = answer {
+						let mut resolved = staged.take().unwrap().commit();
+						write(&mut resolved, &[0, 3]);
+						track = Some(resolved);
+					}
 
 					let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
 					peer_setup.set(crate::lite::Setup::default());
@@ -9526,46 +9632,61 @@ mod tests {
 						crate::transport::boxed::SendStream::new(SinkSend::new(Log::default())),
 						version,
 					);
-					if unresolved {
-						assert!(
-							serve
-								.poll(&publisher.shared, &mut writer, &kio::Waiter::noop())
-								.is_pending()
-						);
-					}
-					// The answer exposes retained history below the live edge, and advertises
-					// a source start below it. A join must use the newest group, not either.
-					// An answer without them is followed by them, before the join is served.
-					if unresolved && !cached {
-						track = Some(staged.take().unwrap().commit());
-					}
-					let producer = match &mut track {
-						Some(track) => track,
-						None => &mut *staged.as_mut().unwrap(),
-					};
-					producer.start_at(0).unwrap();
-					for &sequence in if unresolved { &[0, 3, 7][..] } else { &[7][..] } {
-						let mut group = producer.create_group(group::Info { sequence }).unwrap();
-						group.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
-						group.finish().unwrap();
-					}
-					if cached {
-						track = Some(staged.take().unwrap().commit());
-					}
-					let track = track.unwrap();
-					let outcome = kio::clock::timeout(
-						Duration::from_millis(1),
-						kio::wait(|waiter| {
-							loop {
-								match ready!(serve.poll(&publisher.shared, &mut writer, waiter))? {
-									ControlFlow::Continue(()) => {}
-									ControlFlow::Break(()) => return Poll::Ready(Ok::<_, Error>(())),
+					// Serve for `wait`: a live subscription never ends on its own.
+					let mut drive = async |wait: Duration| {
+						let outcome = kio::clock::timeout(
+							wait,
+							kio::wait(|waiter| {
+								loop {
+									match ready!(serve.poll(&publisher.shared, &mut writer, waiter))? {
+										ControlFlow::Continue(()) => {}
+										ControlFlow::Break(()) => return Poll::Ready(Ok::<_, Error>(())),
+									}
 								}
-							}
-						}),
-					)
-					.await;
-					assert!(outcome.is_err(), "the live subscription ended");
+							}),
+						)
+						.await;
+						assert!(outcome.is_err(), "the live subscription ended");
+					};
+					drive(Duration::from_millis(1)).await;
+
+					let mut track = match answer {
+						Answer::Resolved => {
+							let mut track = track.take().unwrap();
+							write(&mut track, &[7]);
+							track
+						}
+						Answer::Cached => {
+							let mut staged = staged.take().unwrap();
+							write(&mut *staged, &[0, 3, 7]);
+							staged.commit()
+						}
+						Answer::Settling => {
+							let mut track = staged.take().unwrap().commit();
+							drive(Duration::from_millis(10)).await;
+							write(&mut track, &[0, 3, 7]);
+							track
+						}
+						Answer::Reported => {
+							let mut staged = staged.take().unwrap();
+							write(&mut *staged, &[3]);
+							staged.report_largest(track::Position::group(9));
+							staged.commit()
+						}
+						Answer::Late => {
+							let track = staged.take().unwrap().commit();
+							drive(SETTLE * 2).await;
+							track
+						}
+					};
+					drive(SETTLE * 2).await;
+					match answer {
+						Answer::Late => write(&mut track, &[0, 3, 7]),
+						Answer::Reported => write(&mut track, &[7, 9]),
+						_ => {}
+					}
+					drive(Duration::from_millis(1)).await;
+
 					let mut streams = std::collections::BTreeMap::<_, Vec<u8>>::new();
 					for (id, sent) in log.trail() {
 						if let Sent::Write(bytes) = sent {
@@ -9583,17 +9704,24 @@ mod tests {
 						})
 						.collect::<Vec<_>>();
 					sequences.sort();
-					let expected = if start.is_some() || version.resolves_start() || (unresolved && !cached) {
-						vec![0, 3, 7]
-					} else if unresolved {
-						vec![7]
-					} else {
-						vec![3, 7]
+					let all: &[u64] = match answer {
+						Answer::Reported => &[3, 7, 9],
+						_ => &[0, 3, 7],
 					};
-					assert_eq!(
-						sequences, expected,
-						"{version}, unresolved={unresolved}, cached={cached}, start={start:?}"
-					);
+					let settles = received && matches!(version, Version::Lite03 | Version::Lite04);
+					let expected: &[u64] = if start.is_some() || version.resolves_start() {
+						all
+					} else {
+						match answer {
+							Answer::Resolved => &[3, 7],
+							Answer::Cached => &[7],
+							Answer::Settling | Answer::Reported if !settles => all,
+							Answer::Settling => &[7],
+							Answer::Reported => &[9],
+							Answer::Late => &[0, 3, 7],
+						}
+					};
+					assert_eq!(sequences, expected, "{version}, start={start:?}, received={received}");
 					track.abort(Error::Cancel).unwrap();
 				}
 			}

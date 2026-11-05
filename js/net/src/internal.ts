@@ -268,11 +268,8 @@ export interface ResumeShell {
 	readonly closed: GetPromise<Error | null>;
 	/** The properties the first copy committed, if any yet. */
 	info(): Info | undefined;
-	/**
-	 * Commit the logical track's properties, once, with the newest group the committing copy
-	 * found as of its request (see `hooks.requestedSequence`).
-	 */
-	commit(info: Info, requested: bigint | undefined): void;
+	/** Commit the logical track's properties, once. */
+	commit(info: Info): void;
 	/** End the logical track: cleanly, or with `abort`. */
 	close(abort?: Error): void;
 }
@@ -372,6 +369,8 @@ export interface ResumeSource {
 	forgetPastBudget(delivered: Delivered): void;
 	/** The newest sequence any copy has seen. */
 	latest(): bigint | undefined;
+	/** Whether a wire subscription feeds the serving copy. */
+	received(): boolean;
 	/** The serving copy's declared start, raised to its cursor floor, or `"pending"` until resolved. */
 	start(): bigint | "pending" | undefined;
 	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
@@ -552,12 +551,10 @@ export const hooks: {
 	/** Snapshot the latest group sequence for wire positioning; assigned by `track.ts`. */
 	latestSequence: (subscriber: Subscriber) => bigint | undefined;
 	/**
-	 * The newest group as of the subscription's request, once its info resolved: the track's
-	 * newest then, or, for a track still resolving then, the newest its answer held. Nothing
-	 * written since counts, even in response to the subscription's own demand. Assigned by
-	 * `track.ts`.
+	 * Whether a wire subscription feeds the subscriber's track, or a front's serving copy;
+	 * assigned by `track.ts`.
 	 */
-	requestedSequence: (subscriber: Subscriber) => bigint | undefined;
+	received: (subscriber: Subscriber) => boolean;
 	/**
 	 * The source's declared start, raised to the subscriber's cursor floor, or `"pending"` while
 	 * the upstream START that resolves it has yet to arrive; assigned by `track.ts`.
@@ -839,7 +836,7 @@ export const hooks: {
 	latestSequence: () => {
 		throw new Error("track.ts not loaded");
 	},
-	requestedSequence: () => {
+	received: () => {
 		throw new Error("track.ts not loaded");
 	},
 	sourceStart: () => {

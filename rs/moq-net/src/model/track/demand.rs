@@ -209,10 +209,6 @@ struct Preference {
 	subscriptions: Option<kio::Lock<Subscriptions>>,
 	/// Bumped under the write whenever the ranges change.
 	ranges_revision: AtomicU64,
-	/// The track's newest sequence when the subscription was requested, set only if the track
-	/// had resolved by then; see `TrackState::requested`.
-	requested: std::sync::OnceLock<Option<u64>>,
-	answer: std::sync::OnceLock<Arc<std::sync::OnceLock<Option<u64>>>>,
 }
 
 impl Preferences {
@@ -227,8 +223,6 @@ impl Preferences {
 			value: kio::Producer::new(value),
 			subscriptions,
 			ranges_revision: AtomicU64::new(0),
-			requested: Default::default(),
-			answer: Default::default(),
 		}))
 	}
 
@@ -269,20 +263,6 @@ impl Preferences {
 	pub(in crate::model) fn consume(&self) -> kio::Consumer<Subscription> {
 		self.0.value.consume()
 	}
-	/// Record the track's newest sequence as the subscription is requested, once.
-	pub(in crate::model) fn set_requested(&self, newest: Option<u64>) {
-		let _ = self.0.requested.set(newest);
-	}
-	/// The track's newest sequence when the subscription was requested, if it had resolved.
-	pub(in crate::model) fn requested(&self) -> Option<Option<u64>> {
-		self.0.requested.get().or_else(|| self.0.answer.get()?.get()).copied()
-	}
-	pub(in crate::model) fn answer(&self) -> Option<Arc<std::sync::OnceLock<Option<u64>>>> {
-		self.0.answer.get().cloned()
-	}
-	pub(in crate::model) fn set_answer(&self, answer: Arc<std::sync::OnceLock<Option<u64>>>) {
-		let _ = self.0.answer.set(answer);
-	}
 	pub(in crate::model) fn poll_ref<F, R>(
 		&self,
 		waiter: &kio::Waiter,
@@ -311,8 +291,6 @@ impl From<kio::Producer<Subscription>> for Preferences {
 			value,
 			subscriptions: None,
 			ranges_revision: AtomicU64::new(0),
-			requested: Default::default(),
-			answer: Default::default(),
 		}))
 	}
 }

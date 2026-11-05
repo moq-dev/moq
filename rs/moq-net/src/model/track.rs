@@ -421,10 +421,6 @@ pub(crate) struct TrackState {
 	// relative starts count back from (see `latest_live`).
 	newest_produced: Option<u64>,
 
-	// `max_sequence` when waiting subscribers first resolved, or `None` before then; see
-	// `TrackState::request_answered`.
-	resolved: Option<Option<u64>>,
-
 	// The checked starts cached groups hold, by sequence (see [`group::Origin::Bound`]), so a
 	// first frame finds its neighbors without walking groups not yet stamped. Filled through
 	// the read guard a first frame holds, so it needs its own lock, never contended.
@@ -1203,7 +1199,6 @@ impl TrackState {
 	fn commit(&mut self) {
 		debug_assert_eq!(self.publication, Publication::Staged, "only a staged track commits");
 		self.publication = Publication::Published;
-		self.resolve();
 	}
 
 	/// Mint the Producer and resolve waiting subscribers at once.
@@ -2112,51 +2107,6 @@ impl TrackState {
 		// A replaced max age moves every parked read's budget.
 		if self.info.replace(info).is_some() {
 			self.cache.wakes().wake_all();
-		}
-		if self.publication != Publication::Staged {
-			self.resolve();
-		}
-	}
-
-	/// Record the newest sequence as waiting subscribers resolve (see [`Self::poll_info`]),
-	/// the first time they do.
-	fn resolve(&mut self) {
-		self.resolved.get_or_insert(self.max_sequence);
-	}
-
-	/// The newest sequence as of a request made now: `Some` with it (`None` within for none)
-	/// once the track resolved, or `None` while it still resolves, when [`Self::request_answered`]
-	/// says once it does. A logical track reads the copy serving it, or the parked one.
-	fn requested(state: &kio::Consumer<Self>) -> Option<Option<u64>> {
-		let (ready, max, routes) = {
-			let state = state.read();
-			(state.poll_info().is_ready(), state.max_sequence, state.routes.clone())
-		};
-		if !ready {
-			return None;
-		}
-		// Read outside the track's lock: the copy has a lock of its own.
-		match routes {
-			Some(routes) => routes
-				.serving()
-				.or_else(|| routes.parked())
-				.map(|copy| copy.latest_sequence()),
-			None => Some(max),
-		}
-	}
-
-	/// The newest sequence a request made while the track was still resolving finds in its
-	/// answer: what the track held once it resolved, or a logical track's serving copy as of
-	/// the front's own request for it. Nothing written after the answer counts, even in
-	/// response to the request's own demand: it is newer, so it is delivered.
-	fn request_answered(state: &kio::Consumer<Self>) -> Option<u64> {
-		let (resolved, routes) = {
-			let state = state.read();
-			(state.resolved.flatten(), state.routes.clone())
-		};
-		match routes {
-			Some(routes) => routes.resolved(),
-			None => resolved,
 		}
 	}
 
@@ -3941,7 +3891,6 @@ impl Producer {
 		// subscriber surfaces the close/abort on its first read; the preferences are
 		// simply never registered (nothing aggregates them anymore).
 		let info = self.info.clone();
-		let requested = self.state.read().max_sequence;
 		let subscription = Preferences::register(self.state.read(), preferences);
 
 		// Hoisted: an inline `read()` guard would live to the end of the struct literal,
@@ -3952,7 +3901,6 @@ impl Producer {
 			broadcast,
 			info,
 			inner: Inner::Plain(Cursor::new(self.state.consume(), subscription)),
-			requested,
 			delivered: Delivered::default(),
 			// A producer-side (in-process) subscribe is not egress: stay untagged.
 			stats: stats::Scope::default(),
@@ -4854,11 +4802,6 @@ impl Consumer {
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Pending<Subscribing> {
 		let (state, subscription) = self.resolve(Some(&subscription.into().unwrap_or_default()));
 		let subscription = subscription.expect("a subscription was requested");
-		if let Some(newest) = TrackState::requested(&state) {
-			subscription.set_requested(newest);
-		} else if let Some(routes) = state.read().routes.clone() {
-			subscription.set_answer(routes.answer());
-		}
 
 		kio::Pending::new(Subscribing {
 			name: self.name.clone(),
@@ -5289,14 +5232,10 @@ impl Consumer {
 	/// for a relay), and errors with the track's abort error if it closes first.
 	/// [`Subscriber::info`] is the already-resolved counterpart.
 	pub fn info(&self) -> kio::Pending<Resolving> {
-		let state = self.resolve(None).0;
-		let answer = state.read().routes.as_ref().map(|routes| routes.answer());
 		kio::Pending::new(Resolving {
 			name: self.name.clone(),
 			broadcast: self.broadcast.clone(),
-			requested: TrackState::requested(&state),
-			answer,
-			state,
+			state: self.resolve(None).0,
 			stats: self.stats.clone(),
 		})
 	}
@@ -5351,6 +5290,16 @@ impl Consumer {
 			return serving.latest_sequence();
 		}
 		self.with_state(|state| state?.read().max_sequence)
+	}
+
+	/// Whether a remote publisher feeds this track: a copy received from one, or a front's
+	/// track it serves through one.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn is_received(&self) -> bool {
+		if let Some(serving) = self.serving() {
+			return serving.is_received();
+		}
+		self.with_state(|state| state.is_some_and(|state| state.read().received))
 	}
 
 	/// The first group the declared end excludes whole, or `None` while the track is open ended.
@@ -5420,20 +5369,8 @@ impl Subscribing {
 			name: self.name.clone(),
 			broadcast: self.broadcast.clone(),
 			state: self.state.clone(),
-			requested: self.subscription.requested(),
-			answer: self.subscription.answer(),
 			stats: self.stats.clone(),
 		}
-	}
-
-	/// Wait for a front's copy before pinning a wire join from retained metadata.
-	pub(crate) fn poll_wire(&self, waiter: &kio::Waiter) -> Poll<Result<Subscriber>> {
-		if self.subscription.requested().is_none()
-			&& let Some(routes) = self.state.read().routes.clone()
-		{
-			ready!(routes.poll_join(waiter));
-		}
-		self.poll_ok(waiter)
 	}
 
 	/// Poll until the peer confirms the subscription, yielding the [`Subscriber`].
@@ -5460,10 +5397,6 @@ impl Subscribing {
 			broadcast: self.broadcast.clone(),
 			info,
 			inner,
-			requested: self
-				.subscription
-				.requested()
-				.unwrap_or_else(|| TrackState::request_answered(&self.state)),
 			delivered: Delivered::default(),
 			stats: self.stats.clone(),
 			_stats_sub: self.stats.subscribe(),
@@ -5500,9 +5433,6 @@ pub struct Resolving {
 	name: Arc<str>,
 	broadcast: Arc<broadcast::Info>,
 	state: kio::Consumer<TrackState>,
-	/// The newest sequence when requested, if the track had resolved; see [`TrackState::requested`].
-	requested: Option<Option<u64>>,
-	answer: Option<Arc<std::sync::OnceLock<Option<u64>>>>,
 	stats: stats::Scope,
 }
 
@@ -5524,15 +5454,6 @@ impl Resolving {
 		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
 			.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
 		Poll::Ready(Ok(info))
-	}
-
-	/// The newest sequence as of this request, once [`Self::poll_ok`] is ready; see
-	/// [`Subscriber::requested_sequence`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn requested_sequence(&self) -> Option<u64> {
-		self.requested
-			.or_else(|| self.answer.as_ref()?.get().copied())
-			.unwrap_or_else(|| TrackState::request_answered(&self.state))
 	}
 }
 
@@ -5841,8 +5762,6 @@ pub struct Subscriber {
 	broadcast: Arc<broadcast::Info>,
 	info: Info,
 	inner: Inner,
-	/// The newest sequence as of the request; see [`Self::requested_sequence`].
-	requested: Option<u64>,
 	/// The groups handed out, so none is handed out twice: not when its sequence is
 	/// re-created, nor when another route delivers it too.
 	delivered: Delivered,
@@ -8932,20 +8851,22 @@ impl Subscriber {
 		}
 	}
 
+	/// Whether a remote publisher feeds this track: a copy received from one, or a front's
+	/// logical track served through one.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn is_received(&self) -> bool {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().received,
+			Inner::Resume(resume, _) => resume.is_received(),
+		}
+	}
+
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn latest_sequence(&self) -> Option<u64> {
 		match &self.inner {
 			Inner::Plain(cursor) => cursor.state.read().max_sequence,
 			Inner::Resume(resume, _) => resume.latest(),
 		}
-	}
-
-	/// The newest sequence as of this subscription's request, `None` when there was none;
-	/// see [`TrackState::requested`]. Unlike [`Self::latest_sequence`], nothing written since
-	/// counts, even in response to this subscription's own demand.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn requested_sequence(&self) -> Option<u64> {
-		self.requested
 	}
 
 	/// Join again at the live edge, judged by [`Info::refresh`] like a new subscriber: a
@@ -9484,27 +9405,6 @@ mod test {
 	fn track_producer(name: impl Into<Arc<str>>, info: impl Into<Option<Info>>) -> Producer {
 		let info = info.into().unwrap_or_else(|| Info::default().with_max_age(None));
 		Producer::new(Arc::new(broadcast::Info::default()), name, info)
-	}
-
-	#[test]
-	fn a_provisional_install_is_the_first_visible_answer() {
-		let request = Request::new(Arc::new(broadcast::Info::default()), "test");
-		let consumer = request.consume();
-		let pending = consumer.subscribe(None);
-		{
-			let mut state = request.state.write().ok().unwrap();
-			let _group = state
-				.insert_group_request(3, group::Bounds { start: 0, end: Some(1) }, None)
-				.unwrap();
-			assert!(state.poll_info().is_ready());
-		}
-		let Poll::Ready(Ok(sub)) = pending.poll_ok(&kio::Waiter::noop()) else {
-			panic!("provisional metadata already resolves subscribers");
-		};
-		assert_eq!(sub.requested_sequence(), None);
-		// A later publisher acceptance must not move the first visible answer's boundary.
-		let producer = request.accept(Info::default().with_max_age(None));
-		assert_eq!(TrackState::request_answered(&producer.state.consume()), None);
 	}
 
 	#[test]

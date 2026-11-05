@@ -3297,17 +3297,15 @@ struct TrackIo {
 }
 
 impl TrackIo {
-	/// Serve the track from `asked`'s copy, accepting it with that copy's info. Spliced
-	/// first, so a subscription that resolves with the accept finds the copy it joins.
+	/// Serve the track from `asked`'s copy, accepting it with that copy's info first.
 	fn splice(&mut self, asked: Asked) {
 		self.ready.wake_by_ref();
-		let resolved = asked.query.requested_sequence();
-		self.routes.splice(asked.copy.clone(), asked.staged, resolved);
 		if let Some(info) = asked.info.clone()
 			&& let Some(request) = self.request.take()
 		{
 			self.accepted = Some(request.accept(info));
 		}
+		self.routes.splice(asked.copy.clone(), asked.staged);
 		self.copy = Some((asked.source, asked.copy, asked.query));
 		self.held = asked.sub;
 	}
