@@ -180,7 +180,7 @@ impl Workers {
 				 QUIC-LB server id (listen.lb.id)"
 			);
 		}
-		let tls = match server.tls {
+		let serve = match server.tls {
 			Some(tls) => {
 				// A second configured source must not be silently ignored.
 				anyhow::ensure!(
@@ -238,7 +238,7 @@ impl Workers {
 			.chain([b"h3".to_vec()])
 			.collect();
 		let quic = quic.resolve();
-		let mut tls = tls.config(alpn)?;
+		let mut tls = serve.config(alpn)?;
 		if let Some(path) = &quic.keylog {
 			let tls = Arc::make_mut(&mut tls);
 			tls.key_log = Arc::new(moq_tokio::tls::KeyLog::open(path)?);
@@ -269,7 +269,7 @@ impl Workers {
 			addr,
 			server,
 			window,
-			tls: tls.clone(),
+			tls: serve,
 			udp,
 			pin: config.pin,
 			alpns: Arc::new(alpns),
