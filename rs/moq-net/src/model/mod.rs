@@ -65,6 +65,8 @@ pub mod origin {
 		Config, Consumer, Cost, Driver, HopLimit, Link, Preference, Prepared, Producer, Publication, Request,
 		Requesting, Requests, Route, Source,
 	};
+	pub use crate::route::RouteKey;
+
 	// Relay-level: every route change, for forwarding and stats. Apps read
 	// `announce` and `follow` instead.
 	#[doc(hidden)]
