@@ -892,7 +892,8 @@ rejected every one; no round set that agreed on a slowdown had a median above
 6%. A third run, whose base cut one case's work by a quarter, failed with that
 case alone at +35%. Its rounds also agreed, at medians of +9.3 to +9.7%, on
 `stats/tick` cases whose source was identical on both sides, so 10% is a floor
-rather than a margin. The moq-net and relay groups are not calibrated yet.
+rather than a margin. The `rust-bench` and `rust-relay` groups are not
+calibrated yet.
 
 The table page shows tonight's comparison above the trend: confirmed
 regressions, targets not compared, cases faster in the screen, slowdowns the
@@ -913,9 +914,9 @@ Each run's evidence directory keeps both builds' estimates (`criterion` and
 `paired.json`.
 
 Each revision builds in its own Cargo target directory (`base` and `current`
-under `CARGO_TARGET_DIR`, default `target/bench`). An A/B outside `run.sh`
-uses its base mode or a target directory per source tree: two trees sharing
-one can leave a bench linked against the other tree's library.
+under `CARGO_TARGET_DIR`, default `target/bench`). For an A/B comparison, use
+`run.sh`'s `BENCH_BASE` mode or a target directory per source tree: two trees
+sharing one can leave a bench linked against the other tree's library.
 
 ### CodSpeed
 

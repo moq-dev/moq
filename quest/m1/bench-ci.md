@@ -5,24 +5,28 @@
 The paired Rust Criterion comparison each Nightly runs (see
 [Paired comparison](/bench/README.md#paired-comparison)) fails only on real
 regressions in every paired group: A/A runs on the hosted ARM runners hold its
-threshold, confirmation budget, and round count for moq-net (`rust-bench`)
+threshold, confirmation budget, and round count for `rust-bench`
 and `rust-relay` too, and the rounds stop agreeing on slowdowns in code that
 did not change.
 
 ## Waiting
 
-- Maintainer: authorize one agent dispatch of an A/A Nightly run on `main`
-  (`bench-base` set to its own commit) once
-  [moq-net's benches run to completion](/quest/m1/bench-test-mode.md) lands.
-  Agents dispatch Nightly only under a per-run authorization, since a dispatch
-  cancels any in-progress Nightly through its concurrency group. Neither
-  `rust-bench` nor `rust-relay` produced a `paired.json` in any run so far:
-  moq-net's `memory`, `origin` and `session` benches panic, and `rust-relay`'s
-  session bench includes moq-net's `benches/session/mod.rs` and panics at the
-  same `Evicted`. Check: that run's `bench-rust` and `bench-rust-relay`
-  artifacts each hold a `paired.json`.
+- moq-dev/moq: once [moq-dev/moq#7940](https://github.com/moq-dev/moq/pull/7940)
+  merges, an agent may dispatch exactly one A/A Nightly run on `main`, with
+  `bench-base` set to main's head, under the authorization recorded below.
+  Check: that run's `bench-rust` and `bench-rust-relay` artifacts each hold
+  `paired.json` at the artifact root (the gate's input), rather than only
+  partial `runs/run.*/paired.json` files.
 
 ## Plan
+
+Decided 2026-11-05 (maintainer, /quest-plan): authorize exactly one agent
+dispatch of an A/A Nightly run on `main` once
+[moq-dev/moq#7940](https://github.com/moq-dev/moq/pull/7940) merges:
+`gh workflow run nightly.yml --ref main -f bench-base=<main's head>`.
+Check that `bench-rust` and `bench-rust-relay` each produce an artifact-root
+`paired.json`. A dispatch cancels any in-progress Nightly through its
+concurrency group.
 
 Calibrated 2026-11-05 for the shared, supplemental (`rust-extra`) and io_uring
 groups; `bench/README.md` records the numbers. Threshold 10%, 20
