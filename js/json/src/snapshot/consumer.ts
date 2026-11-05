@@ -19,7 +19,8 @@ const GAPS: Moq.StreamCode[] = [
  * yields each reconstructed value with the timestamp of the frame that produced it. Two reads:
  * {@link next} yields each state in order, skipping every group a newer one supersedes,
  * and {@link latest} skips to the newest state, for a caller that only wants the current value.
- * What {@link latest} skips is gone, so a later {@link next} resumes after it.
+ * What {@link latest} skips is gone, so a later {@link next} resumes after it. Overlapping reads
+ * take turns in call order.
  * When something else already owns the track, use the {@link Decoder} directly.
  *
  * A snapshot is superseded the moment a newer one exists, so the consumer subscribes itself at a
@@ -34,6 +35,8 @@ export class Consumer<T> {
 	#group?: Moq.Group.Consumer;
 	#framesRead = 0;
 	#closed = false;
+	// The read in flight: reads share the group and decoder, so each starts once the last settles.
+	#reading: Promise<unknown> = Promise.resolve();
 
 	constructor(config: Consumer.Config<T>) {
 		this.#track = config.track
@@ -62,7 +65,7 @@ export class Consumer<T> {
 	 * from the next one.
 	 */
 	next(): Promise<Timed<T> | undefined> {
-		return this.#read(false);
+		return this.#queue(false);
 	}
 
 	/**
@@ -75,7 +78,13 @@ export class Consumer<T> {
 	 * when nothing newer than the last yield has arrived.
 	 */
 	latest(): Promise<Timed<T> | undefined> {
-		return this.#read(true);
+		return this.#queue(true);
+	}
+
+	#queue(skip: boolean): Promise<Timed<T> | undefined> {
+		const read = this.#reading.then(() => this.#read(skip));
+		this.#reading = read.catch(() => undefined);
+		return read;
 	}
 
 	async #read(skip: boolean): Promise<Timed<T> | undefined> {
@@ -117,14 +126,14 @@ export class Consumer<T> {
 				if (!(err instanceof Moq.Error.Stream && GAPS.includes(err.code))) throw err;
 				// The group was reset or we fell behind its eviction window. Resync from the next
 				// group, which begins with a fresh snapshot (frame 0), so no partial state is presented.
-				if (this.#group === group) this.#group = undefined;
+				this.#group = undefined;
 				continue;
 			}
 			if (this.#closed) return undefined;
 
 			if (!frame) {
 				// The group is exhausted; advance to the next one.
-				if (this.#group === group) this.#group = undefined;
+				this.#group = undefined;
 				continue;
 			}
 

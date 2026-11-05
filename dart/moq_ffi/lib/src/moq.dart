@@ -11599,10 +11599,12 @@ class MoqJsonSnapshotConsumer implements MoqJsonSnapshotConsumerInterface {
   MoqJsonSnapshotConsumer({
     required MoqBroadcastConsumer broadcast,
     required String name,
+    int priority = 0,
   }) : _ptr = rustCall(
          (status) => uniffi_moq_ffi_fn_constructor_moqjsonsnapshotconsumer_new(
            FfiConverterMoqBroadcastConsumer.lower(broadcast),
            FfiConverterString.lower(name),
+           FfiConverterInt8.lower(priority),
            status,
          ),
          moqExceptionErrorHandler,
@@ -20133,12 +20135,18 @@ external void uniffi_moq_ffi_fn_free_moqjsonsnapshotconsumer(
 );
 
 @Native<
-  Pointer<Void> Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)
+  Pointer<Void> Function(
+    Pointer<Void>,
+    RustBuffer,
+    Int8,
+    Pointer<RustCallStatus>,
+  )
 >(assetId: _uniffiAssetId)
 external Pointer<Void>
 uniffi_moq_ffi_fn_constructor_moqjsonsnapshotconsumer_new(
   Pointer<Void> broadcast,
   RustBuffer name,
+  int priority,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -24096,7 +24104,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqjsonsnapshotconsumer_new() !=
-      49887) {
+      47962) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqjsonsnapshotproducer_new() !=

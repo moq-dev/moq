@@ -155,11 +155,18 @@ type SnapshotConsumer struct {
 	inner *ffi.MoqJsonSnapshotConsumer
 }
 
+// SnapshotConsumerOptions configures a snapshot consumer's subscription.
+type SnapshotConsumerOptions struct {
+	// Priority is the subscription's delivery priority, higher first, as
+	// moq.Subscription.Priority.
+	Priority int8
+}
+
 // NewSnapshotConsumer subscribes to the track named name on broadcast and reads it as a
-// lossy latest-value JSON track. The consumer owns its subscription, at a zero Delay.Max;
-// a read waits for it to resolve and fails if it cannot.
-func NewSnapshotConsumer(broadcast *moq.BroadcastConsumer, name string) (*SnapshotConsumer, error) {
-	inner, err := ffi.NewMoqJsonSnapshotConsumer(bridge.BroadcastConsumer(broadcast), name)
+// lossy latest-value JSON track. The consumer owns its subscription, at a zero Delay.Max
+// and the options' priority; a read waits for it to resolve and fails if it cannot.
+func NewSnapshotConsumer(broadcast *moq.BroadcastConsumer, name string, options SnapshotConsumerOptions) (*SnapshotConsumer, error) {
+	inner, err := ffi.NewMoqJsonSnapshotConsumer(bridge.BroadcastConsumer(broadcast), name, options.Priority)
 	if err != nil {
 		return nil, err
 	}

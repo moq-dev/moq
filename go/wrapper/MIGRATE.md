@@ -18,7 +18,7 @@ Replace stream-track `AppendDatagram` / `InsertDatagram` / `RecvDatagram` with `
 
 ### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
 
-`json.NewSnapshotConsumer(broadcast, name)` takes the `*BroadcastConsumer` and the track name instead of a `*TrackConsumer`, and subscribes to the track itself at a zero `Delay.Max`. Drop the `SubscribeTrack` call; a refused subscription now fails the first read. `Next` skips every group a newer one supersedes, and `Latest` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
+`json.NewSnapshotConsumer(broadcast, name, options)` takes the `*BroadcastConsumer`, the track name, and `SnapshotConsumerOptions` instead of a `*TrackConsumer`, and subscribes to the track itself at a zero `Delay.Max` and the options' `Priority`. Drop the `SubscribeTrack` call; a refused subscription now fails the first read. `Next` skips every group a newer one supersedes, and `Latest` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
 
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 

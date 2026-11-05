@@ -65,7 +65,7 @@ func TestTracks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshotConsumer, err := moqjson.NewSnapshotConsumer(consumer, "status")
+	snapshotConsumer, err := moqjson.NewSnapshotConsumer(consumer, "status", moqjson.SnapshotConsumerOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestDemand(t *testing.T) {
 		t.Fatalf("Wanted = %d before any subscriber", *wanted)
 	}
 
-	snapshotConsumer, err := moqjson.NewSnapshotConsumer(consumer, "status")
+	snapshotConsumer, err := moqjson.NewSnapshotConsumer(consumer, "status", moqjson.SnapshotConsumerOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

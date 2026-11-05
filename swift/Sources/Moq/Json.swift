@@ -91,10 +91,10 @@ extension Json {
         let ffi: MoqJsonSnapshotConsumer
 
         /// Subscribe to the track `name` on `broadcast` and read it as a JSON snapshot track.
-        /// The consumer owns its subscription, at a zero `delay.max`; a read waits for it to
-        /// resolve and throws if it cannot.
-        public init(broadcast: BroadcastConsumer, name: String) throws {
-            ffi = try MoqJsonSnapshotConsumer(broadcast: broadcast.ffi, name: name)
+        /// The consumer owns its subscription, at a zero `delay.max` and `priority` (higher
+        /// first); a read waits for it to resolve and throws if it cannot.
+        public init(broadcast: BroadcastConsumer, name: String, priority: Int8 = 0) throws {
+            ffi = try MoqJsonSnapshotConsumer(broadcast: broadcast.ffi, name: name, priority: priority)
         }
 
         /// The next state in order, or `nil` once the track ends or is closed.

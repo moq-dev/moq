@@ -212,6 +212,25 @@ impl Track {
 }
 
 #[cfg(test)]
+mod subscription {
+	use super::*;
+
+	#[test]
+	fn subscribes_at_the_configured_priority_and_zero_delay() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("data", moq_net::track::Info::default())
+			.unwrap();
+		let mut config = Config::default();
+		config.priority = 5;
+		let _consumer = Consumer::<serde_json::Value>::new(track.consume(), config);
+		let subscription = track.subscription().expect("the consumer subscribed");
+		assert_eq!(subscription.priority, 5);
+		assert_eq!(subscription.delay.max, Some(std::time::Duration::ZERO));
+	}
+}
+
+#[cfg(test)]
 mod timestamps {
 	use super::*;
 

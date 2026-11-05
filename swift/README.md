@@ -94,8 +94,8 @@ not found. lite-07 uses independent requests.
 JSON tracks live under the `Json` namespace, mirroring the `moq-json` crate, and carry your own
 `Codable` types with the framing handled for you. Each type wraps a track: a producer takes over a
 `TrackProducer` and advertises it in the broadcast's catalog, and a consumer takes over a
-`TrackConsumer`, except `Json.SnapshotConsumer(broadcast:name:)`, which subscribes itself at a zero
-`delay.max`. You opt into one of three distinct modes: `Json.SnapshotProducer`/`Json.SnapshotConsumer`
+`TrackConsumer`, except `Json.SnapshotConsumer(broadcast:name:priority:)`, which subscribes itself at a
+zero `delay.max`. You opt into one of three distinct modes: `Json.SnapshotProducer`/`Json.SnapshotConsumer`
 (lossy latest-value, a subscriber only sees the newest value), `Json.StreamProducer`/`Json.StreamConsumer`
 (lossless append-log, every record preserved in order), or `Json.WindowProducer`/`Json.WindowConsumer`
 (a sliding window of records a reader can join at any point, not advertised in the catalog). Values encode/decode at the boundary with

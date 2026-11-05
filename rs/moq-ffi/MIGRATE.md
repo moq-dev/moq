@@ -21,7 +21,7 @@ A received track's `info()` sets `max_age_unlimited` when its publisher advertis
 
 ### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
 
-`MoqJsonSnapshotConsumer::new(broadcast, name)` takes a `MoqBroadcastConsumer` and the track name instead of a `MoqTrackConsumer`, and subscribes to the track itself at a zero `delay.max`. Drop the `subscribe_track` call; a refused subscription now fails the first read. `next()` skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes.
+`MoqJsonSnapshotConsumer::new(broadcast, name, priority)` takes a `MoqBroadcastConsumer`, the track name, and the subscription's priority (default 0) instead of a `MoqTrackConsumer`, and subscribes to the track itself at a zero `delay.max`. Drop the `subscribe_track` call; a refused subscription now fails the first read. `next()` skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes.
 
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 

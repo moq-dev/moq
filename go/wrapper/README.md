@@ -119,7 +119,7 @@ Import it under an alias next to `encoding/json`. Each type wraps a track:
 `NewSnapshotProducer` / `NewStreamProducer` take over a `TrackProducer` and advertise it
 in the broadcast's catalog, `NewStreamConsumer` takes over a `TrackConsumer` that has not
 read a group yet, and `NewSnapshotConsumer` takes the `BroadcastConsumer` and track name and
-subscribes itself at a zero `Delay.Max`. Snapshots carry lossy latest state; streams
+subscribes itself at a zero `Delay.Max` and `SnapshotConsumerOptions.Priority`. Snapshots carry lossy latest state; streams
 carry every record in order. `NewWindowProducer` / `NewWindowConsumer` carry a sliding window
 of records a reader can join at any point; the catalog has no window mode, so the producer
 takes only the track. Producers accept any `encoding/json` value; consumers return
@@ -149,7 +149,8 @@ _ = publication.Announce(moq.AnnounceRoute{})
 ```
 
 Snapshot and window producers take `SnapshotOptions` or `WindowOptions`; the stream producer and
-every consumer take only the track, and a consumer reads a compressed track like a plain one.
+the stream and window consumers take only the track. Every consumer reads a compressed track like a
+plain one.
 
 ## Errors
 

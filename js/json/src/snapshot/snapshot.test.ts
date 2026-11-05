@@ -251,7 +251,28 @@ test("close ends a pending read", async () => {
 	producer.update({ value: { a: 2 } });
 	consumer.close();
 	expect(await Promise.all(pending)).toEqual([undefined, undefined]);
+	// The subscription the consumer owned is gone.
+	expect(track.demand().wanted.peek()).toBeUndefined();
 	expect(await consumer.latest()).toBeUndefined();
+	producer.finish();
+});
+
+// Reads share the consumer's group and decoder, so a read waiting on a group must finish before a
+// later read moves on: otherwise the old group's delta lands on the newer group's snapshot.
+test("overlapping reads take turns", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer<Value>({ track });
+	const consumer = new Consumer<Value>({ track });
+	producer.update({ value: { a: 1, keep: true } });
+	expect((await consumer.next())?.value).toEqual({ a: 1, keep: true });
+
+	const next = consumer.next();
+	producer.update({ value: { a: 2, keep: true } });
+	producer.cut();
+	producer.update({ value: { b: 3 } });
+	const latest = consumer.latest();
+	expect((await next)?.value).toEqual({ a: 2, keep: true });
+	expect((await latest)?.value).toEqual({ b: 3 });
 	producer.finish();
 });
 
