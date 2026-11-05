@@ -2945,8 +2945,8 @@ struct Serving {
 ///
 /// Clones share one route. Dropping the last clone retracts it, and so does closing
 /// its broadcast. The broadcast lives on for the subscriptions already on it for as
-/// long as another of its producer handles does. It keeps the origin's [`Driver`]
-/// running, so a publisher can drop every [`Producer`] and keep serving.
+/// long as another of its producer handles does. The route keeps the origin's
+/// [`Driver`] running, so a publisher can drop every [`Producer`] and keep serving.
 #[derive(Clone)]
 #[must_use = "dropping the last clone of a route retracts it"]
 pub struct Route {

@@ -741,7 +741,10 @@ mod supervision_tests {
 			inner,
 			driver: completion.clone(),
 		});
-		let broadcast = origin.route("retained".into(), hidden()).unwrap().broadcast().unwrap();
+		// The route owns the broadcast, and it is the only handle that keeps the origin
+		// running once the producer is gone.
+		let route = origin.route("retained".into(), hidden()).unwrap();
+		let broadcast = route.broadcast().unwrap();
 		// One importer shares a timebase and one doesn't, so both reservation paths carry the driver.
 		let timebase = MoqMediaTimebase::new(broadcast.clone()).unwrap();
 		let container = MoqMediaContainerProducer::new(
@@ -770,6 +773,8 @@ mod supervision_tests {
 			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
 		assert!(matches!(completion.finished().await, Err(MoqError::Task { .. })));
 		drop(completion);
+		// The origin's last owner is gone too, so only the importers still hold the failure.
+		drop(route);
 		assert!(matches!(container.cut(), Err(MoqError::Task { .. })));
 		assert!(matches!(independent.write(Vec::new()), Err(MoqError::Task { .. })));
 		assert!(matches!(container.finish(), Err(MoqError::Task { .. })));
