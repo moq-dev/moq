@@ -368,16 +368,13 @@ impl<'de, E: CatalogExt> Deserialize<'de> for Catalog<E> {
 						)));
 					}
 
-					match &track.init_data {
-						Some(inline) if inline != &entry.data => {
-							return Err(serde::de::Error::custom(format!(
-								"MSF track {:?} carries conflicting initData and initRef {:?}",
-								track.name, id
-							)));
-						}
-						Some(_) => {}
-						None => track.init_data = Some(entry.data.clone()),
+					if track.init_data.as_ref().is_some_and(|inline| inline != &entry.data) {
+						return Err(serde::de::Error::custom(format!(
+							"MSF track {:?} carries conflicting initData and initRef {:?}",
+							track.name, id
+						)));
 					}
+					track.init_data = Some(entry.data.clone());
 				}
 				track.init_ref = None;
 				Ok(track)
@@ -1059,12 +1056,18 @@ mod test {
 			],
 			"tracks": [
 				{ "name": "video0", "packaging": "cmaf", "isLive": true, "role": "video",
+				  "codec": "avc1.640028", "initData": "AQID", "initRef": "v0" },
+				{ "name": "video1", "packaging": "cmaf", "isLive": true, "role": "video",
 				  "codec": "avc1.640028", "initData": "AQID", "initRef": "v0" }
 			]
 		}"#;
 
 		let catalog = Catalog::<()>::from_str(json).unwrap();
-		assert_eq!(catalog.tracks[0].init_data.as_deref(), Some("AQID"));
+		let first = catalog.tracks[0].init_data.as_ref().unwrap();
+		let second = catalog.tracks[1].init_data.as_ref().unwrap();
+		assert_eq!(first.as_ref(), "AQID");
+		// The matching inline copies are dropped in favor of the shared initRef payload.
+		assert!(Arc::ptr_eq(first, second));
 	}
 
 	#[test]

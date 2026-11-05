@@ -214,6 +214,9 @@ fn container_from_msf(track: &moq_msf::Track, init_cache: &mut InitDataCache) ->
 	}
 }
 
+/// Decoded init data keyed by the shared `Arc<str>` allocation's address and length.
+type InitDataCache = HashMap<(usize, usize), bytes::Bytes>;
+
 /// Base64-decode `track.init_data` into a `Bytes` buffer, propagating a
 /// descriptive error on malformed input. Returns `Ok(None)` when no
 /// `init_data` is present.
@@ -222,8 +225,6 @@ fn container_from_msf(track: &moq_msf::Track, init_cache: &mut InitDataCache) ->
 /// For Legacy/LOC tracks the bytes are the codec-specific decoder
 /// description (e.g. an AVCC/HVCC config record or AAC AudioSpecificConfig)
 /// that downstream decoders need to configure their bitstream parsers.
-type InitDataCache = HashMap<(usize, usize), bytes::Bytes>;
-
 fn decode_init_data(track: &moq_msf::Track, init_cache: &mut InitDataCache) -> Result<Option<bytes::Bytes>> {
 	let Some(b64) = &track.init_data else {
 		return Ok(None);
