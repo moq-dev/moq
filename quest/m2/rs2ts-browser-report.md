@@ -11,7 +11,7 @@ including bundle size, CPU, and first-frame latency.
 Decided 2026-10-12: this broader media report remains in m2. It supplements
 the focused browser comparison required before each backend adoption; it
 cannot replace or postpone that decision evidence. Measure whichever backend
-is deployed, WASM or JS-only, and name the exact revisions and build inputs.
+is deployed and name the exact revisions and build inputs.
 
 Run it as a variant of `bench/browser` (`just bench-browser BASE`), whose A/A
 and injected-copy controls bound variability and which already separates
@@ -23,4 +23,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Rust-backed @moq/net](/quest/m2/rs2ts/README.md) - the adopted implementation and retained baseline
+- [JS-only @moq/net](/quest/m2/rs2ts-js.md) - the adopted implementation and retained baseline

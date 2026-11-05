@@ -25,6 +25,7 @@
 
 #![expect(
 	clippy::disallowed_methods,
+	clippy::disallowed_types,
 	reason = "custom timings measure the real time the work took, not the ambient clock"
 )]
 
@@ -35,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{announce, broadcast, origin, stats};
+use moq_net::{origin, stats};
 use moq_stats::produce::bench::{Driver, FrameBytes};
 
 struct Counter;
@@ -94,8 +95,8 @@ struct Relay {
 	driver: Driver,
 	_origin: origin::Producer,
 	_origin_driver: origin::Driver,
-	_publishers: Vec<broadcast::Producer>,
-	_cursors: Vec<announce::Consumer>,
+	_publishers: Vec<origin::Publication>,
+	_cursors: Vec<origin::Routes>,
 	_sessions: Vec<stats::Session>,
 	_held: Vec<moq_net::track::Subscriber>,
 }
@@ -128,9 +129,9 @@ impl Relay {
 		let mut sessions = Vec::with_capacity(tiers);
 		let tier_labels: Vec<_> = (0..tiers)
 			.map(|tier| {
-				let tier = stats::Tier::new(format!("t{tier}"));
-				let session = registry.tier(tier.clone()).session("root");
-				let mut cursor = origin.consume().with_stats(session.clone()).announced();
+				let tier = stats::Tier::new(moq_net::Path::new(&format!("t{tier}")).unwrap());
+				let session = registry.tier(tier.clone()).session(moq_net::Path::from_static("root"));
+				let mut cursor = origin.consume().with_stats(session.clone()).routes();
 				while cursor.next().now_or_never().flatten().is_some() {}
 				cursors.push(cursor);
 				sessions.push(session);
@@ -174,7 +175,12 @@ impl Relay {
 		}
 		for path in self.paths.iter().step_by(self.step) {
 			for tier in &self.tiers {
-				moq_net::fuzz::bump_publisher_bytes(&self.registry, path.as_str(), tier, 1);
+				moq_net::fuzz::bump_publisher_bytes(
+					&self.registry,
+					moq_net::Path::new(path.as_str()).unwrap(),
+					tier,
+					1,
+				);
 			}
 		}
 	}
@@ -300,7 +306,11 @@ impl Presence {
 		let names: Vec<String> = (0..labels).map(|index| format!("room/{index:05}")).collect();
 		let sessions: Vec<_> = names
 			.iter()
-			.map(|label| registry.tier(stats::Tier::default()).session(label.as_str()))
+			.map(|label| {
+				registry
+					.tier(stats::Tier::default())
+					.session(moq_net::Path::new(label.as_str()).unwrap())
+			})
 			.collect();
 		// One set of wire counters per connection, independently of held presence tracks.
 		let wire = sessions

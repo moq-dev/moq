@@ -79,7 +79,7 @@ test.each(["lite", "ietf"] as const)("%s closes on the first advertisement beyon
 						version: IetfVersion.DRAFT_22,
 						client: false,
 						nextRequestId: async () => 0n,
-						spendRequest: () => {},
+						checkRequestId: () => {},
 						openBi: async () => new Stream({ version, readable, writable }),
 						acceptBi: async () => undefined,
 						close: () => pair.server.close(),
@@ -87,13 +87,13 @@ test.each(["lite", "ietf"] as const)("%s closes on the first advertisement beyon
 					limits,
 				});
 	try {
-		const announced = subscriber.announced();
+		const announced = subscriber.routes();
 		const ended = await announced.closed;
 		expect(ended).toBeInstanceOf(SessionError);
 		expect((ended as SessionError).code).toBe(SessionCode.TooManyRequests);
 		expect(closing.mock.calls[0]?.[0]?.closeCode).toBe(SessionCode.TooManyRequests);
 	} finally {
-		subscriber.close();
+		if (subscriber instanceof LiteSubscriber) subscriber.close();
 		pair.client.close();
 		pair.server.close();
 		closing.mockRestore();

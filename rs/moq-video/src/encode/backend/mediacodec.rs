@@ -687,7 +687,7 @@ mod tests {
 	}
 
 	#[test]
-	#[ignore = "needs an Android device with a MediaCodec H.264 encoder"]
+	#[ignore = "needs an Android device or emulator: just rs android-test"]
 	fn encodes_a_keyframe_with_parameter_sets_inline() {
 		let config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 		let mut backend = MediaCodec::open(&config).expect("a MediaCodec encoder");

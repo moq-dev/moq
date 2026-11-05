@@ -62,8 +62,8 @@ impl Server {
 				biased;
 				_ = &mut close => break Ok(()),
 				request = listener.accept() => match request {
-					Some(request) => request,
-					None => break Ok(()),
+					Ok(request) => request,
+					Err(err) => break Err(err.into()),
 				},
 			};
 
@@ -119,6 +119,17 @@ impl Server {
 	pub fn request_query(&self, request: Id, dst: &mut moq_string) -> Result<(), Error> {
 		*dst = match self.request(request)?.query() {
 			Some(query) => borrow(query),
+			None => moq_string {
+				data: std::ptr::null(),
+				len: 0,
+			},
+		};
+		Ok(())
+	}
+
+	pub fn request_peer_implementation(&self, request: Id, dst: &mut moq_string) -> Result<(), Error> {
+		*dst = match self.request(request)?.peer_implementation() {
+			Some(implementation) => borrow(implementation),
 			None => moq_string {
 				data: std::ptr::null(),
 				len: 0,

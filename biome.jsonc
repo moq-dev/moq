@@ -16,7 +16,7 @@
 	},
 	"files": {
 		// The project scanner (enabled by noImportCycles) tries to parse every file it
-		// indexes. Exclude two kinds it can't handle:
+		// indexes. Exclude binary assets and generated fixtures:
 		//   - MPEG transport-stream fixtures whose `.ts` extension collides with TypeScript.
 		//   - SVG assets, which Biome routes to its HTML parser and rejects.
 		//   - The audio jitter corpus, which is generated and byte-compared by its own test,
@@ -26,6 +26,7 @@
 		"includes": [
 			"**",
 			"!rs/moq-mux/src/container/ts/test_data",
+			"!rs/moq-audio/src/decode/test_data/*.ts",
 			"!**/*.svg",
 			"!doc/concept/audio-jitter/*.json",
 			"!test/audio-quality/traces/*.json"
@@ -74,9 +75,8 @@
 	},
 	"overrides": [
 		{
-			// Production code reads time through @moq/clock so a Manual clock drives it in tests.
-			// Tests are not swept yet.
-			"includes": ["js/*/src/**", "demo/web/src/**", "!js/clock/src/host.ts", "!**/*.test.ts", "!**/*.test.tsx"],
+			// Code and tests read time through @moq/clock, so a Manual clock drives them.
+			"includes": ["js/*/src/**", "demo/web/src/**", "!js/clock/src/host.ts"],
 			"linter": {
 				"rules": {
 					"style": {
@@ -134,6 +134,18 @@
 	"javascript": {
 		"formatter": {
 			"quoteStyle": "double"
+		}
+	},
+	// Biome 2.6 formats YAML and Markdown by default. Keep both off until a
+	// deliberate, repo-wide reformat turns them on.
+	"yaml": {
+		"formatter": {
+			"enabled": false
+		}
+	},
+	"markdown": {
+		"formatter": {
+			"enabled": false
 		}
 	}
 }

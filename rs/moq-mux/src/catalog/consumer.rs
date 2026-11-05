@@ -4,7 +4,7 @@
 //! advertises and yields [`Catalog<E>`](super::hang::Catalog) snapshots so callers
 //! and exporters only deal with one shape.
 
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use super::hang::{Catalog, CatalogExt};
 use super::{CatalogFormat, Stream};
@@ -41,36 +41,66 @@ enum State<E: CatalogExt> {
 impl<E: CatalogExt> Consumer<E> {
 	pub(crate) fn format(&self) -> CatalogFormat {
 		match &self.inner {
-			State::Hang(consumer) => consumer.format(),
+			State::Hang(_) => CatalogFormat::Hang,
 			State::Msf(_) => CatalogFormat::Msf,
 			State::Closed(format) => *format,
 		}
 	}
 
 	/// Subscribe to the catalog track advertised by `format`.
+	#[cfg(feature = "async")]
 	pub async fn new(broadcast: &moq_net::broadcast::Consumer, format: CatalogFormat) -> Result<Self, crate::Error> {
-		Ok(Self {
-			inner: match format {
-				CatalogFormat::Hang => {
-					let track = broadcast
-						.track(hang::Catalog::DEFAULT_NAME)?
-						.subscribe(hang::Catalog::default_subscription())
-						.await?;
-					State::Hang(super::hang::Consumer::new(track))
-				}
-				CatalogFormat::HangZ => {
-					let track = broadcast
-						.track(hang::Catalog::COMPRESSED_NAME)?
-						.subscribe(hang::Catalog::default_subscription())
-						.await?;
-					State::Hang(super::hang::Consumer::compressed(track))
-				}
-				CatalogFormat::Msf => {
-					let track = broadcast.track(moq_msf::DEFAULT_NAME)?.subscribe(None).await?;
-					State::Msf(super::msf::Consumer::new(track))
-				}
+		let mut subscribing = Subscribing::new(broadcast, format);
+		kio::wait(|waiter| subscribing.poll_ok(waiter)).await
+	}
+}
+
+/// A catalog subscription awaiting its track: [`Consumer::new`] for a caller that polls.
+pub(crate) struct Subscribing<E: CatalogExt> {
+	pending: Pending<E>,
+}
+
+enum Pending<E: CatalogExt> {
+	/// The hang consumer subscribes itself; its track's info resolving rides on that
+	/// subscription, so a refused catalog fails here as it does for MSF.
+	Hang {
+		consumer: Option<Box<super::hang::Consumer<E>>>,
+		info: moq_net::track::Resolving,
+	},
+	Msf(moq_net::track::Subscribing),
+	Failed(crate::Error),
+}
+
+impl<E: CatalogExt> Subscribing<E> {
+	/// Subscribe to the catalog track advertised by `format`.
+	pub(crate) fn new(broadcast: &moq_net::broadcast::Consumer, format: CatalogFormat) -> Self {
+		let pending = match format {
+			CatalogFormat::Hang => match broadcast.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => Pending::Hang {
+					consumer: Some(Box::new(super::hang::Consumer::new(track.clone()))),
+					info: track.info().into_inner(),
+				},
+				Err(err) => Pending::Failed(err.into()),
 			},
-		})
+			CatalogFormat::Msf => match broadcast.track(moq_msf::DEFAULT_NAME) {
+				Ok(track) => Pending::Msf(track.subscribe(None).into_inner()),
+				Err(err) => Pending::Failed(err.into()),
+			},
+		};
+		Self { pending }
+	}
+
+	/// The catalog consumer, once the track subscription is confirmed.
+	pub(crate) fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<Consumer<E>, crate::Error>> {
+		let inner = match &mut self.pending {
+			Pending::Hang { consumer, info } => {
+				ready!(info.poll_ok(waiter))?;
+				State::Hang(*consumer.take().expect("resolves once"))
+			}
+			Pending::Msf(subscribing) => State::Msf(super::msf::Consumer::new(ready!(subscribing.poll_ok(waiter))?)),
+			Pending::Failed(err) => return Poll::Ready(Err(err.clone())),
+		};
+		Poll::Ready(Ok(Consumer { inner }))
 	}
 }
 
@@ -105,10 +135,9 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn eof_releases_each_catalog_subscription() {
-		for format in [CatalogFormat::Hang, CatalogFormat::HangZ, CatalogFormat::Msf] {
+		for format in [CatalogFormat::Hang, CatalogFormat::Msf] {
 			let name = match format {
 				CatalogFormat::Hang => hang::Catalog::DEFAULT_NAME,
-				CatalogFormat::HangZ => hang::Catalog::COMPRESSED_NAME,
 				CatalogFormat::Msf => moq_msf::DEFAULT_NAME,
 			};
 			let broadcast = moq_net::broadcast::Info::new().produce();

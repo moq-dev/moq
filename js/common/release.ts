@@ -3,6 +3,11 @@ import { dirname, join } from "node:path";
 
 const dryRun = process.argv.includes("--dry-run") || process.env.DRY_RUN === "true";
 
+// JSR publish token, from the `npm` Environment. Remove it from this process's
+// environment so only `deno publish` receives it, not builds or npm.
+const jsrToken = process.env.JSR_TOKEN;
+delete process.env.JSR_TOKEN;
+
 // Read package.json to get name, version, and whether to also publish to JSR.
 const pkg = JSON.parse(await Bun.file("package.json").text());
 const { name, version } = pkg;
@@ -117,9 +122,9 @@ if (publishJsr) {
 	// Call `deno publish` directly (what `jsr publish` wraps) using the deno from
 	// the nix devshell, so parallel package releases don't race on a runtime
 	// jsr/deno download into a shared bunx cache. jsr.json and the generated dist
-	// leave the tree dirty, so allow it. OIDC trusted publishing kicks in
-	// automatically under GitHub Actions; locally it falls back to an interactive
-	// browser login.
+	// leave the tree dirty, so allow it. Without a token, Deno tries JSR's GitHub
+	// OIDC trust under GitHub Actions, which the packages should not grant since
+	// any branch of the repository could claim it, and a browser login locally.
 	const args = [
 		"publish",
 		"--unstable-bare-node-builtins",
@@ -147,6 +152,7 @@ if (publishJsr) {
 		console.log(`⏭️  ${name}@${version} already on JSR, skipping`);
 	} else {
 		console.log(`🚀 Publishing ${name}@${version} to JSR...`);
+		if (jsrToken) args.push("--token", jsrToken);
 		execFileSync("deno", args, { stdio: "inherit", env });
 	}
 }

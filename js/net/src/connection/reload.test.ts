@@ -1,7 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
-import { Instant, Manual, Milli, Nano } from "@moq/clock";
+import { Instant, Manual, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
+import { Viewers } from "../bandwidth.ts";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import { ConnectTimeout, SessionCode, SessionError, StreamCode, toTransport } from "../error.ts";
 import { Route } from "../hop.ts";
@@ -12,25 +13,26 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import { nextTask } from "../util/yield.ts";
+import { closeUnwanted } from "../util/announce.ts";
 import { wireOf } from "../wire.ts";
 import type { Established } from "./established.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
-import { pumpAnnounced, Redirects, Reload, type ReloadProps } from "./reload.ts";
+import { pumpAnnounced, Redirects, Reload, type ReloadDelay, type ReloadProps } from "./reload.ts";
 
 function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
 	return acceptSession({ transport, url, ...props });
 }
 
 function publish(origin: OriginProducer, path: Path.Valid) {
-	const broadcast = origin.createBroadcast(path);
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	return broadcast;
 }
 
 async function settle() {
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 }
 
 test("equivalent URL instances do not restart a pending connection", async () => {
@@ -84,6 +86,14 @@ test("ReloadProps excludes transport", () => {
 	// @ts-expect-error transport is not part of ReloadProps
 	const props: ReloadProps = withTransport;
 	expect(props.enabled).toBeUndefined();
+});
+
+test("ReloadProps excludes viewers", () => {
+	const withViewers = { viewers: new Viewers() };
+	// @ts-expect-error a reload owns its viewers registry
+	const props: ReloadProps = withViewers;
+	expect(props.enabled).toBeUndefined();
+	withViewers.viewers.close();
 });
 
 test("closing mid-connect aborts the pending attempt", async () => {
@@ -186,7 +196,7 @@ test("an explicitly undefined delay field falls back to its default", async () =
 	});
 	try {
 		await waitUntil(() => dials > 0);
-		await new Promise((resolve) => setTimeout(resolve, 100));
+		await sleep(Nano.fromMilli(Milli(100)));
 		// The default initial delay is 1000ms, so the first retry is still pending.
 		expect(dials).toBe(1);
 	} finally {
@@ -197,14 +207,15 @@ test("an explicitly undefined delay field falls back to its default", async () =
 
 // Polls until `pred` holds, so a regression fails the test instead of hanging it.
 async function waitUntil(pred: () => boolean): Promise<void> {
-	for (let i = 0; i < 500; i++) {
+	const deadline = Instant.add(now(), Nano.fromMilli(Milli(1000)));
+	while (now() <= deadline) {
 		if (pred()) return;
 		await settle();
 	}
 	throw new Error("timed out waiting for condition");
 }
 
-test("an announced request follows the reconnect on the same handle", async () => {
+test("a follower follows the reconnect on the same handle", async () => {
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 
@@ -231,7 +242,7 @@ test("an announced request follows the reconnect on the same handle", async () =
 		delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
 		consume: clientOrigin,
 	});
-	const watched = clientOrigin.request(Path.from("late"), { announced: true });
+	const watched = clientOrigin.follow(Path.from("late"));
 
 	try {
 		await waitUntil(() => watched.active.peek() !== undefined);
@@ -267,7 +278,7 @@ test("an ended auth handle gives up instead of retrying", async () => {
 	// so a reconnect, if the loop tried one, would be dialed well within the bound.
 	const until = async (done: () => boolean) => {
 		for (let i = 0; i < 100 && !done(); i++) {
-			await nextTask();
+			await yieldNow();
 			await clock.advance(Nano.fromMilli(Milli(1)));
 		}
 		expect(done()).toBe(true);
@@ -402,6 +413,80 @@ for (const code of [SessionCode.Unauthorized, SessionCode.MalformedAuthToken, Se
 	});
 }
 
+/**
+ * Stub WebTransport for lite-06, which carries the credential in the URL: refuses `refused`
+ * once `release` resolves, and accepts any other credential, recording each dialed jwt.
+ */
+function refusing(refused: string, release: Promise<void>) {
+	const dialed: (string | null)[] = [];
+	const stub = function StubWebTransport(target: string | URL) {
+		const jwt = new URL(target).searchParams.get("jwt");
+		dialed.push(jwt);
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		void accept(pair.server, new URL(target)).then(async () => {
+			if (jwt !== refused) return;
+			await release;
+			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+		});
+		return pair.client;
+	};
+	return { dialed, stub: stub as unknown as typeof WebTransport };
+}
+
+test("a refused credential replaced since its dial redials with the new one", async () => {
+	const original = globalThis.WebTransport;
+	const { promise: release, resolve } = Promise.withResolvers<void>();
+	const { dialed, stub } = refusing("old", release);
+	globalThis.WebTransport = stub;
+
+	const tokens = new Signal<readonly string[]>(["old"]);
+	const reload = new Reload({
+		url: new URL("https://example.com/"),
+		versions: ["moq-lite-06"],
+		websocket: { enabled: false },
+		tokens,
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+	});
+	try {
+		await waitUntil(() => reload.established.peek() !== undefined);
+		tokens.set(["new"]);
+		resolve();
+		await waitUntil(() => dialed.includes("new"));
+		expect(dialed).toEqual(["old", "new"]);
+		await waitUntil(() => reload.established.peek() !== undefined);
+		expect(reload.error.peek()).toBeUndefined();
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("new tokens redial a URL that stopped on refusing the old ones", async () => {
+	const original = globalThis.WebTransport;
+	const { dialed, stub } = refusing("old", Promise.resolve());
+	globalThis.WebTransport = stub;
+
+	const tokens = new Signal<readonly string[]>(["old"]);
+	const reload = new Reload({
+		url: new URL("https://example.com/"),
+		versions: ["moq-lite-06"],
+		websocket: { enabled: false },
+		tokens,
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+	});
+	try {
+		await waitUntil(() => reload.error.peek() !== undefined);
+		expect(dialed).toEqual(["old"]);
+		tokens.set(["new"]);
+		await waitUntil(() => dialed.includes("new"));
+		await waitUntil(() => reload.established.peek() !== undefined);
+		expect(reload.error.peek()).toBeUndefined();
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
 test("an unauthorized session close during setup stops retrying", async () => {
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
@@ -507,7 +592,7 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 		const pair = createMockTransportPair(Lite.ALPN_05);
 		const saw = new OriginProducer();
 		// The server watches everything, so it asks the client for announcements.
-		const watching = saw.announced();
+		const watching = saw.routes();
 		const serverOrigin = new OriginProducer();
 		void accept(pair.server, url, { publish: serverOrigin.consume(), consume: saw }).then((session) => {
 			publish(serverOrigin, Path.from("remote"));
@@ -527,7 +612,7 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 	});
 	const reader = subscribeOrigin.consume();
 	// A watch held across the reconnect: each session re-opens its announce request.
-	const watching = reader.announced();
+	const watching = reader.routes();
 
 	try {
 		// First session: the server's broadcast lands in the client origin, and the client's
@@ -662,8 +747,9 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 		await waitUntil(() => handle.origin.peek() !== undefined);
 		const origin = handle.origin.peek();
 		if (!origin) throw new Error("no origin");
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		await waitUntil(() => dials.length > 0);
 		const first = dials[0];
@@ -686,7 +772,8 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 			fin.hold?.enable();
 			const last = producer.appendGroup();
 			last.writeFrame(textFrame("last"));
-			last.close();
+			last.finish();
+			producer.finish();
 			producer.close();
 			teardown.end(handle, win);
 			await clock.advance(Nano.fromMilli(teardown.linger));
@@ -748,8 +835,9 @@ for (const [name, drainEnd] of Object.entries(drainEnds)) {
 		globalThis.WebTransport = stub as unknown as typeof WebTransport;
 
 		const origin = new OriginProducer();
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		const reload = new Reload({
 			url: new URL("https://example.com/a"),
@@ -779,6 +867,7 @@ for (const [name, drainEnd] of Object.entries(drainEnds)) {
 			remote.close();
 			reload.close();
 			for (const dial of dials) (await dial.server).abort();
+			producer.finish();
 			producer.close();
 			broadcast.close();
 			origin.close();
@@ -807,8 +896,9 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 	globalThis.WebTransport = stub as unknown as typeof WebTransport;
 
 	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const reload = new Reload({
 		url: new URL("https://example.com/"),
@@ -844,6 +934,7 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 		remote.close();
 		reload.close();
 		for (const dial of dials) (await dial.server).abort();
+		producer.finish();
 		producer.close();
 		broadcast.close();
 		origin.close();
@@ -889,8 +980,9 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 	const origin = new OriginProducer();
 	const reload = new Reload({ url, websocket: { enabled: false }, publish: origin.consume() });
 	await reload.auth.add("token");
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const first = dials[0];
 	if (!first) throw new Error("no first dial");
@@ -903,7 +995,8 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 		fin.hold?.enable();
 		const last = producer.appendGroup();
 		last.writeFrame(textFrame("last"));
-		last.close();
+		last.finish();
+		producer.finish();
 		producer.close();
 		reload.close();
 
@@ -929,13 +1022,12 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 test("closing an announce consumer during upstream teardown does not append retractions", async () => {
 	const { Producer } = await import("../announced.ts");
 	const upstream = new Producer();
-	const reload = new Reload({ enabled: false });
-	reload.established.set({
-		probe: new Signal(undefined),
-		announced: () => upstream.consume(),
-		stats: async () => undefined,
-	} as unknown as import("./established.ts").Established);
-	const consumer = reload.announced();
+	const producer = new Producer();
+	const pump = new Effect((effect) => pumpAnnounced(effect, upstream.consume(), producer));
+	const consumer = producer.consume();
+	// The same lifecycle as Connection.announced: the last consumer closing closes the producer and its pump.
+	closeUnwanted(producer);
+	void producer.closed.then(() => pump.close());
 	const errors = spyOn(console, "error").mockImplementation(() => {});
 	try {
 		upstream.append({
@@ -950,21 +1042,23 @@ test("closing an announce consumer during upstream teardown does not append retr
 		await Promise.resolve();
 		consumer.close();
 		await settle();
+		expect(producer.closed.peek()).not.toBeUndefined();
 		expect(errors.mock.calls).toEqual([]);
 	} finally {
 		consumer.close();
-		reload.close();
+		pump.close();
+		producer.close();
 		errors.mockRestore();
 	}
 });
 
 test("announced accepts a non-prefix scope before any session exists", () => {
-	const reload = new Reload({ enabled: false });
+	const connection = new Connection({ enabled: false });
 	try {
-		const announced = reload.announced(Path.Pattern.parse("room/*"));
+		const announced = connection.routes(Path.Pattern.parse("room/*"));
 		announced.close();
 	} finally {
-		reload.close();
+		connection.close();
 	}
 });
 
@@ -977,9 +1071,9 @@ test("a watcher syncs with the server's initial set, and again after a reconnect
 	// Through the consume origin, and through the handle's own stream without one.
 	for (const [alpn, viaOrigin] of [
 		[Lite.ALPN_06, true],
-		[IetfALPN.DRAFT_19, true],
+		[IetfALPN.DRAFT_18, true],
 		[Lite.ALPN_06, false],
-		[IetfALPN.DRAFT_19, false],
+		[IetfALPN.DRAFT_18, false],
 	] as const) {
 		const original = globalThis.WebTransport;
 		const url = new URL("https://example.com/");
@@ -997,14 +1091,15 @@ test("a watcher syncs with the server's initial set, and again after a reconnect
 		globalThis.WebTransport = stub as unknown as typeof WebTransport;
 
 		const clientOrigin = new OriginProducer();
-		const reload = new Reload({
+		const props = {
 			enabled: true,
 			url,
 			websocket: { enabled: false },
 			delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
-			consume: viaOrigin ? clientOrigin : undefined,
-		});
-		const watching = viaOrigin ? clientOrigin.announced() : reload.announced();
+		};
+		const reload = viaOrigin ? new Reload({ ...props, consume: clientOrigin }) : undefined;
+		const connection = viaOrigin ? undefined : new Connection({ ...props, share: false });
+		const watching = connection ? connection.routes() : clientOrigin.routes();
 		const seen = new Set<string>();
 		void (async () => {
 			for await (const event of watching) {
@@ -1025,7 +1120,8 @@ test("a watcher syncs with the server's initial set, and again after a reconnect
 			expect([...seen].sort()).toEqual(["a", "b"]);
 		} finally {
 			watching.close();
-			reload.close();
+			reload?.close();
+			connection?.close();
 			clientOrigin.close();
 			for (const broadcast of published) broadcast.close();
 			serverOrigin.close();
@@ -1166,36 +1262,159 @@ test("an attempt that outlives the connect timeout is retried after the backoff"
 	}
 });
 
-test("attempts that keep timing out give up at the retry window with ConnectTimeout", async () => {
-	const clock = new Manual();
-	const installed = clock.install();
-	const url = new URL("https://relay.example/room");
-	const plan = dialPlan(() => "hang", url);
-	const reload = new Reload({
-		url,
-		websocket: { enabled: false },
-		timeout: Milli(30),
-		delay: { initial: Milli(10), multiplier: 1, max: Milli(10), timeout: Milli(100) },
+// Every attempt hangs until its 30 ms connect timeout. The window counts from the first dial, as
+// moq-tokio's does, and no attempt starts once it has passed.
+const windows: [string, ReloadDelay, number, number][] = [
+	// Dials at 0, 40, and 80; the last runs past the window and gives up when it fails.
+	["an attempt under way finishes past the window", { initial: Milli(10), timeout: Milli(100) }, 110, 3],
+	// The first failure at 30 ms leaves 30 ms, less than the 50 ms wait, so it gives up at the deadline.
+	["a wait that reaches the deadline gives up there", { initial: Milli(50), timeout: Milli(60) }, 60, 1],
+];
+for (const [name, delay, gaveUp, dials] of windows) {
+	test(`retry window: ${name}`, async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		// Full delay every time, so the waits are exact.
+		const random = spyOn(Math, "random").mockReturnValue(1);
+		const warned = spyOn(console, "warn").mockImplementation(() => {});
+		const url = new URL("https://relay.example/room");
+		const plan = dialPlan(() => "hang", url);
+		const reload = new Reload({
+			url,
+			websocket: { enabled: false },
+			timeout: Milli(30),
+			delay: { multiplier: 1, max: Milli(1000), ...delay },
+		});
+		try {
+			await waitUntil(() => plan.dials() === 1);
+			expect(await elapse(clock, () => reload.error.peek() !== undefined)).toBe(gaveUp);
+			expect(reload.error.peek()).toBeInstanceOf(ConnectTimeout);
+			expect(plan.dials()).toBe(dials);
+			expect(plan.hungCloses()).toBe(plan.dials());
+		} finally {
+			reload.close();
+			plan.restore();
+			warned.mockRestore();
+			random.mockRestore();
+			installed.close();
+		}
 	});
-	try {
-		await waitUntil(() => plan.dials() === 1);
-		const waited = await elapse(clock, () => reload.error.peek() !== undefined);
-		// The window starts at the first failure (30 ms) and is checked at each failure after
-		// it, so giving up comes up to one attempt after the window.
-		expect(waited).toBeGreaterThanOrEqual(130);
-		expect(waited).toBeLessThan(170);
-		expect(reload.error.peek()).toBeInstanceOf(ConnectTimeout);
-		expect(plan.hungCloses()).toBe(plan.dials());
-	} finally {
-		reload.close();
-		plan.restore();
-		installed.close();
-	}
-});
+}
 
 test("an invalid timeout is refused when the loop is built, not by every attempt", () => {
 	for (const timeout of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
 		expect(() => new Reload({ url: new URL("https://example.com/"), timeout: timeout as Milli })).toThrow(
+			RangeError,
+		);
+	}
+});
+
+// Each session lives 100 ms, so the backoff between them shows how `healthy` scores its end and
+// how `max` caps the delay, matching moq-tokio's `connect.backoff`.
+const backoffs: [string, ReloadDelay, number[]][] = [
+	// Past `initial` but short of the default bar, so each end is a failed attempt.
+	["a session short of the default healthy bar escalates", {}, [10, 20, 40]],
+	["a session past the healthy bar resets", { healthy: Milli(50) }, [10, 10, 10]],
+	[
+		"a zero max leaves the delay uncapped",
+		{ initial: Milli(1000), multiplier: 4, max: Milli(0) },
+		[1000, 4000, 16000],
+	],
+	["a max below initial caps the first delay too", { max: Milli(5) }, [5, 5, 5]],
+	["a zero multiplier keeps the delay constant", { multiplier: 0 }, [10, 10, 10]],
+	["a fractional multiplier below 1 keeps the delay constant", { multiplier: 0.5 }, [10, 10, 10]],
+];
+for (const [name, delay, gaps] of backoffs) {
+	test(`backoff: ${name}`, async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		// Full delay every time, so the waits are exact.
+		const random = spyOn(Math, "random").mockReturnValue(1);
+		const warned = spyOn(console, "warn").mockImplementation(() => {});
+		const original = globalThis.WebTransport;
+		const url = new URL("https://relay.example/room");
+		const servers: Promise<{ abort(): void }>[] = [];
+		globalThis.WebTransport = function StubWebTransport() {
+			const pair = createMockTransportPair(Lite.ALPN_06);
+			servers.push(accept(pair.server, url));
+			return pair.client;
+		} as unknown as typeof WebTransport;
+		const reload = new Reload({
+			url,
+			websocket: { enabled: false },
+			delay: { initial: Milli(10), multiplier: 2, max: Milli(1000), ...delay },
+		});
+		try {
+			const waited: number[] = [];
+			for (let session = 0; session < gaps.length; session++) {
+				await waitUntil(() => reload.status.peek() === "connected");
+				await clock.advance(Nano.fromMilli(Milli(100)));
+				(await servers[session])?.abort();
+				waited.push(await elapse(clock, () => servers.length === session + 2));
+			}
+			expect(waited).toEqual([...gaps]);
+		} finally {
+			reload.close();
+			globalThis.WebTransport = original;
+			warned.mockRestore();
+			random.mockRestore();
+			installed.close();
+		}
+	});
+}
+
+// The delay after the second failure, 1e601 ms, overflows; it saturates, as Rust's Duration
+// does, rather than failing the loop. The 1e301 ms wait itself is never fired: at that
+// instant a 100 ms poll no longer advances the clock.
+test("backoff: an uncapped delay saturates instead of overflowing", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const warned = spyOn(console, "warn").mockImplementation(() => {});
+	const failed = spyOn(console, "error");
+	const original = globalThis.WebTransport;
+	const url = new URL("https://relay.example/room");
+	const servers: Promise<{ abort(): void }>[] = [];
+	globalThis.WebTransport = function StubWebTransport() {
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		servers.push(accept(pair.server, url));
+		return pair.client;
+	} as unknown as typeof WebTransport;
+	const reload = new Reload({
+		url,
+		websocket: { enabled: false },
+		delay: { initial: Milli(10), multiplier: 1e300, max: Milli(0) },
+	});
+	try {
+		for (let session = 0; session < 2; session++) {
+			await waitUntil(() => reload.status.peek() === "connected");
+			(await servers[session])?.abort();
+			if (session === 0) await elapse(clock, () => servers.length === 2);
+		}
+		await waitUntil(() => reload.status.peek() === "disconnected");
+		for (let i = 0; i < 10; i++) await settle();
+		expect(failed).not.toHaveBeenCalled();
+		expect(reload.error.peek()).toBeUndefined();
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+		failed.mockRestore();
+		warned.mockRestore();
+		installed.close();
+	}
+});
+
+test("a delay field with no meaning is refused when the loop is built", () => {
+	const bad = [-1, Number.NaN, Number.POSITIVE_INFINITY] as Milli[];
+	const invalid: ReloadDelay[] = [
+		// Zero would count every session as healthy.
+		{ healthy: Milli(0) },
+		// Zero `max` is uncapped and zero `timeout` unlimited, so infinity has no spelling here.
+		...bad.flatMap((value) => [{ initial: value }, { max: value }, { healthy: value }, { timeout: value }]),
+		{ multiplier: Number.NaN },
+		{ multiplier: Number.POSITIVE_INFINITY },
+	];
+	for (const delay of invalid) {
+		expect(() => new Reload({ url: new URL("https://example.com/"), delay }), JSON.stringify(delay)).toThrow(
 			RangeError,
 		);
 	}

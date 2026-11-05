@@ -4,21 +4,44 @@
 
 Every benchmark that regressed since the previous run is explained, fixed, or
 planned, and every hot or fan-out path without a benchmark gets one or a
-follow-up.
+follow-up. `main` ships no slower than `release`: every case where the cut
+this run gates would be slower is fixed or accepted with the feature it pays
+for.
 
 ## Plan
 
 Recurs once per major release (decided 2026-10-19). The PR that finishes
 this run also adds the next one with the same file name at the end of the next
-milestone's `Required` (m0 to m1, m1 to m2). The successor keeps the Goal
-and this paragraph; the rest of its Plan is rewritten with what this run
-learned: baselines, results, and what to check first. A successor placed in m2
+milestone's `Required` (m0 to m1, m1 to m2). The successor keeps the Goal,
+this paragraph, and the release baseline section; the rest of its Plan is
+rewritten with what this run learned: baselines, results, and what to check
+first. A successor placed in m2
 also lists the [release cut](/quest/m2/release/cut.md) under `Required`, so it
 waits for the release in flight to ship. Only `/quest-delete` ends the
 recurrence. Fixes land in the run's PR, one commit each, rather than as follow-ups.
 Only a change that needs a maintainer decision (public API, scope) or is
 independently landable and too large to review alongside the rest becomes a
 follow-up through `/quest-plan`.
+
+### Release baseline
+
+The run's last step, once the rest of its milestone has merged, so `main` is
+what the cut ships. Pair it with the last cut, keeping the evidence outside
+the checkout, and record `/proc/loadavg` around each run:
+
+```bash
+BENCH_ARTIFACTS=<scratch> just bench origin/release
+bun bench/browser/micro.ts --bench frames --out <scratch>/frames.json base=<release> current=. aa=.
+```
+
+`<release>` is an export of `origin/release` with its own
+`bun install --frozen-lockfile`. Re-run every slower case in alternating
+rounds and count instructions for any that holds (see Method). A ratio
+against `release` shows where to look, not what to fix: `main` carries
+features `release` lacks, so a flat per-operation cost usually pays for one,
+while a cost that grows with `main`'s own sweep is accidental. Fix accidental
+cost in this run, and record each accepted cost in its results with the
+feature and PR it pays for. A browser row inside the `aa` spread is noise.
 
 ### What the m1 run (2026-10-22) fixed
 
@@ -89,6 +112,12 @@ did not move.
   catalog on every estimate to validate it before retaining it (62% of
   `catalog_estimate_fanout/hang/tracks_4/4`). Validating only the edited entry
   would weaken that guarantee for custom configs, so it needs a decision.
+- The TS export grows with track count (1.50x release at `container-export/ts/1x1`,
+  2.24x at `16x64`): `Schedule::index` and `Schedule::admit`
+  (`moq-mux/src/container/ts/schedule.rs`) scan and sort every queued unit
+  per PCR slot.
+- e2ee expands the AES-GCM key on every frame (`aead` in
+  `moq-crypto/src/e2ee/protect.rs`), about a quarter of `protect`; release does too.
 
 ### Method: attribute with instruction counts, not wall time
 
@@ -108,6 +137,9 @@ wall-clock bisect blames the wrong commit. Count instructions instead:
   `finish` for `track_stamp_groups`) and divide by the count.
 - `callgrind_annotate --inclusive=yes` diffs between two commits point at the
   step; workspace sources show as `${workspace}`, so read them by name.
+- A wall-time hold at equal instructions may be page faults: compare
+  `/usr/bin/time -f %R`, then pin glibc with `GLIBC_TUNABLES` (see
+  [the m1 release run](/quest/m1/release-perf/README.md)) before blaming code.
 - A bench that is not CPU-bound is not attributable this way:
   `relay_auth_refresh` runs real loopback sockets and moved +27-60% on CI with
   +0.4% instructions.
@@ -131,34 +163,32 @@ follow-up quest. The m1 run added none of these:
 1. [HLS request fan-out](/quest/m2/performance-survey/hls-serving.md) owns
    repeated segment fetch/remux and playlist rendering, swept over viewers,
    renditions and window segments.
-2. [Session datagrams](/quest/m2/performance-survey/datagram-delivery.md) owns
-   complete adapter delivery across publishers and viewers.
-3. LOC and CMAF wire containers in moq-mux: `containers` and `export` only use
+2. LOC and CMAF wire containers in moq-mux: `containers` and `export` only use
    `Container::Legacy`; sweep container x frame size x frames.
-4. [Buffered browser groups](/quest/m2/performance-survey/hang-buffered.md)
-   owns per-frame scans and bulk skip work in the Hang consumer.
-5. [Browser media copies](/quest/m2/performance-survey/browser-media-copies.md)
+3. [Browser media copies](/quest/m2/performance-survey/browser-media-copies.md)
    owns CMAF sample copies and LOC encode allocation. Generic `js/msf` and
    `js/flate` benchmark coverage remains here.
-6. moq-quic loss recovery and real congestion controllers: every bench pins
+4. moq-quic loss recovery and real congestion controllers: every bench pins
    `Unlimited`; sweep controller x flight x loss x streams.
-7. [Announcement snapshots](/quest/m2/performance-survey/announced-snapshots.md)
+5. [Announcement snapshots](/quest/m2/performance-survey/announced-snapshots.md)
    owns HTTP snapshot/rendering costs across routes and pollers.
-8. [JWT verification](/quest/m2/performance-survey/jwt-verification.md) owns
-   key-source I/O, import, lookup, parsing and crypto attribution.
-9. MPEG-TS import with real repeated media (the CLI bench mostly skips null
+6. JWT verification is covered: `moq-auth`'s `verify` bench runs nightly in
+   `rust-extra` (see [bench/README.md](/bench/README.md#auth-verification)).
+   Signature verification dominated every asymmetric algorithm; nothing
+   was changed. Track its `decide`, `set` and `sessions` series here.
+7. MPEG-TS import with real repeated media (the CLI bench mostly skips null
    padding), and MKV, FLV, H.265, AV1 importers.
-10. JS watch audio ring buffer and publish `Fanout` (lower impact). Include
-    capture-to-encoder staging: `audio/framer.ts` copies planes before
-    `audio/encoder.ts` joins them. AudioData already uses a transfer list;
-    do not count that transfer as another mandatory copy. Sweep publishers
-    x renditions, channels and frame duration in a browser.
+8. JS watch audio ring buffer and publish `Fanout` (lower impact). Include
+   capture-to-encoder staging: `audio/framer.ts` copies planes before
+   `audio/encoder.ts` joins them. AudioData already uses a transfer list;
+   do not count that transfer as another mandatory copy. Sweep publishers
+   x renditions, channels and frame duration in a browser.
 
 The [2026-10-22 source survey](/quest/m2/performance-survey/README.md) owns
 the extracted items above and additional algorithmic hypotheses, with paired
 benchmarks required before optimization. This audit still owns nightly
 regression attribution and the remaining coverage. Its fragmented-MKV child
-specializes item 9's MKV work.
+specializes item 7's MKV work.
 
 Single-axis fan-out benches to widen: `session_delivery_paced` (viewers only),
 `track_fanout_*` (subscribers only), `memory` (lite-06 only), and

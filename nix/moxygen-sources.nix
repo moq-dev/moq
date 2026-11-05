@@ -2,38 +2,38 @@
   moxygen = {
     owner = "facebookexperimental";
     repo = "moxygen";
-    rev = "c27ae6358df62a1195da479b2e07c50dd8174279";
-    hash = "sha256-ZbTb3kOyFYL0MfALDgoQC50NX+OR6geC4iUXc/phSik=";
+    rev = "aaa50a77f90ebe6e7df0835b845dcf93882ec3bb";
+    hash = "sha256-R5T80Tk7IQddGHXgJpmHR2oqVTKPEhmpfC16J7SWVLQ=";
   };
   folly = {
     owner = "facebook";
     repo = "folly";
-    rev = "e89841cb61bf8f5283cda05b1bd35de99557a557";
-    hash = "sha256-PMOouxfCqzzkdzIC3lO0iwSi82YjwQ5empXOUSV1j8E=";
+    rev = "670c43663b324cc6e85dbe6a8ec99d49b95b64eb";
+    hash = "sha256-Z7kIVitxIgO1IVW0Z+taxHItTJsRNGaWzVZ3XGGHo1I=";
   };
   mvfst = {
     owner = "facebook";
     repo = "mvfst";
-    rev = "00fb3329dc43c6095668083d92a626031aa1eead";
-    hash = "sha256-tTDiMMGZ82THJnrZc5V4xgScm+RaQiAgYUXbGLtY3qs=";
+    rev = "1c7dfc8ce6f3db4f18267aeaecd47afcb6c4b961";
+    hash = "sha256-6K2ElaqBLJH5QA0HzZk6aDLWhKordqf+VGSApWIIbzM=";
   };
   proxygen = {
     owner = "facebook";
     repo = "proxygen";
-    rev = "05d1c685b865a2c90f6ab13aef6f01ccd53c7931";
-    hash = "sha256-ogSop9Vc1Arfa9FOyhxo1F8n2QQ+ytBmlB7SK7Am0xE=";
+    rev = "ee06536ae2e3c8881701bb4fb94be797739f425e";
+    hash = "sha256-k00ObeUfFuZsoL/go7+feSFAaJGdbHKqDZuCCY8COe0=";
   };
   wangle = {
     owner = "facebook";
     repo = "wangle";
-    rev = "a39ad0756413158253824d08fa3d212dcfac4e42";
-    hash = "sha256-OpmCdhEokiH0kTzsDGchHMtwHsvE/2ZjZ61ph3SeF0Y=";
+    rev = "f5f5f463a80cb00e2e2fd70c75c5ff379bc46d46";
+    hash = "sha256-T5AoLgCa+HhKCjrMXfiSdYr0JGTYu/ShOIWGdbm8EQA=";
   };
   fizz = {
     owner = "facebookincubator";
     repo = "fizz";
-    rev = "327e167726bdde385a4fbb368ea148aeb2641acb";
-    hash = "sha256-tQC/2apy2BS5+Ckb7U3DRwwsMs3Zbv5sUvW/g+wzywo=";
+    rev = "6e0025b356edef19154ac9a845c8ced5b84bdcb3";
+    hash = "sha256-Mi/wRcc7Cm9TtX3dowQYn27zjtdC2fHux2RmMtMGeBk=";
   };
   fast_float = {
     owner = "fastfloat";

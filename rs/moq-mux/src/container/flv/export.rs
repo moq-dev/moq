@@ -128,7 +128,7 @@ impl Flavor {
 
 /// Produce an FLV byte stream from a broadcast, following a catalog stream.
 ///
-/// Use [`next`](Self::next) to pull byte chunks. The first chunk is the FLV file
+/// Use [`poll_next`](Self::poll_next) to pull byte chunks. The first chunk is the FLV file
 /// header followed by the AVC/AAC sequence headers; each subsequent chunk is the
 /// tag for one media frame. Returns `None` when the broadcast ends. Narrow the
 /// renditions first with [`Stream::select`](crate::catalog::Stream::select).
@@ -182,7 +182,7 @@ struct FlvTrack {
 	source: ExportSource,
 	pending: Option<crate::jitter::Arrival<Frame>>,
 	/// When the source was last empty, bounding the next frame's arrival.
-	empty: moq_clock::Instant,
+	empty: kio::clock::Instant,
 	finished: bool,
 	/// The FLV payload shape (legacy CodecID vs enhanced FourCC) to mux this
 	/// track as, fixed from its catalog codec when it's bound.
@@ -209,7 +209,7 @@ impl FlvTrack {
 	fn rebind(&mut self, source: ExportSource) {
 		self.source = source.continuing(&self.source);
 		self.finished = false;
-		self.empty = moq_clock::now();
+		self.empty = kio::clock::now();
 	}
 
 	/// The tag timestamp of a frame presented at `pts` on the tag clock, on the inferred clock.
@@ -226,7 +226,7 @@ impl FlvTrack {
 	fn start_group(
 		&mut self,
 		key: (u8, usize),
-		arrived: moq_clock::Instant,
+		arrived: kio::clock::Instant,
 		shift: u32,
 		jitter: &mut crate::jitter::Buffer<(u8, usize), Tag>,
 	) -> anyhow::Result<()> {
@@ -244,7 +244,7 @@ impl FlvTrack {
 	fn release(
 		&mut self,
 		key: (u8, usize),
-		settled: Option<moq_clock::Instant>,
+		settled: Option<kio::clock::Instant>,
 		shift: u32,
 		flush: bool,
 		jitter: &mut crate::jitter::Buffer<(u8, usize), Tag>,
@@ -285,10 +285,9 @@ impl FlvTrack {
 			arrived,
 			read,
 			restart,
-			skip,
-			cut,
 			sync,
 			leading,
+			bytes,
 			item,
 			..
 		} = arrival;
@@ -299,10 +298,9 @@ impl FlvTrack {
 				read,
 				decode: moq_net::Timestamp::from_millis(u64::from(timestamp))?.into(),
 				restart,
-				skip,
-				cut,
 				sync,
 				leading,
+				bytes,
 				item: Tag {
 					frame: item,
 					timestamp,
@@ -382,12 +380,8 @@ impl<S: Stream> Export<S> {
 		self
 	}
 
-	/// Get the next byte chunk.
-	pub async fn next(&mut self) -> anyhow::Result<Option<Bytes>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for the next byte chunk.
+	/// Get the next FLV byte chunk, or `None` once the export ends.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Bytes>>> {
 		// 1. Drain catalog updates to discover the track layout.
 		while let Some(catalog) = self.catalog.as_mut() {
@@ -401,11 +395,6 @@ impl<S: Stream> Export<S> {
 			}
 		}
 
-		self.jitter.expect(
-			(0..self.video.len())
-				.map(|i| (0, i))
-				.chain((0..self.audio.len()).map(|i| (1, i))),
-		);
 		self.fill(waiter)?;
 
 		// 3. Emit the header once every track's codec config has resolved.
@@ -453,7 +442,7 @@ impl<S: Stream> Export<S> {
 	}
 
 	#[cfg(test)]
-	pub(super) fn next_deadline(&self) -> Option<moq_clock::Instant> {
+	pub(super) fn next_deadline(&self) -> Option<kio::clock::Instant> {
 		self.jitter.next_deadline()
 	}
 
@@ -469,20 +458,21 @@ impl<S: Stream> Export<S> {
 		self
 	}
 
-	/// Read each track until it has a frame due, preserving ingress timing before buffering.
+	/// Read each track within its jitter window, preserving ingress timing before buffering.
 	fn fill(&mut self, waiter: &kio::Waiter) -> anyhow::Result<()> {
 		for kind in [0, 1] {
 			let count = if kind == 0 { self.video.len() } else { self.audio.len() };
 			for index in 0..count {
 				loop {
-					if self.header_emitted && self.jitter.full(&(kind, index)) {
-						break;
-					}
 					let track = if kind == 0 {
 						&mut self.video[index]
 					} else {
 						&mut self.audio[index]
 					};
+					if self.header_emitted && self.jitter.full(&(kind, index), waiter) {
+						let _ = track.source.poll_received(waiter);
+						break;
+					}
 					if !self.header_emitted && track.pending.is_some() {
 						break;
 					}
@@ -495,7 +485,7 @@ impl<S: Stream> Export<S> {
 						let frame = match track.source.poll_event(waiter)? {
 							Poll::Ready(Some(Event::Frame { frame, .. })) => frame,
 							// A group that ended or was cut short holds frames no later one can precede.
-							Poll::Ready(Some(Event::GroupEnd | Event::Cut)) => {
+							Poll::Ready(Some(Event::GroupEnd | Event::Cut { .. })) => {
 								track.release((kind, index), None, self.shift, true, &mut self.jitter)?;
 								continue;
 							}
@@ -505,7 +495,7 @@ impl<S: Stream> Export<S> {
 								break;
 							}
 							Poll::Pending => {
-								track.empty = moq_clock::now();
+								track.empty = kio::clock::now();
 								break;
 							}
 						};
@@ -515,13 +505,12 @@ impl<S: Stream> Export<S> {
 						}
 						crate::jitter::Arrival {
 							arrived: track.empty,
-							read: moq_clock::now(),
+							read: kio::clock::now(),
 							decode: frame.timestamp.into(),
 							restart: track.source.markers(),
-							skip: track.source.skips(),
-							cut: track.source.cuts(),
 							sync: kind == 1 || frame.keyframe,
 							leading: false,
+							bytes: frame.payload.len(),
 							item: frame,
 						}
 					};
@@ -600,6 +589,12 @@ impl<S: Stream> Export<S> {
 		// publisher retires a rendition as its track finishes or drops, and the catalog
 		// update races that end on another stream, so only the track's end can say which it
 		// was: a finish ends it cleanly, and a drop is the error the export reports.
+		// Only binding adds tracks, so the clock waits on the bound set as of this update.
+		self.jitter.expect(
+			(0..self.video.len())
+				.map(|i| (0, i))
+				.chain((0..self.audio.len()).map(|i| (1, i))),
+		);
 		Ok(())
 	}
 
@@ -680,7 +675,7 @@ impl<S: Stream> Export<S> {
 				track_id,
 				source,
 				pending: None,
-				empty: moq_clock::now(),
+				empty: kio::clock::now(),
 				finished: false,
 				flavor,
 				fallback_description,
@@ -729,7 +724,7 @@ impl<S: Stream> Export<S> {
 				track_id,
 				source,
 				pending: None,
-				empty: moq_clock::now(),
+				empty: kio::clock::now(),
 				finished: false,
 				flavor,
 				fallback_description: None,
@@ -966,7 +961,7 @@ fn ensure_legacy(container: &Container, kind: &str, name: &str) -> anyhow::Resul
 		Container::Cmaf { .. } => anyhow::bail!("FLV export does not support CMAF {kind} track '{name}'"),
 		Container::Unknown(unknown) => anyhow::bail!(
 			"FLV export does not support container '{}' on {kind} track '{name}'",
-			unknown.kind().unwrap_or("<missing>")
+			unknown.kind()
 		),
 	}
 }

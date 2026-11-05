@@ -22,20 +22,30 @@ class Selection(unittest.TestCase):
             script.write_text(prepare(UPSTREAM))
             client = root / "moxygen/moqtest/moqtest_client"
             client.parent.mkdir(parents=True)
-            client.write_text('''#!/usr/bin/env python3
+            client.write_text("""#!/usr/bin/env python3
 import json, os, sys
 with open(os.environ["CONFORMANCE_CALLS"], "a") as log:
     log.write(json.dumps(sys.argv[1:]) + "\\n")
 print("MoQTest verification result: SUCCESS")
 sys.exit(int(os.environ["CONFORMANCE_EXIT"]))
-''')
+""")
             client.chmod(0o755)
             calls = root / "calls.jsonl"
-            env = dict(os.environ, SECTIONS="1 2 3 4 5 6 7", SKIP_FETCH="1",
-                       MOXYGEN_DIR=str(root), CONFORMANCE_CALLS=str(calls),
-                       CONFORMANCE_EXIT=str(exit_code))
-            result = subprocess.run(["bash", str(script), "http://127.0.0.1:1", "16", "Q"],
-                                    cwd=root, env=env, capture_output=True, text=True)
+            env = dict(
+                os.environ,
+                SECTIONS="1 2 3 4 5 6 7",
+                SKIP_FETCH="1",
+                MOXYGEN_DIR=str(root),
+                CONFORMANCE_CALLS=str(calls),
+                CONFORMANCE_EXIT=str(exit_code),
+            )
+            result = subprocess.run(
+                ["bash", str(script), "http://127.0.0.1:1", "16", "Q"],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
             return result, [json.loads(line) for line in calls.read_text().splitlines()]
 
     def test_every_selected_case_uses_subscribe_and_supported_forwarding(self):

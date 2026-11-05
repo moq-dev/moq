@@ -40,10 +40,6 @@ pub enum Error {
 		namespace: String,
 	},
 
-	/// Multiple namespaces use a track name that would overwrite one hang rendition ID.
-	#[error("MSF track name {0:?} is ambiguous as a hang rendition ID")]
-	DuplicateTrackName(String),
-
 	/// The catalog frame is not valid UTF-8.
 	#[error("MSF catalog frame is not valid UTF-8")]
 	InvalidUtf8,

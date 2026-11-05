@@ -69,7 +69,9 @@ nameEl.addEventListener("change", () => {
 // encoded stream ("encoded"). Defaults to off (raw) to avoid the extra encode +
 // decode unless the user wants to inspect codec artifacts.
 const encodedEl = $<HTMLInputElement>("encoded-preview");
-const syncPreview = () => publish.setAttribute("preview", encodedEl.checked ? "encoded" : "source");
+const syncPreview = () => {
+	publish.preview = encodedEl.checked ? "encoded" : "source";
+};
 encodedEl.addEventListener("change", syncPreview);
 syncPreview();
 
@@ -408,7 +410,10 @@ meta.run((effect) => {
 		timescale: Net.Time.Timescale.MILLI,
 		maxAge: Milli(86_400_000),
 	});
-	effect.cleanup(() => track.close());
+	effect.cleanup(() => {
+		track.finish();
+		track.close();
+	});
 
 	const producer = new Json.Snapshot.Producer<unknown>({ track });
 	producer.update({ value: currentMeta, at: Net.Time.Timestamp.now() });

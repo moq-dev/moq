@@ -1,101 +1,123 @@
-import { Milli, Nano } from "@moq/clock";
-import { controlTimeout, error, NoStreamCredit } from "../error.ts";
-import type { OpenOptions, Stream } from "../stream.ts";
-import { TimeoutError, withTimeout } from "./timeout.ts";
+import { Milli, Nano, sleep } from "@moq/clock";
+import { race } from "@moq/signals";
+import { controlTimeout, error } from "../error.ts";
+import type { Stream } from "../stream.ts";
+import { TimeoutError } from "./timeout.ts";
 
-/** Request opens defer their deadline to the create-to-answer budget. @internal */
-export const requestOptions = { timeout: null, waitUntilAvailable: false } satisfies Partial<OpenOptions>;
-/** Milliseconds allowed from a request create to its first answer. @internal */
+/** Milliseconds a request may go unanswered once none of its streams waits to open. @internal */
 export const REQUEST_TIMEOUT_MS = 10_000;
 
-// A closed session fails its creates with a session-sourced WebTransportError, or with an
-// InvalidStateError once it has closed. Those report the session's failure, not missing credit.
-function sessionFailure(err: unknown): boolean {
-	if (typeof err !== "object" || err === null) return false;
-	const { source, name } = err as { source?: unknown; name?: unknown };
-	return source === "session" || name === "InvalidStateError";
+/** What a deadline failure resets: a stream, or whatever owns one. @internal */
+export interface Abortable {
+	abort(err: Error): void;
 }
 
-// A stream the deadline resets, with the request written on it and the message withdrawing it.
-interface Recorded {
-	stream: Stream;
-	written?: Promise<boolean>;
-	withdraw?: () => Promise<void>;
-}
-
-/** One fatal deadline for a request, including every stream its setup creates. @internal */
+/**
+ * One fatal deadline for a request, including every stream its setup creates.
+ *
+ * An open waiting for the peer's stream credit is waiting its turn, not the peer stalling, so
+ * the deadline only runs while none of the request's streams waits to open. @internal
+ */
 export class Deadline {
-	#opening = false;
-	#streams: Recorded[] = [];
+	/** Creates still waiting on credit: a fetch opens its TRACK stream alongside. */
+	#opening = 0;
+	/** Settles whenever an open starts or ends, restarting the budget. */
+	#changed!: Promise<void>;
+	#notify!: () => void;
+	#owners: Abortable[] = [];
 	#failure?: Error;
 
-	/** Record a create so deadline failures reset its stream even if it opens late. */
-	async open(opening: Stream | Promise<Stream>): Promise<Stream> {
-		this.#opening = true;
-		let stream: Stream;
-		try {
-			stream = await opening;
-		} catch (cause) {
-			if (sessionFailure(cause)) throw cause;
-			throw new NoStreamCredit({ cause });
-		} finally {
-			this.#opening = false;
-		}
-		if (this.#failure) {
-			stream.abort(this.#failure);
-			throw this.#failure;
-		}
-		this.#streams.push({ stream });
-		return stream;
+	constructor() {
+		this.#rearm();
+	}
+
+	#rearm() {
+		this.#changed = new Promise((resolve) => {
+			this.#notify = resolve;
+		});
+	}
+
+	#change(delta: number) {
+		this.#opening += delta;
+		this.#notify();
+		this.#rearm();
 	}
 
 	/**
-	 * Write the request on an opened stream, and what withdraws it if the deadline fails after.
-	 *
-	 * A draft-14-16 request rides the control stream, where a reset tells the peer nothing, so
-	 * one that reached the peer is withdrawn by message first. Without `withdraw` the reset alone ends it.
+	 * Record a create so deadline failures reset its stream even if it opens late. `own` wraps
+	 * the opened stream in its owner, which the failure then resets instead.
 	 */
-	async send(stream: Stream, write: () => Promise<void>, withdraw?: () => Promise<void>): Promise<void> {
+	open(opening: Stream | Promise<Stream>): Promise<Stream>;
+	open<T extends Abortable>(opening: Stream | Promise<Stream>, own: (stream: Stream) => T): Promise<T>;
+	async open(
+		opening: Stream | Promise<Stream>,
+		own: (stream: Stream) => Abortable = (stream) => stream,
+	): Promise<Abortable> {
+		this.#change(1);
+		let stream: Stream;
+		try {
+			stream = await opening;
+		} finally {
+			this.#change(-1);
+		}
+		const owner = own(stream);
+		if (this.#failure) {
+			owner.abort(this.#failure);
+			throw this.#failure;
+		}
+		this.#owners.push(owner);
+		return owner;
+	}
+
+	/** Write the request on an opened stream, which a deadline failure after resets. */
+	async send(stream: Abortable, write: () => Promise<void>): Promise<void> {
 		if (this.#failure) throw this.#failure;
-		const recorded = this.#streams.find((recorded) => recorded.stream === stream);
-		if (!recorded) throw new Error("request sent on a stream the deadline did not open");
-		const sending = write();
-		recorded.written = sending.then(
-			() => true,
-			() => false,
-		);
-		recorded.withdraw = withdraw;
-		await sending;
+		if (!this.#owners.includes(stream)) throw new Error("request sent on a stream the deadline did not open");
+		await write();
 	}
 
 	/** Wait for the first answer under the request's single deadline. */
 	async wait<T>(answer: Promise<T>): Promise<T> {
+		const done = new AbortController();
 		try {
-			return await withTimeout(
-				answer,
-				Nano.fromMilli(Milli(REQUEST_TIMEOUT_MS)),
-				`request timed out after ${REQUEST_TIMEOUT_MS}ms`,
-			);
+			return (await race([answer, this.#expire(done.signal)])) as T;
 		} catch (cause) {
-			const failure =
-				cause instanceof TimeoutError
-					? this.#opening
-						? new NoStreamCredit({ cause })
-						: controlTimeout(cause)
-					: error(cause);
+			const failure = cause instanceof TimeoutError ? controlTimeout(cause) : error(cause);
 			this.#failure = failure;
-			// Other failures keep the caller's cancellation ordering, including legacy UNSUBSCRIBE.
-			if (cause instanceof TimeoutError || cause instanceof NoStreamCredit) {
-				await Promise.all(this.#streams.map((recorded) => Deadline.#reset(recorded, failure)));
+			// Other failures keep the caller's cancellation ordering.
+			if (cause instanceof TimeoutError) {
+				for (const owner of this.#owners) owner.abort(failure);
 			}
 			throw failure;
+		} finally {
+			done.abort();
 		}
 	}
 
-	static async #reset({ stream, written, withdraw }: Recorded, failure: Error) {
-		// The withdrawal names a request the peer must already have, so a write still in
-		// flight finishes first, and one that never landed is not withdrawn.
-		if (withdraw && written && (await written)) await withdraw().catch(() => undefined);
-		stream.abort(failure);
+	/** Reject once the request goes the whole budget with none of its streams waiting to open. */
+	async #expire(done: AbortSignal): Promise<never> {
+		const budget = Nano.fromMilli(Milli(REQUEST_TIMEOUT_MS));
+		const answered = new Promise<void>((resolve) =>
+			done.addEventListener("abort", () => resolve(), { once: true }),
+		);
+		for (;;) {
+			const changed = this.#changed;
+			const restart = new AbortController();
+			const timer =
+				this.#opening > 0
+					? new Promise<void>(() => {})
+					: sleep(budget, { signal: AbortSignal.any([restart.signal, done]) }).catch(() => undefined);
+			const why = await race([
+				timer.then(() => "expired" as const),
+				changed.then(() => "changed" as const),
+				answered,
+			]);
+			restart.abort();
+			// Answered: the waiting is over, and nothing is left to reject.
+			if (why === undefined) return new Promise<never>(() => {});
+			if (why === "expired" && !done.aborted) {
+				throw new TimeoutError(`request timed out after ${REQUEST_TIMEOUT_MS}ms`);
+			}
+		}
 	}
 }

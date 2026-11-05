@@ -11,7 +11,7 @@
  *   and a PUBLISH_NAMESPACE is repriced with the same parameters on a REQUEST_UPDATE.
  *
  * These are the semantics moq-lite carries natively on every announcement (see
- * `lite/announce.ts`); this module is the moq-transport binding, negotiated on draft-17+
+ * `lite/announce.ts`); this module is the moq-transport binding, negotiated on draft-18+
  * only, where SETUP is a Key-Value-Pair block.
  *
  * A broadcast we produce carries a single-entry HOP_PATH and a cost of 0, and a route we
@@ -30,20 +30,6 @@ import * as Varint from "../varint.ts";
 // Type-only: SETUP loads eagerly and must not pull in the message parameter codec.
 import type { Parameters } from "./parameters.ts";
 import { SetupOption, type SetupOptions } from "./setup_options.ts";
-import { type IetfVersion, Version } from "./version.ts";
-
-/**
- * Whether a version can negotiate the extension.
- *
- * Draft-17 is the first with the unified SETUP: a bare Key-Value-Pair block that a new
- * option slots into without touching the message shape. Earlier drafts exchange SETUP over
- * the legacy control stream, which this extension does not cover.
- *
- * @internal
- */
-export function supported(version: IetfVersion): boolean {
-	return version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16;
-}
 
 /**
  * The Hop IDs this session declared, one per direction.
@@ -103,9 +89,7 @@ export interface Update {
  *
  * @internal
  */
-export function fromSetup(params: SetupOptions, version: IetfVersion): Hop | undefined {
-	if (!supported(version)) return undefined;
-
+export function fromSetup(params: SetupOptions): Hop | undefined {
 	// 0 is legal: the peer speaks the extension but withholds its identity.
 	const value = params.getVarint(SetupOption.HopId);
 	if (value === undefined) return undefined;
@@ -117,8 +101,7 @@ export function fromSetup(params: SetupOptions, version: IetfVersion): Hop | und
  *
  * @internal
  */
-export function intoSetup(params: SetupOptions, self: Hop, version: IetfVersion) {
-	if (!supported(version)) return;
+export function intoSetup(params: SetupOptions, self: Hop) {
 	params.setVarint(SetupOption.HopId, self);
 }
 

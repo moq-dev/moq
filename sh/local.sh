@@ -10,10 +10,10 @@ if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
     exec "$@"
 fi
 export NEXTEST_TEST_THREADS="${NEXTEST_TEST_THREADS-4}"
-if [[ "${MOQ_LOCAL_SUPERVISED:-}" == 1 ]]; then
+if [[ "${LOCAL_SUPERVISED:-}" == 1 ]]; then
     exec "$@"
 fi
 if [[ "${QUEST_GATE_ADMITTED:-}" == 1 ]]; then
     exec bun --no-orphans "${BASH_SOURCE[0]%/*}/local.ts" "$@"
 fi
-exec quest gate bun --no-orphans "${BASH_SOURCE[0]%/*}/local.ts" "$@"
+exec bash "${BASH_SOURCE[0]%/*}/quest.sh" gate bun --no-orphans "${BASH_SOURCE[0]%/*}/local.ts" "$@"

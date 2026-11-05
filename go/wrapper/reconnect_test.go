@@ -109,7 +109,7 @@ func waitConnects(t *testing.T, ctx context.Context, session *moq.Session, want 
 	}
 }
 
-// awaitAnnouncement drains announcements until an active one names path.
+// awaitAnnouncement drains announcements until path is present.
 func awaitAnnouncement(t *testing.T, ctx context.Context, announced *moq.AnnounceConsumer, path string) {
 	t.Helper()
 
@@ -121,7 +121,7 @@ func awaitAnnouncement(t *testing.T, ctx context.Context, announced *moq.Announc
 		if event == nil {
 			t.Fatalf("announcement stream ended before %q", path)
 		}
-		if ann, ok := event.(moq.AnnounceEventStart); ok && ann.Announce.Prefix == path {
+		if ann, ok := event.(moq.AnnounceEventPresent); ok && ann.Announce.Prefix == path {
 			return
 		}
 	}
@@ -184,10 +184,11 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	publisher := dialWorker(t, ctx, url)
 	defer publisher.Close()
 
-	broadcast, err := publisher.CreateBroadcast("live")
+	publication, err := publisher.CreateBroadcast("live")
 	if err != nil {
 		t.Fatal(err)
 	}
+	broadcast := publication.Broadcast()
 	defer broadcast.Close()
 
 	track, err := broadcast.PublishTrack("data", timedInfo())
@@ -195,7 +196,7 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer track.Finish()
-	if err := broadcast.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -226,7 +227,7 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 
 	awaitAnnouncement(t, ctx, announced, "live")
 
-	before, err := subscriber.RequestBroadcast(ctx, "live")
+	before, err := subscriber.Request(ctx, "live", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +266,7 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	// The subscriber resolves the re-announced broadcast again and receives
 	// frames, which is how a worker follows a relay restart: the old handle's
 	// broadcast closed with its source, and the announcement is what re-anchors.
-	after, err := subscriber.RequestBroadcast(ctx, "live")
+	after, err := subscriber.Request(ctx, "live", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

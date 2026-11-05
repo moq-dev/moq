@@ -18,7 +18,7 @@ or acceptor to mirror.
 So each surface here exposes that unified shape once Rust has it, and only
 for the surface a named consumer uses. Start by asking that consumer which
 surface it needs. Do not build all three. Through moq-ffi, follow the session
-AUTH shape of `MoqAuth` in `rs/moq-ffi/src/auth.rs`. Update every
+AUTH shape: `MoqSession.tokens()` and `MoqSession.grants()`. Update every
 wrapper, as the cross-package table requires.
 
 Public API: whatever the chosen surface needs to present and accept auths
@@ -27,4 +27,3 @@ per request. Wire: none.
 ## Related
 
 - [#5148](https://github.com/moq-dev/moq/pull/5148) - incoming request tokens in Rust
-- [Relay request tokens](/quest/m3/auth-request-lease.md) - the relay's half, also waiting on a consumer

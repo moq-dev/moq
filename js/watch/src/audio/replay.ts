@@ -19,8 +19,8 @@
 import { Manual, type Micro, Milli, Nano, type Second } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
-import { Group, Time, Track } from "@moq/net";
-import { Effect, Signal } from "@moq/signals";
+import { type Group, Time, Track } from "@moq/net";
+import { Derived, Effect, Signal } from "@moq/signals";
 import { type Arrival as Diagnostic, gap } from "../arrivals";
 import { type Delay, Sync } from "../sync";
 import { Backpressure } from "./buffer";
@@ -84,6 +84,8 @@ export interface Quantum {
 	timestamp: number;
 	/** The delay `Sync` resolved as of this quantum, in ms: what the ring and the decode gate hold. */
 	delay: number;
+	/** The ring's cumulative underruns, as the player's stats count them: each run-dry and each short quantum. */
+	underruns: number;
 }
 
 /** Samples as the milliseconds `AudioBuffer` posts to the worklet. */
@@ -132,9 +134,9 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 
 	const sync = new Sync({ delay: options.delay });
 	const track = new Track.Producer("audio");
-	const consumer = new Container.Consumer(track.subscribe({ maxDelay: WIRE_MAX_DELAY }), {
+	const consumer = new Container.Consumer(track.subscribe({ delay: { max: WIRE_MAX_DELAY } }), {
 		format: new Container.Legacy.Format("audio"),
-		maxDelay: sync.out.maxDelay,
+		delay: new Derived([sync.out.delay, sync.out.maxDelay], (min, max) => ({ min, max })),
 	});
 
 	// Match the decoder: a codec constant until a delivered packet states its own duration.
@@ -148,7 +150,8 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			delay: config.delay !== undefined ? Milli(config.delay) : undefined,
 		}),
 	);
-	signals.cleanup(sync.register(playout));
+	const audio = sync.track({ target: playout });
+	signals.cleanup(() => audio.close());
 	await settle();
 
 	let delay = sync.out.delay.peek();
@@ -188,7 +191,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			const { timestamp, arrival } = next.frame;
 			read.set(timestamp);
 			const media = Milli.fromMicro(timestamp);
-			const late = sync.received(media, arrival);
+			const late = audio.received(media, arrival);
 			arrivals.push({ kind: "frame", timestamp: media, arrival, late });
 			const entry = recorded.get(timestamp);
 			if (!entry) throw new Error(`the consumer delivered an unrecorded frame at ${timestamp} us`);
@@ -236,9 +239,8 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 				}
 				let group = groups.get(arrival.group);
 				if (!group) {
-					group = new Group.Producer(arrival.group);
+					group = track.createGroup(BigInt(arrival.group));
 					groups.set(arrival.group, group);
-					track.writeGroup(group);
 				}
 				const timestamp = micros(arrival.timestamp);
 				group.writeFrame({
@@ -246,7 +248,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 					timestamp: Time.Timestamp.fromMicros(timestamp),
 				});
 				if (ends.get(arrival.group) === next) {
-					group.close();
+					group.finish();
 					groups.delete(arrival.group);
 				}
 				next++;
@@ -281,12 +283,14 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 				stalled: ring.stalled,
 				timestamp: Milli.fromMicro(ring.timestamp),
 				delay,
+				underruns: ring.underruns,
 			};
 		}
 	} finally {
 		delivery.resolve();
 		abort.abort();
 		consumer.close();
+		track.finish();
 		track.close();
 		await decode;
 		signals.close();

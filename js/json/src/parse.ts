@@ -1,9 +1,9 @@
 import { DuplicateKey } from "./error.ts";
 
-const decoder = new TextDecoder();
+const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /**
- * Parse one JSON frame, refusing any object that repeats a key.
+ * Parse one JSON frame, refusing malformed Unicode and any object that repeats a key.
  *
  * `JSON.parse` keeps the last of a repeated key while other parsers keep the first or refuse, so
  * such a frame could mean two things to two readers. A full parser that reports duplicates costs
@@ -41,10 +41,17 @@ function members(root: unknown): number {
 	const pending = [root];
 	while (pending.length > 0) {
 		const value = pending.pop();
-		if (typeof value !== "object" || value === null) continue;
-		const items = Array.isArray(value) ? value : Object.values(value);
-		if (!Array.isArray(value)) count += items.length;
-		for (const item of items) pending.push(item);
+		if (typeof value === "string") {
+			if (!value.isWellFormed()) throw new SyntaxError("unpaired surrogate in JSON string");
+		} else if (Array.isArray(value)) {
+			for (const item of value) pending.push(item);
+		} else if (typeof value === "object" && value !== null) {
+			for (const [key, item] of Object.entries(value)) {
+				if (!key.isWellFormed()) throw new SyntaxError("unpaired surrogate in JSON object key");
+				count++;
+				pending.push(item);
+			}
+		}
 	}
 	return count;
 }

@@ -8,7 +8,7 @@ the nightly uses, and the old per-case comparison is deleted.
 ## Plan
 
 [moq-dev/moq#6511](https://github.com/moq-dev/moq/pull/6511) added the paired
-path (`--criterion` with `MOQ_BENCH_BASE`, writing `paired.json`). The BASE
+path (`--criterion` with `BENCH_BASE`, writing `paired.json`). The BASE
 mode in `bench/run.sh` still goes through `compare_criterion`. Route it
 through the paired path, and delete `criterion_cases`, `compare_criterion`,
 `report_set_changes`, and `--criterion-baseline`. That also deletes the

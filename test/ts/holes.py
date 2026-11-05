@@ -4,14 +4,18 @@
     ./holes.py capture.ts source.ts [--shed]
 
 Every audio and video stream of a generated clip has a constant frame duration, so the step
-between consecutive decode timestamps is the same throughout. A capture's step past one and a
-half of its source's is a hole: media the round-trip lost, whether the path dropped it, the relay evicted
-it, or the exporter missed its deadline. A lost prefix or tail leaves no step behind, so each
-source stream must also be in the capture, on its PID, ending where the source's does: the
-export keeps the source's timestamps. It may start later, by up to JOIN: the subscriber joins
-at the relay's latest group once the catalog is out, which skips the first second or two of
-a generated clip on a clean path. The compliance checks grade only the access units that
-arrived, so a capture missing most of its video still passes them.
+between consecutive presentation timestamps, in presentation order, is the same throughout. A
+capture's step past one and a half of its source's is a hole: media the round-trip lost, whether
+the path dropped it, the relay evicted it, or the exporter missed its deadline. Presentation
+timestamps, because the export keeps them while it derives each group's decode timestamps from
+that group's frames alone: a reordered group's first frames decode just before its earliest
+presentation, not a frame apart, which leaves a decode step at every group with nothing lost. A
+lost prefix or tail leaves no step behind, so each source stream must also be in the capture, on
+its PID, ending where the source's does: the export keeps the source's timestamps. It may start
+later, by up to JOIN: the subscriber joins at the relay's latest group once the catalog is out,
+which skips the first second or two of a generated clip on a clean path. The compliance checks
+grade only the access units that arrived, so a capture missing most of its video still passes
+them.
 
 Under `--shed` the path was narrower than the media, so losing media is expected and reported,
 but only by whole groups: of each group of the source, from a sync frame to the next, the
@@ -43,15 +47,15 @@ from fractions import Fraction
 JOIN = Fraction(3)
 
 
-def step(dts: list[int]) -> int:
-    """A stream's frame step: its most common decode-timestamp step, or 0 with fewer than two frames."""
-    steps = [b - a for a, b in zip(dts, dts[1:])]
+def step(times: list[int]) -> int:
+    """A stream's frame step: its most common step between ascending timestamps, or 0 with fewer than two frames."""
+    steps = [b - a for a, b in zip(times, times[1:])]
     return Counter(steps).most_common(1)[0][0] if steps else 0
 
 
-def holes(dts: list[int], frame: int) -> list[tuple[int, int]]:
-    """The (dts, step) of each step past one and a half frames."""
-    return [(a, b - a) for a, b in zip(dts, dts[1:]) if 2 * (b - a) > 3 * frame]
+def holes(times: list[int], frame: int) -> list[tuple[int, int]]:
+    """The (timestamp, step) of each step past one and a half frames between ascending timestamps."""
+    return [(a, b - a) for a, b in zip(times, times[1:]) if 2 * (b - a) > 3 * frame]
 
 
 @dataclass
@@ -65,7 +69,8 @@ class Shed:
 
 
 def shed(pts: list[int], sync: list[bool], kept: list[int]) -> Shed:
-    """Grade the capture's `kept` PTS, in its order, against the source's frames, in decode order with their sync flags."""
+    """Grade the capture's `kept` PTS, in its order, against the source's frames, in decode order with
+    their sync flags."""
     result = Shed(missing=0, mid_group=[], tail=0, unmatched=[])
     joined = lost = False
     i = 0
@@ -120,12 +125,27 @@ def probe(path: str) -> dict[str, Stream]:
     # Probe the whole file, not FFmpeg's first 5 MB: a stream whose first frame comes after that
     # is never described, so the second frame of its first PES repeats the first's timestamp
     # and every later one in that PES runs a frame behind, which reads as a hole.
-    report = json.loads(subprocess.run(
-        ["ffprobe", "-v", "error", "-probesize", str(os.path.getsize(path)), "-analyzeduration", str(2**62),
-         "-show_entries", "stream=index,id,codec_type,codec_name,time_base:packet=stream_index,dts,pts,flags",
-         "-of", "json", path],
-        check=True, capture_output=True, text=True,
-    ).stdout)
+    report = json.loads(
+        subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-probesize",
+                str(os.path.getsize(path)),
+                "-analyzeduration",
+                str(2**62),
+                "-show_entries",
+                "stream=index,id,codec_type,codec_name,time_base:packet=stream_index,dts,pts,flags",
+                "-of",
+                "json",
+                path,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
     streams = {s["index"]: s for s in report["streams"] if s.get("codec_type") in ("audio", "video")}
     dts: dict[int, list[int]] = {index: [] for index in streams}
     pts: dict[int, list[int]] = {index: [] for index in streams}
@@ -137,9 +157,15 @@ def probe(path: str) -> dict[str, Stream]:
             pts[index].append(int(packet.get("pts", packet["dts"])))
             sync[index].append("K" in packet.get("flags", ""))
     return {
-        s["id"]: Stream(s, dts[index], pts[index], sync[index],
-                        tuple(t * Fraction(s["time_base"]) for t in (min(pts[index]), max(pts[index]), dts[index][-1])))
-        for index, s in streams.items() if pts[index]
+        s["id"]: Stream(
+            s,
+            dts[index],
+            pts[index],
+            sync[index],
+            tuple(t * Fraction(s["time_base"]) for t in (min(pts[index]), max(pts[index]), dts[index][-1])),
+        )
+        for index, s in streams.items()
+        if pts[index]
     }
 
 
@@ -158,7 +184,7 @@ def main() -> None:
     for pid, src in sorted(source.items()):
         label = f"PID {pid} {src.info['codec_name']}"
         # The source's step, not the capture's: a capture that kept every other frame has a step of its own.
-        frame = step(src.dts)
+        frame = step(sorted(src.pts))
         if frame == 0:
             sys.exit(f"error: {label} has fewer than two frames in {args.source}")
         if pid not in capture:
@@ -167,8 +193,10 @@ def main() -> None:
             continue
         got = capture[pid]
         base = Fraction(got.info["time_base"])
-        span = (f"from {float(got.span[0]):.3f}s to {float(got.span[1]):.3f}s "
-                f"of {float(src.span[0]):.3f}s to {float(src.span[1]):.3f}s")
+        span = (
+            f"from {float(got.span[0]):.3f}s to {float(got.span[1]):.3f}s "
+            f"of {float(src.span[0]):.3f}s to {float(src.span[1]):.3f}s"
+        )
         if args.shed:
             expected = src.pts
             if src.info["codec_name"] in ("mp2", "ac3", "eac3"):
@@ -178,8 +206,10 @@ def main() -> None:
             graded = shed(expected, src.sync, got.pts)
             reasons = [f"resumes mid-group at {float(t * base):.3f}s" for t in graded.mid_group[:5]]
             if graded.unmatched:
-                reasons.append(f"{len(graded.unmatched)} frames from {float(graded.unmatched[0] * base):.3f}s "
-                               "are out of the source's order, repeated, or not in it")
+                reasons.append(
+                    f"{len(graded.unmatched)} frames from {float(graded.unmatched[0] * base):.3f}s "
+                    "are out of the source's order, repeated, or not in it"
+                )
             if graded.tail:
                 reasons.append(f"lost {graded.tail} frames of the source's last group")
             late = got.span[0] - src.span[0]
@@ -187,14 +217,16 @@ def main() -> None:
                 reasons.append(f"starts {float(late):.3f}s after its source, past the {float(JOIN)}s join")
             summary = f"{graded.missing} frames ({float(graded.missing * frame * base):.1f} s) shed"
         else:
-            found = holes(got.dts, frame)
+            found = holes(sorted(got.pts), frame)
             reasons = [f"at {float(at * base):.3f}s: {float(gap * base) * 1000:.0f} ms step" for at, gap in found[:5]]
             reasons += cuts(src.span, got.span, frame * base)
             missing = sum(gap - frame for _, gap in found) * base
             summary = f"{len(found)} holes, {float(missing) * 1000:.0f} ms missing"
         failed |= bool(reasons)
-        print(f"  {'FAIL' if reasons else 'PASS'}  {label}: {len(got.dts)} frames of "
-              f"{float(frame * base) * 1000:.2f} ms, {summary}, {span}")
+        print(
+            f"  {'FAIL' if reasons else 'PASS'}  {label}: {len(got.dts)} frames of "
+            f"{float(frame * base) * 1000:.2f} ms, {summary}, {span}"
+        )
         for reason in reasons:
             print(f"        {reason}")
     sys.exit(1 if failed else 0)

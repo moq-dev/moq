@@ -8,8 +8,8 @@ results, with avoidable copying or unrelated-route work removed if worthwhile.
 ## Plan
 
 [serve_announced](/rs/moq-relay/src/web.rs) creates an announcement consumer,
-collects prefixes, creates another Vec of strings and joins them per request
-(lines 1011-1044). Some output-size cost is necessary; repeated snapshot and
+collects prefixes, creates another Vec of strings and joins them per request.
+Some output-size cost is necessary; repeated snapshot and
 formatting work is the hypothesis, not proof of a bottleneck.
 
 Sweep registered routes × HTTP pollers, independently varying matched prefix

@@ -1,6 +1,6 @@
 import { type Installed, install } from "./ambient.ts";
 import type { Backend } from "./backend.ts";
-import { drain } from "./host.ts";
+import { drain, host } from "./host.ts";
 import { Instant, Nano, Wall } from "./types.ts";
 
 type Timer = { at: number; order: number; index: number; ready: () => void };
@@ -20,6 +20,7 @@ export class Manual {
 	#order = 0;
 	#revision = 0;
 	#fired = 0;
+	#tasks = 0;
 	#driving = false;
 	#advancing = false;
 	#armed?: () => void;
@@ -37,6 +38,15 @@ export class Manual {
 			return () => {
 				this.#remove(timer);
 			};
+		},
+		// Yields stay real host tasks, so the host's other work still gets a turn, but the clock counts them.
+		task: (ready) => {
+			this.#tasks++;
+			this.#revision++;
+			host.task(() => {
+				this.#tasks--;
+				ready();
+			});
 		},
 	};
 
@@ -67,7 +77,7 @@ export class Manual {
 		}
 	}
 
-	/** Advance through each due deadline, draining tasks before continuing to the target. */
+	/** Advance through each due deadline, draining tasks and pending yields before continuing to the target. */
 	async advance(duration: Nano): Promise<void> {
 		if (this.#driving) throw new Error("time driver already pending");
 		this.#driving = true;
@@ -131,6 +141,8 @@ export class Manual {
 			for (;;) {
 				const revision = this.#revision;
 				await drain();
+				// A yield armed while draining is still queued: time must not pass a yielding loop.
+				if (this.#tasks > 0) continue;
 				if (target === undefined) {
 					if (stop?.()) return;
 					// Select fire's target in the same turn that readies its first timer.

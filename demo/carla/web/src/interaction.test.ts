@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { focusFromHash, hashWithFocus, Interaction } from "./interaction.ts";
+import { focusFromHash, hashWithFocus, Interaction, ownsKey } from "./interaction.ts";
 
 describe("Interaction", () => {
 	test("focuses a truck without taking control", () => {
@@ -104,4 +104,29 @@ test("a retracted truck loses preview, focus, and control before re-announcement
 	expect(state.hovered.peek()).toBeUndefined();
 	state.focus("truck1/front");
 	expect(state.driving.peek()).toBeUndefined();
+});
+
+describe("ownsKey", () => {
+	// Stand-ins for the DOM nodes, which bun's test runtime doesn't provide.
+	const node = () => ({ nodeType: 1 }) as unknown as Node;
+	const body = node();
+	const documentElement = node();
+	const host = node();
+	const inside = node();
+	const root = {
+		host,
+		ownerDocument: { body, documentElement },
+		contains: (other: Node | null) => other === inside,
+	} as unknown as ShadowRoot;
+
+	test("takes keys aimed inside the player or at nothing in particular", () => {
+		expect(ownsKey(inside, root)).toBe(true);
+		expect(ownsKey(host, root)).toBe(true);
+		expect(ownsKey(body, root)).toBe(true);
+		expect(ownsKey(documentElement, root)).toBe(true);
+	});
+
+	test("leaves keys aimed at the host page's own controls", () => {
+		expect(ownsKey(node(), root)).toBe(false);
+	});
 });

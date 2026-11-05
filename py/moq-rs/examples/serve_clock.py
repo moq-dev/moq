@@ -13,16 +13,16 @@ Run a subscriber against it with TLS verification disabled, e.g.:
 
 import argparse
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import moq
 
 
 async def run(bind: str, broadcast_name: str, track_name: str, host: str) -> None:
     async with moq.Server(bind, tls_generate=[host]) as server:
-        broadcast = server.create_broadcast(broadcast_name)
-        track = broadcast.publish_track(track_name, moq.TrackInfo(timescale=1_000_000))
-        broadcast.announce()
+        publication = server.create_broadcast(broadcast_name)
+        track = publication.broadcast.publish_track(track_name, moq.TrackInfo(timescale=1_000_000))
+        publication.announce()
         print(f"serving {broadcast_name!r} track={track_name!r} on https://{server.local_addr}")
         for fp in server.cert_fingerprints():
             print(f"  cert fingerprint sha256: {fp}")
@@ -31,13 +31,13 @@ async def run(bind: str, broadcast_name: str, track_name: str, host: str) -> Non
         try:
             while True:
                 now = datetime.now(timezone.utc).replace(microsecond=0)
-                timestamp = timedelta(seconds=int(now.timestamp()))
+                timestamp = moq.Timestamp(int(now.timestamp()), 1)
                 group = track.append_group()
                 group.write_frame(now.strftime("%Y-%m-%d %H:%M:").encode(), timestamp)
 
                 current_minute = now.minute
                 while now.minute == current_minute:
-                    timestamp = timedelta(seconds=int(now.timestamp()))
+                    timestamp = moq.Timestamp(int(now.timestamp()), 1)
                     group.write_frame(now.strftime("%S").encode(), timestamp)
                     await asyncio.sleep(1 - datetime.now(timezone.utc).microsecond / 1_000_000)
                     now = datetime.now(timezone.utc).replace(microsecond=0)

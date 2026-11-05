@@ -22,8 +22,29 @@ fn packet(pid: u16) -> [u8; 188] {
 	packet
 }
 
+/// Pin glibc's heap so every slot reuses it. A padded slot at 100 Mb/s lays out about 300 KB,
+/// right at the size where glibc adapts between `mmap` and the heap and trims the heap's
+/// top, so which one a run settles on, and with it fresh page faults on every slot, flips
+/// with the process's heap history alone: that was a 5x swing on the ARM runners with no
+/// change to the schedule.
+fn hold_heap() {
+	#[cfg(all(target_os = "linux", target_env = "gnu"))]
+	// SAFETY: mallopt only tunes the allocator, called before anything is measured.
+	unsafe {
+		assert_eq!(libc::mallopt(libc::M_MMAP_THRESHOLD, 32 << 20), 1);
+		assert_eq!(libc::mallopt(libc::M_TRIM_THRESHOLD, libc::c_int::MAX), 1);
+	}
+}
+
 fn admission(c: &mut Criterion) {
-	let mut group = c.benchmark_group("ts_schedule");
+	for skipped in [false, true] {
+		admission_case(c, skipped);
+	}
+}
+
+fn admission_case(c: &mut Criterion, skipped: bool) {
+	hold_heap();
+	let mut group = c.benchmark_group(if skipped { "ts_schedule_skip" } else { "ts_schedule" });
 	group.measurement_time(Duration::from_secs(1));
 	group.warm_up_time(Duration::from_millis(200));
 	group.sample_size(10);
@@ -48,7 +69,11 @@ fn admission(c: &mut Criterion) {
 					}
 					for frame in 0..frames {
 						for pid in 1..=pids {
-							let at = (999 + frame * 40) * 1_000_000;
+							let gap = if skipped && frame >= frames / 2 { 4_000 } else { 0 };
+							if skipped && frame == frames / 2 {
+								schedule.skip();
+							}
+							let at = (999 + gap + frame * 40) * 1_000_000;
 							schedule
 								.push_frames(
 									pid,
@@ -76,6 +101,7 @@ fn admission(c: &mut Criterion) {
 /// Padded layout across queued tracks and access-unit size, each track's first unit with the
 /// tables ahead of it, the larger units spanning several slots.
 fn tables(c: &mut Criterion) {
+	hold_heap();
 	let mut group = c.benchmark_group("ts_schedule_tables");
 	group.measurement_time(Duration::from_secs(1));
 	group.warm_up_time(Duration::from_millis(200));

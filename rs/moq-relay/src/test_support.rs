@@ -21,6 +21,9 @@ pub struct TestRelay {
 /// Bind a public test relay on ephemeral loopback ports without TOML or port probes.
 ///
 /// It also accepts the work-in-progress moq-lite-07, for a client that opts in.
+/// It ignores SIGINT and SIGTERM, which reach every relay in a `cargo test`
+/// process, so a sibling test raising one cannot stop it; fire
+/// [`Relay::shutdown_trigger`] instead.
 pub async fn test_relay() -> anyhow::Result<TestRelay> {
 	let mut config = Config::default();
 	config.drain_timeout = Some(std::time::Duration::ZERO.into());
@@ -32,7 +35,7 @@ pub async fn test_relay() -> anyhow::Result<TestRelay> {
 	config.web.http.listen = Some("127.0.0.1:0".parse()?);
 	config.auth.public = vec![moq_auth::Pattern::all()];
 
-	let relay = Relay::load(config).await?;
+	let relay = Relay::load(config).await?.with_signals(false);
 	let quic = relay.quic_addr()?;
 	let http = relay.web_addrs().http.expect("HTTP listener was configured");
 	let fingerprint = relay

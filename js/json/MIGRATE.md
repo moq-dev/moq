@@ -4,11 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### A compressed group is held to the group budget
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
 
-A compressed group may inflate to at most `Group.MAX_GROUP_CACHE_BYTES` (32 MiB), the most a plain group carries.
-The encoders charge each frame its plaintext: a compressed snapshot over 32 MiB throws `FrameTooLarge` (it used to pass up to 64 MiB), a window header over it throws, and deltas and ops roll a new group once a group's plaintext would pass the budget.
-A compressed stream's budget is 32 MiB of record plaintext.
+`Snapshot.Consumer`'s `track` option is the track itself, a `Track.Consumer` (`broadcast.track(name)`) or an in-process `Track.Producer`, instead of a `Track.Subscriber`. The consumer subscribes to it at a zero `delay.max` and default options otherwise; the new `priority` option sets the subscription's priority.
+Call the consumer's new `close()` to end that subscription, where you closed your subscriber before.
+No handle to the subscription leaves the consumer, so ranges, order, and `delay.max` can no longer be set on a snapshot reader.
+
+`next()` skips every group a newer one supersedes, and `latest()` no longer waits for a lower group a received track still owes, whatever another reader of the track asks for.
+A reader that set `delay.max` to replay a snapshot track's history or trail a playhead gets only the newest group: read the track's groups yourself and feed them to a `Snapshot.Decoder`, or publish a `Stream` track when every state must survive, or a `Window` track for a bounded recent history.
+
+### Compression moves to the track
+
+The `Compression` type, every `compression` option, `Desync`, `Stream.Decoder.reset`, and `Window.DecoderConfig` are gone, along with the `@moq/flate` dependency.
+Frames are plain JSON: create the track with `compress: true` instead, and `@moq/net` compresses each group on the wire and hands every reader plain frames.
+Drop `compression` from producer and consumer options, and construct `Window.Decoder` with no arguments. A consumer reads a compressed track with no option of its own.
+Every frame is charged its JSON size against `Group.MAX_GROUP_CACHE_BYTES`, as a compressed one already was.
 
 ### Groups roll on joiner demand
 
@@ -29,7 +39,7 @@ Fix any publisher that writes a repeated key.
 
 The snapshot, stream, and window consumers' `next()` and async iterator yield `{ value, at }`, where `at` is the frame's timestamp and absent on an untimed track.
 A window event's `value` is the `Event` that `next()` used to return; a record restated by a group header carries the header frame's time.
-A snapshot consumer's `next()` yields every state in order; call `latest()` to skip to the newest, as `next()` used to.
+A snapshot consumer's `next()` yields each state in order, skipping every group a newer one supersedes (see the zero-delay entry above); call `latest()` to skip to the newest, as `next()` used to.
 Where you awaited `next()` for the newest value, read `(await consumer.latest())?.value`.
 A caller that passes the result on as `any` or `unknown` still compiles, so search for every `next()` and `for await` rather than relying on type errors.
 

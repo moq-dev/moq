@@ -4,8 +4,11 @@
 //! stored track on a `moq_net` broadcast, the archived catalog included, with its stored
 //! timescale and priority and no max age: the store's retention bounds what it holds. Each
 //! track's live feed starts at its newest stored sequence, and every older group is served on
-//! demand from the store through [`track::Dynamic`](moq_net::track::Dynamic) fills, each sequence in its recorded form: a
-//! group as a group, a datagram as a datagram.
+//! demand from the store through [`track::Requests`](moq_net::track::Requests) fills.
+//!
+//! A reader's time start older than the newest group is looked up from the object keys, each of
+//! which carries its first frame's timestamp, so the range starts at the stored group containing
+//! it however old, and a time end stops just past the group containing it.
 //!
 //! A growing archive is followed: every [`Config::refresh`], one delimiter LIST of the prefix
 //! finds added tracks, and one LIST per track after its newest key finds new objects. Once the
@@ -18,7 +21,7 @@
 //!
 //! let store = moq_archive::Store::new(InMemory::new(), "recordings/demo");
 //! let consumer = moq_archive::Consumer::open(store, broadcast, Default::default()).await?;
-//! // Every stored track exists now: announce the broadcast, then serve it.
+//! // Every stored track exists now: announce its publication, then serve it.
 //! consumer.run().await?;
 //! # Ok(())
 //! # }
@@ -83,7 +86,7 @@ pub struct Consumer<S> {
 	shared: Arc<Shared<S>>,
 	broadcast: broadcast::Producer,
 	/// Answers requests for names the archive does not hold, and says when the broadcast closed.
-	requests: broadcast::Dynamic,
+	requests: broadcast::Requests,
 	refresh: Duration,
 	tracks: HashMap<String, Track>,
 	/// Whether the prefix held `.end`, so every track ended and nothing is refreshed.
@@ -98,7 +101,7 @@ struct Shared<S> {
 struct Track {
 	index: Arc<Mutex<Index>>,
 	live: track::Live,
-	dynamic: moq_net::track::Dynamic,
+	dynamic: moq_net::track::Requests,
 }
 
 /// What one refresh found, applied to the served tracks at once.
@@ -137,7 +140,7 @@ impl<S: ObjectStore> Consumer<S> {
 		});
 		let mut consumer = Self {
 			shared,
-			requests: broadcast.dynamic(),
+			requests: broadcast.requests(),
 			broadcast,
 			refresh: config.refresh,
 			tracks: HashMap::new(),
@@ -182,7 +185,7 @@ impl<S: ObjectStore> Consumer<S> {
 				let (shared, period) = (self.shared.clone(), self.refresh);
 				refreshing = Some(
 					async move {
-						moq_clock::sleep(period).await;
+						kio::clock::sleep(period).await;
 						refresh(shared, snapshots).await
 					}
 					.boxed(),
@@ -237,7 +240,7 @@ impl<S: ObjectStore> Consumer<S> {
 	fn apply(&mut self, refreshed: Refreshed) -> Result<()> {
 		for (name, info, index) in refreshed.added {
 			let producer = self.broadcast.create_track(name.as_str(), info)?;
-			let dynamic = producer.dynamic();
+			let dynamic = producer.requests();
 			self.tracks.insert(
 				name,
 				Track {
@@ -255,7 +258,7 @@ impl<S: ObjectStore> Consumer<S> {
 		if let Some(ends) = refreshed.ends {
 			for (name, end) in ends {
 				if let Some(track) = self.tracks.get_mut(&name) {
-					track.live.end(end, &name)?;
+					track.live.end(end)?;
 				}
 			}
 			self.ended = true;
@@ -330,14 +333,21 @@ async fn refresh<S: ObjectStore>(shared: Arc<Shared<S>>, mut tracks: Vec<Snapsho
 
 		let (objects, from) = match track.started {
 			// Everything new, in order.
-			true => (listed.objects, 0),
+			true => (
+				listed
+					.objects
+					.into_iter()
+					.map(|(start, _, path)| (start, path))
+					.collect(),
+				0,
+			),
 			// Only the newest sequence: fills serve the rest.
 			false => {
 				let Some((start, path)) = track.index.lock().unwrap().newest() else {
 					continue;
 				};
 				let newest = object(&shared, &path, start, timed).await?;
-				let sequence = newest.entries.last().ok_or(Error::Empty)?.sequence();
+				let sequence = newest.entries.last().ok_or(Error::Empty)?.sequence;
 				(track.index.lock().unwrap().holding(sequence, 0).0, sequence)
 			}
 		};

@@ -12,6 +12,19 @@ pub struct Wire(
 	pub Kind,
 );
 
+impl Wire {
+	/// The bytes preceding a frame's payload: its varint timestamp.
+	pub(crate) fn prefix(&self, timestamp: moq_net::Timestamp) -> crate::Result<bytes::Bytes> {
+		let mut prefix = bytes::BytesMut::new();
+		hang::container::Frame {
+			timestamp,
+			payload: bytes::Bytes::new(),
+		}
+		.encode(&mut prefix)?;
+		Ok(prefix.freeze())
+	}
+}
+
 impl Container for Wire {
 	type Error = crate::Error;
 

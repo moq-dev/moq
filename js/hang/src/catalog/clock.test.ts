@@ -2,22 +2,34 @@ import { expect, test } from "bun:test";
 import { ClockSchema, MOQ_EPOCH_UNIX_MILLIS, wallClockTime } from "./index.ts";
 import { RootSchema } from "./root.ts";
 
-// Mirrors rs/hang/fixtures/catalog-clock.json: the canonical new shape, a root clock plus an
-// archive without a wall field. A reader maps archive timestamps through the root clock after
+// Mirrors rs/hang/fixtures/catalog-clock.json: the canonical shape, with the clock and the join
+// interval in the root `media` section. A reader maps media timestamps through `media.clock` after
 // timescale conversion.
 const FIXTURE = {
 	video: {
 		renditions: {
-			video: { codec: "avc1.64001f", container: { kind: "legacy" } },
+			video: {
+				codec: "avc1.64001f",
+				codedWidth: 1280,
+				codedHeight: 720,
+				container: { kind: "legacy" },
+			},
 		},
 	},
 	audio: {
 		renditions: {
-			audio: { codec: "opus", container: { kind: "legacy" }, sampleRate: 48000, numberOfChannels: 2 },
+			audio: {
+				codec: "opus",
+				container: { kind: "legacy" },
+				sampleRate: 48000,
+				numberOfChannels: 2,
+			},
 		},
 	},
-	clock: { wall: 1_751_846_400_000_000, timescale: 1_000_000 },
-	archive: { timelines: { video: { track: "video.timeline.z", duration: 2000 } }, timescale: 1000 },
+	media: {
+		clock: { wall: 1_751_846_400_000_000, timescale: 1_000_000 },
+		join: { interval: 2000 },
+	},
 };
 
 test("an omitted timescale means microseconds on the wire", () => {
@@ -76,14 +88,12 @@ test("wallClockTime refuses bad inputs", () => {
 	expect(() => wallClockTime(clock, Number.MAX_SAFE_INTEGER, 1)).toThrow();
 });
 
-test("the packaged shape maps archive timestamps through the root clock", () => {
+test("the packaged shape maps media timestamps through the media clock", () => {
 	const catalog = RootSchema.parse(FIXTURE);
-	if (!catalog.clock) throw new Error("fixture lost its clock");
-	if (!catalog.archive) throw new Error("fixture lost its archive");
+	const clock = catalog.media?.clock;
+	if (!clock) throw new Error("fixture lost its clock");
+	expect(Number(catalog.media?.join?.interval)).toBe(2000);
 
-	// Archive PTS 2000 (ms) lands 2s after the wall epoch.
-	expect(wallClockTime(catalog.clock, 2000, catalog.archive.timescale).getTime()).toBe(
-		MOQ_EPOCH_UNIX_MILLIS + 1_751_846_402_000,
-	);
-	expect("wall" in catalog.archive).toBe(false);
+	// PTS 2000 (ms) lands 2s after the wall epoch.
+	expect(wallClockTime(clock, 2000, 1000).getTime()).toBe(MOQ_EPOCH_UNIX_MILLIS + 1_751_846_402_000);
 });

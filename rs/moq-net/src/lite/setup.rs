@@ -17,6 +17,10 @@ const PARAM_COST: u64 = 0x4;
 const PARAM_HOP: u64 = 0x5;
 /// Setup Parameter id for the sender's implementation, as `name/version` product tokens.
 const PARAM_IMPLEMENTATION: u64 = 0x6;
+/// Setup Parameter id for the client's connection credential (client-only, lite-07+).
+const PARAM_TOKEN: u64 = 0x7;
+/// Setup Parameter id for the sender's route key proof (lite-07+).
+const PARAM_ROUTE_KEY: u64 = 0x8;
 /// Setup Parameter id offering the `ietf` extension (draft-lcurley-moq-ietf): "IETF" in ASCII.
 const PARAM_IETF: u64 = 0x4945_5446;
 
@@ -58,14 +62,21 @@ impl ProbeLevel {
 	/// Both metrics are sampled rather than declared, so this only works for a
 	/// transport whose figures exist by the time the session starts. QUIC and TCP
 	/// both qualify: their RTT comes from the handshake, which has already happened.
+	///
+	/// [`Increase`](Self::Increase) additionally needs a sender, a transport
+	/// [`Probe`](crate::transport::Probe), since the session probes to the peer's
+	/// target through it. Without one a peer's target could never be honored.
 	#[cfg(feature = "async")]
 	pub fn detect(session: &crate::driver::Transport) -> Self {
-		use crate::transport::Stats as _;
+		use crate::transport::Metrics as _;
 		use crate::transport::poll::Session as _;
-		let stats = session.stats();
-		match stats.estimated_send_rate().is_some() || stats.rtt().is_some() {
-			true => Self::Report,
-			false => Self::None,
+		let metrics = session.metrics();
+		if metrics.estimated_send_rate().is_none() && metrics.rtt().is_none() {
+			return Self::None;
+		}
+		match session.probe().is_some() {
+			true => Self::Increase,
+			false => Self::Report,
 		}
 	}
 
@@ -161,16 +172,16 @@ impl std::fmt::Display for Role {
 /// lite-05+ only. The two endpoints' SETUP messages are independent: neither side
 /// blocks on the peer's before opening other streams, but a stream whose encoding
 /// depends on a negotiated capability (e.g. PROBE) must wait for it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Setup {
 	/// The probe capability this endpoint supports. [`ProbeLevel::None`] when absent.
 	pub probe: ProbeLevel,
 	/// The request path, for transports that carry no request URI (native QUIC,
 	/// qmux over TCP/TLS, unix sockets), with `?` and the URI query appended when
 	/// there is one. Sent only by the client; a server never sends one and a relay
-	/// never forwards it. `None` on URI-carrying bindings, where it would be a
-	/// protocol violation. On an in-band binding an empty path selects the root, like `None`;
-	/// a URI binding forbids even an empty Path parameter.
+	/// never forwards it. `None` when the transport URI carries the target, where it would
+	/// be a protocol violation, even empty. Otherwise an empty path selects the root, like
+	/// `None`.
 	pub path: Option<String>,
 	/// The single direction the client intends to use, or `None` for a bidirectional
 	/// session. `None` is sent as the absence of the parameter, which is also how a
@@ -188,19 +199,45 @@ pub struct Setup {
 	/// applies). `None` when the endpoint has no meaningful identity (a
 	/// leaf that never forwards); a wire value of 0 decodes as `None`.
 	pub hop: Option<crate::Hop>,
+	/// The connection credential (lite-07+), which the empty-token Auth Stream names.
+	/// Sent only by the client. The parameter carries no Token Type, so it is always
+	/// [`Token::OUT_OF_BAND`](crate::setup::Token::OUT_OF_BAND).
+	pub token: Option<crate::setup::Token>,
 	/// Whether this endpoint offers the `ietf` extension (lite-07+). Negotiated only when
 	/// both endpoints offer it.
 	pub ietf: bool,
 	/// The sender's implementation, as space-separated `name/version` product tokens
 	/// (`moq-net-rs/0.3.10`). Opaque; `None` omits the parameter.
 	pub implementation: Option<String>,
+	/// Proof that the sender holds its route key, bound to this session (lite-07+).
+	pub route_key: Option<crate::route::Proof>,
 }
 
-impl Message for Setup {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Session);
+impl std::fmt::Debug for Setup {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Setup")
+			.field("probe", &self.probe)
+			// Native transports carry the JWT in this request target.
+			.field(
+				"path",
+				&self.path.as_deref().map(|path| path.split('?').next().unwrap()),
+			)
+			.field("role", &self.role)
+			.field("cost", &self.cost)
+			.field("hop", &self.hop)
+			.field("token", &self.token)
+			.field("ietf", &self.ietf)
+			.field("implementation", &self.implementation)
+			.field("route_key", &self.route_key)
+			.finish()
+	}
+}
+
+impl<'a> Message<'a> for Setup {
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Session);
 	const MAX_SIZE: usize = crate::setup::MAX_SETUP_SIZE;
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		ReceivedSetup::decode_msg(r, version).map(|received| received.setup)
 	}
 
@@ -231,12 +268,28 @@ impl Message for Setup {
 		if let Some(implementation) = &self.implementation {
 			params.set_bytes(PARAM_IMPLEMENTATION, implementation.as_bytes().to_vec());
 		}
+		if let Some(token) = &self.token {
+			if !version.has_auth() {
+				return Err(EncodeError::Version);
+			}
+			// An empty value is no credential, and the untyped parameter cannot carry another type.
+			if token.kind != crate::setup::Token::OUT_OF_BAND || token.value.is_empty() {
+				return Err(EncodeError::Unsupported);
+			}
+			params.set_bytes(PARAM_TOKEN, token.value.clone());
+		}
 		if self.ietf {
 			// The framing it changes is unpublished, so a published version cannot offer it.
 			if !version.has_ietf() {
 				return Err(EncodeError::Version);
 			}
 			params.set_bytes(PARAM_IETF, Vec::new());
+		}
+		if let Some(proof) = self.route_key {
+			if !version.has_route_key() {
+				return Err(EncodeError::Version);
+			}
+			params.set_bytes(PARAM_ROUTE_KEY, proof.to_bytes());
 		}
 
 		params.encode(w, version)
@@ -250,11 +303,11 @@ pub(super) struct ReceivedSetup {
 	role_present: bool,
 }
 
-impl Message for ReceivedSetup {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Session);
+impl<'a> Message<'a> for ReceivedSetup {
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Session);
 	const MAX_SIZE: usize = Setup::MAX_SIZE;
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_setup_stream() {
 			return Err(DecodeError::Version);
 		}
@@ -280,14 +333,32 @@ impl Message for ReceivedSetup {
 		let hop = params
 			.get_varint(PARAM_HOP, version)?
 			.and_then(|id| crate::Hop::new(id).ok());
-		let implementation = crate::setup::decode_implementation(params.get_bytes(PARAM_IMPLEMENTATION))?;
-		// An older version does not know the parameter, so it ignores it like any other.
+		let implementation = if version.has_implementation() {
+			crate::setup::decode_implementation(params.get_bytes(PARAM_IMPLEMENTATION))?
+		} else {
+			None
+		};
+		// An older version does not know these parameters, so it ignores them like any other.
+		let token = match params.get_bytes(PARAM_TOKEN) {
+			Some([]) if version.has_auth() => return Err(DecodeError::InvalidValue),
+			Some(value) if version.has_auth() => Some(crate::setup::Token {
+				kind: crate::setup::Token::OUT_OF_BAND,
+				value: value.to_vec(),
+			}),
+			_ => None,
+		};
 		let ietf = match params.get_bytes(PARAM_IETF) {
 			Some(value) if version.has_ietf() => match value.is_empty() {
 				true => true,
 				false => return Err(DecodeError::InvalidValue),
 			},
 			_ => false,
+		};
+		let route_key = match params.get_bytes(PARAM_ROUTE_KEY) {
+			Some(value) if version.has_route_key() => {
+				Some(crate::route::Proof::from_bytes(value).ok_or(DecodeError::InvalidValue)?)
+			}
+			_ => None,
 		};
 
 		Ok(Self {
@@ -298,8 +369,10 @@ impl Message for ReceivedSetup {
 				role,
 				cost,
 				hop,
+				token,
 				ietf,
 				implementation,
+				route_key,
 			},
 		})
 	}
@@ -319,25 +392,64 @@ pub(crate) struct PeerSetup(kio::Shared<PeerSetupState>);
 
 struct PeerSetupState {
 	client: bool,
-	binding: crate::transport::Binding,
+	address: crate::transport::Address,
 	/// Whether our own SETUP offers the `ietf` extension.
 	ietf: bool,
 	seen: bool,
 	setup: Option<Setup>,
 	/// Where the peer's advertised implementation is published for the session handle.
 	implementation: crate::setup::PeerImplementation,
+	/// The session's auth link to tell once the peer's SETUP accepts the connection.
+	accept: Option<crate::auth::Link>,
+	/// What the peer's route key proof must sign, or `None` when the transport cannot bind
+	/// one to this session, so any proof leaves the peer unproven.
+	transcript: Option<crate::route::Transcript>,
+	/// The route key the peer proved.
+	route_key: Option<[u8; 32]>,
+}
+
+impl PeerSetupState {
+	/// Keep the key the peer's SETUP proves, or refuse a proof whose signature fails.
+	fn prove(&mut self, setup: &Setup) -> Result<(), crate::Error> {
+		let (Some(proof), Some(transcript)) = (&setup.route_key, &self.transcript) else {
+			return Ok(());
+		};
+		// The peer holds the side of the session we do not.
+		if !transcript.verify(proof, !self.client) {
+			return Err(crate::Error::ProtocolViolation);
+		}
+		tracing::debug!(proof = ?proof, "peer proved its route key");
+		self.route_key = Some(proof.key);
+		Ok(())
+	}
 }
 
 impl PeerSetup {
-	pub fn new(client: bool, binding: crate::transport::Binding) -> Self {
+	pub fn new(client: bool, address: crate::transport::Address) -> Self {
 		Self(kio::Shared::new(PeerSetupState {
 			client,
-			binding,
+			address,
 			ietf: false,
 			seen: false,
 			setup: None,
 			implementation: Default::default(),
+			accept: None,
+			transcript: None,
+			route_key: None,
 		}))
+	}
+
+	/// Check the peer's route key proof against `transcript`, this session's.
+	pub fn with_transcript(self, transcript: Option<crate::route::Transcript>) -> Self {
+		self.0.lock().transcript = transcript;
+		self
+	}
+
+	/// Tell `link` once the peer's SETUP arrives that it accepted the connection credential.
+	pub fn accepting(self, link: crate::auth::Link) -> Self {
+		link.await_setup();
+		self.0.lock().accept = Some(link);
+		self
 	}
 
 	/// Publish the peer's advertised implementation to `slot` once its SETUP arrives.
@@ -348,14 +460,20 @@ impl PeerSetup {
 
 	pub(super) fn receive(&self, received: ReceivedSetup) -> Result<(), crate::Error> {
 		let mut state = self.0.lock();
-		if ((state.client || state.binding == crate::transport::Binding::Uri) && received.setup.path.is_some())
-			|| (state.client && received.role_present)
+		if ((state.client || state.address == crate::transport::Address::Uri) && received.setup.path.is_some())
+			|| (state.client && (received.role_present || received.setup.token.is_some()))
 		{
 			return Err(crate::Error::ProtocolViolation);
 		}
+		state.prove(&received.setup)?;
 		state.seen = true;
 		state.implementation.set(received.setup.implementation.clone());
 		state.setup = Some(received.setup);
+		let accept = state.accept.take();
+		drop(state);
+		if let Some(link) = accept {
+			link.accepted();
+		}
 		Ok(())
 	}
 
@@ -384,12 +502,23 @@ impl PeerSetup {
 		}
 	}
 
-	/// Record the peer's SETUP.
-	pub fn set(&self, setup: Setup) {
+	/// Record the peer's SETUP, refusing a route key proof that does not hold.
+	pub fn set(&self, setup: Setup) -> Result<(), crate::Error> {
 		let mut state = self.0.lock();
+		state.prove(&setup)?;
 		state.seen = true;
 		state.implementation.set(setup.implementation.clone());
 		state.setup = Some(setup);
+		Ok(())
+	}
+
+	/// The route key the peer proved, once its SETUP arrived.
+	#[cfg_attr(
+		not(test),
+		expect(dead_code, reason = "session integration files a scoped peer's routes under it")
+	)]
+	pub fn route_key(&self) -> Option<[u8; 32]> {
+		self.0.lock().route_key
 	}
 
 	/// Claim the Setup Stream before decoding its body, refusing any second stream.
@@ -445,7 +574,7 @@ mod tests {
 		msg.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 			.unwrap();
 		let mut slice = &buf[..];
-		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, Setup::decode).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, |r, v| Setup::decode(r, v)).unwrap();
 		assert!(bytes::Buf::remaining(&slice) == 0, "trailing bytes after decode");
 		got
 	}
@@ -492,18 +621,18 @@ mod tests {
 		);
 	}
 
-	/// Probing to a local target never reaches the wire, so a sender alone promises the
-	/// peer nothing more than a report.
+	/// A sender probes to the peer's target as well as its own, so it promises the peer
+	/// `Increase`. Without one, `detect_reports_with_either_metric` stays at `Report`.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_sender_still_reports() {
+	fn a_sender_advertises_increase() {
 		use crate::lite::test_transport::{SinkSession, SinkStats};
 
 		let stats = SinkStats::default().with_send_rate(1_000_000);
 		let session = SinkSession::new(Default::default()).with_stats(stats).with_probe();
 		assert_eq!(
 			ProbeLevel::detect(&crate::driver::Transport::new(session.clone())),
-			ProbeLevel::Report
+			ProbeLevel::Increase
 		);
 	}
 
@@ -580,6 +709,122 @@ mod tests {
 		assert!(Setup::decode_slice(&valued, Version::Lite07).is_err());
 	}
 
+	/// Route key proofs are accepted only on lite-07 and must have the fixed wire size.
+	#[test]
+	fn route_key_is_lite07_only() {
+		let transcript = crate::route::Transcript::new([2; 32]);
+		let msg = Setup {
+			route_key: Some(transcript.prove(&crate::origin::RouteKey::generate(), true)),
+			..Default::default()
+		};
+		let buf = msg.encode_bytes(Version::Lite07).unwrap();
+		assert_eq!(Setup::decode_slice(&buf, Version::Lite07).unwrap().0, msg);
+		assert!(matches!(msg.encode_bytes(Version::Lite06), Err(EncodeError::Version)));
+
+		// One parameter, its id, then a 95-byte value: not a proof.
+		let mut short = vec![0x01, 0x08, 0x5f];
+		short.extend([0; 95]);
+		let mut framed = Vec::new();
+		Encoder::new(&mut framed, Version::Lite07.into())
+			.varint(short.len() as u64)
+			.unwrap();
+		framed.extend(short);
+		assert!(Setup::decode_slice(&framed, Version::Lite07).is_err());
+	}
+
+	/// A server checks the client's proof against this session, and refuses one that fails.
+	#[test]
+	fn peer_route_key_is_kept_only_when_its_proof_holds() {
+		let key = crate::origin::RouteKey::generate();
+		let session = || Some(crate::route::Transcript::new([2; 32]));
+		let proven = |client: bool| Setup {
+			route_key: Some(crate::route::Transcript::new([2; 32]).prove(&key, client)),
+			..Default::default()
+		};
+		let server = || PeerSetup::new(false, crate::transport::Address::Setup).with_transcript(session());
+
+		let peer = server();
+		peer.set(proven(true)).unwrap();
+		assert_eq!(peer.route_key(), proven(true).route_key.map(|proof| proof.key));
+
+		// A server's own proof reflected back as the client's.
+		assert!(matches!(
+			server().set(proven(false)),
+			Err(crate::Error::ProtocolViolation)
+		));
+
+		// A transport that cannot export leaves the peer unproven, whatever it sends.
+		let unbound = PeerSetup::new(false, crate::transport::Address::Setup);
+		unbound.set(proven(false)).unwrap();
+		assert_eq!(unbound.route_key(), None);
+	}
+
+	/// The connection credential rides lite-07+, which an older version ignores like any
+	/// unknown parameter, and only an untyped, non-empty token can be sent.
+	#[test]
+	fn token_is_lite07_only() {
+		let token = crate::setup::Token {
+			kind: crate::setup::Token::OUT_OF_BAND,
+			value: b"jwt".to_vec(),
+		};
+		let msg = Setup {
+			token: Some(token.clone()),
+			..Default::default()
+		};
+		let buf = msg.encode_bytes(Version::Lite07).unwrap();
+		// Length, one parameter, its id, then the token's length and bytes.
+		assert_eq!(&buf[..], [0x06, 0x01, 0x07, 0x03, b'j', b'w', b't']);
+		assert_eq!(Setup::decode_slice(&buf, Version::Lite07).unwrap().0, msg);
+		assert!(matches!(msg.encode_bytes(Version::Lite06), Err(EncodeError::Version)));
+		assert_eq!(Setup::decode_slice(&buf, Version::Lite06).unwrap().0, Setup::default());
+
+		for unsendable in [
+			crate::setup::Token {
+				// Any registered type but out-of-band, which moq-lite cannot carry.
+				kind: 0x1,
+				..token.clone()
+			},
+			crate::setup::Token {
+				value: Vec::new(),
+				..token
+			},
+		] {
+			let msg = Setup {
+				token: Some(unsendable),
+				..Default::default()
+			};
+			assert!(matches!(
+				msg.encode_bytes(Version::Lite07),
+				Err(EncodeError::Unsupported)
+			));
+		}
+
+		// An empty value carries no credential, so it is refused rather than read as none.
+		assert!(Setup::decode_slice(&[0x03, 0x01, 0x07, 0x00], Version::Lite07).is_err());
+	}
+
+	/// Only the client presents a connection credential.
+	#[test]
+	fn a_server_token_is_a_protocol_violation() {
+		let setup = Setup {
+			token: Some(crate::setup::Token {
+				kind: crate::setup::Token::OUT_OF_BAND,
+				value: b"jwt".to_vec(),
+			}),
+			..Default::default()
+		};
+		let buf = setup.encode_bytes(Version::Lite07).unwrap();
+		let received = |buf: &[u8]| ReceivedSetup::decode_slice(buf, Version::Lite07).unwrap().0;
+
+		let client = PeerSetup::new(true, crate::transport::Address::Setup);
+		assert!(matches!(
+			client.receive(received(&buf)),
+			Err(crate::Error::ProtocolViolation)
+		));
+		let server = PeerSetup::new(false, crate::transport::Address::Setup);
+		server.receive(received(&buf)).unwrap();
+	}
+
 	/// Never emit a SETUP our own receiver would refuse.
 	#[test]
 	fn encode_enforces_the_setup_limit() {
@@ -620,7 +865,8 @@ mod tests {
 				implementation,
 				..Default::default()
 			};
-			assert_eq!(round_trip(&msg), msg);
+			let buf = msg.encode_bytes(Version::Lite07).unwrap();
+			assert_eq!(Setup::decode_slice(&buf, Version::Lite07).unwrap().0, msg);
 		}
 	}
 
@@ -638,6 +884,22 @@ mod tests {
 			Setup::decode_slice(&buf, Version::Lite07),
 			Err(DecodeError::InvalidValue)
 		));
+	}
+
+	#[test]
+	fn older_versions_ignore_implementation_before_parsing_it() {
+		for version in [Version::Lite05, Version::Lite06] {
+			for value in [b"x/1".as_slice(), &[0xff]] {
+				let mut params = Parameters::default();
+				params.set_bytes(PARAM_IMPLEMENTATION, value.to_vec());
+				let mut data = Vec::new();
+				let mut writer = Encoder::new(&mut data, version.into());
+				let prefix = writer.prefix_varint();
+				params.encode(&mut writer, version).unwrap();
+				writer.fill(prefix).unwrap();
+				assert!(Setup::decode_slice(&data, version).unwrap().0.implementation.is_none());
+			}
+		}
 	}
 
 	#[test]
@@ -660,7 +922,7 @@ mod tests {
 			let mut buf = Vec::new();
 			msg.encode(&mut Encoder::new(&mut buf, version.into()), version)
 				.unwrap();
-			let got = crate::coding::decode_buf(&mut &buf[..], version, Setup::decode).unwrap();
+			let got = crate::coding::decode_buf(&mut &buf[..], version, |r, v| Setup::decode(r, v)).unwrap();
 			assert_eq!(got.hop, want, "{version:?}");
 		}
 	}
@@ -685,7 +947,7 @@ mod tests {
 			.unwrap();
 		buf.extend_from_slice(&body);
 		let mut slice = &buf[..];
-		let got = crate::coding::decode_buf(&mut slice, version, Setup::decode).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, version, |r, v| Setup::decode(r, v)).unwrap();
 		assert_eq!(got.hop, None);
 	}
 
@@ -730,7 +992,7 @@ mod tests {
 		buf.extend_from_slice(&body);
 
 		let mut slice = &buf[..];
-		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, Setup::decode).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, |r, v| Setup::decode(r, v)).unwrap();
 		assert_eq!(got.probe, ProbeLevel::Increase);
 	}
 
@@ -764,7 +1026,7 @@ mod tests {
 			buf.extend_from_slice(&body);
 
 			let mut slice = &buf[..];
-			let got = crate::coding::decode_buf(&mut slice, Version::Lite05, Setup::decode).unwrap();
+			let got = crate::coding::decode_buf(&mut slice, Version::Lite05, |r, v| Setup::decode(r, v)).unwrap();
 			assert_eq!(got.role, None, "role code {code} should decode as bidirectional");
 		}
 	}
@@ -799,7 +1061,7 @@ mod tests {
 		buf.extend_from_slice(&body);
 
 		let mut slice = &buf[..];
-		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, Setup::decode).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, |r, v| Setup::decode(r, v)).unwrap();
 		assert_eq!(got.path.as_deref(), Some("/foo"));
 	}
 }

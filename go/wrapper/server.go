@@ -15,8 +15,6 @@ type Transport = ffi.MoqTransport
 const (
 	// TransportQUIC is a session that arrived over native QUIC.
 	TransportQUIC = ffi.MoqTransportQuic
-	// TransportIroh is a session that arrived over an Iroh peer-to-peer connection.
-	TransportIroh = ffi.MoqTransportIroh
 	// TransportWebSocket is a session that arrived over the WebSocket fallback transport.
 	TransportWebSocket = ffi.MoqTransportWebSocket
 	// TransportTCP is a session that arrived over a plaintext TCP connection.
@@ -46,6 +44,13 @@ func (r *Request) Path() string {
 // Query is the encoded request query without "?"; it may contain credentials.
 func (r *Request) Query() *string {
 	return r.inner.Query()
+}
+
+// PeerImplementation is the implementation the client advertised, like
+// "moq-go/0.7.0 moq-ffi/0.4.12 moq-net-rs/0.3.10", or nil if it advertised none.
+// Peer-controlled: use it for logs and rollout counts, never to authorize.
+func (r *Request) PeerImplementation() *string {
+	return r.inner.PeerImplementation()
 }
 
 // Transport is the wire transport the request arrived over, e.g. TransportQUIC.
@@ -173,7 +178,8 @@ func Listen(ctx context.Context, bind string, opts ...ServerOption) (*Server, er
 			Key:      cfg.tlsKey,
 			Generate: cfg.tlsGenerate,
 		},
-		Quic: ffi.MoqQuicConfig{MaxStreams: cfg.quicMaxStreams, Keylog: cfg.quicKeylog},
+		Quic:           ffi.MoqQuicConfig{MaxStreams: cfg.quicMaxStreams, Keylog: cfg.quicKeylog},
+		Implementation: &implementation,
 	}
 	if cfg.publish != nil {
 		config.Publish = &cfg.publish.inner
@@ -212,7 +218,7 @@ func (s *Server) CertFingerprints() ([]string, error) {
 // CreateBroadcast creates an unannounced broadcast at path, invisible to everyone until announced. Announce it after populating tracks.
 //
 // See [OriginProducer.CreateBroadcast].
-func (s *Server) CreateBroadcast(path string) (*BroadcastProducer, error) {
+func (s *Server) CreateBroadcast(path string) (*Publication, error) {
 	if s.publishOrigin == nil {
 		return nil, ErrNoPublishOrigin
 	}

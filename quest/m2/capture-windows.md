@@ -17,6 +17,13 @@ including the cursor, move to
   exists but is macOS-only and returns `Unsupported` elsewhere. Unlike macOS
   this does not go through the screen-capture API, so it is an independent path
   and does not inherit the Screen Recording permission coupling.
+- **Per-app audio** (decided 2026-10-26, maintainer: yes) uses WASAPI process
+  loopback (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) to capture one
+  process tree's output, through the same `moq_audio::capture` source as the
+  Linux and macOS halves. Microsoft documents build 20348 as the floor, though
+  it works from Windows 10 2004 (build 19041) in practice. Activate it at
+  setup and refuse per-app audio with the reason where activation fails,
+  rather than gating on a build number.
 
 WGC does not answer app capture. It captures one monitor or one window per
 item and has no per-process source, so the per-window-composition or

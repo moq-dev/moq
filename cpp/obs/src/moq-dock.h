@@ -46,7 +46,6 @@ private:
 	bool CreateConfiguredEncoders();
 	bool CreateCustomEncoders();
 	void CreateVideoEncoder(const char *id, obs_data_t *settings);
-	QString ConnectUrl() const;
 	void PeelJwtFromRelayUrl();
 	void ClearLiveStats();
 

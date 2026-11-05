@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { Signal } from "@moq/signals";
-import { Allocator, allocate, type Want } from "./bandwidth.ts";
+import { Allocator, allocate, Plan, Viewers, type Want } from "./bandwidth.ts";
 import { Producer as TrackProducer } from "./track.ts";
+import { Observed } from "./util/observed.ts";
 
 /** Priorities matching hang's, which is what the allocator sees in practice. */
 const AUDIO = 80;
@@ -65,6 +66,57 @@ test("an unregistered share has no grant", () => {
 	expect(allocate(1_000_000, [want(0, VIDEO, 1_000)], 7)).toBeUndefined();
 });
 
+/** One share's slice, dividing every tier again for it alone: the reference a shared division is checked against. */
+function sequential(estimate: number, wants: readonly Want[], id: number): number | undefined {
+	let budget = estimate;
+	let tier: number | undefined = Math.max(...wants.map((want) => want.priority));
+	while (tier !== undefined && Number.isFinite(tier)) {
+		const members = wants.filter((want) => want.priority === tier).sort((a, b) => a.max - b.max);
+		let remaining = members.length;
+		for (const want of members) {
+			const grant = Math.min(want.max, Math.floor(budget / remaining));
+			if (want.id === id) return grant;
+			budget -= grant;
+			remaining -= 1;
+		}
+		const lower = wants.filter((want) => want.priority < (tier as number)).map((want) => want.priority);
+		tier = lower.length ? Math.max(...lower) : undefined;
+	}
+	return undefined;
+}
+
+test("one division matches each share dividing alone", () => {
+	let seed = 42;
+	const next = (bound: number) => {
+		seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+		return seed % bound;
+	};
+	for (let round = 0; round < 2_000; round++) {
+		const count = next(12) + 1;
+		const tiers = next(4) + 1;
+		const entries = Array.from({ length: count }, (_, id) => ({
+			want: want(id, next(tiers) - 1, next(5) * 300 + next(3)),
+			active: next(3) > 0,
+		}));
+		const estimate = next(count * 1_600);
+		const active = entries.filter((entry) => entry.active).map((entry) => entry.want);
+		const plan = new Plan(estimate, active);
+
+		for (const { want, active: demanded } of entries) {
+			// An idle reservation reads what it would get were it demanded again, in registration order.
+			const expected = demanded
+				? sequential(estimate, active, want.id)
+				: sequential(
+						estimate,
+						[...active, want].sort((a, b) => a.id - b.id),
+						want.id,
+					);
+			const actual = demanded ? plan.grant(want.id) : plan.rejoin(want);
+			expect({ want, actual }).toEqual({ want, actual: expected });
+		}
+	}
+});
+
 test("concurrent tracks split the estimate", () => {
 	const estimate = new Signal<number | undefined>(undefined);
 	const allocator = new Allocator(estimate);
@@ -87,7 +139,7 @@ test("concurrent tracks split the estimate", () => {
 	allocator.close();
 });
 
-test("an idle track claims nothing", () => {
+test("an idle track claims nothing", async () => {
 	const estimate = new Signal<number | undefined>(2_000_000);
 	const allocator = new Allocator(estimate);
 
@@ -99,10 +151,18 @@ test("an idle track claims nothing", () => {
 	const idle = allocator.reserve(idleTrack.demand(), 4_000_000);
 
 	expect(watched.peek()).toBe(2_000_000);
-	// Not zero: an idle share reports "no opinion" so a sender that is mid-shutdown
-	// holds its rate instead of retuning to the floor on the way out.
-	expect(idle.peek()).toBeUndefined();
+	// What it would get if a viewer joined, so a rendition stopped for lack of
+	// bandwidth can resume after its viewers left.
+	expect(idle.peek()).toBe(1_000_000);
+	expect(idle.rate.peek()).toBe(1_000_000);
 
+	// The idle share keeps following the estimate.
+	const next = idle.rate.changed();
+	estimate.set(4_000_000);
+	expect(await next).toBe(2_000_000);
+	expect(watched.peek()).toBe(4_000_000);
+
+	estimate.set(2_000_000);
 	idleTrack.subscribe();
 	expect(watched.peek()).toBe(1_000_000);
 	expect(idle.peek()).toBe(1_000_000);
@@ -125,7 +185,7 @@ test("a share wakes when a sibling goes idle", async () => {
 	expect(mine.peek()).toBe(1_000_000);
 	expect(sibling.peek()).toBe(1_000_000);
 
-	const next = mine.grant.changed();
+	const next = mine.rate.changed();
 	siblingSub.close();
 	expect(await next).toBe(2_000_000);
 	expect(mine.peek()).toBe(2_000_000);
@@ -144,7 +204,7 @@ test("an unchanged slice still follows the estimate past the cap", async () => {
 	estimate.set(10_000_000);
 	expect(reserved.peek()).toBe(4_000_000);
 
-	const next = reserved.grant.changed();
+	const next = reserved.rate.changed();
 	// Still miles above the reservation, so the slice holds at 4 Mbps.
 	estimate.set(9_000_000);
 	expect(reserved.peek()).toBe(4_000_000);
@@ -172,7 +232,7 @@ test("a parked share is woken by sibling demand", async () => {
 	expect(reserved.peek()).toBe(1_000_000);
 	expect(sibling.peek()).toBe(1_000_000);
 
-	const next = reserved.grant.changed();
+	const next = reserved.rate.changed();
 	siblingSub.close();
 	expect(await next).toBe(2_000_000);
 
@@ -186,6 +246,7 @@ test("a closed track is pruned", () => {
 	const first = track(VIDEO);
 	first.subscribe();
 	const firstShare = allocator.reserve(first.demand(), 4_000_000);
+	first.finish();
 	first.close();
 
 	const second = track(VIDEO);
@@ -211,7 +272,7 @@ test("closing a reservation releases it", async () => {
 	const second = allocator.reserve(secondTrack.demand(), 4_000_000);
 	expect(second.peek()).toBe(1_000_000);
 
-	const orphan = first.grant;
+	const orphan = first.rate;
 	expect(orphan.peek()).toBe(1_000_000);
 
 	const next = orphan.changed();
@@ -258,7 +319,7 @@ test("update wakes a parked reader", async () => {
 	const reserved = allocator.reserve(producer.demand(), 1_000_000);
 	expect(reserved.peek()).toBe(1_000_000);
 
-	const next = reserved.grant.changed();
+	const next = reserved.rate.changed();
 	reserved.update(4_000_000);
 	expect(await next).toBe(4_000_000);
 
@@ -284,7 +345,7 @@ test("a closed allocator reports no grant", () => {
 
 	allocator.close();
 	expect(reserved.peek()).toBeUndefined();
-	expect(reserved.grant.peek()).toBeUndefined();
+	expect(reserved.rate.peek()).toBeUndefined();
 });
 
 test("reserve and update reject a non-finite or negative ceiling", () => {
@@ -304,3 +365,130 @@ test("reserve and update reject a non-finite or negative ceiling", () => {
 
 	allocator.close();
 });
+
+// Several players on one connection must not each select against the whole downlink:
+// the receive estimate splits max-min fair by each viewer's ceiling, and never sums above it.
+test("viewers split the receive estimate max-min fair", () => {
+	const estimate = new Signal<number | undefined>(6_000_000);
+	const viewers = new Viewers(estimate);
+
+	const small = viewers.watch(1_000_000);
+	const large = viewers.watch(8_000_000);
+	expect(small.peek()).toBe(1_000_000);
+	expect(large.peek()).toBe(5_000_000);
+
+	// Three even claims on a link too small for any of them: an even cut each, never above it.
+	estimate.set(2_000_000);
+	small.update(4_000_000);
+	large.update(4_000_000);
+	const third = viewers.watch(4_000_000);
+	const grants = [small.peek() ?? 0, large.peek() ?? 0, third.peek() ?? 0];
+	for (const grant of grants) expect(Math.abs(grant - 666_666)).toBeLessThanOrEqual(1);
+	expect(grants.reduce((sum, grant) => sum + grant, 0)).toBe(2_000_000);
+
+	// No estimate is "hold your selection", not zero.
+	estimate.set(undefined);
+	expect(small.peek()).toBeUndefined();
+
+	viewers.close();
+});
+
+// The PROBE stream encodes at most MAX_TARGET, so a viewer, update, or override past it is
+// refused and leaves the target as it was.
+test("viewer targets stay encodable", () => {
+	const viewers = new Viewers();
+	const max = Viewers.MAX_TARGET;
+
+	expect(() => viewers.watch(max + 1)).toThrow(RangeError);
+	const first = viewers.watch(max - 1);
+	expect(() => viewers.watch(2)).toThrow(RangeError);
+	const second = viewers.watch(1);
+	expect(viewers.target.peek()).toBe(max);
+
+	expect(() => second.update(2)).toThrow(RangeError);
+	expect(viewers.target.peek()).toBe(max);
+	first.update(1);
+	second.update(max - 1);
+	expect(viewers.target.peek()).toBe(max);
+
+	viewers.setTarget(1_000_000);
+	expect(() => viewers.setTarget(max + 1)).toThrow(RangeError);
+	expect(viewers.target.peek()).toBe(1_000_000);
+
+	first.close();
+	second.close();
+	viewers.close();
+});
+
+test("the viewers' target sums their ceilings until overridden", () => {
+	const viewers = new Viewers(new Signal<number | undefined>(1_000_000));
+	expect(viewers.target.peek()).toBe(0);
+
+	const first = viewers.watch(1_000_000);
+	const second = viewers.watch(2_000_000);
+	expect(viewers.target.peek()).toBe(3_000_000);
+
+	second.update(4_000_000);
+	expect(viewers.target.peek()).toBe(5_000_000);
+
+	// Zero sends no target; clearing the override follows the viewers again.
+	viewers.setTarget(0);
+	expect(viewers.target.peek()).toBe(0);
+	viewers.setTarget(10_000_000);
+	expect(viewers.target.peek()).toBe(10_000_000);
+	viewers.setTarget(undefined);
+	expect(viewers.target.peek()).toBe(5_000_000);
+
+	first.close();
+	expect(viewers.target.peek()).toBe(4_000_000);
+	second.close();
+	expect(viewers.target.peek()).toBe(0);
+
+	viewers.close();
+});
+
+test("a closed viewers registry claims nothing", () => {
+	const viewers = new Viewers(new Signal<number | undefined>(1_000_000));
+	// Closing retracts an override too, and a later one is ignored.
+	viewers.setTarget(1_000_000);
+	viewers.close();
+	expect(viewers.target.peek()).toBe(0);
+	viewers.setTarget(1_000_000);
+	expect(viewers.target.peek()).toBe(0);
+
+	const viewer = viewers.watch(2_000_000);
+	expect(viewers.target.peek()).toBe(0);
+	expect(viewer.peek()).toBeUndefined();
+	viewer.close();
+});
+
+// Observing a connection's receive estimate is what requests PROBE, so a registry with
+// nobody watching must not hold that demand.
+test("an idle viewers registry does not observe the estimate", async () => {
+	const estimate = new Observed<number | undefined>(1_000_000);
+	const viewers = new Viewers(estimate);
+	expect(estimate.wanted.peek()).toBe(false);
+
+	const viewer = viewers.watch(1_000_000);
+	await settled();
+	expect(estimate.wanted.peek()).toBe(true);
+
+	viewer.close();
+	await settled();
+	expect(estimate.wanted.peek()).toBe(false);
+
+	viewers.close();
+});
+
+// Let queued signal reactions run without relying on host timers.
+function settled(): Promise<void> {
+	return new Promise((resolve) => {
+		const channel = new MessageChannel();
+		channel.port1.onmessage = () => {
+			channel.port1.close();
+			channel.port2.close();
+			resolve();
+		};
+		channel.port2.postMessage(null);
+	});
+}

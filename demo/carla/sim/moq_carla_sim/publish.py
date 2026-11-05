@@ -10,6 +10,7 @@ player speaks:
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import math
 from dataclasses import dataclass
@@ -177,14 +178,18 @@ def status_payload(status: Status) -> dict[str, Any]:
 
 
 class StatusPublisher:
-    """The `status` track: DEFLATE-compressed JSON snapshots.
+    """The `status` track: JSON snapshots on a compressed, timed track.
 
     Snapshot rather than stream, because a late joiner wants the truck's current
-    state, not the history of every command it ever accepted.
+    state, not the history of every command it ever accepted. Every update is
+    stamped from the broadcast clock, the same epoch the media tracks use, so
+    the catalog never reads the JSON track's timeline as a delay.
     """
 
     def __init__(self, broadcast: moq.BroadcastProducer) -> None:
-        self._producer = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status"), compression=True)
+        track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000, compress=True))
+        self._catalog = moq.media.CatalogProducer(broadcast)
+        self._producer = moq.json.SnapshotProducer(broadcast, track)
         # Weak: watching demand neither keeps the track open nor locks it.
         self._demand = self._producer.demand()
 
@@ -198,7 +203,7 @@ class StatusPublisher:
         truck that cannot answer is not one anybody should be steering: let it
         reach the session, exactly as the video pump does with its own track.
         """
-        self._producer.update(payload)
+        self._producer.update(payload, self._catalog.now())
 
     async def used(self) -> None:
         while await self._demand.wanted_changed() is None:
@@ -230,7 +235,7 @@ def _parse_timestamps(raw: Any) -> tuple[TimestampEntry, ...]:
     return tuple(entries.values())
 
 
-def parse_command(driver_id: str, message: Any, epoch: str | None = None) -> Command | None:
+def parse_command(driver_id: str, message: Any, instance: str | None = None) -> Command | None:
     """Turn one `control` track message from a driver run into a Command.
 
     Returns None for anything unrecognized. A driver is an untrusted publisher,
@@ -257,7 +262,7 @@ def parse_command(driver_id: str, message: Any, epoch: str | None = None) -> Com
         return Command(
             kind="drive",
             driver_id=driver_id,
-            epoch=epoch,
+            instance=instance,
             sequence=sequence,
             state=DriveState(
                 steering=_number(message.get("steering")),
@@ -269,7 +274,7 @@ def parse_command(driver_id: str, message: Any, epoch: str | None = None) -> Com
         )
 
     if kind in ("estop", "reset_estop", "respawn"):
-        return Command(kind=kind, driver_id=driver_id, epoch=epoch, sequence=sequence, timestamps=timestamps)
+        return Command(kind=kind, driver_id=driver_id, instance=instance, sequence=sequence, timestamps=timestamps)
 
     return None
 
@@ -297,58 +302,84 @@ async def watch_drivers(
 ) -> None:
     """Discover driver broadcasts at `{prefix}/{driverId}` and fan their commands in.
 
-    Runs until cancelled. Each run of a driver, its path plus the route epoch it
-    announced under, gets its own task, so one slow or stuck driver cannot hold
-    up the others. A broadcast that ends, or restarts under another epoch, ends
-    its task, and with it the lease of that run; a restart starts a new task.
+    Runs until cancelled. Each driver path the listing reports present gets its own
+    task, so one slow or stuck driver cannot hold up the others. That task follows
+    the path across the driver's runs, one publisher instance each; a run that
+    another takes over, or whose path goes absent, ends, and with it its lease.
     """
-    drivers: dict[str, tuple[str | None, asyncio.Task[None]]] = {}
-
-    def forget(driver_id: str, task: asyncio.Task[None]) -> None:
-        # Only this run's entry: a restart has already put its successor there.
-        current = drivers.get(driver_id)
-        if current is not None and current[1] is task:
-            del drivers[driver_id]
+    drivers: dict[str, asyncio.Task[None]] = {}
 
     try:
         async with client.announced(prefix, filter="*") as announced:
             async for event in announced:
-                # Every variant carries `announce`; uniffi's stubs type only the enum.
-                announce = event.announce  # pyright: ignore[reportAttributeAccessIssue]
-                path = announce.prefix
+                # Both variants carry `announce`; uniffi's stubs type only the enum.
+                path = event.announce.prefix  # pyright: ignore[reportAttributeAccessIssue]
                 driver_id = path.removeprefix(prefix + "/")
                 # The filter admits one segment below the prefix; anything else
                 # is a route that only overlaps it, not a driver's broadcast.
                 if driver_id == path or not driver_id or "/" in driver_id:
                     continue
-                epoch = announce.route.epoch
-                current = drivers.get(driver_id)
-                if isinstance(event, moq.AnnounceEventEnd):
-                    if current is not None:
-                        del drivers[driver_id]
-                        current[1].cancel()
+                if isinstance(event, moq.AnnounceEventAbsent):
+                    task = drivers.pop(driver_id, None)
+                    if task is not None:
+                        task.cancel()
                     continue
-                if current is not None:
-                    # Same run: the route only changed hops or cost.
-                    if current[0] == epoch and not isinstance(event, moq.AnnounceEventRestart):
-                        continue
-                    current[1].cancel()
-                task = asyncio.create_task(
-                    _pump_driver(driver_id, epoch, client, path, commands),
+                drivers[driver_id] = asyncio.create_task(
+                    _follow_driver(driver_id, client, path, commands),
                     name=f"driver:{driver_id}",
                 )
-                drivers[driver_id] = (epoch, task)
-                task.add_done_callback(lambda task, driver_id=driver_id: forget(driver_id, task))
     finally:
-        for _, task in drivers.values():
+        for task in drivers.values():
             task.cancel()
+
+
+# Names each driver run for the lease. The bindings hand out a run's broadcast
+# without its route instance, and a process-wide count keeps a run's late
+# `driver_left` from releasing a later run of the same driver.
+_runs = itertools.count(1)
+
+
+async def _follow_driver(
+    driver_id: str,
+    client: moq.Client,
+    path: str,
+    commands: asyncio.Queue[Command],
+) -> None:
+    """Pump each run of one driver in turn, ending a run once another takes over or it goes offline."""
+    run: asyncio.Task[None] | None = None
+    try:
+        async with client.follow(path) as following:
+            while True:
+                try:
+                    broadcast = await following.available()
+                # A refusal leaves the follow waiting for another run; only shutdown ends it.
+                except moq.Error as err:  # pyright: ignore[reportGeneralTypeIssues]
+                    if moq.is_shutdown(err):
+                        raise
+                    log.info("driver %s refused: %s", driver_id, err)
+                    continue
+                if run is not None:
+                    run.cancel()
+                    run = None
+                if broadcast is None:
+                    continue
+                instance = str(next(_runs))
+                run = asyncio.create_task(
+                    _pump_driver(driver_id, instance, broadcast, commands),
+                    name=f"driver:{driver_id}:{instance}",
+                )
+    # uniffi's stubs declare the error a plain class; at runtime it is an Exception.
+    except moq.Error as err:  # pyright: ignore[reportGeneralTypeIssues]
+        log.info("driver %s follow ended: %s", driver_id, err)
+    finally:
+        if run is not None:
+            run.cancel()
 
 
 async def _pump_driver(
     driver_id: str,
-    epoch: str | None,
-    client: moq.Client,
-    path: str,
+    instance: str,
+    broadcast: moq.BroadcastConsumer,
     commands: asyncio.Queue[Command],
 ) -> None:
     """Feed one driver run's `control` track into the command queue.
@@ -356,20 +387,19 @@ async def _pump_driver(
     Always emits `driver_left` on the way out, however it leaves, so the gate
     releases a lease even when the track ends abnormally.
     """
-    log.info("driver %s connected (epoch %s)", driver_id, epoch)
+    log.info("driver %s connected (run %s)", driver_id, instance)
     try:
-        broadcast = await client.request_broadcast(path)
-        control = moq.json.SnapshotConsumer(await broadcast.subscribe_track("control"), compression=True)
+        control = moq.json.SnapshotConsumer(broadcast, "control")
         async for message in control:
-            command = parse_command(driver_id, message, epoch)
+            command = parse_command(driver_id, message.value, instance)
             if command is not None:
                 await commands.put(command)
     # uniffi's stubs declare the error a plain class; at runtime it is an Exception.
     except moq.Error as err:  # pyright: ignore[reportGeneralTypeIssues]
         log.info("driver %s track ended: %s", driver_id, err)
     finally:
-        log.info("driver %s disconnected (epoch %s)", driver_id, epoch)
-        await commands.put(Command(kind="driver_left", driver_id=driver_id, epoch=epoch))
+        log.info("driver %s disconnected (run %s)", driver_id, instance)
+        await commands.put(Command(kind="driver_left", driver_id=driver_id, instance=instance))
 
 
 __all__ = [

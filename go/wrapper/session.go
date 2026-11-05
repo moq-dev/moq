@@ -62,82 +62,87 @@ func (s *Session) Stats() ConnectionStats {
 	return connectionStatsFromFFI(s.inner.Stats())
 }
 
-// Bandwidth is the session's bandwidth allocator. Every call returns a handle
+// Allocator is the session's bandwidth allocator. Every call returns a handle
 // to the same registry, so reservations made through one are visible to the
 // others. A client handle survives reconnects: the grant is nil while
 // disconnected and resumes on the next connection.
-func (s *Session) Bandwidth() *Bandwidth {
-	return &Bandwidth{inner: s.inner.Bandwidth()}
+func (s *Session) Allocator() *Allocator {
+	return &Allocator{inner: s.inner.Allocator()}
 }
 
-// Auth is the session's authorization: the grant its peer gave it, and more
-// tokens to present. Each call returns an independent watcher of the grant. A
-// client session's handle survives reconnects, presenting each added token again
-// on every new connection.
-func (s *Session) Auth() *Auth {
-	return &Auth{inner: s.inner.Auth()}
+// Grants follows the grant the peer gave this session. Each call returns an
+// independent consumer; close it when done. A client session's grant follows
+// each reconnect, reading nil while offline.
+func (s *Session) Grants() *GrantConsumer {
+	return &GrantConsumer{inner: s.inner.Grants()}
 }
 
-// Auth reads a session's grant and presents more tokens.
+// GrantConsumer follows the grant a session's peer gave it: the union of every
+// token the session presented.
 //
 // AUTH is only on moq-lite-07-wip and on moq-transport sessions that negotiate
 // the MoQ Auth extension; elsewhere the grant stays nil.
-type Auth struct {
-	inner *ffi.MoqAuth
+type GrantConsumer struct {
+	inner *ffi.MoqGrantConsumer
 }
 
-// Grant returns the union of every token's grant, or nil until the peer first
-// answers one. A client session reads nil while it reconnects.
-func (a *Auth) Grant() *Grant {
-	return grantFromFFI(a.inner.Grant())
+// Grant returns the grant now, or nil until the peer first answers a token. A
+// client session reads nil while it reconnects.
+func (g *GrantConsumer) Grant() *Grant {
+	return grantFromFFI(g.inner.Grant())
 }
 
-// GrantChanged blocks until the grant differs from the one this handle last
-// reported, or held when it was made, and returns it. It errors once a client's
-// connection or a server's session ends; a reconnect is not an end.
-func (a *Auth) GrantChanged(ctx context.Context) (*Grant, error) {
-	grant, err := bridge.Call(ctx, nil, a.inner.GrantChanged)
+// Changed blocks until the grant differs from the one this last returned, or
+// held when it was made, and returns it. It errors once a client's connection
+// or a server's session ends, or after Close; a reconnect is not an end.
+func (g *GrantConsumer) Changed(ctx context.Context) (*Grant, error) {
+	grant, err := bridge.Call(ctx, nil, g.inner.Changed)
 	return grantFromFFI(grant), err
 }
 
-// Add presents another token, returning once the peer accepts it. Its grant
-// joins the union until the token is closed. The peer's refusal is a
-// ProtocolError carrying its code; a session that cannot carry another token
-// returns an error for which errors.Is(err, ErrUnsupported) holds. Cancelling ctx
-// withdraws the token.
-func (a *Auth) Add(ctx context.Context, token string) (*AuthToken, error) {
-	inner, err := bridge.CallHandle(ctx, nil, func(ctx context.Context) (*ffi.MoqAuthToken, error) {
-		return a.inner.Add(ctx, token)
-	})
-	if err != nil {
-		return nil, err
+// Close ends every current and future Changed call.
+func (g *GrantConsumer) Close() { g.inner.Cancel() }
+
+// Tokens returns the credentials a native client session presents, to replace
+// while it runs, or nil for a server-accepted session, which presents none.
+func (s *Session) Tokens() *Tokens {
+	inner := s.inner.Tokens()
+	if inner == nil {
+		return nil
 	}
-	return &AuthToken{inner: inner}, nil
+	return &Tokens{inner: *inner}
 }
 
-// AuthToken is one token presented with Auth.Add.
-type AuthToken struct {
-	inner *ffi.MoqAuthToken
+// Tokens are the credentials a client session presents, replaceable while it runs.
+type Tokens struct {
+	inner *ffi.MoqTokens
 }
 
-// Grant returns this token's own grant, or nil after it ended.
-func (t *AuthToken) Grant() *Grant {
-	return grantFromFFI(t.inner.Grant())
+// Set replaces the credentials every dial presents, such as before the current
+// ones expire. The first is the connection credential, unless the URL carries
+// its own ?jwt=; each other one widens the grant over in-band AUTH. The next
+// dial presents them, and a live session with in-band AUTH presents them at
+// once, withdrawing each replaced token once its replacements are answered,
+// even when one is refused. After an authorization refusal the session redials
+// only if they changed. An empty token is refused.
+func (t *Tokens) Set(tokens ...string) error {
+	return t.inner.Set(append([]string(nil), tokens...))
 }
 
-// Closed blocks until the token ends, returning the peer's revocation or the end
-// of a client's connection or a server's session, or nil when the peer closed it
-// without an error. A reconnect does not end it.
-func (t *AuthToken) Closed(ctx context.Context) error {
-	return bridge.CallErr(ctx, nil, t.inner.Closed)
+// Answered blocks until the peer's first verdict on the tokens the last Set
+// newly presented: nil once each is granted, in band or as a later dial's
+// connection credential. A token the set kept counts only once refused, and
+// nothing is re-checked after the answer. It returns the peer's refusal as a
+// ProtocolError carrying its code, an error for which
+// errors.Is(err, ErrUnsupported) holds when the session cannot carry an
+// in-band token, or the connection's close reason.
+func (t *Tokens) Answered(ctx context.Context) error {
+	return bridge.CallErr(ctx, nil, t.inner.Answered)
 }
 
-// Close withdraws the token, removing its grant from the union.
-func (t *AuthToken) Close() { t.inner.Cancel() }
-
-// Bandwidth divides one connection's send estimate among the tracks sharing it.
-type Bandwidth struct {
-	inner *ffi.MoqBandwidth
+// Allocator divides one connection's send estimate among the tracks sharing it.
+type Allocator struct {
+	inner *ffi.MoqAllocator
 }
 
 // Reserve claims up to maxBps for the track demand watches; every track
@@ -145,23 +150,23 @@ type Bandwidth struct {
 // reserve the most the track can ever send. Reuse Reservation.Update to change
 // the ceiling, or call Update(0) before abandoning or replacing the reservation
 // to hand the room back without waiting for garbage collection.
-func (b *Bandwidth) Reserve(demand *TrackDemand, maxBps uint64) *Reservation {
-	return &Reservation{inner: b.inner.Reserve(demand.inner, maxBps)}
+func (a *Allocator) Reserve(demand *TrackDemand, maxBps uint64) *Reservation {
+	return &Reservation{inner: a.inner.Reserve(demand.inner, maxBps)}
 }
 
-// Reservation is one track's standing claim on a Bandwidth.
+// Reservation is one track's standing claim on an Allocator.
 //
-// Grant is a snapshot: nil means no estimate or no demand, so hold the current
-// rate, and 0 is a real zero grant.
+// Rate is a snapshot: nil means no estimate, so hold the current rate, and 0 is
+// a real zero rate. While nothing subscribes it is the share the track would get.
 // Update(0) relinquishes the allocation while the track stays subscribed; the
 // handle remains usable and a later Update can claim bandwidth again.
 type Reservation struct {
 	inner *ffi.MoqReservation
 }
 
-// Grant returns this reservation's slice right now, in bits per second.
-func (r *Reservation) Grant() *uint64 {
-	return r.inner.Grant()
+// Rate returns this reservation's slice right now, in bits per second.
+func (r *Reservation) Rate() *uint64 {
+	return r.inner.Rate()
 }
 
 // Update changes the ceiling, keeping the same claim. Zero immediately gives
@@ -169,6 +174,109 @@ func (r *Reservation) Grant() *uint64 {
 // target; it does not close the track or destroy the native handle.
 func (r *Reservation) Update(maxBps uint64) {
 	r.inner.Update(maxBps)
+}
+
+// Viewers returns the session's viewers, dividing the connection's receive
+// estimate among the broadcasts watched over it. Every call returns a handle to
+// the same registry, and the session sends what its viewers' ceilings add up to
+// as its PROBE target. A client handle survives reconnects: a viewer reads nil
+// while disconnected and resumes on the next connection.
+func (s *Session) Viewers() *Viewers {
+	return &Viewers{inner: s.inner.Viewers()}
+}
+
+// Viewers divides one connection's receive estimate among the broadcasts
+// watched over it, max-min fair by each viewer's ceiling.
+type Viewers struct {
+	inner *ffi.MoqViewers
+}
+
+// Watch claims up to maxBps for a broadcast, returning its viewer. maxBps is a
+// ceiling: what the largest rendition the player would switch to needs, not what
+// it is receiving. Holding the viewer requests the receive estimate, like
+// Session.RecvBandwidth; Close it once the broadcast stops being watched.
+// Errors with ErrOutOfRange, watching nothing, when the ceilings would sum
+// above 2^53 - 1.
+func (v *Viewers) Watch(maxBps uint64) (*Viewer, error) {
+	inner, err := v.inner.Watch(maxBps)
+	if err != nil {
+		return nil, err
+	}
+	return &Viewer{inner: inner}, nil
+}
+
+// SetTarget sends targetBps as the PROBE target instead of the viewers' sum, or
+// nil to follow them again. Zero sends no target. Errors with ErrOutOfRange,
+// keeping the previous override, above 2^53 - 1.
+func (v *Viewers) SetTarget(targetBps *uint64) error {
+	return v.inner.SetTarget(targetBps)
+}
+
+// Viewer is one watched broadcast's standing claim on Viewers.
+//
+// Rate is a snapshot: nil means no receive estimate, so hold the current
+// selection, and 0 is a real zero rate.
+type Viewer struct {
+	inner *ffi.MoqViewer
+}
+
+// Rate returns this viewer's slice of the receive estimate right now, in bits
+// per second.
+func (v *Viewer) Rate() *uint64 {
+	return v.inner.Rate()
+}
+
+// Update changes the ceiling, keeping the same claim, as when a catalog enables
+// or disables a rendition. Errors with ErrOutOfRange, keeping the previous
+// ceiling, when the ceilings would sum above 2^53 - 1.
+func (v *Viewer) Update(maxBps uint64) error {
+	return v.inner.Update(maxBps)
+}
+
+// Close releases the claim, handing its share to the other viewers, lowering
+// the PROBE target, and ending its receive-estimate demand without waiting for
+// garbage collection. Call it from the goroutine that last used the viewer;
+// the viewer is unusable afterwards.
+func (v *Viewer) Close() {
+	v.inner.Destroy()
+}
+
+// RatePolicy maps a reservation's grant onto a sender's bitrate: MaxBps caps it,
+// and LowerBps, the next lower rendition's MaxBps, disables this rendition while
+// the grant is below (MaxBps + 2*LowerBps) / 3 and a session probes for it.
+type RatePolicy = ffi.MoqRatePolicy
+
+// RateTarget is what a sender following a RateControl should be doing: a
+// RateTargetEnabled bitrate, or RateTargetDisabled.
+type RateTarget = ffi.MoqRateTarget
+
+// RateTargetEnabled produces at BitrateBps and advertises the rendition as enabled.
+type RateTargetEnabled = ffi.MoqRateTargetEnabled
+
+// RateTargetDisabled stops sending and advertises the rendition as disabled.
+type RateTargetDisabled = ffi.MoqRateTargetDisabled
+
+// RateControl turns a Reservation's grant into a sender's RateTarget, with the
+// policy moq's own encoders follow: drops apply at once, raises climb at most 25%
+// per second, and moves under 5% are ignored. For a sender that encodes on its
+// own, call Update on every frame and apply what it returns.
+type RateControl struct {
+	inner *ffi.MoqRateControl
+}
+
+// NewRateControl starts at policy.MaxBps until a grant says otherwise.
+func NewRateControl(policy RatePolicy) *RateControl {
+	return &RateControl{inner: ffi.NewMoqRateControl(policy)}
+}
+
+// Target returns what the sender should currently be doing.
+func (c *RateControl) Target() RateTarget {
+	return c.inner.Target()
+}
+
+// Update feeds reservation's grant, returning a new target worth applying, or nil.
+func (c *RateControl) Update(reservation *Reservation) *RateTarget {
+	return c.inner.Update(reservation.inner)
 }
 
 // Publish returns the origin used to advertise local broadcasts to the remote.
@@ -182,8 +290,8 @@ func (s *Session) Consume() *OriginConsumer {
 }
 
 // Shutdown requests a draining close now; wait for its result with Closed.
-// Explicit moq-lite-07-wip waits for the peer to receive finished tails; older
-// Lite versions (including default lite-06) and IETF wait only for transport ACKs.
+// moq-lite-05 and newer wait for the peer to receive finished tails; older Lite
+// versions and IETF wait only for transport ACKs.
 // Finish or abort live tracks first; the drain times out after one second.
 func (s *Session) Shutdown() {
 	s.inner.Shutdown()

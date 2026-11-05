@@ -1,7 +1,7 @@
 /** A ponyfill for the WHATWG [`WebSocketStream`][spec] API.
  *
- * `WebSocketStream` exposes a WebSocket as a pair of streams —
- * `{ readable, writable }` — with backpressure on the writable. It currently
+ * `WebSocketStream` exposes a WebSocket as a pair of streams -
+ * `{ readable, writable }` - with backpressure on the writable. It currently
  * ships only in Chromium. This module wraps a plain `WebSocket` to present the
  * same surface (`opened`, `closed`, `close()`), applying write backpressure by
  * polling `bufferedAmount` against a configurable high-water mark.
@@ -20,33 +20,44 @@ export type WebSocketStreamData = Uint8Array | string;
 
 /** Resolved value of {@link WebSocketStreamLike.opened}. */
 export interface WebSocketStreamOpenEvent {
+	/** The messages the peer sends. */
 	readable: ReadableStream<WebSocketStreamData>;
+	/** The messages to send to the peer. */
 	writable: WritableStream<WebSocketStreamData>;
+	/** The extensions the server selected. */
 	extensions: string;
+	/** The subprotocol the server selected, or empty. */
 	protocol: string;
 }
 
 /** Resolved value of {@link WebSocketStreamLike.closed}. */
 export interface WebSocketStreamCloseEvent {
+	/** The close code the connection ended with. */
 	closeCode: number;
+	/** The close reason the connection ended with. */
 	reason: string;
 }
 
 /** Argument to {@link WebSocketStreamLike.close}. */
 export interface WebSocketStreamCloseInfo {
+	/** The close code to send. */
 	closeCode?: number;
+	/** The close reason to send. */
 	reason?: string;
 }
 
 /** The common shape implemented by both the native API and this ponyfill. */
 export interface WebSocketStreamLike {
+	/** The URL the socket connected to. */
 	readonly url: string;
+	/** Resolves with the streams once the handshake completes. */
 	readonly opened: Promise<WebSocketStreamOpenEvent>;
+	/** Resolves once the connection closes. */
 	readonly closed: Promise<WebSocketStreamCloseEvent>;
+	/** Close the connection, with an optional code and reason. */
 	close(closeInfo?: WebSocketStreamCloseInfo): void;
-	/** Ponyfill-only: resize the write-backpressure high-water mark at runtime
-	 *  (see {@link WebSocketStream.setHighWaterMark}). Absent on the native API,
-	 *  which sizes its own send buffer — callers should treat it as optional. */
+	/** Ponyfill-only: resize the write-backpressure high-water mark at runtime.
+	 *  Absent on the native API, which sizes its own send buffer - callers should treat it as optional. */
 	setHighWaterMark?(bytes: number): void;
 }
 
@@ -77,19 +88,30 @@ type NativeWebSocketStreamConstructor = new (
 /** The slice of the `WebSocket` API this ponyfill relies on. Both the browser
  *  `WebSocket` and Node's `ws` satisfy it. */
 export interface WebSocketLike {
+	/** How binary messages arrive; set to `arraybuffer`. */
 	binaryType: string;
 	/** Absent on some server-side implementations; only used to report
 	 *  {@link WebSocketStreamLike.url} for an adopted socket. */
 	readonly url?: string;
+	/** Bytes queued to send but not yet sent. */
 	readonly bufferedAmount: number;
+	/** The connection state, as the `WebSocket` constants number it. */
 	readonly readyState: number;
+	/** The subprotocol the server selected, or empty. */
 	readonly protocol: string;
+	/** The extensions the server selected. */
 	readonly extensions: string;
+	/** Queue a message to send. */
 	send(data: string | ArrayBufferLike | ArrayBufferView): void;
+	/** Close the connection, with an optional code and reason. */
 	close(code?: number, reason?: string): void;
+	/** Called once the handshake completes. */
 	onopen: ((ev: unknown) => void) | null;
+	/** Called with each message received. */
 	onmessage: ((ev: { data: unknown }) => void) | null;
+	/** Called when the connection fails. */
 	onerror: ((ev: unknown) => void) | null;
+	/** Called once the connection closes. */
 	onclose: ((ev: { code?: number; reason?: string }) => void) | null;
 }
 
@@ -121,7 +143,7 @@ function validCloseCode(code: number | undefined): code is number {
 /** Resolve once `bufferedAmount` drains below the mark (write backpressure).
  *  The mark is read live via `highWaterMark()` on every check, so a runtime
  *  resize (see {@link WebSocketStream.setHighWaterMark}) takes effect mid-drain.
- *  Returns `undefined` synchronously when there's already room — no microtask
+ *  Returns `undefined` synchronously when there's already room - no microtask
  *  on the hot path, so `writer.ready` stays resolved when the socket is keeping up. */
 function drain(ws: WebSocketLike, highWaterMark: () => number): Promise<void> | undefined {
 	if (ws.bufferedAmount <= highWaterMark()) return undefined;
@@ -217,7 +239,7 @@ export class WebSocketStream implements WebSocketStreamLike {
 		};
 
 		// An adopted socket may already have finished (or missed) its handshake, in
-		// which case `onopen`/`onclose` will never fire — settle from readyState.
+		// which case `onopen`/`onclose` will never fire - settle from readyState.
 		if (ws.readyState !== CONNECTING) {
 			if (ws.readyState === OPEN) {
 				opened.resolve({ readable, writable, extensions: ws.extensions, protocol: ws.protocol });
@@ -237,13 +259,13 @@ export class WebSocketStream implements WebSocketStreamLike {
 		}
 	}
 
-	/** Wrap a socket that already exists — typically one a server accepted from an
+	/** Wrap a socket that already exists - typically one a server accepted from an
 	 *  HTTP upgrade (`Deno.upgradeWebSocket`, `ws`, ...), where there is no URL to
 	 *  dial and the handshake (including subprotocol selection) is already done.
 	 *
 	 *  Ownership transfers: this overwrites the socket's `onopen`/`onmessage`/
 	 *  `onerror`/`onclose` handlers, so adopt it before anything else reads from
-	 *  it — messages delivered before adoption are dropped by the platform, not
+	 *  it - messages delivered before adoption are dropped by the platform, not
 	 *  buffered. A socket that is already open resolves {@link opened} without
 	 *  waiting for an `onopen` that has already fired (or was never going to).
 	 *

@@ -9,7 +9,7 @@ rendition, sync point interval, audio/video skew,
 media timestamp continuity, the [health verdict](/doc/concept/stats.md#health)
 from the publisher's stats, and whether the broadcast ends with a clean
 unannounce (observed by the check; the publisher, which owns the
-`broadcast::Producer`, does the unannounce). A failure names the broken layer
+`origin::Publication`, does the unannounce). A failure names the broken layer
 and its evidence instead of one score, and the raw evidence is kept so two
 people reach the same diagnosis.
 

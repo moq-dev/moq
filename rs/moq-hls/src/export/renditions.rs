@@ -1,36 +1,71 @@
 //! A broadcast's rendition set, as a `Producer`/[`Consumer`] pair.
 //!
 //! The `Producer` holds the current renditions, reconciled from the catalog by its `sync`;
-//! the HTTP serve path reads them synchronously (look one up, render the master playlist). It
-//! is also the fan-out point for the broadcast's segments: the reference rendition's timeline
-//! watcher hands each record to every rendition through the `Fanout` handle, and each rendition
-//! keeps its own window over them.
+//! the HTTP serve path reads them synchronously (look one up, render the master playlist). Each
+//! rendition follows its own media track onto the broadcast's grid; the `Fanout` handle holds what
+//! they share: the discontinuity counts and the publisher run.
 //! A [`Consumer`] is a cursor for a recorder that mirrors the *whole* broadcast: [`next`](Consumer::next)
 //! yields one [`Event`] at a time as renditions are added or removed, replaying the current
-//! set as [`Added`](Event::Added) when first consumed, and returning `None` once the source
+//! set as [`Added`](Event::Added) when first consumed, and returning `None` once the catalog
 //! finishes cleanly, or an error when the recording is incomplete.
 
-use moq_clock::Wall;
-use std::collections::{BTreeMap, VecDeque};
+use kio::clock::Wall;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Weak};
 use std::task::Poll;
 use std::time::Duration;
 
 use moq_mux::catalog::hang::Catalog;
-use moq_mux::timeline::Entry;
 
+use super::driver::{Owner, Spawner};
+use super::master;
 use super::rendition::{Kind, Rendition};
-use super::segments::{self, Discontinuities, Reference};
 
 /// The `(kind, name)` identity of a rendition. Video and audio are separate axes, so a video
 /// and an audio rendition may share a name without colliding.
-type Key = (Kind, String);
+pub(crate) type Key = (Kind, String);
+
+/// Numbers each rendition's content breaks: its segments after its media timestamps went back, or
+/// after a reconfigure's hand-over, start a new discontinuity, as does every rendition's next
+/// segment after a publisher-run restart.
+///
+/// Counted per rendition, since each numbers its own segments. A break in one rendition only
+/// makes its count diverge from its siblings', which players resync across by
+/// `EXT-X-PROGRAM-DATE-TIME`. Kept by name, so a reconfigured rendition's replacement never
+/// lists a lower sequence than its predecessor.
+#[derive(Default)]
+struct Discontinuities {
+	/// Each live rendition's newest sequence.
+	renditions: BTreeMap<Key, u64>,
+	/// Publisher-run restarts so far, where a rendition first seen starts.
+	restarts: u64,
+}
+
+impl Discontinuities {
+	/// The sequence of rendition `key`'s next segment, which starts a new one when `broken`.
+	fn stamp(&mut self, key: &Key, broken: bool) -> u64 {
+		if !self.renditions.contains_key(key) {
+			self.renditions.insert(key.clone(), self.restarts);
+		}
+		let sequence = self.renditions.get_mut(key).expect("inserted above");
+		*sequence += u64::from(broken);
+		*sequence
+	}
+
+	/// Start a new discontinuity on every rendition, for a publisher run that restarts.
+	fn restart(&mut self) {
+		self.restarts += 1;
+		for sequence in self.renditions.values_mut() {
+			*sequence += 1;
+		}
+	}
+}
 
 /// A change to the rendition set, yielded by [`Consumer::next`].
 #[non_exhaustive]
 pub enum Event {
-	/// A rendition appeared, with its own timeline advertised (or was reconfigured: a `Removed`
-	/// for the old one precedes it).
+	/// A rendition appeared, once the catalog declares its join interval (or was reconfigured: a
+	/// `Removed` for the old one precedes it).
 	Added(Arc<Rendition>),
 	/// A rendition disappeared (removed from the catalog, or replaced by a reconfigure).
 	Removed {
@@ -41,54 +76,34 @@ pub enum Event {
 	},
 }
 
-/// The timeline fan-out state: who gets fed, and what a late-created rendition replays.
+/// What every rendition of the broadcast shares.
 ///
-/// Feeds by `Weak` reference rather than through the rendition map: a recording cursor's
-/// `Arc<Rendition>` must keep receiving records after `Broadcaster::drop` clears the map, or
-/// its final segments would be silently lost.
+/// Reaches renditions by `Weak` reference rather than through the rendition map: a recording
+/// cursor's `Arc<Rendition>` must keep its records flowing after `Broadcaster::drop` clears the
+/// map, or its final segments would be silently lost.
 struct Feed {
-	/// Every rendition ever created and still alive, pruned as they drop.
+	/// Every rendition created and still alive, the dropped ones pruned as the next registers.
 	targets: Vec<Weak<Rendition>>,
-	/// Recent reference records with their discontinuity sequence, replayed into a rendition
-	/// created mid-broadcast so its playlist window isn't empty until the next record. Evicted with
-	/// the same policy as the windows.
-	history: VecDeque<segments::Row>,
-	/// The last accepted row survives source pops, so a handoff cannot rewind or reuse a position.
-	last: Option<segments::Row>,
-	/// Catalog-managed reader identity; pointer identity also rejects a cancelled reader of
-	/// the same reference after a rapid disable/re-enable. No selected reader freezes the window.
-	selection: Option<Option<Reference>>,
-	/// A new watcher first replays its checkpoint, including records already advertised.
-	joining: bool,
-	/// Stamps each record once, so every rendition agrees on where the timeline breaks.
+	/// Each rendition's discontinuity count.
 	discontinuities: Discontinuities,
-	/// The timeline ended cleanly; late-created renditions start ended (`EXT-X-ENDLIST`).
-	ended: bool,
-	/// A reference timeline the playlists still list failed; late-created renditions start failed.
+	/// The longest duration the first catalog batch declared, in whole seconds rounded up: the
+	/// floor of every target duration this run (see [`Producer::register`]).
+	baseline: Option<u64>,
+	/// The catalog failed; late-created renditions start failed.
 	failed: Option<crate::Error>,
-	/// The timeline stream is over (cleanly or not); late-created renditions start closed.
-	closed: bool,
-	/// The estimated wall-clock time of timeline `pts` 0, anchored when the first record
-	/// arrived (assuming its segment had just ended). The DASH manifest's
-	/// `availabilityStartTime` falls back to this when the catalog declares no `clock`; set
-	/// once so reloads see a stable presentation, and reset with the window when the
-	/// timeline restarts.
+	/// Another publisher run replaced this one, so every window ended where it was (see
+	/// [`Producer::cut`]) and no later failure reaches them.
+	cut: bool,
+	/// The estimated wall-clock time of `pts` 0, anchored when the first segment was listed
+	/// (assuming it had just ended). The DASH manifest's `availabilityStartTime` falls back to
+	/// this when the catalog declares no `clock`; set once so reloads see a stable presentation,
+	/// and reset with the publisher run.
 	anchor: Option<Wall>,
 	/// The publisher run every segment URL carries; late-created renditions inherit it.
 	generation: Option<Arc<str>>,
 	/// The playlist window duration applied on every push (see
 	/// [`Config::window`](super::Config::window)).
 	window: Duration,
-}
-
-impl Feed {
-	fn accepts(&self, reference: &Reference) -> bool {
-		self.selection.as_ref().is_none_or(|selected| {
-			selected
-				.as_ref()
-				.is_some_and(|selected| Arc::ptr_eq(selected, reference))
-		})
-	}
 }
 
 /// The producing side of a broadcast's rendition set.
@@ -106,62 +121,157 @@ pub(crate) struct Producer {
 #[derive(Default)]
 struct State {
 	renditions: BTreeMap<Key, Arc<Rendition>>,
+	media: Option<hang::catalog::Media>,
 	/// The catalog's confirmed end, distinct from dropping its watcher.
 	finished: Option<crate::Result<()>>,
-	// Cache catalog quality order without making any_held_externally count it as a consumer.
+	// Cache catalog quality order without counting it as a holder.
 	audio: Vec<Weak<Rendition>>,
+	/// Each media track a catalog without a join interval yet lists, by the reference it was held
+	/// on, held subscribed so an on-demand publisher produces the media its interval is measured
+	/// from (see [`hold`]).
+	waiting: BTreeMap<Key, (Held, Owner)>,
 }
 
-/// The timeline fan-out handle: everything the timeline watcher needs, and nothing more.
+/// Where a rendition's media track is: its broadcast, instance, and track name.
+type Held = (Option<moq_net::path::Relative>, Option<moq_net::Instance>, String);
+
+/// Holds `track` on `binding` subscribed until dropped, as demand for its media.
 ///
-/// Deliberately separate from [`Producer`]: the watcher outlives the `Broadcaster` while a
+/// A publisher that measures its join interval does so from media, and an on-demand one produces
+/// media only for a subscriber: without this, an export that subscribes only once the interval
+/// is declared would never see one.
+struct Hold {
+	binding: moq_mux::Binding,
+	track: String,
+	state: Holding,
+}
+
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per track a catalog lists before its join interval, held in place until dropped"
+)]
+enum Holding {
+	Binding,
+	Subscribing {
+		_broadcast: moq_net::broadcast::Consumer,
+		_track: moq_net::track::Consumer,
+		subscribing: moq_net::track::Subscribing,
+	},
+	Held {
+		_broadcast: moq_net::broadcast::Consumer,
+		_track: moq_net::track::Consumer,
+		_subscriber: moq_net::track::Subscriber,
+	},
+}
+
+impl kio::Task for Hold {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if let Holding::Binding = self.state {
+			let Ok(broadcast) = std::task::ready!(self.binding.poll_broadcast(waiter)) else {
+				return Poll::Ready(());
+			};
+			let Ok(track) = broadcast.track(&self.track) else {
+				return Poll::Ready(());
+			};
+			let subscribing = track.subscribe(moq_net::track::Subscription::default()).into_inner();
+			self.state = Holding::Subscribing {
+				_broadcast: broadcast,
+				_track: track,
+				subscribing,
+			};
+		}
+		if let Holding::Subscribing { subscribing, .. } = &self.state {
+			let Ok(subscriber) = std::task::ready!(subscribing.poll_ok(waiter)) else {
+				return Poll::Ready(());
+			};
+			let Holding::Subscribing { _broadcast, _track, .. } = std::mem::replace(&mut self.state, Holding::Binding)
+			else {
+				unreachable!("subscribing above");
+			};
+			self.state = Holding::Held {
+				_broadcast,
+				_track,
+				_subscriber: subscriber,
+			};
+		}
+		// Held until the owner drops it.
+		Poll::Pending
+	}
+}
+
+/// The shared state handle each rendition's record watcher reaches.
+///
+/// Deliberately separate from [`Producer`]: a watcher outlives the `Broadcaster` while a
 /// recording cursor drains, and holding a full `Producer` there would keep the rendition-set
 /// channel open (so `renditions()` cursors would never terminate).
 #[derive(Clone)]
 pub(crate) struct Fanout {
+	pub(super) lazy: bool,
 	feed: kio::Producer<Feed>,
+	/// Starts each rendition's background work on the broadcaster's driver.
+	spawner: Spawner,
 }
 
 impl Producer {
-	pub fn new(window: Duration) -> Self {
+	pub fn new(window: Duration, spawner: Spawner) -> Self {
 		Self {
 			state: kio::Producer::new(State::default()),
 			fanout: Fanout {
+				lazy: false,
 				feed: kio::Producer::new(Feed {
 					targets: Vec::new(),
-					history: VecDeque::new(),
-					last: None,
-					selection: None,
-					joining: false,
 					discontinuities: Discontinuities::default(),
-					ended: false,
+					baseline: None,
 					failed: None,
-					closed: false,
+					cut: false,
 					anchor: None,
 					generation: None,
 					window,
 				}),
+				spawner,
 			},
 		}
 	}
 
-	/// The timeline fan-out handle for the timeline watcher task.
+	pub fn lazy(window: Duration, spawner: Spawner) -> Self {
+		let mut producer = Self::new(window, spawner);
+		producer.fanout.lazy = true;
+		producer
+	}
+
+	/// A producer whose renditions run on a driver spawned on the ambient runtime.
+	#[cfg(test)]
+	pub(super) fn spawned(window: Duration) -> Self {
+		let (spawner, driver) = Spawner::new();
+		tokio::spawn(driver.run());
+		Self::new(window, spawner)
+	}
+
+	/// How many renditions the fanout still reaches, dropped ones not yet pruned included.
+	#[cfg(test)]
+	pub(super) fn targets(&self) -> usize {
+		self.fanout.feed.read().targets.len()
+	}
+
+	/// The handle every rendition shares.
 	pub fn fanout(&self) -> Fanout {
 		self.fanout.clone()
 	}
 
 	/// The playlist window duration every rendition's window is trimmed to.
 	pub fn window(&self) -> Duration {
-		self.fanout.feed.read().window
+		self.fanout.window()
 	}
 
-	/// The estimated wall-clock time of timeline `pts` 0 (see [`Feed::anchor`]); `None` until
-	/// the first record arrives.
+	/// The estimated wall-clock time of `pts` 0 (see [`Feed::anchor`]); `None` until the first
+	/// segment is listed.
 	pub fn anchor(&self) -> Option<Wall> {
 		self.fanout.feed.read().anchor
 	}
 
-	/// Why a reference timeline the playlists list failed, if one did.
+	/// Why the catalog failed, if it did.
 	pub fn failure(&self) -> Option<crate::Error> {
 		self.fanout.feed.read().failed.clone()
 	}
@@ -178,6 +288,22 @@ impl Producer {
 	/// Look up a rendition by kind and name (serve path).
 	pub fn get(&self, kind: Kind, name: &str) -> Option<Arc<Rendition>> {
 		self.state.read().renditions.get(&(kind, name.to_string())).cloned()
+	}
+
+	#[cfg(feature = "server")]
+	pub fn poll_get(&self, waiter: &kio::Waiter, kind: Kind, name: &str) -> Poll<Option<Arc<Rendition>>> {
+		match self.state.poll_ref(waiter, |state| {
+			if state.media.is_some() {
+				Poll::Ready(state.renditions.get(&(kind, name.to_string())).cloned())
+			} else {
+				Poll::Pending
+			}
+		}) {
+			Poll::Ready(Ok(rendition)) => Poll::Ready(rendition),
+			// Read through the closed state's guard: `get` would lock it again.
+			Poll::Ready(Err(state)) => Poll::Ready(state.renditions.get(&(kind, name.to_string())).cloned()),
+			Poll::Pending => Poll::Pending,
+		}
 	}
 
 	/// Snapshot video by name and audio in catalog quality order (for the master playlist).
@@ -207,11 +333,17 @@ impl Producer {
 		self.state.read().renditions.is_empty()
 	}
 
-	/// Whether anything outside the map (a recording cursor, a handed-out `Arc`) still holds a
-	/// rendition. `Broadcaster::drop` checks this to decide whether the timeline watcher must
-	/// outlive it (so those holders keep receiving records) or can be aborted.
-	pub fn any_held_externally(&self) -> bool {
-		self.state.read().renditions.values().any(|r| Arc::strong_count(r) > 1)
+	/// Whether any rendition could still be listed: enabled and not failed on its own.
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
+	pub fn listable(&self) -> bool {
+		self.state
+			.read()
+			.renditions
+			.values()
+			.any(|rendition| rendition.is_enabled() && !rendition.failed_alone())
 	}
 
 	/// Release every rendition the map is holding.
@@ -221,8 +353,8 @@ impl Producer {
 	/// so teardown doesn't depend on consumers dropping first.
 	///
 	/// Deliberately drops rather than [`Rendition::close`]s: a rendition a cursor still holds
-	/// keeps receiving timeline records through the [`Feed`]'s weak list, so a recording in
-	/// progress drains to the real end of the broadcast instead of being truncated here.
+	/// keeps following its records, so a recording in progress drains to the real end of the
+	/// broadcast instead of being truncated here.
 	pub fn clear(&self) {
 		if let Ok(mut current) = self.state.write() {
 			current.renditions.clear();
@@ -230,161 +362,94 @@ impl Producer {
 		}
 	}
 
-	/// Record the catalog's end before closing its change stream.
+	/// Record the catalog's end before closing its change stream. A failed catalog fails every
+	/// rendition, so none reads as finished.
+	///
+	/// The first end wins. The set stays locked while the windows fail, so a racing
+	/// [`cut`](Self::cut) lands wholly before (and the failure is dropped) or after (and the
+	/// failed windows keep their failure).
 	pub fn finish(&self, result: crate::Result<()>) {
-		if let Err(err) = &result {
-			let failed = crate::Error::CatalogFailed {
-				source: Box::new(err.clone()),
-			};
-			self.fanout.fail(None, failed);
+		let Ok(mut state) = self.state.write() else {
+			return;
+		};
+		if state.finished.is_some() {
+			return;
 		}
+		if let Err(err) = &result {
+			self.fanout.fail(crate::Error::CatalogFailed {
+				source: Box::new(err.clone()),
+			});
+		}
+		state.finished = Some(result);
+		drop(state);
+		self.close();
+	}
+
+	/// End the rendition set and every window at what is listed now, because another publisher
+	/// run replaced this one, which may go on publishing. A cursor drains the listed segments and
+	/// then ends as after a clean finish; one already failed keeps its failure.
+	///
+	/// Closes the set first: that waits out a [`sync`](Self::sync) in flight, so no rendition
+	/// joins after its siblings were cut.
+	pub fn cut(&self) {
 		if let Ok(mut state) = self.state.write() {
-			state.finished = Some(result);
+			state.finished.get_or_insert(Ok(()));
 		}
 		self.close();
+		self.fanout.cut();
 	}
 
 	/// Close the channel, signalling consumers that no more renditions will appear.
 	///
-	/// Deliberately does NOT cascade into the renditions' own segment windows: those are ended
-	/// or failed by the timeline watcher (see [`Fanout::finish`] and [`Fanout::fail`]), which must
-	/// mark them before closing them, or the playlist never gets its `EXT-X-ENDLIST` or error.
+	/// Deliberately does NOT cascade into the renditions' own segment windows: each ends with its
+	/// own records.
 	pub fn close(&self) {
 		let _ = self.state.close();
 	}
 }
 
 impl Fanout {
-	/// Select the next reference, whose records list only past the last advertised one.
-	pub fn select(&self, reference: Option<Reference>) {
-		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
-		feed.selection = Some(reference);
-		feed.joining = true;
+	/// Run `task` on the broadcaster's driver until it finishes or the returned [`Owner`] drops.
+	pub fn spawn(&self, task: impl kio::Task<Output = ()> + Send + 'static) -> Owner {
+		self.spawner.spawn(task)
 	}
 
-	/// Fan one reference timeline record out to every living rendition, and into replay history.
-	pub fn push(&self, index: u64, entry: Entry, reference: &Reference) {
+	/// The playlist window duration every rendition's window is trimmed to.
+	pub fn window(&self) -> Duration {
+		self.feed.read().window
+	}
+
+	/// The discontinuity sequence of rendition `key`'s next segment, which starts a new one when
+	/// `broken` (see [`Discontinuities::stamp`]). Anchors the presentation at a segment ending at
+	/// `end`, if nothing has.
+	pub fn stamp(&self, key: &Key, broken: bool, end: Duration) -> u64 {
 		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
-		if !feed.accepts(reference) || feed.failed.is_some() {
-			return;
-		}
-		let pts = Duration::from(entry.pts);
-		let end = entry.end_time();
-		let mut skipped = false;
-		if let Some(last) = &feed.last {
-			if feed.joining || last.reference != *reference {
-				// The media sequence is the source record sequence, so every edge derives it alone.
-				// A replacement resumes only past every advertised position and content time; a
-				// lagging one holds the playlist until its numbering catches up.
-				if entry.sequence <= last.segment || (pts < last.end && !segments::continues(last.end, pts)) {
-					return;
-				}
-				// HLS numbers a playlist's segments consecutively, so a replacement that skips
-				// positions cannot follow the advertised rows.
-				skipped = entry.sequence > last.segment + 1;
-			} else if pts < Duration::from(last.pts) || entry.sequence <= last.segment {
-				feed.history.clear();
-				feed.last = None;
-				feed.anchor = None;
-			}
-		}
-		feed.joining = false;
-		if skipped {
-			feed.history.clear();
-			feed.discontinuities.interrupt();
-			feed.targets.retain(|target| {
-				let Some(rendition) = target.upgrade() else {
-					return false;
-				};
-				rendition.clear();
-				true
-			});
-		}
 		if feed.anchor.is_none() {
-			feed.anchor = Some(moq_clock::wall().checked_sub(end).unwrap_or(Wall::UNIX_EPOCH));
+			feed.anchor = Some(kio::clock::wall().checked_sub(end).unwrap_or(Wall::UNIX_EPOCH));
 		}
-		let period = feed.last.as_ref().map_or(moq_net::Timestamp::ZERO, |last| {
-			if last.reference == *reference {
-				last.period
-			} else {
-				entry.pts
-			}
-		});
-		let discontinuity = feed.discontinuities.stamp(pts, end);
-		let row = segments::Row {
-			index,
-			segment: entry.sequence,
-			period,
-			reference: reference.clone(),
-			frames: entry.start..entry.end,
-			keyframe: entry.keyframe,
-			duration: entry.duration,
-			pts: entry.pts,
-			end,
-			discontinuity,
-		};
-		feed.last = Some(row.clone());
-		feed.history.push_back(row.clone());
-		let window = feed.window;
-		loop {
-			let rest = feed.history.get(1).map_or(Duration::ZERO, |second| {
-				feed.history.back().unwrap().end.saturating_sub(second.pts.into())
-			});
-			let keeps_start = !feed.history[0].starts() || feed.history.iter().skip(1).any(segments::Row::starts);
-			if !segments::evicts(window, feed.history.len(), rest, keeps_start) {
-				break;
-			}
-			feed.history.pop_front();
-		}
-		feed.targets.retain(|target| {
-			let Some(rendition) = target.upgrade() else {
-				return false;
-			};
-			rendition.push(row.clone(), window);
-			true
-		});
+		feed.discontinuities.stamp(key, broken)
 	}
 
-	/// Remove records that left the source timeline window from every rendition window.
-	pub fn pop(&self, range: std::ops::Range<u64>, reference: &Reference) {
-		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
-		let Some(through) = feed
-			.history
-			.iter()
-			.filter(|row| row.reference == *reference && range.contains(&row.index))
-			.map(|row| row.segment)
-			.max()
-		else {
-			return;
-		};
-		// HLS assigns consecutive positions within a playlist. Removing an interior row
-		// would renumber every later URI, so retention always retires a whole prefix.
-		feed.history.retain(|row| row.segment > through);
-		feed.targets.retain(|target| {
-			let Some(rendition) = target.upgrade() else {
-				return false;
-			};
-			rendition.retire(through);
-			true
-		});
+	/// Why the catalog failed, if it did.
+	pub fn failure(&self) -> Option<crate::Error> {
+		self.feed.read().failed.clone()
 	}
 
 	/// List every rendition under `generation` from now on.
 	///
 	/// Replacing a generation drops what was listed under it and the inits built from it: those
-	/// belong to the run it named. The first one only labels the run already flowing, so an embedder that supplies
-	/// it right after construction loses nothing to a race with the first records.
+	/// belong to the run it named. The first one only labels the run already flowing, so an
+	/// embedder that supplies it right after construction loses nothing to a race with the first
+	/// records. A cut set keeps its generation, so its ended playlists keep their URLs.
 	pub fn set_generation(&self, generation: Option<Arc<str>>) {
 		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
-		if feed.generation == generation {
+		if feed.generation == generation || feed.cut {
 			return;
 		}
 		let restart = feed.generation.is_some();
 		feed.generation = generation.clone();
 		if restart {
-			feed.history.clear();
-			feed.last = None;
-			feed.discontinuities.interrupt();
+			feed.discontinuities.restart();
 			feed.anchor = None;
 		}
 		feed.targets.retain(|target| {
@@ -400,62 +465,26 @@ impl Fanout {
 		});
 	}
 
-	/// Clear stale rows after source records were skipped before this reader saw them.
-	pub fn skip(&self, reference: Option<&Reference>) {
+	/// End every window, including those only a cursor still holds (see [`Producer::cut`]).
+	fn cut(&self) {
 		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
-		if let Some(reference) = reference
-			&& (feed.joining || !feed.accepts(reference))
-		{
+		feed.cut = true;
+		feed.targets.retain(|target| {
+			let Some(rendition) = target.upgrade() else {
+				return false;
+			};
+			rendition.cut();
+			true
+		});
+	}
+
+	/// Fail every window with `err`, so no playlist reads as finished.
+	fn fail(&self, err: crate::Error) {
+		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
+		if feed.failed.is_some() || feed.cut {
 			return;
 		}
-		feed.history.clear();
-		if reference.is_none() {
-			feed.last = None;
-		}
-		feed.discontinuities.interrupt();
-		feed.targets.retain(|target| {
-			let Some(rendition) = target.upgrade() else {
-				return false;
-			};
-			rendition.clear();
-			true
-		});
-	}
-
-	/// End every window for the selected watcher, ignoring a superseded watcher's completion.
-	/// `None` ends them when the source ended with no reference selected, so no watcher will.
-	pub fn finish(&self, reference: Option<&Reference>) -> bool {
-		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
-		let selected = match reference {
-			Some(reference) => feed.accepts(reference),
-			None => feed.selection.as_ref().is_none_or(Option::is_none),
-		};
-		if !selected || feed.failed.is_some() {
-			return false;
-		}
-		feed.ended = true;
-		feed.closed = true;
-		feed.targets.retain(|target| {
-			let Some(rendition) = target.upgrade() else {
-				return false;
-			};
-			rendition.end();
-			rendition.close();
-			true
-		});
-		true
-	}
-
-	/// Fail every window with `err` when the selected `reference`'s timeline failed, so no
-	/// playlist reads as finished. A live window trims a superseded reference's rows on its own.
-	/// `None` fails the whole source when the catalog fails.
-	pub fn fail(&self, reference: Option<&Reference>, err: crate::Error) -> bool {
-		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
-		if feed.failed.is_some() || !reference.is_none_or(|reference| feed.accepts(reference)) {
-			return false;
-		}
 		feed.failed = Some(err.clone());
-		feed.closed = true;
 		feed.targets.retain(|target| {
 			let Some(rendition) = target.upgrade() else {
 				return false;
@@ -464,16 +493,14 @@ impl Fanout {
 			rendition.close();
 			true
 		});
-		true
 	}
 }
 
 impl Producer {
-	/// Resolve once at least one rendition has a playable media playlist. Bounding how long to
-	/// wait is the caller's policy, so wrap this in a timeout rather than passing one in.
-	pub async fn ready(&self) {
-		let _ = kio::wait(|waiter| {
-			self.state.poll_ref(waiter, |current| {
+	/// Ready once at least one rendition has a playable media playlist, or the set closed.
+	pub fn poll_ready(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state
+			.poll_ref(waiter, |current| {
 				if current
 					.renditions
 					.values()
@@ -484,8 +511,7 @@ impl Producer {
 					Poll::Pending
 				}
 			})
-		})
-		.await;
+			.map(|_| ())
 	}
 
 	/// Resolve once at least one enabled rendition is [advertised](Rendition::is_advertised), so a
@@ -494,47 +520,129 @@ impl Producer {
 		not(feature = "server"),
 		allow(dead_code, reason = "only the `server` feature uses it")
 	)]
-	pub(crate) async fn advertised(&self) {
-		let _ = kio::wait(|waiter| {
-			self.state.poll_ref(waiter, |current| {
-				if current
-					.renditions
-					.values()
-					.any(|rendition| rendition.is_enabled() && rendition.poll_advertised(waiter).is_ready())
-				{
+	pub(crate) fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state
+			.poll_ref(waiter, |current| {
+				if current.renditions.values().any(|rendition| {
+					rendition.is_enabled() && (self.fanout.lazy || rendition.poll_advertised(waiter).is_ready())
+				}) {
 					Poll::Ready(())
 				} else {
 					Poll::Pending
 				}
 			})
-		})
-		.await;
+			.map(|_| ())
 	}
 
-	/// Enroll a freshly-created rendition in the timeline feed, replaying the recent history
-	/// (and the ended/failed/closed markers) so its window matches its siblings', and start following its
-	/// own timeline.
-	fn register(&self, rendition: &Arc<Rendition>) {
+	/// Ready once a catalog was read, or the set closed.
+	#[cfg(feature = "server")]
+	pub(crate) fn poll_catalogued(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state
+			.poll_ref(waiter, |current| {
+				if current.media.is_some() {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			})
+			.map(|_| ())
+	}
+
+	/// Start every enabled video rendition's init build, then be ready once one of them has its
+	/// init and lists a segment of its own, so a manifest lists it, or none is left
+	/// that listings do not refuse: a denied or failed one can never be listed. A build that has
+	/// nothing to read from yet starts on the wake that indexes its media.
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
+	#[cfg_attr(test, kio::wrapper)]
+	pub(crate) fn poll_video_init(&self, waiter: &kio::Waiter) -> Poll<()> {
+		{
+			let poll = self.state.poll_ref(waiter, |current| {
+				let mut video = current
+					.renditions
+					.values()
+					.filter(|rendition| {
+						rendition.kind == Kind::Video
+							&& rendition.is_enabled()
+							&& rendition.poll_refused(waiter).is_pending()
+					})
+					.peekable();
+				if video.peek().is_none()
+					|| video.any(|rendition| {
+						// Rerun on every wake: `poll_refused` registered `waiter` on its records, so
+						// the rows a build needs wake this wait to start it.
+						rendition.start_init();
+						rendition.poll_init(waiter).is_ready() && rendition.poll_represented(waiter).is_ready()
+					}) {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			});
+			match poll {
+				Poll::Ready(Ok(())) => Poll::Ready(()),
+				// A closed catalog adds no rendition, but the existing ones' inits keep arriving,
+				// and the predicate registered `waiter` on each of them.
+				Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
+			}
+		}
+	}
+
+	/// Enroll freshly created renditions with what their siblings share, and start following
+	/// their own records.
+	///
+	/// A playlist URI keeps one `EXT-X-TARGETDURATION` while its rendition stays in the catalog
+	/// (RFC 8216 6.2.1). The target is derived rather than stored per name, so a publisher
+	/// churning names can't grow the feed: a new rendition gets the larger of its own declared
+	/// duration and the [baseline](Feed::baseline), the longest the first batch declared.
+	/// Renditions listed first all agree. A reconfigured rendition's replacement keeps its
+	/// predecessor's (see [`Rendition::after`]), which already covers the baseline. One that
+	/// leaves and returns gets the target its declaration derives: the same unless a reconfigure
+	/// had kept an older one.
+	fn register(&self, added: Vec<Rendition>) -> Vec<Arc<Rendition>> {
+		// Most catalog updates only revise estimates; writing the feed would wake every cursor.
+		if added.is_empty() {
+			return Vec::new();
+		}
 		let mut feed = self
 			.fanout
 			.feed
 			.write()
 			.unwrap_or_else(|_| unreachable!("fanout is open"));
-		rendition.label(feed.generation.clone());
-		rendition.watch();
-		for row in &feed.history {
-			rendition.push(row.clone(), feed.window);
-		}
-		if feed.ended {
-			rendition.end();
-		}
-		if let Some(err) = &feed.failed {
-			rendition.fail(err.clone());
-		}
-		if feed.closed {
-			rendition.close();
-		}
-		feed.targets.push(Arc::downgrade(rendition));
+		let feed = &mut *feed;
+		// Fixed by the first batch, while each target is still its own declared duration.
+		let baseline = *feed
+			.baseline
+			.get_or_insert_with(|| added.iter().map(Rendition::target_duration).max().unwrap_or(1));
+		let added: Vec<_> = added
+			.into_iter()
+			.map(|rendition| {
+				let target_duration = rendition.target_duration().max(baseline);
+				let rendition = Arc::new(rendition.pin(target_duration));
+				rendition.label(feed.generation.clone());
+				if let Some(err) = &feed.failed {
+					rendition.fail(err.clone());
+					rendition.close();
+				} else if !self.fanout.lazy {
+					rendition.watch();
+				}
+				feed.targets.push(Arc::downgrade(&rendition));
+				rendition
+			})
+			.collect();
+		// Pruned here, so a catalog that keeps replacing renditions holds only the live ones. A
+		// replacement shares its predecessor's name, so its count survives.
+		feed.targets.retain(|target| target.strong_count() > 0);
+		let live: BTreeSet<Key> = feed
+			.targets
+			.iter()
+			.filter_map(Weak::upgrade)
+			.map(|rendition| (rendition.kind, rendition.name.clone()))
+			.collect();
+		feed.discontinuities.renditions.retain(|key, _| live.contains(key));
+		added
 	}
 
 	/// Reconcile the rendition set with a complete catalog snapshot. Removed or reconfigured
@@ -550,39 +658,75 @@ impl Producer {
 	/// new advertised bitrate, since the publisher republishes the catalog every time its
 	/// measured bitrate, jitter, or framerate moves.
 	///
-	/// Renditions are only servable when the catalog advertises its timelines (its root `archive`
-	/// entry): without one there is nothing to render playlists from, so the whole catalog is
-	/// skipped with a warning. A rendition joins the set only once the archive indexes its own
-	/// timeline, which a publisher may declare after the rendition's init: until then every
-	/// segment would be a gap, so it is neither listed nor reported as [`Event::Added`].
+	/// Renditions join the set only once the catalog declares `media.join.interval`, which a
+	/// publisher measures over its first second or group when it knows no GOP: without that grid
+	/// nothing numbers their segments, so none is listed or reported as [`Event::Added`]. The
+	/// interval is fixed for a broadcast instance; should it change anyway, every rendition is
+	/// rebuilt on the new grid.
 	///
 	/// `source` holds the broadcast the snapshot was read from, so each rendition serves media
 	/// from that same broadcast rather than whatever is at the path by the time it is asked. A
 	/// rendition whose `broadcast` reference escapes above the origin root names no broadcast at
-	/// all, so it is dropped with a warning rather than served.
-	pub fn sync(&self, source: &moq_mux::Source, catalog: &Catalog) {
-		use hang::catalog::Reference as _;
-
-		let Some(archive) = catalog.archive.clone() else {
-			if !catalog.video.renditions.is_empty() || !catalog.audio.renditions.is_empty() {
-				tracing::warn!("catalog advertises no archive; its renditions can't be served as HLS");
+	/// all, so it is dropped with a warning rather than served. So is a rendition named `""`, `.`, or
+	/// `..`, which no URL path segment can address, so the master playlist, the DASH manifest, and
+	/// the router agree on what is served.
+	/// Hold every video and audio track `catalog` lists subscribed in `waiting`, releasing those
+	/// it no longer lists.
+	fn wait(&self, source: &moq_mux::Source, catalog: &Catalog, waiting: &mut BTreeMap<Key, (Held, Owner)>) {
+		use hang::catalog::Reference;
+		let video = catalog.video.renditions.iter().map(|(name, config)| {
+			let reference = (
+				config.broadcast.clone(),
+				config.instance.clone(),
+				config.track(name).to_string(),
+			);
+			((Kind::Video, name.clone()), reference)
+		});
+		let audio = catalog.audio.renditions.iter().map(|(name, config)| {
+			let reference = (
+				config.broadcast.clone(),
+				config.instance.clone(),
+				config.track(name).to_string(),
+			);
+			((Kind::Audio, name.clone()), reference)
+		});
+		let listed: BTreeMap<Key, Held> = video.chain(audio).collect();
+		// A rendition that now names another track drops the old hold for a new one.
+		waiting.retain(|key, (held, _)| listed.get(key) == Some(held));
+		for (key, held) in listed {
+			if waiting.contains_key(&key) {
+				continue;
 			}
-			return;
-		};
-		let section = archive;
-		let clock = catalog.clock;
+			let (broadcast, instance, track) = &held;
+			let Ok(binding) = source.bind(broadcast.as_ref(), instance.as_ref()) else {
+				continue;
+			};
+			let owner = self.fanout.spawn(Hold {
+				binding,
+				track: track.clone(),
+				state: Holding::Binding,
+			});
+			waiting.insert(key, (held, owner));
+		}
+	}
+
+	pub fn sync(&self, source: &moq_mux::Source, catalog: &Catalog) {
+		let clock = catalog.media.clock;
+		let interval = catalog.media.interval();
 
 		let Ok(mut current) = self.state.write() else {
 			return;
 		};
+		current.media = Some(catalog.media);
 
-		// Renditions the catalog dropped or reconfigured. Close each as it goes so any cursor
+		// Renditions the catalog dropped or reconfigured. Retire each as it goes so any cursor
 		// over it drains and ends, instead of parking on a window that never finishes -- the
 		// cursor's own `Arc<Rendition>` would otherwise keep it alive.
 		let stale: Vec<Key> = current
 			.renditions
 			.iter()
 			.filter(|((kind, name), rendition)| match kind {
+				_ if interval != Some(rendition.interval()) => true,
 				Kind::Video => !catalog
 					.video
 					.renditions
@@ -596,14 +740,38 @@ impl Producer {
 			})
 			.map(|(key, _)| key.clone())
 			.collect();
+		// A replacement lists the segments its retired predecessor won't, so no segment is muxed
+		// under both configs.
+		let mut handoffs = BTreeMap::new();
 		for key in stale {
 			if let Some(rendition) = current.renditions.remove(&key) {
-				rendition.end();
-				rendition.close();
+				let successor = match &key {
+					(Kind::Video, name) => catalog.video.renditions.get(name),
+					(Kind::Audio, _) => None,
+				};
+				handoffs.insert(key, rendition.retire(successor));
 			}
 		}
 
-		for (name, video) in &catalog.video.renditions {
+		// Until the interval is declared, nothing is listed, but every media track is held wanted.
+		let current = &mut *current;
+		match interval {
+			Some(_) => current.waiting.clear(),
+			None if !self.fanout.lazy => self.wait(source, catalog, &mut current.waiting),
+			None => current.waiting.clear(),
+		}
+
+		let mut added = Vec::new();
+		let video = catalog.video.renditions.iter().filter(|_| interval.is_some());
+		let audio = catalog.audio.renditions.iter().filter(|_| interval.is_some());
+		for (name, video) in video {
+			if !master::is_path_segment(name) {
+				tracing::warn!(
+					rendition = name,
+					"ignoring video rendition not named as a URL path segment"
+				);
+				continue;
+			}
 			let key = (Kind::Video, name.clone());
 			if let Some(rendition) = current.renditions.get(&key) {
 				// Survived the stale pass, so it decodes the same: keep its window, its cached
@@ -612,38 +780,42 @@ impl Producer {
 				rendition.refresh(video.bitrate, video.framerate, video.enabled);
 				continue;
 			}
-			if !section.timelines.contains_key(video.track(name)) {
+			let interval = interval.expect("filtered above");
+			match Rendition::video(name.clone(), video, source, interval, clock, self.fanout()) {
+				Ok(rendition) => added.push(rendition.after(handoffs.get(&key))),
+				Err(err) => tracing::warn!(rendition = name, %err, "ignoring unservable video rendition"),
+			}
+		}
+		for (name, audio) in audio {
+			if !master::is_path_segment(name) {
+				tracing::warn!(
+					rendition = name,
+					"ignoring audio rendition not named as a URL path segment"
+				);
 				continue;
 			}
-			let rendition = match Rendition::video(name.clone(), video, source, section.clone(), clock) {
-				Ok(rendition) => Arc::new(rendition),
-				Err(err) => {
-					tracing::warn!(rendition = name, %err, "ignoring unservable video rendition");
-					continue;
-				}
-			};
-			self.register(&rendition);
-			current.renditions.insert(key, rendition);
-		}
-		for (name, audio) in &catalog.audio.renditions {
 			let key = (Kind::Audio, name.clone());
 			if let Some(rendition) = current.renditions.get(&key) {
 				rendition.refresh(audio.bitrate, None, audio.enabled);
 				continue;
 			}
-			if !section.timelines.contains_key(audio.track(name)) {
-				continue;
+			let interval = interval.expect("filtered above");
+			match Rendition::audio(name.clone(), audio, source, interval, clock, self.fanout()) {
+				Ok(rendition) => added.push(rendition.after(handoffs.get(&key))),
+				Err(err) => tracing::warn!(rendition = name, %err, "ignoring unservable audio rendition"),
 			}
-			let rendition = match Rendition::audio(name.clone(), audio, source, section.clone(), clock) {
-				Ok(rendition) => Arc::new(rendition),
-				Err(err) => {
-					tracing::warn!(rendition = name, %err, "ignoring unservable audio rendition");
-					continue;
-				}
-			};
-			self.register(&rendition);
-			current.renditions.insert(key, rendition);
 		}
+		for rendition in self.register(added) {
+			current
+				.renditions
+				.insert((rendition.kind, rendition.name.clone()), rendition);
+		}
+		if current.renditions.is_empty()
+			&& (!catalog.video.renditions.is_empty() || !catalog.audio.renditions.is_empty())
+		{
+			tracing::debug!("the catalog declares no join interval yet; nothing to serve");
+		}
+
 		// Rank once per catalog update, keeping playlist reads linear. Updating state also wakes
 		// the master's long-poll when metadata changes without replacing a rendition.
 		current.audio = catalog
@@ -669,10 +841,11 @@ pub struct Consumer {
 }
 
 impl Consumer {
-	/// The next rendition change; `None` only after the catalog and reference finish cleanly.
-	pub async fn next(&mut self) -> crate::Result<Option<Event>> {
-		let Some(event) = kio::wait(|waiter| self.poll_next(waiter)).await? else {
-			return Ok(None);
+	/// The next rendition change; `None` only after the catalog finishes cleanly.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Event>>> {
+		let Some(event) = std::task::ready!(self.poll_event(waiter))? else {
+			return Poll::Ready(Ok(None));
 		};
 		match &event {
 			Event::Added(rendition) => {
@@ -683,36 +856,26 @@ impl Consumer {
 				self.seen.remove(&(*kind, name.clone()));
 			}
 		}
-		Ok(Some(event))
+		Poll::Ready(Ok(Some(event)))
 	}
 
-	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Event>>> {
-		let finished = match self
+	fn poll_event(&self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Event>>> {
+		// A failed catalog cannot wait for the change stream to close.
+		if let Poll::Ready(Ok(err)) = self
+			.feed
+			.poll(waiter, |feed| feed.failed.clone().map_or(Poll::Pending, Poll::Ready))
+		{
+			return Poll::Ready(Err(err));
+		}
+		match self
 			.state
 			.poll(waiter, |current| next_event(&current.renditions, &self.seen))
 		{
-			Poll::Ready(Ok(event)) => return Poll::Ready(Ok(Some(event))),
-			Poll::Ready(Err(state)) => {
-				match &state.finished {
-					Some(result) => result.clone()?,
-					None => return Poll::Ready(Err(crate::Error::IncompleteRecording)),
-				}
-				true
-			}
-			Poll::Pending => false,
-		};
-		// A failed reference cannot wait for an otherwise live catalog to close.
-		match self.feed.poll(waiter, |feed| {
-			if let Some(err) = &feed.failed {
-				Poll::Ready(Err(err.clone()))
-			} else if feed.ended && finished {
-				Poll::Ready(Ok(None))
-			} else {
-				Poll::Pending
-			}
-		}) {
-			Poll::Ready(Ok(result)) => Poll::Ready(result),
-			Poll::Ready(Err(_)) => Poll::Ready(Err(crate::Error::IncompleteRecording)),
+			Poll::Ready(Ok(event)) => Poll::Ready(Ok(Some(event))),
+			Poll::Ready(Err(state)) => Poll::Ready(match &state.finished {
+				Some(result) => result.clone().map(|()| None),
+				None => Err(crate::Error::IncompleteRecording),
+			}),
 			Poll::Pending => Poll::Pending,
 		}
 	}
@@ -746,194 +909,98 @@ fn next_event(current: &BTreeMap<Key, Arc<Rendition>>, seen: &BTreeMap<Key, Arc<
 mod tests {
 	use super::*;
 
+	/// A set whose catalog closed before its first snapshot answers a lookup instead of
+	/// locking its state a second time.
+	#[cfg(feature = "server")]
+	#[test]
+	fn a_set_closed_before_its_catalog_answers_a_lookup() {
+		let (spawner, _driver) = Spawner::new();
+		let renditions = Producer::lazy(Duration::from_secs(16), spawner);
+		renditions.close();
+		assert!(matches!(
+			renditions.poll_get(&kio::Waiter::noop(), Kind::Video, "v"),
+			Poll::Ready(None)
+		));
+	}
+
 	#[tokio::test]
-	async fn cursors_require_both_catalog_and_reference_completion() {
+	async fn cursors_end_only_with_a_finished_catalog() {
 		tokio::time::pause();
-		let producer = Producer::new(Duration::from_secs(30));
+		let producer = Producer::spawned(Duration::from_secs(30));
 		let mut cursor = producer.subscribe();
-		producer.finish(Ok(()));
-		// Catalog completion alone cannot vouch for the media timeline.
-		assert!(cursor.poll_next(&kio::Waiter::noop()).is_pending());
-		producer.fanout.finish(None);
-		assert!(cursor.next().await.unwrap().is_none());
-		assert!(cursor.next().await.unwrap().is_none());
-
-		let producer = Producer::new(Duration::from_secs(30));
-		let mut cursor = producer.subscribe();
-		producer.fanout.finish(None);
 		assert!(cursor.poll_next(&kio::Waiter::noop()).is_pending());
 		producer.finish(Ok(()));
 		assert!(cursor.next().await.unwrap().is_none());
+		assert!(cursor.next().await.unwrap().is_none());
 
-		let producer = Producer::new(Duration::from_secs(30));
+		let producer = Producer::spawned(Duration::from_secs(30));
 		let mut cursor = producer.subscribe();
 		producer.close();
 		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
 		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
 
-		let producer = Producer::new(Duration::from_secs(30));
+		let producer = Producer::spawned(Duration::from_secs(30));
 		let mut cursor = producer.subscribe();
 		drop(producer);
 		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
 	}
 
 	#[test]
-	fn a_reference_failure_is_reported_without_catalog_completion() {
-		let producer = Producer::new(Duration::from_secs(30));
-		let cursor = producer.subscribe();
-		let reference = Arc::new((Kind::Video, "video".into(), "video".into()));
-		let waiter = kio::Waiter::noop();
-		assert!(cursor.poll_next(&waiter).is_pending());
-		producer.fanout.fail(Some(&reference), crate::Error::NoVariants);
-		assert!(matches!(
-			cursor.poll_next(&waiter),
-			Poll::Ready(Err(crate::Error::NoVariants))
-		));
+	fn each_rendition_counts_its_own_discontinuities() {
+		let video = (Kind::Video, "video".to_string());
+		let audio = (Kind::Audio, "audio".to_string());
+		let mut breaks = Discontinuities::default();
+		assert_eq!(breaks.stamp(&video, false), 0);
+		assert_eq!(
+			breaks.stamp(&video, true),
+			1,
+			"the segment after a stop starts a new one"
+		);
+		assert_eq!(
+			breaks.stamp(&audio, false),
+			0,
+			"a break in one rendition leaves the others"
+		);
+		breaks.restart();
+		assert_eq!(breaks.stamp(&video, false), 2);
+		assert_eq!(breaks.stamp(&audio, false), 1);
+		let late = (Kind::Video, "late".to_string());
+		assert_eq!(
+			breaks.stamp(&late, false),
+			1,
+			"a rendition first seen starts at the run"
+		);
 	}
 
 	#[tokio::test]
-	async fn a_failed_catalog_or_reference_never_completes_a_cursor() {
+	async fn a_failed_catalog_never_completes_a_cursor() {
 		tokio::time::pause();
-		let producer = Producer::new(Duration::from_secs(30));
+		let producer = Producer::spawned(Duration::from_secs(30));
 		let mut cursor = producer.subscribe();
-		producer.fanout.finish(None);
 		producer.finish(Err(crate::Error::NoVariants));
-		assert!(matches!(cursor.next().await, Err(crate::Error::NoVariants)));
+		assert!(matches!(
+			cursor.next().await,
+			Err(crate::Error::CatalogFailed { source }) if matches!(*source, crate::Error::NoVariants)
+		));
+		assert!(producer.failure().is_some());
+	}
 
-		let producer = Producer::new(Duration::from_secs(30));
+	// A cut ends the set before it cuts the windows. A catalog failure landing in that gap must
+	// not fail the windows the cut keeps, nor leave the set and its windows disagreeing.
+	#[tokio::test]
+	async fn a_failure_racing_a_cut_is_dropped() {
+		tokio::time::pause();
+		let producer = Producer::spawned(Duration::from_secs(30));
 		let mut cursor = producer.subscribe();
-		let reference = Arc::new((Kind::Video, "video".into(), "video".into()));
-		producer.fanout.fail(Some(&reference), crate::Error::NoVariants);
-		producer.finish(Ok(()));
-		assert!(matches!(cursor.next().await, Err(crate::Error::NoVariants)));
-	}
-
-	fn entry(sequence: u64, pts: u64) -> Entry {
-		let record = hang::timeline::Record::new(
-			sequence,
-			pts,
-			2_000,
-			hang::timeline::Position::group(sequence),
-			hang::timeline::Position::group(sequence + 1),
-		);
-		Entry::decode(record, moq_net::Timescale::MILLI).unwrap()
-	}
-
-	fn handed_off(old_last: u64) -> (Fanout, Reference) {
-		let fanout = Producer::new(Duration::from_secs(30)).fanout();
-		let old = Arc::new((Kind::Video, "old".into(), "old".into()));
-		let new = Arc::new((Kind::Video, "new".into(), "new".into()));
-		fanout.select(Some(old.clone()));
-		fanout.push(old_last, entry(old_last, old_last * 2_000), &old);
-		fanout.select(Some(new.clone()));
-		(fanout, new)
-	}
-
-	fn rows(fanout: &Fanout) -> Vec<(u64, u64, Duration)> {
-		let feed = fanout.feed.read();
-		feed.history
-			.iter()
-			.map(|row| (row.segment, row.discontinuity, Duration::from(row.period)))
-			.collect()
-	}
-
-	#[test]
-	fn an_aligned_replacement_continues_the_source_numbering() {
-		let (fanout, new) = handed_off(5);
-		// The replacement's checkpoint restates records the old reference already advertised.
-		fanout.push(4, entry(4, 8_000), &new);
-		fanout.push(5, entry(5, 10_000), &new);
-		fanout.push(6, entry(6, 12_000), &new);
-		let period = Duration::from_secs(12);
-		assert_eq!(rows(&fanout), [(5, 0, Duration::ZERO), (6, 0, period)]);
-	}
-
-	#[test]
-	fn a_replacement_ahead_drops_the_advertised_rows() {
-		let (fanout, new) = handed_off(5);
-		fanout.push(8, entry(8, 16_000), &new);
-		assert_eq!(rows(&fanout), [(8, 1, Duration::from_secs(16))]);
-	}
-
-	#[test]
-	fn a_lagging_replacement_holds_until_its_numbering_passes_the_advertised_rows() {
-		let (fanout, new) = handed_off(5);
-		for sequence in [2, 3, 5] {
-			fanout.push(sequence, entry(sequence, 12_000 + sequence * 2_000), &new);
-			assert_eq!(rows(&fanout), [(5, 0, Duration::ZERO)], "record {sequence} holds");
+		// The first half of `cut`: the set ends cleanly while its windows are not cut yet.
+		if let Ok(mut state) = producer.state.write() {
+			state.finished = Some(Ok(()));
 		}
-		fanout.push(6, entry(6, 24_000), &new);
-		assert_eq!(
-			rows(&fanout),
-			[(5, 0, Duration::ZERO), (6, 1, Duration::from_secs(24))],
-			"the skipped content time is a discontinuity"
-		);
-	}
-
-	#[test]
-	fn a_source_skip_preserves_the_handoff_period() {
-		let (fanout, new) = handed_off(5);
-		fanout.push(6, entry(6, 12_000), &new);
-		fanout.skip(Some(&new));
-		fanout.push(9, entry(9, 18_000), &new);
-		assert_eq!(rows(&fanout), [(9, 1, Duration::from_secs(12))]);
-	}
-
-	#[test]
-	fn an_aborted_reader_of_the_same_reference_cannot_finish_its_replacement() {
-		let fanout = Producer::new(Duration::from_secs(30)).fanout();
-		let old = Arc::new((Kind::Video, "video".into(), "video".into()));
-		fanout.select(Some(old.clone()));
-		fanout.push(0, entry(0, 0), &old);
-		let replacement = Arc::new(old.as_ref().clone());
-		fanout.select(Some(replacement.clone()));
-		assert!(!fanout.finish(Some(&old)));
-		fanout.skip(Some(&old));
-		fanout.push(1, entry(1, 2_000), &old);
-		fanout.push(1, entry(1, 2_000), &replacement);
-		assert_eq!(fanout.feed.read().history.len(), 2);
-	}
-
-	#[test]
-	fn only_the_selected_reader_fails_the_feed() {
-		let err = || crate::Error::NoVariants;
-		// A superseded reader's rows trim with the window, so its failure changes nothing.
-		let (fanout, new) = handed_off(5);
-		let old = fanout.feed.read().history[0].reference.clone();
-		assert!(!fanout.fail(Some(&old), err()));
-		assert!(fanout.fail(Some(&new), err()));
-		assert!(!fanout.finish(Some(&new)), "a failed feed never finishes");
-	}
-
-	#[test]
-	fn handoff_ignores_replayed_and_superseded_events() {
-		let producer = Producer::new(Duration::from_secs(30));
-		let fanout = producer.fanout();
-		let old = Arc::new((Kind::Video, "old".into(), "old".into()));
-		let new = Arc::new((Kind::Video, "new".into(), "new".into()));
-		fanout.select(Some(old.clone()));
-		fanout.push(5, entry(5, 10_000), &old);
-		fanout.select(Some(new.clone()));
-		fanout.push(6, entry(6, 12_000), &old);
-		assert!(!fanout.finish(Some(&old)));
-		fanout.skip(Some(&old));
-		fanout.skip(Some(&new));
-		fanout.push(0, entry(0, 0), &new);
-		fanout.push(6, entry(6, 12_000), &new);
-		{
-			let feed = fanout.feed.read();
-			assert_eq!(feed.history.len(), 2);
-			assert_eq!(feed.history.back().unwrap().segment, 6);
-			assert!(!feed.ended);
-			assert_eq!(feed.history.back().unwrap().discontinuity, 0);
-		}
-		fanout.pop(0..6, &new);
-		assert_eq!(fanout.feed.read().history.len(), 2);
-		fanout.pop(0..6, &old);
-		assert_eq!(fanout.feed.read().history.len(), 1);
-		fanout.pop(6..7, &new);
-		assert!(fanout.feed.read().history.is_empty());
-		fanout.push(7, entry(7, 14_000), &new);
-		assert_eq!(fanout.feed.read().history.back().unwrap().segment, 7);
+		producer.close();
+		producer.finish(Err(crate::Error::NoVariants));
+		assert!(producer.failure().is_none(), "the failure reached the windows");
+		producer.cut();
+		assert!(cursor.next().await.unwrap().is_none());
+		assert!(producer.failure().is_none());
 	}
 }

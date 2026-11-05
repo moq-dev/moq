@@ -19,8 +19,9 @@ follows the hang draft, which rounds up
 ([#5212](https://github.com/moq-dev/moq/pull/5212)).
 
 - `rs/moq-mux/src/codec/h264/split.rs`: `sei_has_recovery_point` returns the
-  `recovery_frame_cnt` the `h264-parser` crate already exposes on
-  `SeiPayload::RecoveryPoint`, and the split frame carries it. A count of zero
+  `recovery_frame_cnt` that `h264-reader`'s
+  `nal::sei::recovery_point::RecoveryPoint::read` parses from the message, and
+  the split frame carries it. A count of zero
   stays a plain keyframe. Recovery points with `broken_link_flag` set remain
   out of scope, as before.
 - The length-prefixed path bypasses the splitter: `rs/moq-mux/src/import/track.rs`

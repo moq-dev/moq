@@ -51,14 +51,19 @@ for event, err := range announced.All(ctx) {
 		log.Fatal(err)
 	}
 	switch event := event.(type) {
-	case moq.AnnounceEventStart:
+	case moq.AnnounceEventPresent:
 		// Prefix stays origin-relative; Captures reports wildcard matches.
-		fmt.Println("got broadcast", event.Announce.Prefix)
-	case moq.AnnounceEventRestart: // a new publisher run at the same path
-		fmt.Println("restarted broadcast", event.Announce.Prefix)
+		fmt.Println("broadcast online", event.Announce.Prefix)
+	case moq.AnnounceEventAbsent:
+		fmt.Println("broadcast offline", event.Announce.Prefix)
 	}
 }
 ```
+
+The listing reports only whether each path is present. A restarted publisher or another
+instance taking the path over keeps it present: to read the broadcast across them, hold
+`client.Follow(path, nil)` and read each new instance from `Available`, which returns nil
+while the path is offline.
 
 ## Common APIs
 
@@ -71,12 +76,21 @@ pinning a generated self-signed certificate.
 `Client.Session().Stats()` returns a connection stats snapshot. Fields are nil
 when the transport backend does not report that metric yet.
 
-An encoder you manage can claim a share of `Client.Session().Bandwidth()` with
+An encoder you manage can claim a share of `Client.Session().Allocator()` with
 `Reserve(demand, maxBps)`, using the track's `Demand()`. Keep one reservation and change its ceiling
 with `Update(maxBps)`. Call `Update(0)` before abandoning or replacing it to
 return its share and automatic probe ceiling immediately, even while the track
 stays subscribed. A later update can resume the same claim. While the track
 stays open, dropping the Go reference alone leaves release to garbage collection.
+
+A player divides the receive estimate among the broadcasts it watches with
+`Client.Session().Viewers()`. `Watch(maxBps)` claims up to what the largest
+rendition it would switch to needs; the viewer's `Rate()` is its slice, nil
+while there is no estimate, and `Update(maxBps)` changes the ceiling. The
+session sends the viewers' summed ceilings as its PROBE target, which
+`SetTarget` overrides. Ceilings or a target summing above 2^53 - 1 fail with
+`moq.ErrOutOfRange`. Holding a viewer requests PROBE, so `Close()` it once
+the broadcast stops being watched.
 
 Incoming server requests expose the query-free `Path()` before `Accept()`. It
 is consistent across transports and returns an empty string for the root or
@@ -97,37 +111,49 @@ catalog snapshots, live media, and one fetched media group. The last two take a 
 (`VideoRendition` or `AudioRendition`: a catalog ID and its config) and follow its broadcast
 and track themselves. `NewGroupConsumer`
 decodes a raw group, such as one from `moq.TrackConsumer.RecvGroup` for arrival-order reads.
-Frames and `Flush` use `time.Duration`; `Demand()` owns track names and subscriber waits.
+Frames carry exact `moq.Timestamp` records; `Demand()` owns track names and subscriber waits.
 
-`BroadcastProducer.Dynamic()` accepts subscriber-requested tracks. Call
+`BroadcastProducer.Requests()` accepts subscriber-requested tracks. Call
 `TrackRequest.Accept()` for raw tracks, or pass the request as `media.Requested`
 so the media importer selects the timescale.
 
 JSON tracks live in the `moq.dev/moq/json` subpackage, mirroring the `moq-json` crate.
 Import it under an alias next to `encoding/json`. Each type wraps a track:
 `NewSnapshotProducer` / `NewStreamProducer` take over a `TrackProducer` and advertise it
-in the broadcast's catalog, and `NewSnapshotConsumer` / `NewStreamConsumer` take over a
-`TrackConsumer` that has not read a group yet. Snapshots carry lossy latest state; streams
+in the broadcast's catalog, `NewStreamConsumer` takes over a `TrackConsumer` that has not
+read a group yet, and `NewSnapshotConsumer` takes the `BroadcastConsumer` and track name and
+subscribes itself at a zero `Delay.Max` and `SnapshotConsumerOptions.Priority`. Snapshots carry lossy latest state; streams
 carry every record in order. `NewWindowProducer` / `NewWindowConsumer` carry a sliding window
 of records a reader can join at any point; the catalog has no window mode, so the producer
 takes only the track. Producers accept any `encoding/json` value; consumers return
 `json.RawMessage` so callers choose their own decoded type.
-`Update` / `Append` / `Push` / `Pop` take a final `*time.Duration` on the broadcast clock; nil publishes untimed.
+`Update` / `Append` / `Push` / `Pop` take a final `moq.Timestamp` on the broadcast clock, so their track needs a timescale.
 Raw tracks with a nil timescale are untimed; timed tracks require matching timestamps.
-`media.CatalogProducer.Now()` samples and fixes the catalog clock for explicit local-event stamps.
-`moq.dev/moq/flate` provides the matching snapshot and stream producers for opaque bytes.
+`media.CatalogProducer.Now()` samples and fixes the broadcast clock, the epoch every track in the broadcast shares; stamp media and JSON from it.
+Opaque bytes go on a plain `TrackProducer`.
 
 ```go
-import moqjson "moq.dev/moq/json"
+import (
+	moqjson "moq.dev/moq/json"
+	moqmedia "moq.dev/moq/media"
+)
 
-broadcast, _ := client.CreateBroadcast("room")
-track, _ := broadcast.PublishTrack("status", nil)
-status, _ := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{Compression: true})
-_ = status.Update(map[string]any{"viewers": 42}, nil)
+publication, _ := client.CreateBroadcast("room")
+broadcast := publication.Broadcast()
+// Every JSON write is stamped, so the track is timed. JSON is small and repetitive, so
+// compress it on the wire.
+scale := uint64(1_000)
+track, _ := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale, Compress: true})
+status, _ := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{})
+catalog, _ := moqmedia.NewCatalogProducer(broadcast)
+now, _ := catalog.Now()
+_ = status.Update(map[string]any{"viewers": 42}, now)
+_ = publication.Announce(moq.AnnounceRoute{})
 ```
 
-Producers take `SnapshotOptions` or `StreamOptions`; both consumers take
-`ConsumerOptions`, where only `Compression` has to match the producer.
+Snapshot and window producers take `SnapshotOptions` or `WindowOptions`; the stream producer and
+the stream and window consumers take only the track. Every consumer reads a compressed track like a
+plain one.
 
 ## Errors
 
@@ -140,18 +166,25 @@ the session closed, i.e. not a real failure) and `moq.IsAuthError(err)` (HTTP
 
 Every call that can block takes a `context.Context` and aborts cleanly when it is
 cancelled, leaving nothing running in the background. A one-shot call (a subscribe,
-a fetch, `RequestBroadcast`, `Resolve`, `WantedChanged`, `Used`/`Unused`, `Server.Accept`) aborts on
+a fetch, `Request`, `Resolve`, `WantedChanged`, `Server.Accept`) aborts on
 its own and leaves the object usable; a stream read cancels the stream it reads.
 See the package doc for details.
 
 ## Raw datagrams
 
-Raw tracks support best-effort datagrams alongside groups: `TrackProducer.AppendDatagram`
-sends one `Frame` and returns its sequence number, while `TrackConsumer.RecvDatagram`
-and `TrackConsumer.Datagrams` receive them in arrival order. Payloads are capped at
-1200 bytes. Datagram delivery requires a datagram-capable transport and lite-05 or
-newer moq-lite, or moq-transport; pre-lite-05, WebSocket, and TCP paths do not
-deliver them, and there is no stream fallback.
+Create a separate live track with `BroadcastProducer.CreateDatagrams(name, info)` and
+subscribe with `BroadcastConsumer.Datagrams(name)`. `DatagramProducer.Append(timestamp, payload)`
+assigns a sequence, `Insert(Datagram)` preserves one, and `DatagramConsumer.Recv(ctx)` or
+`All(ctx)` reads in arrival order. Stream tracks of the same name are independent.
+Watch aggregate subscriber demand with `Priority()` / `PriorityChanged(ctx, last)`, and
+serve on-demand datagram tracks with `BroadcastRequests.Datagrams()`.
+Keep payloads well below the path MTU. Delivery requires a datagram-capable transport and
+lite-05 or newer; there is no stream fallback.
+
+On lite-05/06, a local datagram handler is asked for an on-demand name without waiting
+for the stream handler, and answers it unless a stream track of that name is published. A
+relayed broadcast asks its upstream for the datagram track only once the stream track is
+not found. lite-07 uses independent requests.
 
 ## Versioning
 

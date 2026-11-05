@@ -14,6 +14,7 @@
  */
 import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { StreamCode, StreamError } from "./error.ts";
+import { hooks } from "./internal.ts";
 import type * as track from "./track.ts";
 
 /**
@@ -34,9 +35,13 @@ export type TracksEvent =
 	| { kind: "removed"; name: string }
 	| { kind: "finished"; name: string };
 
-/** Whether `own` closed cleanly, so its track leaves the listing as finished. */
+/**
+ * Whether `own` leaves the listing as finished: it closed cleanly, or it declared its end and is
+ * still open, as the Rust listing counts a producer that finished but still holds its track.
+ */
 function finished(own: track.Producer): boolean {
-	return own.closed.peek() === null;
+	const released = hooks.trackReleased(own).peek();
+	return released === null || (released === undefined && hooks.trackFinished(own));
 }
 
 /** One listed track and who lists it. */
@@ -168,7 +173,7 @@ export class Listing {
 	#lister = false;
 	/** Whether the lister's answer has synced. */
 	#answered = false;
-	#used = new Signal(false);
+	#wanted = new Signal(false);
 	#closed: GetPromise<null>;
 
 	constructor(closed: GetPromise<null>) {
@@ -176,8 +181,8 @@ export class Listing {
 	}
 
 	/** Whether anyone lists the broadcast. */
-	get used(): Getter<boolean> {
-		return this.#used;
+	get wanted(): Getter<boolean> {
+		return this.#wanted;
 	}
 
 	/** Settles once the broadcast ended. */
@@ -190,7 +195,7 @@ export class Listing {
 	}
 
 	#counted() {
-		this.#used.set(this.#readers.size > 0);
+		this.#wanted.set(this.#readers.size > 0);
 	}
 
 	/** Re-evaluate whether the listing has synced, telling readers when it changed. */
@@ -406,30 +411,37 @@ export class Tracks {
 	}
 }
 
+/** Make the lister attached to a broadcast's listing state. @internal */
+export let makeLister: (listing: Listing) => Lister;
+
 /**
  * Answers a broadcast's listings for a handler that knows the tracks it would serve, as a
  * session lists its peer's. A broadcast has at most one.
  *
  * While it exists, readers wait for it to {@link synced} before reporting `synced`. Answer
- * while {@link used}: list what the publisher behind it holds and keep it current, then
- * {@link clear} once unused. {@link close} withdraws what it listed.
+ * while {@link wanted}: list what the publisher behind it holds and keep it current, then
+ * {@link clear} once unwanted. {@link close} withdraws what it listed.
  */
 export class Lister {
 	#listing: Listing;
 	#closed = false;
 
-	constructor(listing: Listing) {
+	private constructor(listing: Listing) {
 		listing.attach();
 		this.#listing = listing;
 	}
 
-	/** Whether anyone lists the broadcast. */
-	get used(): Getter<boolean> {
-		return this.#listing.used;
+	static {
+		makeLister = (listing) => new Lister(listing);
 	}
 
-	/** Settles once the broadcast ended. */
-	get ended(): GetPromise<null> {
+	/** Whether anyone lists the broadcast. */
+	get wanted(): Getter<boolean> {
+		return this.#listing.wanted;
+	}
+
+	/** Settles once the broadcast ended, as every listing of it does. */
+	get closed(): GetPromise<null> {
 		return this.#listing.closed;
 	}
 

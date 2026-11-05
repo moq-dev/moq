@@ -2,7 +2,7 @@
 //! against it, and fill the output catalog with rung + passthrough entries.
 
 use hang::catalog::{AV1, Container, Video, VideoCodec, VideoConfig};
-use moq_net::path::RelativeOwned;
+use moq_net::path::Relative;
 use moq_video::decode::Codec;
 
 use crate::{Error, Ladder};
@@ -355,16 +355,13 @@ pub(crate) fn populate(
 	out: &mut moq_mux::catalog::hang::Catalog,
 	source: &moq_mux::catalog::hang::Catalog,
 	rungs: &[Published],
-	source_rel: Option<&RelativeOwned>,
+	source_rel: Option<&Relative>,
 ) -> Result<(), Error> {
 	out.video = Video::default();
 	out.audio = hang::catalog::Audio::default();
-	// A derivative does not synthesize its own archive: keep the child's, including a
-	// live-only timeline, so replay/store discovery survives composition. The clock goes with
-	// it: the derivative republishes the child's timeline, so its timestamps only mean
-	// something under the child's wall mapping.
-	out.archive = source.archive.clone();
-	out.clock = source.clock;
+	// The derivative republishes the child's timeline, so its timestamps only mean something under
+	// the child's wall mapping.
+	out.media.clock = source.media.clock;
 
 	// Display metadata applies to the rungs too (same picture, smaller).
 	out.video.display = source.video.display.clone();
@@ -378,6 +375,12 @@ pub(crate) fn populate(
 	let Some(rel) = source_rel else {
 		return Ok(());
 	};
+
+	// The source's renditions are listed too, and they promise only the source's join interval,
+	// so the derivative joins on it unless its own tracks already declared one. Fixed once set.
+	if out.media.join.is_none() {
+		out.media.join = source.media.join;
+	}
 
 	for (name, config) in &source.video.renditions {
 		if config.broadcast.is_some() {
@@ -766,7 +769,7 @@ mod tests {
 		video.insert("low", source(640, 360, None)).unwrap();
 		video.insert("high", source(1920, 1080, None)).unwrap();
 		let mut remote = source(3840, 2160, None);
-		remote.broadcast = Some(RelativeOwned::from("./other".to_string()));
+		remote.broadcast = Some(Relative::new("./other").unwrap());
 		video.insert("remote", remote).unwrap();
 
 		let (name, config) = choose_source(&video, &mut decodes_all()).await.unwrap();
@@ -979,7 +982,7 @@ mod tests {
 		audio.jitter = Some(std::time::Duration::from_millis(20));
 		child.audio.insert("audio", audio.clone()).unwrap();
 
-		let rel = RelativeOwned::from(".".to_string());
+		let rel = Relative::new(".").unwrap();
 		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
 		populate(&mut out, &child, &[], Some(&rel)).unwrap();
 
@@ -990,30 +993,43 @@ mod tests {
 	}
 
 	#[test]
-	fn populate_preserves_the_child_archive() {
+	fn populate_preserves_the_child_clock() {
 		let mut child = moq_mux::catalog::hang::Catalog::<()>::default();
 		child
 			.video
 			.insert("video", source(1920, 1080, Some(6_000_000)))
 			.unwrap();
-		let mut archive = hang::catalog::Archive::new();
-		archive.timelines.insert(
-			"video".to_string(),
-			hang::catalog::Timeline::new("video.timeline.z", 4_000),
-		);
-		archive.replay = Some(RelativeOwned::from("./recordings/clip".to_string()));
-		archive.version = Some(hang::catalog::Archive::VERSION);
-		child.archive = Some(archive.clone());
 		let clock = hang::catalog::Clock::new(moq_net::Timestamp::from_micros(1_751_846_400_000_000).unwrap()).unwrap();
-		child.clock = Some(clock);
+		child.media.clock = Some(clock);
 
 		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
 		populate(&mut out, &child, &[], None).unwrap();
-		assert_eq!(out.archive, Some(archive), "a derivative keeps the child's archive");
-		assert_eq!(out.clock, Some(clock), "a derivative keeps the child's clock");
+		assert_eq!(out.media.clock, Some(clock), "a derivative keeps the child's clock");
 	}
 
-	/// A derivative runs on its source's mapping: `populate` writes the source's root clock through
+	/// A derivative listing the source's renditions joins on the source's interval, unless its own
+	/// tracks already declared one; one listing only its rungs declares its own.
+	#[test]
+	fn populate_carries_the_source_interval_with_its_renditions() {
+		let interval = |secs| hang::catalog::Join::new(std::time::Duration::from_secs(secs));
+		let mut child = moq_mux::catalog::hang::Catalog::<()>::default();
+		child.media.join = interval(4);
+		let rel = Relative::new(".").unwrap();
+
+		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
+		populate(&mut out, &child, &[], None).unwrap();
+		assert_eq!(out.media.join, None, "only rungs: the derivative measures its own");
+
+		populate(&mut out, &child, &[], Some(&rel)).unwrap();
+		assert_eq!(out.media.join, interval(4));
+
+		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
+		out.media.join = interval(2);
+		populate(&mut out, &child, &[], Some(&rel)).unwrap();
+		assert_eq!(out.media.join, interval(2), "fixed once declared");
+	}
+
+	/// A derivative runs on its source's mapping: `populate` writes the source's `media.clock` through
 	/// `modify()`, so the derivative's clock carries that mapping and its data is stamped on it.
 	#[tokio::test(start_paused = true)]
 	async fn a_derivative_stamps_on_its_source_clock() {
@@ -1023,10 +1039,13 @@ mod tests {
 		let ago = Duration::from_secs(60);
 		let _ = moq_net::time::Instant::now();
 		tokio::time::advance(ago).await;
-		let clock = moq_mux::Clock::at(moq_net::time::Instant::now() - ago, moq_clock::wall() - ago).unwrap();
+		let clock = moq_mux::Clock::at(moq_net::time::Instant::now() - ago, kio::clock::wall() - ago).unwrap();
 		let mut input = moq_net::broadcast::Info::default().produce();
-		let source =
-			moq_mux::catalog::Producer::new(&mut input, moq_mux::catalog::Config::default().with_clock(clock)).unwrap();
+		let source = moq_mux::catalog::Producer::new(
+			&mut input,
+			moq_mux::catalog::Config::default().with_clock(clock.clone()),
+		)
+		.unwrap();
 
 		let mut output = moq_net::broadcast::Info::default().produce();
 		let mut derived = moq_mux::catalog::Producer::new(&mut output, moq_mux::catalog::Config::default()).unwrap();
@@ -1041,11 +1060,12 @@ mod tests {
 			.json_snapshot::<u32>(
 				output.create_track("status", info).unwrap(),
 				moq_mux::json::Config::default(),
+				moq_mux::json::Options::default(),
 			)
 			.unwrap();
 		let mut subscriber = status.consume();
 		tokio::time::advance(Duration::from_secs(3)).await;
-		status.update(moq_net::Timed::from(&1).at(adopted.now())).unwrap();
+		status.update(&1, adopted.now()).unwrap();
 
 		let waiter = kio::Waiter::noop();
 		let std::task::Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) else {

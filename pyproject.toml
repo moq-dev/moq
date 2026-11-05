@@ -38,16 +38,18 @@ manifest-path = "rs/moq-ffi/Cargo.toml"
 features = ["openh264"]
 python-source = "py/moq-ffi"
 module-name = "moq_ffi._uniffi"
-# Cargo resolves optional path dependencies even when Python does not enable them.
-# Maturin also needs the workspace generator to render Python bindings.
-include = [{ path = "rs/moq-v4l/**/*", format = "sdist" }, { path = "rs/uniffi-bindgen/**/*", format = "sdist" }]
+# Cargo resolves disabled optional path dependencies too, while Maturin only
+# follows enabled features. Include the Rust workspace so new optional crates
+# and the UniFFI generator are available when installing from source.
+include = [{ path = "rs/**/*", format = "sdist" }]
 # `maturin develop` writes the bindings into the source tree, where a later wheel build
 # would pick them up again and fail on the duplicate. The build regenerates them anyway.
 exclude = [
     "**/moq_ffi/_uniffi/**",
     "**/__pycache__/**",
-    # Native codec conformance corpora are only read by Rust tests.
-    { path = "**/moq-audio/src/decode/test_data/**", format = "sdist" },
+    { path = "**/target/**", format = "sdist" },
+    # Media fixtures are only read by Rust tests, not source installs.
+    { path = "**/test_data/**", format = "sdist" },
 ]
 
 # Listed explicitly (not `py/*`) so build output like py/dist isn't mistaken
@@ -58,6 +60,8 @@ members = ["py/moq-rs"]
 [dependency-groups]
 dev = ["ruff", "maturin", "pyright", "pytest", "pytest-asyncio"]
 docs = ["furo>=2025.12.19", "myst-parser>=5.1.0", "sphinx>=9.1.0"]
+# `just py audit` checks the resolved lock against the advisory database.
+audit = ["pip-audit>=2.10.1"]
 
 [tool.uv]
 build-constraint-dependencies = ["hatchling==1.32.0", "maturin==1.14.1"]

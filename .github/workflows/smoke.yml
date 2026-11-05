@@ -41,8 +41,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     # The matrix runs in real time (ffmpeg -re pacing + per-subscriber timeouts);
     # this is just a safety net against a hung relay/client. The nix channel
-    # gets longer: compiling a moq HEAD that isn't in cachix yet has taken 43
-    # minutes on its own, and that build is what seeds the cache (see below).
+    # gets longer: nix.moq.dev serves the toolchain but not moq's packages at
+    # HEAD, and compiling them has taken 43 minutes.
     timeout-minutes: ${{ matrix.channel == 'nix' && 75 || 45 }}
 
     # smoke.sh resolves the latest libmoq release via the GitHub API. Without a
@@ -98,12 +98,12 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: "21"
-      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         with:
           gradle-version: "8.14.4"
 
@@ -192,13 +192,10 @@ jobs:
           brew tap moq-dev/tap
           brew install moq-dev/tap/moq-relay moq-dev/tap/moq-cli
 
+      # Trusts the moq flake's nixConfig, which names the nix.moq.dev cache.
       - name: Install Nix (nix channel)
         if: matrix.channel == 'nix'
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-        with:
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+        uses: ./.github/actions/nix
 
       - name: Build moq from the flake (nix channel)
         if: matrix.channel == 'nix'
@@ -209,44 +206,29 @@ jobs:
           cli=$(nix build --refresh --no-link --print-out-paths 'github:moq-dev/moq#moq')
           {
             echo "RELAY_BIN=$relay/bin/moq-relay"
-            echo "MOQ_BIN=$cli/bin/moq"
+            echo "CLI_BIN=$cli/bin/moq"
           } >> "$GITHUB_ENV"
-
-      # cachix.yml only pushes release tags, so each new HEAD
-      # compiles here for ~20 minutes. Push what we just built, so later runs
-      # (and anyone doing `nix run github:moq-dev/moq#moq`) substitute it until
-      # moq's main moves. Only the two outputs' runtime closures, never the
-      # multi-GB build dependencies; unpinned, so cachix's LRU evicts them
-      # before any pinned release. Skipped on pull requests and until the repo
-      # has a CACHIX_AUTH_TOKEN secret.
-      - name: Push moq build to cachix (nix channel)
-        if: matrix.channel == 'nix' && github.event_name != 'pull_request'
-        env:
-          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
-        run: |
-          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
-            echo "no CACHIX_AUTH_TOKEN secret; not pushing"
-            exit 0
-          fi
-          nix run nixpkgs#cachix -- push kixelated "${RELAY_BIN%/bin/*}" "${MOQ_BIN%/bin/*}"
 
       - name: Pull moqdev images (docker channel)
         if: matrix.channel == 'docker'
         # Pull :latest fresh, then point smoke.sh at the wrapper scripts (which
-        # `docker run --network host` the images) via RELAY_BIN/MOQ_BIN. Docker is
+        # `docker run --network host` the images) via RELAY_BIN/CLI_BIN. Docker is
         # preinstalled on the Linux runners.
         run: |
           docker pull moqdev/moq-relay
           docker pull moqdev/moq
           {
             echo "RELAY_BIN=$PWD/clients/docker/moq-relay"
-            echo "MOQ_BIN=$PWD/clients/docker/moq"
+            echo "CLI_BIN=$PWD/clients/docker/moq"
           } >> "$GITHUB_ENV"
 
       # ── browser deps (Chromium runtime libs on Linux) ──────────────────
       - name: Playwright system deps (Linux)
         if: runner.os == 'Linux'
         run: just playwright-deps
+
+      - name: Harness tests
+        run: just harness-check
 
       # Fail loudly if we've drifted off "latest": a committed lock file, a moq
       # package that stopped being requested at latest, or a stale playwright pin.
@@ -290,7 +272,7 @@ jobs:
       # ── token interop ──────────────────────────────────────────────────
       # Independent of the media matrix: prove the published token tooling
       # cross-verifies. `moq auth` rides the same channel as moq-relay/moq
-      # (cargo/apt/brew/nix, on PATH or MOQ_BIN); @moq/auth comes from npm and
+      # (cargo/apt/brew/nix, on PATH or CLI_BIN); @moq/auth comes from npm and
       # runs under both node and bun; rust-docker runs `auth` in the
       # moqdev/moq image. The negative pass inside token.sh confirms each verifier rejects
       # tampered tokens and the wrong key.
@@ -463,7 +445,7 @@ jobs:
       # `cargo build` through it; without mise, setup only reports where the
       # shim lives, so put that directory first on PATH (as moq's dev shell
       # does). `--status` exits non-zero when there is no shim.
-      - uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
+      - uses: jdx/mr-boxington-action@88acf2bb50552c7c508cbac13e5f8c576b95b1de # v1.7.3
         with:
           version: 1.17.0
           github-cache-mode: objects
@@ -476,6 +458,10 @@ jobs:
           [ -x "$shim" ]
           dirname "$shim" >> "$GITHUB_PATH"
 
+      # The client's own tests, against the same Git HEAD dependencies.
+      - name: Cloudflare client tests
+        run: just cloudflare-check
+
       - name: Cloudflare interoperability
         run: just cloudflare
 
@@ -486,7 +472,7 @@ jobs:
       contents: read
       packages: read
     # The published client image and moq-dev relay both follow Git HEAD. Building
-    # the Rust relay is the long pole; the 12 protocol cases are bounded and quick.
+    # the Rust relay is the long pole; the protocol cases are bounded and quick.
     timeout-minutes: 45
 
     steps:
@@ -503,7 +489,7 @@ jobs:
       # `cargo build` through it; without mise, setup only reports where the
       # shim lives, so put that directory first on PATH (as moq's dev shell
       # does). `--status` exits non-zero when there is no shim.
-      - uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
+      - uses: jdx/mr-boxington-action@88acf2bb50552c7c508cbac13e5f8c576b95b1de # v1.7.3
         with:
           version: 1.17.0
           github-cache-mode: objects
@@ -517,10 +503,6 @@ jobs:
           dirname "$shim" >> "$GITHUB_PATH"
 
       - name: Moxygen interoperability
-        # Current moq-dev HEAD negotiates successfully but fails moxygen's
-        # announce-subscribe case. Keep the full diagnostic visible without
-        # failing the job; remove this once that protocol mismatch is fixed.
-        continue-on-error: true
         run: just moxygen
 
   interop-runner:
@@ -553,8 +535,9 @@ jobs:
           path: runner-upstream
           persist-credentials: false
 
-      # Any failed pair or setup step fails the job. A complete run still writes
-      # its report first, since a failing run is the one worth looking at.
+      # Only moq-dev clients against this checkout's relay gate the job, plus any
+      # setup step; the other pairs are reported only. A complete run still
+      # writes its report first, since a failing run is the one worth looking at.
       - name: Run upstream Docker matrices
         run: just runner "$GITHUB_WORKSPACE/runner-upstream" "$GITHUB_WORKSPACE/interop-runner-report"
 

@@ -293,9 +293,14 @@ impl Frame {
 		self.image().format
 	}
 
-	#[cfg(feature = "nvidia")]
+	#[cfg(any(feature = "nvidia", all(test, feature = "render")))]
 	pub(crate) fn handles(&self) -> Result<Handles, Error> {
 		self.inner.allocation.handles.try_clone()
+	}
+
+	#[cfg(all(test, feature = "render"))]
+	pub(crate) fn timeline(&self) -> Timeline {
+		self.inner.timeline
 	}
 
 	#[cfg(feature = "nvidia")]

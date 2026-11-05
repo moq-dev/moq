@@ -50,21 +50,22 @@ function holdFin(transport: MockTransport) {
 	};
 }
 
-for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_19]) {
+for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18]) {
 	for (const outcome of ["acknowledged", "timeout"] as const)
 		test(`graceful close withdrawal ${outcome} over ${protocol}`, async () => {
 			const pair = createMockTransportPair(protocol);
 			const fin = holdFin(pair.server);
 			const source = new Producer();
 			const destination = new Producer();
-			const broadcast = source.createBroadcast(Path.from("room"));
-			broadcast.announce();
+			const broadcastPublication = source.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
 			const url = new URL("https://localhost/test");
 			const [client, server] = await Promise.all([
 				connect({ url, transport: pair.client, consume: destination }),
 				accept({ url, transport: pair.server, publish: source.consume() }),
 			]);
-			const announced = destination.announced();
+			const announced = destination.routes();
 			let installed: Installed | undefined;
 			try {
 				expect((await announced.next())?.kind).toBe("start");

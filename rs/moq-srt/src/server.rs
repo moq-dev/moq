@@ -247,7 +247,7 @@ impl Server {
 				stream_id,
 				peer,
 				latency: self.latency,
-				max_age: None,
+				max_age: Some(hang::container::MAX_AGE),
 				bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 				program: None,
 				linger: moq_mux::Linger::DEFAULT,
@@ -279,8 +279,8 @@ struct Pending {
 	peer: SocketAddr,
 	/// The SRT receive latency, reused as the egress delay (at least a second) on a subscribe.
 	latency: Duration,
-	/// Retention declared on the media tracks an ingest mints, or `None` for hang's own
-	/// default. Override with [`Publish::with_max_age`].
+	/// Max age declared on the media tracks an ingest mints, or `None` for no publisher
+	/// limit. Override with [`Publish::with_max_age`].
 	max_age: Option<Duration>,
 	/// Connection allocator each ingested track claims its peak-hold bitrate on.
 	/// Override with [`Publish::with_bandwidth`].
@@ -366,14 +366,14 @@ impl Publish {
 		self.0.peer
 	}
 
-	/// Set how long relays keep a non-latest group of this publish's media tracks
-	/// fetchable. `None` keeps hang's own default.
+	/// Set how long a superseded group of this publish's media tracks stays fresh, or
+	/// `None` for no publisher limit. Defaults to
+	/// [`MAX_AGE`](hang::container::MAX_AGE).
 	///
-	/// A retention budget, not a delivery one: it never makes a subscriber play further
+	/// A freshness bound, not a delivery one: it never makes a subscriber play further
 	/// behind live, it caps how far back a FETCH can still reach. The default suits a
 	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
-	/// advertise segments that are still fetchable. Lower it when nothing reads history
-	/// and the memory matters.
+	/// advertise segments that are still fetchable. Lower it when nothing reads history.
 	///
 	/// Unrelated to the SRT receive latency [`Server::bind`] negotiates, which is a
 	/// transport buffer on this hop.
@@ -418,8 +418,8 @@ impl Publish {
 	/// Once the stream ends, the finished broadcast stays up for the
 	/// [linger](Self::with_linger), and the future resolves after that. Dropping the future
 	/// ends the linger early. A socket or demux error closes the broadcast at once.
-	pub async fn accept(self, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
-		let path = path.as_path();
+	pub async fn accept(self, origin: &origin::Producer, path: impl Into<moq_net::Path>) -> Result<()> {
+		let path: moq_net::Path = path.into();
 		let socket = self.0.request.accept(None).await?;
 		tracing::info!(peer = %self.0.peer, %path, "SRT publish accepted");
 		let config = moq_mux::catalog::Config::default()
@@ -493,8 +493,8 @@ impl Subscribe {
 	/// Waits for the broadcast to be announced (so a caller may connect before the
 	/// publisher), cancelling cleanly if the caller disconnects first. This future
 	/// resolves when playback ends, so callers usually run it on its own task.
-	pub async fn accept(self, origin: &origin::Consumer, path: impl moq_net::AsPath) -> Result<()> {
-		let path = path.as_path();
+	pub async fn accept(self, origin: &origin::Consumer, path: impl Into<moq_net::Path>) -> Result<()> {
+		let path: moq_net::Path = path.into();
 		let socket = self.0.request.accept(None).await?;
 		tracing::info!(peer = %self.0.peer, %path, "SRT subscribe accepted");
 		let options = crate::ts::Options {
@@ -583,7 +583,7 @@ pub(crate) async fn serve_subscribe(
 	mut socket: SrtSocket,
 	options: crate::ts::Options,
 ) -> Result<()> {
-	// Resolve the broadcast, but watch the socket while we wait: `routed`
+	// Resolve the broadcast, but watch the socket while we wait: following it
 	// parks forever for a stream that is never published, and nothing else polls the
 	// socket during that wait, so without this a caller who requests a non-existent
 	// stream (or hangs up before it starts) would leak this task and its socket.
@@ -597,7 +597,7 @@ pub(crate) async fn serve_subscribe(
 	};
 
 	let Some(mut subscriber) = subscriber else {
-		tracing::warn!(%path, "SRT subscribe for an unroutable broadcast");
+		tracing::debug!(%path, "SRT subscribe for an unroutable broadcast");
 		return Ok(());
 	};
 
@@ -688,13 +688,7 @@ fn parse_stream_id(stream_id: Option<&StreamId>) -> Option<(String, ConnectionMo
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
-	use std::time::Instant as StdInstant;
 
 	use super::*;
 	use bytes::Bytes;
@@ -755,13 +749,16 @@ mod tests {
 		const MESSAGES: usize = 128;
 		for sequence in 0..MESSAGES {
 			sender
-				.send((StdInstant::now(), Bytes::copy_from_slice(&sequence.to_be_bytes())))
+				.send((
+					kio::clock::now().into_std(),
+					Bytes::copy_from_slice(&sequence.to_be_bytes()),
+				))
 				.await
 				.unwrap();
 		}
 
 		for sequence in 0..MESSAGES {
-			let (_, payload) = tokio::time::timeout(Duration::from_secs(3), receiver.next())
+			let (_, payload) = kio::clock::timeout(Duration::from_secs(3), receiver.next())
 				.await
 				.expect("SRT sender stalled after its small default buffer overflowed")
 				.expect("SRT sender closed before the burst finished")
@@ -913,10 +910,10 @@ mod tests {
 
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(moq_net::time::run(driver));
-		let mut broadcast = origin.create_broadcast("marker").unwrap();
+		let broadcast = origin.create_broadcast("marker").unwrap();
 		broadcast.announce(moq_net::origin::Route::default()).unwrap();
 		let mut catalog = moq_mux::catalog::Producer::new(
-			&mut broadcast,
+			&mut broadcast.broadcast().clone(),
 			moq_mux::catalog::Config::default().with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default()),
 		)
 		.unwrap();
@@ -929,6 +926,7 @@ mod tests {
 		{
 			let mut guard = catalog.modify().unwrap();
 			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 48_000, 2);
+			config.description = Some(Bytes::from_static(&[0x11, 0x90]));
 			config.container = hang::catalog::Container::Legacy;
 			guard.audio.renditions.insert(track.name().to_string(), config);
 		}
@@ -964,14 +962,15 @@ mod tests {
 			panic!("m=request must create a subscribe request");
 		};
 		let consumer = origin.consume();
-		let egress = tokio::spawn(async move { subscribe.accept(&consumer, "marker").await });
+		let egress =
+			tokio::spawn(async move { subscribe.accept(&consumer, moq_net::Path::from_static("marker")).await });
 		let mut receiver = caller.await.unwrap();
 
 		// Three seconds of program, then wait until the receiver is actually playing it
 		// so the marker lands a real wall-clock distance after the first packet.
 		write(&mut producer, 30, OFFSET);
 		let mut received = Vec::new();
-		let first = tokio::time::timeout(Duration::from_secs(10), receiver.next())
+		let first = kio::clock::timeout(Duration::from_secs(10), receiver.next())
 			.await
 			.expect("the first payload never arrived")
 			.expect("the SRT egress closed early")
@@ -985,7 +984,7 @@ mod tests {
 		// Drain until the muxer flags the break, which it does exactly once, on the new
 		// generation's leading clock packet.
 		let boundary = loop {
-			let payload = tokio::time::timeout(Duration::from_secs(10), receiver.next())
+			let payload = kio::clock::timeout(Duration::from_secs(10), receiver.next())
 				.await
 				.expect("the resumed generation never arrived")
 				.expect("the SRT egress closed before the marker")
@@ -1012,20 +1011,20 @@ mod tests {
 		egress.abort();
 	}
 
-	/// One publisher instance of `live`: an announced broadcast under its own epoch with one
+	/// One publisher instance of `live`: an announced broadcast under its own instance with one
 	/// Legacy AAC track, for the egress tests.
 	struct Instance {
-		_broadcast: moq_net::broadcast::Producer,
+		_broadcast: moq_net::origin::Publication,
 		catalog: moq_mux::catalog::Producer<moq_mux::container::ts::Ext>,
 		audio: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
 	}
 
 	impl Instance {
 		fn publish(origin: &moq_net::origin::Producer, track: &str) -> Self {
-			let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
-			let mut broadcast = origin.publish("live", route).unwrap();
+			let route = moq_net::origin::Route::default();
+			let broadcast = origin.publish("live", route).unwrap();
 			let mut catalog = moq_mux::catalog::Producer::new(
-				&mut broadcast,
+				&mut broadcast.broadcast().clone(),
 				moq_mux::catalog::Config::default()
 					.with_catalog(moq_mux::catalog::hang::Catalog::<moq_mux::container::ts::Ext>::default()),
 			)
@@ -1034,6 +1033,7 @@ mod tests {
 				.create_track(track, hang::container::track_info(hang::catalog::PRIORITY.audio))
 				.unwrap();
 			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 48_000, 2);
+			config.description = Some(Bytes::from_static(&[0x11, 0x90]));
 			config.container = hang::catalog::Container::Legacy;
 			catalog
 				.modify()
@@ -1102,7 +1102,7 @@ mod tests {
 			subscribe
 				.with_follow(follow)
 				.with_stitch(stitch)
-				.accept(&consumer, "live")
+				.accept(&consumer, moq_net::Path::from_static("live"))
 				.await
 		});
 		(caller.await.unwrap(), task)
@@ -1133,7 +1133,7 @@ mod tests {
 		let (mut receiver, egress) = egress(&origin, Duration::from_secs(10), true).await;
 
 		old.write(30, 600_000_000);
-		let first = tokio::time::timeout(Duration::from_secs(10), receiver.next())
+		let first = kio::clock::timeout(Duration::from_secs(10), receiver.next())
 			.await
 			.expect("the first payload never arrived")
 			.expect("the SRT egress closed early")
@@ -1143,7 +1143,7 @@ mod tests {
 		// The replacement starts its own timeline over while the old instance stays up.
 		let mut new = Instance::publish(&origin, "new.aac");
 		new.write(30, 0);
-		tokio::time::timeout(Duration::from_secs(10), async {
+		kio::clock::timeout(Duration::from_secs(10), async {
 			loop {
 				let (_, payload) = receiver
 					.next()
@@ -1173,15 +1173,15 @@ mod tests {
 		let (mut receiver, egress) = egress(&origin, FOLLOW, false).await;
 
 		live.write(5, 0);
-		tokio::time::timeout(Duration::from_secs(10), receiver.next())
+		kio::clock::timeout(Duration::from_secs(10), receiver.next())
 			.await
 			.expect("the first payload never arrived")
 			.expect("the SRT egress closed early")
 			.unwrap();
-		let ended = tokio::time::Instant::now();
+		let ended = kio::clock::now();
 		live.finish();
 
-		tokio::time::timeout(Duration::from_secs(10), async {
+		kio::clock::timeout(Duration::from_secs(10), async {
 			while let Some(payload) = receiver.next().await {
 				payload.unwrap();
 			}
@@ -1202,19 +1202,19 @@ mod tests {
 		let (mut receiver, egress) = egress(&origin, Duration::from_secs(600), false).await;
 
 		live.write(5, 0);
-		tokio::time::timeout(Duration::from_secs(10), receiver.next())
+		kio::clock::timeout(Duration::from_secs(10), receiver.next())
 			.await
 			.expect("the first payload never arrived")
 			.expect("the SRT egress closed early")
 			.unwrap();
 		live.finish();
 		// Take everything the broadcast sent, so the egress is following when the caller goes.
-		while let Ok(Some(payload)) = tokio::time::timeout(Duration::from_secs(2), receiver.next()).await {
+		while let Ok(Some(payload)) = kio::clock::timeout(Duration::from_secs(2), receiver.next()).await {
 			payload.unwrap();
 		}
 		receiver.close().await.unwrap();
 
-		tokio::time::timeout(Duration::from_secs(10), egress)
+		kio::clock::timeout(Duration::from_secs(10), egress)
 			.await
 			.expect("the egress outlived its caller")
 			.unwrap()

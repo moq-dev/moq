@@ -1,5 +1,4 @@
 use super::PublishMode;
-use crate::rml::amf0::Amf0Value;
 use crate::rml::sessions::StreamMetadata;
 use crate::rml::time::RtmpTimestamp;
 use bytes::Bytes;
@@ -90,15 +89,10 @@ pub enum ServerSessionEvent {
 	},
 
 	/// The client sent an Amf0 command that was not able to be handled
-	UnhandleableAmf0Command {
-		command_name: String,
-		transaction_id: f64,
-		command_object: Amf0Value,
-		additional_values: Vec<Amf0Value>,
-	},
+	UnhandleableAmf0Command { command_name: String, transaction_id: f64 },
 
 	/// The client sent an Amf0 data message that isn't stream metadata, such as `onCuePoint`
-	UnhandleableAmf0Data { values: Vec<Amf0Value> },
+	UnhandleableAmf0Data {},
 
 	/// The client is requesting playback of the specified stream
 	PlayStreamRequested {

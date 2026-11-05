@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { decode, encode } from "./catalog.ts";
+import { runInNewContext } from "node:vm";
+import { CatalogSchema, decode, encode } from "./catalog.ts";
 
 function encodeJson(value: unknown): Uint8Array {
 	return new TextEncoder().encode(JSON.stringify(value));
@@ -91,20 +92,49 @@ test("resolves draft-01 initRef into inline initData", () => {
 	expect(catalog.tracks[0].initData).toBe("AQID");
 });
 
-test("leaves initData undefined for a dangling or non-inline initRef", () => {
-	const catalog = decode(
-		encodeJson({
-			version: "draft-01",
-			initDataList: [{ id: "v0", type: "url", data: "https://example.com/init" }],
-			tracks: [
-				{ name: "a", packaging: "cmaf", isLive: true, role: "video", codec: "avc1.640028", initRef: "missing" },
-				{ name: "b", packaging: "cmaf", isLive: true, role: "video", codec: "avc1.640028", initRef: "v0" },
-			],
-		}),
-	);
+// Mirrors the Rust side: a malformed initRef must not decode as a track with no init data.
+function initRefCatalog(entry: { type: string; data: string }, track: Record<string, unknown>): Uint8Array {
+	return encodeJson({
+		version: "draft-01",
+		initDataList: [{ id: "v0", ...entry }],
+		tracks: [{ name: "video0", packaging: "cmaf", isLive: true, role: "video", codec: "avc1.640028", ...track }],
+	});
+}
 
-	expect(catalog.tracks[0].initData).toBeUndefined();
-	expect(catalog.tracks[1].initData).toBeUndefined();
+test("rejects a dangling initRef", () => {
+	const raw = initRefCatalog({ type: "inline", data: "AQID" }, { initRef: "missing" });
+	expect(() => decode(raw)).toThrow(/missing initData/);
+});
+
+test("rejects an initRef to a non-inline entry", () => {
+	const raw = initRefCatalog({ type: "url", data: "https://example.com/init" }, { initRef: "v0" });
+	expect(() => decode(raw)).toThrow(/unsupported type/);
+});
+
+test("rejects inline initData that disagrees with its initRef", () => {
+	const raw = initRefCatalog({ type: "inline", data: "AQID" }, { initData: "BAUG", initRef: "v0" });
+	expect(() => decode(raw)).toThrow(/conflicting/);
+});
+
+test("accepts inline initData that matches its initRef", () => {
+	const catalog = decode(initRefCatalog({ type: "inline", data: "AQID" }, { initData: "AQID", initRef: "v0" }));
+	expect(catalog.tracks[0].initData).toBe("AQID");
+});
+
+test("rejects a duplicate initDataList id", () => {
+	// Mirrors the Rust side: keeping either entry would let two readers disagree on init bytes.
+	const raw = encodeJson({
+		version: "draft-01",
+		initDataList: [
+			{ id: "v", type: "inline", data: "AQID" },
+			{ id: "v", type: "inline", data: "BAUG" },
+		],
+		tracks: [
+			{ name: "video0", packaging: "cmaf", isLive: true, role: "video", codec: "avc1.640028", initRef: "v" },
+		],
+	});
+
+	expect(() => decode(raw)).toThrow(/duplicate initData/);
 });
 
 test("rejects an unsupported numeric version", () => {
@@ -209,6 +239,21 @@ test("preserves delay through decode and encode", () => {
 	expect(wireTracks[0].delay).toBe(200);
 });
 
+test("rejects a negative delay", () => {
+	const raw = encodeJson({
+		version: "draft-01",
+		tracks: [{ name: "video0", packaging: "loc", isLive: true, role: "video", codec: "avc1.640028", delay: -1 }],
+	});
+	expect(() => decode(raw)).toThrow();
+	expect(() =>
+		encode({
+			tracks: [
+				{ name: "video0", packaging: "loc", isLive: true, role: "video", codec: "avc1.640028", delay: -1 },
+			],
+		}),
+	).toThrow();
+});
+
 test("carries extension root members through decode and encode", () => {
 	// An extension section (here `mpegts`) rides the catalog root untouched, and a
 	// section this build has never heard of survives the same way.
@@ -235,20 +280,27 @@ test("refuses an extension section named after a reserved root field", () => {
 	expect(() => encode({ tracks: [], ext: { tracks: "nope" } })).toThrow(/reserved root field/);
 });
 
-test("round-trips a __proto__ extension member as data", () => {
-	// Assigning `__proto__` to an ordinary object invokes the prototype setter: the member
-	// vanishes from the catalog and its value becomes the map's prototype. Built as raw JSON,
-	// since `__proto__:` in an object literal is that same setter syntax and never lands as a key.
-	const raw = '{"version":"draft-01","tracks":[],"__proto__":{"polluted":1},"ok":2}';
-	const catalog = decode(new TextEncoder().encode(raw));
-
-	const ext = catalog.ext ?? {};
-	expect(Object.keys(ext).sort()).toEqual(["__proto__", "ok"]);
-	expect(Object.getPrototypeOf(ext)).toBeNull();
-
-	const wire = decodeJson(encode(catalog));
-	expect(Object.keys(wire)).toContain("__proto__");
-	expect(wire.ok).toBe(2);
+test("shared Rust extension names survive decoding and the public schema", async () => {
+	const raw = await Bun.file(new URL("../../../rs/moq-msf/fixtures/catalog-names.json", import.meta.url)).bytes();
+	const { version: _, tracks, ...ext } = decodeJson(raw);
+	const catalog = decode(raw);
+	for (const parsed of [catalog, CatalogSchema.parse({ tracks, ext }), CatalogSchema.parse(catalog)]) {
+		expect(Object.keys(parsed.ext ?? {}).sort()).toEqual(Object.keys(ext).sort());
+		expect(Object.getPrototypeOf(parsed.ext)).toBeNull();
+		expect(decodeJson(encode(parsed))).toEqual(decodeJson(raw));
+	}
+	// Like a record, the extension accepts only plain objects: these have no own members to keep.
+	for (const bad of [new Map([["mpegts", 1]]), new Set(["mpegts"]), [1, 2], "mpegts"]) {
+		expect(() => CatalogSchema.parse({ tracks: [], ext: bad })).toThrow();
+	}
+	// A plain object from another realm has a different `Object.prototype`, yet is still plain.
+	const foreign = runInNewContext(`JSON.parse('{"mpegts":1,"constructor":2,"__proto__":3}')`);
+	expect(Object.getPrototypeOf(foreign)).not.toBe(Object.prototype);
+	expect(Object.keys(CatalogSchema.parse({ tracks: [], ext: foreign }).ext ?? {}).sort()).toEqual([
+		"__proto__",
+		"constructor",
+		"mpegts",
+	]);
 });
 
 test("caption role, label, language and codec survive the wire", () => {
@@ -274,4 +326,22 @@ test("preserves a track namespace through MSF decoding and encoding", () => {
 			{ name: "video", namespace: "room/left", packaging: "loc", role: "video", codec: "vp8", isLive: false },
 		]);
 	}
+});
+
+test("refuses duplicate JSON members before schema validation", () => {
+	for (const text of [
+		'{"version":1,"version":"draft-01","tracks":[]}',
+		'{"version":1,"tracks":[{"name":"a","name":"b","packaging":"loc"}]}',
+		'{"version":1,"tracks":[],"extension":{"x":0,"x":1}}',
+	]) {
+		expect(() => decode(new TextEncoder().encode(text))).toThrow(/duplicate JSON object key/);
+	}
+});
+
+test("refuses malformed Unicode in catalogs", () => {
+	for (const text of ['\ufeff{"version":1}', '{"version":1,"extension":"\\ud800"}', '{"version":1,"\\udfff":0}']) {
+		expect(() => decode(new TextEncoder().encode(text))).toThrow();
+	}
+	const prefix = new TextEncoder().encode('{"version":1,"extension":"');
+	expect(() => decode(new Uint8Array([...prefix, 0xff, 0x22, 0x7d]))).toThrow();
 });

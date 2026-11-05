@@ -89,19 +89,22 @@ final class _Announcements implements AnnounceConsumer {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-final class _Auth implements Auth {
+final class _Grants implements GrantConsumer {
   final started = Completer<_Read<Grant?>>();
+  var cancels = 0;
   var disposals = 0;
 
   @override
   Grant? grant() => null;
   @override
-  UniffiRustFuture<Grant?> grantChanged() {
+  UniffiRustFuture<Grant?> changed() {
     final read = _Read<Grant?>();
     started.complete(read);
     return read;
   }
 
+  @override
+  void cancel() => cancels++;
   @override
   void dispose() => disposals++;
   @override
@@ -125,17 +128,17 @@ void main() {
     },
   );
 
-  test('idle grant cancellation leaves the shared auth usable', () async {
-    final auth = _Auth();
+  test('idle grant cancellation releases its read and consumer', () async {
+    final source = _Grants();
     final grants = <Grant?>[];
-    final subscription = auth.grants().listen(grants.add);
-    final read = await auth.started.future;
+    final subscription = source.updates().listen(grants.add);
+    final read = await source.started.future;
     await subscription.cancel();
     expect(grants, [null]);
     expect(read.cancels, 1);
     expect(read.cleaned.isCompleted, isTrue);
-    expect(auth.disposals, 0);
-    expect(auth.grant(), isNull);
+    expect(source.cancels, 1);
+    expect(source.disposals, 1);
   });
 
   test('cancellation before the first read still releases ownership', () async {

@@ -2,10 +2,10 @@ import { Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { Error as NetError } from "@moq/net";
-import { Effect, type Getter, getter, type Inputs, type Readonlys } from "@moq/signals";
+import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys } from "@moq/signals";
 import type { VTTCue, VTTRegion } from "media-captions";
 import { subscribeMedia } from "../media";
-import type { Sync } from "../sync";
+import type { Sync, Track } from "../sync";
 import type { Source } from "./source";
 
 // Drop cues whose end is more than this far behind the playhead, to bound memory on a long stream.
@@ -227,6 +227,10 @@ export class Renderer {
 
 	#signals = new Effect();
 
+	// The captions' hold on the clock: the selected rendition's catalog delay, so cues from a
+	// rendition that trails the others still line up with them.
+	readonly #clock: Track;
+
 	// Whether the clock-skew warning has already fired for the current track, so a misconfigured
 	// publisher costs one line instead of one per cue.
 	#skewWarned = false;
@@ -238,6 +242,15 @@ export class Renderer {
 			container: getter(props?.container),
 			enabled: getter(props?.enabled ?? true),
 		};
+
+		const target = this.#signals.computed((effect) => {
+			// Captions with nowhere to render hold nothing.
+			if (!effect.get(this.in.enabled) || !effect.get(this.in.container)) return undefined;
+			const delay = effect.get(this.source.out.config)?.delay;
+			return delay !== undefined ? Milli(delay) : undefined;
+		});
+		this.#clock = this.sync.track({ target });
+		this.#signals.cleanup(() => this.#clock.close());
 
 		this.#signals.run(this.#run.bind(this));
 	}
@@ -254,7 +267,7 @@ export class Renderer {
 		const [_enabled, container, track, config, broadcast] = values;
 
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source broadcast.
-		const active = broadcast.relativeBroadcast(effect, config.broadcast, config.epoch);
+		const active = broadcast.relativeBroadcast(effect, config.broadcast, config.instance);
 		if (!active) return;
 
 		// A new track gets its own chance to complain about its clock.
@@ -301,7 +314,7 @@ export class Renderer {
 				broadcast: active,
 				track: Catalog.track(track, config),
 				priority: Catalog.PRIORITY.text,
-				maxDelay: this.sync.out.maxDelay,
+				delay: new Derived([this.sync.out.delay, this.sync.out.maxDelay], (min, max) => ({ min, max })),
 			});
 			if (!sub) return;
 			const store: CueStore = { cues: [], clears: [] };

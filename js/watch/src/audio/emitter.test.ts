@@ -37,13 +37,14 @@ afterEach(() => {
 	else Reflect.deleteProperty(globalThis, "GainNode");
 });
 
-async function setup() {
+async function setup(level = 0.5, silenced = false) {
 	const context = { currentTime: 10, destination: {} };
 	const source = { out: { root: new Signal({ context, connect: () => {} }) } } as unknown as Decoder;
-	const volume = new Signal(0.5);
-	const emitter = new Emitter({ source, volume });
+	const volume = new Signal(level);
+	const muted = new Signal(silenced);
+	const emitter = new Emitter({ source, volume, muted });
 	await settle();
-	return { emitter, volume, node: nodes[0] };
+	return { emitter, volume, muted, node: nodes[0] };
 }
 
 async function settle(): Promise<void> {
@@ -61,6 +62,42 @@ test("ramps a volume change from wherever the last ramp reached", async () => {
 			["set", 0.5, 10],
 			["ramp", 0, 10.2],
 		]);
+	} finally {
+		emitter.close();
+	}
+});
+
+test("a root arriving muted starts at zero gain and preserves the selected level", async () => {
+	const { emitter, volume, node } = await setup(0.8, true);
+	try {
+		expect(node.gain.value).toBe(0);
+		expect(node.calls.at(-1)).toEqual(["ramp", 0, 10.2]);
+		expect(volume.peek()).toBe(0.8);
+		expect(emitter.out.enabled.peek()).toBe(false);
+	} finally {
+		emitter.close();
+	}
+});
+
+test("mute gates gain while level edits and zero volume stay independent", async () => {
+	const { emitter, volume, muted, node } = await setup(0.8);
+	try {
+		muted.set(true);
+		await settle();
+		expect(node.calls.at(-1)).toEqual(["ramp", 0, 10.2]);
+		expect(volume.peek()).toBe(0.8);
+		volume.set(0.3);
+		await settle();
+		expect(node.calls.at(-1)).toEqual(["ramp", 0, 10.2]);
+		expect(muted.peek()).toBe(true);
+		muted.set(false);
+		await settle();
+		expect(node.calls.at(-1)).toEqual(["ramp", 0.3, 10.2]);
+		volume.set(0);
+		await settle();
+		expect(muted.peek()).toBe(false);
+		expect(emitter.out.enabled.peek()).toBe(true);
+		expect(node.calls.at(-1)).toEqual(["ramp", 0, 10.2]);
 	} finally {
 		emitter.close();
 	}

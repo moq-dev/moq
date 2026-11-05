@@ -13,7 +13,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Client, Hop, Server, Session, Version, announce, origin};
+use moq_net::{Client, Hop, Server, Session, Version, origin};
 use support::harness::{now, spawn};
 use support::mock::{MockSession, create_mock_session_pair};
 
@@ -31,10 +31,10 @@ struct Publisher {
 	client: Session,
 	server: Session,
 	server_transport: MockSession,
-	server_driver: moq_clock::sim::JoinHandle<moq_net::Error>,
+	server_driver: kio::clock::sim::JoinHandle<moq_net::Error>,
 	/// The client's origin, which it publishes from.
 	origin: origin::Producer,
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 }
 
 async fn publish(version: Version, relay: &origin::Producer, hop: u64, name: &str) -> Publisher {
@@ -59,7 +59,7 @@ async fn publish(version: Version, relay: &origin::Producer, hop: u64, name: &st
 	};
 	let server = async {
 		let (session, mut driver) = server.accept(now(), server_transport.clone()).await.unwrap();
-		let driver = moq_clock::sim::spawn(moq_clock::drive(move |now, waiter| {
+		let driver = kio::clock::sim::spawn(kio::clock::drive(move |now, waiter| {
 			moq_net::time::Driver::poll(&mut driver, now, waiter)
 		}));
 		(session, driver)
@@ -77,31 +77,32 @@ async fn publish(version: Version, relay: &origin::Producer, hop: u64, name: &st
 }
 
 /// Wait until `path` is announced (`true`) or withdrawn (`false`) on `announced`.
-async fn until(announced: &mut announce::Consumer, path: &str, active: bool) {
+async fn until(announced: &mut origin::Routes, path: &str, active: bool) {
 	let wait = async {
 		loop {
 			let (announce, now_active) = match announced.next().await.expect("origin closed") {
-				announce::Event::Start(announce)
-				| announce::Event::Update(announce)
-				| announce::Event::Restart(announce) => (announce, true),
-				announce::Event::End(announce) => (announce, false),
+				origin::RouteEvent::Start(announce)
+				| origin::RouteEvent::Update(announce)
+				| origin::RouteEvent::Restart(announce)
+				| origin::RouteEvent::Takeover { announce, .. } => (announce, true),
+				origin::RouteEvent::End(announce) => (announce, false),
 			};
 			if announce.prefix.as_str() == path && now_active == active {
 				return;
 			}
 		}
 	};
-	moq_clock::timeout(TIMEOUT, wait)
+	kio::clock::timeout(TIMEOUT, wait)
 		.await
 		.unwrap_or_else(|_| panic!("{path} never became active={active}"));
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn a_panicking_session_leaves_the_others_serving() {
-	for version in ["moq-lite-07-wip", "moq-transport-20"] {
+	for version in ["moq-lite-07-wip", "moq-transport-22"] {
 		let version: Version = version.parse().unwrap();
 		let relay = produce_origin(100);
-		let mut announced = relay.consume().announced();
+		let mut announced = relay.consume().routes();
 
 		let broken = publish(version, &relay, 1, "broken").await;
 		until(&mut announced, "broken", true).await;
@@ -110,7 +111,7 @@ async fn a_panicking_session_leaves_the_others_serving() {
 
 		broken.server_transport.panic_on_stats();
 		let _ = broken.server.stats();
-		let ended = moq_clock::timeout(TIMEOUT, broken.server_driver)
+		let ended = kio::clock::timeout(TIMEOUT, broken.server_driver)
 			.await
 			.expect("the driver never sampled the stats");
 		assert!(
@@ -119,7 +120,7 @@ async fn a_panicking_session_leaves_the_others_serving() {
 		);
 
 		until(&mut announced, "broken", false).await;
-		moq_clock::timeout(TIMEOUT, broken.server.closed())
+		kio::clock::timeout(TIMEOUT, broken.server.closed())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the panicked session never closed"));
 
@@ -127,7 +128,7 @@ async fn a_panicking_session_leaves_the_others_serving() {
 		let later = healthy.origin.create_broadcast("later").unwrap();
 		later.announce(Default::default()).unwrap();
 		until(&mut announced, "later", true).await;
-		assert!(relay.consume().routed("healthy").await.is_some());
+		crate::support::announced(&relay.consume(), "healthy").await;
 		drop((healthy, broken.client, later));
 	}
 }

@@ -1,8 +1,10 @@
 package media_test
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"moq.dev/moq"
 	"moq.dev/moq/media"
@@ -38,6 +40,34 @@ func TestRequestedTargetRequiresRequest(t *testing.T) {
 	for _, target := range []media.Target{nil, media.Requested{}, (*media.Named)(nil), (*media.Requested)(nil)} {
 		if _, err := media.NewAudioTrackProducer(nil, target, media.AudioInit{}); err == nil {
 			t.Fatal("invalid target succeeded")
+		}
+	}
+}
+
+// The generated converter panics on a negative duration, so it is refused first.
+func TestRefusesNegativeDurations(t *testing.T) {
+	ctx := context.Background()
+	negative := -time.Millisecond
+	rendition := media.AudioRendition("audio", media.Audio{Jitter: &negative})
+
+	if _, err := media.FetchGroup(ctx, nil, media.GroupConfig{Options: &moq.FetchGroupOptions{MaxDelay: &negative}}); err == nil {
+		t.Fatal("a negative fetch max delay was accepted, want an error")
+	}
+	if _, err := media.FetchGroup(ctx, nil, media.GroupConfig{Rendition: rendition}); err == nil {
+		t.Fatal("a negative jitter was fetched, want an error")
+	}
+	if _, err := media.NewTrackConsumer(ctx, nil, media.TrackConfig{Rendition: rendition}); err == nil {
+		t.Fatal("a negative jitter was subscribed, want an error")
+	}
+	if _, err := (&moq.BroadcastConsumer{}).Resolve(ctx, rendition); err == nil {
+		t.Fatal("a negative jitter was resolved, want an error")
+	}
+	for _, warmup := range []media.Rendition{
+		media.AudioRendition("audio", media.Audio{Warmup: &negative}),
+		media.VideoRendition("video", media.Video{Warmup: &negative}),
+	} {
+		if _, err := media.NewTrackConsumer(ctx, nil, media.TrackConfig{Rendition: warmup}); err == nil {
+			t.Fatal("a negative warmup was subscribed, want an error")
 		}
 	}
 }

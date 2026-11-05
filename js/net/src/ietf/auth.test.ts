@@ -4,8 +4,6 @@ import { SessionCode, type SessionError, StreamCode, type StreamError } from "..
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { AuthError, AuthMessage, AuthOk } from "./auth.ts";
-import { fromSetup, intoSetup } from "./auth_setup.ts";
-import { SetupOption, SetupOptions } from "./setup_options.ts";
 import { Version } from "./version.ts";
 
 function patterns(...texts: string[]): Path.Patterns {
@@ -21,7 +19,7 @@ async function bytes(write: (w: Writer) => Promise<void>): Promise<Uint8Array> {
 				chunks.push(new Uint8Array(chunk));
 			},
 		}),
-		Version.DRAFT_17,
+		Version.DRAFT_18,
 	);
 	await write(writer);
 	writer.close();
@@ -37,31 +35,14 @@ async function bytes(write: (w: Writer) => Promise<void>): Promise<Uint8Array> {
 
 /** A reader past the message type, the way the dispatcher leaves one. */
 async function afterType(write: (w: Writer) => Promise<void>): Promise<Reader> {
-	const reader = new Reader(undefined, await bytes(write), Version.DRAFT_17);
+	const reader = new Reader(undefined, await bytes(write), Version.DRAFT_18);
 	await reader.u53();
 	return reader;
 }
 
-test("the setup option negotiates on draft-17+ only", () => {
-	for (const version of [Version.DRAFT_17, Version.DRAFT_22]) {
-		const params = new SetupOptions();
-		expect(fromSetup(params, version)).toBeUndefined();
-		intoSetup(params, version);
-		expect(fromSetup(params, version)).toBe(true);
-	}
-	const legacy = new SetupOptions();
-	intoSetup(legacy, Version.DRAFT_16);
-	expect(legacy.getVarint(SetupOption.Auth)).toBeUndefined();
-
-	// An explicit value other than 1 is an implementation that declined.
-	const declined = new SetupOptions();
-	declined.setVarint(SetupOption.Auth, 0n);
-	expect(fromSetup(declined, Version.DRAFT_17)).toBe(false);
-});
-
 test("AUTH round-trips its request id and token", async () => {
-	const r = await afterType((w) => new AuthMessage(4n, new TextEncoder().encode("jwt")).encode(w, Version.DRAFT_17));
-	const msg = await AuthMessage.decode(r, Version.DRAFT_17);
+	const r = await afterType((w) => new AuthMessage(4n, new TextEncoder().encode("jwt")).encode(w, Version.DRAFT_18));
+	const msg = await AuthMessage.decode(r, Version.DRAFT_18);
 	expect(msg.requestId).toBe(4n);
 	expect(new TextDecoder().decode(msg.token)).toBe("jwt");
 });
@@ -69,7 +50,7 @@ test("AUTH round-trips its request id and token", async () => {
 test("AUTH_OK carries each pattern as its canonical text", async () => {
 	// The exact bytes `rs/moq-net/src/ietf/auth.rs` checks, so both encoders agree.
 	const ok = new AuthOk(patterns("room/*/cam", "ch1"), patterns(""), undefined);
-	const wire = await bytes((w) => ok.encode(w, Version.DRAFT_17));
+	const wire = await bytes((w) => ok.encode(w, Version.DRAFT_18));
 	// Type, 16-bit length, then: two publish patterns in canonical order, the empty
 	// subscribe pattern, never expires.
 	expect([...wire.slice(-19)]).toEqual([
@@ -85,8 +66,8 @@ test("AUTH_OK carries each pattern as its canonical text", async () => {
 
 	// Literals and wildcards travel exactly, never widened to a prefix.
 	const grant = new AuthOk(patterns("**"), patterns("live/*", "lobby/cam-*.hang", "ch1"), 60_000);
-	const r = await afterType((w) => grant.encode(w, Version.DRAFT_17));
-	const got = await AuthOk.decode(r, Version.DRAFT_17);
+	const r = await afterType((w) => grant.encode(w, Version.DRAFT_18));
+	const got = await AuthOk.decode(r, Version.DRAFT_18);
 	expect(got.publish.equals(grant.publish)).toBe(true);
 	expect(got.subscribe.equals(grant.subscribe)).toBe(true);
 	expect(got.expires).toBe(60_000);
@@ -104,17 +85,17 @@ test("a grant too large for one message is refused before anything is written", 
 				written += chunk.byteLength;
 			},
 		}),
-		Version.DRAFT_17,
+		Version.DRAFT_18,
 	);
-	await expect(huge.encode(writer, Version.DRAFT_17)).rejects.toThrow("Message too large");
+	await expect(huge.encode(writer, Version.DRAFT_18)).rejects.toThrow("Message too large");
 	writer.close();
 	await writer.closed;
 	expect(written).toBe(0);
 });
 
 test("AUTH_ERROR preserves actionable refusal kinds", async () => {
-	const r = await afterType((w) => new AuthError(0x3, "too large").encode(w, Version.DRAFT_17));
-	expect((await AuthError.decode(r, Version.DRAFT_17)).toError()).toBeInstanceOf(Unsupported);
+	const r = await afterType((w) => new AuthError(0x3, "too large").encode(w, Version.DRAFT_18));
+	expect((await AuthError.decode(r, Version.DRAFT_18)).toError()).toBeInstanceOf(Unsupported);
 	const expired = new AuthError(0x5, "expired").toError() as SessionError;
 	expect(expired.code).toBe(SessionCode.Expired);
 	const malformed = new AuthError(0x4, "not a JWT").toError() as SessionError;
@@ -124,8 +105,4 @@ test("AUTH_ERROR preserves actionable refusal kinds", async () => {
 	// Past the acceptor's GOAWAY: the request is refused, not the token.
 	const goingAway = new AuthError(0x6, "going away").toError() as StreamError;
 	expect(goingAway.code).toBe(StreamCode.GoingAway);
-});
-
-test("drafts before 17 carry no AUTH", async () => {
-	await expect(bytes((w) => new AuthMessage(0n, new Uint8Array()).encode(w, Version.DRAFT_16))).rejects.toThrow();
 });

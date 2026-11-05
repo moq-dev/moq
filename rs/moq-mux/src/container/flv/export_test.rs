@@ -10,9 +10,12 @@ use hang::catalog::{AudioCodec, VideoCodec};
 
 use super::{Export, Import};
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond media track: the frames written here carry timestamps. It declares media's
+/// max age, so an exporter started after publishing still reads the superseded groups.
 fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(hang::container::MAX_AGE)
 }
 
 /// Open an FLV export on the hang catalog of `source`.
@@ -26,8 +29,8 @@ async fn open_export(source: crate::Source) -> Export<crate::catalog::Consumer> 
 
 /// A drift budget no test timeline comes close to, so the exporter reads every group.
 ///
-/// The media track's full retention window, so an exporter started after publishing
-/// can still read every retained group. These tests write or import a whole broadcast
+/// The media track's full max age, so an exporter started after publishing
+/// can still read every fresh group. These tests write or import a whole broadcast
 /// and only then export it, which the
 /// exporter's default [`Duration::ZERO`] collapses to the
 /// live edge: completeness has to be asked for, exactly as a real recorder does.
@@ -131,13 +134,13 @@ async fn drain_export<S: crate::catalog::Stream>(mut exporter: Export<S>, import
 	let mut exported = Vec::new();
 	let mut importer = Some(importer);
 	for _ in 0..64 {
-		match tokio::time::timeout(Duration::from_millis(100), exporter.next()).await {
+		match kio::clock::timeout(Duration::from_millis(100), exporter.next()).await {
 			Ok(Ok(Some(chunk))) => exported.extend_from_slice(&chunk),
 			Ok(Ok(None)) => break,
 			Ok(Err(e)) => panic!("exporter error: {e}"),
 			Err(_) => {
 				if let Some(deadline) = exporter.next_deadline() {
-					tokio::time::advance(deadline.saturating_duration_since(moq_clock::now())).await;
+					tokio::time::advance(deadline.saturating_duration_since(kio::clock::now())).await;
 				} else {
 					importer = None; // No scheduled frames remain; close the broadcast.
 				}
@@ -618,7 +621,7 @@ async fn drain_to_end<S: crate::catalog::Stream>(mut exporter: Export<S>, keepal
 	let mut exported = Vec::new();
 	let mut keepalive = Some(keepalive);
 	for _ in 0..64 {
-		match tokio::time::timeout(Duration::from_millis(100), exporter.next()).await {
+		match kio::clock::timeout(Duration::from_millis(100), exporter.next()).await {
 			Ok(Ok(Some(chunk))) => exported.extend_from_slice(&chunk),
 			Ok(Ok(None)) => break,
 			Ok(Err(e)) => panic!("exporter error: {e}"),
@@ -897,7 +900,7 @@ async fn export_rebinds_to_a_better_rendition_before_the_header() {
 
 	let mut exporter = open_export(crate::source::announced(&consumer).await).await;
 	assert!(
-		tokio::time::timeout(Duration::from_millis(100), exporter.next())
+		kio::clock::timeout(Duration::from_millis(100), exporter.next())
 			.await
 			.is_err(),
 		"the header waits on the small rendition's config"
@@ -935,7 +938,7 @@ async fn export_rebinds_to_a_better_rendition_before_the_header() {
 		})
 		.unwrap();
 
-	let header = tokio::time::timeout(Duration::from_millis(100), exporter.next())
+	let header = kio::clock::timeout(Duration::from_millis(100), exporter.next())
 		.await
 		.expect("the header follows the better rendition")
 		.unwrap()
@@ -945,7 +948,7 @@ async fn export_rebinds_to_a_better_rendition_before_the_header() {
 		"the sequence header carries the better rendition's avcC"
 	);
 
-	let frame = tokio::time::timeout(Duration::from_millis(100), exporter.next())
+	let frame = kio::clock::timeout(Duration::from_millis(100), exporter.next())
 		.await
 		.expect("the better rendition's frame follows")
 		.unwrap()
@@ -1019,7 +1022,7 @@ async fn export_unbinds_a_rendition_disabled_before_the_header() {
 
 	let mut exporter = open_export(crate::source::announced(&consumer).await).await;
 	assert!(
-		tokio::time::timeout(Duration::from_millis(100), exporter.next())
+		kio::clock::timeout(Duration::from_millis(100), exporter.next())
 			.await
 			.is_err(),
 		"the header waits on the small rendition's config"
@@ -1036,14 +1039,14 @@ async fn export_unbinds_a_rendition_disabled_before_the_header() {
 		.unwrap()
 		.enabled = false;
 	assert!(
-		tokio::time::timeout(Duration::from_millis(100), exporter.next())
+		kio::clock::timeout(Duration::from_millis(100), exporter.next())
 			.await
 			.is_err(),
 		"nothing enabled"
 	);
 	small.write(crate::container::test_util::video_frame(0, true)).unwrap();
 	assert!(
-		tokio::time::timeout(Duration::from_millis(100), exporter.next())
+		kio::clock::timeout(Duration::from_millis(100), exporter.next())
 			.await
 			.is_err(),
 		"the disabled rendition's keyframe writes no header"
@@ -1065,7 +1068,7 @@ async fn export_unbinds_a_rendition_disabled_before_the_header() {
 			keyframe: true,
 		})
 		.unwrap();
-	let header = tokio::time::timeout(Duration::from_millis(100), exporter.next())
+	let header = kio::clock::timeout(Duration::from_millis(100), exporter.next())
 		.await
 		.expect("the header follows the enabled rendition")
 		.unwrap()
@@ -1143,7 +1146,7 @@ async fn export_rebinds_to_a_better_audio_rendition_before_the_header() {
 
 	let mut exporter = open_export(crate::source::announced(&consumer).await).await;
 	assert!(
-		tokio::time::timeout(Duration::from_millis(100), exporter.next())
+		kio::clock::timeout(Duration::from_millis(100), exporter.next())
 			.await
 			.is_err(),
 		"the header waits on the video config"
@@ -1174,7 +1177,7 @@ async fn export_rebinds_to_a_better_audio_rendition_before_the_header() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 
-	let header = tokio::time::timeout(Duration::from_millis(100), exporter.next())
+	let header = kio::clock::timeout(Duration::from_millis(100), exporter.next())
 		.await
 		.expect("the header resolves")
 		.unwrap()
@@ -1552,13 +1555,13 @@ async fn drain_until_idle<S: crate::catalog::Stream>(
 	out: &mut Vec<u8>,
 ) -> Option<anyhow::Result<()>> {
 	loop {
-		match tokio::time::timeout(Duration::from_millis(100), exporter.next()).await {
+		match kio::clock::timeout(Duration::from_millis(100), exporter.next()).await {
 			Ok(Ok(Some(chunk))) => out.extend_from_slice(&chunk),
 			Ok(Ok(None)) => return Some(Ok(())),
 			Ok(Err(e)) => return Some(Err(e)),
 			Err(_) => {
 				let deadline = exporter.next_deadline()?;
-				tokio::time::advance(deadline.saturating_duration_since(moq_clock::now())).await;
+				tokio::time::advance(deadline.saturating_duration_since(kio::clock::now())).await;
 			}
 		}
 	}
@@ -1702,7 +1705,7 @@ async fn a_track_leaving_the_catalog_is_read_to_its_end() {
 async fn drain_exporter_chunks<S: crate::catalog::Stream>(mut exporter: Export<S>, chunks: usize) -> Vec<u8> {
 	let mut exported = Vec::new();
 	for _ in 0..chunks {
-		match tokio::time::timeout(Duration::from_millis(100), exporter.next()).await {
+		match kio::clock::timeout(Duration::from_millis(100), exporter.next()).await {
 			Ok(Ok(Some(chunk))) => exported.extend_from_slice(&chunk),
 			Ok(Ok(None)) => panic!("exporter ended early"),
 			Ok(Err(e)) => panic!("exporter error: {e}"),
@@ -1725,7 +1728,7 @@ async fn configured_delay_holds_live_frames() {
 	assert!(export.next().await.unwrap().is_some(), "container header");
 	live.track.write(raw_frame(0, &[0xde, 0xad], true)).unwrap();
 	assert!(
-		tokio::time::timeout(std::time::Duration::from_millis(1), export.next())
+		kio::clock::timeout(std::time::Duration::from_millis(1), export.next())
 			.await
 			.is_err(),
 		"the release delay must hold a live frame instead of emitting on arrival"
@@ -1743,7 +1746,7 @@ async fn delay_drops_late_frames_and_drains_the_final_frame() {
 	let delay = std::time::Duration::from_millis(100);
 	let mut export = super::Export::new(live.source().await, live.catalog_stream().await).with_delay(delay);
 	export.next().await.unwrap().unwrap();
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	live.track.write(raw_frame(0, b"first", true)).unwrap();
 	let first = export.next().await.unwrap().unwrap();
 	assert!(first.windows(5).any(|part| part == b"first"));
@@ -1753,13 +1756,14 @@ async fn delay_drops_late_frames_and_drains_the_final_frame() {
 	tokio::time::advance(std::time::Duration::from_millis(200)).await;
 	assert!(export.poll_next(&kio::Waiter::noop()).is_pending());
 	live.track.write(raw_frame(20_000, b"expired", true)).unwrap();
-	live.track.write(raw_frame(400_000, b"final", true)).unwrap();
+	// Sent a delay ahead: any further would be a step in its timeline, which re-acquires.
+	live.track.write(raw_frame(300_000, b"final", true)).unwrap();
 	live.track.finish().unwrap();
 	live.catalog.finish().unwrap();
 	let final_frame = export.next().await.unwrap().unwrap();
 	assert!(final_frame.windows(5).any(|part| part == b"final"));
 	assert!(!final_frame.windows(7).any(|part| part == b"expired"));
-	assert!(start.elapsed() >= std::time::Duration::from_millis(500));
+	assert!(start.elapsed() >= std::time::Duration::from_millis(400));
 	assert!(export.next().await.unwrap().is_none());
 }
 

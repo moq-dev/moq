@@ -3,9 +3,11 @@
 use std::task::Poll;
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 
-use crate::catalog::{CatalogFormat, Stream};
+#[cfg(feature = "async")]
+use crate::catalog::CatalogFormat;
+use crate::catalog::Stream;
 use crate::container::consumer::Event;
 use crate::container::{ExportSource, Frame};
 use crate::jitter::{self, Arrival, Push};
@@ -42,18 +44,20 @@ impl Release {
 	/// Subscribe to the catalog of `source`, waiting for the `m2ts` section that names its track.
 	///
 	/// Fails for [`CatalogFormat::Msf`], which has no `m2ts` section.
+	#[cfg(feature = "async")]
 	pub async fn new(source: crate::Source, catalog_format: CatalogFormat) -> crate::Result<Self> {
 		if catalog_format == CatalogFormat::Msf {
 			return Err(
 				anyhow::anyhow!("the MSF catalog has no `m2ts` passthrough track; read the hang catalog").into(),
 			);
 		}
-		let catalog = source.catalog(catalog_format).await?;
+		let mut subscribing = crate::catalog::Subscribing::new(&source.broadcast(), catalog_format);
+		let catalog = kio::wait(|waiter| subscribing.poll_ok(waiter)).await?;
 		let mut release = Self {
 			source,
 			catalog: Some(catalog),
 			track: None,
-			subscribed: moq_clock::now(),
+			subscribed: kio::clock::now(),
 			finished: false,
 			released: false,
 			delay: Duration::ZERO,
@@ -123,11 +127,7 @@ impl Release {
 
 	/// The next object, at its time: whole TS packets, verbatim, stamped with the PCR time of
 	/// its first byte. Returns `None` once the track, or a catalog that never named one, ends.
-	pub async fn next(&mut self) -> crate::Result<Option<Frame>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for the next original MPEG-TS frame at its release time, or `None` at end.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
@@ -141,12 +141,13 @@ impl Release {
 			&& let Some((name, track)) = self.track.as_mut()
 		{
 			loop {
-				if self.jitter.full(&()) {
+				if self.jitter.full(&(), waiter) {
+					let _ = track.poll_received(waiter);
 					break;
 				}
 				let (frame, arrived) = match track.poll_event(waiter) {
 					Poll::Ready(Ok(Some(Event::Frame { frame, arrived }))) => (frame, arrived),
-					Poll::Ready(Ok(Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut))) => continue,
+					Poll::Ready(Ok(Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut { .. }))) => continue,
 					Poll::Ready(Ok(None)) => {
 						self.finished = true;
 						break;
@@ -158,15 +159,14 @@ impl Release {
 				// does not make them late, and a stall of the whole path does not hide that they are.
 				let arrival = Arrival {
 					arrived: arrived.max(self.subscribed),
-					read: moq_clock::now(),
+					read: kio::clock::now(),
 					decode: frame.timestamp.into(),
 					restart: track.markers(),
-					skip: track.skips(),
-					cut: track.cuts(),
 					// The output opens on a group, at a random access point; from then on every
 					// object goes out on its own, so one dropped late is a gap of its packets only.
 					sync: frame.keyframe || self.released,
 					leading: false,
+					bytes: frame.payload.len(),
 					item: frame,
 				};
 				if self.jitter.push((), arrival)? == Push::Late {
@@ -208,7 +208,7 @@ impl Release {
 					false => source.live(),
 				};
 				self.track = Some((m2ts.track.clone(), source));
-				self.subscribed = moq_clock::now();
+				self.subscribed = kio::clock::now();
 			}
 			Some((name, _)) if *name != m2ts.track => {
 				return Err(anyhow::anyhow!("the `m2ts` track moved from `{name}` to `{}`", m2ts.track).into());

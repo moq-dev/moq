@@ -17,7 +17,7 @@ the same definition as QUIC's `udp_tx`.
 - `serve_subscribe` and the publish path own the socket today and expose
   nothing. Update a `moq_net::transport::Wire` per connection
   from each statistics update and hand it to the embedder, which registers it
-  with `moq_net::stats::Handle::wire`.
+  with `stats::Session::wire` on a session from `stats::Handle::session`.
 - Read `srt-tokio`'s statistics now rather than waiting on one port
   (decided 2026-10-20, maintainer, because the source needs no socket ownership
   change). When [SRT on the shared socket](/quest/m2/one-port/srt-demux.md)

@@ -10,18 +10,18 @@
 # Linux-only: --network host needs a native Docker daemon sharing the host's
 # network namespace, which GitHub's macOS runners (and Docker Desktop / podman
 # machine VMs) don't provide. Override the runtime with SMOKE_DOCKER=podman and
-# the image with MOQ_RELAY_IMAGE.
+# the image with SMOKE_RELAY_IMAGE.
 set -euo pipefail
 
 runtime="${SMOKE_DOCKER:-docker}"
-image="${MOQ_RELAY_IMAGE:-moqdev/moq-relay}"
+image="${SMOKE_RELAY_IMAGE:-moqdev/moq-relay}"
 
 # Give the container a stable name so smoke.sh can reap it. A SIGKILL of this
 # wrapper (how smoke.sh tears the relay down) kills the runtime client but leaves
 # the detached container running and still holding the relay's port, which then
 # blocks the next smoke.sh run in the same job. smoke.sh's cleanup removes it by
 # this name; clear any leftover from a crashed run here too, before we rebind.
-name="${MOQ_RELAY_CONTAINER:-moq-relay-smoke}"
+name="${SMOKE_RELAY_CONTAINER:-moq-relay-smoke}"
 "$runtime" rm -f "$name" >/dev/null 2>&1 || true
 
 # smoke.sh passes the config path as the final argument (or just --help, to

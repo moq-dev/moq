@@ -146,7 +146,7 @@ export class Producer {
 			payload: this.#format.kind === "data" ? new Uint8Array() : encodeFrame(new Uint8Array(), timestamp),
 			timestamp: Time.Timestamp.fromMicros(timestamp),
 		});
-		group.close();
+		group.finish();
 		this.#liveEdge = this.#liveEdge === undefined ? timestamp : (Math.max(this.#liveEdge, timestamp) as Micro);
 		this.#marked = true;
 	}
@@ -169,7 +169,7 @@ export class Producer {
 				: undefined;
 		// A presentation endpoint cannot bound the decode-order tail after reordering.
 		this.#format.finishGroup(this.#group, this.#reordered ? undefined : end);
-		this.#group.close();
+		this.#group.finish();
 		this.#group = undefined;
 		if (this.#end !== undefined) {
 			this.#liveEdge = this.#liveEdge === undefined ? this.#end : (Math.max(this.#liveEdge, this.#end) as Micro);
@@ -182,7 +182,12 @@ export class Producer {
 	/** Close the track and current group, optionally with an error. */
 	close(err?: Error) {
 		if (!err) this.#close();
-		this.#group?.close(err);
-		this.#track.close(err);
+		if (err) this.#group?.abort(err);
+		else this.#group?.finish();
+		if (err) this.#track.abort(err);
+		else {
+			this.#track.finish();
+			this.#track.close();
+		}
 	}
 }

@@ -17,7 +17,7 @@ const child = Bun.spawn(command, {
 	stdin: "inherit",
 	stdout: "inherit",
 	stderr: "inherit",
-	env: { ...process.env, MOQ_LOCAL_SUPERVISED: "1" },
+	env: { ...process.env, LOCAL_SUPERVISED: "1" },
 });
 // Forward cancellation and let the child clean up; once it exits, every survivor is ours.
 let signaled: number | undefined;

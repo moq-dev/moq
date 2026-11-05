@@ -375,17 +375,7 @@ test("toStreamCode: a control timeout keeps its own code", () => {
 	expect(toStreamCode(timeout)).toBe(StreamCode.ControlTimeout);
 
 	// The moq-transport registry has no value for it, so every draft reads it as INTERNAL_ERROR.
-	for (const version of [
-		Version.DRAFT_14,
-		Version.DRAFT_15,
-		Version.DRAFT_16,
-		Version.DRAFT_17,
-		Version.DRAFT_18,
-		Version.DRAFT_19,
-		Version.DRAFT_20,
-		Version.DRAFT_21,
-		Version.DRAFT_22,
-	]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		expect(toStreamCode(timeout, { version })).toBe(StreamCode.Internal);
 	}
 
@@ -445,6 +435,6 @@ test("toStreamCode: lite-only codes do not reach an IETF peer", () => {
 		StreamCode.Unroutable,
 		StreamCode.FrameTooLarge,
 	]) {
-		expect(toStreamCode(new StreamError(code), { version: Version.DRAFT_20 })).toBe(StreamCode.Internal);
+		expect(toStreamCode(new StreamError(code), { version: Version.DRAFT_22 })).toBe(StreamCode.Internal);
 	}
 });

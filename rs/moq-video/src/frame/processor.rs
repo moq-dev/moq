@@ -23,7 +23,7 @@ impl Plan {
 		})
 	}
 
-	#[cfg(any(feature = "capture", test))]
+	#[cfg(any(feature = "capture", all(target_os = "windows", feature = "render"), test))]
 	pub fn capture(source: Size) -> Result<Self, Error> {
 		let target = Size::new(source.width & !1, source.height & !1);
 		if target.width == 0 || target.height == 0 || source.width > i32::MAX as u32 || source.height > i32::MAX as u32

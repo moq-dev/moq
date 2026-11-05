@@ -37,31 +37,50 @@ pub enum Socket {
 }
 ```
 
-The mux and each session hold `Arc<dyn Transmit>` instead of
-`Arc<UdpSocket>`, and `UdpSocket` implements `Transmit`, so the bound case
-behaves as today. Candidates come from `advertised` instead of the bound
-socket's local address; it is a list, like `ice_candidates`, so a dual-stack
-peer still gets a same-family candidate. Address-family mapping follows the
-real socket, not the advertisement: a dual-stack socket bound to `[::]` may
-advertise a public IPv4 address, so the `Transmit` impl owns the IPv4-mapped
-conversion the session applies today. Received and pinned addresses use the
-same canonical form the demux's flow table keys on, or no pin ever matches.
+Build on `moq-ice` (split out in #5702) rather than beside it.
+`moq_ice::Socket { udp, locals, inbound }` already separates the advertised
+host candidates (`locals`, from `ice_candidates`) from the bound address and
+takes routed datagrams on its `Inbound` queue, and the server mux
+(`rs/moq-rtc/src/server/mux.rs`) already routes its own `recv_from` loop
+into per-session `Inbound`s. What is left is the send side and the mux's
+read loop: `moq_ice::Socket`'s `udp: Arc<UdpSocket>` becomes
+`Arc<dyn Transmit>` (`Transmit` lives in `moq-ice`, and `UdpSocket`
+implements it, so the bound case behaves as today), and a fed mux routes
+datagrams from the demux hook instead of reading a bound socket. Adapt the
+sketch above to that: `advertised` is `ice_candidates`, and `recv` feeds
+the mux's existing router. Address-family mapping follows the real socket,
+not the advertisement: a dual-stack socket bound to `[::]` may advertise a
+public IPv4 address, so the `Transmit` impl owns the IPv4-mapped conversion
+`moq-ice` applies today. Received and pinned addresses use the same
+`moq_ice::canonical` form the demux's flow table keys on, or no pin ever
+matches.
 When ICE selects a pair, the remote address goes out on `pinned`, so the
 demux routes that tuple to WebRTC before any SRT test (see the
 [questline README](/quest/m2/one-port/README.md)). A pin also has to be
 released when its session ends or ICE moves to another pair: either an
 unpin message or idle expiry in the flow table, as SRT's pins have.
 
+The demux side has landed: `moq_tokio::quic::demux::WebRtc` (from
+`Demux::webrtc`, or `moq_relay::Relay::webrtc` for an embedded relay) yields
+ICE checks and responses, DTLS, and RTP as `Datagram`s whose `remote` is already in
+`moq_ice::canonical` form, sends a `Transmit` from the shared port (mapping an
+IPv4 destination for an AF_INET6 socket), and pins a remote with `pin`, which
+returns a guard that releases the pin on drop. So the fed `Socket` takes a
+`WebRtc` rather than the channels in the sketch, and the mux holds a `Pin` per
+selected pair, dropped when its session ends or ICE moves. A feed's `recv`
+returns `None` once the listener is gone.
+
 Things to watch: the server config is `Clone` today and a receiver is not, so
 the fed socket may belong in the server's constructor rather than the
 config. The fed mux has nothing to bind lazily, and a dropped feed should
 fail the server loudly rather than idle.
 
+Noted 2026-10-31 from [moq-dev/moq#7095](https://github.com/moq-dev/moq/pull/7095):
+its demux `Datagram` carries no ECN marks or kernel receive timestamp. If
+the fed mux's RTP congestion control needs either, add them to the demux
+here rather than reading them around it.
+
 Tests: a fed mux completes ICE and DTLS with a client through an in-memory
 `Transmit`, reports the selected tuple on `pinned`, and releases it when the
 session closes. A fed dual-stack socket serves an IPv4 peer. The existing
 bound tests keep passing.
-
-## Required
-
-- [UDP demux](/quest/m2/p2p/udp-demux.md) - the WebRTC hook and flow table this feeds from and pins into

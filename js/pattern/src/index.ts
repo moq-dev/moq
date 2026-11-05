@@ -81,6 +81,7 @@ export class InvalidPattern extends Error {
 	}
 }
 
+/** Types for {@link InvalidPattern}. */
 export namespace InvalidPattern {
 	/** Why a string or a segment list is not a valid {@link Pattern}. */
 	export type Code =
@@ -1053,8 +1054,9 @@ function bounded(patterns: Iterable<Pattern>): Pattern[] {
  *
  * Operations over a whole union (construction, {@link Patterns.covers}, and
  * {@link Patterns.intersect}) index one side by segment first, so their cost follows the
- * members a query could match rather than every pair: a peer's large grant costs about its
- * own size, not its square.
+ * members a query could match rather than every pair. That keeps common grants near their own
+ * size, but containment between wildcard patterns reduces to Orthogonal Vectors, so some shapes
+ * stay super-linear (the `mask` and `chain` cases in `bench/algebra.ts`).
  *
  * @public
  */

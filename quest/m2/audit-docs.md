@@ -31,21 +31,18 @@ freshest. Baselines:
 - Rust: 31 crates set `#![warn(missing_docs)]`, including `moq-mux`,
   `moq-ffi`, and `moq-c` since
   [#6088](https://github.com/moq-dev/moq/pull/6088) and
-  [#6091](https://github.com/moq-dev/moq/pull/6091); m1 added `moq-shaper` and
-  `moq-wasm`. Count the rest with
-  `cargo rustdoc -p <crate> --lib --all-features -- -W missing_docs`, and
-  `moq-wasm` with `--target wasm32-unknown-unknown`, since it is empty on
-  native. `moq-auth` is ambiguous with its crates.io copy, so pass its
+  [#6091](https://github.com/moq-dev/moq/pull/6091); m1 added `moq-shaper`.
+  Count the rest with
+  `cargo rustdoc -p <crate> --lib --all-features -- -W missing_docs`.
+  `moq-auth` is ambiguous with its crates.io copy, so pass its
   `path+file://` spec. Every linted crate was clean with all features.
   `moq-audio`, `moq-video`, and `moq-sock` were also clean on Linux but stay
   unlinted for their macOS, Windows, and Android items. `moq-gst` has 3 items
   from `gst::plugin_define!`. `moq-v4l` reports 3108, nearly all its generated
   `sys` bindings; whether the fork earns docs is still undecided.
-- JS: since [docs-js](https://github.com/moq-dev/moq/pull/6163), every
-  published package's build runs `js/common/docs.ts`, which fails on an
-  undocumented export or public class member, so check only that its
-  exemptions (private, protected, symbol brands, and custom element reactions)
-  still hold up and that docs say something.
+- JS: the doc build renders the API reference with TypeDoc and fails on any
+  TypeDoc warning, such as an unresolved link, but not on an undocumented
+  export, so look for those and check that docs say something.
 - Links: GET (not HEAD) every external URL in `doc/` with a browser user
   agent. 316 URLs: all answered except placeholder and local hosts, relay
   URLs that only speak MoQ, npmjs.com and w3.org pages that refuse
@@ -55,7 +52,7 @@ freshest. Baselines:
   the crate's first publish.
 - CLI: all 68 shell invocations in `doc/`, `README.md`, and
   `rs/moq-cli/README.md` parse with `--help` appended against a build with
-  `capture,play,transcode,iroh,openh264`, after substituting a URL for the
+  `capture,play,transcode,openh264`, after substituting a URL for the
   elided `moq ...` connect. Unknown flags fail but bad values do not.
   `gst-inspect-1.0` of a debug `moq-gst` build lists every element and pad
   property `doc/bin/gstreamer.md` names.

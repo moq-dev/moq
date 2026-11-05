@@ -6,10 +6,9 @@
 # relay restart becomes a permanent outage instead of a bounded gap the same
 # handles resume across.
 diff --git a/rs/moq-tokio/src/connection.rs b/rs/moq-tokio/src/connection.rs
-index 13f3fb4e2..349827099 100644
 --- a/rs/moq-tokio/src/connection.rs
 +++ b/rs/moq-tokio/src/connection.rs
-@@ -845,7 +845,8 @@ impl Connection {
+@@ -1289,7 +1289,8 @@
  					// One-shot mode: the session ending ends the connection. Its close
  					// reason is the terminal error, mirroring `moq_net::Session::closed`.
  					// A GOAWAY already returned above.
@@ -17,5 +16,5 @@ index 13f3fb4e2..349827099 100644
 +					// MUTATION: losing an established session ends the loop instead of redialing.
 +					if !client.reconnect || healthy {
  						return match ended {
- 							Ended::Closed(res) => res.map_err(Error::from),
+ 							Ended::Closed(res) => res,
  							Ended::Goaway(_) => unreachable!("handled before the migration branch"),

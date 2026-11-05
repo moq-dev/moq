@@ -9,12 +9,26 @@ use url::Url;
 use crate::{Error, Id, moq_protocol_error};
 
 /// A callback receiving a positive handle/value, zero on clean completion, or a negative error.
+///
+/// Runs on moq-c's runtime thread. The callback and `user_data` must be safe to use on that thread.
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 pub type moq_status_callback = Option<extern "C" fn(user_data: *mut c_void, code: i32)>;
 
 /// A callback receiving each session lifecycle change; the `MOQ_CONNECTION_PHASE_CLOSED` one is terminal.
+///
+/// Runs on moq-c's runtime thread. The callback and `user_data` must be safe to use on that thread.
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 pub type moq_state_callback = Option<extern "C" fn(user_data: *mut c_void, state: *const crate::moq_connection_state)>;
+
+/// Callback for [crate::moq_origin_follow]: each [crate::moq_follow_event] and its code.
+///
+/// `code` is the broadcast handle for `MOQ_FOLLOW_EVENT_ONLINE`, `0` for
+/// `MOQ_FOLLOW_EVENT_OFFLINE`, and the terminal status for `MOQ_FOLLOW_EVENT_END`: `0`, or a
+/// negative error whose reason [crate::moq_error] reports inside the callback.
+///
+/// Runs on moq-c's runtime thread. The callback and `user_data` must be safe to use on that thread.
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
+pub type moq_follow_callback = Option<extern "C" fn(user_data: *mut c_void, event: crate::moq_follow_event, code: i32)>;
 
 pub static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
 	let runtime = tokio::runtime::Builder::new_current_thread()
@@ -118,7 +132,9 @@ impl Background {
 			.unwrap_or(Ok(()))
 	}
 
-	fn poll_finished(&self, waiter: &kio::Waiter) -> std::task::Poll<Result<(), Error>> {
+	/// The background operation's result, once it finishes.
+	#[kio::wrapper]
+	pub fn poll_finished(&self, waiter: &kio::Waiter) -> std::task::Poll<Result<(), Error>> {
 		let Some(result) = &self.result else {
 			return std::task::Poll::Ready(Ok(()));
 		};
@@ -129,11 +145,6 @@ impl Background {
 			Ok(result) => std::task::Poll::Ready(result),
 			Err(_) => std::task::Poll::Ready(Err(Error::Panic)),
 		}
-	}
-
-	/// Wait until the background operation finishes and return its result.
-	pub async fn finished(&self) -> Result<(), Error> {
-		kio::wait(|waiter| self.poll_finished(waiter)).await
 	}
 
 	/// Fail an operation when its owned background task fails.
@@ -209,6 +220,7 @@ impl OnStatus {
 	/// # Safety
 	/// - The caller must ensure user_data remains valid for the callback's lifetime.
 	/// - The callback function pointer must be valid if provided.
+	/// - The callback and `user_data` must be safe to use on moq-c's runtime thread.
 	pub unsafe fn new(user_data: *mut c_void, on_status: moq_status_callback) -> Result<Self, Error> {
 		Ok(Self {
 			user_data,
@@ -227,6 +239,8 @@ impl OnStatus {
 	}
 }
 
+// SAFETY: The constructor requires the callback and user_data to remain valid and
+// safe to use on moq-c's runtime thread for the callback's lifetime.
 unsafe impl Send for OnStatus {}
 
 /// A [moq_state_callback] and its user data.
@@ -241,6 +255,7 @@ impl OnState {
 	///
 	/// # Safety
 	/// - The caller must keep `user_data` valid until the terminal callback.
+	/// - The callback and `user_data` must be safe to use on moq-c's runtime thread.
 	pub unsafe fn new(user_data: *mut c_void, on_state: moq_state_callback) -> Result<Self, Error> {
 		Ok(Self {
 			user_data,
@@ -258,7 +273,61 @@ impl OnState {
 	}
 }
 
+// SAFETY: The constructor requires the callback and user_data to remain valid and
+// safe to use on moq-c's runtime thread until the terminal callback.
 unsafe impl Send for OnState {}
+
+/// A [moq_follow_callback] and its user data.
+#[derive(Clone, Copy)]
+pub struct OnFollow {
+	user_data: *mut c_void,
+	on_follow: extern "C" fn(user_data: *mut c_void, event: crate::moq_follow_event, code: i32),
+}
+
+impl OnFollow {
+	/// Wrap a C follow callback.
+	///
+	/// # Safety
+	/// - The caller must keep `user_data` valid until the `MOQ_FOLLOW_EVENT_END` callback.
+	/// - The callback and `user_data` must be safe to use on moq-c's runtime thread.
+	pub unsafe fn new(user_data: *mut c_void, on_follow: moq_follow_callback) -> Result<Self, Error> {
+		Ok(Self {
+			user_data,
+			on_follow: on_follow.ok_or(Error::InvalidPointer)?,
+		})
+	}
+
+	/// Deliver a broadcast handle for an instance now serving the path.
+	pub fn online(&self, broadcast: crate::Id) {
+		(self.on_follow)(
+			self.user_data,
+			crate::moq_follow_event::MOQ_FOLLOW_EVENT_ONLINE,
+			i32::from(broadcast),
+		);
+	}
+
+	/// Report that the path went offline.
+	pub fn offline(&self) {
+		(self.on_follow)(self.user_data, crate::moq_follow_event::MOQ_FOLLOW_EVENT_OFFLINE, 0);
+	}
+}
+
+impl crate::task::Terminal for OnFollow {
+	/// Deliver the terminal status, recording its failure first so the callback can read
+	/// `moq_error()`.
+	fn terminal(&self, res: Result<(), Error>) {
+		record_error(&res);
+		(self.on_follow)(
+			self.user_data,
+			crate::moq_follow_event::MOQ_FOLLOW_EVENT_END,
+			res.code(),
+		);
+	}
+}
+
+// SAFETY: The constructor requires the callback and user_data to remain valid and
+// safe to use on moq-c's runtime thread until the terminal callback.
+unsafe impl Send for OnFollow {}
 
 /// Types that can be converted to C-compatible return codes.
 pub trait ReturnCode {
@@ -496,6 +565,16 @@ pub unsafe fn parse_slice<'a>(data: *const u8, size: usize) -> Result<&'a [u8], 
 
 	let data = unsafe { std::slice::from_raw_parts(data, size) };
 	Ok(data)
+}
+
+/// Parse an optional timestamp, NULL meaning untimed.
+///
+/// # Safety
+/// `timestamp` must be NULL or a valid pointer to a [crate::moq_timestamp].
+pub unsafe fn parse_timestamp(timestamp: *const crate::moq_timestamp) -> Result<Option<moq_net::Timestamp>, Error> {
+	Ok(unsafe { timestamp.as_ref() }
+		.map(|&timestamp| timestamp.try_into())
+		.transpose()?)
 }
 
 #[cfg(test)]

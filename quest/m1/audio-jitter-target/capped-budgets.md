@@ -1,59 +1,52 @@
-# [XS] Re-measure the browser budgets after the estimator capped one observation's weight
+# [XS] Re-measure the AAC browser budgets after the TS importer groups each PES
 
 ## Goal
 
-Seven scheduled nightlies on `main` after the estimator began capping how much
-weight one observation takes show the AAC `bursty` browser rows discarding
-about as much audio a minute as the Opus `bursty` rows, and the Opus
-`near-zero` row holding a 60 ms target with no underrun episodes. `test/audio-quality/budgets.json`
-carries every browser row's ceilings re-measured from them.
+`test/audio-quality/budgets.json` carries the six AAC browser rows' ceilings
+re-measured, by the rule in its note, from seven scheduled nightlies on `main`
+that all ran after the TS importer began publishing each PES as one group, and
+the note's sentence that the AAC rows predate the grouping is dropped. Nearly
+every AAC frame on those nights arrives in order.
+
+## Waiting
+
+- moq-dev/moq: seven scheduled Nightly runs on `main` after
+  [moq-dev/moq#7898](https://github.com/moq-dev/moq/pull/7898) merges. Find them
+  with `gh run list --workflow nightly.yml --event schedule` and download each
+  with `gh run download <id> -n audio-quality-run`; never dispatch the nightly by
+  hand. The artifacts expire after 7 days, so download each run's as it lands
+  rather than waiting for the seventh.
 
 ## Plan
 
-Waits on the nightlies: check the `audio-quality-run` artifacts of the
-scheduled Nightly runs on `main` (`gh run download <id> -n audio-quality-run`)
-once seven have run since the change merged. Never dispatch the nightly by
-hand. Re-measure by the rule in the budgets note, and drop the note's sentence
-that budgets the AAC bursty discards against Opus's as measured. Nightlies
-from before the one-ring removal also carry `-isolated` rows; grade only the
-`-plain` rows, which are the browser rows now.
+Decided 2026-11-04 (maintainer, on
+[moq-dev/moq#7898](https://github.com/moq-dev/moq/pull/7898)): land one group
+per PES as is. The extra AAC `wide` re-stalls are for Watch's time stretch to
+absorb, and this quest no longer expects AAC `wide` to stop running dry.
+Options shown:
 
-Decided 2026-10-22 (maintainer): the Opus near-zero budgets quest folded in
-here, so one pass over the same seven nightlies covers both. The cap
-([#6164](https://github.com/moq-dev/moq/pull/6164)) merged 2026-10-22T00:10Z,
-after the build flush, so post-cap nightlies are also post-flush.
+- ✅ Land as is
+- Land only the budgets, holding the importer change until time stretch lands
+- Keep the change and deepen AAC's target
 
-The first post-cap scheduled run, [2026-10-22 nightly](https://github.com/moq-dev/moq/actions/runs/39779729461),
-failed only the browser Opus `wide` target ceilings: `isolated` p95 was
-380 ms against 270 ms, and `plain` was 400 ms against 300 ms. In the
-`audio-quality-run` artifact, both `chromium-opus-48000-wide-*.ndjson`
-series hold their startup target until about 21 s, then settle at 200 to
-220 ms; both matching `.longtasks.json` arrays are empty. The isolated
-row has zero underruns, stalls, and silence; plain has 2.2 underruns a
-minute, 0 stalls, and 0 silence. This supplies one of the seven required
-scheduled runs, not a reason to change the estimator or recalibrate early.
+[moq-dev/moq#7898](https://github.com/moq-dev/moq/pull/7898) re-measured every
+browser row from the 2026-10-29 to 2026-11-04 nightlies (its body keeps each
+night's metrics) and changed the publisher: `moq import ts` used to send each
+seven-frame AAC PES as seven one-frame groups, which the transport delivers
+newest first, so 82 to 86% of AAC frames arrived behind a newer one. Each PES is
+now one group, its frames in presentation order.
 
-The near-zero stall was never the isolated ring. That row is simply the
-matrix's first, and a cold `cargo build` left about 800 MB dirty when it
-started. On the ARM runner each periodic writeback burst froze the page's main
-thread for 100 to 320 ms until the backlog drained, and the harness now
-flushes its build before the first row. If the first row still shows
-long-task clusters, compare `<tag>.longtasks.json` against the runner's disk
-activity before changing the player.
+On those nights, before the change, AAC `bursty` discarded up to 368.3 ms a
+minute against Opus `bursty`'s 117.4. Replaying their captures with each PES's
+arrival slots handed to its frames oldest first, as one group, halved the AAC
+`bursty` and `wide` discards (`bursty` summed over the seven nights 1156 to 584
+ms a minute) and lowered both rows' target by 20 to 60 ms. That shallower target doubled AAC
+`wide`'s player re-stalls (mean 3.0 to 6.6 a minute), the 0.95 quantile's trade
+that [Watch](/quest/m1/audio-jitter-target/watch.md)'s time stretch absorbs.
 
-The cap changed every row's startup, not only AAC bursty's: the prior is
-replaced in about five seconds instead of two, and a late interval in those
-first seconds holds the target for up to one 20 s half-life instead of falling
-back within seconds. Replays of local captures held the clean rows' targets
-where they were, but one live Opus `near-zero` `plain` run held a startup
-hiccup at 160 ms for 20 s, over that row's 95 ms ceiling. If a nightly breaches
-a startup target ceiling that way, budget it as measured rather than reopening
-the estimator.
-
-On replays of the 2026-10-18 nightly capture and of two local captures, the
-cap cut AAC bursty discards from 540 to 860 ms a minute to 0 to 170, and its
-target p95 from 663 ms to 343 to 363. If the nightlies still show AAC bursty
-discarding several times Opus's, the remaining source is the publisher: each
-seven-frame PES flush is seven one-frame groups, delivered newest first, so the
-oldest frame of a flush waits behind every newer group on a path that cannot
-carry them together.
+AAC `bursty` still discards about three times what Opus `bursty` does (584
+against 174 summed), and parity is not expected: the harness keeps ffmpeg's
+default PES packing on purpose, so AAC frames reach the viewer a median 210 ms
+behind their media time on `bursty` against Opus's 41. Grade the same
+`chromium-aac-*` rows, and check the in-order claim with the share of each row's
+`.arrivals.ndjson` frames that arrive behind a newer one.

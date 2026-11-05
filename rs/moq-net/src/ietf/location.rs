@@ -16,8 +16,8 @@ impl Encode<Version> for Location {
 	}
 }
 
-impl Decode<Version> for Location {
-	fn decode(buf: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for Location {
+	fn decode(buf: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let group = buf.varint()?;
 		let object = buf.varint()?;
 		Ok(Self { group, object })

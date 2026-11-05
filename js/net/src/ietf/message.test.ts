@@ -15,9 +15,9 @@ function recording(version: IetfVersion): { writer: Writer; chunks: Uint8Array[]
 }
 
 test("a control message goes out in one write, and one that fails to encode writes nothing", async () => {
-	for (const version of [Version.DRAFT_14, Version.DRAFT_17]) {
+	for (const version of [Version.DRAFT_18]) {
 		const { writer, chunks } = recording(version);
-		const err = new RequestError({ requestId: 3n, errorCode: 2, reasonPhrase: "nope" });
+		const err = new RequestError({ errorCode: 2, reasonPhrase: "nope" });
 		await Message.write(writer, RequestError.id, err, version);
 		expect(chunks.length).toBe(1);
 
@@ -31,7 +31,7 @@ test("a control message goes out in one write, and one that fails to encode writ
 		await err.encode(writer, version);
 		expect(chunks.length).toBe(2);
 
-		const huge = new RequestError({ requestId: 3n, errorCode: 2, reasonPhrase: "x".repeat(65_536) });
+		const huge = new RequestError({ errorCode: 2, reasonPhrase: "x".repeat(65_536) });
 		await expect(Message.write(writer, RequestError.id, huge, version)).rejects.toThrow("Message too large");
 		expect(chunks.length).toBe(2);
 	}

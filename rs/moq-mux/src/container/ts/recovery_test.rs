@@ -17,7 +17,7 @@
 //! - Every delivered frame missing from the output is counted: `trimmed` before its track's
 //!   first frame went out, `dropped` after, and each skip upstream is one of `gaps`.
 //! - Every unit arrives before it decodes, the continuity counters run unbroken, and the PCR
-//!   signals a discontinuity exactly where the source declared one.
+//!   signals declared boundaries and delivery skips with PCR discontinuities.
 //! - Each point a receiver acquires at carries its own PAT and PMT, and FFmpeg decodes the output
 //!   without an error from there, presenting every picture that went out, once, as the
 //!   continuous source decode's picture at the same presentation time.
@@ -27,11 +27,12 @@
 use std::ops::Range;
 use std::time::Duration;
 
+use kio::clock::Instant;
 use mpeg2ts::pes::{PesPacketReader, ReadPesPacket};
 use mpeg2ts::ts::TsPacketReader;
-use tokio::time::Instant;
 
-use super::export_test::{assert_on_time, count_discontinuity, open_export};
+use super::catalog::Ext;
+use super::export_test::{assert_on_time, count_discontinuity, open_ts};
 use super::stats::{self, Class};
 use crate::catalog::hang::Catalog;
 use crate::container::Frame;
@@ -89,27 +90,34 @@ enum Profile {
 	Spliced,
 	/// [`Closed`](Self::Closed) for two minutes.
 	Long,
+	/// MPEG-2 open GOP, carried as whole PES: after the first every group opens on a sequence
+	/// header, behind two B-pictures that reference the group before.
+	Mpeg2,
 }
 
 /// One FFmpeg encode.
 struct Encode {
 	size: &'static str,
 	seconds: &'static str,
-	/// The x264 or x265 parameters.
-	x26x: &'static str,
-	hevc: bool,
+	video: Video,
 	/// Seconds the timestamps start late by.
 	offset: u64,
+}
+
+/// The video encoder, with its x264 or x265 parameters.
+#[derive(Clone, Copy)]
+enum Video {
+	H264(&'static str),
+	H265(&'static str),
+	/// FFmpeg's `mpeg2video`, a GOP every twelve pictures, each open but the first.
+	Mpeg2,
 }
 
 impl Encode {
 	fn run(&self) -> Vec<u8> {
 		let source = format!("testsrc=size={}:rate=25", self.size);
 		let offset = self.offset.to_string();
-		let x26x = match self.hevc {
-			true => format!("{}:log-level=error", self.x26x),
-			false => self.x26x.to_string(),
-		};
+		let x265;
 		let mut args = vec![
 			"-nostdin",
 			"-hide_banner",
@@ -126,13 +134,24 @@ impl Encode {
 			"-t",
 			self.seconds,
 		];
-		args.extend(match self.hevc {
-			true => ["-c:v", "libx265", "-x265-params"],
-			false => ["-c:v", "libx264", "-x264-params"],
-		});
-		args.push(&x26x);
-		if !self.hevc {
-			args.extend(["-profile:v", "high"]);
+		match self.video {
+			Video::H264(x264) => args.extend(["-c:v", "libx264", "-x264-params", x264, "-profile:v", "high"]),
+			Video::H265(params) => {
+				// x265 sizes its own thread pools by the host's cores, ignoring `-threads`, which makes
+				// the encode both costlier and different from one host to the next.
+				x265 = format!("{params}:pools=none:frame-threads=1:log-level=error");
+				args.extend(["-c:v", "libx265", "-x265-params", &x265]);
+			}
+			Video::Mpeg2 => args.extend([
+				"-c:v",
+				"mpeg2video",
+				"-g",
+				"12",
+				"-bf",
+				"2",
+				"-sc_threshold",
+				"1000000000",
+			]),
 		}
 		args.extend([
 			"-preset",
@@ -158,14 +177,73 @@ impl Encode {
 			"mpegts",
 			"pipe:1",
 		]);
-		let output = std::process::Command::new("ffmpeg")
-			.args(&args)
-			.output()
-			.expect("ffmpeg is in the dev shell");
-		let stderr = String::from_utf8_lossy(&output.stderr);
-		assert!(output.status.success() && stderr.is_empty(), "ffmpeg: {stderr}");
-		output.stdout
+		cached(&args, &[])
 	}
+}
+
+/// Run FFmpeg on `input` and return what it writes, failing on any error it logs.
+fn ffmpeg(args: &[&str], input: &[u8]) -> Result<Vec<u8>, String> {
+	use std::io::Write as _;
+	let mut child = std::process::Command::new("ffmpeg")
+		.args(args)
+		.stdin(std::process::Stdio::piped())
+		.stdout(std::process::Stdio::piped())
+		.stderr(std::process::Stdio::piped())
+		.spawn()
+		.expect("ffmpeg is in the dev shell");
+	let mut stdin = child.stdin.take().unwrap();
+	let output = std::thread::scope(|scope| {
+		// FFmpeg may stop reading at its first error, which the status reports.
+		scope.spawn(move || stdin.write_all(input));
+		child.wait_with_output().unwrap()
+	});
+	let stderr = String::from_utf8_lossy(&output.stderr);
+	if !output.status.success() || !stderr.is_empty() {
+		return Err(format!("FFmpeg failed ({}): {stderr}", output.status));
+	}
+	Ok(output.stdout)
+}
+
+/// [`ffmpeg`], run once per FFmpeg build for the same arguments and input. Nextest runs each
+/// test in a process of its own, so the clips and their reference decodes are kept beside the
+/// test binary, and the first process to need one makes it while the rest wait.
+fn cached(args: &[&str], input: &[u8]) -> Vec<u8> {
+	use std::hash::{Hash, Hasher};
+	static FFMPEG: std::sync::OnceLock<(std::path::PathBuf, String)> = std::sync::OnceLock::new();
+	let (dir, build) = FFMPEG.get_or_init(|| {
+		// The binary `Command` runs, named by its resolved path (in the Nix dev shell, a store
+		// path that changes with any of its inputs) and when it last changed.
+		let name = format!("ffmpeg{}", std::env::consts::EXE_SUFFIX);
+		let path = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+			.map(|dir| dir.join(&name))
+			.find(|path| path.is_file())
+			.expect("ffmpeg is in the dev shell");
+		let path = std::fs::canonicalize(path).unwrap();
+		let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+		let exe = std::env::current_exe().unwrap();
+		let dir = exe.parent().unwrap().with_file_name("recovery-ffmpeg");
+		std::fs::create_dir_all(&dir).unwrap();
+		(dir, format!("{} {modified:?}", path.display()))
+	});
+	let mut hasher = std::hash::DefaultHasher::new();
+	(build, args, input).hash(&mut hasher);
+	let path = dir.join(format!("{:016x}", hasher.finish()));
+
+	let lock = (std::fs::OpenOptions::new().create(true).truncate(false).write(true))
+		.open(path.with_extension("lock"))
+		.unwrap();
+	lock.lock().unwrap();
+	match std::fs::read(&path) {
+		Ok(output) => return output,
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+		Err(err) => panic!("{}: {err}", path.display()),
+	}
+	let output = ffmpeg(args, input).unwrap();
+	// Renamed into place, so a process killed mid-write leaves no entry behind.
+	let partial = path.with_extension("partial");
+	std::fs::write(&partial, &output).unwrap();
+	std::fs::rename(&partial, &path).unwrap();
+	output
 }
 
 /// A generated clip, and the encodes its pictures come from.
@@ -176,16 +254,16 @@ struct Clip {
 }
 
 impl Profile {
-	/// The clip, generated once per process.
+	/// The clip, loaded once per process.
 	fn clip(self) -> &'static Clip {
-		static CLIPS: [std::sync::OnceLock<Clip>; 8] = [const { std::sync::OnceLock::new() }; 8];
+		static CLIPS: [std::sync::OnceLock<Clip>; 9] = [const { std::sync::OnceLock::new() }; 9];
 		CLIPS[self as usize].get_or_init(|| {
 			const CLOSED: &str = "keyint=12:min-keyint=12:scenecut=0";
-			let encode = |size, x26x, hevc, offset| Encode {
+			const OPEN: &str = "keyint=12:min-keyint=12:scenecut=0:open-gop=1:bframes=3:b-adapt=0";
+			let encode = |size, video, offset| Encode {
 				size,
 				seconds: "6",
-				x26x,
-				hevc,
+				video,
 				offset,
 			};
 			let whole = |encode: Encode| {
@@ -194,41 +272,31 @@ impl Profile {
 				Clip { ts, parts }
 			};
 			match self {
-				Self::Closed => whole(encode("320x240", CLOSED, false, 0)),
+				Self::Closed => whole(encode("320x240", Video::H264(CLOSED), 0)),
 				// 2^33 ticks is 95,443.7 s.
-				Self::Wrap => whole(encode("320x240", CLOSED, false, 95441)),
-				Self::Open => whole(encode(
-					"320x240",
-					"keyint=12:min-keyint=12:scenecut=0:open-gop=1:bframes=3:b-adapt=0",
-					false,
-					0,
-				)),
-				Self::Rasl => whole(encode(
-					"320x240",
-					"keyint=12:min-keyint=12:scenecut=0:open-gop=1:bframes=3:b-adapt=0",
-					true,
-					0,
-				)),
+				Self::Wrap => whole(encode("320x240", Video::H264(CLOSED), 95441)),
+				Self::Open => whole(encode("320x240", Video::H264(OPEN), 0)),
+				Self::Rasl => whole(encode("320x240", Video::H265(OPEN), 0)),
 				Self::Radl => whole(encode(
 					"320x240",
-					"keyint=12:min-keyint=12:scenecut=0:open-gop=0:radl=2:bframes=3:b-adapt=0",
-					true,
+					Video::H265("keyint=12:min-keyint=12:scenecut=0:open-gop=0:radl=2:bframes=3:b-adapt=0"),
 					0,
 				)),
 				Self::Resized => splice(
-					encode("320x240", CLOSED, false, 0).run(),
-					encode("176x144", CLOSED, false, 0).run(),
+					encode("320x240", Video::H264(CLOSED), 0).run(),
+					encode("176x144", Video::H264(CLOSED), 0).run(),
 					false,
 				),
 				Self::Spliced => splice(
-					encode("320x240", CLOSED, false, 0).run(),
-					encode("320x240", CLOSED, false, JUMP.as_secs()).run(),
+					encode("320x240", Video::H264(CLOSED), 0).run(),
+					encode("320x240", Video::H264(CLOSED), JUMP.as_secs()).run(),
 					true,
 				),
 				Self::Long => whole(Encode {
 					seconds: "120",
-					..encode("320x240", CLOSED, false, 0)
+					..encode("320x240", Video::H264(CLOSED), 0)
 				}),
+				Self::Mpeg2 => whole(encode("320x240", Video::Mpeg2, 0)),
 			}
 		})
 	}
@@ -243,7 +311,7 @@ impl Profile {
 
 	/// Whether its leading pictures reference the group before.
 	fn orphans(self) -> bool {
-		matches!(self, Self::Open | Self::Rasl)
+		matches!(self, Self::Open | Self::Rasl | Self::Mpeg2)
 	}
 
 	/// The PCR discontinuities the source declares.
@@ -399,15 +467,16 @@ struct Recorded {
 /// What the import of a clip published.
 struct Recording {
 	profile: Profile,
-	catalog: Catalog,
+	catalog: Catalog<Ext>,
 	tracks: Vec<Recorded>,
 }
 
 /// Import `profile`'s clip whole and read back every frame of every track.
 async fn record(profile: Profile) -> Recording {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	// Kept whole, however long the clip.
-	let config = crate::catalog::Config::default().with_max_age(Duration::from_secs(300));
+	// Kept whole, however long the clip, with the `mpegts` section that carries MPEG-2 video.
+	let config = (crate::catalog::Config::default().with_max_age(Duration::from_secs(300)))
+		.with_catalog(Catalog::<Ext>::default());
 	let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
 	let consumer = broadcast.consume();
 	let mut import = super::Import::new(broadcast.clone(), catalog.reserve());
@@ -415,18 +484,28 @@ async fn record(profile: Profile) -> Recording {
 	import.finish().unwrap();
 	let snapshot = catalog.snapshot();
 
-	let names = (snapshot.video.renditions.keys().map(|name| (name.clone(), true)))
+	let whole = (snapshot.ext.mpegts.tracks.iter()).filter(|(_, track)| {
+		track
+			.pes_packet
+			.as_ref()
+			.is_some_and(|pes| matches!(pes.stream_type, 0x01 | 0x02))
+	});
+	let names = (snapshot.video.renditions.keys().chain(whole.map(|(name, _)| name)))
+		.map(|name| (name.clone(), true))
 		.chain(snapshot.audio.renditions.keys().map(|name| (name.clone(), false)));
 	let mut tracks = Vec::new();
 	for (name, video) in names {
 		let mut track = consumer
 			.track(&name)
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(300)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(300))),
+			)
 			.await
 			.unwrap();
 		let mut groups = Vec::new();
-		while let Some(mut group) = tokio::time::timeout(Duration::from_secs(1), track.recv_group())
+		while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group())
 			.await
 			.unwrap()
 			.unwrap()
@@ -456,10 +535,18 @@ async fn record(profile: Profile) -> Recording {
 }
 
 /// The presentation time of a published frame, in microseconds on the catalog clock, and
-/// whether it is the marker of a declared discontinuity.
+/// whether it is the marker of a declared discontinuity. A whole video PES is stamped with its
+/// placement, so its own PTS says when it presents.
 fn decoded(frame: &moq_net::frame::Frame) -> (u64, bool) {
 	let frame = hang::container::Frame::decode(frame.payload.clone()).unwrap();
-	(frame.timestamp.as_micros() as u64, frame.payload.is_empty())
+	let pts = match frame.payload.get(..4) {
+		Some([0, 0, 1, 0xe0..=0xef]) => {
+			let pts = super::psi::PesStart::parse(&frame.payload).unwrap().pts.unwrap();
+			pts * 100 / 9
+		}
+		_ => frame.timestamp.as_micros() as u64,
+	};
+	(pts, frame.payload.is_empty())
 }
 
 /// The presentation time of a published frame, in microseconds on the catalog clock.
@@ -558,6 +645,8 @@ impl Bottleneck {
 struct Arm {
 	profile: Profile,
 	schedule: Schedule,
+	/// Expected PCR flags from declared boundaries and overlapping delivery skips.
+	breaks: usize,
 	/// A bottleneck after the faults.
 	path: Option<Bottleneck>,
 	/// When the export starts.
@@ -571,9 +660,18 @@ fn arm(profile: Profile, schedule: Schedule) -> Arm {
 	Arm {
 		profile,
 		schedule,
+		breaks: profile.breaks(),
 		path: None,
 		join: Duration::ZERO,
 		catalog: Duration::ZERO,
+	}
+}
+
+impl Arm {
+	/// Expect this many PCR flags from the arm's boundaries and losses.
+	fn breaks(mut self, count: usize) -> Self {
+		self.breaks = count;
+		self
 	}
 }
 
@@ -618,19 +716,14 @@ impl Ledger {
 struct Run {
 	ledgers: Vec<Ledger>,
 	frames: Vec<Frame>,
+	/// The frames' payloads, concatenated.
+	ts: Vec<u8>,
 	stats: stats::Export,
 	/// The stats after each output frame, and when, from the republisher's start.
 	samples: Vec<(Duration, stats::Export)>,
 }
 
 impl Run {
-	fn ts(&self) -> Vec<u8> {
-		self.frames
-			.iter()
-			.flat_map(|frame| frame.payload.iter().copied())
-			.collect()
-	}
-
 	fn ledger(&self, video: bool) -> &Ledger {
 		self.ledgers.iter().find(|ledger| ledger.video == video).unwrap()
 	}
@@ -800,7 +893,8 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 
 	// The republisher: the same catalog and tracks on a new broadcast, each frame at its time.
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let config = crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default());
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
 	let snapshot = recording.catalog.clone();
 	let producers: Vec<_> = recording
 		.tracks
@@ -824,13 +918,14 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 		let mut open: Vec<Option<moq_net::group::Producer>> = producers.iter().map(|_| None).collect();
 		let mut kept = vec![0; producers.len()];
 		for (at, event) in events {
-			tokio::time::sleep_until(start + at).await;
+			kio::clock::sleep_until(start + at).await;
 			let Some((t, g, step)) = event else {
 				let snapshot = snapshot.clone();
 				catalog
 					.mutate(|catalog| {
 						catalog.video = snapshot.video;
 						catalog.audio = snapshot.audio;
+						catalog.ext = snapshot.ext;
 					})
 					.unwrap();
 				continue;
@@ -863,12 +958,12 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 		std::future::pending::<()>().await;
 	});
 
-	tokio::time::sleep_until(start + arm.join).await;
+	kio::clock::sleep_until(start + arm.join).await;
 	let source = crate::source::announced(&consumer).await;
-	let mut export = open_export(source).await.unwrap().with_delay(DELAY);
+	let mut export = (open_ts(source, crate::catalog::CatalogFormat::Hang).await.unwrap()).with_delay(DELAY);
 	let mut frames = Vec::new();
 	let mut samples = Vec::new();
-	while let Ok(next) = tokio::time::timeout(STALL, export.next()).await {
+	while let Ok(next) = kio::clock::timeout(STALL, export.next()).await {
 		let Some(frame) = next.expect("export error") else {
 			break;
 		};
@@ -876,15 +971,20 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 		samples.push((start.elapsed(), export.stats()));
 	}
 	publisher.abort();
+	let mut ts = Vec::new();
+	for frame in &frames {
+		ts.extend_from_slice(&frame.payload);
+	}
 	let mut run = Run {
 		ledgers,
 		frames,
+		ts,
 		stats: export.stats(),
 		samples,
 	};
 
 	// Match each PES, and each ADTS frame of an audio PES, to the unit it carries.
-	let mut reader = PesPacketReader::new(TsPacketReader::new(std::io::Cursor::new(run.ts())));
+	let mut reader = PesPacketReader::new(TsPacketReader::new(std::io::Cursor::new(&run.ts)));
 	while let Some(pes) = reader.read_pes_packet().unwrap() {
 		let video = pes.header.stream_id.is_video();
 		assert!(video || pes.header.stream_id.is_audio(), "only audio and video go out");
@@ -1013,10 +1113,13 @@ fn grade(ledgers: &[Ledger], stats: &stats::Export) -> Result<(), String> {
 			}
 		}
 
+		// The leading pictures of the group the video starts at go before it, though they follow
+		// its keyframe in decode order.
 		let first = units.iter().position(|unit| unit.output).unwrap_or(units.len());
 		for (i, unit) in ledger.media() {
 			if unit.delivered && !unit.output {
-				*if i < first { &mut before } else { &mut after } += 1;
+				let leads = ledger.video && unit.leading && unit.group == start.group;
+				*if i < first || leads { &mut before } else { &mut after } += 1;
 				late += u64::from(unit.on_time != Some(true));
 			}
 		}
@@ -1078,7 +1181,11 @@ struct Decoded {
 /// Decode `ts` with software FFmpeg, its audio too unless `video_only`, failing on any error it
 /// logs. Pictures keep their own size, so a resolution change hashes each at its own.
 fn decode(ts: &[u8], video_only: bool) -> Result<Decoded, String> {
-	use std::io::Write as _;
+	parse(&ffmpeg(&decoder(video_only), ts)?, video_only)
+}
+
+/// The FFmpeg arguments [`decode`] runs with.
+fn decoder(video_only: bool) -> Vec<&'static str> {
 	let mut args = vec![
 		"-nostdin",
 		"-hide_banner",
@@ -1105,29 +1212,18 @@ fn decode(ts: &[u8], video_only: bool) -> Result<Decoded, String> {
 	if !video_only {
 		args.extend(["-map", "0:a:0", "-c:a", "pcm_s16le"]);
 	}
-	args.extend(["-f", "framemd5", "pipe:1"]);
-	let mut child = std::process::Command::new("ffmpeg")
-		.args(&args)
-		.stdin(std::process::Stdio::piped())
-		.stdout(std::process::Stdio::piped())
-		.stderr(std::process::Stdio::piped())
-		.spawn()
-		.expect("ffmpeg is in the dev shell");
-	let mut stdin = child.stdin.take().unwrap();
-	let input = ts.to_vec();
-	let feed = std::thread::spawn(move || stdin.write_all(&input));
-	let output = child.wait_with_output().unwrap();
-	// FFmpeg may stop reading at its first error, which the status reports.
-	let _ = feed.join().unwrap();
-	let stderr = String::from_utf8_lossy(&output.stderr);
-	if !output.status.success() || !stderr.is_empty() {
-		return Err(format!("FFmpeg failed ({}): {stderr}", output.status));
-	}
+	// A fast hash: MD5 over every raw picture costs about as much as the decode.
+	args.extend(["-f", "framehash", "-hash", "murmur3", "pipe:1"]);
+	args
+}
+
+/// What [`decoder`] wrote.
+fn parse(output: &[u8], video_only: bool) -> Result<Decoded, String> {
 	let mut decoded = Decoded {
 		pictures: Vec::new(),
 		samples: 0,
 	};
-	for line in String::from_utf8(output.stdout).unwrap().lines() {
+	for line in std::str::from_utf8(output).unwrap().lines() {
 		if line.starts_with("#tb 0:") {
 			assert_eq!(line, "#tb 0: 1/90000", "pictures are stamped at 90 kHz");
 		}
@@ -1136,7 +1232,7 @@ fn decode(ts: &[u8], video_only: bool) -> Result<Decoded, String> {
 		}
 		let fields: Vec<&str> = line.split(',').map(str::trim).collect();
 		let [index, _dts, pts, duration, _size, hash] = fields[..] else {
-			panic!("framemd5 line {line}");
+			panic!("framehash line {line}");
 		};
 		match index {
 			"0" => {
@@ -1162,7 +1258,7 @@ impl Reference {
 		// Each encode decoded on its own, from its start, keeping the pictures the clip took.
 		let source: Vec<(u64, String)> = (profile.clip().parts.iter())
 			.flat_map(|(ts, range)| {
-				let pictures = decode(ts, false).unwrap().pictures;
+				let pictures = parse(&cached(&decoder(false), ts), false).unwrap().pictures;
 				pictures.into_iter().filter(|(pts, _)| range.contains(pts))
 			})
 			.collect();
@@ -1269,13 +1365,13 @@ fn segments<'a>(ts: &[u8], video: &'a Ledger, pids: (u16, u16)) -> Result<Vec<Se
 		.collect())
 }
 
-/// Where an arm leaves its evidence, kept when it fails or `MOQ_TEST_KEEP` is set: under
-/// `$MOQ_TEST_RUNS/ts-recovery/`, by test name.
+/// Where an arm leaves its evidence, kept when it fails or `HARNESS_KEEP` is set: under
+/// `$HARNESS_RUNS/ts-recovery/`, by test name.
 struct Evidence(Option<std::path::PathBuf>);
 
 impl Evidence {
 	fn save(run: &Run) -> Self {
-		let Some(root) = std::env::var_os("MOQ_TEST_RUNS") else {
+		let Some(root) = std::env::var_os("HARNESS_RUNS") else {
 			return Self(None);
 		};
 		// libtest names each test's thread after it; a test run on the main thread has its process.
@@ -1285,7 +1381,7 @@ impl Evidence {
 		};
 		let dir = std::path::Path::new(&root).join("ts-recovery").join(name);
 		std::fs::create_dir_all(&dir).unwrap();
-		std::fs::write(dir.join("export.ts"), run.ts()).unwrap();
+		std::fs::write(dir.join("export.ts"), &run.ts).unwrap();
 		std::fs::write(dir.join("ledgers.txt"), format!("{:#?}", run.ledgers)).unwrap();
 		std::fs::write(dir.join("stats.txt"), format!("{:#?}", run.stats)).unwrap();
 		Self(Some(dir))
@@ -1296,7 +1392,7 @@ impl Drop for Evidence {
 	fn drop(&mut self) {
 		if let Some(dir) = &self.0
 			&& !std::thread::panicking()
-			&& std::env::var_os("MOQ_TEST_KEEP").is_none()
+			&& std::env::var_os("HARNESS_KEEP").is_none()
 		{
 			let _ = std::fs::remove_dir_all(dir);
 		}
@@ -1318,21 +1414,21 @@ async fn recover(arm: Arm) -> Run {
 		run.stats.release
 	);
 	assert!(assert_on_time(&run.frames) > 200, "too little output to judge");
-	assert_continuous(&run.ts());
+	assert_continuous(&run.ts);
 	assert_eq!(
 		count_discontinuity(&run.frames),
-		profile.breaks(),
-		"a PCR discontinuity where the source declared one, and no other"
+		arm.breaks,
+		"one PCR flag per declared boundary or overlapping delivery gap"
 	);
 
 	let reference = Reference::new(profile, run.ledger(true));
 	let pids = (run.pid(Class::Video), run.pid(Class::Audio));
-	for (i, (ts, emitted)) in segments(&run.ts(), run.ledger(true), pids).unwrap().iter().enumerate() {
+	for (i, (ts, emitted)) in segments(&run.ts, run.ledger(true), pids).unwrap().iter().enumerate() {
 		let output = decode(ts, true).unwrap_or_else(|err| panic!("segment {i}: {err}"));
 		(reference.compare(&output, emitted)).unwrap_or_else(|err| panic!("segment {i}: {err}"));
 	}
 	if profile != Profile::Open {
-		let output = decode(&run.ts(), false).unwrap();
+		let output = decode(&run.ts, false).unwrap();
 		let video = run.ledger(true);
 		let emitted: Vec<&Unit> = video.units.iter().filter(|unit| unit.output).collect();
 		reference.compare(&output, &emitted).unwrap();
@@ -1378,10 +1474,13 @@ async fn a_clean_path_loses_nothing() {
 /// on the next keyframe.
 #[tokio::test(start_paused = true)]
 async fn a_skipped_group_resumes_at_the_next() {
-	let run = recover(arm(Profile::Closed, |slot| match slot.video && slot.group == 5 {
-		true => Delivery::Omitted,
-		false => clean(slot),
-	}))
+	let run = recover(
+		arm(Profile::Closed, |slot| match slot.video && slot.group == 5 {
+			true => Delivery::Omitted,
+			false => clean(slot),
+		})
+		.breaks(1),
+	)
 	.await;
 	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (0, 1));
 }
@@ -1390,12 +1489,15 @@ async fn a_skipped_group_resumes_at_the_next() {
 /// settle their decode times, and loses only its tail.
 #[tokio::test(start_paused = true)]
 async fn a_cut_group_keeps_what_it_delivered() {
-	let run = recover(arm(Profile::Closed, |slot| {
-		match slot.video && slot.group == 5 && slot.frame >= 4 {
-			true => Delivery::Omitted,
-			false => clean(slot),
-		}
-	}))
+	let run = recover(
+		arm(Profile::Closed, |slot| {
+			match slot.video && slot.group == 5 && slot.frame >= 4 {
+				true => Delivery::Omitted,
+				false => clean(slot),
+			}
+		})
+		.breaks(1),
+	)
 	.await;
 	let video = run.ledger(true);
 	let kept = video.units.iter().filter(|unit| unit.group == 5 && unit.output).count();
@@ -1409,7 +1511,7 @@ async fn a_cut_group_keeps_what_it_delivered() {
 /// resumes on the first keyframe delivered in time, on the same clock.
 #[tokio::test(start_paused = true)]
 async fn a_stall_drops_what_it_made_late() {
-	let run = recover(arm(Profile::Closed, |slot| hold(slot.video, slot))).await;
+	let run = recover(arm(Profile::Closed, |slot| hold(slot.video, slot)).breaks(1)).await;
 	let (video, audio) = (run.ledger(true), run.ledger(false));
 	assert!(
 		video.units.iter().any(|unit| unit.on_time == Some(false)),
@@ -1428,7 +1530,45 @@ async fn a_stall_drops_what_it_made_late() {
 /// deadline is dropped rather than sent late.
 #[tokio::test(start_paused = true)]
 async fn a_path_stall_drops_what_it_made_late() {
-	recover(arm(Profile::Closed, |slot| hold(true, slot))).await;
+	recover(arm(Profile::Closed, |slot| hold(true, slot)).breaks(1)).await;
+}
+
+/// Audio and reordered video lose the same last-frame interval before a keyframe. Their
+/// decode reserves differ, but the missing media shares one PCR flag.
+#[tokio::test(start_paused = true)]
+async fn a_short_outage_across_both_tracks_flags_once() {
+	let run = recover(
+		arm(Profile::Closed, |slot| {
+			let missing = if slot.video {
+				slot.group == 5 && slot.frame == 11
+			} else {
+				(SPLICE - FRAME..SPLICE).contains(&slot.nominal)
+			};
+			if missing { Delivery::Omitted } else { clean(slot) }
+		})
+		.breaks(1),
+	)
+	.await;
+	assert_eq!(run.stats.release.gaps, 2, "both tracks skipped media");
+}
+
+/// Audio loses an interval that ends before video's, though video's send-ahead releases its
+/// loss first. Disjoint losses each flag the PCR, whichever is muxed first.
+#[tokio::test(start_paused = true)]
+async fn disjoint_outages_across_both_tracks_flag_twice() {
+	let run = recover(
+		arm(Profile::Closed, |slot| {
+			let missing = if slot.video {
+				slot.group == 5 && slot.frame == 11
+			} else {
+				(SPLICE - 5 * FRAME..SPLICE - 4 * FRAME).contains(&slot.nominal)
+			};
+			if missing { Delivery::Omitted } else { clean(slot) }
+		})
+		.breaks(2),
+	)
+	.await;
+	assert_eq!(run.stats.release.gaps, 2, "both tracks skipped media");
 }
 
 /// Hold what is `held` and due in [1.92 s, 4.4 s) until the end, delivering the rest cleanly.
@@ -1444,7 +1584,7 @@ fn hold(held: bool, slot: Slot) -> Delivery {
 /// audio's row stops counting and its quiet grows on the output's clock, and the audio resumes.
 #[tokio::test(start_paused = true)]
 async fn a_stalled_track_leaves_the_others_running() {
-	let run = recover(arm(Profile::Closed, stall_audio)).await;
+	let run = recover(arm(Profile::Closed, stall_audio).breaks(1)).await;
 	let video = run.ledger(true);
 	assert_eq!(out(video), video.units.len(), "every picture goes out");
 	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (0, 1));
@@ -1486,11 +1626,14 @@ fn stall_audio(slot: Slot) -> Delivery {
 /// Audio sent 200 ms behind the video, within the delay, survives a skipped video group whole.
 #[tokio::test(start_paused = true)]
 async fn skewed_audio_survives_a_video_skip() {
-	let run = recover(arm(Profile::Closed, |slot| match (slot.video, slot.group) {
-		(true, 5) => Delivery::Omitted,
-		(true, _) => clean(slot),
-		(false, _) => Delivery::At(slot.nominal + Duration::from_millis(200)),
-	}))
+	let run = recover(
+		arm(Profile::Closed, |slot| match (slot.video, slot.group) {
+			(true, 5) => Delivery::Omitted,
+			(true, _) => clean(slot),
+			(false, _) => Delivery::At(slot.nominal + Duration::from_millis(200)),
+		})
+		.breaks(1),
+	)
 	.await;
 	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (0, 1));
 }
@@ -1498,7 +1641,7 @@ async fn skewed_audio_survives_a_video_skip() {
 /// A skipped group around the 33-bit wrap keeps the clock, and the pictures either side decode.
 #[tokio::test(start_paused = true)]
 async fn a_skip_across_the_wrap_keeps_the_clock() {
-	let run = recover(arm(Profile::Wrap, skip_group_5)).await;
+	let run = recover(arm(Profile::Wrap, skip_group_5).breaks(1)).await;
 	let video = run.ledger(true);
 	let pts: Vec<u64> = video
 		.units
@@ -1543,7 +1686,7 @@ fn leading_out(video: &Ledger, group: usize) -> usize {
 /// are trimmed, while every group after a whole one keeps its own.
 #[tokio::test(start_paused = true)]
 async fn open_gop_trims_only_the_orphans() {
-	let run = recover(arm(Profile::Open, skip_and_cut)).await;
+	let run = recover(arm(Profile::Open, skip_and_cut).breaks(2)).await;
 	let video = run.ledger(true);
 	assert_eq!(
 		(leading_out(video, 6), leading_out(video, 9)),
@@ -1557,11 +1700,36 @@ async fn open_gop_trims_only_the_orphans() {
 	assert_eq!(run.stats.release.gaps, 2);
 }
 
+/// MPEG-2 open GOP, whose pictures are stamped with their placement rather than their
+/// presentation: the leading B-pictures a skip or a cut orphans are trimmed, and so are those of
+/// the group the export joins at, while every group after a whole one keeps its own.
+#[tokio::test(start_paused = true)]
+async fn mpeg2_open_gop_trims_only_the_orphans() {
+	let run = recover(Arm {
+		join: Duration::from_millis(1100),
+		..arm(Profile::Mpeg2, skip_and_cut).breaks(2)
+	})
+	.await;
+	let video = run.ledger(true);
+	let first = video.units.iter().find(|unit| unit.output).unwrap().group;
+	assert_eq!(first, 2, "the export joins at the group in flight");
+	assert_eq!(
+		(leading_out(video, 2), leading_out(video, 6), leading_out(video, 9)),
+		(0, 0, 0),
+		"the orphans are trimmed"
+	);
+	assert!(
+		leading_out(video, 3) > 0 && leading_out(video, 7) > 0 && leading_out(video, 10) > 0,
+		"a continuous group keeps them"
+	);
+	assert_eq!(run.stats.release.gaps, 2);
+}
+
 /// HEVC open GOP: the RASL pictures a skip or a cut orphans are trimmed, a continuous CRA keeps
 /// its own, and the output decodes straight through the CRA it resumes at.
 #[tokio::test(start_paused = true)]
 async fn hevc_trims_only_orphaned_rasl() {
-	let run = recover(arm(Profile::Rasl, skip_and_cut)).await;
+	let run = recover(arm(Profile::Rasl, skip_and_cut).breaks(2)).await;
 	let video = run.ledger(true);
 	assert_eq!(
 		(leading_out(video, 6), leading_out(video, 9)),
@@ -1578,7 +1746,7 @@ async fn hevc_trims_only_orphaned_rasl() {
 /// HEVC RADL pictures reference only their own IDR, so after a skip or a cut they go out with it.
 #[tokio::test(start_paused = true)]
 async fn hevc_keeps_radl_after_a_hole() {
-	let run = recover(arm(Profile::Radl, skip_and_cut)).await;
+	let run = recover(arm(Profile::Radl, skip_and_cut).breaks(2)).await;
 	let video = run.ledger(true);
 	assert_eq!(
 		(leading_out(video, 6), leading_out(video, 9)),
@@ -1603,10 +1771,10 @@ async fn a_join_starts_on_a_whole_group() {
 }
 
 /// The catalog names the tracks only 2.3 s in, while the group in flight is cut short: the export
-/// waits for it, starts on the next whole group with the tables ahead of it, and loses nothing
-/// after.
+/// starts on what arrived of it, from its keyframe with the tables ahead of it, and loses
+/// nothing after the cut.
 #[tokio::test(start_paused = true)]
-async fn a_late_catalog_starts_on_a_whole_group() {
+async fn a_late_catalog_starts_on_the_group_in_flight() {
 	let run = recover(Arm {
 		catalog: Duration::from_millis(2300),
 		..arm(Profile::Closed, |slot| {
@@ -1615,11 +1783,12 @@ async fn a_late_catalog_starts_on_a_whole_group() {
 				false => clean(slot),
 			}
 		})
+		.breaks(1)
 	})
 	.await;
 	let video = run.ledger(true);
 	let first = video.units.iter().find(|unit| unit.output).unwrap().group;
-	assert_eq!(first, 5, "the export starts on the first whole group after the catalog");
+	assert_eq!(first, 4, "the export starts on the group in flight");
 	assert_eq!(run.stats.release.dropped, 0);
 }
 
@@ -1628,39 +1797,48 @@ async fn a_late_catalog_starts_on_a_whole_group() {
 /// hole both decode at the new size.
 #[tokio::test(start_paused = true)]
 async fn a_skip_across_a_resolution_change_takes_the_new_parameters() {
-	let run = recover(arm(Profile::Resized, |slot| {
-		match slot.video && (slot.group == 6 || (slot.group == 5 && slot.frame >= 4)) {
-			true => Delivery::Omitted,
-			false => clean(slot),
-		}
-	}))
+	let run = recover(
+		arm(Profile::Resized, |slot| {
+			match slot.video && (slot.group == 6 || (slot.group == 5 && slot.frame >= 4)) {
+				true => Delivery::Omitted,
+				false => clean(slot),
+			}
+		})
+		.breaks(1),
+	)
 	.await;
 	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (0, 1));
 }
 
 /// The clock jumps 20 s at a declared discontinuity, and the path loses the group before the
-/// break and the one after it: the output signals the break once, on the PCR, and resumes on the
-/// keyframe after.
+/// break and the one after it: the output signals the declared break and the delivery skip
+/// on the PCR, and resumes on the keyframe after.
 #[tokio::test(start_paused = true)]
 async fn a_declared_discontinuity_survives_loss_either_side() {
-	let run = recover(arm(Profile::Spliced, |slot| {
-		match slot.video && (slot.group == 7 || (slot.group == 5 && slot.frame >= 4)) {
-			true => Delivery::Omitted,
-			false => clean(slot),
-		}
-	}))
+	let run = recover(
+		arm(Profile::Spliced, |slot| {
+			match slot.video && (slot.group == 7 || (slot.group == 5 && slot.frame >= 4)) {
+				true => Delivery::Omitted,
+				false => clean(slot),
+			}
+		})
+		.breaks(2),
+	)
 	.await;
 	assert_eq!(run.stats.release.dropped, 0);
 }
 
 /// The path loses the marker that declares the break, and every frame on either side arrives:
-/// the export still finds the break where the clock jumps and signals it once.
+/// the export marks the overlapping delivery skips and recovered clock jump once.
 #[tokio::test(start_paused = true)]
 async fn a_lost_discontinuity_marker_still_breaks_the_clock() {
-	let run = recover(arm(Profile::Spliced, |slot| match slot.marker {
-		true => Delivery::Omitted,
-		false => clean(slot),
-	}))
+	let run = recover(
+		arm(Profile::Spliced, |slot| match slot.marker {
+			true => Delivery::Omitted,
+			false => clean(slot),
+		})
+		.breaks(1),
+	)
 	.await;
 	assert_eq!(run.stats.release.dropped, 0);
 }
@@ -1676,7 +1854,7 @@ async fn a_congested_path_sheds_what_it_made_late() {
 			queue: 2 * DELAY,
 			congested: |at| (Duration::from_millis(1500)..Duration::from_millis(3500)).contains(&at),
 		}),
-		..arm(Profile::Closed, clean)
+		..arm(Profile::Closed, clean).breaks(1)
 	})
 	.await;
 	let video = run.ledger(true);
@@ -1763,7 +1941,8 @@ async fn long_faults_hold_their_latency() {
 			// Two seconds of every twenty.
 			congested: |at| (17..19).contains(&(at.as_secs() % 20)) && at < Duration::from_secs(100),
 		}),
-		..arm(Profile::Long, faults)
+		// Five cycles, each with four scheduled losses and one shared congestion interval.
+		..arm(Profile::Long, faults).breaks(5 * 5)
 	})
 	.await;
 	assert!(run.stats.release.gaps >= 20, "every fault skipped: {:?}", run.stats);
@@ -1823,7 +2002,7 @@ async fn the_graders_fail_what_they_should() {
 	assert!(err.contains("gaps reported"), "{err}");
 
 	// The output less the tables ahead of the keyframe it resumes at.
-	let ts = run.ts();
+	let ts = &run.ts;
 	let pid = run.pid(Class::Video);
 	let pids = (pid, run.pid(Class::Audio));
 	let packets = ts.as_chunks::<188>().0;
@@ -1837,7 +2016,7 @@ async fn the_graders_fail_what_they_should() {
 		.filter(|&(at, packet)| !((tables..resume).contains(&at) && payload(packet).0 == 0))
 		.flat_map(|(_, packet)| packet.iter().copied())
 		.collect();
-	segments(&ts, &run.ledgers[video], pids).unwrap();
+	segments(ts, &run.ledgers[video], pids).unwrap();
 	let err = segments(&stripped, &run.ledgers[video], pids).unwrap_err();
 	assert!(err.contains("no PAT"), "{err}");
 

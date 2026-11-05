@@ -15,6 +15,7 @@
 
 #![expect(
 	clippy::disallowed_methods,
+	clippy::disallowed_types,
 	reason = "custom timings measure the real time the work took, not the ambient clock"
 )]
 
@@ -24,15 +25,27 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::{Client, Hop, Server, Timestamp, Version, broadcast, cache, origin, track, transport::memory};
+use moq_net::{Client, Hop, Server, Timestamp, Version, cache, origin, track, transport::memory};
 
 const VERSION: &str = "moq-lite-06";
 
 /// Frames per group, so per-frame and per-group costs both appear.
 const FRAMES: usize = 4;
 
-const SIZES: [usize; 3] = [64, 16 * 1024, 1024 * 1024];
+const SIZES: [usize; 4] = [64, 16 * 1024, 1024 * 1024, 4 * 1024 * 1024];
 const STREAMS: [usize; 3] = [1, 16, 128];
+
+/// The most payload one round may write across every stream, so the largest frames skip
+/// the widest sweep rather than hold gigabytes.
+const ROUND_BYTES: usize = 512 * 1024 * 1024;
+
+/// Every `(streams, size)` pair to measure.
+fn cases() -> impl Iterator<Item = (usize, usize)> {
+	STREAMS
+		.into_iter()
+		.flat_map(|streams| SIZES.into_iter().map(move |size| (streams, size)))
+		.filter(|(streams, size)| streams * FRAMES * size <= ROUND_BYTES)
+}
 
 struct Counter;
 
@@ -82,27 +95,29 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 fn now() -> moq_net::time::Instant {
-	moq_clock::now()
+	kio::clock::now()
 }
 
 /// One publisher and one subscriber session over an in-memory pair.
 struct Link {
+	pools: Vec<cache::Pool>,
+	cache_now: moq_net::time::Instant,
 	tracks: Vec<track::Producer>,
 	subscribers: Vec<track::Subscriber>,
 	payload: Bytes,
-	_broadcast: broadcast::Producer,
+	_broadcast: origin::Publication,
 	_sessions: (moq_net::Session, moq_net::Session),
 	_origins: (origin::Producer, origin::Producer),
 }
 
 impl Link {
 	async fn new(streams: usize, size: usize) -> Self {
+		let mut pools = Vec::new();
 		let version: Version = VERSION.parse().unwrap();
-		let origin = |hop: u64| {
+		let mut origin = |hop: u64| {
 			let mut config = origin::Config::new(Hop::new(hop).unwrap());
-			// Hold one round's groups, with room for the handover, and no more.
-			config.pool =
-				cache::Pool::new(cache::Config::default().with_capacity((4 * streams * FRAMES * size) as u64));
+			config.pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
+			pools.push(config.pool.clone());
 			let (producer, driver) = origin::Producer::new(config);
 			tokio::spawn(moq_net::time::run(driver));
 			producer
@@ -135,15 +150,22 @@ impl Link {
 		);
 
 		let broadcast = publisher.create_broadcast("bench").unwrap();
-		let info = track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		let info = track::Info::default()
+			.with_max_age(None)
+			.with_timescale(moq_net::Timescale::MILLI);
 		let tracks: Vec<_> = (0..streams)
 			.map(|index| broadcast.create_track(format!("{index}"), info.clone()).unwrap())
 			.collect();
 		broadcast.announce(Default::default()).unwrap();
 
 		let consumer = subscriber.consume();
-		consumer.routed("bench").await.unwrap();
-		let remote = consumer.request_broadcast("bench", None).await.unwrap();
+		let remote = consumer
+			.follow("bench", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let mut subscribers = Vec::new();
 		for index in 0..streams {
 			let track = remote.track(&format!("{index}")).unwrap();
@@ -151,6 +173,8 @@ impl Link {
 		}
 
 		let mut link = Self {
+			pools,
+			cache_now: now(),
 			tracks,
 			subscribers,
 			payload: Bytes::from(vec![0; size]),
@@ -160,6 +184,7 @@ impl Link {
 		};
 		// Warm every stream so the timed rounds skip first-group setup.
 		for _ in 0..4 {
+			link.tick();
 			link.round().await;
 		}
 		link
@@ -186,13 +211,31 @@ impl Link {
 		bytes
 	}
 
+	// Advance the cache/model clock between rounds to expire read history.
+	fn tick(&mut self) {
+		self.cache_now += cache::DEFAULT_EXPIRY;
+		for pool in &self.pools {
+			pool.poll(self.cache_now, &kio::Waiter::noop());
+		}
+	}
+
 	async fn measure(&mut self, iters: u64) -> Duration {
 		let expected = self.tracks.len() * FRAMES * self.payload.len();
-		let start = Instant::now();
+		let counting = std::env::var_os("MEMORY_ALLOCS").is_some();
+		let mut elapsed = Duration::ZERO;
 		for _ in 0..iters {
+			self.tick();
+			if counting {
+				COUNTING.store(true, Ordering::Relaxed);
+			}
+			let start = Instant::now();
 			assert_eq!(self.round().await, expected);
+			elapsed += start.elapsed();
+			if counting {
+				COUNTING.store(false, Ordering::Relaxed);
+			}
 		}
-		start.elapsed()
+		elapsed
 	}
 }
 
@@ -201,22 +244,16 @@ fn allocations() {
 	const ROUNDS: usize = 64;
 
 	let rt = runtime();
-	for streams in STREAMS {
-		for size in SIZES {
-			let mut link = rt.block_on(Link::new(streams, size));
-			ALLOCATIONS.store(0, Ordering::Relaxed);
-			ALLOCATED.store(0, Ordering::Relaxed);
-			COUNTING.store(true, Ordering::Relaxed);
-			rt.block_on(link.measure(ROUNDS as u64));
-			COUNTING.store(false, Ordering::Relaxed);
+	for (streams, size) in cases() {
+		let mut link = rt.block_on(Link::new(streams, size));
+		ALLOCATIONS.store(0, Ordering::Relaxed);
+		ALLOCATED.store(0, Ordering::Relaxed);
+		rt.block_on(link.measure(ROUNDS as u64));
 
-			let frames = (ROUNDS * streams * FRAMES) as f64;
-			let allocations = ALLOCATIONS.load(Ordering::Relaxed) as f64 / frames;
-			let bytes = ALLOCATED.load(Ordering::Relaxed) as f64 / frames;
-			println!(
-				"streams={streams}/size={size}: {allocations:.1} allocations, {bytes:.0} bytes allocated per frame"
-			);
-		}
+		let frames = (ROUNDS * streams * FRAMES) as f64;
+		let allocations = ALLOCATIONS.load(Ordering::Relaxed) as f64 / frames;
+		let bytes = ALLOCATED.load(Ordering::Relaxed) as f64 / frames;
+		println!("streams={streams}/size={size}: {allocations:.1} allocations, {bytes:.0} bytes allocated per frame");
 	}
 }
 
@@ -228,18 +265,16 @@ fn bench(c: &mut Criterion) {
 
 	let rt = runtime();
 	let mut group = c.benchmark_group("memory");
-	for streams in STREAMS {
-		for size in SIZES {
-			group.throughput(Throughput::Bytes((streams * FRAMES * size) as u64));
-			let mut link = None;
-			group.bench_function(
-				BenchmarkId::from_parameter(format!("streams={streams}/size={size}")),
-				|b| {
-					let link = link.get_or_insert_with(|| rt.block_on(Link::new(streams, size)));
-					b.iter_custom(|iters| rt.block_on(link.measure(iters)))
-				},
-			);
-		}
+	for (streams, size) in cases() {
+		group.throughput(Throughput::Bytes((streams * FRAMES * size) as u64));
+		let mut link = None;
+		group.bench_function(
+			BenchmarkId::from_parameter(format!("streams={streams}/size={size}")),
+			|b| {
+				let link = link.get_or_insert_with(|| rt.block_on(Link::new(streams, size)));
+				b.iter_custom(|iters| rt.block_on(link.measure(iters)))
+			},
+		);
 	}
 	group.finish();
 }

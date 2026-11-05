@@ -7,7 +7,6 @@ import { implementationFromSetup, implementationIntoSetup, SetupOption, SetupOpt
 test("setup option keys match the registries", () => {
 	expect({ ...SetupOption }).toEqual({
 		Path: 0x01n,
-		MaxRequestId: 0x02n,
 		AuthorizationToken: 0x03n,
 		MaxAuthTokenCacheSize: 0x04n,
 		Authority: 0x05n,
@@ -19,7 +18,6 @@ test("setup option keys match the registries", () => {
 		MaxAge: 0x915c4n,
 		Auth: 0x40b70n,
 		ActiveCount: 0x40b64n,
-		Epoch: 0x40b68n,
 	});
 });
 

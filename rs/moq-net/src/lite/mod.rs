@@ -17,19 +17,21 @@ mod announce;
 mod auth;
 mod compress;
 mod datagram;
-mod epoch;
 pub(crate) mod error;
 mod fetch;
 mod goaway;
 mod group;
 pub(crate) mod ietf;
 mod info;
+mod instance;
 pub mod message;
 mod parameters;
 pub(crate) mod priority;
 mod probe;
 #[cfg(feature = "async")]
 mod publisher;
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+pub use publisher::CoverageBench;
 #[cfg(feature = "async")]
 mod replay;
 #[cfg(feature = "async")]
@@ -65,6 +67,12 @@ pub use stream::*;
 pub use subscribe::*;
 #[cfg(feature = "async")]
 use subscriber::*;
+// The fuzz harness drives a group stream's ingest directly.
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+pub(crate) use subscriber::FrameIngest;
+// The range-count bench looks up a subscription's frame bounds directly.
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+pub(crate) use publisher::FramesBench;
 pub use track::*;
 pub use tracks::*;
 pub use version::Version;

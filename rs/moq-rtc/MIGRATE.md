@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Config::max_age` of `None` is unlimited ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`server::Config::max_age` and `client::Config::max_age` default to `Some(hang::container::MAX_AGE)` (30 s), and `None` now sets no publisher limit instead of keeping that default.
+Leave the field at its default unless you have a value.
+
+### `moq_net::Path` has no lifetime
+
+`server::{whip, whep}::accept` take `impl Into<moq_net::Path>`: pass a `Path`, from `moq_net::Path::new(s)?` or `moq_net::Path::from_static`. See moq-net's migration for the rest.
+
 ### Client calls run the session
 
 `Client::publish` and `Client::subscribe` resolve once the session ends, instead of once it negotiates.

@@ -94,19 +94,11 @@ impl Import {
 	}
 
 	fn initialize_avc3(&mut self, data: &[u8]) -> Result<()> {
-		// Resolve the config from any SPS in the seed buffer. Scan a clone so the
-		// caller's buffer is left intact for the splitter to consume.
-		let mut scan = Bytes::copy_from_slice(data);
-		let mut nals = NalIterator::new(&mut scan);
-		while let Some(nal) = nals.next().transpose()? {
+		// Resolve the config from any SPS in the seed buffer.
+		for nal in crate::codec::annexb::complete_nals(data)? {
 			if is_sps(&nal) {
 				self.seed_sps(&nal)?;
 			}
-		}
-		if let Some(nal) = nals.flush()?
-			&& is_sps(&nal)
-		{
-			self.seed_sps(&nal)?;
 		}
 		Ok(())
 	}
@@ -122,7 +114,8 @@ impl Import {
 		Ok(())
 	}
 
-	/// The MoQ track name this importer publishes on.
+	/// The MoQ track name this importer publishes on, which a decoder identity change replaces
+	/// with a newly minted one.
 	pub fn name(&self) -> &str {
 		self.track.name()
 	}
@@ -130,6 +123,12 @@ impl Import {
 	/// A watch-only handle to this track's subscriber demand.
 	pub fn demand(&self) -> moq_net::track::Demand {
 		self.track.track().demand()
+	}
+
+	/// The track this importer publishes on, which a decoder identity change replaces with a
+	/// newly named one.
+	pub fn track(&self) -> &moq_net::track::Producer {
+		self.track.track()
 	}
 
 	/// Finish the track, flushing any buffered data.
@@ -156,6 +155,26 @@ impl Import {
 	pub fn discontinuity(&mut self) -> Result<()> {
 		self.track.discontinuity()?;
 		Ok(())
+	}
+
+	/// Advertise whether this rendition is being produced, as the catalog's
+	/// [`enabled`](hang::catalog::VideoConfig::enabled): a publisher that stops encoding it
+	/// disables it, so viewers select another rendition rather than wait for frames.
+	pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
+		self.catalog.set_enabled(&mut self.track, enabled)?;
+		Ok(())
+	}
+
+	/// Report frames the encoder feeding this track skipped. See
+	/// [`Producer::report_skipped`](crate::container::Producer::report_skipped).
+	pub fn report_skipped(&self, frames: u64) {
+		self.track.report_skipped(frames);
+	}
+
+	/// Report the target bitrate of the encoder feeding this track. See
+	/// [`Producer::report_bitrate`](crate::container::Producer::report_bitrate).
+	pub fn report_bitrate(&self, bitrate: moq_net::bandwidth::Rate) {
+		self.track.report_bitrate(bitrate);
 	}
 
 	/// Close the current group and open the next one at `sequence`.
@@ -187,10 +206,7 @@ impl Import {
 		Ok(())
 	}
 
-	/// Apply a resolved config, updating the catalog rendition in place.
-	///
-	/// A changed config (new avcC, or a new inline SPS) just re-mirrors the
-	/// rendition; there are no fixed tracks to reject a reconfiguration.
+	/// Apply a resolved config, minting a track when the decoder identity changes.
 	fn apply_config(&mut self, config: hang::catalog::VideoConfig) -> crate::Result<()> {
 		self.catalog.publish(&mut self.track, config)
 	}
@@ -199,19 +215,7 @@ impl Import {
 	/// keyframe's inline SPS and refining the catalog jitter as it goes.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		for frame in frames {
-			if frame.keyframe {
-				let hdr =
-					crate::codec::color::access_unit(&frame.payload, self.length_size, 1, |h| h & 0x1f == NAL_TYPE_SEI);
-				// avc1 config arrives out-of-band via initialize(); avc3 carries the SPS inline.
-				let sps = self.length_size.is_none().then(|| find_sps(&frame.payload)).flatten();
-				// A new SPS starts a coded sequence whose HDR metadata replaces the last one's. It goes
-				// first, so a keyframe that also configures publishes once.
-				let sequence = sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
-				self.catalog.hdr(&mut self.track, hdr, sequence)?;
-				if let Some(sps) = sps {
-					self.configure_from_sps(&sps)?;
-				}
-			}
+			self.configure(&frame)?;
 
 			if !self.catalog.configured() {
 				// A keyframe we still can't configure is undecodable, so bail
@@ -224,6 +228,30 @@ impl Import {
 			}
 
 			self.track.write(frame)?;
+		}
+		Ok(())
+	}
+
+	/// Account for a frame its caller drops rather than writes: a keyframe still configures the
+	/// rendition. The splitter re-injects the SPS and PPS into the next keyframe itself.
+	pub(crate) fn dropped(&mut self, frame: &Frame) -> Result<()> {
+		self.configure(frame)
+	}
+
+	/// Resolve the config and HDR metadata a keyframe carries inline, without publishing it.
+	fn configure(&mut self, frame: &Frame) -> Result<()> {
+		if !frame.keyframe {
+			return Ok(());
+		}
+		let hdr = crate::codec::color::access_unit(&frame.payload, self.length_size, 1, |h| h & 0x1f == NAL_TYPE_SEI);
+		// avc1 config arrives out-of-band via initialize(); avc3 carries the SPS inline.
+		let sps = self.length_size.is_none().then(|| find_sps(&frame.payload)).flatten();
+		// A new SPS starts a coded sequence whose HDR metadata replaces the last one's. It goes
+		// first, so a keyframe that also configures publishes once.
+		let sequence = sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
+		self.catalog.hdr(&mut self.track, hdr, sequence)?;
+		if let Some(sps) = sps {
+			self.configure_from_sps(&sps)?;
 		}
 		Ok(())
 	}
@@ -392,8 +420,49 @@ mod tests {
 		assert_eq!((color.mastering, color.content_light), (None, None));
 	}
 
+	/// A disabled rendition stays disabled across a new SPS, and enabling it republishes.
+	#[tokio::test(start_paused = true)]
+	async fn a_disabled_rendition_survives_a_new_sps() {
+		use crate::codec::h264::fixtures::{PPS, SPS_BT709, SPS_HDR10};
+
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		let mut split = Split::new();
+		let mut keyframe = |import: &mut Import, ms: u64, sps: &[u8]| {
+			let mut annexb = BytesMut::new();
+			for nal in [sps, PPS, idr] {
+				annexb.extend_from_slice(&[0, 0, 0, 1]);
+				annexb.extend_from_slice(nal);
+			}
+			let pts = moq_net::Timestamp::from_millis(ms).unwrap();
+			let mut frames = split.decode(&annexb, pts).expect("split keyframe");
+			frames.extend(split.flush(pts).expect("flush keyframe"));
+			import.decode(frames).expect("decode keyframe");
+		};
+		let enabled = || catalog.snapshot().video.renditions["video"].enabled;
+
+		keyframe(&mut import, 0, SPS_HDR10);
+		assert!(enabled());
+		import.set_enabled(false).unwrap();
+		assert!(!enabled());
+		keyframe(&mut import, 40, SPS_BT709);
+		assert_eq!(
+			catalog.snapshot().video.renditions["video"]
+				.color
+				.as_ref()
+				.unwrap()
+				.primaries,
+			Some(1)
+		);
+		assert!(!enabled(), "a reconfiguration keeps the rendition disabled");
+		import.set_enabled(true).unwrap();
+		assert!(enabled());
+	}
+
 	/// A frame-only SPS declares its reorder depth, which holds for the track's life: a later SPS
-	/// declaring less or none keeps it, and one declaring more is refused.
+	/// declaring less or none keeps it, and one declaring more is refused. An SPS that changes the
+	/// decoder identity mints a new track, which declares its own.
 	#[tokio::test(start_paused = true)]
 	async fn a_declared_reorder_depth_holds_for_the_track() {
 		use crate::codec::h264::fixtures::{PPS, SPS_FIELD, SPS_IPB, SPS_PYRAMID};
@@ -404,7 +473,7 @@ mod tests {
 		let mut deep = Import::new(deep, catalog.reserve(), Default::default()).unwrap();
 		let mut shallow = Import::new(shallow, catalog.reserve(), Default::default()).unwrap();
 		let mut split = Split::new();
-		let mut keyframe = |import: &mut Import, name: &str, ms: u64, sps: &[u8]| {
+		let mut keyframe = |import: &mut Import, ms: u64, sps: &[u8]| {
 			let mut annexb = BytesMut::new();
 			for nal in [sps, PPS, idr] {
 				annexb.extend_from_slice(&[0, 0, 0, 1]);
@@ -415,18 +484,17 @@ mod tests {
 			frames.extend(split.flush(pts).expect("flush keyframe"));
 			import
 				.decode(frames)
-				.map(|()| catalog.snapshot().video.renditions[name].reorder)
+				.map(|()| catalog.snapshot().video.renditions[import.name()].reorder)
 		};
 
-		assert_eq!(keyframe(&mut deep, "deep", 0, SPS_PYRAMID).unwrap(), Some(2));
-		assert_eq!(keyframe(&mut deep, "deep", 40, SPS_IPB).unwrap(), Some(2));
-		assert_eq!(
-			keyframe(&mut deep, "deep", 80, SPS_FIELD).unwrap(),
-			Some(2),
-			"fields declare none"
-		);
-		assert_eq!(keyframe(&mut shallow, "shallow", 0, SPS_IPB).unwrap(), Some(1));
-		assert!(keyframe(&mut shallow, "shallow", 40, SPS_PYRAMID).is_err());
+		assert_eq!(keyframe(&mut deep, 0, SPS_PYRAMID).unwrap(), Some(2));
+		assert_eq!(keyframe(&mut deep, 40, SPS_IPB).unwrap(), Some(2));
+		assert_eq!(deep.name(), "deep");
+		// A field-coded SPS is a new profile, level, and scan: a new track with its own bound.
+		assert_eq!(keyframe(&mut deep, 80, SPS_FIELD).unwrap(), None, "fields declare none");
+		assert_eq!(deep.name(), "deep/1");
+		assert_eq!(keyframe(&mut shallow, 0, SPS_IPB).unwrap(), Some(1));
+		assert!(keyframe(&mut shallow, 40, SPS_PYRAMID).is_err());
 	}
 
 	/// A new out-of-band avcC starts a new coded sequence, so in-band HDR metadata from the last one
@@ -454,7 +522,10 @@ mod tests {
 		let color = || catalog.snapshot().video.renditions["video"].color.clone().unwrap();
 		assert!(color().mastering.is_some());
 
+		// The new avcC is a new description, so it publishes a new track.
 		import.initialize(&avcc(SPS_BT709)).unwrap();
+		assert_eq!(import.name(), "video/1");
+		let color = || catalog.snapshot().video.renditions["video/1"].color.clone().unwrap();
 		assert_eq!(color().primaries, Some(1));
 		assert_eq!((color().mastering, color().content_light), (None, None));
 	}
@@ -659,7 +730,7 @@ mod tests {
 		];
 		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
 		// recovery-point SEI (payload type 6), then a non-IDR I-slice (type 1).
-		let sei: &[u8] = &[0x06, 0x06, 0x02, 0x00, 0x40, 0x80];
+		let sei: &[u8] = &[0x06, 0x06, 0x01, 0x84, 0x80];
 		let islice: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
 
 		let mut annexb = BytesMut::new();

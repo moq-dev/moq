@@ -4,12 +4,32 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### A compressed group is held to the group budget
+### Async wrappers are opt-in
 
-A compressed group may inflate to at most `moq_net::group::MAX_CACHE_BYTES` (32 MiB), the most a plain group carries, so a peer's small frames cannot make a reader hold more than an uncompressed track would.
-The encoders charge each frame its plaintext: a compressed snapshot or window header over 32 MiB fails with `moq_net::Error::FrameTooLarge` (snapshot) or the window's group cache error, where it used to pass up to 64 MiB, and deltas and ops roll a new group once a group's plaintext would pass the budget.
-A compressed stream's budget is 32 MiB of record plaintext.
-`snapshot::consumer::Config::max_size` still sets a tighter limit, but no longer stops inflation early; a frame inflates within the group budget and is then refused.
+Enable the `async` Cargo feature to keep awaiting consumer `next`/`latest` and producer
+`refresh`: `moq-json = { version = "...", features = ["async"] }`. This also applies
+with `default-features = false`. The feature is off by default; `poll_next`,
+`poll_latest`, and `poll_refresh` stay available without it.
+The generated consumer wrappers no longer require `T: Unpin`.
+The JSON framing and JS and binding APIs are unchanged.
+
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`snapshot::Consumer::new` takes the track, a `moq_net::track::Consumer`, instead of a `track::Subscriber`, and subscribes to it itself at a zero `delay.max` and default preferences otherwise; the new `Config::priority` sets the subscription's priority.
+Pass `broadcast.track(name)?` rather than `broadcast.track(name)?.subscribe(..).await?`, or `producer.consume()` for an in-process `track::Producer`.
+A refused or failed subscription now surfaces from the first read instead of before construction.
+No handle to that subscription leaves the consumer, so ranges, order, and `delay.max` can no longer be set on a snapshot reader.
+
+`next()` skips every group a newer one supersedes, and `latest()` no longer waits for a lower group a received track still owes, whatever another reader of the track asks for.
+A reader that set `delay.max` to replay a snapshot track's history or trail a playhead gets only the newest group: read the track's groups yourself and feed them to a `snapshot::Decoder`, or publish a `stream` track when every state must survive, or a `window` track for a bounded recent history.
+
+### Compression moves to the track
+
+`Compression`, every `Config::compression` field, the `with_compression` setters, `Error::Flate`, `Error::Desync`, and `stream::Decoder::reset` are gone, along with the moq-flate dependency.
+Frames are plain JSON; set `compress: true` on the `moq_net::track::Info` you create the track with, and moq-net compresses each group on the wire and hands every reader plain frames.
+Drop the `compression` field from your producer and consumer configs: a consumer reads a compressed track with no setting of its own.
+The stream and window consumer configs are now empty, kept for options to come.
+Every frame is charged its JSON size against `moq_net::group::MAX_CACHE_BYTES`, as a compressed one already was.
 
 ### Groups roll on joiner demand
 
@@ -25,7 +45,7 @@ An `Encoder` user restates with `Encoder::snapshot()` once `Demand::wanted` pass
 
 Snapshot, stream, and window `next` / `poll_next` return `moq_net::Timed<T>`: read `.value` for the value and `.at` for the frame's exact timestamp, `None` when untimed.
 A window event's `.value` is the `Event` that `next` used to return; a record restated by a group header carries the header frame's time.
-Snapshot `next` now yields every state in order inside the subscription's `max_delay`; call `latest` / `poll_latest` for the old collapse-to-newest read.
+Snapshot `next` now yields each state in order, skipping every group a newer one supersedes (see the zero-delay entry above); call `latest` / `poll_latest` for the old collapse-to-newest read.
 
 ### Duplicate keys are refused
 

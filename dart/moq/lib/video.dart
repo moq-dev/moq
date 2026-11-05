@@ -16,8 +16,20 @@ typedef Producer = MoqVideoProducer;
 /// Encodes raw pictures without publishing them.
 typedef Encoder = MoqVideoEncoder;
 
-/// Subscribes to a catalog video rendition and yields decoded frames; open one with `Consumer.subscribe`.
+/// Subscribes to a catalog video rendition and yields each [Read]; open one with `Consumer.subscribe`.
 typedef Consumer = MoqVideoConsumer;
+
+/// One item a [Consumer] reads, in delivery order: [ReadFrame], [ReadGap], or [ReadEnd].
+typedef Read = MoqVideoRead;
+
+/// A decoded picture; `dispose()` its frame promptly, since held frames stall the decoder.
+typedef ReadFrame = FrameMoqVideoRead;
+
+/// Media after what was already read was lost; what follows does not continue it.
+typedef ReadGap = GapMoqVideoRead;
+
+/// The publisher stopped its encoder; what follows comes from a fresh encoder.
+typedef ReadEnd = EndMoqVideoRead;
 
 /// The pixel layout, resolution, and framerate written to a [Producer].
 typedef EncoderInput = MoqVideoEncoderInput;
@@ -25,7 +37,7 @@ typedef EncoderInput = MoqVideoEncoderInput;
 /// The codec, bitrate, group mode, and backend preference.
 typedef EncoderOutput = MoqVideoEncoderOutput;
 
-/// What a [Consumer] delivers: an optional resize, a max delay, and whether to keep the decoder's surface (macOS and iOS).
+/// What a [Consumer] delivers: an optional resize, a delay, and whether to keep the decoder's surface (macOS and iOS).
 typedef DecoderOutput = MoqVideoDecoderOutput;
 
 /// One raw picture with its presentation timestamp.
@@ -69,25 +81,6 @@ typedef SoftwareEncoder = SoftwareMoqVideoEncoderKind;
 
 /// A specific backend by name, such as `videotoolbox`, `mediafoundation`, or `openh264`.
 typedef NamedEncoder = NamedMoqVideoEncoderKind;
-
-/// Duration view over a raw picture's timestamp.
-extension VideoFrameDuration on MoqVideoFrame {
-  /// Presentation timestamp.
-  Duration get timestamp => Duration(microseconds: timestampUs);
-}
-
-/// Duration view over a decoded picture's timestamp.
-extension VideoDecodedFrameDuration on MoqVideoDecodedFrame {
-  /// Presentation timestamp.
-  Duration get timestamp => Duration(microseconds: timestampUs());
-}
-
-/// Duration view over a decoder's latency bound.
-extension VideoDecoderOutputDuration on MoqVideoDecoderOutput {
-  /// Upper bound on buffering before a stalled group is skipped, or null for the default.
-  Duration? get maxDelay =>
-      maxDelayUs == null ? null : Duration(microseconds: maxDelayUs!);
-}
 
 /// Input, codec settings, and publication ownership for a producer.
 typedef ProducerOptions = MoqVideoProducerOptions;

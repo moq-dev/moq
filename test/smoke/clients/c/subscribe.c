@@ -29,18 +29,16 @@ typedef struct {
 // Callbacks run on libmoq's runtime thread; main waits on the condvar. ctx
 // lives on main's stack and outlives the callbacks (main blocks until got/
 // timeout, then the process exits), so there's no use-after-free.
-static void on_state(void *ud, const moq_connection_state *state) {
+static void on_status(void *ud, int32_t status) {
     (void)ud;
-    fprintf(stderr, "session state: phase=%d connects=%llu failure=%d\n", (int)state->phase,
-            (unsigned long long)state->connects, state->failure);
+    fprintf(stderr, "session status: %d\n", status);
 }
 
 static void on_frame(void *ud, int32_t frame) {
     ctx_t *c = (ctx_t *)ud;
     if (frame <= 0) return; // 0 = ended, negative = error
-    moq_frame f;
-    memset(&f, 0, sizeof(f));
-    if (moq_consume_frame((uint32_t)frame, &f) == 0 && f.payload_size > 0) {
+    moq_frame item = {0};
+    if (moq_consume_frame((uint32_t)frame, &item) == 0 && item.payload_size > 0) {
         pthread_mutex_lock(&c->mu);
         c->got = 1;
         pthread_cond_signal(&c->cv);
@@ -116,7 +114,7 @@ int main(int argc, char **argv) {
 
     // NULL config dials with the defaults; origin_publish = 0 disables
     // publishing; consume via our origin.
-    int32_t session = moq_session_connect(url, strlen(url), NULL, 0, (uint32_t)origin, on_state, &c);
+    int32_t session = moq_session_connect(url, strlen(url), NULL, 0, (uint32_t)origin, on_status, &c);
     if (session <= 0) {
         fprintf(stderr, "error: moq_session_connect failed: %d\n", session);
         return 1;

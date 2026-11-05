@@ -10,11 +10,10 @@ use crate::Result;
 
 /// Consumes a sliding window of JSON records from a track, yielding one event per change.
 ///
-/// A [`Decoder`] that owns its track: it reads groups, starts a cold DEFLATE window at each
-/// boundary, and turns each group's header into just the changes this reader has not been told
+/// A [`Decoder`] that owns its track: it reads groups and turns each group's header into just the changes this reader has not been told
 /// about. When something else already owns the track, use the [`Decoder`] directly.
 ///
-/// Group rolls never surface. A publisher rolls for compression's sake, and a header restating the
+/// Group rolls never surface. A header restating the
 /// window yields nothing for records already delivered, so this reads as one continuous stream of
 /// [`Event`]s regardless of how the publisher framed them.
 ///
@@ -48,14 +47,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 	}
 
 	/// Get the next event and its frame's timestamp, or `None` once the track ends.
-	pub async fn next(&mut self) -> Result<Option<moq_net::Timed<Event<T>>>>
-	where
-		T: Unpin,
-	{
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for the next event, without blocking.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<Event<T>>>>> {
 		loop {
 			// Drain what the last frame produced before reading more, so every queued event is that

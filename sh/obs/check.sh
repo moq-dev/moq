@@ -32,11 +32,11 @@ fi
 # the change that opens the gap and so the one that should fail.
 # OBS_LINKED_VERSION comes from the dev shell (see flake.nix), so this leg
 # is skipped outside it, where there is no nixpkgs obs-studio to compare.
-# MOQ_STRICT turns that skip into an error for the same reason it turns a
+# CI_STRICT turns that skip into an error for the same reason it turns a
 # missing tool into one: in CI a leg that checks nothing still reports green.
 if [ -z "${OBS_LINKED_VERSION:-}" ]; then
-    if [ -n "${MOQ_STRICT:-}" ]; then
-        echo "MOQ_STRICT is set but OBS_LINKED_VERSION is unset; run inside 'nix develop', which exports it" >&2
+    if [ -n "${CI_STRICT:-}" ]; then
+        echo "CI_STRICT is set but OBS_LINKED_VERSION is unset; run inside 'nix develop', which exports it" >&2
         exit 1
     fi
 else
@@ -59,6 +59,22 @@ if command -v cmake >/dev/null; then
         cat "$build_dir/configure.log" >&2
         exit 1
     fi
+    # Neither a release archive nor a prebuilt moq-ffi carries qlog.
+    for scenario in archive prebuilt; do
+        args=(-DMOQ_FFI_QLOG=ON)
+        case "$scenario" in
+            archive) args+=(-DMOQ_LOCAL= -DMOQ_VERSION=0.0.0) ;;
+            prebuilt) args+=("-DMOQ_FFI_DIR=$build_dir") ;;
+        esac
+        if cmake -S . -B "$build_dir/qlog-$scenario" "${args[@]}" >"$build_dir/configure.log" 2>&1; then
+            echo "CMake accepted MOQ_FFI_QLOG without a source build: $scenario" >&2
+            exit 1
+        fi
+        if ! grep -Fq "MOQ_FFI_QLOG requires the in-tree build" "$build_dir/configure.log"; then
+            cat "$build_dir/configure.log" >&2
+            exit 1
+        fi
+    done
     archive="$build_dir/moq-cpp-0.0.0-x86_64-unknown-linux-gnu.tar.gz"
     touch "$archive"
     for scenario in conflict missing mismatch; do

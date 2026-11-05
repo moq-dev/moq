@@ -30,6 +30,8 @@ Decided with the maintainer on 2026-10-21:
   through every registered public relay), plus every cell of the runner's
   report with a moq.dev side: our clients, our docker relay, or
   `cdn.moq.dev`, including third-party clients failing against our relay.
+  Smoke's upstream runner job fails only on our clients against our relay,
+  so this audit is what catches every other red cell.
 - Sync new registry entries. The smoke workflow's upstream runner job runs
   the runner's HEAD, so check that newly registered clients and docker-only
   relays show up in its [report](https://git.moq.dev/interop-runner/),
@@ -42,7 +44,7 @@ Decided with the maintainer on 2026-10-21:
 
 Both reports run published packages, so a fix turns green only after it
 ships. Verify from `main` instead. For our clients through a third-party
-relay, `MOQ_BIN=target/debug/moq just relays --only <key> --publishers rust
+relay, `CLI_BIN=target/debug/moq just relays --only <key> --publishers rust
 --subscribers rust` from `test/smoke`. For a third-party client through our
 relay, run its published runner image (`RELAY_URL`, `TLS_DISABLE_VERIFY=1`,
 `TESTCASE`) on the host network against a `moq-relay` built from `main`.
@@ -64,14 +66,14 @@ each turned green:
   WebTransport on that port; a raw-QUIC-only relay stays unsupported, since
   JS has no raw QUIC. The JS client's red5 WebTransport cells still time out
   connecting, which m0's one-write control messages target.
-- `subscribe-namespace-lifecycle`: released JS withdraws a draft-17+
+- `subscribe-namespace-lifecycle`: released JS withdraws a draft-18+
   PUBLISH_NAMESPACE with FIN, which six relays ignore, so it waits for
   NAMESPACE_DONE. `main` resets the request
   ([moq-dev/moq#5483](https://github.com/moq-dev/moq/pull/5483)) and passes
   against Cloudflare draft-18;
   [moq-dev/moq#6518](https://github.com/moq-dev/moq/pull/6518) backports it
   to `release`. Released Rust never sees the NAMESPACE itself from quic-zig
-  or moxygen (docker, and draft-14 over raw QUIC); the client built on
+  or moxygen (docker); the client built on
   `main` passes against both, so it gets no backport: the runner client bump
   fixes it.
 - Our relay through third-party clients: `rendezvous-timeout` 0x10
@@ -98,10 +100,8 @@ Still red from `main`, ours:
 - moq-dev-js `data-subgroup-basic` against libquicr never sees the track
   end, while moq-dev-rs passes. Not yet traced.
 - Every `js-web` publisher cell behind a joining FETCH (imquic, MOQtail
-  draft-22, aiomoqt, red5) waits on [JavaScript FETCH](/quest/m1/js-fetch.md).
-  moxygen draft-14 over raw QUIC discovered nothing, since the CLI asked
-  draft-14 for no namespace; it passed live once Rust asked for the watched
-  prefixes ([moq-dev/moq#6530](https://github.com/moq-dev/moq/pull/6530)).
+  draft-22, aiomoqt, red5) was refused its FETCH; JS now serves cached and
+  draft-18 joining FETCH, so rerun them.
 
 Theirs, reported or waiting on others:
 
@@ -118,39 +118,76 @@ Theirs, reported or waiting on others:
   fixed upstream; imquic's cells against `cdn.moq.dev` wait for the runner
   to rebuild its image.
   [meetecho/imquic#43](https://github.com/meetecho/imquic/issues/43)
-  (drops a data stream whose header spans reads) is owned by
-  [JS subgroup data through imquic](/quest/m1/interop-coverage/js-imquic-objects.md).
+  (drops a data stream whose header spans reads) is closed, and the
+  runner's moq-dev-js client writes the header in one write since
+  `@moq/net` 0.4.7
+  ([englishm/moq-interop-runner#179](https://github.com/englishm/moq-interop-runner/pull/179)):
+  `data-subgroup-basic` against imquic passes in all three cells of the
+  2026-10-31 nightly.
   [Eyevinn/moqlivemock#157](https://github.com/Eyevinn/moqlivemock/issues/157)
   is fixed and green.
-- Drafted in this run, posted only if the maintainer approved: Cloudflare's
-  draft-16 relay forwards END_OF_TRACK as a Normal empty object, so the Rust
-  subscriber reads an extra object (3, 0); MOQtail draft-18 never forwards
+- Drafted in this run, posted only if the maintainer approved: MOQtail draft-18 never forwards
   NAMESPACE for a later matching PUBLISH_NAMESPACE; moq-go dials only the
   IPv6 address of `cdn.moq.dev` and needs an explicit port in an `https://`
   URL; and the runner lists moqxr as not run for lack of a published image.
   Search before filing again.
+- To file: cloudflare/moq-rs `SubscribeRecv::error` returns before setting
+  `closed` when `TrackWriter::close` fails because the track has no reader,
+  so a REQUEST_ERROR reaches the caller as `done` instead of not-found.
+  Smoke's Cloudflare probe holds its reader to avoid it
+  ([moq-dev/moq#7073](https://github.com/moq-dev/moq/pull/7073)).
 - Not reported, lower value: red5 subscribes the published prefix instead
   of the requested tuple namespace (no public repo); moqlivemock's relay
   refuses a SUBSCRIBE under an announced prefix; libquicr answers
-  SUBSCRIBE_OK for an unpublished namespace; xquic ignores our draft-14
-  SUBSCRIBE_ERROR, sends `moq-test/interop` as one tuple field, and its
-  WebTransport never reaches our relay.
+  SUBSCRIBE_OK for an unpublished namespace; xquic sends `moq-test/interop`
+  as one tuple field, and its WebTransport never reaches our relay.
 
 Unsupported or down, not worth rechecking unless something changes:
 PUBLISH and SUBSCRIBE_TRACKS cases (`publish-track-*`, `namespace-discovery`,
 Cloudflare's PUBLISH cases), relays without namespace discovery, which
-moq-net needs before a SUBSCRIBE (Cloudflare draft-14, xquic-draft-18),
+moq-net needs before a SUBSCRIBE (xquic-draft-18), peers speaking only
+moq-transport drafts 14 to 17 (Cloudflare's draft-14 and draft-16 relays),
 quiche-moq (connect idle timeout), xquic's docker relay (binds loopback),
 and moqtopus and xquic-draft-18 over WebTransport (raw QUIC only).
+
+Added 2026-10-31, from the runner's 2026-10-31 nightly
+[41149054952](https://github.com/englishm/moq-interop-runner/actions/runs/41149054952)
+as read by [moq-dev/moq#7050](https://github.com/moq-dev/moq/pull/7050) and
+[moq-dev/moq#7104](https://github.com/moq-dev/moq/pull/7104) (moq-dev-js on
+`@moq/net` 0.4.7):
+
+- moq-dev-js fails `setup-only` in about 505 ms with an empty message in
+  three cells: remote QUIC against Cloudflare draft-18, remote QUIC against
+  aiomoqt, and aiomoqt docker, on 0.4.4 and 0.4.7 alike. WebTransport to the
+  same hosts passes. The two remote QUIC cells are probably the raw-QUIC
+  limitation under Check first; the aiomoqt docker cell is unexplained.
+- The same nightly shows moq-dev-js `setup-only` failures against
+  libquicr, moqlivemock, moq-dev-rs, moqtail, moqx, quiche-moq, red5,
+  stitcher-moq, and xquic-draft-18. Classify each cell from its own log,
+  and group cells only when their logs show a shared cause.
+- imquic: moq-dev-js `subscribe-before-announce` fails in both remote cells
+  (`lminiero.it`), and `publish-namespace-done` in the remote-quic cell; all
+  three pass in the docker cell.
+- Runner image staleness: a merged moq-dev-* bump reaches the nightly only
+  after someone dispatches an image rebuild, because the schedule in the
+  runner's `rebuild-all-images.yml` is commented out. After a bump merges,
+  check its GHCR tag. Asking upstream to restore the schedule is outside
+  the standing approval, so get the maintainer's first.
+- The runner's `moq-rs-draft-18-relay` and `moq-rs-draft-18-client` image
+  builds (Cloudflare draft-18) failed in the 2026-10-22 rebuild and both
+  2026-10-28 rebuilds, so those cells run stale images.
 
 ## Required
 
 - [Release cut](/quest/m2/release/cut.md) - waits for the release in flight to ship
 
+From the 2026-10-25 run: the runner's moq-dev-js `announce-subscribe` case times
+out against imquic on both 0.4.4 and the [moq-dev/moq#6769](https://github.com/moq-dev/moq/pull/6769)
+backport, so it predates that fix. It still times out on 0.4.6 and 0.4.7
+(2026-10-28, 3 runs each), and fails in all three moq-dev-js → imquic
+cells of the 2026-10-31 nightly. Classify it.
+
 ## Related
 
 - [Runner client bump](/quest/m2/release/runner-client-bump.md) - the runner's Rust client moves to the cut and its API
 - [Runner teardown](/quest/m3/interop-runner-approval.md) - the runner's moq.dev clients move to the withdrawing `close()` once it ships
-- [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - Moxygen's filter type, waiting upstream
-- [JavaScript FETCH](/quest/m1/js-fetch.md) - the JS publisher serves FETCH, which most red `js-web` publisher cells need
-- [Interop coverage](/quest/m1/interop-coverage/README.md) - the runner cases whose red cells this audit classifies

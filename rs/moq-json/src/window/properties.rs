@@ -139,7 +139,7 @@ fn check(config: ProducerConfig, steps: Vec<Step>, join: usize) -> TestCaseResul
 	}
 
 	for mode in ["following", "late", "lagging"] {
-		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default().with_compression(config.compression));
+		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
 		let mut notified = BTreeSet::new();
 		let mut received = BTreeSet::new();
 		let mut contents = BTreeMap::new();
@@ -238,6 +238,7 @@ fn window_codec_property_matches_every_readers_logical_window() {
 	let mut runner = TestRunner::new(Config {
 		cases,
 		rng_seed: RngSeed::Fixed(u64::from(seed)),
+		rng_algorithm: proptest::test_runner::RngAlgorithm::XorShift,
 		failure_persistence: None,
 		..Default::default()
 	});
@@ -259,13 +260,10 @@ fn window_codec_property_matches_every_readers_logical_window() {
 		1..65,
 	);
 	let sequence = (
-		(any::<bool>(), any::<bool>(), proptest::option::of(1usize..=8)).prop_map(
-			|(ops, compression, checkpoint_records)| ProducerConfig {
-				ops,
-				compression,
-				checkpoint_records,
-			},
-		),
+		(any::<bool>(), proptest::option::of(1usize..=8)).prop_map(|(ops, checkpoint_records)| ProducerConfig {
+			ops,
+			checkpoint_records,
+		}),
 		steps,
 		0usize..64,
 	);

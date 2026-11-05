@@ -102,7 +102,7 @@ export class Local {
 		this.user = userFields(props.user);
 
 		const origin = props.connection.origin;
-		const bandwidth = props.connection.bandwidth;
+		const bandwidth = props.connection.allocator;
 
 		this.webcam = new Publish.Source.Camera({
 			enabled: this.cameraEnabled,

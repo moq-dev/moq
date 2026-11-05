@@ -49,7 +49,7 @@ pub enum End {
 	/// The session's RTP timeline jumped, so its tracks finished before the jump.
 	///
 	/// Its timestamps no longer continue the broadcast's, so the caller finishes the
-	/// broadcast and restarts every session sharing it under a fresh epoch.
+	/// broadcast and restarts every session sharing it under a fresh instance.
 	Jumped,
 }
 
@@ -62,10 +62,8 @@ pub struct Client {
 	/// The URL without its userinfo.
 	url: Url,
 	creds: Option<Credentials>,
-	/// [`TIMEOUT`], shortened by tests.
+	/// [`TIMEOUT`], lengthened by tests so only [`KEYFRAME_TIMEOUT`] fires.
 	timeout: std::time::Duration,
-	/// [`KEYFRAME_TIMEOUT`], shortened by tests.
-	keyframe_timeout: std::time::Duration,
 	/// [`MAX_FORWARD`], shortened by tests.
 	max_forward: std::time::Duration,
 }
@@ -106,7 +104,6 @@ impl Client {
 			url,
 			creds,
 			timeout: TIMEOUT,
-			keyframe_timeout: KEYFRAME_TIMEOUT,
 			max_forward: MAX_FORWARD,
 		})
 	}
@@ -225,23 +222,23 @@ impl Client {
 		let result: Result<End> = async {
 			let mut session = self.within(session.play(play)).await??.demuxed()?;
 			tracing::info!(%url, streams = tracks.len(), "RTSP session playing");
-			let playing = moq_clock::now();
+			let playing = kio::clock::now();
 			// Measured from the last frame, so RTCP reports alone cannot keep a dead camera alive.
 			let mut deadline = playing + self.timeout;
-			while let Some(item) = moq_clock::timeout(deadline - moq_clock::now(), session.next())
+			while let Some(item) = kio::clock::timeout(deadline - kio::clock::now(), session.next())
 				.await
 				.map_err(|_| Error::Stalled(self.timeout))?
 			{
 				let item = item?;
 				if matches!(item, CodecItem::VideoFrame(_) | CodecItem::AudioFrame(_)) {
-					deadline = moq_clock::now() + self.timeout;
+					deadline = kio::clock::now() + self.timeout;
 				}
 				if ingest.push(item, session.streams())?.is_some() {
 					tracing::warn!(%url, "RTSP timeline jumped, ending the session");
 					return Ok(End::Jumped);
 				}
-				if ingest.awaiting_keyframe(playing, self.keyframe_timeout) {
-					return Err(Error::Stalled(self.keyframe_timeout));
+				if ingest.awaiting_keyframe(playing, KEYFRAME_TIMEOUT) {
+					return Err(Error::Stalled(KEYFRAME_TIMEOUT));
 				}
 			}
 			Ok(End::Closed)
@@ -264,7 +261,7 @@ impl Client {
 impl Client {
 	/// Fail `step` once it takes longer than the timeout.
 	async fn within<T>(&self, step: impl Future<Output = T>) -> Result<T> {
-		moq_clock::timeout(self.timeout, step)
+		kio::clock::timeout(self.timeout, step)
 			.await
 			.map_err(|_| Error::Stalled(self.timeout))
 	}
@@ -371,11 +368,11 @@ struct Stream {
 	track: Track,
 	/// The previous frame's timestamp, in the stream's clock units since the session start, and
 	/// when it arrived.
-	last: Option<(i64, moq_clock::Instant)>,
+	last: Option<(i64, kio::clock::Instant)>,
 	/// Whether a keyframe has been published (video) or the session started (audio).
 	started: bool,
 	/// When a lost packet broke the video's reference chain, so it waits for a keyframe.
-	held: Option<moq_clock::Instant>,
+	held: Option<kio::clock::Instant>,
 	/// Whether retina's parameter sets still need inserting: until the splitter emits a keyframe
 	/// carrying them, after which it re-inserts them ahead of every keyframe itself.
 	fresh: bool,
@@ -419,7 +416,7 @@ impl Ingest {
 				frame.timestamp(),
 				frame.data(),
 				frame.has_new_parameters(),
-				moq_clock::Instant::from_std(frame.end_ctx().received()),
+				kio::clock::Instant::from_std(frame.end_ctx().received()),
 				frame.loss(),
 			),
 			CodecItem::AudioFrame(frame) => (
@@ -427,7 +424,7 @@ impl Ingest {
 				frame.timestamp(),
 				frame.data(),
 				false,
-				moq_clock::Instant::from_std(frame.ctx().received()),
+				kio::clock::Instant::from_std(frame.ctx().received()),
 				// AAC packets decode alone, and the decoder conceals a lost one.
 				0,
 			),
@@ -470,7 +467,7 @@ impl Ingest {
 					// access unit is damaged too, even when it is a keyframe, so drop it.
 					if stream.started && stream.held.is_none() {
 						tracing::warn!(stream_id, loss, "RTP packets lost, waiting for the next keyframe");
-						stream.held = Some(moq_clock::now());
+						stream.held = Some(kio::clock::now());
 					}
 					video.reset();
 					return Ok(None);
@@ -514,7 +511,7 @@ impl Ingest {
 
 	/// Whether a video stream has waited longer than `timeout` for a keyframe: its first since
 	/// `playing`, or its next since a loss held it.
-	fn awaiting_keyframe(&self, playing: moq_clock::Instant, timeout: std::time::Duration) -> bool {
+	fn awaiting_keyframe(&self, playing: kio::clock::Instant, timeout: std::time::Duration) -> bool {
 		self.streams.iter().flatten().any(|stream| {
 			let since = match stream.held {
 				Some(held) => held,
@@ -543,11 +540,6 @@ impl Ingest {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use std::time::Duration;
 
@@ -555,14 +547,24 @@ mod tests {
 	use crate::fake::{self, Media, Server};
 
 	/// Real sockets, so a wall-clock bound on every wait instead of paused time.
-	const TIMEOUT: Duration = Duration::from_secs(10);
+	const WAIT: Duration = Duration::from_secs(10);
 	/// 30 fps at the RTP video clock.
 	const FRAME: u32 = 3000;
 
+	#[expect(
+		clippy::disallowed_methods,
+		reason = "the watchdog runs on tokio's host timer: tests that install a manual clock advance the ambient one past it"
+	)]
 	async fn within<T>(what: &str, step: impl Future<Output = T>) -> T {
-		tokio::time::timeout(TIMEOUT, step)
+		tokio::time::timeout(WAIT, step)
 			.await
 			.unwrap_or_else(|_| panic!("{what} timed out"))
+	}
+
+	/// Make the test runtime's clock one only the test moves, so a setup step on a loaded runner
+	/// never reaches a deadline. Call it before anything reads the clock.
+	fn manual() -> kio::clock::Installed {
+		kio::clock::Manual::new().install(&tokio::runtime::Handle::current())
 	}
 
 	fn broadcast() -> (moq_net::broadcast::Producer, moq_mux::catalog::Producer) {
@@ -594,7 +596,8 @@ mod tests {
 		broadcast: &moq_net::broadcast::Producer,
 		(name, container): (String, moq_mux::catalog::hang::Container),
 	) -> moq_mux::container::Consumer<moq_mux::catalog::hang::Container> {
-		let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60)));
 		let track = broadcast
 			.consume()
 			.track(&name)
@@ -839,7 +842,7 @@ mod tests {
 
 	/// Two sessions (a camera's SD and HD URLs) publish renditions of one broadcast. When one
 	/// session's timeline jumps, the caller ends the broadcast and restarts both under a fresh
-	/// epoch, each new broadcast with its own catalog.
+	/// instance, each new broadcast with its own catalog.
 	#[tokio::test]
 	async fn two_sessions_restart_together_on_a_jump() {
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
@@ -855,11 +858,15 @@ mod tests {
 			async move {
 				let mut ends = Vec::new();
 				for _ in 0..2 {
-					let epoch = moq_net::Epoch::mint();
-					let route = moq_net::origin::Route::default().with_epoch(epoch.clone());
-					let mut broadcast = origin.publish("camera", route).unwrap();
-					let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-					published_tx.send((epoch, broadcast.clone(), catalog.clone())).unwrap();
+					let instance = moq_net::Instance::random();
+					let route = moq_net::origin::Route::default().with_instance(instance.clone(), 0);
+					let broadcast = origin.publish("camera", route).unwrap();
+					let mut catalog =
+						moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default())
+							.unwrap();
+					published_tx
+						.send((instance, broadcast.clone(), catalog.clone()))
+						.unwrap();
 					// The first session to return ends the run; dropping the other's pull
 					// finishes its tracks.
 					let end = tokio::select! {
@@ -874,10 +881,10 @@ mod tests {
 			}
 		});
 
-		let mut epochs = Vec::new();
+		let mut instances = Vec::new();
 		for run in 0..2 {
-			let (epoch, broadcast, catalog) = within("the broadcast", published.recv()).await.unwrap();
-			epochs.push(epoch);
+			let (instance, broadcast, catalog) = within("the broadcast", published.recv()).await.unwrap();
+			instances.push(instance);
 			let mut sd_session = within("SD PLAY", sd.accept(500)).await;
 			let mut hd_session = within("HD PLAY", hd.accept(9000)).await;
 			sd_session.video(0, 500, &[fake::H264_IDR]).await;
@@ -904,7 +911,7 @@ mod tests {
 		let ends = within("the caller", caller).await.unwrap();
 		assert_eq!(ends[0], End::Jumped);
 		assert_eq!(ends[1], End::Closed);
-		assert!(epochs[1] > epochs[0], "the restart mints a fresh epoch");
+		assert_ne!(instances[1], instances[0], "the restart mints a fresh instance");
 	}
 
 	/// Credentials come out of the URL, never reach a log, and still authenticate.
@@ -936,51 +943,82 @@ mod tests {
 	/// redials it rather than waiting forever.
 	#[tokio::test]
 	async fn a_silent_session_stalls() {
+		let clock = manual();
 		let server = Server::bind(vec![Media::H264 { sprop: true }]).await;
 		let (broadcast, catalog) = broadcast();
-		let mut client = Client::new(server.url()).unwrap();
-		client.timeout = Duration::from_millis(200);
-		let started = tokio::time::Instant::now();
-		let pull = tokio::spawn(async move { client.pull(&broadcast, &catalog).await });
+		let client = Client::new(server.url()).unwrap();
+		let pull = tokio::spawn({
+			let (broadcast, catalog) = (broadcast.clone(), catalog.clone());
+			async move { client.pull(&broadcast, &catalog).await }
+		});
 
-		let _session = within("PLAY", server.accept(0)).await;
+		let mut session = within("PLAY", server.accept(0)).await;
+		session.video(0, 0, &[fake::H264_IDR]).await;
+		let snapshot = catalog_with(&catalog, 1, 0).await;
+		let mut reader = subscribe(&broadcast, video_track(&snapshot)).await;
+
+		// Just short of the deadline the session is still up, so a frame still publishes.
+		clock.advance(super::TIMEOUT - Duration::from_millis(1));
+		session.video(0, FRAME, &[fake::H264_SLICE]).await;
+		within("both frames", async {
+			let mut frames = 0;
+			while frames < 2 {
+				let read = reader.read().await.unwrap().expect("track open");
+				frames += usize::from(matches!(read, moq_mux::container::Read::Frame { .. }));
+			}
+		})
+		.await;
+
+		clock.advance(super::TIMEOUT);
 		let err = within("the pull", pull).await.unwrap().unwrap_err();
-		assert!(matches!(err, Error::Stalled(_)), "{err}");
-		assert!(started.elapsed() >= Duration::from_millis(200));
+		assert!(
+			matches!(err, Error::Stalled(timeout) if timeout == super::TIMEOUT),
+			"{err}"
+		);
 	}
 
 	/// A camera that stops sending media but keeps sending RTCP reports still stalls.
 	#[tokio::test]
 	async fn rtcp_alone_stalls() {
+		let clock = manual();
 		let server = Server::bind(vec![Media::H264 { sprop: true }]).await;
 		let (broadcast, catalog) = broadcast();
-		let mut client = Client::new(server.url()).unwrap();
-		client.timeout = Duration::from_millis(200);
-		let mut pull = tokio::spawn(async move { client.pull(&broadcast, &catalog).await });
+		let client = Client::new(server.url()).unwrap();
+		let pull = tokio::spawn({
+			let catalog = catalog.clone();
+			async move { client.pull(&broadcast, &catalog).await }
+		});
 
 		let mut session = within("PLAY", server.accept(0)).await;
 		session.video(0, 0, &[fake::H264_IDR]).await;
-		let err = within("the pull", async {
-			loop {
-				session.rtcp(0, 0).await;
-				tokio::select! {
-					result = &mut pull => return result.unwrap().unwrap_err(),
-					_ = tokio::time::sleep(Duration::from_millis(30)) => {}
-				}
-			}
-		})
-		.await;
-		assert!(matches!(err, Error::Stalled(_)), "{err}");
+		// Published once the frame armed the deadline.
+		catalog_with(&catalog, 1, 0).await;
+		for _ in 0..4 {
+			session.rtcp(0, 0).await;
+			// On this current-thread runtime a yield resumes only after the I/O driver polls, so
+			// the pull sees the report as readable before the clock moves. Its timeout polls the
+			// read before the deadline, so it takes the report even when the deadline is due.
+			tokio::task::yield_now().await;
+			clock.advance(super::TIMEOUT / 4);
+		}
+		let err = within("the pull", pull).await.unwrap().unwrap_err();
+		assert!(
+			matches!(err, Error::Stalled(timeout) if timeout == super::TIMEOUT),
+			"{err}"
+		);
 	}
 
 	/// A video stream that never sends a keyframe would withhold the catalog while its audio
 	/// keeps the session alive, so the pull fails rather than idling.
 	#[tokio::test]
 	async fn a_stream_without_keyframes_stalls() {
+		let clock = manual();
 		let server = Server::bind(vec![Media::H264 { sprop: true }, Media::Aac]).await;
 		let (broadcast, catalog) = broadcast();
 		let mut client = Client::new(server.url()).unwrap();
-		client.keyframe_timeout = Duration::from_millis(200);
+		// Lengthened so the clock can run well ahead of the frames read and only the keyframe
+		// deadline fires.
+		client.timeout = 10 * KEYFRAME_TIMEOUT;
 		let mut pull = tokio::spawn(async move { client.pull(&broadcast, &catalog).await });
 
 		let mut session = within("PLAY", server.accept(0)).await;
@@ -988,15 +1026,20 @@ mod tests {
 			for frame in 0.. {
 				session.video(0, frame * FRAME, &[fake::H264_SLICE]).await;
 				session.aac(1, frame * 1600, b"audio").await;
+				clock.advance(Duration::from_secs(1));
 				tokio::select! {
 					result = &mut pull => return result.unwrap().unwrap_err(),
-					_ = tokio::time::sleep(Duration::from_millis(30)) => {}
+					// A driver turn, so the pull can read what was sent.
+					_ = kio::clock::sleep(Duration::ZERO) => {}
 				}
 			}
 			unreachable!()
 		})
 		.await;
-		assert!(matches!(err, Error::Stalled(_)), "{err}");
+		assert!(
+			matches!(err, Error::Stalled(timeout) if timeout == KEYFRAME_TIMEOUT),
+			"{err}"
+		);
 	}
 
 	/// A stream that pauses, such as motion-triggered video beside continuous audio, returns as
@@ -1017,7 +1060,7 @@ mod tests {
 		let snapshot = catalog_with(&catalog, 1, 0).await;
 		let reader = subscribe(&broadcast, video_track(&snapshot)).await;
 		// Half a second of silence, well past the 100ms allowance, then the matching timestamp.
-		tokio::time::sleep(Duration::from_millis(500)).await;
+		kio::clock::sleep(Duration::from_millis(500)).await;
 		session.video(0, 45_000, &[fake::H264_SLICE]).await;
 		session.close().await;
 		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
@@ -1094,10 +1137,13 @@ mod tests {
 	/// than leaving the broadcast frozen.
 	#[tokio::test]
 	async fn held_video_without_a_keyframe_stalls() {
+		let clock = manual();
 		let server = Server::bind(vec![Media::H264 { sprop: true }]).await;
 		let (broadcast, catalog) = broadcast();
 		let mut client = Client::new(server.url()).unwrap();
-		client.keyframe_timeout = Duration::from_millis(200);
+		// Lengthened so the clock can run well ahead of the frames read and only the keyframe
+		// deadline fires.
+		client.timeout = 10 * KEYFRAME_TIMEOUT;
 		let mut pull = tokio::spawn(async move { client.pull(&broadcast, &catalog).await });
 
 		let mut session = within("PLAY", server.accept(0)).await;
@@ -1106,15 +1152,20 @@ mod tests {
 		let err = within("the pull", async {
 			for frame in 2.. {
 				session.video(0, frame * FRAME, &[fake::H264_SLICE]).await;
+				clock.advance(Duration::from_secs(1));
 				tokio::select! {
 					result = &mut pull => return result.unwrap().unwrap_err(),
-					_ = tokio::time::sleep(Duration::from_millis(30)) => {}
+					// A driver turn, so the pull can read what was sent.
+					_ = kio::clock::sleep(Duration::ZERO) => {}
 				}
 			}
 			unreachable!()
 		})
 		.await;
-		assert!(matches!(err, Error::Stalled(_)), "{err}");
+		assert!(
+			matches!(err, Error::Stalled(timeout) if timeout == KEYFRAME_TIMEOUT),
+			"{err}"
+		);
 	}
 
 	/// A server whose `rtptime` lands well after its packets would never publish anything, so

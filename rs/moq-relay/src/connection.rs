@@ -92,7 +92,9 @@ impl<R: Incoming> Connection<R> {
 		// cannot hold the connection open behind a decision that never comes.
 		// Boxed: the admission future is large, and nesting it inline overflows debug stacks.
 		let admitted = request
-			.within(Box::pin(lifecycle.admit(request.admission(&lifecycle.auth))))
+			.within(Box::pin(
+				lifecycle.admit(request.admission(&lifecycle.auth), request.pacer()),
+			))
 			.await
 			.inspect_err(|_| lifecycle.cluster.refusals.record(RefusalKind::Unavailable))
 			.map_err(|err| err.context("admission timed out"))?;
@@ -111,15 +113,6 @@ impl<R: Incoming> Connection<R> {
 			subscriber,
 			stats,
 		} = admitted;
-
-		// A peer's QUIC limits widen before SETUP OK, so its first requests see them.
-		// Other transports keep their own limits.
-		#[cfg(feature = "quic")]
-		if let Some(limits) = lifecycle.cluster.quic_limits(&lease)
-			&& let Some(quic) = request.quic()
-		{
-			quic.set_limits(limits)?;
-		}
 
 		// Accept the connection.
 		// NOTE: subscribe and publish seem backwards because of how relays work.
@@ -143,6 +136,9 @@ impl<R: Incoming> Connection<R> {
 				return Err(err.into());
 			}
 		};
+		// Before SETUP OK, so the first requests see them: a peer's wider limits, and the
+		// caps the window then opens under. Other transports keep their own limits.
+		let request = request.with_quic_limits(lifecycle.cluster.quic_limits(&lease))?;
 		let serving = lifecycle.shutdown.serve();
 		// Bounded too: a peer that stalls the SETUP reply must not outlive the relay.
 		// Abandoning the reply refuses the session with the timeout code, which its stats count.
@@ -272,9 +268,12 @@ impl Lifecycle {
 			.ok_or_else(|| anyhow::anyhow!("connection task panicked"))
 	}
 
+	/// Admit `request`, holding its connection to a capped grant through `pacer`, or
+	/// refusing a capped grant without one.
 	pub(crate) async fn admit(
 		&self,
 		request: moq_auth::Request,
+		pacer: Option<auth::Pacer>,
 	) -> Result<(cluster::Admitted, Option<crate::session::Registration>), Rejection> {
 		self.span.record("session", &request.id);
 		// Peer-controlled, so recorded escaped rather than displayed raw.
@@ -282,7 +281,7 @@ impl Lifecycle {
 			self.span
 				.record("implementation", tracing::field::debug(implementation));
 		}
-		let admitted = self.shutdown.admit(self.authorize(request)).await;
+		let admitted = self.shutdown.admit(self.authorize(request, pacer)).await;
 		// Cluster admission records its own refusals; LAN and drain refusals are recorded here.
 		if let Err(err) = &admitted
 			&& let Some(refusal) = err.refusal
@@ -295,6 +294,7 @@ impl Lifecycle {
 	async fn authorize(
 		&self,
 		request: moq_auth::Request,
+		pacer: Option<auth::Pacer>,
 	) -> Result<(cluster::Admitted, Option<crate::session::Registration>), Rejection> {
 		if cluster::Cluster::is_lan_path(&request.path) {
 			let Some(presented) = cluster::Cluster::lan_credential(&request.path) else {
@@ -331,7 +331,7 @@ impl Lifecycle {
 		}
 		let admitted = self
 			.cluster
-			.admit_session(&self.auth, request.clone())
+			.admit_session(&self.auth, request.clone(), pacer)
 			.await
 			.map_err(|err| {
 				// Cluster admission owns this refusal; only local/drain refusals remain here.
@@ -378,13 +378,11 @@ impl Lifecycle {
 pub async fn supervise(
 	session: moq_net::Session,
 	lease: auth::Lease,
-	serving: crate::shutdown::Serving,
+	mut serving: crate::shutdown::Serving,
 	registration: Option<crate::session::Registration>,
 ) -> anyhow::Result<()> {
 	let mut lease = lease.authorizing(&session);
 	let mut shutdown = serving.shutdown.clone();
-	// Held until the `end` is reported, so a drain past its deadline still waits for it.
-	let _serving = serving;
 	let reported = lease.reported();
 	let result = loop {
 		let nudged = async {
@@ -394,6 +392,9 @@ pub async fn supervise(
 			}
 		};
 		tokio::select! {
+			// A close withdraws every in-band credential in the same step, so the lease
+			// can end with it; the close is the cause, not a revocation.
+			biased;
 			err = session.closed() => {
 				lease.close_session(&err, session_bytes(&session));
 				break Err(err.into());
@@ -409,13 +410,20 @@ pub async fn supervise(
 				// Empty URI: "reconnect to me" (the relay is restarting). The session's
 				// machine runs on its own, so the GOAWAY still reaches the wire while
 				// we wait here, and the drain deadline closes it if the peer stays.
-				shutdown.drain_session(&session).await;
+				serving.drain(&session).await;
 				lease.close(moq_auth::lease::Reason::Shutdown, session_bytes(&session));
 				break Ok(());
 			}
 			() = nudged => lease.revalidate(),
 		}
 	};
+	// Abort requests are executed by the driver, so observe the transport close first.
+	session.closed().await;
+	serving.closed();
+	if let Some(registration) = &registration {
+		registration.closed();
+	}
+	// Keep `serving` and the registration until the end report finishes.
 	reported.await;
 	result
 }
@@ -452,7 +460,7 @@ mod tests {
 				tracing_subscriber::filter::Targets::new().with_target("moq_relay::connection", tracing::Level::INFO),
 			);
 		let _logging = tracing::subscriber::set_default(subscriber);
-		let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(cluster::Options::default()).unwrap();
 		let (auth, _admissions) = auth::Auth::embedded("test");
 		let lifecycle = Lifecycle::new(cluster, auth, 42, None);
 		lifecycle

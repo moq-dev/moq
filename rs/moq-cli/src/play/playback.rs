@@ -6,18 +6,13 @@ use std::collections::HashSet;
 use hang::catalog::Reference;
 use moq_mux::catalog;
 
-/// Which half of the pipeline a playback task drives.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Kind {
-	Video,
-	Audio,
-}
+pub(super) use moq_mux::timeline::Kind;
 
 /// The track a rendition plays from: its resolved broadcast path and its name there.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Track {
 	/// Resolved rather than as written, since several references name one broadcast.
-	broadcast: Option<hang::moq_net::PathOwned>,
+	broadcast: Option<hang::moq_net::Path>,
 	name: String,
 }
 

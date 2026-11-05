@@ -22,6 +22,14 @@ if(MOQ_LOCAL AND EXISTS "${MOQ_LOCAL}/cpp/moq/CMakeLists.txt")
   set(_moq_local_build TRUE)
 endif()
 
+# Off by default, like moq-ffi's feature. The release archive and a prebuilt MOQ_FFI_DIR carry
+# default features only, so refuse here, before the OBS dependencies download, rather than
+# silently building without it.
+option(MOQ_FFI_QLOG "Build moq-ffi with qlog, which shows the qlog directory setting" OFF)
+if(MOQ_FFI_QLOG AND (NOT _moq_local_build OR MOQ_FFI_DIR))
+  message(FATAL_ERROR "MOQ_FFI_QLOG requires the in-tree build: set MOQ_LOCAL and clear MOQ_FFI_DIR")
+endif()
+
 if(_moq_local_build)
   file(STRINGS "${MOQ_LOCAL}/cpp/moq/VERSION" _moq_link_version LIMIT_COUNT 1)
   if(NOT _moq_link_version MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
@@ -160,6 +168,7 @@ target_sources(
     src/obs-moq.cpp
     src/moq-audio-encoder.cpp
     src/moq-audio-encoder.h
+    src/moq-implementation.h
     src/moq-worker.h
     src/moq-output.h
     src/moq-service.h
@@ -170,16 +179,15 @@ target_sources(
     src/moq-source.cpp
     src/moq-source.h
 )
+# Sessions advertise it in SETUP (moq-implementation.h); the dock also displays it.
+target_compile_definitions(obs-moq PRIVATE PLUGIN_VERSION_STRING="${PLUGIN_VERSION}")
 
 # The dock requires both the frontend API (to register it) and Qt (to build it).
 # The advanced settings dialog is Qt-only, so it ships with the dock that opens it;
 # without Qt the same settings are still reachable through the service properties.
 if(ENABLE_FRONTEND_API AND ENABLE_QT)
   target_sources(obs-moq PRIVATE src/moq-dock.cpp src/moq-dock.h src/moq-advanced-dialog.cpp src/moq-advanced-dialog.h)
-  target_compile_definitions(
-    obs-moq
-    PRIVATE MOQ_FRONTEND_ENABLED MOQ_VERSION_STRING="${_moq_link_version}" PLUGIN_VERSION_STRING="${PLUGIN_VERSION}"
-  )
+  target_compile_definitions(obs-moq PRIVATE MOQ_FRONTEND_ENABLED MOQ_VERSION_STRING="${_moq_link_version}")
 endif()
 
 if(${BUILD_PLUGIN})

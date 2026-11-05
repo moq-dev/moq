@@ -2,7 +2,66 @@ mod export;
 
 pub(crate) use export::{Codec, Convert, Export};
 
+use std::collections::BTreeMap;
+
 use bytes::{Buf, Bytes, BytesMut};
+
+/// A bit reader over an H.264 or H.265 parameter set or SEI NAL unit's RBSP: the bytes after its
+/// `header`-byte NAL header, with emulation prevention removed as they are read.
+///
+/// These NAL units end in `rbsp_trailing_bits`, so a trailing zero byte is Annex B's
+/// `trailing_zero_8bits` left behind by the splitter, and is dropped rather than refused as an
+/// emulated start code.
+pub(crate) fn rbsp(nal: &[u8], header: usize) -> h264_reader::rbsp::BitReader<h264_reader::rbsp::ByteReader<&[u8]>> {
+	h264_reader::rbsp::BitReader::new(rbsp_bytes_reader(nal, header))
+}
+
+/// The RBSP bytes of an H.264 or H.265 parameter set or SEI NAL unit, as [`rbsp`] reads them.
+/// `None` when the payload holds a byte sequence emulation prevention forbids.
+pub(crate) fn rbsp_bytes(nal: &[u8], header: usize) -> Option<Vec<u8>> {
+	use std::io::Read;
+
+	let mut out = Vec::with_capacity(nal.len());
+	rbsp_bytes_reader(nal, header).read_to_end(&mut out).ok()?;
+	Some(out)
+}
+
+/// The `(payloadType, payload)` of each message in an H.264 or H.265 SEI RBSP, which share the
+/// `sei_message` syntax. A malformed message ends the iteration. Unlike h264-reader's
+/// `SeiReader`, a payload of any size is skipped without a copy.
+pub(crate) fn sei_messages(rbsp: &[u8]) -> impl Iterator<Item = (u32, &[u8])> {
+	let mut buf = rbsp;
+	std::iter::from_fn(move || {
+		// Each message needs at least a type and size byte; the last byte is the RBSP stop bit.
+		if buf.len() <= 2 {
+			return None;
+		}
+		let kind = sei_value(&mut buf)?;
+		let size = sei_value(&mut buf)?;
+		let (payload, rest) = buf.split_at_checked(size as usize)?;
+		buf = rest;
+		Some((kind, payload))
+	})
+}
+
+/// An SEI `payloadType` or `payloadSize`: a run of 0xFF bytes, each adding 255, then the remainder.
+fn sei_value(buf: &mut &[u8]) -> Option<u32> {
+	let mut value = 0u32;
+	loop {
+		let (&byte, rest) = buf.split_first()?;
+		*buf = rest;
+		value = value.checked_add(byte.into())?;
+		if byte != 0xFF {
+			return Some(value);
+		}
+	}
+}
+
+fn rbsp_bytes_reader(nal: &[u8], header: usize) -> h264_reader::rbsp::ByteReader<&[u8]> {
+	let payload = nal.get(header..).unwrap_or_default();
+	let end = payload.iter().rposition(|&b| b != 0).map_or(0, |last| last + 1);
+	h264_reader::rbsp::ByteReader::without_skip(&payload[..end])
+}
 
 /// The four-byte Annex B start code preceding a NAL unit.
 pub const START_CODE: Bytes = Bytes::from_static(&[0, 0, 0, 1]);
@@ -34,6 +93,10 @@ pub enum Error {
 	/// A keyframe has neither an inline nor a retained parameter set of the named type.
 	#[error("keyframe has no {0}, in the access unit or earlier in the track")]
 	MissingParameterSet(&'static str),
+
+	/// A parameter set NAL of this type ends before the id it defines.
+	#[error("parameter set NAL type {0} has no readable id")]
+	ParameterSetId(u8),
 }
 
 /// A result using this module's error type.
@@ -145,19 +208,12 @@ pub fn build_prefix<'a, I: IntoIterator<Item = &'a Bytes>>(nals: I) -> Bytes {
 	out.freeze()
 }
 
-/// Append `nal` to `set` unless a byte-identical entry is already present,
-/// preserving insertion order. Returns true if it was added.
+/// Parameter sets of one type keyed by the id they define, in id order.
 ///
-/// Used to accumulate the distinct parameter-set NALs (SPS/PPS, plus VPS for
-/// H.265) a stream carries: avcC/hvcC hold an ordered list, and a source may
-/// define several (e.g. two PPS) that slices reference by id.
-pub(crate) fn push_distinct(set: &mut Vec<Bytes>, nal: &Bytes) -> bool {
-	if set.iter().any(|existing| existing == nal) {
-		return false;
-	}
-	set.push(nal.clone());
-	true
-}
+/// A later set with an id replaces the earlier one, as it does in a decoder, so a source may
+/// define several (e.g. two PPS that slices reference by id) and a repeated or redefined id
+/// costs one entry rather than a growing list.
+pub(crate) type ParameterSets = BTreeMap<u32, Bytes>;
 
 /// The NAL syntax an [`InBand`] transform reads.
 #[derive(Debug, Clone, Copy)]
@@ -185,6 +241,58 @@ impl InBandCodec {
 			(_, 32..=34) => Some(Self::H265),
 			_ => None,
 		}
+	}
+
+	/// Insert parameter set `nal` (header included) under the id it defines, replacing any
+	/// earlier set with that id.
+	pub(crate) fn insert_parameter_set(self, sets: &mut ParameterSets, nal: &Bytes) -> Result<()> {
+		use h264_reader::rbsp::BitRead;
+
+		let nal_type = self.nal_type(nal);
+		let header = match self {
+			Self::H264 => 1,
+			Self::H265 => 2,
+		};
+		let r = &mut rbsp(nal, header);
+		let id = match (self, nal_type) {
+			// seq_parameter_set_id follows profile_idc, the constraint flags, and level_idc.
+			(Self::H264, 7) => r
+				.skip(24, "profile_idc..level_idc")
+				.and_then(|()| r.read_ue("seq_parameter_set_id")),
+			// pic_parameter_set_id opens a PPS in both codecs.
+			(Self::H264, 8) | (Self::H265, 34) => r.read_ue("pic_parameter_set_id"),
+			(Self::H265, 32) => r.read::<4, u32>("vps_video_parameter_set_id"),
+			(Self::H265, 33) => crate::codec::h265::sps_id(r),
+			_ => return Err(Error::ParameterSetId(nal_type)),
+		};
+		sets.insert(id.map_err(|_| Error::ParameterSetId(nal_type))?, nal.clone());
+		Ok(())
+	}
+
+	/// Replace each `retained` parameter-set type, in VPS, SPS, PPS order, with the sets a complete
+	/// Annex-B init defines. A type the init omits keeps its retained sets.
+	///
+	/// Each init replaces the last one's sets rather than accumulating onto them, as a keyframe's
+	/// inline sets do in [`reconcile_keyframe_params`].
+	pub(crate) fn adopt_init(self, data: &[u8], retained: &mut [&mut ParameterSets]) -> Result<()> {
+		let types = self.parameter_sets();
+		debug_assert_eq!(types.len(), retained.len());
+		let mut sets = vec![ParameterSets::new(); types.len()];
+		for nal in complete_nals(data)? {
+			if nal.is_empty() {
+				continue;
+			}
+			let nal_type = self.nal_type(&nal);
+			if let Some(index) = types.iter().position(|&(ty, _)| ty == nal_type) {
+				self.insert_parameter_set(&mut sets[index], &nal)?;
+			}
+		}
+		for (retained, set) in retained.iter_mut().zip(sets) {
+			if !set.is_empty() {
+				**retained = set;
+			}
+		}
+		Ok(())
 	}
 
 	fn delimiter(self) -> u8 {
@@ -221,7 +329,7 @@ impl InBandCodec {
 pub(crate) struct InBand {
 	codec: InBandCodec,
 	/// The active sets of each type, in [`InBandCodec::parameter_sets`] order.
-	active: [Vec<Bytes>; 3],
+	active: [ParameterSets; 3],
 }
 
 impl InBand {
@@ -250,10 +358,10 @@ impl InBand {
 			let nal_type = codec.nal_type(nal);
 			kinds.iter().position(|(t, _)| *t == nal_type)
 		};
-		let mut sets: [Vec<Bytes>; 3] = Default::default();
+		let mut sets: [ParameterSets; 3] = Default::default();
 		for nal in &nals {
 			if let Some(index) = kind(nal) {
-				push_distinct(&mut sets[index], nal);
+				codec.insert_parameter_set(&mut sets[index], nal)?;
 			}
 		}
 		for (active, set) in self.active.iter_mut().zip(sets) {
@@ -281,7 +389,7 @@ impl InBand {
 			if active.is_empty() {
 				return Err(Error::MissingParameterSet(name));
 			}
-			for nal in active {
+			for nal in active.values() {
 				length_prefix(&mut out, nal)?;
 			}
 		}
@@ -312,9 +420,9 @@ fn length_prefix(out: &mut BytesMut, nal: &[u8]) -> Result<()> {
 ///
 /// `seen` is this AU's inline NALs (already appended to `chunks`); `retained` is
 /// the cross-GOP set re-injected on bare keyframes.
-pub(crate) fn reconcile_keyframe_params(chunks: &mut BytesMut, retained: &mut Vec<Bytes>, seen: &mut Vec<Bytes>) {
+pub(crate) fn reconcile_keyframe_params(chunks: &mut BytesMut, retained: &mut ParameterSets, seen: &mut ParameterSets) {
 	if seen.is_empty() {
-		for nal in retained.iter() {
+		for nal in retained.values() {
 			chunks.extend_from_slice(&START_CODE);
 			chunks.extend_from_slice(nal);
 		}
@@ -322,6 +430,15 @@ pub(crate) fn reconcile_keyframe_params(chunks: &mut BytesMut, retained: &mut Ve
 	} else if seen != retained {
 		retained.clone_from(seen);
 	}
+}
+
+/// Every NAL in a complete Annex-B buffer, including the final one that no start code terminates.
+pub(crate) fn complete_nals(data: &[u8]) -> Result<Vec<Bytes>> {
+	let mut buf = Bytes::copy_from_slice(data);
+	let mut iter = NalIterator::new(&mut buf);
+	let mut nals = iter.by_ref().collect::<Result<Vec<_>>>()?;
+	nals.extend(iter.flush()?);
+	Ok(nals)
 }
 
 /// Iterates complete Annex B NAL units, leaving an unterminated final unit for `flush`.
@@ -980,12 +1097,10 @@ mod tests {
 
 	#[test]
 	fn in_band_h265_keyframes_carry_vps_sps_pps() {
-		let vps = &[0x40, 0x01, 0x0c][..];
-		let sps = &[0x42, 0x01, 0x01, 0x60][..];
-		let pps = &[0x44, 0x01, 0xc0][..];
+		use crate::codec::h265::fixtures::{PPS, SPS, SPS_PYRAMID, VPS};
+		let (vps, sps, pps, sps2) = (VPS, SPS, PPS, SPS_PYRAMID);
 		let idr = &[0x26, 0x01, 0xaa][..];
 		let sei = &[0x4e, 0x01, 0x05][..];
-		let sps2 = &[0x42, 0x01, 0x01, 0x61][..];
 
 		// An access unit with no slice is not a sample; its sets wait for the next keyframe.
 		let mut tx = InBand::new(InBandCodec::H265);
@@ -1002,10 +1117,41 @@ mod tests {
 		assert_eq!(sei_first.as_ref(), length_prefixed(&[vps, sps2, pps, sei, idr]));
 	}
 
+	/// A parameter set keys by the id it defines, so a stream redefining ids holds one entry
+	/// per id, the last, however many sets it sends. A set too short for its id is refused.
+	#[test]
+	fn parameter_sets_key_by_id() {
+		use crate::codec::h265::fixtures::{PPS, SPS, SPS_PYRAMID, VPS};
+
+		let mut sets = ParameterSets::new();
+		for last in 0..=u8::MAX {
+			// pic_parameter_set_id is ue(v): `1` is id 0, `010` is id 1.
+			for head in [0xce, 0x4e] {
+				let pps = Bytes::copy_from_slice(&[0x68, head, 0x3c, last]);
+				InBandCodec::H264.insert_parameter_set(&mut sets, &pps).unwrap();
+			}
+		}
+		assert_eq!(sets.len(), 2);
+		assert_eq!(sets[&0].as_ref(), [0x68, 0xce, 0x3c, 0xff]);
+		assert_eq!(sets[&1].as_ref(), [0x68, 0x4e, 0x3c, 0xff]);
+
+		for nal in [VPS, SPS, SPS_PYRAMID, PPS] {
+			let mut sets = ParameterSets::new();
+			InBandCodec::H265
+				.insert_parameter_set(&mut sets, &Bytes::from_static(nal))
+				.unwrap();
+			assert_eq!(sets.keys().collect::<Vec<_>>(), [&0]);
+		}
+
+		let truncated = Bytes::from_static(&[0x67, 0x42, 0xc0]);
+		let err = InBandCodec::H264.insert_parameter_set(&mut ParameterSets::new(), &truncated);
+		assert!(matches!(err, Err(Error::ParameterSetId(7))), "{err:?}");
+	}
+
 	#[test]
 	fn in_band_keyframe_without_parameter_sets_fails() {
-		let sps = &[0x42, 0x01, 0x01, 0x60][..];
-		let pps = &[0x44, 0x01, 0xc0][..];
+		use crate::codec::h265::fixtures::{PPS, SPS};
+		let (sps, pps) = (SPS, PPS);
 		let idr = &[0x26, 0x01, 0xaa][..];
 
 		let mut tx = InBand::new(InBandCodec::H265);

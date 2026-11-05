@@ -129,21 +129,11 @@ test("plaintext roundtrip", () => {
 	expect(roundtrip({}, values)).toEqual(values);
 });
 
-test("compressed roundtrip", () => {
-	const values: Doc[] = [
-		{ a: 1, b: 1 },
-		{ a: 1, b: 2 },
-		{ a: 5, b: 2 },
-	];
-	expect(roundtrip({ compression: "deflate" }, values)).toEqual(values);
-});
-
-// The window is per group, so a keyframe mid-stream has to restart it on both sides. A decoder that
-// kept the old window here would fail to inflate the new group's snapshot.
-test("compressed roundtrip across a group boundary", () => {
+// Deltas are per group, so a keyframe mid-stream has to restart the baseline on both sides.
+test("roundtrip across a group boundary", () => {
 	// Past the frame cap, so the group rolls mid-stream.
 	const values: Doc[] = Array.from({ length: 300 }, (_, n) => ({ n }));
-	const got = roundtrip({ compression: "deflate" }, values);
+	const got = roundtrip({}, values);
 	expect(got.at(-1)).toEqual({ n: 299 });
 });
 
@@ -160,7 +150,7 @@ test("deltas never roll on their own", () => {
 });
 
 test("snapshot restates the last value", () => {
-	const encoder = new Encoder<Doc>({ compression: "deflate" });
+	const encoder = new Encoder<Doc>({});
 	expect(encoder.snapshot()).toBeUndefined();
 
 	commit(encoder, { a: 1, b: 1 });
@@ -170,9 +160,9 @@ test("snapshot restates the last value", () => {
 	expect(frame.keyframe).toBe(true);
 	frame.commit();
 
-	// The restatement opens a fresh group (and DEFLATE window) a new decoder reads on its own, and
-	// the next change rides as a delta against it.
-	const decoder = new Decoder<Doc>({ compression: "deflate" });
+	// The restatement opens a fresh group a new decoder reads on its own, and the next change rides
+	// as a delta against it.
+	const decoder = new Decoder<Doc>({});
 	decoder.snapshot(frame.payload);
 	expect(decoder.decode()).toEqual({ a: 1, b: 2 });
 	const delta = encoder.update({ a: 1, b: 3 });
@@ -220,16 +210,6 @@ test("frames apply without materializing", () => {
 	}
 
 	expect(decoder.decode()).toEqual({ n: 20 });
-});
-
-test("compressed deltas reuse the group window", () => {
-	const phrase = "Media over QUIC delivers real-time latency at massive scale";
-	const frames = encode({ deltas: true, compression: "deflate" }, [{ note: phrase }, { note: phrase, echo: phrase }]);
-
-	// The raw patch repeats the whole phrase; compressed against the window it's a fraction.
-	const raw = new TextEncoder().encode(JSON.stringify({ echo: phrase })).length;
-	expect(frames.length).toBe(2);
-	expect(frames[1][1]).toBeLessThan(raw / 2);
 });
 
 // A frame the caller never wrote must not leave the encoder emitting deltas against a baseline no

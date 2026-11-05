@@ -17,7 +17,7 @@ exporter reads one, without knowing.
   `import/`), `catalog/`, `timeline.rs`, `json.rs`,
   `source.rs`, and the TS exporter under `container/ts`. About 250 type
   references across these modules.
-- The [m1 compression migration](/quest/m1/compress/migrate.md) deletes
+- The [m1 compression migration](https://github.com/moq-dev/moq/pull/7046) deleted
   `moq-mux::binary`; opaque bytes use plain tracks, so there is no binary
   helper to convert here.
 - Capture: `moq_video::encode::Producer::new` takes a concrete
@@ -30,7 +30,7 @@ exporter reads one, without knowing.
 - No behavior change with the defaults. Keep the `containers` Criterion
   bench flat before and after.
 - Test an import and export round trip (fMP4 and TS) through the moq-net
-  pass-through test wrapper, plus one through moq-e2ee's wrappers once
+  pass-through test wrapper, plus one through moq-crypto's wrappers once
   [they implement the traits](/quest/m2/net-wrap/e2ee.md).
 
 Public API: generic type parameters with moq-net defaults across moq-mux.

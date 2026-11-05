@@ -1,7 +1,7 @@
 //! JSON publishing over [`moq-net`](moq_net) tracks, in three modes:
 //!
-//! - [`snapshot`]: **lossy**. One JSON value updated over time; `next` yields states inside the
-//!   drift budget, while `latest` skips to the newest state. Superseded groups may be lost.
+//! - [`snapshot`]: **lossy**. One JSON value updated over time; `next` yields states in order,
+//!   while `latest` skips to the newest state. Superseded groups are lost.
 //! - [`stream`]: **lossless**. An ordered append-log of self-contained records; every record is
 //!   preserved and delivered in order, nothing is ever superseded.
 //! - [`window`]: **bounded**. An ordered run of records appended to the back and dropped from the
@@ -16,6 +16,9 @@
 //! (and back), with the encoder saying where the group boundaries fall. Reach for the codec layer
 //! when something else already owns the track, such as a `moq_mux::container::Producer` also
 //! managing a timeline and a catalog estimate.
+//!
+//! The `poll_*` methods are always available. Enable the `async` feature for their generated
+//! async wrappers (`next`, `latest`, and `refresh`); it is off by default.
 
 #![warn(missing_docs)]
 
@@ -28,23 +31,6 @@ mod strict;
 pub mod window;
 
 pub use crate::diff::{Diff, diff};
-
-/// How a JSON track compresses its frames.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Compression {
-	/// Uncompressed JSON frames.
-	#[default]
-	None,
-
-	/// Group-scoped raw DEFLATE, sync-flushed at each frame boundary.
-	Deflate,
-}
-
-impl Compression {
-	pub(crate) const fn is_deflate(self) -> bool {
-		matches!(self, Self::Deflate)
-	}
-}
 
 /// Errors produced while publishing or consuming JSON.
 #[derive(thiserror::Error, Debug, Clone)]
@@ -60,25 +46,12 @@ pub enum Error {
 	#[error("json: {0}")]
 	Json(String),
 
-	/// A compressed frame could not be decoded (malformed, truncated, or oversized).
-	#[error(transparent)]
-	Flate(#[from] moq_flate::Error),
-
 	/// A merge patch arrived with no snapshot to apply it to.
 	///
 	/// Every group opens with a full snapshot, so this means frames reached
 	/// [`snapshot::Decoder`] out of order, or a group's first frame was routed as a delta.
 	#[error("delta before snapshot")]
 	MissingSnapshot,
-
-	/// A compressed [`stream`] frame was encoded but never written, so the shared DEFLATE window is
-	/// ahead of what the consumer holds and nothing later in this group can be decoded.
-	///
-	/// Unlike [`snapshot`], a stream has no keyframe to resynchronize on, so the encoder refuses to
-	/// continue rather than emit frames that cannot be read. Recover by rolling a new group and
-	/// calling [`stream::Encoder::reset`].
-	#[error("compression desynchronized: a frame was encoded but never written")]
-	Desync,
 
 	/// A [`stream`] track carried a second group, which a lossless log cannot do.
 	///

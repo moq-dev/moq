@@ -3,7 +3,7 @@
 //! Tracks how much wall-clock time is spent on emulation, video encoding,
 //! and audio encoding. Published to viewers via the status track.
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use std::time::Duration;
 
 use serde::Serialize;

@@ -36,17 +36,9 @@ pub enum Error {
 	#[error("json: {0}")]
 	Json(#[from] moq_json::Error),
 
-	/// Error publishing or consuming opaque payloads over a track.
-	#[error("flate: {0}")]
-	Flate(#[from] moq_flate::Error),
-
 	/// A catalog entry declares a track mode this build does not implement.
 	#[error("unsupported track mode: {0}")]
 	UnsupportedMode(String),
-
-	/// A catalog entry declares a compression this build does not implement.
-	#[error("unsupported track compression: {0}")]
-	UnsupportedCompression(String),
 
 	/// A locally published track's catalog entry points at another broadcast.
 	#[error("a locally published track can't reference another broadcast")]
@@ -180,46 +172,10 @@ pub enum Error {
 		composition_time_ms: i32,
 	},
 
-	/// [`timeline::Producer::push`](crate::timeline::Producer::push) received a record out of order.
-	#[error("timeline record {actual} pushed where {expected} was next")]
-	TimelineSequence {
-		/// The window's next index.
-		expected: u64,
-		/// The pushed record's sequence.
-		actual: u64,
-	},
-
-	/// A timeline frame report did not advance past the previous one.
-	#[error("timeline report at {position:?} does not advance past {last:?}")]
-	TimelinePosition {
-		/// The rejected report's position.
-		position: hang::timeline::Position,
-		/// The previous report's position.
-		last: hang::timeline::Position,
-	},
-
-	/// The catalog's `archive` entry indexes no timeline for this track.
-	#[error("no timeline for track {0}")]
-	TimelineMissing(String),
-
-	/// A timeline frame report is timed differently from the track's earlier ones: a track is all
-	/// timed or all untimed.
-	#[error("timeline report at {0:?} does not match the track's timing")]
-	TimelineTiming(hang::timeline::Position),
-
-	/// A timeline record has no `pts` or `duration` to decode, as on an untimed track.
-	#[error("timeline record {0} is untimed")]
-	TimelineUntimed(u64),
-
 	/// Error from a muxer/demuxer that reports via `anyhow` (currently the MPEG-TS demuxer).
 	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).
 	#[error("{0}")]
 	Other(std::sync::Arc<anyhow::Error>),
-
-	/// A timeline catalog section declared a timescale that isn't a valid
-	/// [`moq_net::Timescale`] (zero, or too large).
-	#[error("invalid timeline timescale: {0}")]
-	InvalidTimescale(u32),
 
 	/// A timestamp cannot be mapped between the broadcast clock and the wall: PTS zero would land
 	/// before the moq epoch (2020) or after now, the host's wall clock was unset so the clock has no
@@ -246,18 +202,18 @@ pub enum Error {
 	#[error("broadcast reference escapes the root: {0}")]
 	EscapingBroadcast(String),
 
-	/// A reference's `epoch` names another publisher instance than the one serving its broadcast.
+	/// A reference's `instance` names another stream than the one serving its broadcast.
 	///
 	/// The served instance is the one the source resolved first for that path, so a later
 	/// reference cannot move it; the reference fails instead of reading other content.
-	#[error("broadcast {path} serves epoch {actual}, not the referenced {expected}")]
-	EpochMismatch {
+	#[error("broadcast {path} serves instance {actual}, not the referenced {expected}")]
+	InstanceMismatch {
 		/// The broadcast's path, relative to the origin root.
 		path: String,
-		/// The epoch the reference names.
-		expected: moq_net::Epoch,
-		/// The epoch the resolved broadcast serves.
-		actual: moq_net::Epoch,
+		/// The instance the reference names.
+		expected: moq_net::Instance,
+		/// The instance the resolved broadcast serves.
+		actual: moq_net::Instance,
 	},
 
 	/// A rendition tried to lower jitter already advertised to subscribers.
@@ -322,6 +278,9 @@ pub enum Error {
 	/// Another publisher instance replaced a followed broadcast, and stitching was off.
 	#[error("another publisher instance replaced broadcast `{0}`; enable stitch to follow it as a program switch")]
 	Replaced(String),
+	/// A published rendition changed fields that require a new decoder configuration.
+	#[error("rendition `{0}` changed identity; publish it under a new track name")]
+	IdentityChanged(String),
 
 	/// A rendition moved to a track whose media goes back before what the export already read for it.
 	#[error(
@@ -340,7 +299,17 @@ pub enum Error {
 impl Error {
 	/// The error for a rendition whose container this build does not recognize.
 	pub(crate) fn unsupported_container(container: &hang::catalog::UnknownContainer) -> Self {
-		Self::UnsupportedContainer(container.kind().unwrap_or("<missing>").to_string())
+		Self::UnsupportedContainer(container.kind().to_string())
+	}
+
+	/// The reason a track this error aborts gives its subscribers. Only a transport error has a
+	/// wire code; anything else reaches them as a generic failure while the cause stays here.
+	pub(crate) fn reason(&self) -> moq_net::Error {
+		match self {
+			Self::Moq(err) => err.clone(),
+			Self::Json(moq_json::Error::Net(err)) => err.clone(),
+			_ => moq_net::StreamError::Internal.into(),
+		}
 	}
 }
 

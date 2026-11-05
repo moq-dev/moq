@@ -1,8 +1,8 @@
 /** Sweep frame and chunk size for a group stream decoded into a group and drained by a reader. */
 import type { Consumer as GroupConsumer } from "../src/group.ts";
 import { Producer } from "../src/group.ts";
-import { NativeSession } from "../src/ietf/adapter.ts";
 import { Group as IetfGroup } from "../src/ietf/object.ts";
+import { NativeSession } from "../src/ietf/session.ts";
 import { Subscribe, SubscribeOk } from "../src/ietf/subscribe.ts";
 import { Subscriber as IetfSubscriber } from "../src/ietf/subscriber.ts";
 import { ALPN, Version as IetfVersion } from "../src/ietf/version.ts";
@@ -51,10 +51,10 @@ const lite: Protocol = {
 	],
 	async subscribe() {
 		const open: Open = (stream) => {
-			const producer = new Producer(0);
+			const producer = new Producer(0n);
 			const done = readFrames(new Reader(stream, undefined, LiteVersion.DRAFT_06), producer, {
 				scale: 1_000_000,
-			}).then(() => producer.close());
+			}).then(() => producer.finish());
 			return { group: Promise.resolve(producer.consume()), done };
 		};
 		return { open, close: () => {} };
@@ -64,7 +64,7 @@ const lite: Protocol = {
 // A moq-transport subgroup stream with no properties, through the subscriber that routes it to its
 // track. Every retained group costs each later one a timeline scan (#4246), so a row stays at a
 // few hundred groups.
-const IETF_VERSION = IetfVersion.DRAFT_19;
+const IETF_VERSION = IetfVersion.DRAFT_22;
 const IETF_ALIAS = 9n;
 const IETF_FLAGS = {
 	hasExtensions: false,
@@ -84,27 +84,24 @@ const ietf: Protocol = {
 		new Uint8Array(frameSize).fill(index),
 	],
 	async subscribe() {
-		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const pair = createMockTransportPair(ALPN.DRAFT_22);
 		const subscriber = new IetfSubscriber({ session: new NativeSession(pair.server, IETF_VERSION, true) });
 		const track = subscriber.consume(Path.from("bench")).track("video").subscribe();
 
 		const peer = await Stream.accept(pair.client, IETF_VERSION);
 		if (!peer) throw new Error("the subscriber never subscribed");
 		await peer.reader.u53();
-		const request = await Subscribe.decode(peer.reader, IETF_VERSION);
+		await Subscribe.decode(peer.reader, IETF_VERSION);
 		await peer.writer.u53(SubscribeOk.id);
-		await new SubscribeOk({ requestId: request.requestId, trackAlias: IETF_ALIAS }).encode(
-			peer.writer,
-			IETF_VERSION,
-		);
+		await new SubscribeOk({ trackAlias: IETF_ALIAS }).encode(peer.writer, IETF_VERSION);
 
 		const ordered = track.ordered();
-		let groupId = 0;
+		let groupId = 0n;
 		const open: Open = (stream) => {
 			const header = new IetfGroup({
 				trackAlias: IETF_ALIAS,
 				groupId: groupId++,
-				subGroupId: 0,
+				subGroupId: 0n,
 				publisherPriority: 0,
 				flags: IETF_FLAGS,
 			});

@@ -1,12 +1,29 @@
-import { type Dispose, Effect, readonlys, Signal } from "@moq/signals";
+import {
+	type Dispose,
+	Effect,
+	type Getter,
+	getter,
+	type Inputs,
+	type Readonlys,
+	readonlys,
+	Signal,
+} from "@moq/signals";
+
+/** Signals the device list reads. */
+export type DeviceInput = {
+	// Whether to discover devices. Defaults to true. When false the device and permission listeners
+	// are removed and the outputs keep their last values.
+	enabled: Getter<boolean>;
+};
 
 /** Constructor options for {@link Device}. */
-export interface DeviceProps {
+export interface DeviceProps extends Inputs<DeviceInput> {
 	/** Seed the preferred device; also live-editable via `device.preferred`. */
 	preferred?: string | Signal<string | undefined>;
 }
 
-type DeviceOutput = {
+/** Signals the device list derives. */
+export type DeviceOutput = {
 	// The devices that are available, or undefined without permission to enumerate them.
 	available: Signal<MediaDeviceInfo[] | undefined>;
 	// The device the platform names as its default, or undefined when it names none.
@@ -31,6 +48,9 @@ export class Device<Kind extends "audio" | "video"> {
 	/** Whether this tracks audio inputs or video inputs. */
 	readonly kind: Kind;
 
+	/** The wired inputs, read-only. */
+	readonly in: Readonlys<DeviceInput>;
+
 	/** The deviceId to capture from, or undefined to let the browser and OS choose. Only the app writes this. */
 	preferred: Signal<string | undefined>;
 
@@ -48,9 +68,13 @@ export class Device<Kind extends "audio" | "video"> {
 
 	constructor(kind: Kind, props?: DeviceProps) {
 		this.kind = kind;
+		this.in = {
+			enabled: getter(props?.enabled ?? true),
+		};
 		this.preferred = Signal.from(props?.preferred);
 
 		this.#signals.run((effect) => {
+			if (!effect.get(this.in.enabled)) return;
 			effect.spawn(this.#run.bind(this, effect));
 			effect.event(navigator.mediaDevices, "devicechange", () => this.#out.permission.mutate(() => {}));
 		});
@@ -60,6 +84,7 @@ export class Device<Kind extends "audio" | "video"> {
 		// A grant after an explicit denial is new information. The capture source listens to this
 		// permission signal while stopped and reopens without requiring a page reload.
 		this.#signals.run((effect) => {
+			if (!effect.get(this.in.enabled)) return;
 			effect.spawn(async () => {
 				const status = await navigator.permissions
 					?.query({ name: (kind === "video" ? "camera" : "microphone") as PermissionName })

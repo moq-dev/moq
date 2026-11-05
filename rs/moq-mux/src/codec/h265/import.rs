@@ -99,17 +99,10 @@ impl Import {
 
 	/// Resolve the config from any SPS in the buffer.
 	fn initialize_hev1(&mut self, buf: &[u8]) -> Result<()> {
-		let mut scan = Bytes::copy_from_slice(buf);
-		let mut nals = NalIterator::new(&mut scan);
-		while let Some(nal) = nals.next().transpose()? {
+		for nal in crate::codec::annexb::complete_nals(buf)? {
 			if is_sps(&nal) {
 				self.seed_sps(&nal)?;
 			}
-		}
-		if let Some(nal) = nals.flush()?
-			&& is_sps(&nal)
-		{
-			self.seed_sps(&nal)?;
 		}
 		Ok(())
 	}
@@ -125,7 +118,8 @@ impl Import {
 		Ok(())
 	}
 
-	/// The MoQ track name this importer publishes on.
+	/// The MoQ track name this importer publishes on, which a decoder identity change replaces
+	/// with a newly minted one.
 	pub fn name(&self) -> &str {
 		self.track.name()
 	}
@@ -133,6 +127,12 @@ impl Import {
 	/// A watch-only handle to this track's subscriber demand.
 	pub fn demand(&self) -> moq_net::track::Demand {
 		self.track.track().demand()
+	}
+
+	/// The track this importer publishes on, which a decoder identity change replaces with a
+	/// newly named one.
+	pub fn track(&self) -> &moq_net::track::Producer {
+		self.track.track()
 	}
 
 	/// Finish the track, flushing the current group.
@@ -159,6 +159,26 @@ impl Import {
 	pub fn discontinuity(&mut self) -> Result<()> {
 		self.track.discontinuity()?;
 		Ok(())
+	}
+
+	/// Advertise whether this rendition is being produced, as the catalog's
+	/// [`enabled`](hang::catalog::VideoConfig::enabled): a publisher that stops encoding it
+	/// disables it, so viewers select another rendition rather than wait for frames.
+	pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
+		self.catalog.set_enabled(&mut self.track, enabled)?;
+		Ok(())
+	}
+
+	/// Report frames the encoder feeding this track skipped. See
+	/// [`Producer::report_skipped`](crate::container::Producer::report_skipped).
+	pub fn report_skipped(&self, frames: u64) {
+		self.track.report_skipped(frames);
+	}
+
+	/// Report the target bitrate of the encoder feeding this track. See
+	/// [`Producer::report_bitrate`](crate::container::Producer::report_bitrate).
+	pub fn report_bitrate(&self, bitrate: moq_net::bandwidth::Rate) {
+		self.track.report_bitrate(bitrate);
 	}
 
 	/// Close the current group and open the next one at `sequence`.
@@ -188,10 +208,8 @@ impl Import {
 		Ok(())
 	}
 
-	/// Apply a resolved config, updating the catalog rendition in place.
+	/// Apply a resolved config, minting a track when the decoder identity changes.
 	///
-	/// A changed config just re-mirrors the rendition; there are no fixed tracks to reject a
-	/// reconfiguration.
 	fn apply_config(&mut self, config: hang::catalog::VideoConfig) -> crate::Result<()> {
 		self.catalog.publish(&mut self.track, config)
 	}
@@ -200,22 +218,7 @@ impl Import {
 	/// keyframe's inline SPS and refining the catalog jitter as it goes.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		for frame in frames {
-			if frame.keyframe {
-				let hdr = crate::codec::color::access_unit(&frame.payload, self.length_size, 2, |h| {
-					nal_unit_type(h) == scuffle_h265::NALUnitType::PrefixSeiNut
-				});
-				// hvc1 config arrives out-of-band via initialize(); hev1 carries the SPS inline.
-				// Scanning an hvc1 payload as Annex-B would misread a length prefix as a start
-				// code (a 322-byte NAL prefixes as `00 00 01 42`, an SPS NAL header).
-				let sps = self.length_size.is_none().then(|| find_sps(&frame.payload)).flatten();
-				// A new SPS starts a coded sequence whose HDR metadata replaces the last one's. It goes
-				// first, so a keyframe that also configures publishes once.
-				let sequence = sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
-				self.catalog.hdr(&mut self.track, hdr, sequence)?;
-				if let Some(sps) = sps {
-					self.configure_from_sps(&sps)?;
-				}
-			}
+			self.configure(&frame)?;
 
 			// A keyframe we still can't configure (no SPS) is undecodable.
 			if frame.keyframe && !self.catalog.configured() {
@@ -225,6 +228,34 @@ impl Import {
 			// A pre-keyframe delta has no group to anchor it: the producer returns
 			// MissingKeyframe, which the caller (e.g. a TS mid-stream join) skips.
 			self.track.write(frame)?;
+		}
+		Ok(())
+	}
+
+	/// Account for a frame its caller drops rather than writes: a keyframe still configures the
+	/// rendition. The splitter re-injects the VPS, SPS, and PPS into the next keyframe itself.
+	pub(crate) fn dropped(&mut self, frame: &Frame) -> Result<()> {
+		self.configure(frame)
+	}
+
+	/// Resolve the config and HDR metadata a keyframe carries inline, without publishing it.
+	fn configure(&mut self, frame: &Frame) -> Result<()> {
+		if !frame.keyframe {
+			return Ok(());
+		}
+		let hdr = crate::codec::color::access_unit(&frame.payload, self.length_size, 2, |h| {
+			nal_unit_type(h) == scuffle_h265::NALUnitType::PrefixSeiNut
+		});
+		// hvc1 config arrives out-of-band via initialize(); hev1 carries the SPS inline.
+		// Scanning an hvc1 payload as Annex-B would misread a length prefix as a start
+		// code (a 322-byte NAL prefixes as `00 00 01 42`, an SPS NAL header).
+		let sps = self.length_size.is_none().then(|| find_sps(&frame.payload)).flatten();
+		// A new SPS starts a coded sequence whose HDR metadata replaces the last one's. It goes
+		// first, so a keyframe that also configures publishes once.
+		let sequence = sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
+		self.catalog.hdr(&mut self.track, hdr, sequence)?;
+		if let Some(sps) = sps {
+			self.configure_from_sps(&sps)?;
 		}
 		Ok(())
 	}
@@ -300,14 +331,16 @@ mod tests {
 		let mut frames = split.decode(&au, pts).unwrap();
 		frames.extend(split.flush(pts).unwrap());
 		import.decode(frames).unwrap();
-		let color = || catalog.snapshot().video.renditions["video"].color.clone();
-		assert!(color().unwrap().mastering.is_some());
+		let color = |name: &str| catalog.snapshot().video.renditions[name].color.clone();
+		assert!(color("video").unwrap().mastering.is_some());
 
-		// An SPS that signals no colour: nothing is left once the stale metadata goes.
+		// An SPS that signals no colour: nothing is left once the stale metadata goes. It is also a
+		// new profile and level, so it publishes a new track.
 		import
 			.initialize(&annexb(&[fixtures::VPS, fixtures::SPS, fixtures::PPS]))
 			.unwrap();
-		assert_eq!(color(), None);
+		assert_eq!(import.name(), "video/1");
+		assert_eq!(color("video/1"), None);
 	}
 
 	/// An HDR10 keyframe publishes its VUI colour and the static HDR metadata its SEI carries.

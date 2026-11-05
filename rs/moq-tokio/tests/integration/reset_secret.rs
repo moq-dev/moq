@@ -24,8 +24,12 @@ struct Fixture {
 impl Fixture {
 	fn new() -> Self {
 		let dir = tempfile::tempdir().expect("tempdir");
-		let key = rcgen::KeyPair::generate().expect("key");
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("key");
 		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
 			.expect("params")
 			.self_signed(&key)
 			.expect("cert");
@@ -37,7 +41,10 @@ impl Fixture {
 		Self {
 			cert: cert.der().clone(),
 			cert_path: write("server.pem", cert.pem().as_bytes()),
-			key_path: write("server.key", key.serialize_pem().as_bytes()),
+			key_path: write(
+				"server.key",
+				pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())).as_bytes(),
+			),
 			reset_secret: write("reset.key", format!("{RESET_SECRET}\n").as_bytes()),
 			_dir: dir,
 		}
@@ -66,7 +73,7 @@ impl Fixture {
 				.expect("failed to listen");
 			let port = listener.local_addr().expect("no quic addr").port();
 			tokio::spawn(async move {
-				while let Some(request) = listener.accept().await {
+				while let Ok(request) = listener.accept().await {
 					tokio::spawn(async move {
 						let _session = request.ok().await;
 						std::future::pending::<()>().await;
@@ -81,8 +88,8 @@ impl Fixture {
 
 /// Connect, crash the server and restart it on the same port, then report how the
 /// client's connection ended once it next sent something.
-fn restart(reset_secret: bool) -> Result<driver::ConnectionError, tokio::time::error::Elapsed> {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+fn restart(reset_secret: bool) -> Result<driver::connection::Error, kio::clock::Elapsed> {
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let fixture = Fixture::new();
 	let client = tokio::runtime::Builder::new_current_thread()
 		.enable_all()
@@ -98,12 +105,13 @@ fn restart(reset_secret: bool) -> Result<driver::ConnectionError, tokio::time::e
 			.with_root_certificates(roots)
 			.with_no_client_auth();
 		tls.alpn_protocols = vec![b"moq-lite-06".to_vec()];
-		let quic = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic config");
 
-		let endpoint = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("endpoint");
+		let endpoint =
+			driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+				.expect("endpoint");
 		let conn = endpoint
-			.connect_with(
-				driver::ClientConfig::new(Arc::new(quic)),
+			.connect(
+				&driver::client::Config::new(Arc::new(tls)),
 				([127, 0, 0, 1], port).into(),
 				"localhost",
 			)
@@ -118,18 +126,18 @@ fn restart(reset_secret: bool) -> Result<driver::ConnectionError, tokio::time::e
 
 	client.block_on(async {
 		let mut send = conn.open_uni(Default::default()).await.expect("open");
-		send.write_all(&[0; 64]).await.expect("write");
-		send.finish().expect("finish");
+		send.write_all(&[0; 64][..]).await.expect("write");
+		send.finish();
 		// Far below the client's 30s idle timeout, and ample for a loopback round
 		// trip; the keyless arm waits all of it.
-		tokio::time::timeout(Duration::from_secs(1), conn.closed()).await
+		kio::clock::timeout(Duration::from_secs(1), conn.closed()).await
 	})
 }
 
 #[test]
 fn a_restarted_server_resets_its_predecessors_connections() {
 	let closed = restart(true);
-	assert!(matches!(closed, Ok(driver::ConnectionError::Reset)), "{closed:?}");
+	assert!(matches!(closed, Ok(driver::connection::Error::Reset)), "{closed:?}");
 }
 
 /// The control: a random key per process drops the old connection IDs as invalid,

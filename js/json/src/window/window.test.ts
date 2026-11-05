@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
-import { Group, Error as NetError, StreamCode, Time, type Timed, Track } from "@moq/net";
+import { Milli, yieldNow } from "@moq/clock";
+import { Error as NetError, StreamCode, Time, type Timed, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Decoder, Encoder, type Event, Producer, type Span } from "./index.ts";
 
@@ -19,10 +19,11 @@ class Live {
 	events: Event<Rec>[] = [];
 	#next?: Promise<Timed<Event<Rec>> | undefined>;
 
-	constructor(config: { ops?: boolean; compression?: boolean; checkpointRecords?: number } = {}) {
-		const track = new Track.Producer("test");
-		this.producer = new Producer<Rec>({ track, ...config });
-		this.consumer = new Consumer<Rec>({ track: track.subscribe(), compression: config.compression });
+	constructor(config: { ops?: boolean; compress?: boolean; checkpointRecords?: number } = {}) {
+		const { compress, ...producer } = config;
+		const track = new Track.Producer("test").accept({ compress });
+		this.producer = new Producer<Rec>({ track, ...producer });
+		this.consumer = new Consumer<Rec>({ track: track.subscribe() });
 	}
 
 	async push(n: number): Promise<void> {
@@ -41,10 +42,7 @@ class Live {
 		for (;;) {
 			const idle = Symbol("idle");
 			this.#next ??= this.consumer.next();
-			const event = await Promise.race([
-				this.#next,
-				new Promise<typeof idle>((resolve) => setTimeout(() => resolve(idle), 0)),
-			]);
+			const event = await Promise.race([this.#next, yieldNow().then((): typeof idle => idle)]);
 			if (event === idle || event === undefined) return;
 			this.#next = undefined;
 			this.events.push(event.value);
@@ -104,6 +102,7 @@ test("concurrent consumer reads are rejected", async () => {
 	const first = consumer.next();
 
 	expect(() => consumer.next()).toThrow("multiple calls to next not supported");
+	track.finish();
 	track.close();
 	expect(await first).toBeUndefined();
 });
@@ -200,20 +199,20 @@ test("rolling is invisible to the consumer", async () => {
 });
 
 test("compressed round-trip across rolls", async () => {
-	const live = new Live({ compression: true });
+	const live = new Live({ compress: true });
 	for (let n = 0; n < 40; n++) {
 		await live.push(n);
 		if (n >= 10) await live.pop(1);
 		if (n % 7 === 6) live.producer.cut();
 	}
 
-	// Every roll opens a fresh window; every record still arrives exactly once, in order.
+	// Every roll opens a fresh group; every record still arrives exactly once, in order.
 	expect(pushed(await live.finish())).toEqual(Array.from({ length: 40 }, (_, n) => n));
 });
 
 // The frame count and first-frame timestamp of each group in a finished track.
 async function groups(track: Track.Producer): Promise<[number, number | undefined][]> {
-	const ordered = track.subscribe({ maxDelay: Milli(30_000) }).ordered();
+	const ordered = track.subscribe({ delay: { max: Milli(30_000) } }).ordered();
 	const out: [number, number | undefined][] = [];
 	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
 		const first = await group.readFrame();
@@ -235,7 +234,7 @@ test("a joiner over the ratio gets a fresh header", async () => {
 		[2, [3]],
 		[3, [4, 1]],
 	] as const) {
-		const track = new Track.Producer("test").accept({ refresh: 1 });
+		const track = new Track.Producer("test").accept({ refresh: 1, maxAge: null });
 		const producer = new Producer<Rec>({ track });
 		producer.push({ value: { n: 1000 } });
 		for (let n = 0; n < pushes; n++) producer.push({ value: { n } });
@@ -250,7 +249,7 @@ test("a joiner over the ratio gets a fresh header", async () => {
 });
 
 test("a window refresh reuses the newest timestamp", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 0 });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 0, maxAge: null });
 	const producer = new Producer<Rec>({ track });
 	producer.push({ value: { n: 0 }, at: Time.Timestamp.fromMillis(10) });
 	producer.push({ value: { n: 1 }, at: Time.Timestamp.fromMillis(20) });
@@ -273,7 +272,7 @@ test("a window refresh reuses the newest timestamp", async () => {
 });
 
 test("a window refresh after an older edit starts at the newest timestamp", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 0 });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 0, maxAge: null });
 	const producer = new Producer<Rec>({ track });
 	producer.push({ value: { n: 0 }, at: Time.Timestamp.fromMillis(30) });
 	// Ops may carry timestamps older than their group's first frame.
@@ -371,7 +370,7 @@ test("a lagging consumer is told what it missed", async () => {
 		producer.push({ value: { n } });
 		producer.pop(1);
 	}
-	subscriber.withRange({ start: { included: (await subscriber.largest())?.group ?? 0 } });
+	subscriber.withRange({ start: { included: (await subscriber.largest())?.group ?? 0n } });
 	const events = await live.finish();
 
 	const skipped = events.flatMap((e) => ("skip" in e ? span(e.skip) : []));
@@ -403,13 +402,14 @@ test("consumer resumes at a checkpoint after losing a group", async () => {
 		group.writeFrame({ payload: frame.payload, timestamp: Time.Timestamp.now() });
 		frame.commit();
 		expect((await consumer.next())?.value).toEqual({ push: { index: 0, value: { n: 0 } } });
-		group.close(error);
+		group.abort(error);
 
 		frame = encoder.push({ n: 1 });
 		group = track.appendGroup();
 		group.writeFrame({ payload: frame.payload, timestamp: Time.Timestamp.now() });
 		frame.commit();
-		group.close();
+		group.finish();
+		track.finish();
 		track.close();
 
 		expect((await consumer.next())?.value).toEqual({ push: { index: 1, value: { n: 1 } } });
@@ -424,7 +424,7 @@ test("a fresh consumer adopts the current offset", async () => {
 	producer.pop(3);
 
 	const subscriber = track.subscribe();
-	subscriber.withRange({ start: { included: (await subscriber.largest())?.group ?? 0 } });
+	subscriber.withRange({ start: { included: (await subscriber.largest())?.group ?? 0n } });
 	const consumer = new Consumer<Rec>({ track: subscriber });
 	producer.finish();
 	const events: Event<Rec>[] = [];
@@ -495,8 +495,9 @@ test("pop counts are nonnegative safe integers", () => {
 
 test("an op that would evict the header rolls first", () => {
 	const encoder = new Encoder<string>({ ops: true });
-	const first = "a".repeat(16 * 1024 * 1024);
-	const next = "b".repeat(15 * 1024 * 1024);
+	// Charged about twice their size, for the compressed slice a track may keep beside each.
+	const first = "a".repeat(8 * 1024 * 1024);
+	const next = "b".repeat(7 * 1024 * 1024);
 
 	let frame = encoder.push(first);
 	expect(frame.keyframe).toBeTrue();
@@ -517,19 +518,15 @@ test("an op that would evict the header rolls first", () => {
 	frame.commit();
 });
 
-// Compression doesn't lift the limit: a reader inflates the header whole, so one past the group budget
-// is refused however small it deflates.
-for (const compression of [false, true]) {
-	test(`a header larger than the group cache is rejected (compression=${compression})`, () => {
-		const encoder = new Encoder<string>({ compression });
+test("a header larger than the group cache is rejected", () => {
+	const encoder = new Encoder<string>();
 
-		expect(() => encoder.push("x".repeat(Group.MAX_GROUP_CACHE_BYTES))).toThrow("group cache limit");
-		expect(encoder.window).toEqual([]);
+	expect(() => encoder.push("x".repeat(32 * 1024 * 1024))).toThrow("group cache limit");
+	expect(encoder.window).toEqual([]);
 
-		const frame = encoder.push("ok");
-		expect(frame.keyframe).toBeTrue();
-	});
-}
+	const frame = encoder.push("ok");
+	expect(frame.keyframe).toBeTrue();
+});
 
 test("an uncommitted edit leaves the window unchanged", () => {
 	const encoder = new Encoder<number>();
@@ -594,7 +591,7 @@ test("events carry their frame's timestamp, and a header's restated records get 
 	producer.cut();
 	producer.push({ value: { n: 3 }, at: at(400) });
 	producer.finish();
-	late.withRange({ start: { included: 1 } });
+	late.withRange({ start: { included: 1n } });
 	const events: Timed<Event<Rec>>[] = [];
 	for await (const event of new Consumer<Rec>({ track: late })) events.push(event);
 	expect(events.map((event) => event.value)).toEqual([

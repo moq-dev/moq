@@ -15,9 +15,8 @@ categories = ["multimedia", "filesystem"]
 [dependencies]
 bytes = { workspace = true }
 futures = { workspace = true }
-kio = { workspace = true }
-moq-clock = { workspace = true }
-moq-net = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
+moq-net = { workspace = true, features = ["async"] }
 object_store = { workspace = true }
 percent-encoding = { workspace = true }
 quick_cache = "0.7"
@@ -29,12 +28,14 @@ tracing = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 axum = { workspace = true }
-criterion = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
+kio = { path = "../kio", features = ["manual"] }
 object_store = { workspace = true, features = ["fs", "aws"] }
 s3s = "0.17"
 s3s-fs = "0.17"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "test-util", "time"] }
+workspace-hack = { path = "../workspace-hack" }
 
 [[bench]]
 name = "producer"

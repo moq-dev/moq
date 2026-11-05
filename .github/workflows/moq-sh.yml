@@ -11,7 +11,7 @@ on:
     paths:
       - "infra/moq-sh/**"
       - ".github/workflows/moq-sh.yml"
-  # Release PRs, through release-gate.yml. Main PRs skip it: the merge queue's
+  # Release PRs, through release-gate.yml. Main PRs skip it: the landing gate's
   # Check runs its fixtures on Linux, and nightly.yml's platform.yml call runs
   # them and the smoke on macOS.
   workflow_call:
@@ -57,6 +57,9 @@ jobs:
     needs: test
     if: github.repository_owner == 'moq-dev' && github.event_name != 'pull_request' && github.ref == 'refs/heads/release'
     runs-on: ubuntu-latest
+    # Write credentials live in the `publish` Environment, which only protected
+    # refs can deploy to.
+    environment: publish
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

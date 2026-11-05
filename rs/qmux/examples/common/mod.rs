@@ -32,7 +32,7 @@ pub fn payload(seed: usize) -> Vec<u8> {
 /// Write all of `data` then the FIN, bounded by [`TIMEOUT`].
 pub async fn send_all(send: &mut SendStream, data: &[u8], what: &str) -> anyhow::Result<()> {
 	let mut data = Bytes::copy_from_slice(data);
-	moq_clock::timeout(TIMEOUT, async {
+	kio::clock::timeout(TIMEOUT, async {
 		while !data.is_empty() {
 			send.write_buf(&mut data).await?;
 		}
@@ -47,7 +47,7 @@ pub async fn send_all(send: &mut SendStream, data: &[u8], what: &str) -> anyhow:
 /// Read until the FIN, bounded by [`TIMEOUT`].
 pub async fn recv_all(recv: &mut RecvStream, what: &str) -> anyhow::Result<Bytes> {
 	let mut buf = BytesMut::new();
-	moq_clock::timeout(TIMEOUT, async {
+	kio::clock::timeout(TIMEOUT, async {
 		while let Some(chunk) = recv.read_chunk(usize::MAX).await? {
 			buf.extend_from_slice(&chunk);
 		}

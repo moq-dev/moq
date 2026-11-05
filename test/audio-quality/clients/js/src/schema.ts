@@ -97,6 +97,13 @@ export const METRICS = {
 		description:
 			"Audio the ring failed to supply while playing: the missing samples at the device rate. `max` is the longest episode.",
 	},
+	player_underruns: {
+		unit: "count",
+		clock: "render",
+		aggregations: ["total", "per_min"],
+		description:
+			"The player's own count, which its stats panel shows: each time the ring ran dry mid-playback and re-stalled to refill, plus each quantum it filled only part-way. `underruns` leaves out the run-dry ones, since the quanta after them render while stalled.",
+	},
 	skip_aheads: {
 		unit: "count",
 		clock: "viewer",
@@ -370,6 +377,11 @@ export type Sample = {
 	stalled?: boolean;
 	/** `sync.out.delay`: the resolved playout target. Natively, the target the speaker is held on. */
 	delay?: Ms;
+	/**
+	 * `audio.out.stats.underruns`, cumulative: the player's own count, which the stats panel shows.
+	 * Unset natively.
+	 */
+	playerUnderruns?: number;
 	/** The current connection PROBE round trip. */
 	rtt?: Ms;
 	/** The selected rendition's advertised jitter at this sample. */

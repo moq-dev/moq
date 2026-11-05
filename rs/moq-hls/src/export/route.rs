@@ -12,8 +12,27 @@ pub struct Route {
 	/// The broadcast path, percent-decoded. An embedder that scopes its origin rewrites
 	/// this relative to that scope before looking it up.
 	pub broadcast: String,
+	/// The contribution ID and publisher instance, when the resource belongs to one.
+	pub contribution: Option<Contribution>,
 	/// The resource requested under the broadcast.
 	pub resource: Resource,
+}
+
+/// The contribution catalog and stream named inside a broadcast's instance URL.
+///
+/// A contribution's resource nests under the served broadcast as
+/// `{broadcast}/@{instance}/contribution/{id}/{kind}/{rendition}/@{contribution-instance}/`
+/// followed by the [`Resource`] file (`media.m3u8`, `init.{hash}.mp4`, or `seg/{segment}.m4s`).
+/// The broadcast's own `@{instance}` comes first, so [`Route::broadcast`] stays the parent's
+/// path and a path-based policy check covers its contributions. A denied contribution answers
+/// `403`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Contribution {
+	/// The contribution ID in the parent catalog, percent-decoded.
+	pub id: String,
+	/// The contribution's publisher instance, percent-decoded and without its `@`.
+	pub instance: String,
 }
 
 /// A resource under a broadcast.
@@ -27,7 +46,7 @@ pub enum Resource {
 	/// `@{instance}/{kind}/{rendition}/media.m3u8`: a rendition's HLS media playlist.
 	#[non_exhaustive]
 	Media {
-		/// The publisher instance the URL names, without its `@`.
+		/// The publisher instance, percent-decoded and without its `@`.
 		instance: String,
 		/// The rendition's kind.
 		kind: Kind,
@@ -38,7 +57,7 @@ pub enum Resource {
 	/// answered by [`Rendition::init`](super::Rendition::init).
 	#[non_exhaustive]
 	Init {
-		/// The publisher instance the URL names, without its `@`.
+		/// The publisher instance, percent-decoded and without its `@`.
 		instance: String,
 		/// The rendition's kind.
 		kind: Kind,
@@ -51,7 +70,7 @@ pub enum Resource {
 	/// [`Rendition::segment`](super::Rendition::segment).
 	#[non_exhaustive]
 	Segment {
-		/// The publisher instance the URL names, without its `@`.
+		/// The publisher instance, percent-decoded and without its `@`.
 		instance: String,
 		/// The rendition's kind.
 		kind: Kind,
@@ -68,10 +87,11 @@ impl Route {
 	///
 	/// The broadcast occupies every segment before the resource suffix, which for every
 	/// resource but the master and manifest starts with the `@{instance}` segment. Each segment is
-	/// percent-decoded, and one that decodes to a `/` is refused, so an encoded separator
-	/// cannot smuggle a different broadcast past a policy check on [`broadcast`](Self::broadcast).
+	/// percent-decoded. An instance or rendition can contain an encoded `/`, but a broadcast
+	/// segment cannot, so an encoded separator cannot smuggle a different broadcast past a
+	/// policy check on [`broadcast`](Self::broadcast).
 	pub fn parse(path: &str) -> Option<Self> {
-		let parts = path
+		let mut parts = path
 			.strip_prefix('/')?
 			.split('/')
 			.map(|part| {
@@ -84,6 +104,39 @@ impl Route {
 		if parts.iter().any(String::is_empty) {
 			return None;
 		}
+
+		// Put the child instance after the rendition: this suffix cannot also be an
+		// ordinary rendition URL for a longer broadcast path. The kind would occupy
+		// that URL's @instance slot, so the two grammars are disjoint.
+		let tail = match parts.as_slice() {
+			[.., directory, _] if directory == "seg" => 2,
+			[.., file] if file == "media.m3u8" || init_hash(file).is_some() => 1,
+			_ => 0,
+		};
+		let end = parts.len() - tail;
+		let contribution = if tail != 0 {
+			match &parts[..end] {
+				[.., parent, directory, id, kind, _, child]
+					if directory == "contribution"
+						&& instance_id(parent).is_some()
+						&& Kind::parse(kind).is_some()
+						&& instance_id(child).is_some() =>
+				{
+					// Every slot has the contribution shape; otherwise the ordinary arms below
+					// parse the untouched parts as a longer broadcast path.
+					let contribution = Contribution {
+						id: id.clone(),
+						instance: instance_id(child)?,
+					};
+					parts.remove(end - 1);
+					parts.drain(end - 5..end - 3);
+					Some(contribution)
+				}
+				_ => None,
+			}
+		} else {
+			None
+		};
 
 		let (broadcast, resource) = match parts.as_slice() {
 			[broadcast @ .., file] if file == "master.m3u8" => (broadcast, Resource::Master),
@@ -122,6 +175,7 @@ impl Route {
 		}
 		Some(Self {
 			broadcast: broadcast.join("/"),
+			contribution,
 			resource,
 		})
 	}
@@ -152,6 +206,7 @@ mod tests {
 			Route::parse("/project/live/@run/video/cam%231%2Fmain%3Falt/media.m3u8"),
 			Some(Route {
 				broadcast: "project/live".to_string(),
+				contribution: None,
 				resource: Resource::Media {
 					instance: "run".to_string(),
 					kind: Kind::Video,
@@ -199,7 +254,7 @@ mod tests {
 			rendition: "main".to_string(),
 			segment: Id {
 				generation: generation.map(str::to_string),
-				reference: "ab12cd34".to_string(),
+				tag: "ab12cd34".to_string(),
 				at,
 			},
 		};
@@ -243,7 +298,7 @@ mod tests {
 		assert!(Route::parse("/project/live/@run/video/main/seg/ab12cd34.tx.m4s").is_none());
 		assert!(
 			Route::parse("/project/live/@run/video/main/seg/42.m4s").is_none(),
-			"a segment URL names its reference"
+			"a segment URL names its record track"
 		);
 		assert!(Route::parse("/project/live/@run/video/main/seg/1.ts").is_none());
 	}
@@ -257,5 +312,50 @@ mod tests {
 	fn rejects_encoded_broadcast_separators() {
 		assert!(Route::parse("/project/private%2F/master.m3u8").is_none());
 		assert!(Route::parse("/project%2Fprivate/master.m3u8").is_none());
+	}
+
+	#[test]
+	fn contribution_resources_keep_the_parent_policy_path() {
+		for suffix in ["media.m3u8", "init.abcd.mp4", "seg/abcd.7.m4s"] {
+			let route = Route::parse(&format!(
+				"/room/live/@parent/contribution/a%2Fb/video/same%2Fname/@child/{suffix}"
+			))
+			.unwrap();
+			assert_eq!(route.broadcast, "room/live");
+			assert_eq!(
+				route.contribution,
+				Some(Contribution {
+					id: "a/b".into(),
+					instance: "child".into()
+				})
+			);
+			let instance = match route.resource {
+				Resource::Media { instance, .. }
+				| Resource::Init { instance, .. }
+				| Resource::Segment { instance, .. } => instance,
+				_ => panic!("wrong resource"),
+			};
+			assert_eq!(instance, "parent");
+		}
+		let own = Route::parse("/room/@parent/contribution/id/@child/video/main/media.m3u8").unwrap();
+		assert_eq!(own.broadcast, "room/@parent/contribution/id");
+		assert!(own.contribution.is_none());
+		assert!(Route::parse("/room%2Flive/@parent/contribution/id/video/main/@child/media.m3u8").is_none());
+		// Contribution-shaped but for the child slot: an ordinary URL on a longer broadcast path.
+		let own = Route::parse("/room/@parent/contribution/id/video/@run/audio/seg/media.m3u8").unwrap();
+		assert_eq!(own.broadcast, "room/@parent/contribution/id/video");
+		assert!(own.contribution.is_none());
+		match own.resource {
+			Resource::Media {
+				instance,
+				kind,
+				rendition,
+			} => {
+				assert_eq!(instance, "run");
+				assert_eq!(kind, Kind::Audio);
+				assert_eq!(rendition, "seg");
+			}
+			_ => panic!("wrong resource"),
+		}
 	}
 }

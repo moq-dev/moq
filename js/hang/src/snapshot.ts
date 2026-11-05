@@ -1,4 +1,4 @@
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import { u53Schema } from "./catalog/integers";
 
 /** An optional measurement, with JSON null decoded as unavailable like Rust Option. */

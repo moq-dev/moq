@@ -3,17 +3,18 @@
  *
  * @module
  */
-import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
-import type * as Epoch from "./epoch.ts";
-import { NotFound } from "./error.ts";
+import { type GetPromise, Once, Signal } from "@moq/signals";
+import * as datagram from "./datagram.ts";
+import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
-import { Route } from "./hop.ts";
+import type { Route } from "./hop.ts";
+import type * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
-import { Lister, Listing, listTracks, type Tracks } from "./listing.ts";
+import { Listing, listTracks, makeLister, type Tracks } from "./listing.ts";
 import * as Path from "./path.ts";
 import * as track from "./track.ts";
 import { untilAborted } from "./util/abort.ts";
-import { registerWire, trackOf } from "./wire.ts";
+import { registerWire, trackOf, wireOf } from "./wire.ts";
 
 export { Tracks, type TracksEvent } from "./listing.ts";
 
@@ -30,24 +31,20 @@ export interface Announcer {
 let attachAnnouncer: (producer: Producer, announcer: Announcer) => void;
 let stampProducer: (producer: Producer, path: Path.Valid) => void;
 
-// Info lookups pending or held on a track. Each is demand, as a pending track request is in Rust,
-// though nobody subscribes.
+// Info lookups pending or held on a track.
 class Lookups {
 	pending = 0;
 	// Whether a lookup opened the request, so the last lookup to end closes it unless subscribed.
 	opened = false;
-	// Re-evaluates the track's demand at once; set by watchDemand.
-	changed = () => {};
-
-	add(delta: number): void {
-		this.pending += delta;
-		this.changed();
-	}
 }
 
 /** Reactive backing state shared by broadcast producers and consumers. */
 class BroadcastState {
 	requested = new Signal<track.Request[]>([]);
+	datagramRequested = new Signal<datagram.Request[]>([]);
+	datagramPending = new Set<datagram.Request>();
+	datagrams = new Map<string, datagram.Producer>();
+	datagramServed = false;
 	pending = new Set<track.Request>();
 	closed = new Once<null>();
 	// The tracks the broadcast lists, and the readers listing them.
@@ -59,58 +56,84 @@ class BroadcastState {
 	requests = new Map<string, track.Producer>();
 	lookups = new WeakMap<track.Producer, Lookups>();
 	// Whether something answers on-demand track requests: a wire layer's consumed broadcast, or a
-	// publisher that has started pulling them. The counterpart of a live Rust `broadcast::Dynamic`;
+	// publisher that has started pulling them. The counterpart of a live Rust `broadcast::Requests`;
 	// without one, a track nobody publishes is `NotFound` rather than a request nobody will answer.
 	served = false;
-	// Live consumer handles sharing this state (see {@link Consumer.clone}). The broadcast
-	// closes once the last one closes, so a shared consumer can be handed to several callers.
+	// Live consumer handles sharing this state (see {@link Consumer.clone}).
 	consumers = 0;
-	used = new Signal(false);
-	active = 0;
-	// The demand watcher of each open track, disposed when it closes or leaves the broadcast.
-	demands = new Map<track.Producer, Dispose>();
+	// A wire layer's broadcast, which has no producer: it ends once no consumer holds it, as a
+	// Rust session retires a source nothing holds. A produced broadcast ends only on its close.
+	unheld = false;
 	// Run synchronously once the broadcast closes, before `closed` notifies its observers.
 	closers = new Set<() => void>();
 }
 
-// Each track updates the aggregate on an edge, so a demand change touches only its track.
-// A track counts as demand while any `lookups` are pending, subscribed or not.
-function watchDemand(state: BroadcastState, producer: track.Producer, lookups?: Lookups): void {
-	if (state.demands.has(producer)) return;
-	const demand = producer.demand();
-	// A closed track is never demand, and its close already fired, so nothing would dispose a watcher.
-	if (demand.closed.peek() !== undefined) return;
-	let active = false;
-	const update = () => {
-		const used =
-			state.closed.peek() === undefined &&
-			demand.closed.peek() === undefined &&
-			((lookups?.pending ?? 0) > 0 || demand.wanted.peek() !== undefined);
-		if (active === used) return;
-		state.active += used ? 1 : -1;
-		active = used;
-		state.used.set(state.active > 0);
-	};
-	const disposeUsed = demand.wanted.subscribe(update);
-	if (lookups) lookups.changed = update;
-	const disposeClosed = demand.closed.subscribe(() => {
-		if (demand.closed.peek() === undefined) return;
-		cleanup();
+// Datagram tracks never enter the stream listing or cache.
+function liveDatagrams(state: BroadcastState, name: string): datagram.Consumer | undefined {
+	const producer = state.datagrams.get(name);
+	if (!producer) return;
+	if (producer.closed.peek() !== undefined) {
+		state.datagrams.delete(name);
+		return;
+	}
+	return producer.consume();
+}
+
+function createDatagrams(state: BroadcastState, name: string, info: Partial<datagram.Info>): datagram.Producer {
+	if (state.closed.peek() !== undefined) throw new Error("broadcast is closed");
+	// A request its readers closed waits for async cleanup; serve the name fresh instead.
+	const queued = state.datagramRequested
+		.peek()
+		.find((request) => request.name === name && request.closed.peek() === undefined);
+	if (queued) {
+		state.datagramRequested.mutate((requests) => requests.splice(requests.indexOf(queued), 1));
+		return queued.accept(info);
+	}
+	const existing = state.datagrams.get(name);
+	if (existing?.closed.peek() === undefined && existing) throw new Error(`duplicate datagram track: ${name}`);
+	const producer = new datagram.Producer(name).accept(info);
+	state.datagrams.set(name, producer);
+	void producer.closed.then(() => {
+		if (state.datagrams.get(name) === producer) state.datagrams.delete(name);
 	});
-	const cleanup = () => {
-		disposeUsed();
-		disposeClosed();
-		// A removed track keeps its lookups, so a hold ending later must not count it again.
-		if (lookups?.changed === update) lookups.changed = () => {};
-		if (active) {
-			state.active--;
-			active = false;
-			state.used.set(state.active > 0);
-		}
-		state.demands.delete(producer);
-	};
-	state.demands.set(producer, cleanup);
-	update();
+	return producer;
+}
+
+function datagrams(state: BroadcastState, name: string): datagram.Consumer {
+	if (state.closed.peek() !== undefined) throw new Error("broadcast is closed");
+	const existing = liveDatagrams(state, name);
+	if (existing) return existing;
+	const producer = new datagram.Producer(name);
+	const consumer = producer.consume();
+	if (!state.datagramServed) {
+		producer.abort(new NotFound(`datagram track ${name}`));
+		return consumer;
+	}
+	const request = hooks.datagramRequest(producer, state.datagramPending);
+	state.datagrams.set(name, producer);
+	state.datagramRequested.mutate((requests) => requests.push(request));
+	void producer.closed.then(() => {
+		state.datagramPending.delete(request);
+		if (state.datagrams.get(name) === producer) state.datagrams.delete(name);
+		state.datagramRequested.mutate((requests) => {
+			const index = requests.indexOf(request);
+			if (index !== -1) requests.splice(index, 1);
+		});
+	});
+	return consumer;
+}
+
+async function requestedDatagrams(state: BroadcastState): Promise<datagram.Request | undefined> {
+	state.datagramServed = true;
+	for (;;) {
+		const requests = state.datagramRequested.peek();
+		requests.sort((a, b) => (a.priority.peek() ?? -128) - (b.priority.peek() ?? -128));
+		const request = requests.pop();
+		if (request && request.closed.peek() === undefined) return request;
+		if (request) continue;
+		if (state.closed.peek() !== undefined) return;
+		await Signal.race(state.datagramRequested, state.closed);
+	}
 }
 
 function dequeueRequest(state: BroadcastState): track.Request | undefined {
@@ -146,8 +169,14 @@ function closeState(state: BroadcastState) {
 	if (state.closed.peek() !== undefined) return;
 	state.closed.set(null);
 	state.listing.close();
-	for (const cleanup of state.demands.values()) cleanup();
-	for (const request of state.pending) request.reject();
+	for (const request of state.datagramPending) request.reject(new StreamError(StreamCode.Cancel));
+	state.datagramRequested.set([]);
+	for (const request of state.pending)
+		request.reject(
+			new StreamError(StreamCode.Internal, {
+				message: `track request ${request.name} dropped before acceptance`,
+			}),
+		);
 	state.requested.mutate((requests) => {
 		requests.length = 0;
 	});
@@ -159,13 +188,13 @@ function closeState(state: BroadcastState) {
 function lookup(state: BroadcastState, name: string): track.Producer | undefined {
 	const inserted = state.tracks.get(name);
 	if (inserted) {
-		if (!(inserted.closed.peek() instanceof Error)) return inserted;
+		if (!(hooks.trackReleased(inserted).peek() instanceof Error)) return inserted;
 		state.tracks.delete(name);
 	}
 
 	const requested = state.requests.get(name);
 	if (requested) {
-		if (requested.closed.peek() === undefined) return requested;
+		if (hooks.trackReleased(requested).peek() === undefined) return requested;
 		state.requests.delete(name);
 	}
 
@@ -191,15 +220,14 @@ function logical(state: BroadcastState, name: string): { producer: track.Produce
 	if (!state.served) {
 		// Answer through the track rather than throwing, so a peer's subscribe is refused with
 		// the code instead of an unhandled error.
-		producer.close(new NotFound(`track ${name}`));
+		producer.abort(new NotFound(`track ${name}`));
 		return { producer, requested: false };
 	}
 
 	const lookups = new Lookups();
 	state.lookups.set(producer, lookups);
-	watchDemand(state, producer, lookups);
 	state.requests.set(name, producer);
-	void producer.closed.then(() => {
+	void hooks.trackReleased(producer).then(() => {
 		if (state.requests.get(name) === producer) state.requests.delete(name);
 	});
 
@@ -210,12 +238,11 @@ function logical(state: BroadcastState, name: string): { producer: track.Produce
 	return { producer, requested: true };
 }
 
-function subscribe(state: BroadcastState, name: string, options: track.Subscription = {}): track.Subscriber {
+function subscribe(state: BroadcastState, name: string, options?: track.Subscription): track.Subscriber {
 	return logical(state, name).producer.subscribe(options);
 }
 
-// A pending lookup is demand, and so is a held one until `hold` aborts, which also abandons it before
-// the answer. A request a lookup opened is let go once it is answered and nobody holds or subscribes
+// A lookup is held until `hold` aborts, which also abandons it before the answer. A request a lookup opened is let go once it is answered and nobody holds or subscribes
 // to it; closing it sooner would hand its handler a closed producer.
 async function resolveTrackInfo(state: BroadcastState, name: string, hold?: AbortSignal): Promise<track.Info> {
 	hold?.throwIfAborted();
@@ -223,13 +250,14 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 	const lookups = state.lookups.get(producer);
 	if (!lookups) return producer.info();
 	if (requested) lookups.opened = true;
-	lookups.add(1);
+	lookups.pending++;
 
 	const info = producer.info();
 	let answered = false;
 	let ended = false;
 	const release = () => {
-		if (lookups.opened && lookups.pending === 0 && producer.demand().wanted.peek() === undefined) producer.close();
+		if (lookups.opened && lookups.pending === 0 && producer.demand().wanted.peek() === undefined)
+			hooks.releaseTrack(producer);
 	};
 	info.then(
 		() => {
@@ -240,7 +268,7 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 	);
 	const end = () => {
 		ended = true;
-		lookups.add(-1);
+		lookups.pending--;
 		if (answered) release();
 	};
 
@@ -261,37 +289,69 @@ function largest(state: BroadcastState, name: string): track.Position | undefine
 	return producer && hooks.cachedLargest(producer);
 }
 
-// Serve a group from the local retained window by subscribing and scanning to the
-// requested sequence. The default for a produced broadcast; the consuming wire layer
-// overrides it to fetch over the network (or to reject when the transport has no FETCH).
+// Fetch one group as a one-range subscription: the cached group at once, or else one the track's
+// {@link track.Requests} handler answers, asked at once whether the group was written yet or not,
+// as the Rust `fetch_group` does. A group the producer writes meanwhile answers it too. With no
+// handler open, a miss fails at once with `NotFound`. The default for a produced broadcast; the
+// consuming wire layer overrides it to fetch over the network (or to reject when the transport has
+// no FETCH).
 async function fetchGroup(
 	state: BroadcastState,
 	name: string,
-	sequence: number,
+	sequence: bigint,
 	options: track.FetchGroupOptions = {},
 ): Promise<GroupConsumer> {
 	options.signal?.throwIfAborted();
-	const subscriber = subscribe(state, name, { priority: options.priority });
+	const subscriber = subscribe(state, name, {
+		...track.Subscription.default(),
+		priority: options.priority,
+		ranges: [{ start: { absolute: sequence }, end: { absolute: sequence + 1n } }],
+	});
 	hooks.fetchBudget(subscriber, options.maxDelay);
 	try {
+		// Judged in this turn when the track is known, so a cached group is taken before anything
+		// else can change it. A track requested on demand opens its handler once accepted, so its
+		// miss is judged then.
+		let asked = hooks.askFetch(subscriber, sequence);
+		if (asked === "pending") {
+			await untilAborted(subscriber.info(), options.signal);
+			asked = hooks.askFetch(subscriber, sequence);
+		}
+		if (asked !== true) throw new NotFound(`group ${sequence}`);
 		for (;;) {
-			const group = await untilAborted(subscriber.recvGroup(), options.signal);
-			if (!group) throw new NotFound(`group ${sequence}`);
-			if (group.sequence === sequence) {
-				// Close the subscription when the returned group finishes, not now: an
-				// in-progress group must keep receiving frames for its lifetime (mirrors
-				// Rust poll_fetch). Also fires if the caller closes the group early.
-				void group.closed.then(() => subscriber.close());
-				return group;
+			const recv = hooks.tryRecvGroup(subscriber, true);
+			switch (recv.kind) {
+				case "group":
+					// Close the subscription when the returned group finishes, not now: an
+					// in-progress group must keep receiving frames for its lifetime (mirrors
+					// Rust poll_fetch). Also fires if the caller closes the group early.
+					void recv.group.closed.then(() => subscriber.close());
+					return recv.group;
+				case "drop":
+					// A fill's refusal says why; anything else given up is just gone.
+					if (toStreamCode(recv.error) === StreamCode.Old) throw new NotFound(`group ${sequence}`);
+					throw recv.error;
+				case "error":
+					throw recv.error;
+				case "done":
+					throw new NotFound(`group ${sequence}`);
 			}
-
-			group.close();
-			if (group.sequence > sequence) throw new NotFound(`group ${sequence}`);
+			await untilAborted(changed(subscriber), options.signal);
 		}
 	} catch (err) {
 		subscriber.close();
 		throw err;
 	}
+}
+
+// Settles once a read of `subscriber` may go differently.
+function changed(subscriber: track.Subscriber): Promise<void> {
+	return new Promise((resolve) => {
+		const dispose = hooks.groupChanged(subscriber, () => {
+			dispose();
+			resolve();
+		});
+	});
 }
 
 // Remove and return the request queued for `name`, if no handler has taken it yet.
@@ -308,50 +368,15 @@ function takeQueued(state: BroadcastState, name: string): track.Request | undefi
 function adopt(state: BroadcastState, producer: track.Producer, info: track.Info): void {
 	const lookups = state.lookups.get(producer) ?? new Lookups();
 	state.lookups.set(producer, lookups);
-	watchDemand(state, producer, lookups);
 	state.tracks.set(producer.name, producer);
 	state.listing.listOwn(producer.name, producer, info);
 
 	// A finished track keeps serving its cache, so only an abort evicts it.
-	void producer.closed.then((closed) => {
+	void hooks.trackReleased(producer).then((closed) => {
 		if (!(closed instanceof Error)) return;
 		if (state.tracks.get(producer.name) === producer) state.tracks.delete(producer.name);
 		state.listing.unlistOwn(producer.name, producer);
 	});
-}
-
-let makeDemand: (state: BroadcastState) => Demand;
-
-/**
- * A watch-only view of demand for any track in a broadcast.
- *
- * @internal Tests only; nothing outside the package consumes it.
- */
-export class Demand {
-	#state: BroadcastState;
-	private constructor(state: BroadcastState) {
-		this.#state = state;
-	}
-	static {
-		makeDemand = (state) => new Demand(state);
-	}
-
-	/** Whether any track currently has subscribers, or a track info query is pending. */
-	get used(): Getter<boolean> {
-		return this.#state.used;
-	}
-
-	/** Wait until every track becomes unused or the broadcast closes. */
-	async unused(): Promise<void> {
-		while (this.#state.used.peek() && this.#state.closed.peek() === undefined) {
-			await Signal.race(this.#state.used, this.#state.closed);
-		}
-	}
-
-	/** The broadcast's clean close. */
-	get closed(): GetPromise<null> {
-		return this.#state.closed;
-	}
 }
 
 /**
@@ -361,7 +386,6 @@ export class Demand {
  */
 export class Producer {
 	#state = new BroadcastState();
-	#demand = makeDemand(this.#state);
 	#announcer?: Announcer;
 	#path = Path.empty();
 
@@ -372,8 +396,12 @@ export class Producer {
 			largest: (name) => largest(this.#state, name),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => requested(this.#state),
+			datagrams: (name) => datagrams(this.#state, name),
+			liveDatagrams: (name) => liveDatagrams(this.#state, name),
+			createDatagrams: (name, info) => createDatagrams(this.#state, name, info),
+			requestedDatagrams: () => requestedDatagrams(this.#state),
 			tracks: (owner) => listTracks(this.#state.listing, owner),
-			lister: () => new Lister(this.#state.listing),
+			lister: () => makeLister(this.#state.listing),
 		});
 	}
 
@@ -382,11 +410,7 @@ export class Producer {
 			producer.#announcer = announcer;
 		};
 		hooks.attachAnnouncer = attachAnnouncer;
-		hooks.withholdAnnouncer = (producer) => {
-			const announcer = producer.#announcer;
-			producer.#announcer = undefined;
-			return announcer;
-		};
+
 		hooks.onClosed = (producer, fn) => {
 			const closers = producer.#state.closers;
 			closers.add(fn);
@@ -405,15 +429,6 @@ export class Producer {
 		return this.#state.closed;
 	}
 
-	/**
-	 * Watch demand for the broadcast's tracks.
-	 *
-	 * @internal Tests only; nothing outside the package consumes it.
-	 */
-	demand(): Demand {
-		return this.#demand;
-	}
-
 	/** A read handle for this broadcast, named by the path the origin created it at. */
 	consume(): Consumer {
 		return makeConsumer({ state: this.#state, path: this.#path });
@@ -426,9 +441,10 @@ export class Producer {
 	 * from the returned producer. A request a handler has already taken stays a duplicate.
 	 * An append on the track throws if it would reuse a sequence an earlier track of the name
 	 * wrote in this broadcast, so a replacement writes its first group explicitly. Throws if an
-	 * open track or a live request already holds the name.
+	 * open track or a live request already holds the name. `info` resolves as
+	 * {@link track.Producer.accept} does, so an omitted `maxAge` is zero, the live edge only.
 	 */
-	createTrack(name: string, info: Partial<track.Info> = {}): track.Producer {
+	createTrack(name: string, info: track.InfoInit = {}): track.Producer {
 		if (this.#state.closed.peek() !== undefined) {
 			throw new Error("broadcast is closed");
 		}
@@ -440,31 +456,35 @@ export class Producer {
 			const lookups = this.#state.lookups.get(producer);
 			if (lookups) lookups.opened = false;
 			this.#state.requests.delete(name);
-			adopt(this.#state, producer, track.infoDefaults(info));
+			adopt(this.#state, producer, track.authoredInfo(info));
 			return producer;
 		}
 
 		// One logical track per name: an open track or a live request already serves it.
 		// A request a handler already pulled stays duplicate, as in Rust.
 		const live = [this.#state.tracks.get(name), this.#state.requests.get(name)];
-		if (live.some((existing) => existing && existing.closed.peek() === undefined)) {
+		if (live.some((existing) => existing && hooks.trackReleased(existing).peek() === undefined)) {
 			throw new Error(`duplicate track: ${name}`);
 		}
 
 		const producer = new track.Producer(name).accept(info);
-		adopt(this.#state, producer, track.infoDefaults(info));
+		adopt(this.#state, producer, track.authoredInfo(info));
 		return producer;
 	}
 
+	/** Create a live datagram track in a namespace separate from stream tracks. */
+	createDatagrams(name: string, info: Partial<datagram.Info> = {}): datagram.Producer {
+		return createDatagrams(this.#state, name, info);
+	}
+
 	/**
-	 * Remove a statically inserted track, including a finished cached one: stop counting it
-	 * toward {@link demand} and listing it at once.
+	 * Remove a statically inserted track, including a finished cached one, and stop listing it
+	 * at once.
 	 */
 	removeTrack(name: string): void {
 		const track = this.#state.tracks.get(name);
 		if (!track) return;
 		this.#state.tracks.delete(name);
-		this.#state.demands.get(track)?.();
 		this.#state.listing.unlistOwn(name, track);
 	}
 
@@ -473,49 +493,7 @@ export class Producer {
 		return trackOf(name, this);
 	}
 
-	/** The route this broadcast is announced with, or undefined while it is not announced. */
-	get route(): Route | undefined {
-		return this.#announcer?.route();
-	}
-
-	/**
-	 * Advertise this broadcast's exact path, or replace the standing advertisement's route.
-	 *
-	 * The route is taken as given, epoch included: a route with another epoch (or none)
-	 * announces a new broadcast, so re-price from the current one,
-	 * `announce({ ...broadcast.route, cost })`, to keep the instance.
-	 *
-	 * Call it once the tracks a subscriber needs first (a catalog) exist. Until then the
-	 * broadcast exists for nobody, on its own origin or at a peer. Retracts on
-	 * {@link unannounce} or {@link close}. Throws if this producer was not created through an
-	 * origin, is a claim answer still being prepared, or if the broadcast is already closed.
-	 */
-	announce(
-		route:
-			| Route
-			| {
-					epoch?: Route["epoch"];
-					hops?: Route["hops"];
-					cost?: Route["cost"];
-					auth?: Route["auth"];
-			  } = Route.default,
-	): void {
-		if (this.#state.closed.peek() !== undefined) {
-			throw new Error("broadcast is closed");
-		}
-		if (!this.#announcer) throw new Error("broadcast is not attached to an origin");
-		this.#announcer.announce(Route.normalize(route));
-	}
-
-	/**
-	 * Retract the advertisement of this broadcast's path, if any, from local consumers and
-	 * peers alike. {@link announce} brings it back.
-	 */
-	unannounce(): void {
-		this.#announcer?.unannounce();
-	}
-
-	/** End the broadcast for good: retract it, serve no new tracks, and refuse a later {@link announce}. Idempotent. */
+	/** End the broadcast for good: retract its route and serve no new tracks. Idempotent. */
 	close(): void {
 		this.#announcer?.unannounce();
 		this.#announcer = undefined;
@@ -527,7 +505,7 @@ export class Producer {
 interface Shared {
 	state: BroadcastState;
 	path: Path.Valid;
-	epoch?: Epoch.Valid;
+	instance?: Instance.Valid;
 	unlisted?: boolean;
 }
 
@@ -546,7 +524,7 @@ let makeConsumer: (shared: Shared) => Consumer;
 export class Consumer {
 	#state: BroadcastState;
 	#path: Path.Valid;
-	#epoch?: Epoch.Valid;
+	#instance?: Instance.Valid;
 	// Served on request through a route claiming a shorter prefix, which names no broadcast to list.
 	#unlisted: boolean;
 
@@ -556,7 +534,7 @@ export class Consumer {
 	protected constructor(shared?: never);
 	protected constructor(shared?: Shared) {
 		this.#path = shared?.path ?? Path.empty();
-		this.#epoch = shared?.epoch;
+		this.#instance = shared?.instance;
 		this.#unlisted = shared?.unlisted ?? false;
 		if (shared) {
 			this.#state = shared.state;
@@ -564,6 +542,8 @@ export class Consumer {
 			// A standalone consumer is a wire layer's, which serves every track on demand.
 			this.#state = new BroadcastState();
 			this.#state.served = true;
+			this.#state.datagramServed = true;
+			this.#state.unheld = true;
 		}
 		this.#state.consumers++;
 		registerWire(this, {
@@ -572,8 +552,12 @@ export class Consumer {
 			largest: (name) => largest(this.#state, name),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => requested(this.#state),
+			datagrams: (name) => datagrams(this.#state, name),
+			liveDatagrams: (name) => liveDatagrams(this.#state, name),
+			createDatagrams: (name, info) => createDatagrams(this.#state, name, info),
+			requestedDatagrams: () => requestedDatagrams(this.#state),
 			tracks: (owner) => this.#tracks(owner),
-			lister: () => new Lister(this.#state.listing),
+			lister: () => makeLister(this.#state.listing),
 		});
 	}
 
@@ -583,12 +567,13 @@ export class Consumer {
 			if (target instanceof Consumer) target.#path = path;
 			else stampProducer(target, path);
 		};
-		hooks.stampEpoch = (target, epoch) => {
-			target.#epoch = epoch;
+		hooks.stampInstance = (target, instance) => {
+			target.#instance = instance;
 		};
 		hooks.stampUnlisted = (target) => {
 			target.#unlisted = true;
 		};
+		hooks.unlisted = (target) => target.#unlisted;
 	}
 
 	/**
@@ -604,22 +589,23 @@ export class Consumer {
 	}
 
 	/**
-	 * The publisher epoch of the route an origin resolved this handle through, if it has one.
+	 * The instance of the route an origin resolved this handle through: the stream it reads.
 	 *
-	 * An origin stamps it with each request's result, so it names the publisher
-	 * instance actually serving this handle even when the request named none. `undefined` for a
-	 * route without an epoch or a handle not handed out by an origin.
+	 * An origin stamps it with each request's result, so it names the stream actually serving
+	 * this handle even when the request named none. `undefined` for a handle not handed out by
+	 * an origin.
 	 */
-	get epoch(): Epoch.Valid | undefined {
-		return this.#epoch;
+	get instance(): Instance.Valid | undefined {
+		return this.#instance;
 	}
 
 	/**
 	 * Settles with `null` once the broadcast closes; a broadcast end carries no cause.
 	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
 	 *
-	 * Shared by every {@link clone}: it settles once the last handle closes. The subscribing
-	 * wire layer peeks it to evict a closed entry from its per-path consume cache.
+	 * Shared by every {@link clone}. A produced broadcast settles once its producer closes; a
+	 * broadcast consumed from a session, once the session ends it or the last handle closes.
+	 * The subscribing wire layer peeks it to evict a closed entry from its per-path consume cache.
 	 */
 	get closed(): GetPromise<null> {
 		return this.#state.closed;
@@ -629,7 +615,7 @@ export class Consumer {
 	 * Return another handle to the same broadcast, reference-counted with this one.
 	 *
 	 * Both handles read the same tracks, carry the same {@link path}, and share one {@link closed}
-	 * state; the broadcast closes only once *every* handle has {@link close}d. Used by the connection's per-path
+	 * state. Used by the connection's per-path
 	 * consume cache to share one subscription across callers. Subclasses that resolve info over
 	 * the wire override this to preserve their type (see the wire layer's consumed broadcast).
 	 */
@@ -637,15 +623,22 @@ export class Consumer {
 		return new Consumer(this.shareState());
 	}
 
-	// Hand this consumer's backing state and path to a clone. Opaque (`never`) so the state type
-	// stays unexported; a subclass passes it straight back into its own `super(...)`.
+	/**
+	 * This consumer's backing state and path, for a clone. Opaque (`never`) so the state type
+	 * stays unexported; a subclass passes it straight back into its own `super(...)`.
+	 */
 	protected shareState(): never {
 		return {
 			state: this.#state,
 			path: this.#path,
-			epoch: this.#epoch,
+			instance: this.#instance,
 			unlisted: this.#unlisted,
 		} satisfies Shared as never;
+	}
+
+	/** Read a datagram track live from now, independently of any same-name stream track. */
+	datagrams(name: string): datagram.Consumer {
+		return wireOf(this).datagrams(name);
 	}
 
 	/** Get a lazy handle for a track on this broadcast. Repeat subscriptions dedupe onto one upstream subscription. */
@@ -674,13 +667,13 @@ export class Consumer {
 	}
 
 	/**
-	 * Release this handle. The broadcast is closed once this was the last live handle;
-	 * while other {@link clone}s remain open it stays live.
+	 * Release this handle, like dropping a Rust handle. A produced broadcast stays open until
+	 * its producer closes; one consumed from a session ends once no {@link clone} holds it.
 	 */
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
-		if (--this.#state.consumers > 0) return;
+		if (--this.#state.consumers > 0 || !this.#state.unheld) return;
 		closeState(this.#state);
 	}
 }

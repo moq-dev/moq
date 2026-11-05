@@ -1,9 +1,7 @@
-//! A shared byte budget for cached groups and buffered datagrams, repaid by write-time eviction.
+//! A shared byte budget for cached groups, repaid by write-time eviction.
 //!
 //! Every group charges its cached bytes into a [`Pool`] through a crate-internal
-//! `Charge`, billed to its track's `Track` account. A track's datagram send buffer bills
-//! each datagram it holds the same way, both payload forms of a compressed one included,
-//! and pays debt by dropping its oldest once the groups' payment falls short. The pool itself never evicts: it is
+//! `Charge`, billed to its track's `Track` account. The pool itself never evicts: it is
 //! a handful of atomic counters. While the pool is over capacity, each track accrues
 //! eviction debt as it writes (`accrue`),
 //! sized proportionally to what it wrote, and pays that debt by aborting its own oldest
@@ -40,15 +38,16 @@
 //! [`DEFAULT_EXPIRY`], while a relay creates one configured pool and shares it across
 //! every origin so the whole process caches into a single policy.
 
-use crate::sync::Mutex;
+use crate::util::SendCell;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, PoisonError, Weak};
 use std::task::{Poll, ready};
 use std::time::Duration;
 
 use super::track::{self, Position, TrackState};
-use super::{aborts, expiry, group};
+use super::{aborts, expiry, flate, group};
 
 /// Fixed bookkeeping charged per cached group on top of its frame payload bytes.
 ///
@@ -123,15 +122,17 @@ impl Config {
 
 /// A shared cache policy and byte budget; cloning shares both.
 ///
-/// The pool tracks how many payload bytes are cached across every registered group and
-/// datagram buffer, plus the mean last-access time of the evictable groups. It never
+/// The pool tracks how many payload bytes are cached across every registered group,
+/// plus the mean last-access time of the evictable groups. It never
 /// evicts on its own: tracks accrue eviction debt as they write and evict their own
-/// oldest groups and datagrams to pay it. Idle expiration runs during [`Self::poll`]. The capacity is
+/// oldest groups to pay it. Idle expiration runs during [`Self::poll`]. The capacity is
 /// therefore a target usage converges toward, not a hard limit: carried debt, capped
 /// payments, and the always-protected live edge all let usage transiently exceed it.
 #[derive(Clone)]
 pub struct Pool {
-	inner: Arc<Inner>,
+	// Every track and handoff registry reaches back into group state, so the cell
+	// proves `Send` once here instead of inside every origin and broadcast handle.
+	inner: Arc<SendCell<Inner>>,
 }
 
 impl Default for Pool {
@@ -213,7 +214,7 @@ impl Pool {
 			ms.max(1).div_ceil(TICK_MS).saturating_mul(TICK_MS)
 		});
 		Self {
-			inner: Arc::new(Inner {
+			inner: Arc::new(SendCell::new(Inner {
 				used: AtomicU64::new(0),
 				capacity: AtomicU64::new(config.capacity.unwrap_or(u64::MAX)),
 				expiry,
@@ -226,7 +227,7 @@ impl Pool {
 				wall_micros: AtomicU64::new(0),
 				wall: kio::Lock::default(),
 				held: Mutex::default(),
-			}),
+			})),
 		}
 	}
 
@@ -243,7 +244,7 @@ impl Pool {
 		}
 	}
 
-	/// Bytes currently cached across every registered group and datagram buffer.
+	/// Bytes currently cached across every registered group.
 	pub fn used(&self) -> u64 {
 		self.inner.used.load(Ordering::Relaxed)
 	}
@@ -638,7 +639,7 @@ impl std::fmt::Debug for Pool {
 /// nothing can cache into it any more.
 #[derive(Clone)]
 pub struct PoolWeak {
-	inner: std::sync::Weak<Inner>,
+	inner: std::sync::Weak<SendCell<Inner>>,
 }
 
 impl PoolWeak {
@@ -711,18 +712,26 @@ pub(super) struct Track {
 	// lock, and wakes only the readers following it.
 	largest: kio::Shared<Largest>,
 
+	// Whether the track ever declared an end, set under the track lock and never cleared,
+	// so a reader looking for one skips that lock until there is one to read.
+	declared: AtomicBool,
+
 	// What the frames this track's groups are still receiving may allocate up front,
 	// shared with every track minted from the same origin handle.
 	frames: super::frame::Budget,
+
+	// One finished local group's encoder, kept until another group needs it or the
+	// account drops. Raw codec only: an Extra here would keep this account alive.
+	encoder: Mutex<Option<flate::Encoder>>,
 }
 
 /// The greatest location a track has written or its source reported, followed by the track
-/// handles' `largest`: each new group or datagram at its head, then each frame written to it.
+/// handles' `largest`: each new group at its head, then each frame written to it.
 #[derive(Default)]
 struct Largest {
 	position: Option<Position>,
-	// The largest group's content may still grow: no copy of it finished, and it is not a
-	// datagram. An aborted one stays open, since it can be recreated or fetched.
+	// The largest group's content may still grow: no copy of the whole group finished. An
+	// aborted one stays open, since it can be recreated or fetched.
 	open: bool,
 	// The track ended, so no newer position can follow.
 	ended: bool,
@@ -738,8 +747,8 @@ impl Track {
 		}
 	}
 
-	/// Group `sequence` holds every frame it will have: a copy finished, or it is a datagram.
-	/// A group name fixes its content, so no legal write raises the largest past it.
+	/// Group `sequence` holds every frame it will have: a whole copy finished. A group name
+	/// fixes its content, so no legal write raises the largest past it.
 	pub(super) fn finish_largest(&self, sequence: u64) {
 		let mut largest = self.largest.lock();
 		if largest.position.is_some_and(|position| position.group == sequence) {
@@ -819,6 +828,8 @@ impl Track {
 			wakes: Default::default(),
 			aborts: OnceLock::new(),
 			largest: Default::default(),
+			declared: AtomicBool::new(false),
+			encoder: Mutex::default(),
 		});
 		if let Some(key) = track.pool.register(&track) {
 			let _ = track.sweep.set(key);
@@ -844,6 +855,16 @@ impl Track {
 	/// The track's reads parked on their drift budget.
 	pub(super) fn wakes(&self) -> &expiry::Wakes {
 		&self.wakes
+	}
+
+	/// The track declared an end. Called under the track lock.
+	pub(super) fn declare_end(&self) {
+		self.declared.store(true, Ordering::Release);
+	}
+
+	/// Whether the track ever declared an end, so the end may be worth the track lock.
+	pub(super) fn end_declared(&self) -> bool {
+		self.declared.load(Ordering::Acquire)
 	}
 
 	/// Watch every group the publisher cuts, rather than chosen sequences.
@@ -903,17 +924,6 @@ impl Track {
 		})
 	}
 
-	/// Bill `bytes` of a buffered datagram, which accrue eviction debt like a group's frames.
-	pub(super) fn bill(self: &Arc<Self>, bytes: u64) -> Bill {
-		self.pool.add(bytes);
-		self.written.fetch_add(bytes, Ordering::Relaxed);
-		Bill {
-			track: self.clone(),
-			bytes,
-			at: self.pool.now(),
-		}
-	}
-
 	/// Take everything written since the last call, to be turned into eviction debt.
 	pub(super) fn take_written(&self) -> u64 {
 		self.written.swap(0, Ordering::Relaxed)
@@ -953,7 +963,7 @@ impl Track {
 		// its teardown on its own clone count rather than the state's.
 		let Some(state) = self.state.upgrade() else {
 			// An ended track's channel is closed, but a stale consumer can still hold its
-			// groups and datagrams: the sweep expires them in place, or they would never go.
+			// groups: the sweep expires them in place, or they would never go.
 			if full && scan_expiry {
 				self.state.read(|state| state.expire_closed(state.expiry_scan_drain()));
 			}
@@ -1013,6 +1023,15 @@ impl Track {
 
 impl Drop for Track {
 	fn drop(&mut self) {
+		if self
+			.encoder
+			.get_mut()
+			.unwrap_or_else(PoisonError::into_inner)
+			.take()
+			.is_some()
+		{
+			self.pool.sub(flate::ENCODER_HEAP);
+		}
 		if let Some(key) = self.sweep.get() {
 			self.pool.unregister(*key);
 		}
@@ -1024,7 +1043,7 @@ impl Drop for Track {
 	}
 }
 
-/// The bytes a held head of a failed group or a buffered datagram bills to its track's
+/// The bytes a held head of a failed group bills to its track's
 /// pool, released on drop.
 pub(super) struct Bill {
 	track: Arc<Track>,
@@ -1034,11 +1053,6 @@ pub(super) struct Bill {
 }
 
 impl Bill {
-	/// What it bills the pool.
-	pub(super) fn bytes(&self) -> u64 {
-		self.bytes
-	}
-
 	/// Whether the pool's idle window passed since it was billed.
 	pub(super) fn expired(&self) -> bool {
 		let pool = &self.track.pool;
@@ -1154,9 +1168,33 @@ impl Charge {
 		self.touch(WRITE_BOOST)
 	}
 
+	/// Release `n` charged bytes the group dropped while still cached, without an access.
+	pub(super) fn sub(&mut self, n: u64) {
+		if let Some(track) = &self.track {
+			let n = n.min(self.bytes);
+			track.pool.sub(n);
+			self.bytes -= n;
+		}
+	}
+
 	/// The group's full cached footprint: payload bytes plus overhead.
 	pub(super) fn size(&self) -> u64 {
 		self.bytes
+	}
+
+	/// Move already-accounted payload to a shared content owner without recording a write.
+	pub(super) fn transfer(&mut self, bytes: u64) -> Extra {
+		if self.track.is_none() {
+			return Extra::default();
+		}
+		self.bytes = self
+			.bytes
+			.checked_sub(bytes)
+			.expect("transferred payload must already be charged");
+		Extra {
+			track: self.track.clone(),
+			bytes: AtomicU64::new(bytes),
+		}
 	}
 
 	/// The shared handle to this group's last-access stamp, so the group can read it
@@ -1264,6 +1302,34 @@ pub(super) struct Extra {
 }
 
 impl Extra {
+	/// Take this track's spare encoder with its charge, or bill a new one.
+	pub(super) fn take_encoder(&self) -> flate::Encoder {
+		if let Some(track) = &self.track {
+			let encoder = track.encoder.lock().unwrap_or_else(PoisonError::into_inner).take();
+			if let Some(mut encoder) = encoder {
+				// Moving existing heap is not a write and must not accrue eviction debt.
+				self.bytes.fetch_add(flate::ENCODER_HEAP, Ordering::Relaxed);
+				encoder.reset();
+				return encoder;
+			}
+		}
+		self.add(flate::ENCODER_HEAP);
+		flate::Encoder::new()
+	}
+
+	/// Park a finished encoder and its charge, dropping it if the track has a spare.
+	pub(super) fn park_encoder(&self, encoder: flate::Encoder) {
+		if let Some(track) = &self.track {
+			let mut spare = track.encoder.lock().unwrap_or_else(PoisonError::into_inner);
+			if spare.is_none() {
+				self.bytes.fetch_sub(flate::ENCODER_HEAP, Ordering::Relaxed);
+				*spare = Some(encoder);
+				return;
+			}
+		}
+		self.sub(flate::ENCODER_HEAP);
+	}
+
 	/// Bill `n` more bytes.
 	pub(super) fn add(&self, n: u64) {
 		if let Some(track) = &self.track {
@@ -1324,6 +1390,42 @@ mod test {
 	fn bounded(capacity: u64) -> Pool {
 		let config = Config::default().with_capacity(capacity).with_expiry(DEFAULT_EXPIRY);
 		Pool::new(config)
+	}
+
+	/// Reuse transfers existing heap, concurrent users allocate separately, and only
+	/// one finished encoder stays parked until the account's final owner drops.
+	#[test]
+	fn encoder_spare_transfers_its_charge_without_write_debt() {
+		let pool = Pool::unbounded();
+		let charge = charge(&pool);
+		let first = charge.extra();
+		let second = charge.extra();
+		let account = charge.track.as_ref().unwrap();
+		account.take_written();
+		let encoder = first.take_encoder();
+		let concurrent = second.take_encoder();
+		assert_eq!(pool.used(), ENTRY_OVERHEAD + 2 * flate::ENCODER_HEAP);
+		assert_eq!(account.take_written(), 2 * flate::ENCODER_HEAP);
+
+		first.park_encoder(encoder);
+		assert_eq!(first.size(), 0);
+		assert_eq!(pool.used(), ENTRY_OVERHEAD + 2 * flate::ENCODER_HEAP);
+		let encoder = first.take_encoder();
+		assert_eq!(first.size(), flate::ENCODER_HEAP);
+		assert_eq!(account.take_written(), 0, "reuse must not inflate write debt");
+		first.park_encoder(encoder);
+		second.park_encoder(concurrent);
+		assert_eq!(second.size(), 0);
+		assert_eq!(pool.used(), ENTRY_OVERHEAD + flate::ENCODER_HEAP, "only one spare");
+
+		// A group and its inflated copy may outlive the track. They still own its
+		// account, so the parked encoder stays billed until that last owner drops.
+		drop(charge);
+		assert_eq!(pool.used(), flate::ENCODER_HEAP);
+		drop(first);
+		assert_eq!(pool.used(), flate::ENCODER_HEAP);
+		drop(second);
+		assert_eq!(pool.used(), 0);
 	}
 
 	struct Flag(std::sync::atomic::AtomicBool);
@@ -1394,17 +1496,17 @@ mod test {
 
 	/// Wall time can lead a lagging driver's sample, while another driver can supply
 	/// future time. Neither a new driver nor a backward sample may rewind expiration.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn wall_deadlines_use_the_later_of_ambient_and_driven_time() {
 		let pool = Pool::unbounded();
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let waiter = kio::Waiter::noop();
 		pool.poll(now, &waiter);
 		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let (read, reading) = flag();
 		let at = now + Duration::from_secs(1);
 		track.watch_wall(at, &reading);
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert_eq!(pool.poll(now, &waiter), None);
 		assert!(read.0.swap(false, Ordering::SeqCst), "ambient time was ignored");
 

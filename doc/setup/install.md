@@ -59,7 +59,8 @@ nix run github:moq-dev/moq/release#moq-relay -- relay.toml
 nix run github:moq-dev/moq/release#moq -- --help
 
 # Docker (linux/amd64 and linux/arm64). The image is scratch (the package
-# closure only) and has no shell.
+# closure only), has no shell, and runs as uid 65532, which must be able to read
+# mounted files.
 docker run -p 4443:4443/udp -p 4443:4443/tcp -v "$PWD/relay.toml:/app/relay.toml:ro" moqdev/moq-relay /app/relay.toml
 docker run -i moqdev/moq --help
 ```
@@ -70,6 +71,21 @@ Static binaries for Linux (x86\_64, aarch64), macOS (Apple Silicon), and Windows
 `nix.moq.dev` only holds tagged releases, so the `release` branch builds from
 source. Nix asks before trusting it; `--accept-flake-config` says yes for one
 command.
+
+Every archive, binary, and package attached to a `moq` or `moq-relay` release
+carries a build provenance attestation; older releases have none.
+`SHA256SUMS` comes from the same release, so it only catches a corrupt
+download. To check that a file was built by this repository's release
+workflow for the tag you expect, use the
+[GitHub CLI](https://cli.github.com/); `--source-ref` rejects a genuine file
+from another release:
+
+```bash
+gh attestation verify moq-cli-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz \
+  --repo moq-dev/moq \
+  --signer-workflow moq-dev/moq/.github/workflows/release-binary.yml \
+  --source-ref refs/tags/moq-cli-vX.Y.Z
+```
 
 ## Debian and Ubuntu
 

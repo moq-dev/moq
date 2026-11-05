@@ -1,11 +1,10 @@
-import { afterEach, beforeEach, expect, jest, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { type Installed, Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
-import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import { SessionCode, SessionError } from "../error.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
-import { Producer as OriginProducer } from "../origin.ts";
+import { Producer as OriginProducer, type Table } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
 import * as Time from "../time.ts";
@@ -14,9 +13,10 @@ import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
 import { Reload } from "./reload.ts";
 
-function publish(origin: { createBroadcast(path: Path.Valid): BroadcastProducer }, path: Path.Valid) {
-	const broadcast = origin.createBroadcast(path);
-	broadcast.announce();
+function publish(origin: Pick<Table, "createBroadcast">, path: Path.Valid) {
+	const broadcastPublication = origin.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	return broadcast;
 }
 
@@ -26,15 +26,11 @@ function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "tra
 	return acceptSession({ transport, url, ...props });
 }
 
-// Drain the mock handshake and reactive tasks before moving to the next timer slice.
-async function advance(ms = 0) {
-	for (let elapsed = 0; ; ) {
-		for (let i = 0; i < 64; i++) await Promise.resolve();
-		if (elapsed === ms) return;
-		const step = Math.min(100, ms - elapsed);
-		jest.advanceTimersByTime(step);
-		elapsed += step;
-	}
+let clock: Manual;
+let installed: Installed;
+
+function advance(ms = 0): Promise<void> {
+	return clock.advance(Nano.fromMilli(Milli(ms)));
 }
 
 const linger = Milli(2000);
@@ -42,7 +38,10 @@ const linger = Milli(2000);
 const original = globalThis.WebTransport;
 const originalWebSocket = globalThis.WebSocket;
 
-beforeEach(() => jest.useFakeTimers());
+beforeEach(() => {
+	clock = new Manual();
+	installed = clock.install();
+});
 
 afterEach(async () => {
 	resetShared();
@@ -50,7 +49,7 @@ afterEach(async () => {
 	await advance(linger);
 	globalThis.WebTransport = original;
 	globalThis.WebSocket = originalWebSocket;
-	jest.useRealTimers();
+	installed.close();
 });
 
 /** Hand out a live mock transport per dial, counting how many were opened. */
@@ -263,16 +262,16 @@ test("a borrowed connection origin exposes live routes and dynamic serving", asy
 			announcement = event;
 		});
 		const prefix = Path.from("on-demand");
-		const route = table.dynamicRoute(prefix);
+		const route = table.requestsRoute(prefix);
 		await advance();
-		expect(announcement).toMatchObject({ kind: "start", prefix });
+		expect(announcement).toMatchObject({ kind: "present", prefix });
 		let withdrawal: unknown;
 		void live.next().then((event) => {
 			withdrawal = event;
 		});
 		route.close();
 		await advance();
-		expect(withdrawal).toMatchObject({ kind: "end", prefix });
+		expect(withdrawal).toMatchObject({ kind: "absent", prefix });
 		live.close();
 	} finally {
 		handle.close();
@@ -570,40 +569,26 @@ test("pooled probe readers share demand and carry it through reconnects", async 
 		return pair.client;
 	};
 	globalThis.WebTransport = stub as unknown as typeof WebTransport;
-	const settle = () =>
-		new Promise<void>((resolve) => {
-			const channel = new MessageChannel();
-			channel.port1.onmessage = () => {
-				channel.port1.close();
-				channel.port2.close();
-				resolve();
-			};
-			channel.port2.postMessage(null);
-		});
 	const first = new Connection({ url });
 	const second = new Connection({ url });
 	let stopFirst = () => {};
 	let stopSecond = () => {};
 	try {
 		await advance();
-		await settle();
 		expect(pairs[0].client.sendStreams.bidi).toHaveLength(0);
 		stopFirst = first.probe.subscribe(() => {});
 		stopSecond = second.probe.subscribe(() => {});
 		await advance();
-		await settle();
 		expect(pairs[0].client.sendStreams.bidi).toHaveLength(1);
 		stopFirst();
 		await advance(100);
 		expect(pairs[0].client.sendStreams.bidi).toHaveLength(1);
 		pairs[0].server.close({ closeCode: SessionCode.Internal, reason: "reconnect" });
 		await advance(2_000);
-		await settle();
 		expect(pairs).toHaveLength(2);
 		expect(pairs[1].client.sendStreams.bidi).toHaveLength(1);
 		stopSecond();
 		await advance();
-		await settle();
 		const before = statsCalls[1];
 		await advance(500);
 		expect(statsCalls[1]).toBe(before);
@@ -613,7 +598,6 @@ test("pooled probe readers share demand and carry it through reconnects", async 
 		first.close();
 		second.close();
 		await advance(linger);
-		await settle();
 	}
 });
 
@@ -621,7 +605,7 @@ test("a handle's announcements sync with the shared origin", async () => {
 	stubTransports();
 
 	const handle = new Connection({ url });
-	const watch = handle.announced();
+	const watch = handle.routes();
 	expect(watch.synced.peek()).toBe(false);
 
 	await advance();

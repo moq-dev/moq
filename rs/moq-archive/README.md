@@ -31,7 +31,7 @@ use moq_archive::object_store::memory::InMemory;
 let store = moq_archive::Store::new(InMemory::new(), "recordings/demo");
 moq_archive::Producer::new(store.clone(), broadcast, Default::default()).run().await?;
 
-// `served` is a `moq_net::broadcast::Producer`, announced once `open` returns.
+// `served` is an `origin::Publication`'s fill, announced once `open` returns.
 let consumer = moq_archive::Consumer::open(store, served, Default::default()).await?;
 consumer.run().await?;
 ```

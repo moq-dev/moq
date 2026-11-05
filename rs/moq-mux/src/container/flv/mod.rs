@@ -18,7 +18,7 @@
 //! from the frame), and the sample bytes already match the
 //! [`Legacy`](crate::catalog::hang::Container) container, so no codec transform is
 //! needed. Other legacy codecs (VP6, Speex, …) and the E-RTMP FLAC audio are
-//! logged and dropped on import, and rejected on export.
+//! rejected on import and export.
 
 mod export;
 mod import;

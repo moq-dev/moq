@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `server::Request::with_quic_limits` sets the QUIC limits `ok` applies before answering SETUP. A server QUIC connection holds only `moq_net::transport::SETUP_RECEIVE_WINDOW` until `ok` opens `[quic] receive_window`, so a client cannot bank credit before it is admitted.
+
 - `server::Request::within` finishes a future, such as admitting the session, within what remains of the handshake deadline, closing the session with the timeout code otherwise.
 
 ## [0.19.23](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.22...moq-tokio-v0.19.23) - 2026-10-06

@@ -1,4 +1,5 @@
 export * from "./announce.ts";
+export * from "./compat.ts";
 export * from "./connection.ts";
 export * from "./datagram.ts";
 export * from "./fetch.ts";

@@ -22,8 +22,8 @@ var (
 	GroupConsumer func(any) *ffi.MoqGroupConsumer
 	// TrackDemand wraps a handle as a *moq.TrackDemand.
 	TrackDemand func(*ffi.MoqTrackDemand) any
-	// Bandwidth returns the handle behind a *moq.Bandwidth.
-	Bandwidth func(any) *ffi.MoqBandwidth
+	// Allocator returns the handle behind a *moq.Allocator.
+	Allocator func(any) *ffi.MoqAllocator
 	// Reservation wraps a native reservation as *moq.Reservation.
 	Reservation func(*ffi.MoqReservation) any
 	// CatalogProducer returns the handle behind a *media.CatalogProducer.
@@ -38,29 +38,41 @@ var BroadcastConsumer func(any) *ffi.MoqBroadcastConsumer
 // TrackRequest returns the handle behind a *moq.TrackRequest.
 var TrackRequest func(any) *ffi.MoqTrackRequest
 
-// Frame converts a moq.Frame to the generated record.
-var Frame func(any) (ffi.MoqFrame, error)
-
 // Subscription converts a *moq.Subscription to the generated record.
 var Subscription func(any) (*ffi.MoqSubscription, error)
 
-// Duration converts d to microseconds, refusing a negative duration rather
-// than letting it wrap when cast to uint64.
-func Duration(d time.Duration, name string) (uint64, error) {
-	if d < 0 {
-		return 0, fmt.Errorf("negative %s: %v", name, d)
+// Delay converts a moq.Delay to the generated record.
+var Delay func(any) (ffi.MoqDelay, error)
+
+// NonNegative refuses a negative duration, which the generated converter
+// would panic on rather than return an error.
+func NonNegative(value *time.Duration, name string) error {
+	if value != nil && *value < 0 {
+		return fmt.Errorf("negative %s: %v", name, *value)
 	}
-	return uint64(d.Microseconds()), nil
+	return nil
 }
 
-// OptionalDuration converts a caller's time to microseconds, preserving absence.
-func OptionalDuration(value *time.Duration, name string) (*uint64, error) {
-	if value == nil {
-		return nil, nil
+// Rendition refuses a rendition's negative jitter or warmup, for the same reason.
+func Rendition(rendition ffi.MoqRendition) error {
+	switch rendition := rendition.(type) {
+	case ffi.MoqRenditionAudio:
+		return Audio(rendition.Config)
+	case ffi.MoqRenditionVideo:
+		return Video(rendition.Config)
 	}
-	us, err := Duration(*value, name)
-	if err != nil {
-		return nil, err
+	return nil
+}
+
+// Audio refuses an audio rendition's negative jitter or warmup.
+func Audio(audio ffi.MoqAudio) error {
+	if err := NonNegative(audio.Jitter, "jitter"); err != nil {
+		return err
 	}
-	return &us, nil
+	return NonNegative(audio.Warmup, "warmup")
+}
+
+// Video refuses a video rendition's negative warmup.
+func Video(video ffi.MoqVideo) error {
+	return NonNegative(video.Warmup, "warmup")
 }

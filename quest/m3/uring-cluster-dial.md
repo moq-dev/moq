@@ -21,16 +21,12 @@ CPU per Gbps and latency on the relay-to-relay fanout shape, ring against
 tokio, swept over links and subscribers.
 
 Decided 2026-10-22 (maintainer), from the io_uring audit: cluster dials
-stay measure-gated. Iroh and WebRTC data channels stay on tokio. TCP and
+stay measure-gated. WebRTC data channels stay on tokio. TCP and
 WebSocket move onto the workers through
 [Stream transports](/quest/m2/perf/stream/README.md), which its own
 decision exempts from a gate.
 
 Public API: none until the port. Wire: none.
-
-## Required
-
-- [Profile the io_uring workers](/quest/m2/perf/uring-profile.md) - the recipe this measures with
 
 ## Related
 
