@@ -142,8 +142,8 @@ case $MODE in
         FANOUT_SCENARIOS=${BENCH_FANOUT_SCENARIOS:-model session}
         FANOUT_SUBSCRIBERS=${BENCH_FANOUT_SUBSCRIBERS:-1 64 512}
         for value in $FANOUT_SCENARIOS; do
-            if [[ ! $value =~ ^(model|session)$ ]]; then
-                printf 'unknown fan-out scenario %q; expected model or session\n' "$value" >&2
+            if [[ ! $value =~ ^(model|session|group)$ ]]; then
+                printf 'unknown fan-out scenario %q; expected model, session, or group\n' "$value" >&2
                 exit 1
             fi
         done
@@ -463,7 +463,13 @@ measure_criterion() {
         mkdir -p "$RUN/base-context"
         (cd "$WORKTREE" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE" comparison-base)
         printf 'Criterion paired with base %s\n' "$BASE"
-        if ! criterion_build_base "$base"; then
+        printf 'Base build log: %s/base-build.log\n' "$RUN"
+        local build_status=(0 0)
+        criterion_build_base "$base" 2>&1 | tee "$RUN/base-build.log" >&2 || build_status=("${PIPESTATUS[@]}")
+        if ((build_status[1] != 0)); then
+            printf 'Failed to write base build log: %s/base-build.log\n' "$RUN" >&2
+        fi
+        if ((build_status[0] != 0)); then
             : >"$base"
             for key in "${targets[@]}"; do unavailable "$key" "base build failed"; done
         fi
@@ -976,15 +982,19 @@ run_queued_builds() {
     done
 }
 
-# Check out one revision for this run, in the checkout's ignored scratch space,
-# where it loads only its own Cargo configuration. Its target persists, keyed by
-# revision; the compiler cache keys on remapped paths, so a fresh checkout reuses it.
+# Check out one revision in the checkout's ignored scratch space, where it loads
+# only its own Cargo configuration. Both the checkout and its target persist,
+# keyed by revision: a fresh checkout's new mtimes would rebuild every workspace
+# crate on a host without a compiler cache.
 revision_checkout() {
-    local sha=$1 label=$2 worktree
-    mkdir -p "$ROOT/.tmp"
-    worktree=$(mktemp -d "$ROOT/.tmp/moq-bench-base.XXXXXX")
-    WORKTREES+=("$worktree")
-    git worktree add --detach "$worktree" "$sha" >/dev/null
+    local sha=$1 label=$2 worktree=$ROOT/.tmp/bench-revisions/$1
+    if [[ ! -f $worktree/.git || $(git -C "$worktree" rev-parse HEAD 2>/dev/null) != "$sha" ]] ||
+        [[ -n $(git -C "$worktree" status --porcelain 2>/dev/null) ]]; then
+        git worktree remove --force "$worktree" >/dev/null 2>&1 || rm -rf "$worktree"
+        git worktree prune
+        mkdir -p "$ROOT/.tmp/bench-revisions"
+        git worktree add --detach "$worktree" "$sha" >/dev/null
+    fi
     mkdir -p "$RUN/base-context/$label"
     (cd "$worktree" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context/$label" "$sha" --profile)
     REVISION_CHECKOUT=$worktree
