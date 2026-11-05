@@ -156,7 +156,7 @@ type Catalog = {
   "text": TextSchema | undefined,
   "json": JsonTracks | undefined,
   "binary": BinaryTracks | undefined,
-  "contributions": Record<string, {
+  "include": Record<string, {
     "broadcast": string,
     "instance": string | undefined,
   }> | undefined,
@@ -172,7 +172,7 @@ For example, a chat entry should name a chat track, not carry individual chat me
 This way catalog updates are rare and a client MAY choose to not subscribe.
 The `json` and `binary` sections ({{data}}) are how a track like that is listed.
 
-This specification defines audio, video, and text media tracks, an optional `media` section ({{media}}) holding the clock that maps content time to wall time and the interval a viewer can join on, the root `version` ({{catalog-version}}), the application data tracks in {{data}}, optional publisher statistics and solicited viewer feedback ({{media-stats}}), and whole broadcasts listed as `contributions` ({{contributions}}).
+This specification defines audio, video, and text media tracks, an optional `media` section ({{media}}) holding the clock that maps content time to wall time and the interval a viewer can join on, the root `version` ({{catalog-version}}), the application data tracks in {{data}}, optional publisher statistics and solicited viewer feedback ({{media-stats}}), and whole broadcasts listed in `include` ({{include}}).
 
 ## Version {#catalog-version}
 The root `version` field is the oldest draft of this specification that reads the catalog correctly, by draft number: `4` needs a consumer of moq-hang-04 or later.
@@ -188,7 +188,7 @@ This draft needs `version` 4 for:
 - a `track` ({{field-track}}) other than the entry's ID, which an older consumer subscribes to instead;
 - a video `warmup` ({{field-warmup}}) above zero, since an older consumer starts decoding a group at a picture that is not a keyframe.
 
-Every other catalog change in this draft is safe to ignore: `enabled` ({{field-enabled}}) leaves an older consumer selecting a disabled rendition, which plays nothing; `media` ({{media}}) only offers the clock and join interval, which an older consumer goes without; `stats` and `echo` ({{media-stats}}) only offer optional tracks; `contributions` ({{contributions}}) only offer broadcasts to open on selection; video `reorder` leaves an older consumer inferring decode times from timestamps; `jitter`, `delay`, audio `warmup`, and the data track estimates are hints.
+Every other catalog change in this draft is safe to ignore: `enabled` ({{field-enabled}}) leaves an older consumer selecting a disabled rendition, which plays nothing; `media` ({{media}}) only offers the clock and join interval, which an older consumer goes without; `stats` and `echo` ({{media-stats}}) only offer optional tracks; `include` ({{include}}) only offers broadcasts to open on selection; video `reorder` leaves an older consumer inferring decode times from timestamps; `jitter`, `delay`, audio `warmup`, and the data track estimates are hints.
 
 ## Media {#media}
 The catalog's root `media` field holds what applies to every audio and video track:
@@ -238,22 +238,25 @@ A group longer than the interval is an overrun, which an edge tolerates.
 A consumer that cannot decode `join`, including a zero `interval`, MUST treat it as absent.
 Nesting the interval under `join` leaves room for a later join mechanism that is not a fixed grid.
 
-## Contributions {#contributions}
-The optional root `contributions` map names whole broadcasts, such as each guest feed in a composed room, whose own catalogs describe their renditions.
-Each key is a contribution ID.
+## Includes {#include}
+The optional root `include` map names whole broadcasts, such as transcoded renditions of the source, whose own catalogs describe their renditions.
+Each key is an include ID.
 Each entry MUST contain a string `broadcast`, resolved against the catalog's broadcast as in {{field-broadcast}}, and MAY contain an `instance` as in {{field-instance}}.
 A consumer MUST reject a catalog with a malformed entry or a reference that escapes above the root.
 
-Listing an entry MUST NOT subscribe to the contribution: a consumer opens its catalog only when it selects the contribution or one of its renditions.
-An HLS master selects every contribution it lists, reading their catalogs to describe their renditions, but MUST NOT subscribe to their media until requested by a player.
-It segments a contribution's renditions on the listing catalog's `media` ({{media}}), whatever the contribution's own catalog declares.
-A publisher producing media on demand MUST answer its catalog without starting media production.
-A selected contribution resolves like a rendition's reference, under the same rules for `instance` and restarts ({{field-instance}}).
-A contribution produced on demand has no stream until it resolves, so a publisher omits its `instance` until then.
+An include MUST share the listing catalog's PTS timeline and root settings, including its `media.clock` and `media.join.interval` ({{media}}).
+A consumer uses the listing catalog's settings without comparing the include's own settings; a mismatch is a publisher error.
 
-A contribution's rendition IDs belong to its own catalog and MUST NOT replace IDs in the listing catalog, so the same ID MAY name a contribution, a rendition in the listing catalog, and a rendition in the contribution.
-An unavailable contribution does not invalidate the listing catalog.
-A consumer does not expand a contribution's own `contributions`: each needs a selection of its own.
+Listing an entry MUST NOT subscribe to the include: a consumer opens its catalog only when it selects the include or one of its renditions.
+An HLS master selects every include it lists, reading their catalogs to describe their renditions, but MUST NOT subscribe to their media until requested by a player.
+It segments an include's renditions on the listing catalog's `media` ({{media}}), whatever the include's own catalog declares.
+A publisher producing media on demand MUST answer its catalog without starting media production.
+A selected include resolves like a rendition's reference, under the same rules for `instance` and restarts ({{field-instance}}).
+An include produced on demand has no stream until it resolves, so a publisher omits its `instance` until then.
+
+An include's rendition IDs belong to its own catalog and MUST NOT replace IDs in the listing catalog, so the same ID MAY name an include, a rendition in the listing catalog, and a rendition in the include.
+An unavailable include does not invalidate the listing catalog.
+A consumer does not expand an include's own `include`: each needs a selection of its own.
 
 ## Track Identity {#identity}
 A track name always means the same content, so a catalog update never redefines an audio or video track.
@@ -1095,7 +1098,7 @@ the broadcast path, not the payload. This track is distinct from an application'
 `hang/chat.json` snapshot extension.
 
 # Security Considerations
-A rendition's `broadcast` reference ({{field-broadcast}}), like a contribution's ({{contributions}}), resolves against the consumer's root, which is the subtree it is authorized for.
+A rendition's `broadcast` reference ({{field-broadcast}}), like an include's ({{include}}), resolves against the consumer's root, which is the subtree it is authorized for.
 Clamping a reference that escapes above that root would silently redirect the subscription to an unrelated broadcast, so a consumer rejects the catalog instead.
 
 TODO Security
@@ -1126,8 +1129,9 @@ This document has no IANA actions.
 - Added the optional video `preference` field: a consumer selects automatically among the highest preference it can decode.
 - Added the optional video `reorder` field: the most frames that can precede one in decode order and follow it in presentation, fixed for the track once declared. A consumer that authors decode times derives them from it and the current group alone, refusing deeper reordering; without it, a consumer infers them from timestamps.
 - Added an optional `instance` beside every rendition and data track `broadcast` reference ({{field-instance}}). A consumer reads each referenced path from the first broadcast it resolves for a catalog instance; a present `instance` fails a rendition that resolves another stream, and is best effort against an Instance a receiver minted.
-- Added the optional root `contributions` map ({{contributions}}): whole broadcasts named by a relative `broadcast` and an optional `instance`, opened only on selection, whose rendition IDs stay their own.
-- An HLS master selects the contributions it lists by reading their catalogs, without demanding media, and segments them on the listing catalog's `media`; an on-demand publisher answers its catalog without starting media production.
+- Added the optional root `include` map ({{include}}): whole broadcasts named by a relative `broadcast` and an optional `instance`, opened only on selection, whose rendition IDs stay their own.
+- Includes share the listing catalog's PTS timeline and root settings, including its clock and join interval.
+- An HLS master selects the includes it lists by reading their catalogs, without demanding media, and segments them on the listing catalog's `media`; an on-demand publisher answers its catalog without starting media production.
 - Added optional `stats` and `echo` catalog sections, publisher/viewer snapshots keyed by rendition ID, and the `.echo` feedback broadcast convention.
 - An Opus frame timestamp counts the OpusHead pre-skip: a consumer presents each decoded sample the pre-skip earlier than its frame timestamp places it.
 

@@ -691,40 +691,51 @@
             PATH=$(printf '%s' "$PATH" | awk -v RS=: '!seen[$0]++ { printf "%s%s", sep, $0; sep = ":" }')
           '';
 
-          env = {
-            # What sh/dispatch.sh checks before a scoped `just check` or `just
-            # fix`. IN_NIX_SHELL would also pass inside another project's shell.
-            IN_MOQ_DEV_SHELL = "1";
+          # moq binaries reject any MOQ_* variable they don't read, so the
+          # shell must export none.
+          env =
+            let
+              vars = {
+                # What sh/dispatch.sh checks before a scoped `just check` or `just
+                # fix`. IN_NIX_SHELL would also pass inside another project's shell.
+                IN_MOQ_DEV_SHELL = "1";
 
-            # Local launchers need the exact build without evaluating the flake again.
-            MOQ_QUEST = "${quest-cli}/bin/quest";
+                # Local launchers need the exact build without evaluating the flake again.
+                # QUEST_* belongs to quest itself.
+                DEV_SHELL_QUEST = "${quest-cli}/bin/quest";
 
-            PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
-            PLAYWRIGHT_VERSION = pkgs.playwright-driver.version;
-            PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
+                PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
+                PLAYWRIGHT_VERSION = pkgs.playwright-driver.version;
+                PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
 
-            # Where `just obs compile` and `just obs test` look for libobs. Set
-            # on every platform so the plugin type-checks against the pinned OBS
-            # release everywhere, rather than whatever the host happens to have.
-            OBS_INCLUDE_DIR = "${obs-headers}/include/obs";
+                # Where `just obs compile` and `just obs test` look for libobs. Set
+                # on every platform so the plugin type-checks against the pinned OBS
+                # release everywhere, rather than whatever the host happens to have.
+                OBS_INCLUDE_DIR = "${obs-headers}/include/obs";
 
-            # What `just obs check` compares the two in-repo OBS pins against.
-            # Exported rather than read back out of nix, so the guard costs a
-            # variable lookup instead of a nested evaluation of this flake.
-            OBS_LINKED_VERSION = obs-linked-version;
+                # What `just obs check` compares the two in-repo OBS pins against.
+                # Exported rather than read back out of nix, so the guard costs a
+                # variable lookup instead of a nested evaluation of this flake.
+                OBS_LINKED_VERSION = obs-linked-version;
 
-            # Link libvpx statically for moq-video's `vpx` feature, the shape the
-            # quest ships: no system codec library at runtime.
-            VPX_STATIC = "1";
-          }
-          // pkgs.lib.optionalAttrs (!pkgs.stdenv.hostPlatform.isDarwin) {
-            ALSA_PLUGIN_DIR = "${alsaPlugins}/lib/alsa-lib";
-            # Firefox loads these at runtime; harness.ts exposes them only to its process.
-            PLAYWRIGHT_FIREFOX_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
-              pkgs.ffmpeg
-              pkgs.libpulseaudio
-            ];
-          };
+                # Link libvpx statically for moq-video's `vpx` feature, the shape the
+                # quest ships: no system codec library at runtime.
+                VPX_STATIC = "1";
+              }
+              // pkgs.lib.optionalAttrs (!pkgs.stdenv.hostPlatform.isDarwin) {
+                ALSA_PLUGIN_DIR = "${alsaPlugins}/lib/alsa-lib";
+                # Firefox loads these at runtime; harness.ts exposes them only to its process.
+                PLAYWRIGHT_FIREFOX_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+                  pkgs.ffmpeg
+                  pkgs.libpulseaudio
+                ];
+              };
+              moq = builtins.filter (pkgs.lib.hasPrefix "MOQ_") (builtins.attrNames vars);
+            in
+            assert pkgs.lib.assertMsg (
+              moq == [ ]
+            ) "dev shell must not export MOQ_* (moq binaries reject them): ${toString moq}";
+            vars;
         };
 
         formatter = pkgs.nixfmt-tree;
