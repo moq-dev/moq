@@ -38,6 +38,13 @@ it does not establish the cause. Keep this wait in the quest so the
 evidence-only [moq-dev/moq#7933](https://github.com/moq-dev/moq/pull/7933)
 can land without a speculative test or production change.
 
+On the next captured failure, check the dial count and which client closed
+first. The fixture overwrites shared `fin.hold` on every dial and lets any
+client's close set shared `fin.closed`, but reads the track from `dials[0]`.
+An extra dial could therefore hold FINs on another client or report another
+client's close. This is an unverified hypothesis, not an established cause;
+check it alongside setup-group completion before choosing a fix.
+
 Public API: none. Wire: none.
 
 ### Reproduction attempts
@@ -54,7 +61,10 @@ no reproduction on the unchanged claim based on `origin/main`.
   and `lite/connection`) filtered to `closing the loop|teardown by|a URL change`
   with `--rerun-each 5` passed 40 tests, zero failures. A scratch preload
   stubbed `performance.now()` to advance 5 ms on each budget clock read,
-  forcing the shared stream budgets to yield at each clock check.
+  forcing the shared stream budgets to yield at each clock check. This
+  stresses budget scheduling only: it neither advances the test's manual
+  clock nor forces an extra dial or another client's early close, so it
+  does not rule out those paths.
 - The earlier lite fixture fix suggests checking setup-group completion,
   but neither run supports changing this fixture yet. No test or production
   code changed, per the reproduce-first requirement.
@@ -63,7 +73,10 @@ no reproduction on the unchanged claim based on `origin/main`.
 
 - moq-dev/moq: capture the next reload drain failure with logs before choosing
   a fix. Check full-suite and merge-queue failure reports for the test names
-  above; retain the full command, commit, assertion/stack output, and surrounding
-  session logs in the report. Once captured, link that report here, remove this
-  waiting item, and reproduce the failure under multi-file load to investigate
-  its cause. Passing isolated reruns alone do not clear this condition.
+  above; retain the full command, commit, and assertion/stack output in the
+  report, plus any available session logs. The fixture currently emits no
+  dial/close diagnostics; those logs are not required to resume investigation.
+  Once captured, link that report here, remove this waiting item, and reproduce
+  the failure under multi-file load, capturing dial count and per-client close
+  state to test the hypothesis above. Passing isolated reruns alone do not
+  clear this condition.
