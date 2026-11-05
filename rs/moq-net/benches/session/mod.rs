@@ -34,9 +34,11 @@
 //! one datagram per track per round across publisher and viewer axes, then larger payloads
 //! and cadences, on moq-lite and moq-transport-22. Throughput counts delivered datagrams,
 //! each checked for its sequence and payload, so a lost one fails.
-//! `SESSION_EXPIRY_ONLY=1` uses the standalone 30s-expiry pool and reports groups
-//! written plus charged cache bytes every 10s during long profiling runs. Each round
-//! advances the cache clock by a second, so the expiry window spans 30 rounds.
+//! Delivery uses expiry-only pools: history expires between rounds outside timing,
+//! so byte pressure cannot shed unread frames during a batch.
+//! `SESSION_EXPIRY_ONLY=1` advances the cache clock by a second instead of the 30s
+//! expiry window, retaining 30 rounds for profiling. It reports groups written and
+//! charged cache bytes every 10s during long runs.
 //!
 //! `session_join_*` times a new viewer connecting, resolving a broadcast, and
 //! receiving its latest group, swept over what the relays already announce.
@@ -123,9 +125,7 @@ const DASH_VERSIONS: [&str; 2] = ["moq-lite-06", "moq-transport-22"];
 /// A stats frame: a small JSON snapshot.
 const DASH_FRAME: usize = 128;
 
-/// Each endpoint gets its own bounded pool, as a relay configures one per
-/// process: without a byte target, every hop keeps each group for the whole
-/// expiry window and memory grows with the run length instead of the shape.
+/// Initial budgets for join and churn fixtures. Delivery rooms use expiry-only pools.
 const RELAY_CACHE: u64 = 16 * 1024 * 1024;
 const CLIENT_CACHE: u64 = 1024 * 1024;
 
@@ -518,7 +518,7 @@ pub(crate) trait Backend {
 	type Relay: Clone;
 	const PREFIX: &'static str;
 
-	fn relay(id: u64, capacity: u64) -> (Self::Relay, cache::Pool);
+	fn relay(id: u64, capacity: Option<u64>) -> (Self::Relay, cache::Pool);
 	fn origin(relay: &Self::Relay) -> &origin::Producer;
 	async fn connect(options: MockConnectOptions, relay: &Self::Relay, hidden: bool) -> Pair;
 }
@@ -530,7 +530,7 @@ impl Backend for Model {
 	type Relay = origin::Producer;
 	const PREFIX: &'static str = "";
 
-	fn relay(id: u64, capacity: u64) -> (Self::Relay, cache::Pool) {
+	fn relay(id: u64, capacity: Option<u64>) -> (Self::Relay, cache::Pool) {
 		make_origin(id, capacity)
 	}
 
@@ -567,9 +567,10 @@ impl Drop for Pair {
 	}
 }
 
-fn make_origin(id: u64, capacity: u64) -> (origin::Producer, cache::Pool) {
+fn make_origin(id: u64, capacity: Option<u64>) -> (origin::Producer, cache::Pool) {
 	let mut config = origin::Config::new(Hop::new(id).unwrap());
-	let pool = cache::Pool::new(if std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+	let profiling = std::env::var_os("SESSION_EXPIRY_ONLY").is_some();
+	let pool = cache::Pool::new(if capacity.is_none() || profiling {
 		cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)
 	} else {
 		cache::Config::default().with_capacity(capacity)
@@ -583,6 +584,7 @@ fn make_origin(id: u64, capacity: u64) -> (origin::Producer, cache::Pool) {
 /// Relays and publishers, before any viewer joins. Holds every handle that
 /// keeps a session or broadcast alive.
 struct Cluster<B: Backend> {
+	expiry: bool,
 	version: Version,
 	window: usize,
 	credit: Option<usize>,
@@ -602,8 +604,9 @@ struct Cluster<B: Backend> {
 }
 
 impl<B: Backend> Cluster<B> {
-	async fn new(version: &str, shape: Shape) -> Self {
+	async fn new(version: &str, shape: Shape, expiry: bool) -> Self {
 		let mut this = Self {
+			expiry,
 			version: version.parse().unwrap(),
 			window: shape.window,
 			credit: shape.credit,
@@ -621,7 +624,7 @@ impl<B: Backend> Cluster<B> {
 
 		for _ in 0..shape.relays {
 			this.next_hop += 1;
-			let (relay, pool) = B::relay(this.next_hop, RELAY_CACHE);
+			let (relay, pool) = B::relay(this.next_hop, (!expiry).then_some(RELAY_CACHE));
 			this.relays.push(relay);
 			this.pools.push(pool);
 		}
@@ -679,7 +682,7 @@ impl<B: Backend> Cluster<B> {
 
 	fn origin(&mut self, capacity: u64) -> (origin::Producer, cache::Pool) {
 		self.next_hop += 1;
-		make_origin(self.next_hop, capacity)
+		make_origin(self.next_hop, (!self.expiry).then_some(capacity))
 	}
 
 	/// Connect a viewer session to `relay`.
@@ -811,7 +814,7 @@ impl<B: Backend> Room<B> {
 		);
 		assert!(!shape.paced || shape.burst == 1, "a paced round writes one frame");
 		assert!(!shape.fetch || !shape.paced, "fetch rounds read finished groups");
-		let mut cluster = Cluster::<B>::new(version, shape).await;
+		let mut cluster = Cluster::<B>::new(version, shape, true).await;
 
 		let mut viewers = Vec::new();
 		let mut watched = vec![false; shape.total()];
@@ -880,12 +883,6 @@ impl<B: Backend> Room<B> {
 		room.writing.resize_with(room.watched.len(), || None);
 		room.reading.resize_with(shape.viewers * shape.watch, || None);
 
-		// First measure the complete batch without eviction. The delivery benchmark must
-		// fit its working set; cache-pressure loss is a different workload.
-		let capacities: Vec<_> = room.pools().map(cache::Pool::capacity).collect();
-		for pool in room.pools() {
-			pool.resize(None);
-		}
 		let blocked_before: usize = room
 			.viewers
 			.iter()
@@ -898,11 +895,6 @@ impl<B: Backend> Room<B> {
 		for _ in 0..shape.group_frames / shape.frames() {
 			room.tick();
 			room.round().await;
-		}
-		for (pool, capacity) in room.pools().zip(capacities) {
-			// Keep the old and current batch resident during the handover, including
-			// bookkeeping rather than estimating a group from payload bytes alone.
-			pool.resize(capacity.map(|capacity| capacity.max(pool.used() * 2)));
 		}
 		// Exercise turnover as well as the empty cache, including Criterion's one-pass
 		// nightly smoke mode.
@@ -946,11 +938,15 @@ impl<B: Backend> Room<B> {
 		self.cluster.pools.iter().chain(viewers)
 	}
 
-	/// Unpaced rounds otherwise collapse many complete batches into one cache tick,
-	/// where yesterday's read outranks today's unread write. Sample a new recency
-	/// epoch per round without sleeping or changing protocol time.
+	/// Advance the cache/model clock outside timing to expire old batches.
+	/// Each round completes its reads before this step; pending read deadlines
+	/// share this clock too.
 	fn tick(&mut self) {
-		self.cache_now += Duration::from_secs(1);
+		self.cache_now += if std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+			Duration::from_secs(1)
+		} else {
+			cache::DEFAULT_EXPIRY
+		};
 		for pool in self.pools() {
 			pool.poll(self.cache_now, &kio::Waiter::noop());
 		}
@@ -1317,6 +1313,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 							publishers: 1,
 							..Shape::BASE
 						},
+						false,
 					)
 					.await;
 					let mut viewers = Vec::new();
@@ -1409,7 +1406,7 @@ fn join<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Ite
 			group.bench_function(BenchmarkId::from_parameter(shape.id(version)), |b| {
 				let cluster = cluster.get_or_insert_with(|| {
 					rt.block_on(async {
-						let cluster = Cluster::<B>::new(version, *shape).await;
+						let cluster = Cluster::<B>::new(version, *shape, false).await;
 						let payload = Bytes::from(vec![0; shape.frame]);
 						for track in &cluster.tracks {
 							for sequence in 0..shape.history {
@@ -1505,6 +1502,7 @@ impl<B: Backend> DashRoom<B> {
 				viewers: 0,
 				..Shape::BASE
 			},
+			false,
 		)
 		.await;
 
@@ -1668,6 +1666,7 @@ impl<B: Backend> ChurnRoom<B> {
 				viewers: 0,
 				..Shape::BASE
 			},
+			false,
 		)
 		.await;
 		let published = &cluster._broadcasts[0];
@@ -1883,7 +1882,7 @@ pub(crate) fn withdrawal<B: Backend>(c: &mut Criterion) {
 								publishers: 0,
 								..Shape::BASE
 							};
-							let cluster = Cluster::<B>::new("moq-lite-06", shape).await;
+							let cluster = Cluster::<B>::new("moq-lite-06", shape, false).await;
 							let mut announced = B::origin(cluster.relays.last().unwrap()).consume().routes();
 							let live: Vec<_> = (0..broadcasts)
 								.map(|i| {

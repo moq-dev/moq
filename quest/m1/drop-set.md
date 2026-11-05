@@ -258,6 +258,10 @@ Test on mock time through a relay:
   2026-10-28).
 
 Mirror each case in `js/net`.
+In `js/net`, a group a sink buffers keeps its source wanted only while
+`Subscriber.#reading` says its reader will still read it
+([moq-dev/moq#7948](https://github.com/moq-dev/moq/pull/7948)), so a change to
+how a cursor judges a missing or stale group keeps that verdict in step.
 
 Public API: none. Wire: lite-07 SUBSCRIBE_DROP (unpublished) gains `Max Age`
 and the widening and ordering rules above; published versions are

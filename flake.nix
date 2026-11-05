@@ -679,6 +679,9 @@
               export PATH="$(dirname "$shim"):$PATH"
             fi
 
+            # Skills also invoke quest directly, so keep it ahead of host installs.
+            export PATH="${quest-cli}/bin:$PATH"
+
             # Each nested shell (direnv, then `nix develop`, then another
             # inside a gate) prepends this shell's ~160 store paths again,
             # about 10 KB. mbx copies PATH into two variables at ~3.6 times
@@ -692,6 +695,9 @@
             # What sh/dispatch.sh checks before a scoped `just check` or `just
             # fix`. IN_NIX_SHELL would also pass inside another project's shell.
             IN_MOQ_DEV_SHELL = "1";
+
+            # Local launchers need the exact build without evaluating the flake again.
+            MOQ_QUEST = "${quest-cli}/bin/quest";
 
             PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
             PLAYWRIGHT_VERSION = pkgs.playwright-driver.version;
