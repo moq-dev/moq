@@ -85,6 +85,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Shared group serving and ingest](/quest/m2/shared-serve.md) - Rust's moq-lite and moq-transport sessions serve and ingest groups through one poll machine each, with only wire encoding per protocol
 - [Shared group serving and ingest in JS](/quest/m2/shared-serve-js.md) - the same split in js/net, following the Rust seam
 - [Paired bench BASE](/quest/m2/bench-base-paired.md) - `just bench <base>` uses the nightly's paired comparison and the old one is deleted
+- [Audio renditions carry a language](/quest/m2/audio-lang.md) - audio renditions have an optional BCP-47 `lang`, and watch auto-picks within one language
 - [Receive pool](/quest/m2/receive-pool.md) - one byte budget per worker covers every connection's receive credit and the cache, billing each frame once
 - [Front parking](/quest/m2/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
 - [A refused follower asks a replacement handler](/quest/m2/follow-refused-retry.md) - a same-instance handler swap with identical route details re-asks a refused `Following`, while listeners still see no change
@@ -180,6 +181,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [Audio capture without ALSA link](/quest/m2/capture-alsa-link.md) - moq-audio capture and playback build on Linux without linking libasound, and capture becomes a default feature
 - [The moq CLI can publish a changing catalog](/quest/m2/cli-catalog-updates.md) - catalog updates mid-stream, so recovery replays need no hand-built clients
 - [Ship capture and playback](/quest/m2/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
+- [moq-relay in nixpkgs](/quest/m2/nixpkgs-relay.md) - `nix-shell -p moq-relay` installs the released relay from upstream nixpkgs, auto-updated from our tags
+- [moq-cli in nixpkgs](/quest/m2/nixpkgs-cli.md) - the released `moq` CLI with its full release feature set joins nixpkgs as `moq-cli`
 - [Egress profile](/quest/m2/quic-egress-profile.md) - measure relay send-path syscalls, pacing bursts, and allocations before optimizing any of them
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - H.265 encode and decode, pre-generated bindings, and pooled resize surfaces, including the moq-dev/vaapi release that carries them
 - [GPU capacity and health](/quest/m2/gpu-health.md) - moq-video reports each device's sessions, memory, utilization, and health on NVIDIA, AMD, and Intel alike
@@ -305,3 +308,4 @@ lite-07; bitrate enforcement is not part of this release.
 - [The publish support panel lists only codecs publishing accepts](/quest/m2/publish-support-probe.md) - the settings panel runs the publisher's Annex B encoder probe
 - [A hung Python test fails instead of hanging the suite](/quest/m2/py-test-timeouts.md) - one pytest-timeout bound covers every `py/` test
 - [Chromium's Opus encoder stamps chunks from their input](/quest/m2/chromium-opus-timestamps.md) - waiting on Chromium; unlocks native `usedtx` for push-to-talk
+- [TLS reload follows symlinked certificate files](/quest/m2/watch-symlink-targets.md) - in-place rewrites of symlink targets in other directories reload roots, served chains, and client certificates

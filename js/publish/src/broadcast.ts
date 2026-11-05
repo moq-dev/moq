@@ -515,6 +515,9 @@ export class Broadcast {
 
 		// Static tracks fan out to every subscriber. The encoder-facing handle stays set while the
 		// track is open. Audio keeps it while buffering PCM; on-demand video gates it on a subscriber.
+		effect.cleanup(() => {
+			for (const handle of this.#handles.values()) handle.track.set(undefined);
+		});
 		effect.run((inner) => {
 			const renditions = inner.get(this.#renditions);
 			inner.get(publication.renames);
@@ -539,6 +542,7 @@ export class Broadcast {
 				} else if (entry.track && entry.track.closed.peek() !== undefined) {
 					// A failure leaves this rendition down until it clears. It then recovers under a fresh
 					// track name, so its group sequence can start over.
+					handle.track.set(undefined);
 					if (!cause) publication.rename(entry);
 					continue;
 				}
@@ -551,20 +555,23 @@ export class Broadcast {
 				}
 				entry.owner = rendition;
 				const served = entry.track;
+				// Set directly rather than undone on cleanup: this effect reruns for every rendition when
+				// any one registers or renames, and the gate's rerun lands a microtask after its cleanup,
+				// so an unchanged rendition would see its track vanish and return. Audio ends its epoch on
+				// any track change.
 				inner.run((gate) => {
 					const closed = gate.get(served.closed);
 					if (closed !== undefined) {
 						// A producer aborting its track directly fails the rendition the same way.
 						if (closed && !entry.slot.error.peek()) entry.slot.error.set(closed);
+						handle.track.set(undefined);
 						return;
 					}
-					if (
+					const idle =
 						rendition.kind !== "audio" &&
 						gate.get(this.in.onDemand) &&
-						gate.get(served.demand().wanted) === undefined
-					)
-						return;
-					gate.set(handle.track, served);
+						gate.get(served.demand().wanted) === undefined;
+					handle.track.set(idle ? undefined : served);
 				});
 			}
 		});

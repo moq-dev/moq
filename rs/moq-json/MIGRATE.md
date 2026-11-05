@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Async wrappers are opt-in
+
+Enable the `async` Cargo feature to keep awaiting consumer `next`/`latest` and producer
+`refresh`: `moq-json = { version = "...", features = ["async"] }`. This also applies
+with `default-features = false`. The feature is off by default; `poll_next`,
+`poll_latest`, and `poll_refresh` stay available without it.
+The generated consumer wrappers no longer require `T: Unpin`.
+The JSON framing and JS and binding APIs are unchanged.
+
 ### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
 
 `snapshot::Consumer::new` takes the track, a `moq_net::track::Consumer`, instead of a `track::Subscriber`, and subscribes to it itself at a zero `delay.max` and default preferences otherwise; the new `Config::priority` sets the subscription's priority.

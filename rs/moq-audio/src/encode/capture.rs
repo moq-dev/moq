@@ -912,6 +912,7 @@ mod tests {
 					.unwrap()
 					.available()
 					.await
+					.unwrap()
 					.unwrap();
 				let source = moq_mux::Source::new(origin.consume(), remote);
 				let (broadcaster, export) =

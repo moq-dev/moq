@@ -3,7 +3,7 @@
 pub mod harness;
 pub mod mock;
 
-use moq_net::{announce, datagram, goaway, origin, track};
+use moq_net::{datagram, goaway, origin, track};
 
 /// Wait until anyone wants the track, returning the group they want.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
@@ -35,12 +35,12 @@ pub async fn datagram_priority(producer: &datagram::Producer, want: Option<i8>) 
 /// Wait until `consumer` sees a route announced at exactly `path`, and return it.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 pub async fn announced(consumer: &origin::Consumer, path: &str) -> origin::Route {
-	let mut announced = consumer.announced();
+	let mut announced = consumer.routes();
 	loop {
 		match announced.next().await.expect("the origin closed") {
-			announce::Event::Start(announce)
-			| announce::Event::Update(announce)
-			| announce::Event::Restart(announce)
+			origin::RouteEvent::Start(announce)
+			| origin::RouteEvent::Update(announce)
+			| origin::RouteEvent::Restart(announce)
 				if announce.prefix.as_str() == path =>
 			{
 				return announce.route;

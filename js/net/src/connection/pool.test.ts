@@ -264,14 +264,14 @@ test("a borrowed connection origin exposes live routes and dynamic serving", asy
 		const prefix = Path.from("on-demand");
 		const route = table.requestsRoute(prefix);
 		await advance();
-		expect(announcement).toMatchObject({ kind: "start", prefix });
+		expect(announcement).toMatchObject({ kind: "present", prefix });
 		let withdrawal: unknown;
 		void live.next().then((event) => {
 			withdrawal = event;
 		});
 		route.close();
 		await advance();
-		expect(withdrawal).toMatchObject({ kind: "end", prefix });
+		expect(withdrawal).toMatchObject({ kind: "absent", prefix });
 		live.close();
 	} finally {
 		handle.close();
@@ -605,7 +605,7 @@ test("a handle's announcements sync with the shared origin", async () => {
 	stubTransports();
 
 	const handle = new Connection({ url });
-	const watch = handle.announced();
+	const watch = handle.routes();
 	expect(watch.synced.peek()).toBe(false);
 
 	await advance();

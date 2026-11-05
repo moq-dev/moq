@@ -4,6 +4,59 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Readers at a shed frame ask a `track::Requests` handler for a flight ([#7944](https://github.com/moq-dev/moq/pull/7944))
+
+A reader that reaches a frame its group copy shed no longer gets `Error::Evicted` when the track has a live `track::Requests` handle: the handler receives a `Fill` of that one group from that frame (`Fill::start`), or from frame 0 on a compressed track, even though the group is still cached and live.
+Accept it as usual and write from that frame, waiting on `group::Producer::ready` so its readers pace it, and stop once `Fill::is_wanted` is false and the group's `demand()` has no reader: they left it for the live copy.
+A handler that cannot serve old frames refuses the fill (`Fill::refuse_groups` or dropping it), and the reader falls back to refresh or `Evicted` as before. A track without a handler is unchanged.
+
+### The `async` feature is opt-in ([#7607](https://github.com/moq-dev/moq/pull/7607))
+
+`async` is no longer a default feature. Enable it to keep the sessions (`Client`, `Server`, `Session`), `time::run`, the announcement `Stream` adapter, and every async wrapper such as `next_group`, `read_frame`, or `closed`:
+`moq-net = { version = "...", features = ["async"] }`.
+Each wrapper is now generated from its `poll_*` method, which stays available without the feature, and its docs live on that poll.
+`frame::Consumer::read_all`, `track::Demand::closed`, and `track::Ordered::finished` gain theirs as the new `poll_read_all`, `poll_closed`, and `poll_finished`.
+`moq-tokio`'s `net` feature enables it for you.
+`group::Producer::ready` now needs the feature too.
+
+### Admission completion records its own time
+
+`server::Activity::drain()` begins closing admission once its active set empties.
+`Activity::close()` and the new poll-native `poll_close()` return that instant,
+even for a late observer. Replace matches against `()` with a discarded result
+or read the returned `kio::clock::Instant`. Once draining begins, the last `Active`
+drop closes admission synchronously, including when a close wait was cancelled.
+This is native listener bookkeeping; the protocol wire is unchanged.
+
+### Announcements are a listing; `follow` reports the path going offline ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`origin::Consumer::announced()` lists paths: `announce::Event` is `Present(Announce)` or `Absent(Announce)`.
+Another instance taking a path over keeps it present, and a route's cost or hops changing is not reported, so `Start`, `Update`, `End`, `Restart` and `Takeover` are gone.
+Map `Start` to `Present` and `End` to `Absent`, and drop `Update` arms.
+Where you requested the path again on `Restart`, hold `consumer.follow(path, None)` instead: each `available()` returns the next instance's broadcast.
+
+`Following::available()` returns `Result<Option<broadcast::Consumer>, Error>`: `None` reports the path going offline (or, when pinned, another instance taking it over), and the next `Some` is whatever serves it again.
+The first call never returns `None`. After a resolution failure, such as a handler refusing the path, the next `available()` waits for the serving route to change instead of asking the same handler again, so keep the follower rather than dropping it.
+
+```rust
+// Before
+match announced.next().await {
+    Some(announce::Event::Start(a) | announce::Event::Restart(a)) => play(consumer.request(&a.prefix, None).await?),
+    _ => {}
+}
+let broadcast = consumer.follow(path, None)?.available().await?;
+// After
+if let Some(announce::Event::Present(a)) = announced.next().await {
+    let mut following = consumer.follow(&a.prefix, None)?;
+    while let Some(broadcast) = following.available().await? {
+        play(broadcast);
+    }
+}
+let broadcast = consumer.follow(path, None)?.available().await?.expect("the first change is an instance");
+```
+
+Relays and stats that forward every route change call `consumer.routes()`, a hidden `origin::Routes` stream of `origin::RouteEvent`, which keeps the old five variants.
+
 ### Opens wait their turn for stream credit ([#7894](https://github.com/moq-dev/moq/pull/7894))
 
 A request no longer fails with `Error::NoStreamCredit` when the peer grants no more streams: every stream a session opens waits for credit, and returning credit goes to the open whose stream the transport would send first. The variant is removed; drop any arm matching it.

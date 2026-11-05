@@ -14,8 +14,7 @@
  * route got after the switch is not lost. It is kept while it may still deliver a group under its
  * bound the reader lacks (unread, or still landing within the grace a passed group is waited for),
  * and while a group still read is read from it or may continue from it (it holds that group, or may
- * yet get it). Nothing under the bound is waited for past the reader's budget. Datagrams are
- * ephemeral, so no copy is kept for them: a reader that never asked for a group keeps none.
+ * yet get it). Nothing under the bound is waited for past the reader's budget.
  *
  * A new copy is asked from where the reader got to, so it never has the groups below the reader's
  * local floor that the copies it replaced cached. Lowering that floor asks the newest route for
@@ -41,7 +40,7 @@
  * still land below that end on a copy it replaced. Its `closed` settles and the reader leaves the
  * route, keeping each copy only while it holds something left to read, as a direct reader keeps
  * its buffer. Its end is the first one any copy declared, which every later copy has to match, and
- * no copy may hold a group or datagram at or past it.
+ * no copy may hold a group at or past it.
  *
  * @module
  */
@@ -58,10 +57,8 @@ import {
 	hooks,
 	insertDrop,
 	insertRun,
-	MAX_DATAGRAMS,
 	maxDelayOf,
 	type Recv,
-	type RecvDatagram,
 	type Replacement,
 	type ResumeShell,
 	type ResumeSource,
@@ -276,7 +273,7 @@ interface Copy {
 	sub: track.Subscriber;
 	/** Where the subscription was asked to start, so demand updates never ask for less. */
 	floor?: bigint;
-	/** Replaced by a newer route: its datagrams are the newer copy's to deliver. */
+	/** Replaced by a newer route. */
 	replaced: boolean;
 	/**
 	 * Bounded once the newer copy delivered its first group: nothing past this group is taken
@@ -286,8 +283,6 @@ interface Copy {
 	until?: bigint | null;
 	/** The group channel ran out: cleanly (`null`) or failed. */
 	done?: Error | null;
-	/** The datagram channel ran out. */
-	datagramsDone?: Error | null;
 	/**
 	 * When a newer group superseded every group under the bound: the newer copy's first group, or
 	 * the track's end. What the reader still lacks from it is waited for from here, for no longer
@@ -296,7 +291,7 @@ interface Copy {
 	since?: Instant;
 	/** Groups still read that came from this copy, which keep a replaced copy subscribed. */
 	lease: number;
-	/** It handed out a group or datagram, so a failure is its route failing mid-serve rather than refusing. */
+	/** It handed out a group, so a failure is its route failing mid-serve rather than refusing. */
 	delivered?: boolean;
 }
 
@@ -348,16 +343,6 @@ class Reader implements ResumeSource {
 	 * reader lacks. Kept until the gaps are backfilled; see {@link #backfillGaps}.
 	 */
 	#resumed = false;
-	/** The last datagram handed out, which never ages until another supersedes it. */
-	#datagram?: bigint;
-	/**
-	 * Previously handed-out identities, in the order they were superseded. A replacement copy
-	 * replays at most its buffered datagrams, so no more than that many are kept, whatever the
-	 * budget: a publisher cannot grow it.
-	 */
-	#datagrams = new Map<bigint, Instant>();
-	/** The newest datagram handed out, which a declared end must stay past. */
-	#newestDatagram?: bigint;
 	/** Bumped when this reader subscribes a new copy or a copy's last lease ends, waking its parked reads. */
 	#changed = new Signal(0);
 	#dispose: Dispose[] = [];
@@ -455,7 +440,6 @@ class Reader implements ResumeSource {
 			copy.until = undefined;
 			copy.since = undefined;
 			copy.done = undefined;
-			copy.datagramsDone = undefined;
 			// Resume where a fresh copy would: a group it buffered while replaced, below the newest
 			// another route handed out, is not handed out.
 			if (this.#newest !== undefined) copy.floor = max(copy.floor ?? 0n, this.#newest);
@@ -849,50 +833,6 @@ class Reader implements ResumeSource {
 		return lowest?.copy;
 	}
 
-	tryDatagram(delivered: Delivered): RecvDatagram {
-		this.#delivered = delivered;
-		this.sync();
-		this.#learnEnd();
-		if (this.#closed) return this.#refused ? { kind: "error", error: this.#refused } : { kind: "done" };
-		// Like groups, the last delivery stays fresh; earlier identities cost memory only
-		// while the reader's budget still covers their successor's arrival.
-		const at = now();
-		const budget = this.#budget() * 1_000_000;
-		for (const [sequence, since] of this.#datagrams) {
-			if (at - since < budget) break;
-			this.#datagrams.delete(sequence);
-		}
-		for (let index = this.#copies.length - 1; index >= 0; index--) {
-			const copy = this.#copies[index];
-			// A replaced copy's datagrams are the serving one's to deliver.
-			if (copy.datagramsDone !== undefined || copy.replaced) continue;
-			for (;;) {
-				const recv = hooks.tryRecvDatagram(copy.sub);
-				if (recv.kind === "datagram") {
-					const sequence = recv.datagram.sequence;
-					if (sequence === this.#datagram || this.#datagrams.has(sequence)) continue;
-					if (this.#datagram !== undefined) {
-						if (this.#datagrams.size === MAX_DATAGRAMS) {
-							this.#datagrams.delete(this.#datagrams.keys().next().value as bigint);
-						}
-						this.#datagrams.set(this.#datagram, at);
-					}
-					this.#datagram = sequence;
-					this.#newestDatagram = max(this.#newestDatagram ?? 0n, sequence);
-					copy.delivered = true;
-					return recv;
-				}
-				if (recv.kind === "done") copy.datagramsDone = copy.sub.closed.peek() ?? null;
-				else if (recv.kind === "error") copy.datagramsDone = recv.error;
-				break;
-			}
-		}
-		this.#letGo(delivered);
-		const end = this.#end((copy) => copy.datagramsDone);
-		if (end.kind === "error" || end.kind === "done") return end;
-		return { kind: "idle" };
-	}
-
 	/**
 	 * Whether the track ended, once the serving copy's channel (as `done` reads it) ran out:
 	 * cleanly, or with a verdict a route failure does not excuse.
@@ -1002,8 +942,7 @@ class Reader implements ResumeSource {
 	 * newest group the serving copy has.
 	 */
 	#retains(copy: Copy, delivered: Delivered, edge: bigint | undefined): "wait" | "keep" | undefined {
-		// Datagrams are ephemeral, so only groups keep a copy: a reader that only reads datagrams
-		// keeps none, whatever its budget.
+		// Until the first group read, no cached copy needs to be retained.
 		if (!this.#groupsRead) return undefined;
 		// Not yet bounded, it may still feed a group the new copy never has.
 		if (copy.until === undefined && copy.done === undefined) return "wait";
@@ -1146,8 +1085,7 @@ class Reader implements ResumeSource {
 			fn();
 		};
 		disposes.push(this.route.changed.changed(once), this.#changed.changed(once));
-		for (const copy of this.#copies)
-			disposes.push(hooks.groupChanged(copy.sub, once), hooks.datagramChanged(copy.sub, once));
+		for (const copy of this.#copies) disposes.push(hooks.groupChanged(copy.sub, once));
 		return dispose;
 	}
 
@@ -1170,7 +1108,7 @@ class Reader implements ResumeSource {
 		return last?.generation === this.#generation ? last : undefined;
 	}
 
-	// The logical track's end, learning it from any copy that declared one. A group or datagram
+	// The logical track's end, learning it from any copy that declared one. A group
 	// at or past it, on any copy or already handed out, claims other content: a direct track
 	// refuses an end below what it received.
 	#learnEnd(): track.Position | undefined {
@@ -1186,8 +1124,6 @@ class Reader implements ResumeSource {
 			const seen = (sequence: bigint | undefined) => sequence !== undefined && sequence >= final;
 			if (
 				seen(this.#newest) ||
-				seen(this.#newestDatagram) ||
-				// The largest counts datagrams too, which the latest group does not.
 				this.#copies.some(
 					(copy) => seen(hooks.latestSequence(copy.sub)) || seen(hooks.peekLargest(copy.sub).largest?.group),
 				)
@@ -1970,6 +1906,17 @@ export class Front {
 		);
 	}
 
+	/** Join the serving source's live datagram track; it holds no cached route copies. */
+	datagrams(name: string): import("./datagram.ts").Consumer {
+		if (!this.#source) throw new NotFound(`datagram track ${name}`);
+		return this.#source.wire.datagrams(name);
+	}
+
+	/** Join an already present datagram track without opening a request. */
+	liveDatagrams(name: string): import("./datagram.ts").Consumer | undefined {
+		return this.#source?.wire.liveDatagrams(name);
+	}
+
 	// Wait for the source to change, or `signal` to abort.
 	#next(signal?: AbortSignal): Promise<void> {
 		return until(Signal.race(this.#changed), signal);
@@ -2131,7 +2078,9 @@ class FrontConsumer extends broadcast.Consumer {
 		this.#front = front;
 		const view = wireOf(this);
 		registerWire(this, {
-			requested: view.requested,
+			...view,
+			datagrams: (name) => front.datagrams(name),
+			liveDatagrams: (name) => front.liveDatagrams(name),
 			tracks: view.tracks,
 			lister: view.lister,
 			subscribe: (name, options) => front.subscribe(name, options),
