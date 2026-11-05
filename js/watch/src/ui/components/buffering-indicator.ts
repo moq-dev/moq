@@ -13,16 +13,11 @@ export function bufferingIndicator(parent: Effect, watch: MoqWatch): HTMLElement
 		// video one. Gate it on audio actually being downloaded: the ring reports stalled from
 		// construction and drains once the download stops, so a video-only broadcast or a muted
 		// player would otherwise show the spinner forever. "instant" never downloads audio at all.
-		// A held rendition the publisher disabled has no frames coming, which is not a stall either.
-		const audioConfig = effect.get(watch.audio.source.out.config);
 		const audio =
 			effect.get(watch.audio.in.enabled) &&
-			audioConfig !== undefined &&
-			audioConfig.enabled !== false &&
+			effect.get(watch.audio.source.out.config) !== undefined &&
 			effect.get(watch.controls.delay) !== "instant";
-		const video = effect.get(watch.video.source.out.config)?.enabled !== false;
-		const buffering =
-			(video && effect.get(watch.video.out.stalled)) || (audio && effect.get(watch.audio.out.stalled));
+		const buffering = effect.get(watch.video.out.stalled) || (audio && effect.get(watch.audio.out.stalled));
 		const status = effect.get(watch.broadcast.out.status);
 		const online = status === "loading" || status === "live";
 		const unsupported = effect.get(watch.video.source.out.error)?.name === "NotSupportedError";

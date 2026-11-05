@@ -1,3 +1,4 @@
+import { ComfortNoise } from "./comfort";
 import type { Message, State } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
 
@@ -8,6 +9,7 @@ const RAMP = 64;
 class Render extends AudioWorkletProcessor {
 	// Created by the main thread's init message.
 	#ring?: AudioRingBuffer;
+	#comfort?: ComfortNoise;
 	#underflow = 0;
 	#stateCounter = 0;
 	#epoch = 0;
@@ -22,6 +24,7 @@ class Render extends AudioWorkletProcessor {
 			const msg = event.data;
 			if (msg.type === "init") {
 				this.#ring = new AudioRingBuffer(msg);
+				this.#comfort = new ComfortNoise(msg.rate);
 				this.#playing = msg.playing ?? true;
 				this.#underflow = 0;
 				this.#short = false;
@@ -33,6 +36,8 @@ class Render extends AudioWorkletProcessor {
 					this.#ring?.park();
 					this.#epoch = msg.park;
 				}
+			} else if (msg.type === "end") {
+				this.#ring?.end(msg.timestamp);
 			} else if (msg.type === "truncate") {
 				this.#ring?.truncate(msg.timestamp);
 			} else if (msg.type === "reset") {
@@ -49,6 +54,7 @@ class Render extends AudioWorkletProcessor {
 		const output = outputs[0];
 		const ring = this.#ring;
 		const samplesRead = this.#playing ? (ring?.read(output) ?? 0) : 0;
+		this.#comfort?.played(output, samplesRead);
 
 		if (samplesRead < output[0].length) {
 			// Fade the tail of what we did read down to the silence that follows it.
@@ -58,7 +64,9 @@ class Render extends AudioWorkletProcessor {
 					channel[samplesRead - ramp + i] *= 1 - (i + 1) / ramp;
 				}
 			}
-			if (this.#playing) this.#underflow += output[0].length - samplesRead;
+			// The publisher declared this silence, including the refill before its next utterance.
+			if (ring?.silent) this.#comfort?.fill(output, samplesRead);
+			else if (this.#playing) this.#underflow += output[0].length - samplesRead;
 			this.#short = true;
 		} else {
 			if (this.#short) {
@@ -88,6 +96,7 @@ class Render extends AudioWorkletProcessor {
 					stalled: ring.stalled,
 					anchored: ring.anchored,
 					underruns: ring.underruns,
+					silent: ring.silent,
 					epoch: this.#epoch,
 				};
 				this.port.postMessage(state);

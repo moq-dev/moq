@@ -1,7 +1,7 @@
 import type { Micro, Milli } from "@moq/clock";
 
 /** Everything the main thread sends the render worklet over its port. */
-export type Message = Init | Data | Latency | Reset | Truncate | Playing;
+export type Message = Init | Data | Latency | Reset | Truncate | Playing | End;
 
 /** Create the worklet's ring. */
 export interface Init {
@@ -26,6 +26,12 @@ export interface Reset {
 /** Drop buffered samples at or after `timestamp`, keeping what is already due. */
 export interface Truncate {
 	type: "truncate";
+	timestamp: Micro;
+}
+
+/** The publisher declared its audio ends here, less any codec delay, so running dry there is silence. */
+export interface End {
+	type: "end";
 	timestamp: Micro;
 }
 
@@ -54,6 +60,8 @@ export interface State {
 	anchored: boolean;
 	// How many times the ring has run dry mid-playback, cumulative.
 	underruns: number;
+	// Whether playback ran out at a declared end and nothing has played since.
+	silent: boolean;
 	// The epoch of the last reset or park the worklet applied.
 	epoch: number;
 }

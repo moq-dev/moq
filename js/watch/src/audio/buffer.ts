@@ -1,7 +1,7 @@
 import { Micro, Milli, type Second } from "@moq/clock";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import { ringHold, ringSamples } from "./latency";
-import type { Data, Init, Latency, Playing, Reset, State, Truncate } from "./render";
+import type { Data, End, Init, Latency, Playing, Reset, State, Truncate } from "./render";
 
 /**
  * Decides when the decode loop may decode a frame, which is how the target delay is split between
@@ -270,6 +270,10 @@ export class AudioBuffer {
 	/** How many times the ring has run dry mid-playback, cumulative. */
 	readonly underruns: Getter<number> = this.#underruns;
 
+	readonly #silent = new Signal<boolean>(false);
+	/** Whether playback ran out at a declared end and nothing has played since. */
+	readonly silent: Getter<boolean> = this.#silent;
+
 	// Backpressure runs off the playhead the worklet reports in its state messages.
 	#backpressure: Backpressure;
 	// Bumped per reset or park. A state message posted before the worklet saw it reports the ring
@@ -322,6 +326,7 @@ export class AudioBuffer {
 				this.#timestamp.set(data.timestamp);
 				this.#stalled.set(data.stalled);
 				this.#underruns.set(data.underruns);
+				this.#silent.set(data.silent);
 				if (data.epoch === this.#epoch) {
 					this.#backpressure.observe(data.anchored ? data.timestamp : undefined, data.stalled);
 				}
@@ -393,6 +398,16 @@ export class AudioBuffer {
 	truncate(timestamp: Micro): void {
 		this.#backpressure.truncated(timestamp);
 		const msg: Truncate = { type: "truncate", timestamp };
+		this.#worklet.port.postMessage(msg);
+	}
+
+	/**
+	 * Note that the publisher declared its audio ends at `timestamp`, less any codec delay that leaves
+	 * the decoded audio short of it, so running dry there plays comfort noise rather than counting as
+	 * an underrun, until the next audio plays.
+	 */
+	end(timestamp: Micro): void {
+		const msg: End = { type: "end", timestamp };
 		this.#worklet.port.postMessage(msg);
 	}
 

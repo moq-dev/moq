@@ -78,7 +78,7 @@ describe("render dispatch", () => {
 		send({ type: "data", timestamp: Micro(500_000), data: [new Float32Array(100).fill(2)] });
 		for (let i = 0; i < 3; i++) read(20);
 		expect(sent).toEqual([
-			{ type: "state", epoch: 7, timestamp: Micro(560_000), stalled: false, anchored: true, underruns: 0 },
+			{ type: "state", epoch: 7, timestamp: Micro(560_000), stalled: false, anchored: true, underruns: 0, silent: false },
 		]);
 	});
 
@@ -98,7 +98,7 @@ describe("render dispatch", () => {
 		expect(read(20)[19]).toBe(1);
 		read(20);
 		expect(sent).toEqual([
-			{ type: "state", epoch: 3, timestamp: Micro(60_000), stalled: false, anchored: true, underruns: 0 },
+			{ type: "state", epoch: 3, timestamp: Micro(60_000), stalled: false, anchored: true, underruns: 0, silent: false },
 		]);
 	});
 
@@ -113,6 +113,48 @@ describe("render dispatch", () => {
 		expect(output[79]).toBe(1);
 		expect([...output.slice(80)]).toEqual(Array(20).fill(2));
 	});
+});
+
+// A declared end plays comfort noise at the level of the quietest audio heard before it, through the
+// refill of the next utterance, and none of it counts as an underrun.
+it("fills a declared silence with comfort noise and counts no underrun", () => {
+	const { send, read, sent } = renderer();
+	const quiet = 0.0002;
+	send({ type: "data", timestamp: Micro(0), data: [new Float32Array(200).fill(quiet)] });
+	send({ type: "end", timestamp: Micro(200_000) });
+	for (let i = 0; i < 10; i++) expect(read(20)[0]).toBeCloseTo(quiet, 9);
+
+	const rms = (samples: Float32Array) => Math.sqrt(samples.reduce((sum, x) => sum + x * x, 0) / samples.length);
+	const noise = read(2000);
+	expect(Math.max(...noise.map(Math.abs))).toBeLessThanOrEqual(quiet * Math.sqrt(3));
+	expect(rms(noise)).toBeCloseTo(quiet, 4);
+	for (let i = 0; i < 4; i++) read(20);
+	expect(sent.at(-1)).toMatchObject({ underruns: 0, silent: true });
+
+	// The next utterance refills before it plays, and the noise carries on meanwhile.
+	send({ type: "reset", epoch: 1 });
+	send({ type: "data", timestamp: Micro(9_000_000), data: [new Float32Array(50).fill(1)] });
+	expect(rms(read(20))).toBeGreaterThan(0);
+	send({ type: "data", timestamp: Micro(9_050_000), data: [new Float32Array(50).fill(1)] });
+	read(20);
+	for (let i = 0; i < 3; i++) read(20);
+	expect(sent.at(-1)).toMatchObject({ underruns: 0, silent: false, stalled: false });
+});
+
+it("caps comfort noise at -60 dBFS after loud audio", () => {
+	const { send, read } = renderer();
+	send({ type: "data", timestamp: Micro(0), data: [new Float32Array(200).fill(0.5)] });
+	send({ type: "end", timestamp: Micro(200_000) });
+	for (let i = 0; i < 10; i++) read(20);
+	expect(Math.max(...read(2000).map(Math.abs))).toBeLessThanOrEqual(0.001 * Math.sqrt(3));
+});
+
+it("adds no noise to a source that was already silent", () => {
+	const { send, read } = renderer();
+	send({ type: "data", timestamp: Micro(0), data: [new Float32Array(200)] });
+	send({ type: "end", timestamp: Micro(200_000) });
+	for (let i = 0; i < 10; i++) read(20);
+	expect([...read(100)]).toEqual(Array(100).fill(0));
 });
 
 it("holds PCM without consuming it until the shared startup gate opens", () => {

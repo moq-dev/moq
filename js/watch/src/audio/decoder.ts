@@ -75,7 +75,8 @@ export type DecoderOutput = {
 	// Current playback timestamp from worklet
 	timestamp: Signal<Milli | undefined>;
 
-	// Whether the audio buffer is stalled (waiting to fill)
+	// Whether the audio buffer is stalled (waiting to fill). A silence the publisher declared, such as
+	// a push-to-talk mute, is not a stall.
 	stalled: Signal<boolean>;
 
 	// Combined buffered ranges (network jitter + decode buffer)
@@ -218,9 +219,7 @@ export class Decoder {
 		const startup = this.#signals.computed((effect) => {
 			if (!effect.get(this.in.enabled)) return undefined;
 			if (effect.get(this.source.pending)) return null;
-			// A held disabled rendition has no frames coming, so startup does not wait on it.
-			const config = effect.get(this.source.out.config);
-			if (!config || config.enabled === false) return undefined;
+			if (!effect.get(this.source.out.config)) return undefined;
 			const span = effect.get(this.#decodeBuffered)[0];
 			if (!span) return null;
 			// Deep targets stay encoded, so count the audio queued past the decoded span. Sum it across
@@ -237,11 +236,9 @@ export class Decoder {
 			const config = effect.get(this.source.out.config);
 			return config ? playbackIdentity(config) : undefined;
 		});
-		// A held disabled rendition idles too, so a muted tile suspends its AudioContext.
-		this.#idle = this.#signals.computed((effect) => {
-			const config = effect.get(this.source.out.config);
-			return (!config || config.enabled === false) && effect.get(this.#out.stalled);
-		});
+		this.#idle = this.#signals.computed(
+			(effect) => effect.get(this.source.out.config) === undefined && effect.get(this.#out.stalled),
+		);
 
 		this.#signals.run(this.#runSubscribeMaxDelay.bind(this));
 		this.#signals.run(this.#runShape.bind(this));
@@ -396,7 +393,7 @@ export class Decoder {
 				this.#trimDecodeBuffered(ts);
 			});
 			effect.run((inner) => {
-				this.#out.stalled.set(inner.get(ring.stalled));
+				this.#out.stalled.set(inner.get(ring.stalled) && !inner.get(ring.silent));
 			});
 			// Each ring counts from zero, so add only what this one counted to the cumulative stats.
 			let counted = 0;
@@ -983,6 +980,9 @@ export class Decoder {
 	// Apply an ordered container read before handling it, reporting whether a codec epoch ended:
 	// a gap, or a later group after a declared end.
 	#onRead(read: Container.Read): boolean {
+		// Decoded audio stops a pre-skip short of a declared end when the publisher left its codec's
+		// lookahead unflushed, so the ring takes the end that early.
+		if (read.kind === "end") this.#ring.peek()?.end((read.end - this.#terminal.delay) as Micro);
 		if (!this.#terminal.update(read)) return false;
 		// A hole restarts codec prediction on the same timeline, keeping decoded PCM and parked video.
 		if (read.kind === "frame") {

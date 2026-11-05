@@ -535,6 +535,58 @@ describe("re-buffer", () => {
 	});
 });
 
+// A publisher that stops sending, such as a push-to-talk mute, declares where its audio ends. Running
+// dry there is the silence it announced, not an underrun, through the refill of the next utterance.
+describe("declared end", () => {
+	it("runs dry at the end without an underrun, and stays silent across a reset", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 40 as Milli });
+		write(buffer, 0 as Milli, 40, { channels: 1 });
+		buffer.end(Micro(30_000));
+
+		expect(read(buffer, 20, 1)[0].length).toBe(20);
+		expect(buffer.silent).toBe(false);
+		// A partial quantum past the end is silence too, so playback waits for the next utterance.
+		expect(read(buffer, 30, 1)[0].length).toBe(20);
+		expect(buffer.silent).toBe(true);
+		expect(buffer.stalled).toBe(true);
+		expect(read(buffer, 20, 1)[0].length).toBe(0);
+		expect(buffer.underruns).toBe(0);
+
+		// The next utterance re-anchors and refills, still silent until it plays.
+		buffer.reset();
+		expect(buffer.silent).toBe(true);
+		write(buffer, 5000 as Milli, 40, { channels: 1 });
+		expect(read(buffer, 20, 1)[0].length).toBe(20);
+		expect(buffer.silent).toBe(false);
+
+		// The reset forgot the old end, so running dry now is an underrun.
+		read(buffer, 20, 1);
+		read(buffer, 20, 1);
+		expect(buffer.underruns).toBe(1);
+		expect(buffer.silent).toBe(false);
+	});
+
+	it("counts running dry short of the end as an underrun", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 20 as Milli });
+		write(buffer, 0 as Milli, 20, { channels: 1 });
+		buffer.end(Micro(40_000));
+		read(buffer, 20, 1);
+		read(buffer, 20, 1);
+		expect(buffer.underruns).toBe(1);
+		expect(buffer.silent).toBe(false);
+	});
+
+	it("takes an end that arrives after the playhead ran out there", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 20 as Milli });
+		write(buffer, 0 as Milli, 20, { channels: 1 });
+		read(buffer, 20, 1);
+		read(buffer, 20, 1);
+		expect(buffer.underruns).toBe(1);
+		buffer.end(Micro(20_000));
+		expect(buffer.silent).toBe(true);
+	});
+});
+
 describe("buffered mode", () => {
 	function createBuffered(latency: number) {
 		return new AudioRingBuffer({ rate: 1000, channels: 1, latency: latency as Milli, buffered: true });

@@ -13,6 +13,12 @@ export class AudioRingBuffer {
 	#parked = false;
 	#underruns = 0;
 
+	// Where the publisher declared its audio ends, as a sample index, until the next reset.
+	#end?: number;
+	// Whether the playhead ran out at a declared end and nothing has played since: intentional
+	// silence, which is no underrun and survives the reset that re-anchors the next utterance.
+	#silent = false;
+
 	// Samples in the most recent write, i.e. one decoded chunk. The overflow band tolerates this
 	// much above the target before dropping, so a ring sitting exactly on the target doesn't drop
 	// audio the moment the next chunk lands. The most recent write rather than a running maximum:
@@ -63,6 +69,11 @@ export class AudioRingBuffer {
 	/** How many times the reader has run dry mid-playback. */
 	get underruns(): number {
 		return this.#underruns;
+	}
+
+	/** Whether playback ran out at a declared end and nothing has played since. */
+	get silent(): boolean {
+		return this.#silent;
 	}
 
 	get timestamp(): Micro {
@@ -212,6 +223,22 @@ export class AudioRingBuffer {
 		this.#writeIndex = Math.max(target, this.#readIndex);
 	}
 
+	/**
+	 * Note that the publisher declared its audio ends at `timestamp`, so running dry there is silence
+	 * rather than an underrun. Pass the end less any codec delay that leaves the decoded audio short
+	 * of it.
+	 */
+	end(timestamp: Micro): void {
+		this.#end = Math.round(Second.fromMicro(timestamp) * this.rate);
+		// The end can arrive after the playhead already ran out at it.
+		if (this.#anchored && this.#stalled && this.length <= 0 && this.#ended()) this.#silent = true;
+	}
+
+	// Whether the playhead has reached the declared end.
+	#ended(): boolean {
+		return this.#end !== undefined && this.#readIndex >= this.#end;
+	}
+
 	// Flush all buffered samples and re-stall, ready to anchor the next utterance.
 	reset(): void {
 		this.#readIndex = 0;
@@ -219,6 +246,7 @@ export class AudioRingBuffer {
 		this.#stalled = true;
 		this.#parked = false;
 		this.#anchored = false;
+		this.#end = undefined;
 	}
 
 	read(output: Float32Array[]): number {
@@ -229,7 +257,8 @@ export class AudioRingBuffer {
 		if (samples <= 0) {
 			// Ran dry mid-playback: re-stall so write() refills to the target before resuming.
 			this.#stalled = true;
-			this.#underruns++;
+			if (this.#ended()) this.#silent = true;
+			else this.#underruns++;
 			return 0;
 		}
 
@@ -246,11 +275,20 @@ export class AudioRingBuffer {
 		}
 
 		this.#readIndex += samples;
+		this.#silent = false;
 
 		// A short quantum ends in silence, so it counts as an underrun even if a chunk lands before
 		// the next read. It does not park playback: the shortfall is under one quantum, and a
-		// refill would spend the whole target as silence to cover it.
-		if (samples < output[0].length) this.#underruns++;
+		// refill would spend the whole target as silence to cover it. At a declared end it is the
+		// silence the publisher announced, and the ring waits for the next utterance.
+		if (samples < output[0].length) {
+			if (this.#ended()) {
+				this.#silent = true;
+				this.#stalled = true;
+			} else {
+				this.#underruns++;
+			}
+		}
 
 		return samples;
 	}
