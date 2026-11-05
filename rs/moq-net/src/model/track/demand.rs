@@ -312,6 +312,7 @@ impl From<kio::Producer<Subscription>> for Preferences {
 			subscriptions: None,
 			ranges_revision: AtomicU64::new(0),
 			requested: Default::default(),
+			answer: Default::default(),
 		}))
 	}
 }
