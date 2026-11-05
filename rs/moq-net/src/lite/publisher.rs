@@ -4873,7 +4873,13 @@ impl TrackRun {
 			// A group whose stream already reset as stale is judged again under the new terms:
 			// one still cached, in range, and fresh under the new budget is served again. The
 			// rest is dropped again, by run, on the next poll. A run an earlier update left to
-			// drop again is judged again too, since these terms may serve it.
+			// drop again is judged again too, since these terms may serve it, and so is a group
+			// one re-offered that has not opened yet, since they may no longer admit it.
+			for group in std::mem::take(&mut self.reoffered) {
+				if let Some(end) = group.sequence.checked_add(1) {
+					self.expired.insert(group.sequence..end);
+				}
+			}
 			let pending = std::mem::take(&mut self.redrop);
 			self.expired.extend(pending.iter().cloned());
 			for run in std::mem::take(&mut self.expired).iter() {
@@ -5135,11 +5141,15 @@ impl TrackRun {
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
-		// A group an update re-offers takes the next stream credit, ahead of new ones.
+		// A group an update re-offers takes the next stream credit, ahead of new ones, unless a
+		// verdict sent since accounted for it.
 		if self.opening.is_none()
 			&& let Some(group) = self.reoffered.pop_front()
 		{
 			let sequence = group.sequence;
+			if self.served.as_ref().is_some_and(|served| served.contains(&sequence)) {
+				return Poll::Ready(Ok(ControlFlow::Continue(())));
+			}
 			match position_group(group, &self.frames) {
 				Some(group) => self.serve(group),
 				None => {
@@ -5307,8 +5317,8 @@ impl TrackRun {
 	}
 
 	/// Forward a verdict the cursor reached on `range`, as [`Self::drop_range`] does. On lite-07
-	/// it also replaces what it overrides: a skip any drop already sent, and a final drop a stale
-	/// one, which the next update would otherwise reopen. A reader the earlier drop ended stays
+	/// it also replaces what it overrides: a skip any drop already sent, and a drop the wire
+	/// names final (any code but OLD) a stale one, which the next update would otherwise reopen. A reader the earlier drop ended stays
 	/// ended.
 	fn forward_range(
 		&mut self,
@@ -5319,8 +5329,8 @@ impl TrackRun {
 		if self.ctx.version.has_skip() && self.served.is_some() {
 			let replaces = match hole {
 				Hole::Skip => Some(&self.dropped),
-				Hole::Drop { stale: None, .. } => Some(&self.dropped_stale),
-				Hole::Drop { .. } => None,
+				Hole::Drop { .. } if hole.error() == StreamError::Old => None,
+				Hole::Drop { .. } => Some(&self.dropped_stale),
 			};
 			let replaced: Vec<_> = replaces
 				.into_iter()
@@ -5376,12 +5386,19 @@ impl TrackRun {
 						self.dropped.remove(gap.clone());
 						self.dropped_stale.remove(gap.clone());
 					}
+					// The wire names every OLD drop stale, which the next update reopens. One the
+					// cursor gave up as final, such as one relayed from a version whose drops are
+					// all final, is dropped again by each update, as an expired stream is.
+					Hole::Drop { .. } if hole.error() == StreamError::Old => {
+						self.dropped.insert(gap.clone());
+						self.dropped_stale.insert(gap.clone());
+						if hole.stale_budget().is_none() {
+							self.expired.insert(gap.clone());
+						}
+					}
 					Hole::Drop { .. } => {
 						self.dropped.insert(gap.clone());
-						match hole.stale_budget() {
-							Some(_) => self.dropped_stale.insert(gap.clone()),
-							None => self.dropped_stale.remove(gap.clone()),
-						}
+						self.dropped_stale.remove(gap.clone());
 					}
 				}
 			}
@@ -7977,6 +7994,100 @@ mod serve_group_test {
 				"widen={widen}: still stale, it is dropped again under update 1"
 			);
 		}
+	}
+
+	/// A group an update re-offers waits for stream credit, and is judged again by whatever
+	/// arrives meanwhile: a later update whose range no longer admits it, or a final drop the
+	/// reader reaches for it, leaves it unserved.
+	#[kio::test]
+	async fn a_queued_reoffer_is_judged_again_before_it_opens_on_lite07() {
+		for narrow in [true, false] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let budget = Duration::from_millis(500);
+			let subscriber =
+				track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(budget)));
+			let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+			write_group(&mut track, 0, 0);
+			write_group(&mut track, 1, 1000);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			write_group(&mut track, 2, 3000);
+			run.ctx.outcomes.dropped.lock().unwrap().push((0, StreamError::Old));
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			let opened = run.ctx.outcomes.opened.load(Ordering::Relaxed);
+			let update = |id, start, update| lite::SubscribeUpdate {
+				wanted_group: None,
+				priority: 0,
+				max_delay: Duration::from_secs(10),
+				min_delay: None,
+				ranges: vec![(id, lite::Range::span(start, 0, None, None))],
+				order: Order::Descending,
+				update,
+			};
+			// Widened: group 0 is fresh again, and waits its turn.
+			run.update(update(0, Some(0), 1));
+			assert_eq!(run.reoffered.len(), 1);
+			match narrow {
+				true => run.update(update(1, Some(1), 2)),
+				false => {
+					run.forward_range(0..1, &Hole::drop(StreamError::Cancel), &mut writer)
+						.unwrap();
+				}
+			}
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			assert_eq!(
+				run.ctx.outcomes.opened.load(Ordering::Relaxed),
+				opened,
+				"narrow={narrow}: group 0 never opens again"
+			);
+			let drops: &[(u64, u64, u64)] = match narrow {
+				// Outside the range now, so it is dropped again under the narrowing update.
+				true => &[(0, 0, 0), (0, 0, 2)],
+				false => &[(0, 0, 0), (0, 0, 1)],
+			};
+			assert_eq!(
+				drop_updates(&mut writer, &log, Version::Lite07).await,
+				drops,
+				"narrow={narrow}"
+			);
+		}
+	}
+
+	/// A drop the cursor gave up as final with OLD, as one relayed from a lite-06 upstream is,
+	/// goes out as a stale drop on lite-07, which the subscriber reopens on its next update, so
+	/// each update drops it again rather than leave it owed.
+	#[kio::test]
+	async fn a_final_old_drop_is_dropped_again_by_each_update_on_lite07() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(None);
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 0, 0);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		run.forward_range(1..2, &Hole::drop(StreamError::Old), &mut writer)
+			.unwrap();
+		for update in [1, 2] {
+			run.update(lite::SubscribeUpdate {
+				wanted_group: None,
+				priority: 1,
+				max_delay: Duration::from_secs(3600),
+				min_delay: None,
+				ranges: vec![(0, lite::Range::span(None, 0, None, None))],
+				order: Order::Descending,
+				update,
+			});
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		}
+		assert_eq!(
+			drop_updates(&mut writer, &log, Version::Lite07).await,
+			[(1, 1, 0), (1, 1, 1), (1, 1, 2)]
+		);
 	}
 
 	/// A run one update left to drop again is judged again under the next update that

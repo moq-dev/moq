@@ -4993,6 +4993,9 @@ test("creating a skipped sequence throws Skipped", () => {
 
 	producer.skipGroups(5n, 7n);
 	expect(() => producer.createGroup(6n)).toThrow(Skipped);
+	expect(() => producer.insertDatagram(6n, undefined, new Uint8Array())).toThrow(Skipped);
+	// No skip below group 0.
+	expect(() => producer.skipGroups(-1n, 1n)).toThrow(RangeError);
 	// The next sequence, 5, was skipped too.
 	expect(() => producer.appendGroup()).toThrow(Skipped);
 	// A later drop leaves a skipped sequence skipped.

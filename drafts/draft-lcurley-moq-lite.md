@@ -1686,6 +1686,7 @@ A stale (OLD) drop is the exception: it ends no group whose Group Stream arrived
 
 **Update**:
 The [SUBSCRIBE](#subscribe) or [SUBSCRIBE_UPDATE](#subscribe-update) `Update` in effect when the publisher gave the groups up.
+A subscriber MUST treat an `Update` larger than the last one it sent as a PROTOCOL_VIOLATION.
 
 A drop whose Error Code is OLD is a stale verdict, which holds only under the update it names.
 The subscriber judges it against the `Subscriber Max Age` it sent with that update, from its own record: the drop does not carry the budget.

@@ -3131,6 +3131,10 @@ impl TrackState {
 		{
 			return Err(Error::Closed);
 		}
+		// Never produced, so no fill holds it either.
+		if self.skipped(sequence) {
+			return Err(Error::Skipped);
+		}
 
 		// Adopt the supplied info only if the track hasn't been accepted yet. Groups
 		// created here charge the same account as any other, so backfill written
@@ -22465,8 +22469,8 @@ mod test {
 		assert_eq!(drops, [(1..4, Hole::Skip)]);
 	}
 
-	/// A skip is final: creating a group at a sequence an append or `skip_groups` skipped is
-	/// refused, while a dropped one may be created again.
+	/// A skip is final: creating or filling a group at a sequence an append or `skip_groups`
+	/// skipped is refused, while a dropped one may be created again.
 	#[test]
 	#[cfg(feature = "async")]
 	fn creating_a_skipped_sequence_is_refused() {
@@ -22490,6 +22494,16 @@ mod test {
 		producer.give_up(1..2, Hole::drop(StreamError::Cancel));
 		assert!(matches!(
 			producer.create_group(group::Info { sequence: 1 }),
+			Err(Error::Skipped)
+		));
+		// No fill holds a skipped sequence either.
+		assert!(matches!(
+			producer
+				.state
+				.write()
+				.ok()
+				.unwrap()
+				.insert_group_request(6, group::Bounds::default(), None),
 			Err(Error::Skipped)
 		));
 		// A dropped sequence may be created again.

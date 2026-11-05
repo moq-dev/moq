@@ -1928,6 +1928,9 @@ export class Subscriber {
 				// stream, and a reader of one still arriving ends with the drop's error now. A lite-07
 				// stale drop leaves a group whose stream arrived, since the stream wins over it.
 				const { start, end, update } = resp.drop;
+				// It can only echo an update this subscriber sent.
+				if (update > (entry.update ?? 0n))
+					throw new ProtocolViolation(`SUBSCRIBE_DROP names update ${update}, which was never sent`);
 				const error = resp.drop.cause(this.version);
 				// On lite-07 an OLD drop is a stale verdict, which the next update reopens; every other
 				// drop is final, whatever update it names.

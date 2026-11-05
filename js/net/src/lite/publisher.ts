@@ -1391,6 +1391,9 @@ export class Publisher {
 				? { skip: new SubscribeSkip({ start, end }) }
 				: { drop: SubscribeDrop.given(start, end, hole.error, this.version, updateNumber) };
 
+		// Whether lite-07 names `hole` stale: an OLD drop, which the next update reopens.
+		const sentStale = (hole: Hole) => !hole.skip && toStreamCode(hole.error) === StreamCode.Old;
+
 		// Lite-07: the part of `served` named in SUBSCRIBE_DROP, never served. A skip replaces a
 		// drop, so it is sent over one of these, but never over a group served.
 		let dropped: Run[] = [];
@@ -1413,9 +1416,16 @@ export class Publisher {
 						droppedStale = removeRun(droppedStale, gap.start, gap.end);
 						continue;
 					}
-					if (hole.stale === undefined) droppedStale = removeRun(droppedStale, gap.start, gap.end);
-					else insertRun(droppedStale, gap.start, gap.end);
 					insertRun(dropped, gap.start, gap.end);
+					// The wire names every OLD drop stale, which the next update reopens. One the
+					// reader gave up as final, such as one relayed from a version whose drops are all
+					// final, is dropped again by each update, as an expired stream is.
+					if (!sentStale(hole)) {
+						droppedStale = removeRun(droppedStale, gap.start, gap.end);
+						continue;
+					}
+					insertRun(droppedStale, gap.start, gap.end);
+					if (hole.stale === undefined) insertRun(expired, gap.start, gap.end);
 				}
 			}
 			for (const gap of gaps) {
@@ -1427,11 +1437,11 @@ export class Publisher {
 		};
 
 		// Forward a verdict the reader reached on `[start, end)`, as `drop` does. On lite-07 it also
-		// replaces what it overrides: a skip any drop already sent, and a final drop a stale one,
+		// replaces what it overrides: a skip any drop already sent, and a final (non-OLD) drop a stale one,
 		// which the next update would otherwise reopen. A reader the earlier drop ended stays ended.
 		const forward = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
 			if (served && hasSkip(this.version)) {
-				const replaces = hole.skip ? dropped : hole.stale === undefined ? droppedStale : [];
+				const replaces = hole.skip ? dropped : sentStale(hole) ? [] : droppedStale;
 				for (const run of [...replaces]) {
 					const from = max(run.start, start);
 					const to = min(run.end, end);
@@ -1615,6 +1625,12 @@ export class Publisher {
 									pendingDrops.length,
 									...pendingDrops.filter((d) => toStreamCode(d.error) !== StreamCode.Old),
 								);
+								// A group re-offered that has not opened yet is judged again too, since these
+								// terms may no longer admit it.
+								for (const group of reoffered.splice(0)) {
+									insertRun(expired, group.sequence, group.sequence + 1n);
+									group.close();
+								}
 								// A group whose stream already reset as stale: one still cached, in range, and
 								// fresh under the new budget is served again; the rest is dropped again, by run.
 								for (const run of expired.splice(0)) {

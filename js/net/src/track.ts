@@ -1842,6 +1842,8 @@ export class Producer {
 	 * cached keeps what it is, since it was produced after all. Mirrors the Rust `skip_groups`.
 	 */
 	skipGroups(start: bigint, end: bigint): void {
+		checkSequence(start);
+		checkSequence(end);
 		this.#skipReceived(start, end);
 	}
 
@@ -1996,9 +1998,11 @@ export class Producer {
 	 *
 	 * Preserves the supplied sequence (later appends continue past it) so a relay can
 	 * forward a datagram without renumbering it. The size and timestamp rules of
-	 * {@link appendDatagram} apply. Most origin publishers want {@link appendDatagram} instead.
+	 * {@link appendDatagram} apply, and a skipped sequence throws {@link Skipped}. Most origin
+	 * publishers want {@link appendDatagram} instead.
 	 */
 	insertDatagram(sequence: bigint, timestamp: Timestamp | undefined, payload: Uint8Array) {
+		this.#refuseSkipped(checkSequence(sequence));
 		this.#insertDatagram({ sequence, timestamp, payload });
 	}
 

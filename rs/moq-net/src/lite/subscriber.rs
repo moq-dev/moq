@@ -4825,6 +4825,27 @@ mod tests {
 		(serve, serving, tail, broadcast)
 	}
 
+	/// A SUBSCRIBE_DROP can only echo an update the subscriber sent: one naming a later update
+	/// is a protocol violation, and accounts for nothing.
+	#[kio::test]
+	async fn a_drop_naming_an_unsent_update_is_a_protocol_violation() {
+		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let drop = lite::SubscribeResponse::Drop(lite::SubscribeDrop {
+			start: 1,
+			end: 2,
+			error: u64::from(crate::coding::StreamCodes::encode_stream_code(
+				&Version::Lite07,
+				&crate::StreamError::Old,
+			)),
+			update: 1,
+		});
+		assert!(matches!(
+			serving.apply_response(&serve, drop),
+			Err(Error::ProtocolViolation)
+		));
+		assert!(!tail.read().covers(1..3));
+	}
+
 	/// On lite-07 an OLD drop is a stale verdict judged under the budget this subscriber sent
 	/// with the update it names. Any SUBSCRIBE_UPDATE reopens every stale run in the tail,
 	/// whether or not it widens the budget, and an OLD drop naming a superseded update is no
@@ -10742,6 +10763,10 @@ impl ServeLoop {
 				// An empty range (Group Start = Group End + 1) names nothing.
 				if groups.is_empty() {
 					return Ok(());
+				}
+				// It can only echo an update this subscriber sent.
+				if dropped.update > active.update {
+					return Err(Error::ProtocolViolation);
 				}
 				let error = dropped.error(serve.subscriber.version);
 				// On lite-07 an OLD drop is a stale verdict, which the next update reopens; every
