@@ -4849,6 +4849,8 @@ impl Consumer {
 		let subscription = subscription.expect("a subscription was requested");
 		if let Some(newest) = TrackState::requested(&state) {
 			subscription.set_requested(newest);
+		} else if let Some(routes) = state.read().routes.clone() {
+			subscription.set_answer(routes.answer());
 		}
 
 		kio::Pending::new(Subscribing {
@@ -5285,6 +5287,7 @@ impl Consumer {
 			name: self.name.clone(),
 			broadcast: self.broadcast.clone(),
 			requested: TrackState::requested(&state),
+			answer: state.read().routes.as_ref().map(|routes| routes.answer()),
 			state,
 			stats: self.stats.clone(),
 		})
@@ -5410,6 +5413,7 @@ impl Subscribing {
 			broadcast: self.broadcast.clone(),
 			state: self.state.clone(),
 			requested: self.subscription.requested(),
+			answer: self.subscription.answer(),
 			stats: self.stats.clone(),
 		}
 	}
@@ -5490,6 +5494,7 @@ pub struct Resolving {
 	state: kio::Consumer<TrackState>,
 	/// The newest sequence when requested, if the track had resolved; see [`TrackState::requested`].
 	requested: Option<Option<u64>>,
+	answer: Option<Arc<std::sync::OnceLock<Option<u64>>>>,
 	stats: stats::Scope,
 }
 
@@ -5518,6 +5523,7 @@ impl Resolving {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn requested_sequence(&self) -> Option<u64> {
 		self.requested
+			.or_else(|| self.answer.as_ref()?.get().copied())
 			.unwrap_or_else(|| TrackState::request_answered(&self.state))
 	}
 }

@@ -212,6 +212,7 @@ struct Preference {
 	/// The track's newest sequence when the subscription was requested, set only if the track
 	/// had resolved by then; see `TrackState::requested`.
 	requested: std::sync::OnceLock<Option<u64>>,
+	answer: std::sync::OnceLock<Arc<std::sync::OnceLock<Option<u64>>>>,
 }
 
 impl Preferences {
@@ -227,6 +228,7 @@ impl Preferences {
 			subscriptions,
 			ranges_revision: AtomicU64::new(0),
 			requested: Default::default(),
+			answer: Default::default(),
 		}))
 	}
 
@@ -273,7 +275,13 @@ impl Preferences {
 	}
 	/// The track's newest sequence when the subscription was requested, if it had resolved.
 	pub(in crate::model) fn requested(&self) -> Option<Option<u64>> {
-		self.0.requested.get().copied()
+		self.0.requested.get().or_else(|| self.0.answer.get()?.get()).copied()
+	}
+	pub(in crate::model) fn answer(&self) -> Option<Arc<std::sync::OnceLock<Option<u64>>>> {
+		self.0.answer.get().cloned()
+	}
+	pub(in crate::model) fn set_answer(&self, answer: Arc<std::sync::OnceLock<Option<u64>>>) {
+		let _ = self.0.answer.set(answer);
 	}
 	pub(in crate::model) fn poll_ref<F, R>(
 		&self,

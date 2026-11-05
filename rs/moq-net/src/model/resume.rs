@@ -77,6 +77,8 @@ struct Route {
 	/// The newest sequence as of the front's request for the serving copy, where a
 	/// subscription made before the track resolved joins; see [`track::Subscriber::requested_sequence`].
 	resolved: Option<u64>,
+	/// Shared by requests waiting for the next splice, then frozen for those requests.
+	answer: Arc<std::sync::OnceLock<Option<u64>>>,
 	/// The id the next stage takes.
 	next_stage: u64,
 }
@@ -209,6 +211,8 @@ impl Producer {
 	fn serve_from(&self, copy: track::Consumer, stage: Option<u64>, resolved: Option<u64>) {
 		if let Ok(mut route) = self.state.write() {
 			route.generation += 1;
+			let _ = route.answer.set(resolved);
+			route.answer = Default::default();
 			route.resolved = resolved;
 			route.copy = Some(copy);
 			route.parked = None;
@@ -321,6 +325,16 @@ impl Consumer {
 	/// The serving route's copy, if any.
 	pub(super) fn serving(&self) -> Option<track::Consumer> {
 		self.state.read().copy.clone()
+	}
+
+	/// The first copy's answer for a request that has no arrival snapshot.
+	pub(super) fn answer(&self) -> Arc<std::sync::OnceLock<Option<u64>>> {
+		let route = self.state.read();
+		if route.copy.is_some() || route.parked.is_some() {
+			Arc::new(std::sync::OnceLock::from(route.resolved))
+		} else {
+			route.answer.clone()
+		}
 	}
 
 	/// Wait for a copy to supply a join snapshot, or for the route to end.
@@ -2561,6 +2575,38 @@ mod test {
 			panic!("the copy supplies the snapshot");
 		};
 		assert_eq!(sub.requested_sequence(), Some(7));
+	}
+
+	#[test]
+	fn a_pending_wire_join_keeps_the_first_answer_across_splices() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let pending = logical.consume().subscribe(None);
+		let first = copy();
+		first
+			.create_group(group::Info { sequence: 7 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		routes.serve(first.consume());
+		routes.park();
+		routes.unpark();
+		let second_pending = logical.consume().subscribe(None);
+		let second = copy();
+		second
+			.create_group(group::Info { sequence: 9 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		routes.serve(second.consume());
+		let Poll::Ready(Ok(first_sub)) = pending.poll_wire(&kio::Waiter::noop()) else {
+			panic!("first answer");
+		};
+		let Poll::Ready(Ok(second_sub)) = second_pending.poll_wire(&kio::Waiter::noop()) else {
+			panic!("second answer");
+		};
+		assert_eq!(first_sub.requested_sequence(), Some(7));
+		assert_eq!(second_sub.requested_sequence(), Some(9));
 	}
 
 	fn subscribe(logical: &track::Producer, max_delay: Duration) -> track::Subscriber {
