@@ -146,7 +146,10 @@ test("a datagram track round-trips over moq-transport", async () => {
 		expect(info.timescale).toBe(Timescale.MILLI);
 		// A peer's unreadable properties lose one best-effort payload, not the session.
 		const encode = ObjectDatagram.prototype.encode;
-		const corrupt = spyOn(ObjectDatagram.prototype, "encode").mockImplementation(function (this: ObjectDatagram, version) {
+		const corrupt = spyOn(ObjectDatagram.prototype, "encode").mockImplementation(function (
+			this: ObjectDatagram,
+			version,
+		) {
 			corrupt.mockRestore();
 			return encode.call(new ObjectDatagram({ ...this, properties: Uint8Array.of(0x10) }), version);
 		});
