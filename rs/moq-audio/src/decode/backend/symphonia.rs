@@ -13,6 +13,7 @@ pub(super) struct Symphonia {
 	inner: symphonia_codec_aac::AacDecoder,
 	sample_rate: u32,
 	layout: Layout,
+	adts: bool,
 }
 
 impl Symphonia {
@@ -58,15 +59,32 @@ impl Symphonia {
 			inner,
 			sample_rate,
 			layout: Layout::from_channels(channel_count as u32)?,
+			adts: catalog.description.is_none() && !matches!(catalog.container, hang::catalog::Container::Cmaf { .. }),
 		}))
 	}
 }
 
 impl Backend for Symphonia {
 	fn decode(&mut self, packet: &[u8]) -> Result<Decoded, Error> {
-		// The packet is a raw AAC frame, not ADTS, so there is nothing to timestamp
-		// it with here: the container carries the timestamp and the decoder only
-		// reads the payload.
+		let packet = if self.adts {
+			let header =
+				moq_mux::codec::aac::adts::Header::parse(packet).map_err(|err| Error::Decode(format!("aac: {err}")))?;
+			if header.object_type != 2
+				|| header.sample_rate != self.sample_rate
+				|| u32::from(header.channel_config) != self.layout.channels()
+				|| header.blocks != 1
+			{
+				return Err(Error::Decode(
+					"ADTS header disagrees with the AAC-LC catalog or carries multiple blocks".into(),
+				));
+			}
+			header
+				.payload(packet)
+				.map_err(|err| Error::Decode(format!("aac: {err}")))?
+		} else {
+			packet
+		};
+		// The container carries the timestamp; Symphonia reads only the raw AAC block.
 		let packet = symphonia_core::packet::PacketRef::new(
 			0,
 			symphonia_core::units::Timestamp::ZERO,

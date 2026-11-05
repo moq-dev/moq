@@ -53,11 +53,13 @@ pub(crate) enum Target {
 }
 
 impl Target {
-	/// A fixed target for `Some`, otherwise the estimator floored at `advertised`.
-	pub(crate) fn new(delay: Option<Duration>, advertised: Option<Duration>) -> Self {
-		match delay {
-			Some(delay) => Self::Fixed(millis(delay)),
-			None => Self::Auto(Box::new(Estimator::new(advertised.map_or(0.0, millis)))),
+	/// The estimator floored at `delay` and `advertised` when `estimate`, otherwise `delay` fixed.
+	pub(crate) fn new(delay: Duration, estimate: bool, advertised: Option<Duration>) -> Self {
+		match estimate {
+			false => Self::Fixed(millis(delay)),
+			true => Self::Auto(Box::new(Estimator::new(millis(
+				advertised.unwrap_or_default().max(delay),
+			)))),
 		}
 	}
 
@@ -430,7 +432,11 @@ pub(crate) mod tests {
 	fn conforms_to_the_corpus() {
 		for name in CORPUS {
 			let case = case(name);
-			let mut target = Target::new(case.delay.map(duration), case.advertised.map(duration));
+			let mut target = Target::new(
+				case.delay.map_or(Duration::ZERO, duration),
+				case.delay.is_none(),
+				case.advertised.map(duration),
+			);
 			target.set_frame(case.frame);
 
 			let series = case.series();
@@ -450,7 +456,7 @@ pub(crate) mod tests {
 	/// ahead of it must not carry the media-time gap into the target.
 	#[test]
 	fn a_timestamp_jump_is_not_a_delay() {
-		let mut target = Target::new(None, None);
+		let mut target = Target::new(Duration::ZERO, true, None);
 		target.set_frame(20.0);
 		target.observe(0.0, 0.0);
 		for i in 0..500 {
@@ -461,14 +467,14 @@ pub(crate) mod tests {
 
 	#[test]
 	fn an_advertised_span_floors_rather_than_adds() {
-		let target = Target::new(None, Some(Duration::from_millis(200)));
+		let target = Target::new(Duration::ZERO, true, Some(Duration::from_millis(200)));
 		// The prior reads 100 ms, under the advertised 200 ms.
 		assert_eq!(target.millis(), 200.0);
 	}
 
 	#[test]
 	fn the_measured_term_is_bounded_by_the_histogram() {
-		let mut target = Target::new(None, None);
+		let mut target = Target::new(Duration::ZERO, true, None);
 		target.set_frame(20.0);
 		// A frame every 20 ms of media arriving a whole second apart: every interval
 		// sees a delay far past the last bucket.

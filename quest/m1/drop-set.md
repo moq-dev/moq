@@ -14,9 +14,9 @@ narrower budget is served after a widening, as a cold relay would.
 
 ## Plan
 
-Decided 2026-10-27 (maintainer): this runs after
-[Linear fill path](/quest/m1/subscribe-ranges/fill-linear.md), since both edit
-`given_up` in `rs/moq-net/src/model/track/miss.rs`, and before
+Decided 2026-10-27 (maintainer): this runs after the range count cost work,
+which finished in [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542),
+since both edit `given_up` in `rs/moq-net/src/model/track/miss.rs`, and before
 [Rust groups by start](/quest/m1/time-addressing/model.md), which requires it
 because runs keyed by group sequence convert mechanically to starts.
 
@@ -171,8 +171,8 @@ window as the groups they sit between, and expiry applies the same
 fold-or-`TooFarBehind` rule as a Rust eviction. A run sits between cached
 sequences, so there are at most about one per cached sequence (alternating
 drop and arrival), and JS run state grows no faster than the JS cache
-itself. The JS byte bound for both is
-[JS unbounded groups](/quest/m1/unbounded-groups/js.md).
+itself. The JS byte bound for both is the 32 MiB group tail that
+[moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411) landed.
 
 Only a final run folds into a cursor's floor: a delivered run, a run
 skipped at the track's max age bound (no widening reaches past it), or a
@@ -258,6 +258,10 @@ Test on mock time through a relay:
   2026-10-28).
 
 Mirror each case in `js/net`.
+In `js/net`, a group a sink buffers keeps its source wanted only while
+`Subscriber.#reading` says its reader will still read it
+([moq-dev/moq#7948](https://github.com/moq-dev/moq/pull/7948)), so a change to
+how a cursor judges a missing or stale group keeps that verdict in step.
 
 Public API: none. Wire: lite-07 SUBSCRIBE_DROP (unpublished) gains `Max Age`
 and the widening and ordering rules above; published versions are
@@ -303,7 +307,15 @@ a cancelled fetch below a track's end still holds the end open until the cache
 expiry scan removes it, so how fast a subscription ends depends on expiry
 timing. Settle it here, where cancelled and expired runs get a reason.
 
+### Untimed fills below a resolved start
+
+Noted 2026-10-31 from [moq-dev/moq#7235](https://github.com/moq-dev/moq/pull/7235),
+which made everything below a resolved SUBSCRIBE_START fillable from upstream:
+a lite-07 copy with no media time asks a fill below the start even for a reader
+whose budget the publisher already exceeded, and that fill ends empty. If the
+extra FETCH shows up in relay traffic, bound it here, where a run below the
+start can carry the budget it was resolved under.
+
 ## Related
 
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - fills the cache miss an evicted run leaves
-- [JS unbounded groups](/quest/m1/unbounded-groups/js.md) - the JS byte bound for groups and the runs between them; not required, since JS runs never outgrow the JS cache

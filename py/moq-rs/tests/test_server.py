@@ -10,15 +10,10 @@ import pytest
 
 
 async def routes(announced: moq.AnnounceConsumer):
-    """Yield each newly announced route, skipping updates and ends."""
+    """Yield each route that makes its path present, skipping absences."""
     async for event in announced:
-        if isinstance(event, moq.AnnounceEventStart):
+        if isinstance(event, moq.AnnounceEventPresent):
             yield event.announce
-
-
-async def next_route(announced: moq.AnnounceConsumer) -> moq.AnnounceEvent:
-    """The next announce event."""
-    return await asyncio.wait_for(anext(announced), timeout=5.0)
 
 
 def opus_head() -> bytes:
@@ -82,12 +77,12 @@ async def test_server_client_roundtrip():
                     media_consumer = await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, audio)
 
                     payload = b"hello over the wire"
-                    media.write_frame(payload, timedelta(microseconds=1_000_000))
+                    media.write_frame(payload, moq.Timestamp(1_000_000, 1_000_000))
 
                     async for frame in media_consumer:
                         assert isinstance(frame, moq.media.MediaFrame)
                         assert frame.payload == payload
-                        assert frame.timestamp // timedelta(microseconds=1) == 1_000_000
+                        assert frame.timestamp == moq.Timestamp(1_000_000, 1_000_000)
                         break
 
                     break
@@ -209,6 +204,36 @@ async def test_session_state_names_a_failing_first_dial():
                 state = await asyncio.wait_for(session.state_changed(state.revision), timeout=10)
                 assert isinstance(state.failure, moq.Error.Connect)
                 assert state.connects == 0
+            session.cancel(0)
+
+
+async def test_viewer_holds_without_an_estimate():
+    """A viewer on a session that has not connected reads no estimate."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as silent:
+        silent.bind(("127.0.0.1", 0))
+        host, port = silent.getsockname()
+        client = moq.Client(
+            f"https://{host}:{port}",
+            tls=moq.ClientTls(insecure=True),
+            bind="127.0.0.1:0",
+            websocket=moq.WebSocketConfig(enabled=False),
+        )
+        async with client:
+            session = client.session
+            assert session is not None
+            viewers = session.viewers()
+            viewer = viewers.watch(1_000_000)
+            viewer.update(2_000_000)
+            viewers.set_target(0)
+            viewers.set_target(None)
+            assert viewer.rate() is None
+            # Past what a PROBE target carries: refused.
+            with pytest.raises(moq.Error.OutOfRange):
+                viewers.watch(2**53)
+            with pytest.raises(moq.Error.OutOfRange):
+                viewers.set_target(2**53)
             session.cancel(0)
 
 
@@ -448,50 +473,6 @@ async def test_broadcast_route_over_wire():
             except asyncio.CancelledError:
                 pass
             broadcast.close()
-
-
-async def test_route_update_observes_restart():
-    """A route metadata update arrives as an AnnounceEventUpdate.
-
-    The publisher re-prices its announced route; the subscriber observes the new
-    cost in place (no retraction), and unannouncing retracts it.
-    """
-    origin = moq.OriginProducer()
-    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], publish=origin) as server:
-        publication = origin.create_broadcast("routed")
-        publication.announce(moq.AnnounceRoute(cost=1))
-
-        serve_task = asyncio.create_task(server.serve())
-        try:
-            async with moq.Client(
-                f"https://{server.local_addr}",
-                tls=moq.ClientTls(insecure=True),
-                bind="127.0.0.1:0",
-            ) as client:
-                announced = client.announced()
-                first = await next_route(announced)
-                assert isinstance(first, moq.AnnounceEventStart)
-                assert first.announce.prefix == "routed"
-                first_cost = first.announce.route.cost
-
-                # The publisher raises its cost: an in-place update.
-                publication.announce(moq.AnnounceRoute(cost=5))
-                updated = await next_route(announced)
-                assert isinstance(updated, moq.AnnounceEventUpdate)
-                assert updated.announce.prefix == "routed"
-                assert updated.announce.route.cost == first_cost + 4
-
-                # Unannouncing retracts the route.
-                publication.unannounce()
-                ended = await next_route(announced)
-                assert isinstance(ended, moq.AnnounceEventEnd)
-                assert ended.announce.prefix == "routed"
-        finally:
-            serve_task.cancel()
-            try:
-                await serve_task
-            except asyncio.CancelledError:
-                pass
 
 
 async def test_client_context_keeps_the_body_error():

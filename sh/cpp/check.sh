@@ -31,6 +31,12 @@ fi
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../../cpp"
 
+# A source build checks formatting first; the release jobs that pass an input
+# check a build of sources already gated.
+if [[ -z "$archive" && -z "$ffi_dir" ]]; then
+    bash ../sh/clang-format.sh --check cpp/moq
+fi
+
 # Single-config generators build the package Debug, for cargo's dev profile. The consumers
 # clear the build type, since debug info only slows the bindings' compile and link. Visual
 # Studio ignores CMAKE_BUILD_TYPE and gets --config Release, since the Rust staticlib links
@@ -90,10 +96,10 @@ bash ../doc/lib/samples.sh cpp ../doc/lib/cpp/index.md >"$build/doc-samples.cpp"
 "${CXX:-c++}" -std=c++20 -fsyntax-only -Wall -Werror -I"$prefix/include" moq/bench/main.cpp
 
 if command -v pkg-config >/dev/null 2>&1; then
-    export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
+    pc="$prefix/lib/pkgconfig/moq-cpp.pc"
     # Assigned first: set -e ignores a failing substitution inside a command's arguments.
-    sources=$(pkg-config --variable=sources moq-cpp)
-    flags=$(pkg-config --cflags --libs moq-cpp)
+    sources=$(pkg-config --variable=sources "$pc")
+    flags=$(pkg-config --cflags --libs "$pc")
     # Those sources already compiled at C++17 with these flags in test-17, so the probe links
     # that library instead of compiling them again.
     if [[ ! -f "$sources" ]]; then

@@ -208,11 +208,6 @@ fn local_ufrag(data: &[u8]) -> Option<String> {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 	use std::time::Duration;
@@ -293,6 +288,11 @@ mod tests {
 	}
 
 	#[test]
+	#[expect(
+		clippy::disallowed_methods,
+		clippy::disallowed_types,
+		reason = "the test measures route lookup cost on the host clock"
+	)]
 	fn wire_routes_scale_with_peers_and_packets() {
 		use std::hint::black_box;
 		use std::time::Instant;
@@ -376,7 +376,7 @@ mod tests {
 			.await
 			.expect("IPv4 peer must reach a dual-stack mux");
 
-		let (_data, src) = tokio::time::timeout(Duration::from_secs(5), rx.packets.recv())
+		let (_data, src) = kio::clock::timeout(Duration::from_secs(5), rx.packets.recv())
 			.await
 			.expect("the demux must route the IPv4 peer's binding request")
 			.expect("session inbox stayed open");

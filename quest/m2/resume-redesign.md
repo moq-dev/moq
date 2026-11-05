@@ -50,7 +50,7 @@ paths diverged.
 
 1. Route copies become successive writers into the logical `TrackState`,
    the only cache. Every writer is of the instance the subscription started
-   on: a newer [publisher epoch](/doc/concept/moq-lite.md#publisher-epochs)
+   on: a newer [publisher epoch](/doc/concept/moq-lite.md#publisher-instances)
    never feeds it (the route rule in `rs/moq-net/AGENTS.md`), so its readers
    end with an error once their instance's routes are gone. Same-epoch routes
    carry identical content, so a later writer's duplicate sequence is
@@ -61,11 +61,10 @@ paths diverged.
 2. The upstream request is already the union of readers' resume points
    (`Producer::subscription`), so per-reader copy cursors are local overhead.
 3. Readers become plain cursors: delete `Inner::Resume`, `Reader`, `Copy`,
-   `Retain`, `Candidate`, per-reader datagram dedupe (dedupe once on insert),
-   and per-reader `learn_end`.
+   `Retain`, `Candidate`, and per-reader `learn_end`.
 4. `Recover` attaches to the slot, not a handed-out group: continuing a
    group whose copy failed is a
-   [flight](/quest/m1/unbounded-groups/flights.md) from the reader's frame on
+   [flight](https://github.com/moq-dev/moq/pull/7944) from the reader's frame on
    the new route, which hands over like any other flight.
 
 Hard constraint from the splice era: two caches sharing one group handle
@@ -74,18 +73,25 @@ b9398f7459, 68c73349a3). Session copies under a front must stop caching for
 themselves and only feed the logical track.
 
 Land it in Rust first, then mirror `js/net` unless
-[rs2ts](/quest/m2/rs2ts/README.md) has replaced it. Extend
+[JS-only @moq/net](/quest/m2/rs2ts-js.md) has replaced it. Extend
 `benches/origin.rs` with the reader times flap sweep before starting, to
 measure the change.
 
 Public API: none. Wire: none.
 
+Decided 2026-11-05 (maintainer, follow-up from
+[moq-dev/moq#7736](https://github.com/moq-dev/moq/pull/7736)): ✅ fold this
+case into the redesign instead of patching code it deletes. In
+`js/net/src/resume.ts`, `#update` skips a copy whose upstream subscription
+closed, so a closed copy that still holds groups keeps picking under the
+reader's old `delay.max` after an update. It was found by review and not
+reproduced. The redesign's tests must cover a preference update after the
+serving copy's upstream closed, followed by a read.
+
 ## Required
 
-- [Flights](/quest/m1/unbounded-groups/flights.md) - the paced copy and handover `Recover` folds into
 - [Release cut](/quest/m2/release/cut.md) - wait for the release in flight to ship
 
 ## Related
 
-- [A reserved group survives a route returning](/quest/m1/cut-audit/reserved-route-return.md) - a pre-cut fix this deletes
 - [Recover reads its budget without a sync](/quest/m2/recover-budget.md) - a per-frame cost this deletes

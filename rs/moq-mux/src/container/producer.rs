@@ -58,13 +58,12 @@ pub struct Producer<C: Container, R = ()> {
 	/// Set by [`Self::seek`] and consumed on the next group creation.
 	pending_sequence: Option<u64>,
 
-	/// Reports each written group into this rendition's HLS records, unless the catalog disabled them.
-	recorder: Option<crate::hls::Recorder>,
+	/// This track's place in the broadcast's join interval, for a video or audio track a catalog
+	/// minted: it reports the longest group measured.
+	member: Option<crate::catalog::interval::Member>,
 
-	/// The furthest presentation point written, i.e. `max(timestamp + duration)`. Reported to
-	/// `recorder` on each [`cut`](Self::cut), since the last group of a track has no successor
-	/// to bound it and its record would otherwise end at its last frame's start. Also the base
-	/// for a duration marker when the caller does not pass a bound.
+	/// The furthest presentation point written, i.e. `max(timestamp + duration)`: the base for a
+	/// duration marker when the caller does not pass a bound.
 	end: Option<moq_net::Timestamp>,
 
 	/// Exclusive presentation end of finished groups, where a payload with no timestamp of its
@@ -89,6 +88,8 @@ pub struct Producer<C: Container, R = ()> {
 	/// Measures bitrate, reorder, batch, and explicit encoder flush observations for the catalog.
 	/// A caller without a published rendition simply never reads the estimate.
 	estimator: crate::catalog::Estimator,
+	/// Frames at or before this are history caught up behind the live edge; see [`Self::history`].
+	history: Option<moq_net::Timestamp>,
 
 	/// Peak-hold claim on the connection allocator, when one was supplied.
 	/// Named `bandwidth` so it is not confused with the catalog-gate [`Reserved`].
@@ -99,6 +100,82 @@ pub struct Producer<C: Container, R = ()> {
 
 	/// The counters the catalog reports for this track, when it was created through a catalog.
 	sent: Option<std::sync::Arc<crate::stats::Sent>>,
+}
+
+/// A frame whose payload streams into its track as it arrives, opened by [`Producer::open`].
+///
+/// It holds the track's open group until [`Producer::commit`] returns it, so nothing else writes to
+/// the track meanwhile. Dropping it unfinished aborts that group.
+pub(crate) struct Streamed {
+	writer: moq_net::frame::Producer,
+	timestamp: moq_net::Timestamp,
+	duration: Option<moq_net::Timestamp>,
+	keyframe: bool,
+	size: usize,
+}
+
+impl Streamed {
+	/// Append payload bytes, readable by subscribers at once.
+	pub fn write(&mut self, chunk: &[u8]) -> crate::Result<()> {
+		self.writer.write(chunk)?;
+		Ok(())
+	}
+
+	/// Payload bytes still to write.
+	pub fn remaining(&self) -> usize {
+		self.writer.remaining()
+	}
+
+	/// Abort the frame and its group with `err`.
+	pub fn abort(self, err: moq_net::Error) {
+		let _ = self.writer.abort(err);
+	}
+}
+
+impl<R: Clone + Send + 'static> Producer<crate::catalog::hang::Container, R> {
+	/// Open a frame of `size` payload bytes, written through the returned [`Streamed`] as they
+	/// arrive, for a source that learns a frame's size before its bytes.
+	///
+	/// Groups and refuses frames the way [`write`](Self::write) does; the frame is measured once
+	/// [`commit`](Self::commit)ted. The group's storage takes the bytes as they are written, so a
+	/// declared size commits no memory, and one past the group's limit is refused up front. A
+	/// buffering producer, or CMAF, whose `moof` describes the payload, cannot stream.
+	pub(crate) fn open(
+		&mut self,
+		timestamp: moq_net::Timestamp,
+		keyframe: bool,
+		duration: Option<moq_net::Timestamp>,
+		size: usize,
+	) -> crate::Result<Streamed> {
+		let prefix = match self.container.prefix(timestamp)? {
+			Some(prefix) if self.buffer_duration.is_zero() => prefix,
+			_ => return Err(crate::Error::UnsupportedContainer("a streamed frame".into())),
+		};
+		self.prepare(timestamp, keyframe)?;
+		let group = self.group.take().expect("prepare opens a group");
+		let total = prefix.len().checked_add(size).ok_or(moq_net::Error::FrameTooLarge)?;
+		let mut writer = group.create_frame(moq_net::frame::Info {
+			timestamp: Some(timestamp),
+			size: total as u64,
+		})?;
+		writer.write(prefix)?;
+		Ok(Streamed {
+			writer,
+			timestamp,
+			duration,
+			keyframe,
+			size,
+		})
+	}
+
+	/// Finish a frame [`open`](Self::open) returned once its payload is written, handing its group
+	/// back to the track.
+	pub(crate) fn commit(&mut self, frame: Streamed) -> crate::Result<()> {
+		let group = frame.writer.finish()?;
+		self.group = Some(group);
+		self.written(frame.timestamp, frame.duration, frame.size, frame.keyframe);
+		Ok(())
+	}
 }
 
 trait Rendition<R>: Send {
@@ -113,9 +190,8 @@ trait Rendition<R>: Send {
 		&self,
 		container: crate::catalog::hang::Container,
 		info: moq_net::track::Info,
-		hls_hint: Option<std::time::Duration>,
+		interval: Option<std::time::Duration>,
 	) -> crate::Result<Producer<crate::catalog::hang::Container, R>>;
-	fn retire(&self, track: &str) -> crate::Result<()>;
 }
 
 impl<E, R> Rendition<R> for crate::catalog::tracks::Rendition<E, R>
@@ -131,13 +207,9 @@ where
 		&self,
 		container: crate::catalog::hang::Container,
 		info: moq_net::track::Info,
-		hls_hint: Option<std::time::Duration>,
+		interval: Option<std::time::Duration>,
 	) -> crate::Result<Producer<crate::catalog::hang::Container, R>> {
-		self.fresh(container, info, hls_hint)
-	}
-
-	fn retire(&self, track: &str) -> crate::Result<()> {
-		self.retire(track)
+		self.fresh(container, info, interval)
 	}
 
 	fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
@@ -169,8 +241,8 @@ impl<C: Container> Producer<C> {
 	/// Create a Producer wrapping the given moq-lite producer, muxing into `container`.
 	///
 	/// A plain media track by default: no buffering, no timeline. Add buffering with
-	/// [`with_buffer`](Self::with_buffer); the timeline recorder is wired by the catalog (see
-	/// [`catalog::Producer::video`](crate::catalog::Producer::video) and its sibling APIs.
+	/// [`with_buffer`](Self::with_buffer); the join interval is wired by the catalog (see
+	/// [`catalog::Producer::video`](crate::catalog::Producer::video) and its sibling APIs).
 	pub fn new(track: moq_net::track::Producer, container: C) -> Self {
 		Self {
 			inner: track,
@@ -179,7 +251,7 @@ impl<C: Container> Producer<C> {
 			buffer: Vec::new(),
 			buffer_duration: std::time::Duration::ZERO,
 			pending_sequence: None,
-			recorder: None,
+			member: None,
 			end: None,
 			live_edge: None,
 			start: None,
@@ -189,6 +261,7 @@ impl<C: Container> Producer<C> {
 			cadence: None,
 			reordered: false,
 			estimator: crate::catalog::Estimator::new(),
+			history: None,
 			bandwidth: None,
 			rendition: None,
 			sent: None,
@@ -216,7 +289,7 @@ where
 			buffer: Vec::new(),
 			buffer_duration: std::time::Duration::ZERO,
 			pending_sequence: None,
-			recorder: None,
+			member: None,
 			end: None,
 			live_edge: None,
 			start: None,
@@ -226,6 +299,7 @@ where
 			cadence: None,
 			reordered: false,
 			estimator: rendition.estimator(),
+			history: None,
 			bandwidth: None,
 			rendition: Some(Box::new(rendition)),
 			sent: None,
@@ -233,6 +307,8 @@ where
 	}
 
 	/// Publish or replace this track's catalog config.
+	///
+	/// Unset jitter and delay keep their published floor; explicitly lowering either is refused.
 	pub fn set(&mut self, config: R) -> crate::Result<()> {
 		self.rendition.as_mut().ok_or(crate::Error::NotPublished)?.set(config)
 	}
@@ -269,8 +345,12 @@ where
 	}
 
 	fn publish_estimate(&mut self) -> crate::Result<()> {
+		let reading = self.estimator.reading();
+		if let Some(member) = self.member.as_mut() {
+			member.report(reading.interval);
+		}
 		if let Some(rendition) = self.rendition.as_mut() {
-			rendition.estimate(self.estimator.reading())?;
+			rendition.estimate(reading)?;
 		}
 		Ok(())
 	}
@@ -301,20 +381,13 @@ impl Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig> {
 			return self.set(config);
 		}
 		let container = crate::catalog::hang::Container::try_from(&config)?;
-		let hls_hint = self.recorder.as_ref().and_then(|recorder| recorder.declared());
-		let mut next = rendition.fresh(container, self.inner.info().clone(), hls_hint)?;
+		let interval = self.member.as_ref().and_then(|member| member.interval());
+		let mut next = rendition.fresh(container, self.inner.info().clone(), interval)?;
 		next.buffer_duration = self.buffer_duration;
 		next.set(config)?;
 		self.finish()?;
-		// The old name is never published again, so its HLS records end with it. They can only
-		// retire once its recorder is gone.
-		let old = std::mem::replace(self, next);
-		let name = old.name().to_string();
-		drop(old);
-		match &self.rendition {
-			Some(rendition) => rendition.retire(&name),
-			None => Ok(()),
-		}
+		*self = next;
+		Ok(())
 	}
 }
 
@@ -382,18 +455,20 @@ where
 		self.estimator.reorder(delay);
 	}
 
+	/// Mark frames at or before `until` as retained history being caught up, rather than live
+	/// frames written late.
+	///
+	/// History never measures [`delay`](crate::catalog::Estimate::delay) against the other tracks:
+	/// a publisher replaying a backlog behind the live edge would otherwise advertise the backlog's
+	/// age as playout delay for the rest of the track.
+	pub fn history(&mut self, until: moq_net::Timestamp) {
+		self.history = Some(until);
+	}
+
 	/// Record the media duration emitted together by a container importer.
 	pub(crate) fn burst(&mut self, duration: std::time::Duration) -> crate::Result<()> {
 		self.estimator.burst(duration);
 		self.publish_estimate()
-	}
-
-	/// Declare a segment boundary the source drew at `pts`: the HLS records start a segment at the
-	/// first group starting at or after it, instead of pacing segments by duration.
-	pub(crate) fn boundary(&mut self, pts: moq_net::Timestamp) {
-		if let Some(recorder) = self.recorder.as_mut() {
-			recorder.cut(pts);
-		}
 	}
 
 	/// Whether the next [`write`](Self::write) has to be a keyframe, i.e. no group is currently open
@@ -419,19 +494,16 @@ where
 	/// moof+mdat). Zero (the default) flushes each frame immediately.
 	///
 	/// This is the publisher-side counterpart to the consumer's max delay, and the one
-	/// knob here that genuinely *adds* delay.
+	/// knob here that genuinely *adds* delay. A batch's oldest frame reaches the transport
+	/// as late as the batch's span, so the catalog advertises that span as `jitter`.
 	pub fn with_buffer(mut self, duration: std::time::Duration) -> Self {
 		self.buffer_duration = duration;
 		self
 	}
 
-	/// Report each written group through `recorder` into the track's HLS records, whose readers
-	/// count as demand for this track.
-	pub(crate) fn with_recorder(mut self, mut recorder: Option<crate::hls::Recorder>) -> Self {
-		if let Some(recorder) = recorder.as_mut() {
-			recorder.lend(&self.inner);
-		}
-		self.recorder = recorder;
+	/// Report the longest group measured through `member` into the broadcast's join interval.
+	pub(crate) fn with_member(mut self, member: Option<crate::catalog::interval::Member>) -> Self {
+		self.member = member;
 		self
 	}
 
@@ -450,6 +522,22 @@ where
 	pub(crate) fn with_sent(mut self, sent: std::sync::Arc<crate::stats::Sent>) -> Self {
 		self.sent = Some(sent);
 		self
+	}
+
+	/// Report `frames` frames the source produced but never handed to this track, such as ones an
+	/// encoder fell behind on, in its catalog's [`stats`](crate::catalog::Producer::stats).
+	pub fn report_skipped(&self, frames: u64) {
+		if let Some(sent) = &self.sent {
+			sent.skip(frames);
+		}
+	}
+
+	/// Report the encoder's latest target bitrate in its catalog's
+	/// [`stats`](crate::catalog::Producer::stats). The catalog's `bitrate` stays the maximum.
+	pub fn report_bitrate(&self, bitrate: moq_net::bandwidth::Rate) {
+		if let Some(sent) = &self.sent {
+			sent.target(bitrate);
+		}
 	}
 
 	/// Count a written frame. Only video keyframes count as keyframes: elsewhere the bit only
@@ -498,27 +586,54 @@ where
 	/// broadcast. Frames may still dip below the previous group's content: B-frames, open-GOP
 	/// leading pictures, and a keyframe that overlaps the previous group's last frame.
 	pub fn write(&mut self, frame: Frame) -> crate::Result<()> {
-		let floor = match frame.keyframe {
+		self.prepare(frame.timestamp, frame.keyframe)?;
+
+		// Buffer or write the frame.
+		if self.buffer_duration.is_zero() {
+			let group = self.group.as_mut().unwrap();
+			let (timestamp, duration, bytes) = (frame.timestamp, frame.duration, frame.payload.len());
+			let keyframe = frame.keyframe;
+			self.container.write(group, &[frame])?;
+			// Only what the container accepted is measured. A rejected frame (too large for the
+			// group, a timestamp that won't convert) leaves the producer usable, and the estimate's
+			// extrema never fall, so counting one would inflate the catalog for good.
+			self.written(timestamp, duration, bytes, keyframe);
+		} else {
+			// Buffered frames count toward the rates on the way in instead. The flush that eventually
+			// writes them takes the track down with it when it fails, so there is nothing to unwind.
+			// Their place in the write order waits for that flush, which is when the transport has them.
+			self.estimator.rate(frame.timestamp, frame.payload.len());
+			self.observe_end(frame.timestamp, frame.duration);
+			self.buffer.push(frame);
+
+			// Flush if the buffered span has reached the buffer duration.
+			if self.buffered_span() >= self.buffer_duration {
+				self.flush_buffer(None)?;
+			}
+		}
+
+		Ok(())
+	}
+
+	/// Check `timestamp` against the group starts, and open a group for a keyframe.
+	fn prepare(&mut self, timestamp: moq_net::Timestamp, keyframe: bool) -> crate::Result<()> {
+		let floor = match keyframe {
 			true => self.start,
 			false => self.floor,
 		};
 		if let Some(floor) = floor
-			&& timestamp_lt(frame.timestamp, floor)
+			&& timestamp_lt(timestamp, floor)
 		{
-			return Err(super::TimestampRewind {
-				timestamp: frame.timestamp,
-				floor,
-			}
-			.into());
+			return Err(super::TimestampRewind { timestamp, floor }.into());
 		}
 
 		// A keyframe cuts the previous group, using its timestamp as the boundary where the
 		// previous group's content ends, unless it overlaps that content.
-		if frame.keyframe {
+		if keyframe {
 			let overlaps = self
 				.previous_timestamp
-				.is_some_and(|previous| timestamp_lt(frame.timestamp, previous));
-			self.cut((!overlaps).then_some(frame.timestamp))?;
+				.is_some_and(|previous| timestamp_lt(timestamp, previous));
+			self.cut((!overlaps).then_some(timestamp))?;
 			if overlaps {
 				self.cadence = None;
 			}
@@ -526,7 +641,7 @@ where
 
 		// Start a new group if needed; the first frame of a group must be a keyframe.
 		if self.group.is_none() {
-			if !frame.keyframe {
+			if !keyframe {
 				// No group yet and this delta can't anchor one. The caller (e.g. a
 				// mid-stream join) decides whether to skip until the first keyframe.
 				return Err(super::MissingKeyframe.into());
@@ -537,52 +652,35 @@ where
 			};
 
 			self.floor = self.start;
-			self.start = Some(frame.timestamp);
+			self.start = Some(timestamp);
 			self.group = Some(group);
 		}
 
-		// Buffer or write the frame.
-		if self.buffer_duration.is_zero() {
-			let group = self.group.as_mut().unwrap();
-			let (timestamp, duration, bytes) = (frame.timestamp, frame.duration, frame.payload.len());
-			let (sequence, keyframe) = (group.sequence, frame.keyframe);
-			self.container.write(group, &[frame])?;
-			// The HLS records absorb publish failures themselves (they are an optional sidecar), so
-			// reporting can't abort the media write.
-			if let Some(recorder) = self.recorder.as_mut() {
-				recorder.frame(sequence, timestamp);
-			}
-
-			// Only what the container accepted is measured. A rejected frame (too large for the
-			// group, a timestamp that won't convert) leaves the producer usable, and the estimate's
-			// extrema never fall, so counting one would inflate the catalog for good.
-			self.estimator.write(timestamp, bytes);
-			self.count(bytes, keyframe);
-			self.observe_end(timestamp, duration);
-		} else {
-			// Buffered frames count toward the rates on the way in instead. The flush that eventually
-			// writes them takes the track down with it when it fails, so there is nothing to unwind.
-			// Their place in the write order waits for that flush, which is when the transport has them.
-			self.estimator.rate(frame.timestamp, frame.payload.len());
-			self.observe_end(frame.timestamp, frame.duration);
-			self.buffer.push(frame);
-
-			// Flush if the buffered span has reached the buffer duration. Compute
-			// min/max across the buffer rather than first/last: frames within a track
-			// are in *decode* order, and B-frames have non-monotonic PTS, so
-			// `last - first` can shrink as a B-frame lands between two earlier-PTS
-			// frames. The min/max pair captures the actual presentation span.
-			if self.buffer.len() >= 2 {
-				let mut iter = self.buffer.iter().map(|f| std::time::Duration::from(f.timestamp));
-				let first = iter.next().unwrap();
-				let (min, max) = iter.fold((first, first), |(min, max), d| (min.min(d), max.max(d)));
-				if max.saturating_sub(min) >= self.buffer_duration {
-					self.flush_buffer(None)?;
-				}
-			}
-		}
-
 		Ok(())
+	}
+
+	/// Measure and report a frame the group accepted unbuffered.
+	fn written(
+		&mut self,
+		timestamp: moq_net::Timestamp,
+		duration: Option<moq_net::Timestamp>,
+		bytes: usize,
+		keyframe: bool,
+	) {
+		self.estimator.rate(timestamp, bytes);
+		self.order(timestamp);
+		self.count(bytes, keyframe);
+		self.observe_end(timestamp, duration);
+	}
+
+	/// Place a written frame in the write order, unless it is history; see [`Self::history`].
+	fn order(&mut self, timestamp: moq_net::Timestamp) {
+		if self
+			.history
+			.is_none_or(|until| timestamp.as_micros() > until.as_micros())
+		{
+			self.estimator.order(timestamp);
+		}
 	}
 
 	/// Cut the current group, flushing buffered frames and closing it.
@@ -618,14 +716,8 @@ where
 		self.flush_buffer(tail_end)?;
 
 		// Where this group's content stops: the duration marker when we write one, else the
-		// caller's bound, else the furthest point we wrote. The HLS records hear it after the flush,
-		// so a group still wholly buffered has reported its first frame and opened a segment.
+		// caller's bound, else the furthest point we wrote.
 		let reached = marker_at.or(end).max(self.end);
-		if let Some(recorder) = self.recorder.as_mut()
-			&& let Some(end) = reached
-		{
-			recorder.end(end);
-		}
 		if let Some(group) = self.group.as_mut() {
 			self.container.finish_group(group, tail_end)?;
 		}
@@ -668,6 +760,9 @@ where
 		let Ok(end) = moq_net::Timestamp::from_micros(micros) else {
 			return;
 		};
+		if duration.is_some() {
+			self.estimator.reach(end);
+		}
 		if self.end.is_none_or(|prev| end >= prev) {
 			self.end = Some(end);
 			self.last_duration = duration.filter(|duration| !duration.is_zero());
@@ -744,11 +839,24 @@ where
 			)?,
 		}
 		group.finish()?;
-		// The marker is contiguous, so without this the open HLS segment would absorb the pause.
-		if let Some(recorder) = self.recorder.as_mut() {
-			recorder.stop(group.sequence);
-		}
 		Ok(())
+	}
+
+	/// The presentation span of the buffered frames, zero for fewer than two.
+	///
+	/// Taken across the buffer rather than first to last: frames within a track are in *decode*
+	/// order, and B-frames have non-monotonic PTS, so `last - first` can shrink as a B-frame lands
+	/// between two earlier-PTS frames.
+	fn buffered_span(&self) -> std::time::Duration {
+		let mut timestamps = self
+			.buffer
+			.iter()
+			.map(|frame| std::time::Duration::from(frame.timestamp));
+		let Some(first) = timestamps.next() else {
+			return std::time::Duration::ZERO;
+		};
+		let (min, max) = timestamps.fold((first, first), |(min, max), ts| (min.min(ts), max.max(ts)));
+		max - min
 	}
 
 	/// Flush any buffered frames into the current group without closing it.
@@ -790,29 +898,57 @@ where
 		};
 
 		self.container.write(group, &self.buffer)?;
-		if let Some(recorder) = self.recorder.as_mut() {
-			recorder.frame(group.sequence, self.buffer[0].timestamp);
-		}
+		// The batch reaches the transport at once, so its earliest frame is as late as the span to its
+		// latest. That is jitter, not delay: the latest frame isn't late at all.
+		let span = self.buffered_span();
+		self.estimator.burst(span);
 		// Counted only once written: an abort discards the buffer, and those frames were never sent.
-		for frame in &self.buffer {
-			self.estimator.order(frame.timestamp);
+		let mut buffer = std::mem::take(&mut self.buffer);
+		for frame in &buffer {
+			self.order(frame.timestamp);
 			self.count(frame.payload.len(), frame.keyframe);
 		}
-		self.buffer.clear();
+		buffer.clear();
+		self.buffer = buffer;
 
 		Ok(())
 	}
 
 	/// Finish the track, flushing any buffered frames and closing any open group.
 	pub fn finish(&mut self) -> crate::Result<()> {
+		self.end_with(None)
+	}
+
+	/// [`finish`](Self::finish) the track with `err`, for a source that failed after
+	/// producing media worth keeping.
+	///
+	/// Unlike [`abort`](Self::abort), every group written stays readable and keeps being
+	/// served; a reader reaching the end gets `err` instead of the end of stream. Over IETF
+	/// moq-transport, a remote subscriber is told only of a generic internal error.
+	pub fn fail(&mut self, err: moq_net::Error) -> crate::Result<()> {
+		self.end_with(Some(err))
+	}
+
+	fn end_with(&mut self, err: Option<moq_net::Error>) -> crate::Result<()> {
 		self.cut(None)?;
-		self.inner.finish()?;
+		match err {
+			None => self.inner.finish()?,
+			Some(err) => {
+				let next = self
+					.inner
+					.largest()
+					.map_or(0, |largest| largest.group.saturating_add(1));
+				self.inner.finish_at(moq_net::track::Position::group(next), Some(err))?;
+			}
+		}
 		self.publish_estimate()?;
+		// A track that ended before measuring declares what it saw, and no longer holds the join
+		// interval back.
+		if let Some(mut member) = self.member.take() {
+			member.finish(self.estimator.partial_interval());
+		}
 		// A finished track may be kept around, but its media stops holding the other tracks back.
 		self.estimator.discontinuity();
-		// Dropping the recorder stops the open HLS segment, so a track that ends before its catalog
-		// still declares a duration and is advertised.
-		self.recorder = None;
 		Ok(())
 	}
 
@@ -858,11 +994,6 @@ mod tests {
 	use crate::catalog::hang::Container;
 	use moq_net::Timestamp;
 
-	/// A millisecond track: the frames written here carry timestamps.
-	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
-	}
-
 	/// Mint a standalone track for tests via a throwaway broadcast, since tracks are
 	/// born from their broadcast (no public `track::Producer::new`).
 	fn track_producer(
@@ -881,11 +1012,12 @@ mod tests {
 	/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) budget collapses to the live
 	/// edge: history has to be asked for.
 	fn replay() -> moq_net::track::Subscription {
-		moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_DELAY)
+		moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY))
 	}
 
-	/// The media track's full retention window, so readers started after publishing
-	/// can still consume every retained group.
+	/// The media track's full max age, so readers started after publishing
+	/// can still consume every fresh group.
 	const RECORDING_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
 	fn frame(timestamp_us: u64, keyframe: bool) -> Frame {
@@ -947,8 +1079,9 @@ mod tests {
 	fn catalog_write_order_measures_delay_across_renditions() {
 		let (_broadcast, catalog, mut tracks) = renditions(&["fast", "slow"]);
 
-		// The slow rendition writes each frame after the fast one has written 200ms past it.
-		for i in 1..10u64 {
+		// The slow rendition writes each frame after the fast one has written 200ms past it, for longer
+		// than the window delay is measured over.
+		for i in 1..40u64 {
 			tracks[0].write(frame(i * 40_000 + 200_000, true)).unwrap();
 			tracks[1].write(frame(i * 40_000, true)).unwrap();
 		}
@@ -963,10 +1096,90 @@ mod tests {
 		assert_eq!(renditions["slow"].jitter, None, "a constant trail is not jitter");
 	}
 
-	/// Buffered frames reach the transport when the buffer flushes, so that is where they are ordered:
-	/// interleaved by timestamp on the way in, a second-long buffer still trails the other rendition.
 	#[test]
-	fn a_buffered_rendition_is_ordered_when_it_flushes() {
+	fn reconfigure_keeps_floors_until_the_track_identity_changes() {
+		let ms = std::time::Duration::from_millis;
+		for codec in ["avc3.42c01e", "hev1.1.6.L93.B0"] {
+			let (_broadcast, catalog, mut tracks) = renditions(&["fast", "slow"]);
+			let slow = &mut tracks[1];
+			// Start a new identity, as an importer does when it resolves its codec.
+			let mut config = hang::catalog::VideoConfig::new(codec.parse::<hang::catalog::VideoCodec>().unwrap());
+			config.coded_width = Some(640);
+			config.coded_height = Some(360);
+			slow.reconfigure(config.clone()).unwrap();
+			let name = slow.name().to_string();
+			tracks[1].reorder(Timestamp::from_millis(100).unwrap());
+			for i in 1..40u64 {
+				tracks[0].write(frame(i * 40_000 + 200_000, true)).unwrap();
+				tracks[1].write(frame(i * 40_000, true)).unwrap();
+			}
+			tracks[1].cut(None).unwrap();
+			let measured = catalog.snapshot().video.renditions[&name].clone();
+			assert_eq!((measured.jitter, measured.delay), (Some(ms(100)), Some(ms(200))));
+
+			// Match an external catalog edit, such as the HLS conformance fixture's raise.
+			let mut edit = tracks[1].modify().unwrap();
+			edit.jitter = Some(ms(300));
+			edit.delay = Some(ms(400));
+			edit.commit().unwrap();
+			config.coded_width = Some(1280);
+			config.coded_height = Some(720);
+			tracks[1].reconfigure(config.clone()).unwrap();
+			assert_eq!(tracks[1].name(), name);
+			let current = catalog.snapshot().video.renditions[&name].clone();
+			assert_eq!((current.coded_width, current.coded_height), (Some(1280), Some(720)));
+			assert_eq!((current.jitter, current.delay), (Some(ms(300)), Some(ms(400))));
+
+			for (jitter, delay) in [(Some(ms(250)), None), (None, Some(ms(350)))] {
+				let mut lower = config.clone();
+				lower.jitter = jitter;
+				lower.delay = delay;
+				let err = tracks[1].reconfigure(lower).unwrap_err();
+				assert!(matches!(
+					(jitter, err),
+					(Some(_), crate::Error::JitterDecreased) | (None, crate::Error::DelayDecreased)
+				));
+				assert_eq!(catalog.snapshot().video.renditions[&name], current);
+			}
+
+			// A new identity owns a new floor, even when it supplies lower values.
+			config.codec = hang::catalog::VideoCodec::VP8;
+			config.jitter = Some(ms(20));
+			config.delay = Some(ms(30));
+			tracks[1].reconfigure(config).unwrap();
+			assert_ne!(tracks[1].name(), name);
+			let current = catalog.snapshot().video.renditions[tracks[1].name()].clone();
+			assert_eq!((current.jitter, current.delay), (Some(ms(20)), Some(ms(30))));
+		}
+	}
+
+	/// History caught up behind the live edge is not a late write: only what follows it measures delay.
+	#[test]
+	fn history_measures_no_delay() {
+		let (_broadcast, catalog, mut tracks) = renditions(&["live", "replay"]);
+		tracks[0].write(frame(2_000_000, true)).unwrap();
+
+		tracks[1].history(moq_net::Timestamp::from_micros(1_960_000).unwrap());
+		for i in 1..=49u64 {
+			tracks[1].write(frame(i * 40_000, true)).unwrap();
+		}
+		tracks[1].cut(None).unwrap();
+		assert_eq!(catalog.snapshot().video.renditions["replay"].delay, None);
+
+		// Live frames past the history that still trail the other rendition are late writes.
+		for i in 0..40u64 {
+			tracks[0].write(frame(2_040_000 + i * 40_000, true)).unwrap();
+			tracks[1].write(frame(2_020_000 + i * 40_000, true)).unwrap();
+		}
+		tracks[1].cut(None).unwrap();
+		assert_eq!(tracks[1].estimate().delay, Some(std::time::Duration::from_millis(20)));
+	}
+
+	/// Buffered frames reach the transport when the buffer flushes, so a second-long buffer's oldest
+	/// frame trails the other rendition by the batch's span, and its newest by nothing: the span is
+	/// jitter, not delay.
+	#[test]
+	fn a_buffered_rendition_flushes_its_span_as_jitter() {
 		let (_broadcast, catalog, tracks) = renditions(&["live", "buffered"]);
 		let [mut live, buffered] = <[Rendition; 2]>::try_from(tracks).ok().unwrap();
 		let mut buffered = buffered.with_buffer(std::time::Duration::from_secs(1));
@@ -977,8 +1190,11 @@ mod tests {
 		}
 		buffered.cut(None).unwrap();
 
-		let delay = catalog.snapshot().video.renditions["buffered"].delay;
-		assert_eq!(delay, Some(std::time::Duration::from_millis(960)));
+		let buffered = &catalog.snapshot().video.renditions["buffered"];
+		assert_eq!(
+			(buffered.jitter, buffered.delay),
+			(Some(std::time::Duration::from_millis(960)), None)
+		);
 	}
 
 	/// A finished rendition may be kept around, but its media stops holding the others back.
@@ -1185,12 +1401,15 @@ mod tests {
 	/// continuity from adjacent sequences.
 	#[tokio::test]
 	async fn discontinuity_publishes_an_empty_group() {
-		// The resumed clock jumps forty minutes, so both the retention window and the
+		// The resumed clock jumps forty minutes, so both the max age and the
 		// drift budget have to cover it or the pre-discontinuity group reads as ancient.
 		let discontinuity_max_age = std::time::Duration::from_secs(41 * 60);
 		let info = hang::container::track_info(hang::catalog::PRIORITY.audio).with_max_age(discontinuity_max_age);
 		let track = track_producer("test", info);
-		let consumer = track.subscribe(moq_net::track::Subscription::default().with_max_delay(discontinuity_max_age));
+		let consumer = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(discontinuity_max_age)),
+		);
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
 
 		producer.write(frame(0, true)).unwrap();
@@ -1580,74 +1799,6 @@ mod tests {
 		crate::container::fmp4::encode_fragment(info, group).unwrap();
 	}
 
-	/// Each HLS record of `tracks`' `video` as `(group, pts ms, stop)`.
-	async fn hls_records(
-		broadcast: &moq_net::broadcast::Producer,
-		tracks: &crate::hls::Tracks,
-	) -> Vec<(u64, u64, bool)> {
-		tracks.finish();
-		let hls = tracks.hls("video").expect("declared");
-		let mut consumer = crate::hls::Consumer::subscribe(&broadcast.consume(), &hls)
-			.await
-			.unwrap();
-		let mut records = Vec::new();
-		while let Some(event) = consumer.next().await.unwrap() {
-			if let crate::hls::Event::Push { entry, .. } = event {
-				records.push((entry.group, entry.pts.as_micros() as u64 / 1_000, entry.is_stop()));
-			}
-		}
-		records
-	}
-
-	/// A group shorter than the buffer reaches the HLS records only when it closes, and its segment
-	/// still runs to the group's end rather than stopping at its first frame.
-	#[tokio::test]
-	async fn a_wholly_buffered_group_records_its_end() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let tracks = crate::hls::Tracks::new(&broadcast);
-		let recorder = tracks.track("video", crate::hls::Config::default()).unwrap();
-		let track = broadcast.create_track("video", timed()).unwrap();
-		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video))
-			.with_buffer(std::time::Duration::from_secs(10))
-			.with_recorder(Some(recorder));
-
-		producer.write(frame(0, true)).unwrap();
-		producer.write(frame(33_000, false)).unwrap();
-		producer.cut(Some(Timestamp::from_micros(66_000).unwrap())).unwrap();
-		drop(producer);
-
-		assert_eq!(hls_records(&broadcast, &tracks).await, [(0, 0, false), (1, 66, true)]);
-	}
-
-	/// The segment before a discontinuity stops at the marker, not where content resumes.
-	#[tokio::test]
-	async fn a_discontinuity_stops_the_segment_at_the_marker() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let tracks = crate::hls::Tracks::new(&broadcast);
-		let recorder = tracks.track("video", crate::hls::Config::default()).unwrap();
-		let track = broadcast.create_track("video", timed()).unwrap();
-		let mut producer =
-			Producer::new(track, Container::Legacy(crate::container::Kind::Video)).with_recorder(Some(recorder));
-
-		producer.write(frame(0, true)).unwrap();
-		producer.write(frame(33_000, false)).unwrap();
-		producer.cut(Some(Timestamp::from_micros(66_000).unwrap())).unwrap();
-		producer.discontinuity().unwrap();
-		// Resumed 40 minutes later.
-		producer.write(frame(2_400_000_000, true)).unwrap();
-		drop(producer);
-
-		assert_eq!(
-			hls_records(&broadcast, &tracks).await,
-			[
-				(0, 0, false),
-				(1, 66, true),
-				(2, 2_400_000, false),
-				(3, 2_400_000, true)
-			]
-		);
-	}
-
 	#[tokio::test]
 	async fn duration_marker_uses_cadence_not_batching_delay() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
@@ -1718,7 +1869,7 @@ mod tests {
 		assert!(producer.cut(Some(Timestamp::from_micros(10_000).unwrap())).is_err());
 		assert!(!producer.needs_keyframe());
 		assert!(
-			tokio::time::timeout(std::time::Duration::from_millis(1), group.read_frame())
+			kio::clock::timeout(std::time::Duration::from_millis(1), group.read_frame())
 				.await
 				.is_err()
 		);

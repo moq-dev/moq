@@ -89,8 +89,7 @@ fn framing(consumed: &[u8], framed: &ietf::Framed, version: ietf::Version) {
 	}
 	if *id == ietf::SubscribeUpdate::ID {
 		whole::<ietf::Update>(consumed, version);
-		whole::<ietf::NamespaceUpdate<false>>(consumed, version);
-		whole::<ietf::NamespaceUpdate<true>>(consumed, version);
+		whole::<ietf::NamespaceUpdate>(consumed, version);
 	}
 }
 

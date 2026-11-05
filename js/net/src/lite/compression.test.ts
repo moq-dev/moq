@@ -15,6 +15,7 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 		const destination = new Producer();
 		const broadcastPublication = source.createBroadcast(Path.from("compressed"));
 		const broadcast = broadcastPublication.broadcast;
+		const datagrams = broadcast.createDatagrams("data");
 		const track = broadcast.createTrack("data", { compress: true });
 		broadcastPublication.announce();
 		const peers: { abort(): void }[] = [];
@@ -27,7 +28,7 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 					accept({ url, transport: pair.server, publish: publish.consume() }),
 				])),
 			);
-			const announcements = consume.announced();
+			const announcements = consume.routes();
 			try {
 				while ((await announcements.next())?.kind !== "start") {}
 			} finally {
@@ -42,24 +43,28 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 			if (!active) throw new Error("broadcast did not resolve");
 			const remote = active.track("data");
 			expect((await remote.info()).compress).toBe(downstream === ALPN_07_WIP);
-			const reader = remote.subscribe({ maxDelay: Milli(1000) });
+			const reader = remote.subscribe({ delay: { max: Milli(1000) } });
 			const group = track.appendGroup();
 			const payloads = [new Uint8Array(4096).fill(7), new Uint8Array(), new Uint8Array(4096).fill(7)];
 			for (const payload of payloads) group.writeFrame({ payload });
 			group.finish();
 			const received = await reader.recvGroup();
 			if (!received) throw new Error("missing group");
-			expect(received.sequence).toBe(0);
+			expect(received.sequence).toBe(0n);
 			for (const payload of payloads) expect((await received.readFrame())?.payload).toEqual(payload);
 			expect(await received.readFrame()).toBeUndefined();
-			const fetched = await remote.fetchGroup(0);
+			const fetched = await remote.fetchGroup(0n);
 			for (const payload of payloads) expect((await fetched.readFrame())?.payload).toEqual(payload);
 			expect(await fetched.readFrame()).toBeUndefined();
-			// Each datagram has a cold window; no lost or reordered predecessor is needed.
+			// Datagram payloads stay plain beside the compressed stream track.
+			const unreliable = active.datagrams("data");
+			await unreliable.info();
+			while (datagrams.priority.peek() === undefined) await datagrams.priority.changed();
 			for (const payload of [new Uint8Array(100).fill(4), new Uint8Array(100).fill(8)]) {
-				track.appendDatagram(undefined, payload);
-				expect((await reader.recvDatagram())?.payload).toEqual(payload);
+				datagrams.append(undefined, payload);
+				expect((await unreliable.recv())?.payload).toEqual(payload);
 			}
+			unreliable.close();
 			reader.close();
 			fetched.close();
 			received?.close();

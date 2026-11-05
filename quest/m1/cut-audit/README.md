@@ -1,4 +1,4 @@
-# Pre-cut audit findings
+# [S] Pre-cut audit findings
 
 ## Goal
 
@@ -41,30 +41,19 @@ internal and can ship after the cut:
 [resume as producer replacement](/quest/m2/resume-redesign.md),
 [moq-transport request leases](/quest/m2/ietf-request-lease.md),
 [group heads filled in place](/quest/m2/ietf-fill-refill.md),
-[one relay serve path](/quest/m2/relay-serve-path.md),
-[moqsrc pad actors](/quest/m2/moqsrc-pad-actor.md), and
-[publish rendition identity](/quest/m2/publish-publication.md). Other
-redesign evidence went into the quests that already own the mechanism:
+moqsrc pad actors and publish rendition identity (both since landed). The
+[one relay serve path](/quest/m1/session-policy/uring.md) proposal moved into
+m1 on 2026-11-04, as part of moving session policy into moq-net before the
+cut. Other redesign evidence went into the quests that already own the
+mechanism:
 [subscribe ranges](/quest/m1/subscribe-ranges/README.md),
 [drop set](/quest/m1/drop-set.md),
-[per-origin routes](/quest/m1/cluster-routing/routes.md),
+[per-origin routes](/quest/m1/cluster-routing/routes/README.md),
 drafts 14-17 removal (since landed), and
 [buffered playback](/quest/m1/buffered-ascending.md). The audit recommends
-leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
-
-## Required
-
-- [Counted field-less `trun` entries](/quest/m1/cut-audit/fmp4-sample-resolver.md) - a moof of field-less runs cannot materialize millions of sample entries
-- [A reserved group survives a route returning](/quest/m1/cut-audit/reserved-route-return.md) - a route flip A to B to A no longer panics a peeked reader
-- [A description-less AAC rendition means one thing](/quest/m1/cut-audit/aac-description-less.md) - every player and exporter agrees on the frame format
-- [The export clock keeps only the rules admission still needs](/quest/m1/cut-audit/jitter-admission.md) - the clock rules the time and byte admission bound made redundant are measured and removed
-- [Stream-accept loops yield on a per-poll budget](/quest/m1/cut-audit/accept-budget.md) - a peer opening many streams cannot monopolize a session driver
-- [Rust and JS accept the same catalogs](/quest/m1/cut-audit/catalog-parity.md) - one strictness, per rendition, with a shared fixture corpus
+leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts-js.md).
 
 ## Related
 
-- [Release audit findings](/quest/m1/release-audit/README.md) - the 2026-10-22 audit this one follows
-- [Untrusted media parsers have fuzz targets](/quest/m2/media-fuzz.md) - would have caught the media parser findings here
 - [Announce interest streams share one route table](/quest/m2/announce-interest-memory.md) - the audit's inherited announce memory finding
 - [A parked read of a resumed group reads its budget without re-syncing](/quest/m2/recover-budget.md) - measure-first resume cost
-- [Transcode rungs scale off the runtime](/quest/m2/transcode-rungs.md) - the audit's transcode findings

@@ -140,7 +140,7 @@ void main() {
       final publication = origin.createBroadcast(path: 'still-listening');
       try {
         publication.announce(route: MoqAnnounceRoute());
-        expect(await next, isA<StartMoqAnnounceEvent>());
+        expect(await next, isA<PresentMoqAnnounceEvent>());
       } finally {
         publication.broadcast().close();
       }

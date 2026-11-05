@@ -87,8 +87,9 @@ pub fn ingest(data: &[u8]) -> bool {
 	let (session, info, body) = match selector % 2 {
 		0 => {
 			let version = super::LITE_VERSIONS[(*selector as usize / 2) % super::LITE_VERSIONS.len()];
-			// Lite05/06 timestamps may be send times, so their tracks arrive untimed.
-			let timed = timed && version.has_media_time();
+			// The track arrives timed exactly when the wire stamps it: never before Lite05,
+			// always on Lite05/06 (an untimed one carries its send times), as declared after.
+			let timed = version.wire_timescale(timed.then_some(Timescale::MILLI)).is_some();
 			let session = Session::Lite {
 				version,
 				records: settings & 0x10 != 0 && version.has_ietf(),
@@ -220,7 +221,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 			let consumer = producer.consume();
 			let mut group = crate::recv::Group::new(producer);
 			let framing = lite::Framing::new(info, version);
-			let mut ingest = lite::FrameIngest::new(framing, version, records, frame_start);
+			let mut ingest = lite::FrameIngest::new(framing, records, frame_start);
 			let end = drive(body.len(), |waiter| ingest.poll(&mut reader, &mut group, waiter));
 			(end.map(|()| "fin".to_string()), (group, consumer))
 		}

@@ -71,7 +71,7 @@ refused means an error or a counted drop.
 | DSM-CC types (0x0A to 0x0D), 0x86 without `CUEI` | DSM-CC preserved as a `verbatim` section; 0x86 without `CUEI` refused, counted in `refused` | landed |
 | CAT, EMM/ECM, ATSC PSIP, other SI PIDs, unlisted PIDs, TS scrambling | Outside the profile, raw lane; counted in `refused`, unclaimed PIDs when the import reads every program | landed |
 | DVB SI on 0x0010, 0x0011, 0x0012, 0x0014 | Preserved: snapshot track per PID and `table_id` | landed |
-| Program identity, program and ES descriptors | Preserved: descriptors follow each PMT revision; an identity change refuses | landed |
+| Program identity, program and ES descriptors | Preserved: descriptors follow each PMT revision; a PAT naming another identity restarts the import at that PAT under a new instance, and `--program all` refuses it | landed |
 | PMT add, remove, retype; PID reuse | Normalized without a new epoch: a changed or reused PID ends its track and continues under a fresh name, and the export rebuilds the PMT at the next `version_number` | landed |
 | PAT changes: moved PMT PID, programs added or removed | Normalized: followed; a removed program retires, and returns as a new epoch, and a running export moves the PMT behind a PAT at the next `version_number` | landed |
 | Programs without video | Preserved when the PMT names a PCR PID; refused without one | landed |
@@ -93,17 +93,51 @@ measurement (decided 2026-10-28). Re-planned the same day: decode order covers M
 absorbs the release audit's export-reorder quest, and the shared parser lands
 before the open stream-routes and PAT drafts, which rebase onto it.
 
+Decided 2026-11-03 (maintainer, #7221): the TS export counts an unmarked step
+back as a restart only where a reorder bound proves the frame falls outside
+valid reordering: audio, which never reorders, and video that steps back past
+its catalog `reorder` depth, in both cases by more than the export's delay.
+Video that declares no `reorder` is left untouched: no detection, no rewrite,
+no error.
+
+Decided 2026-11-04 (maintainer, design review of
+[moq-dev/moq#7780](https://github.com/moq-dev/moq/pull/7780)):
+
+- ✅ A TS restart carries nothing across. The new import starts with no
+  program map and waits for the source's own PAT/PMT and next keyframe,
+  accepting up to one GOP of extra delay before the new instance announces
+  after an unannounced switch: the event is rare, and a guess across the
+  restart is fragile. Not chosen: a private provisional map on `Restart`
+  read through `Import::after(&restart)`; a source-level `Source` owning
+  PAT/PMT and steps; holding PSI packets until the next clock reading.
+- ✅ A PAT naming another `transport_stream_id` or program restarts the
+  import at that PAT (`Step::Identity`), even before the new source's first
+  PCR. Not chosen: refusing it, which ended the whole publish.
+- ✅ Decoded media parses incrementally, so a config publishes before its PES
+  ends, and the initial reservation releases at the first PTS. This is
+  independent of the handoff.
+
+Decided 2026-11-05 (maintainer, /quest-complete, for
+[moq-dev/moq#7785](https://github.com/moq-dev/moq/pull/7785)): ✅ cross-track
+loss coalescing keeps only each track's last loss. A slower track can flag
+outage A again after a faster track resumed A and then B (three flags for
+two outages); state stays bounded by the track count, and the extra flag
+lands where loss happened. Not chosen: keeping every loss until all tracks
+pass it (unbounded while a track stalls); collapsing losses older than the
+release point minus the delay (more code, and assumes muxing in release
+order). Reversed the same day: the planned
+[PCR jump flag](/quest/m1/ts-reliability/pcr-jump-flag.md) removes the
+per-track loss tracking.
+
 PMT fragmentation (#5220), initial mux-rate measurement (#5287), and
 decoder-time admission (#5306) have landed, as have PSI runs (#5606) and
 catalog linger (#5305).
 
 ## Required
 
-- [A restart keeps its catalog](/quest/m1/ts-reliability/restart-catalog.md) - a restarted import publishes its catalog with its first media
-- [A small step back keeps the TS export's video](/quest/m1/ts-reliability/step-back.md) - the export re-acquires on a sub-group step back from any source instead of dropping its video
-- [Shared PID stats](/quest/m1/ts-reliability/shared-pid-stats.md) - `ts::stats` counts a shared PID once in the shared parser, so its timing counts survive program changes
+- [A CBR import's muxRate can't stick low](/quest/m1/ts-reliability/mux-rate-raise.md) - a stable window above the published rate raises it, and an export's deadline miss names the rate it needed
+- [The TS export flags a PCR only where its clock jumps](/quest/m1/ts-reliability/pcr-jump-flag.md) - a padded skip goes out unflagged; a schedule that skips slots flags the jump
 
 ## Related
 
 - [MSFTS mapping](/quest/m3/msfts-convergence.md) - document the exact equivalence and differences between the carriage modes
-

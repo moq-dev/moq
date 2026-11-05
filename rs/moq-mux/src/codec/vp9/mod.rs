@@ -71,30 +71,33 @@ impl FrameHeader {
 	/// Reads only as far as the frame size (the last field we care about);
 	/// everything after it is left untouched.
 	pub fn parse(data: &[u8]) -> Result<Self> {
-		let mut r = BitReader::new(data);
+		use bitstream_io::BitRead;
 
-		if r.read(2)? != 0b10 {
+		let mut r = bitstream_io::BitReader::endian(data, bitstream_io::BigEndian);
+		let mut read = |bits: u32| r.read_var::<u32>(bits).map_err(|_| Error::Truncated);
+
+		if read(2)? != 0b10 {
 			return Err(Error::InvalidFrameMarker);
 		}
 
-		let profile_low = r.read(1)?;
-		let profile_high = r.read(1)?;
+		let profile_low = read(1)?;
+		let profile_high = read(1)?;
 		let profile = ((profile_high << 1) | profile_low) as u8;
 		if profile == 3 {
-			r.skip(1)?; // reserved_zero
+			read(1)?; // reserved_zero
 		}
 
 		// show_existing_frame: displays a previously decoded frame, no header follows.
-		if r.read(1)? == 1 {
-			r.skip(3)?; // frame_to_show_map_idx
+		if read(1)? == 1 {
+			read(3)?; // frame_to_show_map_idx
 			return Ok(Self {
 				keyframe: false,
 				key: None,
 			});
 		}
 
-		let keyframe = r.read(1)? == 0; // frame_type: 0 = KEY_FRAME
-		r.skip(2)?; // show_frame, error_resilient_mode
+		let keyframe = read(1)? == 0; // frame_type: 0 = KEY_FRAME
+		read(2)?; // show_frame, error_resilient_mode
 
 		if !keyframe {
 			return Ok(Self {
@@ -103,26 +106,26 @@ impl FrameHeader {
 			});
 		}
 
-		if r.read(24)? != SYNC_CODE {
+		if read(24)? != SYNC_CODE {
 			return Err(Error::InvalidSyncCode);
 		}
 
 		// color_config (VP9 spec §6.2.2).
 		let bit_depth = if profile >= 2 {
-			if r.read(1)? == 1 { 12 } else { 10 }
+			if read(1)? == 1 { 12 } else { 10 }
 		} else {
 			8
 		};
-		let color_space = r.read(3)? as u8;
+		let color_space = read(3)? as u8;
 
 		const CS_RGB: u8 = 7;
 		let (subsampling_x, subsampling_y, full_range);
 		if color_space != CS_RGB {
-			full_range = r.read(1)? == 1;
+			full_range = read(1)? == 1;
 			if profile == 1 || profile == 3 {
-				subsampling_x = r.read(1)? == 1;
-				subsampling_y = r.read(1)? == 1;
-				r.skip(1)?; // reserved_zero
+				subsampling_x = read(1)? == 1;
+				subsampling_y = read(1)? == 1;
+				read(1)?; // reserved_zero
 			} else {
 				// Profiles 0 and 2 are 4:2:0 only.
 				(subsampling_x, subsampling_y) = (true, true);
@@ -132,13 +135,13 @@ impl FrameHeader {
 			full_range = true;
 			(subsampling_x, subsampling_y) = (false, false);
 			if profile == 1 || profile == 3 {
-				r.skip(1)?; // reserved_zero
+				read(1)?; // reserved_zero
 			}
 		}
 
 		// frame_size (VP9 spec §6.2.3): each field is `value - 1`.
-		let width = r.read(16)? + 1;
-		let height = r.read(16)? + 1;
+		let width = read(16)? + 1;
+		let height = read(16)? + 1;
 
 		Ok(Self {
 			keyframe: true,
@@ -272,36 +275,6 @@ pub(crate) fn vpcc(vp9: &VP9) -> mp4_atom::VpcC {
 		transfer_characteristics: vp9.transfer_characteristics,
 		matrix_coefficients: vp9.matrix_coefficients,
 		codec_initialization_data: Vec::new(),
-	}
-}
-
-/// Minimal MSB-first bit reader over a byte slice.
-struct BitReader<'a> {
-	data: &'a [u8],
-	bit: usize,
-}
-
-impl<'a> BitReader<'a> {
-	fn new(data: &'a [u8]) -> Self {
-		Self { data, bit: 0 }
-	}
-
-	fn read(&mut self, n: u32) -> Result<u32> {
-		let mut value = 0;
-		for _ in 0..n {
-			let byte = self.bit / 8;
-			if byte >= self.data.len() {
-				return Err(Error::Truncated);
-			}
-			let shift = 7 - (self.bit % 8);
-			value = (value << 1) | u32::from((self.data[byte] >> shift) & 1);
-			self.bit += 1;
-		}
-		Ok(value)
-	}
-
-	fn skip(&mut self, n: u32) -> Result<()> {
-		self.read(n).map(|_| ())
 	}
 }
 

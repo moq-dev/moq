@@ -419,7 +419,7 @@ mod tests {
 
 	#[test]
 	fn key_six_is_opaque_on_every_draft() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for bytes in [
 				Bytes::from_static(&[0x06, 42]),
 				Bytes::from_static(&[0x0b, 2, 0x06, 42]),
@@ -532,7 +532,7 @@ mod tests {
 	/// in the units the egress declares, not the ones it arrived in.
 	#[test]
 	fn mutable_timestamps_follow_the_egress_units() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let bytes = Bytes::from_static(&[0x10, 42, 0x20, 7]);
 			let decoded = read(&bytes, version, Some(Timescale::MILLI)).unwrap();
 			let written = write(
@@ -816,7 +816,7 @@ mod compression_tests {
 	}
 	#[test]
 	fn sizes_are_known_and_unknown_properties_survive() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let unknown = property(0x8800, 7);
 			let wire = compression(serialize([&unknown], version).unwrap(), version, Some(123)).unwrap();
 			let decoded = read(&wire.into(), version, None).unwrap();
@@ -829,7 +829,7 @@ mod compression_tests {
 	}
 	#[test]
 	fn a_status_cannot_declare_an_inflated_size() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let size = property(super::super::flate::INFLATED, 0);
 			for value in [
 				size.clone(),
@@ -849,7 +849,7 @@ mod compression_tests {
 
 	#[test]
 	fn sealed_sizes_are_forwarded_or_refused_without_rewriting() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let sealed = Property {
 				id: 0x0b,
 				value: Value::Bytes(

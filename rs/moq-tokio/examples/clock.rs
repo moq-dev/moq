@@ -112,14 +112,14 @@ async fn main() -> anyhow::Result<()> {
 				tokio::select! {
 					Some(event) = announced.next() => match event {
 						// A restart is a new broadcast: subscribe to it afresh.
-						announce::Event::Start(update) | announce::Event::Update(update) | announce::Event::Restart(update) => {
+						announce::Event::Present(update) => {
 							tracing::info!(broadcast = %update.prefix, "broadcast is online, subscribing to track");
 							let broadcast = consumer.request(&update.prefix, None).await?;
 							let track = broadcast
 								.track(&track)?.subscribe(None).await?;
 							clock = Some(Subscriber::new(track));
 						}
-						announce::Event::End(update) => {
+						announce::Event::Absent(update) => {
 							tracing::warn!(broadcast = %update.prefix, "broadcast is offline, waiting...");
 						}
 					},
@@ -163,7 +163,7 @@ impl Publisher {
 			let next = next.with_second(0).unwrap().with_nanosecond(0).unwrap();
 
 			let delay = (next - now).to_std().unwrap();
-			moq_clock::sleep(delay).await;
+			kio::clock::sleep(delay).await;
 
 			now = next; // just assume we didn't undersleep
 		}
@@ -183,7 +183,7 @@ impl Publisher {
 			let next = next.with_nanosecond(0).unwrap();
 
 			let delay = (next - now).to_std().unwrap();
-			moq_clock::sleep(delay).await;
+			kio::clock::sleep(delay).await;
 
 			// Get the current time again to check if we overslept
 			let actual = Utc::now();

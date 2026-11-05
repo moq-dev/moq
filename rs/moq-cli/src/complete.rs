@@ -20,8 +20,8 @@ use std::future::Future;
 use std::time::Duration;
 
 use anyhow::Context;
-use moq_clock::Instant;
-use moq_clock::timeout_at;
+use kio::clock::Instant;
+use kio::clock::timeout_at;
 #[cfg(feature = "capture")]
 use usage_rs::complete::{Candidate, CompleteCtx, CompletionFuture};
 use usage_rs::complete::{CompletionOverlay, CompletionRequest, Shell, render};
@@ -425,7 +425,7 @@ mod tests {
 		if !test_env::Env::without(&["MOQ_CONNECT"]).isolate() {
 			return;
 		}
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 
 		let origin = moq_tokio::origin::spawn();
 		let _alpha = origin.create_broadcast("alpha").expect("alpha");

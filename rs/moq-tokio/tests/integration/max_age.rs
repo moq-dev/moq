@@ -100,7 +100,7 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 				.next()
 				.await
 				.ok_or_else(|| anyhow::anyhow!("announcements closed"))?,
-			moq_net::announce::Event::Start(_)
+			moq_net::announce::Event::Present(_)
 		) {}
 		let front = consumer.request("age", None).await?;
 		for (i, age) in AGES.into_iter().enumerate() {
@@ -126,7 +126,7 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 #[tokio::test]
 async fn max_age_relay_rust() {
 	for version in ["moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
-		tokio::time::timeout(TIMEOUT, relay(version.parse().unwrap(), None))
+		kio::clock::timeout(TIMEOUT, relay(version.parse().unwrap(), None))
 			.await
 			.unwrap()
 			.unwrap();
@@ -138,7 +138,7 @@ async fn max_age_relay_rust() {
 async fn max_age_relay_javascript() {
 	for version in ["moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		for publish in [false, true] {
-			tokio::time::timeout(TIMEOUT, relay(version.parse().unwrap(), Some(publish)))
+			kio::clock::timeout(TIMEOUT, relay(version.parse().unwrap(), Some(publish)))
 				.await
 				.unwrap()
 				.unwrap();

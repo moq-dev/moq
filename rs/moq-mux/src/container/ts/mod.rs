@@ -23,7 +23,7 @@
 //! demultiplexing cannot carry (TS-level scrambling, PSI and SI as authored), and
 //! [`Release`] writes that track back out on a fixed delay.
 
-mod adts;
+use crate::codec::aac::adts;
 mod damage;
 mod demux;
 mod export;

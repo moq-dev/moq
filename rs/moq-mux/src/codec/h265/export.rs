@@ -40,12 +40,8 @@ impl<S: Stream> Export<S> {
 		self
 	}
 
-	/// Wait for the next Annex B access unit, or `None` once the export ends.
-	pub async fn next(&mut self) -> crate::Result<Option<Bytes>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for the next Annex B access unit, or `None` once the export ends.
+	/// Get the next Annex B access unit, or `None` once the export ends.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Bytes>>> {
 		self.inner.poll_next(waiter)
 	}
@@ -249,7 +245,7 @@ mod tests {
 	}
 	/// The next chunk, required to be ready without another frame arriving.
 	async fn next<S: Stream>(export: &mut Export<S>) -> Bytes {
-		tokio::time::timeout(std::time::Duration::from_millis(1), export.next())
+		kio::clock::timeout(std::time::Duration::from_millis(1), export.next())
 			.await
 			.expect("a frame is ready")
 			.unwrap()
@@ -306,7 +302,7 @@ mod tests {
 
 		set_enabled(&mut live, true);
 		assert!(
-			tokio::time::timeout(std::time::Duration::from_millis(1), export.next())
+			kio::clock::timeout(std::time::Duration::from_millis(1), export.next())
 				.await
 				.is_err(),
 			"the stale group the primary stopped on is not replayed"

@@ -4,16 +4,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use std::task::Poll;
+use std::task::{Poll, ready};
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_net::stats::{Presence, Registry, Report, Tier, Traffic, TrafficEntry};
-use moq_net::{Epoch, Path, broadcast, kio, origin, track};
+use moq_net::{Path, broadcast, kio, origin, track};
 use serde::Serialize;
-use web_async::spawn;
 
 use crate::{
-	Prefix, Totals, Usage, parse_prefix_track, parse_presence_track, prefix_track, presence_track, totals_track,
+	Epoch, Prefix, Totals, Usage, parse_prefix_track, parse_presence_track, prefix_track, presence_track, totals_track,
 };
 
 /// Settings for a [`Producer`]. Construct with [`Config::new`] and chain
@@ -22,17 +21,17 @@ use crate::{
 /// to [`Producer::new`].
 ///
 /// With no origin set the resulting producer is a no-op: its registry is
-/// disabled (bumps are dropped) and no task spawns. Call
+/// disabled (bumps are dropped) and its [`Publisher`] returns at once. Call
 /// [`Config::with_origin`] to publish.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct Config {
 	/// Origin the stats broadcast is created on.
-	/// When `None`, [`Producer::new`] spawns no task and publishes nothing.
+	/// When `None`, [`Producer::new`] publishes nothing.
 	pub origin: Option<origin::Producer>,
 	/// Top-level path stats are published under (default `.stats`). The full
 	/// advertised path is `<prefix>/node/<node>` (or `<prefix>/node` when
-	/// `node` is unset), announced under a fresh [`Epoch`] each time. Also the
+	/// `node` is unset), announced under a fresh [`Instance`](moq_net::Instance) each time. Also the
 	/// registry's exclude prefix, so serving a stats broadcast doesn't generate
 	/// more stats.
 	pub prefix: Path,
@@ -54,7 +53,7 @@ pub struct Config {
 	/// first segment, and larger values include more leading segments. A
 	/// group's track is listed while its group has live traffic, plus the
 	/// [`Self::linger`], and a group returning after that is a new track
-	/// instance with a new [`GroupFrame::epoch`](crate::GroupFrame::epoch),
+	/// run with a new [`GroupFrame::epoch`](crate::GroupFrame::epoch),
 	/// counted from zero.
 	pub depth: usize,
 	/// How long a group's track stays listed after its group's last entry
@@ -142,27 +141,26 @@ struct Keepalive;
 /// Publishes a [`Registry`]'s counters as a stats broadcast. Cheap to clone.
 ///
 /// [`Producer::new`] builds the registry itself (wiring the config's prefix as
-/// its exclude prefix) and spawns the publish task; hand sessions tier-scoped
-/// handles via [`Registry::tier`] on [`Producer::registry`]. The task drains
-/// the registry every interval and writes a frame per changed track, running
-/// until the last [`Producer`] clone is dropped.
+/// its exclude prefix) and returns the [`Publisher`] to run; hand sessions
+/// tier-scoped handles via [`Registry::tier`] on [`Producer::registry`]. The
+/// publisher drains the registry every interval and writes a frame per changed
+/// track, running until the last [`Producer`] clone is dropped.
 #[derive(Clone)]
 pub struct Producer {
 	registry: Registry,
-	/// `None` for a no-op producer (config had no origin): no task was spawned
+	/// `None` for a no-op producer (config had no origin): nothing publishes
 	/// and the registry is disabled.
 	_keepalive: Option<Arc<Keepalive>>,
 }
 
 impl Producer {
-	/// Build a producer from `config`.
+	/// Build a producer from `config`, with the [`Publisher`] its caller runs.
 	///
-	/// When `config` has an origin, this spawns the publish task immediately
-	/// and announces the stats broadcast; the task runs until the last
-	/// [`Producer`] clone is dropped. With no origin the producer is a no-op
-	/// (its registry is disabled, nothing is published) and no task spawns, so
-	/// it's safe to build outside an async runtime.
-	pub fn new(config: Config) -> Self {
+	/// The publisher announces the stats broadcast once it runs, and publishes
+	/// until the last [`Producer`] clone is dropped. Spawning it is the caller's,
+	/// so the caller decides what a panic in it ends. With no origin the producer
+	/// is a no-op: its registry is disabled and the publisher returns at once.
+	pub fn new(config: Config) -> (Self, Publisher) {
 		let Config {
 			origin,
 			prefix,
@@ -177,10 +175,11 @@ impl Producer {
 		let node = node.filter(|p| !p.is_empty());
 
 		let Some(origin) = origin else {
-			return Self {
+			let producer = Self {
 				registry: Registry::disabled(),
 				_keepalive: None,
 			};
+			return (producer, Publisher(Run::Done));
 		};
 
 		// The prefix is a literal path, so its subtree claim cannot fail.
@@ -196,12 +195,16 @@ impl Producer {
 			linger,
 			interval,
 		};
-		spawn(task.run(Arc::downgrade(&keepalive)));
-
-		Self {
+		let publisher = Publisher(Run::Idle(
+			Box::new(task),
+			Arc::downgrade(&keepalive),
+			tracing::Span::current(),
+		));
+		let producer = Self {
 			registry,
 			_keepalive: Some(keepalive),
-		}
+		};
+		(producer, publisher)
 	}
 
 	/// The registry this producer drains. Hand sessions tier-scoped handles via
@@ -209,6 +212,99 @@ impl Producer {
 	/// Disabled (all bumps no-op) for a no-op producer.
 	pub fn registry(&self) -> &Registry {
 		&self.registry
+	}
+}
+
+/// The publish task of one [`Producer`], returned by [`Producer::new`].
+#[must_use = "nothing is published until the publisher runs"]
+pub struct Publisher(Run);
+
+/// Where a [`Publisher`] is in its run.
+enum Run {
+	/// Not polled yet: announces on the first poll.
+	Idle(Box<Task>, Weak<Keepalive>, tracing::Span),
+	Running(Box<Running>),
+	Done,
+}
+
+/// A running publisher's drain and the interval it drains on.
+struct Running {
+	drain: Drain,
+	ticker: kio::clock::Interval,
+	weak: Weak<Keepalive>,
+	span: tracing::Span,
+}
+
+impl Publisher {
+	/// Publish until the last [`Producer`] clone drops; at once for a no-op producer.
+	///
+	/// The broadcast is announced on the first poll and ends when this resolves or
+	/// the publisher drops.
+	pub fn poll_run(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if let Run::Idle(..) = self.0 {
+			let Run::Idle(task, weak, span) = std::mem::replace(&mut self.0, Run::Done) else {
+				unreachable!("matched above");
+			};
+			if let Some(running) = Running::start(*task, weak, span) {
+				self.0 = Run::Running(Box::new(running));
+			}
+		}
+		let Run::Running(running) = &mut self.0 else {
+			return Poll::Ready(());
+		};
+		if running.poll_run(waiter).is_pending() {
+			return Poll::Pending;
+		}
+		// Dropping the drain ends the broadcast, as dropping the publisher does.
+		self.0 = Run::Done;
+		Poll::Ready(())
+	}
+
+	/// Publish until the last [`Producer`] clone drops; at once for a no-op producer.
+	/// See [`Self::poll_run`].
+	#[cfg(feature = "async")]
+	pub async fn run(mut self) {
+		kio::wait(|waiter| self.poll_run(waiter)).await
+	}
+}
+
+impl Running {
+	/// Announce the stats broadcast, unless every [`Producer`] clone is already
+	/// gone or the origin refused it.
+	fn start(task: Task, weak: Weak<Keepalive>, span: tracing::Span) -> Option<Self> {
+		// A publisher first run after its last producer dropped announces nothing,
+		// so it cannot replace a newer producer's broadcast on the same path.
+		if weak.strong_count() == 0 {
+			return None;
+		}
+		let (drain, ticker) = span.in_scope(|| {
+			let interval = task.interval;
+			let drain = Drain::new(task)?;
+			let mut ticker = kio::clock::interval(interval);
+			ticker.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Delay);
+			Some((drain, ticker))
+		})?;
+		Some(Self {
+			drain,
+			ticker,
+			weak,
+			span,
+		})
+	}
+
+	/// Write a frame per drain, until every [`Producer`] clone is dropped.
+	fn poll_run(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let _entered = self.span.enter();
+		loop {
+			// Scheduled instants are at least an interval apart, even after a late tick,
+			// so each drain gets an interval of its own to open its groups in.
+			let scheduled = ready!(self.ticker.poll_tick(&mut waiter.context()));
+			if self.weak.upgrade().is_none() {
+				return Poll::Ready(());
+			}
+			self.drain.collect();
+			self.drain.publish(scheduled);
+		}
 	}
 }
 
@@ -221,34 +317,6 @@ struct Task {
 	depth: usize,
 	linger: Duration,
 	interval: Duration,
-}
-
-impl Task {
-	/// Publishes the stats broadcast and writes a frame per drain. Runs until
-	/// every [`Producer`] clone is dropped (`weak.upgrade()` returns `None`).
-	async fn run(self, weak: Weak<Keepalive>) {
-		let interval = self.interval;
-		let Some(mut drain) = Drain::new(self) else {
-			return;
-		};
-
-		let mut ticker = moq_clock::interval(interval);
-		ticker.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Delay);
-
-		loop {
-			// Scheduled instants are at least an interval apart, even after a late tick,
-			// so each drain gets an interval of its own to open its groups in.
-			let scheduled = ticker.tick().await;
-
-			if weak.upgrade().is_none() {
-				drain.finish();
-				return;
-			}
-
-			drain.collect();
-			drain.publish(scheduled);
-		}
-	}
 }
 
 /// The publish task's state, kept across drains so a steady-state drain
@@ -281,7 +349,7 @@ impl Drain {
 	/// `None` if the origin refused it.
 	fn new(task: Task) -> Option<Self> {
 		let node = NodePublisher::create(&task)?;
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		Some(Self {
 			task,
 			node,
@@ -317,10 +385,6 @@ impl Drain {
 		// A label's presence track and a prefix's track exist only while
 		// requested. See `serve_requests`.
 		self.node.serve_requests(&self.report, self.tick, stamp);
-	}
-
-	fn finish(self) {
-		self.node.finish();
 	}
 
 	/// The largest group snapshot still held, and the largest group frame this
@@ -538,8 +602,8 @@ impl<V: Serialize> Output<V> {
 		}
 	}
 
-	/// Whether any consumer exists.
-	fn is_used(&self) -> bool {
+	/// Whether anyone wants the output.
+	fn is_wanted(&self) -> bool {
 		self.snapshot.demand().wanted().is_some()
 	}
 
@@ -647,7 +711,7 @@ fn tier_entry<'a, V: Default>(tiers: &'a mut HashMap<Tier, V>, tier: &Tier) -> &
 }
 
 /// The always-present `totals.json` track and its per-tier sums. Never pruned
-/// while the broadcast lives, so it is cumulative within the epoch.
+/// while the broadcast lives, so it is cumulative within the broadcast instance.
 struct TotalsTrack {
 	output: Output<Totals>,
 	sums: Cumulative<Totals>,
@@ -763,7 +827,7 @@ impl PrefixTrack {
 }
 
 /// One group's track: listed from the group's first entry until it lingers
-/// empty, then finished. A return after that is a new instance under a new
+/// empty, then finished. A return after that is a new run under a new
 /// epoch, counted from zero, so it holds no state for groups that left.
 struct GroupTrack {
 	/// The track name, for logs.
@@ -779,10 +843,8 @@ struct GroupTrack {
 
 /// A group track's frame, byte-identical to a [`GroupFrame`](crate::GroupFrame)
 /// once sorted.
-#[serde_with::serde_as]
 #[derive(Serialize)]
 struct GroupBody {
-	#[serde_as(as = "serde_with::DisplayFromStr")]
 	epoch: Epoch,
 	tiers: Frame<GroupTier>,
 }
@@ -819,8 +881,7 @@ impl GroupTrack {
 			name,
 			snapshot: Snapshot::new(track, config()),
 			body: GroupBody {
-				// A new instance of the name: readers keep its counters apart from
-				// an earlier instance's.
+				// A new counter run: readers keep its counters apart from an earlier epoch's.
 				epoch: Epoch::mint(),
 				tiers: Frame::default(),
 			},
@@ -942,9 +1003,9 @@ impl NodePublisher {
 		let advertised = advertised_path(&task.prefix, task.node.as_ref())
 			.inspect_err(|err| tracing::warn!(%err, "stats: node path too long"))
 			.ok()?;
-		// A fresh epoch per announcement: a restart is a new broadcast, so no relay
+		// A fresh instance per announcement: a restart is a new broadcast, so no relay
 		// resumes it from groups cached under the old one.
-		let route = origin::Route::default().with_epoch(Epoch::mint());
+		let route = origin::Route::default();
 		let broadcast = match task.origin.publish(&advertised, route) {
 			Ok(broadcast) => broadcast,
 			Err(err) => {
@@ -1126,14 +1187,14 @@ impl NodePublisher {
 		// Reclaim before adopting, so a request for a track just reclaimed is
 		// served again by this very drain.
 		self.presence.retain(|_, track| {
-			if track.output.is_used() {
+			if track.output.is_wanted() {
 				return true;
 			}
 			track.output.finish();
 			false
 		});
 		self.prefixes.retain(|_, track| {
-			if track.output.is_used() {
+			if track.output.is_wanted() {
 				return true;
 			}
 			track.output.finish();
@@ -1237,9 +1298,13 @@ impl NodePublisher {
 		track.publish(tick, stamp);
 		self.prefixes.insert(path.as_str().to_string(), track);
 	}
+}
 
-	/// Deliberately end the broadcast: finish every track, then close the broadcast.
-	fn finish(mut self) {
+/// The publish task ending, when the last producer drops or when its future is
+/// cancelled, is a deliberate end of the broadcast, never a dropped track.
+impl Drop for NodePublisher {
+	/// Finish every track, then close the broadcast.
+	fn drop(&mut self) {
 		self.totals.output.finish();
 		for track in self.presence.values_mut() {
 			track.output.finish();
@@ -1306,6 +1371,13 @@ fn advertised_path(prefix: &Path, node: Option<&Path>) -> Result<Path, moq_net::
 	}
 }
 
+/// Run a test producer's publisher on the ambient runtime.
+#[cfg(test)]
+pub(crate) fn spawned((producer, publisher): (Producer, Publisher)) -> Producer {
+	tokio::spawn(publisher.run());
+	producer
+}
+
 #[cfg(test)]
 mod tests {
 	/// The group budget every stats track has under test, small enough that a test
@@ -1320,7 +1392,7 @@ mod tests {
 	/// A drain at the current instant, numbered `group`.
 	fn stamp(group: u64) -> Stamp {
 		Stamp {
-			at: moq_clock::now(),
+			at: kio::clock::now(),
 			group,
 		}
 	}
@@ -1404,12 +1476,12 @@ mod tests {
 			.with_versions(version.into())
 			.with_publisher(upstream.consume().with_hidden(true));
 		let client = async {
-			let (session, driver) = client.connect(moq_clock::now(), client_transport).await.unwrap();
+			let (session, driver) = client.connect(kio::clock::now(), client_transport).await.unwrap();
 			tokio::spawn(moq_net::time::run(driver));
 			session
 		};
 		let server = async {
-			let (session, driver) = server.accept(moq_clock::now(), server_transport).await.unwrap();
+			let (session, driver) = server.accept(kio::clock::now(), server_transport).await.unwrap();
 			tokio::spawn(moq_net::time::run(driver));
 			session
 		};
@@ -1454,7 +1526,7 @@ mod tests {
 			drain.collect();
 			drain.publish(Instant::now());
 			let consumer = edge.consume().with_hidden(true);
-			let mut events = consumer.announced();
+			let mut events = consumer.routes();
 			let (route, active) = next_update(&mut events).await.unwrap();
 			assert!(active);
 			assert_eq!(route.prefix.as_str(), ".stats/node");
@@ -1463,9 +1535,9 @@ mod tests {
 			let mut previous = None;
 			for (reading, delta) in [(40, 11), (1_000, 7)] {
 				store(reading);
-				let subscriber = pumping(&mut drain, broadcast.track(&name).unwrap().subscribe(None))
-					.await
-					.unwrap();
+				let track = broadcast.track(&name).unwrap();
+				let mut reader = moq_json::snapshot::Consumer::<PresenceFrame>::new(track.clone(), Default::default());
+				pumping(&mut drain, track.info()).await.unwrap();
 				let mut cursor = pumping(&mut drain, broadcast.track(&name).unwrap().subscribe(None))
 					.await
 					.unwrap();
@@ -1475,7 +1547,6 @@ mod tests {
 				}
 				drop(group);
 				drop(cursor);
-				let mut reader = moq_json::snapshot::Consumer::<PresenceFrame>::new(subscriber, Default::default());
 				let initial = pumping(&mut drain, reader.next()).await.unwrap().unwrap().value;
 				assert_eq!(
 					(initial[""].wire_tx, initial[""].wire_rx),
@@ -1532,7 +1603,7 @@ mod tests {
 			assert_eq!(
 				(total.wire_tx, total.wire_rx),
 				(1_307, 2_614),
-				"epoch totals never reset on re-hold"
+				"broadcast totals never reset on re-hold"
 			);
 		}
 	}
@@ -1553,13 +1624,7 @@ mod tests {
 		};
 		publish(vec![Path::from_static("small")], 1);
 
-		let track = consumer
-			.track("t.json")
-			.unwrap()
-			.subscribe(None)
-			.now_or_never()
-			.unwrap()
-			.unwrap();
+		let track = consumer.track("t.json").unwrap();
 		let mut reader = moq_json::snapshot::Consumer::<Value>::new(track, Default::default());
 		let mut next = || {
 			reader
@@ -1600,30 +1665,31 @@ mod tests {
 	}
 
 	/// The next route and whether it is active.
-	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::announce::Event::Start(route)
-			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route) => Some((route, true)),
-			moq_net::announce::Event::End(route) => Some((route, false)),
+			moq_net::origin::RouteEvent::Start(route)
+			| moq_net::origin::RouteEvent::Update(route)
+			| moq_net::origin::RouteEvent::Restart(route)
+			| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 		}
 	}
 
 	use std::collections::BTreeMap;
 
 	use moq_net::stats::{Registry, Tier};
-	use moq_net::{Timestamp, announce, broadcast, track};
+	use moq_net::{Instance, Timestamp, broadcast, track};
 
 	use super::*;
 	use crate::{PrefixFrame, PresenceFrame, TotalsFrame};
 
 	fn test_producer(node: Option<&str>) -> (Producer, origin::Producer) {
 		let origin = produce_origin();
-		let producer = Producer::new(
+		let producer = crate::produce::spawned(Producer::new(
 			Config::new()
 				.with_origin(origin.clone())
 				.with_node(node.map(|s| Path::try_from(s.to_string()).unwrap())),
-		);
+		));
 		(producer, origin)
 	}
 
@@ -1631,7 +1697,7 @@ mod tests {
 	/// announce (bumping the `_closed` counters).
 	#[allow(dead_code, reason = "held for their drop, never read")]
 	struct Feed {
-		announced: announce::Consumer,
+		announced: origin::Routes,
 		source: origin::Publication,
 		consumer: broadcast::Consumer,
 		sub: Option<track::Subscriber>,
@@ -1656,7 +1722,7 @@ mod tests {
 		// Egress (publisher side) is tagged; the local publisher stays untagged.
 		let egress = origin.consume().with_stats(ctx);
 
-		let mut announced = egress.announced();
+		let mut announced = egress.routes();
 		let source = origin.create_broadcast(path).expect("create_broadcast");
 		source.announce(origin::Route::default()).expect("announce");
 		let producer = source.create_track("video", timed()).expect("create_track");
@@ -1700,7 +1766,7 @@ mod tests {
 
 	/// Awaits the stats announce and returns its broadcast.
 	async fn announced(origin: &origin::Producer) -> (String, moq_net::broadcast::Consumer) {
-		let mut consumer = origin.consume().with_hidden(true).announced();
+		let mut consumer = origin.consume().with_hidden(true).routes();
 		tokio::time::advance(Duration::from_millis(1)).await;
 		let (update, active) = next_update(&mut consumer).await.expect("expected announce");
 		assert!(active);
@@ -1722,10 +1788,7 @@ mod tests {
 	async fn read_group(broadcast: &moq_net::broadcast::Consumer, group: &str) -> crate::GroupFrame {
 		let track = broadcast
 			.track(&crate::group_track(moq_net::Path::new(group).unwrap()))
-			.expect("track")
-			.subscribe(None)
-			.await
-			.expect("subscribe");
+			.expect("track");
 		let mut reader = moq_json::snapshot::Consumer::<crate::GroupFrame>::new(track, Default::default());
 		reader.latest().await.expect("read").expect("frame").value
 	}
@@ -1745,7 +1808,7 @@ mod tests {
 	struct Reader<T>(moq_json::snapshot::Consumer<T>);
 
 	impl<T: serde::de::DeserializeOwned + Unpin> Reader<T> {
-		fn new(track: track::Subscriber) -> Self {
+		fn new(track: track::Consumer) -> Self {
 			Self(moq_json::snapshot::Consumer::new(track, Default::default()))
 		}
 
@@ -1772,24 +1835,15 @@ mod tests {
 		broadcast: &moq_net::broadcast::Consumer,
 		name: &str,
 	) -> Reader<T> {
-		Reader::new(
-			broadcast
-				.track(name)
-				.expect("track")
-				.subscribe(None)
-				.await
-				.expect("subscribe"),
-		)
+		let track = broadcast.track(name).expect("track");
+		let reader = Reader::new(track.clone());
+		track.info().await.expect("subscribe");
+		reader
 	}
 
 	/// The latest buffered totals frame.
 	async fn read_totals(broadcast: &moq_net::broadcast::Consumer) -> TotalsFrame {
-		let track = broadcast
-			.track(crate::TOTALS)
-			.expect("track")
-			.subscribe(None)
-			.await
-			.expect("subscribe");
+		let track = broadcast.track(crate::TOTALS).expect("track");
 		let mut reader = moq_json::snapshot::Consumer::<TotalsFrame>::new(track, Default::default());
 		reader.latest().await.expect("read").expect("frame").value
 	}
@@ -1839,7 +1893,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_late_drain_leaves_the_next_its_own_interval() {
 		// Schedule the drains a millisecond before an interval boundary.
-		let phase = Duration::from(Timestamp::from(moq_clock::now())).as_millis() % 1000;
+		let phase = Duration::from(Timestamp::from(kio::clock::now())).as_millis() % 1000;
 		tokio::time::advance(Duration::from_millis(((1999 - phase) % 1000) as u64)).await;
 
 		let origin = produce_origin();
@@ -1895,7 +1949,7 @@ mod tests {
 			interval,
 		})
 		.unwrap();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		for phase in (0..1500).step_by(100) {
 			let at = start + Duration::from_micros(phase);
 			assert_eq!(
@@ -1908,53 +1962,53 @@ mod tests {
 
 	/// A producer on `origin` publishing as node `sjc` at depth 0.
 	fn node_producer(origin: &origin::Producer) -> Producer {
-		Producer::new(
+		crate::produce::spawned(Producer::new(
 			Config::new()
 				.with_origin(origin.clone())
 				.with_node(Path::from_static("sjc")),
-		)
+		))
 	}
 
-	/// A producer restarted on the same origin ends its old epoch and announces
+	/// A producer restarted on the same origin ends its old instance and announces
 	/// the same path under a new one.
 	#[tokio::test(start_paused = true)]
-	async fn restarted_producer_announces_a_new_epoch() {
+	async fn restarted_producer_announces_a_new_instance() {
 		let origin = produce_origin();
-		let mut events = origin.consume().with_hidden(true).announced();
+		let mut events = origin.consume().with_hidden(true).routes();
 
 		let first = node_producer(&origin);
 		drive_tick().await;
-		let [(path, true, before)] = &take_epochs(&mut events)[..] else {
+		let [(path, true, before)] = &take_instances(&mut events)[..] else {
 			panic!("expected one announce");
 		};
 		assert_eq!(path, ".stats/node/sjc");
 
 		drop(first);
 		drive_tick().await;
-		assert_eq!(take_epochs(&mut events), [(path.clone(), false, before.clone())]);
+		assert_eq!(take_instances(&mut events), [(path.clone(), false, before.clone())]);
 
 		let _second = node_producer(&origin);
 		drive_tick().await;
-		let [(after_path, true, after)] = &take_epochs(&mut events)[..] else {
+		let [(after_path, true, after)] = &take_instances(&mut events)[..] else {
 			panic!("expected one announce");
 		};
 		assert_eq!(after_path, path);
-		assert!(after > before, "a restart mints a newer epoch");
+		assert_ne!(after, before, "a restart mints a new instance");
 	}
 
 	/// A restart while the old instance is still announced (a route the mesh
-	/// has not withdrawn yet) takes the path at once: the newer epoch restarts
+	/// has not withdrawn yet) takes the path at once: the newer instance restarts
 	/// it, so a reader re-requests the new broadcast instead of stalling on the
 	/// old one, while the old subscription stays on the old instance.
 	#[tokio::test(start_paused = true)]
 	async fn restart_replaces_a_still_announced_instance() {
 		let origin = produce_origin();
-		let mut events = origin.consume().with_hidden(true).announced();
+		let mut events = origin.consume().with_hidden(true).routes();
 
 		let first = node_producer(&origin);
 		let _f1 = feed(first.registry(), Tier::default(), "foo/bar", true, 1, 100).await;
 		drive_tick().await;
-		let [(path, true, before)] = &take_epochs(&mut events)[..] else {
+		let [(path, true, before)] = &take_instances(&mut events)[..] else {
 			panic!("expected one announce");
 		};
 		let stats = origin.consume().request(path.as_str(), None).await.expect("resolve");
@@ -1964,15 +2018,63 @@ mod tests {
 		let second = node_producer(&origin);
 		let _f2 = feed(second.registry(), Tier::default(), "foo/bar", true, 1, 30).await;
 		drive_tick().await;
-		let [(started, true, after)] = &take_epochs(&mut events)[..] else {
-			panic!("expected the new epoch to restart the path");
+		let [(started, true, after)] = &take_instances(&mut events)[..] else {
+			panic!("expected the new instance to restart the path");
 		};
 		assert_eq!(started, path);
-		assert!(after > before);
+		assert_ne!(after, before);
 		drop(old);
 
 		let stats = origin.consume().request(path.as_str(), None).await.expect("resolve");
 		assert_eq!(read_egress(&stats).await["foo/bar"].bytes, 30);
+	}
+
+	/// A publisher first run after every producer clone dropped announces
+	/// nothing, so it cannot take the path from a newer producer.
+	#[tokio::test(start_paused = true)]
+	async fn a_publisher_run_after_its_producer_dropped_announces_nothing() {
+		let origin = produce_origin();
+		let mut events = origin.consume().with_hidden(true).routes();
+
+		let (stale, publisher) = Producer::new(
+			Config::new()
+				.with_origin(origin.clone())
+				.with_node(Path::from_static("sjc")),
+		);
+		drop(stale);
+
+		let _newer = node_producer(&origin);
+		drive_tick().await;
+		let [(_, true, _)] = &take_instances(&mut events)[..] else {
+			panic!("expected the newer producer's announce");
+		};
+
+		publisher.run().await;
+		drive_tick().await;
+		assert_eq!(take_instances(&mut events), []);
+	}
+
+	/// Cancelling a running publisher ends its tracks deliberately, so a reader
+	/// sees the track finish rather than drop.
+	#[tokio::test(start_paused = true)]
+	async fn a_cancelled_publisher_finishes_its_tracks() {
+		let origin = produce_origin();
+		let (_producer, publisher) = Producer::new(
+			Config::new()
+				.with_origin(origin.clone())
+				.with_node(Path::from_static("sjc")),
+		);
+		let task = tokio::spawn(publisher.run());
+		drive_tick().await;
+		let (_, broadcast) = announced(&origin).await;
+		let mut totals = subscribe(&broadcast, crate::TOTALS).await;
+		while try_next_frame(&mut totals).is_some() {}
+
+		task.abort();
+		assert!(task.await.unwrap_err().is_cancelled());
+		while let Some(group) = totals.next_group().await.expect("a finished track, not a dropped one") {
+			drop(group);
+		}
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -2143,24 +2245,24 @@ mod tests {
 	/// `.stats/node/sjc`.
 	fn grouped_producer(linger: Duration) -> (Producer, origin::Producer) {
 		let origin = produce_origin();
-		let producer = Producer::new(
+		let producer = crate::produce::spawned(Producer::new(
 			Config::new()
 				.with_origin(origin.clone())
 				.with_node(Path::from_static("sjc"))
 				.with_depth(1)
 				.with_linger(linger),
-		);
+		));
 		(producer, origin)
 	}
 
 	/// The announce events buffered so far in delivery order, as
-	/// `(path, active, epoch)`. Every stats route carries an epoch.
-	fn take_epochs(events: &mut announce::Consumer) -> Vec<(String, bool, Epoch)> {
+	/// `(path, active, instance)`. Every stats route carries an instance.
+	fn take_instances(events: &mut origin::Routes) -> Vec<(String, bool, Instance)> {
 		use futures::FutureExt;
 		let mut out = Vec::new();
 		while let Some(Some((update, active))) = next_update(events).now_or_never() {
-			let epoch = update.route.epoch.expect("a stats route carries an epoch");
-			out.push((update.prefix.as_str().to_string(), active, epoch));
+			let instance = update.route.instance.expect("a stats route carries an instance");
+			out.push((update.prefix.as_str().to_string(), active, instance));
 		}
 		out
 	}
@@ -2210,13 +2312,11 @@ mod tests {
 			.request(moq_net::Path::from_static("acme"));
 		drive_tick().await;
 		let (_, broadcast) = announced(&origin).await;
-		let track = broadcast
+		let handle = broadcast
 			.track(&crate::group_track(moq_net::Path::from_static("")))
-			.expect("track")
-			.subscribe(None)
-			.await
-			.expect("subscribe");
-		let mut track = moq_json::snapshot::Consumer::<crate::GroupFrame>::new(track, Default::default());
+			.expect("track");
+		let mut track = moq_json::snapshot::Consumer::<crate::GroupFrame>::new(handle.clone(), Default::default());
+		handle.info().await.expect("subscribe");
 		let drain = |track: &mut moq_json::snapshot::Consumer<crate::GroupFrame>| {
 			use futures::FutureExt;
 			let mut frames = Vec::new();
@@ -2287,12 +2387,13 @@ mod tests {
 	/// Subscribe to `label`'s presence track on `broadcast`, driving a tick so
 	/// the producer adopts the request.
 	async fn hold_presence(broadcast: &moq_net::broadcast::Consumer, label: &str) -> Reader<PresenceFrame> {
-		let subscribing = broadcast
-			.track(&presence_track(moq_net::Path::new(label).unwrap()))
-			.expect("track")
-			.subscribe(None);
+		let reader = Reader::new(
+			broadcast
+				.track(&presence_track(moq_net::Path::new(label).unwrap()))
+				.expect("track"),
+		);
 		drive_tick().await;
-		Reader::new(subscribing.await.expect("held"))
+		reader
 	}
 
 	/// A held presence track is cumulative from when it was first held: it
@@ -2365,21 +2466,21 @@ mod tests {
 		.expect("drain");
 		let mut tick = || {
 			drain.collect();
-			drain.publish(moq_clock::now());
+			drain.publish(kio::clock::now());
 			drain.node.presence.len()
 		};
 		let broadcast = origin.consume().request(".stats/node", None).await.expect("resolve");
 
 		// Let the request reach the stats broadcast's queue before the drain.
-		let subscribing = broadcast
+		let handle = broadcast
 			.track(&presence_track(moq_net::Path::from_static("")))
-			.expect("track")
-			.subscribe(None);
+			.expect("track");
+		let mut track = Reader::new(handle.clone());
 		for _ in 0..8 {
 			tokio::task::yield_now().await;
 		}
 		assert_eq!(tick(), 1, "held");
-		let mut track = Reader::new(subscribing.await.expect("held"));
+		handle.info().await.expect("held");
 		assert_eq!(try_presence(&mut track), Some(PresenceFrame::new()), "held at zero");
 
 		// The label records while held: the same subscription carries it.
@@ -2427,12 +2528,13 @@ mod tests {
 	/// Subscribe to `path`'s prefix track on `broadcast`, driving a tick so the
 	/// producer adopts the request.
 	async fn hold_prefix(broadcast: &moq_net::broadcast::Consumer, path: &str) -> Reader<PrefixFrame> {
-		let subscribing = broadcast
-			.track(&prefix_track(moq_net::Path::new(path).unwrap()))
-			.expect("track")
-			.subscribe(None);
+		let reader = Reader::new(
+			broadcast
+				.track(&prefix_track(moq_net::Path::new(path).unwrap()))
+				.expect("track"),
+		);
 		drive_tick().await;
-		Reader::new(subscribing.await.expect("held"))
+		reader
 	}
 
 	/// The latest buffered prefix frame, `None` when nothing is buffered.
@@ -2620,20 +2722,20 @@ mod tests {
 		.expect("drain");
 		let mut tick = || {
 			drain.collect();
-			drain.publish(moq_clock::now());
+			drain.publish(kio::clock::now());
 			drain.node.prefixes.len()
 		};
 		let broadcast = origin.consume().request(".stats/node", None).await.expect("resolve");
 
-		let subscribing = broadcast
+		let handle = broadcast
 			.track(&prefix_track(moq_net::Path::from_static("acme")))
-			.expect("track")
-			.subscribe(None);
+			.expect("track");
+		let mut track = Reader::new(handle.clone());
 		for _ in 0..8 {
 			tokio::task::yield_now().await;
 		}
 		assert_eq!(tick(), 1, "held");
-		let mut track = Reader::new(subscribing.await.expect("held"));
+		handle.info().await.expect("held");
 		assert_eq!(last_prefix(&mut track), Some(PrefixFrame::new()), "held at zero");
 
 		let _feed = feed(&registry, Tier::default(), "acme/live", true, 1, 7).await;
@@ -2851,24 +2953,24 @@ mod tests {
 				// Warm up: create the groups and tracks and grow every buffer.
 				for _ in 0..3 {
 					drain.collect();
-					drain.publish(moq_clock::now());
+					drain.publish(kio::clock::now());
 				}
 				// Hold a prefix with a child per tier, as a reader would.
 				let _held = hold.then(|| {
 					let tick = drain.tick;
-					let stamp = drain.stamp(moq_clock::now());
+					let stamp = drain.stamp(kio::clock::now());
 					drain
 						.node
 						.adopt_prefix(&drain.report, Path::from_static("room0"), None, tick, stamp);
 					drain.node.prefixes["room0"].output.snapshot.track.subscribe(None)
 				});
 				drain.collect();
-				drain.publish(moq_clock::now());
+				drain.publish(kio::clock::now());
 
 				let before = counting::allocs();
 				drain.collect();
 				let allocs = counting::allocs() - before;
-				drain.publish(moq_clock::now());
+				drain.publish(kio::clock::now());
 
 				assert!(!drain.report.traffic.is_empty(), "the drain carried entries");
 				assert_eq!(
@@ -2941,7 +3043,7 @@ mod tests {
 		drain.collect();
 		drain.publish(start);
 		let consumer = edge.consume().with_hidden(true);
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 		let (route, active) = next_update(&mut announced).await.unwrap();
 		assert!(active);
 		assert_eq!(route.prefix.as_str(), ".stats/node");
@@ -2958,9 +3060,7 @@ mod tests {
 		drop(acme);
 		let lingering = start + Duration::from_secs(9);
 		let stats = crate::Consumer::new(broadcast.clone(), Default::default());
-		let mut acme = pumping_at(&mut drain, lingering, stats.group(moq_net::Path::from_static("acme")))
-			.await
-			.unwrap();
+		let mut acme = stats.group(moq_net::Path::from_static("acme")).unwrap();
 		let mut frame = pumping_at(&mut drain, lingering, acme.next()).await.unwrap().unwrap();
 		while !frame.tiers[""].labels.is_empty() {
 			frame = pumping_at(&mut drain, lingering, acme.next()).await.unwrap().unwrap();
@@ -2974,9 +3074,7 @@ mod tests {
 			("acme".into(), false)
 		);
 		assert!(pumping_at(&mut drain, lingered, acme.next()).await.unwrap().is_none());
-		let mut beta_reader = pumping_at(&mut drain, lingered, stats.group(moq_net::Path::from_static("beta")))
-			.await
-			.unwrap();
+		let mut beta_reader = stats.group(moq_net::Path::from_static("beta")).unwrap();
 		let frame = pumping_at(&mut drain, lingered, beta_reader.next())
 			.await
 			.unwrap()
@@ -2998,9 +3096,9 @@ mod tests {
 		);
 	}
 
-	/// A group that returns after its linger is a new track instance: a new
+	/// A group that returns after its linger starts a new counter run: a new
 	/// epoch counted from zero, so a reader summing each epoch never counts the
-	/// old one twice, and group numbers that continue past the old instance's.
+	/// old one twice, and group numbers that continue past the old run's.
 	#[tokio::test(start_paused = true)]
 	async fn a_relisted_group_starts_a_new_epoch_from_zero() {
 		let (producer, origin) = grouped_producer(Duration::ZERO);
@@ -3016,7 +3114,7 @@ mod tests {
 			.tier(Tier::default())
 			.session(moq_net::Path::from_static("acme/live"));
 		drive_tick().await;
-		let mut reader = stats.group(moq_net::Path::from_static("acme")).await.expect("listed");
+		let mut reader = stats.group(moq_net::Path::from_static("acme")).expect("listed");
 		let first = reader.next().await.unwrap().unwrap();
 		assert_eq!(first.tiers[""].sessions.sessions_started, 1);
 		let old_sequence = sequence(&broadcast).await;
@@ -3037,20 +3135,22 @@ mod tests {
 		drive_tick().await;
 		let second = stats
 			.group(moq_net::Path::from_static("acme"))
-			.await
 			.expect("listed again")
 			.next()
 			.await
 			.unwrap()
 			.unwrap();
-		assert!(second.epoch > first.epoch, "a returning group mints a new epoch");
+		assert!(
+			second.epoch.as_str() > first.epoch.as_str(),
+			"a returning group mints a newer UUIDv7"
+		);
 		assert_eq!(
 			second.tiers[""].sessions.sessions_started, 1,
 			"a new epoch counts from zero"
 		);
 		assert!(
 			sequence(&broadcast).await > old_sequence,
-			"group numbers continue past the old instance"
+			"group numbers continue past the old run"
 		);
 		assert_eq!(
 			default_totals(&broadcast).await.sessions.sessions_started,
@@ -3084,12 +3184,8 @@ mod tests {
 		let _big = registry
 			.tier(Tier::default())
 			.session(moq_net::Path::from_static("big"));
-		let mut acme = pumping(&mut drain, stats.group(moq_net::Path::from_static("acme")))
-			.await
-			.unwrap();
-		let mut big = pumping(&mut drain, stats.group(moq_net::Path::from_static("big")))
-			.await
-			.unwrap();
+		let mut acme = stats.group(moq_net::Path::from_static("acme")).unwrap();
+		let mut big = stats.group(moq_net::Path::from_static("big")).unwrap();
 		assert!(pumping(&mut drain, acme.next()).await.unwrap().is_some());
 		assert!(pumping(&mut drain, big.next()).await.unwrap().is_some());
 
@@ -3132,7 +3228,6 @@ mod tests {
 
 		let frame = stats
 			.group(moq_net::Path::from_static("acme"))
-			.await
 			.unwrap()
 			.next()
 			.await
@@ -3146,7 +3241,6 @@ mod tests {
 
 		let frame = stats
 			.group(moq_net::Path::from_static("beta"))
-			.await
 			.unwrap()
 			.next()
 			.await
@@ -3157,7 +3251,6 @@ mod tests {
 
 		let frame = stats
 			.group(moq_net::Path::from_static("feed"))
-			.await
 			.unwrap()
 			.next()
 			.await

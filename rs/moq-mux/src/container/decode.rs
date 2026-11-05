@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 /// The largest supported reorder span in 90 kHz ticks.
 pub(crate) const MAX_REORDER: u64 = 2 * 90_000;

@@ -115,9 +115,13 @@ async fn main() -> anyhow::Result<()> {
 		let mut command = String::new();
 		stdin.read_line(&mut command).await?;
 		ensure!(command == "read\n", "finish read phase was not released");
-		moq_clock::timeout(args.timeout, async {
+		kio::clock::timeout(args.timeout, async {
 			let mut routes = consumer.announced();
-			let broadcast = consumer.follow(&args.broadcast, None)?.available().await?;
+			let broadcast = consumer
+				.follow(&args.broadcast, None)?
+				.available()
+				.await?
+				.context("went offline before serving")?;
 			let mut catalogs =
 				moq_mux::catalog::Consumer::<()>::new(&broadcast, moq_mux::catalog::CatalogFormat::Hang).await?;
 			let catalog = loop {
@@ -131,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
 				.track(name)?
 				.subscribe(Some(
 					moq_net::track::Subscription::default()
-						.with_max_delay(args.timeout)
+						.with_delay(moq_net::track::Delay::default().with_max(args.timeout))
 						.with_range(0..),
 				))
 				.await?;
@@ -156,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
 					.next()
 					.await
 					.context("origin ended before broadcast withdrawal")?;
-				if let moq_net::announce::Event::End(announce) = event
+				if let moq_net::announce::Event::Absent(announce) = event
 					&& announce.prefix.as_str() == args.broadcast
 				{
 					break;
@@ -165,14 +169,13 @@ async fn main() -> anyhow::Result<()> {
 			let health = consumer
 				.follow(format!("{}.health", args.broadcast), None)?
 				.available()
-				.await?;
+				.await?
+				.context("went offline before serving")?;
 			let mut track = health.track("live")?.subscribe(None).await?;
 			let mut group = track.recv_group().await?.context("no health group")?;
 			let frame = group.read_frame().await?.context("no health frame")?;
-			ensure!(
-				frame.payload.as_ref() == b"session-alive" && frame.timestamp.is_none(),
-				"health payload or timestamp"
-			);
+			// Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+			ensure!(frame.payload.as_ref() == b"session-alive", "health payload");
 			ensure!(
 				group.read_frame().await?.is_none() && track.recv_group().await?.is_none(),
 				"health EOF"

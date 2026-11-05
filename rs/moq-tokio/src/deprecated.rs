@@ -7,8 +7,7 @@
 /// The deprecated spellings a config was parsed from, each paired with its
 /// replacement.
 ///
-/// Collect one per config section ([`crate::connect::Config::deprecated`] and its
-/// siblings), and refuse to start when it is non-empty: the [`std::fmt::Display`]
+/// Collect one per config section and refuse to start when it is non-empty: the [`std::fmt::Display`]
 /// is the migration to print. Honoring the old spelling instead is what this
 /// replaced, because a warning that scrolls past leaves a process running on
 /// settings it silently dropped.
@@ -23,8 +22,16 @@ impl Deprecated {
 	}
 
 	/// Fold another section's findings in, so one message covers the whole config.
+	///
+	/// A finding already present is kept once: without a file, [`crate::cli::Merge`]
+	/// hands back `parsed` as-is, so collecting from both it and the result sees
+	/// the same hidden fields twice.
 	pub fn extend(&mut self, other: Deprecated) {
-		self.0.extend(other.0);
+		for item in other.0 {
+			if !self.0.contains(&item) {
+				self.0.push(item);
+			}
+		}
 	}
 
 	/// Record one released flag and the flag that replaced it.

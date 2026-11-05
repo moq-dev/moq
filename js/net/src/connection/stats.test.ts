@@ -1,12 +1,13 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import QmuxSession from "@moq/qmux";
 import { Effect } from "@moq/signals";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, MockTransport } from "../mock.ts";
 import { type AcceptProps, accept as acceptSession, type ConnectProps, connect as connectSession } from "./index.ts";
 import { Reload } from "./reload.ts";
-import { type TransportStats, transportStats } from "./stats.ts";
+import { canEstimate, estimates, type TransportStats, transportStats } from "./stats.ts";
 
 function connect(url: URL, props: Omit<ConnectProps, "url"> = {}) {
 	return connectSession({ url, ...props });
@@ -103,6 +104,58 @@ test("probe starts empty and stays empty without PROBE support", async () => {
 	}
 });
 
+// Each wire transport, imitated on a mock so only what it can report differs.
+const kinds: { name: string; estimates: boolean; shape: (quic: MockTransport) => void }[] = [
+	{ name: "WebTransport with getStats", estimates: true, shape: () => {} },
+	{
+		name: "WebTransport without getStats",
+		estimates: false,
+		// Shipping Chromium and Safari implement no getStats().
+		shape: (quic) => {
+			(quic as unknown as { getStats?: unknown }).getStats = undefined;
+		},
+	},
+	{
+		name: "the WebSocket fallback",
+		estimates: false,
+		// A qmux session is what marks the fallback; the mock keeps its own behavior.
+		shape: (quic) => {
+			const proto = Object.create(QmuxSession.prototype);
+			Object.defineProperties(proto, Object.getOwnPropertyDescriptors(MockTransport.prototype));
+			Object.setPrototypeOf(quic, proto);
+		},
+	},
+	{
+		name: "WebRTC",
+		estimates: false,
+		shape: (quic) => {
+			Object.assign(quic, { transport: "webrtc" });
+		},
+	},
+];
+
+for (const kind of kinds) {
+	for (const alpn of [Lite.ALPN_06, Ietf.ALPN.DRAFT_18]) {
+		test(`a ${alpn} session over ${kind.name} ${kind.estimates ? "can" : "cannot"} report a send-rate estimate`, async () => {
+			const pair = createMockTransportPair(alpn, { stats: { estimatedSendRate: 2_000_000 } });
+			kind.shape(pair.client);
+			expect(canEstimate(pair.client)).toBe(kind.estimates);
+			const url = new URL("https://example.com/");
+			const [client, server] = await Promise.all([
+				connect(url, { transport: pair.client }),
+				accept(pair.server, url),
+			]);
+			try {
+				expect(estimates(client)).toBe(kind.estimates);
+				expect(estimates(server)).toBe(true);
+			} finally {
+				client.abort();
+				server.abort();
+			}
+		});
+	}
+}
+
 test("Reload exposes its established session stats and probe only while connected", async () => {
 	const original = globalThis.WebTransport;
 	const pair = createMockTransportPair(Lite.ALPN_06, { stats: { bytesSent: 99 } });
@@ -116,18 +169,18 @@ test("Reload exposes its established session stats and probe only while connecte
 	try {
 		const server = await accept(pair.server, url);
 		while (!reload.established.peek()) {
-			await new Promise((resolve) => setTimeout(resolve, 0));
+			await yieldNow();
 		}
 		expect((await reload.established.peek()?.stats())?.bytesSent).toBe(99);
 		expect(reload.probe.peek()).toEqual({});
 
 		server.abort();
 		while (reload.established.peek()) {
-			await new Promise((resolve) => setTimeout(resolve, 0));
+			await yieldNow();
 		}
 		expect(reload.status.peek()).toBe("disconnected");
 		expect(await reload.established.peek()?.stats()).toBeUndefined();
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await yieldNow();
 		expect(reload.probe.peek()).toBeUndefined();
 	} finally {
 		reload.close();

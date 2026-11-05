@@ -1,13 +1,13 @@
 //! Outgoing streams and datagrams: their handles, scheduling, and errors.
 
-use std::io;
+use std::{io, task::Poll};
 
 use bytes::Buf;
 use thiserror::Error;
 use tracing::trace;
 
-use super::{StreamEvent, StreamsState, schedule::Slot};
-use crate::connection::{ConnectionTag, State as ConnState, send_buffer::SendBuffer, spaces::Retransmits};
+use super::{StreamsState, schedule::Slot};
+use crate::connection::{ConnectionTag, State as ConnState, send_buffer::SendBuffer, spaces::Retransmits, waits::Wait};
 use crate::{StreamId, VarInt, frame};
 
 #[derive(Debug)]
@@ -262,21 +262,20 @@ impl Send {
 		Ok(false)
 	}
 
-	/// The acknowledged prefix to report once it reaches the offset a waiter is waiting for
-	pub(super) fn take_acked(&mut self) -> Option<u64> {
-		let acked = self.pending.acked();
-		if self.notify.is_none_or(|notify| acked < notify) {
-			return None;
+	/// Whether the acknowledged prefix reached the lowest offset a waiter is waiting for, which
+	/// then wakes every waiter on the stream
+	pub(super) fn take_acked(&mut self) -> bool {
+		if self.notify.is_none_or(|notify| self.pending.acked() < notify) {
+			return false;
 		}
 		self.notify = None;
-		Some(acked)
+		true
 	}
 
-	/// The acknowledged prefix to report to every waiter after a reset or STOP_SENDING, which may
-	/// fail any of them
-	pub(super) fn take_waiting(&mut self) -> Option<u64> {
-		self.notify.take()?;
-		Some(self.pending.acked())
+	/// Whether a waiter is waiting on the acknowledged prefix, which a reset or STOP_SENDING may
+	/// fail, so every waiter on the stream wakes
+	pub(super) fn take_waiting(&mut self) -> bool {
+		self.notify.take().is_some()
 	}
 
 	/// Handle increase to stream-level flow control limit
@@ -355,8 +354,8 @@ impl<'a> Stream<'a> {
 	/// Queue as much of `data` as the stream and connection accept now, returning how many bytes
 	///
 	/// Each chunk is taken with [`Buf::copy_to_bytes`], which a [`Bytes`](bytes::Bytes) source
-	/// splits off without copying. Fails with [`Error::Blocked`] when nothing fits; a
-	/// [`StreamEvent::Writable`] says when to retry.
+	/// splits off without copying. Fails with [`Error::Blocked`] when nothing fits;
+	/// [`Self::poll_write`] waits for room instead.
 	pub fn write(&mut self, data: &mut impl Buf) -> Result<usize, Error> {
 		if self.conn_state.is_closed() {
 			trace!(%self.id, "write blocked; connection draining");
@@ -382,10 +381,12 @@ impl<'a> Stream<'a> {
 					{
 						self.state.data_blocked_limit = Some(self.state.max_data);
 						self.pending.data_blocked = true;
+						self.state.waits.wake_transmit();
 					}
 				} else if stream.data_blocked_limit != Some(stream.max_data) {
 					stream.data_blocked_limit = Some(stream.max_data);
 					self.pending.stream_data_blocked.insert(self.id);
+					self.state.waits.wake_transmit();
 				}
 				return Err(Error::Blocked);
 			}
@@ -397,7 +398,24 @@ impl<'a> Stream<'a> {
 		if !was_pending {
 			self.state.pending.push(self.id, &mut stream.slot, stream.priority);
 		}
+		self.state.waits.wake_transmit();
 		Ok(written)
+	}
+
+	/// [`Self::write`], or wait for room when nothing fits
+	///
+	/// Pending registers `waiter` until flow control or the send buffer has room, the peer stops
+	/// the stream, or it is finished, reset, or released. Fails with [`Error::ConnectionLost`] once
+	/// the connection is lost.
+	pub fn poll_write(&mut self, waiter: &kio::Waiter, data: &mut impl Buf) -> Poll<Result<usize, Error>> {
+		match self.write(data) {
+			Err(Error::Blocked) if self.state.waits.lost().is_some() => Poll::Ready(Err(Error::ConnectionLost)),
+			Err(Error::Blocked) => {
+				self.state.waits.register(self.id, Wait::Write, waiter);
+				Poll::Pending
+			}
+			result => Poll::Ready(result),
+		}
 	}
 
 	/// How the stream ended, or `None` while it is still going
@@ -409,7 +427,29 @@ impl<'a> Stream<'a> {
 			Some(Some(stream)) if stream.released => Err(Error::Closed),
 			Some(Some(stream)) => Ok(stream.end()),
 			Some(None) => Ok(None),
-			None => self.state.ends.get(&self.id).map(|&end| Some(end)).ok_or(Error::Closed),
+			None => self
+				.state
+				.ends
+				.get(&self.id)
+				.map(|&(end, _)| Some(end))
+				.ok_or(Error::Closed),
+		}
+	}
+
+	/// Wait for the stream to end, as [`Self::end`] reports it
+	///
+	/// Pending registers `waiter` until the peer acknowledges a finish, stops the stream, or the
+	/// stream is reset or released. Fails with [`Error::ConnectionLost`] once the connection is
+	/// lost first.
+	pub fn poll_end(&mut self, waiter: &kio::Waiter) -> Poll<Result<End, Error>> {
+		match self.end() {
+			Ok(Some(end)) => Poll::Ready(Ok(end)),
+			Err(err) => Poll::Ready(Err(err)),
+			Ok(None) if self.state.waits.lost().is_some() => Poll::Ready(Err(Error::ConnectionLost)),
+			Ok(None) => {
+				self.state.waits.register(self.id, Wait::End, waiter);
+				Poll::Pending
+			}
 		}
 	}
 
@@ -420,11 +460,18 @@ impl<'a> Stream<'a> {
 	/// kept for the connection's life.
 	pub fn release(self) {
 		if self.state.ends.remove(&self.id).is_some() {
+			if self.state.ends.capacity() > self.state.ends.len().saturating_mul(4) {
+				self.state.ends.shrink_to_fit();
+			}
 			return;
 		}
 		let max_data = self.state.max_send_data(self.id);
 		if let Ok(stream) = StreamsState::send_mut(&mut self.state.send, self.id, max_data) {
 			stream.released = true;
+			// Every wait on the ID now fails with Closed.
+			for wait in [Wait::Write, Wait::End, Wait::Acked] {
+				self.state.waits.wake(self.id, wait);
+			}
 		}
 	}
 
@@ -440,6 +487,9 @@ impl<'a> Stream<'a> {
 		if !was_pending {
 			self.state.pending.push(self.id, &mut stream.slot, stream.priority);
 		}
+		// A writer waiting on it learns it is closed.
+		self.state.waits.wake(self.id, Wait::Write);
+		self.state.waits.wake_transmit();
 
 		Ok(())
 	}
@@ -469,31 +519,52 @@ impl<'a> Stream<'a> {
 
 	/// Whether the peer acknowledged every byte before `offset`
 	///
-	/// A `false` notes to report a [`StreamEvent::Acked`] once the answer changes, so poll again
-	/// then. The stream holds only its lowest waiting offset, so every waiter on it polls again
-	/// on that event. Like [`End::Finished`], an acknowledgment only means the peer's QUIC stack
+	/// A `false` notes to wake the stream's [`Self::poll_acked`] waiters once the answer changes.
+	/// The stream holds only its lowest waiting offset, so every waiter on it polls again then. Like [`End::Finished`], an acknowledgment only means the peer's QUIC stack
 	/// holds the data, not that its application read it.
 	///
 	/// Fails with [`Error::Closed`] once the peer will never acknowledge it, or no longer reads
 	/// it: a reset dropped the data before `offset`, the peer sent STOP_SENDING, or the
-	/// connection closed.
+	/// connection closed before the peer acknowledged it.
 	///
 	/// # Panics
 	/// - when `offset` came from another stream
 	pub fn acked(&mut self, offset: Offset) -> Result<bool, Error> {
 		let offset = self.own(offset);
-		if self.conn_state.is_closed() {
-			return Err(Error::Closed);
-		}
-		match self.state.send.get_mut(&self.id) {
+		let acked = match self.state.send.get_mut(&self.id) {
 			Some(Some(stream)) if !stream.released => stream.acked(offset),
 			// Nothing was written, so an offset of it is 0.
 			Some(None) => Ok(true),
 			Some(Some(_)) => Err(Error::Closed),
+			// A reset keeps answering for the prefix the peer acknowledged before it freed the stream.
 			None => match self.state.ends.get(&self.id) {
-				Some(End::Finished) => Ok(true),
+				Some((End::Finished, _)) => Ok(true),
+				Some((End::Reset(_), acked)) if offset <= *acked => Ok(true),
 				_ => Err(Error::Closed),
 			},
+		};
+		match acked {
+			Ok(false) if self.conn_state.is_closed() => Err(Error::Closed),
+			acked => acked,
+		}
+	}
+
+	/// Wait for the peer to acknowledge every byte before `offset`, as [`Self::acked`] answers it
+	///
+	/// Pending registers `waiter` until the answer changes. Fails with [`Error::ConnectionLost`]
+	/// instead of [`Error::Closed`] once the connection is lost.
+	///
+	/// # Panics
+	/// - when `offset` came from another stream
+	pub fn poll_acked(&mut self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
+		match self.acked(offset) {
+			Ok(true) => Poll::Ready(Ok(())),
+			Ok(false) => {
+				self.state.waits.register(self.id, Wait::Acked, waiter);
+				Poll::Pending
+			}
+			Err(Error::Closed) if self.state.waits.lost().is_some() => Poll::Ready(Err(Error::ConnectionLost)),
+			Err(err) => Poll::Ready(Err(err)),
 		}
 	}
 
@@ -548,16 +619,22 @@ impl<'a> Stream<'a> {
 		let send = stream.reset(error_code, reliable_size, at);
 		self.state.connection_blocked.swap_remove(&self.id);
 		self.state.buffered_data -= buffered - stream.pending.buffered();
-		if let Some(offset) = stream.take_waiting() {
-			self.state.events.push_back(StreamEvent::Acked { id: self.id, offset });
-		}
+		let waiting = stream.take_waiting();
 		// Only data below the Reliable Size is left to send
 		if !stream.is_pending() {
 			self.state.pending.remove(&mut stream.slot);
 		}
 		if let Some(reliable_size) = send {
 			self.pending.reset_stream.push((self.id, reliable_size));
+			self.state.waits.wake_transmit();
 		}
+		if waiting {
+			self.state.waits.wake(self.id, Wait::Acked);
+		}
+		// The stream ended, and a writer waiting on it learns it is closed.
+		self.state.waits.wake(self.id, Wait::End);
+		self.state.waits.wake(self.id, Wait::Write);
+		self.state.unblock();
 
 		Ok(())
 	}
@@ -718,8 +795,7 @@ impl Group {
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
-	/// Flow control or the send buffer has no room; a [`StreamEvent::Writable`] says when to
-	/// retry
+	/// Flow control or the send buffer has no room; [`Stream::poll_write`] waits for it
 	#[error("blocked")]
 	Blocked,
 	/// The peer asked us to stop sending, with its code
@@ -734,6 +810,10 @@ pub enum Error {
 	/// The stream was finished, reset, or released, or was never opened
 	#[error("closed stream")]
 	Closed,
+	/// The connection was lost; [`Connection::poll_closed`](crate::connection::Connection::poll_closed)
+	/// says why
+	#[error("connection lost")]
+	ConnectionLost,
 }
 
 impl From<Error> for io::Error {
@@ -743,7 +823,7 @@ impl From<Error> for io::Error {
 			Error::Stopped(_) => io::ErrorKind::ConnectionReset,
 			Error::TooLarge => io::ErrorKind::InvalidInput,
 			Error::Unsupported => io::ErrorKind::Unsupported,
-			Error::Closed => io::ErrorKind::NotConnected,
+			Error::Closed | Error::ConnectionLost => io::ErrorKind::NotConnected,
 		};
 		Self::new(kind, err)
 	}

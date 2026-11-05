@@ -15,29 +15,31 @@ categories = ["asynchronous", "network-programming", "os::linux-apis"]
 [features]
 default = ["quic"]
 # QUIC and WebTransport on moq-quic, with TLS through rustls.
-quic = ["dep:moq-congestion", "dep:moq-quic", "dep:rustls", "dep:rustls-platform-verifier"]
+quic = ["dep:moq-congestion", "dep:moq-crypto", "dep:moq-quic", "dep:rustls", "dep:rustls-platform-verifier"]
 # Capture qlog traces (`quic::Transport::qlog`). Off by default: it compiles the
 # qlog crate and its serde_json encoder into moq-quic, which a production build has
 # no use for.
 qlog = ["moq-quic?/qlog"]
-# Workers created inside a tokio runtime with a `moq_clock::Manual` clock installed
+# Workers created inside a tokio runtime with a `kio::clock::Manual` clock installed
 # run on that clock, so a test decides when their time passes. For test builds.
-_manual = ["moq-clock/manual"]
+_manual = ["kio/manual"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bytes = "1"
+futures = "0.3"
 http = "1"
 io-uring = { workspace = true }
-kio = { workspace = true }
+# The worker is a kio clock backend: its turn's instant is the ambient clock.
+kio = { workspace = true, features = ["async", "runtime"] }
 libc = { workspace = true }
-# The worker is a moq-clock backend: its turn's instant is the ambient clock.
-moq-clock = { workspace = true }
 moq-congestion = { workspace = true, optional = true }
-moq-net = { workspace = true }
-moq-quic = { workspace = true, features = ["rustls-aws-lc-rs"], optional = true }
+# rind's rustls provider and the `UnsupportedCpu` error the transport crates share.
+moq-crypto = { workspace = true, features = ["provider"], optional = true }
+moq-net = { workspace = true, features = ["async"] }
+moq-quic = { workspace = true, features = [], optional = true }
 moq-sock = { workspace = true }
 rustc-hash = { workspace = true }
-rustls = { version = "0.23", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std"], optional = true }
 # OS-native server-cert verifier for the rustls backends. Version matched to
 # the copy moq-tokio pulls in, to avoid duplication.
 rustls-platform-verifier = { version = "0.7", optional = true }
@@ -48,26 +50,30 @@ thiserror = "2"
 tracing = "0.1"
 url = "2"
 web-transport-proto = { workspace = true }
-web-transport-trait = { workspace = true }
 
 [dev-dependencies]
 anyhow = "1"
 bytes = { workspace = true }
 criterion = { package = "bench-harness", path = "../bench-harness" }
 moq-net = { path = "../moq-net" }
+pem = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
-web-transport-trait = { workspace = true }
+workspace-hack = { path = "../workspace-hack" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 io-uring = { workspace = true }
 libc = { workspace = true }
-moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic", "aws-lc-rs"] }
+# The socket-queue benchmark's rate-limited path.
+moq-shaper = { path = "../moq-shaper" }
+moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic"] }
 # Tests run workers on a manual clock.
 moq-uring = { path = ".", features = ["_manual"] }
 nix = { workspace = true }
-rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
-rustls = "0.23"
+rcgen = { workspace = true, features = ["pem"] }
+rind-rcgen = { workspace = true }
+rind-rustls = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 # The qlog test parses every record of a trace, which is what catches a
 # truncated or interleaved write.
 serde_json = { workspace = true }
@@ -103,6 +109,11 @@ required-features = ["quic"]
 [[bench]]
 name = "timers"
 harness = false
+
+[[bench]]
+name = "web_headers"
+harness = false
+required-features = ["quic"]
 
 [lints]
 workspace = true

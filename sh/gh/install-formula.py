@@ -2,9 +2,9 @@
 """Install a rendered formula and migrate its former crate-based name."""
 
 import json
-from pathlib import Path
 import shutil
 import sys
+from pathlib import Path
 
 
 def install(crate: str, rendered: Path, tap: Path) -> None:

@@ -393,11 +393,6 @@ impl Mixer {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
@@ -496,28 +491,44 @@ mod tests {
 	/// Measurement-only harness: no device and no timing acceptance threshold.
 	#[test]
 	#[ignore = "run with just rs bench-playback"]
+	#[expect(
+		clippy::disallowed_methods,
+		clippy::disallowed_types,
+		reason = "the benchmark measures mixer callbacks on the host clock"
+	)]
 	fn benchmark_mixer_callbacks() {
-		for sinks in [1, 8, 32, MAX_SINKS] {
-			for frames in [128, 480, 1024, 2048] {
-				let mut harness = Harness::with_depth(Layout::Stereo, MAX_SINKS);
-				let mut prods: Vec<_> = (0..sinks).map(|_| harness.add(Arc::new(Gain::new())).1).collect();
-				let mut out = vec![0.0; frames * STEREO];
-				harness.fill(&mut out);
-				let pcm = vec![0.25 / sinks as f32; frames * STEREO];
-				let mut elapsed = std::time::Duration::ZERO;
-				for _ in 0..1000 {
-					for prod in &mut prods {
-						prod.push(&pcm);
+		println!("stretch,sinks,frames,ns_per_callback");
+		for stretch in [false, true] {
+			for sinks in [1, 8, 32, MAX_SINKS] {
+				for frames in [128, 480, 1024, 2048] {
+					let mut harness = Harness::with_depth(Layout::Stereo, MAX_SINKS);
+					let mut prods: Vec<_> = (0..sinks).map(|_| harness.add(Arc::new(Gain::new())).1).collect();
+					let mut out = vec![0.0; frames * STEREO];
+					harness.fill(&mut out);
+					if stretch {
+						for entry in &mut harness.mixer.entries {
+							entry.cons.stretch(RATE);
+						}
 					}
-					let start = std::time::Instant::now();
-					harness.fill(std::hint::black_box(&mut out));
-					elapsed += start.elapsed();
-					std::hint::black_box(&out);
+					let pcm = vec![0.25 / sinks as f32; frames * STEREO];
+					for prod in &mut prods {
+						prod.push(&vec![0.25 / sinks as f32; 4800 * STEREO]);
+					}
+					let mut elapsed = std::time::Duration::ZERO;
+					for iteration in 0..1000 {
+						// Exercise convergence in both directions, not only cheap holds.
+						let target = Duration::from_millis(if iteration % 200 < 100 { 60 } else { 120 });
+						for prod in &mut prods {
+							assert!(prod.set_latency(target));
+							prod.push(&pcm);
+						}
+						let start = std::time::Instant::now();
+						harness.fill(std::hint::black_box(&mut out));
+						elapsed += start.elapsed();
+						std::hint::black_box(&out);
+					}
+					println!("{stretch},{sinks},{frames},{:.1}", elapsed.as_nanos() as f64 / 1000.0);
 				}
-				println!(
-					"sinks={sinks} frames={frames}: {:.1} ns/callback",
-					elapsed.as_nanos() as f64 / 1000.0
-				);
 			}
 		}
 	}

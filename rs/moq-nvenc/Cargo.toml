@@ -21,5 +21,8 @@ cudarc = { workspace = true }
 libloading = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+workspace-hack = { path = "../workspace-hack" }
+
 [lints]
 workspace = true

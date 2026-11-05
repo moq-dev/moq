@@ -40,7 +40,7 @@ The `moq-c` package (`c/moq`, `just c check`) builds the generated header and
 its probe in CI, so drift fails loud. moq-ffi's record
 `MoqAudioEncoderFinished` was renamed from `MoqAudioEncoderFinish` so moq's
 current generator emits the header;
-[the switch](/quest/m2/uniffi-fork.md) reverts that rename. No `c-v*` tag ships
+[the switch](/quest/m2/ffi-exporter.md) reverts that rename. No `c-v*` tag ships
 before the cut.
 
 The line owns the pre-publication check: every `doc/lib/c` sample and the C
@@ -50,6 +50,6 @@ publication; [old-crate retirement](/quest/m2/release/c-retire.md) follows.
 
 ## Required
 
-- [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md) - the C generator comes from rust2's fork
+- [Switch to rust2's exporter](/quest/m2/ffi-exporter.md) - the C ABI comes from rust2's exporter instead of a UniFFI generator
 - [C consumers](/quest/m2/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API
 - [Async failure contract](/quest/m2/c/async-failure-contract.md) - every generated async call returns a task and calls back exactly once, cancelled when its task was freed first

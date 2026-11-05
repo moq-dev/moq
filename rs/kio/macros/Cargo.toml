@@ -1,8 +1,9 @@
-# The `#[kio::machine]` attribute. A separate crate only because a proc macro
-# must be; `kio` re-exports it behind its `macros` feature.
+# The `#[kio::machine]` and `#[kio::test]` attributes. A separate crate only
+# because a proc macro must be; `kio` re-exports them behind its `macros` and
+# `sim` features.
 [package]
 name = "kio-macros"
-description = "The #[kio::machine] attribute; use it through kio's macros feature."
+description = "The #[kio::machine] and #[kio::test] attributes; use them through kio's macros and sim features."
 authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
@@ -11,8 +12,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
 
-keywords = ["async", "poll", "state-machine"]
-categories = ["asynchronous"]
+keywords = ["async", "poll", "state-machine", "test", "simulation"]
+categories = ["asynchronous", "development-tools::testing"]
 
 [lib]
 proc-macro = true

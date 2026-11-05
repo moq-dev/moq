@@ -25,6 +25,19 @@ a channel that parks them; evicted entries are freed by epoch-based reclamation.
 With the `macros` feature, `#[kio::machine]` writes a `poll_*` state machine from
 straight-line code with explicit waits.
 
+`clock` is the time those waits run on: logical instants, wall time, deadlines, and
+timers on tokio (the `runtime` feature). The `sim` feature adds a
+deterministic executor and `#[kio::test]`, which runs an `async fn` test on it:
+
+```rust
+#[kio::test]
+async fn retries_after_a_second() {
+    let start = kio::clock::now(); // Instant::ZERO
+    kio::clock::sleep(std::time::Duration::from_secs(1)).await; // returns at once
+    assert_eq!(kio::clock::now() - start, std::time::Duration::from_secs(1));
+}
+```
+
 It's used internally by [moq-net](https://github.com/moq-dev/moq/tree/main/rs/moq-net) and friends, but is generic enough to be useful on its own.
 
 See the [API documentation](https://docs.rs/kio/) for details.

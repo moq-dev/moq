@@ -6,7 +6,8 @@ A relay, or a binary embedding the gateway crates beside one, speaks
 everything it serves on one UDP port and one TCP port. UDP carries QUIC
 (WebTransport and raw moq), the WebRTC media path (STUN, DTLS, SRTP) for
 WHIP and WHEP, and SRT. TCP carries TLS-terminated
-HTTP (WebSocket qmux, WHIP and WHEP signaling, HLS, ops), RTMP, and RTMPS.
+HTTP (WebSocket qmux, WHIP and WHEP signaling, HLS, ops), `tls://` qmux,
+RTMP, and RTMPS.
 Upstream delivers the demux and stacks that accept a fed socket or stream;
 `moq-relay` itself serves QUIC and HTTP on them,
 and an embedder such as moq.pro's edge wires WebRTC, RTMP, and SRT, which the
@@ -31,12 +32,21 @@ Decided 2026-10-05, from moq.pro's audit: `moq-rtc` taking a fed socket
 m2 rather than m3, since moq.pro's edge cutover and its uring rollout wait on
 them.
 
-Decided 2026-10-15: [UDP demux](/quest/m2/p2p/udp-demux.md) remains
-under P2P, now deferred to m2,
-because [native pairs](/quest/m2/p2p/native-quic.md) run QUIC and ICE's
-STUN on one socket through the same demux. The rest of this line builds on
-that shared prerequisite in m2. QUIC shard steering landed in #5638;
-reuse its filter rather than recreating that completed work.
+The UDP demux has landed: `moq_sock::demux` classifies, and the tokio QUIC
+listener's socket diverts the WebRTC media path inline in its receive to a
+`moq_tokio::quic::demux::WebRtc` feed, which `moq_relay::Relay::webrtc`
+hands an embedder. [Native pairs](/quest/m2/p2p/native-quic.md) reuse the
+classifier. QUIC shard steering landed in #5638; reuse its filter rather than
+recreating that completed work.
+
+Decided 2026-10-31 by the maintainer, in
+[moq-dev/moq#7095](https://github.com/moq-dev/moq/pull/7095): the split runs
+inline in the QUIC socket's `poll_recv`, not in a task owning the socket and
+fanning out to per-stack virtual sockets, so a QUIC datagram keeps its
+zero-copy, same-task path and its GRO batch. The API stays as shipped:
+`moq_tokio::quic::demux::Demux` in `server::Config::demux`, `Demux::webrtc()`
+returning the `WebRtc` feed, and `moq_relay::Relay::webrtc()`. SRT adds its
+class to the same inline split.
 
 ### Classifying a datagram
 
@@ -62,11 +72,11 @@ unknown tuple is not SRT; it is dropped or given to the WebRTC mux.
 
 ### Virtual sockets
 
-One OS socket, or one shard of a reuseport group, is read by the demux and
-fanned into virtual sockets, one per stack, each with the `AsyncUdpSocket`
-shape. Sends go straight to the shared socket, so every stack answers from
-the same address and port. moq-tokio's `quic::driver` accepts the virtual socket through
-`new_with_abstract_socket`. `moq-rtc`'s `Mux` already demuxes STUN by ufrag
+One OS socket, or one shard of a reuseport group, is read by the QUIC
+endpoint's own socket, which keeps QUIC in place and copies every other
+class into that stack's bounded feed, shared by every shard. Sends go
+straight to the shared socket, so every stack answers from the same address
+and port. `moq-rtc`'s `Mux` already demuxes STUN by ufrag
 internally and takes a fed socket in
 [WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md). SRT skips `srt-tokio`,
 which accepts a `tokio::net::UdpSocket` but no abstraction, and feeds
@@ -77,30 +87,18 @@ decided.
 
 Decided 2026-10-08: the public STUN responder is left to P2P (m2), its
 only consumer. Here, a Binding request carrying USERNAME is an ICE check
-and goes to WebRTC; any other is dropped and counted. Decided 2026-10-13:
+and goes to WebRTC, as does every Binding response, since the WebRTC agent
+runs full ICE and only it sends requests from this port. Any other STUN is
+dropped and counted. Decided 2026-10-13:
 the responder binds its own port ([relay STUN](/doc/bin/relay/config.md#stun)),
 so the shared port never answers public Binding requests.
-
-### TCP
-
-The 1935 listener downstream already peeks one byte to split RTMPS from RTMP.
-The unified acceptor generalizes it: 0x16 is TLS, terminated here, then the
-first decrypted byte is peeked again; 0x03 is an RTMP handshake and anything
-else is HTTP, which goes to the axum router. A plaintext 0x03 is RTMP and a
-plaintext ASCII method is HTTP. RTMPS clients send no ALPN, so ALPN cannot do
-this. The acceptor yields classified connections; `moq-rtmp`'s
-`accept_stream` already takes any `AsyncRead + AsyncWrite`, and
-`axum_server::Server::from_listener` takes a listener that a channel of
-pre-accepted streams can stand behind.
 
 ## Required
 
 - [WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md) - `moq-rtc` serves WHIP and WHEP media from the WebRTC hook and pins ICE tuples
-- [TCP acceptor](/quest/m2/one-port/tcp-demux.md) - one listener carries TLS-terminated HTTP, RTMP, and RTMPS
 - [SRT on the shared socket](/quest/m2/one-port/srt-demux.md) - moq-srt drives `srt-protocol` on demuxed packets and the flow table pins its 4-tuples
 
 ## Related
 
-- [UDP demux](/quest/m2/p2p/udp-demux.md) - one socket carries QUIC, with a WebRTC hook for embedders; owned by deferred native P2P in m2
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - the io_uring workers host the UDP demux
 - [Stream transports](/quest/m2/perf/stream/README.md) - the io_uring workers that would host the TCP acceptor later

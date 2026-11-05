@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { fromRequestCode, type RequestCondition, type RequestKind, toRequestCode } from "./error.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-const ALL: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_22];
+const ALL: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22];
 
 const KINDS: RequestKind[] = [
 	"subscribe",
@@ -84,11 +84,11 @@ test("going away is 0x6 on every request", () => {
 	}
 });
 
-test("INVALID_FILTER is registered from draft 22", () => {
+test("INVALID_FILTER is registered from draft 20", () => {
 	for (const version of ALL) {
-		expect(toRequestCode("invalid_filter", "subscribe", version)).toBe(version >= Version.DRAFT_22 ? 0x36 : 0);
+		expect(toRequestCode("invalid_filter", "subscribe", version)).toBe(version >= Version.DRAFT_20 ? 0x36 : 0);
 		expect(fromRequestCode(0x36, "fetch", version)).toBe(
-			version >= Version.DRAFT_22 ? "invalid_filter" : undefined,
+			version >= Version.DRAFT_20 ? "invalid_filter" : undefined,
 		);
 	}
 });

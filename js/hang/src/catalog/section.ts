@@ -1,4 +1,5 @@
 import * as z from "zod/mini";
+import { u53Schema } from "./integers";
 
 /**
  * Wrap a catalog section so a value that isn't one decodes as absent rather than failing the
@@ -34,6 +35,57 @@ export function section<T extends z.ZodMiniType>(schema: T, map: string) {
 }
 
 /**
+ * A catalog map keyed by ID (renditions, data tracks, contributions), refusing the catalog if any
+ * entry is malformed.
+ *
+ * Each entry must parse with `schema`; the issue names the entry. An unknown container
+ * or extension field is not malformed, so it never refuses the catalog. Mirrors the Rust
+ * `deserialize_renditions`.
+ *
+ * @param schema - one entry's schema.
+ * @param kind - what an entry is, naming it in the issue (`rendition`, `contribution`).
+ */
+export function renditions<T extends z.ZodMiniType>(schema: T, kind = "rendition") {
+	return z.pipe(
+		// Not `z.record`, which would drop an ID like `__proto__` that JSON.parse keeps as its own.
+		z.custom<Record<string, unknown>>(
+			(value) => typeof value === "object" && value !== null && !Array.isArray(value),
+		),
+		z.transform((raw, ctx) => {
+			const kept: [string, z.infer<T>][] = [];
+			for (const [id, value] of Object.entries(raw)) {
+				const result = schema.safeParse(value);
+				if (result.success) kept.push([id, result.data]);
+				else
+					ctx.issues.push({
+						code: "custom",
+						message: `malformed ${kind} ${id}: ${result.error.message}`,
+						input: value,
+					});
+			}
+			// fromEntries defines each key as its own property, so `__proto__` stays an ID.
+			return Object.fromEntries(kept) as Record<string, z.infer<T>>;
+		}),
+	);
+}
+
+/**
+ * A nonzero count that fits in 32 bits, such as a picture dimension or sample rate. Branded `u53`
+ * like the wider counts, since every value fits there too.
+ */
+export const countSchema = u53Schema.check(z.positive(), z.lte(0xffff_ffff));
+
+/**
+ * Whether a codec string field is digits in `radix`, at most `max`. Refuses the empty field and
+ * the sign or whitespace `parseInt` alone would take. Mirrors the Rust `codec_number`.
+ */
+export function codecNumber(field: string | undefined, radix: 10 | 16, max: number): boolean {
+	if (field === undefined) return false;
+	const digits = radix === 10 ? /^[0-9]+$/ : /^[0-9a-fA-F]+$/;
+	return digits.test(field) && Number.parseInt(field, radix) <= max;
+}
+
+/**
  * Like {@link section}, for a section identified by one string field (`stats.track`, `echo.path`)
  * rather than a map. Mirrors the Rust `deserialize_named`.
  *
@@ -51,6 +103,25 @@ export function named<T extends z.ZodMiniType>(schema: T, key: string) {
 						value === null ||
 						typeof (value as Record<string, unknown>)[key] !== "string",
 				),
+				z.transform(() => undefined),
+			),
+		]),
+	);
+}
+
+/**
+ * Like {@link section}, for a section recognized by being an object at all (`media`): any other
+ * value, `null` and arrays included, is someone else's and decodes as absent, while an object is
+ * checked by `schema` and fails the catalog when malformed. Mirrors the Rust `deserialize_media`.
+ *
+ * @param schema - the section's own schema, applied when the value is an object.
+ */
+export function object<T extends z.ZodMiniType>(schema: T) {
+	return z.optional(
+		z.union([
+			schema,
+			z.pipe(
+				z.custom<unknown>((value) => typeof value !== "object" || value === null || Array.isArray(value)),
 				z.transform(() => undefined),
 			),
 		]),

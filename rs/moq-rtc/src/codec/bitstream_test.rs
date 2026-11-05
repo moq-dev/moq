@@ -31,7 +31,7 @@ fn annexb(nals: &[&[u8]]) -> Bytes {
 #[tokio::test(start_paused = true)]
 async fn h264_annexb_frame_publishes_catalog_entry() {
 	// Real SPS+PPS pair lifted from moq-mux's avc3 catalog test. Anything
-	// shorter and h264-parser's RBSP decoder runs out of bytes parsing
+	// shorter and the SPS parser runs out of bytes reading
 	// vui_parameters; not worth synthesizing a smaller one by hand.
 	let sps: &[u8] = &[
 		0x67, 0x42, 0xc0, 0x1f, 0xda, 0x01, 0x40, 0x16, 0xe9, 0xb8, 0x08, 0x08, 0x0a, 0x00, 0x00, 0x07, 0xd0, 0x00,
@@ -112,7 +112,7 @@ async fn idle_video_bridges_do_not_gate_audio_catalog() {
 	)
 	.expect("push opus");
 
-	let snapshot = tokio::time::timeout(std::time::Duration::from_millis(1), updates.next())
+	let snapshot = kio::clock::timeout(std::time::Duration::from_millis(1), updates.next())
 		.await
 		.expect("idle video must not gate active audio")
 		.expect("catalog update")

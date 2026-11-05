@@ -89,8 +89,8 @@ fn scope_producer(origin: &moq_net::origin::Producer, name: &str) -> anyhow::Res
 }
 
 /// WHEP client: pull a remote broadcast into the Origin under `target.name` (import),
-/// announced under `epoch`.
-pub async fn connect_import(target: ImportTarget, url: Url, epoch: moq_net::Epoch) -> anyhow::Result<()> {
+/// announced under `instance`.
+pub async fn connect_import(target: ImportTarget, url: Url, instance: moq_net::Instance) -> anyhow::Result<()> {
 	let name = &target.name;
 	let producer = target
 		.origin
@@ -99,7 +99,7 @@ pub async fn connect_import(target: ImportTarget, url: Url, epoch: moq_net::Epoc
 	// The WHEP pull fills the tracks as they arrive; announce up front so viewers
 	// can discover the broadcast while it connects.
 	producer
-		.announce(moq_net::origin::Route::default().with_epoch(epoch))
+		.announce(moq_net::origin::Route::default().with_instance(instance, 0))
 		.context("failed to announce broadcast")?;
 
 	tracing::info!(url = %RedactedUrl::new(&url), %name, "WHEP client pulling");
@@ -121,7 +121,8 @@ pub async fn connect_export(origin: moq_net::origin::Consumer, url: Url, name: S
 		.follow(name.as_str(), None)?
 		.available()
 		.await
-		.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
+		.with_context(|| format!("failed to resolve broadcast `{name}`"))?
+		.context("went offline before serving")?;
 	let source = moq_mux::Source::new(origin, broadcast);
 
 	tracing::info!(url = %RedactedUrl::new(&url), %name, "WHIP client pushing");

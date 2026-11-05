@@ -112,7 +112,7 @@ function invalidJoiningRequestId(kind: RequestKind, version: IetfVersion): numbe
 export function toRequestCode(condition: RequestCondition, kind: RequestKind, version: IetfVersion): number {
 	switch (condition) {
 		case "invalid_filter":
-			return version >= Version.DRAFT_22 ? INVALID_FILTER : INTERNAL_ERROR;
+			return version >= Version.DRAFT_20 ? INVALID_FILTER : INTERNAL_ERROR;
 		case "internal":
 			return INTERNAL_ERROR;
 		case "unauthorized":
@@ -161,7 +161,7 @@ export function fromRequestCode(code: number, kind: RequestKind, version: IetfVe
 			return "not_supported";
 	}
 
-	if (code === INVALID_FILTER && version >= Version.DRAFT_22) return "invalid_filter";
+	if (code === INVALID_FILTER && version >= Version.DRAFT_20) return "invalid_filter";
 	if (code === DOES_NOT_EXIST) return "does_not_exist";
 	if (code === invalidRange(kind)) return "invalid_range";
 	if (code === invalidJoiningRequestId(kind, version)) return "invalid_joining_request_id";

@@ -1,4 +1,0 @@
-# Same style as rs/.rustfmt.toml; rustfmt only finds a config above the file.
-hard_tabs = true
-
-max_width = 120

@@ -28,8 +28,10 @@ def built_dirs(tree: str, metadata: dict) -> set[str]:
     """
     root = metadata["workspace_root"].replace("\\", "/").rstrip("/") + "/"
     members = {
-        (package["name"], f"v{package['version']}"):
-            package["manifest_path"].replace("\\", "/").removeprefix(root).removesuffix("/Cargo.toml")
+        (package["name"], f"v{package['version']}"): package["manifest_path"]
+        .replace("\\", "/")
+        .removeprefix(root)
+        .removesuffix("/Cargo.toml")
         for package in metadata["packages"]
     }
     return {members[key] for key in (tuple(line.split()[:2]) for line in tree.splitlines()) if key in members}
@@ -52,8 +54,19 @@ def main() -> None:
     if not packages:
         sys.exit(f"error: no `-p` packages found in {HARNESS.relative_to(ROOT)}")
 
-    tree = cargo("tree", "--locked", "--target", TARGET, "--edges", "normal,build", "--prefix", "none",
-                 "--format", "{p}", *(arg for p in packages for arg in ("-p", p)))
+    tree = cargo(
+        "tree",
+        "--locked",
+        "--target",
+        TARGET,
+        "--edges",
+        "normal,build",
+        "--prefix",
+        "none",
+        "--format",
+        "{p}",
+        *(arg for p in packages for arg in ("-p", p)),
+    )
     built = built_dirs(tree, json.loads(cargo("metadata", "--locked", "--no-deps", "--format-version", "1")))
 
     # Every `rs/<dir>/**` filter, even one whose crate is gone; other filters are the harness's own inputs.
@@ -61,9 +74,12 @@ def main() -> None:
 
     missing, extra = sorted(built - filtered), sorted(filtered - built)
     for path in missing:
-        print(f"error: {WORKFLOW.relative_to(ROOT)} misses \"{path}/**\", which `just test ts` builds", file=sys.stderr)
+        print(f'error: {WORKFLOW.relative_to(ROOT)} misses "{path}/**", which `just test ts` builds', file=sys.stderr)
     for path in extra:
-        print(f"error: {WORKFLOW.relative_to(ROOT)} filters \"{path}/**\", which `just test ts` does not build", file=sys.stderr)
+        print(
+            f'error: {WORKFLOW.relative_to(ROOT)} filters "{path}/**", which `just test ts` does not build',
+            file=sys.stderr,
+        )
     if missing or extra:
         sys.exit(1)
 

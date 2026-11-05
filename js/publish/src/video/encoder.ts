@@ -8,17 +8,21 @@ import {
 	type Getter,
 	getter,
 	type Inputs,
-	Once,
 	type Readonlys,
 	readonlys,
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { errors, watched } from "../internal";
+import { watched } from "../internal";
 import { Estimator, type Order } from "../order";
+import { Slot } from "../publication";
+import type { RenditionStats } from "../rendition";
 import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
 import { normalizeSource, type Source } from "./types";
+
+// The keyframe interval when the config sets none.
+const DEFAULT_KEYFRAME_INTERVAL = Milli.fromSecond(2 as Second);
 
 /** Cumulative encoder output totals, measured from the chunks the encoder produces. */
 export interface Stats {
@@ -30,6 +34,12 @@ export interface Stats {
 
 	/** Total keyframes encoded while serving. Divide frames by this for the average GOP length. */
 	keyframes: number;
+
+	/** Total captured frames skipped while serving because the encoder still had a frame queued. */
+	skipped: number;
+
+	/** The bitrate the encoder targets now, in bits per second, or undefined while none is resolved. */
+	bitrate?: number;
 }
 
 // TODO support signals?
@@ -54,7 +64,10 @@ export interface Config {
 
 	/**
 	 * The longest interval between keyframes. A joining subscriber forces one sooner once the
-	 * group's deltas outweigh the track's refresh ratio. (default: 2000 milliseconds)
+	 * group's deltas outweigh the track's refresh ratio. The broadcast declares the longest
+	 * interval as its catalog's `media.join.interval` when media is first listed, which then bounds
+	 * every GOP: a live change past it, including to infinite, is capped there until a new network
+	 * broadcast declares again. (default: 2000 milliseconds)
 	 */
 	keyframeInterval?: Milli;
 
@@ -112,7 +125,8 @@ export type EncoderOutput = {
 	// True while encoding: enabled and the rendition has a track, which with the broadcast's
 	// `onDemand` also takes a subscriber.
 	active: Signal<boolean>;
-	// Cumulative output totals (frames, bytes, keyframes) measured while serving.
+	// Cumulative output totals (frames, bytes, keyframes, skipped) measured while serving, and the
+	// target bitrate.
 	stats: Signal<Stats>;
 };
 
@@ -154,7 +168,7 @@ export class Encoder {
 		catalog: new Signal<Catalog.VideoConfig | undefined>(undefined),
 		resolved: new Signal<VideoEncoderConfig | undefined>(undefined),
 		active: new Signal<boolean>(false),
-		stats: new Signal<Stats>({ frames: 0, bytes: 0, keyframes: 0 }),
+		stats: new Signal<Stats>({ frames: 0, bytes: 0, keyframes: 0, skipped: 0 }),
 	};
 	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
@@ -162,10 +176,10 @@ export class Encoder {
 	// The output dimensions of the video in pixels.
 	#dimensions = new Signal<{ width: number; height: number } | undefined>(undefined);
 
-	// The coded-size ceiling to probe for the current broadcast: each side's largest of its accepted
+	// The coded-size ceiling to probe for the current slot: each side's largest of its accepted
 	// ceiling and the current size. A smaller capture resizes in band below it without changing what
 	// the catalog advertises.
-	#coded = new Signal<{ broadcast?: Broadcast; width: number; height: number } | undefined>(undefined);
+	#coded = new Signal<{ slot: Slot<Catalog.VideoConfig>; width: number; height: number } | undefined>(undefined);
 
 	// The config the browser accepted and encoded a probe frame with, and the codec string it reported.
 	// Kept through a re-probe, so the rendition stays in the catalog until the new probe replaces it.
@@ -198,8 +212,6 @@ export class Encoder {
 	 */
 	readonly settled: Computed<boolean>;
 
-	// Each registration keeps its terminal failure even after the public error clears.
-	#failure = new Signal(new Once<Error>());
 	// The capture inputs #runCaptureRecovery last saw, carried across a gap in the source or display.
 	#seen?: {
 		capture?: Capture;
@@ -210,10 +222,12 @@ export class Encoder {
 	#estimator = new Estimator();
 	// The estimator's delay, republished whenever it rises.
 	#estimate = new Signal<Estimator["estimate"]>({});
-	// What this rendition advertised on each broadcast, keyed by the broadcast or, for a local preview,
-	// the encoder. A broadcast keeps a rendition's track when it re-registers, so returning to one
-	// continues its ceiling, maxima, and last config, while another broadcast starts its own.
-	#advertised = new WeakMap<object, Advertised>();
+	// What this rendition keeps for the current network broadcast's track: its ceiling, maxima, last
+	// config, and failure. A network broadcast keeps a rendition's track when it re-registers, so
+	// returning to one continues them, while a new one starts its own.
+	#slot = new Signal<Slot<Catalog.VideoConfig> | undefined>(undefined);
+	// The slot while no network broadcast is serving the rendition, such as for a local preview.
+	#local = new Slot<Catalog.VideoConfig>();
 	// Whether the rendition was disabled since a config last resolved, so it keeps advertising its last
 	// config as disabled until the re-enabled capture resolves a new one. A capture that never reopens
 	// leaves it disabled, which is accurate: no frames are coming.
@@ -270,20 +284,24 @@ export class Encoder {
 				}
 			});
 		}
+		this.#signals.run(this.#runError.bind(this));
 		this.#signals.run(this.#runSettingsRecovery.bind(this));
 		this.#signals.run(this.#runCaptureRecovery.bind(this));
 		this.#signals.run(this.#runRegister.bind(this));
+		this.#signals.run((effect) => {
+			const bitrate = effect.get(this.#out.resolved)?.bitrate;
+			this.#out.stats.update((stats) => ({ ...stats, bitrate }));
+		});
 	}
 
-	// What this rendition advertised on `broadcast`'s track.
-	#track(broadcast: Broadcast | undefined): Advertised {
-		const key = broadcast ?? this;
-		let track = this.#advertised.get(key);
-		if (!track) {
-			track = { bitrate: 0, framerate: 0 };
-			this.#advertised.set(key, track);
-		}
-		return track;
+	// The current slot, read through `effect`.
+	#current(effect: Effect): Slot<Catalog.VideoConfig> {
+		return effect.get(this.#slot) ?? this.#local;
+	}
+
+	// The public error is the current slot's, so a new network broadcast starts without one.
+	#runError(effect: Effect): void {
+		effect.set(this.#out.error, effect.get(this.#current(effect).error));
 	}
 
 	// Count a failure until `effect` reruns with new inputs.
@@ -320,26 +338,31 @@ export class Encoder {
 		this.#rearm();
 	}
 
-	// Clear a latched failure so a fresh registration retries.
+	// Clear a latched failure, so the broadcast serves the rendition again under a fresh track name.
 	#rearm(): void {
-		if (!this.#out.error.peek()) return;
-		this.#out.error.set(undefined);
-		this.#failure.set(new Once<Error>());
+		(this.#slot.peek() ?? this.#local).error.set(undefined);
 	}
 
 	// Register the rendition on the broadcast and drive its catalog + encode loop. Re-registers cleanly
 	// when the broadcast swaps.
 	#runRegister(effect: Effect): void {
-		const failure = effect.get(this.#failure);
 		const broadcast = effect.get(this.in.broadcast);
 		if (!broadcast) return;
 
 		const rendition = broadcast.video(this.name);
-		errors.set(rendition, failure);
 		effect.cleanup(() => rendition.close());
+		effect.proxy(this.#slot, rendition.slot);
+		effect.cleanup(() => this.#slot.set(undefined));
+
+		// The longest GOP, which the broadcast declares as the catalog's join interval.
+		effect.run((effect) => {
+			const interval = effect.get(this.config)?.keyframeInterval ?? DEFAULT_KEYFRAME_INTERVAL;
+			rendition.joinInterval.set(interval);
+		});
 
 		// Publish the resolved catalog config; undefined (until one resolves) leaves it out of the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
+		effect.proxy<RenditionStats | undefined>(rendition.stats, this.out.stats);
 
 		// Encode while enabled and the broadcast hands over the track (with `onDemand`, a subscriber is attached).
 		effect.run((effect) => {
@@ -349,7 +372,7 @@ export class Encoder {
 			effect.set(this.#out.active, enabled && !!track && !error, false);
 			if (!enabled || !track || error) return;
 
-			this.#encode(track, broadcast.order, effect);
+			this.#encode(track, broadcast.order, broadcast.join, effect);
 		});
 
 		// Reserve against the connection while a subscriber is attached. Wait for a ceiling so we
@@ -385,7 +408,7 @@ export class Encoder {
 	}
 
 	// Encode captured frames into the track producer, reconfiguring when the resolved config changes.
-	#encode(track: Moq.Track.Producer, order: Order, effect: Effect): void {
+	#encode(track: Moq.Track.Producer, order: Order, join: Getter<Milli | undefined>, effect: Effect): void {
 		const capture = effect.get(this.in.capture);
 		if (!capture) return;
 
@@ -399,12 +422,15 @@ export class Encoder {
 		// The largest group demand asked for that a keyframe already answers, including one still in
 		// the encoder. A join over the refresh ratio asks for one past the largest, which the next frame
 		// opens; any other join is served by a group already written, encoded with or without demand.
-		let answered: number | undefined;
+		let answered: bigint | undefined;
 		const answer = () => {
 			const wanted = demand.wanted.peek();
-			if (wanted !== undefined) answered = Math.max(answered ?? 0, wanted);
+			if (wanted !== undefined && (answered === undefined || wanted > answered)) answered = wanted;
 		};
-		const covered = () => Math.max(answered ?? -1, track.largest()?.group ?? -1);
+		const covered = () => {
+			const largest = track.largest()?.group ?? -1n;
+			return answered !== undefined && answered > largest ? answered : largest;
+		};
 		let tearingDown = false;
 
 		effect.spawn(async () => {
@@ -424,6 +450,7 @@ export class Encoder {
 					}
 
 					this.#out.stats.update((stats) => ({
+						...stats,
 						frames: stats.frames + 1,
 						bytes: stats.bytes + frame.byteLength,
 						keyframes: key ? stats.keyframes + 1 : stats.keyframes,
@@ -432,7 +459,7 @@ export class Encoder {
 					producer.encode(frame, frame.timestamp as Micro, key);
 					// Including a keyframe the encoder placed on its own, which opened a group too.
 					if (key) answer();
-					if (this.#estimator.write(frame.timestamp, order)) {
+					if (this.#estimator.write(frame.timestamp, order, key)) {
 						this.#estimate.set({ ...this.#estimator.estimate });
 					}
 				},
@@ -489,7 +516,10 @@ export class Encoder {
 							// A pending input means the codec is saturated. Keep capture live instead of
 							// growing a stale encode queue whose lateness becomes permanent catalog delay.
 							// Drop before answering a keyframe request or advancing the frame-rate cursor.
-							if (encoder.encodeQueueSize > 0) continue;
+							if (encoder.encodeQueueSize > 0) {
+								this.#out.stats.update((stats) => ({ ...stats, skipped: stats.skipped + 1 }));
+								continue;
+							}
 
 							// This doesn't need to be reactive.
 							const config = this.config.peek();
@@ -507,7 +537,11 @@ export class Encoder {
 							}
 							lastEncoded = frame.timestamp as Micro;
 
-							const interval = config?.keyframeInterval ?? Milli.fromSecond(2 as Second);
+							// The catalog's declared join interval is the longest GOP, fixed for the network
+							// broadcast, so a live raise past it stops there.
+							const requested = config?.keyframeInterval ?? DEFAULT_KEYFRAME_INTERVAL;
+							const declared = join.peek();
+							const interval = declared === undefined ? requested : Milli(Math.min(requested, declared));
 
 							// Force a keyframe if this is the first frame (no group yet), the GOP elapsed, the
 							// caller asked for one, or a join wants a group past the largest. No spacing: the
@@ -578,10 +612,10 @@ export class Encoder {
 	}
 
 	#abort(error: unknown, track: Moq.Track.Producer): void {
-		if (this.#out.error.peek()) return;
+		const failure = (this.#slot.peek() ?? this.#local).error;
+		if (failure.peek()) return;
 		const cause = error instanceof Error ? error : new Error(String(error));
-		this.#failure.peek().set(cause);
-		this.#out.error.set(cause);
+		failure.set(cause);
 		track.abort(cause);
 	}
 
@@ -593,11 +627,11 @@ export class Encoder {
 	#runCatalog(effect: Effect): void {
 		const estimate = effect.get(this.#estimate);
 		const enabled = effect.get(this.in.enabled) && !effect.get(this.#out.error);
-		const track = this.#track(effect.get(this.in.broadcast));
+		const slot = this.#current(effect);
 		if (!enabled) this.#paused = true;
 		const live = enabled ? effect.get(this.#live) : undefined;
 		if (!live) {
-			const last = this.#paused ? track.last : undefined;
+			const last = this.#paused ? slot.last : undefined;
 			effect.set(this.#out.catalog, last && { ...last, ...estimate, enabled: false });
 			return;
 		}
@@ -606,12 +640,12 @@ export class Encoder {
 		// Advertise the codec string the probe's encoder reported rather than the one we configured,
 		// so it names the profile and level the bitstream actually carries at the ceiling.
 		const { config, reported } = live.detected;
-		track.bitrate = Math.max(track.bitrate, config.bitrate);
-		track.framerate = Math.max(track.framerate, config.framerate);
+		slot.bitrate = Math.max(slot.bitrate, config.bitrate);
+		slot.framerate = Math.max(slot.framerate, config.framerate);
 		const catalog: Catalog.VideoConfig = {
 			codec: reported,
-			bitrate: Catalog.u53(track.bitrate),
-			framerate: track.framerate,
+			bitrate: Catalog.u53(slot.bitrate),
+			framerate: slot.framerate,
 			codedWidth: Catalog.u53(config.width),
 			codedHeight: Catalog.u53(config.height),
 			optimizeForLatency: true,
@@ -621,7 +655,7 @@ export class Encoder {
 			...estimate,
 		};
 
-		track.last = catalog;
+		slot.last = catalog;
 		effect.set(this.#out.catalog, catalog);
 	}
 
@@ -642,9 +676,9 @@ export class Encoder {
 		// Captured now: the run's signal is replaced once a rerun starts.
 		const superseded = effect.abort;
 		effect.spawn(async () => {
-			const track = this.#track(dimensions.broadcast);
+			const { slot } = dimensions;
 			try {
-				let detected: Detected;
+				let detected: Probe;
 				try {
 					detected = await this.#bestCodec(dimensions, target);
 				} catch (err) {
@@ -652,7 +686,7 @@ export class Encoder {
 					// down to fit it, until a smaller capture reruns the probe. Re-probing the ceiling with the
 					// current target, rather than reusing the old probe, still refuses a target the hardware
 					// can't meet and survives a disable that dropped the old probe.
-					const accepted = track.ceiling;
+					const accepted = slot.ceiling;
 					if (
 						superseded.aborted ||
 						!accepted ||
@@ -670,8 +704,8 @@ export class Encoder {
 
 				// Only an accepted probe commits a ceiling, so a size the hardware refuses never sticks.
 				const { width, height } = detected.config;
-				track.ceiling = { width, height };
-				this.#codec.set({ ...detected, broadcast: dimensions.broadcast });
+				slot.ceiling = { width, height };
+				this.#codec.set({ ...detected, slot });
 			} catch (err) {
 				// A newer probe reports its own outcome.
 				if (superseded.aborted) return;
@@ -690,12 +724,12 @@ export class Encoder {
 	#runResolved(effect: Effect): void {
 		if (!effect.get(this.in.enabled)) return;
 
-		// A probe for another broadcast describes another track, so wait for this one's.
-		const broadcast = effect.get(this.in.broadcast);
+		// A probe for another slot describes another track, so wait for this one's.
+		const slot = this.#current(effect);
 		const detected = effect.get(this.#codec);
 		const dimensions = effect.get(this.#dimensions);
 		const target = effect.get(this.#target);
-		if (!detected || detected.broadcast !== broadcast || !dimensions || !target) return;
+		if (!detected || detected.slot !== slot || !dimensions || !target) return;
 
 		// A capture that outgrew the probe encodes scaled down to fit until the re-probe at the new
 		// ceiling lands, so the live config never exceeds what the catalog advertises.
@@ -758,24 +792,24 @@ export class Encoder {
 		effect.set(this.#dimensions, { width, height });
 	}
 
-	// The ceiling to probe: each side's largest of this broadcast's accepted ceiling and the current
-	// size. Reruns once a probe commits a ceiling, which leaves it unchanged.
+	// The ceiling to probe: each side's largest of this slot's accepted ceiling and the current size.
+	// Reruns once a probe commits a ceiling, which leaves it unchanged.
 	#runCeiling(effect: Effect): void {
 		const dimensions = effect.get(this.#dimensions);
 		if (!dimensions) return;
 
-		const broadcast = effect.get(this.in.broadcast);
+		const slot = this.#current(effect);
 		effect.get(this.#codec);
-		const ceiling = this.#track(broadcast).ceiling;
+		const ceiling = slot.ceiling;
 		effect.set(this.#coded, {
-			broadcast,
+			slot,
 			width: Math.max(ceiling?.width ?? 0, dimensions.width),
 			height: Math.max(ceiling?.height ?? 0, dimensions.height),
 		});
 	}
 
 	// Try to determine the best config for the given settings.
-	async #bestCodec(dimensions: { width: number; height: number }, target: Target): Promise<Detected> {
+	async #bestCodec(dimensions: { width: number; height: number }, target: Target): Promise<Probe> {
 		// A list of codecs to try, in order of preference. Only full RFC 6381 strings: Chrome, Firefox,
 		// and Safari all refuse a bare `avc1` or `vp09`, and native players can't decode without the profile.
 		const HARDWARE_CODECS = [
@@ -840,7 +874,7 @@ export class Encoder {
 			// The full config, like moq-video's probe: an encoder may pick its level from the frame rate
 			// or bitrate. The bitrate is the ceiling rather than the grant, so a bandwidth estimate never
 			// re-probes.
-			const config: Detected["config"] = {
+			const config: Probe["config"] = {
 				codec,
 				width: dimensions.width,
 				height: dimensions.height,
@@ -848,13 +882,19 @@ export class Encoder {
 				bitrate: ceiling(codec, dimensions, target),
 				latencyMode: "realtime",
 				hardwareAcceleration,
+				// Annex B keeps the parameter sets in band, so the catalog carries no description and a
+				// keyframe can change the size. The probe refuses an encoder that ignores this.
 				avc: codec.startsWith("avc1") ? { format: "annexb" } : undefined,
 				// @ts-expect-error TypeScript's DOM lib lacks the HEVC codec registration's `hevc` config.
 				hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
 			};
 
 			const { supported } = await VideoEncoder.isConfigSupported(config);
-			if (supported) return { config, reported: await reportedCodec(config) };
+			if (!supported) continue;
+
+			const probed = await probeEncoder(config);
+			if ("reported" in probed) return { config, reported: probed.reported };
+			console.warn(`moq-publish: skipping ${codec}: ${probed.refused}`);
 		}
 
 		throw new Error("no supported codec");
@@ -896,26 +936,16 @@ type Target = {
 };
 
 // A hardware probe result.
-type Detected = {
+type Probe = {
 	// The config the browser accepted and encoded a probe frame with. Its bitrate is the ceiling,
 	// before any bandwidth grant.
 	config: VideoEncoderConfig & { framerate: number; bitrate: number };
 	// The codec string the encoder reported for it, which the catalog advertises.
 	reported: string;
-	// The broadcast the probe ran for; another one starts its own ceiling.
-	broadcast?: Broadcast;
 };
 
-// What a rendition advertised on one broadcast's track.
-type Advertised = {
-	// The coded-size ceiling of the largest accepted probe.
-	ceiling?: { width: number; height: number };
-	// The largest bitrate and frame rate advertised, since the catalog may only raise them.
-	bitrate: number;
-	framerate: number;
-	// The last config published while enabled, which a disabled rendition keeps advertising.
-	last?: Catalog.VideoConfig;
-};
+// A probe and the slot it ran for; another slot starts its own ceiling.
+type Detected = Probe & { slot: Slot<Catalog.VideoConfig> };
 
 // The most this rendition ever sends with `codec`, before a bandwidth grant caps it.
 function ceiling(codec: string, dimensions: { width: number; height: number }, target: Target): number {
@@ -967,16 +997,39 @@ function black(config: VideoEncoderConfig, timestamp: number): VideoFrame {
 	return new VideoFrame(data, { format: "I420", codedWidth: width, codedHeight: height, timestamp });
 }
 
-// Encode one frame with a throwaway encoder and return the codec string it reports, like
+// How many frames the probe encodes. Three are enough for a B-frame to come out of order; one more
+// is headroom.
+const PROBE_FRAMES = 4;
+
+// Encode a few frames with a throwaway encoder and return the codec string it reports, like
 // moq-video's `Config::probe`. The encoder picks the profile and level it actually writes, so reading
 // them back lets the rendition be advertised before a subscriber starts the real encoder, without a
 // claim the first keyframe would contradict. It closes before the config resolves, so it never
 // overlaps the first real encoder; only a re-probe while serving briefly holds two sessions.
-async function reportedCodec(config: VideoEncoderConfig): Promise<string> {
+//
+// Refuses an encoder whose output the track can't carry, so the caller moves on to the next codec:
+// - Output that reorders. The catalog declares none, but Firefox's software H.264 still emits
+//   B-frames for High and Main under realtime latency.
+// - H.264 or HEVC that isn't Annex B. Safari 26 accepts `hevc: { format: "annexb" }` but emits
+//   length-prefixed NAL units with an hvcC description, which no subscriber can decode. A
+//   description means length-prefixed output (per the AVC and HEVC WebCodecs registrations), which
+//   also catches a four-byte length that happens to read as a start code, such as `00 00 01 2c`.
+async function probeEncoder(config: VideoEncoderConfig): Promise<{ reported: string } | { refused: string }> {
 	let reported: string | undefined;
+	let reordered = false;
+	let last: number | undefined;
+	let first: Uint8Array | undefined;
+	let described = false;
 	const encoder = new VideoEncoder({
-		output: (_chunk, metadata) => {
+		output: (chunk, metadata) => {
 			reported ??= metadata?.decoderConfig?.codec;
+			if (last !== undefined && chunk.timestamp <= last) reordered = true;
+			last = chunk.timestamp;
+			if (metadata?.decoderConfig?.description) described = true;
+			if (!first) {
+				first = new Uint8Array(chunk.byteLength);
+				chunk.copyTo(first);
+			}
 		},
 		// flush() rejects with the same error.
 		error: () => {},
@@ -985,18 +1038,21 @@ async function reportedCodec(config: VideoEncoderConfig): Promise<string> {
 	try {
 		encoder.configure(config);
 
-		// Mid-gray, since the picture only has to make the encoder emit its config.
+		// Mid-gray, since the pictures only have to make the encoder emit its config and pick an order.
 		const { width, height } = config;
-		const frame = new VideoFrame(new Uint8Array((width * height * 3) / 2).fill(0x80), {
-			format: "I420",
-			codedWidth: width,
-			codedHeight: height,
-			timestamp: 0,
-		});
-		try {
-			encoder.encode(frame, { keyFrame: true });
-		} finally {
-			frame.close();
+		const data = new Uint8Array((width * height * 3) / 2).fill(0x80);
+		for (let i = 0; i < PROBE_FRAMES; i++) {
+			const frame = new VideoFrame(data, {
+				format: "I420",
+				codedWidth: width,
+				codedHeight: height,
+				timestamp: Math.round((i * 1_000_000) / (config.framerate ?? 30)),
+			});
+			try {
+				encoder.encode(frame, { keyFrame: i === 0 });
+			} finally {
+				frame.close();
+			}
 		}
 
 		await encoder.flush();
@@ -1005,7 +1061,22 @@ async function reportedCodec(config: VideoEncoderConfig): Promise<string> {
 	}
 
 	if (!reported) throw new Error(`${config.codec} encoder reported no codec string`);
-	return reported;
+	if (reordered) return { refused: "its encoder reorders frames despite realtime latency" };
+	if (requestsAnnexB(config.codec) && (described || !(first && startsWithStartCode(first)))) {
+		return { refused: "its encoder ignored the requested Annex B format" };
+	}
+	return { reported };
+}
+
+// The codecs the probe configures for Annex B output.
+function requestsAnnexB(codec: string): boolean {
+	return codec.startsWith("avc1") || codec.startsWith("hev1");
+}
+
+// Whether `data` opens with an Annex B start code: 00 00 01, with an optional leading zero byte.
+function startsWithStartCode(data: Uint8Array): boolean {
+	if (data[0] !== 0 || data[1] !== 0) return false;
+	return data[2] === 1 || (data[2] === 0 && data[3] === 1);
 }
 
 // Scale the bitrate for more efficient codecs, relative to H.264.

@@ -2,7 +2,7 @@
 //! Sender identity comes from the broadcast, not the payload.
 
 use crate::Error;
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_net::{broadcast, track};
 use std::{
 	collections::VecDeque,
@@ -21,10 +21,10 @@ pub const HISTORY: Duration = Duration::from_secs(10);
 pub type Event = moq_json::window::Event<String>;
 
 /// Poll-driven wall-clock deadline, the same shape kio::time used before that
-/// module left kio. Built on web-async so tokio::time::pause advances it in tests.
+/// module left kio. Built on kio's clock so tokio::time::pause advances it in tests.
 struct Deadline {
 	at: Option<Instant>,
-	sleep: Option<Pin<Box<moq_clock::Sleep>>>,
+	sleep: Option<Pin<Box<kio::clock::Sleep>>>,
 }
 
 impl Deadline {
@@ -44,8 +44,8 @@ impl Deadline {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let Some(at) = self.at else { return Poll::Pending };
-		let sleep = self.sleep.get_or_insert_with(|| Box::pin(moq_clock::sleep_until(at)));
-		if at <= moq_clock::now() {
+		let sleep = self.sleep.get_or_insert_with(|| Box::pin(kio::clock::sleep_until(at)));
+		if at <= kio::clock::now() {
 			return Poll::Ready(());
 		}
 		waiter.poll_future(sleep.as_mut())
@@ -92,12 +92,12 @@ impl Publisher {
 		self.prune()?;
 		self.producer
 			.push(moq_net::Timed::from(&text.to_owned()).at(moq_net::Timestamp::now()))?;
-		self.expires.push_back(moq_clock::now() + HISTORY);
+		self.expires.push_back(kio::clock::now() + HISTORY);
 		Ok(())
 	}
 
 	fn prune(&mut self) -> Result<(), Error> {
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let count = self.expires.iter().take_while(|expires| **expires <= now).count();
 		if count == 0 {
 			return Ok(());
@@ -108,16 +108,13 @@ impl Publisher {
 		Ok(())
 	}
 
-	/// Poll until the oldest retained messages expire; drive this alongside incoming sends.
+	/// Prune the oldest retained messages once they expire. Drive this alongside incoming sends,
+	/// and again after each expiry while the publisher is open.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_expire(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		self.deadline.set(self.expires.front().copied());
 		ready!(self.deadline.poll(waiter));
 		Poll::Ready(self.prune())
-	}
-
-	/// Wait until the oldest retained messages expire; call again while the publisher is open.
-	pub async fn expire(&mut self) -> Result<(), Error> {
-		kio::wait(|waiter| self.poll_expire(waiter)).await
 	}
 
 	/// Finish the track, preserving the final retained window for current readers.
@@ -140,8 +137,11 @@ enum State {
 
 impl Subscriber {
 	/// Subscribe to the newest retained window on a broadcast.
+	#[cfg(feature = "async")]
 	pub async fn subscribe(broadcast: &broadcast::Consumer) -> Result<Self, Error> {
-		Ok(Self::new(broadcast.track(TRACK)?.subscribe(None).await?))
+		let track = broadcast.track(TRACK)?;
+		let subscribing = track.subscribe(None).into_inner();
+		Ok(Self::new(kio::wait(|waiter| subscribing.poll_ok(waiter)).await?))
 	}
 
 	/// Read window changes from an existing subscription, starting at the newest window.
@@ -151,8 +151,10 @@ impl Subscriber {
 		}
 	}
 
-	/// Poll the next window change and when its frame was sent, returning errors separately from
-	/// clean completion.
+	/// The next window change and when its frame was sent, or `None` on clean completion.
+	///
+	/// A message first seen in a later window's header carries that header's time, not its send time.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<Event>>, Error>> {
 		if let State::Positioning(pending) = &mut self.state {
 			let track = pending.as_mut().expect("positioning holds the track");
@@ -170,13 +172,6 @@ impl Subscriber {
 			unreachable!("positioned above");
 		};
 		Poll::Ready(Ok(ready!(consumer.poll_next(waiter))?))
-	}
-
-	/// Wait for the next window change and when its frame was sent, or None on clean completion.
-	///
-	/// A message first seen in a later window's header carries that header's time, not its send time.
-	pub async fn recv(&mut self) -> Result<Option<moq_net::Timed<Event>>, Error> {
-		kio::wait(|waiter| self.poll_recv(waiter)).await
 	}
 }
 
@@ -294,7 +289,13 @@ mod tests {
 		let relay = origin(2);
 		let _link = link(&publisher, &relay).await;
 		let consumer = relay.consume();
-		let remote = consumer.follow("room", None).unwrap().available().await.unwrap();
+		let remote = consumer
+			.follow("room", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 
 		// A first reader warms the relay's copy with the first window.
 		{
@@ -316,7 +317,8 @@ mod tests {
 		chat.push(moq_net::Timed::from(&"second".to_owned()).at(at(1))).unwrap();
 
 		// A delay budget long enough that the backlog is still worth delivering.
-		let subscription = track::Subscription::default().with_max_delay(Duration::from_secs(10));
+		let subscription =
+			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(10)));
 		let mut late = Subscriber::new(remote.track(TRACK).unwrap().subscribe(subscription).await.unwrap());
 		assert_eq!(
 			late.recv().await.unwrap().map(|e| (e.value, e.at)),

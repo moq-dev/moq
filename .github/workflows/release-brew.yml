@@ -15,7 +15,9 @@ name: release-brew
 # hour.
 
 on:
-  workflow_run:
+  # Publishes only a protected release tag at the run's commit; see
+  # "Require a release tag at the run's commit".
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows:
       - moq-relay
       - moq-cli
@@ -155,7 +157,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: moq-dev/homebrew-tap
-          token: ${{ steps.token.outputs.token }}
+          # The next step pushes the formula with this credential.
+          token: ${{ steps.token.outputs.token }} # zizmor: ignore[artipacked]
           path: homebrew-tap
 
       - name: Commit and push formula

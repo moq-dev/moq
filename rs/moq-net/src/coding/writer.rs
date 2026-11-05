@@ -107,6 +107,7 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	/// cancelled `encode` must not be retried with the same message, or two
 	/// copies go on the wire; resume with [`Self::poll_flush`] (or any later
 	/// write) instead.
+	#[cfg(test)]
 	pub async fn encode<T: Encode<V> + Debug>(&mut self, msg: &T) -> Result<(), Error>
 	where
 		V: Into<Form> + Copy,
@@ -116,6 +117,7 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	}
 
 	/// Encode a varint to the stream, with the same cancellation rules as [`Self::encode`].
+	#[cfg(test)]
 	pub async fn varint(&mut self, value: u64) -> Result<(), Error>
 	where
 		V: Into<Form> + Copy,
@@ -135,21 +137,15 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 			.map_err(|err| self.version.transport_error(err))
 	}
 
-	/// Poll until the entire `Buf` has been written to the stream.
+	/// Write the entire `Buf` to the stream.
 	///
 	/// NOTE: This can avoid performing a copy when using `Bytes`.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_write_all<Buf: bytes::Buf>(&mut self, waiter: &kio::Waiter, buf: &mut Buf) -> Poll<Result<(), Error>> {
 		while buf.has_remaining() {
 			ready!(self.poll_write(waiter, buf))?;
 		}
 		Poll::Ready(Ok(()))
-	}
-
-	/// Write the entire `Buf` to the stream.
-	///
-	/// NOTE: This can avoid performing a copy when using `Bytes`.
-	pub async fn write_all<Buf: bytes::Buf + Send>(&mut self, buf: &mut Buf) -> Result<(), Error> {
-		kio::wait(|waiter| self.poll_write_all(waiter, buf)).await
 	}
 
 	/// Whether every buffered byte has hit the stream, so a FIN would not cut a message short.
@@ -182,6 +178,14 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 		}
 	}
 
+	/// Reset the stream with `code`, for a condition no [`StreamError`] names, which the
+	/// caller has already looked up in the negotiated protocol's registry.
+	pub(crate) fn reset(mut self, code: u32) {
+		if let Some(mut stream) = self.stream.take() {
+			stream.reset(code);
+		}
+	}
+
 	/// Finish the stream and wait for the peer to acknowledge everything written.
 	///
 	/// [`Self::finish`] alone is not enough to deliver a final message. A stream that has sent
@@ -193,21 +197,35 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	/// A message still partly buffered resets the stream with [`Error::Cancel`] instead: a FIN
 	/// would hand the peer a truncated message, and flushing the rest could wait forever on
 	/// credit the peer withholds.
-	pub async fn close(mut self) -> Result<(), Error> {
+	#[cfg(test)]
+	pub async fn close(self) -> Result<(), Error>
+	where
+		V: Clone,
+	{
+		let mut closing = self.closing()?;
+		kio::wait(|waiter| closing.poll(waiter)).await
+	}
+
+	/// Finish the stream, returning the wait for the peer's acknowledgement: [`Self::close`]
+	/// for a caller that polls.
+	pub fn closing(mut self) -> Result<Closing<S, V>, Error>
+	where
+		V: Clone,
+	{
 		if !self.is_flushed() {
 			self.abort(&Error::Cancel);
 			return Err(Error::Cancel);
 		}
-		let Some(mut stream) = self.stream.take() else {
-			return Ok(());
-		};
-
-		stream.finish().map_err(|err| self.version.transport_error(err))?;
-		let version = &self.version;
-		kio::wait(|waiter| stream.poll_closed(waiter).map_err(|err| version.transport_error(err))).await
+		let version = self.version.clone();
+		let mut stream = self.stream.take();
+		if let Some(stream) = &mut stream {
+			stream.finish().map_err(|err| version.transport_error(err))?;
+		}
+		Ok(Closing { stream, version })
 	}
 
-	/// Poll until the stream is closed, or the [Self::finish] is acknowledged by the peer.
+	/// Resolves once the stream is closed, or the [Self::finish] is acknowledged by the peer.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let version = &self.version;
 		self.stream
@@ -224,11 +242,6 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 		let res = ready!(self.poll_closed(waiter));
 		self.stream = None;
 		Poll::Ready(res)
-	}
-
-	/// Wait for the stream to be closed, or the [Self::finish] to be acknowledged by the peer.
-	pub async fn closed(&mut self) -> Result<(), Error> {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
 	/// Set the priority within the stream's send group, or session-wide when ungrouped.
@@ -255,6 +268,26 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	}
 }
 
+/// A [`Writer`] whose stream has sent its FIN, waiting for the peer to acknowledge it.
+///
+/// Dropping it never resets the stream, so what was written still arrives.
+pub struct Closing<S, V> {
+	stream: Option<S>,
+	version: V,
+}
+
+impl<S: crate::transport::poll::SendStream, V: StreamCodes> Closing<S, V> {
+	/// Resolves once the peer acknowledges everything written, or the stream dies.
+	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let Some(stream) = &self.stream else {
+			return Poll::Ready(Ok(()));
+		};
+		stream
+			.poll_closed(waiter)
+			.map_err(|err| self.version.transport_error(err))
+	}
+}
+
 impl<S: crate::transport::poll::SendStream> Writer<S, ietf::Version> {
 	/// Encode `msg` into the write buffer as `[id][size][body]`, to be sent by
 	/// [`Self::poll_flush`]. The type and body go in together or not at all, so a failed encode
@@ -274,6 +307,7 @@ impl<S: crate::transport::poll::SendStream> Writer<S, ietf::Version> {
 
 	/// Encode an IETF `Message` to the stream as `[type_id][size][body]`, with the same
 	/// all-or-nothing buffering as [`Self::buffer_message`] and cancellation rules as [`Self::encode`].
+	#[cfg(test)]
 	pub async fn encode_message<'m, T: ietf::Message<'m>>(&mut self, msg: &T) -> Result<(), Error> {
 		self.buffer_message(T::ID, msg)?;
 		kio::wait(|waiter| self.poll_flush(waiter)).await
@@ -336,7 +370,7 @@ mod tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn raw_payload_stop_uses_the_negotiated_registry() {
 		for (version, expected) in [
 			(
@@ -375,12 +409,12 @@ mod tests {
 			writer.set_priority(send_order.into());
 		}
 
-		assert_eq!(log.priorities(), (0u8..=255).collect::<Vec<_>>());
+		assert_eq!(log.priorities(), (0i64..=255).collect::<Vec<_>>());
 	}
 
 	/// A message the stream has not taken whole cannot be finished, so closing resets rather
 	/// than hand the peer a truncated message.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn closing_an_unflushed_message_resets() {
 		let log = Log::default();
 		let budget = kio::Producer::new(0);
@@ -474,7 +508,7 @@ mod tests {
 		writer
 			.buffer(&lite::Track {
 				broadcast: crate::Path::from_static("test"),
-				epoch: None,
+				instance: None,
 				track: "video".into(),
 			})
 			.unwrap();

@@ -127,6 +127,7 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 			timestamp: audio.out.timestamp.peek(),
 			stalled: audio.out.stalled.peek(),
 			delay: sync.out.delay.peek(),
+			playerUnderruns: audio.out.stats.peek()?.underruns,
 			rtt: watch.player.in.probe.peek()?.rtt,
 			jitter: audio.source.out.config.peek()?.jitter,
 			renditionDelay: audio.source.out.config.peek()?.delay,

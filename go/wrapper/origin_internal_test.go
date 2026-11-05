@@ -66,7 +66,7 @@ func TestRequestsKeepTheOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RequestedBroadcast err = %v, want a request", err)
 	}
-	prepared, err := request.Prepare(MintEpoch())
+	prepared, err := request.Prepare()
 	if err != nil {
 		t.Fatal(err)
 	}

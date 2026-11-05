@@ -7,7 +7,7 @@ use axum::{
 use axum_server::accept::Accept;
 use futures::{future::BoxFuture, task::AtomicWaker};
 use http_body::Body as _;
-use moq_clock::{Instant, Sleep};
+use kio::clock::{Instant, Sleep};
 use std::{
 	io,
 	pin::Pin,
@@ -56,7 +56,7 @@ where
 		let since = Instant::now();
 		Box::pin(async move {
 			let (inner, service) = match timeout.and_then(|timeout| since.checked_add(timeout)) {
-				Some(deadline) => moq_clock::timeout_at(deadline, accepted)
+				Some(deadline) => kio::clock::timeout_at(deadline, accepted)
 					.await
 					.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "HTTP connection idle deadline"))??,
 				None => accepted.await?,
@@ -70,7 +70,7 @@ where
 				}),
 				wake: AtomicWaker::new(),
 			});
-			let timer = Box::pin(moq_clock::sleep(Duration::ZERO));
+			let timer = Box::pin(kio::clock::sleep(Duration::ZERO));
 			Ok((
 				Io {
 					inner,
@@ -185,6 +185,17 @@ pub(crate) struct Io<I> {
 	timer: Pin<Box<Sleep>>,
 }
 impl<I> Io<I> {
+	/// The stream underneath, once HTTP has handed it to another protocol and no longer
+	/// needs the idle deadline.
+	#[cfg(feature = "websocket")]
+	#[allow(
+		dead_code,
+		reason = "the http_idle benchmark includes this module without the WebSocket route"
+	)]
+	pub(crate) fn into_inner(self) -> I {
+		self.inner
+	}
+
 	fn poll_deadline(&mut self, cx: &mut Context<'_>) -> io::Result<()> {
 		self.state.wake.register(cx.waker());
 		let activity = self.state.activity.lock().unwrap_or_else(PoisonError::into_inner);
@@ -229,10 +240,6 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for Io<I> {
 	unused_imports,
 	reason = "The benchmark includes this private module without a test harness"
 )]
-#[allow(
-	clippy::disallowed_methods,
-	reason = "tests read the host clock directly; an allow because the benchmark compiles them out"
-)]
 mod tests {
 	use super::*;
 	use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -270,7 +277,7 @@ mod tests {
 			timeout: Some(TIMEOUT),
 		};
 		let start = Instant::now();
-		let result = tokio::time::timeout(TIMEOUT * 2, acceptor.accept(server, ()))
+		let result = kio::clock::timeout(TIMEOUT * 2, acceptor.accept(server, ()))
 			.await
 			.expect("stalled handshake survived its deadline");
 		assert_eq!(result.err().unwrap().kind(), io::ErrorKind::TimedOut);
@@ -419,7 +426,7 @@ mod tests {
 				continue;
 			}
 			let start = Instant::now();
-			let result = tokio::time::timeout(TIMEOUT * 2, serving)
+			let result = kio::clock::timeout(TIMEOUT * 2, serving)
 				.await
 				.expect("idle HTTP/2 connection survived its deadline")
 				.unwrap();

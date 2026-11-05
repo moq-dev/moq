@@ -14,25 +14,29 @@ categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
 default = ["server"]
-server = ["dep:axum"]
+# The import and export gateways, which drive HTTP fetches and background watchers as async code.
+async = ["kio/async", "moq-mux/async"]
+server = ["async", "dep:axum", "dep:http-body"]
 
 [dependencies]
 # Only needed by the HTTP export server (gated by `server`).
 axum = { workspace = true, optional = true }
 bytes = { workspace = true }
 hang = { workspace = true }
+http-body = { workspace = true, optional = true }
 humantime = { workspace = true }
-kio = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 m3u8-rs = "6"
-moq-clock = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 percent-encoding = { workspace = true }
 rand = { workspace = true }
-reqwest = { workspace = true, features = ["rustls", "gzip"] }
+reqwest = { workspace = true, features = ["rustls-no-provider", "gzip"] }
+rind = { workspace = true }
+# Installed as rustls's process default when the host installed none, since reqwest reads it.
+rind-rustls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
@@ -40,13 +44,24 @@ url = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = { workspace = true }
 moq-archive = { path = "../moq-archive" }
+# Compile the gateways for the tests, with or without the `server` feature.
+moq-hls = { path = ".", default-features = false, features = ["async"] }
 moq-json = { path = "../moq-json" }
-moq-tokio = { path = "../moq-tokio", default-features = false, features = ["tcp", "quic", "aws-lc-rs"] }
+moq-tokio = { path = "../moq-tokio", default-features = false, features = ["tcp", "quic"] }
+mp4-atom = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 tracing-test = { workspace = true }
+workspace-hack = { path = "../workspace-hack" }
+
+[[bench]]
+name = "contributions"
+harness = false
+required-features = ["server"]
 
 [lints]
 workspace = true

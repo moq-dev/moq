@@ -5,8 +5,9 @@ if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
     exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
 fi
 
-# Full check for the Kotlin packages: regenerate the bindings + native lib
-# (sh/kt/generate.sh), then run the raw-bindings and wrapper JVM tests.
+# Full check for the Kotlin packages: check formatting (sh/kt/format.sh),
+# regenerate the bindings + native lib (sh/kt/generate.sh), then run the
+# raw-bindings and wrapper JVM tests.
 #
 # Unlike generation, this needs a JDK and Gradle. Both ship in the `nix
 # develop` dev shell (see flake.nix ktDeps), so a missing one is an error
@@ -17,6 +18,9 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KT_DIR="$(cd "$SCRIPT_DIR/../../kt" && pwd)"
 
+# Formatting needs only ktfmt, so it fails before the slower generation.
+bash "$SCRIPT_DIR/format.sh" --check
+
 bash "$SCRIPT_DIR/generate.sh"
 
 if ! command -v java >/dev/null 2>&1; then
@@ -24,9 +28,11 @@ if ! command -v java >/dev/null 2>&1; then
     exit 1
 fi
 
-GRADLE_CMD="${GRADLE_CMD:-$(command -v gradle || true)}"
-if [[ -z "$GRADLE_CMD" ]]; then
-    echo "kt check: gradle not on PATH; run 'nix develop' or use 'just kt generate' to only regenerate bindings" >&2
+# `type -P` resolves only executables, so an inherited shell function named gradle can neither
+# stand in for Gradle nor make the gradle() wrapper below call itself.
+gradle_name="${GRADLE_CMD:-gradle}"
+if ! GRADLE_CMD="$(type -P "$gradle_name")"; then
+    echo "kt check: Gradle executable '$gradle_name' not found; run 'nix develop' or use 'just kt generate' to only regenerate bindings" >&2
     exit 1
 fi
 

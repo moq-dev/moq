@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use futures::TryStreamExt;
-use moq_clock::sleep;
+use kio::clock::sleep;
 use moq_net::track::Position;
 use moq_net::{Timescale, Timestamp, broadcast, group, track};
 use object_store::ObjectStoreExt;
@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 
 use super::*;
 use crate::Info;
-use crate::layout::{At, Entry, Object};
+use crate::layout::{At, Object};
 use crate::mock::Mock;
 
 const SECOND: Duration = Duration::from_secs(1);
@@ -31,8 +31,12 @@ fn spawn(store: &Store<Mock>, broadcast: &broadcast::Producer, config: Config) -
 	tokio::spawn(Producer::new(store.clone(), broadcast.consume(), config).run())
 }
 
+/// A millisecond source track with no publisher max age, so the recorder reaches superseded
+/// groups and only its own max delay bounds the wait for a missing one.
 fn timed() -> track::Info {
-	track::Info::default().with_timescale(Timescale::MILLI)
+	track::Info::default()
+		.with_timescale(Timescale::MILLI)
+		.with_max_age(None)
 }
 
 fn ms(ms: u64) -> Timestamp {
@@ -63,7 +67,7 @@ async fn subscribed(track: &track::Producer) {
 }
 
 async fn finished(task: JoinHandle<Result<()>>) {
-	moq_clock::timeout(Duration::from_secs(1000), task)
+	kio::clock::timeout(Duration::from_secs(1000), task)
 		.await
 		.expect("the producer ends with its broadcast")
 		.unwrap()
@@ -109,8 +113,8 @@ async fn objects(store: &Store<Mock>, track: &str, timed: bool) -> BTreeMap<Stri
 	objects
 }
 
-/// Each object's entries as `(sequence, form, frames)`, where a frame is `pts/payload`.
-fn contents(objects: &BTreeMap<String, Object>) -> Vec<Vec<(u64, &'static str, Vec<String>)>> {
+/// Each object's entries as `(sequence, frames)`, where a frame is `pts/payload`.
+fn contents(objects: &BTreeMap<String, Object>) -> Vec<Vec<(u64, Vec<String>)>> {
 	objects
 		.values()
 		.map(|object| {
@@ -118,11 +122,8 @@ fn contents(objects: &BTreeMap<String, Object>) -> Vec<Vec<(u64, &'static str, V
 				.entries
 				.iter()
 				.map(|entry| {
-					let (form, frames) = match entry {
-						Entry::Group { frames, .. } => ("group", frames.as_slice()),
-						Entry::Datagram { frame, .. } => ("datagram", std::slice::from_ref(frame)),
-					};
-					let frames = frames
+					let frames = entry
+						.frames
 						.iter()
 						.map(|frame| {
 							let payload = String::from_utf8(frame.payload.to_vec()).unwrap();
@@ -132,7 +133,7 @@ fn contents(objects: &BTreeMap<String, Object>) -> Vec<Vec<(u64, &'static str, V
 							}
 						})
 						.collect();
-					(entry.sequence(), form, frames)
+					(entry.sequence, frames)
 				})
 				.collect()
 		})
@@ -180,8 +181,8 @@ async fn timed_objects_cut_at_group_boundaries_by_duration() {
 	assert_eq!(
 		contents(&objects)[0],
 		[
-			(0, "group", vec!["0/a".to_string(), "500/b".to_string()]),
-			(1, "group", vec!["1000/a".to_string(), "1500/b".to_string()]),
+			(0, vec!["0/a".to_string(), "500/b".to_string()]),
+			(1, vec!["1000/a".to_string(), "1500/b".to_string()]),
 		]
 	);
 	let info = Info::decode(&get(&store, "video/.info").await.unwrap()).unwrap();
@@ -219,10 +220,7 @@ async fn a_lost_group_is_a_gap_that_never_stalls_later_groups() {
 	);
 	assert_eq!(
 		contents(&stored)[1],
-		[
-			(2, "group", vec!["2000/c".to_string()]),
-			(3, "group", vec!["3000/d".to_string()]),
-		]
+		[(2, vec!["2000/c".to_string()]), (3, vec!["3000/d".to_string()]),]
 	);
 
 	// The lost group arriving too late stays a gap.
@@ -258,10 +256,7 @@ async fn a_fresh_track_waits_for_a_group_below_its_first_arrival() {
 	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [key(1, 0, 1000)]);
 	assert_eq!(
 		contents(&stored)[0],
-		[
-			(1, "group", vec!["1000/b".to_string()]),
-			(2, "group", vec!["2000/c".to_string()]),
-		]
+		[(1, vec!["1000/b".to_string()]), (2, vec!["2000/c".to_string()]),]
 	);
 
 	// Group 0 arriving after that is too late.
@@ -303,7 +298,7 @@ async fn an_oversized_timed_group_splits_into_ordered_unique_keys() {
 	let stored: Vec<String> = contents(&objects)
 		.into_iter()
 		.flatten()
-		.flat_map(|(_, _, frames)| frames)
+		.flat_map(|(_, frames)| frames)
 		.collect();
 	let expected: Vec<String> = frames.iter().map(|(pts, payload)| format!("{pts}/{payload}")).collect();
 	assert_eq!(stored, expected);
@@ -335,10 +330,7 @@ async fn an_open_untimed_group_is_cut_at_each_flush() {
 	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [head, untimed(0, 1)]);
 	assert_eq!(
 		contents(&stored),
-		[
-			[(0, "group", vec!["a".to_string()])],
-			[(0, "group", vec!["b".to_string()])]
-		]
+		[[(0, vec!["a".to_string()])], [(0, vec!["b".to_string()])]]
 	);
 
 	open.finish().unwrap();
@@ -386,9 +378,9 @@ async fn an_untimed_group_splits_by_wall_clock() {
 	assert_eq!(
 		contents(&stored),
 		[
-			vec![(0, "group", strings(&["a", "b", "c", "d"]))],
-			vec![(0, "group", strings(&["e"]))],
-			vec![(1, "group", strings(&["f"]))],
+			vec![(0, strings(&["a", "b", "c", "d"]))],
+			vec![(0, strings(&["e"]))],
+			vec![(1, strings(&["f"]))],
 		]
 	);
 }
@@ -470,7 +462,7 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 	let frames: Vec<String> = contents(&stored)
 		.into_iter()
 		.flatten()
-		.flat_map(|(_, _, frames)| frames)
+		.flat_map(|(_, frames)| frames)
 		.collect();
 	assert_eq!(frames, ["0/a", "100/b", "200/c", "300/d"]);
 
@@ -483,7 +475,7 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 	let frames: Vec<String> = contents(&stored)
 		.into_iter()
 		.flatten()
-		.flat_map(|(_, _, frames)| frames)
+		.flat_map(|(_, frames)| frames)
 		.collect();
 	assert_eq!(frames, ["a", "b", "c", "d"]);
 	assert!(complete(&store).await);
@@ -526,7 +518,7 @@ async fn a_partial_group_resumes_after_its_last_stored_frame() {
 	let frames: Vec<String> = contents(&stored)
 		.into_iter()
 		.flatten()
-		.flat_map(|(_, _, frames)| frames)
+		.flat_map(|(_, frames)| frames)
 		.collect();
 	assert_eq!(frames, ["0/a", "500/c", "600/d"]);
 	assert_eq!(end(&store, "video").await, Some(End::Finish(At { group: 2, frame: 0 })));
@@ -683,36 +675,31 @@ async fn a_track_added_mid_recording_is_recorded() {
 	assert!(complete(&store).await);
 }
 
+/// An archive records stream tracks only: a datagram track of the same name leaves no trace.
 #[tokio::test(start_paused = true)]
-async fn groups_and_datagrams_keep_their_form_through_an_abrupt_end() {
+async fn a_datagram_track_is_not_recorded() {
 	let store = store();
 	let broadcast = broadcast::Info::new().produce();
-	let mut track = broadcast.create_track("mixed", timed()).unwrap();
+	let video = broadcast.create_track("video", timed()).unwrap();
+	let mut datagrams = broadcast
+		.create_datagrams(
+			"video",
+			moq_net::datagram::Info::default().with_timescale(Timescale::MILLI),
+		)
+		.unwrap();
 	let task = spawn(&store, &broadcast, config());
-	subscribed(&track).await;
-
-	group(&track, 0, &[(0, "g0")]);
-	track.insert_datagram(1, ms(100), "d1").unwrap();
-	group(&track, 2, &[(200, "g2")]);
-	track.insert_datagram(3, ms(300), "d3").unwrap();
-	track.insert_datagram(4, ms(400), "d4").unwrap();
-	// Ends at once: every received datagram is stored before the end.
-	track.finish().unwrap();
+	subscribed(&video).await;
+	datagrams.append(ms(0), "datagram").unwrap();
+	group(&video, 0, &[(0, "a")]);
+	settle().await;
+	datagrams.finish();
+	video.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
 
-	let stored = objects(&store, "mixed", true).await;
-	assert_eq!(
-		contents(&stored),
-		[[
-			(0, "group", vec!["0/g0".to_string()]),
-			(1, "datagram", vec!["100/d1".to_string()]),
-			(2, "group", vec!["200/g2".to_string()]),
-			(3, "datagram", vec!["300/d3".to_string()]),
-			(4, "datagram", vec!["400/d4".to_string()]),
-		]]
-	);
-	assert_eq!(end(&store, "mixed").await, Some(End::Finish(At { group: 5, frame: 0 })));
+	// The stream track's lone frame, and nothing of the datagram's.
+	let video = objects(&store, "video", true).await;
+	assert_eq!(contents(&video), [vec![(0, vec!["0/a".to_string()])]]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -730,7 +717,7 @@ async fn markers_wait_for_the_listing_to_end() {
 	last.write_frame(ms(1000), "b").unwrap();
 	last.write_frame(ms(1100), "c").unwrap();
 	// A mid-group end: frames 0 and 1 of group 1.
-	video.finish_at(Position { group: 1, frame: 2 }).unwrap();
+	video.finish_at(Position { group: 1, frame: 2 }, None).unwrap();
 	last.finish().unwrap();
 	settle().await;
 	sleep(SECOND).await;
@@ -748,6 +735,32 @@ async fn markers_wait_for_the_listing_to_end() {
 	// An error end is recorded, and the broadcast still completes.
 	assert_eq!(end(&store, "audio").await, Some(End::Error(64 + 7)));
 	assert!(complete(&store).await);
+}
+
+/// A track that ends with an error records that error, though every group below the end stays.
+#[tokio::test(start_paused = true)]
+async fn an_errored_end_records_its_error() {
+	let store = store();
+	let broadcast = broadcast::Info::new().produce();
+	let mut video = broadcast.create_track("video", timed()).unwrap();
+	let task = spawn(&store, &broadcast, config());
+	subscribed(&video).await;
+	group(&video, 0, &[(0, "a")]);
+	group(&video, 1, &[(1000, "b")]);
+	video
+		.finish_at(Position::group(2), Some(moq_net::Error::App(7)))
+		.unwrap();
+	settle().await;
+	broadcast.close();
+	finished(task).await;
+
+	let frames: Vec<String> = contents(&objects(&store, "video", true).await)
+		.into_iter()
+		.flatten()
+		.flat_map(|(_, frames)| frames)
+		.collect();
+	assert_eq!(frames, ["0/a", "1000/b"]);
+	assert_eq!(end(&store, "video").await, Some(End::Error(64 + 7)));
 }
 
 #[tokio::test(start_paused = true)]
@@ -776,7 +789,7 @@ async fn a_re_added_track_continues_and_its_marker_records_the_last_run() {
 	let frames: Vec<String> = contents(&objects(&store, "video", true).await)
 		.into_iter()
 		.flatten()
-		.flat_map(|(_, _, frames)| frames)
+		.flat_map(|(_, frames)| frames)
 		.collect();
 	assert_eq!(frames, ["0/a", "1000/b", "2000/c"]);
 	assert_eq!(end(&store, "video").await, Some(End::Error(64 + 3)));
@@ -805,7 +818,7 @@ async fn a_re_added_track_is_stored_under_its_own_properties() {
 
 	second.finish().unwrap();
 	broadcast.close();
-	let err = moq_clock::timeout(Duration::from_secs(1000), task)
+	let err = kio::clock::timeout(Duration::from_secs(1000), task)
 		.await
 		.unwrap()
 		.unwrap()

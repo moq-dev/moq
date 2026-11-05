@@ -134,14 +134,22 @@ job runs, so an idle VM holds little more than its running services; the next jo
 reads its caches from disk.
 The guest has no swap, so earlyoom kills the largest process once available memory
 drops below 10%, rather than letting a job that fills memory thrash the disk.
-For MoQ, set `MOQ_QUEUE_RUNNER` to the runner label after a representative CI run
-passes; release pull requests use hosted runners and main pull requests skip cloud CI.
+MoQ's main pull requests land through GitHub's merge queue, whose `merge_group`
+builds run on the host's `moq-queue` runner; release pull requests use hosted
+runners.
 
 The hosted workflow uses `just gh runner-vm-ci` to load a temporary AppArmor
 profile for the exact pinned `unshare` while building the image. The recipe
 refuses local and self-hosted runners, and unloads the profile on exit,
 including build failure. `just gh runner-vm` does not change host policy;
 its build host must already support rootless user namespaces.
+
+Ubuntu denies that map when `kernel.apparmor_restrict_unprivileged_userns` is
+set, unless the binary has a profile. `just gh runner-userns` installs
+`nix/runner/nix-builder-unshare` into `/etc/apparmor.d/` and loads it. The
+profile allows user namespaces only for `/nix/store/*util-linux*/bin/unshare`,
+so a nixpkgs bump still matches, and `/usr/bin/unshare` stays denied. AppArmor
+stays enabled. Run it again only after the host profile is removed.
 
 `just gh runner-vm` builds a guest image and runs NixOS integration tests for
 startup without carrier, public egress for multiple guests, private-network and

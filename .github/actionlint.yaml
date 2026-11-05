@@ -1,3 +1,7 @@
+self-hosted-runner:
+  # The host's merge queue runner (kixelated/nixos modules/ci-runners.nix).
+  labels:
+    - moq-queue
 paths:
   # GitHub's `queue: max` on the shared Pages writers. actionlint learns it in
   # https://github.com/rhysd/actionlint/pull/661, unreleased after 1.7.12.

@@ -8,12 +8,17 @@ set working-directory := '.'
 default:
     just check
 
-# Skips cleanly on non-macOS hosts, which is why platform.yml runs it on a Mac.
+# Formatting is checked everywhere; the build and tests skip cleanly on
+# non-macOS hosts, which is why platform.yml runs it on a Mac.
 # This runs the tests too, so there is no separate `just swift test`.
 
 # Build moq-ffi for the host, regenerate uniffi bindings, run swift test.
 check:
     bash ../sh/swift/check.sh
+
+# Format the handwritten Swift with swift-format (swift/.swift-format).
+fix:
+    bash ../sh/swift/format.sh
 
 # Run the binding benchmark with optimized Rust and Swift builds on macOS.
 bench:

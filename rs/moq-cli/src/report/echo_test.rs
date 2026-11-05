@@ -30,7 +30,13 @@ async fn export_echo_reports_where_the_import_solicits() {
 	import.decode(&CLIP[..HALF]).unwrap();
 	publication.announce(Default::default()).unwrap();
 	let consumer = origin.consume();
-	let resolved = consumer.follow("demo", None).unwrap().available().await.unwrap();
+	let resolved = consumer
+		.follow("demo", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
 
 	let args = SubscribeArgs {
 		format: SubscribeFormat::Ts,
@@ -40,6 +46,7 @@ async fn export_echo_reports_where_the_import_solicits() {
 		fragment_duration: None,
 		mux_rate: None,
 		passthrough: false,
+		output: None,
 		catalog: None,
 		select: SelectArgs::default(),
 	};
@@ -96,7 +103,7 @@ async fn export_echo_reports_where_the_import_solicits() {
 	let final_report: hang::echo::Snapshot<ts::stats::Report> = serde_json::from_value(final_report).unwrap();
 	// It may have arrived while the export was still running.
 	while feedback.last().is_none_or(|line| line.feedback != final_report) {
-		let line = tokio::time::timeout(Duration::from_secs(30), lines.next_line())
+		let line = kio::clock::timeout(Duration::from_secs(30), lines.next_line())
 			.await
 			.expect("the final feedback never arrived")
 			.unwrap()

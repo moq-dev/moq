@@ -1,5 +1,5 @@
 //! A session admitted as a cluster peer widens its QUIC limits before SETUP OK,
-//! while a viewer keeps the `--quic-*` ones, on the tokio listener and the
+//! while a viewer opens to the `--quic-*` ones, on the tokio listener and the
 //! io_uring workers alike.
 #![cfg(feature = "quic")]
 
@@ -20,13 +20,22 @@ pub(crate) const BARE_IDLE: Duration = Duration::from_secs(300);
 
 /// A self-signed certificate on disk.
 fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-	let key = rcgen::KeyPair::generate().expect("keypair");
-	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("cert params");
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("cert params");
 	let cert = params.self_signed(&key).expect("self-signed cert");
 	let cert_path = dir.join("cert.pem");
 	let key_path = dir.join("key.pem");
 	std::fs::write(&cert_path, cert.pem()).expect("write cert");
-	std::fs::write(&key_path, key.serialize_pem()).expect("write key");
+	std::fs::write(
+		&key_path,
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+	)
+	.expect("write key");
 	(cert_path, key_path)
 }
 
@@ -59,13 +68,12 @@ async fn probe(port: u16, peer: bool) -> Seen {
 	connect.tls.insecure = Some(true);
 	let mut tls = connect.tls.build().expect("tls config");
 	tls.alpn_protocols = vec![b"moq-lite-06".to_vec()];
-	let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic crypto");
 	let endpoint =
 		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
 			.expect("endpoint");
 	let conn = endpoint
 		.connect(
-			&driver::client::Config::new(std::sync::Arc::new(crypto)),
+			&driver::client::Config::new(std::sync::Arc::new(tls)),
 			([127, 0, 0, 1], port).into(),
 			"localhost",
 		)
@@ -80,7 +88,7 @@ async fn probe(port: u16, peer: bool) -> Seen {
 
 	// The relay widens a peer before it answers SETUP, so its SETUP stream
 	// arrives behind the new credit.
-	let _setup = tokio::time::timeout(TIMEOUT, conn.accept_uni())
+	let _setup = kio::clock::timeout(TIMEOUT, conn.accept_uni())
 		.await
 		.expect("relay SETUP timeout")
 		.expect("relay SETUP");
@@ -89,7 +97,7 @@ async fn probe(port: u16, peer: bool) -> Seen {
 	while streams.len() < PROBE {
 		let open = conn.open_uni(Default::default());
 		let stream = match peer {
-			true => tokio::time::timeout(TIMEOUT, open)
+			true => kio::clock::timeout(TIMEOUT, open)
 				.await
 				.expect("peer stream credit timeout"),
 			false => match open.now_or_never() {
@@ -115,7 +123,7 @@ async fn peer_widens_and_viewer_does_not(mut relay: Relay, port: u16) {
 	let deciding = tokio::spawn(async move {
 		let mut leases = Vec::new();
 		for peer in [true, false] {
-			let admission = tokio::time::timeout(TIMEOUT, admissions.next())
+			let admission = kio::clock::timeout(TIMEOUT, admissions.next())
 				.await
 				.expect("admission timeout")
 				.expect("admission");
@@ -128,7 +136,9 @@ async fn peer_widens_and_viewer_does_not(mut relay: Relay, port: u16) {
 		}
 		leases
 	});
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 
 	let peer = probe(port, true).await;
 	assert_eq!(peer.streams, PROBE, "a peer opens past the viewer stream limit");
@@ -140,7 +150,8 @@ async fn peer_widens_and_viewer_does_not(mut relay: Relay, port: u16) {
 		"a viewer keeps the stream limit, opened {}",
 		viewer.streams
 	);
-	assert_eq!(viewer.max_data, 0, "a viewer's receive window is unchanged");
+	// Both start with only the SETUP window, which admission opens for a viewer too.
+	assert!(viewer.max_data > 0, "a viewer's receive window opens once admitted");
 
 	let _leases = deciding.await.expect("decider");
 	running.abort();
@@ -149,7 +160,7 @@ async fn peer_widens_and_viewer_does_not(mut relay: Relay, port: u16) {
 
 #[tokio::test]
 async fn tokio_peer_session_widens_quic_limits() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let relay = Relay::load(config(dir.path()))
 		.await
@@ -174,7 +185,7 @@ async fn refused_at_load(set: impl FnOnce(&mut Config)) -> String {
 /// and `[quic]` alike, rather than wedging the peer or the handshake later.
 #[tokio::test]
 async fn unadvertisable_quic_limits_are_refused_at_load() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let err = refused_at_load(|config| {
 		config.limits.peer.quic.receive_window = std::num::NonZeroU64::new(1 << 62).unwrap();
 	})
@@ -218,8 +229,12 @@ async fn unadvertisable_quic_limits_are_refused_at_load() {
 /// limit is a transport parameter, so the handshake alone shows it. Its idle
 /// timeout is far past any test's, so only a close ends a link in time.
 pub(crate) fn bare_server(connect: &moq_tokio::connect::Config) -> driver::endpoint::Endpoint {
-	let key = rcgen::KeyPair::generate().expect("keypair");
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
 	let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
 		.expect("cert params")
 		.self_signed(&key)
 		.expect("self-signed cert");
@@ -227,7 +242,7 @@ pub(crate) fn bare_server(connect: &moq_tokio::connect::Config) -> driver::endpo
 		.with_no_client_auth()
 		.with_single_cert(
 			vec![cert.der().clone()],
-			rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+			rustls::pki_types::PrivateKeyDer::Pkcs8(key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
 		)
 		.expect("server tls");
 	tls.alpn_protocols = connect
@@ -236,10 +251,9 @@ pub(crate) fn bare_server(connect: &moq_tokio::connect::Config) -> driver::endpo
 		.iter()
 		.map(|alpn| alpn.as_bytes().to_vec())
 		.collect();
-	let crypto = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic crypto");
 	let mut transport = driver::transport::Config::default();
 	transport.idle_timeout = Some(BARE_IDLE);
-	let mut config = driver::server::Config::new(std::sync::Arc::new(crypto));
+	let mut config = driver::server::Config::new(std::sync::Arc::new(tls));
 	config.transport = transport;
 	driver::endpoint::Endpoint::new(
 		driver::endpoint::Config::default().with_server(config),
@@ -261,11 +275,9 @@ async fn static_dial(
 	let mut options = moq_relay::cluster::Options::new(Default::default());
 	options.config.connect = vec![moq_relay::cluster::Peer::new(format!("moql://127.0.0.1:{port}/"))];
 	options.peer.quic.max_streams = std::num::NonZeroU64::new(4 * PROBE as u64).unwrap();
-	let cluster = moq_relay::cluster::Cluster::new(options)
-		.expect("cluster init")
-		.with_connect(connect, quic);
+	let cluster = crate::spawn_cluster(options).with_connect(connect, quic);
 	let running = tokio::spawn(cluster.start().await.expect("cluster start").run());
-	let conn = tokio::time::timeout(TIMEOUT, server.accept())
+	let conn = kio::clock::timeout(TIMEOUT, server.accept())
 		.await
 		.expect("dial timeout")
 		.expect("incoming")
@@ -280,7 +292,7 @@ async fn static_dial(
 /// `[quic]` settings still advertises the peer limits from the handshake on.
 #[tokio::test]
 async fn cluster_dials_widen_a_plain_client() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let mut connect = moq_tokio::connect::Config::default();
 	connect.tls.insecure = Some(true);
 	let server = bare_server(&connect);
@@ -306,7 +318,7 @@ async fn cluster_dials_widen_a_plain_client() {
 /// admits cluster traffic by source port keeps working.
 #[tokio::test]
 async fn static_peer_dials_from_the_configured_bind() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let mut connect = moq_tokio::connect::Config::default();
 	connect.tls.insecure = Some(true);
 	// Borrow a free port from the OS, then hand it to the dial template.
@@ -330,7 +342,7 @@ async fn static_peer_dials_from_the_configured_bind() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn tokio_worker_peer_session_widens_quic_limits() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let mut config = config(dir.path());
 	config.runtime.workers = Some(1);
@@ -343,7 +355,7 @@ async fn tokio_worker_peer_session_widens_quic_limits() {
 #[cfg(all(target_os = "linux", feature = "_uring"))]
 #[tokio::test]
 async fn uring_peer_session_widens_quic_limits() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	match moq_uring::Worker::new(Default::default()) {
 		Ok(_) => {}
 		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {

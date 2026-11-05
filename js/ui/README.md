@@ -10,11 +10,14 @@
 Presentation components shared by the [@moq/watch](../watch) and [@moq/publish](../publish) overlays, built on [@moq/signals](../signals).
 You only need it directly to build a custom overlay in the same style.
 
-- `controlButton`, `settingsButton`, `icon`: overlay control buttons and SVG glyphs.
-- `graph`: a rolling sparkline for stats panels.
+- `controlButton`, `settingsButton`, `fullscreenButton`, `icon`: overlay control buttons and SVG glyphs.
+- `createFullscreen`: cross-browser fullscreen with an iPhone pseudo-fullscreen fallback, its state a signal.
+- `statCard`, `statLine`, `graph`: stats panel cards, key/value rows, and a rolling sparkline.
+- `formatBitrate`, `formatMillis`, `formatHz`, `formatFps`: human-readable stats values.
 - `Support`: the base of `<moq-watch-support>` and `<moq-publish-support>`, a banner and details table for a browser support report.
 
-It holds no styles or capability detection: each overlay styles these elements and detects its own support.
+It holds no capability detection and publishes no styles: each overlay styles these elements, including the `player--pseudo-fullscreen` class, and detects its own support.
+Inside this repository, `@moq/watch` and `@moq/publish` inline the shared stats card and sparkline styles from `src/stats.css` at build time; that file is not part of the npm package.
 
 ```bash
 bun add @moq/ui

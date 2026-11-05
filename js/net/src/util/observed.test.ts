@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Derived, Effect, type Getter, Signal } from "@moq/signals";
 import { Follow, Observed } from "./observed";
 
 const flush = async () => {
@@ -9,22 +9,44 @@ const flush = async () => {
 test("peeking holds no demand and only the last observer releases it", () => {
 	const value = new Observed(1);
 	expect(value.peek()).toBe(1);
-	expect(value.used.peek()).toBe(false);
+	expect(value.wanted.peek()).toBe(false);
 	const first = value.subscribe(() => {});
 	const second = value.subscribe(() => {});
 	first();
 	first();
-	expect(value.used.peek()).toBe(true);
+	expect(value.wanted.peek()).toBe(true);
 	second();
-	expect(value.used.peek()).toBe(false);
+	expect(value.wanted.peek()).toBe(false);
 });
 
 test("reactive one-shot observers preserve demand across a value update", async () => {
 	const value = new Observed(1);
 	const demand: boolean[] = [];
-	const stop = value.used.subscribe((used) => demand.push(used));
+	const stop = value.wanted.subscribe((wanted) => demand.push(wanted));
 	const effect = new Effect((effect) => {
 		effect.get(value);
+	});
+	await flush();
+	value.set(2);
+	await flush();
+	expect(demand).toEqual([true]);
+	effect.close();
+	await flush();
+	expect(demand).toEqual([true, false]);
+	stop();
+});
+
+// A reload's viewers read the session's PROBE estimate through a Follow and a Derived; a
+// gap in demand there would close and reopen the PROBE stream on every report.
+test("a reactive reader through a Derived preserves demand across a value update", async () => {
+	const value = new Observed(1);
+	const demand: boolean[] = [];
+	const stop = value.wanted.subscribe((wanted) => demand.push(wanted));
+	const derived = new Derived([new Follow(new Signal<Getter<number> | undefined>(value))], (value) =>
+		value === undefined ? undefined : value * 2,
+	);
+	const effect = new Effect((effect) => {
+		effect.get(derived);
 	});
 	await flush();
 	value.set(2);
@@ -42,20 +64,20 @@ test("forwarded demand switches sources and releases its old source", async () =
 	const source = new Signal<Getter<number> | undefined>(first);
 	const follow = new Follow(source);
 	expect(follow.peek()).toBe(1);
-	expect(first.used.peek()).toBe(false);
+	expect(first.wanted.peek()).toBe(false);
 	const seen: (number | undefined)[] = [];
 	const stop = follow.subscribe((value) => seen.push(value));
-	expect(first.used.peek()).toBe(true);
+	expect(first.wanted.peek()).toBe(true);
 	source.set(second);
 	await flush();
-	expect(first.used.peek()).toBe(false);
-	expect(second.used.peek()).toBe(true);
+	expect(first.wanted.peek()).toBe(false);
+	expect(second.wanted.peek()).toBe(true);
 	second.set(3);
 	await flush();
 	expect(seen).toEqual([2, 3]);
 	stop();
 	stop();
-	expect(second.used.peek()).toBe(false);
+	expect(second.wanted.peek()).toBe(false);
 });
 
 test("one-shot forwarding re-arms once per change without releasing demand", async () => {
@@ -72,7 +94,7 @@ test("one-shot forwarding re-arms once per change without releasing demand", asy
 		value.set(i);
 		await flush();
 		expect(seen).toHaveLength(i);
-		expect(value.used.peek()).toBe(i < 3);
+		expect(value.wanted.peek()).toBe(i < 3);
 	}
 	expect(seen).toEqual([1, 2, 3]);
 });
@@ -89,7 +111,7 @@ test("independent observers may share a callback", async () => {
 	value.set(1);
 	await flush();
 	expect(calls).toBe(1);
-	expect(value.used.peek()).toBe(true);
+	expect(value.wanted.peek()).toBe(true);
 	second();
-	expect(value.used.peek()).toBe(false);
+	expect(value.wanted.peek()).toBe(false);
 });

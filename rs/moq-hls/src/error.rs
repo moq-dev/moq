@@ -132,13 +132,13 @@ pub enum Error {
 	#[error("io: {0}")]
 	Io(std::sync::Arc<std::io::Error>),
 
-	/// A rendition's HLS records failed, so its listings refuse rather than read as a finished
+	/// A rendition's media track failed, so its listings refuse rather than read as a finished
 	/// recording.
-	#[error("hls records {track} failed: {source}")]
-	RecordsFailed {
-		/// The record track's name.
+	#[error("media track {track} failed: {source}")]
+	MediaFailed {
+		/// The media track's name.
 		track: String,
-		/// Why the records failed.
+		/// Why the track failed.
 		source: Box<Error>,
 	},
 
@@ -177,9 +177,19 @@ pub enum Error {
 		/// The segment whose media cannot be recorded.
 		segment: u64,
 	},
+
+	/// This CPU lacks a feature the crate's cryptography requires, named in rind's message.
+	#[error("unsupported CPU: {0}")]
+	UnsupportedCpu(String),
 }
 
 impl Error {
+	/// Carries rind's message rather than its type, so rind stays out of this crate's API.
+	#[cfg(feature = "async")]
+	pub(crate) fn unsupported_cpu(err: rind::cpu::MissingFeature) -> Self {
+		Self::UnsupportedCpu(err.to_string())
+	}
+
 	/// The HTTP status the origin answered with, if it answered with one at all.
 	///
 	/// The import loop consults it: a `503` on a playlist fetch is worth another pass, a `404` is
@@ -198,6 +208,7 @@ impl Error {
 	/// another attempt: request timeout, rate limit, and the gateway/overload statuses. Every other
 	/// status, `404` and `403` included, is settled, as is a playlist that had already ended when
 	/// the import joined it. A failure with no answer at all is left to the backoff budget.
+	#[cfg(feature = "async")]
 	pub(crate) fn settled(&self) -> bool {
 		match self {
 			Self::PlaylistEnded => true,
@@ -212,6 +223,7 @@ impl Error {
 ///
 /// Every variant naming a resource stores it through here rather than redacting at display, so
 /// its `Debug` print is as safe as its `Display`.
+#[cfg(feature = "async")]
 pub(crate) fn redact(url: &url::Url) -> url::Url {
 	let mut url = url.clone();
 	// Fails only for a URL that cannot carry userinfo at all, such as `file:`.
@@ -250,6 +262,10 @@ mod tests {
 		let address = listener.local_addr().expect("local address");
 		drop(listener);
 
+		// reqwest reads rustls's process default, as the importer installs it.
+		let _ = rind_rustls::default_provider()
+			.expect("supported CPU")
+			.install_default();
 		let err: Error = reqwest::get(format!("http://user:pass@{address}/media.m3u8?jwt=secret"))
 			.await
 			.expect_err("dial a closed port")

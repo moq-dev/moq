@@ -168,8 +168,7 @@ void publish_tone(
 ) {
     const auto started = Clock::now();
     std::vector<uint8_t> data(AUDIO_BATCH_SAMPLES * tones.size() * sizeof(float));
-    uint64_t timestamp_us = 0;
-    size_t phase = 0;
+    uint64_t phase = 0;
     while (!stop.load()) {
         for (size_t i = 0; i < AUDIO_BATCH_SAMPLES; i++) {
             for (size_t c = 0; c < tones.size(); c++) {
@@ -180,11 +179,10 @@ void publish_tone(
                 std::memcpy(&data[(i * tones.size() + c) * sizeof(float)], &sample, sizeof(float));
             }
         }
-        ok(audio->write({timestamp_us, data}), "tone write");
+        ok(audio->write({{phase, AUDIO_RATE}, data}), "tone write");
         phase += AUDIO_BATCH_SAMPLES;
-        timestamp_us += AUDIO_BATCH_US;
         // Pace against the start, so encoding cost doesn't accumulate as drift.
-        std::this_thread::sleep_until(started + std::chrono::microseconds(timestamp_us));
+        std::this_thread::sleep_until(started + std::chrono::microseconds(phase * 1'000'000 / AUDIO_RATE));
     }
 }
 
@@ -295,7 +293,7 @@ void decode_audio(
     }
     moq::AudioDecoderOutput output{};
     output.format = moq::AudioSampleFormat::kF32;
-    output.max_delay = MAX_DELAY;
+    output.delay = moq::Delay{std::chrono::nanoseconds(0), MAX_DELAY};
     auto decoder = until(moq::AudioConsumer::subscribe(consumer, id, audio, output), deadline, "audio consumer");
 
     std::ofstream log(out + ".txt");
@@ -319,7 +317,9 @@ void decode_audio(
         const auto *frame = &variant->frame;
 
         const size_t samples = frame->data.size() / frame_bytes;
-        log << frame->timestamp_us << " " << samples << "\n";
+        // tone.py reads whole microseconds; splitting off the seconds keeps the product in range.
+        const auto &ts = frame->timestamp;
+        log << ts.value / ts.scale * 1'000'000 + ts.value % ts.scale * 1'000'000 / ts.scale << " " << samples << "\n";
         pcm.write(reinterpret_cast<const char *>(frame->data.data()), static_cast<std::streamsize>(frame->data.size()));
         decoded += samples;
     }
@@ -350,6 +350,7 @@ int subscribe(
         : deadline;
     auto announced = ok(session->consume()->follow(path, std::nullopt), "follow");
     auto consumer = until(announced->available(), read_deadline, "available");
+    if (!consumer) fail("first available() reported offline");
 
     // The catalog is a live track. A lazy publisher (e.g. the browser, which only encodes on
     // demand) may announce a rendition in a later update rather than the first snapshot, so
@@ -364,8 +365,8 @@ int subscribe(
     }
     const auto &[id, video] = *catalog->video.begin();
 
-    moq::Subscription subscription;
-    subscription.max_delay =
+    auto subscription = moq::subscription_defaults();
+    subscription.delay.max =
         finish ? std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(timeout)) : MAX_DELAY;
     auto media = until(
         moq::MediaTrackConsumer::subscribe(consumer, {moq::Rendition::kVideo{id, video}, subscription}), read_deadline,
@@ -399,19 +400,21 @@ int subscribe(
         if (frames != expected_frames) fail("wrong finished media frame count");
         while (until(catalogs->next(), read_deadline, "catalog EOF")) {}
         for (;;) {
-            auto event = until(routes->next(), read_deadline, "announcement END");
+            auto event = until(routes->next(), read_deadline, "announcement absent");
             if (!event) fail("origin ended before broadcast withdrawal");
-            const auto *end = std::get_if<moq::AnnounceEvent::kEnd>(&event->get_variant());
+            const auto *end = std::get_if<moq::AnnounceEvent::kAbsent>(&event->get_variant());
             if (end && end->announce.prefix == path) break;
         }
         auto watch = ok(session->consume()->follow(path + ".health", std::nullopt), "health watch");
         auto health = until(watch->available(), read_deadline, "health available");
+        if (!health) fail("first health available() reported offline");
         auto track = until(health->subscribe_track("live", std::nullopt), read_deadline, "health subscribe");
         auto group = until(track->next_group(), read_deadline, "health group");
         if (!group) fail("missing health group");
         auto frame = until(group->read_frame(), read_deadline, "health frame");
-        if (!frame || std::string(frame->payload.begin(), frame->payload.end()) != "session-alive" || frame->timestamp_us) {
-            fail("health payload or timestamp");
+        // Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+        if (!frame || std::string(frame->payload.begin(), frame->payload.end()) != "session-alive") {
+            fail("health payload");
         }
         if (until(group->read_frame(), read_deadline, "health group EOF") ||
             until(track->next_group(), read_deadline, "health track EOF") || session->state().connects != 1) {

@@ -4,8 +4,8 @@
 
 A frame of any size, such as a file delivered as one frame, passes through a
 relay holding only a group's 32 MB tail. Sealed segments inside the frame
-are shed like front frames, and a [flight](/quest/m1/unbounded-groups/flights.md)
-can start at a `(frame, byte)` position on the current lite wip version.
+are shed like front frames, and a flight
+([moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944)) can start at a `(frame, byte)` position on the current lite wip version.
 `MAX_CACHE_BYTES` stops capping a frame; it still bounds a group's tail.
 
 ## Plan
@@ -48,8 +48,10 @@ by flights, so this waits on Flights and stays in m1.
   it no longer follows from a model limit.
 - Rust readers get a chunked payload read, so a frame larger than memory
   never has to be collected whole. [moq-dev/moq#6628](https://github.com/moq-dev/moq/pull/6628)
-  kept its segments internal; the JS half is in
-  [JS byte holes](/quest/m1/unbounded-groups/js-byte-holes.md).
+  kept its segments internal. JS already has its chunked read
+  (`nextFrame` and `readChunk`, from
+  [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411)); its wire
+  half is in [JS byte holes](/quest/m1/unbounded-groups/js-byte-holes.md).
 - Test a frame several times the 32 MB tail through a relay chain: a late
   joiner reads it whole through a flight, and memory stays near 32 MB per
   copy.
@@ -57,7 +59,3 @@ by flights, so this waits on Flights and stays in m1.
 Public API: `Position` gains a byte field, frames gain a chunked read, and
 `MAX_CACHE_BYTES` stops capping a frame.
 Wire: a byte offset on the current lite wip's range ends and group header.
-
-## Required
-
-- [Flights](/quest/m1/unbounded-groups/flights.md) - the paced copies a mid-frame start serves

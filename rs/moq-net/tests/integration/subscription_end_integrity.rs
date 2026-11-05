@@ -10,7 +10,7 @@
 //! `Ok(None)` only after that FIN; any other ending is an error.
 //!
 //! The publisher opens the final group and writes its first frame (the group stream
-//! opens), finishes the track (SUBSCRIBE_END goes out), then writes the rest, finishes
+//! opens), finishes the track (SUBSCRIBE_FINISH goes out), then writes the rest, finishes
 //! the group and disconnects with no await in between, so the final group's tail and
 //! its FIN never leave. The close lands before the subscriber reads on. The subscriber
 //! must then either see every frame or end with an error; it must not end `Ok(None)`
@@ -44,7 +44,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 /// Let the drivers run until nothing is runnable: under paused time an idle runtime
 /// auto-advances the clock, so this returns once every queued write has been sent.
 async fn settle() {
-	moq_clock::sleep(Duration::from_millis(1)).await;
+	kio::clock::sleep(Duration::from_millis(1)).await;
 }
 
 fn expected() -> Vec<Vec<u8>> {
@@ -67,10 +67,11 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	let MockPair { client, server, .. } = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 
 	// The publisher only learns of a subscription once the subscriber polls it, so the
 	// reader runs concurrently. It reports the head group drained, then waits to be told
@@ -78,7 +79,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	let (drained_tx, drained_rx) = futures::channel::oneshot::channel();
 	let (go_tx, go_rx) = futures::channel::oneshot::channel::<()>();
 
-	let reader = moq_clock::sim::spawn(async move {
+	let reader = kio::clock::sim::spawn(async move {
 		let subscription = moq_net::track::Subscription::default().with_range(0..);
 		let mut sub = remote
 			.track("video")
@@ -109,7 +110,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 		}
 	});
 
-	moq_clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
+	kio::clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
@@ -119,13 +120,13 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 		head.write_frame(Timestamp::ZERO, payload).unwrap();
 	}
 	head.finish().unwrap();
-	moq_clock::timeout(TIMEOUT, drained_rx)
+	kio::clock::timeout(TIMEOUT, drained_rx)
 		.await
 		.expect("the head group never arrived")
 		.expect("reader gone");
 
 	// The final group opens and its first frame is sent, then the track's end is
-	// declared: SUBSCRIBE_END reaches the subscriber with the group still open, as it
+	// declared: SUBSCRIBE_FINISH reaches the subscriber with the group still open, as it
 	// does whenever a finish races a group still in flight.
 	let mut tail = track.append_group().unwrap();
 	tail.write_frame(Timestamp::ZERO, TAIL[0]).unwrap();
@@ -148,7 +149,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	// merely slower than the network.
 	settle().await;
 	let _ = go_tx.send(());
-	let result = moq_clock::timeout(TIMEOUT, reader)
+	let result = kio::clock::timeout(TIMEOUT, reader)
 		.await
 		.expect("the subscription never ended")
 		.expect("reader panicked");
@@ -158,7 +159,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 
 /// The session closes with the final group in flight: the subscription ends with an
 /// error, or delivers every frame.
-#[moq_clock::test]
+#[kio::test]
 async fn a_subscription_cut_by_the_session_close_does_not_end_clean() {
 	let (got, err) = round(true).await;
 	assert!(
@@ -174,7 +175,7 @@ async fn a_subscription_cut_by_the_session_close_does_not_end_clean() {
 }
 
 /// With the session kept alive the same track arrives whole and ends `Ok(None)`.
-#[moq_clock::test]
+#[kio::test]
 async fn a_finished_track_ends_clean_while_its_session_lives() {
 	let (got, err) = round(false).await;
 	assert!(
@@ -229,10 +230,11 @@ async fn killed(version: &str, kill: Kill) -> (Option<moq_net::Error>, Option<mo
 		.unwrap()
 		.available()
 		.await
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 	// Subscribing resolves only once the publisher serves the track, which it does
 	// only after seeing the subscription, so the reader runs concurrently.
-	let reader = moq_clock::sim::spawn(async move {
+	let reader = kio::clock::sim::spawn(async move {
 		let subscription = moq_net::track::Subscription::default().with_range(0..);
 		let mut sub = remote
 			.track("video")
@@ -279,10 +281,10 @@ async fn killed(version: &str, kill: Kill) -> (Option<moq_net::Error>, Option<mo
 
 /// A session dying mid-track ends the subscriber's track with the session's own
 /// error: not a clean end, and not a generic `Dropped` or `Cancel`.
-#[moq_clock::test]
+#[kio::test]
 async fn a_session_death_ends_the_track_with_its_error() {
 	for version in DEATH_VERSIONS {
-		let (err, group_end) = moq_clock::timeout(TIMEOUT, killed(version, Kill::Death))
+		let (err, group_end) = kio::clock::timeout(TIMEOUT, killed(version, Kill::Death))
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the track never ended"));
 		assert!(
@@ -298,11 +300,11 @@ async fn a_session_death_ends_the_track_with_its_error() {
 
 /// A clean close cuts off the track and its open group with a cancelled session, and a
 /// local close reads exactly as the remote one does.
-#[moq_clock::test]
+#[kio::test]
 async fn a_session_close_cancels_the_track_from_either_side() {
 	for version in DEATH_VERSIONS {
 		for kill in [Kill::RemoteClose, Kill::LocalClose] {
-			let (err, group_end) = moq_clock::timeout(TIMEOUT, killed(version, kill))
+			let (err, group_end) = kio::clock::timeout(TIMEOUT, killed(version, kill))
 				.await
 				.unwrap_or_else(|_| panic!("{version}: the track never ended"));
 			let cancelled = |err: &Option<moq_net::Error>| {
@@ -334,8 +336,9 @@ async fn fetch_killed(version: &str, kill: Kill) -> moq_net::Error {
 		.unwrap()
 		.available()
 		.await
-		.expect("broadcast resolves");
-	let mut fetching = moq_clock::sim::spawn(async move { remote.track("video").unwrap().fetch_group(0, None).await });
+		.expect("broadcast resolves")
+		.unwrap();
+	let mut fetching = kio::clock::sim::spawn(async move { remote.track("video").unwrap().fetch_group(0, None).await });
 
 	let request = dynamic.requested_track().await.expect("the track request arrives");
 	let groups = request.requests();
@@ -357,11 +360,11 @@ async fn fetch_killed(version: &str, kill: Kill) -> moq_net::Error {
 }
 
 /// A FETCH cut off by a clean close ends as a cancelled session, whichever side closed.
-#[moq_clock::test]
+#[kio::test]
 async fn a_session_close_cancels_a_pending_fetch_from_either_side() {
 	for version in ["moq-lite-05", "moq-lite-07-wip"] {
 		for kill in [Kill::RemoteClose, Kill::LocalClose] {
-			let err = moq_clock::timeout(TIMEOUT, fetch_killed(version, kill))
+			let err = kio::clock::timeout(TIMEOUT, fetch_killed(version, kill))
 				.await
 				.unwrap_or_else(|_| panic!("{version}: the fetch never ended"));
 			assert!(

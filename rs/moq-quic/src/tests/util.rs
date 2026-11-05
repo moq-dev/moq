@@ -7,20 +7,21 @@ use std::{
 	net::{Ipv6Addr, SocketAddr, UdpSocket},
 	str,
 	sync::{Arc, LazyLock, Mutex},
+	task::Poll,
 };
 
 use assert_matches::assert_matches;
 use bytes::BytesMut;
-use rand::{RngExt, SeedableRng, rngs::StdRng};
+use rand::{SeedableRng, rngs::StdRng};
 use rustls::{
 	KeyLogFile,
-	client::WebPkiServerVerifier,
 	pki_types::{CertificateDer, PrivateKeyDer},
 };
-use tracing::{info_span, trace};
+use tracing::{debug_span, trace};
 
-use super::crypto::rustls::{QuicClientConfig, QuicServerConfig, configured_provider};
+use super::crypto::rustls::QuicServerConfig;
 use super::*;
+pub(super) use crate::sim::{Bottleneck, Link, QueueStats};
 use crate::{Duration, Instant, entropy};
 
 pub(super) const DEFAULT_MTU: usize = 1452;
@@ -159,7 +160,7 @@ impl Pair {
 	}
 
 	pub(super) fn drive_client(&mut self) {
-		let span = info_span!("client");
+		let span = debug_span!("client");
 		let _guard = span.enter();
 		self.client.drive(self.time, self.server.addr);
 		for (packet, buffer) in self.client.outbound.drain(..) {
@@ -191,7 +192,7 @@ impl Pair {
 	}
 
 	pub(super) fn drive_server(&mut self) {
-		let span = info_span!("server");
+		let span = debug_span!("server");
 		let _guard = span.enter();
 		self.server.drive(self.time, self.client.addr);
 		for (packet, buffer) in self.server.outbound.drain(..) {
@@ -232,7 +233,7 @@ impl Pair {
 
 	/// Just start connecting the client
 	pub(super) fn begin_connect(&mut self, config: client::Config) -> ConnectionHandle {
-		let span = info_span!("client");
+		let span = debug_span!("client");
 		let _guard = span.enter();
 		let (client_ch, client_conn) = self
 			.client
@@ -249,13 +250,10 @@ impl Pair {
 		client_ch
 	}
 
+	/// Asserts both sides finished the handshake
 	pub(super) fn finish_connect(&mut self, client_ch: ConnectionHandle, server_ch: ConnectionHandle) {
-		assert_matches!(self.client_conn_mut(client_ch).poll(), Some(Event::HandshakeDataReady));
-		assert_matches!(self.client_conn_mut(client_ch).poll(), Some(Event::Connected));
-		assert_matches!(self.server_conn_mut(server_ch).poll(), Some(Event::HandshakeDataReady));
-		assert_matches!(self.server_conn_mut(server_ch).poll(), Some(Event::HandshakeConfirmed));
-		assert_matches!(self.server_conn_mut(server_ch).poll(), Some(Event::Connected));
-		assert_matches!(self.client_conn_mut(client_ch).poll(), Some(Event::HandshakeConfirmed));
+		assert_established(self.client_conn_mut(client_ch));
+		assert_established(self.server_conn_mut(server_ch));
 	}
 
 	pub(super) fn client_conn_mut(&mut self, ch: ConnectionHandle) -> &mut Connection {
@@ -305,152 +303,12 @@ impl Default for Pair {
 	}
 }
 
-/// A rate-limited FIFO queue, as at a bottleneck router
-#[derive(Debug, Clone)]
-pub(super) struct Bottleneck {
-	time_per_byte: Duration,
-	/// The bytes the queue holds before it tail-drops
-	buffer_size: u32,
-	/// The queueing delay past which packets are tail-dropped
-	max_queue: Duration,
-	/// Whether packets are marked CE once the queue is half full, as a classic AQM does
-	marks_ce: bool,
-	/// When the link finishes serving everything queued so far
-	busy_until: Option<Instant>,
-	pub(super) stats: QueueStats,
-}
-
-impl Bottleneck {
-	/// A link serving `bytes_per_second`, queueing up to `buffer_size` bytes
-	pub(super) fn new(bytes_per_second: u64, buffer_size: u32, marks_ce: bool) -> Self {
-		let time_per_byte = Duration::from_nanos(1_000_000_000 / bytes_per_second);
-		Self {
-			time_per_byte,
-			buffer_size,
-			max_queue: buffer_size * time_per_byte,
-			marks_ce,
-			busy_until: None,
-			stats: QueueStats::default(),
-		}
-	}
-
-	/// Serve at `bytes_per_second` from now on, keeping the queue's size in bytes
-	///
-	/// Packets already queued still leave when they were due, as if the link stepped once they
-	/// had been served.
-	pub(super) fn set_rate(&mut self, bytes_per_second: u64) {
-		self.time_per_byte = Duration::from_nanos(1_000_000_000 / bytes_per_second);
-		self.max_queue = self.buffer_size * self.time_per_byte;
-	}
-
-	/// Queues `bytes` arriving at `now`, returning when they leave the link and whether they
-	/// were marked CE, or `None` if the full queue dropped them
-	fn enqueue(&mut self, now: Instant, bytes: usize) -> Option<(Instant, bool)> {
-		let busy_until = self.busy_until.unwrap_or(now).max(now);
-		let delay = busy_until - now;
-		if delay > self.max_queue {
-			self.stats.dropped += 1;
-			return None;
-		}
-		let service = bytes as u32 * self.time_per_byte;
-		self.stats.queued += 1;
-		self.stats.total_delay += delay;
-		self.stats.max_delay = self.stats.max_delay.max(delay);
-		if delay > self.max_queue / 2 {
-			self.stats.congested += service;
-		}
-
-		let done = busy_until + service;
-		self.busy_until = Some(done);
-		let marked = self.marks_ce && done > now + self.max_queue / 2;
-		self.stats.marked += marked as u64;
-		Some((done, marked))
-	}
-}
-
-/// One direction of the path: an optional bottleneck, then seeded loss, duplication, jitter,
-/// and reordering
-#[derive(Debug, Clone, Default)]
-pub(super) struct Link {
-	/// Queues datagrams at a rate-limited bottleneck, if set
-	pub(super) bottleneck: Option<Bottleneck>,
-	/// The probability a datagram leaving the bottleneck is lost
-	pub(super) loss: f64,
-	/// The probability a datagram arrives twice
-	pub(super) duplicate: f64,
-	/// Extra delay drawn uniformly up to this for each arrival, keeping arrivals in order
-	pub(super) jitter: Duration,
-	/// The probability an arrival is held back by up to `reorder_delay` more, so datagrams sent
-	/// after it can overtake it
-	pub(super) reorder: f64,
-	/// The most a reordered arrival is held back
-	pub(super) reorder_delay: Duration,
-	/// The latest in-order arrival, which jitter never moves another before
-	last_arrival: Option<Instant>,
-}
-
-impl Link {
-	/// Sends `bytes` at `now`, returning whether the bottleneck marked them CE and when each copy
-	/// that survives arrives
-	fn transmit(&mut self, rng: &mut StdRng, now: Instant, latency: Duration, bytes: usize) -> (bool, Vec<Instant>) {
-		let (sent, marked) = match &mut self.bottleneck {
-			Some(bottleneck) => match bottleneck.enqueue(now, bytes) {
-				Some(dequeued) => dequeued,
-				None => return (false, Vec::new()),
-			},
-			None => (now, false),
-		};
-		if rng.random_bool(self.loss) {
-			return (marked, Vec::new());
-		}
-
-		let copies = 1 + rng.random_bool(self.duplicate) as usize;
-		let arrivals = (0..copies)
-			.map(|_| {
-				let arrival = sent + latency + rng.random_range(Duration::ZERO..=self.jitter);
-				if rng.random_bool(self.reorder) {
-					return arrival + rng.random_range(Duration::ZERO..=self.reorder_delay);
-				}
-				let arrival = self.last_arrival.map_or(arrival, |last| last.max(arrival));
-				self.last_arrival = Some(arrival);
-				arrival
-			})
-			.collect();
-		(marked, arrivals)
-	}
-}
-
-/// What a [`Bottleneck`] queue has seen
-#[derive(Debug, Default, Clone)]
-pub(super) struct QueueStats {
-	/// Packets tail-dropped
-	pub(super) dropped: u64,
-	/// Packets marked CE
-	pub(super) marked: u64,
-	/// Packets queued for delivery
-	pub(super) queued: u32,
-	/// The queueing delay delivered packets met, summed
-	pub(super) total_delay: Duration,
-	/// The longest queueing delay a delivered packet met
-	pub(super) max_delay: Duration,
-	/// How long the link spent serving packets that queued past half full, the marking
-	/// threshold, so how long the sender took to answer congestion, summed over the run
-	pub(super) congested: Duration,
-}
-
-impl QueueStats {
-	/// The mean queueing delay delivered packets met
-	pub(super) fn mean_delay(&self) -> Duration {
-		self.total_delay / self.queued.max(1)
-	}
-}
-
 pub(super) struct TestEndpoint {
 	pub(super) endpoint: Endpoint,
 	pub(super) addr: SocketAddr,
 	socket: Option<UdpSocket>,
 	/// Each connection's next timer, as of its last poll
-	timeouts: BTreeMap<ConnectionHandle, Instant>,
+	pub(super) timeouts: BTreeMap<ConnectionHandle, Instant>,
 	pub(super) outbound: VecDeque<(Transmit, Bytes)>,
 	delayed: VecDeque<(Transmit, Bytes)>,
 	/// Datagrams in flight to this endpoint, in arrival order
@@ -555,6 +413,7 @@ impl TestEndpoint {
 					local_ip: None,
 					ecn,
 					data: packet,
+					arrival: Some(recv_time),
 				},
 				&mut buf,
 			) {
@@ -609,7 +468,7 @@ impl TestEndpoint {
 				while let Some(event) = conn.poll_endpoint_events() {
 					endpoint_events.push((ch, event));
 				}
-				while let Some(transmit) = conn.poll_transmit(now, MAX_DATAGRAMS, &mut buf) {
+				while let Some(transmit) = conn.transmit(now, MAX_DATAGRAMS, &mut buf) {
 					let size = transmit.size;
 					self.outbound.extend(split_transmit(transmit, &buf[..size]));
 					buf.clear();
@@ -759,13 +618,72 @@ impl ::std::ops::DerefMut for TestEndpoint {
 	}
 }
 
+/// Poll the server's next chunk of `s`
+pub(super) fn poll_read(
+	pair: &mut Pair,
+	ch: ConnectionHandle,
+	s: StreamId,
+	waiter: &kio::Waiter,
+) -> Poll<Result<Option<Bytes>, recv::Error>> {
+	let mut recv = pair.server_recv(ch, s);
+	let mut chunks = recv.read().unwrap();
+	let poll = chunks
+		.poll_next(waiter, usize::MAX)
+		.map(|r| r.map(|chunk| chunk.map(|c| c.bytes)));
+	chunks.finalize();
+	poll
+}
+
+/// Polls a wait with a waiter nothing wakes, to read its answer as it stands
+pub(super) fn peek<T>(poll: impl FnOnce(&kio::Waiter) -> Poll<T>) -> Poll<T> {
+	poll(&kio::Waiter::noop())
+}
+
+/// Asserts the connection has its handshake data, is connected and confirmed, and is still alive
+///
+/// Waits count wakes rather than order them, so this checks where the handshake ended, not the
+/// order its steps completed in.
+pub(super) fn assert_established(conn: &mut Connection) {
+	assert!(has_handshake_data(conn));
+	assert!(is_connected(conn));
+	assert!(is_confirmed(conn));
+	assert_matches!(conn.error(), None);
+}
+
+/// How far the connection's handshake got: whether it has its handshake data, is connected, and
+/// is confirmed
+pub(super) fn handshake_progress(conn: &mut Connection) -> (bool, bool, bool) {
+	(has_handshake_data(conn), is_connected(conn), is_confirmed(conn))
+}
+
+/// Whether the connection's handshake data is available
+pub(super) fn has_handshake_data(conn: &mut Connection) -> bool {
+	peek(|waiter| conn.poll_handshake_data(waiter)) == Poll::Ready(Ok(()))
+}
+
+/// Whether the connection completed its handshake
+pub(super) fn is_connected(conn: &mut Connection) -> bool {
+	peek(|waiter| conn.poll_connected(waiter)) == Poll::Ready(Ok(()))
+}
+
+/// Whether the connection's handshake was confirmed
+pub(super) fn is_confirmed(conn: &mut Connection) -> bool {
+	peek(|waiter| conn.poll_handshake_confirmed(waiter)) == Poll::Ready(Ok(()))
+}
+
+/// Logs the test's own events, and the stack's per-packet trace when `RUST_LOG` asks for it.
+///
+/// Formatting every trace event costs more than the simulation it describes, and the runs are
+/// deterministic, so a failure replays with `RUST_LOG=trace` to read it. The per-step side spans
+/// are debug for the same reason: they only label the stack's own events.
 pub(super) fn subscribe() -> tracing::subscriber::DefaultGuard {
+	let filter = tracing_subscriber::EnvFilter::builder()
+		.with_default_directive(tracing::Level::INFO.into())
+		.from_env()
+		.expect("RUST_LOG");
 	let builder = tracing_subscriber::FmtSubscriber::builder()
-		.with_max_level(tracing::Level::TRACE)
+		.with_env_filter(filter)
 		.with_writer(|| TestWriter);
-	// tracing uses std::time to trace time, which panics in wasm.
-	#[cfg(all(target_family = "wasm", target_os = "unknown"))]
-	let builder = builder.without_time();
 	tracing::subscriber::set_default(builder.finish())
 }
 
@@ -813,26 +731,29 @@ pub(super) fn server_config_with_cert(cert: CertificateDer<'static>, key: Privat
 	config
 }
 
-pub(super) fn server_crypto() -> QuicServerConfig {
+pub(super) fn server_crypto() -> rustls::ServerConfig {
 	server_crypto_inner(None, None)
 }
 
-pub(super) fn server_crypto_with_alpn(alpn: Vec<Vec<u8>>) -> QuicServerConfig {
+pub(super) fn server_crypto_with_alpn(alpn: Vec<Vec<u8>>) -> rustls::ServerConfig {
 	server_crypto_inner(None, Some(alpn))
 }
 
-pub(super) fn server_crypto_with_cert(cert: CertificateDer<'static>, key: PrivateKeyDer<'static>) -> QuicServerConfig {
+pub(super) fn server_crypto_with_cert(
+	cert: CertificateDer<'static>,
+	key: PrivateKeyDer<'static>,
+) -> rustls::ServerConfig {
 	server_crypto_inner(Some((cert, key)), None)
 }
 
 fn server_crypto_inner(
 	identity: Option<(CertificateDer<'static>, PrivateKeyDer<'static>)>,
 	alpn: Option<Vec<Vec<u8>>>,
-) -> QuicServerConfig {
+) -> rustls::ServerConfig {
 	let (cert, key) = identity.unwrap_or_else(|| {
 		(
 			CERTIFIED_KEY.cert.der().clone(),
-			PrivateKeyDer::Pkcs8(CERTIFIED_KEY.signing_key.serialize_der().into()),
+			PrivateKeyDer::Pkcs8(CERTIFIED_KEY.signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
 		)
 	});
 
@@ -841,7 +762,7 @@ fn server_crypto_inner(
 		config.alpn_protocols = alpn;
 	}
 
-	config.try_into().unwrap()
+	config
 }
 
 pub(super) fn client_config() -> client::Config {
@@ -866,7 +787,7 @@ pub(super) fn client_config_with_deterministic_pns() -> client::Config {
 /// leave at once, while BBR3 paces from its own rate and releases a burst nanoseconds later.
 pub(super) fn cubic_transport() -> transport::Config {
 	transport::Config {
-		congestion: Arc::new(congestion::CubicConfig::default()),
+		congestion: Arc::new(congestion::cubic::Config::default()),
 		..transport::Config::default()
 	}
 }
@@ -875,31 +796,38 @@ pub(super) fn client_config_with_certs(certs: Vec<CertificateDer<'static>>) -> c
 	client::Config::new(Arc::new(client_crypto_inner(Some(certs), None)))
 }
 
-pub(super) fn client_crypto() -> QuicClientConfig {
+pub(super) fn client_crypto() -> rustls::ClientConfig {
 	client_crypto_inner(None, None)
 }
 
-pub(super) fn client_crypto_with_alpn(protocols: Vec<Vec<u8>>) -> QuicClientConfig {
+pub(super) fn client_crypto_with_alpn(protocols: Vec<Vec<u8>>) -> rustls::ClientConfig {
 	client_crypto_inner(None, Some(protocols))
 }
 
-fn client_crypto_inner(certs: Option<Vec<CertificateDer<'static>>>, alpn: Option<Vec<Vec<u8>>>) -> QuicClientConfig {
+fn client_crypto_inner(
+	certs: Option<Vec<CertificateDer<'static>>>,
+	alpn: Option<Vec<Vec<u8>>>,
+) -> rustls::ClientConfig {
 	let mut roots = RootCertStore::empty();
 	for cert in certs.unwrap_or_else(|| vec![CERTIFIED_KEY.cert.der().clone()]) {
 		roots.add(cert).unwrap();
 	}
 
-	let mut inner = QuicClientConfig::inner(
-		WebPkiServerVerifier::builder_with_provider(Arc::new(roots), configured_provider())
-			.build()
-			.unwrap(),
-	);
+	// Packet-layout tests depend on a ClientHello that fits in one Initial.
+	// Integration tests exercise rind's default hybrid key share.
+	let mut provider = rind_rustls::default_provider().unwrap();
+	provider.kx_groups = vec![rind_rustls::kx_group::X25519];
+	let mut inner = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+		.with_protocol_versions(&[&rustls::version::TLS13])
+		.unwrap()
+		.with_root_certificates(roots)
+		.with_no_client_auth();
 	inner.key_log = Arc::new(KeyLogFile::new());
 	if let Some(alpn) = alpn {
 		inner.alpn_protocols = alpn;
 	}
 
-	inner.try_into().unwrap()
+	inner
 }
 
 pub(super) fn min_opt<T: Ord>(x: Option<T>, y: Option<T>) -> Option<T> {
@@ -955,8 +883,16 @@ fn set_congestion_experienced(x: Option<EcnCodepoint>, congestion_experienced: b
 	})
 }
 
-pub(crate) static CERTIFIED_KEY: LazyLock<rcgen::CertifiedKey<rcgen::KeyPair>> =
-	LazyLock::new(|| rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap());
+pub(crate) static CERTIFIED_KEY: LazyLock<rcgen::CertifiedKey<rind_rcgen::KeyPair>> = LazyLock::new(|| {
+	(|| -> std::result::Result<_, rcgen::Error> {
+		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+		params.serial_number = Some(1u64.into());
+		let cert = params.self_signed(&signing_key)?;
+		Ok(rcgen::CertifiedKey { cert, signing_key })
+	})()
+	.unwrap()
+});
 
 #[derive(Default)]
 struct SimpleTokenLog(Mutex<HashSet<u128>>);

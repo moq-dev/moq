@@ -6,7 +6,6 @@ import { DataType, StreamId } from "../../js/net/src/lite/stream.ts";
 import { ALPN_05, ALPN_06, ALPN_07_WIP, Version } from "../../js/net/src/lite/version.ts";
 import { createMockTransportPair } from "../../js/net/src/mock.ts";
 import { Stream, Writer } from "../../js/net/src/stream.ts";
-import { wireOf } from "../../js/net/src/wire.ts";
 
 console.debug = console.error;
 const input: { alpn: string; bytes: number[] } = JSON.parse(process.argv[2]);
@@ -38,7 +37,7 @@ try {
 	await goaway.writer.u53(StreamId.Goaway);
 	await new Goaway("").encode(goaway.writer, version);
 	goaway.writer.close();
-	assert.equal((await wireOf(connection).goaway).uri, "");
+	assert.equal((await connection.draining).uri, "");
 	assert.equal(closed, false);
 	const bytes: number[] = [];
 	const output = new Writer(

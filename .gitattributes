@@ -1,1 +1,3 @@
+* text=auto eol=lf
 quest/** merge=quest
+.github/actions/nextest/VERSION text eol=lf

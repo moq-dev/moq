@@ -8,11 +8,11 @@ or is removed or made private. Overlapping operations are collapsed into one.
 Names mirror across Rust, JS, and the bindings. Every break says how
 to migrate.
 
-Non-goals: redesigning surfaces that already have their own quest
+Non-goals: redesigning independently scoped surfaces
 ([subscribe ranges](/quest/m1/subscribe-ranges/README.md),
-[archives](/quest/m1/archive/README.md),
+[archives](/doc/concept/archives.md),
 [compressed tracks](/doc/concept/compression.md),
-[A/V clock](/quest/m1/av-clock.md)), and inherited debt that a later quest
+and `Sync`'s per-track clock handles), and inherited debt that a later quest
 already reshapes.
 
 ## Plan
@@ -73,11 +73,7 @@ Rejected in planning:
 
 ## Required
 
-- [Two broadcast resolutions](/quest/m1/api-audit/resolve/README.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
-- [Demand is wanted, everywhere](/quest/m1/api-audit/wanted.md) - every `used`/`unused` pair becomes `wanted()` and `wanted_changed()`, and unused ones go
-- [QMux datagrams obey or refuse their policy](/quest/m1/api-audit/qmux-datagrams.md) - `Session.datagrams` is the DOM interface, its high-water mark is live, and the inert settings throw
-- [No constructible internal handles](/quest/m1/api-audit/internal-constructors.md) - `Rendition`, `Lister`, `Arrivals`, and e2ee's generations get private constructors, and a lint rule stops new ones
-- [moq-congestion's first-publish names](/quest/m1/api-audit/congestion-names.md) - `bbr3::Config`, `cubic::Config`, `Metrics`, `Factory`, and no `into_any`
+- [Routes are the origin API](/quest/m1/api-audit/route/README.md) - apps announce exact or prefix routes through one `Route` handle that owns its broadcast and carries an `instance`, prefix routes can serve a held broadcast, and readers get a listing plus `follow`
 
 ## Related
 

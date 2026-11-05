@@ -6,7 +6,9 @@
 //! VPS/SPS/PPS for H.265), so we:
 //! - pull the parameter sets out of the stream and build a
 //!   `CMVideoFormatDescription`, (re)creating the decompression session whenever
-//!   they change;
+//!   they change. A track whose description carries them builds the session at
+//!   open, so a stream VideoToolbox has no decoder for is refused before
+//!   subscribing rather than at its first keyframe;
 //! - repackage the slice NALs as AVCC/HVCC (4-byte length-prefixed) in a
 //!   `CMSampleBuffer`, the form VideoToolbox decodes;
 //! - request NV12 output and hand the `CVPixelBuffer` back as-is, so a decoded
@@ -37,9 +39,10 @@ use objc2_core_video::{
 };
 use objc2_video_toolbox::{
 	VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord, VTDecompressionSession,
+	kVTCouldNotFindVideoDecoderErr, kVTVideoDecoderUnsupportedDataFormatErr,
 };
 
-use super::{Backend, Codec, Config};
+use super::{Backend, Codec, Config, Stream};
 use crate::frame::{Surface, apple::PixelBuffer};
 use crate::{Error, Frame};
 
@@ -57,6 +60,48 @@ enum NalKind {
 	Sps,
 	Pps,
 	Slice,
+}
+
+/// One access unit taken apart: the parameter sets it carries and its slices
+/// in the 4-byte length-prefixed form VideoToolbox decodes.
+#[derive(Default)]
+struct Split {
+	vps: Option<Bytes>,
+	sps: Option<Bytes>,
+	pps: Option<Bytes>,
+	avcc: Vec<u8>,
+}
+
+impl Split {
+	/// `NalIterator` yields the parameter-set NALs as zero-copy `Bytes`
+	/// (sub-slices of `access_unit`), so they need no copy.
+	fn new(codec: Codec, access_unit: Bytes) -> Result<Self, Error> {
+		let mut split = Self {
+			avcc: Vec::with_capacity(access_unit.len()),
+			..Self::default()
+		};
+		let mut handle = |nal: Bytes| match nal_kind(&nal, codec) {
+			NalKind::Vps => split.vps = Some(nal),
+			NalKind::Sps => split.sps = Some(nal),
+			NalKind::Pps => split.pps = Some(nal),
+			NalKind::Slice => {
+				split.avcc.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+				split.avcc.extend_from_slice(&nal);
+			}
+		};
+
+		// `NalIterator` yields every NAL except the last (it has no trailing start
+		// code); `flush` returns that final one.
+		let mut buf = access_unit;
+		let mut nals = NalIterator::new(&mut buf);
+		for nal in nals.by_ref() {
+			handle(nal.map_err(moq_mux::Error::from)?);
+		}
+		if let Some(nal) = nals.flush().map_err(moq_mux::Error::from)? {
+			handle(nal);
+		}
+		Ok(split)
+	}
 }
 
 /// Where the C output callback drops decoded frames, drained after each
@@ -92,19 +137,24 @@ pub(crate) struct VideoToolbox {
 }
 
 impl VideoToolbox {
-	/// Open a decoder for `codec` (H.264 or H.265). The session is built lazily
-	/// once the first keyframe's parameter sets arrive.
+	/// Open a decoder for `stream` (H.264 or H.265). The session is built from
+	/// the description's parameter sets when the track has them, otherwise once
+	/// the first keyframe's arrive.
 	/// `config` is accepted for signature parity; VideoToolbox decodes at the
 	/// stream's native size (callers scale the frames themselves).
-	pub(crate) fn open(codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+		Ok(Box::new(Self::new(stream)?))
+	}
+
+	fn new(stream: &Stream) -> Result<Self, Error> {
+		let codec = stream.codec;
 		if !matches!(codec, Codec::H264 | Codec::H265) {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"VideoToolbox {} decode is not wired",
 				codec.label()
 			)));
 		}
-		tracing::info!(decoder = NAME, codec = ?codec, "opened video decoder");
-		Ok(Box::new(Self {
+		let mut backend = Self {
 			codec,
 			session: None,
 			format: None,
@@ -115,7 +165,13 @@ impl VideoToolbox {
 			sample_index: 0,
 			pending: VecDeque::new(),
 			sink: Box::new(Sink::default()),
-		}))
+		};
+		if let Some(parameter_sets) = &stream.parameter_sets {
+			let split = Split::new(codec, parameter_sets.clone())?;
+			backend.ensure_session(split.vps, split.sps, split.pps)?;
+		}
+		tracing::info!(decoder = NAME, codec = ?codec, "opened video decoder");
+		Ok(backend)
 	}
 
 	/// The ordered parameter sets the format description needs, or `None` if any
@@ -175,7 +231,17 @@ impl VideoToolbox {
 		let session = NonNull::new(session_ptr)
 			.filter(|_| status == 0)
 			.map(|p| unsafe { CFRetained::from_raw(p) })
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("VTDecompressionSessionCreate failed: {status}")))?;
+			.ok_or_else(|| {
+				// VideoToolbox has no decoder, hardware or software, for this format.
+				if status == kVTCouldNotFindVideoDecoderErr || status == kVTVideoDecoderUnsupportedDataFormatErr {
+					Error::UnsupportedCodec(format!(
+						"VideoToolbox has no decoder for this {} stream ({status})",
+						self.codec.label()
+					))
+				} else {
+					Error::Codec(anyhow::anyhow!("VTDecompressionSessionCreate failed: {status}"))
+				}
+			})?;
 
 		self.session = Some(session);
 		self.format = Some(format);
@@ -209,34 +275,8 @@ impl VideoToolbox {
 impl Backend for VideoToolbox {
 	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
 		// Split the Annex-B access unit, pull out any parameter sets, and gather
-		// the slices into length-prefixed (4-byte) form. `NalIterator` yields the
-		// parameter-set NALs as zero-copy `Bytes` (sub-slices of `access_unit`), so
-		// they need no copy.
-		let codec = self.codec;
-		let mut vps = None;
-		let mut sps = None;
-		let mut pps = None;
-		let mut avcc: Vec<u8> = Vec::with_capacity(access_unit.len());
-		let mut handle = |nal: Bytes| match nal_kind(&nal, codec) {
-			NalKind::Vps => vps = Some(nal),
-			NalKind::Sps => sps = Some(nal),
-			NalKind::Pps => pps = Some(nal),
-			NalKind::Slice => {
-				avcc.extend_from_slice(&(nal.len() as u32).to_be_bytes());
-				avcc.extend_from_slice(&nal);
-			}
-		};
-
-		// `NalIterator` yields every NAL except the last (it has no trailing start
-		// code); `flush` returns that final one.
-		let mut buf = access_unit;
-		let mut nals = NalIterator::new(&mut buf);
-		for nal in nals.by_ref() {
-			handle(nal.map_err(moq_mux::Error::from)?);
-		}
-		if let Some(nal) = nals.flush().map_err(moq_mux::Error::from)? {
-			handle(nal);
-		}
+		// the slices into length-prefixed (4-byte) form.
+		let Split { vps, sps, pps, avcc } = Split::new(self.codec, access_unit)?;
 
 		if !self.ensure_session(vps, sps, pps)? {
 			// No parameter sets yet (e.g. a delta frame before the first keyframe).
@@ -532,6 +572,35 @@ fn nal_kind(nal: &[u8], codec: Codec) -> NalKind {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A track whose description carries its parameter sets gets its session at
+	/// open, which is where VideoToolbox answers whether it has a decoder for the
+	/// stream, and its first keyframe reuses that session.
+	#[test]
+	fn a_description_builds_the_session_at_open() {
+		// x264's High profile SPS and PPS for a 64x64 picture.
+		const SPS: &[u8] = &[
+			0x67, 0x64, 0x00, 0x0a, 0xac, 0xd9, 0x44, 0x26, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03,
+			0x00, 0x08, 0x3c, 0x48, 0x96, 0x58,
+		];
+		const PPS: &[u8] = &[0x68, 0xeb, 0xe3, 0xcb, 0x22, 0xc0];
+		let parameter_sets = moq_mux::codec::annexb::build_prefix(&[Bytes::from_static(SPS), Bytes::from_static(PPS)]);
+		let stream = Stream {
+			parameter_sets: Some(parameter_sets.clone()),
+			..Codec::H264.into()
+		};
+
+		let mut backend = VideoToolbox::new(&stream).unwrap();
+		let opened: *const VTDecompressionSession = &**backend.session.as_ref().expect("no session at open");
+
+		let split = Split::new(Codec::H264, parameter_sets).unwrap();
+		assert!(backend.ensure_session(split.vps, split.sps, split.pps).unwrap());
+		let session: *const VTDecompressionSession = &**backend.session.as_ref().unwrap();
+		assert!(
+			ptr::eq(opened, session),
+			"the keyframe's parameter sets rebuilt the session"
+		);
+	}
 
 	#[test]
 	fn pending_timestamps_are_bounded() {

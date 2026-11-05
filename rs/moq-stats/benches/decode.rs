@@ -9,6 +9,7 @@
 
 #![expect(
 	clippy::disallowed_methods,
+	clippy::disallowed_types,
 	reason = "custom timings measure the real time the work took, not the ambient clock"
 )]
 
@@ -87,7 +88,7 @@ fn traffic(index: usize, tick: u64, changed_percent: usize) -> Traffic {
 /// The frames a group's producer would publish over the run, snapshot first.
 fn frames(broadcasts: usize, tiers: usize, changed_percent: usize) -> Vec<(Vec<u8>, bool)> {
 	let mut encoder = Encoder::<Body>::new(snapshot::Config::default().with_deltas(true));
-	let epoch = moq_net::Epoch::mint().to_string();
+	let epoch = "01900000-0000-7000-8000-000000000001".to_string();
 	(0..TICKS + 2)
 		.map(|tick| {
 			let tiers = (0..tiers)

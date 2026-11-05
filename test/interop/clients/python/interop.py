@@ -9,7 +9,7 @@ subscribe: connect, wait for a catalog with video and audio, and exit 0 once a
            has been decoded to --audio-out.<codec> for tone.py to judge (exit 1 on
            timeout / no data).
 
---finish verifies a finite tail, natural media/catalog EOF, announcement END, and
+--finish verifies a finite tail, natural media/catalog EOF, the announcement going absent, and
 same-session health; --frames sets its exact size. --finish-ack selects publisher
 finish mode and names the FIFO releasing teardown after the real linger.
 --version offers only that version. --grant waits for the grant the relay sends over
@@ -65,7 +65,7 @@ async def _publish_tone(audio: moq.audio.Producer, tones: list[int]) -> None:
         ]
         audio.write(
             moq.audio.Frame(
-                timestamp=timedelta(microseconds=timestamp_us), data=struct.pack(f"<{len(samples)}f", *samples)
+                timestamp=moq.Timestamp(timestamp_us, 1_000_000), data=struct.pack(f"<{len(samples)}f", *samples)
             )
         )
         phase += AUDIO_BATCH_SAMPLES
@@ -82,6 +82,7 @@ async def _print_grant(client: moq.Client, timeout: float) -> None:
     """Wait for the relay's grant and print it, in the Rust client's `auth granted` shape."""
     session = client.session
     assert session is not None
+
     async def first() -> moq.Grant:
         async with session.grants() as grants:
             async for grant in grants:
@@ -183,10 +184,11 @@ async def _catalog_with_media(consumer: moq.BroadcastConsumer) -> moq.media.Cata
 
 
 async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> None:
-    # Watch the exact path before resolving it, retaining END while media drains.
+    # Watch the exact path before resolving it, retaining its absence while media drains.
     async with client.announced(broadcast) as announcements:
-        async with client.follow(broadcast) as announced:
-            consumer = await announced
+        async with client.follow(broadcast) as following:
+            consumer = await following
+            assert consumer is not None
             async with await moq.media.CatalogConsumer.subscribe(consumer) as catalogs:
                 async for catalog in catalogs:
                     if catalog.video:
@@ -195,7 +197,7 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
                     raise RuntimeError("catalog ended without video")
                 id, video = next(iter(catalog.video.items()))
                 async with await moq.media.TrackConsumer.subscribe(
-                    consumer, id, video, subscription=moq.Subscription(max_delay=MAX_DELAY)
+                    consumer, id, video, subscription=moq.Subscription(delay=moq.Delay(max=MAX_DELAY))
                 ) as media:
                     count = 0
                     async for frame in media:
@@ -217,26 +219,26 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
 
         started = False
         async for event in announcements:
-            if isinstance(event, moq.AnnounceEventRestart) and event.announce.prefix == broadcast:
-                raise RuntimeError("broadcast restarted during finish")
-            if isinstance(event, moq.AnnounceEventStart) and event.announce.prefix == broadcast:
+            if isinstance(event, moq.AnnounceEventPresent) and event.announce.prefix == broadcast:
                 started = True
-            if isinstance(event, moq.AnnounceEventEnd) and event.announce.prefix == broadcast:
+            if isinstance(event, moq.AnnounceEventAbsent) and event.announce.prefix == broadcast:
                 if not started:
                     raise RuntimeError("broadcast ended without announcement")
                 break
         else:
-            raise RuntimeError("announcement stream ended before broadcast END")
+            raise RuntimeError("announcement stream ended before the broadcast went absent")
 
     async with client.follow(f"{broadcast}.health") as announced_health:
         health = await announced_health
+        assert health is not None
         async with await health.subscribe_track("live") as live:
             seen = False
             async for group in live:
                 async with group:
                     async for frame in group:
-                        if seen or frame.payload != b"session-alive" or frame.timestamp is not None:
-                            raise RuntimeError("unexpected session health payload or timestamp")
+                        # Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+                        if seen or frame.payload != b"session-alive":
+                            raise RuntimeError("unexpected session health payload")
                         seen = True
             if not seen:
                 raise RuntimeError("missing session health payload")
@@ -255,7 +257,10 @@ async def _decode_audio(
     """
     out = f"{out}.{audio.codec.split('.')[0]}"
     decoder = await moq.audio.Consumer.subscribe(
-        consumer, id, audio, moq.audio.DecoderOutput(format=moq.audio.SampleFormat.F32, max_delay=MAX_DELAY)
+        consumer,
+        id,
+        audio,
+        moq.audio.DecoderOutput(format=moq.audio.SampleFormat.F32, delay=moq.Delay(max=MAX_DELAY)),
     )
     frame_bytes = 4 * audio.channel_count
     decoded = 0
@@ -268,7 +273,7 @@ async def _decode_audio(
             if isinstance(frame, moq.audio.End):
                 raise RuntimeError("audio track ended early")
             samples = len(frame.data) // frame_bytes
-            log.write(f"{frame.timestamp // timedelta(microseconds=1)} {samples}\n")
+            log.write(f"{frame.timestamp.to_timedelta() // timedelta(microseconds=1)} {samples}\n")
             pcm.write(frame.data)
             decoded += samples
             if decoded * 1000 >= audio_ms * audio.sample_rate:
@@ -300,12 +305,13 @@ async def subscribe(
             return
         assert audio_out is not None and audio_ms is not None
         consumer = await asyncio.wait_for(client.follow(broadcast), timeout)
+        assert consumer is not None
         catalog = await asyncio.wait_for(_catalog_with_media(consumer), timeout)
 
         id, video = next(iter(catalog.video.items()))
 
         media = await moq.media.TrackConsumer.subscribe(
-            consumer, id, video, subscription=moq.Subscription(max_delay=MAX_DELAY)
+            consumer, id, video, subscription=moq.Subscription(delay=moq.Delay(max=MAX_DELAY))
         )
 
         total = 0

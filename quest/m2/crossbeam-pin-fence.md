@@ -2,14 +2,18 @@
 
 ## Goal
 
-Waiting on upstream crossbeam. Once
-[crossbeam-rs/crossbeam#1352](https://github.com/crossbeam-rs/crossbeam/issues/1352)
-is fixed in a released crossbeam-epoch, the workspace takes that release and
+The workspace takes a crossbeam-epoch release that fixes `Local::pin`, and
 kio's `fence(Release)` in `Read::drop` (`rs/kio/src/log.rs`) is deleted, with
-the log eviction loom model still passing on ARM.
+kio's log tests still passing on ARM.
 
-Check #1352's state and crossbeam-epoch's latest release. Delete this quest if
-upstream declines the fix.
+## Waiting
+
+- crossbeam-rs/crossbeam: a released crossbeam-epoch fixes
+  [crossbeam-rs/crossbeam#1352](https://github.com/crossbeam-rs/crossbeam/issues/1352)
+  (the fix is proposed in
+  [crossbeam-rs/crossbeam#1355](https://github.com/crossbeam-rs/crossbeam/pull/1355)).
+  Check #1352's state and crossbeam-epoch's latest release. Delete this quest
+  if upstream declines the fix.
 
 ## Plan
 
@@ -25,8 +29,10 @@ Decided 2026-10-28 (maintainer): keep crossbeam-epoch rather than replace it.
 refcounted segments and per-read refcounts, it supports loom, and moka pulls
 it into moq-relay anyway.
 
-Verify on ARM: the Nightly `Tests (rs loom)` job runs on `ubuntu-24.04-arm`.
-Without an ARM host, force crossbeam's non-x86 branch in a scratch copy, as
-#7134 did, and confirm the model passes without the fence.
+Verify on ARM: Nightly's `gate` job runs kio's log tests on
+`ubuntu-24.04-arm`. The loom model that checked this ordering is gone (decided
+2026-10-31, maintainer: "Remove loom entirely"), so also confirm from the
+released `Local::pin` that it orders the epoch store before the reads it
+guards, which is what the fence restores.
 
 Public API: none. Wire: none.

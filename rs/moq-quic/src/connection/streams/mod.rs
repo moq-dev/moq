@@ -1,7 +1,9 @@
+use std::task::Poll;
+
 use tracing::trace;
 
 use super::spaces::{Retransmits, ThinRetransmits};
-use crate::{Dir, StreamId, VarInt, frame};
+use crate::{Dir, StreamId, connection::Error, frame};
 
 mod lease;
 pub mod recv;
@@ -46,6 +48,8 @@ impl<'a> Streams<'a> {
 		if self.state.next[dir as usize] >= self.state.max[dir as usize] {
 			self.state.streams_blocked[dir as usize] = true;
 			self.state.open_refused[dir as usize] = true;
+			// STREAMS_BLOCKED
+			self.state.waits.wake_transmit();
 			return None;
 		}
 
@@ -82,6 +86,57 @@ impl<'a> Streams<'a> {
 		Some(StreamId::new(!self.state.side, dir, x))
 	}
 
+	/// [`Self::open`], or wait for the peer to allow another stream
+	///
+	/// Pending registers `waiter` until the peer raises the stream limit in `dir`. Fails once
+	/// the connection is lost.
+	///
+	/// # Panics
+	/// - when `options.group` was opened on another connection
+	pub fn poll_open(
+		&mut self,
+		waiter: &kio::Waiter,
+		dir: Dir,
+		options: send::Options<'_>,
+	) -> Poll<Result<StreamId, Error>> {
+		if let Some(err) = self.state.waits.lost() {
+			return Poll::Ready(Err(err.clone()));
+		}
+		match self.open(dir, options) {
+			Some(id) => Poll::Ready(Ok(id)),
+			None => {
+				self.state.waits.register_open(dir, waiter);
+				Poll::Pending
+			}
+		}
+	}
+
+	/// [`Self::accept`], or wait for the peer to open a stream
+	///
+	/// Pending registers `waiter` until the peer opens a stream in `dir`. Streams the peer opened
+	/// stay acceptable after the connection is lost, and only then does this fail.
+	pub fn poll_accept(&mut self, waiter: &kio::Waiter, dir: Dir) -> Poll<Result<StreamId, Error>> {
+		if let Some(id) = self.accept(dir) {
+			return Poll::Ready(Ok(id));
+		}
+		if let Some(err) = self.state.waits.lost() {
+			return Poll::Ready(Err(err.clone()));
+		}
+		self.state.waits.register_accept(dir, waiter);
+		Poll::Pending
+	}
+
+	/// How many more streams the peer lets this side open in `dir` before it raises its limit.
+	pub fn credit(&self, dir: Dir) -> u64 {
+		self.state.max[dir as usize].saturating_sub(self.state.next[dir as usize])
+	}
+
+	/// Whether an open in `dir` was refused since the peer last raised its limit, so this side
+	/// waits for its MAX_STREAMS, as the STREAMS_BLOCKED it sends says.
+	pub fn blocked(&self, dir: Dir) -> bool {
+		self.state.open_refused[dir as usize]
+	}
+
 	/// The number of streams that may have unacknowledged data.
 	pub fn send_streams(&self) -> usize {
 		self.state.send_streams
@@ -113,6 +168,7 @@ impl StreamsState {
 	) -> bool {
 		let group = options.group.map(|g| g.index(self.tag));
 		let frame = datagram.size();
+		self.waits.wake_transmit();
 		self.pending
 			.push_datagram(group, options.priority, datagram, frame, budget)
 	}
@@ -135,74 +191,6 @@ impl StreamsState {
 	/// Frame bytes queued datagrams hold against the send buffer.
 	pub(crate) fn datagram_bytes(&self) -> usize {
 		self.pending.datagram_bytes()
-	}
-}
-
-/// Application events about streams
-#[derive(Debug, PartialEq, Eq)]
-pub enum StreamEvent {
-	/// One or more new streams has been opened and can be accepted
-	///
-	/// A separate [`StreamEvent::Readable`] is emitted once data arrives.
-	Opened {
-		/// Directionality for which streams have been opened
-		dir: Dir,
-	},
-	/// A currently open stream likely has data or errors waiting to be read
-	Readable {
-		/// Which stream is now readable
-		id: StreamId,
-	},
-	/// A formerly write-blocked stream might be ready for a write or have been stopped
-	///
-	/// Only generated for streams that are currently open.
-	Writable {
-		/// Which stream is now writable
-		id: StreamId,
-	},
-	/// A finished stream has been fully acknowledged or stopped
-	Finished {
-		/// Which stream has been finished
-		id: StreamId,
-	},
-	/// The answer changed for the lowest offset a [`send::Stream::acked`] call is waiting for
-	///
-	/// The stream's contiguous acknowledged prefix reached it, or a reset or STOP_SENDING may have
-	/// failed any waiter. Every waiter on the stream polls again: one at or below `offset` is
-	/// acknowledged, and one past it learns its error or registers again. Reported before a [`StreamEvent::Finished`] from the same ACK.
-	/// Not reported when the connection closes, which fails [`send::Stream::acked`] instead.
-	Acked {
-		/// Which stream was acknowledged
-		id: StreamId,
-		/// The end of the stream's contiguous acknowledged prefix
-		offset: u64,
-	},
-	/// The peer asked us to stop sending on an outgoing stream
-	Stopped {
-		/// Which stream has been stopped
-		id: StreamId,
-		/// Error code supplied by the peer
-		error_code: VarInt,
-	},
-	/// At least one new stream of a certain directionality may be opened
-	Available {
-		/// Directionality for which streams are newly available
-		dir: Dir,
-	},
-}
-
-/// Indicates whether a frame needs to be transmitted
-///
-/// This type wraps around bool and uses the `#[must_use]` attribute in order
-/// to prevent accidental loss of the frame transmission requirement.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-#[must_use = "A frame might need to be enqueued"]
-pub struct ShouldTransmit(bool);
-
-impl ShouldTransmit {
-	/// Returns whether a frame should be transmitted
-	pub fn should_transmit(self) -> bool {
-		self.0
 	}
 }
 

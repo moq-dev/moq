@@ -1,22 +1,26 @@
 use tokio::net::{TcpStream, ToSocketAddrs};
 
-use crate::transport::build_stream_session;
-use crate::{Config, Error, Session};
+use crate::transport::{Stream, build_stream_session};
+use crate::{Config, Driver, Error, Session};
 
 /// Connect a QMux client over plain TCP with one session configuration.
 ///
 /// TCP has no ALPN; set `Config::protocol` to negotiate an application protocol.
-pub async fn connect(addr: impl ToSocketAddrs, config: Config) -> Result<Session, Error> {
+pub async fn connect(addr: impl ToSocketAddrs, config: Config) -> Result<(Session, Driver<Stream<TcpStream>>), Error> {
 	let stream = TcpStream::connect(addr).await?;
 	finish(stream, config, false).await
 }
 
 /// Accept a QMux session; drive each handshake independently of the listener loop.
-pub async fn accept(stream: TcpStream, config: Config) -> Result<Session, Error> {
+pub async fn accept(stream: TcpStream, config: Config) -> Result<(Session, Driver<Stream<TcpStream>>), Error> {
 	finish(stream, config, true).await
 }
 
-async fn finish(stream: TcpStream, config: crate::Config, is_server: bool) -> Result<Session, Error> {
+async fn finish(
+	stream: TcpStream,
+	config: crate::Config,
+	is_server: bool,
+) -> Result<(Session, Driver<Stream<TcpStream>>), Error> {
 	let socket_stats = adopt(&stream)?;
 	// `build_stream_session` awaits the peer's transport parameters before
 	// returning, so `protocol()` is resolved on the session we hand back
@@ -30,7 +34,10 @@ async fn finish(stream: TcpStream, config: crate::Config, is_server: bool) -> Re
 /// Disables Nagle: the session already batches records and flushes once per batch,
 /// so Nagle has nothing left to coalesce and would only hold a batch's tail until
 /// the peer's delayed ACK.
-pub(crate) fn adopt(stream: &TcpStream) -> std::io::Result<Option<crate::SharedSocketStats>> {
+///
+/// For a socket whose session starts elsewhere, such as
+/// `tls::Server::accept_established`.
+pub fn adopt(stream: &TcpStream) -> std::io::Result<Option<crate::SharedSocketStats>> {
 	stream.set_nodelay(true)?;
 
 	// The kernel already tracks this socket's RTT (and, on Linux, its delivery
@@ -73,8 +80,8 @@ mod tests {
 			finish(adopt(client), config.clone(), false),
 			accept(adopt(server), config)
 		);
-		client.unwrap();
-		server.unwrap();
+		let _client = client.unwrap();
+		let _server = server.unwrap();
 		for probe in probes {
 			assert!(probe.nodelay().unwrap());
 		}

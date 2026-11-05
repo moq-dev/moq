@@ -32,6 +32,5 @@ Open, for when the port starts:
 
 ## Related
 
-- [OBS multitrack](/quest/m2/obs-multitrack.md) - multitrack video renditions the native output should carry
 - [First C++ package release](/quest/m2/release/cpp-release.md) - the published C++ package the port would build on
 - [OBS native codecs](/quest/m2/obs-moq-video/README.md) - the plugin's codec work, which stays plugin-side

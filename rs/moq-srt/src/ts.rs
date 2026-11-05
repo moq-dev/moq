@@ -39,7 +39,7 @@ pub enum Program {
 ///
 /// A step of the source's clock onto another timeline ([`ts::Restart`]), such as a
 /// changeover between two encoders whose clocks were never locked, finishes the broadcast
-/// and republishes the rest of the input on the same path under a new epoch, on the same
+/// and republishes the rest of the input on the same path under a new instance, on the same
 /// connection. [`Program::All`] still ends the ingest there.
 pub struct Publisher {
 	importer: Importer,
@@ -67,7 +67,7 @@ struct One {
 	program: Option<u16>,
 }
 
-/// One program's broadcast, under one epoch.
+/// One program's broadcast, under one instance.
 struct Instance {
 	// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
 	// verbatim, so the importer uses the `mpegts` catalog extension rather than the
@@ -80,7 +80,7 @@ struct Instance {
 }
 
 impl Instance {
-	/// Publish `path` under a new epoch, importing `program` of the input, or its only one.
+	/// Publish `path` under a new instance, importing `program` of the input, or its only one.
 	///
 	/// Each instance is its own publisher, so an encoder reconnecting under the same stream id,
 	/// or a source whose clock stepped, replaces the stale broadcast instead of resuming into it.
@@ -89,9 +89,9 @@ impl Instance {
 		path: &str,
 		config: moq_mux::catalog::Config,
 		program: Option<u16>,
-	) -> Result<(Self, moq_net::Epoch)> {
-		let epoch = moq_net::Epoch::mint();
-		let broadcast = origin.publish(path, moq_net::origin::Route::default().with_epoch(epoch.clone()))?;
+	) -> Result<(Self, moq_net::Instance)> {
+		let id = moq_net::Instance::random();
+		let broadcast = origin.publish(path, moq_net::origin::Route::default().with_instance(id.clone(), 0))?;
 		let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
 		let mut import = ts::Import::new(broadcast.broadcast().clone(), catalog.reserve());
@@ -103,7 +103,7 @@ impl Instance {
 			catalog,
 			broadcast,
 		};
-		Ok((instance, epoch))
+		Ok((instance, id))
 	}
 
 	/// Flush the buffered media and finish every track, the catalog included.
@@ -118,7 +118,7 @@ impl Publisher {
 	/// Wire up the TS importer and catalog for `path` on `origin`, announcing the broadcast
 	/// now, or each program's once its PMT declares its tracks for [`Program::All`].
 	///
-	/// `config` is the catalog the importer publishes into: retention
+	/// `config` is the catalog the importer publishes into: max age
 	/// (`with_max_age`) and the connection allocator passthrough tracks claim on
 	/// (`with_bandwidth`).
 	pub fn new(
@@ -128,7 +128,7 @@ impl Publisher {
 		program: Option<Program>,
 	) -> Result<Self> {
 		let importer = match program {
-			// `ts::Programs` mints an epoch per program.
+			// `ts::Programs` mints an instance per program.
 			Some(Program::All) => {
 				tracing::info!(%path, ?program, "publishing ingest broadcasts");
 				Importer::All(Box::new(ts::Programs::new(
@@ -142,8 +142,8 @@ impl Publisher {
 					Some(Program::One(program)) => Some(program),
 					_ => None,
 				};
-				let (instance, epoch) = Instance::publish(origin, path, config.clone(), program)?;
-				tracing::info!(%path, ?program, %epoch, "publishing ingest broadcast");
+				let (instance, id) = Instance::publish(origin, path, config.clone(), program)?;
+				tracing::info!(%path, ?program, instance = %id, "publishing ingest broadcast");
 				Importer::One(Box::new(One {
 					instance,
 					origin: origin.clone(),
@@ -182,11 +182,11 @@ impl Publisher {
 				while let Err(err) = instance.import.decode(&data) {
 					let restart = err.downcast::<ts::Restart>().map_err(moq_mux::Error::from)?;
 					// The instance before the step finishes; the rest of the input republishes
-					// the path under a new epoch.
+					// the path under a new instance.
 					instance.finish()?;
 					self.span.in_scope(|| self.log.finish(&instance.import.stats()));
-					let (next, epoch) = Instance::publish(origin, path, config.clone(), *program)?;
-					tracing::warn!(%path, step = %restart.step, %epoch, "the source's clock stepped; republishing");
+					let (next, id) = Instance::publish(origin, path, config.clone(), *program)?;
+					tracing::warn!(%path, step = %restart.step, instance = %id, "the source's clock stepped; republishing");
 					// The finished broadcast ends with its publication.
 					*instance = next;
 					self.log = ts::stats::Log::default();
@@ -292,7 +292,9 @@ impl Subscriber {
 		// Join the broadcast once announced. The export resolves any referenced sibling
 		// broadcast (the catalog `broadcast` field) through the same origin.
 		let broadcast = match following.available().await {
-			Ok(broadcast) => broadcast,
+			Ok(Some(broadcast)) => broadcast,
+			// The first change is always an instance.
+			Ok(None) => return Ok(None),
 			Err(moq_net::Error::Closed) => return Ok(None),
 			Err(err) => return Err(err.into()),
 		};
@@ -325,15 +327,10 @@ impl Subscriber {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
+	use kio::clock::timeout;
 	use moq_mux::catalog::hang::Container;
 	use moq_mux::catalog::{CatalogFormat, Stream};
-	use tokio::time::timeout;
 
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
@@ -493,10 +490,10 @@ mod tests {
 	}
 
 	/// A source switched between two encoders whose clocks started hours apart, without a
-	/// `discontinuity_indicator`, either way: the ingest republishes under a new epoch on the
+	/// `discontinuity_indicator`, either way: the ingest republishes under a new instance on the
 	/// same connection, and an egress that stitches replacements carries on into it.
 	#[tokio::test(start_paused = true)]
-	async fn a_clock_step_republishes_under_a_new_epoch() {
+	async fn a_clock_step_republishes_under_a_new_instance() {
 		// The issue's step: two encoders started about 4 h 40 m apart.
 		const SWITCH: i64 = 16_844 * 90_000 + 45_000;
 		for step in [-SWITCH, SWITCH] {
@@ -636,7 +633,7 @@ mod tests {
 	/// announced.
 	async fn program(origin: &moq_net::origin::Producer, path: &str) -> (u16, Vec<u16>) {
 		let consumer = origin.consume();
-		let broadcast = consumer.follow(path, None).unwrap().available().await.unwrap();
+		let broadcast = consumer.follow(path, None).unwrap().available().await.unwrap().unwrap();
 		let mut catalog = moq_mux::catalog::Consumer::<ts::Ext>::new(&broadcast, CatalogFormat::Hang)
 			.await
 			.unwrap();
@@ -664,7 +661,7 @@ mod tests {
 	}
 
 	/// A caller reconnecting under the same stream id while its stale connection is
-	/// still open restarts the broadcast at once: each connection is its own epoch, so
+	/// still open restarts the broadcast at once: each connection is its own instance, so
 	/// a fresh request reaches the reconnect, while the stale viewer stays on the old
 	/// one until it leaves.
 	#[tokio::test(start_paused = true)]
@@ -681,7 +678,7 @@ mod tests {
 			.unwrap();
 
 		let _fresh = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
-		let stale_viewer = tokio::time::timeout(Duration::from_secs(1), async {
+		let stale_viewer = kio::clock::timeout(Duration::from_secs(1), async {
 			loop {
 				match catalog.recv_group().await {
 					Ok(Some(_)) => continue,
@@ -732,10 +729,16 @@ mod tests {
 		publisher.feed(Bytes::from_static(BBB5S)).unwrap();
 
 		let consumer = origin.consume();
-		let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
-		let start = tokio::time::Instant::now();
+		let broadcast = consumer
+			.follow("live/cam0", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
+		let start = kio::clock::now();
 		let wait = tokio::spawn(publisher.finish(linger).unwrap().wait());
-		tokio::time::sleep(linger / 2).await;
+		kio::clock::sleep(linger / 2).await;
 		let mut catalog = broadcast.track("catalog.json").unwrap().subscribe(None).await.unwrap();
 		assert!(
 			catalog.recv_group().await.unwrap().is_some(),
@@ -747,10 +750,10 @@ mod tests {
 		assert!(broadcast.is_closed());
 	}
 
-	/// The retention the caller configured has to reach the media tracks the TS importer
+	/// The max age the caller configured has to reach the media tracks the TS importer
 	/// mints off the PMT, not stop at the catalog producer it was set on.
 	#[tokio::test]
-	async fn publisher_declares_the_configured_retention() {
+	async fn publisher_declares_the_configured_max_age() {
 		let origin = produce_origin();
 		let mut publisher = Publisher::new(
 			&origin,
@@ -765,7 +768,13 @@ mod tests {
 		publisher.feed(Bytes::from(ts)).unwrap();
 
 		let consumer = origin.consume();
-		let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
+		let broadcast = consumer
+			.follow("live/cam0", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let info = broadcast.track("0.avc3").unwrap().info().await.unwrap();
 		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
@@ -836,7 +845,13 @@ mod tests {
 		let mut publisher = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
 
 		let consumer = origin.consume();
-		let broadcast = consumer.follow("ingest", None).unwrap().available().await.unwrap();
+		let broadcast = consumer
+			.follow("ingest", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 
 		publisher.feed(bytes::Bytes::from_static(BBB5S)).unwrap();
 

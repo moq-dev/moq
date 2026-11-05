@@ -2,19 +2,15 @@ import { expect, spyOn, test } from "bun:test";
 import { SessionCode, StreamCode, StreamError } from "../error.ts";
 import { HopSchema } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
-import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream, Writer } from "../stream.ts";
 import { Slots } from "../util/limits.ts";
 import { Connection } from "./connection.ts";
-import { Parameters } from "./parameters.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
-import { Publisher } from "./publisher.ts";
 import { RequestOk } from "./request.ts";
 import { NativeSession } from "./session.ts";
 import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
-import { SubscribeTracks } from "./subscribe_tracks.ts";
 import { Subscriber } from "./subscriber.ts";
 import { ALPN, Version } from "./version.ts";
 
@@ -150,51 +146,12 @@ for (const [version, alpn] of versions) {
 		});
 		const acquiring = spyOn(Slots.prototype, "tryAcquire");
 		try {
-			const announced = subscriber.announced();
+			const announced = subscriber.routes();
 			await announced.closed;
 			expect(acquiring).toHaveBeenCalledTimes(3); // a, b, c; neither DONE nor the repeat takes another slot.
 			expect((await pair.client.closed).closeCode).toBe(SessionCode.TooManyRequests);
 		} finally {
 			acquiring.mockRestore();
-			pair.client.close();
-			pair.server.close();
-		}
-	});
-
-	test(`${alpn}: a reset track listing observes a later transport rejection`, async () => {
-		const pair = createMockTransportPair(alpn);
-		const ended = Promise.withResolvers<WebTransportCloseInfo>();
-		Object.defineProperty(pair.server, "closed", { value: ended.promise });
-		const origin = new OriginProducer();
-		const publisher = new Publisher({
-			session: new NativeSession(pair.server, version, false),
-			quic: pair.server,
-			publish: origin.consume(),
-			requiresSolicitation: true,
-			ready: new Promise<void>(() => {}),
-		});
-		const unhandled: unknown[] = [];
-		const onUnhandled = (err: unknown) => unhandled.push(err);
-		process.on("unhandledRejection", onUnhandled);
-		try {
-			const client = await Stream.open(pair.client, { version });
-			const server = await Stream.accept(pair.server, version);
-			if (!server) throw new Error("missing listing stream");
-			const parameters = new Parameters();
-			parameters.forward = false;
-			const running = publisher.runSubscribeTracks(new SubscribeTracks(0n, Path.empty(), parameters), server);
-			expect(await client.reader.u53()).toBe(RequestOk.id);
-			await RequestOk.decode(client.reader, version);
-			client.abort(new StreamError(StreamCode.Cancel));
-			await running;
-			ended.reject(new Error("transport died after the listing"));
-			// Unhandled rejection delivery happens on the next event-loop turn, not a clock deadline.
-			await new Promise<void>((resolve) => setImmediate(resolve));
-			expect(unhandled).toEqual([]);
-		} finally {
-			process.off("unhandledRejection", onUnhandled);
-			publisher.close();
-			origin.close();
 			pair.client.close();
 			pair.server.close();
 		}
@@ -212,7 +169,7 @@ for (const [version, alpn] of versions) {
 				cluster: { self, peer },
 				limits: { announces: 1 },
 			});
-			const announced = subscriber.announced();
+			const announced = subscriber.routes();
 			const stream = await Stream.accept(pair.client, version);
 			if (!stream) throw new Error("missing namespace stream");
 			const answer = async (stream: Stream) => {
@@ -243,7 +200,7 @@ for (const [version, alpn] of versions) {
 				} else {
 					stream.abort(new StreamError(StreamCode.Cancel));
 					await announced.closed;
-					const next = subscriber.announced();
+					const next = subscriber.routes();
 					const replacement = await Stream.accept(pair.client, version);
 					if (!replacement) throw new Error("missing replacement namespace stream");
 					await answer(replacement);
@@ -266,7 +223,7 @@ for (const [version, alpn] of versions) {
 			quic: pair.server,
 			limits: { announces: 1 },
 		});
-		const announced = subscriber.announced();
+		const announced = subscriber.routes();
 		try {
 			const inline = await Stream.accept(pair.client, version);
 			if (!inline) throw new Error("missing namespace stream");

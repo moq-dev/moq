@@ -49,7 +49,7 @@ This means the available bandwidth is often underestimated, and the subscriber h
 
 This is particularly problematic for adaptive bitrate (ABR) algorithms.
 A viewer may get stuck at a low quality rendition indefinitely because the congestion window never grows to reflect the true link capacity.
-If the viewer does attempt to switch to a higher rendition without first probing, they risk buffering — either because the congestion window has not been warmed up to support the higher bitrate, or because the network genuinely cannot sustain it.
+If the viewer does attempt to switch to a higher rendition without first probing, they risk buffering - either because the congestion window has not been warmed up to support the higher bitrate, or because the network genuinely cannot sustain it.
 Without probing, the subscriber cannot distinguish between these two cases.
 
 {{moqt}} Section 3.7.2 suggests subscribing to additional tracks at low priority or sending padding to fill the congestion window during probing intervals.

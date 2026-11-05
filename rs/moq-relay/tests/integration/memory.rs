@@ -1,7 +1,7 @@
-//! A relay [`Connection`] over moq-net's in-memory transport.
+//! A relay [`Connection`] over moq-net's in-memory transport, on kio's simulator.
 //!
-//! No sockets, so a test on Tokio's paused clock never waits on the host: the clock
-//! only advances once every message in flight has landed.
+//! No sockets and no Tokio: every task runs on [`kio::clock::sim`], whose clock only
+//! advances once every message in flight has landed, so a test never waits on the host.
 
 #[cfg(feature = "test-support")]
 use moq_net::transport::memory;
@@ -16,8 +16,8 @@ pub fn newest() -> moq_net::Version {
 /// Dial a relay serving `cluster` through `auth` over a fresh in-memory link, as
 /// `client` speaking `version`.
 ///
-/// The relay's half runs as [`Connection::run`] on its own task, reported to the
-/// decider as QUIC. Lite 05+ answers SETUP before the verdict, so a refused session
+/// The relay's half runs as [`Connection::run`] on its own simulator task, reported
+/// to the decider as QUIC. Lite 05+ answers SETUP before the verdict, so a refused session
 /// may connect and then close.
 #[cfg(feature = "test-support")]
 pub async fn connect(
@@ -31,20 +31,20 @@ pub async fn connect(
 	let (client_link, relay_link) = memory::pair(config);
 
 	let (cluster, auth) = (cluster.clone(), auth.clone());
-	tokio::spawn(async move {
+	drop(kio::clock::sim::spawn(async move {
 		let server = moq_net::Server::new().with_versions(version.into());
 		let Ok(handshake) = server.accept_request(moq_net::time::Instant::now(), relay_link).await else {
 			return;
 		};
 		let request = Accepted::new(handshake, moq_auth::Transport::Quic);
 		Connection::new(request, cluster, auth).run().await;
-	});
+	}));
 
 	let (session, driver) = client
 		.with_versions(version.into())
 		.connect(moq_net::time::Instant::now(), client_link)
 		.await?;
-	tokio::spawn(moq_net::time::run(driver));
+	drop(kio::clock::sim::spawn(moq_net::time::run(driver)));
 	Ok(session)
 }
 
@@ -62,8 +62,30 @@ pub fn public(public: &[&str], publish: &[&str], subscribe: &[&str]) -> auth::Au
 		.expect("auth init")
 }
 
-/// A standalone cluster with default options.
+/// A standalone cluster with default options, driven on the simulator.
 #[cfg(feature = "test-support")]
 pub fn cluster() -> cluster::Cluster {
-	cluster::Cluster::new(cluster::Options::default()).expect("cluster init")
+	spawn_cluster(cluster::Options::default())
+}
+
+/// Build a cluster and drive it on a simulator task, as [`crate::spawn_cluster`]
+/// does on Tokio. A failed driver panics the run.
+#[cfg(feature = "test-support")]
+pub fn spawn_cluster(options: cluster::Options) -> cluster::Cluster {
+	let (cluster, driver) = cluster::Cluster::new(options).expect("cluster init");
+	drop(kio::clock::sim::spawn(async move {
+		if let Err(err) = driver.run().await {
+			panic!("cluster driver failed: {err:#}");
+		}
+	}));
+	cluster
+}
+
+/// An origin whose driver runs on a simulator task, as `moq_tokio::origin::spawn`
+/// does on Tokio.
+#[cfg(feature = "test-support")]
+pub fn origin() -> moq_net::origin::Producer {
+	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
+	drop(kio::clock::sim::spawn(moq_net::time::run(driver)));
+	origin
 }

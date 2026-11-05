@@ -10,7 +10,13 @@ accept names read outside the spec, such as `moq_video::ENV`.
 
 ## Plan
 
-Decided 2026-10-23 (maintainer interview): the maintainer approved posting
-an issue or PR on jdx/usage for this. Waiting on jdx/usage is the condition:
-check the upstream issue or PR and its releases; delete this quest if
-upstream declines, keeping the helper.
+Filed 2026-11-02 (maintainer-approved, /quest-unblock). No existing issue or
+release covered it; the closest, clap's declined `env_prefix`, builds names
+from a prefix, which this does not.
+
+Shipped 2026-11-03 (checked 2026-11-04, /quest-unblock): usage-lib
+[7.2.0](https://github.com/jdx/usage/releases/tag/v7.2.0) adds the opt-in
+`unknown_env` node ([jdx/usage#1609](https://github.com/jdx/usage/pull/1609),
+closing jdx/usage#1607), with derive syntax
+`#[usage(unknown_env(prefix = "MOQ_", allow(...)))]` for names read outside
+the spec.

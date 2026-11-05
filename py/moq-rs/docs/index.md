@@ -17,7 +17,7 @@ import moq
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
         async for event in client.announced():
-            if isinstance(event, moq.AnnounceEventStart):
+            if isinstance(event, moq.AnnounceEventPresent):
                 broadcast = await client.request(event.announce.prefix)
                 print(await moq.media.catalog(broadcast))
 
@@ -62,6 +62,9 @@ asyncio.run(main())
    BroadcastRequests
    BroadcastRequest
    TrackProducer
+   DatagramProducer
+   DatagramRequests
+   DatagramRequest
    TrackDemand
    TrackRequests
    TrackRequest
@@ -80,6 +83,7 @@ asyncio.run(main())
 
    BroadcastConsumer
    TrackConsumer
+   DatagramConsumer
    GroupConsumer
 ```
 
@@ -172,16 +176,14 @@ broadcast, and producers advertise it in the catalog.
    Following
    Announce
    AnnounceEvent
-   AnnounceEventStart
-   AnnounceEventUpdate
-   AnnounceEventEnd
-   AnnounceEventRestart
+   AnnounceEventPresent
+   AnnounceEventAbsent
 ```
 
 ## Data types
 
 These records, enums, and objects are re-exported from the native `moq_ffi` bindings; the
-wrapper groups them under `moq` and `moq.media`, with owned duration records at the boundary. Their fields are defined on the
+wrapper groups them under `moq` and `moq.media`, with owned duration and timestamp records at the boundary. Their fields are defined on the
 Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
 
 ```{eval-rst}
@@ -193,6 +195,7 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
 
    media.Catalog
    media.Container
+   Timestamp
    Frame
    media.MediaFrame
    Datagram
@@ -232,7 +235,6 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    is_shutdown
    protocol_error
    log_level
-   mint_epoch
 ```
 
 ```{toctree}

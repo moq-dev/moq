@@ -25,6 +25,14 @@ supervision run on the shared tokio runtime that owns the HTTP client, the
 timers, and the origins. A qmux session handle is `Send + Sync` however its
 transport is driven, which is what makes that handoff free here too.
 
+moq-tokio spawns each qmux `Driver` on its own runtime (`spawn_qmux` in
+`rs/moq-tokio/src/lib.rs`), so its `tcp::Listener::accept`,
+`websocket::Listener::accept`, and `websocket::accept` return only the session.
+A worker must run the driver on its own local task set instead, so this quest
+reshapes `moq_tokio::websocket::accept` (or adds a sibling) to hand the driver
+back; the qmux constructors already return it (decided 2026-11-01, maintainer,
+in [moq-dev/moq#7494](https://github.com/moq-dev/moq/pull/7494)).
+
 Keep the ops and web listeners' behavior identical: the same routes, the same
 CORS scoping, the same landing-page fallback, and the same
 `/certificate.sha256` fingerprint. Extend `rs/moq-relay/tests/integration/runtime_uring.rs`

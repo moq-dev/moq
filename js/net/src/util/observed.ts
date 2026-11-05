@@ -4,16 +4,16 @@ type Listener<T> = (value: T) => void;
 
 /** A package-private signal whose listeners hold demand for its producer. */
 export class Observed<T> extends Signal<T> {
-	readonly used = new Signal(false);
+	readonly wanted = new Signal(false);
 	#observers = 0;
 
 	#observe(): Dispose {
-		if (++this.#observers === 1) this.used.set(true);
+		if (++this.#observers === 1) this.wanted.set(true);
 		let active = true;
 		return () => {
 			if (!active) return;
 			active = false;
-			if (--this.#observers === 0) this.used.set(false);
+			if (--this.#observers === 0) this.wanted.set(false);
 		};
 	}
 
@@ -32,7 +32,7 @@ export class Observed<T> extends Signal<T> {
 		if (!fn) return new Promise<T>((resolve) => this.changed(resolve));
 		const release = this.#observe();
 		const dispose = super.changed((value) => {
-			// Schedule a reactive reader's next run before publishing unused, so its
+			// Schedule a reactive reader's next run before publishing unwanted, so its
 			// replacement listener coalesces away the temporary gap in demand.
 			try {
 				fn(value);

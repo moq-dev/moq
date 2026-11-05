@@ -5,7 +5,7 @@
 //! keep a prefix reliable, [`recv::Stream::poll_lease`] to hold receive credit until a message is
 //! complete, and [`connection::Connection::set_limits`] to change flow control on a live connection.
 //!
-//! It needs no MoQ session: enable the `driver` feature (with `aws-lc-rs` or `ring`) and
+//! It needs no MoQ session: enable the `driver` feature and
 //! `default-features = false` to build it without moq-net. The entry point is the
 //! [`endpoint::Endpoint`], built from an [`endpoint::Config`] and a UDP socket it owns;
 //! [`endpoint::Endpoint::connect`] dials with a [`client::Config`].
@@ -44,34 +44,37 @@
 //! with a domain name--then as with TLS, self-signed certificates can be used to provide
 //! encryption alone.
 #![warn(missing_docs)]
+//!
+//! Session waits take `&self` and a caller-owned `&kio::Waiter`; stream reads and writes
+//! take `&mut self`. Dropping the waiter cancels its registrations. Async helpers own their
+//! waiter, while `Future` and runtime I/O traits bridge their `Context` through `kio::Park`.
 
 pub mod connection;
 pub mod endpoint;
+pub(crate) mod forward;
 mod incoming;
 mod mutex;
 pub mod recv;
 mod runtime;
 pub mod send;
+#[cfg(feature = "sim")]
+#[doc(hidden)]
+pub mod sim;
 mod work_limiter;
 
-pub(crate) use moq_clock::Instant;
+pub(crate) use kio::clock::Instant;
 pub(crate) use std::time::Duration;
 
 pub use moq_quic::{
 	ApplicationClose, ConfigError, ConnectionClose, ConnectionId, ConnectionIdGenerator, CreditStats, EcnCodepoint,
-	FrameStats, FrameType, InvalidCid, Limits, LimitsError, PathStats, Transmit, TransportErrorCode, UdpStats, VarInt,
-	VarIntBoundsExceeded, Version, client, crypto, server, stream, transport,
+	FrameStats, FrameType, InvalidCid, Limits, LimitsError, PathStats, Rate, Transmit, TransportErrorCode, UdpStats,
+	VarInt, VarIntBoundsExceeded, Version, client, crypto, server, stream, transport,
 };
 
-#[cfg(all(test, feature = "quic"))]
-pub(crate) use crate::quic::driver::runtime::wrap_udp_socket;
+#[cfg(feature = "quic")]
+pub(crate) use crate::quic::driver::runtime::{Slot, wrap_udp_socket};
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests;
 
 #[derive(Debug)]

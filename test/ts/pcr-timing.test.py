@@ -19,7 +19,10 @@ class Schedule(unittest.TestCase):
     def test_unpadded_start_is_graded(self):
         scan = types.SimpleNamespace(
             pcr=[(index, i * 1_080_000) for i, index in enumerate([0, 10, 20, 120, 220, 320])],
-            first_null=20, new_base=set(), pcr_pid=256, other_pcr_pids=set(),
+            first_null=20,
+            new_base=set(),
+            pcr_pid=256,
+            other_pcr_pids=set(),
         )
         args = types.SimpleNamespace(mux_rate=3_760_000, schedule_pct_min=99, schedule_tolerance_pct=1)
         result = timing.check_schedule(scan, args)
@@ -29,8 +32,14 @@ class Schedule(unittest.TestCase):
 
 class Rate(unittest.TestCase):
     ARGS = types.SimpleNamespace(
-        live=True, seconds=120, live_cover_pct=50, live_min_pcr=20,
-        release_ms=10, release_pct_max=1, drift_ms=1000, rate_ppm=30,
+        live=True,
+        seconds=120,
+        live_cover_pct=50,
+        live_min_pcr=20,
+        release_ms=10,
+        release_pct_max=1,
+        drift_ms=1000,
+        rate_ppm=30,
     )
 
     def stalled(self, scale):
@@ -55,11 +64,18 @@ class Rate(unittest.TestCase):
         # Reads only ever land late: up to 4 ms through the start of the graded window, under
         # 0.5 ms either side, on a clock at exactly the media rate.
         rng = random.Random(7)
-        scan = types.SimpleNamespace(new_base=set(), pcr=[
-            (i * 166, round(i * 0.025 * 27_000_000),
-             1000.0 + i * 0.025 + rng.uniform(0, 0.004 if 1600 <= i < 2600 else 0.0005), 256)
-            for i in range(4648)
-        ])
+        scan = types.SimpleNamespace(
+            new_base=set(),
+            pcr=[
+                (
+                    i * 166,
+                    round(i * 0.025 * 27_000_000),
+                    1000.0 + i * 0.025 + rng.uniform(0, 0.004 if 1600 <= i < 2600 else 0.0005),
+                    256,
+                )
+                for i in range(4648)
+            ],
+        )
         rate = timing.check_rate(scan, self.ARGS)
         self.assertTrue(rate[2], rate)
         self.assertLess(abs(rate[4]["ppm"][0]), 3.0)
@@ -76,8 +92,7 @@ class Evidence(unittest.TestCase):
             with self.subTest(scale=scale), tempfile.TemporaryDirectory() as directory:
                 scan = timing.Scan()
                 scan.pcr = [
-                    (i * 266, round(i * 0.04 * 27_000_000), 1000.0 + i * 0.04 * scale, 256)
-                    for i in range(3001)
+                    (i * 266, round(i * 0.04 * 27_000_000), 1000.0 + i * 0.04 * scale, 256) for i in range(3001)
                 ]
                 # A flagged clock jump must remain excluded when the report is replayed.
                 for i in range(1500, len(scan.pcr)):
@@ -92,15 +107,24 @@ class Evidence(unittest.TestCase):
                         status = timing.main()
                 saved = json.loads(report.read_text())
                 replay = types.SimpleNamespace(
-                    pcr=saved["pcr_samples"], new_base=set(saved["new_base"]), wraps=saved["wraps"],
+                    pcr=saved["pcr_samples"],
+                    new_base=set(saved["new_base"]),
+                    wraps=saved["wraps"],
                 )
                 args = types.SimpleNamespace(**saved["parameters"])
                 results = {row["name"]: row for row in saved["checks"]}
                 for check in [timing.check_rate, timing.check_release, timing.check_value_interval]:
                     name, severity, ok, headline, detail = check(replay, args)
-                    self.assertEqual(results[name], dict(
-                        name=name, severity=severity, ok=ok, headline=headline, detail=detail,
-                    ))
+                    self.assertEqual(
+                        results[name],
+                        dict(
+                            name=name,
+                            severity=severity,
+                            ok=ok,
+                            headline=headline,
+                            detail=detail,
+                        ),
+                    )
                 self.assertEqual(saved["clock"], "time.monotonic")
                 self.assertEqual(saved["new_base"], [1500])
                 self.assertEqual(results["pcr-rate"]["ok"], scale == 1.0)

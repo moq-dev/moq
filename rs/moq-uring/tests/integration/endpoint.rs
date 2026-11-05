@@ -4,7 +4,7 @@
 //!
 //! Unsupported local kernels skip loudly; CI_STRICT makes CI refuse them.
 
-#![cfg(all(target_os = "linux", feature = "quic"))]
+#![cfg(feature = "quic")]
 
 use crate::support;
 
@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
+use moq_net::transport::poll::SendStream as _;
 use moq_uring::{Config, Error, Worker, quic, udp};
-use web_transport_trait::poll::{SendStream as _, Session as _};
 
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
@@ -62,8 +62,8 @@ fn dial_and_accept_share_one_socket() {
 			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 			.expect("socket");
 		quic::Endpoint::new(
-			sock,
 			quic::endpoint::Config::default().with_server(server_config(&certs)),
+			sock,
 		)
 		.expect("endpoint")
 	};
@@ -89,7 +89,7 @@ fn dial_and_accept_share_one_socket() {
 				assert_eq!(conn.protocol(), Some(ALPN), "negotiated ALPN");
 			}
 			for (conn, peer) in [(&a_to_b, b_addr), (&b_in, a_addr), (&b_to_a, a_addr), (&a_in, b_addr)] {
-				assert_eq!(conn.remote_addr(), peer, "peer address");
+				assert_eq!(conn.remote_address(), peer, "peer address");
 			}
 			for conn in [&b_in, &a_in] {
 				assert_eq!(conn.server_name(), Some("localhost"), "accepted SNI");
@@ -101,7 +101,8 @@ fn dial_and_accept_share_one_socket() {
 		.expect("worker");
 }
 
-/// A session owns the connection independently of the driver and stream handles.
+/// A session closes once its last clone and the last stream it handed out are
+/// gone, whatever background tasks still hold the connection.
 #[test]
 fn dropping_the_last_raw_session_closes_the_connection() {
 	dropped_raw_session_closes(false);
@@ -122,11 +123,11 @@ fn dropped_raw_session_closes(explicit: bool) {
 			.expect("socket")
 	};
 	let server = quic::Endpoint::new(
-		socket(),
 		quic::endpoint::Config::default().with_server(server_config(&certs)),
+		socket(),
 	)
 	.expect("server endpoint");
-	let client = quic::Endpoint::new(socket(), quic::endpoint::Config::default()).expect("client endpoint");
+	let client = quic::Endpoint::new(quic::endpoint::Config::default(), socket()).expect("client endpoint");
 	worker
 		.block_on(async move {
 			let conn = client
@@ -135,12 +136,12 @@ fn dropped_raw_session_closes(explicit: bool) {
 				.expect("dial");
 			let peer = server.accept().await.expect("accept");
 			let session = quic::web::Session::raw(conn);
-			let mut remaining = session.clone();
+			let remaining = session.clone();
 			drop(session);
-			let mut send = std::future::poll_fn(|cx| remaining.poll_open_uni(cx))
+			let mut send = kio::wait(|waiter| remaining.poll_open_uni(waiter, Default::default()))
 				.await
 				.expect("surviving clone opens a stream");
-			std::future::poll_fn(|cx| send.poll_write(cx, b"alive"))
+			kio::wait(|waiter| send.poll_write(waiter, b"alive"))
 				.await
 				.expect("write");
 			let mut recv = peer.accept_uni().await.expect("accept stream");
@@ -155,13 +156,67 @@ fn dropped_raw_session_closes(explicit: bool) {
 				0
 			};
 			drop(remaining);
-			// Stream handles intentionally survive the final session handle.
+			if !explicit {
+				// The stream outlives every session clone and keeps it open.
+				kio::wait(|waiter| send.poll_write(waiter, b"still"))
+					.await
+					.expect("the stream keeps the session open");
+				let read = recv.read(&mut &mut payload[..]).await.expect("read");
+				assert_eq!(read, Some(5));
+				assert_eq!(&payload, b"still");
+			}
+			drop(send);
 			let error = peer.closed().await;
 			assert!(
 				matches!(error, quic::Error::App { code: actual, .. } if actual == code),
 				"peer saw {error:?}"
 			);
-			drop((send, recv));
+			drop(recv);
+		})
+		.expect("worker");
+}
+
+/// A raw connection closes with code 0 once its last handle and stream are
+/// gone, rather than leaving the peer to idle out.
+#[test]
+fn dropping_the_last_connection_handle_closes_it() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let socket = || {
+		handle
+			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+			.expect("socket")
+	};
+	let server = quic::Endpoint::new(
+		quic::endpoint::Config::default().with_server(server_config(&certs)),
+		socket(),
+	)
+	.expect("server endpoint");
+	let client = quic::Endpoint::new(quic::endpoint::Config::default(), socket()).expect("client endpoint");
+	worker
+		.block_on(async move {
+			let conn = client
+				.connect(&dial_config(), server.local_addr(), "localhost")
+				.await
+				.expect("dial");
+			let peer = server.accept().await.expect("accept");
+			let mut send = conn.open_uni(Default::default()).await.expect("open");
+			let clone = conn.clone();
+			drop(conn);
+			drop(clone);
+
+			// The stream outlives every connection handle and keeps it open.
+			send.write_all(&b"alive"[..])
+				.await
+				.expect("the stream keeps the connection open");
+			let mut recv = peer.accept_uni().await.expect("accept stream");
+			let mut payload = [0; 5];
+			recv.read_exact(&mut payload).await.expect("read");
+
+			drop(send);
+			let error = peer.closed().await;
+			assert!(matches!(error, quic::Error::App { code: 0, .. }), "peer saw {error:?}");
 		})
 		.expect("worker");
 }
@@ -184,10 +239,10 @@ fn a_close_reaches_both_ends_with_its_code() {
 	};
 	let mut incoming_config = quic::endpoint::Config::default().with_server(server_config(&certs));
 	incoming_config.activity = activity.clone();
-	let server = quic::Endpoint::new(socket(&handle), incoming_config).expect("server endpoint");
+	let server = quic::Endpoint::new(incoming_config, socket(&handle)).expect("server endpoint");
 	let mut outgoing_config = quic::endpoint::Config::default();
 	outgoing_config.activity = outgoing.clone();
-	let client = quic::Endpoint::new(socket(&handle), outgoing_config).expect("dial-only endpoint");
+	let client = quic::Endpoint::new(outgoing_config, socket(&handle)).expect("dial-only endpoint");
 
 	worker
 		.block_on(async move {
@@ -207,7 +262,7 @@ fn a_close_reaches_both_ends_with_its_code() {
 			assert!(closes(&outgoing), "outbound dials are not admissions");
 			let mut accepted = server.accept().await.expect("accept");
 
-			dialed.close(CLOSE_CODE.into(), CLOSE_REASON.as_bytes());
+			dialed.close(CLOSE_CODE.into(), CLOSE_REASON);
 
 			for (end, conn) in [("closer", &mut dialed), ("peer", &mut accepted)] {
 				match conn.closed().await {
@@ -245,15 +300,15 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");
 	let endpoint = quic::Endpoint::new(
-		sock,
 		quic::endpoint::Config::default().with_server(server_config(&certs)),
+		sock,
 	)
 	.expect("endpoint");
 	let server = endpoint.local_addr();
 	let dial_only_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("dial-only socket");
-	let dial_only = quic::Endpoint::new(dial_only_sock, quic::endpoint::Config::default()).expect("dial-only endpoint");
+	let dial_only = quic::Endpoint::new(quic::endpoint::Config::default(), dial_only_sock).expect("dial-only endpoint");
 	let dial_only_addr = dial_only.local_addr();
 
 	// The raw client runs on its own thread (the worker owns this one) and
@@ -286,8 +341,9 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 			}
 			sock.set_read_timeout(Some(Duration::from_secs(5)))?;
 
-			// The long-header type bits are version-specific. Use bits that mean
-			// 0-RTT in v1 to prove we negotiate before interpreting them.
+			// The long-header type bits are version-specific. These bits mean
+			// 0-RTT in v1, which moq-quic drops unanswered, so a reply proves we
+			// negotiate the version before interpreting them.
 			let mut packet = Vec::new();
 			packet.push(0xD0); // long header, fixed bit, unknown-version type
 			packet.extend_from_slice(&0x0a0a_0a0au32.to_be_bytes());
@@ -382,11 +438,11 @@ fn a_peer_stop_reaches_the_accepted_stream() {
 			.expect("socket")
 	};
 	let server = quic::Endpoint::new(
-		socket(&handle),
 		quic::endpoint::Config::default().with_server(server_config(&certs)),
+		socket(&handle),
 	)
 	.expect("server endpoint");
-	let client = quic::Endpoint::new(socket(&handle), quic::endpoint::Config::default()).expect("dial-only endpoint");
+	let client = quic::Endpoint::new(quic::endpoint::Config::default(), socket(&handle)).expect("dial-only endpoint");
 
 	worker
 		.block_on(async move {
@@ -408,7 +464,7 @@ fn a_peer_stop_reaches_the_accepted_stream() {
 				.await
 				.expect("accept_bi");
 
-			match within(&handle, "the stop to be reported", send.stopped()).await {
+			match within(&handle, "the stop to be reported", send.closed()).await {
 				Ok(Some(code)) => assert_eq!(code, CLOSE_CODE.into(), "stop code"),
 				other => panic!("expected the peer's stop, got {other:?}"),
 			}
@@ -460,10 +516,10 @@ fn an_unroutable_dial_fails_alone() {
 	let certs = support::certs().expect("certificates");
 
 	let server = quic::Endpoint::new(
+		quic::endpoint::Config::default().with_server(server_config(&certs)),
 		handle
 			.udp(UdpSocket::bind("[::1]:0").expect("bind"), udp::Config::default())
 			.expect("server socket"),
-		quic::endpoint::Config::default().with_server(server_config(&certs)),
 	)
 	.expect("server endpoint");
 	let v6_only = {
@@ -476,8 +532,8 @@ fn an_unroutable_dial_fails_alone() {
 		UdpSocket::from(fd)
 	};
 	let client = quic::Endpoint::new(
-		handle.udp(v6_only, udp::Config::default()).expect("client socket"),
 		quic::endpoint::Config::default(),
+		handle.udp(v6_only, udp::Config::default()).expect("client socket"),
 	)
 	.expect("dial-only endpoint");
 
@@ -522,7 +578,7 @@ fn the_backlog_bounds_pending_handshakes() {
 		.expect("socket");
 	let mut config = quic::endpoint::Config::default().with_server(server_config(&certs));
 	config.backlog = 0;
-	let endpoint = quic::Endpoint::new(sock, config).expect("endpoint");
+	let endpoint = quic::Endpoint::new(config, sock).expect("endpoint");
 	let server = endpoint.local_addr();
 
 	let accepted = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -560,7 +616,7 @@ fn the_backlog_bounds_queued_connections() {
 		.expect("socket");
 	let mut config = quic::endpoint::Config::default().with_server(server_config(&certs));
 	config.backlog = 1;
-	let endpoint = quic::Endpoint::new(sock, config).expect("endpoint");
+	let endpoint = quic::Endpoint::new(config, sock).expect("endpoint");
 	let server = endpoint.local_addr();
 
 	let first_sock = handle
@@ -601,8 +657,8 @@ fn connections_share_one_tx_buffer_fairly() {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp_config)
 		.expect("socket");
 	let endpoint = quic::Endpoint::new(
-		sock,
 		quic::endpoint::Config::default().with_server(server_config(&certs)),
+		sock,
 	)
 	.expect("endpoint");
 	let server = endpoint.local_addr();
@@ -682,9 +738,9 @@ fn connections_share_one_tx_buffer_fairly() {
 				.expect("second client socket");
 			let mut second_config = dial_config();
 			second_config.transport.idle_timeout = Duration::from_millis(500);
-			let started = moq_clock::now();
+			let started = kio::clock::now();
 			let second = quic::client::connect(second_sock, &second_config, server, "localhost").await;
-			let elapsed = moq_clock::now() - started;
+			let elapsed = kio::clock::now() - started;
 			running.set(false);
 			let second = second.expect("the second connection must not starve");
 			assert!(
@@ -706,7 +762,7 @@ fn accept_needs_a_server_config() {
 	let sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");
-	let endpoint = quic::Endpoint::new(sock, quic::endpoint::Config::default()).expect("endpoint");
+	let endpoint = quic::Endpoint::new(quic::endpoint::Config::default(), sock).expect("endpoint");
 
 	let result = worker.block_on(async move { endpoint.accept().await }).expect("worker");
 	assert!(matches!(result, Err(quic::Error::NotServer)), "got {result:?}");
@@ -735,7 +791,7 @@ fn an_identity_is_read_once() {
 		let sock = handle
 			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 			.expect("socket");
-		quic::Endpoint::new(sock, quic::endpoint::Config::default().with_server(config.clone())).expect("endpoint")
+		quic::Endpoint::new(quic::endpoint::Config::default().with_server(config.clone()), sock).expect("endpoint")
 	};
 
 	// Two endpoints, as two workers would build them, then a real handshake
@@ -773,11 +829,11 @@ fn cancelling_a_dial_releases_its_connection() {
 			.expect("socket")
 	};
 	let server = quic::Endpoint::new(
-		socket(&handle),
 		quic::endpoint::Config::default().with_server(server_config(&certs)),
+		socket(&handle),
 	)
 	.expect("server endpoint");
-	let client = quic::Endpoint::new(socket(&handle), quic::endpoint::Config::default()).expect("client endpoint");
+	let client = quic::Endpoint::new(quic::endpoint::Config::default(), socket(&handle)).expect("client endpoint");
 
 	worker
 		.block_on(async {

@@ -49,12 +49,12 @@ fn old_peers_keep_hidden_paths() {
 /// The relay dials a peer pinned to `version`. The peer's announce request cannot
 /// carry the opt-in below lite-07, yet it discovers the relay's hidden broadcast.
 async fn old_peer_keeps_hidden_paths(version: moq_net::Version) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
-	tokio::time::timeout(TEST_TIMEOUT, async {
+	kio::clock::timeout(TEST_TIMEOUT, async {
 		let (port, mut server) = listen_tcp(version).await;
 		let peer_origin = moq_tokio::origin::spawn();
-		let mut discovered = peer_origin.consume().with_hidden(true).announced();
+		let mut discovered = peer_origin.consume().with_hidden(true).routes();
 		let accept = tokio::spawn(async move {
 			let request = server.accept().await.expect("cluster dial");
 			let session = request.with_subscriber(peer_origin).ok().await.expect("accept");
@@ -65,15 +65,14 @@ async fn old_peer_keeps_hidden_paths(version: moq_net::Version) {
 		client_config.tls.insecure = Some(true);
 		let mut cluster_config = cluster::Config::default();
 		cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port}/"))];
-		let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
-			.expect("cluster init")
-			.with_connect(client_config, Default::default());
+		let cluster =
+			crate::spawn_cluster(cluster::Options::new(cluster_config)).with_connect(client_config, Default::default());
 		let node = cluster.origin.create_broadcast(".hidden/test").expect("create hidden");
 		node.announce(Default::default()).expect("announce hidden");
 		let cluster_run = tokio::spawn(cluster.clone().start().await.expect("cluster start").run());
 
 		loop {
-			if let moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Update(announce) =
+			if let moq_net::origin::RouteEvent::Start(announce) | moq_net::origin::RouteEvent::Update(announce) =
 				discovered.next().await.expect("peer origin closed")
 				&& announce.prefix.as_str() == ".hidden/test"
 			{

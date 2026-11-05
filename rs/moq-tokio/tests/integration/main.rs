@@ -2,22 +2,25 @@
 //!
 //! Each `tests/*.rs` file is its own crate that links this package and its
 //! dependencies again, so add new integration tests here as a module.
-#![expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 
 mod backend;
 mod broadcast;
 mod close_code;
+mod datagram_delivery;
+mod fresh_port;
 mod keylog;
 mod max_age;
+mod migrate;
 mod receive_credit;
+mod receive_ts;
 mod reconnect;
+mod relay_fill;
 mod reset_secret;
 mod runtime;
+mod scream;
+mod sim;
 mod stream_code;
+mod stream_limits;
 mod subscription_end_integrity;
 mod tokens;
 mod unannounce;

@@ -24,7 +24,8 @@ from .types import AnnounceRoute
 
 Announce = MoqAnnounce
 """A route over a prefix: the origin-relative ``prefix``, what each filter wildcard
-matched (``captures``), and the ``route`` serving it.
+matched (the required list ``captures``), and the ``route`` serving it.
+The list is empty when the filter has no wildcards.
 
 It carries no broadcast. Resolve a specific path with
 :meth:`OriginConsumer.request`. By convention a publisher announces
@@ -32,23 +33,18 @@ each broadcast's exact path, so subscribers can enumerate broadcasts from routes
 """
 
 AnnounceEvent = MoqAnnounceEvent
-"""What :class:`AnnounceConsumer` yields: :data:`AnnounceEventStart`,
-:data:`AnnounceEventUpdate`, :data:`AnnounceEventEnd`, or
-:data:`AnnounceEventRestart`, each carrying an :data:`Announce` as ``announce``.
+"""What :class:`AnnounceConsumer` yields: :data:`AnnounceEventPresent` or
+:data:`AnnounceEventAbsent`, each carrying an :data:`Announce` as ``announce``.
+
+Another publisher instance taking a path over keeps it present; hold
+:meth:`OriginConsumer.follow` to see the broadcast change.
 """
 
-AnnounceEventStart = MoqAnnounceEvent.START
-"""A route now covers the prefix; the stream had none there."""
+AnnounceEventPresent = MoqAnnounceEvent.PRESENT
+"""A route now covers the path, which was absent."""
 
-AnnounceEventUpdate = MoqAnnounceEvent.UPDATE
-"""The route covering the prefix changed hops or cost."""
-
-AnnounceEventEnd = MoqAnnounceEvent.END
-"""No route covers the prefix any more; carries its last route."""
-
-AnnounceEventRestart = MoqAnnounceEvent.RESTART
-"""Another publisher instance now serves the prefix: drop what was resolved under
-it and request afresh."""
+AnnounceEventAbsent = MoqAnnounceEvent.ABSENT
+"""No route covers the path any more; carries its last route."""
 
 
 class AnnounceConsumer(_Stream[MoqAnnounceEvent]):
@@ -73,8 +69,8 @@ class Following:
     """Follows a specific path across the publisher instances that serve it.
 
     ``await`` it (or call :meth:`available`) to get the :class:`BroadcastConsumer`
-    once the broadcast becomes available, and again for each instance that takes over.
-    Usable as an async context manager.
+    once the broadcast becomes available, again for each instance that takes over,
+    and ``None`` while the path is offline. Usable as an async context manager.
     """
 
     def __init__(self, inner: MoqFollowing) -> None:
@@ -86,15 +82,18 @@ class Following:
     async def __aexit__(self, *exc) -> None:
         self.cancel()
 
-    async def available(self) -> BroadcastConsumer:
-        """Await the next publisher instance serving the path and return its consumer.
+    async def available(self) -> BroadcastConsumer | None:
+        """Await the next change to the publisher instance serving the path.
 
-        The first call resolves the instance serving the path once one is announced. Each
-        later call waits for another to take over (a restarted publisher, or a replacement
-        session) or for the broadcast to return after it went offline. Drop what was read
-        from the previous instance then: its tracks end when its session does.
+        The first call resolves the instance serving the path once one is announced, and
+        never returns ``None``. Each later call returns another instance taking over (a
+        restarted publisher, or a replacement session), or ``None`` once the path goes
+        offline (or, when following an ``instance``, another one takes it over), then
+        whatever serves it next. Drop what was read from the previous instance then: its
+        tracks end when its session does.
         """
-        return BroadcastConsumer(await self._inner.available())
+        broadcast = await self._inner.available()
+        return BroadcastConsumer(broadcast) if broadcast is not None else None
 
     def __await__(self):
         return self.available().__await__()
@@ -115,9 +114,13 @@ class BroadcastRequest:
         """The requested broadcast path."""
         return self._inner.path()
 
-    def prepare(self, epoch: str) -> BroadcastPrepared:
-        """Start an answer under a new epoch, hidden until published."""
-        return BroadcastPrepared(self._inner.prepare(epoch))
+    def prepare(self) -> BroadcastPrepared:
+        """Start answering as a new stream under a fresh instance, hidden until published."""
+        return BroadcastPrepared(self._inner.prepare())
+
+    def serve(self, broadcast: BroadcastConsumer) -> None:
+        """Serve held content under the prefix route's continuous sequence space, without an exact route."""
+        self._inner.serve(broadcast._inner)
 
     def reject(self, error_code: int) -> None:
         """Reject the request with an application error code."""
@@ -211,15 +214,17 @@ class OriginConsumer:
         """
         return AnnounceConsumer(self._inner.announced(MoqAnnounceConfig(prefix=prefix, filter=filter, hidden=hidden)))
 
-    def follow(self, path: str, *, epoch: str | None = None) -> Following:
+    def follow(self, path: str, *, instance: str | None = None) -> Following:
         """Follow the broadcast at ``path``, resolving each publisher instance that serves it.
 
         A broadcast created on this origin resolves once it is announced, like a
-        remote one. Pass an ``epoch`` (UUIDv7 text) to follow only that instance.
+        remote one. Pass an ``instance`` to follow only that stream: another one
+        taking over reads as ``None`` and is never handed out, and the stream is
+        handed out again if it returns.
         """
-        return Following(self._inner.follow(path, epoch))
+        return Following(self._inner.follow(path, instance))
 
-    async def request(self, path: str, *, epoch: str | None = None) -> BroadcastConsumer:
+    async def request(self, path: str, *, instance: str | None = None) -> BroadcastConsumer:
         """Request the broadcast at ``path``, resolving one publisher instance as soon as it can be served.
 
         Resolves through the best announced route covering the path: an
@@ -227,9 +232,9 @@ class OriginConsumer:
         on demand by that session), or a dynamic handler on the origin. An
         unannounced broadcast is unroutable. Unlike :meth:`follow`, this
         answers for what is reachable now and raises if nothing can serve the
-        path. Pass an ``epoch`` (UUIDv7 text) to refuse any other instance.
+        path. Pass an ``instance`` to refuse any other stream.
         """
-        return BroadcastConsumer(await self._inner.request(path, epoch))
+        return BroadcastConsumer(await self._inner.request(path, instance))
 
 
 class OriginProducer:

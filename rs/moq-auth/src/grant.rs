@@ -1,7 +1,7 @@
-use moq_clock::Wall;
+use crate::Rate;
+use kio::clock::Wall;
 use moq_pattern::Patterns;
 use serde::{Deserialize, Serialize};
-use serde_with::{DurationSeconds, serde_as};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -11,19 +11,24 @@ use std::time::Duration;
 /// nothing is a refusal too, and one that asks to be revalidated must say when it
 /// expires, so an outage always has a bound the server chose. [`validate`](Self::validate)
 /// checks these once at the boundary.
-#[serde_as]
-#[serde_with::skip_serializing_none]
+///
+/// A role with a cap is written `{"path": [...], "rate": bps}`, which every older
+/// reader refuses rather than drop the cap.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
+#[serde(from = "crate::wire::Grant", into = "crate::wire::Grant")]
 #[non_exhaustive]
 pub struct Grant {
 	/// Patterns the session may publish, relative to the root.
-	#[serde(skip_serializing_if = "Patterns::is_empty")]
 	pub publish: Patterns,
 
+	/// The most the session may publish, or no cap when absent.
+	pub publish_rate: Option<Rate>,
+
 	/// Patterns the session may subscribe to, relative to the root.
-	#[serde(skip_serializing_if = "Patterns::is_empty")]
 	pub subscribe: Patterns,
+
+	/// The most the session may receive from its subscriptions, or no cap when absent.
+	pub subscribe_rate: Option<Rate>,
 
 	/// The path the patterns are relative to, replacing the dialed one. This is how a
 	/// server aliases a slug to a canonical id. Absent means the dialed path.
@@ -32,15 +37,12 @@ pub struct Grant {
 	/// Subtrees the session reads from elsewhere: each path, relative to the root,
 	/// resolves at the absolute path it maps to. Read-only: nothing is published
 	/// beneath one. The patterns still name the path relative to the root.
-	#[serde(skip_serializing_if = "BTreeMap::is_empty")]
 	pub mounts: BTreeMap<String, String>,
 
 	/// When the session closes, as unix seconds.
-	#[serde_as(as = "Option<moq_clock::serde::UnixSeconds>")]
 	pub expires: Option<Wall>,
 
 	/// How long until the relay asks again, in seconds.
-	#[serde_as(as = "Option<DurationSeconds<u64>>")]
 	pub revalidate: Option<Duration>,
 
 	/// The stats tier this session's traffic is bucketed under: `/`-joined segments of
@@ -53,13 +55,11 @@ pub struct Grant {
 	/// The session is a cluster peer (another relay): what it announces entered
 	/// the cluster elsewhere, not here, and it discovers hidden routes without
 	/// asking, for peers that predate the opt-in. A client certificate alone is not.
-	#[serde(skip_serializing_if = "std::ops::Not::not")]
 	pub peer: bool,
 
 	/// The cluster peer is upstream: the relay never offers it a route learned
 	/// from another upstream peer, so it never carries traffic between two.
 	/// Requires `peer`.
-	#[serde(skip_serializing_if = "std::ops::Not::not")]
 	pub upstream: bool,
 }
 
@@ -75,11 +75,11 @@ impl Grant {
 
 	/// Snapshot the expiry on the ambient clock; one already past is now, and one beyond
 	/// the clock's range is never.
-	pub fn deadline(&self) -> Option<moq_clock::Instant> {
+	pub fn deadline(&self) -> Option<kio::clock::Instant> {
 		// Read the instant first, so a pause between the two reads shortens the grant
 		// instead of extending it.
-		let start = moq_clock::now();
-		let now = moq_clock::wall();
+		let start = kio::clock::now();
+		let now = kio::clock::wall();
 		let remaining = self.expires?.checked_duration_since(now).unwrap_or_default();
 		start.checked_add(remaining)
 	}
@@ -107,7 +107,7 @@ impl Grant {
 		if let Some(label) = &self.label {
 			moq_pattern::Pattern::literal(label).map_err(crate::Error::InvalidLabel)?;
 		}
-		if self.expires.is_some_and(|expires| expires <= moq_clock::wall()) {
+		if self.expires.is_some_and(|expires| expires <= kio::clock::wall()) {
 			return Err(crate::Error::GrantExpired);
 		}
 		Ok(())
@@ -125,6 +125,8 @@ mod tests {
 	#[test]
 	fn round_trips_in_seconds() {
 		let grant = Grant {
+			publish_rate: None,
+			subscribe_rate: None,
 			publish: patterns(&["alice/**"]),
 			subscribe: patterns(&["**"]),
 			root: Some("pid/room".into()),
@@ -150,6 +152,8 @@ mod tests {
 	#[test]
 	fn serializes_to_the_cross_language_vector() {
 		let grant = Grant {
+			publish_rate: None,
+			subscribe_rate: None,
 			publish: patterns(&["alice/**"]),
 			subscribe: patterns(&["**"]),
 			root: Some("pid/room".into()),
@@ -183,7 +187,7 @@ mod tests {
 		assert_eq!(serde_json::from_str::<Grant>(r#"{"publish":["**"]}"#).unwrap(), grant);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn validate_refuses_nothing_unbounded_and_expired() {
 		assert!(matches!(Grant::default().validate(), Err(crate::Error::UselessGrant)));
 
@@ -194,7 +198,7 @@ mod tests {
 		assert!(matches!(grant.validate(), Err(crate::Error::UnboundedRevalidate)));
 
 		// Exact: no grace for an auth server whose clock runs behind.
-		let now = moq_clock::wall();
+		let now = kio::clock::wall();
 		grant.expires = Some(now);
 		assert!(matches!(grant.validate(), Err(crate::Error::GrantExpired)));
 
@@ -203,7 +207,7 @@ mod tests {
 
 		grant.expires = Some(now + Duration::from_secs(60));
 		grant.validate().unwrap();
-		moq_clock::sim::advance(Duration::from_secs(60)).await;
+		kio::clock::sim::advance(Duration::from_secs(60)).await;
 		assert!(
 			matches!(grant.validate(), Err(crate::Error::GrantExpired)),
 			"expiry follows the ambient clock, not the host's"
@@ -246,15 +250,15 @@ mod tests {
 
 	/// The expiry and the instant come from one clock, so time passing before the
 	/// snapshot never shortens the grant.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn deadline_is_the_exact_expiry() {
-		let start = moq_clock::now();
-		let now = moq_clock::wall();
+		let start = kio::clock::now();
+		let now = kio::clock::wall();
 		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
 		assert_eq!(grant.deadline(), None);
 
 		grant.expires = Some(now + Duration::from_secs(10));
-		moq_clock::sim::advance(Duration::from_secs(4)).await;
+		kio::clock::sim::advance(Duration::from_secs(4)).await;
 		assert_eq!(grant.deadline(), Some(start + Duration::from_secs(10)));
 
 		grant.expires = Some(now - Duration::from_secs(1));
@@ -265,7 +269,7 @@ mod tests {
 		);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn expiry_saturates_to_the_wall_range() {
 		let parse = |expires: i64| {
 			serde_json::from_value::<Grant>(serde_json::json!({"publish":["**"],"expires":expires})).unwrap()

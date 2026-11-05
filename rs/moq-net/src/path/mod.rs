@@ -288,7 +288,7 @@ impl Path {
 	/// assert_eq!(path.parts().collect::<Vec<_>>(), ["foo", "bar", "baz"]);
 	/// assert_eq!(Path::empty().parts().count(), 0);
 	/// ```
-	pub fn parts(&self) -> impl Iterator<Item = &str> {
+	pub fn parts(&self) -> impl Iterator<Item = &str> + Clone {
 		// Segments are never empty, so only the empty path ends in an empty substring,
 		// which a terminator split skips; the route table walks this on every lookup.
 		self.as_str().split_terminator('/')
@@ -303,8 +303,8 @@ impl Path {
 	/// The path as a string, with no leading or trailing slash.
 	pub fn as_str(&self) -> &str {
 		match &self.0 {
-			// SAFETY: `Repr::copy` and `concat` fill `buf[..len]` only from whole `&str`s and an
-			// ASCII `/`, so those bytes are valid UTF-8.
+			// SAFETY: `Repr::copy_bounded` and `concat` fill `buf[..len]` only from whole `&str`s
+			// and an ASCII `/`, so those bytes are valid UTF-8.
 			Repr::Inline { len, buf } => unsafe { std::str::from_utf8_unchecked(&buf[..*len as usize]) },
 			Repr::Static(s) => s,
 			Repr::Shared { buf, start } => &buf[*start as usize..],
@@ -371,13 +371,14 @@ impl Path {
 			buf[a.len() + 1..len].copy_from_slice(b.as_bytes());
 			Ok(Path(Repr::Inline { len: len as u8, buf }))
 		} else {
-			// Sized up front: `format!` guesses low and reallocates.
-			let mut buf = String::with_capacity(len);
+			// Joined on the stack, which `arrayvec` leaves uninitialized, so the shared buffer
+			// is the only allocation: a `String` would be a second, copied again into it.
+			let mut buf = arrayvec::ArrayString::<{ Self::MAX_BYTES }>::new();
 			buf.push_str(a);
 			buf.push('/');
 			buf.push_str(b);
 			Ok(Path(Repr::Shared {
-				buf: buf.into(),
+				buf: buf.as_str().into(),
 				start: 0,
 			}))
 		}
@@ -1065,8 +1066,9 @@ mod tests {
 	#[test]
 	#[should_panic(expected = "longer than")]
 	fn test_from_static_too_long() {
-		let literal: &'static str = Box::leak("a".repeat(Path::MAX_BYTES + 1).into_boxed_str());
-		Path::from_static(literal);
+		// A static rather than a leaked string, which Miri would report.
+		static LITERAL: [u8; Path::MAX_BYTES + 1] = [b'a'; Path::MAX_BYTES + 1];
+		Path::from_static(std::str::from_utf8(&LITERAL).unwrap());
 	}
 
 	#[test]
@@ -1142,7 +1144,7 @@ mod tests {
 		// A message carrying the longest path still fits the lite message limit.
 		let tracks = crate::lite::Tracks {
 			broadcast: Path::new(&longest).unwrap(),
-			epoch: None,
+			instance: None,
 		};
 		let buf = tracks.encode_bytes(Version::Lite07).unwrap();
 		let (decoded, _) = crate::lite::Tracks::decode_slice(&buf, Version::Lite07).unwrap();

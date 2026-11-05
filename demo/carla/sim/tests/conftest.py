@@ -1,7 +1,6 @@
 """Lightweight stand-ins for runtime-only modules used during unit collection."""
 
 import sys
-import uuid
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -18,19 +17,11 @@ class AnnounceEvent:
         self.announce = announce
 
 
-class AnnounceEventStart(AnnounceEvent):
+class AnnounceEventPresent(AnnounceEvent):
     pass
 
 
-class AnnounceEventUpdate(AnnounceEvent):
-    pass
-
-
-class AnnounceEventEnd(AnnounceEvent):
-    pass
-
-
-class AnnounceEventRestart(AnnounceEvent):
+class AnnounceEventAbsent(AnnounceEvent):
     pass
 
 
@@ -44,15 +35,16 @@ class SnapshotProducer:
     def demand(self) -> object:
         return self.track.demand()
 
-    def update(self, value: object) -> None:
+    def update(self, value: object, timestamp: object) -> None:
         self.values.append(value)
 
 
 class SnapshotConsumer:
-    """Wraps parsed fake values in timed records, like the runtime consumer."""
+    """Reads the named fake track of a broadcast, wrapping its parsed values in timed records,
+    like the runtime consumer."""
 
-    def __init__(self, track: object) -> None:
-        self._track = track
+    def __init__(self, broadcast: object, name: str, *, priority: int = 0) -> None:
+        self._track = broadcast.tracks[name]
 
     async def __aiter__(self):
         async for value in self._track:
@@ -61,12 +53,11 @@ class SnapshotConsumer:
 
 moq = ModuleType("moq")
 moq.Error = MoqError
-moq.AnnounceEventStart = AnnounceEventStart
-moq.AnnounceEventUpdate = AnnounceEventUpdate
-moq.AnnounceEventEnd = AnnounceEventEnd
-moq.AnnounceEventRestart = AnnounceEventRestart
-moq.AnnounceRoute = lambda **kwargs: SimpleNamespace(**kwargs)
-moq.mint_epoch = lambda: str(uuid.uuid4())
+# The stub has no shutdown errors: every `MoqError` it raises is a failure.
+moq.is_shutdown = lambda err: False
+moq.AnnounceEventPresent = AnnounceEventPresent
+moq.AnnounceEventAbsent = AnnounceEventAbsent
+moq.Timestamp = lambda value, scale: SimpleNamespace(value=value, scale=scale)
 moq.TrackInfo = lambda **kwargs: SimpleNamespace(**kwargs)
 
 moq_json = ModuleType("moq.json")
@@ -75,6 +66,19 @@ moq_json.SnapshotConsumer = SnapshotConsumer
 moq.json = moq_json
 
 moq_media = ModuleType("moq.media")
+
+
+class CatalogProducer:
+    """A broadcast clock fixed at zero, like the runtime's shared epoch."""
+
+    def __init__(self, broadcast: object) -> None:
+        pass
+
+    def now(self) -> SimpleNamespace:
+        return SimpleNamespace(value=0, scale=1_000)
+
+
+moq_media.CatalogProducer = CatalogProducer
 moq_media.VideoFormat = SimpleNamespace(AVC3="avc3")
 moq_media.VideoInit = lambda **kwargs: SimpleNamespace(**kwargs)
 moq_media.VideoHint = lambda **kwargs: SimpleNamespace(**kwargs)

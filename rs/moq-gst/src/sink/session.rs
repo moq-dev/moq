@@ -252,6 +252,9 @@ pub(crate) struct Session {
 	/// The live recv-bitrate estimate, tracked across reconnects by the reconnect loop. Read directly
 	/// by the `estimated-recv-rate` getter.
 	recv_bandwidth: moq_net::bandwidth::Consumer,
+	/// Divides this publication's send estimate among tracks that opt into a ceiling. The reconnect
+	/// handle owns the registry, so reservations and their probe target survive reconnects.
+	bandwidth: moq_net::bandwidth::Allocator,
 	connection_stats: moq_tokio::connection::Monitor,
 	/// This publication's completion. The task moves it to `Failed` on a fatal transport error, so the
 	/// pad streaming threads stop feeding a dead session without consulting the element.
@@ -274,11 +277,12 @@ impl Session {
 		let _rt = RUNTIME.enter();
 
 		let origin = moq_tokio::origin::spawn();
-		// Each run is a new publisher instance: a restarted pipeline takes over from one whose route still
-		// lingers, rather than resuming viewers into the old run's group sequence. Reconnects keep it.
-		let epoch = moq_net::Epoch::mint();
-		gst::info!(CAT, "publishing {} under epoch {epoch}", settings.broadcast);
-		let broadcast = origin.publish(&settings.broadcast, moq_net::origin::Route::default().with_epoch(epoch))?;
+		// Each run is a new stream under a fresh instance, which the publication mints: a restarted
+		// pipeline never resumes viewers into the old run's group sequence. Reconnects keep it.
+		let broadcast = origin.publish(&settings.broadcast, moq_net::origin::Route::default())?;
+		if let Some(instance) = broadcast.route().and_then(|route| route.instance) {
+			gst::info!(CAT, "publishing {} under instance {instance}", settings.broadcast);
+		}
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())?;
 
@@ -300,6 +304,7 @@ impl Session {
 		// Persistent handles that survive reconnects; the getters read them without touching the loop.
 		let send_bandwidth = reconnect.send_bandwidth();
 		let recv_bandwidth = reconnect.recv_bandwidth();
+		let bandwidth = reconnect.allocator();
 		let connection_stats = reconnect.monitor();
 
 		// The task is spawned parked. An immediate auth rejection would otherwise race the element
@@ -322,6 +327,7 @@ impl Session {
 				status,
 				send_bandwidth,
 				recv_bandwidth,
+				bandwidth,
 				connection_stats,
 				completion,
 			},
@@ -346,6 +352,16 @@ impl Session {
 		self.recv_bandwidth.peek().map_or(0, moq_net::bandwidth::Rate::as_bps)
 	}
 
+	/// The allocator shared by tracks published in this session.
+	pub fn bandwidth(&self) -> moq_net::bandwidth::Allocator {
+		self.bandwidth.clone()
+	}
+
+	#[cfg(test)]
+	pub(super) fn replace_bandwidth(&mut self, bandwidth: moq_net::bandwidth::Allocator) {
+		self.bandwidth = bandwidth;
+	}
+
 	/// Snapshot the current connection statistics, or None while disconnected.
 	pub fn connection_stats(&self) -> Option<gst::Structure> {
 		self.connection_stats
@@ -365,9 +381,9 @@ impl Session {
 
 	/// Stop the session: a clean local close, never an error. Returns once the reconnect loop has ended.
 	///
-	/// Aborting only cancels the loop at its next await point, and a worker may be mid-dial, generating
-	/// TLS randomness. A process exiting in that window (`gst-launch` right after NULL) races aws-lc's
-	/// exit destructors, which free its seed DRBG and then `abort()` a thread asking for more.
+	/// Aborting only cancels the loop at its next await point, and a worker may be mid-dial. Without the
+	/// wait, that dial outlives the state change an application waits on before it exits (`gst-launch`
+	/// right after NULL).
 	pub fn stop(self) {
 		// The status task goes first, so it never reports the loop's end as a failure.
 		self.join.abort();
@@ -553,19 +569,19 @@ mod tests {
 		(session, connection)
 	}
 
-	fn announced_epoch(broadcast: &moq_net::origin::Publication) -> moq_net::Epoch {
-		broadcast.route().expect("announced").epoch.expect("an epoch")
+	fn announced_instance(broadcast: &moq_net::origin::Publication) -> moq_net::Instance {
+		broadcast.route().expect("announced").instance.expect("an instance")
 	}
 
-	// Without an epoch, a restart whose old route lingers resumes viewers into the old run's groups.
+	// Under one instance, a restart whose old route lingers would resume viewers into the old run's groups.
 	#[test]
-	fn each_run_announces_a_newer_epoch() {
+	fn each_run_announces_a_new_instance() {
 		let (first, first_broadcast) = started_with_broadcast();
-		let first_epoch = announced_epoch(&first_broadcast);
+		let first_instance = announced_instance(&first_broadcast);
 		first.stop();
 
 		let (second, second_broadcast) = started_with_broadcast();
-		assert!(announced_epoch(&second_broadcast) > first_epoch);
+		assert_ne!(announced_instance(&second_broadcast), first_instance);
 		second.stop();
 	}
 
@@ -573,8 +589,8 @@ mod tests {
 		connection.poll_closed(&moq_net::kio::Waiter::noop()).is_ready()
 	}
 
-	// A dial still running once the element reached NULL can outlive `main`, and aws-lc aborts the
-	// process when a thread asks it for randomness after its exit destructors ran.
+	// A dial still running once the element reached NULL would outlive the state change an application
+	// waits on before it exits.
 	#[test]
 	fn stop_returns_after_the_reconnect_loop_ends() {
 		let (session, connection) = started();

@@ -7,7 +7,9 @@ contract, the relay flags, and worked examples, see the
 [Authentication Documentation](../../doc/bin/relay/auth.md).
 
 Grants and claims name paths with patterns from `@moq/pattern`: `foo` is one
-broadcast, `foo/**` is a subtree, `**` is everything.
+broadcast, `foo/**` is a subtree, `**` is everything. A role may also carry a
+bitrate cap, written `{"path": [...], "rate": bps}` and parsed into
+`publish_rate` or `subscribe_rate` beside the patterns.
 
 ## Installation
 
@@ -105,13 +107,15 @@ moq-auth verify --key root.jwk --in alice.jwt
 
 ### Answering a relay
 
-A server implementing the contract validates what the relay sends and answers a grant:
+A server implementing the contract validates what the relay sends and answers a grant.
+`encodeGrant` writes a cap into its role, where the relay reads it:
 
 ```typescript
-import { type Grant, GrantSchema, RequestSchema } from "@moq/auth";
+import { encodeGrant, type Grant, RequestSchema } from "@moq/auth";
 
 const request = RequestSchema.parse(await body.json());
-const grant: Grant = GrantSchema.parse({ subscribe: ["**"], expires: 4102444800, revalidate: 60 });
+const grant: Grant = { subscribe: ["**"], subscribe_rate: 8_000_000, expires: 4102444800, revalidate: 60 };
+return Response.json(encodeGrant(grant));
 ```
 
 ### Working example

@@ -5,7 +5,7 @@
 //! the hot path; they register themselves in [`Shared`] and hand their consumer
 //! straight to the mixer.
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 #[cfg(feature = "aec")]
@@ -955,7 +955,7 @@ impl Driver {
 	/// Jittered so a host running many streams doesn't reopen the device in lockstep after a
 	/// suspend or a driver reload.
 	fn schedule(&mut self) -> Instant {
-		let wait = self.retry.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+		let wait = self.retry.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0);
 		self.retry = (self.retry * 2).min(RETRY_MAX);
 		Instant::now() + wait
 	}
@@ -1015,7 +1015,6 @@ impl Driver {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use crate::playback::sink::{self, Input};
@@ -1321,6 +1320,10 @@ mod tests {
 
 		// Let the driver reach `park` with an empty mailbox, then race a flood
 		// of notifications against it.
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "the driver is a real OS thread that parks outside any runtime"
+		)]
 		std::thread::sleep(Duration::from_millis(10));
 		std::thread::scope(|s| {
 			for _ in 0..8 {
@@ -1385,6 +1388,10 @@ mod tests {
 			requests.wait(Some(Instant::now() + PATIENCE))
 		});
 
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "the driver is a real OS thread that parks outside any runtime"
+		)]
 		std::thread::sleep(Duration::from_millis(10));
 		waker.sync();
 

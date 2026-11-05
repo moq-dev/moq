@@ -11,5 +11,5 @@ export { Consumer, type ConsumerProps, DEFAULT_MAX_BUFFER, type Read } from "./c
 export type { Format } from "./format";
 /** The legacy varint container. */
 export * as Legacy from "./legacy";
-export { type TrackInfoOptions, trackInfo } from "./track";
+export { MAX_AGE, type TrackInfoOptions, trackInfo } from "./track";
 export * from "./types";

@@ -1,7 +1,7 @@
 //! Low-level protocol logic for the QUIC protocol
 //!
 //! moq-quic has no networking code: the caller supplies transport timestamps, and address
-//! validation reads the ambient `moq-clock` wall time. Most applications use the Tokio driver
+//! validation reads the ambient `kio::clock` wall time. Most applications use the Tokio driver
 //! in `moq_tokio::quic::driver` instead.
 //!
 //! Use `moq_tokio::quic::driver` for Tokio, or drive this state machine from another runtime.
@@ -24,14 +24,18 @@ mod coding;
 mod constant_time;
 mod entropy;
 // Not part of the public API: compiled only for the crate's own tests, the benches, and
-// the `fuzz/` harness. The connection target needs ring or aws-lc-rs for the endpoint's keys.
-#[cfg(all(any(test, feature = "fuzz"), any(feature = "aws-lc-rs", feature = "ring")))]
+// the `fuzz/` harness. The connection target uses rind for the endpoint's keys.
+#[cfg(any(test, feature = "fuzz"))]
 #[doc(hidden)]
 pub mod fuzz;
 mod range_set;
-#[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
+// Not part of the public API: the network path the crate's tests and simulated drivers share.
+#[cfg(any(test, feature = "sim"))]
+#[doc(hidden)]
+pub mod sim;
+#[cfg(test)]
 mod tests;
-pub mod transport_parameters;
+mod transport_parameters;
 mod varint;
 
 pub use varint::{VarInt, VarIntBoundsExceeded};
@@ -40,9 +44,7 @@ mod bloom_token_log;
 use bloom_token_log::BloomTokenLog;
 
 pub mod connection;
-pub use crate::connection::{
-	CreditStats, Datagrams, Event, FrameStats, PathStats, ShouldTransmit, StreamEvent, Streams, UdpStats, recv, send,
-};
+pub use crate::connection::{CreditStats, Datagrams, Event, FrameStats, PathStats, Streams, UdpStats, recv, send};
 
 pub mod stream;
 #[cfg(feature = "mux")]
@@ -50,13 +52,13 @@ pub mod stream;
 pub use connection::mux;
 pub(crate) use stream::{Dir, Id as StreamId};
 
-#[cfg(any(feature = "ring", feature = "aws-lc-rs"))]
+// The configs take and report rustls types, so callers name the same version.
 pub use rustls;
 
 mod config;
 mod limits;
 pub use config::{ConfigError, client, server, transport};
-pub use limits::{Limits, LimitsError};
+pub use limits::{Limits, LimitsError, Rate};
 
 pub mod crypto;
 
@@ -89,7 +91,7 @@ use token_memory_cache::TokenMemoryCache;
 
 // Deal with time
 // MoQ's clock, so a caller-driven clock (a test's or the simulator's) reaches the state machine.
-pub(crate) use moq_clock::{Instant, Wall};
+pub(crate) use kio::clock::{Instant, Wall};
 pub(crate) use std::time::Duration;
 pub(crate) const UNIX_EPOCH: Wall = Wall::UNIX_EPOCH;
 
@@ -181,6 +183,9 @@ const MIN_INITIAL_SIZE: u16 = 1200;
 /// <https://www.rfc-editor.org/rfc/rfc9000.html#name-datagram-size>
 const INITIAL_MTU: u16 = 1200;
 const MAX_UDP_PAYLOAD: u16 = 65527;
+/// Bytes one IPv4 UDP send can carry, however many GSO segments split it: 65,535 minus the IP and
+/// UDP headers. Linux refuses a larger train with `EMSGSIZE`.
+const MAX_TRANSMIT_SIZE: usize = 65_507;
 const TIMER_GRANULARITY: Duration = Duration::from_millis(1);
 /// Maximum number of streams that can be uniquely identified by a stream ID
 const MAX_STREAM_COUNT: u64 = 1 << 60;
