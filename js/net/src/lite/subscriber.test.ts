@@ -2352,7 +2352,7 @@ test.each(
 	const runResponses = internal.runResponses.bind(internal);
 	const responses = spyOn(internal, "runResponses").mockImplementation((stream, entry) => {
 		counters.push(
-			...[entry.track.subscription, entry.track.demand().wanted, hooks.producerLargest(entry.track)].map(
+			...[hooks.requested(entry.track), entry.track.demand().wanted, hooks.producerLargest(entry.track)].map(
 				countChanges,
 			),
 		);

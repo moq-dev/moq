@@ -2141,7 +2141,7 @@ export class Subscriber {
 	#covered(entry: SubscribeEntry): boolean {
 		// Without SUBSCRIBE_FINISH (older drafts) nothing says which groups are owed.
 		if (entry.end === undefined) return false;
-		const ranges = wireRanges(entry.track.subscription.peek()?.ranges ?? [{}]);
+		const ranges = wireRanges(hooks.requested(entry.track).peek()?.ranges ?? [{}]);
 		const end = min(entry.end, wireSpan(ranges).end ?? entry.end);
 		const floor = rangesStart(ranges);
 		// Lite-07 answers with SUBSCRIBE_OK once the track ends, unless nothing was asked below the
@@ -2218,10 +2218,10 @@ export class Subscriber {
 				wanted !== sentWanted
 					? wanted
 					: undefined;
-			const current = track.subscription.peek();
+			const current = hooks.requested(track).peek();
 			if (current === undefined || (refresh === undefined && this.#sameSubscription(current, lastSent))) {
 				// Each wake releases the quiet signals too, including when termination wins.
-				const next = await race([Signal.race(track.subscription, demand.wanted, edge), stopped]);
+				const next = await race([Signal.race(hooks.requested(track), demand.wanted, edge), stopped]);
 				if (next === null) return;
 				continue;
 			}

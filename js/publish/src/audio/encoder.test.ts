@@ -1347,6 +1347,48 @@ test("demand replays only the retained audio its max delay still wants", async (
 	}
 });
 
+// A fetch's own budget judges only the group it asks for, so it must not narrow what the encoder
+// replays for the live subscribers that come later.
+test("a fetch alone replays the whole retention", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const clock = new Manual();
+	const installed = clock.install();
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("fetch.hang") });
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
+	let fetched: Moq.Group.Consumer | undefined;
+	try {
+		await configuring;
+		await settle();
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		// A first viewer leaves group 0 in the cache for the fetch to find.
+		const first = net.track("audio").subscribe({ delay: { max: null } });
+		await settle();
+		await feed.push({ timestamp: Micro(0), channels: [new Float32Array(960)] });
+		await feed.drain();
+		first.close();
+		await settle();
+		const encoded = encoder.out.stats.peek().frames;
+		for (let index = 1; index <= 150; index++) {
+			await clock.advance(Nano.fromMilli(Milli(20)));
+			await feed.push({ timestamp: Micro(index * 20_000), channels: [new Float32Array(960)] });
+			await feed.drain();
+		}
+		expect(encoder.out.stats.peek().frames).toBe(encoded);
+		// Held open, the fetched group keeps the fetch's demand alive while the encoder reacts.
+		fetched = await net.track("audio").fetchGroup(0n);
+		await settle();
+		expect(encoder.out.stats.peek().frames).toBe(encoded + 150);
+	} finally {
+		fetched?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});
+
 // Replay catches up behind the live edge another rendition already reached; advertising that as
 // `delay` would buffer playback by the retention for the rest of the broadcast.
 test("replayed raw audio raises no catalog delay", async () => {
