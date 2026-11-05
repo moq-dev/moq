@@ -148,7 +148,7 @@ impl Meter {
 		let window = std::mem::take(&mut self.window);
 		let mut whole = Interval::default();
 		window.iter().for_each(|s| whole.add(*s));
-		let packet = rate(1, whole.ticks);
+		let packet = (PACKET_BITS * PCR_HZ).div_ceil(whole.ticks);
 		let rate = whole.rate();
 		let stable = window.iter().all(|s| s.agrees(rate));
 		match self.published {
@@ -238,18 +238,20 @@ mod test {
 
 	#[test]
 	fn upward_rounding_of_one_packet_holds() {
-		let published = rate(100_000, WINDOW);
+		// Real windows overshoot two seconds; one packet need not be an integer rate.
+		let ticks = SAMPLE + 75_000;
+		let published = rate(100_000, ticks * 4);
 		let mut meter = Meter::measured(Some(published));
 		assert!(
 			feed(
 				&mut meter,
-				[(25_001, SAMPLE), (25_000, SAMPLE), (25_000, SAMPLE), (25_000, SAMPLE)]
+				[(25_000, ticks), (25_000, ticks), (25_000, ticks), (25_001, ticks)]
 			)
 			.is_empty()
 		);
 		assert_eq!(
-			feed(&mut meter, [(25_001, SAMPLE); 4]),
-			vec![Some(rate(100_004, WINDOW))]
+			feed(&mut meter, [(25_001, ticks); 4]),
+			vec![Some(rate(100_004, ticks * 4))]
 		);
 	}
 
