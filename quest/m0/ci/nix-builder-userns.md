@@ -1,4 +1,4 @@
-# [S] The desktop host's Nix builders may map user namespaces
+# [XS] The desktop host's Nix builders may map user namespaces
 
 ## Goal
 
@@ -28,3 +28,12 @@ As of 2026-11-05 the probe fails on the desktop host (Ubuntu 26.04, where
 AppArmor's restriction for Nix builds there, persistently and as narrowly as
 works, apply it when no gate is running, and check that the probe succeeds and
 `just ci` passes `check flake`.
+
+Decided 2026-11-05 (maintainer, /quest-plan): flip the sysctl host-wide rather than a narrow AppArmor
+profile for the Nix builders. Not chosen: a narrow profile; declining and
+deleting the quest. Applied the same day:
+`/etc/sysctl.d/99-userns.conf` sets
+`kernel.apparmor_restrict_unprivileged_userns = 0` (it loads after Ubuntu's
+`/usr/lib/sysctl.d/10-apparmor.conf`), `unshare --map-root-user true`
+succeeds, and `nix/runner/userns-probe.nix` builds. What remains: run
+`just ci` on the desktop and confirm `check flake` passes.

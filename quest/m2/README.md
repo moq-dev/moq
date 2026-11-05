@@ -181,6 +181,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [Audio capture without ALSA link](/quest/m2/capture-alsa-link.md) - moq-audio capture and playback build on Linux without linking libasound, and capture becomes a default feature
 - [The moq CLI can publish a changing catalog](/quest/m2/cli-catalog-updates.md) - catalog updates mid-stream, so recovery replays need no hand-built clients
 - [Ship capture and playback](/quest/m2/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
+- [moq-relay in nixpkgs](/quest/m2/nixpkgs-relay.md) - `nix-shell -p moq-relay` installs the released relay from upstream nixpkgs, auto-updated from our tags
+- [moq-cli in nixpkgs](/quest/m2/nixpkgs-cli.md) - the released `moq` CLI with its full release feature set joins nixpkgs as `moq-cli`
 - [Egress profile](/quest/m2/quic-egress-profile.md) - measure relay send-path syscalls, pacing bursts, and allocations before optimizing any of them
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - H.265 encode and decode, pre-generated bindings, and pooled resize surfaces, including the moq-dev/vaapi release that carries them
 - [GPU capacity and health](/quest/m2/gpu-health.md) - moq-video reports each device's sessions, memory, utilization, and health on NVIDIA, AMD, and Intel alike
