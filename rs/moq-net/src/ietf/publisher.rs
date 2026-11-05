@@ -3466,6 +3466,7 @@ impl Publisher {
 	}
 
 	/// Await [`FetchServe`].
+	#[cfg(test)]
 	async fn serve_fetch_stream(
 		self,
 		stream: Stream<Transport, Version>,
@@ -3497,6 +3498,7 @@ impl Publisher {
 	}
 
 	/// Await [`TrackStatusServe`].
+	#[cfg(test)]
 	async fn serve_track_status_stream(
 		self,
 		stream: Stream<Transport, Version>,
@@ -4100,6 +4102,7 @@ impl Publisher {
 	}
 
 	/// Await [`NamespaceServe`].
+	#[cfg(test)]
 	async fn serve_subscribe_namespace_stream(
 		self,
 		stream: Stream<Transport, Version>,
