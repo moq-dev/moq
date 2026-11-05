@@ -922,9 +922,11 @@ export class Subscriber {
 			this.#unanswered.delete(id);
 			const opened = stream;
 			const receiving = producer;
-			// The only thing following DATAGRAMS_INFO is the publisher's FIN.
-			const ended = opened.reader.done().then((done) => {
+			// The only thing following DATAGRAMS_INFO is the publisher's FIN. Its last datagram may
+			// arrive alongside, so the datagrams already received route first.
+			const ended = opened.reader.done().then(async (done) => {
 				if (!done) throw new ProtocolViolation("data after DATAGRAMS_INFO");
+				await yieldNow();
 				receiving.finish();
 			});
 			void ended.catch(() => {});

@@ -857,16 +857,16 @@ impl Subscriber {
 		self.subscribes.lock().remove(&id);
 	}
 
-	/// Decode one datagram body and hand it to the datagram track it was sent for.
+	/// Decode one datagram body and hand it to the datagram track it was sent for, or return
+	/// the Subscribe ID it names when that subscription has no datagram track: one unknown,
+	/// ended, or not yet answered.
 	///
 	/// A datagram track's subscription takes its datagrams. On lite-05/06 a stream track's
 	/// subscription carries its name's datagrams too, which go to that name's datagram track.
-	/// One for a subscription with no datagram track, unknown or not yet answered, is dropped
-	/// and counted: the driver decodes answers first, so a datagram sharing a receive pass
-	/// with its answer finds the track.
-	fn route_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
+	/// Padding and a body past the wire cap name no subscription.
+	fn route_datagram(&self, payload: bytes::Bytes) -> Result<Option<u64>, Error> {
 		if payload.len() > lite::Datagram::MAX_SIZE {
-			return Ok(());
+			return Ok(None);
 		}
 		let mut target = None;
 		let Some(dg) = lite::Datagram::decode(payload, self.version, |id| {
@@ -874,15 +874,10 @@ impl Subscriber {
 			target.as_ref().is_some_and(|(_, timescale)| timescale.is_some())
 		})?
 		else {
-			return Ok(());
+			return Ok(None);
 		};
 		let Some((mut producer, timescale)) = target else {
-			self.datagrams_unrouted.fetch_add(1, atomic::Ordering::Relaxed);
-			tracing::debug!(
-				subscribe = dg.subscribe,
-				"dropping datagram for a subscription with no datagram track"
-			);
-			return Ok(());
+			return Ok(Some(dg.subscribe));
 		};
 		let timestamp = dg
 			.timestamp
@@ -894,7 +889,8 @@ impl Subscriber {
 			sequence: dg.sequence,
 			timestamp,
 			payload: dg.payload,
-		})
+		})?;
+		Ok(None)
 	}
 
 	/// The datagram track Subscribe ID `id` delivers to, and its datagrams' timescale.
@@ -1080,6 +1076,15 @@ impl SubscriberDriver {
 			}
 		}
 
+		// Datagrams go around the sources, which decode the answers that register their
+		// routes and the ends that remove them. A publisher sends a track's first datagram
+		// right behind its answer and its last right before its end, often in the same
+		// packet. So the datagrams of known tracks go first, ahead of any end, and the first
+		// with no known track waits for the sources' answers.
+		if let Poll::Ready(Err(err)) = self.poll_datagrams(waiter, true) {
+			return Poll::Ready(Err(err));
+		}
+
 		// Sources minted by the announce half; their completion never ends the
 		// session (the origin delivers the unannounce itself).
 		while let Poll::Ready(Ok(minted)) = self.subscriber.sources.poll_pop(waiter) {
@@ -1087,17 +1092,23 @@ impl SubscriberDriver {
 		}
 		let _ = self.sources.poll(waiter);
 
-		// After the sources, which decode the answers that register datagram routes: a
-		// publisher sends a track's first datagram right behind its answer, often in the
-		// same packet, and a datagram routed first would find no route.
+		if let Poll::Ready(Err(err)) = self.poll_datagrams(waiter, false) {
+			return Poll::Ready(Err(err));
+		}
+
+		Poll::Pending
+	}
+
+	/// Route the ready datagrams, see [`DatagramRecv::poll`]; ready only with the error that
+	/// ends the session.
+	fn poll_datagrams(&mut self, waiter: &kio::Waiter, hold: bool) -> Poll<Result<(), Error>> {
 		if let Some(datagrams) = &mut self.datagrams {
-			match datagrams.poll(waiter) {
+			match datagrams.poll(waiter, hold) {
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 				Poll::Ready(Ok(())) => self.datagrams = None,
 				Poll::Pending => {}
 			}
 		}
-
 		Poll::Pending
 	}
 }
@@ -1741,6 +1752,8 @@ struct DatagramRecv {
 	// A dedicated receive handle: the poll interface takes `&mut self`.
 	recv: Transport,
 	enabled: bool,
+	/// The first datagram with no known track before the sources ran, routed once they have.
+	held: Option<bytes::Bytes>,
 }
 
 impl DatagramRecv {
@@ -1751,20 +1764,41 @@ impl DatagramRecv {
 			subscriber,
 			recv,
 			enabled,
+			held: None,
 		}
 	}
 
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	/// Route the ready datagrams. With `hold`, before the sources run, stop at the first with
+	/// no known track and keep it: its answer may be among what they decode. The pass after
+	/// them, in the same driver poll, routes it and the rest, dropping and counting each that
+	/// still finds no track.
+	fn poll(&mut self, waiter: &kio::Waiter, hold: bool) -> Poll<Result<(), Error>> {
 		if !self.enabled {
 			return Poll::Ready(Ok(()));
 		}
 		// A peer keeping datagrams ready must not hold the session's other tasks.
 		let mut budget = kio::coop::Budget::new(32);
 		loop {
-			ready!(budget.poll_yield(waiter));
-			let payload = ready!(self.recv.poll_recv_datagram(waiter)).map_err(crate::lite::error::from_transport)?;
-			if let Err(err) = self.subscriber.route_datagram(payload) {
-				tracing::debug!(%err, "dropping datagram");
+			if hold && self.held.is_some() {
+				return Poll::Pending;
+			}
+			let payload = match self.held.take() {
+				Some(payload) => payload,
+				None => {
+					ready!(budget.poll_yield(waiter));
+					ready!(self.recv.poll_recv_datagram(waiter)).map_err(crate::lite::error::from_transport)?
+				}
+			};
+			match self.subscriber.route_datagram(payload.clone()) {
+				Ok(None) => {}
+				Ok(Some(_)) if hold => self.held = Some(payload),
+				Ok(Some(subscribe)) => {
+					self.subscriber
+						.datagrams_unrouted
+						.fetch_add(1, atomic::Ordering::Relaxed);
+					tracing::debug!(subscribe, "dropping datagram for a subscription with no datagram track");
+				}
+				Err(err) => tracing::debug!(%err, "dropping datagram"),
 			}
 		}
 	}
@@ -3887,12 +3921,69 @@ mod tests {
 				.unwrap();
 		}
 
-		assert!(recv.poll(&kio::Waiter::noop()).is_pending());
+		assert!(recv.poll(&kio::Waiter::noop(), false).is_pending());
 		let other = local.clone();
 		assert!(
 			other.poll_recv_datagram(&kio::Waiter::noop()).is_ready(),
 			"one poll routed every datagram"
 		);
+	}
+
+	/// Before the sources run, a datagram whose track isn't known yet is held rather than
+	/// dropped, and the pass after them routes it to a track registered in between. One that
+	/// still finds no track is dropped and counted.
+	#[kio::test]
+	async fn a_datagram_waits_for_the_sources_before_it_is_dropped() {
+		use crate::transport::poll::Session as _;
+
+		let (local, peer) = crate::transport::memory::pair(Default::default());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(local),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: Version::Lite07,
+			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let mut recv = DatagramRecv::new(subscriber.clone());
+		let send = |subscribe| {
+			let body = lite::Datagram {
+				subscribe,
+				sequence: 0,
+				timestamp: None,
+				payload: bytes::Bytes::from_static(b"x"),
+			};
+			peer.send_datagram(body.encode_bytes(Version::Lite07).unwrap(), Default::default())
+				.unwrap();
+		};
+		let unrouted = || subscriber.datagrams_unrouted.load(atomic::Ordering::Relaxed);
+		let waiter = kio::Waiter::noop();
+
+		send(1);
+		assert!(recv.poll(&waiter, true).is_pending());
+		assert!(recv.held.is_some(), "dropped before the sources ran");
+		let producer = datagram::Info::default().produce("datagrams");
+		let mut received = producer.consume();
+		subscriber.datagrams.lock().insert(
+			1,
+			DatagramEntry {
+				producer,
+				timescale: None,
+			},
+		);
+		assert!(recv.poll(&waiter, false).is_pending());
+		assert!(matches!(received.poll_recv(&waiter), Poll::Ready(Ok(Some(_)))));
+		assert_eq!(unrouted(), 0);
+
+		send(2);
+		assert!(recv.poll(&waiter, true).is_pending());
+		assert!(recv.poll(&waiter, false).is_pending());
+		assert!(recv.held.is_none());
+		assert_eq!(unrouted(), 1);
 	}
 
 	#[kio::test]
@@ -5173,7 +5264,7 @@ mod tests {
 			if version.has_padding() {
 				// These bytes would name the active subscription without the discriminator.
 				for body in [vec![1], vec![1; 1200], vec![1; 1201]] {
-					subscriber.route_datagram(body.into()).unwrap();
+					assert_eq!(subscriber.route_datagram(body.into()).unwrap(), None);
 					assert!(recv().is_pending());
 				}
 			}
@@ -5188,7 +5279,7 @@ mod tests {
 				.encode_bytes(version)
 				.unwrap()
 			};
-			subscriber.route_datagram(payload(1, 1)).unwrap();
+			assert_eq!(subscriber.route_datagram(payload(1, 1)).unwrap(), None);
 			let Poll::Ready(Ok(Some(datagram))) = recv() else {
 				panic!("{version}: the datagram was not delivered");
 			};
@@ -5198,23 +5289,18 @@ mod tests {
 			let max_payload = 1200 - payload(2, 0).len();
 			let oversized = payload(2, max_payload + 1);
 			assert_eq!(oversized.len(), 1201);
-			subscriber.route_datagram(oversized).unwrap();
+			assert_eq!(subscriber.route_datagram(oversized).unwrap(), None);
 			assert!(recv().is_pending(), "oversized body was delivered");
 			let boundary = payload(3, max_payload);
 			assert_eq!(boundary.len(), 1200);
-			subscriber.route_datagram(boundary).unwrap();
+			assert_eq!(subscriber.route_datagram(boundary).unwrap(), None);
 			assert!(matches!(recv(), Poll::Ready(Ok(Some(datagram))) if datagram.sequence == 3));
 
-			// Neither padding nor an oversized body names a subscription.
-			let unrouted = || subscriber.datagrams_unrouted.load(atomic::Ordering::Relaxed);
-			assert_eq!(unrouted(), 0, "{version}");
-
-			// An unknown subscription's datagram goes nowhere, and is counted.
+			// An unknown subscription's datagram goes nowhere, and names it.
 			let mut other = payload(4, 1).to_vec();
 			other[usize::from(version.has_padding())] = 2;
-			subscriber.route_datagram(other.into()).unwrap();
+			assert_eq!(subscriber.route_datagram(other.into()).unwrap(), Some(2));
 			assert!(recv().is_pending());
-			assert_eq!(unrouted(), 1, "{version}");
 		}
 	}
 

@@ -285,14 +285,18 @@ test("lite-06: a request cancelled behind the shared datagram writer sends nothi
 // A publisher's stream writes, handed to the subscriber `lag` microtasks late: the answer it
 // writes lands after a datagram sent behind it, though in the same host task.
 function lagAnswers(transport: MockTransport, lag: number): void {
+	if (lag === 0) return;
 	const lagging = (writable: WritableStream<Uint8Array>) => {
 		const writer = writable.getWriter();
 		let chain = Promise.resolve();
 		const later = (op: () => Promise<void>) => {
-			chain = chain.then(async () => {
-				for (let i = 0; i < lag; i++) await Promise.resolve();
-				await op();
-			});
+			// A write the session's close fails is lost, as it would be on the wire.
+			chain = chain
+				.then(async () => {
+					for (let i = 0; i < lag; i++) await Promise.resolve();
+					await op();
+				})
+				.catch(() => {});
 			return chain;
 		};
 		return new WritableStream<Uint8Array>({
@@ -349,4 +353,38 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			}
 		});
 	}
+}
+
+// A publisher that writes a last datagram and finishes at once sends the datagram right ahead
+// of its track's end. The subscriber routes the datagram before it ends the track.
+for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
+	test(`${alpn}: a datagram sent right before its end arrives`, async () => {
+		const source = new Origin();
+		const publication = source.createBroadcast(path);
+		const datagrams = publication.broadcast.createDatagrams("audio");
+		publication.announce();
+		const pair = createMockTransportPair(alpn);
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client }),
+			accept({ url, transport: pair.server, publish: source.consume() }),
+		]);
+		const remote = wireOf(client).consume(path);
+		const reader = remote.datagrams("audio");
+		reader.setPriority(5);
+		try {
+			await reader.info();
+			while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
+			datagrams.append(undefined, Uint8Array.of(1));
+			datagrams.finish();
+			expect((await reader.recv())?.payload).toEqual(Uint8Array.of(1));
+			expect(await reader.recv()).toBeUndefined();
+			expect((await client.stats()).datagramsUnrouted).toBe(0);
+		} finally {
+			reader.close();
+			remote.close();
+			client.abort();
+			server.abort();
+			source.close();
+		}
+	});
 }

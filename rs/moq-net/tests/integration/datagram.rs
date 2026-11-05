@@ -589,3 +589,25 @@ async fn a_datagram_sent_right_behind_its_answer_arrives() {
 		assert_eq!(chain.pairs[0].server.stats().datagrams_unrouted, Some(0), "{version}");
 	}
 }
+
+/// A publisher that writes a last datagram and finishes at once sends the datagram right
+/// ahead of its track's end, so both reach the subscriber in one receive pass. The
+/// subscriber routes the datagram before it ends the track.
+#[kio::test]
+async fn a_datagram_sent_right_before_its_end_arrives() {
+	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
+		let chain = Chain::new(&[version]).await;
+		let mut producer = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+		let mut consumer = chain.consume(&producer, 1).await;
+		producer.append(millis(1), &b"last"[..]).unwrap();
+		producer.finish();
+		let datagram = kio::clock::timeout(TIMEOUT, consumer.recv())
+			.await
+			.unwrap_or_else(|_| panic!("{version}: nothing arrived"))
+			.unwrap_or_else(|err| panic!("{version}: {err:?}"))
+			.unwrap_or_else(|| panic!("{version}: the datagram was dropped"));
+		assert_eq!(&datagram.payload[..], b"last", "{version}");
+		assert!(recv(&mut consumer).await.unwrap().is_none(), "{version}");
+		assert_eq!(chain.pairs[0].server.stats().datagrams_unrouted, Some(0), "{version}");
+	}
+}
