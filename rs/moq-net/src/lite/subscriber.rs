@@ -1490,7 +1490,9 @@ impl GroupRecv {
 
 		let res = match res {
 			Ok(()) => {
-				let _ = group.finish();
+				if group.finish().is_ok() {
+					reading.finish();
+				}
 				Ok(())
 			}
 			Err(err @ (Error::Cancel | Error::Stream(crate::StreamError::Cancel))) => {
@@ -5160,6 +5162,61 @@ mod tests {
 		assert!(!covers(4..5), "the group that never arrived is owed again");
 		frame(&mut two).expect("the drop leaves a group still arriving");
 		frame(&mut three).expect("the update leaves a group still arriving");
+	}
+
+	/// A group whose stream finished wins over a lite-07 stale drop that lands after the cache
+	/// evicted it: the publisher served it over that drop, so the next update owes it no more.
+	/// A stream that finished under an earlier update says nothing of a drop under the new one.
+	#[kio::test]
+	async fn a_finished_group_wins_over_a_late_stale_drop_once_evicted() {
+		let version = Version::Lite07;
+		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let now = || serve.subscriber.runtime.now();
+		let code = u64::from(crate::coding::StreamCodes::encode_stream_code(
+			&version,
+			&crate::StreamError::Old,
+		));
+		let old = |sequence, update| {
+			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
+				start: sequence,
+				end: sequence,
+				error: code,
+				update,
+			})
+		};
+		let arrive = |serving: &mut ServeLoop, sequence| {
+			let mut group = serving.serving.create_group(crate::group::Info { sequence }).unwrap();
+			let reading = Reading::open(&tail, Some(sequence), now());
+			group
+				.write_frame(crate::Timestamp::from_millis(1).unwrap(), &b"x"[..])
+				.unwrap();
+			group.finish().unwrap();
+			reading.finish();
+			serving.serving.evict(sequence);
+		};
+		let update = |serving: &mut ServeLoop| {
+			let Sub::Active(active) = &mut serving.sub else {
+				unreachable!("an active subscription");
+			};
+			let ranges = active.live.unchanged();
+			buffer_update(active, ranges, &serving.serving, now()).unwrap();
+		};
+		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
+
+		arrive(&mut serving, 1);
+		serving.apply_response(&serve, old(1, 0)).unwrap();
+		update(&mut serving);
+		assert!(covers(1..2), "the evicted group that arrived stays accounted for");
+
+		// Finished under the first update, then judged stale under the second.
+		arrive(&mut serving, 2);
+		update(&mut serving);
+		serving.apply_response(&serve, old(2, 2)).unwrap();
+		update(&mut serving);
+		assert!(
+			!covers(2..3),
+			"a drop under a later update is the publisher's to re-offer"
+		);
 	}
 
 	/// A SKIP, or any final drop, that follows an OLD drop of the same groups replaces it: an
@@ -9625,6 +9682,7 @@ fn buffer_update(
 	let held = serving.supersede_stale(judged_end(active.live.iter().map(|(_, range)| range)));
 	let recorded = std::mem::take(&mut active.stale);
 	if let Ok(mut tail) = active.tail.write() {
+		tail.updated();
 		for run in recorded.iter() {
 			for reopened in held.overlapping(run) {
 				tail.unaccount(reopened.start.max(run.start)..reopened.end.min(run.end), now);
@@ -10942,14 +11000,14 @@ impl ServeLoop {
 			// lite-07 stale drop leaves a group whose stream arrived,
 			// since the stream wins over it.
 			lite::SubscribeResponse::Drop(dropped) => {
+				// It can only echo an update this subscriber sent, even when it names nothing.
+				if dropped.update > active.update {
+					return Err(Error::ProtocolViolation);
+				}
 				let groups = dropped.start..dropped.end.saturating_add(1);
 				// An empty range (Group Start = Group End + 1) names nothing.
 				if groups.is_empty() {
 					return Ok(());
-				}
-				// It can only echo an update this subscriber sent.
-				if dropped.update > active.update {
-					return Err(Error::ProtocolViolation);
 				}
 				let error = dropped.error(serve.subscriber.version);
 				// On lite-07 an OLD drop is a stale verdict, which the next update reopens; every
@@ -10972,6 +11030,11 @@ impl ServeLoop {
 							given.insert(groups.clone());
 							for asked in active.fill_groups.overlapping(&groups) {
 								given.remove(asked.clone());
+							}
+							// A group whose stream finished under this update was served over
+							// the drop, so it won, even once the cache evicted it.
+							for finished in active.tail.read().finished(&groups) {
+								given.remove(finished.clone());
 							}
 							for given in given.iter() {
 								let recorded = self

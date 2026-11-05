@@ -2158,7 +2158,10 @@ export class Subscriber {
 				entry.tail.account(start, end + 1n);
 				// Judged under the budget this subscriber sent with that update.
 				const hole = stale ? staleHole(entry.maxDelay ?? 0) : { error };
-				const recorded = hooks.dropTrackGroups(entry.track, start, end + 1n, hole);
+				// A group whose stream finished under this update was served over a stale drop, so it
+				// won, even once the cache evicted it.
+				const named = stale ? entry.tail.unfinished(start, end + 1n) : [{ start, end: end + 1n }];
+				const recorded = named.flatMap((run) => hooks.dropTrackGroups(entry.track, run.start, run.end, hole));
 				// A final drop is never reopened, even where it replaces a stale one. A sequence
 				// already skipped stays skipped, and one whose group arrived keeps it, so no update
 				// reopens either.
@@ -2341,6 +2344,7 @@ export class Subscriber {
 			// unknown again: a reader fills them rather than trust an old verdict.
 			entry.update = update.update;
 			entry.maxDelay = update.maxDelay;
+			entry.tail.updated();
 			const held = hooks.supersedeStale(entry.track, judgedEnd(ranges));
 			// A lite-07 publisher re-offers every group it reported stale on any update, and drops
 			// again under the new number what is still stale, so the tail owes every stale run again.
@@ -2451,6 +2455,8 @@ export class Subscriber {
 			});
 
 			producer.finish();
+			// Only a group that arrived whole, not one a drop or the track ended meanwhile.
+			if (producer.closed.peek() === null) tail.finish(group.sequence);
 			stream.stop(StreamCode.Cancel);
 		} catch (err: unknown) {
 			// A violation ends the session, which the connection does once it escapes; anything
