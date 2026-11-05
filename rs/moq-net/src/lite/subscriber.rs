@@ -157,7 +157,7 @@ struct DatagramEntry {
 	timescale: Option<Timescale>,
 }
 
-/// What the sources ended in one driver poll, applied once its datagrams routed.
+/// What the sources ended, applied once the driver read the datagrams queued with it.
 #[derive(Default)]
 struct DatagramEnds {
 	/// Lite-07: the datagram tracks the publisher finished, by Subscribe ID.
@@ -884,8 +884,9 @@ impl Subscriber {
 	}
 
 	/// Apply the datagram ends the sources read, once the driver routed the datagrams received
-	/// with them. A publisher sends a track's last datagram right before its end, and a fresh
-	/// track's answer, first datagram and end can all share a receive pass.
+	/// with them: it read the transport's queue empty. A publisher sends a track's last datagram
+	/// right before its end, and a fresh track's answer, first datagram and end can all share a
+	/// receive pass. A peer keeping the queue full delays its tracks' ends, holding nothing more.
 	fn end_datagrams(&self) {
 		let ends = std::mem::take(&mut *self.datagram_ends.lock());
 		for (id, producer) in ends.tracks {
@@ -1133,7 +1134,8 @@ impl SubscriberDriver {
 		// routes and the ends that remove them. A publisher sends a track's first datagram
 		// right behind its answer and its last right before its end, often in the same
 		// packet. So the datagrams of known tracks go first, those with no known track wait
-		// for the sources' answers, and the ends the sources read apply after both.
+		// for the sources' answers, and the ends the sources read apply after both, once the
+		// datagrams queued with them are read.
 		if let Poll::Ready(Err(err)) = self.poll_datagrams(waiter, true) {
 			return Poll::Ready(Err(err));
 		}
@@ -1146,7 +1148,11 @@ impl SubscriberDriver {
 		let _ = self.sources.poll(waiter);
 
 		let routed = self.poll_datagrams(waiter, false);
-		self.subscriber.end_datagrams();
+		// A pass the budget cut short leaves datagrams queued, which may have come with an end:
+		// its ends wait for a later poll's pass to read the queue empty.
+		if self.datagrams.as_ref().is_none_or(|recv| recv.caught_up) {
+			self.subscriber.end_datagrams();
+		}
 		if let Poll::Ready(Err(err)) = routed {
 			return Poll::Ready(Err(err));
 		}
@@ -1810,6 +1816,9 @@ struct DatagramRecv {
 	/// The datagrams with no known track before the sources ran, routed once they have. At
 	/// most one pass's budget, and empty again by the end of each driver poll.
 	held: Vec<bytes::Bytes>,
+	/// Whether the last pass read the transport's queue empty, or the receive ended, rather
+	/// than stopping at its budget.
+	caught_up: bool,
 }
 
 impl DatagramRecv {
@@ -1821,6 +1830,7 @@ impl DatagramRecv {
 			recv,
 			enabled,
 			held: Vec::new(),
+			caught_up: true,
 		}
 	}
 
@@ -1841,7 +1851,9 @@ impl DatagramRecv {
 		// what the first pass holds.
 		let mut budget = kio::coop::Budget::new(32);
 		loop {
+			self.caught_up = false;
 			ready!(budget.poll_yield(waiter));
+			self.caught_up = true;
 			let payload = match ready!(self.recv.poll_recv_datagram(waiter)) {
 				Ok(payload) => payload,
 				Err(err) => {
@@ -4072,6 +4084,67 @@ mod tests {
 		assert!(recv.poll(&waiter, false).is_pending());
 		assert!(recv.held.is_empty());
 		assert_eq!(unrouted(), 1);
+	}
+
+	/// A track's end waits for the datagrams queued with it, though they outlast a driver
+	/// poll's budget, and applies once a pass reads the queue empty.
+	#[kio::test]
+	async fn an_end_waits_for_the_datagrams_queued_with_it() {
+		use crate::transport::poll::Session as _;
+
+		const QUEUED: u64 = 100;
+		let (local, peer) = crate::transport::memory::pair(Default::default());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(local),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: Version::Lite07,
+			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let mut driver = SubscriberDriver::new(subscriber.clone(), Vec::new(), false);
+		let producer = datagram::Info::default().produce("datagrams");
+		let mut received = producer.consume();
+		subscriber.datagrams.lock().insert(
+			1,
+			DatagramEntry {
+				producer: producer.clone(),
+				timescale: None,
+			},
+		);
+		for sequence in 0..QUEUED {
+			let body = lite::Datagram {
+				subscribe: 1,
+				sequence,
+				timestamp: None,
+				payload: bytes::Bytes::from_static(b"x"),
+			};
+			peer.send_datagram(body.encode_bytes(Version::Lite07).unwrap(), Default::default())
+				.unwrap();
+		}
+		// As the sources queue an end they read.
+		subscriber.datagram_ends.lock().tracks.push((1, producer));
+
+		let waiter = kio::Waiter::noop();
+		let mut polls = 0;
+		let mut count = 0;
+		while !subscriber.datagram_ends.lock().tracks.is_empty() {
+			assert!(driver.poll(&waiter).is_pending());
+			polls += 1;
+			assert!(polls < 16, "the end never applied");
+			// The track keeps only so many unread.
+			while let Poll::Ready(Ok(Some(_))) = received.poll_recv(&waiter) {
+				count += 1;
+			}
+		}
+		assert!(polls > 1, "one poll read the whole queue");
+		assert!(matches!(received.poll_recv(&waiter), Poll::Ready(Ok(None))));
+		assert_eq!(count, QUEUED);
+		assert_eq!(subscriber.datagrams_unrouted.load(atomic::Ordering::Relaxed), 0);
 	}
 
 	#[kio::test]

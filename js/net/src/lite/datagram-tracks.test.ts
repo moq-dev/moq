@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { accept, connect } from "../connection/index.ts";
@@ -7,6 +7,7 @@ import { Producer as Origin } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
 import { Timescale, Timestamp } from "../time.ts";
+import { Budget } from "../util/yield.ts";
 import { wireOf } from "../wire.ts";
 import { ALPN_04, ALPN_05, ALPN_06, ALPN_07_WIP } from "./version.ts";
 
@@ -395,6 +396,49 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			expect(await reader.recv()).toBeUndefined();
 			expect((await client.stats()).datagramsUnrouted).toBe(0);
 		} finally {
+			reader.close();
+			remote.close();
+			client.abort();
+			server.abort();
+			source.close();
+		}
+	});
+}
+
+// A burst written right before a track's end can outlast the receive loop's budget, which yields
+// with some of it still queued. The end waits for the loop to read the queue empty.
+for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
+	test(`${alpn}: a burst sent right before its end arrives past a budget yield`, async () => {
+		// As many as a datagram track buffers unread, past two receive budgets.
+		const BURST = 64;
+		const source = new Origin();
+		const publication = source.createBroadcast(path);
+		const datagrams = publication.broadcast.createDatagrams("audio");
+		publication.announce();
+		const pair = createMockTransportPair(alpn);
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client }),
+			accept({ url, transport: pair.server, publish: source.consume() }),
+		]);
+		const remote = wireOf(client).consume(path);
+		const reader = remote.datagrams("audio");
+		reader.setPriority(5);
+		// Every budget slice reads as spent, so the receive loop yields a host task every 32 checks.
+		let checks = 0;
+		const budget = spyOn(Budget.prototype, "poll").mockImplementation(() =>
+			++checks % 32 === 0 ? yieldNow() : undefined,
+		);
+		try {
+			await reader.info();
+			while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
+			for (let i = 0; i < BURST; i++) datagrams.append(undefined, Uint8Array.of(i));
+			datagrams.finish();
+			let count = 0;
+			while ((await reader.recv()) !== undefined) count++;
+			expect(count).toBe(BURST);
+			expect((await client.stats()).datagramsUnrouted).toBe(0);
+		} finally {
+			budget.mockRestore();
 			reader.close();
 			remote.close();
 			client.abort();

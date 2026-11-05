@@ -260,6 +260,8 @@ export class Subscriber {
 	// later while the rest go on.
 	#held: { subscribe: bigint; payload: Uint8Array }[] = [];
 	#heldRouted?: Promise<void>;
+	// Set while the receive loop yields to its budget, which may leave datagrams queued.
+	#receiveYield?: Promise<void>;
 	/** Datagrams received for a subscription with no datagram track; see `Stats.datagramsUnrouted`. */
 	datagramsUnrouted = 0;
 	// A SUBSCRIBE sent alongside its TRACK, until its TRACK_INFO lands: settles with the
@@ -2413,7 +2415,11 @@ export class Subscriber {
 			try {
 				for (;;) {
 					const yielded = datagramBudget.poll();
-					if (yielded !== undefined) await yielded;
+					if (yielded !== undefined) {
+						this.#receiveYield = yielded;
+						await yielded;
+						this.#receiveYield = undefined;
+					}
 					const { value, done } = await reader.read();
 					if (done) break;
 					if (!value) continue;
@@ -2459,12 +2465,21 @@ export class Subscriber {
 		this.#dropUnrouted(unrouted);
 	}
 
-	// Wait for the datagrams received for `subscribe` so far to route: those the transport already
-	// delivered, a host task, and those held for its answer.
+	// Wait for the datagrams received for `subscribe` so far to route: a host task, then until the
+	// receive loop reads the transport's queue empty rather than yielding to its budget, and those
+	// held for its answer. A peer keeping the queue full delays the end, holding nothing more.
 	async #datagramsRouted(subscribe: bigint): Promise<void> {
 		await yieldNow();
-		// A held datagram keeps its routing pass running.
-		while (this.#isHeld(subscribe)) await this.#heldRouted;
+		for (;;) {
+			if (this.#receiveYield) {
+				await this.#receiveYield;
+				// The loop reads on in microtasks, until the queue empties or its next yield.
+				await yieldNow();
+			} else if (this.#isHeld(subscribe)) {
+				// A held datagram keeps its routing pass running.
+				await this.#heldRouted;
+			} else return;
+		}
 	}
 
 	// Whether a datagram for `subscribe` is held, which later ones wait behind to keep its order.
