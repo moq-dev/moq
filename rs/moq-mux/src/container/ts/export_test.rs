@@ -8562,22 +8562,17 @@ fn assert_skip_discontinuity(frames: &[Frame], count: usize) {
 		}
 	}
 	let start = kio::clock::Instant::now();
-	for (count, packet) in ts.as_chunks::<188>().0.iter().enumerate() {
+	let mut count = 0;
+	for packet in ts.as_chunks::<188>().0 {
 		if packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x80 != 0 {
 			assert_ne!(packet[5] & 0x10, 0, "a clock jump flags only a PCR packet");
 		}
 		let continuation = continuity.packet(packet);
-		// Judge PCR repetition from its samples. VBR packet density between samples
-		// cannot predict elapsed time, so do not extrapolate it over non-PCR packets.
+		// Feed the PCR samples as a uniform synthetic stream to grade their values.
+		// VBR packet density cannot supply a constant byte rate for health extrapolation.
 		if super::import::pcr(packet).is_some() {
-			health.packet(
-				packet,
-				continuation,
-				super::health::At {
-					count: count as u64 + 1,
-					arrival: start,
-				},
-			);
+			count += 1;
+			health.packet(packet, continuation, super::health::At { count, arrival: start });
 		}
 	}
 
