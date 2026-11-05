@@ -13,6 +13,7 @@
 
 #![cfg_attr(not(test), allow(dead_code, reason = "the lite-07 session does not drive it yet"))]
 
+mod proof;
 mod view;
 
 #[cfg(test)]
@@ -27,6 +28,8 @@ use std::{
 
 use crate::Path;
 
+pub use proof::RouteKey;
+pub(crate) use proof::{EXPORTER_LABEL, Proof, Transcript};
 pub(crate) use view::{View, overlaps, within};
 
 /// An opaque routing identity, declared by an origin or derived by [`Scope`].

@@ -13,8 +13,8 @@ the same arrival trace.
 
 Boundaries: converging by playing slightly faster or slower is the browser's
 [Watch](/quest/m1/audio-jitter-target/watch.md) quest. No packet loss concealment.
-Video keeps its own target; making the audio playhead the clock is [A/V
-clock](/quest/m1/av-clock.md).
+Video keeps its own target; the shared clock stays on local time, and
+[Watch](/quest/m1/audio-jitter-target/watch.md) converges the audio ring on it.
 
 ## Plan
 

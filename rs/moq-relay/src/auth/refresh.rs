@@ -1360,6 +1360,7 @@ mod tests {
 		request.tls = Some(moq_auth::Peer {
 			name: "edge".into(),
 			fingerprint: "ab".repeat(32),
+			chain: vec!["ab".repeat(32)],
 			expires: None,
 			issuer: "test".into(),
 		});

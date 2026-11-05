@@ -30,7 +30,3 @@ then 0.8 line of its own.
   release produces the C archive the samples are checked against.
 
 Public API: moq-c gains each m1 binding feature. Wire: none.
-
-## Required
-
-- [API gaps](/quest/m1/c/api-gaps.md) - disabling pre-encoded simulcast rungs after the shared importer support lands
