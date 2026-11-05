@@ -299,23 +299,6 @@ impl Connection {
 		Poll::Ready(Ok((send::Stream::new(conn.clone(), id), recv::Stream::new(conn, id))))
 	}
 
-	/// Open a request stream using only the credit already granted by the peer.
-	#[cfg(feature = "net")]
-	pub(crate) fn open_request(&self) -> Result<Option<(send::Stream, recv::Stream)>, Error> {
-		let mut state = self.0.state.lock();
-		if let Some(err) = state.error() {
-			return Err(err);
-		}
-		let Some(id) = state.inner.streams().open(Dir::Bi, Default::default()) else {
-			return Ok(None);
-		};
-		drop(state);
-		Ok(Some((
-			send::Stream::new(self.0.clone(), id),
-			recv::Stream::new(self.0.clone(), id),
-		)))
-	}
-
 	/// The next incoming unidirectional stream.
 	///
 	/// # Cancel safety
@@ -491,6 +474,18 @@ impl Connection {
 	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
 		let state = self.0.state.lock();
 		moq_net::transport::ReceiveWindow::new(state.inner.receive_window(), state.inner.stream_receive_window())
+	}
+
+	/// The peer's stream credit in `dir`, as this connection last heard it.
+	#[cfg(feature = "net")]
+	pub(crate) fn stream_credit(&self, dir: moq_net::transport::Dir) -> moq_net::transport::StreamCredit {
+		let dir = match dir {
+			moq_net::transport::Dir::Uni => Dir::Uni,
+			moq_net::transport::Dir::Bi => Dir::Bi,
+		};
+		let mut state = self.0.state.lock();
+		let streams = state.inner.streams();
+		moq_net::transport::StreamCredit::new(streams.credit(dir), streams.blocked(dir))
 	}
 
 	/// How many send streams the connection still holds state for

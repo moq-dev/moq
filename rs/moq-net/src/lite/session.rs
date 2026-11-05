@@ -570,6 +570,7 @@ impl Present {
 				handle: self.handle.clone(),
 				violation: self.violation.clone(),
 				id,
+				open: Default::default(),
 				state: PresentState::Open { token, answered: false },
 			});
 		}
@@ -592,6 +593,8 @@ struct PresentToken {
 	handle: crate::auth::Link,
 	violation: kio::Shared<Option<Error>>,
 	id: u64,
+	/// Its place in line for the peer's stream credit while a request stream opens.
+	open: crate::transport::open::Open,
 	state: PresentState,
 }
 
@@ -675,10 +678,11 @@ impl PresentToken {
 					}
 					let token = token.clone();
 					let answered = *answered;
-					let mut stream = match ready!(Stream::poll_open_request(&self.session, self.version, waiter)) {
-						Ok(stream) => stream,
-						Err(err) => return Poll::Ready(err),
-					};
+					let mut stream =
+						match ready!(Stream::poll_open(&self.session, &mut self.open, self.version, waiter)) {
+							Ok(stream) => stream,
+							Err(err) => return Poll::Ready(err),
+						};
 					stream = stream.with_stats(&self.stats);
 					let res = stream
 						.writer
@@ -787,6 +791,7 @@ struct SendSetup {
 	version: Version,
 	session: Transport,
 	setup: Box<Setup>,
+	open: crate::transport::open::Open,
 	state: SendSetupState,
 }
 
@@ -798,6 +803,7 @@ impl SendSetup {
 			version,
 			session,
 			setup: Box::new(setup),
+			open: Default::default(),
 			state: SendSetupState::Start,
 		}
 	}
@@ -812,7 +818,7 @@ impl SendSetup {
 
 	fn poll_send(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		// Waiting for stream credit on our own session handle.
-		let stream = wait!(Open => self.session.poll_open_uni(waiter, Default::default()))
+		let stream = wait!(Open => self.session.poll_open_uni(&mut self.open, waiter, Default::default()))
 			.map_err(crate::lite::error::from_transport)?;
 		let mut writer: Writer<crate::transport::boxed::SendStream, Version> =
 			Writer::new(stream, self.version).with_stats(&self.stats);
@@ -835,6 +841,7 @@ struct SendGoaway {
 	/// Opening a stream and watching the session close each need their own handle.
 	closed: Transport,
 	session: Transport,
+	open: crate::transport::open::Open,
 	state: SendGoawayState,
 }
 
@@ -852,6 +859,7 @@ impl SendGoaway {
 			goaway,
 			closed: session.clone(),
 			session,
+			open: Default::default(),
 			state: SendGoawayState::Start,
 		}
 	}
@@ -869,7 +877,7 @@ impl SendGoaway {
 		if !self.version.has_goaway() {
 			return Poll::Ready(());
 		}
-		let mut stream: Stream<Transport, Version> = match wait!(Open => Stream::poll_open(&self.session, self.version, waiter))
+		let mut stream: Stream<Transport, Version> = match wait!(Open => Stream::poll_open(&self.session, &mut self.open, self.version, waiter))
 		{
 			Ok(stream) => stream,
 			Err(err) => {
@@ -1443,8 +1451,7 @@ mod tests {
 		}
 	}
 
-	// GOAWAY is not a request: refusing it without credit would leave the peer
-	// unaware that we are draining.
+	// Refusing GOAWAY without credit would leave the peer unaware that we are draining.
 	#[kio::test]
 	async fn goaway_waits_for_stream_credit() {
 		let transport = ScriptedSession::new(Vec::new()).without_credit();
@@ -1455,7 +1462,8 @@ mod tests {
 		assert_eq!(log.bi_opens(), 0, "GOAWAY waits for stream credit");
 		transport.grant_credit();
 		let _ = server.driver.poll(&kio::Waiter::noop());
-		assert_eq!(log.bi_opens(), 1, "GOAWAY stream was not opened");
+		// The GOAWAY and the announce interest that waited beside it.
+		assert_eq!(log.bi_opens(), 2, "GOAWAY stream was not opened");
 		assert!(log.closes().is_empty());
 	}
 

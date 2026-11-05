@@ -2504,13 +2504,6 @@ mod tests {
 				moq_net::transport::poll::Buffered::new(ScriptedRecv { data: None }),
 			)))
 		}
-		fn poll_open_request(
-			&self,
-			waiter: &kio::Waiter,
-			options: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
-		) -> std::task::Poll<Result<Option<moq_net::transport::poll::BiStreams<Self>>, ScriptedError>> {
-			self.poll_open_bi(waiter, options).map_ok(Some)
-		}
 		fn send_group(&self, _: i64) -> Option<moq_net::transport::poll::Ungrouped> {
 			None
 		}
