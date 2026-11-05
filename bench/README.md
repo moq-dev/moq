@@ -412,7 +412,8 @@ nix develop --command just bench-fanout "cdff3c8f95 21d6da9fc1"
 nix develop --command just bench-fanout "" "model" "1 512"
 ```
 
-Two scenarios run every subscriber count on one thread:
+Each scenario runs every subscriber count on one thread. `model` and `session`
+run by default:
 
 - `model`: one finished group a cycle through the track model, which every
   subscriber takes before parking again, as moq-net's `track_fanout_group`
@@ -423,6 +424,9 @@ Two scenarios run every subscriber count on one thread:
   runtime. It counts the publisher, relay, and viewer sessions together, but no
   QUIC: in-tree qmux, receive leases, and crypto only show in relay counts. A
   revision whose session API predates this harness reports it unsupported.
+- `group`, on request: every subscriber drains one finished 512-frame group in
+  batches, as moq-net's `group_relay_frames/plain/512/*` bench does, so that
+  bench's cost is counted without its wall-clock noise.
 
 Each `bench/fanout/<scenario>` crate builds against each base's and the current
 tree's own crates and lock, `BENCH_BUILD_JOBS` at a time, into

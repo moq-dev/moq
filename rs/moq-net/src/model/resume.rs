@@ -1752,6 +1752,11 @@ impl Reader {
 		for run in covered {
 			self.drops.remove(run);
 		}
+		// The common case: nothing to report, and the serving copy's own poll above wakes
+		// this for the next run it gives up, so no copy needs judging.
+		if self.drops.is_empty() {
+			return Poll::Pending;
+		}
 		// Judged as the group path judges it, so a copy kept only for a group still read
 		// holds nothing back, and letting one go wakes this too.
 		self.let_go(delivered, waiter);
@@ -6827,7 +6832,6 @@ mod test {
 						assert!(sub.recv_group().now_or_never().is_none());
 						assert!(a.subscription().is_none());
 					}
-					wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
 					sub.control()
 						.update(
 							Subscription::default()
@@ -6835,9 +6839,13 @@ mod test {
 								.with_delay(Delay::default().with_max(Duration::from_secs(if widen { 10 } else { 2 }))),
 						)
 						.unwrap();
-					assert!(
-						wake.0.load(std::sync::atomic::Ordering::Relaxed),
-						"recovered={recovered}, widen={widen}, chunked={chunked}: preference update did not wake the held read"
+					// The update reaches the copy being read at once. Nothing landed above the
+					// held group, so no budget can convict it yet: the read need not wake until
+					// a group lands, and judges the new budget then.
+					assert_eq!(
+						source.subscription().unwrap().priority,
+						7,
+						"recovered={recovered}, widen={widen}, chunked={chunked}: preference update did not reach the copy"
 					);
 					for sequence in 1..=4 {
 						let mut next = source.create_group(group::Info { sequence }).unwrap();

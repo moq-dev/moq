@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `group::Consumer::poll_next_frame` is crate-private ([#7874](https://github.com/moq-dev/moq/pull/7874))
+
+Read a frame in chunks with the async `group::Consumer::next_frame`, or read whole frames with `poll_read_frame` from a poll loop.
+
 ### Opens wait their turn for stream credit ([#7894](https://github.com/moq-dev/moq/pull/7894))
 
 A request no longer fails with `Error::NoStreamCredit` when the peer grants no more streams: every stream a session opens waits for credit, and returning credit goes to the open whose stream the transport would send first. The variant is removed; drop any arm matching it.

@@ -1,0 +1,18 @@
+# Built by `bench/run.sh --fanout` against each revision's moq-net, outside the workspace,
+# so a historical checkout measures the same scenario. Its own lock is that revision's.
+[package]
+name = "fanout-group"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+futures = "0.3"
+moq-net = { path = "../../../rs/moq-net", features = ["fuzz"] }
+
+[profile.release]
+codegen-units = 1
+debug = "line-tables-only"
+lto = "fat"

@@ -5934,11 +5934,12 @@ impl group::Expiry for FetchExpiry {
 		self.reading.release();
 	}
 
-	fn is_expired(&self, max_delay: Option<Duration>, waiter: &kio::Waiter) -> bool {
+	fn is_expired(&self, recover: Option<&super::resume::Recover>, waiter: &kio::Waiter) -> bool {
 		// Parked first, so a group landing above while this judges wakes it.
 		if !self.cache.wakes().watch_landing(self.sequence, waiter) {
 			return false;
 		}
+		let max_delay = recover.and_then(|recover| recover.poll_budget(waiter));
 		let state = self.state.read();
 		let budget = match (self.max_delay, max_delay) {
 			(Some(fetch), Some(route)) => fetch.min(route),
@@ -5978,14 +5979,16 @@ impl group::Expiry for GroupExpiry {
 	}
 
 	/// A group nothing ever landed above has no successor, so neither clock can convict it:
-	/// that verdict, the common one at the live edge, takes neither the track's lock nor the
-	/// subscription's. Nothing it skips parking on can move it until a group lands above,
-	/// which wakes the read.
-	fn is_expired(&self, max_delay: Option<Duration>, waiter: &kio::Waiter) -> bool {
+	/// that verdict, the common one at the live edge, takes neither the track's lock, the
+	/// subscription's, nor a logical reader's. Nothing it skips parking on can move it until
+	/// a group lands above, which wakes the read; a reader's preferences reach its copies
+	/// without this poll, since every update mirrors them at once.
+	fn is_expired(&self, recover: Option<&super::resume::Recover>, waiter: &kio::Waiter) -> bool {
 		// Parked first, so a group landing above while this judges wakes it.
 		if !self.cache.wakes().watch_landing(self.sequence, waiter) {
 			return false;
 		}
+		let max_delay = recover.and_then(|recover| recover.poll_budget(waiter));
 		let max_delay = max_delay.unwrap_or_else(|| {
 			let mut max_delay = Duration::default();
 			let _ = self.subscription.poll(waiter, |subscription| {

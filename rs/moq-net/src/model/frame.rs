@@ -1657,8 +1657,7 @@ impl Consumer {
 		let Some(expiry) = &self.expiry else {
 			return false;
 		};
-		let budget = self.recover.as_ref().and_then(|recover| recover.0.poll_budget(waiter));
-		if !expiry.policy.is_expired(budget, waiter) {
+		if !expiry.policy.is_expired(self.recover.as_ref().map(|recover| &recover.0), waiter) {
 			return false;
 		}
 

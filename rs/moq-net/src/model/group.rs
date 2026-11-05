@@ -3385,8 +3385,9 @@ pub(super) trait Expiry: Send + Sync + std::panic::UnwindSafe + std::panic::RefU
 
 	/// Return whether the group is stale, registering `waiter` for anything that
 	/// could change the answer while the group remains live.
-	/// A logical reader supplies its current budget after the original copy is gone.
-	fn is_expired(&self, max_delay: Option<std::time::Duration>, waiter: &kio::Waiter) -> bool;
+	/// A logical reader's `recover` supplies its current budget after the original copy is
+	/// gone, asked only once a verdict needs it.
+	fn is_expired(&self, recover: Option<&super::resume::Recover>, waiter: &kio::Waiter) -> bool;
 
 	/// Keep the reader's budget and cap while following a replacement track's edge.
 	fn for_track(&self, track: &track::Consumer) -> Arc<dyn Expiry>;
@@ -3700,10 +3701,11 @@ impl Consumer {
 	fn poll_expiry(&mut self, waiter: &kio::Waiter, held: bool) -> bool {
 		if !self.expired
 			&& (held || self.expiry_pending())
-			&& self.expiry.as_ref().is_some_and(|expiry| {
-				let budget = self.recover.as_ref().and_then(|recover| recover.poll_budget(waiter));
-				expiry.is_expired(budget, waiter)
-			}) {
+			&& self
+				.expiry
+				.as_ref()
+				.is_some_and(|expiry| expiry.is_expired(self.recover.as_deref(), waiter))
+		{
 			self.expired = true;
 			// Another read, such as `poll_expired`, may judge a frame read parked before it.
 			Idle::disarm(&mut self.idle);
@@ -3813,7 +3815,7 @@ impl Consumer {
 	///
 	/// Returns None if the group is finished and the index is out of range, or the cursor
 	/// passed the [`Self::with_range`] cap.
-	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
+	pub(crate) fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
 		let res = match self.recover.is_none() {
 			true => {
 				let res = self.poll_next_frame_once(waiter);
@@ -6676,7 +6678,7 @@ mod test {
 	}
 
 	impl Expiry for Switch {
-		fn is_expired(&self, _: Option<std::time::Duration>, waiter: &kio::Waiter) -> bool {
+		fn is_expired(&self, _: Option<&crate::model::resume::Recover>, waiter: &kio::Waiter) -> bool {
 			waiter.register(&mut self.0.1.lock().unwrap());
 			self.0.0.load(Ordering::Relaxed)
 		}

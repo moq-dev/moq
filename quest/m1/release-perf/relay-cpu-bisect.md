@@ -14,17 +14,15 @@ Found by [moq-dev/moq#7505](https://github.com/moq-dev/moq/pull/7505). Decided 2
 - In-tree qmux ([moq-dev/moq#6231](https://github.com/moq-dev/moq/pull/6231)) and receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)) cost nothing measurable on the relay. The step between them is public ingest ([moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111)): +10.5k per frame on chat over io\_uring, in each viewer's frame read.
 - `main` against the old endpoint, on the quiet test host: chat 1.28x on io\_uring and 1.10x on the tokio workers, video 1.12x and 0.89x.
 
-What remains is the decision below on public ingest's relay cost, and the `group_relay_frames` item below. The epic accepted public ingest on 2026-11-03 at its model cost (+200 per group), which never reads a frame.
+What remains is public ingest's relay cost and the `group_relay_frames` item below. The epic accepted public ingest on 2026-11-03 at its model cost (+200 per group), which never reads a frame.
+
+Decided 2026-11-05 (maintainer, /quest-unblock): keep cutting public ingest's relay cost ([moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111), +10.5k of `main`'s +30.8k per frame on chat over io\_uring). Count `main`'s per-viewer read with `just bench-fanout` session and callgrind, fix what a live read pays for nothing, and record the rest in the epic. The listed lead is `Consumer::poll_expiry` calling `Recover::poll_budget` before `is_expired`; skipping it needs the mirrored-preference sync proven redundant. Not chosen: accepting the cost, or handing it to the [performance audit](/quest/m2/audit-perf.md). Also remove, or make crate-private, any public API on the relay read paths this work touches that no consumer outside its own crate uses.
 
 Measure as the report does. For a model or session change, `just bench-fanout` against the base, which host load doesn't move; the session scenario reads every frame, so it reaches public ingest's read path. For the relay, `BENCH_GENERATOR=21d6da9fc1`, `BENCH_INSTRUCTION_PERIOD=2000003`, `kernel.perf_event_max_sample_rate` raised to 100,000 and restored after, on a quiet host such as `nixos2` (relay on CPUs 0-3, generator on 4,5,10,11, `BENCH_BUILD_JOBS=2`), comparing only cells from one run.
 
 Added 2026-11-04 (maintainer) from [fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664)'s comparison on a loaded host: `main` at `f37d964` reads `group_relay_frames` about 15% slower than `e7a5c10`. Pacing ([moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388)) explains about 4% of that, and [its own quest](/quest/m1/release-perf/pacing-report.md) trims it; attribute the remaining ~10% here, on a quiet host.
 
 Public API: none expected. Wire: none.
-
-## Waiting
-
-- Maintainer: decide public ingest's relay cost ([moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111), +10.5k of `main`'s +30.8k per frame on chat over io\_uring). Each viewer's read now reaches a group before its first frame and blocks on it, running the expiry checks a blocked read runs, and the forward-drop, receive, and staleness paths poll the track state more. Options: (1, recommended) keep this quest open to cut it, counting `main`'s per-viewer read with `just bench-fanout` session and callgrind, fixing what a live read pays for nothing, and recording the rest in the epic; (2) accept it as the price of readers reaching a group before its first frame, record it in the epic, and delete this quest; (3) hand it to the [performance audit](/quest/m2/audit-perf.md). Whether a feature's cost is worth more work is the maintainer's call, so no agent can take it. Done when this item is replaced by the pick.
 
 ## Related
 

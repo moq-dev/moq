@@ -142,8 +142,8 @@ case $MODE in
         FANOUT_SCENARIOS=${BENCH_FANOUT_SCENARIOS:-model session}
         FANOUT_SUBSCRIBERS=${BENCH_FANOUT_SUBSCRIBERS:-1 64 512}
         for value in $FANOUT_SCENARIOS; do
-            if [[ ! $value =~ ^(model|session)$ ]]; then
-                printf 'unknown fan-out scenario %q; expected model or session\n' "$value" >&2
+            if [[ ! $value =~ ^(model|session|group)$ ]]; then
+                printf 'unknown fan-out scenario %q; expected model, session, or group\n' "$value" >&2
                 exit 1
             fi
         done

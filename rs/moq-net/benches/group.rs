@@ -779,14 +779,14 @@ fn streaming(b: &mut criterion::Bencher, chunk: &Bytes, arrivals: usize, threads
 					loop {
 						let reading = match frame {
 							Some(frame) => frame,
-							None => match group.poll_next_frame(&waiter) {
-								Poll::Ready(Ok(Some(next))) => frame.insert(next),
-								Poll::Ready(Ok(None)) => {
+							None => match group.next_frame().now_or_never() {
+								Some(Ok(Some(next))) => frame.insert(next),
+								Some(Ok(None)) => {
 									*group = next.lock().unwrap().clone();
 									continue;
 								}
-								Poll::Ready(Err(err)) => panic!("next frame failed: {err}"),
-								Poll::Pending => break,
+								Some(Err(err)) => panic!("next frame failed: {err}"),
+								None => break,
 							},
 						};
 						match reading.poll_read_chunk(&waiter) {
