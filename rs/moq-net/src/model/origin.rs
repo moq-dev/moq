@@ -4219,8 +4219,16 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 				let closing = sources.get(&source).is_some_and(|s| s.is_closing());
 				let Some(io) = tracks.get_mut(&name) else { continue };
 				let Some(asked) = io.query.take() else { continue };
-				// Known metadata still resolves after an abort: the copy's readers drain
-				// its finished history before reporting the outcome, as local readers do.
+				// An aborted copy with history still splices, so its readers drain that
+				// history before the outcome, as local readers do. One that delivered
+				// nothing is a refusal, which leaves a draining incumbent serving.
+				let result = match result {
+					Ok(info) => match asked.copy.poll_complete(&kio::Waiter::noop()) {
+						Poll::Ready(Err(err)) if asked.copy.latest_sequence().is_none() => Err(err),
+						_ => Ok(info),
+					},
+					Err(err) => Err(err),
+				};
 				// Staged only while the track has a reader: without one the machine
 				// will not splice, and a held copy would keep the source subscribed.
 				if let Ok(info) = &result
@@ -13636,6 +13644,42 @@ mod tests {
 			.await
 			.expect("the draining source stays subscribed with nobody reading")
 			.expect("open");
+	}
+
+	/// The newcomer answers "video" with matching metadata but aborts before delivering a
+	/// group, all before the front polls the answer: that is a refusal, so the incumbent
+	/// keeps serving rather than the track ending on the newcomer's error.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_replacement_aborted_without_history_keeps_the_incumbent() {
+		let (producer, _server, _upstream, old, mut subscription) = remote_front().await;
+
+		let newcomer = producer.create_broadcast("room/alice").unwrap();
+		let mut handler = newcomer.requests();
+		newcomer
+			.announce(Route::default().with_instance(instance(), 0))
+			.unwrap();
+		let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
+			.await
+			.expect("the front asked the newcomer")
+			.expect("request");
+		request.accept(crate::track::Info::timed()).abort(Error::App(7)).unwrap();
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+
+		let mut group = old.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"still".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut group = next_group(&mut subscription)
+			.await
+			.expect("the incumbent keeps serving")
+			.expect("track open");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"still");
+
+		// The incumbent's clean end is the track's, not the newcomer's error.
+		old.finish().unwrap();
+		assert!(matches!(next_group(&mut subscription).await, Ok(None)));
 	}
 
 	/// The newcomer refuses "video", so the track drains the incumbent. The reader leaves

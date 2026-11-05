@@ -534,8 +534,7 @@ lone=
 next=0
 failed=()
 failed_status=0
-# A cancelled lane can make wait return its status; the report must still run.
-trap 'cancel; wait || true; report; rm -rf "$logs" "$changed" "$js_changed"' EXIT
+trap 'cancel; wait; report; rm -rf "$logs" "$changed" "$js_changed"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
