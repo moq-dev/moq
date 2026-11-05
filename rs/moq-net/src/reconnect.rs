@@ -531,6 +531,9 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		if let Some((tokens, _)) = &self.tokens {
 			tokens.connected(&session);
 		}
+		// A predecessor that retired mid-dial queued an offline this session now contradicts.
+		// Its `Retired` stays, so the caller still drops the predecessor.
+		self.queue.retain(|action| !matches!(action, Action::Offline(_)));
 		self.walk = Walk::default();
 		self.phase = Phase::Live(Box::new(Live {
 			goaway: Some(session.draining()),

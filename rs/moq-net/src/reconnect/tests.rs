@@ -617,6 +617,40 @@ async fn the_handover_takes_the_earlier_deadline() {
 	);
 }
 
+/// A replacement that connects after the predecessor retired mid-dial serves, so the
+/// offline the retirement queued no longer holds and is never reported.
+#[kio::test]
+async fn a_connect_cancels_the_offline_a_retirement_queued() {
+	const HANDOVER: Duration = Duration::from_millis(500);
+	let peer = url("tcp://peer:1/");
+	let mut config = Config::default();
+	config.goaway.handover = HANDOVER;
+	let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
+	let mut run = Run::default();
+	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
+
+	kio::clock::sleep(Duration::from_secs(2)).await;
+	run.servers[0].drain().send(goaway::Goaway::new()).unwrap();
+	assert!(matches!(next(&mut machine).await, Action::Migrating));
+	assert!(matches!(next(&mut machine).await, Action::Dial(_)));
+	// The dial outlasts the handover, so the predecessor retires with nothing serving.
+	assert!(matches!(next(&mut machine).await, Action::Retired));
+
+	let (client, _server) = handshake().await;
+	machine.connected(kio::clock::now(), client);
+	assert!(
+		matches!(
+			machine.poll(kio::clock::now(), &kio::Waiter::noop()),
+			Action::Wait(None)
+		),
+		"a stale offline followed the connect"
+	);
+	assert!(machine.session().is_some());
+}
+
 /// Under [`Restart::Wait`] an empty-URI GOAWAY changes nothing while the peer keeps the
 /// session: no migration and no redial. Its close then reconnects like any drop.
 #[kio::test]
