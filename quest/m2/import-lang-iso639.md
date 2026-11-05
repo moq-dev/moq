@@ -2,7 +2,8 @@
 
 ## Goal
 
-`moq import` of fMP4 and TS sources sets audio and text `lang` to a BCP-47
+`moq import` of fMP4 and TS sources sets `lang` (fMP4 audio and text, TS
+audio; TS imports publish no text renditions) to a BCP-47
 tag that browsers' `navigator.languages` can match: the ISO 639-1 code where
 one exists (`en`, not `eng`), else the three-letter code. `und` and absent
 codes leave `lang` unset.
@@ -31,8 +32,8 @@ Decided 2026-11-05 (maintainer):
   publishing codes raw and matching 639-2 in every player.
 
 Public API: none. Wire: fMP4 text `lang` changes from `eng` to `en` and
-from `und` to unset; fMP4 audio and TS audio and text `lang` become set
-where they were unset.
+from `und` to unset; fMP4 audio and TS audio `lang` become set where they
+were unset.
 
 ## Required
 
