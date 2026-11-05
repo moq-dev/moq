@@ -27,16 +27,30 @@ records):
   - Refusals, ends, and the client address. Rejected: personal data on a
     track any label reader sees.
 
-- The records are a track in the existing stats layout, one per label like
-  the per-label totals, documented in `doc/concept/stats.md`. Pick its codec
-  from moq-json's producers (stream or window) and say why in the PR.
+- The records are a per-label track beside `<label>/presence.json`, named by a
+  helper next to `presence_track` in `rs/moq-stats` and produced and consumed
+  there, documented in `doc/concept/stats.md`. Every stats track today is a
+  compressed `moq_json::snapshot`, which suits state rather than a log of
+  events: pick `stream` or `window`, say in the PR why it departs from
+  `snapshot`, and update the doc's Encoding section, which says every stats
+  track is a snapshot.
 - Bounded by design. A peer can cause unlimited refusals, so records past a
   per-label rate are not published one by one: the track publishes a summary
   (count per kind over the interval) instead, and the cumulative counters stay
   exact. Measure the bytes a refusal flood costs with and without the bound.
-- The same records reach embedders through the outcome API that refusals
-  already go through (`Handle::refuse`), so a gateway's refusals appear the
-  same way as native ones.
+- Refusal records go through `moq_net::stats::Handle::refuse`, so a gateway's
+  refusals appear the same way as native ones. It takes only `(label, reason)`
+  today, and the relay's `Refusals::record`/`record_auth`
+  (`rs/moq-relay/src/refusals.rs`) keep only `(tier, root)`, so the record's
+  path and transport have no way in. Make the breaking change: `refuse` takes
+  one struct carrying the label, kind, requested path, and transport, and the
+  relay passes them from the `moq_auth::Request` it holds at every refusal
+  site. A field is optional only where a real caller lacks it.
+- Abnormal-end records are emitted in `moq-net` where `sessions_failed` is
+  bumped today (`SessionInner::drop`, with the kind `Session::end` set), not
+  through `refuse`. The stats session therefore learns its path, transport,
+  and start time when created, so `Handle::session` takes them too (the same
+  breaking change; the relay knows `request.transport()` at admission).
 - Rust and JS readers parse the track.
 
 Tests: a refused session and an abnormal end each produce exactly one record
