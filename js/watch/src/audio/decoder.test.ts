@@ -1351,7 +1351,7 @@ it("keeps audio's opening buffered while an enabled video track fills", async ()
 	const installed = clock.install();
 	const playback = await play(Milli(100), true);
 	const video = new Signal<{ start: Milli; end: Milli } | null>(null);
-	const remove = playback.sync.register(new Signal(Milli(100)), video);
+	const remove = playback.sync.track({ target: new Signal(Milli(100)), startup: video });
 	try {
 		await playback.play(8);
 		await clock.advance(Nano.zero);
@@ -1366,7 +1366,7 @@ it("keeps audio's opening buffered while an enabled video track fills", async ()
 		expect(ring.read([new Float32Array(960), new Float32Array(960)])).toBe(960);
 		expect(ring.ring?.timestamp).toBe(Micro((opening ?? 0) + 20_000));
 	} finally {
-		remove();
+		remove.close();
 		playback.close();
 		await microtasks();
 		installed.close();
@@ -1378,7 +1378,7 @@ it("starts above the decoded audio floor without expanding PCM storage", async (
 	const installed = clock.install();
 	const playback = await play(Milli(1000), true);
 	const video = new Signal<{ start: Milli; end: Milli } | null>(null);
-	const remove = playback.sync.register(new Signal(Milli(1000)), video);
+	const remove = playback.sync.track({ target: new Signal(Milli(1000)), startup: video });
 	try {
 		await playback.play(80);
 		await clock.advance(Nano.zero);
@@ -1395,7 +1395,7 @@ it("starts above the decoded audio floor without expanding PCM storage", async (
 		expect(ring.read([new Float32Array(960), new Float32Array(960)])).toBe(960);
 		expect(ring.ring?.timestamp).toBe(Micro((opening ?? 0) + 20_000));
 	} finally {
-		remove();
+		remove.close();
 		playback.close();
 		await microtasks();
 		installed.close();
@@ -1446,6 +1446,7 @@ for (const cmaf of [false, true]) {
 		const installed = clock.install();
 		const playback = await play(Milli(100), true, cmaf);
 		const reset = spyOn(playback.sync, "reset");
+		const video = playback.sync.track({ target: new Signal<Milli | undefined>(undefined) });
 		const prime = spyOn(AudioDecoder.prototype, "reset");
 		try {
 			await playback.play(7);
@@ -1457,7 +1458,7 @@ for (const cmaf of [false, true]) {
 			const held = ring.length;
 			const reference = playback.sync.out.reference.peek();
 			const resets = playback.resets();
-			const parked = playback.sync.wait(Milli(1000));
+			const parked = video.wait(Milli(1000));
 			expect(held).toBeGreaterThan(0);
 			playback.push({ kind: "gap", timestamp: Micro(160_000), duration: Micro(20_000) });
 			await microtasks();
@@ -1487,7 +1488,7 @@ it.each([100, 1000])(
 	async (delay) => {
 		const playback = await play(Milli(delay), true);
 		const video = new Signal<{ start: Milli; end: Milli } | null>(null);
-		const remove = playback.sync.register(new Signal(Milli(delay)), video);
+		const remove = playback.sync.track({ target: new Signal(Milli(delay)), startup: video });
 		const disconnect = spyOn(FakeWorklet.prototype, "disconnect");
 		const closeTrack = spyOn(Moq.Track.Subscriber.prototype, "close");
 		try {
@@ -1506,7 +1507,7 @@ it.each([100, 1000])(
 			await microtasks();
 			expect(playback.inserted()).toHaveLength(decoded);
 		} finally {
-			remove();
+			remove.close();
 			playback.close();
 			await microtasks();
 			disconnect.mockRestore();
@@ -1517,7 +1518,10 @@ it.each([100, 1000])(
 
 it("a rejected audio support probe does not leave buffered video waiting on a pending track", async () => {
 	const sync = new Sync({ delay: Milli(100), buffer: Milli(1000) });
-	const remove = sync.register(new Signal(Milli(100)), new Signal({ start: Milli(0), end: Milli(100) }));
+	const remove = sync.track({
+		target: new Signal(Milli(100)),
+		startup: new Signal({ start: Milli(0), end: Milli(100) }),
+	});
 	let reject!: (error: Error) => void;
 	const failure = new Error("audio support probe failed");
 	const logged = spyOn(console, "warn").mockImplementation(() => {});
@@ -1547,7 +1551,7 @@ it("a rejected audio support probe does not leave buffered video waiting on a pe
 	const decoder = new Decoder({ source, sync });
 	try {
 		await microtasks();
-		sync.received(Milli(0));
+		remove.received(Milli(0));
 		await microtasks();
 		expect(sync.playing.peek()).toBe(false);
 		reject(failure);
@@ -1559,7 +1563,7 @@ it("a rejected audio support probe does not leave buffered video waiting on a pe
 	} finally {
 		decoder.close();
 		source.close();
-		remove();
+		remove.close();
 		sync.close();
 		logged.mockRestore();
 	}
@@ -1570,7 +1574,7 @@ it.each([false, true])("releases shared startup across a hole in queued audio (C
 	const installed = clock.install();
 	const playback = await play(Milli(1500), true, cmaf);
 	const video = new Signal<{ start: Milli; end: Milli } | null>({ start: Milli(20), end: Milli(1520) });
-	const remove = playback.sync.register(new Signal(Milli(1500)), video);
+	const remove = playback.sync.track({ target: new Signal(Milli(1500)), startup: video });
 	try {
 		await playback.play(25);
 		// The audio after the hole counts, the hole itself does not.
@@ -1596,7 +1600,7 @@ it.each([false, true])("releases shared startup across a hole in queued audio (C
 		expect(playback.sync.playing.peek()).toBe(true);
 		expect(ring.read([new Float32Array(960), new Float32Array(960)])).toBe(960);
 	} finally {
-		remove();
+		remove.close();
 		playback.close();
 		await microtasks();
 		installed.close();

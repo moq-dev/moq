@@ -2516,6 +2516,7 @@ mod tests {
 		request.tls = Some(moq_auth::Peer {
 			name: "edge0".into(),
 			fingerprint: "ab".repeat(32),
+			chain: vec!["ab".repeat(32)],
 			expires: None,
 			issuer: "CN=cluster".into(),
 		});
@@ -4082,9 +4083,7 @@ mod tests {
 			.expect("accept")
 			.await
 			.expect("handshake");
-		cluster
-			.critical
-			.spawn("injected", async { panic!("injected critical failure") });
+		cluster.critical.fail(anyhow::anyhow!("injected critical failure"));
 		let result = kio::clock::timeout(TIMEOUT, running)
 			.await
 			.expect("run returns on a critical failure")

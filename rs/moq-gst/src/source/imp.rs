@@ -179,9 +179,8 @@ impl SessionController {
 
 	/// Stop the session, returning once its readers have removed their pads and the connection closed.
 	///
-	/// A dial still running once the element reached NULL can outlive `main` (`gst-launch` exits right
-	/// after), and aws-lc aborts the process when a thread asks it for randomness after its exit
-	/// destructors ran.
+	/// A dial still running once the element reached NULL would outlive the state change an application
+	/// waits on before it exits (`gst-launch` exits right after).
 	fn stop(self, element: &super::MoqSrc) {
 		let _ = self.shutdown.send(true);
 
@@ -3764,8 +3763,8 @@ mod session_tests {
 		}
 	}
 
-	// A dial still running once the element reached NULL can outlive `main`, and aws-lc aborts the
-	// process when a thread asks it for randomness after its exit destructors ran.
+	// A dial still running once the element reached NULL would outlive the state change an application
+	// waits on before it exits.
 	#[test]
 	fn stop_returns_after_the_connection_closes() {
 		let element = element();
