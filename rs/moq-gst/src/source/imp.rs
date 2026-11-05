@@ -1175,10 +1175,7 @@ fn reconcile(
 			STREAMING.scope(playback.session.element.clone(), follower_task),
 			RUNTIME.handle(),
 		);
-		followers.insert(
-			path,
-			Followed { plan: plan_tx, empty },
-		);
+		followers.insert(path, Followed { plan: plan_tx, empty });
 	}
 }
 
@@ -5052,7 +5049,10 @@ mod session_tests {
 
 		let seen = recorder.seen();
 		assert_eq!(recorder.count(|seen| matches!(seen, Seen::Pad(_))), 2, "{seen:?}");
-		assert!(!seen.contains(&Seen::Start(pad)), "the ended pad started again: {seen:?}");
+		assert!(
+			!seen.contains(&Seen::Start(pad)),
+			"the ended pad started again: {seen:?}"
+		);
 	}
 
 	/// A publisher that stops ends its media, a beat later its catalog, then its announcement.
