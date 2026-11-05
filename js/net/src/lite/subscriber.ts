@@ -2455,8 +2455,9 @@ export class Subscriber {
 			});
 
 			producer.finish();
-			// Only a group that arrived whole, not one a drop or the track ended meanwhile.
-			if (producer.closed.peek() === null) tail.finish(group.sequence);
+			// Only a group that arrived whole, not one a drop or the track ended meanwhile, and only
+			// where a lite-07 stale drop asks for it.
+			if (hasSkip(this.version) && producer.closed.peek() === null) tail.finish(group.sequence);
 			stream.stop(StreamCode.Cancel);
 		} catch (err: unknown) {
 			// A violation ends the session, which the connection does once it escapes; anything

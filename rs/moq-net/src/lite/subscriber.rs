@@ -1490,7 +1490,8 @@ impl GroupRecv {
 
 		let res = match res {
 			Ok(()) => {
-				if group.finish().is_ok() {
+				// Only a lite-07 stale drop asks which groups arrived whole.
+				if group.finish().is_ok() && self.subscriber.version.has_skip() {
 					reading.finish();
 				}
 				Ok(())
