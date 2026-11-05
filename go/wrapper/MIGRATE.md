@@ -16,6 +16,10 @@ Replace stream-track `AppendDatagram` / `InsertDatagram` / `RecvDatagram` with `
 
 `TrackInfo.MaxAge` is a `time.Duration` instead of a `*time.Duration`, like `Delay.Max`: the zero value, and a nil `*TrackInfo`, now advertise a zero max age, serving only the live edge, instead of no publisher limit. Assign the duration directly, and set the new `MaxAgeUnlimited`, which ignores `MaxAge`, where you relied on nil meaning no limit. A received track's `Info()` sets it when its publisher advertised no limit.
 
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`json.NewSnapshotConsumer(broadcast, name, options)` takes the `*BroadcastConsumer`, the track name, and `SnapshotConsumerOptions` instead of a `*TrackConsumer`, and subscribes to the track itself at a zero `Delay.Max` and the options' `Priority`. Drop the `SubscribeTrack` call; a refused subscription now fails the first read. `Next` skips every group a newer one supersedes, and `Latest` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
+
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
 Viewer ceilings and PROBE target overrides are refused with the new `ErrOutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers.Watch` returns `(*Viewer, error)`, and `Viewers.SetTarget` and `Viewer.Update` return an `error`. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
@@ -195,7 +199,7 @@ Application calls are unchanged.
 ### JSON consumers return `*json.Timed` (#5677)
 
 `SnapshotConsumer.Next`, `StreamConsumer.Next`, and `All` return `*Timed{Value, Timestamp}` instead of the raw message; `Timestamp` is a `*time.Duration`, nil when untimed.
-A snapshot consumer's `Next` now yields every state in order; call `Latest(ctx)` for the newest.
+A snapshot consumer's `Next` now yields each state in order, skipping every group a newer one supersedes (see the zero-delay entry above); call `Latest(ctx)` for the newest.
 Timestamps are rounded down to a whole microsecond.
 
 ### Ranges filter reads (#5929)

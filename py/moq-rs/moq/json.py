@@ -134,13 +134,15 @@ class StreamProducer:
 class SnapshotConsumer(_Stream[Timed]):
     """Async iterator over a JSON snapshot track, yielding each state in order (lossy).
 
-    Each item is a :class:`Timed`. Groups older than the subscription's ``delay.max`` are skipped,
-    so a playhead reader sets that budget to its distance behind live; :meth:`latest` skips to the
-    newest state instead. Usable as an async context manager that cancels on exit.
+    Each item is a :class:`Timed`. Every group a newer one supersedes is skipped; :meth:`latest`
+    skips to the newest state instead. The consumer subscribes to the track ``name`` on
+    ``broadcast`` itself, at a zero ``delay.max`` and ``priority`` (higher first); a read waits for
+    that subscription and raises if it fails. Usable as an async context manager that cancels on
+    exit.
     """
 
-    def __init__(self, track: subscribe.TrackConsumer) -> None:
-        self._inner = MoqJsonSnapshotConsumer(track._inner)
+    def __init__(self, broadcast: subscribe.BroadcastConsumer, name: str, *, priority: int = 0) -> None:
+        self._inner = MoqJsonSnapshotConsumer(broadcast._inner, name, priority)
 
     async def _next(self) -> Timed | None:
         return Timed._from_ffi(await self._inner.next())
