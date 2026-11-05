@@ -16,6 +16,10 @@ Replace stream-track `appendDatagram` / `insertDatagram` / `recvDatagram` with `
 
 A `nil` `TrackInfo.maxAge`, the default, and a `nil` info now advertise a zero max age, serving only the live edge, instead of no publisher limit. Pass `maxAgeUnlimited: true`, which ignores `maxAge`, where you relied on `nil` meaning no limit. A received track's `info()` sets it when its publisher advertised no limit.
 
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`Json.SnapshotConsumer(broadcast:name:priority:)` takes the `BroadcastConsumer` and the track name instead of `track:`, and subscribes to the track itself at a zero `delay.max` and `priority` (default 0). Drop the `subscribeTrack` call; a refused subscription now throws from the first read. Iteration skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
+
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
 Viewer ceilings and PROBE target overrides are refused with the new `MoqError.OutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers.watch(maxBps:)` and `setTarget(targetBps:)` and `Viewer.update(maxBps:)` throw it, so call them with `try`. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
@@ -179,7 +183,7 @@ Application calls are unchanged.
 ### JSON consumers yield `Json.Timed` (#5677)
 
 `Json.SnapshotConsumer` and `Json.StreamConsumer` yield `Json.Timed<Value>` (`value`, `timestampUs`) instead of the bare value; `timestampUs` is `nil` when untimed.
-A snapshot consumer's `next()` now yields every state in order; call `latest()` for the newest.
+A snapshot consumer's `next()` now yields each state in order, skipping every group a newer one supersedes (see the zero-delay entry above); call `latest()` for the newest.
 Timestamps are rounded down to a whole microsecond.
 
 ### Ranges filter reads (#5929)

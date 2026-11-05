@@ -14,8 +14,6 @@
 
 use std::ops::Range;
 
-use rand::RngExt;
-
 use super::*;
 use crate::congestion::bbr3;
 
@@ -121,7 +119,7 @@ const DELAY_BOUND: Candidate = Candidate {
 	name: "BBR3 delay bound",
 	transport: || {
 		let mut bbr = bbr3::Config::default();
-		bbr.delay_bound(true).probe_rng_seed(entropy::rng().random());
+		bbr.delay_bound(true);
 		transport::Config {
 			congestion: Arc::new(bbr),
 			receive_timestamps: NonZeroU32::new(TIMESTAMPS),

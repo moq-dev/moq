@@ -16,6 +16,10 @@ Replace stream-track `append_datagram` / `insert_datagram` / `recv_datagram` wit
 
 `TrackInfo.max_age` defaults to `timedelta(0)`, like `Delay.max`, so a bare `TrackInfo()` and an omitted one now advertise a zero max age, serving only the live edge, instead of no publisher limit. `None` still means no limit: pass `max_age=None` where you relied on the default.
 
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`moq.json.SnapshotConsumer(broadcast, name, *, priority=0)` takes the `BroadcastConsumer` and the track name instead of a `TrackConsumer`, and subscribes to the track itself at a zero `delay.max` and `priority`. Drop the `subscribe_track` call; a refused subscription now raises from the first read. Iteration skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
+
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
 Viewer ceilings and PROBE target overrides are refused with the new `moq.Error.OutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers.watch` and `set_target` and `Viewer.update` raise it. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
@@ -183,7 +187,7 @@ and native library together; application calls are unchanged.
 ### JSON consumers yield `json.Timed` (#5677)
 
 `json.SnapshotConsumer` and `json.StreamConsumer` yield `Timed(value, timestamp)` instead of the bare value; `timestamp` is a `timedelta`, or `None` when untimed.
-Iterating a snapshot consumer now yields every state in order; `await consumer.latest()` returns the newest.
+Iterating a snapshot consumer now yields each state in order, skipping every group a newer one supersedes (see the zero-delay entry above); `await consumer.latest()` returns the newest.
 Timestamps are rounded down to a whole microsecond.
 
 ### Ranges filter reads (#5929)

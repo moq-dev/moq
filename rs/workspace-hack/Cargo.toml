@@ -328,7 +328,6 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
 libc = { version = "0.2", features = ["extra_traits"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
-log = { version = "0.4", default-features = false, features = ["release_max_level_debug"] }
 nix = { version = "0.31", features = ["net", "uio"] }
 nom-15128469a54ed75a = { package = "nom", version = "7" }
 proc-macro2 = { version = "1" }
@@ -362,7 +361,6 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
 libc = { version = "0.2", features = ["extra_traits"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
-log = { version = "0.4", default-features = false, features = ["release_max_level_debug"] }
 nix = { version = "0.31", features = ["net", "uio"] }
 nom-15128469a54ed75a = { package = "nom", version = "7" }
 quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }
@@ -435,7 +433,6 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
 libc = { version = "0.2", features = ["extra_traits"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
-log = { version = "0.4", default-features = false, features = ["release_max_level_debug"] }
 nix = { version = "0.31", features = ["net", "uio"] }
 nom-15128469a54ed75a = { package = "nom", version = "7" }
 proc-macro2 = { version = "1" }
@@ -469,7 +466,6 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
 libc = { version = "0.2", features = ["extra_traits"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
-log = { version = "0.4", default-features = false, features = ["release_max_level_debug"] }
 nix = { version = "0.31", features = ["net", "uio"] }
 nom-15128469a54ed75a = { package = "nom", version = "7" }
 quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }

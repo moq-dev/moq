@@ -200,9 +200,8 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: 
 	const consumer = request.active.peek();
 	if (!consumer) return;
 
-	const track = consumer.track("group.json").subscribe();
-	effect.cleanup(() => track.close());
-	const group = new Json.Snapshot.Consumer<GroupFrame>({ track });
+	const group = new Json.Snapshot.Consumer<GroupFrame>({ track: consumer.track("group.json") });
+	effect.cleanup(() => group.close());
 	effect.spawn(async () => {
 		for (;;) {
 			const state = await effect.race(group.latest());
