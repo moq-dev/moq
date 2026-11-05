@@ -12,7 +12,7 @@ use crate::{
 	frame, group,
 	ietf::{self, Control, FetchType, Filter, GroupOrder, RequestId},
 	origin, track,
-	util::{BoxFuture, TaskSet, Tasks},
+	util::{TaskSet, Tasks},
 };
 
 use super::{Message, Version, cluster, error::request, group::ObjectExtensionsLength, peer, request_update};
@@ -967,7 +967,7 @@ struct Held {
 /// A joining request may be abandoned before it takes an ID. Once committed, the session
 /// owns ending it on the wire.
 struct JoiningTask {
-	work: Option<BoxFuture<'static, Result<(), Error>>>,
+	work: Option<JoinFetch>,
 	state: kio::Shared<JoiningState>,
 	tasks: Tasks,
 }
@@ -984,7 +984,7 @@ impl JoiningTask {
 		let Some(work) = self.work.as_mut() else {
 			return Poll::Ready(Ok(()));
 		};
-		let res = ready!(waiter.poll_future(work.as_mut()));
+		let res = ready!(work.poll(waiter));
 		self.work = None;
 		Poll::Ready(res)
 	}
@@ -1001,8 +1001,7 @@ impl Drop for JoiningTask {
 			// The session owns cancelling the request, including after the subscription
 			// ends: closing it once its header is out, or resetting it while the peer's
 			// send window still holds the header back.
-			self.tasks
-				.push(move |waiter: &kio::Waiter| waiter.poll_future(work.as_mut()).map(|_| ()));
+			self.tasks.push(move |waiter: &kio::Waiter| work.poll(waiter).map(|_| ()));
 		}
 	}
 }
@@ -1113,7 +1112,7 @@ impl ResolveAlias {
 }
 
 /// Await [`ResolveAlias`].
-#[cfg(feature = "async")]
+#[cfg(test)]
 async fn resolve_track_alias(
 	runtime: &crate::time::Deadlines,
 	aliases: kio::Consumer<AliasTable>,
@@ -1205,13 +1204,10 @@ impl Subscriber {
 
 	/// Serve the requests beneath one attached namespace on its own task.
 	fn serve_route(&self, path: Path, generation: u64) {
-		let this = self.clone();
-		self.tasks.push(crate::util::future_task(async move {
-			// stop_announce is the authoritative remover: it drops the entry
-			// (retracting the route) once the announce refcount hits zero,
-			// which is what makes run_route exit, as does a limit holding it back.
-			this.run_route(path, generation).await;
-		}));
+		// stop_announce is the authoritative remover: it drops the entry (retracting the
+		// route) once the announce refcount hits zero, which is what ends the route, as does
+		// a limit holding it back.
+		self.tasks.push(RunRoute::new(self.clone(), path, generation));
 	}
 
 	/// End every active subscription with the error that ended the session.
@@ -2990,13 +2986,6 @@ impl Subscriber {
 			return Poll::Ready(());
 		}
 		tasks.poll(waiter)
-	}
-
-	/// Serve one announced namespace's requests; see [`RunRoute`].
-	#[cfg(feature = "async")]
-	async fn run_route(&self, path: Path, generation: u64) {
-		let mut route = RunRoute::new(self.clone(), path, generation);
-		kio::wait(|waiter| kio::Task::poll(&mut route, waiter)).await
 	}
 
 	/// Re-price one attached route to a draining cost (the peer sent a GOAWAY):
@@ -5101,7 +5090,7 @@ impl Subscriber {
 	fn start_joining_fetch(&self, subscribe_id: RequestId, track: &track::Producer) -> Option<JoiningTask> {
 		let fill = self.state.lock().subscribes.get(&subscribe_id)?.fill.clone();
 		let state = kio::Shared::<JoiningState>::default();
-		let mut join = JoinFetch {
+		let join = JoinFetch {
 			this: self.clone(),
 			subscribe_id,
 			track: track.clone(),
@@ -5112,9 +5101,8 @@ impl Subscriber {
 			stream: None,
 			step: JoinStep::Open(Default::default()),
 		};
-		let work: BoxFuture<'static, Result<(), Error>> = Box::pin(kio::wait(move |waiter| join.poll(waiter)));
 		Some(JoiningTask {
-			work: Some(work),
+			work: Some(join),
 			state,
 			tasks: self.tasks.clone(),
 		})
@@ -5808,13 +5796,10 @@ impl RecvGroup {
 		// SUBSCRIBE_OK or PUBLISH can be reordered behind this stream. Hold only the
 		// subgroup header while waiting so the data stream cannot consume flow control.
 		let aliases = this.state.lock().aliases.consume();
-		let runtime = this.runtime.clone();
-		let alias = group.track_alias;
-		let mut resolving: BoxFuture<'static, Result<RequestId, Error>> =
-			Box::pin(async move { resolve_track_alias(&runtime, aliases, alias).await });
+		let mut resolving: ResolveAlias = ResolveAlias::new(&this.runtime, aliases, group.track_alias);
 		// Unread meanwhile, so a reset or an eviction would otherwise go unseen, and an evicted
 		// stream holds further eviction off until it is stopped.
-		let resolved = wait!(Resolve => match waiter.poll_future(resolving.as_mut()) {
+		let resolved = wait!(Resolve => match resolving.poll(waiter) {
 			Poll::Ready(resolved) => Poll::Ready(Ok(resolved)),
 			Poll::Pending => stream.poll_reset(waiter).map(Err),
 		})?;

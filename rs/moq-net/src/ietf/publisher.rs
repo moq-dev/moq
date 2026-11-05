@@ -22,7 +22,6 @@ use crate::{
 	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, Location, RequestId},
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::{Order, Subscription},
-	util::BoxFuture,
 };
 
 use super::{Message, Version, cluster, error::request, peer, request_update};
@@ -2573,8 +2572,6 @@ struct RunFill {
 /// The fetch stream a fill writes, ranked as the group it fills.
 type FillStream = Writer<Ranked<crate::transport::boxed::SendStream>, Version>;
 
-/// What writing a fill's group gives back: its stream, and how the write ended.
-type FillWrite = BoxFuture<'static, (FillStream, Result<(), Error>)>;
 
 #[kio::machine(self.state: RunFillState)]
 impl RunFill {
@@ -2664,30 +2661,22 @@ impl RunFill {
 		let setup = wait!(Setup => publisher.peer_setup.poll_get(waiter));
 		let compressed = if setup.flate { group.compressed() } else { group };
 		let (timescale, version) = (self.timescale, publisher.version);
-		let mut write: FillWrite = Box::pin(async move {
-			let res = Publisher::write_fetch_group(
-				&mut writer,
-				compressed,
-				filled,
-				slice,
-				timescale,
-				version,
-				publisher_priority,
-			)
-			.await;
-			(writer, res)
-		});
-		let done = wait!(Write => waiter.poll_future(write.as_mut()));
-		let mut written: FillStream = done.0;
-		if let Err(err) = done.1 {
-			return self.fail(written, err);
+		let started = FetchGroupWrite::new(compressed, filled, slice, timescale, version, publisher_priority);
+		let mut write: FetchGroupWrite = match started {
+			Ok(write) => write,
+			Err(err) => return self.fail(writer, err),
+		};
+		let done = wait!(Write => write.poll(waiter, writer));
+		if let Err(err) = done {
+			return self.fail(writer, err);
 		}
-		// Keeps the stream, and its rank, until the acknowledgement, like [`settle`].
-		if let Err(err) = written.finish() {
+		// Keeps the stream, and its rank, until the acknowledgement: unlike [`Writer::close`],
+		// cancelling resets it as a cancelled group stream's is.
+		if let Err(err) = writer.finish() {
 			tracing::debug!(%err, fill = %self.request_id, "fill stream close failed");
 			return Poll::Ready(());
 		}
-		let closed = wait!(Settle => written.poll_close(waiter));
+		let closed = wait!(Settle => writer.poll_close(waiter));
 		match closed {
 			Ok(()) => tracing::debug!(fill = %self.request_id, "fill complete"),
 			Err(err) => tracing::debug!(%err, fill = %self.request_id, "fill stream close failed"),
@@ -2813,7 +2802,7 @@ impl Publisher {
 
 	/// Resolve a request's broadcast while the peer still wants the answer, a FIN withdrawing it
 	/// where `fin_cancels`.
-	#[cfg(feature = "async")]
+	#[cfg(test)]
 	async fn resolve(
 		&self,
 		stream: &mut Stream<Transport, Version>,
@@ -3370,20 +3359,6 @@ impl Publisher {
 	) {
 		let mut run = RunFill::new(fill, track, timescale, request_id);
 		kio::wait(|waiter| run.poll(waiter, self, ranking, opened)).await
-	}
-
-	/// Await [`FetchGroupWrite`].
-	async fn write_fetch_group(
-		stream: &mut Writer<Ranked<crate::transport::boxed::SendStream>, Version>,
-		group: group::Consumer,
-		sequence: u64,
-		slice: GroupSlice,
-		timescale: Option<Timescale>,
-		version: Version,
-		priority: u8,
-	) -> Result<(), Error> {
-		let mut write = FetchGroupWrite::new(group, sequence, slice, timescale, version, priority)?;
-		kio::wait(|waiter| write.poll(waiter, stream)).await
 	}
 
 	/// Buffer one fetch object's header and timestamp properties in the negotiated layout.
