@@ -47,4 +47,3 @@ signature. No ANNOUNCE_OK proof body is needed by this draft or implementation;
 ## Related
 
 - [Route session integration](/quest/m1/cluster-routing/routes/session.md) - files identities under the proven key
-- [lite-07 route wire](/quest/m1/cluster-routing/routes/wire.md) - coordinates announce messages

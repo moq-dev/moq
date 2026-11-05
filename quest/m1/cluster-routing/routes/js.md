@@ -17,11 +17,10 @@ Decided 2026-10-27 (maintainer), from
 `origin.ts` a detached request stays on its own route instead of following
 the cheapest one; fix it with the route-selection rework here.
 - Feed the availability API from [Announcement availability](/quest/m1/cluster-routing/routes/availability.md).
-- Rust/JS interop covers the route messages, the floor list, and the echo.
+- Rust/JS interop covers the route messages, the floor marker, and the echo.
 
 ## Required
 
-- [lite-07 route wire](/quest/m1/cluster-routing/routes/wire.md) - the messages
 - [Announcement availability](/quest/m1/cluster-routing/routes/availability.md) - the API this feeds
 
 ## Related
