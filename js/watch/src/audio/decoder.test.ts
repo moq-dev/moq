@@ -80,7 +80,8 @@ class FakeWorklet {
 			} else if (msg.type === "truncate") this.ring?.truncate(msg.timestamp);
 			else if (msg.type === "end") this.ring?.end(msg.timestamp);
 			else if (msg.type === "reset") {
-				this.ring?.reset();
+				if (msg.next) this.ring?.next();
+				else this.ring?.reset();
 				this.#epoch = msg.epoch;
 				this.#playing = msg.playing ?? true;
 			} else if (msg.type === "playing" && msg.epoch === this.#epoch) this.#playing = msg.playing;
@@ -717,6 +718,34 @@ describe("Decoder across a rendition's absence", () => {
 		}
 	});
 
+	// Back-to-back presses: the next utterance arrives while the last one's tail still plays, which
+	// must neither flush that tail nor stall.
+	it("follows a declared end straight into the next utterance without a stall", async () => {
+		const playback = await play(Milli(100));
+		try {
+			await playback.play(12);
+			const [ring] = playback.rings();
+			expect(ring.read([new Float32Array(128), new Float32Array(128)])).toBe(128);
+			const end = frameTimestamp + 20_000;
+			playback.push({ kind: "end", group: 0n, end: Micro(end) });
+			for (let i = 0; i < 6; i++) {
+				const read = frame();
+				read.group = 1n;
+				playback.push(read);
+				await microtasks();
+			}
+			expect(playback.resets()).toBe(0);
+			playback.push({ kind: "end", group: 1n, end: Micro(frameTimestamp + 20_000) });
+			await microtasks();
+			expect(drain(ring)).toBeGreaterThan(0);
+			await microtasks();
+			expect(playback.subscriptions()).toBe(1);
+			expect(playback.stats()).toMatchObject({ underruns: 0, stalls: 0 });
+		} finally {
+			playback.close();
+		}
+	});
+
 	it("deselects a disabled rendition and resubscribes once it is re-enabled", async () => {
 		const playback = await play(Milli(100));
 		try {
@@ -761,6 +790,8 @@ describe("Decoder across a rendition's absence", () => {
 				await microtasks();
 			}
 			expect(playback.stalled()).toBe(false);
+			playback.push({ kind: "end", group: 1n, end: Micro(frameTimestamp + 20_000) });
+			await microtasks();
 			expect(drain(ring)).toBeGreaterThan(0);
 			await microtasks();
 

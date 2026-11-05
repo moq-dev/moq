@@ -239,6 +239,16 @@ export class AudioRingBuffer {
 		return this.#end !== undefined && this.#readIndex >= this.#end;
 	}
 
+	/**
+	 * The publisher's next utterance follows its declared end. Once nothing is left to play, flush
+	 * and re-anchor on it like {@link reset}; while the end's audio is still buffered, play straight
+	 * into the next utterance on the same timeline, dropping nothing.
+	 */
+	next(): void {
+		if (!this.#anchored || this.length <= 0) this.reset();
+		else this.#end = undefined;
+	}
+
 	// Flush all buffered samples and re-stall, ready to anchor the next utterance.
 	reset(): void {
 		this.#readIndex = 0;

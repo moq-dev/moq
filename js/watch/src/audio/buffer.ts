@@ -413,10 +413,24 @@ export class AudioBuffer {
 
 	/** Flush buffered samples and re-stall, ready to anchor the next utterance (buffered mode). */
 	reset(): void {
+		this.#reset(false);
+	}
+
+	/**
+	 * The next utterance after a declared end: flush and re-anchor once playback ran out at the end,
+	 * or keep playing into it while the end's audio still plays. The playhead is unknown here until
+	 * the worklet reports which.
+	 */
+	next(): void {
+		this.#reset(true);
+	}
+
+	#reset(next: boolean): void {
 		this.#epoch++;
 		const msg: Reset = {
 			type: "reset",
 			epoch: this.#epoch,
+			...(next && { next }),
 			...(this.#playing && { playing: this.#playing.peek() }),
 		};
 		this.#worklet.port.postMessage(msg);

@@ -576,6 +576,40 @@ describe("declared end", () => {
 		expect(buffer.silent).toBe(false);
 	});
 
+	// Back-to-back presses: the next utterance arrives while the last one's tail is still buffered.
+	it("plays the next utterance after the end's tail without flushing it", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 40 as Milli });
+		write(buffer, 0 as Milli, 40, { channels: 1, value: 1 });
+		buffer.end(Micro(40_000));
+		expect(read(buffer, 20, 1)[0].length).toBe(20);
+
+		buffer.next();
+		write(buffer, 50 as Milli, 40, { channels: 1, value: 2 });
+		// The rest of the tail, the short gap to the next utterance, then the utterance itself.
+		const [played] = read(buffer, 70, 1);
+		expect([...played.slice(0, 20)]).toEqual(Array(20).fill(1));
+		expect([...played.slice(20, 30)]).toEqual(Array(10).fill(0));
+		expect([...played.slice(30)]).toEqual(Array(40).fill(2));
+		expect(buffer.underruns).toBe(0);
+		expect(buffer.silent).toBe(false);
+
+		// The end no longer applies, so running dry now is an underrun.
+		read(buffer, 20, 1);
+		expect(buffer.underruns).toBe(1);
+	});
+
+	it("re-anchors the next utterance once the end's audio has played out", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 20 as Milli });
+		write(buffer, 0 as Milli, 20, { channels: 1 });
+		buffer.end(Micro(20_000));
+		read(buffer, 20, 1);
+		read(buffer, 20, 1);
+		expect(buffer.silent).toBe(true);
+		buffer.next();
+		expect(buffer.anchored).toBe(false);
+		expect(buffer.silent).toBe(true);
+	});
+
 	it("takes an end that arrives after the playhead ran out there", () => {
 		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 20 as Milli });
 		write(buffer, 0 as Milli, 20, { channels: 1 });

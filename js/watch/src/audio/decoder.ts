@@ -985,9 +985,13 @@ export class Decoder {
 		if (read.kind === "end") this.#ring.peek()?.end((read.end - this.#terminal.delay) as Micro);
 		if (!this.#terminal.update(read)) return false;
 		// A hole restarts codec prediction on the same timeline, keeping decoded PCM and parked video.
+		// A frame after a declared end starts the next utterance, which re-anchors playback once the
+		// previous one has played out, and otherwise follows it without dropping its tail.
 		if (read.kind === "frame") {
 			this.sync.reset();
-			this.reset();
+			this.#decodeBuffered.set([]);
+			this.#queued.set(undefined);
+			this.#ring.peek()?.next();
 		}
 		return true;
 	}

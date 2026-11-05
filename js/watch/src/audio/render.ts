@@ -18,6 +18,8 @@ export interface Init {
 /** Flush the buffer and re-stall. */
 export interface Reset {
 	type: "reset";
+	// The next utterance after a declared end: flush only once playback ran out at the end.
+	next?: boolean;
 	// Echoed in every later state message, so the main thread can tell state from before the reset.
 	epoch: number;
 	playing?: boolean;
