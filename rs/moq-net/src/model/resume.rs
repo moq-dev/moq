@@ -2582,6 +2582,7 @@ mod test {
 		let routes = Producer::new();
 		let logical = logical(&routes);
 		let pending = logical.consume().subscribe(None);
+		let info = pending.info();
 		let first = copy();
 		first
 			.create_group(group::Info { sequence: 7 })
@@ -2606,6 +2607,7 @@ mod test {
 			panic!("second answer");
 		};
 		assert_eq!(first_sub.requested_sequence(), Some(7));
+		assert_eq!(info.requested_sequence(), Some(7));
 		assert_eq!(second_sub.requested_sequence(), Some(9));
 	}
 

@@ -5283,11 +5283,12 @@ impl Consumer {
 	/// [`Subscriber::info`] is the already-resolved counterpart.
 	pub fn info(&self) -> kio::Pending<Resolving> {
 		let state = self.resolve(None).0;
+		let answer = state.read().routes.as_ref().map(|routes| routes.answer());
 		kio::Pending::new(Resolving {
 			name: self.name.clone(),
 			broadcast: self.broadcast.clone(),
 			requested: TrackState::requested(&state),
-			answer: state.read().routes.as_ref().map(|routes| routes.answer()),
+			answer,
 			state,
 			stats: self.stats.clone(),
 		})
