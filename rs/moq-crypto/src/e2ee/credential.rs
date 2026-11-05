@@ -54,8 +54,8 @@ impl Credential {
 	///
 	/// # Errors
 	///
-	/// [`Error::UnsupportedCpu`] if this CPU lacks a feature the crypto needs.
-	/// [`Error::Identity`] if `context` exceeds 65535 bytes or `kid` exceeds `2^53-1`.
+	/// [`Error::UnsupportedCpu`](crate::e2ee::Error::UnsupportedCpu) if this CPU lacks a feature the crypto needs.
+	/// [`Error::Identity`](crate::e2ee::Error::Identity) if `context` exceeds 65535 bytes or `kid` exceeds `2^53-1`.
 	pub fn new(config: Config) -> Result<Self> {
 		crate::cpu::check()?;
 		check_bytes(config.context.len())?;
@@ -84,7 +84,7 @@ impl Credential {
 	///
 	/// # Errors
 	///
-	/// [`Error::Identity`] if `semantic` exceeds 65535 bytes.
+	/// [`Error::Identity`](crate::e2ee::Error::Identity) if `semantic` exceeds 65535 bytes.
 	pub fn path(&self, semantic: &str) -> Result<moq_net::Path> {
 		let material: [u8; PATH_LEN] = self.expand(&self.path_info(semantic)?);
 		// A fixed-length encoding, far under the path limit.
