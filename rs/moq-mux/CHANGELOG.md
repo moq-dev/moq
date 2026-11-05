@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A `moof` declares at most one sample per byte of its metadata past 4,096, besides `fmp4::MAX_FRAGMENT_SAMPLES`, or it is refused with `Error::TooManySamples` before planning. A run without per-sample fields stores only a count, so a 104-byte `moof` could plan 65,792 samples (7 MB) before any payload arrived; every run with per-sample fields already pays at least 4 bytes a sample.
 - Received CMAF init segments and fragments use the importer's metadata and sample limits before mp4-atom parses any box, including discarded known types and the children it keeps from spatial sample-entry boxes. MSF catalog derivation and regular MP4 recording share the checks; zero-byte entry counts cannot amplify a small input.
 
 - fMP4 import bounds what a `moov` or `moof` costs to parse and plan: a body over `fmp4::MAX_METADATA_BYTES` (2 MiB) is refused at its header, since parsing expands it up to tenfold, a `moof` of more than `fmp4::MAX_FRAGMENT_SAMPLES` (now 131,072) samples is refused before planning, and a `moov` of more than `fmp4::MAX_TRACKS` (256) tracks with `Error::TooManyTracks` before any is created. `fmp4::MAX_HELD_BYTES` (32 MiB) now bounds only a text sample. A 116-byte `moof` no longer plans 584 MB.
