@@ -953,7 +953,11 @@ impl Schedule {
 	/// Push a unit of `packets` on `pid` due by `timing`, after every unit pushed before it.
 	fn enqueue(&mut self, pid: u16, timing: Timing, packets: Vec<u8>, tables: Option<Program>) -> &mut Unit {
 		let due = slot(timing.by);
-		let start = self.last.map_or(due, |last| (last + 1).min(due));
+		// A long silence cannot let resumed media precede its own send-ahead.
+		let start = self
+			.last
+			.filter(|last| due.saturating_sub(*last) <= BACKFILL)
+			.map_or(due, |last| (last + 1).min(due));
 		self.last = Some(due);
 		let runs = self.runs(&packets);
 		let seq = self.seq;
@@ -1834,6 +1838,29 @@ mod tests {
 		);
 		let tables: usize = slots.iter().filter_map(|(_, pids, _)| pids.get(&100)).sum();
 		assert_eq!(tables, 2);
+	}
+
+	/// After a long silence, media keeps its send-ahead instead of riding the old clock.
+	#[test]
+	fn resumed_media_keeps_its_send_ahead() {
+		for rate in [None, Some(RATE)] {
+			for window in [Duration::ZERO, Duration::from_millis(500)] {
+				let mut schedule = Schedule::new(window);
+				schedule.set_rate(rate);
+				schedule.set_buffer(1, VIDEO);
+				for time in [1_000, 7_000] {
+					schedule.push(1, timing(time), unit(1, 1), true).unwrap();
+				}
+				let mut sent = Vec::new();
+				while let Some(slot) = schedule.next(None).unwrap() {
+					if !slot.packets.is_empty() {
+						sent.push(slot.index);
+					}
+				}
+				assert_eq!(sent.len(), 2);
+				assert!(sent[1] >= slot(ms(7_000)).saturating_sub(ahead(Some(&VIDEO), slot(window.as_nanos()))));
+			}
+		}
 	}
 
 	/// Advancing the known source horizon through silence skips slots without a delivery marker.

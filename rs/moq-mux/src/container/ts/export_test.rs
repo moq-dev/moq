@@ -8526,6 +8526,25 @@ async fn a_skipped_group_flags_the_clock() {
 				let jumped = pair[1].timestamp.as_micros() > pair[0].timestamp.as_micros() + 25_000;
 				assert_eq!(count_discontinuity(&pair[1..]), usize::from(jumped));
 			}
+			// Each flag lands right before the audio that resumes after its hole.
+			let resumes: Vec<u64> = [20 + missing, 40 + 2 * missing]
+				.into_iter()
+				.filter(|_| missing == 60 && delay.is_zero())
+				.map(|sequence| (60_000 + sequence * 100) * 90)
+				.collect();
+			let mut reader = TsPacketReader::new(Cursor::new(&ts));
+			let (mut flagged, mut after) = (false, Vec::new());
+			while let Some(packet) = reader.read_ts_packet().unwrap() {
+				flagged |= packet
+					.adaptation_field
+					.is_some_and(|field| field.discontinuity_indicator);
+				if let Some(TsPayload::PesStart(pes)) = packet.payload
+					&& std::mem::take(&mut flagged)
+				{
+					after.extend(pes.header.pts.map(|pts| pts.as_u64()));
+				}
+			}
+			assert_eq!(after, resumes, "the first PES after each flag resumes its hole");
 			let (_, audio) = collect_pes_pts(&ts);
 			assert!(
 				audio.iter().any(|&pts| pts >= (60_000 + (70 + 2 * missing) * 100) * 90),
