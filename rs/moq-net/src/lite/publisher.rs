@@ -2493,6 +2493,21 @@ impl Request for SubscribeServe {
 							continue;
 						}
 					};
+					crate::ietf::flate::egress(track.info(), shared.version.has_compression())?;
+					// Lite05+ accepts implicitly: no SUBSCRIBE_OK, the immutable properties
+					// live in TRACK_INFO, and the resolved range arrives as
+					// SUBSCRIBE_START/END from the run loop. Older drafts still acknowledge
+					// with SUBSCRIBE_OK here, at once: it names no start, so it never waits on
+					// the settle below.
+					if !shared.version.has_track_stream() {
+						let info = lite::SubscribeOk {
+							priority: msg.priority,
+							max_delay: Duration::ZERO,
+							start_group: None,
+							end_group: None,
+						};
+						writer.buffer(&lite::SubscribeResponse::Ok(info))?;
+					}
 					// A copy's newest group then is not what its source's answer brings: an older
 					// one cached, or none yet.
 					if latest.is_none()
@@ -2515,9 +2530,13 @@ impl Request for SubscribeServe {
 						Version::Lite01 | Version::Lite02 => latest,
 						_ => latest.or_else(|| track.latest_sequence()),
 					};
-					*self = Self::run(shared, *msg, bounds, track, latest, update, legacy, ietf, writer)?;
+					*self = Self::run(shared, *msg, bounds, track, latest, update, legacy, ietf);
 				}
 				Self::Settle { due, .. } => {
+					// The SUBSCRIBE_OK goes out now, not once the settle ends.
+					if let Poll::Ready(Err(err)) = writer.poll_flush(waiter) {
+						return Poll::Ready(Err(err));
+					}
 					let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
 					ready!(due.poll(waiter));
 					let Self::Settle {
@@ -2539,7 +2558,7 @@ impl Request for SubscribeServe {
 					};
 					// Past what the cache holds once the source reported a newer group.
 					let latest = track.peek_largest().map(|largest| largest.group);
-					*self = Self::run(shared, *msg, bounds, *track, latest, update, legacy, ietf, writer)?;
+					*self = Self::run(shared, *msg, bounds, *track, latest, update, legacy, ietf);
 				}
 				Self::Run(run) => {
 					// One datagram a step, beside the groups.
@@ -2976,28 +2995,11 @@ impl SubscribeServe {
 		update: Option<LiveUpdate>,
 		legacy: Option<Box<Legacy>>,
 		ietf: bool,
-		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
-	) -> Result<Self, Error> {
-		crate::ietf::flate::egress(track.info(), shared.version.has_compression())?;
-
+	) -> Self {
 		// `None` omits the per-frame timestamp prefix: an untimed track on
 		// Lite07+, or any track before Lite05 (whose frames still carry
 		// timestamps in the model, just not on this wire).
 		let stamp = Stamp::new(shared.version, track.info().timescale);
-
-		// Lite05+ accepts implicitly: no SUBSCRIBE_OK, the immutable properties
-		// live in TRACK_INFO, and the resolved range arrives as
-		// SUBSCRIBE_START/END from the run loop. Older drafts still acknowledge
-		// with SUBSCRIBE_OK here.
-		if !shared.version.has_track_stream() {
-			let info = lite::SubscribeOk {
-				priority: msg.priority,
-				max_delay: Duration::ZERO,
-				start_group: None,
-				end_group: None,
-			};
-			writer.buffer(&lite::SubscribeResponse::Ok(info))?;
-		}
 
 		// Track-level subscriber priority and group order. SUBSCRIBE_UPDATE
 		// messages broadcast new values to the run loop (so future groups inherit
@@ -3035,7 +3037,7 @@ impl SubscribeServe {
 		if let Some(update) = update {
 			run.update(update);
 		}
-		Ok(Self::Run(Box::new(run)))
+		Self::Run(Box::new(run))
 	}
 
 	/// Serve `msg` from the name's datagram track, at the priority of its latest `update`.
@@ -9631,8 +9633,9 @@ mod tests {
 					};
 					let mut serve =
 						SubscribeServe::start(&publisher.shared, msg, "video", broadcast.consume()).unwrap();
+					let control = Log::default();
 					let mut writer = Writer::new(
-						crate::transport::boxed::SendStream::new(SinkSend::new(Log::default())),
+						crate::transport::boxed::SendStream::new(SinkSend::new(control.clone())),
 						version,
 					);
 					// Serve for `wait`: a live subscription never ends on its own.
@@ -9667,6 +9670,9 @@ mod tests {
 						Answer::Settling => {
 							let mut track = staged.take().unwrap().commit();
 							drive(Duration::from_millis(10)).await;
+							// The SUBSCRIBE_OK names no start, so it never waits on the settle.
+							let answered = control.trail().iter().any(|(_, sent)| matches!(sent, Sent::Write(_)));
+							assert_eq!(answered, !version.has_track_stream(), "{version}: answered at once");
 							write(&mut track, &[0, 3, 7]);
 							track
 						}

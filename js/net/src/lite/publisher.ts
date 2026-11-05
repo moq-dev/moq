@@ -1042,25 +1042,6 @@ export class Publisher {
 			// priority.
 			const info = await untilAborted(track.info(), left.signal);
 			const publisher = info.priority;
-			// Without a newest group on arrival, such as a SUBSCRIBE that beat its track
-			// resolving, the newest once it resolves stands in, as it would for one sent after.
-			// A lite-03/04 copy's newest group then is not what its source's answer brings, but
-			// an older one cached or none yet: it waits {@link SETTLE} past the answer and starts
-			// at the newest group known by then, including a largest the answer reported.
-			// Lite-01/02 keep the floor their arrival gave, as Rust does.
-			if (latest === undefined && msg.startGroup === undefined && !arrivalOnly(this.version)) {
-				const settles =
-					(this.version === Version.DRAFT_03 || this.version === Version.DRAFT_04) && hooks.received(track);
-				if (settles) await sleep(SETTLE, { signal: left.signal });
-				const known = hooks.latestSequence(track);
-				const reported = settles ? hooks.peekLargest(track).largest?.group : undefined;
-				const newest = known === undefined ? reported : reported === undefined ? known : max(known, reported);
-				const resolved = cursorFloor(this.version, msg.startGroup, newest);
-				if (resolved !== floor) {
-					floor = resolved;
-					track.withRange({ start: { included: floor } });
-				}
-			}
 			// Older drafts carry no timestamps.
 			let stamp: Stamp | undefined;
 			let compress = false;
@@ -1084,6 +1065,27 @@ export class Publisher {
 					endGroup: msg.endGroup,
 				});
 				await encodeSubscribeResponse(stream.writer, { ok }, this.version);
+			}
+
+			// Without a newest group on arrival, such as a SUBSCRIBE that beat its track
+			// resolving, the newest once it resolves stands in, as it would for one sent after.
+			// A lite-03/04 copy's newest group then is not what its source's answer brings, but
+			// an older one cached or none yet: it waits {@link SETTLE} past the answer and starts
+			// at the newest group known by then, including a largest the answer reported.
+			// Lite-01/02 keep the floor their arrival gave, as Rust does. After the SUBSCRIBE_OK,
+			// which names no start, so the answer never waits on the settle.
+			if (latest === undefined && msg.startGroup === undefined && !arrivalOnly(this.version)) {
+				const settles =
+					(this.version === Version.DRAFT_03 || this.version === Version.DRAFT_04) && hooks.received(track);
+				if (settles) await sleep(SETTLE, { signal: left.signal });
+				const known = hooks.latestSequence(track);
+				const reported = settles ? hooks.peekLargest(track).largest?.group : undefined;
+				const newest = known === undefined ? reported : reported === undefined ? known : max(known, reported);
+				const resolved = cursorFloor(this.version, msg.startGroup, newest);
+				if (resolved !== floor) {
+					floor = resolved;
+					track.withRange({ start: { included: floor } });
+				}
 			}
 
 			console.debug(`publish ok: broadcast=${msg.broadcast} track=${track.name}`);

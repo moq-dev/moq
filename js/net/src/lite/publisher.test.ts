@@ -1588,6 +1588,8 @@ test.each([
 		try {
 			await sub.accept([0n, 3n], true);
 			await clock.advance(Nano.zero);
+			// The SUBSCRIBE_OK names no start, so it never waits on the settle.
+			expect("ok" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
 			sub.serve(5n);
 			await clock.advance(Nano.fromMilli(Milli(50)));
 			sub.serve(4n);
