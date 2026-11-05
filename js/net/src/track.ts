@@ -2914,6 +2914,12 @@ export class Subscriber {
 			subscriber.#settle();
 			return subscriber.#window.starts(from);
 		};
+		hooks.servingResolved = (subscriber) => {
+			const resumed = subscriber.#resume?.resolved();
+			if (resumed) return resumed;
+			subscriber.#settle();
+			return subscriber.#window.resolved();
+		};
 		hooks.tryNextGroup = (subscriber, floor) => {
 			subscriber.#raiseNext(floor);
 			return subscriber.#tryNextGroup();

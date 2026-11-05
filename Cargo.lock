@@ -7012,6 +7012,7 @@ name = "qmux"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "bench-harness",
  "bytes",
  "futures",
  "kio",

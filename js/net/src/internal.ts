@@ -30,7 +30,7 @@ import type {
 } from "./track.ts";
 import { max, min } from "./util/sequence.ts";
 import * as Varint from "./varint.ts";
-import type { Window } from "./window.ts";
+import type { Resolved, Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
 /** What a null {@link Delay.max} goes out as: the largest value every peer can read, as Rust sends for `None`. */
@@ -378,6 +378,8 @@ export interface ResumeSource {
 	end(): Position | undefined;
 	/** Where each range starts on the serving copy once delivery starts at `from`, undefined without one. */
 	starts(from: bigint): (bigint | undefined)[] | undefined;
+	/** Each range as the serving copy resolved it, undefined without one. */
+	resolved(): (Resolved | undefined)[] | undefined;
 	/** The runs of `[start, end)` the serving copy reads, undefined without one. */
 	runs(start: bigint, end: bigint): Run[] | undefined;
 	/**
@@ -596,6 +598,11 @@ export const hooks: {
 	 * with no group there: what lite-07 SUBSCRIBE_START answers. Assigned by `track.ts`.
 	 */
 	servingStarts: (subscriber: Subscriber, from: bigint) => (bigint | undefined)[];
+	/**
+	 * Each of a subscriber's ranges as resolved where it is served, undefined for one whose start
+	 * still waits: what lite-07 SUBSCRIBE_STARTED answers. Assigned by `track.ts`.
+	 */
+	servingResolved: (subscriber: Subscriber) => (Resolved | undefined)[];
 	/** The lowest buffered candidate, which an ordered take may wait below; `floor` passes sequences taken on other copies. */
 	peekGroup: (subscriber: Subscriber, ordered: boolean, floor?: bigint) => bigint | undefined;
 	/** Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival order. */
@@ -803,6 +810,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	servingStarts: () => {
+		throw new Error("track.ts not loaded");
+	},
+	servingResolved: () => {
 		throw new Error("track.ts not loaded");
 	},
 	makeRequest: () => {

@@ -8,7 +8,12 @@ import { Subscribe as IetfSubscribe, SubscribeOk } from "../../js/net/src/ietf/s
 import { Subscriber as IetfSubscriber } from "../../js/net/src/ietf/subscriber.ts";
 import { Version as IetfVersion } from "../../js/net/src/ietf/version.ts";
 import { StreamId } from "../../js/net/src/lite/stream.ts";
-import { encodeSubscribeResponse, Subscribe, SubscribeEnd, SubscribeStart } from "../../js/net/src/lite/subscribe.ts";
+import {
+	encodeSubscribeResponse,
+	Subscribe,
+	SubscribeFinish,
+	SubscribeStart,
+} from "../../js/net/src/lite/subscribe.ts";
 import { Subscriber as LiteSubscriber } from "../../js/net/src/lite/subscriber.ts";
 import { Track, TrackInfo } from "../../js/net/src/lite/track.ts";
 import { Version as LiteVersion } from "../../js/net/src/lite/version.ts";
@@ -60,7 +65,7 @@ if (version !== undefined) {
 	if (input.started || input.owed)
 		await encodeSubscribeResponse(output, { start: new SubscribeStart([0n]) }, version);
 	if (input.clean || input.owed) {
-		await encodeSubscribeResponse(output, { end: new SubscribeEnd(input.owed ? 1n : 0n) }, version);
+		await encodeSubscribeResponse(output, { finish: new SubscribeFinish(input.owed ? 1n : 0n) }, version);
 	}
 } else {
 	assert.equal(input.version, "moqt-18");

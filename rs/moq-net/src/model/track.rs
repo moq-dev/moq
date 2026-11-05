@@ -22,7 +22,8 @@ use super::idle;
 use super::skipped::Skipped;
 use crate::ledger::{self, Ledger};
 
-use super::subscription::{Accounted, Containing, Held, Holdings, Layered, Resolved, Runs, Seen, Window, later};
+pub(crate) use super::subscription::Resolved;
+use super::subscription::{Accounted, Containing, Held, Holdings, Layered, Runs, Seen, Window, later};
 pub use super::subscription::{Anchor, Delay, Order, Position, Range, Subscription};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
@@ -3754,6 +3755,12 @@ impl Producer {
 	#[cfg(feature = "async")]
 	pub(crate) fn start_sequence(&self) -> Option<u64> {
 		self.state.read().start_sequence
+	}
+
+	/// Evict group `sequence` from the cache, as expiry does.
+	#[cfg(test)]
+	pub(crate) fn evict(&self, sequence: u64) {
+		self.modify().unwrap().evict_group(sequence, Error::Evicted);
 	}
 
 	/// The exclusive end, once [`Self::finish`] or [`Self::finish_at`] declared one.
@@ -8591,6 +8598,21 @@ impl Subscriber {
 				cursor.filter.window.starts(from)
 			}
 			Inner::Resume(resume, _) => resume.starts(from),
+		}
+	}
+
+	/// Each of this subscriber's ranges as resolved here, by index: its first group and
+	/// exclusive end, `None` while open, or `None` for one whose start still waits on the
+	/// live feed or a lookup. One empty as given, or that only resolves empty, ends at or
+	/// below its start.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn resolved(&mut self) -> Vec<Option<Resolved>> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+				cursor.filter.window.resolved()
+			}
+			Inner::Resume(resume, _) => resume.resolved(),
 		}
 	}
 
@@ -22241,7 +22263,11 @@ mod test {
 			let mut subscriber = producer.subscribe(replay().with_ranges(ranges));
 			assert_eq!(
 				subscriber.resolved_ranges(),
-				vec![Some(Resolved { start: 0, end: None })],
+				vec![Some(Resolved {
+					start: 0,
+					end: None,
+					floored: true
+				})],
 				"group 1 may still start before the end"
 			);
 			if dropped {
@@ -22249,7 +22275,11 @@ mod test {
 				assert_eq!(drain(&mut subscriber), vec![0]);
 				assert_eq!(
 					subscriber.resolved_ranges(),
-					vec![Some(Resolved { start: 0, end: Some(2) })],
+					vec![Some(Resolved {
+						start: 0,
+						end: Some(2),
+						floored: true
+					})],
 					"the drop settles the end"
 				);
 				continue;
@@ -22289,7 +22319,11 @@ mod test {
 			assert_eq!(reader.drain(), Vec::<u64>::new(), "ordered: {ordered}");
 			assert_eq!(
 				reader.resolved(),
-				vec![Some(Resolved { start: 0, end: Some(1) })],
+				vec![Some(Resolved {
+					start: 0,
+					end: Some(1),
+					floored: true
+				})],
 				"1 starting past the end settles it"
 			);
 		}
@@ -22339,7 +22373,11 @@ mod test {
 			.unwrap();
 		assert_eq!(
 			subscriber.resolved_ranges(),
-			vec![Some(Resolved { start: 0, end: Some(3) })]
+			vec![Some(Resolved {
+				start: 0,
+				end: Some(3),
+				floored: true
+			})]
 		);
 	}
 
