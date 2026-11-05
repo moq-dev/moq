@@ -15,6 +15,7 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 		const destination = new Producer();
 		const broadcastPublication = source.createBroadcast(Path.from("compressed"));
 		const broadcast = broadcastPublication.broadcast;
+		const datagrams = broadcast.createDatagrams("data");
 		const track = broadcast.createTrack("data", { compress: true });
 		broadcastPublication.announce();
 		const peers: { abort(): void }[] = [];
@@ -55,11 +56,15 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 			const fetched = await remote.fetchGroup(0n);
 			for (const payload of payloads) expect((await fetched.readFrame())?.payload).toEqual(payload);
 			expect(await fetched.readFrame()).toBeUndefined();
-			// Each datagram has a cold window; no lost or reordered predecessor is needed.
+			// Datagram payloads stay plain beside the compressed stream track.
+			const unreliable = active.datagrams("data");
+			await unreliable.info();
+			while (datagrams.priority.peek() === undefined) await datagrams.priority.changed();
 			for (const payload of [new Uint8Array(100).fill(4), new Uint8Array(100).fill(8)]) {
-				track.appendDatagram(undefined, payload);
-				expect((await reader.recvDatagram())?.payload).toEqual(payload);
+				datagrams.append(undefined, payload);
+				expect((await unreliable.recv())?.payload).toEqual(payload);
 			}
+			unreliable.close();
 			reader.close();
 			fetched.close();
 			received?.close();
