@@ -39,5 +39,4 @@ receiving every group, and nothing hanging.
 
 ## Required
 
-- [A departed subscription releases its streams](/quest/m1/stream-credit/release-on-leave.md) - on lite-07 a subscription whose reader left frees its upstream streams, so 3 slots serve the next one
 - [A higher-priority group makes room](/quest/m1/stream-credit/make-room.md) - it takes over a lower-priority stream, or one is reset, without over-cancelling
