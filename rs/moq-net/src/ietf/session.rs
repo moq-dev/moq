@@ -551,7 +551,8 @@ impl Running {
 
 /// The halves of a running session. Every half but the task set ends the session only by
 /// failing: one that finishes cleanly drops out, and the task set draining is the one clean
-/// exit. Fields drop in declaration order, the reverse of the order they are polled in.
+/// exit. Fields drop in declaration order: the halves in the reverse of their poll order,
+/// then the uni streams, the subscriber and the task set.
 struct Race {
 	/// Our SUBSCRIBE_NAMESPACE requests; `None` without a subscribe half.
 	namespaces: Option<Namespaces>,
