@@ -3265,7 +3265,7 @@ impl AnnounceProducer {
 	///
 	/// An entry advertised by this update continues what `predecessor`, a covering
 	/// served route, served beneath it; see [`Takeover`].
-	pub(super) fn update_if(
+	fn update_if(
 		&self,
 		route: RouteInfo,
 		predecessor: Option<&kio::Shared<ServeState>>,
