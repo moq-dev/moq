@@ -20,6 +20,10 @@ pub struct Sleep {
 	parked: Option<Waker>,
 }
 
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per sleep, and the size gap varies with the clock features enabled; an allow, since some builds balance it"
+)]
 enum Timer {
 	Queue(crate::clock::deadline::Timer),
 	Host(crate::clock::runtime::Timer),

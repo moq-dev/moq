@@ -109,7 +109,7 @@ func waitConnects(t *testing.T, ctx context.Context, session *moq.Session, want 
 	}
 }
 
-// awaitAnnouncement drains announcements until an active one names path.
+// awaitAnnouncement drains announcements until path is present.
 func awaitAnnouncement(t *testing.T, ctx context.Context, announced *moq.AnnounceConsumer, path string) {
 	t.Helper()
 
@@ -121,7 +121,7 @@ func awaitAnnouncement(t *testing.T, ctx context.Context, announced *moq.Announc
 		if event == nil {
 			t.Fatalf("announcement stream ended before %q", path)
 		}
-		if ann, ok := event.(moq.AnnounceEventStart); ok && ann.Announce.Prefix == path {
+		if ann, ok := event.(moq.AnnounceEventPresent); ok && ann.Announce.Prefix == path {
 			return
 		}
 	}

@@ -241,11 +241,12 @@ impl Consumer {
 		self.inner.set_priority(priority);
 	}
 
-	/// Poll for the next datagram event, or `None` once the track finished.
+	/// The next datagram event, or `None` once the track finished.
 	///
 	/// # Errors
 	///
 	/// [`Error::Exhausted`] once the datagram key is spent, or a net error.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>>> {
 		let Some(datagram) = ready!(self.inner.poll_recv(waiter)?) else {
 			return Poll::Ready(Ok(None));
@@ -274,15 +275,6 @@ impl Consumer {
 			Err(err) => return Poll::Ready(Err(err)),
 		};
 		Poll::Ready(Ok(Some(event)))
-	}
-
-	/// Receive the next datagram event.
-	///
-	/// # Errors
-	///
-	/// Same as [`Self::poll_recv`].
-	pub async fn recv(&mut self) -> Result<Option<Event>> {
-		kio::wait(|waiter| self.poll_recv(waiter)).await
 	}
 }
 
