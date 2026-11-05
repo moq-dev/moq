@@ -218,12 +218,14 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 		} => {
 			let mut reader = reader(Bytes::copy_from_slice(body), chunk, version);
 			let producer = track.append_group().ok()?;
-			let consumer = producer.consume();
+			let mut viewer = Viewer::new(producer.consume(), info.compress);
 			let mut group = crate::recv::Group::new(producer);
 			let framing = lite::Framing::new(info, version);
 			let mut ingest = lite::FrameIngest::new(framing, records, frame_start);
-			let end = drive(body.len(), |waiter| ingest.poll(&mut reader, &mut group, waiter));
-			(end.map(|()| "fin".to_string()), (group, consumer))
+			let end = drive(body.len(), &mut viewer, |waiter| {
+				ingest.poll(&mut reader, &mut group, waiter)
+			});
+			(end.map(|()| "fin".to_string()), (group, viewer))
 		}
 		Session::Ietf { version } => {
 			let (header, used) = ietf::GroupHeader::decode_slice(body, version).ok()?;
@@ -244,16 +246,18 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 					last: None,
 				})
 				.ok()?;
-			let consumer = producer.consume();
+			let mut viewer = Viewer::new(producer.consume(), info.compress);
 			let mut group = crate::recv::Group::new(producer);
 			let mut ingest = ietf::GroupIngest::new(version, &header, info.timescale);
-			let end = drive(body.len(), |waiter| ingest.poll(&mut reader, &mut group, waiter));
-			(end.map(|ended| format!("{ended:?}")), (group, consumer))
+			let end = drive(body.len(), &mut viewer, |waiter| {
+				ingest.poll(&mut reader, &mut group, waiter)
+			});
+			(end.map(|ended| format!("{ended:?}")), (group, viewer))
 		}
 	};
 
-	let (group, consumer) = group;
-	// Settle the group as the session does, so the reader below never waits.
+	let (group, mut viewer) = group;
+	// Settle the group as the session does, so the viewer reads to its end.
 	match &end {
 		Ok(_) => {
 			let _ = group.finish();
@@ -263,8 +267,9 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 		}
 	}
 
+	viewer.read();
 	Some(Ingested {
-		frames: read(consumer, info.compress),
+		frames: viewer.frames,
 		end: end.map_err(|err| err.to_string()),
 	})
 }
@@ -280,13 +285,16 @@ fn reader<V: coding::StreamCodes>(payload: Bytes, chunk: usize, version: V) -> S
 	coding::Reader::new(crate::transport::poll::Buffered::new(stream), version)
 }
 
-/// Poll the ingest until it settles.
+/// Poll the ingest until it settles, `viewer` reading the group between polls.
 ///
 /// The stream hands over a chunk every other poll and the ingest yields every few frames,
 /// so a stream of `len` bytes settles within a few polls per byte. One that does not is
-/// waiting on something other than the stream, which a peer could hold forever.
+/// waiting on something other than the stream, which a peer could hold forever. The ingest
+/// may also wait on the group's reader to pace a frame (see `group::Producer::poll_paced`),
+/// so the viewer keeps up as a subscriber would.
 fn drive<T>(
 	len: usize,
+	viewer: &mut Viewer,
 	mut poll: impl FnMut(&kio::Waiter) -> std::task::Poll<Result<T, crate::Error>>,
 ) -> Result<T, crate::Error> {
 	let waiter = &kio::Waiter::noop();
@@ -294,31 +302,46 @@ fn drive<T>(
 		if let std::task::Poll::Ready(res) = poll(waiter) {
 			return res;
 		}
+		viewer.read();
 	}
 	panic!("the ingest stalled on a complete {len}-byte stream");
 }
 
-/// Read every frame the group holds, in its stored form.
-fn read(consumer: group::Consumer, compress: bool) -> Vec<Seen> {
-	let mut consumer = match compress {
-		true => consumer.compressed(),
-		false => consumer,
-	};
-	let waiter = &kio::Waiter::noop();
-	let mut frames = Vec::new();
-	while let std::task::Poll::Ready(Ok(Some(object))) = consumer.poll_read_object(waiter) {
-		let fields = object.fields.as_deref().map(|Fields { id, properties }| {
-			let block = properties.block.as_ref().map(|block| block.bytes.clone());
-			(*id, block)
-		});
-		frames.push(Seen {
-			timestamp: object.frame.timestamp,
-			payload: object.frame.payload.contiguous(0),
-			fields,
-			inflated: object.inflated,
-		});
+/// The group's reader, taking every frame as soon as it is complete.
+struct Viewer {
+	consumer: group::Consumer,
+	/// Each frame taken so far, in its stored form.
+	frames: Vec<Seen>,
+}
+
+impl Viewer {
+	fn new(consumer: group::Consumer, compress: bool) -> Self {
+		let consumer = match compress {
+			true => consumer.compressed(),
+			false => consumer,
+		};
+		Self {
+			consumer,
+			frames: Vec::new(),
+		}
 	}
-	frames
+
+	/// Take every frame that is ready.
+	fn read(&mut self) {
+		let waiter = &kio::Waiter::noop();
+		while let std::task::Poll::Ready(Ok(Some(object))) = self.consumer.poll_read_object(waiter) {
+			let fields = object.fields.as_deref().map(|Fields { id, properties }| {
+				let block = properties.block.as_ref().map(|block| block.bytes.clone());
+				(*id, block)
+			});
+			self.frames.push(Seen {
+				timestamp: object.frame.timestamp,
+				payload: object.frame.payload.contiguous(0),
+				fields,
+				inflated: object.inflated,
+			});
+		}
+	}
 }
 
 /// The streams the seeds open with: one group per protocol, built from our own framing.
