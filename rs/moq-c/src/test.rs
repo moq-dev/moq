@@ -8382,11 +8382,14 @@ fn preencoded_rungs_and_rate_control() {
 	);
 	let (allocator, estimate) = test_allocator();
 	let reservation = id(moq_allocator_reserve_media(allocator, high, 4_000_000));
-	let control = id(moq_rate_control_create(moq_rate_policy {
-		max_bps: 4_000_000,
-		lower_bps: 2_000_000,
-		has_lower: true,
-	}));
+	let control = id(moq_rate_control_create(
+		reservation,
+		moq_rate_policy {
+			max_bps: 4_000_000,
+			lower_bps: 2_000_000,
+			has_lower: true,
+		},
+	));
 	let mut target = moq_rate_target {
 		enabled: false,
 		bitrate_bps: 0,
@@ -8394,15 +8397,15 @@ fn preencoded_rungs_and_rate_control() {
 	assert_eq!(unsafe { moq_rate_control_target(control, &mut target) }, 0);
 	assert!(target.enabled);
 	assert_eq!(target.bitrate_bps, 4_000_000);
-	assert_eq!(unsafe { moq_rate_control_update(control, reservation, &mut target) }, 0);
+	assert_eq!(unsafe { moq_rate_control_update(control, &mut target) }, 0);
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(1_000_000)))
 		.unwrap();
-	assert_eq!(unsafe { moq_rate_control_update(control, reservation, &mut target) }, 1);
+	assert_eq!(unsafe { moq_rate_control_update(control, &mut target) }, 1);
 	// Without a probing session a rung must stay on so its grant can recover.
 	assert!(target.enabled);
 	assert_eq!(target.bitrate_bps, 1_000_000);
-	assert_eq!(unsafe { moq_rate_control_update(control, reservation, &mut target) }, 0);
+	assert_eq!(unsafe { moq_rate_control_update(control, &mut target) }, 0);
 	assert_eq!(moq_reservation_close(reservation), 0);
 	assert_eq!(moq_rate_control_close(control), 0);
 	assert_eq!(moq_allocator_close(allocator), 0);

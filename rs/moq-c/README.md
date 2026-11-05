@@ -182,9 +182,9 @@ the catalog and marks a discontinuity when disabling; resume on a keyframe.
 Audio importers do not support this toggle.
 
 Reserve each media track with `moq_allocator_reserve_media`. Create a
-`moq_rate_control_create` handle with `moq_rate_policy.max_bps` and, for higher
+`moq_rate_control_create` handle bound to the reservation, with `moq_rate_policy.max_bps` and, for higher
 rungs, `has_lower` and `lower_bps`. Read its initial `moq_rate_control_target`,
-then call `moq_rate_control_update` with the reservation on every frame,
+then call `moq_rate_control_update` on every frame,
 including while disabled. A return of 1 writes a changed target; 0 holds the
 last target; a negative return is an error. Apply the target's `bitrate_bps`
 to your encoder and `enabled` through `moq_publish_media_set_enabled`.

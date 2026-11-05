@@ -13,8 +13,24 @@ pub(crate) struct Bandwidth {
 	reservations: NonZeroSlab<Arc<moq_net::bandwidth::Reservation>>,
 	consumers: NonZeroSlab<Arc<Consumer>>,
 	viewers: NonZeroSlab<moq_net::bandwidth::Viewers>,
-	controls: NonZeroSlab<moq_mux::rate::Control>,
+	controls: NonZeroSlab<RateControl>,
 	viewer: NonZeroSlab<moq_net::bandwidth::Viewer>,
+}
+
+struct RateControl {
+	inner: moq_mux::rate::Control,
+	grant: moq_net::bandwidth::Consumer,
+}
+
+impl RateControl {
+	fn update(&mut self) -> Option<moq_mux::rate::Target> {
+		self.apply(self.grant.peek(), self.grant.probed())
+	}
+
+	fn apply(&mut self, grant: Option<moq_net::bandwidth::Rate>, probed: bool) -> Option<moq_mux::rate::Target> {
+		self.inner.set_probed(probed);
+		self.inner.update(grant, kio::clock::now())
+	}
 }
 
 impl Bandwidth {
@@ -450,18 +466,20 @@ impl From<moq_mux::rate::Target> for moq_rate_target {
 	}
 }
 
-/// Create a rate control starting at the policy's maximum bitrate.
+/// Create a rate control following this reservation, starting at the policy's maximum bitrate.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_rate_control_create(policy: moq_rate_policy) -> i32 {
+pub extern "C" fn moq_rate_control_create(reservation: u32, policy: moq_rate_policy) -> i32 {
 	ffi::enter(move || {
 		let mut native = moq_mux::rate::Policy::new(moq_net::bandwidth::Rate::from_bps(policy.max_bps));
 		native.lower = policy
 			.has_lower
 			.then(|| moq_net::bandwidth::Rate::from_bps(policy.lower_bps));
-		State::lock()
-			.bandwidth
-			.controls
-			.insert(moq_mux::rate::Control::new(native))
+		let mut state = State::lock();
+		let grant = state.bandwidth.reservation(ffi::parse_id(reservation)?)?.consume();
+		state.bandwidth.controls.insert(RateControl {
+			inner: moq_mux::rate::Control::new(native),
+			grant,
+		})
 	})
 }
 
@@ -478,34 +496,33 @@ pub unsafe extern "C" fn moq_rate_control_target(control: u32, target: *mut moq_
 			.controls
 			.get(ffi::parse_id(control)?)
 			.ok_or(Error::NotFound)?
+			.inner
 			.target()
 			.into();
 		Ok(())
 	})
 }
 
-/// Feed a reservation's grant on every frame, returning 1 for a changed target, 0 to hold, or a negative error.
+/// Follow the bound reservation's grant on every frame, returning 1 for a changed target, 0 to hold, or a negative error.
 ///
 /// Drops apply immediately; raises ramp and small moves are ignored. No estimate holds the
 /// target. Disabling requires a probing session so the grant can recover. Apply a changed
-/// target to your encoder and `moq_publish_media_set_enabled`; the control owns neither.
+/// target to your encoder and `moq_publish_media_set_enabled`. Closing the reservation holds
+/// the last target; the control owns neither the reservation nor media.
 ///
 /// # Safety
 /// - `target` must point to writable storage, written only when the return value is 1.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_rate_control_update(control: u32, reservation: u32, target: *mut moq_rate_target) -> i32 {
+pub unsafe extern "C" fn moq_rate_control_update(control: u32, target: *mut moq_rate_target) -> i32 {
 	ffi::enter(move || {
 		let target = unsafe { target.as_mut() }.ok_or(Error::InvalidPointer)?;
 		let mut state = State::lock();
-		let reservation = state.bandwidth.reservation(ffi::parse_id(reservation)?)?;
-		let grant = reservation.consume();
 		let control = state
 			.bandwidth
 			.controls
 			.get_mut(ffi::parse_id(control)?)
 			.ok_or(Error::NotFound)?;
-		control.set_probed(grant.probed());
-		if let Some(next) = control.update(grant.peek(), kio::clock::now()) {
+		if let Some(next) = control.update() {
 			*target = next.into();
 			Ok(1i32)
 		} else {
@@ -529,6 +546,37 @@ pub extern "C" fn moq_rate_control_close(control: u32) -> i32 {
 
 #[cfg(test)]
 mod consumer_tests {
+	#[tokio::test(start_paused = true)]
+	async fn rate_control_probing_disables_and_recovers() {
+		use moq_mux::rate::{Control, Policy, Target};
+		use moq_net::bandwidth::Rate;
+		let estimate = moq_net::bandwidth::Producer::new();
+		let mut policy = Policy::new(Rate::from_bps(6_000_000));
+		policy.lower = Some(Rate::from_bps(2_000_000));
+		let mut control = RateControl {
+			inner: Control::new(policy),
+			grant: estimate.consume(),
+		};
+		assert_eq!(
+			control.apply(Some(Rate::from_bps(3_000_000)), true),
+			Some(Target::Disabled)
+		);
+		assert_eq!(control.apply(None, true), None);
+		tokio::time::advance(std::time::Duration::from_secs(4)).await;
+		assert!(matches!(
+			control.apply(Some(Rate::from_bps(6_000_000)), true),
+			Some(Target::Enabled(_))
+		));
+		assert_eq!(
+			control.apply(Some(Rate::from_bps(3_000_000)), true),
+			Some(Target::Disabled)
+		);
+		assert!(matches!(
+			control.apply(Some(Rate::from_bps(3_000_000)), false),
+			Some(Target::Enabled(_))
+		));
+	}
+
 	use super::*;
 	use crate::ffi::ReturnCode;
 
