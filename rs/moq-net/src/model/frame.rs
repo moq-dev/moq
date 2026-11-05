@@ -343,7 +343,6 @@ impl<const N: usize> Buffer<N> {
 	}
 
 	/// Whether the buffer holds no frames.
-	#[cfg(test)]
 	pub fn is_empty(&self) -> bool {
 		self.0.is_empty()
 	}
