@@ -109,7 +109,7 @@ impl std::str::FromStr for Fingerprint {
 			return Err(INVALID);
 		}
 		let mut bytes = [0; 32];
-		for (byte, pair) in bytes.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+		for (byte, pair) in bytes.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
 			let pair = std::str::from_utf8(pair).map_err(|_| INVALID)?;
 			*byte = u8::from_str_radix(pair, 16).map_err(|_| INVALID)?;
 		}
