@@ -312,6 +312,7 @@ impl Ahead {
 /// once it finished, or `None` once a range bounded inside it ends at or below its live
 /// edge. A range reaching past the edge of the track's newest group, which is live, is
 /// refused; an older group still arriving, such as a relay's fill, is waited on to finish.
+/// Each change to the group wakes it, so a bounded range is answered once the edge passes it.
 fn poll_settle(
 	waiter: &kio::Waiter,
 	track: &track::Consumer,
@@ -336,9 +337,10 @@ fn poll_settle(
 	if range.until(sequence).is_some_and(|until| until <= edge) {
 		return Poll::Ready(Ok(None));
 	}
-	// The subscription starts at the saved Largest Object, so the prefix is all there.
+	// A joining FETCH ends where its subscription starts, at the saved Largest Object, so
+	// its prefix is still arriving rather than live.
 	if joined {
-		return Poll::Ready(Err((Error::NotFound, "joining prefix unavailable".into())));
+		return Poll::Pending;
 	}
 	if track.is_live() && track.latest_sequence().is_none_or(|latest| sequence >= latest) {
 		return Poll::Ready(Err((
@@ -6949,6 +6951,9 @@ impl FetchGroupWrite {
 			match &mut self.state {
 				FetchGroupState::Yield => {
 					ready!(self.budget.poll_yield(waiter));
+					if self.group.wire().is_some_and(|wire| !wire.fetchable) {
+						return Poll::Ready(Err(Error::Unsupported));
+					}
 					if Self::capped(self.slice, self.index) {
 						return Poll::Ready(self.finish());
 					}
