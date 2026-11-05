@@ -44,7 +44,7 @@ const END_OF_TRACK = new Uint8Array([0, 0, 0x4]);
 function groupStream(subscriber: Subscriber, groupId: bigint, flags = FLAGS) {
 	let controller!: ReadableStreamDefaultController<Uint8Array>;
 	const readable = new ReadableStream<Uint8Array>({ start: (c) => (controller = c) });
-	const header = new GroupMessage({ trackAlias: ALIAS, groupId, subGroupId: 0, publisherPriority: 0, flags });
+	const header = new GroupMessage({ trackAlias: ALIAS, groupId, subGroupId: 0n, publisherPriority: 0, flags });
 	const handled = subscriber.handleGroup(header, new Reader(readable, undefined, VERSION));
 	return {
 		write: (bytes: Uint8Array) => controller.enqueue(bytes),
@@ -61,7 +61,7 @@ async function subscribed(largest?: bigint) {
 	const reader = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ delay: { max: Milli(60_000) } });
+		.subscribe({ ranges: [{ start: { relative: 0n } }], delay: { max: Milli(60_000) } });
 
 	const peer = await Stream.accept(pair.client, VERSION);
 	if (!peer) throw new Error("the subscriber never opened a subscribe stream");

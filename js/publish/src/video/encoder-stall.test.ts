@@ -117,15 +117,14 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal(track),
-		hls: () => undefined,
-		hlsHint: new Signal(undefined),
+		joinInterval: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
 		},
 	};
 	const encoder = new Encoder("video", {
-		broadcast: { video: () => rendition, order } as never,
+		broadcast: { video: () => rendition, order, join: new Signal(undefined) } as never,
 		capture: {
 			in: { source: new Signal({ getSettings: () => ({ frameRate: 25 }), getConstraints: () => ({}) }) },
 			out: { display: new Signal({ width: 640, height: 480 }), frames: new Signal(fanout) },

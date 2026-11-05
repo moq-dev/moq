@@ -33,6 +33,11 @@ MKV buffering fix to release, which stays exposed until then. Backport it to
 (maintainer, 2026-11-03). A blanket size cap would refuse supported inputs and
 miss the decoder's captured children, as
 [moq-dev/moq#7718](https://github.com/moq-dev/moq/pull/7718) measured.
+It likewise ships [moq-dev/moq#7708](https://github.com/moq-dev/moq/pull/7708)'s
+resumed-history fix: release (moq-net 0.3.20) loses a resumed IETF reader's
+cached groups on drafts 14 to 22. ✅ No backport (maintainer, 2026-11-04;
+[moq-dev/moq#7815](https://github.com/moq-dev/moq/pull/7815)), so check
+both fixes reach release.
 
 Recurs once per major release (decided 2026-10-19). The PR that finishes the
 cut shifts the milestones up, as the root [questline](/quest/README.md)

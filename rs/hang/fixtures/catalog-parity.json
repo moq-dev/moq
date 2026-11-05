@@ -3375,7 +3375,7 @@
 		"refused": true
 	},
 	{
-		"name": "rendition IDs are any string",
+		"name": "video rendition IDs are any string",
 		"catalog": {
 			"video": {
 				"renditions": {
@@ -3384,11 +3384,47 @@
 					},
 					"__proto__": {
 						"codec": "avc1.64001f"
+					},
+					"constructor": {
+						"codec": "avc1.64001f"
+					},
+					"toString": {
+						"codec": "avc1.64001f"
 					}
 				}
 			}
 		},
-		"video": ["", "__proto__"]
+		"video": ["", "__proto__", "constructor", "toString"]
+	},
+	{
+		"name": "audio rendition IDs are any string",
+		"catalog": {
+			"audio": {
+				"renditions": {
+					"": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2
+					},
+					"__proto__": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2
+					},
+					"constructor": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2
+					},
+					"toString": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2
+					}
+				}
+			}
+		},
+		"audio": ["", "__proto__", "constructor", "toString"]
 	},
 	{
 		"name": "empty catalog",

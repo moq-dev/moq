@@ -15,8 +15,8 @@ use crate::container::test_util::{IDR, Live, PPS, SPS, raw_frame, video_frame};
 
 /// A drift budget no test timeline comes close to, so the exporter reads every group.
 ///
-/// The media track's full retention window, so an exporter started after publishing
-/// can still read every retained group. These tests import a whole file and only then
+/// The media track's full max age, so an exporter started after publishing
+/// can still read every fresh group. These tests import a whole file and only then
 /// export it, which the exporter's default
 /// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) collapses to the live edge:
 /// completeness has to be asked for, exactly as a real recorder does.

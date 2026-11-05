@@ -312,7 +312,6 @@ impl Mergeable for Traffic {
 			|| self.stale.bytes < prev.stale.bytes
 			|| self.stale.frames < prev.stale.frames
 			|| self.stale.groups < prev.stale.groups
-			|| self.stale.datagrams < prev.stale.datagrams
 	}
 }
 

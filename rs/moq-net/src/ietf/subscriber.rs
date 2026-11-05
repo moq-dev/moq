@@ -516,7 +516,7 @@ impl<'a> RangeWriter<'a> {
 
 	/// Finish the current group and open group `sequence`, returning the first Object ID it
 	/// starts at. The sequences between them do not exist. A group cached since it was asked
-	/// is read past, as is a datagram, which no request ever gets.
+	/// is read past, as is a datagram, which a stream track never holds.
 	fn open(&mut self, sequence: u64, datagram: bool) -> Result<u64, Error> {
 		if sequence < self.next || sequence > self.fetch.last {
 			tracing::warn!(
@@ -536,8 +536,8 @@ impl<'a> RangeWriter<'a> {
 		};
 		let producer = match datagram {
 			true => {
-				tracing::debug!(sequence, "a datagram group is not fetchable");
-				fill.reject_groups(sequence..sequence + 1, Error::NotFetchable);
+				tracing::debug!(sequence, "dropping a datagram group from a fetch");
+				fill.drop_groups(sequence..sequence + 1);
 				None
 			}
 			false => match fill.accept(sequence, None) {
@@ -3046,6 +3046,8 @@ impl Subscriber {
 				}
 				loop {
 					let adopt = kio::wait(|waiter| {
+						// Every wait here drives the fetches a lingering copy started.
+						let _ = group_fetches.poll(waiter);
 						if gate.poll_denied(waiter).is_ready() {
 							return Poll::Ready(Err(Abandon::Failed(Error::Unauthorized)));
 						}
@@ -3116,12 +3118,14 @@ impl Subscriber {
 			}
 			None => {
 				let opening = self.session.clone();
+				let mut open = crate::transport::open::Open::default();
 				let stream = match kio::wait(|waiter| {
+					let _ = group_fetches.poll(waiter);
 					if gate.poll_denied(waiter).is_ready() {
 						return Poll::Ready(Err(Error::Unauthorized));
 					}
 					validity.check(waiter)?;
-					Stream::poll_open_request(&opening, self.version, waiter)
+					Stream::poll_open(&opening, &mut open, self.version, waiter)
 				})
 				.await
 				{
@@ -3270,6 +3274,7 @@ impl Subscriber {
 			});
 			loop {
 				let setup = kio::wait(|waiter| {
+					let _ = group_fetches.poll(waiter);
 					let response = waiter.poll_future(response.as_mut());
 					if let Poll::Ready(Err(err)) = response {
 						return Poll::Ready(Setup::Response(Err(err)));
@@ -3366,7 +3371,10 @@ impl Subscriber {
 			// The publisher may already be serving before it answers. A session abort
 			// already rejected the parked request; dropping what remains is not a second one.
 			let aborted = self.remove_subscribe(request_id).is_none();
-			self.cancel_subscribe(stream).await;
+			let mut cancelling = std::pin::pin!(self.cancel_subscribe(stream));
+			group_fetches
+				.drive(|waiter| waiter.poll_future(cancelling.as_mut()))
+				.await;
 			// A resumed copy goes back to lingering, unless the session took it.
 			return resumed.filter(|_| !aborted);
 		};
@@ -3935,6 +3943,9 @@ impl Subscriber {
 												tracing::debug!(%err, "joining FETCH failed, joining at the next whole group");
 											}
 										}
+										// Cache misses keep going meanwhile, such as one the fill
+										// settling just released to FETCH the joined group.
+										let _ = group_fetches.poll(waiter);
 										poll_settled(&mut settle, waiter, &fill, count)
 									})
 									.await;
@@ -4268,12 +4279,13 @@ impl Subscriber {
 				// No ID is spent while opening a stream, so dropping a blocked open
 				// cannot leave a gap in the peer's sequential request IDs.
 				let opening = this.session.clone();
+				let mut open = crate::transport::open::Open::default();
 				let mut stream = kio::wait(|waiter| {
 					validity.check(waiter)?;
 					if let Poll::Ready(err) = track.poll_aborted(waiter) {
 						return Poll::Ready(Err(err));
 					}
-					Stream::poll_open(&opening, this.version, waiter)
+					Stream::poll_open(&opening, &mut open, this.version, waiter)
 				})
 				.await?;
 				stream = stream.with_stats(this.origin.stats());
@@ -4477,12 +4489,13 @@ impl Subscriber {
 		let dynamic = request.requests();
 		let validity = self.validity.start();
 		let opening = self.session.clone();
+		let mut open = crate::transport::open::Open::default();
 		let mut stream = match kio::wait(|waiter| {
 			if gate.poll_denied(waiter).is_ready() {
 				return Poll::Ready(Err(Error::Unauthorized));
 			}
 			validity.check(waiter)?;
-			Stream::poll_open_request(&opening, self.version, waiter)
+			Stream::poll_open(&opening, &mut open, self.version, waiter)
 		})
 		.await
 		{
@@ -4831,76 +4844,21 @@ impl Subscriber {
 		Ok(())
 	}
 
-	/// Deliver an OBJECT_DATAGRAM with private relay metadata on its subscription.
+	/// Drop an OBJECT_DATAGRAM: a subscription is a stream track's, which takes no datagrams.
 	///
-	/// A malformed datagram is a protocol error. An unbound alias is dropped, as the
-	/// draft permits instead of buffering; public readers receive only Normal payloads.
+	/// A malformed datagram is still a protocol error.
 	pub fn recv_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
 		let (datagram, _) = ietf::ObjectDatagram::decode_slice(&payload, self.version)?;
-		let (alias, sequence) = (datagram.track_alias, datagram.group_id);
-
-		let (payload, status) = match datagram.body {
-			ietf::DatagramBody::Payload(payload) => (payload, None),
-			ietf::DatagramBody::Status(status) if super::object::status_defined(status) => {
-				(bytes::Bytes::new(), Some(status))
-			}
-			ietf::DatagramBody::Status(_) => return Err(Error::Session(SessionError::ProtocolViolation)),
-		};
-
-		let mut state = self.state.lock();
-		let request_id = match state.aliases.read().map.get(&alias) {
-			Some(Alias::Active(request_id)) => *request_id,
-			_ => {
-				tracing::debug!(alias, sequence, "dropping a datagram for an unbound alias");
-				return Ok(());
-			}
-		};
-		let Some(track) = state.subscribes.get_mut(&request_id) else {
-			return Ok(());
-		};
-
-		// Like a subgroup object: a track that declared no timescale is untimed. One on a
-		// timed track without a Timestamp is refused by the model.
-		let properties = bytes::Bytes::from(datagram.properties.unwrap_or_default());
-		// A status object has no frame to hold its time, so its block keeps it.
-		let (timestamp, properties, inflated) = match status.is_some_and(|status| status != 0) {
-			true => (
-				None,
-				super::object::unframed(&properties, self.version, track.timescale)?,
-				None,
-			),
-			false => {
-				let decoded = super::object::read(&properties, self.version, track.timescale)?;
-				super::object::check_frame(&decoded.properties, track.timescale)?;
-				(decoded.timestamp, decoded.properties, decoded.inflated)
-			}
-		};
-		let Some(producer) = track.producer.as_mut() else {
-			return Ok(());
-		};
-		let inflated = match status.is_some_and(|s| s != 0) {
-			true => None,
-			false => super::object::inflated(inflated, producer.info().compress)?,
-		};
-		let stored = crate::model::datagram::Stored {
-			datagram: crate::Datagram {
-				sequence,
-				timestamp,
-				payload,
-			},
-			wire: Some(std::sync::Arc::new(crate::model::datagram::Wire {
-				object_id: datagram.object_id,
-				priority: datagram.publisher_priority,
-				end_of_group: datagram.end_of_group,
-				status,
-				properties,
-			})),
-			deflated: None,
-		};
-		match inflated {
-			Some(size) => producer.insert_deflated_datagram(stored, size)?,
-			None => producer.insert_wire_datagram(stored)?,
+		if let ietf::DatagramBody::Status(status) = datagram.body
+			&& !super::object::status_defined(status)
+		{
+			return Err(Error::Session(SessionError::ProtocolViolation));
 		}
+		tracing::debug!(
+			alias = datagram.track_alias,
+			group = datagram.group_id,
+			"dropping a datagram on a stream track's subscription"
+		);
 		Ok(())
 	}
 }
@@ -5438,10 +5396,10 @@ impl Subscriber {
 				prior_group = Some(sequence);
 			}
 
-			// A datagram cannot be reconstructed from a FETCH stream.
+			// A datagram is never a stream track's, so a FETCH stream has no group to rebuild.
 			if object.datagram {
 				tracing::debug!(?group, "a datagram group is not fetchable");
-				return Err(Error::NotFetchable);
+				return Err(Error::NotFound);
 			}
 
 			let raw = bytes::Bytes::from(object.properties.unwrap_or_default());
@@ -5632,6 +5590,7 @@ impl Subscriber {
 		// The fill is already owned by waiting readers; credit backpressures it until
 		// their demand leaves instead of refusing accepted work.
 		let opening = self.session.clone();
+		let mut open = crate::transport::open::Open::default();
 		let mut stream = match kio::wait(|waiter| {
 			validity.check(waiter)?;
 			if let Poll::Ready(err) = fill.poll_aborted(waiter) {
@@ -5644,7 +5603,7 @@ impl Subscriber {
 			if let Poll::Ready(Err(err)) = timescale.poll(waiter) {
 				return Poll::Ready(Err(err));
 			}
-			Stream::poll_open(&opening, self.version, waiter)
+			Stream::poll_open(&opening, &mut open, self.version, waiter)
 		})
 		.await
 		{
@@ -6520,6 +6479,24 @@ mod tests {
 
 	use super::*;
 
+	/// A publisher that sends no MAX_CACHE_DURATION sets no publisher limit, never the zero an
+	/// authored track defaults to; one that sends it keeps that value.
+	#[test]
+	fn a_received_track_keeps_its_max_cache_duration() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			let absent = accepted_info(&ietf::Properties::default(), version);
+			assert_eq!(absent.max_age, None, "{version}");
+			let present = accepted_info(
+				&ietf::Properties {
+					max_cache_duration: Some(std::time::Duration::from_secs(7)),
+					..Default::default()
+				},
+				version,
+			);
+			assert_eq!(present.max_age, Some(std::time::Duration::from_secs(7)), "{version}");
+		}
+	}
+
 	/// What keeps a SUBSCRIBE_NAMESPACE open until the peer ends it, while the first lives.
 	fn live() -> (kio::Producer<()>, kio::Consumer<()>) {
 		let live = kio::Producer::new(());
@@ -6778,7 +6755,7 @@ mod tests {
 		let prefix = namespaces.pop().unwrap();
 
 		let (_live, live) = live();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), Version::Draft18)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), Version::Draft18)
 			.await
 			.unwrap();
 		let mut run =
@@ -6814,7 +6791,7 @@ mod tests {
 			);
 
 			let (cancel, live) = live();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(
@@ -6912,7 +6889,7 @@ mod tests {
 			.pop()
 			.expect("one prefix");
 		let (_live, live) = live();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		// Parks on the read after the scripted NAMESPACE is consumed.
@@ -7011,7 +6988,7 @@ mod tests {
 			.pop()
 			.expect("one prefix");
 		let (_live, live) = live();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let mut run =
@@ -7076,7 +7053,7 @@ mod tests {
 			);
 
 			let (_live, live) = live();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 				.await
 				.unwrap();
 			let res = subscriber
@@ -7173,7 +7150,7 @@ mod tests {
 			let (mut subscriber, consumer, snapshot) = counted_subscriber(VERSION, true, session.clone());
 			let mut cursor = consumer.announced();
 			let (_live, live) = live();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 				.await
 				.unwrap();
 			let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(
@@ -7202,7 +7179,7 @@ mod tests {
 		let cursor = consumer.announced();
 		assert!(!cursor.is_synced());
 		let (_live, live) = live();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let mut run =
@@ -7226,7 +7203,7 @@ mod tests {
 			}
 			let (mut subscriber, _consumer, snapshot) = counted_subscriber(VERSION, true, session.clone());
 			let (_live, live) = live();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 				.await
 				.unwrap();
 			let res = subscriber
@@ -7378,124 +7355,46 @@ mod tests {
 		);
 	}
 
-	/// Relays keep datagram Object IDs, while plain readers see only normal object 0.
-	/// An unbound alias is dropped, and a malformed datagram is the peer's violation.
+	/// An OBJECT_DATAGRAM is dropped, since a subscription is a stream track's and a stream
+	/// track takes no datagrams, but a malformed one is still the peer's violation.
 	#[kio::test]
-	async fn an_object_datagram_is_a_datagram_group() {
+	async fn an_object_datagram_is_dropped() {
 		use crate::coding::Encode as _;
 		use futures::FutureExt as _;
 
 		let subscriber = subscriber_with_tracks(&[(RequestId(11), "cam", "audio")]);
 		subscriber.register_alias(RequestId(11), 7).unwrap();
-		let (mut consumer, mut relay) = {
-			let mut state = subscriber.state.lock();
-			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
-			track.timescale = Some(Timescale::MILLI);
-			let producer = track.producer.as_ref().unwrap();
-			(producer.subscribe(None), producer.subscribe(None))
-		};
-
-		let timestamp = crate::Timestamp::new(96_000, Timescale::MILLI).unwrap();
-		let datagram = |alias: u64, group_id: u64, object_id: Option<u64>, body: ietf::DatagramBody| {
-			let mut properties = Vec::new();
-			ietf::encode_object_time(
-				&mut crate::coding::Encoder::new(&mut properties, Version::Draft18.into()),
-				timestamp,
-				Timescale::MILLI,
-			)
-			.unwrap();
-			ietf::ObjectDatagram {
-				track_alias: alias,
-				group_id,
-				object_id,
-				publisher_priority: None,
-				// Only a Normal Object may carry Properties, and a status cannot end the group.
-				end_of_group: matches!(body, ietf::DatagramBody::Payload(_)),
-				properties: matches!(body, ietf::DatagramBody::Payload(_)).then_some(properties),
-				body,
-			}
-			.encode_bytes(Version::Draft18)
-			.unwrap()
-		};
-		let payload = |bytes: &'static [u8]| ietf::DatagramBody::Payload(bytes::Bytes::from_static(bytes));
-
-		// Nonzero objects survive for relays; plain readers skip them, unbound aliases, and statuses.
-		subscriber
-			.recv_datagram(datagram(7, 4, Some(1), payload(b"no")))
-			.unwrap();
-		subscriber.recv_datagram(datagram(8, 4, None, payload(b"no"))).unwrap();
-		subscriber
-			.recv_datagram(datagram(7, 9, Some(0), payload(b"yes")))
-			.unwrap();
-		subscriber
-			.recv_datagram(datagram(7, 10, None, ietf::DatagramBody::Status(END_OF_TRACK)))
-			.unwrap();
-		let Poll::Ready(Ok(Some(first))) = relay.poll_recv_stored_datagram(&kio::Waiter::noop()) else {
-			panic!("the relay did not receive the object");
-		};
-		assert_eq!(first.sequence, 4);
-		assert_eq!(first.wire.as_ref().unwrap().object_id, Some(1));
-		assert_eq!(&first.payload[..], b"no");
-		let received = consumer.recv_datagram().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(received.sequence, 9, "the Group ID is the sequence");
-		assert_eq!(received.timestamp, Some(timestamp));
-		assert_eq!(&received.payload[..], b"yes");
-		assert!(
-			consumer.recv_datagram().now_or_never().is_none(),
-			"only the normal object 0 payload got through"
-		);
-
-		// A status datagram cannot end the group.
-		let malformed = bytes::Bytes::from_static(&[0x22, 0x07, 0x04, 0x00]);
-		assert!(is_protocol_violation(&subscriber.recv_datagram(malformed).unwrap_err()));
-	}
-
-	/// A datagram that lands before SUBSCRIBE_OK binds its alias is dropped, not held for the
-	/// subscription to replay once it is bound. The reader was already subscribed, so only the
-	/// missing alias can have dropped it.
-	#[kio::test]
-	async fn a_datagram_before_its_alias_is_dropped() {
-		use crate::coding::Encode as _;
-		use futures::FutureExt as _;
-
-		let subscriber = subscriber_with_tracks(&[(RequestId(11), "cam", "audio")]);
 		let mut consumer = {
 			let mut state = subscriber.state.lock();
 			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
 			track.timescale = Some(Timescale::MILLI);
 			track.producer.as_ref().unwrap().subscribe(None)
 		};
-		let datagram = |group_id: u64| {
-			let mut properties = Vec::new();
-			ietf::encode_object_time(
-				&mut crate::coding::Encoder::new(&mut properties, Version::Draft18.into()),
-				crate::Timestamp::new(96_000, Timescale::MILLI).unwrap(),
-				Timescale::MILLI,
-			)
-			.unwrap();
-			ietf::ObjectDatagram {
-				track_alias: 7,
-				group_id,
-				object_id: None,
-				publisher_priority: None,
-				end_of_group: true,
-				properties: Some(properties),
-				body: ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"d")),
-			}
-			.encode_bytes(Version::Draft18)
-			.unwrap()
-		};
 
-		subscriber.recv_datagram(datagram(4)).unwrap();
-		subscriber.register_alias(RequestId(11), 7).unwrap();
-		subscriber.recv_datagram(datagram(5)).unwrap();
+		let mut properties = Vec::new();
+		ietf::encode_object_time(
+			&mut crate::coding::Encoder::new(&mut properties, Version::Draft18.into()),
+			crate::Timestamp::new(96_000, Timescale::MILLI).unwrap(),
+			Timescale::MILLI,
+		)
+		.unwrap();
+		let datagram = ietf::ObjectDatagram {
+			track_alias: 7,
+			group_id: 4,
+			object_id: None,
+			publisher_priority: None,
+			end_of_group: true,
+			properties: Some(properties),
+			body: ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"d")),
+		}
+		.encode_bytes(Version::Draft18)
+		.unwrap();
+		subscriber.recv_datagram(datagram).unwrap();
+		assert!(consumer.recv_group().now_or_never().is_none(), "no group arrives");
 
-		let received = consumer.recv_datagram().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(received.sequence, 5);
-		assert!(
-			consumer.recv_datagram().now_or_never().is_none(),
-			"group 4 never arrives"
-		);
+		// A status datagram cannot end the group.
+		let malformed = bytes::Bytes::from_static(&[0x22, 0x07, 0x04, 0x00]);
+		assert!(is_protocol_violation(&subscriber.recv_datagram(malformed).unwrap_err()));
 	}
 
 	/// One alias naming two different tracks is the collision section 11.1 makes fatal.
@@ -8805,6 +8704,81 @@ mod tests {
 		}
 	}
 
+	/// A lingering copy's fetches keep going while a returning subscriber's SUBSCRIBE awaits
+	/// its answer: a reader leaving cancels its FETCH then, not once the answer arrives.
+	#[kio::test]
+	async fn a_resubscribe_keeps_driving_the_lingering_fetches() {
+		let version = Version::Draft22;
+		let status_ok = message(
+			ietf::TrackStatusOk::ID,
+			&ietf::TrackStatusOk {
+				largest: Some(ietf::Location { group: 3, object: 42 }),
+				properties: Default::default(),
+			},
+			version,
+		);
+		// Neither the FETCH nor the SUBSCRIBE is ever answered.
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![status_ok]);
+		let log = session.log.clone();
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			crate::time::sim(),
+			crate::driver::Transport::new(session.clone()),
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(false),
+			None,
+			peer::PeerSetup::declared(peer::Peer::default()),
+			crate::Hop::new(1).unwrap(),
+			None,
+			version,
+			tasks,
+			Default::default(),
+		);
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		// Demand with nobody subscribing learns the track from TRACK_STATUS, then lingers.
+		let mut query = std::pin::pin!(track.info());
+		assert!(futures::poll!(query.as_mut()).is_pending());
+		let request = dynamic.requested_track().await.expect("no track requested");
+		let serving = kio::clock::sim::spawn(async move {
+			subscriber
+				.run_subscribe(Path::from_static("broadcast"), dynamic, None, request)
+				.await;
+		});
+		settle().await;
+
+		let mut fetch = Box::pin(track.fetch_group(2, None));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		settle().await;
+		let _subscription = track.subscribe(None);
+		settle().await;
+		let requests = |id| {
+			let writes = log.writes.lock().unwrap().clone();
+			let mut buf = Decoder::new(&writes, version.into());
+			let mut count = 0;
+			while !buf.is_empty() {
+				let type_id = buf.varint().unwrap();
+				let size = buf.u16().unwrap();
+				buf.slice(size as usize).unwrap();
+				count += usize::from(type_id == id);
+			}
+			count
+		};
+		assert_eq!(requests(ietf::Fetch::ID), 1, "the miss FETCHed while lingering");
+		assert_eq!(requests(ietf::Subscribe::ID), 1, "the returning subscriber subscribed");
+
+		let stops = log.stops().len();
+		drop(fetch);
+		settle().await;
+		assert!(
+			log.stops().len() > stops,
+			"the abandoned FETCH is cancelled while SUBSCRIBE awaits its answer"
+		);
+		serving.abort();
+	}
+
 	/// The publisher opens no fetch stream for an empty range, so a fill against a track
 	/// with no content is owed nothing. Leaving it outstanding would withhold every later
 	/// group behind a head that is never coming.
@@ -9219,7 +9193,7 @@ mod tests {
 		);
 
 		let (_live, live) = live();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		subscriber
@@ -9308,7 +9282,7 @@ mod tests {
 		);
 
 		let (_live, live) = live();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(
@@ -9378,7 +9352,7 @@ mod tests {
 					tasks,
 					Default::default(),
 				);
-				let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 					.await
 					.unwrap();
 				let msg = ietf::PublishNamespace {
@@ -9446,7 +9420,7 @@ mod tests {
 		);
 
 		let path = crate::Path::from_static("room/host");
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let msg = ietf::PublishNamespace {
@@ -9843,7 +9817,7 @@ mod tests {
 		assert_eq!(id, 0, "the harness advertisement is the first");
 		assert!(routed_now(&consumer, "room/host").is_some(), "attached to start with");
 
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		(subscriber, consumer, stream, driver, log)
@@ -10070,7 +10044,7 @@ mod tests {
 			.start_announce(path.clone(), advert, Admit::Token(Some(hold)))
 			.unwrap();
 
-		let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), Version::Draft18)
+		let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), Version::Draft18)
 			.await
 			.unwrap();
 		let mut attached = Some(0);
@@ -10415,7 +10389,7 @@ mod tests {
 				Default::default(),
 			);
 
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let msg = ietf::Publish {
@@ -10630,7 +10604,7 @@ mod tests {
 	async fn a_publish_namespace_token_authorizes_an_uncovered_announce() {
 		const VERSION: Version = Version::Draft18;
 		let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness(VERSION, Vec::new());
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -10672,7 +10646,7 @@ mod tests {
 			let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 			let (mut subscriber, mut requests, _cred, consumer, session) =
 				auth_announce_harness_on(version, session.clone());
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
@@ -10749,7 +10723,7 @@ mod tests {
 	async fn a_refused_publish_namespace_token_is_not_announced() {
 		const VERSION: Version = Version::Draft18;
 		let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness(VERSION, Vec::new());
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -10792,7 +10766,7 @@ mod tests {
 		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		auth.granted(0, crate::auth::Grant::all());
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth);
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -10846,7 +10820,7 @@ mod tests {
 		let auth = crate::auth::Link::new(false);
 		auth.handle().authorize(&limit("room"));
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth.clone());
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let consulted = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -10903,7 +10877,7 @@ mod tests {
 		let auth = crate::auth::Link::new(false);
 		auth.handle().authorize(&crate::auth::Grant::default());
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth.clone());
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let acceptor = async move {
@@ -10974,7 +10948,7 @@ mod tests {
 		// Serve the route, which the harness leaves undriven.
 		let (tasks, mut task_set) = crate::util::TaskSet::new();
 		subscriber.tasks = tasks;
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
@@ -11053,7 +11027,7 @@ mod tests {
 			let (mut subscriber, mut requests, _cred, consumer, session) =
 				auth_announce_harness(version, publish_namespace_update_with_token(version).await);
 			let rt = subscriber.runtime.clone();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 
@@ -11130,7 +11104,7 @@ mod tests {
 		let (mut subscriber, mut requests, _cred, consumer, session) =
 			auth_announce_harness_on(VERSION, session.clone());
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -11193,7 +11167,7 @@ mod tests {
 				let (mut subscriber, mut requests, _cred, consumer, session) =
 					auth_announce_harness(version, Vec::new());
 				let rt = subscriber.runtime.clone();
-				let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 					.await
 					.unwrap();
 				let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
@@ -11271,7 +11245,7 @@ mod tests {
 		let (mut subscriber, mut requests, _cred, consumer, session) =
 			auth_announce_harness_on(VERSION, session.clone());
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -11312,7 +11286,7 @@ mod tests {
 			let (mut subscriber, mut requests, _cred, _consumer, session) =
 				auth_announce_harness(version, publish_namespace_update_with_token(version).await);
 			let rt = subscriber.runtime.clone();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 
@@ -11395,7 +11369,7 @@ mod tests {
 		for version in [Version::Draft18, Version::Draft22] {
 			let (mut subscriber, mut requests, _cred, consumer, session) =
 				auth_announce_harness(version, publish_namespace_update_with_token(version).await);
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let run = std::pin::pin!(subscriber.run_publish_namespace_stream(
@@ -11431,7 +11405,7 @@ mod tests {
 		for version in [Version::Draft18, Version::Draft22] {
 			let (mut subscriber, _requests, _cred, consumer, session) = auth_announce_harness(version, Vec::new());
 			let probe = subscriber.clone();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let run = std::pin::pin!(subscriber.run_publish_namespace_stream(
@@ -11462,7 +11436,7 @@ mod tests {
 			let (mut subscriber, _requests, _cred, consumer, session) = auth_announce_harness(version, Vec::new());
 			let auth = subscriber.auth.clone();
 			let probe = subscriber.clone();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
@@ -11508,7 +11482,7 @@ mod tests {
 		let (mut subscriber, mut requests, _cred, consumer, session) =
 			auth_announce_harness(VERSION, publish_namespace_update_with_token_and_cluster(VERSION).await);
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -11595,7 +11569,7 @@ mod tests {
 		script.extend(publish_namespace_update_token_rid(VERSION, 0x07, Some(hop_path(&[7, 11])), None).await);
 		let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness(VERSION, script);
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -11678,7 +11652,7 @@ mod tests {
 		}
 		let (mut subscriber, mut requests, _cred, _consumer, session) = auth_announce_harness(VERSION, script);
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -11738,7 +11712,7 @@ mod tests {
 		}
 		let (mut subscriber, mut requests, _cred, _consumer, session) = auth_announce_harness(VERSION, script);
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -11783,7 +11757,7 @@ mod tests {
 		}
 		let (mut subscriber, mut requests, _cred, _consumer, session) = auth_announce_harness(VERSION, script);
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -11827,7 +11801,7 @@ mod tests {
 		}
 		let (mut subscriber, mut requests, _cred, _consumer, session) = auth_announce_harness(VERSION, script);
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -11878,7 +11852,7 @@ mod tests {
 		let (mut subscriber, mut requests, _cred, consumer, session) =
 			auth_announce_harness_on(VERSION, session.clone());
 		let rt = subscriber.runtime.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -11996,7 +11970,7 @@ mod tests {
 		{
 			let (mut subscriber, mut requests, consumer, session) =
 				auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 				.await
 				.unwrap();
 			let consulted = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -12045,7 +12019,7 @@ mod tests {
 		{
 			let (mut subscriber, mut requests, consumer, session) =
 				auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 				.await
 				.unwrap();
 			let acceptor = async move {
@@ -12088,7 +12062,7 @@ mod tests {
 		]);
 		let (mut subscriber, mut requests, _cred, consumer, session) =
 			auth_announce_harness_on(VERSION, session.clone());
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let popped = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -12162,7 +12136,7 @@ mod tests {
 		let (mut subscriber, mut requests, _cred, _consumer, session) =
 			auth_announce_harness_on(VERSION, session.clone());
 		let control = subscriber.control.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let acceptor = async move {
@@ -12236,7 +12210,7 @@ mod tests {
 		]);
 		let (mut subscriber, mut requests, _cred, _consumer, session) =
 			auth_announce_harness_on(VERSION, session.clone());
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 		let acceptor = async move {
@@ -12293,7 +12267,7 @@ mod tests {
 		for (grant, admitted) in [(read_only, false), (write_only, true)] {
 			let (mut subscriber, mut requests, consumer, session) =
 				auth_announce_harness_no_ext(VERSION, Some(crate::auth::Grant::default()));
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 				.await
 				.unwrap();
 			let acceptor = async move {
@@ -12335,7 +12309,7 @@ mod tests {
 	async fn a_token_less_request_on_a_no_auth_session_is_unchanged() {
 		const VERSION: Version = Version::Draft18;
 		let (mut subscriber, _requests, consumer, session) = auth_announce_harness_no_ext(VERSION, None);
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.unwrap();
 
@@ -12502,8 +12476,10 @@ struct Join {
 ///
 /// Earlier drafts have no fill parameter. Every subscription is a live join: Largest
 /// Object, followed by a joining FETCH relative at offset 0 for that group's head. An
-/// earlier start's groups are left to the copy's fills, one FETCH per run of them, and a
-/// later start skips the head locally. A bounded end has no joining-FETCH spelling
+/// earlier start's missing groups are left to the copy's fills, one FETCH per run of them,
+/// and a later start skips the head locally. A join landing past a gap after a resumed
+/// copy's cache leaves those cached groups unjudgeable, so a finite budget gives them up
+/// rather than fetching them again. A bounded end has no joining-FETCH spelling
 /// either, so the join stays open and readers stop at their own end: refusing it would
 /// abort a resumed copy for every reader it serves.
 ///
@@ -13327,7 +13303,7 @@ mod stitch_tests {
 			.unwrap();
 			ietf::Subscribe::ID
 		};
-		let stream = Stream::open(&mut crate::driver::Transport::new(downstream.clone()), egress)
+		let stream = Stream::open(&crate::driver::Transport::new(downstream.clone()), egress)
 			.await
 			.unwrap();
 		publisher
@@ -13741,130 +13717,6 @@ mod stitch_tests {
 	}
 
 	#[kio::test]
-	async fn passthrough_preserves_datagram_objects_through_dispatch() {
-		// Also through a second relay behind a moq-lite hop with the `ietf` extension.
-		for (version, ranged, hop) in [Version::Draft22]
-			.into_iter()
-			.flat_map(|version| [(version, false), (version, true)])
-			.filter(|(version, ranged)| !*ranged || *version == Version::Draft22)
-			.flat_map(|(version, ranged)| [(version, ranged, false), (version, ranged, true)])
-		{
-			let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
-			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-			let track = broadcast
-				.create_track("video", accepted_info(&Default::default(), version))
-				.unwrap();
-			let mut h = Harness::with_timescale(Fill::Done, vec![], None);
-			h.subscriber.version = version;
-			h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().producer = Some(track.clone());
-			let properties = vec![2, 7, 3, 1, 42];
-			let mut original = Vec::new();
-			for id in [6, 7, 8] {
-				let datagram = ietf::ObjectDatagram {
-					track_alias: ALIAS,
-					group_id: SEQUENCE,
-					object_id: Some(id),
-					// An omitted priority inherits the track default, which the
-					// downstream response need not carry.
-					publisher_priority: (id != 6).then_some(200),
-					end_of_group: false,
-					properties: (id != 8).then(|| properties.clone()),
-					body: if id == 8 {
-						ietf::DatagramBody::Status(END_OF_GROUP)
-					} else {
-						ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"object"))
-					},
-				};
-				h.subscriber
-					.recv_datagram(datagram.encode_bytes(version).unwrap())
-					.unwrap();
-				original.push(datagram);
-			}
-			track.finish().unwrap();
-			let (served, _sessions, _copy) = match hop {
-				true => {
-					let (served, sessions) = crate::lite::ietf::test_hop(&origin, "room", [true, true]).await;
-					// The hop learns the track's info first, and holds the copy for the SUBSCRIBE
-					// below: a SUBSCRIBE sent alongside the TRACK has the cache replayed as
-					// datagrams before the TRACK_INFO they are read with, and they are dropped.
-					let copy = served
-						.consume()
-						.request("room", None)
-						.await
-						.unwrap()
-						.track("video")
-						.unwrap();
-					copy.info().await.unwrap();
-					(served, Some(sessions), Some(copy))
-				}
-				false => (origin, None, None),
-			};
-			let downstream = ScriptedSession::per_stream(vec![vec![]]).with_datagrams(65535);
-			let peer = peer::PeerSetup::default();
-			peer.set(peer::Peer::default());
-			let publisher = crate::ietf::Publisher::new(
-				crate::time::sim(),
-				crate::driver::Transport::new(downstream.clone()),
-				served.consume(),
-				Control::new(false),
-				None,
-				peer,
-				version,
-			);
-			let subscribe = ietf::Subscribe {
-				max_age: None,
-				new_group: None,
-				request_id: RequestId(3),
-				track_namespace: Path::from_static("room"),
-				track_name: "video".into(),
-				subscriber_priority: 128,
-				group_order: ietf::GroupOrder::Ascending,
-				filter: if ranged {
-					Filter::Absolute {
-						start: ietf::Location {
-							group: SEQUENCE,
-							object: 7,
-						},
-						end: Some(ietf::EndLocation {
-							group: SEQUENCE,
-							object: Some(7),
-						}),
-					}
-				} else {
-					Filter::Unfiltered
-				},
-				fill: None,
-				properties_wanted: true,
-				forward: true,
-				rendezvous: false,
-				range_filters: false,
-				authorization_token: None,
-			};
-			let mut body = Vec::new();
-			subscribe
-				.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
-				.unwrap();
-			let stream = Stream::open(&mut crate::driver::Transport::new(downstream.clone()), version)
-				.await
-				.unwrap();
-			publisher
-				.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream)
-				.unwrap()
-				.await;
-			let sent = downstream.log.datagrams.lock().unwrap();
-			original.retain(|datagram| !ranged || datagram.object_id == Some(7));
-			assert_eq!(sent.len(), original.len(), "{version} ranged={ranged} hop={hop}");
-			let inherited = super::super::priority::to_wire(track.publisher_priority());
-			for (bytes, mut expected) in sent.iter().zip(original) {
-				expected.track_alias = 3;
-				expected.publisher_priority = expected.publisher_priority.or(Some(inherited));
-				let (actual, _) = ietf::ObjectDatagram::decode_slice(bytes, version).unwrap();
-				assert_eq!(actual, expected);
-			}
-		}
-	}
-
-	#[kio::test]
 	async fn passthrough_translates_mutable_property_encodings() {
 		for ingress in [Version::Draft22] {
 			let mut properties = Vec::new();
@@ -13916,45 +13768,6 @@ mod stitch_tests {
 			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
 			assert_eq!(read_group(&mut consumer).await, (SEQUENCE, vec![(None, vec![42]); 3]));
 		}
-	}
-
-	/// Relays retain a datagram's Object ID; a plain reader skips it until object 0 arrives.
-	#[kio::test]
-	async fn passthrough_accepts_datagrams_past_object_zero() {
-		let version = Version::Draft22;
-		let mut h = Harness::with_timescale(Fill::Done, vec![], None);
-		h.subscriber.version = version;
-		let mut consumer = h.track.subscribe(None);
-		let mut plain = h.track.subscribe(None);
-		let mut datagram = ietf::ObjectDatagram {
-			track_alias: ALIAS,
-			group_id: SEQUENCE,
-			object_id: Some(6),
-			publisher_priority: Some(128),
-			end_of_group: false,
-			properties: None,
-			body: ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"object-six")),
-		};
-		h.subscriber
-			.recv_datagram(datagram.encode_bytes(version).unwrap())
-			.unwrap();
-		let received = consumer.poll_recv_stored_datagram(&kio::Waiter::noop());
-		assert!(
-			matches!(&received, Poll::Ready(Ok(Some(data)))
-				if data.payload == b"object-six"[..] && data.wire.as_ref().unwrap().object_id == Some(6)),
-			"{received:?}"
-		);
-		assert!(plain.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
-		datagram.object_id = Some(0);
-		datagram.body = ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"object-zero"));
-		h.subscriber
-			.recv_datagram(datagram.encode_bytes(version).unwrap())
-			.unwrap();
-		let received = plain.poll_recv_datagram(&kio::Waiter::noop());
-		assert!(
-			matches!(&received, Poll::Ready(Ok(Some(data))) if data.payload == b"object-zero"[..]),
-			"{received:?}"
-		);
 	}
 
 	#[kio::test]
@@ -15262,8 +15075,8 @@ mod stitch_tests {
 		buf
 	}
 
-	/// A datagram group is never fetchable, so a group fetch answered with one names it
-	/// dropped as not fetchable, caching nothing, and reads on past its payload.
+	/// A stream track takes no datagrams, so a group fetch answered with a datagram Object
+	/// drops its group, caching nothing, and reads on past its payload.
 	#[kio::test]
 	async fn a_group_fetch_drops_a_datagram_group() {
 		let mut run = GroupFetchRun::new(VERSION, datagram_object(SEQUENCE)).await;
@@ -15271,7 +15084,7 @@ mod stitch_tests {
 
 		let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
 		assert!(res.is_ok(), "{res:?}");
-		assert!(matches!(fetch.await, Err(Error::NotFetchable)));
+		assert!(matches!(fetch.await, Err(Error::NotFound)));
 		assert!(run.track.consume().peek_group(SEQUENCE).is_none(), "nothing is cached");
 	}
 
@@ -15424,7 +15237,7 @@ mod stitch_tests {
 
 		assert!(matches!(
 			h.subscriber.clone().recv_fill(&mut fill).await,
-			Err(Error::NotFetchable)
+			Err(Error::NotFound)
 		));
 		h.subscriber
 			.clone()
@@ -15527,7 +15340,7 @@ mod stitch_tests {
 			let track = track::Producer::new(
 				std::sync::Arc::new(crate::broadcast::Info::default()),
 				"video",
-				track::Info::default().with_timescale(None),
+				track::Info::default().with_timescale(None).with_max_age(None),
 			);
 
 			Self {
@@ -15689,7 +15502,10 @@ mod joining_fetch_tests {
 			scripts: [Vec<u8>; 2],
 			control: Control,
 		) -> Self {
-			let session = ScriptedSession::per_stream(Vec::from(scripts));
+			Self::subscribe(version, start, ScriptedSession::per_stream(Vec::from(scripts)), control).await
+		}
+
+		async fn subscribe(version: Version, start: Option<u64>, session: ScriptedSession, control: Control) -> Self {
 			let (tasks, _task_set) = crate::util::TaskSet::new();
 			let subscriber = Subscriber::new(
 				crate::time::sim(),
@@ -16192,6 +16008,70 @@ mod joining_fetch_tests {
 		*fill.write().ok().unwrap() = Fill::Done;
 		settle().await;
 		assert_eq!(fetches(), 1, "a settled fill leaves the miss to a FETCH");
+	}
+
+	/// The grace PUBLISH_DONE waits out for reordered data streams keeps driving cache
+	/// misses: one parked on the joined head FETCHes as soon as the fill settles, rather
+	/// than once the grace ends.
+	#[kio::test]
+	async fn a_miss_fetches_during_the_publish_done_grace() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		let session = ScriptedSession::new(subscribe_ok(version, largest)).with_read_wakes();
+		let run = JoinRun::subscribe(version, None, session, Control::new(false)).await;
+		let fetches = || {
+			decode_messages(&run.session.log, version)
+				.iter()
+				.filter(|(id, _)| *id == ietf::Fetch::ID)
+				.count()
+		};
+		let mut fetch = Box::pin(run._hold.1.fetch_group(4, None));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		settle().await;
+		assert_eq!(fetches(), 0, "the miss waits for the subscription's fill");
+
+		run.session.push(&message_bytes(
+			ietf::PublishDone::ID,
+			&ietf::PublishDone {
+				status_code: ietf::PublishDoneStatus::TrackEnded.code(),
+				stream_count: 0,
+				reason_phrase: "done".into(),
+			},
+			version,
+		));
+		settle().await;
+		assert!(
+			!run.subscriber.state.lock().subscribes.is_empty(),
+			"the grace is still running"
+		);
+
+		let fill = run
+			.subscriber
+			.state
+			.lock()
+			.subscribes
+			.values()
+			.next()
+			.unwrap()
+			.fill
+			.clone();
+		*fill.write().ok().unwrap() = Fill::Done;
+		settle().await;
+		assert!(
+			!run.subscriber.state.lock().subscribes.is_empty(),
+			"the grace is still running"
+		);
+		assert_eq!(
+			fetches(),
+			1,
+			"a settled fill leaves the miss to a FETCH during the grace"
+		);
+
+		kio::clock::sleep(crate::ledger::GRACE * 2).await;
+		assert!(
+			run.subscriber.state.lock().subscribes.is_empty(),
+			"PUBLISH_DONE ended the subscription"
+		);
 	}
 
 	/// A malformed answer to the joining FETCH is not a refusal: the peer broke the

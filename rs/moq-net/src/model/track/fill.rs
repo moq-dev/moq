@@ -1045,9 +1045,8 @@ impl Fill {
 		self.inner.result.clone()
 	}
 
-	/// Refuse `groups` with the source's answer to a request for them: only a lone datagram
-	/// group, or [`Error::Old`] under the publisher's max age (with every older group of the
-	/// fill), is named dropped.
+	/// Refuse `groups` with the source's answer to a request for them: only [`Error::Old`]
+	/// under the publisher's max age (with every older group of the fill) is named dropped.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn reject_groups(&self, groups: ops::Range<u64>, err: Error) {
 		self.inner.reject(groups, err, self.max_delay());
@@ -1232,9 +1231,6 @@ impl Inner {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn reject(&self, groups: ops::Range<u64>, err: Error, asked: Option<Duration>) {
 		match err {
-			// A datagram is never cached, so no request ever gets it. Only a request for that
-			// one group says which group it was.
-			Error::NotFetchable if groups.end - groups.start == 1 => self.drop_groups(groups, err, asked),
 			// Stale under the fill's budget, and so is every group older than it: a timed
 			// track's starts never rewind. Only the publisher's max age binds every reader;
 			// under the fill's own budget they are withdrawn, for a reader with a wider one.
@@ -1428,9 +1424,9 @@ impl GroupFill {
 		self.inner.accept(self.sequence, info.into())
 	}
 
-	/// Refuse the group with the source's answer, for the readers waiting now. Only a
-	/// datagram, or [`Error::Old`] under the publisher's max age (with every older group of
-	/// the fill), names it dropped.
+	/// Refuse the group with the source's answer, for the readers waiting now. Only
+	/// [`Error::Old`] under the publisher's max age (with every older group of the fill)
+	/// names it dropped.
 	pub(crate) fn reject(self, err: Error) {
 		self.inner.reject(self.sequence..self.sequence + 1, err, self.max_delay);
 	}

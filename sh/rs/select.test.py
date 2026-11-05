@@ -124,14 +124,27 @@ class SelectTest(unittest.TestCase):
             self.assertEqual(self.selected(f"sh/rs/{owner}-features.sh"), [])
 
     def test_gate_leaves_send_depth_to_nightly(self):
-        # Nightly runs `rs send-depth` on the pinned toolchain; the gate's lint
-        # is the one cargo pass.
+        # Nightly runs `rs send-depth` on the pinned toolchain.
         for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "Cargo.lock"):
             with self.subTest(path=path):
                 calls = self.selected(path)
-                self.assertEqual(len(calls), 1, calls)
+                self.assertEqual(len(calls), 2, calls)
                 self.assertTrue(calls[0].startswith("rs lint "), calls)
+                self.assertEqual(calls[1], "rs media-defaults", calls)
         self.assertEqual(self.selected("sh/rs/send-depth.sh"), [])
+
+    def test_media_defaults_are_isolated_from_device_features(self):
+        for path in ("rs/moq-audio/src/lib.rs", "rs/moq-video/src/lib.rs", "Cargo.lock"):
+            for github_actions in (False, True):
+                with self.subTest(path=path, github_actions=github_actions):
+                    calls = self.selected(path, github_actions=github_actions)
+                    self.assertEqual(calls[-1], "rs media-defaults", calls)
+                    self.assertEqual(calls.count("rs media-defaults"), 1, calls)
+        # A crate with no media dependents needs no extra compile.
+        for action in ("lint", "test"):
+            self.assertNotIn("rs media-defaults", self.selected("rs/moq-auth/src/lib.rs", action=action))
+        # The device-feature test build stays a single build.
+        self.assertNotIn("rs media-defaults", self.selected("rs/moq-audio/src/lib.rs", action="test"))
 
     def test_device_features_join_the_one_test_build(self):
         for path, features in (
@@ -449,11 +462,11 @@ class FeatureTest(unittest.TestCase):
                 calls = self.trace("net", net_features=f'moq-net feature "{feature}"', expected_returncode=1)
                 self.assertTrue(all(call.startswith("tree ") for call in calls), calls)
 
-    def test_tokio_keeps_extremes_and_crypto_contracts(self):
+    def test_tokio_keeps_extremes_and_transport_contracts(self):
         boundary = self.trace("tokio")
         exhaustive = self.trace("tokio", "--all")
         self.assertEqual(sum(call.startswith("clippy ") for call in boundary), 3)
-        self.assertEqual(sum(call.startswith("clippy ") for call in exhaustive), 12)
+        self.assertEqual(sum(call.startswith("clippy ") for call in exhaustive), 9)
         self.assertTrue(any(" --tests " in call for call in boundary))
         self.assertFalse(any(" --all-targets " in call for call in boundary))
         self.assertTrue(any(" --all-targets " in call for call in exhaustive))
@@ -477,10 +490,6 @@ class FeatureTest(unittest.TestCase):
 
 CARGO_STUB = r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FEATURE_CALLS"
-if [[ "$*" == 'check --locked -p moq-tokio --no-default-features --features quic' ]]; then
- echo 'a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature' >&2
- exit 1
-fi
 if [[ $1 == tree ]]; then
  if [[ "$*" == *'-i moq-net'* ]]; then
   printf '%s\n' "${FEATURE_NET_FEATURES:-}"

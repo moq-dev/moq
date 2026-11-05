@@ -6,7 +6,6 @@ import { Format as Format_1 } from "@moq/hang/container";
 import { Micro } from "@moq/clock";
 import { Milli } from "@moq/clock";
 import { Net } from "@moq/hang";
-import { Recorder } from "@moq/hang/hls";
 import { Signals } from "@moq/hang";
 import { Video } from "@moq/hang/catalog";
 
@@ -60,7 +59,7 @@ export namespace Legacy {
 	}
 	export { Frame };
 	export class Producer {
-		constructor(track: Net.Track.Producer, format: Legacy.Format, recorder?: Recorder);
+		constructor(track: Net.Track.Producer, format: Legacy.Format);
 		close(err?: Error): void;
 		discontinuity(end?: Micro): void;
 		encode(data: Uint8Array | Legacy.Source, timestamp: Micro, keyframe: boolean): void;
@@ -73,6 +72,8 @@ export namespace Legacy {
 }
 
 export * as Loc from "@moq/loc";
+
+export const MAX_AGE: Milli;
 
 export type Read = {
 	frame: ReceivedFrame;
@@ -93,11 +94,11 @@ export interface ReceivedFrame extends Frame {
 }
 
 export type TrackInfoOptions = {
-	maxAge?: Milli;
+	maxAge?: Milli | null;
 	priority: number;
 };
 
 export function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): BufferedRanges;
 
-export function trackInfo(options: TrackInfoOptions): Partial<Net.Track.Info>;
+export function trackInfo(options: TrackInfoOptions): Net.Track.InfoInit;
 ```

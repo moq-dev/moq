@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Datagrams are their own track kind ([#7752](https://github.com/moq-dev/moq/pull/7752))
+
+`e2ee::track::Producer::{append_datagram, insert_datagram}` and `e2ee::track::Consumer::{poll_recv_datagram, recv_datagram}` are removed. Create a datagram track with `e2ee::broadcast::Producer::create_datagrams(name, info)` and read it with `e2ee::broadcast::Consumer::datagrams(name)`, which return `datagram::Producer` (`append`, `insert`) and `datagram::Consumer` (`recv`, yielding the same `datagram::Event`). Its sequence is its own, not the stream track's group counter, and its key domain stays separate.
+
 ### Features gate signing and encryption
 
 The `sign` and `e2ee` modules sit behind default features of the same names.

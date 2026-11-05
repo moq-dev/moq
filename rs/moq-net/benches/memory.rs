@@ -148,7 +148,9 @@ impl Link {
 		);
 
 		let broadcast = publisher.create_broadcast("bench").unwrap();
-		let info = track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		let info = track::Info::default()
+			.with_max_age(None)
+			.with_timescale(moq_net::Timescale::MILLI);
 		let tracks: Vec<_> = (0..streams)
 			.map(|index| broadcast.create_track(format!("{index}"), info.clone()).unwrap())
 			.collect();

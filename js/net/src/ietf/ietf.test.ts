@@ -687,7 +687,7 @@ test("group flags round-trip firstObject", async () => {
 		new Group({
 			trackAlias: 7n,
 			groupId: 3n,
-			subGroupId: 0,
+			subGroupId: 0n,
 			publisherPriority: 0,
 			flags: {
 				hasExtensions: false,

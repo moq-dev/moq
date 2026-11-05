@@ -65,7 +65,7 @@ Open, for this quest's interview:
 - How a publisher answering a range walks the drop set's runs in group
   order, and where FETCH_OK's End Location falls.
 
-Test across Rust and JS on drafts 18, 20, and 22, with and without the extension. Draft 20 added 2026-11-03 (maintainer, /quest-plan of the follow-ups from [moq-dev/moq#7704](https://github.com/moq-dev/moq/pull/7704)), since draft 20 joined the covered drafts in [interop coverage](/quest/m1/interop-coverage/README.md).
+Test across Rust and JS on drafts 18, 20, and 22, with and without the extension. Draft 20 added 2026-11-03 (maintainer, /quest-plan of the follow-ups from [moq-dev/moq#7704](https://github.com/moq-dev/moq/pull/7704)), since draft 20 joined the covered drafts in [interop coverage](https://github.com/moq-dev/moq/blob/acef90cf0425d9f0e4e699759cede07adfb2ecfb/quest/m1/interop-coverage/README.md).
 A range over a copy whose holes are all proven is answered with `0x8C` runs.
 A range with an unknown hole is still refused. Regression: an upstream
 reports G stale for a narrow subscriber while still holding G; a wider

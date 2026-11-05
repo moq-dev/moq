@@ -24,8 +24,9 @@ stays on its mutex.
   shared track it keeps is still the most contended channel, with one reader
   per worker. Nor does the cluster spike (2026-11-01, same epic): a relay
   per thread took every channel's lock wait to zero, but its win is
-  conditional on a worker mesh that never re-announces peer routes, which is
-  not planned yet. If relay-per-thread lands, adoption is likely abandoned;
+  conditional on a worker mesh that never re-announces peer routes, which
+  [its plan](/quest/m2/perf/kio-channel-contention/relay-per-thread.md)
+  weighs, deciding whether adoption waits on it. If relay-per-thread lands, adoption is likely abandoned;
   until then the shared model stays.
 - Audit moq-net (and moq-relay's `critical.rs`) for other state that is
   appended at the back, read by cursor, and evicted from the front, beyond

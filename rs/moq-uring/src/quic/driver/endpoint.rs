@@ -88,7 +88,7 @@ impl Endpoint {
 	/// driver run there, and a socket adopted as a reuseport member steers
 	/// the ids this endpoint issues to itself. Refused once that worker has
 	/// been dropped, since nothing would ever drive the endpoint.
-	pub fn new(socket: udp::Socket, config: Config) -> Result<Self, Error> {
+	pub fn new(config: Config, socket: udp::Socket) -> Result<Self, Error> {
 		let owner = socket.owner();
 		let Some(handle) = owner.handle() else {
 			return Err(Error::Io(Shared::gone_error().to_string()));

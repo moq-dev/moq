@@ -86,6 +86,11 @@ impl Tail {
 		self.ledger.covers(groups)
 	}
 
+	/// See [`Ledger::accounted`].
+	pub fn accounted(&self, groups: Range<u64>) -> impl Iterator<Item = Range<u64>> + '_ {
+		self.ledger.accounted(groups)
+	}
+
 	/// See [`Ledger::folds_at`].
 	#[cfg(test)]
 	pub fn folds_at(&self, group: u64) -> Option<Instant> {

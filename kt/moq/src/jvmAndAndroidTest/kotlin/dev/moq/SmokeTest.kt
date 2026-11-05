@@ -24,6 +24,8 @@ import dev.moq.video.FrameRate as VideoFrameRate
 import dev.moq.video.Producer as VideoProducer
 import dev.moq.video.ProducerOptions as VideoProducerOptions
 import dev.moq.video.ReadFrame as VideoReadFrame
+import java.net.DatagramSocket
+import java.net.InetAddress
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -65,6 +67,30 @@ private fun opusHead(): ByteArray =
         )
 
 class SmokeTest {
+    @Test
+    fun `datagram-only requests have independent priority demand`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val stream = broadcast.publishTrack("events", null)
+            val requests = broadcast.requests().datagrams()
+            val consumer = broadcast.consume().datagrams("events")
+            consumer.setPriority(12)
+            val request = requests.requested()
+            assertEquals("events", request.name())
+            assertEquals(12.toByte(), request.priority())
+            val producer = request.accept(null)
+            assertEquals(12.toByte(), producer.priority())
+            assertNull(stream.demand().wanted())
+            producer.insert(Datagram(7uL, null, "seven".encodeToByteArray()))
+            val datagram = assertNotNull(consumer.recv())
+            assertEquals(7uL, datagram.sequence)
+            assertEquals("seven", datagram.payload.decodeToString())
+            consumer.cancel()
+            assertNull(producer.priorityChanged(12))
+            producer.finish()
+            requests.cancel()
+        }
+    }
+
     @Test
     fun `destroyed object arguments are refused before native calls`() {
         val broadcast = BroadcastProducer()
@@ -316,7 +342,11 @@ class SmokeTest {
     @Test
     fun `an ascending subscription reads a cached backlog oldest first`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track = broadcast.publishTrack("backlog", TrackInfo(timescale = 1_000_000uL))
+            val track =
+                broadcast.publishTrack(
+                    "backlog",
+                    TrackInfo(maxAgeUnlimited = true, timescale = 1_000_000uL),
+                )
             for (ms in 0uL until 3uL) {
                 val group = track.appendGroup()
                 group.writeFrame(
@@ -371,6 +401,21 @@ class SmokeTest {
             assertNull(frame?.timestamp)
             assertNull(consumer.info().timescale)
             track.finish()
+        }
+    }
+
+    @Test
+    fun `an omitted max age is zero and the unlimited flag sets none`() {
+        BroadcastProducer().use { broadcast ->
+            val omitted = broadcast.publishTrack("omitted", null).consume(null).info()
+            assertEquals(java.time.Duration.ZERO, omitted.maxAge)
+            val unlimited =
+                broadcast
+                    .publishTrack("unlimited", TrackInfo(maxAgeUnlimited = true))
+                    .consume(null)
+                    .info()
+            assertNull(unlimited.maxAge)
+            assertTrue(unlimited.maxAgeUnlimited)
         }
     }
 
@@ -682,6 +727,33 @@ class SmokeTest {
     }
 
     @Test
+    fun `viewers watch, update, and release before the session connects`() = runTest {
+        Server.listen(
+                ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))
+            )
+            .use { server ->
+                Moq.connect(
+                        "https://${server.localAddr}",
+                        ClientConfig(tls = ClientTls(insecure = true)),
+                    )
+                    .use { moq ->
+                        val viewers: Viewers = moq.viewers()
+                        // The server never accepts, so there is no receive estimate to divide.
+                        val viewer: Viewer = viewers.watch(4_000_000uL)
+                        viewer.use {
+                            assertNull(it.rate())
+                            it.update(1_000_000uL)
+                            assertNull(it.rate())
+                        }
+                        viewers.setTarget(0uL)
+                        viewers.setTarget(null)
+                        // Past what a PROBE target carries: refused.
+                        assertFailsWith<MoqException.OutOfRange> { viewers.watch(1uL shl 53) }
+                    }
+            }
+    }
+
+    @Test
     fun `closing a server releases its port`() = runTest {
         val first =
             Server.listen(
@@ -920,25 +992,24 @@ class SmokeTest {
     /** The returned Session owns its pending dial even after Client cancellation. */
     @Test
     fun `session owns and cancels its first dial`() = runTest {
-        Server.listen(
-                ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))
-            )
-            .use { server ->
-                val client =
-                    Client(
-                        ClientConfig(
-                            bind = "127.0.0.1:0",
-                            tls = ClientTls(insecure = true),
-                            once = true,
-                        )
+        // A bound socket that never answers keeps the first dial pending, so `connects`
+        // cannot advance between the read below and the cancel.
+        DatagramSocket(0, InetAddress.getByName("127.0.0.1")).use { silent ->
+            val client =
+                Client(
+                    ClientConfig(
+                        bind = "127.0.0.1:0",
+                        tls = ClientTls(insecure = true),
+                        once = true,
                     )
-                val session = client.connect("https://${server.localAddr}")
-                client.cancel()
-                assertEquals(0uL, session.state().connects)
-                session.cancel(0u)
-                session.closed()
-                assertEquals(ConnectionPhase.CLOSED, session.state().phase)
-            }
+                )
+            val session = client.connect("https://127.0.0.1:${silent.localPort}")
+            client.cancel()
+            assertEquals(0uL, session.state().connects)
+            session.cancel(0u)
+            session.closed()
+            assertEquals(ConnectionPhase.CLOSED, session.state().phase)
+        }
     }
 
     /**

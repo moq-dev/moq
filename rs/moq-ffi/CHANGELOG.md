@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `MoqSession::viewers` returns a `MoqViewers` that divides the receive estimate
+  among watched broadcasts: `MoqViewers::watch` returns a `MoqViewer` reading its
+  slice, and the viewers' ceilings summed are the PROBE target sent to the peer.
+  Ceilings or a target past 2^53 - 1 bps are refused with the new
+  `MoqError::OutOfRange`.
 - `MoqAudioEncoder::track_init` returns the init that publishes its packets, and
   `MoqAudioEncoder::set_bitrate` retunes it live.
 - `MoqAudioDecoderOutput::delay_us` fixes the audio playout delay, and
@@ -32,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   takes the next item as it arrives, and sequence or arrival order is unchanged. A call
   the binding cancelled but has not freed yet no longer holds up the next one, and
   `cancel()` on these handles releases their state before it returns.
+- A raw track's datagrams travel on their own datagram track: they are numbered apart
+  from groups, never move `largest`, and reach a subscription from its first
+  `recv_datagram` on. See `MIGRATE.md`.
 
 ## [0.4.12](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.11...moq-ffi-v0.4.12) - 2026-10-06
 

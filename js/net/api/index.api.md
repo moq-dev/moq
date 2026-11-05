@@ -72,6 +72,21 @@ export namespace Bandwidth {
 		get rate(): Signals.Getter<number | undefined>;
 		update(max: number): void;
 	}
+	export class Viewer implements Disposable {
+		[Symbol.dispose](): void;
+		close(): void;
+		peek(): number | undefined;
+		get rate(): Signals.Getter<number | undefined>;
+		update(max: number): void;
+	}
+	export class Viewers {
+		constructor(estimate?: Signals.Getter<number | undefined>);
+		static readonly MAX_TARGET: number;
+		close(): void;
+		setTarget(target: number | undefined): void;
+		readonly target: Signals.Getter<number>;
+		watch(max: number): Bandwidth.Viewer;
+	}
 }
 
 export namespace Broadcast {
@@ -91,7 +106,7 @@ export namespace Broadcast {
 		close(): void;
 		get closed(): Signals.GetPromise<null>;
 		consume(): Broadcast.Consumer;
-		createTrack(name: string, info?: Partial<Track.Info>): Track.Producer;
+		createTrack(name: string, info?: Track.InfoInit): Track.Producer;
 		removeTrack(name: string): void;
 		track(name: string): Track.Consumer;
 	}
@@ -148,6 +163,7 @@ export namespace Connection {
 		transport?: WebTransport;
 		url: URL;
 		versions?: readonly string[];
+		viewers?: Bandwidth.Viewers;
 		websocket?: Connection.WebSocketProps;
 		webtransport?: Connection.WebTransportProps;
 	}
@@ -213,6 +229,7 @@ export namespace Connection {
 	export interface WebSocketProps {
 		delay?: Milli;
 		enabled?: boolean;
+		maxStreams?: number;
 		url?: URL;
 	}
 	export interface WebTransportProps extends Omit<WebTransportOptions, "serverCertificateHashes" | "protocols"> {
@@ -242,6 +259,7 @@ export class Connection {
 	readonly transport: Signals.Getter<Connection.Transport | undefined>;
 	url: Signals.Signal<URL | undefined>;
 	versions: Signals.Signal<readonly string[] | undefined>;
+	readonly viewers: Signals.Getter<Pick<Bandwidth.Viewers, "watch" | "setTarget" | "target"> | undefined>;
 }
 
 export namespace Error {
@@ -258,9 +276,6 @@ export namespace Error {
 		constructor(options?: {
 			cause?: unknown;
 		});
-	}
-	export class NoStreamCredit extends Error {
-		constructor(options?: ErrorOptions);
 	}
 	export class NotFound extends Error.Stream {
 		constructor(what: string, options?: {
@@ -591,7 +606,7 @@ export namespace Track {
 		time?: never;
 	} | {
 		absolute?: never;
-		relative: number;
+		relative: bigint;
 		time?: never;
 	} | {
 		absolute?: never;
@@ -657,6 +672,9 @@ export namespace Track {
 		refresh?: number;
 		timescale?: Time.Timescale | null;
 	}
+	export interface InfoInit extends Partial<Omit<Track.Info, "maxAge">> {
+		maxAge?: Milli | null;
+	}
 	export type Order = "ascending" | "descending";
 	export class Ordered {
 		close(abort?: Error): void;
@@ -686,7 +704,7 @@ export namespace Track {
 	export class Producer {
 		constructor(name: string);
 		abort(error: Error): void;
-		accept(info?: Partial<Track.Info>): this;
+		accept(info?: Track.InfoInit): this;
 		appendDatagram(timestamp: Time.Timestamp | undefined, payload: Uint8Array): bigint;
 		appendGroup(): Group.Producer;
 		close(): void;
@@ -710,7 +728,7 @@ export namespace Track {
 		start?: Track.Anchor;
 	}
 	export class Request {
-		accept(info?: Partial<Track.Info>): Track.Producer;
+		accept(info?: Track.InfoInit): Track.Producer;
 		demand(): Track.Demand;
 		readonly name: string;
 		get priority(): number;

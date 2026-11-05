@@ -4,6 +4,60 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Request opens are ordinary bidirectional opens ([#7894](https://github.com/moq-dev/moq/pull/7894))
+
+`quic::web::Session::poll_open_request` is removed. Call `poll_open_bi`, which waits for the peer's stream credit.
+
+### Transport cryptography uses rind
+
+Remove the `aws-lc-rs` and `ring` Cargo features. rind is always enabled.
+The `net` and `driver` features include certificate support, so an RTMPS-only embedder can use `net` without selecting a provider.
+Self-signed certificates and mDNS/QUIC-LB authentication use rind. Wire formats are unchanged.
+
+`crypto` now re-exports moq-crypto's `provider` module, and a CPU missing a feature rind needs is reported as `crypto::UnsupportedCpu` (`moq_crypto::provider::UnsupportedCpu`), which names the feature:
+
+- `crypto::provider()` returns `Result<Provider, UnsupportedCpu>`; add `?`. It always returns rind, independently of rustls' process default.
+- `crypto::install_default()` returns `Result<(), UnsupportedCpu>` instead of `Result<(), Provider>`. A provider the process already installed is kept and is no longer an error, so replace `let _ = crypto::install_default();` with `crypto::install_default()?;`.
+- `crypto::check()` refuses an unsupported CPU without building a provider; call it before using rind's primitives directly.
+- `tls::Error::NoCryptoProvider` is removed. TLS setup returns `tls::Error::UnsupportedCpu` before generating keys or opening connections, and `quic::Error::UnsupportedCpu` reports the same from the QUIC backend.
+- A failure to draw a self-signed certificate's random serial is `tls::Error::Rcgen`.
+
+### QUIC method names and polls match the transport layer
+
+On `quic::driver::connection::Connection` and `quic::web::Session`, rename `read_datagram()` to `recv_datagram()`.
+On both layers' `send::Stream` and `send::Finished`, rename `stopped()` to `closed()`; results and acknowledgement semantics are unchanged.
+The driver's close future still owns its stream observation and may outlive the handle.
+
+Both layers' `recv::Stream::poll_lease`, and `quic::web::recv::Stream::poll_reset`, take `&kio::Waiter` instead of `&mut Context`.
+Use `kio::wait(|waiter| stream.poll_lease(waiter, want).map_ok(...))` for a lease operation, or retain a `kio::Park` in a `Future` implementation and pass `park.hold(cx)`.
+Dropping the caller's waiter cancels its registrations while the stream stays alive.
+
+### Native WebTransport implements moq-net's poll traits ([#7771](https://github.com/moq-dev/moq/pull/7771))
+
+`quic::web` is supported as a WebTransport library without running MoQ.
+Pass its `Session` directly to moq-net.
+Remove the generic `transport::Session::new(session, address)` wrapper; a WebTransport session reports `Address::Uri` and `Session::raw(connection)` reports `Address::Setup`.
+The generic send/receive adapters, their error wrapper, and the sealed `Grouped`/`GroupedSend` traits are removed, along with every `web_transport_trait` implementation and dependency.
+Custom transports implement `moq_net::transport::poll` directly.
+
+Use `quic::web::send::Stream` and `recv::Stream` instead of `SendStream` and `RecvStream`.
+Their errors are `send::Error` and `recv::Error`.
+`finish(self)` returns a `send::Finished`, which can be awaited for acknowledgements or a peer stop; `reset(self, code)` and `stop(self, code)` consume their stream.
+Code using moq-net's poll traits keeps their mutable terminal methods.
+Session polls take `&self` and a caller-owned `&kio::Waiter`; opens also take the driver's `send::Options`, preserving full `i64` priorities and real send groups.
+
+`Session` no longer dereferences to its QUIC connection. Use `session.connection()` for QUIC-specific operations; `session.send_datagram` always applies WebTransport framing.
+`Session::stats` returns the driver's statistics snapshot. Use moq-net's `Session::metrics` for transport metrics.
+
+`Request` dereferences to `proto::ConnectRequest`; read its `url` and `protocols` fields there.
+`Request::connection()` names the underlying QUIC connection.
+`Request::respond` takes `impl Into<proto::ConnectResponse>` and requires status OK; `reject` takes an `http::StatusCode` and requires a 4xx or 5xx status.
+The Tokio `web::Server` helper and `Request::connect()` accessor are removed; accept from the driver endpoint, then call `Request::accept(connection)`.
+`send::Stream`, `send::Finished`, and `recv::Stream` expose their stream ID as `id()`.
+
+A receive stream's `closed()` observes an empty FIN without a read. When there is payload, read it before waiting for close. `poll_reset` still watches only failures, so it remains pending after a clean end.
+Invalid stream error codes fail as `InvalidReset` or `InvalidStopped`, rather than looking like a clean end.
+
 ### `connection::Observation` reports the transport and last connect ([#7776](https://github.com/moq-dev/moq/pull/7776))
 
 `Observation` adds `transport`, the live session's transport or none while offline, and `last_connected`, when a session last connected, kept while offline.

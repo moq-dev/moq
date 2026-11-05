@@ -27,15 +27,20 @@ This README's own work, after the children:
 - Confirm a scheduled run passes. Failures already owned elsewhere stay
   there: the audio near-zero p95 row belongs to
   [audio jitter target](/quest/m1/audio-jitter-target/README.md), the
-  macOS `receive_credit` timeout to
-  [test flakes](/quest/m0/test-flakes-2/README.md), and the paired bench
-  threshold to [bench CI](/quest/m1/bench-ci.md).
+  macOS `receive_credit` timeout has no owner since its quest was deleted in
+  [moq-dev/moq#6732](https://github.com/moq-dev/moq/pull/6732), so plan one under
+  [test flakes](/quest/m0/test-flakes-2/README.md) if it recurs, the paired bench
+  threshold to [bench CI](/quest/m1/bench-ci.md), and the moq-net bench
+  panics in "Rust bench targets" to
+  [moq-net's benches run to completion](/quest/m1/bench-test-mode.md).
+  The receive-windows benchmark's overcommitted cells, skipped since
+  [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838), moved to
+  [m1](/quest/m1/receive-windows-evicted.md) on 2026-11-04 (maintainer).
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [Nightly's Rust and JS audits pass](/quest/m0/nightly/audits.md) - RUSTSEC-2026-0173 and the root `bun.lock` glob and minimatch advisories are upgraded away or ignored with a reason
 - [moq-net's ingest fuzz target finds no stall](/quest/m0/nightly/ingest-fuzz.md) - the 13-byte stream that stalls ingest is fixed at its cause and kept as a regression test
 - [Nightly's shipping-size check passes](/quest/m0/nightly/shipping-size.md) - js/net, js/watch, and moq-relay growth over 5% is traced to its commits, then shrunk or accepted
-- [Nightly's Miri job stays inside its time budget](/quest/m0/nightly/miri.md) - Miri gets `rust-src`, then finishes inside its 60-minute job and 15-minute-per-test budgets
+- [Nightly's Miri job stays inside its time budget](/quest/m0/nightly/miri.md) - both Miri passes go green, with ARM timings inside the 60-minute job and 15-minute-per-test budgets

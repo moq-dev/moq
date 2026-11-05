@@ -26,16 +26,17 @@ or building a custom player.
 
 ## Wall clock
 
-A catalog root may carry a `clock` that maps PTS zero to wall time.
+A catalog's `media` section may carry a `clock` that maps PTS zero to wall time.
 `Catalog.wallClockTime(clock, pts, ptsTimescale)` turns a frame's timestamp
 into a `Date`. A `Container.Legacy` timestamp is microseconds, so pass
 `1_000_000`.
 
 ```ts
 for await (const root of Catalog.watch(broadcast)) {
-	if (!root.clock) continue; // the publisher exposes no clock
+	const clock = root.media?.clock;
+	if (!clock) continue; // the publisher exposes no clock
 	// `frame` comes from your own `Container.Legacy` consumer.
-	const captured = Catalog.wallClockTime(root.clock, frame.timestamp, 1_000_000);
+	const captured = Catalog.wallClockTime(clock, frame.timestamp, 1_000_000);
 }
 ```
 

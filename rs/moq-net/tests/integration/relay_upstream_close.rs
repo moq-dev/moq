@@ -22,9 +22,12 @@ use moq_net::track::Subscription;
 use moq_net::{Error, Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond track with no publisher max age: the frames written here carry timestamps,
+/// and superseded groups stay readable.
 fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
 }
 
 const TIMEOUT: Duration = Duration::from_secs(10);

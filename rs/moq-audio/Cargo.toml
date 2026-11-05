@@ -61,6 +61,8 @@ playback = ["dep:cpal", "dep:ringbuf", "dep:tokio", "dep:tracing"]
 # Reach devices through the Linux sound server rather than its ALSA plugin, for
 # the server's own device names and routing. These customize cpal only when
 # `capture` or `playback` activates it, so a host flag alone pulls no audio I/O.
+# Off Linux and the BSDs they do nothing, so a dependent can enable them on
+# every platform.
 pipewire = ["cpal?/pipewire"]
 pulseaudio = ["cpal?/pulseaudio"]
 # Acoustic echo cancellation wired directly between `playback` and `capture`,
@@ -136,6 +138,8 @@ objc2-screen-capture-kit = { workspace = true, features = ["SCStream", "SCSharea
 
 [dev-dependencies]
 criterion = { package = "bench-harness", path = "../bench-harness" }
+# An HLS-only viewer starting an on-demand capture.
+moq-hls = { workspace = true }
 # Reads the jitter conformance corpus at doc/concept/audio-jitter/.
 serde = { workspace = true }
 serde_json = { workspace = true }

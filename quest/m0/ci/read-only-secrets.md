@@ -35,7 +35,7 @@ JSR's repository OIDC trust while the token is unset. The repository's
 `MBX_R2_*` pair is read-only: a branch's write to `mbx-moq-dev` is refused
 with AccessDenied.
 
-Verified 2026-11-03 during the [landing recheck](/quest/m0/ci/land.md):
+Verified 2026-11-03 during the [landing recheck](https://github.com/moq-dev/moq/blob/17a81d6c64/quest/m0/ci/land.md):
 complete paginated secret metadata lists neither `APP_CLIENT_ID` nor
 `APP_PRIVATE_KEY` at organization or repository scope. The `bot` and
 `publish` Environments each list both names. The App-copy removal is done;
@@ -73,7 +73,3 @@ publish, since jobs that do not name `publish` still read it:
    publishing.
 6. Verify with the throwaway branch in the Goal, which also confirms each
    Environment refuses the branch.
-
-## Related
-
-- [Land main through GitHub's merge queue](/quest/m0/ci/land.md) - its gate credential also belongs in a protected environment
