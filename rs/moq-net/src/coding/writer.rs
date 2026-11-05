@@ -304,6 +304,7 @@ impl<S: crate::transport::poll::SendStream> Writer<S, ietf::Version> {
 
 	/// Encode an IETF `Message` to the stream as `[type_id][size][body]`, with the same
 	/// all-or-nothing buffering as [`Self::buffer_message`] and cancellation rules as [`Self::encode`].
+	#[cfg(test)]
 	pub async fn encode_message<'m, T: ietf::Message<'m>>(&mut self, msg: &T) -> Result<(), Error> {
 		self.buffer_message(T::ID, msg)?;
 		kio::wait(|waiter| self.poll_flush(waiter)).await

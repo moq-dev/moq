@@ -4065,17 +4065,8 @@ impl Publisher {
 		}
 	}
 
-	/// Advertise every namespace we can, without waiting to be asked.
-	///
-	/// moq-transport itself says nothing about which of the two discovery messages a peer
-	/// expects, and the peers that never send SUBSCRIBE_NAMESPACE are exactly the ones
-	/// expecting a publisher to announce itself, so the default has to be to announce. A
-	/// peer that would rather ask says so with the MoQ Solicit extension
-	/// ([`solicit`](super::solicit)),
-	/// and then this loop does nothing.
-	/// [`Self::serve_subscribe_namespace_stream`] also carries every
-	/// match, so a peer that did not ask hears each namespace both ways. A NAMESPACE is
-	/// discovery only, not a second route.
+	/// [`PublishNamespaces`] as a future, for tests.
+	#[cfg(test)]
 	pub async fn run_publish_namespaces(self) -> Result<(), Error> {
 		let mut run = PublishNamespaces::new(self);
 		kio::wait(|waiter| run.poll(waiter)).await
@@ -6102,20 +6093,29 @@ impl NamespaceLoop {
 	}
 }
 
-/// Advertise every namespace we can, without waiting to be asked: see
-/// [`Publisher::run_publish_namespaces`].
-struct PublishNamespaces {
+/// Advertise every namespace we can, without waiting to be asked.
+///
+/// moq-transport itself says nothing about which of the two discovery messages a peer
+/// expects, and the peers that never send SUBSCRIBE_NAMESPACE are exactly the ones
+/// expecting a publisher to announce itself, so the default has to be to announce. A
+/// peer that would rather ask says so with the MoQ Solicit extension
+/// ([`solicit`](super::solicit)),
+/// and then this loop does nothing.
+/// [`Publisher::serve_subscribe_namespace_stream`] also carries every
+/// match, so a peer that did not ask hears each namespace both ways. A NAMESPACE is
+/// discovery only, not a second route.
+pub(super) struct PublishNamespaces {
 	publisher: Publisher,
 	/// Started once the peer's SETUP says to advertise unasked.
 	run: Option<NamespaceLoop>,
 }
 
 impl PublishNamespaces {
-	fn new(publisher: Publisher) -> Self {
+	pub(super) fn new(publisher: Publisher) -> Self {
 		Self { publisher, run: None }
 	}
 
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		if self.run.is_none() {
 			if ready!(self.publisher.poll_requires_solicitation(waiter)) {
 				return Poll::Ready(Ok(()));
