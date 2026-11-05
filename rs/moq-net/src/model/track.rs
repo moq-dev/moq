@@ -6774,7 +6774,12 @@ impl Cursor {
 
 	/// The next run given up, judging the live edge first only when `probe`.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn poll_drop(&mut self, taken: &Delivered, probe: bool, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, StreamError)> {
+	fn poll_drop(
+		&mut self,
+		taken: &Delivered,
+		probe: bool,
+		waiter: &kio::Waiter,
+	) -> Poll<(ops::Range<u64>, StreamError)> {
 		self.sync();
 		if self.drops.is_none() {
 			let mut drops = Box::new(DropCursor::new(&self.state.read()));

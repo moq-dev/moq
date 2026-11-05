@@ -1657,7 +1657,8 @@ impl Consumer {
 		let Some(expiry) = &self.expiry else {
 			return false;
 		};
-		if !expiry.policy.is_expired(self.recover.as_ref().map(|recover| &recover.0), waiter) {
+		let recover = self.recover.as_ref().map(|recover| &recover.0);
+		if !expiry.policy.is_expired(recover, waiter) {
 			return false;
 		}
 
