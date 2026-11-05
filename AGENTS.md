@@ -28,7 +28,7 @@ The API is the most important thing to get right: a bad shape costs a breaking c
 - Propose alternatives when a name or shape feels awkward.
 - Short names under a module namespace (`encode::Config`, not `EncoderConfig`), mirrored across Rust, JS, and the bindings.
 - Keep package boundaries modular and reusable; prefer a module in an existing package over a one-off package.
-- Never use a huge value like `u64::MAX` as a marker (a varint spends 8 bytes on it); use 0, a separate message or type, or a boolean.
+- Never use a huge value like `u64::MAX` as a marker (it is the longest varint); use 0, a separate message or type, or a boolean.
 
 # Development
 
