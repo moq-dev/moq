@@ -56,8 +56,9 @@ Investigating the older-Bash hang first was rejected because it differs from
 the reported missing timing line. Keep the test skipped until its cause is
 verified. This PR retains evidence only; the job-table cancellation candidate
 was discarded before this head. The isolated launch race is real, but does not
-establish the cause of the pinned-shell failure. After capturing that failure,
-fix and verify the confirmed launch/cancellation race as part of this quest,
+establish the cause of the pinned-shell failure.
+
+Remaining scope: after capturing that failure, fix and verify the confirmed launch/cancellation race as part of this quest,
 even if the missing-report failure has a different cause.
 
 ## Waiting
