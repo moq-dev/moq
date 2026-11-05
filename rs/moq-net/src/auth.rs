@@ -2231,22 +2231,6 @@ impl RequestGrant {
 		latch(&held.ended, ended.clone());
 		Poll::Ready(ended)
 	}
-
-	/// Run `body`, everything a request does once admitted, until it finishes or `grant`
-	/// (when its token admitted it) ends. See [`until`].
-	///
-	/// A poll caller needs no helper: it polls [`Self::poll_ended`] ahead of its body, so this
-	/// goes once its last caller is a poll.
-	#[cfg(feature = "async")]
-	pub(crate) fn guard<F: std::future::Future + Send>(
-		grant: Option<&Self>,
-		body: F,
-	) -> impl std::future::Future<Output = std::result::Result<F::Output, Refusal>> + Send {
-		crate::util::sendable(until(body, move |waiter| match grant {
-			Some(grant) => grant.poll_ended(waiter),
-			None => Poll::Pending,
-		}))
-	}
 }
 
 /// Record `refusal` as why a request grant ended, unless an earlier end already is.
@@ -2256,33 +2240,6 @@ fn latch(ended: &kio::Producer<Option<Refusal>>, refusal: Refusal) {
 	{
 		*ended = Some(refusal);
 	}
-}
-
-/// Run `body` until it finishes, or until `ended` resolves first, which drops `body` wherever
-/// it waits.
-///
-/// An admitted request runs everything it does under this, its setup included, so authority
-/// ending at any await ends the request there, rather than only where a loop remembers to
-/// check. `ended` is polled first, so a request never acts on authority that already ended.
-/// A dropped `body` releases what it holds; anything it was writing stays buffered whole in
-/// the stream's [`Writer`](crate::coding::Writer) as long as each message is buffered before
-/// its first await, so the caller can still end the request on the wire.
-///
-/// A poll caller needs no helper: it polls `ended` ahead of its body, returning the refusal
-/// once ready, and drops the body's state with its own. This goes once its last caller is a poll.
-#[cfg(feature = "async")]
-pub(crate) async fn until<F: std::future::Future>(
-	body: F,
-	mut ended: impl FnMut(&kio::Waiter) -> Poll<Refusal>,
-) -> std::result::Result<F::Output, Refusal> {
-	let mut body = std::pin::pin!(body);
-	kio::wait(|waiter| {
-		if let Poll::Ready(refusal) = ended(waiter) {
-			return Poll::Ready(Err(refusal));
-		}
-		waiter.poll_future(body.as_mut()).map(Ok)
-	})
-	.await
 }
 
 /// Whether `grant` covers a `kind` request at `path` and has not already expired: admitting
@@ -2586,23 +2543,6 @@ impl Gate {
 		drop(self.waiting.take());
 		self.admitted = true;
 		Poll::Ready(())
-	}
-
-	/// Resolve one operation under this gate without dropping the handler's refusal path.
-	///
-	/// A poll caller runs its operation behind `ready!(gate.poll_ready(waiter))` and
-	/// [`Self::poll_refused`] instead, so this goes once its last caller is a poll.
-	#[cfg(feature = "async")]
-	pub(crate) async fn guard<T>(&mut self, operation: impl std::future::Future<Output = Result<T>>) -> Result<T> {
-		let mut operation = std::pin::pin!(operation);
-		kio::wait(|waiter| {
-			std::task::ready!(self.poll_ready(waiter));
-			if let Poll::Ready(err) = self.poll_refused(waiter) {
-				return Poll::Ready(Err(err));
-			}
-			waiter.poll_future(operation.as_mut())
-		})
-		.await
 	}
 
 	/// Resolve with why an admitted request must stop: its token's refusal once it ended, or

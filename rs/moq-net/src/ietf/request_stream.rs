@@ -347,20 +347,6 @@ pub(super) fn buffer_error<W: crate::transport::poll::SendStream>(
 	)
 }
 
-/// Write the REQUEST_ERROR refusing a `kind` request with `err`: [`buffer_error`], then
-/// [`Writer::poll_flush`].
-#[cfg(feature = "async")]
-pub(super) async fn write_error<W: crate::transport::poll::SendStream>(
-	writer: &mut Writer<W, Version>,
-	kind: super::error::request::Kind,
-	err: &Error,
-	reason: &str,
-	version: Version,
-) -> Result<(), Error> {
-	buffer_error(writer, kind, err, reason, version)?;
-	kio::wait(|waiter| writer.poll_flush(waiter)).await
-}
-
 /// A framed subscription update, preserving omitted preferences.
 #[derive(Debug)]
 pub(crate) struct Update {

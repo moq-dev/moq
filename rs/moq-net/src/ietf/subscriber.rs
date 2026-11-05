@@ -1937,20 +1937,13 @@ impl Subscriber {
 	/// other decode error leaves the session open.
 	fn reject_token(
 		&self,
-		mut stream: Stream<Transport, Version>,
+		stream: Stream<Transport, Version>,
 		kind: request::Kind,
 		err: DecodeError,
 	) -> BoxFuture<'static, ()> {
-		let reason = super::token::reason(&err);
-		let buffered =
-			super::request_stream::buffer_error(&mut stream.writer, kind, &Error::Decode(err), reason, self.version);
-		let mut refusal = buffered.map(|()| (stream, super::request_stream::Deliver::new()));
+		let mut reject = super::token::rejection(stream, kind, err, self.version);
 		Box::pin(kio::Pending::new(move |waiter: &kio::Waiter| {
-			let res = match &mut refusal {
-				Ok((stream, deliver)) => ready!(deliver.poll(waiter, &mut stream.writer)),
-				Err(err) => Err(err.clone()),
-			};
-			if let Err(err) = res {
+			if let Err(err) = ready!(reject.poll(waiter)) {
 				tracing::debug!(%err, "token refusal failed");
 			}
 			Poll::Ready(())

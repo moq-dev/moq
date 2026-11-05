@@ -119,18 +119,6 @@ pub(super) fn rejection(
 	super::request_stream::Reject::buffered(stream, buffered)
 }
 
-/// Await [`rejection`].
-#[cfg(feature = "async")]
-pub(super) async fn reject(
-	stream: Stream<Transport, Version>,
-	kind: request::Kind,
-	err: DecodeError,
-	version: Version,
-) -> Result<(), Error> {
-	let mut reject = rejection(stream, kind, err, version);
-	kio::wait(|waiter| reject.poll(waiter)).await
-}
-
 /// Encode `token` by value.
 fn encode(token: &Token, version: Version) -> Result<Vec<u8>, EncodeError> {
 	let mut value = Vec::new();

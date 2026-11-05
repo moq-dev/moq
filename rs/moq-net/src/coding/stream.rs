@@ -49,8 +49,9 @@ impl<V: StreamCodes + Clone> Stream<crate::driver::Transport, V> {
 		Poll::Ready(Ok(Self::build(send, recv, version)))
 	}
 
-	/// Open a control stream with the given version, waiting its turn for stream credit.
-	pub async fn open(session: &crate::driver::Transport, version: V) -> Result<Self, Error> {
+	/// [`Self::poll_open`] as a future, for tests.
+	#[cfg(test)]
+	pub(crate) async fn open(session: &crate::driver::Transport, version: V) -> Result<Self, Error> {
 		let mut open = crate::transport::open::Open::default();
 		kio::wait(|waiter| Self::poll_open(session, &mut open, version.clone(), waiter)).await
 	}
