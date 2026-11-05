@@ -14019,7 +14019,10 @@ mod tests {
 		for _ in 0..10 {
 			kio::clock::sim::yield_now().await;
 		}
-		assert!(replacement.subscription().is_some(), "the awaited copy never got the reader's demand");
+		assert!(
+			replacement.subscription().is_some(),
+			"the awaited copy never got the reader's demand"
+		);
 	}
 
 	/// The newcomer refuses "video", so the track drains the incumbent. The reader leaves
