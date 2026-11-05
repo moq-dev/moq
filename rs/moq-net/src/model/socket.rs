@@ -100,7 +100,6 @@ fn messages() -> track::Info {
 	track::Info::default().with_max_age(None)
 }
 
-
 mod sealed {
 	use super::*;
 
