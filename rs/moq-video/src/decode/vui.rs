@@ -99,7 +99,7 @@ fn h265(nal: &[u8]) -> Option<Option<Color>> {
 	if NALUnitType::from((nal.first()? >> 1) & 0x3f) != NALUnitType::SpsNut {
 		return None;
 	}
-	let Ok(sps) = moq_mux::codec::h265::parse_full_sps(nal) else {
+	let Ok(sps) = moq_mux::codec::h265::Sps::parse(nal) else {
 		return Some(None);
 	};
 	let (width, height) = sps.size();

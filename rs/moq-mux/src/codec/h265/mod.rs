@@ -15,7 +15,7 @@ mod sps;
 pub use export::*;
 pub use import::*;
 pub use split::*;
-pub use sps::{Sps, VideoSignal, parse_full_sps};
+pub use sps::{Sps, VideoSignal};
 
 use bytes::{Buf, Bytes, BytesMut};
 
@@ -237,7 +237,7 @@ pub(crate) fn apply_hvcc_sps(hvcc: &mp4_atom::Hvcc, config: &mut hang::catalog::
 
 /// Resolve either sample framing from the same SPS dimensions and VUI metadata.
 pub(crate) fn config_from_sps(sps_nal: &[u8], in_band: bool) -> Result<hang::catalog::VideoConfig> {
-	let sps = Sps::parse(sps_nal)?;
+	let sps = Sps::parse_or_head(sps_nal)?;
 	let color = sps.color();
 	let Sps { head, full } = sps;
 	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
@@ -283,7 +283,7 @@ pub(crate) fn config_from_sps(sps_nal: &[u8], in_band: bool) -> Result<hang::cat
 /// The picture size an SPS NAL (header included) declares, inside its conformance window. `None`
 /// when it fails to parse.
 pub(crate) fn sps_size(nal: &[u8]) -> Option<(u32, u32)> {
-	let head = Sps::parse(nal).ok()?.head;
+	let head = Sps::parse_or_head(nal).ok()?.head;
 	Some((head.width, head.height))
 }
 
@@ -510,7 +510,7 @@ pub(crate) fn build_hvcc(vps_nals: &[Bytes], sps_nals: &[Bytes], pps_nals: &[Byt
 		}
 	}
 
-	let sps = Sps::parse(first_sps)?.head;
+	let sps = Sps::parse_or_head(first_sps)?.head;
 	let arrays = [
 		(NALUnitType::VpsNut, vps_nals),
 		(NALUnitType::SpsNut, sps_nals),

@@ -4,8 +4,9 @@
 //! into parse errors, and real encoders break some of them: cameras ship `matrix_coeffs` 0 on
 //! 4:2:0, which ITU-T H.265 E.3.1 forbids and libavcodec and GStreamer decode anyway. The codec
 //! string, coded size and hvcC header only need the SPS head, which ends at
-//! `bit_depth_chroma_minus8`. So when scuffle_h265 refuses a value (`InvalidData`), [`Sps::parse`]
-//! reads the head itself. A truncated SPS, or one whose head is invalid, is still an error.
+//! `bit_depth_chroma_minus8`. So when scuffle_h265 refuses a value (`InvalidData`),
+//! [`Sps::parse_or_head`] reads the head itself. A truncated SPS, or one whose head is invalid,
+//! is still an error.
 //!
 //! scuffle_h265 also overflows on hostile values, so [`parse_full`] walks the SPS with moq-mux's
 //! own reader before handing it over, and an SPS that walk refuses falls back to its head too.
@@ -54,6 +55,13 @@ pub struct VideoSignal {
 }
 
 impl Sps {
+	/// Parse a complete SPS NAL unit after a bounded walk, including its header.
+	pub fn parse(nal: &[u8]) -> Result<Self> {
+		let full = parse_full(nal).map_err(|_| Error::SpsParse)?;
+		let head = SpsHead::from_rbsp(&full)?;
+		Ok(Self { head, full: Some(full) })
+	}
+
 	/// Return the picture size inside its conformance window.
 	pub fn size(&self) -> (u32, u32) {
 		(self.head.width, self.head.height)
@@ -71,7 +79,7 @@ impl Sps {
 	}
 
 	/// Parse an SPS NAL unit, keeping only its head when scuffle_h265 refuses a later value.
-	pub(crate) fn parse(nal: &[u8]) -> Result<Self> {
+	pub(crate) fn parse_or_head(nal: &[u8]) -> Result<Self> {
 		match parse_full(nal) {
 			Ok(rbsp) => Ok(Self {
 				head: SpsHead::from_rbsp(&rbsp)?,
@@ -288,14 +296,6 @@ fn skip_sub_layers(
 pub(crate) fn parse_full(nal: &[u8]) -> std::io::Result<scuffle_h265::SpsRbsp> {
 	check(nal)?;
 	Ok(SpsNALUnit::parse(&mut &nal[..])?.rbsp)
-}
-
-/// Parse a complete SPS NAL unit after a bounded walk, including its header.
-pub fn parse_full_sps(nal: &[u8]) -> std::io::Result<Sps> {
-	let full = parse_full(nal)?;
-	let head = SpsHead::from_rbsp(&full)
-		.map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?;
-	Ok(Sps { head, full: Some(full) })
 }
 
 /// Walk an SPS NAL unit as scuffle_h265 0.2.2 reads it, refusing the values its parser would
@@ -681,7 +681,7 @@ mod tests {
 	#[test]
 	fn head_matches_the_full_parse() {
 		for nal in [fixtures::SPS, fixtures::SPS_PYRAMID, SPS_SUB_LAYERS] {
-			let sps = Sps::parse(nal).unwrap();
+			let sps = Sps::parse_or_head(nal).unwrap();
 			assert!(sps.full.is_some(), "scuffle_h265 accepts this SPS");
 			assert_eq!(SpsHead::parse(nal), Some(sps.head));
 		}
@@ -712,13 +712,16 @@ mod tests {
 			max_sub_layers_minus1: 2,
 			..SpsHead::parse(fixtures::SPS).unwrap()
 		};
-		assert_eq!(Sps::parse(SPS_SUB_LAYER_PROFILE_AND_LEVEL).unwrap().head, expected);
+		assert_eq!(
+			Sps::parse_or_head(SPS_SUB_LAYER_PROFILE_AND_LEVEL).unwrap().head,
+			expected
+		);
 	}
 
 	/// Zeroed VUI colour fields on 4:2:0: scuffle_h265 refuses the SPS, the head carries on.
 	#[test]
 	fn zeroed_colour_description_falls_back_to_the_head() {
-		let sps = Sps::parse(fixtures::SPS_ZERO_COLOUR).unwrap();
+		let sps = Sps::parse_or_head(fixtures::SPS_ZERO_COLOUR).unwrap();
 		assert!(sps.full.is_none(), "scuffle_h265 refuses this SPS");
 		assert_eq!(
 			sps.head,
@@ -762,14 +765,14 @@ mod tests {
 	/// The fallback covers a refusal after the head, not a truncated or invalid head.
 	#[test]
 	fn truncated_or_invalid_head_is_still_an_error() {
-		assert!(Sps::parse(&fixtures::SPS[..8]).is_err());
-		assert!(Sps::parse(&fixtures::SPS_ZERO_COLOUR[..20]).is_err());
-		assert!(Sps::parse(&fixtures::SPS[..fixtures::SPS.len() - 6]).is_err());
+		assert!(Sps::parse_or_head(&fixtures::SPS[..8]).is_err());
+		assert!(Sps::parse_or_head(&fixtures::SPS_ZERO_COLOUR[..20]).is_err());
+		assert!(Sps::parse_or_head(&fixtures::SPS[..fixtures::SPS.len() - 6]).is_err());
 		// TemporalId 1, then a single sub-layer without temporal nesting.
 		for (index, byte) in [(1, 0x02), (2, 0x00)] {
 			let mut nal = fixtures::SPS_ZERO_COLOUR.to_vec();
 			nal[index] = byte;
-			assert!(Sps::parse(&nal).is_err());
+			assert!(Sps::parse_or_head(&nal).is_err());
 		}
 		assert_eq!(SpsHead::parse(fixtures::PPS), None);
 		assert_eq!(SpsHead::parse(fixtures::VPS), None);
@@ -969,11 +972,11 @@ mod tests {
 	}
 
 	/// An SPS `check` refuses: [`parse_full`] reports `InvalidData` without calling scuffle_h265,
-	/// and [`Sps::parse`] keeps the head.
+	/// and [`Sps::parse_or_head`] keeps the head.
 	fn assert_refused(nal: &[u8]) {
 		let err = parse_full(nal).unwrap_err();
 		assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{err}");
-		assert!(Sps::parse(nal).unwrap().full.is_none());
+		assert!(Sps::parse_or_head(nal).unwrap().full.is_none());
 	}
 
 	/// Each SPS reaches an overflow in scuffle_h265 0.2.2 or scuffle-expgolomb 0.1.5.
