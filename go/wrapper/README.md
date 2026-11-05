@@ -51,16 +51,19 @@ for event, err := range announced.All(ctx) {
 		log.Fatal(err)
 	}
 	switch event := event.(type) {
-	case moq.AnnounceEventStart:
+	case moq.AnnounceEventPresent:
 		// Prefix stays origin-relative; Captures reports wildcard matches.
-		fmt.Println("got broadcast", event.Announce.Prefix)
-	case moq.AnnounceEventRestart: // a new publisher run at the same path
-		fmt.Println("restarted broadcast", event.Announce.Prefix)
-	case moq.AnnounceEventTakeover: // continues what an earlier route served
-		fmt.Println("took over broadcast", event.Announce.Prefix)
+		fmt.Println("broadcast online", event.Announce.Prefix)
+	case moq.AnnounceEventAbsent:
+		fmt.Println("broadcast offline", event.Announce.Prefix)
 	}
 }
 ```
+
+The listing reports only whether each path is present. A restarted publisher or another
+instance taking the path over keeps it present: to read the broadcast across them, hold
+`client.Follow(path, nil)` and read each new instance from `Available`, which returns nil
+while the path is offline.
 
 ## Common APIs
 
@@ -117,8 +120,9 @@ so the media importer selects the timescale.
 JSON tracks live in the `moq.dev/moq/json` subpackage, mirroring the `moq-json` crate.
 Import it under an alias next to `encoding/json`. Each type wraps a track:
 `NewSnapshotProducer` / `NewStreamProducer` take over a `TrackProducer` and advertise it
-in the broadcast's catalog, and `NewSnapshotConsumer` / `NewStreamConsumer` take over a
-`TrackConsumer` that has not read a group yet. Snapshots carry lossy latest state; streams
+in the broadcast's catalog, `NewStreamConsumer` takes over a `TrackConsumer` that has not
+read a group yet, and `NewSnapshotConsumer` takes the `BroadcastConsumer` and track name and
+subscribes itself at a zero `Delay.Max` and `SnapshotConsumerOptions.Priority`. Snapshots carry lossy latest state; streams
 carry every record in order. `NewWindowProducer` / `NewWindowConsumer` carry a sliding window
 of records a reader can join at any point; the catalog has no window mode, so the producer
 takes only the track. Producers accept any `encoding/json` value; consumers return
@@ -148,7 +152,8 @@ _ = publication.Announce(moq.AnnounceRoute{})
 ```
 
 Snapshot and window producers take `SnapshotOptions` or `WindowOptions`; the stream producer and
-every consumer take only the track, and a consumer reads a compressed track like a plain one.
+the stream and window consumers take only the track. Every consumer reads a compressed track like a
+plain one.
 
 ## Errors
 

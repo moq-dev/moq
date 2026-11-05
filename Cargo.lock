@@ -2945,6 +2945,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "derive_more 2.1.1",
+ "hang",
  "hex",
  "kio",
  "moq-json",
@@ -4549,6 +4550,7 @@ dependencies = [
  "data-encoding",
  "hex",
  "kio",
+ "moq-crypto",
  "moq-net",
  "rind",
  "rind-rustls",
@@ -4582,6 +4584,7 @@ dependencies = [
  "moq-json",
  "moq-mux",
  "moq-net",
+ "moq-shaper",
  "moq-tokio",
  "moq-video",
  "pollster",
@@ -4635,6 +4638,7 @@ dependencies = [
  "kio",
  "m3u8-rs",
  "moq-archive",
+ "moq-hls",
  "moq-json",
  "moq-mux",
  "moq-net",
@@ -4679,6 +4683,7 @@ dependencies = [
  "futures",
  "json-patch",
  "kio",
+ "moq-json",
  "moq-net",
  "proptest",
  "serde",
@@ -4729,6 +4734,7 @@ dependencies = [
  "moq-json",
  "moq-loc",
  "moq-msf",
+ "moq-mux",
  "moq-net",
  "mp4-atom",
  "mpeg2ts",
@@ -4956,6 +4962,7 @@ dependencies = [
  "moq-auth 0.2.1",
  "moq-json",
  "moq-net",
+ "moq-room",
  "moq-tokio",
  "thiserror 2.0.21",
  "tokio",
@@ -5106,6 +5113,7 @@ dependencies = [
  "kio",
  "moq-json",
  "moq-net",
+ "moq-stats",
  "serde",
  "serde_json",
  "serde_with",
@@ -5274,9 +5282,9 @@ dependencies = [
 
 [[package]]
 name = "moq-vaapi"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a697143830ed57c5ce0e96016e845e0b097f607c536847c12890e3bd23ff4db9"
+checksum = "fb08b9dab1b19b21fe0e909755a9c17601d6dcb0ced2b325fda0f0a8ba594cb8"
 dependencies = [
  "anyhow",
  "bindgen 0.70.1",
@@ -5344,9 +5352,9 @@ dependencies = [
 
 [[package]]
 name = "mp4-atom"
-version = "0.17.0"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "718b5227fa90c52ed2e72d4d553560130d9e128acb6217d9fe0ea57312ee7063"
+checksum = "327faeb7d11fc3735194fdaeaa82af72167801bf39dd3d6b2684c8fc5cd7fc19"
 dependencies = [
  "bytes",
  "derive_more 2.1.1",
@@ -11001,7 +11009,6 @@ dependencies = [
  "camino",
  "cc",
  "chrono",
- "clang-sys",
  "clap",
  "clap_builder",
  "const-oid 0.9.6",
@@ -11050,7 +11057,6 @@ dependencies = [
  "jsonwebtoken",
  "lazy_static",
  "libc",
- "libspa",
  "linux-raw-sys 0.12.1",
  "log",
  "md-5 0.10.6",
@@ -11077,7 +11083,6 @@ dependencies = [
  "object_store",
  "once_cell",
  "percent-encoding",
- "pipewire",
  "pkcs1",
  "pkcs8 0.10.2",
  "pkcs8 0.11.0",

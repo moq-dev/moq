@@ -83,8 +83,8 @@ loaded 24-core host (load 13 to 55, seed 7, 60 s) gave target p95s of
 `main`, a second late interval at 7 s. Every run of this branch had zero
 underruns; `main` had up to 14.1 a minute. The 2026-10-29 to 11-03 scheduled
 nightlies on `main` read 160 to 280 ms. So the ceiling stays as it is,
-as [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) directs
-for a startup breach, until the seven-nightly calibration below.
+as `test/audio-quality/budgets.json`'s note budgets startup holds as measured,
+until the seven-nightly calibration below.
 
 ## Waiting
 

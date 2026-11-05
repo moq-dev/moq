@@ -5,6 +5,20 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Shutdown reports deadline cuts separately from end reports
+
+`shutdown::Observer::drained()` now returns `shutdown::Drained` instead of `()`.
+Callers that match its result against `()` should discard it or read the summary.
+An embedder's drain alert can page on `forced`: sessions still open at the deadline.
+`ending` counts sessions already closed strictly before it but still reporting their end,
+and `elapsed` measures the drain itself, even when the first observer arrives later.
+Sample `Observer::tally()` or await `Observer::changed()` for the live `Tally { open, ending }`.
+
+`session::View` adds `closed: Option<kio::clock::Wall>`; add it to struct literals.
+`GET /sessions` omits `closed` while open and includes its Unix seconds timestamp
+while the session finishes reporting its end. Refused SETUP replies remain refusals,
+not forced cuts. No protocol wire change.
+
 ### Transport and HTTP cryptography use rind
 
 The relay checks rind CPU support at startup, including `Relay::load` for embedders.

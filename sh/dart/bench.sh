@@ -23,12 +23,16 @@ case "$host" in
     *-windows-*) library=moq_ffi.dll ;;
     *) library=libmoq_ffi.so ;;
 esac
+target_dir=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
+messages=$(cargo build-ffi --release --message-format=json-render-diagnostics)
+library_path=$(jq -cs --arg root "$target_dir" --arg target "$host" --arg host "$host" \
+    --arg profile release --arg library "$library" -f sh/rs/ffi-artifact.jq <<<"$messages")
 cat >>dart/moq/pubspec.yaml <<YAML
 
 hooks:
   user_defines:
     moq_ffi:
-      library: ../../target/$host/release/$library
+      library: $library_path
 YAML
 
 export MOQ_BENCH_DIR="${MOQ_BENCH_DIR:-$PWD/target/bench/ffi}"

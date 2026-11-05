@@ -42,9 +42,12 @@ test:
     python3 sh/size/release.test.py
     python3 sh/size/nightly.test.py
     python3 bench/compare.test.py
+    bash sh/local.sh python3 bench/build.test.py
     python3 bench/summary.test.py
     python3 bench/profile.test.py
     python3 bench/fanout.test.py
+    python3 bench/lock.test.py
+    python3 bench/local.test.py
     python3 sh/gh/gst-formula.test.py
     python3 sh/changed.test.py
     python3 sh/large-files.test.py
@@ -63,6 +66,7 @@ test:
     python3 sh/kt/gradle.test.py
     python3 sh/rs/select.test.py
     python3 sh/rs/config.test.py
+    python3 sh/rs/hakari.test.py
     python3 sh/js/workspace.test.py
     python3 sh/js/audit.test.py
     python3 sh/rs/test-lints.test.py
