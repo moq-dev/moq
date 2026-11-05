@@ -4582,6 +4582,7 @@ dependencies = [
  "moq-json",
  "moq-mux",
  "moq-net",
+ "moq-shaper",
  "moq-tokio",
  "moq-video",
  "pollster",
@@ -5274,9 +5275,9 @@ dependencies = [
 
 [[package]]
 name = "moq-vaapi"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a697143830ed57c5ce0e96016e845e0b097f607c536847c12890e3bd23ff4db9"
+checksum = "fb08b9dab1b19b21fe0e909755a9c17601d6dcb0ced2b325fda0f0a8ba594cb8"
 dependencies = [
  "anyhow",
  "bindgen 0.70.1",
@@ -11001,7 +11002,6 @@ dependencies = [
  "camino",
  "cc",
  "chrono",
- "clang-sys",
  "clap",
  "clap_builder",
  "const-oid 0.9.6",
@@ -11050,7 +11050,6 @@ dependencies = [
  "jsonwebtoken",
  "lazy_static",
  "libc",
- "libspa",
  "linux-raw-sys 0.12.1",
  "log",
  "md-5 0.10.6",
@@ -11077,7 +11076,6 @@ dependencies = [
  "object_store",
  "once_cell",
  "percent-encoding",
- "pipewire",
  "pkcs1",
  "pkcs8 0.10.2",
  "pkcs8 0.11.0",

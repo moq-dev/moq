@@ -559,7 +559,7 @@ class SmokeTest {
             val config = SnapshotConfig(deltas = true)
             val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
             SnapshotProducer(broadcast, track, config).use { producer ->
-                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                val consumer = SnapshotConsumer(broadcast.consume(), "status")
                 for (n in 1..4) producer.update(
                     Status(state = "live$n"),
                     timestamp = n.milliseconds.toTimestamp(),
@@ -629,7 +629,7 @@ class SmokeTest {
                 assertEquals("status", demand.name())
                 assertEquals(null, demand.wanted())
 
-                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                val consumer = SnapshotConsumer(broadcast.consume(), "status")
                 while (demand.wantedChanged() == null) {}
                 consumer.cancel()
                 while (demand.wantedChanged() != null) {}
@@ -647,7 +647,7 @@ class SmokeTest {
                 val demand: TrackDemand = producer.demand()
                 producer.update(Status(state = "live"), Timestamp(1uL, 1_000uL))
 
-                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                val consumer = SnapshotConsumer(broadcast.consume(), "status")
                 while (demand.wantedChanged() == null) {}
                 // `first` cancels the collection, which must release the subscription without an
                 // explicit cancel.
@@ -669,7 +669,7 @@ class SmokeTest {
             SnapshotProducer(broadcast, track, config).use { producer ->
                 producer.update("""{"state":"raw"}""", Timestamp(1uL, 1_000uL))
 
-                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                val consumer = SnapshotConsumer(broadcast.consume(), "status")
                 assertEquals(
                     Timed(Status(state = "raw"), Timestamp(1uL, 1_000uL)),
                     consumer.valuesAs<Status>().first(),

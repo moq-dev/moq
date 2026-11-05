@@ -315,7 +315,7 @@ fn stop_sending_fails() {
 	}
 }
 
-/// Nothing is acknowledged on a closed connection.
+/// What the peer never acknowledged fails once the connection closes.
 #[test]
 fn close_fails() {
 	let _guard = subscribe();
@@ -330,6 +330,55 @@ fn close_fails() {
 	let now = pair.time;
 	pair.client_conn_mut(client_ch).close(now, VarInt(0), String::new());
 	assert_eq!(acked(&mut pair, client_ch, s, offset), Err(send::Error::Closed));
+}
+
+/// What the peer acknowledged before the connection closed stays acknowledged, on a stream it
+/// freed as well as a live one, while what it never acknowledged is lost and wakes its waiter.
+#[test]
+fn close_keeps_acknowledged() {
+	let _guard = subscribe();
+	let mut pair = pair(true);
+	let (client_ch, server_ch) = pair.connect();
+	let finished = open(&mut pair, client_ch, server_ch);
+	pair.client_send(client_ch, finished).finish().unwrap();
+	let end = pair.client_send(client_ch, finished).offset();
+	let live = open(&mut pair, client_ch, server_ch);
+	pair.drive();
+	let delivered = pair.client_send(client_ch, live).offset();
+	pair.client_send(client_ch, live).write(&mut &b"unacked"[..]).unwrap();
+	let unacked = pair.client_send(client_ch, live).offset();
+	lose_client_packets(&mut pair);
+	assert_eq!(
+		pair.client_send(client_ch, finished).end(),
+		Ok(Some(send::End::Finished))
+	);
+	assert_eq!(acked(&mut pair, client_ch, finished, end), Ok(true));
+	assert_eq!(acked(&mut pair, client_ch, live, delivered), Ok(true));
+	let parked = Counter::new();
+	assert_eq!(poll_acked(&mut pair, client_ch, live, &parked, unacked), Poll::Pending);
+
+	let now = pair.time;
+	pair.server_conn_mut(server_ch).close(now, VarInt(0), String::new());
+	pair.drive();
+	assert!(pair.client_conn_mut(client_ch).is_closed());
+	assert_eq!(parked.wakes(), 1);
+
+	let waiter = Counter::new();
+	assert_eq!(acked(&mut pair, client_ch, finished, end), Ok(true));
+	assert_eq!(
+		poll_acked(&mut pair, client_ch, finished, &waiter, end),
+		Poll::Ready(Ok(()))
+	);
+	assert_eq!(acked(&mut pair, client_ch, live, delivered), Ok(true));
+	assert_eq!(
+		poll_acked(&mut pair, client_ch, live, &waiter, delivered),
+		Poll::Ready(Ok(()))
+	);
+	assert_eq!(acked(&mut pair, client_ch, live, unacked), Err(send::Error::Closed));
+	assert_eq!(
+		poll_acked(&mut pair, client_ch, live, &waiter, unacked),
+		Poll::Ready(Err(send::Error::ConnectionLost))
+	);
 }
 
 /// An offset from another stream is a caller bug, the one misuse its type leaves possible.
