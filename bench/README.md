@@ -151,6 +151,11 @@ transports, for example to compare only WebSocket against a base:
 nix develop --command just bench origin/main ws
 ```
 
+To repeat only the relay measurements, using the same builds, alternating rounds,
+sampler and comparison report, run `just bench-relay origin/release quic`.
+Each Linux workload retains `/proc/loadavg` before and after its run.
+This omits Criterion measurements whose results are already settled.
+
 Every relay serves QUIC and plain WebSocket on its port; `wss://`, `tcp://`, and
 `tls://` get their own listener on the port two above it. A base revision must
 accept the listener a case needs, so pass the transports it has: a relay without

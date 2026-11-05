@@ -13,6 +13,12 @@ set -euo pipefail
 # `--fanout` counts the chat fan-out's instructions per delivered group on one thread,
 # for each BENCH_BASE revision and the current tree, independent of host load.
 
+# Reuse the paired relay suite without repeating unrelated Criterion measurements.
+RELAY_ONLY=false
+if [[ ${1:-} == --relay ]]; then
+    RELAY_ONLY=true
+    shift
+fi
 MODE=${1:-}
 ROUNDS=${BENCH_RUNTIME_ROUNDS:-3}
 if [[ ! $ROUNDS =~ ^[0-9]+$ ]] || ((10#$ROUNDS < 1)); then
@@ -1267,9 +1273,11 @@ elif [[ -n $BASE ]]; then
         python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE_COMMIT" comparison-base
     )
 
-    printf 'Criterion comparison: %s (%s) versus current\n' "$BASE" "$BASE_COMMIT"
-    compare_criterion "$WORKTREE" "$ROOT"
-    report_set_changes
+    if [[ $RELAY_ONLY == false ]]; then
+        printf 'Criterion comparison: %s (%s) versus current\n' "$BASE" "$BASE_COMMIT"
+        compare_criterion "$WORKTREE" "$ROOT"
+        report_set_changes
+    fi
 
     printf '\nBuilding relay binaries...\n'
     (
@@ -1279,8 +1287,10 @@ elif [[ -n $BASE ]]; then
     cp "$BASE_TARGET/release/moq-relay" "$RUN/moq-relay-base"
     chmod +x "$RUN/moq-relay-base"
 else
-    printf 'Criterion current: %s\n' "$(git rev-parse --short HEAD)"
-    run_criterion "$ROOT" --discard-baseline
+    if [[ $RELAY_ONLY == false ]]; then
+        printf 'Criterion current: %s\n' "$(git rev-parse --short HEAD)"
+        run_criterion "$ROOT" --discard-baseline
+    fi
     printf '\nBuilding relay binaries...\n'
 fi
 generate_certificate
