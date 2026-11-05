@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
-use crate::auth::{Grant, Issue, Link, Reply, Request, Serving};
+use crate::auth::{Grant, Link, Reply, Request, Serving};
 use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
 use crate::{Error, Patterns, SessionError};
 
@@ -219,195 +219,318 @@ pub(super) async fn run_present(
 	version: Version,
 	stats: crate::stats::Session,
 ) -> Result<(), Error> {
-	if !peer_setup.get().await.auth {
-		handle.unsupported();
-		return std::future::pending().await;
-	}
-
-	let mut tasks = crate::util::TaskSet::owned();
-	let violation: kio::Shared<Option<Error>> = Default::default();
-	while let Some((id, token)) = tasks
-		.drive(|waiter| {
-			if let Poll::Ready(mut err) = violation.poll(waiter, |err| match err.is_some() {
-				true => Poll::Ready(()),
-				false => Poll::Pending,
-			}) {
-				return Poll::Ready(Err(err.take().unwrap()));
-			}
-			handle.poll_opening(waiter).map(Ok)
-		})
-		.await?
-	{
-		let present = Present {
-			stats: stats.clone(),
-			runtime: runtime.clone(),
-			session: session.clone(),
-			control: control.clone(),
-			handle: handle.clone(),
-			version,
-			id,
-		};
-		let violation = violation.clone();
-		tasks.push(crate::util::future_task(async move {
-			let mut token = Ok(token);
-			let mut answered = false;
-			loop {
-				// After a GOAWAY, sent or received, the peer must not see new requests.
-				let err = match token {
-					Ok(token) if present.handle.active() => present.run(token, &mut answered).await,
-					Ok(_) => Error::GoingAway,
-					Err(err) => err,
-				};
-				let err = match err {
-					// The peer negotiated the extension, but a reset before any reply still tells
-					// us nothing about the token: it earns nothing here, as on moq-lite.
-					Error::Stream(_) if !answered => Error::Unsupported,
-					err => crate::auth::protocol_error(err),
-				};
-				// AUTH_ERROR carries no code that may pass, so unlike moq-lite only a lost
-				// request is presented again.
-				if let Some(delay) = present.handle.retry(present.id, &err) {
-					tracing::debug!(%err, ?delay, "auth token presenting again");
-					token = present.reopen(delay).await;
-					continue;
-				}
-				if matches!(err, Error::ProtocolViolation) {
-					violation.lock().get_or_insert(err.clone());
-				}
-
-				match &err {
-					Error::Cancel
-					| Error::Unsupported
-					| Error::Transport(_)
-					| Error::IdleTimeout
-					| Error::Session(_) => {
-						tracing::debug!(%err, "auth token ended")
-					}
-					err => tracing::warn!(%err, "auth token ended"),
-				}
-				present.handle.ended(present.id, err);
-				return;
-			}
-		}));
-	}
-	std::future::pending().await
+	let mut presenting = Presenting::new(runtime, session, control, handle, peer_setup, version, stats);
+	kio::wait(|waiter| presenting.poll(waiter)).await
 }
 
-/// One token's Auth request.
+/// What every one of our Auth requests is sent with.
 #[cfg(feature = "async")]
-struct Present {
+#[derive(Clone)]
+struct Presenter {
 	stats: crate::stats::Session,
 	runtime: crate::time::Deadlines,
 	session: Transport,
 	control: Control,
 	handle: Link,
 	version: Version,
+}
+
+/// [`run_present`]'s progress: an Auth request for each token, as a child task.
+#[cfg(feature = "async")]
+pub(super) struct Presenting {
+	presenter: Presenter,
+	peer_setup: peer::PeerSetup,
+	/// Whether the peer's SETUP negotiated the extension, once read.
+	negotiated: Option<bool>,
+	tasks: crate::util::TaskSet,
+	/// A protocol violation on any token's stream, which ends the session.
+	violation: kio::Shared<Option<Error>>,
+	/// The session ended, so no token opens another stream.
+	ended: bool,
+}
+
+#[cfg(feature = "async")]
+impl Presenting {
+	pub(super) fn new(
+		runtime: crate::time::Deadlines,
+		session: Transport,
+		control: Control,
+		handle: Link,
+		peer_setup: peer::PeerSetup,
+		version: Version,
+		stats: crate::stats::Session,
+	) -> Self {
+		Self {
+			presenter: Presenter {
+				stats,
+				runtime,
+				session,
+				control,
+				handle,
+				version,
+			},
+			peer_setup,
+			negotiated: None,
+			tasks: crate::util::TaskSet::owned(),
+			violation: Default::default(),
+			ended: false,
+		}
+	}
+
+	/// Ready only with the protocol violation a token's stream hit.
+	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let negotiated = match self.negotiated {
+			Some(negotiated) => negotiated,
+			None => {
+				let negotiated = std::task::ready!(self.peer_setup.poll_get(waiter)).auth;
+				if !negotiated {
+					self.presenter.handle.unsupported();
+				}
+				*self.negotiated.insert(negotiated)
+			}
+		};
+		if !negotiated || self.ended {
+			return Poll::Pending;
+		}
+
+		loop {
+			if let Poll::Ready(mut err) = self.violation.poll(waiter, |err| match err.is_some() {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}) {
+				return Poll::Ready(Err(err.take().unwrap()));
+			}
+			match self.presenter.handle.poll_opening(waiter) {
+				Poll::Ready(Some((id, token))) => {
+					let mut present = Present {
+						presenter: self.presenter.clone(),
+						violation: self.violation.clone(),
+						id,
+						answered: false,
+						state: PresentState::Start(Ok(token)),
+					};
+					self.tasks.push(move |waiter: &kio::Waiter| present.poll(waiter));
+				}
+				// The children are left where they wait, no longer polled.
+				Poll::Ready(None) => {
+					self.ended = true;
+					return Poll::Pending;
+				}
+				Poll::Pending => {
+					// The children never end the session; `Ready` just means they're drained
+					// until the next token.
+					let _ = self.tasks.poll(waiter);
+					return Poll::Pending;
+				}
+			}
+		}
+	}
+}
+
+/// One token's Auth requests: presented, tracked until either side ends it, and
+/// presented again while [`Link::retry`] asks.
+#[cfg(feature = "async")]
+struct Present {
+	presenter: Presenter,
+	violation: kio::Shared<Option<Error>>,
 	id: u64,
+	/// The peer replied to the token, on this request or an earlier one, so a request it
+	/// closes or resets before replying is lost rather than unsupported.
+	answered: bool,
+	state: PresentState,
+}
+
+#[cfg(feature = "async")]
+enum PresentState {
+	/// The token to present next, or why it cannot be.
+	Start(Result<Bytes, Error>),
+	/// Waiting for a stream to send it on.
+	Opening {
+		open: crate::transport::open::Open,
+		token: Bytes,
+	},
+	/// Flushing the AUTH.
+	Sending(Stream<Transport, Version>),
+	/// Reading the peer's replies.
+	Reading {
+		stream: Stream<Transport, Version>,
+		messages: super::request_stream::Messages,
+		budget: kio::coop::Budget,
+	},
+	/// Waiting out a retry's delay.
+	Reopening(crate::time::Deadline),
+	Done,
 }
 
 #[cfg(feature = "async")]
 impl Present {
-	/// Wait out a retry's `delay`, then take the token to present again.
-	async fn reopen(&self, delay: Duration) -> Result<Bytes, Error> {
-		let mut deadline = crate::time::Deadline::after(&self.runtime, delay);
-		kio::wait(|waiter| {
-			if self.handle.poll_withdrawn(self.id, waiter).is_ready() {
-				return Poll::Ready(Err(Error::Cancel));
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		loop {
+			let err = match &mut self.state {
+				PresentState::Start(token) => match std::mem::replace(token, Err(Error::Cancel)) {
+					// After a GOAWAY, sent or received, the peer must not see new requests.
+					Ok(token) if self.presenter.handle.active() => {
+						self.state = PresentState::Opening {
+							open: Default::default(),
+							token,
+						};
+						continue;
+					}
+					Ok(_) => Error::GoingAway,
+					Err(err) => err,
+				},
+				PresentState::Reopening(deadline) => {
+					let token = match self.presenter.handle.poll_withdrawn(self.id, waiter) {
+						Poll::Ready(()) => Err(Error::Cancel),
+						Poll::Pending => {
+							std::task::ready!(deadline.poll(waiter));
+							self.presenter.handle.reopen(self.id)
+						}
+					};
+					self.state = PresentState::Start(token);
+					continue;
+				}
+				PresentState::Done => return Poll::Ready(()),
+				PresentState::Opening { .. } | PresentState::Sending(_) | PresentState::Reading { .. } => {
+					let err = std::task::ready!(self.poll_request(waiter));
+					// Drops the stream, whose reset is what tells the peer.
+					self.state = PresentState::Done;
+					err
+				}
+			};
+
+			let err = match err {
+				// The peer negotiated the extension, but a reset before any reply still tells
+				// us nothing about the token: it earns nothing here, as on moq-lite.
+				Error::Stream(_) if !self.answered => Error::Unsupported,
+				err => crate::auth::protocol_error(err),
+			};
+			let handle = &self.presenter.handle;
+			// AUTH_ERROR carries no code that may pass, so unlike moq-lite only a lost
+			// request is presented again.
+			if let Some(delay) = handle.retry(self.id, &err) {
+				tracing::debug!(%err, ?delay, "auth token presenting again");
+				self.state = PresentState::Reopening(crate::time::Deadline::after(&self.presenter.runtime, delay));
+				continue;
 			}
-			std::task::ready!(deadline.poll(waiter));
-			Poll::Ready(self.handle.reopen(self.id))
-		})
-		.await
+			if matches!(err, Error::ProtocolViolation) {
+				self.violation.lock().get_or_insert(err.clone());
+			}
+
+			match &err {
+				Error::Cancel | Error::Unsupported | Error::Transport(_) | Error::IdleTimeout | Error::Session(_) => {
+					tracing::debug!(%err, "auth token ended")
+				}
+				err => tracing::warn!(%err, "auth token ended"),
+			}
+			handle.ended(self.id, err);
+			return Poll::Ready(());
+		}
 	}
 
-	/// Send the token, then track its grant until either side ends it, resolving with why.
-	///
-	/// `answered` records that the peer replied to the token, on this request or an
-	/// earlier one, so a request it closes or resets before replying is lost rather than
-	/// unsupported.
-	async fn run(&self, token: Bytes, answered: &mut bool) -> Error {
-		let mut stream = match Stream::open(&self.session, self.version).await {
-			Ok(stream) => stream,
-			Err(err) => return err,
-		};
-		stream = stream.with_stats(&self.stats);
-		let request_id = self.control.next_request_id();
-		if let Err(err) = stream.writer.encode_message(&Auth { request_id, token }).await {
-			return err;
-		}
-
-		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
-		let mut budget = kio::coop::Budget::new(32);
+	/// Send the token, then track its grant until either side ends it, ready with why.
+	fn poll_request(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		let presenter = &self.presenter;
 		loop {
-			enum Next {
-				Withdrawn,
-				Reply(Result<Option<super::request_stream::Framed>, Error>),
-			}
-
-			let next = {
-				let mut read = std::pin::pin!(messages.next(&mut stream.reader));
-				kio::wait(|waiter| {
-					if self.handle.poll_withdrawn(self.id, waiter).is_ready() {
-						return Poll::Ready(Next::Withdrawn);
+			match &mut self.state {
+				PresentState::Opening { open, token } => {
+					let stream =
+						match std::task::ready!(Stream::poll_open(&presenter.session, open, presenter.version, waiter))
+						{
+							Ok(stream) => stream,
+							Err(err) => return Poll::Ready(err),
+						};
+					let mut stream = stream.with_stats(&presenter.stats);
+					let auth = Auth {
+						request_id: presenter.control.next_request_id(),
+						token: std::mem::take(token),
+					};
+					if let Err(err) = stream.writer.buffer_message(Auth::ID, &auth) {
+						return Poll::Ready(err);
 					}
-					waiter.poll_future(read.as_mut()).map(Next::Reply)
-				})
-				.await
-			};
-
-			let (id, body) = match next {
-				// Resetting our side is what tells the peer.
-				Next::Withdrawn => return Error::Cancel,
-				Next::Reply(Ok(Some(super::request_stream::Framed(id, body)))) => (id, body),
-				// The peer ended the grant without revoking it.
-				Next::Reply(Ok(None)) if *answered => return Error::Cancel,
-				// A peer that closes before answering could not tell us anything.
-				Next::Reply(Ok(None)) => return Error::Unsupported,
-				Next::Reply(Err(err)) => return err,
-			};
-
-			match id {
-				AuthOk::ID => {
-					let ok: AuthOk = match decode_reply(&body, self.version) {
-						Ok(ok) => ok,
-						Err(err) => return err,
-					};
-					let now = self.runtime.now();
-					// The expiry is the peer's number: one past the local clock's range is
-					// malformed, not a reason to panic.
-					let expires = match ok.expires.map(|expires| now.checked_add(expires)) {
-						Some(None) => return Error::ProtocolViolation,
-						expires => expires.flatten(),
-					};
-					*answered = true;
-					self.handle.granted(
-						self.id,
-						Grant {
-							publish: ok.publish,
-							subscribe: ok.subscribe,
-							expires,
-						},
-					);
-					// Each grant recomputes the session's permits, so a peer streaming them
-					// must not hold the session's other tasks.
-					kio::wait(|waiter| budget.poll_yield(waiter)).await;
+					self.state = PresentState::Sending(stream);
 				}
-				AuthError::ID => {
-					let refused: AuthError = match decode_reply(&body, self.version) {
-						Ok(refused) => refused,
-						Err(err) => return err,
-					};
-					let err = from_code(refused.code);
-					tracing::warn!(%err, code = refused.code, reason = %refused.reason, "auth token refused");
-					// A grant the acceptor could not tell, or never judged, is unknown, not
-					// empty, so only a real refusal settles the union.
-					if !matches!(err, Error::Unsupported | Error::GoingAway) {
-						self.handle.refused(self.id);
+				PresentState::Sending(stream) => {
+					if let Err(err) = std::task::ready!(stream.writer.poll_flush(waiter)) {
+						return Poll::Ready(err);
 					}
-					*answered = true;
-					return err;
+					let PresentState::Sending(stream) = std::mem::replace(&mut self.state, PresentState::Done) else {
+						unreachable!()
+					};
+					self.state = PresentState::Reading {
+						stream,
+						messages: super::request_stream::Messages::new(
+							presenter.session.clone(),
+							presenter.control.client(),
+						),
+						// Each grant recomputes the session's permits, so a peer streaming them
+						// must not hold the session's other tasks.
+						budget: kio::coop::Budget::new(32),
+					};
 				}
-				_ => return Error::UnexpectedMessage,
+				PresentState::Reading {
+					stream,
+					messages,
+					budget,
+				} => loop {
+					std::task::ready!(budget.poll_yield(waiter));
+					if presenter.handle.poll_withdrawn(self.id, waiter).is_ready() {
+						// Resetting our side is what tells the peer.
+						return Poll::Ready(Error::Cancel);
+					}
+					let (id, body) = match std::task::ready!(messages.poll_next(&mut stream.reader, waiter)) {
+						Ok(Some(super::request_stream::Framed(id, body))) => (id, body),
+						// The peer ended the grant without revoking it.
+						Ok(None) if self.answered => return Poll::Ready(Error::Cancel),
+						// A peer that closes before answering could not tell us anything.
+						Ok(None) => return Poll::Ready(Error::Unsupported),
+						Err(err) => return Poll::Ready(err),
+					};
+
+					match id {
+						AuthOk::ID => {
+							let ok: AuthOk = match decode_reply(&body, presenter.version) {
+								Ok(ok) => ok,
+								Err(err) => return Poll::Ready(err),
+							};
+							let now = presenter.runtime.now();
+							// The expiry is the peer's number: one past the local clock's range is
+							// malformed, not a reason to panic.
+							let expires = match ok.expires.map(|expires| now.checked_add(expires)) {
+								Some(None) => return Poll::Ready(Error::ProtocolViolation),
+								expires => expires.flatten(),
+							};
+							self.answered = true;
+							presenter.handle.granted(
+								self.id,
+								Grant {
+									publish: ok.publish,
+									subscribe: ok.subscribe,
+									expires,
+								},
+							);
+						}
+						AuthError::ID => {
+							let refused: AuthError = match decode_reply(&body, presenter.version) {
+								Ok(refused) => refused,
+								Err(err) => return Poll::Ready(err),
+							};
+							let err = from_code(refused.code);
+							tracing::warn!(%err, code = refused.code, reason = %refused.reason, "auth token refused");
+							// A grant the acceptor could not tell, or never judged, is unknown, not
+							// empty, so only a real refusal settles the union.
+							if !matches!(err, Error::Unsupported | Error::GoingAway) {
+								presenter.handle.refused(self.id);
+							}
+							self.answered = true;
+							return Poll::Ready(err);
+						}
+						_ => return Poll::Ready(Error::UnexpectedMessage),
+					}
+				},
+				PresentState::Start(_) | PresentState::Reopening(_) | PresentState::Done => {
+					unreachable!("not a request")
+				}
 			}
 		}
 	}
@@ -438,17 +561,24 @@ impl Serve {
 	#[cfg(feature = "async")]
 	pub(super) async fn run(
 		self,
-		mut stream: Stream<Transport, Version>,
+		stream: Stream<Transport, Version>,
 		msg: Auth,
 		version: Version,
 	) -> Result<(), Error> {
-		let mut goaways = super::request_stream::GoAways::new(msg.request_id.0 % 2 == 1);
+		let mut answering = self.answer(stream, msg, version);
+		kio::wait(|waiter| answering.poll(waiter)).await
+	}
+
+	/// Start answering one Auth request; see [`Self::run`].
+	#[cfg(feature = "async")]
+	pub(super) fn answer(self, mut stream: Stream<Transport, Version>, msg: Auth, version: Version) -> Answering {
+		let goaways = super::request_stream::GoAways::new(msg.request_id.0 % 2 == 1);
 		let serving = Serving::new(self.handle.clone());
-		let issue = &serving.issue;
 		let mut default = None;
-		match self.handle.acceptor() {
+		let state = match self.handle.acceptor() {
 			Some(requests) => {
-				requests.push(Request::new(msg.token, issue.clone()));
+				requests.push(Request::new(msg.token, serving.issue.clone()));
+				AnsweringState::Serving
 			}
 			// Only the connection's own credential has a default answer; a token needs
 			// someone to verify it.
@@ -457,47 +587,213 @@ impl Serve {
 					code: NOT_SUPPORTED,
 					reason: "tokens are not verified in band".to_string(),
 				};
-				if stream.writer.encode_message(&reply).await.is_ok() {
-					let _ = stream.writer.close().await;
+				match stream.writer.buffer_message(AuthError::ID, &reply) {
+					Ok(()) => AnsweringState::Unverified,
+					Err(_) => AnsweringState::Done,
 				}
-				return Ok(());
 			}
 			// Re-sent whenever a new limit changes it.
-			None => default = Some(crate::auth::DefaultGrant::new(self.handle.clone(), self.peer_grant)),
-		}
-
-		let err = match serve_issue(
-			&self.runtime,
-			issue,
-			default.as_mut(),
-			&mut stream,
-			version,
-			&mut goaways,
-		)
-		.await
-		{
-			Ok(()) => Error::Cancel,
-			Err(err) => {
-				match &err {
-					Error::Cancel
-					| Error::Unsupported
-					| Error::Stream(_)
-					| Error::Session(_)
-					| Error::Transport(_)
-					| Error::IdleTimeout => {
-						tracing::debug!(%err, "auth request ended")
-					}
-					err => tracing::warn!(%err, "auth request error"),
-				}
-				err
+			None => {
+				default = Some(crate::auth::DefaultGrant::new(self.handle.clone(), self.peer_grant));
+				AnsweringState::Serving
 			}
 		};
-		let err = crate::auth::protocol_error(err);
-		serving.end(err.clone());
-		if matches!(err, Error::ProtocolViolation) {
-			return Err(err);
+		Answering {
+			runtime: self.runtime,
+			serving,
+			default,
+			stream: Some(stream),
+			version,
+			goaways,
+			state,
 		}
-		Ok(())
+	}
+}
+
+/// One Auth request being answered: [`Serve::answer`].
+#[cfg(feature = "async")]
+pub(super) struct Answering {
+	runtime: crate::time::Deadlines,
+	serving: Serving,
+	/// Feeds the default acceptor's grant into the outbox as it changes.
+	default: Option<crate::auth::DefaultGrant>,
+	/// Taken only to close it after refusing an unverified token.
+	stream: Option<Stream<Transport, Version>>,
+	version: Version,
+	goaways: super::request_stream::GoAways,
+	state: AnsweringState,
+}
+
+#[cfg(feature = "async")]
+enum AnsweringState {
+	/// Flushing the refusal of a token nobody verifies, then closing.
+	Unverified,
+	/// Waiting for the refusal's acknowledgement.
+	UnverifiedClosing {
+		closing: crate::coding::Closing<crate::transport::boxed::SendStream, Version>,
+		_reader: crate::coding::Reader<crate::transport::boxed::RecvStream, Version>,
+	},
+	/// Writing the acceptor's replies until either side ends the token.
+	Serving,
+	/// Flushing a reply; `last` ends the replies once it is out.
+	Flushing {
+		last: bool,
+	},
+	/// Waiting for the acknowledgement of our FIN.
+	Closing,
+	Done,
+}
+
+#[cfg(feature = "async")]
+impl Answering {
+	/// Ready once the token's stream ends, failing only on a protocol violation.
+	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		loop {
+			match &mut self.state {
+				AnsweringState::Unverified => {
+					let stream = self.stream.as_mut().expect("unverified holds the stream");
+					let flushed = std::task::ready!(stream.writer.poll_flush(waiter));
+					self.state = AnsweringState::Done;
+					if flushed.is_ok() {
+						let Stream { writer, reader } = self.stream.take().expect("unverified holds the stream");
+						if let Ok(closing) = writer.closing() {
+							self.state = AnsweringState::UnverifiedClosing {
+								closing,
+								_reader: reader,
+							};
+						}
+					}
+				}
+				AnsweringState::UnverifiedClosing { closing, .. } => {
+					let _ = std::task::ready!(closing.poll(waiter));
+					self.state = AnsweringState::Done;
+				}
+				AnsweringState::Done => return Poll::Ready(Ok(())),
+				AnsweringState::Serving | AnsweringState::Flushing { .. } | AnsweringState::Closing => {
+					let err = match std::task::ready!(self.poll_issue(waiter)) {
+						Ok(()) => Error::Cancel,
+						Err(err) => {
+							match &err {
+								Error::Cancel
+								| Error::Unsupported
+								| Error::Stream(_)
+								| Error::Session(_)
+								| Error::Transport(_)
+								| Error::IdleTimeout => {
+									tracing::debug!(%err, "auth request ended")
+								}
+								err => tracing::warn!(%err, "auth request error"),
+							}
+							err
+						}
+					};
+					self.state = AnsweringState::Done;
+					let err = crate::auth::protocol_error(err);
+					self.serving.end(err.clone());
+					if matches!(err, Error::ProtocolViolation) {
+						return Poll::Ready(Err(err));
+					}
+					return Poll::Ready(Ok(()));
+				}
+			}
+		}
+	}
+
+	/// Write the acceptor's replies until either side ends the token.
+	fn poll_issue(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let issue = &self.serving.issue;
+		let stream = self.stream.as_mut().expect("serving holds the stream");
+		loop {
+			let reply = match &mut self.state {
+				AnsweringState::Flushing { last } => {
+					std::task::ready!(stream.writer.poll_flush(waiter))?;
+					match *last {
+						true => {
+							stream.writer.finish()?;
+							self.state = AnsweringState::Closing;
+						}
+						false => self.state = AnsweringState::Serving,
+					}
+					continue;
+				}
+				AnsweringState::Closing => return stream.writer.poll_closed(waiter),
+				AnsweringState::Serving => {
+					if let Poll::Ready(res) = self
+						.goaways
+						.poll_next::<Unexpected, _>(&mut stream.reader, waiter)
+						.map(|res| res.map(|_| ()))
+					{
+						match res {
+							// The presenter withdrew the token, by FIN or by a cancelling reset.
+							// That is why it ended, whether or not our own FIN reaches a
+							// presenter that left.
+							Ok(()) | Err(Error::Stream(crate::StreamError::Cancel)) => {
+								issue.lock().peer.get_or_insert(Error::Cancel);
+								stream.writer.finish()?;
+								self.state = AnsweringState::Closing;
+								continue;
+							}
+							Err(err) => return Poll::Ready(Err(err)),
+						}
+					}
+					if let Some(default) = self.default.as_mut()
+						&& let Poll::Ready(grant) = default.poll(waiter)
+					{
+						issue.lock().outbox.push_back(Reply::Grant(grant));
+					}
+					let mut issue = std::task::ready!(issue.poll(waiter, |issue| {
+						match issue.outbox.is_empty() && !issue.done {
+							true => Poll::Pending,
+							false => Poll::Ready(()),
+						}
+					}));
+					issue.outbox.pop_front()
+				}
+				AnsweringState::Unverified | AnsweringState::UnverifiedClosing { .. } | AnsweringState::Done => {
+					unreachable!("not serving")
+				}
+			};
+
+			match reply {
+				Some(Reply::Grant(grant)) => {
+					let now = self.runtime.now();
+					let ok = AuthOk {
+						publish: grant.publish,
+						subscribe: grant.subscribe,
+						expires: grant.expires.map(|at| at.saturating_duration_since(now)),
+					};
+					// Sized as the full message before anything is written, so a grant over the u16
+					// message size never leaves half a message on the wire. Never trim it: refuse,
+					// which revokes whatever this stream granted before.
+					if let Err(err) = ok.encode(&mut Encoder::new(&mut Vec::new(), self.version.into()), self.version) {
+						tracing::debug!(%err, "auth grant cannot be encoded as one AUTH_OK; refusing the token");
+						issue.lock().done = true;
+						let refused = AuthError {
+							code: NOT_SUPPORTED,
+							reason: "grant cannot be encoded as one AUTH_OK".to_string(),
+						};
+						stream.writer.buffer_message(AuthError::ID, &refused)?;
+						self.state = AnsweringState::Flushing { last: true };
+						continue;
+					}
+					stream.writer.buffer_message(AuthOk::ID, &ok)?;
+					self.state = AnsweringState::Flushing { last: false };
+				}
+				Some(Reply::Refuse { code, reason }) => {
+					let refused = AuthError {
+						code: to_code(code),
+						reason,
+					};
+					stream.writer.buffer_message(AuthError::ID, &refused)?;
+					self.state = AnsweringState::Flushing { last: false };
+				}
+				// The app is done with the grant, or refused the token: close our side.
+				None => {
+					stream.writer.finish()?;
+					self.state = AnsweringState::Closing;
+				}
+			}
+		}
 	}
 }
 
@@ -514,91 +810,6 @@ impl<'a> crate::coding::Decode<'a, Version> for Unexpected {
 	}
 }
 
-/// Write the acceptor's replies until either side ends the token. `default` feeds
-/// the default acceptor's grant into the outbox as it changes.
-#[cfg(feature = "async")]
-async fn serve_issue(
-	runtime: &crate::time::Deadlines,
-	issue: &kio::Shared<Issue>,
-	mut default: Option<&mut crate::auth::DefaultGrant>,
-	stream: &mut Stream<Transport, Version>,
-	version: Version,
-	goaways: &mut super::request_stream::GoAways,
-) -> Result<(), Error> {
-	enum Next {
-		Withdrawn(Result<(), Error>),
-		Reply(Option<Reply>),
-	}
-
-	loop {
-		let next = kio::wait(|waiter| {
-			if let Poll::Ready(res) = goaways
-				.poll_next::<Unexpected, _>(&mut stream.reader, waiter)
-				.map(|res| res.map(|_| ()))
-			{
-				return Poll::Ready(Next::Withdrawn(res));
-			}
-			if let Some(default) = default.as_deref_mut()
-				&& let Poll::Ready(grant) = default.poll(waiter)
-			{
-				issue.lock().outbox.push_back(Reply::Grant(grant));
-			}
-			match issue.poll(waiter, |issue| match issue.outbox.is_empty() && !issue.done {
-				true => Poll::Pending,
-				false => Poll::Ready(()),
-			}) {
-				Poll::Ready(mut issue) => Poll::Ready(Next::Reply(issue.outbox.pop_front())),
-				Poll::Pending => Poll::Pending,
-			}
-		})
-		.await;
-
-		match next {
-			// The presenter withdrew the token, by FIN or by a cancelling reset. That is
-			// why it ended, whether or not our own FIN reaches a presenter that left.
-			Next::Withdrawn(Ok(()) | Err(Error::Stream(crate::StreamError::Cancel))) => {
-				issue.lock().peer.get_or_insert(Error::Cancel);
-				break;
-			}
-			Next::Withdrawn(Err(err)) => return Err(err),
-			Next::Reply(Some(Reply::Grant(grant))) => {
-				let now = runtime.now();
-				let ok = AuthOk {
-					publish: grant.publish,
-					subscribe: grant.subscribe,
-					expires: grant.expires.map(|at| at.saturating_duration_since(now)),
-				};
-				// Sized as the full message before anything is written, so a grant over the u16
-				// message size never leaves half a message on the wire. Never trim it: refuse,
-				// which revokes whatever this stream granted before.
-				if let Err(err) = ok.encode(&mut Encoder::new(&mut Vec::new(), version.into()), version) {
-					tracing::debug!(%err, "auth grant cannot be encoded as one AUTH_OK; refusing the token");
-					issue.lock().done = true;
-					let refused = AuthError {
-						code: NOT_SUPPORTED,
-						reason: "grant cannot be encoded as one AUTH_OK".to_string(),
-					};
-					stream.writer.encode_message(&refused).await?;
-					break;
-				}
-				stream.writer.encode_message(&ok).await?;
-			}
-			Next::Reply(Some(Reply::Refuse { code, reason })) => {
-				let refused = AuthError {
-					code: to_code(code),
-					reason,
-				};
-				stream.writer.encode_message(&refused).await?;
-			}
-			// The app is done with the grant, or refused the token: close our side.
-			Next::Reply(None) => break,
-		}
-	}
-
-	stream.writer.finish()?;
-	stream.writer.closed().await
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -611,20 +822,26 @@ mod tests {
 			for client in [false, true] {
 				let first = if client { 0 } else { 1 };
 				let control = Control::new(client);
-				let present = Present {
-					runtime: crate::time::sim(),
-					stats: Default::default(),
-					session: crate::driver::Transport::new(
-						crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit(),
-					),
-					control: control.clone(),
-					handle: Link::new(false),
-					version,
+				let mut present = Present {
+					presenter: Presenter {
+						runtime: crate::time::sim(),
+						stats: Default::default(),
+						session: crate::driver::Transport::new(
+							crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit(),
+						),
+						control: control.clone(),
+						handle: Link::new(false),
+						version,
+					},
+					violation: Default::default(),
 					id: 0,
+					answered: false,
+					state: PresentState::Opening {
+						open: Default::default(),
+						token: Bytes::new(),
+					},
 				};
-				let mut answered = false;
-				let mut run = std::pin::pin!(present.run(Bytes::new(), &mut answered));
-				let polled = kio::wait(|waiter| Poll::Ready(waiter.poll_future(run.as_mut()).is_pending())).await;
+				let polled = kio::wait(|waiter| Poll::Ready(present.poll_request(waiter).is_pending())).await;
 				assert!(polled, "the request waits for credit");
 				assert_eq!(control.next_request_id(), RequestId(first));
 			}

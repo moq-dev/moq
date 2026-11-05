@@ -352,7 +352,8 @@ impl Subscriber {
 		let (key, failed, opening) = self.listings.lock().listen(path, lister);
 		if let Some(opening) = opening {
 			let this = self.clone();
-			self.tasks.push(crate::util::future_task(this.run_subscribe_tracks(opening)));
+			self.tasks
+				.push(crate::util::future_task(this.run_subscribe_tracks(opening)));
 		}
 		Listening {
 			listings: self.listings.clone(),
