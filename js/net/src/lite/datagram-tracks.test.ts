@@ -404,6 +404,40 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	});
 }
 
+// A track's end waits a host task for the datagrams received with it. A session close in
+// between finishes the track rather than cutting it off: the publisher already ended it.
+for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
+	test(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
+		const source = new Origin();
+		const publication = source.createBroadcast(path);
+		const datagrams = publication.broadcast.createDatagrams("audio");
+		publication.announce();
+		const pair = createMockTransportPair(alpn);
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client }),
+			accept({ url, transport: pair.server, publish: source.consume() }),
+		]);
+		const remote = wireOf(client).consume(path);
+		const reader = remote.datagrams("audio");
+		reader.setPriority(5);
+		try {
+			await reader.info();
+			while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
+			datagrams.finish();
+			// The mock delivers the end in microtasks, all within this host task.
+			for (let i = 0; i < 1000; i++) await Promise.resolve();
+			client.abort();
+			expect(await reader.recv()).toBeUndefined();
+		} finally {
+			reader.close();
+			remote.close();
+			client.abort();
+			server.abort();
+			source.close();
+		}
+	});
+}
+
 // Holds back what the publisher writes on the next request stream it accepts once armed, until
 // released: that subscription's answer stays outstanding while everything else flows.
 function holdNextAnswer(transport: MockTransport): { arm(): void; release(): void } {

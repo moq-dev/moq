@@ -140,6 +140,9 @@ interface Consumed {
 interface DatagramEntry {
 	producer: datagram.Producer;
 	timescale?: Time.Timescale;
+	// Set once the publisher ended the track, while the datagrams received with the end route:
+	// a session close meanwhile finishes it rather than cutting it off.
+	ended?: boolean;
 }
 
 interface SubscribeEntry {
@@ -926,7 +929,8 @@ export class Subscriber {
 			signal.throwIfAborted();
 			if (!stream) throw new Error("datagram stream was not opened");
 			producer = request.accept(answered);
-			this.#datagrams.set(id, { producer, timescale: answered.timescale });
+			const route: DatagramEntry = { producer, timescale: answered.timescale };
+			this.#datagrams.set(id, route);
 			this.#unanswered.delete(id);
 			const opened = stream;
 			const receiving = producer;
@@ -934,6 +938,7 @@ export class Subscriber {
 			// arrive alongside, so the datagrams already received route first.
 			const ended = opened.reader.done().then(async (done) => {
 				if (!done) throw new ProtocolViolation("data after DATAGRAMS_INFO");
+				route.ended = true;
 				await this.#datagramsRouted(id);
 				receiving.finish();
 			});
@@ -1391,7 +1396,10 @@ export class Subscriber {
 			entry.datagramDemand?.();
 			if (entry.datagrams) {
 				// The stream track's end is its datagrams' end: those received with it route first.
-				if (entry.end !== undefined) await this.#datagramsRouted(id);
+				if (entry.end !== undefined && !(hooks.trackReleased(producer).peek() instanceof Error)) {
+					entry.datagrams.ended = true;
+					await this.#datagramsRouted(id);
+				}
 				const closed = hooks.trackReleased(producer).peek();
 				if (closed instanceof Error) entry.datagrams.producer.abort(closed);
 				else if (entry.end !== undefined) entry.datagrams.producer.finish();
@@ -2634,7 +2642,7 @@ export class Subscriber {
 	/**
 	 * Ends every subscribed track, fetch, and setup exchange with `err`, the session's end, which
 	 * defaults to a clean close: they were cut off rather than ended. A track whose publisher
-	 * already ended it finishes instead.
+	 * already ended it finishes instead, datagram tracks included.
 	 */
 	close(err: Error = new SessionError(SessionCode.Cancel)) {
 		this.#closed.abort(err);
@@ -2645,7 +2653,10 @@ export class Subscriber {
 		}
 
 		this.#subscribes.clear();
-		for (const { producer } of this.#datagrams.values()) producer.abort(err);
+		for (const { producer, ended } of this.#datagrams.values()) {
+			if (ended) producer.finish();
+			producer.abort(err);
+		}
 		this.#datagrams.clear();
 		this.#legacyDatagrams.clear();
 
