@@ -34,8 +34,8 @@ import 'package:moq_ffi/moq_ffi.dart';
 /// Publishes lossy latest-value JSON snapshots on a track it takes over.
 typedef SnapshotProducer = MoqJsonSnapshotProducer;
 
-/// Consumes each JSON snapshot state from a track it takes over, or skips to
-/// the newest with `latest()`.
+/// Consumes each JSON snapshot state from a track it subscribes to itself, or
+/// skips to the newest with `latest()`.
 typedef SnapshotConsumer = MoqJsonSnapshotConsumer;
 
 /// Configures a lossy latest-value JSON producer.

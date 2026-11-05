@@ -127,7 +127,7 @@ async fn handle_viewer_commands(
 	broadcast: moq_net::broadcast::Consumer,
 	cmd_tx: &tokio::sync::mpsc::Sender<Command>,
 ) -> anyhow::Result<()> {
-	let track = broadcast.track("command")?.subscribe(None).await?;
+	let track = broadcast.track("command")?;
 	let mut commands =
 		moq_json::snapshot::Consumer::<RawCommand>::new(track, moq_json::snapshot::consumer::Config::default());
 
