@@ -351,7 +351,7 @@ impl Echo {
 		let broadcast = self.target.origin.create_broadcast(path)?;
 		let tracks = ReportTrack::create(&mut broadcast.broadcast().clone(), hang::echo::TRACK)?;
 		// A fresh instance, so a reader sees a replaced feedback broadcast as a restart.
-		broadcast.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))?;
+		broadcast.announce(moq_net::origin::Route::default())?;
 		Ok(Feedback {
 			path: path.clone(),
 			_broadcast: broadcast,

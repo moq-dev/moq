@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"time"
 
 	"moq.dev/moq"
 	moqmedia "moq.dev/moq/media"
@@ -62,7 +61,8 @@ func ExampleClient_CreateBroadcast() {
 	}
 	_ = publication.Announce(moq.AnnounceRoute{})
 
-	pts := 20 * time.Millisecond
+	// 20 ms in, counted on the Opus 48 kHz sample clock.
+	pts := moq.Timestamp{Value: 960, Scale: 48_000}
 	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame"), Timestamp: &pts}); err != nil {
 		log.Fatal(err)
 	}

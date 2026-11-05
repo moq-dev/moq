@@ -13,6 +13,10 @@ default: check
 check *args:
     {{ quote(justfile_directory() / "sh/c/check.sh") }} "$@"
 
+# Format the handwritten C with clang-format (cpp/obs/.clang-format).
+fix:
+    bash ../sh/clang-format.sh c
+
 # Runs in the caller's directory, so a relative `--output` means what it would
 # to the script itself.
 

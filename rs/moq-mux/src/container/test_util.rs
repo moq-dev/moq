@@ -253,7 +253,8 @@ pub(crate) async fn published<E>(
 
 	let mut out = std::collections::BTreeMap::new();
 	for (name, container) in containers {
-		let replay = moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600));
+		let replay = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(3600)));
 		let track = consumer.track(&name).unwrap().subscribe(replay).await.unwrap();
 		let mut reader = crate::container::Consumer::new(track, container);
 		let mut timestamps = Vec::new();
@@ -290,7 +291,7 @@ impl Clocks {
 		let mut clocks = Vec::new();
 		while let std::task::Poll::Ready(catalog) = self.0.poll_next(&waiter) {
 			let Some(catalog) = catalog.unwrap() else { break };
-			clocks.push(catalog.clock);
+			clocks.push(catalog.media.clock);
 		}
 		clocks
 	}
@@ -501,17 +502,6 @@ impl moq_net::transport::poll::Session for Gated {
 		options: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
 	) -> std::task::Poll<Result<moq_net::transport::poll::BiStreams<Self>, Self::Error>> {
 		self.inner.poll_open_bi(waiter, options)
-	}
-
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: moq_net::transport::poll::SendOptions<
-			'_,
-			<Self::SendStream as moq_net::transport::poll::SendStream>::Group,
-		>,
-	) -> std::task::Poll<Result<Option<moq_net::transport::poll::BiStreams<Self>>, Self::Error>> {
-		self.inner.poll_open_request(waiter, options)
 	}
 
 	fn send_group(&self, priority: i64) -> Option<moq_net::transport::poll::Ungrouped> {

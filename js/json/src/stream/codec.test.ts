@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Group, Track } from "@moq/net";
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import { Decoder } from "./decoder.ts";
 import { Encoder } from "./encoder.ts";
 import { Producer } from "./producer.ts";

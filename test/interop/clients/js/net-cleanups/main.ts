@@ -7,7 +7,7 @@ import { createMockTransportPair } from "../../../../../js/net/src/mock";
 
 /** Exercise public readers and accepted connections in the browser. */
 export async function run() {
-	const group = new Net.Group.Producer(0);
+	const group = new Net.Group.Producer(0n);
 	group.writeFrame({ payload: new TextEncoder().encode("first") });
 	const first = group.consume();
 	const a = await first.readString();
@@ -18,7 +18,7 @@ export async function run() {
 	const c = await second.readString();
 	group.finish();
 	second.close();
-	const json = new Net.Group.Producer(0);
+	const json = new Net.Group.Producer(0n);
 	const reader = json.consume();
 	json.writeFrame({ payload: new Uint8Array() });
 	json.writeFrame({ payload: new TextEncoder().encode("false") });

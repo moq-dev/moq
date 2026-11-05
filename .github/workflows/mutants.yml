@@ -1,0 +1,53 @@
+name: Mutants
+
+# Mutation-tests moq-auth and moq-net's grant, resume, and expiry code (scoped in
+# .cargo/mutants.toml), listing in the job summary each mutant no test caught.
+# A survivor fails its shard, which alert.yml posts. There is no score: fix a
+# survivor with a test, or exclude it in .cargo/mutants.toml with the reason.
+#
+# Weekly, not nightly: the scoped code changes slowly, and every mutant rebuilds
+# its crate and reruns its tests, so even sharded a run takes hours.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * 6"
+
+concurrency:
+  group: mutants-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    name: Mutants (${{ matrix.shard }}/24)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/nix
+
+      # No Rust cache: every mutant's build would be written back to it. In place,
+      # since the checkout is disposable and a copy would rebuild from cold.
+      - name: Test mutants
+        run: nix develop --command just rs mutants --in-place --shard ${{ matrix.shard }}/24
+
+      - name: Upload results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: mutants-${{ matrix.shard }}
+          path: target/mutants/mutants.out
+          if-no-files-found: ignore
+          retention-days: 45

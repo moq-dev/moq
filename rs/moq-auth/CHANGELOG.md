@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Token claims and grants carry optional bitrate caps again, as additive `publish_rate` and `subscribe_rate` (`Rate`, bits per second) beside the patterns. A capped role is written as `{"path": [...], "rate": bps}`, which released verifiers refuse rather than drop the cap; key scopes still refuse it.
+
 ### Changed
 
-- [**breaking**] Auth roles hold path patterns directly, matching release. Removed the unenforced `Access`/`Rate` API and the unvalidated public `Key::decode`; object roles, including bitrate caps, are refused during parsing.
+- [**breaking**] Auth roles hold path patterns directly, matching release. Removed the `Access` API and the unvalidated public `Key::decode`; a role's bitrate cap is a separate `publish_rate` or `subscribe_rate`.
 
 - Auth requests distinguish `webtransport` from native `quic`. Upgrade auth servers before relays: older servers reject the new value. Rust and JavaScript auth parsers now map future transport names to `unknown`.
 - `moq auth serve` refuses a query carrying more than one `jwt`, even an empty or escaped one, with `serve::Refusal::DuplicateJwt` instead of believing the last. The value is percent-decoded once.

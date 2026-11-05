@@ -69,12 +69,12 @@ enum SourceState {
 	Ended,
 }
 
-/// The track a source reads: its broadcast's path, the publisher instance that broadcast must
-/// be, and the track's name there.
+/// The track a source reads: its broadcast's path, the instance that broadcast must have, and
+/// the track's name there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Target {
 	path: moq_net::Path,
-	epoch: Option<moq_net::Epoch>,
+	instance: Option<moq_net::Instance>,
 	track: String,
 }
 
@@ -83,13 +83,13 @@ impl Target {
 	fn of(source: &crate::Source, name: &str, config: &impl Reference) -> Option<Self> {
 		Some(Self {
 			path: source.resolve_reference(config.broadcast())?,
-			epoch: config.epoch().cloned(),
+			instance: config.instance().cloned(),
 			track: config.track(name).to_string(),
 		})
 	}
 
 	fn request(&self, source: &crate::Source) -> SourceState {
-		let binding = source.request_path(&self.path, self.epoch.as_ref());
+		let binding = source.request_path(&self.path, self.instance.as_ref());
 		SourceState::Requesting(binding, self.track.clone())
 	}
 }
@@ -130,7 +130,7 @@ pub(crate) struct ExportSource {
 	after: Option<u64>,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
-	/// OpusHead). Some once the codec config is available — from the catalog
+	/// OpusHead). Some once the codec config is available - from the catalog
 	/// `description`, or synthesized by the transform.
 	description: Option<Bytes>,
 	/// Video codec used to derive geometry from its configuration or keyframes.
@@ -268,7 +268,7 @@ impl ExportSource {
 	) -> Result<Self, crate::Error> {
 		let target = Target {
 			path: source.path().clone(),
-			epoch: None,
+			instance: None,
 			track: name.to_string(),
 		};
 		let media = HangContainer::Legacy(crate::container::Kind::Data);
@@ -519,7 +519,8 @@ impl ExportSource {
 			if sibling {
 				self.instance = Some(broadcast.clone());
 			}
-			let mut subscription = moq_net::track::Subscription::default().with_max_delay(self.max_delay);
+			let mut subscription = moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(self.max_delay));
 			if let Some(after) = self.after {
 				subscription = subscription.with_range((Bound::Excluded(after), Bound::Unbounded));
 			}
@@ -757,6 +758,40 @@ pub(crate) fn codec_dimensions(
 	};
 
 	Ok(dimensions.filter(|(width, height)| *width > 0 && *height > 0))
+}
+
+/// The picture size the last SPS in a length-prefixed sample declares, for an H.264 or H.265 track
+/// that keeps its parameter sets in band beside its config record (avc3, hev1): the record fixes the
+/// NAL length size, while any keyframe may redefine the size. `None` for any other track, or a
+/// sample carrying no SPS.
+pub(crate) fn in_band_dimensions(
+	codec: &VideoCodec,
+	description: &[u8],
+	payload: &[u8],
+) -> crate::Result<Option<(u32, u32)>> {
+	let (h265, length_size) = match codec {
+		VideoCodec::H264(h264) if h264.inline => (false, crate::codec::h264::avcc_params(description)?.0),
+		VideoCodec::H265(h265) if h265.in_band => (true, crate::codec::h265::hvcc_params(description)?.0),
+		_ => return Ok(None),
+	};
+	let is_sps = |header: u8| match h265 {
+		false => header & 0x1f == 7,
+		true => (header >> 1) & 0x3f == 33,
+	};
+	let Some(sps) = crate::codec::annexb::length_prefixed_nals(payload, length_size)?
+		.map_while(|nal| nal.ok())
+		.filter(|nal| nal.first().is_some_and(|&header| is_sps(header)))
+		.last()
+	else {
+		return Ok(None);
+	};
+	let size = match h265 {
+		false => crate::codec::h264::Sps::parse(sps)
+			.ok()
+			.map(|sps| (sps.coded_width, sps.coded_height)),
+		true => crate::codec::h265::sps_size(sps),
+	};
+	Ok(size.filter(|(width, height)| *width > 0 && *height > 0))
 }
 
 /// An avcC or hvcC derived from the catalog codec string, when that string and
@@ -1045,7 +1080,7 @@ mod tests {
 			let observed = kio::wait(|waiter| {
 				let _ = export.poll_read(waiter);
 				match live.track.subscription() {
-					Some(subscription) => Poll::Ready(subscription.max_delay),
+					Some(subscription) => Poll::Ready(subscription.delay.max),
 					None => Poll::Pending,
 				}
 			})
@@ -1300,7 +1335,10 @@ mod tests {
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
 		let consumer = Consumer::new(
-			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10))),
+			track.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
+			),
 			HangContainer::Legacy(crate::container::Kind::Audio),
 		);
 		export.state = SourceState::Active(Box::new(consumer));

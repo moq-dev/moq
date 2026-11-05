@@ -1,4 +1,4 @@
-import Session from "@moq/qmux";
+import Session, { type SendStreamOptions } from "@moq/qmux";
 import { Channel } from "./channel.ts";
 
 /** The peer connection and the MoQ ALPN agreed through signaling. */
@@ -75,7 +75,14 @@ export class Transport implements WebTransport {
 		// SCTP's negotiated limit is known only after the data channel opens.
 		this.#session = this.#socket.opened.then(() => {
 			if (this.#closing) throw new Error("transport closed before opening");
-			const config = { maxRecordSize: BigInt(this.#socket.maxRecordSize), maxDatagramFrameSize: null };
+			// MoQ holds a stream open per subscription and per live group, far past qmux's default
+			// of 100 each way. Matches the stream limit of Rust's sessions.
+			const config = {
+				maxStreamsBidi: 10_000n,
+				maxStreamsUni: 10_000n,
+				maxRecordSize: BigInt(this.#socket.maxRecordSize),
+				maxDatagramFrameSize: null,
+			};
 			const session = server
 				? Session.accept(this.#socket, { config, protocol: `qmux-01.${protocol}` })
 				: new Session(this.#socket, { config });
@@ -132,12 +139,12 @@ export class Transport implements WebTransport {
 	}
 
 	/** Open a bidirectional qmux stream. */
-	async createBidirectionalStream(options?: WebTransportSendStreamOptions): Promise<WebTransportBidirectionalStream> {
+	async createBidirectionalStream(options?: SendStreamOptions): Promise<WebTransportBidirectionalStream> {
 		return (await this.#session).createBidirectionalStream(options);
 	}
 
 	/** Open a unidirectional qmux stream. */
-	async createUnidirectionalStream(options?: WebTransportSendStreamOptions): Promise<WritableStream<Uint8Array>> {
+	async createUnidirectionalStream(options?: SendStreamOptions): Promise<WritableStream<Uint8Array>> {
 		return (await this.#session).createUnidirectionalStream(options);
 	}
 

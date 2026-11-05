@@ -12,7 +12,7 @@ use moq_transport::message::RequestErrorCode;
 use moq_transport::{
     coding::TrackNamespace,
     serve::{Datagram, ServeError, Track, TrackReader, TrackReaderMode, Tracks},
-    session::{Publisher, SessionError, Subscriber},
+    session::{transport::Session, Publisher, SessionError, Subscriber},
 };
 use url::Url;
 
@@ -157,7 +157,7 @@ async fn run() -> anyhow::Result<Outcome> {
 
 async fn publish(
     args: Args,
-    session: web_transport::Session,
+    session: Session,
     transport: moq_transport::session::Transport,
 ) -> anyhow::Result<()> {
     let (session, mut publisher) = Publisher::connect(session, transport)
@@ -233,7 +233,7 @@ async fn publish_datagrams(
 async fn subscribe(
     args: Args,
     objects: usize,
-    session: web_transport::Session,
+    session: Session,
     transport: moq_transport::session::Transport,
 ) -> anyhow::Result<()> {
     let (session, mut subscriber) = Subscriber::connect(session, transport)
@@ -260,7 +260,7 @@ async fn subscribe(
 
 async fn probe(
     args: Args,
-    session: web_transport::Session,
+    session: Session,
     transport: moq_transport::session::Transport,
 ) -> anyhow::Result<Outcome> {
     let (session, mut subscriber) = Subscriber::connect(session, transport)

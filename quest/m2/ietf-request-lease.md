@@ -54,7 +54,3 @@ Consider the same shape for lite's request machines, where the audit found
 `TrackInfoFetch`, `Establish`, `FetchServeRun`, and `TracksRecv`.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [moq-transport 18 and 22 only](/quest/m1/ietf-drop/README.md) - deletes about 2,950 production lines and the adapter first

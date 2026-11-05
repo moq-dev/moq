@@ -57,14 +57,15 @@ pub(crate) fn server_tls(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use rcgen::{CertificateParams, KeyPair};
+	use rcgen::CertificateParams;
+	use rind_rcgen::KeyPair;
 	use rustls::pki_types::PrivateKeyDer;
 	use std::{path::PathBuf, sync::Arc};
 	use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 	#[tokio::test]
 	async fn cluster_api_refuses_redirects() {
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let addr = listener.local_addr().unwrap();
 		let server = async move {
@@ -88,7 +89,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn auth_trust_is_independent_from_mesh_verification() {
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		let dir = tempfile::tempdir().unwrap();
 		let ca = Authority::new("mesh");
 		let (cert, key) = ca.leaf("127.0.0.1");
@@ -98,9 +99,10 @@ mod tests {
 			.with_no_client_auth()
 			.with_single_cert(
 				vec![cert.der().clone()],
-				PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+				PrivateKeyDer::Pkcs8(key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
 			)
 			.unwrap();
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		for mode in ["insecure", "root", "fingerprint"] {
 			let mut mesh = moq_tokio::tls::Connect::default();
 			match mode {
@@ -108,42 +110,58 @@ mod tests {
 				"root" => mesh.root = vec![root.clone()],
 				"fingerprint" => {
 					mesh.fingerprint = vec![hex::encode(
-						aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, cert.der()).as_ref(),
+						rind::digest::digest(&rind::digest::SHA256, cert.der()).as_ref(),
 					)]
 				}
 				_ => unreachable!(),
 			}
 			for trusted in [false, true] {
-				let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 				let auth = crate::auth::Config {
 					root: if trusted { vec![root.clone()] } else { Vec::new() },
 					url: Some(format!("https://{}/", listener.local_addr().unwrap()).parse().unwrap()),
 					..Default::default()
 				};
 				let auth = auth.init("relay", &mesh, false).unwrap();
-				let serve = async {
-					let (stream, _) = listener.accept().await.unwrap();
-					if let Ok(mut stream) = tokio_rustls::TlsAcceptor::from(Arc::new(server.clone()))
-						.accept(stream)
-						.await
-					{
-						read_request(&mut stream).await;
-						let body = r#"{"publish":["**"],"subscribe":["**"]}"#;
-						let response = format!(
-							"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-							body.len()
-						);
-						stream.write_all(response.as_bytes()).await.unwrap();
-					}
-				};
 				let admit = auth.admit(auth.request(moq_auth::Transport::Quic, "/"));
-				let (admitted, ()) = tokio::join!(admit, serve);
+				let (admitted, request) = tokio::join!(admit, serve_auth(&listener, &server));
 				assert_eq!(admitted.is_ok(), trusted, "mesh {mode}, auth root {trusted}");
+				if let Ok(lease) = admitted {
+					let request = request.unwrap();
+					assert_eq!(request.event, moq_auth::Event::Connect);
+					// Drain the lease's End before another admission uses this listener.
+					let reported = lease.reported();
+					drop(lease);
+					let ((), ended) = tokio::join!(reported, serve_auth(&listener, &server));
+					let ended = ended.unwrap();
+					assert_eq!(ended.id, request.id);
+					assert!(matches!(ended.event, moq_auth::Event::End { .. }));
+				} else {
+					assert!(request.is_none(), "untrusted TLS must fail before HTTP");
+				}
 			}
 		}
 	}
 
-	async fn read_request(stream: &mut (impl tokio::io::AsyncRead + Unpin)) {
+	async fn serve_auth(listener: &tokio::net::TcpListener, tls: &rustls::ServerConfig) -> Option<moq_auth::Request> {
+		let (stream, _) = listener.accept().await.unwrap();
+		let Ok(mut stream) = tokio_rustls::TlsAcceptor::from(Arc::new(tls.clone()))
+			.accept(stream)
+			.await
+		else {
+			return None;
+		};
+		let request = read_request(&mut stream).await;
+		let body = r#"{"publish":["**"],"subscribe":["**"]}"#;
+		let response = format!(
+			"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+			body.len()
+		);
+		stream.write_all(response.as_bytes()).await.unwrap();
+		stream.shutdown().await.unwrap();
+		Some(request)
+	}
+
+	async fn read_request(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> moq_auth::Request {
 		let mut request = Vec::new();
 		loop {
 			let mut data = [0; 4096];
@@ -164,7 +182,7 @@ mod tests {
 				.parse()
 				.unwrap();
 			if request.len() >= end + 4 + length {
-				return;
+				return serde_json::from_slice(&request[end + 4..end + 4 + length]).unwrap();
 			}
 		}
 	}
@@ -177,8 +195,13 @@ mod tests {
 
 	impl Authority {
 		fn new(name: &str) -> Self {
-			let key = KeyPair::generate().unwrap();
-			let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+			let key = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+			let mut params = CertificateParams::new(Vec::<String>::new())
+				.map(|mut params| {
+					params.serial_number = Some(1u64.into());
+					params
+				})
+				.unwrap();
 			params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
 			params.distinguished_name.push(rcgen::DnType::CommonName, name);
 			let cert = params.self_signed(&key).unwrap();
@@ -186,8 +209,13 @@ mod tests {
 		}
 
 		fn leaf(&self, name: &str) -> (rcgen::Certificate, KeyPair) {
-			let key = KeyPair::generate().unwrap();
-			let params = CertificateParams::new(vec![name.to_string()]).unwrap();
+			let key = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+			let params = CertificateParams::new(vec![name.to_string()])
+				.map(|mut params| {
+					params.serial_number = Some(1u64.into());
+					params
+				})
+				.unwrap();
 			let cert = params
 				.signed_by(&key, &rcgen::Issuer::from_params(&self.params, &self.key))
 				.unwrap();
@@ -236,7 +264,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn peer_api_trust_is_independent_and_keeps_cluster_identity() {
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		let dir = tempfile::tempdir().unwrap();
 		let mesh = Authority::new("mesh");
 		let api = Authority::new("API");
@@ -250,7 +278,13 @@ mod tests {
 		let mut config = moq_tokio::tls::Connect::default();
 		config.root = vec![write("mesh.pem", mesh.cert.pem())];
 		config.cert = Some(write("client.pem", identity.pem()));
-		config.key = Some(write("client-key.pem", identity_key.serialize_pem()));
+		config.key = Some(write(
+			"client-key.pem",
+			pem::encode(&pem::Pem::new(
+				"PRIVATE KEY",
+				identity_key.to_pkcs8().secret_pkcs8_der(),
+			)),
+		));
 		let mesh_tls = config.build().unwrap();
 		let api_root = write("api.pem", api.cert.pem());
 		let mut roots = rustls::RootCertStore::empty();
@@ -262,7 +296,7 @@ mod tests {
 			.with_client_cert_verifier(verifier)
 			.with_single_cert(
 				vec![server_cert.der().clone()],
-				PrivateKeyDer::Pkcs8(server_key.serialize_der().into()),
+				PrivateKeyDer::Pkcs8(server_key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
 			)
 			.unwrap();
 
@@ -296,7 +330,7 @@ mod tests {
 			.with_client_cert_verifier(verifier)
 			.with_single_cert(
 				vec![mesh_server_cert.der().clone()],
-				PrivateKeyDer::Pkcs8(mesh_server_key.serialize_der().into()),
+				PrivateKeyDer::Pkcs8(mesh_server_key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
 			)
 			.unwrap();
 		assert!(

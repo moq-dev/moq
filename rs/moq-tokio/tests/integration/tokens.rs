@@ -41,7 +41,7 @@ async fn serve(version: &str, refused: &'static str) -> Server {
 
 	let notify = release.clone();
 	tokio::spawn(async move {
-		while let Some(request) = listener.accept().await {
+		while let Ok(request) = listener.accept().await {
 			let seen = Seen {
 				query: request.query().map(str::to_string),
 				token: request

@@ -11,8 +11,8 @@ import * as Video from "./video";
 
 /** Inputs for a complete broadcast playback pipeline. */
 export type PlayerInput = {
-	/** Origin that supplies the broadcast. */
-	origin: Getter<Moq.Origin.Table | undefined>;
+	/** Read-side origin that supplies the broadcast, borrowed without its lifecycle. */
+	origin: Getter<Moq.Origin.Reader | undefined>;
 	/** Broadcast path relative to the origin. */
 	name: Getter<Moq.Path.Valid>;
 	/** Whether the pipeline may subscribe. */

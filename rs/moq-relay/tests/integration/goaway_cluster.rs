@@ -15,9 +15,12 @@ use moq_relay::{
 };
 use url::Url;
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond track with no publisher max age: the frames written here carry timestamps,
+/// and superseded groups stay readable.
 fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
 }
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -42,7 +45,7 @@ async fn within<T>(step: &str, fut: impl std::future::Future<Output = T>) -> T {
 /// Run an integration-test future on a dedicated thread with a large stack.
 ///
 /// Under `--all-features`, `moq-tokio` compiles every transport
-/// (QUIC, iroh, websocket, and qmux) into its `Session`/`Client` types.
+/// (QUIC, websocket, and qmux) into its `Session`/`Client` types.
 /// These multi-relay tests hold several such values live across await points,
 /// so the single test future's state machine is large, and in an unoptimized
 /// build it overflows libtest's default 2 MiB per-test thread stack (a SIGABRT
@@ -74,7 +77,7 @@ const LITE_07: &str = "moq-lite-07-wip";
 async fn listen_tcp() -> (u16, moq_tokio::Listener) {
 	let mut config = moq_tokio::listen::Config::default();
 	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
-	// lite-07 alongside the defaults, so a dialer that opts in carries route epochs.
+	// lite-07 alongside the defaults, so a dialer that opts in carries route instances.
 	config.version = std::iter::once(LITE_07.parse().unwrap())
 		.chain(moq_net::Versions::all().iter().copied())
 		.collect();
@@ -110,7 +113,7 @@ fn drain_session_with_zero_timeout_closes_at_once() {
 /// the wire, so passing the window straight through left the session with no
 /// force-close at all and `drain_session` awaiting a peer that never leaves.
 async fn drain_session_with_zero_timeout_closes_at_once_inner() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let origin = moq_tokio::origin::spawn();
 	let (port, mut accepted, _handle) = spawn_upstream(origin).await;
@@ -146,7 +149,7 @@ fn cluster_continues_a_group_split_by_goaway() {
 /// A GOAWAY that lands mid-group hands the rest of the group to the reader already
 /// holding it, and the next group after it, never the split group a second time.
 async fn cluster_continues_a_group_split_by_goaway_inner() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let upstream_origin = moq_tokio::origin::spawn();
 	let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
@@ -163,9 +166,8 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 
 	let mut cluster_config = cluster::Config::default();
 	cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port_a}/"))];
-	let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
-		.expect("cluster init")
-		.with_connect(client_config, Default::default());
+	let cluster =
+		crate::spawn_cluster(cluster::Options::new(cluster_config)).with_connect(client_config, Default::default());
 	let started = cluster.clone().start().await.expect("cluster start");
 	let cluster_run = tokio::spawn(started.run());
 
@@ -213,7 +215,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	within("routed via B", async {
 		loop {
 			let event = announced.next().await.expect("announce update");
-			// Without an epoch, B's route is another source: a restart.
+			// Under another instance, B's route is another source: a restart.
 			if let moq_net::announce::Event::Start(update)
 			| moq_net::announce::Event::Update(update)
 			| moq_net::announce::Event::Restart(update)
@@ -262,7 +264,7 @@ async fn spawn_upstream(
 	let (accepted_tx, accepted_rx) = tokio::sync::mpsc::unbounded_channel();
 
 	let handle = tokio::spawn(async move {
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			// Serve the shared origin bidirectionally, like a relay peer would.
 			let scratch = moq_tokio::origin::spawn();
 			let session = match request.with_publisher(&origin).with_subscriber(scratch).ok().await {
@@ -284,7 +286,7 @@ async fn spawn_upstream(
 /// never retracts on the cluster origin (route re-pricing and the sibling's
 /// announce surface as metadata updates, not churn).
 async fn cluster_migrates_on_upstream_goaway_inner() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		// ── the shared "live" broadcast both siblings can serve ─────────
@@ -304,9 +306,8 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 
 		let mut cluster_config = cluster::Config::default();
 		cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port_a}/"))];
-		let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
-			.expect("cluster init")
-			.with_connect(client_config, Default::default());
+		let cluster =
+			crate::spawn_cluster(cluster::Options::new(cluster_config)).with_connect(client_config, Default::default());
 
 		let started = cluster.clone().start().await.expect("cluster start");
 		let cluster_run = tokio::spawn(started.run());
@@ -404,7 +405,7 @@ async fn spawn_relay_with_upstream(
 	upstream_url: &str,
 	accept_notify: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> (u16, tokio::task::JoinHandle<()>) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let (port, mut server) = listen_tcp().await;
 
@@ -423,12 +424,11 @@ async fn spawn_relay_with_upstream(
 	client_config.tls.insecure = Some(true);
 	client_config.goaway.handover = Some((HANDOVER).into());
 	client_config.backoff.initial = Some((BACKOFF).into());
-	// Only lite-07 carries the epoch that lets a failover resume the subscription.
+	// Only lite-07 carries the instance that lets a failover resume the subscription.
 	client_config.version = vec![LITE_07.parse().unwrap()];
 
-	let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
-		.expect("cluster init")
-		.with_connect(client_config, Default::default());
+	let cluster =
+		crate::spawn_cluster(cluster::Options::new(cluster_config)).with_connect(client_config, Default::default());
 
 	let started = cluster.clone().start().await.expect("cluster start");
 	let handle = tokio::spawn(async move {
@@ -438,7 +438,7 @@ async fn spawn_relay_with_upstream(
 
 		let mut accept_notify = accept_notify;
 		let mut id = 0;
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			if let Some(notify) = accept_notify.take() {
 				let _ = notify.send(());
 			}
@@ -474,18 +474,18 @@ async fn spawn_relay_with_upstream(
 /// 3. The draining MID-A leg keeps serving through the handover window, so
 ///    every group published across the swap arrives exactly once.
 /// 4. Once the old leg closes, the SAME subscription keeps flowing: both legs'
-///    routes carry TOP's epoch on lite-07, so BOTTOM's front re-splices onto
+///    routes carry TOP's instance on lite-07, so BOTTOM's front re-splices onto
 ///    the MID-B leg instead of ending the subscription.
 /// 5. No GOAWAY leaks to the subscriber's own session, and the path never
 ///    retracts under the subscriber.
 async fn cluster_diamond_goaway_seamless_failover_inner() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	// ── TOP: origin server serving the same broadcast to both mids ──────
 	let top_origin = moq_tokio::origin::spawn();
 	let broadcast = top_origin.create_broadcast("diamond").expect("create broadcast");
 	broadcast
-		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.announce(moq_net::origin::Route::default())
 		.expect("create broadcast");
 	let track = broadcast.create_track("video", timed()).expect("create track");
 
@@ -578,9 +578,10 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// must preserve is that every group arrives, exactly once, with its frames intact.
 	let mut sub = within(
 		"subscribe to the video track",
-		bc.track("video")
-			.expect("track handle")
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60))),
+		bc.track("video").expect("track handle").subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+		),
 	)
 	.await
 	.expect("subscribe");
@@ -655,7 +656,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	drop(mid_a_upstream);
 
 	// The subscription was served through the MID-A leg, but its close does not
-	// end it: both legs' routes carry TOP's epoch, so BOTTOM's front re-splices
+	// end it: both legs' routes carry TOP's instance, so BOTTOM's front re-splices
 	// onto the MID-B leg and the subscription rides through. Keep publishing and keep reading the SAME subscription.
 	const POST_DRAIN_LAST: u64 = LAST_GROUP + 40;
 	let post_publisher = tokio::spawn(async move {
@@ -762,8 +763,8 @@ async fn collect_group(sub: &mut moq_net::track::Subscriber, seen: &mut BTreeSet
 /// left to redial, and dropping the connection closes the transport because it
 /// holds the last session clone.
 ///
-/// The client comes back because it owns the transport endpoint (iroh's dies with
-/// it), and the caller has to outlive the connection it just got.
+/// The client comes back because it owns the transport endpoint, and the caller
+/// has to outlive the connection it just got.
 async fn connect_once(
 	client: moq_tokio::Client,
 	url: url::Url,
@@ -785,7 +786,7 @@ fn goaway_handover_is_enforced_while_the_replacement_dial_hangs() {
 /// then says nothing, so the handshake hangs, and the predecessor must still be
 /// closed on schedule rather than held for as long as the dial takes.
 async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let upstream_origin = moq_tokio::origin::spawn();
 	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin).await;

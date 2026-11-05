@@ -27,15 +27,20 @@ This README's own work, after the children:
 - Confirm a scheduled run passes. Failures already owned elsewhere stay
   there: the audio near-zero p95 row belongs to
   [audio jitter target](/quest/m1/audio-jitter-target/README.md), the
-  macOS `receive_credit` timeout to
-  [test flakes](/quest/m0/test-flakes-2/README.md), and the paired bench
-  threshold to [bench CI](/quest/m1/bench-ci.md).
+  macOS `receive_credit` timeout has no owner since its quest was deleted in
+  [moq-dev/moq#6732](https://github.com/moq-dev/moq/pull/6732), so plan one under
+  [test flakes](/quest/m0/test-flakes-2/README.md) if it recurs, the paired bench
+  threshold to [bench CI](/quest/m1/bench-ci.md), and the moq-net bench
+  panics in "Rust bench targets" to
+  [moq-net's benches run to completion](/quest/m1/bench-test-mode.md).
+  The receive-windows benchmark's overcommitted cells, skipped since
+  [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838), moved to
+  [m1](/quest/m1/receive-windows-evicted.md) on 2026-11-04 (maintainer).
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [The browser backend baseline completes on IETF22](/quest/m0/nightly/browser-baseline.md) - the WASM and UniFFI backend baseline completes every supported transport case without an internal error
-- [Probing beside Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stays within its deadline and p99 budgets
-- [Paired bench regressions bisected](/quest/m0/nightly/bench-regressions.md) - retirement/selection's +21-24% and two 10% rows fixed or shown to be noise
-- [Firefox's player closes every VideoFrame](/quest/m0/nightly/firefox-videoframe.md) - the Media job's Firefox player stops leaking an unclosed VideoFrame
+- [moq-net's ingest fuzz target finds no stall](/quest/m0/nightly/ingest-fuzz.md) - the 13-byte stream that stalls ingest is fixed at its cause and kept as a regression test
+- [Nightly's shipping-size check passes](/quest/m0/nightly/shipping-size.md) - js/net, js/watch, and moq-relay growth over 5% is traced to its commits, then shrunk or accepted
+- [Nightly's Miri job stays inside its time budget](/quest/m0/nightly/miri.md) - both Miri passes go green, with ARM timings inside the 60-minute job and 15-minute-per-test budgets

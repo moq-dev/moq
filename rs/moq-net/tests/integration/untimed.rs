@@ -12,7 +12,7 @@ use crate::support;
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_net::{Hop, Timescale, Timestamp, Version, origin, track};
+use moq_net::{Hop, Timescale, Timestamp, Version, datagram, origin, track};
 use support::harness::peer;
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -62,8 +62,9 @@ fn millis(ms: u64) -> Timestamp {
 	Timestamp::from_millis(ms).unwrap()
 }
 
+/// An untimed track with no publisher max age, so superseded groups stay readable.
 fn untimed() -> track::Info {
-	track::Info::default().with_timescale(None)
+	track::Info::default().with_timescale(None).with_max_age(None)
 }
 
 /// Origins chained by one session per hop, each hop on its own version.
@@ -187,7 +188,7 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 		let consumer = chain.nodes[1].consume().request("room", None).await.unwrap();
 		let subscription = track::Subscription::default()
 			.with_range(2..)
-			.with_max_delay(Duration::from_secs(30));
+			.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
 		let mut subscriber = kio::clock::timeout(TIMEOUT, consumer.track("data").unwrap().subscribe(subscription))
 			.await
 			.expect("subscribe timeout")
@@ -205,30 +206,38 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 	}
 }
 
-/// An untimed track's datagram arrives untimed, except that lite-05 and lite-06 carry its
-/// send time.
+/// An untimed datagram track's datagram arrives untimed, except that lite-05 and lite-06
+/// carry its send time on a millisecond track.
 #[kio::test]
 async fn datagrams_arrive_as_published() {
-	for version in ["moq-lite-05", "moq-lite-07-wip", "moq-transport-22"] {
+	for version in ["moq-lite-05", "moq-lite-07-wip"] {
 		let chain = Chain::new(&[version]).await;
 		let broadcast = chain.nodes[0].create_broadcast("room").unwrap();
-		let mut producer = broadcast.create_track("data", untimed()).unwrap();
+		let mut producer = broadcast.create_datagrams("data", datagram::Info::default()).unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		kio::clock::sleep(Duration::from_secs(1)).await;
 
-		let mut subscriber = chain.subscribe("data").await;
-		// A group first, so the subscription is bound before any datagram lands.
-		producer.write_frame(None, &b"before"[..]).unwrap();
-		next_frame(&mut subscriber).await;
+		let consumer = kio::clock::timeout(TIMEOUT, chain.nodes[1].consume().request("room", None))
+			.await
+			.expect("resolve timeout")
+			.expect("broadcast resolves");
+		let mut consumer = consumer.datagrams("data").unwrap();
+		// Not the default, which the lite-05 TRACK lookup ahead of the SUBSCRIBE holds too.
+		consumer.set_priority(1);
+		kio::clock::timeout(TIMEOUT, support::datagram_priority(&producer, Some(1)))
+			.await
+			.expect("the request never reached the publisher");
+		// Datagrams count once the answer is back.
+		let timescale = consumer.info().await.unwrap().timescale;
 
-		producer.append_datagram(None, &b"untimed"[..]).unwrap();
-		let datagram = kio::clock::timeout(TIMEOUT, subscriber.recv_datagram())
+		producer.append(None, &b"untimed"[..]).unwrap();
+		let datagram = kio::clock::timeout(TIMEOUT, consumer.recv())
 			.await
 			.expect("datagram timeout")
 			.unwrap()
 			.expect("a datagram");
 		let sent = expected(version) == Arrives::SendTimes;
 		assert_eq!(datagram.timestamp.is_some(), sent, "{version}");
+		assert_eq!(timescale, sent.then_some(Timescale::MILLI), "{version}");
 	}
 }
 

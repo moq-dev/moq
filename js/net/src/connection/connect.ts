@@ -1,8 +1,9 @@
 import { Elapsed, Milli, Nano, sleep, timeout } from "@moq/clock";
-import Session, { type Version as QmuxVersion } from "@moq/qmux";
-import { race } from "@moq/signals";
+import Session, { type SessionOptions as QmuxOptions, type Version as QmuxVersion } from "@moq/qmux";
+import { type Getter, race } from "@moq/signals";
 import type * as Auth from "../auth.ts";
 import { vacant } from "../auth_session.ts";
+import type { Viewers } from "../bandwidth.ts";
 import { ConnectTimeout, error, fromClose, ProtocolViolation, sessionCause } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
@@ -34,6 +35,11 @@ const WEBTRANSPORT_HEDGE = DEFAULT_WEBSOCKET_DELAY_MS;
 // WebSocket 20 s to open.
 const WEBSOCKET_REDIAL = Milli(10_000);
 
+// MoQ holds a stream open per subscription and per live group, far past qmux's default of
+// 100 each way, where the peer's opens are refused or wait on credit forever. Matches
+// `moq-tokio`'s `quic.max_streams`, the limit of Rust's sessions and the relay.
+const DEFAULT_MAX_STREAMS = 10_000;
+
 // RESET_STREAM and CONNECTION_CLOSE are separate transport notifications. Give the latter
 // time to surface its authoritative code without letting a reset-only peer stall SETUP forever.
 const SETUP_CLOSE_GRACE = Nano.fromMilli(Milli(100));
@@ -48,9 +54,18 @@ export interface WebSocketProps {
 
 	/**
 	 * The delay in milliseconds before attempting the WebSocket fallback (default: 500).
-	 * If WebSocket won the previous race for a given URL, this is 0.
+	 * It is 0 while WebSocket holds the last win against the host and port the fallback dials,
+	 * until WebTransport wins a race there again.
 	 */
 	delay?: Milli;
+
+	/**
+	 * How many streams the server may hold open at once, applied to bidirectional and
+	 * unidirectional streams alike (default: 10,000), like `moq-tokio`'s `quic.max_streams`.
+	 * MoQ holds a stream per subscription and per live group, so a low limit stalls or refuses them.
+	 * Must be a positive integer.
+	 */
+	maxStreams?: number;
 }
 
 /**
@@ -152,7 +167,7 @@ export function checkVersions(versions: readonly string[]): string[] {
 	return [...versions];
 }
 
-/** Validate and snapshot an ordered version list before acquiring a connection. @internal */
+/** Validate the transport options and snapshot an ordered version list before acquiring a connection. @internal */
 export function normalizeVersions(props?: {
 	versions?: readonly string[];
 	webtransport?: WebTransportProps;
@@ -162,6 +177,9 @@ export function normalizeVersions(props?: {
 		throw new TypeError("webtransport.protocols was removed; set versions instead");
 	if (props?.websocket && "protocols" in props.websocket)
 		throw new TypeError("websocket.protocols was removed; set versions instead");
+	const maxStreams = props?.websocket?.maxStreams;
+	if (maxStreams !== undefined && !(Number.isSafeInteger(maxStreams) && maxStreams > 0))
+		throw new RangeError(`websocket.maxStreams must be a positive integer: ${maxStreams}`);
 	return props?.versions === undefined ? undefined : checkVersions(props.versions);
 }
 
@@ -253,6 +271,13 @@ export interface ConnectProps {
 	implementation?: string;
 
 	/**
+	 * The viewers whose ceilings summed the session sends as its PROBE target, so a peer
+	 * that advertised `Increase` probes the connection up to it (moq-lite-05+). Omit to send
+	 * no target. The registry is borrowed, so the same one can span reconnects.
+	 */
+	viewers?: Viewers;
+
+	/**
 	 * Maximum time for one connect, covering the dial and the MoQ handshake, which has no
 	 * deadline of its own (default: 30000ms). `0` waits forever. Past it, the connect rejects
 	 * with {@link ConnectTimeout} and closes whatever it had opened.
@@ -280,10 +305,23 @@ type SessionProps = {
 	token?: Uint8Array;
 	/** The implementation this side advertises in SETUP; empty sends nothing. */
 	implementation: string;
+	/** The PROBE target to send a peer that advertised `Increase`. */
+	probeTarget?: Getter<number>;
 };
 
-// Save if WebSocket won the last race, so we won't give QUIC a head start next time.
+/**
+ * Servers (host and port) the WebSocket fallback dials where WebSocket won the last race, so the
+ * next dial there skips QUIC's head start. Both transports still race, and a WebTransport win
+ * deletes the entry, since UDP gets through again. Keyed like moq-tokio's: whether UDP reaches a
+ * server does not depend on the path or query, which may hold a rotating credential.
+ */
 const websocketWon = new Set<string>();
+
+/** The {@link websocketWon} key for the URL the WebSocket fallback dials. */
+function websocketKey(url: URL): string {
+	const port = url.port || (url.protocol === "http:" || url.protocol === "ws:" ? "80" : "443");
+	return `${url.hostname}:${port}`;
+}
 
 /** The default connect signal: never aborts. */
 const NEVER_ABORTED = new AbortController().signal;
@@ -371,6 +409,7 @@ async function connectInner(
 		extensions: Extensions.offered(props.extensions),
 		token: presented.setup === undefined ? undefined : new TextEncoder().encode(presented.setup),
 		implementation: props.implementation ?? IMPLEMENTATION,
+		probeTarget: props.viewers?.target,
 	});
 
 	if (props.transport) {
@@ -387,13 +426,23 @@ async function connectInner(
 		? hedgeWebTransport(url, cancel, offered.alpns, props.webtransport)
 		: undefined;
 
-	// Give QUIC a head start to connect before trying WebSocket, unless WebSocket has won in the past.
-	// NOTE that QUIC should be faster because it involves 1/2 fewer RTTs.
+	// Give QUIC a head start to connect before trying WebSocket, unless WebSocket won the last race
+	// to this server. NOTE that QUIC should be faster because it involves 1/2 fewer RTTs.
+	const websocketUrl = fallbackDial?.url ?? url;
+	const server = websocketKey(websocketUrl);
 	const headstart =
-		!webtransport || websocketWon.has(url.toString()) ? 0 : (props.websocket?.delay ?? DEFAULT_WEBSOCKET_DELAY_MS);
+		!webtransport || websocketWon.has(server) ? 0 : (props.websocket?.delay ?? DEFAULT_WEBSOCKET_DELAY_MS);
+	const maxStreams = BigInt(props.websocket?.maxStreams ?? DEFAULT_MAX_STREAMS);
 	const websocket =
 		props.websocket?.enabled !== false
-			? connectWebSocket(fallbackDial?.url ?? url, headstart, cancel, offered.alpns)
+			? connectWebSocket(websocketUrl, headstart, cancel, {
+					// The default (`requireProtocol: false`) also advertises the bare `qmux-02`,
+					// `qmux-01`, and `qmux-00`, so we still interop with relays that only know a
+					// wire-format version.
+					protocols: offered.alpns,
+					versions: Object.fromEntries(offered.alpns.map((alpn) => [alpn, QMUX[alpn] ?? null])),
+					config: { maxStreamsBidi: maxStreams, maxStreamsUni: maxStreams },
+				})
 			: undefined;
 
 	if (!websocket && !webtransport) {
@@ -422,12 +471,13 @@ async function connectInner(
 	// Abort the setup handshake without leaking the selected transport.
 	void abort.then(() => session.close());
 
-	// Save if WebSocket won the last race, so we won't give QUIC a head start next time.
+	// Record who won the race to this server, so QUIC's next head start follows the last result.
 	if (session instanceof Session) {
 		console.debug(redact(url), "connected via WebSocket");
-		websocketWon.add(url.toString());
+		websocketWon.add(server);
 	} else {
 		console.debug(redact(url), "connected via WebTransport");
+		websocketWon.delete(server);
 	}
 
 	// The remaining setup is identical whether the transport was raced or supplied.
@@ -698,15 +748,10 @@ async function connectWebTransport(
 		// and never reaches here. Keep this at debug so it doesn't read as a problem.
 		console.debug(redact(fingerprintUrl), "performing an insecure fingerprint fetch; use https:// in production");
 
-		// Fetch the fingerprint from the server.
-		// TODO cancel the request if the effect is cancelled.
-		const fingerprint = await Promise.race([fetch(fingerprintUrl), cancel]);
+		const fingerprint = await fetchFingerprint(fingerprintUrl, cancel);
 		if (!fingerprint) return undefined;
 
-		const fingerprintText = await Promise.race([fingerprint.text(), cancel]);
-		if (fingerprintText === undefined) return undefined;
-
-		hashes.push({ algorithm: "sha-256", value: Hex.toBytes(fingerprintText) });
+		hashes.push({ algorithm: "sha-256", value: fingerprint });
 
 		finalUrl = new URL(url);
 		finalUrl.protocol = "https:";
@@ -732,6 +777,51 @@ async function connectWebTransport(
 	return quic;
 }
 
+/** A SHA-256 certificate fingerprint is 32 bytes, served as this many hex characters. */
+const FINGERPRINT_HEX_LENGTH = 64;
+
+/**
+ * Fetch the SHA-256 certificate fingerprint served at `url`, or `undefined` once `cancel` resolves.
+ *
+ * Resolving `cancel` aborts the request. The body is read chunk by chunk and refused at the first
+ * chunk that takes it past a fingerprint, so a reply with no `Content-Length` cannot accumulate:
+ * it holds at most a fingerprint plus the one chunk the network stack handed over.
+ */
+async function fetchFingerprint(url: URL, cancel: Promise<void>): Promise<Uint8Array<ArrayBuffer> | undefined> {
+	const controller = new AbortController();
+	void cancel.then(() => controller.abort());
+
+	try {
+		const response = await fetch(url, { signal: controller.signal });
+		if (!response.ok) throw new Error(`fingerprint fetch failed: HTTP ${response.status}`);
+
+		const body = new Uint8Array(FINGERPRINT_HEX_LENGTH);
+		let length = 0;
+		const reader = response.body?.getReader();
+		for (;;) {
+			const chunk = await reader?.read();
+			if (!chunk || chunk.done) break;
+			if (length + chunk.value.byteLength > body.length) {
+				throw new Error(`fingerprint is longer than ${FINGERPRINT_HEX_LENGTH} hex characters`);
+			}
+			body.set(chunk.value, length);
+			length += chunk.value.byteLength;
+		}
+		if (length !== body.length) {
+			throw new Error(`fingerprint is ${length} characters, expected ${FINGERPRINT_HEX_LENGTH} hex characters`);
+		}
+
+		return Hex.toBytes(new TextDecoder().decode(body));
+	} catch (err) {
+		// Cancelled: another transport won or the caller aborted, which is no failure of this dial.
+		if (controller.signal.aborted) return undefined;
+		throw err;
+	} finally {
+		// Releases the request and cancels any unread body, whichever way this ended.
+		controller.abort();
+	}
+}
+
 // TODO accept arguments to control the port/path used.
 /**
  * Dial the WebSocket fallback after `delay`, and if a dial has not opened within
@@ -748,7 +838,7 @@ async function connectWebSocket(
 	url: URL,
 	delay: number,
 	cancel: Promise<void>,
-	alpns: string[],
+	options: QmuxOptions,
 ): Promise<Session | undefined> {
 	const timer = sleep(Nano.fromMilli(Milli(delay)));
 
@@ -756,13 +846,7 @@ async function connectWebSocket(
 	if (!active) return undefined;
 
 	for (let wait = WEBSOCKET_REDIAL; ; wait = Milli(wait * 2)) {
-		// The default (`requireProtocol: false`) also advertises the bare `qmux-02`,
-		// `qmux-01`, and `qmux-00`, so we still interop with relays that only know a
-		// wire-format version.
-		const quic = new Session(url, {
-			protocols: alpns,
-			versions: Object.fromEntries(alpns.map((alpn) => [alpn, QMUX[alpn] ?? null])),
-		});
+		const quic = new Session(url, options);
 
 		// Wait for the WebSocket to connect, for the cancel promise to resolve, or for the
 		// redial. `ready` rejects on a refused/failed connection, so a throw here is the

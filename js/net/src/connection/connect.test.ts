@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
+import Qmux, { selectSubprotocol, type WebSocketLike } from "@moq/qmux";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import { ClientSetup, ServerSetup } from "../lite/compat.ts";
@@ -115,6 +116,138 @@ test("a raw QUIC URL dials WebTransport over https", async () => {
 	}
 
 	expect(dialed).toBe("https://example.com:4443/anon?jwt=x");
+});
+
+// Serve `/certificate.sha256` from `respond`, recording when a request's client goes away.
+function fingerprintServer(respond: (request: Request) => Response | Promise<Response>) {
+	let requests = 0;
+	let aborted = 0;
+	const server = Bun.serve({
+		port: 0,
+		fetch(request) {
+			requests++;
+			request.signal.addEventListener("abort", () => aborted++, { once: true });
+			return respond(request);
+		},
+	});
+	return {
+		url: new URL(`http://127.0.0.1:${server.port}/anon`),
+		requests: () => requests,
+		aborted: () => aborted,
+		stop: () => server.stop(true),
+	};
+}
+
+// Wait, bounded, for `ready` to hold; a real socket needs more than a microtask turn.
+async function until(ready: () => boolean) {
+	for (let i = 0; i < 200 && !ready(); i++) await sleep(Nano.fromMilli(Milli(5)));
+}
+
+test("an http:// URL pins the fetched fingerprint and dials https", async () => {
+	const fingerprint = "ab".repeat(32);
+	const server = fingerprintServer(() => new Response(fingerprint));
+	const pair = createMockTransportPair(ALPN_06);
+	const original = globalThis.WebTransport;
+	let dialed: string | undefined;
+	let hashes: WebTransportHash[] | undefined;
+
+	function StubWebTransport(this: unknown, target: string | URL, options: WebTransportOptions) {
+		dialed = target.toString();
+		hashes = options.serverCertificateHashes;
+		return pair.client;
+	}
+	globalThis.WebTransport = StubWebTransport as unknown as typeof WebTransport;
+
+	try {
+		const connection = await connect(server.url, { websocket: { enabled: false } });
+		connection.abort();
+	} finally {
+		globalThis.WebTransport = original;
+		server.stop();
+	}
+
+	expect(dialed).toBe(`https://127.0.0.1:${server.url.port}/anon`);
+	expect(hashes?.map((hash) => [hash.algorithm, [...(hash.value as Uint8Array)]])).toEqual([
+		["sha-256", Array(32).fill(0xab)],
+	]);
+});
+
+test("an http:// fingerprint longer than a SHA-256 is refused without reading the rest", async () => {
+	// A chunked body with no Content-Length that never ends: only a bounded read can refuse it.
+	const chunk = new TextEncoder().encode("a".repeat(1024));
+	const server = fingerprintServer(
+		() =>
+			new Response(
+				new ReadableStream({
+					pull(controller) {
+						controller.enqueue(chunk);
+					},
+				}),
+			),
+	);
+	const original = globalThis.WebTransport;
+	let dials = 0;
+	function CountingWebTransport(this: unknown): never {
+		dials++;
+		throw new Error("unexpected dial");
+	}
+	globalThis.WebTransport = CountingWebTransport as unknown as typeof WebTransport;
+
+	try {
+		await expect(connect(server.url, { websocket: { enabled: false } })).rejects.toThrow(
+			"fingerprint is longer than 64 hex characters",
+		);
+		expect(dials).toBe(0);
+	} finally {
+		globalThis.WebTransport = original;
+		server.stop();
+	}
+});
+
+test("an http:// fingerprint of the wrong length or status is refused", async () => {
+	const original = globalThis.WebTransport;
+	globalThis.WebTransport = function Unused(this: unknown): never {
+		throw new Error("unexpected dial");
+	} as unknown as typeof WebTransport;
+
+	const short = fingerprintServer(() => new Response("ab".repeat(31)));
+	const missing = fingerprintServer(() => new Response("no certificate\n", { status: 404 }));
+	try {
+		await expect(connect(short.url, { websocket: { enabled: false } })).rejects.toThrow(
+			"fingerprint is 62 characters, expected 64 hex characters",
+		);
+		await expect(connect(missing.url, { websocket: { enabled: false } })).rejects.toThrow(
+			"fingerprint fetch failed: HTTP 404",
+		);
+	} finally {
+		globalThis.WebTransport = original;
+		short.stop();
+		missing.stop();
+	}
+});
+
+test("aborting connect aborts a pending http:// fingerprint fetch", async () => {
+	// Answer nothing, so only the abort ends the request.
+	const server = fingerprintServer(() => new Promise<Response>(() => {}));
+	const original = globalThis.WebTransport;
+	globalThis.WebTransport = function Unused(this: unknown): never {
+		throw new Error("unexpected dial");
+	} as unknown as typeof WebTransport;
+
+	const controller = new AbortController();
+	try {
+		const pending = connect(server.url, { websocket: { enabled: false }, signal: controller.signal });
+		await until(() => server.requests() > 0);
+		expect(server.requests()).toBe(1);
+
+		controller.abort(new Error("stop"));
+		await expect(pending).rejects.toThrow("stop");
+		await until(() => server.aborted() > 0);
+		expect(server.aborted()).toBe(1);
+	} finally {
+		globalThis.WebTransport = original;
+		server.stop();
+	}
 });
 
 test("a failed connect names why the transport failed", async () => {
@@ -514,6 +647,100 @@ test("the WebSocket fallback offers the same versions", async () => {
 	expect(asked.some((protocol) => protocol.endsWith(ALPN_05))).toBe(false);
 });
 
+// How many streams the WebSocket fallback lets a server open in each direction: a qmux
+// server accepts the dial and opens streams until the client's limit refuses one.
+async function websocketStreamLimits(props: Omit<ConnectProps, "url">): Promise<{ bidi: number; uni: number }> {
+	const original = globalThis.WebTransport;
+	// No WebTransport, so the WebSocket attempt goes at once.
+	globalThis.WebTransport = undefined as unknown as typeof WebTransport;
+	const accepted = Promise.withResolvers<Qmux>();
+	// Bun's server socket, shaped as the `WebSocketLike` that `Qmux.accept` adopts.
+	let adopted: WebSocketLike | undefined;
+	const server = Bun.serve<{ protocol: string }>({
+		port: 0,
+		fetch(request, server) {
+			const protocol = selectSubprotocol(request.headers.get("sec-websocket-protocol"), {
+				protocols: [ALPN_06],
+				versions: { [ALPN_06]: null },
+			});
+			if (!protocol) return new Response("no protocol", { status: 400 });
+			const headers = { "sec-websocket-protocol": protocol };
+			if (server.upgrade(request, { headers, data: { protocol } })) return;
+			return new Response("no upgrade", { status: 400 });
+		},
+		websocket: {
+			open(socket) {
+				socket.binaryType = "arraybuffer";
+				adopted = {
+					binaryType: "arraybuffer",
+					get bufferedAmount() {
+						return socket.getBufferedAmount();
+					},
+					get readyState() {
+						return socket.readyState;
+					},
+					protocol: "",
+					extensions: "",
+					send: (data) => void socket.send(data as Uint8Array),
+					close: (code, reason) => socket.close(code, reason),
+					onopen: null,
+					onmessage: null,
+					onerror: null,
+					onclose: null,
+				};
+				accepted.resolve(Qmux.accept(adopted, { protocol: socket.data.protocol }));
+			},
+			message(_socket, data) {
+				adopted?.onmessage?.({ data });
+			},
+			close(_socket, code, reason) {
+				adopted?.onclose?.({ code, reason });
+			},
+		},
+	});
+	const controller = new AbortController();
+	try {
+		// SETUP goes unanswered, so the attempt stays open until aborted.
+		const attempt = connect(new URL(`http://127.0.0.1:${server.port}/`), {
+			signal: controller.signal,
+			versions: ["moq-lite-06"],
+			...props,
+		}).catch(() => undefined);
+		const session = await accepted.promise;
+		const count = async (open: () => Promise<unknown>) => {
+			let opened = 0;
+			try {
+				for (; ; opened++) await open();
+			} catch {
+				return opened;
+			}
+		};
+		const now = { waitUntilAvailable: false };
+		const limits = {
+			bidi: await count(() => session.createBidirectionalStream(now)),
+			uni: await count(() => session.createUnidirectionalStream(now)),
+		};
+		controller.abort();
+		await attempt;
+		session.close();
+		return limits;
+	} finally {
+		globalThis.WebTransport = original;
+		server.stop(true);
+	}
+}
+
+test("the WebSocket fallback grants the server websocket.maxStreams in each direction", async () => {
+	expect(await websocketStreamLimits({})).toEqual({ bidi: 10_000, uni: 10_000 });
+	expect(await websocketStreamLimits({ websocket: { maxStreams: 3 } })).toEqual({ bidi: 3, uni: 3 });
+});
+
+test("websocket.maxStreams must be a positive integer", async () => {
+	for (const maxStreams of [0, -1, 1.5, Number.NaN]) {
+		await expect(connect(url, { websocket: { maxStreams } })).rejects.toThrow(RangeError);
+	}
+});
+
 // A WebTransport whose handshake nothing ever answers, as a dial to a dead target is.
 function silentWebTransport(): { closes: () => number; restore: () => void } {
 	const original = globalThis.WebTransport;
@@ -806,7 +1033,8 @@ test("when the WebSocket wins, every WebTransport dial is closed", async () => {
 	};
 	const controller = new AbortController();
 	try {
-		const pending = connect(new URL("https://example.com/websocket-wins"), { signal: controller.signal });
+		// Its own host: a WebSocket win drops WebTransport's head start for that host and port afterwards.
+		const pending = connect(new URL("https://websocket-wins.example.com/"), { signal: controller.signal });
 		await clock.advance(Nano.fromMilli(Milli(700)));
 		expect(plan.dials.map((dial) => dial.at)).toEqual([0, 500]);
 		expect(plan.dials.map((dial) => dial.closes)).toEqual([1, 1]);
@@ -849,8 +1077,8 @@ test("when WebTransport and WebSocket open in the same turn, the one not chosen 
 	};
 	const controller = new AbortController();
 	try {
-		// Its own URL: a WebSocket win drops WebTransport's head start for that URL afterwards.
-		const pending = connect(new URL("https://example.com/same-turn"), {
+		// Its own host: a WebSocket win drops WebTransport's head start for that host and port afterwards.
+		const pending = connect(new URL("https://same-turn.example.com/"), {
 			websocket: { delay: Milli(0) },
 			signal: controller.signal,
 		});
@@ -959,8 +1187,8 @@ test("an invalid timeout throws before touching the caller's signal", async () =
 
 type WebSocketDial = "hang" | "open" | { failAfter: Milli } | { openAfter: Milli };
 
-// Their own URL: a WebSocket that wins drops WebTransport's head start for its URL afterwards.
-const websocketUrl = new URL("https://example.com/websocket-only");
+// Their own host: a WebSocket that wins drops WebTransport's head start for its host and port afterwards.
+const websocketUrl = new URL("https://websocket-only.example.com/");
 
 // Stub a native WebSocketStream so each dial behaves as `plan` says, recording when it was
 // dialed (on the Manual clock) and how often it was closed. WebTransport is removed, as in
@@ -1101,6 +1329,82 @@ test("with the default timeout, a silent WebSocket is redialed once and the atte
 		expect(plan.dials.map((dial) => dial.closes)).toEqual([1, 1]);
 	} finally {
 		plan.restore();
+		installed.close();
+	}
+});
+
+// One race on the Manual clock: WebTransport dials as `webtransport` says and the WebSocket as
+// `websocket` says. Returns when each WebSocket dial started, relative to the connect.
+async function raceOnce(
+	clock: Manual,
+	target: URL,
+	webtransport: Dial,
+	websocket: WebSocketDial,
+	props: Omit<ConnectProps, "url"> = {},
+): Promise<number[]> {
+	// `webSocketPlan` removes WebTransport; `webTransportPlan` puts a stub back over it.
+	const sockets = webSocketPlan(clock, () => websocket);
+	const transports = webTransportPlan(clock, () => webtransport);
+	const start = Nano.toMilli(Nano(clock.now()));
+	const controller = new AbortController();
+	try {
+		const pending = connect(target, { signal: controller.signal, ...props });
+		await clock.advance(Nano.fromMilli(Milli(600)));
+		// A WebSocket winner is still in SETUP, which nothing answers; a WebTransport one connected.
+		controller.abort();
+		const connection = await pending.catch(() => undefined);
+		connection?.abort();
+		return sockets.dials.map((dial) => dial.at - start);
+	} finally {
+		transports.restore();
+		sockets.restore();
+	}
+}
+
+// Each test below uses its own hosts, since the preference outlives the test.
+test("a WebSocket win skips the head start for any path or query on that host and port", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const at = (path: string) => new URL(path, "https://preferred.example.com");
+	try {
+		expect(await raceOnce(clock, at("/a?jwt=one"), "hang", "open")).toEqual([500]);
+		// Another path and a rotated token reach the same server.
+		expect(await raceOnce(clock, at("/b?jwt=two"), "hang", "open")).toEqual([0]);
+		expect(await raceOnce(clock, at("https://preferred.example.com:443/c"), "hang", "open")).toEqual([0]);
+		// Another port is another server.
+		expect(await raceOnce(clock, at("https://preferred.example.com:4443/a"), "hang", "open")).toEqual([500]);
+	} finally {
+		installed.close();
+	}
+});
+
+test("the WebSocket preference is keyed by the server the fallback dials", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const websocket = { url: new URL("https://fallback.example.com/ws") };
+	try {
+		const primary = new URL("https://primary.example.com/");
+		expect(await raceOnce(clock, primary, "hang", "open", { websocket })).toEqual([500]);
+		// Another WebTransport server with the same fallback skips the head start.
+		const secondary = new URL("https://secondary.example.com/");
+		expect(await raceOnce(clock, secondary, "hang", "open", { websocket })).toEqual([0]);
+		// Without the fallback URL, the WebSocket dials the primary, which never lost a race.
+		expect(await raceOnce(clock, primary, "hang", "open")).toEqual([500]);
+	} finally {
+		installed.close();
+	}
+});
+
+test("a WebTransport win restores the head start", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const target = new URL("https://recovered.example.com/");
+	try {
+		expect(await raceOnce(clock, target, "hang", "open")).toEqual([500]);
+		// WebSocket won last, so it dials at once, but WebTransport opens first and wins.
+		expect(await raceOnce(clock, target, { openWhen: sleep(Nano.fromMilli(Milli(100))) }, "hang")).toEqual([0]);
+		expect(await raceOnce(clock, target, "hang", "open")).toEqual([500]);
+	} finally {
 		installed.close();
 	}
 });

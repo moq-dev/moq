@@ -79,11 +79,21 @@ impl Version {
 		!matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04)
 	}
 
-	/// Whether the session may deliver groups over unreliable QUIC datagrams (lite-05 §6.4).
-	/// Group datagrams route one frame over an existing subscription; lite-07 adds a
-	/// leading type and padding. Older than lite-05 never sends or accepts datagrams.
+	/// Whether the session may carry unreliable QUIC datagrams (lite-05 §6.4): single-frame
+	/// groups on lite-05/06, a datagram track's datagrams on lite-07, which adds a leading
+	/// type and padding. Older than lite-05 never sends or accepts datagrams.
 	pub fn has_datagrams(self) -> bool {
 		!matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04)
+	}
+
+	/// Whether a subscriber subscribes to a datagram track through its own Datagrams Stream
+	/// (0x9), whose datagrams carry the datagram track's own sequence. Added in lite-07;
+	/// earlier versions carry single-frame groups as datagrams on a SUBSCRIBE subscription.
+	pub(crate) fn has_datagram_tracks(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
 	}
 
 	/// Whether announce streams begin with ANNOUNCE_OK and omit the sender's origin
@@ -182,8 +192,17 @@ impl Version {
 		)
 	}
 
+	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's optional
+	/// `Subscriber Min Age`. Added in lite-07; an earlier subscription decodes it as not stated.
+	pub(crate) fn has_min_delay(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an
-	/// earlier fetch is bounded by the publisher's retention alone.
+	/// earlier fetch is bounded by the publisher's max age alone.
 	pub(crate) fn has_fetch_max_delay(self) -> bool {
 		!matches!(
 			self,
@@ -225,12 +244,19 @@ impl Version {
 		self.resolves_start() && !self.has_media_time() && !self.has_fetch_max_delay()
 	}
 
-	/// Whether subscription completion waits for the subscriber's FIN.
+	/// Whether subscription completion waits for the subscriber's FIN, which it sends once
+	/// its tail accounting settles. SUBSCRIBE_FINISH says which groups are owed, so that is
+	/// prompt from lite-05; before it, only the subscriber's grace settles the tail.
 	pub(crate) fn waits_for_subscriber_fin(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
+		self.has_track_stream()
+	}
+
+	/// Whether the Subscribe Stream stays open past SUBSCRIBE_FINISH and past a covered
+	/// bounded subscription, so a SUBSCRIBE_UPDATE can still reach the track's history.
+	/// The subscriber FINs once it wants nothing more, and the publisher FINs in reply.
+	/// Added in lite-07; before it the publisher FINs once the track ends.
+	pub(crate) fn keeps_subscribe_open(self) -> bool {
+		self.has_ranges()
 	}
 
 	/// Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07; older
@@ -252,18 +278,9 @@ impl Version {
 	}
 
 	/// Whether TRACK_INFO carries the compression flag, and a compressed Track's FRAME
-	/// and datagram its inflated size. Added in lite-07; an earlier peer receives the
+	/// its inflated size. Added in lite-07; an earlier peer receives the
 	/// frames inflated.
 	pub(crate) fn has_compression(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
-	/// Whether the stream error table has NOT_FETCHABLE, for a FETCH that reached a
-	/// datagram. Added in lite-07; earlier versions say NOT_FOUND instead.
-	pub(crate) fn has_not_fetchable(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -281,7 +298,7 @@ impl Version {
 		)
 	}
 
-	/// Whether SUBSCRIBE_END carries the error the track ended with, so an errored end
+	/// Whether SUBSCRIBE_FINISH carries the error the track ended with, so an errored end
 	/// keeps its history across a hop. Added in lite-07; earlier versions can only reset.
 	pub(crate) fn has_end_error(self) -> bool {
 		!matches!(
@@ -290,11 +307,10 @@ impl Version {
 		)
 	}
 
-	/// Whether announcements and track requests carry the publisher epoch, the
-	/// identity that says two routes serve the same bytes. Added in lite-07.
-	/// Older versions carry nothing, so a received route has no epoch and is
-	/// never resumed through another route.
-	pub fn has_epoch(self) -> bool {
+	/// Whether announcements carry their instance and epoch, and track requests the
+	/// instance they pin. Added in lite-07. Older versions carry nothing, so the
+	/// receiving session mints an instance for each announcement.
+	pub fn has_instance(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -371,7 +387,7 @@ impl Version {
 	}
 
 	/// The timescale the wire carries for a track with `timescale`, or `None` when its
-	/// frames and datagrams carry no timestamp.
+	/// frames or datagrams carry no timestamp.
 	///
 	/// Lite05 and Lite06 always carry one, so an untimed track declares milliseconds there
 	/// and its payloads carry their send times instead.

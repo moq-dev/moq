@@ -127,6 +127,26 @@ mod test {
 		}
 	}
 
+	/// A timestamp the track's millisecond scale can't hold is refused before a replacement group
+	/// is published, so the last value stays readable.
+	#[test]
+	fn a_timed_track_refuses_an_unconvertible_timestamp() {
+		let huge = moq_net::Timestamp::from_scale((1 << 61) - 1, 1).unwrap();
+		for deltas in [false, true] {
+			let (mut producer, track) = producer_on(cfg(deltas), timed());
+			let at = moq_net::Timestamp::from_millis(100).unwrap();
+			producer
+				.update(moq_net::Timed::from(&json!({ "n": 1 })).at(at))
+				.unwrap();
+			assert!(matches!(
+				producer.update(moq_net::Timed::from(&json!({ "n": 2 })).at(huge)),
+				Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
+			));
+			producer.finish().unwrap();
+			assert_eq!(drain(track), vec![json!({ "n": 1 })], "deltas={deltas}");
+		}
+	}
+
 	#[test]
 	fn a_bare_publish_stays_untimed() {
 		let track = moq_net::broadcast::Info::new()
@@ -207,7 +227,7 @@ mod test {
 	fn next_preserves_intermediate_states() {
 		let (mut producer, mut track) = producer(cfg(true));
 		let mut subscription = track.subscription();
-		subscription.max_delay = None;
+		subscription.delay.max = None;
 		track.update(subscription).unwrap();
 		for n in [1, 2, 3] {
 			producer
@@ -971,24 +991,29 @@ mod test {
 		assert!(matches!(producer.update(&json!({ "a": 3 })), Err(crate::Error::Net(_))));
 	}
 
-	/// A track whose timescale is extreme enough that converting a wall-clock timestamp into it
-	/// overflows, so `write_frame` rejects every frame. That stands in for any post-`append_group`
-	/// write failure (the reported one is a frame over moq-net's 32 MB per-group cache) without
-	/// allocating 32 MB to provoke it.
+	/// A timed track whose first group already starts at ten seconds, so a group that a frame at
+	/// [`rewound`] opens is published by `append_group` and then refused by `write_frame` for
+	/// starting before it. That stands in for any post-`append_group` write failure (the reported
+	/// one is a frame over moq-net's 32 MB per-group cache) without allocating 32 MB to provoke it.
 	fn rejecting_track() -> moq_net::track::Producer {
-		let mut info = timed();
-		info.timescale = Some(moq_net::Timescale::new((1u64 << 62) - 1).unwrap());
-
-		moq_net::broadcast::Info::new()
+		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", Some(info))
-			.unwrap()
+			.create_track("test", timed())
+			.unwrap();
+		let mut group = track.append_group().unwrap();
+		group
+			.write_frame(
+				moq_net::Timestamp::from_millis(10_000).unwrap(),
+				bytes::Bytes::from_static(b"{}"),
+			)
+			.unwrap();
+		group.finish().unwrap();
+		track
 	}
 
-	/// A time [`rejecting_track`] can't hold: it matches the timed track, so the publish gets as
-	/// far as the group before the conversion fails.
-	fn late() -> moq_net::Timestamp {
-		moq_net::Timestamp::from_millis(10_000).unwrap()
+	/// Before [`rejecting_track`]'s first group starts, so a group opened at it is refused.
+	fn rewound() -> moq_net::Timestamp {
+		moq_net::Timestamp::from_millis(1_000).unwrap()
 	}
 
 	/// `append_group` publishes the group before the frame is written, and a rejected frame does not
@@ -1001,7 +1026,7 @@ mod test {
 		let mut producer = Producer::<Value>::new(track, cfg(false));
 
 		assert!(matches!(
-			producer.update(moq_net::Timed::from(&json!({ "a": 1 })).at(late())),
+			producer.update(moq_net::Timed::from(&json!({ "a": 1 })).at(rewound())),
 			Err(crate::Error::Net(_))
 		));
 

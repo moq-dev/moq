@@ -577,6 +577,7 @@ impl Serve {
 			let listener = tokio::net::TcpListener::bind(addr)
 				.await
 				.with_context(|| format!("failed to bind {addr}"))?;
+			let addr = listener.local_addr().context("failed to read the bound address")?;
 			tracing::info!(%addr, url = ?self.mesh_url, "mesh coordinator listening");
 			mesh = Some((coordinator.clone(), listener));
 			server = server.with_mesh(coordinator);
@@ -593,6 +594,8 @@ impl Serve {
 					let listener = tokio::net::TcpListener::bind(addr)
 						.await
 						.with_context(|| format!("failed to bind {addr}"))?;
+					// Log the bound address, so `--listen 127.0.0.1:0` reports the port the OS picked.
+					let addr = listener.local_addr().context("failed to read the bound address")?;
 					tracing::info!(%addr, "auth server listening");
 					server.serve(listener).await?;
 				}

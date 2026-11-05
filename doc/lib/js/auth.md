@@ -16,9 +16,11 @@ checks a connection path against a token's claims exactly as `moq auth serve`
 does. A grant can label its session's stats independently of its authorization
 root. Tokens are interchangeable with the Rust side. Grants and claims are
 [`Pattern`](https://www.npmjs.com/package/@moq/pattern) unions: `foo` is one
-broadcast, `foo/**` is a subtree, `**` is everything. Parsed claim and grant roles are
-pattern string arrays; `authorize` returns reduced `Patterns` for each role.
-Object roles, including bitrate caps, are refused during parsing.
+broadcast, `foo/**` is a subtree, `**` is everything. A claim or grant role may
+also carry a bitrate cap, parsed into `publish_rate` or `subscribe_rate` beside
+the pattern arrays; key scopes bound paths only, and `authorize` checks paths
+only. Answer a capped grant with `encodeGrant`, which writes the cap where the
+relay reads it.
 
 ```bash
 bun add @moq/auth

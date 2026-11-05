@@ -2,7 +2,7 @@ import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { supportCacheKey } from "./config";
+import { SupportProbe } from "../support-probe";
 
 /**
  * A function that checks if a video configuration can be played.
@@ -10,10 +10,6 @@ import { supportCacheKey } from "./config";
  * `Decoder.supported` is the WebCodecs probe used by `<moq-watch>`.
  */
 export type Supported = (config: Catalog.VideoConfig) => Promise<boolean>;
-
-type CacheableSupported = Supported & {
-	[supportCacheKey]?: (config: Catalog.VideoConfig) => string;
-};
 
 /** What the viewer wants from the video rendition; the source picks the best one within it. */
 export type Target = {
@@ -207,18 +203,19 @@ export class Source {
 	/** The wired inputs, read-only. */
 	readonly in: Readonlys<SourceInput>;
 
+	#probe = new SupportProbe<Catalog.VideoConfig>("video");
+
 	readonly #out: SourceOutput = {
 		catalog: new Signal<Catalog.Video | undefined>(undefined),
 		available: new Signal<Record<string, Catalog.VideoConfig>>({}),
-		error: new Signal<Error | undefined>(undefined),
+		error: this.#probe.error,
 		track: new Signal<string | undefined>(undefined),
 		config: new Signal<Catalog.VideoConfig | undefined>(undefined),
 	};
 	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
-	#pending = new Signal(false);
 	/** Whether rendition support is still being resolved. @internal */
-	readonly pending: Getter<boolean> = this.#pending;
+	readonly pending: Getter<boolean> = this.#probe.pending;
 
 	// The last selection, which a disable holds while no enabled rendition remains.
 	#held?: { broadcast: Broadcast; track: string };
@@ -228,7 +225,6 @@ export class Source {
 	#probed = new Signal<Broadcast | undefined>(undefined);
 
 	#signals = new Effect();
-	#supportCache = new WeakMap<Supported, Map<string, { key: string; supported: boolean }>>();
 
 	constructor(props?: Inputs<SourceInput>) {
 		this.in = {
@@ -255,72 +251,12 @@ export class Source {
 
 	#runSupported(effect: Effect): void {
 		const supported = effect.get(this.in.supported);
-		if (!supported) {
-			this.#out.error.set(undefined);
-			return;
-		}
-
 		// Read the catalog from the broadcast itself, so the probe result is tagged with the right one.
 		const broadcast = effect.get(this.in.broadcast);
 		const renditions = (broadcast && effect.get(broadcast.out.catalog)?.video?.renditions) ?? {};
-		this.#out.error.set(undefined);
-		let cache = this.#supportCache.get(supported);
-		if (!cache) {
-			cache = new Map();
-			this.#supportCache.set(supported, cache);
-		}
-		const names = new Set(Object.keys(renditions));
-		for (const name of cache.keys()) {
-			if (!names.has(name)) cache.delete(name);
-		}
-
-		effect.set(this.#pending, true, false);
-		effect.spawn(async () => {
-			const available: Record<string, Catalog.VideoConfig> = {};
-
-			for (const [name, config] of Object.entries(renditions)) {
-				const cacheKey = (supported as CacheableSupported)[supportCacheKey];
-				const key = cacheKey ? cacheKey(config) : JSON.stringify(config);
-				const cached = cache.get(name);
-				let isSupported: boolean | undefined = false;
-				if (cached?.key === key) {
-					isSupported = cached.supported;
-				} else {
-					let failed = false;
-					try {
-						// `supported` comes from the consumer, so we cannot assume it ever settles. A
-						// rerun waits for the tasks it spawned, so an unraced probe would hold it shut.
-						isSupported = await effect.race(supported(config));
-					} catch (err) {
-						failed = true;
-						console.warn(
-							`[Source] video rendition ${name} (${config.codec}) support probe failed; treating as unsupported`,
-							err,
-						);
-					}
-					if (!failed && isSupported !== undefined) {
-						cache.set(name, {
-							key: cacheKey ? cacheKey(config) : JSON.stringify(config),
-							supported: isSupported,
-						});
-					}
-				}
-
-				// Torn down: stop probing and publish nothing, since the rerun redoes this.
-				if (effect.abort.aborted) return;
-
-				if (isSupported) available[name] = config;
-			}
-
-			if (Object.keys(available).length === 0 && Object.keys(renditions).length > 0) {
-				console.warn("[Source] No supported video renditions found:", renditions);
-				this.#out.error.set(new DOMException("no supported video renditions", "NotSupportedError"));
-			} else {
-				this.#out.error.set(undefined);
-			}
+		this.#probe.run(effect, supported, renditions, (available) => {
 			this.#probed.set(broadcast);
 			this.#out.available.set(available);
-			this.#pending.set(false);
 		});
 	}
 

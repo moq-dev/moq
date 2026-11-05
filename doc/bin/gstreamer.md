@@ -63,14 +63,16 @@ Audio packets share groups of at least 20 ms while forwarding as they arrive.
 Each `sink_%u` request pad is one track. Pad properties: `track` names it
 (default: after the codec), `container=loc` publishes it as
 [LOC](/concept/standard#loc) instead of the legacy hang container, and
-`track-status`/`track-error` report its lifecycle. `track-demand` is null until
-the track is active, then reports `wanted` and the wanted `group`; watch its
-property notification to gate an upstream encoder explicitly. Keep encoding
-until the track is published, though: demand is reported once the pad
-negotiates, but the first catalog needs a timed buffer and any in-band codec
-config, so stopping on the initial `wanted=false` hides the rendition from
-catalog-driven viewers and demand never arrives. The same applies to a
-`<track>/<n>` replacement (below). Setting
+`track-status`/`track-error` report its lifecycle. `track-demand` reports
+`wanted` and the wanted `group` once viewers can find the track; watch its
+property notification to gate an upstream encoder explicitly. A media or
+caption track is found through the catalog, so its demand stays null until a
+published catalog lists it, which takes a timed buffer and any in-band codec
+config. Keep encoding while demand is null, then follow `wanted`. The same
+applies to a `<track>/<n>` replacement (below), and demand is null again after
+the pad's EOS or a failure. An `application/octet-stream` track has no catalog
+entry, so its subscribers name it directly and its demand is reported as soon
+as the pad negotiates. Setting
 `bandwidth-ceiling` to that encoder's maximum bits per second also reserves a
 fair share of the connection estimate. The same structure then reports
 `probed` and `grant-bps`; an absent grant means hold the current rate, while a
@@ -93,13 +95,12 @@ codec config, a pad requested again, or a stream resumed after EOS publishes as
 reports `failed` on an answer redialing can't change, such as a rejected token.
 Both elements accept the same connection properties. `connect-version` is a
 comma-separated list, matching the CLI's repeatable `--connect-version`;
-unknown versions fail startup. QUIC durations are milliseconds, with zero
-disabling the local idle timeout or keep-alive. An unset keep-alive derives
-from the idle timeout and reads back as that interval.
+unknown versions fail startup. QUIC durations are milliseconds. Zero disables the local idle timeout; a zero
+or unset keep-alive derives from the idle timeout and reads back as zero.
 Each run from `READY` publishes under a fresh
-[publisher epoch](/concept/moq-lite#publisher-epochs), so on moq-lite 07 (opt-in)
-or moq-transport, viewers switch to a restarted pipeline at once instead of stalling on the old
-one; reconnects within a run keep it. The first catalog waits for a timed buffer
+[instance](/concept/moq-lite#publisher-instances), so viewers switch to a
+restarted pipeline at once instead of stalling on the old one; reconnects
+within a run keep it. The first catalog waits for a timed buffer
 to place the shared wall clock and for every requested pad to negotiate its
 rendition, including any codec config carried in its first buffers. A linked pad
 that never negotiates holds back the whole catalog until
@@ -128,13 +129,14 @@ in the same shape as the relay's sessions track. One read returns both from
 the same instant, so their difference is 1 while connected. Unlike `status`, a
 drop you did not poll still moves both counters.
 
-The catalog `delay` of each pad is how far its buffers' timestamps trail ones
-the other pads already pushed, so players buffer for an encoder that delivers
-behind the others. Arrival time is never measured, so file, demuxed, and network
-media advertise the same values as a live encoder.
+The catalog `delay` of each pad is the least its buffers' timestamps trail ones
+the other pads already pushed over a second of media, so players buffer for an
+encoder that delivers behind the others. Lateness only some buffers have, such as B-frame reorder, is
+left to the player's own measurement. Arrival time is never measured, so file,
+demuxed, and network media advertise the same values as a live encoder.
 
 After a pause, flush, or changed TIME segment, the pad stops holding the others
-back until its next buffer, and previously measured maxima remain. Resumed
+back until its next buffer, and values already published remain. Resumed
 timestamps must continue forward on the broadcast media clock.
 
 A video pad joining mid-GOP drops delta frames until its first keyframe. If a
@@ -169,9 +171,14 @@ on its own. Losing the relay connection also holds the pads: `moqsrc` redials
 without a retry deadline and resumes when the broadcast returns. A refused
 connection, refused path or catalog, or malformed protocol input or catalog posts
 an error. Properties: `url`,
-`broadcast`, `connect-version` (comma-separated protocol versions to offer, most
+`broadcast`, `max-delay`, `connect-version` (comma-separated protocol versions to offer, most
 preferred first; every stable version by default), `tls-disable-verify`,
 `quic-idle-timeout`, `quic-keep-alive`, and `quic-keylog`.
+
+`max-delay` is how many milliseconds (default 1000) a group may trail the live
+edge before every pad skips it. Raise it to ride out a stalled pipeline or a
+congested link without gaps, at the cost of falling further behind live first. The
+publisher's max-age caps it.
 
 Debug with `GST_DEBUG=*:4` for GStreamer and `RUST_LOG=debug` for the plugin.
 To decrypt a capture, set `quic-keylog=true` on either element along with

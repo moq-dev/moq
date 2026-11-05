@@ -37,11 +37,11 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), {
 		format: new LegacyFormat("data"),
-		maxDelay: 5000 as Milli,
+		delay: { max: 5000 as Milli },
 	});
 
 	// Group A at a large sequence, completed so the cursor advances past it.
-	const a = track.createGroup(1_000_000);
+	const a = track.createGroup(1_000_000n);
 	a.writeFrame({
 		payload: encodeLegacyFrame(0 as Micro, new Uint8Array([0x01])),
 		timestamp: Time.Timestamp.now(),
@@ -58,7 +58,7 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	// Open group B at a large jump (+90_000, NOT +1) with a frame far past A's last PTS, and leave it
 	// open. Legacy has no duration, so A's end is unknown -- B could be continuous, or group 1_000_001
 	// could still be coming. We cannot tell, so B must NOT surface yet.
-	const b = track.createGroup(1_090_000);
+	const b = track.createGroup(1_090_000n);
 	b.writeFrame({
 		payload: encodeLegacyFrame(1_000_000 as Micro, new Uint8Array([0x02])),
 		timestamp: Time.Timestamp.now(),

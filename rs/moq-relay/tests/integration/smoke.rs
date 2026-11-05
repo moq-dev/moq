@@ -49,14 +49,14 @@ async fn build_web(ws: bool) -> web::Web {
 
 /// A standalone cluster with default options.
 fn new_cluster() -> cluster::Cluster {
-	cluster::Cluster::new(cluster::Options::default()).expect("cluster init")
+	crate::spawn_cluster(cluster::Options::default())
 }
 
 /// [`build_web`] for a test that configures the listeners or the cluster itself (e.g. HTTPS).
 async fn build_web_with(web_config: web::Config, cluster: cluster::Cluster) -> web::Web {
 	// Crypto provider is process-global; reinstalls after the first one are
 	// no-ops, but the test binary may run before any other moq code does.
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	// A public grant of `**` lets any path through.
 	let mut auth_config = auth::Config::default();
@@ -431,13 +431,22 @@ async fn relay_web_serves_merged_routes() {
 async fn relay_https_terminates_tls() {
 	let dir = tempfile::TempDir::new().expect("tempdir");
 
-	let key = rcgen::KeyPair::generate().expect("keypair");
-	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("cert params");
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("cert params");
 	let cert = params.self_signed(&key).expect("self-signed cert");
 	let cert_path = dir.path().join("cert.pem");
 	let key_path = dir.path().join("key.pem");
 	std::fs::write(&cert_path, cert.pem()).expect("write cert");
-	std::fs::write(&key_path, key.serialize_pem()).expect("write key");
+	std::fs::write(
+		&key_path,
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+	)
+	.expect("write key");
 
 	let mut config = web::Config::default();
 	config.ws = false;
@@ -561,7 +570,7 @@ async fn spawn_accept_relay(
 	Option<std::net::SocketAddr>,
 	tokio::task::JoinHandle<()>,
 ) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let server = config.init(Default::default()).expect("server init");
 
@@ -569,14 +578,14 @@ async fn spawn_accept_relay(
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init");
 
-	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	let cluster = crate::spawn_cluster(cluster::Options::default());
 	let mut server = server.listen().await.expect("listen");
 	let quic = server.local_addr().ok();
 	let tcp = server.tcp_local_addr();
 
 	let handle = tokio::spawn(async move {
 		let mut id = 0;
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			let conn = Connection::new(request, cluster.clone(), auth.clone())
 				.with_id(id)
 				.with_shutdown(moq_relay::shutdown::Observer::disabled());
@@ -950,8 +959,8 @@ async fn health_endpoint_reports_ok() {
 /// left to redial, and dropping the connection closes the transport because it
 /// holds the last session clone.
 ///
-/// The client comes back because it owns the transport endpoint (iroh's dies with
-/// it), and the caller has to outlive the connection it just got.
+/// The client comes back because it owns the transport endpoint, and the caller
+/// has to outlive the connection it just got.
 async fn connect_once(
 	client: moq_tokio::Client,
 	url: url::Url,

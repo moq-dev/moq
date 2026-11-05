@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Poll, ready};
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
@@ -17,37 +18,111 @@ pub(crate) struct Channel {
 }
 
 impl qmux::transport::Transport for Channel {
-	type Writer = Writer;
-	type Reader = Reader;
+	fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes, qmux::Error>> {
+		self.reader.poll_recv(waiter)
+	}
 
-	fn split(self, _config: &qmux::Config) -> (Writer, Reader) {
-		(self.writer, self.reader)
+	fn poll_ready(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), qmux::Error>> {
+		self.writer.poll_ready(waiter)
+	}
+
+	fn send(&mut self, record: Bytes) -> Result<(), qmux::Error> {
+		self.writer.send(record)
+	}
+
+	fn poll_flush(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), qmux::Error>> {
+		self.writer.poll_ready(waiter)
+	}
+
+	fn poll_close(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), qmux::Error>> {
+		ready!(self.writer.poll_ready(waiter))?;
+		self.writer.close();
+		Poll::Ready(Ok(()))
 	}
 }
 
-/// Hands outbound records to the driver, which waits for SCTP to drain before
-/// taking more, so a full send window holds back qmux's writer.
+/// A queue of outbound records, holding one at a time: the driver waits for SCTP to drain
+/// before taking more, so a full send window holds back qmux's writer.
+///
+/// Closing it from either end ends the session's writes: the [`Writer`] closes it to have the
+/// driver close the channel, and the driver drops its [`Outbox`] once the channel is gone.
+pub(crate) fn outbox(max: usize) -> (Outbox, Writer) {
+	let queue = kio::Queue::bounded(1);
+	let writer = Writer {
+		queue: queue.clone(),
+		pending: None,
+		max,
+		_driver: None,
+	};
+	(Outbox(queue), writer)
+}
+
+/// The driver's end of the outbound queue.
+pub(crate) struct Outbox(kio::Queue<Bytes>);
+
+impl Outbox {
+	/// The session's next record, or `None` once its writer closed.
+	pub async fn next(&self) -> Option<Bytes> {
+		self.0.pop().await.ok()
+	}
+}
+
+impl Drop for Outbox {
+	fn drop(&mut self) {
+		self.0.close();
+	}
+}
+
+/// Hands outbound records to the driver through its [`Outbox`].
 pub(crate) struct Writer {
-	/// `None` once closed: dropping the sender is what tells the driver to close the channel.
-	pub tx: Option<mpsc::Sender<Bytes>>,
+	queue: kio::Queue<Bytes>,
+	/// A record waiting for room in `queue`.
+	pending: Option<Bytes>,
 	/// The largest message the peer accepts.
-	pub max: usize,
+	max: usize,
 	/// Keeps the driver running while the session outlives the signaling handle.
 	pub _driver: Option<mpsc::Sender<super::Command>>,
 }
 
-impl qmux::transport::Writer for Writer {
-	async fn send(&mut self, data: Bytes) -> Result<(), qmux::Error> {
-		if data.len() > self.max {
-			return Err(qmux::Error::FrameTooLarge);
+impl Writer {
+	/// Wait until the pending record, if any, is in the queue.
+	pub fn poll_ready(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), qmux::Error>> {
+		if self.pending.is_some() {
+			let pending = &mut self.pending;
+			ready!(
+				self.queue
+					.poll_push_with(waiter, || pending.take().expect("checked above"))
+			)
+			.map_err(|_| qmux::Error::Closed)?;
 		}
-		let tx = self.tx.as_ref().ok_or(qmux::Error::Closed)?;
-		tx.send(data).await.map_err(|_| qmux::Error::Closed)
+		Poll::Ready(Ok(()))
 	}
 
-	async fn close(&mut self) -> Result<(), qmux::Error> {
-		self.tx = None;
+	/// Queue a record, after [`Self::poll_ready`] found room.
+	pub fn send(&mut self, record: Bytes) -> Result<(), qmux::Error> {
+		if record.len() > self.max {
+			return Err(qmux::Error::FrameTooLarge);
+		}
+		self.pending = Some(record);
 		Ok(())
+	}
+
+	/// Queue a record and wait for the driver to take it.
+	#[cfg(test)]
+	pub async fn write(&mut self, record: Bytes) -> Result<(), qmux::Error> {
+		self.send(record)?;
+		kio::wait(|waiter| self.poll_ready(waiter)).await
+	}
+
+	/// Close the channel once the driver takes what is queued.
+	pub fn close(&mut self) {
+		self.queue.close();
+	}
+}
+
+impl Drop for Writer {
+	fn drop(&mut self) {
+		self.close();
 	}
 }
 
@@ -110,18 +185,23 @@ pub(crate) struct Reader {
 	unread: Arc<AtomicU64>,
 }
 
-impl qmux::transport::Reader for Reader {
-	async fn recv(&mut self) -> Result<Bytes, qmux::Error> {
-		let record = self.rx.recv().await.unwrap_or(Err(qmux::Error::Closed))?;
+impl Reader {
+	/// The next record the driver read off the channel.
+	pub fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes, qmux::Error>> {
+		let record = ready!(self.rx.poll_recv(&mut waiter.context())).unwrap_or(Err(qmux::Error::Closed))?;
 		self.unread.fetch_sub(record.len() as u64, Ordering::Relaxed);
-		Ok(record)
+		Poll::Ready(Ok(record))
+	}
+
+	/// Wait for [`Self::poll_recv`].
+	#[cfg(test)]
+	pub async fn recv(&mut self) -> Result<Bytes, qmux::Error> {
+		kio::wait(|waiter| self.poll_recv(waiter)).await
 	}
 }
 
 #[cfg(test)]
 mod tests {
-	use qmux::transport::Reader as _;
-
 	use super::*;
 
 	#[tokio::test]

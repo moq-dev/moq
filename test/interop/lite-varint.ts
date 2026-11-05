@@ -93,7 +93,7 @@ if (untimed) {
 	assert.equal(datagram.timestamp, undefined);
 	untimedDatagramBytes = [...datagram.encode(version)];
 } else {
-	assert.throws(() => new Datagram(9n, 1, undefined, new Uint8Array()).encode(version));
+	assert.throws(() => new Datagram(9n, 1n, undefined, new Uint8Array()).encode(version));
 }
 
 const trackInfo = await TrackInfo.decode(reader(input.trackInfo), version);
@@ -109,6 +109,8 @@ for (;;) {
 	const frame = await g.decodeMaybe(decode);
 	if (!frame) break;
 	if (!frame.timestamp) throw new Error("a lite-05+ frame decoded without its timestamp");
+	// The fixture's frames fit one segment, so each payload decodes with its header.
+	if (!frame.payload) throw new Error("a fixture frame streamed past its header");
 	frames.push({ timestamp: BigInt(frame.timestamp.value), payload: frame.payload });
 }
 const zigzag = (d: bigint) => (d << 1n) ^ (d >> 63n);
@@ -133,6 +135,7 @@ if (untimed) {
 		const frame = await u.decodeMaybe(frameDecoder({ scale: 0 }));
 		if (!frame) break;
 		assert.equal(frame.timestamp, undefined);
+		if (!frame.payload) throw new Error("a fixture frame streamed past its header");
 		untimedFrames.push(frame.payload);
 	}
 	untimedGroupBytes = await write(async (w) => {

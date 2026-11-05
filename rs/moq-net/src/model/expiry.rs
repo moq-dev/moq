@@ -361,10 +361,15 @@ impl Wakes {
 mod test {
 	use super::*;
 
+	/// A reader's waiter that stays registered while it lives: `kio::Waiter::noop` registers nothing.
+	fn parked() -> kio::Waiter {
+		kio::Waiter::new(std::task::Waker::noop().clone())
+	}
+
 	#[test]
 	fn landing_hint_keeps_both_indices_armed() {
 		let wakes = Wakes::default();
-		let waiter = kio::Waiter::noop();
+		let waiter = parked();
 		assert!(!wakes.landing_waiters.load(Ordering::Relaxed));
 		wakes.watch_landing(0, &waiter);
 		wakes.watch_held(10, &waiter);
@@ -397,7 +402,7 @@ mod test {
 		for sequence in 0..100 {
 			// The last switch's reader gave its group up.
 			drop(reader.take());
-			let waiter = kio::Waiter::noop();
+			let waiter = parked();
 			wakes.watch_held(sequence, &waiter);
 			reader = Some(waiter);
 		}
@@ -416,7 +421,7 @@ mod test {
 		let mut next = 0u64;
 		let mut park = |count: usize| {
 			for _ in 0..count {
-				let waiter = kio::Waiter::noop();
+				let waiter = parked();
 				wakes.watch_deadline(Timestamp::from_micros(next).unwrap(), Duration::ZERO, &waiter);
 				next += 1;
 			}
@@ -446,7 +451,7 @@ mod test {
 				media_sweeps += usize::from(parked.deadlines.len() >= parked.deadlines_sweep);
 				wall_sweeps += usize::from(parked.wall.len() >= parked.wall_sweep);
 			}
-			let waiter = kio::Waiter::noop();
+			let waiter = parked();
 			let budget = Duration::from_secs(1) + Duration::from_micros(i);
 			wakes.watch_deadline(Timestamp::from_secs(10).unwrap(), budget, &waiter);
 			wakes.watch_wall(now + budget, &waiter);
@@ -465,7 +470,7 @@ mod test {
 		let wakes = Wakes::default();
 		let now = crate::time::Instant::ZERO;
 		for i in 0..1_000u64 {
-			let waiter = kio::Waiter::noop();
+			let waiter = parked();
 			let budget = Duration::from_secs(1) + Duration::from_micros(i);
 			wakes.watch_deadline(Timestamp::from_secs(10).unwrap(), budget, &waiter);
 			wakes.watch_wall(now + budget, &waiter);

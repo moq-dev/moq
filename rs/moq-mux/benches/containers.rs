@@ -132,10 +132,20 @@ fn cmaf_import(passthrough: bool) -> (moq_mux::catalog::Producer, moq_mux::conta
 }
 
 fn import_cmaf(
-	(catalog, mut import): (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import),
+	import: (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import),
 	data: &Bytes,
 ) -> (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import) {
-	import.decode(data).unwrap();
+	import_cmaf_chunks(import, data, data.len())
+}
+
+fn import_cmaf_chunks(
+	(catalog, mut import): (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import),
+	data: &Bytes,
+	chunk: usize,
+) -> (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import) {
+	for chunk in data.chunks(chunk) {
+		import.decode(chunk).unwrap();
+	}
 	import.finish().unwrap();
 	(catalog, import)
 }
@@ -272,21 +282,99 @@ fn interleaved_runs(c: &mut Criterion) {
 				for (direction, passthrough) in [("import", true), ("unwrap", false)] {
 					let mut group = c.benchmark_group(format!("cmaf-interleaved-{direction}"));
 					group.throughput(Throughput::Bytes(data.len() as u64));
-					group.bench_function(
-						BenchmarkId::new(format!("{tracks}tracks"), format!("{runs}runs-{size}bytes")),
-						|b| {
-							b.iter_batched(
-								|| cmaf_import(passthrough),
-								|import| import_cmaf(import, std::hint::black_box(&data)),
-								BatchSize::PerIteration,
-							);
-						},
-					);
+					for chunk in [1, 1024, data.len()] {
+						group.bench_function(
+							BenchmarkId::new(
+								format!("{tracks}tracks"),
+								format!("{runs}runs-{size}bytes-{chunk}chunk"),
+							),
+							|b| {
+								b.iter_batched(
+									|| cmaf_import(passthrough),
+									|import| import_cmaf_chunks(import, std::hint::black_box(&data), chunk),
+									BatchSize::PerIteration,
+								);
+							},
+						);
+					}
+
 					group.finish();
 				}
 			}
 		}
 	}
+}
+
+/// Receive-side init and sample parsing, across metadata counts and media payload sizes.
+fn cmaf_receive(c: &mut Criterion) {
+	use moq_mux::container::Container;
+	use mp4_atom::{Decode, Encode};
+
+	let mut source = include_bytes!("../src/container/fmp4/test_data/bbb.mp4").as_slice();
+	mp4_atom::Ftyp::decode(&mut source).unwrap();
+	let mut moov = mp4_atom::Moov::decode(&mut source).unwrap();
+	let trak = moov
+		.trak
+		.iter()
+		.find(|trak| trak.mdia.hdlr.handler.as_ref() == b"soun")
+		.unwrap()
+		.clone();
+	let id = trak.tkhd.track_id;
+	moov.trak = vec![trak];
+	let mut init = Vec::new();
+	moov.encode(&mut init).unwrap();
+	let wire = moq_mux::container::fmp4::Wire::from_init(&init).unwrap();
+	let mut group = c.benchmark_group("cmaf-receive");
+	group.bench_function("init", |b| {
+		b.iter(|| moq_mux::container::fmp4::Wire::from_init(std::hint::black_box(&init)).unwrap())
+	});
+	for samples in [1, 32, 1024] {
+		for size in [1, 4096] {
+			let mut moof = mp4_atom::Moof {
+				mfhd: mp4_atom::Mfhd { sequence_number: 1 },
+				traf: vec![mp4_atom::Traf {
+					tfhd: mp4_atom::Tfhd {
+						track_id: id,
+						..Default::default()
+					},
+					tfdt: Some(mp4_atom::Tfdt {
+						base_media_decode_time: 0,
+					}),
+					trun: vec![mp4_atom::Trun {
+						data_offset: Some(0),
+						samples: vec![
+							mp4_atom::TrunEntry {
+								size: Some(size),
+								duration: Some(1024),
+								flags: Some(0),
+								cts: None
+							};
+							samples
+						]
+						.into(),
+					}],
+					..Default::default()
+				}],
+			};
+			let mut data = Vec::new();
+			moof.encode(&mut data).unwrap();
+			moof.traf[0].trun[0].data_offset = Some((data.len() + 8) as i32);
+			data.clear();
+			moof.encode(&mut data).unwrap();
+			mp4_atom::Mdat {
+				data: vec![1; size as usize * samples],
+			}
+			.encode(&mut data)
+			.unwrap();
+			let frame = moq_net::frame::Frame::new(None, Bytes::from(data));
+			assert_eq!(wire.decode(frame.clone()).unwrap().len(), samples);
+			group.throughput(Throughput::Elements(samples as u64));
+			group.bench_function(BenchmarkId::new(samples.to_string(), size), |b| {
+				b.iter(|| wire.decode(std::hint::black_box(frame.clone())).unwrap())
+			});
+		}
+	}
+	group.finish();
 }
 
 fn containers(c: &mut Criterion) {
@@ -756,6 +844,7 @@ fn mkv_payloads(c: &mut Criterion) {
 criterion_group!(
 	benches,
 	containers,
+	cmaf_receive,
 	mkv_chunks,
 	mkv_payloads,
 	interleaved_runs,

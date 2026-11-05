@@ -20,7 +20,7 @@ for (const count of [1, 16, 64]) {
 				const start = performance.now();
 				for (let callback = 0; callback < CALLBACKS; callback++) {
 					const timestamp = Micro((callback * frames * 1_000_000) / 48_000);
-					const read = { kind: "frame" as const, group: callback, frame: { timestamp } };
+					const read = { kind: "frame" as const, group: BigInt(callback), frame: { timestamp } };
 					const sample = { timestamp, sampleRate: 48_000, numberOfFrames: frames };
 					for (const decoder of decoders) {
 						if (callback % 64 === 0) decoder.update({ kind: "gap" });

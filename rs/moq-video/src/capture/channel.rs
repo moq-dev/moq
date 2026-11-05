@@ -30,6 +30,17 @@ struct State {
 	native: Option<Native>,
 	closed: bool,
 	error: Option<Error>,
+	/// Frames replaced before the consumer reached them.
+	skipped: u64,
+}
+
+impl State {
+	/// Hold `frame` as the latest, counting the one it replaces as skipped.
+	fn replace(&mut self, frame: Frame) {
+		if self.frame.replace(frame).is_some() {
+			self.skipped += 1;
+		}
+	}
 }
 
 /// How a device's own timeline maps onto this stream's.
@@ -54,6 +65,7 @@ impl FrameChannel {
 				native: None,
 				closed: false,
 				error: None,
+				skipped: 0,
 			}),
 			notify: Notify::new(),
 			epoch: Instant::now(),
@@ -122,7 +134,7 @@ impl FrameChannel {
 			mapped: timestamp,
 			..anchor
 		});
-		state.frame = Some(Frame::new(surface, timestamp));
+		state.replace(Frame::new(surface, timestamp));
 		drop(state);
 		self.notify.notify_one();
 	}
@@ -132,9 +144,14 @@ impl FrameChannel {
 		if state.closed {
 			return;
 		}
-		state.frame = Some(frame);
+		state.replace(frame);
 		drop(state);
 		self.notify.notify_one();
+	}
+
+	/// How many frames a newer one replaced before [`recv`](Self::recv) reached them.
+	pub(super) fn skipped(&self) -> u64 {
+		self.state.lock().unwrap().skipped
 	}
 
 	/// Mark the source ended, so a parked [`recv`](Self::recv) returns `None`.
@@ -235,6 +252,7 @@ mod tests {
 			chan.push(frame(id));
 		}
 		assert_eq!(chan.recv().await.unwrap().unwrap().surface.width(), 6);
+		assert_eq!(chan.skipped(), 5);
 	}
 
 	#[tokio::test]

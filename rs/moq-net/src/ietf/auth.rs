@@ -326,7 +326,7 @@ impl Present {
 	/// earlier one, so a request it closes or resets before replying is lost rather than
 	/// unsupported.
 	async fn run(&self, token: Bytes, answered: &mut bool) -> Error {
-		let mut stream = match Stream::open_request(&mut self.session.clone(), self.version).await {
+		let mut stream = match Stream::open(&self.session, self.version).await {
 			Ok(stream) => stream,
 			Err(err) => return err,
 		};
@@ -606,7 +606,7 @@ mod tests {
 
 	#[cfg(feature = "async")]
 	#[kio::test]
-	async fn auth_refused_without_credit_spends_no_request_id() {
+	async fn auth_waiting_for_credit_spends_no_request_id() {
 		for version in [Version::Draft18] {
 			for client in [false, true] {
 				let first = if client { 0 } else { 1 };
@@ -622,10 +622,10 @@ mod tests {
 					version,
 					id: 0,
 				};
-				assert!(matches!(
-					present.run(Bytes::new(), &mut false).await,
-					Error::NoStreamCredit
-				));
+				let mut answered = false;
+				let mut run = std::pin::pin!(present.run(Bytes::new(), &mut answered));
+				let polled = kio::wait(|waiter| Poll::Ready(waiter.poll_future(run.as_mut()).is_pending())).await;
+				assert!(polled, "the request waits for credit");
 				assert_eq!(control.next_request_id(), RequestId(first));
 			}
 		}

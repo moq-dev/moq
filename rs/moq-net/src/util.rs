@@ -3,10 +3,12 @@
 use std::{collections::VecDeque, future::Future, pin::Pin, task::Poll};
 
 mod cell;
+mod idle;
 #[cfg(feature = "async")]
 mod later;
 mod wake;
 pub(crate) use cell::SendCell;
+pub(crate) use idle::Idle;
 #[cfg(feature = "async")]
 pub(crate) use later::{Later, Learning};
 pub(crate) use wake::QueueWake;

@@ -120,6 +120,11 @@ impl Installed {
 		self.0.lock().unwrap().clock.step_wall(wall);
 	}
 
+	/// Whether `other` is a clone of this clock.
+	pub(crate) fn same(&self, other: &Self) -> bool {
+		Arc::ptr_eq(&self.0, &other.0)
+	}
+
 	pub(crate) fn anchor(&self) -> (Instant, Wall) {
 		let mut state = self.0.lock().unwrap();
 		if let Some(anchor) = state.anchor {

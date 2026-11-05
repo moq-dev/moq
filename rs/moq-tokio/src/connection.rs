@@ -368,7 +368,7 @@ fn fingerprint_pins(scheme: &str) -> bool {
 /// Unknown schemes rank lowest, so a forgotten classification is refused.
 fn scheme_tier(scheme: &str) -> u8 {
 	match scheme {
-		"https" | "moqt" | "moql" | "wss" | "iroh" | "tls" => 2,
+		"https" | "moqt" | "moql" | "wss" | "tls" => 2,
 		"tcp" | "ws" | "http" => 1,
 		// `unix` lands here deliberately: local IPC is not an upgrade over a
 		// network transport, it is a different reachability class (see `is_local`).
@@ -590,6 +590,7 @@ struct State {
 	/// Advanced by `Shared::connected` with the same write that publishes `status`,
 	/// so a reader can't see `Connected` without its count.
 	connects: u64,
+	last_connected: Option<kio::clock::Instant>,
 	/// Cumulative connects and disconnects, bumped by the reconnect loop itself so a session that
 	/// connects and drops before a consumer polls still counts.
 	presence: moq_net::stats::Presence,
@@ -650,6 +651,7 @@ impl Shared {
 			state.revision += 1;
 			state.status = Some(Status::Connected);
 			state.connects += 1;
+			state.last_connected = Some(kio::clock::now());
 			state.presence.sessions_started += 1;
 			state.failure = None;
 			state.version = Some(session.version());
@@ -775,6 +777,10 @@ pub struct Observation {
 	pub phase: Phase,
 	/// How many sessions have connected, including replacements.
 	pub connects: u64,
+	/// When a session last connected, retained while offline.
+	pub last_connected: Option<kio::clock::Instant>,
+	/// The live session's transport, or none while offline.
+	pub transport: Option<crate::Transport>,
 	/// The latest failed attempt or terminal failure, cleared by a successful connect.
 	pub failure: Option<Error>,
 	/// The live session's negotiated version, or none while offline.
@@ -811,6 +817,8 @@ impl State {
 				}
 			},
 			connects: self.connects,
+			last_connected: self.last_connected,
+			transport: self.transport,
 			failure: self.error.clone().or_else(|| self.failure.clone()),
 			version: self.version,
 		}
@@ -937,6 +945,8 @@ pub struct Connection {
 	bandwidth: moq_net::bandwidth::Allocator,
 	/// Persistent recv-bitrate estimate, fed by the loop from each live session.
 	recv_bandwidth: moq_net::bandwidth::Weak,
+	/// Divides `recv_bandwidth`, and every session the loop dials sends its viewers' target.
+	viewers: moq_net::bandwidth::Viewers,
 	/// The last status returned by [`status`](Self::status), for change detection.
 	/// Per-clone: a clone starts from its parent's cursor and diverges from there.
 	last_reported: Option<Status>,
@@ -981,7 +991,8 @@ impl Connection {
 		let send_bandwidth = send_bw.consume();
 		let recv_bandwidth = recv_bw.weak();
 		let bandwidth = moq_net::bandwidth::Allocator::new(send_bandwidth.clone());
-		let client = client.with_allocator(bandwidth.clone());
+		let viewers = moq_net::bandwidth::Viewers::new(recv_bandwidth.clone());
+		let client = client.with_allocator(bandwidth.clone()).with_viewers(viewers.clone());
 
 		let closed: CloseGuard = Default::default();
 		let task_closed = closed.clone();
@@ -1029,6 +1040,7 @@ impl Connection {
 			send_bandwidth,
 			recv_bandwidth,
 			bandwidth,
+			viewers,
 			last_reported: None,
 		}
 	}
@@ -1062,8 +1074,8 @@ impl Connection {
 	/// still finishing after a GOAWAY) after draining its queued data.
 	/// Tokens stay presented until both sessions finish draining.
 	///
-	/// See [`moq_net::Session::close`]: explicit lite-07-wip waits for the subscriber
-	/// to receive finished tracks' tails; older Lite versions and IETF wait only for
+	/// See [`moq_net::Session::close`]: lite-05 and newer wait for the subscriber to
+	/// receive finished tracks' tails; older Lite versions and IETF wait only for
 	/// transport ACKs. Announcements are withdrawn first, bounded by a one second deadline
 	/// (or a predecessor's remaining handover window, if sooner). Call this before
 	/// [`Client::close`], which closes the transport without waiting. Returns `Ok`
@@ -1106,6 +1118,10 @@ impl Connection {
 	}
 
 	async fn run(shared: &Shared, client: Client, addrs: Addrs) -> crate::Result<()> {
+		#[cfg(feature = "quic")]
+		let mut client = client;
+		#[cfg(feature = "quic")]
+		let mut failed_dials = 0;
 		let backoff = client.backoff.clone();
 		let goaway = client.goaway.resolve();
 		let pacing = Pacing::new(&backoff);
@@ -1132,8 +1148,24 @@ impl Connection {
 
 			// What the last dial presented, so a refusal is judged against it.
 			let mut presented = None;
+			// Retry one transient failure on the same socket. Two failed walks are enough
+			// to try another flow. Only a retry window that allows a third walk gets here:
+			// a black-holed handshake outlasts the default window after the first walk.
+			#[cfg(feature = "quic")]
+			if failed_dials >= 2 {
+				match client.fresh_port() {
+					Ok(()) => failed_dials = 0,
+					// The old flow may have recovered, so dial it anyway. The count stays
+					// at the threshold, so the next walk retries the allocation.
+					Err(err) => tracing::warn!(%err, "no fresh UDP port; redialing from the old one"),
+				}
+			}
 			match Self::dial_any(shared, &client, &addrs, &mut draining, &mut presented).await {
 				Ok((addr, dialed)) => {
+					#[cfg(feature = "quic")]
+					{
+						failed_dials = 0;
+					}
 					let url = addr.url().clone();
 					tracing::info!(peer = %Endpoint(&url), transport = %dialed.transport, "connected");
 					shared.connected(&dialed.session, dialed.transport);
@@ -1158,7 +1190,7 @@ impl Connection {
 					// won't go, so redialing the old address or a fallback would ignore it.
 					let assigned = match &ended {
 						// A fingerprint only checked the dial that installed the Rustls
-						// verifier. tcp, unix, iroh, and plaintext WebSocket never consult it.
+						// verifier. tcp, unix, and plaintext WebSocket never consult it.
 						Ended::Goaway(msg) => {
 							goaway
 								.redirect
@@ -1339,6 +1371,18 @@ impl Connection {
 					if (err.is_terminal() && !refreshed(&err, &shared.tokens, presented.as_ref())) || !client.reconnect
 					{
 						return Err(err);
+					}
+					#[cfg(feature = "quic")]
+					if addrs
+						.as_slice()
+						.iter()
+						.any(|addr| matches!(addr.url().scheme(), "http" | "https" | "moqt" | "moql"))
+					{
+						// Explicit shutdown cannot recover by retrying or opening another socket.
+						if client.quic_closed() {
+							return Err(err);
+						}
+						failed_dials += 1;
 					}
 					shared.retrying(&err);
 					retry.last_error = Some(err);
@@ -1563,6 +1607,15 @@ impl Connection {
 		self.recv_bandwidth.consume()
 	}
 
+	/// Divides [`recv_bandwidth`](Self::recv_bandwidth) among the broadcasts watched over
+	/// this connection, mirroring [`moq_net::Session::viewers`].
+	///
+	/// Persistent like the estimate: every session the loop dials sends these viewers'
+	/// target, so they survive reconnects. Viewers report `None` while disconnected.
+	pub fn viewers(&self) -> moq_net::bandwidth::Viewers {
+		self.viewers.clone()
+	}
+
 	/// Poll whether the connection loop has stopped.
 	///
 	/// `Ready(Err)` if it permanently gave up (reconnect timeout exceeded, an auth
@@ -1650,7 +1703,7 @@ fn timeout_error(timeout: Duration, last_error: Option<&Error>) -> Error {
 
 /// Jitter the next delay and cap it at the retry window. `None` means the window is exhausted.
 fn retry_wait(delay: Duration, retry_start: kio::clock::Instant, timeout: Duration) -> Option<Duration> {
-	let wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+	let wait = delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0);
 	if timeout.is_zero() {
 		return Some(wait);
 	}
@@ -2140,7 +2193,7 @@ mod tests {
 	/// forgot to add is refused rather than trusted.
 	#[test]
 	fn scheme_tiers_rank_encrypted_above_plaintext() {
-		for scheme in ["https", "moqt", "moql", "wss", "iroh", "tls"] {
+		for scheme in ["https", "moqt", "moql", "wss", "tls"] {
 			assert_eq!(scheme_tier(scheme), 2, "{scheme} is encrypted");
 		}
 		for scheme in ["tcp", "ws", "http"] {
@@ -2294,7 +2347,7 @@ mod tests {
 		for scheme in ["https", "wss", "moqt", "moql", "tls"] {
 			assert!(fingerprint_pins(scheme), "{scheme}");
 		}
-		for scheme in ["http", "ws", "tcp", "unix", "iroh"] {
+		for scheme in ["http", "ws", "tcp", "unix"] {
 			assert!(!fingerprint_pins(scheme), "{scheme}");
 		}
 	}
@@ -2583,7 +2636,7 @@ mod tests {
 	/// A client that trusts the self-signed [`live`] listener.
 	#[cfg(feature = "tcp")]
 	fn client() -> Client {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		crate::crypto::install_default().unwrap();
 
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
@@ -2747,7 +2800,7 @@ mod tests {
 	async fn dial_any_walks_past_the_dead_addresses() {
 		let client = client();
 		let (mut server, live) = live().await;
-		tokio::spawn(async move { while server.accept().await.is_some() {} });
+		tokio::spawn(async move { while server.accept().await.is_ok() {} });
 
 		let dead_a = dead().await;
 		let dead_b = dead().await;
@@ -3249,7 +3302,7 @@ mod tests {
 		let server_addr = server.local_addr().unwrap();
 		let (accepted, mut sessions) = tokio::sync::mpsc::unbounded_channel();
 		tokio::spawn(async move {
-			while let Some(request) = server.accept().await {
+			while let Ok(request) = server.accept().await {
 				let transport = request.transport();
 				if let Ok(session) = request.ok().await {
 					let _ = accepted.send((transport, session));
@@ -3324,7 +3377,7 @@ mod tests {
 
 		let (accepted, sessions) = tokio::sync::mpsc::unbounded_channel();
 		let task = tokio::spawn(async move {
-			while let Some(request) = server.accept().await {
+			while let Ok(request) = server.accept().await {
 				if let Ok(session) = request.with_publisher(&origin).ok().await {
 					let _ = accepted.send(session);
 				}
@@ -3550,6 +3603,7 @@ mod tests {
 			qmux::Session::accept(stream(server), config())
 		)
 		.unwrap();
+		let (client, server) = (crate::spawn_qmux(client), crate::spawn_qmux(server));
 		let now = moq_net::time::Instant::now();
 		let client = async {
 			let (session, driver) = moq_net::Client::new()
@@ -3638,6 +3692,7 @@ mod tests {
 					qmux::Session::accept(qmux::transport::Stream::new(server), config())
 				)
 				.unwrap();
+				let (client, server) = (crate::spawn_qmux(client), crate::spawn_qmux(server));
 				let now = moq_net::time::Instant::now();
 				let moq = moq_net::Client::new()
 					.with_versions(versions.clone())

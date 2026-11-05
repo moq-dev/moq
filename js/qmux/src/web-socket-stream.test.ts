@@ -137,7 +137,7 @@ describe("WebSocketStream ponyfill", () => {
 		await tick(5);
 		expect(settled).toBe(false); // backpressured at 100
 
-		// Raise the mark above the buffered amount — the in-progress drain resolves
+		// Raise the mark above the buffered amount - the in-progress drain resolves
 		// without bufferedAmount having to change.
 		wss.setHighWaterMark(1000);
 		expect(wss.highWaterMark).toBe(1000);

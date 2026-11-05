@@ -2,18 +2,15 @@
 
 ## Goal
 
-Condition: an embedding consumer's moq-relay pin includes
-[moq-dev/moq#6535](https://github.com/moq-dev/moq/pull/6535), which adds
-`Config::merge(&CliLayer)`. Check each consumer's lockfile for a moq-relay
-version or revision that carries it, and advance a pin that lacks it through
-that consumer's normal upstream-first process.
-
-Then every embedding consumer loads its relay config through
+Every embedding consumer loads its relay config through
 `Config::merge`, an explicit obsolete file or environment spelling refuses
 its startup, and its embedded CLI-only fields survive the merge. Delete this
 quest once every embedder is migrated.
 
 ## Plan
+
+Cleared 2026-11-02 (/quest-unblock): every embedder's moq pin now carries [moq-dev/moq#6535](https://github.com/moq-dev/moq/pull/6535)'s `Config::merge(&CliLayer)` (moq.pro at `80cafb3a`, studio at `96244dd8`). studio only calls `moq_relay::test_relay()`, so moq.pro is the one embedder to migrate; its `rs/edge/src/config.rs` still does `toml::from_str` and `update_from`.
+
 
 Split from the relay config API audit (maintainer, 2026-10-23): the upstream
 loader landed first, because migrating a consumer before its pin carries the

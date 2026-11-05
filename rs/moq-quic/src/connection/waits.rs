@@ -75,6 +75,9 @@ pub(crate) struct Waits {
 	open: [WaiterList; 2],
 	/// For a received datagram
 	datagram: WaiterList,
+	/// For something to transmit: the driver, woken by whatever the application queues
+	transmit: WaiterList,
+	handshake_data: Latch,
 	connected: Latch,
 	confirmed: Latch,
 	/// For the connection to be lost, which every other wait also hears
@@ -109,6 +112,11 @@ impl Waits {
 				waits.list(wait).wake();
 			}
 		}
+		// Wakes may already have removed entries. Contract only as streams go away, rather than
+		// on every wake, so a reader that repeatedly parks does not churn the allocation.
+		if self.streams.capacity() > self.streams.len().saturating_mul(4) {
+			self.streams.shrink_to_fit();
+		}
 	}
 
 	/// Register `waiter` for a stream the peer opens in `dir`
@@ -141,6 +149,23 @@ impl Waits {
 		self.datagram.wake();
 	}
 
+	/// Register `waiter` for something to transmit
+	pub(crate) fn register_transmit(&mut self, waiter: &Waiter) {
+		waiter.register(&mut self.transmit);
+	}
+
+	/// The application queued something to transmit
+	///
+	/// Cheap once woken: the list stays empty until the driver finds nothing to send again.
+	pub(crate) fn wake_transmit(&mut self) {
+		self.transmit.wake();
+	}
+
+	/// The handshake's negotiated parameters became available
+	pub(crate) fn handshake_data(&mut self) {
+		self.handshake_data.set();
+	}
+
 	/// The handshake completed
 	pub(crate) fn connected(&mut self) {
 		self.connected.set();
@@ -149,6 +174,12 @@ impl Waits {
 	/// The handshake was confirmed
 	pub(crate) fn confirmed(&mut self) {
 		self.confirmed.set();
+	}
+
+	/// Ready once the handshake's parameters are available, or with the error once the connection
+	/// was lost first
+	pub(crate) fn poll_handshake_data(&mut self, waiter: &Waiter) -> Poll<Result<(), Error>> {
+		Self::poll_latch(&mut self.handshake_data, &self.lost, waiter)
 	}
 
 	/// Ready once the handshake completed, or with the error once the connection was lost first
@@ -196,7 +227,7 @@ impl Waits {
 			return;
 		}
 		self.lost = Some(reason);
-		for (_, mut waits) in self.streams.drain() {
+		for (_, mut waits) in std::mem::take(&mut self.streams) {
 			for wait in [Wait::Read, Wait::Write, Wait::End, Wait::Acked] {
 				waits.list(wait).wake();
 			}
@@ -205,6 +236,9 @@ impl Waits {
 			list.wake();
 		}
 		self.datagram.wake();
+		// A close still owes the peer its CONNECTION_CLOSE.
+		self.transmit.wake();
+		self.handshake_data.waiters.wake();
 		self.connected.waiters.wake();
 		self.confirmed.waiters.wake();
 		self.closed.wake();
@@ -265,5 +299,34 @@ impl std::ops::Deref for Counter {
 
 	fn deref(&self) -> &Waiter {
 		&self.waiter
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::Side;
+
+	#[test]
+	fn freed_and_lost_streams_release_waiter_storage() {
+		for lost in [false, true] {
+			let mut waits = Waits::default();
+			let readers: Vec<_> = (0..128).map(|_| Counter::new()).collect();
+			for (index, reader) in readers.iter().enumerate() {
+				waits.register(StreamId::new(Side::Client, Dir::Uni, index as u64), Wait::Read, reader);
+			}
+			if lost {
+				waits.lose(Error::TimedOut);
+			} else {
+				for index in 0..128 {
+					let id = StreamId::new(Side::Client, Dir::Uni, index);
+					waits.wake(id, Wait::Read);
+					waits.freed(id);
+					assert!(waits.streams.capacity() <= waits.streams.len() * 4);
+				}
+			}
+			assert!(readers.iter().all(|reader| reader.wakes() == 1));
+			assert_eq!(waits.streams.capacity(), 0, "waiter slots outlived their streams");
+		}
 	}
 }

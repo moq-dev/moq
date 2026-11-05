@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { ClockSchema, MOQ_EPOCH_UNIX_MILLIS, u53, wallClockTime } from "./index.ts";
+import { ClockSchema, MOQ_EPOCH_UNIX_MILLIS, wallClockTime } from "./index.ts";
 import { RootSchema } from "./root.ts";
 
-// Mirrors rs/hang/fixtures/catalog-clock.json: the canonical shape, a root clock plus a
-// per-rendition `hls` field. A reader maps HLS record timestamps (milliseconds) through the root
-// clock after timescale conversion.
+// Mirrors rs/hang/fixtures/catalog-clock.json: the canonical shape, with the clock and the join
+// interval in the root `media` section. A reader maps media timestamps through `media.clock` after
+// timescale conversion.
 const FIXTURE = {
 	video: {
 		renditions: {
@@ -13,7 +13,6 @@ const FIXTURE = {
 				codedWidth: 1280,
 				codedHeight: 720,
 				container: { kind: "legacy" },
-				hls: { track: "video.hls", duration: 2000 },
 			},
 		},
 	},
@@ -24,11 +23,13 @@ const FIXTURE = {
 				container: { kind: "legacy" },
 				sampleRate: 48000,
 				numberOfChannels: 2,
-				hls: { track: "audio.hls", duration: 2000 },
 			},
 		},
 	},
-	clock: { wall: 1_751_846_400_000_000, timescale: 1_000_000 },
+	media: {
+		clock: { wall: 1_751_846_400_000_000, timescale: 1_000_000 },
+		join: { interval: 2000 },
+	},
 };
 
 test("an omitted timescale means microseconds on the wire", () => {
@@ -87,12 +88,12 @@ test("wallClockTime refuses bad inputs", () => {
 	expect(() => wallClockTime(clock, Number.MAX_SAFE_INTEGER, 1)).toThrow();
 });
 
-test("the packaged shape maps HLS record timestamps through the root clock", () => {
+test("the packaged shape maps media timestamps through the media clock", () => {
 	const catalog = RootSchema.parse(FIXTURE);
-	if (!catalog.clock) throw new Error("fixture lost its clock");
-	const video = catalog.video?.renditions.video;
-	expect(video?.hls).toEqual({ track: "video.hls", duration: u53(2000) });
+	const clock = catalog.media?.clock;
+	if (!clock) throw new Error("fixture lost its clock");
+	expect(Number(catalog.media?.join?.interval)).toBe(2000);
 
-	// Record PTS 2000 (ms) lands 2s after the wall epoch.
-	expect(wallClockTime(catalog.clock, 2000, 1000).getTime()).toBe(MOQ_EPOCH_UNIX_MILLIS + 1_751_846_402_000);
+	// PTS 2000 (ms) lands 2s after the wall epoch.
+	expect(wallClockTime(clock, 2000, 1000).getTime()).toBe(MOQ_EPOCH_UNIX_MILLIS + 1_751_846_402_000);
 });

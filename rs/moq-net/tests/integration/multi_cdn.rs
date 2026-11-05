@@ -2,13 +2,13 @@
 
 //! An endpoint linked to two CDNs uses its preferred one and fails over to the next.
 //!
-//! A publisher `P` pushes one broadcast, under one epoch, to CDN relays `A` and `B`. A
+//! A publisher `P` pushes one broadcast, under one instance, to CDN relays `A` and `B`. A
 //! subscriber `S` links to both, ranking `A` first with
 //! [`origin::Producer::with_preference`] while pricing `B` cheaper, so only the
 //! preference puts `A` ahead. Losing `A` moves `S` to `B`, and `A` returning moves it
-//! back. Between lite-07 routes with the same epoch each move resumes the subscription.
-//! A moq-transport `B` with the MoQ Epoch extension carries the epoch, but its copy's
-//! track info records the draft, so the move onto it is refused.
+//! back. Between lite-07 routes, which carry the instance, each move resumes the
+//! subscription. A moq-transport `B` carries none, so `S` mints one for it, and the move
+//! onto it is a restart that ends the subscription rather than stitching onto it.
 
 use crate::support;
 
@@ -164,7 +164,7 @@ impl Topology {
 		let broadcast = publisher.create_broadcast("live").unwrap();
 		let track = broadcast.create_track("video", timed()).unwrap();
 		broadcast
-			.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+			.announce(origin::Route::default().with_instance(moq_net::Instance::random(), 0))
 			.unwrap();
 
 		let pushes = vec![
@@ -191,7 +191,8 @@ impl Topology {
 
 	async fn subscribe(&self) -> mpsc::UnboundedReceiver<Delivery> {
 		let remote = self.subscriber.consume().request("live", None).await.unwrap();
-		let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
+		let prefs =
+			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 		read(remote.track("video").unwrap().subscribe(prefs).await.unwrap())
 	}
 
@@ -269,7 +270,7 @@ fn assert_continuous(seen: &[(u64, Vec<u8>, Option<Timestamp>)], groups: u64) {
 	}
 }
 
-/// Two CDNs under one epoch, `B` over `secondary`: `S` reads through `A` although `B` is
+/// Two CDNs under one instance, `B` over `secondary`: `S` reads through `A` although `B` is
 /// cheaper, resumes on `B` when `A` goes, and moves back once `A` returns, every frame once.
 async fn fails_over_and_back(secondary: &str) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
@@ -288,7 +289,7 @@ async fn fails_over_and_back(secondary: &str) {
 		let update = announced.next().await.expect("announced");
 		assert!(
 			matches!(update, announce::Event::Update(_)) && !via_a(&update),
-			"same epoch over B: {update:?}"
+			"same instance over B: {update:?}"
 		);
 		seen.extend(topology.group_anywhere(&mut rx).await);
 
@@ -314,11 +315,9 @@ async fn preferred_cdn_fails_over_and_back() {
 	fails_over_and_back("moq-lite-07-wip").await;
 }
 
-/// A moq-transport `B` with the MoQ Epoch extension carries `P`'s epoch, so losing `A` is
-/// an update, not a restart. Its copy's track info differs from `A`'s, recording the draft
-/// it crossed, and one epoch means identical content: `S` refuses the copy, so the track
-/// ends with no frame of `B`'s.
-async fn refused_across_protocols(secondary: &str) {
+/// A moq-transport `B` carries no instance, so `S` mints one for its route and losing `A`
+/// is a restart onto another stream: the track ends with no frame of `B`'s.
+async fn restarts_across_protocols(secondary: &str) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		let mut topology = Topology::new(secondary.parse().unwrap()).await;
 		let mut announced = topology.subscriber.consume().announced();
@@ -332,16 +331,23 @@ async fn refused_across_protocols(secondary: &str) {
 		topology.lose_a().await;
 		let update = announced.next().await.expect("announced");
 		assert!(
-			matches!(update, announce::Event::Update(_)) && !via_a(&update),
-			"same epoch over B: {update:?}"
+			matches!(update, announce::Event::Restart(_)) && !via_a(&update),
+			"another instance over B: {update:?}"
 		);
 		topology.group();
 		settle().await;
 		let rest: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 		assert!(
-			matches!(rest.as_slice(), [(u64::MAX, Err(Error::Unsupported))]),
-			"the track did not end with the refusal: {rest:?}"
+			matches!(
+				rest.as_slice(),
+				[(u64::MAX, Err(Error::Session(moq_net::SessionError::Cancel)))]
+			),
+			"the old route did not end its track: {rest:?}"
 		);
+		let mut fresh = topology.subscribe().await;
+		let (sequence, _, bytes) = next(&mut fresh).await;
+		assert_eq!(sequence, 1, "the fresh subscription joins the current group");
+		assert_eq!(bytes, payload(1, 0));
 		drop((topology.publisher, topology.cdn_b));
 	})
 	.await
@@ -349,12 +355,12 @@ async fn refused_across_protocols(secondary: &str) {
 }
 
 #[kio::test]
-async fn transport_secondary_is_refused() {
-	refused_across_protocols("moq-transport-22").await;
+async fn transport_secondary_restarts() {
+	restarts_across_protocols("moq-transport-22").await;
 }
 
-/// The same over the first draft that can carry the epoch.
+/// The same over the oldest supported moq-transport draft.
 #[kio::test]
-async fn transport_17_secondary_is_refused() {
-	refused_across_protocols("moq-transport-18").await;
+async fn transport_18_secondary_restarts() {
+	restarts_across_protocols("moq-transport-18").await;
 }

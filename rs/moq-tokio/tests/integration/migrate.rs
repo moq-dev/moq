@@ -47,7 +47,7 @@ async fn relay(
 	let (accepted, sessions) = tokio::sync::mpsc::unbounded_channel();
 	let origin = origin.clone();
 	tokio::spawn(async move {
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			let request = request.with_publisher(&origin).with_subscriber(origin.clone());
 			if let Ok(session) = request.ok().await {
 				let _ = accepted.send(session);
@@ -108,7 +108,8 @@ fn view(origin: &moq_net::origin::Producer, name: &str) -> tokio::sync::mpsc::Un
 			.await
 			.expect("the broadcast resolves");
 		// A budget, so a group the move delays is late rather than skipped.
-		let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(5));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5)));
 		let mut track = broadcast
 			.track("video")
 			.expect("track")
@@ -172,9 +173,9 @@ async fn a_migrated_session_closes_once_nothing_flows() {
 		.expect("the client never connected")
 		.expect("the relay stopped");
 
-	let epoch = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
-	publish(&local, "up", epoch());
-	publish(&origin, "down", epoch());
+	// Each broadcast mints an instance the migration carries across sessions.
+	publish(&local, "up", moq_net::origin::Route::default());
+	publish(&origin, "down", moq_net::origin::Route::default());
 	let mut upstream = view(&origin, "up");
 	let mut downstream = view(&local, "down");
 	let (mut up, mut down) = (Vec::new(), Vec::new());

@@ -48,7 +48,7 @@ async fn serve(case: Case) -> Server {
 	};
 
 	tokio::spawn(async move {
-		while let Some(request) = listener.accept().await {
+		while let Ok(request) = listener.accept().await {
 			tokio::spawn(async move {
 				match case {
 					Case::Reject => {

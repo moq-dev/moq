@@ -155,7 +155,7 @@ mod test {
 				.requested_broadcast()
 				.await
 				.expect("handler should be asked for the path")
-				.prepare(moq_net::Epoch::mint())
+				.prepare()
 				.expect("the answer should prepare");
 			let track = prepared
 				.broadcast()

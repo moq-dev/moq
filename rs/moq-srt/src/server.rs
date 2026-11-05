@@ -247,7 +247,7 @@ impl Server {
 				stream_id,
 				peer,
 				latency: self.latency,
-				max_age: None,
+				max_age: Some(hang::container::MAX_AGE),
 				bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 				program: None,
 				linger: moq_mux::Linger::DEFAULT,
@@ -279,8 +279,8 @@ struct Pending {
 	peer: SocketAddr,
 	/// The SRT receive latency, reused as the egress delay (at least a second) on a subscribe.
 	latency: Duration,
-	/// Retention declared on the media tracks an ingest mints, or `None` for hang's own
-	/// default. Override with [`Publish::with_max_age`].
+	/// Max age declared on the media tracks an ingest mints, or `None` for no publisher
+	/// limit. Override with [`Publish::with_max_age`].
 	max_age: Option<Duration>,
 	/// Connection allocator each ingested track claims its peak-hold bitrate on.
 	/// Override with [`Publish::with_bandwidth`].
@@ -366,14 +366,14 @@ impl Publish {
 		self.0.peer
 	}
 
-	/// Set how long relays keep a non-latest group of this publish's media tracks
-	/// fetchable. `None` keeps hang's own default.
+	/// Set how long a superseded group of this publish's media tracks stays fresh, or
+	/// `None` for no publisher limit. Defaults to
+	/// [`MAX_AGE`](hang::container::MAX_AGE).
 	///
-	/// A retention budget, not a delivery one: it never makes a subscriber play further
+	/// A freshness bound, not a delivery one: it never makes a subscriber play further
 	/// behind live, it caps how far back a FETCH can still reach. The default suits a
 	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
-	/// advertise segments that are still fetchable. Lower it when nothing reads history
-	/// and the memory matters.
+	/// advertise segments that are still fetchable. Lower it when nothing reads history.
 	///
 	/// Unrelated to the SRT receive latency [`Server::bind`] negotiates, which is a
 	/// transport buffer on this hop.
@@ -1011,7 +1011,7 @@ mod tests {
 		egress.abort();
 	}
 
-	/// One publisher instance of `live`: an announced broadcast under its own epoch with one
+	/// One publisher instance of `live`: an announced broadcast under its own instance with one
 	/// Legacy AAC track, for the egress tests.
 	struct Instance {
 		_broadcast: moq_net::origin::Publication,
@@ -1021,7 +1021,7 @@ mod tests {
 
 	impl Instance {
 		fn publish(origin: &moq_net::origin::Producer, track: &str) -> Self {
-			let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+			let route = moq_net::origin::Route::default();
 			let broadcast = origin.publish("live", route).unwrap();
 			let mut catalog = moq_mux::catalog::Producer::new(
 				&mut broadcast.broadcast().clone(),

@@ -125,7 +125,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("source", type=Path)
     parser.add_argument("capture", type=Path)
-    parser.add_argument("--loss-ok", action="store_true", help="report gaps instead of failing on them, but not a lost tail")
+    parser.add_argument(
+        "--loss-ok", action="store_true", help="report gaps instead of failing on them, but not a lost tail"
+    )
     parser.add_argument("--report-json", type=Path)
     args = parser.parse_args()
 
@@ -167,8 +169,10 @@ def main() -> int:
             status = (actual.get(name) or ["-"])[0]
             print(f"  {'same' if same else 'DIFF'}  {name}: {status}  {(actual.get(name) or ['', ''])[1]}")
             if not same:
-                print(f"passthrough: FAIL: {name} grades the capture {actual.get(name)}, its source {expected.get(name)}",
-                      file=sys.stderr)
+                print(
+                    f"passthrough: FAIL: {name} grades the capture {actual.get(name)}, its source {expected.get(name)}",
+                    file=sys.stderr,
+                )
                 code = 1
     else:
         report["compliance"] = {"capture": verdicts(args.capture)}

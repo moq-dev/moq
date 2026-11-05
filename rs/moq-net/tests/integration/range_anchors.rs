@@ -7,6 +7,7 @@
 //! anchor instead of resolving it against the part of the track it happens to hold.
 
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -77,7 +78,7 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 	};
 
 	let subscription = Subscription::default()
-		.with_max_delay(FOREVER)
+		.with_delay(Delay::default().with_max(FOREVER))
 		.with_order(Order::Ascending)
 		.with_ranges([range]);
 	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))

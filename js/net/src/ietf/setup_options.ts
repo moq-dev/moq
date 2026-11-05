@@ -24,8 +24,6 @@ export const SetupOption = {
 	Auth: 0x40b70n,
 	/** ACTIVE_COUNT, from the MoQ Active Count extension. See `active_count.ts`. */
 	ActiveCount: 0x40b64n,
-	/** EPOCH, from the MoQ Epoch extension. See `epoch.ts`. */
-	Epoch: 0x40b68n,
 } as const;
 
 // Unknown SETUP options may repeat, including GREASE (draft-22 section 9.1).

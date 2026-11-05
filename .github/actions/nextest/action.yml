@@ -1,0 +1,16 @@
+name: Install nextest
+description: Install the nextest version shared with the OSS Scanner image.
+
+runs:
+  using: composite
+  steps:
+    - name: Read nextest version
+      id: version
+      shell: bash
+      run: |
+        version=$(cat "$GITHUB_ACTION_PATH/VERSION")
+        : "${version:?nextest version is empty}"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+    - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+      with:
+        tool: nextest@${{ steps.version.outputs.version }}

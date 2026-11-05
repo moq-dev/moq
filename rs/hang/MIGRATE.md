@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The catalog track advertises a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`Catalog::default_track_info` takes moq-net's new zero default, so the catalog track advertises the live edge only where it advertised no limit. A late joiner still reads the newest snapshot, which never goes stale.
+`container::track_info` still declares `container::MAX_AGE` (30 s) on media tracks.
+
 ### Compression moves to the track
 
 `catalog::Compression`, the `compression` field on `JsonConfig` and `BinaryConfig`, `Catalog::COMPRESSED_NAME`, and `catalog::Consumer::compressed` are gone.
@@ -20,14 +25,18 @@ An old catalog's `"compression"` key on a data track lands in the entry's `extra
 `catalog::MAX_RENDITIONS` and `Error::TooManyRenditions` are gone: a catalog with any number of renditions is accepted.
 Delete matches on `TooManyRenditions`. An application that wants a limit counts `video.renditions`, `audio.renditions`, and `text.renditions` itself.
 
-### HLS records replace the root archive
+### The `media` section replaces the root archive and clock
 
 `catalog::Archive`, `catalog::Timeline`, `Catalog::archive`, and the `timeline` module are gone.
-A video or audio rendition carries its own `hls: Option<catalog::Hls>` field, naming its record track and nominal segment duration.
-Records are `hls::Record { sequence, group, pts, duration }` in milliseconds on a `<track>.hls` track (`hls::default_name`, `hls::SUFFIX`).
-Build one with `Record::new(sequence, group, pts)`, adding `with_duration(0)` where content stops.
 A catalog with an old root `archive` still parses, with the entry ignored.
+
+`Catalog::clock` moves to `Catalog::media.clock`, serialized as `media.clock` rather than a root `clock`.
 `catalog::MOQ_EPOCH_UNIX_MILLIS` moves to the `clock` module, re-exported at the same path.
+
+`catalog::Media` also carries `join: Option<catalog::Join>`, whose `interval` promises that every audio and video track starts a group at least that often.
+Set it with `catalog.media.join = Join::new(gop)`, which is `None` for a zero `gop`.
+An HLS or DASH export numbers its segments on that grid, so a broadcast without it is not HLS-renderable.
+A root `clock` written by an older publisher is ignored.
 
 ### `Catalog` parses through `FromStr` (#6471)
 
@@ -39,10 +48,10 @@ Call `json.parse::<Catalog>()`, or bring `std::str::FromStr` into scope to keep 
 `catalog::Priorities` fields and `container::track_info`'s priority are `i8`, higher first, with 0 unset.
 `PRIORITY` keeps its values (100, 90, 80, 60), which now sit above the unset default instead of below it, so their moq-lite bytes move from 100..60 to 228..188.
 
-### `catalog::Reference` names its epoch (#5699)
+### `catalog::Reference` names its instance (#5699)
 
-Every rendition and data track config gains an optional `epoch` beside `broadcast`.
-`Reference` has a new required `epoch()`: an implementor outside this crate returns the entry's epoch, or `None` when it names none.
+Every rendition and data track config gains an optional `instance` beside `broadcast`.
+`Reference` has a new required `instance()`: an implementor outside this crate returns the entry's instance, or `None` when it names none.
 
 ### A lost catalog track is `Error::Moq` (#6114)
 

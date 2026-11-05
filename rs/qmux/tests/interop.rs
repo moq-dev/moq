@@ -42,14 +42,20 @@ async fn ours_and_theirs(version: Version, ours_is_client: bool) -> (Session, qm
 			Session::connect(ours_transport, ours),
 			qmux06::Session::accept(theirs_transport, theirs)
 		);
-		(ours.unwrap(), theirs.unwrap())
+		(spawn(ours.unwrap()), theirs.unwrap())
 	} else {
 		let (ours, theirs) = tokio::join!(
 			Session::accept(ours_transport, ours),
 			qmux06::Session::connect(theirs_transport, theirs)
 		);
-		(ours.unwrap(), theirs.unwrap())
+		(spawn(ours.unwrap()), theirs.unwrap())
 	}
+}
+
+/// Spawn our session's driver, returning the session.
+fn spawn<T: qmux::transport::Transport + Send + 'static>((session, driver): (Session, qmux::Driver<T>)) -> Session {
+	tokio::spawn(driver);
+	session
 }
 
 async fn write_all(send: &mut qmux::SendStream, mut data: Bytes) {

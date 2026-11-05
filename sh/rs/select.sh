@@ -40,7 +40,9 @@ select_packages() {
     # A changed path under `rs/` is a seed only because every crate directory
     # there is named after its crate. Under-selecting checks nothing, so fall
     # back to all.
-    if jq -e '.packages[] | (.manifest_path | split("/")) as $p | select($p[-3] == "rs" and $p[-2] != .name)' <<<"$metadata" >/dev/null; then
+    local mismatched
+    mismatched=$(jq 'any(.packages[]; (.manifest_path | split("/")) as $p | $p[-3] == "rs" and $p[-2] != .name)' <<<"$metadata")
+    if [[ "$mismatched" == true ]]; then
         echo "rs: a crate directory no longer matches its crate name; selecting everything." >&2
         echo ALL
         return
@@ -48,8 +50,8 @@ select_packages() {
 
     local seeds benches edges selected
     # A crate's `benches/` builds only its own bench targets, which no other crate can
-    # depend on and the test build never compiles, so it selects that crate alone
-    # (for its lint) rather than every dependent's tests.
+    # depend on, so it selects that crate alone (for its lint) rather than every
+    # dependent's tests.
     benches=$(sed -n 's|^rs/\([^/]*\)/benches/.*|\1|p' "$list")
     # A target can also sit outside its crate, as moq-cli's interop examples
     # under test/interop/clients/rust/ do, so a change in the directory of a
@@ -109,7 +111,13 @@ select_packages() {
 	' <<<"$metadata" | sort -u | tr '\n' ' '
 }
 
-packages=$(select_packages)
+# A command substitution clears -e, so a failing jq inside selection would
+# otherwise print a partial selection. Restore it there; Bash 4.4's
+# `inherit_errexit` would too, but macOS ships Bash 3.2.
+packages=$(
+    set -e
+    select_packages
+)
 
 # Ids are `path+file://<dir>#<version>` for a directory named after its crate.
 names=$(tr ' ' '\n' <<<"$packages" | sed -n 's|.*/\([^/#]*\)#.*|\1|p' | sort -u | tr '\n' ' ')
@@ -136,7 +144,7 @@ fi
 
 # The `*-fuzz` crates need a nightly toolchain; only `just rs fuzz` compiles them.
 if [[ "$packages" == ALL ]]; then
-    flags=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz)
+    flags=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz)
 else
     # Space-separated `--package <id>` pairs; ids contain no spaces.
     # shellcheck disable=SC2206
@@ -153,9 +161,15 @@ case "$action" in
         # Nightly runs the Send-depth proof (`just rs send-depth`) on its
         # pinned toolchain.
         just rs "$action" "${flags[@]}"
+        # The test build enables device features, which can hide unused items
+        # in the default-feature test cfg. Keep this compile isolated from the
+        # selected dependents, whose features would unify capture back in.
+        if [[ "$action" == lint ]] && wants '(moq-video|moq-audio)'; then
+            just rs media-defaults
+        fi
         # Device code behind the off-by-default `capture` feature. check-test
         # lints it through the test build, as for the default features.
-        if [[ "$action" != lint ]] && wants '(moq-video|moq-audio|moq-scene|moq-studio)'; then
+        if [[ "$action" != lint ]] && wants '(moq-video|moq-audio)'; then
             if [[ "$action" == check-test ]]; then just rs capture-test; else just rs capture; fi
         fi
         # moq-cli's media tasks are behind `play`; only check-test runs tests.
@@ -168,6 +182,9 @@ case "$action" in
         # A selection can hold nothing testable, and
         # nextest exits 4 on that; the whole workspace finding none really is wrong.
         [[ "$packages" == ALL ]] || flags+=(--no-tests=pass)
+        # Benches and examples join the build only to be linted; nextest's
+        # default filter leaves the benches unrun.
+        flags+=(--benches --examples)
         # CI keeps Cargo's per-crate build timings, which check.yml uploads.
         timings=()
         [[ "${GITHUB_ACTIONS:-}" != true ]] || timings=(--timings)
@@ -176,8 +193,11 @@ case "$action" in
         # features only add code, so every test still runs. Cargo rejects a
         # feature of a package outside the selection, hence the explicit picks.
         features=()
+        # The crates the build holds, for their targets' features below.
+        building=$names
         if wants '(moq-video|moq-audio)'; then
             [[ "$packages" == ALL ]] || flags+=(--package moq-video --package moq-audio)
+            building+=" moq-video moq-audio"
             features+=(moq-video/capture moq-audio/capture moq-audio/playback)
         fi
         if wants moq-cli; then features+=(moq-cli/play moq-cli/openh264); fi
@@ -186,6 +206,26 @@ case "$action" in
         # The relay's io_uring listener, Linux-only. A moq-uring change selects
         # the relay too, as its dependent.
         if [[ "$(uname -s)" == Linux ]] && wants moq-relay; then features+=(moq-relay/io-uring); fi
+        # Cargo skips a bench or example whose `required-features` are off without
+        # a word, and a bench-only change selects its crate alone, so no dependent
+        # turns them on. Turn on every one the built crates' targets name. All of
+        # them are additive and build wherever the gate runs; moq-uring's targets
+        # compile to nothing off Linux.
+        required=$(
+            set -e
+            cargo metadata --locked --format-version 1 --no-deps | jq -r --arg names "$building" --arg all "$packages" '
+                ($names | split(" ") | map(select(. != ""))) as $want
+                | .packages[]
+                | select(if $all == "ALL" then (.name | endswith("-fuzz") | not) else (.name as $n | $want | index($n) != null) end)
+                | .name as $name
+                | .targets[]
+                | select(.kind // [] | any(. == "bench" or . == "example"))
+                | (.["required-features"] // [])[]
+                | "\($name)/\(.)"' | sort -u | tr '\n' ' '
+        )
+        for feature in $required; do
+            [[ " ${features[*]-} " == *" $feature "* ]] || features+=("$feature")
+        done
         if ((${#features[@]})); then flags+=(--features "${features[*]}"); fi
         just rs test "${flags[@]}" ${timings[@]+"${timings[@]}"}
         ;;
@@ -204,10 +244,12 @@ case "$action" in
             fi
         fi
         # `play` and `capture` are off by default and turn on the device and
-        # render code in moq-video, moq-audio, and the cli. Only when moq-cli is
-        # selected, since cargo rejects a feature of a package outside the
-        # selection; a change to anything they reach selects moq-cli anyway.
-        if wants moq-cli; then flags+=(--features "moq-cli/play moq-cli/capture"); fi
+        # render code in moq-video, moq-audio, and the cli. The Linux sound
+        # server flags ride along to prove they compile away elsewhere. Only
+        # when moq-cli is selected, since cargo rejects a feature of a package
+        # outside the selection; a change to anything they reach selects
+        # moq-cli anyway.
+        if wants moq-cli; then flags+=(--features "moq-cli/play moq-cli/capture moq-cli/pipewire moq-cli/pulseaudio"); fi
         # Apple UDP batching is opt-in; compile its implementation and tests on macOS.
         if [[ "$(uname -s)" == Darwin ]] && wants moq-sock; then
             flags+=(--features moq-sock/fast-apple-datapath)

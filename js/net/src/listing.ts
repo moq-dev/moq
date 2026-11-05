@@ -411,6 +411,9 @@ export class Tracks {
 	}
 }
 
+/** Make the lister attached to a broadcast's listing state. @internal */
+export let makeLister: (listing: Listing) => Lister;
+
 /**
  * Answers a broadcast's listings for a handler that knows the tracks it would serve, as a
  * session lists its peer's. A broadcast has at most one.
@@ -423,10 +426,13 @@ export class Lister {
 	#listing: Listing;
 	#closed = false;
 
-	/** @internal */
-	constructor(listing: Listing) {
+	private constructor(listing: Listing) {
 		listing.attach();
 		this.#listing = listing;
+	}
+
+	static {
+		makeLister = (listing) => new Lister(listing);
 	}
 
 	/** Whether anyone lists the broadcast. */

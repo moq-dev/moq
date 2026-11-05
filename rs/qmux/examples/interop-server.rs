@@ -86,11 +86,12 @@ async fn main() -> anyhow::Result<()> {
 
 	let (socket, _) = listener.accept().await?;
 	socket.set_nodelay(true)?;
-	let session = qmux::ws::Server::new()
+	let (session, driver) = qmux::ws::Server::new()
 		.with_protocol(PROTOCOL, &[version])
 		.require_protocol()
 		.accept(socket)
 		.await?;
+	tokio::spawn(driver);
 
 	run(session, version).await
 }

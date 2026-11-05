@@ -526,6 +526,11 @@ impl PriorityHandle {
 /// stream sits below.
 pub const RECV_CONTROL: i64 = i64::MAX;
 
+/// The receive priority of a group stream held unread until a control message says how to
+/// read it, such as its subscription's TRACK_INFO: below every other stream, so a full
+/// receive window stops it first and the control message it waits on still gets credit.
+pub const RECV_PARKED: i64 = i64::MIN;
+
 /// The receive priority of a group stream: always below a control stream or an
 /// unidentified one, ranked by its subscription's `priority` and then its `order`, like the
 /// sender ranks it. A [`Order::Descending`] subscription gives up its oldest group first,
@@ -609,8 +614,8 @@ mod tests {
 		}
 	}
 
-	/// Every group sits below an unidentified stream, and so below a control stream, with
-	/// more urgent subscriptions and then newer groups kept longer.
+	/// Every group sits below an unidentified stream, and so below a control stream, and above
+	/// a parked one, with more urgent subscriptions and then newer groups kept longer.
 	#[test]
 	fn recv_group_stays_below_unidentified_streams() {
 		for order in [Order::Descending, Order::Ascending] {
@@ -619,8 +624,8 @@ mod tests {
 			assert!(recv_group(i8::MIN, u64::MAX, order) < recv_group(-1, 0, order));
 			assert!(recv_group(i8::MAX, 0, order) < 0);
 			assert!(recv_group(i8::MAX, u64::MAX, order) < 0);
-			assert!(recv_group(i8::MIN, 0, order) > i64::MIN);
-			assert!(recv_group(i8::MIN, u64::MAX, order) > i64::MIN);
+			assert!(recv_group(i8::MIN, 0, order) > RECV_PARKED);
+			assert!(recv_group(i8::MIN, u64::MAX, order) > RECV_PARKED);
 		}
 		// The group the subscription would deliver last is the first to go.
 		assert!(recv_group(0, 0, Order::Descending) < recv_group(0, 1, Order::Descending));

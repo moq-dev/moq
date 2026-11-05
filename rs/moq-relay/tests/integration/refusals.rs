@@ -11,13 +11,22 @@ use moq_relay::{Config, Relay};
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-	let key = rcgen::KeyPair::generate().expect("keypair");
-	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("cert params");
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("cert params");
 	let cert = params.self_signed(&key).expect("self-signed cert");
 	let cert_path = dir.join("cert.pem");
 	let key_path = dir.join("key.pem");
 	std::fs::write(&cert_path, cert.pem()).expect("write cert");
-	std::fs::write(&key_path, key.serialize_pem()).expect("write key");
+	std::fs::write(
+		&key_path,
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+	)
+	.expect("write key");
 	(cert_path, key_path)
 }
 
@@ -25,7 +34,7 @@ fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf
 /// admission configured: each test sets its own. WebSocket is served only when `ws`,
 /// on the HTTP port. A QUIC dial's WebSocket fallback goes to the QUIC port, where
 /// nothing listens over TCP, so it cannot reach admission and count a second time.
-fn config(dir: &std::path::Path, ws: bool) -> Config {
+pub(crate) fn config(dir: &std::path::Path, ws: bool) -> Config {
 	let (cert, key) = certificate(dir);
 	let mut config = Config::default();
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -53,15 +62,15 @@ struct Running {
 }
 
 async fn start(config: Config) -> Running {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let stats = relay.stats().registry().clone();
 	let origin = relay.cluster().origin.consume();
 	let quic = relay.quic_addr().expect("quic listener bound");
 	let http = relay.web_addrs().http.expect("http listener bound");
 	let internal = relay.internal().addr().expect("internal listener bound");
-	let ready = relay.ready();
 	let trigger = relay.shutdown_trigger().clone();
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
 	ready.wait().await.expect("relay ready");
 	Running {
@@ -102,7 +111,7 @@ impl Running {
 	}
 }
 
-fn client() -> moq_tokio::Client {
+pub(crate) fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
@@ -425,12 +434,11 @@ async fn web_peer(addr: SocketAddr, alpn: &str) -> moq_tokio::quic::web::Session
 	tls.insecure = Some(true);
 	let mut tls = tls.build().unwrap();
 	tls.alpn_protocols = vec![b"h3".to_vec()];
-	let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
 	let endpoint =
 		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap()).unwrap();
 	let conn = endpoint
 		.connect(
-			&driver::client::Config::new(std::sync::Arc::new(crypto)),
+			&driver::client::Config::new(std::sync::Arc::new(tls)),
 			addr,
 			"localhost",
 		)
@@ -450,7 +458,7 @@ async fn web_peer(addr: SocketAddr, alpn: &str) -> moq_tokio::quic::web::Session
 async fn uri_setup_paths(io_uring: bool) {
 	use moq_tokio::quic::web::{SessionError, WebTransportError};
 
-	let _ = moq_tokio::crypto::install_default();
+	moq_tokio::crypto::install_default().unwrap();
 	let versions: Vec<moq_net::Version> = [
 		"moq-lite-05",
 		"moq-lite-06",
@@ -473,7 +481,9 @@ async fn uri_setup_paths(io_uring: bool) {
 	let addr = relay.quic_addr().unwrap();
 	let mut admissions = relay.admissions().unwrap();
 	let trigger = relay.shutdown_trigger().clone();
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 	for version in versions {
 		for path in [
 			Some(""),
@@ -504,7 +514,7 @@ async fn uri_setup_paths(io_uring: bool) {
 			let mut setup = peer.open_uni(Default::default()).await.unwrap();
 			setup.write_all(&bytes[..]).await.unwrap();
 			if version.is_lite() {
-				setup.finish().unwrap();
+				drop(setup.finish());
 			}
 			if path.is_some() {
 				let error = kio::clock::timeout(TIMEOUT, async {

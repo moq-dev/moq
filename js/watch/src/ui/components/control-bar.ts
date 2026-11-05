@@ -1,10 +1,9 @@
 import type { Effect } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
-import { settingsButton } from "@moq/ui";
+import { fullscreenButton, settingsButton } from "@moq/ui";
 import type MoqWatch from "../../element";
 import type { UiState } from "../state";
 import { captionsButton } from "./captions-button";
-import { fullscreenButton } from "./fullscreen-button";
 import { liveBadge } from "./live-badge";
 import { playPauseButton } from "./play-pause";
 import { volumeSlider } from "./volume-slider";

@@ -2,7 +2,8 @@
 
 ## Goal
 
-On a Windows machine with more than one GPU, `moq-studio`'s program reaches a
+On a Windows machine with more than one GPU, a texture exported through
+`moq_video::render::export`, such as moq-dev/studio's program, reaches a
 hardware Media Foundation encoder on the GPU route: the encoder is enumerated
 on the adapter that owns the exported texture, rather than being passed over
 for a readback encoder because Media Foundation picked another GPU.
@@ -28,5 +29,5 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Direct3D11 render import](/quest/m2/render-d3d11.md) - the other Windows half of keeping the studio's pictures on the GPU
-- [Studio](/quest/m3/studio/README.md) - the app whose program this encodes
+- [Direct3D11 render import](/quest/m2/render-d3d11.md) - the other Windows half of keeping rendered pictures on the GPU
+- [Studio](https://github.com/moq-dev/studio) - moq-dev/studio, the app whose program this encodes

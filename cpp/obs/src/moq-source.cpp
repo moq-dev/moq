@@ -4,6 +4,7 @@
 #include <util/platform.h>
 #include <util/darray.h>
 #include <util/dstr.h>
+#include <util/util_uint64.h>
 
 #include <moq/moq.hpp>
 
@@ -76,6 +77,13 @@ namespace {
 
 struct moq_source;
 
+// A track timestamp in the nanoseconds OBS stamps media with, floored when the scale does not
+// divide a second evenly into nanoseconds.
+static uint64_t moq_source_nanoseconds(const moq::Timestamp &timestamp)
+{
+	return util_mul_div64(timestamp.value, 1'000'000'000, timestamp.scale);
+}
+
 enum class Decoded { Pending, Ready, Failed };
 // Full: the decoder refused the packet until its pending pictures are taken.
 enum class Sent { Accepted, Full, Failed };
@@ -87,7 +95,7 @@ struct VideoDecoder {
 	SwsContext *sws_ctx = nullptr;
 	bool got_keyframe = false;
 	// End can precede the old encoder's final packets, whose timestamps are below it.
-	std::optional<uint64_t> end_us;
+	std::optional<uint64_t> end_ns;
 	uint32_t frames_waiting_for_keyframe = 0;
 	uint32_t consecutive_decode_errors = 0;
 	obs_source_frame frame = {};
@@ -111,6 +119,12 @@ struct AudioLayout {
 	uint32_t sample_rate = 0;
 };
 
+// Own the ranked snapshot while setup asynchronously tries each rendition once.
+struct AudioSelection {
+	std::vector<std::pair<std::string, moq::Audio>> candidates;
+	size_t next = 0;
+};
+
 // One subscribed track: what it is, the consumer once subscribed, and the pending
 // call that subscribes or reads its next frame. Dropping it cancels that call.
 struct Track {
@@ -132,6 +146,7 @@ struct Track {
 	// Video reads encoded frames to decode here; audio reads PCM moq-audio decoded.
 	std::shared_ptr<moq::MediaTrackConsumer> consumer;
 	std::shared_ptr<moq::AudioConsumer> audio_consumer;
+	std::shared_ptr<AudioSelection> audio_selection;
 	std::optional<moq::Continuation> call;
 };
 
@@ -221,6 +236,8 @@ static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared
 static void moq_source_clear_audio_locked(struct moq_source *ctx);
 static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				       const moq::Catalog &catalog);
+static void moq_source_try_audio(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				 const std::shared_ptr<AudioSelection> &selection);
 static Sent moq_source_send_packet(VideoDecoder &decoder, const moq::MediaFrame &frame_data);
 static Decoded moq_source_receive_frame(VideoDecoder &decoder);
 
@@ -728,18 +745,18 @@ static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Co
 	auto &decoder = *track->video_decoder;
 	const auto &variant = (*result)->get_variant();
 	if (const auto *end = std::get_if<moq::MediaRead::kEnd>(&variant)) {
-		decoder.end_us = end->end_us;
+		decoder.end_ns = moq_source_nanoseconds(end->end);
 		moq_source_read_track(ctx, conn, track);
 		return;
 	}
 	const auto *read = std::get_if<moq::MediaRead::kFrame>(&variant);
-	if (!read || (decoder.end_us && read->frame.timestamp_us >= *decoder.end_us)) {
+	if (!read || (decoder.end_ns && moq_source_nanoseconds(read->frame.timestamp) >= *decoder.end_ns)) {
 		// A gap loses references immediately. An end does so only at the fresh encoder,
 		// after all old tail packets below its endpoint have entered the decoder.
 		moq_source_drain_video(ctx, conn, track);
 		avcodec_flush_buffers(decoder.codec_ctx);
 		decoder.got_keyframe = false;
-		decoder.end_us.reset();
+		decoder.end_ns.reset();
 	}
 	if (!read) {
 		moq_source_read_track(ctx, conn, track);
@@ -814,7 +831,7 @@ static bool moq_source_on_audio_read(struct moq_source *ctx, const std::shared_p
 	audio.format = AUDIO_FORMAT_FLOAT_PLANAR;
 	audio.samples_per_sec = layout.sample_rate;
 	// The same broadcast timeline video stamps, in the nanoseconds OBS expects.
-	audio.timestamp = frame.timestamp_us * 1000;
+	audio.timestamp = moq_source_nanoseconds(frame.timestamp);
 
 	if (track == conn->pending_audio)
 		conn->audio = std::move(conn->pending_audio);
@@ -857,30 +874,14 @@ static void moq_source_on_audio_subscribed(struct moq_source *ctx, const std::sh
 	if (!result) {
 		LOG_ERROR("Failed to subscribe to Audio track: %s", result.error().to_string().c_str());
 		moq_source_discard_candidate(conn, track);
+		if (std::holds_alternative<moq::Error::kUnsupportedConfig>(result.error().get_variant()))
+			moq_source_try_audio(ctx, conn, track->audio_selection);
 		return;
 	}
+	track->audio_selection.reset();
 	track->audio_consumer = *result;
 	LOG_INFO("Subscribed to Audio track successfully");
 	moq_source_read_audio(ctx, conn, track);
-}
-
-// Whether moq-audio decodes the rendition: Opus, PCM, or mono or stereo AAC-LC (the one AAC
-// profile and the layouts it has). moq-ffi reports a refusal only once the subscribe fails,
-// as an audio error with no kind, so check here to let an unsupported rendition fall through.
-// A configuration moq-audio still refuses, such as a malformed OpusHead, discards the
-// candidate when it subscribes.
-static bool moq_source_audio_decodes(const moq::Audio &config)
-{
-	const auto &codec = config.codec;
-	if (codec == "opus" || codec == "pcm")
-		return true;
-	// hang reads the AAC profile as a decimal, so `mp4a.40.02` is AAC-LC too.
-	const std::string aac = "mp4a.40.";
-	if (codec.rfind(aac, 0) != 0)
-		return false;
-	const auto profile = codec.find_first_not_of('0', aac.size());
-	return profile != std::string::npos && codec.compare(profile, std::string::npos, "2") == 0 &&
-	       (config.channel_count == 1 || config.channel_count == 2);
 }
 
 // The channels moq-audio should remix a rendition to, and where OBS puts them. A count
@@ -932,7 +933,7 @@ static bool moq_source_same_video(const Track *track, const std::string &id, con
 	const bool same_coded =
 		old.coded.has_value() == config.coded.has_value() &&
 		(!old.coded || (old.coded->width == config.coded->width && old.coded->height == config.coded->height));
-	return old.broadcast == config.broadcast && old.epoch == config.epoch && old.codec == config.codec &&
+	return old.broadcast == config.broadcast && old.instance == config.instance && old.codec == config.codec &&
 	       old.description == config.description && same_coded &&
 	       moq_source_same_container(old.container, config.container);
 }
@@ -945,7 +946,7 @@ static bool moq_source_same_audio(const Track *track, const std::string &id, con
 	// The same track under a new catalog ID is the same rendition.
 	if (old.track.value_or(track->id) != config.track.value_or(id))
 		return false;
-	return old.broadcast == config.broadcast && old.epoch == config.epoch && old.codec == config.codec &&
+	return old.broadcast == config.broadcast && old.instance == config.instance && old.codec == config.codec &&
 	       old.description == config.description && old.sample_rate == config.sample_rate &&
 	       old.channel_count == config.channel_count && moq_source_same_container(old.container, config.container);
 }
@@ -1021,22 +1022,32 @@ static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared
 		return;
 	}
 
-	for (const auto *rendition : candidates) {
+	auto selection = std::make_shared<AudioSelection>();
+	selection->candidates.reserve(candidates.size());
+	for (const auto *rendition : candidates)
+		selection->candidates.emplace_back(rendition->first, rendition->second);
+	moq_source_try_audio(ctx, conn, selection);
+}
+
+static void moq_source_try_audio(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				 const std::shared_ptr<AudioSelection> &selection)
+{
+	while (selection->next < selection->candidates.size()) {
+		const auto *rendition = &selection->candidates[selection->next++];
 		const auto &id = rendition->first;
 		const auto &config = rendition->second;
 		if (moq_source_same_audio(conn->audio.get(), id, config) && conn->audio->instance == conn->instance) {
 			conn->pending_audio.reset();
 			return;
 		}
-		if (moq_source_same_audio(conn->pending_audio.get(), id, config))
+		if (moq_source_same_audio(conn->pending_audio.get(), id, config)) {
+			// Keep the in-flight setup, but fall through against the newest catalog if it refuses.
+			if (!conn->pending_audio->audio_consumer)
+				conn->pending_audio->audio_selection = selection;
 			return;
-
-		// A codec moq-audio can't decode, or a layout OBS can't place, falls through to the next rendition.
-		if (!moq_source_audio_decodes(config)) {
-			LOG_ERROR("Unsupported audio codec '%s' with %u channels in rendition %s", config.codec.c_str(),
-				  config.channel_count, id.c_str());
-			continue;
 		}
+
+		// OBS's speaker layout is independent of the decoder's capabilities.
 		auto layout = moq_source_audio_layout(config.channel_count);
 		if (!layout) {
 			LOG_ERROR("Unsupported audio channel count %u in rendition %s: OBS has no layout for it",
@@ -1055,6 +1066,7 @@ static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared
 		track->instance = conn->instance;
 		track->audio_config = config;
 		track->audio_layout = *layout;
+		track->audio_selection = selection;
 		conn->pending_audio = track;
 
 		moq::AudioDecoderOutput output{};
@@ -1146,9 +1158,9 @@ static std::unique_ptr<VideoDecoder> moq_source_prepare_decoder(const moq::Video
 		}
 	}
 
-	// Packets carry the frame's microsecond timestamp, which the decoder hands back on the
-	// picture it belongs to.
-	decoder->codec_ctx->pkt_timebase = AVRational{1, 1'000'000};
+	// Packets carry the frame's timestamp in OBS's nanoseconds, which the decoder hands back
+	// on the picture it belongs to.
+	decoder->codec_ctx->pkt_timebase = AVRational{1, 1'000'000'000};
 
 	// Open codec
 	if (avcodec_open2(decoder->codec_ctx, codec, NULL) < 0) {
@@ -1200,7 +1212,7 @@ static Sent moq_source_send_packet(VideoDecoder &decoder, const moq::MediaFrame 
 	packet->size = static_cast<int>(frame_data.payload.size());
 	// The decoder hands this back on the picture it belongs to. Decode order has no
 	// timestamp of its own here, so dts stays unset.
-	packet->pts = static_cast<int64_t>(frame_data.timestamp_us);
+	packet->pts = static_cast<int64_t>(moq_source_nanoseconds(frame_data.timestamp));
 
 	// Send packet to decoder
 	int ret = avcodec_send_packet(decoder.codec_ctx, packet);
@@ -1366,8 +1378,8 @@ static Decoded moq_source_receive_frame(VideoDecoder &decoder)
 		return Decoded::Failed;
 	}
 
-	// OBS expects nanoseconds; packets carry microseconds.
-	decoder.frame.timestamp = static_cast<uint64_t>(frame->best_effort_timestamp) * 1000;
+	// Packets already carry the nanoseconds OBS expects.
+	decoder.frame.timestamp = static_cast<uint64_t>(frame->best_effort_timestamp);
 	decoder.frame.format = VIDEO_FORMAT_RGBA;
 	av_frame_free(&frame);
 	return Decoded::Ready;

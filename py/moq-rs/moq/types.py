@@ -1,11 +1,9 @@
 """Re-export moq-ffi record types without the Moq prefix.
 
-Records the wrapper gives Python defaults or timestamp conversions are owned in `_records` instead.
+Records the wrapper gives Python defaults or timestamp conversions, and handles that return a
+timestamp, are owned in `_records` instead.
 """
 
-from moq_ffi import (
-    MoqAnchor as Anchor,
-)
 from moq_ffi import (
     MoqAnnounceRoute as AnnounceRoute,
 )
@@ -24,6 +22,7 @@ from moq_ffi import (
 from moq_ffi import (
     MoqConnectionState as ConnectionState,
 )
+from moq_ffi import MoqDatagramInfo as DatagramInfo
 from moq_ffi import (
     MoqErrorScope as ErrorScope,
 )
@@ -43,16 +42,13 @@ from moq_ffi import (
     MoqProtocolKind as ProtocolKind,
 )
 from moq_ffi import (
-    MoqRange as Range,
+    MoqRateTarget as RateTarget,
 )
 from moq_ffi import (
     MoqRoute as Route,
 )
 from moq_ffi import (
     MoqVideoCodec as VideoCodec,
-)
-from moq_ffi import (
-    MoqVideoDecodedFrame as VideoDecodedFrame,
 )
 from moq_ffi import (
     MoqVideoEncoderInput as VideoEncoderInput,
@@ -71,15 +67,20 @@ from moq_ffi import (
 )
 
 from ._records import (
+    Anchor,
     Backoff,
     ClientTls,
     ConnectionStats,
     Datagram,
+    Delay,
     Frame,
     Grant,
     QuicConfig,
+    Range,
     Subscription,
+    Timestamp,
     TrackInfo,
+    VideoDecodedFrame,
     WebSocketConfig,
 )
 
@@ -95,6 +96,8 @@ __all__ = [
     "ConnectionPhase",
     "ConnectionState",
     "Datagram",
+    "DatagramInfo",
+    "Delay",
     "ErrorScope",
     "Frame",
     "FetchGroupOptions",
@@ -105,8 +108,10 @@ __all__ = [
     "ProtocolKind",
     "QuicConfig",
     "Range",
+    "RateTarget",
     "Route",
     "Subscription",
+    "Timestamp",
     "TrackInfo",
     "VideoCodec",
     "VideoEncoderInput",

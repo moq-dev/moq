@@ -24,6 +24,13 @@ pub(crate) fn fin(version: &str, started: bool, clean: bool, responses: Vec<u8>)
 	serde_json::from_slice(&bun("bare-fin.ts", input)).expect("JS publisher returned response bytes")
 }
 
+/// Feed a JS subscriber responses that end the track owing group 0, kill its session, and
+/// return the JS publisher's encoding of the same responses.
+pub(crate) fn owed_tail(version: &str, responses: Vec<u8>) -> Vec<u8> {
+	let input = serde_json::json!({ "version": version, "owed": true, "responses": responses });
+	serde_json::from_slice(&bun("bare-fin.ts", input)).expect("JS publisher returned response bytes")
+}
+
 /// Rust updates keep the JS subscription alive, cover both unseen groups after narrowing,
 /// and fill the largest group's head under the update's ID on draft-22.
 #[test]
@@ -63,7 +70,6 @@ fn ietf_range_updates_interop() {
 			authorization_token: None,
 			new_group: None,
 			max_age: None,
-			epoch: None,
 		}
 		.encode(&mut w, version)
 		.unwrap();
@@ -321,8 +327,6 @@ fn lite_varint_interop() {
 			sequence: 300,
 			timestamp: Some((1 << 50) + 5),
 			payload: bytes::Bytes::from_static(b"x"),
-			inflated: None,
-			ietf: None,
 		}
 		.encode_bytes(version)
 		.unwrap();
@@ -346,8 +350,6 @@ fn lite_varint_interop() {
 			sequence: 1 << 30,
 			timestamp: None,
 			payload: bytes::Bytes::from_static(b"untimed"),
-			inflated: None,
-			ietf: None,
 		}
 		.encode_bytes(version);
 		let untimed_datagram = match untimed {
@@ -407,7 +409,7 @@ fn lite_varint_interop() {
 		assert_eq!(echo.padding, padding, "{version}: padding");
 		if version.has_padding() {
 			assert!(
-				lite::Datagram::decode(echo.padding.into(), version, false, |_| {
+				lite::Datagram::decode(echo.padding.into(), version, |_| {
 					panic!("padding must not look up a subscription")
 				})
 				.unwrap()
@@ -559,7 +561,7 @@ fn lite_tracks_interop() {
 	let version = lite::Version::Lite07;
 	let request = lite::Tracks {
 		broadcast: crate::Path::from_static("room"),
-		epoch: None,
+		instance: None,
 	}
 	.encode_bytes(version)
 	.unwrap();
@@ -629,11 +631,11 @@ fn ietf_track_status_interop() {
 			let mut w = Encoder::new(&mut buf, version.into());
 			w.varint(<ietf::TrackStatus as ietf::Message>::ID).unwrap();
 			ietf::TrackStatus {
+				authorization_token: None,
 				request_id: ietf::RequestId(id),
 				track_namespace: crate::Path::new(namespace).unwrap(),
 				track_name: "video".into(),
 				properties_wanted: wanted,
-				epoch: None,
 			}
 			.encode(&mut w, version)
 			.unwrap();

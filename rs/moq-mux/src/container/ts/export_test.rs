@@ -84,8 +84,8 @@ fn length_prefixed(nals: &[&[u8]]) -> Bytes {
 /// paused time) or the stream ends.
 /// A drift budget no test timeline comes close to, so the exporter reads every group.
 ///
-/// The media track's full retention window, so an exporter started after publishing
-/// can still read every retained group. These tests write a whole broadcast up front
+/// The media track's full max age, so an exporter started after publishing
+/// can still read every fresh group. These tests write a whole broadcast up front
 /// and only then export it, which the
 /// exporter's default [`Duration::ZERO`] collapses to the
 /// live edge: completeness has to be asked for, exactly as a real recorder does.
@@ -161,7 +161,7 @@ async fn custom_selected_catalog_drives_export_and_follow() {
 	for payload in [b"first".as_slice(), b"next".as_slice()] {
 		let broadcast = origin.create_broadcast("live").unwrap();
 		broadcast
-			.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+			.announce(moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0))
 			.unwrap();
 		let mut snapshot = Catalog::default();
 		let mut producers = Vec::new();
@@ -225,7 +225,7 @@ async fn a_follower_keeps_msf_after_catalog_eof() {
 	use std::task::Poll;
 
 	let origin = crate::source::produce_origin();
-	let epoch = moq_net::Epoch::mint();
+	let instance = moq_net::Instance::random();
 	let publish = || {
 		let broadcast = origin.create_broadcast("live").unwrap();
 		let track = broadcast
@@ -236,7 +236,7 @@ async fn a_follower_keeps_msf_after_catalog_eof() {
 		group.write_frame(moq_net::Timestamp::now(), msf).unwrap();
 		group.finish().unwrap();
 		broadcast
-			.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
+			.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
 			.unwrap();
 		(broadcast, track)
 	};
@@ -1392,8 +1392,8 @@ async fn trimmed_leading_pictures_keep_their_slots() {
 	assert_eq!(joined.iter().collect::<Vec<_>>(), shared);
 }
 
-/// A declared depth of zero decodes every frame at its presentation, and refuses a frame that
-/// reorders, rather than inferring a decode delay.
+/// A declared depth of zero decodes every frame at its presentation. A regression proves a
+/// timeline step and starts a new clock period instead of inferring a decode delay.
 #[tokio::test(start_paused = true)]
 async fn export_declared_zero_reorder_decodes_at_presentation() {
 	let (mut export, _keep) = export_declared(0, &[&[0, 40, 80, 120]]).await;
@@ -1406,15 +1406,12 @@ async fn export_declared_zero_reorder_decodes_at_presentation() {
 	assert_eq!(timing.len(), 4);
 	assert!(timing.iter().all(|(pts, dts)| pts == dts), "{timing:?}");
 
-	let (mut export, _keep) = export_declared(0, &[&[0, 80, 40, 120]]).await;
-	let err = loop {
-		match kio::clock::timeout(DRAIN, export.next()).await {
-			Ok(Ok(Some(_))) => {}
-			Ok(Ok(None)) | Err(_) => panic!("a frame reordered past the declared depth was exported"),
-			Ok(Err(err)) => break err,
-		}
-	};
-	assert!(err.to_string().contains("declared depth"), "{err}");
+	let (mut export, _keep) = export_declared(0, &[&[0, 80, 40, 120, 80, 160], &[200, 240]]).await;
+	let frames = drain_frames(&mut export).await;
+	let bytes: Vec<u8> = frames.iter().flat_map(|frame| frame.payload.iter().copied()).collect();
+	let timing = video_pes_timing(&bytes);
+	assert_eq!(timing, [0, 80, 40, 120, 80, 160, 200, 240].map(|ms| (ms * 90, ms * 90)));
+	assert_eq!(count_discontinuity(&frames), 2, "each step opens a clock period");
 }
 
 /// #2937: the PCR must be a uniform bounded-interval ramp, not a sample of the
@@ -1854,7 +1851,10 @@ async fn export_scte35_roundtrip() {
 	let track = consumer2
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+		)
 		.await
 		.unwrap();
 	let mut scte_reader = crate::container::Consumer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
@@ -2067,7 +2067,10 @@ async fn export_pes_packet_roundtrip() {
 	let track = consumer2
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+		)
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
@@ -2221,7 +2224,10 @@ async fn programs_without_video_roundtrip_opaque_tracks() {
 			let track = consumer2
 				.track(&restored)
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+				)
 				.await
 				.unwrap();
 			let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy(Kind::Data));
@@ -2265,7 +2271,10 @@ async fn read_frames(consumer: &moq_net::broadcast::Consumer, name: &str, kind: 
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+		)
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy(kind));
@@ -3058,7 +3067,10 @@ async fn read_cues(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<(
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+		)
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
@@ -3229,39 +3241,24 @@ fn make_long_section(table_id: u8, ext: u16, version: u8, number: u8, last: u8, 
 	s
 }
 
-/// Read an SI snapshot track from the start: every group, as its frames' payloads.
+/// The newest snapshot group of an SI track: its sequence, and its frames' payloads.
 ///
-/// Starting at group 0 only asks the publisher to send from there; the default
-/// [`Duration::ZERO`] budget then skips every group the live edge has
-/// already passed, which is all of them once the importer has finished. A budget
-/// wider than the test's wall-clock span (every cut lands within microseconds) is
-/// what actually delivers the history, so a count of groups counts cuts.
-async fn read_si_groups(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<Vec<Bytes>> {
-	let mut track = consumer
-		.track(name)
-		.unwrap()
-		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_range(0..)
-				.with_max_delay(Duration::from_secs(5)),
-		)
-		.await
-		.unwrap();
-	let mut groups = Vec::new();
-	while let Some(mut group) = track.recv_group().await.unwrap() {
-		let mut frames = Vec::new();
-		while let Some(frame) = kio::wait(|waiter| group.poll_read_frame(waiter)).await.unwrap() {
-			frames.push(frame.payload);
-		}
-		groups.push(frames);
+/// An SI track keeps the default zero max age: a superseded snapshot is stale at once, so only
+/// the newest is served. Its groups are appended from sequence 0, so the sequence counts the
+/// cuts before it, and a test checks an earlier revision's snapshot right after cutting it.
+async fn newest_si_group(consumer: &moq_net::broadcast::Consumer, name: &str) -> (u64, Vec<Bytes>) {
+	let mut track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+	let mut group = track.recv_group().await.unwrap().expect("a snapshot group");
+	let mut frames = Vec::new();
+	while let Some(frame) = kio::wait(|waiter| group.poll_read_frame(waiter)).await.unwrap() {
+		frames.push(frame.payload);
 	}
-	groups
+	(group.sequence, frames)
 }
 
 /// The newest snapshot of an SI track, reduced to its sections.
 async fn read_si_sections(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<Bytes> {
-	let groups = read_si_groups(consumer, name).await;
-	let frames = groups.last().expect("at least one snapshot group");
+	let (_, frames) = newest_si_group(consumer, name).await;
 	frames
 		.iter()
 		.flat_map(crate::container::ts::si::split_sections)
@@ -3414,14 +3411,13 @@ async fn service_layer_survives_roundtrip() {
 		Some(Duration::from_secs(10)),
 		"the DVB NIT interval was filled in"
 	);
-	let nit_groups = read_si_groups(&consumer, &nit_entry.track).await;
+	let (nit_sequence, nit_frames) = newest_si_group(&consumer, &nit_entry.track).await;
 	assert_eq!(
-		nit_groups.len(),
-		1,
+		nit_sequence, 0,
 		"the repeated NIT committed once; a repetition cuts no group"
 	);
 	assert_eq!(
-		nit_groups[0],
+		nit_frames,
 		vec![Bytes::from(nit.clone())],
 		"the NIT snapshot is the section, byte-for-byte"
 	);
@@ -4559,21 +4555,23 @@ async fn torn_transition_is_never_published() {
 	let mut input = si_packet(0x0011, &sdt(5, 0, 0xaa));
 	input.extend_from_slice(&si_packet_cc(0x0011, &sdt(5, 1, 0xab), 1));
 	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
+	let track = &si[&0x0011][&0x42].track;
+	// A superseded snapshot is stale at once, so each batch's newest is read before the next.
+	let mut snapshots = vec![newest_si_group(&rig.consumer, track).await];
 	// Version 6 arrives torn across two batches; the intermediate state (section 0
 	// at v6, section 1 still v5) must never hit the track.
 	rig.import
 		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(6, 0, 0xba), 2)[..]))
 		.unwrap();
+	snapshots.push(newest_si_group(&rig.consumer, track).await);
 	rig.import
 		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(6, 1, 0xbb), 3)[..]))
 		.unwrap();
 	rig.import.finish().unwrap();
+	snapshots.push(newest_si_group(&rig.consumer, track).await);
 
-	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
-	let track = &si[&0x0011][&0x42].track;
-	let groups = read_si_groups(&rig.consumer, track).await;
-	assert!(!groups.is_empty(), "at least one snapshot group");
-	for (i, frames) in groups.iter().enumerate() {
+	for (sequence, frames) in &snapshots {
 		let versions: Vec<u8> = frames
 			.iter()
 			.flat_map(crate::container::ts::si::split_sections)
@@ -4581,7 +4579,7 @@ async fn torn_transition_is_never_published() {
 			.collect();
 		assert!(
 			versions.windows(2).all(|w| w[0] == w[1]),
-			"group {i} mixes versions: {versions:?}"
+			"group {sequence} mixes versions: {versions:?}"
 		);
 	}
 	assert_eq!(
@@ -4815,20 +4813,24 @@ async fn an_sdt_revision_dropping_the_service_retires_it() {
 			.map(|tables| tables[&0x42].track.clone())
 	};
 
+	// A superseded snapshot is stale at once, so each revision's is read before the next.
 	let track = revise(0, &[(1, b"One"), (2, b"Two")]).expect("the SDT is advertised");
+	let mut groups = vec![newest_si_group(&consumer, &track).await];
 	assert_eq!(revise(1, &[(2, b"Two")]), None, "the revision retired the SDT entry");
+	groups.push(newest_si_group(&consumer, &track).await);
 	assert_eq!(
 		revise(2, &[(1, b"One"), (2, b"Two")]),
 		Some(track.clone()),
 		"listed again, on the same track"
 	);
 	capture.finish(Timestamp::ZERO).unwrap();
+	groups.push(newest_si_group(&consumer, &track).await);
 
-	let groups = read_si_groups(&consumer, &track).await;
-	assert_eq!(groups.len(), 3, "one snapshot per revision");
-	assert_sdt_lists_only(&groups[0][0], 0, 1, b"One");
-	assert!(groups[1].is_empty(), "the retiring snapshot carries no SDT");
-	assert_sdt_lists_only(&groups[2][0], 2, 1, b"One");
+	let sequences: Vec<u64> = groups.iter().map(|(sequence, _)| *sequence).collect();
+	assert_eq!(sequences, [0, 1, 2], "one snapshot per revision");
+	assert_sdt_lists_only(&groups[0].1[0], 0, 1, b"One");
+	assert!(groups[1].1.is_empty(), "the retiring snapshot carries no SDT");
+	assert_sdt_lists_only(&groups[2].1[0], 2, 1, b"One");
 }
 
 /// A corrupted SDT actual is not rebuilt under a fresh, valid CRC: the section is
@@ -4862,6 +4864,8 @@ async fn a_corrupt_sdt_keeps_the_last_good_snapshot() {
 	};
 
 	let track = feed(sdt_actual(0, 0, 0, &[(1, b"One")])).expect("the SDT is advertised");
+	// A superseded snapshot is stale at once, so the first is read before the next revision.
+	let first = newest_si_group(&consumer, &track).await;
 	// One unflagged bit flip turns the service name "One" into "Nne" under the source CRC.
 	let mut corrupt = sdt_actual(1, 0, 0, &[(1, b"One")]);
 	let name = corrupt.len() - 4 - 3;
@@ -4869,11 +4873,11 @@ async fn a_corrupt_sdt_keeps_the_last_good_snapshot() {
 	assert_eq!(feed(corrupt), Some(track.clone()), "the corrupt revision kept the SDT");
 	assert_eq!(feed(sdt_actual(2, 0, 0, &[(1, b"Uno")])), Some(track.clone()));
 	capture.finish(Timestamp::ZERO).unwrap();
+	let last = newest_si_group(&consumer, &track).await;
 
-	let groups = read_si_groups(&consumer, &track).await;
-	assert_eq!(groups.len(), 2, "no snapshot for the corrupt revision");
-	assert_sdt_lists_only(&groups[0][0], 0, 1, b"One");
-	assert_sdt_lists_only(&groups[1][0], 2, 1, b"Uno");
+	assert_eq!((first.0, last.0), (0, 1), "no snapshot for the corrupt revision");
+	assert_sdt_lists_only(&first.1[0], 0, 1, b"One");
+	assert_sdt_lists_only(&last.1[0], 2, 1, b"Uno");
 }
 
 /// A multi-section SDT revision with the selected service's section corrupt does not
@@ -4907,6 +4911,8 @@ async fn a_partial_sdt_revision_keeps_the_last_good_snapshot() {
 
 	feed(sdt_actual(0, 0, 1, &[(1, b"One")]));
 	let track = feed(sdt_actual(0, 1, 1, &[(2, b"Two")])).expect("the SDT is advertised");
+	// A superseded snapshot is stale at once, so the first is read before the next revision.
+	let first = newest_si_group(&consumer, &track).await;
 	let mut corrupt = sdt_actual(1, 0, 1, &[(1, b"One")]);
 	let name = corrupt.len() - 4 - 3;
 	corrupt[name] ^= 0x01;
@@ -4919,11 +4925,11 @@ async fn a_partial_sdt_revision_keeps_the_last_good_snapshot() {
 	);
 	assert_eq!(feed(sdt_actual(1, 0, 1, &[(1, b"Uno")])), Some(track.clone()));
 	capture.finish(Timestamp::ZERO).unwrap();
+	let last = newest_si_group(&consumer, &track).await;
 
-	let groups = read_si_groups(&consumer, &track).await;
-	assert_eq!(groups.len(), 2, "no snapshot for the partial revision");
-	assert_sdt_lists_only(&groups[0][0], 0, 1, b"One");
-	assert_sdt_lists_only(&groups[1][0], 1, 1, b"Uno");
+	assert_eq!((first.0, last.0), (0, 1), "no snapshot for the partial revision");
+	assert_sdt_lists_only(&first.1[0], 0, 1, b"One");
+	assert_sdt_lists_only(&last.1[0], 1, 1, b"Uno");
 }
 
 /// A selection filters EIT schedule actual (0x50..=0x5F) by service, as it does
@@ -5088,8 +5094,8 @@ async fn tdt_round_trips_as_latest_value() {
 		vec![Bytes::from(tick(2))],
 		"the newest snapshot is the latest tick alone"
 	);
-	let groups = read_si_groups(&rig.consumer, &entry.track).await;
-	assert_eq!(groups.len(), 2, "one group per tick, no accumulation");
+	let (sequence, _) = newest_si_group(&rig.consumer, &entry.track).await;
+	assert_eq!(sequence, 1, "one group per tick, no accumulation");
 }
 
 /// Build a well-formed short-form section (syntax indicator clear): header + body,
@@ -5143,8 +5149,8 @@ async fn short_form_repetition_cuts_no_group() {
 	rig.import.finish().unwrap();
 
 	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
-	let groups = read_si_groups(&rig.consumer, &si[&0x0014][&0x70].track).await;
-	assert_eq!(groups.len(), 1, "a repetition cut no further group");
+	let (sequence, _) = newest_si_group(&rig.consumer, &si[&0x0014][&0x70].track).await;
+	assert_eq!(sequence, 0, "a repetition cut no further group");
 }
 
 /// SI never gates output: an advertised entry whose track resolves but never
@@ -5604,12 +5610,13 @@ const JOIN: u64 = 75;
 /// Produce one broadcast and export it twice, the second exporter joining partway in, and
 /// return what each rendered.
 ///
-/// Both exporters are drained after every write, so neither skips a group and the two see the
-/// same arrival order. That isolates the question under test (does the *rendering* depend on
-/// when the process started) from the separate question of whether two legs received the same
-/// groups in the same order. The program carries an SDT, whose unchanged repeats have to land on
-/// the same media times in both legs too (#3948).
-async fn export_twice(with_video: bool) -> (Vec<Frame>, Vec<Frame>) {
+/// Media drains after each write so neither exporter skips a group. Clock-table revisions
+/// arrive between the two drains, before their stamped media position: each leg sees the same
+/// snapshot at a different media position. The SDT's unchanged repeats and TDT/TOT revisions
+/// must still land on the same frames.
+/// The zero-delay exports request no superseded history; queued bursts need an explicit
+/// delay budget, as in `queued_clock_revisions_follow_the_exporters_freshness_budgets`.
+async fn export_twice(with_video: bool, late_clock: bool) -> (Vec<Frame>, Vec<Frame>) {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(
@@ -5618,6 +5625,29 @@ async fn export_twice(with_video: bool) -> (Vec<Frame>, Vec<Frame>) {
 	)
 	.unwrap();
 	let _sdt = publish_sdt(&mut broadcast, &mut catalog);
+	let mut clocks = [0x70, 0x73].map(|table_id| {
+		let mut track = broadcast.create_track(format!("clock-{table_id}"), timed()).unwrap();
+		track
+			.write_frame(Timestamp::ZERO, Bytes::from(make_short_section(table_id, &[0; 5])))
+			.unwrap();
+		catalog
+			.modify()
+			.unwrap()
+			.ext
+			.mpegts
+			.si
+			.entry(0x0014)
+			.or_default()
+			.insert(
+				table_id,
+				tscat::SiEntry {
+					track: track.name().to_string(),
+					interval: Some(Duration::from_secs(30)),
+					..Default::default()
+				},
+			);
+		(table_id, track)
+	});
 
 	let mut video = with_video.then(|| {
 		let track = broadcast
@@ -5703,6 +5733,22 @@ async fn export_twice(with_video: bool) -> (Vec<Frame>, Vec<Frame>) {
 		}
 
 		out_a.extend(drain_frames(&mut a).await);
+		if if late_clock { tick == 100 } else { tick % 30 == 10 } {
+			for (table_id, track) in &mut clocks {
+				track
+					.write_frame(
+						Timestamp::from_micros(if late_clock {
+							(tick - 5) * VIDEO_US
+						} else {
+							(tick + 5) * VIDEO_US + 1_000
+						})
+						.unwrap(),
+						Bytes::from(make_short_section(*table_id, &[tick as u8; 5])),
+					)
+					.unwrap();
+			}
+		}
+
 		if let Some(b) = b.as_mut() {
 			out_b.extend(drain_frames(b).await);
 		}
@@ -5781,7 +5827,7 @@ fn assert_only_continuity_differs(a: &[Frame], b: &[Frame], from: Timestamp) {
 
 #[tokio::test(start_paused = true)]
 async fn late_join_matches_a_running_exporter() {
-	let (a, b) = export_twice(true).await;
+	let (a, b) = export_twice(true, false).await;
 
 	// Skip to the joiner's second keyframe: its first group covers tune-in, where the two legs
 	// legitimately differ because only the joiner has to lead with the program tables.
@@ -5795,7 +5841,7 @@ async fn late_join_matches_a_running_exporter() {
 /// timeline on its own.
 #[tokio::test(start_paused = true)]
 async fn late_join_matches_a_running_exporter_without_video() {
-	let (a, b) = export_twice(false).await;
+	let (a, b) = export_twice(false, false).await;
 
 	// The joiner's first frame leads with PAT/PMT, while the running exporter has no
 	// reason to repeat them there, and its SDT waits for a PCR interval after them. They can
@@ -5812,6 +5858,26 @@ async fn late_join_matches_a_running_exporter_without_video() {
 		.expect("a periodic PAT/PMT refresh")
 		.timestamp;
 	assert_only_continuity_differs(&a, &b, from);
+}
+
+/// A revision missing its stamped slot cannot be reconstructed there. It goes out at the
+/// next grid slot each leg can still serve, and byte identity returns after both emit it.
+#[tokio::test(start_paused = true)]
+async fn a_late_clock_revision_remains_visible_between_exports() {
+	let (a, b) = export_twice(true, true).await;
+	let revision = make_short_section(0x70, &[100; 5]);
+	let at = |frames: &[Frame]| {
+		frames
+			.iter()
+			.find(|frame| frame.payload.windows(revision.len()).any(|w| w == revision))
+			.unwrap()
+			.timestamp
+	};
+	// This fixture sends each PES in the PCR slice before its decode boundary.
+	// Pin both decisions to the media grid, including the late leg's next slot.
+	assert_eq!(Duration::from(at(&b)) + PCR_INTERVAL, Duration::from_secs(4));
+	assert_eq!(Duration::from(at(&a)) + PCR_INTERVAL, Duration::from_secs(5));
+	assert_only_continuity_differs(&a, &b, Timestamp::from_millis(5_250).unwrap());
 }
 
 // The interleave is a function of the media, not of arrival (moq-dev/moq#2829): each frame
@@ -6652,7 +6718,7 @@ struct SiCadenceRig {
 	_broadcast: moq_net::broadcast::Producer,
 }
 
-async fn si_cadence_rig(pid: u16, table_id: u8, interval: Duration) -> SiCadenceRig {
+async fn si_cadence_rig((pid, table_id): (u16, u8), interval: Duration, info: moq_net::track::Info) -> SiCadenceRig {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(
@@ -6662,7 +6728,7 @@ async fn si_cadence_rig(pid: u16, table_id: u8, interval: Duration) -> SiCadence
 	.unwrap();
 
 	let si_name = format!("{pid:#06x}-{table_id:#04x}.si");
-	let si_track = broadcast.create_track(si_name.as_str(), timed()).unwrap();
+	let si_track = broadcast.create_track(si_name.as_str(), info).unwrap();
 
 	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
 	let track = broadcast
@@ -6745,7 +6811,7 @@ impl SiCadenceRig {
 #[tokio::test(start_paused = true)]
 async fn si_revision_does_not_wait_for_the_interval() {
 	let tick = |mjd: u8| make_short_section(0x70, &[0xc0, mjd, 0x12, 0x34, 0x56]);
-	let mut rig = si_cadence_rig(0x0014, 0x70, Duration::from_secs(30)).await;
+	let mut rig = si_cadence_rig((0x0014, 0x70), Duration::from_secs(30), timed()).await;
 
 	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(tick(1))).unwrap();
 	assert_eq!(rig.media(0, 0x0014).await, 0, "the first frame stays buffered");
@@ -6771,7 +6837,7 @@ async fn si_revision_does_not_wait_for_the_interval() {
 async fn si_repeats_ride_the_media_grid() {
 	let sdt_v1 = make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8]);
 	let sdt_v2 = make_long_section(0x42, 1, 1, 0, 0, &[0xbb; 8]);
-	let mut rig = si_cadence_rig(0x0011, 0x42, Duration::from_secs(2)).await;
+	let mut rig = si_cadence_rig((0x0011, 0x42), Duration::from_secs(2), timed()).await;
 
 	// The lead emission lands wherever this exporter joined.
 	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(sdt_v1)).unwrap();
@@ -6809,7 +6875,7 @@ async fn si_repeats_ride_the_media_grid() {
 #[tokio::test(start_paused = true)]
 async fn si_clock_tables_do_not_repeat_unchanged() {
 	let tick = |mjd: u8| make_short_section(0x70, &[0xc0, mjd, 0x12, 0x34, 0x56]);
-	let mut rig = si_cadence_rig(0x0014, 0x70, Duration::from_secs(2)).await;
+	let mut rig = si_cadence_rig((0x0014, 0x70), Duration::from_secs(2), timed()).await;
 
 	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(tick(1))).unwrap();
 	assert_eq!(rig.media(0, 0x0014).await, 0, "the first frame stays buffered");
@@ -6829,6 +6895,144 @@ async fn si_clock_tables_do_not_repeat_unchanged() {
 	assert_eq!(rig.media(11_000, 0x0014).await, 0, "and only that one");
 }
 
+/// Several complete snapshots can arrive before the media they describe. Reading one
+/// revision ahead preserves each stamped slot without replacing an earlier one with a
+/// future clock value, and a stamp between grid boundaries rounds up rather than down.
+#[tokio::test(start_paused = true)]
+async fn clock_revisions_wait_for_their_stamped_grid_slots() {
+	for table_id in [0x70, 0x73] {
+		let section = |value| make_short_section(table_id, &[value; 5]);
+		let mut rig = si_cadence_rig((0x0014, table_id), Duration::from_secs(30), timed()).await;
+		rig.si_track
+			.write_frame(Timestamp::ZERO, Bytes::from(section(0)))
+			.unwrap();
+		rig.media(0, 0x0014).await;
+		assert_eq!(rig.media(1_000, 0x0014).await, 1);
+		for (millis, value) in [(2_501, 1), (3_500, 2)] {
+			rig.si_track
+				.write_frame(Timestamp::from_millis(millis).unwrap(), Bytes::from(section(value)))
+				.unwrap();
+			assert!(
+				drain_frames(&mut rig.exporter).await.is_empty(),
+				"SI alone cannot advance media"
+			);
+		}
+		for millis in [1_500, 2_500, 2_999] {
+			assert_eq!(rig.media(millis, 0x0014).await, 0, "future revision at {millis}");
+		}
+		for (millis, value) in [(3_000, 1), (4_000, 2)] {
+			let mut frames = rig.media_frames(millis).await;
+			// A 1ms media step need not close a 25ms PCR slice. Collect that slice
+			// independently of which read returns it. SI rides the media PES, whose
+			// delivery precedes its decode time.
+			frames.extend(rig.media_frames(millis + 40).await);
+			assert_eq!(count_pid(&frames, 0x0014), 1, "revision at {millis}");
+			assert!(
+				frames
+					.iter()
+					.any(|frame| frame.payload.windows(section(value).len()).any(|w| w == section(value)))
+			);
+		}
+		assert_eq!(rig.media(5_000, 0x0014).await, 0, "unchanged clocks never repeat");
+		// End of stream cannot move a future clock value ahead of its media position,
+		// or repeat the value already emitted at 4s.
+		rig.si_track
+			.write_frame(Timestamp::from_millis(6_500).unwrap(), Bytes::from(section(3)))
+			.unwrap();
+		rig.producer.finish().unwrap();
+		rig.si_track.finish().unwrap();
+		rig.catalog.finish().unwrap();
+		assert_eq!(count_pid(&drain_frames(&mut rig.exporter).await, 0x0014), 0);
+	}
+}
+
+/// A whole burst arrives without polling between writes. The contract: every clock revision
+/// that stays within the export's delay and the publisher's max age reaches its stamped slot,
+/// and a superseded revision outside either bound may be skipped. With a budget longer than
+/// the burst, both subscriptions keep later revisions while holding the first. Controls below
+/// the burst's span pin which superseded revisions each bound skips today: neither an
+/// unlimited publisher nor a generous reader overrides the other, and the newest always lands.
+#[tokio::test(start_paused = true)]
+async fn queued_clock_revisions_follow_the_exporters_freshness_budgets() {
+	for table_id in [0x70, 0x73] {
+		for (max_age, delay, omitted) in [
+			(None, Duration::ZERO, 2),
+			(None, Duration::from_millis(500), 1),
+			(None, Duration::from_secs(6), 0),
+			(Some(Duration::from_secs(6)), Duration::from_secs(6), 0),
+			(Some(Duration::from_millis(500)), Duration::from_secs(6), 1),
+		] {
+			let section = |value| make_short_section(table_id, &[value; 5]);
+			let mut rig = si_cadence_rig(
+				(0x0014, table_id),
+				Duration::from_secs(30),
+				super::si::track_info(max_age),
+			)
+			.await;
+			rig.catalog
+				.modify()
+				.unwrap()
+				.video
+				.renditions
+				.values_mut()
+				.next()
+				.unwrap()
+				.reorder = Some(0);
+			rig.exporter = rig.exporter.with_delay(delay).with_replay();
+			rig.si_track.write_frame(Timestamp::ZERO, section(0)).unwrap();
+			let mut joining = open_ts(
+				crate::source::announced(&rig._broadcast.consume()).await,
+				crate::catalog::CatalogFormat::Hang,
+			)
+			.await
+			.unwrap()
+			.with_delay(delay)
+			.with_replay();
+			let (mut initial, mut initial_b) = tokio::join!(rig.media_frames(0), drain_frames(&mut joining));
+			let (a, b) = tokio::join!(rig.media_frames(1_000), drain_frames(&mut joining));
+			initial.extend(a);
+			initial_b.extend(b);
+			assert_eq!(count_pid(&initial, 0x0014), 1, "the running export acquired SI");
+			assert_eq!(count_pid(&initial_b, 0x0014), 1, "the joining export acquired SI");
+
+			for (millis, value) in [(2_501, 1), (3_500, 2), (4_501, 3)] {
+				rig.si_track
+					.write_frame(Timestamp::from_millis(millis).unwrap(), section(value))
+					.unwrap();
+			}
+			let (mut a, mut b) = (Vec::new(), Vec::new());
+			for millis in (1_040..=5_520).step_by(40) {
+				let (next_a, next_b) = tokio::join!(rig.media_frames(millis), drain_frames(&mut joining));
+				a.extend(next_a);
+				b.extend(next_b);
+			}
+			for (leg, frames) in [("running", a), ("joining", b)] {
+				let emitted: Vec<_> = frames
+					.iter()
+					.flat_map(|frame| {
+						// SI leads the PES it describes. Video's send-ahead can put that PES
+						// on an earlier PCR slice, so check its media slot from the wire's PTS.
+						let pts = video_pes_timing(&frame.payload).first().map(|(pts, _)| *pts);
+						ts_sections(&frame.payload, 0x0014)
+							.into_iter()
+							.map(move |section| (pts.expect("SI must lead a media PES"), section))
+					})
+					.collect();
+				let mut expected = vec![
+					(3 * 90_000, Bytes::from(section(1))),
+					(4 * 90_000, Bytes::from(section(2))),
+					(5 * 90_000, Bytes::from(section(3))),
+				];
+				expected.drain(..omitted);
+				assert_eq!(
+					emitted, expected,
+					"{leg}, table={table_id:#x}, delay={delay:?}, max_age={max_age:?}"
+				);
+			}
+		}
+	}
+}
+
 /// A reordered (B-frame) timestamp below the emission anchor earns no credit:
 /// `si_due` saturates elapsed time, so a revision arriving there is deferred, the
 /// anchor never moves backwards, and neither revisions nor repeats can fire early
@@ -6836,7 +7040,7 @@ async fn si_clock_tables_do_not_repeat_unchanged() {
 #[tokio::test(start_paused = true)]
 async fn si_reordered_frames_earn_no_emission_credit() {
 	let section = |version: u8| make_long_section(0x42, 1, version, 0, 0, &[version; 8]);
-	let mut rig = si_cadence_rig(0x0011, 0x42, Duration::from_secs(10)).await;
+	let mut rig = si_cadence_rig((0x0011, 0x42), Duration::from_secs(10), timed()).await;
 
 	rig.si_track
 		.write_frame(Timestamp::ZERO, Bytes::from(section(0)))
@@ -6881,7 +7085,7 @@ async fn si_reordered_frames_earn_no_emission_credit() {
 async fn si_anchor_survives_a_zero_interval_reorder() {
 	let section = |version: u8| make_long_section(0x42, 1, version, 0, 0, &[version; 8]);
 	// Zero interval: the table rides every frame, whatever its timestamp.
-	let mut rig = si_cadence_rig(0x0011, 0x42, Duration::ZERO).await;
+	let mut rig = si_cadence_rig((0x0011, 0x42), Duration::ZERO, timed()).await;
 
 	rig.si_track
 		.write_frame(Timestamp::ZERO, Bytes::from(section(0)))
@@ -6928,31 +7132,39 @@ async fn si_anchor_survives_a_zero_interval_reorder() {
 /// snapshot track, so the bound has to hold here too.
 #[tokio::test(start_paused = true)]
 async fn si_rapid_revisions_are_rate_bounded() {
-	let section = |version: u8| make_long_section(0x42, 1, version, 0, 0, &[version; 8]);
-	let mut rig = si_cadence_rig(0x0011, 0x42, Duration::from_secs(30)).await;
+	for (pid, table_id) in [(0x0011, 0x42), (0x0014, 0x70), (0x0014, 0x73)] {
+		let section = |version: u8| {
+			if table_id == 0x42 {
+				make_long_section(table_id, 1, version, 0, 0, &[version; 8])
+			} else {
+				make_short_section(table_id, &[version; 5])
+			}
+		};
+		let mut rig = si_cadence_rig((pid, table_id), Duration::from_secs(30), timed()).await;
 
-	let mut emitted = 0;
-	for i in 0..13u8 {
-		rig.si_track
-			.write_frame(Timestamp::ZERO, Bytes::from(section(i)))
-			.unwrap();
-		let frames = rig.media_frames(u64::from(i) * 250).await;
-		let count = count_pid(&frames, 0x0011);
-		emitted += count;
-		if i == 4 {
-			// The 1s floor lapses here, and the emission carries the newest revision.
-			assert_eq!(count, 1, "the 1s emission");
-			let needle = section(4);
-			assert!(
-				frames
-					.iter()
-					.any(|f| f.payload.windows(needle.len()).any(|w| w == needle)),
-				"the floored emission carries the newest revision"
-			);
+		let mut emitted = 0;
+		for i in 0..13u8 {
+			rig.si_track
+				.write_frame(Timestamp::ZERO, Bytes::from(section(i)))
+				.unwrap();
+			let frames = rig.media_frames(u64::from(i) * 250).await;
+			let count = count_pid(&frames, pid);
+			emitted += count;
+			if i == 4 {
+				// The 1s floor lapses here, and the emission carries the newest revision.
+				assert_eq!(count, 1, "the 1s emission");
+				let needle = section(4);
+				assert!(
+					frames
+						.iter()
+						.any(|f| f.payload.windows(needle.len()).any(|w| w == needle)),
+					"the floored emission carries the newest revision"
+				);
+			}
 		}
+		emitted += rig.media(3_250, pid).await;
+		assert_eq!(emitted, 4, "lead plus one per second, not one per revision");
 	}
-	emitted += rig.media(3_250, 0x0011).await;
-	assert_eq!(emitted, 4, "lead plus one per second, not one per revision");
 }
 
 /// Two captures overlapping on one broadcast (a supervisor restarting its
@@ -8762,8 +8974,8 @@ fn unflagged(frames: &[Frame]) -> Vec<u16> {
 /// gap the clock spans. Both ways a broadcast ends, a clean finish and a drop, continue alike.
 async fn same_instance_returns(finish: bool) {
 	let origin = crate::source::produce_origin();
-	let epoch = moq_net::Epoch::mint();
-	let route = || moq_net::origin::Route::default().with_epoch(epoch.clone());
+	let instance = moq_net::Instance::random();
+	let route = || moq_net::origin::Route::default().with_instance(instance.clone(), 0);
 
 	let (broadcast, mut catalog) = publish_live::<()>(&origin, route());
 	let mut track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
@@ -8786,7 +8998,7 @@ async fn same_instance_returns(finish: bool) {
 	frames.extend(rest);
 	assert_eq!(end.is_ok(), finish, "a finish ends cleanly and a drop fails: {end:?}");
 
-	// Back under the same epoch a second later, its media as far on as the wall clock, its
+	// Back under the same instance a second later, its media as far on as the wall clock, its
 	// catalog listing the track only in its second snapshot.
 	kio::clock::sleep(Duration::from_secs(1)).await;
 	let (broadcast, mut catalog) = publish_live::<()>(&origin, route());
@@ -8843,12 +9055,12 @@ async fn a_return_keeps_catalog_and_group_history() {
 	crate::clock::fake_host_wall(wall);
 	let start = kio::clock::now();
 	let origin = crate::source::produce_origin();
-	let epoch = moq_net::Epoch::mint();
-	let route = moq_net::origin::Route::default().with_epoch(epoch.clone());
+	let instance = moq_net::Instance::random();
+	let route = moq_net::origin::Route::default().with_instance(instance.clone(), 0);
 	let (broadcast, mut catalog) = publish_live::<()>(&origin, route.clone());
 	let mut track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	let mut groups = track.consume();
-	let clock = catalog.snapshot().clock;
+	let clock = catalog.snapshot().media.clock;
 	let source = crate::source::resolved(&origin, "live").await;
 	let old = source.broadcast();
 	let mut export = open_export(source)
@@ -8868,7 +9080,11 @@ async fn a_return_keeps_catalog_and_group_history() {
 	tokio::time::advance(Duration::from_secs(1)).await;
 	crate::clock::fake_host_wall(wall + start.elapsed());
 	broadcast.announce(route).unwrap();
-	assert_eq!(catalog.snapshot().clock, clock, "a return must keep the catalog clock");
+	assert_eq!(
+		catalog.snapshot().media.clock,
+		clock,
+		"a return must keep the catalog clock"
+	);
 	let back = origin
 		.consume()
 		.follow("live", None)
@@ -8876,7 +9092,7 @@ async fn a_return_keeps_catalog_and_group_history() {
 		.available()
 		.await
 		.unwrap();
-	assert_eq!(back.info().epoch.as_ref(), Some(&epoch));
+	assert_eq!(back.info().instance.as_ref(), Some(&instance));
 	assert!(!back.is_clone(&old), "the withdrawn front is replaced");
 	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 	let mut export = export.follow(back, stream).unwrap();
@@ -8906,7 +9122,7 @@ async fn a_return_keeps_catalog_and_group_history() {
 #[tokio::test(start_paused = true)]
 async fn a_switch_carries_through_an_instance_that_never_built_its_tables() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 
 	let (old, mut old_catalog) = publish_live::<()>(&origin, route());
 	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
@@ -8964,7 +9180,7 @@ async fn a_switch_carries_through_an_instance_that_never_built_its_tables() {
 #[tokio::test(start_paused = true)]
 async fn another_instance_is_a_full_program_switch() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 
 	let (old, mut old_catalog) = publish_live::<()>(&origin, route());
 	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
@@ -9068,7 +9284,7 @@ async fn another_instance_is_a_full_program_switch() {
 #[tokio::test(start_paused = true)]
 async fn a_switch_moving_the_pmt_advances_the_pat() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 	let publish = |pmt_pid: u16| {
 		let (broadcast, mut catalog) = publish_live::<tscat::Ext>(&origin, route());
 		let track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
@@ -9122,8 +9338,8 @@ async fn a_switch_moving_the_pmt_advances_the_pat() {
 #[tokio::test(start_paused = true)]
 async fn export_stats_count_only_returned_output() {
 	let origin = crate::source::produce_origin();
-	let epoch = moq_net::Epoch::mint();
-	let route = || moq_net::origin::Route::default().with_epoch(epoch.clone());
+	let instance = moq_net::Instance::random();
+	let route = || moq_net::origin::Route::default().with_instance(instance.clone(), 0);
 	let units = |stats: stats::Export| stats.streams.values().map(|row| row.units).sum::<u64>() as usize;
 
 	let (broadcast, mut catalog) = publish_live::<()>(&origin, route());
@@ -9479,12 +9695,12 @@ async fn large_pmt(streams: u16, mux_rate: Option<u64>) -> usize {
 /// Publish a catalog-only broadcast at `live`, for a test of what follows its end.
 fn publish_bare(
 	origin: &moq_net::origin::Producer,
-	epoch: Option<&moq_net::Epoch>,
+	instance: Option<&moq_net::Instance>,
 ) -> (moq_net::origin::Publication, crate::catalog::Producer<()>) {
 	let route = moq_net::origin::Route::default();
 	publish_live::<()>(
 		origin,
-		epoch.map_or(route.clone(), |epoch| route.with_epoch(epoch.clone())),
+		instance.map_or(route.clone(), |instance| route.with_instance(instance.clone(), 0)),
 	)
 }
 
@@ -9511,7 +9727,7 @@ async fn a_follower_fails_at_once_on_its_own_failure() {
 	];
 	for cause in causes {
 		let origin = crate::source::produce_origin();
-		let (broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+		let (broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Instance::random()));
 		let track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 		let mut follower = follower(&origin).await.with_follow(Duration::from_secs(10));
 		assert!(
@@ -9546,7 +9762,7 @@ async fn a_follower_waits_out_the_follow_on_a_lost_route() {
 	];
 	for cause in causes {
 		let origin = crate::source::produce_origin();
-		let (broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+		let (broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Instance::random()));
 		let track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 		let follow = Duration::from_secs(10);
 		let mut follower = follower(&origin).await.with_follow(follow);
@@ -9574,7 +9790,7 @@ async fn a_follower_waits_out_the_follow_on_a_lost_route() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_awaits_a_replacement_catalog_past_the_follow() {
 	let origin = crate::source::produce_origin();
-	let first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let first = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	let follow = Duration::from_secs(10);
 	let mut follower = follower(&origin).await.with_follow(follow).with_stitch(true);
 	finish(first);
@@ -9589,7 +9805,7 @@ async fn a_follower_awaits_a_replacement_catalog_past_the_follow() {
 	let second = origin
 		.publish(
 			"live",
-			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
+			moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0),
 		)
 		.unwrap();
 	let unanswered = second.requests();
@@ -9611,8 +9827,8 @@ async fn a_follower_awaits_a_replacement_catalog_past_the_follow() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_awaits_a_return_catalog_until_it_fails() {
 	let origin = crate::source::produce_origin();
-	let epoch = moq_net::Epoch::mint();
-	let first = publish_bare(&origin, Some(&epoch));
+	let instance = moq_net::Instance::random();
+	let first = publish_bare(&origin, Some(&instance));
 	let follow = Duration::from_secs(10);
 	let mut follower = follower(&origin).await.with_follow(follow);
 	finish(first);
@@ -9624,7 +9840,7 @@ async fn a_follower_awaits_a_return_catalog_until_it_fails() {
 	);
 
 	let second = origin
-		.publish("live", moq_net::origin::Route::default().with_epoch(epoch))
+		.publish("live", moq_net::origin::Route::default().with_instance(instance, 0))
 		.unwrap();
 	let silent = second.create_track(hang::Catalog::DEFAULT_NAME, None).unwrap();
 	assert!(
@@ -9645,8 +9861,8 @@ async fn a_follower_awaits_a_return_catalog_until_it_fails() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_keeps_following_when_a_return_goes_before_it_resolves() {
 	let origin = crate::source::produce_origin();
-	let epoch = moq_net::Epoch::mint();
-	let first = publish_bare(&origin, Some(&epoch));
+	let instance = moq_net::Instance::random();
+	let first = publish_bare(&origin, Some(&instance));
 	let follow = Duration::from_secs(10);
 	let mut follower = follower(&origin).await.with_follow(follow);
 	let start = kio::clock::now();
@@ -9660,7 +9876,7 @@ async fn a_follower_keeps_following_when_a_return_goes_before_it_resolves() {
 
 	// Back, but its catalog request is never answered before it goes again.
 	let second = origin
-		.publish("live", moq_net::origin::Route::default().with_epoch(epoch))
+		.publish("live", moq_net::origin::Route::default().with_instance(instance, 0))
 		.unwrap();
 	let unanswered = second.requests();
 	assert!(
@@ -9678,11 +9894,14 @@ async fn a_follower_keeps_following_when_a_return_goes_before_it_resolves() {
 	assert_eq!(start.elapsed(), follow);
 }
 
-/// Announce `epoch` at `live`, refusing every track request with `NotFound` until the
+/// Announce `instance` at `live`, refusing every track request with `NotFound` until the
 /// returned task is aborted, which ends the broadcast.
-fn publish_refusing(origin: &moq_net::origin::Producer, epoch: &moq_net::Epoch) -> tokio::task::JoinHandle<()> {
+fn publish_refusing(origin: &moq_net::origin::Producer, instance: &moq_net::Instance) -> tokio::task::JoinHandle<()> {
 	let broadcast = origin
-		.publish("live", moq_net::origin::Route::default().with_epoch(epoch.clone()))
+		.publish(
+			"live",
+			moq_net::origin::Route::default().with_instance(instance.clone(), 0),
+		)
 		.unwrap();
 	let mut dynamic = broadcast.requests();
 	tokio::spawn(async move {
@@ -9698,7 +9917,7 @@ fn publish_refusing(origin: &moq_net::origin::Producer, epoch: &moq_net::Epoch) 
 #[tokio::test(start_paused = true)]
 async fn a_follower_keeps_following_through_a_refused_return() {
 	let origin = crate::source::produce_origin();
-	let first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let first = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	let follow = Duration::from_secs(10);
 	let mut follower = follower(&origin).await.with_follow(follow).with_stitch(true);
 	let start = kio::clock::now();
@@ -9711,7 +9930,7 @@ async fn a_follower_keeps_following_through_a_refused_return() {
 	);
 
 	// Replaced, but the replacement refuses its catalog request.
-	let refusing = publish_refusing(&origin, &moq_net::Epoch::mint());
+	let refusing = publish_refusing(&origin, &moq_net::Instance::random());
 	assert!(
 		kio::clock::timeout(Duration::from_secs(2), follower.next())
 			.await
@@ -9720,7 +9939,7 @@ async fn a_follower_keeps_following_through_a_refused_return() {
 	);
 	refusing.abort();
 
-	let mut second = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let mut second = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	std::ops::DerefMut::deref_mut(&mut second.1.modify().unwrap());
 	assert!(
 		kio::clock::timeout(Duration::from_secs(1), follower.next())
@@ -9740,8 +9959,8 @@ async fn a_follower_keeps_following_through_a_refused_return() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_reports_a_refused_return_at_the_follow() {
 	let origin = crate::source::produce_origin();
-	let epoch = moq_net::Epoch::mint();
-	let first = publish_bare(&origin, Some(&epoch));
+	let instance = moq_net::Instance::random();
+	let first = publish_bare(&origin, Some(&instance));
 	let follow = Duration::from_secs(10);
 	let mut follower = follower(&origin).await.with_follow(follow);
 	let start = kio::clock::now();
@@ -9753,7 +9972,7 @@ async fn a_follower_reports_a_refused_return_at_the_follow() {
 			.is_err(),
 		"following"
 	);
-	let _refusing = publish_refusing(&origin, &epoch);
+	let _refusing = publish_refusing(&origin, &instance);
 	let end = kio::clock::timeout(follow * 3, follower.next())
 		.await
 		.expect("the follow bounds the wait");
@@ -9769,8 +9988,8 @@ async fn a_follower_reports_a_refused_return_at_the_follow() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_stitches_onto_the_next_replacement_when_one_goes_before_it_resolves() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
-	let first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
+	let first = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	let mut follower = follower(&origin)
 		.await
 		.with_stitch(true)
@@ -9786,7 +10005,7 @@ async fn a_follower_stitches_onto_the_next_replacement_when_one_goes_before_it_r
 		"resolving the replacement"
 	);
 	drop((second, unanswered));
-	let mut third = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let mut third = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	std::ops::DerefMut::deref_mut(&mut third.1.modify().unwrap());
 	assert!(
 		kio::clock::timeout(Duration::from_secs(1), follower.next())
@@ -9811,8 +10030,8 @@ async fn a_follower_stitches_onto_the_next_replacement_when_one_goes_before_it_r
 #[tokio::test(start_paused = true)]
 async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 	let origin = crate::source::produce_origin();
-	let epoch = moq_net::Epoch::mint();
-	let first = publish_bare(&origin, Some(&epoch));
+	let instance = moq_net::Instance::random();
+	let first = publish_bare(&origin, Some(&instance));
 	let follow = Duration::from_secs(10);
 	let mut follower = follower(&origin).await.with_follow(follow).with_stitch(true);
 	let start = kio::clock::now();
@@ -9825,7 +10044,7 @@ async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 	);
 
 	// Back, with a catalog yet to deliver its first snapshot.
-	let second = publish_bare(&origin, Some(&epoch));
+	let second = publish_bare(&origin, Some(&instance));
 	assert!(
 		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
@@ -9837,7 +10056,7 @@ async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 	let third = origin
 		.publish(
 			"live",
-			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
+			moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0),
 		)
 		.unwrap();
 	let unanswered = third.requests();
@@ -9860,8 +10079,8 @@ async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 #[tokio::test(start_paused = true)]
 async fn a_return_after_an_abandoned_switch_restores_priority() {
 	let origin = crate::source::produce_origin();
-	let epoch = moq_net::Epoch::mint();
-	let (old, mut old_catalog) = publish_bare(&origin, Some(&epoch));
+	let instance = moq_net::Instance::random();
+	let (old, mut old_catalog) = publish_bare(&origin, Some(&instance));
 	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
 	write_aac(&mut old_audio, 0);
 	let export = open_export(crate::source::resolved(&origin, "live").await)
@@ -9883,7 +10102,7 @@ async fn a_return_after_an_abandoned_switch_restores_priority() {
 	let replacement = origin
 		.publish(
 			"live",
-			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
+			moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0),
 		)
 		.unwrap();
 	let unanswered = replacement.requests();
@@ -9895,12 +10114,12 @@ async fn a_return_after_an_abandoned_switch_restores_priority() {
 	);
 
 	// The old program ends mid-switch. The replacement goes without serving its catalog,
-	// allowing the older epoch to serve again.
+	// allowing the older instance to serve again.
 	old_audio.finish().unwrap();
 	finish((old, old_catalog));
 	pump(&mut follower).await;
 	drop((replacement, unanswered));
-	let (back, mut back_catalog) = publish_bare(&origin, Some(&epoch));
+	let (back, mut back_catalog) = publish_bare(&origin, Some(&instance));
 	let mut back_audio = aac_rendition(&mut back.broadcast().clone(), &mut back_catalog, "a.aac");
 	write_aac(&mut back_audio, 1000);
 	pump(&mut follower).await;
@@ -9924,8 +10143,8 @@ async fn a_return_after_an_abandoned_switch_restores_priority() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_follows_a_return_after_a_lost_route() {
 	let origin = crate::source::produce_origin();
-	let epoch = moq_net::Epoch::mint();
-	let (broadcast, mut catalog) = publish_bare(&origin, Some(&epoch));
+	let instance = moq_net::Instance::random();
+	let (broadcast, mut catalog) = publish_bare(&origin, Some(&instance));
 	let track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	let mut follower = follower(&origin).await.with_follow(Duration::from_secs(10));
 	assert!(
@@ -9938,7 +10157,7 @@ async fn a_follower_follows_a_return_after_a_lost_route() {
 	track.abort(moq_net::Error::Unroutable);
 	catalog.abort(moq_net::Error::Unroutable);
 	drop(broadcast);
-	let (broadcast, mut catalog) = publish_bare(&origin, Some(&epoch));
+	let (broadcast, mut catalog) = publish_bare(&origin, Some(&instance));
 	let mut track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	assert!(
 		kio::clock::timeout(Duration::from_secs(3), follower.next())
@@ -9959,13 +10178,13 @@ async fn a_follower_follows_a_return_after_a_lost_route() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_fails_a_stitch_onto_a_replacement_that_refuses_its_catalog() {
 	let origin = crate::source::produce_origin();
-	let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let _first = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	let mut follower = follower(&origin).await.with_stitch(true);
 
 	let _second = origin
 		.publish(
 			"live",
-			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
+			moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0),
 		)
 		.unwrap();
 	let end = kio::clock::timeout(Duration::from_secs(10), follower.next())
@@ -9979,8 +10198,8 @@ async fn a_follower_fails_a_stitch_onto_a_replacement_that_refuses_its_catalog()
 #[tokio::test(start_paused = true)]
 async fn a_follower_built_after_its_route_went_follows_the_return() {
 	let origin = crate::source::produce_origin();
-	let epoch = moq_net::Epoch::mint();
-	let first = publish_bare(&origin, Some(&epoch));
+	let instance = moq_net::Instance::random();
+	let first = publish_bare(&origin, Some(&instance));
 	let export = open_export(crate::source::resolved(&origin, "live").await)
 		.await
 		.unwrap();
@@ -9996,7 +10215,7 @@ async fn a_follower_built_after_its_route_went_follows_the_return() {
 			.is_err(),
 		"following"
 	);
-	let mut second = publish_bare(&origin, Some(&epoch));
+	let mut second = publish_bare(&origin, Some(&instance));
 	std::ops::DerefMut::deref_mut(&mut second.1.modify().unwrap());
 	assert!(
 		kio::clock::timeout(Duration::from_secs(1), follower.next())
@@ -10020,7 +10239,7 @@ async fn a_follower_takes_its_own_instance_winning_back_for_no_replacement() {
 	let origin = crate::source::produce_origin();
 	let route = |cost: u64| {
 		moq_net::origin::Route::default()
-			.with_epoch(moq_net::Epoch::mint())
+			.with_instance(moq_net::Instance::random(), 0)
 			.with_cost(cost)
 	};
 
@@ -10059,10 +10278,10 @@ async fn a_follower_takes_its_own_instance_winning_back_for_no_replacement() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_fails_on_a_replacement_without_stitch() {
 	let origin = crate::source::produce_origin();
-	let first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let first = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	let mut follower = follower(&origin).await.with_follow(Duration::from_secs(10));
 	finish(first);
-	let _second = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let _second = publish_bare(&origin, Some(&moq_net::Instance::random()));
 
 	let start = kio::clock::now();
 	let err = follower.next().await.expect_err("a replacement fails the follower");
@@ -10070,19 +10289,16 @@ async fn a_follower_fails_on_a_replacement_without_stitch() {
 	assert!(start.elapsed() < Duration::from_secs(1), "no wait for a return");
 }
 
-/// An epochless route has no instance to match, so even its own return is a replacement.
+/// An unnamed route has no instance to match, so even its own return is a replacement.
 #[tokio::test(start_paused = true)]
-async fn a_follower_takes_an_epochless_return_as_a_replacement() {
+async fn a_follower_takes_an_unnamed_return_as_a_replacement() {
 	let origin = crate::source::produce_origin();
 	let first = publish_bare(&origin, None);
 	let mut follower = follower(&origin).await.with_follow(Duration::from_secs(10));
 	finish(first);
 	let _second = publish_bare(&origin, None);
 
-	let err = follower
-		.next()
-		.await
-		.expect_err("an epochless return fails the follower");
+	let err = follower.next().await.expect_err("an unnamed return fails the follower");
 	assert!(matches!(err, crate::Error::Replaced(_)), "{err}");
 }
 
@@ -10091,8 +10307,8 @@ async fn a_follower_takes_an_epochless_return_as_a_replacement() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_continues_on_the_same_instance_returning() {
 	let origin = crate::source::produce_origin();
-	let epoch = moq_net::Epoch::mint();
-	let first = publish_bare(&origin, Some(&epoch));
+	let instance = moq_net::Instance::random();
+	let first = publish_bare(&origin, Some(&instance));
 	let follow = Duration::from_secs(10);
 	let mut follower = follower(&origin).await.with_follow(follow);
 	let start = kio::clock::now();
@@ -10104,7 +10320,7 @@ async fn a_follower_continues_on_the_same_instance_returning() {
 		"following"
 	);
 
-	let mut second = publish_bare(&origin, Some(&epoch));
+	let mut second = publish_bare(&origin, Some(&instance));
 	std::ops::DerefMut::deref_mut(&mut second.1.modify().unwrap());
 	assert!(
 		kio::clock::timeout(Duration::from_secs(1), follower.next())
@@ -10132,15 +10348,15 @@ async fn drain_follower(follower: &mut super::Follower) -> (Vec<Frame>, Option<c
 	}
 }
 
-/// The route going and another of the same epoch taking over after a gap that ended the
+/// The route going and another of the same instance taking over after a gap that ended the
 /// export's request, with the follower unpolled across it, is its own instance returning: the
 /// export carries on through the new route under the program already announced, with no break
 /// flagged.
 #[tokio::test(start_paused = true)]
-async fn a_follower_continues_through_a_same_epoch_handoff_after_a_gap() {
+async fn a_follower_continues_through_a_same_instance_handoff_after_a_gap() {
 	let origin = crate::source::produce_origin();
-	let epoch = moq_net::Epoch::mint();
-	let route = moq_net::origin::Route::default().with_epoch(epoch.clone());
+	let instance = moq_net::Instance::random();
+	let route = moq_net::origin::Route::default().with_instance(instance.clone(), 0);
 	let exact = origin.publish("pool/job", route.clone()).unwrap();
 	let mut catalog = crate::catalog::Producer::<()>::new(&mut exact.broadcast().clone(), Default::default()).unwrap();
 	let mut track = aac_rendition(&mut exact.broadcast().clone(), &mut catalog, "a.aac");
@@ -10202,8 +10418,8 @@ async fn a_follower_continues_through_a_same_epoch_handoff_after_a_gap() {
 #[tokio::test(start_paused = true)]
 async fn a_follower_ignores_a_covering_prefix_while_the_exact_route_serves() {
 	let origin = crate::source::produce_origin();
-	let route = |epoch| moq_net::origin::Route::default().with_epoch(epoch);
-	let exact = origin.publish("pool/job", route(moq_net::Epoch::mint())).unwrap();
+	let route = |instance| moq_net::origin::Route::default().with_instance(instance, 0);
+	let exact = origin.publish("pool/job", route(moq_net::Instance::random())).unwrap();
 	let catalog = crate::catalog::Producer::<()>::new(&mut exact.broadcast().clone(), Default::default()).unwrap();
 	let source = crate::source::resolved(&origin, "pool/job").await;
 	let mut follower = super::Follower::new(open_export(source).await.unwrap()).unwrap();
@@ -10228,10 +10444,10 @@ async fn a_follower_ignores_a_covering_prefix_while_the_exact_route_serves() {
 async fn a_midstream_stitch_awaits_the_replacement_catalog() {
 	for follow in [Duration::ZERO, Duration::from_secs(10)] {
 		let origin = crate::source::produce_origin();
-		let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+		let _first = publish_bare(&origin, Some(&moq_net::Instance::random()));
 		let mut follower = follower(&origin).await.with_stitch(true).with_follow(follow);
-		let epoch = moq_net::Epoch::mint();
-		let (_second, mut catalog) = publish_bare(&origin, Some(&epoch));
+		let instance = moq_net::Instance::random();
+		let (_second, mut catalog) = publish_bare(&origin, Some(&instance));
 		assert!(
 			kio::clock::timeout(Duration::from_secs(60), follower.next())
 				.await
@@ -10251,7 +10467,7 @@ async fn a_midstream_stitch_awaits_the_replacement_catalog() {
 			follower.export().cataloged(),
 			"the late snapshot switches, follow={follow:?}"
 		);
-		assert_eq!(follower.export().instance(), Some(&epoch));
+		assert_eq!(follower.export().instance(), Some(&instance));
 	}
 }
 
@@ -10263,7 +10479,7 @@ async fn a_cancelled_replacement_after_the_follow_can_follow_again() {
 
 	for format in [CatalogFormat::Hang, CatalogFormat::Msf] {
 		let origin = crate::source::produce_origin();
-		let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+		let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 		let first = origin.publish("live", route()).unwrap();
 		let (name, snapshot) = match format {
 			CatalogFormat::Hang => (
@@ -10333,15 +10549,15 @@ async fn a_cancelled_replacement_after_the_follow_can_follow_again() {
 			"following after the replacement left"
 		);
 
-		let epoch = moq_net::Epoch::mint();
-		let (_third, mut catalog) = publish_bare(&origin, Some(&epoch));
+		let instance = moq_net::Instance::random();
+		let (_third, mut catalog) = publish_bare(&origin, Some(&instance));
 		std::ops::DerefMut::deref_mut(&mut catalog.modify().unwrap());
 		catalog.finish().unwrap();
 		let end = kio::clock::timeout(follow * 2, follower.next())
 			.await
 			.expect("the final instance ends the export");
 		assert!(matches!(end, Ok(None)), "{format:?}: {end:?}");
-		assert_eq!(follower.export().instance(), Some(&epoch));
+		assert_eq!(follower.export().instance(), Some(&instance));
 		assert_eq!(follower.export().catalog_format(), format);
 	}
 }
@@ -10351,7 +10567,7 @@ async fn a_cancelled_replacement_after_the_follow_can_follow_again() {
 #[tokio::test(start_paused = true)]
 async fn a_midstream_stitch_keeps_the_old_instance_playing_until_it_switches() {
 	let origin = crate::source::produce_origin();
-	let (broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let (broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	let mut track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	let export = open_export(crate::source::resolved(&origin, "live").await)
 		.await
@@ -10363,7 +10579,7 @@ async fn a_midstream_stitch_keeps_the_old_instance_playing_until_it_switches() {
 	let second = origin
 		.publish(
 			"live",
-			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
+			moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0),
 		)
 		.unwrap();
 	let _unanswered = second.requests();
@@ -10380,15 +10596,15 @@ async fn a_midstream_stitch_keeps_the_old_instance_playing_until_it_switches() {
 #[tokio::test(start_paused = true)]
 async fn a_nested_stitch_keeps_awaiting_the_pending_replacement() {
 	let origin = crate::source::produce_origin();
-	let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let _first = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	let mut follower = follower(&origin)
 		.await
 		.with_stitch(true)
 		.with_follow(Duration::from_secs(10));
 
 	// Switched onto a replacement whose catalog has no snapshot yet.
-	let epoch = moq_net::Epoch::mint();
-	let (_second, mut catalog) = publish_bare(&origin, Some(&epoch));
+	let instance = moq_net::Instance::random();
+	let (_second, mut catalog) = publish_bare(&origin, Some(&instance));
 	assert!(
 		kio::clock::timeout(Duration::from_secs(2), follower.next())
 			.await
@@ -10400,7 +10616,7 @@ async fn a_nested_stitch_keeps_awaiting_the_pending_replacement() {
 	let third = origin
 		.publish(
 			"live",
-			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
+			moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0),
 		)
 		.unwrap();
 	let unanswered = third.requests();
@@ -10429,7 +10645,7 @@ async fn a_nested_stitch_keeps_awaiting_the_pending_replacement() {
 		follower.export().cataloged(),
 		"the second replacement served its catalog"
 	);
-	assert_eq!(follower.export().instance(), Some(&epoch));
+	assert_eq!(follower.export().instance(), Some(&instance));
 }
 
 /// A replacement whose catalog closes before its first snapshot fails the stitch, rather than
@@ -10437,13 +10653,13 @@ async fn a_nested_stitch_keeps_awaiting_the_pending_replacement() {
 #[tokio::test(start_paused = true)]
 async fn a_midstream_stitch_catalog_closed_without_a_snapshot_fails() {
 	let origin = crate::source::produce_origin();
-	let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let _first = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	let mut follower = follower(&origin)
 		.await
 		.with_stitch(true)
 		.with_follow(Duration::from_secs(10));
 
-	let (_second, mut catalog) = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let (_second, mut catalog) = publish_bare(&origin, Some(&moq_net::Instance::random()));
 	assert!(
 		kio::clock::timeout(Duration::from_secs(1), follower.next())
 			.await
@@ -10467,7 +10683,7 @@ fn audio_pts(frames: &[Frame]) -> Vec<u64> {
 }
 
 /// A rendition the catalog lists only after another instance took the path reads the instance
-/// the export resolved, never the replacement, even on an epochless route.
+/// the export resolved, never the replacement, even on an unnamed route.
 #[tokio::test(start_paused = true)]
 async fn a_late_rendition_never_reads_a_replacement() {
 	let origin = crate::source::produce_origin();
@@ -10499,7 +10715,7 @@ async fn a_late_rendition_never_reads_a_replacement() {
 }
 
 /// An SI entry repointed after another instance took the path reads the instance the export
-/// resolved, never the replacement, even on an epochless route.
+/// resolved, never the replacement, even on an unnamed route.
 #[tokio::test(start_paused = true)]
 async fn a_repointed_si_entry_never_reads_a_replacement() {
 	let sdt_a = make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8]);
@@ -11259,8 +11475,8 @@ async fn placed_sections_keep_their_source_positions() {
 #[tokio::test(start_paused = true)]
 async fn a_track_renamed_on_its_pid_across_returns_retires_the_one_before() {
 	let origin = crate::source::produce_origin();
-	let epoch = moq_net::Epoch::mint();
-	let route = || moq_net::origin::Route::default().with_epoch(epoch.clone());
+	let instance = moq_net::Instance::random();
+	let route = || moq_net::origin::Route::default().with_instance(instance.clone(), 0);
 	let rendition = |broadcast: &mut moq_net::broadcast::Producer,
 	                 catalog: &mut crate::catalog::Producer<tscat::Ext>,
 	                 name: &str| {
@@ -11325,8 +11541,8 @@ async fn a_track_renamed_on_its_pid_across_returns_retires_the_one_before() {
 #[tokio::test(start_paused = true)]
 async fn a_track_renamed_on_its_pid_across_a_return_is_quiet_from_its_listing() {
 	let origin = crate::source::produce_origin();
-	let epoch = moq_net::Epoch::mint();
-	let route = || moq_net::origin::Route::default().with_epoch(epoch.clone());
+	let instance = moq_net::Instance::random();
+	let route = || moq_net::origin::Route::default().with_instance(instance.clone(), 0);
 	let rendition = |broadcast: &mut moq_net::broadcast::Producer,
 	                 catalog: &mut crate::catalog::Producer<tscat::Ext>,
 	                 name: &str| {
@@ -11397,7 +11613,7 @@ async fn a_track_renamed_on_its_pid_across_a_return_is_quiet_from_its_listing() 
 #[tokio::test(start_paused = true)]
 async fn a_switch_follows_the_last_pmt_out() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 
 	let (old, mut old_catalog) = publish_live::<tscat::Ext>(&origin, route());
 	let mut audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
@@ -11445,7 +11661,7 @@ async fn a_switch_follows_the_last_pmt_out() {
 #[tokio::test(start_paused = true)]
 async fn a_switch_follows_the_last_pat_out() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 
 	let (old, mut old_catalog) = publish_live::<tscat::Ext>(&origin, route());
 	let mut audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
@@ -11494,7 +11710,7 @@ async fn a_switch_follows_the_last_pat_out() {
 #[tokio::test(start_paused = true)]
 async fn a_switch_past_an_instance_that_laid_no_tables_follows_the_last_pmt_out() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 	let follow = async |export: Export<_>| {
 		let replacement = origin.consume().request("live", None).await.unwrap();
 		let stream = crate::catalog::Consumer::new(&replacement, Default::default())
@@ -11549,7 +11765,7 @@ async fn a_switch_past_an_instance_that_laid_no_tables_follows_the_last_pmt_out(
 #[tokio::test(start_paused = true)]
 async fn a_stitched_switch_keeps_the_healthy_legs_held_frames() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 	let (old, mut old_catalog) = publish_live::<()>(&origin, route());
 	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
 	let mut export = open_export(crate::source::resolved(&origin, "live").await)
@@ -11576,7 +11792,7 @@ async fn a_stitched_switch_keeps_the_healthy_legs_held_frames() {
 	let export = export.follow(replacement, stream).unwrap();
 	assert!(
 		export.buffered() >= held,
-		"a new epoch discarded the healthy old leg before the replacement clock acquired: before={held}, after={}",
+		"a new instance discarded the healthy old leg before the replacement clock acquired: before={held}, after={}",
 		export.buffered()
 	);
 }
@@ -11587,7 +11803,7 @@ async fn a_stitched_switch_keeps_the_healthy_legs_held_frames() {
 async fn a_healthy_stitch_feeds_the_old_generation_until_the_new_clock_acquires() {
 	use std::task::Poll;
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 	let (old, mut old_catalog) = publish_live::<()>(&origin, route());
 	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
 	let export = open_export(crate::source::resolved(&origin, "live").await)
@@ -11649,7 +11865,7 @@ async fn a_healthy_stitch_feeds_the_old_generation_until_the_new_clock_acquires(
 	let next: Vec<_> = frames[switch..].iter().map(|(_, _, frame)| frame.clone()).collect();
 	assert!(
 		audio_pts(&next).iter().all(|pts| *pts >= 160_000 * 90),
-		"epochs have independent timestamps"
+		"each instance has its own timestamps"
 	);
 	assert_eq!(unflagged(&next), Vec::<u16>::new());
 	assert_eq!(follower.export().discontinuity(), 1);
@@ -11662,8 +11878,8 @@ async fn a_healthy_stitch_feeds_the_old_generation_until_the_new_clock_acquires(
 async fn repeated_stitches_keep_the_delay() {
 	use std::task::Poll;
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
-	// Publisher `k` stamps its media `k * 100 s` on, so each epoch has its own timeline.
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
+	// Publisher `k` stamps its media `k * 100 s` on, so each one has its own timeline.
 	const SPACING: u64 = 100_000;
 	const SWITCH: u64 = 4_000;
 	let mut publishers = Vec::new();
@@ -11744,7 +11960,7 @@ async fn repeated_stitches_keep_the_delay() {
 #[tokio::test(start_paused = true)]
 async fn an_expired_follow_stops_healthy_input_but_drains_its_buffered_tail() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 	let (old, mut old_catalog) = publish_live::<()>(&origin, route());
 	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
 	let delay = Duration::from_millis(500);
@@ -11909,7 +12125,7 @@ async fn a_publisher_that_leaves_drains_its_buffered_tail_before_the_end() {
 #[tokio::test(start_paused = true)]
 async fn a_replacement_leaving_before_it_commits_keeps_the_old_program() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 	let (old, mut old_catalog) = publish_live::<()>(&origin, route());
 	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
 	let mut export = open_export(crate::source::resolved(&origin, "live").await)
@@ -11971,7 +12187,7 @@ async fn a_replacement_leaving_before_it_commits_keeps_the_old_program() {
 #[tokio::test(start_paused = true)]
 async fn a_newer_pending_instance_discards_the_unemitted_held_replacement() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 	let (a, mut a_catalog) = publish_live::<()>(&origin, route());
 	let mut a_audio = aac_rendition(&mut a.broadcast().clone(), &mut a_catalog, "a.aac");
 	let mut export = open_export(crate::source::resolved(&origin, "live").await)
@@ -12033,7 +12249,7 @@ async fn a_newer_pending_instance_discards_the_unemitted_held_replacement() {
 #[tokio::test(start_paused = true)]
 async fn an_empty_finished_replacement_drains_the_old_program() {
 	let origin = crate::source::produce_origin();
-	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let route = || moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
 	let (old, mut catalog) = publish_live::<()>(&origin, route());
 	let mut audio = aac_rendition(&mut old.broadcast().clone(), &mut catalog, "a.aac");
 	let mut export = open_export(crate::source::resolved(&origin, "live").await)
@@ -12079,11 +12295,11 @@ async fn an_empty_finished_replacement_drains_the_old_program() {
 	);
 }
 
-/// Before any PSI, no layout or failed reader should survive a same-epoch return.
-async fn cold_same_epoch_return(pending: bool) {
+/// Before any PSI, no layout or failed reader should survive a same-instance return.
+async fn cold_same_instance_return(pending: bool) {
 	let origin = crate::source::produce_origin();
-	let epoch = moq_net::Epoch::mint();
-	let route = || moq_net::origin::Route::default().with_epoch(epoch.clone());
+	let instance = moq_net::Instance::random();
+	let route = || moq_net::origin::Route::default().with_instance(instance.clone(), 0);
 	let (old, mut old_catalog) = publish_live::<()>(&origin, route());
 	let mut old_video = h264_rendition(&mut old.broadcast().clone(), &mut old_catalog, "v.avc1");
 	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
@@ -12093,7 +12309,7 @@ async fn cold_same_epoch_return(pending: bool) {
 		.with_delay(Duration::from_secs(3))
 		.with_replay();
 	let mut prefix = Vec::new();
-	let returned_epoch = if pending {
+	let returned_instance = if pending {
 		for ms in (0..400).step_by(40) {
 			write_h264(&mut old_video, ms);
 		}
@@ -12101,10 +12317,10 @@ async fn cold_same_epoch_return(pending: bool) {
 			write_aac(&mut old_audio, ms);
 		}
 		prefix.push(export.next().await.unwrap().unwrap());
-		let next_epoch = moq_net::Epoch::mint();
+		let next_instance = moq_net::Instance::random();
 		let (cold, mut catalog) = publish_live::<()>(
 			&origin,
-			moq_net::origin::Route::default().with_epoch(next_epoch.clone()),
+			moq_net::origin::Route::default().with_instance(next_instance.clone(), 0),
 		);
 		let mut video = h264_rendition(&mut cold.broadcast().clone(), &mut catalog, "v.avc1");
 		let mut audio = aac_rendition(&mut cold.broadcast().clone(), &mut catalog, "a.aac");
@@ -12126,16 +12342,19 @@ async fn cold_same_epoch_return(pending: bool) {
 			prefix.push(frame);
 		}
 		cold.unannounce();
-		next_epoch
+		next_instance
 	} else {
 		old_video.finish().unwrap();
 		old_audio.finish().unwrap();
 		old_catalog.finish().unwrap();
 		assert!(export.next().await.unwrap().is_none());
 		old.unannounce();
-		epoch
+		instance
 	};
-	let (back, mut catalog) = publish_live::<()>(&origin, moq_net::origin::Route::default().with_epoch(returned_epoch));
+	let (back, mut catalog) = publish_live::<()>(
+		&origin,
+		moq_net::origin::Route::default().with_instance(returned_instance, 0),
+	);
 	let mut video = h264_rendition(&mut back.broadcast().clone(), &mut catalog, "v.avc1");
 	let mut audio = aac_rendition(&mut back.broadcast().clone(), &mut catalog, "a.aac");
 	let target = origin
@@ -12174,11 +12393,11 @@ async fn cold_same_epoch_return(pending: bool) {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_same_epoch_return_before_psi_rebuilds_cold_readers() {
-	cold_same_epoch_return(false).await;
+async fn a_same_instance_return_before_psi_rebuilds_cold_readers() {
+	cold_same_instance_return(false).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_pending_same_epoch_return_rebuilds_cold_readers() {
-	cold_same_epoch_return(true).await;
+async fn a_pending_same_instance_return_rebuilds_cold_readers() {
+	cold_same_instance_return(true).await;
 }

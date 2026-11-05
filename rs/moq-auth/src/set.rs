@@ -149,6 +149,8 @@ mod tests {
 
 	fn create_test_claims() -> Claims {
 		Claims {
+			publish_rate: None,
+			subscribe_rate: None,
 			root: "test-path".to_string(),
 			publish: patterns(&["test-pub/**"]),
 			subscribe: patterns(&["test-sub/**"]),

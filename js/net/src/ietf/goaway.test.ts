@@ -5,7 +5,6 @@ import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
-import { wireOf } from "../wire.ts";
 import { AuthMessage, AuthOk, IetfAuthWire } from "./auth.ts";
 import { Connection } from "./connection.ts";
 import { GoAway } from "./goaway.ts";
@@ -44,7 +43,7 @@ for (const [version, alpn, requestId] of [
 			await peer.writer.u53(GoAway.id);
 			await new GoAway({ newSessionUri: "", timeout: 5000n, requestId }).encode(peer.writer, version);
 
-			const drain = await wireOf(connection).goaway;
+			const drain = await connection.draining;
 			expect(drain.uri).toBe("");
 			expect(drain.timeout).toBe(Milli(5000));
 
@@ -137,12 +136,12 @@ for (const [version, alpn] of [
 			client: true,
 		});
 		// A caller may close immediately on a redirect, so the protocol error must win.
-		void wireOf(connection).goaway.then(() => connection.abort());
+		void connection.draining.then(() => connection.abort());
 		const frame = version === Version.DRAFT_18 ? [0x10, 0, 3, 0, 0, 0] : [0x10, 0, 2, 0, 0];
 		try {
 			await peer.writer.write(new Uint8Array([...frame, ...frame]));
 			expect((await pair.server.closed).closeCode).toBe(SessionCode.ProtocolViolation);
-			expect(wireOf(connection).goaway.peek()).toBeUndefined();
+			expect(connection.draining.peek()).toBeUndefined();
 		} finally {
 			connection.abort();
 		}

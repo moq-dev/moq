@@ -34,7 +34,7 @@ function streamOf(chunks: Uint8Array[]): Reader {
 }
 
 test("every frame in a chunk reaches the reader before it wakes", async () => {
-	const producer = new Producer(0);
+	const producer = new Producer(0n);
 	const consumer = producer.consume();
 	const frames = Array.from({ length: 10 }, (_, index) => ({ delta: 1, payload: [index] }));
 	const done = readFrames(streamOf([encode(frames)]), producer, { scale: SCALE });
@@ -45,7 +45,7 @@ test("every frame in a chunk reaches the reader before it wakes", async () => {
 });
 
 test("frames split at every byte keep their payloads and timestamps", async () => {
-	const producer = new Producer(0);
+	const producer = new Producer(0n);
 	const consumer = producer.consume();
 	// Deltas wide enough for multi-byte varints, and one that steps back.
 	const frames = [
@@ -71,7 +71,7 @@ test("frames split at every byte keep their payloads and timestamps", async () =
 });
 
 test("frames without a timescale carry no timestamp prefix", async () => {
-	const producer = new Producer(0);
+	const producer = new Producer(0n);
 	const consumer = producer.consume();
 	await readFrames(streamOf([encode([{ payload: [7] }, { payload: [8, 9] }])]), producer, { scale: 0 });
 	producer.finish();
@@ -82,7 +82,7 @@ test("frames without a timescale carry no timestamp prefix", async () => {
 });
 
 test("a stream that ends inside a frame rejects", async () => {
-	const producer = new Producer(0);
+	const producer = new Producer(0n);
 	const bytes = encode([{ delta: 1, payload: [1, 2, 3] }]);
 	await expect(
 		readFrames(streamOf([bytes.subarray(0, bytes.byteLength - 1)]), producer, { scale: SCALE }),
@@ -90,7 +90,7 @@ test("a stream that ends inside a frame rejects", async () => {
 });
 
 test("stops once the group closes", async () => {
-	const producer = new Producer(0);
+	const producer = new Producer(0n);
 	// Never ends: only the close can stop the read.
 	const stream = new Reader(new ReadableStream<Uint8Array>(), undefined, VERSION);
 	const done = readFrames(stream, producer, { scale: SCALE });

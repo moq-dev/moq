@@ -161,6 +161,7 @@ type Result<T> = std::result::Result<T, Error>;
 pub(crate) async fn connect(
 	url: Url,
 	protocols: &[&str],
+	session: &qmux::Config,
 	failover_delay: std::time::Duration,
 	resolution_delay: std::time::Duration,
 ) -> Result<qmux::Session> {
@@ -169,7 +170,7 @@ pub(crate) async fn connect(
 
 	tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting via TCP");
 	let candidates = crate::resolve::Candidates::resolve(host, port, resolution_delay);
-	connect_addrs(candidates, protocols, failover_delay).await
+	connect_addrs(candidates, protocols, session, failover_delay).await
 }
 
 /// Dial a `tls://host:port` URL: qmux over TLS over TCP, negotiating one of
@@ -181,6 +182,7 @@ pub(crate) async fn connect_tls(
 	url: Url,
 	protocols: &[&str],
 	tls: &crate::tls::Connect,
+	session: &qmux::Config,
 	failover_delay: std::time::Duration,
 	resolution_delay: std::time::Duration,
 ) -> crate::Result<qmux::Session> {
@@ -195,7 +197,7 @@ pub(crate) async fn connect_tls(
 	let client = qmux::tls::Client::new(std::sync::Arc::new(tls.build()?))
 		.with_protocols(protocols.iter().map(|&alpn| (alpn, &[WIRE_VERSION][..])))
 		.require_protocol()
-		.with_session_config(crate::qmux_config());
+		.with_session_config(session.clone());
 
 	tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting via TLS over TCP");
 	let candidates = crate::resolve::Candidates::resolve(host, port, resolution_delay);
@@ -206,6 +208,7 @@ pub(crate) async fn connect_tls(
 			client
 				.connect(addr, &name)
 				.await
+				.map(crate::spawn_qmux)
 				.map_err(|err| Error::Connect(crate::error::message(err)))
 		}
 	})
@@ -217,16 +220,18 @@ pub(crate) async fn connect_tls(
 async fn connect_addrs(
 	candidates: crate::resolve::Candidates,
 	protocols: &[&str],
+	session: &qmux::Config,
 	failover_delay: std::time::Duration,
 ) -> Result<qmux::Session> {
 	crate::failover::race(candidates, failover_delay, |addr| {
 		let protocols: Vec<String> = protocols.iter().map(|&p| p.to_owned()).collect();
+		let mut config = session.clone();
 		async move {
-			let mut config = crate::qmux_config();
 			config.version = WIRE_VERSION;
 			config.protocol = qmux::Protocol::Negotiate(protocols);
 			qmux::tcp::connect(addr, config)
 				.await
+				.map(crate::spawn_qmux)
 				.map_err(|err| Error::Connect(crate::error::message(err)))
 		}
 	})
@@ -251,10 +256,11 @@ pub struct TlsAcceptor {
 impl TlsAcceptor {
 	pub(crate) fn new(
 		config: std::sync::Arc<rustls::ServerConfig>,
+		session: qmux::Config,
 		server: moq_net::Server,
 		timeout: Option<std::time::Duration>,
 	) -> Self {
-		let qmux = qmux::tls::Server::new(config.clone()).with_session_config(crate::qmux_config());
+		let qmux = qmux::tls::Server::new(config.clone()).with_session_config(session);
 		Self {
 			config,
 			qmux,
@@ -306,6 +312,7 @@ impl TlsAcceptor {
 				self.qmux
 					.accept_established(stream, stats)
 					.await
+					.map(crate::spawn_qmux)
 					.map_err(|err| Error::Accept(crate::error::message(err)))
 			};
 			let session = crate::server::within(deadline, handshake).await?;
@@ -321,6 +328,8 @@ pub struct Listener {
 	listener: tokio::net::TcpListener,
 	protocols: Vec<String>,
 	health: crate::accept::Health,
+	/// The settings each accepted qmux session starts with.
+	session: qmux::Config,
 	/// Present when the listener serves TLS; it negotiates the ALPN itself.
 	tls: Option<qmux::tls::Server>,
 }
@@ -334,6 +343,7 @@ impl Listener {
 				listener,
 				protocols: Vec::new(),
 				health: crate::accept::Health::new("tcp"),
+				session: crate::qmux_default(),
 				tls: None,
 			})
 		})
@@ -343,7 +353,16 @@ impl Listener {
 	/// Serve TLS with `config`, whose ALPN list already names each
 	/// `qmux-01.<protocol>` pair to accept.
 	pub(crate) fn with_tls(mut self, config: std::sync::Arc<rustls::ServerConfig>) -> Self {
-		self.tls = Some(qmux::tls::Server::new(config).with_session_config(crate::qmux_config()));
+		self.tls = Some(qmux::tls::Server::new(config).with_session_config(self.session.clone()));
+		self
+	}
+
+	/// Open each accepted session with `quic`'s windows and stream count, the `[quic]`
+	/// section, rather than its defaults. A session admitted with
+	/// [`crate::server::Request::with_quic_limits`] then takes those.
+	pub fn with_quic(mut self, quic: &crate::quic::Resolved) -> Self {
+		self.session = crate::qmux_config(quic);
+		self.tls = self.tls.map(|tls| tls.with_session_config(self.session.clone()));
 		self
 	}
 
@@ -400,14 +419,14 @@ impl Listener {
 	) -> impl Future<Output = Result<(qmux::Session, net::SocketAddr)>> + use<> {
 		let (stream, addr) = self.accept_socket().await;
 		tracing::debug!(%addr, "accepted TCP connection");
-		let mut config = crate::qmux_config();
+		let mut config = self.session.clone();
 		config.version = WIRE_VERSION;
 		config.protocol = qmux::Protocol::Negotiate(self.protocols.clone());
 		let tls = self.tls.clone();
 		async move {
 			let session = match tls {
-				Some(tls) => tls.accept(stream).await,
-				None => qmux::tcp::accept(stream, config).await,
+				Some(tls) => tls.accept(stream).await.map(crate::spawn_qmux),
+				None => qmux::tcp::accept(stream, config).await.map(crate::spawn_qmux),
 			}
 			.map_err(|err| Error::Accept(crate::error::message(err)))?;
 			Ok((session, addr))
@@ -451,10 +470,9 @@ mod tests {
 
 	/// A `tls://` dial carries qmux and the request target over TLS, and a client
 	/// that does not trust the certificate is refused.
-	#[cfg(feature = "aws-lc-rs")]
 	#[tokio::test]
 	async fn tls_carries_qmux_and_refuses_an_untrusted_certificate() {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		crate::crypto::install_default().unwrap();
 		let mut listen = crate::listen::Config::default();
 		listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 		listen.tcp.tls = Some(true);
@@ -466,12 +484,12 @@ mod tests {
 	/// as QUIC does: CA roots accept a chained certificate or a token-only client,
 	/// pinned peers require a pinned certificate. The request reports the chain
 	/// and the SNI.
-	#[cfg(feature = "aws-lc-rs")]
 	#[tokio::test]
 	async fn tls_verifies_a_client_certificate() {
-		use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair};
+		use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer};
+		use rind_rcgen::KeyPair;
 
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		crate::crypto::install_default().unwrap();
 		let dir = tempfile::tempdir().unwrap();
 		let write = |name: &str, contents: String| {
 			let path = dir.path().join(name);
@@ -479,13 +497,23 @@ mod tests {
 			path
 		};
 
-		let ca_key = KeyPair::generate().unwrap();
-		let mut ca_params = CertificateParams::new(Vec::new()).unwrap();
+		let ca_key = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let mut ca_params = CertificateParams::new(Vec::new())
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
+			.unwrap();
 		ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
 		let ca_cert = ca_params.self_signed(&ca_key).unwrap();
 		let issuer = Issuer::from_params(&ca_params, &ca_key);
-		let client_key = KeyPair::generate().unwrap();
-		let mut client_params = CertificateParams::new(vec!["client.example".to_string()]).unwrap();
+		let client_key = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let mut client_params = CertificateParams::new(vec!["client.example".to_string()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
+			.unwrap();
 		client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
 		let client_cert = client_params.signed_by(&client_key, &issuer).unwrap();
 		let fingerprint = crate::tls::PeerIdentity::from_chain(vec![client_cert.der().clone()])
@@ -494,7 +522,10 @@ mod tests {
 		let ca = write("ca.pem", ca_cert.pem());
 		let cert = (
 			write("client.pem", client_cert.pem()),
-			write("client.key", client_key.serialize_pem()),
+			write(
+				"client.key",
+				pem::encode(&pem::Pem::new("PRIVATE KEY", client_key.to_pkcs8().secret_pkcs8_der())),
+			),
 		);
 
 		let listen = |set: &dyn Fn(&mut crate::listen::Config)| {
@@ -544,7 +575,6 @@ mod tests {
 	/// Dial `server` over `tls://localhost`, presenting `cert` (a PEM cert and key)
 	/// if given. Returns the server with the accepted request's identity and SNI,
 	/// or `None` when the dial is refused.
-	#[cfg(feature = "aws-lc-rs")]
 	async fn mtls_dial(
 		mut server: crate::Listener,
 		cert: Option<&(std::path::PathBuf, std::path::PathBuf)>,
@@ -581,7 +611,6 @@ mod tests {
 		Some((server, identity, sni))
 	}
 
-	#[cfg(feature = "aws-lc-rs")]
 	async fn tls_round_trip(listen: crate::listen::Config) {
 		let mut server = listen.init(Default::default()).unwrap().listen().await.unwrap();
 		let port = server.tcp_local_addr().unwrap().port();
@@ -636,7 +665,12 @@ mod tests {
 		let candidates = crate::resolve::Candidates::fixed([blackhole, addr]);
 		let session = kio::clock::timeout(
 			Duration::from_secs(5),
-			connect_addrs(candidates, &["moq-test"], Duration::from_millis(50)),
+			connect_addrs(
+				candidates,
+				&["moq-test"],
+				&crate::qmux_default(),
+				Duration::from_millis(50),
+			),
 		)
 		.await
 		.expect("failover timed out")
@@ -659,7 +693,7 @@ mod tests {
 		let addr = listener.local_addr().expect("local addr");
 		let accept = tokio::spawn(async move { listener.accept().await.expect("listener gone").expect("accept") });
 		let candidates = crate::resolve::Candidates::fixed([addr]);
-		let client = connect_addrs(candidates, &["moq-test"], Duration::ZERO)
+		let client = connect_addrs(candidates, &["moq-test"], &crate::qmux_default(), Duration::ZERO)
 			.await
 			.expect("connect failed");
 		let server = accept.await.expect("accept task panicked");
@@ -682,7 +716,7 @@ mod tests {
 	#[tokio::test]
 	async fn connect_addrs_rejects_empty() {
 		let candidates = crate::resolve::Candidates::fixed([]);
-		let res = connect_addrs(candidates, &["moq-test"], Duration::ZERO).await;
+		let res = connect_addrs(candidates, &["moq-test"], &crate::qmux_default(), Duration::ZERO).await;
 		assert!(matches!(res, Err(Error::NoAddresses)));
 	}
 }

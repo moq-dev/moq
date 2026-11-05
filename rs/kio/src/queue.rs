@@ -68,8 +68,8 @@ impl<T> State<T> {
 /// Role-less like [`Shared`](crate::Shared): every clone can push, pop, or close,
 /// and there is no liveness of its own: closure is explicit via
 /// [`close`](Self::close), never implied by dropping handles. Bounded queues park
-/// pushes at capacity ([`poll_push_with`](Self::poll_push_with) /
-/// [`push`](Self::push)) or reject them ([`try_push`](Self::try_push)); pops park
+/// pushes at capacity ([`poll_push_with`](Self::poll_push_with), or `push` with the
+/// `async` feature) or reject them ([`try_push`](Self::try_push)); pops park
 /// while empty. After close, pops drain what's queued before reporting [`Closed`].
 ///
 /// An event wakes *every* waiter parked on the affected side (there is no
@@ -153,6 +153,7 @@ impl<T> Queue<T> {
 	///
 	/// Returns [`Closed`] if the queue closes first (or already was); the item is
 	/// dropped in that case; use [`try_push`](Self::try_push) to get it back.
+	#[cfg(feature = "async")]
 	pub async fn push(&self, item: T) -> Result<(), Closed> {
 		let mut item = Some(item);
 		// Capture the slot by `&mut` so the closure is `Unpin` regardless of `T`.
@@ -177,10 +178,11 @@ impl<T> Queue<T> {
 		Ok(Some(item))
 	}
 
-	/// Poll for the next item.
+	/// Pop, waiting for an item while the queue is empty.
 	///
 	/// Queued items drain before closure is reported, so [`Closed`] means empty
-	/// *and* closed. Registers `waiter` while empty; a push or close re-polls it.
+	/// *and* closed. A push or close wakes the waiter.
+	#[cfg_attr(feature = "async", kio_macros::wrapper)]
 	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_pop(&self, waiter: &Waiter) -> Poll<Result<T, Closed>> {
 		let (item, mut waiters) = {
@@ -196,13 +198,6 @@ impl<T> Queue<T> {
 		};
 		waiters.wake();
 		crate::coop::ready(Ok(item))
-	}
-
-	/// Pop, waiting for an item while the queue is empty.
-	///
-	/// Returns [`Closed`] once the queue is both closed and drained.
-	pub async fn pop(&self) -> Result<T, Closed> {
-		crate::wait(move |waiter| self.poll_pop(waiter)).await
 	}
 
 	/// Close the queue: pushes fail from here on, pops drain what's queued and then

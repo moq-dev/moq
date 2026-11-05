@@ -52,7 +52,8 @@ pub const TARGETS: &[(&str, Target)] = &[
 
 /// A cid length byte, a grease byte, and a datagram: the unprotected packet header.
 ///
-/// A decoded packet and the coalesced remainder together account for every input byte.
+/// The decoded packet is the bytes just before the coalesced remainder, and any bytes before
+/// it start with a 0-RTT packet, which the decode skips.
 pub fn packet(data: &[u8]) -> bool {
 	let [cid_len, grease, packet @ ..] = data else {
 		return false;
@@ -68,8 +69,14 @@ pub fn packet(data: &[u8]) -> bool {
 		return false;
 	};
 
-	let rest = rest.map_or(0, |rest| rest.len());
-	assert_eq!(len, decoded.len() + rest, "the decode lost bytes");
+	let end = len - rest.map_or(0, |rest| rest.len());
+	let skipped = end.checked_sub(decoded.len()).expect("the decode invented bytes");
+	assert_eq!(decoded.data(), &packet[skipped..end], "the decode moved bytes");
+	// A long header (0x80) with the 0-RTT type (0x10 of the type bits 0x30)
+	assert!(
+		skipped == 0 || packet[0] & 0xb0 == 0x90,
+		"the decode skipped a packet that is not 0-RTT"
+	);
 	true
 }
 

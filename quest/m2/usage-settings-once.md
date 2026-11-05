@@ -11,17 +11,19 @@ CLI behavior and wire are unchanged.
 
 ## Plan
 
-Waits on two outside conditions, in order:
-
-1. The maintainer approves posting the proposal on jdx/usage. Decided
-   2026-10-27 (maintainer interview): ask before posting; no approval yet.
-2. Upstream ships it. Check the issue and usage-rs releases.
+Filed 2026-11-02 (maintainer-approved, /quest-unblock), building on the
+one-source-of-truth goal of jdx/usage#896, #1180 and #1202.
 
 Today `usage::Cli` and `usage::Config` reject each other's attributes, and
 `Registry::drift` tests the two declarations agree. The Cli side already names
 `env` and `setting` per field; the registry side adds the type and `parse`.
 Propose inferring those from the field so one declaration serves both. If
 upstream declines, delete this quest and keep the drift test.
+
+Shipped 2026-11-03 (checked 2026-11-04, /quest-unblock): usage-lib
+[7.2.0](https://github.com/jdx/usage/releases/tag/v7.2.0) lets derive flags
+declare their own settings ([jdx/usage#1610](https://github.com/jdx/usage/pull/1610),
+closing jdx/usage#1608).
 
 ## Related
 

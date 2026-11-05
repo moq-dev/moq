@@ -66,7 +66,7 @@ async fn spawn_peer() -> (u16, tokio::runtime::Runtime) {
 			.expect("peer listen");
 		let _ = bound.send(listener.local_addr().expect("peer addr").port());
 
-		while let Some(request) = listener.accept().await {
+		while let Ok(request) = listener.accept().await {
 			let origin = origin.clone();
 			tokio::spawn(async move {
 				if let Ok(session) = request.with_publisher(&origin).ok().await {
@@ -90,7 +90,7 @@ fn silent_peer_detected_within_idle_timeout() {
 }
 
 async fn silent_peer_detected() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let (port, peer) = spawn_peer().await;
 
@@ -107,9 +107,7 @@ async fn silent_peer_detected() {
 	// The keep-alive derives from the idle timeout, so only the silenced peer idles out.
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.idle_timeout = Some((IDLE).into());
-	let cluster = cluster::Cluster::new(cluster::Options::new(config))
-		.expect("cluster init")
-		.with_connect(connect, quic);
+	let cluster = crate::spawn_cluster(cluster::Options::new(config)).with_connect(connect, quic);
 	let mut announced = cluster.origin.consume().announced();
 	let run = tokio::spawn(cluster.clone().start().await.expect("cluster start").run());
 

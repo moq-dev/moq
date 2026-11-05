@@ -2,6 +2,7 @@ import { Milli } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
+import { SupportProbe } from "../support-probe";
 
 /** What the viewer wants from the audio rendition. */
 export type Target = {
@@ -32,6 +33,11 @@ export type SourceInput = {
 export type SourceOutput = {
 	catalog: Signal<Catalog.Audio | undefined>;
 	available: Signal<Record<string, Catalog.AudioConfig>>;
+
+	// Why no rendition can be chosen, or undefined while healthy or still probing. A
+	// `NotSupportedError` means the browser can decode none of the catalog's renditions.
+	error: Signal<Error | undefined>;
+
 	track: Signal<string | undefined>;
 	config: Signal<Catalog.AudioConfig | undefined>;
 
@@ -47,18 +53,20 @@ export class Source {
 	/** The wired inputs, read-only. */
 	readonly in: Readonlys<SourceInput>;
 
+	#probe = new SupportProbe<Catalog.AudioConfig>("audio");
+
 	readonly #out: SourceOutput = {
 		catalog: new Signal<Catalog.Audio | undefined>(undefined),
 		available: new Signal<Record<string, Catalog.AudioConfig>>({}),
+		error: this.#probe.error,
 		track: new Signal<string | undefined>(undefined),
 		config: new Signal<Catalog.AudioConfig | undefined>(undefined),
 		jitter: new Signal<Milli | undefined>(undefined),
 	};
 	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
-	#pending = new Signal(false);
 	/** Whether rendition support is still being resolved. @internal */
-	readonly pending: Getter<boolean> = this.#pending;
+	readonly pending: Getter<boolean> = this.#probe.pending;
 
 	// The last selection, which a disable holds while no enabled rendition remains.
 	#held?: { broadcast: Broadcast; track: string };
@@ -92,46 +100,13 @@ export class Source {
 	}
 
 	#runSupported(effect: Effect): void {
+		const supported = effect.get(this.in.supported);
 		// Read the catalog from the broadcast itself, so the probe result is tagged with the right one.
 		const broadcast = effect.get(this.in.broadcast);
 		const renditions = (broadcast && effect.get(broadcast.out.catalog)?.audio?.renditions) ?? {};
-		const supported = effect.get(this.in.supported);
-		if (!supported) return;
-
-		effect.set(this.#pending, true, false);
-		effect.spawn(async () => {
-			try {
-				const available: Record<string, Catalog.AudioConfig> = {};
-
-				for (const [name, config] of Object.entries(renditions)) {
-					// `supported` comes from the consumer, so we cannot assume it ever settles. A rerun
-					// waits for the tasks it spawned, so an unraced probe would hold the next run shut.
-					let isSupported = false;
-					try {
-						isSupported = !!(await effect.race(supported(config)));
-					} catch (err) {
-						if (effect.abort.aborted) return;
-						console.warn(
-							`[Source] audio rendition ${name} (${config.codec}) support probe failed; treating as unsupported`,
-							err,
-						);
-					}
-
-					// Torn down: stop probing and publish nothing, since the rerun redoes this.
-					if (effect.abort.aborted) return;
-
-					if (isSupported) available[name] = config;
-				}
-
-				if (Object.keys(available).length === 0 && Object.keys(renditions).length > 0) {
-					console.warn("no supported audio renditions found:", renditions);
-				}
-
-				this.#probed.set(broadcast);
-				this.#out.available.set(available);
-			} finally {
-				this.#pending.set(false);
-			}
+		this.#probe.run(effect, supported, renditions, (available) => {
+			this.#probed.set(broadcast);
+			this.#out.available.set(available);
 		});
 	}
 

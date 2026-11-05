@@ -11,20 +11,21 @@
 #include <memory>
 #include <vector>
 
-template <typename T>
-T ok(moq::expected<T> result) {
-    if (!result) {
-        std::fprintf(stderr, "moq: %s\n", result.error().to_string().c_str());
-        std::abort();
-    }
-    return std::move(*result);
+template<typename T> T ok(moq::expected<T> result)
+{
+	if (!result) {
+		std::fprintf(stderr, "moq: %s\n", result.error().to_string().c_str());
+		std::abort();
+	}
+	return std::move(*result);
 }
 
-inline void ok(moq::expected<void> result) {
-    if (!result) {
-        std::fprintf(stderr, "moq: %s\n", result.error().to_string().c_str());
-        std::abort();
-    }
+inline void ok(moq::expected<void> result)
+{
+	if (!result) {
+		std::fprintf(stderr, "moq: %s\n", result.error().to_string().c_str());
+		std::abort();
+	}
 }
 
 inline std::shared_ptr<moq::Session> session;

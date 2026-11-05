@@ -14,9 +14,9 @@ const NEW: u8 = 2;
 /// What the replaced run's recording holds when the new instance takes over.
 #[derive(Clone, Copy, Debug)]
 enum Case {
-	/// A cached segment returned while the cursor's live SUBSCRIBE was still unanswered.
-	/// Without an epoch nothing says which instance answers it, so it is refused and the
-	/// recording loses the old run's last uncached GOP.
+	/// A cached segment returned while the cursor's live SUBSCRIBE was still unanswered. The
+	/// rendition's media watcher already carries every group of the old run on any wire, so the
+	/// recording completes.
 	Unanswered,
 	/// As [`Self::Unanswered`], while the replacement's own group of the same number is
 	/// still open, which the old cursor once waited on forever.
@@ -66,7 +66,7 @@ async fn takeover(version: &str, case: Case) {
 	}
 
 	// The new instance numbers its groups and segments from zero again.
-	let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let route = moq_net::origin::Route::default();
 	let mut new = Publisher::new(&pair.publisher, "live", route);
 	let deadline = kio::clock::now() + TIMEOUT;
 	let current = loop {
@@ -110,24 +110,12 @@ async fn takeover(version: &str, case: Case) {
 	}
 	drop(old);
 
-	// The old recording reads only its own segments, and either completes or fails at the GOP
-	// it lost.
+	// The old recording reads only its own segments, and completes.
 	let (read, end) = drain_old(&mut cursor).await;
-	match case {
-		Case::Answered => {
-			end.unwrap_or_else(|err| panic!("{case:?}: {err}"));
-			assert_eq!(read, [1, 2, 3], "{case:?}");
-			let playlist = rendition.media_playlist(None).expect("finished").expect("listed");
-			assert!(playlist.ends_with("#EXT-X-ENDLIST\n"), "{case:?}: {playlist}");
-		}
-		Case::Unanswered | Case::UnansweredUnfinished | Case::FinishedFirst => {
-			assert!(
-				matches!(end, Err(moq_hls::Error::SegmentUnavailable { segment: 3 })),
-				"{case:?}: {end:?}"
-			);
-			assert_eq!(read, [1, 2], "{case:?}");
-		}
-	}
+	end.unwrap_or_else(|err| panic!("{version} {case:?}: {err}"));
+	assert_eq!(read, [1, 2, 3], "{version} {case:?}");
+	let playlist = rendition.media_playlist(None).expect("finished").expect("listed");
+	assert!(playlist.ends_with("#EXT-X-ENDLIST\n"), "{case:?}: {playlist}");
 
 	for uri in &old_segments {
 		assert_old(&app, uri).await;
@@ -172,7 +160,7 @@ async fn drain_old(cursor: &mut segments::Consumer) -> (Vec<u64>, moq_hls::Resul
 			Ok(None) => return (read, Ok(())),
 			Err(err) => return (read, Err(err)),
 		};
-		// The stop the old run ends with is a gap, which carries no media of either run.
+		// A gap carries no media of either run.
 		let Some(media) = segment.media.as_deref() else {
 			continue;
 		};

@@ -4,7 +4,7 @@
 import { Time } from "@moq/net";
 import { Timed } from "@moq/net";
 import { Track } from "@moq/net";
-import { ZodMiniType } from "@zod/mini";
+import { ZodMiniType } from "zod/mini";
 
 export interface Diff {
 	forcedSnapshot: boolean;
@@ -94,7 +94,6 @@ export namespace Stream {
 	export class Encoder<T> {
 		constructor(config?: Stream.Config<T>);
 		encode(value: T): Stream.Pending;
-		reset(): void;
 	}
 	export interface Pending {
 		commit(): void;
@@ -167,6 +166,7 @@ export namespace Window {
 	}
 	export class Producer<T> {
 		constructor(config: Window.ProducerConfig);
+		abort(err: Error): void;
 		cut(): void;
 		finish(): void;
 		get offset(): number;

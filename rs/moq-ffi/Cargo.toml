@@ -76,6 +76,7 @@ pollster = { workspace = true }
 # Runs the key log tests with `SSLKEYLOGFILE` set or unset, in a child process.
 test-env = { path = "../test-env" }
 tokio = { workspace = true, features = ["test-util"] }
+workspace-hack = { path = "../workspace-hack" }
 
 [target.'cfg(unix)'.dev-dependencies]
 # Process CPU time for the benchmark's baselines.

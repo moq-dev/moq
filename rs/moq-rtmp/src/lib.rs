@@ -63,6 +63,11 @@ use std::time::Duration;
 mod dial;
 mod error;
 mod flv;
+// Not part of the public API: compiled only for the crate's own tests and for the `fuzz/`
+// harness.
+#[cfg(any(test, feature = "fuzz"))]
+#[doc(hidden)]
+pub mod fuzz;
 mod metadata;
 // Vendored forks of rml_rtmp and rml_amf0; see the module docs.
 mod rml;

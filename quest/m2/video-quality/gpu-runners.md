@@ -25,5 +25,4 @@ online with its labels. Delete this quest once they are listed.
   cannot protect it.
 - Follow `nixos`'s sandboxed runner containers where the host allows it,
   binding in only the GPU device nodes and the host driver's libraries.
-- The [rented gate host](/quest/m3/ci-host.md) does not change this. The
-  quality job is nightly, so its runners can stay at home.
+- The quality job is nightly, so its runners can stay at home.

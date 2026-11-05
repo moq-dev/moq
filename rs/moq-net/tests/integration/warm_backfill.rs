@@ -12,6 +12,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use moq_net::track::Delay;
 use moq_net::track::{Info, Subscription};
 use moq_net::{Hop, Timescale, Timestamp, Version, origin, track};
 
@@ -39,7 +40,11 @@ async fn subscribe(relay: &origin::Producer) -> track::Subscriber {
 	remote
 		.track("video")
 		.unwrap()
-		.subscribe(Subscription::default().with_max_delay(BUDGET).with_range(0..))
+		.subscribe(
+			Subscription::default()
+				.with_delay(Delay::default().with_max(BUDGET))
+				.with_range(0..),
+		)
 		.await
 		.unwrap()
 }
@@ -62,7 +67,10 @@ async fn a_newcomer_on_a_warm_relay_gets_the_backfill() {
 		let _link = peer(version.parse::<Version>().unwrap(), &publisher, &relay).await;
 		let broadcast = publisher.create_broadcast("live").unwrap();
 		let source = broadcast
-			.create_track("video", Info::default().with_timescale(Timescale::MILLI))
+			.create_track(
+				"video",
+				Info::default().with_timescale(Timescale::MILLI).with_max_age(None),
+			)
 			.unwrap();
 		for sequence in 0..GROUPS {
 			let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();

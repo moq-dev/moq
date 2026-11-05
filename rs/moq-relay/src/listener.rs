@@ -18,6 +18,8 @@ mod demux;
 mod idle;
 pub(crate) use demux::{Classified, Stream, Tls, classify};
 pub(crate) use idle::Admission;
+#[cfg(feature = "websocket")]
+pub(crate) use idle::Io;
 
 use std::{
 	io,

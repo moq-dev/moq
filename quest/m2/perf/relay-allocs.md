@@ -42,12 +42,8 @@ Decided 2026-10-17 (maintainer): m2, under perf.
 
 Decided 2026-10-22 (maintainer): this waits on the work that replaces the
 session clones and boxed opens at the top of this profile; re-profile after
-it lands before fixing what remains. Since 2026-10-23 the QUIC half of that
-removal is [native WebTransport](/quest/m1/quic-api/native-web.md), so the
-relay's QUIC profile waits on it.
+it lands before fixing what remains. The QUIC adapters are now removed by
+[moq-dev/moq#7771](https://github.com/moq-dev/moq/pull/7771); re-profile the
+native poll implementations before fixing what remains.
 
 Public API: none expected. Wire: none.
-
-## Required
-
-- [Native WebTransport](/quest/m1/quic-api/native-web.md) - removes the QUIC path's per-stream session clone and boxed future, so the profile is retaken after it

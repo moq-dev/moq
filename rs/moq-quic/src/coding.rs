@@ -128,3 +128,21 @@ impl<T: BufMut> BufMutExt for T {
 		VarInt::from_u64(x).unwrap().encode(self);
 	}
 }
+
+/// A buffer frames are written into, which knows how much it already holds so a writer
+/// can stop at the packet or record boundary
+pub(crate) trait FrameBuf: BufMut {
+	fn len(&self) -> usize;
+}
+
+impl FrameBuf for Vec<u8> {
+	fn len(&self) -> usize {
+		Vec::len(self)
+	}
+}
+
+impl FrameBuf for bytes::BytesMut {
+	fn len(&self) -> usize {
+		bytes::BytesMut::len(self)
+	}
+}

@@ -70,7 +70,8 @@ test("verify refuses unsafe signed payloads without dropping their restrictions"
 			{ publish: ["**"], exp: 1000 },
 			{ publish: ["**"], nbf: 1001 },
 			{ publish: ["**"], subscribe: { path: "alice/**", rate: 8000 } },
-			{ publish: { path: ["alice/**"], rate: 8000 }, subscribe: ["**"] },
+			{ publish: { path: ["alice/**"], rate: 0 }, subscribe: ["**"] },
+			{ publish: { path: ["alice/**"] }, subscribe: ["**"] },
 		]) {
 			await expect(Key.verify(key, await signed(payload))).rejects.toThrow();
 		}
@@ -829,6 +830,27 @@ test("key scope is enforced when signing and verifying", async () => {
 	// way in, so a scope can't be stripped by re-signing elsewhere.
 	const forged = await Key.sign(unrestricted, denied);
 	await expect(Key.verify(scoped, forged)).rejects.toThrow("exceed the key scope");
+});
+
+test("caps survive signing, and a key scope bounds only their paths", async () => {
+	const key: Key = { ...Key.parse(encodeJwk(testKey)), scope: { root: "room", publish: ["**"], subscribe: ["**"] } };
+	const token = await Key.sign(key, {
+		root: "room",
+		publish: { path: ["alice/**"], rate: 8000 },
+		subscribe: { path: ["bob/**"], rate: 16000 },
+	});
+	const claims = await Key.verify(key, token);
+	expect(claims).toMatchObject({
+		publish: ["alice/**"],
+		publish_rate: 8000,
+		subscribe: ["bob/**"],
+		subscribe_rate: 16000,
+	});
+
+	// The decoded claims sign again with their caps.
+	const resigned = await Key.verify(key, await Key.sign(key, claims));
+	expect(resigned).toMatchObject({ publish_rate: 8000, subscribe_rate: 16000 });
+	await expect(Key.sign(key, { ...claims, publish_rate: 0 })).rejects.toThrow(/rate must be a positive integer/);
 });
 
 test("key scope treats absolute and rooted grants alike", async () => {

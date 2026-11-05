@@ -33,7 +33,8 @@ backport of that action to `release`, which landed in
 `moq-ffi-v0.4.20` tag's chained run
 ([failed](https://github.com/moq-dev/moq/actions/runs/41038297141)) came before
 that merge, and a re-run checks out the same tag commit, so it fails again.
-`release-py.yml` has no `workflow_dispatch`. What publishes 0.5.2 now:
+`release`'s `release-py.yml` has no `workflow_dispatch` until the maintainer's
+cut carries the manual retry trigger from `main`. What publishes 0.5.2 now:
 
 - The next `moq-ffi-v*` tag at a `release` commit with the nix action, which
   chains Release Py FFI into Release Py.
@@ -41,11 +42,22 @@ that merge, and a re-run checks out the same tag commit, so it fails again.
   or `sh/gh/release.sh`: the push gate publishes, since `release`'s moq-ffi
   0.4.20 is tagged and on PyPI.
 
+After that cut adopts the trigger, the maintainer can retry with
+`gh workflow run release-py.yml --ref release`; the same published-wrapper
+and published-FFI gates apply.
+
 Dart: pub.dev publishes `moq` only from a `moq-dart-v*` tag, and only
 `moq-dart-v0.1.0` exists. Pushing `moq-dart-v0.1.1` at `release`'s head
 publishes 0.1.1 and exercises the unproven path in
 [A Dart tag publishes unattended](/quest/m2/release/dart-publish.md). Decided
 2026-10-30 (maintainer): push it during the combined cut, not before.
+
+Decided 2026-11-04 (maintainer, /quest-unblock): ✅ cut the combined patch
+release on `release` soon, once [moq-dev/moq#7596](https://github.com/moq-dev/moq/pull/7596)'s
+remaining ports and [moq-dev/moq#7680](https://github.com/moq-dev/moq/pull/7680)
+are ready, and merge `main` into `release` for the next minor line
+separately, later. Not chosen: one combined cut that merges `main` first, or
+neither this week.
 
 Public API: none. Wire: none.
 

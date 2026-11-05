@@ -9,6 +9,7 @@
 //! receiver checks them, so it refuses that out-of-order group.
 
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -54,7 +55,7 @@ async fn relay(
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast
-		.create_track("data", Info::default().with_timescale(timescale))
+		.create_track("data", Info::default().with_timescale(timescale).with_max_age(None))
 		.unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
@@ -76,7 +77,9 @@ async fn relay(
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
-	let subscription = Subscription::default().with_max_delay(BUDGET).with_range(0..);
+	let subscription = Subscription::default()
+		.with_delay(Delay::default().with_max(BUDGET))
+		.with_range(0..);
 	let reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote
 			.track("data")
@@ -174,7 +177,9 @@ async fn a_timed_track_keeps_its_timestamps_through_a_relay() {
 async fn fetch_only(version: &str) -> Vec<Result<Option<moq_net::Timestamp>, moq_net::Error>> {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("data", Info::default()).unwrap();
+	let track = broadcast
+		.create_track("data", Info::default().with_max_age(None))
+		.unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	write_group(&track, 0);
 	write_group(&track, 1);

@@ -9,10 +9,15 @@
  * Faults are injected here rather than at the subscriber, so the negative controls exercise the
  * same assertions the real cases do.
  *
+ * The picture reaches the encoder as a {@link Publish.Video.FrameSource}, not a canvas capture track.
+ * Chromium's MediaStreamTrackProcessor discards a frame still in flight inside it when torn down, without
+ * closing it, and the page then logs it as garbage collected unclosed: a stop would fail the console
+ * check on a frame no script ever held. The publish page's camera still covers that capture path.
+ *
  * @module
  */
 
-import { Milli, Nano } from "@moq/clock";
+import { Milli, Nano, now } from "@moq/clock";
 import * as Moq from "@moq/net";
 import * as Publish from "@moq/publish";
 import { Effect, Signal } from "@moq/signals";
@@ -92,19 +97,35 @@ export class Fixture {
 		const ctx = canvas.getContext("2d");
 		if (!ctx) throw new Error("2d canvas context unavailable");
 
-		// captureStream(0) never samples on its own: every frame comes from an explicit
-		// requestFrame(), which is what ties the emitted frames to the pattern clock.
-		const stream = canvas.captureStream(0);
-		// The publish types describe a getUserMedia track, whose settings a canvas track does not carry.
-		// Only the MediaStreamTrack half is ever touched at runtime.
-		const videoTrack = stream.getVideoTracks()[0] as unknown as Publish.Video.StreamTrack;
-		this.#signals.cleanup(() => videoTrack.stop());
-		// The spec puts requestFrame() on the track, which Chromium follows; Firefox has it on the
-		// stream instead.
-		const capturing = stream.getVideoTracks()[0] as Partial<CanvasCaptureMediaStreamTrack>;
-		const requestFrame = capturing.requestFrame
-			? () => capturing.requestFrame?.()
-			: () => (stream as unknown as { requestFrame(): void }).requestFrame();
+		// Each frame is made off the canvas for a read already waiting, so none is ever queued where a
+		// cancel would drop it unclosed. A tick with no read waiting skips the frame, as a slow capture
+		// track would. The frames carry `now()` stamps, the epoch capture uses.
+		let waiting: (() => void) | undefined;
+		let deliver: ((frame: VideoFrame) => void) | undefined;
+		const frames = new ReadableStream<VideoFrame>(
+			{
+				start: (controller) => {
+					deliver = (frame) => controller.enqueue(frame);
+				},
+				pull: () =>
+					new Promise<void>((resolve) => {
+						waiting = resolve;
+					}),
+				cancel: () => {
+					waiting?.();
+					waiting = undefined;
+					deliver = undefined;
+				},
+			},
+			{ highWaterMark: 0 },
+		);
+		const take = () => {
+			const resolve = waiting;
+			if (!resolve || !deliver) return;
+			waiting = undefined;
+			deliver(new VideoFrame(canvas, { timestamp: Math.round(Nano.toMicro(Nano(now()))) }));
+			resolve();
+		};
 
 		this.#audio = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: "interactive" });
 		this.#signals.cleanup(() => void this.#audio.close());
@@ -121,7 +142,7 @@ export class Fixture {
 		const connection = new Moq.Connection({ url: new URL(url), enabled: true, versions });
 		this.#signals.cleanup(() => connection.close());
 
-		const capture = new Publish.Video.Capture({ source: videoTrack });
+		const capture = new Publish.Video.Capture({ source: { frames, frameRate: Pattern.FPS } });
 		this.#signals.cleanup(() => capture.close());
 
 		const broadcast = new Publish.Broadcast({
@@ -190,7 +211,7 @@ export class Fixture {
 			const start = this.#audio.currentTime + 0.2;
 			oscillator.start(start);
 			this.#runTone(oscillator, start, fault);
-			this.#runPicture(ctx, requestFrame, start, fault);
+			this.#runPicture(ctx, take, start, fault);
 		};
 		const unlock = () => void this.#audio.resume().catch(() => {});
 
@@ -260,9 +281,9 @@ export class Fixture {
 		this.#signals.interval(schedule, Nano.fromMilli(Milli((SCHEDULE_AHEAD * 1000) / 4)));
 	}
 
-	// Paint and request capture per pattern tick. Capture and encoding can finish later. The counter
+	// Paint and hand the capture a frame per pattern tick. Encoding can finish later. The counter
 	// comes from the audio clock, so a coalesced tick skips a frame instead of drifting the two apart.
-	#runPicture(ctx: CanvasRenderingContext2D, requestFrame: () => void, start: number, fault: Fault): void {
+	#runPicture(ctx: CanvasRenderingContext2D, take: () => void, start: number, fault: Fault): void {
 		let painted = -1;
 
 		const tick = () => {
@@ -274,12 +295,12 @@ export class Fixture {
 			painted = frameId;
 
 			Pattern.paint(ctx, fault === "frozen-video" ? 0 : frameId, this.#generation);
-			requestFrame();
+			take();
 			this.#frameId.set(frameId);
 		};
 
 		// Twice the frame rate: a tick that lands between frames is a no-op, and one that lands late
-		// still requests capture of the frame the clock is on.
+		// still hands over the frame the clock is on.
 		this.#timer = self.setInterval(tick, 1000 / Pattern.FPS / 2);
 		this.#signals.cleanup(() => {
 			if (this.#timer !== undefined) self.clearInterval(this.#timer);

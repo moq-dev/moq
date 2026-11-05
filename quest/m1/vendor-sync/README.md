@@ -56,14 +56,19 @@ kixelated/cros-codecs, kixelated/openh264-rs, kixelated/fflate) and the
 Public API: none expected; a ported fix that changes one says so. Wire: QUIC
 behavior follows quinn's fixes.
 
+VAAPI's completed cycle adopted crates.io `moq-vaapi 0.1.1` after
+[the source fix](https://github.com/moq-dev/vaapi/pull/5) and
+[read-only CI](https://github.com/moq-dev/vaapi/pull/6) merged. When re-creating
+the next cycle, always include moq-dev/vaapi even though it is a crates.io
+dependency outside this tree. Restore its Goal of auditing both ChromeOS
+upstreams and publishing/adopting any needed fixes. Carry checked heads and
+dispositions from [VAAPI's Upstream audit](https://github.com/moq-dev/vaapi/blob/v0.1.1/README.md#upstream),
+which records cros-libva `59384456ac2ae78c0c3e5515f41ef1efd9b802cf` and
+cros-codecs `a050c6cde530e563197ee9e3e72ab01f48a0c41f`.
+
 ## Required
 
-- [moq-quic has every quinn fix it needs](/quest/m1/vendor-sync/quinn.md) - quinn's fixes since the last check are ported with their tests
-- [moq-v4l has every libv4l-rs fix it needs](/quest/m1/vendor-sync/v4l.md) - libv4l-rs fixes since v4l 0.14 are ported or the API they fix is gone
 - [UniFFI generator forks are current](/quest/m1/vendor-sync/uniffi.md) - the generator forks carry upstream's fixes until rust2 replaces them
-- [moq-vaapi has every cros-codecs fix it needs](/quest/m1/vendor-sync/vaapi.md) - cros-libva and cros-codecs fixes reach moq-dev/vaapi
-- [moq-nvenc has every upstream fix it needs](/quest/m1/vendor-sync/nvenc.md) - nvidia-video-codec-sdk fixes since the vendored commit are ported
-- [moq-rtmp's rml has every upstream fix it needs](/quest/m1/vendor-sync/rml.md) - rust-media-libs fixes since rml_rtmp 0.8.0 are ported
 
 ## Related
 

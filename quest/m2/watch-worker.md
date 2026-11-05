@@ -35,4 +35,4 @@ Gate on the plan's jank harness and N-player sweep, both nightly.
 
 ## Related
 
-- [Time stretch](/quest/m2/watch-audio-time-stretch.md) - changes the worklet this feeds
+- [Watch](/quest/m1/audio-jitter-target/watch.md) - time-stretches in the worklet this feeds

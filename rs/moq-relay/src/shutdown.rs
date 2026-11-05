@@ -455,11 +455,12 @@ mod tests {
 		let running = tokio::spawn(relay.run());
 
 		// Upgraded, then silent: no MoQ SETUP ever follows.
-		let _session = qmux::ws::Client::new()
+		let (_session, driver) = qmux::ws::Client::new()
 			.with_protocols(moq_net::ALPNS.iter().map(|&a| (a, &[] as &[qmux::Version])))
 			.connect(&format!("ws://{addr}/room"))
 			.await
 			.unwrap();
+		tokio::spawn(driver);
 
 		// Only timers decide what follows.
 		tokio::time::pause();

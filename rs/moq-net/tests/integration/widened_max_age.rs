@@ -10,8 +10,9 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use moq_net::track::Delay;
 use moq_net::track::{Info, Range, Subscription};
-use moq_net::{Hop, Timescale, Timestamp, Version, origin, track};
+use moq_net::{Hop, Timescale, Timestamp, Version, kio, origin, track};
 
 use crate::support::harness::{MockConnectOptions, MockPair, connect_mock, peer, spawn};
 
@@ -30,8 +31,8 @@ const WIDE: Duration = Duration::from_millis(6500);
 /// start at the live edge, below which a reader fills only the floor its ranges name.
 const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip"];
 
-/// The wire for the tests on one version: only lite-07 FETCHes below the start, so only it
-/// can pull a group twice.
+/// The wire for the tests on one version: only lite-07 fills below the start, so only it can
+/// pull a group twice.
 const VERSION: &str = "moq-lite-07-wip";
 
 fn origin(hop: u64) -> origin::Producer {
@@ -40,46 +41,62 @@ fn origin(hop: u64) -> origin::Producer {
 	origin
 }
 
+/// A millisecond track with no publisher max age, so only a reader's budget skips its groups.
+fn timed() -> Info {
+	Info::default().with_timescale(Timescale::MILLI).with_max_age(None)
+}
+
 /// A publisher holding every group, a relay, and a viewer behind it.
 struct Chain {
 	source: track::Producer,
 	viewer: origin::Producer,
 	links: Vec<MockPair>,
+	source_gate: kio::Producer<bool>,
 	_hold: Vec<Box<dyn std::any::Any>>,
 }
 
 impl Chain {
 	/// Without `relay`, the viewer reads the publisher directly.
 	async fn new(version: &str, relay: bool) -> Self {
+		let chain = Self::empty(version, relay).await;
+		chain.populate();
+		chain
+	}
+
+	async fn empty(version: &str, relay: bool) -> Self {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let relay = relay.then(|| origin(2));
 		let viewer = origin(3);
 		let mut links = Vec::new();
-		match &relay {
-			Some(relay) => {
-				links.push(peer(version, &publisher, relay).await);
-				links.push(peer(version, relay, &viewer).await);
-			}
-			None => links.push(peer(version, &publisher, &viewer).await),
+		let source_gate = kio::Producer::new(true);
+		let mut options = MockConnectOptions::new(version);
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(relay.as_ref().unwrap_or(&viewer).clone());
+		options.server_gate = Some(source_gate.consume());
+		links.push(connect_mock(options).await);
+		if let Some(relay) = &relay {
+			links.push(peer(version, relay, &viewer).await);
 		}
 		let broadcast = publisher.create_broadcast("live").unwrap();
-		let source = broadcast
-			.create_track("video", Info::default().with_timescale(Timescale::MILLI))
-			.unwrap();
-		for sequence in 0..GROUPS {
-			let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
-			group
-				.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), &b"x"[..])
-				.unwrap();
-			group.finish().unwrap();
-		}
+		let source = broadcast.create_track("video", timed()).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		Self {
 			source,
 			viewer,
 			links,
+			source_gate,
 			_hold: vec![Box::new(publisher), Box::new(relay), Box::new(broadcast)],
+		}
+	}
+
+	fn populate(&self) {
+		for sequence in 0..GROUPS {
+			let mut group = self.source.create_group(moq_net::group::Info { sequence }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), &b"x"[..])
+				.unwrap();
+			group.finish().unwrap();
 		}
 	}
 
@@ -98,7 +115,7 @@ impl Chain {
 		let consumer = self.viewer.consume();
 		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 		let subscription = Subscription::default()
-			.with_max_delay(budget)
+			.with_delay(Delay::default().with_max(budget))
 			.with_ranges([Range::oldest()]);
 		remote.track("video").unwrap().subscribe(subscription).await.unwrap()
 	}
@@ -116,7 +133,8 @@ async fn received(subscriber: &mut track::Subscriber) -> BTreeSet<u64> {
 
 /// A fresh reader asks no fill for the history below where its feed starts, through a relay
 /// or not: below a start resolved from a budget no tighter than its own, every group is
-/// stale, and below a live edge start it names no floor under, none was asked for.
+/// stale by its media time, and below a live edge start it names no floor under, none was
+/// asked for.
 #[kio::test]
 async fn a_fresh_reader_fills_nothing_below_its_start() {
 	for (version, want) in [
@@ -140,6 +158,47 @@ async fn a_fresh_reader_fills_nothing_below_its_start() {
 	}
 }
 
+/// Tighten while no start is selectable, then ask for a budget between the old and
+/// selected ones: the copy leaves the history below its start fillable rather than giving
+/// it up. Lite-07 asks for it as a range on the subscription the publisher's re-offer
+/// serves too, so only the groups the reader gets tell the two apart from a give-up.
+#[kio::test]
+async fn a_tightened_start_leaves_history_fillable_by_an_intermediate_reader() {
+	for relay in [false, true] {
+		let chain = Chain::empty(VERSION, relay).await;
+		let mut first = chain.subscribe(WIDE).await;
+		let mut source = chain.source.clone();
+		while source.subscription_changed().await.unwrap().is_none() {}
+		first
+			.update(
+				Subscription::default()
+					.with_delay(Delay::default().with_max(NARROW))
+					.with_ranges([Range::oldest()]),
+			)
+			.unwrap();
+		while source.subscription_changed().await.unwrap().and_then(|s| s.delay.max) != Some(NARROW) {}
+		chain.populate();
+		assert_eq!(received(&mut first).await, (6..GROUPS).collect());
+
+		*chain.source_gate.write().ok().unwrap() = false;
+		let mut intermediate = chain.subscribe(Duration::from_millis(4500)).await;
+		// Drive the reader's miss walk too, with the upstream deliberately parked.
+		let reading = kio::clock::sim::spawn(async move {
+			let mut got = BTreeSet::new();
+			while got.len() < 6 {
+				got.insert(intermediate.recv_group().await.unwrap().unwrap().sequence);
+			}
+			got
+		});
+		*chain.source_gate.write().ok().unwrap() = true;
+		let got = kio::clock::timeout(TIMEOUT, reading)
+			.await
+			.expect("the history below the start is fillable");
+		assert_eq!(got.unwrap(), (4..GROUPS).collect(), "relay={relay}");
+		assert_eq!(chain.fetches(), 0, "relay={relay}: the history rides the subscription");
+	}
+}
+
 /// What the subscriber reads after widening its own max age, through a relay or not.
 #[kio::test]
 async fn a_widened_reader_gets_what_was_skipped() {
@@ -151,7 +210,7 @@ async fn a_widened_reader_gets_what_was_skipped() {
 			assert_eq!(first, (6..GROUPS).collect(), "{version} relay={relay}");
 
 			let wide = Subscription::default()
-				.with_max_delay(WIDE)
+				.with_delay(Delay::default().with_max(WIDE))
 				.with_ranges([Range::oldest()]);
 			reader.update(wide).unwrap();
 			let widened = kio::clock::timeout(TIMEOUT, received(&mut reader)).await.unwrap();
@@ -243,9 +302,7 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 		.session(moq_net::Path::from_static(""));
 	let _upstream = connect_mock(options).await;
 	let broadcast = publisher.create_broadcast("live").unwrap();
-	let source = broadcast
-		.create_track("video", Info::default().with_timescale(Timescale::MILLI))
-		.unwrap();
+	let source = broadcast.create_track("video", timed()).unwrap();
 	for sequence in 0..GROUPS {
 		let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
 		group
@@ -263,7 +320,7 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 		let consumer = viewer.consume();
 		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 		let subscription = Subscription::default()
-			.with_max_delay(budget)
+			.with_delay(Delay::default().with_max(budget))
 			.with_ranges([Range::oldest()]);
 		let mut reader = remote.track("video").unwrap().subscribe(subscription).await.unwrap();
 		let got = received(&mut reader).await;

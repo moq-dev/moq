@@ -92,19 +92,27 @@ async function video(bc: Moq.Broadcast.Consumer, [name, config]: [string, Catalo
 // How far behind the newest audio a group may fall and still be read, in milliseconds.
 const AUDIO_BUDGET = 5000;
 
-/** The subscription field holding the latency budget, which the checkout renamed from `maxAge`. */
-function budgetField(): "maxAge" | "maxDelay" {
-	// The checkout refuses the old name, which a throwaway local track shows without a session.
+/**
+ * The subscription fields holding the latency budget, which releases spelled `maxAge`, then
+ * `maxDelay`, and the checkout spells `delay: { max }`.
+ */
+function budget(millis: number): Record<string, unknown> {
+	// Each version refuses the older names, which a throwaway local track shows without a session.
+	const spellings = [{ maxAge: millis }, { maxDelay: millis }, { delay: { max: millis } }];
 	const broadcast = new Moq.Broadcast.Producer();
 	try {
-		broadcast
-			.createTrack("probe")
-			.subscribe({ maxAge: 0 } as Moq.Track.Subscription)
-			.close();
-		return "maxAge";
-	} catch (err) {
-		if (!(err instanceof TypeError)) throw err;
-		return "maxDelay";
+		for (const spelling of spellings.slice(0, -1)) {
+			try {
+				broadcast
+					.createTrack(`probe-${Object.keys(spelling)[0]}`)
+					.subscribe(spelling as Moq.Track.Subscription)
+					.close();
+				return spelling;
+			} catch (err) {
+				if (!(err instanceof TypeError)) throw err;
+			}
+		}
+		return spellings[spellings.length - 1];
 	} finally {
 		broadcast.close();
 	}
@@ -174,7 +182,7 @@ async function audio(
 	// In sequence order, as a stateful decoder needs. An fMP4 fragment lands the tail of one audio
 	// group and the head of the next in one burst, and the default budget of zero drops that tail
 	// once the next group arrives, so allow a backlog; a group that never arrives still leaves a gap.
-	const subscription = { priority: Catalog.PRIORITY.audio, [budgetField()]: AUDIO_BUDGET };
+	const subscription = { priority: Catalog.PRIORITY.audio, ...budget(AUDIO_BUDGET) };
 	const track = bc
 		.track(name)
 		.subscribe(subscription as Moq.Track.Subscription)

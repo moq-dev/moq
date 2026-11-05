@@ -229,6 +229,7 @@ pub fn interval_at(start: Instant, period: Duration) -> Interval {
 
 impl Interval {
 	/// Wait for the next tick, returning the instant it was scheduled for.
+	#[cfg(feature = "async")]
 	pub async fn tick(&mut self) -> Instant {
 		std::future::poll_fn(|cx| self.poll_tick(cx)).await
 	}
@@ -275,6 +276,7 @@ impl Interval {
 ///
 /// `poll` is called with the current instant and returns when it next wants to be
 /// polled: `Ok(Some(at))` by `at` or on a wake, `Ok(None)` only on a wake.
+#[cfg(feature = "async")]
 pub async fn drive<E>(mut poll: impl FnMut(Instant, &crate::Waiter) -> Result<Option<Instant>, E> + Unpin) -> E {
 	let mut timer: Option<Sleep> = None;
 	crate::wait(move |waiter| {

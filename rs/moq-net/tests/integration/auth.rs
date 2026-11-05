@@ -1105,7 +1105,8 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 				.available()
 				.await
 				.unwrap();
-			let prefs = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+			let prefs = moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
 			let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 			sub.recv_group().await.unwrap().expect("a group");
 
@@ -1202,7 +1203,10 @@ async fn a_live_subscription_survives_union_renewal(version: &'static str) {
 async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+		let prefs = || {
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
+		};
 
 		// The server publishes room/x to the client; the client publishes up/y to the server.
 		let server_origin = produce_origin(1);
@@ -1288,6 +1292,75 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 			let count = resets.iter().filter(|&&code| code == unauthorized).count();
 			assert_eq!(count, 2, "both subscriptions reset with UNAUTHORIZED: {resets:x?}");
 		}
+	})
+	.await
+	.expect("timed out");
+}
+
+/// Losing a grant cancels a datagram track the peer publishes to us, and leaves the session up.
+#[kio::test]
+async fn lite_07_a_revoked_grant_cancels_its_datagram_subscriptions() {
+	within(async {
+		let server_origin = produce_origin(1);
+		let down = server_origin.create_broadcast("room/x").unwrap();
+		let mut audio = down
+			.create_datagrams(
+				"audio",
+				moq_net::datagram::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			)
+			.unwrap();
+		down.announce(Default::default()).unwrap();
+
+		let received = produce_origin(3);
+		let mut pair = connect(Options {
+			version: Some(LITE_07),
+			client_publish: Some(produce_origin(2)),
+			client_subscribe: Some(received.clone()),
+			server_publish: Some(server_origin.clone()),
+			server_subscribe: Some(server_origin.clone()),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let mut issued = serve(pair.requests.take().unwrap(), |token| {
+			token.is_empty().then(|| grant(&["up"], &["room"]))
+		});
+		let (_, setup) = issued.next().await.unwrap();
+
+		let remote = received
+			.consume()
+			.follow("room/x", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
+		let mut reader = remote.datagrams("audio").unwrap();
+		reader.info().await.unwrap();
+		// Sent until one arrives: a datagram is best-effort.
+		let first = loop {
+			audio
+				.append(moq_net::Timestamp::from_millis(0).unwrap(), b"x".as_ref())
+				.unwrap();
+			if let Some(Ok(datagram)) = futures::FutureExt::now_or_never(reader.recv()) {
+				break datagram;
+			}
+			kio::clock::sleep(Duration::from_millis(10)).await;
+		};
+		assert!(first.is_some());
+
+		setup.revoke(SessionError::Unauthorized, "expired");
+		let err = loop {
+			match reader.recv().await {
+				Ok(Some(_)) => continue,
+				Ok(None) => panic!("datagram subscription finished instead of ending"),
+				Err(err) => break err,
+			}
+		};
+		assert!(
+			matches!(err, Error::Unauthorized | Error::Stream(StreamError::Unauthorized)),
+			"{err:?}"
+		);
+		assert_eq!(pair.client_transport.close_reason(), None);
 	})
 	.await
 	.expect("timed out");
@@ -1601,7 +1674,10 @@ async fn ended(sub: &mut moq_net::track::Subscriber) -> Error {
 async fn a_narrowing_deafens_one_path(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+		let prefs = || {
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
+		};
 
 		let relay = produce_origin(1);
 		let audio = relay.create_broadcast("room/alice/audio").unwrap();
@@ -1686,7 +1762,10 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+		let prefs = || {
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
+		};
 
 		let client_origin = produce_origin(2);
 		let mic = client_origin.create_broadcast("room/bob/mic").unwrap();
@@ -1820,7 +1899,10 @@ async fn recv_through(sub: &mut moq_net::track::Subscriber, sequence: u64) {
 async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+		let prefs = || {
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
+		};
 
 		let relay = produce_origin(1);
 		let audio = relay.create_broadcast("room/alice/audio").unwrap();
@@ -1889,7 +1971,10 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+		let prefs = || {
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
+		};
 
 		let client_origin = produce_origin(2);
 		let mic = client_origin.create_broadcast("room/bob/mic").unwrap();

@@ -2,12 +2,11 @@
 """Check the binary size cap against real diffs in a scratch repository."""
 
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CAP = 500 * 1024
@@ -26,8 +25,7 @@ class LargeFilesTests(unittest.TestCase):
         self.bin.mkdir()
         for command in ("bash", "git", "sort", "wc", "mktemp", "rm", "cp"):
             (self.bin / command).symlink_to(shutil.which(command))
-        self.env = dict(os.environ, PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
-                        GIT_CONFIG_GLOBAL=os.devnull)
+        self.env = dict(os.environ, PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
         self.env.pop("GITHUB_BASE_REF", None)
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.name", "test")
@@ -39,8 +37,9 @@ class LargeFilesTests(unittest.TestCase):
         self.git("update-ref", "refs/remotes/origin/main", "HEAD")
 
     def git(self, *args):
-        return subprocess.run(["git", *args], cwd=self.repo, env=self.env,
-                              text=True, capture_output=True, check=True).stdout.strip()
+        return subprocess.run(
+            ["git", *args], cwd=self.repo, env=self.env, text=True, capture_output=True, check=True
+        ).stdout.strip()
 
     def binary(self, path, size):
         (self.repo / path).write_bytes(b"\0" * size)
@@ -53,8 +52,9 @@ class LargeFilesTests(unittest.TestCase):
         self.git("commit", "-qm", "change")
 
     def check(self, base="origin/main"):
-        return subprocess.run(["bash", "sh/large-files.sh", base], cwd=self.repo, env=self.env,
-                              text=True, capture_output=True)
+        return subprocess.run(
+            ["bash", "sh/large-files.sh", base], cwd=self.repo, env=self.env, text=True, capture_output=True
+        )
 
     def expect_pass(self, base="origin/main"):
         result = self.check(base)
@@ -108,8 +108,10 @@ class LargeFilesTests(unittest.TestCase):
         self.expect_pass(base="--all")
 
     def test_allowlist_entries_need_a_reason_and_an_oversized_file(self):
-        for line, message in (("fixture.bin", "needs a reason"),
-                              ("missing.bin some reason", "missing.bin is not a file over the cap")):
+        for line, message in (
+            ("fixture.bin", "needs a reason"),
+            ("missing.bin some reason", "missing.bin is not a file over the cap"),
+        ):
             with self.subTest(line=line):
                 self.allow(line)
                 self.expect_fail(message)

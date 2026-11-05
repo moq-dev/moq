@@ -1,6 +1,21 @@
 import { Session, SessionCode } from "../error.ts";
 
 /**
+ * Allocation guard for a compressed frame, which is stored and sent whole: the lite-07 header
+ * declares a slice's size before its bytes, so a frame cannot be compressed as it streams.
+ * @internal
+ */
+export const MAX_FRAME_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Bytes in each segment of a frame written in pieces past one segment, as Rust's
+ * `frame::SEGMENT`: segment `i` holds the frame's bytes from `i * SEGMENT_BYTES`. A wire
+ * frame within one segment is decoded whole; a larger one streams in.
+ * @internal
+ */
+export const SEGMENT_BYTES = 1024 * 1024;
+
+/**
  * How many live requests a peer may hold on one session, as moq-net's `session::Limits`.
  * Subscriptions, FETCHes, and listing PUBLISHes have no cap: each holds a bidi stream, so stream
  * credit bounds them.

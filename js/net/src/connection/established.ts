@@ -1,7 +1,8 @@
-import type { Getter } from "@moq/signals";
+import type { GetPromise, Getter } from "@moq/signals";
 import type * as announce from "../announce.ts";
 import type * as Auth from "../auth.ts";
 import type * as Path from "../path.ts";
+import type { Drain } from "./goaway.ts";
 import type { Probe, Stats } from "./stats.ts";
 import type { Transport } from "./transport.ts";
 
@@ -69,13 +70,23 @@ export interface Established {
 	/**
 	 * Withdraw announcements and drain for up to one second, then close the session.
 	 *
-	 * Explicit lite-07-wip waits for the subscriber to receive finished tails; older
-	 * Lite versions wait only for transport ACKs. IETF media streams are not drained.
+	 * Lite-05 and newer wait for the subscriber to read finished tails; older Lite versions
+	 * wait only for transport ACKs. IETF media streams are not drained.
 	 */
 	close(): Promise<void>;
 
 	/** End the session immediately without waiting for delivery. */
 	abort(): void;
+
+	/**
+	 * Settles with the peer's GOAWAY, its request that this session move elsewhere. The session
+	 * keeps serving until it closes, and a one-shot session never moves on its own, so answer it
+	 * by connecting again and closing this one. Stays pending if the session closes without one.
+	 *
+	 * The URI is peer-controlled: apply a redirect policy you trust before dialing it or presenting
+	 * tokens to it, as the reconnecting `Connection` does with `goaway.redirect`.
+	 */
+	readonly draining: GetPromise<Drain>;
 
 	/**
 	 * Resolves when the session closes: `null` for a clean close, an `Error.Session` when the

@@ -58,16 +58,15 @@ Recommendations for the implementation:
   catalog schema (`js/msf/src/catalog.ts`) accepts a negative `delay` and
   folds it into absent; refuse it on decode instead.
 
-Decided 2026-10-27 (maintainer): this waits only on
-[capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md), not the
-whole [audio jitter target](/quest/m1/audio-jitter-target/README.md) epic,
-whose remaining manual browser proof does not gate reshaping the clock.
-
-## Required
-
-- [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - the estimator's browser budgets, re-measured, before this reshapes the clock around them
+Decided 2026-10-27 (maintainer): this waits only on the estimator's browser
+budgets being re-measured, not the whole
+[audio jitter target](/quest/m1/audio-jitter-target/README.md) epic, whose
+remaining manual browser proof does not gate reshaping the clock.
+[moq-dev/moq#7898](https://github.com/moq-dev/moq/pull/7898) re-measured every
+browser row. What [capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md)
+still owes, the AAC rows after a publisher change, does not gate it either.
 
 ## Related
 
-- [Time stretch](/quest/m2/watch-audio-time-stretch.md) - stretching needs a clock to converge toward
+- [Watch](/quest/m1/audio-jitter-target/watch.md) - time-stretches the audio ring toward the clock this produces
 - [Watch worker](/quest/m2/watch-worker.md) - moves `Sync` into a worker afterwards; keep the handles free of main-thread assumptions

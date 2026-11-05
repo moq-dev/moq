@@ -73,7 +73,7 @@ impl Script {
 	async fn handle(State(script): State<Script>, Json(request): Json<Request>) -> Response {
 		script.seen.lock().unwrap().push(request.clone());
 		let answer = match request.event {
-			Event::Connect => script.connect.lock().unwrap().clone(),
+			Event::Connect | Event::Attach => script.connect.lock().unwrap().clone(),
 			Event::Revalidate => script.revalidate.lock().unwrap().clone(),
 			Event::End { .. } => return StatusCode::NO_CONTENT.into_response(),
 		};
@@ -129,7 +129,7 @@ impl Fixture {
 	}
 
 	async fn spawn(auth: moq_relay::auth::Auth, websocket: bool) -> Self {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let _ = rind_rustls::default_provider().unwrap().install_default();
 		let sessions = moq_relay::session::Registry::new();
 		let mut internal_config = internal::Config::default();
 		internal_config.listen = Some("127.0.0.1:0".parse().unwrap());
@@ -143,7 +143,7 @@ impl Fixture {
 		});
 
 		let (url, handle) = if websocket {
-			let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+			let cluster = crate::spawn_cluster(cluster::Options::default());
 			let mut server_config = moq_tokio::listen::Config::default();
 			server_config.bind = Some("[::]:0".parse().unwrap());
 			server_config.tls.generate = vec!["localhost".into()];
@@ -169,11 +169,11 @@ impl Fixture {
 			let server = config.init(Default::default()).expect("server init");
 			let mut server = server.listen().await.expect("listen");
 			let port = server.tcp_local_addr().expect("TCP listener is configured").port();
-			let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+			let cluster = crate::spawn_cluster(cluster::Options::default());
 			let sessions = sessions.clone();
 			let handle = tokio::spawn(async move {
 				let mut id = 0;
-				while let Some(request) = server.accept().await {
+				while let Ok(request) = server.accept().await {
 					let conn = Connection::new(request, cluster.clone(), auth.clone())
 						.with_id(id)
 						.with_sessions(sessions.clone());

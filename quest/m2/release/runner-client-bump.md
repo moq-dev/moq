@@ -2,15 +2,17 @@
 
 ## Goal
 
-Condition: a moq-tokio release carries
-[moq-dev/moq#5083](https://github.com/moq-dev/moq/pull/5083), a breaking
-change on `main` that publishes only with the next cut. Check with
-`cargo info moq-tokio` and that release's changelog.
-
-Then bump the moq-dev-rs client in
+The moq-dev-rs client in
 [englishm/moq-interop-runner](https://github.com/englishm/moq-interop-runner)
-to it, so it stops attaching a Timestamp property to every object, and delete
-this quest once that PR merges.
+runs a moq-tokio that stops attaching a Timestamp property to every object.
+Delete this quest once that bump merges.
+
+## Waiting
+
+- moq-dev/moq: a moq-tokio release carries
+  [moq-dev/moq#5083](https://github.com/moq-dev/moq/pull/5083), a breaking
+  change on `main` that publishes only with the next cut. Check with
+  `cargo info moq-tokio` and that release's changelog.
 
 ## Plan
 

@@ -32,6 +32,11 @@ jobs:
         with:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+      # The workspace-hack unifies third-party features so the gate's builds
+      # share a cache, which would hide a crate using a feature it does not
+      # declare. Every build here checks declarations, so it runs without it.
+      - name: Disable the workspace-hack
+        run: nix develop --command bash -c 'cargo hakari disable && cargo update --workspace'
       - name: Check feature and profile variants
         run: nix develop --command just ${{ matrix.recipe }}
         env:

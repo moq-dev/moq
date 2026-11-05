@@ -277,11 +277,12 @@ impl Session {
 		let _rt = RUNTIME.enter();
 
 		let origin = moq_tokio::origin::spawn();
-		// Each run is a new publisher instance: a restarted pipeline takes over from one whose route still
-		// lingers, rather than resuming viewers into the old run's group sequence. Reconnects keep it.
-		let epoch = moq_net::Epoch::mint();
-		gst::info!(CAT, "publishing {} under epoch {epoch}", settings.broadcast);
-		let broadcast = origin.publish(&settings.broadcast, moq_net::origin::Route::default().with_epoch(epoch))?;
+		// Each run is a new stream under a fresh instance, which the publication mints: a restarted
+		// pipeline never resumes viewers into the old run's group sequence. Reconnects keep it.
+		let broadcast = origin.publish(&settings.broadcast, moq_net::origin::Route::default())?;
+		if let Some(instance) = broadcast.route().and_then(|route| route.instance) {
+			gst::info!(CAT, "publishing {} under instance {instance}", settings.broadcast);
+		}
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())?;
 
@@ -568,19 +569,19 @@ mod tests {
 		(session, connection)
 	}
 
-	fn announced_epoch(broadcast: &moq_net::origin::Publication) -> moq_net::Epoch {
-		broadcast.route().expect("announced").epoch.expect("an epoch")
+	fn announced_instance(broadcast: &moq_net::origin::Publication) -> moq_net::Instance {
+		broadcast.route().expect("announced").instance.expect("an instance")
 	}
 
-	// Without an epoch, a restart whose old route lingers resumes viewers into the old run's groups.
+	// Under one instance, a restart whose old route lingers would resume viewers into the old run's groups.
 	#[test]
-	fn each_run_announces_a_newer_epoch() {
+	fn each_run_announces_a_new_instance() {
 		let (first, first_broadcast) = started_with_broadcast();
-		let first_epoch = announced_epoch(&first_broadcast);
+		let first_instance = announced_instance(&first_broadcast);
 		first.stop();
 
 		let (second, second_broadcast) = started_with_broadcast();
-		assert!(announced_epoch(&second_broadcast) > first_epoch);
+		assert_ne!(announced_instance(&second_broadcast), first_instance);
 		second.stop();
 	}
 
