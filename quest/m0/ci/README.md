@@ -186,5 +186,4 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Measure the Linux cache effect of native media exclusions](/quest/m0/ci/hakari-followups.md) - scheduled Linux jobs measure cache reuse after unrelated tests stop compiling PipeWire and libclang
 - [A release merge opens no stale release PR](/quest/m0/ci/release-pr-after-release.md) - `just rs release` publishes before it proposes, so a merged release isn't re-proposed
 - [Build two queue entries at once if it helps](/quest/m0/ci/queue-concurrency.md) - a measured trial of `maximumEntriesToBuild: 2` against the serial lane's burst latency
-- [macOS CI runs kio's tests](/quest/m0/ci/macos-kio.md) - `just rs macos-test` includes kio
 - [The desktop host's Nix builders may map user namespaces](/quest/m0/ci/nix-builder-userns.md) - agents' local `just ci` builds the runner image instead of failing `check flake`
