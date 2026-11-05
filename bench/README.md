@@ -12,6 +12,18 @@ case dials. `lsof`, included in the Nix shell, verifies
 ownership. A collision uses the existing startup attempts; exhausted attempts
 fail with the relay log before any load starts.
 
+Every session from `run.sh`, `browser/run.sh`, or `local.py` (so every root
+`just bench*` recipe) holds the host's benchmark lock, `/tmp/moq-bench.lock`,
+from the end of its argument checks until it exits, across all checkouts and
+agents. A second session waits, printing the holder's PID, start time,
+directory, and command; the file holds that record. `lock.sh COMMAND` holds it
+for any other measurement. The kernel releases it once the session and every
+process it started exit. It serializes benchmarks only: builds and tests from
+other agents still run, so pick a quiet host and check the load each run
+records. Bench a host as one Unix user: Linux's `fs.protected_regular` keeps a
+second user from opening a lock file the first one created, whatever its mode,
+and `lock.py` refuses a link in the lock file's place.
+
 ## Commands
 
 Run every Criterion target plus the local relay workloads:
@@ -957,3 +969,11 @@ the module lanes `just check` runs at once, sweep `--jobs 1 3` over
 `bash sh/dispatch.sh check BASE`, which is then admitted once as a whole.
 Admission remains outside the suite's timeout clocks. Use separate checkouts to
 avoid measuring Cargo's artifact lock instead of competing work.
+
+`local.py` starts its workers without the benchmark lock's descriptor, which
+`quest gate` and Bun would close anyway, so only `local.py` itself holds the
+lock. Every exit of `local.py` stops its workers first. On Linux a SIGKILL or
+OOM kill does too, even inside a Quest scope: each worker watches `local.py`
+through a pidfd and stops once it exits. macOS has no pidfd, so there killing
+`local.py` with SIGKILL frees the lock while its workers keep measuring until
+their own gates exit, an accepted gap. Stop it with Ctrl-C or SIGTERM instead.

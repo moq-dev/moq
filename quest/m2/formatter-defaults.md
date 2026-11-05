@@ -17,6 +17,8 @@ frontmatter, instead of imposing a custom global style. Keep lint rules,
 parser capabilities, and exclusions that protect generated, vendored, or
 byte-sensitive files. Use the selected formatter's defaults where a language
 has no single standard style; do not invent a replacement repository style.
+Empty the root `.rustfmt.toml` rather than deleting it: rustfmt otherwise
+walks past the repository root and applies a parent checkout's config.
 
 Coordinate the repository-wide reformat with the Bun decision so files do not
 first change to Biome defaults and then to Bun's. Native languages join the
