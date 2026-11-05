@@ -5,7 +5,7 @@
 Publish the relay QoS lag and dropped-counter API after the next release.
 The histogram lands on totals and prefix tracks beside the existing maps.
 Publisher timeliness, client media health, and dashboard presentation remain
-separate additive work in m2.
+separate additive work in m3 and m5.
 
 ## Plan
 

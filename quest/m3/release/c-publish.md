@@ -12,7 +12,7 @@ archive instead of the hand-written one.
 The generated C line proves the same cases with the built archive before
 publication. This quest proves registry/release delivery after publication
 and records the artifact versions and results. The hand-written `moq-c` 0.7
-ships at the m1 cut (decided 2026-10-25), so the generated 0.8 supersedes a
+ships at the next cut (decided 2026-10-25), so the generated 0.8 supersedes a
 published package; its source stays until
 [c-retire](/quest/m3/release/c-retire.md).
 

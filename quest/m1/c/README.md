@@ -3,7 +3,7 @@
 ## Goal
 
 The hand-written `moq-c` crate (`rs/moq-c`, `moq.h`) ships at this cut as
-`moq-c` 0.7 with every binding feature moq-ffi gains in m1, so a C user can do
+`moq-c` 0.7 with every binding feature moq-ffi gains in m1 or m2, so a C user can do
 whatever a Python, Swift, Kotlin, Go, Dart, or C++ user can. The C interop
 client and every `doc/lib/c` sample build and run against the built release
 archive before the cut.
@@ -17,15 +17,15 @@ but it publishes only after the cut. C users break
 twice (0.6 to 0.7, then to the generated 0.8); that is the accepted cost.
 
 - moq-c is not frozen: it takes the same breaks as moq-ffi and the other
-  bindings. Every m1 quest or PR that changes the binding API changes
+  bindings. Every m1 or m2 quest or PR that changes the binding API changes
   `rs/moq-c` in the same PR, with its Impact migration note and `doc/lib/c`
   update; none waits on the generated package.
-- Before the cut, diff the moq-ffi exports against `moq.h` and add any m1
+- Before the cut, diff the moq-ffi exports against `moq.h` and add any m1 or m2
   binding feature still missing, so parity is checked rather than assumed.
 - `rs/moq-c` publishes through release-plz like the other crates; confirm the
   release produces the C archive the samples are checked against.
 
-Public API: moq-c gains each m1 binding feature. Wire: none.
+Public API: moq-c gains each m1 or m2 binding feature. Wire: none.
 
 ## Required
 

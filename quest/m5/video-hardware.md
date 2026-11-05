@@ -8,7 +8,7 @@ real hardware get run on it, and what breaks gets fixed.
 ## Plan
 
 Every item here is blocked on a physical machine rather than on code, which is
-why they sit together and why they sit in m3. Decided in the 2026-09-30 audit:
+why they sit together and why they sit in m5. Decided in the 2026-09-30 audit:
 the KDE DMA-BUF capture and PipeWire camera validations fold in here, and the
 V4L2 `VIDIOC_EXPBUF` source is dropped with the export itself (see
 [#2819](/quest/m4/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md)).

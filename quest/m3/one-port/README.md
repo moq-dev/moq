@@ -85,7 +85,7 @@ decided.
 
 ### STUN
 
-Decided 2026-10-08: the public STUN responder is left to P2P (m2), its
+Decided 2026-10-08: the public STUN responder is left to P2P (m4), its
 only consumer. Here, a Binding request carrying USERNAME is an ICE check
 and goes to WebRTC, as does every Binding response, since the WebRTC agent
 runs full ICE and only it sends requests from this port. Any other STUN is

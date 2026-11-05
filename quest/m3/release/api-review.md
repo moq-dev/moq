@@ -15,7 +15,7 @@ Record what this run learned (inventory method, findings, what to check first)
 in the cut's PR notes or a follow-up quest, so the next run starts from it.
 Only `/quest-delete` ends the recurrence.
 
-Starts once m1 lands, so the APIs it reviews are the ones that ship; the cut
+Starts once m2 lands, so the APIs it reviews are the ones that ship; the cut
 waits for it. API shape is the maintainer's call (decided 2026-10-19), so this
 run changes no code. Inventory the diff against the last published version
 by running `just api-diff`
@@ -24,7 +24,7 @@ hand diff the surfaces it cannot see. For each export that is awkward, judge it
 against AGENTS.md's Public API rules: names mirrored across languages, no
 callbacks or 4+ args, misuse unrepresentable, private until a consumer needs
 it. Propose 2-3 shapes with a recommendation, ask the maintainer, and file
-each approved change as a quest in m1, which holds the cut until it lands.
+each approved change as a quest in m2, which holds the cut until it lands.
 Model items only the built-in sessions use stay private
 ([moq-dev/moq#6747](https://github.com/moq-dev/moq/pull/6747)); this review judges the shape of what ships.
 

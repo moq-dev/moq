@@ -4,7 +4,8 @@
 
 Work that follows the next breaking release with nobody waiting on it yet:
 tests, tooling, benchmarks, optimizations, conditions on outside parties that
-only later work needs, and features that only moq.pro's later plans need.
+only later work needs, and features only a downstream deployment's later
+plans need.
 
 ## Plan
 

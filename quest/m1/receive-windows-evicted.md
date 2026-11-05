@@ -20,7 +20,7 @@ alongside throughput and latency, instead of failing.
 Moved to m1 2026-11-04 with the maintainer, after
 [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838) landed the
 fitting cells: what remains waits on
-[group-drops](/quest/m2/group-drops.md), an m1 quest, and with the
+[group-drops](/quest/m2/group-drops.md), an m2 quest, and with the
 overcommitted cells skipped the benchmark no longer fails Nightly, so this
 no longer holds the m0
 [Nightly passes on main](/quest/m0/nightly/README.md) epic open. It replaces

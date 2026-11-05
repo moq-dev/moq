@@ -36,7 +36,7 @@ Churn context: main landed about 2,400 commits in the 30 days before the
 audit, 823 of them fixes, concentrated in `rs/moq-net` (`model/track.rs` 85
 fix commits, `ietf/subscriber.rs` 69, `ietf/publisher.rs` 53,
 `lite/subscriber.rs` 51, `model/resume.rs` 46) and `js/net`. The audit's
-redesign proposals for the churning mechanisms are in m2, since each is
+redesign proposals for the churning mechanisms are in m3 and m4, since each is
 internal and can ship after the cut:
 [resume as producer replacement](/quest/m4/resume-redesign.md),
 [moq-transport request leases](/quest/m3/ietf-request-lease.md),

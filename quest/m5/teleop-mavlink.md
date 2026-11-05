@@ -8,7 +8,7 @@ and MAVProxy connect unchanged.
 
 ## Plan
 
-Parked in m3 until a real ArduPilot user or partner asks (2026-09-30 audit).
+Parked in m5 until a real ArduPilot user or partner asks (2026-09-30 audit).
 
 Decided 2026-10-08: the lossy class is a snapshot track per key with a
 bounded key set, since one snapshot track carries only one latest value.

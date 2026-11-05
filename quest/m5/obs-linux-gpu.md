@@ -6,7 +6,7 @@ A supported Linux OBS graphics/encoder combination publishes composited video wi
 
 ## Plan
 
-In m3 until the OBS encoder ships and a Linux user reports CPU readback as
+In m5 until the OBS encoder ships and a Linux user reports CPU readback as
 the bottleneck.
 
 - Start with an API feasibility probe. OBS exposes DMA-BUF import in `graphics.h`; that is not proof its compositor textures can be exported. Determine whether EGL/GL allocation export is available, or whether an upstream OBS hook or an encoder-owned exportable render target is required.

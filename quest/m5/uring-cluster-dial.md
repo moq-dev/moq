@@ -30,4 +30,4 @@ Public API: none until the port. Wire: none.
 
 ## Related
 
-- [Stream transports](/quest/m4/perf/stream/README.md) - the TCP and WebSocket half, ported in m2
+- [Stream transports](/quest/m4/perf/stream/README.md) - the TCP and WebSocket half, ported in m4

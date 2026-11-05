@@ -56,7 +56,7 @@ m1 quest on 2026-10-22.
   otherwise the migration note says how to share the type instead.
 - Compile-check the code in every `MIGRATE.md` section the cut ships against
   the candidate. Nothing else builds it.
-- Required by the cut, after m1's breaking work has landed.
+- Required by the cut, after m2's breaking work has landed.
 - Start from the candidates [moq-dev/moq#6477](https://github.com/moq-dev/moq/pull/6477)
   listed as breaks matching no name in `MIGRATE.md` (about 15 Rust crates,
   `@moq/hang`, `@moq/net`, `@moq/watch`, and moq-ffi): confirm each, and add

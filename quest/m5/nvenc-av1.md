@@ -8,7 +8,7 @@ transcode, and refuses it elsewhere.
 
 ## Plan
 
-Split from the Main10 quest in the 2026-09-30 audit. It sits in m3 because it
+Split from the Main10 quest in the 2026-09-30 audit. It sits in m5 because it
 is hardware-gated: AV1 NVENC needs an Ada GPU, and the only GPU CI host is an
 RTX 3070 Ti. An Ada GPU on a CI host, or a consumer asking for AV1 encode,
 brings it back.

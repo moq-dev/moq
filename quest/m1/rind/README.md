@@ -48,7 +48,7 @@ instead, so every crate drops C, not just the relay.
   uses, so most areas switch on rind 0.1.2 (published 2026-11-01), which runs on
   CPUs without the crypto extensions (e2ee, which no binary links, switched
   on 0.1.0). Relay ACME, the one area that waited on `rind-instant-acme`, is
-  removed for now instead (maintainer, 2026-11-03), and returns on rind in m3.
+  removed for now instead (maintainer, 2026-11-03), and returns on rind in m5.
   aws-lc-rs stays in the workspace until
   the last area lands, which is when this epic removes it.
 - Split per area, each landing once rind covers it. Docs a change makes stale

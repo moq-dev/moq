@@ -13,7 +13,7 @@ production takes, and the fixture must take that path. Firefox 157 in
 Playwright 1.64 has no `MediaStreamTrackProcessor`, in a worker or on the
 window, and cannot transfer a `MediaStreamTrack`, so it always takes the
 `<video>` fallback. Chromium has no worker processor either, so no Playwright
-engine on Linux reaches the worker path; its coverage moved to the m3 Safari
+engine on Linux reaches the worker path; its coverage moved to the m5 Safari
 quest (decided 2026-10-30, see Related).
 
 What remains before the lane joins Nightly's `media-firefox` job:
@@ -34,7 +34,7 @@ What remains before the lane joins Nightly's `media-firefox` job:
 
 Playwright WebKit stays out, since Playwright's WebKit is not Safari. The
 [macOS browser lane](/quest/m4/macos-browser-lane.md) adds Chrome and Safari on
-macOS, and the m3 Safari work publishes from Safari there.
+macOS, and the m5 Safari work publishes from Safari there.
 
 ## Related
 

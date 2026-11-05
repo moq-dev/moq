@@ -16,9 +16,9 @@ it: Kixel builds a `kixel` daemon on these libraries, and any other binary
 can do the same.
 
 Non-goals: a mesh daemon or CLI here (`moq mesh` is not added to moq-cli),
-MagicDNS, agent protocols, a graph UI, internet P2P or NAT traversal in m2
+MagicDNS, agent protocols, a graph UI, internet P2P or NAT traversal in m3
 (remote traffic always crosses a relay; [mesh over ICE](/quest/m5/mesh-ice.md)
-is parked in m3), TUN devices or IP routing, encryption (parked in
+is parked in m5), TUN devices or IP routing, encryption (parked in
 [mesh keys](/quest/m5/mesh-keys.md)), a member list that a compromised
 coordinator cannot extend, and Windows.
 
@@ -103,7 +103,7 @@ the third, and survives a relay restart.
 
 ## Related
 
-- [P2P](/quest/m4/p2p/README.md) - internet peer sessions, which the m2 mesh does not use
+- [P2P](/quest/m4/p2p/README.md) - internet peer sessions, which the m3 mesh does not use
 - [Mesh over ICE](/quest/m5/mesh-ice.md) - deferred direct paths between mesh nodes on different networks
 - [End-to-end encryption](/quest/m5/e2ee/README.md) - the AEAD the encryption level will reuse
 - [Teleoperation](/quest/m5/teleop-robot.md) - robot track shapes that could ride the mesh

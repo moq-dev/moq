@@ -56,7 +56,7 @@ and its trait-versus-bridge comparison:
 - **Scope is every writer and reader above moq-net:** moq-mux (with the
   moq-video and moq-audio encoders built on it), moq-json, moq-stats, hang,
   and the CLI paths, plus the JS packages that need it.
-- **Ships in m2 with e2ee**, not in m1's breaking release: it is a public
+- **Ships in m5 with e2ee**, not in m2's breaking release: it is a public
   API break, and e2ee is its first consumer.
 
 Today moq-net has no model traits (only `Consume<T>` in

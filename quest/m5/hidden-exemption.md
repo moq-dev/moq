@@ -9,7 +9,7 @@ for peers that predate it.
 
 ## Plan
 
-In m3 because it waits on a deployment, not on code; it comes back once
+In m5 because it waits on a deployment, not on code; it comes back once
 the mesh runs lite-07.
 
 - Remove the exemption, the `with_hidden(token.peer)` in `Cluster::scope`

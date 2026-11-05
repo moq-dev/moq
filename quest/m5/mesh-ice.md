@@ -11,7 +11,7 @@ ordinary link.
 ## Plan
 
 Parked 2026-10-31 (maintainer, moq.pro mesh planning interview): remote mesh
-traffic is meant to cross relays, so hole punching waits in m3 until a mesh
+traffic is meant to cross relays, so hole punching waits in m5 until a mesh
 user needs it. Reuse the P2P line's ICE, signaling under the mesh's own
 prefix, and operator-supplied ICE servers; no TURN, since the relay already
 carries the fallback route.

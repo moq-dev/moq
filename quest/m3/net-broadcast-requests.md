@@ -17,5 +17,5 @@ track per thread created up front, so T3 claims a broadcast per entity
 instead and can collapse to one once this lands. Today the request pull
 (`requested()` in `js/net/src/broadcast.ts`) is reachable only by wire
 layers, and only the origin has a public `requests()`; keep the internal
-wire path on the new handler. Ranked at the top of m2 beside the mesh
+wire path on the new handler. Ranked at the top of m3 beside the mesh
 libraries, which Kixel builds on from `main`.

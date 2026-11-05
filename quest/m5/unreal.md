@@ -10,7 +10,7 @@ editor stability across a play-stop-play cycle.
 
 ## Plan
 
-In m3 until an Unreal consumer asks; the C++ package it links already exists.
+In m5 until an Unreal consumer asks; the C++ package it links already exists.
 
 - Consume the release tarball through the module's `Build.cs`
   (`PublicAdditionalLibraries`, include paths); Unreal's build does not use

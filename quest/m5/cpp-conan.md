@@ -9,8 +9,8 @@ Windows, macOS, and Linux.
 
 ## Plan
 
-In m3 until a Conan consumer asks; the release tarball covers C++ consumers
-first. The vcpkg registry, which this reuses, is parked in m3 too (decided
+In m5 until a Conan consumer asks; the release tarball covers C++ consumers
+first. The vcpkg registry, which this reuses, is parked in m5 too (decided
 2026-10-08), so it lands before this does.
 
 - A `moq-cpp` recipe, named after the package, on a moq-dev remote

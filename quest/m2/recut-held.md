@@ -22,6 +22,11 @@ an epic with no breaking work left stays in m1, and one with no gating work
 left leaves the cut gate for m1. If a child is claimed again before this runs,
 leave its epic in place and keep this quest for it.
 
+Prose that names a held epic's milestone becomes stale when it moves; update
+it in the same PR: moq-c parity in [c-origin-relay](/quest/m5/c-origin-relay.md),
+datagram tracks in [net-wrap](/quest/m5/net-wrap/README.md), and the browser
+padding probes in [lite07-finalize](/quest/m2/lite07-finalize.md).
+
 ## Required
 
 - [Route handle](/quest/m1/api-audit/route/handle.md) - claim held api-audit

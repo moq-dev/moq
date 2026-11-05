@@ -8,7 +8,7 @@ five minutes.
 
 ## Plan
 
-Parked in m3 until a real ArduPilot user or partner asks (2026-09-30 audit).
+Parked in m5 until a real ArduPilot user or partner asks (2026-09-30 audit).
 
 The browser client subscribes video and telemetry and publishes control, the
 shape Blue Robotics' Cockpit proves is viable. It is the demo and the

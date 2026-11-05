@@ -21,7 +21,7 @@ releases it.
   they arrive. Since 2026-10-05 a track is all timed or all untimed (the untimed
   model, [#4822](https://github.com/moq-dev/moq/pull/4822)), so no stream mixes the two.
 - This replaces the sync code a web frontend writes today to hold KLV or
-  MAVLink telemetry back to the video playhead. In m2 rather than m1, since
+  MAVLink telemetry back to the video playhead. In m3 rather than m1, since
   that workaround exists.
 - Decided 2026-10-08: the A/V clock and the watch worker land first, since
   they change what `Sync` waits on and where it runs.

@@ -127,7 +127,7 @@ Decisions (2026-10-22), each with its reason:
   right. The before/after is still recorded.
 - **The ablation reuses the bench harness** rather than building a second
   one.
-- **Ranked second in m2/perf**, after kio channel contention, which is the
+- **Ranked second in m4/perf**, after kio channel contention, which is the
   largest cost measured so far.
 
 Decided 2026-10-31 (maintainer), in

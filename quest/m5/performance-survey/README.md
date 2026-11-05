@@ -17,7 +17,7 @@ Requested on 2026-10-22: an extensive performance audit and quests requiring
 benchmarks to validate findings. Audited main
 [`1d43c096e044`](https://github.com/moq-dev/moq/commit/1d43c096e04431bfc87d807ce47a546df8017475).
 These are source-supported hypotheses, not new measured regressions or
-promised speedups. General optimization stays in m2 under the existing
+promised speedups. General optimization stays in m4 under the existing
 milestone policy. Do not change API, wire, scheduling policy, or retention
 contracts just to improve a number; bring a necessary contract change to the
 maintainer with the measurement first. No new user guide is needed for this

@@ -4,7 +4,7 @@
 
 Work that follows the next breaking release and has someone waiting on it:
 byte streams and the mesh libraries first, then release execution after the
-cut, quests a named consumer needs (including moq.pro), and bug fixes in
+cut, quests a named consumer needs, including downstream deployments, and bug fixes in
 shipped code. Breaking and additive work mix here; the cut after m2's sorts
 them by kind.
 
@@ -13,9 +13,10 @@ them by kind.
 Decided 2026-11-05 (maintainer, milestone re-cut): the old m2 ("later work")
 split in half by priority into m3 and m4. A quest joined m3 when a named
 consumer or user-facing need waits on it, when it is release execution or a
-bug fix in shipped code, or when an m0 to m3 quest requires it. moq.pro's
-quests count as a consumer: what its m1 and m2 need joins m3, and what only
-its m3 needs joins m4. The recurring hygiene audits live here behind the
+bug fix in shipped code, or when an m0 to m3 quest requires it. A downstream
+deployment's plans count as a consumer: work its near-term plans need joins
+m3, work only its urgent plans need joins m1 or m2 by kind, and work only its
+later plans need joins m4. The recurring hygiene audits live here behind the
 cut, so the shift after the cut brings each into m1, as before.
 
 Decided 2026-10-13: a feature does not block the breaking release merely

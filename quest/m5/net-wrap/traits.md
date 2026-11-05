@@ -70,4 +70,4 @@ they wait for the breaking release cut.
 
 ## Required
 
-- [Breaking release cut](/quest/m3/release/cut.md) - the traits land after the cut that ships m1's breaks
+- [Breaking release cut](/quest/m3/release/cut.md) - the traits land after the cut that ships m2's breaks

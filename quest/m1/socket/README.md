@@ -13,7 +13,7 @@ hand-rolling the announce, watch, and request loop. Rust, JS, and Python
 Non-goals: a wire change to moq-lite (a socket is a path and track convention
 over existing announce and subscribe streams); session caps, leases, or idle
 timeouts, which stay application logic (boy's 60 s idle, CARLA's one-driver
-lease and 1 s watchdog); signing and encryption, which the m2
+lease and 1 s watchdog); signing and encryption, which the m3
 [mesh](/quest/m3/mesh/README.md) owns by making endpoint ids public keys.
 
 ## Plan
@@ -180,7 +180,7 @@ replacement arc), still standing:
 Later, not built now: a multiplexed `quic` protocol, `quic/<dialer>/<acceptor>/<S>` on
 the same endpoint with no new announcement, which brings back several groups
 or streams per session; and signed or encrypted sessions with ids as public
-keys, in the m2 [mesh](/quest/m3/mesh/README.md).
+keys, in the m3 [mesh](/quest/m3/mesh/README.md).
 
 This epic owns removing the hand-rolled loops: after the ports, no
 announce-watch-request pairing remains in `rs/moq-boy`, `js/moq-boy`, or

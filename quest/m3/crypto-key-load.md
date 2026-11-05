@@ -15,4 +15,4 @@ Planned 2026-11-03 (maintainer) from Kixel's `@kixel/mesh`
 had to carry its own Ed25519 and z-base-32 code because `SecretKey` cannot
 load a stored key and its `sign` is internal. Keep generated keys working,
 keep the browser path non-extractable, and test that a key loaded from bytes
-signs what Rust verifies. Ranked at the top of m2 beside the mesh libraries.
+signs what Rust verifies. Ranked at the top of m3 beside the mesh libraries.

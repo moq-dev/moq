@@ -20,7 +20,7 @@ buffered-ascending (lite-07 already carries the order field), webrtc-vendor
 (internal, though it requires the m2 rename), and the crates.io trusted
 publisher and OIDC quests (setup after the cut's first publishes) are
 additive. [video-vaapi](/quest/m1/video-vaapi.md) moved up from later work
-because moq.pro's iGPU transcode prototypes need it now.
+because a downstream iGPU transcode trial needs it now.
 
 Held here by open claims: a quest's branch is its path, so a claimed quest
 cannot move until its PR merges, and an epic moves with its children. These

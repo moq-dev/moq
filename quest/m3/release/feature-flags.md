@@ -20,12 +20,12 @@ Record what this run learned (inventory method, findings, what to check
 first) in the cut's PR notes or a follow-up quest, so the next run starts from
 it. Only `/quest-delete` ends the recurrence.
 
-Starts once m1 lands, so the features it reviews are the ones that ship; the
+Starts once m2 lands, so the features it reviews are the ones that ship; the
 cut waits for it. Feature changes break downstream builds, which is why this
 runs before the cut rather than with the post-release audits. Like the [API
 shape review](/quest/m3/release/api-review.md), this run changes no code
 (decided 2026-10-26): it proposes each change with a recommendation, asks the
-maintainer, and files each approved change as a quest in m1, which holds the
+maintainer, and files each approved change as a quest in m2, which holds the
 cut until it lands.
 
 Judge every feature against the `# Features` rules in `rs/AGENTS.md`, and

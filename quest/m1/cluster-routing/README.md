@@ -137,6 +137,6 @@ setup after the capabilities land.
 
 - [Route health](/quest/m5/route-health/README.md) - epoch-only active/passive delivery monitoring and automatic recovery
 - [P2P](/quest/m4/p2p/README.md) - application-selected peer sessions feed the shared routing model
-- [Routing guide](/quest/m1/routing-guide.md) - concept page and federation setup; P2P extends it in m2
+- [Routing guide](/quest/m1/routing-guide.md) - concept page and federation setup; P2P extends it in m4
 - [Route wakes](/quest/m4/route-wakes.md) - local work follows affected fronts rather than the whole covered table
 - [Link quality](/quest/m5/link-quality.md) - optional measured link cost, distinct from delivery-health failover
