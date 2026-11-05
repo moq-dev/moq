@@ -2452,12 +2452,18 @@ impl TrackState {
 			let Some(slot) = self.lookup.get(&sequence) else {
 				continue;
 			};
-			// Its flights too, which readers ride for the same reason.
-			let flights = self.flights.get(&sequence).into_iter().flatten();
-			for group in slot.copies().cloned().chain(flights.filter_map(group::Detached::held)) {
+			for group in slot.copies() {
 				let freed = group.shed(self.debt, cap - paid.min(cap));
 				self.debt -= freed.min(self.debt);
 				paid = paid.saturating_add(freed);
+			}
+			// Its flights too, which readers ride for the same reason.
+			for flight in self.flights.get(&sequence).into_iter().flatten() {
+				if let Some(group) = flight.held() {
+					let freed = group.shed(self.debt, cap - paid.min(cap));
+					self.debt -= freed.min(self.debt);
+					paid = paid.saturating_add(freed);
+				}
 			}
 		}
 		paid
@@ -23472,6 +23478,37 @@ mod test {
 		assert_eq!(read_numbered(&mut far), None, "too far behind the flight's rider");
 		let own = asked(&requests).expect("a flight of its own");
 		assert_eq!(own.start(), Position { group: 0, frame: 0 });
+	}
+
+	/// A flight sheds its front under pool debt like the copy it replays, so a pool far
+	/// smaller than one tail holds a live group and its flight near the pool.
+	#[test]
+	#[cfg(feature = "async")]
+	fn pool_debt_sheds_a_flight() {
+		const POOL: u64 = 4 * 1024 * 1024;
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(POOL));
+		let producer = Producer::new(
+			Arc::new(broadcast::Info {
+				pool: pool.clone(),
+				..Default::default()
+			}),
+			"test",
+			Info::default(),
+		);
+		let requests = producer.requests();
+		let mut live = producer.append_group().unwrap();
+		let mut late = live.consume();
+		for index in 0..1_000 {
+			live.write_frame(None, numbered(index)).unwrap();
+		}
+		assert_eq!(read_numbered(&mut late), None);
+		let mut flight = asked(&requests).expect("a flight").accept(0, None).unwrap();
+		assert_eq!(read_numbered(&mut late), None);
+		for index in 0..1_000 {
+			flight.write_frame(None, numbered(index)).unwrap();
+			assert_eq!(read_numbered(&mut late), Some(index));
+			assert!(pool.used() < 2 * POOL, "frame {index}: {} bytes held", pool.used());
+		}
 	}
 
 	/// A handler that refuses a flight leaves the reader where a track without one does: a
