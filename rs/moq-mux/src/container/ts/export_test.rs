@@ -8459,7 +8459,7 @@ async fn jitter_published_after_the_tables_keeps_the_encoders_clock() {
 	assert_decodes_after_the_clock(&runner);
 }
 
-/// A delivery skip flags the next PCR without changing the program or its release clock.
+/// Only skipped schedule slots flag the PCR, keeping the program and release clock.
 /// Short holes keep the grid continuous; long ones exceed the scheduler's backfill window.
 #[tokio::test(start_paused = true)]
 async fn a_skipped_group_flags_the_clock() {
@@ -8520,27 +8520,12 @@ async fn a_skipped_group_flags_the_clock() {
 			out.extend(drain_frames(&mut export).await);
 
 			assert_eq!(export.discontinuity(), 0, "a skipped group is not a new program clock");
-			assert_skip_discontinuity(&out, 2 * usize::from(missing > 0));
+			assert_skip_discontinuity(&out, 2 * usize::from(missing == 60 && delay.is_zero()));
 			let ts: Vec<u8> = out.iter().flat_map(|f| f.payload.iter().copied()).collect();
-			// Each flag lands right before the audio that resumes after its hole.
-			let resumes: Vec<u64> = [20 + missing, 40 + 2 * missing]
-				.into_iter()
-				.filter(|_| missing > 0)
-				.map(|sequence| (60_000 + sequence * 100) * 90)
-				.collect();
-			let mut reader = TsPacketReader::new(Cursor::new(&ts));
-			let (mut flagged, mut after) = (false, Vec::new());
-			while let Some(packet) = reader.read_ts_packet().unwrap() {
-				flagged |= packet
-					.adaptation_field
-					.is_some_and(|field| field.discontinuity_indicator);
-				if let Some(TsPayload::PesStart(pes)) = packet.payload
-					&& std::mem::take(&mut flagged)
-				{
-					after.extend(pes.header.pts.map(|pts| pts.as_u64()));
-				}
+			for pair in out.windows(2) {
+				let jumped = pair[1].timestamp.as_micros() > pair[0].timestamp.as_micros() + 25_000;
+				assert_eq!(count_discontinuity(&pair[1..]), usize::from(jumped));
 			}
-			assert_eq!(after, resumes, "the first PES after each flag resumes its hole");
 			let (_, audio) = collect_pes_pts(&ts);
 			assert!(
 				audio.iter().any(|&pts| pts >= (60_000 + (70 + 2 * missing) * 100) * 90),
@@ -8551,9 +8536,13 @@ async fn a_skipped_group_flags_the_clock() {
 	}
 }
 
-/// A same-program skip changes only the next PCR's flag, including across a backfilled gap.
+/// A same-program clock jump flags only its first PCR.
 fn assert_skip_discontinuity(frames: &[Frame], count: usize) {
-	assert_eq!(count_discontinuity(frames), count, "only one PCR per skip is flagged");
+	assert_eq!(
+		count_discontinuity(frames),
+		count,
+		"only one PCR per clock jump is flagged"
+	);
 	assert!(
 		pats(frames).iter().all(|&(version, _)| version == 0),
 		"the PAT keeps its version"
@@ -8575,18 +8564,23 @@ fn assert_skip_discontinuity(frames: &[Frame], count: usize) {
 	let start = kio::clock::Instant::now();
 	for (count, packet) in ts.as_chunks::<188>().0.iter().enumerate() {
 		if packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x80 != 0 {
-			assert_ne!(packet[5] & 0x10, 0, "a skip flags only a PCR packet");
+			assert_ne!(packet[5] & 0x10, 0, "a clock jump flags only a PCR packet");
 		}
 		let continuation = continuity.packet(packet);
-		health.packet(
-			packet,
-			continuation,
-			super::health::At {
-				count: count as u64 + 1,
-				arrival: start,
-			},
-		);
+		// Judge PCR repetition from its samples. VBR packet density between samples
+		// cannot predict elapsed time, so do not extrapolate it over non-PCR packets.
+		if super::import::pcr(packet).is_some() {
+			health.packet(
+				packet,
+				continuation,
+				super::health::At {
+					count: count as u64 + 1,
+					arrival: start,
+				},
+			);
+		}
 	}
+
 	let mut stats = stats::Snapshot::default();
 	health.errors().report(&mut stats);
 	assert_eq!(stats.pcr_discontinuity_indicator_error, 0, "no unflagged PCR jump");
@@ -8834,7 +8828,7 @@ async fn moved_export(
 
 /// A rendition the catalog moves to another track, in its broadcast or a sibling one, goes on
 /// out of the PID the PMT announced, with that track's media and none of the one it left. The
-/// continuity counters run on, and only the PCR flags the media skipped by the move. Its
+/// continuity counters and the PCR clock run on through the move. Its
 /// parameter sets ride in-band, so the new track may carry another SPS.
 #[tokio::test(start_paused = true)]
 async fn a_moved_rendition_continues_on_its_pid() {
@@ -8852,7 +8846,7 @@ async fn a_moved_rendition_continues_on_its_pid() {
 			"the new track's parameter sets go out in-band"
 		);
 		assert_eq!(continuity_errors(&frames), 0);
-		assert_skip_discontinuity(&frames, 1);
+		assert_skip_discontinuity(&frames, 0);
 		assert!(
 			pmts(&frames).iter().all(|(version, _)| *version == 0),
 			"the PMT stays as announced"
@@ -9042,7 +9036,7 @@ fn unflagged(frames: &[Frame]) -> Vec<u16> {
 }
 
 /// The same instance back after every route went carries on in the same export, under the
-/// program already announced: the PSI keeps its version, and only the PCR flags the gap.
+/// program already announced: the PSI keeps its version and the PCR clock continues.
 /// Both ways a broadcast ends, a clean finish and a drop, continue alike.
 async fn same_instance_returns(finish: bool) {
 	let origin = crate::source::produce_origin();
@@ -9099,7 +9093,7 @@ async fn same_instance_returns(finish: bool) {
 	end.unwrap();
 
 	assert_eq!(pes_count(&frames), 20, "every frame of both spans went out");
-	assert_skip_discontinuity(&frames, 1);
+	assert_skip_discontinuity(&frames, 0);
 	assert_eq!(export.discontinuity(), 0);
 	assert!(
 		pats(&frames).iter().all(|&(version, _)| version == 0),
@@ -9184,7 +9178,7 @@ async fn a_return_keeps_catalog_and_group_history() {
 	frames.extend(rest);
 	end.expect("the publisher's final finish is clean");
 	assert_eq!(pes_count(&frames), 20, "each span goes out exactly once");
-	assert_skip_discontinuity(&frames, 1);
+	assert_skip_discontinuity(&frames, 0);
 	assert_eq!(export.discontinuity(), 0);
 	assert!(pats(&frames).iter().all(|&(version, _)| version == 0));
 	assert!(pmts(&frames).iter().all(|(version, _)| *version == 0));
@@ -10426,7 +10420,7 @@ async fn drain_follower(follower: &mut super::Follower) -> (Vec<Frame>, Option<c
 /// The route going and another of the same instance taking over after a gap that ended the
 /// export's request, with the follower unpolled across it, is its own instance returning: the
 /// export carries on through the new route under the program already announced, flagging
-/// only the next PCR after the skip.
+/// the PCR only if the schedule skips empty slots.
 #[tokio::test(start_paused = true)]
 async fn a_follower_continues_through_a_same_instance_handoff_after_a_gap() {
 	let origin = crate::source::produce_origin();
@@ -10475,7 +10469,7 @@ async fn a_follower_continues_through_a_same_instance_handoff_after_a_gap() {
 	);
 
 	assert_eq!(pes_count(&frames), 20, "every frame of both routes went out");
-	assert_skip_discontinuity(&frames, 1);
+	assert_skip_discontinuity(&frames, 0);
 	assert_eq!(follower.export().discontinuity(), 0);
 	assert!(
 		pats(&frames).iter().all(|&(version, _)| version == 0),

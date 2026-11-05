@@ -70,9 +70,6 @@ fn admission_case(c: &mut Criterion, skipped: bool) {
 					for frame in 0..frames {
 						for pid in 1..=pids {
 							let gap = if skipped && frame >= frames / 2 { 4_000 } else { 0 };
-							if skipped && frame == frames / 2 {
-								schedule.skip();
-							}
 							let at = (999 + gap + frame * 40) * 1_000_000;
 							schedule
 								.push_frames(
