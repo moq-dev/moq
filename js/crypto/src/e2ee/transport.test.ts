@@ -131,6 +131,9 @@ for (const [name, protocol] of [
 			remote,
 			cred.consume(Epoch.of(remote) ?? generation.epoch),
 		).datagrams("audio");
+		// Once the request is answered the peer routes datagrams to it, so the first append cannot
+		// arrive before the track is registered.
+		await consumer.info();
 		while (audio.priority.peek() === undefined) await audio.priority.changed();
 		const sequence = await audio.append(ms(20), encoder.encode("opus"));
 		expect(sequence).toBe(0n);

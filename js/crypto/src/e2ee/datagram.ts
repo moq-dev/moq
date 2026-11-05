@@ -129,6 +129,10 @@ export class Consumer {
 	get priority(): number {
 		return this.#inner.priority;
 	}
+	/** The datagram track's publisher properties, once its request is answered. */
+	info(): Promise<NetDatagram.Info> {
+		return this.#inner.info();
+	}
 	/** Change this consumer's priority, higher first. */
 	setPriority(priority: number): void {
 		this.#inner.setPriority(priority);
