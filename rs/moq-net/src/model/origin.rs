@@ -3717,6 +3717,14 @@ impl FrontServe {
 			&self.front,
 			self.resolved.as_ref().or(self.pin.as_ref()),
 		);
+		// No candidate irreversibly ends this front. Revoke its cached verdict under the
+		// table lock a lookup takes: a route can return before the end actions run, and a
+		// requester must not join the broadcast those actions are about to close.
+		if best.is_none()
+			&& let Ok(mut pending) = self.request.write()
+		{
+			pending.resolved = Some(Err(Error::Unroutable));
+		}
 		// Under the table's lock, which a request reads it under too: a request that
 		// sees another winner from here on mints its own front rather than join this one.
 		if self.resolved.is_none()
@@ -10607,6 +10615,80 @@ mod tests {
 			payloads.push(group.read_frame().await.unwrap().unwrap().payload);
 		}
 		assert_eq!(payloads.last().map(|p| &p[..]), Some(&b"late"[..]));
+	}
+
+	/// Once a front observes a gap, a request after the route returns cannot join it while
+	/// its terminal actions are still being applied on another thread.
+	#[test]
+	fn a_request_after_a_gap_skips_the_front_already_ending() {
+		let (producer, mut driver) = Producer::new(Config::default());
+		let consumer = producer.consume();
+		let route = Route::default();
+		let publication = producer.publish("room/alice", route.clone()).unwrap();
+		let path = consumer.absolute("room/alice").unwrap();
+		let key = (path.clone(), Horizon::default(), None);
+		let broadcast = broadcast::Info::new().produce();
+		let held = broadcast.consume();
+		let (request, watch) = {
+			let mut state = consumer.shared.lock();
+			let selected = state
+				.best_route(&path, Horizon::default(), &HashSet::new(), |_| true)
+				.unwrap()
+				.instance
+				.clone();
+			let request = kio::Producer::new(PendingFront {
+				resolved: None,
+				via: None,
+				first: None,
+				selected,
+				refused: false,
+			});
+			state.fronts.insert(
+				key,
+				RemoteFront {
+					request: request.clone(),
+					broadcast: held.weak(),
+				},
+			);
+			let watch = state.watch_front(&consumer.shared, &path, Horizon::default(), request.clone());
+			(request, watch)
+		};
+		let mut front = FrontServe::new(FrontTask {
+			shared: consumer.shared.clone(),
+			broadcast,
+			path,
+			horizon: Horizon::default(),
+			pin: None,
+			watch,
+			request,
+			timers: consumer.timers.clone(),
+		});
+		let waiter = kio::Waiter::noop();
+		assert!(kio::Task::poll(&mut front, &waiter).is_pending());
+		let Poll::Ready(Ok(first)) = consumer
+			.lookup(Path::new("room/alice").unwrap(), None)
+			.into_inner()
+			.poll_ok(&waiter)
+		else {
+			panic!("the first front did not resolve")
+		};
+
+		publication.unannounce();
+		let ending = front.select();
+		assert!(matches!(ending, Event::Selected { best: None, .. }));
+		publication.announce(route).unwrap();
+		let next = consumer.lookup(Path::new("room/alice").unwrap(), None).into_inner();
+		assert!(next.poll_ok(&waiter).is_pending(), "joined the front already ending");
+
+		front.events.push_back(ending);
+		assert!(kio::Task::poll(&mut front, &waiter).is_ready());
+		driver.poll(Instant::ZERO, &waiter).unwrap();
+		let Poll::Ready(Ok(fresh)) = next.poll_ok(&waiter) else {
+			panic!("the fresh front did not resolve")
+		};
+		assert!(!fresh.is_clone(&first));
+		assert!(!fresh.is_closed());
+		assert!(fresh.track("video").is_ok());
 	}
 
 	/// A re-announce that lands before the front acts on the retraction reuses
