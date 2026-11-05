@@ -14,7 +14,6 @@ and `moq_allocator_reserve_media` with the new `moq_rate_control_*` handles to
 adapt an external encoder to its reservation. Close controls and reservations
 separately. No wire format changes.
 
-
 ### Separate datagram tracks
 
 Create a separate producer with `moq_publish_datagrams` and `moq_datagram_info`; replace `moq_publish_track_datagram` with `moq_publish_datagrams_append` on that handle, or `moq_publish_datagrams_insert` for an explicit sequence. `moq_consume_datagrams` now takes a subscriber priority before its callback and never subscribes to a stream track. Use `moq_publish_datagrams_demand` and `moq_datagram_demand_priority` for aggregate priority, and `moq_publish_datagrams_requests` / `moq_datagram_request_accept` for on-demand publishing. Finish or abort datagram producers separately. A zeroed datagram info is untimed, unlike the microsecond default of stream-track info. `moq_consume_datagrams` returns a negative code at once when the broadcast has neither the datagram track nor a datagram request handler, and a remote name without one ends its callback with a not-found error.
