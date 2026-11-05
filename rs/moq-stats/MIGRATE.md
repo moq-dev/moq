@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Async wrappers are opt-in
+
+Enable the `async` Cargo feature to keep awaiting the readers' `next` and `Publisher::run`:
+`moq-stats = { version = "...", features = ["async"] }`. This also applies with
+`default-features = false`. The feature is off by default; without it, drive `poll_next` and
+`Publisher::poll_run`.
+
+`Consumer::{totals, presence, prefix, group}` return their reader at once instead of awaiting
+the subscription handshake: drop the `.await`. The handshake finishes on the reader's first
+`next`, which fails with its error, such as `NotFound` for an unlisted group.
+The stats tracks and their JSON are unchanged.
+
 ### Group counters have their own epoch type
 
 `GroupFrame::epoch` is `moq_stats::Epoch` instead of `moq_net::Instance`.

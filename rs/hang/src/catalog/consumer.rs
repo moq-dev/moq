@@ -26,7 +26,7 @@ impl<E: DeserializeOwned + Default> Consumer<E> {
 		}
 	}
 
-	/// Poll for the next catalog update.
+	/// Get the next catalog update, or `None` when the track ends.
 	///
 	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if any rendition's
 	/// `broadcast` reference, contribution, or echo prefix walks above the root. Such a reference names no broadcast, and the
@@ -35,6 +35,7 @@ impl<E: DeserializeOwned + Default> Consumer<E> {
 	/// publisher that emits one has a bug (or is hostile), and silently serving the rest hides
 	/// that from the operator while the missing rendition surfaces much later as a track that
 	/// never fills.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
 		let value = ready!(self.inner.poll_latest(waiter))
 			.map_err(|err| match err {
@@ -49,14 +50,6 @@ impl<E: DeserializeOwned + Default> Consumer<E> {
 			check_resolvable(&self.base, catalog)?;
 		}
 		Poll::Ready(Ok(catalog))
-	}
-
-	/// Wait for the next catalog update, or return `None` when the track ends.
-	pub async fn next(&mut self) -> Result<Option<Catalog<E>>>
-	where
-		Catalog<E>: Unpin,
-	{
-		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 }
 

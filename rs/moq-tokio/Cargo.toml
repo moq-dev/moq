@@ -16,7 +16,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 default = ["net", "quic", "websocket", "tcp", "uds"]
 # MoQ sessions over moq-net: `Client`, `Server`, `origin`, and the `connect`, `listen`,
 # and `transport` modules. Every transport feature turns it on, since none works without it.
-net = ["dep:moq-net", "_certs"]
+net = ["dep:moq-net", "moq-net/async", "_certs"]
 # The async QUIC driver alone (`quic::driver`): moq-quic on tokio, without moq-net or
 # the MoQ backend. Includes rind cryptography.
 driver = ["_certs", "dep:moq-congestion", "dep:moq-quic", "dep:rustc-hash"]
@@ -64,7 +64,7 @@ http = { version = "1", optional = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
 if-addrs = { workspace = true, optional = true }
-kio = { workspace = true, features = ["runtime"] }
+kio = { workspace = true, features = ["async", "runtime"] }
 mdns-sd = { workspace = true, optional = true }
 moq-congestion = { workspace = true, optional = true }
 # rind's rustls provider and the `UnsupportedCpu` error, re-exported as `crypto`. Needs no moq-net.
