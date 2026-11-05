@@ -264,7 +264,10 @@ else: raise AssertionError(args)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 built = json.loads((self.root / "build").read_text())
                 self.assertEqual(built["target"], target if target != host else None)
-                self.assertEqual(built["linker"], "aarch64-linux-gnu-gcc" if target == "aarch64-unknown-linux-gnu" and target != host else None)
+                self.assertEqual(
+                    built["linker"],
+                    "aarch64-linux-gnu-gcc" if target == "aarch64-unknown-linux-gnu" and target != host else None,
+                )
                 self.assertEqual("--no-default-features" in built["args"], minimal)
                 self.assertEqual(
                     built["args"][built["args"].index("--target-dir") + 1],
