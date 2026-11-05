@@ -10,7 +10,7 @@ is on crates.io (published 2026-11-03).
 ## Plan
 
 Decided 2026-11-05 (maintainer, /quest-audit): ✅ retire the stub before
-[Rust releases publish through OIDC](/quest/m1/release-rs-oidc.md), so the
+[Rust releases publish through OIDC](/quest/m2/release-rs-oidc.md), so the
 crate never needs a trusted publisher.
 
 - Delete `rs/moq-e2ee` (the workspace's `rs/*` glob picks it up) and its
