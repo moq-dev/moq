@@ -21,8 +21,10 @@ only for readers it covers (`Drift::settles`, `settles` in
 (`supersede_stale`), and every lite-07 update re-offering what was reported
 stale (`reoffer_stale`). It kept today's storage: `TrackState::drops`,
 `DropCursor` with its `reported` and `reported_stale` sets, `Skipped`,
-`Delivered`, `TrackRun::served`, and the JS `drops` signal, `#pending`,
-`#reported`, and `#reportedStale`, none billed to anything. This quest is
+`Delivered`, `TrackRun::served`, the lite subscriber's record of the group
+streams that finished since its last update (`Tail::finished`, JS
+`Tail#finished`), and the JS `drops` signal, `#pending`, `#reported`, and
+`#reportedStale`, none billed to anything. This quest is
 what remains: bounding them.
 
 Decided 2026-11-03 (maintainer, /quest-unblock): `js/net` bounds run memory
@@ -137,7 +139,9 @@ decision above and the PR's `## Waiting` item on out-of-order creation:
   neither sends OLD for it again nor names it at the end. On the receiving
   side a Group Stream wins over a stale drop of its sequence in either order:
   an OLD that lands after the stream leaves the group, still arriving or
-  not, and an update owes again only the stale runs the track still holds.
+  not, or finished under the same update and since evicted (agent decision
+  26, 2026-11-05, for review), and an update owes again only the stale runs
+  the track still holds.
   The end sweep's NOT_FOUND never replaces a stale drop, so an update can
   still reach an ended track's history. Not chosen: reverting the
   replacement; merging with the stale report left in place.
@@ -192,6 +196,36 @@ first a full receive window evicts. A reader already handed the failed copy
 sees it fail, since no sequence is handed out twice; the cache, fills, and
 readers that had not reached it get the re-offer. Not chosen: letting the
 duplicate replace the copy still arriving; accepting the loss.
+
+Decided 2026-11-05 (maintainer, /quest-plan): the agent decisions
+[moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670) listed for
+review stand as recorded, numbered as in its body:
+
+- ✅ **14:** a Group Stream or final drop the publisher's reader reaches
+  replaces a stale drop it already sent (above).
+- ✅ **16:** SUBSCRIBE_UPDATE carries `Update` after the Range edit and before
+  `Wanted Group`; SUBSCRIBE_SKIP keeps 0x3 beside SUBSCRIBE_STARTED at 0x4.
+- ✅ **17:** an OLD drop records no stale run on groups a range fill asked
+  for, which recovery asks for again. Every drop the subscriber accounts,
+  and every SKIP, answers the fills owing those groups; an OLD drop under a
+  superseded `Update` answers none.
+- ✅ **18:** the JS covered-FIN reopen loop and its stale-run supersede go,
+  as main deleted the loop.
+- ✅ **19:** a final OLD drop, such as one relayed from lite-06, goes out on
+  lite-07 as the stale drop its code names, recorded and dropped again on
+  each update.
+- ✅ **20:** an update judges again the re-offers still waiting for stream
+  credit, and a verdict sent for a queued re-offer keeps it from opening.
+- ✅ **21:** a SUBSCRIBE_DROP naming an `Update` later than the last one sent
+  is a PROTOCOL_VIOLATION.
+- ✅ **22:** a received stale run is judged again for a reader whose terms
+  changed, so a widened budget asks a fill for it.
+- ✅ **23:** recording a stale verdict answers no outstanding fill (JS, as
+  Rust), `skipGroups` checks its bounds, and a fill cannot cache a skipped
+  sequence.
+- ✅ **25:** a relay cursor's stale report that an upstream's received stale
+  run decided stays the upstream's to judge after an update
+  (`DropCursor::reported_received`, JS `#reportedReceived`).
 
 Decided 2026-10-27 (maintainer): this runs after the range count cost work,
 which finished in [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542),
