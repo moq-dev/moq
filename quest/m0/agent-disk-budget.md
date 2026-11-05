@@ -23,4 +23,4 @@ touched, and delete this quest in a PR recording both.
 
 ## Waiting
 
-- Maintainer: merge and install [kixelated/dotfiles#41](https://github.com/kixelated/dotfiles/pull/41) on the desktop, since an agent session must not install over the live dotfiles or mass-delete targets; check that `systemctl --user list-timers` lists `worktree-clean.timer` with a last run
+- Maintainer: merge and install [kixelated/dotfiles#41](https://github.com/kixelated/dotfiles/pull/41) on the desktop, since an agent session must not install over the live dotfiles or mass-delete targets; check that `systemctl --user list-timers` lists `worktree-clean.timer` with a last run that postdates the install.
