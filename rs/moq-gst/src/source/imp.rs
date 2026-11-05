@@ -914,20 +914,10 @@ impl Session {
 	/// with the session, except those of renditions the catalog retired.
 	async fn follow_catalog(&self, source: moq_mux::Source, cancel: &mut watch::Receiver<bool>) -> Result<()> {
 		let broadcast = source.broadcast();
-		let catalog_track = broadcast.track(hang::catalog::Catalog::DEFAULT_NAME)?;
-		// A publisher that never answers would otherwise hold the run until it is cancelled.
-		let catalog_track = tokio::select! {
-			track = catalog_track.subscribe(hang::catalog::Catalog::default_subscription()) => match track {
-				Ok(track) => track,
-				Err(err) if source_lost(&err) => {
-					tracing::warn!(%err, "catalog unavailable, holding pads");
-					return Ok(());
-				}
-				Err(err) => return Err(anyhow::Error::from(err).context("catalog refused")),
-			},
-			_ = cancel.changed() => return Ok(()),
-		};
-		let mut catalog_consumer = moq_mux::catalog::hang::Consumer::new(catalog_track);
+		// The consumer subscribes itself: a refused or lost subscription surfaces from its first read
+		// below, and a publisher that never answers holds the run only until it is cancelled.
+		let mut catalog_consumer =
+			moq_mux::catalog::hang::Consumer::new(broadcast.track(hang::catalog::Catalog::DEFAULT_NAME)?);
 
 		// Follow the catalog for the whole run and reconcile against every update, rather than
 		// building the renditions once from the first frame. This covers reactive publishers (the
@@ -5269,8 +5259,12 @@ mod session_tests {
 			.expect("the refusal held the session")
 			.unwrap()
 			.expect_err("the refusal did not fail the session");
+		// The catalog consumer subscribes itself, so the refusal surfaces from its first read.
 		assert!(
-			matches!(err.downcast_ref::<moq_net::Error>(), Some(moq_net::Error::NotFound)),
+			matches!(
+				err.downcast_ref::<moq_mux::Error>(),
+				Some(moq_mux::Error::Moq(moq_net::Error::NotFound))
+			),
 			"{err:?}"
 		);
 	}
