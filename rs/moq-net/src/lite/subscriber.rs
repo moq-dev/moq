@@ -10520,9 +10520,11 @@ impl ServeLoop {
 		loop {
 			match &mut self.mode {
 				ServeMode::Establish(est) => {
-					// Credit or flow control may never return. Observe lost demand before
-					// waiting, retaining the TRACK bridge only while somebody needs it.
-					if self.fetches.is_empty()
+					// Before TRACK existed, SUBSCRIBE itself obtained the metadata that
+					// attaches downstream readers. Its initial lack of demand is expected.
+					// With TRACK, credit or flow control must not retain an abandoned setup.
+					if serve.subscriber.version.has_track_stream()
+						&& self.fetches.is_empty()
 						&& self.range_fills.is_empty()
 						&& crate::util::poll_unwanted(&mut self.demand, waiter).is_ready()
 					{
