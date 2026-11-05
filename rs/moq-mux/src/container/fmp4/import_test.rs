@@ -3659,6 +3659,23 @@ fn colr_fills_what_the_sps_leaves_unsaid() {
 	assert_eq!(video.color, Some(color(9, 16, 9, true)));
 }
 
+/// ICC profiles do not hide the CICP colour carried by another colr box.
+#[test]
+fn colr_after_an_icc_profile_fills_the_catalog() {
+	let init = avc1_init(crate::codec::h264::fixtures::SPS_IPB, Some(color(9, 16, 9, true)));
+	let (ftyp, mut moov) = decode_init(&init);
+	let mp4_atom::Codec::Avc1(avc1) = &mut moov.trak[0].mdia.minf.stbl.stsd.codecs[0] else {
+		panic!("expected avc1");
+	};
+	avc1.colr.insert(0, mp4_atom::Colr::Prof { profile: vec![1, 2, 3] });
+	let mut init = Vec::new();
+	ftyp.encode(&mut init).unwrap();
+	moov.encode(&mut init).unwrap();
+	let catalog = run_fmp4(&init);
+	let video = catalog.video.renditions.values().next().unwrap();
+	assert_eq!(video.color, Some(color(9, 16, 9, true)));
+}
+
 /// A source that signals no colour adds no catalog field and no colr box.
 #[test]
 fn unsignalled_color_stays_absent() {
@@ -3667,7 +3684,7 @@ fn unsignalled_color_stays_absent() {
 	let mp4_atom::Codec::Avc1(avc1) = &moov.trak[0].mdia.minf.stbl.stsd.codecs[0] else {
 		panic!("expected avc1");
 	};
-	assert_eq!(avc1.colr, None);
+	assert!(avc1.colr.is_empty());
 
 	let catalog = run_fmp4(&init);
 	let video = catalog.video.renditions.values().next().unwrap();
