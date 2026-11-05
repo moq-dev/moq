@@ -10,7 +10,7 @@ use rind::hkdf;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::e2ee::Epoch;
-use crate::e2ee::error::{Error, Result};
+use crate::e2ee::error::Result;
 use crate::e2ee::generation;
 use crate::e2ee::limits::{PATH_LABEL, PATH_LEN, PROFILE, SECRET_LEN, check_bytes, check_u53};
 
@@ -54,10 +54,10 @@ impl Credential {
 	///
 	/// # Errors
 	///
-	/// [`Error::Unsupported`] if this CPU lacks a feature the crypto needs.
+	/// [`Error::UnsupportedCpu`] if this CPU lacks a feature the crypto needs.
 	/// [`Error::Identity`] if `context` exceeds 65535 bytes or `kid` exceeds `2^53-1`.
 	pub fn new(config: Config) -> Result<Self> {
-		rind::cpu::check().map_err(|missing| Error::Unsupported(missing.to_string()))?;
+		crate::cpu::check()?;
 		check_bytes(config.context.len())?;
 		check_u53(config.kid)?;
 		let secret = Secret(config.secret);

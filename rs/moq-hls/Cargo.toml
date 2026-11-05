@@ -27,14 +27,13 @@ http-body = { workspace = true, optional = true }
 humantime = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
 m3u8-rs = "6"
+moq-crypto = { workspace = true, features = ["provider"] }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 percent-encoding = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-no-provider", "gzip"] }
 rind = { workspace = true }
-# Installed as rustls's process default when the host installed none, since reqwest reads it.
-rind-rustls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -52,6 +51,7 @@ moq-hls = { path = ".", default-features = false, features = ["async"] }
 moq-json = { path = "../moq-json" }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["tcp", "quic"] }
 mp4-atom = { workspace = true }
+rind-rustls = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }

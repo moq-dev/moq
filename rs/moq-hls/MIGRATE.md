@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Shared unsupported CPU error
+
+`Error::UnsupportedCpu` now carries `moq_crypto::cpu::UnsupportedCpu` instead of a `String`. Use its `Display` implementation for the missing feature message.
+
 ### The gateways need the `async` feature
 
 The `import` and `export` modules compile only with the new `async` Cargo feature, which the default

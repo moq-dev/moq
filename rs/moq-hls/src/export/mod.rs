@@ -142,7 +142,7 @@ impl Broadcaster {
 	/// Fails with [`Error::UnsupportedCpu`](crate::Error::UnsupportedCpu) on a CPU its
 	/// cryptography cannot run on.
 	pub fn new(source: moq_mux::Source, config: Config) -> crate::Result<(Self, Driver)> {
-		rind::cpu::check().map_err(crate::Error::unsupported_cpu)?;
+		moq_crypto::cpu::check()?;
 		Ok(Self::start(source, config, None))
 	}
 

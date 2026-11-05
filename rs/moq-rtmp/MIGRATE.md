@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Shared unsupported CPU error
+
+CPU refusals now return `Error::UnsupportedCpu(moq_crypto::cpu::UnsupportedCpu)` from listener, stream acceptance, and dial setup instead of an I/O or session error.
+
 ### Handshake cryptography uses rind
 
 RTMP handshake HMAC-SHA256 uses rind. `Server::bind` checks CPU support before binding; every stream handshake also checks before using crypto, including `accept_stream` and the dial client.

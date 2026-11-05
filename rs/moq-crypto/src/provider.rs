@@ -1,4 +1,4 @@
-//! rind, MoQ's one cryptography provider: the CPU check and its rustls provider.
+//! rind's rustls cryptography provider.
 //!
 //! rind's primitives panic on a CPU missing a feature they require, so each entry point
 //! here refuses such a CPU with [`UnsupportedCpu`] instead. The transport crates report
@@ -6,21 +6,10 @@
 
 use std::sync::{Arc, OnceLock};
 
+use crate::cpu::UnsupportedCpu;
+
 /// A shared rustls crypto provider.
 pub type Provider = Arc<rustls::crypto::CryptoProvider>;
-
-/// This CPU lacks a feature that rind requires, named in the message.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("unsupported CPU: {0}")]
-pub struct UnsupportedCpu(rind::cpu::MissingFeature);
-
-/// Refuse a CPU that rind cannot run on, naming the missing feature.
-///
-/// Call this before using rind's primitives directly; [`provider`] and
-/// [`install_default`] run it themselves.
-pub fn check() -> Result<(), UnsupportedCpu> {
-	rind::cpu::check().map_err(UnsupportedCpu)
-}
 
 /// Return rind's rustls provider, refusing a CPU missing a required feature.
 ///
@@ -51,7 +40,7 @@ mod tests {
 		// The test hosts run rind, so the provider builds and every call returns the same one.
 		let first = provider().unwrap();
 		assert!(Arc::ptr_eq(&first, &provider().unwrap()));
-		check().unwrap();
+		crate::cpu::check().unwrap();
 		install_default().unwrap();
 		// A second install keeps the first provider and still succeeds.
 		install_default().unwrap();

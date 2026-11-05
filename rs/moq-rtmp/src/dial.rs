@@ -116,6 +116,7 @@ impl<S: Stream> Client<S> {
 	}
 
 	async fn with_stream_config(mut stream: S, app: &str, tc_url: Option<String>) -> Result<Self> {
+		moq_crypto::cpu::check()?;
 		let remaining = kio::clock::timeout(crate::server::HANDSHAKE_TIMEOUT, client_handshake(&mut stream))
 			.await
 			.map_err(|_| anyhow::anyhow!("RTMP handshake timed out"))??;

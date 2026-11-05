@@ -148,8 +148,8 @@ impl Handshake {
 	/// The Flash Player 9 handshake requires generating a different packet 1 depending if you
 	/// are the client or the server, and thus this must be specified when creating a new
 	/// `Handshake` instance.
-	pub fn new(peer_type: PeerType) -> Result<Handshake, HandshakeError> {
-		rind::cpu::check().map_err(std::io::Error::other)?;
+	pub fn new(peer_type: PeerType) -> Result<Handshake, moq_crypto::cpu::UnsupportedCpu> {
+		moq_crypto::cpu::check()?;
 		Ok(Handshake {
 			current_stage: Stage::NeedToSendP0AndP1,
 			command_byte: 0_u8,

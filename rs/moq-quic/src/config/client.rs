@@ -60,7 +60,7 @@ impl Config {
 	///
 	/// A CPU that rind cannot run on, and a root store the verifier refuses, both arrive in
 	/// [`rustls::Error::Other`]: downcast it to
-	/// [`UnsupportedCpu`](moq_crypto::provider::UnsupportedCpu) or
+	/// [`UnsupportedCpu`](moq_crypto::cpu::UnsupportedCpu) or
 	/// [`VerifierBuilderError`](rustls::client::VerifierBuilderError).
 	pub fn with_root_certificates(roots: Arc<rustls::RootCertStore>) -> Result<Self, rustls::Error> {
 		let provider = provider()?;
