@@ -56,7 +56,7 @@ fn new_cluster() -> cluster::Cluster {
 async fn build_web_with(web_config: web::Config, cluster: cluster::Cluster) -> web::Web {
 	// Crypto provider is process-global; reinstalls after the first one are
 	// no-ops, but the test binary may run before any other moq code does.
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	// A public grant of `**` lets any path through.
 	let mut auth_config = auth::Config::default();
@@ -431,13 +431,22 @@ async fn relay_web_serves_merged_routes() {
 async fn relay_https_terminates_tls() {
 	let dir = tempfile::TempDir::new().expect("tempdir");
 
-	let key = rcgen::KeyPair::generate().expect("keypair");
-	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("cert params");
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("cert params");
 	let cert = params.self_signed(&key).expect("self-signed cert");
 	let cert_path = dir.path().join("cert.pem");
 	let key_path = dir.path().join("key.pem");
 	std::fs::write(&cert_path, cert.pem()).expect("write cert");
-	std::fs::write(&key_path, key.serialize_pem()).expect("write key");
+	std::fs::write(
+		&key_path,
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+	)
+	.expect("write key");
 
 	let mut config = web::Config::default();
 	config.ws = false;
@@ -561,7 +570,7 @@ async fn spawn_accept_relay(
 	Option<std::net::SocketAddr>,
 	tokio::task::JoinHandle<()>,
 ) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let server = config.init(Default::default()).expect("server init");
 

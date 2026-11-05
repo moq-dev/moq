@@ -76,7 +76,7 @@ pipe below; the second round above adds the acceptor to the session name:
 - Long-lived `tcp` sessions rely on unbounded groups (since
   [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411) a group has no
   size cap, and each copy keeps a ~32 MiB tail). With one reader per copy,
-  [fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) acts
+  [fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664) acts
   as TCP backpressure: a writer awaiting `group::Producer::ready` runs at most
   16 MiB past its reader on each hop, and a reader that falls off the tail
   fails with `Evicted` rather than skipping data. Where pacing doesn't reach

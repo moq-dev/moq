@@ -10,7 +10,7 @@ pub(crate) fn rng() -> rand::rngs::ThreadRng {
 /// A generator seeded straight from the OS, not the thread rng, so forked processes diverge
 ///
 /// Panics if the OS random source fails.
-#[cfg(all(not(test), any(feature = "aws-lc-rs", feature = "ring")))]
+#[cfg(not(test))]
 pub(crate) fn std_rng() -> rand::rngs::StdRng {
 	use rand::SeedableRng;
 	rand::rngs::StdRng::try_from_rng(&mut rand::rngs::SysRng)
@@ -21,7 +21,7 @@ pub(crate) fn std_rng() -> rand::rngs::StdRng {
 pub(crate) use seeded::{rng, std_rng};
 
 // Only the crate's `tests` module reseeds, and it needs a rustls provider.
-#[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
+#[cfg(test)]
 pub(crate) use seeded::reseed;
 
 #[cfg(test)]

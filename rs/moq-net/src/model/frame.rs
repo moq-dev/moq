@@ -1376,12 +1376,12 @@ impl Producer {
 		self.buf.write_chunk(chunk)
 	}
 
-	/// Poll until the group's writer may take more of this frame from upstream; see
-	/// [`group::Producer::poll_paced`].
+	/// Poll until the group's writer may take more of this frame from upstream, at most
+	/// `window` bytes past its fastest reader; see [`group::Producer::poll_paced`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn poll_ready(&self, waiter: &kio::Waiter) -> Poll<()> {
+	pub(crate) fn poll_ready(&self, waiter: &kio::Waiter, window: u64) -> Poll<()> {
 		self.group()
-			.poll_paced(waiter, self.buf.written(Ordering::Acquire) as u64)
+			.poll_paced(waiter, self.buf.written(Ordering::Acquire) as u64, window)
 	}
 
 	/// Publish what has been written so far, waking consumers parked on the group.
@@ -2020,7 +2020,10 @@ mod tests {
 	#[test]
 	fn a_delivery_attaching_mid_write_publishes_one_payload() {
 		const SIZE: usize = SEGMENT + 4093;
-		let payload: Vec<_> = (0..SIZE).map(|i| (i % 251) as u8).collect();
+		// Repeating one period spares Miri a fill it would step through byte by byte,
+		// half this test's time there.
+		let mut payload = (0..251).collect::<Vec<u8>>().repeat(SIZE.div_ceil(251));
+		payload.truncate(SIZE);
 		for grow in [false, true] {
 			let budget = Budget::new(if grow { 0 } else { SEGMENT });
 			let (a, active) = FrameBuf::admitted(SIZE, &budget);

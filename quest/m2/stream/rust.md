@@ -30,7 +30,3 @@ frame per TCP read, no fill handler.
   before the frame ends, round-trip bytes, half-close each way,
   reset each way, a reader ending `Evicted` surfaced as a reset, and a relay
   restart ending the stream with a typed error.
-
-## Required
-
-- [Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) - lossless delivery to a reader that keeps up

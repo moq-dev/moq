@@ -32,6 +32,7 @@
 
 #[cfg(test)]
 mod archive_tests;
+mod contributions;
 mod driver;
 mod grid;
 pub mod master;
@@ -51,8 +52,10 @@ use rand::RngExt;
 
 pub use driver::Driver;
 pub(crate) use playlist::render_media;
+#[cfg(feature = "server")]
+pub(crate) use rendition::Demand;
 pub use rendition::{Kind, Rendition};
-pub use route::{Resource, Route};
+pub use route::{Contribution, Resource, Route};
 
 /// Backoff bounds for the initial catalog subscription.
 ///
@@ -112,6 +115,7 @@ pub struct Broadcaster {
 	instance: Arc<str>,
 	/// The current rendition set, reconciled from the catalog by the watcher task.
 	renditions: renditions::Producer,
+	contributions: Option<contributions::Producer>,
 	/// Shared by every clone; its drop with the last one ends the catalog watcher.
 	_guard: Arc<Guard>,
 }
@@ -119,6 +123,7 @@ pub struct Broadcaster {
 /// What the last [`Broadcaster`] clone releases.
 struct Guard {
 	renditions: renditions::Producer,
+	contributions: Option<contributions::Producer>,
 	/// Ends the catalog watcher when dropped, or when [`replaced`](Broadcaster::replaced) takes it.
 	watcher: Mutex<Option<driver::Owner>>,
 }
@@ -130,22 +135,29 @@ impl Drop for Guard {
 		// media flowing, so its final segments are not truncated. Each rendition stops
 		// following its media once no recording cursor holds it.
 		self.renditions.clear();
+		if let Some(contributions) = &self.contributions {
+			contributions.clear();
+		}
 	}
 }
 
 impl Broadcaster {
-	/// Start tracking the renditions of `source`'s catalog broadcast, once the returned
+	/// Start tracking the own renditions of `source`'s catalog broadcast, once the returned
 	/// [`Driver`] runs.
 	///
 	/// Fails with [`Error::UnsupportedCpu`](crate::Error::UnsupportedCpu) on a CPU its
 	/// cryptography cannot run on.
 	pub fn new(source: moq_mux::Source, config: Config) -> crate::Result<(Self, Driver)> {
 		rind::cpu::check().map_err(crate::Error::unsupported_cpu)?;
-		Ok(Self::start(source, config))
+		Ok(Self::start(source, config, None))
 	}
 
 	/// [`new`](Self::new) for a caller that already checked the CPU.
-	pub(crate) fn start(source: moq_mux::Source, config: Config) -> (Self, Driver) {
+	pub(crate) fn start(
+		source: moq_mux::Source,
+		config: Config,
+		origin: Option<moq_net::origin::Consumer>,
+	) -> (Self, Driver) {
 		let broadcast = source.broadcast();
 		// An instance names the stream on every edge, so each serves it under the same URLs.
 		let instance = broadcast
@@ -154,18 +166,25 @@ impl Broadcaster {
 			.clone()
 			.unwrap_or_else(moq_net::Instance::random);
 		let (spawner, mut driver) = driver::Spawner::new();
+		let contributions = origin.map(|origin| contributions::Producer::new(origin, config.window, spawner.clone()));
 		let renditions = renditions::Producer::new(config.window, spawner);
 		// The watcher owns its own producer clone; dropping the `Broadcaster` ends it so the
 		// standing catalog subscription stops when nobody's serving from this broadcaster.
-		let watcher = driver.lead(watch_catalog(source, renditions.clone()));
+		let watcher = driver.lead(watch_catalog(
+			source,
+			renditions.clone(),
+			Role::Root(contributions.clone().map(Box::new)),
+		));
 		let broadcaster = Self {
 			broadcast,
 			instance: Arc::from(instance.as_str()),
 			_guard: Arc::new(Guard {
 				renditions: renditions.clone(),
+				contributions: contributions.clone(),
 				watcher: Mutex::new(Some(watcher)),
 			}),
 			renditions,
+			contributions,
 		};
 		(broadcaster, driver)
 	}
@@ -248,7 +267,20 @@ impl Broadcaster {
 		allow(dead_code, reason = "only the `server` feature uses it")
 	)]
 	pub(crate) async fn advertised(&self) {
-		self.renditions.advertised().await;
+		kio::wait(|waiter| {
+			let own = self.renditions.poll_advertised(waiter);
+			let contribution = self
+				.contributions
+				.as_ref()
+				.is_some_and(|contributions| contributions.poll_advertised(waiter).is_ready());
+			// Contributions alone answer only while no own rendition could still be listed.
+			if own.is_ready() || (!self.renditions.listable() && contribution) {
+				std::task::Poll::Ready(())
+			} else {
+				std::task::Poll::Pending
+			}
+		})
+		.await;
 	}
 
 	/// Version every segment URL with `generation`, a label for the publisher run the
@@ -283,7 +315,11 @@ impl Broadcaster {
 	/// holding different tokens; a credential in `Config` would embed one viewer's in
 	/// another's playlist.
 	///
-	/// Lists only enabled renditions a player can start, i.e. ones listing at least one segment,
+	/// A broadcaster obtained from `Server` also lists contribution renditions from their
+	/// catalogs, starting their media only on request. `Broadcaster::new` exports the own
+	/// renditions only, so a recorder never demands contributions.
+	///
+	/// Lists only enabled own renditions a player can start, i.e. ones listing at least one segment,
 	/// so an early render may list audio alone, or nothing at all. A disabled rendition (catalog `enabled: false`) is left out until
 	/// it re-enables, while its media playlist keeps serving.
 	pub fn master_playlist(&self, query: Option<&str>) -> String {
@@ -315,7 +351,26 @@ impl Broadcaster {
 				}),
 			}
 		}
+		if let Some(contributions) = &self.contributions {
+			let (extra_video, extra_audio) = contributions.variants(&self.instance, query);
+			video.extend(extra_video);
+			audio.extend(extra_audio);
+		}
 		(video, audio)
+	}
+
+	#[cfg(feature = "server")]
+	pub(crate) async fn contribution(
+		&self,
+		at: &Contribution,
+		kind: Kind,
+		name: &str,
+	) -> crate::Result<Option<Arc<Rendition>>> {
+		self.renditions.catalogued().await;
+		match &self.contributions {
+			Some(contributions) => contributions.rendition(at, kind, name).await,
+			None => Ok(None),
+		}
 	}
 
 	/// Render the DASH manifest (MPD) from the current renditions' segments, or `None` while nothing is listable yet (every `SegmentTimeline`
@@ -449,6 +504,9 @@ impl Broadcaster {
 		let watcher = self._guard.watcher.lock().unwrap().take();
 		drop(watcher);
 		self.renditions.cut();
+		if let Some(contributions) = &self.contributions {
+			contributions.clear();
+		}
 	}
 
 	/// Whether the current catalog contains no servable renditions (serve path).
@@ -461,7 +519,16 @@ impl Broadcaster {
 	}
 }
 
-async fn watch_catalog(source: moq_mux::Source, renditions: renditions::Producer) {
+/// What a catalog watcher reconciles besides its own rendition set.
+enum Role {
+	/// A root broadcast, following its catalog's contributions when an HTTP server serves it.
+	Root(Option<Box<contributions::Producer>>),
+	/// A contribution included in a root broadcast. Its renditions take the root catalog's
+	/// `media`, so they share the root's timeline and grid whatever the contribution declares.
+	Contribution(kio::Consumer<hang::catalog::Media>),
+}
+
+async fn watch_catalog(source: moq_mux::Source, renditions: renditions::Producer, role: Role) {
 	// The source's catalog broadcast, so the catalog, the media subscriptions, and the closed
 	// check below all refer to the one broadcast it was built from.
 	let broadcast = &source.broadcast();
@@ -484,17 +551,50 @@ async fn watch_catalog(source: moq_mux::Source, renditions: renditions::Producer
 		}
 	};
 
+	// A contribution's latest catalog, re-synced when the root's media changes.
+	let mut latest: Option<catalog::hang::Catalog> = None;
 	let result = loop {
-		match kio::wait(|waiter| consumer.poll_next(waiter)).await {
-			Ok(Some(catalog)) => renditions.sync(&source, &catalog),
-			Ok(None) => break Ok(()),
-			Err(err) => {
+		let next = kio::wait(|waiter| {
+			if let std::task::Poll::Ready(next) = consumer.poll_next(waiter) {
+				return std::task::Poll::Ready(Some(next));
+			}
+			if let (Role::Contribution(root), Some(catalog)) = (&role, &latest)
+				&& let std::task::Poll::Ready(Ok(())) = root.poll(waiter, |media| match **media != catalog.media {
+					true => std::task::Poll::Ready(()),
+					false => std::task::Poll::Pending,
+				}) {
+				return std::task::Poll::Ready(None);
+			}
+			std::task::Poll::Pending
+		})
+		.await;
+		let mut catalog = match next {
+			Some(Ok(Some(catalog))) => catalog,
+			Some(Ok(None)) => break Ok(()),
+			Some(Err(err)) => {
 				tracing::warn!(%err, "broadcast catalog stream ended with error");
 				break Err(err.into());
 			}
+			None => latest.take().expect("a root media change follows a catalog"),
+		};
+		match &role {
+			Role::Root(Some(contributions)) => contributions.sync(&source, &catalog),
+			Role::Root(None) => {}
+			Role::Contribution(root) => catalog.media = *root.read(),
+		}
+		renditions.sync(&source, &catalog);
+		if let Role::Contribution(_) = role {
+			latest = Some(catalog);
 		}
 	};
+	let failed = result.is_err();
 	renditions.finish(result);
+	// The root catalog lists the contributions: once it fails, stop following and advertising
+	// them too. A clean end freezes the final catalog, which keeps its entries, as the own
+	// renditions keep their final set.
+	if failed && let Role::Root(Some(contributions)) = &role {
+		contributions.clear();
+	}
 }
 
 #[cfg(test)]
