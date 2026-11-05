@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class FeaturesTest(unittest.TestCase):
-    def run_features(self, failures=(), nested=False, leaks=()):
+    def run_features(self, failures=(), nested=False, leaks=(), recipe="features"):
         runner = shutil.which("just")
         (ROOT / ".tmp").mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
@@ -40,7 +40,8 @@ class FeaturesTest(unittest.TestCase):
                         sys.exit(1)
                     if call[0] == 'just':
                         if os.environ['FEATURE_NESTED'] == '1' and args[1] in (
-                            'net-features', 'quic-features', 'tokio-features', 'media-features', 'coroutines'
+                            'net-features', 'quic-features', 'crypto-key', 'tokio-features', 'media-features',
+                            'coroutines',
                         ):
                             sys.exit(subprocess.call([os.environ['FEATURE_REAL_JUST'], *args]))
                         sys.exit(0)
@@ -56,22 +57,14 @@ class FeaturesTest(unittest.TestCase):
                                 for crate in crates:
                                     print(crate + ' v1.0.0')
                     elif args[0] == 'rustc':
-                        package = args[args.index('-p') + 1]
                         for arg in args:
                             if arg.startswith('mir='):
-                                Path(arg[4:]).write_text('' if package == 'kio' else '\\n'.join(
-                                    '{async fn body of ' + name + '()}'
-                                    for name in ('until', 'run_front', 'serve_front')
-                                ))
-                    elif args[0] == 'check' and '-p' in args and args[args.index('-p') + 1] == 'moq-tokio':
-                        print('a rustls QUIC backend requires a crypto provider: '
-                              'enable either the `aws-lc-rs` or `ring` feature')
-                        sys.exit(1)
+                                Path(arg[4:]).write_text('')
                     """)
                 )
                 stub.chmod(0o755)
             result = subprocess.run(
-                [runner, "rs", "features"],
+                [runner, "rs", recipe],
                 cwd=ROOT,
                 env=dict(
                     os.environ,
@@ -104,11 +97,21 @@ class FeaturesTest(unittest.TestCase):
                 for failure in failures:
                     self.assertTrue(any(" ".join(failure) in line for line in summary))
 
+    def test_platform_tests_run_after_a_failure(self):
+        for recipe in ("macos-test", "windows-test"):
+            with self.subTest(recipe=recipe):
+                passed, expected = self.run_features(recipe=recipe)
+                self.assertEqual(passed.returncode, 0, passed.stderr)
+                failed, calls = self.run_features([expected[0]], recipe=recipe)
+                self.assertNotEqual(failed.returncode, 0)
+                self.assertEqual(calls, expected)
+                self.assertIn("checks: failed: " + " ".join(expected[0]), failed.stderr)
+
     def test_nested_feature_checks_continue_after_compile_failures(self):
         passed, expected = self.run_features(nested=True)
         self.assertEqual(passed.returncode, 0, passed.stderr)
         failures = []
-        for package in ("kio", "moq-net", "moq-quic", "moq-tokio", "moq-video"):
+        for package in ("kio", "moq-net", "moq-quic", "moq-crypto", "moq-tokio", "moq-video"):
             failures.append(
                 next(call for call in expected if call[0] == "cargo" and call[1] != "tree" and package in call)
             )
@@ -116,7 +119,7 @@ class FeaturesTest(unittest.TestCase):
         self.assertNotEqual(failed.returncode, 0)
         self.assertEqual(calls, expected)
         summary = "\n".join(line for line in failed.stderr.splitlines() if line.startswith("checks: failed: "))
-        for package in ("kio", "moq-net", "moq-quic", "moq-tokio", "moq-video"):
+        for package in ("kio", "moq-net", "moq-quic", "moq-crypto", "moq-tokio", "moq-video"):
             self.assertIn(package, summary)
         self.assertIn("checks: just rs coroutines", failed.stdout)
 
