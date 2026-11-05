@@ -4,7 +4,7 @@ use crate::{
 	Hop, Hops, Instance, Path,
 	coding::*,
 	origin::Cost,
-	route::{self, Advert, Reach},
+	route::{self, Advert},
 };
 
 use super::{
@@ -33,6 +33,7 @@ const ANNOUNCE_FLOOR: u64 = 9;
 	allow(dead_code, reason = "the lite-07 session does not drive the route layer yet")
 )]
 const ROUTE_REQUEST: u64 = 10;
+const ROUTE_HOLD: u64 = 11;
 
 /// Whether the negotiated version can update a live advertisement's metadata. On lite-05 an
 /// update travels as a duplicate ANNOUNCE (a second `active` for an already-announced path); on
@@ -113,84 +114,58 @@ pub enum AnnounceBroadcast {
 	/// ROUTE_START (lite-07+): the sender has a route to the origin node `node`, and
 	/// assigns it the next Route ID.
 	RouteStart { node: route::Id, advert: Advert },
-	/// ROUTE_UPDATE (lite-07+): the route with this id changed, or is held.
-	RouteUpdate { id: u64, reach: Reach },
+	/// ROUTE_UPDATE (lite-07+): the route with this id changed, and is usable.
+	RouteUpdate { id: u64, advert: Advert },
+	/// ROUTE_HOLD (lite-07+): the sender has no usable route with this id, but still
+	/// holds its advertisements while it recovers.
+	RouteHold { id: u64 },
 	/// ROUTE_END (lite-07+): the sender let go of the route with this id, and of every
 	/// advertisement under it. The receiver echoes it back.
 	RouteEnd { id: u64 },
 	/// ANNOUNCE_FLOOR (lite-07+): closes the batch of advertisements under the route
 	/// with this id, certifying them across the whole requested prefix at the origin's
-	/// revision, or certifying nothing (`None`, the last varint on the wire).
+	/// revision, or certifying nothing (`None`).
 	Floor { id: u64, revision: Option<route::Rev> },
 }
 
-/// Refuse what no node advertises: node 0, and the last varint as a seqno or metric,
-/// which mean nothing and held.
-fn valid_start(node: route::Id, advert: &Advert) -> bool {
-	node != 0 && advert.seqno != route::MAX && advert.metric != route::MAX
-}
-
+/// Encode a seqno, metric, and down-only bit. No origin advertises the last seqno,
+/// which would leave no room for the successor a ROUTE_REQUEST names.
 fn encode_advert(w: &mut Encoder<'_>, advert: &Advert) -> Result<(), EncodeError> {
+	if advert.seqno == route::MAX {
+		return Err(EncodeError::InvalidState);
+	}
 	w.varint(advert.seqno)?;
 	w.varint(advert.metric)?;
 	w.bool(advert.down_only);
 	Ok(())
 }
 
-/// Encode a ROUTE_UPDATE body after its id. A held route carries a zero seqno and bit.
-fn encode_reach(w: &mut Encoder<'_>, reach: &Reach) -> Result<(), EncodeError> {
-	match reach {
-		Reach::Finite(advert) if advert.seqno == route::MAX || advert.metric == route::MAX => {
-			Err(EncodeError::InvalidState)
-		}
-		Reach::Finite(advert) => encode_advert(w, advert),
-		Reach::Held => encode_advert(
-			w,
-			&Advert {
-				seqno: 0,
-				metric: route::MAX,
-				down_only: false,
-			},
-		),
-	}
-}
-
 fn decode_advert(r: &mut Decoder<'_>) -> Result<Advert, DecodeError> {
+	let seqno = r.varint()?;
+	if seqno == route::MAX {
+		return Err(DecodeError::InvalidValue);
+	}
 	Ok(Advert {
-		seqno: r.varint()?,
+		seqno,
 		metric: r.varint()?,
 		down_only: r.bool()?,
 	})
 }
 
-fn decode_reach(r: &mut Decoder<'_>) -> Result<Reach, DecodeError> {
-	let advert = decode_advert(r)?;
-	if advert.metric != route::MAX {
-		if advert.seqno == route::MAX {
-			return Err(DecodeError::InvalidValue);
-		}
-		return Ok(Reach::Finite(advert));
-	}
-	if advert.seqno != 0 || advert.down_only {
-		return Err(DecodeError::InvalidValue);
-	}
-	Ok(Reach::Held)
-}
-
-/// Encode an ANNOUNCE_FLOOR body. No origin advertises the last revision, so it
-/// stands for a floor that certifies nothing.
+/// Encode an ANNOUNCE_FLOOR body: the revision plus one, or 0 to certify nothing.
 fn encode_floor(w: &mut Encoder<'_>, id: u64, revision: Option<route::Rev>) -> Result<(), EncodeError> {
 	w.varint(id)?;
 	match revision {
+		// No origin advertises the last revision, so it never needs the offset.
 		Some(route::MAX) => Err(EncodeError::InvalidState),
-		Some(rev) => w.varint(rev),
-		None => w.varint(route::MAX),
+		Some(rev) => w.varint(rev + 1),
+		None => w.varint(0),
 	}
 }
 
 fn decode_floor(r: &mut Decoder<'_>) -> Result<AnnounceBroadcast, DecodeError> {
 	let id = r.varint()?;
-	let revision = Some(r.varint()?).filter(|&rev| rev != route::MAX);
+	let revision = r.varint()?.checked_sub(1);
 	Ok(AnnounceBroadcast::Floor { id, revision })
 }
 
@@ -343,11 +318,14 @@ impl Encode<Version> for AnnounceBroadcast {
 				Self::Takeover { .. } => return Err(EncodeError::Version),
 				Self::RouteStart { .. } if version.has_routes() => ROUTE_START,
 				Self::RouteUpdate { .. } if version.has_routes() => ROUTE_UPDATE,
+				Self::RouteHold { .. } if version.has_routes() => ROUTE_HOLD,
 				Self::RouteEnd { .. } if version.has_routes() => ROUTE_END,
 				Self::Floor { .. } if version.has_routes() => ANNOUNCE_FLOOR,
-				Self::RouteStart { .. } | Self::RouteUpdate { .. } | Self::RouteEnd { .. } | Self::Floor { .. } => {
-					return Err(EncodeError::Version);
-				}
+				Self::RouteStart { .. }
+				| Self::RouteUpdate { .. }
+				| Self::RouteHold { .. }
+				| Self::RouteEnd { .. }
+				| Self::Floor { .. } => return Err(EncodeError::Version),
 				// The pre-lite-06 path-form retraction has no place on lite-06.
 				Self::Ended { .. } => return Err(EncodeError::Version),
 				// Decode-only: an unknown type is never sent.
@@ -403,17 +381,17 @@ impl Encode<Version> for AnnounceBroadcast {
 				}
 				Self::Synced => {}
 				Self::RouteStart { node, advert } => {
-					if !valid_start(*node, advert) {
+					if *node == 0 {
 						return Err(EncodeError::InvalidState);
 					}
 					w.varint(*node)?;
 					encode_advert(w, advert)?;
 				}
-				Self::RouteUpdate { id, reach } => {
+				Self::RouteUpdate { id, advert } => {
 					w.varint(*id)?;
-					encode_reach(w, reach)?;
+					encode_advert(w, advert)?;
 				}
-				Self::RouteEnd { id } => w.varint(*id)?,
+				Self::RouteHold { id } | Self::RouteEnd { id } => w.varint(*id)?,
 				Self::Floor { id, revision } => encode_floor(w, *id, *revision)?,
 				Self::Ended { .. } | Self::Skipped => unreachable!("refused above"),
 			}
@@ -452,6 +430,7 @@ impl Encode<Version> for AnnounceBroadcast {
 			| Self::Synced
 			| Self::RouteStart { .. }
 			| Self::RouteUpdate { .. }
+			| Self::RouteHold { .. }
 			| Self::RouteEnd { .. }
 			| Self::Floor { .. } => {
 				return Err(EncodeError::Version);
@@ -520,15 +499,16 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 					ROUTE_START if version.has_routes() => {
 						let node = body.varint()?;
 						let advert = decode_advert(&mut body)?;
-						if !valid_start(node, &advert) {
+						if node == 0 {
 							return Err(DecodeError::InvalidValue);
 						}
 						Self::RouteStart { node, advert }
 					}
 					ROUTE_UPDATE if version.has_routes() => Self::RouteUpdate {
 						id: body.varint()?,
-						reach: decode_reach(&mut body)?,
+						advert: decode_advert(&mut body)?,
 					},
+					ROUTE_HOLD if version.has_routes() => Self::RouteHold { id: body.varint()? },
 					ROUTE_END if version.has_routes() => Self::RouteEnd { id: body.varint()? },
 					ANNOUNCE_FLOOR if version.has_routes() => decode_floor(&mut body)?,
 					// Unknown types are skipped by length so an earlier Lite06 build
@@ -1524,16 +1504,13 @@ mod tests {
 			},
 			AnnounceBroadcast::RouteStart {
 				node: route::QUALIFIED | 9,
-				advert: advert(route::MAX - 1, route::MAX - 1, true),
+				advert: advert(route::MAX - 1, route::MAX, true),
 			},
 			AnnounceBroadcast::RouteUpdate {
 				id: 0,
-				reach: Reach::Finite(advert(42, 15, true)),
+				advert: advert(42, 0, true),
 			},
-			AnnounceBroadcast::RouteUpdate {
-				id: 3,
-				reach: Reach::Held,
-			},
+			AnnounceBroadcast::RouteHold { id: 3 },
 			AnnounceBroadcast::RouteEnd { id: 0 },
 			AnnounceBroadcast::Floor {
 				id: 0,
@@ -1549,8 +1526,8 @@ mod tests {
 		}
 	}
 
-	/// A floor is a marker: the Route ID and one revision, the last varint when it
-	/// certifies nothing.
+	/// A floor is a marker: the Route ID and the revision plus one, 0 when it certifies
+	/// nothing.
 	#[test]
 	fn a_floor_is_its_route_and_revision() {
 		let encode = |revision| {
@@ -1560,8 +1537,9 @@ mod tests {
 				.unwrap();
 			buf
 		};
-		assert_eq!(encode(Some(7)), vec![9, 2, 0, 7]);
-		assert_eq!(encode(None), [&[9, 10, 0][..], &[0xff; 9]].concat());
+		assert_eq!(encode(Some(0)), vec![9, 2, 0, 1]);
+		assert_eq!(encode(Some(7)), vec![9, 2, 0, 8]);
+		assert_eq!(encode(None), vec![9, 2, 0, 0]);
 	}
 
 	#[test]
@@ -1573,8 +1551,9 @@ mod tests {
 			},
 			AnnounceBroadcast::RouteUpdate {
 				id: 0,
-				reach: Reach::Held,
+				advert: advert(0, 1, false),
 			},
+			AnnounceBroadcast::RouteHold { id: 0 },
 			AnnounceBroadcast::RouteEnd { id: 0 },
 			AnnounceBroadcast::Floor { id: 0, revision: None },
 		] {
@@ -1605,8 +1584,8 @@ mod tests {
 		));
 	}
 
-	/// What no node advertises is refused on both ends: node 0, the last varint as a
-	/// seqno or a starting metric, and a held route carrying a seqno or the bit.
+	/// What no node advertises is refused on both ends: node 0, and the last seqno or
+	/// revision.
 	#[test]
 	fn route_messages_refuse_what_no_node_advertises() {
 		let refused = [
@@ -1618,19 +1597,11 @@ mod tests {
 				node: 1,
 				advert: advert(route::MAX, 1, false),
 			},
-			AnnounceBroadcast::RouteStart {
-				node: 1,
-				advert: advert(0, route::MAX, false),
-			},
 			AnnounceBroadcast::RouteUpdate {
 				id: 0,
-				reach: Reach::Finite(advert(route::MAX, 1, false)),
+				advert: advert(route::MAX, 1, false),
 			},
-			AnnounceBroadcast::RouteUpdate {
-				id: 0,
-				reach: Reach::Finite(advert(0, route::MAX, false)),
-			},
-			// The last revision is the floor that certifies nothing, never a revision.
+			// The last revision has no room for the offset.
 			AnnounceBroadcast::Floor {
 				id: 0,
 				revision: Some(route::MAX),
@@ -1653,12 +1624,14 @@ mod tests {
 		let malformed = [
 			forge(ROUTE_START, advert(0, 0, 1, 0)),
 			forge(ROUTE_START, advert(1, route::MAX, 1, 0)),
-			forge(ROUTE_START, advert(1, 0, route::MAX, 0)),
 			forge(ROUTE_START, advert(1, 0, 1, 2)),
 			// ROUTE_UPDATE's leading field is the Route ID, so 0 is a valid id here.
 			forge(ROUTE_UPDATE, advert(0, route::MAX, 1, 0)),
-			forge(ROUTE_UPDATE, advert(0, 1, route::MAX, 0)),
-			forge(ROUTE_UPDATE, advert(0, 0, route::MAX, 1)),
+			// A hold carries only its Route ID.
+			forge(ROUTE_HOLD, |w| {
+				w.varint(0u64).unwrap();
+				w.varint(0u64).unwrap();
+			}),
 			// A floor without its revision, and one with trailing bytes.
 			forge(ANNOUNCE_FLOOR, |w| w.varint(0u64).unwrap()),
 			forge(ANNOUNCE_FLOOR, |w| {

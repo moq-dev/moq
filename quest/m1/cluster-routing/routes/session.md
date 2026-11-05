@@ -78,6 +78,11 @@ drives sessions, which is why the switch lands here.
   projection: a scope a relay lost now goes offline downstream only on
   ROUTE_END, the accepted cost, so update the scoped fixtures' expectations
   to it, while no sweep may revive a known withdrawal or report a false END.
+  Also cover a fresh claim that arrives only on an uncertified stream while
+  an older certified floor on another stream proves it absent
+  ([review](https://github.com/moq-dev/moq/pull/7764#discussion_r4485081975)):
+  the merge rule hides it until the certifying peer refreshes or lets go,
+  and the test pins that bound.
 - Bound what a peer makes the router hold (routes, claims, views per
   session) by design, as the session caps announcements today.
 - Public API: the route-change surface on `broadcast::Route` and its

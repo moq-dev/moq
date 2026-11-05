@@ -12,8 +12,9 @@ runs on the hosted ARM runners, and a deliberately slowed bench fails the job.
 - Maintainer: dispatch the slowed-bench Nightly run below. Agents never
   dispatch Nightly; the 2026-11-04 authorization covered the two A/A runs only.
 - Maintainer: authorize one more A/A Nightly run for the moq-net
-  (`bench-rust`) and `bench-rust-relay` groups once
-  [moq-net's benches run to completion](/quest/m1/bench-test-mode.md) lands.
+  (`bench-rust`) and `bench-rust-relay` groups, now that
+  [moq-dev/moq#7940](https://github.com/moq-dev/moq/pull/7940) lets moq-net's
+  benches run to completion.
   Neither group produced a `paired.json` in either 2026-11-04 run, because
   their benches panic. Check: both groups' `paired.json` exist in that run.
 

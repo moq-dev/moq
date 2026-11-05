@@ -802,7 +802,7 @@ fn an_overflowing_route_neither_certifies_nor_holds() {
 	};
 	let (near, far) = (1, 2);
 	let far_link = Link {
-		cost: MAX - 1,
+		cost: MAX,
 		..Link::default()
 	};
 

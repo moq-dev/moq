@@ -401,7 +401,8 @@ The subscriber creates the stream with an ANNOUNCE_REQUEST message.
 The publisher replies with a single ANNOUNCE_OK message followed by the matching routes and claims and any future changes:
 
 - ROUTE_START: the publisher reaches an origin node.
-- ROUTE_UPDATE: a route's seqno, metric, or down-only bit changed, or the route is held.
+- ROUTE_UPDATE: a route's seqno, metric, or down-only bit changed.
+- ROUTE_HOLD: the publisher has no usable route but holds it while it recovers.
 - ROUTE_END: the publisher let go of a route and every claim under it.
 - ANNOUNCE_START: a matching claim of a route's origin node.
 - ANNOUNCE_END: the origin withdrew a claim.
@@ -450,7 +451,7 @@ The subscriber applies a batch whole, once its floor arrives.
 A receiver that hears one origin's claims on several streams merges them claim by claim, each at the prefix its stream presents it: of the streams whose floor certifies the claim, the one with the highest Revision decides whether it exists, and a claim no floor certifies exists while some stream carries it.
 An older floor never revives a claim whose withdrawal a newer one delivered.
 A floor that certifies nothing proves no claim absent: the stream's claims stay until its ANNOUNCE_END or ROUTE_END.
-While a receiver has a usable route to the origin and every peer whose last finite route to it is feasible here has answered the current request, it lets go of a claim none of those peers certifies or carries: it goes offline, which is not an ANNOUNCE_END.
+While a receiver has a usable route to the origin and every peer whose last advertised route to it is feasible here has answered the current request, it lets go of a claim none of those peers certifies or carries: it goes offline, which is not an ANNOUNCE_END.
 
 #### Compression {#announce-compression}
 An ANNOUNCE_START or ANNOUNCE_TAKEOVER MAY copy the head of its path from a live claim on the same stream, its base.
@@ -482,10 +483,10 @@ A Node ID is otherwise declared, not proven.
 An origin advertises its own route with a Metric of 0 and a Seqno that only it advances.
 A receiver adds the session's link cost (see [Cost Parameter](#cost-parameter)) to the Metric of every route the peer sends; the sum is its metric through that peer.
 Each link adds at least 1, so a route's metric strictly increases away from its origin.
-A metric that reaches 2^64-1 makes the route unusable.
+A metric that overflows 64 bits makes the route unusable.
 
-A node keeps a feasibility distance per Node ID: the highest Seqno of any finite route it advertised, and the lowest metric it advertised at that Seqno, as in [RFC8966] Section 3.5.1.
-A route is feasible when its Seqno is greater than the distance's, or equal with a lower metric.
+A node keeps a feasibility distance per Node ID: the highest Seqno of any route it advertised, and the lowest metric it advertised at that Seqno, as in [RFC8966] Section 3.5.1.
+A route is feasible when no feasibility distance is kept for its Node ID yet, when its Seqno is greater than the distance's, or when its Seqno is equal and its advertised Metric is lower.
 A node selects, per Node ID, among its feasible routes that are not held: a session that has not received a GOAWAY, then the highest local priority, then the lowest metric.
 It MUST NOT select an infeasible route, and a distance only ever falls within a Seqno, so advertising a longer route never raises it.
 A node MAY mark a session upstream.
@@ -496,8 +497,8 @@ A node that does not forward, such as a client, sends only its own route, and ho
 An origin advances its Seqno whenever its own set of sessions changes.
 It never advertises a Seqno or Revision of 2^64-1: a change that would reach it instead rotates its Node ID, ending the old route everywhere and announcing its claims again under the new one.
 
-A node with no usable route to an origin node holds it while it can still recover: while every route it has to the node is infeasible, or a peer holds a route whose last finite advertisement is feasible here.
-A held route travels as a ROUTE_UPDATE with an infinite Metric (2^64-1), and its claims stay shown but unavailable.
+A node with no usable route to an origin node holds it while it can still recover: while every route it has to the node is infeasible, or a peer holds a route whose last advertisement is feasible here.
+A held route travels as a ROUTE_HOLD, and its claims stay shown but unavailable until a ROUTE_UPDATE makes it usable again.
 Otherwise the node lets go, sending ROUTE_END wherever it advertised the route, and its claims go offline.
 Neither proves that the origin withdrew its claims.
 
@@ -1082,7 +1083,7 @@ An Announce Stream ending before SYNCED is a PROTOCOL_VIOLATION; a Tracks Stream
 
 ## ROUTE_START {#route-start}
 A publisher sends a ROUTE_START message when it reaches an origin node (see [Routing](#routing)).
-Each ROUTE_START implicitly assigns the next Route ID on the stream, later referenced by ROUTE_UPDATE, ROUTE_END, ANNOUNCE_FLOOR, ANNOUNCE_START, and ANNOUNCE_TAKEOVER (see [Announce](#announce)).
+Each ROUTE_START implicitly assigns the next Route ID on the stream, later referenced by ROUTE_UPDATE, ROUTE_HOLD, ROUTE_END, ANNOUNCE_FLOOR, ANNOUNCE_START, and ANNOUNCE_TAKEOVER (see [Announce](#announce)).
 
 ~~~
 ROUTE_START Message {
@@ -1108,7 +1109,6 @@ The origin's sequence number of the route, which only the origin advances.
 
 **Metric**:
 The publisher's metric to the origin node, 0 when it is the origin.
-2^64-1 is a PROTOCOL_VIOLATION here: a route starts usable.
 
 **Down Only**:
 1 if the route is down-only (see [Routing](#routing)), 0 otherwise.
@@ -1137,9 +1137,26 @@ The ordinal implicitly assigned by a prior ROUTE_START on this stream.
 
 **Seqno**, **Metric**, and **Down Only**:
 As defined for [ROUTE_START](#route-start), replacing the route's.
-A Metric of 2^64-1 means the route is held: the publisher has no usable route to the origin node but still holds its claims while it recovers.
-A held route carries a Seqno and Down Only of 0, and the receiver keeps the last finite values; any other value is a PROTOCOL_VIOLATION.
-A later finite ROUTE_UPDATE makes the route usable again.
+A ROUTE_UPDATE for a held route makes it usable again.
+
+
+## ROUTE_HOLD {#route-hold}
+A publisher sends a ROUTE_HOLD message when it has no usable route to the origin node but still holds the route and its claims while it recovers (see [Routing](#routing)), referencing its Route ID.
+The receiver keeps the route's last Seqno, Metric, and Down Only, and does not select it until a ROUTE_UPDATE.
+
+~~~
+ROUTE_HOLD Message {
+  Type (i) = 0xB
+  Message Length (i)
+  Route ID (i)
+}
+~~~
+
+**Type**:
+Set to 0xB to indicate a ROUTE_HOLD message.
+
+**Route ID**:
+The ordinal implicitly assigned by a prior ROUTE_START on this stream.
 
 
 ## ROUTE_END {#route-end}
@@ -1372,7 +1389,7 @@ Set to 0x9 to indicate an ANNOUNCE_FLOOR message.
 The ordinal implicitly assigned by a prior ROUTE_START on this stream.
 
 **Revision**:
-The origin's Revision at which the floor certifies the stream's claims for the route, or 2^64-1, which no origin advertises (see [Routing](#routing)), when it certifies nothing.
+The origin's Revision at which the floor certifies the stream's claims for the route, plus one, or 0 when it certifies nothing.
 
 
 ## SUBSCRIBE
@@ -2112,9 +2129,9 @@ The `Message Length` describes the payload size on the wire.
 - A receiver mints an Instance, starting with `~`, for each announcement a session of an earlier version delivers.
 - Added announce compression: ANNOUNCE_START and ANNOUNCE_TAKEOVER gain `Path Base` and `Path Keep` to copy the head of a live claim's suffix.
 - Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, with a seqno, an additive metric, and a down-only bit, and loops are prevented by Babel's feasibility condition. Every ANNOUNCE_START and ANNOUNCE_TAKEOVER names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin rather than an update per claim. Removed the Hop ID list, ANNOUNCE_OK's Hop ID, and the SETUP Hop parameter (0x5).
-- A ROUTE_UPDATE with a Metric of 2^64-1 holds a route while it recovers; ROUTE_END lets it go. Neither withdraws the origin's claims, and the subscriber echoes every ROUTE_END back.
+- Added ROUTE_HOLD (0xB), which holds a route while it recovers; ROUTE_END lets it go. Neither withdraws the origin's claims, and the subscriber echoes every ROUTE_END back.
 - Added ROUTE_REQUEST (0xA), sent by the subscriber on the Announce Stream to ask for a route with a newer seqno when every route it has is infeasible.
-- Added ANNOUNCE_FLOOR (0x9), closing each batch of a route's claims with the origin Revision at which the stream's claims across the requested prefix are certified, or 2^64-1 to certify nothing, so a stale copy never revives a claim whose withdrawal a newer one delivered. A floor certifies only the claims its own request shows.
+- Added ANNOUNCE_FLOOR (0x9), closing each batch of a route's claims with the origin Revision at which the stream's claims across the requested prefix are certified plus one, or 0 to certify nothing, so a stale copy never revives a claim whose withdrawal a newer one delivered. A floor certifies only the claims its own request shows.
 - A route presents only its most specific claim covering the requested prefix, moved to the next covering claim when it is withdrawn rather than ended.
 - Added `Node ID` to TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS: the origin node the first hop selected, followed by every later hop.
 - Replaced Warm and Cold Route Cost with the origin's Announce Cost, unchanged in transit. ANNOUNCE_UPDATE carries only the Announce Cost.

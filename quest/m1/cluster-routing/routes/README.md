@@ -16,15 +16,17 @@ claim whose withdrawal is already known.
 1. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **The draft describes the target before the code switches.** A hop-less ANNOUNCE cannot run before the router drives sessions; the quest's own Plan says so. So the draft now specifies the whole lite-07 route wire, while main's lite-07 session keeps sending hop-based ANNOUNCEs until [Route session integration](https://github.com/moq-dev/moq/blob/main/quest/m1/cluster-routing/routes/session.md) lands. lite-07 is unpublished `-wip`, off by default, and the epic lands in one release before the cut. The other option was to put only the new message sections in the draft and leave ANNOUNCE hop-based. I rejected it because ANNOUNCE_FLOOR's "for that route" and the Route ID would then be undefined in the draft.
 2. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **The request field is `Node ID (i)`, with 0 meaning "the publisher selects".** It is added to every request that resolves a path: TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS. Node ID 0 is reserved everywhere.
 3. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **ROUTE_REQUEST names a Node ID, not a Route ID.** A request can then never race a ROUTE_END into a protocol violation.
-4. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **A held ROUTE_UPDATE carries a seqno and down-only bit of 0.** Any other value is refused, rather than letting the fields carry no meaning.
+4. ~~A held ROUTE_UPDATE carries a seqno and down-only bit of 0.~~ Superseded by item 14: a held route is its own message and carries no seqno or bit.
 5. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **Floor regions have no order, and a repeated region is a violation.** A sorted order would need Rust's `Path` ordering reproduced exactly in JS. Decoding into a map rejects duplicates at the same cost. Superseded the same day by item 10, which removes regions.
 6. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **The Hop setup parameter and ANNOUNCE_OK's Hop ID are dropped from lite-07.** Their only roles were path-vector exclusion and the implicit trailing hop. ANNOUNCE_OK reserves no body for a route-key proof: [moq-dev/moq#7937](https://github.com/moq-dev/moq/pull/7937), accepted the same day, proves the route key once per session in SETUP. The live hop-based codec still switches in session integration, as choice 1 requires.
 7. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **An echo naming a Route ID that was never ended, or was already echoed, is a violation at the publisher.** The publisher can check this from its live and unacknowledged ids alone, with no growing state.
 8. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **ANNOUNCE_TAKEOVER keeps its shape, with a Route ID in place of hops, and its predecessor must be under the same route.** [quest/m1/announce-takeover.md](https://github.com/moq-dev/moq/blob/main/quest/m1/announce-takeover.md) deletes the message, so this keeps the change minimal.
 9. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **Unknown announce types stay skipped by length on lite-06+**, as before. An unknown reply type is refused.
-10. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **ANNOUNCE_FLOOR is a marker, not a region list:** `{Route ID, Revision}`. It closes a batch and certifies the stream's claims for that route across the whole requested prefix as the origin's at that Revision. A publisher that cannot vouch for the whole requested prefix at one Revision still closes the batch, with a Revision of 2^64-1 that certifies nothing: the one Revision no origin advertises, as the infinite Metric marks a held route, so the common floor carries no flag and no offset. Regions, the replacing list, and the 65,535-byte overflow go away. Accepted cost: a relay with partial knowledge of an origin certifies nothing for that route, so a receiver lets its stale claims go only on ROUTE_END. Rejected: one region per message; a multipart atomic list.
+10. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **ANNOUNCE_FLOOR is a marker, not a region list:** `{Route ID, Revision}`. It closes a batch and certifies the stream's claims for that route across the whole requested prefix as the origin's at that Revision. A publisher that cannot vouch for the whole requested prefix at one Revision still closes the batch, with a floor that certifies nothing, encoded per item 13. Regions, the replacing list, and the 65,535-byte overflow go away. Accepted cost: a relay with partial knowledge of an origin certifies nothing for that route, so a receiver lets its stale claims go only on ROUTE_END. Rejected: one region per message; a multipart atomic list.
 11. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **Clamped claims collapse to the best one.** When several of a route's claims cover a request's prefix (`live` at cost 10 and `live/a` at cost 1, request `live/a/x`), the publisher presents only the most specific, and when it is withdrawn moves the presented claim to the next covering one with ANNOUNCE_UPDATE or ANNOUNCE_RESTART instead of ending it. No wire change; one live claim per prefix per route holds, and a receiver merges claims at the prefix each stream presents them. Rejected: carrying each claim's ancestor depth.
 12. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **A floor certifies only what its own request shows.** A stream whose request did not set `Hidden` certifies nothing about hidden claims. No new wire field. Rejected: isolating differently filtered views.
+13. ✅ Decided 2026-11-05 (maintainer): **ANNOUNCE_FLOOR encodes `Revision + 1`, with 0 meaning the floor certifies nothing,** the same offset as `Max Age`. Rust decodes it to `Option`. It replaces a Revision of 2^64-1 as the marker: a huge sentinel is a bad pattern and costs 9 bytes as a lite-07 varint. Rejected: a separate message; a boolean field.
+14. ✅ Decided 2026-11-05 (maintainer: "use 0 as a sentinel, or make a new message type"; the agent picked the message): **A held route is ROUTE_HOLD (0xB), `{Route ID}`,** replacing a ROUTE_UPDATE with a Metric of 2^64-1. A metric of 0 is real (the origin's own route), so 0 cannot mark held, and offsetting every metric by one would still leave a held update's seqno and down-only bit meaningless and refused. The message carries only what a hold means, item 4's rule goes away, and a metric is now only bounded by overflow, so the wire refuses no metric. The 2^64-1 Seqno and Revision bounds stay: they are bounds, not markers, leaving room for a ROUTE_REQUEST's successor and for the floor's offset.
 
 
 The route layer's core landed in
@@ -167,8 +169,8 @@ the bullets below are the contract it carries.
   by metric overflow.
 - Loop freedom is Babel's feasibility condition (RFC 8966) keyed by node:
   accept a route if its seqno is newer, or equal with a metric below the
-  feasibility distance. Only the origin advances its seqno. Retraction is an
-  infinite metric or ROUTE_END; there is no count to infinity.
+  feasibility distance. Only the origin advances its seqno. Retraction is
+  ROUTE_HOLD or ROUTE_END; there is no count to infinity.
 - Starvation recovery is Babel's seqno request (RFC 8966 s3.8, decided
   2026-10-12). A node whose routes to an origin are all infeasible sends
   ROUTE_REQUEST for that origin, with its feasibility seqno plus one, to the
@@ -257,7 +259,7 @@ loss never reports an END:
 - Each origin numbers the changes to its own claims with a revision that
   starts at zero for each routing identity, separate from the route seqno.
   Both are varints. An origin never advertises the last value, 2^64-1 (the
-  largest lite-07 varint, as for the infinite metric): a
+  largest lite-07 varint): a
   seqno advance, claim change, or seqno request that would reach it rotates
   the identity instead, ending the old one everywhere and announcing the
   claims again under a fresh one, so nothing wraps and every advertised
@@ -310,7 +312,7 @@ loss never reports an END:
   withdrawing one origin's wildcard leaves another origin's copy
   (`wildcard_claims_end_per_origin_and_are_certified_below`).
 - A node tracks the regions each neighbour's last view certifies. Only a
-  neighbour whose last finite advertisement is feasible here counts, held or
+  neighbour whose last advertisement is feasible here counts, held or
   not: feasible edges strictly decrease the metric toward the origin, so two
   nodes never keep a region alive through each other. While the node has a
   usable route and every such neighbour has answered the current interest, a
@@ -341,9 +343,8 @@ loss never reports an END:
   withdrawal.
 - Per identity, a node is usable (a feasible selected route: announcements
   shown available), held, or let go. It is held while starved, or while a
-  neighbor's held route has a last finite advertisement feasible here; it
-  keeps showing the announcements as unavailable and sends ROUTE_UPDATE with
-  an infinite metric. Holds therefore follow strictly decreasing metrics
+  neighbor's held route has a last advertisement feasible here; it
+  keeps showing the announcements as unavailable and sends ROUTE_HOLD. Holds therefore follow strictly decreasing metrics
   down to a starved node and cannot prop each other up. Otherwise the node
   lets go: ROUTE_END to every neighbor it advertised to, and its reader sees
   the announcements go offline, a distinct event from an END the origin
@@ -413,8 +414,10 @@ Decided with the maintainer 2026-10-16, from the handoff proof:
    which adds bytes and removes no state, since a receiver still needs each
    session's last view to apply a batch from a sender whose own view jumped;
    and the floor on ROUTE_UPDATE, which ties claim churn to route processing.
-2. Held encoding: ✅ an infinite metric (2^64-1) means held and ROUTE_END
-   means let go, with no new field. Rejected: an explicit held bit.
+2. Held encoding: ~~an infinite metric (2^64-1) means held and ROUTE_END
+   means let go, with no new field. Rejected: an explicit held bit.~~
+   Superseded 2026-11-05 by Plan item 14: ROUTE_HOLD means held, and
+   ROUTE_END still means let go.
 3. Reader API: ✅ an announcement carries availability, and letting go is a
    distinct offline event, separate from the origin's END, in Rust and JS.
    Rejected: presence alone, which gives a reader nothing to re-request on
