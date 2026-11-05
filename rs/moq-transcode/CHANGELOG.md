@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.21](https://github.com/moq-dev/moq/compare/moq-transcode-v0.1.20...moq-transcode-v0.1.21) - 2026-11-05
+
+### Other
+
+- updated the following local packages: moq-net, hang, moq-mux, moq-video
+
 ## [0.1.20](https://github.com/moq-dev/moq/compare/moq-transcode-v0.1.19...moq-transcode-v0.1.20) - 2026-11-03
 
 ### Other

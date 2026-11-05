@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.13](https://github.com/moq-dev/moq/compare/moq-relay-v0.17.12...moq-relay-v0.17.13) - 2026-11-05
+
+### Fixed
+
+- *(relay)* backport HTTP response and ops-listener hardening
+
 ## [0.17.12](https://github.com/moq-dev/moq/compare/moq-relay-v0.17.11...moq-relay-v0.17.12) - 2026-11-03
 
 ### Other

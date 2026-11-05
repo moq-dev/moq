@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.21](https://github.com/moq-dev/moq/compare/moq-net-v0.3.20...moq-net-v0.3.21) - 2026-11-05
+
+### Fixed
+
+- *(net)* withdraw IETF advertisements without send credit on release
+- *(net)* wait for the joined group head before fetching a cache miss
+- *(net)* keep cache-miss fetches moving through the PUBLISH_DONE grace
+
 ## [0.3.20](https://github.com/moq-dev/moq/compare/moq-net-v0.3.19...moq-net-v0.3.20) - 2026-11-03
 
 ### Other

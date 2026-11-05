@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.13](https://github.com/moq-dev/moq/compare/moq-cli-v0.14.12...moq-cli-v0.14.13) - 2026-11-05
+
+### Other
+
+- updated the following local packages: moq-relay, hang, moq-mux, moq-tokio, moq-audio, moq-video, moq-hls, moq-rtc, moq-rtmp, moq-srt, moq-transcode
+
 ## [0.14.12](https://github.com/moq-dev/moq/compare/moq-cli-v0.14.11...moq-cli-v0.14.12) - 2026-11-03
 
 ### Other
