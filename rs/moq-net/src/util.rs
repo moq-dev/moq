@@ -1,8 +1,6 @@
-//! Future boxing and the driver-owned task set.
+//! The driver-owned task set.
 
 use std::{collections::VecDeque, task::Poll};
-#[cfg(feature = "async")]
-use std::{future::Future, pin::Pin};
 
 mod cell;
 mod idle;
@@ -15,19 +13,8 @@ pub(crate) use idle::Idle;
 pub(crate) use later::{Later, Learning};
 pub(crate) use wake::QueueWake;
 
-/// A boxed `Send` future, the same type as `futures::future::BoxFuture`.
-#[cfg(feature = "async")]
-pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-
-/// A boxed [`kio::Tasks`] task: hand-rolled machines and adapted futures alike.
+/// A boxed [`kio::Tasks`] task.
 pub(crate) type BoxTask = Box<dyn FnMut(&kio::Waiter) -> Poll<()> + Send>;
-
-/// Adapt a future into a [`kio::Tasks`] task, for a caller not yet written as a poll.
-#[cfg(feature = "async")]
-pub(crate) fn future_task(task: impl Future<Output = ()> + Send + 'static) -> BoxTask {
-	let mut task: BoxFuture<'static, ()> = Box::pin(task);
-	Box::new(move |waiter| waiter.poll_future(task.as_mut()))
-}
 
 /// Cloneable handle for submitting tasks to a driver-owned [`TaskSet`].
 #[derive(Clone)]

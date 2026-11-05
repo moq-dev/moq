@@ -107,6 +107,7 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	/// cancelled `encode` must not be retried with the same message, or two
 	/// copies go on the wire; resume with [`Self::poll_flush`] (or any later
 	/// write) instead.
+	#[cfg(test)]
 	pub async fn encode<T: Encode<V> + Debug>(&mut self, msg: &T) -> Result<(), Error>
 	where
 		V: Into<Form> + Copy,
@@ -116,6 +117,7 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	}
 
 	/// Encode a varint to the stream, with the same cancellation rules as [`Self::encode`].
+	#[cfg(test)]
 	pub async fn varint(&mut self, value: u64) -> Result<(), Error>
 	where
 		V: Into<Form> + Copy,
@@ -195,6 +197,7 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	/// A message still partly buffered resets the stream with [`Error::Cancel`] instead: a FIN
 	/// would hand the peer a truncated message, and flushing the rest could wait forever on
 	/// credit the peer withholds.
+	#[cfg(test)]
 	pub async fn close(self) -> Result<(), Error>
 	where
 		V: Clone,
