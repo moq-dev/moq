@@ -5717,9 +5717,10 @@ impl RecvGroup {
 				)
 			}
 		};
-		// Held until the group settles above: the stream counts toward the subscription's end
-		// for as long as it is read.
-		drop(reading);
+		// Held until the group settles above, so a frame the track or group cut short drops
+		// into an already-aborted group instead of reporting a loss, and the stream counts
+		// toward the subscription's end for as long as it is read.
+		drop((ingest, reading));
 		Poll::Ready(res)
 	}
 }
@@ -6106,11 +6107,20 @@ impl RecvFill {
 		let filling: Filling = Filling(fill.clone());
 		// A fill stream can overtake SUBSCRIBE_OK. The fill gate above is released only
 		// after that response commits track Info and installs the producer.
-		let installed = this.state.lock();
-		let subscription = installed.subscribes.get(&subscribe_id).ok_or(Error::NotFound)?;
-		let track: track::Producer = subscription.producer.clone().ok_or(Error::NotFound)?;
-		let largest: Option<u64> = subscription.fill_largest;
-		drop(installed);
+		let installed = this
+			.state
+			.lock()
+			.subscribes
+			.get(&subscribe_id)
+			.map(|subscription| (subscription.producer.clone(), subscription.fill_largest));
+		let Some((Some(producer), fill_largest)) = installed else {
+			// The guard cancels an unfinished head before the count lets the end go.
+			drop(filling);
+			drop(counted);
+			return Poll::Ready(Err(Error::NotFound));
+		};
+		let track: track::Producer = producer;
+		let largest: Option<u64> = fill_largest;
 
 		// Race the peer's stream against the subscription going away, the same way a
 		// subgroup stream is served. Otherwise a peer that stalls partway through a payload
@@ -6133,6 +6143,8 @@ impl RecvFill {
 				if matches!(err, Error::MalformedTrack) {
 					let _ = track.abort(Error::MalformedTrack);
 				}
+				drop(filling);
+				drop(counted);
 				return Poll::Ready(Err(err));
 			}
 		};
@@ -6159,8 +6171,8 @@ impl RecvFill {
 				Err(Error::Cancel)
 			}
 		};
-		// Held to the end: the guard cancels an unfinished head, and the count holds the
-		// subscription's end open while this stream is read.
+		// Held to the end, the guard dropping first: it cancels an unfinished head before the
+		// count, which holds the subscription's end open while this stream is read, lets go.
 		drop(filling);
 		drop(counted);
 		Poll::Ready(res)
