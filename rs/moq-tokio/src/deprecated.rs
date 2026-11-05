@@ -22,8 +22,16 @@ impl Deprecated {
 	}
 
 	/// Fold another section's findings in, so one message covers the whole config.
+	///
+	/// A finding already present is kept once: without a file, [`crate::cli::Merge`]
+	/// hands back `parsed` as-is, so collecting from both it and the result sees
+	/// the same hidden fields twice.
 	pub fn extend(&mut self, other: Deprecated) {
-		self.0.extend(other.0);
+		for item in other.0 {
+			if !self.0.contains(&item) {
+				self.0.push(item);
+			}
+		}
 	}
 
 	/// Record one released flag and the flag that replaced it.

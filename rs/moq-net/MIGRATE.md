@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Origins prove a route key ([#7937](https://github.com/moq-dev/moq/pull/7937))
+
+`origin::Config::route_key` takes an `origin::RouteKey`, which every lite-07 session on the origin proves to its peer in SETUP. Origins sharing a key fail over as one to a peer that scopes them; `None`, the default, proves nothing.
+A proof binds to the session through the new `poll::Session::export_keying_material`, which defaults to `None`: a transport over TLS returns its exporter, and a wrapper around another transport forwards it.
+
+### Group batch operations and `poll_next_frame` are crate-private ([#7874](https://github.com/moq-dev/moq/pull/7874))
+
+Read a frame in chunks with the async `group::Consumer::next_frame`, or read whole frames with `poll_read_frame` from a poll loop.
+`group::Consumer::{read_frames, poll_read_frames, keep_alive}`, `frame::Buffer`, and `group::Producer::write_frames` are now crate-private. Replace batch reads with repeated `read_frame` or `poll_read_frame` calls, and batch writes with `write_frame`. Cache access is refreshed by those reads.
+
 ### Readers at a shed frame ask a `track::Requests` handler for a flight ([#7944](https://github.com/moq-dev/moq/pull/7944))
 
 A reader that reaches a frame its group copy shed no longer gets `Error::Evicted` when the track has a live `track::Requests` handle: the handler receives a `Fill` of that one group from that frame (`Fill::start`), or from frame 0 on a compressed track, even though the group is still cached and live.

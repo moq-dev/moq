@@ -407,6 +407,17 @@ pub mod poll {
 			None
 		}
 
+		/// Export 32 bytes of keying material from this session's handshake under `label` and
+		/// `context` (RFC 8446 section 7.5), or `None` when the transport has no exporter.
+		///
+		/// Both ends of one session export the same bytes, and no other session does.
+		/// WebTransport derives them per session as its draft specifies, since other sessions
+		/// may share the connection.
+		fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+			let _ = (label, context);
+			None
+		}
+
 		/// Accept the next unidirectional stream opened by the peer.
 		fn accept_uni(&self) -> AcceptUni<'_, Self> {
 			AcceptUni::new(self)
@@ -614,6 +625,10 @@ pub mod poll {
 
 		fn stream_credit(&self, dir: super::Dir) -> Option<super::StreamCredit> {
 			(**self).stream_credit(dir)
+		}
+
+		fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+			(**self).export_keying_material(label, context)
 		}
 	}
 

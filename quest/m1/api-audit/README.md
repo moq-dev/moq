@@ -12,7 +12,7 @@ Non-goals: redesigning independently scoped surfaces
 ([subscribe ranges](/quest/m1/subscribe-ranges/README.md),
 [archives](/doc/concept/archives.md),
 [compressed tracks](/doc/concept/compression.md),
-[A/V clock](/quest/m1/av-clock.md)), and inherited debt that a later quest
+and `Sync`'s per-track clock handles), and inherited debt that a later quest
 already reshapes.
 
 ## Plan

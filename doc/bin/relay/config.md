@@ -306,6 +306,7 @@ connect = ["https://us-east.example.com/?cost=10"]   # Peers to dial. ?cost pric
 node = "https://us-west.example.com/"                 # This relay's own URL.
 token = "cluster.jwt"                                 # JWT for dials without an inline ?jwt=.
 id = 12345                                            # Stable Hop ID across restarts.
+route_key = "route.key"                               # Route key; relays sharing the file fail over as one to scoped peers.
 max_hops = 32                                         # Longest accepted/forwarded hop path (1 to 32).
 
 [cluster.api]
