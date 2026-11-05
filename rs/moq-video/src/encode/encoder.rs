@@ -129,13 +129,14 @@ pub enum Preset {
 /// requested [`Preset`] names the one whose controls it did apply, and one that
 /// could not confirm the controls a preset needs names none.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Applied {
+#[non_exhaustive]
+pub struct Applied {
 	/// The preset whose controls took effect, or `None` when the backend could
 	/// not confirm them (a refused or advisory low-latency setting).
-	pub(crate) preset: Option<Preset>,
+	pub preset: Option<Preset>,
 	/// The backend controls that took effect, for display, e.g.
 	/// `"p1, low-latency tuning, no B-frames, CBR, 1-frame VBV"`. Not a parse target.
-	pub(crate) controls: String,
+	pub controls: String,
 }
 
 impl Applied {
@@ -417,7 +418,7 @@ impl Encoder {
 
 	/// The latency and compression controls the backend applied for
 	/// [`Config::preset`], fixed for the session's lifetime.
-	pub(crate) fn applied(&self) -> Applied {
+	pub fn applied(&self) -> Applied {
 		self.backend.applied()
 	}
 
