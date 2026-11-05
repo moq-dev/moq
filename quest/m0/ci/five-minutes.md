@@ -134,7 +134,9 @@ What remains:
 - Admission still makes the measured net route exceed 5 minutes despite its
   command taking 227 s. The 2026-10-29 admission decision above remains with
   moq-dev/quest.
-- Repeat the default FFI route after the Gradle fix lands, without the override.
+- Repeat the default FFI route without the override; the Gradle fix
+  ([moq-dev/moq#7632](https://github.com/moq-dev/moq/pull/7632)) merged
+  2026-11-04.
 - Keep the dependency-build and cache work with
   [hakari](/quest/m0/ci/hakari.md). Decided 2026-10-30 (user): defer parallel
   Rust lint until that quest lands, then measure it. The slow-tests reduction
@@ -148,8 +150,6 @@ What remains:
 
 - moq-dev/quest: admission must keep the whole gate inside the worker's cache
   window; repeat the net measurement after its admission work lands.
-- moq-dev/moq: [moq-dev/moq#7632](https://github.com/moq-dev/moq/pull/7632)
-  must land before repeating the default FFI measurement without `GRADLE_CMD`.
 
 ## Related
 

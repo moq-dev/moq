@@ -4,6 +4,23 @@ How to adopt new APIs and update for breaking changes, newest first.
 
 ## Unreleased
 
+### `container::Playout` replaces `with_warmup` ([#7864](https://github.com/moq-dev/moq/pull/7864))
+
+`container::Consumer::with_warmup` is gone. Build a `container::Playout::new(delay, warmup)` from the `Delay` and the catalog rendition's `warmup`, subscribe with `playout.subscription(subscription)`, which widens the max delay by the warmup, and build the consumer with `playout.consumer(track, format)`, which skips at the max delay alone. The order no longer matters, and a track subscribed without the widening is widened when the consumer is built.
+
+```rust
+// Before
+let subscription = Subscription::default().with_delay(delay.with_max(delay.max.map(|max| max + warmup)));
+let track = broadcast.track(name)?.subscribe(subscription).await?;
+let consumer = Consumer::new(track, format).with_warmup(warmup).with_delay(delay);
+// After
+let playout = Playout::new(delay, warmup);
+let track = broadcast.track(name)?.subscribe(playout.subscription(Subscription::default())).await?;
+let consumer = playout.consumer(track, format);
+```
+
+A rendition without a warmup keeps `Consumer::new(track, format).with_delay(delay)`.
+
 ### `catalog::Config::with_max_age(None)` is unlimited ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 `Config::with_max_age` no longer treats `None` as "keep hang's default": an unset `Config` mints media tracks with `hang::container::MAX_AGE` (30 s), as before, `None` sets no publisher limit, and a value is that value.
@@ -45,8 +62,8 @@ HLS replaces a refused importer immediately; transient fetch failures still keep
 
 `container::Consumer::set_max_delay(Duration)` is `set_delay(Delay)`, and `with_delay(Delay)` is its builder.
 `moq_net::track::Delay { min, max }` defaults to zero for both: `max` (`None` for no limit) is the max delay that `set_max_delay` took. `set_delay` puts the whole delay on the subscription, and `Consumer::new` inherits it from there.
-`min` is the playout delay, and a consumer reads an unstated (`None`) one as zero. An unfloored consumer starts at the group covering the live edge less `min` plus any `with_warmup`, waiting for it when the newest group arrives first. Before the first read, a backlog that already landed starts at the first group whose first frame is within the max delay, plus the warmup, of the newest content, keeping the group covering the live edge less `min` and the warmup.
-Replace `consumer.set_max_delay(d)` with `consumer.set_delay(Delay::default().with_max(d))`, and set `min` to your playout delay. Call `with_warmup` before `with_delay`.
+`min` is the playout delay, and a consumer reads an unstated (`None`) one as zero. An unfloored consumer starts at the group covering the live edge less `min` plus any `Playout` warmup, waiting for it when the newest group arrives first. Before the first read, a backlog that already landed starts at the first group whose first frame is within the max delay, plus the warmup, of the newest content, keeping the group covering the live edge less `min` and the warmup.
+Replace `consumer.set_max_delay(d)` with `consumer.set_delay(Delay::default().with_max(d))`, and set `min` to your playout delay. A rendition with a catalog warmup builds its consumer with `container::Playout` instead.
 
 ### Compression moves to the track
 

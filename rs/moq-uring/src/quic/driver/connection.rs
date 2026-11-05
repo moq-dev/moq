@@ -329,6 +329,17 @@ impl Connection {
 		let conn = self.shared.conn.borrow();
 		moq_net::transport::ReceiveWindow::new(conn.receive_window(), conn.stream_receive_window())
 	}
+
+	/// The peer's stream credit in `dir`, as this connection last heard it.
+	pub(crate) fn stream_credit(&self, dir: moq_net::transport::Dir) -> moq_net::transport::StreamCredit {
+		let dir = match dir {
+			moq_net::transport::Dir::Uni => Dir::Uni,
+			moq_net::transport::Dir::Bi => Dir::Bi,
+		};
+		let mut conn = self.shared.conn.borrow_mut();
+		let streams = conn.streams();
+		moq_net::transport::StreamCredit::new(streams.credit(dir), streams.blocked(dir))
+	}
 }
 
 impl Clone for Connection {
@@ -457,26 +468,6 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 	};
 	guard.shared = None;
 	Ok(conn)
-}
-
-impl Connection {
-	pub(crate) fn open_request(&self) -> Result<Option<(send::Stream, recv::Stream)>, Error> {
-		if let Some(err) = self.shared.closed() {
-			return Err(err);
-		}
-		let id = self
-			.shared
-			.conn
-			.borrow_mut()
-			.streams()
-			.open(Dir::Bi, Default::default());
-		Ok(id.map(|id| {
-			(
-				send::Stream::new(self.shared.clone(), id),
-				recv::Stream::new(self.shared.clone(), id),
-			)
-		}))
-	}
 }
 
 impl Connection {

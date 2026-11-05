@@ -1206,7 +1206,14 @@ mod tests {
 	#[cfg(all(feature = "websocket", any(unix, windows)))]
 	fn acceptor_state() -> Arc<WebState> {
 		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
-		let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+		let cert = (|| -> std::result::Result<_, rcgen::Error> {
+			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+			params.serial_number = Some(1u64.into());
+			let cert = params.self_signed(&signing_key)?;
+			Ok(rcgen::CertifiedKey { cert, signing_key })
+		})()
+		.unwrap();
 		let certificates = moq_tokio::tls::Certificates::from_pem(cert.cert.pem().as_bytes()).unwrap();
 		Web::new(
 			crate::auth::Auth::refuse("test"),
@@ -1216,7 +1223,8 @@ mod tests {
 		)
 		.state
 	}
-	use rcgen::{CertificateParams, KeyPair};
+	use rcgen::CertificateParams;
+	use rind_rcgen::KeyPair;
 	use std::io::Write;
 	use tempfile::TempDir;
 	use tokio::io::{AsyncRead, AsyncWrite};
@@ -1671,17 +1679,27 @@ mod tests {
 	/// Generate a CA + server cert/key on disk and return the temp paths.
 	/// Modeled after `auth.rs::mtls_fixture`.
 	fn make_named_certs(dir: &TempDir, name: &str, hostname: &str) -> (PathBuf, PathBuf, PathBuf) {
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 
-		let ca_kp = KeyPair::generate().unwrap();
-		let mut ca_params = CertificateParams::new(vec![]).unwrap();
+		let ca_kp = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let mut ca_params = CertificateParams::new(vec![])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
+			.unwrap();
 		ca_params.distinguished_name.push(rcgen::DnType::CommonName, "Test CA");
 		ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
 		let ca_cert = ca_params.self_signed(&ca_kp).unwrap();
 		let ca_issuer = rcgen::Issuer::from_params(&ca_params, &ca_kp);
 
-		let server_kp = KeyPair::generate().unwrap();
-		let mut server_params = CertificateParams::new(vec![hostname.to_string()]).unwrap();
+		let server_kp = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let mut server_params = CertificateParams::new(vec![hostname.to_string()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
+			.unwrap();
 		server_params
 			.distinguished_name
 			.push(rcgen::DnType::CommonName, format!("test-{name}"));
@@ -1692,7 +1710,11 @@ mod tests {
 		let key_path = dir.path().join(format!("{name}.key.pem"));
 		std::fs::write(&ca_path, ca_cert.pem()).unwrap();
 		std::fs::write(&cert_path, server_cert.pem()).unwrap();
-		std::fs::write(&key_path, server_kp.serialize_pem()).unwrap();
+		std::fs::write(
+			&key_path,
+			pem::encode(&pem::Pem::new("PRIVATE KEY", server_kp.to_pkcs8().secret_pkcs8_der())),
+		)
+		.unwrap();
 
 		(ca_path, cert_path, key_path)
 	}
@@ -2552,6 +2574,88 @@ mod tests {
 		assert_eq!(streams, Some(7));
 
 		serving.abort();
+	}
+
+	/// Read the windows advertised by the real relay upgrade, before MoQ admission can
+	/// widen them. Nondefault values distinguish operator configuration from defaults.
+	#[cfg(feature = "websocket")]
+	#[tokio::test]
+	async fn websocket_upgrade_advertises_the_configured_receive_windows() {
+		use bytes::Buf;
+		use futures::StreamExt;
+		use qmux::ws::tungstenite::{Message, client::IntoClientRequest};
+
+		// QMux's frame type, lengths, and QUIC transport parameter values use QUIC varints.
+		fn decode_quic(bytes: &mut bytes::Bytes) -> Result<u64, &'static str> {
+			let first = *bytes.first().ok_or("missing varint")?;
+			let len = 1 << (first >> 6);
+			if bytes.len() < len {
+				return Err("truncated varint");
+			}
+			let mut value = (bytes.get_u8() & 0x3f) as u64;
+			for _ in 1..len {
+				value = (value << 8) | bytes.get_u8() as u64;
+			}
+			Ok(value)
+		}
+
+		let mut config = crate::Config::default();
+		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.web.http.listen = Some("127.0.0.1:0".parse().unwrap());
+		config.web.ws = true;
+		config.auth.public = vec![moq_auth::Pattern::all()];
+		config.quic.receive_window = Some(3 << 20);
+		config.quic.stream_receive_window = Some(384 << 10);
+		config.quic.max_streams = Some(17);
+		let relay = crate::Relay::load(config).await.unwrap().with_signals(false);
+		let http = relay.web_addrs().http.unwrap();
+		let serving = tokio::spawn(relay.run());
+
+		for version in qmux::Version::ALL {
+			let mut request = format!("ws://{http}/").into_client_request().unwrap();
+			request
+				.headers_mut()
+				.insert("sec-websocket-protocol", version.alpn().parse().unwrap());
+			let (mut socket, _) = qmux::ws::tokio_tungstenite::connect_async(request).await.unwrap();
+			let Message::Binary(mut record) = kio::clock::timeout(std::time::Duration::from_secs(5), socket.next())
+				.await
+				.unwrap()
+				.unwrap()
+				.unwrap()
+			else {
+				panic!("expected QMux transport parameters");
+			};
+			assert_eq!(decode_quic(&mut record).unwrap(), 0x3f5153300d0a0d0a);
+			let len = decode_quic(&mut record).unwrap() as usize;
+			let mut params = record.split_to(len);
+			let mut found = std::collections::BTreeMap::new();
+			while params.has_remaining() {
+				let id = decode_quic(&mut params).unwrap();
+				let len = decode_quic(&mut params).unwrap() as usize;
+				let mut value = params.split_to(len);
+				if (0x04..=0x09).contains(&id) {
+					found.insert(id, decode_quic(&mut value).unwrap());
+					assert!(value.is_empty());
+				}
+			}
+			assert_eq!(
+				found,
+				[
+					(4, 3 << 20),
+					(5, 384 << 10),
+					(6, 384 << 10),
+					(7, 384 << 10),
+					(8, 17),
+					(9, 17)
+				]
+				.into_iter()
+				.collect(),
+				"{version:?}"
+			);
+			socket.close(None).await.unwrap();
+		}
+		serving.abort();
+		let _ = serving.await;
 	}
 
 	/// An upgraded WebSocket reads no more than one qmux record at a time: a frame
