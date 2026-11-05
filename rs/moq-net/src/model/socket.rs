@@ -34,7 +34,7 @@ use std::task::{Poll, ready};
 use crate::{Error, Path};
 
 use super::WeakEntry;
-use super::origin::{self, Route};
+use super::origin::{self, RouteOptions};
 use super::track::{self, Delay, Order, Subscription};
 use super::{frame, group};
 
@@ -118,8 +118,8 @@ mod sealed {
 		pub(super) origin: origin::Consumer,
 		/// Where the `tcp` sessions' pumps run: the origin's driver.
 		pub(super) tasks: crate::util::TasksWeak,
-		/// This endpoint's broadcast.
-		pub(super) publication: origin::Publication,
+		/// This endpoint's route, which owns its broadcast.
+		pub(super) route: origin::Route,
 		/// The sessions withholding the broadcast from their peer.
 		pub(super) withheld: origin::HiddenWithheld,
 		pub(super) state: kio::Lock<State>,
@@ -403,7 +403,7 @@ impl Shared {
 			} else {
 				match std::mem::replace(&mut state.handler, Handler::Taken(kio::WaiterList::new())) {
 					Handler::Idle(requests) => Some(requests),
-					Handler::None => Some(self.publication.requests()),
+					Handler::None => Some(self.route.broadcast().requests()),
 					Handler::Taken(_) => unreachable!("checked above"),
 				}
 			}
@@ -495,7 +495,7 @@ impl Shared {
 		if let Some(retired) = retired {
 			// Closed first, as `close` may not have yet: dropping the last handler rejects
 			// the dials still queued with `Dropped`, rather than the close's `Unroutable`.
-			self.publication.close();
+			self.route.broadcast().close();
 			drop(retired);
 		}
 		for mut wake in wakes {
@@ -524,7 +524,7 @@ impl Shared {
 		if let Some(err) = &self.state.lock().end {
 			return Err(err.clone());
 		}
-		match self.publication.poll_closed(waiter) {
+		match self.route.broadcast().poll_closed(waiter) {
 			Poll::Ready(()) => Err(Error::Closed),
 			Poll::Pending => Ok(()),
 		}
@@ -552,7 +552,7 @@ impl Shared {
 		let streams = std::mem::take(&mut state.streams);
 		drop(guard);
 
-		self.publication.close();
+		self.route.broadcast().close();
 		// Reset outside the lock.
 		for stream in streams {
 			stream.abort(Error::Cancel);
@@ -599,7 +599,7 @@ impl Endpoint {
 	///
 	/// `id` names the endpoint: a well-known name for a server, or a random one for a
 	/// client. It must be one path segment. Fails like
-	/// [`origin::Producer::create_broadcast`] when `origin` may not publish
+	/// [`origin::Producer::route`] when `origin` may not publish
 	/// `<prefix>/.socket/<id>`.
 	pub fn new(
 		origin: &origin::Producer,
@@ -607,8 +607,7 @@ impl Endpoint {
 		id: &str,
 	) -> Result<Self, Error> {
 		let prefix = crate::path::convert(prefix)?;
-		let publication = origin.create_broadcast(endpoint_path(&prefix, id)?)?;
-		publication.announce(Route::default())?;
+		let route = origin.route(endpoint_path(&prefix, id)?, RouteOptions::default())?;
 		let consumer = origin.consume();
 		Ok(Self {
 			shared: Arc::new(Shared {
@@ -617,7 +616,7 @@ impl Endpoint {
 				withheld: consumer.hidden_withheld(),
 				origin: consumer,
 				tasks: origin.tasks(),
-				publication,
+				route,
 				state: kio::Lock::new(State {
 					handler: Handler::None,
 					tcp: Queue::default(),
@@ -675,7 +674,7 @@ impl Endpoint {
 		let name = track_name(S::PROTOCOL.as_str(), &shared.id, peer, &session);
 		// This side's half, waiting for the peer to ask for it, which only the peer can:
 		// nobody else knows the session.
-		let answer = shared.publication.reserve_unlisted_track(name.clone())?;
+		let answer = shared.route.broadcast().reserve_unlisted_track(name.clone())?;
 		// Followed rather than requested, so a peer not announced yet is waited for.
 		let resolving = Box::new(shared.origin.follow(path, None)?);
 		Ok(kio::Pending::new(Dialing {
@@ -1308,7 +1307,7 @@ mod tests {
 			// Listening, so the dial queues for the handler.
 			assert!(endpoint.poll_accept_tcp(&noop).is_pending());
 
-			let broadcast = endpoint.shared.publication.broadcast().consume();
+			let broadcast = endpoint.shared.route.broadcast().consume();
 			let dial = broadcast
 				.track("tcp/alice/bob/0123456789abcdef0123456789abcdef")
 				.unwrap()
@@ -1348,7 +1347,7 @@ mod tests {
 		assert!(endpoint.poll_accept_track(&noop).is_pending());
 		assert!(endpoint.poll_accept_tcp(&noop).is_pending());
 
-		let broadcast = endpoint.shared.publication.broadcast().consume();
+		let broadcast = endpoint.shared.route.broadcast().consume();
 		let queued = || endpoint.shared.state.lock().track.dials.len();
 		let dial = |session: u32| {
 			let dial = broadcast

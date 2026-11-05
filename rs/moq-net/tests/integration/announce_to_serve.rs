@@ -145,8 +145,8 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 	let mut log = Vec::new();
 
 	// Created, not yet announced: nobody can see or reach it.
-	let broadcast = publisher.create_broadcast(PATH).unwrap();
-	let track = broadcast.create_track("video", timed()).unwrap();
+	let broadcast = publisher.route(PATH, moq_net::origin::RouteOptions::hidden()).unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	kio::clock::sleep(SETTLE).await;
 	log.push(format!(
 		"created: {:?} {}",
@@ -155,7 +155,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 	));
 
 	// Announced: listed, and a request resolves.
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 	kio::clock::sleep(SETTLE).await;
 	let first = request(&consumer).await;
 	log.push(format!("announced: {:?} {}", drain(&mut announced), outcome(&first)));
@@ -173,7 +173,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 	// Unannounced: retracted for everyone. A fresh request is refused rather
 	// than joining the broadcast still draining, which ends, while the track
 	// already in flight carries on to its own end.
-	broadcast.unannounce();
+	broadcast.withdraw();
 	kio::clock::sleep(SETTLE).await;
 	log.push(format!(
 		"unannounced: {:?} {} closed={}",
@@ -190,7 +190,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 	));
 
 	// Announced again: listed and servable, through a fresh broadcast.
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 	kio::clock::sleep(SETTLE).await;
 	let again = request(&consumer).await;
 	log.push(format!(
@@ -201,7 +201,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 	));
 	let again = again.expect("a reannounced broadcast resolves");
 
-	let audio = broadcast.create_track("audio", timed()).unwrap();
+	let audio = broadcast.broadcast().create_track("audio", timed()).unwrap();
 	let mut reader = read(&again, "audio").await;
 	kio::clock::timeout(SETTLE, crate::support::wanted(audio.demand()))
 		.await

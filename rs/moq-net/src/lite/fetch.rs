@@ -13,7 +13,7 @@ use super::{Message, Version};
 #[derive(Clone, Debug)]
 pub struct Fetch<'a> {
 	pub broadcast: Path,
-	/// The instance the subscriber expects; see [`crate::origin::Route::instance`].
+	/// The instance the subscriber expects; see [`crate::origin::RouteInfo::instance`].
 	/// Lite07+ only.
 	pub instance: Option<crate::Instance>,
 	pub track: Cow<'a, str>,

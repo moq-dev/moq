@@ -162,7 +162,7 @@ test("SUBSCRIBE_NAMESPACE gets the published namespaces", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const control = await Stream.open(pair.server, { version });
 	const origin = new OriginProducer();
-	origin.createBroadcast(Path.from("room")).announce();
+	origin.route(Path.from("room"), { hidden: true }).announce();
 	const connection = new Connection({
 		url: new URL("https://example.com"),
 		quic: pair.server,
@@ -397,9 +397,8 @@ for (const [version, alpn] of [[Version.DRAFT_22, ALPN.DRAFT_22]] as const) {
 			const pair = createMockTransportPair(alpn);
 			const control = await Stream.open(pair.server, { version });
 			const origin = new OriginProducer();
-			const broadcastPublication = origin.createBroadcast(Path.from("room"));
-			const broadcast = broadcastPublication.broadcast;
-			broadcastPublication.announce();
+			const broadcastRoute = origin.route(Path.from("room"));
+			const broadcast = broadcastRoute.broadcast;
 			broadcast.createTrack("video", { timescale: Timescale.MILLI });
 			const connection = new Connection({
 				url: new URL("https://example.com"),
@@ -433,9 +432,8 @@ async function serving(version: IetfVersion, alpn: string) {
 	const pair = createMockTransportPair(alpn);
 	const control = await Stream.open(pair.server, { version });
 	const origin = new OriginProducer();
-	const broadcastPublication = origin.createBroadcast(Path.from("room"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("room"));
+	const broadcast = broadcastRoute.broadcast;
 	broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const connection = new Connection({
 		url: new URL("https://example.com"),

@@ -125,11 +125,11 @@ export class Echo {
 			let broadcast: Moq.Broadcast.Producer | undefined;
 			let writer: Report.Writer<Schema.Snapshot>;
 			try {
-				const publication = origin.createBroadcast(path);
-				broadcast = publication.broadcast;
-				writer = new Report.Writer(broadcast, Schema.TRACK, Schema.SnapshotSchema);
 				// A fresh instance, so a reader sees a replaced feedback broadcast as a restart.
-				publication.announce();
+				const route = origin.route(path, { hidden: true });
+				broadcast = route.broadcast;
+				writer = new Report.Writer(broadcast, Schema.TRACK, Schema.SnapshotSchema);
+				route.announce();
 			} catch (err) {
 				broadcast?.close();
 				console.warn("failed to publish feedback", path, err);

@@ -4,3 +4,5 @@
 [bindings.kotlin.rename]
 "MoqBroadcastProducer.close" = "end"
 "MoqSocketEndpoint.close" = "end"
+# See MoqRoute::instance_id: the C++ generator reserves `instance`, Kotlin does not.
+"MoqRoute.instance_id" = "instance"

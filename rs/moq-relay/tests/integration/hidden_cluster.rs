@@ -67,8 +67,10 @@ async fn old_peer_keeps_hidden_paths(version: moq_net::Version) {
 		cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port}/"))];
 		let cluster =
 			crate::spawn_cluster(cluster::Options::new(cluster_config)).with_connect(client_config, Default::default());
-		let node = cluster.origin.create_broadcast(".hidden/test").expect("create hidden");
-		node.announce(Default::default()).expect("announce hidden");
+		let _node = cluster
+			.origin
+			.route(".hidden/test", moq_net::origin::RouteOptions::default())
+			.expect("create hidden");
 		let cluster_run = tokio::spawn(cluster.clone().start().await.expect("cluster start").run());
 
 		loop {

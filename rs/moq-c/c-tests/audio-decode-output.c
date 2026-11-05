@@ -104,11 +104,11 @@ int main(void) {
     int32_t origin = moq_origin_create();
     CHECK(origin > 0);
     const char *path = "audio-decode-output";
-    uint32_t broadcast = 0;
-    int32_t publication = moq_origin_create_broadcast((uint32_t)origin, path, strlen(path), &broadcast);
-    CHECK(publication > 0);
-    CHECK(moq_publication_announce((uint32_t)publication, NULL) == 0);
-    CHECK(moq_publication_free((uint32_t)publication) == 0);
+    int32_t route = moq_origin_route((uint32_t)origin, path, strlen(path), NULL);
+    CHECK(route > 0);
+    int32_t created = moq_route_broadcast((uint32_t)route);
+    CHECK(created > 0);
+    uint32_t broadcast = (uint32_t)created;
     moq_audio_encoder_input input = {MOQ_AUDIO_SAMPLE_FORMAT_F32, 48000, 2};
     moq_audio_encoder_output output = {"pcm", 3, 0, 0, 0, 0};
     int32_t producer = moq_encode_audio((uint32_t)broadcast, "audio", 5, &input, &output, 0);
@@ -155,6 +155,7 @@ int main(void) {
     CHECK(moq_consume_catalog_free((uint32_t)c.catalog) == 0);
     CHECK(moq_consume_catalog_cancel((uint32_t)catalogs) == 0);
     CHECK(moq_consume_close((uint32_t)c.broadcast) == 0);
+    CHECK(moq_route_free((uint32_t)route) == 0);
     CHECK(moq_publish_close((uint32_t)broadcast) == 0);
     CHECK(moq_origin_close((uint32_t)origin) == 0);
     pthread_mutex_lock(&c.mutex);

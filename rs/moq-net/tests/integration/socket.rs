@@ -284,16 +284,18 @@ struct ByHand {
 	/// Carol's half, which she writes groups to as she likes.
 	half: track::Producer,
 	_dialed: track::Subscriber,
-	_endpoint: origin::Publication,
+	_endpoint: origin::Route,
 	_carol: origin::Producer,
 }
 
 /// Dial bob by hand from carol in a `tcp` session.
 async fn dial_by_hand(fixture: &mut Fixture, bob: &Endpoint) -> ByHand {
 	let carol = fixture.client(LITE).await;
-	let endpoint = carol.create_broadcast("room/.socket/carol").unwrap();
-	endpoint.announce(Default::default()).unwrap();
-	let mut requests = endpoint.requests();
+	let endpoint = carol
+		.route("room/.socket/carol", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	endpoint.announce().unwrap();
+	let mut requests = endpoint.broadcast().requests();
 	let name = "tcp/carol/bob/0123456789abcdef0123456789abcdef";
 	let broadcast = kio::clock::timeout(TIMEOUT, carol.consume().request("room/.socket/bob", None))
 		.await
@@ -605,9 +607,11 @@ async fn an_accept_waits_for_its_dialer() {
 		"bob's accept ended before carol announced"
 	);
 
-	let endpoint = carol.create_broadcast("room/.socket/carol").unwrap();
-	let mut requests = endpoint.requests();
-	endpoint.announce(Default::default()).unwrap();
+	let endpoint = carol
+		.route("room/.socket/carol", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let mut requests = endpoint.broadcast().requests();
+	endpoint.announce().unwrap();
 	let answer = async {
 		let request = kio::wait(|waiter| requests.poll_requested_track(waiter)).await.unwrap();
 		assert_eq!(request.name(), name);

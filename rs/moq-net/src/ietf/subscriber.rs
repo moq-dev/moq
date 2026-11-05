@@ -864,18 +864,18 @@ impl TrackState {
 struct BroadcastState {
 	// The route announced into our origin for this namespace, post-charge: the newest
 	// live advertisement's.
-	route: crate::origin::Route,
+	route: crate::origin::RouteInfo,
 
 	// Each live advertisement of the namespace with the route it describes, oldest first.
 	// A publisher replacing its instance withdraws one advertisement and makes another, on
 	// separate streams that can arrive in either order: the newest stands until it goes,
 	// and an update to an older one changes nothing.
-	adverts: Vec<(u64, crate::origin::Route)>,
+	adverts: Vec<(u64, crate::origin::RouteInfo)>,
 
 	// The served route: dropping it (and the serve task's clone) retracts the
 	// route and rejects its queued requests. `None` while the session's limit holds
 	// it back, though the peer still advertises it.
-	dynamic: Option<crate::origin::Requests>,
+	dynamic: Option<crate::origin::Route>,
 
 	// Bumped each time the route attaches, so a serve task outlived by a limit that
 	// took the route away and gave it back ends rather than serve beside the new one.
@@ -944,7 +944,7 @@ enum Withdraw {
 struct Advertised {
 	/// The route it describes, with this link's price already charged. The prefix
 	/// is stamped where the advertisement attaches (the namespace).
-	route: crate::origin::Route,
+	route: crate::origin::RouteInfo,
 }
 
 /// One NAMESPACE a SUBSCRIBE_NAMESPACE stream holds, live on the wire until its
@@ -1289,11 +1289,11 @@ impl Subscriber {
 	/// its true length. An anonymous route already ranks below every identified one,
 	/// so that understatement cannot beat a real path. Price such a link with
 	/// [`crate::Client::with_cost`] among other anonymous routes.
-	fn session_route(&self, peer: &cluster::Peer) -> crate::origin::Route {
+	fn session_route(&self, peer: &cluster::Peer) -> crate::origin::RouteInfo {
 		let mut hops = crate::Hops::new();
 		hops.push(crate::Hop::UNKNOWN)
 			.expect("an empty hop chain has room for one entry");
-		crate::origin::Route::default()
+		crate::origin::RouteInfo::default()
 			.with_hops(hops)
 			.with_via(self.via(peer))
 			// A peer without Cluster contributes only the arriving link price.
@@ -2812,7 +2812,7 @@ impl Subscriber {
 		if self.going_away.is_set() {
 			route.cost = crate::origin::Cost::DRAIN;
 		}
-		entry.dynamic = Some(self.origin.requests_route(path, route, None)?);
+		entry.dynamic = Some(self.origin.forward(path, route, None)?);
 		entry.generation += 1;
 		tracing::info!(route = %crate::path::Rooted(self.origin.root(), path), "namespace authorized again");
 		Ok(Some(entry.generation))
@@ -2873,7 +2873,7 @@ impl Subscriber {
 				if *newest == id {
 					entry.route = route.clone();
 					if let Some(dynamic) = &entry.dynamic {
-						dynamic.update_route(entry.route.clone())?;
+						dynamic.update(entry.route.clone())?;
 					}
 				}
 				Ok(())
@@ -2905,7 +2905,7 @@ impl Subscriber {
 					return Ok(());
 				}
 				// Propagates Error::Unauthorized if the namespace is out of scope.
-				let dynamic = self.origin.requests_route(&path, route.clone(), None)?;
+				let dynamic = self.origin.forward(&path, route.clone(), None)?;
 
 				entry.insert(BroadcastState {
 					route: route.clone(),
@@ -2960,7 +2960,7 @@ impl Subscriber {
 				if *newest != state.route {
 					state.route = newest.clone();
 					if let Some(dynamic) = &state.dynamic {
-						dynamic.update_route(state.route.clone())?;
+						dynamic.update(state.route.clone())?;
 					}
 				}
 				if state.tokens == 0
@@ -3006,7 +3006,7 @@ impl Subscriber {
 			route.cost = crate::origin::Cost::DRAIN;
 		}
 		if let Some(dynamic) = &entry.dynamic {
-			let _ = dynamic.update_route(entry.route.clone());
+			let _ = dynamic.update(entry.route.clone());
 		}
 	}
 
@@ -3153,7 +3153,9 @@ impl RunRoute {
 			entry.live = Default::default();
 		}
 		match &mut entry.dynamic {
-			Some(dynamic) => dynamic.poll_requested_broadcast(waiter).map(Some),
+			Some(dynamic) => dynamic
+				.poll_requested(waiter)
+				.map(|request| Some(request.ok_or(crate::Error::Closed))),
 			None => Poll::Ready(None),
 		}
 	}
@@ -9981,11 +9983,11 @@ mod tests {
 
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let source = origin.publish("broadcast", Default::default()).unwrap();
+			let source = origin.route("broadcast", Default::default()).unwrap();
 			let resolved = origin.consume().request("broadcast", None).await.unwrap();
 			let peer = Arc::new(Peer {
 				version,
-				dynamic: Mutex::new(Some(source.requests())),
+				dynamic: Mutex::new(Some(source.broadcast().requests())),
 				park: Default::default(),
 				log: Default::default(),
 			});
@@ -10420,7 +10422,10 @@ mod tests {
 		// What we are publishing to the peer: a real upstream route.
 		let upstream = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 		let _source = origin
-			.announce("room/host", crate::origin::Route::default().with_hops(upstream.clone()))
+			.announce(
+				"room/host",
+				crate::origin::RouteInfo::default().with_hops(upstream.clone()),
+			)
 			.unwrap();
 		announced.expect_next_active("room/host").await;
 		let _advertised = publishing.expect_next_active("room/host").await;
@@ -10534,7 +10539,7 @@ mod tests {
 	}
 
 	/// The current best route covering `path`, if any (synchronous peek).
-	fn routed_now(consumer: &crate::origin::Consumer, path: &str) -> Option<crate::origin::Route> {
+	fn routed_now(consumer: &crate::origin::Consumer, path: &str) -> Option<crate::origin::RouteInfo> {
 		use futures::FutureExt;
 		match consumer.path_routes(path).ok()?.next().now_or_never()?? {
 			crate::origin::RouteEvent::End(_) => None,
@@ -11035,7 +11040,7 @@ mod tests {
 		let path = crate::Path::from_static("room/host");
 
 		let first = Advertised {
-			route: crate::origin::Route::default()
+			route: crate::origin::RouteInfo::default()
 				.with_hops(hop_path(&[7, 9]).hops().clone())
 				.with_cost(4),
 		};
@@ -11046,7 +11051,7 @@ mod tests {
 
 		// A new chain and cost: the route updates in place.
 		let rerouted = Advertised {
-			route: crate::origin::Route::default()
+			route: crate::origin::RouteInfo::default()
 				.with_hops(hop_path(&[7, 11]).hops().clone())
 				.with_cost(2),
 		};
@@ -14707,8 +14712,9 @@ mod stitch_tests {
 	) -> (Vec<u8>, crate::lite::test_transport::Log) {
 		use crate::lite::test_transport::Sent;
 		let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
-		let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
+		let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				"video",
 				accepted_info(

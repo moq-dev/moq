@@ -256,12 +256,35 @@ async fn await_announced(consumer: &MoqOriginConsumer, path: &str) -> Arc<MoqBro
 		.expect("the first change is an instance")
 }
 
-/// Create a broadcast and announce its exact path: the create / populate / announce
-/// order with nothing to populate yet.
-fn create_announced(origin: &MoqOriginProducer, path: &str) -> Arc<MoqBroadcastProducer> {
-	let publication = origin.create_broadcast(path.into()).unwrap();
-	publication.announce(MoqAnnounceRoute::default()).unwrap();
-	publication.broadcast()
+/// A broadcast and the route that keeps it announced.
+struct Announced {
+	_route: Arc<MoqRoute>,
+	broadcast: Arc<MoqBroadcastProducer>,
+}
+
+impl std::ops::Deref for Announced {
+	type Target = Arc<MoqBroadcastProducer>;
+
+	fn deref(&self) -> &Self::Target {
+		&self.broadcast
+	}
+}
+
+/// Create a visible route, with nothing to populate yet.
+fn create_announced(origin: &MoqOriginProducer, path: &str) -> Announced {
+	let route = origin.route(path.into(), MoqRouteOptions::default()).unwrap();
+	Announced {
+		broadcast: route.broadcast().unwrap(),
+		_route: route,
+	}
+}
+
+/// Options creating a route hidden until it announces.
+fn hidden() -> MoqRouteOptions {
+	MoqRouteOptions {
+		hidden: true,
+		..Default::default()
+	}
 }
 
 /// The next announce event, failing the test on a timeout or a closed origin.
@@ -390,114 +413,92 @@ fn origin_config_set_cache_capacity() {
 	);
 }
 
-#[test]
-fn route_conversions_keep_cost_and_derive_anonymity() {
-	// An observed route reports its static cost.
-	let route = moq_net::origin::Route::default().with_cost(moq_net::origin::Cost::new(9));
-	assert_eq!(MoqRoute::from(route).cost, 9);
+#[tokio::test]
+async fn route_options_reach_the_announced_route() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let route = origin
+		.route(
+			"priced-route".into(),
+			MoqRouteOptions {
+				cost: 9,
+				..Default::default()
+			},
+		)
+		.unwrap();
 
-	// A publisher seeds its production cost with one number.
-	let seeded = moq_net::origin::Route::try_from(MoqAnnounceRoute {
-		cost: 5,
-		..Default::default()
-	})
-	.unwrap();
-	assert_eq!(seeded.cost, moq_net::origin::Cost::new(5));
-	assert!(seeded.hops.is_empty());
+	// Reading an advertisement preserves its static production price and the route's
+	// instance; a local route took no hops.
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
+	let info = next_announced(&announced).await.route;
+	assert_eq!(info.cost, 9);
+	assert_eq!(info.instance, route.instance_id());
+	assert!(info.hops.is_empty());
+	assert!(!info.anonymous);
 
-	let anonymous = MoqRoute::from(
-		moq_net::origin::Route::default().with_hops(moq_net::Hops::try_from(vec![moq_net::Hop::UNKNOWN]).unwrap()),
-	);
-	assert!(anonymous.anonymous);
-	assert_eq!(anonymous.hops, vec![0]);
+	// Re-pricing changes the route in place: the listing never reports it, but a fresh
+	// listing reads the new price under the same instance.
+	route.set_cost(4).unwrap();
+	let repriced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
+	let info = next_announced(&repriced).await.route;
+	assert_eq!(info.cost, 4);
+	assert_eq!(info.instance, route.instance_id());
+
+	route.broadcast().unwrap().close().unwrap();
 }
 
 #[tokio::test]
-async fn announced_route_keeps_static_cost_on_reannounce() {
+async fn route_options_name_an_instance_or_refuse() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let publication = origin.create_broadcast("priced-route".into()).unwrap();
-	publication
-		.announce(MoqAnnounceRoute {
-			cost: 9,
-			..Default::default()
-		})
-		.unwrap();
-
-	// Reading an advertisement preserves its static production price.
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let route = loop {
-		if let MoqAnnounceEvent::Present { announce } = next_event(&announced).await
-			&& announce.prefix == "priced-route"
-		{
-			break announce.route;
-		}
-	};
-	assert_eq!(route.cost, 9);
 
-	// Re-announcing what was observed keeps the static price.
-	publication
-		.announce(MoqAnnounceRoute {
-			cost: route.cost,
-			instance: Some(route.instance.clone()),
-			..Default::default()
-		})
+	// A stable instance is served as named.
+	let route = origin
+		.route(
+			"instance-route".into(),
+			MoqRouteOptions {
+				instance: Some("cam".into()),
+				epoch: 3,
+				..Default::default()
+			},
+		)
 		.unwrap();
-	assert_eq!(publication.inner.route().map(MoqRoute::from), Some(route));
+	assert_eq!(route.instance_id(), "cam");
+	assert_eq!(next_announced(&announced).await.route.instance, "cam");
 
-	publication.broadcast().close().unwrap();
-}
-
-#[test]
-fn instance_routes_parse_and_refuse() {
-	// A stable instance round-trips with its epoch, which only orders its runs.
-	let route = MoqAnnounceRoute {
-		instance: Some("cam".into()),
-		epoch: 3,
-		..Default::default()
-	};
-	let back = moq_net::origin::Route::try_from(route).unwrap();
-	assert_eq!(back.instance, Some("cam".parse().unwrap()));
-	assert_eq!(MoqRoute::from(back).instance, "cam");
-
-	let route = MoqAnnounceRoute {
+	// An instance is never empty, and the refusal creates nothing.
+	let empty = MoqRouteOptions {
 		instance: Some(String::new()),
 		..Default::default()
 	};
 	assert!(matches!(
-		moq_net::origin::Route::try_from(route),
+		origin.route("refused".into(), empty.clone()),
 		Err(MoqError::InvalidInstance { .. })
 	));
+	assert!(matches!(
+		origin.route_prefix("refused".into(), empty),
+		Err(MoqError::InvalidInstance { .. })
+	));
+
+	route.cancel();
 }
 
 #[tokio::test]
-async fn following_restarts_on_a_new_instance() {
+async fn a_new_route_at_a_path_restarts_its_followers() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let following = consumer.follow("instance-route".into(), None).unwrap();
-	let publication = origin.create_broadcast("instance-route".into()).unwrap();
-
-	let first = moq_net::Instance::random().to_string();
-	publication
-		.announce(MoqAnnounceRoute {
-			instance: Some(first.clone()),
-			..Default::default()
-		})
-		.unwrap();
+	let first = origin.route("instance-route".into(), Default::default()).unwrap();
 	let announce = next_announced(&announced).await;
-	assert_eq!(announce.route.instance, first);
+	assert_eq!(announce.route.instance, first.instance_id());
 	following.available().await.unwrap().unwrap();
 
-	// A new run of the same publisher is another instance: followers restart onto it, while
-	// the path stays listed.
-	let second = moq_net::Instance::random().to_string();
-	publication
-		.announce(MoqAnnounceRoute {
-			instance: Some(second.clone()),
-			..Default::default()
-		})
-		.unwrap();
+	// A new run of the same publisher is a new route with its own instance: followers
+	// restart onto it, while the path stays listed.
+	let second = origin.route("instance-route".into(), Default::default()).unwrap();
+	assert_ne!(first.instance_id(), second.instance_id());
 	kio::clock::timeout(TIMEOUT, following.available())
 		.await
 		.expect("the new instance is handed out")
@@ -506,13 +507,26 @@ async fn following_restarts_on_a_new_instance() {
 
 	// The next listed event is the path going absent under the new instance: the restart
 	// itself was never listed.
-	publication.unannounce().unwrap();
+	first.withdraw().unwrap();
+	second.withdraw().unwrap();
 	match next_event(&announced).await {
-		MoqAnnounceEvent::Absent { announce } => assert_eq!(announce.route.instance, second),
+		MoqAnnounceEvent::Absent { announce } => assert_eq!(announce.route.instance, second.instance_id()),
 		other => panic!("expected an absence, got {other:?}"),
 	}
 
-	publication.broadcast().close().unwrap();
+	first.cancel();
+	second.cancel();
+}
+
+#[tokio::test]
+async fn an_exact_route_yields_no_requests_and_a_prefix_route_no_broadcast() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let exact = origin.route("live".into(), Default::default()).unwrap();
+	assert!(exact.requested().await.unwrap().is_none());
+	let prefix = origin.route_prefix("room".into(), Default::default()).unwrap();
+	assert!(matches!(prefix.broadcast(), Err(MoqError::Internal { .. })));
+	exact.cancel();
+	prefix.cancel();
 }
 
 /// A media track reserves through its demand, so an app that publishes
@@ -3266,14 +3280,14 @@ fn audio_rejects_bad_init_bytes() {
 	);
 }
 
-/// Creating a broadcast does not make it exist for anyone: nothing crosses the
-/// announce cursor and nothing resolves until `announce`, locally exactly as for a
-/// peer. `follow` waits for the announcement.
+/// A hidden route does not exist for anyone: nothing crosses the announce cursor and
+/// nothing resolves until `announce`, locally exactly as for a peer. `follow` waits for
+/// the announcement.
 #[tokio::test]
-async fn create_broadcast_is_invisible_until_announced() {
+async fn a_hidden_route_is_invisible_until_announced() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let publication = origin.create_broadcast("live".into()).unwrap();
+	let route = origin.route("live".into(), hidden()).unwrap();
 
 	let unroutable = kio::clock::timeout(TIMEOUT, consumer.request("live".into(), None))
 		.await
@@ -3285,10 +3299,10 @@ async fn create_broadcast_is_invisible_until_announced() {
 	let waiting = consumer.follow("live".into(), None).unwrap();
 	let waited = tokio::spawn(async move { waiting.available().await });
 	kio::clock::sleep(std::time::Duration::from_millis(50)).await;
-	assert!(!pending.is_finished(), "create_broadcast must not advertise the path");
+	assert!(!pending.is_finished(), "a hidden route must not advertise the path");
 	assert!(!waited.is_finished(), "an unannounced broadcast must not resolve");
 
-	publication.announce(MoqAnnounceRoute::default()).unwrap();
+	route.announce().unwrap();
 	kio::clock::timeout(TIMEOUT, waited)
 		.await
 		.expect("timed out waiting for the announced broadcast")
@@ -3304,7 +3318,7 @@ async fn create_broadcast_is_invisible_until_announced() {
 		matches!(&update, MoqAnnounceEvent::Present { announce } if announce.prefix == "live"),
 		"{update:?}"
 	);
-	publication.broadcast().close().unwrap();
+	route.broadcast().unwrap().close().unwrap();
 }
 
 /// Waiting for an exact path must hand the broadcast back named by that path, the base a
@@ -3540,7 +3554,7 @@ async fn announced_filters_patterns_and_reports_captures() {
 			.unwrap();
 
 		// A claim at `room` could serve a match, but its own name is none, so it is not listed.
-		let broad = origin.requests("room".into()).unwrap();
+		let broad = serve(&origin, "room");
 		let chat = create_announced(&origin, "room/alice/chat");
 		let audio = create_announced(&origin, "room/alice/audio");
 		let update = next_announced(&announced).await;
@@ -3658,17 +3672,15 @@ async fn resolve_honors_the_reference_instance() {
 	let consumer = origin.consume();
 	let served = moq_net::Instance::random().to_string();
 	let other = moq_net::Instance::random().to_string();
-	let route = MoqAnnounceRoute {
+	let options = MoqRouteOptions {
 		instance: Some(served.clone()),
 		..Default::default()
 	};
 
-	let catalog = origin.create_broadcast("a/pub".into()).unwrap();
-	catalog.announce(route.clone()).unwrap();
-	let catalog = catalog.broadcast();
-	let source = origin.create_broadcast("a/source".into()).unwrap();
-	source.announce(route).unwrap();
-	let source = source.broadcast();
+	let catalog_route = origin.route("a/pub".into(), options.clone()).unwrap();
+	let catalog = catalog_route.broadcast().unwrap();
+	let source_route = origin.route("a/source".into(), options).unwrap();
+	let source = source_route.broadcast().unwrap();
 	let _video = source.publish_track("video".into(), None).unwrap();
 	let plain = create_announced(&origin, "a/plain");
 
@@ -3716,97 +3728,104 @@ async fn resolve_honors_the_reference_instance() {
 }
 
 #[tokio::test]
-async fn announce_and_unannounce_toggles_discovery() {
+async fn announce_and_withdraw_toggle_discovery() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let publication = origin.create_broadcast("live".into()).unwrap();
-	publication.announce(MoqAnnounceRoute::default()).unwrap();
+	let route = origin.route("live".into(), MoqRouteOptions::default()).unwrap();
 
 	// The consumer observes the flag through the announce stream: an active
 	// announcement, then its retraction.
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	async fn wait_live(announced: &MoqAnnounceConsumer, active: bool) {
+	async fn wait_live(announced: &MoqAnnounceConsumer, active: bool) -> MoqAnnounce {
 		loop {
 			match next_event(announced).await {
-				MoqAnnounceEvent::Present { announce } if active && announce.prefix == "live" => return,
-				MoqAnnounceEvent::Absent { announce } if !active && announce.prefix == "live" => return,
+				MoqAnnounceEvent::Present { announce } if active && announce.prefix == "live" => return announce,
+				MoqAnnounceEvent::Absent { announce } if !active && announce.prefix == "live" => return announce,
 				_ => {}
 			}
 		}
 	}
-	wait_live(&announced, true).await;
+	assert_eq!(wait_live(&announced, true).await.route.instance, route.instance_id());
 
-	publication.unannounce().unwrap();
+	route.withdraw().unwrap();
 	wait_live(&announced, false).await;
 
-	// Unannounced for local consumers exactly as for peers.
+	// Withdrawn for local consumers exactly as for peers.
 	let unroutable = kio::clock::timeout(TIMEOUT, consumer.request("live".into(), None))
 		.await
 		.expect("an unroutable request answers at once");
-	assert!(unroutable.is_err(), "an unannounced broadcast is unroutable");
+	assert!(unroutable.is_err(), "a withdrawn broadcast is unroutable");
 
-	// Announcing again brings it back.
-	publication.announce(MoqAnnounceRoute::default()).unwrap();
-	wait_live(&announced, true).await;
+	// Announcing again brings the same stream back.
+	route.announce().unwrap();
+	assert_eq!(wait_live(&announced, true).await.route.instance, route.instance_id());
 	kio::clock::timeout(TIMEOUT, consumer.request("live".into(), None))
 		.await
 		.expect("timed out requesting the reannounced broadcast")
 		.expect("a reannounced broadcast resolves");
 
-	publication.broadcast().close().unwrap();
+	route.broadcast().unwrap().close().unwrap();
 }
 
-/// The publication and the fill handle each keep the broadcast and its route alive: dropping
-/// either alone retracts nothing, and only the close does.
+/// The route alone keeps its broadcast announced: dropping the broadcast handle retracts
+/// nothing, while dropping or cancelling the route retracts it and its broadcast lives on.
 #[tokio::test]
-async fn dropping_a_publication_keeps_its_route() {
+async fn the_route_keeps_its_broadcast_announced() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let publication = origin.create_broadcast("live".into()).unwrap();
-	publication.announce(MoqAnnounceRoute::default()).unwrap();
-	let broadcast = publication.broadcast();
-	assert!(Arc::ptr_eq(&broadcast, &publication.broadcast()));
-	drop(publication);
+	let live = origin.route("live".into(), MoqRouteOptions::default()).unwrap();
+	let broadcast = live.broadcast().unwrap();
+	assert!(Arc::ptr_eq(&broadcast, &live.broadcast().unwrap()));
+	drop(broadcast);
 	await_announced(&consumer, "live").await;
 
-	let publication = origin.create_broadcast("held".into()).unwrap();
-	publication.announce(MoqAnnounceRoute::default()).unwrap();
-	drop(publication.broadcast());
-	await_announced(&consumer, "held").await;
-
-	broadcast.close().unwrap();
-	publication.broadcast().close().unwrap();
-	for path in ["live", "held"] {
+	let dropped = origin.route("dropped".into(), MoqRouteOptions::default()).unwrap();
+	let dropped_broadcast = dropped.broadcast().unwrap();
+	await_announced(&consumer, "dropped").await;
+	drop(dropped);
+	let cancelled = origin.route("cancelled".into(), MoqRouteOptions::default()).unwrap();
+	let cancelled_broadcast = cancelled.broadcast().unwrap();
+	await_announced(&consumer, "cancelled").await;
+	cancelled.cancel();
+	assert!(matches!(cancelled.announce(), Err(MoqError::Cancelled)));
+	assert!(matches!(cancelled.requested().await, Err(MoqError::Cancelled)));
+	for path in ["dropped", "cancelled"] {
 		let unroutable = kio::clock::timeout(TIMEOUT, consumer.request(path.into(), None))
 			.await
 			.expect("an unroutable request answers at once");
-		assert!(unroutable.is_err(), "a closed broadcast is unroutable");
+		assert!(unroutable.is_err(), "a retracted route is unroutable");
 	}
+	for broadcast in [dropped_broadcast, cancelled_broadcast] {
+		broadcast.publish_track("data".into(), None).unwrap();
+		broadcast.close().unwrap();
+	}
+
+	live.broadcast().unwrap().close().unwrap();
+	let unroutable = kio::clock::timeout(TIMEOUT, consumer.request("live".into(), None))
+		.await
+		.expect("an unroutable request answers at once");
+	assert!(unroutable.is_err(), "a closed broadcast is unroutable");
 }
 
-/// A publication outliving its closed broadcast cannot announce or withdraw the broadcast that
-/// replaced it at the same path.
+/// A route outliving its closed broadcast cannot announce, re-price, or withdraw the route
+/// that replaced it at the same path.
 #[tokio::test]
-async fn a_stale_publication_leaves_its_replacement_alone() {
+async fn a_closed_route_leaves_its_replacement_alone() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let stale = origin.create_broadcast("live".into()).unwrap();
-	stale.announce(MoqAnnounceRoute::default()).unwrap();
-	stale.broadcast().close().unwrap();
+	let stale = origin.route("live".into(), MoqRouteOptions::default()).unwrap();
+	stale.broadcast().unwrap().close().unwrap();
 
-	let replacement = origin.create_broadcast("live".into()).unwrap();
-	replacement.announce(MoqAnnounceRoute::default()).unwrap();
-	assert!(matches!(
-		stale.announce(MoqAnnounceRoute::default()),
-		Err(MoqError::Closed)
-	));
-	assert!(matches!(stale.unannounce(), Err(MoqError::Closed)));
+	let replacement = origin.route("live".into(), MoqRouteOptions::default()).unwrap();
+	assert!(matches!(stale.announce(), Err(MoqError::Closed)));
+	assert!(matches!(stale.set_cost(1), Err(MoqError::Closed)));
+	stale.withdraw().unwrap();
 	kio::clock::timeout(TIMEOUT, consumer.request("live".into(), None))
 		.await
 		.expect("timed out requesting the replacement")
 		.expect("the replacement still resolves");
 
-	replacement.broadcast().close().unwrap();
+	replacement.broadcast().unwrap().close().unwrap();
 }
 
 #[tokio::test]
@@ -4956,8 +4975,13 @@ async fn follow() {
 	_broadcast.close().unwrap();
 }
 
-fn serve(origin: &MoqOriginProducer, prefix: &str) -> Arc<MoqOriginRequests> {
-	origin.requests(prefix.into()).unwrap()
+fn serve(origin: &MoqOriginProducer, prefix: &str) -> Arc<MoqRoute> {
+	origin.route_prefix(prefix.into(), MoqRouteOptions::default()).unwrap()
+}
+
+/// The next request beneath a prefix route, failing the test once it yields none.
+async fn requested(route: &MoqRoute) -> Result<Arc<MoqBroadcastRequest>, MoqError> {
+	Ok(route.requested().await?.expect("the prefix route ended"))
 }
 
 #[tokio::test]
@@ -4971,26 +4995,21 @@ async fn dynamic_broadcast_request() {
 		tokio::spawn(async move { consumer.request("dynamic/broadcast".into(), None).await })
 	};
 
-	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_broadcast())
+	let request = kio::clock::timeout(TIMEOUT, requested(&dynamic))
 		.await
 		.expect("timed out waiting for requested broadcast")
 		.unwrap();
 	assert_eq!(request.path().unwrap(), "dynamic/broadcast");
 
-	let prepared = request.prepare().unwrap();
-	let served = prepared.broadcast();
+	let job = request.route(hidden()).unwrap();
+	let served = job.broadcast().unwrap();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
-	// Only publish announces the answer, under a fresh instance and after admission, and it
-	// hands back the fill handle the answer was prepared with.
-	let publication = prepared.publish().unwrap();
-	assert!(Arc::ptr_eq(&publication.broadcast(), &served));
-	// A re-price that names no instance keeps the one the answer was published under.
-	publication
-		.announce(MoqAnnounceRoute {
-			cost: 7,
-			..Default::default()
-		})
-		.unwrap();
+	// Only announce answers the requester, under a fresh instance and after admission.
+	let instance = job.instance_id();
+	job.announce().unwrap();
+	// A re-price keeps the instance the answer was announced under.
+	job.set_cost(7).unwrap();
+	assert_eq!(job.instance_id(), instance);
 	assert!(matches!(request.path(), Err(MoqError::Closed)));
 
 	let broadcast = kio::clock::timeout(TIMEOUT, requesting)
@@ -5032,14 +5051,13 @@ async fn dynamic_serves_a_request_under_a_prefix() {
 		let consumer = consumer.clone();
 		tokio::spawn(async move { consumer.request("live/cam".into(), None).await })
 	};
-	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_broadcast())
+	let request = kio::clock::timeout(TIMEOUT, requested(&dynamic))
 		.await
 		.expect("timed out waiting for the prefix request")
 		.unwrap();
 	assert_eq!(request.path().unwrap(), "live/cam");
-	let prepared = request.prepare().unwrap();
-	let served = prepared.broadcast();
-	prepared.publish().unwrap();
+	let job = request.route(MoqRouteOptions::default()).unwrap();
+	let served = job.broadcast().unwrap();
 	kio::clock::timeout(TIMEOUT, requesting)
 		.await
 		.expect("timed out waiting for the request to resolve")
@@ -5075,13 +5093,12 @@ async fn dynamic_keeps_the_origin_alive() {
 		let consumer = consumer.clone();
 		tokio::spawn(async move { consumer.request("live".into(), None).await })
 	};
-	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_broadcast())
+	let request = kio::clock::timeout(TIMEOUT, requested(&dynamic))
 		.await
 		.expect("the handler must still receive requests")
 		.unwrap();
-	let prepared = request.prepare().unwrap();
-	let served = prepared.broadcast();
-	prepared.publish().unwrap();
+	let job = request.route(MoqRouteOptions::default()).unwrap();
+	let served = job.broadcast().unwrap();
 	kio::clock::timeout(TIMEOUT, requesting)
 		.await
 		.expect("timed out waiting for the request to resolve")
@@ -5563,7 +5580,7 @@ async fn dynamic_broadcast_request_can_reject() {
 		tokio::spawn(async move { consumer.request("missing".into(), None).await })
 	};
 
-	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_broadcast())
+	let request = kio::clock::timeout(TIMEOUT, requested(&dynamic))
 		.await
 		.expect("timed out waiting for requested broadcast")
 		.unwrap();
@@ -5586,7 +5603,7 @@ async fn cancelling_dynamic_broadcasts_unregisters_the_handler() {
 	let consumer = origin.consume();
 
 	dynamic.cancel();
-	assert!(matches!(dynamic.requested_broadcast().await, Err(MoqError::Closed)));
+	assert!(matches!(dynamic.requested().await, Err(MoqError::Cancelled)));
 
 	let result = kio::clock::timeout(TIMEOUT, consumer.request("missing".into(), None))
 		.await
@@ -5923,12 +5940,7 @@ async fn roundtrip(media: &MoqMediaTrackProducer, track: &MoqMediaTrackConsumer,
 async fn datagram_connection(
 	path: &str,
 	versions: Vec<String>,
-) -> (
-	Arc<MoqBroadcastProducer>,
-	Arc<MoqBroadcastConsumer>,
-	Arc<MoqSession>,
-	impl Sized,
-) {
+) -> (Announced, Arc<MoqBroadcastConsumer>, Arc<MoqSession>, impl Sized) {
 	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let server = MoqServer::new(MoqServerConfig {
 		bind: Some("127.0.0.1:0".into()),
@@ -6140,7 +6152,7 @@ async fn follow_retries_a_dropped_wait() {
 
 	let waiting = followed.clone();
 	let dropped = tokio::spawn(async move { waiting.available().await });
-	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_broadcast())
+	let request = kio::clock::timeout(TIMEOUT, requested(&dynamic))
 		.await
 		.expect("the wait never asked for the broadcast")
 		.unwrap();
@@ -6148,13 +6160,13 @@ async fn follow_retries_a_dropped_wait() {
 	assert!(matches!(dropped.await, Err(err) if err.is_cancelled()));
 
 	let retry = tokio::spawn(async move { followed.available().await });
-	let served = request.prepare().unwrap().publish().unwrap();
+	let served = request.route(MoqRouteOptions::default()).unwrap();
 	kio::clock::timeout(TIMEOUT, retry)
 		.await
 		.expect("the retry waited for another instance")
 		.unwrap()
 		.unwrap();
-	served.broadcast().close().unwrap();
+	served.broadcast().unwrap().close().unwrap();
 }
 
 /// Another instance taking over while `available()` resolves is the one it hands out, so the
@@ -6170,7 +6182,7 @@ async fn follow_hands_out_a_takeover_once(dynamic_at: &str) {
 	let waiting = followed.clone();
 	let first = tokio::spawn(async move { waiting.available().await });
 	// The wait is on the dynamic route's answer when the exact path takes over under another instance.
-	let _unanswered = kio::clock::timeout(TIMEOUT, dynamic.requested_broadcast())
+	let _unanswered = kio::clock::timeout(TIMEOUT, requested(&dynamic))
 		.await
 		.expect("the wait never asked for the broadcast")
 		.unwrap();
@@ -6205,12 +6217,11 @@ async fn follow_hands_out_a_held_takeover_once() {
 async fn follow_hands_out_the_instance_again_after_an_end() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let followed = origin.consume().follow("live".into(), None).unwrap();
-	let route = MoqAnnounceRoute {
+	let options = MoqRouteOptions {
 		instance: Some(moq_net::Instance::random().to_string()),
 		..Default::default()
 	};
-	let publication = origin.create_broadcast("live".into()).unwrap();
-	publication.announce(route.clone()).unwrap();
+	let first_route = origin.route("live".into(), options.clone()).unwrap();
 	let first = kio::clock::timeout(TIMEOUT, followed.available())
 		.await
 		.expect("timed out waiting for the broadcast")
@@ -6218,20 +6229,17 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 		.unwrap();
 
 	// A covering claim answering under the same instance.
-	let dynamic = origin.inner().inner.requests("").unwrap();
-	publication.unannounce().unwrap();
+	let dynamic = serve(&origin, "");
+	first_route.withdraw().unwrap();
 	let again = tokio::spawn(async move {
 		assert!(followed.available().await?.is_none(), "the end comes first");
 		followed.available().await
 	});
-	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_broadcast())
+	let request = kio::clock::timeout(TIMEOUT, requested(&dynamic))
 		.await
 		.expect("the instance never asked the route above the path")
 		.unwrap();
-	let served = request.prepare().unwrap().publish().unwrap();
-	served
-		.announce(moq_net::origin::Route::try_from(route.clone()).unwrap())
-		.unwrap();
+	let served = request.route(options).unwrap();
 
 	let again = kio::clock::timeout(TIMEOUT, again)
 		.await
@@ -6245,7 +6253,7 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 		"the claim above did not answer the same instance"
 	);
 	drop((served, dynamic));
-	publication.broadcast().close().unwrap();
+	first_route.broadcast().unwrap().close().unwrap();
 }
 
 /// An instance pins both resolutions to one publisher instance: a request for another one is
@@ -6255,12 +6263,14 @@ async fn an_instance_pins_request_and_follow() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let instance = moq_net::Instance::random().to_string();
-	let first = origin.create_broadcast("live".into()).unwrap();
-	first
-		.announce(MoqAnnounceRoute {
-			instance: Some(instance.clone()),
-			..Default::default()
-		})
+	let first = origin
+		.route(
+			"live".into(),
+			MoqRouteOptions {
+				instance: Some(instance.clone()),
+				..Default::default()
+			},
+		)
 		.unwrap();
 
 	let pinned = kio::clock::timeout(TIMEOUT, consumer.request("live".into(), Some(instance.clone())))
@@ -6295,13 +6305,7 @@ async fn an_instance_pins_request_and_follow() {
 		.expect("timed out following the pinned instance")
 		.unwrap()
 		.unwrap();
-	let second = origin.create_broadcast("live".into()).unwrap();
-	second
-		.announce(MoqAnnounceRoute {
-			instance: Some(moq_net::Instance::random().to_string()),
-			..Default::default()
-		})
-		.unwrap();
+	let second = origin.route("live".into(), MoqRouteOptions::default()).unwrap();
 	// An unpinned request resolves the takeover and holds it, so a follower resolving it joins
 	// that answer at once: one poll, which applies the takeover first, would hand it out.
 	let takeover = kio::clock::timeout(TIMEOUT, consumer.request("live".into(), None))
@@ -6325,8 +6329,8 @@ async fn an_instance_pins_request_and_follow() {
 		"the follower handed out another instance"
 	);
 	drop(takeover);
-	first.broadcast().close().unwrap();
-	second.broadcast().close().unwrap();
+	first.broadcast().unwrap().close().unwrap();
+	second.broadcast().unwrap().close().unwrap();
 }
 
 /// The route a wait resolves through leaving, and another instance arriving before it resolves,
@@ -6340,7 +6344,7 @@ async fn follow_hands_out_a_gap_while_resolving_once() {
 
 	let waiting = followed.clone();
 	let first = tokio::spawn(async move { waiting.available().await });
-	let _unanswered = kio::clock::timeout(TIMEOUT, dynamic.requested_broadcast())
+	let _unanswered = kio::clock::timeout(TIMEOUT, requested(&dynamic))
 		.await
 		.expect("the wait never asked for the broadcast")
 		.unwrap();
@@ -6371,7 +6375,7 @@ async fn follow_waits_for_another_instance_after_a_dropped_takeover() {
 
 	let waiting = followed.clone();
 	let first = tokio::spawn(async move { waiting.available().await });
-	let _unanswered = kio::clock::timeout(TIMEOUT, dynamic.requested_broadcast())
+	let _unanswered = kio::clock::timeout(TIMEOUT, requested(&dynamic))
 		.await
 		.expect("the wait never asked for the broadcast")
 		.unwrap();

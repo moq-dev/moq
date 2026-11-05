@@ -170,8 +170,7 @@ broadcast, and producers advertise it in the catalog.
 
    OriginProducer
    OriginConsumer
-   OriginRequests
-   Publication
+   Route
    AnnounceConsumer
    Following
    Announce
@@ -216,8 +215,7 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    Subscription
    TrackInfo
    FetchGroupOptions
-   AnnounceRoute
-   Route
+   RouteInfo
    ConnectionStats
 ```
 
