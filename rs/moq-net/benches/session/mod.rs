@@ -123,9 +123,8 @@ const DASH_VERSIONS: [&str; 2] = ["moq-lite-06", "moq-transport-22"];
 /// A stats frame: a small JSON snapshot.
 const DASH_FRAME: usize = 128;
 
-/// Each endpoint gets its own bounded pool, as a relay configures one per
-/// process: without a byte target, every hop keeps each group for the whole
-/// expiry window and memory grows with the run length instead of the shape.
+/// Initial budgets for join and churn fixtures. Delivery rooms use expiry
+/// between rounds instead, so cache pressure never sheds unread frames.
 const RELAY_CACHE: u64 = 16 * 1024 * 1024;
 const CLIENT_CACHE: u64 = 1024 * 1024;
 
@@ -571,7 +570,9 @@ fn make_origin(id: u64, capacity: u64) -> (origin::Producer, cache::Pool) {
 	let pool = cache::Pool::new(if std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
 		cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)
 	} else {
-		cache::Config::default().with_capacity(capacity)
+		cache::Config::default()
+			.with_capacity(capacity)
+			.with_expiry(cache::DEFAULT_EXPIRY)
 	});
 	config.pool = pool.clone();
 	let (producer, driver) = origin::Producer::new(config);
@@ -876,9 +877,8 @@ impl<B: Backend> Room<B> {
 		room.writing.resize_with(room.watched.len(), || None);
 		room.reading.resize_with(shape.viewers * shape.watch, || None);
 
-		// First measure the complete batch without eviction. The delivery benchmark must
-		// fit its working set; cache-pressure loss is a different workload.
-		let capacities: Vec<_> = room.pools().map(cache::Pool::capacity).collect();
+		// Delivery must retain every unread group. Bound history by expiry between
+		// rounds instead of byte pressure, which may shed an in-flight group's head.
 		for pool in room.pools() {
 			pool.resize(None);
 		}
@@ -894,11 +894,6 @@ impl<B: Backend> Room<B> {
 		for _ in 0..shape.group_frames / shape.frames() {
 			room.tick();
 			room.round().await;
-		}
-		for (pool, capacity) in room.pools().zip(capacities) {
-			// Keep the old and current batch resident during the handover, including
-			// bookkeeping rather than estimating a group from payload bytes alone.
-			pool.resize(capacity.map(|capacity| capacity.max(pool.used() * 2)));
 		}
 		// Exercise turnover as well as the empty cache, including Criterion's one-pass
 		// nightly smoke mode.
@@ -942,11 +937,14 @@ impl<B: Backend> Room<B> {
 		self.cluster.pools.iter().chain(viewers)
 	}
 
-	/// Unpaced rounds otherwise collapse many complete batches into one cache tick,
-	/// where yesterday's read outranks today's unread write. Sample a new recency
-	/// epoch per round without sleeping or changing protocol time.
+	/// Expire old batches outside timing. Activity is dated on the following poll,
+	/// so history holds two rounds plus each track's protected latest group.
 	fn tick(&mut self) {
-		self.cache_now += Duration::from_secs(1);
+		self.cache_now += if std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+			Duration::from_secs(1)
+		} else {
+			cache::DEFAULT_EXPIRY
+		};
 		for pool in self.pools() {
 			pool.poll(self.cache_now, &kio::Waiter::noop());
 		}

@@ -11,47 +11,31 @@ such break.
 
 ## Plan
 
-Planned 2026-11-04 with the maintainer. While iterating
-[moq-dev/moq#7729](https://github.com/moq-dev/moq/pull/7729) (authored tracks
-default to zero max age, merged 2026-11-04), its agent ran the Rust benches in
-test mode: `group` panicked under the new default and was fixed there, while
-`origin`, `session` and `track` in `rs/moq-net/benches/` panicked on main
-before the change.
+The implementation PR fixes the benchmark fixtures without changing the product:
 
-Nightly already runs these targets measured: `sh/gh/nightly.sh`'s `rust-bench`
-step runs `criterion net --no-fail-fast -p moq-net --features fuzz --bench '*'`.
-Scheduled run
-[41656613559](https://github.com/moq-dev/moq/actions/runs/41656613559)
-(2026-11-03, before #7729) failed it on four targets:
+- `origin/reprice_duplicate` uses covering discovery, since the announced prefix
+  is above each cursor's allowed paths.
+- Memory and session delivery retain unread groups without byte-pressure
+  shedding. Cache expiry between rounds bounds history outside measured work.
+  The shared session fixture also covers the production relay benchmark.
+- The full test-mode and short measured sweeps verify every moq-net target.
 
-- `origin` (`origin.rs:574` and `:576`, `winner changed`) in
-  `origin/reprice_duplicate/1d_1s_cost2`.
-- `session` (`session/mod.rs:371` and `:492`, `Evicted`) in
-  `session_delivery_burst/moq-transport-22/...`.
-- `memory` (`memory.rs:194`, `Evicted`) in `memory/streams=16/size=1048576`.
-- `track` (`track.rs:1718` and `:1730`) in `track_range_widening/1r/64`, fixed
-  by [moq-dev/moq#7840](https://github.com/moq-dev/moq/pull/7840) (merged
-  2026-11-04).
-
-Start by re-running every moq-net bench target on main, in test mode and in a
-short measured run, since #7729's zero max-age default may have broken more.
-Fix each at its cause: a bench whose expectation predates a deliberate
-behaviour change is updated; a bench exposing a product bug gets the product
-fix. `origin` and `session` need `fuzz`, and Cargo skips a bench whose
-`required-features` are off without a word, so a test-mode run without it
-passes while they're broken.
-
-Where CI catches the next break is the maintainer's call; ask in the PR. A
-test-mode run in Nightly adds nothing, since the measured run covers the same
-targets. Today the PR gate builds benches with their features but leaves them
-unrun (`rs/justfile` above the `test` recipe; `.config/nextest.toml`'s
-`default-filter = "not kind(bench)"`). Running them there, which would have
-caught these before merge, reverses the
-[Nightly epic](/quest/m0/nightly/README.md)'s 2026-10-24 decision that the
-gate keeps skipping benches and a green Nightly catches them within a day.
-Measure the test-mode run's cost before asking.
+Nightly already runs the measured targets in `sh/gh/nightly.sh`'s `rust-bench`
+step. The PR gate builds benches with their required features, but excludes
+running them through `.config/nextest.toml`'s `not kind(bench)` default filter.
+No CI placement change is included pending the maintainer's decision below.
 
 Public API: none. Wire: none.
+
+## Waiting
+
+- Maintainer: choose where CI catches the next benchmark failure. Options:
+  retain measured Nightly coverage, or run moq-net benches in test mode in the
+  PR gate as well. Recommend retaining Nightly coverage, consistent with the
+  Nightly epic's existing policy; the PR records the full test-mode cost.
+  This reverses a recorded maintainer policy if changed, so an agent cannot
+  choose it unattended. Check the decision is recorded in the PR, then apply
+  any chosen gate change and finish this quest.
 
 ## Related
 
