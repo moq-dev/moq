@@ -3230,7 +3230,7 @@ impl Drop for DriverState {
 	}
 }
 
-/// Everything [`run_front`] owns, queued by [`Consumer::request`].
+/// Everything [`FrontServeRun`] owns, queued by [`Consumer::request`].
 struct FrontTask {
 	/// The route table the front selects from.
 	shared: SendCell<kio::Shared<OriginState>>,
@@ -3412,24 +3412,65 @@ impl InFlight {
 /// Drives one front until it ends, then holds the tracks it left in flight until
 /// their last reader leaves, or until nothing owns the origin: a reader never keeps
 /// the driver from finishing.
-async fn run_front(task: FrontTask, origin: TasksWeak) {
-	let mut in_flight = serve_front(task).await;
-	// Each keeps its copy for the readers still on their way, then lets go as an unread
-	// track parks, so the copy never keeps its source subscribed for nobody. Unread once
-	// is unread for good: the front closed its broadcast, which refuses every lookup, so
-	// no reader can arrive once the last one left.
-	kio::wait(|waiter| {
+struct FrontServeRun {
+	state: FrontRunState,
+	origin: TasksWeak,
+}
+
+#[allow(clippy::large_enum_variant, reason = "a machine's enum is its storage")]
+enum FrontRunState {
+	/// Not polled yet: the front starts serving on its first poll, so a set that drops
+	/// it unpolled never starts it.
+	Start(FrontTask),
+	Serve(FrontServe),
+	/// Each keeps its copy for the readers still on their way, then lets go as an unread
+	/// track parks, so the copy never keeps its source subscribed for nobody. Unread once
+	/// is unread for good: the front closed its broadcast, which refuses every lookup, so
+	/// no reader can arrive once the last one left.
+	InFlight(Vec<InFlight>),
+}
+
+impl FrontServeRun {
+	fn new(task: FrontTask, origin: TasksWeak) -> Self {
+		Self {
+			state: FrontRunState::Start(task),
+			origin,
+		}
+	}
+}
+
+impl kio::Task for FrontServeRun {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let in_flight = loop {
+			match &mut self.state {
+				FrontRunState::Start(_) => {
+					let FrontRunState::Start(task) =
+						std::mem::replace(&mut self.state, FrontRunState::InFlight(Vec::new()))
+					else {
+						unreachable!("matched above");
+					};
+					self.state = FrontRunState::Serve(FrontServe::new(task));
+				}
+				FrontRunState::Serve(serve) => {
+					let in_flight = ready!(serve.poll(waiter));
+					self.state = FrontRunState::InFlight(in_flight);
+				}
+				FrontRunState::InFlight(in_flight) => break in_flight,
+			}
+		};
 		// Dropped without a release, so a reader on its way keeps the copy; it stays held
 		// only while the logical track's state does, for an origin nobody owns.
-		if origin.poll_orphaned(waiter).is_ready() {
-			for io in &mut in_flight {
+		if self.origin.poll_orphaned(waiter).is_ready() {
+			for io in in_flight.iter_mut() {
 				if let Some(request) = io.request.take() {
 					request.reject(io.end.clone());
 				}
 			}
 			return Poll::Ready(());
 		}
-		for mut io in std::mem::take(&mut in_flight) {
+		for mut io in std::mem::take(in_flight) {
 			if let Some(request) = &mut io.request {
 				while let Poll::Ready(Some(_)) = request.poll_subscription_changed(waiter) {}
 			}
@@ -3466,8 +3507,7 @@ async fn run_front(task: FrontTask, origin: TasksWeak) {
 			true => Poll::Ready(()),
 			false => Poll::Pending,
 		}
-	})
-	.await;
+	}
 }
 
 /// The route a front may serve from. `resolved` is the instance the front first
@@ -3489,112 +3529,159 @@ fn pick<'a>(
 	}
 }
 
+/// What [`FrontServe::poll_step`] returns: one thing that happened.
+enum FrontStep {
+	Assigned(track::Request),
+	Resolved(Result<broadcast::Consumer, Error>),
+	SourceClosed(u64),
+	Info(Arc<str>, u64, Result<track::Info, Error>),
+	Ended(Arc<str>, u64, Result<(), Error>, bool),
+	Demand(Arc<str>),
+	Holders,
+	/// The broadcast closed: nobody can hold it again.
+	Closed,
+	Deadline,
+	Table,
+	/// Someone lists the broadcast, or the serving source changed: read its listing.
+	Listing,
+	/// Nobody lists the broadcast any more.
+	Unlisted,
+	Listed(Result<Option<broadcast::TracksEvent>, Error>),
+}
+
+/// A front's in-flight upstream request.
+struct FrontUpstream {
+	route: u64,
+	/// The route's instance when asked.
+	asked: Instance,
+	/// [`OriginState::next_route`] when asked.
+	asked_at: u64,
+	pending: kio::Consumer<PendingBroadcast>,
+	/// The queue's [`ServeState::renewals`], and its count when asked: a renewal
+	/// since released the request, whatever it resolved to and whenever.
+	renewals: Arc<AtomicU64>,
+	asked_renewals: u64,
+}
+
 /// Feeds the world's events to a [`Front`] and performs the actions it returns,
-/// until the front ends; returns the tracks it ended in flight. The decisions live
+/// until the front ends; resolves to the tracks it ended in flight. The decisions live
 /// in the machine; this only waits and executes, so nothing here decides anything
 /// twice.
-async fn serve_front(task: FrontTask) -> Vec<InFlight> {
-	let FrontTask {
-		shared,
-		broadcast,
-		path,
-		horizon,
-		pin,
-		watch,
-		request,
-		timers,
-	} = task;
+///
+/// Declared in drop order: the state the front builds goes before the task's handles it
+/// is built from, the newest first.
+struct FrontServe {
+	/// The current wait's waiter. Each wait gets a fresh one: a reused waiter keeps the
+	/// registrations an earlier wait left, which wake the front spuriously.
+	park: kio::Park,
+	/// The source the broadcast's datagram lookups go to, as last handed over: datagram
+	/// tracks are live only, so a lookup joins the serving source's own track rather than a
+	/// copy the front would splice.
+	datagram_source: Option<u64>,
+	/// Once the front picks a route a session received, it asks sessions to keep
+	/// discovering its path for as long as it lives, so the route outlives whatever
+	/// reader found it, such as a listing that has since closed.
+	discovered: Option<Interest>,
+	events: VecDeque<Event>,
+	/// Whether a consumer held the broadcast as of the last edge fed to the machine,
+	/// starting with the request that minted the front.
+	held: bool,
+	/// What the front first resolved; see [`pick`].
+	resolved: Option<Instance>,
+	/// The watch generation the last selection saw.
+	seen: u64,
+	deadline: crate::time::Deadline,
+	ready: kio::Queue<Arc<str>>,
+	tracks: HashMap<Arc<str>, TrackIo>,
+	upstream: Option<FrontUpstream>,
+	next_source: u64,
+	/// The instance each source's route served when it was asked, and the table's clock
+	/// then: what its content is from.
+	instances: HashMap<u64, (Instance, u64)>,
+	sources: HashMap<u64, broadcast::Consumer>,
+	front: Front,
+	listing: Option<FrontListing>,
+	lister: broadcast::Lister,
+	/// The front serves its broadcast on demand: every track a reader names is
+	/// handed here, and its readers read it from whichever source serves the path.
+	dynamic: broadcast::Requests,
+	timers: Deadlines,
+	request: kio::Producer<PendingFront>,
+	watch: Watch,
+	pin: Option<Instance>,
+	horizon: Horizon,
+	path: Path,
+	broadcast: broadcast::Producer,
+	shared: SendCell<kio::Shared<OriginState>>,
+}
 
-	/// What the wait below returns: one thing that happened.
-	enum Step {
-		Assigned(track::Request),
-		Resolved(Result<broadcast::Consumer, Error>),
-		SourceClosed(u64),
-		Info(Arc<str>, u64, Result<track::Info, Error>),
-		Ended(Arc<str>, u64, Result<(), Error>, bool),
-		Demand(Arc<str>),
-		Holders,
-		/// The broadcast closed: nobody can hold it again.
-		Closed,
-		Deadline,
-		Table,
-		/// Someone lists the broadcast, or the serving source changed: read its listing.
-		Listing,
-		/// Nobody lists the broadcast any more.
-		Unlisted,
-		Listed(Result<Option<broadcast::TracksEvent>, Error>),
+impl FrontServe {
+	fn new(task: FrontTask) -> Self {
+		let FrontTask {
+			shared,
+			broadcast,
+			path,
+			horizon,
+			pin,
+			watch,
+			request,
+			timers,
+		} = task;
+		let dynamic = broadcast.requests();
+		let lister = dynamic
+			.lister()
+			.expect("only the front answers its broadcast's listings");
+		let deadline = crate::time::Deadline::new(&timers);
+		broadcast.serve_datagrams_from(None);
+		let mut serve = Self {
+			park: kio::Park::default(),
+			datagram_source: None,
+			discovered: None,
+			events: VecDeque::new(),
+			held: true,
+			resolved: None,
+			seen: 0,
+			deadline,
+			ready: kio::Queue::new(),
+			tracks: HashMap::new(),
+			upstream: None,
+			next_source: 0,
+			instances: HashMap::new(),
+			sources: HashMap::new(),
+			front: Front::new(track::IDLE_LINGER),
+			listing: None,
+			lister,
+			dynamic,
+			timers,
+			request,
+			watch,
+			pin,
+			horizon,
+			path,
+			broadcast,
+			shared,
+		};
+		let event = serve.select();
+		serve.events.push_back(event);
+		serve
 	}
 
-	// The front serves its broadcast on demand: every track a reader names is
-	// handed here, and its readers read it from whichever source serves the path.
-	let mut dynamic = broadcast.requests();
-	let lister = dynamic
-		.lister()
-		.expect("only the front answers its broadcast's listings");
-	let mut listing: Option<FrontListing> = None;
-	let mut front = Front::new(track::IDLE_LINGER);
-	let mut sources: HashMap<u64, broadcast::Consumer> = HashMap::new();
-	// The instance each source's route served when it was asked, and the table's clock
-	// then: what its content is from.
-	let mut instances: HashMap<u64, (Instance, u64)> = HashMap::new();
-	let mut next_source = 0u64;
-	/// The in-flight upstream request.
-	struct Upstream {
-		route: u64,
-		/// The route's instance when asked.
-		asked: Instance,
-		/// [`OriginState::next_route`] when asked.
-		asked_at: u64,
-		pending: kio::Consumer<PendingBroadcast>,
-		/// The queue's [`ServeState::renewals`], and its count when asked: a renewal
-		/// since released the request, whatever it resolved to and whenever.
-		renewals: Arc<AtomicU64>,
-		asked_renewals: u64,
-	}
-	let mut upstream: Option<Upstream> = None;
-	let mut tracks: HashMap<Arc<str>, TrackIo> = HashMap::new();
-	let ready: kio::Queue<Arc<str>> = kio::Queue::new();
-	let mut deadline = crate::time::Deadline::new(&timers);
-	// The watch generation the last selection saw.
-	let mut seen = 0;
-	// What the front first resolved; see [`pick`].
-	let mut resolved: Option<Instance> = None;
-	// Whether a consumer held the broadcast as of the last edge fed to the machine,
-	// starting with the request that minted the front.
-	let mut held = true;
-	let mut events: VecDeque<Event> = VecDeque::new();
-	// Once the front picks a route a session received, it asks sessions to keep
-	// discovering its path for as long as it lives, so the route outlives whatever
-	// reader found it, such as a listing that has since closed.
-	let mut discovered: Option<Interest> = None;
-	// The source the broadcast's datagram lookups go to, as last handed over: datagram
-	// tracks are live only, so a lookup joins the serving source's own track rather than a
-	// copy the front would splice.
-	let mut datagram_source: Option<u64> = None;
-	broadcast.serve_datagrams_from(None);
-
-	// Read the table for the machine: the best route and whether
-	// the serving source is on its way out. Also what the watch wakes for.
-	let select = |front: &mut Front,
-	              sources: &HashMap<u64, broadcast::Consumer>,
-	              instances: &mut HashMap<u64, (Instance, u64)>,
-	              seen: &mut u64,
-	              resolved: &mut Option<Instance>,
-	              discovered: &mut Option<Interest>|
-	 -> Event {
-		let table = shared.read();
+	/// Read the table for the machine: the best route and whether
+	/// the serving source is on its way out. Also what the watch wakes for.
+	fn select(&mut self) -> Event {
+		let table = self.shared.read();
 		if table.closed {
 			return Event::Closed;
 		}
 		// Read alongside the decision, under the lock a poke takes first.
-		*seen = watch.seen();
-		front.retain_routes(|route| table.routes.covers(&path, route));
+		self.seen = self.watch.seen();
+		self.front.retain_routes(|route| table.routes.covers(&self.path, route));
 		// A route that took over the instance the front resolved continues it. The table
 		// carries the front's verdict forward as each takeover lands; this also catches
 		// one that landed before the front wrote its first, or won the path only later.
-		if let Some(instance) = resolved.as_mut()
-			&& let Some(next) = request.write().ok().and_then(|mut pending| {
-				if let Some(best) = table.best_route(&path, horizon, &HashSet::new(), |_| true) {
+		if let Some(instance) = self.resolved.as_mut()
+			&& let Some(next) = self.request.write().ok().and_then(|mut pending| {
+				if let Some(best) = table.best_route(&self.path, self.horizon, &HashSet::new(), |_| true) {
 					PendingFront::continue_with(&mut pending, best);
 				}
 				match &pending.resolved {
@@ -3602,19 +3689,25 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 					_ => None,
 				}
 			}) {
-			for (asked, _) in instances.values_mut() {
+			for (asked, _) in self.instances.values_mut() {
 				if asked == instance {
 					*asked = next.clone();
 				}
 			}
 			*instance = next;
 		}
-		let best = pick(&table, &path, horizon, front, resolved.as_ref().or(pin.as_ref()));
+		let best = pick(
+			&table,
+			&self.path,
+			self.horizon,
+			&self.front,
+			self.resolved.as_ref().or(self.pin.as_ref()),
+		);
 		// Under the table's lock, which a request reads it under too: a request that
 		// sees another winner from here on mints its own front rather than join this one.
-		if resolved.is_none()
+		if self.resolved.is_none()
 			&& let Some(entry) = best
-			&& let Ok(mut pending) = request.write()
+			&& let Ok(mut pending) = self.request.write()
 			&& pending.selected != entry.instance
 		{
 			pending.selected = entry.instance.clone();
@@ -3626,41 +3719,49 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 			local: entry.local,
 			carried: !entry.instance.is_minted(),
 		});
-		let serving_closing = front
+		let serving_closing = self
+			.front
 			.serving()
-			.and_then(|id| sources.get(&id))
+			.and_then(|id| self.sources.get(&id))
 			.is_some_and(|source| source.is_closing());
 		drop(table);
-		if received && discovered.is_none() {
-			let mut table = shared.lock();
-			*discovered = Some(Interest::new(&mut table, &shared, path.clone()));
+		if received && self.discovered.is_none() {
+			let mut table = self.shared.lock();
+			self.discovered = Some(Interest::new(&mut table, &self.shared, self.path.clone()));
 		}
 		Event::Selected { best, serving_closing }
-	};
+	}
 
-	// Whether a route's refusal is the answer: only the current winner speaks for the
-	// path. A retraction resolves like a rejection, and a route beaten while its
-	// request was pending speaks for nobody, so either one re-selects instead.
-	let standing = |front: &Front, route: u64, resolved: &Option<Instance>| {
-		let table = shared.read();
-		pick(&table, &path, horizon, front, resolved.as_ref().or(pin.as_ref())).is_some_and(|best| best.id == route)
-	};
+	/// Whether a route's refusal is the answer: only the current winner speaks for the
+	/// path. A retraction resolves like a rejection, and a route beaten while its
+	/// request was pending speaks for nobody, so either one re-selects instead.
+	fn standing(&self, route: u64) -> bool {
+		let table = self.shared.read();
+		pick(
+			&table,
+			&self.path,
+			self.horizon,
+			&self.front,
+			self.resolved.as_ref().or(self.pin.as_ref()),
+		)
+		.is_some_and(|best| best.id == route)
+	}
 
-	// Whether an answer `route` gave for `asked` would serve another instance than the
-	// front's: the route has since moved off it, or, before the front resolved, another
-	// instance won the path while the request was in flight.
-	let stale = |front: &Front, route: u64, asked: &Instance, resolved: &Option<Instance>| {
-		let table = shared.read();
-		let Some(entry) = table.routes.covering(&path).find(|entry| entry.id == route) else {
+	/// Whether an answer `route` gave for `asked` would serve another instance than the
+	/// front's: the route has since moved off it, or, before the front resolved, another
+	/// instance won the path while the request was in flight.
+	fn stale(&self, route: u64, asked: &Instance) -> bool {
+		let table = self.shared.read();
+		let Some(entry) = table.routes.covering(&self.path).find(|entry| entry.id == route) else {
 			return false;
 		};
 		if entry.instance != *asked {
 			return true;
 		}
-		match resolved {
+		match &self.resolved {
 			Some(resolved) => resolved != asked,
 			// A winner that took over the instance asked continues it.
-			None => pick(&table, &path, horizon, front, pin.as_ref()).is_some_and(|best| {
+			None => pick(&table, &self.path, self.horizon, &self.front, self.pin.as_ref()).is_some_and(|best| {
 				best.instance != *asked
 					&& best
 						.takeover
@@ -3668,731 +3769,727 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						.is_none_or(|takeover| takeover.instance != *asked)
 			}),
 		}
-	};
+	}
 
-	events.push_back(select(
-		&mut front,
-		&sources,
-		&mut instances,
-		&mut seen,
-		&mut resolved,
-		&mut discovered,
-	));
-
-	loop {
-		while let Some(event) = events.pop_front() {
-			let refused = matches!(
-				&event,
-				Event::Resolved {
-					result: Err(Refusal { standing: true, .. }),
-					..
+	/// Wait for the next thing to happen, the one place the front parks.
+	fn poll_step(&mut self, waiter: &kio::Waiter) -> Poll<FrontStep> {
+		if let Poll::Ready(Ok(request)) = self.dynamic.poll_requested_track(waiter) {
+			return Poll::Ready(FrontStep::Assigned(request));
+		}
+		if let Some(upstream) = &self.upstream
+			&& let Poll::Ready(result) = upstream.pending.poll(waiter, |p| match &p.resolved {
+				Some(result) => Poll::Ready(result.clone()),
+				None => Poll::Pending,
+			}) {
+			return Poll::Ready(FrontStep::Resolved(match result {
+				Ok(resolved) => resolved,
+				// The queue died unresolved (its handler dropped): the route
+				// could not serve.
+				Err(_closed) => Err(Error::Unroutable),
+			}));
+		}
+		// The listing first: a source ends its listing before it closes, so this forwards
+		// the tracks it finished last before its close detaches it.
+		match &mut self.listing {
+			None => {
+				if self.front.serving().is_some() && matches!(self.lister.poll_wanted(waiter), Poll::Ready(Ok(()))) {
+					return Poll::Ready(FrontStep::Listing);
 				}
-			);
-			let answered = match &event {
-				Event::TrackInfo { track, source, .. } => Some((track.clone(), *source)),
-				_ => None,
-			};
-			for action in front.step(event) {
-				match action {
-					Action::Reselect => events.push_back(select(
-						&mut front,
-						&sources,
-						&mut instances,
-						&mut seen,
-						&mut resolved,
-						&mut discovered,
-					)),
-					Action::Request { route } => {
-						// The entry and what it serves.
-						let found = {
-							let table = shared.read();
-							table
-								.routes
-								.covering(&path)
-								.find(|entry| entry.id == route && entry.live())
-								.map(|entry| {
-									let instance = (entry.instance.clone(), table.next_route);
-									(entry.source.clone(), entry.server.clone(), instance)
-								})
-						};
-						let Some((source, server, instance)) = found else {
-							events.push_back(Event::Resolved {
-								route,
-								result: Err(Refusal {
-									err: Error::Unroutable,
-									standing: false,
-								}),
-							});
-							continue;
-						};
-						if let Some(source) = source {
-							let id = next_source;
-							next_source += 1;
-							sources.insert(id, source);
-							instances.insert(id, instance);
-							events.push_back(Event::Resolved { route, result: Ok(id) });
-							continue;
+			}
+			Some(state) => {
+				if self.lister.poll_unwanted(waiter).is_ready() {
+					return Poll::Ready(FrontStep::Unlisted);
+				}
+				if state.source != self.front.serving() {
+					return Poll::Ready(FrontStep::Listing);
+				}
+				if let Some(reader) = &mut state.reader
+					&& let Poll::Ready(result) = reader.poll_next(waiter)
+				{
+					return Poll::Ready(FrontStep::Listed(result));
+				}
+			}
+		}
+		if let Some(id) = self.front.serving()
+			&& let Some(source) = self.sources.get(&id)
+			&& source.poll_closed(waiter).is_ready()
+		{
+			return Poll::Ready(FrontStep::SourceClosed(id));
+		}
+		while let Poll::Ready(Ok(name)) = self.ready.poll_pop(waiter) {
+			let Some(io) = self.tracks.get_mut(&name) else { continue };
+			io.ready.popped();
+			let waker = Waker::from(io.ready.clone());
+			let waiter = io.park.hold(&Context::from_waker(&waker));
+			let step = (|| {
+				if let Some(asked) = &mut io.query
+					&& let Poll::Ready(result) = asked.query.poll(waiter)
+				{
+					return Some(FrontStep::Info(name.clone(), asked.source, result));
+				}
+				follow_demand(&mut io.held, io.accepted.as_mut(), &io.weak, &io.routes, waiter);
+				// Settled once the copy closes: a group still open below a declared end is
+				// owed until then, and a session closing first means it never came.
+				if let Some((source, copy, _)) = &io.copy
+					&& copy.poll_closed(waiter).is_ready()
+				{
+					let result = match copy.poll_complete(&kio::Waiter::noop()) {
+						Poll::Ready(result) => result,
+						Poll::Pending => {
+							// A channel cannot reopen after poll_closed reported its end.
+							debug_assert!(false, "closed copy did not report completion");
+							Err(Error::Cancel)
 						}
-						let Some(server) = server else {
-							events.push_back(Event::Resolved {
-								route,
-								result: Err(Refusal {
-									err: Error::Unroutable,
-									standing: standing(&front, route, &resolved),
-								}),
-							});
-							continue;
-						};
-						let mut serve = server.lock();
-						if serve.closed {
-							// Retracted under us, or its handler dropped while the
-							// announcement stands: it cannot serve. A retraction
-							// leaves the table before it closes the server, so the
-							// table tells the two apart.
-							drop(serve);
-							events.push_back(Event::Resolved {
-								route,
-								result: Err(Refusal {
-									err: Error::Unroutable,
-									standing: standing(&front, route, &resolved),
-								}),
-							});
-							continue;
+					};
+					let delivered = copy.latest_sequence().is_some();
+					return Some(FrontStep::Ended(name.clone(), *source, result, delivered));
+				}
+				// Watch the demand edge in whichever direction is unmet. Only `Pending`
+				// parks, so an answer steps and the handler looks again, polling anew when
+				// nothing changed. A closed track is unread: it owes one `Unwanted` if
+				// recorded read, and is no edge after.
+				let edge = match io.wanted {
+					true => io.weak.poll_unwanted(waiter).is_ready(),
+					false => matches!(io.weak.poll_wanted(waiter), Poll::Ready(Ok(()))),
+				};
+				if edge {
+					return Some(FrontStep::Demand(name.clone()));
+				}
+				None
+			})();
+			if let Some(step) = step {
+				// A ready answer did not park on its next edge. Revisit this track
+				// once the machine has consumed the event and applied its actions.
+				io.ready.wake_by_ref();
+				return Poll::Ready(step);
+			}
+		}
+		// The same for whoever holds the broadcast itself.
+		let edge = match self.held {
+			true => self.broadcast.poll_unheld(waiter),
+			false => self.broadcast.poll_held(waiter),
+		};
+		match edge {
+			Poll::Ready(Ok(())) => return Poll::Ready(FrontStep::Holders),
+			// Answers at once from here on, so it must end the front, not be polled again.
+			Poll::Ready(Err(_)) => return Poll::Ready(FrontStep::Closed),
+			Poll::Pending => {}
+		}
+		if self.deadline.poll(waiter).is_ready() {
+			return Poll::Ready(FrontStep::Deadline);
+		}
+		self.watch.poll_changed(waiter, self.seen).map(|()| FrontStep::Table)
+	}
+}
+
+impl kio::Task for FrontServe {
+	type Output = Vec<InFlight>;
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Vec<InFlight>> {
+		loop {
+			while let Some(event) = self.events.pop_front() {
+				let refused = matches!(
+					&event,
+					Event::Resolved {
+						result: Err(Refusal { standing: true, .. }),
+						..
+					}
+				);
+				let answered = match &event {
+					Event::TrackInfo { track, source, .. } => Some((track.clone(), *source)),
+					_ => None,
+				};
+				for action in self.front.step(event) {
+					match action {
+						Action::Reselect => {
+							let event = self.select();
+							self.events.push_back(event);
 						}
-						// A source this route already materialized for the path
-						// attaches without another upstream round trip. Its session
-						// retires a source nothing holds, atomically with this mint, so
-						// one found closed is gone and the route is asked afresh.
-						if let Some(source) = serve
-							.served
-							.get(&path)
-							.map(|weak| weak.consume())
-							.filter(|source| !source.is_closed())
-						{
-							drop(serve);
-							let id = next_source;
-							next_source += 1;
-							sources.insert(id, source);
-							instances.insert(id, instance);
-							events.push_back(Event::Resolved { route, result: Ok(id) });
-							continue;
-						}
-						let pending = match serve.requests.join(&path) {
-							Some(producer) => producer.consume(),
-							None => {
-								let producer = kio::Producer::<PendingBroadcast>::default();
-								let consumer = producer.consume();
-								match serve.requests.insert(path.clone(), producer) {
-									Ok(()) => consumer,
-									// No live handler behind the route: it cannot
-									// serve, whatever the table says.
-									Err(_) => {
-										drop(serve);
-										events.push_back(Event::Resolved {
-											route,
-											result: Err(Refusal {
-												err: Error::Unroutable,
-												standing: standing(&front, route, &resolved),
-											}),
-										});
-										continue;
+						Action::Request { route } => {
+							// The entry and what it serves.
+							let found = {
+								let table = self.shared.read();
+								table
+									.routes
+									.covering(&self.path)
+									.find(|entry| entry.id == route && entry.live())
+									.map(|entry| {
+										let instance = (entry.instance.clone(), table.next_route);
+										(entry.source.clone(), entry.server.clone(), instance)
+									})
+							};
+							let Some((source, server, instance)) = found else {
+								self.events.push_back(Event::Resolved {
+									route,
+									result: Err(Refusal {
+										err: Error::Unroutable,
+										standing: false,
+									}),
+								});
+								continue;
+							};
+							if let Some(source) = source {
+								let id = self.next_source;
+								self.next_source += 1;
+								self.sources.insert(id, source);
+								self.instances.insert(id, instance);
+								self.events.push_back(Event::Resolved { route, result: Ok(id) });
+								continue;
+							}
+							let Some(server) = server else {
+								self.events.push_back(Event::Resolved {
+									route,
+									result: Err(Refusal {
+										err: Error::Unroutable,
+										standing: self.standing(route),
+									}),
+								});
+								continue;
+							};
+							let mut serve = server.lock();
+							if serve.closed {
+								// Retracted under us, or its handler dropped while the
+								// announcement stands: it cannot serve. A retraction
+								// leaves the table before it closes the server, so the
+								// table tells the two apart.
+								drop(serve);
+								self.events.push_back(Event::Resolved {
+									route,
+									result: Err(Refusal {
+										err: Error::Unroutable,
+										standing: self.standing(route),
+									}),
+								});
+								continue;
+							}
+							// A source this route already materialized for the path
+							// attaches without another upstream round trip. Its session
+							// retires a source nothing holds, atomically with this mint, so
+							// one found closed is gone and the route is asked afresh.
+							if let Some(source) = serve
+								.served
+								.get(&self.path)
+								.map(|weak| weak.consume())
+								.filter(|source| !source.is_closed())
+							{
+								drop(serve);
+								let id = self.next_source;
+								self.next_source += 1;
+								self.sources.insert(id, source);
+								self.instances.insert(id, instance);
+								self.events.push_back(Event::Resolved { route, result: Ok(id) });
+								continue;
+							}
+							let pending = match serve.requests.join(&self.path) {
+								Some(producer) => producer.consume(),
+								None => {
+									let producer = kio::Producer::<PendingBroadcast>::default();
+									let consumer = producer.consume();
+									match serve.requests.insert(self.path.clone(), producer) {
+										Ok(()) => consumer,
+										// No live handler behind the route: it cannot
+										// serve, whatever the table says.
+										Err(_) => {
+											drop(serve);
+											self.events.push_back(Event::Resolved {
+												route,
+												result: Err(Refusal {
+													err: Error::Unroutable,
+													standing: self.standing(route),
+												}),
+											});
+											continue;
+										}
 									}
 								}
-							}
-						};
-						upstream = Some(Upstream {
-							route,
-							asked: instance.0,
-							asked_at: instance.1,
-							pending,
-							renewals: serve.renewals.clone(),
-							asked_renewals: serve.renewals.load(Ordering::Acquire),
-						});
-					}
-					Action::Detach { source, drain } => {
-						sources.remove(&source);
-						instances.remove(&source);
-						for io in tracks.values_mut() {
-							if !drain && io.query.as_ref().is_some_and(|asked| asked.source == source) {
-								io.query = None;
-							}
-							if !drain && io.staged.as_ref().is_some_and(|asked| asked.source == source) {
-								io.staged = None;
-							}
-							// Any source leaving is rare: drop every parked shortcut rather
-							// than track which source each came from.
-							io.routes.unpark();
-						}
-					}
-					Action::Resolve => {
-						// The broadcast is whatever its first source serves, from the instance
-						// its route had when asked.
-						let (Some(source), Some(route)) = (front.serving(), front.serving_route()) else {
-							continue;
-						};
-						let Some((instance, asked)) = instances.get(&source).cloned() else {
-							continue;
-						};
-						// Route datagram lookups before a requester can see the broadcast,
-						// which would otherwise find no source to ask.
-						if datagram_source != Some(source) {
-							datagram_source = Some(source);
-							broadcast.serve_datagrams_from(sources.get(&source).cloned());
-						}
-						resolved = Some(instance.clone());
-						if let Ok(mut pending) = request.write()
-							&& pending.resolved.is_none()
-						{
-							pending.first = Some(instance.clone());
-							pending.resolved = Some(Ok(instance));
-							pending.via = Some((route, asked));
-						}
-					}
-					Action::Query { track: name, source } => {
-						let Some(io) = tracks.get_mut(&name) else { continue };
-						io.ready.wake_by_ref();
-						let closing = sources.get(&source).is_some_and(|s| s.is_closing());
-						match sources.get(&source).map(|s| s.track(&name)) {
-							Some(Ok(lookup)) => {
-								// Subscribe before the query exposes upstream demand, and query
-								// that same instance even if the broadcast changes meanwhile.
-								let sub = io.weak.subscription().map(|(demand, subscribers)| {
-									lookup.subscribe(io.routes.subscription(demand, subscribers))
-								});
-								let query = match &sub {
-									Some(sub) => sub.info(),
-									None => lookup.info().into_inner(),
-								};
-								let copy = query.track();
-								io.query = Some(Asked {
-									source,
-									staged: io.routes.stage(copy.clone()),
-									copy,
-									query,
-									info: None,
-									sub,
-								});
-							}
-							Some(Err(err)) => events.push_back(Event::TrackInfo {
-								track: name,
-								source,
-								closing,
-								result: Err(err),
-							}),
-							None => {}
-						}
-					}
-					Action::Splice { track: name, source } => {
-						let Some(io) = tracks.get_mut(&name) else { continue };
-						let Some(asked) = io.staged.take() else {
-							continue;
-						};
-						if asked.source != source {
-							continue;
-						}
-						io.splice(asked);
-					}
-					Action::Park { track: name } => {
-						let Some(io) = tracks.get_mut(&name) else { continue };
-						io.ready.wake_by_ref();
-						// Drop the copy so its source goes idle at once. A returning
-						// reader gets a fresh one, so nothing cached can be stale.
-						io.routes.park();
-						io.copy = None;
-						io.held = None;
-					}
-					Action::Forget { track: name } => {
-						// A reader that looked the track up since the machine decided keeps
-						// it. Feed its `Wanted` edge here: the demand poll only sees the
-						// current level, so a reader gone before the next poll would
-						// otherwise leave the track unread with no linger armed.
-						if let Some(io) = tracks.get_mut(&name)
-							&& !io.weak.abort_unwanted(Error::Cancel)
-						{
-							if !io.wanted {
-								io.wanted = true;
-								events.push_back(Event::Wanted { track: name });
-							}
-							continue;
-						}
-						// Nobody reads it, so nobody follows its copy: let the route go idle.
-						if let Some(io) = tracks.remove(&name) {
-							io.routes.park();
-						}
-						events.push_back(Event::Forgotten { track: name });
-					}
-					Action::Finish { track: name } => {
-						if let Some(io) = tracks.get_mut(&name) {
-							io.end(Ok(()));
-						}
-					}
-					Action::Abort { track: name, err } => {
-						if let Some(io) = tracks.get_mut(&name) {
-							tracing::debug!(name = %name, %err, "aborting track");
-							io.end(Err(err));
-						}
-					}
-					Action::Arm { at } => deadline.set(at),
-					Action::Retire => {
-						// Closing refuses every holder from here on, atomically with minting
-						// one: a request that joined first keeps the front, and one after
-						// finds it closed and mints a fresh one.
-						let event = match broadcast.close_unheld() {
-							true => Event::Retired,
-							false => {
-								held = true;
-								Event::Held
-							}
-						};
-						events.push_back(event);
-					}
-					Action::End { err } => {
-						// Leave the table before anything shows the end, whatever ended the
-						// front: a requester seeing it re-requests, and must mint a fresh
-						// front rather than join this one again. A successor already in the
-						// slot stays.
-						shared
-							.lock()
-							.fronts
-							.remove_if(&(path.clone(), horizon, pin.clone()), |front| {
-								front.request.same_channel(&request)
+							};
+							self.upstream = Some(FrontUpstream {
+								route,
+								asked: instance.0,
+								asked_at: instance.1,
+								pending,
+								renewals: serve.renewals.clone(),
+								asked_renewals: serve.renewals.load(Ordering::Acquire),
 							});
-						if let Ok(mut pending) = request.write() {
-							pending.refused = refused;
-							pending.resolved.get_or_insert(Err(err.clone()));
 						}
-						// Ending the broadcast only retracts it: no new requesters or
-						// tracks, and a newcomer at the path gets a fresh front. Tracks
-						// in flight carry on (moq-lite: retraction does not disturb
-						// subscriptions already in flight): their readers follow the copy
-						// they read to its end, since no front is left to replace it.
-						broadcast.close();
-						let mut in_flight = Vec::new();
-						for (_, mut io) in tracks.drain() {
-							let wanted = io.weak.is_wanted();
-							// A reader still waiting on its source's answer is in flight
-							// too: serve it the copy it asked, so it ends as that copy does.
-							let waiting = io.staged.take().or_else(|| io.query.take());
-							if io.copy.is_none()
-								&& wanted && let Some(asked) = waiting
-							{
-								io.splice(asked);
+						Action::Detach { source, drain } => {
+							self.sources.remove(&source);
+							self.instances.remove(&source);
+							for io in self.tracks.values_mut() {
+								if !drain && io.query.as_ref().is_some_and(|asked| asked.source == source) {
+									io.query = None;
+								}
+								if !drain && io.staged.as_ref().is_some_and(|asked| asked.source == source) {
+									io.staged = None;
+								}
+								// Any source leaving is rare: drop every parked shortcut rather
+								// than track which source each came from.
+								io.routes.unpark();
 							}
-							// Nothing in flight: unread, or nothing serving it.
-							if !wanted || io.copy.is_none() {
-								io.end(Err(err.clone()));
-								// An unread track the front has not parked yet still holds
-								// its copy, which would keep its source subscribed.
-								if !wanted {
-									io.routes.release();
+						}
+						Action::Resolve => {
+							// The broadcast is whatever its first source serves, from the instance
+							// its route had when asked.
+							let (Some(source), Some(route)) = (self.front.serving(), self.front.serving_route()) else {
+								continue;
+							};
+							let Some((instance, asked)) = self.instances.get(&source).cloned() else {
+								continue;
+							};
+							// Route datagram lookups before a requester can see the broadcast,
+							// which would otherwise find no source to ask.
+							if self.datagram_source != Some(source) {
+								self.datagram_source = Some(source);
+								self.broadcast.serve_datagrams_from(self.sources.get(&source).cloned());
+							}
+							self.resolved = Some(instance.clone());
+							if let Ok(mut pending) = self.request.write()
+								&& pending.resolved.is_none()
+							{
+								pending.first = Some(instance.clone());
+								pending.resolved = Some(Ok(instance));
+								pending.via = Some((route, asked));
+							}
+						}
+						Action::Query { track: name, source } => {
+							let Some(io) = self.tracks.get_mut(&name) else { continue };
+							io.ready.wake_by_ref();
+							let closing = self.sources.get(&source).is_some_and(|s| s.is_closing());
+							match self.sources.get(&source).map(|s| s.track(&name)) {
+								Some(Ok(lookup)) => {
+									// Subscribe before the query exposes upstream demand, and query
+									// that same instance even if the broadcast changes meanwhile.
+									let sub = io.weak.subscription().map(|(demand, subscribers)| {
+										lookup.subscribe(io.routes.subscription(demand, subscribers))
+									});
+									let query = match &sub {
+										Some(sub) => sub.info(),
+										None => lookup.info().into_inner(),
+									};
+									let copy = query.track();
+									io.query = Some(Asked {
+										source,
+										staged: io.routes.stage(copy.clone()),
+										copy,
+										query,
+										info: None,
+										sub,
+									});
+								}
+								Some(Err(err)) => self.events.push_back(Event::TrackInfo {
+									track: name,
+									source,
+									closing,
+									result: Err(err),
+								}),
+								None => {}
+							}
+						}
+						Action::Splice { track: name, source } => {
+							let Some(io) = self.tracks.get_mut(&name) else { continue };
+							let Some(asked) = io.staged.take() else {
+								continue;
+							};
+							if asked.source != source {
+								continue;
+							}
+							io.splice(asked);
+						}
+						Action::Park { track: name } => {
+							let Some(io) = self.tracks.get_mut(&name) else { continue };
+							io.ready.wake_by_ref();
+							// Drop the copy so its source goes idle at once. A returning
+							// reader gets a fresh one, so nothing cached can be stale.
+							io.routes.park();
+							io.copy = None;
+							io.held = None;
+						}
+						Action::Forget { track: name } => {
+							// A reader that looked the track up since the machine decided keeps
+							// it. Feed its `Wanted` edge here: the demand poll only sees the
+							// current level, so a reader gone before the next poll would
+							// otherwise leave the track unread with no linger armed.
+							if let Some(io) = self.tracks.get_mut(&name)
+								&& !io.weak.abort_unwanted(Error::Cancel)
+							{
+								if !io.wanted {
+									io.wanted = true;
+									self.events.push_back(Event::Wanted { track: name });
 								}
 								continue;
 							}
-							io.routes.conclude();
-							let TrackIo {
-								weak,
-								routes,
-								request,
-								accepted,
-								copy,
-								held,
-								..
-							} = io;
-							in_flight.push(InFlight {
-								weak,
-								routes,
-								end: err.clone(),
-								request,
-								accepted,
-								query: copy.map(|(_, _, query)| query),
-								held,
-							});
-						}
-						return in_flight;
-					}
-				}
-			}
-			// A staged copy the machine did not splice was refused or is no longer wanted:
-			// let it go, or its source stays subscribed for nobody.
-			if let Some((name, source)) = answered
-				&& let Some(io) = tracks.get_mut(&name)
-				&& io.staged.as_ref().is_some_and(|asked| asked.source == source)
-			{
-				io.staged = None;
-			}
-		}
-
-		if front.serving() != datagram_source {
-			datagram_source = front.serving();
-			broadcast.serve_datagrams_from(datagram_source.and_then(|id| sources.get(&id)).cloned());
-		}
-
-		let step = kio::wait(|waiter| {
-			if let Poll::Ready(Ok(request)) = dynamic.poll_requested_track(waiter) {
-				return Poll::Ready(Step::Assigned(request));
-			}
-			if let Some(upstream) = &upstream
-				&& let Poll::Ready(result) = upstream.pending.poll(waiter, |p| match &p.resolved {
-					Some(result) => Poll::Ready(result.clone()),
-					None => Poll::Pending,
-				}) {
-				return Poll::Ready(Step::Resolved(match result {
-					Ok(resolved) => resolved,
-					// The queue died unresolved (its handler dropped): the route
-					// could not serve.
-					Err(_closed) => Err(Error::Unroutable),
-				}));
-			}
-			// The listing first: a source ends its listing before it closes, so this forwards
-			// the tracks it finished last before its close detaches it.
-			match &mut listing {
-				None => {
-					if front.serving().is_some() && matches!(lister.poll_wanted(waiter), Poll::Ready(Ok(()))) {
-						return Poll::Ready(Step::Listing);
-					}
-				}
-				Some(state) => {
-					if lister.poll_unwanted(waiter).is_ready() {
-						return Poll::Ready(Step::Unlisted);
-					}
-					if state.source != front.serving() {
-						return Poll::Ready(Step::Listing);
-					}
-					if let Some(reader) = &mut state.reader
-						&& let Poll::Ready(result) = reader.poll_next(waiter)
-					{
-						return Poll::Ready(Step::Listed(result));
-					}
-				}
-			}
-			if let Some(id) = front.serving()
-				&& let Some(source) = sources.get(&id)
-				&& source.poll_closed(waiter).is_ready()
-			{
-				return Poll::Ready(Step::SourceClosed(id));
-			}
-			while let Poll::Ready(Ok(name)) = ready.poll_pop(waiter) {
-				let Some(io) = tracks.get_mut(&name) else { continue };
-				io.ready.popped();
-				let waker = Waker::from(io.ready.clone());
-				let waiter = io.park.hold(&Context::from_waker(&waker));
-				let step = (|| {
-					if let Some(asked) = &mut io.query
-						&& let Poll::Ready(result) = asked.query.poll(waiter)
-					{
-						return Some(Step::Info(name.clone(), asked.source, result));
-					}
-					follow_demand(&mut io.held, io.accepted.as_mut(), &io.weak, &io.routes, waiter);
-					// Settled once the copy closes: a group still open below a declared end is
-					// owed until then, and a session closing first means it never came.
-					if let Some((source, copy, _)) = &io.copy
-						&& copy.poll_closed(waiter).is_ready()
-					{
-						let result = match copy.poll_complete(&kio::Waiter::noop()) {
-							Poll::Ready(result) => result,
-							Poll::Pending => {
-								// A channel cannot reopen after poll_closed reported its end.
-								debug_assert!(false, "closed copy did not report completion");
-								Err(Error::Cancel)
+							// Nobody reads it, so nobody follows its copy: let the route go idle.
+							if let Some(io) = self.tracks.remove(&name) {
+								io.routes.park();
 							}
-						};
-						let delivered = copy.latest_sequence().is_some();
-						return Some(Step::Ended(name.clone(), *source, result, delivered));
+							self.events.push_back(Event::Forgotten { track: name });
+						}
+						Action::Finish { track: name } => {
+							if let Some(io) = self.tracks.get_mut(&name) {
+								io.end(Ok(()));
+							}
+						}
+						Action::Abort { track: name, err } => {
+							if let Some(io) = self.tracks.get_mut(&name) {
+								tracing::debug!(name = %name, %err, "aborting track");
+								io.end(Err(err));
+							}
+						}
+						Action::Arm { at } => self.deadline.set(at),
+						Action::Retire => {
+							// Closing refuses every holder from here on, atomically with minting
+							// one: a request that joined first keeps the front, and one after
+							// finds it closed and mints a fresh one.
+							let event = match self.broadcast.close_unheld() {
+								true => Event::Retired,
+								false => {
+									self.held = true;
+									Event::Held
+								}
+							};
+							self.events.push_back(event);
+						}
+						Action::End { err } => {
+							// Leave the table before anything shows the end, whatever ended the
+							// front: a requester seeing it re-requests, and must mint a fresh
+							// front rather than join this one again. A successor already in the
+							// slot stays.
+							self.shared
+								.lock()
+								.fronts
+								.remove_if(&(self.path.clone(), self.horizon, self.pin.clone()), |front| {
+									front.request.same_channel(&self.request)
+								});
+							if let Ok(mut pending) = self.request.write() {
+								pending.refused = refused;
+								pending.resolved.get_or_insert(Err(err.clone()));
+							}
+							// Ending the broadcast only retracts it: no new requesters or
+							// tracks, and a newcomer at the path gets a fresh front. Tracks
+							// in flight carry on (moq-lite: retraction does not disturb
+							// subscriptions already in flight): their readers follow the copy
+							// they read to its end, since no front is left to replace it.
+							self.broadcast.close();
+							let mut in_flight = Vec::new();
+							for (_, mut io) in self.tracks.drain() {
+								let wanted = io.weak.is_wanted();
+								// A reader still waiting on its source's answer is in flight
+								// too: serve it the copy it asked, so it ends as that copy does.
+								let waiting = io.staged.take().or_else(|| io.query.take());
+								if io.copy.is_none()
+									&& wanted && let Some(asked) = waiting
+								{
+									io.splice(asked);
+								}
+								// Nothing in flight: unread, or nothing serving it.
+								if !wanted || io.copy.is_none() {
+									io.end(Err(err.clone()));
+									// An unread track the front has not parked yet still holds
+									// its copy, which would keep its source subscribed.
+									if !wanted {
+										io.routes.release();
+									}
+									continue;
+								}
+								io.routes.conclude();
+								let TrackIo {
+									weak,
+									routes,
+									request,
+									accepted,
+									copy,
+									held,
+									..
+								} = io;
+								in_flight.push(InFlight {
+									weak,
+									routes,
+									end: err.clone(),
+									request,
+									accepted,
+									query: copy.map(|(_, _, query)| query),
+									held,
+								});
+							}
+							return Poll::Ready(in_flight);
+						}
 					}
-					// Watch the demand edge in whichever direction is unmet. Only `Pending`
-					// parks, so an answer steps and the handler looks again, polling anew when
-					// nothing changed. A closed track is unread: it owes one `Unwanted` if
-					// recorded read, and is no edge after.
-					let edge = match io.wanted {
-						true => io.weak.poll_unwanted(waiter).is_ready(),
-						false => matches!(io.weak.poll_wanted(waiter), Poll::Ready(Ok(()))),
-					};
-					if edge {
-						return Some(Step::Demand(name.clone()));
-					}
-					None
-				})();
-				if let Some(step) = step {
-					// A ready answer did not park on its next edge. Revisit this track
-					// once the machine has consumed the event and applied its actions.
-					io.ready.wake_by_ref();
-					return Poll::Ready(step);
 				}
-			}
-			// The same for whoever holds the broadcast itself.
-			let edge = match held {
-				true => broadcast.poll_unheld(waiter),
-				false => broadcast.poll_held(waiter),
-			};
-			match edge {
-				Poll::Ready(Ok(())) => return Poll::Ready(Step::Holders),
-				// Answers at once from here on, so it must end the front, not be polled again.
-				Poll::Ready(Err(_)) => return Poll::Ready(Step::Closed),
-				Poll::Pending => {}
-			}
-			if deadline.poll(waiter).is_ready() {
-				return Poll::Ready(Step::Deadline);
-			}
-			watch.poll_changed(waiter, seen).map(|()| Step::Table)
-		})
-		.await;
-
-		let event = match step {
-			Step::Assigned(request) => {
-				let name: Arc<str> = request.name().into();
-				let track_ready = crate::util::QueueWake::new(name.clone(), ready.clone());
-				track_ready.wake_by_ref();
-				let routes = super::resume::Producer::new();
-				tracks.insert(
-					name.clone(),
-					TrackIo {
-						ready: track_ready,
-						park: Default::default(),
-						weak: request.weak(),
-						request: Some(request.routes(routes.consume())),
-						accepted: None,
-						routes,
-						query: None,
-						staged: None,
-						copy: None,
-						held: None,
-						wanted: false,
-					},
-				);
-				Event::TrackAssigned {
-					track: name,
-					now: timers.now(),
-				}
-			}
-			Step::Resolved(result) => {
-				let Some(Upstream {
-					route,
-					asked,
-					asked_at,
-					renewals,
-					asked_renewals,
-					..
-				}) = upstream.take()
-				else {
-					continue;
-				};
-				// Counted rather than read off the request, which an answer just before
-				// the change already took out of the queue, and rather than compared by
-				// instance, which may have come back since.
-				let released = renewals.load(Ordering::Acquire) != asked_renewals;
-				match result {
-					// An instance change released the request, the route moved to another
-					// instance, or another won the path, while the request was in flight:
-					// ask again rather than resolve requesters onto a broadcast that is
-					// already replaced.
-					_ if released => Event::Resolved {
-						route,
-						result: Err(Refusal {
-							err: Error::Unroutable,
-							standing: false,
-						}),
-					},
-					Ok(_) if stale(&front, route, &asked, &resolved) => Event::Resolved {
-						route,
-						result: Err(Refusal {
-							err: Error::Unroutable,
-							standing: false,
-						}),
-					},
-					Ok(source) => {
-						let id = next_source;
-						next_source += 1;
-						sources.insert(id, source);
-						instances.insert(id, (asked, asked_at));
-						Event::Resolved { route, result: Ok(id) }
-					}
-					Err(err) => Event::Resolved {
-						route,
-						result: Err(Refusal {
-							err,
-							standing: standing(&front, route, &resolved),
-						}),
-					},
-				}
-			}
-			Step::SourceClosed(source) => Event::SourceClosed { source },
-			Step::Info(name, source, result) => {
-				let closing = sources.get(&source).is_some_and(|s| s.is_closing());
-				let Some(io) = tracks.get_mut(&name) else { continue };
-				let Some(asked) = io.query.take() else { continue };
-				// An aborted copy with history still splices, so its readers drain that
-				// history before the outcome, as local readers do. One that delivered
-				// nothing is a refusal, which leaves a draining incumbent serving.
-				let result = match result {
-					Ok(info) => match asked.copy.poll_complete(&kio::Waiter::noop()) {
-						Poll::Ready(Err(err)) if asked.copy.latest_sequence().is_none() => Err(err),
-						_ => Ok(info),
-					},
-					Err(err) => Err(err),
-				};
-				// Staged only while the track has a reader: without one the machine
-				// will not splice, and a held copy would keep the source subscribed.
-				if let Ok(info) = &result
-					&& io.wanted
+				// A staged copy the machine did not splice was refused or is no longer wanted:
+				// let it go, or its source stays subscribed for nobody.
+				if let Some((name, source)) = answered
+					&& let Some(io) = self.tracks.get_mut(&name)
+					&& io.staged.as_ref().is_some_and(|asked| asked.source == source)
 				{
-					io.staged = Some(Asked {
-						info: Some(info.clone()),
-						..asked
-					});
-				}
-				Event::TrackInfo {
-					track: name,
-					source,
-					closing,
-					result,
-				}
-			}
-			Step::Ended(name, source, result, delivered) => {
-				let closing = sources.get(&source).is_some_and(|s| s.is_closing());
-				let Some(io) = tracks.get_mut(&name) else { continue };
-				io.copy = None;
-				io.held = None;
-				Event::TrackEnded {
-					track: name,
-					source,
-					closing,
-					result,
-					delivered,
-				}
-			}
-			Step::Demand(name) => {
-				let Some(io) = tracks.get_mut(&name) else { continue };
-				// Read again: the edge may have flipped back since it fired, and the next
-				// wait parks on it.
-				if io.weak.is_wanted() == io.wanted {
-					continue;
-				}
-				io.wanted = !io.wanted;
-				if !io.wanted {
-					// Nothing will be spliced now: let go of the copies a query
-					// holds, or the source stays subscribed with nobody reading.
-					io.query = None;
 					io.staged = None;
 				}
-				match io.wanted {
-					true => Event::Wanted { track: name },
-					false => Event::Unwanted {
+			}
+
+			if self.front.serving() != self.datagram_source {
+				self.datagram_source = self.front.serving();
+				self.broadcast
+					.serve_datagrams_from(self.datagram_source.and_then(|id| self.sources.get(&id)).cloned());
+			}
+
+			let mut park = std::mem::take(&mut self.park);
+			let Poll::Ready(step) = self.poll_step(park.hold(&waiter.context())) else {
+				self.park = park;
+				return Poll::Pending;
+			};
+			// Before the step runs, so nothing it touches wakes the front for a wait that
+			// is over.
+			drop(park);
+
+			let event = match step {
+				FrontStep::Assigned(request) => {
+					let name: Arc<str> = request.name().into();
+					let track_ready = crate::util::QueueWake::new(name.clone(), self.ready.clone());
+					track_ready.wake_by_ref();
+					let routes = super::resume::Producer::new();
+					self.tracks.insert(
+						name.clone(),
+						TrackIo {
+							ready: track_ready,
+							park: Default::default(),
+							weak: request.weak(),
+							request: Some(request.routes(routes.consume())),
+							accepted: None,
+							routes,
+							query: None,
+							staged: None,
+							copy: None,
+							held: None,
+							wanted: false,
+						},
+					);
+					Event::TrackAssigned {
 						track: name,
-						now: timers.now(),
-					},
-				}
-			}
-			Step::Holders => {
-				// Read again: the edge may have flipped back since it fired.
-				if broadcast.is_held() == held {
-					continue;
-				}
-				held = !held;
-				match held {
-					true => Event::Held,
-					false => Event::Unheld,
-				}
-			}
-			Step::Closed => Event::Retired,
-			Step::Deadline => {
-				// Cleared here so a fired deadline cannot keep firing; the machine
-				// re-arms what is still parked.
-				deadline.set(None);
-				Event::Deadline { now: timers.now() }
-			}
-			Step::Table => select(
-				&mut front,
-				&sources,
-				&mut instances,
-				&mut seen,
-				&mut resolved,
-				&mut discovered,
-			),
-			Step::Listing => {
-				// A route claiming a prefix names no broadcast, so a path it serves on request
-				// has no inventory to list.
-				let covering = front.serving_route().is_some_and(|route| {
-					shared
-						.read()
-						.routes
-						.covering(&path)
-						.find(|entry| entry.id == route)
-						.is_some_and(|entry| entry.prefix != path)
-				});
-				if covering {
-					listing = None;
-					lister.abort(Error::NotFound);
-					continue;
-				}
-				let state = listing.get_or_insert_default();
-				state.source = front.serving();
-				state.stale = state.listed.clone();
-				// A closing source lists nothing more; the front moves off it soon.
-				state.reader = state
-					.source
-					.and_then(|id| sources.get(&id))
-					.and_then(|source| source.tracks().ok());
-				continue;
-			}
-			Step::Unlisted => {
-				listing = None;
-				lister.clear();
-				continue;
-			}
-			Step::Listed(result) => {
-				let Some(state) = &mut listing else { continue };
-				// The lister refuses only once the broadcast ended, which ends the front too.
-				match result {
-					Ok(Some(broadcast::TracksEvent::Added { name, info })) => {
-						if !state.stale.remove(&name) && state.listed.insert(name.clone()) {
-							let _ = lister.add(name, info);
-						}
+						now: self.timers.now(),
 					}
-					// Forwarded as the source reported it, finished or not.
-					Ok(Some(broadcast::TracksEvent::Removed { name })) => {
-						state.stale.remove(&name);
-						if state.listed.remove(&name) {
-							let _ = lister.remove(&name);
+				}
+				FrontStep::Resolved(result) => {
+					let Some(FrontUpstream {
+						route,
+						asked,
+						asked_at,
+						renewals,
+						asked_renewals,
+						..
+					}) = self.upstream.take()
+					else {
+						continue;
+					};
+					// Counted rather than read off the request, which an answer just before
+					// the change already took out of the queue, and rather than compared by
+					// instance, which may have come back since.
+					let released = renewals.load(Ordering::Acquire) != asked_renewals;
+					match result {
+						// An instance change released the request, the route moved to another
+						// instance, or another won the path, while the request was in flight:
+						// ask again rather than resolve requesters onto a broadcast that is
+						// already replaced.
+						_ if released => Event::Resolved {
+							route,
+							result: Err(Refusal {
+								err: Error::Unroutable,
+								standing: false,
+							}),
+						},
+						Ok(_) if self.stale(route, &asked) => Event::Resolved {
+							route,
+							result: Err(Refusal {
+								err: Error::Unroutable,
+								standing: false,
+							}),
+						},
+						Ok(source) => {
+							let id = self.next_source;
+							self.next_source += 1;
+							self.sources.insert(id, source);
+							self.instances.insert(id, (asked, asked_at));
+							Event::Resolved { route, result: Ok(id) }
 						}
+						Err(err) => Event::Resolved {
+							route,
+							result: Err(Refusal {
+								err,
+								standing: self.standing(route),
+							}),
+						},
 					}
-					Ok(Some(broadcast::TracksEvent::Finished { name })) => {
-						state.stale.remove(&name);
-						if state.listed.remove(&name) {
-							let _ = lister.finish(&name);
-						}
-					}
-					Ok(Some(broadcast::TracksEvent::Synced)) => {
-						for name in state.stale.drain() {
-							state.listed.remove(&name);
-							let _ = lister.remove(&name);
-						}
-						lister.synced();
-					}
-					// The source ended: the front moves to another source, or ends with it.
-					Ok(None)
-						if state
-							.source
-							.and_then(|id| sources.get(&id))
-							.is_none_or(|source| source.is_closing()) =>
+				}
+				FrontStep::SourceClosed(source) => Event::SourceClosed { source },
+				FrontStep::Info(name, source, result) => {
+					let closing = self.sources.get(&source).is_some_and(|s| s.is_closing());
+					let Some(io) = self.tracks.get_mut(&name) else { continue };
+					let Some(asked) = io.query.take() else { continue };
+					// An aborted copy with history still splices, so its readers drain that
+					// history before the outcome, as local readers do. One that delivered
+					// nothing is a refusal, which leaves a draining incumbent serving.
+					let result = match result {
+						Ok(info) => match asked.copy.poll_complete(&kio::Waiter::noop()) {
+							Poll::Ready(Err(err)) if asked.copy.latest_sequence().is_none() => Err(err),
+							_ => Ok(info),
+						},
+						Err(err) => Err(err),
+					};
+					// Staged only while the track has a reader: without one the machine
+					// will not splice, and a held copy would keep the source subscribed.
+					if let Ok(info) = &result
+						&& io.wanted
 					{
-						state.reader = None
+						io.staged = Some(Asked {
+							info: Some(info.clone()),
+							..asked
+						});
 					}
-					// The source's handler ended the listing on a live source, as a peer does
-					// once its broadcast ended: so does the front's, and a later reader asks again.
-					Ok(None) => {
-						listing = None;
-						lister.end();
-					}
-					Err(err) => {
-						// Its readers fail, and a later reader asks again.
-						listing = None;
-						lister.abort(err);
+					Event::TrackInfo {
+						track: name,
+						source,
+						closing,
+						result,
 					}
 				}
-				continue;
-			}
-		};
-		events.push_back(event);
+				FrontStep::Ended(name, source, result, delivered) => {
+					let closing = self.sources.get(&source).is_some_and(|s| s.is_closing());
+					let Some(io) = self.tracks.get_mut(&name) else { continue };
+					io.copy = None;
+					io.held = None;
+					Event::TrackEnded {
+						track: name,
+						source,
+						closing,
+						result,
+						delivered,
+					}
+				}
+				FrontStep::Demand(name) => {
+					let Some(io) = self.tracks.get_mut(&name) else { continue };
+					// Read again: the edge may have flipped back since it fired, and the next
+					// wait parks on it.
+					if io.weak.is_wanted() == io.wanted {
+						continue;
+					}
+					io.wanted = !io.wanted;
+					if !io.wanted {
+						// Nothing will be spliced now: let go of the copies a query
+						// holds, or the source stays subscribed with nobody reading.
+						io.query = None;
+						io.staged = None;
+					}
+					match io.wanted {
+						true => Event::Wanted { track: name },
+						false => Event::Unwanted {
+							track: name,
+							now: self.timers.now(),
+						},
+					}
+				}
+				FrontStep::Holders => {
+					// Read again: the edge may have flipped back since it fired.
+					if self.broadcast.is_held() == self.held {
+						continue;
+					}
+					self.held = !self.held;
+					match self.held {
+						true => Event::Held,
+						false => Event::Unheld,
+					}
+				}
+				FrontStep::Closed => Event::Retired,
+				FrontStep::Deadline => {
+					// Cleared here so a fired deadline cannot keep firing; the machine
+					// re-arms what is still parked.
+					self.deadline.set(None);
+					Event::Deadline { now: self.timers.now() }
+				}
+				FrontStep::Table => self.select(),
+				FrontStep::Listing => {
+					// A route claiming a prefix names no broadcast, so a path it serves on request
+					// has no inventory to list.
+					let covering = self.front.serving_route().is_some_and(|route| {
+						self.shared
+							.read()
+							.routes
+							.covering(&self.path)
+							.find(|entry| entry.id == route)
+							.is_some_and(|entry| entry.prefix != self.path)
+					});
+					if covering {
+						self.listing = None;
+						self.lister.abort(Error::NotFound);
+						continue;
+					}
+					let state = self.listing.get_or_insert_default();
+					state.source = self.front.serving();
+					state.stale = state.listed.clone();
+					// A closing source lists nothing more; the front moves off it soon.
+					state.reader = state
+						.source
+						.and_then(|id| self.sources.get(&id))
+						.and_then(|source| source.tracks().ok());
+					continue;
+				}
+				FrontStep::Unlisted => {
+					self.listing = None;
+					self.lister.clear();
+					continue;
+				}
+				FrontStep::Listed(result) => {
+					let Some(state) = &mut self.listing else { continue };
+					// The lister refuses only once the broadcast ended, which ends the front too.
+					match result {
+						Ok(Some(broadcast::TracksEvent::Added { name, info })) => {
+							if !state.stale.remove(&name) && state.listed.insert(name.clone()) {
+								let _ = self.lister.add(name, info);
+							}
+						}
+						// Forwarded as the source reported it, finished or not.
+						Ok(Some(broadcast::TracksEvent::Removed { name })) => {
+							state.stale.remove(&name);
+							if state.listed.remove(&name) {
+								let _ = self.lister.remove(&name);
+							}
+						}
+						Ok(Some(broadcast::TracksEvent::Finished { name })) => {
+							state.stale.remove(&name);
+							if state.listed.remove(&name) {
+								let _ = self.lister.finish(&name);
+							}
+						}
+						Ok(Some(broadcast::TracksEvent::Synced)) => {
+							for name in state.stale.drain() {
+								state.listed.remove(&name);
+								let _ = self.lister.remove(&name);
+							}
+							self.lister.synced();
+						}
+						// The source ended: the front moves to another source, or ends with it.
+						Ok(None)
+							if state
+								.source
+								.and_then(|id| self.sources.get(&id))
+								.is_none_or(|source| source.is_closing()) =>
+						{
+							state.reader = None
+						}
+						// The source's handler ended the listing on a live source, as a peer does
+						// once its broadcast ended: so does the front's, and a later reader asks again.
+						Ok(None) => {
+							self.listing = None;
+							self.lister.end();
+						}
+						Err(err) => {
+							// Its readers fail, and a later reader asks again.
+							self.listing = None;
+							self.lister.abort(err);
+						}
+					}
+					continue;
+				}
+			};
+			self.events.push_back(event);
+		}
 	}
 }
 
@@ -5857,10 +5954,13 @@ impl Requests {
 		self.announcement.update(route)
 	}
 
-	/// Poll for the next requested path under this route, without blocking.
+	/// The next path a consumer requests under this route, as a [`Request`] to serve.
 	///
-	/// Returns [`Error::Closed`] once the origin's [`Driver`] has been dropped:
-	/// no request will ever arrive again, so handler loops should end.
+	/// Takes `&self` so a handler can serve from one task while another re-prices
+	/// the route; concurrent callers each receive distinct requests. Returns
+	/// [`Error::Closed`] once the origin's [`Driver`] has been dropped: no request will
+	/// ever arrive again, so handler loops should end.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_requested_broadcast(&self, waiter: &kio::Waiter) -> Poll<Result<Request, Error>> {
 		let mut state = ready!(self.state.poll(waiter, |state| {
 			if state.closed || state.requests.has_queued() {
@@ -5888,16 +5988,6 @@ impl Requests {
 			home: self.state.clone(),
 			publisher: self.publisher.clone(),
 		}))
-	}
-
-	/// Block until a consumer requests a path under this route, returning a
-	/// [`Request`] to serve.
-	///
-	/// Takes `&self` so a handler can serve from one task while another re-prices
-	/// the route; concurrent callers each receive distinct requests.
-	#[cfg(feature = "async")]
-	pub async fn requested_broadcast(&self) -> Result<Request, Error> {
-		kio::wait(|waiter| self.poll_requested_broadcast(waiter)).await
 	}
 }
 
@@ -6901,7 +6991,7 @@ impl Consumer {
 
 	/// Follow the broadcast at `path` across the instances that serve it.
 	///
-	/// The first [`available`](Following::available) resolves the instance serving the path
+	/// The first [`poll_available`](Following::poll_available) resolves the instance serving the path
 	/// once one is announced, retrying route churn but returning a selected handler's refusal;
 	/// the call after a refusal waits for the serving route to change. Each later call returns
 	/// another instance taking over, or `None` once the path goes offline, then whatever serves
@@ -7142,7 +7232,7 @@ impl Consumer {
 		// Released before the push: a set whose handles are gone drops the task,
 		// and the `Watch` it carries unregisters under this same lock.
 		drop(state);
-		self.tasks.push(run_front(
+		self.tasks.push(FrontServeRun::new(
 			FrontTask {
 				shared: self.shared.clone(),
 				broadcast,
@@ -7415,23 +7505,13 @@ impl Routes {
 		event
 	}
 
-	/// Returns the next route announcement, update, or retraction, its prefix
-	/// relative to this cursor's root.
+	/// The next route announcement, update, or retraction, its prefix relative to
+	/// this cursor's root, or `None` once the cursor is closed.
 	///
 	/// A retraction is only delivered for a previously announced prefix, and a
-	/// repeated announcement for the same prefix is a metadata update. Returns
-	/// None if the cursor is closed. The consumer is also a [`futures::Stream`]
-	/// of the same events.
-	#[cfg(feature = "async")]
-	pub async fn next(&mut self) -> Option<RouteEvent> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for the next event, without blocking.
-	///
-	/// Returns `Poll::Ready(Some(_))` for an event, `Poll::Ready(None)` if the
-	/// cursor is closed, or `Poll::Pending` after registering `waiter` to be
-	/// notified when the next event arrives.
+	/// repeated announcement for the same prefix is a metadata update. With the
+	/// `async` feature, the consumer is also a `futures::Stream` of the same events.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<RouteEvent>> {
 		loop {
 			let now = self.timers.now();
@@ -10178,8 +10258,8 @@ mod tests {
 			}),
 			timers: consumer.timers.clone(),
 		};
-		let mut front = std::pin::pin!(serve_front(task));
-		assert!(front.as_mut().now_or_never().is_none(), "the front ended early");
+		let mut front = kio::Pending::new(FrontServe::new(task));
+		assert!((&mut front).now_or_never().is_none(), "the front ended early");
 
 		broadcast.close();
 		let in_flight = kio::clock::timeout(Duration::from_secs(1), front)

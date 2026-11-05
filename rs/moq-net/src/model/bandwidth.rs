@@ -167,14 +167,9 @@ impl Demand {
 		!self.state.is_closed() && self.state.wanted()
 	}
 
-	/// Return [`wanted`](Self::wanted) once it differs from what this handle last returned:
+	/// [`wanted`](Self::wanted) once it differs from what this handle last returned:
 	/// immediately on the first call, then on each change. Errors once every producer is gone.
-	#[cfg(feature = "async")]
-	pub async fn wanted_changed(&mut self) -> Result<bool> {
-		kio::wait(|waiter| self.poll_wanted_changed(waiter)).await
-	}
-
-	/// Poll for [`wanted`](Self::wanted) to differ from what this handle last returned.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<bool>> {
 		loop {
 			if self.state.is_closed() {
@@ -1156,7 +1151,7 @@ impl Consumer {
 		}
 	}
 
-	/// Poll for a bandwidth change without blocking.
+	/// The bandwidth estimate once it changes, or `None` when it has become unavailable.
 	///
 	/// `Ok(None)` means the estimate is unavailable *for now*: the backend
 	/// stopped reporting one, or the handle spans reconnects and is between
@@ -1168,6 +1163,7 @@ impl Consumer {
 	///
 	/// A backend with no bandwidth estimation at all yields no [Consumer] in the
 	/// first place, so that case never reaches here.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Rate>>> {
 		let last = self.last;
 
@@ -1206,18 +1202,6 @@ impl Consumer {
 
 		self.last = bitrate;
 		Poll::Ready(Ok(bitrate))
-	}
-
-	/// Block until the bandwidth estimate changes, returning the new value, or
-	/// `None` when the estimate has become unavailable.
-	///
-	/// # Errors
-	///
-	/// Returns an error once the producer is closed or dropped, so a caller can
-	/// stop watching. See [`poll_changed`](Self::poll_changed).
-	#[cfg(feature = "async")]
-	pub async fn changed(&mut self) -> Result<Option<Rate>> {
-		kio::wait(|waiter| self.poll_changed(waiter)).await
 	}
 }
 

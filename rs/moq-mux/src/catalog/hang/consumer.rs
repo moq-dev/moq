@@ -29,12 +29,13 @@ impl<E: CatalogExt> Consumer<E> {
 		}
 	}
 
-	/// Poll for the next catalog update.
+	/// Get the next catalog update, or `None` once the track ends.
 	///
 	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if any rendition's
 	/// `broadcast` reference or echo prefix walks above the root, rejecting the whole catalog
 	/// (see [`hang::catalog::Consumer::poll_next`]). A transport failure is
 	/// [`Error::Moq`](crate::Error::Moq).
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
 		self.inner.poll_next(waiter).map_err(|err| match err {
 			// Lifted to this crate's variants, which `Source` reports for the same faults.
@@ -42,17 +43,6 @@ impl<E: CatalogExt> Consumer<E> {
 			hang::Error::EscapingBroadcast(rel) => crate::Error::EscapingBroadcast(rel),
 			err => crate::Error::Hang(err),
 		})
-	}
-
-	/// Get the next catalog update.
-	///
-	/// This method waits for the next catalog publication and returns the
-	/// catalog data. If there are no more updates, `None` is returned.
-	pub async fn next(&mut self) -> Result<Option<Catalog<E>>>
-	where
-		Catalog<E>: Unpin,
-	{
-		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 }
 
