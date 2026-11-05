@@ -155,26 +155,15 @@ struct PrepareFetch {
 	joined: bool,
 	priority: i8,
 	compression: bool,
+	/// The whole group, when the request names it. Asking for the group needs nothing from
+	/// the track's info, only judging and answering it: a relay's FETCH goes upstream
+	/// alongside the request for the info, driven while that resolves.
+	ahead: Option<Ahead>,
+	info: track::Resolving,
 	state: PrepareFetchState,
 }
 
-#[allow(
-	clippy::large_enum_variant,
-	reason = "a state machine's enum is its storage: one per FETCH; an allow, since the size gap varies by target"
-)]
-enum PrepareFetchState {
-	/// Resolving the track's info. Asking for the group needs nothing from it, only judging
-	/// and answering it: a relay's FETCH goes upstream alongside the request for the info,
-	/// driven while that resolves.
-	Info {
-		ahead: Option<Ahead>,
-		info: track::Resolving,
-	},
-	/// Reading the group.
-	Read(ReadFetch),
-	Done,
-}
-
+#[kio::machine(self.state: PrepareFetchState)]
 impl PrepareFetch {
 	fn new(
 		track: &track::Consumer,
@@ -199,56 +188,36 @@ impl PrepareFetch {
 			joined,
 			priority,
 			compression,
-			state: PrepareFetchState::Info {
-				ahead,
-				info: track.info().into_inner(),
-			},
+			ahead,
+			info: track.info().into_inner(),
+			state: PrepareFetchState::Start,
 		}
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter, track: &track::Consumer) -> Poll<Result<PreparedFetch, (Error, String)>> {
-		let failed = |err: Error| {
-			let reason = err.to_string();
-			(err, reason)
-		};
-		loop {
-			match &mut self.state {
-				PrepareFetchState::Info { ahead, info } => {
-					if let Some(ahead) = ahead {
-						ahead.poll(waiter);
-					}
-					ready!(info.poll_ok(waiter)).map_err(failed)?;
-					let ahead = ahead.take();
-					let range = self.judge(track)?;
-					self.state = PrepareFetchState::Read(ReadFetch::new(
-						track,
-						range.start.group,
-						range.start.object,
-						range.until(range.start.group),
-						self.priority,
-						self.compression,
-						ahead,
-					));
-				}
-				PrepareFetchState::Read(read) => {
-					let last = ready!(read.poll(waiter, track)).map_err(failed)?;
-					self.state = PrepareFetchState::Done;
-					return Poll::Ready(Ok(PreparedFetch {
-						range: self.range,
-						last,
-					}));
-				}
-				PrepareFetchState::Done => panic!("polled after it resolved"),
+		let resolved = wait!(Info => {
+			if let Some(ahead) = &mut self.ahead {
+				ahead.poll(waiter);
 			}
-		}
+			self.info.poll_ok(waiter)
+		});
+		resolved.map_err(with_reason)?;
+		let range: FetchRange = self.judge(track)?;
+		let mut read: ReadFetch = ReadFetch::new(
+			track,
+			range.start.group,
+			range.start.object,
+			range.until(range.start.group),
+			self.priority,
+			self.compression,
+			self.ahead.take(),
+		);
+		let last = wait!(Read => read.poll(waiter, track)).map_err(with_reason)?;
+		Poll::Ready(Ok(PreparedFetch { range, last }))
 	}
 
 	/// Judge the range against the track, now that its info resolved.
 	fn judge(&mut self, track: &track::Consumer) -> Result<FetchRange, (Error, String)> {
-		let failed = |err: Error| {
-			let reason = err.to_string();
-			(err, reason)
-		};
 		let range = &mut self.range;
 		// The cache's newest object is Largest Object while a live feed writes the track, or once
 		// the track ended at its newest group. A fetch-only copy retains its publisher's report
@@ -300,12 +269,18 @@ impl PrepareFetch {
 					.is_some_and(|end| !track.cached_groups(range.start.group..end).is_empty());
 				return Err(match held {
 					true => (Error::InvalidRange, "start past Largest Object".into()),
-					false => failed(Error::NotFound),
+					false => with_reason(Error::NotFound),
 				});
 			}
 		}
 		Ok(*range)
 	}
+}
+
+/// A refusal's error with its reason phrase.
+fn with_reason(err: Error) -> (Error, String) {
+	let reason = err.to_string();
+	(err, reason)
 }
 
 /// Await [`PrepareFetch`].
@@ -2674,55 +2649,17 @@ struct RunFill {
 	track: track::Consumer,
 	timescale: Option<Timescale>,
 	request_id: RequestId,
+	open: crate::transport::open::Open,
 	state: RunFillState,
 }
 
 /// The fetch stream a fill writes, ranked as the group it fills.
 type FillStream = Writer<Ranked<crate::transport::boxed::SendStream>, Version>;
 
-enum RunFillState {
-	Start,
-	/// Opening the stream, at the priority the subscription had as the fill started.
-	Open {
-		priority: i8,
-		rank: Option<Rank<GroupOf<Transport>>>,
-		open: crate::transport::open::Open,
-	},
-	/// Writing the FETCH_HEADER's type.
-	Type {
-		priority: i8,
-		stream: FillStream,
-	},
-	/// Writing the FETCH_HEADER.
-	Header {
-		priority: i8,
-		stream: FillStream,
-	},
-	/// Resolving the track's info, which the subscription this fills described already.
-	Info {
-		priority: i8,
-		stream: FillStream,
-		info: track::Resolving,
-	},
-	/// Fetching the group.
-	Fetch {
-		stream: FillStream,
-		publisher_priority: u8,
-		fetching: kio::Pending<track::Fetching>,
-	},
-	/// Waiting on the peer's SETUP for whether the group's frames compress.
-	Setup {
-		stream: FillStream,
-		publisher_priority: u8,
-		group: group::Consumer,
-	},
-	/// Writing the group's objects.
-	Write(BoxFuture<'static, (FillStream, Result<(), Error>)>),
-	/// Keeping the stream, and its rank, until the peer acknowledges it, like [`settle`].
-	Settle(FillStream),
-	Done,
-}
+/// What writing a fill's group gives back: its stream, and how the write ended.
+type FillWrite = BoxFuture<'static, (FillStream, Result<(), Error>)>;
 
+#[kio::machine(self.state: RunFillState)]
 impl RunFill {
 	fn new(fill: FillServe, track: track::Consumer, timescale: Option<Timescale>, request_id: RequestId) -> Self {
 		Self {
@@ -2730,6 +2667,7 @@ impl RunFill {
 			track,
 			timescale,
 			request_id,
+			open: Default::default(),
 			state: RunFillState::Start,
 		}
 	}
@@ -2741,192 +2679,107 @@ impl RunFill {
 		ranking: &Ranking<GroupOf<Transport>>,
 		opened: &AtomicU64,
 	) -> Poll<()> {
-		loop {
-			match &mut self.state {
-				RunFillState::Start => {
-					let priority = *ranking.priority.read();
-					let rank = match self.fill {
-						FillServe::Empty => {
-							self.state = RunFillState::Done;
-							return Poll::Ready(());
-						}
-						FillServe::Group { sequence, skip, .. } => Some(ranking.rank(Location {
-							group: sequence,
-							object: skip,
-						})),
-						// Only the refusal goes out on its stream, so it competes with nothing.
-						FillServe::Unsupported => None,
-					};
-					self.state = RunFillState::Open {
-						priority,
-						rank,
-						open: Default::default(),
-					};
-				}
-				RunFillState::Open { priority, rank, open } => {
-					let options = rank.as_mut().map(Rank::options).unwrap_or_default();
-					let stream = match ready!(publisher.session.poll_open_uni(open, waiter, options)) {
-						Ok(stream) => stream,
-						Err(err) => {
-							tracing::debug!(err = %Error::from_transport(err), fill = %self.request_id, "fill stream failed to open");
-							self.state = RunFillState::Done;
-							return Poll::Ready(());
-						}
-					};
-					opened.fetch_add(1, Ordering::Relaxed);
-					let (priority, rank) = (*priority, rank.take());
-					let mut stream = Writer::new(Ranked::new(stream, rank).lapsing(&ranking.lapse), publisher.version);
-					let buffered = stream.buffer_varint(FetchHeader::TYPE);
-					self.state = RunFillState::Type { priority, stream };
-					if let Err(err) = buffered {
-						return self.fail(err);
-					}
-				}
-				RunFillState::Type { priority, stream } => {
-					let res = ready!(stream.poll_flush(waiter)).and_then(|()| {
-						stream.buffer(&FetchHeader {
-							request_id: self.request_id,
-						})
-					});
-					let priority = *priority;
-					if let Err(err) = res {
-						return self.fail(err);
-					}
-					let RunFillState::Type { stream, .. } = std::mem::replace(&mut self.state, RunFillState::Done)
-					else {
-						unreachable!("matched above");
-					};
-					self.state = RunFillState::Header { priority, stream };
-				}
-				RunFillState::Header { priority, stream } => {
-					let res = ready!(stream.poll_flush(waiter));
-					let priority = *priority;
-					if let Err(err) = res {
-						return self.fail(err);
-					}
-					let RunFillState::Header { stream, .. } = std::mem::replace(&mut self.state, RunFillState::Done)
-					else {
-						unreachable!("matched above");
-					};
-					self.state = RunFillState::Info {
-						priority,
-						stream,
-						info: self.track.info().into_inner(),
-					};
-				}
-				RunFillState::Info { priority, info, .. } => {
-					let res = ready!(info.poll_ok(waiter));
-					let priority = *priority;
-					let info = match res {
-						Ok(info) => info,
-						Err(err) => return self.fail(err),
-					};
-					let publisher_priority = super::priority::to_wire(info.priority);
-					let FillServe::Group { sequence, .. } = self.fill else {
-						return self.fail(Error::Unsupported);
-					};
-					let fetching = self.track.fetch_group(
-						sequence,
-						group::Fetch {
-							priority,
-							..Default::default()
-						},
-					);
-					let RunFillState::Info { stream, .. } = std::mem::replace(&mut self.state, RunFillState::Done)
-					else {
-						unreachable!("matched above");
-					};
-					self.state = RunFillState::Fetch {
-						stream,
-						publisher_priority,
-						fetching,
-					};
-				}
-				RunFillState::Fetch { fetching, .. } => {
-					let group = match ready!(kio::Task::poll(&mut **fetching, waiter)) {
-						Ok(group) => group,
-						Err(err) => return self.fail(err),
-					};
-					let RunFillState::Fetch {
-						stream,
-						publisher_priority,
-						..
-					} = std::mem::replace(&mut self.state, RunFillState::Done)
-					else {
-						unreachable!("matched above");
-					};
-					self.state = RunFillState::Setup {
-						stream,
-						publisher_priority,
-						group,
-					};
-				}
-				RunFillState::Setup { .. } => {
-					let flate = ready!(publisher.peer_setup.poll_get(waiter)).flate;
-					let RunFillState::Setup {
-						mut stream,
-						publisher_priority,
-						group,
-					} = std::mem::replace(&mut self.state, RunFillState::Done)
-					else {
-						unreachable!("matched above");
-					};
-					let group = if flate { group.compressed() } else { group };
-					let FillServe::Group { sequence, skip, until } = self.fill else {
-						unreachable!("only a group fill fetches");
-					};
-					let (timescale, version) = (self.timescale, publisher.version);
-					self.state = RunFillState::Write(Box::pin(async move {
-						let res = Publisher::write_fetch_group(
-							&mut stream,
-							group,
-							sequence,
-							GroupSlice { skip, until },
-							timescale,
-							version,
-							publisher_priority,
-						)
-						.await;
-						(stream, res)
-					}));
-				}
-				RunFillState::Write(write) => {
-					let (mut stream, res) = ready!(waiter.poll_future(write.as_mut()));
-					if let Err(err) = res {
-						self.state = RunFillState::Settle(stream);
-						return self.fail(err);
-					}
-					if let Err(err) = stream.finish() {
-						tracing::debug!(%err, fill = %self.request_id, "fill stream close failed");
-						self.state = RunFillState::Done;
-						return Poll::Ready(());
-					}
-					self.state = RunFillState::Settle(stream);
-				}
-				RunFillState::Settle(stream) => {
-					match ready!(stream.poll_close(waiter)) {
-						Ok(()) => tracing::debug!(fill = %self.request_id, "fill complete"),
-						Err(err) => tracing::debug!(%err, fill = %self.request_id, "fill stream close failed"),
-					}
-					self.state = RunFillState::Done;
-					return Poll::Ready(());
-				}
-				RunFillState::Done => panic!("polled after it resolved"),
+		let priority: i8 = *ranking.priority.read();
+		let mut rank: Option<Rank<GroupOf<Transport>>> = match self.fill {
+			FillServe::Empty => return Poll::Ready(()),
+			FillServe::Group { sequence, skip, .. } => Some(ranking.rank(Location {
+				group: sequence,
+				object: skip,
+			})),
+			// Only the refusal goes out on its stream, so it competes with nothing.
+			FillServe::Unsupported => None,
+		};
+		let opening = wait!(Open => publisher.session.poll_open_uni(
+			&mut self.open,
+			waiter,
+			rank.as_mut().map(Rank::options).unwrap_or_default(),
+		));
+		let stream = match opening {
+			Ok(stream) => stream,
+			Err(err) => {
+				tracing::debug!(err = %Error::from_transport(err), fill = %self.request_id, "fill stream failed to open");
+				return Poll::Ready(());
 			}
+		};
+		opened.fetch_add(1, Ordering::Relaxed);
+		let mut writer: FillStream = Writer::new(Ranked::new(stream, rank).lapsing(&ranking.lapse), publisher.version);
+
+		if let Err(err) = writer.buffer_varint(FetchHeader::TYPE) {
+			return self.fail(writer, err);
 		}
+		let typed = wait!(Type => writer.poll_flush(waiter));
+		if let Err(err) = typed.and_then(|()| {
+			writer.buffer(&FetchHeader {
+				request_id: self.request_id,
+			})
+		}) {
+			return self.fail(writer, err);
+		}
+		let headed = wait!(Header => writer.poll_flush(waiter));
+		if let Err(err) = headed {
+			return self.fail(writer, err);
+		}
+
+		// Resolved already: the subscription this fills described the track.
+		let resolving: track::Resolving = self.track.info().into_inner();
+		let resolved = wait!(Info => resolving.poll_ok(waiter));
+		let publisher_priority: u8 = match resolved {
+			Ok(info) => super::priority::to_wire(info.priority),
+			Err(err) => return self.fail(writer, err),
+		};
+		let FillServe::Group { sequence, skip, until } = self.fill else {
+			return self.fail(writer, Error::Unsupported);
+		};
+		let fetching: kio::Pending<track::Fetching> = self.track.fetch_group(
+			sequence,
+			group::Fetch {
+				priority,
+				..Default::default()
+			},
+		);
+		let filled: u64 = sequence;
+		let slice: GroupSlice = GroupSlice { skip, until };
+		let fetched = wait!(Fetch => kio::Task::poll(&mut **fetching, waiter));
+		let group: group::Consumer = match fetched {
+			Ok(group) => group,
+			Err(err) => return self.fail(writer, err),
+		};
+		let setup = wait!(Setup => publisher.peer_setup.poll_get(waiter));
+		let compressed = if setup.flate { group.compressed() } else { group };
+		let (timescale, version) = (self.timescale, publisher.version);
+		let mut write: FillWrite = Box::pin(async move {
+			let res = Publisher::write_fetch_group(
+				&mut writer,
+				compressed,
+				filled,
+				slice,
+				timescale,
+				version,
+				publisher_priority,
+			)
+			.await;
+			(writer, res)
+		});
+		let done = wait!(Write => waiter.poll_future(write.as_mut()));
+		let mut written: FillStream = done.0;
+		if let Err(err) = done.1 {
+			return self.fail(written, err);
+		}
+		// Keeps the stream, and its rank, until the acknowledgement, like [`settle`].
+		if let Err(err) = written.finish() {
+			tracing::debug!(%err, fill = %self.request_id, "fill stream close failed");
+			return Poll::Ready(());
+		}
+		let closed = wait!(Settle => written.poll_close(waiter));
+		match closed {
+			Ok(()) => tracing::debug!(fill = %self.request_id, "fill complete"),
+			Err(err) => tracing::debug!(%err, fill = %self.request_id, "fill stream close failed"),
+		}
+		Poll::Ready(())
 	}
 
-	/// Reset the fill's stream with `err`, the draft's fill-failure signal.
-	fn fail(&mut self, err: Error) -> Poll<()> {
-		let stream = match std::mem::replace(&mut self.state, RunFillState::Done) {
-			RunFillState::Type { stream, .. }
-			| RunFillState::Header { stream, .. }
-			| RunFillState::Info { stream, .. }
-			| RunFillState::Fetch { stream, .. }
-			| RunFillState::Setup { stream, .. }
-			| RunFillState::Settle(stream) => stream,
-			_ => unreachable!("only an open stream fails"),
-		};
+	/// Reset the fill's `stream` with `err`, the draft's fill-failure signal.
+	fn fail(&self, stream: FillStream, err: Error) -> Poll<()> {
 		tracing::debug!(%err, fill = %self.request_id, "fill failed, resetting its stream");
 		stream.abort(&err);
 		Poll::Ready(())
@@ -15152,7 +15005,7 @@ mod serve_tests {
 	}
 
 	/// The REQUEST_ERROR a refused renewal writes before the subscription ends, matching
-	/// `write_subscribe_error(.., &Error::Unauthorized, reason)`.
+	/// `buffer_subscribe_error(.., &Error::Unauthorized, reason)`.
 	async fn request_error_bytes(version: Version, reason: &str) -> Vec<u8> {
 		let log = crate::lite::test_transport::Log::default();
 		let mut writer = crate::coding::Writer::new(
