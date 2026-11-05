@@ -1313,11 +1313,16 @@ pub fn seeds() -> Vec<Seed> {
 		}
 	}
 
-	// A typed empty TRACKS_SYNCED, AUTH_OK reply, ROUTE_END echo, and ROUTE_REQUEST need
-	// nonuniform envelope bytes.
+	// A typed empty TRACKS_SYNCED, AUTH_OK reply, the route messages past ROUTE_START
+	// (whose type bytes the sweep's lengths never reach), the ROUTE_END echo, and
+	// ROUTE_REQUEST need nonuniform envelope bytes.
 	for (kind, body) in [
 		(23, &[4, 0][..]),
 		(27, &[0, 3, 0, 0, 0][..]),
+		(5, &[7, 4, 0, 1, 2, 0][..]),
+		(5, &[8, 1, 0][..]),
+		(5, &[9, 2, 0, 1][..]),
+		(5, &[11, 1, 0][..]),
 		(33, &[8, 1, 0][..]),
 		(33, &[10, 2, 1, 0][..]),
 	] {

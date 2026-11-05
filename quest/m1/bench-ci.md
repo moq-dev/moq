@@ -25,9 +25,10 @@ A/A results, 2026-11-04 (/quest-unblock): runs
 [41933525520](https://github.com/moq-dev/moq/actions/runs/41933525520) both
 produced `paired.json` for the shared, extra, and uring groups. The first was
 cancelled by Nightly's concurrency group after its bench artifacts uploaded.
-At a 10% threshold over 3 rounds, neither run confirmed a regression, and
-every case over 10% came back as noise. Single-pass crossings: shared 18 and
-26 of 716, extra 10 and 15 of 460, uring 1 and 1 of 41. |delta| p95 was
+At a 10% threshold over 3 rounds, neither run confirmed a regression: every
+case the 20-case confirmation budget (`CONFIRMATIONS`) reached came back as
+noise. Single-pass crossings: shared 18 and 26 of 716, extra 10 and 15 of 460,
+uring 1 and 1 of 41, so the second run left 6 shared cases `unconfirmed`. |delta| p95 was
 3.7-8.3%, p99 10-23%. Tune the threshold for those groups from these.
 
 Decided 2026-11-04 (maintainer, /quest-unblock): ✅ authorize one-time agent

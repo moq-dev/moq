@@ -532,7 +532,7 @@ The winning tier is the whole answer: a refusal from it never falls through to a
 Nor is a refusal retried at another claim of the same prefix.
 
 Within the tier, a claim is ineligible while another claim of the same prefix carries its Instance at a higher Epoch, however cheap it is.
-Among the eligible claims, the receiver SHOULD prefer the highest local priority of the route's session, then the lowest cost, the claim's Announce Cost plus its route's metric, then the lowest Rendezvous Hash, and then the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
+Among the eligible claims, the receiver SHOULD prefer a route whose session has not received a GOAWAY, then the highest local priority of the route's session, then the lowest cost, the claim's Announce Cost plus its route's metric, then the lowest Rendezvous Hash, and then the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
 The Rendezvous Hash is the 64-bit FNV-1a hash, with offset basis `0x420C0DECB00B` and the standard FNV-64 prime, of the requested path's UTF-8 bytes followed by the origin's Node ID as 8 little-endian bytes.
 Every node that knows the same claims ranks them the same, so equal-cost origins of one prefix share its paths and every relay sends one path to the same origin.
 When choosing which claim to advertise for a prefix, the requested path is the prefix itself.

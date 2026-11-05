@@ -338,8 +338,8 @@ impl Version {
 	}
 
 	/// Whether the announce stream carries the route layer: ROUTE_START, ROUTE_UPDATE,
-	/// ROUTE_END, and ANNOUNCE_FLOOR toward the subscriber, and ROUTE_REQUEST and the
-	/// ROUTE_END echo back. Added in lite-07.
+	/// ROUTE_HOLD, ROUTE_END, and ANNOUNCE_FLOOR toward the subscriber, and ROUTE_REQUEST
+	/// and the ROUTE_END echo back. Added in lite-07.
 	pub(crate) fn has_routes(self) -> bool {
 		!matches!(
 			self,

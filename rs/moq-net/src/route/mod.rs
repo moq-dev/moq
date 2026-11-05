@@ -136,7 +136,7 @@ pub(crate) enum Reach {
 /// A message for one neighbor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Out<N, A> {
-	/// ROUTE_START or ROUTE_UPDATE, or ROUTE_END for `None`.
+	/// ROUTE_START or ROUTE_UPDATE, ROUTE_HOLD for a held reach, or ROUTE_END for `None`.
 	Route { to: N, id: Id, reach: Option<Reach> },
 	/// A batch of announcement changes for `id`, closed by its floor list, which
 	/// replaces the last one sent for that route.
