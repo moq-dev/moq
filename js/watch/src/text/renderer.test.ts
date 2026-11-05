@@ -1,5 +1,9 @@
 import { beforeAll, describe, expect, test } from "bun:test";
+import { Milli, yieldNow } from "@moq/clock";
+import type * as Catalog from "@moq/hang/catalog";
+import { Signal } from "@moq/signals";
 import { parseText, VTTCue } from "media-captions";
+import { Sync } from "../sync";
 import {
 	type CueStore,
 	clearCue,
@@ -7,9 +11,11 @@ import {
 	insertCues,
 	MAX_RETAINED,
 	pruneCues,
+	Renderer,
 	rollUp,
 	sanitizeCue,
 } from "./renderer";
+import type { Source } from "./source";
 
 function store(cues: VTTCue[] = []): CueStore {
 	return { cues, clears: [] };
@@ -283,5 +289,42 @@ describe("sanitizeCue", () => {
 		expect(html(sanitizeCue("a < b > c"))).toBe("a &lt; b &gt; c");
 		expect(html(sanitizeCue('she said "hi"'))).toBe("she said &quot;hi&quot;");
 		expect(html(sanitizeCue("[BUNNY SNORES]"))).toBe("[BUNNY SNORES]");
+	});
+});
+
+describe("Renderer", () => {
+	test("holds the selected rendition's catalog delay in the shared clock while it can render", async () => {
+		const config = new Signal<Catalog.TextConfig | undefined>({ delay: 300 } as Catalog.TextConfig);
+		const source = {
+			in: { broadcast: new Signal(undefined) },
+			out: { config, track: new Signal(undefined) },
+		} as unknown as Source;
+		const enabled = new Signal(true);
+		const sync = new Sync();
+		// Never touched: with no track selected, nothing subscribes or renders.
+		const container = new Signal<HTMLElement | undefined>({} as HTMLElement);
+		const renderer = new Renderer({ source, sync, enabled, container });
+		try {
+			await yieldNow();
+			expect(sync.out.delay.peek()).toBe(Milli(300));
+
+			// Captions that are off hold nothing.
+			enabled.set(false);
+			await yieldNow();
+			expect(sync.out.delay.peek()).toBe(Milli.zero);
+			enabled.set(true);
+			container.set(undefined);
+			await yieldNow();
+			expect(sync.out.delay.peek()).toBe(Milli.zero);
+			container.set({} as HTMLElement);
+			await yieldNow();
+			expect(sync.out.delay.peek()).toBe(Milli(300));
+			config.set(undefined);
+			await yieldNow();
+			expect(sync.out.delay.peek()).toBe(Milli.zero);
+		} finally {
+			renderer.close();
+			sync.close();
+		}
 	});
 });

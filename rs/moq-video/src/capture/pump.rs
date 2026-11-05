@@ -9,11 +9,12 @@
 //! drops, releasing the device. The stop flag is checked between reads, so on a
 //! live device (which delivers a frame per interval) shutdown is prompt; a read
 //! with no frame to hand back returns [`Read::Idle`] rather than blocking, which
-//! is what keeps a held capture (a minimized window) just as prompt. The join
-//! is what guarantees the device fd is closed before a subsequent reopen, so we
-//! don't race EBUSY. A wedged device that blocks a read forever would stall that
-//! join, the same as the original `spawn_blocking` path did, but that needs a
-//! driver that delivers neither a frame nor an error.
+//! is what keeps a held capture (a minimized window) and a V4L2 camera that
+//! stopped streaming (its reads time out) just as prompt. The join is what
+//! guarantees the device fd is closed before a subsequent reopen, so we don't
+//! race EBUSY. Media Foundation's synchronous `ReadSample` has no timeout, so a
+//! Windows camera that delivers neither a frame nor an error still stalls that
+//! join.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,8 +31,9 @@ pub(super) enum Read {
 	/// A captured frame with a timestamp in the device's private timeline.
 	FrameAt(Surface, moq_net::Timestamp),
 	/// No frame this turn, but the source is still live: the pump re-checks its
-	/// stop flag and calls again. A backend uses this to hold a capture (a
-	/// minimized or mid-resize window) without ending the stream. Only X11 holds one.
+	/// stop flag and calls again. X11 uses this to hold a capture (a minimized or
+	/// mid-resize window) without ending the stream, and V4L2 when no frame
+	/// arrives within its read timeout.
 	#[cfg(target_os = "linux")]
 	Idle,
 	/// The source stopped producing; the stream ends and the caller reopens.

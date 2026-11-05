@@ -266,6 +266,22 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 			.filter(|hop| hop.id() != 0);
 	}
 
+	// Prove our origin's route key, bound to this session, so a peer that scopes us files
+	// our routes under it. A transport without an exporter cannot bind a proof, so neither
+	// side proves anything there.
+	let transcript = version
+		.has_route_key()
+		.then(|| session.export_keying_material(crate::route::EXPORTER_LABEL, &[]))
+		.flatten()
+		.map(crate::route::Transcript::new);
+	let route_key = publish
+		.as_ref()
+		.and_then(|origin| origin.route_key())
+		.or_else(|| subscribe.as_ref().and_then(|origin| origin.route_key()));
+	if let (Some(transcript), Some(key)) = (&transcript, route_key) {
+		our_setup.route_key = Some(transcript.prove(&key, client));
+	}
+
 	// What the peer's connection credential earns by default: publishing what our
 	// subscribe half accepts, and subscribing to what our publish half serves. A
 	// missing half grants nothing.
@@ -306,6 +322,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	// Setup stream isn't expected on the wire again.
 	let peer_implementation = crate::setup::PeerImplementation::default();
 	let mut peer_setup_slot = PeerSetup::new(client, session.address())
+		.with_transcript(transcript)
 		.offer_ietf(our_setup.ietf)
 		.with_implementation(peer_implementation.clone());
 	// Without AUTH, the server checks a client's credential before its SETUP, which the
@@ -318,7 +335,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		peer_implementation.set(None);
 	}
 	let early = if let Some(accepted) = peer_setup {
-		peer_setup_slot.set(accepted.setup);
+		peer_setup_slot.set(accepted.setup)?;
 		accepted.early
 	} else {
 		Vec::new()

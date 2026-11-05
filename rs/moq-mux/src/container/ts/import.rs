@@ -1769,8 +1769,8 @@ impl<E: catalog::Catalog> Import<E> {
 	}
 
 	/// Copy the measured multiplex rate into the `mpegts` section, publishing the
-	/// catalog. Called only when the measurement changed, so a steady source never
-	/// republishes.
+	/// catalog. Called only when the measurement changed, so a steady source republishes
+	/// only when a window sets a new high, ever more rarely.
 	fn record_mux_rate(&mut self) -> anyhow::Result<()> {
 		let rate = self.mux_rate.published();
 		if let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut() {

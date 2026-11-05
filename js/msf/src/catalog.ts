@@ -56,7 +56,8 @@ const trackShape = {
 
 	// Non-standard: how far this rendition trails the broadcast's earliest, in milliseconds.
 	// Mirrors hang `delay`. A player holds `delay + jitter` and does not subtract across renditions.
-	delay: z.optional(z.number()),
+	// A rendition cannot trail the earliest by a negative amount, so that is malformed.
+	delay: z.optional(z.number().check(z.nonnegative())),
 };
 
 /** Zod schema describing a single track entry in an MSF catalog. */
@@ -127,6 +128,9 @@ const WireCatalogSchema = z.object({
 
 /** Serialize a catalog to its JSON wire representation (draft-01). */
 export function encode(catalog: Catalog): Uint8Array {
+	// Refuse what `decode` would reject, so a publisher fails here instead of its subscribers.
+	CatalogSchema.parse(catalog);
+
 	// Hoist inline init payloads into a shared, deduplicated initDataList and
 	// reference each from its track via initRef (the draft-01 wire shape).
 	const initDataList: z.infer<typeof InitDataSchema>[] = [];
