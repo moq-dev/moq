@@ -3,8 +3,8 @@
 //! A [`Producer`] lists the broadcast's tracks (TRACKS, [`broadcast::Consumer::tracks`]) and
 //! records each through its own ascending SUBSCRIBE, so it holds what the publisher's cache
 //! stops serving: a group still missing once the subscription's max delay passes is a gap, never
-//! a stall. Datagrams are never cached, so a track's are recorded from when its subscription
-//! takes effect. The host picks the key prefix, per broadcast path and instance say, and runs one
+//! a stall. TRACKS lists stream tracks only, so a datagram track, which is live-only, is never
+//! recorded. The host picks the key prefix, per broadcast path and instance say, and runs one
 //! producer per broadcast; the producer stores no instance. See the [crate docs](crate#layout) for
 //! what it writes.
 //!

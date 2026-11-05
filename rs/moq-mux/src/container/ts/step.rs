@@ -1,4 +1,5 @@
-//! Whether the source's clock stepped onto another timeline, which ends the import's instance.
+//! Whether the source's clock stepped onto another timeline, or its PAT named another
+//! program, either of which ends the import's instance.
 //!
 //! A contribution switched between two encoders whose clocks were never locked steps every
 //! timestamp at once without `discontinuity_indicator`. Splicing the two would put two sources
@@ -12,41 +13,45 @@
 //! read SRT loss as a step. One clock stepping alone, such as a corrupt PCR or a stream whose
 //! PTS jumps, is not a new source and is left to the import. After a flagged break, the
 //! streams stepping back is a rewind; one stepping forward splices as before.
+//!
+//! A PAT naming another `transport_stream_id` or program number is another source too, even
+//! when it arrives before the new source's first clock reading. The new instance reads from
+//! the packet that completes that PAT, so one spanning packets is read at its next repetition.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use bytes::Bytes;
-use mpeg2ts::ts::TsPacket;
+use mpeg2ts::ts::{Pid, TsPacket};
 
 use super::demux::Demux;
 use super::health::{Continuation, Continuity, Delta, PTS_LIMIT};
 use super::import::{Framer, Payload, STAGING_BYTES_MAX, adaptation_valid, discontinuity_indicator, payload, pcr};
 use super::mux_rate::PCR_WRAP;
 use super::passthrough::PCR_HZ;
-use super::psi::PesStart;
+use super::psi::{Pat, PesStart};
 
 /// A forward step beyond this is another timeline: ffmpeg's `dts_delta_threshold`.
 const LEAP: Duration = Duration::from_secs(10);
 const PTS_HZ: u64 = 90_000;
 const PTS_WRAP: u64 = 1 << 33;
 
-/// The source's clock stepped onto another timeline, so the [`Import`](super::Import) ended its
-/// instance there.
+/// The source's clock stepped onto another timeline, or its PAT named another program, so the
+/// [`Import`](super::Import) ended its instance there.
 ///
 /// What follows is another broadcast. A caller that carries on finishes this import and
 /// publishes [`remainder`](Self::remainder) into a new one, as a new instance under a new instance.
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
-#[error("the source's clock {step}; what follows is a new broadcast")]
+#[error("the source {step}; what follows is a new broadcast")]
 pub struct Restart {
-	/// How the clock stepped.
+	/// How the source changed.
 	pub step: Step,
 	/// The input from the step on, which this import did not read.
 	pub remainder: Bytes,
 }
 
-/// How the source's clock stepped, ending an import's instance.
+/// How the source changed, ending an import's instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Step {
@@ -62,14 +67,30 @@ pub enum Step {
 		/// How far forward.
 		by: Duration,
 	},
+	/// The PAT named another `transport_stream_id` or program number for the imported program.
+	Identity {
+		/// The new `transport_stream_id`.
+		transport_stream_id: u16,
+		/// The new program number.
+		program_number: u16,
+	},
 }
 
 impl std::fmt::Display for Step {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			Self::Rewind { by, flagged: true } => write!(f, "went back {by:?} after a flagged break"),
-			Self::Rewind { by, flagged: false } => write!(f, "went back {by:?} without a discontinuity_indicator"),
-			Self::Leap { by } => write!(f, "jumped forward {by:?} without a discontinuity_indicator"),
+			Self::Rewind { by, flagged: true } => write!(f, "clock went back {by:?} after a flagged break"),
+			Self::Rewind { by, flagged: false } => {
+				write!(f, "clock went back {by:?} without a discontinuity_indicator")
+			}
+			Self::Leap { by } => write!(f, "clock jumped forward {by:?} without a discontinuity_indicator"),
+			Self::Identity {
+				transport_stream_id,
+				program_number,
+			} => write!(
+				f,
+				"PAT named transport_stream_id {transport_stream_id} program {program_number}"
+			),
 		}
 	}
 }
@@ -82,6 +103,8 @@ pub(super) struct Routes<'a> {
 	pub timed: &'a dyn Fn(u16) -> bool,
 	/// The program clock: PCR ticks summed since the first, as [`Import::now`](super::Import::now).
 	pub now: Option<u64>,
+	/// The identity a whole PAT names for the program, when it is not the one being read.
+	pub switched: &'a dyn Fn(&Pat) -> Option<Step>,
 }
 
 /// What to do with the next packet.
@@ -278,7 +301,7 @@ struct Ahead {
 	back: Option<Duration>,
 	/// The first PCR read since, which times how long the silent streams are waited for.
 	since: Option<u64>,
-	/// The next input offset to read, and the framer's state there.
+	/// The next input offset to read, never before `at`, and the framer's state there.
 	scan: u64,
 	framer: Framer,
 	/// The step, once every clock confirmed it.
@@ -292,15 +315,20 @@ impl Steps {
 			self.clock = routes.pcr_pid.map(|pid| (pid, None));
 		}
 		let (mut cursor, mut framer) = demux.cursor();
-		let start = (cursor, framer);
 		let Some((at, pkt)) = demux.peek(&mut cursor, &mut framer) else {
 			return Verdict::Route;
 		};
 		let pid = (u16::from(pkt[1] & 0x1f) << 8) | u16::from(pkt[2]);
+		// The PAT never routes, so every later call peeks it again and repeats the restart.
+		if pid == Pid::PAT
+			&& let Some(step) = demux.pat_after(pkt).as_ref().and_then(routes.switched)
+		{
+			return Verdict::Restart(step);
+		}
 		let marks = Marks::read(pkt, routes, &self.headers);
 
 		if self.ahead.is_none() && at >= self.cleared {
-			self.ahead = self.trigger(at, pid, &marks, routes, start);
+			self.ahead = self.trigger(at, pid, &marks, routes, framer);
 		}
 		let Some(ahead) = &mut self.ahead else {
 			self.observe(pid, marks, routes);
@@ -342,15 +370,9 @@ impl Steps {
 	}
 
 	/// Start judging a step at the packet at `at` if it shows one, with the clocks expected to
-	/// step with it.
-	fn trigger(
-		&self,
-		at: u64,
-		pid: u16,
-		marks: &Marks,
-		routes: &Routes,
-		(scan, framer): (u64, Framer),
-	) -> Option<Ahead> {
+	/// step with it. `framer` is locked onto that packet, so the scan reads it again from `at`
+	/// rather than from the junk a resync skipped before it.
+	fn trigger(&self, at: u64, pid: u16, marks: &Marks, routes: &Routes, framer: Framer) -> Option<Ahead> {
 		let last_pcr = self.clock.and_then(|(_, last)| last);
 		let stepped = if marks.flagged {
 			None
@@ -397,7 +419,7 @@ impl Steps {
 			headers: self.headers.clone(),
 			back: None,
 			since: None,
-			scan,
+			scan: at,
 			framer,
 			confirmed: None,
 		})
@@ -520,6 +542,7 @@ mod tests {
 			pcr_pid: Some(CLOCK),
 			timed: &timed,
 			now: None,
+			switched: &|_| None,
 		};
 		loop {
 			match steps.judge(&demux, &routes) {
@@ -629,6 +652,24 @@ mod tests {
 			.extend(ts(&mut cc, VIDEO, false, &[0x21, 0x00, 0x05, 0x00, 0x05]));
 		second(&mut mux, &mut cc, PCR_HZ + 2 * FRAME, true);
 		assert_eq!(judge(&mux.out, &[VIDEO]), None);
+	}
+
+	/// Junk before the switch, such as a torn packet at the splice, makes the framer resync onto
+	/// the packet that shows the step, past the cursor. The look-ahead reads on from that
+	/// packet, not from the junk, so the switch is still judged whole.
+	#[test]
+	fn a_resync_before_the_step_reads_on_from_it() {
+		let (mut mux, mut cc) = (Mux::default(), 0);
+		second(&mut mux, &mut cc, PCR_HZ, true);
+		mux.out.extend_from_slice(&[0x00; 5]);
+		second(&mut mux, &mut cc, PCR_WRAP + 2 * PCR_HZ - SWITCH, true);
+		let Some(Step::Rewind { by, flagged: false }) = judge(&mux.out, &[VIDEO]) else {
+			panic!("the switch was missed");
+		};
+		assert!(
+			by.abs_diff(Duration::from_millis(16_844_460)) < Duration::from_millis(100),
+			"{by:?}"
+		);
 	}
 
 	/// A PES header split across packets still times its stream, so the switch is seen.

@@ -21,7 +21,7 @@ export namespace Announce {
 		get synced(): Signals.Getter<boolean>;
 	}
 	export type Event = {
-		kind: "start" | "update" | "restart" | "end";
+		kind: "present" | "absent";
 	} & Announce.Announce;
 	export interface Options {
 		covering?: boolean;
@@ -72,6 +72,21 @@ export namespace Bandwidth {
 		get rate(): Signals.Getter<number | undefined>;
 		update(max: number): void;
 	}
+	export class Viewer implements Disposable {
+		[Symbol.dispose](): void;
+		close(): void;
+		peek(): number | undefined;
+		get rate(): Signals.Getter<number | undefined>;
+		update(max: number): void;
+	}
+	export class Viewers {
+		constructor(estimate?: Signals.Getter<number | undefined>);
+		static readonly MAX_TARGET: number;
+		close(): void;
+		setTarget(target: number | undefined): void;
+		readonly target: Signals.Getter<number>;
+		watch(max: number): Bandwidth.Viewer;
+	}
 }
 
 export namespace Broadcast {
@@ -80,6 +95,7 @@ export namespace Broadcast {
 		clone(): Broadcast.Consumer;
 		close(): void;
 		get closed(): Signals.GetPromise<null>;
+		datagrams(name: string): Datagram.Consumer;
 		get instance(): Instance.Valid | undefined;
 		get path(): Path.Valid;
 		protected shareState(): never;
@@ -91,7 +107,8 @@ export namespace Broadcast {
 		close(): void;
 		get closed(): Signals.GetPromise<null>;
 		consume(): Broadcast.Consumer;
-		createTrack(name: string, info?: Partial<Track.Info>): Track.Producer;
+		createDatagrams(name: string, info?: Partial<Datagram.Info>): Datagram.Producer;
+		createTrack(name: string, info?: Track.InfoInit): Track.Producer;
 		removeTrack(name: string): void;
 		track(name: string): Track.Consumer;
 	}
@@ -148,6 +165,7 @@ export namespace Connection {
 		transport?: WebTransport;
 		url: URL;
 		versions?: readonly string[];
+		viewers?: Bandwidth.Viewers;
 		websocket?: Connection.WebSocketProps;
 		webtransport?: Connection.WebTransportProps;
 	}
@@ -213,6 +231,7 @@ export namespace Connection {
 	export interface WebSocketProps {
 		delay?: Milli;
 		enabled?: boolean;
+		maxStreams?: number;
 		url?: URL;
 	}
 	export interface WebTransportProps extends Omit<WebTransportOptions, "serverCertificateHashes" | "protocols"> {
@@ -242,6 +261,51 @@ export class Connection {
 	readonly transport: Signals.Getter<Connection.Transport | undefined>;
 	url: Signals.Signal<URL | undefined>;
 	versions: Signals.Signal<readonly string[] | undefined>;
+	readonly viewers: Signals.Getter<Pick<Bandwidth.Viewers, "watch" | "setTarget" | "target"> | undefined>;
+}
+
+export namespace Datagram {
+	export class Consumer {
+		clone(): Datagram.Consumer;
+		close(error?: Error): void;
+		info(): Promise<Datagram.Info>;
+		readonly name: string;
+		get priority(): number;
+		recv(): Promise<Datagram.Datagram | undefined>;
+		setPriority(value: number): void;
+	}
+	export interface Datagram {
+		payload: Uint8Array;
+		sequence: bigint;
+		timestamp?: Time.Timestamp;
+	}
+	export interface Info {
+		priority: number;
+		timescale?: Time.Timescale | null;
+	}
+	export class Producer {
+		constructor(name: string);
+		abort(error: Error): void;
+		accept(properties?: Partial<Datagram.Info>): this;
+		append(timestamp: Time.Timestamp | undefined, payload: Uint8Array): bigint;
+		get closed(): Signals.GetPromise<Error | null>;
+		consume(): Datagram.Consumer;
+		finish(): void;
+		info(): Promise<Datagram.Info>;
+		insert(datagram: Datagram.Datagram): void;
+		readonly name: string;
+		get priority(): Signals.Getter<number | undefined>;
+	}
+	export class Request {
+		accept(properties?: Partial<Datagram.Info>): Datagram.Producer;
+		get closed(): Signals.GetPromise<Error | null>;
+		get name(): string;
+		get priority(): Signals.Getter<number | undefined>;
+		reject(error: Error): void;
+	}
+	export function rescale(info: {
+		timescale?: Time.Timescale | null;
+	}, timestamp: Time.Timestamp | undefined): Time.Timestamp | undefined;
 }
 
 export namespace Error {
@@ -258,9 +322,6 @@ export namespace Error {
 		constructor(options?: {
 			cause?: unknown;
 		});
-	}
-	export class NoStreamCredit extends Error {
-		constructor(options?: ErrorOptions);
 	}
 	export class NotFound extends Error.Stream {
 		constructor(what: string, options?: {
@@ -322,7 +383,7 @@ export namespace Group {
 		readJson(): Promise<unknown | undefined>;
 		readString(): Promise<string | undefined>;
 		readable(): Promise<void>;
-		readonly sequence: number;
+		readonly sequence: bigint;
 		tryReadFrame(): Group.Frame | undefined;
 		tryReadFrameSequence(): {
 			sequence: number;
@@ -354,17 +415,17 @@ export namespace Group {
 		write(chunk: Uint8Array): void;
 	}
 	export interface Info {
-		sequence: number;
+		sequence: bigint;
 	}
 	export class Producer {
-		constructor(sequence: number);
+		constructor(sequence: bigint);
 		abort(error: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		consume(): Group.Consumer;
 		createFrame(info: Group.FrameInfo): Group.FrameProducer;
 		finish(): void;
 		get isClosed(): boolean;
-		readonly sequence: number;
+		readonly sequence: bigint;
 		writeFrame(frame: Group.Frame): void;
 	}
 	export interface ReadOptions {
@@ -388,10 +449,19 @@ export namespace Origin {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		get closed(): Signals.GetPromise<Error | null>;
 		get discovery(): Signals.Getter<boolean | undefined>;
-		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
+		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 	}
 	export type Cost = bigint;
+	export interface FollowOptions {
+		instance?: Instance.Valid;
+	}
+	export class Following {
+		readonly active: Signals.Getter<Broadcast.Consumer | undefined>;
+		close(): void;
+		readonly closed: Signals.GetPromise<Error | null>;
+		readonly path: Path.Valid;
+	}
 	export type Hop = infer<typeof Origin.HopSchema>;
 	export const HopSchema: $ZodBranded<ZodMiniBigInt<bigint>, "Hop", "out">;
 	export class Prepared {
@@ -408,7 +478,7 @@ export namespace Origin {
 		consume(): Origin.Consumer;
 		createBroadcast(path: Path.Valid): Origin.Publication;
 		get discovery(): Signals.Getter<boolean | undefined>;
-		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
+		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		requests(prefix: Path.Valid): Origin.Requests;
 		scope(root: Path.Valid, patterns: Path.Patterns): Origin.Producer;
@@ -429,13 +499,14 @@ export namespace Origin {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		readonly closed: Signals.GetPromise<Error | null>;
 		readonly discovery: Signals.Getter<boolean | undefined>;
-		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
+		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 	}
 	export class Request {
 		readonly path: Path.Valid;
 		prepare(): Origin.Prepared;
 		reject(err: Error): void;
+		serve(source: Broadcast.Producer | Broadcast.Consumer): void;
 	}
 	export interface RequestOptions {
 		instance?: Instance.Valid;
@@ -575,23 +646,31 @@ export interface Timed<T> {
 }
 
 export namespace Track {
+	export type Anchor = {
+		absolute: bigint;
+		relative?: never;
+		time?: never;
+	} | {
+		absolute?: never;
+		relative: bigint;
+		time?: never;
+	} | {
+		absolute?: never;
+		relative?: never;
+		time: Time.Timestamp;
+	};
 	export type Bound = {
 		excluded?: never;
-		included: number;
+		included: bigint;
 	} | {
-		excluded: number;
+		excluded: bigint;
 		included?: never;
 	};
 	export class Consumer {
-		fetchGroup(sequence: number, options?: Track.FetchGroupOptions): Promise<Group.Consumer>;
+		fetchGroup(sequence: bigint, options?: Track.FetchGroupOptions): Promise<Group.Consumer>;
 		info(): Promise<Track.Info>;
 		readonly name: string;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
-	}
-	export interface Datagram {
-		payload: Uint8Array;
-		sequence: number;
-		timestamp?: Time.Timestamp;
 	}
 	export interface Delay {
 		max?: Milli | null;
@@ -600,12 +679,28 @@ export namespace Track {
 	export class Demand {
 		get closed(): Signals.GetPromise<Error | null>;
 		readonly name: string;
-		get wanted(): Signals.Getter<number | undefined>;
+		get wanted(): Signals.Getter<bigint | undefined>;
 	}
 	export interface FetchGroupOptions {
 		maxDelay?: Milli;
 		priority?: number;
 		signal?: AbortSignal;
+	}
+	export class Fill {
+		[Symbol.dispose](): void;
+		accept(sequence: bigint, info?: Partial<Track.Info>): Group.Producer;
+		close(): void;
+		dropGroups(start: bigint, end: bigint): void;
+		readonly end: bigint;
+		isWanted(sequence: bigint): boolean;
+		get maxDelay(): Milli | null;
+		get order(): Track.Order;
+		get priority(): number;
+		refuseGroups(start: bigint, end: bigint, error: Error): void;
+		readonly start: bigint;
+		unwanted(sequence: bigint): Promise<void>;
+		wanted(): bigint | undefined;
+		wantedChanged(): Promise<bigint | undefined>;
 	}
 	export interface Groups {
 		end?: Track.Bound;
@@ -617,6 +712,9 @@ export namespace Track {
 		priority: number;
 		refresh?: number;
 		timescale?: Time.Timescale | null;
+	}
+	export interface InfoInit extends Partial<Omit<Track.Info, "maxAge">> {
+		maxAge?: Milli | null;
 	}
 	export type Order = "ascending" | "descending";
 	export class Ordered {
@@ -630,11 +728,10 @@ export namespace Track {
 		readBool(): Promise<boolean | undefined>;
 		readFrame(): Promise<{
 			frame: number;
-			group: number;
+			group: bigint;
 		} & Group.Frame | undefined>;
 		readJson(): Promise<unknown | undefined>;
 		readString(): Promise<string | undefined>;
-		recvDatagram(): Promise<Track.Datagram | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		tryNextGroup(): Group.Consumer | undefined;
 		update(options: Track.Subscription): void;
@@ -642,36 +739,45 @@ export namespace Track {
 	}
 	export interface Position {
 		frame: number;
-		group: number;
+		group: bigint;
 	}
 	export class Producer {
 		constructor(name: string);
 		abort(error: Error): void;
-		accept(info?: Partial<Track.Info>): this;
-		appendDatagram(timestamp: Time.Timestamp | undefined, payload: Uint8Array): number;
+		accept(info?: Track.InfoInit): this;
 		appendGroup(): Group.Producer;
 		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
-		createGroup(sequence: number): Group.Producer;
+		createGroup(sequence: bigint): Group.Producer;
 		demand(): Track.Demand;
 		finish(): void;
 		finishAt(end: Track.Position, error?: Error): void;
 		info(): Promise<Track.Info>;
-		insertDatagram(sequence: number, timestamp: Time.Timestamp | undefined, payload: Uint8Array): void;
 		largest(): Track.Position | undefined;
 		readonly name: string;
 		get priority(): number;
+		requests(): Track.Requests;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		writeFrame(frame: Group.Frame): void;
 	}
+	export interface Range {
+		end?: Track.Anchor;
+		start?: Track.Anchor;
+	}
 	export class Request {
-		accept(info?: Partial<Track.Info>): Track.Producer;
+		accept(info?: Track.InfoInit): Track.Producer;
 		demand(): Track.Demand;
 		readonly name: string;
 		get priority(): number;
 		reject(err: Error): void;
 		get subscription(): Readonly<Track.Subscription>;
+	}
+	export class Requests {
+		[Symbol.dispose](): void;
+		close(): void;
+		get name(): string;
+		requestedFill(): Promise<Track.Fill | undefined>;
 	}
 	export class Subscriber {
 		close(abort?: Error): void;
@@ -681,7 +787,6 @@ export namespace Track {
 		largest(): Promise<Track.Position | undefined>;
 		readonly name: string;
 		ordered(): Track.Ordered;
-		recvDatagram(): Promise<Track.Datagram | undefined>;
 		recvGroup(): Promise<Group.Consumer | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		tryRecvGroup(): Group.Consumer | undefined;
@@ -693,11 +798,12 @@ export namespace Track {
 	};
 	export interface Subscription {
 		delay?: Track.Delay;
-		groups?: Track.Groups;
 		order?: Track.Order;
 		priority?: number;
+		ranges?: Track.Range[];
 	}
 	export function infoDefaults(info?: Partial<Track.Info>): Track.Info;
+	export import rescale = Datagram.rescale;
 }
 
 export namespace Varint {

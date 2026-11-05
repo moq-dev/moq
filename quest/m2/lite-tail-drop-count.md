@@ -9,7 +9,7 @@ From lite-05 on, a moq-lite session's tail is complete once every group up to th
 Decided 2026-10-30 (maintainer, follow-up planning): m2. Found by the audit on [moq-dev/moq#7403](https://github.com/moq-dev/moq/pull/7403). The maintainer dislikes grace periods.
 
 - Count per version. lite-01..04 have no drop message, so they keep today's behaviour.
-- Account for holes left by lost datagrams.
+- On lite-05/06, account for holes left by lost datagrams. Lite-07 stream tracks carry no datagrams ([Datagram tracks](/quest/m1/datagram-tracks/README.md)).
 - Guard against a peer that never accounts for a group: decide with the maintainer whether that ends the tail with an error or keeps waiting. Don't add a new grace.
 - The IETF tail keeps its grace until the moq-transport gap-signal extension (planned in [moq-dev/moq#7425](https://github.com/moq-dev/moq/pull/7425)) lands, since moq-transport can't signal gaps.
 

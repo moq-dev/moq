@@ -58,7 +58,7 @@ fn import_as(url: &str, fingerprint: &str, global: &[&str], name: &str) -> Child
 
 #[tokio::test]
 async fn import_delivers_the_catalog_finish_at_eof() {
-	let _ = moq_tokio::crypto::install_default();
+	moq_tokio::crypto::install_default().unwrap();
 	let fixture = moq_relay::test_relay().await.expect("test relay");
 	let ready = fixture.relay.ready();
 	tokio::spawn(fixture.relay.run());
@@ -88,7 +88,7 @@ async fn import_delivers_the_catalog_finish_at_eof() {
 	let event = running(&mut child, "the announce", announced.next())
 		.await
 		.expect("origin closed");
-	let moq_tokio::moq_net::announce::Event::Start(announce) = event else {
+	let moq_tokio::moq_net::announce::Event::Present(announce) = event else {
 		panic!("the first announce event is {event:?}, not a start");
 	};
 	assert_eq!(announce.prefix.as_str(), "demo");
@@ -136,7 +136,7 @@ const SHORT: &[u8] = include_bytes!("../../../moq-mux/src/container/ts/test_data
 /// for the linger after EOF.
 #[tokio::test]
 async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
-	let _ = moq_tokio::crypto::install_default();
+	moq_tokio::crypto::install_default().unwrap();
 	let fixture = moq_relay::test_relay().await.expect("test relay");
 	let ready = fixture.relay.ready();
 	tokio::spawn(fixture.relay.run());

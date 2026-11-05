@@ -49,12 +49,12 @@ fn old_peers_keep_hidden_paths() {
 /// The relay dials a peer pinned to `version`. The peer's announce request cannot
 /// carry the opt-in below lite-07, yet it discovers the relay's hidden broadcast.
 async fn old_peer_keeps_hidden_paths(version: moq_net::Version) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		let (port, mut server) = listen_tcp(version).await;
 		let peer_origin = moq_tokio::origin::spawn();
-		let mut discovered = peer_origin.consume().with_hidden(true).announced();
+		let mut discovered = peer_origin.consume().with_hidden(true).routes();
 		let accept = tokio::spawn(async move {
 			let request = server.accept().await.expect("cluster dial");
 			let session = request.with_subscriber(peer_origin).ok().await.expect("accept");
@@ -72,7 +72,7 @@ async fn old_peer_keeps_hidden_paths(version: moq_net::Version) {
 		let cluster_run = tokio::spawn(cluster.clone().start().await.expect("cluster start").run());
 
 		loop {
-			if let moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Update(announce) =
+			if let moq_net::origin::RouteEvent::Start(announce) | moq_net::origin::RouteEvent::Update(announce) =
 				discovered.next().await.expect("peer origin closed")
 				&& announce.prefix.as_str() == ".hidden/test"
 			{

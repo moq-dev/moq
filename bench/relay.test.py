@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise sampler-owned generator lifetime with deterministic fake counters."""
+"""Exercise relay workload lifetimes with deterministic fake counters."""
 
 import os
 import random
@@ -56,6 +56,7 @@ class Loss(unittest.TestCase):
 
 
 class Lifecycle(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "linux", "relay process metrics require Linux")
     def test_sampler_stops_generator_after_collecting_both_processes(self):
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory)
@@ -106,6 +107,46 @@ run_workload fixture ignored video
             self.assertEqual(result["cpu_cores"], 1)
             self.assertEqual(result["generator"]["cpu_cores"], 1)
             self.assertEqual(result["host_window_start_ms"], result["throughput_window_start_ms"])
+
+    def test_generator_duration_limits_workload_without_sampler(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            fake = run / "load.py"
+            fake.write_text("""#!/usr/bin/env python3
+import argparse, json, pathlib
+p = argparse.ArgumentParser()
+p.add_argument('--duration', required=True)
+p.add_argument('--output', type=pathlib.Path, required=True)
+a, _ = p.parse_known_args()
+assert a.duration == '10s'
+a.output.write_text(''.join(json.dumps(dict(timestamp_ms=t, bytes_sent=t*10, bytes_recv=t*10,
+    frames_sent=t, frames_recv=t, groups_expected=1, groups_present=1, groups_lost=0,
+    latency_p50_ms=1, latency_p99_ms=1))+'\\n' for t in (0, 5000, 10000)))
+""")
+            fake.chmod(0o755)
+            script = """set -euo pipefail
+ROOT=$1 RUN=$2 LOAD_BIN=$3 HOST_BIN=false
+source "$ROOT/bench/relay.sh"
+# Exercise the non-Linux branch on Linux CI too.
+uname() { printf 'Darwin\\n'; }
+start_relay() { RELAY_PID=$$; RELAY_PORT=4500; }
+stop_relay() { RELAY_PID=; }
+run_workload fixture ignored video
+"""
+            result = subprocess.run(
+                ["bash", "-c", script, "test", str(ROOT), str(run), str(fake)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            import json
+
+            report = json.loads((run / "relay/fixture/video/summary.json").read_text())
+            self.assertEqual(report["throughput_window_start_ms"], 5000)
+            self.assertEqual(report["throughput_window_end_ms"], 10000)
+            self.assertEqual(report["recv_fps"], 1000)
+            self.assertNotIn("cpu_cores", report)
+            self.assertNotIn("generator", report)
 
 
 @unittest.skipUnless(sys.platform == "linux", "relay process metrics require Linux")

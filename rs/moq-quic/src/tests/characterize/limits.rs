@@ -20,7 +20,7 @@ fn finish_all(pair: &mut Pair, client_ch: ConnectionHandle, server_ch: Connectio
 		let mut recv = pair.server_recv(server_ch, s);
 		let mut chunks = recv.read().unwrap();
 		while chunks.next(usize::MAX).unwrap().is_some() {}
-		let _ = chunks.finalize();
+		chunks.finalize();
 	}
 	pair.drive();
 }
@@ -74,7 +74,7 @@ fn read_buffered(pair: &mut Pair, ch: ConnectionHandle, streams: &mut Vec<Stream
 		while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
 			total += chunk.bytes.len();
 		}
-		let _ = chunks.finalize();
+		chunks.finalize();
 	}
 	total
 }

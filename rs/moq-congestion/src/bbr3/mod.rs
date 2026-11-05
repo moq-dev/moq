@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod bench;
+mod delay;
 mod max_filter;
 
 #[cfg(test)]
@@ -87,6 +88,11 @@ const LOSS_THRESH: f64 = 0.02;
 /// equivalent to BBR.Beta: A constant specifying the default multiplicative decrease to make upon
 /// each round trip during which the connection detects packet loss (the value is 0.7).
 const BETA: f64 = 0.7;
+
+/// The delay bound's pacing, as a share of the delivery rate while the bottleneck queue grows:
+/// GoogCC's backoff from its acknowledged rate on overuse. Below the bottleneck's rate, it drains
+/// the queue at 15% of that rate.
+const DELAY_BETA: f64 = 0.85;
 
 /// equivalent to BBR.Headroom: A constant specifying the multiplicative factor to apply to
 /// BBR.inflight_longterm when calculating a volume of free headroom to try to leave unused in the
@@ -527,28 +533,28 @@ pub struct Bbr3 {
     /// Used when computing `offload_budget` per
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.8.2>.
     max_ack_delay: Duration,
+    /// Reads bottleneck queue growth from the peer's receive timestamps, when
+    /// [`Config::delay_bound`] is set.
+    delay: Option<delay::Detector>,
+    /// The delay bound's ceiling on BBR.bw: the most the path delivered without its queue
+    /// growing. Infinite until the queue first grows, and always without the delay bound.
+    bw_delay: f64,
+    /// C.delivered when the delay bound last acted, which it does once per round trip.
+    delay_round_delivered: u64,
 }
 
 impl Bbr3 {
     /// equivalent to BBROnInit <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.2.1>
     fn new(config: Arc<Config>, init: Init) -> Self {
-        let probe_rng = if let Some(probe_seed) = config.probe_rng_seed {
-            Pcg32::from_seed(probe_seed)
-        } else {
-            #[cfg(test)]
-            {
-                Pcg32::from_seed([0; 16])
-            }
-            #[cfg(not(test))]
-            {
-                Pcg32::from_rng(&mut rand::rng())
-            }
-        };
+        let probe_rng = Pcg32::seed_from_u64(init.seed);
         let smss = Ord::min(
             Ord::max(MIN_MAX_DATAGRAM_SIZE, init.mtu) as u64,
             MAX_DATAGRAM_SIZE,
         );
-        let initial_cwnd = config.initial_window;
+        let min_pipe_cwnd = 4 * smss;
+        // The 1200-based default may not hold one datagram of a larger MTU, which would block
+        // the first packet with nothing in flight to ever open the window.
+        let initial_cwnd = config.initial_window.max(min_pipe_cwnd);
         let startup_pacing_gain = config.startup_pacing_gain.unwrap_or(STARTUP_PACING_GAIN);
         let default_pacing_gain = config.default_pacing_gain.unwrap_or(DEFAULT_PACING_GAIN);
         let probe_bw_down_pacing_gain = config
@@ -606,7 +612,7 @@ impl Bbr3 {
             round_start: true,
             next_round_delivered: 0,
             idle_restart: false,
-            min_pipe_cwnd: 4 * smss, /* 4 * C.SMSS as defined in <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.8> */
+            min_pipe_cwnd, /* 4 * C.SMSS as defined in <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.8> */
             max_bw: 0.0,
             bw_shortterm: f64::INFINITY,
             undo_bw_shortterm: f64::INFINITY,
@@ -677,6 +683,9 @@ impl Bbr3 {
             // when the connection supplies peer ACK-frequency parameters.
             ack_eliciting_threshold: 1,
             max_ack_delay: Duration::from_millis(25),
+            delay: config.delay_bound.then(delay::Detector::default),
+            bw_delay: f64::INFINITY,
+            delay_round_delivered: 0,
         }
     }
 
@@ -820,6 +829,10 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRUpdateACKAggregation <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.9>
+    ///
+    /// The delay bound expects delivery at BBR.bw without its own `bw_delay`: pacing below the
+    /// delivery rate to drain a queue delivers faster than that bound while the queue lasts,
+    /// which is not ACK aggregation, and taking it as such inflates the window.
     fn update_ack_aggregation(&mut self, newly_acked: u64, now: Instant) {
         let interval;
         if let Some(extra_acked_interval_start) = self.extra_acked_interval_start {
@@ -827,7 +840,11 @@ impl Bbr3 {
         } else {
             interval = Duration::from_secs(0);
         }
-        let mut expected_delivered = (self.bw * interval.as_secs_f64()) as u64;
+        let bw = match self.bw_delay.is_finite() {
+            true => self.max_bw.min(self.bw_shortterm),
+            false => self.bw,
+        };
+        let mut expected_delivered = (bw * interval.as_secs_f64()) as u64;
         if self.extra_acked_delivered <= expected_delivered {
             self.extra_acked_delivered = 0;
             self.extra_acked_interval_start = Some(now);
@@ -1339,9 +1356,11 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRBoundBWForModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.3>
+    ///
+    /// The delay bound's `bw_delay` bounds it too, infinite unless that is on.
     fn bound_bw_for_model(&mut self) {
-        // gives min of both f64
-        self.bw = [self.max_bw, self.bw_shortterm]
+        // gives min of all three f64
+        self.bw = [self.max_bw, self.bw_shortterm, self.bw_delay]
             .iter()
             .copied()
             .fold(f64::NAN, f64::min);
@@ -1814,6 +1833,63 @@ impl Bbr3 {
         let inflight = Ord::max(inflight, self.offload_budget);
         Some(Ord::max(inflight, self.min_pipe_cwnd))
     }
+
+    /// The delay bound's response to the forward delay's trend showing the bottleneck queue
+    /// growing, at most once per round trip, so the response to one queue lands before it is
+    /// judged again.
+    ///
+    /// While the queue grows, the bottleneck's rate bounds the delivery rate, so the round's
+    /// delivery rate measures it. ProbeBW_UP has found it: `bw_delay` falls to it, and the probe
+    /// stops, as loss stops it, so ProbeBW_DOWN drains the probe's queue. Growth in any other
+    /// ProbeBW phase means the path slowed under the estimate: `bw_delay` falls to
+    /// [`DELAY_BETA`] of the delivery rate, so pacing drains the queue that slowing built.
+    ///
+    /// Startup, Drain, and ProbeRTT are BBR3's own: Startup ends on its plateau or on loss, and
+    /// Drain and ProbeRTT already send below the estimate.
+    ///
+    /// A round that has measured no rate, as a zero-interval sample leaves it, bounds nothing,
+    /// as `update_max_bw` skips that sample: a zero bound would stop pacing until a probe the
+    /// path carries raised it.
+    fn bound_queue_growth(&mut self, now: Instant) {
+        let Some(rs) = self.rs else {
+            return;
+        };
+        if rs.prior_delivered < self.delay_round_delivered {
+            return;
+        }
+        let delivery_rate = self.bw_latest.max(rs.delivery_rate);
+        if delivery_rate <= 0.0 {
+            return;
+        }
+        match self.state {
+            BbrState::ProbeBw(ProbeBwSubstate::Up) => {
+                self.bw_delay = self.bw_delay.min(delivery_rate);
+                self.start_probe_bw_down(now);
+            }
+            BbrState::ProbeBw(_) => {
+                self.bw_delay = self.bw_delay.min(DELAY_BETA * delivery_rate);
+            }
+            BbrState::Startup | BbrState::Drain | BbrState::ProbeRtt => return,
+        }
+        self.bound_bw_for_model();
+        self.delay_round_delivered = self.rate.delivered();
+    }
+
+    /// Raises `bw_delay` to what Startup and ProbeBW_UP deliver without the queue growing: a
+    /// probe the path carries lifts it a probe gain per round, as it lifts BBR.max_bw.
+    fn raise_bw_delay(&mut self) {
+        let Some(rs) = self.rs else {
+            return;
+        };
+        let probing = matches!(
+            self.state,
+            BbrState::Startup | BbrState::ProbeBw(ProbeBwSubstate::Up)
+        );
+        if probing && !rs.is_app_limited && rs.delivery_rate > self.bw_delay {
+            self.bw_delay = rs.delivery_rate;
+            self.bound_bw_for_model();
+        }
+    }
 }
 
 impl Controller for Bbr3 {
@@ -1868,10 +1944,10 @@ impl Controller for Bbr3 {
     fn on_ack(&mut self, ack: Ack<'_>) {
         // equivalent to RS.newly_acked. It is passed to the ACK's model steps rather than kept in
         // `rs`, so no later `set_cwnd` counts it again.
-        let mut newly_acked = 0;
-        for acked in ack.packets {
-            self.check_recovery_done(acked.sent);
-            newly_acked += u64::from(acked.bytes);
+        let newly_acked = ack.packets.iter().map(|acked| u64::from(acked.bytes)).sum();
+        let latest_sent = ack.packets.iter().map(|acked| acked.sent).max();
+        if let Some(delay) = &mut self.delay {
+            delay.on_ack(ack.packets, ack.now);
         }
         self.inflight = ack.in_flight;
         // An ACK that delivered no packet has no sample, and a finished one is never folded
@@ -1881,11 +1957,27 @@ impl Controller for Bbr3 {
         if ack.app_limited && self.rate.is_app_limited() {
             self.probe_rtt_skip_app_limited = true;
         }
-        let Some(rs) = self.ack_rs else {
+        if let Some(rs) = self.ack_rs {
+            self.rs = Some(rs);
+            self.update_model_and_state(rs.prior_delivered, newly_acked, ack.app_limited, ack.now);
+        }
+        // The ACK that ends a loss round acknowledges the first packet sent after that round's
+        // first loss, which is also what ends the recovery that loss began. The model steps
+        // judge the round they close, so they see the recovery as it was: otherwise Startup's
+        // high-loss exit, which asks for a full round in recovery, misses every round one
+        // recovery episode spans, and an application-limited sender never leaves Startup.
+        if let Some(sent) = latest_sent {
+            self.check_recovery_done(sent);
+        }
+        if self.ack_rs.is_none() {
             return;
-        };
-        self.rs = Some(rs);
-        self.update_model_and_state(rs.prior_delivered, newly_acked, ack.app_limited, ack.now);
+        }
+        if let Some(grew) = self.delay.as_mut().map(delay::Detector::take_signal) {
+            self.raise_bw_delay();
+            if grew {
+                self.bound_queue_growth(ack.now);
+            }
+        }
         self.update_control_parameters(newly_acked);
     }
 
@@ -2000,11 +2092,16 @@ impl Controller for Bbr3 {
     }
 
     fn metrics(&self) -> Metrics {
+        // BBR.bw, recomputed since a short-term model reset or a spurious-loss undo lands
+        // between ACKs: a loss-driven `bw_shortterm` and the delay bound's `bw_delay` both mark
+        // the path slower than `max_bw`, so a bandwidth follower, such as an encoder, should
+        // follow them. Both are infinite while unset.
+        let estimate = self.max_bw.min(self.bw_shortterm).min(self.bw_delay);
         Metrics {
             congestion_window: self.window(),
             ssthresh: None,
             pacing_rate: Some(self.pacing_rate.round() as u64),
-            bandwidth_estimate: (self.max_bw > 0.0).then_some(self.max_bw.round() as u64),
+            bandwidth_estimate: (estimate > 0.0).then_some(estimate.round() as u64),
             probe_inflight: self.probe_inflight(),
         }
     }
@@ -2029,7 +2126,6 @@ impl Controller for Bbr3 {
 #[derive(Debug, Clone)]
 pub struct Config {
     initial_window: u64,
-    probe_rng_seed: Option<[u8; 16]>,
     startup_pacing_gain: Option<f64>,
     default_pacing_gain: Option<f64>,
     probe_bw_down_pacing_gain: Option<f64>,
@@ -2039,21 +2135,33 @@ pub struct Config {
     drain_pacing_gain: Option<f64>,
     pacing_margin_percent: Option<f64>,
     default_cwnd_gain: Option<f64>,
+    delay_bound: bool,
 }
 
 impl Config {
-    /// Default limit on the amount of outstanding data in bytes.
+    /// Brake when the peer's receive timestamps show the bottleneck queue growing.
     ///
-    /// Recommended value: `min(10 * max_datagram_size, max(2 * max_datagram_size, 14720))`
-    pub fn initial_window(&mut self, value: u64) -> &mut Self {
-        self.initial_window = value;
+    /// A trend line over the forward delay, as GoogCC fits one, detects the queue growing. BBR3
+    /// then bounds its bandwidth estimate, and with it the pacing rate and the window, at the
+    /// delivery rate the queue's growth measured: a bandwidth probe stops there, as it stops on
+    /// loss, and growth outside a probe sets the bound below that rate, so the queue drains.
+    /// Startup and ProbeBW_UP raise the bound to whatever they deliver, so the probes, native
+    /// probing included, still find capacity that comes back. Startup and the model are BBR3's
+    /// own.
+    ///
+    /// Without receive timestamps, which the transport requests separately, it does nothing.
+    /// Off by default.
+    pub fn delay_bound(&mut self, value: bool) -> &mut Self {
+        self.delay_bound = value;
         self
     }
 
-    /// Seed the probe phases for deterministic transport tests.
-    #[cfg(any(test, feature = "testing"))]
-    pub fn probe_rng_seed(&mut self, seed: [u8; 16]) -> &mut Self {
-        self.probe_rng_seed = Some(seed);
+    /// Default limit on the amount of outstanding data in bytes.
+    ///
+    /// Recommended value: `min(10 * max_datagram_size, max(2 * max_datagram_size, 14720))`.
+    /// Raised to at least four datagrams of the path MTU, BBR's `MinPipeCwnd`.
+    pub fn initial_window(&mut self, value: u64) -> &mut Self {
+        self.initial_window = value;
         self
     }
 }
@@ -2064,7 +2172,6 @@ impl Default for Config {
             // Bounded by the datagram size a path starts at, not [`MAX_DATAGRAM_SIZE`] (the
             // RFC 9000 ceiling), which would clamp 14720 up to 9x the intended window.
             initial_window: 14720.clamp(2 * BASE_DATAGRAM_SIZE, 10 * BASE_DATAGRAM_SIZE),
-            probe_rng_seed: None,
             startup_pacing_gain: None,
             default_pacing_gain: None,
             probe_bw_down_pacing_gain: None,
@@ -2074,6 +2181,7 @@ impl Default for Config {
             drain_pacing_gain: None,
             pacing_margin_percent: None,
             default_cwnd_gain: None,
+            delay_bound: false,
         }
     }
 }
@@ -2112,6 +2220,7 @@ mod test {
                 mtu,
                 rtt: Duration::from_millis(333),
                 max_pacing_rate: None,
+                seed: 0,
             };
             Self {
                 bbr: Bbr3::new(config, init),
@@ -2139,13 +2248,25 @@ mod test {
 
         /// Add packet `pn` to the ACK being built; a number not in flight is ignored.
         fn ack(&mut self, now: Instant, sent: Instant, bytes: u64, pn: u64) {
+            self.ack_received(now, sent, bytes, pn, None);
+        }
+
+        /// [`Self::ack`], reporting when the peer received the packet.
+        fn ack_received(
+            &mut self,
+            now: Instant,
+            sent: Instant,
+            bytes: u64,
+            pn: u64,
+            received: Option<Duration>,
+        ) {
             let _ = now;
             if let Some(acked) = self.sent.remove(&pn) {
                 self.acked.push(Acked {
                     sent,
                     bytes: bytes as u16,
                     packet: acked.packet,
-                    received: None,
+                    received,
                 });
             }
         }
@@ -2208,6 +2329,8 @@ mod test {
         pn: u64,
         send_ns: u64,
         ack_ns: u64,
+        /// when the peer received it
+        recv_ns: u64,
         /// whether the bottleneck marked the packet CE
         ce: bool,
     }
@@ -2241,6 +2364,10 @@ mod test {
         ce_above_ns: Option<u64>,
         /// the longest queueing delay a packet has met at the bottleneck
         max_queue_ns: u64,
+        /// whether each ACK reports when the peer received the packet, as receive timestamps do
+        timestamps: bool,
+        /// each packet's queueing delay at the bottleneck, by when it reached it
+        queues: Vec<(u64, u64)>,
     }
 
     impl Sim {
@@ -2260,6 +2387,8 @@ mod test {
                 btl_service_ns: (mss as f64 / bw * 1e9).round() as u64,
                 ce_above_ns: None,
                 max_queue_ns: 0,
+                timestamps: false,
+                queues: Vec::new(),
             }
         }
 
@@ -2279,6 +2408,7 @@ mod test {
                     pn: self.pn,
                     send_ns: now_ns,
                     ack_ns: now_ns,
+                    recv_ns: now_ns,
                     ce: false,
                 });
                 self.pn += 1;
@@ -2385,6 +2515,7 @@ mod test {
                     let ack_ns = finish + self.ret_ns;
                     let queue_ns = service_start - arrival;
                     self.max_queue_ns = self.max_queue_ns.max(queue_ns);
+                    self.queues.push((arrival, queue_ns));
                     let ce = self.ce_above_ns.is_some_and(|limit| queue_ns > limit);
 
                     self.bbr.send(
@@ -2397,6 +2528,7 @@ mod test {
                         pn: self.pn,
                         send_ns,
                         ack_ns,
+                        recv_ns: finish,
                         ce,
                     });
 
@@ -2413,7 +2545,9 @@ mod test {
                     self.inflight -= self.mss;
                     let now_at = self.base + Duration::from_nanos(self.now_ns);
                     let send_at = self.base + Duration::from_nanos(p.send_ns);
-                    self.bbr.ack(now_at, send_at, self.mss, p.pn);
+                    let received = self.timestamps.then(|| Duration::from_nanos(p.recv_ns));
+                    self.bbr
+                        .ack_received(now_at, send_at, self.mss, p.pn, received);
                     self.bbr.end_acks(now_at, self.inflight, false);
                     // Each ACK covers one packet, so a marked one raises the CE count.
                     if p.ce {
@@ -2449,29 +2583,22 @@ mod test {
 
     #[test]
     fn test_probe_rng() {
-        let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Config {
-            initial_window: 14720.clamp(2 * BASE_DATAGRAM_SIZE, 10 * BASE_DATAGRAM_SIZE),
-            probe_rng_seed: Some(seed),
-            startup_pacing_gain: None,
-            default_pacing_gain: None,
-            probe_bw_down_pacing_gain: None,
-            probe_bw_up_pacing_gain: None,
-            probe_bw_up_cwnd_gain: None,
-            probe_rtt_cwnd_gain: None,
-            drain_pacing_gain: None,
-            pacing_margin_percent: None,
-            default_cwnd_gain: None,
+        let init = Init {
+            now: Instant::now(),
+            mtu: 2500,
+            rtt: Duration::from_millis(333),
+            max_pacing_rate: None,
+            seed: 17,
         };
-        let mut bbr3 = Driver::new(Arc::new(config), 2500);
+        let mut bbr3 = Bbr3::new(Arc::new(Config::default()), init);
         bbr3.pick_probe_wait();
         assert_eq!(bbr3.rounds_since_bw_probe, 1);
-        assert_eq!(bbr3.bw_probe_wait, Duration::from_millis(2652));
+        assert_eq!(bbr3.bw_probe_wait, Duration::from_millis(2910));
         // T_reno_bound is re-drawn on every pick, alongside the wall-clock bound
-        assert_eq!(bbr3.reno_rounds_bound, 63);
+        assert_eq!(bbr3.reno_rounds_bound, 62);
         bbr3.pick_probe_wait();
         assert_eq!(bbr3.rounds_since_bw_probe, 0);
-        assert_eq!(bbr3.bw_probe_wait, Duration::from_millis(2461));
+        assert_eq!(bbr3.bw_probe_wait, Duration::from_millis(2244));
         assert_eq!(bbr3.reno_rounds_bound, 63);
     }
 
@@ -3304,6 +3431,70 @@ mod test {
         );
     }
 
+    /// Startup leaves on high loss when one recovery episode spans the whole loss round. The ACK
+    /// that ends the round acknowledges the first packet sent after the round's first loss,
+    /// which also ends that recovery, so the exit must judge the round by the recovery it spent.
+    #[test]
+    fn startup_exits_on_loss_round_one_recovery_spans() {
+        const MSS: u16 = 1200;
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS);
+        let base = Instant::now();
+        let at = |ms: u64| base + Duration::from_millis(ms);
+        let mut inflight = 0;
+        let send = |bbr: &mut Driver, ms: u64, pn: u64, inflight: &mut u64| {
+            bbr.send(at(ms), MSS, pn);
+            *inflight += u64::from(MSS);
+            // An application-limited sender, so only loss can end Startup
+            let held = bbr.bbr.inflight;
+            bbr.bbr.rate.mark_app_limited(held);
+        };
+
+        // An application-limited warmup, a round each 10ms
+        for round in 0..3u64 {
+            let ms = round * 10;
+            for pn in round * 10..round * 10 + 10 {
+                send(&mut bbr, ms, pn, &mut inflight);
+            }
+            for pn in round * 10..round * 10 + 10 {
+                bbr.ack(at(ms + 10), at(ms), MSS.into(), pn);
+                inflight -= u64::from(MSS);
+            }
+            bbr.end_acks(at(ms + 10), inflight, true);
+        }
+        assert_eq!(bbr.state, BbrState::Startup);
+
+        // The flight that overflows the path, sent before any loss
+        for pn in 100..140 {
+            send(&mut bbr, 30, pn, &mut inflight);
+        }
+        for pn in 100..102 {
+            bbr.ack(at(40), at(30), MSS.into(), pn);
+            inflight -= u64::from(MSS);
+        }
+        bbr.end_acks(at(40), inflight, true);
+
+        // Every loss is of that flight, so one recovery episode covers them all
+        let lose = |bbr: &mut Driver, ms: u64, pns: &[u64], inflight: &mut u64| {
+            for &pn in pns {
+                bbr.lose(MSS, pn, at(ms));
+                *inflight -= u64::from(MSS);
+            }
+        };
+        lose(&mut bbr, 50, &[102, 104, 106], &mut inflight);
+        assert!(bbr.in_recovery);
+        send(&mut bbr, 55, 200, &mut inflight);
+        lose(&mut bbr, 60, &[108, 110, 112, 114], &mut inflight);
+        assert_eq!(bbr.state, BbrState::Startup);
+
+        // The first packet sent since the loss round began ends both it and the recovery
+        bbr.ack(at(70), at(55), MSS.into(), 200);
+        inflight -= u64::from(MSS);
+        bbr.end_acks(at(70), inflight, true);
+        assert!(!bbr.in_recovery);
+        assert!(bbr.full_bw_reached, "Startup ignored a round of high loss");
+        assert_eq!(bbr.state, BbrState::Drain);
+    }
+
     /// A.7: Never exiting STARTUP when application-limited with no loss.
     ///
     /// The negative counterpart to A.1 (plateau exit) and A.2 (loss exit): with
@@ -3670,14 +3861,7 @@ mod test {
         /// simulated propagation round-trip time (100ms), matching A.1/A.3/A.5/A.8
         const RTT_NS: u64 = 100_000_000;
 
-        // Drive the production default configuration with a fixed probe RNG seed so
-        // bw_probe_wait is deterministic; its exact value does not matter here since
-        // the deadline is computed from it below.
-        let config = Config {
-            probe_rng_seed: Some([6; 16]),
-            ..Config::default()
-        };
-        let mut sim = Sim::new(config, MSS, BW, RTT_NS);
+        let mut sim = Sim::new(Config::default(), MSS, BW, RTT_NS);
         assert_eq!(sim.bbr.state, BbrState::Startup);
 
         // Whether the flow has reached the PROBE_UP phase; the PROBE_DOWN we care
@@ -4768,14 +4952,7 @@ mod test {
         // bottleneck serialization time for one MSS-sized packet
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
 
-        // Seed the probe RNG so the PROBE_BW bw-probe wait (hence the cruise sojourn length) is
-        // deterministic and the pair-count target below is not flaky.
-        let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Config {
-            probe_rng_seed: Some(seed),
-            ..Config::default()
-        };
-        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -5050,14 +5227,7 @@ mod test {
         /// post-jump probing sees a clean, loss-free 100 Mbit/s link.
         const LOSS_PERIOD: u64 = 25;
 
-        // Seed the probe RNG so the PROBE_BW cycle timing (hence when PROBE_UP is entered) is
-        // deterministic.
-        let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Config {
-            probe_rng_seed: Some(seed),
-            ..Config::default()
-        };
-        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -5301,13 +5471,7 @@ mod test {
         /// drives `bw_shortterm` down and, once the max-bw filter window expires, `max_bw`.
         const BUFFER_BYTES: f64 = BW_HI * (RTT_NS as f64 / 1e9);
 
-        // Seed the probe RNG so the PROBE_BW cycle timing is deterministic.
-        let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Config {
-            probe_rng_seed: Some(seed),
-            ..Config::default()
-        };
-        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -5522,13 +5686,7 @@ mod test {
         const TOTAL_NS: u64 = 20_000_000_000;
         const WINDOW_NS: u64 = 5_000_000_000;
 
-        // Seed the probe RNG so the PROBE_BW cycle timing is deterministic.
-        let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Config {
-            probe_rng_seed: Some(seed),
-            ..Config::default()
-        };
-        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -5743,14 +5901,7 @@ mod test {
         const FWD_NS: u64 = RTT_NS / 2;
         const RET_NS: u64 = RTT_NS / 2;
 
-        // Seed the probe RNG so the PROBE_BW cycle timing (hence when PROBE_UP is entered) is
-        // deterministic.
-        let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Config {
-            probe_rng_seed: Some(seed),
-            ..Config::default()
-        };
-        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -6008,14 +6159,7 @@ mod test {
         const FWD_NS: u64 = RTT_NS / 2;
         const RET_NS: u64 = RTT_NS / 2;
 
-        // Seed the probe RNG so the PROBE_BW cycle timing (hence when PROBE_UP is entered) is
-        // deterministic.
-        let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Config {
-            probe_rng_seed: Some(seed),
-            ..Config::default()
-        };
-        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -6545,14 +6689,7 @@ mod test {
         const FWD_NS: u64 = RTT_NS / 2;
         const RET_NS: u64 = RTT_NS / 2;
 
-        // Seed the probe RNG so the PROBE_BW cycle timing (hence when each PROBE_UP is
-        // entered) is deterministic.
-        let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Config {
-            probe_rng_seed: Some(seed),
-            ..Config::default()
-        };
-        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -6787,14 +6924,7 @@ mod test {
         // bottleneck serialization time for one MSS-sized packet
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
 
-        // Pin this scenario's probe schedule: once app-limiting lifts at the
-        // PROBE_REFILL -> PROBE_UP edge the flow does genuine PROBE_BW cycling, whose
-        // phase timing is RNG-driven (cf. sibling probing tests).
-        let config = Config {
-            probe_rng_seed: Some([6; 16]),
-            ..Config::default()
-        };
-        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -8169,12 +8299,8 @@ mod test {
     #[test]
     fn sustained_ce_bounds_the_queue_and_recovers() {
         const SEC: u64 = 1_000_000_000;
-        let config = || Config {
-            probe_rng_seed: Some([7; 16]),
-            ..Config::default()
-        };
-        let mut control = Sim::new(config(), 1200, LINK_BW, LINK_RTT);
-        let mut marked = Sim::new(config(), 1200, LINK_BW, LINK_RTT);
+        let mut control = Sim::new(Config::default(), 1200, LINK_BW, LINK_RTT);
+        let mut marked = Sim::new(Config::default(), 1200, LINK_BW, LINK_RTT);
         marked.ce_above_ns = Some(5 * MS);
 
         // Startup and its drain.
@@ -8196,6 +8322,116 @@ mod test {
         run_until(&mut marked, 21 * SEC);
         assert!(marked.bbr.max_bw > 0.9 * control.bbr.max_bw);
         assert_eq!(marked.bbr.inflight_shortterm, u64::MAX);
+    }
+
+    /// A [`Sim`] whose peer reports receive timestamps, with the delay bound on or off
+    fn timestamped(delay_bound: bool) -> Sim {
+        let mut config = Config::default();
+        config.delay_bound(delay_bound);
+        let mut sim = Sim::new(config, 1200, LINK_BW, LINK_RTT);
+        sim.timestamps = true;
+        sim
+    }
+
+    /// The `p`th percentile of the queueing delay packets met reaching the bottleneck in
+    /// `from..until`, in nanoseconds
+    fn queue_percentile(sim: &Sim, from: u64, until: u64, p: f64) -> u64 {
+        let mut queues: Vec<u64> = sim
+            .queues
+            .iter()
+            .filter(|(at, _)| (from..until).contains(at))
+            .map(|&(_, queue)| queue)
+            .collect();
+        queues.sort_unstable();
+        queues[((queues.len() - 1) as f64 * p) as usize]
+    }
+
+    /// The capacity drops to a quarter for 5s, then comes back. BBR3 keeps sending into the
+    /// queue its stale estimate builds until its window binds, while the delay bound reads the
+    /// queue growing and paces below the delivery rate until it drains. Its ProbeBW_UP then
+    /// finds the capacity again, at nearly BBR3's goodput throughout.
+    #[test]
+    fn delay_bound_drains_queue_after_capacity_drop() {
+        const SEC: u64 = 1_000_000_000;
+        let mut control = timestamped(false);
+        let mut bound = timestamped(true);
+        let mut delivered = [[0; 3]; 2];
+        for (sim, delivered) in [&mut control, &mut bound].into_iter().zip(&mut delivered) {
+            delivered[0] = run_until(sim, 5 * SEC);
+            sim.btl_service_ns *= 4;
+            delivered[1] = run_until(sim, 10 * SEC);
+            sim.btl_service_ns /= 4;
+            delivered[2] = run_until(sim, 15 * SEC);
+        }
+        let median = |sim: &Sim| queue_percentile(sim, 5 * SEC, 10 * SEC, 0.5);
+        let (control_queue, bound_queue) = (median(&control), median(&bound));
+        assert!(
+            bound_queue * 4 < control_queue,
+            "median queue {}ms with the bound, {}ms without",
+            bound_queue / MS,
+            control_queue / MS
+        );
+        let [control_bytes, bound_bytes] = delivered;
+        for phase in 0..3 {
+            assert!(
+                bound_bytes[phase] as f64 > 0.9 * control_bytes[phase] as f64,
+                "phase {phase}: {bound_bytes:?} bytes delivered with the bound, {control_bytes:?} without"
+            );
+        }
+    }
+
+    /// Queue growth read on a round that measured no rate leaves the delay bound alone, rather
+    /// than bounding BBR.bw, and with it pacing, at zero.
+    #[test]
+    fn delay_bound_ignores_a_zero_rate() {
+        let mut sim = scripted();
+        sim.send(0, 1);
+        sim.ack(10 * MS, [0], false);
+        sim.send(10 * MS, 1);
+        // A zero interval, which carries no bandwidth
+        sim.ack(10 * MS, [1], false);
+        assert_eq!(sim.bbr.rs.unwrap().delivery_rate, 0.0);
+
+        sim.bbr.state = BbrState::ProbeBw(ProbeBwSubstate::Down);
+        sim.bbr.bw_latest = 0.0;
+        let now = sim.at(10 * MS);
+        sim.bbr.bound_queue_growth(now);
+        assert_eq!(sim.bbr.bw_delay, f64::INFINITY);
+        assert_eq!(sim.bbr.delay_round_delivered, 0);
+    }
+
+    /// The bandwidth estimate reports the loss and delay bounds when they are below `max_bw`, so
+    /// a bandwidth follower slows with them, and returns to `max_bw` once a probe lifts them
+    #[test]
+    fn bounds_cap_the_bandwidth_estimate() {
+        let mut sim = scripted();
+        sim.bbr.max_bw = 1_000_000.0;
+        assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(1_000_000));
+        sim.bbr.bw_delay = 400_000.0;
+        assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(400_000));
+        sim.bbr.bw_delay = 2_000_000.0;
+        assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(1_000_000));
+        sim.bbr.bw_shortterm = 700_000.0;
+        assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(700_000));
+        // Read between ACKs, before `bound_bw_for_model` folds the reset into BBR.bw
+        sim.bbr.reset_short_term_model();
+        assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(1_000_000));
+    }
+
+    /// The delay bound reads only receive timestamps: without them it changes nothing
+    #[test]
+    fn delay_bound_without_timestamps_is_bbr3() {
+        const SEC: u64 = 1_000_000_000;
+        let mut control = timestamped(false);
+        let mut bound = timestamped(true);
+        bound.timestamps = false;
+        for sim in [&mut control, &mut bound] {
+            run_until(sim, 3 * SEC);
+            sim.btl_service_ns *= 4;
+            run_until(sim, 6 * SEC);
+        }
+        assert_eq!(control.queues, bound.queues);
+        assert_eq!(control.bbr.window(), bound.bbr.window());
     }
 
     /// Each idle ACK can pass the old application-limited marker while reporting that the

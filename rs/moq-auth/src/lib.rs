@@ -4,7 +4,7 @@
 //! every piece of the answer:
 //!
 //! - [`Request`], [`Grant`], and [`Refusal`]: the JSON a relay POSTs to an auth server on
-//!   [`Event::Connect`], [`Event::Revalidate`], and [`Event::End`], and what comes back.
+//!   [`Event::Connect`], [`Event::Attach`], [`Event::Revalidate`], and [`Event::End`], and what comes back.
 //! - [`lease::Producer`] / [`lease::Consumer`]: the handle a session holds for its
 //!   grant, so whoever runs the accept loop decides how, in process or over HTTP.
 //! - [`Client`]: the HTTP implementation that drives a lease against `--auth-url`.
@@ -18,11 +18,16 @@
 //! Grants and claims name paths with [`Pattern`]s from `moq-pattern`, re-exported here:
 //! `foo` is one broadcast, `foo/**` is a subtree, `**` is everything. Each role may also
 //! carry a bitrate cap, a [`Rate`].
+//!
+//! The lease `poll_*` methods are always available. Enable the `async` feature for their
+//! generated async wrappers (`changed`, `closed`, and `revalidate_requested`) and
+//! `lease::Consumer::reported`; `client` and `serve` enable it.
 
 #![warn(missing_docs)]
 
 mod algorithm;
 mod claims;
+mod crypto;
 mod error;
 mod fs;
 mod generate;

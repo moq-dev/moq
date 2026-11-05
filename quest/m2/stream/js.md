@@ -13,5 +13,5 @@ the Rust/JS pair to `just test interop`.
 
 ## Required
 
-- [JS sockets](/quest/m2/socket/js.md) - the socket each stream is a bi track on
+- [JS sockets](/quest/m1/socket/js.md) - the socket each stream is a bi track on
 - [Rust byte streams](/quest/m2/stream/rust.md) - the reference surface

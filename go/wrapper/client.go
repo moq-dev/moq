@@ -307,7 +307,7 @@ func (c *Client) CreateBroadcast(path string) (*Publication, error) {
 	return c.publisher.CreateBroadcast(path)
 }
 
-// Announced streams routes announced by the remote under a pattern scope.
+// Announced lists the paths the remote announces under a pattern scope, as each becomes present or absent.
 func (c *Client) Announced(options AnnounceOptions) (*AnnounceConsumer, error) {
 	return c.consumer.Announced(options)
 }

@@ -14,7 +14,8 @@ Docker; see [Install](/setup/install).
 Its cryptography comes from [rind](https://github.com/moq-dev/rind), which
 runs on any x86\_64 CPU and on any aarch64 CPU with NEON, including a Raspberry
 Pi 4, CM4, or Zero 2 W on a 64-bit OS. On a CPU missing a feature rind needs,
-`moq` exits at startup naming it.
+`moq` exits at startup naming it. The Rust library also supports armv7;
+prebuilt CLI artifacts for 32-bit boards are not yet available.
 
 ## What it does
 
@@ -95,15 +96,19 @@ restarted encoder or a looping file wrapping to the top, ends the import with
 an error; run it again to publish anew. `import ts` and `import srt` republish
 instead when an MPEG-TS clock steps onto another timeline: the PCR and every
 stream stepping back, flagged or not, or more than 10 s forward without a
-`discontinuity_indicator`. The broadcast finishes there, and the rest of the
+`discontinuity_indicator`, and when a PAT names another `transport_stream_id`
+or program number. The broadcast finishes there, and the rest of the
 input publishes as a new stream under a new
 [instance](/concept/moq-lite#publisher-instances), on the same SRT connection, which
-`export ts --stitch --follow` carries on into. The new stream keeps the mux
+`export ts --stitch --follow` carries on into. The new stream carries nothing
+over from the old one's PAT and PMT: it waits for the source to repeat them and
+for its next keyframe, so a switch whose tables went out just before its clock
+stepped announces up to one GOP later. The new stream keeps the mux
 rate the old one measured, so its catalog goes out with its first media rather
 than after a fresh two-second measurement. An unflagged step usually means
 redundant encoders behind a changeover switch: time-lock their clocks, or have
 the switch set `discontinuity_indicator`. `--program all` and `--passthrough`
-still end at a rewind. A flagged MPEG-TS discontinuity that
+still end at a rewind, and `--program all` at a changed identity. A flagged MPEG-TS discontinuity that
 jumps forward continues the broadcast and is declared on the exported clock.
 MPEG-TS timestamps follow their source history across the 33-bit wrap
 (every 26.5 hours), including files imported faster than real time and flagged
@@ -226,7 +231,9 @@ to `--delay` ahead of its decode time and no further than its decoder buffer
 holds. That send-ahead comes out of the delay, so the output trails a TS source
 by `--delay`. A frame that cannot arrive in time at the rate fails the export,
 as does video whose HRD declares a longer buffer delay than `--delay`; the
-error names the `--delay` it needs.
+error names the `--delay` it needs. Skipped media within the same broadcast
+flags the next PCR as discontinuous without changing the PMT version. Raw
+`--passthrough` keeps surviving packets unchanged, including across loss.
 
 ## Play
 
@@ -290,7 +297,11 @@ moq ... import capture --audio on                        # encode audio continuo
 
 Video goes through the platform hardware encoder, with an H.264 software
 fallback when built with `openh264`, and audio is Opus; [moq-video](/lib/rs/moq-video) lists the
-backends. The camera and microphone stay open while publishing, so a late
+backends. An audio device that fails or stops ends the import with its source
+error; restart the command after the device is available again. Audio appears
+in the catalog once its device opens; a microphone permission prompt leaves
+other media available. The camera and
+microphone stay open while publishing, so a late
 subscriber can fetch the recent past. Choose each medium with
 `--video <on|demand|off>` (default `on`) and `--audio <on|demand|off>`
 (default `demand`). `on` encodes for the whole publish, and `off` publishes no
@@ -407,6 +418,10 @@ reachable. A recording still being made is followed, checked every `--refresh`
 stopped early stays live. It refuses a prefix with no recording, or with keys
 `export archive` does not write.
 
+Instances are percent-encoded as one key segment. When passing a stored key in an
+import URL, URL-encode its literal `%` characters too: instance `a/b` records under
+`event/@a%2Fb`, which the import URL names as `s3://recordings/event/@a%252Fb`.
+
 Store URLs are `file:///absolute/path`, `s3://bucket/prefix`,
 `gs://bucket/prefix`, or `az://container/prefix`, with credentials from the
 usual `AWS_*`, `GOOGLE_*`, and `AZURE_*` environment variables.
@@ -470,8 +485,10 @@ MoQ process and `moq-relay` on the LAN, with no other configuration. Without
 `--cluster-lan-secret`, anyone who can reach the listener joins, so leave it
 unset only on networks you trust. `--cluster-connect` is a MoQ side on its own,
 so it needs no `--connect`. WAN cluster dials (`--cluster-connect`,
-`--cluster-api-url`) share `--connect-bind` with `--connect`, and each binds
-it, while LAN dials take an ephemeral port. So a fixed `--connect-bind` port with
+`--cluster-api-url`) bind `--connect-bind`'s address. On port 0, each cluster
+session takes its own ephemeral port, so a redial leaves from a fresh one. A
+fixed port pins every WAN cluster dial to it, while LAN dials still take
+ephemeral ports. `--connect` binds it too, so a fixed `--connect-bind` port with
 both `--connect` and a WAN cluster peer is refused at startup: use port 0, or drop
 `--connect` (unset `MOQ_CONNECT` if it supplies the URL).
 
@@ -494,8 +511,9 @@ See [Authentication](/bin/relay/auth).
 
 ## Retention and latency
 
-`import --max-age` (default 30 s) tells relays how long to keep old groups
-fetchable, which the [HLS gateway](/bin/hls) depends on. `export fmp4`, `export mp4`,
+`import --max-age` (default 30 s) tells relays how long a superseded media group stays
+fresh and fetchable, which the [HLS gateway](/bin/hls) depends on. `import archive`
+refuses it: a replay advertises no max age, and the archive's retention bounds what it serves. `export fmp4`, `export mp4`,
 `export h264`, and `export h265` take `--max-delay` (default 500 ms): how far a stalled group
 may fall behind the live edge before *this* consumer skips it. Raising
 `--max-age` never delays playback.

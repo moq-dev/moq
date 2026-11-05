@@ -52,7 +52,7 @@ const IMMUTABLE: u64 = 0x0b;
 /// The Track Properties block carried at the end of SUBSCRIBE_OK, PUBLISH, and FETCH_OK.
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct Properties {
-	/// The publisher's cache window; omission leaves retention unconstrained.
+	/// The publisher's max age; omission sets no publisher limit.
 	pub max_cache_duration: Option<Duration>,
 
 	/// The track's Timescale, which declares the units of every object Timestamp on it.

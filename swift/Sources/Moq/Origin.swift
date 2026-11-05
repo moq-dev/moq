@@ -59,6 +59,11 @@ public final class BroadcastRequest: Sendable {
         BroadcastPrepared(try ffi.prepare())
     }
 
+    /// Serve held content under the prefix route's continuous sequence space, without an exact route.
+    public func serve(broadcast: BroadcastConsumer) throws {
+        try ffi.serve(broadcast: broadcast.ffi)
+    }
+
     /// Reject the request with an application error code.
     public func reject(errorCode: UInt16) throws {
         try ffi.reject(errorCode: errorCode)
@@ -146,8 +151,10 @@ public final class OriginConsumer: Sendable {
         self.ffi = ffi
     }
 
-    /// Stream routes under a literal prefix matching an optional pattern filter.
-    /// Paths with a segment starting with `.` below the prefix are left out unless `hidden`.
+    /// List the paths under a literal prefix matching an optional pattern filter, as each
+    /// becomes present or absent. A new publisher instance keeps its path present, so use
+    /// `follow` to see it. Paths with a segment starting with `.` below the prefix are left
+    /// out unless `hidden`.
     public func announced(prefix: String = "", filter: String? = nil, hidden: Bool = false) throws -> AnnounceConsumer {
         AnnounceConsumer(try ffi.announced(config: MoqAnnounceConfig(prefix: prefix, filter: filter, hidden: hidden)))
     }
@@ -168,7 +175,7 @@ public final class OriginConsumer: Sendable {
     }
 }
 
-/// A stream of announce events. Iterate directly:
+/// A listing of paths as each becomes present or absent. Iterate directly:
 /// `for try await event in announced { ... }`.
 /// The sequence ends when the origin closes; cancelling the consuming task
 /// cancels the subscription.
@@ -208,17 +215,18 @@ public final class Following: Sendable {
         self.ffi = ffi
     }
 
-    /// Suspend until the next publisher instance serves the path, then resolve it.
-    /// The first call resolves the instance serving the path once one is announced.
-    /// Each later call waits for another to take over (a restarted publisher, or a
-    /// replacement session) or for the broadcast to return after it went offline.
+    /// Suspend until the publisher instance serving the path changes.
+    /// The first call resolves the instance serving the path once one is announced, and
+    /// never returns nil. Each later call returns another instance taking over (a
+    /// restarted publisher, or a replacement session), or nil once the path goes offline
+    /// (or, with an `instance`, another one takes it over), then whatever serves it next.
     /// Drop what was read from the previous instance then: its tracks end when its
     /// session does. Throws `Closed` if cancelled or the origin closes first.
-    public func available() async throws -> BroadcastConsumer {
-        BroadcastConsumer(try await ffi.available())
+    public func available() async throws -> BroadcastConsumer? {
+        (try await ffi.available()).map(BroadcastConsumer.init)
     }
 
-    /// Cancel the pending `available()` call.
+    /// Cancel all current and future `available()` calls.
     public func cancel() {
         ffi.cancel()
     }

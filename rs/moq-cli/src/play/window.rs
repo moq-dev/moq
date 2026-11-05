@@ -21,7 +21,7 @@ use super::args::Args;
 use super::layout::fit;
 use super::media::Media;
 use super::output::Output;
-use super::timeline::Presentation;
+use moq_mux::timeline::{Consumer, Producer as Presentation};
 
 /// How early a frame may be shown rather than waiting another wakeup for it.
 /// Under a display's frame interval, so it can't be seen, but enough that timer
@@ -61,7 +61,7 @@ pub fn run(
 		.context("failed to create the playback event loop")?;
 	let proxy = event_loop.create_proxy();
 	let video = Arc::new(Mutex::new(VecDeque::new()));
-	let presentation = Arc::new(Mutex::new(Presentation::new(args.video_delay())));
+	let presentation = Presentation::new(args.video_delay());
 	// Signals the decoder that the presenter took a frame, so it can hand over
 	// the next one instead of dropping it.
 	let drained = Arc::new(tokio::sync::Notify::new());
@@ -100,7 +100,7 @@ pub fn run(
 	} else {
 		format!("moq play: {broadcast}")
 	};
-	let mut app = App::new(title, video, presentation, drained, render);
+	let mut app = App::new(title, video, presentation.consume(), drained, render);
 	let result = event_loop.run_app(&mut app).context("playback event loop failed");
 	media.abort();
 	network.abort();
@@ -153,7 +153,7 @@ async fn watch_network(mut tasks: tokio::task::JoinSet<anyhow::Result<()>>, prox
 struct App {
 	title: String,
 	video: Arc<Mutex<VecDeque<moq_video::Frame>>>,
-	presentation: Arc<Mutex<Presentation>>,
+	presentation: Consumer,
 	drained: Arc<tokio::sync::Notify>,
 	render: Arc<tokio::sync::SetOnce<moq_video::Output>>,
 	display: Option<Display>,
@@ -170,7 +170,7 @@ impl App {
 	fn new(
 		title: String,
 		video: Arc<Mutex<VecDeque<moq_video::Frame>>>,
-		presentation: Arc<Mutex<Presentation>>,
+		presentation: Consumer,
 		drained: Arc<tokio::sync::Notify>,
 		render: Arc<tokio::sync::SetOnce<moq_video::Output>>,
 	) -> Self {
@@ -193,23 +193,19 @@ impl App {
 			return Ok(());
 		};
 		let mut video = self.video.lock().unwrap();
-		let presentation = self.presentation.lock().unwrap();
-
-		// The clock is re-read here rather than cached with the frame: another
-		// track re-anchoring moves the whole queue's schedule, and a deadline
-		// computed on arrival would present all of it that far late. A frame with
-		// no deadline at all has nothing to wait for, since nothing has anchored
-		// the clock yet.
+		// Re-read the shared anchor on every redraw: audio may have moved it.
 		let cutoff = Instant::now() + VIDEO_EARLY_TOLERANCE;
 		let mut due = None;
-		while video
-			.front()
-			.is_some_and(|frame| presentation.due(frame.timestamp).is_none_or(|at| at <= cutoff))
+		if let Some(index) = self
+			.presentation
+			.present(video.iter().map(|frame| frame.timestamp), cutoff)
 		{
-			due = video.pop_front();
+			for _ in 0..=index {
+				due = video.pop_front();
+			}
 		}
-		let next_redraw = video.front().and_then(|frame| presentation.due(frame.timestamp));
-		drop(presentation);
+		let next_redraw = video.front().and_then(|frame| self.presentation.due(frame.timestamp));
+
 		let popped = due.is_some();
 		drop(video);
 

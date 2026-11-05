@@ -11,17 +11,15 @@ from . import audio as audio
 from . import json as json
 from . import video as video
 from .client import Client, CongestionControl, connect, qlog_supported, versions
+from .datagram import DatagramConsumer, DatagramProducer, DatagramRequest, DatagramRequests
 from .errors import is_auth, is_shutdown, protocol_error
 from .log import log_level
 from .origin import (
     Announce,
     AnnounceConsumer,
     AnnounceEvent,
-    AnnounceEventEnd,
-    AnnounceEventRestart,
-    AnnounceEventStart,
-    AnnounceEventTakeover,
-    AnnounceEventUpdate,
+    AnnounceEventAbsent,
+    AnnounceEventPresent,
     BroadcastPrepared,
     BroadcastRequest,
     Following,
@@ -41,7 +39,17 @@ from .publish import (
     TrackRequests,
 )
 from .server import Request, Server, Transport
-from .session import Allocator, BandwidthConsumer, GrantConsumer, Reservation, Session, Tokens
+from .session import (
+    Allocator,
+    BandwidthConsumer,
+    GrantConsumer,
+    RateControl,
+    Reservation,
+    Session,
+    Tokens,
+    Viewer,
+    Viewers,
+)
 from .subscribe import (
     BroadcastConsumer,
     GroupConsumer,
@@ -59,6 +67,8 @@ from .types import (
     ConnectionState,
     ConnectionStats,
     Datagram,
+    DatagramInfo,
+    Delay,
     ErrorScope,
     FetchGroupOptions,
     Frame,
@@ -69,6 +79,7 @@ from .types import (
     ProtocolKind,
     QuicConfig,
     Range,
+    RateTarget,
     Route,
     Subscription,
     Timestamp,
@@ -88,11 +99,8 @@ __all__ = [
     "Announce",
     "AnnounceConsumer",
     "AnnounceEvent",
-    "AnnounceEventEnd",
-    "AnnounceEventRestart",
-    "AnnounceEventTakeover",
-    "AnnounceEventStart",
-    "AnnounceEventUpdate",
+    "AnnounceEventAbsent",
+    "AnnounceEventPresent",
     "AnnounceRoute",
     "AudioCodec",
     "AudioEncoderInput",
@@ -111,6 +119,12 @@ __all__ = [
     "ConnectionPhase",
     "ConnectionState",
     "Datagram",
+    "DatagramInfo",
+    "DatagramConsumer",
+    "DatagramProducer",
+    "DatagramRequest",
+    "DatagramRequests",
+    "Delay",
     "Error",
     "ErrorScope",
     "Frame",
@@ -131,6 +145,8 @@ __all__ = [
     "Position",
     "Publication",
     "Range",
+    "RateControl",
+    "RateTarget",
     "Request",
     "Reservation",
     "Route",
@@ -152,6 +168,8 @@ __all__ = [
     "VideoEncoderOutput",
     "VideoDecodedFrame",
     "VideoPixelFormat",
+    "Viewer",
+    "Viewers",
     "WebSocketConfig",
     "connect",
     "is_auth",

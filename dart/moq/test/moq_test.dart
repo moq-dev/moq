@@ -19,6 +19,31 @@ Future<AnnounceEvent> nextRoute(AnnounceConsumer announced) async {
 }
 
 void main() {
+  test('datagram-only requests have independent priority demand', () async {
+    final broadcast = BroadcastProducer();
+    final stream = broadcast.publishTrack(name: 'events', info: null);
+    final requests = broadcast.requests().datagrams();
+    final consumer = broadcast.consume().datagrams(name: 'events');
+    consumer.setPriority(priority: 12);
+    final request = await requests.requested().timeout(timeout);
+    expect(request.name(), 'events');
+    expect(request.priority(), 12);
+    final producer = request.accept(info: null);
+    expect(producer.priority(), 12);
+    expect(stream.demand().wanted(), isNull);
+    producer.insert(
+      datagram: Datagram(sequence: 7, payload: utf8.encode('seven')),
+    );
+    final datagram = await consumer.recv().timeout(timeout);
+    expect(datagram?.sequence, 7);
+    expect(datagram?.payload, utf8.encode('seven'));
+    consumer.cancel();
+    expect(await producer.priorityChanged(last: 12).timeout(timeout), isNull);
+    producer.finish();
+    requests.cancel();
+    broadcast.close();
+  });
+
   test('container timebase belongs to one broadcast', () {
     final owner = BroadcastProducer();
     final other = BroadcastProducer();
@@ -67,9 +92,30 @@ void main() {
     broadcast.close();
   });
 
+  test('an omitted max age is zero and the unlimited flag sets none', () {
+    final broadcast = BroadcastProducer();
+    final omitted = broadcast
+        .publishTrack(name: 'omitted', info: null)
+        .consume(subscription: null)
+        .info();
+    expect(omitted.maxAge, Duration.zero);
+    final unlimited = broadcast
+        .publishTrack(name: 'unlimited', info: TrackInfo(maxAgeUnlimited: true))
+        .consume(subscription: null)
+        .info();
+    expect(unlimited.maxAge, isNull);
+    expect(unlimited.maxAgeUnlimited, isTrue);
+    broadcast.close();
+  });
+
   test('a default subscription skips superseded groups at once', () {
-    expect(defaultSubscription().maxDelay, Duration.zero);
-    expect(Subscription().maxDelay, isNull);
+    for (final subscription in [defaultSubscription(), Subscription()]) {
+      expect(subscription.delay.min, Duration.zero);
+      expect(subscription.delay.max, Duration.zero);
+    }
+    final unset = Delay(min: null, max: null);
+    expect(unset.min, isNull);
+    expect(unset.max, isNull);
   });
 
   test('a negative duration in a raw record is refused', () {
@@ -77,7 +123,9 @@ void main() {
     final track = broadcast.publishTrack(name: 'negative', info: null);
     expect(
       () => track.consume(
-        subscription: Subscription(maxDelay: const Duration(microseconds: -1)),
+        subscription: Subscription(
+          delay: Delay(max: const Duration(microseconds: -1)),
+        ),
       ),
       throwsArgumentError,
     );
@@ -90,7 +138,7 @@ void main() {
       final broadcast = BroadcastProducer();
       final track = broadcast.publishTrack(
         name: 'backlog',
-        info: TrackInfo(timescale: 1000000),
+        info: TrackInfo(maxAgeUnlimited: true, timescale: 1000000),
       );
       for (var ms = 0; ms < 3; ms++) {
         final group = track.appendGroup();
@@ -105,7 +153,7 @@ void main() {
 
       final consumer = track.consume(
         subscription: Subscription(
-          maxDelay: const Duration(seconds: 10),
+          delay: Delay(max: const Duration(seconds: 10)),
           ranges: [Range(start: RelativeMoqAnchor(2))],
           order: Order.ascending,
         ),
@@ -214,8 +262,24 @@ void main() {
     final serverSession = await accepted;
     expect(client.allocator(), isA<MoqAllocator>());
 
+    final viewers = client.viewers();
+    expect(viewers, isA<Viewers>());
+    final viewer = viewers.watch(maxBps: 4000000);
+    expect(viewer, isA<Viewer>());
+    // A slice never exceeds its ceiling, whether or not QUIC has an estimate yet.
+    viewer.update(maxBps: 1000000);
+    expect(viewer.rate() ?? 0, lessThanOrEqualTo(1000000));
+    viewers.setTarget(targetBps: 0);
+    viewers.setTarget(targetBps: null);
+    // Past what a PROBE target carries: refused.
+    expect(
+      () => viewers.watch(maxBps: 1 << 53),
+      throwsA(isA<OutOfRangeMoqException>()),
+    );
+    viewer.dispose();
+
     final announcement = client.announced().updates().firstWhere(
-      (event) => event is AnnounceEventStart,
+      (event) => event is AnnounceEventPresent,
     );
     final publication = relay.createBroadcast(path: 'live');
     final track = publication.broadcast().publishTrack(
@@ -224,7 +288,7 @@ void main() {
     );
     publication.announce(route: AnnounceRoute());
     final announced =
-        (await announcement.timeout(timeout) as AnnounceEventStart).announce;
+        (await announcement.timeout(timeout) as AnnounceEventPresent).announce;
     expect(announced.prefix, 'live');
 
     final requested = await client.request(announced.prefix).timeout(timeout);
@@ -304,14 +368,14 @@ void main() {
     final serverSession = await accepted;
 
     final announcement = client.announced().updates().firstWhere(
-      (event) => event is AnnounceEventStart,
+      (event) => event is AnnounceEventPresent,
     );
     final publication = server.createBroadcast('live');
     final broadcast = publication.broadcast();
     final track = broadcast.publishTrack(name: 'events', info: null);
     publication.announce(route: AnnounceRoute());
     final announced =
-        (await announcement.timeout(timeout) as AnnounceEventStart).announce;
+        (await announcement.timeout(timeout) as AnnounceEventPresent).announce;
     expect(announced.prefix, 'live');
 
     await client.close();
@@ -474,27 +538,27 @@ void main() {
     publication.announce(route: AnnounceRoute());
     final announced = consumer.announced(config: MoqAnnounceConfig());
     final first = await nextRoute(announced);
-    expect(first, isA<AnnounceEventStart>());
-    expect((first as AnnounceEventStart).announce.prefix, 'live');
+    expect(first, isA<AnnounceEventPresent>());
+    expect((first as AnnounceEventPresent).announce.prefix, 'live');
 
     publication.unannounce();
     final retracted = await nextRoute(announced);
-    expect(retracted, isA<AnnounceEventEnd>());
-    expect((retracted as AnnounceEventEnd).announce.prefix, 'live');
+    expect(retracted, isA<AnnounceEventAbsent>());
+    expect((retracted as AnnounceEventAbsent).announce.prefix, 'live');
     await expectLater(
       consumer.request(path: 'live').timeout(timeout),
       throwsA(anything),
     );
 
     publication.announce(route: AnnounceRoute());
-    expect(await nextRoute(announced), isA<AnnounceEventStart>());
+    expect(await nextRoute(announced), isA<AnnounceEventPresent>());
     await consumer.request(path: 'live').timeout(timeout);
 
     // Disposing the publication keeps the route; closing the broadcast ends it.
     publication.dispose();
     await consumer.request(path: 'live').timeout(timeout);
     broadcast.close();
-    expect(await nextRoute(announced), isA<AnnounceEventEnd>());
+    expect(await nextRoute(announced), isA<AnnounceEventAbsent>());
     announced.cancel();
     announced.dispose();
   });
@@ -516,26 +580,56 @@ void main() {
     replacement.broadcast().close();
   });
 
-  test('a new instance restarts announce consumers', () async {
+  test('a new instance restarts followers but stays listed', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
-    final announced = origin.consume().announced(config: MoqAnnounceConfig());
+    final consumer = origin.consume();
+    final announced = consumer.announced(config: MoqAnnounceConfig());
+    final following = consumer.follow(path: 'instance');
     final publication = origin.createBroadcast(path: 'instance');
 
     publication.announce(route: AnnounceRoute());
-    final start = await nextRoute(announced) as AnnounceEventStart;
-    expect(start.announce.route.instance, isNotEmpty);
+    final present = await nextRoute(announced) as AnnounceEventPresent;
+    expect(present.announce.route.instance, isNotEmpty);
+    (await following.available().timeout(timeout))!.dispose();
 
     publication.announce(route: AnnounceRoute(instance: 'camera', epoch: 1));
-    final restart = await nextRoute(announced) as AnnounceEventRestart;
-    expect(restart.announce.route.instance, 'camera');
+    (await following.available().timeout(timeout))!.dispose();
+
+    // The takeover was not listed, so the next event is the path going absent.
+    publication.unannounce();
+    final absent = await nextRoute(announced) as AnnounceEventAbsent;
+    expect(absent.announce.route.instance, 'camera');
 
     expect(
       () => publication.announce(route: AnnounceRoute(instance: '')),
       throwsA(isA<InvalidInstanceMoqException>()),
     );
+    following.cancel();
+    following.dispose();
     announced.cancel();
     announced.dispose();
   });
+
+  test(
+    'a follower reports the path going offline and the next broadcast',
+    () async {
+      final origin = MoqOriginProducer(config: MoqOriginConfig());
+      final following = origin.consume().follow(path: 'offline');
+      final publication = origin.createBroadcast(path: 'offline');
+
+      publication.announce(route: AnnounceRoute());
+      (await following.available().timeout(timeout))!.dispose();
+
+      publication.unannounce();
+      expect(await following.available().timeout(timeout), isNull);
+
+      publication.announce(route: AnnounceRoute());
+      (await following.available().timeout(timeout))!.dispose();
+
+      following.cancel();
+      following.dispose();
+    },
+  );
 
   test('announced pattern reports captures', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
@@ -545,7 +639,7 @@ void main() {
     final publication = origin.createBroadcast(path: 'room/alice/chat');
     publication.announce(route: AnnounceRoute());
 
-    final update = await nextRoute(announced) as AnnounceEventStart;
+    final update = await nextRoute(announced) as AnnounceEventPresent;
     expect(update.announce.prefix, 'room/alice/chat');
     expect(update.announce.captures, ['alice']);
   });
@@ -577,11 +671,10 @@ void main() {
       ),
       config: moq_json.SnapshotConfig(),
     );
-    final track = await broadcast
-        .consume()
-        .subscribeTrack(name: 'status', subscription: null)
-        .timeout(timeout);
-    final consumer = moq_json.SnapshotConsumer(track: track);
+    final consumer = moq_json.SnapshotConsumer(
+      broadcast: broadcast.consume(),
+      name: 'status',
+    );
 
     for (var n = 1; n <= 4; n++) {
       producer.update(
@@ -759,10 +852,7 @@ void main() {
 
     final fixedOutput = moq_audio.DecoderOutput(
       format: moq_audio.SampleFormat.f32,
-      delay: moq_media.Delay(
-        min: Duration(milliseconds: 80),
-        max: Duration.zero,
-      ),
+      delay: Delay(min: Duration(milliseconds: 80)),
       estimate: false,
     );
     final fixed = await moq_audio.Consumer.subscribe(

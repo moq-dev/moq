@@ -1,15 +1,12 @@
-use crate::error::KeyError;
-use crate::{Algorithm, EllipticCurve, Jwk, Key, KeyMaterial, RsaPublicKey};
-use aws_lc_rs::encoding::{AsBigEndian, AsDer, Pkcs8V1Der};
-use aws_lc_rs::signature::KeyPair;
-use p256::elliptic_curve::array::typenum::Unsigned;
-use p256::elliptic_curve::point::PointCompression;
-use p256::elliptic_curve::sec1::{FromSec1Point, ModulusSize, ToSec1Point};
-use p256::elliptic_curve::{Curve, CurveArithmetic, SecretKey};
-use pkcs1::der::Decode;
+use crate::{Algorithm, EllipticCurve, Error, Jwk, Key, KeyMaterial, RsaPublicKey};
+use pkcs1::der::Decode as _;
+use pkcs8::der::Decode as _;
+use rind::signature::{EcdsaKeyPair, EcdsaSigningAlgorithm, Ed25519KeyPair, RsaKeyPair, RsaKeySize, sign};
 
 /// Generate a key pair for the given algorithm, returning the private and public keys.
 pub fn generate(algorithm: Algorithm, id: Option<crate::KeyId>) -> crate::Result<Key> {
+	crate::crypto::init()?;
+
 	let key = match algorithm {
 		Algorithm::HS256 => generate_hmac_key::<32>(),
 		Algorithm::HS384 => generate_hmac_key::<48>(),
@@ -20,8 +17,8 @@ pub fn generate(algorithm: Algorithm, id: Option<crate::KeyId>) -> crate::Result
 		| Algorithm::PS256
 		| Algorithm::PS384
 		| Algorithm::PS512 => generate_rsa_key(),
-		Algorithm::ES256 => generate_ec_key::<p256::NistP256>(EllipticCurve::P256),
-		Algorithm::ES384 => generate_ec_key::<p384::NistP384>(EllipticCurve::P384),
+		Algorithm::ES256 => generate_ec_key(&sign::ECDSA_P256_SHA256_FIXED, EllipticCurve::P256),
+		Algorithm::ES384 => generate_ec_key(&sign::ECDSA_P384_SHA384_FIXED, EllipticCurve::P384),
 		Algorithm::EdDSA => generate_ed25519_key(),
 	};
 
@@ -32,17 +29,17 @@ pub fn generate(algorithm: Algorithm, id: Option<crate::KeyId>) -> crate::Result
 
 fn generate_hmac_key<const SIZE: usize>() -> crate::Result<KeyMaterial> {
 	let mut key = [0u8; SIZE];
-	aws_lc_rs::rand::fill(&mut key)?;
+	rind::rand::fill(&mut key).map_err(Error::crypto)?;
 	Ok(KeyMaterial::OCT { secret: key.to_vec() })
 }
 
+// rind exports an RSA private key only as PKCS#8, so each JWK field is read back out of it.
 fn generate_rsa_key() -> crate::Result<KeyMaterial> {
-	let key = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048)?;
-	let document: Pkcs8V1Der<'_> = key.as_der()?;
-	let info =
-		pkcs8::PrivateKeyInfoRef::try_from(document.as_ref()).map_err(|e| crate::Error::Crypto(e.to_string()))?;
-	let key =
-		pkcs1::RsaPrivateKey::from_der(info.private_key.as_bytes()).map_err(|e| crate::Error::Crypto(e.to_string()))?;
+	let pkcs8 = RsaKeyPair::generate(RsaKeySize::Rsa2048)
+		.map_err(Error::crypto)?
+		.to_pkcs8();
+	let info = pkcs8::PrivateKeyInfoRef::from_der(pkcs8.as_ref()).map_err(Error::crypto)?;
+	let key = pkcs1::RsaPrivateKey::from_der(info.private_key.as_bytes()).map_err(Error::crypto)?;
 
 	Ok(KeyMaterial::RSA {
 		public: RsaPublicKey {
@@ -61,44 +58,28 @@ fn generate_rsa_key() -> crate::Result<KeyMaterial> {
 	})
 }
 
-fn generate_ec_key<C>(curve: EllipticCurve) -> crate::Result<KeyMaterial>
-where
-	C: Curve + CurveArithmetic + PointCompression,
-	C::AffinePoint: ToSec1Point<C> + FromSec1Point<C>,
-	C::FieldBytesSize: ModulusSize,
-{
-	let mut bytes = vec![0u8; C::FieldBytesSize::to_usize()];
-	let secret = loop {
-		aws_lc_rs::rand::fill(&mut bytes)?;
+fn generate_ec_key(algorithm: &'static EcdsaSigningAlgorithm, curve: EllipticCurve) -> crate::Result<KeyMaterial> {
+	let pair = EcdsaKeyPair::generate(algorithm).map_err(Error::crypto)?;
 
-		if let Ok(secret) = SecretKey::<C>::from_slice(&bytes) {
-			break secret;
-		}
-	};
-
-	let point = secret.public_key().to_sec1_point(false);
-
-	let x = point.x().ok_or(KeyError::MissingEcX)?.to_vec();
-	let y = point.y().ok_or(KeyError::MissingEcY)?.to_vec();
-	let d = secret.to_bytes().to_vec();
+	// An X9.62 uncompressed point: a 0x04 tag, then x and y at equal width.
+	let public = pair.public_key();
+	let point = &public.as_ref()[1..];
+	let (x, y) = point.split_at(point.len() / 2);
 
 	Ok(KeyMaterial::EC {
 		curve,
-		x,
-		y,
-		d: Some(d),
+		x: x.to_vec(),
+		y: y.to_vec(),
+		d: Some(pair.to_scalar().as_ref().to_vec()),
 	})
 }
 
 fn generate_ed25519_key() -> crate::Result<KeyMaterial> {
-	let key_pair = aws_lc_rs::signature::Ed25519KeyPair::generate()?;
-
-	let public_key = key_pair.public_key().as_ref().to_vec();
-	let seed = key_pair.seed()?.as_be_bytes()?.as_ref().to_vec();
+	let pair = Ed25519KeyPair::generate().map_err(Error::crypto)?;
 
 	Ok(KeyMaterial::OKP {
 		curve: EllipticCurve::Ed25519,
-		x: public_key,
-		d: Some(seed),
+		x: pair.public_key().as_ref().to_vec(),
+		d: Some(pair.to_seed().as_ref().to_vec()),
 	})
 }

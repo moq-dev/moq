@@ -4,6 +4,31 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The gateways need the `async` feature
+
+The `import` and `export` modules compile only with the new `async` Cargo feature, which the default
+`server` feature enables. With `default-features = false`, enable it to keep them:
+`moq-hls = { version = "...", default-features = false, features = ["async"] }`.
+Nothing else changes for a build with `server`.
+
+The export waits have polls for a caller that drives them itself: `Broadcaster::poll_closed`
+and `poll_ready`, `Rendition::poll_playable`, and `poll_next` on the `renditions::Consumer` and
+`segments::Consumer` cursors. A `segments::Consumer::next` dropped mid-fetch leaves that fetch to the
+next call, which resumes it rather than starting over.
+
+### HTTP HLS lists contributions without starting their media
+
+`Server` follows the root catalog's contributions and lists their renditions from their
+catalogs, on the root catalog's join interval and clock. Contribution media starts
+only when requested and stops once responses finish and it idles for the longer of three
+target durations and the playlist window plus one target duration.
+Their URLs include both instances:
+`@{instance}/contribution/{id}/{kind}/{rendition}/@{contribution-instance}/...`.
+`Route::contribution` identifies that contribution; `Resource::instance` still names the
+parent broadcast's instance. Embedders using `Server::respond` need no routing change.
+DASH, `Broadcaster::new`, and the recorder cursor continue serving the broadcast's own
+renditions only.
+
 ### `Broadcaster::new` returns a cloneable handle and its `Driver`
 
 `Broadcaster::new(source, config)` returns `(Broadcaster, Driver)` instead of `Arc<Broadcaster>`.
@@ -16,14 +41,16 @@ let (broadcaster, driver) = moq_hls::export::Broadcaster::new(source, config);
 tokio::spawn(driver.run());
 ```
 
-### Renditions list their own HLS records
+### Renditions number their media on the join interval
 
-Each rendition reads the records its catalog `hls` field names, and segment `n` is its record `n`; a rendition without `hls` gets no playlist.
-`Error::TimelineFailed` is `Error::RecordsFailed { track, source }`.
-Segment numbers mean nothing across renditions, so match renditions by timestamp, as players do; nothing snaps to a nearby keyframe.
-Each rendition counts its own discontinuities, so `Segment::discontinuity` from two renditions' cursors can differ after a break in one of them.
+Each rendition reads its media track and numbers its groups into segments on the grid of the catalog's `media.join.interval`, from each group's first frame timestamp; a broadcast without the interval gets no playlists.
+Every rendition shares the grid's segment numbers while cutting at its own groups, and a grid slot no group starts a segment in is listed as a gap.
+`Rendition::hls()` is replaced by `Rendition::track()`, the media track it reads, and `Rendition::interval()`.
+`Error::TimelineFailed` is `Error::MediaFailed { track, source }`, naming the media track.
+A segment is the smallest whole multiple of the interval that is at least a second long, and `EXT-X-TARGETDURATION` is twice that, rounded up to whole seconds.
+Each rendition counts its own discontinuities, which start only where its timestamps go back or at a reconfigure's hand-over, so `Segment::discontinuity` from two renditions' cursors can differ.
 The DASH manifest has one period, with `t` and `d` in milliseconds, and no `segmentAlignment`.
-Segment URL tags hash each rendition's own record track and its config, so every URL changes once, and a reconfigured rendition lists its later segments under new URLs.
+Segment URL tags hash each rendition's media track, the interval, and its config, so every URL changes once, and a reconfigured rendition lists its later segments under new URLs.
 
 ### The segment cursor yields gaps
 
@@ -39,7 +66,7 @@ manifest, and recording cursor with `Error::CatalogFailed { source }` instead of
 the raw `source`. Before, a recording cursor returned the raw network error
 (such as `Unroutable`) when the catalog failed before the reference timeline
 did, so a caller could not tell that final failure from a retryable fetch error.
-Match `CatalogFailed` wherever you match `RecordsFailed`, and look through
+Match `CatalogFailed` wherever you match `MediaFailed`, and look through
 `source` for the underlying error.
 
 ### Rendition URLs name the publisher instance
@@ -48,10 +75,12 @@ Match `CatalogFailed` wherever you match `RecordsFailed`, and look through
 master playlist and DASH manifest list now sits under that instance:
 `/{broadcast}/@{instance}/{kind}/{rendition}/...` instead of
 `/{broadcast}/{kind}/{rendition}/...`. `Route::parse` refuses the old layout,
-and `Resource::{Media, Init, Segment, SegmentAt}` carry the `instance` they
+and `Resource::{Media, Init, Segment}` carry the `instance` they
 name. `Broadcaster::master_playlist` and `Broadcaster::manifest` render the new
 layout. An embedder that answers through `Server::respond` needs no change; one
-that routes rendition URLs itself must pass the `@{instance}` segment through.
+that routes rendition URLs itself must percent-decode the instance after splitting the
+`@{instance}` segment from the path. Instance delimiters such as `/`, `?`, `%`, and `#` are
+percent-encoded, just like rendition names.
 
 ### Denied broadcast references report authorization failure
 
@@ -65,14 +94,14 @@ Allowed renditions keep serving, and missing or disconnected media remains 404.
 
 ### A failed timeline fails the segment cursor
 
-`export::segments::Consumer::next` returns `Err(Error::RecordsFailed { .. })` once a failed timeline's covered segments drain, instead of `Ok(None)`.
+`export::segments::Consumer::next` returns `Err(Error::MediaFailed { .. })` once a failed track's covered segments drain, instead of `Ok(None)`.
 `Ok(None)` now means only a clean end, so finalize a recording there, and mark it truncated on the error.
 
 ```rust
 match cursor.next().await {
 	Ok(Some(segment)) => { /* store it */ }
 	Ok(None) => { /* complete: finalize the recording */ }
-	Err(Error::RecordsFailed { .. }) => { /* truncated: every later call fails the same */ }
+	Err(Error::MediaFailed { .. }) => { /* truncated: every later call fails the same */ }
 	Err(err) => { /* a fetch failed: call next() again to retry it */ }
 }
 ```
@@ -108,7 +137,7 @@ Treat the error as final and import the restarted source as a new broadcast.
 ### A failed timeline fails its listings
 
 `export::Broadcaster::manifest` and `export::Rendition::media_playlist` return `Result<Option<String>>`.
-Answer `Err(Error::RecordsFailed { .. })` with an uncacheable error (the server router uses 500 with `Cache-Control: no-store`) instead of serving a playlist.
+Answer `Err(Error::MediaFailed { .. })` with an uncacheable error (the server router uses 500 with `Cache-Control: no-store`) instead of serving a playlist.
 `Rendition::playlist` fails the same way, including for a range it used to refuse with `Error::RangeUnavailable`.
 A failed timeline no longer ends a playlist with `EXT-X-ENDLIST` or turns the DASH manifest `static`; only a clean finish does.
 A rendition whose own timeline failed is left out of the manifest and master playlist, while its siblings keep serving.

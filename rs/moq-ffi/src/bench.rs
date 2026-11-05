@@ -248,6 +248,7 @@ async fn rust_ffi() {
 		let timed = MoqTrackInfo {
 			priority: 0,
 			max_age: None,
+			max_age_unlimited: false,
 			refresh: None,
 			timescale: Some(1_000_000),
 			compress: false,
@@ -318,4 +319,84 @@ async fn rust_net() {
 async fn benchmark_ffi() {
 	rust_ffi().await;
 	rust_net().await;
+}
+
+/// Wake only `active` children while independently growing the background population.
+/// The acknowledged turn measures actual root dispatch, including its per-child wakes.
+#[tokio::test]
+#[ignore = "benchmark: nightly ignored tests"]
+async fn benchmark_background() {
+	let mut report = Report::default();
+	for held in [1, 64, 1024, 8192] {
+		for active in [1, 8, 64] {
+			if active > held {
+				continue;
+			}
+			let ack = kio::Queue::new();
+			let mut pulses = Vec::new();
+			let mut children = Vec::new();
+			for _ in 0..held {
+				let pulse = kio::Producer::new(0u64);
+				let reader = pulse.consume();
+				let ack = ack.clone();
+				children.push(crate::ffi::Background::new(async move {
+					let mut previous = 0;
+					while let Ok(next) = kio::wait(|waiter| {
+						reader.poll(waiter, |value| {
+							if **value > previous {
+								std::task::Poll::Ready(**value)
+							} else {
+								std::task::Poll::Pending
+							}
+						})
+					})
+					.await
+					{
+						previous = next;
+						ack.try_push(()).unwrap();
+					}
+					Ok(())
+				}));
+				pulses.push(pulse);
+			}
+			let round = |n| {
+				let (pulses, ack) = (&pulses, &ack);
+				async move {
+					for pulse in &pulses[..active] {
+						*pulse
+							.write()
+							.unwrap_or_else(|_| unreachable!("benchmark owns the pulse")) = n;
+					}
+					for _ in 0..active {
+						ack.pop().await.unwrap();
+					}
+				}
+			};
+			for n in 1..=WARMUP {
+				round(n).await;
+			}
+			let (start, cpu_start, budget) = (Instant::now(), cpu(), budget());
+			let mut rounds = 0;
+			while start.elapsed() < budget {
+				kio::clock::timeout(ROUND_TIMEOUT, round(WARMUP + rounds + 1))
+					.await
+					.expect("root wedged");
+				rounds += 1;
+			}
+			let elapsed = start.elapsed();
+			let cpu_used = cpu() - cpu_start;
+			let name = format!("held={held}/active={active}");
+			report.push(format!("turn/{name}"), "ns", elapsed.as_nanos() as f64 / rounds as f64);
+			report.push(
+				format!("cpu/{name}"),
+				"ns",
+				cpu_used.as_nanos() as f64 / (rounds * active as u64) as f64,
+			);
+			drop(pulses);
+			for child in children {
+				child.finished().await.unwrap();
+			}
+		}
+	}
+	report.write("rust-background");
 }

@@ -49,6 +49,9 @@ struct Pending {
 	// What its joins ask with now, shared with them and its handler.
 	asks: kio::Shared<Asks>,
 	queued: bool,
+	// A flight: a separate copy of one group from its start frame, which no other reader
+	// joins by sequence; see [`FillState::fly`].
+	flight: bool,
 	// How many joins still read each sequence: one a reader narrowed away is no longer owed.
 	wants: RangeMap<u64, u32>,
 	// Readers hold consumers, so it counts the fill's demand; the handler's copy says what
@@ -519,6 +522,7 @@ impl FillState {
 					time: None,
 					asks,
 					queued: true,
+					flight: false,
 					wants: RangeMap::from_iter([(groups.clone(), 1)]),
 					result,
 				},
@@ -526,6 +530,68 @@ impl FillState {
 			self.queue.push_back(id);
 		}
 		(joins, unfillable)
+	}
+
+	/// Join or queue a flight of group `sequence` from `frame`: a fill answered with a copy
+	/// of its own, which no reader joins by sequence, since a copy shed past its readers
+	/// holds nothing for one asking earlier. Readers asking from the same frame before it is
+	/// answered share it. `None` while no handler can take it.
+	pub(super) fn fly(
+		&mut self,
+		shared: &kio::Shared<FillState>,
+		sequence: u64,
+		frame: u64,
+		asking: Asking,
+	) -> Option<Join> {
+		let groups = sequence..sequence.checked_add(1)?;
+		if self.handlers == 0 {
+			return None;
+		}
+		let boarding = self.pending.iter_mut().find(|(_, pending)| {
+			pending.flight
+				&& pending.start == Position { group: sequence, frame }
+				&& !pending.result.read().resolved.contains(&sequence)
+		});
+		let id = match boarding {
+			Some((id, pending)) => {
+				pending.want(groups.clone());
+				pending.asks.lock().add(&asking);
+				*id
+			}
+			None => {
+				let id = self.next;
+				self.next += 1;
+				let mut asks = Asks::default();
+				asks.add(&asking);
+				self.pending.insert(
+					id,
+					Pending {
+						start: Position { group: sequence, frame },
+						end: groups.end,
+						frame_end: None,
+						time: None,
+						asks: kio::Shared::new(asks),
+						queued: true,
+						flight: true,
+						wants: RangeMap::from_iter([(groups.clone(), 1)]),
+						result: Default::default(),
+					},
+				);
+				self.queue.push_back(id);
+				id
+			}
+		};
+		let pending = &self.pending[&id];
+		Some(Join {
+			fills: shared.clone(),
+			id,
+			held: RangeSet::from_iter([groups.clone()]),
+			groups,
+			outcome: Some(pending.result.consume()),
+			attempt: pending.result.weak(),
+			asking,
+			asks: pending.asks.clone(),
+		})
 	}
 
 	/// Queue a fill looking up `time` within `ask`'s run, with the join waiting on its answer.
@@ -555,6 +621,7 @@ impl FillState {
 				time: Some(time),
 				asks,
 				queued: true,
+				flight: false,
 				wants: RangeMap::new(),
 				result,
 			},
@@ -646,6 +713,15 @@ impl FillState {
 	}
 }
 
+/// The pieces of `gap` once `skip` is taken out of it.
+fn without(gap: ops::Range<u64>, skip: Option<u64>) -> impl Iterator<Item = ops::Range<u64>> {
+	let pieces = match skip {
+		Some(skip) if gap.contains(&skip) => [gap.start..skip, skip + 1..gap.end],
+		_ => [gap, 0..0],
+	};
+	pieces.into_iter().filter(|piece| !piece.is_empty())
+}
+
 /// Stop routing readers wanting `groups` to fill `id`: they were answered. Reads first, so
 /// an answer that changes nothing wakes no handler parked on the queue.
 fn uncover(fills: &kio::Shared<FillState>, id: u64, groups: ops::Range<u64>) {
@@ -669,7 +745,13 @@ pub(super) fn poll_requested(
 	}) {
 		let id = guard.pop().expect("predicate guaranteed a fill");
 		let pending = guard.pending.get(&id).expect("popped fill is pending");
-		let (start, end, frame_end, time) = (pending.start, pending.end, pending.frame_end, pending.time);
+		let (start, end, frame_end, time, flight) = (
+			pending.start,
+			pending.end,
+			pending.frame_end,
+			pending.time,
+			pending.flight,
+		);
 		let (asks, result) = (pending.asks.clone(), pending.result.clone());
 		drop(guard);
 		// Built with the fills unlocked, so no other lock nests under theirs.
@@ -681,6 +763,7 @@ pub(super) fn poll_requested(
 			end,
 			frame_end,
 			time,
+			flight,
 			asks,
 			result,
 		};
@@ -744,6 +827,8 @@ struct Inner {
 	// Exclusive frame cap in the last group; None asks through the original end.
 	frame_end: Option<u64>,
 	time: Option<Timestamp>,
+	// Answered with a copy of its own rather than the cache's; see [`FillState::fly`].
+	flight: bool,
 	asks: kio::Shared<Asks>,
 	result: kio::Producer<Outcome>,
 }
@@ -838,13 +923,8 @@ impl Fill {
 		self.inner.is_wanted(sequence)
 	}
 
-	/// Wait until no reader waits for group `sequence` from this fill, so stop serving it.
-	#[cfg(feature = "async")]
-	pub async fn unwanted(&self, sequence: u64) {
-		kio::wait(|waiter| self.poll_unwanted(sequence, waiter)).await
-	}
-
-	/// Poll until no reader waits for group `sequence` from this fill.
+	/// Resolves once no reader waits for group `sequence` from this fill, so stop serving it.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_unwanted(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<()> {
 		self.inner.poll_unwanted(sequence, waiter)
 	}
@@ -866,6 +946,11 @@ impl Fill {
 	/// neither answered nor delivered live since it was asked. `None` once none is owed or
 	/// no reader waits on the fill, so stop serving it.
 	pub fn wanted(&self) -> Option<u64> {
+		self.wanted_except(None)
+	}
+
+	/// [`Self::wanted`], passing over `skip`.
+	fn wanted_except(&self, skip: Option<u64>) -> Option<u64> {
 		if !self.inner.result.wanted() {
 			return None;
 		}
@@ -873,19 +958,24 @@ impl Fill {
 			let wanted = self.inner.wanted();
 			let sequence = {
 				let outcome = self.inner.result.read();
-				let mut gaps = wanted.iter().flat_map(|run| outcome.resolved.gaps(run));
+				let mut gaps = wanted
+					.iter()
+					.flat_map(|run| outcome.resolved.gaps(run))
+					.flat_map(|gap| without(gap, skip));
 				match self.order() {
 					Order::Ascending => gaps.next().map(|gap| gap.start),
 					Order::Descending => gaps.last().map(|gap| gap.end - 1),
 				}
 			}?;
 			// The live feed may have delivered it since: answered by the cache, not the source.
-			let cached = self
-				.inner
-				.state
-				.read()
-				.covering_range(sequence, self.inner.bounds(sequence))
-				.is_some();
+			// Never a flight's, which the cached copy shed.
+			let cached = !self.inner.flight
+				&& self
+					.inner
+					.state
+					.read()
+					.covering_range(sequence, self.inner.bounds(sequence))
+					.is_some();
 			if !cached {
 				return Some(sequence);
 			}
@@ -898,17 +988,12 @@ impl Fill {
 		}
 	}
 
-	/// Return [`wanted`](Self::wanted) once it differs from what this handle last returned:
+	/// [`wanted`](Self::wanted) once it differs from what this handle last returned:
 	/// immediately on the first call, then on each change.
 	///
 	/// So `while let Some(sequence) = fill.wanted_changed().await` serves each group as it
 	/// becomes owed, and ends once the fill is withdrawn or answered.
-	#[cfg(feature = "async")]
-	pub async fn wanted_changed(&mut self) -> Option<u64> {
-		kio::wait(|waiter| self.poll_wanted_changed(waiter)).await
-	}
-
-	/// Poll for [`wanted`](Self::wanted) to differ from what this handle last returned.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		// Arm every input of `wanted` before reading it, so a change in between still wakes:
 		// the readers leaving, narrowing, or taking a group, the answers, the order, and a
@@ -940,10 +1025,29 @@ impl Fill {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn next_run(&self) -> Option<ops::Range<u64>> {
 		let sequence = self.wanted()?;
+		Some(self.run_from(sequence, self.inner.owed_around(sequence)))
+	}
+
+	/// [`Self::next_run`], passing over `skip`: a group another request is already bringing,
+	/// so the groups around it are served while it waits. `None` once nothing else is owed.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn next_run_except(&self, skip: u64) -> Option<ops::Range<u64>> {
+		let sequence = self.wanted_except(Some(skip))?;
 		let owed = self.inner.owed_around(sequence);
+		let owed = match skip < sequence {
+			true => owed.start.max(skip + 1)..owed.end,
+			false => owed.start..owed.end.min(skip),
+		};
+		Some(self.run_from(sequence, owed))
+	}
+
+	/// The run from `sequence` over the `owed` groups beside it, in the fill's order, up to
+	/// the nearest one the cache holds.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn run_from(&self, sequence: u64, owed: ops::Range<u64>) -> ops::Range<u64> {
 		let state = self.inner.state.read();
 		let held = |(_, slot): &(&u64, &super::Slot)| !slot.is_aborted();
-		Some(match self.order() {
+		match self.order() {
 			Order::Ascending => {
 				let end = state
 					.lookup
@@ -961,7 +1065,7 @@ impl Fill {
 					.map_or(owed.start, |(held, _)| held + 1);
 				start..sequence + 1
 			}
-		})
+		}
 	}
 
 	/// The newest group the track's live feed produced, while a feed still writes the track:
@@ -1009,9 +1113,8 @@ impl Fill {
 		self.inner.result.clone()
 	}
 
-	/// Refuse `groups` with the source's answer to a request for them: only a lone datagram
-	/// group, or [`Error::Old`] under the publisher's max age (with every older group of the
-	/// fill), is named dropped.
+	/// Refuse `groups` with the source's answer to a request for them: only [`Error::Old`]
+	/// under the publisher's max age (with every older group of the fill) is named dropped.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn reject_groups(&self, groups: ops::Range<u64>, err: Error) {
 		self.inner.reject(groups, err, self.max_delay());
@@ -1108,7 +1211,10 @@ impl Inner {
 		}
 		// Cache the group before answering: readers resolve an accept through the cache.
 		let res = TrackState::modify(&self.state).and_then(|mut state| {
-			let res = state.insert_group_request(sequence, frames, info);
+			let res = match self.flight {
+				true => state.insert_flight(sequence, frames, info),
+				false => state.insert_group_request(sequence, frames, info),
+			};
 			let deferred = state.deferred();
 			drop(state);
 			deferred.wake();
@@ -1117,7 +1223,7 @@ impl Inner {
 		if let Ok(mut outcome) = self.result.write() {
 			outcome.accept(sequence..end);
 			if let Ok(group) = &res
-				&& (frames.start > 0 || frames.end.is_some())
+				&& (self.flight || frames.start > 0 || frames.end.is_some())
 			{
 				outcome.partial.insert(sequence, group.handle());
 			}
@@ -1196,9 +1302,6 @@ impl Inner {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn reject(&self, groups: ops::Range<u64>, err: Error, asked: Option<Duration>) {
 		match err {
-			// A datagram is never cached, so no request ever gets it. Only a request for that
-			// one group says which group it was.
-			Error::NotFetchable if groups.end - groups.start == 1 => self.drop_groups(groups, err, asked),
 			// Stale under the fill's budget, and so is every group older than it: a timed
 			// track's starts never rewind. Only the publisher's max age binds every reader;
 			// under the fill's own budget they are withdrawn, for a reader with a wider one.
@@ -1392,9 +1495,9 @@ impl GroupFill {
 		self.inner.accept(self.sequence, info.into())
 	}
 
-	/// Refuse the group with the source's answer, for the readers waiting now. Only a
-	/// datagram, or [`Error::Old`] under the publisher's max age (with every older group of
-	/// the fill), names it dropped.
+	/// Refuse the group with the source's answer, for the readers waiting now. Only
+	/// [`Error::Old`] under the publisher's max age (with every older group of the fill)
+	/// names it dropped.
 	pub(crate) fn reject(self, err: Error) {
 		self.inner.reject(self.sequence..self.sequence + 1, err, self.max_delay);
 	}

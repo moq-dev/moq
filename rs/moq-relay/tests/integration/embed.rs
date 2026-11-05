@@ -9,7 +9,9 @@
 
 #![cfg(feature = "_quic")]
 
-use std::net::{SocketAddr, TcpListener};
+#[cfg(not(target_os = "linux"))]
+use std::net::SocketAddr;
+use std::net::TcpListener;
 use std::time::Duration;
 
 use moq_relay::{Config, Relay};
@@ -23,13 +25,22 @@ fn timed() -> moq_net::track::Info {
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-	let key = rcgen::KeyPair::generate().expect("keypair");
-	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("cert params");
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("cert params");
 	let cert = params.self_signed(&key).expect("self-signed cert");
 	let cert_path = dir.join("cert.pem");
 	let key_path = dir.join("key.pem");
 	std::fs::write(&cert_path, cert.pem()).expect("write cert");
-	std::fs::write(&key_path, key.serialize_pem()).expect("write key");
+	std::fs::write(
+		&key_path,
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+	)
+	.expect("write key");
 	(cert_path, key_path)
 }
 
@@ -47,14 +58,14 @@ fn client() -> moq_tokio::Client {
 		.with_reconnect(false)
 }
 
+#[cfg(not(target_os = "linux"))]
 async fn assert_owner_stopped(quic: SocketAddr, http: SocketAddr) {
 	assert!(
 		tokio::net::TcpStream::connect(http).await.is_err(),
 		"HTTP still accepted after the owner stopped"
 	);
-	// A closed UDP port never answers, so this only ends at the timeout. A live
-	// listener answers a loopback handshake well inside it, and on Linux the
-	// socket check before this is what proves the port closed.
+	// Without the Linux socket-inode proof, probe the listeners. A closed UDP
+	// port never answers, so this only ends at the timeout.
 	let url: url::Url = format!("https://{quic}/").parse().expect("parse url");
 	let after = kio::clock::timeout(
 		Duration::from_millis(500),
@@ -149,7 +160,7 @@ async fn stop(trigger: moq_relay::shutdown::Trigger, running: tokio::task::JoinH
 /// Load, mount a custom route, clone the origin, run the owner, prove QUIC
 /// plus HTTP, then stop it through the trigger and prove its sockets closed.
 async fn embed_and_stop(mut config: Config) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	// No drain window: the sessions are already gone by the time the owner
 	// stops, and the test should not wait out the default.
@@ -274,7 +285,7 @@ async fn embed_and_stop(mut config: Config) {
 	let url: url::Url = format!("https://{quic}/").parse().expect("parse url");
 	let subscriber_origin = moq_tokio::origin::spawn();
 	let consumer = subscriber_origin.consume();
-	let mut announced = consumer.announced();
+	let mut announced = consumer.routes();
 	let subscriber = kio::clock::timeout(
 		TIMEOUT,
 		client()
@@ -334,6 +345,9 @@ async fn embed_and_stop(mut config: Config) {
 	// owner's sockets are still open.
 	#[cfg(target_os = "linux")]
 	assert!(owned.is_disjoint(&open_sockets()), "the owner's sockets outlived `run`");
+	// A freed port can already belong to another test. Linux checks the owner's
+	// socket identities instead; probe only where that proof is unavailable.
+	#[cfg(not(target_os = "linux"))]
 	assert_owner_stopped(quic, http).await;
 }
 
@@ -428,7 +442,7 @@ async fn uring_custom_route_and_quic() {
 /// The WebRTC media path on the QUIC port reaches the embedder's feed, whichever
 /// worker read it, and the feed's reply leaves from the QUIC port.
 async fn webrtc_feed(mut config: Config) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	config.drain_timeout = Some((Duration::ZERO).into());
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let quic = relay.quic_addr().expect("quic listener bound");
@@ -577,12 +591,12 @@ fn embedded_loader_refuses_obsolete_file_settings() {
 }
 
 /// The next route and whether it is active.
-async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route)
-		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route)
-		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-		moq_net::announce::Event::End(route) => Some((route, false)),
+		moq_net::origin::RouteEvent::Start(route)
+		| moq_net::origin::RouteEvent::Update(route)
+		| moq_net::origin::RouteEvent::Restart(route)
+		| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 	}
 }

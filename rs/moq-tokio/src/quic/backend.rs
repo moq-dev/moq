@@ -9,7 +9,7 @@ use crate::quic::Resolved;
 use crate::quic::ServerId;
 use crate::tls::FingerprintVerifier;
 use std::net;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The transport config the resolved quic knobs describe, for either role.
@@ -26,7 +26,10 @@ fn transport(quic: &Resolved, role: &str) -> Result<driver::transport::Config> {
 	if let Some(gso) = quic.gso {
 		transport.segmentation_offload = gso;
 	}
-	transport.congestion = congestion_factory(quic.congestion());
+	transport.congestion = match &quic.controller {
+		Some(controller) => controller.0.clone(),
+		None => congestion_factory(quic.congestion()),
+	};
 	transport.validate()?;
 	apply_qlog(&mut transport, quic, role)?;
 	Ok(transport)
@@ -93,6 +96,10 @@ pub enum Error {
 	/// The resolved transport settings are ones the QUIC stack refuses.
 	#[error("invalid quic config: {0}")]
 	Config(#[from] driver::ConfigError),
+
+	/// This CPU lacks a feature that rind, MoQ's cryptography, requires.
+	#[error(transparent)]
+	UnsupportedCpu(#[from] crate::crypto::UnsupportedCpu),
 
 	/// The qlog trace file couldn't be created, usually a missing directory.
 	#[cfg(feature = "qlog")]
@@ -183,10 +190,6 @@ pub enum Error {
 	/// The mTLS client verifier could not be built from the configured roots.
 	#[error("failed to build client certificate verifier")]
 	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
-
-	/// The TLS config lacks a cipher suite QUIC can use for initial packets.
-	#[error("no cipher suite available for QUIC initial packets")]
-	NoInitialCipherSuite,
 
 	/// The connection could not be started, usually a bad config or address.
 	#[error("{0}")]
@@ -282,12 +285,6 @@ crate::error::from_message! {
 	hex::FromHexError => InvalidFingerprint,
 }
 
-impl From<driver::crypto::rustls::NoInitialCipherSuite> for Error {
-	fn from(_: driver::crypto::rustls::NoInitialCipherSuite) -> Self {
-		Self::NoInitialCipherSuite
-	}
-}
-
 impl From<web::ClientError> for Error {
 	fn from(err: web::ClientError) -> Self {
 		Self::Client {
@@ -304,6 +301,10 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone)]
 pub(crate) struct Client {
 	pub quic: driver::endpoint::Endpoint,
+	/// Each reconnect loop may replace its endpoint without moving other sessions.
+	/// Weak handles let close reach all of them without retaining abandoned sockets.
+	endpoints: Arc<Mutex<Endpoints>>,
+	bind: net::SocketAddr,
 	pub transport: driver::transport::Config,
 	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Connect::allows_http_bootstrap]).
 	pub http_bootstrap: bool,
@@ -322,7 +323,16 @@ pub(crate) struct Client {
 	keylog: Option<Arc<crate::tls::KeyLog>>,
 }
 
+struct Endpoints {
+	closed: bool,
+	all: Vec<driver::endpoint::WeakEndpoint>,
+}
+
 impl Client {
+	pub fn is_closed(&self) -> bool {
+		self.endpoints.lock().unwrap().closed
+	}
+
 	pub fn new(config: &connect::Config, quic: &crate::quic::Config) -> Result<Self> {
 		let resolved = config.resolve();
 		let socket = crate::bind::udp(crate::bind::Udp::new(resolved.bind)).map_err(Error::BindSocket)?;
@@ -339,9 +349,15 @@ impl Client {
 
 		let quic = driver::endpoint::Endpoint::new(driver::endpoint::Config::default(), socket)
 			.map_err(Error::CreateEndpoint)?;
+		let endpoints = Arc::new(Mutex::new(Endpoints {
+			closed: false,
+			all: vec![quic.downgrade()],
+		}));
 
 		Ok(Self {
 			quic,
+			endpoints,
+			bind: resolved.bind,
 			transport,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			host_name: config.tls.host_name.clone(),
@@ -352,9 +368,43 @@ impl Client {
 		})
 	}
 
-	/// Close every connection, then wait until each has sent its close to the peer.
+	/// Give only this clone a fresh ephemeral socket; fixed bind ports never move.
+	pub fn fresh_port(&mut self) -> Result<()> {
+		if self.bind.port() != 0 {
+			return Ok(());
+		}
+		let mut endpoints = self.endpoints.lock().unwrap();
+		if endpoints.closed {
+			return Ok(());
+		}
+		// Bind before dropping the old endpoint so the kernel cannot reuse its port.
+		let socket = crate::bind::udp(crate::bind::Udp::new(self.bind)).map_err(Error::BindSocket)?;
+		let dual_stack = crate::bind::udp_is_dual_stack(&socket);
+		let quic = driver::endpoint::Endpoint::new(driver::endpoint::Config::default(), socket)
+			.map_err(Error::CreateEndpoint)?;
+		endpoints.all.retain(|endpoint| endpoint.upgrade().is_some());
+		endpoints.all.push(quic.downgrade());
+		tracing::info!(old = %self.quic.local_addr(), new = %quic.local_addr(), "redialing from a fresh UDP port");
+		self.quic = quic;
+		self.dual_stack = dual_stack;
+		Ok(())
+	}
+
+	/// Close every connection, including endpoints replaced by reconnect loops.
 	pub async fn close(self) {
-		self.quic.close(driver::VarInt::from_u32(0), "client shutdown").await;
+		let closes: Vec<_> = {
+			let mut endpoints = self.endpoints.lock().unwrap();
+			endpoints.closed = true;
+			endpoints
+				.all
+				.iter()
+				.filter_map(|endpoint| endpoint.upgrade())
+				.map(|endpoint| async move {
+					endpoint.close(driver::VarInt::from_u32(0), "client shutdown").await;
+				})
+				.collect()
+		};
+		futures::future::join_all(closes).await;
 	}
 
 	pub async fn connect(
@@ -402,9 +452,8 @@ impl Client {
 				tracing::warn!(url = %RedactedUrl::new(&fingerprint), "performing insecure HTTP request for certificate");
 
 				// Even a plaintext fetch builds reqwest's TLS stack, which panics without a
-				// process default when another crate (iroh) builds it as `rustls-no-provider`.
-				// An error only means one is already installed.
-				let _ = crate::crypto::install_default();
+				// process default when another crate in the graph builds it as `rustls-no-provider`.
+				crate::crypto::install_default()?;
 
 				let resp = reqwest::get(fingerprint.as_str())
 					.await
@@ -440,7 +489,6 @@ impl Client {
 			config.key_log = keylog.clone();
 		}
 
-		let config: driver::crypto::rustls::QuicClientConfig = config.try_into()?;
 		let mut config = driver::client::Config::new(Arc::new(config));
 		config.transport = self.transport.clone();
 
@@ -493,7 +541,6 @@ impl Error {
 			| Self::UnsupportedScheme(_)
 			| Self::InvalidDnsName
 			| Self::Config(_)
-			| Self::NoInitialCipherSuite
 			| Self::ConnectRejected(_)
 			| Self::Limits(_) => true,
 			Self::Tls(err) => err.is_terminal(),
@@ -624,7 +671,6 @@ impl Server {
 			tls.key_log = keylog;
 		}
 
-		let tls: driver::crypto::rustls::QuicServerConfig = tls.try_into()?;
 		let mut server = driver::server::Config::new(Arc::new(tls));
 		server.transport = transport;
 		// Advertise the preferred_address transport parameter (RFC 9000 §9.6).
@@ -779,19 +825,10 @@ pub(crate) async fn accept(
 ) -> Result<crate::server::Accepted<web::Session>> {
 	let mut conn = conn.accept()?;
 
-	// Scoped so the `!Send` boxed handshake data is gone before the next await.
-	let (alpn, host) = {
-		let handshake = conn
-			.handshake_data()
-			.await?
-			.downcast::<driver::crypto::rustls::HandshakeData>()
-			.unwrap();
-		(handshake.protocol, handshake.server_name)
-	};
-
-	let alpn = alpn.ok_or(Error::MissingAlpn)?;
+	let handshake = conn.handshake_data().await?;
+	let alpn = handshake.alpn.ok_or(Error::MissingAlpn)?;
 	let alpn = String::from_utf8(alpn)?;
-	let host = host.unwrap_or_default();
+	let host = handshake.server_name.unwrap_or_default();
 
 	let remote = conn.remote_address();
 	tracing::debug!(%host, ip = %remote, %alpn, "accepting");
@@ -818,7 +855,10 @@ pub(crate) async fn accept(
 				.await
 				.map_err(|err| Error::RecvRequest(crate::error::message(err)))?;
 			let url = Some(request.url.clone());
-			let identity = crate::tls::PeerIdentity::from_any(request.conn().peer_identity());
+			let identity = request
+				.connection()
+				.peer_identity()
+				.map(crate::tls::PeerIdentity::from_chain);
 			// The authority the client put in its CONNECT URL.
 			let authority = request.url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
 
@@ -845,7 +885,7 @@ pub(crate) async fn accept(
 		// this also covers versions omitted from `moq_net::ALPNS` but enabled
 		// in this server's configuration.
 		alpn if alpns.contains(&alpn) => {
-			let identity = crate::tls::PeerIdentity::from_any(conn.peer_identity());
+			let identity = conn.peer_identity().map(crate::tls::PeerIdentity::from_chain);
 			// Raw QUIC carries no request URL; the path rides the SETUP. The TLS SNI is the
 			// only authority the client can offer here, and it is optional.
 			let authority = (!host.is_empty()).then_some(host);
@@ -955,7 +995,7 @@ mod tests {
 	}
 
 	/// The certificate fetch goes out without a process-default crypto provider installed,
-	/// even when reqwest is built with rustls but no provider (as iroh builds it).
+	/// even when reqwest is built with rustls but no provider.
 	#[tokio::test]
 	async fn http_dial_needs_no_installed_provider() {
 		use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1167,6 +1207,7 @@ mod tests {
 			mtu: 1200,
 			rtt: std::time::Duration::from_millis(333),
 			max_pacing_rate: None,
+			seed: 0,
 		};
 
 		let loss = congestion_factory(CongestionControl::Loss).build(init);
@@ -1238,11 +1279,17 @@ mod tests {
 				.await
 				.expect("connect failed");
 
-			// web::Session derefs to the driver connection.
-			assert!(session.congestion_state().probes(), "client controller cannot probe");
+			// Inspect the driver through the explicit connection accessor.
+			assert!(
+				session.connection().congestion_state().probes(),
+				"client controller cannot probe"
+			);
 			// BBRv3 can probe, so moq-net gets a target to write.
 			#[cfg(feature = "net")]
-			assert!(session.probe().is_some(), "BBRv3 connection has no probe target");
+			assert!(
+				session.connection().probe().is_some(),
+				"BBRv3 connection has no probe target"
+			);
 			assert!(
 				accepted.await.expect("server task panicked"),
 				"server controller cannot probe"
@@ -1250,6 +1297,96 @@ mod tests {
 		})
 		.await
 		.expect("test timed out");
+	}
+
+	/// A factory that counts the controllers it builds, each a BBRv3.
+	#[derive(Default)]
+	struct Counted(std::sync::atomic::AtomicUsize);
+
+	impl moq_congestion::Factory for Counted {
+		fn build(self: Arc<Self>, init: moq_congestion::Init) -> Box<dyn moq_congestion::Controller> {
+			self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+			Arc::new(moq_congestion::bbr3::Config::default()).build(init)
+		}
+	}
+
+	/// Loopback test: an application's controller runs both ends' live connections in
+	/// place of the configured family, here CUBIC. CUBIC cannot probe and BBRv3 can, so a
+	/// probing connection is running the factory's controller.
+	#[tokio::test]
+	async fn a_custom_controller_reaches_the_live_connection() {
+		let server_config = listen::Config {
+			bind: Some("127.0.0.1:0".parse().unwrap()),
+			tls: crate::tls::Listen {
+				generate: vec!["localhost".into()],
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		let server_factory = Arc::new(Counted::default());
+		let server_quic = crate::quic::Config {
+			congestion_control: Some(CongestionControl::Loss),
+			controller: Some(crate::quic::Controller(server_factory.clone())),
+			..Default::default()
+		};
+
+		let tls = server_config.tls.load().unwrap();
+		let server = Server::new(Options {
+			config: server_config,
+			quic: server_quic,
+			member: None,
+			tls,
+			demux: Default::default(),
+		})
+		.expect("server init");
+		let addr = server.local_addr();
+
+		let accepted = tokio::spawn(async move {
+			let incoming = server.accept().await.expect("no incoming connection");
+			let conn = incoming.accept().expect("accept").await.expect("handshake");
+			conn.congestion_state().probes()
+		});
+
+		let mut tls_config = crate::tls::Connect::default();
+		tls_config.insecure = Some(true);
+		let client_config = connect::Config {
+			bind: Some("127.0.0.1:0".parse().unwrap()),
+			tls: tls_config,
+			..Default::default()
+		};
+
+		let client_factory = Arc::new(Counted::default());
+		let client_quic = crate::quic::Config {
+			congestion_control: Some(CongestionControl::Loss),
+			controller: Some(crate::quic::Controller(client_factory.clone())),
+			..Default::default()
+		};
+
+		let tls = client_config.tls.build().expect("tls config");
+		let client = Client::new(&client_config, &client_quic).expect("client init");
+		let url: Url = format!("moqt://127.0.0.1:{}", addr.port()).parse().unwrap();
+
+		kio::clock::timeout(Duration::from_secs(5), async move {
+			let session = client
+				.connect(&tls, url.into(), &moq_net::Versions::default())
+				.await
+				.expect("connect failed");
+
+			assert!(
+				session.connection().congestion_state().probes(),
+				"client connection is not running its own controller"
+			);
+			assert!(
+				accepted.await.expect("server task panicked"),
+				"server connection is not running its own controller"
+			);
+		})
+		.await
+		.expect("test timed out");
+
+		assert!(client_factory.0.load(std::sync::atomic::Ordering::Relaxed) > 0);
+		assert!(server_factory.0.load(std::sync::atomic::Ordering::Relaxed) > 0);
 	}
 
 	/// The peers file skips this server's own entry, so every server can share it, and refuses

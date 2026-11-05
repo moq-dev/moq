@@ -29,7 +29,7 @@ struct Node {
 }
 
 async fn spawn_relay(id: u64, connect: Vec<String>, cluster_version: Option<moq_net::Version>) -> Node {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let mut config = Config::default();
 	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
@@ -67,7 +67,29 @@ async fn wait_dialed(http: &reqwest::Client, internal: u16, dialed: usize) {
 			.await
 			.expect("read /nodes");
 		let nodes: serde_json::Value = serde_json::from_str(&body).expect("parse /nodes");
-		if nodes["nodes"].as_array().expect("a node list").len() == dialed {
+		if nodes["nodes"]
+			.as_array()
+			.expect("a node list")
+			.iter()
+			.filter(|node| !node["connections"].as_array().expect("connections").is_empty())
+			.count() == dialed
+		{
+			for node in nodes["nodes"].as_array().unwrap() {
+				let connections = node["connections"].as_array().unwrap();
+				if connections.is_empty() {
+					continue;
+				}
+				assert!(
+					node["last_connected_seconds_ago"].is_number(),
+					"live peer has no successful connect: {node}"
+				);
+				for connection in connections {
+					assert!(
+						connection["transport"].is_string(),
+						"live peer has no transport: {node}"
+					);
+				}
+			}
 			return;
 		}
 		assert!(kio::clock::now() < deadline, "the mesh never formed: {nodes}");
@@ -218,7 +240,8 @@ async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 		.unwrap()
 		.available()
 		.await
-		.map_err(|err| format!("broadcast unroutable: {err}"))?;
+		.map_err(|err| format!("broadcast unroutable: {err}"))?
+		.ok_or("the first change is an instance")?;
 
 	// This verifies route propagation rather than real-time backlog skipping. Give
 	// every hop enough tolerance for the next 100ms group to arrive while the
@@ -259,7 +282,7 @@ async fn watch_announces(
 ) -> tokio::task::JoinHandle<Vec<(String, bool)>> {
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn();
-	let mut announced = origin.consume().announced();
+	let mut announced = origin.consume().routes();
 	let session = kio::clock::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url).established())
 		.await
 		.expect("viewer connect timeout")
@@ -346,7 +369,7 @@ async fn unknown_publisher_republish_stays_routable() {
 
 	let url: Url = format!("tcp://127.0.0.1:{}", mesh.d()).parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn();
-	let mut announced = origin.consume().announced();
+	let mut announced = origin.consume().routes();
 	let _session = kio::clock::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url).established())
 		.await
 		.expect("viewer connect timeout")
@@ -401,12 +424,12 @@ async fn unknown_publisher_does_not_flap_across_a_lite04_cluster_triangle() {
 }
 
 /// The next route and whether it is active.
-async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route)
-		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route)
-		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-		moq_net::announce::Event::End(route) => Some((route, false)),
+		moq_net::origin::RouteEvent::Start(route)
+		| moq_net::origin::RouteEvent::Update(route)
+		| moq_net::origin::RouteEvent::Restart(route)
+		| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 	}
 }

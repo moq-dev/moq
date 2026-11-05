@@ -7,7 +7,7 @@ TCP, with no wire change. First measure the cost and attribute it to layers.
 Then qmux drives a socket it owns from one task. Then the relay serves those
 sockets from the io_uring workers, where io_uring's advantage over epoll is far
 larger for TCP than for UDP. Tokio stays the relay's control-plane runtime:
-auth, iroh, cert reload, signals, and session supervision.
+auth, cert reload, signals, and session supervision.
 
 Out of scope: h2 or h3 WebSocket, permessage-deflate, and any wire change.
 

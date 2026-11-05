@@ -17,7 +17,7 @@ import moq
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
         async for event in client.announced():
-            if isinstance(event, moq.AnnounceEventStart):
+            if isinstance(event, moq.AnnounceEventPresent):
                 broadcast = await client.request(event.announce.prefix)
                 print(await moq.media.catalog(broadcast))
 
@@ -62,6 +62,9 @@ asyncio.run(main())
    BroadcastRequests
    BroadcastRequest
    TrackProducer
+   DatagramProducer
+   DatagramRequests
+   DatagramRequest
    TrackDemand
    TrackRequests
    TrackRequest
@@ -80,6 +83,7 @@ asyncio.run(main())
 
    BroadcastConsumer
    TrackConsumer
+   DatagramConsumer
    GroupConsumer
 ```
 
@@ -172,11 +176,8 @@ broadcast, and producers advertise it in the catalog.
    Following
    Announce
    AnnounceEvent
-   AnnounceEventStart
-   AnnounceEventUpdate
-   AnnounceEventEnd
-   AnnounceEventRestart
-   AnnounceEventTakeover
+   AnnounceEventPresent
+   AnnounceEventAbsent
 ```
 
 ## Data types

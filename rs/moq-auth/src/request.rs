@@ -21,6 +21,9 @@ pub struct Request {
 	/// Random 128-bit hex, unique per session; the key every event for it shares.
 	pub id: String,
 
+	/// The attached credential this event concerns; absent for the connection itself.
+	pub auth: Option<String>,
+
 	/// Which lifecycle event this is, with what an `end` carries.
 	#[serde(flatten)]
 	pub event: Event,
@@ -95,10 +98,11 @@ impl Request {
 	/// `#[non_exhaustive]`, so this stays the way to build one as fields are added.
 	pub fn new(node: impl Into<String>, transport: Transport, path: impl Into<String>) -> Self {
 		let mut bytes = [0u8; 16];
-		aws_lc_rs::rand::fill(&mut bytes).expect("failed to generate a session id");
+		rind::rand::fill(&mut bytes).expect("failed to generate a session id");
 		let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
 		Self {
 			id,
+			auth: None,
 			event: Event::Connect,
 			node: node.into(),
 			transport,
@@ -159,6 +163,8 @@ pub enum Event {
 		/// What it moved.
 		bytes: Bytes,
 	},
+	/// Another credential asks to join the connection, identified by `auth`.
+	Attach,
 }
 
 /// How a session reached the relay, including QUIC, relay HTTP, and gateways.

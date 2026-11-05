@@ -199,7 +199,7 @@ discovery.run((effect) => {
 			// Only catalog-backed broadcasts are watchable streams; this skips the relay's
 			// `.stats` broadcast (see the stats dashboard demo for that one).
 			if (!path.endsWith(".hang") && !path.endsWith(".msf")) continue;
-			if (entry.kind === "end") live.delete(path);
+			if (entry.kind === "absent") live.delete(path);
 			else live.add(path);
 			broadcasts.set([...live].sort());
 		}
@@ -440,9 +440,11 @@ ui.run((effect) => {
 		return;
 	}
 
-	const track = broadcast.track(trackName).subscribe({ priority: Hang.Catalog.PRIORITY.catalog });
-	effect.cleanup(() => track.close());
-	const consumer = new Json.Snapshot.Consumer<unknown>({ track });
+	const consumer = new Json.Snapshot.Consumer<unknown>({
+		track: broadcast.track(trackName),
+		priority: Hang.Catalog.PRIORITY.catalog,
+	});
+	effect.cleanup(() => consumer.close());
 
 	effect.spawn(async () => {
 		try {

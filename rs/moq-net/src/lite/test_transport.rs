@@ -11,7 +11,7 @@
 use std::{
 	sync::{
 		Arc, Mutex,
-		atomic::{AtomicUsize, Ordering},
+		atomic::{AtomicBool, AtomicUsize, Ordering},
 	},
 	task::Poll,
 };
@@ -71,13 +71,14 @@ pub struct Log {
 	/// How long the trail and the stops were at the first session close.
 	closed_at: Arc<Mutex<Option<(usize, usize)>>>,
 	bi_opens: Arc<AtomicUsize>,
-	pub request_attempts: Arc<AtomicUsize>,
 	priorities: Arc<Mutex<Vec<i64>>>,
 	/// Hands each send group its id.
 	group_ids: Arc<AtomicUsize>,
 	groups: Arc<Mutex<Vec<(usize, i64)>>>,
 	joins: Arc<Mutex<Vec<(usize, usize)>>>,
 	orders: Arc<Mutex<Vec<(usize, i64)>>>,
+	/// Set by [`Self::fail_writes`].
+	writes_fail: Arc<AtomicBool>,
 }
 
 /// One thing a send stream did, as recorded in [`Log::trail`].
@@ -106,6 +107,12 @@ impl Log {
 				code: closed.expect("closed"),
 				stream: None,
 			})
+	}
+
+	/// Fail every later write on every send stream, as a peer that stopped reading
+	/// them (STOP_SENDING) would.
+	pub fn fail_writes(&self) {
+		self.writes_fail.store(true, Ordering::Relaxed);
 	}
 
 	/// What every send stream did, in call order, tagged with the stream's id (its
@@ -302,6 +309,12 @@ impl poll::SendStream for SinkSend {
 	type Group = SinkGroup;
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		if self.log.writes_fail.load(Ordering::Relaxed) {
+			return Poll::Ready(Err(SinkError {
+				stream: Some(0),
+				..Default::default()
+			}));
+		}
 		if self.prefix == 0
 			&& let Some(gate) = &self.gate
 		{
@@ -522,17 +535,6 @@ impl poll::Session for DeadStreamSession {
 			SinkSend::new(self.log.clone()).opened(options),
 			DeadRecv(self.reset),
 		)))
-	}
-
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: crate::transport::poll::SendOptions<
-			'_,
-			<Self::SendStream as crate::transport::poll::SendStream>::Group,
-		>,
-	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
-		self.poll_open_bi(waiter, options).map_ok(Some)
 	}
 
 	fn poll_open_uni(
@@ -765,17 +767,6 @@ impl poll::Session for SinkSession {
 		Poll::Ready(Ok((send, PendingRecv)))
 	}
 
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: crate::transport::poll::SendOptions<
-			'_,
-			<Self::SendStream as crate::transport::poll::SendStream>::Group,
-		>,
-	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
-		self.poll_open_bi(waiter, options).map_ok(Some)
-	}
-
 	fn poll_open_uni(
 		&self,
 		waiter: &kio::Waiter,
@@ -968,7 +959,6 @@ pub struct ScriptedSession {
 	unacked_fin: bool,
 	/// Set by [`Self::with_unacked_uni_fins`]; shared, so every clone counts down one budget.
 	unacked_unis: Arc<AtomicUsize>,
-	datagram_size: usize,
 	/// Set by [`Self::with_groups`].
 	groups: bool,
 	/// Set by [`Self::with_send_window`].
@@ -990,11 +980,6 @@ impl ScriptedSession {
 		self
 	}
 
-	pub fn with_datagrams(mut self, max_size: usize) -> Self {
-		self.datagram_size = max_size;
-		self
-	}
-
 	pub fn new(script: Vec<u8>) -> Self {
 		Self {
 			log: Log::default(),
@@ -1010,7 +995,6 @@ impl ScriptedSession {
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			unacked_fin: false,
 			unacked_unis: Default::default(),
-			datagram_size: 0,
 			groups: false,
 			send_window: None,
 		}
@@ -1222,21 +1206,6 @@ impl poll::Session for ScriptedSession {
 		)))
 	}
 
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: crate::transport::poll::SendOptions<
-			'_,
-			<Self::SendStream as crate::transport::poll::SendStream>::Group,
-		>,
-	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
-		self.log.request_attempts.fetch_add(1, Ordering::Relaxed);
-		if !*self.credit.read() {
-			return Poll::Ready(Ok(None));
-		}
-		self.poll_open_bi(waiter, options).map_ok(Some)
-	}
-
 	fn poll_open_uni(
 		&self,
 		waiter: &kio::Waiter,
@@ -1274,7 +1243,7 @@ impl poll::Session for ScriptedSession {
 	}
 
 	fn max_datagram_size(&self) -> usize {
-		self.datagram_size
+		0
 	}
 
 	fn address(&self) -> crate::transport::Address {

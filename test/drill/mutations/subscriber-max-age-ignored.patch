@@ -4,10 +4,10 @@
 # Preserve negotiation and decoding, but ignore the requested budget when serving.
 --- a/rs/moq-net/src/ietf/publisher.rs
 +++ b/rs/moq-net/src/ietf/publisher.rs
-@@ -2028,9 +2028,6 @@
- 		// A live SUBSCRIBE's NEW_GROUP_REQUEST asks nothing more: subscribing is itself a join,
+@@ -1887,9 +1887,6 @@
  		// which the track's refresh ratio judges.
- 		let mut subscription = serving_subscription(msg.subscriber_priority).with_order(msg.group_order.to_order());
+ 		let mut subscription: Subscription =
+ 			serving_subscription(msg.subscriber_priority).with_order(msg.group_order.to_order());
 -		if let Some(max_age) = msg.max_age {
 -			subscription.delay.max = Some(Duration::from_millis(max_age));
 -		}

@@ -73,7 +73,7 @@ fn read_all(mut recv: recv::Stream<'_>) -> u64 {
 	while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
 		read += chunk.bytes.len() as u64;
 	}
-	let _ = chunks.finalize();
+	chunks.finalize();
 	read
 }
 
@@ -300,7 +300,7 @@ fn a_frame_larger_than_the_burst_arrives_gradually() {
 		{
 			written += n;
 		}
-		if leased.is_none() && pair.server_recv(server_ch, s).lease(frame).0.is_ok() {
+		if leased.is_none() && pair.server_recv(server_ch, s).lease(frame).is_ok() {
 			leased = Some(pair.time);
 		}
 	});

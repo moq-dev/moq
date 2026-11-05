@@ -1,4 +1,11 @@
 #![warn(missing_docs)]
+#![cfg_attr(
+	not(feature = "async"),
+	allow(
+		rustdoc::broken_intra_doc_links,
+		reason = "the docs link the async-only functions, which a poll-only build leaves out"
+	)
+)]
 
 //! Media muxers and demuxers for MoQ.
 //!
@@ -21,22 +28,30 @@
 //! - [`Pacer`] maps each exported frame's media timestamp to the wall-clock
 //!   instant it should be delivered at, for byte streams whose spacing is
 //!   part of the format (MPEG-TS).
+//! - [`timeline`] shares one audio-led playout clock with video presenters.
 //! - [`rate`] turns bandwidth grants into stable media bitrate targets shared
 //!   by audio, video, and transcode senders.
-//! - [`hls`](mod@hls) publishes HLS segment records per rendition by default, so
-//!   an edge can build HLS/DASH playlists without downloading media.
 //! - [`follow`] follows a broadcast across the publisher instances that
 //!   serve it, for a reader that restarts on each one.
 //! - [`Linger`] keeps a cleanly ended broadcast up for a fixed time, so a
 //!   subscriber that arrives after the end still gets its tail.
+//!
+//! The `poll_*` methods are always available. Enable the `async` feature for their generated
+//! async wrappers and the async constructors with no poll of their own; it is off by default.
 
+#[cfg(any(test, feature = "fuzz"))]
+mod allocation;
 pub mod catalog;
 mod clock;
 pub mod codec;
 pub mod container;
 mod error;
 pub mod follow;
-pub mod hls;
+// Not part of the public API: compiled only for the crate's own tests and for the `fuzz/`
+// harness.
+#[cfg(any(test, feature = "fuzz"))]
+#[doc(hidden)]
+pub mod fuzz;
 pub mod import;
 mod jitter;
 pub mod json;
@@ -46,6 +61,7 @@ pub mod rate;
 pub mod select;
 mod source;
 mod stats;
+pub mod timeline;
 
 pub use clock::Clock;
 pub use error::*;

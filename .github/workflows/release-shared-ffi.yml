@@ -55,6 +55,21 @@ jobs:
       reuse-native: true
     secrets: inherit
 
+  # The wrapper publishes once its bindings are on Maven Central. Called rather
+  # than chained by workflow_run, so it runs as this tag, which the `publish`
+  # Environment admits, instead of as `main`. Status functions see every
+  # ancestor, so only the Kotlin publisher's own result gates it.
+  kotlin-lib:
+    name: Release Kotlin lib
+    needs: [kotlin]
+    if: ${{ always() && !cancelled() && github.ref_type == 'tag' && needs.kotlin.result == 'success' }}
+    uses: ./.github/workflows/release-kt-lib.yml
+    with:
+      dry-run: false
+    permissions:
+      contents: read
+    secrets: inherit
+
   swift:
     name: Release Swift FFI
     needs: [native]

@@ -38,7 +38,7 @@ fun TrackConsumer.groupsAsArrived(): Flow<GroupConsumer> = pull({ cancel() }) { 
 fun TrackConsumer.frames(): Flow<Frame> = pull({ cancel() }) { readFrame() }
 
 /** Stream of best-effort datagrams in arrival order. */
-fun TrackConsumer.datagrams(): Flow<Datagram> = pull({ cancel() }) { recvDatagram() }
+fun DatagramConsumer.datagrams(): Flow<Datagram> = pull({ cancel() }) { recv() }
 
 /** Stream of tracks requested by subscribers. */
 fun BroadcastRequests.requestedTracks(): Flow<TrackRequest> =
@@ -99,3 +99,7 @@ private fun <T : Any> pull(next: suspend () -> T?): Flow<T> = flow {
  */
 internal fun <T : Any> pull(cancel: () -> Unit, next: suspend () -> T?): Flow<T> =
     pull(next).onCompletion { cause -> if (cause is CancellationException) cancel() }
+
+/** Stream of datagram tracks requested by consumers. */
+fun DatagramRequests.requestedDatagrams(): Flow<DatagramRequest> =
+    pull({ cancel() }) { requested() }

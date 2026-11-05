@@ -518,9 +518,9 @@ class DecoderTrack {
 
 	// The group the current `frame` was read from. Group sequences are shared by every subscription to
 	// the track, so they place a picture on a timeline for either decoder.
-	group?: number;
+	group?: bigint;
 	// The first group of the timeline this decoder reads, undefined until a publisher restart.
-	readonly start = new Signal<number | undefined>(undefined);
+	readonly start = new Signal<bigint | undefined>(undefined);
 
 	// Counts the timeline restarts this decoder read. A picture decoded before one is from the old
 	// timeline and never presents after it, even when its clock wait already resolved.
@@ -530,7 +530,7 @@ class DecoderTrack {
 	// per chunk; the maintainer accepted that as an exception to the bounded-state rule
 	// (moq-dev/moq#7555, 2026-11-01), since WebCodecs bounds no codec's pending output, so any cap is
 	// a guess that can evict a picture the codec still owes.
-	#groups = new Map<number, number>();
+	#groups = new Map<number, bigint>();
 
 	// How far past the shared clock's budgets this decoder reaches.
 	#warmup: Getter<Milli>;
@@ -563,7 +563,7 @@ class DecoderTrack {
 	// A hole or timeline restart makes the next decoded frame decide whether the codec resets.
 	#resetPending = false;
 	// A declared endpoint stays in force through holes until a later group starts a new timeline.
-	#endGroup?: number;
+	#endGroup?: bigint;
 
 	// The newest consumer reading this track, whose estimate a replacement continues. The predecessor
 	// is only held until the first one opens.
@@ -759,7 +759,7 @@ class DecoderTrack {
 		this.#configure(decoder);
 
 		let previous: Micro | undefined;
-		let latest: number | undefined;
+		let latest: bigint | undefined;
 		const recovery = new Recovery();
 
 		this.#spawn(effect, async () => {
@@ -834,7 +834,7 @@ class DecoderTrack {
 		this.#configure(decoder);
 
 		let previous: Micro | undefined;
-		let latest: number | undefined;
+		let latest: bigint | undefined;
 		const recovery = new Recovery();
 
 		this.#spawn(effect, async () => {
@@ -911,7 +911,7 @@ class DecoderTrack {
 
 	// Container gaps restart prediction on the existing clock. Only a declared end followed by
 	// a later group establishes another timeline; a marker from older history cannot end live media.
-	#onRead(read: Container.Read, latest: number | undefined): void {
+	#onRead(read: Container.Read, latest: bigint | undefined): void {
 		if (read.kind === "gap") {
 			if (latest !== undefined) this.#resetPending = true;
 		} else if (read.kind === "end") {
@@ -924,7 +924,7 @@ class DecoderTrack {
 
 	// A fresh timeline invalidates parked pictures and its previous decoded span. The held picture
 	// stays until the new keyframe renders; the codec resets before that keyframe is decoded.
-	#onBreak(group: number): void {
+	#onBreak(group: bigint): void {
 		this.first.set(undefined);
 		this.timestamp.set(undefined);
 		this.#buffered.set([]);
@@ -1059,7 +1059,7 @@ class Rendition {
 	// shown on. Nothing below that timestamp shows again until the timeline restarts.
 	#shown?: VideoFrame;
 	#last?: Milli;
-	#start?: number;
+	#start?: bigint;
 
 	#signals = new Effect();
 
@@ -1137,7 +1137,7 @@ class Rendition {
 	// min-delay picture. Only pictures read from `start` on, the min-delay decoder's timeline, are
 	// candidates: one held from before a restart neither shows nor sets the floor. Not `caughtUp`: its
 	// slack, applied per picture, would alternate backwards and forwards.
-	#select(min: Lane, max: Lane | undefined, start: number | undefined): void {
+	#select(min: Lane, max: Lane | undefined, start: bigint | undefined): void {
 		// A restarted timeline begins below the previous one's pictures. Like a decoder's own timestamp
 		// on a break, the selection's clears until the new timeline presents, so a pending rendition is
 		// not held to the old timeline's playhead.
@@ -1147,7 +1147,7 @@ class Rendition {
 			this.timestamp.set(undefined);
 		}
 		const current = (lane: Lane | undefined): lane is Lane & { frame: VideoFrame } =>
-			lane?.frame !== undefined && (start === undefined || (lane.lane.group ?? -1) >= start);
+			lane?.frame !== undefined && (start === undefined || (lane.lane.group ?? -1n) >= start);
 		// Even a clean max-delay picture is a sweep behind until the min-delay decoder has one.
 		if (!current(min)) return;
 
