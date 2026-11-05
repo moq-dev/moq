@@ -49,6 +49,9 @@ struct Pending {
 	// What its joins ask with now, shared with them and its handler.
 	asks: kio::Shared<Asks>,
 	queued: bool,
+	// A flight: a separate copy of one group from its start frame, which no other reader
+	// joins by sequence; see [`FillState::fly`].
+	flight: bool,
 	// How many joins still read each sequence: one a reader narrowed away is no longer owed.
 	wants: RangeMap<u64, u32>,
 	// Readers hold consumers, so it counts the fill's demand; the handler's copy says what
@@ -519,6 +522,7 @@ impl FillState {
 					time: None,
 					asks,
 					queued: true,
+					flight: false,
 					wants: RangeMap::from_iter([(groups.clone(), 1)]),
 					result,
 				},
@@ -526,6 +530,68 @@ impl FillState {
 			self.queue.push_back(id);
 		}
 		(joins, unfillable)
+	}
+
+	/// Join or queue a flight of group `sequence` from `frame`: a fill answered with a copy
+	/// of its own, which no reader joins by sequence, since a copy shed past its readers
+	/// holds nothing for one asking earlier. Readers asking from the same frame before it is
+	/// answered share it. `None` while no handler can take it.
+	pub(super) fn fly(
+		&mut self,
+		shared: &kio::Shared<FillState>,
+		sequence: u64,
+		frame: u64,
+		asking: Asking,
+	) -> Option<Join> {
+		let groups = sequence..sequence.checked_add(1)?;
+		if self.handlers == 0 {
+			return None;
+		}
+		let boarding = self.pending.iter_mut().find(|(_, pending)| {
+			pending.flight
+				&& pending.start == Position { group: sequence, frame }
+				&& !pending.result.read().resolved.contains(&sequence)
+		});
+		let id = match boarding {
+			Some((id, pending)) => {
+				pending.want(groups.clone());
+				pending.asks.lock().add(&asking);
+				*id
+			}
+			None => {
+				let id = self.next;
+				self.next += 1;
+				let mut asks = Asks::default();
+				asks.add(&asking);
+				self.pending.insert(
+					id,
+					Pending {
+						start: Position { group: sequence, frame },
+						end: groups.end,
+						frame_end: None,
+						time: None,
+						asks: kio::Shared::new(asks),
+						queued: true,
+						flight: true,
+						wants: RangeMap::from_iter([(groups.clone(), 1)]),
+						result: Default::default(),
+					},
+				);
+				self.queue.push_back(id);
+				id
+			}
+		};
+		let pending = &self.pending[&id];
+		Some(Join {
+			fills: shared.clone(),
+			id,
+			held: RangeSet::from_iter([groups.clone()]),
+			groups,
+			outcome: Some(pending.result.consume()),
+			attempt: pending.result.weak(),
+			asking,
+			asks: pending.asks.clone(),
+		})
 	}
 
 	/// Queue a fill looking up `time` within `ask`'s run, with the join waiting on its answer.
@@ -555,6 +621,7 @@ impl FillState {
 				time: Some(time),
 				asks,
 				queued: true,
+				flight: false,
 				wants: RangeMap::new(),
 				result,
 			},
@@ -678,7 +745,8 @@ pub(super) fn poll_requested(
 	}) {
 		let id = guard.pop().expect("predicate guaranteed a fill");
 		let pending = guard.pending.get(&id).expect("popped fill is pending");
-		let (start, end, frame_end, time) = (pending.start, pending.end, pending.frame_end, pending.time);
+		let (start, end, frame_end, time, flight) =
+			(pending.start, pending.end, pending.frame_end, pending.time, pending.flight);
 		let (asks, result) = (pending.asks.clone(), pending.result.clone());
 		drop(guard);
 		// Built with the fills unlocked, so no other lock nests under theirs.
@@ -690,6 +758,7 @@ pub(super) fn poll_requested(
 			end,
 			frame_end,
 			time,
+			flight,
 			asks,
 			result,
 		};
@@ -753,6 +822,8 @@ struct Inner {
 	// Exclusive frame cap in the last group; None asks through the original end.
 	frame_end: Option<u64>,
 	time: Option<Timestamp>,
+	// Answered with a copy of its own rather than the cache's; see [`FillState::fly`].
+	flight: bool,
 	asks: kio::Shared<Asks>,
 	result: kio::Producer<Outcome>,
 }
@@ -1143,7 +1214,10 @@ impl Inner {
 		}
 		// Cache the group before answering: readers resolve an accept through the cache.
 		let res = TrackState::modify(&self.state).and_then(|mut state| {
-			let res = state.insert_group_request(sequence, frames, info);
+			let res = match self.flight {
+				true => state.insert_flight(sequence, frames, info),
+				false => state.insert_group_request(sequence, frames, info),
+			};
 			let deferred = state.deferred();
 			drop(state);
 			deferred.wake();
@@ -1152,7 +1226,7 @@ impl Inner {
 		if let Ok(mut outcome) = self.result.write() {
 			outcome.accept(sequence..end);
 			if let Ok(group) = &res
-				&& (frames.start > 0 || frames.end.is_some())
+				&& (self.flight || frames.start > 0 || frames.end.is_some())
 			{
 				outcome.partial.insert(sequence, group.handle());
 			}

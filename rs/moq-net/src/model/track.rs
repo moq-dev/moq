@@ -386,6 +386,10 @@ pub(crate) struct TrackState {
 	// past `detached_kept`, the count its last prune left.
 	detached: Vec<group::Detached>,
 	detached_kept: usize,
+	// The flights of each group: copies of their own, from a frame a cached copy shed, for
+	// the readers riding them; see [`Self::board`]. Held weakly, so the last rider leaving
+	// frees one, and pruned as they are looked up.
+	flights: BTreeMap<u64, Vec<group::Detached>>,
 
 	// Publisher-produced groups in arrival order as (sequence, stamp), walked by
 	// subscriptions; an entry only resolves while its stamp matches the slot's.
@@ -2448,7 +2452,9 @@ impl TrackState {
 			let Some(slot) = self.lookup.get(&sequence) else {
 				continue;
 			};
-			for group in slot.copies() {
+			// Its flights too, which readers ride for the same reason.
+			let flights = self.flights.get(&sequence).into_iter().flatten();
+			for group in slot.copies().cloned().chain(flights.filter_map(group::Detached::held)) {
 				let freed = group.shed(self.debt, cap - paid.min(cap));
 				self.debt -= freed.min(self.debt);
 				paid = paid.saturating_add(freed);
@@ -3092,6 +3098,154 @@ impl TrackState {
 		}
 		self.evict_expired();
 		Ok(group)
+	}
+}
+
+impl TrackState {
+	/// Store a flight a [`Fill`] answered: a copy of group `sequence` of its own, from the
+	/// frame its riders start at, which the cache never serves in place of its cached copy.
+	pub(super) fn insert_flight(
+		&mut self,
+		sequence: u64,
+		frames: group::Bounds,
+		info: Option<Info>,
+	) -> Result<group::Producer> {
+		if let Some(err) = &self.abort {
+			return Err(err.clone());
+		}
+		if self.info.is_none() {
+			self.install(info.unwrap_or_else(|| Info::default().with_max_age(None)));
+		}
+		let info = self.info.clone().unwrap();
+		let content = self.content_for_copy(sequence)?;
+		let mut group = group::Producer::new(group::Info { sequence }, info, self.cache.clone());
+		if let Some(content) = content {
+			group.handle().share_content(content);
+		}
+		group.handle().register_content(&self.contents);
+		group.bound(frames)?;
+		self.cap(&group.handle())?;
+		self.charge_debt();
+		self.detach(&group.handle());
+		// Forget every flight gone since, so only flights still held are kept.
+		self.flights.retain(|_, flights| {
+			flights.retain(|flight| flight.held().is_some());
+			!flights.is_empty()
+		});
+		self.flights.entry(sequence).or_default().push(group.handle().detach());
+		Ok(group)
+	}
+
+	/// The copy of group `sequence` a reader at frame `index` rides, furthest along of
+	/// those that admit it (see [`group::Handle::admits`]), and whether it is a flight
+	/// rather than a cached copy. Only one ahead of `from`, the copy it reads now, which it
+	/// hands over from.
+	pub(super) fn ride(
+		&self,
+		sequence: u64,
+		index: usize,
+		from: Option<&group::Consumer>,
+	) -> Option<(group::Handle, bool)> {
+		let cached = self
+			.lookup
+			.get(&sequence)
+			.into_iter()
+			.flat_map(Slot::copies)
+			.map(|copy| (copy.clone(), false));
+		let flights = self
+			.flights
+			.get(&sequence)
+			.into_iter()
+			.flatten()
+			.filter_map(|flight| Some((flight.held()?, true)));
+		let past = from.map(group::Consumer::committed);
+		cached
+			.chain(flights)
+			.filter(|(copy, _)| from.is_none_or(|from| !copy.is_read_by(from)))
+			.map(|(copy, flight)| (copy.committed(), copy, flight))
+			.filter(|(committed, copy, _)| past.is_none_or(|past| *committed > past) && copy.admits(index))
+			.max_by_key(|(committed, ..)| *committed)
+			.map(|(_, copy, flight)| (copy, flight))
+	}
+}
+
+/// Where a reader at a frame its copy shed goes: see [`board`].
+pub(super) enum Board {
+	/// Ride this copy, a flight or a cached copy, which holds the frame.
+	Ride(group::Consumer, bool),
+	/// Wait for a flight the track's handlers were asked for.
+	Wait(Boarding),
+}
+
+/// Board group `sequence` of `track` at frame `index`, which the copy a reader read shed:
+/// ride a copy that admits the reader, else ask the track's [`Requests`] handlers for a
+/// flight from that frame. `None` when no handler can serve one.
+///
+/// A compressed track flies nothing, since a flight starting past frame 0 lacks what its
+/// plain readers inflate from.
+pub(super) fn board(track: &kio::Producer<TrackState>, sequence: u64, index: usize) -> Option<Board> {
+	let state = track.read();
+	if state.info.as_ref().is_none_or(|info| info.compress) {
+		return None;
+	}
+	if let Some((copy, flight)) = state.ride(sequence, index, None)
+		&& let Some(reader) = copy.try_consume()
+	{
+		return Some(Board::Ride(reader, flight));
+	}
+	let fills = state.fills.clone();
+	drop(state);
+	let asking = fill::Asking {
+		priority: 0,
+		max_delay: None,
+		order: Order::Ascending,
+	};
+	let join = fills.lock().fly(&fills, sequence, index as u64, asking)?;
+	Some(Board::Wait(Boarding {
+		join: Box::new(join),
+		sequence,
+		frame: index as u64,
+	}))
+}
+
+/// The copy a reader riding `from` at frame `index` hands over to: one further along that
+/// admits it, and whether that is a flight. See [`TrackState::ride`].
+pub(super) fn hand_over(
+	track: &kio::Producer<TrackState>,
+	from: &group::Consumer,
+	index: usize,
+) -> Option<(group::Consumer, bool)> {
+	let (copy, flight) = track.read().ride(from.sequence, index, Some(from))?;
+	Some((copy.try_consume()?, flight))
+}
+
+/// A reader waiting on the flight it asked for.
+pub(super) struct Boarding {
+	// Boxed: a reader holds one only while boarding.
+	join: Box<fill::Join>,
+	sequence: u64,
+	frame: u64,
+}
+
+impl Boarding {
+	/// Poll for a reader of the flight, or why none came: the handlers refused it, or went
+	/// away without answering.
+	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<group::Consumer>> {
+		let frames = group::Bounds {
+			start: self.frame,
+			end: None,
+		};
+		let sequence = self.sequence;
+		let answer = self.join.outcome().poll(waiter, |outcome| match outcome.refused(sequence) {
+			Some((err, _)) => Poll::Ready(Err(err.clone())),
+			None if outcome.is_accepted(sequence) => Poll::Ready(outcome.partial(sequence, frames).ok_or(Error::Cancel)),
+			None => Poll::Pending,
+		});
+		Poll::Ready(match ready!(answer) {
+			Ok(Ok(copy)) => copy.try_consume().ok_or(Error::Cancel),
+			Ok(Err(err)) => Err(err),
+			Err(_closed) => Err(Error::NotFound),
+		})
 	}
 }
 
@@ -23177,6 +23331,60 @@ mod test {
 
 		let _joined = producer.subscribe(None);
 		assert_eq!(producer.demand().wanted(), Some(1), "a join asks for the same group");
+	}
+
+	/// The frame a read takes right now, as its number in [`numbered`].
+	fn read_numbered(reader: &mut group::Consumer) -> Option<u32> {
+		let frame = reader.read_frame().now_or_never()?;
+		let frame = frame.expect("read failed").expect("the group ended");
+		Some(u32::from_le_bytes(frame.payload[..4].try_into().unwrap()))
+	}
+
+	/// A late joiner of a live group that shed its front boards a flight from frame 0,
+	/// served by the track's handler, reads it as the handler writes it, and hands over to
+	/// the live copy once that copy holds its frame within reach of the live reader. The
+	/// flight is then unwanted, so its handler stops.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_late_joiner_rides_a_flight_and_hands_over() {
+		let producer = track_producer("test", Info::default());
+		let requests = producer.requests();
+		let mut live = producer.append_group().unwrap();
+		let mut reader = live.consume();
+		let mut late = live.consume();
+		// 48 MiB, half again the live tail.
+		const FRAMES: u32 = 3_000;
+		for index in 0..FRAMES {
+			live.write_frame(None, numbered(index)).unwrap();
+			assert_eq!(read_numbered(&mut reader), Some(index));
+		}
+
+		// Frame 0 was shed: the late reader asks the handler for a flight from it.
+		assert_eq!(read_numbered(&mut late), None);
+		let fill = match requests.poll_requested_fill(&kio::Waiter::noop()) {
+			Poll::Ready(fill) => fill.unwrap(),
+			Poll::Pending => panic!("a flight is asked"),
+		};
+		assert_eq!(fill.start(), Position { group: 0, frame: 0 });
+		let mut flight = fill.accept(0, None).unwrap();
+		assert_eq!(read_numbered(&mut late), None, "aboard, waiting on the handler");
+		let unwanted = |flight: &group::Producer| flight.handle().poll_unwanted(&kio::Waiter::noop()).is_ready();
+		assert!(!unwanted(&flight), "ridden");
+
+		// The handler writes as the rider reads, until the rider leaves for the live copy.
+		let mut index = 0;
+		while !unwanted(&flight) {
+			flight.write_frame(None, numbered(index)).unwrap();
+			assert_eq!(read_numbered(&mut late), Some(index));
+			index += 1;
+			assert!(index < FRAMES, "handed over before the flight caught up");
+		}
+		// Read on from the live copy, to its newest frame.
+		while index < FRAMES {
+			assert_eq!(read_numbered(&mut late), Some(index), "frame {index} from the live copy");
+			index += 1;
+		}
+		assert_eq!(read_numbered(&mut late), None, "at the live edge");
 	}
 
 	/// What a read returns right now: `Some(Some(sequence))` for a group, `Some(None)` for
