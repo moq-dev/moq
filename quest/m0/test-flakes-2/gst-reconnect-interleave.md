@@ -38,8 +38,14 @@ load through `quest gate`. Executions 1–945 passed; 946 failed in 10.04 s:
 printed by the immediate error reporter. This is round 0's reconnect, unlike
 the historical round 1 restart timeout. Keep the quarantine. Logs:
 `.tmp/verified-capture.log` and `.tmp/verified-check.log` in the implementation
-checkout. Do not attribute this remaining stall to catalog acknowledgement or
-startup loss without further evidence.
+checkout. With `GST_DEBUG=moq-src:6 GST_DEBUG_NO_COLOR=1`, execution 1,256
+of a further loaded capture failed in 10.03 s: `10 never reached a pad`, after
+tags 8 and 9 on round 2. No session error or video-reader warning appeared;
+the only warnings were `NotFound` for earlier rounds' audio acknowledgement
+tracks after their producers had gone. Logs: `.tmp/trace-capture.log`,
+`.tmp/trace-last.log`, and `.tmp/trace-check.log`. Do not attribute these
+remaining stalls to catalog acknowledgement or startup loss without further
+evidence.
 
 
 Investigation in [moq-dev/moq#7932](https://github.com/moq-dev/moq/pull/7932),
