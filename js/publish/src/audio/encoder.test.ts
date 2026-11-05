@@ -1332,7 +1332,7 @@ test("demand replays only the retained audio its max delay still wants", async (
 		// At 3000 ms, a 130 ms budget still wants the frames ending after 2870 ms: 143 onward.
 		late = net.track("audio").subscribe({ delay: { max: Milli(130) } });
 		await settle();
-		expect(encoder.out.stats.peek().frames).toBe(7 - LaggingAudioEncoder.LAG);
+		expect(encoder.out.stats.peek().frames).toBe(7 - FakeAudioEncoder.LAG);
 		await feed.push({ timestamp: Micro(150 * 20_000), channels: [new Float32Array(960)] });
 		await feed.drain();
 		const group = await late.ordered().nextGroup();
