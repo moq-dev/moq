@@ -8564,7 +8564,7 @@ mod tests {
 
 		// A SETUP that declares no origin of its own, so only the assigned one applies.
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-		peer_setup.set(crate::lite::Setup::default());
+		peer_setup.set(crate::lite::Setup::default()).unwrap();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 
 		let publisher = Publisher::new(PublisherConfig {
@@ -9149,7 +9149,7 @@ mod tests {
 		}
 
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-		peer_setup.set(crate::lite::Setup::default());
+		peer_setup.set(crate::lite::Setup::default()).unwrap();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let publisher = Publisher::new(PublisherConfig {
 			runtime: crate::time::sim(),
@@ -9276,7 +9276,7 @@ mod tests {
 				.unwrap();
 
 			let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-			peer_setup.set(crate::lite::Setup::default());
+			peer_setup.set(crate::lite::Setup::default()).unwrap();
 			let (_, goaway) = crate::goaway::Handle::new(true);
 			let publisher = Publisher::new(PublisherConfig {
 				estimate: kio::Producer::default().weak(),
@@ -9339,7 +9339,7 @@ mod tests {
 		let _track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-		peer_setup.set(crate::lite::Setup::default());
+		peer_setup.set(crate::lite::Setup::default()).unwrap();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let publisher = Publisher::new(PublisherConfig {
 			estimate: kio::Producer::default().weak(),
@@ -9397,7 +9397,7 @@ mod tests {
 					broadcast.announce(Default::default()).unwrap();
 
 					let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-					peer_setup.set(crate::lite::Setup::default());
+					peer_setup.set(crate::lite::Setup::default()).unwrap();
 					let (_, goaway) = crate::goaway::Handle::new(true);
 					let publisher = Publisher::new(PublisherConfig {
 						estimate: kio::Producer::default().weak(),
@@ -9544,7 +9544,7 @@ mod tests {
 					}
 
 					let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-					peer_setup.set(crate::lite::Setup::default());
+					let _ = peer_setup.set(crate::lite::Setup::default());
 					let (_, goaway) = crate::goaway::Handle::new(true);
 					let log = Log::default();
 					let publisher = Publisher::new(PublisherConfig {
@@ -9674,7 +9674,7 @@ mod tests {
 		broadcast.announce(Default::default()).unwrap();
 
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-		peer_setup.set(crate::lite::Setup::default());
+		peer_setup.set(crate::lite::Setup::default()).unwrap();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let version = Version::Lite07;
 		let publisher = Publisher::new(PublisherConfig {
@@ -9803,7 +9803,7 @@ mod tests {
 		broadcast.announce(Default::default()).unwrap();
 
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-		peer_setup.set(crate::lite::Setup::default());
+		peer_setup.set(crate::lite::Setup::default()).unwrap();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let version = Version::Lite07;
 		let publisher = Publisher::new(PublisherConfig {
@@ -10055,7 +10055,7 @@ mod tests {
 		let track = broadcast.create_track("video", track::Info::timed()).unwrap();
 		let dynamic = track.requests();
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-		peer_setup.set(crate::lite::Setup::default());
+		peer_setup.set(crate::lite::Setup::default()).unwrap();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let publisher = Publisher::new(PublisherConfig {
 			runtime: crate::time::sim(),
@@ -10105,7 +10105,7 @@ mod tests {
 		open.write_frame(crate::Timestamp::ZERO, b"a".to_vec()).unwrap();
 
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-		peer_setup.set(crate::lite::Setup::default());
+		peer_setup.set(crate::lite::Setup::default()).unwrap();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let publisher = Publisher::new(PublisherConfig {
 			runtime: crate::time::sim(),
@@ -10267,7 +10267,7 @@ mod tests {
 				version,
 				&estimate,
 			);
-			probe.shared.peer_setup.set(lite::Setup::default());
+			probe.shared.peer_setup.set(lite::Setup::default()).unwrap();
 			let mut shared = probe.shared;
 			Arc::get_mut(&mut shared).expect("one owner").origin = origin.consume();
 			let mut control = Control {
@@ -10322,7 +10322,7 @@ mod tests {
 			version,
 			&estimate,
 		);
-		probe.shared.peer_setup.set(lite::Setup::default());
+		probe.shared.peer_setup.set(lite::Setup::default()).unwrap();
 		let mut shared = probe.shared;
 		Arc::get_mut(&mut shared).expect("one owner").origin = origin.consume();
 		let control = |stream| Control {
@@ -10379,7 +10379,7 @@ mod tests {
 				version,
 				&estimate,
 			);
-			probe.shared.peer_setup.set(lite::Setup::default());
+			probe.shared.peer_setup.set(lite::Setup::default()).unwrap();
 			let mut shared = probe.shared;
 			Arc::get_mut(&mut shared).expect("one owner").origin = origin.consume();
 			let mut control = Control {
@@ -10462,7 +10462,7 @@ mod tests {
 	/// A publisher on a session with send groups.
 	fn grouped_publisher(origin: origin::Consumer) -> (Publisher, crate::lite::test_transport::Log) {
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-		peer_setup.set(crate::lite::Setup::default());
+		peer_setup.set(crate::lite::Setup::default()).unwrap();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let session = ScriptedSession::new(Vec::new()).with_groups();
 		let log = session.log.clone();
