@@ -1002,7 +1002,8 @@ impl Drop for JoiningTask {
 			// The session owns cancelling the request, including after the subscription
 			// ends: closing it once its header is out, or resetting it while the peer's
 			// send window still holds the header back.
-			self.tasks.push(move |waiter: &kio::Waiter| work.poll(waiter).map(|_| ()));
+			self.tasks
+				.push(move |waiter: &kio::Waiter| work.poll(waiter).map(|_| ()));
 		}
 	}
 }
@@ -14744,10 +14745,7 @@ mod stitch_tests {
 		let stream = Stream::open(&crate::driver::Transport::new(downstream.clone()), egress)
 			.await
 			.unwrap();
-		kio::wait(publisher
-			.handle_stream(id, ietf::Body(body.into()), stream)
-			.unwrap())
-			.await;
+		kio::wait(publisher.handle_stream(id, ietf::Body(body.into()), stream).unwrap()).await;
 		let mut streams = std::collections::BTreeMap::<usize, Vec<u8>>::new();
 		for (id, event) in downstream.log.trail() {
 			if let Sent::Write(bytes) = event {

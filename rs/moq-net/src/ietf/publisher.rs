@@ -2572,7 +2572,6 @@ struct RunFill {
 /// The fetch stream a fill writes, ranked as the group it fills.
 type FillStream = Writer<Ranked<crate::transport::boxed::SendStream>, Version>;
 
-
 #[kio::machine(self.state: RunFillState)]
 impl RunFill {
 	fn new(fill: FillServe, track: track::Consumer, timescale: Option<Timescale>, request_id: RequestId) -> Self {
@@ -11115,11 +11114,12 @@ mod serve_tests {
 				.unwrap();
 			let mark = h.log.trail().len();
 			let body = track_status("room", true, version);
-			let task = kio::wait(h
-				.publisher
-				.clone()
-				.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
-				.unwrap());
+			let task = kio::wait(
+				h.publisher
+					.clone()
+					.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
+					.unwrap(),
+			);
 			kio::clock::timeout(std::time::Duration::from_secs(1), task)
 				.await
 				.unwrap_or_else(|_| panic!("{version}: never answered"));
@@ -11162,11 +11162,13 @@ mod serve_tests {
 					.unwrap();
 				let mark = h.log.writes.lock().unwrap().len();
 				let body = track_status("room", wanted, version);
-				kio::wait(h.publisher
-					.clone()
-					.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
-					.unwrap())
-					.await;
+				kio::wait(
+					h.publisher
+						.clone()
+						.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
+						.unwrap(),
+				)
+				.await;
 				assert!(h.log.resets().is_empty(), "{version}: the answer was reset");
 				assert!(h.track.subscription().is_none(), "{version}: TRACK_STATUS subscribed");
 
@@ -11241,12 +11243,12 @@ mod serve_tests {
 				.unwrap();
 			let mark = h.log.writes.lock().unwrap().len();
 			let body = track_status("live/cam", true, version);
-			let mut answer = std::pin::pin!(
-				kio::wait(h.publisher
+			let mut answer = std::pin::pin!(kio::wait(
+				h.publisher
 					.clone()
 					.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream,)
-					.unwrap())
-			);
+					.unwrap()
+			));
 			assert!(futures::poll!(answer.as_mut()).is_pending(), "{version}");
 
 			// Parked resolving the broadcast when the grant narrows.
@@ -11369,11 +11371,13 @@ mod serve_tests {
 			.await
 			.unwrap();
 		let mark = h.log.writes.lock().unwrap().len();
-		kio::wait(h.publisher
-			.clone()
-			.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
-			.unwrap())
-			.await;
+		kio::wait(
+			h.publisher
+				.clone()
+				.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
+				.unwrap(),
+		)
+		.await;
 		refusal_code(&h.log.writes.lock().unwrap()[mark..], version)
 	}
 
@@ -11442,11 +11446,13 @@ mod serve_tests {
 			.await
 			.unwrap();
 		let mark = h.log.writes.lock().unwrap().len();
-		kio::wait(h.publisher
-			.clone()
-			.handle_stream(id, ietf::Body(bytes::Bytes::from(body)), stream)
-			.unwrap_or_else(|e| panic!("{version}: the request closed the session: {e}")))
-			.await;
+		kio::wait(
+			h.publisher
+				.clone()
+				.handle_stream(id, ietf::Body(bytes::Bytes::from(body)), stream)
+				.unwrap_or_else(|e| panic!("{version}: the request closed the session: {e}")),
+		)
+		.await;
 		assert!(h.log.resets().is_empty(), "{version}: refusal was reset");
 
 		let wire = h.log.writes.lock().unwrap()[mark..].to_vec();
@@ -11555,12 +11561,12 @@ mod serve_tests {
 				.unwrap();
 			let mark = h.log.writes.lock().unwrap().len();
 			let body = track_status(path, true, version);
-			let mut serving = std::pin::pin!(
-				kio::wait(h.publisher
+			let mut serving = std::pin::pin!(kio::wait(
+				h.publisher
 					.clone()
 					.handle_stream(ietf::TrackStatus::ID, ietf::Body(body.into()), stream)
-					.unwrap())
-			);
+					.unwrap()
+			));
 			let done = futures::poll!(serving.as_mut());
 			assert!(
 				claim.requested_broadcast().now_or_never().is_none(),
@@ -11677,15 +11683,16 @@ mod serve_tests {
 			.await
 			.unwrap();
 		let mark = h.log.writes.lock().unwrap().len();
-		let task = kio::wait(h
-			.publisher
-			.clone()
-			.handle_stream(
-				ietf::SubscribeNamespace::ID,
-				ietf::Body(bytes::Bytes::from(body)),
-				stream,
-			)
-			.unwrap_or_else(|e| panic!("{version}: the request closed the session: {e}")));
+		let task = kio::wait(
+			h.publisher
+				.clone()
+				.handle_stream(
+					ietf::SubscribeNamespace::ID,
+					ietf::Body(bytes::Bytes::from(body)),
+					stream,
+				)
+				.unwrap_or_else(|e| panic!("{version}: the request closed the session: {e}")),
+		);
 		let mut task = std::pin::pin!(task);
 		let mut done = false;
 		for _ in 0..100 {
@@ -12594,10 +12601,11 @@ mod serve_tests {
 		subscribe(Filter::NextObject, None)
 			.encode_msg(&mut Encoder::new(&mut data, version.into()), version)
 			.unwrap();
-		let mut serving = kio::wait(h
-			.publisher
-			.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream)
-			.unwrap());
+		let mut serving = kio::wait(
+			h.publisher
+				.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream)
+				.unwrap(),
+		);
 		let mut fetching = Box::pin(joining_fetch(&h, 0));
 		assert!(
 			futures::poll!(fetching.as_mut()).is_pending(),
@@ -12631,10 +12639,11 @@ mod serve_tests {
 		subscribe(Filter::NextObject, None)
 			.encode_msg(&mut Encoder::new(&mut data, version.into()), version)
 			.unwrap();
-		let mut serving = kio::wait(h
-			.publisher
-			.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream)
-			.unwrap());
+		let mut serving = kio::wait(
+			h.publisher
+				.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream)
+				.unwrap(),
+		);
 		match futures::future::select(&mut fetching, &mut serving).await {
 			futures::future::Either::Left((response, _)) => {
 				response.unwrap();
@@ -12656,10 +12665,11 @@ mod serve_tests {
 			subscribe(Filter::NextObject, None)
 				.encode_msg(&mut Encoder::new(&mut data, version.into()), version)
 				.unwrap();
-			let serving = kio::wait(h
-				.publisher
-				.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream)
-				.unwrap());
+			let serving = kio::wait(
+				h.publisher
+					.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream)
+					.unwrap(),
+			);
 			let mut fetching = Box::pin(joining_fetch(&h, 0));
 			assert!(futures::poll!(fetching.as_mut()).is_pending());
 			drop(serving);
@@ -13716,11 +13726,12 @@ mod serve_tests {
 				.await
 				.unwrap();
 			let mark = h.log.writes.lock().unwrap().len();
-			let serving = kio::wait(h
-				.publisher
-				.clone()
-				.handle_stream(ietf::Fetch::ID, ietf::Body(body.into()), stream)
-				.unwrap());
+			let serving = kio::wait(
+				h.publisher
+					.clone()
+					.handle_stream(ietf::Fetch::ID, ietf::Body(body.into()), stream)
+					.unwrap(),
+			);
 			let ((), issued) = futures::join!(serving, async {
 				requests.next().await.unwrap().accept(crate::auth::Grant::all())
 			});
@@ -13939,15 +13950,17 @@ mod serve_tests {
 			let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
 				.await
 				.unwrap();
-			kio::wait(h.publisher
-				.clone()
-				.handle_stream(
-					ietf::TrackStatus::ID,
-					ietf::Body(track_status("room", true, version).into()),
-					stream,
-				)
-				.unwrap())
-				.await;
+			kio::wait(
+				h.publisher
+					.clone()
+					.handle_stream(
+						ietf::TrackStatus::ID,
+						ietf::Body(track_status("room", true, version).into()),
+						stream,
+					)
+					.unwrap(),
+			)
+			.await;
 			let wire = h.log.writes.lock().unwrap().clone();
 			let mut buf = Decoder::new(&wire, version.into());
 			assert_eq!(buf.varint().unwrap(), ietf::TrackStatusOk::ID);
