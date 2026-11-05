@@ -148,7 +148,7 @@ it("fills a declared silence with comfort noise and counts no underrun", () => {
 	expect(sent.at(-1)).toMatchObject({ underruns: 0, silent: true });
 
 	// The next utterance refills before it plays, and the noise carries on meanwhile.
-	send({ type: "reset", epoch: 1 });
+	send({ type: "reset", epoch: 1, next: true });
 	send({ type: "data", timestamp: Micro(9_000_000), data: [new Float32Array(50).fill(1)] });
 	expect(rms(read(20))).toBeGreaterThan(0);
 	send({ type: "data", timestamp: Micro(9_050_000), data: [new Float32Array(50).fill(1)] });
@@ -187,4 +187,14 @@ it("holds PCM without consuming it until the shared startup gate opens", () => {
 	expect([...read(20)]).toEqual(Array(20).fill(0));
 	send({ type: "playing", playing: true, epoch: 1 });
 	expect(read(100)[99]).toBe(2);
+});
+
+it("clears comfort noise when the timeline resets", () => {
+	const { send, read } = renderer();
+	send({ type: "data", timestamp: Micro(0), data: [new Float32Array(200).fill(0.0002)] });
+	send({ type: "end", timestamp: Micro(200_000) });
+	for (let i = 0; i < 10; i++) read(20);
+	expect(read(20).some((value) => value !== 0)).toBe(true);
+	send({ type: "reset", epoch: 1 });
+	expect([...read(20)]).toEqual(Array(20).fill(0));
 });
