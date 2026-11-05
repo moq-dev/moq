@@ -4,6 +4,27 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Following.available()` returns nil once the path goes offline
+
+`try await following.available()` returns `BroadcastConsumer?`.
+After the first call, it returns nil once the followed path goes offline, or, for a `follow(path:instance:)` pinned to an instance, once another instance takes it over; the next call returns whatever serves the path next. The first call never returns nil.
+Drop what you read from the previous broadcast either way. A caller that only waits for the first broadcast can take it with `!`.
+
+### Announcements are a listing
+
+`AnnounceConsumer` yields `.present` when a path becomes present and `.absent` when it goes, each carrying an `Announce`.
+`.start` is `.present` and `.end` is `.absent`.
+`.update`, `.restart`, and `.takeover` are gone: a path whose route or publisher instance changes stays present and is not reported again.
+Where you requested the path again on a restart, hold `follow(path:)` instead; each `available()` returns the next instance's broadcast.
+
+```swift
+let following = try session.consume.follow(path: "live/camera")
+while true {
+    guard let broadcast = try await following.available() else { continue } // offline until the next instance
+    play(broadcast)
+}
+```
+
 ### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
 
 `Media.Video` and `Media.Audio` gain `warmup`, the catalog's decoder warmup; it defaults to `nil`, so existing initializers still compile. `Media.TrackConsumer` and the audio and video consumers read it from the rendition and start that much earlier.

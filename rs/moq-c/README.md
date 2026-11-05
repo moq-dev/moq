@@ -64,7 +64,7 @@ int32_t moq_origin_close(uint32_t origin);
 int32_t moq_origin_create_broadcast(uint32_t origin, const char *path, uintptr_t path_len, uint32_t *broadcast);
 int32_t moq_origin_request(uint32_t origin, const char *path, uintptr_t path_len, const char *instance, uintptr_t instance_len, moq_status_callback on_broadcast, void *user_data);
 int32_t moq_origin_request_cancel(uint32_t task);
-int32_t moq_origin_follow(uint32_t origin, const char *path, uintptr_t path_len, const char *instance, uintptr_t instance_len, moq_status_callback on_broadcast, void *user_data);
+int32_t moq_origin_follow(uint32_t origin, const char *path, uintptr_t path_len, const char *instance, uintptr_t instance_len, moq_follow_callback on_follow, void *user_data);
 int32_t moq_origin_follow_cancel(uint32_t task);
 int32_t moq_origin_announced(uint32_t origin, const moq_announce_config *config, moq_status_callback on_announce, void *user_data);
 int32_t moq_origin_announced_info(uint32_t announced, moq_announce_event *dst);
@@ -185,8 +185,8 @@ Reserve each media track with `moq_allocator_reserve_media`. Create a
 `moq_rate_control_create` handle bound to the reservation, with `moq_rate_policy.max_bps` and, for higher
 rungs, `has_lower` and `lower_bps`. Read its initial `moq_rate_control_target`,
 then call `moq_rate_control_update` on every frame,
-including while disabled. A return of 1 writes a changed target; 0 holds the
-last target; a negative return is an error. Apply the target's `bitrate_bps`
+including while disabled. It returns 0 or a negative error; `target.changed`
+is true for a new target and false to hold the last one. Apply the target's `bitrate_bps`
 to your encoder and `enabled` through `moq_publish_media_set_enabled`.
 The shared controller drops immediately, ramps raises, ignores small changes,
 and holds without an estimate. A rung disables only with a probing session,

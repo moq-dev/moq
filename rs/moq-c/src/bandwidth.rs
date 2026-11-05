@@ -449,6 +449,8 @@ pub struct moq_rate_target {
 	pub enabled: bool,
 	/// Bitrate to produce in bits per second, or 0 when disabled.
 	pub bitrate_bps: u64,
+	/// Whether `moq_rate_control_update` changed the target; always false from `moq_rate_control_target`.
+	pub changed: bool,
 }
 
 impl From<moq_mux::rate::Target> for moq_rate_target {
@@ -457,19 +459,26 @@ impl From<moq_mux::rate::Target> for moq_rate_target {
 			moq_mux::rate::Target::Enabled(rate) => Self {
 				enabled: true,
 				bitrate_bps: rate.as_bps(),
+				changed: false,
 			},
 			moq_mux::rate::Target::Disabled => Self {
 				enabled: false,
 				bitrate_bps: 0,
+				changed: false,
 			},
 		}
 	}
 }
 
 /// Create a rate control following this reservation, starting at the policy's maximum bitrate.
+///
+/// A zero `max_bps` is rejected with `MOQ_ERROR_INVALID_CONFIG`.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_rate_control_create(reservation: u32, policy: moq_rate_policy) -> i32 {
 	ffi::enter(move || {
+		if policy.max_bps == 0 {
+			return Err(Error::InvalidConfig("max_bps must be nonzero".into()));
+		}
 		let mut native = moq_mux::rate::Policy::new(moq_net::bandwidth::Rate::from_bps(policy.max_bps));
 		native.lower = policy
 			.has_lower
@@ -503,7 +512,9 @@ pub unsafe extern "C" fn moq_rate_control_target(control: u32, target: *mut moq_
 	})
 }
 
-/// Follow the bound reservation's grant on every frame, returning 1 for a changed target, 0 to hold, or a negative error.
+/// Follow the bound reservation's grant on every frame, returning zero or a negative error.
+///
+/// `target.changed` is true when the target changed and false to hold the last target.
 ///
 /// Drops apply immediately; raises ramp and small moves are ignored. No estimate holds the
 /// target. Disabling requires a probing session so the grant can recover. Apply a changed
@@ -511,7 +522,7 @@ pub unsafe extern "C" fn moq_rate_control_target(control: u32, target: *mut moq_
 /// the last target; the control owns neither the reservation nor media.
 ///
 /// # Safety
-/// - `target` must point to writable storage, written only when the return value is 1.
+/// - `target` must point to writable storage; its other fields are written only when `changed` is true.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_rate_control_update(control: u32, target: *mut moq_rate_target) -> i32 {
 	ffi::enter(move || {
@@ -522,12 +533,14 @@ pub unsafe extern "C" fn moq_rate_control_update(control: u32, target: *mut moq_
 			.controls
 			.get_mut(ffi::parse_id(control)?)
 			.ok_or(Error::NotFound)?;
-		if let Some(next) = control.update() {
-			*target = next.into();
-			Ok(1i32)
-		} else {
-			Ok(0i32)
+		match control.update() {
+			Some(next) => {
+				*target = next.into();
+				target.changed = true;
+			}
+			None => target.changed = false,
 		}
+		Ok(())
 	})
 }
 

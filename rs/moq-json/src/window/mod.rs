@@ -28,10 +28,10 @@
 //! The publisher rolls a group when a joiner wants a fresh one, exactly as
 //! [`snapshot`](crate::snapshot) does: on a track created with a
 //! [`refresh`](moq_net::track::Info::refresh) ratio, a subscriber joining once the open group's ops
-//! outweigh that ratio times its header asks for one, and [`Producer::refresh`] restates the window
-//! in it. Otherwise a group runs to the frame and byte caps. A [`Consumer`] never surfaces a roll:
-//! a header restating records a reader already has yields nothing, so however often the publisher
-//! rolls, the reader sees one continuous stream of [`Event`]s.
+//! outweigh that ratio times its header asks for one, and [`Producer::poll_refresh`] restates the
+//! window in it. Otherwise a group runs to the frame and byte caps. A [`Consumer`] never surfaces a
+//! roll: a header restating records a reader already has yields nothing, so however often the
+//! publisher rolls, the reader sees one continuous stream of [`Event`]s.
 //! [`ProducerConfig::checkpoint_records`] bounds the suffix repeated on each roll for a long-lived
 //! window.
 //!

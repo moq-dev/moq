@@ -15,7 +15,7 @@ use crate::support;
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
-use moq_net::{Error, Hop, Timestamp, Version, announce, origin, track};
+use moq_net::{Error, Hop, Timestamp, Version, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -127,13 +127,13 @@ async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Option<Timest
 }
 
 /// Whether the route passes through the preferred CDN.
-fn via_a(announce: &announce::Event) -> bool {
+fn via_a(announce: &origin::RouteEvent) -> bool {
 	let route = match announce {
-		announce::Event::Start(a)
-		| announce::Event::Update(a)
-		| announce::Event::Restart(a)
-		| announce::Event::Takeover { announce: a, .. } => &a.route,
-		announce::Event::End(_) => return false,
+		origin::RouteEvent::Start(a)
+		| origin::RouteEvent::Update(a)
+		| origin::RouteEvent::Restart(a)
+		| origin::RouteEvent::Takeover { announce: a, .. } => &a.route,
+		origin::RouteEvent::End(_) => return false,
 	};
 	route.hops.iter().any(|hop| *hop == Hop::new(A).unwrap())
 }
@@ -275,10 +275,10 @@ fn assert_continuous(seen: &[(u64, Vec<u8>, Option<Timestamp>)], groups: u64) {
 async fn fails_over_and_back(secondary: &str) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		let mut topology = Topology::new(secondary.parse().unwrap()).await;
-		let mut announced = topology.subscriber.consume().announced();
+		let mut announced = topology.subscriber.consume().routes();
 		let start = announced.next().await.expect("announced");
 		assert!(
-			matches!(start, announce::Event::Start(_)) && via_a(&start),
+			matches!(start, origin::RouteEvent::Start(_)) && via_a(&start),
 			"the preferred CDN wins over the cheaper one: {start:?}"
 		);
 
@@ -288,7 +288,7 @@ async fn fails_over_and_back(secondary: &str) {
 		topology.lose_a().await;
 		let update = announced.next().await.expect("announced");
 		assert!(
-			matches!(update, announce::Event::Update(_)) && !via_a(&update),
+			matches!(update, origin::RouteEvent::Update(_)) && !via_a(&update),
 			"same instance over B: {update:?}"
 		);
 		seen.extend(topology.group_anywhere(&mut rx).await);
@@ -296,7 +296,7 @@ async fn fails_over_and_back(secondary: &str) {
 		topology.restore_a().await;
 		let update = announced.next().await.expect("announced");
 		assert!(
-			matches!(update, announce::Event::Update(_)) && via_a(&update),
+			matches!(update, origin::RouteEvent::Update(_)) && via_a(&update),
 			"back on A: {update:?}"
 		);
 		seen.extend(topology.group_through_a(&mut rx).await);
@@ -320,7 +320,7 @@ async fn preferred_cdn_fails_over_and_back() {
 async fn restarts_across_protocols(secondary: &str) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		let mut topology = Topology::new(secondary.parse().unwrap()).await;
-		let mut announced = topology.subscriber.consume().announced();
+		let mut announced = topology.subscriber.consume().routes();
 		let start = announced.next().await.expect("announced");
 		assert!(via_a(&start), "{start:?}");
 
@@ -331,7 +331,7 @@ async fn restarts_across_protocols(secondary: &str) {
 		topology.lose_a().await;
 		let update = announced.next().await.expect("announced");
 		assert!(
-			matches!(update, announce::Event::Restart(_)) && !via_a(&update),
+			matches!(update, origin::RouteEvent::Restart(_)) && !via_a(&update),
 			"another instance over B: {update:?}"
 		);
 		topology.group();
