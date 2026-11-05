@@ -33,8 +33,22 @@ the catalog root. Its why I wanted to call the section `include` originally."
 - Update the HLS listing's code, landed in
   [moq-dev/moq#7836](https://github.com/moq-dev/moq/pull/7836), to the new name.
 
+The shared-timeline rule is now stated in the draft and concept guide. The
+rename remains unimplemented pending the naming decision below.
+
 Public API: breaking but unreleased (Rust `hang`, `@moq/hang`, `@moq/watch`).
 Wire: the catalog JSON key changes; unreleased.
+
+## Waiting
+
+- Maintainer: confirm the public name before the breaking rename, as required
+  by the Plan. Options: `include` (recommended, the original preference),
+  `includes` (plural for the map), or keep `contributions`. An agent cannot
+  settle the explicitly reserved naming decision. Record the choice in
+  [the implementation PR](https://github.com/moq-dev/moq/pull/7943), then rename
+  Rust and JS types, schemas, watch API, HLS, fixtures, and draft references
+  together, with Unreleased migration notes. No service or repository setting
+  change is needed.
 
 ## Related
 

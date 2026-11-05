@@ -239,10 +239,13 @@ A consumer that cannot decode `join`, including a zero `interval`, MUST treat it
 Nesting the interval under `join` leaves room for a later join mechanism that is not a fixed grid.
 
 ## Contributions {#contributions}
-The optional root `contributions` map names whole broadcasts, such as each guest feed in a composed room, whose own catalogs describe their renditions.
+The optional root `contributions` map names whole broadcasts, such as transcoded renditions of the source, whose own catalogs describe their renditions.
 Each key is a contribution ID.
 Each entry MUST contain a string `broadcast`, resolved against the catalog's broadcast as in {{field-broadcast}}, and MAY contain an `instance` as in {{field-instance}}.
 A consumer MUST reject a catalog with a malformed entry or a reference that escapes above the root.
+
+A contribution MUST share the listing catalog's PTS timeline and root settings, including its `media.clock` and `media.join.interval` ({{media}}).
+A consumer uses the listing catalog's settings without comparing the contribution's own settings; a mismatch is a publisher error.
 
 Listing an entry MUST NOT subscribe to the contribution: a consumer opens its catalog only when it selects the contribution or one of its renditions.
 An HLS master selects every contribution it lists, reading their catalogs to describe their renditions, but MUST NOT subscribe to their media until requested by a player.
@@ -1128,6 +1131,7 @@ This document has no IANA actions.
 - Added the optional video `reorder` field: the most frames that can precede one in decode order and follow it in presentation, fixed for the track once declared. A consumer that authors decode times derives them from it and the current group alone, refusing deeper reordering; without it, a consumer infers them from timestamps.
 - Added an optional `instance` beside every rendition and data track `broadcast` reference ({{field-instance}}). A consumer reads each referenced path from the first broadcast it resolves for a catalog instance; a present `instance` fails a rendition that resolves another stream, and is best effort against an Instance a receiver minted.
 - Added the optional root `contributions` map ({{contributions}}): whole broadcasts named by a relative `broadcast` and an optional `instance`, opened only on selection, whose rendition IDs stay their own.
+- Contributions share the listing catalog's PTS timeline and root settings, including its clock and join interval.
 - An HLS master selects the contributions it lists by reading their catalogs, without demanding media, and segments them on the listing catalog's `media`; an on-demand publisher answers its catalog without starting media production.
 - Added optional `stats` and `echo` catalog sections, publisher/viewer snapshots keyed by rendition ID, and the `.echo` feedback broadcast convention.
 - An Opus frame timestamp counts the OpusHead pre-skip: a consumer presents each decoded sample the pre-skip earlier than its frame timestamp places it.
