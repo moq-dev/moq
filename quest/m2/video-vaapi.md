@@ -11,12 +11,12 @@ surfaces.
 
 Decided in the 2026-09-30 audit: moved from m4, and the "gated on a
 `moq-dev/vaapi` release" blocker is gone. That crate is our own repo (last
-release 0.1.0 on 2026-09-24), so this quest includes the crate work (HEVC
+release 0.1.1 on 2026-11-04), so this quest includes the crate work (HEVC
 encode, H.265 decode, pre-generated bindings, the resize pool) and cutting the
 release, then bumping the workspace requirement here. The resize-pool quest
 folds in for the same reason.
 
-**Decode.** The H.264 decoder landed (`decode/backend/vaapi.rs`; the workspace pins moq-vaapi 0.1.0),
+**Decode.** The H.264 decoder landed (`decode/backend/vaapi.rs`; the workspace pins moq-vaapi 0.1.1),
 with the default `decode::Config::output` of `Output::Native` handing out
 DMA-BUF surfaces the renderer imports without a download. H.265 decode is still missing, so a Linux box
 without NVDEC has no hardware path for it.
@@ -30,7 +30,7 @@ Intel Meteor Lake. `just rs gpu` also runs the ignored
 VPP to 720p/480p/360p, GPU encode of every frame, and decoded output sizes and
 counts. What is left is H.265, below.
 
-**H.265.** The VAAPI backend advertises H.264 only. `moq-vaapi` 0.1.0 vendors
+**H.265.** The VAAPI backend advertises H.264 only. `moq-vaapi` 0.1.1 vendors
 the HEVC buffer types (`src/buffer/hevc.rs`) but its `Encoder` is hardcoded to
 `VAProfileH264Main` (with `VAEntrypointEncSlice`, or the low-power entrypoint
 where that is all a device has), so exposing an HEVC encoder is a
