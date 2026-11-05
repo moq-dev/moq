@@ -72,4 +72,3 @@ follow-up wires the capture worklet to the encoder worker with a
 ## Related
 
 - [Watch worker](/quest/m2/watch-worker.md) - the implementation this rewrites
-- [A/V clock](/quest/m1/av-clock.md) - the `Sync` shape the implementation moves; the prototype can pace against today's

@@ -359,7 +359,7 @@ export class AudioBuffer {
 		// Nothing has reached the output yet, so there is no mapping to report.
 		if (!output.performanceTime || output.contextTime === undefined) return;
 		const behind = Milli.fromSecond((data.time - output.contextTime) as Second);
-		this.#playhead.set({ rolling: true, timestamp: Milli(timestamp - behind), wall: Milli(output.performanceTime) });
+		this.#playhead.set({ rolling: true, timestamp: timestamp - behind, wall: Milli(output.performanceTime) });
 	}
 
 	// The floor as the worklet takes it.

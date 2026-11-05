@@ -55,5 +55,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the estimator whose budgets these rows extend
-- [A/V clock](/quest/m1/av-clock.md) - audio driving the clock should make these rows easier, not harder
 - [ViSQOL grading](/quest/m2/audio-visqol.md) - adds a quality score to the same harness

@@ -159,10 +159,6 @@ A/V clock work.
   panel open for two minutes, and record its audio Underruns after 30 s and the
   latency tab's auto delay.
 
-## Required
-
-- [A/V clock](/quest/m1/av-clock.md) - the clock the stretch converges toward
-
 ## Related
 
 - [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - re-measures the AAC browser budgets after the publisher change, no gate on this proof

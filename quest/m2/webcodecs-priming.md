@@ -17,8 +17,8 @@ gap ([w3c/webcodecs#626](https://github.com/w3c/webcodecs/issues/626)).
 
 Out of scope: Rust, where `moq-audio` already declares Opus lookahead as
 pre-skip and folds the AAC delay into timestamps (`folded_delay` in
-`rs/moq-audio/src/encode/encoder.rs`); and playback-side sync, which
-[A/V clock](/quest/m1/av-clock.md) owns.
+`rs/moq-audio/src/encode/encoder.rs`); and playback-side sync, where
+the audio playhead drives `Sync`.
 
 ## Plan
 

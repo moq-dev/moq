@@ -78,12 +78,13 @@ export type TrackProps = {
 };
 
 /**
- * Where audio output stands, as the render worklet last reported it: rolling, the sample at
- * `timestamp` reaches the output at local time `wall` (on the `@moq/clock` timeline); stalled
- * mid-playback, the output holds at `timestamp`.
+ * Where audio output stands, as the render worklet last reported it: rolling, the sample at media
+ * time `timestamp` ms (negative while output latency still covers the first sample) reaches the
+ * output at local time `wall` on the `@moq/clock` timeline; stalled mid-playback, the output holds
+ * at `timestamp`.
  * @internal
  */
-export type Playhead = { rolling: true; timestamp: Milli; wall: Milli } | { rolling: false; timestamp: Milli };
+export type Playhead = { rolling: true; timestamp: number; wall: Milli } | { rolling: false; timestamp: Milli };
 
 /** What one track holds in the clock. @internal */
 export type Part = {
@@ -176,6 +177,9 @@ export class Clock {
 		// and another track's arrivals must not move its timeline.
 		if (this.driving) return late;
 
+		// A reference audio handed back belongs to whichever track arrives next.
+		this.owner ??= part;
+
 		const reference = this.fold(current, ref);
 		if (reference === current) return late;
 		this.out.reference.set(reference);
@@ -212,7 +216,8 @@ export class Clock {
 	}
 
 	// Hand the clock back to the wall at the last audio-derived value, so video does not jump. The
-	// reference passes to another track still receiving, whose own timeline ending releases it.
+	// reference passes to another track still receiving, whose own timeline ending releases it, or
+	// else to the next track to arrive.
 	release(): void {
 		const held = this.paused.peek();
 		if (held !== undefined) this.out.reference.set(wall() - held - this.out.delay.peek());
@@ -230,8 +235,7 @@ export class Clock {
 			if (this.audio !== part) return;
 			this.release();
 		}
-		// A reference nobody holds, set before any arrival, is released by whichever track ends.
-		if (this.owner !== undefined && this.owner !== part) return;
+		if (this.owner !== part) return;
 
 		// The earliest remaining track holds the reference, else the next frame anchors a new one.
 		let earliest: Part | undefined;
@@ -275,7 +279,8 @@ export class Clock {
 		if (!this.playing.peek()) return undefined;
 		const reference = this.out.reference.peek();
 		if (reference === undefined) return undefined;
-		return this.paused.peek() ?? Milli(wall() - reference - this.out.delay.peek());
+		// Media time is nonnegative, so a playhead before the first sample's turn reads as zero.
+		return this.paused.peek() ?? Milli(Math.max(0, wall() - reference - this.out.delay.peek()));
 	}
 
 	async wait(part: Part | undefined, timestamp: Milli, signal?: AbortSignal): Promise<boolean> {
@@ -453,7 +458,9 @@ export class Sync {
 	 * @internal
 	 */
 	track(kind: "audio", props: TrackProps): AudioTrack;
+	/** Open a track's hold on the clock. @internal */
 	track(kind: "video" | "text", props: TrackProps): Track;
+	/** Open a track's hold on the clock. @internal */
 	track(kind: TrackKind, props: TrackProps): Track {
 		return kind === "audio" ? new AudioTrack(this.#clock, props) : new Track(this.#clock, props);
 	}
@@ -544,8 +551,8 @@ export class Sync {
 
 	/**
 	 * The PTS that should be rendering right now: the audio playhead while audio plays, else derived
-	 * from the reference and delay; negative before the first frame's turn. Undefined before ingress
-	 * or while buffered startup is filling.
+	 * from the reference and delay; zero until media time zero's turn. Undefined before ingress or
+	 * while buffered startup is filling.
 	 */
 	now(): Milli | undefined {
 		return this.#clock.now();

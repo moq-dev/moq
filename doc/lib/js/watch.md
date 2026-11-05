@@ -49,6 +49,13 @@ suspends the element until corrected or removed. The
 The overlay adds play/pause, volume, fullscreen, a quality selector, a
 buffering indicator, and a stats panel.
 
+While audio plays, it is the clock: video and captions present against the
+sample reaching the speakers, output latency included, so a re-buffering or
+skipping audio ring cannot drift away from the picture. When the audio runs dry
+mid-stream, the picture holds with it. Muted, paused, or without audio, playback
+paces on the local clock, continuing from where audio left it. A video
+discontinuity restarts only video's timeline.
+
 `el.audio.out.error` and `el.video.out.error` report a fatal decode error.
 The failing track closes its subscription and stops decoding. Select another
 source or rendition to clear the failure; the player does not resubscribe to

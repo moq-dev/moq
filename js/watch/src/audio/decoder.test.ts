@@ -1292,6 +1292,48 @@ describe("Decoder across a rename", () => {
 	});
 });
 
+it("drives the clock from the output while it plays, holds it at a re-stall, and hands it back when muted", async () => {
+	const clock = new Manual();
+	clock.jump(Nano.fromMilli(Milli(5000)));
+	const installed = clock.install();
+	const playback = await play(Milli(100));
+	const quantum = () => [new Float32Array(960), new Float32Array(960)];
+	try {
+		await playback.play(10);
+		const ring = playback.rings()[0];
+		const context = playback.context.peek() as unknown as FakeContext;
+		if (!ring?.ring || !context) throw new Error("missing audio graph");
+
+		// Context time 1 s reaches the output now, and the next sample renders 30 ms after it.
+		context.output = { contextTime: 1, performanceTime: 5000 };
+		ring.time = 1.03;
+		expect(ring.read(quantum())).toBe(960);
+		await microtasks();
+		const heard = Milli.fromMicro(ring.ring.timestamp) - 30;
+		expect(playback.sync.now()).toBeCloseTo(heard, 6);
+		await clock.advance(Nano.fromMilli(Milli(10)));
+		expect(playback.sync.now()).toBeCloseTo(heard + 10, 6);
+
+		// The ring runs dry: the clock holds where it stopped, however long the refill takes.
+		while (ring.read(quantum()) > 0);
+		await microtasks();
+		const held = playback.sync.now();
+		expect(held).toBe(Milli.fromMicro(ring.ring.timestamp));
+		await clock.advance(Nano.fromMilli(Milli(500)));
+		expect(playback.sync.now()).toBe(held);
+
+		// Muted, the ring only drains, so the clock runs on from where audio left it.
+		playback.decoding.set(false);
+		await microtasks();
+		await clock.advance(Nano.fromMilli(Milli(10)));
+		expect(playback.sync.now()).toBe(Milli((held ?? 0) + 10));
+	} finally {
+		playback.close();
+		await microtasks();
+		installed.close();
+	}
+});
+
 it("keeps audio's opening buffered while an enabled video track fills", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
@@ -1464,7 +1506,10 @@ it.each([100, 1000])(
 
 it("a rejected audio support probe does not leave buffered video waiting on a pending track", async () => {
 	const sync = new Sync({ delay: Milli(100), buffer: Milli(1000) });
-	const remove = sync.track("video", { target: new Signal(Milli(100)), startup: new Signal({ start: Milli(0), end: Milli(100) }) });
+	const remove = sync.track("video", {
+		target: new Signal(Milli(100)),
+		startup: new Signal({ start: Milli(0), end: Milli(100) }),
+	});
 	let reject!: (error: Error) => void;
 	const failure = new Error("audio support probe failed");
 	const logged = spyOn(console, "warn").mockImplementation(() => {});
