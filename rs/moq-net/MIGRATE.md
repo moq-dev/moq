@@ -6,8 +6,9 @@ How to update your code for each breaking change, newest first.
 
 ### Socket readers start at the beginning
 
-New socket sessions subscribe from group 0, frame 0, so an acceptor's first burst
-is preserved when its subscription answer arrives after its writes. Existing
+New `track` socket sessions subscribe from group 0, and `tcp` sessions join their
+half's only group from its first frame, so an acceptor's first burst is preserved
+when its subscription answer arrives after its writes. Existing
 callers need no migration; socket naming and the public API are unchanged.
 IETF subscribers and publishers also honor explicit starts on every supported
 draft, keeping a prefix written before the answer arrived. A start of group 0 is a

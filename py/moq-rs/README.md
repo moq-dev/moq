@@ -268,7 +268,9 @@ sessions run, or use it as an async context manager. It announces only
 - `TrackStream` exposes `producer: TrackProducer`, `consumer: TrackConsumer`, `peer`,
   and `session`. Its subscription starts reliable and ascending, and omitted
   `info` keeps messages without a publisher age limit. Hold or cancel the consumer
-  to retain or release that subscription.
+  to retain or release that subscription. A message no hop will deliver, such as
+  one a cache reclaimed after 30 s unread or a refused fetch, is skipped rather
+  than ending the session.
 
 Cancelling a dial or its acceptance resets that dial. Cancelling an accept wait
 leaves the endpoint listening. `endpoint.close()` resets sessions and pending dials.

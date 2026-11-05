@@ -100,14 +100,6 @@ fn messages() -> track::Info {
 	track::Info::default().with_max_age(None)
 }
 
-/// What a session's reader asks for: every group, oldest first, however late it is.
-fn reliable() -> Subscription {
-	Subscription::default()
-		// A fresh session starts at group 0 even if its answer arrives after its first writes.
-		.with_range(0..)
-		.with_order(Order::Ascending)
-		.with_delay(Delay::default().with_max(None))
-}
 
 mod sealed {
 	use super::*;
@@ -170,6 +162,21 @@ impl Protocol {
 			"tcp" => Some(Self::Tcp),
 			"track" => Some(Self::Track),
 			_ => None,
+		}
+	}
+
+	/// What a session's reader asks for: every message, oldest first, however late it is.
+	fn subscription(self) -> Subscription {
+		let reliable = Subscription::default()
+			.with_order(Order::Ascending)
+			.with_delay(Delay::default().with_max(None));
+		match self {
+			// The half's only group is the live one, so a live join reads it from its first
+			// frame, even one written before the answer: over moq-transport, a SUBSCRIBE
+			// plus a joining FETCH or fill for that group's head.
+			Self::Tcp => reliable,
+			// Starts at group 0, so a burst written before the answer is kept.
+			Self::Track => reliable.with_range(0..),
 		}
 	}
 }
@@ -273,6 +280,8 @@ impl sealed::Open for TcpStream {
 /// delay budget, so a late group is waited for rather than skipped. Each hop's cache
 /// still reclaims a group nobody read within its idle window (30 s by default), or under
 /// memory pressure, except the newest, so a reader that stalls longer can miss groups.
+/// Any group the track reports it will never deliver, such as one a moq-transport
+/// publisher refused to fetch, is skipped the same way rather than ending the session.
 /// Update its subscription, such as with a finite
 /// [`Delay`] or [`Order::Descending`], to make it lossy or newest first, and read it in
 /// group order with [`track::Subscriber::ordered`]. Groups are written with
@@ -828,13 +837,13 @@ enum Step {
 
 impl Step {
 	/// Advance until the peer serves its half, subscribing to `track` in its endpoint.
-	fn poll(&mut self, waiter: &kio::Waiter, track: &str) -> Poll<Result<(), Error>> {
+	fn poll(&mut self, waiter: &kio::Waiter, protocol: Protocol, track: &str) -> Poll<Result<(), Error>> {
 		loop {
 			match self {
 				Self::Resolving(following) => {
 					// Only the first call is made here, and it never reports the path offline.
 					let broadcast = ready!(following.poll_available(waiter))?.expect("the first call is never offline");
-					let subscribing = broadcast.track(track)?.subscribe(reliable()).into_inner();
+					let subscribing = broadcast.track(track)?.subscribe(protocol.subscription()).into_inner();
 					*self = Self::Subscribing(subscribing);
 				}
 				Self::Subscribing(subscribing) => {
@@ -957,7 +966,7 @@ impl<S: Stream> Dialing<S> {
 			}
 		}
 
-		ready!(self.step.poll(waiter, &self.name))?;
+		ready!(self.step.poll(waiter, S::PROTOCOL, &self.name))?;
 		// The peer serves its half only after asking for this side's, so a conforming peer
 		// asked already; wait for its request regardless.
 		let Some(Answer::Served(_)) = &self.answer else {
@@ -1029,7 +1038,7 @@ impl<S: Stream> Accepting<S> {
 		if self.demand.poll_state(waiter) != track::DemandState::Active {
 			return Poll::Ready(Err(Error::Cancel));
 		}
-		ready!(self.step.poll(waiter, &self.name))?;
+		ready!(self.step.poll(waiter, S::PROTOCOL, &self.name))?;
 
 		// Accepted outside the lock, since it wakes the dialer.
 		let request = self.request.take().ok_or(Error::Closed)?;
