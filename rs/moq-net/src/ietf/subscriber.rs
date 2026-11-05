@@ -2951,14 +2951,14 @@ impl Subscriber {
 				}
 				self.validity.check(waiter)?;
 				if request.poll_unused(waiter).is_ready() {
-					return Poll::Ready(Err(Error::Cancel));
+					return Poll::Ready(Ok(None));
 				}
-				Stream::poll_open(&opening, &mut open, self.version, waiter)
+				Stream::poll_open(&opening, &mut open, self.version, waiter).map(|r| r.map(Some))
 			})
 			.await
 			{
-				Ok(stream) => break stream.with_stats(self.origin.stats()),
-				Err(Error::Cancel) => {
+				Ok(Some(stream)) => break stream.with_stats(self.origin.stats()),
+				Ok(None) => {
 					if request.close_unused() {
 						return;
 					}
