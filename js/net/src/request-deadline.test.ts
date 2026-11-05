@@ -77,9 +77,7 @@ for (const protocol of ["lite", "ietf"] as const) {
 				}
 				// A lite subscription opens its SUBSCRIBE alongside its TRACK.
 				const opened = protocol === "lite" ? 2 : 1;
-				expect(transport.options).toEqual(
-					Array.from({ length: opened }, () => ({ waitUntilAvailable: true })),
-				);
+				expect(transport.options).toEqual(Array.from({ length: opened }, () => ({ waitUntilAvailable: true })));
 			} finally {
 				track.close();
 				broadcast.close();

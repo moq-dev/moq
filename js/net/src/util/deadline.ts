@@ -80,10 +80,11 @@ export class Deadline {
 
 	/** Wait for the first answer, within the budget if one was given. */
 	async wait<T>(answer: Promise<T>): Promise<T> {
-		if (this.#budget === undefined) return answer;
+		const budget = this.#budget;
+		if (budget === undefined) return answer;
 		const done = new AbortController();
 		try {
-			return (await race([answer, this.#expire(done.signal)])) as T;
+			return (await race([answer, this.#expire(budget, done.signal)])) as T;
 		} catch (cause) {
 			const failure = cause instanceof TimeoutError ? controlTimeout(cause) : error(cause);
 			this.#failure = failure;
@@ -98,8 +99,8 @@ export class Deadline {
 	}
 
 	/** Reject once the request goes the whole budget with none of its streams waiting to open. */
-	async #expire(done: AbortSignal): Promise<never> {
-		const budget = Nano.fromMilli(this.#budget!);
+	async #expire(limit: Milli, done: AbortSignal): Promise<never> {
+		const budget = Nano.fromMilli(limit);
 		const answered = new Promise<void>((resolve) =>
 			done.addEventListener("abort", () => resolve(), { once: true }),
 		);
