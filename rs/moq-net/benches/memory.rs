@@ -220,12 +220,19 @@ impl Link {
 
 	async fn measure(&mut self, iters: u64) -> Duration {
 		let expected = self.tracks.len() * FRAMES * self.payload.len();
+		let counting = std::env::var_os("MEMORY_ALLOCS").is_some();
 		let mut elapsed = Duration::ZERO;
 		for _ in 0..iters {
 			self.tick();
+			if counting {
+				COUNTING.store(true, Ordering::Relaxed);
+			}
 			let start = Instant::now();
 			assert_eq!(self.round().await, expected);
 			elapsed += start.elapsed();
+			if counting {
+				COUNTING.store(false, Ordering::Relaxed);
+			}
 		}
 		elapsed
 	}
@@ -240,9 +247,7 @@ fn allocations() {
 		let mut link = rt.block_on(Link::new(streams, size));
 		ALLOCATIONS.store(0, Ordering::Relaxed);
 		ALLOCATED.store(0, Ordering::Relaxed);
-		COUNTING.store(true, Ordering::Relaxed);
 		rt.block_on(link.measure(ROUNDS as u64));
-		COUNTING.store(false, Ordering::Relaxed);
 
 		let frames = (ROUNDS * streams * FRAMES) as f64;
 		let allocations = ALLOCATIONS.load(Ordering::Relaxed) as f64 / frames;
