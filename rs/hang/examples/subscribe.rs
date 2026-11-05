@@ -80,11 +80,7 @@ async fn play(consumer: moq_net::origin::Consumer, announce: moq_net::announce::
 	let broadcast = consumer.request(&announce.prefix, announce.route.instance).await?;
 
 	// Read the catalog to discover available tracks.
-	let catalog_track = broadcast
-		.track(hang::Catalog::DEFAULT_NAME)?
-		.subscribe(hang::Catalog::default_subscription())
-		.await?;
-	let mut catalog = moq_mux::catalog::hang::Consumer::<()>::new(catalog_track);
+	let mut catalog = moq_mux::catalog::hang::Consumer::<()>::new(broadcast.track(hang::Catalog::DEFAULT_NAME)?);
 
 	let info = catalog.next().await?.ok_or_else(|| anyhow::anyhow!("no catalog"))?;
 

@@ -110,10 +110,7 @@ mod tests {
 	async fn opus_output(broadcast: &moq_net::broadcast::Consumer) -> Track {
 		let catalog_track = broadcast
 			.track(hang::Catalog::DEFAULT_NAME)
-			.expect("output catalog track")
-			.subscribe(hang::Catalog::default_subscription())
-			.await
-			.expect("subscribe to output catalog");
+			.expect("output catalog track");
 		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog_track);
 		let catalog = kio::clock::timeout(TIMEOUT, catalogs.next())
 			.await
