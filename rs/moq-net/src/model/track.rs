@@ -6865,6 +6865,10 @@ struct DropCursor {
 	/// [`Subscriber::reoffer_stale`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	reported_stale: RangeSet<u64>,
+	/// The part of [`Self::reported_stale`] an upstream's received stale run decided, which
+	/// is the upstream's to judge again once an update reopens it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	reported_received: RangeSet<u64>,
 	/// The reported runs skipped. A skip replaces a drop, so a run reported dropped is
 	/// reported again once it is skipped, and only a skip already reported stops it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -6881,21 +6885,29 @@ impl DropCursor {
 			scanned: None,
 			reported: RangeSet::new(),
 			reported_stale: RangeSet::new(),
+			reported_received: RangeSet::new(),
 			reported_skip: RangeSet::new(),
 		}
 	}
 
 	/// Take back every stale run, reported or not: an update reopens their verdict, so they
-	/// are judged again, and reported again under the new update if still stale.
-	fn take_stale(&mut self) -> Vec<ops::Range<u64>> {
-		let mut stale: RangeSet<u64> = self
+	/// are judged again, and reported again under the new update if still stale. Also returns
+	/// the part an upstream's received stale run decided.
+	fn take_stale(&mut self) -> (Vec<ops::Range<u64>>, RangeSet<u64>) {
+		let mut stale = RangeSet::new();
+		let mut received = std::mem::take(&mut self.reported_received);
+		let queued: Vec<_> = self
 			.pending
 			.iter()
 			.filter(|(_, pending)| pending.hole.stale_budget().is_some())
-			.map(|(run, _)| run.clone())
+			.map(|(run, pending)| (run.clone(), pending.received))
 			.collect();
-		for run in stale.iter() {
+		for (run, from_upstream) in queued {
 			self.pending.remove(run.clone());
+			if from_upstream {
+				received.insert(run.clone());
+			}
+			stale.insert(run);
 		}
 		for run in std::mem::take(&mut self.reported_stale).iter() {
 			self.reported.remove(run.clone());
@@ -6903,7 +6915,7 @@ impl DropCursor {
 		}
 		// A received stale run is folded in again by the next scan, if the track still holds it.
 		self.scanned = None;
-		stale.into_iter().collect()
+		(stale.into_iter().collect(), received)
 	}
 
 	/// Retire a stale report on `sequence` once its group is handed out: the group won over
@@ -6911,6 +6923,7 @@ impl DropCursor {
 	fn retire(&mut self, sequence: u64) {
 		if let Some(end) = sequence.checked_add(1) {
 			self.reported_stale.remove(sequence..end);
+			self.reported_received.remove(sequence..end);
 		}
 	}
 
@@ -7016,13 +7029,21 @@ impl DropCursor {
 				let hole = pending.hole;
 				self.reported.insert(gap.clone());
 				match &hole {
-					// Final, so no update reopens a stale report it replaced.
-					Hole::Skip => {
-						self.reported_skip.insert(gap.clone());
-						self.reported_stale.remove(gap.clone());
+					hole if hole.stale_budget().is_some() => {
+						self.reported_stale.insert(gap.clone());
+						match pending.received {
+							true => self.reported_received.insert(gap.clone()),
+							false => self.reported_received.remove(gap.clone()),
+						}
 					}
-					hole if hole.stale_budget().is_some() => self.reported_stale.insert(gap.clone()),
-					Hole::Drop { .. } => self.reported_stale.remove(gap.clone()),
+					// Final, so no update reopens a stale report it replaced.
+					hole => {
+						if matches!(hole, Hole::Skip) {
+							self.reported_skip.insert(gap.clone());
+						}
+						self.reported_stale.remove(gap.clone());
+						self.reported_received.remove(gap.clone());
+					}
 				}
 				return Some((gap, hole));
 			}
@@ -7505,12 +7526,17 @@ impl Cursor {
 		let Some(drops) = &mut self.drops else {
 			return Vec::new();
 		};
-		let runs = drops.take_stale();
+		let (runs, received) = drops.take_stale();
 		// What neither a skip nor a miss offers again: a group written off at the track's max
-		// age bound, which no budget reverses. It is still stale under the new terms.
+		// age bound, which no budget reverses. It is still stale under the new terms. What an
+		// upstream's stale run decided is the upstream's to judge again: the next scan folds
+		// it in again if the track still holds it, and it stays owed if new terms superseded it.
 		let mut kept = RangeSet::new();
 		for run in &runs {
 			kept.insert(run.clone());
+			for decided in received.overlapping(run) {
+				kept.remove(decided.clone());
+			}
 			if let Some(misses) = &mut self.misses {
 				for missed in misses.given_up().overlapping(run) {
 					kept.remove(missed.clone());
@@ -7526,12 +7552,6 @@ impl Cursor {
 		}
 		let budget = {
 			let state = self.state.read();
-			// A received stale run is folded in again by the next scan, if the track holds it.
-			for run in kept.clone().iter() {
-				for (dropped, _) in state.drops.overlapping(run) {
-					kept.remove(dropped.clone());
-				}
-			}
 			clamp_max_delay(self.subscription.read().budget(), state.max_age_bound())
 		};
 		if let Some(drops) = &mut self.drops {
@@ -22712,6 +22732,30 @@ mod test {
 		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((3..4, Hole::stale(budget))));
 		producer.supersede_stale(None);
 		assert!(subscriber.poll_drop(&waiter).is_pending(), "5 and 6 are unknown again");
+	}
+
+	/// A received stale run a reader reported and the relay's own update then superseded is
+	/// unknown again: the reader's update owes it until the upstream serves or drops it again,
+	/// rather than dropping it again as if the reader had judged it stale itself.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_superseded_received_stale_report_stays_owed_after_an_update() {
+		let producer = track_producer("test", Info::timed());
+		let budget = Duration::from_millis(500);
+		let mut subscriber = producer.subscribe(
+			Subscription::default()
+				.with_delay(Delay::default().with_max(budget))
+				.with_ranges([Range::groups(0..)]),
+		);
+		let waiter = kio::Waiter::noop();
+		producer.give_up(1..3, Hole::stale(budget));
+		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((1..3, Hole::stale(budget))));
+		producer.supersede_stale(None);
+		assert_eq!(subscriber.reoffer_stale(), [1..3]);
+		assert!(subscriber.poll_drop(&waiter).is_pending(), "no verdict under the new terms");
+		// The upstream drops it again under the new terms: reported again.
+		producer.give_up(1..3, Hole::stale(budget));
+		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((1..3, Hole::stale(budget))));
 	}
 
 	/// A bounded reader is settled by a received stale run only when its range reaches where

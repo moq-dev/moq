@@ -2376,6 +2376,9 @@ export class Subscriber {
 	// The reported runs judged stale, for a wire whose update re-offers them; see
 	// `hooks.reofferStale`.
 	#reportedStale: Run[] = [];
+	// The part of #reportedStale an upstream's received stale run decided, which is the upstream's
+	// to judge again once an update reopens it.
+	#reportedReceived: Run[] = [];
 	// The reported runs skipped: a skip replaces a drop, so a run reported dropped is reported
 	// again once it is skipped, and only a skip already reported stops it.
 	#reportedSkip: Run[] = [];
@@ -2631,6 +2634,7 @@ export class Subscriber {
 		// retires its own.
 		if (this.#reportedStale.length > 0) {
 			this.#reportedStale = removeRun(this.#reportedStale, sequence, sequence + 1n);
+			this.#reportedReceived = removeRun(this.#reportedReceived, sequence, sequence + 1n);
 		}
 		if (this.#resume) this.#resume.forgetPastBudget(this.#delivered);
 		else this.#forgetPastBudget(this.#delivered);
@@ -2750,12 +2754,18 @@ export class Subscriber {
 	#reofferStale(): Run[] {
 		if (this.#resume) return this.#resume.reofferStale();
 		const taken: Run[] = [];
+		const received = this.#reportedReceived;
 		for (const run of this.#reportedStale) {
 			this.#reported = removeRun(this.#reported, run.start, run.end);
 			insertRun(taken, run.start, run.end);
 		}
 		this.#reportedStale = [];
-		for (const run of this.#pending) if (run.stale !== undefined) insertRun(taken, run.start, run.end);
+		this.#reportedReceived = [];
+		for (const run of this.#pending) {
+			if (run.stale === undefined) continue;
+			insertRun(taken, run.start, run.end);
+			if (run.received) insertRun(received, run.start, run.end);
+		}
 		this.#pending = this.#pending.filter((run) => run.stale === undefined);
 		// A received stale run is folded in again by the next scan, if the track still holds it.
 		this.#dropsSeen = undefined;
@@ -2763,11 +2773,13 @@ export class Subscriber {
 			taken.some((run) => run.start <= sequence && sequence < run.end),
 		);
 		// What no skip offers again, such as a group written off at the track's max age bound,
-		// which no budget reverses, is still stale under the new terms: reported again. A
-		// received stale run is left to the scan above. Mirrors Rust.
+		// which no budget reverses, is still stale under the new terms: reported again. What an
+		// upstream's stale run decided is the upstream's to judge again: the scan above folds it
+		// in again if the track still holds it, and it stays owed if new terms superseded it.
+		// Mirrors Rust.
 		let kept: Run[] = taken.map((run) => ({ ...run }));
 		for (const sequence of sequences) kept = removeRun(kept, sequence, sequence + 1n);
-		for (const dropped of this.#state.drops.peek()) kept = removeRun(kept, dropped.start, dropped.end);
+		for (const decided of received) kept = removeRun(kept, decided.start, decided.end);
 		if (kept.length > 0) {
 			const hole = staleHole(this.#drift().budget);
 			for (const run of kept) this.#pending = insertDrop(this.#pending, run.start, run.end, hole);
@@ -3699,7 +3711,7 @@ export class Subscriber {
 	// The first part of `[from, to)` this cursor has not reported yet, now reported, with why. A
 	// skip goes out over a drop already reported, and a final drop over a stale one, since each
 	// replaces what it goes out over.
-	#report(from: bigint, to: bigint, hole: Hole): (Recv & { kind: "drop" }) | undefined {
+	#report(from: bigint, to: bigint, hole: Hole & { received?: boolean }): (Recv & { kind: "drop" }) | undefined {
 		const { start, end } = this.#cursor.peek();
 		const final = !hole.skip && hole.stale === undefined;
 		for (const run of this.#window.runs(max(from, start), min(to, end ?? to))) {
@@ -3709,9 +3721,15 @@ export class Subscriber {
 			if (!gap) continue;
 			insertRun(this.#reported, gap.start, gap.end);
 			if (hole.skip) insertRun(this.#reportedSkip, gap.start, gap.end);
-			if (hole.stale !== undefined) insertRun(this.#reportedStale, gap.start, gap.end);
-			// A skip or final drop is final, so no update reopens a stale report it replaced.
-			else this.#reportedStale = removeRun(this.#reportedStale, gap.start, gap.end);
+			if (hole.stale !== undefined) {
+				insertRun(this.#reportedStale, gap.start, gap.end);
+				if (hole.received) insertRun(this.#reportedReceived, gap.start, gap.end);
+				else this.#reportedReceived = removeRun(this.#reportedReceived, gap.start, gap.end);
+			} else {
+				// A skip or final drop is final, so no update reopens a stale report it replaced.
+				this.#reportedStale = removeRun(this.#reportedStale, gap.start, gap.end);
+				this.#reportedReceived = removeRun(this.#reportedReceived, gap.start, gap.end);
+			}
 			return { kind: "drop", ...gap, error: hole.error, skip: hole.skip, stale: hole.stale };
 		}
 		return undefined;

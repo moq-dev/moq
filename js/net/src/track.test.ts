@@ -3970,6 +3970,25 @@ test("superseding withdraws a partly reported stale run", () => {
 	producer.close();
 });
 
+// A received stale run a reader reported and the relay's own update then superseded is unknown
+// again: the reader's update owes it until the upstream serves or drops it again, rather than
+// dropping it again as if the reader had judged it stale itself. Mirrors Rust.
+test("a superseded received stale report stays owed after an update", () => {
+	const producer = new TrackProducer("video").accept({});
+	const reader = producer.subscribe({ delay: { max: Milli(500) }, ranges: [{ start: { absolute: 0n } }] });
+	hooks.dropTrackGroups(producer, 1n, 3n, staleHole(500));
+	expect(hooks.tryDrop(reader)).toMatchObject({ start: 1n, end: 3n, stale: 500 });
+	hooks.supersedeStale(producer, undefined);
+	expect(hooks.reofferStale(reader)).toEqual([{ start: 1n, end: 3n }]);
+	expect(hooks.tryDrop(reader)).toBeUndefined();
+	// The upstream drops it again under the new terms: reported again.
+	hooks.dropTrackGroups(producer, 1n, 3n, staleHole(500));
+	expect(hooks.tryDrop(reader)).toMatchObject({ start: 1n, end: 3n, stale: 500 });
+	reader.close();
+	producer.finish();
+	producer.close();
+});
+
 test("a received stale run settles a bounded reader only to the judged end", () => {
 	const producer = new TrackProducer("video").accept({ maxAge: null });
 	hooks.receiveTrack(producer);
