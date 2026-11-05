@@ -12,7 +12,14 @@ rust-version.workspace = true
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
+[package.metadata.docs.rs]
+features = ["async"]
+
 [features]
+default = []
+# Generated async wrappers for the poll methods, and the async constructors and helpers with no
+# poll of their own. Enable where you `.await` them.
+async = ["kio/async", "moq-net/async"]
 # Exposes the media parsers' fuzz target bodies and seeds to the `fuzz/` harness through the
 # hidden `fuzz` module. Off by default and hidden from the docs.
 fuzz = []
@@ -51,7 +58,11 @@ webm-iterable = "0.7"
 [dev-dependencies]
 criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = { workspace = true }
+# The tests await hang's catalog subscription.
+hang = { path = "../hang", features = ["async"] }
 kio = { workspace = true, features = ["sim"] }
+# Compile the async API used by the tests, benches, and examples.
+moq-mux = { path = ".", features = ["async"] }
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }

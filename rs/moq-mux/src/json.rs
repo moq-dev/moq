@@ -78,11 +78,15 @@
 //! # }
 //! ```
 
+use std::task::{Poll, ready};
+
 use moq_net::Timed;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use hang::catalog::{JsonConfig, Mode, Reference};
+#[cfg(feature = "async")]
+use hang::catalog::Reference;
+use hang::catalog::{JsonConfig, Mode};
 
 use crate::catalog::hang::CatalogExt;
 use crate::catalog::{IntoRendition, Listing, RenditionConfig};
@@ -201,14 +205,10 @@ impl<T: Serialize> Snapshot<T> {
 	}
 
 	/// Wait for a joiner to want a fresh group, then restate the value in one; see
-	/// [`moq_json::snapshot::Producer::refresh`].
+	/// [`moq_json::snapshot::Producer::poll_refresh`].
 	///
 	/// A restatement is not a new value, so it measures neither `jitter` nor `delay`.
-	pub async fn refresh(&self) -> crate::Result<()> {
-		Ok(self.inner.refresh().await?)
-	}
-
-	/// Poll for [`refresh`](Self::refresh), for an owner driving the producer synchronously.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_refresh(&self, waiter: &kio::Waiter) -> std::task::Poll<crate::Result<()>> {
 		self.inner.poll_refresh(waiter).map_err(Into::into)
 	}
@@ -368,20 +368,10 @@ impl<T: DeserializeOwned> Consumer<T> {
 	///
 	/// Errors if the entry declares a mode this build doesn't implement, which is a track a consumer
 	/// must skip rather than guess at.
+	#[cfg(feature = "async")]
 	pub async fn from_track(track: moq_net::track::Consumer, config: &JsonConfig) -> crate::Result<Self> {
-		let inner = match &config.mode {
-			Mode::Snapshot => Inner::Snapshot(Box::new(moq_json::snapshot::Consumer::new(track, Default::default()))),
-			Mode::Stream => Inner::Stream(Box::new(moq_json::stream::Consumer::new(
-				track.subscribe(None).await?,
-				Default::default(),
-			))),
-			other => return Err(crate::Error::UnsupportedMode(other.to_string())),
-		};
-
-		Ok(Self {
-			inner,
-			mode: config.mode.clone(),
-		})
+		let mut opening = Opening::new(track, config)?;
+		kio::wait(|waiter| opening.poll(waiter)).await
 	}
 
 	/// The mode the publisher chose.
@@ -394,11 +384,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 	}
 
 	/// Get the next value, or `None` once the track ends.
-	pub async fn next(&mut self) -> crate::Result<Option<Timed<T>>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for the next value, without blocking.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> std::task::Poll<crate::Result<Option<Timed<T>>>> {
 		let result = match &mut self.inner {
 			Inner::Snapshot(consumer) => consumer.poll_next(waiter),
@@ -411,12 +397,9 @@ impl<T: DeserializeOwned> Consumer<T> {
 		}
 	}
 
-	/// Skip to the newest snapshot state; stream mode returns `UnsupportedMode`.
-	pub async fn latest(&mut self) -> crate::Result<Option<Timed<T>>> {
-		kio::wait(|waiter| self.poll_latest(waiter)).await
-	}
-
-	/// Poll for the newest snapshot state without discarding records from a lossless stream.
+	/// Skip to the newest snapshot state; stream mode returns `UnsupportedMode` rather than
+	/// discard records from a lossless stream.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_latest(&mut self, waiter: &kio::Waiter) -> std::task::Poll<crate::Result<Option<Timed<T>>>> {
 		match &mut self.inner {
 			Inner::Snapshot(consumer) => consumer.poll_latest(waiter).map(|result| result.map_err(Into::into)),
@@ -432,12 +415,86 @@ impl crate::catalog::Entry<'_, JsonConfig> {
 	/// field names a sibling broadcast is followed rather than silently read from the catalog's own.
 	///
 	/// Errors if the entry declares a mode this build doesn't implement.
+	#[cfg(feature = "async")]
 	pub async fn subscribe<T: DeserializeOwned>(&self, source: &crate::Source) -> crate::Result<Consumer<T>> {
-		let broadcast = source
-			.bind(self.config().broadcast.as_ref(), self.config().instance.as_ref())?
-			.broadcast()
-			.await?;
-		Consumer::from_track(broadcast.track(self.config().track(self.name()))?, self.config()).await
+		let binding = source.bind(self.config().broadcast.as_ref(), self.config().instance.as_ref())?;
+		let mut subscribe = EntrySubscribe::Binding {
+			binding,
+			name: self.config().track(self.name()).to_string(),
+			config: self.config().clone(),
+		};
+		kio::wait(|waiter| subscribe.poll(waiter)).await
+	}
+}
+
+/// A [`Consumer`] waiting for its subscription: a stream's here, a snapshot's on its first read.
+struct Opening<T> {
+	mode: Mode,
+	state: OpeningState<T>,
+}
+
+enum OpeningState<T> {
+	Snapshot(Option<Box<moq_json::snapshot::Consumer<T>>>),
+	Stream(Box<moq_net::track::Subscribing>),
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+impl<T: DeserializeOwned> Opening<T> {
+	/// Errors if the entry declares a mode this build doesn't implement.
+	fn new(track: moq_net::track::Consumer, config: &JsonConfig) -> crate::Result<Self> {
+		let state = match &config.mode {
+			Mode::Snapshot => OpeningState::Snapshot(Some(Box::new(moq_json::snapshot::Consumer::new(
+				track,
+				Default::default(),
+			)))),
+			Mode::Stream => OpeningState::Stream(Box::new(track.subscribe(None).into_inner())),
+			other => return Err(crate::Error::UnsupportedMode(other.to_string())),
+		};
+		Ok(Self {
+			mode: config.mode.clone(),
+			state,
+		})
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Consumer<T>>> {
+		let inner = match &mut self.state {
+			OpeningState::Snapshot(consumer) => Inner::Snapshot(consumer.take().expect("resolves once")),
+			OpeningState::Stream(subscribing) => {
+				let track = ready!(subscribing.poll_ok(waiter))?;
+				Inner::Stream(Box::new(moq_json::stream::Consumer::new(track, Default::default())))
+			}
+		};
+		Poll::Ready(Ok(Consumer {
+			inner,
+			mode: self.mode.clone(),
+		}))
+	}
+}
+
+/// [`Entry::subscribe`](crate::catalog::Entry::subscribe): the entry's broadcast, then its track.
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+#[expect(clippy::large_enum_variant, reason = "a machine's enum is its storage")]
+enum EntrySubscribe<T> {
+	Binding {
+		binding: crate::Binding,
+		name: String,
+		config: JsonConfig,
+	},
+	Opening(Opening<T>),
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+impl<T: DeserializeOwned> EntrySubscribe<T> {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Consumer<T>>> {
+		if let Self::Binding { binding, name, config } = self {
+			let broadcast = ready!(binding.poll_broadcast(waiter))?;
+			// The binding drops as soon as it answers, so its request ends with it.
+			*self = Self::Opening(Opening::new(broadcast.track(name)?, config)?);
+		}
+		let Self::Opening(opening) = self else {
+			unreachable!("bound above");
+		};
+		opening.poll(waiter)
 	}
 }
 

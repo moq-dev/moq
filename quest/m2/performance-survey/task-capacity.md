@@ -10,7 +10,7 @@ capacity is worth what it saves.
 
 [kio::Tasks](/rs/kio/src/task.rs) keeps every slot it ever grew: the slab
 entry (`Option<Occupant<T>>`, whose `Park` holds an inline `Waiter` of about
-100 B), the per-slot waker allocation, and the wake bitset. The CPU half of
+164 B), the per-slot waker allocation, and the wake bitset. The CPU half of
 this quest landed in [moq-dev/moq#7513](https://github.com/moq-dev/moq/pull/7513).
 A three-level wake index means an owner poll visits only woken words, so poll
 cost no longer depends on the historical peak. The memory half remains.
@@ -26,8 +26,8 @@ Decided 2026-11-01 by the maintainer on
 
 The [`task_capacity` bench](/rs/kio/benches/task_capacity.rs) reports
 retained bytes after a burst. With an 8-byte task, the set keeps about
-184 B per peak slot whatever is still live: 188,912 B after a 1,024-task
-burst and 12,085,304 B after 65,536. A real task adds `size_of::<T>()`
+248 B per peak slot whatever is still live: 254,448 B after a 1,024-task
+burst and 16,279,608 B after 65,536. A real task adds `size_of::<T>()`
 per slot, so measure the actual consumers (`GroupServe`, the io_uring worker's
 `Task`, the session sets) before judging the cost. Dropping the set returns
 the heap to baseline, so this is retained capacity, not a leak.
