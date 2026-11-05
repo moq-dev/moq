@@ -79,11 +79,13 @@ lite-07; bitrate enforcement is not part of this release.
 - [Media stats](/quest/m2/stats/README.md) - publishers announce a stats track in the catalog, viewers answer a soliciting catalog through a per-catalog `.echo` broadcast, and one model turns both into a health verdict and a preflight report
 - [Perf](/quest/m2/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model
 - [Wire stats](/quest/m2/wire-stats/README.md) - `Presence` counts each root's transport bytes on the wire, `wire_tx` and `wire_rx`, from QUIC, WebSocket, and embedder gateway sources
+- [Session outcome records](/quest/m2/session-outcome-records.md) - relay stats publish each refusal and abnormal session end as a record per label, bounded under a flood, beside the counters
 - [Performance survey follow-ups](/quest/m2/performance-survey/README.md) - benchmark the source audit's transport, browser, media and serving risks before optimizing
 - [Transport x version benches](/quest/m2/bench-transport-sweep.md) - the session benches sweep transports as well as versions
 - [Shared group serving and ingest](/quest/m2/shared-serve.md) - Rust's moq-lite and moq-transport sessions serve and ingest groups through one poll machine each, with only wire encoding per protocol
 - [Shared group serving and ingest in JS](/quest/m2/shared-serve-js.md) - the same split in js/net, following the Rust seam
 - [Paired bench BASE](/quest/m2/bench-base-paired.md) - `just bench <base>` uses the nightly's paired comparison and the old one is deleted
+- [Audio renditions carry a language](/quest/m2/audio-lang.md) - audio renditions have an optional BCP-47 `lang`, and watch auto-picks within one language
 - [Receive pool](/quest/m2/receive-pool.md) - one byte budget per worker covers every connection's receive credit and the cache, billing each frame once
 - [Front parking](/quest/m2/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
 - [A refused follower asks a replacement handler](/quest/m2/follow-refused-retry.md) - a same-instance handler swap with identical route details re-asks a refused `Following`, while listeners still see no change
@@ -304,3 +306,4 @@ lite-07; bitrate enforcement is not part of this release.
 - [The publish support panel lists only codecs publishing accepts](/quest/m2/publish-support-probe.md) - the settings panel runs the publisher's Annex B encoder probe
 - [A hung Python test fails instead of hanging the suite](/quest/m2/py-test-timeouts.md) - one pytest-timeout bound covers every `py/` test
 - [Chromium's Opus encoder stamps chunks from their input](/quest/m2/chromium-opus-timestamps.md) - waiting on Chromium; unlocks native `usedtx` for push-to-talk
+- [TLS reload follows symlinked certificate files](/quest/m2/watch-symlink-targets.md) - in-place rewrites of symlink targets in other directories reload roots, served chains, and client certificates

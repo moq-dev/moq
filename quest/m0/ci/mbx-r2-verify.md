@@ -18,8 +18,9 @@ and record the numbers in the PR that closes this:
   that window stays cold for the next hosted job. Count how often a Nightly
   job pays that rebuild, including when `Cargo.lock` changed more than 8 times
   since the previous Nightly (see Plan).
-- Bucket size and request counts after a month on mbx 1.28.0 (from about
-  2026-11-26), against the 30-day expiry in `infra/mbx/lifecycle.json`.
+- Bucket size and request counts after a month with capped manifests
+  (mbx 1.28.0 and later, from about 2026-11-26), against the 30-day expiry
+  in `infra/mbx/lifecycle.json`.
   Shorten or lengthen it from that.
 
 Use scheduled Nightly runs on `main` only (`gh run list --workflow
@@ -66,10 +67,12 @@ compilation is "not looked up".
   earlier lockfile state ever matched. The build then fell back to the newest
   local manifest, which was the install's. Since 1.28.0 an install builds
   under its own workspace, so the install order does not matter; it stays
-  where `main` has it. mbx v1.29.1 (2026-11-01) includes #870, so bump the
-  `version` pin in `.github/actions/rust-cache/action.yml` from 1.28.0 to it.
-  Then check that the first scheduled Nightly on it loads a manifest of more
-  than 124 predictions and hits on Windows.
+  where `main` has it. mbx v1.29.1 (2026-11-01) includes
+  [#870](https://github.com/jdx/mr-boxington/pull/870), and
+  `.github/actions/rust-cache/action.yml` pins 1.29.2 (2026-11-03) since
+  [#7653](https://github.com/moq-dev/moq/pull/7653). Verify it against the
+  Windows criterion in Waiting below. The fix also offers legacy CRLF
+  identities, so an in-window manifest from 1.28.0 remains usable.
 - macOS: on 2026-10-28 the build did inherit, prefetching 732 predictions,
   yet hit only 13, with 1565 compilations not looked up. The install order is
   not the cause. Find out why the inherited predictions mostly miss, for
@@ -86,6 +89,56 @@ compilation is "not looked up".
   previous Nightly is out of inheritance reach even with full history.
   Decided 2026-10-29 (maintainer): accept that, and count it under the
   rebuild item in the Goal before asking upstream for a deeper lookback.
+
+Evidence checked 2026-11-02: the latest scheduled Nightly,
+[41483654426](https://github.com/moq-dev/moq/actions/runs/41483654426), still
+uses 1.28.0, so it cannot verify the Windows fix. Its
+[Windows job](https://github.com/moq-dev/moq/actions/runs/41483654426/job/125408629378)
+failed installing NASM from Chocolatey (HTTP 503), before setting up mbx.
+Its [macOS job](https://github.com/moq-dev/moq/actions/runs/41483654426/job/125408628726)
+reported effective read-write. The workspace check took 10m 25s with 13 hits,
+1815 not looked up, no prefetch and no download; the preceding generator
+install had 122 hits and 121 prefetched. Those install hits do not prove the
+workspace reused the previous Nightly. The macOS job later failed tests;
+neither platform failure is evidence against the mbx bump.
+
+The [Linux doctest job](https://github.com/moq-dev/moq/actions/runs/41483654426/job/125408205232)
+also reported effective read-write, but 0 hits, 913 not looked up, 51 bypassed
+and 1 remote failure, despite loading 756 predictions. Its Cargo test build
+took 6m 16s; the cache summary reported 1.1 GiB downloaded and 2.6 GiB
+uploaded. The [previous scheduled run](https://github.com/moq-dev/moq/actions/runs/41313466339/job/124868517732)
+had 0 hits, 878 not looked up, 50 bypassed and 3 remote failures, with a
+6m 26s Cargo build. These are different commits, not the same-commit
+restore-plus-build comparison the Goal requires. There were 13 `Cargo.lock`
+changes between these two runs. Record such intervals for the full-history
+platform jobs' 8-state lookback, not as the cause of these Linux misses:
+Linux has no history to search even within that window, and the loaded
+predictions did not match. The current run also follows the workspace-hack
+feature unification, so changed compiler inputs remain a separate cause.
+
+## Waiting
+
+- GitHub Actions: a scheduled Windows job on mbx 1.29.1 or later must load
+  a workspace manifest of more than 124 predictions and hit, as its
+  workspace build's mbx summary reports. Check the first run with an
+  available manifest from an earlier scheduled Windows workspace build at the
+  same lockfile state or within 8 earlier states. A setup failure or no
+  in-window predecessor is inconclusive; inspect the next eligible scheduled
+  run. Until this proves inheritance pays, keep Linux's shallow checkout as
+  decided above. Do not dispatch Nightly.
+- moq-dev/moq: `release` still lacks the platform Rust cache as checked on
+  2026-11-04 with the command in the Goal. Once it carries the cache, inspect
+  a release pull request's `Check the cache` step for effective read-only.
+- GitHub Actions: scheduled runs must supply the remaining cross-platform
+  reuse, restore-plus-build comparison and rebuild-frequency evidence in the
+  Goal. Current timings are not a matched-commit comparison, and macOS's
+  inherited-prediction misses remain unexplained.
+- Maintainer: from about 2026-11-26, collect R2 bucket size and request counts
+  for the first month and check that the six old oversized manifests expired.
+  R2's account metrics need the maintainer's Cloudflare login, which agents
+  lack. Then decide the lifecycle in `infra/mbx/lifecycle.json`: shorten,
+  keep or lengthen the 30 days. Recommended: keep 30 days unless storage cost
+  or the rebuild count argues otherwise.
 
 ## Related
 

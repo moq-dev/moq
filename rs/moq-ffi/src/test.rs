@@ -24,6 +24,8 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod rung;
+
 /// `value` microseconds.
 fn us(value: u64) -> MoqTimestamp {
 	MoqTimestamp {
@@ -251,6 +253,7 @@ async fn await_announced(consumer: &MoqOriginConsumer, path: &str) -> Arc<MoqBro
 		.await
 		.unwrap_or_else(|_| panic!("timed out waiting for {path} to be announced"))
 		.unwrap()
+		.expect("the first change is an instance")
 }
 
 /// Create a broadcast and announce its exact path: the create / populate / announce
@@ -273,7 +276,7 @@ async fn next_event(announced: &MoqAnnounceConsumer) -> MoqAnnounceEvent {
 /// The next newly announced route.
 async fn next_announced(announced: &MoqAnnounceConsumer) -> MoqAnnounce {
 	match next_event(announced).await {
-		MoqAnnounceEvent::Start { announce } => announce,
+		MoqAnnounceEvent::Present { announce } => announce,
 		other => panic!("expected an announcement, got {other:?}"),
 	}
 }
@@ -424,8 +427,7 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 	// Reading an advertisement preserves its static production price.
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let route = loop {
-		if let MoqAnnounceEvent::Start { announce } | MoqAnnounceEvent::Update { announce } =
-			next_event(&announced).await
+		if let MoqAnnounceEvent::Present { announce } = next_event(&announced).await
 			&& announce.prefix == "priced-route"
 		{
 			break announce.route;
@@ -469,10 +471,11 @@ fn instance_routes_parse_and_refuse() {
 }
 
 #[tokio::test]
-async fn announced_restarts_on_a_new_instance() {
+async fn following_restarts_on_a_new_instance() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
+	let following = consumer.follow("instance-route".into(), None).unwrap();
 	let publication = origin.create_broadcast("instance-route".into()).unwrap();
 
 	let first = moq_net::Instance::random().to_string();
@@ -484,8 +487,10 @@ async fn announced_restarts_on_a_new_instance() {
 		.unwrap();
 	let announce = next_announced(&announced).await;
 	assert_eq!(announce.route.instance, first);
+	following.available().await.unwrap().unwrap();
 
-	// A new run of the same publisher is another instance: consumers restart onto it.
+	// A new run of the same publisher is another instance: followers restart onto it, while
+	// the path stays listed.
 	let second = moq_net::Instance::random().to_string();
 	publication
 		.announce(MoqAnnounceRoute {
@@ -493,12 +498,18 @@ async fn announced_restarts_on_a_new_instance() {
 			..Default::default()
 		})
 		.unwrap();
+	kio::clock::timeout(TIMEOUT, following.available())
+		.await
+		.expect("the new instance is handed out")
+		.unwrap()
+		.unwrap();
+
+	// The next listed event is the path going absent under the new instance: the restart
+	// itself was never listed.
+	publication.unannounce().unwrap();
 	match next_event(&announced).await {
-		MoqAnnounceEvent::Restart { announce } => {
-			assert_eq!(announce.prefix, "instance-route");
-			assert_eq!(announce.route.instance, second);
-		}
-		other => panic!("expected a restart, got {other:?}"),
+		MoqAnnounceEvent::Absent { announce } => assert_eq!(announce.route.instance, second),
+		other => panic!("expected an absence, got {other:?}"),
 	}
 
 	publication.broadcast().close().unwrap();
@@ -1473,7 +1484,7 @@ async fn json_snapshot_roundtrip() {
 		matches!(track.demand(), Err(MoqError::Closed)),
 		"the producer takes over the track"
 	);
-	let consumer = MoqJsonSnapshotConsumer::new(&*subscribe(&broadcast, "meta").await).unwrap();
+	let consumer = MoqJsonSnapshotConsumer::new(&broadcast.consume().unwrap(), "meta".into(), 0).unwrap();
 
 	for n in 1..=4 {
 		producer.update(format!(r#"{{"a":{n}}}"#), us(n * 1000)).unwrap();
@@ -1563,7 +1574,7 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 	.await
 	.expect("timed out waiting for the refresh");
 	assert_eq!(refreshed.sequence(), 1);
-	let consumer = MoqJsonSnapshotConsumer::new(&*subscribe(&broadcast, "meta").await).unwrap();
+	let consumer = MoqJsonSnapshotConsumer::new(&broadcast.consume().unwrap(), "meta".into(), 0).unwrap();
 	let value = kio::clock::timeout(TIMEOUT, consumer.next())
 		.await
 		.expect("timed out waiting for the restated value")
@@ -1592,7 +1603,7 @@ async fn json_demand() {
 	assert_eq!(stream_demand.name(), "events");
 	assert!(!snapshot_demand.wanted().is_some());
 
-	let snapshot_consumer = MoqJsonSnapshotConsumer::new(&*subscribe(&broadcast, "status").await).unwrap();
+	let snapshot_consumer = MoqJsonSnapshotConsumer::new(&broadcast.consume().unwrap(), "status".into(), 0).unwrap();
 	let stream_consumer = MoqJsonStreamConsumer::new(&*subscribe(&broadcast, "events").await).unwrap();
 
 	kio::clock::timeout(TIMEOUT, snapshot_demand.until_wanted())
@@ -3357,7 +3368,7 @@ async fn create_broadcast_is_invisible_until_announced() {
 		.expect("announce reaches the cursor")
 		.expect("the cursor is still open");
 	assert!(
-		matches!(&update, MoqAnnounceEvent::Start { announce } if announce.prefix == "live"),
+		matches!(&update, MoqAnnounceEvent::Present { announce } if announce.prefix == "live"),
 		"{update:?}"
 	);
 	publication.broadcast().close().unwrap();
@@ -3377,6 +3388,7 @@ async fn follow_keeps_the_requested_path() {
 	let waited = kio::clock::timeout(TIMEOUT, announced.available())
 		.await
 		.expect("timed out waiting for the announcement")
+		.unwrap()
 		.unwrap();
 	assert_eq!(waited.inner().info().path.as_str(), "a/pub");
 
@@ -3783,8 +3795,8 @@ async fn announce_and_unannounce_toggles_discovery() {
 	async fn wait_live(announced: &MoqAnnounceConsumer, active: bool) {
 		loop {
 			match next_event(announced).await {
-				MoqAnnounceEvent::Start { announce } if active && announce.prefix == "live" => return,
-				MoqAnnounceEvent::End { announce } if !active && announce.prefix == "live" => return,
+				MoqAnnounceEvent::Present { announce } if active && announce.prefix == "live" => return,
+				MoqAnnounceEvent::Absent { announce } if !active && announce.prefix == "live" => return,
 				_ => {}
 			}
 		}
@@ -3874,6 +3886,7 @@ async fn finish_unpublishes() {
 	kio::clock::timeout(TIMEOUT, announced.available())
 		.await
 		.expect("timed out waiting for the announcement")
+		.unwrap()
 		.unwrap();
 
 	// A graceful finish detaches immediately; the path stops resolving. Removal is
@@ -4730,7 +4743,7 @@ fn close_twice_is_a_noop() {
 /// Wait for the announcement of `path` to end, failing the test if it doesn't.
 async fn await_unannounced(announced: &MoqAnnounceConsumer) {
 	match next_event(announced).await {
-		MoqAnnounceEvent::End { .. } => {}
+		MoqAnnounceEvent::Absent { .. } => {}
 		other => panic!("expected the announcement to end, got {other:?}"),
 	}
 }
@@ -5679,7 +5692,7 @@ fn without_runtime() {
 
 		let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 		let announcement = match pollster::block_on(announced.next()).unwrap().unwrap() {
-			MoqAnnounceEvent::Start { announce } => announce,
+			MoqAnnounceEvent::Present { announce } => announce,
 			other => panic!("expected an announcement, got {other:?}"),
 		};
 		assert_eq!(announcement.prefix, "test");
@@ -5802,6 +5815,7 @@ async fn server_client_run_end(version: &str) {
 	let bc = kio::clock::timeout(TIMEOUT, following.available())
 		.await
 		.expect("timed out waiting for the first run")
+		.unwrap()
 		.unwrap();
 	let unfinished = broadcast
 		.publish_track("unfinished".into(), Some(timed_info()))
@@ -5891,11 +5905,16 @@ async fn server_client_run_end(version: &str) {
 
 	// The announcement, not the track's error, ends the run.
 	match next_event(&announced).await {
-		MoqAnnounceEvent::End { announce } => assert_eq!(announce.prefix, "hello"),
+		MoqAnnounceEvent::Absent { announce } => assert_eq!(announce.prefix, "hello"),
 		other => panic!("{version}: expected the run's end, got {other:?}"),
 	}
 
-	// A replacement run at the same path reaches the follower on its next `available()`.
+	// The follower reports the run's end, then hands out a replacement run at the same path.
+	let ended = kio::clock::timeout(TIMEOUT, following.available())
+		.await
+		.unwrap_or_else(|_| panic!("{version}: the run's end never reached the follower"))
+		.unwrap();
+	assert!(ended.is_none(), "{version}: expected the run's end");
 	let replacement = create_announced(&server_origin, "hello");
 	let replacement_media = MoqMediaTrackProducer::audio(
 		&replacement,
@@ -5906,7 +5925,8 @@ async fn server_client_run_end(version: &str) {
 	let next = kio::clock::timeout(TIMEOUT, following.available())
 		.await
 		.unwrap_or_else(|_| panic!("{version}: the next run was never handed out"))
-		.unwrap();
+		.unwrap()
+		.expect("the next run, not an end");
 	let next_track = subscribe_audio(&next).await;
 	roundtrip(&replacement_media, &next_track, b"next run", 2_000_000).await;
 	replacement_media.finish().unwrap();
@@ -6014,6 +6034,7 @@ async fn datagram_connection(
 	let remote = kio::clock::timeout(TIMEOUT, followed.available())
 		.await
 		.expect("timed out waiting for the broadcast")
+		.unwrap()
 		.unwrap();
 	(broadcast, remote, session, (server, server_origin, server_session))
 }
@@ -6149,6 +6170,7 @@ async fn follow_follows_a_minted_replacement() {
 	let old = kio::clock::timeout(TIMEOUT, followed.available())
 		.await
 		.expect("timed out waiting for the broadcast")
+		.unwrap()
 		.unwrap();
 	let old_track = subscribe_audio(&old).await;
 	roundtrip(&media, &old_track, b"before", 1_000_000).await;
@@ -6157,6 +6179,7 @@ async fn follow_follows_a_minted_replacement() {
 	let fresh = kio::clock::timeout(TIMEOUT, followed.available())
 		.await
 		.expect("the replacement was never handed out")
+		.unwrap()
 		.unwrap();
 	first.shutdown();
 	first.closed().await.unwrap();
@@ -6257,12 +6280,16 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 	let first = kio::clock::timeout(TIMEOUT, followed.available())
 		.await
 		.expect("timed out waiting for the broadcast")
+		.unwrap()
 		.unwrap();
 
 	// A covering claim answering under the same instance.
 	let dynamic = origin.inner().inner.requests("").unwrap();
 	publication.unannounce().unwrap();
-	let again = tokio::spawn(async move { followed.available().await });
+	let again = tokio::spawn(async move {
+		assert!(followed.available().await?.is_none(), "the end comes first");
+		followed.available().await
+	});
 	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
 		.expect("the instance never asked the route above the path")
@@ -6276,7 +6303,8 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 		.await
 		.expect("the instance was never handed out again")
 		.unwrap()
-		.unwrap();
+		.unwrap()
+		.expect("the instance, not an end");
 	assert_eq!(
 		again.inner().info().instance,
 		first.inner().info().instance,
@@ -6331,6 +6359,7 @@ async fn an_instance_pins_request_and_follow() {
 	kio::clock::timeout(TIMEOUT, followed.available())
 		.await
 		.expect("timed out following the pinned instance")
+		.unwrap()
 		.unwrap();
 	let second = origin.create_broadcast("live".into()).unwrap();
 	second
@@ -6349,6 +6378,12 @@ async fn an_instance_pins_request_and_follow() {
 		takeover.inner().info().instance.as_ref().map(ToString::to_string),
 		Some(instance)
 	);
+	// Another instance taking over ends the pinned follow, which hands out nothing else.
+	let ended = kio::clock::timeout(TIMEOUT, followed.available())
+		.await
+		.expect("timed out waiting for the pinned follow's end")
+		.unwrap();
+	assert!(ended.is_none(), "the follower handed out another instance");
 	let next = std::pin::pin!(followed.available());
 	assert!(
 		next.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
@@ -6425,6 +6460,7 @@ async fn follow_waits_for_another_instance_after_a_dropped_takeover() {
 	kio::clock::timeout(TIMEOUT, followed.available())
 		.await
 		.expect("the next instance was never handed out")
+		.unwrap()
 		.unwrap();
 	takeover.close().unwrap();
 	next.close().unwrap();
@@ -6502,7 +6538,8 @@ async fn server_client_roundtrip_auto_origin() {
 	kio::clock::timeout(TIMEOUT, local_announced.available())
 		.await
 		.expect("timed out waiting for the loopback broadcast")
-		.expect("an auto-origin session should discover its own announcement");
+		.expect("an auto-origin session should discover its own announcement")
+		.unwrap();
 	local_broadcast.close().unwrap();
 
 	media.finish().unwrap();

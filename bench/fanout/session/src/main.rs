@@ -46,14 +46,21 @@ fn main() {
 	let viewers: u64 = args.next().unwrap().parse().unwrap();
 	let cycles: usize = args.next().unwrap().parse().unwrap();
 	let version: Version = args.next().as_deref().unwrap_or("moq-lite-06").parse().unwrap();
-	let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_time()
+		.build()
+		.unwrap();
 	runtime.block_on(async move {
 		let relay = origin(1);
 		let publisher = origin(2);
 		let ingest = link(
 			version,
-			Client::new().with_versions(version.into()).with_publisher(publisher.consume()),
-			Server::new().with_versions(version.into()).with_subscriber(relay.clone()),
+			Client::new()
+				.with_versions(version.into())
+				.with_publisher(publisher.consume()),
+			Server::new()
+				.with_versions(version.into())
+				.with_subscriber(relay.clone()),
 		)
 		.await;
 		let broadcast = publisher.create_broadcast("room").unwrap();
@@ -66,11 +73,22 @@ fn main() {
 			let local = origin(3 + viewer);
 			let sessions = link(
 				version,
-				Client::new().with_versions(version.into()).with_subscriber(local.clone()),
-				Server::new().with_versions(version.into()).with_publisher(relay.consume()),
+				Client::new()
+					.with_versions(version.into())
+					.with_subscriber(local.clone()),
+				Server::new()
+					.with_versions(version.into())
+					.with_publisher(relay.consume()),
 			)
 			.await;
-			let remote = local.consume().follow("room", None).unwrap().available().await.expect("broadcast resolves");
+			let remote = local
+				.consume()
+				.follow("room", None)
+				.unwrap()
+				.available()
+				.await
+				.expect("broadcast resolves")
+				.expect("the room is online");
 			let subscriber = remote.track("chat").unwrap().subscribe(None).await.expect("subscribe");
 			audience.push((sessions, local, subscriber));
 		}

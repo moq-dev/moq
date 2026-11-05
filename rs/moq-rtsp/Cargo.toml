@@ -39,6 +39,8 @@ url = { workspace = true }
 base64 = { workspace = true }
 # A clock only the stall tests move, so a loaded runner never fires a deadline early.
 kio = { path = "../kio", features = ["manual"] }
+# The tests await the exported catalog and media.
+moq-mux = { path = "../moq-mux", features = ["async"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-test = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }

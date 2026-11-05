@@ -70,9 +70,7 @@ export function hasTrackStream(version: Version): boolean {
 	}
 }
 
-/// Whether the session may deliver groups over unreliable QUIC datagrams (lite-05 §6.4).
-/// A datagram carries one single-frame group's `subscribe | sequence | timestamp | payload` and is
-/// routed over the existing subscription. Added in lite-05; older versions never send/accept them.
+/** Whether the session carries unreliable datagrams, from lite-05 onward. */
 export function hasDatagrams(version: Version): boolean {
 	// Explicitly list older versions so future versions default to having datagrams.
 	switch (version) {
@@ -84,6 +82,11 @@ export function hasDatagrams(version: Version): boolean {
 		default:
 			return true;
 	}
+}
+
+/** Whether datagram tracks have their own request and sequence space. */
+export function hasDatagramTracks(version: Version): boolean {
+	return hasPadding(version);
 }
 
 /** Whether the session supports the GOAWAY control stream (0x5) for graceful shutdown and migration. Added in lite-04. */
