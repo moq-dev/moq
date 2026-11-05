@@ -460,37 +460,58 @@ impl Drop for Demand {
 		let duration = target
 			.saturating_mul(3)
 			.max(rendition.fanout.window().saturating_add(target));
-		let weak = Arc::downgrade(&rendition);
-		watcher.idle = Some(rendition.fanout.spawn(async move {
-			kio::clock::sleep(duration).await;
-			if let Some(rendition) = weak.upgrade() {
-				let mut claim = rendition.claim.lock().expect("claim lock poisoned");
-				let mut watcher = rendition.watcher.lock().expect("watcher lock poisoned");
-				if watcher.requests == 0 {
-					// A finished window keeps listing what it listed, inherited predecessor rows
-					// included, and keeps its track pin: reads of its retained groups go through
-					// it, since a closed sibling refuses any later lookup. Its finished watcher
-					// stays too, so no request follows the ended track again.
-					if rendition.live.finished() {
-						return;
-					}
-					rendition.media.handle.lock().expect("media lock poisoned").track.take();
-					watcher.media.take();
-					// A resumed watcher never rewrites already-addressed segments or lists a
-					// partial segment it had open when the last player left.
-					claim.start = claim.next;
-					claim.pending = false;
-					if claim.retired {
-						// A replacement waits for this window to close before reading its own
-						// track. Stopping the watcher must finish that handover too.
-						rendition.live.cut();
-					} else {
-						rendition.live.clear();
-						rendition.previous.lock().expect("previous lock poisoned").take();
-					}
-				}
-			}
+		watcher.idle = Some(rendition.fanout.spawn(Idle {
+			rendition: Arc::downgrade(&rendition),
+			duration,
+			sleep: None,
 		}));
+	}
+}
+
+/// Releases a lazy rendition's media once it went `duration` without a request.
+#[cfg(feature = "server")]
+struct Idle {
+	rendition: Weak<Rendition>,
+	duration: Duration,
+	/// Started on the first poll.
+	sleep: Option<kio::clock::Sleep>,
+}
+
+#[cfg(feature = "server")]
+impl kio::Task for Idle {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let duration = self.duration;
+		let sleep = self.sleep.get_or_insert_with(|| kio::clock::sleep(duration));
+		std::task::ready!(waiter.poll_future(std::pin::Pin::new(sleep)));
+		let Some(rendition) = self.rendition.upgrade() else {
+			return Poll::Ready(());
+		};
+		let mut claim = rendition.claim.lock().expect("claim lock poisoned");
+		let mut watcher = rendition.watcher.lock().expect("watcher lock poisoned");
+		// A finished window keeps listing what it listed, inherited predecessor rows included,
+		// and keeps its track pin: reads of its retained groups go through it, since a closed
+		// sibling refuses any later lookup. Its finished watcher stays too, so no request follows
+		// the ended track again.
+		if watcher.requests != 0 || rendition.live.finished() {
+			return Poll::Ready(());
+		}
+		rendition.media.handle.lock().expect("media lock poisoned").track.take();
+		watcher.media.take();
+		// A resumed watcher never rewrites already-addressed segments or lists a partial segment
+		// it had open when the last player left.
+		claim.start = claim.next;
+		claim.pending = false;
+		if claim.retired {
+			// A replacement waits for this window to close before reading its own track.
+			// Stopping the watcher must finish that handover too.
+			rendition.live.cut();
+		} else {
+			rendition.live.clear();
+			rendition.previous.lock().expect("previous lock poisoned").take();
+		}
+		Poll::Ready(())
 	}
 }
 
@@ -678,9 +699,10 @@ impl Rendition {
 
 	/// Start following this rendition's media track onto the grid.
 	pub(crate) fn watch(self: &Arc<Self>) {
-		let watcher = self
-			.fanout
-			.spawn(watch_media(Arc::downgrade(self), self.retiring.subscribe()));
+		let watcher = self.fanout.spawn(future_task(watch_media(
+			Arc::downgrade(self),
+			self.retiring.subscribe(),
+		)));
 		self.watcher.lock().expect("watcher lock poisoned").media = Some(watcher);
 	}
 
@@ -698,10 +720,10 @@ impl Rendition {
 		watcher.idle.take();
 		watcher.requests += 1;
 		if watcher.media.is_none() && !watcher.stopped {
-			watcher.media = Some(
-				self.fanout
-					.spawn(watch_media(Arc::downgrade(self), self.retiring.subscribe())),
-			);
+			watcher.media = Some(self.fanout.spawn(future_task(watch_media(
+				Arc::downgrade(self),
+				self.retiring.subscribe(),
+			))));
 		}
 		Demand(Some(self.clone()))
 	}
@@ -1004,16 +1026,12 @@ impl Rendition {
 		self.live.close();
 	}
 
-	/// Resolve once the playlist is renderable or failed, i.e. once
-	/// [`media_playlist`](Self::media_playlist) would return `Some` or an error. Bounding the wait
-	/// is the caller's policy (the serve path wraps this in its own timeout).
-	pub async fn playable(&self) {
-		kio::wait(|waiter| self.poll_playable(waiter)).await;
-	}
-
-	/// Poll until this rendition is playable (it lists a segment, or its media track ended), its
-	/// media is denied, or its window failed.
-	pub(crate) fn poll_playable(&self, waiter: &kio::Waiter) -> Poll<()> {
+	/// Ready once the playlist is renderable or failed, i.e. once
+	/// [`media_playlist`](Self::media_playlist) would return `Some` or an error: it lists a
+	/// segment, or its media track ended, its media is denied, or its window failed. Bounding the
+	/// wait is the caller's policy (the serve path wraps this in its own timeout).
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_playable(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.poll_media(waiter);
 		if self.media.refusal().is_some() {
 			return Poll::Ready(());
@@ -1030,15 +1048,12 @@ impl Rendition {
 		Poll::Pending
 	}
 
-	/// Resolve once the DASH [representation](Self::representation) lists a segment or this
-	/// rendition fails, as [`playable`](Self::playable) does for the media playlist.
-	pub(crate) async fn represented(&self) {
-		kio::wait(|waiter| self.poll_represented(waiter)).await;
-	}
-
-	/// Poll until this instance lists a segment of its own (or its media track ended), its media is
-	/// denied, or its window failed. Unlike [`poll_playable`](Self::poll_playable), a
-	/// predecessor's segments don't count: the DASH manifest lists none of them.
+	/// Ready once the DASH [representation](Self::representation) lists a segment or this
+	/// rendition fails, as [`poll_playable`](Self::poll_playable) does for the media playlist:
+	/// this instance lists a segment of its own (or its media track ended), its media is denied,
+	/// or its window failed. A predecessor's segments don't count: the DASH manifest lists none of
+	/// them.
+	#[cfg_attr(test, kio::wrapper)]
 	pub(crate) fn poll_represented(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.poll_media(waiter);
 		if self.media.refusal().is_some() {
@@ -1110,7 +1125,7 @@ impl Rendition {
 	pub async fn playlist(&self, query: Option<&str>) -> Result<Option<String>> {
 		// A denied reference is refused before anything else, so no other error masks it.
 		self.authorize()?;
-		self.playable().await;
+		kio::wait(|waiter| self.poll_playable(waiter)).await;
 		// A failed media track may never supply the keyframe an inline init waits for.
 		self.check()?;
 		// Build the inits the listed segments map. An inline-codec init needs a keyframe group
@@ -1475,7 +1490,7 @@ impl Rendition {
 		let media = self.media.clone();
 		let rendition = Arc::downgrade(self);
 		let name = self.name.clone();
-		let build = self.fanout.spawn(async move {
+		let build = self.fanout.spawn(future_task(async move {
 			let _building = building;
 			match read.read(&media, &binding).await {
 				Ok(Some(bytes)) => {
@@ -1486,7 +1501,7 @@ impl Rendition {
 				Ok(None) => {}
 				Err(err) => tracing::warn!(rendition = %name, %err, "failed to build init segment"),
 			}
-		});
+		}));
 		*self.build.lock().expect("build lock poisoned") = Some(build);
 	}
 
@@ -1721,7 +1736,7 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 		let mut after: Option<u64> = None;
 		if let Some(previous) = previous {
 			tokio::select! {
-				_ = previous.live.closed() => {}
+				_ = kio::wait(|waiter| previous.live.poll_closed(waiter)) => {}
 				_ = retired(&mut retiring, &rendition) => return Ok(()),
 			}
 			let (next, boundary) = {
@@ -2138,6 +2153,11 @@ impl InitRead {
 		}
 		Ok(None)
 	}
+}
+
+fn future_task(task: impl Future<Output = ()> + Send + 'static) -> impl kio::Task<Output = ()> + Send + 'static {
+	let mut task = Box::pin(task);
+	move |waiter: &kio::Waiter| waiter.poll_future(task.as_mut())
 }
 
 /// Fetch one group, mapping "no longer (or not yet) servable" to the error that says so

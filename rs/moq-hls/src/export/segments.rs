@@ -405,9 +405,9 @@ impl Producer {
 		}
 	}
 
-	/// Resolve once the window is closed: its media watcher lists no more rows.
-	pub async fn closed(&self) {
-		self.state.closed().await;
+	/// Ready once the window is closed: its media watcher lists no more rows.
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state.poll_closed(waiter)
 	}
 
 	/// Whether the window lists segment `at` of the record track tagged `tag`.
