@@ -81,10 +81,12 @@ mod tests {
 
 	const PATH: &str = "live";
 
-	/// A broadcast at [`PATH`] whose one track, `video`, has three finished groups.
+	/// A broadcast at [`PATH`] whose one track, `video`, has three finished groups. It declares
+	/// media's max age, so its superseded groups stay fetchable as long as the default linger.
 	fn finished(origin: &moq_net::origin::Producer) -> (moq_net::broadcast::Producer, moq_net::track::Producer) {
 		let broadcast = origin.publish(PATH, moq_net::origin::Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let info = moq_net::track::Info::default().with_max_age(hang::container::MAX_AGE);
+		let track = broadcast.create_track("video", info).unwrap();
 		for _ in 0..3 {
 			let mut group = track.append_group().unwrap();
 			group.write_frame(None, bytes::Bytes::from_static(b"frame")).unwrap();

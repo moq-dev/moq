@@ -258,7 +258,15 @@ async fn prepare_video(
 	let mut video = catalog.video(track, Container::Legacy(Kind::Video), config).unwrap();
 	for index in 0..count {
 		let pts = match pattern {
-			"pyramid" => ((index / 9 * 9 + [0, 4, 2, 1, 3, 8, 6, 5, 7][index % 9]) * 3_600) as u64,
+			"pyramid" | "step-back" => {
+				let pts = ((index / 9 * 9 + [0, 4, 2, 1, 3, 8, 6, 5, 7][index % 9]) * 3_600) as u64;
+				if pattern == "step-back" && index >= count / 2 {
+					// Keep the 300 ms rewind in the one group every subscription reads.
+					pts - 300 * 90
+				} else {
+					pts
+				}
+			}
 			"flat" => 90_000,
 			"backward" => 90_000 - index as u64,
 			_ => unreachable!(),
@@ -300,14 +308,36 @@ fn video_reorder(c: &mut Criterion) {
 	group.sample_size(10);
 	group.warm_up_time(Duration::from_millis(50));
 	group.measurement_time(Duration::from_millis(200));
-	for pattern in ["pyramid", "flat", "backward"] {
+	for (format, pattern) in [
+		("mkv", "pyramid"),
+		("mkv", "flat"),
+		("mkv", "backward"),
+		("ts", "pyramid"),
+		("ts", "step-back"),
+	] {
+		let name = if format == "ts" {
+			format!("ts/{pattern}")
+		} else {
+			pattern.into()
+		};
 		for count in [64, 256, 1024] {
 			for size in [256, 16_384] {
-				group.bench_function(BenchmarkId::new(pattern, format!("{count}x{size}")), |b| {
+				group.bench_function(BenchmarkId::new(&name, format!("{count}x{size}")), |b| {
 					b.iter_batched(
 						|| runtime.block_on(prepare_video(count, size, pattern)),
 						|(source, stream, fixture)| {
 							let refused = runtime.block_on(async {
+								if format == "ts" {
+									let mut opened = moq_mux::container::ts::Export::new(source, stream);
+									let mut chunks = 0;
+									while let Some(frame) = opened.next().await.unwrap() {
+										std::hint::black_box(frame);
+										chunks += 1;
+									}
+									assert!(chunks > 0);
+									assert_eq!(opened.discontinuity(), u64::from(pattern == "step-back"));
+									return false;
+								}
 								let mut export = moq_mux::container::mkv::Export::new(source, stream)
 									.with_fragment_duration(Duration::ZERO);
 								loop {
@@ -320,7 +350,7 @@ fn video_reorder(c: &mut Criterion) {
 									}
 								}
 							});
-							assert_eq!(refused, pattern != "pyramid");
+							assert_eq!(refused, format == "mkv" && pattern != "pyramid");
 							fixture
 						},
 						BatchSize::PerIteration,

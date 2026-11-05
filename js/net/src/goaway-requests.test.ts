@@ -117,7 +117,8 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		for (;;) {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
-			const track = req.accept({ timescale: Timescale.MILLI });
+			// The draining session fetches the superseded group 0 below.
+			const track = req.accept({ timescale: Timescale.MILLI, maxAge: null });
 			if (req.name === "video" && armVideo) track.writeFrame(textFrame("one"));
 			if (req.name === "later") track.writeFrame(textFrame("from-draining"));
 			if (req.name === "audio") track.writeFrame(textFrame("from-replacement"));
@@ -180,9 +181,10 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		expect(await later.readString()).toBe("from-draining");
 
 		// A fresh consumer caches nothing, so the publisher's answer proves the FETCH reached the wire.
-		const fetched = wireOf(client).consume(Path.from("room")).track("video").fetchGroup(0);
-		if (kind === "lite") expect(await (await fetched).readString()).toBe("one");
-		else await expect(fetched).rejects.toThrow(/not supported/);
+		const fetched = wireOf(client).consume(Path.from("room")).track("video").fetchGroup(0n);
+		const group = await fetched;
+		expect(await group.readString()).toBe("one");
+		group.close();
 
 		// A new announce-interest opens too, and sees the route at the drain cost.
 		const interest = client.announced();

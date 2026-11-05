@@ -61,8 +61,7 @@ paths diverged.
 2. The upstream request is already the union of readers' resume points
    (`Producer::subscription`), so per-reader copy cursors are local overhead.
 3. Readers become plain cursors: delete `Inner::Resume`, `Reader`, `Copy`,
-   `Retain`, `Candidate`, per-reader datagram dedupe (dedupe once on insert),
-   and per-reader `learn_end`.
+   `Retain`, `Candidate`, and per-reader `learn_end`.
 4. `Recover` attaches to the slot, not a handed-out group: continuing a
    group whose copy failed is a
    [flight](/quest/m1/unbounded-groups/flights.md) from the reader's frame on

@@ -31,14 +31,14 @@ impl Group {
 	}
 
 	/// Poll until the writer may admit the frame `header` opens, its payload and metadata,
-	/// without shedding a byte its fastest reader has yet to take; see
-	/// [`group::Producer::poll_paced`].
-	pub fn poll_admit(&self, waiter: &kio::Waiter, header: &frame::Header) -> std::task::Poll<()> {
+	/// within `window` bytes past its fastest reader, so admitting it sheds no byte that
+	/// reader has yet to take; see [`group::Producer::poll_paced`].
+	pub fn poll_admit(&self, waiter: &kio::Waiter, header: &frame::Header, window: u64) -> std::task::Poll<()> {
 		let metadata = header.fields.as_ref().map_or(0, |fields| fields.heap());
 		self.writer
 			.as_ref()
 			.expect("group writer is available between frames")
-			.poll_paced(waiter, header.info.size.saturating_add(metadata))
+			.poll_paced(waiter, header.info.size.saturating_add(metadata), window)
 	}
 
 	/// Restore the writer returned by a completed frame.

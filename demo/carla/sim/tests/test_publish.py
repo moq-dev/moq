@@ -165,10 +165,11 @@ def test_status_omits_only_the_collision_a_truck_has_not_had() -> None:
 def test_a_closed_status_track_fails_the_session() -> None:
     """Status republishes on a timer, so a swallowed failure would spin forever."""
 
-    def closed(_payload: object) -> None:
+    def closed(_payload: object, _timestamp: object) -> None:
         raise moq.Error("track closed")
 
     publisher = publish.StatusPublisher.__new__(publish.StatusPublisher)
+    publisher._catalog = SimpleNamespace(now=lambda: SimpleNamespace(value=0, scale=1_000))
     publisher._producer = SimpleNamespace(update=closed)
 
     with pytest.raises(moq.Error):

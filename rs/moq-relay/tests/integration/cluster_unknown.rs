@@ -29,7 +29,7 @@ struct Node {
 }
 
 async fn spawn_relay(id: u64, connect: Vec<String>, cluster_version: Option<moq_net::Version>) -> Node {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let mut config = Config::default();
 	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
@@ -67,7 +67,29 @@ async fn wait_dialed(http: &reqwest::Client, internal: u16, dialed: usize) {
 			.await
 			.expect("read /nodes");
 		let nodes: serde_json::Value = serde_json::from_str(&body).expect("parse /nodes");
-		if nodes["nodes"].as_array().expect("a node list").len() == dialed {
+		if nodes["nodes"]
+			.as_array()
+			.expect("a node list")
+			.iter()
+			.filter(|node| !node["connections"].as_array().expect("connections").is_empty())
+			.count() == dialed
+		{
+			for node in nodes["nodes"].as_array().unwrap() {
+				let connections = node["connections"].as_array().unwrap();
+				if connections.is_empty() {
+					continue;
+				}
+				assert!(
+					node["last_connected_seconds_ago"].is_number(),
+					"live peer has no successful connect: {node}"
+				);
+				for connection in connections {
+					assert!(
+						connection["transport"].is_string(),
+						"live peer has no transport: {node}"
+					);
+				}
+			}
 			return;
 		}
 		assert!(kio::clock::now() < deadline, "the mesh never formed: {nodes}");

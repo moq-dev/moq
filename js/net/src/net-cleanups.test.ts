@@ -10,7 +10,7 @@ import { createMockTransportPair } from "./mock.ts";
 import { Producer as TrackProducer } from "./track.ts";
 
 test("group read handles independently replay buffered and future frames", async () => {
-	const group = new GroupProducer(0);
+	const group = new GroupProducer(0n);
 	const first = group.consume();
 	const payload = (text: string) => ({ payload: new TextEncoder().encode(text) });
 	try {
@@ -39,7 +39,7 @@ test("group read handles independently replay buffered and future frames", async
 test.each(["group", "track"] as const)("%s JSON rejects an empty frame without treating it as EOF", async (kind) => {
 	const producer = new TrackProducer("json");
 	const subscriber = kind === "track" ? producer.subscribe().ordered() : undefined;
-	const group = kind === "track" ? producer.createGroup(0) : new GroupProducer(0);
+	const group = kind === "track" ? producer.createGroup(0n) : new GroupProducer(0n);
 	const reader = subscriber ?? group.consume();
 	group.writeFrame({ payload: new Uint8Array() });
 	for (const value of [null, false, 0, ""])
@@ -57,7 +57,7 @@ test.each(["group", "track"] as const)("%s JSON rejects an empty frame without t
 });
 
 test("group booleans refuse every shape except one byte of zero or one", async () => {
-	const group = new GroupProducer(0);
+	const group = new GroupProducer(0n);
 	const reader = group.consume();
 	for (const bytes of [[], [2], [1, 0], [0], [1]]) group.writeFrame({ payload: new Uint8Array(bytes) });
 	group.finish();

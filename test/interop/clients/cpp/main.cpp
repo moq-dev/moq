@@ -364,8 +364,8 @@ int subscribe(
     }
     const auto &[id, video] = *catalog->video.begin();
 
-    moq::Subscription subscription;
-    subscription.max_delay =
+    auto subscription = moq::subscription_defaults();
+    subscription.delay.max =
         finish ? std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(timeout)) : MAX_DELAY;
     auto media = until(
         moq::MediaTrackConsumer::subscribe(consumer, {moq::Rendition::kVideo{id, video}, subscription}), read_deadline,

@@ -1,12 +1,9 @@
-#![cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+#![cfg(feature = "_certs")]
 
-#[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
-use rustls::crypto::aws_lc_rs::default_provider;
-#[cfg(feature = "ring")]
-use rustls::crypto::ring::default_provider;
+use rind_rustls::default_provider;
 
 use std::{
-	future::{Future, poll_fn},
+	future::Future,
 	io::{self, IoSliceMut},
 	net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
 	num::NonZeroU64,
@@ -55,7 +52,14 @@ fn handshake_timeout() {
 	};
 
 	// Avoid NoRootAnchors error
-	let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+	let cert = (|| -> std::result::Result<_, rcgen::Error> {
+		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+		params.serial_number = Some(1u64.into());
+		let cert = params.self_signed(&signing_key)?;
+		Ok(rcgen::CertifiedKey { cert, signing_key })
+	})()
+	.unwrap();
 	let mut roots = RootCertStore::empty();
 	roots.add(cert.cert.into()).unwrap();
 
@@ -92,7 +96,14 @@ async fn close_endpoint() {
 	let _guard = subscribe();
 
 	// Avoid NoRootAnchors error
-	let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+	let cert = (|| -> std::result::Result<_, rcgen::Error> {
+		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+		params.serial_number = Some(1u64.into());
+		let cert = params.self_signed(&signing_key)?;
+		Ok(rcgen::CertifiedKey { cert, signing_key })
+	})()
+	.unwrap();
 	let mut roots = RootCertStore::empty();
 	roots.add(cert.cert.into()).unwrap();
 
@@ -128,7 +139,14 @@ async fn driver_panic_fails_connecting() {
 	let _guard = subscribe();
 
 	// Avoid NoRootAnchors error
-	let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+	let cert = (|| -> std::result::Result<_, rcgen::Error> {
+		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+		params.serial_number = Some(1u64.into());
+		let cert = params.self_signed(&signing_key)?;
+		Ok(rcgen::CertifiedKey { cert, signing_key })
+	})()
+	.unwrap();
 	let mut roots = RootCertStore::empty();
 	roots.add(cert.cert.into()).unwrap();
 
@@ -182,7 +200,7 @@ fn read_after_close() {
 		s.write_all(MSG).await.unwrap();
 		let s = s.finish();
 		// Wait for the stream to be closed, one way or another.
-		_ = s.stopped().await;
+		_ = s.closed().await;
 	});
 	runtime.block_on(async move {
 		let new_conn = endpoint
@@ -262,14 +280,21 @@ fn endpoint_with_config(transport_config: transport::Config) -> Endpoint {
 
 /// Constructs endpoints suitable for connecting to themselves and each other
 struct EndpointFactory {
-	cert: rcgen::CertifiedKey<rcgen::KeyPair>,
+	cert: rcgen::CertifiedKey<rind_rcgen::KeyPair>,
 	endpoint_config: endpoint::Config,
 }
 
 impl EndpointFactory {
 	fn new() -> Self {
 		Self {
-			cert: rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap(),
+			cert: (|| -> std::result::Result<_, rcgen::Error> {
+				let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+				let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+				params.serial_number = Some(1u64.into());
+				let cert = params.self_signed(&signing_key)?;
+				Ok(rcgen::CertifiedKey { cert, signing_key })
+			})()
+			.unwrap(),
 			endpoint_config: endpoint::Config::default(),
 		}
 	}
@@ -279,7 +304,7 @@ impl EndpointFactory {
 	}
 
 	fn server_config(&self, transport_config: transport::Config) -> server::Config {
-		let key = PrivateKeyDer::Pkcs8(self.cert.signing_key.serialize_der().into());
+		let key = PrivateKeyDer::Pkcs8(self.cert.signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into());
 		let mut server_config =
 			crate::quic::driver::server::Config::with_single_cert(vec![self.cert.cert.der().clone()], key).unwrap();
 		server_config.transport = transport_config;
@@ -432,8 +457,8 @@ fn blocking_server_pair(
 	server_socket: Box<dyn AsyncUdpSocket>,
 ) -> (Endpoint, Endpoint, Arc<HandshakeBlocker>) {
 	let factory = EndpointFactory::new();
-	let key = PrivateKeyDer::Pkcs8(factory.cert.signing_key.serialize_der().into());
-	let provider = Arc::new(default_provider());
+	let key = PrivateKeyDer::Pkcs8(factory.cert.signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into());
+	let provider = Arc::new(default_provider().unwrap());
 	let key = rustls::sign::CertifiedKey::from_der(vec![factory.cert.cert.der().clone()], key, &provider).unwrap();
 	let blocker = Arc::new(HandshakeBlocker::default());
 	let mut server_crypto = rustls::ServerConfig::builder_with_provider(provider)
@@ -462,9 +487,9 @@ fn blocking_server_pair(
 	roots.add(factory.cert.cert.der().clone()).unwrap();
 	let client = client_endpoint(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
 	// One classical key share keeps the ClientHello in the first Initial, so a handshake failure
-	// surfaces from `accept` itself. aws-lc-rs's default post-quantum share spills it into a
+	// surfaces from `accept` itself. rind's default post-quantum share spills it into a
 	// second packet, which only reaches the connection after it is registered.
-	let mut provider = default_provider();
+	let mut provider = default_provider().unwrap();
 	provider
 		.kx_groups
 		.retain(|group| group.name() == rustls::NamedGroup::X25519);
@@ -666,8 +691,15 @@ async fn specific_v6_addr() {
 	let _guard = subscribe();
 	let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0);
 
-	let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-	let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
+	let cert = (|| -> std::result::Result<_, rcgen::Error> {
+		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+		params.serial_number = Some(1u64.into());
+		let cert = params.self_signed(&signing_key)?;
+		Ok(rcgen::CertifiedKey { cert, signing_key })
+	})()
+	.unwrap();
+	let key = PrivatePkcs8KeyDer::from(cert.signing_key.to_pkcs8().secret_pkcs8_der().to_vec());
 	let cert = CertificateDer::from(cert.cert);
 	let server_config = server::Config::with_single_cert(vec![cert.clone()], key.into()).unwrap();
 	let server = server_endpoint(server_config, addr).unwrap();
@@ -769,8 +801,15 @@ fn run_echo(args: EchoArgs) {
 
 		// We don't use the `endpoint` helper here because we want two different endpoints with
 		// different addresses.
-		let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-		let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
+		let cert = (|| -> std::result::Result<_, rcgen::Error> {
+			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+			params.serial_number = Some(1u64.into());
+			let cert = params.self_signed(&signing_key)?;
+			Ok(rcgen::CertifiedKey { cert, signing_key })
+		})()
+		.unwrap();
+		let key = PrivatePkcs8KeyDer::from(cert.signing_key.to_pkcs8().secret_pkcs8_der().to_vec());
 		let cert = CertificateDer::from(cert.cert);
 		let mut server_config =
 			crate::quic::driver::server::Config::with_single_cert(vec![cert.clone()], key.into()).unwrap();
@@ -786,7 +825,7 @@ fn run_echo(args: EchoArgs) {
 
 		let mut roots = RootCertStore::empty();
 		roots.add(cert).unwrap();
-		let mut client_crypto = rustls::ClientConfig::builder_with_provider(default_provider().into())
+		let mut client_crypto = rustls::ClientConfig::builder_with_provider(default_provider().unwrap().into())
 			.with_safe_default_protocol_versions()
 			.unwrap()
 			.with_root_certificates(roots)
@@ -879,7 +918,7 @@ async fn echo((mut send, mut recv): (send::Stream, recv::Stream)) {
 		send.write_all(chunk).await.expect("write chunk");
 	}
 
-	let _ = send.finish();
+	drop(send.finish());
 }
 
 fn gen_data(size: usize, seed: u64) -> Vec<u8> {
@@ -949,8 +988,15 @@ async fn retry_after_rebind() {
 async fn rebind_recv() {
 	let _guard = subscribe();
 
-	let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-	let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
+	let cert = (|| -> std::result::Result<_, rcgen::Error> {
+		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+		params.serial_number = Some(1u64.into());
+		let cert = params.self_signed(&signing_key)?;
+		Ok(rcgen::CertifiedKey { cert, signing_key })
+	})()
+	.unwrap();
+	let key = PrivatePkcs8KeyDer::from(cert.signing_key.to_pkcs8().secret_pkcs8_der().to_vec());
 	let cert = CertificateDer::from(cert.cert);
 
 	let mut roots = RootCertStore::empty();
@@ -983,7 +1029,7 @@ async fn rebind_recv() {
 		stream.write_all(MSG.as_slice()).await.unwrap();
 		let stream = stream.finish();
 		// Wait for the stream to be closed, one way or another.
-		_ = stream.stopped().await;
+		_ = stream.closed().await;
 	});
 
 	let connection = {
@@ -1400,7 +1446,7 @@ async fn forwarded_packets_reach_their_owner() {
 		let message = format!("round {round} through server {server}");
 		let (mut send, mut recv) = conn.open_bi(Default::default()).await.unwrap();
 		send.write_all(message.as_bytes()).await.unwrap();
-		let _ = send.finish();
+		drop(send.finish());
 		let echoed = timeout(Duration::from_secs(10), recv.read_to_end(1024))
 			.await
 			.expect("the owner answered")
@@ -1534,12 +1580,12 @@ async fn two_datagram_readers() {
 	let done = tokio::sync::Notify::new();
 	let (a, b, ()) = tokio::join!(
 		async {
-			let x = client.read_datagram().await.unwrap();
+			let x = client.recv_datagram().await.unwrap();
 			done.notify_waiters();
 			x
 		},
 		async {
-			let x = client.read_datagram().await.unwrap();
+			let x = client.recv_datagram().await.unwrap();
 			done.notify_waiters();
 			x
 		},
@@ -1612,9 +1658,9 @@ async fn stream_stopped() {
 	let client = async move {
 		let conn = client.dial(server_addr, "localhost").unwrap().await.unwrap();
 		let mut stream = conn.open_uni(Default::default()).await.unwrap();
-		let stopped1 = stream.stopped();
-		let stopped2 = stream.stopped();
-		let stopped3 = stream.stopped();
+		let stopped1 = stream.closed();
+		let stopped2 = stream.closed();
+		let stopped3 = stream.closed();
 
 		stream.write_all(&b"hi"[..]).await.unwrap();
 		// spawn one of the futures into a task
@@ -1654,7 +1700,7 @@ async fn stream_stopped_2() {
 	})
 	.unwrap();
 	let send_stream = conn.open_uni(Default::default()).await.unwrap();
-	let stopped = timeout(Duration::from_millis(100), send_stream.stopped()).instrument(error_span!("stopped"));
+	let stopped = timeout(Duration::from_millis(100), send_stream.closed()).instrument(error_span!("stopped"));
 	tokio::pin!(stopped);
 	// poll the future once so that the waker is registered.
 	tokio::select! {
@@ -1744,7 +1790,7 @@ async fn stream_stop_before_reset_wins() {
 	recv.stop(5u32.into());
 	stop_sending_received(&conn).await;
 
-	let stopped = send.stopped();
+	let stopped = send.closed();
 	send.reset(7u32.into());
 	let stopped = timeout(Duration::from_secs(10), stopped).await;
 	assert_eq!(stopped, Ok(Ok(Some(5u32.into()))));
@@ -1760,7 +1806,7 @@ async fn stream_stop_after_reset_is_ignored() {
 	send.write_all(&b"hello"[..]).await.unwrap();
 	let recv = server.accept_uni().await.unwrap();
 	// Neither side runs in between, so the peer stops a stream it hasn't seen reset yet.
-	let stopped = send.stopped();
+	let stopped = send.closed();
 	send.reset(7u32.into());
 	recv.stop(5u32.into());
 	stop_sending_received(&conn).await;
@@ -1777,7 +1823,7 @@ async fn stream_stop_survives_freed_reset() {
 	let (conn, server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
 	send.write_all(&b"hello"[..]).await.unwrap();
-	let stopped = send.stopped();
+	let stopped = send.closed();
 	let recv = server.accept_uni().await.unwrap();
 	recv.stop(5u32.into());
 	stop_sending_received(&conn).await;
@@ -1794,7 +1840,7 @@ async fn stream_stop_survives_freed_reset() {
 	assert_eq!(stopped, Ok(Ok(Some(5u32.into()))));
 }
 
-/// A local reset resolves `stopped`, though no stream event reports it
+/// A local reset resolves `closed`, though no stream event reports it
 #[tokio::test]
 async fn stream_reset_resolves_stopped() {
 	let _guard = subscribe();
@@ -1802,7 +1848,7 @@ async fn stream_reset_resolves_stopped() {
 	let (conn, _server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
 	send.write_all(&b"hello"[..]).await.unwrap();
-	let stopped = send.stopped();
+	let stopped = send.closed();
 	send.reset(7u32.into());
 	let stopped = timeout(Duration::from_secs(10), stopped).await;
 	assert_eq!(stopped, Ok(Ok(None)));
@@ -1817,13 +1863,13 @@ async fn stream_reset_at_resolves_stopped() {
 	send.write_all(&b"he"[..]).await.unwrap();
 	let offset = send.offset();
 	send.write_all(&b"llo"[..]).await.unwrap();
-	let stopped = send.stopped();
+	let stopped = send.closed();
 	send.reset_at(offset, 7u32.into());
 	let stopped = timeout(Duration::from_secs(10), stopped).await;
 	assert_eq!(stopped, Ok(Ok(None)));
 }
 
-/// `stopped` futures made before a reset resolve on it, whether or not they were polled yet
+/// `closed` futures made before a reset resolve on it, whether or not they were polled yet
 #[tokio::test]
 async fn stream_stopped_pending_across_reset() {
 	let _guard = subscribe();
@@ -1831,8 +1877,8 @@ async fn stream_stopped_pending_across_reset() {
 	let (conn, _server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
 	send.write_all(&b"hello"[..]).await.unwrap();
-	let unpolled = send.stopped();
-	let polled = tokio::spawn(send.stopped());
+	let unpolled = send.closed();
+	let polled = tokio::spawn(send.closed());
 	tokio::task::yield_now().await;
 	assert!(!polled.is_finished());
 	send.reset(7u32.into());
@@ -1842,7 +1888,7 @@ async fn stream_stopped_pending_across_reset() {
 	assert_eq!(unpolled, Ok(Ok(None)));
 }
 
-/// A `stopped` future outliving its stream resolves on the drop reset
+/// A `closed` future outliving its stream resolves on the drop reset
 #[tokio::test]
 async fn dropped_stream_resolves_stopped() {
 	let _guard = subscribe();
@@ -1851,7 +1897,7 @@ async fn dropped_stream_resolves_stopped() {
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
 	send.write_all(&b"truncated"[..]).await.unwrap();
 	let id = send.id();
-	let stopped = send.stopped();
+	let stopped = send.closed();
 	drop(send);
 	assert!(!conn.send_released(id), "the stopped future keeps the stream's end");
 	let stopped = timeout(Duration::from_secs(10), stopped).await;
@@ -1859,7 +1905,7 @@ async fn dropped_stream_resolves_stopped() {
 	assert!(conn.send_released(id), "the last stopped future releases the stream");
 }
 
-/// A `stopped` future dropped while pending leaves the stream to release itself
+/// A `closed` future dropped while pending leaves the stream to release itself
 #[tokio::test]
 async fn stream_reset_releases_stopped() {
 	let _guard = subscribe();
@@ -1869,7 +1915,7 @@ async fn stream_reset_releases_stopped() {
 	send.write_all(&b"hello"[..]).await.unwrap();
 	let id = send.id();
 	{
-		let mut stopped = pin!(send.stopped());
+		let mut stopped = pin!(send.closed());
 		let poll = std::future::poll_fn(|cx| Poll::Ready(stopped.as_mut().poll(cx))).await;
 		assert!(poll.is_pending());
 	}
@@ -1927,6 +1973,34 @@ async fn dropped_read_leaves_no_waiter() {
 		stream.write_all(&b"hello"[..]).await.unwrap();
 
 		server_task.await.unwrap();
+	}
+}
+
+/// A lease wait belongs to its caller, so cancelling it leaves the live stream with no wakeup.
+#[tokio::test]
+async fn dropped_lease_waiter_leaves_no_registration() {
+	let _guard = subscribe();
+	for cancel in [false, true] {
+		let endpoint = endpoint();
+		let (dialed, accepted) = connect_self(&endpoint).await;
+		let mut send = dialed.open_uni(Default::default()).await.unwrap();
+		send.write_all(&b"hello"[..]).await.unwrap();
+		let mut recv = accepted.accept_uni().await.unwrap();
+		recv.read_exact(&mut [0; 5]).await.unwrap();
+
+		let (waker, counter) = new_count_waker();
+		let waiter = kio::Waiter::new(waker);
+		assert!(recv.poll_lease(&waiter, 1).is_pending());
+		assert_eq!(counter.wakes(), 0);
+		let waiter = if cancel {
+			drop(waiter);
+			None
+		} else {
+			Some(waiter)
+		};
+		accepted.close(0u32.into(), "done");
+		assert_eq!(counter.wakes(), usize::from(!cancel));
+		drop((waiter, recv));
 	}
 }
 
@@ -2063,7 +2137,7 @@ async fn leases_spend_the_connection_window() {
 
 	consume(&mut recv, WINDOW).await;
 	assert_eq!(leased(&mut recv, 400).await, 400);
-	let fin = poll_fn(|cx| recv.poll_lease(cx, 401).map_ok(|lease| lease.is_fin())).await;
+	let fin = kio::wait(|waiter| recv.poll_lease(waiter, 401).map_ok(|lease| lease.is_fin())).await;
 	assert!(fin.unwrap(), "the FIN ends a wait for more");
 	writer.await.unwrap();
 	assert_eq!(server.stats().credit.leased, 400, "a lease outlives its stream");
@@ -2097,9 +2171,9 @@ async fn stuck_window_evicts_the_lower_priority() {
 		let writer = tokio::spawn(async move {
 			// Keep the low stream open: an acknowledged FIN wins over a later STOP_SENDING.
 			if send.write_all(&[7; WINDOW][..]).await.is_ok() && id != low_id {
-				send.finish().stopped().await.unwrap()
+				send.finish().closed().await.unwrap()
 			} else {
-				send.stopped().await.unwrap()
+				send.closed().await.unwrap()
 			}
 		});
 		(id, writer)
@@ -2113,8 +2187,8 @@ async fn stuck_window_evicts_the_lower_priority() {
 	low.set_priority(-1);
 	high.set_priority(1);
 	let leased = tokio::join!(
-		poll_fn(|cx| low.poll_lease(cx, WINDOW).map_ok(|lease| lease.remaining())),
-		poll_fn(|cx| high.poll_lease(cx, WINDOW).map_ok(|mut lease| {
+		kio::wait(|waiter| low.poll_lease(waiter, WINDOW).map_ok(|lease| lease.remaining())),
+		kio::wait(|waiter| high.poll_lease(waiter, WINDOW).map_ok(|mut lease| {
 			let len = lease.remaining();
 			lease.advance(len);
 			lease.release();
@@ -2129,7 +2203,7 @@ async fn stuck_window_evicts_the_lower_priority() {
 	// instead of dropping unread data, which would stop that stream too.
 	drop(low);
 	assert!(
-		poll_fn(|cx| high.poll_lease(cx, 1).map_ok(|lease| lease.is_fin()))
+		kio::wait(|waiter| high.poll_lease(waiter, 1).map_ok(|lease| lease.is_fin()))
 			.await
 			.unwrap()
 	);
@@ -2140,15 +2214,15 @@ async fn stuck_window_evicts_the_lower_priority() {
 
 /// Wait until `recv` leases at least `want` bytes, returning how many it leased.
 async fn leased(recv: &mut recv::Stream, want: usize) -> usize {
-	poll_fn(|cx| recv.poll_lease(cx, want).map_ok(|lease| lease.remaining()))
+	kio::wait(|waiter| recv.poll_lease(waiter, want).map_ok(|lease| lease.remaining()))
 		.await
 		.unwrap()
 }
 
 /// Consume the first `n` leased bytes of `recv`.
 async fn consume(recv: &mut recv::Stream, n: usize) {
-	poll_fn(|cx| {
-		recv.poll_lease(cx, n).map_ok(|mut lease| {
+	kio::wait(|waiter| {
+		recv.poll_lease(waiter, n).map_ok(|mut lease| {
 			lease.advance(n);
 			lease.release();
 		})
@@ -2218,13 +2292,13 @@ async fn tiny_frames_do_not_pin_receive_batches() {
 	client
 		.send_datagram(Bytes::from_static(b"x"), Default::default())
 		.unwrap();
-	assert!(owns_exactly(server.read_datagram().await.unwrap()));
+	assert!(owns_exactly(server.recv_datagram().await.unwrap()));
 
 	let mut send = client.open_uni(Default::default()).await.unwrap();
 	send.write_all(&b"y"[..]).await.unwrap();
 	let mut recv = server.accept_uni().await.unwrap();
-	let taken = poll_fn(|cx| {
-		recv.poll_lease(cx, 1).map_ok(|mut lease| {
+	let taken = kio::wait(|waiter| {
+		recv.poll_lease(waiter, 1).map_ok(|mut lease| {
 			let len = lease.chunk().len();
 			lease.copy_to_bytes(len)
 		})
@@ -2318,7 +2392,14 @@ async fn unroutable_dial_fails_with_no_viable_path() {
 		.unwrap();
 	let client = Endpoint::new(endpoint::Config::default(), UdpSocket::from(socket)).unwrap();
 
-	let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+	let cert = (|| -> std::result::Result<_, rcgen::Error> {
+		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+		params.serial_number = Some(1u64.into());
+		let cert = params.self_signed(&signing_key)?;
+		Ok(rcgen::CertifiedKey { cert, signing_key })
+	})()
+	.unwrap();
 	let mut roots = RootCertStore::empty();
 	roots.add(cert.cert.into()).unwrap();
 	let client_config = client::Config::with_root_certificates(Arc::new(roots)).unwrap();
@@ -2389,7 +2470,7 @@ async fn unreachable_handshake_drains_while_held() {
 	let _guard = subscribe();
 
 	let factory = EndpointFactory::new();
-	let key = PrivateKeyDer::Pkcs8(factory.cert.signing_key.serialize_der().into());
+	let key = PrivateKeyDer::Pkcs8(factory.cert.signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into());
 	let server_config =
 		crate::quic::driver::server::Config::with_single_cert(vec![factory.cert.cert.der().clone()], key).unwrap();
 	let outage = Arc::new(Outage::default());
@@ -2482,4 +2563,181 @@ async fn close_during_handshake_does_not_wait_for_silent_peer() {
 	let elapsed = start.elapsed();
 	assert!(connect.await.is_err());
 	assert_eq!(elapsed, Duration::ZERO, "waited {elapsed:?}");
+}
+
+/// A socket whose output can be held independently of QUIC's flow control.
+#[cfg(feature = "sim")]
+#[derive(Debug)]
+struct ControlledSocket {
+	inner: super::sim::Socket,
+	output: Arc<Mutex<ControlledOutput>>,
+}
+
+#[cfg(feature = "sim")]
+#[derive(Debug, Default)]
+struct ControlledOutput {
+	blocked: bool,
+	attempts: usize,
+	writable: Option<Waker>,
+	parked: kio::WaiterList,
+}
+
+#[cfg(feature = "sim")]
+impl AsyncUdpSocket for ControlledSocket {
+	fn poll_recv(
+		&self,
+		cx: &mut Context<'_>,
+		bufs: &mut [IoSliceMut<'_>],
+		meta: &mut [RecvMeta],
+	) -> Poll<io::Result<usize>> {
+		// Once output stalls, suppress further ingress too, so the peer's retransmits cannot
+		// accidentally drive the close timer for us.
+		if self.output.lock().unwrap().writable.is_some() {
+			return Poll::Pending;
+		}
+		self.inner.poll_recv(cx, bufs, meta)
+	}
+
+	fn try_send(&self, transmit: &moq_sock::udp::Transmit<'_>) -> io::Result<()> {
+		if self.output.lock().unwrap().blocked {
+			return Err(io::ErrorKind::WouldBlock.into());
+		}
+		self.inner.try_send(transmit)
+	}
+
+	fn poll_writable(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+		let mut output = self.output.lock().unwrap();
+		if !output.blocked {
+			return Poll::Ready(Ok(()));
+		}
+		output.attempts += 1;
+		output.writable = Some(cx.waker().clone());
+		output.parked.wake();
+		Poll::Pending
+	}
+
+	fn local_addr(&self) -> io::Result<SocketAddr> {
+		self.inner.local_addr()
+	}
+}
+
+/// Output resumes on release, and closing never depends on that release.
+#[cfg(feature = "sim")]
+#[test]
+fn a_close_behind_a_blocked_socket_is_bounded() {
+	for release in [false, true] {
+		kio::clock::sim::run(async {
+			let network = super::sim::Network::new(1);
+			let client_addr = SocketAddr::from(([10, 0, 0, 1], 4433));
+			let server_addr = SocketAddr::from(([10, 0, 0, 2], 443));
+			let factory = EndpointFactory::new();
+			let mut transport = transport::Config::default();
+			transport.idle_timeout = None;
+			let mut roots = RootCertStore::empty();
+			roots.add(factory.cert.cert.der().clone()).unwrap();
+			let mut config = client::Config::with_root_certificates(Arc::new(roots)).unwrap();
+			config.transport = transport.clone();
+			let output = Arc::new(Mutex::new(ControlledOutput::default()));
+			let socket: Box<dyn AsyncUdpSocket> = Box::new(ControlledSocket {
+				inner: network.bind(server_addr),
+				output: output.clone(),
+			});
+			let client = Endpoint::new(endpoint::Config::default(), network.bind(client_addr)).unwrap();
+			let server = Endpoint::new(
+				endpoint::Config::default().with_server(factory.server_config(transport)),
+				socket,
+			)
+			.unwrap();
+			let (conn, peer) = tokio::try_join!(client.connect(&config, server_addr, "localhost").unwrap(), async {
+				server.accept().await.unwrap().accept().unwrap().await
+			})
+			.unwrap();
+
+			// Settle the server's handshake flight and FIN before holding an ACK-only packet.
+			let warmup = peer.open_uni(Default::default()).await.unwrap().finish();
+			assert_eq!(warmup.await, Ok(None));
+			// Retire handshake keys on the simulated clock before blocking its next send.
+			sleep(Duration::from_secs(1)).await;
+
+			output.lock().unwrap().blocked = true;
+			let mut stream = conn.open_uni(Default::default()).await.unwrap();
+			stream.write_all(&b"held"[..]).await.unwrap();
+			let finished = stream.finish();
+			kio::wait(|waiter| {
+				let mut output = output.lock().unwrap();
+				if output.writable.is_some() {
+					return Poll::Ready(());
+				}
+				waiter.register(&mut output.parked);
+				Poll::Pending
+			})
+			.await;
+
+			// Consume any transmit registration left from before the socket blocked. The driver
+			// must park again without polling transmission, which would consume a packet.
+			let attempts = output.lock().unwrap().attempts;
+			peer.send_datagram(Bytes::from_static(b"queued"), Default::default())
+				.unwrap();
+			kio::wait(|waiter| {
+				let mut output = output.lock().unwrap();
+				if output.attempts > attempts {
+					return Poll::Ready(());
+				}
+				waiter.register(&mut output.parked);
+				Poll::Pending
+			})
+			.await;
+
+			if release {
+				let waker = {
+					let mut output = output.lock().unwrap();
+					output.blocked = false;
+					output.writable.take().unwrap()
+				};
+				waker.wake();
+				let mut received = peer.accept_uni().await.unwrap();
+				assert_eq!(received.read_to_end(4).await.unwrap(), b"held");
+				assert_eq!(finished.await, Ok(None));
+			}
+
+			peer.close(0u32.into(), "closed while blocked");
+			// With zero path latency, three PTOs take about 78 ms. Closing must use that
+			// deadline rather than the unrelated timer left from the handshake.
+			timeout(Duration::from_secs(1), async {
+				server.wait_all_draining().await;
+				server.wait_idle().await;
+			})
+			.await
+			.expect("socket backpressure held the closing period open");
+			if !release {
+				assert!(output.lock().unwrap().blocked);
+			}
+		});
+	}
+}
+
+/// A finished handle keeps the terminal outcome when driven as a future or a caller-owned poll.
+#[tokio::test]
+async fn finished_waits_keep_the_terminal_outcome() {
+	for stopped in [false, true] {
+		let endpoint = endpoint();
+		let (conn, peer) = connect_self(&endpoint).await;
+		let mut stream = conn.open_uni(Default::default()).await.unwrap();
+		stream.write_all(&b"data"[..]).await.unwrap();
+		let received = peer.accept_uni().await.unwrap();
+		let finished = stream.finish();
+		if stopped {
+			received.stop(42u32.into());
+		} else {
+			peer.close(5u32.into(), "connection lost before FIN was acknowledged");
+		}
+		let polled = kio::wait(|waiter| finished.poll_closed(waiter)).await;
+		let awaited = finished.await;
+		assert_eq!(polled, awaited);
+		if stopped {
+			assert_eq!(awaited, Ok(Some(42u32.into())));
+		} else {
+			assert!(matches!(awaited, Err(send::Error::Connection(_))));
+		}
+	}
 }

@@ -31,13 +31,13 @@ try {
 	const initial = await active(requests[0]);
 	// moq-transport carries no instance, so the session mints one for each announcement.
 	assert(initial.instance && Moq.Instance.isMinted(initial.instance), "moq-transport carries no instance");
-	let track = initial.track("video").subscribe({ ranges: [{ start: { absolute: 0 } }] });
+	let track = initial.track("video").subscribe({ ranges: [{ start: { absolute: 0n } }] });
 	try {
 		for (let sequence = 0; sequence < 3; sequence++) {
 			const group = await track.recvGroup();
 			assert(group, "subscription ended during redirect");
 			try {
-				assert.equal(group.sequence, sequence, "handover duplicated or skipped a group");
+				assert.equal(group.sequence, BigInt(sequence), "handover duplicated or skipped a group");
 				const frame = await group.readFrame();
 				assert(frame, "empty group");
 				assert.deepEqual(frame.payload, new Uint8Array(32).fill(sequence));
@@ -67,11 +67,11 @@ try {
 				replacementProbe = wireOf(replacement)
 					.consume(Moq.Path.from("handover"))
 					.track("video")
-					.subscribe({ ranges: [{ start: { absolute: 1 } }] });
+					.subscribe({ ranges: [{ start: { absolute: 1n } }] });
 				const probe = await replacementProbe.recvGroup();
 				assert(probe, "replacement has no group");
 				try {
-					assert.equal(probe.sequence, 1, "replacement served the wrong group");
+					assert.equal(probe.sequence, 1n, "replacement served the wrong group");
 					assert.deepEqual((await probe.readFrame())?.payload, new Uint8Array(32).fill(1));
 				} finally {
 					probe.close();
@@ -87,7 +87,7 @@ try {
 						restarted.instance !== initial.instance,
 					"the replacement announcement is another minted instance",
 				);
-				const next = restarted.track("video").subscribe({ ranges: [{ start: { absolute: 2 } }] });
+				const next = restarted.track("video").subscribe({ ranges: [{ start: { absolute: 2n } }] });
 				track.close();
 				track = next;
 				process.stdout.write("replacement ready\n");

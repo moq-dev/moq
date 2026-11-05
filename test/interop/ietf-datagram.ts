@@ -25,7 +25,7 @@ for (const bytes of input.datagrams) {
 
 // The fields of Rust's first datagram, sent the way the JS publisher sends a track's datagram.
 const published = await encodeDatagram(
-	{ sequence: 42, timestamp: Timestamp.fromMillis(1234), payload: new TextEncoder().encode("hello") },
+	{ sequence: 42n, timestamp: Timestamp.fromMillis(1234), payload: new TextEncoder().encode("hello") },
 	{ trackAlias: 3n, publisherPriority: 7, timescale: Timescale.MILLI },
 	version,
 );

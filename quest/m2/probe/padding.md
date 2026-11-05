@@ -9,9 +9,8 @@ sends a short probe cluster at about twice the estimate, capped at the target,
 about every five seconds, with a follow-up probe when one validates. When the
 path has room the estimate rises; when it doesn't, padding stays within its
 overhead and media frame-delay budgets. Such sessions on lite-07 or IETF
-draft-18 and later then have a sender, so
-[viewer targets](/quest/m2/probe/viewer-target.md) can advertise PROBE
-`Increase` for them.
+draft-18 and later then have a sender, so they advertise PROBE `Increase` and
+probe to the larger of their send target and the peer's PROBE target.
 
 ## Plan
 
@@ -33,6 +32,14 @@ Decided with the maintainer on 2026-10-17 (see the
   (`js/net/src/connection/reload.ts`). Moved here in review of
   [#6102](https://github.com/moq-dev/moq/pull/6102), so m1 ships no browser
   target without a sender.
+- **The peer's target.** Viewer targets landed first ([moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090)), so
+  `js/net` still advertises `Report` and its publisher's `runProbe` reads and
+  drops a peer's PROBE target. With padding, keep the latest target from each
+  PROBE stream (zero once the stream ends), pad to the larger of it and the send
+  target, and advertise `Increase` from `probeLevel` only where padding runs,
+  mirroring Rust's `ProbeLevel::detect` and the session's `Probing` in
+  `rs/moq-net/src/session.rs`. The two directions never mix: a viewer's own
+  target goes to its peer, never into what it pads.
 - **WebRTC's schedule.** Model it on GoogCC's `ProbeController` ALR probing.
   Rejected: [#5863](https://github.com/moq-dev/moq/pull/5863)'s exponential
   backoff to 60 s, which leaves a rendition waiting up to a minute after the
@@ -63,6 +70,9 @@ Tests, on `@moq/clock`'s `Manual`:
 - The padding writer over a fake WebTransport: padding goes out at the lowest
   priority on lite-07 and IETF draft-18, while lite-05, lite-06, and drafts
   14 to 17 pad nothing and negotiate `Report`.
+- A peer's PROBE target raises what padding probes to, a session that also
+  watches never pads for its own viewers, and the target lapses when the
+  PROBE stream ends.
 - In Chrome through a shaped link: with padding the estimate rises past the
   media, without it it stays frozen. On a path held below the target, report
   media frame delay and deadline misses against budgets set before tuning:

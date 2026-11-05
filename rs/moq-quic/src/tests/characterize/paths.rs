@@ -159,7 +159,7 @@ fn duplicate_packet_is_discarded() {
 	let mut chunks = recv.read().unwrap();
 	assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes, MSG);
 	assert_eq!(chunks.next(usize::MAX), Err(recv::Error::Blocked));
-	let _ = chunks.finalize();
+	chunks.finalize();
 }
 
 /// Rebuilds a Retry datagram with `src_cid`, under a valid integrity tag

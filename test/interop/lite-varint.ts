@@ -93,7 +93,7 @@ if (untimed) {
 	assert.equal(datagram.timestamp, undefined);
 	untimedDatagramBytes = [...datagram.encode(version)];
 } else {
-	assert.throws(() => new Datagram(9n, 1, undefined, new Uint8Array()).encode(version));
+	assert.throws(() => new Datagram(9n, 1n, undefined, new Uint8Array()).encode(version));
 }
 
 const trackInfo = await TrackInfo.decode(reader(input.trackInfo), version);

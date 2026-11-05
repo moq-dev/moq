@@ -5,8 +5,9 @@
 //! and flags keyframes (a sequence header or a `KEY_FRAME`), and stamps
 //! wall-clock timestamps when the caller has none (stdin). It owns no track,
 //! catalog, or codec config. AV1 carries the sequence header inline ahead of
-//! keyframes, so unlike H.264/H.265 there is nothing to cache or re-insert; the
-//! importer parses the config out of the frames it emits.
+//! keyframes. Only the initial sequence header survives a reset before the first
+//! picture is returned; there is no cache across pictures. The importer parses
+//! the config out of the frames it emits.
 
 use bytes::{Buf, Bytes, BytesMut};
 use scuffle_av1::{ObuHeader, ObuType};
@@ -20,6 +21,12 @@ use crate::Result;
 /// stdin); call [`flush`](Self::flush) to emit the final in-flight temporal unit.
 pub struct Split {
 	current: Au,
+	/// A picture has been returned, so no later sequence header survives a reset.
+	started: bool,
+	/// The latest complete sequence-header OBU seen before the first picture was returned.
+	/// A reset re-seeds the pending unit with it, even when it discards a picture that was
+	/// queued but never returned. Dropped once a picture is returned.
+	initial: Option<Bytes>,
 	zero: Option<kio::clock::Instant>,
 	pending: Vec<crate::container::Frame>,
 	// Bytes carried across calls: a partial OBU at the tail of one `decode` waits
@@ -45,6 +52,8 @@ impl Split {
 	pub fn new() -> Self {
 		Self {
 			current: Au::default(),
+			started: false,
+			initial: None,
 			zero: None,
 			pending: Vec::new(),
 			tail: BytesMut::new(),
@@ -73,7 +82,7 @@ impl Split {
 			let pts = self.pts(hint)?;
 			self.decode_obu(obu, Some(pts))?;
 		}
-		Ok(std::mem::take(&mut self.pending))
+		Ok(self.take_pending())
 	}
 
 	/// Emit the in-flight temporal unit, if any. Call after the last
@@ -82,7 +91,17 @@ impl Split {
 	pub fn flush(&mut self, pts: impl Into<Option<moq_net::Timestamp>>) -> Result<Vec<crate::container::Frame>> {
 		let pts = self.pts(pts.into())?;
 		self.maybe_start_frame(Some(pts))?;
-		Ok(std::mem::take(&mut self.pending))
+		Ok(self.take_pending())
+	}
+
+	/// Return the completed frames. The first returned picture ends retention of the initial
+	/// sequence header.
+	fn take_pending(&mut self) -> Vec<crate::container::Frame> {
+		if !self.pending.is_empty() {
+			self.started = true;
+			self.initial = None;
+		}
+		std::mem::take(&mut self.pending)
 	}
 
 	fn decode_obu(&mut self, obu_data: Bytes, pts: Option<moq_net::Timestamp>) -> Result<()> {
@@ -100,6 +119,9 @@ impl Split {
 			// A sequence header anchors a keyframe; the importer parses the config.
 			ObuType::SequenceHeader => {
 				self.current.contains_keyframe = true;
+				if !self.started {
+					self.initial = Some(Bytes::copy_from_slice(&obu_data));
+				}
 			}
 			ObuType::TemporalDelimiter => {
 				self.maybe_start_frame(pts)?;
@@ -155,14 +177,20 @@ impl Split {
 		Ok(())
 	}
 
-	/// Drop any in-flight temporal unit.
+	/// Drop any in-flight picture, and any frame completed but not yet returned.
 	///
 	/// Pre-reset OBUs would otherwise leak into a later frame with the wrong
-	/// timestamp.
+	/// timestamp. Before the first picture is returned, the latest complete sequence
+	/// header survives even when the picture is discarded. It does not flag the next
+	/// picture a keyframe: only a `KEY_FRAME` after the reset does.
 	pub fn reset(&mut self) {
 		self.current = Au::default();
+		if let Some(initial) = &self.initial {
+			self.current.chunks.extend_from_slice(initial);
+		}
 		// Drop any buffered partial OBU too, so pre-reset bytes can't leak into the next unit.
 		self.tail.clear();
+		self.pending.clear();
 	}
 
 	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> Result<moq_net::Timestamp> {
@@ -300,6 +328,90 @@ mod tests {
 		let frames = decode_one(&mut split, &mut cat(&[td(), seq_header(), key_frame()]), ts());
 		assert_eq!(frames.len(), 1);
 		assert!(frames[0].keyframe);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn reset_keeps_headers_but_discards_pictures_and_queued_frames() {
+		let mut split = Split::new();
+		assert!(
+			split
+				.decode(&cat(&[td(), seq_header(), obu(5, &[1, 2])]), ts())
+				.unwrap()
+				.is_empty()
+		);
+		// The first picture may be buffered, without a following delimiter to emit it.
+		assert!(split.decode(&key_frame(), ts()).unwrap().is_empty());
+		// A partial frame OBU must not be joined to the post-reset input.
+		assert!(split.decode(&[0x32, 0x04, 0x00], ts()).unwrap().is_empty());
+		split.reset();
+		let next = moq_net::Timestamp::from_micros(1_000).unwrap();
+		let frames = decode_one(&mut split, &mut cat(&[key_frame()]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].payload, cat(&[seq_header(), key_frame()]));
+		assert_eq!(frames[0].timestamp, next);
+
+		assert!(split.decode(&seq_header(), ts()).unwrap().is_empty());
+		split.reset();
+		let frames = decode_one(&mut split, &mut cat(&[key_frame()]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(
+			frames[0].payload,
+			key_frame(),
+			"a later sequence-header prefix is discarded"
+		);
+
+		// The delimiter queues a frame; a later forbidden header fails decode.
+		let invalid = vec![0x82, 0x00];
+		assert!(
+			split
+				.decode(&cat(&[key_frame(), td(), inter_frame(), invalid]), ts())
+				.is_err()
+		);
+		split.reset();
+		let frames = decode_one(&mut split, &mut cat(&[key_frame()]), next);
+		assert_eq!(
+			frames.len(),
+			1,
+			"neither the queued keyframe nor the partial delta survives"
+		);
+		assert_eq!(
+			frames[0].payload,
+			key_frame(),
+			"a consumed sequence header is not cached"
+		);
+		assert!(frames[0].keyframe);
+		assert_eq!(frames[0].timestamp, next);
+	}
+
+	/// A first picture queued by a delimiter but lost to a decode error was never
+	/// returned, so the initial sequence header still survives the reset.
+	#[tokio::test(start_paused = true)]
+	async fn reset_keeps_header_of_queued_but_unreturned_first_picture() {
+		let mut split = Split::new();
+		let invalid = vec![0x82, 0x00];
+		assert!(
+			split
+				.decode(&cat(&[seq_header(), key_frame(), td(), inter_frame(), invalid]), ts())
+				.is_err()
+		);
+		split.reset();
+		let next = moq_net::Timestamp::from_micros(1_000).unwrap();
+		let frames = decode_one(&mut split, &mut cat(&[key_frame()]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].payload, cat(&[seq_header(), key_frame()]));
+		assert!(frames[0].keyframe);
+		assert_eq!(frames[0].timestamp, next);
+	}
+
+	/// A restored sequence header does not make the next inter picture a keyframe.
+	#[tokio::test(start_paused = true)]
+	async fn restored_header_does_not_flag_an_inter_frame() {
+		let mut split = Split::new();
+		assert!(split.decode(&seq_header(), ts()).unwrap().is_empty());
+		split.reset();
+		let frames = decode_one(&mut split, &mut cat(&[td(), inter_frame()]), ts());
+		assert_eq!(frames.len(), 1);
+		assert!(!frames[0].keyframe);
 	}
 
 	/// A frame with no sequence header and INTER frame_type is not a keyframe.

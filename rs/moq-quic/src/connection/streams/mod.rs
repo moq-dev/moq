@@ -126,6 +126,17 @@ impl<'a> Streams<'a> {
 		Poll::Pending
 	}
 
+	/// How many more streams the peer lets this side open in `dir` before it raises its limit.
+	pub fn credit(&self, dir: Dir) -> u64 {
+		self.state.max[dir as usize].saturating_sub(self.state.next[dir as usize])
+	}
+
+	/// Whether an open in `dir` was refused since the peer last raised its limit, so this side
+	/// waits for its MAX_STREAMS, as the STREAMS_BLOCKED it sends says.
+	pub fn blocked(&self, dir: Dir) -> bool {
+		self.state.open_refused[dir as usize]
+	}
+
 	/// The number of streams that may have unacknowledged data.
 	pub fn send_streams(&self) -> usize {
 		self.state.send_streams
@@ -180,21 +191,6 @@ impl StreamsState {
 	/// Frame bytes queued datagrams hold against the send buffer.
 	pub(crate) fn datagram_bytes(&self) -> usize {
 		self.pending.datagram_bytes()
-	}
-}
-
-/// Indicates whether a frame needs to be transmitted
-///
-/// This type wraps around bool and uses the `#[must_use]` attribute in order
-/// to prevent accidental loss of the frame transmission requirement.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-#[must_use = "A frame might need to be enqueued"]
-pub struct ShouldTransmit(bool);
-
-impl ShouldTransmit {
-	/// Returns whether a frame should be transmitted
-	pub fn should_transmit(self) -> bool {
-		self.0
 	}
 }
 

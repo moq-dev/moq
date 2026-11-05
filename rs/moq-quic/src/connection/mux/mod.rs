@@ -733,7 +733,7 @@ impl Connection {
 					err.frame = Some(frame::FrameType::RESET_STREAM_AT);
 					return Err(err);
 				}
-				if self.streams.received_reset(reset)?.should_transmit() {
+				if self.streams.received_reset(reset)? {
 					self.pending.max_data = true;
 				}
 			}
@@ -799,7 +799,7 @@ impl Connection {
 	}
 
 	fn on_stream(&mut self, stream: frame::Stream, allocation: usize) -> Result<(), TransportError> {
-		if self.streams.received(stream, allocation)?.should_transmit() {
+		if self.streams.received(stream, allocation)? {
 			self.pending.max_data = true;
 		}
 		Ok(())

@@ -62,7 +62,7 @@ async function measure(
 	// Inserted by sequence, the way the wire hands a subscribed track its groups.
 	const publish = (close: boolean) => {
 		clock += held > 0 ? 1 : CACHE_WINDOW_MS / retained;
-		const group = producer.createGroup(sequence);
+		const group = producer.createGroup(BigInt(sequence));
 		group.writeFrame({ payload, timestamp: Timestamp.fromMillis(sequence++) });
 		if (close) group.finish();
 		return group;
@@ -106,7 +106,7 @@ async function measure(
 	// Completion wakes every subscriber independently of producer closure.
 	const ending = subscribers.map((subscriber) => subscriber.recvGroup());
 	const endStart = now();
-	producer.finishAt({ group: sequence, frame: 0 });
+	producer.finishAt({ group: BigInt(sequence), frame: 0 });
 	for (const group of await Promise.all(ending)) {
 		if (group) throw new Error("track did not end at its declared boundary");
 	}

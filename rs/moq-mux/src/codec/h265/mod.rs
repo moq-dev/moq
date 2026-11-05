@@ -19,9 +19,9 @@ pub use split::*;
 use bytes::{Buf, Bytes, BytesMut};
 
 use crate::codec::annexb::{InBandCodec, ParameterSets};
-use scuffle_h265::{NALUnitType, SpsNALUnit};
+use scuffle_h265::NALUnitType;
 use sps::Sps;
-pub(crate) use sps::id as sps_id;
+pub(crate) use sps::{id as sps_id, parse_full as parse_full_sps};
 
 /// Wrap one hvc1 (length-prefixed NALU) access unit as a single
 /// [`Frame`](crate::container::Frame), with the keyframe flag set when it
@@ -280,29 +280,35 @@ pub(crate) fn config_from_sps(sps_nal: &[u8], in_band: bool) -> Result<hang::cat
 	Ok(config)
 }
 
+/// The picture size an SPS NAL (header included) declares, inside its conformance window. `None`
+/// when it fails to parse.
+pub(crate) fn sps_size(nal: &[u8]) -> Option<(u32, u32)> {
+	let head = Sps::parse(nal).ok()?.head;
+	Some((head.width, head.height))
+}
+
 /// The reordering an SPS NAL unit declares for its highest sub-layer: `sps_max_num_reorder_pics`,
 /// and the picture period when the VUI's HRD parameters fix the picture rate within the CVS
 /// (ITU-T H.265 E.3.2).
 ///
 /// `None` when the SPS fails to parse.
 pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
-	let sps = SpsNALUnit::parse(&mut &nal[..]).ok()?;
-	let highest = sps.rbsp.sps_max_sub_layers_minus1 as usize;
-	let reorder = &sps.rbsp.sub_layer_ordering_info.sps_max_num_reorder_pics;
+	let sps = parse_full_sps(nal).ok()?;
+	let highest = sps.sps_max_sub_layers_minus1 as usize;
+	let reorder = &sps.sub_layer_ordering_info.sps_max_num_reorder_pics;
 	let depth = *reorder.get(highest).or(reorder.last())?;
 	Some(crate::codec::video::Reorder {
 		depth: u32::try_from(depth).ok()?,
-		period: sps_period(&sps.rbsp),
+		period: sps_period(&sps),
 	})
 }
 
 /// The HRD an SPS NAL unit's VUI declares at its highest sub-layer, when it carries one: the
 /// NAL HRD's last schedule, or the VCL HRD's when that is all there is.
 pub(crate) fn sps_hrd(nal: &[u8]) -> Option<crate::codec::video::Hrd> {
-	let sps = SpsNALUnit::parse(&mut &nal[..]).ok()?;
-	let highest = sps.rbsp.sps_max_sub_layers_minus1 as usize;
+	let sps = parse_full_sps(nal).ok()?;
+	let highest = sps.sps_max_sub_layers_minus1 as usize;
 	let hrd = sps
-		.rbsp
 		.vui_parameters
 		.as_ref()?
 		.vui_timing_info

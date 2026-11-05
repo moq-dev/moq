@@ -29,7 +29,7 @@ fn read(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> (Vec<u8>, Result<
 			Err(e) => break Err(e),
 		}
 	};
-	let _ = chunks.finalize();
+	chunks.finalize();
 	(data, end)
 }
 
@@ -257,7 +257,7 @@ fn received_reset_after_prefix() {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(RELIABLE), Ok(Some(chunk)) if chunk.bytes == MSG[..RELIABLE]);
-	let _ = chunks.finalize();
+	chunks.finalize();
 	assert_matches!(
 		pair.server_conn_mut(server_ch).recv_stream(s).received_reset(),
 		Ok(Some(ERROR))

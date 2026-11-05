@@ -1,7 +1,8 @@
-//! HLS record interop: `publish` writes a fixed frame schedule through moq-mux, whose catalog
-//! publishes HLS records by default, and `read` prints a broadcast's declared durations and
-//! records. The harness reads this publisher and the native JS one (`js-native/hls.ts`), which
-//! publishes the same schedule through `@moq/hang`, and requires the two readouts identical.
+//! HLS grid interop: `publish` writes a fixed frame schedule through moq-mux, whose catalog
+//! measures and declares `media.join.interval`, and `read` prints a broadcast's declared interval
+//! and each rendition's groups, the first pts every HLS edge numbers segments from on that grid.
+//! The harness reads this publisher and the native JS one (`js-native/hls.ts`), which publishes
+//! the same schedule through `@moq/hang`, and requires the two readouts identical.
 //!
 //!     interop-hls publish URL BROADCAST
 //!     interop-hls read URL BROADCAST
@@ -117,49 +118,43 @@ async fn main() -> anyhow::Result<()> {
 		let broadcast = origin.consume().follow(path, None)?.available().await?;
 		let mut catalogs =
 			moq_mux::catalog::Consumer::<()>::new(&broadcast, moq_mux::catalog::CatalogFormat::Hang).await?;
-		// Both renditions, each advertising its records.
-		let renditions = loop {
+		// Both renditions, once the interval is declared.
+		let catalog = loop {
 			let catalog = catalogs
 				.next()
 				.await?
-				.context("catalog ended before advertising records")?;
-			let video = catalog
-				.video
-				.renditions
-				.iter()
-				.map(|(name, config)| ("video", name, &config.hls));
-			let audio = catalog
-				.audio
-				.renditions
-				.iter()
-				.map(|(name, config)| ("audio", name, &config.hls));
-			let renditions: Vec<_> = video
-				.chain(audio)
-				.filter_map(|(kind, name, hls)| Some((kind, name.clone(), hls.clone()?)))
-				.collect();
-			if renditions.len() == 2 {
-				break renditions;
+				.context("catalog ended before declaring its join interval")?;
+			let renditions = catalog.video.renditions.len() + catalog.audio.renditions.len();
+			if catalog.media.join.is_some() && renditions == 2 {
+				break catalog;
 			}
 		};
-		for (kind, name, hls) in renditions {
-			let mut records = moq_mux::hls::Consumer::subscribe(&broadcast, &hls).await?;
+		let interval = catalog.media.interval().expect("checked above");
+		println!("hls interval={}", interval.as_millis());
+		let mut renditions: Vec<(&str, String, Container)> = Vec::new();
+		for (name, config) in &catalog.video.renditions {
+			renditions.push(("video", name.clone(), Container::try_from(config)?));
+		}
+		for (name, config) in &catalog.audio.renditions {
+			renditions.push(("audio", name.clone(), Container::try_from(config)?));
+		}
+		for (kind, name, container) in renditions {
+			use moq_mux::container::Container as _;
+			let replay = moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
+			let mut groups = broadcast.track(&name)?.subscribe(replay).await?.ordered();
 			let mut out = Vec::new();
-			while let Some(event) = records.next().await? {
-				if let moq_mux::hls::Event::Push { entry, .. } = event {
-					let mut record = format!("{}:{}:{}", entry.sequence, entry.group, entry.pts.as_millis());
-					if let Some(duration) = entry.duration {
-						record += &format!(":{}", duration.as_millis());
-					}
-					out.push(record);
-				}
+			while let Some(mut group) = groups.next_group().await? {
+				let Some(frame) = group.read_frame().await? else {
+					continue;
+				};
+				let first = container.decode(frame)?.into_iter().next().context("an empty group")?;
+				// A discontinuity marker has no payload and starts no segment.
+				let mark = if first.payload.is_empty() { ":marker" } else { "" };
+				out.push(format!("{}:{}{mark}", group.sequence, first.timestamp.as_millis()));
 			}
-			ensure!(!out.is_empty(), "{kind} {name} published no records");
-			println!(
-				"hls {kind} {name} track={} duration={} records={}",
-				hls.track,
-				hls.duration.as_millis(),
-				out.join(",")
-			);
+			ensure!(!out.is_empty(), "{kind} {name} published no groups");
+			println!("hls {kind} {name} groups={}", out.join(","));
 		}
 		Ok::<_, anyhow::Error>(())
 	})

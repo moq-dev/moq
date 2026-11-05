@@ -16,6 +16,15 @@ test("counts per rendition of each catalog broadcast, omitting zeros", () => {
 	expect(tally.report(Path.from("unknown.hang"))).toEqual({});
 });
 
+test("a rendition named __proto__ is reported as its own ID", () => {
+	const tally = new Tally();
+	tally.count({ ...live, id: "__proto__" }, { frames: 1 });
+	tally.count(live, { frames: 2 });
+	const report = tally.report(live.path);
+	expect(Object.keys(report).sort()).toEqual(["__proto__", "video"]);
+	expect(Object.getOwnPropertyDescriptor(report, "__proto__")?.value).toEqual({ frames: 1 });
+});
+
 test("a stall reports its time so far and adds its duration once it ends", async () => {
 	const clock = new Manual();
 	const installed = clock.install();

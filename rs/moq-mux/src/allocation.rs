@@ -16,6 +16,15 @@ pub struct Usage {
 	pub freed: usize,
 	/// Calls to allocate or reallocate.
 	pub allocations: usize,
+	/// The most bytes held at once beyond what the thread held when the call began.
+	pub peak: usize,
+}
+
+impl Usage {
+	/// Bytes allocated and not yet freed; freeing what the call did not allocate lowers it.
+	fn live(&self) -> usize {
+		self.allocated.saturating_sub(self.freed)
+	}
 }
 
 thread_local! {
@@ -41,6 +50,7 @@ unsafe impl GlobalAlloc for Counting {
 		record(|usage| {
 			usage.allocated += layout.size();
 			usage.allocations += 1;
+			usage.peak = usage.peak.max(usage.live());
 		});
 		unsafe { System.alloc(layout) }
 	}
@@ -55,6 +65,8 @@ unsafe impl GlobalAlloc for Counting {
 			usage.allocated += new_size;
 			usage.freed += layout.size();
 			usage.allocations += 1;
+			// Both blocks are live while a realloc copies between them.
+			usage.peak = usage.peak.max(usage.live() + layout.size());
 		});
 		unsafe { System.realloc(ptr, layout, new_size) }
 	}

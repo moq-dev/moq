@@ -2,17 +2,22 @@ import { expect, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
+import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
 import { error } from "../error.ts";
+import { hooks } from "../internal.ts";
+import { CACHE_EXPIRY } from "../ledger.ts";
+import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
-import type { Order, Producer as TrackProducer } from "../track.ts";
+import type { Fill, Order, Producer as TrackProducer } from "../track.ts";
+import { SEGMENT_BYTES } from "../util/limits.ts";
 import { wireOf } from "../wire.ts";
 import { Fetch, FetchHeader, FetchOk, type FetchType, type Location } from "./fetch.ts";
 import type * as Filter from "./filter.ts";
-import { Group as GroupMessage } from "./object.ts";
+import { decodeFetchObject, Group as GroupMessage } from "./object.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError } from "./request.ts";
 import { NativeSession } from "./session.ts";
@@ -36,7 +41,9 @@ const INVALID_RANGE = 0x11;
 const INVALID_JOINING_REQUEST_ID = 0x32;
 
 /** A publisher serving the `room` broadcast, with its `video` track and the client's uni streams. */
-function serve(version: IetfVersion, grant?: Signal<Grant | undefined>) {
+// `maxAge` is the track's publisher max age: omitted is the authored zero, and a test that fills
+// superseded history passes `null`, since the publisher fills only groups still fresh.
+function serve(version: IetfVersion, grant?: Signal<Grant | undefined>, priority?: number, maxAge?: Milli | null) {
 	const pair = createMockTransportPair(ALPNS[version]);
 	const origin = new OriginProducer();
 	const pub = new Publisher({
@@ -48,13 +55,14 @@ function serve(version: IetfVersion, grant?: Signal<Grant | undefined>) {
 	});
 	const publication = origin.createBroadcast(Path.from("room"));
 	publication.announce();
-	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, priority, maxAge });
 	const uni = pair.client.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
 	>;
 	return {
 		pair,
 		pub,
+		origin,
 		broadcast: publication.broadcast,
 		track,
 		uni,
@@ -69,7 +77,7 @@ function serve(version: IetfVersion, grant?: Signal<Grant | undefined>) {
 type Served = ReturnType<typeof serve>;
 
 /** Write `payloads` into group `sequence`, finishing it unless told otherwise. */
-function writeGroup(track: TrackProducer, sequence: number, payloads: string[], finish = true) {
+function writeGroup(track: TrackProducer, sequence: bigint, payloads: string[], finish = true) {
 	const group = track.createGroup(sequence);
 	for (const [object, payload] of payloads.entries()) {
 		group.writeFrame({
@@ -84,7 +92,7 @@ function writeGroup(track: TrackProducer, sequence: number, payloads: string[], 
 /** Groups `0..count`, each holding `g-0` and `g-1`, skipping `hole`. */
 function publishPairs(track: TrackProducer, count: number, hole?: number) {
 	for (let sequence = 0; sequence < count; sequence++) {
-		if (sequence !== hole) writeGroup(track, sequence, [`${sequence}-0`, `${sequence}-1`]);
+		if (sequence !== hole) writeGroup(track, BigInt(sequence), [`${sequence}-0`, `${sequence}-1`]);
 	}
 }
 
@@ -326,6 +334,37 @@ test("a FETCH spanning groups is refused before FETCH_OK", async () => {
 	}
 });
 
+/** The Publisher Priority each object on a fetch stream states, absent where it inherits. */
+async function priorities(raw: Uint8Array, version: IetfVersion): Promise<(number | undefined)[]> {
+	const reader = new Reader(undefined, raw, version);
+	expect(await reader.u53()).toBe(FetchHeader.type);
+	await FetchHeader.decode(reader, version);
+	const out: (number | undefined)[] = [];
+	while (!(await reader.done())) {
+		const flags = await reader.u53();
+		if (flags & 0x08) await reader.u53();
+		if (flags & 0x04) await reader.u53();
+		out.push(flags & 0x10 ? await reader.u8() : undefined);
+		if (flags & 0x20) await reader.read(await reader.u53());
+		await reader.read(await reader.u53());
+	}
+	return out;
+}
+
+// A fetch stream's first object states the track's Publisher Priority, as a subgroup header
+// does, and the rest inherit it. Model priority 72 is wire 55, lower first.
+test("a FETCH states the track's priority on its first object", async () => {
+	for (const version of VERSIONS) {
+		using fx = serve(version, undefined, 72);
+		publishPairs(fx.track, 2);
+		const type = range(version, at(1, 0), at(1, 0));
+		const answer = served(await fetch(fx, new Fetch({ requestId: FETCH_ID, type })));
+		expect(answer.objects).toEqual(pairs([1]));
+		expect(answer.ok.properties.priority).toBe(55);
+		expect(await priorities(answer.raw, version)).toEqual([55, undefined]);
+	}
+});
+
 // Only a finished track's final object ends it, wherever the range starts or ends.
 test("a FETCH through the final object reports the end of track", async () => {
 	for (const version of VERSIONS) {
@@ -354,7 +393,7 @@ test("a FETCH waits for the Largest Object's open group", async () => {
 	for (const version of VERSIONS) {
 		using fx = serve(version);
 		publishPairs(fx.track, 4);
-		const live = writeGroup(fx.track, 4, ["4-0"], false);
+		const live = writeGroup(fx.track, 4n, ["4-0"], false);
 		let answered = false;
 		const answering = fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(4, 0), at(4, 0)) }));
 		void answering.finally(() => {
@@ -386,8 +425,147 @@ test("a FETCH the cache cannot answer is refused before FETCH_OK", async () => {
 		expect(await ask(at(3, 2), at(3, 6))).toBe(INVALID_RANGE);
 		expect(await ask(at(3, 1), at(3, 1))).toBe(INVALID_RANGE);
 		// A newest group with no objects starts past Largest Object too.
-		writeGroup(fx.track, 4, []);
+		writeGroup(fx.track, 4n, []);
 		expect(await ask(at(4, 0), at(4, 4))).toBe(INVALID_RANGE);
+	}
+});
+
+test("a FETCH fills never-cached and evicted history, then reuses the cache", async () => {
+	for (const version of VERSIONS) {
+		for (const evicted of [false, true]) {
+			using clock = manual();
+			using fx = serve(version, undefined, undefined, null);
+			if (evicted) {
+				writeGroup(fx.track, 1n, ["1-0", "1-1", "1-2"]);
+				await clock.advance(ms(CACHE_EXPIRY * 2));
+			}
+			writeGroup(fx.track, 3n, ["live"]);
+			const cache = fx.track.subscribe({ ranges: [] });
+			expect(hooks.holdsGroup(cache, 1n)).toBe(false);
+			cache.close();
+			using requests = fx.track.requests();
+			let fill: Fill | undefined;
+			const requested = requests.requestedFill().then((value) => {
+				fill = value;
+			});
+			const msg = new Fetch({
+				requestId: FETCH_ID,
+				type: range(version, at(1, 1), at(1, 3)),
+				subscriberPriority: 3,
+				groupOrder: "ascending",
+			});
+			const fetching = fetch(fx, msg);
+			await flush();
+			expect(fill).toBeDefined();
+			if (!fill) throw new Error("no history fill");
+			expect([fill.start, fill.end, fill.priority, fill.maxDelay]).toEqual([1n, 2n, 124, null]);
+			const group = fill.accept(1n);
+			for (let object = 0; object < 3; object++)
+				group.writeFrame({
+					payload: new TextEncoder().encode(`1-${object}`),
+					timestamp: Timestamp.fromMillis(object),
+				});
+			group.finish();
+			fill.close();
+			await requested;
+			const first = served(await fetching);
+			expect(first.objects).toEqual([
+				[1, 1, "1-1"],
+				[1, 2, "1-2"],
+			]);
+			expect(first.ok.endLocation).toEqual(endAt(version, 1, 2));
+			expect(first.ok.endOfTrack).toBe(false);
+			// No handler remains: the same responder serves the filled group from cache.
+			requests.close();
+			expect(served(await fetch(fx, msg)).objects).toEqual(first.objects);
+		}
+	}
+});
+
+test("a FETCH preserves relayed metadata and cached groups without upstream FETCH", async () => {
+	for (const version of VERSIONS) {
+		for (const warm of [false, true]) {
+			using fx = serve(version);
+			const upstream = new OriginProducer();
+			const publication = upstream.createBroadcast(Path.from("archive"));
+			publication.announce();
+			const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			writeGroup(track, 3n, ["3-0", "3-1"]);
+			// lite-04 has no FETCH; lite-05 can fetch, but refuses empty subscription ranges.
+			const pair = createMockTransportPair(warm ? Lite.ALPN_04 : Lite.ALPN_05);
+			const url = new URL("https://localhost:4443/test");
+			const [client, server] = await Promise.all([
+				connectSession({ url, transport: pair.client }),
+				acceptSession({ url, transport: pair.server, publish: upstream.consume() }),
+			]);
+			try {
+				const source = wireOf(client).consume(Path.from("archive"));
+				const cached = warm ? source.track("video").subscribe({ delay: { max: null } }) : undefined;
+				if (cached) {
+					const group = await cached.recvGroup();
+					expect(group?.sequence).toBe(3n);
+					while (await group?.readFrame()) {}
+					group?.close();
+				}
+				const requests = fx.origin.requestsRoute(Path.from("relayed"));
+				const cursor = requests.requested();
+				const requested = cursor.next();
+				const type = { ...range(version, at(3, 0), at(3, 0)), trackNamespace: Path.from("relayed") };
+				const fetching = fetch(fx, new Fetch({ requestId: FETCH_ID, type }));
+				const next = await requested;
+				if (next.done) throw new Error("no relayed broadcast request");
+				next.value.serve(source);
+				await cursor.return?.();
+				expect(served(await fetching).objects).toEqual(pairs([3]));
+				cached?.close();
+			} finally {
+				client.abort();
+				server.abort();
+				upstream.close();
+			}
+		}
+	}
+});
+
+test("a FETCH refused by its history responder sends no FETCH_OK", async () => {
+	for (const version of VERSIONS) {
+		using fx = serve(version, undefined, undefined, null);
+		writeGroup(fx.track, 3n, ["live"]);
+		using requests = fx.track.requests();
+		const responding = (async () => {
+			using fill = await requests.requestedFill();
+			expect(fill?.wanted()).toBe(1n);
+		})();
+		const fetching = fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(1, 0), at(1, 0)) }));
+		expect(refused(await fetching)).toBe(DOES_NOT_EXIST);
+		requests.close();
+		await responding;
+	}
+});
+
+test("a cancelled or unauthorized FETCH withdraws its unanswered history fill", async () => {
+	for (const version of VERSIONS) {
+		for (const revoke of [false, true]) {
+			const grant = new Signal<Grant | undefined>(undefined);
+			using fx = serve(version, grant, undefined, null);
+			writeGroup(fx.track, 3n, ["live"]);
+			using requests = fx.track.requests();
+			const requested = requests.requestedFill();
+			const request = requestStream(version);
+			const fetching = fx.pub.runFetch(
+				new Fetch({ requestId: FETCH_ID, type: range(version, at(1, 0), at(1, 0)) }),
+				request.stream,
+			);
+			using fill = await requested;
+			expect(fill?.wanted()).toBe(1n);
+			if (revoke) grant.set({ publish: new Path.Patterns([]), subscribe: new Path.Patterns([]) });
+			else request.withdraw();
+			if (revoke) expect(refused(await answer(fx, request.answer, "ascending"))).toBe(UNAUTHORIZED);
+			await fetching;
+			expect(await fill?.wantedChanged()).toBeUndefined();
+			const read = await request.answer.done().catch(error);
+			expect(read === true || read instanceof Error).toBe(true);
+		}
 	}
 });
 
@@ -396,8 +574,8 @@ test("a FETCH of a datagram is refused", async () => {
 	for (const version of VERSIONS) {
 		using fx = serve(version);
 		publishPairs(fx.track, 3);
-		expect(fx.track.appendDatagram(new Timestamp(0, Timescale.MILLI), new Uint8Array([1]))).toBe(3);
-		writeGroup(fx.track, 4, ["4-0"]);
+		expect(fx.track.appendDatagram(new Timestamp(0, Timescale.MILLI), new Uint8Array([1]))).toBe(3n);
+		writeGroup(fx.track, 4n, ["4-0"]);
 
 		const only = new Fetch({ requestId: FETCH_ID, type: range(version, at(3, 0), at(3, 0)) });
 		expect(refused(await fetch(fx, only))).toBe(DOES_NOT_EXIST);
@@ -449,7 +627,7 @@ test("a cancelled FETCH stops waiting", async () => {
 			using _clock = manual();
 			using fx = serve(version);
 			publishPairs(fx.track, 2);
-			writeGroup(fx.track, 2, ["2-0"], false);
+			writeGroup(fx.track, 2n, ["2-0"], false);
 			const request = requestStream(version);
 			const task = fx.pub.runFetch(
 				new Fetch({ requestId: FETCH_ID, type: range(version, at(2, 0), at(2, 0)), fillTimeout }),
@@ -470,7 +648,7 @@ test("FILL_TIMEOUT is ignored while a group finishes", async () => {
 		for (const fillTimeout of [Milli(0), Milli(100)]) {
 			using clock = manual();
 			using fx = serve(version);
-			const live = writeGroup(fx.track, 4, ["4-0"], false);
+			const live = writeGroup(fx.track, 4n, ["4-0"], false);
 			let answered = false;
 			const answering = fetch(
 				fx,
@@ -522,7 +700,7 @@ function joining(offset = 0n): Fetch {
 test("draft-18: a joining FETCH serves the head its subscription starts after", async () => {
 	using fx = serve(D18);
 	publishPairs(fx.track, 5);
-	const live = writeGroup(fx.track, 5, ["5-0", "", "5-2"], false);
+	const live = writeGroup(fx.track, 5n, ["5-0", "", "5-2"], false);
 	const { client, ok } = await subscribe(fx);
 	expect(ok.largest).toEqual({ groupId: 5n, objectId: 2n });
 
@@ -536,7 +714,7 @@ test("draft-18: a joining FETCH serves the head its subscription starts after", 
 	if (next.done) throw new Error("no subscription stream");
 	const group = new Reader(next.value, undefined, D18);
 	const header = await GroupMessage.decode(group, D18);
-	expect(header.groupId).toBe(5);
+	expect(header.groupId).toBe(5n);
 	expect(header.flags.firstObject).toBe(false);
 	expect(await group.u53()).toBe(3);
 
@@ -546,7 +724,8 @@ test("draft-18: a joining FETCH serves the head its subscription starts after", 
 		new FetchOk({
 			endOfTrack: false,
 			endLocation: at(5, 3),
-			properties: { timescale: Timescale.MILLI, priority: 127, groupOrder: 0x2 },
+			// The zero authored default max age, advertised as MAX_CACHE_DURATION.
+			properties: { timescale: Timescale.MILLI, priority: 127, groupOrder: 0x2, maxCacheDuration: 0n },
 		}),
 	);
 	expect(head.requestId).toBe(FETCH_ID);
@@ -560,7 +739,8 @@ test("draft-18: a joining FETCH serves the head its subscription starts after", 
 	await reader.u53();
 	await FetchHeader.decode(reader, D18);
 	expect(await reader.u53()).toBe(0x3c);
-	expect([await reader.u53(), await reader.u53(), await reader.u8()]).toEqual([5, 0, 0]);
+	// The priority is the track's, as FETCH_OK and every subgroup header state it.
+	expect([await reader.u53(), await reader.u53(), await reader.u8()]).toEqual([5, 0, 127]);
 	await reader.read(await reader.u53());
 	await reader.read(await reader.u53());
 	expect(await reader.u53()).toBe(0x20);
@@ -571,7 +751,7 @@ test("draft-18: a joining FETCH serves the head its subscription starts after", 
 // SUBSCRIBE_OK, and the head is then all the subscriber gets of that group.
 test("draft-18: a joining FETCH outlives a subscription that ends after FETCH_OK", async () => {
 	using fx = serve(D18);
-	const live = writeGroup(fx.track, 5, ["5-0", "5-1"], false);
+	const live = writeGroup(fx.track, 5n, ["5-0", "5-1"], false);
 	const { client, serving } = await subscribe(fx);
 
 	const request = requestStream(D18);
@@ -645,9 +825,20 @@ test("draft-18: a joining FETCH its subscription cannot answer is refused", asyn
 		// A head the cache lost is refused, rather than answered short of where the
 		// subscription starts.
 		using fx = serve(D18);
-		const live = writeGroup(fx.track, 5, ["5-0", "5-1"], false);
+		const live = writeGroup(fx.track, 5n, ["5-0", "5-1"], false);
 		const { client } = await subscribe(fx);
 		live.abort(new Error("evicted"));
+		expect(refused(await fetch(fx, joining()))).toBe(DOES_NOT_EXIST);
+		client.close();
+	}
+	{
+		// An upstream can report the largest safe frame, making the head end one past it. No
+		// model group holds that many frames, so the head is unavailable rather than an error.
+		using fx = serve(D18);
+		writeGroup(fx.track, 5n, ["5-0", "5-1"], false);
+		hooks.reportedLargest(fx.track, { group: 5n, frame: Number.MAX_SAFE_INTEGER });
+		const { client, ok } = await subscribe(fx);
+		expect(ok.largest).toEqual({ groupId: 5n, objectId: BigInt(Number.MAX_SAFE_INTEGER) });
 		expect(refused(await fetch(fx, joining()))).toBe(DOES_NOT_EXIST);
 		client.close();
 	}
@@ -657,7 +848,7 @@ test("draft-18: a joining FETCH its subscription cannot answer is refused", asyn
 // the subscriber pipelines both: it waits for the subscription rather than being refused.
 test("draft-18: a joining FETCH waits for the subscription it names", async () => {
 	using fx = serve(D18);
-	writeGroup(fx.track, 5, ["5-0", "5-1"], false);
+	writeGroup(fx.track, 5n, ["5-0", "5-1"], false);
 	const request = requestStream(D18);
 	const task = fx.pub.runFetch(joining(), request.stream);
 	await flush();
@@ -714,4 +905,206 @@ test("draft-18: a joining FETCH whose subscription is refused is refused", async
 	expect(refused(await answer(fx, request.answer, "ascending"))).toBe(INVALID_JOINING_REQUEST_ID);
 	await task;
 	client.close();
+});
+
+// Every selected header is known, but the last payload grows the slice past the group
+// tail. Neither collecting the slice nor reading its last frame whole can deliver this.
+test.each([
+	{ prefix: 3, size: SEGMENT_BYTES * 16 },
+	{ prefix: 0, size: SEGMENT_BYTES * 40 },
+])("a FETCH streams $prefix cached frames and a $size byte final frame past the tail", async ({ prefix, size }) => {
+	for (const version of VERSIONS) {
+		using fx = serve(version);
+		const group = fx.track.createGroup(0n);
+		const prefixSize = SEGMENT_BYTES * 8;
+		for (let index = 0; index < prefix; index++) {
+			const frame = group.createFrame({ size: prefixSize, timestamp: new Timestamp(index, Timescale.MILLI) });
+			for (let offset = 0; offset < prefixSize; offset += SEGMENT_BYTES)
+				frame.write(new Uint8Array(SEGMENT_BYTES).fill(index));
+			frame.finish();
+		}
+		const frame = group.createFrame({ size, timestamp: new Timestamp(prefix, Timescale.MILLI) });
+		const request = requestStream(version);
+		const task = fx.pub.runFetch(
+			new Fetch({ requestId: FETCH_ID, type: range(version, at(0, 0), at(0, prefix + 1)) }),
+			request.stream,
+		);
+		try {
+			expect(await request.answer.u53()).toBe(FetchOk.id);
+			const ok = await FetchOk.decode(request.answer, version);
+			expect(ok.endLocation).toEqual(endAt(version, 0, prefix));
+			const next = await fx.uni.read();
+			if (!next.value) throw new Error("missing fetch stream");
+			const reader = new Reader(next.value, undefined, version);
+			expect(await reader.u53()).toBe(FetchHeader.type);
+			expect((await FetchHeader.decode(reader, version)).requestId).toBe(FETCH_ID);
+			for (let index = 0; index <= prefix; index++) {
+				const length = index === prefix ? size : prefixSize;
+				const object = await reader.decode((cursor) => decodeFetchObject(cursor, Timescale.MILLI));
+				expect(object).toMatchObject({ kind: "object", size: length, payload: undefined });
+				if (object.kind !== "object") throw new Error("expected object");
+				expect(object.timestamp?.value).toBe(index);
+				for (let offset = 0; offset < length; offset += SEGMENT_BYTES) {
+					const bytes = new Uint8Array(Math.min(SEGMENT_BYTES, length - offset)).fill(index);
+					// Forward each segment before the rest exists; no whole-frame read can do this.
+					if (index === prefix) frame.write(bytes);
+					expect(await reader.read(bytes.byteLength)).toEqual(bytes);
+				}
+				if (index === prefix) frame.finish();
+			}
+			// The bound ends the response without waiting for this live group's FIN.
+			expect(await reader.done()).toBe(true);
+			await task;
+		} finally {
+			request.stream.abort(new Error("test ended"));
+			group.abort(new Error("test ended"));
+			await task;
+		}
+	}
+});
+
+// The group ending before a requested bound determines both the true end and its track flag.
+test("a bounded FETCH waits for headers or the final group before promising its end", async () => {
+	for (const version of VERSIONS) {
+		using fx = serve(version);
+		const live = writeGroup(fx.track, 0n, ["0-0", "0-1", "0-2"], false);
+		const answering = fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(0, 0), at(0, 10)) }));
+		await flush();
+		live.finish();
+		fx.track.finish();
+		const answer = served(await answering);
+		expect(answer.ok.endOfTrack).toBe(true);
+		expect(answer.ok.endLocation).toEqual(endAt(version, 0, 2));
+		expect(answer.objects).toEqual([
+			[0, 0, "0-0"],
+			[0, 1, "0-1"],
+			[0, 2, "0-2"],
+		]);
+	}
+});
+
+// Both streams must fail together if any part of an accepted answer becomes undeliverable.
+test.each(["source", "request", "output"] as const)(
+	"a FETCH stalled inside a frame stops on %s failure",
+	async (failure) => {
+		for (const version of VERSIONS) {
+			using fx = serve(version);
+			const group = fx.track.createGroup(0n);
+			group.createFrame({ size: SEGMENT_BYTES * 2, timestamp: new Timestamp(0, Timescale.MILLI) });
+			const request = requestStream(version);
+			const task = fx.pub.runFetch(
+				new Fetch({ requestId: FETCH_ID, type: range(version, at(0, 0), at(0, 1)) }),
+				request.stream,
+			);
+			expect(await request.answer.u53()).toBe(FetchOk.id);
+			await FetchOk.decode(request.answer, version);
+			const next = await fx.uni.read();
+			if (!next.value) throw new Error("missing fetch stream");
+			const reader = new Reader(next.value, undefined, version);
+			expect(await reader.u53()).toBe(FetchHeader.type);
+			await FetchHeader.decode(reader, version);
+			expect(await reader.decode((cursor) => decodeFetchObject(cursor, Timescale.MILLI))).toMatchObject({
+				kind: "object",
+				size: SEGMENT_BYTES * 2,
+				payload: undefined,
+			});
+			const cause = new Error("test failure");
+			if (failure === "source") group.abort(cause);
+			else if (failure === "request") request.withdraw();
+			else reader.stop(cause);
+			await task;
+			if (failure !== "output") expect(await reader.readChunk(1).catch(error)).toBeInstanceOf(Error);
+			group.abort(cause);
+		}
+	},
+);
+
+// An empty frame is an object only once committed: its header alone cannot complete the answer,
+// or a frame aborted after it would be served as if it existed.
+test.each(["finish", "abort"] as const)("a FETCH of an unfinished empty frame waits for its %s", async (outcome) => {
+	for (const version of VERSIONS) {
+		using fx = serve(version);
+		const group = fx.track.createGroup(0n);
+		const frame = group.createFrame({ size: 0, timestamp: new Timestamp(0, Timescale.MILLI) });
+		const request = requestStream(version);
+		let settled = false;
+		const task = fx.pub
+			.runFetch(new Fetch({ requestId: FETCH_ID, type: range(version, at(0, 0), at(0, 1)) }), request.stream)
+			.finally(() => {
+				settled = true;
+			});
+		try {
+			expect(await request.answer.u53()).toBe(FetchOk.id);
+			await FetchOk.decode(request.answer, version);
+			const next = await fx.uni.read();
+			if (!next.value) throw new Error("missing fetch stream");
+			const reader = new Reader(next.value, undefined, version);
+			expect(await reader.u53()).toBe(FetchHeader.type);
+			await FetchHeader.decode(reader, version);
+			expect(await reader.decode((cursor) => decodeFetchObject(cursor, Timescale.MILLI))).toMatchObject({
+				kind: "object",
+				size: 0,
+			});
+			await flush();
+			expect(settled).toBe(false);
+
+			if (outcome === "finish") frame.finish();
+			else group.abort(new Error("source failed"));
+			await task;
+			if (outcome === "finish") expect(await reader.done()).toBe(true);
+			else expect(await reader.done().catch(error)).toBeInstanceOf(Error);
+		} finally {
+			request.stream.abort(new Error("test ended"));
+			group.abort(new Error("test ended"));
+			await task;
+		}
+	}
+});
+
+// A write parked on flow control never reads the group, so the group failing has to reach it
+// another way, or the answer holds its reader until the request ends.
+test("a FETCH parked on flow control stops when its group fails", async () => {
+	for (const version of VERSIONS) {
+		using fx = serve(version);
+		const group = fx.track.createGroup(0n);
+		const frames = 2048;
+		for (let index = 0; index < frames; index++)
+			group.writeFrame({
+				payload: new Uint8Array(64).fill(index),
+				timestamp: new Timestamp(index, Timescale.MILLI),
+			});
+		const request = requestStream(version);
+		let settled = false;
+		const task = fx.pub
+			.runFetch(new Fetch({ requestId: FETCH_ID, type: range(version, at(0, 0), at(0, frames)) }), request.stream)
+			.finally(() => {
+				settled = true;
+			});
+		try {
+			expect(await request.answer.u53()).toBe(FetchOk.id);
+			await FetchOk.decode(request.answer, version);
+			const next = await fx.uni.read();
+			if (!next.value) throw new Error("missing fetch stream");
+			// Nothing reads the fetch stream, so it fills its window and the publisher parks on a write.
+			await flush();
+			expect(settled).toBe(false);
+
+			group.abort(new Error("source failed"));
+			await flush();
+			expect(settled).toBe(true);
+			// Both streams are reset rather than ending as if the answer were complete.
+			expect(await request.answer.u53().catch(error)).toBeInstanceOf(Error);
+			const data = next.value.getReader();
+			let failure: unknown;
+			try {
+				while (!(await data.read()).done);
+			} catch (err: unknown) {
+				failure = err;
+			}
+			expect(failure).toBeInstanceOf(Error);
+		} finally {
+			request.stream.abort(new Error("test ended"));
+			await task;
+		}
+	}
 });

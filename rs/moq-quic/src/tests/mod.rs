@@ -16,10 +16,7 @@ use assert_matches::assert_matches;
 use bytes::{Buf, Bytes, BytesMut};
 use hex_literal::hex;
 use rand::Rng;
-#[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
-use rustls::crypto::aws_lc_rs::default_provider;
-#[cfg(feature = "ring")]
-use rustls::crypto::ring::default_provider;
+use rind_rustls::default_provider;
 use rustls::{
 	AlertDescription, RootCertStore,
 	pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
@@ -332,7 +329,10 @@ fn connect_before_the_finished_leaves(pair: &mut Pair, config: client::Config) -
 #[test]
 fn close_before_a_client_certificate_leaves_ends() {
 	let _guard = subscribe();
-	let provider = Arc::new(default_provider());
+	// Keep the server flight in the packet layout this close-packet sweep measures.
+	let mut provider = default_provider().unwrap();
+	provider.kx_groups = vec![rind_rustls::kx_group::X25519];
+	let provider = Arc::new(provider);
 	let mut roots = RootCertStore::empty();
 	roots.add(CERTIFIED_KEY.cert.der().clone()).unwrap();
 
@@ -342,7 +342,14 @@ fn close_before_a_client_certificate_leaves_ends() {
 		let mut names = vec!["localhost".to_string()];
 		names.extend((0..len / 50).map(|i| format!("{i:03}{}.test", "a".repeat(42))));
 		names.push(format!("{}.test", "b".repeat(len % 50 + 1)));
-		let identity = rcgen::generate_simple_self_signed(names).unwrap();
+		let identity = (|| -> std::result::Result<_, rcgen::Error> {
+			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let mut params = rcgen::CertificateParams::new(names)?;
+			params.serial_number = Some(1u64.into());
+			let cert = params.self_signed(&signing_key)?;
+			Ok(rcgen::CertifiedKey { cert, signing_key })
+		})()
+		.unwrap();
 
 		let mut store = RootCertStore::empty();
 		store.add(identity.cert.der().clone()).unwrap();
@@ -356,7 +363,7 @@ fn close_before_a_client_certificate_leaves_ends() {
 			)
 			.with_single_cert(
 				vec![CERTIFIED_KEY.cert.der().clone()],
-				PrivatePkcs8KeyDer::from(CERTIFIED_KEY.signing_key.serialize_der()).into(),
+				PrivatePkcs8KeyDer::from(CERTIFIED_KEY.signing_key.to_pkcs8().secret_pkcs8_der().to_vec()).into(),
 			)
 			.unwrap();
 		let client = rustls::ClientConfig::builder_with_provider(provider.clone())
@@ -365,7 +372,7 @@ fn close_before_a_client_certificate_leaves_ends() {
 			.with_root_certificates(roots.clone())
 			.with_client_auth_cert(
 				vec![identity.cert.der().clone()],
-				PrivatePkcs8KeyDer::from(identity.signing_key.serialize_der()).into(),
+				PrivatePkcs8KeyDer::from(identity.signing_key.to_pkcs8().secret_pkcs8_der().to_vec()).into(),
 			)
 			.unwrap();
 		let mut client = client::Config::new(Arc::new(client));
@@ -949,7 +956,7 @@ fn finish_stream_simple() {
 		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
 	assert_matches!(chunks.next(usize::MAX), Ok(None));
-	let _ = chunks.finalize();
+	chunks.finalize();
 }
 
 #[test]
@@ -976,7 +983,7 @@ fn reset_stream() {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Err(recv::Error::Reset(ERROR)));
-	let _ = chunks.finalize();
+	chunks.finalize();
 	// The reset stream ends reset, never finished.
 	assert_eq!(
 		peek(|waiter| pair.client_send(client_ch, s).poll_end(waiter)),
@@ -1024,11 +1031,18 @@ fn reject_self_signed_server_cert() {
 	// Create a self-signed certificate with a different distinguished name than the default one,
 	// such that path building cannot confuse the default root the server is using and the one
 	// the client is trusting (in which case we'd get a different error).
-	let mut cert = rcgen::CertificateParams::new(["localhost".into()]).unwrap();
+	let mut cert = rcgen::CertificateParams::new(["localhost".into()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.unwrap();
 	let mut issuer = rcgen::DistinguishedName::new();
 	issuer.push(rcgen::DnType::OrganizationName, "Crazy Quinn's House of Certificates");
 	cert.distinguished_name = issuer;
-	let cert = cert.self_signed(&rcgen::KeyPair::generate().unwrap()).unwrap();
+	let cert = cert
+		.self_signed(&rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap())
+		.unwrap();
 	let client_ch = pair.begin_connect(client_config_with_certs(vec![cert.into()]));
 
 	pair.drive();
@@ -1047,10 +1061,10 @@ fn reject_missing_client_cert() {
 	// because it's convenient.
 	store.add(CERTIFIED_KEY.cert.der().clone()).unwrap();
 
-	let key = PrivatePkcs8KeyDer::from(CERTIFIED_KEY.signing_key.serialize_der());
+	let key = PrivatePkcs8KeyDer::from(CERTIFIED_KEY.signing_key.to_pkcs8().secret_pkcs8_der().to_vec());
 	let cert = CERTIFIED_KEY.cert.der().clone();
 
-	let provider = Arc::new(default_provider());
+	let provider = Arc::new(default_provider().unwrap());
 	let config = rustls::ServerConfig::builder_with_provider(provider.clone())
 		.with_protocol_versions(&[&rustls::version::TLS13])
 		.unwrap()
@@ -1500,7 +1514,7 @@ fn stream_id_limit() {
 		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
 	assert_eq!(chunks.next(usize::MAX), Ok(None));
-	let _ = chunks.finalize();
+	chunks.finalize();
 
 	// Lose the stream-credit grant itself, after proving the sender exhausted its budget.
 	let grants = |pair: &mut Pair| pair.server_conn_mut(server_ch).stats().frame_tx.max_streams_uni;
@@ -1542,7 +1556,7 @@ fn stream_id_limit() {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Ok(None));
-	let _ = chunks.finalize();
+	chunks.finalize();
 }
 
 #[test]
@@ -1561,19 +1575,44 @@ fn streams_blocked() {
 	let mut pair = Pair::new(Default::default(), server);
 	let (client_ch, server_ch) = pair.connect();
 
-	// Use up the only stream slot, then try to open another
+	assert_eq!(pair.client_streams(client_ch).credit(Dir::Uni), 1);
+	assert!(!pair.client_streams(client_ch).blocked(Dir::Uni));
+
+	// Use up the only stream slot: out of credit, but not blocked until an open is refused
 	let s = pair
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.expect("first uni stream");
+	assert_eq!(pair.client_streams(client_ch).credit(Dir::Uni), 0);
+	assert!(!pair.client_streams(client_ch).blocked(Dir::Uni));
 	assert_eq!(pair.client_streams(client_ch).open(Dir::Uni, Default::default()), None);
+	assert!(pair.client_streams(client_ch).blocked(Dir::Uni));
+	assert!(
+		!pair.client_streams(client_ch).blocked(Dir::Bi),
+		"each direction blocks alone"
+	);
 
 	// Send data so the STREAMS_BLOCKED piggybacks on an outgoing packet
 	pair.client_send(client_ch, s).write(&mut &b"hi"[..]).unwrap();
+	pair.client_send(client_ch, s).finish().unwrap();
 	pair.drive();
 
 	assert_eq!(pair.client_conn_mut(client_ch).stats().frame_tx.streams_blocked_uni, 1);
 	assert_eq!(pair.server_conn_mut(server_ch).stats().frame_rx.streams_blocked_uni, 1);
+	// Still blocked once STREAMS_BLOCKED is sent: only the peer's MAX_STREAMS clears it
+	assert!(pair.client_streams(client_ch).blocked(Dir::Uni));
+
+	// The server reads the stream to its end, which frees the slot for a MAX_STREAMS
+	assert_eq!(pair.server_streams(server_ch).accept(Dir::Uni), Some(s));
+	let mut recv = pair.server_recv(server_ch, s);
+	let mut chunks = recv.read().unwrap();
+	assert_matches!(chunks.next(usize::MAX), Ok(Some(_)));
+	assert_matches!(chunks.next(usize::MAX), Ok(None));
+	chunks.finalize();
+	pair.drive();
+
+	assert_eq!(pair.client_streams(client_ch).credit(Dir::Uni), 1);
+	assert!(!pair.client_streams(client_ch).blocked(Dir::Uni));
 }
 
 #[test]
@@ -1639,7 +1678,7 @@ fn data_blocked() {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Ok(Some(chunk)) if chunk.bytes.len() == 10);
-	let _ = chunks.finalize();
+	chunks.finalize();
 	pair.drive();
 	assert_eq!(
 		pair.client_send(client_ch, s).write(&mut &b"0123456789ab"[..]).unwrap(),
@@ -1701,7 +1740,7 @@ fn stream_data_blocked() {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Ok(Some(chunk)) if chunk.bytes.len() == 10);
-	let _ = chunks.finalize();
+	chunks.finalize();
 	pair.drive();
 	assert_eq!(
 		pair.client_send(client_ch, s).write(&mut &b"0123456789ab"[..]).unwrap(),
@@ -1956,7 +1995,7 @@ fn key_update_reordered() {
 	assert_matches!(&*buf1.bytes, MSG1);
 	let buf2 = chunks.next(usize::MAX).unwrap().unwrap();
 	assert_eq!(buf2.bytes, MSG2);
-	let _ = chunks.finalize();
+	chunks.finalize();
 
 	assert_eq!(pair.client_conn_mut(client_ch).stats().path.lost_packets, 0);
 	assert_eq!(pair.server_conn_mut(server_ch).stats().path.lost_packets, 0);
@@ -2355,7 +2394,7 @@ fn test_flow_control(config: transport::Config, window_size: usize) {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_eq!(chunks.next(usize::MAX).err(), Some(recv::Error::Reset(VarInt(42))));
-	let _ = chunks.finalize();
+	chunks.finalize();
 
 	// Happy path
 	info!("writing");
@@ -2389,7 +2428,7 @@ fn test_flow_control(config: transport::Config, window_size: usize) {
 			}
 		}
 	}
-	let _ = chunks.finalize();
+	chunks.finalize();
 
 	info!("finished reading");
 	assert_eq!(cursor, window_size);
@@ -2443,7 +2482,7 @@ fn test_flow_control(config: transport::Config, window_size: usize) {
 		}
 	}
 	assert_eq!(cursor, window_size);
-	let _ = chunks.finalize();
+	chunks.finalize();
 	info!("finished reading");
 }
 
@@ -2510,7 +2549,7 @@ fn stop_opens_bidi() {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Err(recv::Error::Blocked));
-	let _ = chunks.finalize();
+	chunks.finalize();
 
 	assert_matches!(
 		pair.server_send(server_ch, s).write(&mut &b"foo"[..]),
@@ -2844,7 +2883,7 @@ fn finish_stream_flow_control_reordered() {
 		chunks.next(usize::MAX),
 		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
-	let _ = chunks.finalize();
+	chunks.finalize();
 
 	pair.server.drive(pair.time, pair.client.addr);
 	pair.server.delay_outbound(); // Delay it
@@ -2867,7 +2906,7 @@ fn finish_stream_flow_control_reordered() {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Ok(None));
-	let _ = chunks.finalize();
+	chunks.finalize();
 }
 
 #[test]
@@ -2918,7 +2957,7 @@ fn handshake_1rtt_handling() {
 		chunks.next(usize::MAX),
 		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
-	let _ = chunks.finalize();
+	chunks.finalize();
 }
 
 #[test]
@@ -3520,7 +3559,7 @@ fn finish_acked() {
 		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
 	assert_matches!(chunks.next(usize::MAX), Err(recv::Error::Blocked));
-	let _ = chunks.finalize();
+	chunks.finalize();
 
 	// Finish before receiving data ack
 	pair.client_send(client_ch, s).finish().unwrap();
@@ -3544,7 +3583,7 @@ fn finish_acked() {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Ok(None));
-	let _ = chunks.finalize();
+	chunks.finalize();
 }
 
 #[test]
@@ -3593,7 +3632,7 @@ fn finish_retransmit() {
 		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
 	assert_matches!(chunks.next(usize::MAX), Ok(None));
-	let _ = chunks.finalize();
+	chunks.finalize();
 }
 
 /// Ensures that exchanging data on a client-initiated bidirectional stream works past the initial
@@ -3635,7 +3674,7 @@ fn repeated_request_response() {
 		);
 
 		assert_matches!(chunks.next(usize::MAX), Ok(None));
-		let _ = chunks.finalize();
+		chunks.finalize();
 		pair.server_send(server_ch, s).write(&mut &RESPONSE[..]).unwrap();
 		pair.server_send(server_ch, s).finish().unwrap();
 
@@ -3648,7 +3687,7 @@ fn repeated_request_response() {
 			Ok(Some(chunk)) if chunk.bytes == RESPONSE
 		);
 		assert_matches!(chunks.next(usize::MAX), Ok(None));
-		let _ = chunks.finalize();
+		chunks.finalize();
 	}
 }
 
@@ -4170,17 +4209,23 @@ fn server_can_send_3_inital_packets() {
 
 /// Generate a big fat certificate that can't fit inside the initial anti-amplification limit
 fn big_cert_and_key() -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
-	let cert = rcgen::generate_simple_self_signed(
-		Some("localhost".into())
-			.into_iter()
-			.chain((0..1000).map(|x| format!("foo_{x}")))
-			.collect::<Vec<_>>(),
-	)
+	let cert = (|| -> std::result::Result<_, rcgen::Error> {
+		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let mut params = rcgen::CertificateParams::new(
+			Some("localhost".into())
+				.into_iter()
+				.chain((0..1000).map(|x| format!("foo_{x}")))
+				.collect::<Vec<_>>(),
+		)?;
+		params.serial_number = Some(1u64.into());
+		let cert = params.self_signed(&signing_key)?;
+		Ok(rcgen::CertifiedKey { cert, signing_key })
+	})()
 	.unwrap();
 
 	(
 		cert.cert.into(),
-		PrivateKeyDer::Pkcs8(cert.signing_key.serialize_der().into()),
+		PrivateKeyDer::Pkcs8(cert.signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
 	)
 }
 
@@ -4381,6 +4426,101 @@ fn migrate_detects_new_mtu_and_respects_original_peer_max_udp_payload_size() {
 	// Sanity check: the client keeps the old MTU, because migration is triggered by incoming
 	// packets from a different address
 	assert_eq!(pair.client_conn_mut(client_ch).path_mtu(), 1293);
+}
+
+#[test]
+fn migration_mtu_probes_respect_anti_amplification_limit() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	pair.drive();
+	assert_eq!(usize::from(pair.server_conn_mut(server_ch).path_mtu()), DEFAULT_MTU);
+
+	// The server's own counters. From here on everything it receives comes from the client's new
+	// address, and everything it sends goes there too, bar the single padded PATH_CHALLENGE it
+	// sends to the old address when it migrates.
+	let server_stats = |pair: &mut Pair| pair.server_conn_mut(server_ch).stats();
+	let before = server_stats(&mut pair);
+	let path_responses = |pair: &mut Pair| pair.client_conn_mut(client_ch).stats().frame_tx.path_response;
+	let path_responses_before = path_responses(&mut pair);
+
+	// The client shows up at a new IP address, as after a NAT rebinding that changed its public
+	// address. The server starts MTU discovery from scratch for the new path.
+	pair.client.addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), pair.next_port());
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, s).write(&mut &[0xab; 700][..]).unwrap();
+
+	// Until the new path is validated, the server includes a PATH_CHALLENGE in every packet it
+	// sends there, padded to `INITIAL_MTU`; only MTU probes are larger. Lose the datagrams of up to
+	// `INITIAL_MTU` so the path stays unvalidated, and deliver the probes.
+	let lose = |datagram: &[u8]| datagram.len() <= usize::from(INITIAL_MTU);
+
+	// Delivering the client's data from its new address migrates the server onto the new path,
+	// where MTU discovery starts over from `INITIAL_MTU`
+	assert!(step_losing_server_datagrams(&mut pair, lose));
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), pair.client.addr);
+	assert_eq!(pair.server_conn_mut(server_ch).path_mtu(), INITIAL_MTU);
+
+	// Hold the path unvalidated for as long as the server keeps trying to validate it, which ends
+	// when its path validation timer expires, because every PATH_CHALLENGE is lost
+	while pair.server_conn_mut(server_ch).remote_address() == pair.client.addr {
+		let now = server_stats(&mut pair);
+		let sent = now.udp_tx.bytes - before.udp_tx.bytes;
+		let received = now.udp_rx.bytes - before.udp_rx.bytes;
+		info!(sent, received, "bytes exchanged with the unvalidated address");
+		// The anti-amplification limit is three times the bytes received on the path.
+		// `transmit` still starts a full-size datagram while any of that budget is left, and the
+		// PATH_CHALLENGE to the old address is counted here too, so allow two more datagrams of
+		// the unvalidated path's `INITIAL_MTU` on top.
+		assert!(
+			sent < 3 * received + 2 * u64::from(INITIAL_MTU),
+			"server sent {sent} bytes to an unvalidated address it received {received} bytes from"
+		);
+		// MTU probes are not subject to the limit above, so they must wait for validation
+		assert_eq!(
+			now.path.sent_plpmtud_probes, before.path.sent_plpmtud_probes,
+			"server sent an MTU probe to an unvalidated address"
+		);
+		assert_eq!(pair.server_conn_mut(server_ch).path_mtu(), INITIAL_MTU);
+		if !step_losing_server_datagrams(&mut pair, lose) {
+			break;
+		}
+	}
+	assert_eq!(
+		path_responses(&mut pair),
+		path_responses_before,
+		"no PATH_CHALLENGE should have reached the client yet"
+	);
+
+	// More data from the client lifts the limit, a PATH_CHALLENGE gets through, the path is
+	// validated, and MTU discovery runs on it, back up from `INITIAL_MTU`
+	pair.client_send(client_ch, s).write(&mut &[0xab; 700][..]).unwrap();
+	pair.drive();
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), pair.client.addr);
+	assert!(path_responses(&mut pair) > path_responses_before);
+	assert!(server_stats(&mut pair).path.sent_plpmtud_probes > before.path.sent_plpmtud_probes);
+	assert_eq!(usize::from(pair.server_conn_mut(server_ch).path_mtu()), DEFAULT_MTU);
+}
+
+/// Like [`Pair::step`], but the server's datagrams that `lose` selects never leave it
+///
+/// Returns false once neither endpoint has anything scheduled.
+fn step_losing_server_datagrams(pair: &mut Pair, lose: impl Fn(&[u8]) -> bool) -> bool {
+	pair.drive_client();
+	pair.server.drive(pair.time, pair.client.addr);
+	pair.server.outbound.retain(|(_, datagram)| !lose(datagram));
+	pair.drive_server();
+
+	match min_opt(pair.client.next_wakeup(), pair.server.next_wakeup()) {
+		Some(t) => {
+			pair.time = pair.time.max(t);
+			true
+		}
+		None => false,
+	}
 }
 
 #[test]
@@ -4934,7 +5074,7 @@ fn stream_chunks(mut recv: recv::Stream<'_>) -> Vec<u8> {
 		buf.extend(chunk.bytes);
 	}
 
-	let _ = chunks.finalize();
+	chunks.finalize();
 
 	buf
 }
@@ -6731,10 +6871,10 @@ fn leased(pair: &mut Pair, server_ch: ConnectionHandle) -> usize {
 /// whether the peer finished the stream right after the leased bytes.
 fn consume(pair: &mut Pair, server_ch: ConnectionHandle, s: StreamId, n: usize) -> bool {
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut lease = recv.lease(0).0.unwrap();
+	let mut lease = recv.lease(0).unwrap();
 	let fin = lease.is_fin();
 	lease.advance(n);
-	let _ = recv.release(lease);
+	recv.release(lease);
 	fin
 }
 
@@ -6765,8 +6905,8 @@ fn pump_leased(
 
 		let before = leased(pair, server_ch);
 		let mut recv = pair.server_recv(server_ch, s);
-		if let Ok(lease) = recv.lease(0).0 {
-			let _ = recv.restore(lease);
+		if let Ok(lease) = recv.lease(0) {
+			recv.restore(lease);
 		}
 		let read = leased(pair, server_ch) - before;
 		if read == 0 && wrote == 0 {
@@ -6823,10 +6963,7 @@ fn lease_spends_connection_window_only() {
 	assert!(consume(&mut pair, server_ch, s, all), "finished after the leased bytes");
 	assert_eq!(leased(&mut pair, server_ch), 0);
 	pair.server_recv(server_ch, s).stop(0u32.into()).unwrap();
-	assert_eq!(
-		pair.server_recv(server_ch, s).lease(0).0.err(),
-		Some(recv::Error::Closed)
-	);
+	assert_eq!(pair.server_recv(server_ch, s).lease(0).err(), Some(recv::Error::Closed));
 }
 
 #[test]
@@ -7068,7 +7205,7 @@ fn upload(
 			while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
 				received += chunk.bytes.len();
 			}
-			let _ = chunks.finalize();
+			chunks.finalize();
 		}
 
 		if received == total || !pair.step() {

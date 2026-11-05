@@ -14,7 +14,7 @@ Parked 2026-10-25 (maintainer): encryption is out of the first mesh; identity
 and authentication ship first. Research recorded in the planning PR: SFrame
 and IETF secure objects leave key distribution open and give no sender
 authenticity; MLS per broadcast is heavy for churning viewers; a sender-keys
-style wrapped key track fans out like media. The AEAD stays moq-e2ee.
+style wrapped key track fans out like media. The AEAD stays moq-crypto's e2ee.
 Revisit when a mesh user needs confidentiality from relays.
 
 ## Related
