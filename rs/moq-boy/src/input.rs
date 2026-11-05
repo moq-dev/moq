@@ -91,7 +91,8 @@ pub async fn handle_viewers(
 }
 
 /// Read the commands of each broadcast a viewer publishes at `path`, switching to the new one
-/// when the viewer restarts.
+/// when the viewer restarts. A refused resolution waits for the serving route to change, since
+/// the listing reports nothing new while the path stays present.
 async fn follow_viewer(
 	origin: moq_net::origin::Consumer,
 	path: moq_net::Path,
@@ -101,20 +102,27 @@ async fn follow_viewer(
 	let Ok(mut following) = origin.follow(&path, None) else {
 		return;
 	};
-	let mut next = following.available().await;
-	while let Ok(Some(broadcast)) = next {
-		tracing::info!(%viewer_id, "viewer connected");
-		next = tokio::select! {
-			read = handle_viewer_commands(&viewer_id, broadcast, &cmd_tx) => {
+	let mut reading = None;
+	loop {
+		tokio::select! {
+			change = following.available() => match change {
+				Ok(Some(broadcast)) => {
+					tracing::info!(%viewer_id, "viewer connected");
+					reading = Some(Box::pin(handle_viewer_commands(&viewer_id, broadcast, &cmd_tx)));
+				}
+				Ok(None) => {}
+				Err(moq_net::Error::Closed) => return,
+				Err(err) => tracing::debug!(%viewer_id, %err, "viewer not resolved; waiting for a route change"),
+			},
+			read = async { reading.as_mut().expect("guarded").await }, if reading.is_some() => {
+				reading = None;
 				if let Err(e) = read {
 					tracing::warn!(%viewer_id, error = %e, "viewer command error");
 				}
 				tracing::info!(%viewer_id, "viewer disconnected");
 				let _ = cmd_tx.send(Command::ViewerLeft { viewer_id: viewer_id.clone() }).await;
-				following.available().await
 			}
-			changed = following.available() => changed,
-		};
+		}
 	}
 }
 
@@ -261,5 +269,30 @@ mod tests {
 		assert!(matches!(next, Some(Command::Buttons { .. })), "{next:?}");
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(rx.try_recv().is_err(), "the old reader is still running");
+	}
+
+	/// A viewer whose handler refuses it stays followed: the listing reports nothing new when a
+	/// publisher takes the path over, so only the follower can pick it up.
+	#[tokio::test(start_paused = true)]
+	async fn a_refused_viewer_is_read_once_a_publisher_takes_over() {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		tokio::spawn(moq_net::time::run(driver));
+		let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+		let consumer = origin.consume();
+		tokio::spawn(async move { handle_viewers(&consumer, &tx).await });
+
+		let claim = origin.requests("alice").unwrap();
+		kio::clock::timeout(Duration::from_secs(1), claim.requested_broadcast())
+			.await
+			.expect("never asked")
+			.expect("the claim closed")
+			.reject(moq_net::Error::NotFound);
+		kio::clock::sleep(Duration::from_secs(1)).await;
+
+		let (_viewer, track) = viewer(&origin);
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		send(&track, r#"{"type":"reset"}"#);
+		let next = kio::clock::timeout(Duration::from_secs(1), rx.recv()).await;
+		assert!(matches!(next, Ok(Some(Command::Reset))), "{next:?}");
 	}
 }

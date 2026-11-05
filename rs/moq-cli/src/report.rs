@@ -574,7 +574,10 @@ async fn read_echo(origin: moq_net::origin::Consumer, path: moq_net::Path, lines
 			change = following.available() => match change {
 				Ok(Some(broadcast)) => reading = Some(Box::pin(read_feedback(broadcast, path.clone(), lines.clone()))),
 				Ok(None) => {}
-				Err(err) => return tracing::debug!(%err, path = %path.as_str(), "stopped reading feedback"),
+				Err(moq_net::Error::Closed) => return,
+				// The listing reports nothing new while the path stays present, so a refusal
+				// waits here for the serving route to change.
+				Err(err) => tracing::debug!(%err, path = %path.as_str(), "feedback not resolved; waiting for a route change"),
 			},
 			read = async { reading.as_mut().expect("guarded").await }, if reading.is_some() => {
 				reading = None;
@@ -673,6 +676,33 @@ mod tests {
 		feedback.update(&serde_json::json!({ "n": 2 })).unwrap();
 		let late = kio::clock::timeout(Duration::from_secs(1), lines.next_line()).await;
 		assert!(late.is_err(), "a drained reader wrote {late:?}");
+	}
+
+	/// A refused path stays followed: the listing reports nothing new when a publisher takes it
+	/// over, so only the follower can pick it up.
+	#[tokio::test(start_paused = true)]
+	async fn a_refused_feedback_path_is_read_once_a_publisher_takes_over() {
+		let origin = moq_tokio::origin::spawn();
+		let (out, read) = tokio::io::duplex(4096);
+		let mut lines = BufReader::new(read).lines();
+		tokio::spawn(write_echo(origin.consume(), String::new(), out));
+
+		let claim = origin.requests("viewer.echo").unwrap();
+		kio::clock::timeout(Duration::from_secs(1), claim.requested_broadcast())
+			.await
+			.expect("never asked")
+			.expect("the claim closed")
+			.reject(moq_net::Error::NotFound);
+		kio::clock::sleep(Duration::from_secs(1)).await;
+
+		let broadcast = origin.create_broadcast("viewer.echo").unwrap();
+		let track = broadcast.create_track(hang::echo::TRACK, None).unwrap();
+		let mut feedback = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
+		broadcast.announce(Default::default()).unwrap();
+		feedback.update(&serde_json::json!({ "n": 1 })).unwrap();
+		let line = kio::clock::timeout(Duration::from_secs(5), lines.next_line()).await;
+		let line = line.expect("the takeover was never read").unwrap().unwrap();
+		assert!(line.contains(r#""n":1"#), "{line}");
 	}
 
 	/// A reader is forgotten once its drain passes, unless a start at its path replaced it.
