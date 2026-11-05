@@ -15,6 +15,11 @@ selection.retain(&mut catalog, &Selected::of(&previous));
 selection.retain(&mut catalog);
 ```
 
+### `follow::Instances` folds into `Following` ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`follow::Instances::new` is removed: call `origin.follow(path, instance)` and read `Following::available()`, which returns `Some(broadcast)` where `Event::Start` did and `None` where `Event::End` did.
+`Source::follow` still returns `follow::Instances`, for its one-shot hand-out of the catalog's own broadcast; its `next()` and `poll_next()` now return `Option<broadcast::Consumer>`, and `follow::Event` is gone.
+
 ### `container::Playout` replaces `with_warmup` ([#7864](https://github.com/moq-dev/moq/pull/7864))
 
 `container::Consumer::with_warmup` is gone. Build a `container::Playout::new(delay, warmup)` from the `Delay` and the catalog rendition's `warmup`, subscribe with `playout.subscription(subscription)`, which widens the max delay by the warmup, and build the consumer with `playout.consumer(track, format)`, which skips at the max delay alone. The order no longer matters, and a track subscribed without the widening is widened when the consumer is built.

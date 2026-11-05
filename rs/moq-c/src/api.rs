@@ -935,8 +935,8 @@ pub struct moq_announce_route {
 	/// publisher is a new stream viewers restart onto. Set one only for a publisher that
 	/// continues its group sequences across restarts and raises `epoch` on each: readers
 	/// stitch every route of one instance together, so restarting the sequences under an
-	/// old instance splices unrelated groups into their tracks. Changing it is a
-	/// `MOQ_ANNOUNCE_KIND_RESTART`.
+	/// old instance splices unrelated groups into their tracks. Changing it hands followers
+	/// ([moq_origin_follow]) a new broadcast.
 	pub instance: *const c_char,
 	/// The length in bytes of `instance`.
 	pub instance_len: usize,
@@ -1006,22 +1006,14 @@ pub struct moq_announce_config {
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum moq_announce_kind {
-	/// A route now covers the prefix; the listener had none there.
-	MOQ_ANNOUNCE_KIND_START = 0,
-	/// The route covering the prefix changed hops or cost.
-	MOQ_ANNOUNCE_KIND_UPDATE = 1,
-	/// No route covers the prefix any more.
-	MOQ_ANNOUNCE_KIND_END = 2,
-	/// Another publisher instance now serves the prefix: drop what was resolved under
-	/// it and request afresh.
-	MOQ_ANNOUNCE_KIND_RESTART = 3,
-	/// A route now covers the prefix and continues what the route at
-	/// [moq_announce_event::predecessor] served beneath it: keep what was resolved through it.
-	MOQ_ANNOUNCE_KIND_TAKEOVER = 4,
+	/// A route now covers the path, which was absent. Another instance taking it over keeps it
+	/// present: follow it with [moq_origin_follow] to see the broadcast change.
+	MOQ_ANNOUNCE_KIND_PRESENT = 0,
+	/// No route covers the path any more.
+	MOQ_ANNOUNCE_KIND_ABSENT = 1,
 }
 
-/// An announce event from an origin: a route starting, updating, ending, restarting, or
-/// taking over.
+/// An announce event from an origin: a path becoming present or absent.
 #[repr(C)]
 pub struct moq_announce_event {
 	/// The covered prefix, relative to the origin, NOT NULL terminated
@@ -1038,14 +1030,9 @@ pub struct moq_announce_event {
 	/// Which event this is.
 	pub kind: moq_announce_kind,
 
-	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_END` it carries the last
+	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_ABSENT` it carries the last
 	/// advertised route.
 	pub route: moq_route,
-	/// For [moq_announce_kind::MOQ_ANNOUNCE_KIND_TAKEOVER], the prefix of the route continued,
-	/// relative to the origin, NOT NULL terminated. Empty for every other kind.
-	pub predecessor: *const c_char,
-	/// The length in bytes of `predecessor`.
-	pub predecessor_len: usize,
 }
 
 /// Where a session is in its lifecycle, reported by [moq_connection_state].
@@ -2301,34 +2288,50 @@ pub extern "C" fn moq_origin_announced_cancel(announced: u32) -> i32 {
 	})
 }
 
+/// What a [moq_origin_follow] callback reports.
+#[repr(C)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum moq_follow_event {
+	/// An instance now serves the path. `code` is its broadcast handle.
+	MOQ_FOLLOW_EVENT_ONLINE = 0,
+	/// The path went offline, or, for a pinned follow, another instance took it over. `code`
+	/// is `0`.
+	MOQ_FOLLOW_EVENT_OFFLINE = 1,
+	/// The follow ended. `code` is `0` (after [moq_origin_follow_cancel], or the origin closing
+	/// once a handle was delivered) or a negative error.
+	MOQ_FOLLOW_EVENT_END = 2,
+}
+
 /// Follow a broadcast on an origin by path, delivering each publisher instance that serves it.
 ///
 /// Resolves against future announcements: it waits for the announcement to arrive (e.g. over the
-/// network) and then delivers the broadcast handle via `on_broadcast`. Use it right after
+/// network) and then delivers the broadcast handle via `on_follow`. Use it right after
 /// [moq_session_connect] to avoid racing announcement gossip. To resolve one publisher instance
 /// instead, use [moq_origin_request]. A broadcast created on this origin resolves once it is
 /// announced, like a remote one.
 ///
 /// `instance` is the only stream to follow, or NULL (or empty) to follow every instance serving
-/// the path. A pinned follow never delivers another instance taking over, and delivers its own
-/// again if it returns after an end.
+/// the path. A pinned follow never delivers another instance taking over: that ends it, and its
+/// own instance is delivered again when it returns.
 ///
-/// `on_broadcast` is invoked with a positive broadcast handle once announced, and again with a
-/// new handle each time another publisher instance takes over (a restarted publisher, or a
-/// replacement session) or the broadcast returns after it went offline. Drop what was read
-/// from the previous handle then: its tracks end when its session does. The wait ends with
-/// exactly one terminal code: `0` (after [moq_origin_follow_cancel], or the origin closing
-/// once a handle was delivered) or a negative error. After the terminal (`<= 0`) callback,
-/// `on_broadcast` is never called again and `user_data` is never touched again, so release
-/// `user_data` there. The broadcast handle is usable with [moq_consume_catalog] / [moq_consume_track]
-/// and must be freed separately with [moq_consume_close].
+/// `on_follow` receives a [moq_follow_event] and a code. `MOQ_FOLLOW_EVENT_ONLINE` carries a
+/// broadcast handle once announced, and again a new one each time another publisher instance
+/// takes over (a restarted publisher, or a replacement session) or the broadcast returns.
+/// `MOQ_FOLLOW_EVENT_OFFLINE` reports the path going offline, before whatever serves it next.
+/// Drop what was read from the previous handle on either: its tracks end when its session does.
+/// The follow ends with exactly one `MOQ_FOLLOW_EVENT_END`, whose code is `0` or a negative
+/// error that [moq_error] explains inside the callback. After it, `on_follow` is never called
+/// again and `user_data` is never touched again, so release `user_data` there. Each broadcast
+/// handle is usable with [moq_consume_catalog] / [moq_consume_track] and must be freed separately
+/// with [moq_consume_close].
 ///
-/// Returns a non-zero handle to the wait on success, or a negative code on (immediate) failure.
+/// Returns a non-zero handle to the follow on success, or a negative code on (immediate) failure.
 ///
 /// # Safety
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
 /// - `instance` may be NULL, or must point at `instance_len` readable bytes.
-/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_broadcast` callback.
+/// - The caller must keep `user_data` valid until the `MOQ_FOLLOW_EVENT_END` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_follow(
 	origin: u32,
@@ -2336,30 +2339,30 @@ pub unsafe extern "C" fn moq_origin_follow(
 	path_len: usize,
 	instance: *const c_char,
 	instance_len: usize,
-	on_broadcast: ffi::moq_status_callback,
+	on_follow: ffi::moq_follow_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let path = unsafe { ffi::parse_str(path, path_len)? }.to_string();
 		let instance = unsafe { parse_instance(instance, instance_len)? };
-		let on_broadcast = unsafe { ffi::OnStatus::new(user_data, on_broadcast)? };
-		State::lock().origin.follow(origin, path, instance, on_broadcast)
+		let on_follow = unsafe { ffi::OnFollow::new(user_data, on_follow)? };
+		State::lock().origin.follow(origin, path, instance, on_follow)
 	})
 }
 
-/// Abort a wait started by [moq_origin_follow].
+/// Stop a follow started by [moq_origin_follow].
 ///
 /// Returns immediately: zero on success, or a negative code if already closed. Does NOT free
-/// `user_data`. The [moq_origin_follow] `on_broadcast` callback still fires once more
-/// with a terminal `0` (or a negative error), and that final callback is where `user_data` should
-/// be released. Any broadcast handle already delivered is unaffected and must still be freed with
-/// [moq_consume_close].
+/// `user_data`. The [moq_origin_follow] `on_follow` callback still fires once more with
+/// `MOQ_FOLLOW_EVENT_END` (code `0`, or a negative error), and that final callback is where
+/// `user_data` should be released. Any broadcast handle already delivered is unaffected and must
+/// still be freed with [moq_consume_close].
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_origin_follow_cancel(task: u32) -> i32 {
 	ffi::enter(move || {
 		let task = ffi::parse_id(task)?;
-		State::lock().origin.resolve_close(task)
+		State::lock().origin.follow_close(task)
 	})
 }
 

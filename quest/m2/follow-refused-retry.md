@@ -41,9 +41,10 @@ handler selected, so after each wake ask again only if the selected route
 entry is no longer the one that refused. Not chosen: a timed retry, which #7836's
 decision 2 (maintainer, 2026-11-04) ruled out.
 
-Fold this into whatever `follow` becomes under
-[Listing and follow](/quest/m1/api-audit/route/events.md), which moves
-instance changes inside `follow`. If the path watch changes under
+Build on `Following` as
+[moq-dev/moq#7678](https://github.com/moq-dev/moq/pull/7678) left it,
+which reports the path going offline beside its `refused` flag. If the
+path watch changes under
 [front parking](/quest/m2/origin-front-parks.md), use its replacement.
 
 Tests: a refused follower asks the replacement after an overlapping
@@ -56,6 +57,5 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Listing and follow](/quest/m1/api-audit/route/events.md) - `follow` takes over instance changes from announce events
 - [Front parking](/quest/m2/origin-front-parks.md) - the same refusal wait for `request`
 - [The HLS server follows each path once](/quest/m2/hls-follow-once.md) - another `Following` addition

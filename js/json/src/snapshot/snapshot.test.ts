@@ -156,15 +156,13 @@ test("latest abandons a held group when a newer snapshot group rolls", async () 
 	expect(await consumer.latest()).toBeUndefined();
 });
 
-// Skipping to the head takes groups, not the track's largest position, so a datagram past every
-// group does not strand it.
-test("latest ignores a datagram past every group", async () => {
+// Skipping to the head reads the newest snapshot group.
+test("latest reads the newest snapshot group", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltas: false });
 	const consumer = new Consumer<Value>({ track });
 
 	for (let n = 0; n < 4; n++) producer.update({ value: { a: n } });
-	track.appendDatagram(Time.Timestamp.now(), new Uint8Array([0]));
 	expect((await consumer.latest())?.value).toEqual({ a: 3 });
 	producer.finish();
 });

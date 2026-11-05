@@ -94,10 +94,10 @@ class Command:
     `drive`, `estop`, `reset_estop`, and `respawn` arrive on the wire;
     `driver_left` and `watchdog_expired` are synthesized locally.
 
-    `driver_id` is the driver's path segment, which `status` echoes. `instance` is
-    the route instance its broadcast was announced under: the same id announced
-    under another instance is another run of the driver, so it is a different
-    driver for the lease.
+    `driver_id` is the driver's path segment, which `status` echoes. `instance`
+    names the run that sent it, one per publisher instance serving the path: the
+    same id under another instance is another run of the driver, so it is a
+    different driver for the lease.
     """
 
     kind: CommandKind
@@ -114,8 +114,8 @@ class Drive:
     The first driver to send a command owns the truck until it disconnects or
     its command lease expires. Other drivers cannot silently steal control.
 
-    The lease binds to the driver's broadcast path and the instance it was
-    announced under, so a driver whose broadcast ends or restarts loses it.
+    The lease binds to the driver's broadcast path and the run serving it, so a
+    driver whose broadcast ends or restarts loses it.
     It is still cooperative, not enforced: the holder's id is echoed on the
     public `status` track, so anyone allowed to publish there can announce at
     that path under another instance, which ends the holder's broadcast and frees

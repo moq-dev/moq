@@ -2711,7 +2711,7 @@ impl Enforce {
 	pub(crate) fn poll(
 		&mut self,
 		handle: &Link,
-		announced: &mut crate::announce::Consumer,
+		announced: &mut crate::origin::Routes,
 		waiter: &kio::Waiter,
 	) -> Poll<Option<crate::Path>> {
 		if !self.setup {
@@ -2733,7 +2733,7 @@ impl Enforce {
 				return Poll::Ready(None);
 			};
 			match event {
-				crate::announce::Event::Start(update) | crate::announce::Event::Update(update)
+				crate::origin::RouteEvent::Start(update) | crate::origin::RouteEvent::Update(update)
 					if !self.live.contains(&update.prefix) =>
 				{
 					if self.pending.iter().any(|gate| gate.path == update.prefix) {
@@ -2749,7 +2749,7 @@ impl Enforce {
 					}
 					self.live.insert(gate.path);
 				}
-				crate::announce::Event::End(update) => {
+				crate::origin::RouteEvent::End(update) => {
 					self.live.remove(&update.prefix);
 					self.pending.retain(|gate| gate.path != update.prefix);
 				}
