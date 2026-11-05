@@ -127,7 +127,7 @@ case "$1" in
     rust-shared)
         # One invocation unifies this release build instead of rebuilding shared crates
         # independently for each target. Keep the explicit targets: '*' would add coverage.
-        criterion shared --no-fail-fast -p moq-relay -p moq-stats -p moq-mux -p moq-msf -p moq-rtmp -p moq-uring -p moq-pattern \
+        criterion shared --no-fail-fast -p moq-relay -p moq-stats -p moq-mux -p moq-rtmp -p moq-uring -p moq-pattern \
             -p moq-quic --features moq-stats/bench,moq-quic/fuzz \
             --bench http_idle --bench auth --bench http_auth --bench producer_tick --bench decode --bench aggregate \
             --bench catalog --bench ts_schedule --bench export --bench containers --bench matching \
@@ -140,6 +140,7 @@ case "$1" in
     # Keep added coverage out of the rust-bench and rust-shared legs.
     rust-extra)
         criterion qmux --manifest-path rs/qmux/Cargo.toml --bench receive
+        criterion msf -p moq-msf --bench catalog
         # The allocation/window/play-buffer/batch/receive-bursts tables keep their stdout in the run;
         # only Criterion estimates enter the trend report.
         criterion extra --no-fail-fast -p moq-crypto -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
