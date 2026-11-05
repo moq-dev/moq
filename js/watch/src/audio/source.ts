@@ -68,13 +68,6 @@ export class Source {
 	/** Whether rendition support is still being resolved. @internal */
 	readonly pending: Getter<boolean> = this.#probe.pending;
 
-	// The last selection, which a disable holds while no enabled rendition remains.
-	#held?: { broadcast: Broadcast; track: string };
-
-	// The broadcast `available` was probed for. It lags a broadcast switch until the new probe lands.
-	// A signal, since the new broadcast's renditions can equal the old ones and leave `available` unchanged.
-	#probed = new Signal<Broadcast | undefined>(undefined);
-
 	#signals = new Effect();
 
 	constructor(props?: Inputs<SourceInput>) {
@@ -104,42 +97,24 @@ export class Source {
 		// Read the catalog from the broadcast itself, so the probe result is tagged with the right one.
 		const broadcast = effect.get(this.in.broadcast);
 		const renditions = (broadcast && effect.get(broadcast.out.catalog)?.audio?.renditions) ?? {};
-		this.#probe.run(effect, supported, renditions, (available) => {
-			this.#probed.set(broadcast);
-			this.#out.available.set(available);
-		});
+		this.#probe.run(effect, supported, renditions, (available) => this.#out.available.set(available));
 	}
 
 	#runSelected(effect: Effect): void {
-		const broadcast = effect.get(this.in.broadcast);
-		const all = effect.get(this.#out.available);
-		const probed = effect.get(this.#probed);
 		const target = effect.get(this.in.target);
 
-		// A disabled rendition has no frames coming, so it is never newly selected, even by name.
-		const available = Object.fromEntries(Object.entries(all).filter(([, config]) => config.enabled !== false));
+		// A disabled rendition has no frames coming, so it is never selected, even by name.
+		const available = Object.fromEntries(
+			Object.entries(effect.get(this.#out.available)).filter(([, config]) => config.enabled !== false),
+		);
 
-		const track =
-			target?.name && target.name in available
-				? target.name
-				: (this.#select(available) ?? this.#hold(broadcast, all));
-		// A pick from the previous broadcast's renditions is not this broadcast's selection to hold.
-		this.#held = track && broadcast && probed === broadcast ? { broadcast, track } : undefined;
+		const track = target?.name && target.name in available ? target.name : this.#select(available);
 		if (!track) return;
 
-		const config = all[track];
+		const config = available[track];
 		effect.set(this.#out.track, track);
 		effect.set(this.#out.config, config);
 		effect.set(this.#out.jitter, config.jitter !== undefined ? Milli(config.jitter) : undefined);
-	}
-
-	// Every rendition is disabled: keep the selected one, and its subscription, so the re-enable
-	// plays without a resubscribe. A removed rendition, or another broadcast, starts over.
-	#hold(broadcast: Broadcast | undefined, all: Record<string, Catalog.AudioConfig>): string | undefined {
-		if (Object.values(all).some((config) => config.enabled !== false)) return undefined;
-		const held = this.#held;
-		if (!held || held.broadcast !== broadcast || !(held.track in all)) return undefined;
-		return held.track;
 	}
 
 	/**

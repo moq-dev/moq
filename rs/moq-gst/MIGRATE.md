@@ -4,6 +4,12 @@ How to update your pipelines for each breaking change, newest first.
 
 ## Unreleased
 
+### A disabled `moqsrc` rendition ends its pad
+
+Disabling a rendition in the catalog now ends its pad with EOS instead of holding it idle, and a re-enable adds a new pad (`video_1` after `video_0`) whose stream starts at the live edge, like any rendition the catalog adds.
+A pipeline linked by pad name, such as `s.video_0 ! ...`, must link the new pad from `pad-added` to keep playing across a disable.
+Push-to-talk publishers no longer disable a rendition to mute it, so a mute keeps the pad.
+
 ### `moqsrc` audio caps are the standard ones
 
 `moqsrc` audio pads now carry `rate` and `channels` as `int`, and Opus pads the mapping fields (`channel-mapping-family`, `stream-count`, `coupled-count`, plus `channel-mapping` beyond stereo) with the OpusHead and an empty OpusTags as `streamheader`, so `decodebin` and `opusdec` accept them and `opusdec` applies the output gain.
