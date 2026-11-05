@@ -19,6 +19,8 @@ const PARAM_HOP: u64 = 0x5;
 const PARAM_IMPLEMENTATION: u64 = 0x6;
 /// Setup Parameter id for the client's connection credential (client-only, lite-07+).
 const PARAM_TOKEN: u64 = 0x7;
+/// Setup Parameter id for the sender's route key proof (lite-07+).
+const PARAM_ROUTE_KEY: u64 = 0x8;
 /// Setup Parameter id offering the `ietf` extension (draft-lcurley-moq-ietf): "IETF" in ASCII.
 const PARAM_IETF: u64 = 0x4945_5446;
 
@@ -207,6 +209,8 @@ pub struct Setup {
 	/// The sender's implementation, as space-separated `name/version` product tokens
 	/// (`moq-net-rs/0.3.10`). Opaque; `None` omits the parameter.
 	pub implementation: Option<String>,
+	/// Proof that the sender holds its route key, bound to this session (lite-07+).
+	pub route_key: Option<crate::route::Proof>,
 }
 
 impl std::fmt::Debug for Setup {
@@ -224,6 +228,7 @@ impl std::fmt::Debug for Setup {
 			.field("token", &self.token)
 			.field("ietf", &self.ietf)
 			.field("implementation", &self.implementation)
+			.field("route_key", &self.route_key)
 			.finish()
 	}
 }
@@ -279,6 +284,12 @@ impl<'a> Message<'a> for Setup {
 				return Err(EncodeError::Version);
 			}
 			params.set_bytes(PARAM_IETF, Vec::new());
+		}
+		if let Some(proof) = self.route_key {
+			if !version.has_route_key() {
+				return Err(EncodeError::Version);
+			}
+			params.set_bytes(PARAM_ROUTE_KEY, proof.to_bytes());
 		}
 
 		params.encode(w, version)
@@ -343,6 +354,12 @@ impl<'a> Message<'a> for ReceivedSetup {
 			},
 			_ => false,
 		};
+		let route_key = match params.get_bytes(PARAM_ROUTE_KEY) {
+			Some(value) if version.has_route_key() => {
+				Some(crate::route::Proof::from_bytes(value).ok_or(DecodeError::InvalidValue)?)
+			}
+			_ => None,
+		};
 
 		Ok(Self {
 			role_present: role_code.is_some(),
@@ -355,6 +372,7 @@ impl<'a> Message<'a> for ReceivedSetup {
 				token,
 				ietf,
 				implementation,
+				route_key,
 			},
 		})
 	}
@@ -383,6 +401,27 @@ struct PeerSetupState {
 	implementation: crate::setup::PeerImplementation,
 	/// The session's auth link to tell once the peer's SETUP accepts the connection.
 	accept: Option<crate::auth::Link>,
+	/// What the peer's route key proof must sign, or `None` when the transport cannot bind
+	/// one to this session, so any proof leaves the peer unproven.
+	transcript: Option<crate::route::Transcript>,
+	/// The route key the peer proved.
+	route_key: Option<[u8; 32]>,
+}
+
+impl PeerSetupState {
+	/// Keep the key the peer's SETUP proves, or refuse a proof whose signature fails.
+	fn prove(&mut self, setup: &Setup) -> Result<(), crate::Error> {
+		let (Some(proof), Some(transcript)) = (&setup.route_key, &self.transcript) else {
+			return Ok(());
+		};
+		// The peer holds the side of the session we do not.
+		if !transcript.verify(proof, !self.client) {
+			return Err(crate::Error::ProtocolViolation);
+		}
+		tracing::debug!(proof = ?proof, "peer proved its route key");
+		self.route_key = Some(proof.key);
+		Ok(())
+	}
 }
 
 impl PeerSetup {
@@ -395,7 +434,15 @@ impl PeerSetup {
 			setup: None,
 			implementation: Default::default(),
 			accept: None,
+			transcript: None,
+			route_key: None,
 		}))
+	}
+
+	/// Check the peer's route key proof against `transcript`, this session's.
+	pub fn with_transcript(self, transcript: Option<crate::route::Transcript>) -> Self {
+		self.0.lock().transcript = transcript;
+		self
 	}
 
 	/// Tell `link` once the peer's SETUP arrives that it accepted the connection credential.
@@ -418,6 +465,7 @@ impl PeerSetup {
 		{
 			return Err(crate::Error::ProtocolViolation);
 		}
+		state.prove(&received.setup)?;
 		state.seen = true;
 		state.implementation.set(received.setup.implementation.clone());
 		state.setup = Some(received.setup);
@@ -454,12 +502,23 @@ impl PeerSetup {
 		}
 	}
 
-	/// Record the peer's SETUP.
-	pub fn set(&self, setup: Setup) {
+	/// Record the peer's SETUP, refusing a route key proof that does not hold.
+	pub fn set(&self, setup: Setup) -> Result<(), crate::Error> {
 		let mut state = self.0.lock();
+		state.prove(&setup)?;
 		state.seen = true;
 		state.implementation.set(setup.implementation.clone());
 		state.setup = Some(setup);
+		Ok(())
+	}
+
+	/// The route key the peer proved, once its SETUP arrived.
+	#[cfg_attr(
+		not(test),
+		expect(dead_code, reason = "session integration files a scoped peer's routes under it")
+	)]
+	pub fn route_key(&self) -> Option<[u8; 32]> {
+		self.0.lock().route_key
 	}
 
 	/// Claim the Setup Stream before decoding its body, refusing any second stream.
@@ -648,6 +707,56 @@ mod tests {
 		valued.extend([1, 7]);
 		valued[0] += 1;
 		assert!(Setup::decode_slice(&valued, Version::Lite07).is_err());
+	}
+
+	/// Route key proofs are accepted only on lite-07 and must have the fixed wire size.
+	#[test]
+	fn route_key_is_lite07_only() {
+		let transcript = crate::route::Transcript::new([2; 32]);
+		let msg = Setup {
+			route_key: Some(transcript.prove(&crate::origin::RouteKey::generate(), true)),
+			..Default::default()
+		};
+		let buf = msg.encode_bytes(Version::Lite07).unwrap();
+		assert_eq!(Setup::decode_slice(&buf, Version::Lite07).unwrap().0, msg);
+		assert!(matches!(msg.encode_bytes(Version::Lite06), Err(EncodeError::Version)));
+
+		// One parameter, its id, then a 95-byte value: not a proof.
+		let mut short = vec![0x01, 0x08, 0x5f];
+		short.extend([0; 95]);
+		let mut framed = Vec::new();
+		Encoder::new(&mut framed, Version::Lite07.into())
+			.varint(short.len() as u64)
+			.unwrap();
+		framed.extend(short);
+		assert!(Setup::decode_slice(&framed, Version::Lite07).is_err());
+	}
+
+	/// A server checks the client's proof against this session, and refuses one that fails.
+	#[test]
+	fn peer_route_key_is_kept_only_when_its_proof_holds() {
+		let key = crate::origin::RouteKey::generate();
+		let session = || Some(crate::route::Transcript::new([2; 32]));
+		let proven = |client: bool| Setup {
+			route_key: Some(crate::route::Transcript::new([2; 32]).prove(&key, client)),
+			..Default::default()
+		};
+		let server = || PeerSetup::new(false, crate::transport::Address::Setup).with_transcript(session());
+
+		let peer = server();
+		peer.set(proven(true)).unwrap();
+		assert_eq!(peer.route_key(), proven(true).route_key.map(|proof| proof.key));
+
+		// A server's own proof reflected back as the client's.
+		assert!(matches!(
+			server().set(proven(false)),
+			Err(crate::Error::ProtocolViolation)
+		));
+
+		// A transport that cannot export leaves the peer unproven, whatever it sends.
+		let unbound = PeerSetup::new(false, crate::transport::Address::Setup);
+		unbound.set(proven(false)).unwrap();
+		assert_eq!(unbound.route_key(), None);
 	}
 
 	/// The connection credential rides lite-07+, which an older version ignores like any
