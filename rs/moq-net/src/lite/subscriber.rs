@@ -3638,7 +3638,7 @@ mod tests {
 	#[kio::test]
 	async fn a_lite07_fill_is_known_by_its_range_id() {
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), Version::Lite07)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), Version::Lite07)
 			.await
 			.unwrap();
 		// As a fill asks on the wire.
@@ -3708,7 +3708,7 @@ mod tests {
 	)]
 	async fn a_lite07_added_range_is_owed_from_its_reported_start() {
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
-		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), Version::Lite07)
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), Version::Lite07)
 			.await
 			.unwrap();
 		let first = lite::Range::span(Some(4), 0, None, None);
