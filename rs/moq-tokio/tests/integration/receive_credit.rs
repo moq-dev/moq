@@ -938,7 +938,7 @@ const SEGMENT: usize = 1 << 20;
 /// Why cells whose incomplete units overcommit the window are skipped: the quest that makes
 /// `track::Subscriber` report each group it abandons, which their readers need to return its
 /// in-flight credit.
-const OVERCOMMITTED: &str = "waits on quest/m1/group-drops.md";
+const OVERCOMMITTED: &str = "waits on quest/m2/group-drops.md";
 
 /// One benchmark configuration.
 #[derive(Clone, Copy)]

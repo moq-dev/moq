@@ -579,7 +579,7 @@ impl Seen {
 	/// The segments of `name` the DASH manifest may never list: the trailing ones of an instance a
 	/// reconfigure retired, after the last of its segments a timeline did list. The manifest lists
 	/// only the current instance, and a retired one keeps listing what it had read before the
-	/// reconfigure reached the export (/quest/m2/dash-reconfigure.md).
+	/// reconfigure reached the export (/quest/m3/dash-reconfigure.md).
 	fn retired(&self, name: &str) -> BTreeSet<u64> {
 		let timed: Vec<&Bytes> = self
 			.timelines
@@ -738,7 +738,7 @@ impl Seen {
 				.collect();
 			let recording = recorded.segments.get(name).cloned().unwrap_or_default();
 			// Except that the manifest lists only the current instance, so the last segment of one
-			// a reconfigure retires may never be listed (/quest/m2/dash-reconfigure.md).
+			// a reconfigure retires may never be listed (/quest/m3/dash-reconfigure.md).
 			let retired = self.retired(name);
 			let missing: Vec<u64> = recording
 				.iter()
