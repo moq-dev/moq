@@ -43,9 +43,8 @@ Decided with the maintainer, 2026-10-13:
   key proof is planned; if a use case needs a provable identity, moq-lite-07's
   route identity becomes a public key, independent of P2P. Decided 2026-11-04
   (maintainer, /quest-unblock): scoped forgery is that use case. A peer proves
-  a route key once per announce stream, its own identity derives from it, and
-  every identity it sends while scoped is qualified under it
-  ([Scoped peers prove a route key](/quest/m1/cluster-routing/routes/proof.md)).
+  a route key in its lite-07 SETUP, bound to the session, and every identity it
+  sends while scoped, its own included, is qualified under it.
   Receiver-stamped
   per-session identities were dropped 2026-10-26 (maintainer): in a mesh,
   two relays stamping their sessions from one origin forward its routes as

@@ -1233,6 +1233,41 @@ test("an END_OF_GROUP status on a marked stream finishes the group", async () =>
 });
 
 /**
+ * Only the stream's end may follow an END_OF_GROUP or END_OF_TRACK status: an object past
+ * the final one makes the track malformed, rather than ending it or its group clean.
+ * Matches the Rust rule.
+ */
+test.each([
+	["END_OF_GROUP", [0], 0x3],
+	["END_OF_TRACK", [0], 0x4],
+	["a standalone END_OF_TRACK", [], 0x4],
+])("an object after %s is malformed", async (_, objects, status) => {
+	const { subscriber, track } = await subscribeTrack();
+
+	// The objects, the zero-length status object, then one more object.
+	const bytes = new Uint8Array([...encodeObjects(objects), 0, 0, status, ...encodeObjects([0])]);
+	const reader = new Reader(undefined, bytes, VERSION);
+	const stop = spyOn(reader, "stop");
+	await subscriber.handleGroup(
+		new GroupMessage({
+			trackAlias: ALIAS,
+			groupId: 3n,
+			subGroupId: 0n,
+			publisherPriority: 0,
+			flags: groupFlags(true),
+		}),
+		reader,
+	);
+
+	expect(stop).toHaveBeenCalledTimes(1);
+	const err = stop.mock.calls[0][0];
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.MalformedTrack);
+	expect(track.closed.peek()).toBe(err as StreamError);
+	stop.mockRestore();
+});
+
+/**
  * A clear FIRST_OBJECT whose first ID is not 0 still has a hole at the front, so the
  * stream is dropped and the track resumes at the next group.
  */
