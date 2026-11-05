@@ -116,8 +116,12 @@ impl Link {
 		let version: Version = VERSION.parse().unwrap();
 		let mut origin = |hop: u64| {
 			let mut config = origin::Config::new(Hop::new(hop).unwrap());
-			// Expire history between rounds without shedding unread frames under byte pressure.
-			config.pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
+			// Hold the working batch and handover; expire read history between rounds.
+			config.pool = cache::Pool::new(
+				cache::Config::default()
+					.with_capacity((4 * streams * FRAMES * size) as u64)
+					.with_expiry(cache::DEFAULT_EXPIRY),
+			);
 			pools.push(config.pool.clone());
 			let (producer, driver) = origin::Producer::new(config);
 			tokio::spawn(moq_net::time::run(driver));

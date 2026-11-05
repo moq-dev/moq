@@ -32,10 +32,10 @@ impl Backend for Relay {
 	type Relay = Node;
 	const PREFIX: &'static str = "relay_";
 
-	fn relay(id: u64, capacity: Option<u64>) -> (Node, cache::Pool) {
+	fn relay(id: u64, capacity: u64, _expiry: bool) -> (Node, cache::Pool) {
 		let mut config = moq_relay::cache::Config::default();
 		if std::env::var_os("SESSION_EXPIRY_ONLY").is_none() {
-			config.capacity = capacity.map(|capacity| capacity.to_string());
+			config.capacity = Some(capacity.to_string());
 		}
 		let cache = config.init().unwrap();
 		let pool = cache.pool.clone();
