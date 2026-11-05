@@ -54,7 +54,8 @@ a producer would need per-track memory of its last number.
 - **What it waits on** (decided 2026-10-27, maintainer; Fetch as a range
   finished in [moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)): only the
   subscribe-ranges children that put sequence ranges into the model and the
-  wire, Lite-07 ranges ([moq-dev/moq#7872](https://github.com/moq-dev/moq/pull/7872)) and
+  wire, Lite-07 ranges ([moq-dev/moq#7872](https://github.com/moq-dev/moq/pull/7872),
+  merged 2026-11-05) and
   [Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md),
   not the whole epic. [Drop set](/quest/m1/drop-set.md) lands first too: its
   runs keyed by group sequence convert mechanically to starts.

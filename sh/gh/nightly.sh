@@ -54,11 +54,8 @@ if [[ -n $report ]]; then
     mkdir -p "$out/raw"
 fi
 
-failed=()
-run() {
-    echo "nightly: $*"
-    if ! "$@"; then failed+=("$*"); fi
-}
+# shellcheck source=sh/checks.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../checks.sh"
 
 criterion() {
     local label=$1
@@ -202,10 +199,7 @@ case "$1" in
         ;;
 esac
 
-if ((${#failed[@]})); then
-    printf 'nightly: failed: %s\n' "${failed[@]}" >&2
-    exit 1
-fi
+finish
 
 if [[ -n $report ]]; then
     just gh benchmark-report "$report" "$out" "$out/report.json"

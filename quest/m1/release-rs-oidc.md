@@ -29,4 +29,5 @@ authentication Action is needed.
 
 ## Required
 
+- [Remove the moq-e2ee stub](/quest/m1/moq-e2ee-remove.md) - release-plz stops tracking a retired crate that has no trusted publisher
 - [crates.io trusts the workflow](/quest/m1/crates-trusted-publisher.md) - every published crate has the trusted publisher configured

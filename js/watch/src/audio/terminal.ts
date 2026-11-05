@@ -36,6 +36,11 @@ export class Terminal {
 	#prime = true;
 	#before?: Micro;
 
+	/** How far decoded output lands before its frame timestamp: the Opus pre-skip, or zero. */
+	get delay(): Micro {
+		return Math.round((this.#preSkip * 1_000_000) / 48_000) as Micro;
+	}
+
 	/** The exclusive source endpoint most recently received. */
 	get end(): Micro | undefined {
 		return this.#end;

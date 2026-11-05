@@ -469,6 +469,8 @@ struct PadHandle {
 	task: tokio::task::JoinHandle<()>,
 	/// A [`Command::Retire`] is queued, so a further delisting needs none.
 	retiring: bool,
+	/// Ends the pad at once, cutting short the play on it: the rendition was disabled.
+	disable: watch::Sender<bool>,
 }
 
 /// A [`PadActor`]'s queue of commands. Unlike a channel, a reader's cancelled turn leaves it as
@@ -535,7 +537,8 @@ enum Command {
 
 impl Pads {
 	/// Play `play` on the rendition's pad, created if the session has none, once the plays sent
-	/// before it are done. [`Exit::Unlisted`] if the latest catalog does not list the rendition.
+	/// before it are done. [`Exit::Unlisted`] if the latest catalog does not list the rendition, or
+	/// the pad ends before or while it plays.
 	async fn play(&self, element: &glib::WeakRef<super::MoqSrc>, rendition: &Rendition, play: Play) -> Exit {
 		let turn = match self.queue(element, rendition, &play.cancel) {
 			Ok(turn) => turn,
@@ -548,7 +551,7 @@ impl Pads {
 			handoff = turn => match handoff {
 				Ok(handoff) => handoff,
 				// The actor ended the pad first.
-				Err(_) => return Exit::Done,
+				Err(_) => return Exit::Unlisted,
 			},
 		};
 		let (done, exit) = oneshot::channel();
@@ -598,13 +601,15 @@ impl Pads {
 			pad,
 			added: false,
 		};
-		let task = RUNTIME.spawn(STREAMING.scope(element.clone(), actor.run(commands.clone())));
+		let (disable, disabled) = watch::channel(false);
+		let task = RUNTIME.spawn(STREAMING.scope(element.clone(), actor.run(commands.clone(), disabled)));
 		table.pads.insert(
 			rendition.clone(),
 			PadHandle {
 				commands,
 				task,
 				retiring: false,
+				disable,
 			},
 		);
 		Ok(called)
@@ -617,12 +622,20 @@ impl Pads {
 
 	/// List what the latest catalog names, retiring each pad it no longer lists. Its actor ends it
 	/// with EOS once the plays before are done, unless the rendition is listed again by then, so a
-	/// delisted rendition still playing out its track keeps its tail.
+	/// delisted rendition still playing out its track keeps its tail. A `disabled` rendition's pad
+	/// leaves the session now and its actor ends it as soon as a push on it returns, even when its
+	/// reader missed the disable or a re-enable follows, so a re-enable always takes a new pad.
 	/// Nothing once `cancel` fired, since a later run lists the pads then.
-	fn list(&self, listed: HashSet<Rendition>, cancel: &watch::Receiver<bool>) {
+	fn list(&self, listed: HashSet<Rendition>, disabled: &HashSet<Rendition>, cancel: &watch::Receiver<bool>) {
 		let mut table = self.0.lock().unwrap();
 		if *cancel.borrow() {
 			return;
+		}
+		for rendition in disabled {
+			if let Some(handle) = table.pads.remove(rendition) {
+				handle.disable.send_replace(true);
+				table.ending.push(handle.task);
+			}
 		}
 		// A pad is made listed, and an actor finding it listed again keeps it, so only a delisting
 		// retires one. A retirement already queued judges the listing when its turn comes.
@@ -674,8 +687,20 @@ struct PadActor {
 }
 
 impl PadActor {
-	async fn run(mut self, commands: Arc<Inbox>) {
-		while let Some(command) = commands.recv().await {
+	/// Take `commands` until the pad ends, or at once once `disabled`. A disable cuts short the
+	/// play on the pad, which reports [`Exit::Unlisted`] so its follower starts it again on a new
+	/// pad if the rendition is enabled again, and drops the turns queued behind it.
+	async fn run(mut self, commands: Arc<Inbox>, mut disabled: watch::Receiver<bool>) {
+		loop {
+			// A closed sender is a released or dropped pad, which the commands end.
+			let command = tokio::select! {
+				biased;
+				Ok(_) = disabled.wait_for(|disabled| *disabled) => return self.ended(),
+				command = commands.recv() => command,
+			};
+			let Some(command) = command else {
+				return;
+			};
 			match command {
 				Command::Play(turn) => {
 					let (handoff, handed) = oneshot::channel();
@@ -686,21 +711,16 @@ impl PadActor {
 					let Ok((play, done)) = handed.await else {
 						continue;
 					};
-					let exit = self.play(*play).await;
+					let exit = tokio::select! {
+						biased;
+						Ok(_) = disabled.wait_for(|disabled| *disabled) => Exit::Unlisted,
+						exit = self.play(*play) => exit,
+					};
 					let _ = done.send(exit);
 				}
-				Command::Retire => {
-					if self.retired() {
-						// A turn queued behind the retirement drops here, which its reader takes as
-						// done.
-						self.end(true);
-						if let Some(pads) = self.pads.upgrade() {
-							let id = tokio::task::id();
-							pads.lock().unwrap().ending.retain(|task| task.id() != id);
-						}
-						return;
-					}
-				}
+				// A turn queued behind the retirement drops here, which its reader takes as unlisted.
+				Command::Retire if self.retired() => return self.ended(),
+				Command::Retire => {}
 				Command::Release { eos } => return self.end(eos),
 				#[cfg(test)]
 				Command::Settled(settled) => {
@@ -769,6 +789,15 @@ impl PadActor {
 		let handle = pads.remove(&self.rendition).expect("checked above");
 		ending.push(handle.task);
 		true
+	}
+
+	/// End a pad the session already let go, and leave [`PadTable::ending`].
+	fn ended(&self) {
+		self.end(true);
+		if let Some(pads) = self.pads.upgrade() {
+			let id = tokio::task::id();
+			pads.lock().unwrap().ending.retain(|task| task.id() != id);
+		}
 	}
 
 	fn end(&self, eos: bool) {
@@ -1033,23 +1062,12 @@ fn reconcile(
 	emptied: &Arc<tokio::sync::Notify>,
 	cancel: &watch::Receiver<bool>,
 ) {
-	// Share the players' selection rule: keep an already selected disabled rendition only
-	// while no enabled alternative of its kind exists. Pads alone also include idle renditions
-	// displaced by an alternative, so derive selection from the plans the readers follow.
-	let mut selected = moq_mux::select::Selected::default();
-	for follower in followers.values() {
-		for (kind, name) in follower.plan.borrow().renditions.keys() {
-			match kind {
-				TrackKind::Video => selected.video.insert(name.clone()),
-				TrackKind::Audio => selected.audio.insert(name.clone()),
-			};
-		}
-	}
+	// Read what the players select: every enabled rendition in a container this build knows.
 	let mut playable = catalog.clone();
 	moq_mux::select::Broadcast::default()
 		.video(Default::default())
 		.audio(Default::default())
-		.retain(&mut playable, &selected);
+		.retain(&mut playable);
 
 	// Build the desired shape for each rendition. This is deliberately cheap: caps come from the
 	// catalog config and the container is just the hang descriptor. The reader parses the wire
@@ -1097,40 +1115,29 @@ fn reconcile(
 		);
 	}
 
-	// A disabled rendition keeps its pad even when an enabled alternative displaced its reader,
-	// since a pipeline links pads by name (`s.video_0 ! ...`).
-	let disabled: Vec<(Rendition, &dyn hang::catalog::Reference)> = catalog
-		.video
-		.renditions
-		.iter()
-		.filter(|(_, config)| !config.enabled)
-		.map(|(name, config)| {
-			(
-				(TrackKind::Video, name.clone()),
-				config as &dyn hang::catalog::Reference,
+	// Only an enabled rendition keeps a pad: a disabled one's pad ends, and a re-enable takes a new
+	// one like any rendition the catalog adds. Listed before any follower hears of the update, so a
+	// reader it stops can't claim a pad.
+	let listed = desired.keys().cloned().collect();
+	// A disabled reader stops now, where one the catalog dropped plays out its tail.
+	let disabled: Arc<HashSet<Rendition>> = Arc::new(
+		catalog
+			.video
+			.renditions
+			.iter()
+			.filter(|(_, config)| !config.enabled)
+			.map(|(name, _)| (TrackKind::Video, name.clone()))
+			.chain(
+				catalog
+					.audio
+					.renditions
+					.iter()
+					.filter(|(_, config)| !config.enabled)
+					.map(|(name, _)| (TrackKind::Audio, name.clone())),
 			)
-		})
-		.chain(
-			catalog
-				.audio
-				.renditions
-				.iter()
-				.filter(|(_, config)| !config.enabled)
-				.map(|(name, config)| {
-					(
-						(TrackKind::Audio, name.clone()),
-						config as &dyn hang::catalog::Reference,
-					)
-				}),
-		)
-		.collect();
-	// Listed before any follower hears of the update, so a reader it stops can't claim a pad.
-	let listed = desired
-		.keys()
-		.cloned()
-		.chain(disabled.iter().map(|(rendition, _)| rendition.clone()))
-		.collect();
-	playback.session.pads.list(listed, cancel);
+			.collect(),
+	);
+	playback.session.pads.list(listed, &disabled, cancel);
 
 	let mut plans: HashMap<moq_net::Path, Plan> = HashMap::new();
 	for (rendition, shape) in desired {
@@ -1144,22 +1151,24 @@ fn reconcile(
 		};
 		plans.entry(path).or_default().renditions.insert(rendition, shape);
 	}
+	for plan in plans.values_mut() {
+		plan.disabled = disabled.clone();
+	}
 
-	// A broadcast no selected rendition reads any more stops its readers, apart from a delisted
+	// A broadcast no enabled rendition reads any more stops its readers, apart from a delisted
 	// one playing out its tail. Its follower stays reachable, with its finished records, while a
-	// disabled rendition still names it or a delisted one drains, so a re-enable or relist reaches
-	// it rather than a new follower. Once it plays nothing, the run lets it go.
-	let held: HashSet<moq_net::Path> = disabled
-		.iter()
-		.filter_map(|(_, reference)| source.resolve_reference(reference.broadcast()))
-		.collect();
+	// delisted one drains, so a relist reaches it rather than a new follower. Once it plays nothing,
+	// the run lets it go.
 	followers.retain(|path, follower| {
 		// A follower whose broadcast failed exited, and this update follows it again.
 		if follower.plan.is_closed() {
 			return false;
 		}
-		follower.held = held.contains(path);
-		follower.plan.send_replace(plans.remove(path).unwrap_or_default());
+		let plan = plans.remove(path).unwrap_or_else(|| Plan {
+			disabled: disabled.clone(),
+			..Default::default()
+		});
+		follower.plan.send_replace(plan);
 		!follower.idle()
 	});
 	for (path, plan) in plans {
@@ -1176,7 +1185,6 @@ fn reconcile(
 		};
 		let (plan_tx, plan) = watch::channel(plan);
 		let (empty_tx, empty) = watch::channel(false);
-		let held = held.contains(&path);
 		let follower_task = Follower {
 			playback: playback.clone(),
 			path: path.clone(),
@@ -1195,14 +1203,7 @@ fn reconcile(
 			STREAMING.scope(playback.session.element.clone(), follower_task),
 			RUNTIME.handle(),
 		);
-		followers.insert(
-			path,
-			Followed {
-				plan: plan_tx,
-				empty,
-				held,
-			},
-		);
+		followers.insert(path, Followed { plan: plan_tx, empty });
 	}
 }
 
@@ -1211,16 +1212,13 @@ struct Followed {
 	plan: watch::Sender<Plan>,
 	/// Set while it plays no rendition.
 	empty: watch::Receiver<bool>,
-	/// A disabled rendition names its path, so a re-enable needs its finished records.
-	held: bool,
 }
 
 impl Followed {
-	/// Whether nothing reaches it again: it plays nothing, was asked for nothing, and keeps no
-	/// record a re-enable needs. Judged against the plan sent last, so a plan it has yet to take
-	/// keeps it.
+	/// Whether nothing reaches it again: it plays nothing and was asked for nothing. Judged against
+	/// the plan sent last, so a plan it has yet to take keeps it.
 	fn idle(&self) -> bool {
-		!self.held && *self.empty.borrow() && self.plan.borrow().renditions.is_empty()
+		*self.empty.borrow() && self.plan.borrow().renditions.is_empty()
 	}
 }
 
@@ -1245,6 +1243,9 @@ struct Plan {
 	/// its readers drain, and a sibling's keeps following its instances until the catalog's
 	/// broadcast ends.
 	closed: bool,
+	/// Every rendition the catalog names but disables, whose reader stops at once rather than
+	/// playing out its tail as a removed one does.
+	disabled: Arc<HashSet<Rendition>>,
 }
 
 /// Follows the instances at one path and plays the renditions that read it on each in turn: a
@@ -1333,7 +1334,7 @@ impl Follower {
 		let mut listening = !first.closed;
 		// Following instances, which a sibling does past its catalog's close.
 		let mut following = listening || sibling;
-		self.apply(first.renditions);
+		self.apply(first);
 		self.play();
 
 		loop {
@@ -1359,7 +1360,7 @@ impl Follower {
 						let next = plan.borrow_and_update().clone();
 						listening = !next.closed;
 						following = listening || sibling;
-						let fresh = self.apply(next.renditions);
+						let fresh = self.apply(next);
 						// The final plan starts what it adds or reshapes, but restarts no reader
 						// that already ended.
 						match listening {
@@ -1370,7 +1371,7 @@ impl Follower {
 					// No rendition reads this path any more.
 					Err(_) => {
 						(listening, following) = (false, false);
-						self.apply(HashMap::new());
+						self.apply(Plan::default());
 					}
 				},
 				Some(joined) = self.readers.join_next() => {
@@ -1405,9 +1406,14 @@ impl Follower {
 		while self.readers.join_next().await.is_some() {}
 	}
 
-	/// Bring the renditions in line with `wanted`, stopping each one reshaped or gone, and return
+	/// Bring the renditions in line with `plan`, stopping each one reshaped or gone, and return
 	/// those added or reshaped. [`Self::play`] starts the rest.
-	fn apply(&mut self, mut wanted: HashMap<Rendition, Shape>) -> HashSet<Rendition> {
+	fn apply(&mut self, plan: Plan) -> HashSet<Rendition> {
+		let Plan {
+			renditions: mut wanted,
+			disabled,
+			..
+		} = plan;
 		let pads = &self.playback.session.pads;
 		let mut fresh = HashSet::new();
 		self.renditions
@@ -1425,10 +1431,10 @@ impl Follower {
 					true
 				}
 				// A delisted rendition plays out the instance it reads, then leaves. One that never
-				// took its pad, was displaced by an enabled alternative, or now reads another
-				// broadcast stops now.
+				// took its pad, or that is disabled or now reads another broadcast, stops now.
 				None => {
 					entry.draining = !pads.is_listed(rendition)
+						&& !disabled.contains(rendition)
 						&& entry
 							.reader
 							.as_ref()
@@ -1494,7 +1500,7 @@ impl Follower {
 	}
 
 	/// Drop the state no return can resume: an instance neither current nor pinned by a rendition,
-	/// and the records of a retired pad. A disabled rendition keeps its pad, and its records.
+	/// and the records of a retired pad.
 	fn forget(&mut self) {
 		let pinned: HashSet<&moq_net::Instance> = self
 			.renditions
@@ -1586,7 +1592,8 @@ impl Follower {
 		} else if let Exit::Unlisted = exit
 			&& self.playback.session.pads.is_listed(&rendition)
 		{
-			// Delisted and listed again while it went to claim its pad, which the plan coalesced.
+			// Its pad went while the rendition was delisted or disabled and listed again, which the
+			// plan coalesced.
 			self.play();
 		}
 	}
@@ -1606,7 +1613,8 @@ fn serves(instance: &moq_net::broadcast::Consumer, id: Option<&moq_net::Instance
 enum Exit {
 	/// It is done with the instance.
 	Done,
-	/// The catalog did not list the rendition when it went to claim its pad.
+	/// It lost its pad: the catalog did not list the rendition when it went to claim one, or the
+	/// pad ended first or under it. Its follower starts it again if the rendition is listed.
 	Unlisted,
 }
 
@@ -2540,10 +2548,10 @@ mod session_tests {
 		}
 	}
 
-	/// Selection follows the reader plans, independently by kind; idle pads do not keep a
-	/// displaced rendition selected. Reconcile against a plan receiver without starting readers.
+	/// A disabled rendition drops out of its reader's plan, each kind on its own, and an enable
+	/// brings it back. Reconcile against a plan receiver without starting readers.
 	#[test]
-	fn disabled_renditions_follow_the_player_selection_rule() {
+	fn disabled_renditions_leave_the_plan() {
 		let element = element();
 		let (origin, _driver) = moq_net::origin::Producer::new(Default::default());
 		let broadcast = moq_net::broadcast::Info::new().produce();
@@ -2559,11 +2567,7 @@ mod session_tests {
 		let (_empty, empty) = watch::channel(false);
 		let mut followers = std::collections::HashMap::from([(
 			source.resolve_reference(None).unwrap(),
-			super::Followed {
-				plan,
-				empty,
-				held: false,
-			},
+			super::Followed { plan, empty },
 		)]);
 		let mut tasks = tokio::task::JoinSet::new();
 		let emptied = Arc::default();
@@ -2592,23 +2596,15 @@ mod session_tests {
 		catalog.audio.renditions.insert("main".into(), audio);
 		check(&catalog, &[]);
 
-		let both = [(TrackKind::Video, "main"), (TrackKind::Audio, "main")];
 		catalog.video.renditions.get_mut("main").unwrap().enabled = true;
 		catalog.audio.renditions.get_mut("main").unwrap().enabled = true;
-		check(&catalog, &both);
-		catalog.video.renditions.get_mut("main").unwrap().enabled = false;
+		check(&catalog, &[(TrackKind::Video, "main"), (TrackKind::Audio, "main")]);
 		catalog.audio.renditions.get_mut("main").unwrap().enabled = false;
-		check(&catalog, &both);
-
-		catalog.video.renditions.insert("alternative".into(), video_rendition());
-		let alternative = [(TrackKind::Video, "alternative"), (TrackKind::Audio, "main")];
-		check(&catalog, &alternative);
-		catalog.video.renditions.get_mut("alternative").unwrap().enabled = false;
-		check(&catalog, &alternative);
-
-		catalog.video.renditions.remove("alternative");
-		catalog.audio.renditions.remove("main");
-		check(&catalog, &[]);
+		check(&catalog, &[(TrackKind::Video, "main")]);
+		// Its pad ends rather than waiting for a re-enable, and its reader stops without a drain.
+		let audio = (TrackKind::Audio, "main".to_string());
+		assert!(!playback.session.pads.is_listed(&audio));
+		assert!(received.borrow().disabled.contains(&audio));
 	}
 
 	fn video_rendition() -> VideoConfig {
@@ -3872,7 +3868,7 @@ mod session_tests {
 		let (_shutdown, shutdown) = watch::channel(true);
 		let (_stop, stop) = watch::channel(false);
 		let pads = Pads::default();
-		pads.list(HashSet::from([rendition.clone()]), &cancel);
+		pads.list(HashSet::from([rendition.clone()]), &HashSet::new(), &cancel);
 		let instance = publisher.broadcast.consume();
 		let reader = super::Reader {
 			playback: super::Playback {
@@ -3906,6 +3902,77 @@ mod session_tests {
 			.block_on(async { kio::clock::timeout(Duration::from_secs(10), super::RUNTIME.spawn(reader.run())).await })
 			.expect("a push on a pad added after the flush blocked")
 			.unwrap();
+	}
+
+	/// A disable ends the pad even when its reader never hears of it, as when the follower takes
+	/// the disable and a re-enable as one plan. The reader reports its pad lost, so its follower
+	/// starts it again on a new pad.
+	#[test]
+	fn a_disable_its_reader_missed_cuts_its_play() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let mut publisher = Publisher::new(&origin(), Default::default(), video_rendition());
+
+		let rendition = (TrackKind::Video, "video".to_string());
+		let (cancelling, cancel) = watch::channel(false);
+		let (_shutdown, shutdown) = watch::channel(false);
+		let (_stop, stop) = watch::channel(false);
+		let pads = Pads::default();
+		pads.list(HashSet::from([rendition.clone()]), &HashSet::new(), &cancel);
+		let instance = publisher.broadcast.consume();
+		let reader = super::Reader {
+			playback: super::Playback {
+				session: Session {
+					max_delay: DEFAULT_MAX_DELAY,
+					element: element.downgrade(),
+					pads: pads.clone(),
+					shutdown,
+				},
+				broadcast: instance.clone(),
+				timeline: Arc::default(),
+				stop,
+			},
+			rendition: rendition.clone(),
+			shape: super::Shape {
+				caps: gst::Caps::new_empty_simple("video/x-h264"),
+				container: Container::Legacy,
+				track: "video".into(),
+				broadcast: None,
+				instance: None,
+				warmup: Duration::ZERO,
+			},
+			instance,
+			serial: 1,
+			timeline: Arc::default(),
+			finished: super::Finished::default(),
+			live: Arc::default(),
+			cancel,
+		};
+		let run = super::RUNTIME.spawn(reader.run());
+		let pad = recorder.written(&mut publisher, 1);
+
+		pads.list(
+			HashSet::new(),
+			&HashSet::from([rendition.clone()]),
+			&cancelling.subscribe(),
+		);
+		pads.list(
+			HashSet::from([rendition.clone()]),
+			&HashSet::new(),
+			&cancelling.subscribe(),
+		);
+		let exit = super::RUNTIME
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), run).await })
+			.expect("the disable never cut the play")
+			.unwrap();
+		assert!(
+			matches!(exit, super::Exit::Unlisted),
+			"the reader took its pad's end as done"
+		);
+		recorder.wait("the disabled pad never ended", |seen| {
+			seen.contains(&Seen::Eos(pad.clone())).then_some(())
+		});
 	}
 
 	/// A bus sync or pad handler can stop the element from inside a reader's push. Waiting for the
@@ -4554,74 +4621,6 @@ mod session_tests {
 		});
 	}
 
-	/// A sibling track that finished stays finished for its instance only: a disable and an enable
-	/// replays nothing on that instance, and the next instance plays even before the enable.
-	#[test]
-	fn a_reenabled_sibling_rendition_plays_the_next_instance_after_a_finish() {
-		let _pad_ids = pad_ids();
-		let element = element();
-		let recorder = Recorder::attach(&element);
-		let origin = origin();
-		let mut room = referencing(&origin, None);
-		let _audio = ["audio", "again"].map(|name| {
-			room.broadcast
-				.create_track(name, hang::container::track_info(hang::catalog::PRIORITY.audio))
-				.unwrap()
-		});
-		let session = follow(&element, &origin);
-
-		let mut first = Publisher::sibling(&origin, Default::default());
-		let pad = recorder.written(&mut first, 1);
-		first.video.finish().unwrap();
-		await_finished(&first);
-
-		// The catalog consumer only yields the newest snapshot, so each update lists another audio
-		// rendition: its pad appearing proves the run acted on it.
-		{
-			let mut guard = room.catalog.modify().unwrap();
-			guard.video.renditions.get_mut("video").unwrap().enabled = false;
-			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
-		}
-		await_pad(&element, "audio_");
-		let mut second = Publisher::sibling(&origin, Default::default());
-		assert_eq!(
-			recorder.written(&mut second, 2),
-			pad,
-			"the next instance moved to another pad"
-		);
-
-		{
-			let mut guard = room.catalog.modify().unwrap();
-			guard.video.renditions.get_mut("video").unwrap().enabled = true;
-			let mut again = audio_rendition();
-			again.track = Some("again".into());
-			guard.audio.renditions.insert("again".to_string(), again);
-		}
-		for _ in 0..200 {
-			if pads(&element, "audio_").len() == 2 {
-				break;
-			}
-			block(Duration::from_millis(50));
-		}
-		assert_eq!(pads(&element, "audio_").len(), 2, "the re-enable never landed");
-		let replayed = recorder.count(|seen| *seen == Seen::Buffer(pad.clone(), 1));
-
-		assert_eq!(recorder.written(&mut second, 3), pad);
-
-		stop(session);
-
-		// Only the next instance starts a stream: the finished one stays finished on its pad.
-		let seen = recorder.seen();
-		assert_eq!(recorder.count(|seen| *seen == Seen::Start(pad.clone())), 1, "{seen:?}");
-		assert_eq!(
-			recorder.count(|seen| *seen == Seen::Buffer(pad.clone(), 1)),
-			replayed,
-			"{seen:?}"
-		);
-		recorder.assert_one_pad_held();
-		drop(first);
-	}
-
 	/// A sibling rendition delisted while it plays and listed again before its track finishes stays
 	/// with the reader that drained it: the finished track does not replay on its pad, and the
 	/// next instance plays there.
@@ -5100,37 +5099,38 @@ mod session_tests {
 		recorder.assert_one_pad_held();
 	}
 
-	/// With no enabled alternative, disabling holds the reader as well as its pad, so media that
-	/// beats the re-enable catalog update plays without a new subscription or stream.
+	/// Disabling a rendition ends its reader and its pad with an EOS, holding nothing for a
+	/// re-enable, which takes a new pad from a fresh subscription like any added rendition.
 	#[test]
-	fn a_disabled_rendition_keeps_reading_on_the_same_pad() {
+	fn a_disabled_rendition_ends_its_pad() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 
 		let mut publisher = Publisher::new(&origin, Default::default(), video_rendition());
-		let _audio = publisher
-			.broadcast
-			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
-			.unwrap();
 		let session = follow(&element, &origin);
 		let pad = recorder.written(&mut publisher, 1);
 
-		// The catalog consumer only yields the newest snapshot, so the same update lists an audio
-		// rendition: its pad appearing proves the run acted on the disable.
-		{
-			let mut guard = publisher.catalog.modify().unwrap();
-			guard.video.renditions.get_mut("video").unwrap().enabled = false;
-			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
+		publisher
+			.catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.get_mut("video")
+			.unwrap()
+			.enabled = false;
+		recorder.wait("the disabled pad never ended", |seen| {
+			seen.contains(&Seen::Eos(pad.clone())).then_some(())
+		});
+		for _ in 0..100 {
+			if pads(&element, "video_").is_empty() {
+				break;
+			}
+			block(Duration::from_millis(50));
 		}
-		await_pad(&element, "audio_");
-
-		assert_eq!(
-			recorder.written(&mut publisher, 2),
-			pad,
-			"media before the re-enable did not reach the held reader"
-		);
+		assert!(pads(&element, "video_").is_empty(), "the disabled pad stayed");
 
 		publisher
 			.catalog
@@ -5141,19 +5141,88 @@ mod session_tests {
 			.get_mut("video")
 			.unwrap()
 			.enabled = true;
-		assert_eq!(
-			recorder.written(&mut publisher, 3),
+		assert_ne!(
+			recorder.written(&mut publisher, 2),
 			pad,
-			"the re-enabled rendition moved to another pad"
+			"the re-enable reused the ended pad"
 		);
 		stop(session);
 
 		let seen = recorder.seen();
+		assert_eq!(recorder.count(|seen| matches!(seen, Seen::Pad(_))), 2, "{seen:?}");
 		assert!(
 			!seen.contains(&Seen::Start(pad)),
-			"the disable restarted the stream: {seen:?}"
+			"the ended pad started again: {seen:?}"
 		);
-		recorder.assert_one_pad_held();
+	}
+
+	/// A disable ends the pad even when the rendition is re-enabled while a push on it is still
+	/// blocked downstream, so its actor takes both catalog updates only once the push returns.
+	#[test]
+	fn a_disable_ends_the_pad_while_its_push_is_blocked() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+
+		let mut publisher = Publisher::new(&origin, Default::default(), video_rendition());
+		let (shutdown, stopping) = watch::channel(false);
+		let session = Session::new(element.downgrade(), stopping, DEFAULT_MAX_DELAY);
+		let pads = session.pads.clone();
+		let consumer = origin.consume();
+		let task =
+			super::RUNTIME.spawn(async move { session.follow_path(&consumer, "room", std::future::pending()).await });
+		let pad = recorder.written(&mut publisher, 1);
+
+		let blocking = element.static_pad(&pad).unwrap();
+		let (blocked, reached) = std::sync::mpsc::channel();
+		let probe = blocking
+			.add_probe(gst::PadProbeType::BLOCK | gst::PadProbeType::BUFFER, move |_, _| {
+				let _ = blocked.send(());
+				gst::PadProbeReturn::Ok
+			})
+			.unwrap();
+		publisher.write(2);
+		reached
+			.recv_timeout(Duration::from_secs(10))
+			.expect("the frame never reached the pad");
+
+		let rendition = (TrackKind::Video, "video".to_string());
+		for enabled in [false, true] {
+			publisher
+				.catalog
+				.modify()
+				.unwrap()
+				.video
+				.renditions
+				.get_mut("video")
+				.unwrap()
+				.enabled = enabled;
+			for _ in 0..200 {
+				if pads.is_listed(&rendition) == enabled {
+					break;
+				}
+				block(Duration::from_millis(50));
+			}
+			assert_eq!(pads.is_listed(&rendition), enabled, "the catalog update never applied");
+		}
+		blocking.remove_probe(probe);
+
+		recorder.wait("the disabled pad never ended", |seen| {
+			seen.contains(&Seen::Eos(pad.clone())).then_some(())
+		});
+		assert_ne!(
+			recorder.written(&mut publisher, 3),
+			pad,
+			"the re-enable reused the disabled pad"
+		);
+		stop((shutdown, task));
+
+		let seen = recorder.seen();
+		assert!(
+			!seen.contains(&Seen::Start(pad)),
+			"the disabled pad started again: {seen:?}"
+		);
 	}
 
 	/// A publisher that stops ends its media, a beat later its catalog, then its announcement.

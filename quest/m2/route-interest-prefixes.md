@@ -4,9 +4,9 @@
 
 A route-layer Announce Stream's interest is a set of prefixes instead of
 one, so a subscriber that wants several disjoint subtrees opens one stream
-rather than one per prefix. ANNOUNCE_FLOOR regions and certification hold
-across the set, and the proof's floor and certification sweeps pass over
-multi-prefix interests.
+rather than one per prefix. An ANNOUNCE_FLOOR certifies the whole set at
+one revision or nothing, and the proof's floor and certification sweeps pass
+over multi-prefix interests.
 
 ## Plan
 
@@ -21,15 +21,15 @@ Split out of [Routes and announces](/quest/m1/cluster-routing/routes/README.md) 
 the route layer's core with a single interest prefix per stream (its
 regions are suffixes of that prefix) and leaves this as a separate m2 quest.
 
-- Define how ANNOUNCE_FLOOR names a region under a set (which prefix it
-  extends), and what a count of zero means when no prefix meets the sender's
-  regions.
+- Define what a whole-set floor certifies (lite-07's floor is a marker over
+  its one prefix, decided 2026-11-05), and how a sender that knows only some
+  of the set's prefixes answers.
 - Redo the proof's floor and certification sweeps with multi-prefix
   interests, including overlapping prefixes and a set that changes.
 - Update the lite draft and both implementations together.
 
 Public API: the route layer's interest type. Wire: an Announce Stream's
-interest and ANNOUNCE_FLOOR regions on the next unpublished lite version.
+interest and what ANNOUNCE_FLOOR certifies on the next unpublished lite version.
 
 ## Related
 

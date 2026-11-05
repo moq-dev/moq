@@ -42,6 +42,7 @@ export namespace Audio {
 		codec: Signals.Signal<Audio.Codec>;
 		groupDuration: Signals.Signal<Clock.Milli>;
 		readonly in: Signals.Readonlys<Audio.EncoderInput>;
+		muted: Signals.Signal<boolean>;
 		readonly name: string;
 		readonly out: Signals.Readonlys<Audio.EncoderOutput>;
 		volume: Signals.Signal<number>;
@@ -62,6 +63,7 @@ export namespace Audio {
 	export type EncoderProps = Signals.Inputs<Audio.EncoderInput> & {
 		codec?: Audio.Codec | Signals.Signal<Audio.Codec>;
 		groupDuration?: Clock.Milli | Signals.Signal<Clock.Milli>;
+		muted?: boolean | Signals.Signal<boolean>;
 		volume?: number | Signals.Signal<number>;
 	};
 	export interface Format {

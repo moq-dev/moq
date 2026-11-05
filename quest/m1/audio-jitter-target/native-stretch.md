@@ -16,10 +16,12 @@ specifies it.
 ## Plan
 
 Decided 2026-11-03 (maintainer, on
-[moq-dev/moq#7679](https://github.com/moq-dev/moq/pull/7679)): copy NetEq in m1.
-The implementation now ports its received-audio accelerate and preemptive
-expand into the native playback callback. The estimator is unchanged.
-`doc/concept/audio-jitter.md` specifies the shared floating-point algorithm;
+[moq-dev/moq#7679](https://github.com/moq-dev/moq/pull/7679)): copy NetEq in
+m1. The implementation, merged 2026-11-04 in
+[moq-dev/moq#7856](https://github.com/moq-dev/moq/pull/7856), ports its
+received-audio accelerate and preemptive expand into the native playback
+callback. The estimator is unchanged. `doc/concept/audio-jitter.md` specifies
+the shared floating-point algorithm;
 `doc/concept/audio-jitter/stretch/corpus.json` supplies literal PCM vectors
 for both languages. The browser half remains
 [Watch](/quest/m1/audio-jitter-target/watch.md); neither implementation waits
@@ -92,9 +94,9 @@ until the seven-nightly calibration below.
   audible. Recommend this check before claiming the perceptual goal;
   automated amplitude tests cannot decide it.
   Run it in `~/work/moq` on `kixtop`, with its speakers or headphones as
-  the default output, at
-  [moq-dev/moq#7856](https://github.com/moq-dev/moq/pull/7856)'s head
-  (`gh pr checkout 7856 --detach`), or `main` once it lands. The source is
+  the default output, on `main`, where
+  [moq-dev/moq#7856](https://github.com/moq-dev/moq/pull/7856) landed. The
+  source is
   macOS's `say` voice reading `LICENSE-APACHE`, about ten minutes of
   continuous speech, so nothing is downloaded (an archive's speech file
   returned 403):
