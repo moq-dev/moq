@@ -230,6 +230,8 @@ export namespace Connection {
 		delay?: Milli;
 		enabled?: boolean;
 		maxStreams?: number;
+		receiveWindow?: number;
+		streamReceiveWindow?: number;
 		url?: URL;
 	}
 	export interface WebTransportProps extends Omit<WebTransportOptions, "serverCertificateHashes" | "protocols"> {
