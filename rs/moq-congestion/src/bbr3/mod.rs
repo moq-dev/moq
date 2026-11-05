@@ -1944,11 +1944,8 @@ impl Controller for Bbr3 {
     fn on_ack(&mut self, ack: Ack<'_>) {
         // equivalent to RS.newly_acked. It is passed to the ACK's model steps rather than kept in
         // `rs`, so no later `set_cwnd` counts it again.
-        let mut newly_acked = 0;
-        for acked in ack.packets {
-            self.check_recovery_done(acked.sent);
-            newly_acked += u64::from(acked.bytes);
-        }
+        let newly_acked = ack.packets.iter().map(|acked| u64::from(acked.bytes)).sum();
+        let latest_sent = ack.packets.iter().map(|acked| acked.sent).max();
         if let Some(delay) = &mut self.delay {
             delay.on_ack(ack.packets, ack.now);
         }
@@ -1960,11 +1957,21 @@ impl Controller for Bbr3 {
         if ack.app_limited && self.rate.is_app_limited() {
             self.probe_rtt_skip_app_limited = true;
         }
-        let Some(rs) = self.ack_rs else {
+        if let Some(rs) = self.ack_rs {
+            self.rs = Some(rs);
+            self.update_model_and_state(rs.prior_delivered, newly_acked, ack.app_limited, ack.now);
+        }
+        // The ACK that ends a loss round acknowledges the first packet sent after that round's
+        // first loss, which is also what ends the recovery that loss began. The model steps
+        // judge the round they close, so they see the recovery as it was: otherwise Startup's
+        // high-loss exit, which asks for a full round in recovery, misses every round one
+        // recovery episode spans, and an application-limited sender never leaves Startup.
+        if let Some(sent) = latest_sent {
+            self.check_recovery_done(sent);
+        }
+        if self.ack_rs.is_none() {
             return;
-        };
-        self.rs = Some(rs);
-        self.update_model_and_state(rs.prior_delivered, newly_acked, ack.app_limited, ack.now);
+        }
         if let Some(grew) = self.delay.as_mut().map(delay::Detector::take_signal) {
             self.raise_bw_delay();
             if grew {
@@ -2085,9 +2092,11 @@ impl Controller for Bbr3 {
     }
 
     fn metrics(&self) -> Metrics {
-        // The delay bound's `bw_delay` caps the estimate: it marks the path slower than `max_bw`,
-        // so a bandwidth follower, such as an encoder, should follow it. Infinite unless on.
-        let estimate = self.max_bw.min(self.bw_delay);
+        // BBR.bw, recomputed since a short-term model reset or a spurious-loss undo lands
+        // between ACKs: a loss-driven `bw_shortterm` and the delay bound's `bw_delay` both mark
+        // the path slower than `max_bw`, so a bandwidth follower, such as an encoder, should
+        // follow them. Both are infinite while unset.
+        let estimate = self.max_bw.min(self.bw_shortterm).min(self.bw_delay);
         Metrics {
             congestion_window: self.window(),
             ssthresh: None,
