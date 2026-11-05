@@ -406,9 +406,7 @@ impl Server {
 		);
 
 		#[cfg(all(feature = "tcp", feature = "_certs"))]
-		let tls_stream = tls
-			.map(|tls| TcpTls::new(&config, &versions, tls))
-			.transpose()?;
+		let tls_stream = tls.map(|tls| TcpTls::new(&config, &versions, tls)).transpose()?;
 
 		let mut moq = moq_net::Server::new()
 			.with_versions(versions.clone())
@@ -1520,7 +1518,9 @@ impl Incoming {
 		active: moq_net::server::Active,
 	) -> Self {
 		let server_name = session.server_name().map(str::to_owned);
-		let identity = tls.zip(session.peer_certificates()).map(|(tls, chain)| tls.peer(chain.to_vec()));
+		let identity = tls
+			.zip(session.peer_certificates())
+			.map(|(tls, chain)| tls.peer(chain.to_vec()));
 		Self {
 			transport: Transport::Tcp,
 			link: Link {

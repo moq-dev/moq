@@ -1631,11 +1631,13 @@ impl Listen {
 		roots: &ClientRoots,
 	) -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>> {
 		let certs = read_roots(paths)?;
-		let verifier =
-			rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(root_store(&certs)?), provider.clone())
-				.allow_unauthenticated()
-				.build()
-				.map_err(Error::ClientVerifier)?;
+		let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+			Arc::new(root_store(&certs)?),
+			provider.clone(),
+		)
+		.allow_unauthenticated()
+		.build()
+		.map_err(Error::ClientVerifier)?;
 		roots.replace(certs);
 		Ok(verifier)
 	}
@@ -2786,7 +2788,13 @@ mod tests {
 	#[test]
 	fn client_auth_is_off_until_configured() {
 		let provider = crypto::provider().unwrap();
-		assert!(Listen::default().client_auth(provider.clone()).unwrap().verifier.is_none());
+		assert!(
+			Listen::default()
+				.client_auth(provider.clone())
+				.unwrap()
+				.verifier
+				.is_none()
+		);
 
 		let pinned = Listen {
 			peers: Some(Peers::new()),
@@ -3102,7 +3110,11 @@ mod tests {
 		};
 		let full = hashes(&[&leaf, &intermediate, &root]);
 		assert_eq!(lineage(&[&leaf, &intermediate]), full);
-		assert_eq!(lineage(&[&leaf, &intermediate, &root]), full, "a sent root is listed once");
+		assert_eq!(
+			lineage(&[&leaf, &intermediate, &root]),
+			full,
+			"a sent root is listed once"
+		);
 	}
 
 	/// [`Serve::peer`] carries the roots the listener verifies client certificates against.

@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### A listener builds its peers' identities
 
-`tls::PeerIdentity::from_chain` is removed. A listener outside this crate that ran its own mTLS handshake, such as the io_uring workers, calls `tls::Serve::peer(chain)` on the `Serve` its TLS config came from.
+`tls::PeerIdentity::from_chain` is removed. A listener outside this crate that ran its own mTLS handshake, such as the io\_uring workers, calls `tls::Serve::peer(chain)` on the `Serve` its TLS config came from.
 The identity then carries the roots that listener trusts, so `PeerIdentity::lineage` ends at the root the chain verified against even when the client did not send it.
 
 ### The dial-side client certificate reloads from disk
