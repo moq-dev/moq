@@ -886,13 +886,13 @@ fails the job too, rather than passing uncompared; a bench target the base does
 not have yet is only reported as new.
 
 Three runs on the hosted runner set these numbers. In two A/A runs of the
-shared, supplemental and io_uring groups, 2 to 4% of cases crossed 10% either
-way in the screen, at most 17 of them slower, and the rounds rejected every
-one; no round set that agreed on a slowdown had a median above 6%. A third run,
-whose base cut one case's work by a quarter, failed with that case alone at
-+35%. Its rounds also agreed, at medians of +9.3 to +9.7%, on `stats/tick` cases whose source
-was identical on both sides, so 10% is a floor rather than a margin. The
-moq-net and relay groups are not calibrated yet.
+`rust-shared`, `rust-extra` and `rust-uring` groups, 2 to 4% of cases crossed
+10% either way in the screen, at most 17 of them slower, and the rounds
+rejected every one; no round set that agreed on a slowdown had a median above
+6%. A third run, whose base cut one case's work by a quarter, failed with that
+case alone at +35%. Its rounds also agreed, at medians of +9.3 to +9.7%, on
+`stats/tick` cases whose source was identical on both sides, so 10% is a floor
+rather than a margin. The moq-net and relay groups are not calibrated yet.
 
 The table page shows tonight's comparison above the trend: confirmed
 regressions, targets not compared, cases faster in the screen, slowdowns the
