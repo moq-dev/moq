@@ -160,6 +160,10 @@ export class Decoder {
 	// Ordered epoch and endpoint state from the container consumer.
 	#terminal = new Terminal();
 
+	// The subscription declared its end or finished, so a drained ring is the end of the audio, not a
+	// stall the clock should wait out. A later frame clears it.
+	#ended = new Signal(false);
+
 	// The container consumer's arrival estimate, unset while nothing is subscribed.
 	#measured = new Signal<Milli | undefined>(undefined);
 
@@ -402,13 +406,14 @@ export class Decoder {
 			effect.run((inner) => {
 				this.#out.stalled.set(inner.get(ring.stalled));
 			});
-			// Drive the clock while this rendition plays. Muted, disabled, or gone, it hands the clock
-			// back to the wall where it stands, instead of holding video on a ring that only drains.
+			// Drive the clock while this rendition plays. Muted, disabled, ended, or gone, it hands the
+			// clock back to the wall where it stands, instead of holding video on a ring that only drains.
 			effect.run((inner) => {
 				const config = inner.get(this.source.out.config);
 				const live =
 					inner.get(this.in.enabled) &&
 					!inner.get(this.sync.out.instant) &&
+					!inner.get(this.#ended) &&
 					config !== undefined &&
 					config.enabled !== false;
 				this.#track.playhead(live ? inner.get(ring.playhead) : undefined);
@@ -571,6 +576,7 @@ export class Decoder {
 		const preSkip =
 			config.codec === "opus" && config.description ? Util.Opus.preSkip(Util.Hex.toBytes(config.description)) : 0;
 		this.#terminal.clear(preSkip, Micro.fromMilli(Milli(config.warmup ?? 0)));
+		this.#ended.set(false);
 		const format =
 			config.container.kind === "loc" ? new Container.Loc.Format("audio") : new Container.Legacy.Format(config);
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
@@ -619,6 +625,7 @@ export class Decoder {
 				if (next?.kind !== "frame") {
 					// The track ending, or a gap or end, cuts a held head short.
 					if (!(await play(order.flush()))) return;
+					if (!next || next.kind === "end") this.#ended.set(true);
 					if (!next) break;
 					if (this.#onRead(next)) {
 						this.#reprime(decoder, decoderConfig, order);
@@ -630,6 +637,7 @@ export class Decoder {
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Milli.fromMicro(frame.timestamp as Micro);
+				this.#ended.set(false);
 				const late = this.#track.received(timestamp, frame.arrival);
 				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
@@ -659,6 +667,7 @@ export class Decoder {
 		const opusDescription = config.description ? Util.Hex.toBytes(config.description) : init.description;
 		const preSkip = config.codec === "opus" && opusDescription ? Util.Opus.preSkip(opusDescription) : 0;
 		this.#terminal.clear(preSkip, Micro.fromMilli(Milli(config.warmup ?? 0)));
+		this.#ended.set(false);
 		// Opus in CMAF uses raw packets (not OGG-wrapped), so description must be omitted.
 		// The dOps box from the init segment is not a valid OGG Identification Header.
 		const description =
@@ -706,6 +715,7 @@ export class Decoder {
 				if (next?.kind !== "frame") {
 					// The track ending, or a gap or end, cuts a held head short.
 					if (!(await play(order.flush()))) return;
+					if (!next || next.kind === "end") this.#ended.set(true);
 					if (!next) break;
 					if (this.#onRead(next)) {
 						this.#reprime(decoder, decoderConfig, order);
@@ -716,6 +726,7 @@ export class Decoder {
 				const { frame } = next;
 
 				const timestamp = Milli.fromMicro(frame.timestamp);
+				this.#ended.set(false);
 				const late = this.#track.received(timestamp, frame.arrival);
 				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 

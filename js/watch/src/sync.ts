@@ -130,8 +130,11 @@ export class Clock {
 	audio?: Part;
 	driving = false;
 
-	// The audio playhead a re-stall holds the clock at.
-	readonly paused = new Signal<Milli | undefined>(undefined);
+	// Where a re-stall stopped the audio. Stalled, the clock runs on until the output reaches it, which
+	// output latency delays, and holds there. Once the ring refills, the output first plays that
+	// latency's worth of silence, so the clock holds until the reported playhead passes it again,
+	// rather than stepping back.
+	readonly paused = new Signal<{ timestamp: Milli; stalled: boolean } | undefined>(undefined);
 
 	constructor(props?: Inputs<SyncInput>) {
 		this.in = {
@@ -198,10 +201,14 @@ export class Clock {
 	// Re-sync the reference to the audio playhead, hold it at a re-stall, or hand it back to arrivals.
 	clock(part: Part, playhead: Playhead | undefined): void {
 		if (playhead?.rolling) {
+			// The wall clock's skips passed over frames relative to a playhead audio now replaces.
+			if (!this.driving) this.floor = undefined;
 			this.driving = true;
 			this.owner = undefined;
-			this.paused.set(undefined);
 			this.out.reference.set(playhead.wall - playhead.timestamp - this.out.delay.peek());
+			const paused = this.paused.peek();
+			if (paused && this.rolling() >= paused.timestamp) this.paused.set(undefined);
+			else if (paused) this.paused.set({ timestamp: paused.timestamp, stalled: false });
 			return;
 		}
 		if (this.audio !== part || !this.driving) return;
@@ -209,18 +216,30 @@ export class Clock {
 		// audio it accompanies. Buffered playback drains between bursts by design, so its ring
 		// stalling means the audio ended, not that it is late.
 		if (playhead && !this.out.buffered.peek()) {
-			this.paused.set(playhead.timestamp);
+			this.paused.set({ timestamp: playhead.timestamp, stalled: true });
 			return;
 		}
 		this.release();
+	}
+
+	// The playhead extrapolated from the reference, before any hold or clamp.
+	rolling(): number {
+		return wall() - (this.out.reference.peek() ?? 0) - this.out.delay.peek();
+	}
+
+	// The playhead, applying a re-stall's hold.
+	playhead(): number {
+		const rolling = this.rolling();
+		const paused = this.paused.peek();
+		if (!paused) return rolling;
+		return paused.stalled ? Math.min(rolling, paused.timestamp) : Math.max(rolling, paused.timestamp);
 	}
 
 	// Hand the clock back to the wall at the last audio-derived value, so video does not jump. The
 	// reference passes to another track still receiving, whose own timeline ending releases it, or
 	// else to the next track to arrive.
 	release(): void {
-		const held = this.paused.peek();
-		if (held !== undefined) this.out.reference.set(wall() - held - this.out.delay.peek());
+		if (this.paused.peek()) this.out.reference.set(wall() - this.playhead() - this.out.delay.peek());
 		this.paused.set(undefined);
 		this.driving = false;
 		this.owner = this.parts.peek().find((part) => part !== this.audio && part.anchor !== undefined);
@@ -280,7 +299,7 @@ export class Clock {
 		const reference = this.out.reference.peek();
 		if (reference === undefined) return undefined;
 		// Media time is nonnegative, so a playhead before the first sample's turn reads as zero.
-		return this.paused.peek() ?? Milli(Math.max(0, wall() - reference - this.out.delay.peek()));
+		return Milli(Math.max(0, this.playhead()));
 	}
 
 	async wait(part: Part | undefined, timestamp: Milli, signal?: AbortSignal): Promise<boolean> {
@@ -306,13 +325,14 @@ export class Clock {
 				continue;
 			}
 
-			// A stalled audio ring holds the playhead until it plays again.
+			// A stalled audio ring holds the playhead where it stopped until it plays again, and a
+			// refilled one holds it there until its output passes it.
 			const paused = this.paused.peek();
-			if (paused !== undefined) {
-				if (timestamp <= paused) return true;
+			if (paused?.stalled && timestamp > paused.timestamp) {
 				await this.sleep(part, undefined, signal);
 				continue;
 			}
+			if (paused && !paused.stalled && timestamp <= paused.timestamp) return true;
 
 			// NOTE: This function runs in parallel for each frame.
 			const sleep = reference + timestamp - wall() + this.out.delay.peek();

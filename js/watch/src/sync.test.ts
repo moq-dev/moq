@@ -511,6 +511,49 @@ describe("audio clock", () => {
 		sync.close();
 	});
 
+	it("holds a re-stall where the output stops, not where the ring did", async () => {
+		const sync = new Sync({ delay: Milli(100) });
+		const audio = sync.track("audio", { target: target() });
+		await flush();
+		// 30ms of output latency: the ring has read to 1030 while the output plays 1000.
+		audio.playhead({ rolling: true, timestamp: Milli(1000), wall: local() });
+		audio.playhead({ rolling: false, timestamp: Milli(1030) });
+		expect(sync.now()).toBe(Milli(1000));
+		await clock.advance(Nano.fromMilli(Milli(20)));
+		expect(sync.now()).toBe(Milli(1020));
+		await clock.advance(Nano.fromMilli(Milli(100)));
+		expect(sync.now()).toBe(Milli(1030));
+
+		// Refilled, the output plays the latency's silence first: the clock never steps back.
+		audio.playhead({ rolling: true, timestamp: Milli(1000), wall: local() });
+		expect(sync.now()).toBe(Milli(1030));
+		await clock.advance(Nano.fromMilli(Milli(40)));
+		expect(sync.now()).toBe(Milli(1040));
+		audio.playhead({ rolling: true, timestamp: Milli(1040), wall: local() });
+		await clock.advance(Nano.fromMilli(Milli(10)));
+		expect(sync.now()).toBe(Milli(1050));
+		sync.close();
+	});
+
+	it("forgets the wall clock's skips once audio takes over", async () => {
+		const sync = new Sync({ delay: Milli(100) });
+		const audio = sync.track("audio", { target: target() });
+		const video = sync.track("video", { target: target() });
+		await flush();
+		// A burst skips the wall-clock playhead to 900, passing over everything before it.
+		video.received(Milli(0), local());
+		video.received(Milli(1000), local());
+		expect(video.presentable(Milli(100))).toBe(false);
+
+		// Audio plays from 0, so a frame at 100 is still ahead of it.
+		audio.playhead({ rolling: true, timestamp: Milli(0), wall: local() });
+		expect(video.presentable(Milli(100))).toBe(true);
+		const waiting = video.wait(Milli(100));
+		await clock.advance(Nano.fromMilli(Milli(100)));
+		expect(await waiting).toBe(true);
+		sync.close();
+	});
+
 	it("falls back to the wall clock where audio left it when audio stops", async () => {
 		for (const stalled of [false, true]) {
 			const sync = new Sync({ delay: Milli(100) });

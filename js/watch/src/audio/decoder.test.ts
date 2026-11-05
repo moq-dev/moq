@@ -1314,11 +1314,12 @@ it("drives the clock from the output while it plays, holds it at a re-stall, and
 		await clock.advance(Nano.fromMilli(Milli(10)));
 		expect(playback.sync.now()).toBeCloseTo(heard + 10, 6);
 
-		// The ring runs dry: the clock holds where it stopped, however long the refill takes.
+		// The ring runs dry: the clock runs on until the output reaches where it stopped, then holds
+		// there however long the refill takes.
 		while (ring.read(quantum()) > 0);
 		await microtasks();
-		const held = playback.sync.now();
-		expect(held).toBe(Milli.fromMicro(ring.ring.timestamp));
+		const held = Milli.fromMicro(ring.ring.timestamp);
+		expect(playback.sync.now()).toBeLessThan(held);
 		await clock.advance(Nano.fromMilli(Milli(500)));
 		expect(playback.sync.now()).toBe(held);
 
@@ -1326,7 +1327,37 @@ it("drives the clock from the output while it plays, holds it at a re-stall, and
 		playback.decoding.set(false);
 		await microtasks();
 		await clock.advance(Nano.fromMilli(Milli(10)));
-		expect(playback.sync.now()).toBe(Milli((held ?? 0) + 10));
+		expect(playback.sync.now()).toBe(Milli(held + 10));
+	} finally {
+		playback.close();
+		await microtasks();
+		installed.close();
+	}
+});
+
+it("hands the clock back once the track declares its end, so video does not wait on the drained ring", async () => {
+	const clock = new Manual();
+	clock.jump(Nano.fromMilli(Milli(5000)));
+	const installed = clock.install();
+	const playback = await play(Milli(100));
+	const quantum = () => [new Float32Array(960), new Float32Array(960)];
+	try {
+		await playback.play(10);
+		const ring = playback.rings()[0];
+		const context = playback.context.peek() as unknown as FakeContext;
+		if (!ring?.ring || !context) throw new Error("missing audio graph");
+		context.output = { contextTime: 1, performanceTime: 5000 };
+		ring.time = 1;
+		expect(ring.read(quantum())).toBe(960);
+		await microtasks();
+
+		playback.push({ kind: "end", group: 0n, end: Micro(frameTimestamp + 20_000) });
+		await microtasks();
+		while (ring.read(quantum()) > 0);
+		await microtasks();
+		const drained = playback.sync.now() ?? 0;
+		await clock.advance(Nano.fromMilli(Milli(500)));
+		expect(playback.sync.now()).toBe(Milli(drained + 500));
 	} finally {
 		playback.close();
 		await microtasks();
