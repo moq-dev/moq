@@ -184,13 +184,13 @@ fn from_code(code: u64) -> Error {
 
 /// Refuse an AUTH past our GOAWAY cutoff with AUTH_ERROR, the only answer its presenter reads.
 #[cfg(feature = "async")]
-pub(super) async fn refuse_going_away(mut stream: Stream<Transport, Version>) -> Result<(), Error> {
+pub(super) fn going_away(mut stream: Stream<Transport, Version>) -> super::request_stream::Reject {
 	let reply = AuthError {
 		code: GOING_AWAY,
 		reason: "going away".to_string(),
 	};
-	stream.writer.buffer_message(AuthError::ID, &reply)?;
-	super::request_stream::deliver(&mut stream.writer).await
+	let buffered = stream.writer.buffer_message(AuthError::ID, &reply);
+	super::request_stream::Reject::buffered(stream, buffered)
 }
 
 /// What the peer's connection credential earns by default: publishing what our
@@ -206,23 +206,6 @@ pub(super) fn peer_grant(
 	}
 }
 
-/// Present every token this side adds, one AUTH request each, once the peer's SETUP
-/// says it negotiated the extension. Never returns: a session without it just fails
-/// the tokens as unsupported.
-#[cfg(feature = "async")]
-pub(super) async fn run_present(
-	runtime: crate::time::Deadlines,
-	session: Transport,
-	control: Control,
-	handle: Link,
-	peer_setup: peer::PeerSetup,
-	version: Version,
-	stats: crate::stats::Session,
-) -> Result<(), Error> {
-	let mut presenting = Presenting::new(runtime, session, control, handle, peer_setup, version, stats);
-	kio::wait(|waiter| presenting.poll(waiter)).await
-}
-
 /// What every one of our Auth requests is sent with.
 #[cfg(feature = "async")]
 #[derive(Clone)]
@@ -235,7 +218,9 @@ struct Presenter {
 	version: Version,
 }
 
-/// [`run_present`]'s progress: an Auth request for each token, as a child task.
+/// Present every token this side adds, one AUTH request each as a child task, once the
+/// peer's SETUP says it negotiated the extension. Never finishes: a session without it
+/// just fails the tokens as unsupported.
 #[cfg(feature = "async")]
 pub(super) struct Presenting {
 	presenter: Presenter,
@@ -557,19 +542,7 @@ pub(super) struct Serve {
 }
 
 impl Serve {
-	/// Answer one Auth request. The stream lives as long as the token.
-	#[cfg(feature = "async")]
-	pub(super) async fn run(
-		self,
-		stream: Stream<Transport, Version>,
-		msg: Auth,
-		version: Version,
-	) -> Result<(), Error> {
-		let mut answering = self.answer(stream, msg, version);
-		kio::wait(|waiter| answering.poll(waiter)).await
-	}
-
-	/// Start answering one Auth request; see [`Self::run`].
+	/// Start answering one Auth request. The stream lives as long as the token.
 	#[cfg(feature = "async")]
 	pub(super) fn answer(self, mut stream: Stream<Transport, Version>, msg: Auth, version: Version) -> Answering {
 		let goaways = super::request_stream::GoAways::new(msg.request_id.0 % 2 == 1);

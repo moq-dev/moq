@@ -205,13 +205,6 @@ impl Messages {
 	}
 }
 
-/// Refuse a request with its complete REQUEST_ERROR, then finish the response.
-#[cfg(feature = "async")]
-pub(super) async fn reject(stream: Stream<Transport, Version>, error: super::RequestError<'_>) -> Result<(), Error> {
-	let mut reject = Reject::new(stream, error);
-	kio::wait(|waiter| reject.poll(waiter)).await
-}
-
 /// End a request stream with the refusal buffered on it: [`Deliver`] owning the stream.
 pub(super) struct Reject {
 	stream: Stream<Transport, Version>,
@@ -320,13 +313,6 @@ impl Deliver {
 		});
 		Poll::Ready(Ok(()))
 	}
-}
-
-/// Await [`Deliver`].
-#[cfg(feature = "async")]
-pub(super) async fn deliver(writer: &mut Writer<crate::transport::boxed::SendStream, Version>) -> Result<(), Error> {
-	let mut deliver = Deliver::new();
-	kio::wait(|waiter| deliver.poll(waiter, writer)).await
 }
 
 /// Buffer the REQUEST_ERROR refusing a `kind` request with `err`.

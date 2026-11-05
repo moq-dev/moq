@@ -22,6 +22,7 @@ use crate::util::Later;
 use kio::Lock;
 
 mod namespaces;
+pub(super) use namespaces::Namespaces;
 mod tracks;
 
 const TRACK_ALIAS_TIMEOUT: Duration = Duration::from_secs(1);
@@ -5660,7 +5661,7 @@ impl LearnTrackStatus {
 
 impl Subscriber {
 	/// Receive one subgroup stream into its subscription's track; see [`RecvGroup`].
-	#[cfg(feature = "async")]
+	#[cfg(test)]
 	pub async fn recv_group(
 		&mut self,
 		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
@@ -5777,19 +5778,19 @@ impl<'a, const EXTENSIONS: bool> Decode<'a, Version> for PeekFirst<EXTENSIONS> {
 }
 
 /// Receives one subgroup stream into its subscription's track.
-struct RecvGroup {
+pub(super) struct RecvGroup {
 	state: RecvGroupState,
 }
 
 #[kio::machine(self.state: RecvGroupState)]
 impl RecvGroup {
-	fn new() -> Self {
+	pub(super) fn new() -> Self {
 		Self {
 			state: RecvGroupState::Start,
 		}
 	}
 
-	fn poll(
+	pub(super) fn poll(
 		&mut self,
 		waiter: &kio::Waiter,
 		this: &Subscriber,
@@ -6246,7 +6247,7 @@ impl GroupIngest {
 
 impl Subscriber {
 	/// Read a fill fetch stream, or a group FETCH's; see [`RecvFill`].
-	#[cfg(feature = "async")]
+	#[cfg(test)]
 	pub async fn recv_fill(
 		&mut self,
 		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
@@ -6278,19 +6279,19 @@ impl Subscriber {
 /// rest of the group; see [`Fill`]. A reset stream is the publisher's fill-failure
 /// signal, and arrives here as a read error, which drops the head and the join with it.
 /// A group FETCH's stream is handed to [`RecvGroupFetch`] instead.
-struct RecvFill {
+pub(super) struct RecvFill {
 	state: RecvFillState,
 }
 
 #[kio::machine(self.state: RecvFillState)]
 impl RecvFill {
-	fn new() -> Self {
+	pub(super) fn new() -> Self {
 		Self {
 			state: RecvFillState::Start,
 		}
 	}
 
-	fn poll(
+	pub(super) fn poll(
 		&mut self,
 		waiter: &kio::Waiter,
 		this: &Subscriber,

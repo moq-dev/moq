@@ -235,12 +235,3 @@ impl kio::Task for Exchange {
 		Poll::Ready(res)
 	}
 }
-
-impl Subscriber {
-	/// Await [`Namespaces`].
-	#[cfg(feature = "async")]
-	pub(in crate::ietf) async fn run_namespaces(self, discovery: Discovery) -> Result<(), Error> {
-		let mut namespaces = Namespaces::new(self, discovery);
-		Err(kio::wait(|waiter| namespaces.poll(waiter)).await)
-	}
-}
