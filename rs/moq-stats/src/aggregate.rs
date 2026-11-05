@@ -698,7 +698,7 @@ enum Reader<F> {
 	Waiting,
 	/// Awaiting the subscription handshake: the reader has subscribed, and the
 	/// track's info resolving shows whether the track exists.
-	Subscribing(Box<moq_json::snapshot::Consumer<F>>, Pending<Resolving>),
+	Subscribing(Box<moq_json::snapshot::Consumer<F>>, Box<Pending<Resolving>>),
 	/// Reading frames. Boxed: the snapshot consumer dwarfs the other variants,
 	/// and one lives per node in a map.
 	Active(Box<moq_json::snapshot::Consumer<F>>),
@@ -1109,7 +1109,7 @@ fn subscribing<F: serde::de::DeserializeOwned>(
 ) -> Reader<F> {
 	// The reader subscribes first, so resolving the info rides on its subscription.
 	let reader = Box::new(moq_json::snapshot::Consumer::new(track.clone(), config.clone()));
-	Reader::Subscribing(reader, track.info())
+	Reader::Subscribing(reader, Box::new(track.info()))
 }
 
 #[cfg(test)]

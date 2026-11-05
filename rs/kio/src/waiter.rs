@@ -47,8 +47,8 @@ pub struct Waiter {
 	noop: bool,
 }
 
-/// Lists a waiter remembers being parked on. A relay's busiest tasks park on up to 8.
-const PARKED: usize = 8;
+/// Lists a waiter remembers being parked on.
+const PARKED: usize = 16;
 
 impl Waiter {
 	/// Create a new waiter from an async [`Waker`].
@@ -82,7 +82,7 @@ impl Waiter {
 	/// Register this waiter with a [`WaiterList`] for future notification.
 	///
 	/// Delegates to [`WaiterList::register`], a no-op while the list still holds it.
-	/// Only the first 8 lists at once are remembered: a waiter kept across polls
+	/// Only the first 16 lists at once are remembered: a waiter kept across polls
 	/// that also sits on more appends a duplicate to those extras on every call.
 	pub fn register(&self, list: &mut WaiterList) {
 		list.register(self);
