@@ -47,8 +47,8 @@ pub struct MoqAnnounceRoute {
 	/// publisher is a new stream viewers restart onto. Set one only for a publisher that
 	/// continues its group sequences across restarts and raises `epoch` on each: readers
 	/// stitch every route of one instance together, so restarting the sequences under an
-	/// old instance splices unrelated groups into their tracks. Changing it is a
-	/// `MoqAnnounceEvent::Restart`.
+	/// old instance splices unrelated groups into their tracks. Changing it hands
+	/// `MoqFollowing` a new broadcast.
 	#[uniffi(default = None)]
 	pub instance: Option<String>,
 	/// Which run of a stable `instance` this is: only its highest epoch is eligible, cheaper
@@ -197,37 +197,21 @@ impl From<moq_net::announce::Announce> for MoqAnnounce {
 	}
 }
 
-/// What a [`MoqAnnounceConsumer`] yields.
+/// What a [`MoqAnnounceConsumer`] yields: a path becoming present or absent.
+///
+/// Another publisher instance taking a path over keeps it present: follow it with
+/// `MoqOriginConsumer::follow` to see the broadcast change.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum MoqAnnounceEvent {
-	/// A route now covers the prefix; the stream had none there.
-	Start {
-		/// The broadcast announcement affected by this event.
+	/// A route now covers the path, which was absent.
+	Present {
+		/// The announcement that made the path present.
 		announce: MoqAnnounce,
 	},
-	/// The route covering the prefix changed hops or cost.
-	Update {
-		/// The broadcast announcement affected by this event.
+	/// No route covers the path any more. Carries its last advertised route.
+	Absent {
+		/// The announcement that went.
 		announce: MoqAnnounce,
-	},
-	/// No route covers the prefix any more. Carries its last advertised route.
-	End {
-		/// The broadcast announcement affected by this event.
-		announce: MoqAnnounce,
-	},
-	/// Another publisher instance now serves the prefix: drop what was resolved under
-	/// it and request afresh.
-	Restart {
-		/// The broadcast announcement affected by this event.
-		announce: MoqAnnounce,
-	},
-	/// A route now covers the prefix and continues what the route at `predecessor`
-	/// served beneath it: keep what was resolved through that one.
-	Takeover {
-		/// The broadcast announcement affected by this event.
-		announce: MoqAnnounce,
-		/// The prefix of the route it continues, at or above `announce`'s.
-		predecessor: String,
 	},
 }
 
@@ -235,21 +219,11 @@ impl From<moq_net::announce::Event> for MoqAnnounceEvent {
 	fn from(event: moq_net::announce::Event) -> Self {
 		use moq_net::announce::Event;
 		match event {
-			Event::Start(announce) => Self::Start {
+			Event::Present(announce) => Self::Present {
 				announce: announce.into(),
 			},
-			Event::Update(announce) => Self::Update {
+			Event::Absent(announce) => Self::Absent {
 				announce: announce.into(),
-			},
-			Event::End(announce) => Self::End {
-				announce: announce.into(),
-			},
-			Event::Restart(announce) => Self::Restart {
-				announce: announce.into(),
-			},
-			Event::Takeover { announce, predecessor } => Self::Takeover {
-				announce: announce.into(),
-				predecessor: predecessor.to_string(),
 			},
 		}
 	}
@@ -411,8 +385,8 @@ impl MoqOriginConsumer {
 	///
 	/// Unlike `request`, this waits for future announcements and keeps following the
 	/// instances serving the path. A local broadcast resolves once announced, like a remote
-	/// one. Pass an `instance` to follow only that stream: another one taking over is never
-	/// handed out, and the stream is handed out again if it returns after an end.
+	/// one. Pass an `instance` to follow only that stream: another one taking over ends it,
+	/// and the stream is handed out again if it returns.
 	#[uniffi::method(default(instance = None))]
 	pub fn follow(&self, path: String, instance: Option<String>) -> Result<Arc<MoqFollowing>, MoqError> {
 		let _guard = crate::ffi::enter();
@@ -627,24 +601,27 @@ impl MoqAnnounceConsumer {
 
 #[uniffi::export]
 impl MoqFollowing {
-	/// Wait for the next publisher instance serving the broadcast. Returns `Closed` if cancelled
-	/// or the origin is closed.
+	/// Wait for the next change to the publisher instance serving the broadcast. Returns `Closed`
+	/// if cancelled or the origin is closed.
 	///
 	/// The first call resolves the instance serving the path, once one is announced. Each later
-	/// call waits for another to take over, as a restarted publisher or a replacement session
-	/// does, or for the broadcast to return after it went offline. Drop everything read from the
-	/// previous instance then and read the new one: the old one's tracks end when its route
-	/// dies, with an error unless this side closed that session.
-	pub async fn available(&self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
+	/// call returns another instance taking over, as a restarted publisher or a replacement
+	/// session does, or `None` once the path goes offline (or, with an `instance`, another
+	/// instance takes it over), then whatever serves it next. Drop everything read from the
+	/// previous instance then: its tracks end when its route dies, with an error unless this
+	/// side closed that session.
+	pub async fn available(&self) -> Result<Option<Arc<MoqBroadcastConsumer>>, MoqError> {
 		let broadcast = self
 			.reads
 			.wait(|following, waiter| Poll::Ready(Ok(ready!(following.poll_available(waiter))?)))
 			.await?;
-		Ok(Arc::new(MoqBroadcastConsumer::routed(
-			broadcast,
-			self.origin.clone(),
-			self.driver.clone(),
-		)))
+		Ok(broadcast.map(|broadcast| {
+			Arc::new(MoqBroadcastConsumer::routed(
+				broadcast,
+				self.origin.clone(),
+				self.driver.clone(),
+			))
+		}))
 	}
 
 	/// Cancel all current and future `available()` calls.

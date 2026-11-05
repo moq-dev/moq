@@ -47,14 +47,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 	}
 
 	/// Get the next event and its frame's timestamp, or `None` once the track ends.
-	pub async fn next(&mut self) -> Result<Option<moq_net::Timed<Event<T>>>>
-	where
-		T: Unpin,
-	{
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for the next event, without blocking.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<Event<T>>>>> {
 		loop {
 			// Drain what the last frame produced before reading more, so every queued event is that

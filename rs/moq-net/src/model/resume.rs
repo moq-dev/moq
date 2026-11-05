@@ -518,9 +518,9 @@ struct Copy {
 	feeds: bool,
 }
 
-// Boxed: a subscriber is twice a pending answer, and a copy holds one for its whole life.
+// Boxed: a copy holds one for its whole life, and neither arm should pad every copy.
 enum Sub {
-	Pending(kio::Pending<track::Subscribing>),
+	Pending(Box<kio::Pending<track::Subscribing>>),
 	Ready(Box<track::Subscriber>),
 }
 
@@ -1233,7 +1233,7 @@ impl Reader {
 		let wire = self.mirrored.clamped(floor, None, &resolved);
 		self.copies.push(Copy {
 			generation,
-			sub: Sub::Pending(track.subscribe(wire)),
+			sub: Sub::Pending(Box::new(track.subscribe(wire))),
 			track,
 			floor,
 			from: self.mirrored.ranges.clone(),
@@ -1870,7 +1870,7 @@ impl Reader {
 		let wire = self.mirrored.clamped(floor, Some(lowered.end), &resolved);
 		let copy = Copy {
 			generation,
-			sub: Sub::Pending(track.subscribe(wire)),
+			sub: Sub::Pending(Box::new(track.subscribe(wire))),
 			floor,
 			from: self.mirrored.ranges.clone(),
 			resolved,

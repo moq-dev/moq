@@ -44,6 +44,7 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 				.unwrap()
 				.available()
 				.await
+				.unwrap()
 				.unwrap();
 			viewers.push((viewer, pair, remote));
 		}
