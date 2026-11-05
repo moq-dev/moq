@@ -135,11 +135,11 @@ fn serving_max_delay(version: Version, requested: Duration) -> Option<Duration> 
 /// an unbounded budget so nothing is dropped under them (see [`serving_max_delay`]), which
 /// must not read as a request to replay the whole cache on join.
 ///
-/// `latest` is the newest group when the SUBSCRIBE arrived: anything written since is newer,
-/// so it is delivered. A SUBSCRIBE that found none, such as one a relay serves from a copy
-/// still fetching upstream, or on lite-05 one sent alongside its TRACK, takes the newest group
-/// known once the track resolves, including a largest the upstream's answer reported. A newer
-/// group the answer brings later is not waited for. Lite01/02 keep a zero floor.
+/// `latest` is the newest group known once the track resolves, which a SUBSCRIBE can beat, as
+/// one a relay serves from a copy still fetching upstream, or on lite-05 one sent alongside its
+/// TRACK. It includes a largest the upstream's answer reported, whether or not the copy already
+/// held a group, so a join starts at the same group warm or cold. A newer group the answer
+/// brings later is not waited for. Lite01/02 keep the newest group on arrival, or a zero floor.
 fn cursor_floor(version: Version, start_group: Option<u64>, latest: Option<u64>) -> u64 {
 	if version.resolves_start() || start_group.is_some() {
 		return 0;
@@ -2528,11 +2528,9 @@ impl Request for SubscribeServe {
 
 					let latest = match shared.version {
 						Version::Lite01 | Version::Lite02 => latest,
-						_ => latest.or_else(|| {
-							track
-								.latest_sequence()
-								.max(track.peek_largest().map(|largest| largest.group))
-						}),
+						_ => latest
+							.max(track.latest_sequence())
+							.max(track.peek_largest().map(|largest| largest.group)),
 					};
 					let floor = cursor_floor(shared.version, bounds.groups().start(), latest);
 					let mut run = TrackRun::new(sub, track, bounds, floor, steer_tx);
@@ -9484,6 +9482,8 @@ mod tests {
 		enum Answer {
 			/// Groups 0 and 3 written before the SUBSCRIBE arrives, 7 after.
 			Resolved,
+			/// Groups 0 and 3 written and group 9 reported before the SUBSCRIBE arrives, 7 and 9 after.
+			Warm,
 			/// The answer holds groups 0, 3, and 7.
 			Cached,
 			/// The answer holds group 3 and reports group 9 as its largest.
@@ -9507,7 +9507,13 @@ mod tests {
 			Version::Lite05,
 			Version::Lite06,
 		] {
-			for answer in [Answer::Resolved, Answer::Cached, Answer::Reported, Answer::Empty] {
+			for answer in [
+				Answer::Resolved,
+				Answer::Warm,
+				Answer::Cached,
+				Answer::Reported,
+				Answer::Empty,
+			] {
 				for start in [None, Some(0)] {
 					let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 					let broadcast = origin.create_broadcast("room").unwrap();
@@ -9520,9 +9526,12 @@ mod tests {
 					let mut staged = Some(request.stage(track::Info::timed()));
 					staged.as_ref().unwrap().received();
 					let mut track = None;
-					if let Answer::Resolved = answer {
+					if let Answer::Resolved | Answer::Warm = answer {
 						let mut resolved = staged.take().unwrap().commit();
 						write(&mut resolved, &[0, 3]);
+						if let Answer::Warm = answer {
+							resolved.report_largest(track::Position::group(9));
+						}
 						track = Some(resolved);
 					}
 
@@ -9580,7 +9589,7 @@ mod tests {
 					drive().await;
 
 					let mut track = match answer {
-						Answer::Resolved => track.take().unwrap(),
+						Answer::Resolved | Answer::Warm => track.take().unwrap(),
 						Answer::Cached => {
 							let mut staged = staged.take().unwrap();
 							write(&mut staged, &[0, 3, 7]);
@@ -9597,7 +9606,7 @@ mod tests {
 					drive().await;
 					match answer {
 						Answer::Resolved => write(&mut track, &[7]),
-						Answer::Reported => write(&mut track, &[7, 9]),
+						Answer::Reported | Answer::Warm => write(&mut track, &[7, 9]),
 						Answer::Empty => write(&mut track, &[0, 3, 7]),
 						Answer::Cached => {}
 					}
@@ -9622,6 +9631,7 @@ mod tests {
 					sequences.sort();
 					let all: &[u64] = match answer {
 						Answer::Reported => &[3, 7, 9],
+						Answer::Warm => &[0, 3, 7, 9],
 						_ => &[0, 3, 7],
 					};
 					let expected: &[u64] = if start.is_some() || version.resolves_start() {
@@ -9629,7 +9639,9 @@ mod tests {
 					} else {
 						match answer {
 							Answer::Resolved => &[3, 7],
+							Answer::Warm if version == Version::Lite01 => &[3, 7, 9],
 							_ if version == Version::Lite01 => all,
+							Answer::Warm => &[9],
 							Answer::Cached => &[7],
 							Answer::Reported => &[9],
 							Answer::Empty => &[0, 3, 7],

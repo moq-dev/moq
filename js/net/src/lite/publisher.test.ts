@@ -714,6 +714,8 @@ async function servedSubscription(
 		routed?: boolean;
 		// Groups the track holds before the SUBSCRIBE arrives, stamped by sequence.
 		prefill?: bigint[];
+		// A newer largest group the track's source reported before the SUBSCRIBE arrives.
+		reported?: bigint;
 		// Leave the track unresolved until `accept`, as an on-demand track the SUBSCRIBE beats.
 		pending?: boolean;
 	} = {},
@@ -748,6 +750,10 @@ async function servedSubscription(
 		const group = track.createGroup(sequence);
 		for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(sequence))));
 		group.finish();
+	}
+	if (options.reported !== undefined) {
+		if (!track) throw new Error("a pending track has no source to report");
+		hooks.reportedGroup(track, options.reported);
 	}
 	// Pulled before the SUBSCRIBE arrives: a broadcast nobody pulls refuses an unknown track.
 	const request = options.pending ? wireOf(broadcast).requested() : undefined;
@@ -1474,15 +1480,18 @@ test("lite draft-05: an update dropping the floor re-pins to the latest group", 
 // A SUBSCRIBE can beat its track resolving, as one a relay serves from a copy still fetching
 // upstream. Groups the track holds once it does are older than the join, so an absent Group
 // Start is still the latest group known then, including one the upstream reported.
+// Routed, the join reads the front's serving copy.
 test.each([
-	[Version.DRAFT_03, undefined],
-	[Version.DRAFT_04, undefined],
-	[Version.DRAFT_04, 9n],
-	[Version.DRAFT_05, undefined],
+	[Version.DRAFT_03, undefined, false],
+	[Version.DRAFT_04, undefined, false],
+	[Version.DRAFT_04, 9n, false],
+	[Version.DRAFT_04, 9n, true],
+	[Version.DRAFT_05, undefined, false],
+	[Version.DRAFT_05, undefined, true],
 ])(
-	"lite %s (reported %s): a subscribe that beats its track resolving joins at its newest group",
-	async (version, reported) => {
-		const sub = await servedSubscription({ version, pending: true });
+	"lite %s (reported %s, routed %s): a subscribe that beats its track resolving joins at its newest group",
+	async (version, reported, routed) => {
+		const sub = await servedSubscription({ version, pending: true, routed });
 		try {
 			await sub.accept([0n, 3n, 7n], reported);
 			if (reported !== undefined) {
@@ -1492,6 +1501,28 @@ test.each([
 				sub.serve(9n);
 			}
 			expect(await sub.servedHeader()).toBe(reported ?? 7n);
+			expect(await sub.servedSequence()).toBeUndefined();
+		} finally {
+			await sub.close();
+		}
+	},
+);
+
+// A track that already holds groups when the SUBSCRIBE arrives still joins at a newer largest
+// its source reported, as a cold one would.
+test.each([Version.DRAFT_04, Version.DRAFT_05])(
+	"lite %s: a join on a track already holding groups starts at a reported newer group",
+	async (version) => {
+		const sub = await servedSubscription({ version, prefill: [0n, 3n], reported: 9n });
+		try {
+			if (version === Version.DRAFT_04) {
+				expect("ok" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+			} else {
+				await flush();
+			}
+			sub.serve(7n);
+			sub.serve(9n);
+			expect(await sub.servedHeader()).toBe(9n);
 			expect(await sub.servedSequence()).toBeUndefined();
 		} finally {
 			await sub.close();
