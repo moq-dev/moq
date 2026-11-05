@@ -1,4 +1,4 @@
-# Poll-first async
+# [XL] Poll-first async
 
 ## Goal
 
@@ -35,8 +35,7 @@ and their alternatives:
   lives in named fields), leaked wakers, runtime coupling in the library, and
   per-future allocation in `Tasks`.
 - **What kio keeps:** coloring (`poll_x` plus `async fn x`), `'static` spawn,
-  hand-written state machines, and 184 non-test `async fn`
-  wrappers in moq-net that still compile into coroutines.
+  and hand-written state machines.
 - **Rejected:** stackful coroutines (green threads). They break wasm, rust2's MIR
   TypeScript translation, and thread-local soundness.
 - **Zig's model** (I/O passed as an explicit `std.Io`, like an allocator) removes
@@ -72,6 +71,37 @@ and their alternatives:
   `unsafe impl` (decided 2026-10-28). Its users are moq-net's 23 straight-line multi-await `async fn` bodies and 12 straight-line
   hand-written machines; 59 bodies await in loops or selects.
 
-## Required
+Done in [moq-dev/moq#7506](https://github.com/moq-dev/moq/pull/7506) and
+[moq-dev/moq#7607](https://github.com/moq-dev/moq/pull/7607): `#[kio::wrapper]`
+generates the async wrapper from its poll, and kio, moq-net, moq-json, hang,
+moq-mux, moq-hls, moq-room, moq-stats, moq-crypto, and moq-auth each keep theirs
+behind a default-off `async` feature that binaries, tests, tokio glue, and the
+bindings enable. `just rs coroutines` proves each poll-only build compiles no
+coroutines. Runtime glue (moq-tokio, moq-uring) and bindings generate theirs
+unconditionally. The origin front driver and the server handshake are hand-written
+polls.
 
-- [Generated async wrappers behind a feature](/quest/m1/poll-first/async-feature.md) - each library's `async fn` wrappers are generated from its `poll_*` signatures and compile only with its `async` feature
+Decided 2026-11-05 (maintainer, /quest-unblock): convert every remaining
+multi-await `async fn` body listed below in
+[moq-dev/moq#7607](https://github.com/moq-dev/moq/pull/7607) before it lands,
+rather than landing it as is and splitting them into child quests.
+
+What remains is the logic still written as `async fn` bodies, all behind the
+`async` features. Each becomes a `poll_*` (hand-written when a wait sits in a loop
+or branch, `#[kio::machine]` when straight-line) with a generated wrapper, or moves
+out of the library to the edges:
+
+- **moq-net's sessions:** about 113 bodies in `ietf` (publisher, subscriber,
+  session, auth), plus `client::Client::connect`, `Session::close`,
+  `coding::Stream::open`, `Writer::encode`, `auth::Gate::guard` and `until`,
+  `util::TaskSet::drive`, and `time::run`.
+- **moq-net's model:** `frame::Consumer::read_all`, `group::Consumer::read_frame`
+  and `read_frames`, `track::Demand::closed`.
+- **Siblings' gated constructors and readers:** moq-mux `catalog::Consumer::new`,
+  `ts::Release::new`, `Source::{catalog, resolve, subscribe_track}`,
+  `fmp4::Muxer::read`, `Linger::wait`; hang `Catalog::subscribe`; moq-room
+  `chat::Subscriber::subscribe`; moq-auth `lease::Consumer::reported`; moq-hls's
+  import and export drivers.
+- **Wrappers the generator cannot take** stay hand-written: a name that differs
+  from its poll (moq-tokio `state_changed`, `presence_changed`; moq-uring `read`,
+  `write`; moq-net `track::Ordered::finished`), a by-value receiver, or a free fn.

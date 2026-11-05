@@ -1002,9 +1002,9 @@ impl Drop for JoiningTask {
 			// The session owns cancelling the request, including after the subscription
 			// ends: closing it once its header is out, or resetting it while the peer's
 			// send window still holds the header back.
-			self.tasks.push(async move {
+			self.tasks.push(crate::util::future_task(async move {
 				let _ = work.await;
-			});
+			}));
 		}
 	}
 }
@@ -1158,7 +1158,7 @@ impl Subscriber {
 	pub fn with_auth(mut self, auth: crate::auth::Link) -> Self {
 		self.auth = auth;
 		let this = self.clone();
-		self.tasks.push(async move { this.run_limit().await });
+		self.tasks.push(crate::util::future_task(async move { this.run_limit().await }));
 		self
 	}
 
@@ -1199,12 +1199,12 @@ impl Subscriber {
 	/// Serve the requests beneath one attached namespace on its own task.
 	fn serve_route(&self, path: Path, generation: u64) {
 		let this = self.clone();
-		self.tasks.push(async move {
+		self.tasks.push(crate::util::future_task(async move {
 			// stop_announce is the authoritative remover: it drops the entry
 			// (retracting the route) once the announce refcount hits zero,
 			// which is what makes run_route exit, as does a limit holding it back.
 			this.run_route(path, generation).await;
-		});
+		}));
 	}
 
 	/// End every active subscription with the error that ended the session.
@@ -2756,11 +2756,11 @@ impl Subscriber {
 
 			let mut this = self.clone();
 			this.validity = dynamic.validity().clone();
-			broadcasts.push(async move {
+			broadcasts.push(crate::util::future_task(async move {
 				if let Err(err) = this.run_broadcast(requested, source, dynamic, route).await {
 					tracing::debug!(%err, "error running broadcast");
 				}
-			});
+			}));
 		}
 	}
 
@@ -2847,9 +2847,9 @@ impl Subscriber {
 			let path = path.clone();
 			let broadcast = broadcast.clone();
 			let route = route.clone();
-			subscribes.push(async move {
+			subscribes.push(crate::util::future_task(async move {
 				this.run_subscribe(path, broadcast, route, request).await;
-			});
+			}));
 		}
 
 		Ok(())
@@ -3902,7 +3902,7 @@ impl Subscriber {
 							Later::Known(timescale),
 							Some(Heading { request_id }),
 						);
-						group_fetches.push(fetch);
+						group_fetches.push(crate::util::future_task(fetch));
 					}
 					End::Idle => {
 						tracing::debug!(broadcast = %crate::path::Rooted(self.origin.root(), broadcast_path), track = %track_name, "subscribe cancelled (idle)");
@@ -4151,7 +4151,7 @@ impl Subscriber {
 						Later::Known(idle.properties.timescale),
 						None,
 					);
-					group_fetches.push(fetch);
+					group_fetches.push(crate::util::future_task(fetch));
 				}
 				Step::Subscribe => {
 					// Marked before the SUBSCRIBE goes out: a hole may arrive live from here.
@@ -4563,7 +4563,7 @@ impl Subscriber {
 							timescale.later(),
 							None,
 						);
-						group_fetches.push(fetch);
+						group_fetches.push(crate::util::future_task(fetch));
 					}
 					let _ = group_fetches.poll(waiter);
 					crate::util::poll_unwanted(&mut demand, waiter).map(|_| None)

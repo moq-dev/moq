@@ -13,6 +13,15 @@ rust-version.workspace = true
 keywords = ["quic", "webtransport", "conferencing", "live"]
 categories = ["multimedia", "network-programming"]
 
+# The self dev-dependency only turns on `async` for the tests.
+[package.metadata.cargo-shear]
+ignored = ["moq-room"]
+
+[features]
+default = []
+# Generated async wrappers for the poll methods, and `chat::Subscriber::subscribe`. Enable where you `.await` them.
+async = ["kio/async"]
+
 [dependencies]
 kio = { workspace = true, features = ["runtime"] }
 moq-auth = { workspace = true }
@@ -21,6 +30,8 @@ moq-net = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+# Compile the generated wrappers used by the tests.
+moq-room = { path = ".", features = ["async"] }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["net"] }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 workspace-hack = { path = "../workspace-hack" }
