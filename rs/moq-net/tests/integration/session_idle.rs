@@ -113,9 +113,10 @@ async fn a_subscription_keeps_both_ends_busy() {
 }
 
 /// A fetch keeps both ends busy until it ends: here, until the group it reads finishes.
+/// moq-transport refuses a FETCH of the whole live group rather than waiting on it.
 #[kio::test]
 async fn a_fetch_keeps_both_ends_busy() {
-	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+	for version in ["moq-lite-06", "moq-lite-07-wip"] {
 		let Setup {
 			pair,
 			track,

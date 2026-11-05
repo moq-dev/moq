@@ -158,12 +158,13 @@ impl Consumer {
 		self.sequence
 	}
 
-	/// Read the next decrypted frame, without blocking.
+	/// The next decrypted frame, or `None` once the group finished.
 	///
 	/// # Errors
 	///
 	/// [`Error::Authentication`] ends this track. [`Error::Oversize`] or
 	/// [`Error::Exhausted`] as for open, and net errors from the underlying group.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>>> {
 		if self.terminal.poll_failed(waiter) {
 			self.release();
@@ -196,15 +197,6 @@ impl Consumer {
 				Poll::Ready(Err(err))
 			}
 		}
-	}
-
-	/// Read the next decrypted frame.
-	///
-	/// # Errors
-	///
-	/// Same as [`Self::poll_read_frame`].
-	pub async fn read_frame(&mut self) -> Result<Option<Frame>> {
-		kio::wait(|waiter| self.poll_read_frame(waiter)).await
 	}
 }
 

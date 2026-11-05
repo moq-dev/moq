@@ -265,13 +265,14 @@ impl Server {
 			broadcasts.insert(name.to_string(), followed.clone());
 		}
 
-		let task = tokio::spawn(run_follow(
-			Arc::downgrade(&self.inner),
-			name.to_string(),
-			Arc::downgrade(&followed),
+		let mut follow = Follow {
+			inner: Arc::downgrade(&self.inner),
+			name: name.to_string(),
+			followed: Arc::downgrade(&followed),
 			instances,
-			broadcast,
-		));
+			served: Some(broadcast),
+		};
+		let task = tokio::spawn(kio::wait(move |waiter| follow.poll(waiter)));
 		*followed.task.lock().unwrap() = Some(task);
 		Some(followed)
 	}
@@ -291,59 +292,68 @@ impl Inner {
 	}
 }
 
-/// Follow `name`'s instances into `followed` until nothing serves the path, then forget it, so the
-/// next request follows the path afresh. Holds both weakly, so it never keeps the server's state
-/// alive; dropping `followed` aborts it. `served` is the instance `followed` starts on, which the
-/// follower hands out first unless another took over since, or folds away if it closed first.
-async fn run_follow(
+/// Follows `name`'s instances into `followed` until nothing serves the path, then forgets it, so
+/// the next request follows the path afresh. Holds both weakly, so it never keeps the server's
+/// state alive; dropping `followed` aborts it. `served` is the instance `followed` starts on, which
+/// the follower hands out first unless another took over since, or folds away if it closed first.
+struct Follow {
 	inner: Weak<Inner>,
 	name: String,
 	followed: Weak<Followed>,
-	mut instances: moq_net::origin::Following,
-	served: moq_net::broadcast::Consumer,
-) {
-	let mut served = Some(served);
-	let (inner, followed) = loop {
-		let next = kio::wait(|waiter| {
-			let Some(followed) = followed.upgrade() else {
-				return Poll::Ready(None);
-			};
-			followed.forget_closed(waiter);
-			if let Poll::Ready(next) = instances.poll_available(waiter) {
-				return Poll::Ready(Some(next));
-			}
-			// The follower folds away an instance that started and ended before its first poll,
-			// so the served instance closing before it is handed out means nothing serves the path.
-			match &served {
-				Some(served) => served.poll_closed(waiter).map(|()| Some(Ok(None))),
-				None => Poll::Pending,
-			}
-		})
-		.await;
-		let (Some(inner), Some(followed)) = (inner.upgrade(), followed.upgrade()) else {
-			return;
-		};
-		match next {
-			Some(Ok(Some(broadcast))) => {
-				if !served.take().is_some_and(|served| served.is_clone(&broadcast)) {
-					followed.start(inner.serve(broadcast));
-				}
-			}
-			Some(Ok(None)) => break (inner, followed),
-			Some(Err(err)) => {
-				tracing::warn!(%err, %name, "stopped following broadcast");
-				break (inner, followed);
-			}
-			None => return,
-		}
-	};
+	instances: moq_net::origin::Following,
+	served: Option<moq_net::broadcast::Consumer>,
+}
 
-	let mut broadcasts = inner.broadcasts.lock().unwrap();
-	if broadcasts
-		.get(&name)
-		.is_some_and(|current| Arc::ptr_eq(current, &followed))
-	{
-		broadcasts.remove(&name);
+impl Follow {
+	/// The next instance event, or `None` once `followed` is gone.
+	fn poll_next(
+		&mut self,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<Result<Option<moq_net::broadcast::Consumer>, moq_net::Error>>> {
+		let Some(followed) = self.followed.upgrade() else {
+			return Poll::Ready(None);
+		};
+		followed.forget_closed(waiter);
+		if let Poll::Ready(next) = self.instances.poll_available(waiter) {
+			return Poll::Ready(Some(next));
+		}
+		// The follower folds away an instance that started and ended before its first poll,
+		// so the served instance closing before it is handed out means nothing serves the path.
+		match &self.served {
+			Some(served) => served.poll_closed(waiter).map(|()| Some(Ok(None))),
+			None => Poll::Pending,
+		}
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let (inner, followed) = loop {
+			let next = std::task::ready!(self.poll_next(waiter));
+			let (Some(inner), Some(followed)) = (self.inner.upgrade(), self.followed.upgrade()) else {
+				return Poll::Ready(());
+			};
+			match next {
+				Some(Ok(Some(broadcast))) => {
+					if !self.served.take().is_some_and(|served| served.is_clone(&broadcast)) {
+						followed.start(inner.serve(broadcast));
+					}
+				}
+				Some(Ok(None)) => break (inner, followed),
+				Some(Err(err)) => {
+					tracing::warn!(%err, name = %self.name, "stopped following broadcast");
+					break (inner, followed);
+				}
+				None => return Poll::Ready(()),
+			}
+		};
+
+		let mut broadcasts = inner.broadcasts.lock().unwrap();
+		if broadcasts
+			.get(&self.name)
+			.is_some_and(|current| Arc::ptr_eq(current, &followed))
+		{
+			broadcasts.remove(&self.name);
+		}
+		Poll::Ready(())
 	}
 }
 

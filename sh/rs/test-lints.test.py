@@ -21,6 +21,7 @@ class TestLints(unittest.TestCase):
             (root / "src").mkdir()
             shutil.copy(ROOT / "sh" / "local.sh", root / "sh" / "local.sh")
             shutil.copy(ROOT / "sh" / "local.ts", root / "sh" / "local.ts")
+            shutil.copy(ROOT / "sh" / "quest.sh", root / "sh" / "quest.sh")
             (root / "justfile").write_text("mod rs\n")
             shutil.copy(ROOT / "rs" / "justfile", root / "rs" / "justfile")
             shutil.copy(ROOT / "sh" / "rs" / "nextest.sh", root / "sh" / "rs" / "nextest.sh")

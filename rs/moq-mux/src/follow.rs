@@ -45,13 +45,14 @@ impl Instances {
 		Self(Feed::Fixed(Some(broadcast)))
 	}
 
-	/// Poll for the next change, registering `waiter` when there is none yet.
+	/// The next change.
 	///
 	/// Returns each instance as it comes online or takes over, and `None` once the path goes
 	/// offline or, with an instance named, another one takes it over; see
 	/// [`Following::available`](moq_net::origin::Following::available). Fails once the origin
 	/// closes, and with any resolution failure, such as a handler refusing the path; the call
 	/// after a refusal waits for the serving route to change.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<moq_net::broadcast::Consumer>>> {
 		let (following, instance, live) = match &mut self.0 {
 			Feed::Following {
@@ -83,11 +84,6 @@ impl Instances {
 				return Poll::Ready(Ok(None));
 			}
 		}
-	}
-
-	/// The next change; see [`Self::poll_next`].
-	pub async fn next(&mut self) -> crate::Result<Option<moq_net::broadcast::Consumer>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 }
 
