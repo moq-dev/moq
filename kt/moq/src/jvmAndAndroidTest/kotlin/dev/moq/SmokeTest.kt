@@ -30,6 +30,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -210,7 +211,7 @@ class SmokeTest {
     fun `origin alias constructs and consumes`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.consume().use { /* lifecycle smoke */ }
-            origin.requests("").use { /* dynamic origin smoke */ }
+            origin.routePrefix("", RouteOptions()).use { /* prefix route smoke */ }
         }
     }
 
@@ -690,9 +691,9 @@ class SmokeTest {
                 assertEquals(1, fingerprints.size)
                 assertEquals(64, fingerprints[0].length)
 
-                server.createBroadcast("live").use { publication ->
-                    publication.announce(AnnounceRoute())
-                    publication.unannounce()
+                server.route("live", RouteOptions(hidden = true)).use { route ->
+                    route.announce()
+                    route.withdraw()
                 }
             }
     }
@@ -772,57 +773,75 @@ class SmokeTest {
     @Test
     fun `a broadcast is reachable only while announced`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.createBroadcast("live").use { publication ->
-                publication.broadcast().use { it.publishTrack("events", null) }
+            origin.route("live", RouteOptions(hidden = true)).use { route ->
+                route.broadcast().use { it.publishTrack("events", null) }
                 val consumer = origin.consume()
                 assertFailsWith<MoqException> { consumer.request("live") }
 
-                publication.announce(AnnounceRoute())
+                route.announce()
                 val announced = consumer.announced(AnnounceConfig())
                 val first = assertIs<AnnounceEventPresent>(announced.nextRoute())
                 assertEquals("live", first.announce.prefix)
+                assertEquals(route.instance(), first.announce.route.instance)
 
-                publication.unannounce()
+                route.withdraw()
                 val retracted = assertIs<AnnounceEventAbsent>(announced.nextRoute())
                 assertEquals("live", retracted.announce.prefix)
                 assertFailsWith<MoqException> { consumer.request("live") }
 
-                publication.announce(AnnounceRoute())
-                assertIs<AnnounceEventPresent>(announced.nextRoute())
+                // Announcing again continues the same stream.
+                route.announce()
+                val again = assertIs<AnnounceEventPresent>(announced.nextRoute())
+                assertEquals(route.instance(), again.announce.route.instance)
                 consumer.request("live")
             }
         }
     }
 
     @Test
-    fun `closing a publication keeps its route until the broadcast ends`() = runTest {
+    fun `closing a route retracts it while its broadcast lives on`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             val consumer = origin.consume()
             val announced = consumer.announced(AnnounceConfig())
-            val publication = origin.createBroadcast("live")
-            publication.broadcast().use { broadcast ->
-                publication.use { it.announce(AnnounceRoute()) }
+            val route = origin.route("live", RouteOptions())
+            route.broadcast().use { broadcast ->
                 assertIs<AnnounceEventPresent>(announced.nextRoute())
                 consumer.request("live")
 
-                broadcast.end()
+                route.close()
                 assertIs<AnnounceEventAbsent>(announced.nextRoute())
                 assertFailsWith<MoqException> { consumer.request("live") }
+                broadcast.publishTrack("events", null)
+                broadcast.end()
             }
         }
     }
 
     @Test
-    fun `a stale publication leaves its replacement alone`() = runTest {
+    fun `ending the broadcast retracts its route`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.createBroadcast("live").use { stale ->
-                stale.announce(AnnounceRoute())
+            val consumer = origin.consume()
+            val announced = consumer.announced(AnnounceConfig())
+            origin.route("live", RouteOptions()).use { route ->
+                assertIs<AnnounceEventPresent>(announced.nextRoute())
+                route.broadcast().use { it.end() }
+                assertIs<AnnounceEventAbsent>(announced.nextRoute())
+                assertFailsWith<MoqException> { consumer.request("live") }
+                assertFailsWith<MoqException.Closed> { route.announce() }
+            }
+        }
+    }
+
+    @Test
+    fun `a stale route leaves its replacement alone`() = runTest {
+        OriginProducer(OriginConfig()).use { origin ->
+            origin.route("live", RouteOptions()).use { stale ->
                 stale.broadcast().use { it.end() }
 
-                origin.createBroadcast("live").use { replacement ->
-                    replacement.announce(AnnounceRoute())
-                    assertFailsWith<MoqException.Closed> { stale.announce(AnnounceRoute()) }
-                    assertFailsWith<MoqException.Closed> { stale.unannounce() }
+                origin.route("live", RouteOptions()).use { replacement ->
+                    assertFailsWith<MoqException.Closed> { stale.announce() }
+                    assertFailsWith<MoqException.Closed> { stale.setCost(1uL) }
+                    stale.withdraw()
                     origin.consume().request("live")
                     replacement.broadcast().use { it.end() }
                 }
@@ -836,22 +855,25 @@ class SmokeTest {
             val consumer = origin.consume()
             val announced = consumer.announced(AnnounceConfig())
             val following = consumer.follow("instance", null)
-            origin.createBroadcast("instance").use { publication ->
-                publication.announce(AnnounceRoute())
+            origin.route("instance", RouteOptions()).use { first ->
                 val present = assertIs<AnnounceEventPresent>(announced.nextRoute())
                 assertTrue(present.announce.route.instance.isNotEmpty())
+                assertEquals(first.instance(), present.announce.route.instance)
                 assertNotNull(following.available()).close()
 
-                publication.announce(AnnounceRoute(instance = "camera", epoch = 1uL))
-                assertNotNull(following.available()).close()
+                origin.route("instance", RouteOptions(instance = "camera", epoch = 1uL)).use {
+                    second ->
+                    assertNotNull(following.available()).close()
 
-                // The takeover was not listed, so the next event is the path going absent.
-                publication.unannounce()
-                val absent = assertIs<AnnounceEventAbsent>(announced.nextRoute())
-                assertEquals("camera", absent.announce.route.instance)
+                    // The takeover was not listed, so the next event is the path going absent.
+                    first.withdraw()
+                    second.withdraw()
+                    val absent = assertIs<AnnounceEventAbsent>(announced.nextRoute())
+                    assertEquals("camera", absent.announce.route.instance)
+                }
 
                 assertFailsWith<MoqException.InvalidInstance> {
-                    publication.announce(AnnounceRoute(instance = ""))
+                    origin.route("refused", RouteOptions(instance = ""))
                 }
             }
             following.cancel()
@@ -862,14 +884,13 @@ class SmokeTest {
     fun `a follower reports the path going offline and the next broadcast`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             val following = origin.consume().follow("offline", null)
-            origin.createBroadcast("offline").use { publication ->
-                publication.announce(AnnounceRoute())
+            origin.route("offline", RouteOptions()).use { route ->
                 assertNotNull(following.available()).close()
 
-                publication.unannounce()
+                route.withdraw()
                 assertNull(following.available())
 
-                publication.announce(AnnounceRoute())
+                route.announce()
                 assertNotNull(following.available()).close()
             }
             following.cancel()
@@ -881,8 +902,7 @@ class SmokeTest {
         OriginProducer(OriginConfig()).use { origin ->
             val announced =
                 origin.consume().announced(AnnounceConfig(prefix = "room", filter = "*/chat"))
-            origin.createBroadcast("room/alice/chat").use { publication ->
-                publication.announce(AnnounceRoute())
+            origin.route("room/alice/chat", RouteOptions()).use {
                 val update = assertIs<AnnounceEventPresent>(announced.nextRoute())
                 assertEquals("room/alice/chat", update.announce.prefix)
                 assertEquals(listOf("alice"), update.announce.captures)
@@ -893,21 +913,23 @@ class SmokeTest {
     @Test
     fun `dynamic serves a request under a prefix`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.requests("live").use { dynamic ->
+            origin.routePrefix("live", RouteOptions()).use { dynamic ->
+                assertFailsWith<MoqException.Internal> { dynamic.broadcast() }
                 val pending = async {
                     origin.consume().request("live/cam")
                 }
-                val request = dynamic.requestedBroadcast()
+                val request = assertNotNull(dynamic.requested())
                 assertEquals("live/cam", request.path())
-                request.prepare().use { prepared ->
-                    prepared.broadcast().use { fill ->
-                        prepared.publish().use { publication ->
-                            pending.await()
-                            // The publication fills the broadcast it prepared: ending one ends the
-                            // other.
-                            publication.broadcast().use { it.end() }
-                            assertFailsWith<MoqException.Closed> { fill.publishTrack("late", null) }
-                        }
+                request.route(RouteOptions(hidden = true)).use { job ->
+                    assertNotEquals(dynamic.instance(), job.instance())
+                    job.broadcast().use { fill ->
+                        // Only announcing answers the requester.
+                        job.announce()
+                        pending.await()
+                        // The route hands out one broadcast: ending it ends the route too.
+                        job.broadcast().use { it.end() }
+                        assertFailsWith<MoqException.Closed> { fill.publishTrack("late", null) }
+                        assertFailsWith<MoqException.Closed> { job.announce() }
                     }
                 }
             }
@@ -1044,8 +1066,8 @@ class SmokeTest {
     @Test
     fun `audio consumer reports its playout delay`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.createBroadcast("audio-delay").use { publication ->
-                publication.broadcast().use { broadcast ->
+            origin.route("audio-delay", RouteOptions(hidden = true)).use { route ->
+                route.broadcast().use { broadcast ->
                     val audio =
                         AudioProducer(
                             CatalogProducer(broadcast),
@@ -1060,7 +1082,7 @@ class SmokeTest {
                                 track = "mic",
                             ),
                         )
-                    publication.announce(AnnounceRoute())
+                    route.announce()
 
                     val consumer = origin.consume().request("audio-delay")
                     val catalog = CatalogConsumer.subscribe(consumer).next()!!
@@ -1116,8 +1138,8 @@ class SmokeTest {
     @Test
     fun `decoded video frame owns its picture`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.createBroadcast("video-decode-frame").use { publication ->
-                publication.broadcast().use { broadcast ->
+            origin.route("video-decode-frame", RouteOptions(hidden = true)).use { route ->
+                route.broadcast().use { broadcast ->
                     val video =
                         VideoProducer(
                             CatalogProducer(broadcast),
@@ -1138,7 +1160,7 @@ class SmokeTest {
                                 bandwidth = null,
                             ),
                         )
-                    publication.announce(AnnounceRoute())
+                    route.announce()
 
                     // Seed the track so a subscriber joining below lands on encoded media.
                     val rgba = ByteArray(320 * 240 * 4) { 0x80.toByte() }

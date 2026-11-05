@@ -885,8 +885,9 @@ mod tests {
 	#[tokio::test]
 	async fn escaping_broadcast_reference_is_not_advertised() {
 		let origin = produce_origin();
-		let _broadcast = origin.create_broadcast("a/pub").expect("publish allowed");
-		_broadcast.announce(Default::default()).expect("publish allowed");
+		let _broadcast = origin
+			.route("a/pub", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let upstream = crate::resolved(&origin, "a/pub").await;
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
@@ -942,8 +943,9 @@ mod tests {
 	#[tokio::test]
 	async fn renditions_wait_for_the_join_interval() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let upstream = crate::resolved(&origin, "live").await;
 
@@ -974,10 +976,12 @@ mod tests {
 	#[tokio::test]
 	async fn a_held_track_follows_its_rendition() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
-		let first = broadcast.create_track("first", timed()).unwrap();
-		let second = broadcast.create_track("second", timed()).unwrap();
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.expect("publish allowed");
+		broadcast.announce().expect("publish allowed");
+		let first = broadcast.broadcast().create_track("first", timed()).unwrap();
+		let second = broadcast.broadcast().create_track("second", timed()).unwrap();
 		settle().await;
 		let upstream = crate::resolved(&origin, "live").await;
 
@@ -1023,8 +1027,9 @@ mod tests {
 	#[tokio::test]
 	async fn estimate_only_catalog_update_keeps_the_rendition() {
 		let origin = produce_origin();
-		let _broadcast = origin.create_broadcast("live").expect("publish allowed");
-		_broadcast.announce(Default::default()).expect("publish allowed");
+		let _broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let upstream = empty_upstream(&origin, "live").await;
 
@@ -1092,8 +1097,9 @@ mod tests {
 	#[tokio::test]
 	async fn estimated_framerate_keeps_the_rendition() {
 		let origin = produce_origin();
-		let _broadcast = origin.create_broadcast("live").expect("publish allowed");
-		_broadcast.announce(Default::default()).expect("publish allowed");
+		let _broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let upstream = empty_upstream(&origin, "live").await;
 
@@ -1121,8 +1127,9 @@ mod tests {
 	#[tokio::test]
 	async fn estimate_before_first_init_reaches_aac_descriptor() {
 		let origin = produce_origin();
-		let _broadcast = origin.create_broadcast("live").expect("publish allowed");
-		_broadcast.announce(Default::default()).expect("publish allowed");
+		let _broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let upstream = empty_upstream(&origin, "live").await;
 
@@ -1154,8 +1161,9 @@ mod tests {
 	#[tokio::test]
 	async fn decoder_config_change_rebuilds_the_rendition() {
 		let origin = produce_origin();
-		let _broadcast = origin.create_broadcast("live").expect("publish allowed");
-		_broadcast.announce(Default::default()).expect("publish allowed");
+		let _broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let upstream = empty_upstream(&origin, "live").await;
 
@@ -1196,8 +1204,9 @@ mod tests {
 	#[tokio::test]
 	async fn replaced_renditions_are_not_held() {
 		let origin = produce_origin();
-		let _broadcast = origin.create_broadcast("live").expect("publish allowed");
-		_broadcast.announce(Default::default()).expect("publish allowed");
+		let _broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let upstream = empty_upstream(&origin, "live").await;
 
@@ -1217,11 +1226,12 @@ mod tests {
 	#[tokio::test]
 	async fn master_lists_only_playable_renditions() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
-		let mut media = video(&catalog, &broadcast, "video0", video_config());
+		let mut media = video(&catalog, broadcast.broadcast(), "video0", video_config());
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let rendition = kio::clock::timeout(Duration::from_secs(5), async {
@@ -1268,8 +1278,7 @@ mod tests {
 		// A video and an audio rendition can't share a name, so the refused names split.
 		let refused = [(Kind::Video, ""), (Kind::Video, "."), (Kind::Audio, "..")];
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin.route("live", moq_net::origin::RouteOptions::default()).unwrap();
 		settle().await;
 		let mut catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
@@ -1291,7 +1300,7 @@ mod tests {
 			.unwrap();
 		// Only the servable rendition is ever read.
 		let mut video0 = Gops {
-			track: broadcast.create_track("video0", timed()).unwrap(),
+			track: broadcast.broadcast().create_track("video0", timed()).unwrap(),
 		};
 		for sequence in 0..4 {
 			video0.gop(sequence);
@@ -1320,11 +1329,12 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_disabled_rendition_leaves_the_master_and_keeps_its_playlist() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
-		let mut media = video(&catalog, &broadcast, "video0", video_config());
+		let mut media = video(&catalog, broadcast.broadcast(), "video0", video_config());
 		for i in 0..3 {
 			media.write(vp8_frame(i * 2_000_000, true)).unwrap();
 		}
@@ -1400,9 +1410,11 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_transmuxed_segment_keeps_its_init_with_an_unfinished_tail() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.expect("publish allowed");
 		let (_catalog, _media) = publish_vp8(&mut broadcast.broadcast().clone(), inline_vp8());
-		broadcast.announce(moq_net::origin::Route::default()).unwrap();
+		broadcast.announce().unwrap();
 		settle().await;
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.ready().await;
@@ -1425,7 +1437,7 @@ mod tests {
 	async fn a_blocked_init_bootstrap_does_not_hide_a_cached_init() {
 		let (origin, broadcast, _catalog, _video0) = inline_pair("video1").await;
 		// At first only segment 0 is listed, while its group is still open.
-		let (media, open) = open_tail(&broadcast, "video1", 0);
+		let (media, open) = open_tail(broadcast.broadcast(), "video1", 0);
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.ready().await;
@@ -1467,13 +1479,12 @@ mod tests {
 		inline: &str,
 	) -> (
 		moq_net::origin::Producer,
-		moq_net::origin::Publication,
+		moq_net::origin::Route,
 		moq_mux::catalog::Producer,
 		Gops,
 	) {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin.route("live", moq_net::origin::RouteOptions::default()).unwrap();
 		settle().await;
 		let mut catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
@@ -1488,7 +1499,7 @@ mod tests {
 			.unwrap();
 		let other = if inline == "video0" { "video1" } else { "video0" };
 		let other = Gops {
-			track: broadcast.create_track(other, timed()).unwrap(),
+			track: broadcast.broadcast().create_track(other, timed()).unwrap(),
 		};
 		(origin, broadcast, catalog, other)
 	}
@@ -1497,7 +1508,7 @@ mod tests {
 	/// segments.
 	async fn inline_sibling() -> (
 		moq_net::origin::Producer,
-		moq_net::origin::Publication,
+		moq_net::origin::Route,
 		moq_mux::catalog::Producer,
 		Gops,
 	) {
@@ -1565,7 +1576,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn an_init_bootstraps_from_a_complete_group() {
 		let (origin, broadcast, _catalog, _video0) = inline_sibling().await;
-		let media = broadcast.create_track("video1", timed()).unwrap();
+		let media = broadcast.broadcast().create_track("video1", timed()).unwrap();
 		for sequence in 0..3 {
 			let mut group = media.create_group(sequence.into()).unwrap();
 			write_keyframe(&mut group, sequence);
@@ -1587,7 +1598,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_stuck_init_leaves_the_manifest_to_its_siblings() {
 		let (origin, broadcast, _catalog, _video0) = inline_sibling().await;
-		let (_media, mut open) = open_tail(&broadcast, "video1", 3);
+		let (_media, mut open) = open_tail(broadcast.broadcast(), "video1", 3);
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
@@ -1614,8 +1625,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_failed_rendition_waits_for_a_sibling_init() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin.route("live", moq_net::origin::RouteOptions::default()).unwrap();
 		settle().await;
 		let mut catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
@@ -1629,13 +1639,13 @@ mod tests {
 			})
 			.unwrap();
 		let mut video0 = Gops {
-			track: broadcast.create_track("video0", timed()).unwrap(),
+			track: broadcast.broadcast().create_track("video0", timed()).unwrap(),
 		};
 		for sequence in 0..4 {
 			video0.gop(sequence);
 		}
 		// video1's only cached group is still open, so its init build parks on it.
-		let (video1, mut open) = open_tail(&broadcast, "video1", 3);
+		let (video1, mut open) = open_tail(broadcast.broadcast(), "video1", 3);
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
@@ -1666,7 +1676,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_stuck_init_build_never_outlives_its_rendition() {
 		let (origin, broadcast, _catalog, _video0) = inline_sibling().await;
-		let (_media, open) = open_tail(&broadcast, "video1", 3);
+		let (_media, open) = open_tail(broadcast.broadcast(), "video1", 3);
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
@@ -1689,7 +1699,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_manifest_renders_off_the_runtime() {
 		let (origin, broadcast, _catalog, _video0) = inline_sibling().await;
-		let (_media, open) = open_tail(&broadcast, "video1", 3);
+		let (_media, open) = open_tail(broadcast.broadcast(), "video1", 3);
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
@@ -1709,7 +1719,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_new_generation_releases_a_stuck_init_build() {
 		let (origin, broadcast, _catalog, _video0) = inline_sibling().await;
-		let (_media, open) = open_tail(&broadcast, "video1", 3);
+		let (_media, open) = open_tail(broadcast.broadcast(), "video1", 3);
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
@@ -1732,7 +1742,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn an_ended_manifest_stays_dynamic_while_an_init_builds() {
 		let (origin, broadcast, mut catalog, mut video0) = inline_sibling().await;
-		let (media, mut open) = open_tail(&broadcast, "video1", 3);
+		let (media, mut open) = open_tail(broadcast.broadcast(), "video1", 3);
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
@@ -1766,7 +1776,7 @@ mod tests {
 		// it lists nothing.
 		let (origin, broadcast, mut catalog, _video1) = inline_pair("video0").await;
 		// Its earlier groups already left the cache, so the open one is the only candidate.
-		let (_media, mut open) = open_tail(&broadcast, "video0", 1);
+		let (_media, mut open) = open_tail(broadcast.broadcast(), "video0", 1);
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
@@ -1792,7 +1802,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn the_first_video_wait_builds_an_init_listed_while_waiting() {
 		let (origin, broadcast, _catalog, _video1) = inline_pair("video0").await;
-		let media = broadcast.create_track("video0", timed()).unwrap();
+		let media = broadcast.broadcast().create_track("video0", timed()).unwrap();
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		while broadcaster.rendition(Kind::Video, "video0").is_none() {
@@ -1823,7 +1833,7 @@ mod tests {
 		catalog
 			.mutate(|catalog| catalog.video.renditions.get_mut("video1").unwrap().enabled = false)
 			.unwrap();
-		let media = broadcast.create_track("video1", timed()).unwrap();
+		let media = broadcast.broadcast().create_track("video1", timed()).unwrap();
 		for sequence in 0..4 {
 			let mut group = media.create_group(sequence.into()).unwrap();
 			write_keyframe(&mut group, sequence);
@@ -1856,8 +1866,9 @@ mod tests {
 	#[tokio::test]
 	async fn a_reconfigure_versions_the_init_url() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let (_catalog, mut media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
 
@@ -1916,8 +1927,9 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn the_driver_finishes_with_its_owners() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let (_catalog, mut media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
 
@@ -1959,8 +1971,9 @@ mod tests {
 	#[tokio::test]
 	async fn a_generation_versions_segment_urls_and_a_new_one_resets_the_window() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let (_catalog, mut media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
 
@@ -2017,8 +2030,9 @@ mod tests {
 	#[tokio::test]
 	async fn a_replaced_instance_keeps_its_generation() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let (_catalog, _media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
 
@@ -2041,11 +2055,12 @@ mod tests {
 	#[tokio::test]
 	async fn a_new_generation_rebuilds_an_inline_init() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
-		let mut media = video(&catalog, &broadcast, "video0", inline_vp8());
+		let mut media = video(&catalog, broadcast.broadcast(), "video0", inline_vp8());
 		for micros in [0, 2_000_000, 4_000_000] {
 			media.write(vp8_frame(micros, true)).unwrap();
 		}
@@ -2079,8 +2094,9 @@ mod tests {
 	#[tokio::test]
 	async fn serves_playlist_and_segments_from_the_media() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		// Three GOPs, 2s apart: segments 0 and 1 are complete, segment 2 is the live edge.
 		let (catalog, media) = publish_vp8(&mut broadcast.broadcast().clone(), inline_vp8());
@@ -2142,8 +2158,9 @@ mod tests {
 	#[tokio::test]
 	async fn a_segment_ends_where_its_record_says() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let (catalog, media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
 
@@ -2168,8 +2185,9 @@ mod tests {
 	#[tokio::test]
 	async fn a_timed_trailing_sample_keeps_its_duration() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let mut producer = broadcast.broadcast().clone();
 		let catalog = hls_catalog(&mut producer);
@@ -2204,12 +2222,13 @@ mod tests {
 	#[tokio::test]
 	async fn serves_dash_manifest_and_time_addressed_segments() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
-		let mut video = video(&catalog, &broadcast, "video0", video_config());
-		let mut audio = audio(&catalog, &broadcast, "audio0", opus());
+		let mut video = video(&catalog, broadcast.broadcast(), "video0", video_config());
+		let mut audio = audio(&catalog, broadcast.broadcast(), "audio0", opus());
 
 		// Video keyframes every 2s cut the segments; audio contributes one group per cut.
 		let mut audio_write = |micros: u64| {
@@ -2291,8 +2310,9 @@ mod tests {
 	#[tokio::test]
 	async fn root_clock_times_playlists_and_manifest() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 
 		// PTS zero at exactly the moq epoch, so every timestamp maps to a fixed string.
@@ -2300,7 +2320,7 @@ mod tests {
 		let config = catalog_config()
 			.with_clock(moq_mux::Clock::at(moq_net::time::Instant::now(), wall).expect("a representable wall"));
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
-		let mut media = video(&catalog, &broadcast, "video0", video_config());
+		let mut media = video(&catalog, broadcast.broadcast(), "video0", video_config());
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
 		media.write(frame(4_000_000, true)).unwrap(); // live edge
@@ -2335,8 +2355,9 @@ mod tests {
 	#[tokio::test]
 	async fn manifest_falls_back_to_arrival_anchor_without_a_clock() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 
 		// Write the catalog directly: a moq-mux catalog producer always advertises its clock, as a
@@ -2347,6 +2368,7 @@ mod tests {
 		json.deltas = false;
 		let mut catalog = moq_json::snapshot::Producer::new(
 			broadcast
+				.broadcast()
 				.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 				.unwrap(),
 			json,
@@ -2355,7 +2377,7 @@ mod tests {
 			.update(moq_net::Timed::from(&snapshot).at(moq_net::Timestamp::now()))
 			.unwrap();
 		let mut media = Gops {
-			track: broadcast.create_track("video0", timed()).unwrap(),
+			track: broadcast.broadcast().create_track("video0", timed()).unwrap(),
 		};
 		for sequence in 0..3 {
 			media.gop(sequence);
@@ -2397,8 +2419,9 @@ mod tests {
 		}
 
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
 		let mut import = moq_mux::container::fmp4::Import::new(broadcast.broadcast().clone(), catalog.reserve());
@@ -2512,8 +2535,7 @@ mod tests {
 		} else {
 			None
 		};
-		let broadcast = origin.create_broadcast("live").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin.route("live", moq_net::origin::RouteOptions::default()).unwrap();
 		settle().await;
 		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
 		let mut import = moq_mux::container::fmp4::Import::new(broadcast.broadcast().clone(), catalog.reserve());
@@ -2594,11 +2616,12 @@ mod tests {
 	#[tokio::test]
 	async fn dash_manifest_turns_static_when_finished() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let mut catalog = hls_catalog(&mut broadcast.broadcast().clone());
-		let mut media = video(&catalog, &broadcast, "video0", video_config());
+		let mut media = video(&catalog, broadcast.broadcast(), "video0", video_config());
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
 
@@ -2635,11 +2658,12 @@ mod tests {
 	#[tokio::test]
 	async fn an_audio_only_broadcast_segments_on_its_audio() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
-		let mut audio = audio(&catalog, &broadcast, "audio0", opus());
+		let mut audio = audio(&catalog, broadcast.broadcast(), "audio0", opus());
 		// 500ms groups pack into the 2s grid.
 		for micros in (0..=6_000_000u64).step_by(500_000) {
 			let keyframe = audio.needs_keyframe();
@@ -2667,12 +2691,13 @@ mod tests {
 	#[tokio::test]
 	async fn audio_and_video_on_one_grid_line_up() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
-		let mut video = video(&catalog, &broadcast, "video0", video_config());
-		let mut audio = audio(&catalog, &broadcast, "audio0", opus());
+		let mut video = video(&catalog, broadcast.broadcast(), "video0", video_config());
+		let mut audio = audio(&catalog, broadcast.broadcast(), "audio0", opus());
 
 		// Interleaved by pts, as a muxer would demux them: video keyframes every 2s open the
 		// segments; audio publishes a 500ms group each cut.
@@ -2731,12 +2756,13 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn dropping_the_broadcaster_keeps_a_cursor_drainable() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let mut catalog = hls_catalog(&mut broadcast.broadcast().clone());
 		// Segment 0 is complete, while segment 1 stays open until the publisher finishes.
-		let mut media = video(&catalog, &broadcast, "video0", video_config());
+		let mut media = video(&catalog, broadcast.broadcast(), "video0", video_config());
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
 		media.write(frame(3_000_000, false)).unwrap();
@@ -2823,12 +2849,9 @@ mod tests {
 	/// Finish the media before End while retaining its track cache for a late recorder.
 	async fn ended_rendition(sibling: bool) -> Ended {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin.route("live", moq_net::origin::RouteOptions::default()).unwrap();
 		let target = if sibling {
-			let target = origin.create_broadcast("media").unwrap();
-			target.announce(Default::default()).unwrap();
-			target
+			origin.route("media", moq_net::origin::RouteOptions::default()).unwrap()
 		} else {
 			broadcast.clone()
 		};
@@ -2846,10 +2869,10 @@ mod tests {
 		assert!(!rendition.snapshot().segments.is_empty());
 		let binding = rendition.poll_media(&kio::Waiter::noop());
 		let bound = binding.broadcast().await.unwrap();
-		target.close();
+		target.broadcast().close();
 		bound.closed().await;
 		assert!(
-			target.consume().track("video0").is_err(),
+			target.broadcast().consume().track("video0").is_err(),
 			"new lookups are refused after End"
 		);
 		Ended {
@@ -2901,10 +2924,12 @@ mod tests {
 		for sibling in [false, true] {
 			let ended = ended_rendition(sibling).await;
 			let path = if sibling { "media" } else { "live" };
-			let next = ended.origin.create_broadcast(path).unwrap();
-			next.announce(Default::default()).unwrap();
+			let next = ended
+				.origin
+				.route(path, moq_net::origin::RouteOptions::default())
+				.unwrap();
 			let mut media = moq_mux::container::Producer::new(
-				next.create_track("video0", timed()).unwrap(),
+				next.broadcast().create_track("video0", timed()).unwrap(),
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
 			);
 			media.write(payload_frame(0, true, NEW)).unwrap();
@@ -2959,10 +2984,11 @@ mod tests {
 		// carry `payload`, so the two publishers' media differs byte for byte. The returned handle
 		// keeps the publisher alive until it is dropped.
 		fn publish(origin: &moq_net::origin::Producer, payload: &'static [u8]) -> Box<dyn std::any::Any> {
-			let broadcast = origin.create_broadcast("live").expect("publish allowed");
-			broadcast.announce(Default::default()).expect("publish allowed");
+			let broadcast = origin
+				.route("live", moq_net::origin::RouteOptions::default())
+				.expect("publish allowed");
 			let catalog = hls_catalog(&mut broadcast.broadcast().clone());
-			let mut media = video(&catalog, &broadcast, "video0", video_config());
+			let mut media = video(&catalog, broadcast.broadcast(), "video0", video_config());
 			media.write(payload_frame(0, true, payload)).unwrap();
 			media.write(payload_frame(2_000_000, true, payload)).unwrap();
 			media.write(payload_frame(4_000_000, true, payload)).unwrap();
@@ -3031,8 +3057,10 @@ mod tests {
 		const NEW: &[u8] = b"NEWNEWNEWNEWNEWN";
 
 		fn publish_media(origin: &moq_net::origin::Producer, payload: &'static [u8]) -> Box<dyn std::any::Any> {
-			let broadcast = origin.create_broadcast("media").expect("publish allowed");
-			broadcast.announce(Default::default()).expect("publish allowed");
+			let broadcast = origin
+				.route("media", moq_net::origin::RouteOptions::hidden())
+				.expect("publish allowed");
+			broadcast.announce().expect("publish allowed");
 			let media = write_routed_media(&mut broadcast.broadcast().clone(), payload, 0);
 			Box::new((broadcast, media))
 		}
@@ -3040,8 +3068,10 @@ mod tests {
 		let origin = produce_origin();
 
 		// The catalog broadcast carries the catalog; the media lives next door.
-		let live = origin.create_broadcast("live").expect("publish allowed");
-		live.announce(Default::default()).expect("publish allowed");
+		let live = origin
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.expect("publish allowed");
+		live.announce().expect("publish allowed");
 		let old_media = publish_media(&origin, OLD);
 		settle().await;
 
@@ -3096,18 +3126,6 @@ mod tests {
 		drop((new_media, live));
 	}
 
-	fn hops(ids: &[u64]) -> moq_net::Hops {
-		let mut hops = moq_net::Hops::new();
-		for id in ids {
-			hops.push(moq_net::Hop::new(*id).unwrap()).unwrap();
-		}
-		hops
-	}
-
-	fn sibling_route(first: u64) -> moq_net::origin::Route {
-		moq_net::origin::Route::default().with_hops(hops(&[first]))
-	}
-
 	async fn until_finished(rendition: &Rendition) {
 		let deadline = kio::clock::now() + Duration::from_secs(5);
 		loop {
@@ -3123,7 +3141,7 @@ mod tests {
 	/// the sibling broadcast `media`.
 	struct Sibling {
 		origin: moq_net::origin::Producer,
-		_live: moq_net::origin::Publication,
+		_live: moq_net::origin::Route,
 		upstream: moq_mux::Source,
 		config: hang::catalog::VideoConfig,
 	}
@@ -3131,8 +3149,10 @@ mod tests {
 	impl Sibling {
 		async fn new() -> Self {
 			let origin = produce_origin();
-			let live = origin.create_broadcast("live").expect("publish allowed");
-			live.announce(Default::default()).expect("publish allowed");
+			let live = origin
+				.route("live", moq_net::origin::RouteOptions::hidden())
+				.expect("publish allowed");
+			live.announce().expect("publish allowed");
 			settle().await;
 			let upstream = crate::resolved(&origin, "live").await;
 			let mut config = video_config();
@@ -3151,10 +3171,13 @@ mod tests {
 			payload: &'static [u8],
 			start_micros: u64,
 		) -> (
-			moq_net::origin::Publication,
+			moq_net::origin::Route,
 			moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
 		) {
-			let media = self.origin.create_broadcast("media").unwrap();
+			let media = self
+				.origin
+				.route("media", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
 			let track = write_routed_media(&mut media.broadcast().clone(), payload, start_micros);
 			(media, track)
 		}
@@ -3172,7 +3195,7 @@ mod tests {
 		let (old_media, old_track) = test.media(OLD, 0);
 		settle().await;
 		let (_renditions, rendition) = export(&test.upstream, &test.config);
-		old_media.announce(sibling_route(10)).unwrap();
+		old_media.announce().unwrap();
 		kio::clock::timeout(Duration::from_secs(5), rendition.playable())
 			.await
 			.expect("the media reaches the rendition");
@@ -3200,7 +3223,7 @@ mod tests {
 
 		// A publisher serving the path afterwards is never bound.
 		let (new_media, new_track) = test.media(NEW, 6_000_000);
-		new_media.announce(sibling_route(11)).unwrap();
+		new_media.announce().unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		let snapshot = rendition.snapshot();
 		assert_eq!(snapshot.segments.len(), before, "nothing of the replacement is listed");
@@ -3216,7 +3239,7 @@ mod tests {
 
 		let mut test = Sibling::new().await;
 		let (media, _track) = test.media(NEW, 0);
-		media.announce(sibling_route(11)).unwrap();
+		media.announce().unwrap();
 		settle().await;
 
 		let (_renditions, rendition) = export(&test.upstream, &test.config);
@@ -3244,7 +3267,7 @@ mod tests {
 		let (old_media, old_track) = test.media(OLD, 0);
 		settle().await;
 		let (_renditions, rendition) = export(&test.upstream, &test.config);
-		old_media.announce(sibling_route(10)).unwrap();
+		old_media.announce().unwrap();
 		kio::clock::timeout(Duration::from_secs(5), rendition.playable())
 			.await
 			.expect("the media reaches the rendition");
@@ -3256,7 +3279,7 @@ mod tests {
 		assert!(before > 0);
 
 		let (new_media, new_track) = test.media(NEW, 6_000_000);
-		new_media.announce(sibling_route(11)).unwrap();
+		new_media.announce().unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		let snapshot = rendition.snapshot();
 		assert_eq!(snapshot.segments.len(), before, "only the old rows remain listed");
@@ -3282,7 +3305,7 @@ mod tests {
 		let (media, track) = test.media(OLD, 0);
 		settle().await;
 		let (_renditions, rendition) = export(&test.upstream, &test.config);
-		media.announce(sibling_route(10)).unwrap();
+		media.announce().unwrap();
 		kio::clock::timeout(Duration::from_secs(5), rendition.playable())
 			.await
 			.expect("the media reaches the rendition");
@@ -3327,7 +3350,7 @@ mod tests {
 			"nothing is listed before the sibling resolves"
 		);
 
-		media.announce(sibling_route(10)).unwrap();
+		media.announce().unwrap();
 		kio::clock::timeout(Duration::from_secs(5), rendition.playable())
 			.await
 			.expect("the sibling's media is listed once it resolves");
@@ -3345,8 +3368,9 @@ mod tests {
 	#[tokio::test]
 	async fn removing_a_rendition_ends_its_segment_cursor() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let upstream = crate::resolved(&origin, "live").await;
 
@@ -3370,11 +3394,12 @@ mod tests {
 	#[tokio::test]
 	async fn dropping_the_broadcaster_releases_its_renditions() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
-		let mut media = video(&catalog, &broadcast, "video0", video_config());
+		let mut media = video(&catalog, broadcast.broadcast(), "video0", video_config());
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
 
@@ -3414,12 +3439,13 @@ mod tests {
 	#[tokio::test]
 	async fn record_cursors_yield_renditions_and_segments() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
 		// Segments 0 and 1 are complete; segment 2 is the live edge until the publisher drops.
-		let mut media = video(&catalog, &broadcast, "video0", video_config());
+		let mut media = video(&catalog, broadcast.broadcast(), "video0", video_config());
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
 		media.write(frame(4_000_000, true)).unwrap();
@@ -3459,7 +3485,7 @@ mod tests {
 		// Tear down the publisher. The media ends abruptly, so the cursor fails rather than end
 		// as if the recording were complete.
 		drop((catalog, media));
-		broadcast.close();
+		broadcast.broadcast().close();
 
 		let end = kio::clock::timeout(Duration::from_secs(5), segments.next())
 			.await
@@ -3787,8 +3813,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_failed_rendition_leaves_the_manifest_and_master() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin.route("live", moq_net::origin::RouteOptions::default()).unwrap();
 		settle().await;
 		let mut catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
@@ -3801,7 +3826,7 @@ mod tests {
 			})
 			.unwrap();
 		let publish = |name: &str| Gops {
-			track: broadcast.create_track(name, timed()).unwrap(),
+			track: broadcast.broadcast().create_track(name, timed()).unwrap(),
 		};
 		let mut video0 = publish("video0");
 		let mut video1 = publish("video1");
@@ -3946,11 +3971,13 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_discontinuity_marker_lists_no_segment() {
 		let origin = produce_origin();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
-		broadcast.announce(Default::default()).expect("publish allowed");
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.expect("publish allowed");
+		broadcast.announce().expect("publish allowed");
 		settle().await;
 		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
-		let mut media = video(&catalog, &broadcast, "video0", video_config());
+		let mut media = video(&catalog, broadcast.broadcast(), "video0", video_config());
 		for micros in [0, 1_000_000, 2_000_000, 3_000_000] {
 			media.write(vp8_frame(micros, micros % 2_000_000 == 0)).unwrap();
 		}

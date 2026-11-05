@@ -170,12 +170,18 @@ pub async fn import(target: ImportTarget, args: ImportArgs, instance: moq_net::I
 		linger,
 		bandwidth,
 	} = target;
-	let producer = origin.create_broadcast(&name).context("failed to create broadcast")?;
+	// Held through the linger, so the finished broadcast stays announced while it serves the tail.
+	let route = origin
+		.route(
+			&name,
+			moq_net::origin::RouteOptions::hidden().with_instance(instance, 0),
+		)
+		.context("failed to create broadcast")?;
 
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(max_age)
 		.with_bandwidth(bandwidth);
-	let catalog = moq_mux::catalog::Producer::new(&mut producer.broadcast().clone(), config)?;
+	let catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), config)?;
 	// Announced once the catalog first goes out, which waits for every rendition's init: a
 	// relay queries a broadcast's tracks the moment it is announced, and keeps the refusals of a
 	// publisher that cannot serve its declared tracks yet.
@@ -183,14 +189,14 @@ pub async fn import(target: ImportTarget, args: ImportArgs, instance: moq_net::I
 
 	let mut config = moq_hls::import::Config::new(playlist_url(&args.playlist)?);
 	config.passthrough = args.passthrough;
-	let mut importer = moq_hls::import::Import::new(producer.broadcast().clone(), catalog, config)?;
+	let mut importer = moq_hls::import::Import::new(route.broadcast().clone(), catalog, config)?;
 
 	tracing::info!(%name, "importing HLS");
 
 	let ran = match importer.init().await {
 		Ok(()) => {
 			notify_ready();
-			run_announced(&mut importer, &mut listed, &producer, instance).await
+			run_announced(&mut importer, &mut listed, &route).await
 		}
 		Err(err) => Err(err.into()),
 	};
@@ -204,7 +210,7 @@ pub async fn import(target: ImportTarget, args: ImportArgs, instance: moq_net::I
 	// arrives after the end still gets the tail. An interrupt drops it at once.
 	importer.finish()?;
 	tracing::info!(?linger, "playlist ended; serving the finished broadcast");
-	moq_mux::Linger::new([producer.broadcast().clone()], importer, linger)
+	moq_mux::Linger::new([route.broadcast().clone()], importer, linger)
 		.wait()
 		.await;
 	Ok(())
@@ -216,8 +222,7 @@ pub async fn import(target: ImportTarget, args: ImportArgs, instance: moq_net::I
 async fn run_announced(
 	importer: &mut moq_hls::import::Import,
 	listed: &mut moq_mux::catalog::hang::Consumer,
-	publication: &moq_net::origin::Publication,
-	instance: moq_net::Instance,
+	route: &moq_net::origin::Route,
 ) -> anyhow::Result<()> {
 	let run = importer.run();
 	tokio::pin!(run);
@@ -233,9 +238,7 @@ async fn run_announced(
 		}
 	};
 	anyhow::ensure!(catalog.is_some(), "the playlist ended before it declared a track");
-	publication
-		.announce(moq_net::origin::Route::default().with_instance(instance, 0))
-		.context("failed to announce broadcast")?;
+	route.announce().context("failed to announce broadcast")?;
 	if !ended {
 		run.await?;
 	}
@@ -389,7 +392,7 @@ mod test {
 		tempfile::TempDir,
 		moq_hls::import::Import,
 		moq_mux::catalog::hang::Consumer,
-		moq_net::origin::Publication,
+		moq_net::origin::Route,
 	)> {
 		let dir = tempfile::tempdir()?;
 		write_playlist(dir.path(), segments, false);
@@ -397,7 +400,7 @@ mod test {
 
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(moq_net::time::run(driver));
-		let producer = origin.create_broadcast("hls")?;
+		let producer = origin.route("hls", moq_net::origin::RouteOptions::hidden())?;
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut producer.broadcast().clone(), moq_mux::catalog::Config::default())?;
 		let listed = catalog.consume()?;
@@ -419,10 +422,8 @@ mod test {
 	async fn an_ended_playlist_announces_its_catalog() {
 		for _ in 0..32 {
 			let (_dir, mut importer, mut listed, producer) = joined_then_ended(1).await.unwrap();
-			run_announced(&mut importer, &mut listed, &producer, moq_net::Instance::random())
-				.await
-				.unwrap();
-			assert!(producer.route().is_some(), "the finished playlist was not announced");
+			run_announced(&mut importer, &mut listed, &producer).await.unwrap();
+			assert!(producer.is_announced(), "the finished playlist was not announced");
 		}
 	}
 
@@ -440,8 +441,8 @@ mod test {
 	#[tokio::test]
 	async fn an_empty_playlist_fails_unannounced() {
 		let (_dir, mut importer, mut listed, producer) = joined_then_ended(0).await.unwrap();
-		let result = run_announced(&mut importer, &mut listed, &producer, moq_net::Instance::random()).await;
-		assert!(producer.route().is_none(), "an empty playlist was announced");
+		let result = run_announced(&mut importer, &mut listed, &producer).await;
+		assert!(!producer.is_announced(), "an empty playlist was announced");
 		let err = result.expect_err("an empty playlist imports nothing");
 		assert!(format!("{err:#}").contains("before it declared a track"), "{err:#}");
 	}

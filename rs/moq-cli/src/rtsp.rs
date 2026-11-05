@@ -69,14 +69,15 @@ fn is_fatal(err: &anyhow::Error) -> bool {
 /// Publish one session as one broadcast, announced once its catalog names a track, setting
 /// `published` then.
 async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut bool) -> anyhow::Result<moq_rtsp::End> {
-	let broadcast = target
+	// Each run is a new route under a fresh instance, so a redial replaces the last run.
+	let route = target
 		.origin
-		.create_broadcast(&target.name)
+		.route(&target.name, moq_net::origin::RouteOptions::hidden())
 		.context("failed to create broadcast")?;
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(target.max_age)
 		.with_bandwidth(target.bandwidth.clone());
-	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
+	let mut catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), config)?;
 
 	// A relay asks for a broadcast's tracks the moment it is announced, so wait for the
 	// first keyframe to put them in the catalog.
@@ -86,17 +87,14 @@ async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut b
 		if updates.next().await?.is_none() {
 			return std::future::pending().await;
 		}
-		let instance = moq_net::Instance::random();
-		broadcast
-			.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
-			.context("failed to announce broadcast")?;
-		tracing::info!(name = %target.name, %instance, "publishing RTSP broadcast");
+		route.announce().context("failed to announce broadcast")?;
+		tracing::info!(name = %target.name, instance = %route.instance(), "publishing RTSP broadcast");
 		*published = true;
 		std::future::pending::<anyhow::Result<moq_rtsp::End>>().await
 	};
 
 	let end = tokio::select! {
-		end = client.pull(&broadcast, &catalog) => end.map_err(anyhow::Error::from),
+		end = client.pull(route.broadcast(), &catalog) => end.map_err(anyhow::Error::from),
 		err = announce => err,
 	};
 	// Closed at once even after a clean end: the pull redials and publishes the next run under a
@@ -109,7 +107,7 @@ async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut b
 			Ok(())
 		}
 	};
-	broadcast.close();
+	route.broadcast().close();
 	finished?;
 	end
 }

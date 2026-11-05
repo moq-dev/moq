@@ -210,7 +210,7 @@ mod tests {
 		track: track::Producer,
 		sub: track::Subscriber,
 		_announced: origin::Routes,
-		_source: origin::Publication,
+		_source: origin::Route,
 		_ctx: moq_net::stats::Session,
 	}
 
@@ -235,9 +235,10 @@ mod tests {
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
 		let mut announced = egress.routes();
-		let source = feed_origin.create_broadcast(path).unwrap();
-		source.announce(origin::Route::default()).unwrap();
-		let track = source.clone().create_track("video", timed()).unwrap();
+		let source = feed_origin
+			.route(path, moq_net::origin::RouteOptions::default())
+			.unwrap();
+		let track = source.clone().broadcast().create_track("video", timed()).unwrap();
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);

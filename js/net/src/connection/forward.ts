@@ -7,12 +7,12 @@
 import { Milli, Nano } from "@moq/clock";
 import { type Dispose, race } from "@moq/signals";
 import type * as Announce from "../announced.ts";
-import { type Route, routesEqual } from "../hop.ts";
+import { type RouteInfo, routesEqual } from "../hop.ts";
 import { coveringPrefixes } from "../internal.ts";
-import type { Producer as OriginProducer, RequestSlot, Requests } from "../origin.ts";
+import type { Producer as OriginProducer, Route } from "../origin.ts";
 import * as Path from "../path.ts";
 import { after } from "../util/timer.ts";
-import { wireOf } from "../wire.ts";
+import { type RequestSlot, wireOf } from "../wire.ts";
 import type { Established } from "./established.ts";
 
 /** Why a connection refuses the removed `discovery` option rather than ignoring it. */
@@ -39,9 +39,9 @@ interface Interest {
  * request handing over to another never retracts it. The first reporter drives it.
  */
 interface Reported {
-	handle: Requests;
+	handle: Route;
 	/** Each request's latest route for the prefix. */
-	readonly reporters: Map<Interest, Route>;
+	readonly reporters: Map<Interest, RouteInfo>;
 }
 
 /**
@@ -118,16 +118,17 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 	 * instance, so nothing resolved through the old one is joined again, and an in-place
 	 * update otherwise.
 	 */
-	const updateReported = (existing: Reported, prefix: Path.Valid, route: Route, restart: boolean) => {
-		if (restart || route.epoch !== existing.handle.route.epoch) {
+	const updateReported = (existing: Reported, prefix: Path.Valid, route: RouteInfo, restart: boolean) => {
+		const current = wireOf(existing.handle).info;
+		if (restart || route.epoch !== current?.epoch) {
 			// Inserted before the old one leaves, so local readers see one restart rather than
 			// an end and a start.
 			const handle = originWire.receive(prefix, route);
 			existing.handle.close();
 			existing.handle = handle;
 			void drive(handle, conn);
-		} else if (!routesEqual(existing.handle.route, route)) {
-			existing.handle.updateRoute(route);
+		} else if (!routesEqual(current, route)) {
+			wireOf(existing.handle).update(route);
 		}
 	};
 
@@ -289,7 +290,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 }
 
 /** Answer the requests under a received route by consuming them from the session. */
-async function drive(handle: Requests, conn: Established): Promise<void> {
+async function drive(handle: Route, conn: Established): Promise<void> {
 	const session = wireOf(conn);
 	try {
 		for await (const request of handle.requested()) {

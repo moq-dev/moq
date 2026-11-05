@@ -874,8 +874,8 @@ mod tests {
 				let (capture, samples) = capture::test_source();
 				let (origin, origin_driver) = moq_net::origin::Producer::new(Default::default());
 				tokio::spawn(moq_net::time::run(origin_driver));
-				let publication = origin.create_broadcast("live").unwrap();
-				publication.announce(Default::default()).unwrap();
+				let publication = origin.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+				publication.announce().unwrap();
 				let mut broadcast = publication.broadcast().clone();
 				let catalog =
 					moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();

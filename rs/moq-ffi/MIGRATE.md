@@ -16,6 +16,22 @@ Map `Start` to `Present` and `End` to `Absent`, and drop `Update` handling. Wher
 
 `MoqFollowing::available()` returns `Option<Arc<MoqBroadcastConsumer>>`: `None` once the path goes offline (or, for a follow pinned to an `instance`, once another instance takes it over), then the next broadcast when something serves the path again. The first call never returns `None`. Handle `None` as offline: drop what you read from the last broadcast and call `available()` again.
 
+### Publishing goes through one `MoqRoute` handle
+
+`MoqOriginProducer::create_broadcast(path)` is `route(path, MoqRouteOptions)`, and `requests(prefix)` is `route_prefix(prefix, MoqRouteOptions)`. Both return a `MoqRoute`, which replaces `MoqPublication`, `MoqOriginRequests`, and `MoqBroadcastPrepared`:
+
+- `MoqPublication::broadcast()` is `MoqRoute::broadcast()`, which errors with `Internal` on a prefix route.
+- `MoqPublication::announce(MoqAnnounceRoute)` is `announce()`, and re-pricing is `set_cost(cost)`. `unannounce()` is `withdraw()`.
+- `MoqOriginRequests::requested_broadcast()` is `requested()`, which returns `None` once the origin closes instead of `Closed`. A call after `cancel()` fails with `Cancelled`.
+- `MoqBroadcastRequest::prepare()` then `MoqBroadcastPrepared::publish()` is `MoqBroadcastRequest::route(options)`: create it hidden to fill it first, then `announce()`.
+- `MoqRoute::instance_id()` is the stream's instance, minted at creation and kept across `withdraw` and `announce` (Kotlin names it `instance()`; the Python, Go and Swift wrappers expose `instance`). It is not `instance()` because the generated C and C++ objects reserve that name.
+
+`MoqAnnounceRoute` is `MoqRouteOptions { hidden, cost, instance, epoch }`, given once at creation. A route is visible at once unless `hidden`; pass `hidden: true` and call `announce()` after filling the catalog to keep the old create-then-announce order. A stable `instance` is fixed for the route's lifetime: announcing a different one is a new route.
+
+Hold the `MoqRoute` for as long as the broadcast should stay announced. Dropping or cancelling it retracts the route, while `MoqBroadcastProducer::close()` still ends both; a broadcast handle alone no longer keeps it announced.
+
+`MoqRoute`, the record carried by `MoqAnnounce.route`, is renamed `MoqRouteInfo`; its fields are unchanged.
+
 ### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
 
 `MoqVideo` and `MoqAudio` gain `warmup`, the catalog's decoder warmup, null when absent. `MoqMediaTrackConsumer::subscribe` reads it from the rendition: it starts that much further back than the subscription's min delay and asks the publisher for its max delay plus the warmup, while it still skips at the max delay alone. `MoqAudioConsumer::subscribe` and `MoqVideoConsumer::subscribe` now honor it too.
