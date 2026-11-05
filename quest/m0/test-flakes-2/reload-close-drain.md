@@ -27,11 +27,23 @@ CPU contention and `--rerun-each`, as the epic's earlier JS fixes did
 reproduce in a reasonable number of runs, report that and the runs tried
 rather than changing the test blind.
 
+Decided 2026-11-05 (maintainer, /quest-plan): keep this quest and investigate
+the next captured failure with logs. Abandoning it was rejected: the agent on
+[moq-dev/moq#7764](https://github.com/moq-dev/moq/pull/7764) saw
+`closing the loop keeps the tokens until the session drains` fail once in a
+full-suite run on 2026-11-05. It reported `expect(fin.closed).toBe(false)`
+failing after a 999 ms clock advance, then three passing isolated runs.
+This sighting shows the flake still occurs despite the passing reruns below;
+it does not establish the cause. Keep this wait in the quest so the
+evidence-only [moq-dev/moq#7933](https://github.com/moq-dev/moq/pull/7933)
+can land without a speculative test or production change.
+
 Public API: none. Wire: none.
 
 ### Reproduction attempts
 
-2026-11-04: no reproduction on the unchanged claim based on `origin/main`.
+2026-11-04, recorded in [moq-dev/moq#7933](https://github.com/moq-dev/moq/pull/7933):
+no reproduction on the unchanged claim based on `origin/main`.
 
 - `quest gate bun test --cwd js/net --rerun-each 20 --only-failures`
   finished with 58,645 passes, 40 skips, and 95 failures across 121 files
@@ -49,8 +61,9 @@ Public API: none. Wire: none.
 
 ## Waiting
 
-- moq-dev/moq: retain failure output or a reproducer for a reload drain case.
-  The original one-off failure had no saved output, and the repeated runs
-  above did not reproduce it. Recommended: keep this quest and capture the
-  next failure before choosing a fix; alternatively abandon it if the
-  failure no longer warrants investigation.
+- moq-dev/moq: capture the next reload drain failure with logs before choosing
+  a fix. Check full-suite and merge-queue failure reports for the test names
+  above; retain the full command, commit, assertion/stack output, and surrounding
+  session logs in the report. Once captured, link that report here, remove this
+  waiting item, and reproduce the failure under multi-file load to investigate
+  its cause. Passing isolated reruns alone do not clear this condition.
