@@ -380,20 +380,14 @@ impl Session {
 		self.goaway.consumer()
 	}
 
-	/// Poll until the session carries no subscription or fetch, in either direction.
+	/// Resolves once the session carries no subscription or fetch, in either direction.
 	///
 	/// Ready at once while it carries none. A track request still being set up, waiting
 	/// on authorization or the track's info, counts too. Announcements and the other
 	/// control streams don't, so a session can be idle while it still serves discovery.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.work.poll_idle(waiter)
-	}
-
-	/// Wait until the session carries no subscription or fetch, in either direction.
-	///
-	/// See [`poll_idle`](Self::poll_idle).
-	pub async fn idle(&self) {
-		kio::wait(|waiter| self.poll_idle(waiter)).await
 	}
 
 	/// The tokens this side presented and the grant they earned, plus the tokens

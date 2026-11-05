@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use kio::clock::Instant;
 
-use crate::catalog::{CatalogFormat, Stream};
+#[cfg(feature = "async")]
+use crate::catalog::CatalogFormat;
+use crate::catalog::Stream;
 use crate::container::consumer::Event;
 use crate::container::{ExportSource, Frame};
 use crate::jitter::{self, Arrival, Push};
@@ -42,6 +44,7 @@ impl Release {
 	/// Subscribe to the catalog of `source`, waiting for the `m2ts` section that names its track.
 	///
 	/// Fails for [`CatalogFormat::Msf`], which has no `m2ts` section.
+	#[cfg(feature = "async")]
 	pub async fn new(source: crate::Source, catalog_format: CatalogFormat) -> crate::Result<Self> {
 		if catalog_format == CatalogFormat::Msf {
 			return Err(
@@ -123,11 +126,7 @@ impl Release {
 
 	/// The next object, at its time: whole TS packets, verbatim, stamped with the PCR time of
 	/// its first byte. Returns `None` once the track, or a catalog that never named one, ends.
-	pub async fn next(&mut self) -> crate::Result<Option<Frame>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for the next original MPEG-TS frame at its release time, or `None` at end.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {

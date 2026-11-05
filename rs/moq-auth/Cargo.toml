@@ -11,17 +11,29 @@ rust-version.workspace = true
 
 [features]
 default = ["client"]
+# Generated async wrappers for the lease poll methods, and `lease::Consumer::reported`.
+# Enable where you `.await` them; `client` and `serve` are async and enable it.
+async = ["kio/async"]
 # The HTTP client that drives a lease against an auth server.
-client = ["dep:reqwest", "dep:rind-rustls", "dep:rustls", "dep:rustls-platform-verifier", "dep:tokio", "kio/runtime", "dep:tracing", "dep:rand"]
+client = [
+    "async",
+    "dep:reqwest",
+    "dep:rind-rustls",
+    "dep:rustls",
+    "dep:rustls-platform-verifier",
+    "dep:tokio",
+    "kio/runtime",
+    "dep:tracing",
+    "dep:rand",
+]
 # The reference auth server behind `moq auth serve`: the policy a relay held, on axum.
-serve = ["dep:axum", "dep:tokio", "dep:tracing", "tokio/net"]
+serve = ["async", "dep:axum", "dep:tokio", "dep:tracing", "tokio/net"]
 
 [dependencies]
 axum = { workspace = true, optional = true }
 base64 = { workspace = true }
 jsonwebtoken = { workspace = true }
-# `async` for `Shared::wait`, until moq-auth grows an `async` feature of its own.
-kio = { workspace = true, features = ["async", "serde"] }
+kio = { workspace = true, features = ["serde"] }
 moq-crypto = { workspace = true, features = ["serde"] }
 moq-pattern = { workspace = true, features = ["serde"] }
 pkcs1 = { workspace = true, features = ["std"] }

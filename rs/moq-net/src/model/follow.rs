@@ -239,20 +239,14 @@ impl Following {
 		}
 	}
 
-	/// Wait for the next instance serving the path; see
+	/// The next instance serving the path; see
 	/// [`Consumer::follow`](crate::origin::Consumer::follow).
 	///
 	/// Returns [`Error::Closed`] once the origin closes, and any other resolution failure
 	/// as-is. A later call then waits for the serving route to change, even to another route of
-	/// the same instance, instead of asking the refusing route again. Dropping the future keeps the wait's progress for the
-	/// next call.
-	#[cfg(feature = "async")]
-	pub async fn available(&mut self) -> Result<broadcast::Consumer, Error> {
-		kio::wait(|waiter| self.poll_available(waiter)).await
-	}
-
-	/// Poll for the next instance serving the path, registering `waiter` when there
-	/// is none yet.
+	/// the same instance, instead of asking the refusing route again. An abandoned wait keeps its
+	/// progress for the next call.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_available(&mut self, waiter: &kio::Waiter) -> Poll<Result<broadcast::Consumer, Error>> {
 		loop {
 			// Apply every change on hand before reading an answer, so a burst of them hands out

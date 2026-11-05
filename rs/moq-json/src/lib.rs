@@ -16,6 +16,9 @@
 //! (and back), with the encoder saying where the group boundaries fall. Reach for the codec layer
 //! when something else already owns the track, such as a `moq_mux::container::Producer` also
 //! managing a timeline and a catalog estimate.
+//!
+//! The `poll_*` methods are always available. Enable the `async` feature for their generated
+//! async wrappers (`next`, `latest`, and `refresh`); it is off by default.
 
 #![warn(missing_docs)]
 
