@@ -360,11 +360,13 @@ key = "/etc/moq/relay.key"
 ```
 
 The request's `tls.chain` lists the SHA-256 of the leaf and of each certificate
-the leaf provably descends from, nearest first. Only a certificate whose key
-signed a link up from the leaf is listed, so a client cannot claim an
+the leaf provably descends from, nearest first, ending at the root the listener
+verified it against (`listen.tls.root`, or `web.https.root` on the HTTPS
+listener) whether or not the client sent that root. Only a certificate whose
+key signed a link up from the leaf is listed, so a client cannot claim an
 intermediate by sending it, and the relay refuses a chain too tangled to trace
-rather than report the leaf alone. A root appears only when the client sends
-it, so scope by the leaf or an intermediate.
+rather than report the leaf alone. A rule can scope a leaf, an intermediate,
+or a whole root.
 
 `moq auth serve` takes an optional TOML file holding every flag under its
 dotted key; a flag given on the command line wins. Only the file holds

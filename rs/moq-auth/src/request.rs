@@ -247,9 +247,10 @@ pub struct Peer {
 	/// SHA-256 of the leaf certificate, hex.
 	pub fingerprint: String,
 	/// SHA-256 of the leaf, then of each certificate the leaf provably descends from,
-	/// nearest first, hex. A certificate only lands here when its key signed a link up
-	/// from the leaf, so a client cannot claim an intermediate by sending it; a root
-	/// appears only when the client presented it.
+	/// nearest first, hex, ending at the root the relay's listener verified it against
+	/// whether or not the client sent it. A certificate only lands here when its key
+	/// signed a link up from the leaf, so a client cannot claim an intermediate by
+	/// sending it.
 	///
 	/// Empty from a relay that predates it: read that as the leaf alone.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]

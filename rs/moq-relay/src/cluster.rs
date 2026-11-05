@@ -4083,9 +4083,7 @@ mod tests {
 			.expect("accept")
 			.await
 			.expect("handshake");
-		cluster
-			.critical
-			.spawn("injected", async { panic!("injected critical failure") });
+		cluster.critical.fail(anyhow::anyhow!("injected critical failure"));
 		let result = kio::clock::timeout(TIMEOUT, running)
 			.await
 			.expect("run returns on a critical failure")

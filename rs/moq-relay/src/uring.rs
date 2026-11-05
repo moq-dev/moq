@@ -85,6 +85,8 @@ struct Serve {
 	/// `[quic] receive_window`, opened once a session is admitted: until then a
 	/// connection holds [`moq_net::transport::SETUP_RECEIVE_WINDOW`].
 	window: Option<NonZeroU64>,
+	/// The served TLS policy, which builds each client's identity against its roots.
+	tls: moq_tokio::tls::Serve,
 }
 
 /// A bound group of io_uring QUIC workers sharing one port.
@@ -105,8 +107,9 @@ pub struct Workers {
 	server: moq_uring::quic::server::Config,
 	/// `[quic] receive_window`, which admission opens; see [`Serve::window`].
 	window: Option<NonZeroU64>,
-	/// The same live resolver used by every worker and the fingerprint endpoint.
-	certificates: moq_tokio::tls::Certificates,
+	/// The TLS policy every worker serves, and the live resolver behind the
+	/// fingerprint endpoint.
+	tls: moq_tokio::tls::Serve,
 	/// One counter set per worker, in shard order. Created here rather than on
 	/// the worker thread so `/metrics` can publish every worker's series from
 	/// the first scrape, before the threads exist: a series that only appears
@@ -193,7 +196,6 @@ impl Workers {
 			}
 			None => listen_tls.load()?,
 		};
-		let certificates = tls.certificates();
 
 		// One resolution for the whole group, so a DNS answer that rotates
 		// between queries cannot hand members different addresses.
@@ -267,7 +269,7 @@ impl Workers {
 			addr,
 			server,
 			window,
-			certificates,
+			tls: tls.clone(),
 			udp,
 			pin: config.pin,
 			alpns: Arc::new(alpns),
@@ -309,7 +311,7 @@ impl Workers {
 	///
 	/// Tracks rotations: every worker resolves through the same live identity.
 	pub fn certificates(&self) -> moq_tokio::tls::Certificates {
-		self.certificates.clone()
+		self.tls.certificates()
 	}
 
 	/// Spawn the worker threads, each set up but not yet accepting.
@@ -338,6 +340,7 @@ impl Workers {
 			timeout: self.timeout,
 			reset_secret: self.reset_secret,
 			window: self.window,
+			tls: self.tls.clone(),
 		};
 
 		let cores = match self.pin {
@@ -747,7 +750,7 @@ async fn serve_connection(
 	let sni = conn.server_name().map(str::to_owned);
 	// TLS validated this against the configured roots before the connection
 	// existed, so a chain here is an authenticated peer.
-	let identity = conn.peer_identity().map(moq_tokio::tls::PeerIdentity::from_chain);
+	let identity = conn.peer_identity().map(|chain| serve.tls.peer(chain));
 
 	// Browsers speak WebTransport; everyone else raw QUIC. The moq version
 	// rides the ALPN for raw QUIC and the WebTransport subprotocol for `h3`.

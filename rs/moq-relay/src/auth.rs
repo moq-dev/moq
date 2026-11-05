@@ -1772,16 +1772,32 @@ mod tests {
 		assert!(matches!(auth.admit(request).await, Err(Error::Request(_))));
 	}
 
-	/// The relay reports the chain the leaf provably descends from, leaf first.
+	/// The relay reports the chain the leaf provably descends from, leaf first, ending
+	/// at the listener root it verified against even when the client sent only its leaf.
 	#[test]
-	fn a_peer_reports_its_lineage() {
+	fn a_peer_reports_its_lineage_to_the_listener_root() {
+		let root_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let mut root_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+		root_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+		let root = root_params.self_signed(&root_key).unwrap();
+		let issuer = rcgen::Issuer::new(root_params, root_key);
 		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-		let cert = rcgen::CertificateParams::new(vec!["edge0.invalid".to_string()])
+		let leaf = rcgen::CertificateParams::new(vec!["edge0.invalid".to_string()])
 			.unwrap()
-			.self_signed(&key)
+			.signed_by(&key, &issuer)
 			.unwrap();
-		let peer = peer(&moq_tokio::tls::PeerIdentity::from_chain(vec![cert.into()])).unwrap();
-		assert_eq!(peer.chain, vec![peer.fingerprint.clone()]);
+
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("root.pem");
+		std::fs::write(&path, root.pem()).unwrap();
+		let mut listen = moq_tokio::tls::Listen::default();
+		listen.generate = vec!["localhost".into()];
+		listen.root = vec![path];
+		let serve = listen.load().unwrap();
+
+		let peer = peer(&serve.peer(vec![leaf.into()])).unwrap();
+		let root = serve.peer(vec![root.into()]).fingerprint().unwrap();
+		assert_eq!(peer.chain, vec![peer.fingerprint.clone(), root]);
 	}
 
 	/// 0.14 read `anon` as a prefix and a pattern reads it as one broadcast, so a
