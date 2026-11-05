@@ -351,8 +351,9 @@ impl<'de, E: CatalogExt> Deserialize<'de> for Catalog<E> {
 			.into_iter()
 			.map(|mut track| -> Result<Track, D::Error> {
 				// Resolve draft-01 initRef into inline init_data so callers never
-				// see the indirection. Inline init_data (draft-00) is kept as-is,
-				// but a catalog that carries both forms must not disagree.
+				// see the indirection. Inline init_data (draft-00) that matches its
+				// initRef entry shares that entry's allocation; a catalog that
+				// carries both forms must not disagree.
 				if let Some(id) = track.init_ref.take() {
 					let entry = by_id.get(id.as_str()).ok_or_else(|| {
 						serde::de::Error::custom(format!(
