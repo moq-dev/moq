@@ -2346,41 +2346,6 @@ impl Subscriber {
 		super::request_stream::deliver(&mut stream.writer).await
 	}
 
-	/// Reject an incoming PUBLISH.
-	///
-	/// PUBLISH offers a single track, so honoring it means routing per
-	/// (namespace, track). Our model routes per namespace: a source attaches at a
-	/// path and serves every track under it, resolved on demand via SUBSCRIBE.
-	/// Accepting a PUBLISH would mean inventing a namespace-level source out of a
-	/// track-level offer, and that fiction then contradicts any real
-	/// PUBLISH_NAMESPACE for the same path.
-	///
-	/// Declining the request rather than failing the session, since a peer using
-	/// a feature we don't implement is not a protocol violation.
-	async fn run_publish_stream(
-		&mut self,
-		mut stream: Stream<Transport, Version>,
-		msg: ietf::Publish<'static>,
-	) -> Result<(), Error> {
-		if let Some(error) = super::namespace::refusal(&msg.track_namespace, self.version) {
-			return super::request_stream::reject(stream, error).await;
-		}
-		tracing::debug!(broadcast = %msg.track_namespace, track = %msg.track_name, "rejecting publish");
-
-		// We decline the method itself rather than this particular track, which would be
-		// UNINTERESTED.
-		//
-		// The alias the message carries is deliberately not recorded. Nothing will ever bind
-		// it, and a rejected request has no lifetime of ours to hang the cleanup on, so the
-		// entry would have to be swept asynchronously. Any data streams the publisher opened
-		// before reading this are dropped by the unknown-alias path instead.
-		let (kind, err) = (request::Kind::Publish, &Error::Unsupported);
-		super::request_stream::buffer_error(&mut stream.writer, kind, err, "PUBLISH is not supported", self.version)?;
-		// The rejection is the whole exchange, but it still has to arrive: a finish alone
-		// leaves the drop-time reset free to discard it before the peer acknowledges it.
-		super::request_stream::deliver(&mut stream.writer).await
-	}
-
 	/// Send OK on the bidi stream.
 	/// Spend a peer's request ID, closing the session on one it already used.
 	fn spend(&self, id: RequestId) -> Result<(), Error> {
@@ -4408,38 +4373,6 @@ impl Subscriber {
 		stream.reader.abort(&Error::Cancel);
 		let _ = stream.writer.close().await;
 		res
-	}
-
-	async fn read_subscribe_response(
-		&self,
-		stream: &mut Stream<Transport, Version>,
-		messages: &mut super::request_stream::Messages,
-	) -> Result<Option<Accepted>, Error> {
-		// Read type_id + size + body from the stream
-		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
-		let mut data = body.decoder(self.version);
-
-		match type_id {
-			ietf::SubscribeOk::ID => {
-				let msg = ietf::SubscribeOk::decode_msg(&mut data, self.version)?;
-				tracing::debug!(message = ?msg, "received subscribe ok");
-				Ok(Some(Accepted {
-					alias: msg.track_alias,
-					properties: msg.properties,
-					largest: msg.largest,
-				}))
-			}
-			ietf::RequestError::ID => {
-				let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
-				tracing::warn!(message = ?msg, "request error");
-				Err(request::from_code(
-					msg.error_code,
-					request::Kind::Subscribe,
-					self.version,
-				))
-			}
-			_ => Err(Error::UnexpectedMessage),
-		}
 	}
 
 	/// Learn a track nobody subscribes to from TRACK_STATUS, accepting an idle copy that
@@ -10376,7 +10309,7 @@ mod tests {
 			let (tasks, task_set) = crate::util::TaskSet::new();
 			std::mem::forget(task_set);
 
-			let mut subscriber = Subscriber::new(
+			let subscriber = Subscriber::new(
 				crate::time::sim(),
 				crate::driver::Transport::new(session.clone()),
 				origin,
@@ -10408,7 +10341,8 @@ mod tests {
 			};
 
 			// Errors are surfaced to the peer on the stream, not raised as a session error.
-			subscriber.run_publish_stream(stream, msg).await.unwrap();
+			let mut decline = subscriber.decline_publish(stream, msg);
+			kio::wait(|waiter| decline.poll(waiter)).await.unwrap();
 			kio::clock::sleep(Duration::from_millis(1)).await;
 
 			assert!(
