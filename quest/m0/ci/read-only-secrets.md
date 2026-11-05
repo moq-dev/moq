@@ -65,31 +65,27 @@ same name, so that run proves the release jobs read the Environment's copies,
 and proves `SIGNING_PASSWORD` if a Kotlin, apt, or rpm publish runs. Not
 chosen: deleting them now.
 
-`CACHIX_AUTH_TOKEN` is not in `publish` and stays out of the deletions for
-now: `release`'s `cachix.yml` still reads it on `moq-relay-v*`,
-`moq-cli-v*`, `moq-boy-v*`, `libmoq-v*`, and `moq-gst-v*` tags. That job
-names `publish`, so it falls back to the repository copy. (`release`'s
-`cache.yml` also reads it but fires only on pushes to `main`, so it never
-runs there.) `main` no longer uses Cachix, and
-[nix-cache-verify](/quest/m0/ci/nix-cache-verify.md) deletes the token once
-a release cut merges `main` into `release`. Until then a branch can still
-read it, so the Goal's check fails on it unless it moves into `publish`.
+Decided 2026-11-05 (maintainer, /quest-unblock): ✅ retire Cachix instead of
+moving `CACHIX_AUTH_TOKEN`. `release`'s `cachix.yml` still reads it on
+`moq-relay-v*`, `moq-cli-v*`, `moq-boy-v*`, `libmoq-v*`, and `moq-gst-v*`
+tags; that job names `publish`, which lacks it, so it reads the repository
+copy. (`release`'s `cache.yml` also reads it but fires only on pushes to
+`main`, so it never runs there.) The m0 quest `cachix-retire`, planned in
+[moq-dev/moq#7982](https://github.com/moq-dev/moq/pull/7982), backports
+`release-nix.yml` to `release`, drops `cachix.yml` there, and deletes
+`CACHIX_AUTH_TOKEN` and the `kixelated` cache once a release tag proves
+nix.moq.dev. So the deletions here leave `CACHIX_AUTH_TOKEN` to that quest,
+and the throwaway-branch check waits for it. Not chosen: copying it into
+`publish` now; leaving it at repository scope until the m2 cut.
 
 The maintainer's steps are under Waiting, in order. Deleting a
 repository-level secret before a release proves the Environment copy breaks a
-publish. Once they clear, an agent runs the throwaway-branch check in the
-Goal, which also confirms each Environment refuses the branch, then deletes
-the branch.
+publish. Once they and `cachix-retire` clear, an agent runs the
+throwaway-branch check in the Goal, which also confirms each Environment
+refuses the branch, then deletes the branch.
 
 ## Waiting
 
-- Maintainer: decide where `CACHIX_AUTH_TOKEN` lives until Cachix retires.
-  Recommended: copy it into `publish` now, beside the others, and delete the
-  repository copy with them; `release`'s `cachix.yml` already names
-  `publish`, and [publish-release-only](/quest/m0/ci/publish-release-only.md)
-  already expects to remove it from there. Alternative: leave it at
-  repository scope and hold the final check until
-  [nix-cache-verify](/quest/m0/ci/nix-cache-verify.md) deletes it.
 - Maintainer: once [moq-dev/moq#7936](https://github.com/moq-dev/moq/pull/7936)'s
   tags publish cleanly through `publish` (check every job in its tag runs
   with `gh run list --repo moq-dev/moq --branch <tag>`), delete the
@@ -98,7 +94,7 @@ the branch.
   `META_MODEL_API_KEY`, and this repository's access to the organization's
   `DISCORD_WEBHOOK` (already in `alert`). `MBX_R2_*` stays. Agents must not
   change credentials. Check: `gh secret list --repo moq-dev/moq` lists only
-  `MBX_R2_*` (plus `CACHIX_AUTH_TOKEN` if it stays), and
+  `MBX_R2_*` and `CACHIX_AUTH_TOKEN` (until `cachix-retire` deletes it), and
   `gh api repos/moq-dev/moq/actions/organization-secrets` lists none.
 - Maintainer: name the Environment in each trusted publisher, which needs
   the registries' account logins: npm's (`npm`, for the 17 public `@moq/*`
@@ -115,8 +111,12 @@ the branch.
   unlinking before the token exists pauses JSR publishing. Check:
   `gh secret list --repo moq-dev/moq --env npm` lists `JSR_TOKEN`, and each
   package's JSR settings show no linked repository.
+- moq-dev/moq: [moq-dev/moq#7982](https://github.com/moq-dev/moq/pull/7982)
+  adds `/quest/m0/ci/cachix-retire.md` to `main`. Then merge `main` here and
+  replace this item with a `Required` link to it, since the throwaway-branch
+  check needs `CACHIX_AUTH_TOKEN` gone. Check:
+  `gh pr view 7982 --repo moq-dev/moq --json state`.
 
 ## Related
 
 - [Drop main from publish](/quest/m0/ci/publish-release-only.md) - narrows `publish` to `release` and release tags once `main` merges into `release`
-- [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - retires Cachix and deletes `CACHIX_AUTH_TOKEN`
