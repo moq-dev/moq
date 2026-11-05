@@ -878,7 +878,10 @@ impl Subscriber {
 		};
 		let Some((mut producer, timescale)) = target else {
 			self.datagrams_unrouted.fetch_add(1, atomic::Ordering::Relaxed);
-			tracing::debug!(subscribe = dg.subscribe, "dropping datagram for a subscription with no datagram track");
+			tracing::debug!(
+				subscribe = dg.subscribe,
+				"dropping datagram for a subscription with no datagram track"
+			);
 			return Ok(());
 		};
 		let timestamp = dg

@@ -53,6 +53,12 @@ export interface Stats {
 
 	/** Packets currently declared lost. The estimate can decrease when a loss proves spurious. */
 	packetsLost?: number;
+
+	/**
+	 * Datagrams received for a subscription with no datagram track: one this session doesn't
+	 * know, has ended, or whose answer it hasn't received. Absent on moq-transport.
+	 */
+	datagramsUnrouted?: number;
 }
 
 /**

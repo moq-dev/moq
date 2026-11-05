@@ -1,4 +1,4 @@
-import { Milli } from "@moq/clock";
+import { Milli, yieldNow } from "@moq/clock";
 import { type Dispose, Effect, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
@@ -247,6 +247,10 @@ export class Subscriber {
 	#datagrams = new Map<bigint, DatagramEntry>();
 	#legacyDatagrams = new Map<string, DatagramEntry>();
 	#legacyRequests = new Map<string, datagram.Request>();
+	// Lite-07 datagram requests sent and not yet answered.
+	#unanswered = new Set<bigint>();
+	/** Datagrams received for a subscription with no datagram track; see `Stats.datagramsUnrouted`. */
+	datagramsUnrouted = 0;
 	// A SUBSCRIBE sent alongside its TRACK, until its TRACK_INFO lands: settles with the
 	// entry, or `undefined` if it never does.
 	#pending = new Map<bigint, Promise<SubscribeEntry | undefined>>();
@@ -895,6 +899,7 @@ export class Subscriber {
 					{ version: this.version },
 					async (opened) => {
 						stream = opened;
+						this.#unanswered.add(id);
 						await opened.writer.u53(StreamId.Datagrams);
 						await new Datagrams({
 							id,
@@ -914,6 +919,7 @@ export class Subscriber {
 			if (!stream) throw new Error("datagram stream was not opened");
 			producer = request.accept(answered);
 			this.#datagrams.set(id, { producer, timescale: answered.timescale });
+			this.#unanswered.delete(id);
 			const opened = stream;
 			const receiving = producer;
 			// The only thing following DATAGRAMS_INFO is the publisher's FIN.
@@ -946,6 +952,7 @@ export class Subscriber {
 			if (legacyKey !== undefined && this.#legacyRequests.get(legacyKey) === request)
 				this.#legacyRequests.delete(legacyKey);
 			grant?.();
+			this.#unanswered.delete(id);
 			this.#datagrams.delete(id);
 			cancel.abort(new StreamError(StreamCode.Cancel));
 			stream?.reader.stop(StreamCode.Cancel);
@@ -2410,24 +2417,40 @@ export class Subscriber {
 		}
 	}
 
-	// Decode one datagram body and hand it to the matching subscription's producer. Drops the
-	// datagram (best-effort) if the subscription is unknown or closed.
+	// Decode one datagram body and hand it to the datagram track it was sent for. A publisher
+	// sends a track's first datagram right behind its answer, which the transport may hand over
+	// first: one for a subscription still awaiting its answer waits a host task, so an answer
+	// already received decodes before it. One that still finds no track is dropped and counted.
 	async #routeDatagram(payload: Uint8Array): Promise<void> {
 		if (payload.byteLength > DatagramMessage.MAX_SIZE) return;
+		let unrouted = await this.#deliverDatagram(payload);
+		if (unrouted === undefined) return;
+		if (this.#unanswered.has(unrouted) || this.#pending.has(unrouted)) await yieldNow();
+		// Its track may also have registered while the decode awaited.
+		if (this.#datagrams.has(unrouted)) unrouted = await this.#deliverDatagram(payload);
+		if (unrouted === undefined) return;
+		this.datagramsUnrouted++;
+		console.debug(`dropping datagram for a subscription with no datagram track: id=${unrouted}`);
+	}
+
+	// Deliver one datagram body, returning its Subscribe ID if that subscription has no datagram track.
+	async #deliverDatagram(payload: Uint8Array): Promise<bigint | undefined> {
 		// Read with the entry it was decoded with: one registered while the decode awaited would
-		// read a datagram parsed with the defaults. An unknown subscription's datagram, or one
-		// whose TRACK_INFO had not landed, which a datagram cannot wait for, is dropped below.
+		// read a datagram parsed with the defaults.
 		let entry: DatagramEntry | undefined;
 		const dg = await DatagramMessage.decode(payload, this.version, (id) => {
 			entry = this.#datagrams.get(id);
 			return { timed: entry?.timescale !== undefined };
 		});
-		if (!dg || !entry || this.#datagrams.get(dg.subscribe) !== entry) return;
+		// Padding, which names no subscription.
+		if (!dg) return undefined;
+		if (!entry || this.#datagrams.get(dg.subscribe) !== entry) return dg.subscribe;
 		const timestamp =
 			dg.timestamp === undefined || entry.timescale === undefined
 				? undefined
 				: new Time.Timestamp(dg.timestamp, entry.timescale);
 		entry.producer.insert({ sequence: dg.sequence, timestamp, payload: dg.payload });
+		return undefined;
 	}
 
 	/**

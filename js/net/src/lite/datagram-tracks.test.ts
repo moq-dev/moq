@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { accept, connect } from "../connection/index.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, type MockTransport } from "../mock.ts";
 import { Producer as Origin } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
@@ -282,35 +282,71 @@ test("lite-06: a request cancelled behind the shared datagram writer sends nothi
 	}
 });
 
+// A publisher's stream writes, handed to the subscriber `lag` microtasks late: the answer it
+// writes lands after a datagram sent behind it, though in the same host task.
+function lagAnswers(transport: MockTransport, lag: number): void {
+	const lagging = (writable: WritableStream<Uint8Array>) => {
+		const writer = writable.getWriter();
+		let chain = Promise.resolve();
+		const later = (op: () => Promise<void>) => {
+			chain = chain.then(async () => {
+				for (let i = 0; i < lag; i++) await Promise.resolve();
+				await op();
+			});
+			return chain;
+		};
+		return new WritableStream<Uint8Array>({
+			write: (chunk) => void later(() => writer.write(chunk)),
+			close: () => later(() => writer.close()),
+			abort: (reason) => writer.abort(reason),
+		});
+	};
+	const incoming = transport.incomingBidirectionalStreams.pipeThrough(
+		new TransformStream<WebTransportBidirectionalStream, WebTransportBidirectionalStream>({
+			transform: (bidi, controller) =>
+				controller.enqueue({
+					readable: bidi.readable,
+					writable: lagging(bidi.writable),
+				} as WebTransportBidirectionalStream),
+		}),
+	);
+	Object.defineProperty(transport, "incomingBidirectionalStreams", { value: incoming });
+}
+
 // A publisher that writes as soon as a subscription reaches it sends the datagram right behind
-// its answer. The subscriber decodes the answer before it routes the datagram.
+// its answer, which may reach the subscriber first. The subscriber decodes the answer before it
+// routes the datagram.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
-	test(`${alpn}: a datagram sent right behind its answer arrives`, async () => {
-		const source = new Origin();
-		const publication = source.createBroadcast(path);
-		const datagrams = publication.broadcast.createDatagrams("audio");
-		publication.announce();
-		const pair = createMockTransportPair(alpn);
-		const [client, server] = await Promise.all([
-			connect({ url, transport: pair.client }),
-			accept({ url, transport: pair.server, publish: source.consume() }),
-		]);
-		const remote = wireOf(client).consume(path);
-		const reader = remote.datagrams("audio");
-		// Only the subscription carries this priority: a lite-06 TRACK lookup asks for none.
-		reader.setPriority(5);
-		try {
-			while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
-			datagrams.append(undefined, Uint8Array.of(1));
-			await reader.info();
-			datagrams.append(undefined, Uint8Array.of(2));
-			expect((await reader.recv())?.payload).toEqual(Uint8Array.of(1));
-		} finally {
-			reader.close();
-			remote.close();
-			client.abort();
-			server.abort();
-			source.close();
-		}
-	});
+	for (const lag of [0, 100]) {
+		test(`${alpn}: a datagram sent right behind its answer arrives (answer ${lag} microtasks late)`, async () => {
+			const source = new Origin();
+			const publication = source.createBroadcast(path);
+			const datagrams = publication.broadcast.createDatagrams("audio");
+			publication.announce();
+			const pair = createMockTransportPair(alpn);
+			lagAnswers(pair.server, lag);
+			const [client, server] = await Promise.all([
+				connect({ url, transport: pair.client }),
+				accept({ url, transport: pair.server, publish: source.consume() }),
+			]);
+			const remote = wireOf(client).consume(path);
+			const reader = remote.datagrams("audio");
+			// Only the subscription carries this priority: a lite-06 TRACK lookup asks for none.
+			reader.setPriority(5);
+			try {
+				while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
+				datagrams.append(undefined, Uint8Array.of(1));
+				await reader.info();
+				datagrams.append(undefined, Uint8Array.of(2));
+				expect((await reader.recv())?.payload).toEqual(Uint8Array.of(1));
+				expect((await client.stats()).datagramsUnrouted).toBe(0);
+			} finally {
+				reader.close();
+				remote.close();
+				client.abort();
+				server.abort();
+				source.close();
+			}
+		});
+	}
 }

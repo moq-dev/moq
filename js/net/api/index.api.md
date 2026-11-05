@@ -220,6 +220,7 @@ export namespace Connection {
 		bytesLost?: number;
 		bytesReceived?: number;
 		bytesSent?: number;
+		datagramsUnrouted?: number;
 		estimatedSendRate?: number;
 		packetsLost?: number;
 		packetsReceived?: number;

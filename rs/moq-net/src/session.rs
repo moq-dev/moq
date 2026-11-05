@@ -282,7 +282,10 @@ impl Session {
 			state.demanded = true;
 		}
 		Stats {
-			datagrams_unrouted: self.datagrams_unrouted.as_ref().map(|count| count.load(Ordering::Relaxed)),
+			datagrams_unrouted: self
+				.datagrams_unrouted
+				.as_ref()
+				.map(|count| count.load(Ordering::Relaxed)),
 			..state.sample
 		}
 	}

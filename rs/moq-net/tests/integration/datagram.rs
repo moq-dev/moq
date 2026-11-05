@@ -577,11 +577,7 @@ async fn a_datagram_sent_right_behind_its_answer_arrives() {
 			.unwrap_or_else(|_| panic!("{version}: the request never reached the handler"))
 			.unwrap();
 		let mut producer = request.accept(timed());
-		assert_eq!(
-			producer.append(millis(1), &b"first"[..]).unwrap(),
-			0,
-			"{version}"
-		);
+		assert_eq!(producer.append(millis(1), &b"first"[..]).unwrap(), 0, "{version}");
 		let datagram = kio::clock::timeout(TIMEOUT, consumer.recv())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the datagram never arrived"))
