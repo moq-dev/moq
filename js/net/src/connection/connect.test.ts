@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
 import Qmux, { selectSubprotocol, type WebSocketLike } from "@moq/qmux";
+import { decodeRecord, type TransportParams } from "../../../qmux/src/frame.ts";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import { ClientSetup, ServerSetup } from "../lite/compat.ts";
@@ -649,11 +650,12 @@ test("the WebSocket fallback offers the same versions", async () => {
 
 // How many streams the WebSocket fallback lets a server open in each direction: a qmux
 // server accepts the dial and opens streams until the client's limit refuses one.
-async function websocketStreamLimits(props: Omit<ConnectProps, "url">): Promise<{ bidi: number; uni: number }> {
+async function websocketStreamLimits(props: Omit<ConnectProps, "url">) {
 	const original = globalThis.WebTransport;
 	// No WebTransport, so the WebSocket attempt goes at once.
 	globalThis.WebTransport = undefined as unknown as typeof WebTransport;
 	const accepted = Promise.withResolvers<Qmux>();
+	const parameters = Promise.withResolvers<TransportParams>();
 	// Bun's server socket, shaped as the `WebSocketLike` that `Qmux.accept` adopts.
 	let adopted: WebSocketLike | undefined;
 	const server = Bun.serve<{ protocol: string }>({
@@ -691,6 +693,9 @@ async function websocketStreamLimits(props: Omit<ConnectProps, "url">): Promise<
 				accepted.resolve(Qmux.accept(adopted, { protocol: socket.data.protocol }));
 			},
 			message(_socket, data) {
+				for (const frame of decodeRecord(new Uint8Array(data as ArrayBuffer))) {
+					if (frame.type === "transport_parameters") parameters.resolve(frame.params);
+				}
 				adopted?.onmessage?.({ data });
 			},
 			close(_socket, code, reason) {
@@ -723,21 +728,50 @@ async function websocketStreamLimits(props: Omit<ConnectProps, "url">): Promise<
 		controller.abort();
 		await attempt;
 		session.close();
-		return limits;
+		return { ...limits, params: await parameters.promise };
 	} finally {
 		globalThis.WebTransport = original;
 		server.stop(true);
 	}
 }
 
-test("the WebSocket fallback grants the server websocket.maxStreams in each direction", async () => {
-	expect(await websocketStreamLimits({})).toEqual({ bidi: 10_000, uni: 10_000 });
-	expect(await websocketStreamLimits({ websocket: { maxStreams: 3 } })).toEqual({ bidi: 3, uni: 3 });
+test("the WebSocket fallback grants stream limits and receive windows", async () => {
+	const defaults = await websocketStreamLimits({});
+	expect(defaults).toMatchObject({
+		bidi: 10_000,
+		uni: 10_000,
+		params: {
+			initialMaxData: 4_194_304n,
+			initialMaxStreamDataBidiLocal: 1_048_576n,
+			initialMaxStreamDataBidiRemote: 1_048_576n,
+			initialMaxStreamDataUni: 1_048_576n,
+		},
+	});
+	expect(
+		await websocketStreamLimits({
+			websocket: {
+				maxStreams: 3,
+				receiveWindow: 65_537,
+				streamReceiveWindow: 16_385,
+			},
+		}),
+	).toMatchObject({
+		bidi: 3,
+		uni: 3,
+		params: {
+			initialMaxData: 65_537n,
+			initialMaxStreamDataBidiLocal: 16_385n,
+			initialMaxStreamDataBidiRemote: 16_385n,
+			initialMaxStreamDataUni: 16_385n,
+		},
+	});
 });
 
-test("websocket.maxStreams must be a positive integer", async () => {
-	for (const maxStreams of [0, -1, 1.5, Number.NaN]) {
-		await expect(connect(url, { websocket: { maxStreams } })).rejects.toThrow(RangeError);
+test("WebSocket limits must be positive safe integers", async () => {
+	for (const key of ["maxStreams", "receiveWindow", "streamReceiveWindow"] as const) {
+		for (const value of [0, -1, 1.5, Number.NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+			await expect(connect(url, { websocket: { [key]: value } })).rejects.toThrow(RangeError);
+		}
 	}
 });
 

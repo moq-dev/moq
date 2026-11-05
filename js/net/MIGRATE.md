@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### WebSocket receive windows match Rust
+
+The fallback now grants 4 MiB per connection and 1 MiB per stream, up from
+1 MiB and 256 KiB. Set `websocket.receiveWindow` and
+`websocket.streamReceiveWindow` in connection options to tune these byte budgets
+or retain the old limits. Both accept positive safe integers, like
+`websocket.maxStreams`. `@moq/qmux`'s standalone defaults are unchanged.
+
 ### Opens wait their turn for stream credit ([#7894](https://github.com/moq-dev/moq/pull/7894))
 
 `NoStreamCredit` is removed: a request no longer fails when the peer grants no more streams. Every open waits for credit, and returning credit goes to the open with the highest `sendOrder`. A request's 10s deadline runs only while none of its streams waits to open.
