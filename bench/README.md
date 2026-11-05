@@ -904,6 +904,11 @@ Each run's evidence directory keeps both builds' estimates (`criterion` and
 `criterion-base`), the confirmation rounds under `confirm/`, and the run's
 `paired.json`.
 
+Each revision builds in its own Cargo target directory (`base` and `current`
+under `CARGO_TARGET_DIR`, default `target/bench`). An A/B outside `run.sh`
+uses its base mode or a target directory per source tree: two trees sharing
+one can leave a bench linked against the other tree's library.
+
 ### CodSpeed
 
 The CodSpeed workflow adds instruction counts for every `main` commit that
