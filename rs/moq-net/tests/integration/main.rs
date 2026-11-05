@@ -31,6 +31,7 @@ mod fetch_only;
 mod fetch_pipeline;
 mod finished_broadcast_mock;
 mod finite_relay;
+mod flights;
 mod goaway;
 mod group_order;
 mod history_groups;

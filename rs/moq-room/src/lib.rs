@@ -14,6 +14,10 @@
 //! extracted from hang.live's roster and iroh-live's announce-bus redesign of
 //! `iroh-rooms`. Gossip discovery, tickets, and 1:1 Call stay in iroh-live.
 //! Capture and encode stay in `moq-video` / `moq-audio`.
+//!
+//! The `poll_*` methods are always available. Enable the `async` feature for their generated
+//! async wrappers (`next`, `expire`, and `recv`) and `chat::Subscriber::subscribe`; it is off
+//! by default.
 
 #![warn(missing_docs)]
 

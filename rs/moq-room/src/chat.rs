@@ -108,16 +108,13 @@ impl Publisher {
 		Ok(())
 	}
 
-	/// Poll until the oldest retained messages expire; drive this alongside incoming sends.
+	/// Prune the oldest retained messages once they expire. Drive this alongside incoming sends,
+	/// and again after each expiry while the publisher is open.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_expire(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		self.deadline.set(self.expires.front().copied());
 		ready!(self.deadline.poll(waiter));
 		Poll::Ready(self.prune())
-	}
-
-	/// Wait until the oldest retained messages expire; call again while the publisher is open.
-	pub async fn expire(&mut self) -> Result<(), Error> {
-		kio::wait(|waiter| self.poll_expire(waiter)).await
 	}
 
 	/// Finish the track, preserving the final retained window for current readers.
@@ -140,8 +137,11 @@ enum State {
 
 impl Subscriber {
 	/// Subscribe to the newest retained window on a broadcast.
+	#[cfg(feature = "async")]
 	pub async fn subscribe(broadcast: &broadcast::Consumer) -> Result<Self, Error> {
-		Ok(Self::new(broadcast.track(TRACK)?.subscribe(None).await?))
+		let track = broadcast.track(TRACK)?;
+		let subscribing = track.subscribe(None).into_inner();
+		Ok(Self::new(kio::wait(|waiter| subscribing.poll_ok(waiter)).await?))
 	}
 
 	/// Read window changes from an existing subscription, starting at the newest window.
@@ -151,8 +151,10 @@ impl Subscriber {
 		}
 	}
 
-	/// Poll the next window change and when its frame was sent, returning errors separately from
-	/// clean completion.
+	/// The next window change and when its frame was sent, or `None` on clean completion.
+	///
+	/// A message first seen in a later window's header carries that header's time, not its send time.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<Event>>, Error>> {
 		if let State::Positioning(pending) = &mut self.state {
 			let track = pending.as_mut().expect("positioning holds the track");
@@ -170,13 +172,6 @@ impl Subscriber {
 			unreachable!("positioned above");
 		};
 		Poll::Ready(Ok(ready!(consumer.poll_next(waiter))?))
-	}
-
-	/// Wait for the next window change and when its frame was sent, or None on clean completion.
-	///
-	/// A message first seen in a later window's header carries that header's time, not its send time.
-	pub async fn recv(&mut self) -> Result<Option<moq_net::Timed<Event>>, Error> {
-		kio::wait(|waiter| self.poll_recv(waiter)).await
 	}
 }
 
