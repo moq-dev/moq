@@ -970,9 +970,10 @@ fn publish_catalog_config_null_pointer() {
 	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
-/// Enablement belongs to each catalog snapshot; holding a disabled rendition keeps its subscription usable.
+/// Enablement belongs to each catalog snapshot, and a snapshot that disables a rendition refuses to
+/// consume it.
 #[test]
-fn audio_enabled_snapshots_preserve_a_held_consumer() {
+fn audio_enabled_follows_each_snapshot() {
 	let origin = id(moq_origin_create());
 	let path = b"audio-enabled";
 	let broadcast = publish_broadcast(origin, path);
@@ -1030,9 +1031,11 @@ fn audio_enabled_snapshots_preserve_a_held_consumer() {
 		MOQ_ERROR_INVALID_POINTER
 	);
 
-	// A held rendition may be opened from a disabled snapshot, then re-enabled without resubscribing.
 	let frames = Callback::new();
-	let track = id(unsafe { moq_consume_audio(disabled, 0, &TEN_SECONDS, Some(channel_callback), frames.ptr) });
+	assert_eq!(
+		unsafe { moq_consume_audio(disabled, 0, &TEN_SECONDS, Some(channel_callback), frames.ptr) },
+		MOQ_ERROR_NOT_FOUND
+	);
 	set_enabled(true);
 	let resumed = id(catalogs.recv());
 	assert_eq!(
@@ -1045,6 +1048,7 @@ fn audio_enabled_snapshots_preserve_a_held_consumer() {
 		0
 	);
 	assert!(!unsafe { enabled.assume_init() });
+	let track = id(unsafe { moq_consume_audio(resumed, 0, &TEN_SECONDS, Some(channel_callback), frames.ptr) });
 	let payload = b"resumed-audio";
 	assert_eq!(
 		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), micros(0)) },

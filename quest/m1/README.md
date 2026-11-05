@@ -25,7 +25,7 @@ because a downstream iGPU transcode trial needs it now.
 Held here by open claims: a quest's branch is its path, so a claimed quest
 cannot move until its PR merges, and an epic moves with its children. These
 breaking epics and quests stay in m1 for now and are listed in m2's
-`Required`, so the cut still waits on them: api-audit, datagram-tracks, drop-set, push-to-talk, rind, session-policy, and
+`Required`, so the cut still waits on them: api-audit, datagram-tracks, drop-set, rind, session-policy, and
 stream-credit. The [re-cut follow-up](/quest/m2/recut-held.md)
 moves what remains of them once their claims merge. release-perf, held for
 the same reason, gates the cut through the

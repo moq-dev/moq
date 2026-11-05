@@ -4,7 +4,7 @@
 
 The epics that open claims held in place during the 2026-11-05 milestone
 re-cut sit where the re-cut's rules put them. What remains of api-audit,
-datagram-tracks, drop-set, push-to-talk, rind,
+datagram-tracks, drop-set, rind,
 session-policy, and stream-credit moves from m1 to m2; what remains of release-perf moves under
 the [cut gate](/quest/m2/cut-gate/README.md); and the
 probe epic moves from m2 to m3. The "held" notes in the m1, m2, and cut gate
@@ -33,7 +33,6 @@ padding probes in [lite07-finalize](/quest/m2/lite07-finalize.md).
 - [Route handle](/quest/m1/api-audit/route/handle.md) - claim held api-audit
 - [Datagram answer race](/quest/m1/datagram-tracks/answer-race.md) - claim held datagram-tracks
 - [IETF datagram tracks](/quest/m1/datagram-tracks/ietf.md) - claim held datagram-tracks
-- [Push-to-talk DTX](/quest/m1/push-to-talk/dtx.md) - claim held push-to-talk
 - [rind CPU error](/quest/m1/rind/cpu-error.md) - claim held rind
 - [Connect policy](/quest/m1/session-policy/connect.md) - claim held session-policy
 - [Release on leave](/quest/m1/stream-credit/release-on-leave.md) - claim held stream-credit
