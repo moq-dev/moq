@@ -10,7 +10,7 @@ CPU refusals now return `Error::UnsupportedCpu(moq_crypto::cpu::UnsupportedCpu)`
 
 ### Handshake cryptography uses rind
 
-RTMP handshake HMAC-SHA256 uses rind. `Server::bind` checks CPU support before binding; every stream handshake also checks before using crypto, including `accept_stream` and the dial client.
+RTMP handshake HMAC-SHA256 uses rind. `Server::bind` checks CPU support before binding; `accept_stream` and the dial client also check at setup, before using crypto.
 The `tls` feature no longer selects rustls' aws-lc provider; build the supplied TLS configuration with `rind_rustls::default_provider()?` or `moq_tokio::tls::Listen::server_config`.
 RTMP and RTMPS wire formats are unchanged.
 

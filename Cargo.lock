@@ -4648,7 +4648,6 @@ dependencies = [
  "rand 0.10.3",
  "reqwest",
  "rind",
- "rind-rustls",
  "serde",
  "serde_json",
  "tempfile",
