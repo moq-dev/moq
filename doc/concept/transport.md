@@ -48,6 +48,10 @@ only help once bytes leave the TCP queue. The fallback is automatic in every
 client; the relay serves it on its `[web.http]` or `[web.https]` listener. A session that lands on
 WebSocket stays there until it ends; the next connect races again.
 
+Each side lets the other hold 10,000 streams open in each direction, as over
+QUIC, since MoQ holds one per subscription and per live group. Set it with
+`websocket.maxStreams` in `@moq/net` and `quic.max_streams` in `moq-tokio`.
+
 QUIC gets a head start in the race: 500 ms in `@moq/net` and 200 ms in
 `moq-tokio`. Once WebSocket wins against a server, identified by the host and
 port the fallback dials, later connects to that server race both transports at

@@ -63,7 +63,7 @@ cargo add moq-audio                   # PCM echo processing needs no device feat
 cargo add moq-audio --features capture,pipewire
 ```
 
-`pipewire` and `pulseaudio` only take effect alongside `capture` or `playback`.
+`pipewire` and `pulseaudio` only take effect alongside `capture` or `playback`, and only on Linux and the BSDs; elsewhere they compile to nothing, so a dependent can enable them on every platform.
 
 API: [docs.rs/moq-audio](https://docs.rs/moq-audio). Pair with
 [`moq-video`](/lib/rs/moq-video). The playout target `moq play` and

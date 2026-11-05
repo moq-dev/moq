@@ -1648,7 +1648,8 @@ fn bench_range_widening(c: &mut Criterion) {
 						black_box(group);
 					}
 					reader.update(narrow.clone()).unwrap();
-					assert!(reader.poll_recv_group(&waiter).is_pending());
+					// The narrow range is already delivered, so it ends until widened again.
+					assert!(matches!(reader.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
 				});
 				drop((readers, track, broadcast));
 			});

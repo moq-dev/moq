@@ -362,8 +362,7 @@ impl MoqBroadcastConsumer {
 			.watch(async {
 				let subscription = subscription.map(moq_net::track::Subscription::try_from).transpose()?;
 				let track = self.inner.track(&name)?.subscribe(subscription).await?;
-				let datagrams = Datagrams::Remote(self.inner.clone());
-				Ok(Arc::new(MoqTrackConsumer::new(track, datagrams, self.driver.clone())))
+				Ok(Arc::new(MoqTrackConsumer::new(track, self.driver.clone())))
 			})
 			.await
 	}
@@ -406,7 +405,6 @@ pub(crate) fn map_fetch_error(err: moq_net::Error) -> MoqError {
 /// binding can't express in its type system, so the handle commits on the first group
 /// read instead: whichever group cursor a caller reaches for first is the one this
 /// track keeps, and reaching for the other afterwards is [`MoqError::AlreadyCommitted`].
-/// Datagrams are a separate track of the same name, so reading them never commits.
 enum Cursor {
 	/// No group read has happened yet; the track can still commit either way.
 	Uncommitted(moq_net::track::Subscriber),
@@ -430,17 +428,6 @@ struct OrderedCursor {
 
 struct TrackInner {
 	track: Cursor,
-	datagrams: Datagrams,
-}
-
-/// The datagram track of a track's name. A subscribed track opens it on the first datagram
-/// read, so a reader that never asks for datagrams never subscribes to them.
-pub(crate) enum Datagrams {
-	/// Not opened yet; opened from the broadcast the track was subscribed through.
-	Remote(moq_net::broadcast::Consumer),
-	Open(moq_net::datagram::Consumer),
-	/// Read from a track that had already finished, so it has no datagrams to come.
-	Ended,
 }
 
 impl TrackInner {
@@ -537,89 +524,12 @@ impl TrackInner {
 			}
 		}
 	}
-
-	/// The datagram consumer, opened now if this is the first datagram read, or `None` once
-	/// there are none to come.
-	fn datagrams(
-		&mut self,
-		control: &moq_net::track::Control,
-	) -> Result<Option<&mut moq_net::datagram::Consumer>, MoqError> {
-		let name = match &self.track {
-			Cursor::Uncommitted(track) | Cursor::Arrival(track) => track.name(),
-			Cursor::Ordered(ordered) => ordered.track.name(),
-			// Poisoned mid-conversion; see `arrival`.
-			Cursor::Converting => return Err(MoqError::Closed),
-		};
-		if let Datagrams::Remote(broadcast) = &self.datagrams {
-			match broadcast.datagrams(name) {
-				Ok(mut opened) => {
-					opened.set_priority(control.subscription().priority);
-					self.datagrams = Datagrams::Open(opened);
-				}
-				Err(err) => self.datagrams = self.missing(err)?,
-			}
-		}
-		match &mut self.datagrams {
-			Datagrams::Open(datagrams) => Ok(Some(datagrams)),
-			Datagrams::Ended => Ok(None),
-			Datagrams::Remote(_) => unreachable!("opened above"),
-		}
-	}
-
-	/// The datagrams after looking them up failed with `err`: none to come when the track
-	/// declared its end, since its datagram track finished with it and a finished one is no
-	/// longer found, or else `err`.
-	fn missing(&mut self, err: moq_net::Error) -> Result<Datagrams, MoqError> {
-		let missing = matches!(
-			err,
-			moq_net::Error::NotFound | moq_net::Error::Stream(moq_net::StreamError::NotFound)
-		);
-		let waiter = kio::Waiter::noop();
-		let finished = match &mut self.track {
-			Cursor::Uncommitted(track) | Cursor::Arrival(track) => track.poll_finished(&waiter),
-			Cursor::Ordered(ordered) => waiter.poll_future(std::pin::pin!(ordered.track.finished())),
-			Cursor::Converting => Poll::Pending,
-		};
-		match (missing, finished) {
-			(true, Poll::Ready(Ok(_))) => Ok(Datagrams::Ended),
-			_ => Err(err.into()),
-		}
-	}
-
-	fn poll_recv_datagram(
-		&mut self,
-		waiter: &kio::Waiter,
-		control: &moq_net::track::Control,
-	) -> Poll<Result<Option<MoqDatagram>, MoqError>> {
-		let datagrams = match self.datagrams(control) {
-			Ok(Some(datagrams)) => datagrams,
-			Ok(None) => return Poll::Ready(Ok(None)),
-			Err(err) => return Poll::Ready(Err(err)),
-		};
-		let datagram = match ready!(datagrams.poll_recv(waiter)) {
-			Ok(Some(datagram)) => datagram,
-			Ok(None) => return Poll::Ready(Ok(None)),
-			Err(err) => {
-				self.datagrams = match self.missing(err) {
-					Ok(ended) => ended,
-					Err(err) => return Poll::Ready(Err(err)),
-				};
-				return Poll::Ready(Ok(None));
-			}
-		};
-		Poll::Ready(Ok(Some(MoqDatagram {
-			sequence: datagram.sequence,
-			timestamp: datagram.timestamp.map(Into::into),
-			payload: datagram.payload.to_vec(),
-		})))
-	}
 }
 
-/// A subscribed track whose groups, frames, or datagrams can be read.
+/// A subscribed stream track whose groups and frames can be read.
 #[derive(uniffi::Object)]
 pub struct MoqTrackConsumer {
-	/// Every read polls this; none holds it across a wait, so a datagram read progresses while
-	/// a group read is parked, and vice versa.
+	/// Reads poll in place without holding a lock across a wait.
 	reads: Polled<TrackInner>,
 	control: moq_net::track::Control,
 	info: moq_net::track::Info,
@@ -628,13 +538,12 @@ pub struct MoqTrackConsumer {
 }
 
 impl MoqTrackConsumer {
-	pub(crate) fn new(track: moq_net::track::Subscriber, datagrams: Datagrams, driver: Background) -> Self {
+	pub(crate) fn new(track: moq_net::track::Subscriber, driver: Background) -> Self {
 		let control = track.control();
 		let info = track.info().clone();
 		Self {
 			reads: Polled::new(TrackInner {
 				track: Cursor::Uncommitted(track),
-				datagrams,
 			})
 			.supervised(driver.clone()),
 			control,
@@ -646,7 +555,7 @@ impl MoqTrackConsumer {
 	/// Hand the subscription to a typed reader (a JSON consumer, say), closing this handle.
 	///
 	/// Errors with [`MoqError::AlreadyCommitted`] once a group read has started, since the reader
-	/// would miss whatever that read consumed. A datagram read still parked resolves `Cancelled`.
+	/// would miss whatever that read consumed.
 	pub(crate) fn take(&self) -> Result<(moq_net::track::Subscriber, Background), MoqError> {
 		let inner = self
 			.reads
@@ -714,23 +623,6 @@ impl MoqTrackConsumer {
 		Ok(frame.map(raw_frame))
 	}
 
-	/// Receive the next best-effort datagram in arrival order.
-	///
-	/// A consumer from [`MoqTrackProducer::consume`](crate::producer::MoqTrackProducer::consume)
-	/// receives the datagrams sent after it was created. One from a subscription subscribes to
-	/// the track's datagrams on its first call, receiving those sent from then on, so start
-	/// reading before the ones you want are sent. Returns `None` when the track ends.
-	/// Datagram delivery is unavailable over pre-lite-05 moq-lite, moq-transport, and
-	/// stream-only transports. Datagrams are separate from groups, so this works alongside
-	/// either group order, never commits the track to one, and progresses while a group
-	/// read is pending.
-	pub async fn recv_datagram(&self) -> Result<Option<MoqDatagram>, MoqError> {
-		let control = &self.control;
-		self.reads
-			.wait(|inner, waiter| inner.poll_recv_datagram(waiter, control))
-			.await
-	}
-
 	/// Return the publisher-side track properties learned during subscription.
 	pub fn info(&self) -> MoqTrackInfo {
 		MoqTrackInfo::from(&self.info)
@@ -743,16 +635,10 @@ impl MoqTrackConsumer {
 	/// preferences as they were.
 	pub fn update(&self, subscription: MoqSubscription) -> Result<(), MoqError> {
 		let subscription: moq_net::track::Subscription = subscription.try_into()?;
-		let priority = subscription.priority;
 		match self.control.update(subscription) {
 			Ok(()) | Err(moq_net::Error::Closed) => {}
 			Err(err) => return Err(err.into()),
 		}
-		self.reads.peek_mut(|inner| {
-			if let Datagrams::Open(datagrams) = &mut inner.datagrams {
-				datagrams.set_priority(priority);
-			}
-		});
 		Ok(())
 	}
 

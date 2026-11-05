@@ -65,7 +65,7 @@ async function subscribed(version: IetfVersion = VERSION) {
 	const consumer = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ ...track.Subscription.default(), ranges: [{ start: { relative: 0 } }] });
+		.subscribe({ ...track.Subscription.default(), ranges: [{ start: { relative: 0n } }] });
 	onTestFinished(() => {
 		consumer.close();
 		session.close();
@@ -157,7 +157,7 @@ function liveStream(
 	const header = new GroupMessage({
 		trackAlias: ALIAS,
 		groupId: group,
-		subGroupId: 0,
+		subGroupId: 0n,
 		publisherPriority: 0,
 		flags: flags(start === 0),
 	});

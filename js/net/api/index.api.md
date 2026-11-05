@@ -229,6 +229,7 @@ export namespace Connection {
 	export interface WebSocketProps {
 		delay?: Milli;
 		enabled?: boolean;
+		maxStreams?: number;
 		url?: URL;
 	}
 	export interface WebTransportProps extends Omit<WebTransportOptions, "serverCertificateHashes" | "protocols"> {
@@ -275,9 +276,6 @@ export namespace Error {
 		constructor(options?: {
 			cause?: unknown;
 		});
-	}
-	export class NoStreamCredit extends Error {
-		constructor(options?: ErrorOptions);
 	}
 	export class NotFound extends Error.Stream {
 		constructor(what: string, options?: {
@@ -608,7 +606,7 @@ export namespace Track {
 		time?: never;
 	} | {
 		absolute?: never;
-		relative: number;
+		relative: bigint;
 		time?: never;
 	} | {
 		absolute?: never;
