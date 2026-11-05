@@ -97,6 +97,10 @@ pub struct Invocation {
 
 	/// The stages, in the order given. Never empty.
 	pub stages: Vec<Command>,
+
+	/// The settings the first stage's flags were given for, which `auth serve` layers
+	/// over its config file.
+	pub settings: usage_rs::config::CliLayer,
 }
 
 /// Broad category for an invocation parse failure.
@@ -265,7 +269,8 @@ impl Invocation {
 		// reports the missing subcommand as usual.
 		let first = chunks.next().unwrap_or_default();
 		let first = first.iter().skip(1).map(OsString::as_os_str).collect::<Vec<_>>();
-		let cli = Cli::parse_from(&first).map_err(|err| parse_error(Cli::spec(), Cli::command(), &first, err))?;
+		let (cli, settings) = Cli::parse_from_with_settings(&first)
+			.map_err(|err| parse_error(Cli::spec(), Cli::command(), &first, err))?;
 		let given = MoqSide::given(&first);
 
 		let mut deprecated = cli.moq.deprecated();
@@ -305,6 +310,7 @@ impl Invocation {
 			moq: cli.moq,
 			given,
 			stages,
+			settings,
 		})
 	}
 

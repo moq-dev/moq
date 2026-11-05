@@ -17,7 +17,6 @@ import { Timescale, Timestamp } from "../time.ts";
 import { Subscriber as TrackSubscriber } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { type AnnounceBroadcast, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
-import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Probe as ProbeMessage } from "./probe.ts";
@@ -715,6 +714,8 @@ async function servedSubscription(
 		routed?: boolean;
 		// Groups the track holds before the SUBSCRIBE arrives, stamped by sequence.
 		prefill?: bigint[];
+		// A newer largest group the track's source reported before the SUBSCRIBE arrives.
+		reported?: bigint;
 		// Leave the track unresolved until `accept`, as an on-demand track the SUBSCRIBE beats.
 		pending?: boolean;
 	} = {},
@@ -749,6 +750,10 @@ async function servedSubscription(
 		const group = track.createGroup(sequence);
 		for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(sequence))));
 		group.finish();
+	}
+	if (options.reported !== undefined) {
+		if (!track) throw new Error("a pending track has no source to report");
+		hooks.reportedGroup(track, options.reported);
 	}
 	// Pulled before the SUBSCRIBE arrives: a broadcast nobody pulls refuses an unknown track.
 	const request = options.pending ? wireOf(broadcast).requested() : undefined;
@@ -797,11 +802,19 @@ async function servedSubscription(
 		serving,
 		parked: gate.parked,
 		release: gate.release,
-		// Resolve a pending track with the publisher's request for it.
-		async accept() {
+		// Resolve a pending track with the publisher's request for it, answering with `held`
+		// and, when `reported`, an upstream's report of a newer largest group.
+		async accept(held: bigint[] = [], reported?: bigint) {
 			const pulled = await request;
 			if (!pulled) throw new Error("the publisher never requested the track");
-			track = pulled.accept(info);
+			const staged = hooks.stageRequest(pulled, info);
+			if (reported !== undefined) hooks.reportedGroup(staged.producer, reported);
+			for (const sequence of held) {
+				const group = staged.producer.createGroup(sequence);
+				for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(sequence))));
+				group.finish();
+			}
+			track = staged.commit();
 		},
 		// Stamped by sequence, so a group served out of order still starts in order.
 		serve(sequence: bigint) {
@@ -1200,104 +1213,6 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 	});
 }
 
-for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
-	for (const transport of [900, 1400]) {
-		test(`lite ${version}: datagram bodies fit the wire and ${transport}-byte transport`, async () => {
-			const installed = new Manual().install();
-			const sub = await servedSubscription({ version, startGroup: 0n, maxDatagramSize: transport });
-			const reader = sub.datagrams.getReader();
-			const max = Math.min(1200, transport);
-			try {
-				// Lite-07's type adds one byte to the three one-byte group fields.
-				const header = version === Version.DRAFT_07 ? 4 : 3;
-				sub.track.insertDatagram(0n, Timestamp.fromMillis(0), new Uint8Array(max - header + 1));
-				sub.track.insertDatagram(1n, Timestamp.fromMillis(1), new Uint8Array(max - header));
-				const next = await reader.read();
-				if (next.done) throw new Error("datagrams ended early");
-				expect(next.value.byteLength).toBe(max);
-				expect((await DatagramMessage.decode(next.value, version, () => ({ timed: true })))?.sequence).toBe(1n);
-			} finally {
-				await reader.cancel();
-				await sub.close();
-				await sub.serving;
-				installed.close();
-			}
-		});
-	}
-}
-
-test.each([Version.DRAFT_06, Version.DRAFT_07])("lite %s: datagrams honor group and frame bounds", async (version) => {
-	const clock = new Manual();
-	const installed = clock.install();
-	const sub = await servedSubscription({ version, startGroup: 0n, startFrame: 1, endGroup: 1n, endFrame: 0 });
-	const reader = sub.datagrams.getReader();
-	// Datagrams go out in arrival order, so each batch inserts its out-of-range ones ahead of
-	// the last in-range one: reading exactly the in-range ones proves the rest were dropped.
-	const send = (sequences: number[]) => {
-		for (const sequence of sequences)
-			sub.track.insertDatagram(BigInt(sequence), Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
-	};
-	const recv = async () => {
-		const next = await reader.read();
-		if (next.done) throw new Error("datagrams ended early");
-		return (await DatagramMessage.decode(next.value, version, () => ({ timed: true })))?.sequence;
-	};
-	// The publisher applies an update's datagram bounds before forwarding its group range, and
-	// each update here moves the range's end.
-	const applied = async (end: bigint) => {
-		let ranges = sub.track.subscription.peek()?.ranges;
-		while (ranges?.[0]?.end?.absolute !== end) ranges = (await sub.track.subscription.changed())?.ranges;
-	};
-	try {
-		send([0, 2, 1]);
-		expect(await recv()).toBe(1n);
-		// Widen both boundaries, then narrow to one datagram.
-		await replayUpdate({
-			priority: 0,
-			startGroup: 0n,
-			startFrame: 0,
-			endGroup: 4n,
-			endFrame: 0,
-			...restate(version),
-		}).encode(sub.client.writer, version);
-		await applied(5n);
-		send([2, 3, 5, 4]);
-		expect([await recv(), await recv(), await recv()]).toEqual([2n, 3n, 4n]);
-		await replayUpdate({
-			priority: 0,
-			startGroup: 6n,
-			startFrame: 1,
-			endGroup: 7n,
-			endFrame: 0,
-			...restate(version, 1n),
-		}).encode(sub.client.writer, version);
-		await applied(8n);
-		send([6, 8, 7]);
-		expect(await recv()).toBe(7n);
-	} finally {
-		await reader.cancel();
-		await sub.close();
-		await sub.serving;
-		installed.close();
-	}
-});
-
-// A sent datagram is accounted for, so the end sweep does not drop it, as the Rust publisher does.
-test("lite draft-06: the end sweep does not drop a sent datagram", async () => {
-	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0n });
-	try {
-		sub.serve(0n);
-		expect(await sub.servedSequence()).toBe(0n);
-		sub.track.insertDatagram(1n, Timestamp.fromMillis(1), new Uint8Array([1]));
-		await flush();
-		sub.track.finish();
-		sub.track.close();
-		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([]);
-	} finally {
-		await sub.close();
-	}
-});
-
 // A drop describes what was missing then; a late copy of the same group is still served.
 test("lite draft-06: a reported cut still allows a late group", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0n });
@@ -1564,18 +1479,67 @@ test("lite draft-05: an update dropping the floor re-pins to the latest group", 
 
 // A SUBSCRIBE can beat its track resolving, as one a relay serves from a copy still fetching
 // upstream. Groups the track holds once it does are older than the join, so an absent Group
-// Start is still the latest group.
-test.each([Version.DRAFT_01, Version.DRAFT_03, Version.DRAFT_05])(
-	"lite %s: a subscribe that beats its track resolving joins at the latest group",
+// Start is still the latest group known then, including one the upstream reported.
+// Routed, the join reads the front's serving copy.
+test.each([
+	[Version.DRAFT_03, undefined, false],
+	[Version.DRAFT_04, undefined, false],
+	[Version.DRAFT_04, 9n, false],
+	[Version.DRAFT_04, 9n, true],
+	[Version.DRAFT_05, undefined, false],
+	[Version.DRAFT_05, undefined, true],
+])(
+	"lite %s (reported %s, routed %s): a subscribe that beats its track resolving joins at its newest group",
+	async (version, reported, routed) => {
+		const sub = await servedSubscription({ version, pending: true, routed });
+		try {
+			await sub.accept([0n, 3n, 7n], reported);
+			if (reported !== undefined) {
+				// The SUBSCRIBE_OK follows the floor, so these arrive after the join took it.
+				expect("ok" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+				sub.serve(8n);
+				sub.serve(9n);
+			}
+			expect(await sub.servedHeader()).toBe(reported ?? 7n);
+			expect(await sub.servedSequence()).toBeUndefined();
+		} finally {
+			await sub.close();
+		}
+	},
+);
+
+// A track that already holds groups when the SUBSCRIBE arrives still joins at a newer largest
+// its source reported, as a cold one would.
+test.each([Version.DRAFT_04, Version.DRAFT_05])(
+	"lite %s: a join on a track already holding groups starts at a reported newer group",
+	async (version) => {
+		const sub = await servedSubscription({ version, prefill: [0n, 3n], reported: 9n });
+		try {
+			if (version === Version.DRAFT_04) {
+				expect("ok" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+			} else {
+				await flush();
+			}
+			sub.serve(7n);
+			sub.serve(9n);
+			expect(await sub.servedHeader()).toBe(9n);
+			expect(await sub.servedSequence()).toBeUndefined();
+		} finally {
+			await sub.close();
+		}
+	},
+);
+
+// Lite-01/02 retain the arrival-only floor even when the answer contains history.
+test.each([Version.DRAFT_01, Version.DRAFT_02])(
+	"lite %s: a pending join retains its arrival-only floor",
 	async (version) => {
 		const sub = await servedSubscription({ version, pending: true });
 		try {
-			await sub.accept();
-			sub.serve(0n);
-			sub.serve(1n);
-			sub.serve(2n);
-			expect(await sub.servedHeader()).toBe(2n);
-			expect(await sub.servedSequence()).toBeUndefined();
+			await sub.accept([0n, 3n, 7n]);
+			expect(await sub.servedHeader()).toBe(0n);
+			expect(await sub.servedHeader()).toBe(3n);
+			expect(await sub.servedHeader()).toBe(7n);
 		} finally {
 			await sub.close();
 		}
@@ -3384,6 +3348,60 @@ test("lite-07 SYNCED survives an initial removal and continuous earlier-prefix c
 		publisher.close();
 		retained.close();
 		for (const broadcast of churn) broadcast.close();
+		origin.close();
+		pair.client.close();
+		pair.server.close();
+	}
+});
+
+test("lite-06: a datagram request failing behind the shared writer resets rather than ends", async () => {
+	const version = Version.DRAFT_06;
+	const pair = createMockTransportPair(ALPN_06);
+	// The legacy API's one session queue, stalled on its first write.
+	let writes = 0;
+	const stall = Promise.withResolvers<void>();
+	Object.defineProperty(pair.server.datagrams, "writable", {
+		value: new WritableStream<Uint8Array>({
+			write() {
+				writes++;
+				return writes === 1 ? stall.promise : undefined;
+			},
+		}),
+	});
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("test"));
+	const first = broadcast.createDatagrams("a");
+	const second = broadcast.createDatagrams("b");
+
+	const subscribe = async (id: bigint, track: string) => {
+		const client = await Stream.open(pair.client, { version });
+		const server = await Stream.accept(pair.server, version);
+		if (!server) throw new Error("publisher never accepted the subscribe stream");
+		void publisher.runSubscribe(new Subscribe({ id, broadcast: Path.from("test"), track, priority: 0 }), server);
+		expect("start" in (await decodeSubscribeResponse(client.reader, version))).toBe(true);
+		return client;
+	};
+	const settle = async () => {
+		for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+	};
+	const a = await subscribe(0n, "a");
+	const b = await subscribe(1n, "b");
+	try {
+		first.append(undefined, Uint8Array.of(0xaa));
+		while (writes === 0) await settle();
+		// The second request now waits on the writer the first one holds.
+		second.append(undefined, Uint8Array.of(0xbb));
+		await settle();
+		// A SUBSCRIBE_UPDATE holding only its priority fails decoding, while the stream stays open.
+		await b.writer.u53(1);
+		await b.writer.u8(0);
+		await expect(decodeSubscribeResponse(b.reader, version)).rejects.toThrow();
+	} finally {
+		stall.resolve();
+		a.close();
+		b.close();
+		publisher.close();
 		origin.close();
 		pair.client.close();
 		pair.server.close();

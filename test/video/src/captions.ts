@@ -30,7 +30,9 @@ export function captions() {
 	const target = new Signal<string | undefined>(undefined);
 	const source = new Source({ broadcast, target });
 	const sync = new Sync({ delay: Milli.zero });
-	sync.received(Milli(1000));
+	// Stands in for the media that anchors the clock the cues show against.
+	const media = sync.track({ target: new Signal<Milli | undefined>(undefined) });
+	media.received(Milli(1000));
 	const container = document.createElement("div");
 	container.id = "captions";
 	container.style.cssText = "position:relative;width:640px;height:360px";
@@ -44,6 +46,7 @@ export function captions() {
 			renderer.close();
 			source.close();
 			broadcast.close();
+			media.close();
 			sync.close();
 			producer.close();
 			origin.close();

@@ -60,7 +60,7 @@ function watchCovered(
 			for (;;) {
 				const entry = await announced.next();
 				if (!entry) break;
-				if (entry.kind === "end") active.delete(entry.prefix);
+				if (entry.kind === "absent") active.delete(entry.prefix);
 				else active.add(entry.prefix);
 				covered.set([...active].some((prefix) => Path.hasPrefix(prefix, path)));
 			}

@@ -51,6 +51,14 @@ module as skipped; `just ci` still requires the full flake check.
 contains the module selection, with package selection delegated to the
 language runners.
 
+Repository gates and quest checks use the dev shell’s quest executable through
+`sh/quest.sh`, reporting its path. Enter this checkout’s dev shell to use its pin. Use
+`bash sh/quest.sh review --base origin/main` for a local review with that build,
+or `bash sh/quest.sh gate COMMAND [ARGS...]` to admit a standalone build.
+Outside the dev shell, explicit host toolchains (`ALLOW_HOST_TOOLCHAIN=1`, or Windows without Nix)
+report the selected quest executable and version alongside the repository pin;
+their build identity is unverified.
+
 | What you changed or need to measure | Start here |
 | --- | --- |
 | Ordinary source changes | `just check`; [Rust instructions](https://github.com/moq-dev/moq/blob/main/rs/AGENTS.md) and [TypeScript instructions](https://github.com/moq-dev/moq/blob/main/js/AGENTS.md) describe focused test commands and conventions |
@@ -100,7 +108,12 @@ fetch groups with `curl`, which is the quickest way to see what a relay holds.
 
 ## Windows
 
-Nix isn't available on Windows, so `setup.bat` installs the toolchain with
+On WSL, use the Nix dev shell as on Linux. If you cloned with
+`core.autocrlf=true` before the repository enforced LF line endings, make a fresh clone before
+running `just install`. CRLF line endings in an older checkout can break Nix
+builds and shell scripts, and prevent reuse of cached builds.
+
+Nix isn't available on native Windows, so `setup.bat` installs the toolchain with
 winget: Git, Rust, Bun, Node, just, CMake, FFmpeg, and the Visual Studio Build Tools.
 Run it from an Administrator terminal on a fresh machine, and re-run it after
 reopening the terminal if it reports tools missing from `PATH`.

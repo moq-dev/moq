@@ -10,7 +10,7 @@
 //! which leaves the wire before the broader one goes out. The routes a replaced request
 //! carried go with it, and come back once the broader request reports them.
 
-use std::future::Future;
+use std::collections::VecDeque;
 
 use super::*;
 use crate::discovery::{Change, Discovery};
@@ -33,155 +33,205 @@ struct Request {
 	gone: kio::Consumer<()>,
 }
 
-/// A request waiting to go out.
-struct Pending<O> {
-	/// Close once each request it overlaps is off the wire.
-	blockers: Vec<kio::Consumer<()>>,
-	/// Opens its stream.
-	opening: O,
-	/// Closes when the session ends it.
-	live: kio::Consumer<()>,
-	gone: kio::Producer<()>,
+/// Keeps one SUBSCRIBE_NAMESPACE open for each prefix discovery decides on, each on its
+/// own stream, for the session's life. Only an error ends it: a request the peer breaks
+/// the protocol on.
+pub(in crate::ietf) struct Namespaces {
+	subscriber: Subscriber,
+	/// Until the peer's SETUP says whether it holds overlapping requests.
+	setup: Option<Discovery>,
+	discovery: Option<Discovery>,
+	requests: HashMap<u64, Request>,
+	/// The request discovery holds open for each prefix.
+	open_at: HashMap<Path, u64>,
+	running: kio::Tasks<Exchange>,
+	/// Requests that ended, handled one at a time with discovery's changes between them.
+	done: VecDeque<(u64, Result<Ended, Error>)>,
+	next: u64,
 }
 
-impl Subscriber {
-	/// Keep one SUBSCRIBE_NAMESPACE open for each prefix `discovery` decides on, each on a
-	/// stream from `open`, for the session's life. Only an error ends it: a request the
-	/// peer breaks the protocol on.
-	pub(in crate::ietf) async fn run_namespaces<F, O>(self, discovery: Discovery, open: F) -> Result<(), Error>
-	where
-		F: Fn() -> O,
-		O: Future<Output = Result<Stream<Transport, Version>, Error>>,
-	{
-		let mut discovery = match self.peer_setup.get().await.solicit {
-			Some(_) => discovery,
-			None => discovery.exclusive(),
-		};
-		let mut requests: HashMap<u64, Request> = HashMap::new();
-		// The request discovery holds open for each prefix.
-		let mut open_at: HashMap<Path, u64> = HashMap::new();
-		let mut running = futures::stream::FuturesUnordered::new();
-		let mut next = 0u64;
-
-		loop {
-			enum Event<T> {
-				Change(Change),
-				Done(T),
-			}
-			let event = kio::wait(|waiter| {
-				if let Poll::Ready(change) = discovery.poll(waiter) {
-					return Poll::Ready(Event::Change(change));
-				}
-				let mut cx = waiter.context();
-				match futures::Stream::poll_next(std::pin::Pin::new(&mut running), &mut cx) {
-					Poll::Ready(Some(done)) => Poll::Ready(Event::Done(done)),
-					_ => Poll::Pending,
-				}
-			})
-			.await;
-
-			match event {
-				Event::Change(Change::Open(prefix, snapshot)) => {
-					// Wait out the overlapping requests on their way out, such as the narrower
-					// ones an exclusive session just closed for this one. Those still open
-					// overlap it only where the peer holds both.
-					let blockers = requests
-						.values()
-						.filter(|request| request.live.is_none())
-						.filter(|request| request.prefix.has_prefix(&prefix) || prefix.has_prefix(&request.prefix))
-						.map(|request| request.gone.clone())
-						.collect();
-					let live = kio::Producer::new(());
-					let gone = kio::Producer::new(());
-					let key = next;
-					next += 1;
-					requests.insert(
-						key,
-						Request {
-							prefix: prefix.clone(),
-							live: Some(live.clone()),
-							gone: gone.consume(),
-						},
-					);
-					open_at.insert(prefix.clone(), key);
-					let pending = Pending {
-						blockers,
-						opening: open(),
-						live: live.consume(),
-						gone,
-					};
-					running.push(self.clone().namespace_request(key, prefix, snapshot, pending));
-				}
-				// Dropping its `live` ends the request.
-				Event::Change(Change::Close(prefix)) => {
-					if let Some(key) = open_at.remove(&prefix)
-						&& let Some(request) = requests.get_mut(&key)
-					{
-						request.live = None;
-					}
-				}
-				Event::Done((key, res)) => {
-					let Some(request) = requests.remove(&key) else {
-						continue;
-					};
-					// Ended on its own, rather than by the session.
-					if open_at.get(&request.prefix) == Some(&key) {
-						open_at.remove(&request.prefix);
-						discovery.ended(&request.prefix);
-					}
-					if let Err(err) = res {
-						// The peer breaking the protocol is fatal, and the driver turns
-						// this into the session close the draft wants.
-						if is_protocol_violation(&err) {
-							return Err(err);
-						}
-						tracing::warn!(%err, prefix = %request.prefix, "subscribe_namespace failed, continuing without");
-					}
-				}
-			}
+impl Namespaces {
+	pub(in crate::ietf) fn new(subscriber: Subscriber, discovery: Discovery) -> Self {
+		Self {
+			subscriber,
+			setup: Some(discovery),
+			discovery: None,
+			requests: HashMap::new(),
+			open_at: HashMap::new(),
+			running: kio::Tasks::new(),
+			done: VecDeque::new(),
+			next: 0,
 		}
 	}
 
-	/// Send one request once the ones it overlaps are off the wire, and read it until
-	/// either side ends it.
-	async fn namespace_request<O>(
-		mut self,
-		key: u64,
-		prefix: Path,
-		snapshot: crate::model::Snapshot,
-		pending: Pending<O>,
-	) -> (u64, Result<Ended, Error>)
-	where
-		O: Future<Output = Result<Stream<Transport, Version>, Error>>,
-	{
-		let Pending {
-			blockers,
-			opening,
-			live,
-			gone,
-		} = pending;
-		// The open races `live` too: a request ended before it went out holds nothing, nor
-		// the broader one it blocks. Without stream credit it is refused, not parked.
-		let mut opening = std::pin::pin!(opening);
-		let opened = kio::wait(|waiter| {
-			if live.poll_closed(waiter).is_ready() {
-				return Poll::Ready(None);
+	/// Ready with the error that ends them.
+	pub(in crate::ietf) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		if self.setup.is_some() {
+			let declared = ready!(self.subscriber.peer_setup.poll_get(waiter));
+			let discovery = self.setup.take().expect("checked above");
+			self.discovery = Some(match declared.solicit {
+				Some(_) => discovery,
+				None => discovery.exclusive(),
+			});
+		}
+		let discovery = self.discovery.as_mut().expect("decided above");
+
+		loop {
+			if let Poll::Ready(change) = discovery.poll(waiter) {
+				match change {
+					Change::Open(prefix, snapshot) => {
+						// Wait out the overlapping requests on their way out, such as the narrower
+						// ones an exclusive session just closed for this one. Those still open
+						// overlap it only where the peer holds both.
+						let blockers = self
+							.requests
+							.values()
+							.filter(|request| request.live.is_none())
+							.filter(|request| request.prefix.has_prefix(&prefix) || prefix.has_prefix(&request.prefix))
+							.map(|request| request.gone.clone())
+							.collect();
+						let live = kio::Producer::new(());
+						let gone = kio::Producer::new(());
+						let key = self.next;
+						self.next += 1;
+						self.requests.insert(
+							key,
+							Request {
+								prefix: prefix.clone(),
+								live: Some(live.clone()),
+								gone: gone.consume(),
+							},
+						);
+						self.open_at.insert(prefix.clone(), key);
+						self.running.push(Exchange {
+							key,
+							gone: Some(gone),
+							state: ExchangeState::Opening {
+								subscriber: self.subscriber.clone(),
+								prefix,
+								snapshot,
+								blockers,
+								open: crate::transport::open::Open::default(),
+								live: live.consume(),
+							},
+						});
+					}
+					// Dropping its `live` ends the request.
+					Change::Close(prefix) => {
+						if let Some(key) = self.open_at.remove(&prefix)
+							&& let Some(request) = self.requests.get_mut(&key)
+						{
+							request.live = None;
+						}
+					}
+				}
+				continue;
 			}
-			for blocker in &blockers {
-				if blocker.poll_closed(waiter).is_pending() {
+
+			let Some((key, res)) = self.done.pop_front() else {
+				let done = &mut self.done;
+				let _ = self
+					.running
+					.poll_each(waiter, |exchange, res| done.push_back((exchange.key, res)));
+				if self.done.is_empty() {
 					return Poll::Pending;
 				}
+				continue;
+			};
+			let Some(request) = self.requests.remove(&key) else {
+				continue;
+			};
+			// Ended on its own, rather than by the session.
+			if self.open_at.get(&request.prefix) == Some(&key) {
+				self.open_at.remove(&request.prefix);
+				discovery.ended(&request.prefix);
 			}
-			waiter.poll_future(opening.as_mut()).map(Some)
-		})
-		.await;
-		let res = match opened {
-			Some(Ok(stream)) => self.run_subscribe_namespace(stream, prefix, snapshot, live).await,
-			Some(Err(err)) => Err(err),
-			None => Ok(Ended::Local),
+			if let Err(err) = res {
+				// The peer breaking the protocol is fatal, and the driver turns
+				// this into the session close the draft wants.
+				if is_protocol_violation(&err) {
+					return Poll::Ready(err);
+				}
+				tracing::warn!(%err, prefix = %request.prefix, "subscribe_namespace failed, continuing without");
+			}
+		}
+	}
+}
+
+/// One request: sent once the ones it overlaps are off the wire, and read until either
+/// side ends it.
+struct Exchange {
+	key: u64,
+	/// Dropped once it is off the wire, so an overlapping request may go out.
+	gone: Option<kio::Producer<()>>,
+	state: ExchangeState,
+}
+
+#[expect(clippy::large_enum_variant, reason = "a machine's enum is its storage")]
+enum ExchangeState {
+	/// Waiting out the requests it overlaps, then for stream credit.
+	Opening {
+		subscriber: Subscriber,
+		prefix: Path,
+		snapshot: crate::model::Snapshot,
+		/// Close once each request it overlaps is off the wire.
+		blockers: Vec<kio::Consumer<()>>,
+		open: crate::transport::open::Open,
+		/// Closes when the session ends it.
+		live: kio::Consumer<()>,
+	},
+	Running(NamespaceSubscription),
+	Done,
+}
+
+impl kio::Task for Exchange {
+	type Output = Result<Ended, Error>;
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+		let res = loop {
+			match &mut self.state {
+				ExchangeState::Opening {
+					subscriber,
+					blockers,
+					open,
+					live,
+					..
+				} => {
+					// The open races `live` too: a request ended before it went out holds nothing, nor
+					// the broader one it blocks. Without stream credit it is refused, not parked.
+					if live.poll_closed(waiter).is_ready() {
+						break Ok(Ended::Local);
+					}
+					for blocker in blockers.iter() {
+						if blocker.poll_closed(waiter).is_pending() {
+							return Poll::Pending;
+						}
+					}
+					let stream = match ready!(Stream::poll_open(&subscriber.session, open, subscriber.version, waiter))
+					{
+						Ok(stream) => stream,
+						Err(err) => break Err(err),
+					};
+					let ExchangeState::Opening {
+						subscriber,
+						prefix,
+						snapshot,
+						live,
+						..
+					} = std::mem::replace(&mut self.state, ExchangeState::Done)
+					else {
+						unreachable!("matched above");
+					};
+					self.state =
+						ExchangeState::Running(NamespaceSubscription::new(subscriber, stream, prefix, snapshot, live));
+				}
+				ExchangeState::Running(request) => break ready!(request.poll(waiter)),
+				ExchangeState::Done => panic!("Exchange polled after it finished"),
+			}
 		};
+		self.state = ExchangeState::Done;
 		// Off the wire: an overlapping request may go out.
-		drop(gone);
-		(key, res)
+		self.gone = None;
+		Poll::Ready(res)
 	}
 }

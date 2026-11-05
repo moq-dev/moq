@@ -117,10 +117,11 @@ pub fn answer(
 /// `parsed` is the struct Usage filled from argv+env+defaults. File keys that
 /// neither the command line nor the environment set replace those defaults.
 ///
-/// The merge is a TOML round-trip, so a `#[serde(skip)]` field comes back as its
-/// default. The released CLI spellings live on such fields: collect
-/// [`Deprecated`] from `parsed` before calling this, and from
-/// the result for the file's own released keys.
+/// With a file, the merge is a TOML round-trip, so a `#[serde(skip)]` field comes
+/// back as its default; without one, `parsed` is returned unchanged. The released
+/// CLI spellings live on such fields: collect [`Deprecated`] from `parsed` before
+/// calling this, and from the result for the file's own released keys
+/// ([`Deprecated::extend`] drops the repeats when no file was given).
 pub struct Merge<'a> {
 	/// The settings declared by the root CLI.
 	pub registry: Registry,
@@ -148,11 +149,13 @@ impl Merge<'_> {
 		}
 		let resolved = resolve(self.registry, layers).map_err(|err| err.to_string())?;
 
+		// Only a file needs the TOML round trip, which refuses non-UTF-8 paths.
+		let Some(source) = self.file else {
+			return Ok((parsed, resolved));
+		};
 		let occupied = occupied_keys(self.registry, &resolved);
 		let mut merged = toml::Value::try_from(&parsed).map_err(|err| err.to_string())?;
-		if let Some(source) = self.file {
-			overlay_unoccupied(&mut merged, source.value, "", &occupied);
-		}
+		overlay_unoccupied(&mut merged, source.value, "", &occupied);
 		let config: T = merged.try_into().map_err(|err: toml::de::Error| err.to_string())?;
 		Ok((config, resolved))
 	}

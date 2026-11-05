@@ -17,6 +17,17 @@ runner-vm-ci:
     trap 'sudo apparmor_parser --remove "$profile"' EXIT
     just gh runner-vm
 
+# Install the persistent host profile that lets Nix store unshare map user namespaces.
+runner-userns:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+        echo "runner-userns is persistent host policy; a hosted runner uses runner-vm-ci" >&2
+        exit 1
+    fi
+    sudo install -m 0644 nix/runner/nix-builder-unshare /etc/apparmor.d/nix-builder-unshare
+    sudo apparmor_parser --replace /etc/apparmor.d/nix-builder-unshare
+
 # Build and test the persistent NixOS runner VM on x86_64 Linux.
 runner-vm:
     bash sh/local.sh nix build --no-link .#checks.x86_64-linux.github-runner-vm .#checks.x86_64-linux.github-runner-vm-image .#checks.x86_64-linux.github-runner-vm-config --print-build-logs
@@ -42,6 +53,7 @@ test:
     python3 sh/size/release.test.py
     python3 sh/size/nightly.test.py
     python3 bench/compare.test.py
+    bash sh/local.sh python3 bench/build.test.py
     python3 bench/summary.test.py
     python3 bench/profile.test.py
     python3 bench/fanout.test.py
