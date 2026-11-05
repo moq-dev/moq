@@ -709,8 +709,7 @@ mod tests {
 		assert!(Setup::decode_slice(&valued, Version::Lite07).is_err());
 	}
 
-	/// The connection credential rides lite-07+, which an older version ignores like any
-	/// unknown parameter, and only an untyped, non-empty token can be sent.
+	/// Route key proofs are accepted only on lite-07 and must have the fixed wire size.
 	#[test]
 	fn route_key_is_lite07_only() {
 		let transcript = crate::route::Transcript::new([2; 32]);
@@ -760,6 +759,8 @@ mod tests {
 		assert_eq!(unbound.route_key(), None);
 	}
 
+	/// The connection credential rides lite-07+, which an older version ignores like any
+	/// unknown parameter, and only an untyped, non-empty token can be sent.
 	#[test]
 	fn token_is_lite07_only() {
 		let token = crate::setup::Token {
