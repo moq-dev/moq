@@ -9,7 +9,22 @@ its hour and A/A runs on the hosted ARM runners hold its threshold,
 confirmation budget, and round count, and separate builds of unchanged code
 stop measuring as a stable slowdown.
 
+## Waiting
+
+- Maintainer: authorize one A/A Nightly dispatch for `rust-bench` once its
+  paired leg fits its hour, or now for an agent to dispatch then. Agents
+  dispatch Nightly only under a recorded authorization: a dispatch spends an
+  hour of every ARM leg and cancels any Nightly in progress. Check: a dated
+  authorization in this Plan.
+
 ## Plan
+
+Decided 2026-11-05 (maintainer, /quest-unblock): authorize two A/A Nightly
+runs and one slowed-bench run on `main` after
+[moq-dev/moq#7940](https://github.com/moq-dev/moq/pull/7940) merged,
+replacing the earlier one-run authorization. The two A/A runs below spent it;
+the slowed run was not needed, since every paired group runs the same gate
+step.
 
 Calibrated 2026-11-05 for the shared, supplemental (`rust-extra`), io_uring
 and `rust-relay` groups; `bench/README.md` records the numbers. Threshold 10%,
@@ -41,8 +56,7 @@ and `rust-relay` groups; `bench/README.md` records the numbers. Threshold 10%,
   `pattern-algebra/collect-literal/256`'s 256 literals (branch
   `bench-ci/slowed-base`, deleted). The shared job failed at its gate with
   that case alone: screen +35.7%, rounds +34.6, +35.1, +35.2%. The
-  supplemental and io_uring groups passed. Every group runs the same gate
-  step, so no other group needs its own slowed run.
+  supplemental and io_uring groups passed.
 - In that run, the rounds rejected the three `stats/tick/*_10pct` cases the
   screen flagged, but each one's rounds agreed on a slowdown, at medians of
   +9.3 to +9.7%, and every `100pct` case screened +6 to +9%, although
@@ -70,7 +84,7 @@ side meant to take about 3 seconds took 2 minutes for
 once per sample. `track_evict_fanout/512r/8` took about a minute, because its
 untimed reads run inside every iteration. Make those benches pay their setup
 once per benchmark, and bound the rounds by time if the leg still does not
-fit. Its A/A run then needs a maintainer-authorized Nightly dispatch.
+fit.
 
 A dispatch cancels any in-progress Nightly through its concurrency group, and
 the 07:00 UTC scheduled run can cancel a dispatch. Dispatch clear of that
