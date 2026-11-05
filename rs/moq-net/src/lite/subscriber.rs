@@ -4798,7 +4798,7 @@ mod tests {
 		let tail = kio::Producer::new(Tail::default());
 		serving.sub = Sub::Active(SubStream {
 			order: crate::track::Order::Descending,
-			stream: Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+			stream: Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap(),
 			id: 0,
