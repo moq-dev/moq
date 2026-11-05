@@ -1,15 +1,32 @@
-# [M] Delete the old start bookkeeping
+# [S] Delete the old start bookkeeping
 
 ## Goal
 
-What each lite cursor is owed and what was dropped lives in the model, and
-lite `TrackRun` only translates it into SUBSCRIBE_START, SUBSCRIBE_SKIP,
-SUBSCRIBE_DROP, and
-SUBSCRIBE_END per version. `skipped`, `served`, `first`, and the pre-06
-branches are deleted rather than layering lite-07 ranges on top, and on
-lite-07 a subscriber's end is "owed range covered and no stream active".
+Where a lite subscription starts lives in one place per version: lite
+`TrackRun`'s `start`, `first`, `start_frame`, the pre-06 re-pin branch, and
+the per-version start branches collapse into one start state that only
+translates into SUBSCRIBE_START per version, and on lite-07 the
+`requested == start` gate is gone, since a fresh START per update makes it
+unnecessary. What a cursor is owed or was served is out of scope: it stays
+with [Drop set](/quest/m1/drop-set.md).
+
+## Waiting
+
+- moq-dev/moq: [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670)
+  merges. It rewrites the same lite publisher state (about 1,250 lines of
+  `lite/publisher.rs`). Check that it is merged into `main`.
 
 ## Plan
+
+Decided 2026-11-05 (maintainer, /quest-plan): narrow this quest to the start state and wait for #7670, as the
+agent that declined it on 2026-11-05 recommended. #7670 rewrites the same
+publisher state, Drop set already promises to delete the served-groups
+record (`skipped`, `served`, `Delivered`), and
+[moq-dev/moq#7872](https://github.com/moq-dev/moq/pull/7872)'s
+SUBSCRIBE_STARTED makes the lite-07 start gate removable. Not chosen:
+folding it into Drop set, or doing it now on main. The bullets below
+predate the narrowing; the owed-range ones are Drop set's.
+
 
 Moved out of the [Subscribe ranges](/quest/m1/subscribe-ranges/README.md)
 README's own work, where the 2026-10-24 pre-cut audit put it. Decided

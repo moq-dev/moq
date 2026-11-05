@@ -31,3 +31,12 @@ maintainer's actions (ruleset 2420853); the quest names the setting and
 reports the numbers. The host runner must handle two builds at once without
 the shared mbx cache or `quest gate` admission erasing the gain, so record
 host load during the trial.
+
+The trial started early (decided 2026-11-05, maintainer, /quest-plan): the
+second queue runner `nixos-moq-ci2` landed in
+[kixelated/nixos#24](https://github.com/kixelated/nixos/pull/24), and ruleset
+2420853 went to `max_entries_to_build: 2` at 2026-11-05T15:49:30Z. A scheduled
+task sets it back to 1 at 2026-11-07T08:00Z. Measure the setting-2 window
+against a comparable setting-1 window before it, such as
+2026-11-03 06:47Z to 2026-11-04 06:47Z, and check the ruleset reads 1 again
+before recording the result.
