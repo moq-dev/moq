@@ -10,8 +10,8 @@ Explicit group ranges now keep their requested start when the subscription answe
 arrives after its first data. IETF publishers honor absolute starts on all
 supported drafts instead of silently joining at the live edge. A start of group 0
 goes out as an explicit absolute {0, 0} filter; on draft 20, which spells it with no
-fields, that is a present but empty LOCATION_FILTER. A `Subscribe` with an
-unfiltered filter now omits LOCATION_FILTER, and a SUBSCRIBE without one still
+fields, that is a present but empty LOCATION\_FILTER. A `Subscribe` with an
+unfiltered filter now omits LOCATION\_FILTER, and a SUBSCRIBE without one still
 joins live. There is no API change.
 
 ### Relative group anchors are `bigint`

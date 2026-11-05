@@ -12,7 +12,7 @@ callers need no migration; socket naming and the public API are unchanged.
 IETF subscribers and publishers also honor explicit starts on every supported
 draft, keeping a prefix written before the answer arrived. A start of group 0 goes
 out as an explicit absolute {0, 0} filter; on draft 20, which spells it with no
-fields, that is a present but empty LOCATION_FILTER. A SUBSCRIBE that omits the
+fields, that is a present but empty LOCATION\_FILTER. A SUBSCRIBE that omits the
 filter still joins live, so third-party readers and relay caches see no change.
 
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
