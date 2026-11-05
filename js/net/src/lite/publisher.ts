@@ -1054,13 +1054,20 @@ export class Publisher {
 			}
 			const publisher = info.priority;
 			// A SUBSCRIBE can arrive before its track resolves, such as one a relay serves from a
-			// copy still fetching upstream, or on lite-05 one sent alongside its TRACK, when no
-			// group is known yet: the newest once it resolves stands in, as it would for one
-			// sent after.
-			const resolved = cursorFloor(this.version, msg.startGroup, hooks.latestSequence(track));
-			if (latest === undefined && resolved !== floor) {
-				floor = resolved;
-				track.withRange({ start: { included: floor } });
+			// copy still fetching upstream, or on lite-05 one sent alongside its TRACK: the newest
+			// group known once it resolves stands in, including a largest the upstream's answer
+			// reported, whether or not the copy already held a group. A newer group the answer
+			// brings later is not waited for. Lite-01/02 keep their arrival floor, as Rust does.
+			if (this.version !== Version.DRAFT_01 && this.version !== Version.DRAFT_02) {
+				let newest = latest;
+				for (const known of [hooks.latestSequence(track), hooks.peekLargest(track).largest?.group]) {
+					if (known !== undefined) newest = newest === undefined ? known : max(newest, known);
+				}
+				const resolved = cursorFloor(this.version, msg.startGroup, newest);
+				if (resolved !== floor) {
+					floor = resolved;
+					track.withRange({ start: { included: floor } });
+				}
 			}
 			// Older drafts carry no timestamps.
 			let stamp: Stamp | undefined;

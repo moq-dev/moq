@@ -197,6 +197,12 @@ sees it fail, since no sequence is handed out twice; the cache, fills, and
 readers that had not reached it get the re-offer. Not chosen: letting the
 duplicate replace the copy still arriving; accepting the loss.
 
+Mirror each case in `js/net`.
+In `js/net`, a group a sink buffers keeps its source wanted only while
+`Subscriber.#reading` says its reader will still read it
+([moq-dev/moq#7948](https://github.com/moq-dev/moq/pull/7948)), so a change to
+how a cursor judges a missing or stale group keeps that verdict in step.
+
 Decided 2026-11-05 (maintainer, /quest-plan): the agent decisions
 [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670) listed for
 review stand as recorded, numbered as in its body:
