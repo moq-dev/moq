@@ -95,6 +95,7 @@ catches this. A complete set of runs finishes this epic.
 ## Required
 
 - [Push-to-talk suppresses silence instead of toggling the catalog](/quest/m1/push-to-talk/dtx.md) - replaces hold with DTX
+- [Native playback fills declared silence with comfort noise](/quest/m1/push-to-talk/native-comfort-noise.md) - `moq play` plays comfort noise over declared silence and counts no underrun, matching the browser
 
 ## Closes
 

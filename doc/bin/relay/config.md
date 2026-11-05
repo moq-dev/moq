@@ -360,9 +360,17 @@ explicitly, it also caps how long a superseded group stays fresh, whatever max
 age the publisher declared; unset, each track keeps its own max age. The latest
 group of every track, and any group still being read, is kept past `capacity` but
 sheds its oldest frames instead. Whatever the capacity, a group holds at most its
-newest 32 MB. A reader of a track's newest group that reaches a shed frame asks
-for a new group on tracks that opt into refresh. Any other reader of a shed
-frame sees `Evicted`.
+newest 32 MB. A reader that reaches a shed frame, such as a late joiner of a long
+group, replays it through a flight: a separate copy fetched from the upstream hop
+from that frame, paced by its fastest reader and held to its own 32 MB. Readers
+within 16 MB of a flight's fastest reader share it, and a reader leaves its
+flight for the live copy once that copy holds its frame within 16 MB of the live
+reader, which stops the flight. Each hop serves a flight from its own flights in
+turn, up to the publisher, which replays only if it serves past groups. A
+moq-transport hop streams a FETCH's objects after answering it, so it replays a
+finished group, but it refuses a FETCH of a live group that reaches past what
+the group holds, so a live group's replay stops there. When nothing replays it, a reader of a track's newest group asks for a
+new group on tracks that opt into refresh, and any other reader sees `Evicted`.
 
 While a group has readers, the relay receives at most 16 MB of it past the
 fastest one, then stops reading its stream until that reader catches up, so

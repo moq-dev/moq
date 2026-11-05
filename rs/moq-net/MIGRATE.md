@@ -9,6 +9,12 @@ How to update your code for each breaking change, newest first.
 `origin::Config::route_key` takes an `origin::RouteKey`, which every lite-07 session on the origin proves to its peer in SETUP. Origins sharing a key fail over as one to a peer that scopes them; `None`, the default, proves nothing.
 A proof binds to the session through the new `poll::Session::export_keying_material`, which defaults to `None`: a transport over TLS returns its exporter, and a wrapper around another transport forwards it.
 
+### Readers at a shed frame ask a `track::Requests` handler for a flight ([#7944](https://github.com/moq-dev/moq/pull/7944))
+
+A reader that reaches a frame its group copy shed no longer gets `Error::Evicted` when the track has a live `track::Requests` handle: the handler receives a `Fill` of that one group from that frame (`Fill::start`), or from frame 0 on a compressed track, even though the group is still cached and live.
+Accept it as usual and write from that frame, waiting on `group::Producer::ready` so its readers pace it, and stop once `Fill::is_wanted` is false and the group's `demand()` has no reader: they left it for the live copy.
+A handler that cannot serve old frames refuses the fill (`Fill::refuse_groups` or dropping it), and the reader falls back to refresh or `Evicted` as before. A track without a handler is unchanged.
+
 ### The `async` feature is opt-in ([#7607](https://github.com/moq-dev/moq/pull/7607))
 
 `async` is no longer a default feature. Enable it to keep the sessions (`Client`, `Server`, `Session`), `time::run`, the announcement `Stream` adapter, and every async wrapper such as `next_group`, `read_frame`, or `closed`:
