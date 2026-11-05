@@ -789,8 +789,7 @@ class Reader implements ResumeSource {
 				if (recv.kind === "done") {
 					copy.done = copy.sub.closed.peek() ?? null;
 					if (copy.done === null && hooks.subscriberEnd(copy.sub)) this.#settled = true;
-				}
-				else if (recv.kind === "error") copy.done = recv.error;
+				} else if (recv.kind === "error") copy.done = recv.error;
 				break;
 			}
 		}
