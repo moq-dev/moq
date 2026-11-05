@@ -10,6 +10,34 @@ How to update your code for each breaking change, newest first.
 A skip is final: `createGroup` and `appendGroup` at a skipped sequence throw `Skipped`, and a later drop leaves it skipped. It replaces an earlier drop of the same groups, whatever its error, but never a cached group.
 `appendGroup` now skips the holes below it that earlier `createGroup` calls left since the last append; create every sequence you still mean to fill before appending.
 
+### Datagrams use separate track types ([#7846](https://github.com/moq-dev/moq/pull/7846))
+
+Create a datagram track with `broadcast.createDatagrams(name, info)` and read it with
+`broadcast.datagrams(name)`. Replace `Track.Producer.appendDatagram(timestamp, payload)`
+with `Datagram.Producer.append(timestamp, payload)`, `insertDatagram(sequence, timestamp, payload)`
+with `insert({ sequence, timestamp, payload })`, and `Subscriber.recvDatagram()` or
+`Ordered.recvDatagram()` with `Datagram.Consumer.recv()`. The payload type is now
+`Datagram.Datagram`, replacing `Track.Datagram`.
+
+Stream and datagram tracks may share a name, with separate sequence counters. Datagram
+consumers start live, have only a priority (`setPriority`), and have no range, order,
+compression, FETCH, or cache API. `finish()` drains existing readers; `abort(error)`
+fails them immediately. Close consumers when done.
+
+A datagram consumer binds to the broadcast's serving source when opened. It keeps no
+stream resume state and does not move to a replacement route.
+
+Lite-07-wip uses DATAGRAMS on stream type 0x9 and carries no Inflated Size. Lite-05/06
+keep their wire format and carry both kinds of a name on one SUBSCRIBE, without deduplication.
+Create a datagram track before or with its same-name stream track on those versions.
+Lite-01..04 and transports without datagrams refuse datagram requests. moq-transport
+currently refuses them while its separate datagram-track adapter is implemented.
+
+### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`Announce.Event` is `{ kind: "present" | "absent" } & Announce`. Another instance taking a path over keeps it present, and a route's cost or hops changing is not reported, so `start`, `update`, `restart` and `end` are gone.
+Map `"start"` to `"present"` and `"end"` to `"absent"`, and drop `"update"` branches. Where you requested the path again on `"restart"`, hold `origin.follow(path)`: its `active` moves to each new instance's broadcast.
+
 ### Opens wait their turn for stream credit ([#7894](https://github.com/moq-dev/moq/pull/7894))
 
 `NoStreamCredit` is removed: a request no longer fails when the peer grants no more streams. Every open waits for credit, and returning credit goes to the open with the highest `sendOrder`. A request's 10s deadline runs only while none of its streams waits to open.

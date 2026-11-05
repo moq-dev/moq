@@ -30,13 +30,12 @@ test("metadata updates keep the same track and reach an existing subscriber", as
 	try {
 		serve(broadcast, user, new Signal<Preview>({}), effect);
 		await flush();
-		const track = net.consume().track(TRACK.user).subscribe();
-		const consumer = new Json.Snapshot.Consumer<{ name: string }>({ track });
+		const consumer = new Json.Snapshot.Consumer<{ name: string }>({ track: net.consume().track(TRACK.user) });
 		expect((await consumer.latest())?.value.name).toBe("Alice");
 		user.name.set("Bob");
 		await flush();
 		expect((await consumer.latest())?.value.name).toBe("Bob");
-		track.close();
+		consumer.close();
 	} finally {
 		effect.close();
 		net.close();

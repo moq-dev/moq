@@ -2,9 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::task::Poll;
-#[cfg(feature = "server")]
-use std::task::ready;
+use std::task::{Poll, ready};
 use std::time::Duration;
 
 use hang::catalog::{Contribution, Media};
@@ -97,11 +95,11 @@ impl Producer {
 			}
 			let current = kio::Producer::new(Current::Pending);
 			let owner = match source.follow(Some(&reference.broadcast), reference.instance.as_ref()) {
-				Ok(instances) => Some(self.context.spawner.spawn(follow_instances(
+				Ok(instances) => Some(self.context.spawner.spawn(FollowInstances {
 					instances,
-					current.clone(),
-					self.context.clone(),
-				))),
+					current: current.clone(),
+					context: self.context.clone(),
+				})),
 				Err(err) => {
 					*current.write().unwrap_or_else(|_| unreachable!("new entry is open")) =
 						Current::Failed(err.into());
@@ -204,17 +202,8 @@ impl Producer {
 	}
 
 	#[cfg(feature = "server")]
-	pub async fn rendition(
-		&self,
-		at: &super::route::Contribution,
-		kind: Kind,
-		name: &str,
-	) -> crate::Result<Option<Arc<Rendition>>> {
-		kio::wait(|waiter| self.poll_rendition(waiter, at, kind, name)).await
-	}
-
-	#[cfg(feature = "server")]
-	fn poll_rendition(
+	#[kio::wrapper]
+	pub fn poll_rendition(
 		&self,
 		waiter: &kio::Waiter,
 		at: &super::route::Contribution,
@@ -242,55 +231,69 @@ impl Producer {
 	}
 }
 
-async fn follow_instances(mut instances: follow::Instances, current: kio::Producer<Current>, context: Context) {
-	loop {
-		let next = instances.next().await;
-		let next = match next {
-			Ok(follow::Event::Start(broadcast)) => {
-				let id = broadcast
-					.info()
-					.instance
-					.clone()
-					.unwrap_or_else(moq_net::Instance::random)
-					.to_string();
-				let source = moq_mux::Source::new(context.origin.clone(), broadcast);
-				let renditions = renditions::Producer::lazy(context.window, context.spawner.clone());
-				let owner = context.spawner.lead(super::watch_catalog(
-					source,
-					renditions.clone(),
-					super::Role::Contribution(context.root.consume()),
-				));
-				Current::Online(Arc::new(Instance {
-					id,
-					renditions,
-					_owner: owner,
-				}))
-			}
-			Ok(follow::Event::End) => Current::Offline,
-			// An authorization refusal is final: the contribution stays out and its URLs answer 403.
-			Err(err @ moq_mux::Error::Moq(moq_net::Error::Unauthorized)) => {
-				tracing::debug!(%err, "contribution refused");
-				let Ok(mut state) = current.write() else { return };
-				*state = Current::Failed(err.into());
-				return;
-			}
-			Err(moq_mux::Error::Moq(moq_net::Error::Closed)) => {
-				let Ok(mut state) = current.write() else { return };
-				*state = Current::Offline;
-				return;
-			}
-			// Not routed yet, or refused otherwise: wait for the path's next announcement, which
-			// the follower hands out, however long it takes. Until then nothing is listed.
-			Err(err) => {
-				tracing::debug!(%err, "contribution not routed; waiting for its next announcement");
-				match &*current.read() {
-					Current::Pending => Current::Offline,
-					_ => continue,
+/// Follows a contribution's instances into its [`Current`], watching each one's catalog.
+struct FollowInstances {
+	instances: follow::Instances,
+	current: kio::Producer<Current>,
+	context: Context,
+}
+
+impl kio::Task for FollowInstances {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		loop {
+			let next = match ready!(self.instances.poll_next(waiter)) {
+				Ok(Some(broadcast)) => {
+					let id = broadcast
+						.info()
+						.instance
+						.clone()
+						.unwrap_or_else(moq_net::Instance::random)
+						.to_string();
+					let source = moq_mux::Source::new(self.context.origin.clone(), broadcast);
+					let renditions = renditions::Producer::lazy(self.context.window, self.context.spawner.clone());
+					let owner = self.context.spawner.lead(super::WatchCatalog::new(
+						source,
+						renditions.clone(),
+						super::Role::Contribution(self.context.root.consume()),
+					));
+					Current::Online(Arc::new(Instance {
+						id,
+						renditions,
+						_owner: owner,
+					}))
 				}
-			}
-		};
-		let Ok(mut state) = current.write() else { return };
-		*state = next;
+				Ok(None) => Current::Offline,
+				// An authorization refusal is final: the contribution stays out and its URLs answer 403.
+				Err(err @ moq_mux::Error::Moq(moq_net::Error::Unauthorized)) => {
+					tracing::debug!(%err, "contribution refused");
+					if let Ok(mut state) = self.current.write() {
+						*state = Current::Failed(err.into());
+					}
+					return Poll::Ready(());
+				}
+				Err(moq_mux::Error::Moq(moq_net::Error::Closed)) => {
+					if let Ok(mut state) = self.current.write() {
+						*state = Current::Offline;
+					}
+					return Poll::Ready(());
+				}
+				// Not routed yet, or refused otherwise: wait for the path's next announcement, which
+				// the follower hands out, however long it takes. Until then nothing is listed.
+				Err(err) => {
+					tracing::debug!(%err, "contribution not routed; waiting for its next announcement");
+					match &*self.current.read() {
+						Current::Pending => Current::Offline,
+						_ => continue,
+					}
+				}
+			};
+			let Ok(mut state) = self.current.write() else {
+				return Poll::Ready(());
+			};
+			*state = next;
+		}
 	}
 }
 

@@ -32,10 +32,10 @@ const INIT_QUEUE: Duration = Duration::from_secs(30);
 /// (un)subscribes per-rendition tracks as the catalog changes, decodes both Legacy and
 /// CMAF tracks via a per-track source, and re-encodes everything as a merged init
 /// segment + moof+mdat fragments, each track in presentation-timestamp order (see
-/// [`next`](Self::next) for how far that holds across tracks). This is what an fMP4
+/// [`poll_next`](Self::poll_next) for how far that holds across tracks). This is what an fMP4
 /// player (e.g. ffplay, MSE) expects.
 ///
-/// Use [`next`](Self::next) to pull byte chunks: the first call returns the merged
+/// Use [`poll_next`](Self::poll_next) to pull byte chunks: the first call returns the merged
 /// init segment (ftyp + multi-track moov), subsequent calls return moof+mdat
 /// fragments. By default a fragment is a group, emitted when the group closes. A video
 /// keyframe also rolls the fragment within a group; audio follows publisher cuts. [`with_fragment_duration`](Self::with_fragment_duration) caps the
@@ -55,7 +55,7 @@ const INIT_QUEUE: Duration = Duration::from_secs(30);
 /// the new track's first sync sample past what was read. A new rendition, a changed sample
 /// entry, or a return that replays media already written fails the export.
 ///
-/// [`next_chunk`](Self::next_chunk) returns the same bytes as a [`Chunk`], which
+/// [`poll_next_chunk`](Self::poll_next_chunk) returns the same bytes as a [`Chunk`], which
 /// separates the init segment from a [`Fragment`] carrying whether it begins at a
 /// sync sample and how long it lasts. A segmenting consumer (e.g. an HLS/LL-HLS
 /// packager) needs that to map fragments onto segments and parts; narrow the catalog
@@ -612,24 +612,16 @@ impl<S: Stream> Export<S> {
 	/// needs: a demuxer indexes by track and reads `tfdt`. Narrow the catalog to a
 	/// single rendition with [`Stream::select`](crate::catalog::Stream::select) where
 	/// the order matters.
-	pub async fn next(&mut self) -> Result<Option<Bytes>> {
-		Ok(self.next_chunk().await?.map(Chunk::into_data))
-	}
-
-	/// Poll-based variant of [`Self::next`].
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
 		Poll::Ready(Ok(
 			std::task::ready!(self.poll_next_chunk(waiter)?).map(Chunk::into_data)
 		))
 	}
 
-	/// Like [`next`](Self::next) but returns a [`Chunk`], which tells the init segment
+	/// Like [`poll_next`](Self::poll_next) but gets a [`Chunk`], which tells the init segment
 	/// apart from a [`Fragment`] and carries that fragment's segmenting metadata.
-	pub async fn next_chunk(&mut self) -> Result<Option<Chunk>> {
-		kio::wait(|waiter| self.poll_next_chunk(waiter)).await
-	}
-
-	/// Poll-based variant of [`Self::next_chunk`].
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next_chunk(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Chunk>>> {
 		// Appending a frame to a track's buffer restarts the search for work by
 		// going around this loop again, never by re-entering the function: a

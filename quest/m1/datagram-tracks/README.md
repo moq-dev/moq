@@ -120,8 +120,8 @@ datagram track on lite-07, direct and through a relay.
 
 ## Required
 
-- [JS datagram tracks](/quest/m1/datagram-tracks/js.md) - `@moq/net` datagram types and the lite-07 datagram request
 - [moq-transport datagram tracks](/quest/m1/datagram-tracks/ietf.md) - Rust and JS map a datagram track to SUBSCRIBE and OBJECT_DATAGRAM with object ID 0, keeping the requested kind
+- [A datagram sent right behind its answer reaches the subscriber](/quest/m1/datagram-tracks/answer-race.md) - receivers decode answers before routing datagrams, and count the ones they still can't route
 
 ## Related
 

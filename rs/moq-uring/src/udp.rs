@@ -812,9 +812,9 @@ impl Socket {
 		self.shared.shard
 	}
 
-	/// A received packet, or the socket's terminal error, registering `waiter`
-	/// while neither is available. Queued packets drain before an error
+	/// A received packet, or the socket's terminal error. Queued packets drain before an error
 	/// surfaces.
+	#[kio::wrapper]
 	pub fn poll_recv(&self, waiter: &kio::Waiter) -> Poll<io::Result<Packet>> {
 		let mut rx = self.shared.rx.borrow_mut();
 		if let Some(queued) = rx.queue.pop_front() {
@@ -862,13 +862,8 @@ impl Socket {
 		Some((to, io::Error::from_raw_os_error(code)))
 	}
 
-	/// Await [`poll_recv`](Self::poll_recv).
-	pub async fn recv(&self) -> io::Result<Packet> {
-		kio::wait(|waiter| self.poll_recv(waiter)).await
-	}
-
-	/// A free send-staging buffer, registering `waiter` while the pool is
-	/// drained. Backpressure lives here: the pool caps in-flight sends.
+	/// A free send-staging buffer. Backpressure lives here: the pool caps in-flight sends.
+	#[kio::wrapper]
 	pub fn poll_acquire(&self, waiter: &kio::Waiter) -> Poll<io::Result<TxBuf>> {
 		let mut tx = self.shared.tx.borrow_mut();
 		if let Some(code) = tx.error {
@@ -905,11 +900,6 @@ impl Socket {
 		}
 		waiter.register(&mut tx.waiters);
 		Poll::Pending
-	}
-
-	/// Await [`poll_acquire`](Self::poll_acquire).
-	pub async fn acquire(&self) -> io::Result<TxBuf> {
-		kio::wait(|waiter| self.poll_acquire(waiter)).await
 	}
 }
 

@@ -2,7 +2,7 @@ use crate::driver::Transport;
 use crate::transport::poll::Session as _;
 
 use crate::model::track::Hole;
-use crate::{SessionError, announce, datagram, frame, group, origin, track};
+use crate::{SessionError, datagram, frame, group, origin, track};
 use rangemap::{RangeMap, RangeSet};
 use std::{
 	borrow::Cow,
@@ -327,7 +327,7 @@ impl Publisher {
 	async fn run_announce(
 		stream: &mut Stream<Transport, Version>,
 		origin: &origin::Consumer,
-		announced: &mut announce::Consumer,
+		announced: &mut origin::Routes,
 		self_origin: Hop,
 		version: Version,
 		auth: Option<crate::auth::Link>,
@@ -675,7 +675,7 @@ impl AuthServe {
 #[derive(Default)]
 struct Enforce {
 	check: crate::auth::Enforce,
-	announced: Option<announce::Consumer>,
+	announced: Option<origin::Routes>,
 }
 
 impl Enforce {
@@ -684,7 +684,7 @@ impl Enforce {
 			Some(announced) => announced,
 			None => {
 				let origin = ready!(shared.poll_serving_origin(waiter));
-				self.announced.insert(origin.announced())
+				self.announced.insert(origin.routes())
 			}
 		};
 		let Some(path) = ready!(self.check.poll(&shared.auth, announced, waiter)) else {
@@ -967,7 +967,7 @@ impl AnnounceServe {
 			Some(hop) => Poll::Ready(*hop),
 			None => self.shared.peer_setup.poll_hop(waiter).map(|hop| hop.unwrap_or(*assigned)),
 		});
-		let (origin, announced, run): (origin::Consumer, announce::Consumer, AnnounceRun) =
+		let (origin, announced, run): (origin::Consumer, origin::Routes, AnnounceRun) =
 			self.start(prefix, exclude_hop, hidden);
 
 		// Streaming announce updates.
@@ -1002,7 +1002,7 @@ impl AnnounceServe {
 		prefix: crate::Path,
 		exclude_hop: Hop,
 		hidden: bool,
-	) -> (origin::Consumer, announce::Consumer, AnnounceRun) {
+	) -> (origin::Consumer, origin::Routes, AnnounceRun) {
 		// If the requested prefix is outside our scope (an empty origin, or a token
 		// that doesn't grant it), we simply have nothing to announce. Respond with an
 		// empty set and keep the stream open (the subscriber treats a FIN here as a
@@ -1036,7 +1036,7 @@ impl AnnounceServe {
 			true => origin.with_hidden(true),
 			false => origin,
 		};
-		let announced = origin.announced();
+		let announced = origin.routes();
 		let mut run = AnnounceRun::new(prefix, self.shared.self_origin, self.shared.version);
 		run.auth = Some(crate::auth::Gate::new(
 			self.shared.auth.clone(),
@@ -1170,17 +1170,17 @@ impl AnnounceRun {
 		// state from a fresh one and start what the grant now covers. The cursor itself stays:
 		// whatever it has pending for the routes the peer holds (an update, a restart, an end
 		// still waiting out its hold) arrives through the loop as usual.
-		let mut snapshot = origin.announced();
+		let mut snapshot = origin.routes();
 		let mut current: HashMap<crate::Path, crate::origin::Route> = HashMap::new();
 		while let Some(event) = snapshot.try_next() {
 			match event {
-				announce::Event::Start(update)
-				| announce::Event::Update(update)
-				| announce::Event::Restart(update)
-				| announce::Event::Takeover { announce: update, .. } => {
+				origin::RouteEvent::Start(update)
+				| origin::RouteEvent::Update(update)
+				| origin::RouteEvent::Restart(update)
+				| origin::RouteEvent::Takeover { announce: update, .. } => {
 					current.insert(update.prefix, update.route);
 				}
-				announce::Event::End(update) => {
+				origin::RouteEvent::End(update) => {
 					current.remove(&update.prefix);
 				}
 			}
@@ -1424,7 +1424,7 @@ impl AnnounceRun {
 		&mut self,
 		stream: &mut Stream<Transport, Version>,
 		origin: &origin::Consumer,
-		announced: &mut announce::Consumer,
+		announced: &mut origin::Routes,
 	) -> Result<(), Error> {
 		if !matches!(self.version, Version::Lite01 | Version::Lite02) && !self.version.has_announce_ok() {
 			return Ok(());
@@ -1486,7 +1486,7 @@ impl AnnounceRun {
 		&mut self,
 		stream: &mut Stream<Transport, Version>,
 		origin: &origin::Consumer,
-		announced: &mut announce::Consumer,
+		announced: &mut origin::Routes,
 	) -> Result<(), Error> {
 		match self.phase {
 			AnnouncePhase::Withdrawing | AnnouncePhase::Closing => return Ok(()),
@@ -1509,7 +1509,7 @@ impl AnnounceRun {
 		&mut self,
 		stream: &mut Stream<Transport, Version>,
 		origin: &origin::Consumer,
-		announced: &mut announce::Consumer,
+		announced: &mut origin::Routes,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<(), Error>> {
 		if matches!(self.phase, AnnouncePhase::Init) {
@@ -1576,10 +1576,14 @@ impl AnnounceRun {
 			};
 
 			let (update, active, restart, predecessor) = match next {
-				Some(announce::Event::Start(update) | announce::Event::Update(update)) => (update, true, false, None),
-				Some(announce::Event::Restart(update)) => (update, true, true, None),
-				Some(announce::Event::Takeover { announce, predecessor }) => (announce, true, false, Some(predecessor)),
-				Some(announce::Event::End(update)) => (update, false, false, None),
+				Some(origin::RouteEvent::Start(update) | origin::RouteEvent::Update(update)) => {
+					(update, true, false, None)
+				}
+				Some(origin::RouteEvent::Restart(update)) => (update, true, true, None),
+				Some(origin::RouteEvent::Takeover { announce, predecessor }) => {
+					(announce, true, false, Some(predecessor))
+				}
+				Some(origin::RouteEvent::End(update)) => (update, false, false, None),
 				None => {
 					if self.initial.take().is_some() {
 						stream.writer.buffer(&lite::AnnounceBroadcast::Synced)?;
@@ -3460,20 +3464,20 @@ mod announce_test {
 
 	#[test]
 	fn initial_replay_keeps_the_last_event_and_its_order() {
-		let update = |prefix: &'static str, cost| announce::Announce {
+		let update = |prefix: &'static str, cost| crate::announce::Announce {
 			prefix: crate::Path::try_from(prefix).unwrap(),
 			captures: None,
 			route: origin::Route::default().with_cost(cost),
 		};
 		let events = [
-			announce::Event::Start(update("a", 1)),
-			announce::Event::Start(update("b", 2)),
-			announce::Event::Update(update("a", 3)),
-			announce::Event::Start(update("c", 4)),
-			announce::Event::End(update("b", 2)),
-			announce::Event::Restart(update("c", 5)),
-			announce::Event::End(update("c", 5)),
-			announce::Event::Start(update("b", 6)),
+			origin::RouteEvent::Start(update("a", 1)),
+			origin::RouteEvent::Start(update("b", 2)),
+			origin::RouteEvent::Update(update("a", 3)),
+			origin::RouteEvent::Start(update("c", 4)),
+			origin::RouteEvent::End(update("b", 2)),
+			origin::RouteEvent::Restart(update("c", 5)),
+			origin::RouteEvent::End(update("c", 5)),
+			origin::RouteEvent::Start(update("b", 6)),
 		];
 		let initial: Vec<_> = super::super::replay::initial(events)
 			.into_iter()
@@ -3494,7 +3498,7 @@ mod announce_test {
 		let removed = origin.announce("z/removed", origin::Route::default()).unwrap();
 		let _initial = origin.announce("z/retained", origin::Route::default()).unwrap();
 		let consumer = origin.consume();
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 		let budget = kio::Producer::new(0usize);
 		let log = Log::default();
 		let mut wire = Wire {
@@ -3536,7 +3540,7 @@ mod announce_test {
 		let _a = origin.announce("a", origin::Route::default()).unwrap();
 		let _b = origin.announce("b", origin::Route::default()).unwrap();
 		let consumer = origin.consume();
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 		let budget = kio::Producer::new(1usize);
 		let log = Log::default();
 		let mut wire = Wire {
@@ -3578,7 +3582,7 @@ mod announce_test {
 		let _a = origin.announce("a", origin::Route::default()).unwrap();
 		let _b = origin.announce("b", origin::Route::default()).unwrap();
 		let consumer = origin.consume();
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 		let budget = kio::Producer::new(0usize);
 		let log = Log::default();
 		let mut wire = Wire {
@@ -3634,7 +3638,7 @@ mod announce_test {
 		let first = origin.announce("a", origin::Route::default()).unwrap();
 		let unseen = origin.announce("b", origin::Route::default()).unwrap();
 		let consumer = origin.consume();
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 		let budget = kio::Producer::new(1usize);
 		let log = Log::default();
 		let mut wire = Wire {
@@ -3674,7 +3678,7 @@ mod announce_test {
 		let origin = Hop::new(1).unwrap().produce();
 		let _upstream = origin.snapshot("");
 		let consumer = origin.consume();
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 		assert!(!announced.is_synced());
 		let log = Log::default();
 		let mut wire = Wire {
@@ -3794,13 +3798,13 @@ mod announce_test {
 		let log = Log::default();
 		let writes = log.writes.clone();
 		let consumer = origin.consume();
-		assert!(!consumer.announced().is_synced(), "the relay itself is still syncing");
+		assert!(!consumer.routes().is_synced(), "the relay itself is still syncing");
 		let mut stream = Stream::<Transport, Version> {
 			writer: Writer::new(crate::transport::boxed::SendStream::new(SinkSend::new(log)), VERSION),
 			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), VERSION),
 		};
 		let _task = kio::clock::sim::spawn(async move {
-			let mut announced = consumer.announced();
+			let mut announced = consumer.routes();
 			let self_origin = consumer.hop();
 			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, VERSION, None).await
 		});
@@ -3833,7 +3837,7 @@ mod announce_test {
 			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), version),
 		};
 		let task = kio::clock::sim::spawn(async move {
-			let mut announced = consumer.announced();
+			let mut announced = consumer.routes();
 			let self_origin = consumer.hop();
 			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, version, auth).await
 		});
@@ -4090,7 +4094,7 @@ mod announce_test {
 			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), VERSION),
 		};
 		let task = kio::clock::sim::spawn(async move {
-			let mut announced = consumer.announced();
+			let mut announced = consumer.routes();
 			let self_origin = consumer.hop();
 			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, VERSION, None).await
 		});
@@ -8496,7 +8500,14 @@ mod serve_group_test {
 				broadcast.announce(Default::default()).unwrap();
 				let relay = origin(2);
 				let _upstream = connect(version, &publisher, &relay).await;
-				let remote = relay.consume().follow("room", None).unwrap().available().await.unwrap();
+				let remote = relay
+					.consume()
+					.follow("room", None)
+					.unwrap()
+					.available()
+					.await
+					.unwrap()
+					.unwrap();
 				let mut keeper = match warm {
 					true => Some(
 						remote
@@ -8527,6 +8538,7 @@ mod serve_group_test {
 					.unwrap()
 					.available()
 					.await
+					.unwrap()
 					.unwrap();
 				let mut live = remote
 					.track("test")
@@ -9359,7 +9371,7 @@ mod tests {
 			.unwrap();
 
 		let consumer = origin.consume().excluding(assigned);
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 		let mut run = std::pin::pin!(Publisher::run_announce(
 			&mut stream,
 			&consumer,
@@ -9404,7 +9416,7 @@ mod tests {
 			.await
 			.unwrap();
 		let consumer = origin.consume();
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 		let err = Publisher::run_announce(
 			&mut stream,
 			&consumer,
@@ -9433,7 +9445,7 @@ mod tests {
 			.await
 			.unwrap();
 		let consumer = origin.consume();
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 		let mut run = std::pin::pin!(Publisher::run_announce(
 			&mut stream,
 			&consumer,
@@ -9469,7 +9481,7 @@ mod tests {
 			.await
 			.unwrap();
 		let consumer = origin.consume();
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 
 		let mut run = AnnounceRun::new(crate::Path::default(), self_origin, Version::Lite01);
 		run.withdraw(&mut stream, &consumer, &mut announced).unwrap();

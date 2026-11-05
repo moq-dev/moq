@@ -30,7 +30,7 @@ for (const retained of [1, 64, 1024])
 			]);
 			try {
 				const announcements = destination.announced();
-				while ((await announcements.next())?.kind !== "start") {}
+				while ((await announcements.next())?.kind !== "present") {}
 				const request = destination.request(Path.from("room"));
 				while (!request.active.peek()) await request.active.changed();
 				const remote = request.active.peek();

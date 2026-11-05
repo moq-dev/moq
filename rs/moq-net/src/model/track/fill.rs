@@ -847,13 +847,8 @@ impl Fill {
 		self.inner.is_wanted(sequence)
 	}
 
-	/// Wait until no reader waits for group `sequence` from this fill, so stop serving it.
-	#[cfg(feature = "async")]
-	pub async fn unwanted(&self, sequence: u64) {
-		kio::wait(|waiter| self.poll_unwanted(sequence, waiter)).await
-	}
-
-	/// Poll until no reader waits for group `sequence` from this fill.
+	/// Resolves once no reader waits for group `sequence` from this fill, so stop serving it.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_unwanted(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<()> {
 		self.inner.poll_unwanted(sequence, waiter)
 	}
@@ -915,17 +910,12 @@ impl Fill {
 		}
 	}
 
-	/// Return [`wanted`](Self::wanted) once it differs from what this handle last returned:
+	/// [`wanted`](Self::wanted) once it differs from what this handle last returned:
 	/// immediately on the first call, then on each change.
 	///
 	/// So `while let Some(sequence) = fill.wanted_changed().await` serves each group as it
 	/// becomes owed, and ends once the fill is withdrawn or answered.
-	#[cfg(feature = "async")]
-	pub async fn wanted_changed(&mut self) -> Option<u64> {
-		kio::wait(|waiter| self.poll_wanted_changed(waiter)).await
-	}
-
-	/// Poll for [`wanted`](Self::wanted) to differ from what this handle last returned.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		// Arm every input of `wanted` before reading it, so a change in between still wakes:
 		// the readers leaving, narrowing, or taking a group, the answers, the order, and a

@@ -28,6 +28,9 @@ while let Some(event) = room.next().await {
 }
 ```
 
+The example awaits the wrappers behind the `async` feature, which is off by default; the
+`poll_*` methods work without it.
+
 Chat uses `moq-json::window` with ten seconds of history. Drive
 `Publisher::expire()` alongside incoming sends (or call `poll_expire` from a poll
 loop) so messages expire while idle. `Subscriber::recv` returns push/pop/skip

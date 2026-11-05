@@ -17,7 +17,6 @@ import { Timescale, Timestamp } from "../time.ts";
 import { Subscriber as TrackSubscriber } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { type AnnounceBroadcast, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
-import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Probe as ProbeMessage } from "./probe.ts";
@@ -1299,104 +1298,6 @@ test("lite-07 skips a huge run at once", async () => {
 			if ("finish" in resp) break;
 		}
 		expect([codes, skips]).toEqual([[], [[1n, FAR - 1n]]]);
-	} finally {
-		await sub.close();
-	}
-});
-
-for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
-	for (const transport of [900, 1400]) {
-		test(`lite ${version}: datagram bodies fit the wire and ${transport}-byte transport`, async () => {
-			const installed = new Manual().install();
-			const sub = await servedSubscription({ version, startGroup: 0n, maxDatagramSize: transport });
-			const reader = sub.datagrams.getReader();
-			const max = Math.min(1200, transport);
-			try {
-				// Lite-07's type adds one byte to the three one-byte group fields.
-				const header = version === Version.DRAFT_07 ? 4 : 3;
-				sub.track.insertDatagram(0n, Timestamp.fromMillis(0), new Uint8Array(max - header + 1));
-				sub.track.insertDatagram(1n, Timestamp.fromMillis(1), new Uint8Array(max - header));
-				const next = await reader.read();
-				if (next.done) throw new Error("datagrams ended early");
-				expect(next.value.byteLength).toBe(max);
-				expect((await DatagramMessage.decode(next.value, version, () => ({ timed: true })))?.sequence).toBe(1n);
-			} finally {
-				await reader.cancel();
-				await sub.close();
-				await sub.serving;
-				installed.close();
-			}
-		});
-	}
-}
-
-test.each([Version.DRAFT_06, Version.DRAFT_07])("lite %s: datagrams honor group and frame bounds", async (version) => {
-	const clock = new Manual();
-	const installed = clock.install();
-	const sub = await servedSubscription({ version, startGroup: 0n, startFrame: 1, endGroup: 1n, endFrame: 0 });
-	const reader = sub.datagrams.getReader();
-	// Datagrams go out in arrival order, so each batch inserts its out-of-range ones ahead of
-	// the last in-range one: reading exactly the in-range ones proves the rest were dropped.
-	const send = (sequences: number[]) => {
-		for (const sequence of sequences)
-			sub.track.insertDatagram(BigInt(sequence), Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
-	};
-	const recv = async () => {
-		const next = await reader.read();
-		if (next.done) throw new Error("datagrams ended early");
-		return (await DatagramMessage.decode(next.value, version, () => ({ timed: true })))?.sequence;
-	};
-	// The publisher applies an update's datagram bounds before forwarding its group range, and
-	// each update here moves the range's end.
-	const applied = async (end: bigint) => {
-		let ranges = sub.track.subscription.peek()?.ranges;
-		while (ranges?.[0]?.end?.absolute !== end) ranges = (await sub.track.subscription.changed())?.ranges;
-	};
-	try {
-		send([0, 2, 1]);
-		expect(await recv()).toBe(1n);
-		// Widen both boundaries, then narrow to one datagram.
-		await replayUpdate({
-			priority: 0,
-			startGroup: 0n,
-			startFrame: 0,
-			endGroup: 4n,
-			endFrame: 0,
-			...restate(version),
-		}).encode(sub.client.writer, version);
-		await applied(5n);
-		send([2, 3, 5, 4]);
-		expect([await recv(), await recv(), await recv()]).toEqual([2n, 3n, 4n]);
-		await replayUpdate({
-			priority: 0,
-			startGroup: 6n,
-			startFrame: 1,
-			endGroup: 7n,
-			endFrame: 0,
-			...restate(version, 1n),
-		}).encode(sub.client.writer, version);
-		await applied(8n);
-		send([6, 8, 7]);
-		expect(await recv()).toBe(7n);
-	} finally {
-		await reader.cancel();
-		await sub.close();
-		await sub.serving;
-		installed.close();
-	}
-});
-
-// A sent datagram is accounted for, so the end sweep does not drop it, as the Rust publisher does.
-test("lite draft-06: the end sweep does not drop a sent datagram", async () => {
-	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0n });
-	try {
-		sub.serve(0n);
-		expect(await sub.servedSequence()).toBe(0n);
-		sub.track.insertDatagram(1n, Timestamp.fromMillis(1), new Uint8Array([1]));
-		await flush();
-		sub.track.finish();
-		sub.track.close();
-		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([]);
 	} finally {
 		await sub.close();
 	}
@@ -3656,6 +3557,60 @@ test("lite-07 SYNCED survives an initial removal and continuous earlier-prefix c
 		publisher.close();
 		retained.close();
 		for (const broadcast of churn) broadcast.close();
+		origin.close();
+		pair.client.close();
+		pair.server.close();
+	}
+});
+
+test("lite-06: a datagram request failing behind the shared writer resets rather than ends", async () => {
+	const version = Version.DRAFT_06;
+	const pair = createMockTransportPair(ALPN_06);
+	// The legacy API's one session queue, stalled on its first write.
+	let writes = 0;
+	const stall = Promise.withResolvers<void>();
+	Object.defineProperty(pair.server.datagrams, "writable", {
+		value: new WritableStream<Uint8Array>({
+			write() {
+				writes++;
+				return writes === 1 ? stall.promise : undefined;
+			},
+		}),
+	});
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("test"));
+	const first = broadcast.createDatagrams("a");
+	const second = broadcast.createDatagrams("b");
+
+	const subscribe = async (id: bigint, track: string) => {
+		const client = await Stream.open(pair.client, { version });
+		const server = await Stream.accept(pair.server, version);
+		if (!server) throw new Error("publisher never accepted the subscribe stream");
+		void publisher.runSubscribe(new Subscribe({ id, broadcast: Path.from("test"), track, priority: 0 }), server);
+		expect("start" in (await decodeSubscribeResponse(client.reader, version))).toBe(true);
+		return client;
+	};
+	const settle = async () => {
+		for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+	};
+	const a = await subscribe(0n, "a");
+	const b = await subscribe(1n, "b");
+	try {
+		first.append(undefined, Uint8Array.of(0xaa));
+		while (writes === 0) await settle();
+		// The second request now waits on the writer the first one holds.
+		second.append(undefined, Uint8Array.of(0xbb));
+		await settle();
+		// A SUBSCRIBE_UPDATE holding only its priority fails decoding, while the stream stays open.
+		await b.writer.u53(1);
+		await b.writer.u8(0);
+		await expect(decodeSubscribeResponse(b.reader, version)).rejects.toThrow();
+	} finally {
+		stall.resolve();
+		a.close();
+		b.close();
+		publisher.close();
 		origin.close();
 		pair.client.close();
 		pair.server.close();

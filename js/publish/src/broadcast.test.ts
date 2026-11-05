@@ -20,7 +20,7 @@ async function readCatalog(broadcast: Broadcast): Promise<Catalog.Root | undefin
 	const effect = new Effect();
 	const track = new Track.Producer("catalog.json");
 	broadcast.catalog.serve(track, effect);
-	const catalog = (await new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() }).latest())?.value;
+	const catalog = (await new Json.Snapshot.Consumer<Catalog.Root>({ track }).latest())?.value;
 	effect.close();
 	return catalog;
 }
@@ -117,19 +117,18 @@ test("shared Rust stats names survive the publisher's report builder", async () 
 		await settle();
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected a network producer");
-		const subscriber = net.track(Broadcast.STATS_TRACK).subscribe();
+		const consumer = new Json.Snapshot.Consumer<Stats.Snapshot>({
+			track: net.track(Broadcast.STATS_TRACK),
+			schema: Stats.SnapshotSchema,
+		});
 		try {
-			const consumer = new Json.Snapshot.Consumer<Stats.Snapshot>({
-				track: subscriber,
-				schema: Stats.SnapshotSchema,
-			});
 			await settle();
 			await clock.advance(Nano.fromMilli(Milli(1000)));
 			const reported = (await consumer.latest())?.value.renditions ?? {};
 			expect(Object.keys(reported).sort()).toEqual(Object.keys(fixture.renditions ?? {}).sort());
 			expect(reported).toEqual(fixture.renditions ?? {});
 		} finally {
-			subscriber.close();
+			consumer.close();
 		}
 	} finally {
 		broadcast.close();
@@ -319,12 +318,12 @@ test("serves the catalog through a shared static track", async () => {
 	const net = broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
 
-	const subscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
-	const catalog = (await new Json.Snapshot.Consumer<Catalog.Root>({ track: subscriber }).latest())?.value;
+	const reader = new Json.Snapshot.Consumer<Catalog.Root>({ track: net.track(Broadcast.CATALOG_TRACK) });
+	const catalog = (await reader.latest())?.value;
 	expect(catalog?.video?.renditions.video?.codec).toBe("avc1.640028");
 
 	// Dropping the subscriber closes the served track; the broadcast keeps running for the next viewer.
-	subscriber.close();
+	reader.close();
 	await settle();
 	expect(broadcast.net.peek()).toBe(net);
 
@@ -560,15 +559,15 @@ test("keeps the current catalog snapshot for a reconnecting viewer", async () =>
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected a network producer once connected");
 
-		const first = net.track(Broadcast.CATALOG_TRACK).subscribe();
-		expect((await new Json.Snapshot.Consumer<Catalog.Root>({ track: first }).latest())?.value.video).toBeDefined();
+		const first = new Json.Snapshot.Consumer<Catalog.Root>({ track: net.track(Broadcast.CATALOG_TRACK) });
+		expect((await first.latest())?.value.video).toBeDefined();
 		first.close();
 
 		// A reconnect past the idle cache window must still receive the live track's newest
 		// snapshot instead of waiting forever for an edit that may never come.
 		await clock.advance(Nano.fromMilli(Milli(60_000)));
-		const second = net.track(Broadcast.CATALOG_TRACK).subscribe();
-		expect((await new Json.Snapshot.Consumer<Catalog.Root>({ track: second }).latest())?.value.video).toBeDefined();
+		const second = new Json.Snapshot.Consumer<Catalog.Root>({ track: net.track(Broadcast.CATALOG_TRACK) });
+		expect((await second.latest())?.value.video).toBeDefined();
 		second.close();
 
 		broadcast.close();
@@ -621,7 +620,7 @@ test("a served decoder identity change moves the rendition to a fresh track name
 	const announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
 	const instance = announced?.active.peek()?.instance;
 	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({
-		track: net.track(Broadcast.CATALOG_TRACK).subscribe(),
+		track: net.track(Broadcast.CATALOG_TRACK),
 	});
 	const first = net.track("video").subscribe();
 	try {
@@ -870,7 +869,7 @@ test("identity changes before the first announce take a fresh track name", async
 	const net = broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
 	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({
-		track: net.track(Broadcast.CATALOG_TRACK).subscribe(),
+		track: net.track(Broadcast.CATALOG_TRACK),
 	});
 	const config = (await catalog.latest())?.value.video?.renditions.video;
 	expect(config?.codec).toBe("vp8");
@@ -912,9 +911,8 @@ test("stats names a track in the catalog and reports each listed rendition while
 
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected a network producer once connected");
-		const subscriber = net.track(Broadcast.STATS_TRACK).subscribe();
 		const consumer = new Json.Snapshot.Consumer<Stats.Snapshot>({
-			track: subscriber,
+			track: net.track(Broadcast.STATS_TRACK),
 			schema: Stats.SnapshotSchema,
 		});
 		await settle();
@@ -924,7 +922,7 @@ test("stats names a track in the catalog and reports each listed rendition while
 			transport: { rtt: 12 },
 			renditions: { video: { frames: 3, bytes: 300, keyframes: 1, skipped: 2, bitrate: 1_000_000 } },
 		});
-		subscriber.close();
+		consumer.close();
 
 		stats.set(false);
 		await settle();

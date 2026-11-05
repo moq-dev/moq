@@ -78,12 +78,8 @@ impl Stream {
 	/// Segment boundaries do not correspond to peer writes, and hence cannot be used as framing.
 	///
 	/// Cancel-safe.
-	pub async fn read_chunk(&mut self, max: usize) -> Result<Option<Bytes>, Error> {
-		kio::wait(|waiter| self.poll_read_chunk(waiter, max)).await
-	}
-
-	/// [`Self::read_chunk`], as a poll.
-	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
+	#[kio::wrapper]
+	pub fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
 		self.poll_read_generic(waiter, |chunks, waiter| match chunks.poll_next(waiter, max) {
 			Poll::Ready(Ok(Some(chunk))) => ReadStatus::Readable(chunk.bytes),
 			Poll::Ready(res) => (None, res.err()).into(),
@@ -192,21 +188,17 @@ impl Stream {
 		self.drop_stop = code;
 	}
 
-	/// Completes when the stream has been reset by the peer or otherwise closed.
+	/// Resolves once the stream has been reset by the peer or otherwise closed.
 	///
 	/// Yields `Some` with the reset error code when the stream is reset by the peer, and `None`
 	/// once every byte the peer finished it with has been read, after which it is no longer
 	/// meaningful for the stream to be reset. Fails with [`Error::Evicted`] once the stream was
-	/// evicted to free a stuck receive window, until it is stopped.
+	/// evicted to free a stuck receive window, until it is stopped. It takes no bytes, so a lease
+	/// in progress is left as it was.
 	///
 	/// Cancel-safe.
-	pub async fn received_reset(&mut self) -> Result<Option<VarInt>, Error> {
-		kio::wait(|waiter| self.poll_received_reset(waiter)).await
-	}
-
-	/// Poll form of [`Self::received_reset`]. It takes no bytes, so a lease in progress is
-	/// left as it was.
-	pub(crate) fn poll_received_reset(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
+	#[kio::wrapper]
+	pub fn poll_received_reset(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
 		if let Some(code) = self.reset {
 			return Poll::Ready(Ok(Some(code)));
 		}

@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Congestion controllers take their seed from the connection
+
+`congestion::Init` gains `seed: u64`; add it where you build an `Init` by hand (a `Factory` implementation is unaffected).
+moq-quic draws it from the connection's rng, so `endpoint::Config::rng_seed` now replays BBR3's probe phases too.
+`bbr3::Config::probe_rng_seed` and moq-congestion's `testing` feature are removed; set `rng_seed` instead.
+
 ### Transport cryptography uses rind
 
 Remove the `ring`, `aws-lc-rs`, and `rustls-aws-lc-rs` Cargo features. rind is always enabled.
