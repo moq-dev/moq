@@ -25,7 +25,7 @@ export class AudioRingBuffer {
 	#tail?: number;
 	// Declared silences still ahead of the playhead, oldest first, as [start, end) sample indices. The
 	// ring holds them as zeros; the reader fills them with comfort noise. Each one follows a distinct
-	// write and lies within the ring, so the ring's capacity bounds how many there are.
+	// write, and every move of the playhead drops those behind it, so the ring's capacity bounds them.
 	#pauses: Array<{ start: number; end: number }> = [];
 	// The part of the last read inside a declared silence, as output indices.
 	#quiet?: [number, number];
@@ -199,6 +199,7 @@ export class AudioRingBuffer {
 		const limit = band ? Math.min(this.#latencySamples + this.#chunk, this.capacity) : this.capacity;
 		if (end - this.#readIndex > limit) {
 			this.#readIndex = end - (band ? Math.min(this.#latencySamples, this.capacity) : this.capacity);
+			this.#prune();
 		}
 
 		// Fill gaps with zeros if there's a discontinuity
@@ -271,6 +272,14 @@ export class AudioRingBuffer {
 		if (this.#anchored && this.#stalled && this.length <= 0 && this.#ended()) this.#silent = true;
 	}
 
+	// Forget the declared silences the playhead has passed.
+	#prune(): void {
+		const pauses = this.#pauses;
+		let passed = 0;
+		while (passed < pauses.length && pauses[passed].end <= this.#readIndex) passed++;
+		if (passed > 0) pauses.splice(0, passed);
+	}
+
 	// Whether the playhead has reached the declared end.
 	#ended(): boolean {
 		const end = this.#previous ?? this.#end;
@@ -338,8 +347,8 @@ export class AudioRingBuffer {
 
 		// A quantum overlaps at most one declared silence unless an utterance is shorter than it, which
 		// no codec frame is; the span then covers both silences and the sliver between them.
+		this.#prune();
 		const pauses = this.#pauses;
-		while (pauses.length > 0 && pauses[0].end <= this.#readIndex) pauses.shift();
 		const after = this.#readIndex + samples;
 		const first = pauses[0];
 		if (first && first.start < after) {
