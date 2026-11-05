@@ -385,7 +385,7 @@ impl Client {
 		self.connect_boxed(now, Transport::new(session))
 	}
 
-	async fn connect_boxed(&self, now: Instant, mut session: Transport) -> Result<(Session, crate::Driver), Error> {
+	async fn connect_boxed(&self, now: Instant, session: Transport) -> Result<(Session, crate::Driver), Error> {
 		let runtime = Deadlines::new(now);
 		let peer_hop = self.assigned_hop();
 		let (publish, subscribe) = self.origins(peer_hop);
@@ -476,7 +476,7 @@ impl Client {
 		};
 
 		// The SETUP keeps lite-01's framing whichever version it offers.
-		let mut stream = Stream::open(&mut session, Version::Lite(lite::Version::Lite01))
+		let mut stream = Stream::open(&session, Version::Lite(lite::Version::Lite01))
 			.await?
 			.with_stats(&self.stats);
 
@@ -683,17 +683,6 @@ mod tests {
 			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 			Poll::Ready(self.state.control_stream.lock().unwrap().take().ok_or(FakeError))
-		}
-
-		fn poll_open_request(
-			&self,
-			waiter: &kio::Waiter,
-			options: crate::transport::poll::SendOptions<
-				'_,
-				<Self::SendStream as crate::transport::poll::SendStream>::Group,
-			>,
-		) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
-			self.poll_open_bi(waiter, options).map_ok(Some)
 		}
 
 		fn poll_open_uni(

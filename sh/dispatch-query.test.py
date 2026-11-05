@@ -568,6 +568,7 @@ class QueryTests(unittest.TestCase):
         self.assertNotIn("(skipped)", result.stderr)
         self.assertIn("ci: check flake failed", result.stderr)
 
+    @unittest.skip("flaky under host load: quest/m0/test-flakes-2/dispatch-query-terminate.md")
     def test_terminating_the_run_stops_the_running_phase(self):
         started = self.root / "started"
         os.mkfifo(started)

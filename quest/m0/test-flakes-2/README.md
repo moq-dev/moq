@@ -88,12 +88,15 @@ has failed it, so it needs no child of its own (noted 2026-11-03,
 Added 2026-11-03 (maintainer, `/quest-plan`): five more merge-queue failures
 from 2026-11-03 and early 2026-11-04 UTC, one child each.
 
+Added 2026-11-04 (maintainer, `/quest-plan`): moq-gst's interleaved restart
+test, which failed two merge-queue batches and two loaded local runs.
+
 Public API: none. Wire: none.
 
 ## Required
 
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [Browser buffering and Firefox audio-tone tests pass under load](/quest/m0/test-flakes-2/browser-media-flakes.md) - the two `harness.browser.ts` buffering tests and the Firefox player's audio-tone checks pass reliably in Interop and Nightly, each fixed at its cause under the epic's rules
-- [moq-transcode's live multi-rung test survives load](/quest/m0/test-flakes-2/transcode-multi-rung.md) - `live_multi_rung` stops failing queue batches with a cancelled rung group
-- [@moq/net's lite subscribe tests wait for the whole request](/quest/m0/test-flakes-2/js-subscribe-fixture.md) - the three lite subscribe-with-track cases pass under forced yields
-- [@moq/net's uni-stream flood test survives reruns](/quest/m0/test-flakes-2/js-stream-flood.md) - "a flood of uni streams yields" passes under `--rerun-each` and load
+- [moq-gst's interleaved restart test passes under load](/quest/m0/test-flakes-2/gst-reconnect-interleave.md) - `restarts_under_reconnects_interleave_on_one_pad` passes in loaded runs and the merge queue, its missed delivery and its stray `Eos` each fixed at the cause
+- [reload.test.ts's close-drain tests pass under load](/quest/m0/test-flakes-2/reload-close-drain.md) - the drain cases in `js/net`'s reload tests pass in loaded multi-file runs
+- [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed

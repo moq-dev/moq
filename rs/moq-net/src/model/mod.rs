@@ -27,7 +27,7 @@ mod expiry;
 mod idle;
 mod skipped;
 // How far a group's writer reads ahead of its fastest reader.
-mod pace;
+pub(crate) mod pace;
 // The DEFLATE codec behind compressed tracks.
 mod flate;
 pub(crate) mod object;
@@ -53,6 +53,9 @@ pub use timed::Timed;
 /// Publishing broadcasts, announcing routes, and consuming both through an origin.
 pub mod origin {
 	pub use super::follow::Following;
+	pub(crate) use super::origin_impl::HiddenWithheld;
+	#[cfg(feature = "async")]
+	pub(crate) use super::origin_impl::HiddenWithholding;
 	#[cfg(feature = "async")]
 	// private: capability gap
 	pub(crate) use super::origin_impl::Lookup;

@@ -280,6 +280,13 @@ pub(crate) fn config_from_sps(sps_nal: &[u8], in_band: bool) -> Result<hang::cat
 	Ok(config)
 }
 
+/// The picture size an SPS NAL (header included) declares, inside its conformance window. `None`
+/// when it fails to parse.
+pub(crate) fn sps_size(nal: &[u8]) -> Option<(u32, u32)> {
+	let head = Sps::parse(nal).ok()?.head;
+	Some((head.width, head.height))
+}
+
 /// The reordering an SPS NAL unit declares for its highest sub-layer: `sps_max_num_reorder_pics`,
 /// and the picture period when the VUI's HRD parameters fix the picture rate within the CVS
 /// (ITU-T H.265 E.3.2).

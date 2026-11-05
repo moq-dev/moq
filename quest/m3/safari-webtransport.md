@@ -43,3 +43,7 @@ tracking since PR #3345 and closes with this.
 ## Closes
 
 - [#2388](https://github.com/moq-dev/moq/issues/2388) - close this issue when the quest finishes
+
+## Related
+
+- [macOS browser lane](/quest/m2/macos-browser-lane.md) - the nightly lane that drives Safari through safaridriver; the Safari publisher joins it

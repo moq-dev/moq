@@ -2806,7 +2806,7 @@ test("a closed track still delivers a group parked above the cap once the cap is
 });
 
 // The final boundary counts datagrams: they share the group sequence namespace, and a
-// Rust peer feeds SUBSCRIBE_END into finish_at, so a boundary that ignored a trailing
+// Rust peer feeds SUBSCRIBE_FINISH into finish_at, so a boundary that ignored a trailing
 // datagram would finalize the track before it arrives.
 test("end reports the head after the highest produced sequence, datagrams included", async () => {
 	const producer = new TrackProducer("test");

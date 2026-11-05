@@ -172,6 +172,9 @@ pub enum Error {
 	/// The TLS material a connection needs could not be loaded.
 	#[error("tls error: {0}")]
 	Tls(String),
+	/// This CPU lacks a feature that rind, MoQ's cryptography, requires.
+	#[error(transparent)]
+	UnsupportedCpu(#[from] moq_crypto::provider::UnsupportedCpu),
 	/// The socket died underneath the connection.
 	#[error("socket error: {0}")]
 	Io(String),

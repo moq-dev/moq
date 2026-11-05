@@ -15,6 +15,11 @@ broadcast and confirms every subscriber sees data flowing before the timeout.
 Most subscribers check for a non-empty video frame. The browser additionally verifies
 WebCodecs output painted to a canvas and drives the player's pause/resume controls.
 
+The native JS tail lanes also resolve on-demand claims on lite-07, under Node
+and Bun over WebSocket and WebTransport. Fresh readers request or follow the
+claim's own path and child paths. A reader-first case checks that an absent
+request ends while its follower waits for the publisher to arrive.
+
 Every publisher also sends an Opus tone, one sine per channel, and every subscriber
 decodes it. Python and C++ send a mono 440 Hz tone; the rest send 440 Hz left and
 660 Hz right, so a channel swap fails too. The Rust CLI imports it from ffmpeg in

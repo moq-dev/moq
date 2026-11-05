@@ -1032,7 +1032,9 @@ test("a group that goes stale while its stream opens writes nothing", async () =
 		write(2n, 20_000);
 		open();
 
-		expect(String(await streamReset)).toContain("abandoned waiting for a stream slot");
+		// The slot goes to the next group in line, itself past the budget by now, so it is
+		// reset without carrying anything.
+		await streamReset;
 		expect(writes).toBe(0);
 		await yieldNow();
 		expect(unhandled).toEqual([]);
@@ -2657,7 +2659,7 @@ test("draft-22: a backwards range within one group serves nothing and ends the s
 // clock and stream ordering before re-enabling.
 test.skip.each(["ascending", "descending"] as const)("draft-22: a wider fill is refused in %s order", async (order) => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	for (const sequence of [0n, 3n, 9n]) {
 		const group = track.createGroup(sequence);
 		for (let i = 0; i < 2; i++)

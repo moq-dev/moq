@@ -76,7 +76,7 @@ pipe below; the second round above adds the acceptor to the session name:
 - Long-lived `tcp` sessions rely on unbounded groups (since
   [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411) a group has no
   size cap, and each copy keeps a ~32 MiB tail). With one reader per copy,
-  [fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) acts
+  [fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664) acts
   as TCP backpressure: a writer awaiting `group::Producer::ready` runs at most
   16 MiB past its reader on each hop, and a reader that falls off the tail
   fails with `Evicted` rather than skipping data. Where pacing doesn't reach
@@ -147,8 +147,10 @@ standing where the 2026-11-04 decisions above don't replace it:
   [moq-dev/moq#7677](https://github.com/moq-dev/moq/pull/7677): it needs
   moq-lite-07 or moq-transport on every hop, since a moq-lite hop before 07
   has no hidden opt-in and never carries an endpoint's `.socket/<id>`
-  broadcast; [older hops](/quest/m1/socket/old-hop-dial.md) make such a dial
-  fail instead of waiting.
+  broadcast. Relays' cluster links carry hidden broadcasts on every version,
+  so an endpoint's own client session is the hop that decides: while one is
+  moq-lite before 07, its dials and accepts fail `Unsupported` instead of
+  waiting ([moq-dev/moq#7888](https://github.com/moq-dev/moq/pull/7888)).
 - Fixed channels become sessions or messages on one: boy's `command` and
   per-viewer latency, CARLA's `control`, ack, and e-stop. Shared state such as
   boy's `status` stays an ordinary broadcast.
@@ -187,7 +189,6 @@ announce-watch-request pairing remains in `rs/moq-boy`, `js/moq-boy`, or
 ## Required
 
 - [JS sockets](/quest/m1/socket/js.md) - the same surface in `@moq/net`, interoperating with Rust
-- [A socket dial over an older hop fails instead of waiting](/quest/m1/socket/old-hop-dial.md) - a dial through a pre-lite-07 hop fails `Unsupported`
 - [Python sockets](/quest/m1/socket/py.md) - moq-ffi and `py/moq-rs` bindings, interoperating with Rust
 - [moq-boy on sockets](/quest/m1/socket/boy.md) - viewers dial the emulator's endpoint and send commands and receive latency on their session
 - [CARLA on sockets](/quest/m1/socket/carla.md) - drivers dial the truck's endpoint and send control and receive acks on their session
