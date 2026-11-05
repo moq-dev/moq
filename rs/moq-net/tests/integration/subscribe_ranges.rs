@@ -101,6 +101,7 @@ async fn ahead_then_live(version: Option<&str>, relay: bool) -> (Vec<u64>, Vec<u
 				.await
 				.expect("resolve timeout")
 				.expect("broadcast resolves")
+				.unwrap()
 		}
 	};
 
@@ -144,7 +145,8 @@ async fn sparse_ranges_reach_the_publisher_on_lite07() {
 		let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
-			.expect("broadcast resolves");
+			.expect("broadcast resolves")
+			.unwrap();
 
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(Duration::from_secs(60)))
@@ -242,7 +244,13 @@ async fn range_fixture_history(version: &str, relay: bool, history: u64) -> Rang
 	options.client_subscribe = Some(subscriber.clone());
 	sessions.push(connect_mock(options).await);
 	let consumer = subscriber.consume();
-	let remote = consumer.follow("ranges", None).unwrap().available().await.unwrap();
+	let remote = consumer
+		.follow("ranges", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
 	RangeFixture {
 		track,
 		remote,
@@ -762,7 +770,8 @@ async fn a_covered_bounded_subscription_stays_open() {
 		let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
-			.expect("broadcast resolves");
+			.expect("broadcast resolves")
+			.unwrap();
 
 		let bounded = |range: std::ops::Range<u64>| {
 			Subscription::default()

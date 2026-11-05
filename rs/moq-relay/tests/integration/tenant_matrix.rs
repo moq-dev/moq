@@ -236,7 +236,7 @@ impl Watcher {
 	async fn connect(url: url::Url) -> Self {
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 		let session = kio::clock::timeout(
 			TIMEOUT,
 			client()
@@ -256,7 +256,7 @@ impl Watcher {
 			let changed = changed.clone();
 			async move {
 				while let Some(event) = announced.next().await {
-					if let moq_net::announce::Event::Start(route) = event {
+					if let moq_net::origin::RouteEvent::Start(route) = event {
 						seen.lock().unwrap().push(route.prefix.to_string());
 						changed.notify_waiters();
 					}

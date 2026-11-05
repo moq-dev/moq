@@ -21,7 +21,7 @@ export namespace Announce {
 		get synced(): Signals.Getter<boolean>;
 	}
 	export type Event = {
-		kind: "start" | "update" | "restart" | "end";
+		kind: "present" | "absent";
 	} & Announce.Announce;
 	export interface Options {
 		covering?: boolean;
