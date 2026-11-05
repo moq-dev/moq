@@ -61,6 +61,9 @@ impl<T> Linger<T> {
 	}
 
 	/// Wait for the deadline on the ambient clock, then close the broadcasts.
+	///
+	/// Hand-written rather than generated, since it consumes the handle to close them.
+	#[cfg(feature = "async")]
 	pub async fn wait(mut self) {
 		kio::wait(|waiter| self.poll_wait(waiter)).await
 	}

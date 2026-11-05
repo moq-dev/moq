@@ -187,16 +187,11 @@ pub(crate) struct Reader {
 
 impl Reader {
 	/// The next record the driver read off the channel.
+	#[cfg_attr(test, kio::wrapper)]
 	pub fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes, qmux::Error>> {
 		let record = ready!(self.rx.poll_recv(&mut waiter.context())).unwrap_or(Err(qmux::Error::Closed))?;
 		self.unread.fetch_sub(record.len() as u64, Ordering::Relaxed);
 		Poll::Ready(Ok(record))
-	}
-
-	/// Wait for [`Self::poll_recv`].
-	#[cfg(test)]
-	pub async fn recv(&mut self) -> Result<Bytes, qmux::Error> {
-		kio::wait(|waiter| self.poll_recv(waiter)).await
 	}
 }
 

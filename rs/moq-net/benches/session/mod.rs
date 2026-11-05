@@ -554,7 +554,7 @@ pub(crate) struct Pair {
 	pub client: moq_net::Session,
 	pub server_transport: MockSession,
 	pub server: Option<moq_net::Session>,
-	pub discovery: Option<moq_net::announce::Consumer>,
+	pub discovery: Option<moq_net::origin::Routes>,
 	pub task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -713,7 +713,7 @@ impl<B: Backend> Cluster<B> {
 
 struct Viewer {
 	/// Announcements watched without a subscription, one announce request each.
-	following: Vec<moq_net::announce::Consumer>,
+	following: Vec<moq_net::origin::Routes>,
 	subscribers: Vec<track::Subscriber>,
 	/// Datagram track consumers, in the order of the broadcasts watched.
 	datagrams: Vec<datagram::Consumer>,
@@ -732,9 +732,9 @@ impl Viewer {
 			.consume()
 			.scope(path, &moq_net::Patterns::from(moq_net::Pattern::all()))
 			.unwrap()
-			.announced();
+			.routes();
 		let event = announced.next().await.expect("announced");
-		assert!(matches!(event, moq_net::announce::Event::Start(_)), "{event:?}");
+		assert!(matches!(event, moq_net::origin::RouteEvent::Start(_)), "{event:?}");
 		self.following.push(announced);
 	}
 
@@ -747,6 +747,7 @@ impl Viewer {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let consumer = broadcast.datagrams(DATAGRAMS).unwrap();
 		consumer.info().await.unwrap();
@@ -762,6 +763,7 @@ impl Viewer {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		for track in tracks {
 			self.subscribers.push(
@@ -834,6 +836,7 @@ impl<B: Backend> Room<B> {
 						.unwrap()
 						.available()
 						.await
+						.unwrap()
 						.unwrap();
 					viewer.fetches.push((broadcast, source.track(TRACK).unwrap()));
 				} else {
@@ -1695,6 +1698,7 @@ impl<B: Backend> ChurnRoom<B> {
 					.unwrap()
 					.available()
 					.await
+					.unwrap()
 					.unwrap(),
 			);
 			viewers.push(viewer);
@@ -1877,7 +1881,7 @@ pub(crate) fn withdrawal<B: Backend>(c: &mut Criterion) {
 								..Shape::BASE
 							};
 							let cluster = Cluster::<B>::new("moq-lite-06", shape, false).await;
-							let mut announced = B::origin(cluster.relays.last().unwrap()).consume().announced();
+							let mut announced = B::origin(cluster.relays.last().unwrap()).consume().routes();
 							let live: Vec<_> = (0..broadcasts)
 								.map(|i| {
 									B::origin(&cluster.relays[i % (relays - 1)])
@@ -1895,7 +1899,7 @@ pub(crate) fn withdrawal<B: Backend>(c: &mut Criterion) {
 							while let Ok(Some(event)) =
 								kio::clock::timeout(Duration::from_secs(1), announced.next()).await
 							{
-								assert!(matches!(event, moq_net::announce::Event::End(_)), "{event:?}");
+								assert!(matches!(event, moq_net::origin::RouteEvent::End(_)), "{event:?}");
 								retracted += 1;
 							}
 							let elapsed = start.elapsed();

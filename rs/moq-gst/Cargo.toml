@@ -24,7 +24,7 @@ gst = { package = "gstreamer", version = "0.25" }
 gst-audio = { package = "gstreamer-audio", version = "0.25" }
 hang = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
-moq-mux = { workspace = true }
+moq-mux = { workspace = true, features = ["async"] }
 moq-net = { workspace = true }
 moq-tokio = { workspace = true, default-features = true }
 tokio = { workspace = true, features = ["full"] }
