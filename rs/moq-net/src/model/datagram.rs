@@ -13,8 +13,9 @@
 //!
 //! Delivery is best-effort per hop: a session drops (with a debug log) any datagram whose
 //! encoded body exceeds the transport's datagram size, and sessions that can't carry
-//! datagrams at all (moq-lite before 05, moq-transport for now, or stream-only transports
-//! like WebSocket) never deliver them.
+//! datagrams at all (moq-lite before 05, or stream-only transports like WebSocket) never
+//! deliver them. Moq-transport maps a datagram track onto SUBSCRIBE and OBJECT_DATAGRAM,
+//! with the sequence as the group ID and object ID 0.
 //!
 //! Moq-lite 07 asks for a datagram track on a request of its own. Moq-lite 05 and 06 carry a
 //! name's groups and datagrams on one subscription, as moq-transport does: a session serves

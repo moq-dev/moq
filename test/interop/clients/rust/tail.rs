@@ -5,9 +5,11 @@
 //! so it must read a contiguous run of groups through the last one. `cached` publishes every
 //! group before connecting, so a FETCH of a past group never races its write: moq-transport
 //! refuses a FETCH that starts past the largest group rather than waiting for it. `compress`
-//! publishes a compressed track with several frames, one empty, in each group. `late` writes
-//! the head of group 0 before connecting and the rest only once the harness relays that the
-//! subscriber read it, so a join that skips the head stalls rather than racing the publisher.
+//! publishes a compressed track with several frames, one empty, in each group. `datagram`
+//! publishes an untimed datagram track and sends each 900-byte datagram only after the harness
+//! says the subscriber read the last one. `late` writes the head of group 0 before connecting
+//! and the rest only once the harness relays that the subscriber read it, so a join that skips
+//! the head stalls rather than racing the publisher.
 use std::time::Duration;
 
 use anyhow::{Context, ensure};
@@ -76,14 +78,14 @@ async fn main() -> anyhow::Result<()> {
 	let args: Vec<_> = std::env::args().collect();
 	ensure!(
 		(4..=6).contains(&args.len()),
-		"usage: interop-tail publish|subscribe URL BROADCAST [VERSION [drop|join|cached|compress|status|late]]"
+		"usage: interop-tail publish|subscribe URL BROADCAST [VERSION [drop|join|cached|compress|datagram|status|late]]"
 	);
 	let url: url::Url = args[2].parse()?;
 	let mode = args.get(5).map(String::as_str);
 	ensure!(
 		matches!(
 			mode,
-			None | Some("drop" | "join" | "cached" | "compress" | "status" | "late")
+			None | Some("drop" | "join" | "cached" | "compress" | "datagram" | "status" | "late")
 		),
 		"unknown mode: {mode:?}"
 	);
@@ -91,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
 	let join = matches!(mode, Some("join" | "status"));
 	let cached = mode == Some("cached");
 	let compress = mode == Some("compress");
+	let datagram = mode == Some("datagram");
 	let status = mode == Some("status");
 	let late = mode == Some("late");
 	let mut commands = tokio::io::BufReader::new(tokio::io::stdin()).lines();
@@ -106,6 +109,32 @@ async fn main() -> anyhow::Result<()> {
 	match args[1].as_str() {
 		"publish" => {
 			let broadcast = origin.create_broadcast(&args[3])?;
+			if datagram {
+				// Untimed: the OBJECT_DATAGRAM carries no timestamp, so the subscriber can
+				// check the payload alone. Stay open until each one is acknowledged.
+				let mut track = broadcast.create_datagrams("tail", moq_net::datagram::Info::default())?;
+				broadcast.announce(Default::default())?;
+				let session = client.clone().with_publisher(&origin).connect(url).established().await?;
+				let mut priority = track.priority();
+				while priority.is_none() {
+					priority = kio::wait(|waiter| track.poll_priority(waiter, priority)).await;
+				}
+				for sequence in 0..GROUPS {
+					ensure!(
+						commands.next_line().await?.as_deref() == Some(&format!("datagram {sequence}")),
+						"missing datagram command"
+					);
+					track.append(None, vec![sequence as u8; 900])?;
+				}
+				ensure!(
+					commands.next_line().await?.as_deref() == Some("clean end"),
+					"reader did not acknowledge a clean end"
+				);
+				track.finish();
+				broadcast.close();
+				session.close().await?;
+				eprintln!("tail acknowledged");
+			} else {
 			let mut track = broadcast.create_track(
 				"tail",
 				moq_net::track::Info::default()
@@ -164,6 +193,7 @@ async fn main() -> anyhow::Result<()> {
 			broadcast.close();
 			session.close().await?;
 			eprintln!("tail acknowledged");
+			}
 		}
 		"subscribe" => {
 			let consumer = origin.consume();
@@ -178,6 +208,26 @@ async fn main() -> anyhow::Result<()> {
 				.available()
 				.await?
 				.context("went offline before serving")?;
+			if datagram {
+				let mut track = broadcast.datagrams("tail")?;
+				track.info().await?;
+				println!("datagram ready");
+				for sequence in 0..GROUPS {
+					let frame = track.recv().await?.context("missing datagram")?;
+					ensure!(frame.sequence == sequence, "wrong datagram sequence");
+					ensure!(frame.payload.len() == 900, "truncated datagram");
+					ensure!(
+						frame.payload.iter().all(|byte| *byte == sequence as u8),
+						"corrupt datagram"
+					);
+					ensure!(frame.timestamp.is_none(), "unexpected IETF timestamp");
+					println!("datagram {sequence}");
+				}
+				eprintln!("datagram clean groups=0,1,2,3 bytes=3600");
+				session.close().await?;
+				client.close().await;
+				return Ok(());
+			}
 			let remote = broadcast.track("tail")?;
 			if status {
 				// Query before subscribing so draft-18+ must use TRACK_STATUS,

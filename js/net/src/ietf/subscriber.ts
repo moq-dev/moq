@@ -4,6 +4,7 @@ import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
 import * as broadcast from "../broadcast.ts";
+import * as datagram from "../datagram.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { BroadcastCache } from "../consume.ts";
 import * as DatagramStream from "../datagram_stream.ts";
@@ -27,9 +28,9 @@ import { finalSequence, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { receiveFrame, skipPayload } from "../payload.ts";
-import type { Cursor, Reader, Stream } from "../stream.ts";
+import { Reader, type Cursor, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import type { Timescale } from "../time.ts";
+import { Timescale, type Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
@@ -48,7 +49,15 @@ import { isDraft20 } from "./filter.ts";
 import { Join } from "./join.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import { decodeFetchObject, EndOfTrackProperties, Frame, type Group as GroupMessage, ObjectIdGap } from "./object.ts";
+import {
+	decodeFetchObject,
+	decodeObjectTime,
+	EndOfTrackProperties,
+	Frame,
+	type Group as GroupMessage,
+	ObjectIdGap,
+	statusDefined,
+} from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { DEFAULT_WIRE, fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishDoneStatus, publishDoneClean } from "./publish.ts";
@@ -93,6 +102,19 @@ type Subscription = {
 	fetchIds: bigint[];
 };
 
+/** A stream subscription's alias binding. The object identity is what retirement matches. */
+type TrackBinding = { kind: "track"; subscription: Subscription };
+
+/** A datagram subscription's alias binding. Group streams on it are dropped, not written. */
+type DatagramBinding = {
+	kind: "datagram";
+	producer: datagram.Producer;
+	timescale?: Timescale;
+	logged: boolean;
+};
+
+type Binding = TrackBinding | DatagramBinding;
+
 // Out-parameter for #openSubscribe: lets the caller observe partial progress
 // (stream opened, trackAlias registered) so it can clean up on timeout even
 // before the setup promise settles.
@@ -101,6 +123,8 @@ type SubscribeSetupState = {
 	// The accepted subscription, which a registered alias names.
 	subscription?: Subscription;
 	registeredAlias?: bigint;
+	/** The alias binding {@link registeredAlias} names, so cleanup retires that same object. */
+	binding?: Binding;
 	requests?: Requests;
 	/**
 	 * Aborts once the caller has given up. An open still waiting leaves the line, and setup
@@ -154,7 +178,7 @@ export class Subscriber {
 	#cluster?: Cluster.Hops;
 
 	// Publisher-chosen aliases used by incoming group streams.
-	#aliases = new TrackAliases<Subscription>();
+	#aliases = new TrackAliases<Binding>();
 
 	// Units for each track's object Timestamps, from the TIMESCALE Track Property in
 	// SUBSCRIBE_OK. A track missing from this map declared no timeline, so its frames
@@ -700,7 +724,7 @@ export class Subscriber {
 			for (;;) {
 				const request = await wireOf(consumer).requestedDatagrams();
 				if (!request) return;
-				request.reject(new NotFound("datagram tracks over moq-transport"));
+				void this.#runDatagram(path, request, instance.validity?.signal);
 			}
 		})();
 		return this.#consumes.insert(path, instance, consumer);
@@ -804,6 +828,7 @@ export class Subscriber {
 
 		let stream: RequestStream;
 		let subscription: Subscription;
+		let binding: Binding;
 		let trackAlias: bigint;
 		// The SUBSCRIBER_PRIORITY the request went out with.
 		let priority: number;
@@ -817,6 +842,7 @@ export class Subscriber {
 				if (result !== null) {
 					stream = result.stream;
 					subscription = result.subscription;
+					binding = result.binding;
 					trackAlias = result.alias;
 					priority = result.priority;
 					maxAge = result.maxAge;
@@ -851,8 +877,8 @@ export class Subscriber {
 
 				if (
 					state.registeredAlias !== undefined &&
-					state.subscription &&
-					this.#aliases.retire(state.registeredAlias, state.subscription)
+					state.binding &&
+					this.#aliases.retire(state.registeredAlias, state.binding)
 				) {
 					this.#timescales.delete(state.registeredAlias);
 				}
@@ -983,7 +1009,7 @@ export class Subscriber {
 			disposeGrant?.();
 			// Only the owner tears down the alias metadata: a later subscription may have
 			// reclaimed the alias and installed its own timescale.
-			if (this.#aliases.retire(trackAlias, subscription)) this.#timescales.delete(trackAlias);
+			if (this.#aliases.retire(trackAlias, binding)) this.#timescales.delete(trackAlias);
 		}
 	}
 
@@ -1523,6 +1549,7 @@ export class Subscriber {
 	): Promise<{
 		stream: RequestStream;
 		subscription: Subscription;
+		binding: Binding;
 		alias: bigint;
 		priority: number;
 		maxAge?: number;
@@ -1605,6 +1632,8 @@ export class Subscriber {
 		if (!known) state.requests = producer.requests();
 		const tail = new Tail();
 		const subscription: Subscription = { track: producer, tail, timescale: ok.properties.timescale, fetchIds: [] };
+		const binding: Binding = { kind: "track", subscription };
+		state.binding = binding;
 		// The subscription starts after Largest, so the joining FETCH or the fill brings its
 		// group's head. With no Largest the track is empty and every group whole. A draft-22 fill
 		// is one of the subscription's own streams, so the Stream Count already waits for it.
@@ -1635,7 +1664,7 @@ export class Subscriber {
 		state.fill?.(subscription);
 
 		try {
-			this.#aliases.set(ok.trackAlias, subscription, { broadcast, name: request.name });
+			this.#aliases.set(ok.trackAlias, binding, { broadcast, name: request.name });
 			const timescale = ok.properties.timescale;
 			if (timescale !== undefined) {
 				this.#timescales.set(ok.trackAlias, timescale);
@@ -1651,6 +1680,7 @@ export class Subscriber {
 		return {
 			stream: state.stream,
 			subscription,
+			binding,
 			alias: ok.trackAlias,
 			priority: msg.subscriberPriority,
 			maxAge: msg.maxAge,
@@ -1820,10 +1850,10 @@ export class Subscriber {
 			throw new Error("subgroups are not supported");
 		}
 
-		let subscription: Subscription;
+		let binding: Binding;
 		try {
 			// The control message establishing this alias can arrive after the data stream.
-			subscription = await this.#aliases.get(group.trackAlias);
+			binding = await this.#aliases.get(group.trackAlias);
 		} catch (err: unknown) {
 			if (err instanceof ProtocolViolation) this.#fail(err.code, err.message);
 			const e = await sessionCause(this.#quic, err);
@@ -1836,6 +1866,20 @@ export class Subscriber {
 			stream.stop(e);
 			return;
 		}
+
+		// A datagram subscription keeps only OBJECT_DATAGRAM. A group on it is logged once
+		// and stopped; the session stays up.
+		if (binding.kind === "datagram") {
+			if (!binding.logged) {
+				binding.logged = true;
+				console.debug(
+					`dropping a group stream on a datagram track's subscription: alias=${group.trackAlias} group=${group.groupId}`,
+				);
+			}
+			stream.stop(new Error("dropping a group stream on a datagram track's subscription"));
+			return;
+		}
+		const subscription = binding.subscription;
 
 		const { track, tail } = subscription;
 		// Every data stream counts toward PUBLISH_DONE's Stream Count, even one dropped below.
@@ -2154,10 +2198,266 @@ export class Subscriber {
 		}
 	}
 
-	// Stream subscriptions never admit datagrams; the separate IETF datagram-track adapter
-	// owns mapping DATAGRAMS demand onto SUBSCRIBE/OBJECT_DATAGRAM.
+	/**
+	 * Route one OBJECT_DATAGRAM.
+	 *
+	 * An undefined Object Status is a protocol violation on every subscription kind.
+	 * A defined status is not a payload and does not end the track. A datagram subscription
+	 * keeps object ID 0. Anything else is dropped, including every datagram on a stream
+	 * subscription.
+	 */
 	async #recvDatagram(data: Uint8Array): Promise<void> {
-		await ObjectDatagram.decode(data, this.#session.version);
+		const datagram = await ObjectDatagram.decode(data, this.#session.version);
+		if ("status" in datagram.body && !statusDefined(datagram.body.status)) {
+			throw new ProtocolViolation(`undefined object status ${datagram.body.status}`);
+		}
+
+		const binding = this.#aliases.peek(datagram.trackAlias);
+		if (!binding) {
+			console.debug(`dropping a datagram for an unknown alias: alias=${datagram.trackAlias}`);
+			return;
+		}
+		if (binding.kind !== "datagram") {
+			console.debug(
+				`dropping a datagram on a stream track's subscription: alias=${datagram.trackAlias} group=${datagram.groupId}`,
+			);
+			return;
+		}
+
+		if ("status" in datagram.body) {
+			console.debug(`dropping a datagram status: alias=${datagram.trackAlias} group=${datagram.groupId}`);
+			return;
+		}
+		const objectId = datagram.objectId ?? 0n;
+		if (objectId !== 0n) {
+			console.debug(
+				`dropping a datagram with a nonzero object id: alias=${datagram.trackAlias} group=${datagram.groupId} object=${objectId}`,
+			);
+			return;
+		}
+
+		let timestamp: Timestamp | undefined;
+		if (datagram.properties) {
+			try {
+				// Walk the block either way: a malformed property is a protocol violation on an
+				// untimed track too. Only a track that declared a timescale keeps the timestamp.
+				const decoded = await new Reader(undefined, datagram.properties, this.#session.version).decode(
+					(cursor) => decodeObjectTime(cursor, binding.timescale ?? Timescale.SECOND),
+				);
+				if (binding.timescale !== undefined) timestamp = decoded;
+			} catch (err) {
+				const cause = error(err);
+				if (cause instanceof ProtocolViolation) throw cause;
+				console.debug(`dropping a datagram whose properties do not decode: ${reason(cause)}`);
+				return;
+			}
+		}
+		if (binding.timescale !== undefined && timestamp === undefined) {
+			console.debug(
+				`dropping a datagram without a timestamp on a timed track: alias=${datagram.trackAlias} group=${datagram.groupId}`,
+			);
+			return;
+		}
+		try {
+			binding.producer.insert({
+				sequence: datagram.groupId,
+				timestamp,
+				payload: datagram.body.payload,
+			});
+		} catch (err) {
+			console.debug(`dropping a datagram the track refused: ${reason(err)}`);
+		}
+	}
+
+	/**
+	 * Subscribe to one datagram track: its own SUBSCRIBE, live from now, keeping only
+	 * OBJECT_DATAGRAM with object ID 0.
+	 */
+	async #runDatagram(broadcast: Path.Valid, request: datagram.Request, valid?: AbortSignal): Promise<void> {
+		const refused = unauthorized(broadcast);
+		try {
+			for (;;) {
+				const ready = await this.#auth?.ready(broadcast, "subscribe", {
+					signal: valid,
+					until: () => Promise.resolve(request.closed),
+				});
+				if (ready !== false) break;
+				if (request.priority.peek() !== undefined && request.closed.peek() === undefined) continue;
+				return;
+			}
+		} catch (err) {
+			request.reject(error(err));
+			return;
+		}
+		if (this.#denied(broadcast)) {
+			request.reject(refused);
+			return;
+		}
+		if (request.closed.peek() !== undefined) return;
+
+		let requestId: bigint | undefined;
+		try {
+			valid?.throwIfAborted();
+			requestId = await this.#session.nextRequestId(valid);
+		} catch (err) {
+			request.reject(error(err));
+			return;
+		}
+		if (requestId === undefined) {
+			request.reject(await this.#closedSession());
+			return;
+		}
+
+		const version = this.#session.version;
+		let stream: RequestStream | undefined;
+		let binding: DatagramBinding | undefined;
+		let alias: bigint | undefined;
+		try {
+			stream = await RequestStream.open(this.#session, new Deadline(), { quic: this.#quic, signal: valid });
+			const subscriberPriority = toWire(request.priority.peek() ?? 0);
+			await Message.write(
+				stream.writer,
+				Subscribe.id,
+				new Subscribe({
+					requestId,
+					trackNamespace: broadcast,
+					trackName: request.name,
+					subscriberPriority,
+					groupOrder: "descending",
+					filter: { kind: "nextObject" },
+					propertiesWanted: true,
+					forward: true,
+				}),
+				version,
+			);
+			console.debug(`datagram subscribe written: id=${requestId} broadcast=${broadcast} track=${request.name}`);
+
+			const response = await stream.next();
+			if (response === undefined) throw new Error("datagram subscription ended before its response");
+			if (response.type === RequestError.id) {
+				const err = await RequestError.decode(response.reader, version);
+				request.reject(new Error(requestReason(err.errorCode, err.reasonPhrase, "subscribe", version)));
+				stream.close();
+				return;
+			}
+			if (response.type !== SubscribeOk.id) {
+				throw new ProtocolViolation(
+					`unexpected message on a datagram subscription: 0x${response.type.toString(16)}`,
+				);
+			}
+			const ok = await SubscribeOk.decode(response.reader, version);
+			const producer = request.accept({
+				timescale: ok.properties.timescale,
+				priority: fromWire(ok.properties.priority ?? DEFAULT_WIRE),
+			});
+			binding = {
+				kind: "datagram",
+				producer,
+				timescale: ok.properties.timescale ?? undefined,
+				logged: false,
+			};
+			alias = ok.trackAlias;
+			try {
+				this.#aliases.set(alias, binding, { broadcast, name: request.name });
+			} catch (err) {
+				if (err instanceof DuplicateTrackAlias) this.#fail(SessionCode.ProtocolViolation, err.message);
+				throw err;
+			}
+			if (binding.timescale !== undefined) this.#timescales.set(alias, binding.timescale);
+
+			const unanswered = new Signal(0);
+			let sent = fromWire(subscriberPriority);
+			let disposeGrant: Dispose | undefined;
+			const stop = new AbortController();
+			let revoke!: () => void;
+			const revoked = new Promise<"revoked">((resolve) => {
+				revoke = () => resolve("revoked");
+			});
+			disposeGrant = this.#grant?.subscribe(() => {
+				if (this.#denied(broadcast)) revoke();
+			});
+			if (this.#denied(broadcast)) revoke();
+
+			const idle = (async (): Promise<"idle" | "local"> => {
+				for (;;) {
+					if (stop.signal.aborted) return "idle";
+					const closed = producer.closed.peek();
+					if (closed !== undefined) return "local";
+					if (producer.priority.peek() === undefined && hooks.closeUnusedDatagrams(producer)) return "idle";
+					const next = producer.priority.peek();
+					if (next !== undefined && next !== sent && unanswered.peek() === 0) {
+						const updateId = await this.#session.nextRequestId(valid);
+						if (updateId === undefined) throw await this.#closedSession();
+						const parameters = new Parameters();
+						parameters.subscriberPriority = toWire(next);
+						unanswered.update((count) => count + 1);
+						try {
+							await Message.write(
+								stream.writer,
+								SubscribeUpdate.id,
+								new SubscribeUpdate({ requestId: updateId, parameters }),
+								version,
+							);
+						} catch (err) {
+							unanswered.update((count) => count - 1);
+							throw err;
+						}
+						sent = next;
+						continue;
+					}
+					await Signal.race(producer.priority, producer.closed);
+				}
+			})();
+
+			const ended = await race([
+				this.#readDatagramDone(stream, unanswered, broadcast).then(() => "done" as const),
+				revoked,
+				idle,
+			]);
+			stop.abort();
+			if (ended === "done") producer.finish();
+			else if (ended === "revoked") producer.abort(refused);
+			else if (!hooks.closeUnusedDatagrams(producer)) producer.abort(new StreamError(StreamCode.Cancel));
+			disposeGrant?.();
+			if (ended === "done") stream.close();
+			else stream.abort(new StreamError(StreamCode.Cancel));
+		} catch (err) {
+			const cause = await sessionCause(this.#quic, err);
+			if (cause instanceof ProtocolViolation) this.#fail(cause.code, cause.message);
+			if (binding) binding.producer.abort(cause);
+			else request.reject(cause);
+			stream?.abort(cause);
+		} finally {
+			if (alias !== undefined && binding && this.#aliases.retire(alias, binding)) this.#timescales.delete(alias);
+		}
+	}
+
+	/** Read a datagram subscription's request stream until PUBLISH_DONE. Answers clear `unanswered`. */
+	async #readDatagramDone(stream: RequestStream, unanswered: Signal<number>, broadcast: Path.Valid): Promise<void> {
+		const version = this.#session.version;
+		let framed: Framed | undefined;
+		for (;;) {
+			framed = await stream.next();
+			if (framed === undefined) throw new ProtocolViolation("datagram subscription ended without PUBLISH_DONE");
+			if (framed.type === PublishDone.id) break;
+			if ((framed.type === RequestOk.id || framed.type === RequestError.id) && unanswered.peek() > 0) {
+				if (framed.type === RequestOk.id) await RequestOk.decode(framed.reader, version);
+				else await RequestError.decode(framed.reader, version);
+				unanswered.update((count) => count - 1);
+				continue;
+			}
+			throw new ProtocolViolation(`unexpected message on a datagram subscription: 0x${framed.type.toString(16)}`);
+		}
+		const done = await PublishDone.decode(framed.reader, version);
+		if (done.statusCode === PublishDoneStatus.UNAUTHORIZED) throw unauthorized(broadcast);
+		if (done.statusCode === PublishDoneStatus.MALFORMED_TRACK) {
+			throw new StreamError(StreamCode.MalformedTrack, {
+				message: `publish done: malformed track reason=${done.reasonPhrase}`,
+			});
+		}
+		if (!publishDoneClean(done.statusCode, version)) {
+			throw new Error(`publish done: status=0x${done.statusCode.toString(16)} reason=${done.reasonPhrase}`);
+		}
 	}
 }
 

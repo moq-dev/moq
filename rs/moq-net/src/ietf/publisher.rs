@@ -18,7 +18,7 @@ use crate::transport::poll::{GroupOf, SendOptions};
 
 use crate::{
 	DecodeError, Error, Timescale, Timestamp,
-	coding::{Encoder, Stream, Writer},
+	coding::{Encode as _, Encoder, Stream, Writer},
 	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, Location, RequestId},
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::{Order, Subscription},
@@ -1464,15 +1464,58 @@ impl Publisher {
 						Err(err) => return refused(err, false),
 						Ok(None) => return Ok(Subscribed::Withdrawn),
 					};
-					let track = match broadcast.track(&msg.track_name) {
-						Ok(track) => track,
-						Err(err) => return refused(err, true),
+					// SUBSCRIBE does not identify the kind. Resolve both kinds and serve the
+					// first successful answer, preferring streams when both are ready.
+					let mut along = (self.session.max_datagram_size() > 0)
+						.then(|| broadcast.datagrams(msg.track_name.as_ref()).ok()).flatten();
+					if let Some(datagrams) = &mut along {
+						datagrams.set_priority(super::priority::from_wire(msg.subscriber_priority));
+					}
+					let track = broadcast.track(&msg.track_name);
+					let selected = {
+						let streams = async {
+							match &track {
+								Ok(track) => self.subscribe_track(&mut stream, track, &msg, &lapse).await,
+								Err(err) => Some(Err(err.clone())),
+							}
+						};
+						let datagrams = async {
+							match &along {
+								Some(datagrams) => kio::wait(|waiter| datagrams.poll_info(waiter)).await.map(|_| ()),
+								None => Err(Error::NotFound),
+							}
+						};
+						match futures::future::select(Box::pin(streams), Box::pin(datagrams)).await {
+							futures::future::Either::Left((Some(Err(err)), datagrams)) => {
+								// Either kind may be absent or refused. Only fail when neither answers.
+								drop(datagrams);
+								self.until_withdrawn(&mut stream, super::request_stream::fin_cancels(self.version), |waiter| {
+									match &along {
+										Some(datagrams) => datagrams.poll_info(waiter).map(|r| r.map(|_| None).map_err(|_| err.clone())),
+										None => Poll::Ready(Err(err.clone())),
+									}
+								}).await
+							}
+							futures::future::Either::Left((result, _)) => result.map(|r| r.map(Some)),
+							futures::future::Either::Right((Ok(()), _)) => Some(Ok(None)),
+							futures::future::Either::Right((Err(_), streams)) => streams.await.map(|r| r.map(Some)),
+						}
 					};
-					let (mut track_serve, edge) = match self.subscribe_track(&mut stream, &track, &msg, &lapse).await {
-						Some(Ok(subscribed)) => subscribed,
+					let (mut track_serve, edge) = match selected {
+						Some(Ok(Some(streams))) => streams,
+						Some(Ok(None)) => {
+							return self.serve_datagrams(
+								&mut stream, &msg, along.take().expect("datagram kind resolved"),
+								&mut request_finished, &mut goaways, &mut updates, &mut acked,
+							).await;
+						}
 						Some(Err(err)) => return refused(err, true),
 						None => return Ok(Subscribed::Withdrawn),
 					};
+					let track = track.expect("stream kind resolved");
+					if let Some(datagrams) = along {
+						track_serve = track_serve.with_datagrams(datagrams, msg.properties_wanted);
+					}
 					let cache = track;
 					// The fill stamps its objects as the subscription does.
 					let timescale = track_serve.timescale;
@@ -1615,6 +1658,11 @@ impl Publisher {
 							}
 						};
 						track_serve.opened = opened.clone();
+						if self.session.max_datagram_size() > 0
+							&& let Ok(datagrams) = broadcast.datagrams(msg.track_name.as_ref())
+						{
+							track_serve = track_serve.with_datagrams(datagrams, msg.properties_wanted);
+						}
 						save_join(edge.largest, &track, &track_serve.ranking);
 						self.write_request_ok(&mut stream.writer, edge.largest).await?;
 						served = self
@@ -1903,6 +1951,188 @@ impl Publisher {
 			retain.poll_lapsed(waiter)
 		})
 		.await;
+	}
+
+	/// Serve a name that has a datagram track and no stream track.
+	///
+	/// SUBSCRIBE_OK carries the datagram track's properties and no largest location:
+	/// datagrams are not cached. Each payload is an OBJECT_DATAGRAM with object ID 0.
+	/// The track's end is PUBLISH_DONE, not an object status.
+	async fn serve_datagrams(
+		&self,
+		stream: &mut Stream<Transport, Version>,
+		msg: &ietf::Subscribe<'_>,
+		mut datagrams: crate::datagram::Consumer,
+		finished: &mut bool,
+		goaways: &mut super::request_stream::Messages,
+		updates: &mut SubscriptionUpdates,
+		acked: &mut Option<Arc<AtomicU64>>,
+	) -> Result<Subscribed, Error> {
+		// Before any await, so a subscriber waiting on this priority is not stuck behind setup.
+		datagrams.set_priority(super::priority::from_wire(msg.subscriber_priority));
+		let info = match self
+			.until_withdrawn(stream, super::request_stream::fin_cancels(self.version), |waiter| {
+				datagrams.poll_info(waiter)
+			})
+			.await
+		{
+			None => return Ok(Subscribed::Withdrawn),
+			Some(Ok(info)) => info,
+			Some(Err(err)) => return Ok(Subscribed::Refused(err.to_string(), err)),
+		};
+		let timescale = info.timescale.filter(|_| msg.properties_wanted);
+		let publisher = info.priority;
+		let properties = datagram_properties(&info, msg.properties_wanted);
+		*acked = Some(Arc::new(AtomicU64::new(0)));
+		stream
+			.writer
+			.encode_message(&ietf::SubscribeOk {
+				track_alias: msg.request_id.0,
+				largest: None,
+				properties,
+			})
+			.await?;
+
+		let order = ietf::GroupOrder::Descending.to_order();
+		let mut send_group = self.session.send_group(crate::priority::group(
+			super::priority::from_wire(msg.subscriber_priority),
+			publisher,
+		));
+		let mut forward = msg.forward;
+		let session = self.session.clone();
+		let SubscriptionUpdates { grant, renewal } = updates;
+
+		enum Turn {
+			Datagram(crate::datagram::Datagram),
+			Ended,
+			Failed(Error),
+			Update(super::request_stream::Update),
+			Cancelled,
+			Malformed(Error),
+			Renewal(request_update::Verdict),
+		}
+
+		loop {
+			let turn = kio::wait(|waiter| {
+				if session.poll_closed(waiter).is_ready() || stream.writer.poll_closed(waiter).is_ready() {
+					return Poll::Ready(Turn::Cancelled);
+				}
+				if let Poll::Ready(renewed) = renewal.poll(waiter) {
+					return Poll::Ready(Turn::Renewal(renewed));
+				}
+				match self.poll_update(stream, finished, goaways, waiter) {
+					Poll::Ready(UpdateRead::Update(update)) => return Poll::Ready(Turn::Update(update)),
+					Poll::Ready(UpdateRead::Cancelled) => return Poll::Ready(Turn::Cancelled),
+					Poll::Ready(UpdateRead::Malformed(err)) => return Poll::Ready(Turn::Malformed(err)),
+					Poll::Ready(UpdateRead::Failed(err)) => return Poll::Ready(Turn::Failed(err)),
+					Poll::Pending => {}
+				}
+				if forward {
+					match datagrams.poll_recv(waiter) {
+						Poll::Ready(Ok(Some(datagram))) => return Poll::Ready(Turn::Datagram(datagram)),
+						Poll::Ready(Ok(None)) => return Poll::Ready(Turn::Ended),
+						Poll::Ready(Err(err)) => return Poll::Ready(Turn::Failed(err)),
+						Poll::Pending => {}
+					}
+				}
+				Poll::Pending
+			})
+			.await;
+
+			match turn {
+				Turn::Datagram(datagram) => emit_datagram(
+					&self.session,
+					self.version,
+					msg.request_id.0,
+					order,
+					send_group.as_ref(),
+					timescale,
+					publisher,
+					&datagram,
+				),
+				Turn::Ended => return Ok(Subscribed::Served(Served::Track(Ok(())), 0)),
+				Turn::Failed(err) => return Ok(Subscribed::Served(Served::Track(Err(err)), 0)),
+				// The subscriber left after SUBSCRIBE_OK. The caller still writes PUBLISH_DONE,
+				// matching a cancelled stream subscription.
+				Turn::Cancelled => return Ok(Subscribed::Served(Served::Track(Ok(())), 0)),
+				Turn::Malformed(err) => {
+					if super::subscriber::is_protocol_violation(&err) {
+						self.session.clone().close(
+							super::error::to_session_code(&crate::SessionError::from(&err)),
+							&err.to_string(),
+						);
+					}
+					return Ok(Subscribed::Served(Served::Track(Err(err)), 0));
+				}
+				Turn::Renewal(request_update::Verdict { verdict, grant: res }) => {
+					let rg = grant.as_ref().expect("a renewal without a request grant");
+					let Err(refusal) = rg.renew(verdict, res) else {
+						if let Err(err) = self.write_request_ok(&mut stream.writer, None).await {
+							return Ok(Subscribed::Served(Served::Track(Err(err)), 0));
+						}
+						continue;
+					};
+					rg.end(refusal.clone());
+					return Ok(Subscribed::Served(Served::RenewalRefused(refusal), 0));
+				}
+				Turn::Update(update) if renewal.pending() => match renewal.queue(update, self.version) {
+					Ok(()) => {}
+					Err(request_update::Overflow::Session) => {
+						return Ok(Subscribed::Served(
+							Served::Track(Err(request_update::too_many(&mut self.session.clone()))),
+							0,
+						));
+					}
+					Err(request_update::Overflow::Request) => {
+						return Ok(Subscribed::Served(Served::Track(Err(Error::ProtocolViolation)), 0));
+					}
+				},
+				Turn::Update(update) => {
+					// A datagram track has no groups and no stored history. The filter is
+					// answered; objects it would have excluded were never kept.
+					let refused = match &update.refused {
+						Some(err) => Some((err.clone(), "REQUEST_UPDATE parameters not supported")),
+						None if update.new_group.is_some() => {
+							Some((Error::Unsupported, "NEW_GROUP_REQUEST on a datagram track"))
+						}
+						None if update.fill.is_some() && !Filter::is_draft20(self.version) => {
+							Some((Error::Unsupported, "REQUEST_UPDATE parameters not supported"))
+						}
+						None if update.authorization_token.is_some()
+							&& grant.is_none()
+							&& self.auth.token_decides(crate::auth::Direction::Publish) =>
+						{
+							Some((Error::Unsupported, TOKEN_ON_SESSION_REQUEST))
+						}
+						None => None,
+					};
+					if let Some((err, reason)) = refused {
+						self.write_subscribe_error(&mut stream.writer, &err, reason).await?;
+						return Ok(Subscribed::Served(Served::UpdateFailed(err), 0));
+					}
+					if let Some(priority) = update.priority {
+						let priority = super::priority::from_wire(priority);
+						datagrams.set_priority(priority);
+						if let Some(group) = &mut send_group {
+							group.set_priority(crate::priority::group(priority, publisher));
+						}
+					}
+					if let Some(enabled) = update.forward {
+						forward = enabled;
+					}
+					if let (Some(token), Some(rg)) = (
+						update
+							.authorization_token
+							.filter(|_| self.auth.token_decides(crate::auth::Direction::Publish)),
+						grant.as_ref(),
+					) {
+						renewal.verify(rg.verify_renewal(&self.auth, token.0));
+						continue;
+					}
+					self.write_request_ok(&mut stream.writer, None).await?;
+				}
+			}
+		}
 	}
 
 	async fn run_subscription(
@@ -4874,6 +5104,19 @@ struct TrackServe {
 	/// Whether the track advertised DYNAMIC_GROUPS, which an update's NEW_GROUP_REQUEST
 	/// needs.
 	dynamic: bool,
+	/// The name's datagram track, sent as OBJECT_DATAGRAM beside this subscription's groups.
+	datagrams: Option<DatagramForward>,
+}
+
+/// A datagram track forwarded on a subscription that also serves groups.
+struct DatagramForward {
+	consumer: crate::datagram::Consumer,
+	ready: bool,
+	ended: bool,
+	timescale: Option<Timescale>,
+	publisher: i8,
+	/// Stamp timestamps only when SUBSCRIBE_OK declared a TIMESCALE.
+	stamp: bool,
 }
 
 impl TrackServe {
@@ -4929,7 +5172,22 @@ impl TrackServe {
 			terminal: Default::default(),
 			budget: kio::coop::Budget::new(32),
 			dynamic,
+			datagrams: None,
 		}
+	}
+
+	/// Also forward `datagrams` as OBJECT_DATAGRAM with object ID 0.
+	fn with_datagrams(mut self, mut datagrams: crate::datagram::Consumer, stamp: bool) -> Self {
+		datagrams.set_priority(self.track.subscription().priority);
+		self.datagrams = Some(DatagramForward {
+			consumer: datagrams,
+			ready: false,
+			ended: false,
+			timescale: None,
+			publisher: 0,
+			stamp,
+		});
+		self
 	}
 
 	fn compression(mut self, negotiated: bool) -> Self {
@@ -5039,6 +5297,9 @@ impl TrackServe {
 		if let Ok(mut current) = self.priority.write() {
 			*current = priority;
 		}
+		if let Some(datagrams) = &mut self.datagrams {
+			datagrams.consumer.set_priority(priority);
+		}
 		// One move for the whole subscription; its streams keep their place within it.
 		if let Some(group) = &mut self.ranking.group {
 			group.set_priority(crate::priority::group(priority, self.ranking.publisher));
@@ -5067,6 +5328,8 @@ impl TrackServe {
 		self.tail = None;
 		self.opening = None;
 		self.children = kio::Tasks::new();
+		// A pause drops the datagram reader with the groups. Resume asks again.
+		self.datagrams = None;
 	}
 
 	/// Group machines held: the one waiting for stream credit, and those with a stream.
@@ -5159,6 +5422,7 @@ impl TrackServe {
 			let _ = self.terminal.end.set(end);
 		}
 		if self.draining {
+			self.poll_datagrams(waiter);
 			return self.children.poll(waiter).map(Ok);
 		}
 
@@ -5237,7 +5501,142 @@ impl TrackServe {
 		}
 		// Newly created group machines start now rather than on the next wake.
 		let _ = self.children.poll(waiter);
+		// Groups first, so a burst of datagrams cannot starve them.
+		self.poll_datagrams(waiter);
 		Poll::Pending
+	}
+
+	/// Send every buffered datagram as an OBJECT_DATAGRAM with object ID 0.
+	///
+	/// Best-effort: an oversized or unencodable datagram is dropped. The datagram track
+	/// ending or failing stops this and leaves the stream track alone.
+	fn poll_datagrams(&mut self, waiter: &kio::Waiter) {
+		loop {
+			let datagram = {
+				let Some(forward) = self.datagrams.as_mut() else {
+					return;
+				};
+				if forward.ended {
+					return;
+				}
+				if !forward.ready {
+					match forward.consumer.poll_info(waiter) {
+						Poll::Pending => return,
+						Poll::Ready(Ok(info)) => {
+							forward.timescale = info.timescale.filter(|_| forward.stamp);
+							forward.publisher = info.priority;
+							forward.ready = true;
+						}
+						Poll::Ready(Err(err)) => {
+							tracing::debug!(%err, "datagram track ended before it started");
+							forward.ended = true;
+							return;
+						}
+					}
+				}
+				match forward.consumer.poll_recv(waiter) {
+					Poll::Pending => return,
+					Poll::Ready(Ok(None)) => {
+						forward.ended = true;
+						return;
+					}
+					Poll::Ready(Err(err)) => {
+						tracing::debug!(%err, "stopping datagrams on this subscription");
+						forward.ended = true;
+						return;
+					}
+					Poll::Ready(Ok(Some(datagram))) => {
+						let timescale = forward.timescale;
+						let publisher = forward.publisher;
+						(datagram, timescale, publisher)
+					}
+				}
+			};
+			let (datagram, timescale, publisher) = datagram;
+			emit_datagram(
+				&self.session,
+				self.version,
+				self.request_id.0,
+				self.ranking.order,
+				self.ranking.group.as_ref(),
+				timescale,
+				publisher,
+				&datagram,
+			);
+		}
+	}
+}
+
+/// Send one datagram track payload as OBJECT_DATAGRAM, object ID 0, best-effort.
+fn emit_datagram(
+	session: &Transport,
+	version: Version,
+	alias: u64,
+	order: Order,
+	group: Option<&GroupOf<Transport>>,
+	timescale: Option<Timescale>,
+	publisher: i8,
+	datagram: &crate::datagram::Datagram,
+) {
+	let mut properties = Vec::new();
+	if let Some(timescale) = timescale {
+		let Some(timestamp) = datagram.timestamp else {
+			tracing::debug!(sequence = datagram.sequence, "dropping a datagram without a timestamp");
+			return;
+		};
+		if ietf::encode_object_time(
+			&mut Encoder::new(&mut properties, version.into()),
+			timestamp,
+			timescale,
+		)
+		.is_err()
+		{
+			tracing::debug!(sequence = datagram.sequence, "dropping a datagram whose timestamp does not encode");
+			return;
+		}
+	}
+	let body = ietf::ObjectDatagram {
+		track_alias: alias,
+		group_id: datagram.sequence,
+		object_id: None,
+		publisher_priority: Some(super::priority::to_wire(publisher)),
+		end_of_group: true,
+		properties: (!properties.is_empty()).then_some(properties),
+		body: ietf::DatagramBody::Payload(datagram.payload.clone()),
+	};
+	let Ok(body) = body.encode_bytes(version) else {
+		tracing::debug!(sequence = datagram.sequence, "dropping a datagram this draft cannot encode");
+		return;
+	};
+	let max = session.max_datagram_size();
+	if body.len() > max {
+		tracing::debug!(
+			sequence = datagram.sequence,
+			size = body.len(),
+			max,
+			"dropping datagram larger than the transport limit"
+		);
+		return;
+	}
+	// Ranked like a stream carrying the group from its start.
+	let options = SendOptions {
+		group,
+		priority: crate::priority::in_group(datagram.sequence, 0, order),
+	};
+	let _ = session.send_datagram(body, options);
+}
+
+/// Track properties for a datagram-only SUBSCRIBE_OK. Nothing is cached, so there is no
+/// largest location. The subscriber opted out of properties gets an empty block.
+fn datagram_properties(info: &crate::datagram::Info, wanted: bool) -> ietf::Properties {
+	if !wanted {
+		return ietf::Properties::default();
+	}
+	ietf::Properties {
+		timescale: info.timescale,
+		priority: Some(super::priority::to_wire(info.priority)),
+		group_order: Some(ietf::GroupOrder::Descending),
+		..Default::default()
 	}
 }
 
@@ -7142,7 +7541,7 @@ mod subscribe_cursor_test {
 #[cfg(test)]
 mod serve_tests {
 	use super::*;
-	use crate::coding::{Decode, Decoder, Encode as _};
+	use crate::coding::{Decode, Decoder};
 	use crate::ietf::GroupOrder;
 	use crate::lite::test_transport::{Close, Log, ScriptedSession, Sent, SinkSession};
 	use crate::model::ProduceTest;
@@ -18995,7 +19394,6 @@ mod fill_range_tests {
 #[cfg(test)]
 mod compression_tests {
 	use super::*;
-	use crate::coding::Encode as _;
 	#[test]
 	fn sealed_compression_refuses_incompatible_egress() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {

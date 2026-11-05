@@ -226,8 +226,14 @@ impl State {
 			if let Some(request) = track.pending.take() {
 				request.reject(err.clone());
 			}
+			if let Some(request) = track.pending_datagram.take() {
+				request.reject(err.clone());
+			}
 			if let Some(producer) = track.producer {
 				let _ = producer.abort(err.clone());
+			}
+			if let Some(producer) = track.datagram.take() {
+				producer.abort(err.clone());
 			}
 			if let Ok(mut fill) = track.fill.write() {
 				fill.abort(err.clone());
@@ -817,6 +823,16 @@ struct TrackState {
 
 	// The data streams read so far, which PUBLISH_DONE's Stream Count is checked against.
 	tail: kio::Producer<Tail>,
+
+	/// The datagram track this subscription asked for, once SUBSCRIBE_OK accepted it.
+	///
+	/// A stream subscription leaves this empty and drops every OBJECT_DATAGRAM. A datagram
+	/// subscription leaves [`Self::producer`] empty and keeps only object 0.
+	datagram: Option<crate::datagram::Producer>,
+	/// The datagram request until SUBSCRIBE_OK accepts it. Abort rejects this.
+	pending_datagram: Option<crate::datagram::Request>,
+	/// Logged once when a group stream arrives on a datagram subscription.
+	logged_stream: bool,
 }
 
 impl TrackState {
@@ -857,6 +873,9 @@ impl TrackState {
 			fetch_id: None,
 			headless_through: None,
 			tail: Default::default(),
+			datagram: None,
+			pending_datagram: None,
+			logged_stream: false,
 		}
 	}
 }
@@ -1111,6 +1130,12 @@ async fn resolve_track_alias(
 		Poll::Pending
 	})
 	.await
+}
+
+/// A track or datagram a local reader asked this source for.
+enum Asked {
+	Track(track::Request),
+	Datagram(crate::datagram::Request),
 }
 
 impl Subscriber {
@@ -1368,6 +1393,16 @@ impl Subscriber {
 	/// Take the origin request back out of a subscription that is still setting up.
 	fn take_pending(&self, request_id: RequestId) -> Option<track::Request> {
 		self.state.lock().subscribes.get_mut(&request_id)?.pending.take()
+	}
+
+	/// Take the datagram request back out of a subscription that is still setting up.
+	fn take_pending_datagram(&self, request_id: RequestId) -> Option<crate::datagram::Request> {
+		self.state
+			.lock()
+			.subscribes
+			.get_mut(&request_id)?
+			.pending_datagram
+			.take()
 	}
 
 	fn remove_subscribe(&self, request_id: RequestId) -> Option<TrackState> {
@@ -2795,6 +2830,7 @@ impl Subscriber {
 		route: Option<kio::Consumer<()>>,
 	) -> Result<(), Error> {
 		let mut subscribes = TaskSet::owned();
+		let mut datagrams = broadcast.datagrams();
 		let closed_session = self.session.clone();
 		// Answers the source's listings with the peer's tracks, while anyone lists it.
 		let lister = std::sync::Arc::new(
@@ -2812,7 +2848,10 @@ impl Subscriber {
 					self.poll_listing(&path, &lister, &mut listening, waiter);
 					loop {
 						if let Poll::Ready(next) = broadcast.poll_requested_track(waiter) {
-							return Poll::Ready(Some(next));
+							return Poll::Ready(Some(next.map(Asked::Track)));
+						}
+						if let Poll::Ready(next) = datagrams.poll_requested(waiter) {
+							return Poll::Ready(Some(next.map(Asked::Datagram)));
 						}
 						if route.as_ref().is_some_and(|route| route.poll_closed(waiter).is_ready()) {
 							source.close();
@@ -2848,11 +2887,387 @@ impl Subscriber {
 			let broadcast = broadcast.clone();
 			let route = route.clone();
 			subscribes.push(async move {
-				this.run_subscribe(path, broadcast, route, request).await;
+				match request {
+					Asked::Track(request) => this.run_subscribe(path, broadcast, route, request).await,
+					Asked::Datagram(request) => {
+						drop(broadcast);
+						this.run_datagram(path, route, request).await;
+					}
+				}
 			});
 		}
 
 		Ok(())
+	}
+
+	/// Subscribe to one datagram track: its own SUBSCRIBE, live from now, keeping only
+	/// OBJECT_DATAGRAM with object ID 0.
+	///
+	/// A group stream on this subscription is dropped once and does not end the session.
+	/// The stream track of the same name is a different subscription.
+	async fn run_datagram(
+		&mut self,
+		broadcast_path: Path,
+		route: Option<kio::Consumer<()>>,
+		request: crate::datagram::Request,
+	) {
+		let setup = Some(self.session.work().start());
+		let (auth, path, direction) = (
+			self.auth.clone(),
+			broadcast_path.clone(),
+			crate::auth::Direction::Subscribe,
+		);
+		let mut gate = match route {
+			Some(live) => crate::auth::Gate::announced(auth, path, direction, live),
+			None => crate::auth::Gate::new(auth, path, direction),
+		};
+		loop {
+			let admitted = kio::wait(|waiter| {
+				if gate.poll_ready(waiter).is_ready() {
+					return Poll::Ready(Some(gate.poll_denied(waiter).is_pending()));
+				}
+				request.poll_unused(waiter).map(|_| None)
+			})
+			.await;
+			match admitted {
+				Some(true) => break,
+				Some(false) => {
+					request.reject(Error::Unauthorized);
+					return;
+				}
+				None if request.close_unused() => return,
+				None => continue,
+			}
+		}
+		drop(setup);
+
+		let track_name = request.name().to_owned();
+		let opening = self.session.clone();
+		let mut stream = loop {
+			let mut open = crate::transport::open::Open::default();
+			match kio::wait(|waiter| {
+				if gate.poll_denied(waiter).is_ready() {
+					return Poll::Ready(Err(Error::Unauthorized));
+				}
+				self.validity.check(waiter)?;
+				if request.poll_unused(waiter).is_ready() {
+					return Poll::Ready(Err(Error::Cancel));
+				}
+				Stream::poll_open(&opening, &mut open, self.version, waiter)
+			})
+			.await
+			{
+				Ok(stream) => break stream.with_stats(self.origin.stats()),
+				Err(Error::Cancel) => {
+					if request.close_unused() {
+						return;
+					}
+				}
+				Err(err) => {
+					request.reject(err);
+					return;
+				}
+			}
+		};
+
+		let request_id = self.control.next_request_id();
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
+		let priority = request.priority().unwrap_or(0);
+		{
+			let mut state = self.state.lock();
+			state.subscribes.insert(
+				request_id,
+				TrackState {
+					pending_datagram: Some(request),
+					..TrackState::pending(
+						track_name.clone(),
+						broadcast_path.clone(),
+						kio::Producer::new(Fill::Done),
+					)
+				},
+			);
+		}
+
+		let written = stream.writer.buffer_message(
+			ietf::Subscribe::ID,
+			&ietf::Subscribe {
+				max_age: None,
+				new_group: None,
+				request_id,
+				track_namespace: broadcast_path.clone(),
+				track_name: track_name.as_str().into(),
+				subscriber_priority: super::priority::to_wire(priority),
+				group_order: GroupOrder::Descending,
+				filter: Filter::NextObject,
+				fill: None,
+				properties_wanted: true,
+				forward: true,
+				rendezvous: false,
+				range_filters: false,
+				authorization_token: None,
+			},
+		);
+		if let Err(err) = written {
+			tracing::debug!(%err, "failed to encode datagram subscribe");
+			if let Some(request) = self.take_pending_datagram(request_id) {
+				request.reject(err);
+			}
+			self.remove_subscribe(request_id);
+			return;
+		}
+
+		tracing::debug!(broadcast = %crate::path::Rooted(self.origin.root(), &broadcast_path), track = %track_name, "datagram subscribe started");
+
+		enum Setup {
+			Response(Result<super::request_stream::Framed, Error>),
+			Unused,
+			Gone,
+			Revoked,
+		}
+
+		// The answer is owned before this pin drops, so the stream is free to cancel or to
+		// read PUBLISH_DONE. A pin that lived for the rest of the function would hold both.
+		enum Answer {
+			Ok(ietf::SubscribeOk),
+			/// The peer still holds the SUBSCRIBE.
+			Cancel(Error),
+			/// The publisher already refused it, so there is nothing to cancel.
+			Refused,
+			/// The session or the local request already ended the subscription.
+			Gone,
+		}
+
+		let answer = {
+			let mut response = std::pin::pin!(async {
+				kio::wait(|waiter| stream.writer.poll_flush(waiter)).await?;
+				messages.message(&mut stream.reader).await
+			});
+			let setup = loop {
+				let setup = kio::wait(|waiter| {
+					if let Err(err) = self.validity.check(waiter) {
+						return Poll::Ready(Setup::Response(Err(err)));
+					}
+					if gate.poll_denied(waiter).is_ready() {
+						return Poll::Ready(Setup::Revoked);
+					}
+					if let Poll::Ready(res) = waiter.poll_future(response.as_mut()) {
+						return Poll::Ready(Setup::Response(res));
+					}
+					let mut state = self.state.lock();
+					let Some(pending) = state
+						.subscribes
+						.get_mut(&request_id)
+						.and_then(|held| held.pending_datagram.as_mut())
+					else {
+						return Poll::Ready(Setup::Gone);
+					};
+					if pending.poll_unused(waiter).is_ready() {
+						return Poll::Ready(Setup::Unused);
+					}
+					Poll::Pending
+				})
+				.await;
+				match setup {
+					Setup::Unused => {
+						let mut state = self.state.lock();
+						let Some(pending) = state
+							.subscribes
+							.get_mut(&request_id)
+							.and_then(|held| held.pending_datagram.as_mut())
+						else {
+							break Setup::Gone;
+						};
+						if pending.close_unused() {
+							break Setup::Unused;
+						}
+					}
+					other => break other,
+				}
+			};
+
+			match setup {
+				Setup::Gone => Answer::Gone,
+				Setup::Unused => Answer::Cancel(Error::Cancel),
+				Setup::Revoked => Answer::Cancel(Error::Unauthorized),
+				Setup::Response(Err(err)) => {
+					tracing::debug!(%err, "datagram subscribe response error");
+					Answer::Cancel(err)
+				}
+				Setup::Response(Ok(super::request_stream::Framed(type_id, body)))
+					if type_id == ietf::RequestError::ID =>
+				{
+					let mut data = body.decoder(self.version);
+					let err = match ietf::RequestError::decode_msg(&mut data, self.version) {
+						Ok(msg) => request::from_code(msg.error_code, request::Kind::Subscribe, self.version),
+						Err(err) => Error::Decode(err),
+					};
+					if let Some(request) = self.take_pending_datagram(request_id) {
+						request.reject(err);
+					}
+					self.remove_subscribe(request_id);
+					Answer::Refused
+				}
+				Setup::Response(Ok(super::request_stream::Framed(type_id, body)))
+					if type_id == ietf::SubscribeOk::ID =>
+				{
+					match body.message::<ietf::SubscribeOk>(self.version) {
+						Ok(ok) => Answer::Ok(ok),
+						Err(err) => Answer::Cancel(Error::Decode(err)),
+					}
+				}
+				Setup::Response(Ok(_)) => Answer::Cancel(Error::UnexpectedMessage),
+			}
+		};
+
+		let ok = match answer {
+			Answer::Gone | Answer::Refused => return,
+			Answer::Cancel(err) => {
+				if let Some(request) = self.take_pending_datagram(request_id) {
+					request.reject(err);
+				}
+				self.remove_subscribe(request_id);
+				self.cancel_subscribe(stream).await;
+				return;
+			}
+			Answer::Ok(ok) => ok,
+		};
+
+		if let Some(err) = refused(&ok.properties, self.version, self.peer_setup.get().await.flate) {
+			if let Some(request) = self.take_pending_datagram(request_id) {
+				request.reject(err);
+			}
+			self.remove_subscribe(request_id);
+			self.cancel_subscribe(stream).await;
+			return;
+		}
+
+		let info = crate::datagram::Info {
+			timescale: ok.properties.timescale,
+			priority: super::priority::from_wire(
+				ok.properties.priority.unwrap_or(super::priority::DEFAULT_WIRE),
+			),
+		};
+		let Some(request) = self.take_pending_datagram(request_id) else {
+			self.remove_subscribe(request_id);
+			self.cancel_subscribe(stream).await;
+			return;
+		};
+		let producer = request.accept(info);
+		{
+			let mut state = self.state.lock();
+			let Some(held) = state.subscribes.get_mut(&request_id) else {
+				producer.abort(Error::Cancel);
+				return;
+			};
+			held.datagram = Some(producer.clone());
+			held.timescale = info.timescale;
+		}
+		if let Err(err) = self.register_alias(request_id, ok.track_alias) {
+			if matches!(err, Error::Duplicate) {
+				tracing::warn!(track_alias = %ok.track_alias, "publisher reused a live track alias for another track");
+				self.session.close(
+					super::error::to_session_code(&SessionError::from(&err)),
+					err.to_string().as_ref(),
+				);
+			} else {
+				tracing::warn!(track_alias = %ok.track_alias, %err, "could not bind track alias");
+				self.cancel_subscribe(stream).await;
+			}
+			self.remove_subscribe(request_id);
+			producer.abort(err);
+			return;
+		}
+
+		enum End {
+			Idle,
+			Revoked,
+			Done(Result<(), Error>),
+			Update(i8),
+			Failed(Error),
+		}
+
+		let mut sent = priority;
+		let unanswered = AtomicU64::new(0);
+		// The pin borrows the reader until this block ends. Cancelling afterwards moves the stream.
+		let end = {
+			let mut done = std::pin::pin!(Self::read_publish_done(
+				&mut stream.reader,
+				self.version,
+				&unanswered,
+				&mut messages,
+				|_| {}
+			));
+			loop {
+				let end = kio::wait(|waiter| {
+					if gate.poll_denied(waiter).is_ready() {
+						return Poll::Ready(End::Revoked);
+					}
+					if let Err(err) = self.validity.check(waiter) {
+						return Poll::Ready(End::Failed(err));
+					}
+					if let Poll::Ready(Err(err)) = stream.writer.poll_flush(waiter) {
+						return Poll::Ready(End::Failed(err));
+					}
+					if producer.poll_unused(waiter).is_ready() {
+						return Poll::Ready(End::Idle);
+					}
+					if let Poll::Ready(res) = waiter.poll_future(done.as_mut()) {
+						return Poll::Ready(End::Done(res.map(|_| ())));
+					}
+					// One update in flight: its answer shares the stream with PUBLISH_DONE.
+					if unanswered.load(Ordering::Relaxed) == 0
+						&& let Poll::Ready(Some(next)) = producer.poll_priority(waiter, Some(sent))
+						&& next != sent
+					{
+						return Poll::Ready(End::Update(next));
+					}
+					Poll::Pending
+				})
+				.await;
+				match end {
+					End::Update(next) => {
+						let update_id = self.control.next_request_id();
+						if let Err(err) = stream.writer.buffer_message(
+							ietf::SubscribeUpdate::ID,
+							&ietf::SubscribeUpdate {
+								max_age: None,
+								request_id: update_id,
+								subscriber_priority: Some(super::priority::to_wire(next)),
+								forward: None,
+								filter: None,
+								authorization_token: None,
+								new_group: None,
+								fill: None,
+							},
+						) {
+							break End::Failed(err);
+						}
+						sent = next;
+						unanswered.fetch_add(1, Ordering::Relaxed);
+					}
+					other => break other,
+				}
+			}
+		};
+
+		let clean = matches!(end, End::Done(Ok(())));
+		match end {
+			End::Done(Ok(())) => producer.finish(),
+			End::Idle => {
+				if !producer.close_unused() {
+					// A consumer arrived as this one left. The track is still wanted, but this
+					// task already decided to leave; ending it lets the reader ask again.
+					producer.abort(Error::Cancel);
+				}
+			}
+			End::Revoked => producer.abort(Error::Unauthorized),
+			End::Done(Err(err)) | End::Failed(err) => producer.abort(err),
+			End::Update(_) => producer.abort(Error::Cancel),
+		}
+		self.remove_subscribe(request_id);
+		if !clean {
+			self.cancel_subscribe(stream).await;
+		}
 	}
 
 	/// Answer the source's listings while anyone lists it, from a SUBSCRIBE_TRACKS covering
@@ -4692,6 +5107,26 @@ impl Subscriber {
 			}
 		};
 
+		{
+			let mut state = self.state.lock();
+			let Some(track) = state.subscribes.get_mut(&request_id) else {
+				return Err(Error::NotFound);
+			};
+			// A datagram subscription keeps datagrams only. One group stream is logged
+			// per subscription; the session stays up.
+			if track.datagram.is_some() && track.producer.is_none() {
+				if !track.logged_stream {
+					track.logged_stream = true;
+					tracing::debug!(
+						track_alias = %group.track_alias,
+						group = group.group_id,
+						"dropping a group stream on a datagram track's subscription"
+					);
+				}
+				return Err(Error::Unsupported);
+			}
+		}
+
 		let (mut track, timescale, fill, headless, mut reading) = {
 			let state = self.state.lock();
 			let track = state.subscribes.get(&request_id).ok_or(Error::NotFound)?;
@@ -4844,21 +5279,92 @@ impl Subscriber {
 		Ok(())
 	}
 
-	/// Drop an OBJECT_DATAGRAM: a subscription is a stream track's, which takes no datagrams.
+	/// Route an OBJECT_DATAGRAM.
 	///
-	/// A malformed datagram is still a protocol error.
+	/// An undefined Object Status is a protocol violation on every subscription kind.
+	/// A defined status is not a payload. A datagram subscription keeps object ID 0.
+	/// Anything else is dropped, including every datagram on a stream subscription.
 	pub fn recv_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
 		let (datagram, _) = ietf::ObjectDatagram::decode_slice(&payload, self.version)?;
-		if let ietf::DatagramBody::Status(status) = datagram.body
-			&& !super::object::status_defined(status)
+		if let ietf::DatagramBody::Status(status) = &datagram.body
+			&& !super::object::status_defined(*status)
 		{
 			return Err(Error::Session(SessionError::ProtocolViolation));
 		}
-		tracing::debug!(
-			alias = datagram.track_alias,
-			group = datagram.group_id,
-			"dropping a datagram on a stream track's subscription"
-		);
+
+		let (mut producer, timescale) = {
+			let state = self.state.lock();
+			let aliases = state.aliases.read();
+			let Some(request_id) = aliases.map.get(&datagram.track_alias).and_then(|alias| alias.holder()) else {
+				tracing::debug!(alias = datagram.track_alias, "dropping a datagram for an unknown alias");
+				return Ok(());
+			};
+			let Some(track) = state.subscribes.get(&request_id) else {
+				return Ok(());
+			};
+			match &track.datagram {
+				Some(producer) => (producer.clone(), track.timescale),
+				None => {
+					tracing::debug!(
+						alias = datagram.track_alias,
+						group = datagram.group_id,
+						"dropping a datagram on a stream track's subscription"
+					);
+					return Ok(());
+				}
+			}
+		};
+
+		// A defined status names no payload, and it does not end the datagram track.
+		// PUBLISH_DONE is that end.
+		let ietf::DatagramBody::Payload(payload) = datagram.body else {
+			tracing::debug!(
+				alias = datagram.track_alias,
+				group = datagram.group_id,
+				"dropping a datagram status"
+			);
+			return Ok(());
+		};
+		let object_id = datagram.object_id.unwrap_or(0);
+		if object_id != 0 {
+			tracing::debug!(
+				alias = datagram.track_alias,
+				group = datagram.group_id,
+				object_id,
+				"dropping a datagram with a nonzero object id"
+			);
+			return Ok(());
+		}
+
+		let timestamp = match &datagram.properties {
+			Some(raw) => {
+				let bytes = bytes::Bytes::copy_from_slice(raw);
+				match super::object::read(&bytes, self.version, timescale) {
+					Ok(decoded) => decoded.timestamp,
+					Err(err) if is_protocol_violation(&err) => return Err(err),
+					Err(err) => {
+						tracing::debug!(%err, "dropping a datagram whose properties do not decode");
+						return Ok(());
+					}
+				}
+			}
+			None => None,
+		};
+		if timescale.is_some() && timestamp.is_none() {
+			tracing::debug!(
+				alias = datagram.track_alias,
+				group = datagram.group_id,
+				"dropping a datagram without a timestamp on a timed track"
+			);
+			return Ok(());
+		}
+		if let Err(err) = producer.insert(crate::datagram::Datagram {
+			sequence: datagram.group_id,
+			timestamp,
+			payload,
+		}) {
+			tracing::debug!(%err, "dropping a datagram the track refused");
+		}
 		Ok(())
 	}
 }
@@ -7395,6 +7901,93 @@ mod tests {
 		// A status datagram cannot end the group.
 		let malformed = bytes::Bytes::from_static(&[0x22, 0x07, 0x04, 0x00]);
 		assert!(is_protocol_violation(&subscriber.recv_datagram(malformed).unwrap_err()));
+	}
+
+	/// A datagram subscription keeps object 0 and drops everything else. An undefined
+	/// status still closes the session, including on this subscription.
+	#[kio::test]
+	async fn a_datagram_subscription_keeps_object_zero() {
+		use crate::coding::Encode as _;
+
+		let info = crate::datagram::Info::default().with_timescale(Timescale::MILLI);
+		let producer = info.produce("audio");
+		let mut consumer = producer.consume();
+		let subscriber = subscriber_with_tracks(&[(RequestId(11), "cam", "audio")]);
+		subscriber.register_alias(RequestId(11), 7).unwrap();
+		{
+			let mut state = subscriber.state.lock();
+			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
+			// This subscription asked for datagrams, not the stream track.
+			track.producer = None;
+			track.datagram = Some(producer);
+			track.timescale = Some(Timescale::MILLI);
+		}
+
+		let mut properties = Vec::new();
+		ietf::encode_object_time(
+			&mut crate::coding::Encoder::new(&mut properties, Version::Draft18.into()),
+			crate::Timestamp::from_millis(9).unwrap(),
+			Timescale::MILLI,
+		)
+		.unwrap();
+		let encode = |object_id, body| {
+			ietf::ObjectDatagram {
+				track_alias: 7,
+				group_id: 4,
+				object_id,
+				publisher_priority: None,
+				end_of_group: !matches!(body, ietf::DatagramBody::Status(_)),
+				properties: Some(properties.clone()),
+				body,
+			}
+			.encode_bytes(Version::Draft18)
+			.unwrap()
+		};
+
+		subscriber
+			.recv_datagram(encode(None, ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"d"))))
+			.unwrap();
+		match consumer.poll_recv(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(Some(datagram))) => {
+				assert_eq!(datagram.sequence, 4);
+				assert_eq!(datagram.payload.as_ref(), b"d");
+			}
+			other => panic!("object 0 was not delivered: {other:?}"),
+		}
+
+		subscriber
+			.recv_datagram(encode(
+				Some(3),
+				ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"x")),
+			))
+			.unwrap();
+		assert!(
+			matches!(consumer.poll_recv(&kio::Waiter::noop()), Poll::Pending),
+			"a nonzero object id must be dropped"
+		);
+
+		// Status 0 is defined, so it is not a payload and not a violation.
+		subscriber
+			.recv_datagram(encode(None, ietf::DatagramBody::Status(0)))
+			.unwrap();
+		assert!(matches!(consumer.poll_recv(&kio::Waiter::noop()), Poll::Pending));
+
+		// Status 1 is undefined on every subscription kind.
+		let undefined = ietf::ObjectDatagram {
+			track_alias: 7,
+			group_id: 4,
+			object_id: None,
+			publisher_priority: None,
+			end_of_group: false,
+			properties: None,
+			body: ietf::DatagramBody::Status(1),
+		}
+		.encode_bytes(Version::Draft18)
+		.unwrap();
+		assert!(matches!(
+			subscriber.recv_datagram(undefined),
+			Err(Error::Session(SessionError::ProtocolViolation))
+		));
 	}
 
 	/// One alias naming two different tracks is the collision section 11.1 makes fatal.
