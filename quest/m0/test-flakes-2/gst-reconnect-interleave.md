@@ -11,6 +11,37 @@ each failure below and shows the loaded run that reproduced it now passing.
 
 ## Plan
 
+Investigation resumed 2026-11-05 in
+[moq-dev/moq#7977](https://github.com/moq-dev/moq/pull/7977), preserving the
+previous attempt and merging the claim with main. Fresh capture evidence is in
+[this comment](https://github.com/moq-dev/moq/pull/7977#issuecomment-6669180655).
+At `cdb6afe6f6` (source identical to main), the prescribed loaded command
+failed on execution 31 in 0.02 s: all tags arrived, then `Eos("video_0")`.
+`stop(session)` returned successfully, so there was no session error chain.
+A second run invoked the compiled executable directly to avoid Cargo build
+locks. With only error-reporting changes, execution 1,282 failed in 0.02 s:
+round 1's restart moved to `video_1`.
+
+The draft fixes the fixture's missing relist acknowledgement with a new audio
+rendition in the relist snapshot, as the sibling relist test already does.
+Its pad appearing acknowledges reconciliation before withdrawal. A separate
+focused lifecycle test reproduced `subscribe to catalog: unroutable` when a
+resolved publisher disappears before the run starts. The draft treats that
+startup loss like catalog-read loss; the focused test now passes. This is a
+reproduced session-failure path, not proof of the historical failure's exact
+operation.
+
+The delivery stall is still real after both changes. A copy of the test
+executable in `.tmp/` ran alongside internally generated `just check --all`
+load through `quest gate`. Executions 1–945 passed; 946 failed in 10.04 s:
+`4 never reached a pad`, after tags 1, 2 and 3 arrived. No session error was
+printed by the immediate error reporter. This is round 0's reconnect, unlike
+the historical round 1 restart timeout. Keep the quarantine. Logs:
+`.tmp/verified-capture.log` and `.tmp/verified-check.log` in the implementation
+checkout. Do not attribute this remaining stall to catalog acknowledgement or
+startup loss without further evidence.
+
+
 Investigation in [moq-dev/moq#7932](https://github.com/moq-dev/moq/pull/7932),
 2026-11-04: the unchanged ignored test passed once alone, 50
 repetitions alongside `just check`, and 100 repetitions alongside
@@ -93,17 +124,15 @@ Public API: none. Wire: none.
 
 ## Waiting
 
-- moq-dev/moq: a fresh failing loaded or merge-queue run of
-  `restarts_under_reconnects_interleave_on_one_pad` with the session error
-  attached. Check subsequent Actions/merge-queue logs and PR failure reports;
-  because the test is ignored and has no CI caller
-  (`sh/gh/test-inventory.allow`), no Actions log will show it; advance the
-  capture by hand. `quest gate` waits for host load to drop, so supply the
-  load inside the gated run: in the pinned Nix shell, run
-  `quest gate sh -c 'just check --all & c=$!; s=0; for i in $(seq 100); do kill -0 $c 2>/dev/null || break; cargo test -p moq-gst --lib -- source::imp::session_tests::restarts_under_reconnects_interleave_on_one_pad --ignored --exact || { s=1; break; }; done; wait $c || s=1; exit $s'`
-  so the repetitions loop only while `just check --all` still loads the host, as
-  in the Plan, and the command fails if either a repetition or the check fails.
-  Attach the run or log, tested commit, load conditions, and full
-  session error chain to this quest. If the failure output lacks the session
-  error, surface that error before collecting another run. Clear this wait
-  when that evidence is attached, then resume root-cause investigation.
+- moq-dev/moq: identify and fix the remaining reconnect delivery stall captured
+  in [moq-dev/moq#7977](https://github.com/moq-dev/moq/pull/7977). No Actions
+  evidence is needed. Recommendation: escalate investigation to the authorized
+  XHigh or Opus 5.5 effort using the checkpoint and failing local capture.
+  Build the ignored test once, copy its executable into the checkout's `.tmp/`
+  so build cleanup cannot remove it, then invoke that copy repeatedly only
+  while an internally launched `just check --all` is running, all inside one
+  `quest gate`. Preserve both exit statuses. Existing GStreamer diagnostics can
+  be enabled with `GST_DEBUG=moq-src:6 GST_DEBUG_NO_COLOR=1`; retain the failing
+  invocation's output. The session error reporter is already attached. Clear
+  this wait only after the stall is explained and the loaded reproduction
+  passes with its root-cause fix; then remove the test's ignore.

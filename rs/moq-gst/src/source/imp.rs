@@ -911,10 +911,14 @@ impl Session {
 	/// with the session, except those of renditions the catalog retired.
 	async fn follow_catalog(&self, source: moq_mux::Source, cancel: &mut watch::Receiver<bool>) -> Result<()> {
 		let broadcast = source.broadcast();
-		// The consumer subscribes itself: a refused or lost subscription surfaces from its first read
-		// below, and a publisher that never answers holds the run only until it is cancelled.
-		let mut catalog_consumer =
-			moq_mux::catalog::hang::Consumer::new(broadcast.track(hang::catalog::Catalog::DEFAULT_NAME)?);
+		// A restart can drop the resolved publisher before this run first gets polled. Treat
+		// loss at subscription the same as loss during reading, so an obsolete run cannot fail
+		// the session that is already following its replacement.
+		let track = broadcast.track(hang::catalog::Catalog::DEFAULT_NAME);
+		if track.as_ref().is_err_and(source_lost) {
+			return Ok(());
+		}
+		let mut catalog_consumer = moq_mux::catalog::hang::Consumer::new(track.context("subscribe to catalog")?);
 
 		// Follow the catalog for the whole run and reconcile against every update, rather than
 		// building the renditions once from the first frame. This covers reactive publishers (the
@@ -968,7 +972,7 @@ impl Session {
 						catalog_closed = true;
 					}
 					Err(err) => {
-						result = Err(err.into());
+						result = Err(anyhow::Error::from(err).context("read catalog"));
 						break;
 					}
 				},
@@ -4067,6 +4071,7 @@ mod session_tests {
 			Session::new(weak, stopping, DEFAULT_MAX_DELAY)
 				.follow_path(&origin, "room", std::future::pending())
 				.await
+				.inspect_err(|err| eprintln!("session failed: {err:?}"))
 		});
 		(shutdown, task)
 	}
@@ -5231,6 +5236,12 @@ mod session_tests {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
+		let (relisted, applied) = std::sync::mpsc::channel();
+		element.connect_pad_added(move |_, pad| {
+			if pad.name().starts_with("audio_") {
+				let _ = relisted.send(());
+			}
+		});
 		let origin = origin();
 
 		let mut current = Publisher::new(&origin, Default::default(), video_rendition());
@@ -5247,10 +5258,27 @@ mod session_tests {
 			);
 			drop(current);
 
-			// The retirement the empty catalog queues finds the rendition listed again.
+			// Media delivery does not acknowledge catalog reconciliation. A new audio rendition
+			// in the relist snapshot does: its pad appears only after the video is listed again.
+			// Give each round its own rendition so an earlier round's kept pad cannot acknowledge it.
+			let name = format!("relisted-{round}");
+			let _audio = next
+				.broadcast
+				.create_track(
+					name.as_str(),
+					hang::container::track_info(hang::catalog::PRIORITY.audio),
+				)
+				.unwrap();
 			let listed = next.catalog.modify().unwrap().video.renditions.clone();
 			next.catalog.modify().unwrap().video.renditions.clear();
-			next.catalog.modify().unwrap().video.renditions = listed;
+			{
+				let mut catalog = next.catalog.modify().unwrap();
+				catalog.video.renditions = listed;
+				catalog.audio.renditions.insert(name, audio_rendition());
+			}
+			applied
+				.recv_timeout(Duration::from_secs(10))
+				.expect("the relist never reconciled");
 			assert_eq!(
 				recorder.written(&mut next, tag + 1),
 				pad,
@@ -5273,6 +5301,23 @@ mod session_tests {
 		}
 		stop(session);
 		recorder.assert_one_pad_held();
+	}
+
+	/// A replaced publisher can disappear after resolution but before the run subscribes to its
+	/// catalog. Losing it here holds the pads just like losing it during a catalog read.
+	#[test]
+	fn a_broadcast_ending_before_catalog_subscribe_is_a_lost_source() {
+		let element = element();
+		let origin = origin();
+		let publisher = Publisher::new(&origin, Default::default(), video_rendition());
+		let source = moq_mux::Source::new(origin.consume(), publisher.broadcast.consume());
+		drop(publisher);
+		let (_shutdown, shutdown) = watch::channel(false);
+		let (_cancel, mut cancel) = watch::channel(false);
+		let result = super::RUNTIME.block_on(
+			Session::new(element.downgrade(), shutdown, DEFAULT_MAX_DELAY).follow_catalog(source, &mut cancel),
+		);
+		assert!(result.is_ok(), "{result:?}");
 	}
 
 	/// A broadcast with no catalog refuses it, which no restart fixes, so the session fails
