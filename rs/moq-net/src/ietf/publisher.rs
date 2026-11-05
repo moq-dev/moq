@@ -147,108 +147,175 @@ struct PreparedFetch {
 	last: FetchedGroup,
 }
 
-/// Resolve a one-group FETCH and read its objects before promising them in FETCH_OK.
+/// Resolves a one-group FETCH and reads its objects before promising them in FETCH_OK.
 /// A whole-group request waits for an open group to finish.
+struct PrepareFetch {
+	range: FetchRange,
+	largest_filter: Option<Filter>,
+	joined: bool,
+	priority: i8,
+	compression: bool,
+	state: PrepareFetchState,
+}
+
+enum PrepareFetchState {
+	/// Resolving the track's info. Asking for the group needs nothing from it, only judging
+	/// and answering it: a relay's FETCH goes upstream alongside the request for the info,
+	/// driven while that resolves.
+	Info {
+		ahead: Option<Ahead>,
+		info: track::Resolving,
+	},
+	/// Reading the group.
+	Read(ReadFetch),
+	Done,
+}
+
+impl PrepareFetch {
+	fn new(
+		track: &track::Consumer,
+		range: FetchRange,
+		largest_filter: Option<Filter>,
+		joined: bool,
+		priority: i8,
+		compression: bool,
+	) -> Self {
+		let ahead = largest_filter.is_none().then(|| {
+			Ahead::Fetching(track.fetch_group(
+				range.start.group,
+				group::Fetch {
+					priority,
+					..Default::default()
+				},
+			))
+		});
+		Self {
+			range,
+			largest_filter,
+			joined,
+			priority,
+			compression,
+			state: PrepareFetchState::Info {
+				ahead,
+				info: track.info().into_inner(),
+			},
+		}
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter, track: &track::Consumer) -> Poll<Result<PreparedFetch, (Error, String)>> {
+		let failed = |err: Error| {
+			let reason = err.to_string();
+			(err, reason)
+		};
+		loop {
+			match &mut self.state {
+				PrepareFetchState::Info { ahead, info } => {
+					if let Some(ahead) = ahead {
+						ahead.poll(waiter);
+					}
+					ready!(info.poll_ok(waiter)).map_err(failed)?;
+					let ahead = ahead.take();
+					let range = self.judge(track)?;
+					self.state = PrepareFetchState::Read(ReadFetch::new(
+						track,
+						range.start.group,
+						range.start.object,
+						range.until(range.start.group),
+						self.priority,
+						self.compression,
+						ahead,
+					));
+				}
+				PrepareFetchState::Read(read) => {
+					let last = ready!(read.poll(waiter, track)).map_err(failed)?;
+					self.state = PrepareFetchState::Done;
+					return Poll::Ready(Ok(PreparedFetch {
+						range: self.range,
+						last,
+					}));
+				}
+				PrepareFetchState::Done => panic!("polled after it resolved"),
+			}
+		}
+	}
+
+	/// Judge the range against the track, now that its info resolved.
+	fn judge(&mut self, track: &track::Consumer) -> Result<FetchRange, (Error, String)> {
+		let failed = |err: Error| {
+			let reason = err.to_string();
+			(err, reason)
+		};
+		let range = &mut self.range;
+		// The cache's newest object is Largest Object while a live feed writes the track, or once
+		// the track ended at its newest group. A fetch-only copy retains its publisher's report
+		// independently. A joining FETCH ends where its subscription starts instead.
+		let finished = track.final_sequence();
+		let known = track.is_live()
+			|| finished.is_some_and(|end| Some(end) == track.latest_sequence().map(|latest| latest + 1));
+		let largest = match !self.joined && (known || track.reported_object().is_some()) {
+			true => live_edge(track).largest,
+			false => None,
+		};
+		if let Some(filter) = self.largest_filter {
+			let Some(largest) = largest else {
+				return Err((
+					Error::Unsupported,
+					"FETCH relative to Largest Object needs a known publisher edge".into(),
+				));
+			};
+			range.start = match filter {
+				Filter::Unfiltered => Location { group: 0, object: 0 },
+				Filter::NextObject => Location {
+					group: largest.group,
+					object: largest.object.saturating_add(1),
+				},
+				Filter::Relative(groups) => Location {
+					group: largest.group.saturating_add(1).saturating_sub(groups),
+					object: 0,
+				},
+				Filter::Absolute { start, .. } => start,
+			};
+			range.end = Location {
+				group: largest.group,
+				object: 0,
+			};
+		}
+		if range.start.group != range.end.group {
+			return Err((Error::Unsupported, "FETCH spans more than one group".into()));
+		}
+
+		if let Some(largest) = largest {
+			// A start past Largest Object in a group the cache holds is refused INVALID_RANGE
+			// (draft-22 section 9.11), rather than waiting on the live group. A group past every
+			// one held does not exist yet.
+			if (range.start.group, range.start.object) > (largest.group, largest.object) {
+				let held = range
+					.start
+					.group
+					.checked_add(1)
+					.is_some_and(|end| !track.cached_groups(range.start.group..end).is_empty());
+				return Err(match held {
+					true => (Error::InvalidRange, "start past Largest Object".into()),
+					false => failed(Error::NotFound),
+				});
+			}
+		}
+		Ok(*range)
+	}
+}
+
+/// Await [`PrepareFetch`].
+#[cfg(feature = "async")]
 async fn prepare_fetch(
 	track: &track::Consumer,
-	mut range: FetchRange,
+	range: FetchRange,
 	largest_filter: Option<Filter>,
 	joined: bool,
 	priority: i8,
 	compression: bool,
 ) -> Result<PreparedFetch, (Error, String)> {
-	let failed = |err: Error| {
-		let reason = err.to_string();
-		(err, reason)
-	};
-	// Asking for the group needs nothing from the track's info, only judging and answering
-	// it: a relay's FETCH goes upstream alongside the request for the info, driven while
-	// that resolves.
-	let mut ahead = largest_filter.is_none().then(|| {
-		Ahead::Fetching(track.fetch_group(
-			range.start.group,
-			group::Fetch {
-				priority,
-				..Default::default()
-			},
-		))
-	});
-	let info = track.info();
-	kio::wait(|waiter| {
-		if let Some(ahead) = &mut ahead {
-			ahead.poll(waiter);
-		}
-		info.poll_ok(waiter)
-	})
-	.await
-	.map_err(failed)?;
-	// The cache's newest object is Largest Object while a live feed writes the track, or once
-	// the track ended at its newest group. A fetch-only copy retains its publisher's report
-	// independently. A joining FETCH ends where its subscription starts instead.
-	let finished = track.final_sequence();
-	let known =
-		track.is_live() || finished.is_some_and(|end| Some(end) == track.latest_sequence().map(|latest| latest + 1));
-	let largest = match !joined && (known || track.reported_object().is_some()) {
-		true => live_edge(track).largest,
-		false => None,
-	};
-	if let Some(filter) = largest_filter {
-		let Some(largest) = largest else {
-			return Err((
-				Error::Unsupported,
-				"FETCH relative to Largest Object needs a known publisher edge".into(),
-			));
-		};
-		range.start = match filter {
-			Filter::Unfiltered => Location { group: 0, object: 0 },
-			Filter::NextObject => Location {
-				group: largest.group,
-				object: largest.object.saturating_add(1),
-			},
-			Filter::Relative(groups) => Location {
-				group: largest.group.saturating_add(1).saturating_sub(groups),
-				object: 0,
-			},
-			Filter::Absolute { start, .. } => start,
-		};
-		range.end = Location {
-			group: largest.group,
-			object: 0,
-		};
-	}
-	if range.start.group != range.end.group {
-		return Err((Error::Unsupported, "FETCH spans more than one group".into()));
-	}
-
-	if let Some(largest) = largest {
-		// A start past Largest Object in a group the cache holds is refused INVALID_RANGE
-		// (draft-22 section 9.11), rather than waiting on the live group. A group past every
-		// one held does not exist yet.
-		if (range.start.group, range.start.object) > (largest.group, largest.object) {
-			let held = range
-				.start
-				.group
-				.checked_add(1)
-				.is_some_and(|end| !track.cached_groups(range.start.group..end).is_empty());
-			return Err(match held {
-				true => (Error::InvalidRange, "start past Largest Object".into()),
-				false => failed(Error::NotFound),
-			});
-		}
-	}
-
-	let last = read_fetch(
-		track,
-		range.start.group,
-		range.start.object,
-		range.until(range.start.group),
-		priority,
-		compression,
-		ahead,
-	)
-	.await
-	.map_err(failed)?;
-	Ok(PreparedFetch { range, last })
+	let mut prepare = PrepareFetch::new(track, range, largest_filter, joined, priority, compression);
+	kio::wait(|waiter| prepare.poll(waiter, track)).await
 }
 
 /// A whole-group fetch made before the track's info resolved.
@@ -263,13 +330,6 @@ impl Ahead {
 			&& let Poll::Ready(result) = kio::Task::poll(&mut **fetching, waiter)
 		{
 			*self = Self::Fetched(result);
-		}
-	}
-
-	async fn fetched(self) -> Result<group::Consumer, Error> {
-		match self {
-			Self::Fetching(fetching) => fetching.await,
-			Self::Fetched(result) => result,
 		}
 	}
 }
@@ -339,12 +399,212 @@ impl FetchedGroup {
 	}
 }
 
-/// Read group `sequence` of `track` for a FETCH, from object `skip` up to the exclusive
+/// Reads group `sequence` of a track for a FETCH, from object `skip` up to the exclusive
 /// `until`, or through the end of the group without one.
 ///
 /// This is a [`track::Consumer::fetch_group`], so a relay fetches a miss upstream. The
 /// track's info resolves first, as it would for a SUBSCRIBE; `ahead` is the whole group
 /// already asked for, used for a miss.
+struct ReadFetch {
+	sequence: u64,
+	skip: u64,
+	until: Option<u64>,
+	priority: i8,
+	compression: bool,
+	/// Held until the read ends, even when the read asks for its own part of the group.
+	ahead: Option<Ahead>,
+	state: ReadFetchState,
+}
+
+enum ReadFetchState {
+	/// Resolving the track's info.
+	Info(track::Resolving),
+	/// Waiting for the group.
+	Fetch {
+		info: track::Info,
+		fetching: kio::Pending<track::Fetching>,
+	},
+	/// Reading the group's objects in the range.
+	Read {
+		info: track::Info,
+		group: group::Consumer,
+		/// The Object ID of the first frame read.
+		first: u64,
+		frames: Vec<frame::Object>,
+		/// A long cached group is read a slice per poll, so the session's other tasks still run.
+		budget: kio::coop::Budget,
+	},
+	Done,
+}
+
+impl ReadFetch {
+	fn new(
+		track: &track::Consumer,
+		sequence: u64,
+		skip: u64,
+		until: Option<u64>,
+		priority: i8,
+		compression: bool,
+		ahead: Option<Ahead>,
+	) -> Self {
+		Self {
+			sequence,
+			skip,
+			until,
+			priority,
+			compression,
+			ahead,
+			state: ReadFetchState::Info(track.info().into_inner()),
+		}
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter, track: &track::Consumer) -> Poll<Result<FetchedGroup, Error>> {
+		let res = ready!(self.poll_read(waiter, track));
+		self.state = ReadFetchState::Done;
+		Poll::Ready(res)
+	}
+
+	fn poll_read(&mut self, waiter: &kio::Waiter, track: &track::Consumer) -> Poll<Result<FetchedGroup, Error>> {
+		loop {
+			match &mut self.state {
+				ReadFetchState::Info(resolving) => {
+					let info = ready!(resolving.poll_ok(waiter))?;
+					let cached = track.peek_group(self.sequence);
+					let wire = cached.as_ref().and_then(|group| group.wire());
+					if wire.as_ref().is_some_and(|wire| !wire.fetchable) {
+						return Poll::Ready(Err(Error::Unsupported));
+					}
+					// Relayed Object IDs need not match frame ordinals, so a relayed group is read
+					// from its first frame and filtered by ID. Its marked gaps cover the IDs between
+					// where it starts and its first object; a start below that misses to the
+					// upstream. A miss may be relayed too, which only the upstream knows, so it
+					// fetches the whole group.
+					let frame_start = match (&wire, &cached) {
+						(Some(_), Some(group)) => self.skip.min(group.first_frame()),
+						(None, Some(_)) => self.skip,
+						(_, None) => 0,
+					};
+					let fetching = match self.ahead.take_if(|_| frame_start == 0) {
+						Some(Ahead::Fetched(result)) => {
+							self.state = self.reading(info, result?);
+							continue;
+						}
+						Some(Ahead::Fetching(fetching)) => fetching,
+						None => track.fetch_group(
+							self.sequence,
+							group::Fetch {
+								priority: self.priority,
+								frame_start,
+								..Default::default()
+							},
+						),
+					};
+					self.state = ReadFetchState::Fetch { info, fetching };
+				}
+				ReadFetchState::Fetch { info, fetching } => {
+					let group = ready!(kio::Task::poll(&mut **fetching, waiter))?;
+					let info = info.clone();
+					self.state = self.reading(info, group);
+				}
+				ReadFetchState::Read {
+					group,
+					first,
+					frames,
+					budget,
+					..
+				} => {
+					// Reading an object past the range proves the range missed the group's end.
+					let mut overshot = false;
+					loop {
+						ready!(budget.poll_yield(waiter));
+						if group.wire().is_some_and(|wire| !wire.fetchable) {
+							return Poll::Ready(Err(Error::Unsupported));
+						}
+						let ordinal = group.index();
+						let Some(frame) = ready!(group.poll_read_object(waiter))? else {
+							break;
+						};
+						let id = frame.fields.as_ref().map_or(ordinal, |fields| fields.id);
+						if self.until.is_some_and(|until| id >= until) {
+							overshot = true;
+							break;
+						}
+						if id < self.skip {
+							continue;
+						}
+						if frames.is_empty() {
+							*first = id;
+						}
+						frames.push(frame);
+						if self.until.is_some_and(|until| id.saturating_add(1) >= until) {
+							break;
+						}
+					}
+					let ReadFetchState::Read {
+						info,
+						group,
+						first,
+						frames,
+						..
+					} = std::mem::replace(&mut self.state, ReadFetchState::Done)
+					else {
+						unreachable!("matched above");
+					};
+					return Poll::Ready(self.read(info, group, first, frames, overshot));
+				}
+				ReadFetchState::Done => panic!("polled after it resolved"),
+			}
+		}
+	}
+
+	/// Start reading `group`, the one the FETCH answers with.
+	fn reading(&self, info: track::Info, mut group: group::Consumer) -> ReadFetchState {
+		if self.compression {
+			group = group.compressed();
+		}
+		ReadFetchState::Read {
+			info,
+			group,
+			first: self.skip,
+			frames: Vec::new(),
+			budget: kio::coop::Budget::new(32),
+		}
+	}
+
+	/// What the read found, once it reached the end of its range or of the group.
+	fn read(
+		&self,
+		info: track::Info,
+		mut group: group::Consumer,
+		first: u64,
+		frames: Vec<frame::Object>,
+		overshot: bool,
+	) -> Result<FetchedGroup, Error> {
+		// A bounded range can reach the group's end without reading its terminal None, and a
+		// start past the end is already there.
+		let complete = !overshot
+			&& matches!(group.finished().now_or_never(), Some(Ok(_)))
+			&& group.index() >= group.frame_count() as u64;
+		let end_object = group
+			.end_object()
+			.filter(|end| complete && end.id >= self.skip && self.until.is_none_or(|until| end.id < until));
+
+		if group.wire().is_some_and(|wire| !wire.fetchable) {
+			return Err(Error::Unsupported);
+		}
+		Ok(FetchedGroup {
+			sequence: self.sequence,
+			first,
+			frames,
+			end_object,
+			complete,
+			info,
+		})
+	}
+}
+
+/// Await [`ReadFetch`].
+#[cfg(test)]
 async fn read_fetch(
 	track: &track::Consumer,
 	sequence: u64,
@@ -354,90 +614,8 @@ async fn read_fetch(
 	compression: bool,
 	ahead: Option<Ahead>,
 ) -> Result<FetchedGroup, Error> {
-	let info = track.info().await?;
-	let cached = track.peek_group(sequence);
-	let wire = cached.as_ref().and_then(|group| group.wire());
-	if wire.as_ref().is_some_and(|wire| !wire.fetchable) {
-		return Err(Error::Unsupported);
-	}
-	// Relayed Object IDs need not match frame ordinals, so a relayed group is read from
-	// its first frame and filtered by ID. Its marked gaps cover the IDs between where it
-	// starts and its first object; a start below that misses to the upstream. A miss may
-	// be relayed too, which only the upstream knows, so it fetches the whole group.
-	let frame_start = match (&wire, &cached) {
-		(Some(_), Some(group)) => skip.min(group.first_frame()),
-		(None, Some(_)) => skip,
-		(_, None) => 0,
-	};
-	let mut group = match ahead {
-		Some(ahead) if frame_start == 0 => ahead.fetched().await?,
-		_ => {
-			track
-				.fetch_group(
-					sequence,
-					group::Fetch {
-						priority,
-						frame_start,
-						..Default::default()
-					},
-				)
-				.await?
-		}
-	};
-	if compression {
-		group = group.compressed();
-	}
-	let mut first = skip;
-	let mut frames = Vec::new();
-	// Reading an object past the range proves the range missed the group's end.
-	let mut overshot = false;
-	// A long cached group is read a slice per poll, so the session's other tasks still run.
-	let mut budget = kio::coop::Budget::new(32);
-	loop {
-		kio::wait(|waiter| budget.poll_yield(waiter)).await;
-		if group.wire().is_some_and(|wire| !wire.fetchable) {
-			return Err(Error::Unsupported);
-		}
-		let ordinal = group.index();
-		let Some(frame) = kio::wait(|waiter| group.poll_read_object(waiter)).await? else {
-			break;
-		};
-		let id = frame.fields.as_ref().map_or(ordinal, |fields| fields.id);
-		if until.is_some_and(|until| id >= until) {
-			overshot = true;
-			break;
-		}
-		if id < skip {
-			continue;
-		}
-		if frames.is_empty() {
-			first = id;
-		}
-		frames.push(frame);
-		if until.is_some_and(|until| id.saturating_add(1) >= until) {
-			break;
-		}
-	}
-	// A bounded range can reach the group's end without reading its terminal None, and a
-	// start past the end is already there.
-	let complete = !overshot
-		&& matches!(group.finished().now_or_never(), Some(Ok(_)))
-		&& group.index() >= group.frame_count() as u64;
-	let end_object = group
-		.end_object()
-		.filter(|end| complete && end.id >= skip && until.is_none_or(|until| end.id < until));
-
-	if group.wire().is_some_and(|wire| !wire.fetchable) {
-		return Err(Error::Unsupported);
-	}
-	Ok(FetchedGroup {
-		sequence,
-		first,
-		frames,
-		end_object,
-		complete,
-		info,
-	})
+	let mut read = ReadFetch::new(track, sequence, skip, until, priority, compression, ahead);
+	kio::wait(|waiter| read.poll(waiter, track)).await
 }
 
 /// A broadcast whose route table is watched for changes in what we advertise: the
