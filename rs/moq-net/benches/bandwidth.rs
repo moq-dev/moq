@@ -41,7 +41,9 @@ fn table(count: usize) -> (Allocator, broadcast::Producer, Vec<track::Producer>,
 	let mut tracks = Vec::with_capacity(count);
 	let mut reservations = Vec::with_capacity(count);
 	for i in 0..count {
-		let track = broadcast.create_track(format!("t{i}"), None).unwrap();
+		let track = broadcast
+			.create_track(format!("t{i}"), moq_net::track::Info::default().with_max_age(None))
+			.unwrap();
 		reservations.push(allocator.reserve(&track.demand(), Rate::from_kbps(1_000)));
 		tracks.push(track);
 	}
@@ -283,7 +285,7 @@ impl Connection {
 		let slots = (0..shape.reservations)
 			.map(|index| {
 				let priority = priority(shape, index);
-				let info = track::Info::default().with_priority(priority);
+				let info = track::Info::default().with_max_age(None).with_priority(priority);
 				let track = broadcast.create_track(format!("t{index}"), info).unwrap();
 				let subscriber = (!shape.idle || index % 2 == 0).then(|| track.subscribe(None));
 				let max = ceiling(index);

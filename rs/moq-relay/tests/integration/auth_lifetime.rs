@@ -183,7 +183,7 @@ async fn spawn_relay_config(
 	cluster: cluster::Cluster,
 	mut config: moq_tokio::listen::Config,
 ) -> (u16, tokio::task::JoinHandle<()>) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 	// Opt in to lite-07 beside the defaults, so a client pinned to it can reach the AUTH stream.
 	config.version = moq_net::Versions::all()
@@ -220,7 +220,7 @@ async fn spawn_ws_relay_with(
 	auth: moq_relay::auth::Auth,
 	cluster: cluster::Cluster,
 ) -> (u16, tokio::task::JoinHandle<()>) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	// Stream listeners bind lazily, so this server never opens a socket; only
 	// its certificate handle is used.
@@ -379,7 +379,7 @@ async fn spawn_quic_relay_with(
 	root: Option<std::path::PathBuf>,
 	cluster: cluster::Cluster,
 ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let mut config = moq_tokio::listen::Config::default();
 	config.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.tls.generate = vec!["localhost".into()];
@@ -1211,7 +1211,7 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 /// with a client certificate, and over WebSocket where none can be presented.
 #[tokio::test]
 async fn a_certificate_admits_only_what_the_server_grants() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (root, client_cert, client_key) = signed_client(dir.path());
 
@@ -1305,7 +1305,7 @@ async fn an_mtls_client_ingests_here() {
 /// The source the relay records for a broadcast announced over a certificate
 /// session, admitted by `moq auth serve` with the peer link role when requested.
 async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (root, client_cert, client_key) = signed_client(dir.path());
 
@@ -1354,8 +1354,13 @@ async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 }
 
 fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
-	let ca_key = rcgen::KeyPair::generate().expect("ca keypair");
-	let mut ca_params = rcgen::CertificateParams::new(Vec::new()).expect("ca params");
+	let ca_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("ca keypair");
+	let mut ca_params = rcgen::CertificateParams::new(Vec::new())
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("ca params");
 	ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
 	ca_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign, rcgen::KeyUsagePurpose::CrlSign];
 	ca_params
@@ -1363,8 +1368,13 @@ fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathB
 		.push(rcgen::DnType::CommonName, "moq test ca");
 	let ca = rcgen::CertifiedIssuer::self_signed(ca_params, ca_key).expect("self-signed ca");
 
-	let key = rcgen::KeyPair::generate().expect("client keypair");
-	let mut params = rcgen::CertificateParams::new(vec!["client.localhost".to_string()]).expect("client params");
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("client keypair");
+	let mut params = rcgen::CertificateParams::new(vec!["client.localhost".to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("client params");
 	params.use_authority_key_identifier_extension = true;
 	params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
 	let cert = params.signed_by(&key, &ca).expect("signed client cert");
@@ -1374,7 +1384,11 @@ fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathB
 	let key_path = dir.join("client.key.pem");
 	std::fs::write(&root_path, ca.pem()).expect("write ca");
 	std::fs::write(&cert_path, cert.pem()).expect("write client cert");
-	std::fs::write(&key_path, key.serialize_pem()).expect("write client key");
+	std::fs::write(
+		&key_path,
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+	)
+	.expect("write client key");
 	(root_path, cert_path, key_path)
 }
 
@@ -1563,7 +1577,7 @@ async fn closes_at_expires(clock: &kio::clock::Installed, consumer: moq_auth::le
 /// decider's grant admits sessions through the assembled relay.
 #[tokio::test]
 async fn a_relay_without_an_auth_source_is_decided_by_the_embedder() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let config = || {
 		let mut config = Config::default();
 		config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
@@ -1606,7 +1620,7 @@ async fn connect_through_embedded_admission(
 	auth::Admissions,
 	tokio::task::JoinHandle<moq_tokio::Result<moq_tokio::Connection>>,
 ) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let mut config = Config::default();
 	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 	config.listen.timeout = Some((timeout).into());

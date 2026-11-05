@@ -15,7 +15,7 @@ use rand::RngExt;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-	moq_tokio::crypto::install_default().expect("failed to install default crypto provider");
+	moq_tokio::crypto::install_default()?;
 
 	let config = Config::load()?;
 	anyhow::ensure!(

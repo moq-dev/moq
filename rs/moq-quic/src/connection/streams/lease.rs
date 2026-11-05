@@ -70,6 +70,12 @@ impl Leased {
 		matches!(self.end, Some(End::Fin))
 	}
 
+	/// Whether the reader leased bytes it has not read: they sit here, or are out in a
+	/// [`Lease`] that may hand some back.
+	pub(super) fn has_unread(&self) -> bool {
+		self.len > 0 || self.out
+	}
+
 	/// The number of leased bytes not out in a [`Lease`].
 	#[cfg(test)]
 	pub(super) fn len(&self) -> usize {

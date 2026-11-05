@@ -31,7 +31,7 @@ test("a widened maxDelay re-offers what the publisher skipped below the start", 
 	const publication = origin.createBroadcast(Path.from("room"));
 	publication.announce();
 	const broadcast = publication.broadcast;
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	// One group per second, so a budget picks how far back a reader reaches.
 	for (let sequence = 0; sequence < 10; sequence++) {
 		const group = producer.appendGroup();
@@ -74,7 +74,7 @@ for (const [version, alpn] of [
 		const publication = origin.createBroadcast(Path.from("room"));
 		publication.announce();
 		const broadcast = publication.broadcast;
-		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 		const write = (sequence: number, millis: number) => {
 			const group = producer.createGroup(BigInt(sequence));
 			group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.fromMillis(millis) });
@@ -123,7 +123,7 @@ test("a widening keeps a bounded lite-07 subscription open for the stale groups 
 	const publication = origin.createBroadcast(Path.from("room"));
 	publication.announce();
 	const broadcast = publication.broadcast;
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const write = (sequence: number, millis: number) => {
 		const group = producer.createGroup(BigInt(sequence));
 		group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.fromMillis(millis) });
@@ -172,7 +172,7 @@ test("an update keeping the budget drops the stale groups again on lite-07", asy
 	const publication = origin.createBroadcast(Path.from("room"));
 	publication.announce();
 	const broadcast = publication.broadcast;
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const write = (sequence: number, millis: number) => {
 		const group = producer.createGroup(BigInt(sequence));
 		group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.fromMillis(millis) });

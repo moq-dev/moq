@@ -90,8 +90,7 @@ impl Viewer {
 		let (endpoint, conn) = dial(version, addr, Default::default()).await;
 
 		let origin = moq_tokio::origin::spawn();
-		let transport =
-			moq_tokio::transport::Session::new(web::Session::raw(conn.clone()), moq_net::transport::Address::Setup);
+		let transport = web::Session::raw(conn.clone());
 		let (session, driver) = moq_net::Client::new()
 			.with_versions(version.into())
 			.with_subscriber(origin.clone())
@@ -195,7 +194,7 @@ impl Report {
 
 /// Publish datagrams at `cell`'s rate to a loopback viewer and a bufferbloated one.
 async fn measure(version: &str, cell: Cell) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let version: moq_net::Version = version.parse().expect("version");
 
 	let publisher = moq_tokio::origin::spawn();

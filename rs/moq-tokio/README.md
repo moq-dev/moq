@@ -17,6 +17,7 @@ Establishes MoQ connections over a few different transports, selectable via carg
 - **WebSocket** as a fallback when QUIC isn't available
 
 Also handles TLS, certificate generation, logging setup, and reconnection logic, with Usage-derived configuration ready for binaries.
+`quic::web` exposes WebTransport streams, datagrams, and send groups without requiring a MoQ session; its session also implements moq-net's poll traits directly.
 
 ## Examples
 
@@ -40,3 +41,8 @@ including in one-shot mode. With mixed `Addrs`, the target that establishes the
 session determines its redirect policy; unused pinned fallbacks do not restrict it.
 To refresh DNS, resolve and apply your address policy again before creating a new
 connection. Address filtering belongs to the caller.
+
+Transport cryptography always uses rind. Remove the `aws-lc-rs` and `ring`
+features from dependencies. TLS setup checks support before using crypto:
+x86\_64 needs no optional CPU extensions, aarch64 needs NEON, and armv7 is supported.
+Raspberry Pi 4, CM4, and Zero 2 W use rind's paths without aarch64 crypto extensions.

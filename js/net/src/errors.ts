@@ -7,7 +7,6 @@ export {
 	ConnectTimeout,
 	FrameTooLarge,
 	GroupTooLarge,
-	NoStreamCredit,
 	NotFound,
 	ProtocolViolation,
 	RefusedRedirect,

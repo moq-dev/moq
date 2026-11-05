@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expires on the track's `max_age`. After a failure, the driver returns the
   error once that history is served or expired, and the track ends with the
   error while keeping what it published.
+- The `pulseaudio` feature compiles on every platform and does nothing off
+  Linux and the BSDs, so a dependent can enable the sound-server features
+  unconditionally.
 
 ## [0.1.10](https://github.com/moq-dev/moq/compare/moq-audio-v0.1.9...moq-audio-v0.1.10) - 2026-10-05
 

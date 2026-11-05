@@ -3,7 +3,8 @@ name: Queue
 # GitHub's merge queue tests each picked PR on top of main, one at a time, on
 # the host's self-hosted runner, and merges exactly the tree it tested. When the
 # queue drops a PR, moq-dev/quest's queue watcher on the host runs the land
-# fixer and re-enqueues it (quest/m0/ci/land.md).
+# fixer and re-enqueues it
+# (https://github.com/moq-dev/moq/blob/17a81d6c64/quest/m0/ci/land.md).
 #
 # `main`'s ruleset requires this job's `Queue` context. GitHub admits a PR to
 # the queue only once its required checks pass on the PR itself, so the job

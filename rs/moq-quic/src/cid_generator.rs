@@ -166,13 +166,11 @@ impl ConnectionIdGenerator for RandomConnectionIdGenerator {
 ///
 /// This generator uses a non-cryptographic hash and can therefore still be spoofed, but nonetheless
 /// helps prevent the endpoint from responding to non-QUIC packets at very low cost.
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 pub struct HashedConnectionIdGenerator {
 	key: u64,
 	lifetime: Option<Duration>,
 }
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 impl HashedConnectionIdGenerator {
 	/// Create a generator with a random key
 	pub fn new() -> Self {
@@ -188,14 +186,12 @@ impl HashedConnectionIdGenerator {
 	}
 }
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 impl Default for HashedConnectionIdGenerator {
 	fn default() -> Self {
 		Self::new()
 	}
 }
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 impl ConnectionIdGenerator for HashedConnectionIdGenerator {
 	fn generate_cid(&mut self) -> ConnectionId {
 		use std::hash::Hasher;
@@ -232,9 +228,7 @@ impl ConnectionIdGenerator for HashedConnectionIdGenerator {
 	}
 }
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 const NONCE_LEN: usize = 3; // Good for more than 16 million connections
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 const SIGNATURE_LEN: usize = 8 - NONCE_LEN; // 8-byte total CID length
 
 #[cfg(test)]

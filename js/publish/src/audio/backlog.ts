@@ -68,6 +68,11 @@ export class Backlog {
 		return first && Micro(first.end + this.#retention);
 	}
 
+	/** The oldest retained frame, left in place. */
+	peek(): AudioFrame | undefined {
+		return this.#frames[this.#head]?.frame;
+	}
+
 	/** Remove the oldest retained frame. */
 	shift(): AudioFrame | undefined {
 		const entry = this.#frames[this.#head];

@@ -471,7 +471,7 @@ impl Pad {
 			let request = broadcast
 				.reserve_track(name.clone())
 				.with_context(|| format!("cannot reserve track {name}"))?;
-			// Raw data keeps a short explicit window for subscribers that buffer its samples.
+			// Raw data declares a short explicit max age for subscribers that buffer its samples.
 			let info = moq_net::track::Info::default()
 				.with_timescale(moq_net::Timescale::MICRO)
 				.with_max_age(std::time::Duration::from_secs(5));
@@ -2059,10 +2059,10 @@ mod tests {
 		assert!(frame.is_some());
 	}
 
-	// The opaque track declares microseconds so the PTS maps 1:1, and keeps moq-net's retention: the
-	// media helper raises it to 30s for a segmented egress reading history, which a data track never is.
+	// The opaque track declares microseconds so the PTS maps 1:1, and a short explicit max age: the
+	// media helper uses 30s for a segmented egress reading history, which a data track never is.
 	#[tokio::test]
-	async fn an_opaque_track_declares_micros_and_a_retention_window() {
+	async fn an_opaque_track_declares_micros_and_a_short_max_age() {
 		gst::init().unwrap();
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
@@ -2083,7 +2083,7 @@ mod tests {
 		assert_eq!(
 			subscriber.info().max_age,
 			Some(std::time::Duration::from_secs(5)),
-			"an opaque track declares a short retention window"
+			"an opaque track declares a short max age"
 		);
 	}
 

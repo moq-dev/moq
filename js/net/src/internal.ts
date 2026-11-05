@@ -16,10 +16,21 @@ import { isAnonymous, type Route } from "./hop.ts";
 import type * as Instance from "./instance.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
-import type { Delay, Demand, Groups, Info, Position, Producer, Request, Subscriber, Subscription } from "./track.ts";
+import type {
+	Delay,
+	Demand,
+	Groups,
+	Info,
+	InfoInit,
+	Position,
+	Producer,
+	Request,
+	Subscriber,
+	Subscription,
+} from "./track.ts";
 import { max, min } from "./util/sequence.ts";
 import * as Varint from "./varint.ts";
-import type { Window } from "./window.ts";
+import type { Resolved, Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
 /** What a null {@link Delay.max} goes out as: the largest value every peer can read, as Rust sends for `None`. */
@@ -408,6 +419,8 @@ export interface ResumeSource {
 	end(): Position | undefined;
 	/** Where each range starts on the serving copy once delivery starts at `from`, undefined without one. */
 	starts(from: bigint): (bigint | undefined)[] | undefined;
+	/** Each range as the serving copy resolved it, undefined without one. */
+	resolved(): (Resolved | undefined)[] | undefined;
 	/** The runs of `[start, end)` the serving copy reads, undefined without one. */
 	runs(start: bigint, end: bigint): Run[] | undefined;
 	/**
@@ -466,6 +479,24 @@ export interface StagedTrack {
 	commit(): Producer;
 }
 
+/**
+ * How a received copy's start bounds the fills its readers ask below it. Mirrors the Rust
+ * `TrackState::start_resolved` and `fills_from_start`.
+ *
+ * Below a start the publisher resolved from the budget (`resolvesStart`), a reader fills the
+ * history its own budget reaches: an update can cross the response, so nobody knows which
+ * budget picked that start. On a wire whose fills and timestamps cannot judge an older group
+ * against that budget (`fillsFromStart`, lite-06), readers fill nothing below the start, and a
+ * widened budget reaches lower groups through the feed's re-offer. Anywhere else, a reader fills
+ * below the start only the groups its ranges name.
+ */
+export interface FillStarts {
+	/** The wire's start is resolved from the subscriber's budget: lite SUBSCRIBE_START from lite-06. */
+	resolvesStart?: boolean;
+	/** Readers ask no fills below the start at all. */
+	fillsFromStart?: boolean;
+}
+
 /** Maximum buffered datagrams per subscriber; mirrors Rust's bounded send buffer. */
 export const MAX_DATAGRAMS = 64;
 
@@ -520,8 +551,11 @@ export const hooks: {
 	 * since its stale drop replaced it, so it is not among them. Mirrors the Rust `supersede_stale`.
 	 */
 	supersedeStale: (producer: Producer, judgedEnd: bigint | undefined) => Run[];
-	/** Mark a track as fed by a wire subscription, which owes missing groups. Assigned by `track.ts`. */
-	receiveTrack: (producer: Producer) => void;
+	/**
+	 * Mark a track as fed by a wire subscription, which owes missing groups. `starts` says how
+	 * that wire's start bounds the fills its readers ask below it. Assigned by `track.ts`.
+	 */
+	receiveTrack: (producer: Producer, starts?: FillStarts) => void;
 	/** Create a received group at its wire offset before publishing it to readers. Assigned by `track.ts`. */
 	receiveGroup: (producer: Producer, group: { sequence: bigint; start: number }) => GroupProducer;
 	/** The producer's largest reported location and its subsequent changes. */
@@ -559,7 +593,7 @@ export const hooks: {
 	 * Take a request's producer without resolving its subscribers, so content written before
 	 * {@link StagedTrack.commit} is there when the first reader looks; assigned by `track.ts`.
 	 */
-	stageRequest: (request: Request, info: Partial<Info>) => StagedTrack;
+	stageRequest: (request: Request, info: InfoInit) => StagedTrack;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Position | undefined;
 	/** The publisher priority from a demanded track's committed {@link Info}; assigned by `track.ts`. */
@@ -618,6 +652,11 @@ export const hooks: {
 	 * with no group there: what lite-07 SUBSCRIBE_START answers. Assigned by `track.ts`.
 	 */
 	servingStarts: (subscriber: Subscriber, from: bigint) => (bigint | undefined)[];
+	/**
+	 * Each of a subscriber's ranges as resolved where it is served, undefined for one whose start
+	 * still waits: what lite-07 SUBSCRIBE_STARTED answers. Assigned by `track.ts`.
+	 */
+	servingResolved: (subscriber: Subscriber) => (Resolved | undefined)[];
 	/** The lowest buffered candidate, which an ordered take may wait below; `floor` passes sequences taken on other copies. */
 	peekGroup: (subscriber: Subscriber, ordered: boolean, floor?: bigint) => bigint | undefined;
 	/** Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival order. */
@@ -847,6 +886,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	servingStarts: () => {
+		throw new Error("track.ts not loaded");
+	},
+	servingResolved: () => {
 		throw new Error("track.ts not loaded");
 	},
 	makeRequest: () => {

@@ -268,7 +268,7 @@ mod tests {
 			output,
 			..DecodeConfig::new()
 		};
-		decode_backend::open(DecodeCodec::H264, &config).expect("open the decoder")
+		decode_backend::open(&DecodeCodec::H264.into(), &config).expect("open the decoder")
 	}
 
 	/// A static RGBA gradient that varies in both axes, so the chroma planes have

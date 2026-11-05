@@ -698,6 +698,16 @@ impl Misses {
 				for fresh in self.judged.gaps(run) {
 					candidates.insert(fresh);
 				}
+				// A received stale run settles this reader only under the terms it judged, so
+				// what it settled is judged again under new ones.
+				for (dropped, hole) in state.drops.overlapping(run) {
+					if hole.stale_budget().is_some() {
+						let dropped = dropped.start.max(run.start)..dropped.end.min(run.end);
+						for judged in self.judged.overlapping(&dropped) {
+							candidates.insert(judged.start.max(dropped.start)..judged.end.min(dropped.end));
+						}
+					}
+				}
 			}
 		} else {
 			// A moving read floor removes only its retired prefix. New production extends the
@@ -1907,7 +1917,9 @@ mod tests {
 	#[kio::test]
 	async fn a_grace_change_with_nothing_deferred_times_the_next_gap() {
 		let broadcast = crate::broadcast::Info::default().produce();
-		let track = broadcast.create_track("grace", crate::track::Info::default()).unwrap();
+		let track = broadcast
+			.create_track("grace", crate::track::Info::default().with_max_age(None))
+			.unwrap();
 		// A received copy, whose live gaps are filled or waited for, not skipped.
 		track.received();
 		let budget = Duration::from_secs(5);
@@ -2273,7 +2285,9 @@ mod tests {
 		}
 
 		let broadcast = crate::broadcast::Info::default().produce();
-		let mut track = broadcast.create_track("fills", crate::track::Info::default()).unwrap();
+		let mut track = broadcast
+			.create_track("fills", crate::track::Info::default().with_max_age(None))
+			.unwrap();
 		let requests = track.requests();
 		track.start_at(8).unwrap();
 		track
@@ -2346,7 +2360,9 @@ mod tests {
 		}
 
 		let broadcast = crate::broadcast::Info::default().produce();
-		let mut track = broadcast.create_track("fills", crate::track::Info::default()).unwrap();
+		let mut track = broadcast
+			.create_track("fills", crate::track::Info::default().with_max_age(None))
+			.unwrap();
 		let requests = track.requests();
 		track.start_at(8).unwrap();
 		track

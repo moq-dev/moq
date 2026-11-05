@@ -73,7 +73,7 @@ import { grace } from "./ledger.ts";
 import type { Lister, Tracks, TracksEvent } from "./listing.ts";
 import * as track from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/sequence.ts";
-import { clamped, type Window } from "./window.ts";
+import { clamped, type Resolved, type Window } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
 // Stream codes that report the route failing to deliver rather than judging what it carried:
@@ -84,6 +84,7 @@ const ROUTE_FAILURES: ReadonlySet<number> = new Set([
 	StreamCode.SessionClosed,
 	StreamCode.GoingAway,
 	StreamCode.ControlTimeout,
+	StreamCode.Unroutable,
 ]);
 
 /** A copy claiming the same content with different metadata: refused rather than reinterpreted. */
@@ -104,6 +105,27 @@ class Incompatible extends Error {
 export function routeFailed(err: Error): boolean {
 	if (err instanceof StreamError) return ROUTE_FAILURES.has(err.code);
 	return err instanceof SessionError || sessionClosed(err);
+}
+
+// Whether `err` says the route is going away rather than that it gave up on the copy: its
+// answer is no verdict, and the next route is asked. Mirrors the Rust front's `closing`.
+function closing(err: Error): boolean {
+	if (err instanceof StreamError) return err.code === StreamCode.GoingAway || err.code === StreamCode.SessionClosed;
+	return err instanceof SessionError || sessionClosed(err);
+}
+
+// A source losing its route to the content: only another route continues it, since asking the
+// same one again could only replace the withdrawal's cause with a refusal. Mirrors the Rust
+// `unroutable`.
+function unroutable(err: Error): boolean {
+	return err instanceof StreamError && err.code === StreamCode.Unroutable;
+}
+
+// A copy's delivery failure says nothing about its content. A terminal track verdict does.
+// Mirrors the Rust `copy_failed`.
+function copyFailed(copy: Copy): boolean {
+	const error = copy.sub.closed.peek();
+	return error instanceof Error && routeFailed(error);
 }
 
 // Every `track.Info` field but `unchecked`, so one added later fails to compile until it is
@@ -217,6 +239,14 @@ class Route {
 		this.#bump();
 	}
 
+	/** Subscribe every reader afresh to the source that still serves, once its copy failed. */
+	resubscribe(): void {
+		if (!this.source) return;
+		this.generation++;
+		this.#bump();
+		for (const reader of [...this.readers]) reader.sync();
+	}
+
 	/** End the track once the serving copy runs out, rather than replacing it. */
 	refuse(err: Error): void {
 		this.refusal ??= err;
@@ -266,6 +296,8 @@ interface Copy {
 	since?: Instant;
 	/** Groups still read that came from this copy, which keep a replaced copy subscribed. */
 	lease: number;
+	/** It handed out a group or datagram, so a failure is its route failing mid-serve rather than refusing. */
+	delivered?: boolean;
 }
 
 /**
@@ -300,13 +332,15 @@ class Reader implements ResumeSource {
 	#shell: ResumeShell;
 	/** The route generation last read. */
 	#generation?: number;
+	/** The reader's preferences as last mirrored into its copies; see {@link #follow}. */
+	#mirrored?: track.Subscription;
 	/**
 	 * Oldest first, except that a backfill goes before the copy of the route it backfills: the last
 	 * one is the serving route's own, when it is subscribed.
 	 */
 	#copies: Copy[] = [];
-	/** The cursor start the copies were last bounded at: a lower one asks for a backfill. */
-	#start: bigint;
+	/** The reader's cursor the copies were last bounded at: a lower start asks for a backfill. */
+	#bounded: { start: bigint; end?: bigint };
 	/** The newest group handed out: where a new copy is asked to start. */
 	#newest?: bigint;
 	/**
@@ -363,19 +397,12 @@ class Reader implements ResumeSource {
 		this.route = route;
 		this.#shell = shell;
 		this.#record = record;
-		this.#start = shell.cursor.peek().start;
+		this.#mirrored = shell.subscription.peek();
+		this.#bounded = shell.cursor.peek();
 		route.readers.add(this);
 		this.#dispose.push(
-			shell.subscription.subscribe(() => {
-				for (const copy of this.#copies) this.#update(copy);
-			}),
-			shell.cursor.subscribe(() => {
-				for (const copy of this.#copies) this.#bound(copy);
-				const passed = this.#start;
-				this.#start = shell.cursor.peek().start;
-				if (this.#start < passed) this.#backfill(this.#start, passed);
-				if (this.#ended) this.#letGo(this.#delivered);
-			}),
+			shell.subscription.subscribe(() => this.#follow()),
+			shell.cursor.subscribe(() => this.#follow()),
 		);
 		// A fork starts on its parent's newest copy, at that copy's generation: the copy keeps its
 		// retained groups even where no route serves the track, between routes or once the front
@@ -395,9 +422,14 @@ class Reader implements ResumeSource {
 		this.sync();
 	}
 
-	/** Follow the route: subscribe to a new copy and mark the ones it replaced. */
+	/**
+	 * Follow the route: apply the reader's preferences and cursor to its copies, subscribe to a
+	 * new copy, and mark the ones it replaced.
+	 */
 	sync(): void {
-		if (this.#closed || this.#ended) return;
+		if (this.#closed) return;
+		this.#follow();
+		if (this.#ended) return;
 		const route = this.route;
 		if (this.#generation === route.generation) return;
 		this.#generation = route.generation;
@@ -414,7 +446,10 @@ class Reader implements ResumeSource {
 		// Cloned handles share closed, so a returning route reuses its subscription and
 		// leases rather than replaying its cache and retaining another copy per flap. The newest
 		// is the route's own copy, not a backfill of it.
-		const index = this.#copies.findLastIndex((copy) => copy.source.from.closed === source.from.closed);
+		// A copy that failed is never reused: the route subscribes afresh after one.
+		const index = this.#copies.findLastIndex(
+			(copy) => copy.source.from.closed === source.from.closed && !(copy.sub.closed.peek() instanceof Error),
+		);
 		if (index !== -1) {
 			const [copy] = this.#copies.splice(index, 1);
 			source.retain();
@@ -500,6 +535,27 @@ class Reader implements ResumeSource {
 
 	#update(copy: Copy): void {
 		if (copy.sub.closed.peek() === undefined) copy.sub.update(this.#wire(copy));
+	}
+
+	/**
+	 * Apply the reader's preferences and cursor to every copy once they changed. Their signals
+	 * notify a microtask after a change, so every read applies them first too: a copy then picks
+	 * and judges its groups by what the reader holds now, such as a just-lowered `delay.max` or
+	 * replaced ranges, not its last ones. Mirrors the Rust `Reader::sync`.
+	 */
+	#follow(): void {
+		const subscription = this.#shell.subscription.peek();
+		if (subscription !== this.#mirrored) {
+			this.#mirrored = subscription;
+			for (const copy of this.#copies) this.#update(copy);
+		}
+		const cursor = this.#shell.cursor.peek();
+		if (cursor === this.#bounded) return;
+		const passed = this.#bounded.start;
+		this.#bounded = cursor;
+		for (const copy of this.#copies) this.#bound(copy);
+		if (cursor.start < passed) this.#backfill(cursor.start, passed);
+		if (this.#ended) this.#letGo(this.#delivered);
 	}
 
 	/**
@@ -647,6 +703,7 @@ class Reader implements ResumeSource {
 	 * Nor does a backfill of the serving route.
 	 */
 	#observe(copy: Copy, sequence: bigint): void {
+		copy.delivered = true;
 		if (copy.replaced || copy.generation !== this.#generation) return;
 		const bound = max(this.#newest ?? -1n, sequence - 1n);
 		for (const replaced of this.#copies) {
@@ -871,6 +928,7 @@ class Reader implements ResumeSource {
 					}
 					this.#datagram = sequence;
 					this.#newestDatagram = max(this.#newestDatagram ?? 0n, sequence);
+					copy.delivered = true;
 					return recv;
 				}
 				if (recv.kind === "done") copy.datagramsDone = copy.sub.closed.peek() ?? null;
@@ -900,6 +958,18 @@ class Reader implements ResumeSource {
 			// A refusal from a route that still serves is the track's answer.
 			if (!routeFailed(ended)) return this.#fail(ended);
 			if (route.refusal) return this.#fail(route.refusal);
+			// The route that failed it still serves and is not going away, so no move replaces
+			// the copy. As in the Rust front, one that delivered nothing is the route refusing
+			// the track, and one that did is subscribed afresh, unless its source lost the route:
+			// asking it again could only replace the withdrawal's cause with a refusal.
+			if (serving && route.source === serving.source && !closing(ended)) {
+				if (!serving.delivered) {
+					route.refuse(ended);
+					return this.#fail(ended);
+				}
+				if (unroutable(ended)) return this.#fail(ended);
+				route.resubscribe();
+			}
 		}
 		// Refused before any copy fed it: nothing will.
 		if (!last && route.refusal) return this.#fail(route.refusal);
@@ -1225,6 +1295,13 @@ class Reader implements ResumeSource {
 		return serving && hooks.servingStarts(serving.sub, from);
 	}
 
+	// Each copy resolves the reader's ranges in turn, clamped to its floor and replacement.
+	resolved(): (Resolved | undefined)[] | undefined {
+		this.sync();
+		const serving = this.#serving();
+		return serving && hooks.servingResolved(serving.sub);
+	}
+
 	// The reader's ranges resolve on the copies, which hold the groups their anchors name.
 	runs(start: bigint, end: bigint): Run[] | undefined {
 		this.sync();
@@ -1493,7 +1570,7 @@ class Recover implements GroupRecover {
 	 * route is asked, which bounds a hostile route to one bad answer per route change.
 	 */
 	#undelivered(failed: Error, copy: Copy): boolean {
-		return routeFailed(failed) || copy.sub.closed.peek() instanceof Error;
+		return routeFailed(failed) || copyFailed(copy);
 	}
 
 	async replace(index: number, failed: Error | undefined, signal: AbortSignal): Promise<Replacement> {
@@ -1547,6 +1624,8 @@ class Recover implements GroupRecover {
 				// A verdict would repeat from the route that gave it.
 				if (generation === current.generation && !this.#undelivered(failed, current)) throw failed;
 			}
+			// An unroutable copy waits for another route rather than asking its own again.
+			const withdrawn = failed !== undefined && generation === current.generation && unroutable(failed);
 			if (!serving) {
 				// Nothing serves: a failed copy waits for a route, unless none will come.
 				if (failed && route.concluded) throw failed;
@@ -1555,7 +1634,7 @@ class Recover implements GroupRecover {
 				// a fetch of the rest would answer. A copy that failed dropped its open groups with
 				// it, and a group the route failed is no verdict either.
 				const given = hooks.givenUp(serving.sub, this.sequence);
-				if (given.error && !routeFailed(given.error) && !(serving.sub.closed.peek() instanceof Error)) {
+				if (given.error && !routeFailed(given.error) && !copyFailed(serving)) {
 					throw given.error;
 				}
 				waits.push(given.changed);
@@ -1564,25 +1643,33 @@ class Recover implements GroupRecover {
 					const cached = hooks.cachedGroup(serving.sub, this.sequence, index);
 					if (cached) return this.#replacement(cached, serving);
 				}
+				// Finished history may still continue the group above, and so may a fetch already
+				// answered below. Otherwise a terminal track verdict ends this wait even while a
+				// fetch is still unanswered, and asks for nothing more.
+				const closed = serving.sub.closed.peek();
+				const verdict = closed instanceof Error && !routeFailed(closed) ? closed : undefined;
+				waits.push(serving.sub.closed);
 				// Otherwise ask for it, if the route's version can fetch. The subscription may still
 				// deliver it first. Without FETCH only a copy continues a failed group, and none
 				// holds it, so it ends as the failed copy left it.
 				const fetchGroup = serving.source.wire.fetchGroup;
-				if (!fetchGroup && failed) throw failed;
-				if (fetchGroup && fetch?.generation !== generation) {
+				if (!fetchGroup && failed) throw verdict ?? failed;
+				if (fetchGroup && !verdict && !withdrawn && fetch?.generation !== generation) {
 					fetch = startFetch(fetchGroup, route.name, this.sequence, generation, signal);
 					started(fetch);
 				}
 				// A fetch from an earlier route answers for that route, not this one.
 				const asked = fetch?.generation === generation ? fetch : undefined;
+				const outcome = asked?.outcome;
+				// An answer carries its own expiry; the verdict and the budget only end the wait.
+				if (outcome && "group" in outcome) return this.#replacement(outcome.group, serving);
+				if (verdict) throw verdict;
 				const stale = hooks.staleAt(serving.sub, this.sequence);
 				if (stale.expired()) throw new StreamError(StreamCode.Old, { message: "group is past the budget" });
 				waits.push(...stale.changed, ...(asked && !asked.outcome ? [asked.settled] : []));
-				const outcome = asked?.outcome;
-				if (outcome && "group" in outcome) return this.#replacement(outcome.group, serving);
 				// That route failing too waits for the next one, and a refusal is a verdict only for
 				// a copy that failed, once the serving subscription will not deliver the group either.
-				if (outcome && failed && !routeFailed(outcome.error) && !(serving.sub.closed.peek() instanceof Error)) {
+				if (outcome && failed && !routeFailed(outcome.error) && !copyFailed(serving)) {
 					const subscription = serving.sub.subscription.peek();
 					const maxDelay = subscription ? maxDelayOf(subscription) : Milli.zero;
 					const land = { start: this.sequence, end: this.sequence + 1n, floor: true, grace: grace(maxDelay) };
@@ -1997,10 +2084,12 @@ export class Front {
 				return this.#source !== undefined && this.#source !== current;
 			},
 			replace: async (_index, failed, signal) => {
-				// A fetch that failed delivering may ask its own route again; a stalled one, or one
-				// a verdict ended, only moves to another.
-				const avoid = failed && undelivered(failed) ? undefined : current;
-				const next = await this.#fetch(name, sequence, { ...options, signal }, avoid);
+				// A fetch that failed delivering may ask its own route again; a stalled one, one a
+				// verdict ended, or one whose route withdrew only moves to another. A withdrawal
+				// keeps its cause once none will come.
+				const withdrawn = failed && unroutable(failed) ? failed : undefined;
+				const avoid = failed && undelivered(failed) && !withdrawn ? undefined : current;
+				const next = await this.#fetch(name, sequence, { ...options, signal }, avoid, withdrawn);
 				// The fetch's hold on its route passes to the group on adoption, or goes with the discard.
 				return {
 					group: next.group,
@@ -2025,16 +2114,18 @@ export class Front {
 
 	// Fetch a group from whichever route serves the track, asking the next one when a route
 	// fails, and never `avoid`. The source comes back retained for as long as the group is read.
+	// Once no route will come, it ends with `ended`, or as not found.
 	async #fetch(
 		name: string,
 		sequence: bigint,
 		options: track.FetchGroupOptions | undefined,
 		avoid?: Source,
+		ended?: Error,
 	): Promise<{ group: GroupConsumer; source: Source }> {
 		for (;;) {
 			const source = this.#source;
 			if (!source || source === avoid) {
-				if (this.#concluded) throw new NotFound(`group ${sequence}`);
+				if (this.#concluded) throw ended ?? new NotFound(`group ${sequence}`);
 				await this.#next(options?.signal);
 				continue;
 			}

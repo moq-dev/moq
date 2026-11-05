@@ -505,6 +505,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	// Parse a held moov or moof body once its last byte has arrived.
 	fn end_metadata(&mut self, kind: mp4_atom::FourCC, body: Bytes, header_size: usize) -> Result<()> {
+		super::metadata::body(kind, &body)?;
 		if kind == Moov::KIND {
 			return self.init(Moov::decode_body(&mut body.as_ref())?);
 		}
@@ -512,12 +513,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Err(Error::DuplicateMoof.into());
 		}
 		let moof = Moof::decode_body(&mut body.as_ref())?;
-		// Planning resolves every sample, and a run without per-sample fields declares its count
-		// in four bytes, so the byte bound alone does not limit what planning would hold.
-		let samples: u64 = moof.traf.iter().map(sample::count).sum();
-		if samples > super::MAX_FRAGMENT_SAMPLES {
-			return Err(Error::TooManySamples(samples).into());
-		}
 		self.moof = Some(moof);
 		self.moof_span = header_size.checked_add(body.len()).ok_or(Error::InvalidDataOffset)?;
 		Ok(())

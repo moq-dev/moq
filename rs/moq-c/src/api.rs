@@ -624,10 +624,10 @@ pub struct moq_media_read {
 	pub end: moq_timestamp,
 }
 
-/// A best-effort raw track datagram delivered via [moq_consume_datagrams].
+/// A live datagram delivered via [moq_consume_datagrams].
 #[repr(C)]
 pub struct moq_datagram {
-	/// The payload of the datagram, or NULL/0 if the track has ended.
+	/// The datagram payload, valid until [moq_consume_datagram_free].
 	pub payload: *const u8,
 	/// The length in bytes of `payload`.
 	pub payload_size: usize,
@@ -636,25 +636,27 @@ pub struct moq_datagram {
 	/// long as `payload`.
 	pub timestamp: *const moq_timestamp,
 
-	/// The datagram's sequence number, counted apart from the track's groups.
+	/// The datagram track's own sequence number.
 	pub sequence: u64,
 }
 
 /// Publisher-side raw track properties.
 ///
-/// A null [moq_publish_track] `info` pointer uses the moq-net defaults, and so does a
-/// zero-initialized struct.
+/// A null [moq_publish_track] `info` pointer uses the moq-net defaults, including a zero max
+/// age, and so does a zero-initialized struct.
 #[repr(C)]
 pub struct moq_track_info {
 	/// Priority, used to break ties between subscriptions of equal subscriber priority.
 	/// Higher is more urgent; the default 0 is the midpoint.
 	pub priority: i8,
 
-	/// Maximum age of a non-latest group before the publisher evicts it, in microseconds.
-	/// The publisher-side half of `moq_subscription.delay.max_us`.
+	/// How long a superseded group stays fresh, in microseconds. Zero, the default, serves only
+	/// the live edge. The publisher-side half of `moq_subscription.delay.max_us`. Ignored when
+	/// `max_age_unlimited` is set.
 	pub max_age_us: u64,
-	/// Whether `max_age_us` is set. When false, the publisher imposes no age limit.
-	pub max_age_present: bool,
+	/// No publisher age limit, leaving only the cache to bound how long a superseded group is
+	/// served.
+	pub max_age_unlimited: bool,
 
 	/// Per-frame timescale in ticks per second.
 	pub timescale: u64,
@@ -679,10 +681,8 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 		// Raw tracks default to a microsecond timescale; an explicit one below overrides it.
 		let mut out = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MICRO)
-			.with_priority(info.priority);
-		if info.max_age_present {
-			out = out.with_max_age(std::time::Duration::from_micros(info.max_age_us));
-		}
+			.with_priority(info.priority)
+			.with_max_age((!info.max_age_unlimited).then(|| std::time::Duration::from_micros(info.max_age_us)));
 		if info.timescale_present {
 			out = out.with_timescale(moq_net::Timescale::new(info.timescale)?);
 		}
@@ -3170,23 +3170,15 @@ pub unsafe extern "C" fn moq_publish_track_frame(
 	})
 }
 
-/// Send a best-effort datagram on a raw track created by [moq_publish_track].
+/// Append a datagram to a producer from [crate::moq_publish_datagrams], returning its sequence.
 ///
-/// Takes `payload` then `timestamp`, matching [moq_publish_track_frame]. The payload must
-/// be at most 1200 bytes. On success the datagram's sequence number, counted apart from the
-/// track's groups, is written to `out_sequence` when it is non-NULL. A subscriber receives the
-/// datagrams sent once its [moq_consume_datagrams] subscription is answered, and counts toward
-/// the track's demand. Datagrams are delivered only on
-/// transports and wire versions with a datagram channel; there is no group fallback.
-///
-/// Returns a zero on success, or a negative code on failure.
+/// Keep the payload well below the path MTU. No stream fallback is available.
 ///
 /// # Safety
-/// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
-/// - `timestamp` must be NULL or a valid pointer to a [moq_timestamp].
-/// - `out_sequence` must be NULL or a valid pointer to a `uint64_t`.
+/// `payload` must point to `payload_size` bytes, `timestamp` must be NULL or valid,
+/// and `out_sequence` must be NULL or writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_track_datagram(
+pub unsafe extern "C" fn moq_publish_datagrams_append(
 	track: u32,
 	payload: *const u8,
 	payload_size: usize,
@@ -3197,7 +3189,7 @@ pub unsafe extern "C" fn moq_publish_track_datagram(
 		let track = ffi::parse_id(track)?;
 		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
 		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
-		let sequence = State::lock().publish.track_datagram(track, timestamp, payload)?;
+		let sequence = State::lock().publish.datagrams_append(track, timestamp, payload)?;
 		if let Some(out) = unsafe { out_sequence.as_mut() } {
 			*out = sequence;
 		}
@@ -4300,7 +4292,7 @@ pub extern "C" fn moq_consume_track_cancel(track: u32) -> i32 {
 	})
 }
 
-/// Subscribe to a raw track's best-effort datagrams by name.
+/// Subscribe to a live datagram track by name, at the given subscriber priority.
 ///
 /// The datagram counterpart to [moq_consume_track], on its own subscription, delivering the
 /// datagrams sent once the publisher answered it. `on_datagram`
@@ -4322,6 +4314,7 @@ pub unsafe extern "C" fn moq_consume_datagrams(
 	broadcast: u32,
 	name: *const c_char,
 	name_len: usize,
+	priority: i8,
 	on_datagram: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
@@ -4329,7 +4322,9 @@ pub unsafe extern "C" fn moq_consume_datagrams(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let on_datagram = unsafe { ffi::OnStatus::new(user_data, on_datagram)? };
-		State::lock().consume.datagram_track(broadcast, name, on_datagram)
+		State::lock()
+			.consume
+			.datagram_track(broadcast, name, priority, on_datagram)
 	})
 }
 

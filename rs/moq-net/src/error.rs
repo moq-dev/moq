@@ -504,7 +504,7 @@ pub enum Error {
 	/// (see [`cache::Pool`](crate::cache::Pool)), or by the transport when incomplete
 	/// messages spent its receive window. Also a read of a frame the group shed from its
 	/// front, past its live tail or under that debt. Unlike [`Self::Old`], the group was
-	/// still within the publisher's window; it can be re-fetched.
+	/// still fresh under the publisher's max age; it can be re-fetched.
 	#[error("evicted")]
 	Evicted,
 
@@ -551,10 +551,6 @@ pub enum Error {
 	/// The underlying connection reached its transport idle deadline.
 	#[error("transport idle timeout")]
 	IdleTimeout,
-
-	/// The transport refused a request because the peer granted no stream credit.
-	#[error("no stream credit")]
-	NoStreamCredit,
 }
 
 impl Error {
@@ -667,7 +663,7 @@ impl From<&Error> for SessionError {
 			// says an unrecognized code is an unspecified error. Send that instead.
 			Error::Remote(_) => Self::Internal,
 			// Our own transport failed: there is no code to say so.
-			Error::Transport(_) | Error::IdleTimeout | Error::NoStreamCredit => Self::Internal,
+			Error::Transport(_) | Error::IdleTimeout => Self::Internal,
 			// Stream-scoped conditions have no session code.
 			Error::Old
 			| Error::Evicted
@@ -732,7 +728,7 @@ impl From<&Error> for StreamError {
 			// Session-scoped: the peer learns the detail from the session close.
 			// A stream refused on its own is not a session failure, so it does not claim
 			// SESSION_CLOSED; there is no stream-scoped PROTOCOL_VIOLATION to send instead.
-			Error::UnexpectedStream | Error::NoStreamCredit => Self::Internal,
+			Error::UnexpectedStream => Self::Internal,
 			Error::Version
 			| Error::UnknownAlpn(_)
 			| Error::TooManyRequests
