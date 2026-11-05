@@ -30,10 +30,9 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 use std::str::FromStr;
 
-use hmac::{KeyInit, Mac};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use rind::hmac;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use subtle::ConstantTimeEq;
 use url::Url;
 
 use crate::secret::Secret;
@@ -73,6 +72,8 @@ pub struct Error(ErrorKind);
 
 #[derive(Debug, thiserror::Error)]
 enum ErrorKind {
+	#[error(transparent)]
+	UnsupportedCpu(#[from] crate::crypto::UnsupportedCpu),
 	#[error(transparent)]
 	Mdns(#[from] mdns_sd::Error),
 
@@ -191,7 +192,8 @@ struct Identity<'a> {
 /// An HMAC-SHA256 proof of knowing `secret`, bound to one listener's
 /// [`Identity`], plus a `context` separating the advertise and dial roles.
 fn proof(secret: &Secret, context: &str, id: &Identity<'_>) -> String {
-	let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+	let key = hmac::Key::new(&hmac::HMAC_SHA256, secret.as_bytes());
+	let mut mac = hmac::Context::with_key(&key);
 	let port = id.port.to_string();
 	for field in [
 		context,
@@ -205,13 +207,13 @@ fn proof(secret: &Secret, context: &str, id: &Identity<'_>) -> String {
 		mac.update(field.as_bytes());
 		mac.update(&[0]);
 	}
-	hex::encode(mac.finalize().into_bytes())
+	hex::encode(mac.sign().as_ref())
 }
 
 /// Constant-time equality, for comparing a credential against the expected one
 /// without leaking it byte-by-byte through timing.
 pub fn ct_eq(a: &str, b: &str) -> bool {
-	a.len() == b.len() && bool::from(a.as_bytes().ct_eq(b.as_bytes()))
+	rind::constant_time::verify(a.as_bytes(), b.as_bytes()).is_ok()
 }
 
 /// One peer's advertisement: the fields it published, plus the record they
@@ -336,6 +338,7 @@ impl Config {
 	/// returning, so a caller can treat success as "the mesh is live" and gate
 	/// process readiness on it. Errors if no interface works within 5 seconds.
 	pub async fn advertise(self) -> Result<Discovery> {
+		crate::crypto::check().map_err(|err| Error(err.into()))?;
 		crate::runtime::scope(Discovery::new(self)).await
 	}
 }

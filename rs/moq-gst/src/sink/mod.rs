@@ -2,6 +2,7 @@ use gst::glib;
 use gst::prelude::*;
 
 mod imp;
+mod listed;
 mod pad;
 mod request_pad;
 mod session;

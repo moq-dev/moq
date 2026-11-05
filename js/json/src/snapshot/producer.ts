@@ -31,7 +31,7 @@ export class Producer<T> {
 	#deltas: boolean;
 
 	// The sequence of the newest group written, which a joiner's wanted group has to pass.
-	#largest?: number;
+	#largest?: bigint;
 	// The newest timestamp written, which a refresh restates the value at. An update may carry an
 	// older timestamp than its group's first frame, and a new group may not start before that one.
 	#at?: Time.Timestamp;
@@ -49,7 +49,7 @@ export class Producer<T> {
 	}
 
 	// Restate the value in a new group once a joiner wants one past the largest written.
-	#refresh(wanted: number | undefined): void {
+	#refresh(wanted: bigint | undefined): void {
 		if (wanted === undefined || this.#largest === undefined || wanted <= this.#largest) return;
 		const frame = this.#encoder.snapshot();
 		if (!frame) return;

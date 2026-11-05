@@ -22,6 +22,7 @@ from moq_ffi import (
 from moq_ffi import (
     MoqConnectionState as ConnectionState,
 )
+from moq_ffi import MoqDatagramInfo as DatagramInfo
 from moq_ffi import (
     MoqErrorScope as ErrorScope,
 )
@@ -39,6 +40,9 @@ from moq_ffi import (
 )
 from moq_ffi import (
     MoqProtocolKind as ProtocolKind,
+)
+from moq_ffi import (
+    MoqRateTarget as RateTarget,
 )
 from moq_ffi import (
     MoqRoute as Route,
@@ -68,6 +72,7 @@ from ._records import (
     ClientTls,
     ConnectionStats,
     Datagram,
+    Delay,
     Frame,
     Grant,
     QuicConfig,
@@ -91,6 +96,8 @@ __all__ = [
     "ConnectionPhase",
     "ConnectionState",
     "Datagram",
+    "DatagramInfo",
+    "Delay",
     "ErrorScope",
     "Frame",
     "FetchGroupOptions",
@@ -101,6 +108,7 @@ __all__ = [
     "ProtocolKind",
     "QuicConfig",
     "Range",
+    "RateTarget",
     "Route",
     "Subscription",
     "Timestamp",

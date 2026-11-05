@@ -75,7 +75,9 @@ fn measure(flight: usize, batch: usize, steady: bool) -> Duration {
 #[test]
 #[ignore = "controller benchmark: run with --release and --success-output immediate"]
 fn benchmark_per_packet() {
-    println!("gcc_packet controller_stack_bytes={}", size_of::<Gcc>());
+    println!("state,size_bytes");
+    println!("controller_stack,{}", size_of::<Gcc>());
+    println!("steady,flight,batch,cpu_ns");
     for steady in [false, true] {
         for flight in [16, 64, 1000, 4000, 16000] {
             for batch in [1, 8, 32] {
@@ -84,10 +86,7 @@ fn benchmark_per_packet() {
                     *sample = measure(flight, batch, steady);
                 }
                 samples.sort();
-                println!(
-                    "gcc_packet steady={steady} flight={flight} batch={batch} cpu_ns={}",
-                    samples[1].as_nanos()
-                );
+                println!("{steady},{flight},{batch},{}", samples[1].as_nanos());
             }
         }
     }

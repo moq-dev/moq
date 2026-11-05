@@ -28,14 +28,12 @@
 
 // External
 mod error;
-mod recv;
-mod send;
+pub mod recv;
+pub mod send;
 mod server;
 mod session;
 
 pub use error::*;
-pub use recv::*;
-pub use send::*;
 pub use server::*;
 pub use session::*;
 

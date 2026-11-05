@@ -21,7 +21,8 @@ Recurring child of the [vendor sync](/quest/m1/vendor-sync/README.md), which
 says how each run works and recurs. Decided 2026-10-30 (maintainer): covered
 only until [the switch to rust2's exporter](/quest/m2/ffi-exporter.md) lands. After that,
 rust2 owns the generators, and the next run drops this child. Until then, a fix
-landed here goes upstream into rust2's fork too, or rust2's import loses it.
+landed here joins the exporter quest's carried-over list, so the exporter's
+generators get it too; rust2's fork is maintenance-only since 2026-11-02.
 
 A port means a commit on the fork and a pin bump in moq (`flake.nix` and the
 places its "five places" comments name), with regenerated bindings diffed and
@@ -32,7 +33,7 @@ Last checked (2026-10-31), with each fork's base and pin:
 | Fork | Base | Pin | Upstream head checked |
 |---|---|---|---|
 | uniffi-rs | `v0.32.2` (`7bc621ee`) | `35209f3f` | [`ef9625b6`](https://github.com/mozilla/uniffi-rs/commit/ef9625b68dd51207f55f024a27649e58edb52b09) |
-| uniffi-bindgen-go | `0b7fb4ce` | `v0.10.0-kixelated.1+v0.32.0` | [`0b7fb4ce`](https://github.com/NordSecurity/uniffi-bindgen-go/commit/0b7fb4ceef12021bd7f790cc516fa9133e001813) |
+| uniffi-bindgen-go | `0b7fb4ce` | `v0.10.0-kixelated.2+v0.32.0` | [`0b7fb4ce`](https://github.com/NordSecurity/uniffi-bindgen-go/commit/0b7fb4ceef12021bd7f790cc516fa9133e001813) |
 | uniffi-dart | `72d26c1f` | `v0.3.1-kixelated.7+v0.32.0` (`657cbff5`) | [`e644a4ad`](https://github.com/Uniffi-Dart/uniffi-dart/commit/e644a4ad980f72697aba211fd30cb4fbd8fc7324) |
 | uniffi-bindgen-cpp | `20bef754` | `v0.11.0-kixelated.7+v0.32.2` | [`20bef754`](https://github.com/livekit/uniffi-bindgen-cpp/commit/20bef754391023df147267482513c35120dee343) |
 

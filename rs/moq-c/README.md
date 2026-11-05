@@ -39,6 +39,13 @@ int32_t moq_allocator_close(uint32_t allocator);
 int32_t moq_reservation_rate(uint32_t reservation, uint64_t *bps, bool *present);
 int32_t moq_reservation_update(uint32_t reservation, uint64_t max_bps);
 int32_t moq_reservation_close(uint32_t reservation);
+int32_t moq_session_viewers(uint32_t session);
+int32_t moq_viewers_watch(uint32_t viewers, uint64_t max_bps);
+int32_t moq_viewers_set_target(uint32_t viewers, uint64_t target_bps, bool present);
+int32_t moq_viewers_close(uint32_t viewers);
+int32_t moq_viewer_rate(uint32_t viewer, uint64_t *bps, bool *present);
+int32_t moq_viewer_update(uint32_t viewer, uint64_t max_bps);
+int32_t moq_viewer_close(uint32_t viewer);
 
 // Server
 int32_t moq_server_listen(const moq_server_config *config, moq_status_callback on_request, void *user_data);
@@ -149,6 +156,13 @@ are exact `moq_timestamp` records, `value` units at `scale` units per second.
 track's timescale, a microsecond one unless `moq_track_info.timescale` sets
 another, and `moq_consume_track_frame` points `moq_frame.timestamp` at the
 timestamp read, valid until the frame is freed, or NULL on an untimed track.
+
+A zeroed `moq_track_info`, like a NULL one, advertises a zero max age, how long
+a superseded group stays fresh, so only the live edge is served. Set
+`max_age_us` for a longer age, or `max_age_unlimited` for no publisher limit,
+which ignores `max_age_us`. Zero-initialize the struct
+(`moq_track_info info = {0};`) before assigning members, so every flag starts
+false.
 
 JSON window pushes and pops accept an optional `const moq_timestamp *timestamp`,
 like snapshot updates and stream appends. It is when the edit occurred,

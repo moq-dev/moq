@@ -19,8 +19,8 @@ slow-timeout = { period = "30s", terminate-after = 2 }
 # race until proven otherwise (see Root Cause First in AGENTS.md).
 retries = 0
 
-# PR recipes build library, binary, and integration-test targets. Nightly keeps
-# the exhaustive target compile, but executes benches through cargo bench smokes.
+# The PR gate compiles benches to lint them, but never runs them here; Nightly
+# executes them through cargo bench smokes.
 default-filter = "not kind(bench)"
 
 # Limit ring concurrency within one invocation. Unit-test workers use small
@@ -59,6 +59,12 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 [test-groups]
 io-uring = { max-threads = 4 }
 v4l2 = { max-threads = 1 }
+
+# Nightly's ignored benchmark tests (`just gh nightly rust-test`) keep each test's
+# printed tables in target/nextest/bench/junit.xml for the benchmark report.
+[profile.bench.junit]
+path = "junit.xml"
+store-success-output = true
 
 # CI has noisier neighbours and cold caches, so give a test longer before
 # calling it wedged.

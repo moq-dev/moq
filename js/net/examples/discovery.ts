@@ -7,7 +7,7 @@ async function main() {
 
 	// Own and close the origin announcement watch.
 	const announced = origin.announced();
-	const requests = new Map<Moq.Path.Valid, Moq.Origin.Requesting>();
+	const requests = new Map<Moq.Path.Valid, Moq.Origin.Following>();
 
 	// Discover broadcasts announced by the server
 	for await (const announcement of announced) {

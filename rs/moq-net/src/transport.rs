@@ -12,6 +12,8 @@ use std::time::Duration;
 #[cfg(feature = "async")]
 pub(crate) mod boxed;
 pub mod memory;
+#[cfg(feature = "async")]
+pub(crate) mod open;
 
 /// Where a session's request target travels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -162,6 +164,37 @@ impl ReceiveWindow {
 	}
 }
 
+/// Which streams a session opens: one-way, or both ways.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dir {
+	/// Unidirectional streams.
+	Uni,
+	/// Bidirectional streams.
+	Bi,
+}
+
+/// The streams a peer still lets this side open in one direction, as the transport last heard.
+///
+/// A peer grants a bounded number of streams, and an open beyond them waits for it to grant
+/// more. A session reads this to tell an open waiting for that credit from one waiting on
+/// anything else. See [`poll::Session::stream_credit`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StreamCredit {
+	/// The streams this side may still open before the peer grants more.
+	pub available: u64,
+	/// Whether an open was refused for lack of credit since the peer last granted more, so
+	/// this side waits for the peer, as QUIC's STREAMS_BLOCKED says.
+	pub blocked: bool,
+}
+
+impl StreamCredit {
+	/// `available` streams left, `blocked` once an open was refused for lack of them.
+	pub fn new(available: u64, blocked: bool) -> Self {
+		Self { available, blocked }
+	}
+}
+
 /// The smallest connection receive window a transport that leases may offer: one 1 MiB
 /// storage segment.
 ///
@@ -239,7 +272,7 @@ pub mod poll {
 
 	/// A transport session, shared by reference between the tasks that use it.
 	///
-	/// Every operation takes `&self` and keeps no per-caller progress between polls: the
+	/// Every session operation takes `&self` and keeps no per-caller progress between polls: the
 	/// caller owns the [`kio::Waiter`] it parks, so an abandoned wait leaves nothing behind.
 	/// Share a session with [`Arc`](std::sync::Arc) rather than cloning it. Poll operations
 	/// never borrow caller buffers between calls, and shared resources must not be held
@@ -275,18 +308,6 @@ pub mod poll {
 			waiter: &kio::Waiter,
 			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
 		) -> Poll<Result<BiStreams<Self>, Self::Error>>;
-
-		/// Open a request stream without waiting for stream credit.
-		///
-		/// `None` refuses the request before opening a stream. `Pending` means the stream
-		/// already has credit but its transport header is waiting for send capacity.
-		/// Native QUIC and qmux implement this admission check. Iroh retains its waiting
-		/// open behavior, and browser-backed sessions retain their browser's behavior.
-		fn poll_open_request(
-			&self,
-			waiter: &kio::Waiter,
-			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
-		) -> Poll<Result<Option<BiStreams<Self>>, Self::Error>>;
 
 		/// Open a send group at `priority`, or `None` when the transport orders streams by
 		/// their own priority alone.
@@ -373,6 +394,16 @@ pub mod poll {
 		/// stream holds, so it never pauses one: ingest reads every stream as it arrives and
 		/// sheds what its readers fall behind on.
 		fn receive_window(&self) -> Option<super::ReceiveWindow> {
+			None
+		}
+
+		/// Return the peer's stream credit in `dir`, or `None` when the transport cannot say,
+		/// as a browser's WebTransport cannot.
+		///
+		/// Read whenever an open waits, so the session knows whether the peer's credit is what
+		/// it waits for.
+		fn stream_credit(&self, dir: super::Dir) -> Option<super::StreamCredit> {
+			let _ = dir;
 			None
 		}
 
@@ -529,14 +560,6 @@ pub mod poll {
 			(**self).poll_open_bi(waiter, options)
 		}
 
-		fn poll_open_request(
-			&self,
-			waiter: &kio::Waiter,
-			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
-		) -> Poll<Result<Option<BiStreams<Self>>, Self::Error>> {
-			(**self).poll_open_request(waiter, options)
-		}
-
 		fn send_group(&self, priority: i64) -> Option<<Self::SendStream as SendStream>::Group> {
 			(**self).send_group(priority)
 		}
@@ -587,6 +610,10 @@ pub mod poll {
 
 		fn receive_window(&self) -> Option<super::ReceiveWindow> {
 			(**self).receive_window()
+		}
+
+		fn stream_credit(&self, dir: super::Dir) -> Option<super::StreamCredit> {
+			(**self).stream_credit(dir)
 		}
 	}
 
@@ -697,8 +724,7 @@ pub mod poll {
 		/// Set the priority within the stream's send group, or session-wide when ungrouped.
 		///
 		/// Streams with higher values will be sent first, but are not guaranteed to
-		/// arrive first. This matches the W3C WebTransport `sendOrder` convention (and
-		/// quinn's scheduler).
+		/// arrive first. This matches the W3C WebTransport `sendOrder` convention.
 		///
 		/// Backends with a narrower priority saturate or approximate it, so treat the
 		/// ordering as best-effort.
@@ -713,8 +739,8 @@ pub mod poll {
 		/// [`poll_closed`](Self::poll_closed) should resolve when the FIN is acknowledged
 		/// by the peer.
 		///
-		/// NOTE: Quinn implicitly calls this on Drop, but it's a common footgun.
-		/// Implementations SHOULD [`reset`](Self::reset) on Drop instead.
+		/// Dropping an unfinished stream must [`reset`](Self::reset) it, so the peer cannot
+		/// mistake truncated data for a complete stream.
 		fn finish(&mut self) -> Result<(), Self::Error>;
 
 		/// Immediately closes the stream and discards any remaining data.
@@ -723,7 +749,7 @@ pub mod poll {
 		/// The peer may not receive the reset code if the stream is already closed.
 		///
 		/// Takes `&mut self` rather than `self` even though it is terminal, so a caller
-		/// can still [`poll_closed`](Self::poll_closed) afterwards to await the peer ,
+		/// can still [`poll_closed`](Self::poll_closed) afterwards to await the peer,
 		/// and so it matches [`finish`](Self::finish), which must not consume the stream
 		/// for exactly that reason.
 		fn reset(&mut self, code: u32);

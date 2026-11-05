@@ -18,17 +18,25 @@ fn presence(registry: &Registry) -> Presence {
 
 async fn wire_sources(io_uring: bool) {
 	// Process-wide: another test in this binary may have installed it first.
-	let _ = moq_tokio::crypto::install_default();
+	moq_tokio::crypto::install_default().unwrap();
 	let dir = tempfile::tempdir().unwrap();
-	let key = rcgen::KeyPair::generate().unwrap();
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 	let cert = rcgen::CertificateParams::new(vec!["localhost".into()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
 		.unwrap()
 		.self_signed(&key)
 		.unwrap();
 	let cert_path = dir.path().join("cert.pem");
 	let key_path = dir.path().join("key.pem");
 	std::fs::write(&cert_path, cert.pem()).unwrap();
-	std::fs::write(&key_path, key.serialize_pem()).unwrap();
+	std::fs::write(
+		&key_path,
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+	)
+	.unwrap();
 	let mut config = Config::default();
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.cert = vec![cert_path];

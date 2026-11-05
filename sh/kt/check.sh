@@ -28,9 +28,11 @@ if ! command -v java >/dev/null 2>&1; then
     exit 1
 fi
 
-GRADLE_CMD="${GRADLE_CMD:-$(command -v gradle || true)}"
-if [[ -z "$GRADLE_CMD" ]]; then
-    echo "kt check: gradle not on PATH; run 'nix develop' or use 'just kt generate' to only regenerate bindings" >&2
+# `type -P` resolves only executables, so an inherited shell function named gradle can neither
+# stand in for Gradle nor make the gradle() wrapper below call itself.
+gradle_name="${GRADLE_CMD:-gradle}"
+if ! GRADLE_CMD="$(type -P "$gradle_name")"; then
+    echo "kt check: Gradle executable '$gradle_name' not found; run 'nix develop' or use 'just kt generate' to only regenerate bindings" >&2
     exit 1
 fi
 

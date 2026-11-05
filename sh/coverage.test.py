@@ -120,13 +120,15 @@ for arg in sys.argv:
         )
 
     def test_rust_measures_native_workspace_without_fuzz_targets(self):
+        self.env["NEXTEST_NO_FAIL_FAST"] = "1"
         result = self.rust()
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.recorded()
         self.assertEqual(calls[0][2:], ["llvm-cov", "clean", "--workspace"])
         build = calls[1][2:]
+        self.assertEqual(build[:3], ["llvm-cov", "nextest", "--no-fail-fast"])
         self.assertIn("--workspace", build)
-        for excluded in ("moq-net-fuzz", "moq-quic-fuzz"):
+        for excluded in ("moq-net-fuzz", "moq-quic-fuzz", "moq-mux-fuzz", "moq-rtmp-fuzz"):
             self.assertIn(excluded, build)
         self.assertIn("--tests", build)
         self.assertIn("--test-threads", build)

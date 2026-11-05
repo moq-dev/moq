@@ -134,6 +134,7 @@ impl<S: Stream> Export<S> {
 
 	/// The file header: the init segment's `ftyp`, the reserved box, then its `moov`.
 	fn init(&mut self, init: &Bytes) -> Result<Bytes> {
+		fmp4::metadata::check(init)?;
 		let mut cursor = std::io::Cursor::new(init.as_ref());
 		mp4_atom::Ftyp::decode(&mut cursor)?;
 		let split = cursor.position() as usize;
@@ -158,6 +159,7 @@ impl<S: Stream> Export<S> {
 	/// Index a moof+mdat fragment where it will land, after a description of each track the
 	/// file has yet to describe as it is now, and wrapping a late track's in a `free` box.
 	fn fragment(&mut self, fragment: Bytes) -> Result<Bytes> {
+		fmp4::metadata::check(&fragment)?;
 		let index = self.index.as_mut().expect("the init segment comes first");
 		let moof = mp4_atom::Moof::decode(&mut std::io::Cursor::new(fragment.as_ref()))?;
 
@@ -741,6 +743,33 @@ fn sample_table(stsd: &mp4_atom::Stsd, track: &Track, timeline: &Timeline) -> mp
 
 #[cfg(test)]
 mod tests {
+	#[tokio::test]
+	async fn received_metadata_is_bounded() {
+		use crate::container::fmp4::metadata::tests::{attacks, measure};
+		use mp4_atom::Encode;
+		let live = Live::avc3();
+		let mut export = export(&live).await;
+		let mut bounded = true;
+		for (name, data) in attacks(b"moov") {
+			let mut init = Vec::new();
+			mp4_atom::Ftyp {
+				major_brand: b"isom".into(),
+				minor_version: 0,
+				compatible_brands: vec![],
+			}
+			.encode(&mut init)
+			.unwrap();
+			init.extend_from_slice(&data);
+			let init = bytes::Bytes::from(init);
+			bounded &= measure(name, || export.init(&init).is_err());
+		}
+		export.index = Some(super::Index::new(0, &mp4_atom::Moov::default()).unwrap());
+		for (name, data) in attacks(b"moof") {
+			bounded &= measure(name, || export.fragment(data.clone()).is_err());
+		}
+		assert!(bounded);
+	}
+
 	use std::time::Duration;
 
 	use mp4_atom::DecodeMaybe;

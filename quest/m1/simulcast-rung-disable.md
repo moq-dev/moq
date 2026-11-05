@@ -1,40 +1,29 @@
-# [M] OBS disables simulcast rungs the grant cannot fund, proven on a shaped uplink
+# [M] A shaped uplink proves native rung disable and resume
 
 ## Goal
 
-The OBS plugin stops sending its top video renditions when their bandwidth
-grant cannot fund them, advertising each as `enabled: false`, and re-enables
-them with hysteresis once the grant recovers, as the Rust and FFI publishers
-already do. One shaped-uplink run through moq-ffi proves the rule end to end
-over real BBR3 probing, including resuming a rung after the grant fell below
-the lowest rung. The JS publisher is
+One shaped-uplink run through moq-ffi proves the rung rule end to end over
+real BBR3 probing: as the bottleneck narrows below a rung's band, the top
+rendition stops and is advertised `enabled: false`, and once the bottleneck
+opens back up it resumes with hysteresis, including after the grant fell below
+the lowest rung. It runs nightly. The JS publisher is
 [JS rung disable](/quest/m2/probe/rung-disable-js.md).
 
 ## Plan
 
-Landed in [moq-dev/moq#6781](https://github.com/moq-dev/moq/pull/6781): the
-rule lives in `moq_mux::rate` (`Policy::lower` sets the band boundary
-`(max + 2 * lower) / 3`, `Follower` yields `rate::Target::Disabled`), only
-once a session probes for the reservation (`bandwidth::Consumer::probed`).
-An idle reservation reads the share it would get, so recovery does not depend
-on demand. The FFI video producer takes `lower` (the next rendition down),
-sits one track priority below it, drains its encoder while disabled, and
-reopens on a keyframe; `moq_encode_video` takes the same `lower` handle in
-its `moq_video_encode_options`.
+The rule and every native publisher landed: `moq_mux::rate` in
+[moq-dev/moq#6781](https://github.com/moq-dev/moq/pull/6781) (`Policy::lower`
+sets the band boundary `(max + 2 * lower) / 3`; a rung disables only while a
+session probes for its reservation), the FFI and C video producers there too,
+and OBS through moq-ffi's `MoqRateControl`, `MoqVideoInit.lower`, and
+`MoqMediaTrackProducer::set_enabled`, which a pre-encoded publisher follows
+the same way.
 
-- OBS: each OBS video encoder is its own rendition (`video_tracks` in
-  `cpp/obs/src/moq-output.cpp`) publishing pre-encoded packets through a
-  media track, and `MoQRate` (`cpp/obs/src/moq-rate.h`) mirrors
-  `rate::Control` without the rung rule. It needs, through the generated C++
-  package: a way to flip a media track's catalog `enabled`, the reservation's
-  `probed` state (dropped from `MoqReservation` in #6781 for lack of a
-  consumer), and the lower encoder's ceiling and priority. OBS cannot stop an
-  encoder or force a keyframe per rung mid-stream, so decide between dropping
-  packets while disabled and resuming at the next natural keyframe, or
-  restarting the encoder.
-- Shaped uplink: a `moq-shaper` profile whose rate steps down and back up
-  (like the `cellular-step` built-in) opens the bottleneck back up mid-run.
-  Run it nightly with an `#[ignore]` test and a recipe in `rs/justfile`,
+- Shape it with a `moq-shaper` profile whose rate steps down below the top
+  rung and back up (like the `cellular-step` built-in), behind a deep but
+  finite queue whose overflow drops packets. Assert the disable, the catalog
+  `enabled` flips, and the resume, not exact timings.
+- Run it nightly with an `#[ignore]` test and a recipe in `rs/justfile`,
   beside `quic-sim`.
 
 ## Related

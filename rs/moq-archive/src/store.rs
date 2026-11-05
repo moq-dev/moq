@@ -105,7 +105,7 @@ mod tests {
 			.inner()
 			.put(
 				&path,
-				br#"{ "timescale": 1000, "priority": 1, "version": 3 }"#.as_ref().into(),
+				br#"{ "timescale": 1000, "priority": 1, "version": 4 }"#.as_ref().into(),
 			)
 			.await
 			.unwrap();
@@ -116,7 +116,7 @@ mod tests {
 			.bytes()
 			.await
 			.unwrap();
-		assert_eq!(&kept[..], br#"{ "timescale": 1000, "priority": 1, "version": 3 }"#);
+		assert_eq!(&kept[..], br#"{ "timescale": 1000, "priority": 1, "version": 4 }"#);
 	}
 
 	#[tokio::test]
@@ -133,7 +133,7 @@ mod tests {
 				matches!(err, Error::Version(2))
 			}),
 			("junk", b"not json", |err| matches!(err, Error::Json(_))),
-			("zero", br#"{"version":3,"priority":0,"timescale":0}"#, |err| {
+			("zero", br#"{"version":4,"priority":0,"timescale":0}"#, |err| {
 				matches!(err, Error::Timescale(0))
 			}),
 		] {

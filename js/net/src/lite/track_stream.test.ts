@@ -60,7 +60,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const fin = track.reader.done();
 		expect(await settlesWithin(fin, 50)).toBe(false);
 
-		await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart([0]) }, version);
+		await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart([0n]) }, version);
 		expect(await fin).toBe(true);
 
 		reader.close();
@@ -316,7 +316,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		if (kind === "TRACK") void publisher.runTrackInfo(new TrackMessage(Path.from("room"), "video"), server);
 		else
 			void publisher.runFetch(
-				new Fetch({ broadcast: Path.from("room"), track: "video", priority: 0, group: 0 }),
+				new Fetch({ broadcast: Path.from("room"), track: "video", priority: 0, group: 0n }),
 				server,
 			);
 		return client;

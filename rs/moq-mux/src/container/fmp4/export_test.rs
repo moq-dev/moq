@@ -12,8 +12,8 @@ fn timed() -> moq_net::track::Info {
 	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 }
 
-/// The media track's full retention window, so an exporter started after publishing
-/// can still read every retained group. These tests write or import a whole broadcast
+/// The media track's full max age, so an exporter started after publishing
+/// can still read every fresh group. These tests write or import a whole broadcast
 /// and only then export it, which the
 /// exporter's default [`std::time::Duration::ZERO`](std::time::Duration::ZERO) collapses to the
 /// live edge: completeness has to be asked for, exactly as a real recorder does.
@@ -78,7 +78,7 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 }
 
 /// Legacy AAC source (catalog `Container::Legacy`, codec `mp4a.40.2`, with a
-/// `description` carrying the AudioSpecificConfig — the shape an MPEG-TS import
+/// `description` carrying the AudioSpecificConfig - the shape an MPEG-TS import
 /// produces) → fMP4 export must synthesize an mp4a sample entry whose esds
 /// carries that AudioSpecificConfig, instead of bailing with UnsupportedSynthesis.
 #[tokio::test(start_paused = true)]

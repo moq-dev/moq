@@ -22,7 +22,7 @@ platforms = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-pc-win
 # exact-versions = true
 
 [traversal-excludes]
-workspace-members = ["moq-net-fuzz", "moq-quic-fuzz"]
+workspace-members = ["moq-mux-fuzz", "moq-net-fuzz", "moq-quic-fuzz", "moq-rtmp-fuzz"]
 
 [final-excludes]
 workspace-members = ["kio-macros"]

@@ -17,9 +17,9 @@ from moq_ffi import (
 from moq_ffi import MoqVideoFrameRate as FrameRate
 
 from ._read import End, Gap, _end, _gap
-from ._records import Timestamp, VideoDecodedFrame
+from ._records import Delay, Timestamp, VideoDecodedFrame
 from ._stream import _Stream
-from .media import CatalogProducer, DecodeStart, Delay, Dimensions, Video
+from .media import CatalogProducer, DecodeStart, Dimensions, Video
 from .publish import TrackDemand
 from .session import Allocator, Reservation
 from .subscribe import BroadcastConsumer
@@ -63,21 +63,21 @@ class DecoderOutput:
     """What a :class:`Consumer` delivers: an optional resize, a delay, and the decoder's surface (macOS only).
 
     ``delay.min`` is the playout delay, where a cold join starts; ``delay.max`` is how
-    far behind the live edge a stalled group may fall before it is skipped. ``None`` is
-    zero for both. ``start`` picks where to begin on a track that already holds groups,
+    far behind the live edge a stalled group may fall before it is skipped. Both default
+    to zero. ``start`` picks where to begin on a track that already holds groups,
     ``None`` for the oldest: a live player passes ``DecodeStart.LATEST`` so a reopened
     decoder skips the cached backlog.
     """
 
     resize: Dimensions | None = None
-    delay: Delay | None = None
+    delay: Delay = Delay()
     surface: bool = False
     start: DecodeStart | None = None
 
     def _ffi(self) -> MoqVideoDecoderOutput:
         return MoqVideoDecoderOutput(
             resize=self.resize,
-            delay=self.delay,
+            delay=self.delay._ffi(),
             surface=self.surface,
             start=self.start,
         )

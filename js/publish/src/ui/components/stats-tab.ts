@@ -55,18 +55,18 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 		const display = capture ? effect.get(capture.out.display) : undefined;
 		const cfg = effect.get(publish.video.out.catalog);
 		videoCard.el.style.display = display ? "" : "none";
-		vRes.textContent = display ? `${display.width}×${display.height}` : "—";
-		vCodec.textContent = cfg?.codec ?? "—";
+		vRes.textContent = display ? `${display.width}×${display.height}` : "-";
+		vCodec.textContent = cfg?.codec ?? "-";
 	});
 
 	parent.run((effect) => {
 		const cfg = effect.get(publish.audio.out.catalog);
 		audioCard.el.style.display = cfg ? "" : "none";
 		if (!cfg) return;
-		aCodec.textContent = cfg.codec ?? "—";
-		aRate.textContent = cfg.sampleRate ? formatHz(cfg.sampleRate) : "—";
-		aChannels.textContent = cfg.numberOfChannels ? `${cfg.numberOfChannels}` : "—";
-		aBitrate.textContent = cfg.bitrate ? formatBitrate(cfg.bitrate) : "—";
+		aCodec.textContent = cfg.codec ?? "-";
+		aRate.textContent = cfg.sampleRate ? formatHz(cfg.sampleRate) : "-";
+		aChannels.textContent = cfg.numberOfChannels ? `${cfg.numberOfChannels}` : "-";
+		aBitrate.textContent = cfg.bitrate ? formatBitrate(cfg.bitrate) : "-";
 	});
 
 	parent.run((effect) => {
@@ -74,8 +74,8 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 		const status = effect.get(publish.connection.status);
 		const name = effect.get(publish.broadcast.in.name);
 		nStatus.textContent = status;
-		nServer.textContent = url?.host ?? "—";
-		nName.textContent = name?.toString() || "—";
+		nServer.textContent = url?.host ?? "-";
+		nName.textContent = name?.toString() || "-";
 	});
 
 	// Live graphs: frame rate from captured frames, bitrate measured from the bytes we encoded.
@@ -123,7 +123,7 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 		vFpsGraph.push(elapsed > 0 && frameDelta > 0 ? frameDelta / (elapsed / 1000) : undefined);
 
 		const stats = publish.video.out.stats.peek();
-		vTarget.textContent = stats.bitrate !== undefined ? formatBitrate(stats.bitrate) : "—";
+		vTarget.textContent = stats.bitrate !== undefined ? formatBitrate(stats.bitrate) : "-";
 		vSkipped.textContent = `${stats.skipped}`;
 
 		const bytes = encoded();

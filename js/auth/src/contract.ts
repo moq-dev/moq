@@ -98,6 +98,8 @@ export const BytesSchema = z.object({
 export type Bytes = z.infer<typeof BytesSchema>;
 
 const BaseRequestSchema = z.object({
+	/** The attached credential this event concerns; absent for the connection itself. */
+	auth: z.optional(z.string()),
 	/** Random 128-bit hex, unique per session; the key every event for it shares. */
 	id: z.string(),
 	/** The operator's name for the relay asking. */
@@ -141,6 +143,12 @@ export const RequestSchema = z.discriminatedUnion("event", [
 	z.extend(BaseRequestSchema, {
 		/** A session was accepted and asks to be admitted. */
 		event: z.literal("connect"),
+	}),
+	z.extend(BaseRequestSchema, {
+		/** Another credential asks to join the connection. */
+		event: z.literal("attach"),
+		/** The credential's own lifecycle identity. */
+		auth: z.string(),
 	}),
 	z.extend(BaseRequestSchema, {
 		/** The grant asked to be re-checked on its cadence. */

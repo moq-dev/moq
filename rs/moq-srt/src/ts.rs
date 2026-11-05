@@ -118,7 +118,7 @@ impl Publisher {
 	/// Wire up the TS importer and catalog for `path` on `origin`, announcing the broadcast
 	/// now, or each program's once its PMT declares its tracks for [`Program::All`].
 	///
-	/// `config` is the catalog the importer publishes into: retention
+	/// `config` is the catalog the importer publishes into: max age
 	/// (`with_max_age`) and the connection allocator passthrough tracks claim on
 	/// (`with_bandwidth`).
 	pub fn new(
@@ -742,10 +742,10 @@ mod tests {
 		assert!(broadcast.is_closed());
 	}
 
-	/// The retention the caller configured has to reach the media tracks the TS importer
+	/// The max age the caller configured has to reach the media tracks the TS importer
 	/// mints off the PMT, not stop at the catalog producer it was set on.
 	#[tokio::test]
-	async fn publisher_declares_the_configured_retention() {
+	async fn publisher_declares_the_configured_max_age() {
 		let origin = produce_origin();
 		let mut publisher = Publisher::new(
 			&origin,

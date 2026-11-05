@@ -84,22 +84,20 @@ pub struct Cubic {
 
 impl Cubic {
     fn new(config: Arc<Config>, init: Init) -> Self {
+        let current_mtu = init.mtu as u64;
+        // The 1200-based default may not hold one datagram of a larger MTU, which would block
+        // the first packet with nothing in flight to ever open the window.
+        let window = config.initial_window.max(2 * current_mtu);
         Self {
             state: State {
-                window: config.initial_window,
+                window,
                 ssthresh: u64::MAX,
                 ..Default::default()
             },
-            current_mtu: init.mtu as u64,
+            current_mtu,
             pre_congestion_state: None,
             rtt: init.rtt,
-            pacer: Pacer::new(
-                init.rtt,
-                config.initial_window,
-                init.mtu,
-                init.max_pacing_rate,
-                init.now,
-            ),
+            pacer: Pacer::new(init.rtt, window, init.mtu, init.max_pacing_rate, init.now),
         }
     }
 
@@ -311,7 +309,8 @@ pub struct Config {
 impl Config {
     /// Default limit on the amount of outstanding data in bytes.
     ///
-    /// Recommended value: `min(10 * max_datagram_size, max(2 * max_datagram_size, 14720))`
+    /// Recommended value: `min(10 * max_datagram_size, max(2 * max_datagram_size, 14720))`.
+    /// Raised to at least two datagrams of the path MTU.
     pub fn initial_window(&mut self, value: u64) -> &mut Self {
         self.initial_window = value;
         self

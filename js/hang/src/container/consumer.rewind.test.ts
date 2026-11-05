@@ -70,10 +70,10 @@ for (const start of [16_000, 0]) {
 		try {
 			producer.encode(new Uint8Array([1]), Micro(0), true);
 			producer.encode(new Uint8Array([1]), Micro(33_000), false);
-			expect((await frame(consumer))?.group).toBe(0);
+			expect((await frame(consumer))?.group).toBe(0n);
 			await frame(consumer);
 			producer.encode(new Uint8Array([1]), Micro(start), true);
-			expect((await frame(consumer))?.group).toBe(1);
+			expect((await frame(consumer))?.group).toBe(1n);
 		} finally {
 			consumer.close();
 			producer.close();

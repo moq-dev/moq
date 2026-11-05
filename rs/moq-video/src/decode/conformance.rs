@@ -157,7 +157,7 @@ fn open(name: &str) -> Option<Box<dyn Backend>> {
 		kind: Kind::Named(name.to_owned()),
 		..Config::new()
 	};
-	backend::open(Codec::H264, &config).ok()
+	backend::open(&Codec::H264.into(), &config).ok()
 }
 
 /// The backends that opened on this host.

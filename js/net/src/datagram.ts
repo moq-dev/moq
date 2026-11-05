@@ -15,7 +15,7 @@ import type { Timestamp } from "./time.ts";
  */
 export interface Datagram {
 	/** Per-track sequence number, shared with the group namespace. */
-	sequence: number;
+	sequence: bigint;
 	/** Presentation timestamp, present exactly when the track has a timescale. */
 	timestamp?: Timestamp;
 	/** The datagram payload. */

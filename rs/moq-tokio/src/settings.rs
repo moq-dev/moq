@@ -291,28 +291,6 @@ pub struct Log {
 	level: Option<String>,
 }
 
-/// Iroh endpoint settings (`[iroh]`, `--iroh-*`).
-#[cfg(feature = "iroh")]
-#[derive(usage_rs::Config)]
-#[usage(prefix = "iroh")]
-#[doc(hidden)]
-pub struct Iroh {
-	#[usage(env = "MOQ_IROH_ENABLED", cli("--iroh-enabled"))]
-	enabled: Option<bool>,
-
-	#[usage(env = "MOQ_IROH_SECRET", cli("--iroh-secret"))]
-	secret: Option<String>,
-
-	#[usage(env = "MOQ_IROH_BIND_V4", cli("--iroh-bind-v4"))]
-	bind_v4: Option<String>,
-
-	#[usage(env = "MOQ_IROH_BIND_V6", cli("--iroh-bind-v6"))]
-	bind_v6: Option<String>,
-
-	#[usage(env = "MOQ_IROH_DISABLE_RELAY", cli("--iroh-disable-relay"))]
-	disable_relay: Option<bool>,
-}
-
 #[derive(usage_rs::Config)]
 #[usage(prefix = "listen.lb")]
 struct ListenLb {

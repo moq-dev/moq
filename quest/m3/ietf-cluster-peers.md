@@ -19,6 +19,25 @@ epoch-only, both and neither negotiated: cluster metadata alone never makes
 namespace equality sufficient for continuity. Without verified epochs,
 route replacement signals a new instance instead of stitching.
 
+Noted 2026-10-31 from [moq-dev/moq#7259](https://github.com/moq-dev/moq/pull/7259)
+(landed as 44e85d8efb): the draft's "Track Delivery" section
+(`drafts/draft-lcurley-moq-cluster.md:262` on be39188000) runs ahead of the
+implementation.
+It gives PUBLISH and SUBSCRIBE_TRACKS the namespace advertisements' Hop ID
+loop rules: a PUBLISH carries HOP_PATH and ROUTE_COST, is sourced only from a
+path that excludes the subscriber's Hop ID, and is discarded when its path
+holds the receiver's own Hop ID; an edge relay forwarding an unsolicited
+PUBLISH keeps its HOP_PATH (or the bridging 0 entry), appends its Hop ID, and
+accumulates ROUTE_COST; and SUBSCRIBE_TRACKS resolves per namespace and
+resumes a track's preferred source only while the track has demand. The
+same PR put EPOCH on PUBLISH (`drafts/draft-lcurley-moq-epoch.md:112`).
+Neither `rs/moq-net` nor `js/net` carries HOP_PATH, ROUTE_COST, or EPOCH on
+PUBLISH yet. Implement them here, and reconcile with
+[moq-dev/moq#7236](https://github.com/moq-dev/moq/pull/7236) (merged),
+whose publishers refuse inbound SUBSCRIBE_TRACKS
+(`rs/moq-net/src/ietf/publisher.rs:1198`): once this lands, a cluster peer
+serves it instead.
+
 Wire: extends `draft-lcurley-moq-cluster`, updated in the same PR.
 
 ## Required

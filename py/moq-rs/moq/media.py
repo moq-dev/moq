@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -29,6 +30,7 @@ from moq_ffi import (
     MoqMediaFrame,
     MoqMediaGroupConfig,
     MoqMediaGroupConsumer,
+    MoqMediaProducer,
     MoqMediaRead,
     MoqMediaTarget,
     MoqMediaTimebase,
@@ -39,7 +41,6 @@ from moq_ffi import (
     MoqRendition,
 )
 from moq_ffi import MoqDecodeStart as DecodeStart
-from moq_ffi import MoqDelay as Delay
 from moq_ffi import MoqDimensions as Dimensions
 from moq_ffi import MoqVideo as Video
 from moq_ffi import MoqVideoFormat as VideoFormat
@@ -167,9 +168,21 @@ class TrackProducer:
         return cls(MoqMediaTrackProducer.audio(broadcast._inner, target._ffi(), init))
 
     @classmethod
-    def video(cls, broadcast: BroadcastProducer, init: VideoInit, *, target: Target = Named()) -> TrackProducer:
-        """Import complete encoded video frames on a named or requested track."""
-        return cls(MoqMediaTrackProducer.video(broadcast._inner, target._ffi(), init))
+    def video(
+        cls,
+        broadcast: BroadcastProducer,
+        init: VideoInit,
+        *,
+        target: Target = Named(),
+        lower: TrackProducer | TrackStreamProducer | None = None,
+    ) -> TrackProducer:
+        """Import complete encoded video frames on a named or requested track.
+
+        Pass ``lower``, the next lower rendition of the same source and of either
+        producer kind, to publish this track one priority below it, so a bandwidth
+        allocator funds that one first.
+        """
+        return cls(MoqMediaTrackProducer.video(broadcast._inner, target._ffi(), _lower(init, lower)))
 
     def __init__(self, inner: MoqMediaTrackProducer) -> None:
         self._inner = inner
@@ -185,6 +198,15 @@ class TrackProducer:
     def discontinuity(self) -> None:
         """Mark a timeline break, preserving the advertised jitter and delay."""
         self._inner.discontinuity()
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Advertise whether this video rendition is being produced, as its catalog ``enabled``.
+
+        Disable it when its sender stops for lack of bandwidth and mark a
+        :meth:`discontinuity`; enable it again just before the keyframe that
+        resumes it. An audio track refuses.
+        """
+        self._inner.set_enabled(enabled)
 
     def cut(self) -> None:
         """Draw a group boundary here.
@@ -253,9 +275,19 @@ class TrackStreamProducer:
     """
 
     @classmethod
-    def video(cls, broadcast: BroadcastProducer, init: VideoInit, *, target: Target = Named()) -> TrackStreamProducer:
-        """Import a video byte stream, inferring frame boundaries."""
-        return cls(MoqMediaTrackStreamProducer.video(broadcast._inner, target._ffi(), init))
+    def video(
+        cls,
+        broadcast: BroadcastProducer,
+        init: VideoInit,
+        *,
+        target: Target = Named(),
+        lower: TrackProducer | TrackStreamProducer | None = None,
+    ) -> TrackStreamProducer:
+        """Import a video byte stream, inferring frame boundaries.
+
+        ``lower`` is as for :meth:`TrackProducer.video`.
+        """
+        return cls(MoqMediaTrackStreamProducer.video(broadcast._inner, target._ffi(), _lower(init, lower)))
 
     def __init__(self, inner: MoqMediaTrackStreamProducer) -> None:
         self._inner = inner
@@ -268,9 +300,30 @@ class TrackStreamProducer:
         """Push raw stream bytes; whole frames are emitted as they complete."""
         self._inner.write(payload)
 
+    def set_enabled(self, enabled: bool) -> None:
+        """Stop or resume publishing this rendition, advertised as its catalog ``enabled``.
+
+        Disable it when its sender stops for lack of bandwidth: this marks a
+        discontinuity and drops everything written until it is enabled again, so
+        the stream may keep flowing. Enabled again, it resumes, and advertises
+        itself enabled, at the next keyframe in the stream.
+        """
+        self._inner.set_enabled(enabled)
+
     def finish(self) -> None:
         """Finish publishing and flush a clean end to subscribers."""
         self._inner.finish()
+
+
+def _lower(init: VideoInit, lower: TrackProducer | TrackStreamProducer | None) -> VideoInit:
+    if lower is None:
+        return init
+    init = copy.copy(init)
+    if isinstance(lower, TrackProducer):
+        init.lower = cast(MoqMediaProducer, MoqMediaProducer.TRACK(producer=lower._inner))
+    else:
+        init.lower = cast(MoqMediaProducer, MoqMediaProducer.STREAM(producer=lower._inner))
+    return init
 
 
 def _rendition(id: str, rendition: Video | Audio) -> MoqRendition:
@@ -335,7 +388,7 @@ class GroupConsumer(_Stream[MediaFrame]):
 
         Frame timestamps are container media time, not the transport's. Which
         groups arrive, and how long a stalled one stays readable, is the
-        subscription's ``max_delay``. Takes over ``group``, whose handle is
+        subscription's ``delay.max``. Takes over ``group``, whose handle is
         closed afterward; raises ``Error.AlreadyCommitted`` if it has already
         read a frame.
         """
@@ -428,7 +481,6 @@ __all__ = [
     "Video",
     "Catalog",
     "Container",
-    "Delay",
     "Dimensions",
     "DecodeStart",
     "AudioFormat",

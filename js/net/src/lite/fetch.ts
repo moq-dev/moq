@@ -2,6 +2,7 @@ import type { Milli } from "@moq/clock";
 import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import * as Duration from "./duration.ts";
 import { decodePin, encodePin } from "./instance.ts";
 import * as Message from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
@@ -23,9 +24,9 @@ export class Fetch {
 	instance?: Instance.Valid;
 	track: string;
 	priority: number;
-	/** Reader freshness budget. Lite-07+ only; omission uses publisher retention alone. */
+	/** Reader freshness budget. Lite-07+ only; omission leaves the publisher's max age as the only bound. */
 	maxDelay?: Milli;
-	group: number;
+	group: bigint;
 
 	/** Index of the first frame to return; 0 is the start of the group. Lite-06+. */
 	startFrame: number;
@@ -51,7 +52,7 @@ export class Fetch {
 		track: string;
 		priority: number;
 		maxDelay?: Milli;
-		group: number;
+		group: bigint;
 		startFrame?: number;
 		endFrame?: number;
 	}) {
@@ -70,9 +71,9 @@ export class Fetch {
 		await encodePin(w, version, this.instance);
 		await w.string(this.track);
 		await w.u8(toWire(this.priority));
-		if (hasFetchMaxDelay(version)) await w.u53(this.maxDelay === undefined ? 0 : this.maxDelay + 1);
+		if (hasFetchMaxDelay(version)) await Duration.encodeOptional(w, this.maxDelay);
 		else if (this.maxDelay !== undefined) throw new Error("fetch maxDelay not supported for this version");
-		await w.u53(this.group);
+		await w.u62(this.group);
 
 		if (hasFrameBounds(version)) {
 			await w.u53(this.startFrame);
@@ -88,9 +89,10 @@ export class Fetch {
 		const instance = await decodePin(r, version);
 		const track = await r.string();
 		const priority = fromWire(await r.u8());
-		const encodedMaxDelay = hasFetchMaxDelay(version) ? await r.u53() : 0;
-		const maxDelay = encodedMaxDelay > 0 ? ((encodedMaxDelay - 1) as Milli) : undefined;
-		const group = await r.u53();
+		const maxDelay = hasFetchMaxDelay(version)
+			? ((await Duration.decodeOptional(r)) as Milli | undefined)
+			: undefined;
+		const group = await r.u62();
 
 		if (!hasFrameBounds(version)) {
 			return new Fetch({ broadcast, instance, track, priority, maxDelay, group });

@@ -11,22 +11,27 @@ import { Video } from "@moq/publish";
 
 export type AnnounceMode = "always" | "source";
 
+export type CaptureMode = "hold" | "release";
+
 export type SourceType = "camera" | "screen" | "file";
 
 export default class extends HTMLElement {
 	constructor();
 	get announce(): AnnounceMode | undefined;
 	set announce(value: AnnounceMode);
-	attributeChangedCallback(name: "source" | "url" | "stats" | "announce" | "name" | "backend" | "versions" | "muted" | "invisible" | "preview" | "echo-path", oldValue: string | null, newValue: string | null): void;
+	attributeChangedCallback(name: "source" | "url" | "stats" | "announce" | "name" | "capture" | "backend" | "versions" | "muted" | "invisible" | "preview" | "echo-path", oldValue: string | null, newValue: string | null): void;
 	audio: Audio.Encoder;
 	get backend(): Preview.Backend;
 	set backend(value: Preview.Backend);
 	broadcast: Broadcast;
+	get capture(): CaptureMode;
+	set capture(value: CaptureMode);
 	connectedCallback(): void;
 	connection: Net.Connection;
 	readonly controls: {
 		announce: Signals.Signal<AnnounceMode | undefined>;
 		backend: Signals.Signal<Preview.Backend>;
+		capture: Signals.Signal<CaptureMode>;
 		echoPath: Signals.Signal<Net.Path.Relative | undefined>;
 		invisible: Signals.Signal<boolean>;
 		muted: Signals.Signal<boolean>;
@@ -43,7 +48,7 @@ export default class extends HTMLElement {
 	set muted(value: boolean);
 	get name(): Net.Path.Valid;
 	set name(value: string | Net.Path.Valid);
-	static observedAttributes: readonly ["url", "versions", "name", "muted", "invisible", "source", "preview", "backend", "announce", "stats", "echo-path"];
+	static observedAttributes: readonly ["url", "versions", "name", "muted", "invisible", "source", "preview", "backend", "announce", "stats", "echo-path", "capture"];
 	get preview(): Preview.Mode;
 	set preview(value: Preview.Mode);
 	readonly signals: Signals.Effect;

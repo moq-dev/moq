@@ -144,13 +144,18 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 	let viewer = origin_producer(2);
 	let broadcast = publisher.create_broadcast("live").unwrap();
 	let source = broadcast
-		.create_track("video", track::Info::default().with_timescale(Timescale::MILLI))
+		.create_track(
+			"video",
+			track::Info::default()
+				.with_timescale(Timescale::MILLI)
+				.with_max_age(None),
+		)
 		.unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let accept = async {
 		let conn = server.accept().await.unwrap().accept().unwrap().await.unwrap();
-		let session = moq_tokio::transport::Session::new(web::Session::raw(conn), moq_net::transport::Address::Setup);
+		let session = web::Session::raw(conn);
 		let (session, driver) = moq_net::Server::new()
 			.with_versions(version.into())
 			.with_publisher(publisher.consume())
@@ -166,7 +171,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 			.unwrap()
 			.await
 			.unwrap();
-		let session = moq_tokio::transport::Session::new(web::Session::raw(conn), moq_net::transport::Address::Setup);
+		let session = web::Session::raw(conn);
 		let (session, driver) = moq_net::Client::new()
 			.with_versions(version.into())
 			.with_subscriber(viewer.clone())
@@ -242,10 +247,16 @@ fn transport(seed: u64) -> driver::transport::Config {
 /// A self-signed certificate for `localhost`, and the configs that serve and trust it with
 /// `version`'s ALPN
 fn tls(version: Version) -> (driver::server::Config, driver::client::Config) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-	let rcgen::CertifiedKey { cert, signing_key } =
-		rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-	let key = rustls::pki_types::PrivateKeyDer::Pkcs8(signing_key.serialize_der().into());
+	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let rcgen::CertifiedKey { cert, signing_key } = (|| -> std::result::Result<_, rcgen::Error> {
+		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+		params.serial_number = Some(1u64.into());
+		let cert = params.self_signed(&signing_key)?;
+		Ok(rcgen::CertifiedKey { cert, signing_key })
+	})()
+	.unwrap();
+	let key = rustls::pki_types::PrivateKeyDer::Pkcs8(signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into());
 	let alpn = vec![version.alpn().as_bytes().to_vec()];
 
 	let mut server = rustls::ServerConfig::builder()
@@ -253,7 +264,6 @@ fn tls(version: Version) -> (driver::server::Config, driver::client::Config) {
 		.with_single_cert(vec![cert.der().clone()], key)
 		.unwrap();
 	server.alpn_protocols = alpn.clone();
-	let server = driver::crypto::rustls::QuicServerConfig::try_from(server).unwrap();
 
 	let mut roots = rustls::RootCertStore::empty();
 	roots.add(cert.der().clone()).unwrap();
@@ -261,7 +271,6 @@ fn tls(version: Version) -> (driver::server::Config, driver::client::Config) {
 		.with_root_certificates(roots)
 		.with_no_client_auth();
 	client.alpn_protocols = alpn;
-	let client = driver::crypto::rustls::QuicClientConfig::try_from(client).unwrap();
 
 	(
 		driver::server::Config::new(Arc::new(server)),

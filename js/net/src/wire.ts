@@ -25,18 +25,13 @@ export interface Broadcast {
 	/** The newest frame the track's cache holds, read without subscribing; `undefined` while it holds none. */
 	largest(name: string): track.Position | undefined;
 	/** Fetch one group; absent when the session's version has no FETCH, so callers never ask. */
-	fetchGroup?(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
+	fetchGroup?(name: string, sequence: bigint, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	requested(): Promise<track.Request | undefined>;
 	// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
 	/** List the broadcast's tracks for `owner`, ending its older listing of this broadcast with CANCELLED. */
 	tracks(owner?: object): Tracks;
 	/** Answer the broadcast's listings, as a session does with its peer's; throws while another answers. */
 	lister(): Lister;
-	/**
-	 * A session delivered this broadcast. An originated route refuses to serve it:
-	 * publishing it would name this origin's hop for upstream content.
-	 */
-	fromSession?: boolean;
 }
 
 /** Receives one change to the watched prefixes: `prefix` is now (or no longer) wanted. */
@@ -153,19 +148,14 @@ export function registerWire(handle: object, view: View): void {
 	views.set(handle, view);
 }
 
-/**
- * Replace selected operations on a broadcast's package-private view.
- *
- * Only a session-delivered broadcast does this, so the replacement is marked.
- * An origin refuses to serve that broadcast on a route it originated.
- */
+/** Replace selected operations on a broadcast's package-private view. */
 export function overrideBroadcastWire(
 	handle: broadcast.Consumer,
 	overrides: Partial<Pick<Broadcast, "resolveTrackInfo" | "fetchGroup">>,
 ): void {
 	const view = views.get(handle);
 	if (!view) throw new Error("broadcast has no wire view");
-	views.set(handle, { ...(view as Broadcast), ...overrides, fromSession: true });
+	views.set(handle, { ...(view as Broadcast), ...overrides });
 }
 
 export function wireOf(handle: broadcast.Producer): Produced;

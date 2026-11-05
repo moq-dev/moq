@@ -53,8 +53,8 @@ async fn leased(handle: &moq_uring::Handle, recv: &mut quic::recv::Stream, want:
 	within(
 		handle,
 		"stream data",
-		std::future::poll_fn(|cx| {
-			recv.poll_lease(cx, want)
+		kio::wait(|waiter| {
+			recv.poll_lease(waiter, want)
 				.map_ok(|lease| (lease.remaining(), lease.is_fin()))
 		}),
 	)
@@ -67,8 +67,8 @@ async fn consume(handle: &moq_uring::Handle, recv: &mut quic::recv::Stream, n: u
 	within(
 		handle,
 		"stream data",
-		std::future::poll_fn(|cx| {
-			recv.poll_lease(cx, n).map_ok(|mut lease| {
+		kio::wait(|waiter| {
+			recv.poll_lease(waiter, n).map_ok(|mut lease| {
 				lease.advance(n);
 				lease.release();
 			})
@@ -100,11 +100,11 @@ fn endpoints(
 	server_config.transport.limits.receive_window = std::num::NonZeroU64::new(window as u64);
 	server_config.transport.limits.stream_receive_window = std::num::NonZeroU64::new(stream_window as u64);
 	let server = quic::Endpoint::new(
-		socket(handle),
 		quic::endpoint::Config::default().with_server(server_config),
+		socket(handle),
 	)
 	.expect("server endpoint");
-	let client = quic::Endpoint::new(socket(handle), quic::endpoint::Config::default()).expect("dial-only endpoint");
+	let client = quic::Endpoint::new(quic::endpoint::Config::default(), socket(handle)).expect("dial-only endpoint");
 	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	dial.verify = false;
@@ -115,7 +115,7 @@ fn endpoints(
 fn write(handle: &moq_uring::Handle, mut send: quic::send::Stream, len: usize) {
 	handle.spawn(async move {
 		if send.write_all(Bytes::from(vec![7u8; len])).await.is_ok() {
-			let _ = send.finish().stopped().await;
+			let _ = send.finish().await;
 		}
 	});
 }
@@ -147,9 +147,9 @@ fn leases_spend_the_connection_window() {
 
 			// A lease returns nothing, so the peer stops at the window.
 			assert_eq!(leased(&handle, &mut recv, WINDOW).await, (WINDOW, false));
-			let mut cx = Context::from_waker(Waker::noop());
+			let waiter = kio::Waiter::noop();
 			assert!(matches!(
-				recv.poll_lease(&mut cx, WINDOW + 1).map_ok(|lease| lease.remaining()),
+				recv.poll_lease(&waiter, WINDOW + 1).map_ok(|lease| lease.remaining()),
 				Poll::Ready(Err(quic::recv::Error::TooLarge))
 			));
 
@@ -196,14 +196,14 @@ fn stuck_window_evicts_the_lower_priority() {
 			within(
 				&handle,
 				"an eviction",
-				std::future::poll_fn(|cx| {
+				kio::wait(|waiter| {
 					if low_done.is_none()
-						&& let Poll::Ready(res) = low.poll_lease(cx, WINDOW).map_ok(|lease| lease.remaining())
+						&& let Poll::Ready(res) = low.poll_lease(waiter, WINDOW).map_ok(|lease| lease.remaining())
 					{
 						low_done = Some(res);
 					}
 					if high_done.is_none()
-						&& let Poll::Ready(res) = high.poll_lease(cx, WINDOW).map_ok(|lease| lease.remaining())
+						&& let Poll::Ready(res) = high.poll_lease(waiter, WINDOW).map_ok(|lease| lease.remaining())
 					{
 						high_done = Some(res);
 					}
@@ -244,11 +244,11 @@ fn chunked_writes_stop_at_the_window() {
 	);
 	server_config.transport.limits.stream_receive_window = std::num::NonZeroU64::new(STREAM_WINDOW as u64);
 	let server = quic::Endpoint::new(
-		socket(&handle),
 		quic::endpoint::Config::default().with_server(server_config),
+		socket(&handle),
 	)
 	.expect("server endpoint");
-	let client = quic::Endpoint::new(socket(&handle), quic::endpoint::Config::default()).expect("dial-only endpoint");
+	let client = quic::Endpoint::new(quic::endpoint::Config::default(), socket(&handle)).expect("dial-only endpoint");
 	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	dial.verify = false;
@@ -277,7 +277,7 @@ fn chunked_writes_stop_at_the_window() {
 
 			handle.spawn(async move {
 				send.write_all(buf).await.expect("write");
-				let _ = send.finish().stopped().await;
+				let _ = send.finish().await;
 			});
 
 			let mut recv = within(&handle, "the stream", accepted.accept_uni())
@@ -325,7 +325,7 @@ fn tiny_frames_do_not_pin_receive_buffers() {
 			dialed
 				.send_datagram(Bytes::from_static(b"x"), Default::default())
 				.expect("send_datagram");
-			let datagram = within(&handle, "the datagram", accepted.read_datagram())
+			let datagram = within(&handle, "the datagram", accepted.recv_datagram())
 				.await
 				.expect("recv_datagram");
 			assert!(owns_exactly(datagram));
@@ -338,8 +338,8 @@ fn tiny_frames_do_not_pin_receive_buffers() {
 			let taken = within(
 				&handle,
 				"stream data",
-				std::future::poll_fn(|cx| {
-					recv.poll_lease(cx, 1).map_ok(|mut lease| {
+				kio::wait(|waiter| {
+					recv.poll_lease(waiter, 1).map_ok(|mut lease| {
 						let len = lease.chunk().len();
 						lease.copy_to_bytes(len)
 					})
