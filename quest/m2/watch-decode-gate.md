@@ -26,7 +26,3 @@ Public API: none. Wire: none.
 ## Required
 
 - [Watch worker](/quest/m2/watch-worker.md) - moves decode and `Sync` into a worker
-
-## Related
-
-- [A/V clock](/quest/m1/av-clock.md) - changes what `Sync` waits on

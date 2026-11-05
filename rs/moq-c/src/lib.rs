@@ -42,7 +42,7 @@ pub use bandwidth::*;
 pub use datagram::*;
 pub use decode::{moq_decode_gap, moq_decode_read_kind, moq_decode_start};
 pub use error::*;
-pub use ffi::{moq_state_callback, moq_status_callback};
+pub use ffi::{moq_follow_callback, moq_state_callback, moq_status_callback};
 pub use id::*;
 pub use video::*;
 

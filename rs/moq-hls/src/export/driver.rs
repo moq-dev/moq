@@ -1,7 +1,5 @@
 //! The export's background work, as `kio` tasks one [`Driver`] polls.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
 
@@ -44,7 +42,7 @@ impl Driver {
 
 	/// Run `task` ahead of every other task (see [`leads`](Self::leads)), until it finishes or
 	/// the returned [`Owner`] drops.
-	pub(crate) fn lead(&mut self, task: impl Future<Output = ()> + Send + 'static) -> Owner {
+	pub(crate) fn lead(&mut self, task: impl kio::Task<Output = ()> + Send + 'static) -> Owner {
 		let (job, owner) = Job::new(task);
 		self.leads.push(job);
 		owner
@@ -104,17 +102,17 @@ impl Spawner {
 	}
 
 	/// Run `task` on the driver until it finishes or the returned [`Owner`] drops.
-	pub fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) -> Owner {
+	pub fn spawn(&self, task: impl kio::Task<Output = ()> + Send + 'static) -> Owner {
 		self.start(Lane::Other, task)
 	}
 
 	/// [`spawn`](Self::spawn) `task` among the driver's leads, polled before every other task,
 	/// as a catalog watcher must be.
-	pub fn lead(&self, task: impl Future<Output = ()> + Send + 'static) -> Owner {
+	pub fn lead(&self, task: impl kio::Task<Output = ()> + Send + 'static) -> Owner {
 		self.start(Lane::Lead, task)
 	}
 
-	fn start(&self, lane: Lane, task: impl Future<Output = ()> + Send + 'static) -> Owner {
+	fn start(&self, lane: Lane, task: impl kio::Task<Output = ()> + Send + 'static) -> Owner {
 		let (job, owner) = Job::new(task);
 		// Refused once the driver is gone, which drops the task unrun.
 		let _ = self.inbox.0.try_push((lane, job));
@@ -128,15 +126,15 @@ pub(crate) struct Owner(#[expect(dead_code, reason = "held only to close on drop
 /// A task and the [`Owner`] that ends it.
 struct Job {
 	owner: kio::Consumer<()>,
-	task: Pin<Box<dyn Future<Output = ()> + Send>>,
+	task: Box<dyn kio::Task<Output = ()> + Send>,
 }
 
 impl Job {
-	fn new(task: impl Future<Output = ()> + Send + 'static) -> (Self, Owner) {
+	fn new(task: impl kio::Task<Output = ()> + Send + 'static) -> (Self, Owner) {
 		let owner = kio::Producer::new(());
 		let job = Self {
 			owner: owner.consume(),
-			task: Box::pin(task),
+			task: Box::new(task),
 		};
 		(job, Owner(owner))
 	}
@@ -149,7 +147,7 @@ impl kio::Task for Job {
 		if self.owner.poll_closed(waiter).is_ready() {
 			return Poll::Ready(());
 		}
-		waiter.poll_future(self.task.as_mut())
+		self.task.poll(waiter)
 	}
 }
 
@@ -165,9 +163,9 @@ mod tests {
 		let order = Arc::new(std::sync::Mutex::new(Vec::new()));
 		let record = |name: &'static str| {
 			let order = order.clone();
-			async move {
+			move |_: &kio::Waiter| {
 				order.lock().unwrap().push(name);
-				std::future::pending::<()>().await;
+				Poll::Pending
 			}
 		};
 		let _other = spawner.spawn(record("other"));
@@ -182,8 +180,8 @@ mod tests {
 	fn tasks_end_with_their_owner() {
 		let (spawner, mut driver) = Spawner::new();
 		let waiter = kio::Waiter::noop();
-		let forever = spawner.spawn(std::future::pending());
-		let lead = driver.lead(std::future::pending());
+		let forever = spawner.spawn(|_: &kio::Waiter| Poll::Pending);
+		let lead = driver.lead(|_: &kio::Waiter| Poll::Pending);
 		drop(spawner);
 		assert!(driver.poll(&waiter).is_pending(), "the owned tasks still run");
 		drop(lead);
@@ -199,7 +197,10 @@ mod tests {
 		let held = Arc::new(());
 		let _owner = spawner.spawn({
 			let held = held.clone();
-			async move { drop(held) }
+			move |_: &kio::Waiter| {
+				let _ = &held;
+				Poll::Ready(())
+			}
 		});
 		drop(driver);
 		assert_eq!(Arc::strong_count(&held), 1, "the queued task was dropped");

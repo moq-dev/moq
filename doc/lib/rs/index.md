@@ -18,8 +18,6 @@ Transport cryptography comes from [rind](https://github.com/moq-dev/rind).
 It supports every x86\_64 CPU, aarch64 with NEON (including Raspberry Pi 4,
 CM4, and Zero 2 W without crypto extensions), and armv7. Setup reports a
 missing required CPU feature before starting transport cryptography.
-`aws-lc-rs` and `ring` are no longer `moq-tokio` or `moq-quic` features;
-remove them from dependency declarations.
 
 ## Crates
 
@@ -69,8 +67,9 @@ let session = client.with_origin(origin.clone()).connect(url);
 let consumer = origin.consume();
 let mut announced = consumer.announced();
 while let Some(event) = announced.next().await {
-    // Skip updates and retractions.
-    let moq_net::announce::Event::Start(update) = event else { continue };
+    // Skip retractions. A path stays present across publisher restarts: hold
+    // `consumer.follow(path, None)` to be handed each new run.
+    let moq_net::announce::Event::Present(update) = event else { continue };
     let broadcast = consumer.request(&update.prefix, update.route.instance).await?;
     let catalog = broadcast
         .track(hang::Catalog::DEFAULT_NAME)?

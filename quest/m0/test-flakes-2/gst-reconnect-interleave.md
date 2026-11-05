@@ -11,22 +11,30 @@ each failure below and shows the loaded run that reproduced it now passing.
 
 ## Plan
 
-Investigation 2026-11-04: the unchanged ignored test passed once alone, 50
+Investigation in [moq-dev/moq#7932](https://github.com/moq-dev/moq/pull/7932),
+2026-11-04: the unchanged ignored test passed once alone, 50
 repetitions alongside `just check`, and 100 repetitions alongside
 `just check --all`, all through `quest gate` in the pinned Nix shell.
 The first accompanying check passed. Cargo build locks serialized parts
 of the full-workspace sweep, so these runs do not prove the race absent.
-No failure was reproduced and no source change is justified yet; keep the
-ignore until a failing schedule is captured.
+All 151 executions passed. No failure was reproduced; keep the ignore
+until the cause is verified and fixed.
 
 The historical `Unroutable` in
 [moq-dev/moq#7296](https://github.com/moq-dev/moq/pull/7296) came from
 `stop()` unwrapping the session result (line 3822 at merged commit
-`103e98e3624c193fc320e6513d0fb473a6cbe381`), not from
+[`103e98e`](https://github.com/moq-dev/moq/commit/103e98e3624c193fc320e6513d0fb473a6cbe381)), not from
 `publication.announce()`. The failing session operation remains unknown.
 Media delivery still does not acknowledge catalog reconciliation, so a
 controlled schedule around relist reconciliation and route withdrawal
-is the next investigative lead, not a verified fix.
+remains an unverified lead.
+
+Decided 2026-11-05 (maintainer, /quest-plan): capture a fresh failing
+loaded or merge-queue run with the session error attached first (option 2).
+Do not add scheduling instrumentation now. The evidence-only PR can land;
+the external wait belongs in this quest. Keep a code change only if it
+makes the next failure report its session error; otherwise leave this as
+a quest-only change.
 
 Planned 2026-11-04 with the maintainer, from
 [moq-dev/moq#7888](https://github.com/moq-dev/moq/pull/7888)'s suggested
@@ -76,14 +84,26 @@ in a fast run. Find each from the code under test before changing the test.
   moqsrc bug, fixed in moqsrc
   ([moq-dev/moq#7368](https://github.com/moq-dev/moq/pull/7368) made the
   actor own the pad).
-- Find which call returned `Unroutable` in #7296's run, and whether
-  `publication.announce` or a follow can meet an unroutable path in the
-  window after `unannounce`.
 
-Reproduce first: run moq-gst's tests together with the rest of the
-workspace under CPU contention, repeating this test in a loop beside a
-loaded `just check`. If it doesn't reproduce in a reasonable number
-of runs, report that and the runs tried rather than changing the test
-blind.
+After the capture below, identify the failing session operation and use
+the recorded conditions to reproduce and fix each failure at its cause.
+Keep the test ignored until the loaded reproduction passes with the fix.
 
 Public API: none. Wire: none.
+
+## Waiting
+
+- moq-dev/moq: a fresh failing loaded or merge-queue run of
+  `restarts_under_reconnects_interleave_on_one_pad` with the session error
+  attached. Check subsequent Actions/merge-queue logs and PR failure reports;
+  because the test is ignored and has no CI caller
+  (`sh/gh/test-inventory.allow`), no Actions log will show it; advance the
+  capture by hand. `quest gate` waits for host load to drop, so supply the
+  load inside the gated run: in the pinned Nix shell, run
+  `quest gate sh -c 'just check --all & c=$!; s=0; for i in $(seq 100); do kill -0 $c 2>/dev/null || break; cargo test -p moq-gst --lib -- source::imp::session_tests::restarts_under_reconnects_interleave_on_one_pad --ignored --exact || { s=1; break; }; done; wait $c || s=1; exit $s'`
+  so the repetitions loop only while `just check --all` still loads the host, as
+  in the Plan, and the command fails if either a repetition or the check fails.
+  Attach the run or log, tested commit, load conditions, and full
+  session error chain to this quest. If the failure output lacks the session
+  error, surface that error before collecting another run. Clear this wait
+  when that evidence is attached, then resume root-cause investigation.

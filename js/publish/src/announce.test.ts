@@ -176,8 +176,7 @@ test("capture gaps keep the broadcast instance and its track sequences", async (
 	const active: boolean[] = [];
 	const stop = request.active.subscribe((value) => active.push(value !== undefined));
 	const media = net.track("audio").subscribe();
-	const catalogTrack = net.track(Broadcast.CATALOG_TRACK).subscribe();
-	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogTrack });
+	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: net.track(Broadcast.CATALOG_TRACK) });
 	try {
 		await catalog.latest();
 		await settle();
@@ -212,7 +211,7 @@ test("capture gaps keep the broadcast instance and its track sequences", async (
 		stop();
 		request.close();
 		media.close();
-		catalogTrack.close();
+		catalog.close();
 	}
 });
 

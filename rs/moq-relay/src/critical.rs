@@ -1,13 +1,13 @@
 //! Long-lived tasks the relay cannot serve without.
 //!
 //! A session's task may panic and end only that session (see
-//! [`moq_tokio::panic`]). These tasks are different: an origin driver or a
-//! certificate reload that dies leaves a relay that still accepts connections but
-//! serves nothing, which is worse than exiting. So their panic is not contained;
-//! [`Relay::run`](crate::Relay::run) returns it.
+//! [`moq_tokio::panic`]). These tasks are different: an origin driver that dies
+//! leaves a relay that still accepts connections but serves nothing, which is worse
+//! than exiting. So their panic is not contained; [`Relay::run`](crate::Relay::run)
+//! returns it.
 //!
-//! [`Critical`] spawns such a task; [`Child`] is the same guard for one polled as a
-//! [`kio::Tasks`] child by its owner.
+//! [`Child`] guards such a task polled as a [`kio::Tasks`] child by its owner, and
+//! [`Critical`] collects the first failure.
 
 use std::{future::Future, panic::AssertUnwindSafe, task::Poll};
 
@@ -49,29 +49,15 @@ fn panicked(name: &'static str, payload: &(dyn std::any::Any + Send)) -> anyhow:
 	anyhow::anyhow!("{name} panicked: {panic}")
 }
 
-/// Spawns long-lived tasks and reports the first one to panic.
+/// Reports the first long-lived task to fail.
 #[derive(Clone, Default)]
 pub(crate) struct Critical {
-	/// The first panic, as `"<task> panicked: <message>"`.
+	/// The first failure, such as `"<task> panicked: <message>"`.
 	failed: kio::Producer<Option<String>>,
 }
 
 impl Critical {
-	/// Run `task` on the ambient runtime, reporting a panic to [`Self::failed`].
-	pub(crate) fn spawn(&self, name: &'static str, task: impl Future<Output = ()> + Send + 'static) {
-		let failed = self.failed.clone();
-		tokio::spawn(async move {
-			let Err(payload) = AssertUnwindSafe(task).catch_unwind().await else {
-				return;
-			};
-			let panic = panicked(name, payload.as_ref()).to_string();
-			if let Ok(mut failed) = failed.write() {
-				failed.get_or_insert(panic);
-			}
-		});
-	}
-
-	/// Report a failure from a task polled elsewhere, as though a spawned one panicked.
+	/// Report a failure from a task polled elsewhere.
 	pub(crate) fn fail(&self, err: anyhow::Error) {
 		if let Ok(mut failed) = self.failed.write() {
 			failed.get_or_insert_with(|| err.to_string());
@@ -100,13 +86,13 @@ mod tests {
 	use super::*;
 
 	#[tokio::test]
-	async fn the_first_panic_is_reported() {
+	async fn the_first_failure_is_reported() {
 		let critical = Critical::default();
-		critical.spawn("quiet", async {});
-		critical.spawn("broken", async { panic!("injected") });
+		critical.fail(anyhow::anyhow!("first"));
+		critical.fail(anyhow::anyhow!("second"));
 
 		let err = critical.failed().await;
-		assert_eq!(err.to_string(), "broken panicked: injected");
+		assert_eq!(err.to_string(), "first");
 	}
 
 	/// A child's panic resolves it with the error instead of unwinding the owner.

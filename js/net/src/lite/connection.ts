@@ -1,6 +1,6 @@
 import { Milli, Nano } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
-import type * as announce from "../announced.ts";
+import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
 import type { Established } from "../connection/established.ts";
@@ -18,6 +18,7 @@ import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
 import { AnnounceRequest } from "./announce.ts";
 import { LiteAuthWire } from "./auth.ts";
+import { Datagrams } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
@@ -33,6 +34,7 @@ import { Tracks as TracksMessage } from "./tracks.ts";
 import {
 	hasAuth,
 	hasDatagrams,
+	hasDatagramTracks,
 	hasGoaway,
 	hasPadding,
 	hasProbeRtt,
@@ -344,8 +346,14 @@ export class Connection implements Established {
 		}
 	}
 
+	/** The paths announced matching `scope`, each present or absent; see {@link Established.announced}. */
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
-		return this.#subscriber.announced(scope, options);
+		return announce.list(this.#subscriber.routes(scope, options));
+	}
+
+	/** Every route change matching `scope`, for code that forwards routes. @internal */
+	routes(scope?: Path.Pattern, options?: announce.Options): announce.Routes {
+		return this.#subscriber.routes(scope, options);
 	}
 
 	async #runSession() {
@@ -422,6 +430,14 @@ export class Connection implements Established {
 				(async () => {
 					const msg = await Subscribe.decode(stream.reader, this.#version);
 					await this.#publisher.runSubscribe(msg, stream);
+				})(),
+			);
+		} else if (typ === StreamId.Datagrams) {
+			if (!hasDatagramTracks(this.#version)) throw new Error("DATAGRAMS is not supported on this version");
+			await this.#publisher.owe(
+				(async () => {
+					const msg = await Datagrams.decode(stream.reader, this.#version);
+					await this.#publisher.runDatagrams(msg, stream);
 				})(),
 			);
 		} else if (typ === StreamId.Fetch) {

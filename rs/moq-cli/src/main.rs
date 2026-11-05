@@ -313,7 +313,7 @@ async fn drain(shutdown: Shutdown, signals: &mut Signals) {
 	tracing::info!(window = ?shutdown.observer.drain_timeout, "shutdown requested; draining sessions (signal again to exit immediately)");
 	tokio::select! {
 		() = signals.recv() => tracing::warn!("second shutdown signal; exiting immediately"),
-		() = shutdown.observer.drained() => {},
+		_ = shutdown.observer.drained() => {},
 	}
 }
 
@@ -329,9 +329,7 @@ fn main() -> anyhow::Result<()> {
 async fn run() -> anyhow::Result<()> {
 	// The transport, reqwest, axum-server, and object_store all read rustls's process default.
 	// A CPU rind cannot run on fails here, naming the feature it lacks.
-	rind_rustls::default_provider()?
-		.install_default()
-		.map_err(|_| anyhow::anyhow!("a rustls crypto provider is already installed"))?;
+	moq_tokio::crypto::install_default()?;
 
 	let mut cli = Invocation::parse().await;
 	cli.log.init()?;
@@ -347,7 +345,7 @@ async fn run() -> anyhow::Result<()> {
 		match stages.remove(0) {
 			Command::Auth(auth) => {
 				cli.reject("auth")?;
-				return auth.run().await;
+				return auth.run(&cli.settings).await;
 			}
 			Command::Completion(completion) => {
 				cli.reject("completion")?;
@@ -965,7 +963,9 @@ async fn run_container(
 	// rendition's `broadcast` field references (e.g. "./source") through the same origin.
 	let mut follow = consumer.follow(name.as_str(), None)?;
 	let broadcast = tokio::select! {
-		broadcast = follow.available() => broadcast.with_context(|| format!("failed to resolve broadcast `{name}`"))?,
+		broadcast = follow.available() => broadcast
+			.with_context(|| format!("failed to resolve broadcast `{name}`"))?
+			.context("went offline before serving")?,
 		() = finish.cancelled() => return Ok(()),
 	};
 
@@ -1388,6 +1388,7 @@ mod tests {
 						.unwrap()
 						.available()
 						.await
+						.unwrap()
 						.unwrap();
 					let mut track = broadcast
 						.track("status")
@@ -1498,6 +1499,7 @@ mod tests {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap()
 			.track("live")
 			.unwrap()

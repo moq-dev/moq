@@ -23,7 +23,7 @@ export interface Writer {
 
 /** State one track consumer shares with its groups. */
 export interface Reader {
-	// One open in flight across the track's groups and datagrams; net reads wait outside it.
+	// One open in flight across the stream track's groups; net reads wait outside it.
 	pump: Pump;
 	key: TrackKey;
 	terminal: Terminal;
