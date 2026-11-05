@@ -381,9 +381,9 @@ impl Session {
 
 	/// Stop the session: a clean local close, never an error. Returns once the reconnect loop has ended.
 	///
-	/// Aborting only cancels the loop at its next await point, and a worker may be mid-dial, generating
-	/// TLS randomness. A process exiting in that window (`gst-launch` right after NULL) races aws-lc's
-	/// exit destructors, which free its seed DRBG and then `abort()` a thread asking for more.
+	/// Aborting only cancels the loop at its next await point, and a worker may be mid-dial. Without the
+	/// wait, that dial outlives the state change an application waits on before it exits (`gst-launch`
+	/// right after NULL).
 	pub fn stop(self) {
 		// The status task goes first, so it never reports the loop's end as a failure.
 		self.join.abort();
@@ -589,8 +589,8 @@ mod tests {
 		connection.poll_closed(&moq_net::kio::Waiter::noop()).is_ready()
 	}
 
-	// A dial still running once the element reached NULL can outlive `main`, and aws-lc aborts the
-	// process when a thread asks it for randomness after its exit destructors ran.
+	// A dial still running once the element reached NULL would outlive the state change an application
+	// waits on before it exits.
 	#[test]
 	fn stop_returns_after_the_reconnect_loop_ends() {
 		let (session, connection) = started();

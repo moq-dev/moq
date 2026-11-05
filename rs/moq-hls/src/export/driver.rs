@@ -12,7 +12,7 @@ use std::task::Poll;
 /// Dropping it early stops all of that work.
 #[must_use = "the broadcaster does nothing until its driver runs"]
 pub struct Driver {
-	/// The catalog watchers, the broadcast's and each contribution's, polled before the other
+	/// The catalog watchers, the broadcast's and each include's, polled before the other
 	/// tasks in every pass: a reconfigure must retire its rendition before that rendition's
 	/// watcher reads groups published after it.
 	leads: kio::Tasks<Job>,
@@ -155,7 +155,7 @@ impl kio::Task for Job {
 mod tests {
 	use super::*;
 
-	/// A lead a spawner starts, such as a contribution's catalog watcher, runs before the tasks
+	/// A lead a spawner starts, such as an include's catalog watcher, runs before the tasks
 	/// started ahead of it.
 	#[test]
 	fn spawned_leads_run_first() {

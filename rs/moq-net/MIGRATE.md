@@ -16,6 +16,11 @@ filterless SUBSCRIBE on every draft, and the groups below the answer's Largest
 Object come from one range FETCH. A SUBSCRIBE that omits the filter still joins
 live, so third-party readers and relay caches see no change.
 
+### Origins prove a route key ([#7937](https://github.com/moq-dev/moq/pull/7937))
+
+`origin::Config::route_key` takes an `origin::RouteKey`, which every lite-07 session on the origin proves to its peer in SETUP. Origins sharing a key fail over as one to a peer that scopes them; `None`, the default, proves nothing.
+A proof binds to the session through the new `poll::Session::export_keying_material`, which defaults to `None`: a transport over TLS returns its exporter, and a wrapper around another transport forwards it.
+
 ### Group batch operations and `poll_next_frame` are crate-private ([#7874](https://github.com/moq-dev/moq/pull/7874))
 
 Read a frame in chunks with the async `group::Consumer::next_frame`, or read whole frames with `poll_read_frame` from a poll loop.

@@ -1858,6 +1858,16 @@ export class Subscriber {
 			}
 			return producer;
 		};
+		// After an END_OF_GROUP or END_OF_TRACK status only the stream's end may follow: an
+		// object past the group's final one makes the track malformed.
+		const last = async () => {
+			const done = await race([stream.done(), producer?.closed ?? hooks.trackReleased(track)]);
+			if (done === false) {
+				throw new StreamError(StreamCode.MalformedTrack, {
+					message: `data past the group's final object: group=${group.groupId}`,
+				});
+			}
+		};
 
 		try {
 			// The alias binds after SUBSCRIBE_OK commits the track property; an omitted
@@ -1935,6 +1945,7 @@ export class Subscriber {
 					// No object at or past this location exists: after the group's last object
 					// the track ends with it, and at object 0 it ends before it.
 					if (producer && frame.idDelta !== 0) throw new ObjectIdGap(frame.idDelta);
+					await last();
 					const end = { group: group.groupId, frame: nextObject + frame.idDelta };
 					producer?.finish();
 					try {
@@ -1945,7 +1956,10 @@ export class Subscriber {
 					subscription.end ??= finalSequence(end);
 					return;
 				}
-				if (!frame.isObject) break;
+				if (!frame.isObject) {
+					await last();
+					break;
+				}
 
 				// A track that declared TIMESCALE stamps every object, so one without a Timestamp is
 				// malformed rather than something to invent a time for.
