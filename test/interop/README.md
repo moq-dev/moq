@@ -56,8 +56,9 @@ When Python is selected, the in-tree run also connects Python and Rust socket
 endpoints through the relay in both dial directions and both `tcp` and `track`
 protocols. Each direction checks exact frames, empty writes, ordered groups,
 and clean FIN. A stdin drain acknowledgement keeps Rust alive until Python has
-read its entire half. The normal pass pins lite-07 for this lane; the IETF pass
-uses each selected moq-transport draft. Older lite hops are outside this lane.
+read its entire half. The lane runs only in the normal pass, pinned to lite-07:
+moq-net endpoints speak moq-lite to each other, never moq-transport. Older lite
+hops are outside this lane.
 
 The normal run also checks a finite raw track through the relay. Its publisher
 announces end 4 before writing four 256 KiB groups; the reader verifies every byte,

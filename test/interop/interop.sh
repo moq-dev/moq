@@ -499,9 +499,7 @@ plan_pass() {
     fi
     [[ "$FINISH_ONLY" -eq 0 ]] || return 0
     if needs python; then
-        case "$VERSION" in
-            auto | moq-transport-*) record "not run" case="Python Rust sockets" publisher=python subscriber=rust ;;
-        esac
+        [[ "$VERSION" != auto ]] || record "not run" case="Python Rust sockets" publisher=python subscriber=rust
     fi
     for pub in rust js-native-node js-native-bun; do
         [[ "$pub" == rust ]] || needs "$pub" || continue
@@ -2499,14 +2497,11 @@ run_hls_grid() {
 
 # This checkout's CLI FETCH and finite track tails in this pass, then the lite drop lanes.
 # Both roles and protocols share this lane; Python acknowledges Rust's drain before teardown.
+# Lite only: moq-net endpoints speak moq-lite to each other, never moq-transport.
 run_sockets() {
     needs python || return 0
-    local version="$VERSION" log="$LOGS/sockets.log" prefix="sockets-$$-$RANDOM"
-    case "$version" in
-        auto) version=moq-lite-07-wip ;;
-        moq-transport-*) ;;
-        *) return 0 ;;
-    esac
+    [[ "$VERSION" == auto ]] || return 0
+    local version=moq-lite-07-wip log="$LOGS/sockets.log" prefix="sockets-$$-$RANDOM"
     if is_broken python || ! timeout -k 3 "$TIMEOUT" "$PY" "$CLIENTS/python/sockets.py" \
         "$(token_url --publish "$prefix/**" --subscribe "$prefix/**")" "$prefix" "$version" \
         "$EXAMPLES/interop-socket" >"$log" 2>&1; then
