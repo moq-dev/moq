@@ -17,18 +17,10 @@ use super::{
 };
 
 /// Keep the session's SUBSCRIBE_NAMESPACE requests open as `discovery` decides, each on
-/// a stream from `open`; with no subscribe half, ask nothing. Only an error ends it.
-async fn run_namespaces<F, O>(
-	subscriber: Subscriber,
-	discovery: Option<crate::discovery::Discovery>,
-	open: F,
-) -> Result<(), Error>
-where
-	F: Fn() -> O,
-	O: std::future::Future<Output = Result<Stream<Transport, Version>, Error>>,
-{
+/// its own stream; with no subscribe half, ask nothing. Only an error ends it.
+async fn run_namespaces(subscriber: Subscriber, discovery: Option<crate::discovery::Discovery>) -> Result<(), Error> {
 	match discovery {
-		Some(discovery) => subscriber.run_namespaces(discovery, open).await,
+		Some(discovery) => subscriber.run_namespaces(discovery).await,
 		None => std::future::pending().await,
 	}
 }
@@ -369,13 +361,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle, Option<cr
 			// Unsolicited PUBLISH_NAMESPACE unless the peer requires solicitation;
 			// see `Publisher::run_publish_namespaces`.
 			let mut pub_ns_run = std::pin::pin!(err_only(publisher.clone().run_publish_namespaces()));
-			let sub_ns_run = run_namespaces(subscriber.clone(), discovery, {
-				let session = session.clone();
-				move || {
-					let session = session.clone();
-					async move { Stream::open(&session, version).await }
-				}
-			});
+			let sub_ns_run = run_namespaces(subscriber.clone(), discovery);
 			let mut sub_ns_run = std::pin::pin!(err_only(sub_ns_run));
 
 			let res = kio::wait(|waiter| {
