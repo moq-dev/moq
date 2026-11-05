@@ -3022,7 +3022,7 @@ impl Route {
 		let mut control = self.state.control.lock();
 		let info = control.info();
 		let Some(request) = control.request.take() else {
-			return self.state.announcement.update_if(info, None, || true).map(|_| ());
+			return self.state.announcement.update_if(info, None, |_| true).map(|_| ());
 		};
 		let answer = self.broadcast().consume();
 		let mut resolved = None;
@@ -3031,7 +3031,18 @@ impl Route {
 		// The answer continues what the prefix route served for the path: requesters
 		// waiting on it, and whatever resolved through the prefix route's current instance
 		// beneath it. Answered and taken over under one lock, so nothing resolves in between.
-		let admitted = self.state.announcement.update_if(info, Some(&request.home), || {
+		let admitted = self.state.announcement.update_if(info, Some(&request.home), |table| {
+			// The prefix route's entries leave the table before its retraction releases the
+			// request, so one gone from it no longer answers, even before that release.
+			let home = table.routes.covering(&request.path).any(|entry| {
+				entry
+					.server
+					.as_ref()
+					.is_some_and(|server| server.same_channel(&request.home))
+			});
+			if !home {
+				return false;
+			}
 			// The exact route owns this answer's availability. Caching it under the
 			// prefix would keep serving it after this route is withdrawn.
 			resolved = request
@@ -3096,7 +3107,7 @@ impl Route {
 		}
 		self.state
 			.announcement
-			.update_if(control.info(), None, || true)
+			.update_if(control.info(), None, |_| true)
 			.map(|_| ())
 	}
 
@@ -3169,7 +3180,7 @@ impl Route {
 		}
 		control.options.cost = info.cost;
 		control.options.auth = info.auth.clone();
-		self.state.announcement.update_if(info, None, || true).map(|_| ())
+		self.state.announcement.update_if(info, None, |_| true).map(|_| ())
 	}
 
 	/// The queue a prefix route's requests arrive on, for tests that inspect it.
@@ -3245,7 +3256,7 @@ impl AnnounceProducer {
 	/// [`Error::Closed`] once the origin's [`Driver`] has been dropped.
 	#[cfg(any(feature = "async", test))]
 	pub fn update(&self, route: RouteInfo) -> Result<(), Error> {
-		self.update_if(route, None, || true).map(|_| ())
+		self.update_if(route, None, |_| true).map(|_| ())
 	}
 
 	/// [`Self::update`] once `admit` agrees, returning whether it did. `admit` runs
@@ -3258,7 +3269,7 @@ impl AnnounceProducer {
 		&self,
 		route: RouteInfo,
 		predecessor: Option<&kio::Shared<ServeState>>,
-		admit: impl FnOnce() -> bool,
+		admit: impl FnOnce(&OriginState) -> bool,
 	) -> Result<bool, Error> {
 		let mut shared = self.shared.lock();
 		if shared.closed {
@@ -3271,7 +3282,7 @@ impl AnnounceProducer {
 		{
 			return Err(Error::Closed);
 		}
-		if !admit() {
+		if !admit(&shared) {
 			return Ok(false);
 		}
 		// The requests an instance change released, refused once the table lock is gone: the
@@ -3399,23 +3410,15 @@ impl AnnounceProducer {
 
 	/// Retract the route now: remove its table entries and reject anything still
 	/// waiting on its queue. Idempotent, and what dropping the advertisement does.
-	///
-	/// A prefix route's server closes under the table lock, as its entries leave it, so an
-	/// answer admitted under that lock, such as a job route announcing, either lands first
-	/// or finds the request released.
 	fn retract(&self, withdrawn: bool) {
 		let mut shared = self.shared.lock();
 		let guard = self.guard.lock().take();
-		let mut released = Vec::new();
+		let mut servers = Vec::new();
 		for (prefix, id) in &self.entries {
 			let Some(entry) = shared.routes.remove(prefix, *id) else {
 				continue;
 			};
-			if let Some(server) = &entry.server {
-				let mut server = server.lock();
-				server.closed = true;
-				released.extend(server.requests.drain_all());
-			}
+			servers.extend(entry.server.clone());
 			// A peer remains reachable while any of its sessions advertises this
 			// prefix. Remove this session's route before testing the remaining
 			// claims, under the same lock, so overlapping withdrawals cannot
@@ -3436,11 +3439,21 @@ impl AnnounceProducer {
 		}
 		drop(shared);
 		drop(guard);
-		// Refused once the table lock is gone: the refusal wakes their fronts, which read
-		// the table.
-		for producer in released {
-			if let Ok(mut request) = producer.write() {
-				request.resolved.get_or_insert(Err(Error::Unroutable));
+		// Reject anything still waiting on this route's server; a request already
+		// handed to the handler resolves through its own `Request`. Closing wakes
+		// the server's waiters, so it runs after the table unlocks; the entries
+		// already left it, so nothing new routes here meanwhile, and a job route
+		// answering one of them finds its prefix route gone (see [`Route::announce`]).
+		for server in servers {
+			let released = {
+				let mut server = server.lock();
+				server.closed = true;
+				server.requests.drain_all()
+			};
+			for producer in released {
+				if let Ok(mut request) = producer.write() {
+					request.resolved.get_or_insert(Err(Error::Unroutable));
+				}
 			}
 		}
 	}
