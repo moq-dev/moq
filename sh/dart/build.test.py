@@ -14,18 +14,28 @@ ROOT = Path(__file__).resolve().parents[2]
 class BuildTest(unittest.TestCase):
     def test_generator_profiles(self):
         # Only the dev build carries the test hooks, which would skew a benchmark.
-        for profile, release in (("debug", False), ("release", True)):
+        for profile, release, configured in (
+            ("debug", False, False),
+            ("release", True, False),
+            ("debug", False, True),
+            ("release", True, True),
+        ):
             with self.subTest(profile=profile), tempfile.TemporaryDirectory() as directory:
                 scratch = Path(directory)
                 calls = scratch / "calls"
                 compiler_env = scratch / "compiler-env"
                 target = scratch / "external output"
+                target = target if release else ROOT / "target/dart"
                 metadata = json.dumps({"target_directory": str(target)})
-                library = target / "release/libmoq_ffi.so" if release else ROOT / "target/dart/debug/libmoq_ffi.so"
+                library = target / ("x86_64-unknown-linux-gnu" if configured else "") / profile / "libmoq_ffi.so"
+                artifact = json.dumps(
+                    {"reason": "compiler-artifact", "target": {"name": "moq_ffi"}, "filenames": [str(library)]}
+                )
                 for name, source in {
                     "cargo": f"#!/bin/sh\nif [ \"$1\" = metadata ]; then echo '{metadata}'; exit; fi\n"
                     f'printf "%s\\n" "$*" >> "{calls}"\n'
-                    f'printf "%s" "${{CC:-unset}}" > "{compiler_env}"\n',
+                    f'printf "%s" "${{CC:-unset}}" > "{compiler_env}"\n'
+                    f"echo '{artifact}'\n",
                     "rustc": '#!/bin/sh\necho "host: x86_64-unknown-linux-gnu"\n',
                     "dart": "#!/bin/sh\nexit 0\n",
                     "uniffi_bindgen_dart": f'#!/bin/sh\ntest "$2" = "{library}" || exit 2\n'
@@ -58,13 +68,16 @@ class BuildTest(unittest.TestCase):
                 self.assertNotIn("--target", args)
                 self.assertEqual(
                     args[1:],
-                    ["--release"] if release else ["--features", "testing", "--target-dir", str(ROOT / "target/dart")],
+                    (["--release"] if release else ["--features", "testing", "--target-dir", str(ROOT / "target/dart")])
+                    + ["--message-format=json-render-diagnostics"],
                 )
 
     def test_failed_benchmark_restores_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "sh/dart").mkdir(parents=True)
+            (root / "sh/rs").mkdir()
+            shutil.copy(ROOT / "sh/rs/ffi-artifact.jq", root / "sh/rs/ffi-artifact.jq")
             (root / "dart/moq").mkdir(parents=True)
             shutil.copy(ROOT / "sh/dart/bench.sh", root / "sh/dart/bench.sh")
             generate = root / "sh/dart/generate.sh"
@@ -76,8 +89,15 @@ class BuildTest(unittest.TestCase):
             tools.mkdir()
             target = root / "external output"
             metadata = json.dumps({"target_directory": str(target)})
+            artifact = json.dumps(
+                {
+                    "reason": "compiler-artifact",
+                    "target": {"name": "moq_ffi"},
+                    "filenames": [str(target / "release/libmoq_ffi.so")],
+                }
+            )
             for name, source in {
-                "cargo": f"#!/bin/sh\necho '{metadata}'\n",
+                "cargo": f"#!/bin/sh\nif [ \"$1\" = metadata ]; then echo '{metadata}'; else echo '{artifact}'; fi\n",
                 "git": f'#!/bin/sh\necho "{root}"\n',
                 "rustc": '#!/bin/sh\necho "host: x86_64-unknown-linux-gnu"\n',
                 "dart": '#!/bin/sh\nif [ "$1" = run ]; then '

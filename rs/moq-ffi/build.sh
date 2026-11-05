@@ -15,9 +15,8 @@ RS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORKSPACE_DIR="$(cd "$RS_DIR/.." && pwd)"
 
 # Resolve cargo target directory (respects CARGO_TARGET_DIR, .cargo/config, etc.)
-TARGET_BASE_DIR=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps 2>/dev/null |
-    sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' ||
-    echo "$WORKSPACE_DIR/target")
+TARGET_BASE_DIR=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps |
+    jq -er .target_directory)
 
 # Defaults
 TARGET=""
@@ -122,7 +121,7 @@ build_target() {
     # The shared default build (.cargo/config.toml): releases carry the OpenH264
     # software fallback, the only encoder on API-24 Android and the Apple
     # simulators. It is a no-op under --no-default-features.
-    local cargo_args=(build-ffi --release --target-dir "$TARGET_BASE_DIR" --manifest-path "$WORKSPACE_DIR/Cargo.toml")
+    local cargo_args=(build-ffi --release --message-format=json-render-diagnostics --target-dir "$TARGET_BASE_DIR" --manifest-path "$WORKSPACE_DIR/Cargo.toml")
     if [[ "$NO_DEFAULT_FEATURES" == true ]]; then
         cargo_args+=(--no-default-features)
     fi
@@ -136,9 +135,10 @@ build_target() {
         rustup target add "$target"
     fi
 
+    local messages
     if is_android "$target"; then
         # Android targets use cargo-ndk
-        (cd "$WORKSPACE_DIR" && cargo ndk --target "$target" --platform 24 -- "${cargo_args[@]}")
+        messages=$(cd "$WORKSPACE_DIR" && cargo ndk --target "$target" --platform 24 -- "${cargo_args[@]}")
     else
         # Set up cross-compilation for Linux ARM64
         if [[ "$target" == "aarch64-unknown-linux-gnu" && "$target" != "$HOST_TARGET" ]]; then
@@ -149,33 +149,17 @@ build_target() {
         if [[ "$target" != "$HOST_TARGET" ]]; then
             cargo_args+=(--target "$target")
         fi
-        (cd "$WORKSPACE_DIR" && cargo "${cargo_args[@]}")
+        messages=$(cd "$WORKSPACE_DIR" && cargo "${cargo_args[@]}")
     fi
-}
-
-# Native builds share the bindings' host artifacts; cross builds stay scoped
-# by triple. Packaging still uses the requested triple in its output names.
-artifact_dir() {
-    local target="$1"
-    if [[ "$target" == "$HOST_TARGET" ]]; then
-        echo "$TARGET_BASE_DIR/release"
-    else
-        echo "$TARGET_BASE_DIR/$target/release"
-    fi
-}
-
-find_cdylib() {
-    local target="$1"
-    local target_dir
-    target_dir=$(artifact_dir "$target")
-
-    if [[ "$target" == *"-apple-"* ]]; then
-        echo "$target_dir/libmoq_ffi.dylib"
-    elif [[ "$target" == *"-windows-"* ]]; then
-        echo "$target_dir/moq_ffi.dll"
-    else
-        echo "$target_dir/libmoq_ffi.so"
-    fi
+    local library
+    case "$target" in
+        *-apple-*) library=libmoq_ffi.dylib ;;
+        *-windows-*) library=moq_ffi.dll ;;
+        *) library=libmoq_ffi.so ;;
+    esac
+    BUILT_LIBRARY=$(jq -ers --arg root "$TARGET_BASE_DIR" --arg target "$target" \
+        --arg host "$HOST_TARGET" --arg profile release --arg library "$library" \
+        -f "$WORKSPACE_DIR/sh/rs/ffi-artifact.jq" <<<"$messages")
 }
 
 # Generate language bindings into $OUTPUT_DIR/bindings/<lang>/. Tarring is
@@ -243,7 +227,7 @@ if [[ "$BINDINGS_ONLY" == true ]]; then
         cdylib="$LIBRARY"
     else
         build_target "$HOST_TARGET"
-        cdylib=$(find_cdylib "$HOST_TARGET")
+        cdylib="$BUILT_LIBRARY"
     fi
     if [[ ! -f "$cdylib" ]]; then
         echo "Error: cdylib not found at $cdylib" >&2
@@ -266,7 +250,7 @@ echo "Packaging $NAME..."
 
 rm -rf "$PACKAGE_DIR"
 mkdir -p "$PACKAGE_DIR/lib"
-TARGET_DIR=$(artifact_dir "$TARGET")
+TARGET_DIR=$(dirname "$BUILT_LIBRARY")
 
 if [[ "$TARGET" == *"-windows-"* ]]; then
     cp "$TARGET_DIR/moq_ffi.dll" "$PACKAGE_DIR/lib/"
@@ -324,7 +308,7 @@ fi
 # Generate bindings if we can run the library on this host
 cd "$WORKSPACE_DIR"
 if can_run_on_host "$TARGET"; then
-    cdylib=$(find_cdylib "$TARGET")
+    cdylib="$BUILT_LIBRARY"
 
     if [[ -f "$cdylib" ]]; then
         generate_bindings "$cdylib"

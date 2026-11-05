@@ -95,6 +95,7 @@ Future<_Resolved> _build(Uri workspace, String target, String library) async {
   final targetDir = workspace.resolve('target/dart/');
   final cargoArgs = [
     'build-ffi',
+    '--message-format=json-render-diagnostics',
     '--features',
     'testing',
     '--target-dir',
@@ -136,7 +137,26 @@ Future<_Resolved> _build(Uri workspace, String target, String library) async {
     );
   }
 
-  final built = targetDir.resolve('${native ? '' : '$target/'}debug/$library');
+  final artifacts = LineSplitter.split(result.stdout as String)
+      .map((line) => jsonDecode(line) as Map<String, dynamic>)
+      .where(
+        (message) =>
+            message['reason'] == 'compiler-artifact' &&
+            (message['target'] as Map<String, dynamic>)['name'] == 'moq_ffi',
+      )
+      .expand((message) => (message['filenames'] as List).cast<String>())
+      .map((path) => File(path).uri)
+      .where((uri) => uri.pathSegments.last == library)
+      .toSet();
+  if (artifacts.length != 1) {
+    throw StateError('expected one moq-ffi cdylib from Cargo: $artifacts');
+  }
+  final built = artifacts.single;
+  final scoped = targetDir.resolve('$target/debug/$library');
+  final unscoped = targetDir.resolve('debug/$library');
+  if (built != scoped && !(native && built == unscoped)) {
+    throw StateError('Cargo artifact does not match target $target: $built');
+  }
   if (!await File.fromUri(built).exists()) {
     throw StateError('cargo did not produce ${built.toFilePath()}');
   }

@@ -125,7 +125,7 @@ done
 # changes the hook's filter would otherwise silently double this check's Rust
 # build. Cargo rewrites the .d dep-info file even on a no-op, so only the
 # libraries count.
-if [[ -n "$(find "$DART_DIR/../target/dart/debug" -maxdepth 1 -name '*moq_ffi.*' ! -name '*.d' -newer "$generated/built")" ]]; then
+if [[ -n "$(find "$DART_DIR/../target/dart" -mindepth 2 -maxdepth 3 -name '*moq_ffi.*' ! -name '*.d' -newer "$generated/built")" ]]; then
     drift=$(
         { diff <(tr '\0' '\n' <"$generated/generate.env") <(tr '\0' '\n' <"$generated/hook.env") || true; } |
             sed -n 's/^[<>] \([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | sort -u | paste -sd ' ' -

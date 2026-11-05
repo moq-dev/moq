@@ -182,15 +182,24 @@ print((root / "jobs").read_text())
         # A native request must share host units, even when --target was
         # explicitly passed to the packager. A cross request must keep its
         # triple and linker. Minimal builds must never overwrite the default.
-        for host, target, minimal in [
-            ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", False),
-            ("aarch64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", False),
-            ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", False),
-            ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", True),
+        for host, target, minimal, configured in [
+            ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", False, False),
+            ("aarch64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", False, False),
+            ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", False, False),
+            ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", True, False),
+            ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", False, True),
+            ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", False, "wrong"),
         ]:
             with self.subTest(host=host, target=target, minimal=minimal):
                 payload = f"{host}:{target}:{minimal}".encode()
                 self.env["BUILD_ID"] = payload.decode()
+                self.env["CONFIGURED_TARGET"] = (
+                    "aarch64-unknown-linux-gnu" if configured == "wrong" else host if configured else ""
+                )
+                if configured:
+                    default_library = self.root / "target/release/libmoq_ffi.so"
+                    default_library.parent.mkdir(parents=True, exist_ok=True)
+                    default_library.write_bytes(b"stale default")
                 default_library = self.root / "target/release/libmoq_ffi.so"
                 if minimal:
                     default_library.parent.mkdir(parents=True, exist_ok=True)
@@ -214,11 +223,14 @@ elif args[0] == "build-ffi":
         "linker": os.environ.get("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER"),
     }))
     directory = pathlib.Path(args[args.index("--target-dir") + 1])
-    if target: directory /= target
+    effective = target or os.environ.get("CONFIGURED_TARGET")
+    if effective: directory /= effective
     directory /= "release"
     directory.mkdir(parents=True, exist_ok=True)
     for name in ["libmoq_ffi.so", "libmoq_ffi.a"]:
         (directory / name).write_bytes(os.environ["BUILD_ID"].encode())
+    print(json.dumps({"reason": "compiler-artifact", "target": {"name": "moq_ffi"},
+                      "filenames": [str(directory / "libmoq_ffi.so"), str(directory / "libmoq_ffi.a")]}))
 elif args[0] == "run":
     assert pathlib.Path(args[args.index("--library") + 1]).read_bytes() == os.environ["BUILD_ID"].encode()
 else: raise AssertionError(args)
@@ -239,6 +251,10 @@ else: raise AssertionError(args)
                 if minimal:
                     args.append("--no-default-features")
                 result = subprocess.run(args, env=self.env, cwd=self.root, capture_output=True, text=True)
+                if configured == "wrong":
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("does not match the requested target", result.stderr)
+                    continue
                 self.assertEqual(result.returncode, 0, result.stderr)
                 built = json.loads((self.root / "build").read_text())
                 self.assertEqual(built["target"], target if target != host else None)
