@@ -20,6 +20,8 @@ import type * as track from "./track.ts";
 
 /** The protocol-facing operations behind a broadcast handle. */
 export interface Broadcast {
+	/** Whether datagram metadata comes from an application rather than a peer's kindless SUBSCRIBE. */
+	localDatagrams: boolean;
 	datagrams(name: string): datagram.Consumer;
 	liveDatagrams(name: string): datagram.Consumer | undefined;
 	createDatagrams(name: string, info: Partial<datagram.Info>): datagram.Producer;

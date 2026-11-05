@@ -519,14 +519,18 @@ export class Publisher {
 			const streamInfo = track.info().then((info) => ({ kind: "stream" as const, info }));
 			const datagramConsumer = datagrams;
 			const selected = await untilAborted(
-				datagramConsumer
+				datagramConsumer && wireOf(broadcast).localDatagrams
 					? Promise.any([
 							streamInfo,
 							datagramConsumer
 								.info()
 								.then((info) => ({ kind: "datagram" as const, info, consumer: datagramConsumer })),
 						]).catch(() => streamInfo)
-					: streamInfo,
+					: streamInfo.catch(async (err) => {
+							if (!datagramConsumer) throw err;
+							const info = await datagramConsumer.info();
+							return { kind: "datagram" as const, info, consumer: datagramConsumer };
+						}),
 				left.signal,
 			).catch(async (err) => {
 				if (left.signal.aborted) request.abort(cancel);

@@ -391,6 +391,7 @@ export class Producer {
 
 	constructor() {
 		registerWire(this, {
+			localDatagrams: !this.#state.unheld,
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
 			largest: (name) => largest(this.#state, name),
@@ -547,6 +548,7 @@ export class Consumer {
 		}
 		this.#state.consumers++;
 		registerWire(this, {
+			localDatagrams: !this.#state.unheld,
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
 			largest: (name) => largest(this.#state, name),

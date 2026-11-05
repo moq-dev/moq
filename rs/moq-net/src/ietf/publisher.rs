@@ -1481,6 +1481,9 @@ impl Publisher {
 							}
 						};
 						let datagrams = async {
+							if !broadcast.has_local_datagrams() || broadcast.publishes_track(&msg.track_name) {
+								return futures::future::pending().await;
+							}
 							match &along {
 								Some(datagrams) => kio::wait(|waiter| datagrams.poll_info(waiter)).await.map(|_| ()),
 								None => Err(Error::NotFound),
