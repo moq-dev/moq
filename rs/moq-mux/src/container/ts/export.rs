@@ -199,8 +199,6 @@ where
 	/// Generation of the last returned frame, updated only at the output boundary.
 	emitted_epoch: u64,
 	pcr_discontinuity: bool,
-	/// The presentation interval of the last signalled delivery loss, shared across tracks.
-	lost: Option<(Option<Timestamp>, Timestamp)>,
 	/// Lays the muxed packets onto the PCR grid.
 	schedule: Schedule,
 	/// Read each track from the oldest group the delay still reaches, rather than the live
@@ -325,6 +323,8 @@ struct Track {
 	gap: u64,
 	/// Furthest presentation time muxed, so overlapping track losses share one break.
 	last_timestamp: Option<Timestamp>,
+	/// The last delivery loss the track signalled or joined ([`coalesce`]).
+	lost: Option<Lost>,
 	/// How many unmarked steps back the track's timeline took ([`Self::steps_back`]), each
 	/// counted as a marker of its own.
 	steps: u64,
@@ -409,6 +409,7 @@ impl Track {
 			base: (0, 0, 0),
 			gap: 0,
 			last_timestamp: None,
+			lost: None,
 			steps: 0,
 			high: None,
 			finished: false,
@@ -1598,7 +1599,6 @@ where
 			epoch: 0,
 			emitted_epoch: 0,
 			pcr_discontinuity: false,
-			lost: None,
 			schedule: Schedule::new(Duration::ZERO),
 			slot_timer: None,
 			replay: false,
@@ -3024,7 +3024,6 @@ where
 		}
 		self.program.video_start = None;
 		self.program.pcr_discontinuity = true;
-		self.program.lost = None;
 		self.program.tables.clear();
 		if let Some(psi) = &mut self.program.psi {
 			psi.sending.clear();
@@ -3033,6 +3032,7 @@ where
 		}
 		for track in self.program.tracks.values_mut() {
 			track.last_timestamp = None;
+			track.lost = None;
 			track.pack = None;
 			track.parked.clear();
 		}
@@ -3527,18 +3527,12 @@ where
 		let end = frame.timestamp;
 		track.last_timestamp = Some(start.map_or(end, |start| start.max(end)));
 		let skipped = skipped && {
-			// Audio and video can resume the same outage in different release slots, and in
-			// either order. One flag covers their overlapping missing intervals, including a
-			// later read on another track that extends the interval already signalled.
-			// Presentation time shares the content's timeline across their different decode
-			// reserves.
-			let shared = (self.program.lost).filter(|&(first, last)| {
-				start.is_none_or(|start| start < last) && first.is_none_or(|first| first < end)
-			});
-			// `None` sorts first, so a merge keeps an unbounded start.
-			self.program.lost = Some(shared.map_or((start, end), |(first, last)| (first.min(start), last.max(end))));
-			shared.is_none()
+			let others = self.program.tracks.values().filter_map(|track| track.lost);
+			let (lost, separate) = coalesce((start, end), others);
+			self.program.tracks.get_mut(name).context("missing track")?.lost = Some(lost);
+			separate
 		};
+		let track = self.program.tracks.get(name).context("missing track")?;
 		let kind = &track.kind;
 		let is_video = matches!(kind, Kind::Video(_));
 		// Refresh PSI at keyframes, MPEG-1/2 video's carried whole among them, or after the
@@ -4339,6 +4333,30 @@ fn dolby_removals(codec: Dolby, payload: &[u8], decode: u128) -> Vec<(u128, usiz
 	frames
 }
 
+/// A delivery loss's presentation interval: from the furthest media its track muxed before,
+/// `None` when it had muxed none since the last reset, to the frame it resumed at.
+type Lost = (Option<Timestamp>, Timestamp);
+
+/// Merge `lost` with every interval in `others` it overlaps, and whether it overlapped none,
+/// so it needs a PCR flag of its own.
+///
+/// Tracks resume the same outage in different release slots, and in any order. One flag covers
+/// their overlapping intervals, including a later read on another track that extends one
+/// already signalled. Presentation time shares the content's timeline across their different
+/// decode reserves, and every track that muxed nothing since the last reset starts its loss
+/// there.
+fn coalesce((start, end): Lost, others: impl IntoIterator<Item = Lost>) -> (Lost, bool) {
+	let shared: Vec<Lost> = others
+		.into_iter()
+		.filter(|&(first, last)| start.is_none_or(|start| start < last) && first.is_none_or(|first| first < end))
+		.collect();
+	// `None` sorts first, so a merge keeps an unbounded start.
+	let lost = shared.iter().fold((start, end), |(start, end), &(first, last)| {
+		(start.min(first), end.max(last))
+	});
+	(lost, shared.is_empty())
+}
+
 /// Whether `timestamp` has crossed into a later repetition slot than `last`.
 ///
 /// Slots are absolute on the media timeline (`floor(timestamp / interval)`) rather than
@@ -5093,6 +5111,29 @@ mod tests {
 		Buffer, DecodeClock, Dolby, Kind, Laid, Mpeg2Picture, PSI_INTERVAL, PesPacket, Psi, Settle, dolby_removals,
 		due, is_complete_section, si_due, slot, unwrap_pts, verbatim_buffer,
 	};
+
+	/// Losses resumed out of presentation order flag each outage once, however they interleave.
+	#[test]
+	fn coalesce_flags_each_outage_once() {
+		let ms = |ms: u64| Timestamp::from_millis(ms).unwrap();
+		let a = (Some(ms(10_200)), ms(10_400));
+		let b = (Some(ms(9_800)), ms(10_000));
+		assert_eq!(super::coalesce(a, []), (a, true));
+		assert_eq!(super::coalesce(b, [a]), (b, true), "a disjoint earlier outage");
+		assert_eq!(super::coalesce(a, [a, b]), (a, false), "the first outage again");
+		let wider = (Some(ms(9_900)), ms(10_300));
+		assert_eq!(
+			super::coalesce(wider, [a, b]),
+			((Some(ms(9_800)), ms(10_400)), false),
+			"spanning both"
+		);
+		let reset = (None, ms(24_280));
+		assert_eq!(
+			super::coalesce((None, ms(24_216)), [reset]),
+			((None, ms(24_280)), false),
+			"both since a reset"
+		);
+	}
 
 	/// The tables as they stand take the version after the last laid, whatever was set on the
 	/// schedule meanwhile, and the last laid's own when they come back to it. The PAT keeps its
