@@ -2771,7 +2771,7 @@ mod tests {
 		drop((catalog, media, broadcast));
 	}
 
-	/// A one-video-rendition catalog snapshot reconciled by hand, which is what `watch_catalog`
+	/// A one-video-rendition catalog snapshot reconciled by hand, which is what `WatchCatalog`
 	/// does with each snapshot: the rendition follows its media on its own.
 	fn export(
 		upstream: &moq_mux::Source,
@@ -2968,7 +2968,7 @@ mod tests {
 		let upstream = crate::resolved(&origin, "live").await;
 
 		// The publisher goes away and comes back before the catalog snapshot is reconciled. That
-		// gap is wide in practice: `watch_catalog` retries a not-yet-written catalog track with
+		// gap is wide in practice: `WatchCatalog` retries a not-yet-written catalog track with
 		// backoff, so seconds can pass between resolving the broadcast and syncing its first
 		// snapshot. The old broadcast ends first: a path still routed is one broadcast, so a
 		// publisher back before then would resume it instead.
@@ -3547,7 +3547,7 @@ mod tests {
 		}
 	}
 
-	/// Renditions over hand-published media groups, reconciled the way `watch_catalog` does, on a
+	/// Renditions over hand-published media groups, reconciled the way `WatchCatalog` does, on a
 	/// two-second join interval.
 	struct Groups {
 		broadcast: moq_net::broadcast::Producer,

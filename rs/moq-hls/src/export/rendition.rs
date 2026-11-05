@@ -1459,7 +1459,7 @@ impl Rendition {
 		if let Some(init) = &run.init {
 			return Some(init.clone());
 		}
-		// A muxer error surfaces from `bootstrap`, which builds from media.
+		// A muxer error surfaces from a `LoadInit`, which builds from media.
 		let bytes = self.muxer().ok()?.init().ok()??;
 		Some(self.cache_init(run.epoch, bytes))
 	}
