@@ -165,8 +165,6 @@ struct Shape {
 	compress: bool,
 	/// Read each group via a fresh FETCH rather than a live subscription.
 	fetch: bool,
-	/// Expire delivery history between rounds instead of applying byte pressure.
-	expiry: bool,
 	/// Deliver each round as `burst` datagrams of `frame` bytes per watched broadcast's
 	/// datagram track instead of groups.
 	datagrams: bool,
@@ -192,7 +190,6 @@ impl Shape {
 		fetch: false,
 		compress: false,
 		datagrams: false,
-		expiry: false,
 	};
 
 	/// What each viewer subscribes with: a burst is a backlog, which the default
@@ -606,9 +603,9 @@ struct Cluster<B: Backend> {
 }
 
 impl<B: Backend> Cluster<B> {
-	async fn new(version: &str, shape: Shape) -> Self {
+	async fn new(version: &str, shape: Shape, expiry: bool) -> Self {
 		let mut this = Self {
-			expiry: shape.expiry,
+			expiry,
 			version: version.parse().unwrap(),
 			window: shape.window,
 			credit: shape.credit,
@@ -626,7 +623,7 @@ impl<B: Backend> Cluster<B> {
 
 		for _ in 0..shape.relays {
 			this.next_hop += 1;
-			let (relay, pool) = B::relay(this.next_hop, (!shape.expiry).then_some(RELAY_CACHE));
+			let (relay, pool) = B::relay(this.next_hop, (!expiry).then_some(RELAY_CACHE));
 			this.relays.push(relay);
 			this.pools.push(pool);
 		}
@@ -814,8 +811,7 @@ impl<B: Backend> Room<B> {
 		);
 		assert!(!shape.paced || shape.burst == 1, "a paced round writes one frame");
 		assert!(!shape.fetch || !shape.paced, "fetch rounds read finished groups");
-		let shape = Shape { expiry: true, ..shape };
-		let mut cluster = Cluster::<B>::new(version, shape).await;
+		let mut cluster = Cluster::<B>::new(version, shape, true).await;
 
 		let mut viewers = Vec::new();
 		let mut watched = vec![false; shape.total()];
@@ -938,8 +934,9 @@ impl<B: Backend> Room<B> {
 		self.cluster.pools.iter().chain(viewers)
 	}
 
-	/// Expire old batches outside timing. Activity is dated on the following poll,
-	/// and the exact expiry boundary survives until the following poll.
+	/// Advance the cache/model clock outside timing to expire old batches.
+	/// Each round completes its reads before this step; pending read deadlines
+	/// share this clock too.
 	fn tick(&mut self) {
 		self.cache_now += if std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
 			Duration::from_secs(1)
@@ -1311,6 +1308,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 							publishers: 1,
 							..Shape::BASE
 						},
+						false,
 					)
 					.await;
 					let mut viewers = Vec::new();
@@ -1403,7 +1401,7 @@ fn join<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Ite
 			group.bench_function(BenchmarkId::from_parameter(shape.id(version)), |b| {
 				let cluster = cluster.get_or_insert_with(|| {
 					rt.block_on(async {
-						let cluster = Cluster::<B>::new(version, *shape).await;
+						let cluster = Cluster::<B>::new(version, *shape, false).await;
 						let payload = Bytes::from(vec![0; shape.frame]);
 						for track in &cluster.tracks {
 							for sequence in 0..shape.history {
@@ -1499,6 +1497,7 @@ impl<B: Backend> DashRoom<B> {
 				viewers: 0,
 				..Shape::BASE
 			},
+			false,
 		)
 		.await;
 
@@ -1662,6 +1661,7 @@ impl<B: Backend> ChurnRoom<B> {
 				viewers: 0,
 				..Shape::BASE
 			},
+			false,
 		)
 		.await;
 		let published = &cluster._broadcasts[0];
@@ -1876,7 +1876,7 @@ pub(crate) fn withdrawal<B: Backend>(c: &mut Criterion) {
 								publishers: 0,
 								..Shape::BASE
 							};
-							let cluster = Cluster::<B>::new("moq-lite-06", shape).await;
+							let cluster = Cluster::<B>::new("moq-lite-06", shape, false).await;
 							let mut announced = B::origin(cluster.relays.last().unwrap()).consume().announced();
 							let live: Vec<_> = (0..broadcasts)
 								.map(|i| {

@@ -205,7 +205,7 @@ impl Link {
 		bytes
 	}
 
-	// Expire read history between rounds without advancing protocol time.
+	// Advance the cache/model clock between rounds to expire read history.
 	fn tick(&mut self) {
 		self.cache_now += cache::DEFAULT_EXPIRY;
 		for pool in &self.pools {
