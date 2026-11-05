@@ -101,7 +101,8 @@ moq.pro load nodes, and a dedicated bare-metal host; revisit the last only if
 A/A runs show the hosted noise floor hides regressions worth catching.
 
 Decided 2026-10-28 (maintainer): CodSpeed's CPU simulation runs on every
-`main` commit as an extra signal beside this gate rather than a replacement
+`main` push that touches Rust, Cargo, or Nix files, as an extra signal beside
+this gate rather than a replacement
 (see [CodSpeed](/bench/README.md#codspeed)). It covers only the
 single-threaded benches without I/O, so this calibration still decides the
 paired gate.
