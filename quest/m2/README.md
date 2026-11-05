@@ -39,7 +39,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Binary release publishers run on their tag](/quest/m2/release-tag-publishers.md) - brew, Go and Swift releases stop running through `workflow_run` on main, once the cut brings the workflows to `release`
 - [crates.io trusts the workflow](/quest/m2/crates-trusted-publisher.md) - maintainer action: the crates the cut first-publishes by token get a trusted publisher for `release-rs.yml`
 - [Rust releases publish through OIDC](/quest/m2/release-rs-oidc.md) - release-plz publishes with trusted publishing and `CARGO_REGISTRY_TOKEN` is revoked
-- [Release tags substitute from nix.moq.dev](/quest/m2/release-nix-cache.md) - the first tag after the cut substitutes on a clean machine, bucket sizes hold, and Cachix is retired
 - [One policy for oversized container metadata](/quest/m2/import-metadata-policy.md) - fMP4 and MKV refuse or stream huge metadata by one documented rule
 - [Wire fuzz coverage](/quest/m2/wire-fuzz-coverage.md) - the cmsg walks in moq-sock and moq-uring have invariant fuzz targets, and the unsafe peer input reaches runs under Miri
 - [VA-API renderer tests](/quest/m2/vaapi-render-tests.md) - the VA-API renderer, decode, and transcode tests run in `just rs gpu` on AMD and Intel and fail instead of skipping, and hosted CI reports them ignored

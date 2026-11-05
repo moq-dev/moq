@@ -23,10 +23,10 @@ The same PR dropped Cachix from `main` (decided 2026-11-02): Smoke's nix
 channel substitutes from `nix.moq.dev` and no longer pushes, so it names no
 Environment and `CACHIX_AUTH_TOKEN` needs no new home. The alternatives were
 moving the token into `cache-write`, or deleting Cachix everywhere now with a
-`release` backport. `release` keeps its Cachix workflows until the next cut
-merges `main` into it, and
-[Release tags substitute from nix.moq.dev](/quest/m2/release-nix-cache.md) deletes the Cachix
-cache and token once a release tag substitutes from `nix.moq.dev`.
+`release` backport. Changed 2026-11-05 (maintainer, /quest-unblock):
+[Release tags push to nix.moq.dev](/quest/m0/ci/cachix-retire.md) backports
+`release-nix.yml` and drops `cachix.yml` on `release` now, and deletes
+`CACHIX_AUTH_TOKEN` once a release tag substitutes from `nix.moq.dev`.
 
 Decided 2026-11-05 (maintainer, /quest-audit): `publish` still admits
 `main`, so this does not wait for the next cut.
