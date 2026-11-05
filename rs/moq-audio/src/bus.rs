@@ -702,6 +702,7 @@ impl Reader {
 
 	/// The next block, or `None` once the mix has ended and every block kept
 	/// for this reader has been read.
+	#[kio::wrapper]
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Option<Block>> {
 		let next = self.next;
 		let result = ready!(self.history.poll(waiter, |history| {
@@ -718,12 +719,6 @@ impl Reader {
 			}
 			Err(_) => Poll::Ready(None),
 		}
-	}
-
-	/// The next block, or `None` once the mix has ended and every block kept
-	/// for this reader has been read.
-	pub async fn read(&mut self) -> Option<Block> {
-		kio::wait(|waiter| self.poll_read(waiter)).await
 	}
 }
 

@@ -1554,11 +1554,14 @@ impl Watch {
 		self.selector.current(&self.state.read()).cloned()
 	}
 
-	/// Poll for the grant to differ from the last one this watch returned (or saw
-	/// at creation).
+	/// The grant once it differs from the last one this watch returned (or saw at
+	/// creation).
 	///
-	/// `Err` once nothing will change it again: the handle ended, or for a
-	/// token's watch, the token ended for good.
+	/// # Errors
+	///
+	/// Once nothing will change it again: the handle ended, or for a token's watch, the
+	/// token ended for good.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Grant>>> {
 		let last = &self.last;
 		let selector = self.selector;
@@ -1575,16 +1578,6 @@ impl Watch {
 		}
 		Poll::Ready(Err(selector.ended(&state).unwrap_or(Error::Cancel)))
 	}
-
-	/// Wait for the grant to change, returning the new one.
-	///
-	/// # Errors
-	///
-	/// See [`poll_changed`](Self::poll_changed).
-	#[cfg(feature = "async")]
-	pub async fn changed(&mut self) -> Result<Option<Grant>> {
-		kio::wait(|waiter| self.poll_changed(waiter)).await
-	}
 }
 
 /// The tokens the peer presents, for an application that answers them itself.
@@ -1595,15 +1588,10 @@ pub struct Requests {
 }
 
 impl Requests {
-	/// Poll for the next token, or `None` once the handle ends.
+	/// The next token the peer presents, or `None` once the handle ends.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<Request>> {
 		self.queue.poll_next(waiter)
-	}
-
-	/// Wait for the next token the peer presents, or `None` once the handle ends.
-	#[cfg(feature = "async")]
-	pub async fn next(&mut self) -> Option<Request> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 }
 
@@ -2244,6 +2232,7 @@ impl RequestGrant {
 
 	/// Run `body`, everything a request does once admitted, until it finishes or `grant`
 	/// (when its token admitted it) ends. See [`until`].
+	#[cfg(feature = "async")]
 	pub(crate) fn guard<F: std::future::Future + Send>(
 		grant: Option<&Self>,
 		body: F,
@@ -2273,6 +2262,7 @@ fn latch(ended: &kio::Producer<Option<Refusal>>, refusal: Refusal) {
 /// A dropped `body` releases what it holds; anything it was writing stays buffered whole in
 /// the stream's [`Writer`](crate::coding::Writer) as long as each message is buffered before
 /// its first await, so the caller can still end the request on the wire.
+#[cfg(feature = "async")]
 pub(crate) async fn until<F: std::future::Future>(
 	body: F,
 	mut ended: impl FnMut(&kio::Waiter) -> Poll<Refusal>,

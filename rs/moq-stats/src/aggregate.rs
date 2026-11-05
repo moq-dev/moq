@@ -170,8 +170,9 @@ pub struct TotalsConsumer {
 impl TotalsConsumer {
 	/// The next merged frame, or `None` once the announce stream ends (the
 	/// source origin went away).
-	pub async fn next(&mut self) -> Result<Option<TotalsFrame>> {
-		kio::wait(|waiter| self.inner.poll_next(waiter)).await
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next(&mut self, waiter: &Waiter) -> Poll<Result<Option<TotalsFrame>>> {
+		self.inner.poll_next(waiter)
 	}
 }
 
@@ -184,8 +185,9 @@ pub struct GroupConsumer {
 impl GroupConsumer {
 	/// The next merged frame, each tier's [`Group`] keyed by tier label as in
 	/// [`GroupFrame::tiers`], or `None` once the announce stream ends.
-	pub async fn next(&mut self) -> Result<Option<BTreeMap<String, Group>>> {
-		kio::wait(|waiter| self.inner.poll_next(waiter)).await
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next(&mut self, waiter: &Waiter) -> Poll<Result<Option<BTreeMap<String, Group>>>> {
+		self.inner.poll_next(waiter)
 	}
 }
 
@@ -197,8 +199,9 @@ pub struct PresenceConsumer {
 
 impl PresenceConsumer {
 	/// The next merged frame, or `None` once the announce stream ends.
-	pub async fn next(&mut self) -> Result<Option<PresenceFrame>> {
-		kio::wait(|waiter| self.inner.poll_next(waiter)).await
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next(&mut self, waiter: &Waiter) -> Poll<Result<Option<PresenceFrame>>> {
+		self.inner.poll_next(waiter)
 	}
 }
 
@@ -210,8 +213,9 @@ pub struct PrefixConsumer {
 
 impl PrefixConsumer {
 	/// The next merged frame, or `None` once the announce stream ends.
-	pub async fn next(&mut self) -> Result<Option<PrefixFrame>> {
-		kio::wait(|waiter| self.inner.poll_next(waiter)).await
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next(&mut self, waiter: &Waiter) -> Poll<Result<Option<PrefixFrame>>> {
+		self.inner.poll_next(waiter)
 	}
 }
 

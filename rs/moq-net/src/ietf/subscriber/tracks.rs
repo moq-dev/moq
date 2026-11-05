@@ -352,7 +352,7 @@ impl Subscriber {
 		let (key, failed, opening) = self.listings.lock().listen(path, lister);
 		if let Some(opening) = opening {
 			let this = self.clone();
-			self.tasks.push(this.run_subscribe_tracks(opening));
+			self.tasks.push(crate::util::future_task(this.run_subscribe_tracks(opening)));
 		}
 		Listening {
 			listings: self.listings.clone(),
@@ -584,7 +584,7 @@ impl Subscriber {
 		listings.insert(key.clone(), entry);
 		drop(listings);
 		let this = self.clone();
-		self.tasks.push(async move {
+		self.tasks.push(crate::util::future_task(async move {
 			match this.open_paused(&key, &handoff).await {
 				Ok(Some(upstream)) => this.watch(key, upstream, handoff).await,
 				Ok(None) => {}
@@ -597,7 +597,7 @@ impl Subscriber {
 					}
 				}
 			}
-		});
+		}));
 	}
 
 	/// Open a paused SUBSCRIBE for a skipped track and list it once its SUBSCRIBE_OK
@@ -1149,7 +1149,7 @@ impl Subscriber {
 			None => false,
 		};
 		let this = self.clone();
-		self.tasks.push(async move {
+		self.tasks.push(crate::util::future_task(async move {
 			match held {
 				true => this.watch(key, upstream, handoff).await,
 				false => {
@@ -1157,7 +1157,7 @@ impl Subscriber {
 					this.cancel_subscribe(upstream.stream).await;
 				}
 			}
-		});
+		}));
 	}
 
 	/// Pause a subscription nobody reads that is its track's entry, and hold it again. The

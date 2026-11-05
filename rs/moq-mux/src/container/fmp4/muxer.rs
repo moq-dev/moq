@@ -55,6 +55,7 @@ enum Kind {
 /// group has been [`read`](Self::read) to resolve the missing fields from a keyframe.
 pub struct Muxer {
 	kind: Kind,
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	container: HangContainer,
 	transform: Option<VideoTransform>,
 	/// Resolved codec config record: the catalog `description`, or synthesized by the
@@ -177,6 +178,7 @@ impl Muxer {
 	/// block until the publisher closes it). Parameter-set frames are absorbed into the codec
 	/// config record; the group's first emitted frame is marked a keyframe (a group opens on
 	/// one by convention).
+	#[cfg(feature = "async")]
 	pub async fn read(&mut self, group: &mut moq_net::group::Consumer) -> crate::Result<Vec<Frame>> {
 		use crate::container::Container as _;
 
@@ -251,6 +253,7 @@ impl Muxer {
 		codec_dimensions(&config.codec, description.as_deref(), payload)
 	}
 
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn resolve_video_dimensions(&mut self, payload: &[u8]) -> crate::Result<()> {
 		let Kind::Video(config) = &mut self.kind else {
 			return Ok(());
