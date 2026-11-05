@@ -22,7 +22,7 @@ the smoke client (`test/smoke/clients/c`), which
 
 Waits for the cut and the generator switch (found when first started,
 2026-10-28; decided 2026-10-31). Until the cut, [moq-c parity](/quest/m2/cut-gate/c/README.md) ships the
-hand-written 0.7 and proves it with this interop client and the current
+hand-written crate at 0.22 and proves it with this interop client and the current
 `doc/lib/c`, and `doc/` describes only what ships, so either half landing first
 drops the shipping crate's proof and documents an unpublished API. The switch
 re-cases every generated C type (`moq_session` becomes `MoqSession`), so a port
@@ -39,5 +39,5 @@ so it can move only once the generated archive publishes, after this quest;
 
 ## Required
 
-- [Breaking release cut](/quest/m3/release/cut.md) - the hand-written 0.7 ships with this client and these docs as its proof
+- [Breaking release cut](/quest/m3/release/cut.md) - the hand-written crate ships at 0.22 with this client and these docs as its proof
 - [Switch to rust2's exporter](/quest/m3/ffi-exporter.md) - the generated C type names settle before consumers are written against them

@@ -25,7 +25,8 @@ see it for the decisions and research.
   runs on the worker handle, with admission hopping to the shared runtime
   through `Lifecycle::shared`, so one `Connection::run` serves every runtime.
   Use one listen-config mapping at all three sites.
-- Do this before the io_uring packaging work publishes the duplicated path.
+- Do this before [the io_uring packaging work](/quest/m3/relay-io-uring-package.md)
+  publishes the duplicated path.
 - The relay's existing drain, admission and handshake-deadline tests must
   pass on both runtimes.
 

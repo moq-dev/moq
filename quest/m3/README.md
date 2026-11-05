@@ -44,6 +44,8 @@ federation) land.
 - [An audio track's final flush joins its open group](/quest/m3/audio-flush-group.md) - a zero-`delay.max` subscriber gets the tail, not `Old`
 - [Release execution](/quest/m3/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m2
 - [Release tags substitute from nix.moq.dev](/quest/m3/release-nix-cache.md) - the first tag after the cut substitutes on a clean machine, bucket sizes hold, and Cachix is retired
+- [Release pull requests read the R2 Rust cache](/quest/m3/mbx-r2-release-cache.md) - after the cut brings the platform Rust cache to `release`
+- [Binary release publishers run on their tag](/quest/m3/release-tag-publishers.md) - after the cut brings the workflows to `release`
 - [One policy for oversized container metadata](/quest/m3/import-metadata-policy.md) - fMP4 and MKV refuse or stream huge metadata by one documented rule
 - [Video quality](/quest/m3/video-quality/README.md) - a nightly VMAF harness grades every encoder backend and on-demand GoP pops against floors, and moq-boy's encode is fixed under it
 - [rust2's exporter is ready for moq](/quest/m3/rust2-exporter.md) - waiting on moq-dev/rust2's exporter to generate every language moq ships

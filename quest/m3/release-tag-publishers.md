@@ -12,6 +12,15 @@ Planned 2026-11-02 (maintainer, follow-up planning after the 2026-11-02 /quest-c
 the `bot` Environment today, which admits `main`; moving them needs `bot` to
 admit the binary release tags, a maintainer action to list in the PR.
 
+Decided 2026-11-05 (maintainer, /quest-audit): ✅ moved from m0 to m2 (m3 since the milestone re-cut) behind
+[the cut](/quest/m3/release/cut.md), since tags run `release`'s copies of the
+workflows and `release` gets `main`'s only when the cut merges it. Not
+chosen: moving all four release-gated m0 CI quests, including
+[Drop main from the publish Environment](/quest/m0/ci/publish-release-only.md),
+which backports its own change instead; merging `main` into `release` now,
+which reverses the 2026-11-04 decision.
+
 ## Required
 
+- [Cut and publish the prepared breaking release](/quest/m3/release/cut.md) - brings `main`'s workflows to `release`, where tags run them
 - [Release credentials off main](/quest/m0/ci/publish-release-only.md) - the same move for the `publish` jobs lands first

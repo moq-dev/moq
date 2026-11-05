@@ -4,7 +4,9 @@
 
 The scheduled Interop and Video workflows pass on `main`, so a red run
 means a new break. Interop has failed every scheduled run since
-2026-10-22, and Video fails on a stale expectation.
+2026-10-22. Video has passed every scheduled run since 2026-11-02 (for
+example [42063654592](https://github.com/moq-dev/moq/actions/runs/42063654592)),
+so it only needs to stay green.
 
 ## Waiting
 
@@ -58,14 +60,17 @@ showed more causes, fixed in this quest's own PR:
   0.14.11 has been released. Remeasured against moq-cli 0.14.12 and
   moq-relay 0.17.12 with `just test wire-compat --remeasure`.
 
-The P2P data-channel test timed out once, in 41668668824, and passes
-locally; triage it if it recurs.
+The P2P data-channel test timed out in 41668668824 and again in
+[42062226837](https://github.com/moq-dev/moq/actions/runs/42062226837)
+(2026-11-05); [its quest](/quest/m0/test-flakes-2/p2p-data-channel.md) under
+test flakes owns it.
 
 Scheduled run
 [41863118968](https://github.com/moq-dev/moq/actions/runs/41863118968)
 (2026-11-04, after every fix above landed) passed the open-GOP recovery
 case, P2P, and wire-compat. Its only failure was the fallback audio stall
 above, on `moq-lite-07-wip` in Chromium, which the IETF22 fallback quest
-owns.
+owns. Scheduled run 42062226837 (2026-11-05) failed only P2P and the same
+fallback audio stall in Chromium (`audioStalled:true`).
 
 Public API: none. Wire: none.

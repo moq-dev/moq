@@ -14,9 +14,10 @@ moq-webrtc without reaching into moq-tokio's internals.
 ## Plan
 
 Part of [Session policy lives in moq-net](/quest/m1/session-policy/README.md);
-see it for the decisions and research. This is what
-[moq-dev/moq#7804](https://github.com/moq-dev/moq/pull/7804) and the
-[WebRTC rename](/quest/m2/webrtc-rename.md) wait on: the maintainer decided on
+see it for the decisions and research. This is what the
+[WebRTC rename](/quest/m2/webrtc-rename.md) waits on
+([moq-dev/moq#7804](https://github.com/moq-dev/moq/pull/7804), which first
+asked, closed unmerged): the maintainer decided on
 2026-11-04 to move the policy first, so the handoff is a few lines over
 moq-net rather than a copy of the policy.
 

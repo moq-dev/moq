@@ -67,6 +67,12 @@ half rewrites the same JS fill and miss code as
 which also redefine the stale-drop judgment it relies on. Not chosen:
 splitting the `Fill.time` lookup off to start now.
 
+Decided 2026-11-05 (maintainer, /quest-audit): ✅ this also waits for
+[Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md),
+which moves JS multi-group fills in the same `#runFills` onto the
+subscription.
+
 ## Required
 
 - [Drop set](/quest/m1/drop-set.md) - redefines the JS stale-drop judgment and fill code this rewrites
+- [Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md) - moves JS multi-group fills onto the subscription in the same `#runFills`

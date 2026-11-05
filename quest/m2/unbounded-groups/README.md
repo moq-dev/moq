@@ -2,18 +2,19 @@
 
 ## Goal
 
-Groups and frames have no fixed size cap. `MAX_GROUP_FRAMES` (8192) goes
-away, and `MAX_CACHE_BYTES` (32 MB) stops capping groups and frames and
-instead bounds how much of a group's live tail is held. A group sheds whole
-frames from its front once its tail passes 32 MB, or sooner when the shared
-cache pool is over budget, so one long group never grows without bound even
-on a relay with no cache capacity set. A reader or FETCH that reaches a shed
-front is served by a flight, a separate paced copy filled from upstream or
-the publisher's own refill handler; failing that, it asks for a new group
-(refresh), and otherwise it gets `Evicted`. Readers never fail just because a group got big. The motivating
-workloads are long-lived single groups (data/log tracks, audio, window
-timelines), video with very long GOPs, and file transfers where a frame is a
-whole file.
+Groups and frames have no fixed size cap. `MAX_GROUP_FRAMES` is already gone
+([moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)), and
+`MAX_CACHE_BYTES` (32 MB) stops capping groups and frames and instead bounds
+how much of a group's live tail is held. A group sheds whole frames from its
+front once its tail passes 32 MB, or sooner when the shared cache pool is over
+budget, so one long group never grows without bound even on a relay with no
+cache capacity set. A reader or FETCH that reaches a shed front is served by a
+flight, a separate paced copy filled from upstream or the publisher's own
+refill handler; failing that, it asks for a new group (refresh), and otherwise
+it gets `Evicted`. Readers never fail just because a group got big. The
+motivating workloads are long-lived single groups (data/log tracks, audio,
+window timelines), video with very long GOPs, and file transfers where a frame
+is a whole file.
 
 The hot write and read path for ordinary groups does not regress.
 
@@ -164,15 +165,16 @@ A flight's fill is the `track::Requests` fill (`track::Fill`). A handler serves 
 group producer bounded to that range, the same API as a live write, so an
 origin can regenerate data from disk or an archive.
 
-This epic owns the end-to-end test: a relay chain carries one live group well
-past the old caps. A late joiner gets its head through a flight and hands
-over to the live copy, and a live reader keeps the tail, over lite, with
-memory held near 32 MB per copy; over moq-transport, the live group's replay
-is refused and a finished group's replays
-([moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944)). It also carries a long
-compressed group through a small cache pool with a plain reader on a legacy
-wire, which [moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)
-covered only at the model layer (maintainer, 2026-10-30).
+Most of the end-to-end test landed in
+[moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944)
+(`rs/moq-net/tests/integration/flights.rs`): a relay chain carries one live
+group past its 32 MiB tail, a late joiner replays it through a flight and
+hands over to the live copy over lite, and over moq-transport the live
+group's replay is refused and a finished group's replays. This epic still
+owns the rest: a long compressed group through a small cache pool with a
+plain reader on a legacy wire, which
+[moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993) covered only at
+the model layer (maintainer, 2026-10-30).
 
 ## Required
 

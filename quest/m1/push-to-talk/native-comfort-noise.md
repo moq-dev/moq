@@ -23,8 +23,9 @@ browser through `doc/concept/audio-jitter.md` and a corpus case rather than
 two descriptions. Cover it in `test/audio-quality`'s native rows or
 `just test push-to-talk` if that can drive `moq play`.
 
-Coordinate with [moq play reaches zero steady-state underruns by
-time-stretching](/quest/m1/audio-jitter-target/native-stretch.md), which edits
-the same playback ring: whichever lands second rebases onto the other.
+Build on [moq play reaches zero steady-state underruns by
+time-stretching](/quest/m1/audio-jitter-target/native-stretch.md), whose
+stretch in the same playback ring is on `main` since
+[moq-dev/moq#7856](https://github.com/moq-dev/moq/pull/7856).
 
 Public API: none expected. Wire: none.

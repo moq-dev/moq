@@ -32,8 +32,10 @@ Decided 2026-11-05 (maintainer, /quest-plan):
 Today the crate has three `[[bin]]`s (`rs/moq-bench/Cargo.toml`):
 `moq-bench` (`src/main.rs`), `moq-bench-host` (`src/host.rs`, Linux-only),
 and `moq-bench-uring-check` (`src/uring.rs`, 15 lines, behind the `uring`
-feature). Only `bench/run.sh` runs the probe, and nothing else uses the
-`uring` feature, so the feature goes with it. Put the probe wherever
+feature). `bench/run.sh` runs the probe, `bench/profile.test.py` stubs its
+binary, and `bench/metadata.py` names the `moq-bench/uring` feature in its
+runtime and profile descriptions; nothing else uses the feature, so it goes
+with the probe and those three callers follow. Put the probe wherever
 `bench/run.sh` can still build it with the least new surface; a
 `moq-uring` example is the likely fit. On a non-Linux host,
 `moq-bench host` errors the way the bin does today.

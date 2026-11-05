@@ -28,15 +28,24 @@ merges `main` into it, and
 [Release tags substitute from nix.moq.dev](/quest/m3/release-nix-cache.md) deletes the Cachix
 cache and token once a release tag substitutes from `nix.moq.dev`.
 
-What remains is the maintainer's, in order:
+Decided 2026-11-05 (maintainer, /quest-audit): `publish` still admits
+`main`, so this does not wait for the next cut.
 
-1. Merge `main` into `release` (a release cut or a backport). Tags run
-   `release`'s copies of the workflows, so until then a tag still chains its
-   winget and Kotlin wrapper publishers through `main`'s `workflow_run`, which
-   that PR removed: those two skip, and `release`'s apt and rpm dispatches
-   still run on `main`.
-2. Then drop `main` from `publish`'s deployment policy, and remove
-   `DISCORD_WEBHOOK` and `CACHIX_AUTH_TOKEN` from `publish`.
+- ✅ Backport only #7431's workflow change to `release` now, as
+  [moq-dev/moq#7202](https://github.com/moq-dev/moq/pull/7202) and
+  [moq-dev/moq#7421](https://github.com/moq-dev/moq/pull/7421) backported
+  workflow changes, so a tag's run dispatches winget and calls the Kotlin
+  wrapper itself, and `release`'s apt and rpm dispatches name `--ref release`.
+- Not chosen: moving this quest to m2 behind the cut with the other
+  release-gated CI quests; merging `main` into `release` now, which reverses
+  the 2026-11-04 decision below.
+
+What remains, in order:
+
+1. Open the backport PR against `release` (agent work).
+2. Once it merges, the maintainer drops `main` from `publish`'s deployment
+   policy and removes `DISCORD_WEBHOOK` and `CACHIX_AUTH_TOKEN` from
+   `publish`. Environment settings need the maintainer's admin access.
 
 Decided 2026-11-04 (maintainer, /quest-unblock): ✅ cut the combined patch
 release on `release` soon, once [moq-dev/moq#7596](https://github.com/moq-dev/moq/pull/7596)'s

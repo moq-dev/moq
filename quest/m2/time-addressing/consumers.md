@@ -13,9 +13,9 @@ frame's pts.
 Decided 2026-10-25 (maintainer), from the spike:
 
 - GROUP_END replaces hang's empty-frame duration marker
-  (`rs/moq-mux/src/container/producer.rs:523`), so moq-mux stops writing
-  empty frames.
-- Discontinuity marker groups go away (`producer.rs:650`): a gap is a
+  (`rs/moq-mux/src/container/producer.rs`, `cut` and `close`), so moq-mux
+  stops writing empty frames.
+- Discontinuity marker groups go away (`producer.rs`, `discontinuity`): a gap is a
   previous end below the next start, and a missing group is a
   previous-start link that doesn't match.
 - Legacy egress synthesizes neither: old players lose end durations and

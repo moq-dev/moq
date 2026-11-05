@@ -42,6 +42,7 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Nightly's shipping-size check passes](/quest/m0/nightly/shipping-size.md) - js/net, js/watch, and moq-relay growth over 5% is traced to its commits, then shrunk or accepted
 - [Nightly's Miri job stays inside its time budget](/quest/m0/nightly/miri.md) - both Miri passes go green, with ARM timings inside the 60-minute job and 15-minute-per-test budgets
 - [Nightly's macOS platform job passes](/quest/m0/nightly/macos.md) - `moq-audio`'s tests compile on macOS again and the websocket version test's timeout is fixed if it recurs
+- [The OBS stop-drain test reads no gap](/quest/m0/nightly/obs-stop-drain.md) - OBS and OBS TSan read every delivered frame and the track's end after `Stop()`, with no gap
+- [The JS resume model finds no missing groups](/quest/m0/nightly/resume-model.md) - the JS resume model property test hands every reader each group it is owed

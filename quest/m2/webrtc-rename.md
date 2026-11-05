@@ -24,4 +24,4 @@ Public API: breaking (crate rename; `moq_tokio::webrtc` moves). Wire: none.
 
 ## Related
 
-- [moq-rtc REMB and TIAS](/rs/moq-rtc/src/server/whip.rs) - #7373 adds the capped answer in moq-rtc; carry it through the move
+- [moq-rtc REMB and TIAS](/rs/moq-rtc/src/server/whip.rs) - #7373 added the capped answer in moq-rtc; carry it through the move

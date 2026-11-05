@@ -50,5 +50,14 @@ on lite-07 (`track.Consumer.fetchGroup` in JS).
   Subscribe sections. Run `just drafts check`.
 - Run `just test interop --all`.
 
+Decided 2026-11-05 (maintainer, /quest-audit): ✅ this waits for
+[Drop set](/quest/m1/drop-set.md), since both rewrite the JS fill code
+(`js/net/src/lite/subscriber.ts` `#runFills`) and the same lite-07 draft
+sections.
+
 Public API: none expected. Wire: lite-07 (unpublished) SUBSCRIBE anchors lose
 their frame.
+
+## Required
+
+- [Drop set](/quest/m1/drop-set.md) - rewrites the JS fill code and lite-07 draft sections this changes

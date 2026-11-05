@@ -43,3 +43,8 @@ publishing through OIDC.
 
 Done 2026-11-04 (maintainer, /quest-unblock): all 31 published crates have
 the trusted publisher. Only the 7 unpublished crates remain.
+
+Decided 2026-11-05 (maintainer, /quest-audit): moq-e2ee, published but
+retired in favor of moq-crypto, gets no trusted publisher;
+[Remove the moq-e2ee stub](/quest/m1/moq-e2ee-remove.md) takes it out of the
+workspace instead.
