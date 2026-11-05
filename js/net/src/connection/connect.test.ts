@@ -1,7 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
 import Qmux, { selectSubprotocol, type WebSocketLike } from "@moq/qmux";
-import { decodeRecord, type TransportParams } from "../../../qmux/src/frame.ts";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import { ClientSetup, ServerSetup } from "../lite/compat.ts";
@@ -648,6 +647,16 @@ test("the WebSocket fallback offers the same versions", async () => {
 	expect(asked.some((protocol) => protocol.endsWith(ALPN_05))).toBe(false);
 });
 
+// Read wire parameters without making qmux's private codec part of net's TS project.
+const { decodeRecord } = require("../../../qmux/src/frame.ts");
+
+interface ReceiveWindows {
+	initialMaxData: bigint;
+	initialMaxStreamDataBidiLocal: bigint;
+	initialMaxStreamDataBidiRemote: bigint;
+	initialMaxStreamDataUni: bigint;
+}
+
 // How many streams the WebSocket fallback lets a server open in each direction: a qmux
 // server accepts the dial and opens streams until the client's limit refuses one.
 async function websocketStreamLimits(props: Omit<ConnectProps, "url">) {
@@ -655,7 +664,7 @@ async function websocketStreamLimits(props: Omit<ConnectProps, "url">) {
 	// No WebTransport, so the WebSocket attempt goes at once.
 	globalThis.WebTransport = undefined as unknown as typeof WebTransport;
 	const accepted = Promise.withResolvers<Qmux>();
-	const parameters = Promise.withResolvers<TransportParams>();
+	const parameters = Promise.withResolvers<ReceiveWindows>();
 	// Bun's server socket, shaped as the `WebSocketLike` that `Qmux.accept` adopts.
 	let adopted: WebSocketLike | undefined;
 	const server = Bun.serve<{ protocol: string }>({
@@ -693,7 +702,8 @@ async function websocketStreamLimits(props: Omit<ConnectProps, "url">) {
 				accepted.resolve(Qmux.accept(adopted, { protocol: socket.data.protocol }));
 			},
 			message(_socket, data) {
-				for (const frame of decodeRecord(new Uint8Array(data as ArrayBuffer))) {
+				if (typeof data === "string") throw new Error("expected binary QMux record");
+				for (const frame of decodeRecord(new Uint8Array(data))) {
 					if (frame.type === "transport_parameters") parameters.resolve(frame.params);
 				}
 				adopted?.onmessage?.({ data });
