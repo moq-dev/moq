@@ -61,4 +61,4 @@ which dependencies exist.
 
 ## Required
 
-- [Breaking release readiness](/quest/m1/README.md) - the release's features are final before they are reviewed
+- [Breaking release readiness](/quest/m2/README.md) - the release's features are final before they are reviewed

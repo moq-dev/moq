@@ -35,4 +35,4 @@ epochs dropped active-active publishers.
 
 ## Required
 
-- [Breaking release readiness](/quest/m1/README.md) - the release's code is final before it is reviewed
+- [Breaking release readiness](/quest/m2/README.md) - the release's code is final before it is reviewed

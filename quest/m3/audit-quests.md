@@ -8,11 +8,10 @@ conflicting, and misranked quests are fixed.
 ## Plan
 
 Recurs once per major release (decided 2026-10-19). The PR that finishes
-this run also adds the next one with the same file name at the end of the next
-milestone's `Required` (m0 to m1, m1 to m2). The successor keeps the Goal
+this run also adds the next one with the same file name at the end of m3's `Required`, which the shift after the next cut
+brings into m1. The successor keeps the Goal
 and this paragraph; the rest of its Plan is rewritten with what this run
-learned: baselines, results, and what to check first. A successor placed in m2
-also lists the [release cut](/quest/m3/release/cut.md) under `Required`, so it
+learned: baselines, results, and what to check first. The successor also lists the [release cut](/quest/m3/release/cut.md) under `Required`, so it
 waits for the release in flight to ship. Only `/quest-delete` ends the
 recurrence. Fixes land in the run's PR, one commit each, rather than as follow-ups.
 Only a change that needs a maintainer decision (public API, scope) or is

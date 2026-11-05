@@ -38,13 +38,14 @@ This README's own work, once every child has merged:
    vendored commit. Code whose upstream is gone or frozen (moq-tokio's
    `quic::web`, from moq-dev/noq) is listed in the README it lives in and
    gets no child.
-2. Re-create the questline at `/quest/m2/vendor-sync/`, linked from
-   `/quest/m2/README.md`'s `Required`. Every child keeps its Goal and carries
+2. Re-create the questline at `/quest/m3/vendor-sync/`, linked from
+   `/quest/m3/README.md`'s `Required`. Every child keeps its Goal and carries
    forward its last checked commit and what this run learned (what to check
    first, what was ruled out). Each child requires
    [the release cut](/quest/m3/release/cut.md), which removes itself from
-   every `Required` and shifts m2 into m1, so the next run becomes ready in the
-   new m1, once per release cycle.
+   every `Required` and moves the questline under the re-created
+   [cut gate](/quest/m2/cut-gate/README.md) in m2, so the next run becomes
+   ready there, once per release cycle (rule replaced 2026-11-05).
 3. Drop a child whose code was deleted or whose upstream stopped mattering,
    saying why in the PR.
 

@@ -39,18 +39,23 @@ cached groups on drafts 14 to 22. ✅ No backport (maintainer, 2026-11-04;
 [moq-dev/moq#7815](https://github.com/moq-dev/moq/pull/7815)), so check
 both fixes reach release.
 
-Recurs once per major release (decided 2026-10-19). The PR that finishes the
-cut shifts the milestones up, as the root [questline](/quest/README.md)
-describes. This epic's remaining publication and adoption quests move to m0,
-the rest of m2 moves to m1, and every link to a moved path is rewritten. That
-PR also removes this path from every `Required`, which releases the audits
-waiting on it. It then re-creates this quest, the [API shape
-review](/quest/m3/release/api-review.md), the [feature
-review](/quest/m3/release/feature-review.md), and the [Cargo feature
+Recurs once per major release (decided 2026-10-19; shift rule replaced
+2026-11-05). The PR that finishes the cut shifts the milestones, as the root
+[questline](/quest/README.md) describes: this epic's remaining publication
+and adoption quests move to m0, m3's other quests split by kind into m1
+(additive) and m2 (breaking), m4's move to m3, m5 stays, and every link to a
+moved path is rewritten. A recurring cut-gate child that its last run
+re-created in m3, such as the [vendor
+sync](/quest/m2/cut-gate/vendor-sync/README.md), moves under the re-created
+gate instead. That PR also removes this path from every `Required`, which
+releases the audits waiting on it. It then re-creates the [cut
+gate](/quest/m2/cut-gate/README.md) in m2 as that gate's Plan describes, and
+this quest, the [API shape review](/quest/m3/release/api-review.md), the
+[feature review](/quest/m3/release/feature-review.md), and the [Cargo feature
 review](/quest/m3/release/feature-flags.md) at the same paths under a fresh
-release epic in m2. Each keeps its Goal and recurrence paragraph and requires
-the new `/quest/m1/README.md`, and the cut also requires all three reviews. Only
-`/quest-delete` ends the recurrence.
+release epic in m3. Each keeps its Goal and recurrence paragraph and requires
+the new `/quest/m2/README.md`, and the cut also requires all three reviews.
+Only `/quest-delete` ends the recurrence.
 
 From the 2026-10-25 pre-cut run:
 
@@ -83,7 +88,7 @@ repeat these checks after the documented release-to-main merge.
 
 ## Required
 
-- [Breaking release readiness](/quest/m1/README.md) - code, protocol and package proofs
+- [Breaking release readiness](/quest/m2/README.md) - code, protocol and package proofs
 - [Migration audit](/quest/m3/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
 - [API shape review](/quest/m3/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed
 - [Feature review](/quest/m3/release/feature-review.md) - every major work line since the last release was judged end to end, and its follow-ups landed

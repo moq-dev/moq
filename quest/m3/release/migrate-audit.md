@@ -71,4 +71,4 @@ m1 quest on 2026-10-22.
 
 ## Required
 
-- [Breaking release readiness](/quest/m1/README.md) - all breaking work and the MIGRATE.md convention have landed
+- [Breaking release readiness](/quest/m2/README.md) - all breaking work and the MIGRATE.md convention have landed

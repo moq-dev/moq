@@ -2,14 +2,14 @@
 
 ## Goal
 
-Once m1 is complete, publish the prepared Rust crates, JavaScript packages,
+Once m2 is complete, publish the prepared Rust crates, JavaScript packages,
 and language bindings from release, verify installed artifacts, and complete
 publication-dependent cleanup and downstream adoption.
 
 ## Plan
 
 Decided 2026-10-13: readiness, publication, adoption, and rollout are distinct
-stages. This epic is not a prerequisite of m1. Follow CONTRIBUTING.md: merge
+stages. This epic is not a prerequisite of m2. Follow CONTRIBUTING.md: merge
 release into main before the breaking cut, preserving published versions and
 release-only fixes, then merge main into release without squashing. Version
 bumps and tags happen at this cut, not in the milestone-planning PR.
@@ -32,7 +32,7 @@ production stability proven merely because upstream artifacts published.
 - [Feature review](/quest/m3/release/feature-review.md) - every major work line since the last release judged end to end before the cut
 - [Cargo feature review](/quest/m3/release/feature-flags.md) - defaults stay lean and every remaining feature is scoped to the crate that owns it, before the cut
 - [Claim new npm names](/quest/m3/release/npm-first-publish.md) - a maintainer claims `@moq/clock`, `libav`, and `video` on npm and JSR with trusted publishing, before the cut publishes them
-- [Cut and publish](/quest/m3/release/cut.md) - independently executable after m1; release-triggered publication
+- [Cut and publish](/quest/m3/release/cut.md) - independently executable after m2; release-triggered publication
 - [Published assets](/quest/m3/release/assets-release.md) - npm carries hostable worklets
 - [C++ publication](/quest/m3/release/cpp-release.md) - archives and matching OBS plugin publish and install
 - [Generated C publication](/quest/m3/release/c-publish.md) - released archives run the C samples and interop client
