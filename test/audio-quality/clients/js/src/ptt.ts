@@ -43,7 +43,8 @@ globalThis.AudioEncoder = class extends NativeEncoder {
 			...init,
 			output: (chunk, metadata) => {
 				const timestamp = this.#owed.shift();
-				if (timestamp !== undefined) records.encoded.push({ at: performance.now(), timestamp, bytes: chunk.byteLength });
+				if (timestamp !== undefined)
+					records.encoded.push({ at: performance.now(), timestamp, bytes: chunk.byteLength });
 				init.output(chunk, metadata);
 			},
 		});
