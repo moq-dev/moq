@@ -10,7 +10,8 @@ Delete this quest once every crate has one.
 ## Waiting
 
 - Maintainer: after the next `main` to `release` cut publishes kio-macros, moq-c,
-  moq-congestion, moq-crypto, moq-ice, moq-quic, and moq-rtsp by token, add
+  moq-congestion, moq-crypto, moq-ice, moq-quic, and moq-rtsp by token (and
+  moq-bench, whenever [its first publish](/quest/m1/bench-publish.md) lands), add
   their trusted publishers the same way. Settings pages need a crates.io
   login, so check with a `release-rs.yml` run that publishes through OIDC.
 
