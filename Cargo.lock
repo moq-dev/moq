@@ -4703,6 +4703,7 @@ dependencies = [
 name = "moq-msf"
 version = "0.5.1"
 dependencies = [
+ "bench-harness",
  "serde",
  "serde_json",
  "serde_with",

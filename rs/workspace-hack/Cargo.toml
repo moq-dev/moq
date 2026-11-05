@@ -97,8 +97,8 @@ reqwest = { version = "0.13", default-features = false, features = ["gzip", "htt
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 semver = { version = "1", features = ["serde"] }
-serde = { version = "1", features = ["alloc", "derive"] }
-serde_core = { version = "1", features = ["alloc"] }
+serde = { version = "1", features = ["alloc", "derive", "rc"] }
+serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["preserve_order", "raw_value", "unbounded_depth"] }
 serde_spanned = { version = "1", default-features = false, features = ["serde", "std"] }
 serde_with = { version = "3", features = ["base64", "hex", "json"] }
@@ -211,8 +211,8 @@ reqwest = { version = "0.13", default-features = false, features = ["gzip", "htt
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 semver = { version = "1", features = ["serde"] }
-serde = { version = "1", features = ["alloc", "derive"] }
-serde_core = { version = "1", features = ["alloc"] }
+serde = { version = "1", features = ["alloc", "derive", "rc"] }
+serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["preserve_order", "raw_value", "unbounded_depth"] }
 serde_spanned = { version = "1", default-features = false, features = ["serde", "std"] }
 serde_with = { version = "3", features = ["base64", "hex", "json"] }
