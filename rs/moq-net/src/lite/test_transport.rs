@@ -95,6 +95,8 @@ pub struct SinkSend {
 	finished: bool,
 	/// A finished stream still parks, like a peer that has not acknowledged the FIN.
 	unacked_fin: bool,
+	/// Bytes still written past a closed gate: the send credit the peer granted.
+	prefix: usize,
 }
 
 impl SinkSend {
@@ -105,6 +107,7 @@ impl SinkSend {
 			park: kio::Park::default(),
 			finished: false,
 			unacked_fin: false,
+			prefix: 0,
 		}
 	}
 
@@ -116,6 +119,7 @@ impl SinkSend {
 			park: kio::Park::default(),
 			finished: false,
 			unacked_fin: false,
+			prefix: 0,
 		}
 	}
 }
@@ -124,6 +128,12 @@ impl poll::SendStream for SinkSend {
 	type Error = SinkError;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		if self.prefix > 0 {
+			let take = buf.len().min(self.prefix);
+			self.prefix -= take;
+			self.log.writes.lock().unwrap().extend_from_slice(&buf[..take]);
+			return Poll::Ready(Ok(take));
+		}
 		if let Some(gate) = &self.gate {
 			// A closed gate parks forever, which surfaces as a hung test rather than a
 			// write that silently skipped the gate.
@@ -448,13 +458,7 @@ impl poll::Session for SinkSession {
 			return Poll::Pending;
 		};
 
-		let send = SinkSend {
-			log: self.log.clone(),
-			gate: Some(gate),
-			park: kio::Park::default(),
-			finished: false,
-			unacked_fin: false,
-		};
+		let send = SinkSend::gated(self.log.clone(), gate);
 		Poll::Ready(Ok((send, PendingRecv)))
 	}
 
@@ -464,13 +468,7 @@ impl poll::Session for SinkSession {
 		};
 		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
 
-		let send = SinkSend {
-			log: self.log.clone(),
-			gate: Some(gate),
-			park: kio::Park::default(),
-			finished: false,
-			unacked_fin: false,
-		};
+		let send = SinkSend::gated(self.log.clone(), gate);
 		Poll::Ready(Ok((send, PendingRecv)))
 	}
 
@@ -560,7 +558,19 @@ pub struct ScriptedRecv {
 	script: Arc<Mutex<Vec<u8>>>,
 	/// How the peer's send side ends once the script runs out; `None` parks.
 	close: Arc<Mutex<Option<Close>>>,
+	/// Readers parked on an exhausted script, woken by [`ScriptedSession::push`] and
+	/// [`ScriptedSession::close`].
+	parked: Parked,
 	log: Log,
+}
+
+/// The wakers of readers parked on an exhausted script.
+type Parked = Arc<Mutex<Vec<std::task::Waker>>>;
+
+fn wake_parked(parked: &Parked) {
+	for waker in std::mem::take(&mut *parked.lock().unwrap()) {
+		waker.wake();
+	}
 }
 
 /// How a scripted peer closes its send side. See [`ScriptedSession::close`].
@@ -573,7 +583,7 @@ pub enum Close {
 impl poll::RecvStream for ScriptedRecv {
 	type Error = SinkError;
 
-	fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
 		let take = {
 			let mut script = self.script.lock().unwrap();
 			if script.is_empty() {
@@ -590,7 +600,13 @@ impl poll::RecvStream for ScriptedRecv {
 			0 => match *self.close.lock().unwrap() {
 				Some(Close::Fin) => Poll::Ready(Ok(None)),
 				Some(Close::Reset) => Poll::Ready(Err(SinkError)),
-				None => Poll::Pending,
+				None => {
+					let mut parked = self.parked.lock().unwrap();
+					if !parked.iter().any(|waker| waker.will_wake(cx.waker())) {
+						parked.push(cx.waker().clone());
+					}
+					Poll::Pending
+				}
 			},
 			take => Poll::Ready(Ok(Some(take))),
 		}
@@ -617,6 +633,11 @@ pub struct ScriptedSession {
 	/// Shared with every stream, like `script`. See [`Self::close`].
 	close: Arc<Mutex<Option<Close>>>,
 	script: Arc<Mutex<Vec<u8>>>,
+	/// Every stream's parked readers, so [`Self::push`] and [`Self::close`] wake them.
+	parked: Parked,
+	/// Bytes each opened bidi stream may send before its writes park for good. See
+	/// [`Self::with_send_window`].
+	send_window: Option<usize>,
 	/// Per-stream scripts popped by `open_bi` in order; `None` shares `script`
 	/// across every stream.
 	queue: Option<Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>>,
@@ -636,6 +657,8 @@ impl ScriptedSession {
 			log: Log::default(),
 			close: Default::default(),
 			script: Arc::new(Mutex::new(script)),
+			parked: Default::default(),
+			send_window: None,
 			queue: None,
 			open_gate: None,
 			park: kio::Park::default(),
@@ -692,15 +715,22 @@ impl ScriptedSession {
 	}
 
 	/// Append to the shared script: the peer sending more on a stream it already opened.
-	/// Nothing is woken, so the test re-polls the reader itself.
 	pub fn push(&self, bytes: &[u8]) {
 		self.script.lock().unwrap().extend_from_slice(bytes);
+		wake_parked(&self.parked);
 	}
 
-	/// Close the peer's send side once the script runs out. Nothing is woken, so the
-	/// test re-polls the reader itself.
+	/// Close the peer's send side once the script runs out.
 	pub fn close(&self, close: Close) {
 		*self.close.lock().unwrap() = Some(close);
+		wake_parked(&self.parked);
+	}
+
+	/// Let each opened bidi stream send only its first `bytes`, then park its writes for good,
+	/// like a peer that never grants more send credit.
+	pub fn with_send_window(mut self, bytes: usize) -> Self {
+		self.send_window = Some(bytes);
+		self
 	}
 
 	/// Answer each stream from `scripts`, but only once the gate opens: a peer that
@@ -725,6 +755,7 @@ impl poll::Session for ScriptedSession {
 		Poll::Ready(Ok(ScriptedRecv {
 			script: Arc::new(Mutex::new(script)),
 			close: self.close.clone(),
+			parked: self.parked.clone(),
 			log: self.log.clone(),
 		}))
 	}
@@ -751,11 +782,20 @@ impl poll::Session for ScriptedSession {
 			Some(queue) => Arc::new(Mutex::new(queue.lock().unwrap().pop_front().unwrap_or_default())),
 			None => self.script.clone(),
 		};
+		let send = match self.send_window {
+			// The gate's producer is gone, so the writes past the window park forever.
+			Some(window) => SinkSend {
+				prefix: window,
+				..SinkSend::gated(self.log.clone(), kio::Producer::new(false).consume())
+			},
+			None => SinkSend::new(self.log.clone()),
+		};
 		Poll::Ready(Ok((
-			SinkSend::new(self.log.clone()),
+			send,
 			ScriptedRecv {
 				script,
 				close: self.close.clone(),
+				parked: self.parked.clone(),
 				log: self.log.clone(),
 			},
 		)))
