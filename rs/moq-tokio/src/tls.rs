@@ -1623,7 +1623,7 @@ impl Listen {
 		})
 	}
 
-	/// Build a verifier from the root files, publishing them to `roots` once it builds.
+	/// Build a verifier from the root files, adding them to `roots` once it builds.
 	#[cfg(feature = "_certs")]
 	fn build_client_verifier(
 		paths: &[PathBuf],
@@ -1638,7 +1638,7 @@ impl Listen {
 		.allow_unauthenticated()
 		.build()
 		.map_err(Error::ClientVerifier)?;
-		roots.replace(certs);
+		roots.extend(certs);
 		Ok(verifier)
 	}
 
@@ -1705,7 +1705,14 @@ pub(crate) struct ClientAuth {
 	roots: ClientRoots,
 }
 
-/// The CA roots a listener's client verifier last loaded, shared with its reloads.
+/// Every CA root a listener's client verifier has loaded, shared with its reloads.
+///
+/// A rotation adds roots but never drops one. An identity is built after its
+/// handshake, sometimes a peer-paced round trip later, so a root rotated out in
+/// between must still be here for the lineage to reach the root the handshake
+/// verified against. Listing an old root is never wrong: lineage names a root only
+/// when the leaf provably descends from it. The set grows only with the
+/// operator's own root files.
 #[cfg(feature = "_certs")]
 #[derive(Clone, Debug, Default)]
 struct ClientRoots(Arc<RwLock<Arc<[CertificateDer<'static>]>>>);
@@ -1716,8 +1723,12 @@ impl ClientRoots {
 		self.0.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 	}
 
-	fn replace(&self, roots: Vec<CertificateDer<'static>>) {
-		*self.0.write().unwrap_or_else(std::sync::PoisonError::into_inner) = roots.into();
+	fn extend(&self, roots: Vec<CertificateDer<'static>>) {
+		let mut current = self.0.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+		let fresh: Vec<_> = roots.into_iter().filter(|root| !current.contains(root)).collect();
+		if !fresh.is_empty() {
+			*current = current.iter().cloned().chain(fresh).collect();
+		}
 	}
 }
 
@@ -1789,8 +1800,9 @@ impl Serve {
 	/// The identity of a client whose certificate chain, leaf first, this listener's
 	/// handshake accepted.
 	///
-	/// It carries the roots the listener trusts now, so [`PeerIdentity::lineage`] ends
-	/// at the one the chain verified against even when the client did not send it.
+	/// It carries every root the listener has trusted, so [`PeerIdentity::lineage`]
+	/// ends at the one the chain verified against even when the client did not send
+	/// it, and even when that root has since rotated out.
 	/// Only pass a chain TLS accepted: nothing here re-verifies it.
 	pub fn peer(&self, chain: Vec<CertificateDer<'static>>) -> PeerIdentity {
 		PeerIdentity {
@@ -1814,7 +1826,7 @@ impl Serve {
 #[derive(Debug, Clone)]
 pub struct PeerIdentity {
 	chain: Vec<CertificateDer<'static>>,
-	/// The roots the accepting listener trusted when it built this.
+	/// Every root the accepting listener had trusted when it built this.
 	roots: Arc<[CertificateDer<'static>]>,
 }
 
@@ -3135,6 +3147,33 @@ mod tests {
 		let serve = listen.load().unwrap();
 		let peer = serve.peer(vec![leaf.clone(), intermediate.clone()]);
 		assert_eq!(peer.lineage().unwrap(), hashes(&[&leaf, &intermediate, &root]));
+	}
+
+	/// A root rotated out stays reachable, so an identity built after the rotation
+	/// still ends at the root its handshake verified against.
+	#[test]
+	fn client_roots_keep_a_rotated_out_root() {
+		let (old, old_issuer) = lineage_ca(None);
+		let (new, _) = lineage_ca(None);
+		let leaf = lineage_leaf(&old_issuer);
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("root.pem");
+		let provider = crypto::provider().unwrap();
+		let roots = ClientRoots::default();
+		let load = |root: &CertificateDer<'static>| {
+			std::fs::write(&path, pem::encode(&pem::Pem::new("CERTIFICATE", root.to_vec()))).unwrap();
+			Listen::build_client_verifier(std::slice::from_ref(&path), &provider, &roots).unwrap();
+		};
+
+		load(&old);
+		load(&new);
+		load(&new);
+		assert_eq!(roots.current().len(), 2, "a reloaded root is held once");
+		let peer = PeerIdentity {
+			chain: vec![leaf.clone()],
+			roots: roots.current(),
+		};
+		assert_eq!(peer.lineage().unwrap(), hashes(&[&leaf, &old]));
 	}
 
 	/// Padding the chain until path building gives up is an error, never a lineage

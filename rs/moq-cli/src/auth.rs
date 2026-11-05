@@ -855,16 +855,22 @@ impl Serve {
 		};
 		let mut watcher = moq_tokio::watch::Files::new(std::slice::from_ref(path))
 			.with_context(|| format!("failed to watch {}", path.display()))?;
+		let reload = |quiet: bool| match self.apply(server, cli, &usage_rs::config::EnvLayer::from_process()) {
+			Ok(serve) if serve.restart_only() != running.restart_only() => tracing::error!(
+				file = %path.display(),
+				"reloaded the policy; listener and mesh changes take effect on restart"
+			),
+			Ok(_) if quiet => {}
+			Ok(_) => tracing::info!(file = %path.display(), "reloaded the policy"),
+			Err(err) => tracing::error!(file = %path.display(), "keeping the last valid policy: {err:#}"),
+		};
+		// An edit between the first read and the watch produced no event, so read once
+		// more now that nothing further can be missed. Quiet on success, since it almost
+		// always rereads what was just loaded.
+		reload(true);
 		loop {
 			watcher.changed().await;
-			match self.apply(server, cli, &usage_rs::config::EnvLayer::from_process()) {
-				Ok(serve) if serve.restart_only() != running.restart_only() => tracing::error!(
-					file = %path.display(),
-					"reloaded the policy; listener and mesh changes take effect on restart"
-				),
-				Ok(_) => tracing::info!(file = %path.display(), "reloaded the policy"),
-				Err(err) => tracing::error!(file = %path.display(), "keeping the last valid policy: {err:#}"),
-			}
+			reload(false);
 		}
 	}
 
