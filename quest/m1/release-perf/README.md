@@ -330,6 +330,13 @@ per delivered group at 512 subscribers through the in-process session:
   cost 2,117 on `main`, about 40 queries per delivery at about 50
   instructions each: per-reader windows answered by search, not a walk.
 
+In-tree qmux ([moq-dev/moq#6231](https://github.com/moq-dev/moq/pull/6231))
+and receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878))
+add no measurable relay cost on chat over io\_uring, each against its parent
+on the quiet test host, so neither needs accepting. Public ingest's relay cost
+is larger than the model counted and waits on a decision in the
+[bisect](/quest/m1/release-perf/relay-cpu-bisect.md).
+
 ## Required
 
 - [Relay CPU per frame since #5926](/quest/m1/release-perf/relay-cpu-bisect.md) - the 18-56% rise in relay instructions per delivered frame is bisected, attributed, and its avoidable cost fixed
