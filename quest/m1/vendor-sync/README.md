@@ -1,4 +1,4 @@
-# Vendored code has every upstream fix it needs
+# [M] Vendored code has every upstream fix it needs
 
 ## Goal
 
@@ -25,7 +25,9 @@ Each child, each run:
   dependency bumps.
 - Record the newest upstream commit checked where the next run will look: an
   `Upstream` section in the vendored crate's README (or module doc), or the
-  child's Plan for code outside this repository.
+  child's Plan for code outside this repository. When a child completes before
+  re-creation, move its checked heads and next-run decisions into this Plan.
+  Step 2 re-creates completed children from those records too.
 
 This README's own work, once every child has merged:
 
@@ -48,6 +50,28 @@ This README's own work, once every child has merged:
 
 Only `/quest-delete` ends the recurrence.
 
+UniFFI recurrence baseline, checked 2026-11-02: all four upstream default
+branches were checked, and all four public advisory lists were empty. Carry
+these checked heads into the next child:
+
+| Upstream | Head checked |
+|---|---|
+| [mozilla/uniffi-rs](https://github.com/mozilla/uniffi-rs) | [`ef9625b6`](https://github.com/mozilla/uniffi-rs/commit/ef9625b68dd51207f55f024a27649e58edb52b09) |
+| [NordSecurity/uniffi-bindgen-go](https://github.com/NordSecurity/uniffi-bindgen-go) | [`0b7fb4ce`](https://github.com/NordSecurity/uniffi-bindgen-go/commit/0b7fb4ceef12021bd7f790cc516fa9133e001813) |
+| [Uniffi-Dart/uniffi-dart](https://github.com/Uniffi-Dart/uniffi-dart) | [`e644a4ad`](https://github.com/Uniffi-Dart/uniffi-dart/commit/e644a4ad980f72697aba211fd30cb4fbd8fc7324) |
+| [livekit/uniffi-bindgen-cpp](https://github.com/livekit/uniffi-bindgen-cpp) | [`20bef754`](https://github.com/livekit/uniffi-bindgen-cpp/commit/20bef754391023df147267482513c35120dee343) |
+
+MoQ exports no foreign-implementable traits, custom types, dollar-bearing
+defaults, or recursive enum graphs. Recheck these uses before importing the
+related upstream fixes. Upstream's parser, JNI backend, mutable bytes, and
+library-mode removal are redesigns outside this sync. Before changing Dart
+fork CI, read its [coverage record](https://github.com/kixelated/uniffi-dart/blob/moq-0.32/README.md#fork-ci-coverage).
+Until the exporter switch, mirror any generator fixes into rust2's maintenance
+fork too and add them to the exporter quest's carried-over list, so the new
+generators retain them. rust2's fork is maintenance-only since 2026-11-02.
+Drop the UniFFI child once
+[the exporter switch](/quest/m2/ffi-exporter.md) lands.
+
 Out of scope: forks moq no longer consumes (moq-dev/quiche, moq-dev/noq,
 kixelated/cros-codecs, kixelated/openh264-rs, kixelated/fflate) and the
 `@kixelated/libavjs-webcodecs-polyfill` npm fork js/hang uses (maintainer,
@@ -65,10 +89,6 @@ upstreams and publishing/adopting any needed fixes. Carry checked heads and
 dispositions from [VAAPI's Upstream audit](https://github.com/moq-dev/vaapi/blob/v0.1.1/README.md#upstream),
 which records cros-libva `59384456ac2ae78c0c3e5515f41ef1efd9b802cf` and
 cros-codecs `a050c6cde530e563197ee9e3e72ab01f48a0c41f`.
-
-## Required
-
-- [UniFFI generator forks are current](/quest/m1/vendor-sync/uniffi.md) - the generator forks carry upstream's fixes until rust2 replaces them
 
 ## Related
 
