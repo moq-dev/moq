@@ -607,6 +607,49 @@ test("fill: what a reader's sequence cursor passes, a fill no longer owes it", a
 	broadcast.close();
 });
 
+test("fill: a filled group stays wanted only while a reader will still read it", async () => {
+	const { broadcast, track } = resumed(5n);
+	const requests = track.requests();
+	// A live reader already passed every group below the edge.
+	const live = track.subscribe({ ranges: [{ start: { relative: 0n } }], delay: { max: null } });
+	expect((await live.ordered().nextGroup())?.sequence).toBe(5n);
+
+	const reader = track.subscribe(history);
+	const next = reader.ordered().nextGroup();
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	expect(fill.wanted()).toBe(0n);
+	const source = fill.accept(0n);
+	source.writeFrame({ payload: enc.encode("g0") });
+	const taken = await next;
+	expect(taken?.sequence).toBe(0n);
+
+	// A reader still to reach it keeps it wanted once the one that took it lets go.
+	const behind = track.subscribe(history);
+	taken?.close();
+	reader.close();
+	// Closing a reader releases its copy a microtask later.
+	await yieldNow();
+	const wanted = source.demand().wanted;
+	expect(wanted.peek()).toBe(true);
+
+	// Narrowed past it, nobody reads it: only the live reader's copy is left, which it passed.
+	behind.update({ ...history, ranges: [{ start: { absolute: 3n } }] });
+	expect(wanted.peek()).toBe(false);
+	// Widened back over it, it counts again.
+	behind.update(history);
+	expect(wanted.peek()).toBe(true);
+	behind.close();
+	await yieldNow();
+	expect(wanted.peek()).toBe(false);
+
+	source.finish();
+	fill.close();
+	live.close();
+	requests.close();
+	broadcast.close();
+});
+
 test("fill: a reader changing only its order wakes the handler", async () => {
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();

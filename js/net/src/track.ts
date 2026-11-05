@@ -669,6 +669,11 @@ class TrackState {
 	producer?: Producer;
 	/** This sink's reader as the producer's fills know it, once it asked one. */
 	asker?: Asker;
+	/**
+	 * Whether this sink's reader will still read group `sequence`: only a buffered group it will
+	 * read keeps its source wanted. Set once the reader exists.
+	 */
+	reads?: (sequence: bigint) => boolean;
 	groups = new Signal<GroupConsumer[]>([]);
 	// Sequences the upstream publisher gave up, with the error each was given up with: an
 	// incoming SUBSCRIBE_DROP or a producer cut. Kept apart from the cache so reclaim cannot
@@ -1400,6 +1405,7 @@ export class Producer {
 		hooks.arriveGroup(dst, entry.arrived);
 		if (entry.unverified) hooks.unverifyGroup(dst);
 		entry.mirrors.set(sink, dst);
+		if (sink.reads?.(dst.sequence) === false) hooks.groupReads(dst, false);
 		timelineInsert(sink.timeline, dst);
 		void dst.readable().then(() => sink.timelineChanged.update((revision) => revision + 1));
 		sink.latest = max(sink.latest ?? 0n, dst.sequence);
@@ -2432,6 +2438,8 @@ export class Subscriber {
 		if (ordered) this.#delivered.forgetBelow(sequence);
 		this.#delivered.add(sequence);
 		this.#skipped.delete(sequence);
+		// Another copy of it buffered here is never handed out.
+		this.#judge(sequence, sequence + 1n);
 		if (this.#resume) this.#resume.forgetPastBudget(this.#delivered);
 		else this.#forgetPastBudget(this.#delivered);
 		// What it hands out, and forgets below it, it no longer wants from a fill: tell the fills
@@ -2466,7 +2474,9 @@ export class Subscriber {
 	// Raise the sequence cursor to `floor`: what lies below it is passed for good.
 	#raiseNext(floor: bigint | undefined): void {
 		if (floor === undefined || floor <= this.#nextSequence) return;
+		const passed = this.#nextSequence;
 		this.#nextSequence = floor;
+		this.#judge(passed, floor);
 		this.#fillsMoved();
 	}
 
@@ -2482,6 +2492,7 @@ export class Subscriber {
 		// rather than holding the gaps above it forever.
 		let skipped: bigint | undefined;
 		let scanned = false;
+		let forgot: bigint | undefined;
 		for (let oldest = delivered.aboveGap(); oldest !== undefined; oldest = delivered.aboveGap()) {
 			if (!this.#staleAt(oldest, drift)) break;
 			if (!scanned) {
@@ -2494,10 +2505,14 @@ export class Subscriber {
 			}
 			if (skipped !== undefined && skipped < oldest) {
 				delivered.forgetBelow(skipped);
+				forgot = skipped;
 				break;
 			}
 			delivered.forgetBelow(oldest);
+			forgot = oldest;
 		}
+		// A buffered group in a gap forgotten here is never handed out.
+		if (forgot !== undefined && delivered === this.#delivered) this.#judge(0n, forgot);
 	}
 
 	// Record `sequence` as skipped stale under `budget`, so a wider one offers it again.
@@ -2546,6 +2561,7 @@ export class Subscriber {
 	private constructor(name: string, state: TrackState) {
 		this.name = name;
 		this.#state = state;
+		state.reads = (sequence) => this.#reading(sequence);
 		// Each reader filters locally even when another reader widens upstream demand.
 		this.#resolve();
 	}
@@ -2636,6 +2652,7 @@ export class Subscriber {
 			start: max(local.start, this.#window.floor() ?? 0n),
 			end: end === undefined ? local.end : min(local.end ?? end, end),
 		});
+		this.#judge(0n, UNBOUNDED);
 		// A fill this reader alone waited on for a group it no longer reads is withdrawn.
 		this.#fillsMoved();
 	}
@@ -2644,10 +2661,34 @@ export class Subscriber {
 	// handed out, and not passed by the sequence cursor, which never goes back.
 	#reads(start: bigint, end: bigint): Run[] {
 		if (this.#closed || this.#state.closed.peek() !== undefined) return [];
+		return this.#unread(start, end);
+	}
+
+	// The parts of `[start, end)` this reader's bounds and cursor still leave unread, even once
+	// the track closed, since what it buffered stays readable.
+	#unread(start: bigint, end: bigint): Run[] {
 		const cursor = this.#cursor.peek();
 		const from = max(max(start, cursor.start), this.#nextSequence);
 		const to = cursor.end === undefined ? end : min(end, cursor.end);
 		return this.#window.runs(from, to).flatMap((run) => this.#delivered.gaps(run.start, run.end));
+	}
+
+	// Tell each group buffered in `[start, end)` whether this reader will still read it, as the
+	// Rust `Join` holds a run until its reader takes it, passes it, or stops reading it. A budget
+	// judges a group only once a read reaches it, as there.
+	#judge(start: bigint, end: bigint): void {
+		const groups = this.#state.groups.peek();
+		for (let i = timelineIndex(groups, start); i < groups.length && groups[i].sequence < end; i++) {
+			hooks.groupReads(groups[i], this.#reading(groups[i].sequence));
+		}
+	}
+
+	// Whether this reader will still read group `sequence` once buffered: what it wants from a
+	// fill, judged even once the track closed.
+	#reading(sequence: bigint): boolean {
+		if (this.#closed) return false;
+		const unread = this.#unread(sequence, sequence + 1n);
+		return unread.length > 0 && runGaps(this.#givenUp, sequence, sequence + 1n).length > 0;
 	}
 
 	// What this reader still wants from a fill: what it reads, less what it gave up as stale.
@@ -2731,7 +2772,10 @@ export class Subscriber {
 			break;
 		}
 		if (stale.length > 0) {
-			for (const run of stale) insertRun(this.#givenUp, run.start, run.end);
+			for (const run of stale) {
+				insertRun(this.#givenUp, run.start, run.end);
+				this.#judge(run.start, run.end);
+			}
 			this.#fillsMoved();
 		}
 		return owed;
@@ -2806,6 +2850,7 @@ export class Subscriber {
 		const [group] = groups.splice(index, 1);
 		for (const passed of groups.splice(0, index)) passed.close();
 		this.#nextSequence = group.sequence + 1n;
+		this.#judge(group.sequence, this.#nextSequence);
 	}
 
 	// Whether this read ends because its bounded window has nothing left to deliver; see

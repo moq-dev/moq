@@ -233,6 +233,9 @@ class GroupState {
 	// trail a write that already returned, as a batched `total` notification would.
 	progress = new Set<(total: number) => void>();
 	shedRead?: () => void;
+	// Tells the group this copy was mirrored from whether its reader will still read it, so a
+	// copy buffered for a reader that passed it stops keeping the group wanted.
+	reads?: (reads: boolean) => void;
 
 	constructor(sequence: bigint) {
 		this.sequence = sequence;
@@ -319,7 +322,10 @@ export class Producer {
 	readonly sequence: bigint;
 
 	#state: GroupState;
-	#mirrors?: Set<GroupState>;
+	// Each open mirror, with whether its reader will still read it.
+	#mirrors?: Map<GroupState, boolean>;
+	// How many open mirrors a reader will still read.
+	#readers = 0;
 
 	// Whether any mirror reader is attached (see {@link Demand.wanted}). Fetch coalescing watches it to
 	// cancel an abandoned download; a group can stay open indefinitely (a catalog or JSON stream),
@@ -369,7 +375,7 @@ export class Producer {
 			const frames = Array.from(state.frames.peek(), (frame) => flate.push(frame));
 			state.frames.set(new Queue(frames));
 			state.cacheBytes = frames.reduce((bytes, frame) => bytes + frameBytes(frame), 0);
-			for (const mirror of group.#mirrors ?? []) {
+			for (const mirror of group.#mirrors?.keys() ?? []) {
 				mirror.frames.set(new Queue(frames.slice(mirror.start - state.start)));
 				mirror.flate = flate;
 				mirror.compressed = true;
@@ -489,16 +495,23 @@ export class Producer {
 			return makeConsumer(dst);
 		}
 
-		this.#mirrors ??= new Set();
-		this.#mirrors.add(dst);
+		const mirrors = (this.#mirrors ??= new Map());
+		mirrors.set(dst, true);
+		this.#readers++;
 		this.#wanted.set(true);
+		dst.reads = (reads) => {
+			const was = mirrors.get(dst);
+			if (was === undefined || was === reads) return;
+			mirrors.set(dst, reads);
+			this.#readers += reads ? 1 : -1;
+			this.#wanted.set(this.#readers > 0);
+		};
 
 		// Track this mirror's close eagerly (not just lazily on the next write) so demand drops the
 		// moment the last reader leaves, letting an abandoned fetch cancel even with no more frames.
 		const dispose = dst.closed.subscribe((c) => {
 			if (c === undefined) return;
-			this.#mirrors?.delete(dst);
-			this.#wanted.set((this.#mirrors?.size ?? 0) > 0);
+			this.#unmirror(dst);
 			dispose();
 		});
 
@@ -512,6 +525,15 @@ export class Producer {
 	 */
 	demand(): Demand {
 		return this.#demand;
+	}
+
+	// Stop teeing into `mirror`, which closed, and stop counting its reader.
+	#unmirror(mirror: GroupState): void {
+		const reads = this.#mirrors?.get(mirror);
+		if (reads === undefined) return;
+		this.#mirrors?.delete(mirror);
+		if (reads) this.#readers--;
+		this.#wanted.set(this.#readers > 0);
 	}
 
 	/** Writes a frame to the group. */
@@ -573,7 +595,7 @@ export class Producer {
 				entry.done.set(null);
 				// Wake whole-frame readers waiting for it to complete.
 				this.#state.frames.mutate(() => {});
-				for (const mirror of this.#mirrors ?? []) mirror.frames.mutate(() => {});
+				for (const mirror of this.#mirrors?.keys() ?? []) mirror.frames.mutate(() => {});
 			},
 			abort: (error) => this.abort(error),
 		});
@@ -629,11 +651,9 @@ export class Producer {
 			for (const commit of commits) commit();
 		}
 
-		if (this.#mirrors) {
-			for (const mirror of this.#mirrors) {
-				if (mirror.closed.peek() !== undefined) this.#mirrors.delete(mirror);
-				else appendFrame(mirror, frame);
-			}
+		for (const mirror of this.#mirrors?.keys() ?? []) {
+			if (mirror.closed.peek() !== undefined) this.#unmirror(mirror);
+			else appendFrame(mirror, frame);
 		}
 		this.#trim();
 	}
@@ -663,7 +683,7 @@ export class Producer {
 		if (state.start === start && !shed) return;
 		state.flate?.shed(state.start);
 		const lost = headShed(frames.first);
-		for (const mirror of this.#mirrors ?? []) {
+		for (const mirror of this.#mirrors?.keys() ?? []) {
 			// A mirror that has not taken the front frame can no longer read it from its start.
 			if (mirror.closed.peek() !== undefined) continue;
 			if (mirror.start > state.start || (mirror.start === state.start && !lost)) continue;
@@ -671,9 +691,8 @@ export class Producer {
 			mirror.cacheBytes = 0;
 			mirror.flate = undefined;
 			mirror.closed.set(evicted());
-			this.#mirrors?.delete(mirror);
+			this.#unmirror(mirror);
 		}
-		this.#wanted.set((this.#mirrors?.size ?? 0) > 0);
 	}
 
 	/** True once the group has been closed. */
@@ -706,11 +725,9 @@ export class Producer {
 		this.#state.flate?.finish();
 		this.#state.closed.set(outcome);
 
-		if (this.#mirrors) {
-			for (const mirror of this.#mirrors) {
-				if (mirror.closed.peek() === undefined) mirror.closed.set(outcome);
-			}
-			this.#mirrors.clear();
+		for (const mirror of this.#mirrors?.keys() ?? []) {
+			if (mirror.closed.peek() === undefined) mirror.closed.set(outcome);
+			this.#unmirror(mirror);
 		}
 	}
 }
@@ -1171,6 +1188,7 @@ export class Consumer {
 		makeConsumer = (state) => new Consumer(state);
 		hooks.releaseGroupReader = (group, abort) => group.#release(abort);
 		hooks.readsMirrored = (group) => group.#state === group.#mirrored;
+		hooks.groupReads = (group, reads) => group.#mirrored.reads?.(reads);
 		hooks.groupTimestamp = (group) =>
 			group.#state.unverified || group.#state.offset !== 0 ? undefined : group.#state.timestamp;
 		hooks.groupLatest = (group) => (group.#state.unverified ? undefined : group.#state.latest);
