@@ -158,7 +158,9 @@ the bullets below are the contract it carries.
   losing one of two uplinks under one key
   (`scoped_delivery_through_two_uplinks_reaches_one_key`).
 - Decided 2026-11-04 (maintainer): a scoped peer's routing identities are
-  keyed by the route key the peer proves, from a shared key file
+  keyed by the route key the peer proves, so relays configured with the same
+  key file fail over as one; a scoped peer that proves no key, such as one on
+  qmux, gets a per-session key
   ([session integration](/quest/m1/cluster-routing/routes/session.md),
   [Scoped peers prove a route key](/quest/m1/cluster-routing/routes/proof.md)).
   The router takes the key from the caller (`Scope::qualify`).
