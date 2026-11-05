@@ -3465,7 +3465,7 @@ mod test {
         let base = Instant::now();
         let at = |ms: u64| base + Duration::from_millis(ms);
         let mut inflight = 0;
-        let mut send = |bbr: &mut Driver, ms: u64, pn: u64, inflight: &mut u64| {
+        let send = |bbr: &mut Driver, ms: u64, pn: u64, inflight: &mut u64| {
             bbr.send(at(ms), MSS, pn);
             *inflight += u64::from(MSS);
             // An application-limited sender, so only loss can end Startup
@@ -3498,7 +3498,7 @@ mod test {
         bbr.end_acks(at(40), inflight, true);
 
         // Every loss is of that flight, so one recovery episode covers them all
-        let mut lose = |bbr: &mut Driver, ms: u64, pns: &[u64], inflight: &mut u64| {
+        let lose = |bbr: &mut Driver, ms: u64, pns: &[u64], inflight: &mut u64| {
             for &pn in pns {
                 bbr.lose(MSS, pn, at(ms));
                 *inflight -= u64::from(MSS);
