@@ -153,7 +153,8 @@ nix develop --command just bench origin/main ws
 
 To repeat only the relay measurements, using the same builds, alternating rounds,
 sampler and comparison report, run `just bench-relay origin/release quic`.
-Each Linux workload retains `/proc/loadavg` before and after its run.
+Linux suites retain one `/proc/loadavg` snapshot before the workloads start;
+this is host context, not a claim that every measurement window was quiet.
 This omits Criterion measurements whose results are already settled.
 
 Every relay serves QUIC and plain WebSocket on its port; `wss://`, `tcp://`, and

@@ -282,7 +282,6 @@ run_workload() {
     fi
 
     mkdir -p "$directory"
-    if [[ -r /proc/loadavg ]]; then cat /proc/loadavg >"$directory/loadavg-start.txt"; fi
     start_relay "$relay" "$directory" "$runtime" "$workers"
 
     local relay_pid=$RELAY_PID generator_pid='' finished url
@@ -378,7 +377,6 @@ run_workload() {
     else
         summarize_load "$stats" "$summary" "$workload"
     fi
-    if [[ -r /proc/loadavg ]]; then cat /proc/loadavg >"$directory/loadavg-end.txt"; fi
 
 }
 

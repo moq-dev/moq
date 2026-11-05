@@ -18,6 +18,10 @@ RELAY_ONLY=false
 if [[ ${1:-} == --relay ]]; then
     RELAY_ONLY=true
     shift
+    if (($# > 1)) || [[ ${1:-} == --* ]]; then
+        printf 'usage: run.sh --relay [BASE]\n' >&2
+        exit 2
+    fi
 fi
 MODE=${1:-}
 ROUNDS=${BENCH_RUNTIME_ROUNDS:-3}
@@ -191,6 +195,10 @@ case $MODE in
         RUNTIME_WORKERS=$((10#$RUNTIME_WORKERS))
         ;;
     *)
+        if (($# > 1)); then
+            printf 'usage: run.sh [BASE], or run.sh --relay [BASE]\n' >&2
+            exit 2
+        fi
         BASE=$MODE
         # Video stays on QUIC; chat (per-message cost) and fanout (per-byte cost) sweep the transports.
         RELAY_CASES=(quic/video)
@@ -288,7 +296,9 @@ STDOUT_PID=$!
 exec 2> >(tee "$RUN/stderr.log" >&4)
 STDERR_PID=$!
 
-python3 "$ROOT/bench/metadata.py" "$RUN" "$BASE" "$MODE" "${RUNTIME_WORKERS:-}" "$ROUNDS"
+METADATA_MODE=$MODE
+if [[ $RELAY_ONLY == true ]]; then METADATA_MODE=--relay; fi
+python3 "$ROOT/bench/metadata.py" "$RUN" "$BASE" "$METADATA_MODE" "${RUNTIME_WORKERS:-}" "$ROUNDS"
 cp -R "$ROOT/bench/workloads" "$RUN/workloads"
 cp -R "$ROOT/bench" "$RUN/harness"
 
@@ -1298,6 +1308,9 @@ generate_certificate
 CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release -p moq-relay -p moq-bench
 LOAD_BIN=$CURRENT_TARGET/release/moq-bench
 HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
+
+# Record context once for the suite; individual cells include the preceding cell's load.
+if [[ -r /proc/loadavg ]]; then cat /proc/loadavg >"$RUN/loadavg-before-workloads.txt"; fi
 
 if [[ -n $BASE ]]; then
     printf '\nRelay workloads: paired base/current\n'
