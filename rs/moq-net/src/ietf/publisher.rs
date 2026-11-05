@@ -5147,8 +5147,6 @@ struct DatagramForward {
 	ended: bool,
 	timescale: Option<Timescale>,
 	publisher: i8,
-	/// Stamp timestamps only when SUBSCRIBE_OK declared a TIMESCALE.
-	stamp: bool,
 }
 
 impl TrackServe {
@@ -5215,9 +5213,8 @@ impl TrackServe {
 			consumer: datagrams,
 			ready: false,
 			ended: false,
-			timescale: None,
+			timescale: self.timescale.filter(|_| stamp),
 			publisher: 0,
-			stamp,
 		});
 		self
 	}
@@ -5555,7 +5552,7 @@ impl TrackServe {
 					match forward.consumer.poll_info(waiter) {
 						Poll::Pending => return,
 						Poll::Ready(Ok(info)) => {
-							forward.timescale = info.timescale.filter(|_| forward.stamp);
+							// Object times use the stream subscription's advertised timescale.
 							forward.publisher = info.priority;
 							forward.ready = true;
 						}

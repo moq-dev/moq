@@ -958,7 +958,7 @@ export class Publisher {
 			datagramTask = datagrams
 				? this.#sendDatagrams(datagrams, {
 						alias: msg.requestId,
-						propertiesWanted: msg.propertiesWanted,
+						timescale,
 					}).catch((err: unknown) => {
 						console.debug(`stopping datagrams on this subscription: ${reason(err)}`);
 					})
@@ -1278,7 +1278,7 @@ export class Publisher {
 	 */
 	async #sendDatagrams(
 		datagrams: datagram.Consumer,
-		options: { alias: bigint; propertiesWanted: boolean },
+		options: { alias: bigint; timescale?: Timescale },
 	): Promise<void> {
 		let info: datagram.Info;
 		try {
@@ -1290,7 +1290,7 @@ export class Publisher {
 		const opened = DatagramStream.datagramWriter(this.#quic);
 		if (!opened) return;
 		const publisher = info.priority;
-		const timescale = options.propertiesWanted ? (info.timescale ?? undefined) : undefined;
+		const timescale = options.timescale;
 		const rank = () => sendOrder({ priority: datagrams.priority, publisher, position: 2 ** 36 - 1 });
 		const sender = opened.open(rank());
 		const dispose = hooks.datagramPriority(datagrams).subscribe(() => sender.setPriority(rank()));
