@@ -39,5 +39,8 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Flights](/quest/m1/unbounded-groups/flights.md) - separate paced copies and the handover between them
 - [moq-transport requests end through one lease](/quest/m2/ietf-request-lease.md) - restructures the same files first
+
+## Related
+
+- [Flights](/quest/m1/unbounded-groups/flights.md) - separate paced copies and the handover between them, landed in [moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944)

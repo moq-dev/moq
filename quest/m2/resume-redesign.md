@@ -81,9 +81,9 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Flights](/quest/m1/unbounded-groups/flights.md) - the paced copy and handover `Recover` folds into
 - [Release cut](/quest/m2/release/cut.md) - wait for the release in flight to ship
 
 ## Related
 
+- [Flights](/quest/m1/unbounded-groups/flights.md) - the paced copy and handover `Recover` folds into, landed in [moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944)
 - [Recover reads its budget without a sync](/quest/m2/recover-budget.md) - a per-frame cost this deletes

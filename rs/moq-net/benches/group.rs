@@ -30,6 +30,11 @@
 //! reader, as a paced ingest runs, swept over readers: each frame read reports progress,
 //! and the fastest reader's read wakes the parked writer.
 //!
+//! `group_flights` replays a live group half again past its 32 MiB tail to late readers
+//! through flights, swept over readers and how far apart they join: within the 16 MiB a
+//! flight admits they share one, further apart each asks its own. Each reader hands over
+//! to the live copy once it catches up, and its flight stops.
+//!
 //! Run with `cargo bench -p moq-net`.
 
 #![expect(
@@ -943,6 +948,145 @@ fn bench_paced(c: &mut Criterion) {
 	g.finish();
 }
 
+/// 48 MiB of 16 KiB frames: half again the live tail.
+const FLIGHT_FRAMES: usize = 3_072;
+
+/// A live group of [`FLIGHT_FRAMES`] on a track with a handler, its live reader at the edge.
+struct Flights {
+	_broadcast: broadcast::Producer,
+	pool: moq_net::cache::Pool,
+	requests: track::Requests,
+	live: group::Producer,
+	_reader: group::Consumer,
+}
+
+fn shed_live_group(payloads: &[Bytes]) -> Flights {
+	let info = broadcast::Info::default();
+	let pool = info.pool.clone();
+	let broadcast = broadcast::Producer::new(info);
+	let track = broadcast.create_track("bench", track::Info::default()).unwrap();
+	let requests = track.requests();
+	let mut live = track.append_group().unwrap();
+	let mut reader = live.consume();
+	let waiter = kio::Waiter::noop();
+	for payload in payloads {
+		live.write_frame(None, payload.clone()).unwrap();
+		while let Poll::Ready(Ok(Some(_))) = reader.poll_read_frame(&waiter) {}
+	}
+	Flights {
+		_broadcast: broadcast,
+		pool,
+		requests,
+		live,
+		_reader: reader,
+	}
+}
+
+/// A flight the handler writes, from the frame it was asked at.
+struct Flight {
+	group: group::Producer,
+	demand: group::Demand,
+	next: usize,
+	ridden: bool,
+}
+
+/// Replay the live group from frame 0 to `readers` late readers, each joining once the one
+/// before it has read `apart` frames, and return how many flights the handler served, the
+/// frames it wrote, and the most the pool held.
+fn replay_flights(ctx: &Flights, payloads: &[Bytes], readers: usize, apart: usize) -> (usize, usize, u64) {
+	let waiter = kio::Waiter::noop();
+	let mut riders: Vec<(group::Consumer, usize)> = Vec::new();
+	let mut flights: Vec<Flight> = Vec::new();
+	let (mut served, mut written) = (0, 0);
+	let mut peak = 0;
+	while riders.len() < readers || riders.iter().any(|(_, read)| *read < payloads.len()) {
+		while riders.len() < readers && riders.last().is_none_or(|(_, read)| *read >= apart) {
+			riders.push((ctx.live.consume(), 0));
+		}
+		// A megabyte a round each, so a reader joins within a megabyte of when it is due.
+		for (rider, read) in &mut riders {
+			for _ in 0..64 {
+				let Poll::Ready(frame) = rider.poll_read_frame(&waiter) else {
+					break;
+				};
+				let frame = frame.expect("a late reader replays every frame");
+				black_box(frame.expect("the live group is open"));
+				*read += 1;
+			}
+		}
+		while let Poll::Ready(Ok(fill)) = ctx.requests.poll_requested_fill(&waiter) {
+			let start = fill.start();
+			let group = fill.accept(start.group, None).unwrap();
+			let demand = group.demand();
+			served += 1;
+			flights.push(Flight {
+				group,
+				demand,
+				next: start.frame as usize,
+				ridden: false,
+			});
+		}
+		// Riders that left their flight end it.
+		flights.retain_mut(|flight| {
+			let wanted = flight.demand.wanted();
+			let keep = wanted || !flight.ridden;
+			flight.ridden |= wanted;
+			keep
+		});
+		for flight in &mut flights {
+			while let Some(payload) = payloads.get(flight.next)
+				&& flight.group.poll_ready(&waiter, &frame_info(payload)).is_ready()
+			{
+				flight.group.write_frame(None, payload.clone()).unwrap();
+				flight.next += 1;
+				written += 1;
+			}
+		}
+		peak = peak.max(ctx.pool.used());
+	}
+	(served, written, peak)
+}
+
+fn frame_info(payload: &Bytes) -> frame::Info {
+	frame::Info {
+		size: payload.len() as u64,
+		timestamp: None,
+	}
+}
+
+/// See `group_flights` in the module docs. Throughput counts frames the late readers read,
+/// so the flight machinery (boarding, admission, and the handover checks a rider makes) shows
+/// up as a slope across readers and how far apart they join.
+fn bench_flights(c: &mut Criterion) {
+	let payloads: Vec<Bytes> = (0..FLIGHT_FRAMES as u32)
+		.map(|index| Bytes::from(index.to_le_bytes().repeat(4096)))
+		.collect();
+	let mut g = c.benchmark_group("group_flights");
+	g.sample_size(10);
+	for readers in [1, 4, 16] {
+		// Joining together, 8 MiB apart (within reach), and 24 MiB apart (past it).
+		for apart_mib in [0, 8, 24] {
+			let apart = apart_mib * 64;
+			g.throughput(Throughput::Elements((readers * FLIGHT_FRAMES) as u64));
+			g.bench_function(BenchmarkId::new(format!("apart_{apart_mib}MiB"), readers), |b| {
+				b.iter_batched(
+					|| shed_live_group(&payloads),
+					|ctx| {
+						let (served, written, peak) = replay_flights(&ctx, &payloads, readers, apart);
+						// Joiners within reach share a flight; flights share the group's
+						// content, so the pool holds about one live tail and one flight.
+						assert!(served >= 1 && written < readers * FLIGHT_FRAMES);
+						assert!(peak < 64 << 20, "{} MiB held", peak >> 20);
+						ctx
+					},
+					BatchSize::PerIteration,
+				);
+			});
+		}
+	}
+	g.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_write,
@@ -955,6 +1099,7 @@ criterion_group!(
 	bench_contended,
 	bench_streaming,
 	bench_shed,
-	bench_paced
+	bench_paced,
+	bench_flights
 );
 criterion_main!(benches);

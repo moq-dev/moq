@@ -4149,6 +4149,11 @@ impl Producer {
 /// from upstream. While at least one is alive a reader's miss queues a [`Fill`] for it
 /// to serve; with none, the miss is named dropped, and a cache-miss
 /// [`Consumer::fetch_group`] on an accepted track fails fast with [`Error::NotFound`].
+///
+/// A live handle also lets a reader at a frame a group copy shed replay it: a [`Fill`] of
+/// that one group from that frame asks for a flight, a copy of its own paced by the readers
+/// riding it, which they leave for the copy ahead once it holds their frame within reach.
+/// Serve it like any group, and stop once nobody reads it: see [`Fill::is_wanted`].
 pub struct Requests {
 	name: Arc<str>,
 	// Kept to insert served groups into the cache and observe track abort.
@@ -23467,6 +23472,27 @@ mod test {
 		assert_eq!(read_numbered(&mut far), None, "too far behind the flight's rider");
 		let own = asked(&requests).expect("a flight of its own");
 		assert_eq!(own.start(), Position { group: 0, frame: 0 });
+	}
+
+	/// A handler that refuses a flight leaves the reader where a track without one does: a
+	/// track that opts into refresh asks for a new group, and the read is `Evicted`.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_refused_flight_falls_back_to_refresh() {
+		let producer = track_producer("test", Info::default().with_refresh(1_000_000));
+		let requests = producer.requests();
+		// Joined before the group grew, so the join asks for nothing.
+		let _subscriber = producer.subscribe(None);
+		let mut live = producer.append_group().unwrap();
+		let mut late = live.consume();
+		for index in 0..3_000 {
+			live.write_frame(None, numbered(index)).unwrap();
+		}
+		assert_eq!(read_numbered(&mut late), None, "asks a flight");
+		assert_eq!(producer.demand().wanted(), Some(0), "nothing refreshed yet");
+		asked(&requests).expect("a flight").refuse_groups(0..1, Error::NotFound);
+		assert!(matches!(late.read_frame().now_or_never().unwrap(), Err(Error::Evicted)));
+		assert_eq!(producer.demand().wanted(), Some(1), "the reader asked for a new group");
 	}
 
 	/// A rider that falls off its flight's tail never holds the flight's writer back, and

@@ -60,6 +60,6 @@ Public API: `Position` gains a byte field, frames gain a chunked read, and
 `MAX_CACHE_BYTES` stops capping a frame.
 Wire: a byte offset on the current lite wip's range ends and group header.
 
-## Required
+## Related
 
-- [Flights](/quest/m1/unbounded-groups/flights.md) - the paced copies a mid-frame start serves
+- [Flights](/quest/m1/unbounded-groups/flights.md) - the paced copies a mid-frame start serves landed in [moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944); compressed flights remain there

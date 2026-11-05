@@ -1,80 +1,45 @@
-# [L] Flights
+# [M] Flights: compressed groups and paced batch fills
 
 ## Goal
 
-A reader whose frames a group copy has shed, such as a late joiner that wants
-frame 0 of a long group or a reader that fell more than the 32 MB tail behind,
-is served again when the publisher allows replay, without any frame being
-fetched faster than its readers take it. Readers replaying the same part of a
-group share one upstream fill, and a reader that catches up hands over to the
-copy ahead, whose fill then stops. A track whose publisher has no
-`track::Requests` handler keeps the refresh-or-`Evicted` behavior of front eviction
-([moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)).
+What [moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944) left of
+flights, once the maintainer settles its open decisions. A reader at a frame of
+a compressed group that its copy shed is served by a flight, as a plain one is,
+and fills that write a whole batch of groups at once stop evicting their own
+earlier groups before the reader takes them.
 
 ## Plan
 
-Decided 2026-10-28 (maintainer, after an audit of the plan and
-[moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)). This reopens
-2026-10-24's rejection of paced refill "trains" that merge, and replaces
-#6993's unpaced exact-hole refills written into runs below the live log.
-That rejection worried that a merged reader sits at the front, the first
-victim; the 16 MB rule below answers it. #6993 measured about 2.7x the
-fetch cost per frame for a hole longer than the pool, because an unpaced
-refill sheds its own tail before its reader gets there; a paced flight
-never does.
+Landed in [moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944): a
+reader at a shed frame of a plain group on a track with a `track::Requests`
+handler boards a flight. A flight is a separate copy asked of the handler from
+that frame and paced by its fastest rider. The reader joins an existing copy
+that holds its frame within 16 MB, less one log segment, of that copy's fastest
+reader, and hands over to the copy ahead by the same rule. Each relay hop
+serves a flight from its own flights, and a track without a handler keeps
+refresh or `Evicted`.
 
-- A flight is a separate copy of a group: its own upstream fill from its
-  first rider's frame into its own group copy, with its own 32 MB tail, paced
-  by its fastest rider like the live edge
-  ([Fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664)).
-  The live subscription is the first flight. Copies are never stitched
-  together: two caches sharing one group handle caused the expiry and
-  boundary bugs [Resume redesign](/quest/m2/resume-redesign.md) records.
-- Who serves a reader at a shed frame: a flight when the track has a
-  `track::Requests` handler (the publisher's permission to replay), else a
-  new group on tracks that opt into refresh, else `Evicted`. The origin's
-  handler decides whether to serve old content; refresh is the fallback
-  (decided 2026-10-24). Byte streams register no handler, so they never
-  start a flight.
-- Admission: a reader joins an existing flight only if that copy holds its
-  frame within 16 MB, half the tail, of the flight's fastest rider, less one
-  shedding unit (a log segment). Judge it against the worst-case front:
-  the ahead window is capped at 16 MB
-  ([Fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664)),
-  so filling all outstanding credit still leaves an admitted reader held.
-  Otherwise it starts its own flight, so it never boards at a front about to
-  be shed.
-- Handover: a rider whose frame the flight ahead holds within the same
-  admission bound of that flight's fastest rider switches to that copy at the same frame, the way
-  route failover's `Recover` continues a group from another copy. A
-  flight's fill is cancelled when its last rider leaves. A merge costs at
-  most 16 MB of duplicate transfer, and the budget never grows. Rejected:
-  merging as soon as the copies touch, with the merged flight's budget
-  growing toward 64 MB until its slow riders catch up.
-- A rider that falls off its flight's tail is a reader at a shed frame: it
-  starts or joins another flight by the same rules.
-- Upstream: a relay's flight is a frame-offset fill (lite-06+ `Frame Start`)
-  that the upstream serves from its own flights, recursively, until the
-  origin's handler serves or refuses it. Legacy lite peers widen to frame 0.
-  Over moq-transport a flight starts at an object boundary.
-- Memory is 32 MB per flight, bounded overall by pool debt. Open, for the
-  implementer to measure and bring to the maintainer: whether a group needs
-  a cap on concurrent flights, and how a compressed flight that starts past
-  frame 0 gets the decoder state its plain riders need.
-- Tests through a two-relay chain: a late joiner of a group many times the
-  tail reads it from frame 0 through a flight and hands over to the live
-  copy, with memory near 32 MB per flight; a rider that just handed over
-  survives the copy ahead filling its whole ahead window at once; joiners
-  within 16 MB of each other share one upstream fill; a slow rider falls off and starts its own
-  flight without slowing the fast one; no flight fetches a frame twice; a
-  track with no handler refreshes.
-- Benchmarks: a case swept over readers and how far apart they join.
+Remaining, depending on the decisions under Waiting:
+
+- Compressed groups fly nothing yet (`track::board` returns `None` for them).
+  A flight that starts past frame 0 lacks the dictionary its plain riders
+  inflate from.
 - Fills that write a whole batch of groups at once evict their own earlier
   groups before the reader takes them (the follow-up from
-  [moq-dev/moq#7339](https://github.com/moq-dev/moq/pull/7339)). Moved here
-  from [fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664)
-  on 2026-11-02 (maintainer): the failure crosses groups, while pacing holds
-  back one group copy, so a flight's fill paces the batch by its riders
-  instead.
+  [moq-dev/moq#7339](https://github.com/moq-dev/moq/pull/7339), moved here on
+  2026-11-02). This crosses groups, while a flight paces one group copy, so
+  pacing the batch changes what `Fill::wanted` promises every handler.
 
-Public API: none. Wire: none, beyond the existing frame-offset fills.
+## Waiting
+
+- Maintainer: compressed flights. Options: (a) a compressed flight always starts
+  at frame 0 and its riders skip to their frame, costing the prefix's transfer
+  once per flight; (b) the flight carries the inflater's state from the cached
+  copy, which needs the inflated copy to keep a snapshot per segment; (c)
+  compressed groups keep refresh or `Evicted`. Recommendation: (a), since a
+  compressed group's refresh already exists for joiners and a flight is the
+  rarer path.
+- Maintainer: paced batch fills. Options: (a) a quest of its own, where
+  `Fill::wanted` yields the next group only once the readers took the one
+  before; (b) here. Recommendation: (a), since it changes the handler
+  contract and is not about flights.
