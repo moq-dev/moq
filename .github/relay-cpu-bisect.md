@@ -182,7 +182,7 @@ What remains of each viewer's live read is accepted in the [release-perf epic](.
 
 ## `group_relay_frames` since `e7a5c10`
 
-[Fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664)'s comparison found `group_relay_frames` about 15% slower at [f37d964dd3](https://github.com/moq-dev/moq/commit/f37d964dd3) than at [e7a5c10913](https://github.com/moq-dev/moq/commit/e7a5c10913) on a loaded host. The `group` fan-out scenario counts the same drain (every subscriber reads a finished 512-frame group in 16-frame batches), per drained group (runs yLeXzU, S9A3hY, R849HM):
+[Fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664)'s comparison found `group_relay_frames` about 15% slower at [f37d964dd3](https://github.com/moq-dev/moq/commit/f37d964dd3) than at [e7a5c10913](https://github.com/moq-dev/moq/commit/e7a5c10913) on a loaded host. The original `group` fan-out scenario counted the same drain (every subscriber reads a finished 512-frame group in 16-frame batches), per drained group (runs yLeXzU, S9A3hY, R849HM):
 
 | Revision | Instructions | Change |
 | --- | ---: | ---: |
@@ -197,6 +197,8 @@ What remains of each viewer's live read is accepted in the [release-perf epic](.
 | This PR (run 1gKfjA) | 135,396 | -37,835 (-21.8%) |
 
 The +15.3% matches the wall-clock report. Nine other candidates between pacing and `f37d964dd3` count the same as their predecessor. [moq-dev/moq#7504](https://github.com/moq-dev/moq/pull/7504) put an idle gate in front of every frame read and split the read into a second out-of-line layer called from two branches, so each frame paid a call frame and the gate's bookkeeping, about 38 instructions on top of about 297. A frame already in the reader's prefetched batch now returns before the gate, the drift budget, or a route, none of which can apply to it (a read parks only with its batch drained, and a copy adopted mid-group starts empty); what remains below has one call site. The drain is now 9.4% below `e7a5c10913`, pacing included.
+
+The counts above used the whole-frame batch reader before the maintainer made it private. `group_relay_frames` and the `group` scenario now use the relay's `poll_read_objects` through the hidden `fuzz::ObjectBatch` helper, retaining object metadata. These historical counts do not measure that revised harness. Pacing's isolated 2.0% cost was accepted and its dedicated quest removed.
 
 ## Validation
 

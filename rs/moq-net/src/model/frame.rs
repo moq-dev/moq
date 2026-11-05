@@ -12,6 +12,7 @@ use std::sync::{Arc, Weak};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::task::{Poll, ready};
 
+#[cfg(any(test, feature = "fuzz"))]
 use arrayvec::ArrayVec;
 use bytes::{Buf, Bytes, BytesMut};
 
@@ -342,6 +343,7 @@ impl<const N: usize> Buffer<N> {
 	}
 
 	/// Whether the buffer holds no frames.
+	#[cfg(test)]
 	pub fn is_empty(&self) -> bool {
 		self.0.is_empty()
 	}
