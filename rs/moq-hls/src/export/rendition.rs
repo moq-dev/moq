@@ -120,6 +120,7 @@ enum Config {
 /// The broadcast serving this rendition's media. A sibling that ends ends the rendition: it is
 /// never rebound onto whatever serves the path next.
 struct Media {
+	lazy: bool,
 	handle: Mutex<Handle>,
 	track: String,
 	/// The rendition reads another broadcast than the catalog's.
@@ -128,7 +129,8 @@ struct Media {
 
 struct Handle {
 	binding: Arc<moq_mux::Binding>,
-	/// The query holding the track instance alive without subscribing to its media.
+	/// The query pinning the track instance. Even an info query creates publisher demand,
+	/// so a lazy rendition holds it only while serving media.
 	track: Option<moq_net::track::Resolving>,
 	/// The bound sibling ended, so only its retained rows drain.
 	ended: bool,
@@ -147,17 +149,23 @@ impl Handle {
 }
 
 impl Media {
-	fn bind(source: &moq_mux::Source, reference: &impl hang::catalog::Reference, track: &str) -> moq_mux::Result<Self> {
+	fn bind(
+		source: &moq_mux::Source,
+		reference: &impl hang::catalog::Reference,
+		track: &str,
+		lazy: bool,
+	) -> moq_mux::Result<Self> {
 		let rel = reference.broadcast();
 		let mut handle = Handle {
 			binding: Arc::new(source.bind(rel, reference.instance())?),
 			track: None,
 			ended: false,
 		};
-		if let Poll::Ready(Ok(broadcast)) = handle.binding.poll_broadcast(&kio::Waiter::noop()) {
+		if !lazy && let Poll::Ready(Ok(broadcast)) = handle.binding.poll_broadcast(&kio::Waiter::noop()) {
 			handle.capture(&broadcast, track);
 		}
 		Ok(Self {
+			lazy,
 			handle: Mutex::new(handle),
 			track: track.to_string(),
 			// `bind` already rejected an escaping reference, so both sides name a path.
@@ -180,7 +188,9 @@ impl Media {
 	fn poll_sync(&self, waiter: &kio::Waiter, window: &segments::Producer) -> Arc<moq_mux::Binding> {
 		let mut handle = self.handle.lock().expect("media lock poisoned");
 		if let Poll::Ready(Ok(broadcast)) = handle.binding.poll_broadcast(waiter) {
-			handle.capture(&broadcast, &self.track);
+			if !self.lazy {
+				handle.capture(&broadcast, &self.track);
+			}
 			if self.sibling && !handle.ended && broadcast.poll_closed(waiter).is_ready() {
 				// End and Restart both drain only the pinned instance. Looking its path up again
 				// could serve a replacement under the old track's rows.
@@ -393,7 +403,7 @@ pub struct Rendition {
 	/// What every rendition of the broadcast shares: discontinuity counts and the run.
 	fanout: renditions::Fanout,
 	/// Follows the media track's groups into [`live`](Self::live); ends when the rendition drops.
-	watcher: Mutex<Option<Owner>>,
+	watcher: Mutex<Watcher>,
 	/// Set once the catalog drops or replaces the rendition (see [`retire`](Self::retire)).
 	retiring: tokio::sync::watch::Sender<bool>,
 	/// Which segments this instance lists.
@@ -416,6 +426,72 @@ pub struct Rendition {
 	building: Arc<tokio::sync::Mutex<()>>,
 	/// The background init build; ends when the rendition drops.
 	build: Mutex<Option<Owner>>,
+}
+
+#[derive(Default)]
+struct Watcher {
+	media: Option<Owner>,
+	idle: Option<Owner>,
+	#[cfg(feature = "server")]
+	requests: usize,
+	stopped: bool,
+}
+
+/// Keeps lazy media demanded for the whole response, including its first encode.
+#[cfg(feature = "server")]
+pub(crate) struct Demand(Option<Arc<Rendition>>);
+
+#[cfg(feature = "server")]
+impl Drop for Demand {
+	fn drop(&mut self) {
+		let Some(rendition) = self.0.take() else { return };
+		let mut watcher = rendition.watcher.lock().expect("watcher lock poisoned");
+		watcher.requests -= 1;
+		if watcher.requests != 0 || watcher.stopped {
+			return;
+		}
+		// RFC 8216 6.3.4 permits a reload after one target duration (half when unchanged).
+		// Three target durations allow that reload and two more intervals of request latency.
+		// Release also forgets the listed rows, so never before a live window would have evicted
+		// every row the last response listed: the playlist window plus one target duration, since
+		// eviction happens only as a later segment is listed. Start at completion, so an encode or
+		// slow fetch never expires mid-request.
+		let target = Duration::from_secs(rendition.target_duration());
+		let duration = target
+			.saturating_mul(3)
+			.max(rendition.fanout.window().saturating_add(target));
+		let weak = Arc::downgrade(&rendition);
+		watcher.idle = Some(rendition.fanout.spawn(async move {
+			kio::clock::sleep(duration).await;
+			if let Some(rendition) = weak.upgrade() {
+				let mut claim = rendition.claim.lock().expect("claim lock poisoned");
+				let mut watcher = rendition.watcher.lock().expect("watcher lock poisoned");
+				if watcher.requests == 0 {
+					// A finished window keeps listing what it listed, inherited predecessor rows
+					// included, and keeps its track pin: reads of its retained groups go through
+					// it, since a closed sibling refuses any later lookup. Its finished watcher
+					// stays too, so no request follows the ended track again.
+					if rendition.live.finished() {
+						return;
+					}
+					rendition.media.handle.lock().expect("media lock poisoned").track.take();
+					watcher.media.take();
+					// A resumed watcher never rewrites already-addressed segments or lists a
+					// partial segment it had open when the last player left.
+					claim.start = claim.next;
+					claim.pending = false;
+					if claim.retired {
+						// A replacement waits for this window to close before reading its own
+						// track. Stopping the watcher must finish that handover too.
+						rendition.live.cut();
+					} else {
+						rendition.live.clear();
+						rendition.previous.lock().expect("previous lock poisoned").take();
+					}
+				}
+			}
+		}));
+	}
 }
 
 impl Rendition {
@@ -526,7 +602,7 @@ impl Rendition {
 	) -> moq_mux::Result<Self> {
 		let track = config.track(&name);
 		let container = Arc::new(moq_mux::catalog::hang::Container::try_from(config)?);
-		let media = Media::bind(source, config, track)?;
+		let media = Media::bind(source, config, track, fanout.lazy)?;
 		Ok(Self {
 			tag: tag(track, interval, &normalize_video(config)),
 			container,
@@ -546,7 +622,7 @@ impl Rendition {
 			clock,
 			live: Arc::new(segments::Producer::new(0)),
 			fanout,
-			watcher: Mutex::new(None),
+			watcher: Mutex::default(),
 			retiring: tokio::sync::watch::Sender::new(false),
 			claim: Mutex::default(),
 			previous: Mutex::new(None),
@@ -569,7 +645,7 @@ impl Rendition {
 	) -> moq_mux::Result<Self> {
 		let track = config.track(&name);
 		let container = Arc::new(moq_mux::catalog::hang::Container::try_from(config)?);
-		let media = Media::bind(source, config, track)?;
+		let media = Media::bind(source, config, track, fanout.lazy)?;
 		Ok(Self {
 			tag: tag(track, interval, &normalize_audio(config)),
 			container,
@@ -589,7 +665,7 @@ impl Rendition {
 			clock,
 			live: Arc::new(segments::Producer::new(0)),
 			fanout,
-			watcher: Mutex::new(None),
+			watcher: Mutex::default(),
 			retiring: tokio::sync::watch::Sender::new(false),
 			claim: Mutex::default(),
 			previous: Mutex::new(None),
@@ -605,7 +681,29 @@ impl Rendition {
 		let watcher = self
 			.fanout
 			.spawn(watch_media(Arc::downgrade(self), self.retiring.subscribe()));
-		*self.watcher.lock().expect("watcher lock poisoned") = Some(watcher);
+		self.watcher.lock().expect("watcher lock poisoned").media = Some(watcher);
+	}
+
+	#[cfg(feature = "server")]
+	pub(crate) fn is_lazy(&self) -> bool {
+		self.media.lazy
+	}
+
+	#[cfg(feature = "server")]
+	pub(crate) fn demand(self: &Arc<Self>) -> Demand {
+		let mut watcher = self.watcher.lock().expect("watcher lock poisoned");
+		if !self.media.lazy {
+			return Demand(None);
+		}
+		watcher.idle.take();
+		watcher.requests += 1;
+		if watcher.media.is_none() && !watcher.stopped {
+			watcher.media = Some(
+				self.fanout
+					.spawn(watch_media(Arc::downgrade(self), self.retiring.subscribe())),
+			);
+		}
+		Demand(Some(self.clone()))
 	}
 
 	/// Take over from a retired predecessor (see [`retire`](Self::retire)): keep its target
@@ -882,8 +980,10 @@ impl Rendition {
 	/// End the window at the segments listed now, because another publisher run replaced this
 	/// one, and stop following its media: what the replaced run lists later is never listed.
 	pub(crate) fn cut(&self) {
-		let watcher = self.watcher.lock().expect("watcher lock poisoned").take();
-		drop(watcher);
+		let mut watcher = self.watcher.lock().expect("watcher lock poisoned");
+		watcher.stopped = true;
+		watcher.idle.take();
+		watcher.media.take();
 		self.live.cut();
 	}
 
@@ -1090,6 +1190,25 @@ impl Rendition {
 	/// its siblings stay available.
 	pub(crate) fn failed_alone(&self) -> bool {
 		self.fanout.failure().is_none() && self.check().is_err()
+	}
+
+	/// Whether a track query pins this rendition's media instance.
+	#[cfg(all(test, feature = "server"))]
+	pub(crate) fn pinned(&self) -> bool {
+		self.media.handle.lock().expect("media lock poisoned").track.is_some()
+	}
+
+	/// Poll until the broadcast serving this rendition's media settles: `true` once it resolved,
+	/// `false` if it failed, however. A listing advertises only a resolved rendition, so never
+	/// one whose authorization is pending or whose media can't be read.
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
+	pub(crate) fn poll_resolved(&self, waiter: &kio::Waiter) -> Poll<bool> {
+		self.poll_media(waiter)
+			.poll_broadcast(waiter)
+			.map(|result| result.is_ok())
 	}
 
 	/// Poll until listings of this rendition refuse (see [`check`](Self::check)), waking when its

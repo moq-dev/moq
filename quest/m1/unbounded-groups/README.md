@@ -32,7 +32,7 @@ Decided 2026-10-28 (maintainer, after an audit of the plan and
   shedding on pool debt alone let one live group grow without bound once the
   group caps went. The 32 MB counts a group copy's live tail (its
   `kio::log` run), and nothing is kept below it: no head, no refilled runs.
-- With [fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md),
+- With [fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664),
   the 32 MB is one budget split between "ahead" (bytes the fastest reader has
   not read, bounded by pacing) and "behind" (bytes it has read, kept for
   slower readers). Shedding never passes the fastest reader, and the ahead
@@ -76,7 +76,7 @@ superseded 2026-10-28 by flights.) When nothing serves a hole, the reader
 gets `Evicted` and a joiner falls back to `Info::refresh`. The live
 edge is paced by its fastest reader (decided 2026-10-25, superseding
 2026-10-24's "never paced by readers"; see
-[Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md)), so a
+[Fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664)), so a
 byte stream over MoQ loses nothing to a reader that keeps up. Groups are bounded by bytes, with each
 frame's slot charged to the pool and the 32 MB tail. Front eviction landed
 in [moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)
@@ -155,7 +155,6 @@ covered only at the model layer (maintainer, 2026-10-30).
 
 ## Required
 
-- [Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) - every hop buffers at most a window past its fastest reader and pushes back through QUIC flow control
 - [Flights](/quest/m1/unbounded-groups/flights.md) - a reader at a shed frame replays through a separate paced copy that hands over to the copy ahead
 - [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) - segments inside a frame shed like front frames and flights start at `(frame, byte)` on the current lite wip; the frame cap goes
 - [JS byte holes](/quest/m1/unbounded-groups/js-byte-holes.md) - `@moq/net` mirrors the byte-offset wire and continues a frame cut off mid-way

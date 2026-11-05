@@ -10,6 +10,12 @@ A request no longer fails with `Error::NoStreamCredit` when the peer grants no m
 `transport::poll::Session::poll_open_request` is removed. A transport drops its implementation; `poll_open_bi` is the only bidirectional open.
 A transport that knows the peer's stream credit reports it from the new `poll::Session::stream_credit`, which defaults to `None`, as `transport::StreamCredit { available, blocked }` per `transport::Dir`. A wrapper around another transport forwards it.
 
+### `Following` waits out a refusal ([#7836](https://github.com/moq-dev/moq/pull/7836))
+
+After `Following::available` returns a handler's refusal, the next call no longer asks the refusing route again at once.
+It waits for the serving route to change: another instance, the path going and coming back, or the same instance over another route.
+A caller that retried in a loop now waits instead of spinning; one that gave up on the first error is unaffected.
+
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 `track::Info::default()` sets `max_age` to `Some(Duration::ZERO)` instead of `None`: a superseded group is stale as soon as its successor arrives, so readers get only the live edge; the newest group never goes stale.
