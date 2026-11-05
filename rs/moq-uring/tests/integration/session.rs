@@ -133,6 +133,7 @@ fn lite_session_over_the_worker() {
 					.available()
 					.await
 					.expect("broadcast resolves")
+					.unwrap()
 			};
 			let mut track = bc
 				.track("data")
@@ -271,6 +272,7 @@ fn two_lite_sessions_share_the_server_socket() {
 						.available()
 						.await
 						.expect("broadcast resolves")
+						.unwrap()
 				};
 				let mut track = bc
 					.track("data")

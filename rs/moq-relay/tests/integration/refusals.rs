@@ -259,9 +259,10 @@ async fn refused_only_stats_depth_one_has_root_totals_and_shared_embedder_metric
 	)
 	.await
 	.unwrap()
+	.unwrap()
 	.unwrap();
 	let consumer = moq_stats::Consumer::new(broadcast, Default::default());
-	let mut totals = consumer.totals().await.unwrap();
+	let mut totals = consumer.totals().unwrap();
 	kio::clock::timeout(TIMEOUT, async {
 		loop {
 			let frame = totals.next().await.unwrap().unwrap();
@@ -315,9 +316,10 @@ async fn peer_zero_close_is_clean_and_application_close_counts_once() {
 		.unwrap()
 		.available()
 		.await
+		.unwrap()
 		.unwrap();
 	let consumer = moq_stats::Consumer::new(broadcast, Default::default());
-	let mut totals = consumer.totals().await.unwrap();
+	let mut totals = consumer.totals().unwrap();
 	for (index, error) in [moq_net::Error::Cancel, moq_net::Error::App(42)]
 		.into_iter()
 		.enumerate()

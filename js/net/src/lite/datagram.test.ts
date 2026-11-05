@@ -87,3 +87,31 @@ test("an untimed datagram body is refused before lite-07", () => {
 		expect(() => dg.encode(version)).toThrow("has no untimed datagram");
 	}
 });
+
+test("lite-07 datagram requests match Rust's size-prefixed fields", async () => {
+	const { Datagrams, DatagramsInfo, DatagramsUpdate } = await import("./datagram.ts");
+	const { Reader, Writer } = await import("../stream.ts");
+	const Path = await import("../path.ts");
+	const { Timescale } = await import("../time.ts");
+	const request = new Datagrams({ id: 7n, broadcast: Path.from("room/alice"), track: "audio", priority: -3 });
+	const body = await Writer.collect(Version.DRAFT_07, (writer) => request.encode(writer, Version.DRAFT_07));
+	expect([...body]).toEqual([20, 7, 10, ...enc.encode("room/alice"), 0, 5, ...enc.encode("audio"), 125]);
+	const decoded = await Datagrams.decode(new Reader(undefined, body, Version.DRAFT_07), Version.DRAFT_07);
+	expect(decoded).toEqual(request);
+	for (const timescale of [undefined, Timescale.MILLI]) {
+		const info = new DatagramsInfo({ priority: 2, timescale });
+		const body = await Writer.collect(Version.DRAFT_07, (writer) => info.encode(writer, Version.DRAFT_07));
+		expect(await DatagramsInfo.decode(new Reader(undefined, body, Version.DRAFT_07), Version.DRAFT_07)).toEqual(
+			info,
+		);
+	}
+	const update = new DatagramsUpdate(9);
+	const updated = await Writer.collect(Version.DRAFT_07, (writer) => update.encode(writer, Version.DRAFT_07));
+	expect([...updated]).toEqual([1, 137]);
+	expect(
+		await DatagramsUpdate.decodeMaybe(new Reader(undefined, updated, Version.DRAFT_07), Version.DRAFT_07),
+	).toEqual(update);
+	await expect(
+		Writer.collect(Version.DRAFT_06, (writer) => request.encode(writer, Version.DRAFT_06)),
+	).rejects.toThrow("require lite-07");
+});

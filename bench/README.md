@@ -437,7 +437,7 @@ run by default:
   QUIC: in-tree qmux, receive leases, and crypto only show in relay counts. A
   revision whose session API predates this harness reports it unsupported.
 - `group`, on request: every subscriber drains one finished 512-frame group in
-  batches, as moq-net's `group_relay_frames/plain/512/*` bench does, so that
+  object batches through the relay's private reader, as moq-net's `group_relay_frames/plain/512/*` bench does, so that
   bench's cost is counted without its wall-clock noise.
 
 Each `bench/fanout/<scenario>` crate builds against each base's and the current

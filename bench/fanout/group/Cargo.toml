@@ -9,7 +9,7 @@ publish = false
 [workspace]
 
 [dependencies]
-futures = "0.3"
+kio = { path = "../../../rs/kio" }
 moq-net = { path = "../../../rs/moq-net", features = ["fuzz"] }
 
 [profile.release]

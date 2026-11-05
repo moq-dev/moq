@@ -38,6 +38,7 @@ pub(crate) mod tracks;
 
 pub(crate) use claim::Claim;
 pub use consumer::Consumer;
+pub(crate) use consumer::Subscribing;
 pub use data::IntoRendition;
 pub(crate) use data::Listing;
 pub use entry::Entry;

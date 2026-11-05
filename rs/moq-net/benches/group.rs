@@ -30,6 +30,9 @@
 //! reader, as a paced ingest runs, swept over readers: each frame read reports progress,
 //! and the fastest reader's read wakes the parked writer.
 //!
+//! `group_compressed_updates` republishes single-frame compressed groups, swept over
+//! tracks and overlapping groups, to expose encoder allocation on the update path.
+//!
 //! Run with `cargo bench -p moq-net`.
 
 #![expect(
@@ -103,7 +106,7 @@ fn fresh_group() -> Ctx {
 /// Write N small frames into a fresh group (producer-side per-frame cost).
 ///
 /// `single` is one `write_frame` per frame: a group lock plus a track-level eviction
-/// settle each. `batch32` fills a `frame::Buffer` and hands the whole thing to
+/// settle each. `batch32` fills a `moq_net::fuzz::FrameBatch` and hands the whole thing to
 /// `write_frames`, paying both once per batch.
 fn bench_write(c: &mut Criterion) {
 	let payload = Bytes::from(vec![0u8; PAYLOAD]);
@@ -112,17 +115,17 @@ fn bench_write(c: &mut Criterion) {
 		g.throughput(Throughput::Elements(n as u64));
 		g.bench_with_input(BenchmarkId::new("batch32", n), &n, |b, &n| {
 			b.iter_batched(
-				|| (fresh_group(), frame::Buffer::<32>::new()),
+				|| (fresh_group(), moq_net::fuzz::FrameBatch::<32>::new()),
 				|(mut ctx, mut buf)| {
 					for _ in 0..n {
 						let frame = frame::Frame::new(Timestamp::ZERO, payload.clone());
 						// A full buffer hands the frame back: flush, then take it.
 						if let Err(frame) = buf.push(frame) {
-							ctx.group.write_frames(&mut buf).unwrap();
+							buf.write(&mut ctx.group).unwrap();
 							buf.push(frame).unwrap();
 						}
 					}
-					ctx.group.write_frames(&mut buf).unwrap();
+					buf.write(&mut ctx.group).unwrap();
 					(ctx, buf)
 				},
 				BatchSize::SmallInput,
@@ -156,10 +159,10 @@ fn filled_group(n: usize, payload: &Bytes) -> (Ctx, group::Consumer) {
 	(ctx, consumer)
 }
 
-/// Drain a whole group through a reused `frame::Buffer<N>`.
-fn drain_batched<const N: usize>(consumer: &mut group::Consumer, buf: &mut frame::Buffer<N>) {
+/// Drain a whole group through a reused `moq_net::fuzz::FrameBatch<N>`.
+fn drain_batched<const N: usize>(consumer: &mut group::Consumer, buf: &mut moq_net::fuzz::FrameBatch<N>) {
 	loop {
-		let batch = consumer.read_frames(buf).now_or_never().unwrap().unwrap();
+		let batch = buf.read(consumer).now_or_never().unwrap().unwrap();
 		if batch.is_empty() {
 			break;
 		}
@@ -207,7 +210,7 @@ fn bench_read(c: &mut Criterion) {
 					b.iter_batched(
 						|| {
 							let (ctx, consumer) = filled_group(n, &payload);
-							(ctx, consumer, frame::Buffer::<$cap>::new())
+							(ctx, consumer, moq_net::fuzz::FrameBatch::<$cap>::new())
 						},
 						|(ctx, mut consumer, mut buf)| {
 							drain_batched(&mut consumer, &mut buf);
@@ -370,11 +373,18 @@ fn bench_relay_frames(c: &mut Criterion) {
 						b.iter_batched(
 							|| (0..subscribers).map(|_| context.2.consume()).collect::<Vec<_>>(),
 							|mut readers| {
-								// A capacity `group_read_frames` doesn't sweep: sharing its readers'
-								// instantiation moves them out of line and shifts that sweep.
-								let mut buffer = frame::Buffer::<16>::new();
+								let mut buffer = moq_net::fuzz::ObjectBatch::<16>::new();
+								let waiter = kio::Waiter::noop();
 								for reader in &mut readers {
-									drain_batched(reader, &mut buffer);
+									loop {
+										let Poll::Ready(count) = buffer.poll_read(&waiter, reader) else {
+											panic!("finished group blocked")
+										};
+										if count.unwrap() == 0 {
+											break;
+										}
+										buffer.inspect();
+									}
 								}
 								readers
 							},
@@ -494,6 +504,56 @@ fn bench_inflate(c: &mut Criterion) {
 							}
 						}
 						(broadcast, track, consumers)
+					},
+					BatchSize::SmallInput,
+				);
+			});
+		}
+	}
+	g.finish();
+}
+
+/// Repeated single-frame compressed updates on independent tracks. Groups overlap
+/// within each update so only the one spare per track can be reused.
+fn bench_compressed_updates(c: &mut Criterion) {
+	const UPDATES: usize = 32;
+	let payload = Bytes::from(format!("{{\"status\":\"{}\"}}", "ready".repeat(100)));
+	let mut g = c.benchmark_group("group_compressed_updates");
+	for tracks in [1usize, 16] {
+		for concurrent in [1usize, 4] {
+			g.throughput(Throughput::Elements((UPDATES * tracks * concurrent) as u64));
+			g.bench_function(BenchmarkId::new(format!("tracks{tracks}"), concurrent), |b| {
+				b.iter_batched(
+					|| {
+						let broadcast = broadcast::Info::default().produce();
+						let producers: Vec<_> = (0..tracks)
+							.map(|i| {
+								let track = broadcast
+									.create_track(format!("bench{i}"), track::Info::default().with_compress(true))
+									.unwrap();
+								let mut group = track.append_group().unwrap();
+								group.write_frame(None, payload.clone()).unwrap();
+								group.finish().unwrap();
+								track
+							})
+							.collect();
+						(broadcast, producers, Vec::with_capacity(concurrent))
+					},
+					|(broadcast, producers, mut groups)| {
+						for _ in 0..UPDATES {
+							for track in &producers {
+								for _ in 0..concurrent {
+									let mut group = track.append_group().unwrap();
+									group.write_frame(None, payload.clone()).unwrap();
+									groups.push(group);
+								}
+								for group in &mut groups {
+									group.finish().unwrap();
+								}
+								groups.clear();
+							}
+						}
+						(broadcast, producers, groups)
 					},
 					BatchSize::SmallInput,
 				);
@@ -952,6 +1012,7 @@ criterion_group!(
 	bench_stamp,
 	bench_relay_frames,
 	bench_inflate,
+	bench_compressed_updates,
 	bench_contended,
 	bench_streaming,
 	bench_shed,

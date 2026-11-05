@@ -354,10 +354,6 @@ live read is accepted, per delivered group through the session (see the
   group waiting for stream credit, 0.9k: each parks on the next landing so a
   stalled group expires.
 
-## Required
-
-- [Pacing's per-frame report](/quest/m1/release-perf/pacing-report.md) - relay fan-out reads with pacing are within noise of the pre-pacing parent
-
 ## Related
 
 - [Performance audit](/quest/m2/audit-perf.md) - compares nightly to nightly; this epic compares main to release

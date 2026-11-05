@@ -342,6 +342,7 @@ mod tests {
                 mtu: BASE_DATAGRAM_SIZE as u16,
                 rtt: Duration::from_millis(100),
                 max_pacing_rate: None,
+                seed: 0,
             },
         )
     }

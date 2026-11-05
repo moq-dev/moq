@@ -1038,14 +1038,14 @@ async fn serve_announced(
 	};
 
 	let (lease, origin) = admit_http(&state, prefix, query, &uri, server_name, remote, mtls).await?;
-	let mut announced = origin.announced();
+	let mut announced = origin.routes();
 	let mut broadcasts = Vec::new();
 
 	while let Some(event) = announced.try_next() {
-		if let moq_net::announce::Event::Start(update)
-		| moq_net::announce::Event::Update(update)
-		| moq_net::announce::Event::Restart(update)
-		| moq_net::announce::Event::Takeover { announce: update, .. } = event
+		if let moq_net::origin::RouteEvent::Start(update)
+		| moq_net::origin::RouteEvent::Update(update)
+		| moq_net::origin::RouteEvent::Restart(update)
+		| moq_net::origin::RouteEvent::Takeover { announce: update, .. } = event
 		{
 			broadcasts.push(update.prefix);
 		}
@@ -1095,7 +1095,12 @@ async fn serve_fetch(
 		// Block until a route covers the broadcast (within the fetch deadline) so
 		// freshly-connected subscribers don't get a spurious 404 before the announce arrives.
 		let mut following = origin.follow("", None).map_err(|_| StatusCode::NOT_FOUND)?;
-		let broadcast = following.available().await.map_err(|_| StatusCode::NOT_FOUND)?;
+		let broadcast = following
+			.available()
+			.await
+			.ok()
+			.flatten()
+			.ok_or(StatusCode::NOT_FOUND)?;
 		let sequence = match params.group {
 			FetchGroup::Num(sequence) => Some(sequence),
 			FetchGroup::Latest => None,
