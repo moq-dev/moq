@@ -157,6 +157,30 @@ it("fills a declared silence with comfort noise and counts no underrun", () => {
 	expect(sent.at(-1)).toMatchObject({ underruns: 0, silent: false, stalled: false });
 });
 
+// Back-to-back presses leave a short declared silence buffered between two utterances, which plays as
+// the same comfort noise as a longer one.
+it("fills a declared silence between buffered utterances with comfort noise", () => {
+	const { send, read, sent } = renderer();
+	const quiet = 0.0002;
+	send({ type: "data", timestamp: Micro(0), data: [new Float32Array(200).fill(quiet)] });
+	send({ type: "end", timestamp: Micro(200_000) });
+	for (let i = 0; i < 9; i++) read(20);
+	send({ type: "reset", epoch: 1, next: true });
+	send({ type: "data", timestamp: Micro(400_000), data: [new Float32Array(200).fill(1)] });
+
+	const output = read(20);
+	expect(output[0]).toBeCloseTo(quiet, 9);
+	const noise = read(200);
+	expect(noise.some((value) => value !== 0)).toBe(true);
+	expect(Math.max(...noise.map(Math.abs))).toBeLessThanOrEqual(quiet * Math.sqrt(3));
+	// The next utterance fades in from the noise and then plays as sent.
+	const resumed = read(150);
+	expect(resumed[0]).toBeLessThan(1);
+	expect(resumed[149]).toBe(1);
+	for (let i = 0; i < 4; i++) read(10);
+	expect(sent.at(-1)).toMatchObject({ underruns: 0, stalled: false });
+});
+
 it("caps comfort noise at -60 dBFS after loud audio", () => {
 	const { send, read } = renderer();
 	send({ type: "data", timestamp: Micro(0), data: [new Float32Array(200).fill(0.5)] });

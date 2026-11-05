@@ -24,16 +24,16 @@ export class ComfortNoise {
 		this.#block = Math.max(1, Math.round(rate / 50));
 	}
 
-	/** Measure the first `samples` of `output`, just played. */
-	played(output: Float32Array[], samples: number): void {
-		if (samples === 0) return;
+	/** Measure `output` from `from` up to `to`, just played. */
+	played(output: Float32Array[], from: number, to: number): void {
+		if (to <= from) return;
 		if (this.#filling) {
 			this.#filling = false;
 			this.#quietest = Number.POSITIVE_INFINITY;
 			this.#sum = 0;
 			this.#frames = 0;
 		}
-		for (let i = 0; i < samples; i++) {
+		for (let i = from; i < to; i++) {
 			for (const channel of output) this.#sum += channel[i] * channel[i];
 			if (++this.#frames < this.#block) continue;
 			this.#quietest = Math.min(this.#quietest, this.#sum / (this.#block * output.length));
@@ -42,8 +42,8 @@ export class ComfortNoise {
 		}
 	}
 
-	/** Fill `output` from `from` onward with comfort noise. */
-	fill(output: Float32Array[], from: number): void {
+	/** Fill `output` from `from` up to `to`, or its end, with comfort noise. */
+	fill(output: Float32Array[], from: number, to = output[0].length): void {
 		if (!this.#filling) {
 			this.#filling = true;
 			// A silence after too little audio to measure keeps the previous level.
@@ -53,7 +53,7 @@ export class ComfortNoise {
 		// Uniform noise on [-a, a] has an RMS of a / sqrt(3).
 		const amplitude = this.#level * Math.sqrt(3);
 		for (const channel of output) {
-			for (let i = from; i < channel.length; i++) channel[i] = (Math.random() * 2 - 1) * amplitude;
+			for (let i = from; i < to; i++) channel[i] = (Math.random() * 2 - 1) * amplitude;
 		}
 	}
 }

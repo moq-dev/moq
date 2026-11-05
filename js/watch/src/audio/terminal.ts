@@ -84,7 +84,7 @@ export class Terminal {
 		return reset;
 	}
 
-	// Start a fresh timeline after its declared end.
+	// Start a fresh codec epoch after its declared end, on the same timeline.
 	#restart(): void {
 		this.#started = false;
 		this.#end = undefined;

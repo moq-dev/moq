@@ -601,6 +601,8 @@ describe("declared end", () => {
 		expect([...played.slice(0, 20)]).toEqual(Array(20).fill(1));
 		expect([...played.slice(20, 30)]).toEqual(Array(10).fill(0));
 		expect([...played.slice(30)]).toEqual(Array(40).fill(2));
+		// The gap is the declared silence, for the reader to fill with comfort noise.
+		expect(buffer.quiet).toEqual([20, 30]);
 		expect(buffer.underruns).toBe(0);
 		expect(buffer.silent).toBe(false);
 
@@ -623,6 +625,43 @@ describe("declared end", () => {
 
 		write(buffer, 120 as Milli, 20, { channels: 1, value: 2 });
 		expect([...read(buffer, 40, 1)[0]]).toEqual(Array(40).fill(2));
+		expect(buffer.underruns).toBe(0);
+	});
+
+	it("reports a declared silence across reads until the next utterance plays", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 40 as Milli });
+		write(buffer, 0 as Milli, 40, { channels: 1, value: 1 });
+		buffer.end(Micro(40_000));
+		read(buffer, 30, 1);
+		buffer.next();
+		write(buffer, 70 as Milli, 20, { channels: 1, value: 2 });
+
+		read(buffer, 20, 1);
+		expect(buffer.quiet).toEqual([10, 20]);
+		read(buffer, 20, 1);
+		expect(buffer.quiet).toEqual([0, 20]);
+		read(buffer, 20, 1);
+		expect(buffer.quiet).toBeUndefined();
+	});
+
+	// The next utterance's audio may land a beat after the tail has played, which is still the
+	// silence the publisher declared.
+	it("treats running dry before the next utterance lands as declared silence", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 20 as Milli });
+		write(buffer, 0 as Milli, 40, { channels: 1 });
+		buffer.end(Micro(40_000));
+		read(buffer, 20, 1);
+		buffer.next();
+		read(buffer, 20, 1);
+		read(buffer, 20, 1);
+		expect(buffer.underruns).toBe(0);
+		expect(buffer.silent).toBe(true);
+
+		write(buffer, 60 as Milli, 20, { channels: 1, value: 2 });
+		read(buffer, 20, 1);
+		expect(buffer.quiet).toEqual([0, 20]);
+		expect([...read(buffer, 20, 1)[0]]).toEqual(Array(20).fill(2));
+		expect(buffer.quiet).toBeUndefined();
 		expect(buffer.underruns).toBe(0);
 	});
 

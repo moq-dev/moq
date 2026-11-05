@@ -93,6 +93,10 @@ in [Container reads drop backfill](/quest/m1/read-backfill.md).
 The runner fails on a head that is received but never decoded, so the proof
 catches this. A complete set of runs finishes this epic.
 
+## Required
+
+- [Native playback fills declared silence with comfort noise](/quest/m1/push-to-talk/native-comfort-noise.md) - `moq play` plays comfort noise over declared silence and counts no underrun, matching the browser
+
 ## Closes
 
 - [#7101](https://github.com/moq-dev/moq/issues/7101) - a disabled audio rendition is deselected, so the start of the next utterance is lost

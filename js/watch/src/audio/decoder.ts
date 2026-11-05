@@ -715,6 +715,10 @@ export class Decoder {
 	// Decode released frames, resetting the decoder before the first frame of a new codec epoch and
 	// only then dropping one that is out of order. The terminal sees them in decode order, so it
 	// anchors on the oldest. Reports whether to keep going.
+	//
+	// A new epoch (a gap, or a later group after a declared end) restarts the codec, never the
+	// timeline: publishers keep timestamps moving forward across a declared end, so the PCM decoded
+	// before it still plays and the shared clock stays anchored.
 	async #play(
 		effect: Effect,
 		decoder: AudioDecoder,
@@ -979,22 +983,15 @@ export class Decoder {
 		this.#ring.peek()?.reset();
 	}
 
-	// Apply an ordered container read before handling it, reporting whether a codec epoch ended:
-	// a gap, or a later group after a declared end.
+	// Apply an ordered container read before handling it, reporting whether a codec epoch ended: a
+	// gap, or a later group after a declared end. The ring learns where a declared silence starts and
+	// that the next utterance follows it; the timeline and the shared clock carry on through both.
 	#onRead(read: Container.Read): boolean {
 		// Decoded audio stops a pre-skip short of a declared end when the publisher left its codec's
 		// lookahead unflushed, so the ring takes the end that early.
 		if (read.kind === "end") this.#ring.peek()?.end((read.end - this.#terminal.delay) as Micro);
 		if (!this.#terminal.update(read)) return false;
-		// A hole restarts codec prediction on the same timeline, keeping decoded PCM and parked video.
-		// A frame after a declared end starts the next utterance, which re-anchors playback once the
-		// previous one has played out, and otherwise follows it without dropping its tail.
-		if (read.kind === "frame") {
-			this.sync.reset();
-			this.#decodeBuffered.set([]);
-			this.#queued.set(undefined);
-			this.#ring.peek()?.next();
-		}
+		if (read.kind === "frame") this.#ring.peek()?.next();
 		return true;
 	}
 
