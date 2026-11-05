@@ -96,6 +96,9 @@ import {
 // and removals of one name never reaches the announces cap: yield so it cannot starve the host.
 const listingBudget = new Budget();
 const datagramBudget = new Budget();
+// The datagrams held for unanswered subscriptions at once, as many as a Rust pass holds: past it,
+// the receive queue waits for them to route.
+const HELD_DATAGRAMS = 32;
 
 // Request streams refuse exhausted peer credit, with one deadline covering create and answer.
 export const SUBSCRIBE_SETUP_TIMEOUT_MS = REQUEST_TIMEOUT_MS;
@@ -249,6 +252,10 @@ export class Subscriber {
 	#legacyRequests = new Map<string, datagram.Request>();
 	// Lite-07 datagram requests sent and not yet answered.
 	#unanswered = new Set<bigint>();
+	// Datagrams for a subscription still awaiting its answer, in arrival order, routed a host task
+	// later while the rest go on.
+	#held: { subscribe: bigint; payload: Uint8Array }[] = [];
+	#heldRouted?: Promise<void>;
 	/** Datagrams received for a subscription with no datagram track; see `Stats.datagramsUnrouted`. */
 	datagramsUnrouted = 0;
 	// A SUBSCRIBE sent alongside its TRACK, until its TRACK_INFO lands: settles with the
@@ -2421,22 +2428,55 @@ export class Subscriber {
 
 	// Decode one datagram body and hand it to the datagram track it was sent for. A publisher
 	// sends a track's first datagram right behind its answer, which the transport may hand over
-	// first: one for a subscription still awaiting its answer waits a host task, so an answer
-	// already received decodes before it. One that still finds no track is dropped and counted.
+	// first: one for a subscription still awaiting its answer is held a host task, so an answer
+	// already received decodes before it, while other tracks' datagrams go on. One that still
+	// finds no track is dropped and counted.
 	async #routeDatagram(payload: Uint8Array): Promise<void> {
 		if (payload.byteLength > DatagramMessage.MAX_SIZE) return;
-		let unrouted = await this.#deliverDatagram(payload);
+		let unrouted = await this.#deliverDatagram(payload, true);
 		if (unrouted === undefined) return;
-		if (this.#unanswered.has(unrouted) || this.#pending.has(unrouted)) await yieldNow();
-		// Its track may also have registered while the decode awaited.
-		if (this.#datagrams.has(unrouted)) unrouted = await this.#deliverDatagram(payload);
+		// Its track may have registered while the decode awaited.
+		if (!this.#isHeld(unrouted) && this.#datagrams.has(unrouted))
+			unrouted = await this.#deliverDatagram(payload, true);
 		if (unrouted === undefined) return;
-		this.datagramsUnrouted++;
-		console.debug(`dropping datagram for a subscription with no datagram track: id=${unrouted}`);
+		if (this.#isHeld(unrouted) || this.#unanswered.has(unrouted) || this.#pending.has(unrouted)) {
+			this.#held.push({ subscribe: unrouted, payload });
+			this.#heldRouted ??= this.#routeHeld();
+			if (this.#held.length >= HELD_DATAGRAMS) await this.#heldRouted;
+			return;
+		}
+		this.#dropUnrouted(unrouted);
 	}
 
-	// Deliver one datagram body, returning its Subscribe ID if that subscription has no datagram track.
-	async #deliverDatagram(payload: Uint8Array): Promise<bigint | undefined> {
+	// Whether a datagram for `subscribe` is held, which later ones wait behind to keep its order.
+	#isHeld(subscribe: bigint): boolean {
+		return this.#held.some((held) => held.subscribe === subscribe);
+	}
+
+	// A host task later, route the datagrams held until now, then any held meanwhile.
+	async #routeHeld(): Promise<void> {
+		await yieldNow();
+		for (let count = this.#held.length; count > 0; count--) {
+			const [{ payload }] = this.#held;
+			try {
+				const unrouted = await this.#deliverDatagram(payload, false);
+				if (unrouted !== undefined) this.#dropUnrouted(unrouted);
+			} catch (err: unknown) {
+				console.debug(`dropping datagram: ${reason(err)}`);
+			}
+			this.#held.shift();
+		}
+		this.#heldRouted = this.#held.length > 0 ? this.#routeHeld() : undefined;
+	}
+
+	#dropUnrouted(subscribe: bigint): void {
+		this.datagramsUnrouted++;
+		console.debug(`dropping datagram for a subscription with no datagram track: id=${subscribe}`);
+	}
+
+	// Deliver one datagram body, returning its Subscribe ID if that subscription has no datagram
+	// track, or, `behindHeld`, has a datagram held.
+	async #deliverDatagram(payload: Uint8Array, behindHeld: boolean): Promise<bigint | undefined> {
 		// Read with the entry it was decoded with: one registered while the decode awaited would
 		// read a datagram parsed with the defaults.
 		let entry: DatagramEntry | undefined;
@@ -2447,6 +2487,7 @@ export class Subscriber {
 		// Padding, which names no subscription.
 		if (!dg) return undefined;
 		if (!entry || this.#datagrams.get(dg.subscribe) !== entry) return dg.subscribe;
+		if (behindHeld && this.#isHeld(dg.subscribe)) return dg.subscribe;
 		const timestamp =
 			dg.timestamp === undefined || entry.timescale === undefined
 				? undefined

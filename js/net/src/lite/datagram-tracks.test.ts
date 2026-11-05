@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Signal } from "@moq/signals";
 import { accept, connect } from "../connection/index.ts";
 import { createMockTransportPair, type MockTransport } from "../mock.ts";
 import { Producer as Origin } from "../origin.ts";
@@ -388,3 +389,107 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		}
 	});
 }
+
+// Holds back what the publisher writes on the next request stream it accepts once armed, until
+// released: that subscription's answer stays outstanding while everything else flows.
+function holdNextAnswer(transport: MockTransport): { arm(): void; release(): void } {
+	let armed = false;
+	const release = Promise.withResolvers<void>();
+	const holding = (writable: WritableStream<Uint8Array>) => {
+		const writer = writable.getWriter();
+		let chain = release.promise;
+		// A write the session's close fails is lost, as it would be on the wire.
+		const later = (op: () => Promise<void>) => {
+			chain = chain.then(op).catch(() => {});
+			return chain;
+		};
+		return new WritableStream<Uint8Array>({
+			write: (chunk) => void later(() => writer.write(chunk)),
+			close: () => void later(() => writer.close()),
+			abort: (reason) => writer.abort(reason),
+		});
+	};
+	const incoming = transport.incomingBidirectionalStreams.pipeThrough(
+		new TransformStream<WebTransportBidirectionalStream, WebTransportBidirectionalStream>({
+			transform: (bidi, controller) => {
+				const held = armed;
+				armed = false;
+				controller.enqueue(
+					held
+						? ({
+								readable: bidi.readable,
+								writable: holding(bidi.writable),
+							} as WebTransportBidirectionalStream)
+						: bidi,
+				);
+			},
+		}),
+	);
+	Object.defineProperty(transport, "incomingBidirectionalStreams", { value: incoming });
+	return {
+		arm: () => {
+			armed = true;
+		},
+		release: () => release.resolve(),
+	};
+}
+
+// Datagrams held for a track still awaiting its answer don't hold up an answered track's last
+// datagram, which its end, arriving with it, would otherwise drop.
+test("lite-07: an unanswered track's datagrams don't delay another track's last", async () => {
+	const source = new Origin();
+	const publication = source.createBroadcast(path);
+	const b = publication.broadcast.createDatagrams("b");
+	// Answers "a" on demand.
+	const requested = wireOf(publication.broadcast).requestedDatagrams();
+	publication.announce();
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const hold = holdNextAnswer(pair.server);
+	// Counts the datagrams the publisher sends.
+	const sending = pair.server.datagrams.writable.getWriter();
+	let sent = 0;
+	const sends = new Signal(0);
+	Object.defineProperty(pair.server.datagrams, "writable", {
+		value: new WritableStream<Uint8Array>({
+			write: async (chunk) => {
+				await sending.write(chunk);
+				sends.set(++sent);
+			},
+		}),
+	});
+	const [client, server] = await Promise.all([
+		connect({ url, transport: pair.client }),
+		accept({ url, transport: pair.server, publish: source.consume() }),
+	]);
+	const remote = wireOf(client).consume(path);
+	const readerB = remote.datagrams("b");
+	readerB.setPriority(5);
+	let readerA: ReturnType<typeof remote.datagrams> | undefined;
+	try {
+		await readerB.info();
+		while (b.priority.peek() !== 5) await b.priority.changed();
+		hold.arm();
+		readerA = remote.datagrams("a");
+		const request = await requested;
+		if (!request) throw new Error("the request never reached the handler");
+		const a = request.accept({});
+		for (let i = 0; i < 3; i++) a.append(undefined, Uint8Array.of(i));
+		// "a"'s datagrams reach the subscriber ahead of "b"'s.
+		while (sends.peek() < 3) await sends.changed();
+		b.append(undefined, Uint8Array.of(9));
+		b.finish();
+		expect((await readerB.recv())?.payload).toEqual(Uint8Array.of(9));
+		expect(await readerB.recv()).toBeUndefined();
+		// "a" stayed unanswered past the host task its datagrams waited, so they were dropped.
+		expect((await client.stats()).datagramsUnrouted).toBe(3);
+		hold.release();
+		await readerA.info();
+	} finally {
+		readerA?.close();
+		readerB.close();
+		remote.close();
+		client.abort();
+		server.abort();
+		source.close();
+	}
+});
