@@ -116,12 +116,7 @@ impl Link {
 		let version: Version = VERSION.parse().unwrap();
 		let mut origin = |hop: u64| {
 			let mut config = origin::Config::new(Hop::new(hop).unwrap());
-			// Hold the working batch and handover; expire read history between rounds.
-			config.pool = cache::Pool::new(
-				cache::Config::default()
-					.with_capacity((4 * streams * FRAMES * size) as u64)
-					.with_expiry(cache::DEFAULT_EXPIRY),
-			);
+			config.pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
 			pools.push(config.pool.clone());
 			let (producer, driver) = origin::Producer::new(config);
 			tokio::spawn(moq_net::time::run(driver));
@@ -181,6 +176,13 @@ impl Link {
 			_sessions: sessions,
 			_origins: (publisher, subscriber),
 		};
+		// Size from a complete batch, including group and frame bookkeeping.
+		link.tick();
+		link.round().await;
+		for pool in &link.pools {
+			// Dating, the expiry boundary, a demoted live edge, and the incoming batch.
+			pool.resize(pool.used() * 4);
+		}
 		// Warm every stream so the timed rounds skip first-group setup.
 		for _ in 0..4 {
 			link.tick();
@@ -210,7 +212,7 @@ impl Link {
 		bytes
 	}
 
-	// Bound retained history to two rounds plus the protected latest group.
+	// Expire read history between rounds without advancing protocol time.
 	fn tick(&mut self) {
 		self.cache_now += cache::DEFAULT_EXPIRY;
 		for pool in &self.pools {
