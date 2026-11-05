@@ -267,15 +267,17 @@ for (const outcome of ["a refused joining FETCH", "an empty joining FETCH"] as c
 	});
 }
 
-test("a reader in sequence order with no delay budget skips a group whose head was refused", async () => {
+test("a reader in sequence order with no delay budget skips headless groups", async () => {
 	const { subscriber, consumer, fetching } = await join(undefined, { order: "ascending", delay: { max: null } });
 	await refuse(fetching);
 
+	// The joined group's head was refused, and the next group's stream starts mid-group.
 	await subscriber.handleGroup(...liveStream(GROUP, 2, ["t2"]));
-	await subscriber.handleGroup(...liveStream(GROUP + 1n, 0, ["n0"]));
+	await subscriber.handleGroup(...liveStream(GROUP + 1n, 1, ["m1"]));
+	await subscriber.handleGroup(...liveStream(GROUP + 2n, 0, ["n0"]));
 
 	const group = await timeout(Nano.fromMilli(Milli(1000)), consumer.ordered().nextGroup());
-	expect(group?.sequence).toBe(GROUP + 1n);
+	expect(group?.sequence).toBe(GROUP + 2n);
 });
 
 test("a tail parked on a refused joining FETCH is dropped", async () => {

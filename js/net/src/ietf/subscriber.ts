@@ -2004,6 +2004,7 @@ export class Subscriber {
 			// as the keyframe the group opens with.
 			if (producer === undefined && e instanceof ObjectIdGap && !group.flags.firstObject) {
 				console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
+				dropHeadless();
 				stream.stop(new Error("a group must start at object 0"));
 				return;
 			}
