@@ -3683,7 +3683,7 @@ impl FrontServe {
 	/// Read the table for the machine: the best route and whether
 	/// the serving source is on its way out. Also what the watch wakes for.
 	fn select(&mut self) -> Event {
-		let table = self.shared.read();
+		let mut table = self.shared.lock();
 		if table.closed {
 			return Event::Closed;
 		}
@@ -3717,14 +3717,6 @@ impl FrontServe {
 			&self.front,
 			self.resolved.as_ref().or(self.pin.as_ref()),
 		);
-		// No candidate irreversibly ends this front. Revoke its cached verdict under the
-		// table lock a lookup takes: a route can return before the end actions run, and a
-		// requester must not join the broadcast those actions are about to close.
-		if best.is_none()
-			&& let Ok(mut pending) = self.request.write()
-		{
-			pending.resolved = Some(Err(Error::Unroutable));
-		}
 		// Under the table's lock, which a request reads it under too: a request that
 		// sees another winner from here on mints its own front rather than join this one.
 		if self.resolved.is_none()
@@ -3741,6 +3733,16 @@ impl FrontServe {
 			local: entry.local,
 			carried: !entry.instance.is_minted(),
 		});
+		// No candidate irreversibly ends this front. Leave the cache under the same lock
+		// a lookup takes, before a route can return and a newcomer join the broadcast the
+		// end actions are about to close. Existing requesters keep their original verdict.
+		if best.is_none() {
+			table
+				.fronts
+				.remove_if(&(self.path.clone(), self.horizon, self.pin.clone()), |front| {
+					front.request.same_channel(&self.request)
+				});
+		}
 		let serving_closing = self
 			.front
 			.serving()
