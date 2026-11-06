@@ -335,7 +335,8 @@ impl Mixer {
 				let read = match status {
 					Read::NotReady => None,
 					Read::Underflow { frames: read } => Some(read),
-					Read::Ok | Read::Trimmed { .. } => Some(frames),
+					// A declared silence is played on purpose, so it is no gap.
+					Read::Ok | Read::Trimmed { .. } | Read::Comfort { .. } => Some(frames),
 				};
 				match read {
 					Some(read) if entry.completion.writing() => {
