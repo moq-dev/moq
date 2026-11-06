@@ -7,7 +7,7 @@
 
 use std::any::Any;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::task::Poll;
 
 use bytes::{Buf, Bytes};
@@ -211,17 +211,16 @@ impl RecvStream {
 	/// Box a stream outside any session, which therefore never pauses.
 	#[cfg(test)]
 	pub(crate) fn new(stream: impl poll::RecvStream + Send + Sync) -> Self {
-		Self::budgeted(stream, Weak::<Shared<super::memory::Session>>::new(), None)
+		Self::budgeted(stream, Weak::<Shared<super::memory::Session>>::new())
 	}
 
-	/// Box a stream of a session granting `receive`, read when the stream is accepted or
-	/// opened, which sizes its pacing [`window`](Self::window).
-	fn budgeted(stream: impl poll::RecvStream + Send + Sync, session: Budget, receive: Option<ReceiveWindow>) -> Self {
+	/// Box a stream of `session`, whose receive windows size its pacing [`window`](Self::window).
+	fn budgeted(stream: impl poll::RecvStream + Send + Sync, session: Budget) -> Self {
 		Self(Box::new(Budgeted {
 			stream,
 			session,
 			held: 0,
-			window: crate::model::pace::window(receive),
+			window: OnceLock::new(),
 		}))
 	}
 
@@ -251,8 +250,9 @@ struct Budgeted<T> {
 	session: Budget,
 	/// The credit reserved while paused, zero while read.
 	held: u64,
-	/// The pacing window, from the session's receive windows when the stream arrived.
-	window: u64,
+	/// The pacing window, read from the session's receive windows when ingest first paces
+	/// the stream, so one that arrived before admission widened them paces at the wider ones.
+	window: OnceLock<u64>,
 }
 
 impl<T> Budgeted<T> {
@@ -403,22 +403,18 @@ fn unbox<'a, G: 'static>(options: SendOptions<'a, Group>) -> SendOptions<'a, G> 
 	}
 }
 
-fn bi<S: poll::Boxable>(session: &S, (send, recv): poll::BiStreams<S>, budget: Budget) -> (SendStream, RecvStream) {
-	let receive = poll::Session::receive_window(session);
-	(SendStream(Box::new(send)), RecvStream::budgeted(recv, budget, receive))
+fn bi<S: poll::Boxable>((send, recv): poll::BiStreams<S>, budget: Budget) -> (SendStream, RecvStream) {
+	(SendStream(Box::new(send)), RecvStream::budgeted(recv, budget))
 }
 
 impl<S: poll::Boxable> ErasedSession for S {
 	fn poll_accept_uni(&self, waiter: &kio::Waiter, budget: Budget) -> Poll<Result<RecvStream, Error>> {
-		poll::Session::poll_accept_uni(self, waiter).map(|res| {
-			res.map(|recv| RecvStream::budgeted(recv, budget, poll::Session::receive_window(self)))
-				.map_err(Error::new)
-		})
+		poll::Session::poll_accept_uni(self, waiter)
+			.map(|res| res.map(|recv| RecvStream::budgeted(recv, budget)).map_err(Error::new))
 	}
 
 	fn poll_accept_bi(&self, waiter: &kio::Waiter, budget: Budget) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		poll::Session::poll_accept_bi(self, waiter)
-			.map(|res| res.map(|bis| bi::<S>(self, bis, budget)).map_err(Error::new))
+		poll::Session::poll_accept_bi(self, waiter).map(|res| res.map(|bis| bi::<S>(bis, budget)).map_err(Error::new))
 	}
 
 	fn poll_open_uni(&self, waiter: &kio::Waiter, options: SendOptions<'_, Group>) -> Poll<Result<SendStream, Error>> {
@@ -433,7 +429,7 @@ impl<S: poll::Boxable> ErasedSession for S {
 		budget: Budget,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
 		poll::Session::poll_open_bi(self, waiter, unbox(options))
-			.map(|res| res.map(|bis| bi::<S>(self, bis, budget)).map_err(Error::new))
+			.map(|res| res.map(|bis| bi::<S>(bis, budget)).map_err(Error::new))
 	}
 
 	fn send_group(&self, priority: i64) -> Option<Group> {
@@ -574,7 +570,13 @@ impl<T: poll::RecvStream + Send + Sync> ErasedRecv for Budgeted<T> {
 	}
 
 	fn window(&self) -> u64 {
-		self.window
+		*self.window.get_or_init(|| {
+			let receive = self
+				.session
+				.upgrade()
+				.and_then(|shared| shared.session.receive_window());
+			crate::model::pace::window(receive)
+		})
 	}
 
 	fn pause(&mut self) -> bool {
@@ -836,6 +838,21 @@ mod test {
 
 		let session = Session::new(SinkSession::accepted_bi(gate.consume()));
 		assert_eq!(accept(&session).window(), AHEAD);
+	}
+
+	/// A stream accepted while the connection window was held back, such as one buffered
+	/// before admission, paces at the window in force once ingest reads it.
+	#[test]
+	fn a_stream_paces_at_the_window_widened_after_it_arrived() {
+		let gate = kio::Producer::new(true);
+		let session =
+			Session::new(SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(10, 20)));
+		let early = accept(&session);
+		let limits = Limits {
+			receive_window: std::num::NonZeroU64::new(100),
+		};
+		session.set_limits(limits).unwrap();
+		assert_eq!(early.window(), 20);
 	}
 
 	/// A transport that reports no window never pauses a stream, since nothing bounds what

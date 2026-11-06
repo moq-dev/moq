@@ -1884,7 +1884,7 @@ mod tests {
 	}
 
 	/// The windows `[quic]` configures, smaller than its defaults.
-	#[cfg(feature = "tcp")]
+	#[cfg(any(feature = "quic", feature = "tcp"))]
 	fn small_quic() -> crate::quic::Config {
 		crate::quic::Config {
 			receive_window: Some(moq_net::transport::MIN_RECEIVE_WINDOW * 2),
