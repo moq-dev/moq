@@ -83,7 +83,7 @@ reached the listener reordered: 919 at +187 ms and 918 at +192 ms, about 115
 ms in transit against the usual 3 ms. The listener decoded 919 at +191.7 ms.
 Group 918 arrived 0.4 ms later and never reached the decoder, so the utterance
 played from its second frame, 60 ms late. Those runs predate
-PRURL, after which the JS ordered read
+[moq-dev/moq#8071](https://github.com/moq-dev/moq/pull/8071), after which the JS ordered read
 (`js/hang/src/container/consumer.ts`) waits on each group in sequence and
 drops one below its cursor, rather than delivering it as a late backfill that
 the decoder (`js/watch/src/audio/decoder.ts`) then dropped as late. Rerun

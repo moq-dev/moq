@@ -61,7 +61,7 @@ Implementation:
   floor span, keeping `admit()` and the epoch reset ordering from #6549. Keep
   the decoder tests for a reversed head (now released at the floor) and the
   fresh-encoder case.
-- Since PRURL, the JS ordered read starts at the
+- Since [moq-dev/moq#8071](https://github.com/moq-dev/moq/pull/8071), the JS ordered read starts at the
   publisher's reported start, waits on each group in sequence, and drops one
   below its cursor, so `Order` only ever sees an ascending head. That PR left
   `Order` alone for this quest; rerun its decoder tests against the new read.
