@@ -103,7 +103,7 @@ relay.with_web(web).run().await?;
   one in tests, enable the `test-support` feature, read its SETUP with `moq_net::Server::accept_request` and pass
   `Accepted::new(handshake, transport)` to `Connection::new`. The client must
   send its path in the SETUP. The server's accept timeout (`moq_net::Server::with_timeout`)
-  bounds admission and the SETUP reply too.
+  bounds admission and, on moq-lite 01/02, the SETUP reply too.
 - To decide admissions yourself, leave `[auth]` empty and answer
   `relay.admissions()`; see [Authentication](/bin/relay/auth#in-process).
 - To serve WebRTC media (WHIP, WHEP) on the QUIC port, take `relay.webrtc()`:
