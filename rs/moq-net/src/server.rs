@@ -1513,8 +1513,11 @@ mod tests {
 		withheld: bool,
 		/// The receive window `set_limits` opened, or why it refused, or `None` when the
 		/// transport cannot change it.
-		window: Option<Arc<Mutex<Result<Option<std::num::NonZeroU64>, String>>>>,
+		window: Option<Opened>,
 	}
+
+	/// The window a transport opened, or why it refused.
+	type Opened = Arc<Mutex<Result<Option<std::num::NonZeroU64>, String>>>;
 
 	impl FakeSession {
 		fn new(protocol: &'static str, uni: impl IntoIterator<Item = Vec<u8>>) -> Self {
