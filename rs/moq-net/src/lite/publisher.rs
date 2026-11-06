@@ -97,6 +97,8 @@ struct Shared {
 	peer_targets: Mutex<PeerTargets>,
 	/// Numbers each PROBE stream for `peer_targets`.
 	probe_streams: AtomicU64,
+	/// Lite-05/06: the datagram tracks answered TRACKs hold for their SUBSCRIBEs.
+	held_datagrams: HeldDatagrams,
 }
 
 /// The latest target each open PROBE stream sent, so the peer's target is the newest
@@ -263,6 +265,7 @@ impl Publisher {
 				peer_target: kio::Producer::new(crate::bandwidth::Rate::ZERO),
 				peer_targets: Default::default(),
 				probe_streams: AtomicU64::new(0),
+				held_datagrams: Default::default(),
 			}),
 			runtime: config.runtime,
 			accept,
@@ -2087,9 +2090,17 @@ impl<R: Request> Drop for RequestServe<R> {
 /// The open stream is interest in the track: the query that answered it stays until the
 /// requester closes its side, so demand holds while the requester moves on to SUBSCRIBE.
 enum TrackInfoServe {
-	Track(track::Resolving, Option<Box<Legacy>>),
+	/// The stream track's query, its Lite-05/06 fallback, and once answered, the name's
+	/// datagram track held for the SUBSCRIBE alongside.
+	Track(track::Resolving, Option<Box<Legacy>>, Option<DatagramHold>),
 	/// Lite-05/06: a name no stream track has, answered for its datagram track.
 	Datagrams(datagram::Consumer),
+	/// Answered from the datagram track, which stays asked for while held for the SUBSCRIBE
+	/// alongside.
+	Held(
+		#[expect(dead_code, reason = "held for its drop")] datagram::Consumer,
+		#[expect(dead_code, reason = "held for its drop")] DatagramHold,
+	),
 }
 
 impl Request for TrackInfoServe {
@@ -2123,7 +2134,7 @@ impl Request for TrackInfoServe {
 	) -> Result<Self, Error> {
 		let legacy = Legacy::new(shared.version, &broadcast, track);
 		match broadcast.track(track) {
-			Ok(track) => Ok(Self::Track(track.info().into_inner(), legacy)),
+			Ok(track) => Ok(Self::Track(track.info().into_inner(), legacy, None)),
 			Err(err) => Ok(Self::Datagrams(Legacy::datagrams(legacy, err)?)),
 		}
 	}
@@ -2139,12 +2150,10 @@ impl Request for TrackInfoServe {
 		waiter: &kio::Waiter,
 	) -> Poll<Result<ControlFlow<()>, Error>> {
 		let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
-		if let Self::Track(querying, legacy) = self {
+		if let Self::Track(querying, legacy, _) = self {
 			match querying.poll_ok(waiter) {
 				Poll::Ready(Err(err)) => *self = Self::Datagrams(Legacy::datagrams(legacy.take(), err)?),
-				// The stream track answers: let a pending datagram ask go, rather than hold it
-				// as long as the requester keeps the stream open.
-				Poll::Ready(Ok(_)) => drop(legacy.take()),
+				Poll::Ready(Ok(_)) => {}
 				Poll::Pending => {
 					if let Poll::Ready(consumer) = Legacy::poll_datagrams(legacy, waiter) {
 						*self = Self::Datagrams(consumer);
@@ -2152,8 +2161,8 @@ impl Request for TrackInfoServe {
 				}
 			}
 		}
-		let querying = match self {
-			Self::Track(querying, _) => querying,
+		let (querying, legacy, held) = match self {
+			Self::Track(querying, legacy, held) => (querying, legacy, held),
 			Self::Datagrams(consumer) => {
 				let info = ready!(consumer.poll_info(waiter))?;
 				writer.set_priority(crate::coding::TRACK_INFO_SEND_ORDER);
@@ -2169,11 +2178,20 @@ impl Request for TrackInfoServe {
 				if ietf {
 					writer.buffer(&lite::ietf::TrackProperties(Default::default()))?;
 				}
+				let hold = shared.held_datagrams.hold(consumer);
+				*self = Self::Held(consumer.clone(), hold);
 				return Poll::Ready(Ok(ControlFlow::Break(())));
 			}
+			Self::Held(..) => unreachable!("answered once"),
 		};
 		let info = ready!(querying.poll_ok(waiter))?;
 		crate::ietf::flate::egress(&info, shared.version.has_compression())?;
+		// The datagrams beside the stream track, read from this answer on. A pending ask goes,
+		// rather than held as long as the requester keeps the stream open.
+		*held = legacy
+			.take()
+			.and_then(|legacy| legacy.live())
+			.map(|consumer| shared.held_datagrams.hold(&consumer));
 
 		// Ahead of the track's groups, which a subscriber holds unread until it lands.
 		writer.set_priority(crate::coding::TRACK_INFO_SEND_ORDER);
@@ -2340,7 +2358,8 @@ impl Request for SubscribeServe {
 		track: &str,
 		broadcast: crate::broadcast::Consumer,
 	) -> Result<Self, Error> {
-		let legacy = Legacy::new(shared.version, &broadcast, track);
+		let legacy =
+			Legacy::new(shared.version, &broadcast, track).map(|legacy| legacy.adopting(&shared.held_datagrams));
 		let track = match broadcast.track(track) {
 			Ok(track) => track,
 			Err(err) => return Ok(Self::datagrams(Legacy::datagrams(legacy, err)?, &msg, None)),
@@ -2642,6 +2661,8 @@ struct Legacy {
 	/// The name's datagram track, asked for beside the stream track: `None` until asked, as
 	/// a relayed broadcast's stays, and `Some(None)` once a handler refused it.
 	datagrams: Option<Option<datagram::Consumer>>,
+	/// A SUBSCRIBE's: the holds its datagram track is read from (see [`HeldDatagrams`]).
+	held: Option<HeldDatagrams>,
 }
 
 impl Legacy {
@@ -2652,8 +2673,38 @@ impl Legacy {
 				broadcast: broadcast.clone(),
 				name: name.to_string(),
 				datagrams: None,
+				held: None,
 			})
 		})
+	}
+
+	/// Serve a SUBSCRIBE: the datagram track it picks is read from the position of a hold of
+	/// that same track, if any. Checked as it picks, since a pipelined SUBSCRIBE can wait on
+	/// its stream track while the TRACK beside it is answered.
+	fn adopting(mut self: Box<Self>, held: &HeldDatagrams) -> Box<Self> {
+		self.held = Some(held.clone());
+		self
+	}
+
+	/// `consumer`, or a hold's clone of the same track, read from that hold's answer on.
+	fn adopt(&self, consumer: datagram::Consumer) -> datagram::Consumer {
+		self.held
+			.as_ref()
+			.and_then(|held| held.find(&consumer))
+			.unwrap_or(consumer)
+	}
+
+	/// The name's live datagram track, asking no handler: the request's own ask once
+	/// answered, or one published or already asked for. An unanswered ask is dropped,
+	/// which withdraws it.
+	fn live(mut self) -> Option<datagram::Consumer> {
+		let answered = self
+			.datagrams
+			.take()
+			.flatten()
+			.filter(|asked| matches!(asked.poll_info(&kio::Waiter::noop()), Poll::Ready(Ok(_))));
+		let consumer = answered.or_else(|| self.broadcast.datagrams_live(&self.name))?;
+		Some(self.adopt(consumer))
 	}
 
 	/// The datagram track to serve before the stream track answers: one a local handler or
@@ -2681,7 +2732,10 @@ impl Legacy {
 		};
 		match ready!(consumer.poll_info(waiter)) {
 			Ok(_) if this.broadcast.publishes_track(&this.name) => Poll::Pending,
-			Ok(_) => Poll::Ready(asked.take().expect("checked above")),
+			Ok(_) => {
+				let consumer = asked.take().expect("checked above");
+				Poll::Ready(this.adopt(consumer))
+			}
 			Err(_) => {
 				*asked = None;
 				Poll::Pending
@@ -2692,16 +2746,78 @@ impl Legacy {
 	/// The datagram track to serve instead when the stream track's lookup failed with `err`,
 	/// or `err` itself.
 	fn datagrams(legacy: Option<Box<Self>>, err: Error) -> Result<datagram::Consumer, Error> {
-		let Some(legacy) = legacy else {
+		let Some(mut legacy) = legacy else {
 			return Err(err);
 		};
 		if !matches!(err, Error::NotFound | Error::Stream(StreamError::NotFound)) {
 			return Err(err);
 		}
-		let asked = legacy
-			.datagrams
-			.unwrap_or_else(|| legacy.broadcast.datagrams(&legacy.name).ok());
-		asked.ok_or(err)
+		let asked = match legacy.datagrams.take() {
+			Some(asked) => asked,
+			None => legacy.broadcast.datagrams(&legacy.name).ok(),
+		};
+		Ok(legacy.adopt(asked.ok_or(err)?))
+	}
+}
+
+/// Lite-05/06: the datagram tracks this session's answered TRACKs hold, read from each
+/// answer on. The requester reads TRACK_INFO as the publisher accepting the name, but the
+/// datagrams flow on the SUBSCRIBE it sends alongside, a separate stream that can arrive
+/// later. That SUBSCRIBE reads from a clone of the hold, keeping its position, rather than
+/// from its own arrival, which would lose what was written in between. The requester keeps
+/// its TRACK open until the SUBSCRIBE has a response, so the hold outlasts its arrival.
+///
+/// A hold is matched by the track it reads, not by name, so one left on a track a route
+/// change replaced never stands in for the current one. It is a passive observer: it keeps
+/// a position without adding demand, which the SUBSCRIBE adds when it reads the track.
+#[derive(Clone, Default)]
+struct HeldDatagrams(Arc<Mutex<HeldState>>);
+
+#[derive(Default)]
+struct HeldState {
+	next: u64,
+	/// Oldest first, by key.
+	holds: Vec<(u64, datagram::Consumer)>,
+}
+
+impl HeldDatagrams {
+	/// Hold `consumer`'s track from its position until the returned hold drops.
+	fn hold(&self, consumer: &datagram::Consumer) -> DatagramHold {
+		let consumer = consumer.observe();
+		let mut state = self.0.lock().unwrap();
+		let key = state.next;
+		state.next += 1;
+		state.holds.push((key, consumer));
+		DatagramHold {
+			held: self.clone(),
+			key,
+		}
+	}
+
+	/// A clone of the oldest hold reading the same track as `consumer`, if any. Several
+	/// TRACKs of one track may be open, and the SUBSCRIBE could follow any of them, so it
+	/// reads from the earliest answer: a replay only duplicates, a later one would lose.
+	fn find(&self, consumer: &datagram::Consumer) -> Option<datagram::Consumer> {
+		let state = self.0.lock().unwrap();
+		let (_, held) = state.holds.iter().find(|(_, held)| held.is_clone(consumer))?;
+		Some(held.clone())
+	}
+}
+
+/// One answered TRACK's entry in [`HeldDatagrams`].
+struct DatagramHold {
+	held: HeldDatagrams,
+	key: u64,
+}
+
+impl Drop for DatagramHold {
+	fn drop(&mut self) {
+		let mut state = self.held.0.lock().unwrap();
+		let index = state.holds.iter().position(|(key, _)| *key == self.key);
+		let consumer = index.map(|index| state.holds.remove(index));
+		// Dropped outside the lock.
+		drop(state);
+		drop(consumer);
 	}
 }
 
@@ -2726,17 +2842,9 @@ impl LegacyDatagrams {
 	/// subscribes to, so this asks no handler: a request would subscribe to the name again.
 	/// The request's own ask joins only once answered, the track then being live.
 	fn join(legacy: Option<Box<Legacy>>, id: u64, priority: i8, timescale: Option<crate::Timescale>) -> Option<Self> {
-		let Legacy {
-			broadcast,
-			name,
-			datagrams,
-		} = *legacy?;
-		// An unanswered ask is dropped, which withdraws it.
-		let answered = datagrams
-			.flatten()
-			.filter(|asked| matches!(asked.poll_info(&kio::Waiter::noop()), Poll::Ready(Ok(_))));
-		let mut consumer = answered.or_else(|| broadcast.datagrams_live(&name))?;
-		let demand = broadcast.has_local_datagrams();
+		let legacy = legacy?;
+		let demand = legacy.broadcast.has_local_datagrams();
+		let mut consumer = legacy.live()?;
 		if demand {
 			consumer.set_priority(priority);
 		}
@@ -10159,6 +10267,212 @@ mod tests {
 		let top = i64::from(PriorityHandle::send_order_of(0));
 		assert_eq!(session.log.priorities(), [crate::coding::TRACK_INFO_SEND_ORDER]);
 		assert!(crate::coding::TRACK_INFO_SEND_ORDER > top);
+	}
+
+	/// A lite-05/06 publisher serving `origin`, with the log of the datagrams it sends.
+	fn legacy_publisher(
+		version: Version,
+		origin: &crate::origin::Producer,
+	) -> (Publisher, Arc<Mutex<Vec<bytes::Bytes>>>) {
+		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
+		peer_setup.set(crate::lite::Setup::default()).unwrap();
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let sink = SinkSession::new(crate::lite::test_transport::Log::default()).with_datagrams(1200);
+		let log = sink.log.datagrams.clone();
+		let publisher = Publisher::new(PublisherConfig {
+			estimate: kio::Producer::default().weak(),
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(sink),
+			origin: origin.consume(),
+			version,
+			peer_setup,
+			goaway,
+			peer_hop: None,
+			subscriptions: Default::default(),
+			auth: crate::auth::Link::new(false),
+			peer_grant: Default::default(),
+			client: false,
+		});
+		(publisher, log)
+	}
+
+	/// Serve `msg` as the first message of a request stream on `publisher`.
+	async fn legacy_request<R: Request>(
+		publisher: &Publisher,
+		version: Version,
+		msg: &impl Encode<Version>,
+	) -> RequestServe<R> {
+		let mut script = Vec::new();
+		msg.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
+			.unwrap();
+		let session = ScriptedSession::new(script);
+		let (send, recv) = kio::wait(|waiter| {
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&session, waiter, Default::default())
+		})
+		.await
+		.unwrap();
+		let stream = Stream::<Transport, Version> {
+			writer: Writer::new(crate::transport::boxed::SendStream::new(send), version),
+			reader: crate::coding::Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+		};
+		RequestServe::new(publisher.shared.clone(), stream)
+	}
+
+	fn legacy_track() -> lite::Track<'static> {
+		lite::Track {
+			instance: None,
+			broadcast: crate::Path::from_static("room"),
+			track: "events".into(),
+		}
+	}
+
+	fn legacy_subscribe(priority: i8) -> lite::Subscribe<'static> {
+		lite::Subscribe {
+			order: crate::track::Order::Descending,
+			instance: None,
+			id: 0,
+			broadcast: crate::Path::from_static("room"),
+			track: "events".into(),
+			priority,
+			max_delay: Duration::ZERO,
+			min_delay: None,
+			ranges: vec![lite::Range::span(None, 0, None, None)],
+		}
+	}
+
+	/// Lite-05/06: a requester reads TRACK_INFO as the name being accepted, and its SUBSCRIBE,
+	/// on a stream of its own, can arrive after a datagram written meanwhile. That SUBSCRIBE
+	/// still sends it, whether the datagram track answered the TRACK or rides beside a stream
+	/// track of the same name.
+	#[kio::test]
+	async fn a_subscribe_sends_the_datagrams_written_since_its_track_info() {
+		for version in [Version::Lite05, Version::Lite06] {
+			for stream in [false, true] {
+				let case = format!("{version:?}, stream track {stream}");
+				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+				let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+				let mut datagrams = broadcast
+					.broadcast()
+					.create_datagrams("events", datagram::Info::default())
+					.unwrap();
+				let _track = stream.then(|| {
+					broadcast
+						.broadcast()
+						.create_track("events", crate::track::Info::timed())
+						.unwrap()
+				});
+				broadcast.announce().unwrap();
+				let (publisher, log) = legacy_publisher(version, &origin);
+
+				let mut track_info = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
+				assert!(!drive(&mut track_info).await, "{case}: the TRACK stream is held");
+
+				datagrams.append(None, b"between".as_slice()).unwrap();
+
+				let mut subscribe = legacy_request::<SubscribeServe>(&publisher, version, &legacy_subscribe(-5)).await;
+				assert!(!drive(&mut subscribe).await, "{case}: the subscription is live");
+				assert_eq!(log.lock().unwrap().len(), 1, "{case}");
+				// Beside a stream track, only the SUBSCRIBE asks for the datagrams.
+				if stream {
+					assert_eq!(
+						datagrams.priority(),
+						Some(-5),
+						"{case}: the SUBSCRIBE's priority stands"
+					);
+				}
+			}
+		}
+	}
+
+	/// Lite-05/06: a SUBSCRIBE sent alongside its TRACK can arrive first and wait on a
+	/// relayed stream track's info. Once the TRACK is answered and a datagram written, the
+	/// waiting SUBSCRIBE still sends that datagram.
+	#[kio::test]
+	async fn a_waiting_subscribe_sends_the_datagrams_written_since_its_track_info() {
+		for version in [Version::Lite05, Version::Lite06] {
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+			let _relayed = crate::model::broadcast::SourceGuard::new(broadcast.broadcast().clone());
+			let mut datagrams = broadcast
+				.broadcast()
+				.create_datagrams("events", datagram::Info::default())
+				.unwrap();
+			let reserved = broadcast.broadcast().reserve_track("events").unwrap();
+			broadcast.announce().unwrap();
+			let (publisher, log) = legacy_publisher(version, &origin);
+
+			let mut subscribe = legacy_request::<SubscribeServe>(&publisher, version, &legacy_subscribe(0)).await;
+			assert!(!drive(&mut subscribe).await, "{version:?}: waits on the track's info");
+			let mut track_info = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
+			assert!(!drive(&mut track_info).await, "{version:?}: waits on the track's info");
+
+			let _track = reserved.accept(crate::track::Info::timed());
+			assert!(!drive(&mut track_info).await, "{version:?}: the TRACK stream is held");
+			datagrams.append(None, b"between".as_slice()).unwrap();
+			assert!(!drive(&mut subscribe).await, "{version:?}: the subscription is live");
+			assert_eq!(log.lock().unwrap().len(), 1, "{version:?}");
+		}
+	}
+
+	/// Lite-05/06: with two TRACKs of one name open, a SUBSCRIBE reads from the older answer,
+	/// so a datagram written between the two still reaches the SUBSCRIBE of the first.
+	#[kio::test]
+	async fn a_subscribe_reads_from_the_oldest_hold() {
+		for version in [Version::Lite05, Version::Lite06] {
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+			let mut datagrams = broadcast
+				.broadcast()
+				.create_datagrams("events", datagram::Info::default())
+				.unwrap();
+			broadcast.announce().unwrap();
+			let (publisher, log) = legacy_publisher(version, &origin);
+
+			let mut older = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
+			assert!(!drive(&mut older).await, "{version:?}: the older TRACK stream is held");
+			datagrams.append(None, b"between".as_slice()).unwrap();
+			let mut newer = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
+			assert!(!drive(&mut newer).await, "{version:?}: the newer TRACK stream is held");
+
+			let mut subscribe = legacy_request::<SubscribeServe>(&publisher, version, &legacy_subscribe(0)).await;
+			assert!(!drive(&mut subscribe).await, "{version:?}: the subscription is live");
+			assert_eq!(log.lock().unwrap().len(), 1, "{version:?}");
+		}
+	}
+
+	/// Lite-05/06: a hold reads the datagram track that answered its TRACK. Once that track
+	/// is replaced, a SUBSCRIBE reads the replacement, even while the older TRACK stays open.
+	#[kio::test]
+	async fn a_subscribe_reads_the_current_datagram_track_past_an_older_hold() {
+		for version in [Version::Lite05, Version::Lite06] {
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+			let mut first = broadcast
+				.broadcast()
+				.create_datagrams("events", datagram::Info::default())
+				.unwrap();
+			broadcast.announce().unwrap();
+			let (publisher, log) = legacy_publisher(version, &origin);
+
+			let mut older = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
+			assert!(!drive(&mut older).await, "{version:?}: the older TRACK stream is held");
+			first.append(None, b"first".as_slice()).unwrap();
+			first.finish();
+
+			let mut current = broadcast
+				.broadcast()
+				.create_datagrams("events", datagram::Info::default())
+				.unwrap();
+			let mut track_info = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
+			assert!(!drive(&mut track_info).await, "{version:?}: the TRACK stream is held");
+			current.append(None, b"current".as_slice()).unwrap();
+
+			let mut subscribe = legacy_request::<SubscribeServe>(&publisher, version, &legacy_subscribe(0)).await;
+			assert!(!drive(&mut subscribe).await, "{version:?}: the subscription is live");
+			let sent = log.lock().unwrap().clone();
+			assert_eq!(sent.len(), 1, "{version:?}");
+			assert!(sent[0].ends_with(b"current"), "{version:?}: {sent:?}");
+		}
 	}
 
 	/// An answered TRACK stream holds its track until the requester closes its side, by
