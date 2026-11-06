@@ -23,11 +23,12 @@ retries = 0
 # executes them through cargo bench smokes.
 default-filter = "not kind(bench)"
 
-# Split the socket benchmark's grid within the hang budget, but measure one
-# axis at a time so its load does not compete with another axis.
+# Each socket axis occupies the whole ring budget, keeping it exclusive with
+# other axes and ring tests while its offered load is measured.
 [[profile.default.overrides]]
 filter = "package(moq-uring) & test(benchmark_socket_queues)"
-test-group = "socket-queues"
+test-group = "io-uring"
+threads-required = 4
 
 # Limit ring concurrency within one invocation. Unit-test workers use small
 # rings; integration workers keep production geometry. sh/rs/nextest.sh raises
@@ -69,7 +70,6 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 
 [test-groups]
 io-uring = { max-threads = 4 }
-socket-queues = { max-threads = 1 }
 v4l2 = { max-threads = 1 }
 
 # Nightly's ignored benchmark tests (`just gh nightly rust-test`) keep each test's

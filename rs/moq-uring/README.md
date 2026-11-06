@@ -141,8 +141,8 @@ at a socket (`sk_drops` via `SO_MEMINFO`), dropped on the path, or
 unattributed, beside `rx_enobufs`, peak queued bytes, delay and receive CPU.
 `rx_enobufs` is pool starvation, which leaves datagrams queued in the socket:
 with a 16-buffer pool it fired hundreds of times and dropped nothing.
-Each sweep axis runs as a separate test within nextest's hang budget. The
-`socket-queues` test group serializes them so measurements do not compete.
+Each sweep axis runs as a separate test within nextest's hang budget. Each
+reserves the `io-uring` group's four slots so measurements do not compete.
 All cells still run three rounds by default (`SOCKET_QUEUES_RUNS` overrides
 the count), interleaving cells and receive paths within each axis.
 
@@ -155,7 +155,8 @@ just rs test -p moq-uring --release -E 'test(benchmark_socket_queues)' --run-ign
 Locked memory is charged per user across processes, not per nextest run.
 Unit tests use 128 SQ entries and 512 CQ entries instead of the production
 256/2048 geometry. Integration tests still exercise production rings.
-The nextest group allows four ring tests per invocation.
+The nextest group allows four ring tests per invocation. Each socket-queue
+benchmark axis occupies all four slots, excluding other ring tests while measuring.
 
 The Rust recipes that run nextest use `sh/rs/nextest.sh`: local Linux shells raise their
 soft locked-memory limit to the host's hard limit, while GitHub-hosted jobs
