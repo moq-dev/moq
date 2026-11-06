@@ -9633,7 +9633,7 @@ async fn export_stats_catch_a_track_that_stops() {
 
 /// A stopped track's silence counts the whole of a media gap on the surviving track, not just
 /// the one second of clock the exporter backfills: the output's PCR jumps across the rest
-/// unflagged, and that jump is time the stopped track was silent.
+/// with a discontinuity flag, and that jump is time the stopped track was silent.
 #[tokio::test(start_paused = true)]
 async fn export_stats_count_a_gap_longer_than_the_backfill() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();

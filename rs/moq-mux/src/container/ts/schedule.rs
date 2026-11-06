@@ -420,7 +420,7 @@ fn with_pcr(packets: &[u8], ticks: u64) -> Option<Vec<u8>> {
 /// One grid slot's worth of output.
 pub(super) struct Slot {
 	pub index: u128,
-	/// Delivery loss starts here, before any backfilled slots after a clock jump.
+	/// The first PCR after skipped schedule slots declares a clock jump.
 	pub discontinuity: bool,
 	/// The PCR that opens the slot, in system clock ticks.
 	pub pcr: u64,

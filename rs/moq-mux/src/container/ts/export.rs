@@ -1550,7 +1550,7 @@ impl<S: Stream> Program<S>
 where
 	S::Ext: catalog::Catalog,
 {
-	fn new(mut source: crate::Source, catalog: S) -> Self {
+	fn new(mut source: crate::Source, catalog: S, delay: Duration) -> Self {
 		source.isolate();
 		let instance = source.broadcast().info().instance.clone();
 		Self {
@@ -1571,7 +1571,7 @@ where
 			tables: Vec::new(),
 			psi_due: false,
 			revised: false,
-			delay: Duration::ZERO,
+			delay,
 			generation: 0,
 			tracks: HashMap::new(),
 			counters: FxHashMap::default(),
@@ -1585,7 +1585,7 @@ where
 			epoch: 0,
 			emitted_epoch: 0,
 			pcr_discontinuity: false,
-			schedule: Schedule::new(Duration::ZERO),
+			schedule: Schedule::new(delay),
 			slot_timer: None,
 			replay: false,
 			queue: VecDeque::new(),
@@ -1607,7 +1607,8 @@ where
 	/// The caller chooses the catalog format and rendition selection on any [`Stream`].
 	/// The stream remains owned until the export is dropped or follows another broadcast;
 	/// concrete catalog consumers release their subscription and decoder when they end.
-	/// Mux each frame this long after its release time, like an SRT receiver's TSBPD: its
+	///
+	/// Mux each frame `delay` after its release time, like an SRT receiver's TSBPD: its
 	/// decode time less its send-ahead.
 	///
 	/// The send-ahead comes out of the same budget. A frame may go out up to the delay
@@ -1634,12 +1635,11 @@ where
 	/// the other half to spare.
 	///
 	/// With a multiplex rate, a frame that cannot arrive by its decode time fails the export,
-	/// as does video whose HRD declares a buffer delay past the delay. Use
-	/// [`Duration::ZERO`], which holds nothing and sends each frame by its decode time.
+	/// as does video whose HRD declares a buffer delay past the delay.
+	///
+	/// A zero `delay` holds nothing and sends each frame by its decode time.
 	pub fn new(source: crate::Source, catalog: S, delay: Duration) -> Self {
-		let mut program = Program::new(source, catalog);
-		program.delay = delay;
-		program.schedule = Schedule::new(delay);
+		let program = Program::new(source, catalog, delay);
 		Self {
 			program,
 			jitter: jitter::Buffer::new(delay),
@@ -2898,13 +2898,11 @@ where
 	}
 
 	fn replacement(&mut self, source: crate::Source, catalog: S) -> Program<S> {
-		let mut next = Program::new(source, catalog);
+		let mut next = Program::new(source, catalog, self.program.delay);
 		next.id = self.next_program;
 		self.next_program += 1;
-		next.delay = self.program.delay;
 		next.replay = self.program.replay;
 		next.mux_rate_override = self.program.mux_rate_override;
-		next.schedule = Schedule::new(next.delay);
 		next
 	}
 

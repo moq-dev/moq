@@ -55,7 +55,9 @@ impl Release {
 		}
 		let mut subscribing = crate::catalog::Subscribing::new(&source.broadcast(), catalog_format);
 		let catalog = kio::wait(|waiter| subscribing.poll_ok(waiter)).await?;
-		let mut release = Self {
+		let mut jitter = jitter::Buffer::new(delay);
+		jitter.expect([()]);
+		let release = Self {
 			source,
 			catalog: Some(catalog),
 			track: None,
@@ -63,10 +65,9 @@ impl Release {
 			finished: false,
 			released: false,
 			delay,
-			jitter: jitter::Buffer::new(delay),
+			jitter,
 			replay: false,
 		};
-		release.jitter = release.jitter();
 		Ok(release)
 	}
 
@@ -79,6 +80,7 @@ impl Release {
 		self
 	}
 
+	#[cfg(test)]
 	fn jitter(&self) -> jitter::Buffer<(), Frame> {
 		let mut jitter = jitter::Buffer::new(self.delay);
 		#[cfg(test)]
