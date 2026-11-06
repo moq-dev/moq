@@ -1253,6 +1253,7 @@ mod tests {
 	/// max-delay decoder still starts at the group before it, and takes over.
 	#[tokio::test]
 	async fn a_cold_join_whose_live_edge_arrives_first_starts_a_group_earlier() {
+		kio::clock::allow_host_timers();
 		let (broadcast, mut track) = live_track();
 		let mut live = group(&mut track, 1, &[4, 5]);
 

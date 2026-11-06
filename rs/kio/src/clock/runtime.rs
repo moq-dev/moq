@@ -122,6 +122,8 @@ pub(crate) struct Timer {
 	sleep: Pin<Box<host::Sleep>>,
 	/// When it was last armed, so firing can tell whether it waited.
 	armed: host::Instant,
+	/// Where tokio's clock read against std's when armed, while the guard is on.
+	offset: Option<guard::Offset>,
 }
 
 #[cfg(feature = "runtime")]
@@ -132,11 +134,13 @@ impl Timer {
 			origin,
 			sleep: Box::pin(host::sleep_until(origin + at.since_origin().saturating_sub(LEAD))),
 			armed,
+			offset: guard::offset(),
 		}
 	}
 
 	pub(crate) fn reset(&mut self, at: Instant) {
 		self.armed = host::Instant::now();
+		self.offset = guard::offset();
 		self.sleep
 			.as_mut()
 			.reset(self.origin + at.since_origin().saturating_sub(LEAD));
@@ -151,7 +155,7 @@ impl Timer {
 		if let Some(waited) = self.sleep.deadline().checked_duration_since(self.armed)
 			&& !waited.is_zero()
 		{
-			guard::fired(waited);
+			guard::fired(waited, self.offset);
 		}
 		Poll::Ready(())
 	}
@@ -200,19 +204,42 @@ mod guard {
 		})
 	}
 
-	/// Whether the calling runtime's tokio clock is the host's, rather than paused or advanced.
+	/// Bounds on how far tokio's clock reads from std's, in nanoseconds.
 	///
-	/// Unpaused, tokio reads std's clock, so its reading falls between two std readings;
-	/// a paused clock sits wherever it was last left.
-	fn real() -> bool {
-		let before = std::time::Instant::now();
-		let reading = host::Instant::now().into_std();
-		before <= reading && reading <= std::time::Instant::now()
+	/// A running tokio clock, resumed after a pause included, keeps a fixed offset from
+	/// std's, so the bounds taken when a timer is armed and when it fires overlap. Pausing
+	/// or advancing it moves the offset by the time it skipped.
+	#[derive(Clone, Copy)]
+	pub(super) struct Offset {
+		low: i128,
+		high: i128,
 	}
 
-	/// A host timer that waited `waited` fired.
-	pub(super) fn fired(waited: Duration) {
-		if !denied() || ALLOWED.load(Ordering::Relaxed) || !real() {
+	/// The current [`Offset`], while the guard is on.
+	pub(super) fn offset() -> Option<Offset> {
+		if !denied() {
+			return None;
+		}
+		let before = std::time::Instant::now();
+		let reading = host::Instant::now().into_std();
+		let after = std::time::Instant::now();
+		let signed = |from: std::time::Instant| match reading.checked_duration_since(from) {
+			Some(ahead) => ahead.as_nanos() as i128,
+			None => -((from - reading).as_nanos() as i128),
+		};
+		Some(Offset {
+			low: signed(after),
+			high: signed(before),
+		})
+	}
+
+	/// A host timer armed at `armed`'s offset fired after waiting `waited`.
+	pub(super) fn fired(waited: Duration, armed: Option<Offset>) {
+		let (Some(armed), Some(now)) = (armed, offset()) else {
+			return;
+		};
+		// A paused or advanced clock moved its offset; one that ran kept it.
+		if ALLOWED.load(Ordering::Relaxed) || now.high < armed.low || now.low > armed.high {
 			return;
 		}
 		// Abort rather than panic: a panic in a spawned task never reaches the test.
@@ -511,6 +538,12 @@ mod tests {
 
 	#[test]
 	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
+	fn a_resumed_runtime_aborts() {
+		assert!(aborts("resumed"));
+	}
+
+	#[test]
+	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
 	fn a_wait_in_a_spawned_task_aborts() {
 		assert!(aborts("spawned"));
 	}
@@ -555,9 +588,26 @@ mod tests {
 		fn interval() {
 			real().block_on(async {
 				let mut interval = crate::clock::interval(Duration::from_millis(1));
+				// So the second tick waits even if the first was late.
+				interval.set_missed_tick_behavior(crate::clock::MissedTickBehavior::Delay);
 				interval.tick().await;
 				interval.tick().await;
 			});
+		}
+
+		#[test]
+		#[ignore = "aborts; a_resumed_runtime_aborts runs it in a child"]
+		fn resumed() {
+			tokio::runtime::Builder::new_current_thread()
+				.enable_time()
+				.start_paused(true)
+				.build()
+				.unwrap()
+				.block_on(async {
+					tokio::time::advance(Duration::from_secs(3_600)).await;
+					tokio::time::resume();
+					crate::clock::sleep(Duration::from_millis(1)).await;
+				});
 		}
 
 		#[test]
