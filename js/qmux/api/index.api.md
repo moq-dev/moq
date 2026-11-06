@@ -5,6 +5,10 @@ export interface AcceptOptions extends Pick<SessionOptions, "config" | "sendBuff
 	protocol?: string;
 }
 
+export interface BidirectionalStream extends WebTransportBidirectionalStream {
+	readonly writable: SendStream;
+}
+
 export interface Config {
 	idleTimeout?: number | null;
 	maxDatagramFrameSize?: bigint | null;
@@ -18,6 +22,11 @@ export interface Config {
 export interface InstallOptions {
 	requireProtocol?: boolean;
 	versions?: Record<string, Version | Version[] | null>;
+}
+
+export interface SendStream extends WritableStream<Uint8Array> {
+	getStats(): Promise<SendStreamStats>;
+	sendOrder: number;
 }
 
 export type SendStreamOptions = WebTransportSendStreamOptions & {
@@ -115,13 +124,13 @@ export default class implements WebTransport {
 	}): void;
 	readonly closed: Promise<WebTransportCloseInfo>;
 	get congestionControl(): WebTransportCongestionControl;
-	createBidirectionalStream(options?: SendStreamOptions): Promise<WebTransportBidirectionalStream>;
-	createUnidirectionalStream(options?: SendStreamOptions): Promise<WritableStream<Uint8Array>>;
+	createBidirectionalStream(options?: SendStreamOptions): Promise<BidirectionalStream>;
+	createUnidirectionalStream(options?: SendStreamOptions): Promise<SendStream>;
 	get datagrams(): WebTransportDatagramDuplexStream;
 	getStats(): Promise<{
 		datagrams: {};
 	}>;
-	readonly incomingBidirectionalStreams: ReadableStream<WebTransportBidirectionalStream>;
+	readonly incomingBidirectionalStreams: ReadableStream<BidirectionalStream>;
 	readonly incomingUnidirectionalStreams: ReadableStream<ReadableStream<Uint8Array>>;
 	get protocol(): string;
 	readonly ready: Promise<void>;

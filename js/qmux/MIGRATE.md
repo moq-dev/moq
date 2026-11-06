@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### Send streams expose `getStats()` ([#8005](https://github.com/moq-dev/moq/pull/8005))
 
-Send streams gain W3C WebTransport's `getStats()`, resolving to the new `SendStreamStats` (`bytesWritten`, `bytesSent`, `bytesAcknowledged`). Data counts as acknowledged once it is written to the WebSocket. Existing code needs no change.
+Send streams gain W3C WebTransport's `getStats()`, resolving to the new `SendStreamStats` (`bytesWritten`, `bytesSent`, `bytesAcknowledged`). Data counts as acknowledged once it is written to the WebSocket. `createUnidirectionalStream()` now returns the new `SendStream` type, which declares `getStats()` and `sendOrder`, and `createBidirectionalStream()` and `incomingBidirectionalStreams` return the new `BidirectionalStream`, whose `writable` is a `SendStream`. Both narrow the old types, so existing code needs no change.
 
 ### Accepted bidi streams hold credit until both halves end
 

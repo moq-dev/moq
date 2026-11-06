@@ -888,10 +888,11 @@ export class Writer implements OpenStream {
 	static async tryOpen(quic: WebTransport, options: TryOpenOptions): Promise<Writer | undefined> {
 		const session = lines(quic);
 		const rank = options.sendOrder ?? 0;
-		const writable = await session.uni.open(rank, options.cancel);
+		// The line ranks the stream it hands out by its last read, which can differ from a read now.
+		let sendOrder = typeof rank === "number" ? rank : 0;
+		const read = typeof rank === "number" ? rank : () => (sendOrder = rank());
+		const writable = await session.uni.open(read, options.cancel);
 		if (!writable) return undefined;
-		// The line hands the stream out at the rank it reads now.
-		const sendOrder = typeof rank === "number" ? rank : rank();
 		const writer = Writer.#opened(writable, options.version, sendOrder, session.streams);
 		if (options.group) {
 			writer.#listed = session.streams;

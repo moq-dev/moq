@@ -5,7 +5,9 @@ import Session from "./session.ts";
 export { SessionError, StreamError } from "./error.ts";
 export type {
 	AcceptOptions,
+	BidirectionalStream,
 	Config,
+	SendStream,
 	SendStreamOptions,
 	SendStreamStats,
 	SessionOptions,

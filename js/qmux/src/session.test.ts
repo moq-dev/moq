@@ -4,7 +4,7 @@ import { SessionError, StreamError } from "./error.ts";
 import * as Frame from "./frame.ts";
 import { DEFAULT_MAX_RECORD_SIZE, type TransportParams } from "./frame.ts";
 import * as QMux from "./index.ts";
-import Session, { type Config, type SendStreamStats } from "./session.ts";
+import Session, { type Config } from "./session.ts";
 import * as Stream from "./stream.ts";
 import { VarInt } from "./varint.ts";
 import type { WebSocketLike, WebSocketStreamLike } from "./web-socket-stream.ts";
@@ -368,9 +368,7 @@ describe("Session integration (scripted peer)", () => {
 		await session.ready;
 		peer.send({ type: "transport_parameters", params: peerParams() });
 		await waitFor(() => peer.has("transport_parameters"));
-		const stream = (await session.createUnidirectionalStream()) as WritableStream<Uint8Array> & {
-			getStats(): Promise<SendStreamStats>;
-		};
+		const stream = await session.createUnidirectionalStream();
 		const writer = stream.getWriter();
 		expect(await stream.getStats()).toEqual({ bytesWritten: 0, bytesSent: 0, bytesAcknowledged: 0 });
 
