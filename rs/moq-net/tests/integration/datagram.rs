@@ -540,7 +540,10 @@ async fn a_relayed_datagram_track_parks_while_only_passive_readers_remain() {
 
 		drop(reader);
 		kio::clock::sleep(Duration::from_millis(100)).await;
-		assert!(producer.priority().is_some(), "{upstream}: a passive reader keeps the subscription");
+		assert!(
+			producer.priority().is_some(),
+			"{upstream}: a passive reader keeps the subscription"
+		);
 
 		drop(subscriber);
 		kio::clock::timeout(TIMEOUT, datagram_priority(&producer, None))
