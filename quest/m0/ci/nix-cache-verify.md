@@ -30,10 +30,13 @@ credentials.
 Decided 2026-11-05 (maintainer, /quest-audit,
 [moq-dev/moq#7975](https://github.com/moq-dev/moq/pull/7975)): ✅ keep only
 this `main` evidence in m0 and move the release-tag proof, Cachix retirement,
-and bucket sizes to
-[Release tags substitute from nix.moq.dev](/quest/m3/release-nix-cache.md)
-behind the release cut. Not chosen: moving the whole quest to m2; merging
-`main` into `release` now.
+and bucket sizes to an m2 quest behind the release cut. Not chosen: moving the
+whole quest to m2; merging `main` into `release` now.
+
+Superseded the same day (maintainer, /quest-unblock): the release-tag proof,
+Cachix retirement, and bucket sizes moved to
+[Release tags push to nix.moq.dev](/quest/m0/ci/cachix-retire.md), which
+backports `release-nix.yml` to `release` now instead of waiting for the cut.
 
 Use the scheduled and push runs; never dispatch Nightly for this evidence.
 

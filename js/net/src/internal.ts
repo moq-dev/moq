@@ -644,6 +644,8 @@ export const hooks: {
 	fetchBudget: (subscriber: Subscriber, maxDelay: Milli | undefined) => void;
 	/** Whether a reader beyond one-shot fetches subscribes to this copy. */
 	subscribing: (producer: Producer) => Getter<boolean>;
+	/** The aggregate across every reader, one-shot fetches included: what the wire asks for. */
+	requested: (producer: Producer) => Getter<Subscription | undefined>;
 	/** Leave a wire copy serving its cache and fills without a live feed. */
 	cacheTrack: (producer: Producer) => void;
 	/** Fail subscriptions reaching beyond `edge`, keeping history readers and one-shot fetches. */
@@ -909,6 +911,9 @@ export const hooks: {
 	},
 	subscribing: () => {
 		throw new Error("track module not loaded");
+	},
+	requested: () => {
+		throw new Error("track.ts not loaded");
 	},
 	fetchBudget: () => {
 		throw new Error("track.ts not loaded");

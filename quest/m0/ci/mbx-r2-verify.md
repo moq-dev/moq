@@ -78,7 +78,10 @@ compilation is "not looked up".
   [Windows job](https://github.com/moq-dev/moq/actions/runs/42050683248/job/127326015447)
   of run 42050683248 set up mbx 1.29.2, and its workspace build, against a
   manifest of 2,604 predictions, reported 846 hits, 224 misses, 168 not looked
-  up and 1,019 prefetched. Windows inheritance pays.
+  up and 1,019 prefetched. Its `Cargo.lock` differed from the previous
+  scheduled run's, so those hits point to an inherited manifest, but the
+  summary does not name the manifest identity it looked up; record that
+  identity from a later Windows job before relying on inheritance.
 - macOS: on 2026-10-28 the build did inherit, prefetching 732 predictions,
   yet hit only 13, with 1565 compilations not looked up. The install order is
   not the cause. Find out why the inherited predictions mostly miss, for
