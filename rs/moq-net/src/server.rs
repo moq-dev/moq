@@ -178,8 +178,9 @@ impl Server {
 	}
 
 	/// Bound each accept, from the connection's arrival through SETUP, the caller's admission,
-	/// and the SETUP reply. A connection that overruns it is closed with [`Error::Timeout`]'s
-	/// code. `None` waits forever. Defaults to [`DEFAULT_TIMEOUT`].
+	/// and, on moq-lite 01/02, the server SETUP reply. Other versions send their SETUP from the
+	/// started session's driver, outside this bound. A connection that overruns it is closed
+	/// with [`Error::Timeout`]'s code. `None` waits forever. Defaults to [`DEFAULT_TIMEOUT`].
 	pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
 		self.timeout = timeout;
 		self
@@ -1229,7 +1230,7 @@ impl Handshake {
 	///
 	/// Opens the receive window first ([`with_receive_window`](Self::with_receive_window)).
 	/// Fails with [`Error::Timeout`] once the accept deadline passes, whether admission or a
-	/// peer that never takes the SETUP reply ran it out. Dropping a pending `ok` refuses the
+	/// moq-lite 01/02 peer that never takes the SETUP reply ran it out. Dropping a pending `ok` refuses the
 	/// session the same way, so a caller's own deadline counts too.
 	///
 	/// Poll or spawn the returned driver to run the session.

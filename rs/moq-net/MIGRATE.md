@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### Accepting a session runs under one deadline and opens the receive window
 
-`Server` now bounds each accept, from SETUP through the caller's admission and the SETUP reply, closing a connection that overruns it with `Error::Timeout`'s code.
+`Server` now bounds each accept, from SETUP through the caller's admission and, on moq-lite 01/02, the SETUP reply, closing a connection that overruns it with `Error::Timeout`'s code.
 The default is `server::DEFAULT_TIMEOUT` (10 s); call `Server::with_timeout(None)` to keep waiting forever.
 `Server::accept_request` returns a `server::Accept`, which you `.await` as before, or poll; pass it to `kio::clock::timeout` and the like directly, since it is a `Future`.
 A caller that runs a transport handshake first computes `Server::deadline(arrived)`, bounds that handshake by it, and passes it on with `Accept::with_deadline`.
