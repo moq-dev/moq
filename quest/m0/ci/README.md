@@ -175,6 +175,7 @@ The historical samples locate candidates; they are not controlled benchmarks.
 ## Required
 
 - [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - write secrets and publisher identities reach only protected branches and tags, never a pushed branch
+- [moq-gst releases publish again](/quest/m0/ci/gst-release-macos.md) - the macOS tarball job's `brew test` stops hanging on release tags, so moq-gst GitHub releases publish
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - confirm the hosted Nightly jobs reuse the previous Nightly, then measure restore time and expiry
 - [Verify the Nix runtime cache](/quest/m0/ci/nix-cache-verify.md) - hosted Cache uploads `main`'s relay and CLI, and Smoke's nix channel substitutes them
 - [Record hosted cargo-hakari evidence](/quest/m0/ci/hakari.md) - compare scheduled macOS and Windows cache hits and estimated compiler work saved before and after the workspace-hack
