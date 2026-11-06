@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { ProtocolViolation } from "../error.ts";
-import { Reader } from "../stream.ts";
+import * as Path from "../path.ts";
+import { Reader, Writer } from "../stream.ts";
 import * as Filter from "./filter.ts";
-import { joinFilter } from "./subscribe.ts";
+import { joinFilter, Subscribe } from "./subscribe.ts";
 import { Version } from "./version.ts";
 
 const OLD = Version.DRAFT_18;
@@ -22,6 +23,45 @@ test("a live join is Next Object, its head left to a joining FETCH or a StartGro
 	const draft22 = joinFilter(NEW);
 	expect([...Filter.encode(draft22.filter, NEW)]).toEqual([0x05]);
 	expect(draft22.fill).toEqual({ filter: { kind: "relative", groups: 1n }, rangeFilters: false });
+});
+
+test.each([OLD, FIELDS, NEW])("a session start of group 0 joins live with no filter on %s", (version) => {
+	// Its earlier groups come from a range FETCH, so no draft spells an absolute {0, 0}.
+	expect(joinFilter(version, 0n)).toEqual({ filter: { kind: "unfiltered" } });
+	expect(joinFilter(version, 3n)).toEqual({ filter: { kind: "absolute", startGroup: 3n, startObject: 0n } });
+});
+
+async function subscribeBytes(filter: Filter.Filter, version: typeof OLD | typeof FIELDS | typeof NEW) {
+	const chunks: Uint8Array[] = [];
+	const writer = new Writer(
+		new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(chunk.slice()) }),
+		version,
+	);
+	const msg = new Subscribe({
+		requestId: 0n,
+		trackNamespace: Path.from("live"),
+		trackName: "video",
+		subscriberPriority: 128,
+		filter,
+	});
+	await msg.encode(writer, version);
+	writer.close();
+	await writer.closed;
+	const encoded = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+	let offset = 0;
+	for (const chunk of chunks) {
+		encoded.set(chunk, offset);
+		offset += chunk.length;
+	}
+	return encoded;
+}
+
+test.each([OLD, FIELDS, NEW])("a filterless SUBSCRIBE omits LOCATION_FILTER on %s", async (version) => {
+	const filterless = await subscribeBytes({ kind: "unfiltered" }, version);
+	const next = await subscribeBytes({ kind: "nextObject" }, version);
+	expect(next.length).toBeGreaterThan(filterless.length);
+	const decoded = await Subscribe.decode(new Reader(undefined, filterless, version), version);
+	expect(decoded.filter).toEqual({ kind: "unfiltered" });
 });
 
 function roundTrip(filter: Filter.Filter, version: typeof OLD | typeof FIELDS | typeof NEW): Filter.Filter {

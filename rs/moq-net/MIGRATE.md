@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Socket readers start at the beginning
+
+New `track` socket sessions subscribe from group 0, and `tcp` sessions join their
+half's only group from its first frame, so an acceptor's first burst is preserved
+when its subscription answer arrives after its writes. Existing
+callers need no migration; socket naming and the public API are unchanged.
+IETF subscribers and publishers also honor explicit starts on every supported
+draft, keeping a prefix written before the answer arrived. A start of group 0 is a
+filterless SUBSCRIBE on every draft, and the groups below the answer's Largest
+Object come from one range FETCH. A SUBSCRIBE that omits the filter still joins
+live, so third-party readers and relay caches see no change.
+
 ### Origins prove a route key ([#7937](https://github.com/moq-dev/moq/pull/7937))
 
 `origin::Config::route_key` takes an `origin::RouteKey`, which every lite-07 session on the origin proves to its peer in SETUP. Origins sharing a key fail over as one to a peer that scopes them; `None`, the default, proves nothing.

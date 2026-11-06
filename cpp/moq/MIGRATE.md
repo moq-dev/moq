@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Socket sessions
+
+The generated SocketEndpoint, SocketIncomingTcp, SocketIncomingTrack, SocketTcpStream, and SocketTrackStream handles now expose TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
+
+`moq::GroupProducer::ready(size)` is a new async call that completes once a frame of `size` bytes fits a window ahead of the fastest reader. `co_await` it before each `write_frame` so the writer waits for its fastest reader instead of evicting it, though not for slower readers; a TCP socket stream's producer needs it to behave like TCP. Existing writers are unchanged.
+
 ### `Following::available()` reports the path going offline ([#7678](https://github.com/moq-dev/moq/pull/7678))
 
 `moq::Following::available()` resolves to a null `std::shared_ptr<moq::BroadcastConsumer>` once the path goes offline (or, for a follow pinned to an instance, once another instance takes it over), then the next broadcast when something serves the path again. The first call is never null. Check for null before using a later result, and treat it like the previous instance ending.

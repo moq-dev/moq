@@ -3571,7 +3571,9 @@ struct SubscribeOnce {
 	deferred: bool,
 	start: Option<u64>,
 	join: Join,
-	/// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest.
+	/// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest; the
+	/// copy's fills fetch an earlier start's groups. An absolute start keeps its requested
+	/// prefix even if the answer arrives late.
 	live: bool,
 	/// A listed track's paused subscription, which this one resumes rather than open a
 	/// second one.
@@ -3772,9 +3774,7 @@ impl SubscribeOnce {
 					};
 					self.start = subscription.as_ref().and_then(|s| s.start());
 					self.join = subscribe_join(self.start, subscription.as_ref().and_then(|s| s.end()), this.version);
-					// Every draft-18 join is a live one, since its joining FETCH carries that
-					// group alone.
-					self.live = self.start.is_none() || self.join.fetch;
+					self.live = !matches!(self.join.filter, Filter::Absolute { .. });
 					self.subscription = subscription;
 					self.target = Some(target);
 
@@ -4367,6 +4367,16 @@ impl SubscribeOnce {
 				held.producer = Some(track.clone());
 				held.timescale = timescale;
 				held.fill_ok(largest);
+				// A group-0 start joins filterless with no fill for the Largest group's head,
+				// so a stream there that starts mid-group is a cut message: drop it, and the
+				// readers skip that group, rather than surface its tail as the whole group.
+				// Largest's object is inclusive, so even object 0 may already be gone.
+				if self.live
+					&& self.start == Some(0)
+					&& let Some(largest) = largest
+				{
+					held.headless_through = held.headless_through.max(Some(largest.group));
+				}
 			}
 		}
 		this.entry_info(&self.key, request_id, track.info());
@@ -6088,11 +6098,15 @@ impl OpenGroup {
 					// Without a fill, a relay preserves the subgroup's first Object ID and
 					// FIRST_OBJECT claim independently. Plain readers see only frame ordinals. A
 					// head that was owed and never came is the exception: the stream is the same
-					// unstitchable tail it is when it arrives before the fill settles, below.
+					// unstitchable tail it is when it arrives before the fill settles, below,
+					// unless it claims FIRST_OBJECT: a group may start past object 0.
 					if !fill.read().outstanding() {
 						let start = first.map_or(0, |first| first.id);
-						if start != 0 && (self.headless || fill.read().headless(sequence)) {
+						if start != 0 && !header.flags.first_object && (self.headless || fill.read().headless(sequence))
+						{
 							tracing::warn!(sequence, start, "no fill to stitch a mid-group stream onto");
+							// Never arriving whole, the group is dropped so readers stop owing it.
+							track.drop_groups(sequence..sequence + 1, crate::StreamError::NotFound);
 							return Poll::Ready(Err(Error::Unsupported));
 						}
 						return Poll::Ready(Ok(Opened::Group(create(track)?, start)));
@@ -6135,6 +6149,7 @@ impl OpenGroup {
 						(Some(start), Some((producer, _))) => Ok(Opened::Group(producer, start)),
 						(Some(start), None) => {
 							tracing::warn!(sequence, start, "no fill to stitch a mid-group stream onto");
+							track.drop_groups(sequence..sequence + 1, crate::StreamError::NotFound);
 							Err(Error::Unsupported)
 						}
 						(None, Some((producer, next))) => Ok(Opened::Group(producer, next)),
@@ -13944,19 +13959,25 @@ struct Join {
 /// to honor. It splits the group across two streams, the fill carrying the head and the
 /// subscription the tail, which `claim_fill` stitches back into one group producer.
 ///
-/// Earlier drafts have no fill parameter. Every subscription is a live join: Largest
-/// Object, followed by a joining FETCH relative at offset 0 for that group's head. An
-/// earlier start's missing groups are left to the copy's fills, one FETCH per run of them,
-/// and a later start skips the head locally. A join landing past a gap after a resumed
-/// copy's cache leaves those cached groups unjudgeable, so a finite budget gives them up
-/// rather than fetching them again. A bounded end has no joining-FETCH spelling
-/// either, so the join stays open and readers stop at their own end: refusing it would
-/// abort a resumed copy for every reader it serves.
+/// Earlier drafts have no fill parameter, so a live join uses Largest Object followed
+/// by a joining FETCH relative at offset 0 for that group's head.
 ///
-/// A start group we already know is absolute on draft-22 and needs no fill: the
-/// subscription's own range covers it, which is what our publisher serves from its cache.
+/// A start of group 0 with no end is a filterless SUBSCRIBE on every draft, which our
+/// publishers serve from the start of the latest group, and the copy's fills fetch the
+/// groups below it as one range FETCH. Draft 20 has no absolute {0, 0} distinct from no
+/// filter, so no draft spells one.
+///
+/// Any other known start group is absolute on every draft and needs no fill: the
+/// subscription's own range covers it, including a first burst that overtook its answer.
 fn subscribe_join(start: Option<u64>, end: Option<u64>, version: Version) -> Join {
-	if !Filter::is_draft20(version) {
+	if start == Some(0) && end.is_none() {
+		return Join {
+			filter: Filter::Unfiltered,
+			fill: None,
+			fetch: false,
+		};
+	}
+	if !Filter::is_draft20(version) && start.is_none() {
 		return Join {
 			filter: Filter::NextObject,
 			fill: None,
@@ -13974,12 +13995,6 @@ fn subscribe_join(start: Option<u64>, end: Option<u64>, version: Version) -> Joi
 				filter: Some(Filter::Relative(1)),
 				range_filters: false,
 			}),
-			fetch: false,
-		},
-		// An absolute {0, 0} with no end is defined as unfiltered, so it spells itself.
-		Some(0) if end.is_none() => Join {
-			filter: Filter::Unfiltered,
-			fill: None,
 			fetch: false,
 		},
 		Some(start) => Join {
@@ -14076,28 +14091,28 @@ mod filter_tests {
 		);
 	}
 
-	/// The whole track has a spelling of its own: an absent filter is unrestricted.
+	/// The whole track joins live with no filter on every draft, and fetches what came before.
 	#[test]
 	fn the_whole_track_is_unfiltered() {
-		assert_eq!(
-			subscribe_join(Some(0), None, Version::Draft22),
-			Join {
-				filter: Filter::Unfiltered,
-				fill: None,
-				fetch: false,
-			}
-		);
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			assert_eq!(
+				subscribe_join(Some(0), None, version),
+				Join {
+					filter: Filter::Unfiltered,
+					fill: None,
+					fetch: false,
+				}
+			);
+		}
 	}
 
 	const JOINING_DRAFTS: [Version; 1] = [Version::Draft18];
 
-	/// Every draft-18 join is Largest Object plus a joining FETCH, whatever its start or
-	/// end, so the current group's head arrives on the fetch stream and the live tail on the
-	/// subscription.
+	/// A draft-18 live join gets its current group's head through a joining FETCH.
 	#[test]
-	fn older_drafts_always_join_live() {
+	fn older_drafts_join_live_without_an_absolute_start() {
 		for version in JOINING_DRAFTS {
-			for (start, end) in [(None, None), (Some(7), None), (Some(7), Some(10))] {
+			for (start, end) in [(None, None), (None, Some(10))] {
 				assert_eq!(
 					subscribe_join(start, end, version),
 					Join {
@@ -14197,7 +14212,7 @@ mod stitch_tests {
 	/// The subscription's own subgroup stream, starting at `start` because a strict
 	/// publisher delivers nothing before it: that head is the fill's job. Each object
 	/// carries the Timestamp of its Object ID.
-	fn tail_stream(sequence: u64, start: u64, payloads: &[&[u8]]) -> Vec<u8> {
+	pub(super) fn tail_stream(sequence: u64, start: u64, payloads: &[&[u8]]) -> Vec<u8> {
 		let mut buf = Vec::new();
 		ietf::GroupHeader {
 			track_alias: ALIAS,
@@ -15841,6 +15856,71 @@ mod stitch_tests {
 		assert!(matches!(group.read_frame().await, Err(Error::Cancel)));
 	}
 
+	/// A stream for a headless group that claims FIRST_OBJECT is whole even though its first
+	/// Object ID is past zero, so it is delivered rather than dropped as a cut tail.
+	#[kio::test]
+	async fn a_headless_group_claiming_its_first_object_is_delivered() {
+		let h = Harness::new(Fill::Done, vec![draft18_subgroup(SEQUENCE, true, 6, &[b"six"])]);
+		h.subscriber
+			.state
+			.lock()
+			.subscribes
+			.get_mut(&REQUEST)
+			.unwrap()
+			.headless_through = Some(SEQUENCE);
+		let mut consumer = h.track.subscribe(None);
+
+		let mut stream = h.stream().await;
+		h.subscriber.clone().recv_group(&mut stream).await.expect("group");
+		let (sequence, frames) = read_group(&mut consumer).await;
+		assert_eq!(sequence, SEQUENCE);
+		assert_eq!(frames.len(), 1);
+	}
+
+	/// A refused headless group is reported dropped, so a reader in sequence order, as a
+	/// `track` socket session reads, moves on to the next group rather than wait on it.
+	#[kio::test]
+	async fn a_refused_headless_group_does_not_stall_an_ordered_reader() {
+		let h = Harness::new(
+			Fill::Done,
+			vec![
+				tail_stream(SEQUENCE, 2, &[b"tail-2"]),
+				tail_stream(SEQUENCE + 1, 0, &[b"next-0"]),
+			],
+		);
+		// Subscribed before the answer, as the socket does.
+		let mut ordered = h
+			.track
+			.subscribe(Some(
+				track::Subscription::default()
+					.with_order(crate::track::Order::Ascending)
+					.with_delay(track::Delay::default().with_max(None)),
+			))
+			.with_range(0..)
+			.ordered();
+		h.track.received();
+		h.track.anchored_cached();
+		h.track.clone().start_at(SEQUENCE).unwrap();
+		h.subscriber
+			.state
+			.lock()
+			.subscribes
+			.get_mut(&REQUEST)
+			.unwrap()
+			.headless_through = Some(SEQUENCE);
+
+		h.dispatch_refused().await;
+
+		let mut next = h.stream().await;
+		h.subscriber.clone().recv_group(&mut next).await.expect("next group");
+		let group = match ordered.poll_next_group(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(Some(group))) => group,
+			Poll::Ready(other) => panic!("no next group: {:?}", other.map(|group| group.map(|g| g.sequence))),
+			Poll::Pending => panic!("the ordered reader still waits on the refused group"),
+		};
+		assert_eq!(group.sequence, SEQUENCE + 1);
+	}
+
 	/// Widening updates replaced fills that failed to head this group and the next, and the
 	/// current fill has settled. A mid-group tail at or below the last failed group is still
 	/// headless, so it is dropped, while a whole group there stands alone.
@@ -17315,29 +17395,131 @@ mod joining_fetch_tests {
 		}
 	}
 
-	/// A start below, at, or past the Largest group joins that group alone: a group below it
-	/// is left to the copy's fills.
+	/// A known start stays absolute even below or past Largest, so it needs no live head fetch.
 	#[kio::test]
-	async fn a_join_from_any_start_fetches_only_the_largest_group() {
+	async fn an_absolute_start_never_becomes_a_largest_group_join() {
 		let largest = Some(ietf::Location { group: 9, object: 0 });
 		for version in JOINING_DRAFTS {
 			for start in [7, 9, 11] {
 				let run = JoinRun::start(version, Some(start), subscribe_ok(version, largest), fetch_ok(version)).await;
 
 				let messages = decode_messages(&run.session.log, version);
-				let fetch = messages.iter().find(|(id, _)| *id == ietf::Fetch::ID).expect("FETCH");
-				let body = &fetch.1;
-				let msg = crate::coding::decode_from(&mut &body[..], version, ietf::Fetch::decode_msg).unwrap();
+				let subscribe = messages
+					.iter()
+					.find(|(id, _)| *id == ietf::Subscribe::ID)
+					.expect("SUBSCRIBE");
+				let body = &subscribe.1;
+				let msg = crate::coding::decode_from(&mut &body[..], version, ietf::Subscribe::decode_msg).unwrap();
 				assert_eq!(
-					msg.fetch_type,
-					FetchType::RelativeJoining {
-						subscriber_request_id: RequestId(1),
-						group_offset: 0,
+					msg.filter,
+					Filter::Absolute {
+						start: ietf::Location {
+							group: start,
+							object: 0,
+						},
+						end: None,
 					},
 					"{version} from {start}"
 				);
+				assert!(msg.fill.is_none(), "{version} from {start}");
+				assert!(
+					!messages.iter().any(|(id, _)| *id == ietf::Fetch::ID),
+					"{version} from {start}: an absolute stream includes its head"
+				);
 			}
 		}
+	}
+
+	/// A start of group 0 joins live with no filter on every draft and sends no joining
+	/// FETCH: the whole latest group arrives on the subscription, and the copy's fills fetch
+	/// the groups below it once a reader misses them.
+	#[kio::test]
+	async fn a_zero_start_joins_unfiltered_without_a_joining_fetch() {
+		let largest = Some(ietf::Location { group: 9, object: 0 });
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			let run = JoinRun::start(version, Some(0), subscribe_ok(version, largest), fetch_ok(version)).await;
+
+			let messages = decode_messages(&run.session.log, version);
+			let subscribe = messages
+				.iter()
+				.find(|(id, _)| *id == ietf::Subscribe::ID)
+				.expect("SUBSCRIBE");
+			let msg = crate::coding::decode_from(&mut &subscribe.1[..], version, ietf::Subscribe::decode_msg).unwrap();
+			assert_eq!(msg.filter, Filter::Unfiltered, "{version}");
+			assert!(msg.fill.is_none(), "{version}");
+			assert!(
+				!messages.iter().any(|(id, _)| *id == ietf::Fetch::ID),
+				"{version}: no head to join"
+			);
+			assert!(!run.fill_outstanding(), "{version}");
+		}
+	}
+
+	/// A group-0 start fetches only the groups below Largest, so when the publisher is
+	/// already partway through the Largest group, that group's mid-group stream is a cut
+	/// message. It is marked headless, so the stream is dropped and readers skip the group
+	/// (`a_headless_tail_after_its_fill_was_replaced_is_dropped`), rather than reading its
+	/// tail as a whole group. Largest's object is inclusive, so a Largest at object 0 marks
+	/// the group too.
+	#[kio::test]
+	async fn a_zero_start_drops_the_largest_groups_cut_tail() {
+		for (object, headless) in [(2, Some(4)), (0, Some(4))] {
+			let largest = Some(ietf::Location { group: 4, object });
+			for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+				let run = JoinRun::start(version, Some(0), subscribe_ok(version, largest), fetch_ok(version)).await;
+				let state = run.subscriber.state.lock();
+				let held = state
+					.subscribes
+					.values()
+					.next()
+					.expect("the subscription is registered");
+				assert_eq!(held.headless_through, headless, "{version}: Largest object {object}");
+			}
+		}
+	}
+
+	/// A Largest at object 0 already sent that object, so the Largest group's stream starting
+	/// at object 1 without FIRST_OBJECT is a cut tail: it is refused and readers get the next
+	/// group instead.
+	#[kio::test]
+	async fn a_zero_start_drops_a_tail_cut_after_object_0() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 0 });
+		let session = ScriptedSession::per_stream(vec![
+			subscribe_ok(version, largest),
+			super::stitch_tests::tail_stream(4, 1, &[b"tail-1"]),
+			super::stitch_tests::tail_stream(5, 0, &[b"next-0"]),
+		]);
+		let run = JoinRun::subscribe(version, Some(0), session.clone(), Control::new(false)).await;
+		let track = {
+			let state = run.subscriber.state.lock();
+			let held = state
+				.subscribes
+				.values()
+				.next()
+				.expect("the subscription is registered");
+			held.producer.clone().expect("SUBSCRIBE_OK bound the track")
+		};
+		let mut consumer = track.subscribe(None);
+
+		let mut streams = Vec::new();
+		for _ in 0..2 {
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
+			streams.push(Reader::new(crate::transport::boxed::RecvStream::new(recv), version));
+		}
+		let [tail, next] = &mut streams[..] else { unreachable!() };
+		// Accepted, the tail's stream would park unended, so it must be refused at once.
+		let refused = run.subscriber.clone().recv_group(tail).now_or_never();
+		assert!(matches!(refused, Some(Err(Error::Unsupported))), "{refused:?}");
+
+		// The next group's stream never ends, so read it while it is still ingesting.
+		let mut ingesting = run.subscriber.clone();
+		let ingest = ingesting.recv_group(next);
+		let group = futures::select_biased! {
+			group = consumer.recv_group().fuse() => group.expect("track aborted").expect("track finished"),
+			res = ingest.fuse() => panic!("the next group's stream ended: {res:?}"),
+		};
+		assert_eq!(group.sequence, 5, "the cut group was skipped");
 	}
 
 	/// A publisher that serves no FETCH refuses the joining FETCH. That costs the head of

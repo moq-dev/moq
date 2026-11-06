@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Socket sessions
+
+moq.dev/moq/socket now exposes TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
+
+`GroupProducer.Ready(ctx, size)` is new: it blocks until a frame of `size` bytes fits a window ahead of the fastest reader. Call it before each `WriteFrame` so the writer waits for its fastest reader instead of evicting it, though not for slower readers; a TCP socket stream's producer needs it to behave like TCP. Existing writers are unchanged.
+
 ### `Following.Available` reports the path going offline
 
 After the first call, `Available` returns `(nil, nil)` once the followed path goes offline, or, for a `Follow` pinned to an instance, once another instance takes it over.

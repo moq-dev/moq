@@ -156,3 +156,43 @@ A catalog that needs a newer moq-hang draft than this build reads raises `Error.
 - API source: [py/moq-rs/moq](https://github.com/moq-dev/moq/tree/main/py/moq-rs/moq)
 - Source and examples: [`py/moq-rs`](https://github.com/moq-dev/moq/tree/main/py/moq-rs)
 - Raw bindings: [`moq-ffi`](https://pypi.org/project/moq-ffi/) on PyPI, for the unwrapped API
+
+## Socket sessions
+
+`moq.socket` connects endpoints through relays in either direction. Wire one
+origin to both session directions, then hold an endpoint while its sessions run:
+
+```python
+import asyncio, moq
+
+async def socket_client():
+    origin = moq.OriginProducer()
+    versions = ["moq-lite-07-wip"]
+    async with moq.Client("https://cdn.moq.dev/anon", versions=versions, publish=origin, consume=origin):
+        async with moq.socket.Endpoint(origin, "room", "client") as endpoint:
+            stream = await endpoint.dial_tcp("server")
+            stream.producer.write_frame(b"command")
+            stream.producer.finish()  # FIN; abort(error_code) sends RST instead.
+            async for frame in stream.consumer:
+                print(frame.payload)
+
+asyncio.run(socket_client())
+```
+
+Sockets need lite-07 or moq-transport on every hop, so the example opts into
+`moq-lite-07-wip`. No client offers it by default while its wire format is a
+work in progress, and the relay must accept it too.
+
+A server awaits `endpoint.accept_tcp()`, then calls `await incoming.accept()`
+or `incoming.reject()`. Accepting verifies that the claimed peer really dialed.
+`TcpStream` exposes group `producer` and `consumer` handles, plus `peer` and
+`session`. Keep the session id private. Its bounded cache reports eviction if a
+reader falls behind; it never skips bytes.
+
+Use `dial_track(peer, info=None)` and `accept_track()` for independent groups of
+messages. `TrackStream` exposes a track producer and a reliably subscribed,
+ascending consumer. Omitted `info` keeps messages without a publisher age limit;
+update the consumer's subscription to change delivery. The protocols have
+separate accept queues. Cancelling a dial or acceptance resets that dial;
+closing the endpoint resets all its sessions. See [Sockets](/concept/socket)
+for routing and authorization.

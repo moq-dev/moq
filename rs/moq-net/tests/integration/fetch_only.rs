@@ -433,9 +433,8 @@ async fn history_through_fetched_copy(upstream: Version, version: Version) {
 }
 
 /// A history SUBSCRIBE reaching a relay's copy kept after a fetch is answered from the
-/// upstream's SUBSCRIBE_OK, never the edge the fetch learned, and reads its history. A
-/// draft-18 upstream has no bounded join, so the relay joins it live and serves the history
-/// from fills, keeping the copy for its other readers.
+/// upstream's SUBSCRIBE_OK, never the edge the fetch learned, and reads its requested
+/// history, keeping the copy for its other readers.
 #[kio::test]
 async fn a_relay_answers_a_history_subscribe_on_a_fetched_copy() {
 	for (upstream, version) in [
@@ -476,8 +475,7 @@ async fn a_relay_answers_a_live_subscribe_on_a_fetched_copy() {
 
 /// A copy kept after a fetch resumes a bounded subscription that ends at or below the
 /// upstream's new Largest Object, and reads it, though no group past its end arrives.
-/// A draft-18 join fills the missing run with one FETCH, which our publisher refuses
-/// until hole markers are supported. That refusal ends the read instead of hanging.
+/// Every supported draft serves the bounded absolute range on the subscription itself.
 #[kio::test]
 async fn a_resumed_bounded_subscription_reads_below_the_answered_edge() {
 	for version in ["moq-transport-18", "moq-transport-20", "moq-transport-22"] {
@@ -510,18 +508,13 @@ async fn a_resumed_bounded_subscription_reads_below_the_answered_edge() {
 				.await
 				.expect("subscribe timed out")
 				.expect("subscribe");
-			// Read in arrival order, whichever group lands first. A refused multi-group
-			// FETCH gives up the whole run; it never falls back to fetching each group.
+			// Read in arrival order, whichever group lands first.
 			let mut read = Vec::new();
 			while let Some(group) = next_frames(&mut sub).await {
 				read.push(group);
 			}
 			read.sort();
-			if version == "moq-transport-18".parse().unwrap() {
-				assert!(read.is_empty(), "the unsupported multi-group FETCH was refused");
-			} else {
-				assert_eq!(read, [frames(1), frames(2)]);
-			}
+			assert_eq!(read, [frames(1), frames(2)], "{version}");
 			assert!(track.subscription().is_some(), "the read never subscribed");
 
 			drop((sub, copy, remote, pair, track, broadcast, client, publisher));
@@ -534,9 +527,8 @@ async fn a_resumed_bounded_subscription_reads_below_the_answered_edge() {
 /// A copy that went idle holding a group resumes a bounded subscription of that group after
 /// the upstream moved on. With an unlimited max age every version reads it from the cache.
 /// Under a finite one the copy cannot judge a group below its live floor, so it reads the
-/// group only where the resumed feed starts where it asked, not at the answer's Largest.
-/// A draft-18 SUBSCRIBE has no such start: its live join puts the floor above the cached
-/// group, which the read gives up at once rather than waiting for a group that won't come.
+/// group because the resumed feed starts where it asked, not at the answer's Largest: an
+/// absolute start on every draft, draft 18 included.
 #[kio::test]
 async fn a_resumed_bounded_subscription_keeps_its_cached_start() {
 	let versions = moq_net::Versions::all();
@@ -580,14 +572,8 @@ async fn a_resumed_bounded_subscription_keeps_its_cached_start() {
 					.await
 					.expect("subscribe timed out")
 					.expect("subscribe");
-				let started = kio::clock::now();
 				let read = next_frames(&mut sub).await;
-				if max_age.is_some() && version == "moq-transport-18".parse().unwrap() {
-					assert_eq!(read, None, "{version}: the group below the live floor was given up");
-					assert_eq!(kio::clock::now(), started, "{version}: the read waited");
-				} else {
-					assert_eq!(read, Some(frames(0)), "{version}, max age {max_age:?}");
-				}
+				assert_eq!(read, Some(frames(0)), "{version}, max age {max_age:?}");
 
 				drop((sub, copy, remote, pair, track, broadcast, client, publisher));
 			})

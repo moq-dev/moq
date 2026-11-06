@@ -107,9 +107,9 @@ track nobody serves. A dial that gives up resets `B`'s subscription in turn.
 ## Protocols
 
 Each side writes its own half and reads the peer's. A reader subscribes
-reliably and in order: oldest group first, with no delay budget, so it waits
-for a late group rather than skipping it. The protocol decides what a half
-holds.
+reliably and in order: from the half's first frame, oldest first, with no delay
+budget, so it waits for a late group rather than skipping it. The protocol
+decides what a half holds.
 
 ### `tcp`
 
@@ -119,6 +119,9 @@ exactly like one direction of a TCP connection:
 
 - A frame is a write. The reader reads the frames in the order they were
   written, with nothing skipped.
+- The reader joins the live group, which is the half's only one, from its
+  first frame. Over moq-transport, that is a `SUBSCRIBE` plus a joining `FETCH`
+  (or a fill) for the frames written before its answer.
 - Finishing the group is FIN: the reader reads to the end, then sees the end.
 - Resetting the group, or its track, is RST: the reader fails with the error.
 - A second group on a session track is a protocol error: the reader resets the
@@ -129,7 +132,7 @@ budget, no order, since the newest group is never stale.
 
 A session can last indefinitely: a group has no size cap, and each copy keeps
 only a bounded tail of it. A writer that waits for room before each write (in
-Rust, `group::Producer::ready`) runs at most a window ahead of the reader on
+Rust, `group::Producer::ready`; in the bindings, `GroupProducer.ready(size)`) runs at most a window ahead of the reader on
 every hop, so a slow reader slows the writer, as TCP backpressure does, and
 nothing is lost. A writer that doesn't wait sheds the front of its half, and a
 reader that falls behind it fails with an eviction error instead of skipping
@@ -149,7 +152,11 @@ a newer message never makes an older one stale. A reader that keeps up gets
 every message, but each
 hop's cache reclaims a message nobody read within its idle window (30 s by
 default), or under memory pressure, except the newest, so a reader that stalls
-longer can miss messages.
+longer can miss messages. Any message a hop reports it will never deliver is
+skipped the same way, rather than ending the session. Over moq-transport, the
+reader starts at group 0: a `SUBSCRIBE` with no filter, plus one range `FETCH`
+for the groups below the answer's largest, so a publisher that refuses that
+`FETCH` leaves a burst written before the answer missed.
 
 The reader's subscription starts reliable and in order, like `tcp`. An
 application may make it lossy for messages that go stale, such as positions or
