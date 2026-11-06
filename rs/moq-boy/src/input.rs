@@ -69,7 +69,10 @@ impl Replies {
 /// A viewer's session event, in the order the emulator applies them.
 pub enum Command {
 	/// A viewer's session opened.
-	Joined { viewer: ViewerId, replies: Replies },
+	Joined {
+		viewer: ViewerId,
+		replies: Replies,
+	},
 	/// Full button state for a viewer.
 	Buttons {
 		viewer: ViewerId,
@@ -79,7 +82,9 @@ pub enum Command {
 	},
 	Reset,
 	/// A viewer's session ended.
-	Left { viewer: ViewerId },
+	Left {
+		viewer: ViewerId,
+	},
 }
 
 /// Accept every viewer that dials `endpoint`, forwarding their commands to the emulator.

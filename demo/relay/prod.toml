@@ -8,16 +8,16 @@ bind = "[::]:443"
 
 # Every version, plus the opt-in moq-lite-07-wip that sockets (such as MoQ Boy's) need.
 version = [
-	"moq-lite-07-wip",
-	"moq-lite-06",
-	"moq-lite-05",
-	"moq-lite-04",
-	"moq-lite-03",
-	"moq-lite-02",
-	"moq-lite-01",
-	"moq-transport-22",
-	"moq-transport-20",
-	"moq-transport-18",
+    "moq-lite-07-wip",
+    "moq-lite-06",
+    "moq-lite-05",
+    "moq-lite-04",
+    "moq-lite-03",
+    "moq-lite-02",
+    "moq-lite-01",
+    "moq-transport-22",
+    "moq-transport-20",
+    "moq-transport-18",
 ]
 
 [listen.tls]

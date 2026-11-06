@@ -596,7 +596,14 @@ mod tests {
 			argv.extend_from_slice(args);
 			Config::parse_from(&argv.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>()).unwrap()
 		};
-		let versions = |config: Config| config.client().version.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+		let versions = |config: Config| {
+			config
+				.client()
+				.version
+				.iter()
+				.map(|v| v.to_string())
+				.collect::<Vec<_>>()
+		};
 		assert_eq!(versions(parse(&[])), ["moq-lite-07-wip"]);
 		assert_eq!(
 			versions(parse(&["--connect-version", "moq-transport-22"])),
