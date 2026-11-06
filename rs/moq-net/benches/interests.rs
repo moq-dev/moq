@@ -59,9 +59,14 @@ fn bench_uncovered(c: &mut Criterion) {
 	let mut group = c.benchmark_group("interests/uncovered");
 	for (watches, sessions) in SHAPES {
 		let id = BenchmarkId::from_parameter(format!("{watches}w_{sessions}s"));
+		// Criterion calls the closure once per sample, so the fixture is built on the first call and kept.
+		let mut fixture = None;
 		group.bench_function(id, |b| {
-			let table = table(watches, sessions);
-			let incoming = scoped(&table.producer, "incoming");
+			let (table, incoming) = fixture.get_or_insert_with(|| {
+				let table = table(watches, sessions);
+				let incoming = scoped(&table.producer, "incoming");
+				(table, incoming)
+			});
 			b.iter(|| {
 				drop(incoming.routes());
 				for session in &table.sessions {
@@ -77,9 +82,13 @@ fn bench_covered(c: &mut Criterion) {
 	let mut group = c.benchmark_group("interests/covered");
 	for (watches, sessions) in SHAPES {
 		let id = BenchmarkId::from_parameter(format!("{watches}w_{sessions}s"));
+		let mut fixture = None;
 		group.bench_function(id, |b| {
-			let table = table(watches, sessions);
-			let incoming = scoped(&table.producer, "room/incoming");
+			let (table, incoming) = fixture.get_or_insert_with(|| {
+				let table = table(watches, sessions);
+				let incoming = scoped(&table.producer, "room/incoming");
+				(table, incoming)
+			});
 			b.iter(|| {
 				drop(incoming.routes());
 			});
