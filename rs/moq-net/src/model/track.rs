@@ -2890,20 +2890,28 @@ impl TrackState {
 	}
 
 	/// An idle copy's route answered behind what the copy cached from it: no Largest while
-	/// the copy shows groups, or a Largest before the newest position it holds. The cache
-	/// is likely another track, so it is dropped rather than served while the copy fails.
+	/// the copy holds frames, or a Largest before the newest frame it holds. Largest names
+	/// an object, so an empty group says nothing. The cache is likely another track, so it
+	/// is dropped rather than served while the copy fails.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn judge(&mut self, largest: Option<Position>) -> Result<()> {
-		let Some(cached) = self.idle_cached() else {
+		let Feed::Idle { newest: Some(newest) } = self.feed else {
 			return Ok(());
 		};
-		let frames = self
+		let held = self
 			.lookup
-			.get(&cached)
-			.map_or(0, |slot| slot.group.frame_count() as u64);
-		let held = Position {
-			group: cached,
-			frame: frames.saturating_sub(1),
+			.range(..=newest)
+			.rev()
+			.filter(|(_, slot)| slot.is_shown())
+			.find_map(|(&group, slot)| {
+				let frames = slot.group.frame_count() as u64;
+				Some(Position {
+					group,
+					frame: frames.checked_sub(1)?,
+				})
+			});
+		let Some(held) = held else {
+			return Ok(());
 		};
 		if largest.is_some_and(|largest| largest >= held) {
 			return Ok(());
@@ -10368,6 +10376,15 @@ mod test {
 			producer.set_live_ahead(Position::group(2), None),
 			Err(Error::MalformedTrack)
 		));
+
+		// Largest names the newest object, which an empty newest group does not hold.
+		for (largest, ok) in [(Some(Position::group(2)), true), (None, false)] {
+			let mut producer = track_producer("test", None);
+			framed(&producer, 2, 1).finish().unwrap();
+			framed(&producer, 3, 0).finish().unwrap();
+			producer.set_idle();
+			assert_eq!(producer.set_live(largest, None).is_ok(), ok, "{largest:?}");
+		}
 	}
 
 	/// A group standing in for a missing Largest says nothing of how far the route's feed

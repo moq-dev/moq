@@ -2,7 +2,7 @@
 
 //! A relay copy lingers after its last reader leaves and resumes on the next subscribe.
 //! A route answering behind that copy's cache fails the subscription rather than leave it
-//! waiting, and the next subscribe builds a fresh copy (#7973).
+//! waiting, and the next subscribe builds a fresh copy.
 
 use crate::support;
 
