@@ -266,6 +266,9 @@ pub struct Consume {
 
 	/// Buffered JSON window events ready for consumption.
 	json_window_event: NonZeroSlab<Timed<JsonWindowEvent>>,
+
+	/// Watchers waiting for a broadcast to end.
+	closed_task: NonZeroSlab<Task>,
 }
 
 impl Consume {
@@ -286,6 +289,33 @@ impl Consume {
 		origin: Option<crate::origin::Consumer>,
 	) -> Result<Id, Error> {
 		self.broadcast.insert(ConsumeBroadcast { broadcast, origin })
+	}
+
+	/// Watch for a broadcast's end, reported through the task's terminal callback.
+	pub fn closed(&mut self, broadcast: Id, on_closed: OnStatus) -> Result<Id, Error> {
+		let ConsumeBroadcast { broadcast, origin } =
+			self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
+		let driver = origin.map(|origin| origin.driver).unwrap_or_default();
+		self.closed_task.spawn(
+			on_closed,
+			|state| &mut state.consume.closed_task,
+			|close| async move {
+				driver
+					.watch(async move {
+						tokio::select! {
+							biased;
+							_ = close => {}
+							_ = broadcast.closed() => {}
+						}
+						Ok(())
+					})
+					.await
+			},
+		)
+	}
+
+	pub fn closed_cancel(&mut self, task: Id) -> Result<(), Error> {
+		self.closed_task.close(task, Error::NotFound)
 	}
 
 	pub fn catalog(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
@@ -402,6 +432,8 @@ impl Consume {
 				.map(|label| label.as_ptr() as *const c_char)
 				.unwrap_or(std::ptr::null()),
 			label_len: config.label.as_ref().map_or(0, String::len),
+			warmup_us: micros(config.warmup),
+			has_warmup: config.warmup.is_some(),
 		};
 
 		Ok(())
@@ -469,6 +501,10 @@ impl Consume {
 				.map(|label| label.as_ptr() as *const c_char)
 				.unwrap_or(std::ptr::null()),
 			label_len: config.label.as_ref().map_or(0, String::len),
+			jitter_us: micros(config.jitter),
+			has_jitter: config.jitter.is_some(),
+			warmup_us: micros(config.warmup),
+			has_warmup: config.warmup.is_some(),
 		};
 
 		Ok(())
@@ -1205,6 +1241,11 @@ impl Consume {
 			.ok_or(Error::NoIndex)?;
 		Ok((consume, name, config))
 	}
+}
+
+/// A catalog duration in microseconds, saturating; zero when absent.
+fn micros(duration: Option<Duration>) -> u64 {
+	duration.map_or(0, |duration| duration.as_micros().try_into().unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]

@@ -11,6 +11,49 @@ use crate::{Error, ffi, moq_client_config};
 pub struct Config {
 	pub connect: moq_tokio::connect::Config,
 	pub quic: moq_tokio::quic::Config,
+	/// Dial once rather than redialing after the transport drops.
+	pub once: bool,
+}
+
+/// Parse protocol version names; empty keeps the default, every supported version.
+pub fn parse_versions(versions: &[String]) -> Result<Vec<moq_net::Version>, Error> {
+	versions
+		.iter()
+		.map(|version| moq_net::Version::from_str(version).map_err(Error::InvalidConfig))
+		.collect()
+}
+
+/// The QUIC knobs a client or a server config carries, each `None` when unset.
+pub struct Quic<'a> {
+	pub max_streams: Option<u64>,
+	pub idle_timeout_us: Option<u64>,
+	pub keep_alive_us: Option<u64>,
+	pub gso: Option<bool>,
+	pub mtu_discovery: Option<bool>,
+	pub congestion_control: Option<&'a str>,
+	pub qlog: Option<&'a str>,
+	pub keylog: bool,
+}
+
+impl Quic<'_> {
+	pub fn parse(self) -> Result<moq_tokio::quic::Config, Error> {
+		let micros = |us: u64| std::time::Duration::from_micros(us).into();
+		let mut quic = moq_tokio::quic::Config::default();
+		quic.max_streams = self.max_streams;
+		quic.idle_timeout = self.idle_timeout_us.map(micros);
+		quic.keep_alive = self.keep_alive_us.map(micros);
+		quic.gso = self.gso;
+		quic.mtu_discovery = self.mtu_discovery;
+		if let Some(family) = self.congestion_control {
+			quic.congestion_control =
+				Some(moq_tokio::quic::CongestionControl::from_str(family).map_err(Error::InvalidConfig)?);
+		}
+		quic.qlog = self.qlog.map(Into::into);
+		quic.keylog = self
+			.keylog
+			.then(|| std::env::var_os("SSLKEYLOGFILE").unwrap_or_default().into());
+		Ok(quic)
+	}
 }
 
 /// What sessions opened through this library advertise in SETUP: the caller's `prefix`,
@@ -59,11 +102,9 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 	// Protocol
 	let versions = unsafe { ffi::parse_strings(config.versions, config.versions_len)? };
 	if !versions.is_empty() {
-		out.connect.version = versions
-			.iter()
-			.map(|version| moq_net::Version::from_str(version).map_err(Error::InvalidConfig))
-			.collect::<Result<_, _>>()?;
+		out.connect.version = parse_versions(&versions)?;
 	}
+	out.once = config.once;
 	out.connect.tokens = unsafe { ffi::parse_strings(config.tokens, config.tokens_len)? }
 		.into_iter()
 		.map(|token| {
@@ -131,31 +172,19 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 	}
 
 	// QUIC
-	if config.has_quic_max_streams {
-		out.quic.max_streams = Some(config.quic_max_streams);
+	out.quic = unsafe {
+		Quic {
+			max_streams: config.has_quic_max_streams.then_some(config.quic_max_streams),
+			idle_timeout_us: config.has_quic_idle_timeout.then_some(config.quic_idle_timeout_us),
+			keep_alive_us: config.has_quic_keep_alive.then_some(config.quic_keep_alive_us),
+			gso: config.has_quic_gso.then_some(config.quic_gso),
+			mtu_discovery: config.has_quic_mtu_discovery.then_some(config.quic_mtu_discovery),
+			congestion_control: ffi::parse_str_optional(config.quic_congestion_control, config.quic_congestion_control_len)?,
+			qlog: ffi::parse_str_optional(config.quic_qlog, config.quic_qlog_len)?,
+			keylog: config.quic_keylog,
+		}
 	}
-	if config.has_quic_idle_timeout {
-		out.quic.idle_timeout = Some((std::time::Duration::from_micros(config.quic_idle_timeout_us)).into());
-	}
-	if config.has_quic_keep_alive {
-		out.quic.keep_alive = Some((std::time::Duration::from_micros(config.quic_keep_alive_us)).into());
-	}
-	if config.has_quic_gso {
-		out.quic.gso = Some(config.quic_gso);
-	}
-	if config.has_quic_mtu_discovery {
-		out.quic.mtu_discovery = Some(config.quic_mtu_discovery);
-	}
-	if let Some(family) =
-		unsafe { ffi::parse_str_optional(config.quic_congestion_control, config.quic_congestion_control_len)? }
-	{
-		out.quic.congestion_control =
-			Some(moq_tokio::quic::CongestionControl::from_str(family).map_err(Error::InvalidConfig)?);
-	}
-	out.quic.qlog = unsafe { ffi::parse_str_optional(config.quic_qlog, config.quic_qlog_len)? }.map(Into::into);
-	out.quic.keylog = config
-		.quic_keylog
-		.then(|| std::env::var_os("SSLKEYLOGFILE").unwrap_or_default().into());
+	.parse()?;
 
 	Ok(out)
 }

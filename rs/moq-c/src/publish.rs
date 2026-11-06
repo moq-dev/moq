@@ -64,6 +64,9 @@ struct Broadcast {
 	children: Children,
 	/// Set by [`Publish::catalog_finish`]: the catalog is final, so a close leaves it alone.
 	ended: bool,
+	/// Shared source timebases, owned here because each holds the catalog, so a handle that
+	/// outlives the broadcast cannot keep it alive.
+	timebases: std::collections::HashMap<Id, moq_mux::catalog::Timebase<Extra>>,
 }
 
 /// A handle publishing tracks on a broadcast, by the table that holds it.
@@ -317,7 +320,7 @@ pub struct Publish {
 	datagram_demand: NonZeroSlab<DatagramDemand>,
 
 	/// Raw group producers, created from a raw track producer.
-	groups: NonZeroSlab<moq_net::group::Producer>,
+	groups: NonZeroSlab<crate::state::Shared<moq_net::group::Producer>>,
 
 	/// JSON snapshot producers (lossy latest-value tracks), each advertised in its broadcast's
 	/// catalog for as long as it lives.
@@ -342,6 +345,9 @@ pub struct Publish {
 
 	/// Group requests delivered to a handler, freed on accept, abort, or free.
 	group_request: NonZeroSlab<GroupRequest>,
+
+	/// Shared source timebases, each naming the broadcast that owns it.
+	timebases: NonZeroSlab<Id>,
 }
 
 impl Publish {
@@ -375,6 +381,7 @@ impl Publish {
 			video: BTreeMap::new(),
 			audio: BTreeMap::new(),
 			ended: false,
+			timebases: Default::default(),
 		})?;
 		Ok(id)
 	}
@@ -533,15 +540,45 @@ impl Publish {
 		self.insert_media(track, children, Some(priority))
 	}
 
-	pub fn container(&mut self, broadcast: Id, init: import::ContainerInit) -> Result<Id, Error> {
+	/// Create a source timebase owned by `broadcast`, for containers that share one offset.
+	pub fn timebase(&mut self, broadcast: Id) -> Result<Id, Error> {
+		let timebase = self.broadcast(broadcast)?.catalog.timebase();
+		let id = self.timebases.insert(broadcast)?;
+		self.broadcast_mut(broadcast)?.timebases.insert(id, timebase);
+		Ok(id)
+	}
+
+	/// Release a source timebase; containers already sharing it keep their offset.
+	pub fn timebase_free(&mut self, timebase: Id) -> Result<(), Error> {
+		let broadcast = self.timebases.remove(timebase).ok_or(Error::NotFound)?;
+		if let Some(broadcast) = self.broadcasts.get_mut(broadcast) {
+			broadcast.timebases.remove(&timebase);
+		}
+		Ok(())
+	}
+
+	/// Import a container, from `timebase` when shared, or with an independent offset.
+	pub fn container(&mut self, broadcast: Id, init: import::ContainerInit, timebase: Option<Id>) -> Result<Id, Error> {
+		let owner = timebase
+			.map(|timebase| self.timebases.get(timebase).copied().ok_or(Error::NotFound))
+			.transpose()?;
+		if owner.is_some_and(|owner| owner != broadcast) {
+			return Err(Error::InvalidConfig("the timebase belongs to another broadcast".into()));
+		}
 		let Broadcast {
 			producer: broadcast,
 			catalog,
 			driver,
 			children,
+			timebases,
 			..
 		} = self.broadcast(broadcast)?;
-		let container = import::Container::new(broadcast.clone(), catalog.reserve(), &init)?;
+		let reserved = match timebase {
+			// The owner check above means a missing entry is a broadcast that closed and was reused.
+			Some(timebase) => timebases.get(&timebase).ok_or(Error::NotFound)?.reserve(),
+			None => catalog.reserve(),
+		};
+		let container = import::Container::new(broadcast.clone(), reserved, &init)?;
 		let children = children.clone();
 		let container = Container {
 			inner: container,
@@ -1074,7 +1111,7 @@ impl Publish {
 	pub fn group_request_accept(&mut self, request: Id) -> Result<Id, Error> {
 		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
 		let group = request.fill.accept(request.sequence, None)?;
-		self.groups.insert(group)
+		self.groups.insert(crate::state::Shared::new(group))
 	}
 
 	/// Reject a group request like [`Self::group_request_free`]; `error_code` is not delivered.
@@ -1113,14 +1150,14 @@ impl Publish {
 	pub fn track_group(&mut self, track: Id) -> Result<Id, Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
 		let group = raw.inner.append_group()?;
-		self.groups.insert(group)
+		self.groups.insert(crate::state::Shared::new(group))
 	}
 
 	/// Create a raw group with an explicit sequence number.
 	pub fn track_group_at(&mut self, track: Id, sequence: u64) -> Result<Id, Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
 		let group = raw.inner.create_group(moq_net::group::Info { sequence })?;
-		self.groups.insert(group)
+		self.groups.insert(crate::state::Shared::new(group))
 	}
 
 	/// Write a single-frame group to a raw track, `None` when untimed.
@@ -1148,6 +1185,12 @@ impl Publish {
 		}
 		Kept { inner: track, children }.keep(Child::Track(id));
 		Ok(())
+	}
+
+	/// The newest content a raw track holds: its newest group at that group's newest frame
+	/// (0 while it is empty), or `None` before any group was written.
+	pub fn track_largest(&self, track: Id) -> Result<Option<moq_net::track::Position>, Error> {
+		Ok(self.tracks.get(track).ok_or(Error::TrackNotFound)?.inner.largest())
 	}
 
 	/// Declare a raw track's exclusive final group sequence.
@@ -1392,21 +1435,27 @@ impl Publish {
 		timestamp: Option<moq_net::Timestamp>,
 		payload: &[u8],
 	) -> Result<(), Error> {
-		let group = self.groups.get_mut(group).ok_or(Error::GroupNotFound)?;
-		group.write_frame(timestamp, bytes::Bytes::copy_from_slice(payload))?;
+		let group = self.groups.get(group).ok_or(Error::GroupNotFound)?;
+		let mut group = group.lock();
+		group.as_mut().ok_or(Error::GroupNotFound)?.write_frame(timestamp, bytes::Bytes::copy_from_slice(payload))?;
 		Ok(())
+	}
+
+	/// A raw group's producer, to wait on it without the global lock.
+	pub fn group(&self, group: Id) -> Result<crate::state::Shared<moq_net::group::Producer>, Error> {
+		Ok(self.groups.get(group).ok_or(Error::GroupNotFound)?.clone())
 	}
 
 	/// Finish a raw group. No more frames can be written.
 	pub fn group_finish(&mut self, group: Id) -> Result<(), Error> {
-		let mut group = self.groups.remove(group).ok_or(Error::GroupNotFound)?;
+		let mut group = self.groups.remove(group).and_then(|group| group.take()).ok_or(Error::GroupNotFound)?;
 		group.finish()?;
 		Ok(())
 	}
 
 	/// Abort a raw group with an application error code.
 	pub fn group_abort(&mut self, group: Id, error_code: u16) -> Result<(), Error> {
-		let group = self.groups.remove(group).ok_or(Error::GroupNotFound)?;
+		let group = self.groups.remove(group).and_then(|group| group.take()).ok_or(Error::GroupNotFound)?;
 		group.abort(moq_net::Error::App(error_code))?;
 		Ok(())
 	}
@@ -1630,6 +1679,7 @@ mod supervision_tests {
 			.container(
 				broadcast,
 				import::ContainerInit::new(import::ContainerFormat::Ts, bytes::Bytes::new()),
+				None,
 			)
 			.unwrap();
 		publish.broadcasts.remove(broadcast).unwrap();

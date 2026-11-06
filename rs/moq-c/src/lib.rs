@@ -20,6 +20,7 @@
 
 mod api;
 mod audio;
+mod auth;
 mod bandwidth;
 mod client;
 mod consume;
@@ -38,6 +39,7 @@ mod video;
 
 pub use api::*;
 pub use audio::*;
+pub use auth::*;
 pub use bandwidth::*;
 pub use datagram::*;
 pub use decode::{moq_decode_gap, moq_decode_read_kind, moq_decode_start};
