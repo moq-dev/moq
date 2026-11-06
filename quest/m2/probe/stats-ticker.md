@@ -19,10 +19,10 @@ sampled `getStats()` only while a reservation reads it: loops ticking in
 phase cost about a third of the main-thread time for 4 to 16 publishing
 connections. Observed there, not implemented.
 
-- One module-level ticker that runs only while some connection has a
-  reservation reading its estimate, and samples each such connection per
-  tick.
-- Measure main-thread time before and after with #7524's harness at 4 and
+- Done: `js/net/src/connection/ticker.ts` holds one module-level ticker that
+  runs only while some connection has a reservation reading its estimate, and
+  samples each such connection per tick.
+- Remaining: measure main-thread time before and after with #7524's harness at 4 and
   16 connections.
 
 Public API: none. Wire: none.
