@@ -594,43 +594,40 @@ impl Error {
 			_ => Self::Transport(err.to_string()),
 		}
 	}
-}
 
-/// A refusal: the error a request is refused with, and how long the peer may wait
-/// before asking again.
-///
-/// Every refusal API takes `impl Into<Refusal>`, so a bare [`Error`] is a refusal with
-/// no retry hint. The error alone decides what the refusal means; `retry_after` only
-/// reaches moq-transport's REQUEST_ERROR, as its Retry Interval. moq-lite has no such
-/// field and ignores it.
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub struct Refusal {
-	/// Why the request is refused.
-	pub error: Error,
-	/// How long the peer may wait before retrying, or `None` if it should not.
-	pub retry_after: Option<std::time::Duration>,
-}
-
-impl Refusal {
-	/// Refuse with `error`, telling the peer it may retry once `after` has passed.
-	///
-	/// A zero `after` is no hint: moq-transport reads a zero interval as "do not retry".
-	pub fn retry(error: Error, after: std::time::Duration) -> Self {
-		Self {
-			error,
-			retry_after: (!after.is_zero()).then_some(after),
-		}
+	/// Whether asking again may succeed: the route failed to deliver rather than judging what
+	/// it carried, which would repeat on every attempt. Mirrors `routeFailed` in
+	/// `js/net/src/resume.ts`.
+	pub(crate) fn retryable(&self) -> bool {
+		self.unroutable() || self.transient()
 	}
-}
 
-/// A refusal with no retry hint.
-impl From<Error> for Refusal {
-	fn from(error: Error) -> Self {
-		Self {
-			error,
-			retry_after: None,
-		}
+	/// Whether a source lost its route to the content: only another route continues it.
+	pub(crate) fn unroutable(&self) -> bool {
+		matches!(self, Self::Unroutable | Self::Stream(StreamError::Unroutable))
+	}
+
+	/// Whether the same source may deliver a fresh copy. An unroutable source needs a new
+	/// route instead: asking it again can replace the withdrawal's cause with a refusal.
+	pub(crate) fn transient(&self) -> bool {
+		matches!(
+			self,
+			Self::Transport(_)
+				| Self::IdleTimeout
+				| Self::Session(_)
+				| Self::GoingAway
+				| Self::GoawayTimeout
+				| Self::Dropped
+				| Self::Closed
+				| Self::Cancel
+				| Self::Stream(
+					StreamError::Session(_)
+						| StreamError::Internal
+						| StreamError::Cancel
+						| StreamError::GoingAway
+						| StreamError::ControlTimeout
+				)
+		)
 	}
 }
 
@@ -800,21 +797,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	/// A retry hint rides beside the error, which stays exactly what was refused, and a
-	/// zero hint is no hint.
-	#[test]
-	fn a_refusal_keeps_its_error() {
-		let after = std::time::Duration::from_secs(1);
-		let hinted = Refusal::retry(Error::GoingAway, after);
-		assert!(matches!(hinted.error, Error::GoingAway));
-		assert_eq!(hinted.retry_after, Some(after));
-		assert_eq!(
-			Refusal::retry(Error::NotFound, std::time::Duration::ZERO).retry_after,
-			None
-		);
-		assert_eq!(Refusal::from(Error::NotFound).retry_after, None);
-	}
 
 	// Both registries are wire contracts now (draft-lcurley-moq-lite, Error Codes), so
 	// every code we send must decode back to what we meant.

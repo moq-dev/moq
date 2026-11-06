@@ -248,6 +248,17 @@ pub(crate) mod request {
 		registered.unwrap_or(INTERNAL_ERROR)
 	}
 
+	/// The Retry Interval, in milliseconds, for a refusal with `err` that reads `code` on the wire.
+	///
+	/// A refusal asking again may pass invites the backoff a refused token starts from. 0 asks the
+	/// peer never to retry: a verdict would repeat, and UNINTERESTED tells an offer to stop.
+	pub(crate) fn retry_interval(err: &Error, code: u64) -> u64 {
+		match err.retryable() && code != UNINTERESTED {
+			true => crate::auth::RETRY_INITIAL.as_millis() as u64,
+			false => 0,
+		}
+	}
+
 	/// Read a rejection code received on the negotiated draft.
 	///
 	/// A code the draft does not assign for this request, INTERNAL_ERROR included, stays
@@ -303,6 +314,27 @@ pub(crate) mod request {
 			Error::UnsupportedExtension,
 			Error::Remote(0x30),
 		];
+
+		/// Only a refusal that asking again may pass invites a retry. An unroutable offer reads
+		/// UNINTERESTED, which tells the peer to stop offering, so it never does.
+		#[test]
+		fn only_a_refusal_that_may_pass_invites_a_retry() {
+			let retry = crate::auth::RETRY_INITIAL.as_millis() as u64;
+			for version in ALL {
+				for kind in KINDS {
+					for err in EVERY_ERROR {
+						let code = to_code(&err, kind, version);
+						let expected = match err {
+							// The session failing under a request is no verdict on it.
+							Error::GoingAway | Error::Session(_) => retry,
+							Error::Unroutable if matches!(kind, Kind::Subscribe | Kind::Fetch | Kind::TrackStatus) => retry,
+							_ => 0,
+						};
+						assert_eq!(retry_interval(&err, code), expected, "{version:?} {kind:?} {err:?}");
+					}
+				}
+			}
+		}
 
 		/// A relay bridging a moq-lite revocation onto a moq-transport request refuses it as
 		/// UNAUTHORIZED, the same as a local refusal.

@@ -19,7 +19,7 @@ use super::{
 	front::{Action, Candidate, Event, Front, Refusal},
 };
 use crate::{
-	Error, Instance, InvalidPattern, Path, Pattern, Patterns, Refusal as Refused,
+	Error, Instance, InvalidPattern, Path, Pattern, Patterns,
 	coding::{BoundsExceeded, Decode, DecodeError, Decoder, Encode, EncodeError, Encoder, Form, varint},
 	path::{self, Segment},
 	time::{Deadlines, Instant},
@@ -3687,8 +3687,6 @@ struct TrackIo {
 	held: Option<kio::Pending<track::Subscribing>>,
 	/// Whether the track had a reader as of the last demand edge.
 	wanted: bool,
-	/// The retry hint of the last copy that refused the track.
-	retry_after: Option<Duration>,
 }
 
 impl TrackIo {
@@ -3713,23 +3711,18 @@ impl TrackIo {
 		self.staged = None;
 		self.copy = None;
 		self.held = None;
-		let retry_after = self.retry_after.take();
 		match self.request.take() {
 			// Ended before any route served it: nothing to read, nor to fetch.
 			Some(request) => {
 				self.routes.end(result.clone());
-				let error = result.err().unwrap_or(Error::NotFound);
-				request.reject(Refused { error, retry_after });
+				request.reject(result.err().unwrap_or(Error::NotFound));
 			}
 			None => {
 				if let Some(accepted) = self.accepted.take() {
 					let _ = match &result {
 						Ok(()) => accepted.finish(),
 						// A failed track refuses newcomers too, so they ask afresh.
-						Err(err) => accepted.abort(Refused {
-							error: err.clone(),
-							retry_after,
-						}),
+						Err(err) => accepted.abort(err.clone()),
 					};
 				}
 				self.routes.end(result);
@@ -3890,7 +3883,7 @@ impl kio::Task for FrontServeRun {
 					}
 					Poll::Ready(Err(err)) => {
 						// No metadata ever arrived: a lost route cannot answer the request.
-						let err = match super::resume::route_failed(&err) {
+						let err = match err.retryable() {
 							true => io.end.clone(),
 							false => err,
 						};
@@ -3936,8 +3929,7 @@ fn pick<'a>(
 /// What [`FrontServe::poll_step`] returns: one thing that happened.
 enum FrontStep {
 	Assigned(track::Request),
-	/// The upstream answer, and the retry hint a rejection carried.
-	Resolved(Result<broadcast::Consumer, Error>, Option<Duration>),
+	Resolved(Result<broadcast::Consumer, Error>),
 	SourceClosed(u64),
 	Info(Arc<str>, u64, Result<track::Info, Error>),
 	Ended(Arc<str>, u64, Result<(), Error>, bool),
@@ -3999,8 +3991,6 @@ struct FrontServe {
 	ready: kio::Queue<Arc<str>>,
 	tracks: HashMap<Arc<str>, TrackIo>,
 	upstream: Option<FrontUpstream>,
-	/// The retry hint the upstream refusal queued in `events` carried.
-	retry_after: Option<Duration>,
 	next_source: u64,
 	/// The instance each source's route served when it was asked, and the table's clock
 	/// then: what its content is from.
@@ -4052,7 +4042,6 @@ impl FrontServe {
 			ready: kio::Queue::new(),
 			tracks: HashMap::new(),
 			upstream: None,
-			retry_after: None,
 			next_source: 0,
 			instances: HashMap::new(),
 			sources: HashMap::new(),
@@ -4186,15 +4175,15 @@ impl FrontServe {
 		}
 		if let Some(upstream) = &self.upstream
 			&& let Poll::Ready(result) = upstream.pending.poll(waiter, |p| match &p.resolved {
-				Some(result) => Poll::Ready((result.clone(), p.retry_after)),
+				Some(result) => Poll::Ready(result.clone()),
 				None => Poll::Pending,
 			}) {
-			return Poll::Ready(match result {
-				Ok((resolved, retry_after)) => FrontStep::Resolved(resolved, retry_after),
+			return Poll::Ready(FrontStep::Resolved(match result {
+				Ok(resolved) => resolved,
 				// The queue died unresolved (its handler dropped): the route
 				// could not serve.
-				Err(_closed) => FrontStep::Resolved(Err(Error::Unroutable), None),
-			});
+				Err(_closed) => Err(Error::Unroutable),
+			}));
 		}
 		// The listing first: a source ends its listing before it closes, so this forwards
 		// the tracks it finished last before its close detaches it.
@@ -4334,11 +4323,6 @@ impl kio::Task for FrontServe {
 						..
 					}
 				);
-				// Only the standing refusal that ends the front passes its hint on.
-				let retry_after = match &event {
-					Event::Resolved { .. } => self.retry_after.take().filter(|_| refused),
-					_ => None,
-				};
 				let answered = match &event {
 					Event::TrackInfo { track, source, .. } => Some((track.clone(), *source)),
 					_ => None,
@@ -4619,9 +4603,6 @@ impl kio::Task for FrontServe {
 								});
 							if let Ok(mut pending) = self.request.write() {
 								pending.refused = refused;
-								if pending.resolved.is_none() {
-									pending.retry_after = retry_after;
-								}
 								pending.resolved.get_or_insert(Err(err.clone()));
 							}
 							// Ending the broadcast only retracts it: no new requesters or
@@ -4720,7 +4701,6 @@ impl kio::Task for FrontServe {
 							copy: None,
 							held: None,
 							wanted: false,
-							retry_after: None,
 						},
 					);
 					Event::TrackAssigned {
@@ -4728,7 +4708,7 @@ impl kio::Task for FrontServe {
 						now: self.timers.now(),
 					}
 				}
-				FrontStep::Resolved(result, retry_after) => {
+				FrontStep::Resolved(result) => {
 					let Some(FrontUpstream {
 						route,
 						asked,
@@ -4770,16 +4750,13 @@ impl kio::Task for FrontServe {
 							self.instances.insert(id, (asked, asked_at));
 							Event::Resolved { route, result: Ok(id) }
 						}
-						Err(err) => {
-							self.retry_after = retry_after;
-							Event::Resolved {
-								route,
-								result: Err(Refusal {
-									err,
-									standing: self.standing(route),
-								}),
-							}
-						}
+						Err(err) => Event::Resolved {
+							route,
+							result: Err(Refusal {
+								err,
+								standing: self.standing(route),
+							}),
+						},
 					}
 				}
 				FrontStep::SourceClosed(source) => Event::SourceClosed { source },
@@ -4797,8 +4774,6 @@ impl kio::Task for FrontServe {
 						},
 						Err(err) => Err(err),
 					};
-					// What the refusing copy said about retrying, should it end the track.
-					io.retry_after = result.as_ref().err().and(asked.query.retry_after());
 					// Staged only while the track has a reader: without one the machine
 					// will not splice, and a held copy would keep the source subscribed.
 					if let Ok(info) = &result
@@ -6239,8 +6214,6 @@ impl OriginState {
 #[derive(Default)]
 struct PendingBroadcast {
 	resolved: Option<Result<broadcast::Consumer, Error>>,
-	/// The retry hint a handler's rejection carried.
-	retry_after: Option<Duration>,
 }
 
 /// A front's verdict, which its requesters wait on: the instance it resolved, or the
@@ -6263,8 +6236,6 @@ struct PendingFront {
 	selected: Instance,
 	/// The selected serving handler refused, rather than the route disappearing.
 	refused: bool,
-	/// The retry hint that refusal carried.
-	retry_after: Option<Duration>,
 }
 
 impl PendingFront {
@@ -6380,16 +6351,12 @@ impl ServeState {
 		path: &Path,
 		producer: &kio::Producer<PendingBroadcast>,
 		result: Result<broadcast::Consumer, Error>,
-		retry_after: Option<Duration>,
 	) -> bool {
 		let mut state = shared.lock();
 		let Some(resolved) = state.answer(path, producer, result) else {
 			return false;
 		};
 		if let Ok(mut pending) = producer.write() {
-			if pending.resolved.is_none() {
-				pending.retry_after = retry_after;
-			}
 			pending.resolved.get_or_insert(resolved);
 			drop(state);
 		}
@@ -6524,16 +6491,13 @@ impl Request {
 	/// use [`Self::route`] to announce its own instance.
 	pub fn serve(self, broadcast: impl Consume<broadcast::Consumer>) {
 		let broadcast = broadcast.consume();
-		let _ = ServeState::resolve(&self.home, &self.path, &self.producer, Ok(broadcast), None);
+		let _ = ServeState::resolve(&self.home, &self.path, &self.producer, Ok(broadcast));
 		// `self.producer` drops here, closing the channel; the value is still observable.
 	}
 
-	/// Reject the request, resolving every awaiting requester with the refusal's error.
-	///
-	/// A bare [`Error`] converts; see [`Refusal`](crate::Refusal) to add a retry hint.
-	pub fn reject(self, refusal: impl Into<Refused>) {
-		let Refused { error, retry_after } = refusal.into();
-		let _ = ServeState::resolve(&self.home, &self.path, &self.producer, Err(error), retry_after);
+	/// Reject the request, resolving every awaiting requester with `err`.
+	pub fn reject(self, err: Error) {
+		let _ = ServeState::resolve(&self.home, &self.path, &self.producer, Err(err));
 	}
 }
 
@@ -6624,29 +6588,11 @@ impl Lookup {
 
 	/// Poll for the requested broadcast without blocking.
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<broadcast::Consumer, Error>> {
-		self.poll_refused(waiter).map_err(|refused| refused.error)
-	}
-
-	/// [`Self::poll_ok`], keeping the retry hint a handler's refusal carried.
-	pub(crate) fn poll_refused(&self, waiter: &kio::Waiter) -> Poll<Result<broadcast::Consumer, Refused>> {
-		let mut retry_after = None;
-		let found = ready!(self.poll_found(waiter, &mut retry_after));
-		Poll::Ready(found.map_err(|error| Refused { error, retry_after }))
-	}
-
-	fn poll_found(
-		&self,
-		waiter: &kio::Waiter,
-		retry_after: &mut Option<Duration>,
-	) -> Poll<Result<broadcast::Consumer, Error>> {
 		match &self.inner {
 			RequestState::Failed(error) => Poll::Ready(Err(error.clone())),
 			RequestState::Pending { front, broadcast } => Poll::Ready(
 				match ready!(front.poll(waiter, |state| match &state.resolved {
-					Some(result) => {
-						*retry_after = state.retry_after;
-						Poll::Ready(result.clone().map(|instance| (instance, state.first.clone())))
-					}
+					Some(result) => Poll::Ready(result.clone().map(|instance| (instance, state.first.clone())),),
 					None => Poll::Pending,
 				})) {
 					// Another instance than the one named, and not one continuing it: never hand
@@ -7574,7 +7520,6 @@ impl Consumer {
 			first: None,
 			selected: best,
 			refused: false,
-			retry_after: None,
 		});
 		let consumer = request.consume();
 		// The front starts held by this request; see [`Front::new`].
@@ -8359,7 +8304,6 @@ mod tests {
 				copy: None,
 				held: None,
 				wanted: true,
-				retry_after: None,
 			};
 			let mut subscriber = consumer.subscribe(None).now_or_never().unwrap().unwrap();
 			io.end(Ok(()));
@@ -10639,7 +10583,6 @@ mod tests {
 				first: None,
 				selected: instance(),
 				refused: false,
-				retry_after: None,
 			}),
 			timers: consumer.timers.clone(),
 		};
@@ -14197,41 +14140,6 @@ mod tests {
 		let mut group = next_group(&mut subscription).await.unwrap().expect("first group");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 		(producer, server, upstream, old, subscription)
-	}
-
-	/// A retry hint on a carried copy's abort changes nothing the front decides: a
-	/// `GoingAway` copy that delivered is asked for again from the same source, hinted or not.
-	#[kio::test]
-	#[cfg(feature = "async")]
-	async fn a_retry_hint_keeps_a_going_away_copy_retryable() {
-		for refusal in [
-			crate::Refusal::from(Error::GoingAway),
-			crate::Refusal::retry(Error::GoingAway, Duration::from_secs(1)),
-		] {
-			let hinted = refusal.retry_after.is_some();
-			let (_producer, _server, upstream, old, mut subscription) = remote_front().await;
-			let mut handler = upstream.requests();
-			old.abort(refusal).unwrap();
-
-			let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
-				.await
-				.unwrap_or_else(|_| panic!("hinted={hinted}: the front never asked the source again"))
-				.expect("request");
-			let track = request.accept(crate::track::Info::timed());
-			// The copy resumes past the group the reader already has.
-			let mut group = track.create_group(crate::group::Info { sequence: 1 }).unwrap();
-			group.write_frame(crate::Timestamp::ZERO, b"after".as_ref()).unwrap();
-			group.finish().unwrap();
-			let mut group = next_group(&mut subscription)
-				.await
-				.unwrap_or_else(|err| panic!("hinted={hinted}: the track ended: {err}"))
-				.expect("track open");
-			assert_eq!(
-				&group.read_frame().await.unwrap().unwrap().payload[..],
-				b"after",
-				"hinted={hinted}"
-			);
-		}
 	}
 
 	/// A local newcomer takes over while its answer for "video" is pending, so the track

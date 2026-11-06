@@ -167,23 +167,6 @@ test("a refusal carries its reason", async () => {
 	}
 });
 
-test("a refusal carries its retry interval, rounded up, and 0 without one", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
-		for (const [retryAfter, expected] of [
-			[undefined, 0n],
-			[Milli(1500), 1500n],
-			[Milli(0.25), 1n],
-		] as const) {
-			const { stream, wire } = recording(version);
-			await refuse(stream, version, "fetch", { ...refusal, retryAfter });
-			const r = wire();
-			expect(await r.u53()).toBe(RequestError.id);
-			const err = await RequestError.decode(r, version);
-			expect(err.retryInterval).toBe(expected);
-		}
-	}
-});
-
 test("a request's deadline ends it through the request, so later ends do nothing", async () => {
 	const clock = new Manual();
 	const installed = clock.install();

@@ -1,4 +1,4 @@
-import type { Milli } from "@moq/clock";
+import { RETRY_INITIAL } from "../auth_session.ts";
 import { error, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type * as Path from "../path.ts";
 import { Reader, type Stream, type Writer } from "../stream.ts";
@@ -31,16 +31,16 @@ function finCancels(version: IetfVersion): boolean {
 export interface Refusal {
 	condition: RequestCondition;
 	reasonPhrase: string;
-	/** How long the peer may wait before retrying; absent or 0 asks it not to. */
-	retryAfter?: Milli;
+	/** Whether asking again may pass, which invites the peer to retry. Absent is a verdict. */
+	retryable?: boolean;
 }
 
 async function writeRefusal(w: Writer, version: IetfVersion, kind: RequestKind, refusal: Refusal): Promise<void> {
 	const err = new RequestError({
 		errorCode: toRequestCode(refusal.condition, kind, version),
 		reasonPhrase: refusal.reasonPhrase,
-		// Rounded up to whole milliseconds, since 0 tells the peer never to retry.
-		retryInterval: BigInt(Math.ceil(refusal.retryAfter ?? 0)),
+		// 0 asks the peer never to retry.
+		retryInterval: refusal.retryable ? BigInt(RETRY_INITIAL) : 0n,
 	});
 	await Message.write(w, RequestError.id, err, version);
 }

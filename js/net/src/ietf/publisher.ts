@@ -25,6 +25,7 @@ import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
+import { routeFailed } from "../resume.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type { Groups, Info, Range, Position as TrackPosition, Subscriber as TrackSubscriber } from "../track.ts";
@@ -2544,16 +2545,16 @@ export class Publisher {
 		}
 	}
 
-	/** What a request that failed to resolve is refused with. */
+	/**
+	 * What a request that failed to resolve is refused with. A missing publisher a rendezvous
+	 * waited for is a timeout, which, like Rust's `rendezvous_error`, invites no retry.
+	 */
 	#failed(err: unknown, wait = false): Refusal {
 		const e = error(err);
-		const condition =
-			e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable)
-				? wait
-					? "timeout"
-					: "does_not_exist"
-				: "internal";
-		return { condition, reasonPhrase: reason(e) };
+		const reasonPhrase = reason(e);
+		const missing = e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable);
+		if (missing && wait) return { condition: "timeout", reasonPhrase };
+		return { condition: missing ? "does_not_exist" : "internal", reasonPhrase, retryable: routeFailed(e) };
 	}
 
 	/**

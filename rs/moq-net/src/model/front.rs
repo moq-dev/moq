@@ -567,7 +567,7 @@ impl Front {
 			// failover, re-splice from the serving source at the first missing group.
 			Err(err)
 				if delivered
-					&& super::resume::retryable(&err)
+					&& err.transient()
 					&& self.serving.is_some_and(|(_, candidate)| candidate.carried) =>
 			{
 				track.state = TrackState::Idle;
