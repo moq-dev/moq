@@ -259,6 +259,7 @@ async fn a_forged_dial_never_connects() {
 /// track, so it cannot learn a session's name to read or forge it.
 #[tokio::test]
 async fn a_reader_of_everything_lists_no_session() {
+	kio::clock::allow_host_timers();
 	let fixture = Fixture::new().await;
 	let (alice, _alice_origin, _alice_session) = fixture.endpoint("alice", LITE).await;
 	let (bob, _bob_origin, _bob_session) = fixture.endpoint("bob", LITE).await;

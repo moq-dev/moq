@@ -2534,6 +2534,7 @@ mod tests {
 	/// since the first placed the clock. A fresh offset would shift it by its own arrival.
 	#[tokio::test]
 	async fn a_replacement_importer_keeps_the_offset() {
+		kio::clock::allow_host_timers();
 		let (init, fragments) = fmp4_parts(2);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();

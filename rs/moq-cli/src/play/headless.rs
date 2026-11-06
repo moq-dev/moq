@@ -148,6 +148,7 @@ mod tests {
 	/// measure filled in.
 	#[tokio::test]
 	async fn metrics_write_a_final_sample() {
+		kio::clock::allow_host_timers();
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("play.ndjson");
 		let producer = moq_tokio::origin::spawn();

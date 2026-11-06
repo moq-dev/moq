@@ -157,7 +157,7 @@ impl Timer {
 	}
 }
 
-/// Let timers wait on the host clock in this process, for a test on real sockets, devices, or processes.
+/// Let timers wait on the host clock in this process, as real I/O does: real sockets, devices, or processes.
 ///
 /// With `KIO_DENY_HOST_TIMERS=1` in the environment, a timer that waits on the host clock
 /// aborts the process unless it called this. It lasts for the process, which is one test
