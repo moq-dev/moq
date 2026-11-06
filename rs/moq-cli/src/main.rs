@@ -1611,7 +1611,7 @@ mod tests {
 	}
 
 	/// A raw TCP bind is a complete server side even when no QUIC bind is set.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn tcp_only_moq_side_starts_a_server() {
 		let invocation = Invocation::try_parse_from([
 			"moq",
@@ -1645,6 +1645,8 @@ mod tests {
 			panic!("start TCP-only server: {err:#}");
 		}
 
+		// The paused clock moves only once every task parks, so the server has settled into
+		// accepting rather than exiting.
 		assert!(
 			kio::clock::timeout(std::time::Duration::from_millis(50), tasks.join_next())
 				.await

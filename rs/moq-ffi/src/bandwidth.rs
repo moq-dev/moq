@@ -446,8 +446,6 @@ mod tests {
 	#[cfg(feature = "video")]
 	#[test]
 	fn a_share_wakes_a_parked_thread() {
-		use std::sync::atomic::Ordering;
-
 		let estimate = moq_net::bandwidth::Producer::new();
 		let bandwidth = allocator(&estimate);
 		let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -455,28 +453,28 @@ mod tests {
 		let reserved = bandwidth.reserve(&track.demand().unwrap(), 4_000_000);
 		let mut consumer = reserved.consume();
 
-		let parked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-		let parked_flag = parked.clone();
+		// Signalled once `changed()` has returned from its first poll, parked on the share.
+		let (parked, parked_rx) = std::sync::mpsc::channel();
 		let handle = std::thread::spawn(move || {
 			tokio::runtime::Builder::new_current_thread()
 				.enable_all()
 				.build()
 				.unwrap()
 				.block_on(async move {
-					parked_flag.store(true, Ordering::SeqCst);
-					consumer.changed().await
+					let mut changed = std::pin::pin!(consumer.changed());
+					let mut parked = Some(parked);
+					std::future::poll_fn(|cx| {
+						let poll = changed.as_mut().poll(cx);
+						if let Some(parked) = parked.take() {
+							parked.send(()).unwrap();
+						}
+						poll
+					})
+					.await
 				})
 		});
 
-		while !parked.load(Ordering::SeqCst) {
-			std::thread::yield_now();
-		}
-		// The inner changed() may not have parked yet; give it a turn.
-		#[expect(
-			clippy::disallowed_methods,
-			reason = "the test thread has no runtime; it gives the follower's runtime thread a real turn"
-		)]
-		std::thread::sleep(std::time::Duration::from_millis(50));
+		parked_rx.recv().unwrap();
 		let _sub = track.consume(None).unwrap();
 		estimate
 			.set(Some(moq_net::bandwidth::Rate::from_bps(1_000_000)))
