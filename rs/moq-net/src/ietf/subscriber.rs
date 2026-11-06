@@ -682,6 +682,45 @@ struct Accepted {
 	largest: Option<ietf::Location>,
 }
 
+/// A subscriber whose publisher refuses every SUBSCRIBE with `refusal`, and the task set
+/// it runs on.
+#[cfg(test)]
+pub(super) async fn refusing_upstream(
+	version: Version,
+	refusal: ietf::RequestError<'_>,
+) -> (Subscriber, crate::util::TaskSet) {
+	let log = crate::lite::test_transport::Log::default();
+	let mut writer = crate::coding::Writer::new(
+		crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
+		version,
+	);
+	writer.varint(ietf::RequestError::ID).await.unwrap();
+	writer.encode(&refusal).await.unwrap();
+	let script = log.writes.lock().unwrap().clone();
+	let (tasks, task_set) = crate::util::TaskSet::new();
+	let subscriber = Subscriber::new(
+		crate::time::sim(),
+		crate::driver::Transport::new(crate::lite::test_transport::ScriptedSession::new(script)),
+		crate::model::ProduceTest::produce(crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap())),
+		Control::new(false),
+		None,
+		peer::PeerSetup::declared(peer::Peer::default()),
+		crate::Hop::new(1).unwrap(),
+		None,
+		version,
+		tasks,
+		Default::default(),
+	);
+	(subscriber, task_set)
+}
+
+/// A publisher's answer to a SUBSCRIBE, or to the REQUEST_UPDATE resuming one.
+enum Answer {
+	Accepted(Accepted),
+	/// A REQUEST_ERROR: the error its code reads as, and the Retry Interval it asked for.
+	Refused(Error, Duration),
+}
+
 /// What a subscription is for: the origin's request, until the first SUBSCRIBE_OK
 /// accepts it, then the copy it became, subscribed again after lingering.
 enum Target {
@@ -3071,7 +3110,7 @@ impl Subscriber {
 
 	/// Serve one track request; see [`RunSubscribe`].
 	#[cfg(test)]
-	async fn run_subscribe(
+	pub(super) async fn run_subscribe(
 		&mut self,
 		broadcast_path: Path,
 		broadcast: broadcast::Requests,
@@ -3569,7 +3608,7 @@ enum Abandon {
 /// exists to close. The broadcast ending is not a local side going away: a retraction does
 /// not disturb subscriptions already in flight, and this one is.
 enum AnswerWait {
-	Response(Result<Option<Accepted>, Error>),
+	Response(Result<Answer, Error>),
 	Unused,
 	/// `abort` already rejected the parked request.
 	Gone,
@@ -4278,14 +4317,20 @@ impl SubscribeOnce {
 		this: &Subscriber,
 		broadcast_path: &Path,
 		track_name: &str,
-		response: Result<Option<Accepted>, Error>,
+		response: Result<Answer, Error>,
 	) -> Option<Poll<Option<Idle>>> {
 		let request_id = self.request_id;
+		// Only a refusal carries a Retry Interval, which a relay forwards to its own readers.
+		let response = match response {
+			Ok(Answer::Accepted(accepted)) => Ok(accepted),
+			Ok(Answer::Refused(err, retry)) => Err((err, Some(retry))),
+			Err(err) => Err((err, None)),
+		};
 		let accepted = match response {
 			// A track that needs a property we do not understand, or carries more than we
 			// could forward, is neither processed nor forwarded: the subscription is
 			// cancelled and the subscribers refused.
-			Ok(Some(accepted)) if refused(&accepted.properties, this.version, self.flate).is_some() => {
+			Ok(accepted) if refused(&accepted.properties, this.version, self.flate).is_some() => {
 				let err = refused(&accepted.properties, this.version, self.flate).expect("checked by the guard");
 				tracing::debug!(broadcast = %crate::path::Rooted(this.origin.root(), broadcast_path), track = %track_name, %err, "subscribe refused");
 				// Refuse before waiting on the peer to acknowledge the cancellation.
@@ -4300,23 +4345,14 @@ impl SubscribeOnce {
 				self.step = OnceStep::Refuse(Subscriber::cancelling(self.stream()));
 				return None;
 			}
-			Ok(Some(accepted)) => accepted,
-			Ok(None) => {
-				if let Some(pending) = this.take_pending(request_id) {
-					pending.reject(Error::UnexpectedMessage);
-				}
-				this.remove_subscribe(request_id);
-				this.entry_ended(&self.key, request_id, Err(Error::UnexpectedMessage));
-				if let Some(idle) = self.resumed.take() {
-					let _ = idle.track.abort(Error::UnexpectedMessage);
-				}
-				return Some(Poll::Ready(None));
-			}
-			Err(err) => {
+			Ok(accepted) => accepted,
+			Err((err, retry)) => {
 				tracing::debug!(%err, "subscribe response error");
 				// Refuse before waiting on the peer to acknowledge the cancellation.
-				if let Some(pending) = this.take_pending(request_id) {
-					pending.reject(err.clone());
+				match (this.take_pending(request_id), retry) {
+					(Some(pending), Some(retry)) => pending.refuse(err.clone(), retry),
+					(Some(pending), None) => pending.reject(err.clone()),
+					(None, _) => {}
 				}
 				this.remove_subscribe(request_id);
 				// A held subscription that the publisher ended before answering ends its

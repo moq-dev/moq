@@ -102,13 +102,14 @@ fn track_properties(
 
 /// The rendezvous cap is zero, but asking to wait still makes a missing publisher a timeout.
 /// Once the broadcast resolves, a missing track is the publisher's answer and stays DOES_NOT_EXIST.
-fn rendezvous_error(error: Error, requested: bool, resolved: bool) -> Error {
-	let missing = match &error {
+/// `None` when `error` stands.
+fn rendezvous_error(error: &Error, requested: bool, resolved: bool) -> Option<Error> {
+	let missing = match error {
 		Error::Unroutable | Error::Stream(crate::StreamError::Unroutable) => true,
 		Error::NotFound | Error::Stream(crate::StreamError::NotFound) => !resolved,
 		_ => false,
 	};
-	if requested && missing { Error::Timeout } else { error }
+	(requested && missing).then_some(Error::Timeout)
 }
 
 #[cfg_attr(
@@ -801,8 +802,9 @@ struct SubscriptionUpdates {
 
 /// How an admitted subscription came out of serving.
 enum Subscribed {
-	/// It never started, refused with this reason and error before SUBSCRIBE_OK.
-	Refused(String, Error),
+	/// It never started, refused with this reason and error before SUBSCRIBE_OK, and the
+	/// Retry Interval an upstream refusal asked for.
+	Refused(String, Error, Option<Duration>),
 	/// The subscriber withdrew it, or the session closed, before SUBSCRIBE_OK.
 	Withdrawn,
 	/// It was served, and opened this many group streams.
@@ -1141,7 +1143,7 @@ impl SubscribeServe {
 							request.grant = Some(grant);
 							request.admitted()
 						}
-						Err(refusal) => request.refuse(&refusal.error, &refusal.reason)?,
+						Err(refusal) => request.refuse(&refusal.error, &refusal.reason, None)?,
 					};
 				}
 				SubscribeState::Release => {
@@ -1218,7 +1220,7 @@ impl SubscribeRequest {
 			_ => None,
 		};
 		if token.is_none() && !gate.allows() {
-			return self.refuse(&Error::Unauthorized, "not granted");
+			return self.refuse(&Error::Unauthorized, "not granted", None);
 		}
 		// Legal requests we can't honor are refused one at a time, never by closing the
 		// session. Serving a Range Filter unfiltered would deliver objects the subscriber
@@ -1261,10 +1263,15 @@ impl SubscribeRequest {
 		SubscribeState::Serve(Box::new(Serving::new(&self.publisher, &self.msg)))
 	}
 
-	/// Refuse the request with `err`, delivering its REQUEST_ERROR next.
-	fn refuse(&mut self, err: &Error, reason: &str) -> Result<SubscribeState, Error> {
+	/// Refuse the request with `err`, delivering its REQUEST_ERROR next. Its Retry Interval
+	/// is `retry` when an upstream refusal asked for one, and derived from `err` otherwise.
+	fn refuse(&mut self, err: &Error, reason: &str, retry: Option<Duration>) -> Result<SubscribeState, Error> {
+		let mut error = ietf::RequestError::refuse(err, request::Kind::Subscribe, reason, self.publisher.version);
+		if let Some(retry) = retry {
+			error.retry_interval = u64::try_from(retry.as_millis()).unwrap_or(u64::MAX);
+		}
 		let stream = self.stream.as_mut().expect("open until PUBLISH_DONE");
-		let deliver = self.publisher.reject_subscribe(&mut stream.writer, err, reason)?;
+		let deliver = self.publisher.reject_subscribe(&mut stream.writer, &error)?;
 		Ok(SubscribeState::Refuse(deliver))
 	}
 
@@ -1334,7 +1341,7 @@ impl SubscribeRequest {
 				}
 			}
 			Ok(Ok(Subscribed::Served(served, streams))) => self.publish_done(served, streams, retain),
-			Ok(Ok(Subscribed::Refused(reason, err))) => self.refuse(&err, &reason)?,
+			Ok(Ok(Subscribed::Refused(reason, err, retry))) => self.refuse(&err, &reason, retry)?,
 			// Nobody is left to answer.
 			Ok(Ok(Subscribed::Withdrawn)) => SubscribeState::Release,
 			Ok(Err(err)) => return Err(err),
@@ -1343,7 +1350,7 @@ impl SubscribeRequest {
 					let streams = opened.load(Ordering::Relaxed);
 					self.publish_done(Served::Track(Err(refusal.error)), streams, retain)
 				}
-				None => self.refuse(&refusal.error, &refusal.reason)?,
+				None => self.refuse(&refusal.error, &refusal.reason, None)?,
 			},
 		})
 	}
@@ -1390,7 +1397,8 @@ impl SubscribeRequest {
 struct Serving {
 	resuming: bool,
 	datagrams: Option<crate::datagram::Consumer>,
-	stream_error: Option<Error>,
+	/// Why subscribing to the track failed, with the Retry Interval an upstream refusal asked for.
+	stream_error: Option<(Error, Option<Duration>)>,
 	/// The filter the SUBSCRIBE asked for, which every saved join boundary follows.
 	///
 	/// Draft-22 replaced joining FETCH with subscription fills. Older drafts save the same
@@ -1472,8 +1480,11 @@ impl Serving {
 	/// Stats (subscriptions, viewer refcount, groups/frames/bytes) are counted in the model,
 	/// through the tagged `origin::Consumer` the broadcast resolves from.
 	fn poll(&mut self, waiter: &kio::Waiter, request: &mut SubscribeRequest) -> Poll<Result<Subscribed, Error>> {
-		let refused = |err: Error, rendezvous, resolved| {
-			Subscribed::Refused(err.to_string(), rendezvous_error(err, rendezvous, resolved))
+		// An upstream's refusal goes on with the Retry Interval it asked for, unless the
+		// rendezvous answers in its place.
+		let refused = |err: Error, rendezvous, resolved, retry| match rendezvous_error(&err, rendezvous, resolved) {
+			Some(timeout) => Subscribed::Refused(err.to_string(), timeout, None),
+			None => Subscribed::Refused(err.to_string(), err, retry),
 		};
 		let version = request.publisher.version;
 		loop {
@@ -1485,7 +1496,7 @@ impl Serving {
 						// The reason is the origin's, not ours: a dynamic router refusing on
 						// authorization or a drain says so, and only an unroutable path means the
 						// broadcast is not here.
-						Err(err) => return Poll::Ready(Ok(refused(err, request.msg.rendezvous, false))),
+						Err(err) => return Poll::Ready(Ok(refused(err, request.msg.rendezvous, false, None))),
 						Ok(None) => return Poll::Ready(Ok(Subscribed::Withdrawn)),
 					};
 					self.datagrams = serving_datagrams(request, &broadcast);
@@ -1504,7 +1515,7 @@ impl Serving {
 							Ok(track) => {
 								subscribe.poll(waiter, &request.publisher, stream, track, &request.msg, &request.lapse)
 							}
-							Err(err) => Poll::Ready(Some(Err(err.clone()))),
+							Err(err) => Poll::Ready(Some(Err((err.clone(), None)))),
 						}
 					};
 					let mut selected = match result {
@@ -1559,13 +1570,13 @@ impl Serving {
 					}
 					let Some((mut serve, edge)) = selected else {
 						if self.datagrams.is_none()
-							&& let Some(err) = &self.stream_error
+							&& let Some((err, retry)) = &self.stream_error
 						{
 							if self.resuming {
 								self.step = Self::resume_failed(request, err.clone())?;
 								continue;
 							}
-							return Poll::Ready(Ok(refused(err.clone(), request.msg.rendezvous, true)));
+							return Poll::Ready(Ok(refused(err.clone(), request.msg.rendezvous, true, *retry)));
 						}
 						return Poll::Pending;
 					};
@@ -1603,7 +1614,7 @@ impl Serving {
 					let properties =
 						match track_properties(serve.track.info(), request.msg.properties_wanted, version, flate) {
 							Ok(properties) => properties,
-							Err(err) => return Poll::Ready(Ok(Subscribed::Refused(err.to_string(), err))),
+							Err(err) => return Poll::Ready(Ok(Subscribed::Refused(err.to_string(), err, None))),
 						};
 					request.save_join(self.filter, edge.largest, &cache, &serve.ranking);
 
@@ -1855,7 +1866,7 @@ impl SubscribeTrack {
 		track: &track::Consumer,
 		msg: &ietf::Subscribe<'_>,
 		lapse: &Lapse,
-	) -> Poll<Option<Result<(TrackServe, LiveEdge), Error>>> {
+	) -> Poll<Option<Result<(TrackServe, LiveEdge), (Error, Option<Duration>)>>> {
 		let setup = wait!(Setup => publisher.poll_until_withdrawn(
 			stream,
 			super::request_stream::fin_cancels(publisher.version),
@@ -1900,7 +1911,7 @@ impl SubscribeTrack {
 		let mut subscribed: track::Subscriber = match answer {
 			// A peer reads the end of the subscription as the track's.
 			Some(Ok(found)) => found.parked(),
-			Some(Err(err)) => return Poll::Ready(Some(Err(err))),
+			Some(Err(err)) => return Poll::Ready(Some(Err((err, subscribing.retry())))),
 			None => return Poll::Ready(None),
 		};
 
@@ -3311,10 +3322,9 @@ impl Publisher {
 	fn reject_subscribe(
 		&self,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
-		err: &Error,
-		reason: &str,
+		error: &ietf::RequestError<'_>,
 	) -> Result<super::request_stream::Deliver, Error> {
-		self.buffer_subscribe_error(writer, err, reason)?;
+		writer.buffer_message(ietf::RequestError::ID, error)?;
 		Ok(super::request_stream::Deliver::new())
 	}
 
@@ -15781,9 +15791,17 @@ mod serve_tests {
 		drop(claim);
 	}
 
-	/// A `kind` request whose track the publisher refuses with `err`, as the REQUEST_ERROR it
+	/// Who refuses the track a request asks for.
+	enum Refuser {
+		/// The origin, with this error.
+		Local(Error),
+		/// An upstream moq-transport publisher, relayed: its REQUEST_ERROR's (code, Retry Interval).
+		Upstream(u64, u64),
+	}
+
+	/// A `kind` request whose track `refuser` refuses, as the REQUEST_ERROR the publisher
 	/// writes: (code, Retry Interval).
-	async fn refused_track(version: Version, kind: request::Kind, err: Error) -> (u64, u64) {
+	async fn refused_track(version: Version, kind: request::Kind, refuser: Refuser) -> (u64, u64) {
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let route = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let mut requests = route.broadcast().requests();
@@ -15845,7 +15863,26 @@ mod serve_tests {
 			)),
 			kind => unreachable!("{kind:?} asks for no track"),
 		};
-		let rejecting = async { requests.requested_track().await.unwrap().reject(err) };
+		let rejecting = async move {
+			let request = requests.requested_track().await.unwrap();
+			match refuser {
+				Refuser::Local(err) => request.reject(err),
+				Refuser::Upstream(error_code, retry_interval) => {
+					let (mut upstream, _tasks) = super::super::subscriber::refusing_upstream(
+						version,
+						ietf::RequestError {
+							error_code,
+							reason_phrase: "upstream".into(),
+							retry_interval,
+						},
+					)
+					.await;
+					upstream
+						.run_subscribe(crate::Path::from_static("room"), requests, None, request)
+						.await;
+				}
+			}
+		};
 		futures::pin_mut!(rejecting);
 		if let futures::future::Either::Right((res, _)) = futures::future::select(rejecting, serving.as_mut()).await {
 			panic!("{version} {kind:?}: ended unasked: {res:?}");
@@ -15882,8 +15919,21 @@ mod serve_tests {
 					(Error::Unauthorized, (0x1, 0)),
 				] {
 					let case = format!("{version} {kind:?} {err:?}");
-					assert_eq!(refused_track(version, kind, err).await, expected, "{case}");
+					assert_eq!(refused_track(version, kind, Refuser::Local(err)).await, expected, "{case}");
 				}
+			}
+		}
+	}
+
+	/// A relay refuses its reader with the Retry Interval its upstream's refusal asked for,
+	/// where deriving one from the code would differ: DOES_NOT_EXIST reads as `NotFound`,
+	/// which derives "never retry", and GOING_AWAY derives a retry the upstream declined.
+	#[kio::test]
+	async fn a_relay_forwards_an_upstream_refusal_s_retry_interval() {
+		for version in ALL_VERSIONS {
+			for refusal in [(0x10, 5000), (0x6, 0)] {
+				let relayed = refused_track(version, request::Kind::Subscribe, Refuser::Upstream(refusal.0, refusal.1));
+				assert_eq!(relayed.await, refusal, "{version}");
 			}
 		}
 	}

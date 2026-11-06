@@ -549,6 +549,10 @@ pub(crate) struct TrackState {
 
 	// The error that caused the track to be aborted, if any.
 	abort: Option<Error>,
+	// How long the upstream refusing the request asked to wait before asking again, kept so
+	// a relay refuses its own readers with the same interval rather than deriving one.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	retry: Option<Duration>,
 
 	// Whether the declared end settled before a write that could reopen it or an abort, or
 	// `closed()` reported it: every group below it was produced and finished then, so the
@@ -5531,6 +5535,12 @@ impl Subscribing {
 		}
 	}
 
+	/// How long the upstream that refused the track asked to wait before asking again.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn retry(&self) -> Option<Duration> {
+		self.state.read().retry
+	}
+
 	/// Poll until the peer confirms the subscription, yielding the [`Subscriber`].
 	/// Errors if the track is aborted or not found.
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<Subscriber>> {
@@ -5595,6 +5605,12 @@ pub struct Resolving {
 }
 
 impl Resolving {
+	/// How long the upstream that refused the track asked to wait before asking again.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn retry(&self) -> Option<Duration> {
+		self.state.read().retry
+	}
+
 	/// A handle on the track instance this resolves, whatever its broadcast serves later.
 	pub fn track(&self) -> Consumer {
 		Consumer {
@@ -9490,6 +9506,15 @@ impl Request {
 	pub fn reject(self, err: Error) {
 		if let Ok(mut state) = self.state.write() {
 			state.abort = Some(err);
+		}
+	}
+
+	/// Reject the request as an upstream refusal that asked to be tried again after `retry`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn refuse(self, err: Error, retry: Duration) {
+		if let Ok(mut state) = self.state.write() {
+			state.abort = Some(err);
+			state.retry = Some(retry);
 		}
 	}
 
