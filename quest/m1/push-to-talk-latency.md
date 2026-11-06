@@ -37,13 +37,16 @@ fails on the defaults by design?
   on.
 - (c) Run both rows, roughly doubling the nine-minute nightly step.
 
-What did not depend on Watch landed in
-[moq-dev/moq#8009](https://github.com/moq-dev/moq/pull/8009): the run uses the publisher's
-default Opus (20 ms frames, 64 kbit/s), and the page records the resolved
-delay over time, so each press's `jitter_buffer` ends at the first PCM that
-reaches the target the ring held when that PCM landed. What remains is to
-switch the page to `delay: "auto"`, measure on `kixtop` again, and set and
-enforce the budget.
+[moq-dev/moq#8009](https://github.com/moq-dev/moq/pull/8009) landed the
+analyzer's delay timeline: the page records the resolved delay over time, so
+each press's `jitter_buffer` ends at the first PCM that reaches the target the
+ring held when that PCM landed. The run keeps 60 ms / 128 kbit/s Opus too: a
+2026-11-06 Linux run on the default 20 ms Opus at the fixed 300 ms delay had no
+underrun or stall but lost 2 of 22 heads ("utterance head was not decoded"),
+as the defaults' Linux run below did, while the nightly at 60 ms passes. That
+is the ordering defect [Push-to-talk](/quest/m1/push-to-talk/README.md) owns.
+What remains is to switch the page to the defaults, measure on `kixtop` again,
+and set and enforce the budget.
 
 Measured 2026-11-05 on the defaults, before Watch, one run of 22 presses
 each, Chromium 156 headless through a local relay. `kixtop` is a MacBook Air
