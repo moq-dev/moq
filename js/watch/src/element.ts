@@ -248,7 +248,6 @@ export default class MoqWatch extends HTMLElement {
 
 		this.player = new Player({
 			origin: this.connection.origin,
-			probe: this.connection.probe,
 			enabled: this.#enabled,
 			name: this.#name,
 			follow: this.#follow,

@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Video selects from the viewer grant
+
+`Player` no longer takes `probe`: video selects from its viewer's grant (`viewer.viewers`), less the audio the claim covers, instead of the connection's whole `estimatedRecvRate`.
+Remove `probe` and pass `viewer: { viewers: connection.viewers }`; without a claim, video selects the best rendition its target allows.
+`Video.Source` takes `rate`, the receive rate in bits per second video may spend, in place of `probe`.
+To keep selecting from the whole connection estimate, pass `rate: new Signals.Derived([connection.probe], (probe) => probe?.estimatedRecvRate)`.
+An unknown rate now holds the last one instead of selecting the best rendition, so a reconnect no longer jumps to the top of the ladder.
+
 ### Players claim a viewer target from the catalog
 
 `<moq-watch>` and `@moq/room` now hold a viewer on their connection's `viewers` for as long as they download, with a ceiling taken from the catalog, so a relay that probes raises the receive estimate toward the best enabled rendition.
