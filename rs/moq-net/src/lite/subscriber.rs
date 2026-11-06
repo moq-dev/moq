@@ -164,9 +164,12 @@ struct DatagramEnds {
 	tracks: Vec<(u64, datagram::Producer)>,
 	/// Lite-05/06: the datagram tracks whose stream track finished, by broadcast and name.
 	shared: Vec<((Path, String), datagram::Producer)>,
-	/// Lite-05/06: the subscriptions removed, by Subscribe ID, with the broadcast and name
+	/// Lite-05/06: the subscriptions finished, by Subscribe ID, with the broadcast and name
 	/// whose datagram track takes their datagrams.
 	subscribes: Vec<(u64, (Path, String))>,
+	/// Closed once these ends apply. Each serve that queued one keeps its stream until then, so
+	/// the peer's stream credit bounds what a datagram flood can leave queued.
+	applied: kio::Producer<()>,
 }
 
 struct TrackEntry {
@@ -877,10 +880,18 @@ impl Subscriber {
 
 	/// Remove a subscription, releasing the session's handle on its producer.
 	fn remove_subscribe(&self, id: u64) {
+		self.subscribes.lock().remove(&id);
+	}
+
+	/// Remove a subscription its publisher finished. On lite-05/06 its datagrams keep their
+	/// route until the ends apply, which the returned consumer's close reports.
+	fn finish_subscribe(&self, id: u64) -> kio::Consumer<()> {
 		let removed = self.subscribes.lock().remove(&id);
+		let mut ends = self.datagram_ends.lock();
 		if let Some(legacy) = removed.and_then(|mut entry| entry.legacy.take()) {
-			self.datagram_ends.lock().subscribes.push((id, legacy));
+			ends.subscribes.push((id, legacy));
 		}
+		ends.applied.consume()
 	}
 
 	/// Apply the datagram ends the sources read, once the driver routed the datagrams received
@@ -2675,6 +2686,12 @@ enum DatagramState {
 		subscriber: Box<track::Subscriber>,
 		priority: i8,
 	},
+	/// The publisher ended the track: waiting for the end to apply, see
+	/// [`Subscriber::end_datagrams`]. Lite-07 keeps its stream until then.
+	Ending {
+		applied: kio::Consumer<()>,
+		writer: Option<crate::coding::Writer<crate::transport::boxed::SendStream, Version>>,
+	},
 	/// Our side finished: waiting for the publisher to read it.
 	Finish {
 		writer: crate::coding::Writer<crate::transport::boxed::SendStream, Version>,
@@ -2752,7 +2769,7 @@ impl DatagramServe {
 			| DatagramState::Info { request, .. }
 			| DatagramState::Subscribe { request, .. } => request.name(),
 			DatagramState::Live { producer, .. } | DatagramState::Shared { producer, .. } => producer.name(),
-			DatagramState::Finish { .. } | DatagramState::Done => "",
+			DatagramState::Ending { .. } | DatagramState::Finish { .. } | DatagramState::Done => "",
 		}
 	}
 
@@ -2868,7 +2885,7 @@ impl DatagramServe {
 					};
 					if let Some(end) = ended {
 						let DatagramState::Live {
-							producer, mut stream, ..
+							producer, stream, ..
 						} = std::mem::replace(&mut self.state, DatagramState::Done)
 						else {
 							unreachable!()
@@ -2878,12 +2895,13 @@ impl DatagramServe {
 							producer.abort(err.clone());
 							return Poll::Ready(Err(err));
 						}
-						self.subscriber.datagram_ends.lock().tracks.push((self.id, producer));
-						if stream.writer.finish().is_ok() && version.waits_for_subscriber_fin() {
-							self.state = DatagramState::Finish { writer: stream.writer };
-							continue;
-						}
-						return Poll::Ready(Ok(()));
+						let mut ends = self.subscriber.datagram_ends.lock();
+						ends.tracks.push((self.id, producer));
+						self.state = DatagramState::Ending {
+							applied: ends.applied.consume(),
+							writer: Some(stream.writer),
+						};
+						continue;
 					}
 					match producer.poll_priority(waiter, Some(*priority)) {
 						Poll::Ready(Some(next)) => {
@@ -2916,8 +2934,13 @@ impl DatagramServe {
 							unreachable!()
 						};
 						let key = (self.path.clone(), producer.name().to_string());
-						self.subscriber.datagram_ends.lock().shared.push((key, producer));
-						return Poll::Ready(Ok(()));
+						let mut ends = self.subscriber.datagram_ends.lock();
+						ends.shared.push((key, producer));
+						self.state = DatagramState::Ending {
+							applied: ends.applied.consume(),
+							writer: None,
+						};
+						continue;
 					}
 					match producer.poll_priority(waiter, Some(*priority)) {
 						Poll::Ready(Some(next)) => {
@@ -2932,6 +2955,16 @@ impl DatagramServe {
 						},
 						Poll::Pending => return Poll::Pending,
 					}
+				}
+				DatagramState::Ending { applied, writer } => {
+					ready!(applied.poll_closed(waiter));
+					let Some(mut writer) = writer.take() else {
+						return Poll::Ready(Ok(()));
+					};
+					if writer.finish().is_err() || !version.waits_for_subscriber_fin() {
+						return Poll::Ready(Ok(()));
+					}
+					self.state = DatagramState::Finish { writer };
 				}
 				DatagramState::Finish { writer } => {
 					let _ = ready!(writer.poll_close(waiter));
@@ -2981,7 +3014,7 @@ impl DatagramServe {
 				self.unregister_shared(&producer);
 				producer.abort(err);
 			}
-			DatagramState::Finish { .. } | DatagramState::Done => {}
+			DatagramState::Ending { .. } | DatagramState::Finish { .. } | DatagramState::Done => {}
 		}
 	}
 }
@@ -3004,9 +3037,12 @@ impl kio::Task for DatagramServe {
 			return Poll::Ready(());
 		}
 		ready!(self.gate.poll_ready(waiter));
-		// Nothing is left to revoke once our side finished, nor on a closed session, whose
-		// end decides how the track ends.
-		if !matches!(self.state, DatagramState::Finish { .. } | DatagramState::Done)
+		// Nothing is left to revoke once the track ended, nor on a closed session, whose end
+		// decides how the track ends.
+		if !matches!(
+			self.state,
+			DatagramState::Ending { .. } | DatagramState::Finish { .. } | DatagramState::Done
+		)
 			&& self.gate.poll_denied(waiter).is_ready()
 			&& self.closed.poll_closed(waiter).is_pending()
 		{
@@ -9606,6 +9642,12 @@ enum TrackRunState {
 		_working: crate::session::Working,
 	},
 	Serve(ServeLoop),
+	/// Lite-05/06: the publisher finished the track, whose subscription keeps its stream until
+	/// the datagram ends apply, see [`Subscriber::end_datagrams`].
+	Ending {
+		applied: kio::Consumer<()>,
+		active: SubStream,
+	},
 	/// Preserve the completion FIN until the publisher acknowledges it. Lite-07 also reads
 	/// on to the publisher's FIN in reply, so dropping our receive half never refuses it.
 	Finish {
@@ -9684,12 +9726,26 @@ impl TrackServeRun {
 				}
 				// Each fetch in flight resets itself as it drops, seeing the same denial.
 			}
-			TrackRunState::Finish { .. } | TrackRunState::Done => {}
+			TrackRunState::Ending { .. } | TrackRunState::Finish { .. } | TrackRunState::Done => {}
 		}
 	}
 }
 
 impl TrackServeRun {
+	/// Finish our side of the subscription, `true` once it waits for the publisher to read it.
+	fn finish_sub(&mut self, mut active: SubStream, finished: bool) -> bool {
+		let version = self.serve.subscriber.version;
+		if active.stream.writer.finish().is_err() || !finished || !version.waits_for_subscriber_fin() {
+			return false;
+		}
+		self.state = TrackRunState::Finish {
+			writer: Some(active.stream.writer),
+			reader: version.keeps_subscribe_open().then_some(active.stream.reader),
+			_working: active._working,
+		};
+		true
+	}
+
 	/// Nobody wants the track anymore (the origin failed over, the reader left): stop
 	/// waiting on a token or a peer that may never answer, which would otherwise hold
 	/// this task, its TRACK stream, and the track for good. Dropping the fetch resets the
@@ -9730,7 +9786,7 @@ impl kio::Task for TrackServeRun {
 		// A finished track only waits for its FIN to be acknowledged: nothing is left to revoke.
 		// Nor on a closed session, whose grants end with it: the session's end decides how
 		// its tracks end.
-		if !matches!(self.state, TrackRunState::Finish { .. })
+		if !matches!(self.state, TrackRunState::Ending { .. } | TrackRunState::Finish { .. })
 			&& self.gate.poll_denied(waiter).is_ready()
 			&& self.serve.subscriber.session.clone().poll_closed(waiter).is_pending()
 		{
@@ -9870,21 +9926,34 @@ impl kio::Task for TrackServeRun {
 						datagrams.end(Err(Error::Cancel));
 					}
 
-					if let Sub::Active(mut active) = serve_loop.sub {
-						self.serve.subscriber.remove_subscribe(active.id);
-						if active.stream.writer.finish().is_ok()
-							&& finished && self.serve.subscriber.version.waits_for_subscriber_fin()
-						{
-							let keeps_open = self.serve.subscriber.version.keeps_subscribe_open();
-							self.state = TrackRunState::Finish {
-								writer: Some(active.stream.writer),
-								reader: keeps_open.then_some(active.stream.reader),
-								_working: active._working,
-							};
+					if let Sub::Active(active) = serve_loop.sub {
+						let version = self.serve.subscriber.version;
+						if !finished {
+							self.serve.subscriber.remove_subscribe(active.id);
+						} else if version.has_datagrams() && !version.has_datagram_tracks() {
+							// The subscription carries its name's datagrams, which end with it.
+							let applied = self.serve.subscriber.finish_subscribe(active.id);
+							self.state = TrackRunState::Ending { applied, active };
+							continue;
+						} else {
+							self.serve.subscriber.remove_subscribe(active.id);
+						}
+						if self.finish_sub(active, finished) {
 							continue;
 						}
 					}
 
+					return Poll::Ready(());
+				}
+				TrackRunState::Ending { applied, .. } => {
+					ready!(applied.poll_closed(waiter));
+					let TrackRunState::Ending { active, .. } = std::mem::replace(&mut self.state, TrackRunState::Done)
+					else {
+						unreachable!()
+					};
+					if self.finish_sub(active, true) {
+						continue;
+					}
 					return Poll::Ready(());
 				}
 				TrackRunState::Finish { writer, reader, .. } => {
