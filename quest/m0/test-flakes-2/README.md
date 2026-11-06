@@ -112,7 +112,6 @@ Public API: none. Wire: none.
 - [reload.test.ts's close-drain tests pass under load](/quest/m0/test-flakes-2/reload-close-drain.md) - the drain cases in `js/net`'s reload tests pass in loaded multi-file runs
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
 - [Test PulseAudio servers stay off the desktop's D-Bus](/quest/m0/test-flakes-2/pulse-dbus.md) - concurrent media runs on one desktop never collide on `org.PulseAudio1`
-- [The P2P data-channel test transfers its frame](/quest/m0/test-flakes-2/p2p-data-channel.md) - Interop's two-peer data-channel test stops stalling after a failed send
 - [The lite-06 datagram end survives a session close](/quest/m0/test-flakes-2/datagram-end-close.md) - the quarantined lite-06 case passes in loaded runs, re-enabled once its end/close race is fixed
 - [moq-net's pool-debt flight test holds its bound in parallel runs](/quest/m0/test-flakes-2/pool-debt-flight.md) - `pool_debt_sheds_a_flight_without_its_cached_group` stays under `2 * POOL` when it shares a process with moq-net's other tests
 - [The Python audio playout-delay test reads its frames](/quest/m0/test-flakes-2/audio-playout-delay.md) - `test_audio_consumer_reports_its_playout_delay` stops timing out on its first read in the merge queue
