@@ -41,6 +41,7 @@ test("two peer connections complete MoQ SETUP and transfer a frame without a rel
 	const page = await browser.newPage();
 	const errors: string[] = [];
 	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (m) => console.log(m.text()));
 	try {
 		await page.goto(`http://127.0.0.1:${server.port}/`);
 		const report: Report = await page.evaluate(() => window.checkTransport());

@@ -55,7 +55,7 @@ window.checkTransport = async () => {
 	const track = broadcast.createTrack("data", { timescale: Moq.Time.Timescale.MILLI });
 	let client: Awaited<ReturnType<typeof Moq.Connection.connect>> | undefined;
 	let server: Awaited<ReturnType<typeof Moq.Connection.accept>> | undefined;
-	const mark = (m: string) => console.log(`STAGE ${performance.now().toFixed(0)} ${m}`);
+	const mark = (m: string) => console.log(`STAGE ${new Date().toISOString()} ${m}`);
 	try {
 		mark('offer');
 		await left.setLocalDescription(await left.createOffer());

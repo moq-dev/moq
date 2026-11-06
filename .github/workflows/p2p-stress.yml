@@ -22,9 +22,15 @@ jobs:
       - uses: ./.github/actions/nix
       - run: nix develop --command bun install --frozen-lockfile
         shell: bash -leo pipefail {0}
-      - run: cd test/p2p && nix develop --command bun test ./stress.browser.ts
+      - name: Loop the real test
         shell: bash -leo pipefail {0}
-        env:
-          N: "100000"
-          P: "1"
-          BUDGET_MS: "1200000"
+        run: |
+          cd test/p2p
+          end=$((SECONDS + 1500)); runs=0; fails=0
+          while (( SECONDS < end )); do
+            runs=$((runs + 1))
+            if ! nix develop --command bun test ./transport.browser.ts > out.log 2>&1; then
+              fails=$((fails + 1)); echo "=== FAIL run $runs"; grep -v dbus out.log
+            fi
+          done
+          echo "fails $fails of $runs"
