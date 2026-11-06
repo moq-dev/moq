@@ -28,7 +28,7 @@ import {
 	type SubscribeFinish,
 	SubscribeUpdate,
 } from "./subscribe.ts";
-import { Track as TrackMessage } from "./track.ts";
+import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { ALPN_05, ALPN_06, ALPN_07_WIP, hasRanges, keepsSubscribeOpen, Version } from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
@@ -3404,3 +3404,55 @@ test("lite-06: a datagram request failing behind the shared writer resets rather
 		pair.server.close();
 	}
 });
+
+// Lite-05/06: a requester reads TRACK_INFO as the name being accepted, and its SUBSCRIBE, on a
+// stream of its own, can arrive after a datagram written meanwhile. That SUBSCRIBE still sends
+// it, whether the datagram track answered the TRACK or rides beside a stream track of the name.
+for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
+	for (const stream of [false, true]) {
+		const label = version === Version.DRAFT_06 ? "lite-06" : "lite-05";
+		test(`${label}, stream track ${stream}: a SUBSCRIBE sends the datagrams written since its TRACK_INFO`, async () => {
+			const pair = createMockTransportPair(version === Version.DRAFT_06 ? ALPN_06 : ALPN_05);
+			const sent: Uint8Array[] = [];
+			Object.defineProperty(pair.server.datagrams, "writable", {
+				value: new WritableStream<Uint8Array>({
+					write(chunk) {
+						sent.push(chunk);
+					},
+				}),
+			});
+			const origin = new OriginProducer();
+			const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+			const broadcast = publish(origin, Path.from("test"));
+			const datagrams = broadcast.createDatagrams("events");
+			if (stream) broadcast.createTrack("events", { timescale: Timescale.MILLI });
+
+			const track = await Stream.open(pair.client, { version });
+			const trackServer = await Stream.accept(pair.server, version);
+			if (!trackServer) throw new Error("publisher never accepted the track stream");
+			void publisher.runTrackInfo(new TrackMessage(Path.from("test"), "events"), trackServer);
+			await TrackInfo.decode(track.reader, version);
+
+			datagrams.append(undefined, Uint8Array.of(0xaa));
+
+			const subscribe = await Stream.open(pair.client, { version });
+			const subscribeServer = await Stream.accept(pair.server, version);
+			if (!subscribeServer) throw new Error("publisher never accepted the subscribe stream");
+			try {
+				void publisher.runSubscribe(
+					new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "events", priority: 0 }),
+					subscribeServer,
+				);
+				for (let i = 0; i < 20 && sent.length === 0; i++) await new Promise((resolve) => setImmediate(resolve));
+				expect(sent.length).toBe(1);
+			} finally {
+				track.close();
+				subscribe.close();
+				publisher.close();
+				origin.close();
+				pair.client.close();
+				pair.server.close();
+			}
+		});
+	}
+}

@@ -542,6 +542,14 @@ export class Publisher {
 	// A rejected lookup is evicted so a retry can re-probe.
 	#trackInfo = new WeakMap<broadcast.Consumer, Map<string, TrackInfoEntry>>();
 
+	// Lite-05/06: the datagram tracks this session's answered TRACKs hold, read from each
+	// answer on. The requester reads TRACK_INFO as the publisher accepting the name, but the
+	// datagrams flow on the SUBSCRIBE it sends alongside, which can arrive later. That
+	// SUBSCRIBE reads from a clone of the hold, keeping its position, rather than from its own
+	// arrival, which would lose what was written in between. The requester keeps its TRACK open
+	// until the SUBSCRIBE has a response, so the hold outlasts its arrival.
+	#heldDatagrams = new WeakMap<broadcast.Consumer, Map<string, Set<datagram.Consumer>>>();
+
 	/**
 	 * Creates a new Publisher instance.
 	 * @param quic - The WebTransport session to use
@@ -1085,7 +1093,7 @@ export class Publisher {
 			// Serve datagrams concurrently with groups whenever the transport carries them
 			// (the writer exists iff so). No group fallback: otherwise they simply aren't sent.
 			if (this.#datagramWriter && !hasDatagramTracks(this.version)) {
-				legacy = wireOf(front).liveDatagrams(msg.track);
+				legacy = this.#held(front, msg.track)?.clone() ?? wireOf(front).liveDatagrams(msg.track);
 				if (legacy) {
 					legacy.setPriority(msg.priority);
 					datagrams = this.#runDatagrams(legacy, { sub: msg.id, stamp })
@@ -1814,6 +1822,7 @@ export class Publisher {
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			let info: TrackInfoMessage;
+			let datagrams: datagram.Consumer | undefined;
 			try {
 				info = await this.#resolveTrackInfo(front, msg.track, hold.signal);
 			} catch (err) {
@@ -1823,13 +1832,21 @@ export class Publisher {
 					toStreamCode(error(err)) !== StreamCode.NotFound
 				)
 					throw err;
-				const datagrams = front.datagrams(msg.track);
+				const asked = front.datagrams(msg.track);
 				try {
-					info = trackInfoMessage(await untilAborted(datagrams.info(), hold.signal), this.version);
-				} finally {
-					datagrams.close();
+					info = trackInfoMessage(await untilAborted(asked.info(), hold.signal), this.version);
+				} catch (err) {
+					asked.close();
+					throw err;
 				}
+				datagrams = asked;
 			}
+			// Lite-05/06: the name's datagram track, read from this answer on, held for the
+			// SUBSCRIBE alongside, beside a stream track too.
+			if (hasDatagrams(this.version) && !hasDatagramTracks(this.version)) {
+				datagrams ??= wireOf(front).liveDatagrams(msg.track);
+			}
+			if (datagrams) this.#holdDatagrams(front, datagrams, hold.signal);
 			if (watch.revoked()) throw unauthorized(msg.broadcast);
 			await info.encode(stream.writer, this.version);
 			console.debug(`track info: broadcast=${msg.broadcast} track=${msg.track}`);
@@ -1909,6 +1926,35 @@ export class Publisher {
 			tracks?.close();
 			watch.dispose();
 		}
+	}
+
+	// Hold `consumer` of `front` for the SUBSCRIBE alongside until `hold` aborts.
+	#holdDatagrams(front: broadcast.Consumer, consumer: datagram.Consumer, hold: AbortSignal) {
+		let names = this.#heldDatagrams.get(front);
+		if (!names) {
+			names = new Map();
+			this.#heldDatagrams.set(front, names);
+		}
+		let held = names.get(consumer.name);
+		if (!held) {
+			held = new Set();
+			names.set(consumer.name, held);
+		}
+		const set = held;
+		set.add(consumer);
+		const release = () => {
+			set.delete(consumer);
+			if (set.size === 0 && names.get(consumer.name) === set) names.delete(consumer.name);
+			consumer.close();
+		};
+		if (hold.aborted) release();
+		else hold.addEventListener("abort", release, { once: true });
+	}
+
+	// The datagram track `name` of `front` an answered TRACK holds, if any.
+	#held(front: broadcast.Consumer, name: string): datagram.Consumer | undefined {
+		const held = this.#heldDatagrams.get(front)?.get(name);
+		return held?.values().next().value;
 	}
 
 	// Resolve (and cache) a track's immutable TRACK_INFO by asking the application.
@@ -2027,7 +2073,7 @@ export class Publisher {
 		stream: Stream,
 		signal: AbortSignal,
 	): Promise<void> {
-		const track = front.datagrams(msg.track);
+		const track = this.#held(front, msg.track)?.clone() ?? front.datagrams(msg.track);
 		track.setPriority(msg.priority);
 		const updates = (async () => {
 			for (;;) {
