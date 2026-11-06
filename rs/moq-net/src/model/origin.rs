@@ -4066,7 +4066,7 @@ impl FrontServe {
 	/// Read the table for the machine: the best route and whether
 	/// the serving source is on its way out. Also what the watch wakes for.
 	fn select(&mut self) -> Event {
-		let table = self.shared.read();
+		let mut table = self.shared.lock();
 		if table.closed {
 			return Event::Closed;
 		}
@@ -4116,6 +4116,16 @@ impl FrontServe {
 			local: entry.local,
 			carried: !entry.instance.is_minted(),
 		});
+		// No candidate irreversibly ends this front. Leave the cache under the same lock
+		// a lookup takes, before a route can return and a newcomer join the broadcast the
+		// end actions are about to close. Existing requesters keep their original verdict.
+		if best.is_none() {
+			table
+				.fronts
+				.remove_if(&(self.path.clone(), self.horizon, self.pin.clone()), |front| {
+					front.request.same_channel(&self.request)
+				});
+		}
 		let serving_closing = self
 			.front
 			.serving()
@@ -9003,6 +9013,60 @@ mod tests {
 		assert_eq!(paths, ["p1/.svc/foo"]);
 	}
 
+	/// Reads through an unmetered track handle count toward no session, while the metered
+	/// handle on the same broadcast still counts the same group.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_unmetered_track_counts_nothing() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let producer = origin(1).produce();
+		let route = producer.route("room/alice", RouteOptions::default()).unwrap();
+		let track = route
+			.broadcast()
+			.create_track("video", crate::track::Info::timed())
+			.unwrap();
+		let consumer = producer.consume().with_stats(
+			registry
+				.tier(stats::Tier::default())
+				.session(crate::Path::from_static("viewer")),
+		);
+		let broadcast = consumer.request("room/alice", None).await.expect("resolves");
+		let bytes = || -> u64 {
+			registry
+				.snapshot()
+				.traffic()
+				.into_iter()
+				.map(|(_, _, traffic)| traffic.bytes)
+				.sum()
+		};
+
+		let mut unmetered = broadcast
+			.track("video")
+			.unwrap()
+			.unmetered()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let mut metered = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"frame".as_ref()).unwrap();
+		group.finish().unwrap();
+
+		let mut read = unmetered.recv_group().await.unwrap().expect("a group");
+		assert_eq!(
+			read.read_frame().await.unwrap().expect("a frame").payload.as_ref(),
+			b"frame"
+		);
+		assert_eq!(bytes(), 0, "an unmetered read counts nothing");
+
+		let mut read = metered.recv_group().await.unwrap().expect("a group");
+		assert_eq!(
+			read.read_frame().await.unwrap().expect("a frame").payload.as_ref(),
+			b"frame"
+		);
+		assert_eq!(bytes(), 5, "the metered handle still counts");
+	}
+
 	/// A route that turns up later is filtered the same way as the replay.
 	#[kio::test]
 	async fn hidden_route_announced_later_stays_hidden() {
@@ -10918,6 +10982,79 @@ mod tests {
 			payloads.push(group.read_frame().await.unwrap().unwrap().payload);
 		}
 		assert_eq!(payloads.last().map(|p| &p[..]), Some(&b"late"[..]));
+	}
+
+	/// Once a front observes a gap, a request after the route returns cannot join it while
+	/// its terminal actions are still being applied on another thread.
+	#[test]
+	fn a_request_after_a_gap_skips_the_front_already_ending() {
+		let (producer, mut driver) = Producer::new(Config::default());
+		let consumer = producer.consume();
+		let publication = producer.route("room/alice", RouteOptions::default()).unwrap();
+		let path = consumer.absolute("room/alice").unwrap();
+		let key = (path.clone(), Horizon::default(), None);
+		let broadcast = broadcast::Info::new().produce();
+		let held = broadcast.consume();
+		let (request, watch) = {
+			let mut state = consumer.shared.lock();
+			let selected = state
+				.best_route(&path, Horizon::default(), &HashSet::new(), |_| true)
+				.unwrap()
+				.instance
+				.clone();
+			let request = kio::Producer::new(PendingFront {
+				resolved: None,
+				via: None,
+				first: None,
+				selected,
+				refused: false,
+			});
+			state.fronts.insert(
+				key,
+				RemoteFront {
+					request: request.clone(),
+					broadcast: held.weak(),
+				},
+			);
+			let watch = state.watch_front(&consumer.shared, &path, Horizon::default(), request.clone());
+			(request, watch)
+		};
+		let mut front = FrontServe::new(FrontTask {
+			shared: consumer.shared.clone(),
+			broadcast,
+			path,
+			horizon: Horizon::default(),
+			pin: None,
+			watch,
+			request,
+			timers: consumer.timers.clone(),
+		});
+		let waiter = kio::Waiter::noop();
+		assert!(kio::Task::poll(&mut front, &waiter).is_pending());
+		let Poll::Ready(Ok(first)) = consumer
+			.lookup(Path::new("room/alice").unwrap(), None)
+			.into_inner()
+			.poll_ok(&waiter)
+		else {
+			panic!("the first front did not resolve")
+		};
+
+		publication.withdraw();
+		let ending = front.select();
+		assert!(matches!(ending, Event::Selected { best: None, .. }));
+		publication.announce().unwrap();
+		let next = consumer.lookup(Path::new("room/alice").unwrap(), None).into_inner();
+		assert!(next.poll_ok(&waiter).is_pending(), "joined the front already ending");
+
+		front.events.push_back(ending);
+		assert!(kio::Task::poll(&mut front, &waiter).is_ready());
+		driver.poll(Instant::ZERO, &waiter).unwrap();
+		let Poll::Ready(Ok(fresh)) = next.poll_ok(&waiter) else {
+			panic!("the fresh front did not resolve")
+		};
+		assert!(!fresh.is_clone(&first));
+		assert!(!fresh.is_closed());
+		assert!(fresh.track("video").is_ok());
 	}
 
 	/// A re-announce that lands before the front acts on the retraction reuses
