@@ -1027,7 +1027,10 @@ mod tests {
 				_ = probe::flush_entered() => {}
 			}
 		};
-		if kio::clock::timeout(std::time::Duration::from_secs(1), entered).await.is_err() {
+		if kio::clock::timeout(std::time::Duration::from_secs(1), entered)
+			.await
+			.is_err()
+		{
 			probe::release_flush();
 			panic!("flush never reached the codec thread");
 		}
