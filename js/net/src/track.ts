@@ -1799,8 +1799,8 @@ export class Producer {
 	 * Append a new group with the next sequence number: one past this producer's own writes.
 	 *
 	 * Appending says the producer will not go back, so it skips every sequence below the new
-	 * group that it never produced, from the lowest it produced since its last append, as
-	 * {@link skipGroups} would, replacing any drop there. Those sequences are then final: creating one
+	 * group that it never produced, from just past its previous append (before the first, from
+	 * the lowest group it created), as {@link skipGroups} would, replacing any drop there. Those sequences are then final: creating one
 	 * throws {@link Skipped}. Appending alone never leaves such a gap; one left by out-of-order
 	 * {@link createGroup} calls is what it names.
 	 *
@@ -1873,8 +1873,8 @@ export class Producer {
 	}
 
 	// Settle an append at `sequence`: skip every sequence below it this track's own publisher
-	// never produced, from the lowest it produced since its last append, since appending says it
-	// will not go back. The skip replaces a drop given there, as `skipGroups` does.
+	// never produced, from just past its previous append (before the first, from the lowest it
+	// produced), since appending says it will not go back. The skip replaces a drop given there, as `skipGroups` does.
 	#settleAppend(sequence: bigint): void {
 		const from = this.#appended ?? this.#produced[0]?.start;
 		if (from !== undefined) {
