@@ -287,7 +287,7 @@ fn tls(version: Version) -> (driver::server::Config, driver::client::Config) {
 }
 
 fn origin_producer(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(moq_net::Hop::new(hop).unwrap()));
+	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	origin
 }

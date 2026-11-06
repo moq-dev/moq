@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use moq_net::track::Delay;
 use moq_net::track::{Info, Range, Subscription};
-use moq_net::{Hop, Timescale, Timestamp, Version, kio, origin, track};
+use moq_net::{Timescale, Timestamp, Version, kio, origin, track};
 
 use crate::support::harness::{MockConnectOptions, MockPair, connect_mock, peer, spawn};
 
@@ -36,7 +36,7 @@ const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip"];
 const VERSION: &str = "moq-lite-07-wip";
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	origin
 }
