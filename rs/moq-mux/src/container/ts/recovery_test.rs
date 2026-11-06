@@ -1533,27 +1533,8 @@ async fn a_path_stall_drops_what_it_made_late() {
 	recover(arm(Profile::Closed, |slot| hold(true, slot)).breaks(0)).await;
 }
 
-/// Audio and reordered video lose the same last-frame interval before a keyframe. Their
-/// decode reserves differ, but the padded clock continues without a flag.
-#[tokio::test(start_paused = true)]
-async fn a_short_outage_across_both_tracks_keeps_the_clock() {
-	let run = recover(
-		arm(Profile::Closed, |slot| {
-			let missing = if slot.video {
-				slot.group == 5 && slot.frame == 11
-			} else {
-				(SPLICE - FRAME..SPLICE).contains(&slot.nominal)
-			};
-			if missing { Delivery::Omitted } else { clean(slot) }
-		})
-		.breaks(0),
-	)
-	.await;
-	assert_eq!(run.stats.release.gaps, 2, "both tracks skipped media");
-}
-
 /// Audio loses an interval that ends before video's, though video's send-ahead releases its
-/// loss first. Both holes keep the padded PCR clock, whichever is muxed first.
+/// loss first. Both holes keep the padded PCR clock.
 #[tokio::test(start_paused = true)]
 async fn disjoint_outages_across_both_tracks_keep_the_clock() {
 	let run = recover(

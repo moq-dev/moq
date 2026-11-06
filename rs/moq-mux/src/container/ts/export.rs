@@ -240,7 +240,8 @@ where
 /// What a queued output frame tells [`Export::stats`], applied only once the frame is
 /// returned: a rewind drops the queue unwritten.
 struct Tally {
-	/// The frame's PCR in 27 MHz ticks, and whether the source declared a new time base.
+	/// The frame's PCR in 27 MHz ticks, and whether a declared marker, rewind, or program
+	/// switch started a new time base.
 	pcr: (u64, bool),
 	/// The PID of each access unit whose packets begin in the frame.
 	units: Vec<u16>,
