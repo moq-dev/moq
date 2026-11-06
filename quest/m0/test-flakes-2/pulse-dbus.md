@@ -52,6 +52,21 @@ claiming an overlap pass; do not infer a PulseAudio defect from these failures.
 
 Public API: none. Wire: none.
 
+2026-11-06 23:53 UTC rerun after merging current main: dependency installation
+passed before overlap, and `quest gate just ci` passed (112 seconds), including
+`test gh`. Both overlapping `just test media --media-cases pause` runs exited 1
+before browser startup. Runs `interop-iPWHd34k` and `interop-wdFesAVD` failed
+inside the harness's own concurrent Bun installs: `Failed to link semver:
+EEXIST` (and concurrently, vite, yaml, and @babel/parser). Both reported
+`media checks (browser client unavailable)`. Neither created a PulseAudio
+server or `pulse.log`; this attempt gives no new daemon-isolation evidence.
+Outputs and full run directories are retained in the implementation checkout's
+`.tmp/`. Recommend serializing the harness dependency installation while keeping
+the two playback runs concurrent, then repeating the overlap unchanged.
+
+Decided 2026-11-06 (maintainer, /quest-complete): ✅ retain this quest until
+overlapping media runs pass. Retiring it based on clean daemon logs was not chosen.
+
 ## Waiting
 
-- Maintainer: choose whether to retain this quest pending a passing overlap or retire it based on the existing daemon-isolation test and successful daemon startups. Recommend retaining it pending validation of the resume failures; the requested passing-overlap condition was not met. An agent cannot authorize deletion.
+- moq-dev/moq: resolve concurrent Bun install link collisions in the media harness, then demonstrate two overlapping `just test media --media-cases pause` runs pass. Preinstalling dependencies alone did not prevent the internal installs from colliding. Retain existing daemon isolation and this quest pending that validation.
