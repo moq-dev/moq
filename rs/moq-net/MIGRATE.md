@@ -10,6 +10,12 @@ How to update your code for each breaking change, newest first.
 Serve a fill with `while let Some(sequence) = fill.wanted_changed().await` rather than looping over `Fill::wanted`, which still names the next group owed without waiting: a batch written ahead of its readers lets a bounded cache evict its earlier groups before they are read.
 Serve the fills you take concurrently: a fill waits on readers that may first need another fill's groups.
 
+### `track::Consumer::unmetered` reads outside any stats session
+
+`track::Consumer::unmetered()` returns the handle with its stats scope cleared, so the
+subscriptions, fetches, and groups derived from it count toward no stats session, though
+the broadcast or origin it came from is metered. Existing callers need no migration.
+
 ### Socket readers start at the beginning
 
 New `track` socket sessions subscribe from group 0, and `tcp` sessions join their
