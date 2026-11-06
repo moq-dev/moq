@@ -41,7 +41,6 @@ before starting, since tests land and move.
 - [js/net tests run on a mocked clock](/quest/m1/mock-clock-tests/js-net.md) - about 120 js/net tests stop waiting on real time, through their shared helpers
 - [Other JS tests run on a mocked clock](/quest/m1/mock-clock-tests/js-rest.md) - hang's `settle(20)`, publish's fanout helpers, and the rest of JS
 - [moq-relay tests run on a mocked clock](/quest/m1/mock-clock-tests/rs-relay.md) - the relay's `timeout(..).is_err()` session proofs and settle sleeps
-- [Transport crate tests run on a mocked clock](/quest/m1/mock-clock-tests/rs-transport.md) - moq-tokio, moq-quic, moq-sock, and moq-uring
 - [Media crate tests run on a mocked clock](/quest/m1/mock-clock-tests/rs-media.md) - moq-audio, moq-video, moq-hls, moq-mux, and the bridges
 - [Binding and CLI tests run on a mocked clock](/quest/m1/mock-clock-tests/rs-bindings.md) - moq-ffi, moq-c, moq-cli, and kio
 - [Go and Python tests run on a mocked clock](/quest/m1/mock-clock-tests/go-py.md) - the Go wrapper's and Python packages' real-time waits
