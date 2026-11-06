@@ -25,7 +25,7 @@ function trace() {
 		playback: { underruns: 0, stalls: 0 },
 		errors: [] as string[],
 		arrivals: [] as [number, number, number, number][],
-		state: { delay: 300 },
+		delays: [{ at: 0, delay: 300 }],
 	};
 	for (let i = 0; i < 22; i++) {
 		const press = 10_000 + i * 10_000;
@@ -85,6 +85,20 @@ test("a complete run passes, reports its latency, and splits each press exactly"
 	});
 	const parts = Object.values(press.path as Record<string, number>).reduce((sum, part) => sum + part, 0);
 	expect(parts).toBe(press.audible);
+	expect(summary.delay).toEqual({ min: 300, median: 300, max: 300 });
+});
+
+test("a target that rises before the delay fills is filled by the frame that reaches it", async () => {
+	// "auto" raises the target a frame as the press starts, so the sixth frame fills it.
+	const result = trace();
+	result.delays.push({ at: result.presses[0].at, delay: 300 + FRAME });
+	result.audible[0].rendered += FRAME;
+	result.audible[0].at += FRAME;
+	const { exitCode, summary } = await analyze(result);
+	expect(exitCode).toBe(0);
+	expect(summary.presses[0].delay).toBe(300 + FRAME);
+	expect(summary.presses[0].path.jitter_buffer).toBe(5 * FRAME);
+	expect(summary.presses[0].path.render).toBe(10);
 });
 
 test("a frame held back by a capture burst widens its press's spread", async () => {

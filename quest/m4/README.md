@@ -56,7 +56,7 @@ deleted.
 - [Drop moq-auth's iroh transport](/quest/m4/auth-drop-iroh.md) - the next breaking moq-auth release drops `Transport::Iroh` and the JS `"iroh"` value
 - [Relays and moq-tokio offer versioned qmux-02 first](/quest/m4/qmux-02-subprotocols.md) - one shared qmux version list prefers 02, so JS clients negotiate it
 - [Smoke tests make their certificates without a system OpenSSL config](/quest/m4/smoke-libressl.md) - moxygen and Cloudflare smoke pass `-config`, as the conformance runner does
-- [ashpd uses maintained D-Bus crates](/quest/m4/ashpd-maintained.md) - wait for a stable zbus 6 port, then remove the portal dependency exceptions
+- [ashpd uses maintained D-Bus crates](/quest/m4/ashpd-maintained.md) - upgrade to ashpd 0.14 (zbus 6) and remove the portal dependency exceptions
 - [Askama uses a maintained TOML parser](/quest/m4/askama-maintained.md) - wait for a stable parser migration, then remove the generator dependency exception
 - [Adopt formatter defaults after evaluating Bun](/quest/m4/formatter-defaults.md) - every language uses its formatter's defaults, YAML and Markdown are formatted, and remark is gone in one coordinated migration
 - [Upstream unknown-env option in usage-rs](/quest/m4/usage-unknown-env.md) - jdx/usage refuses unknown prefixed env vars, replacing the moq-tokio helper

@@ -11,8 +11,8 @@ import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import * as Watch from "@moq/watch";
 import { z } from "zod/mini";
-import type { GameStatus } from "./schemas.ts";
-import { GameStatusSchema } from "./schemas.ts";
+import type { GameStatus, LatencyEntry } from "./schemas.ts";
+import { GameStatusSchema, ReplySchema } from "./schemas.ts";
 
 /** Configuration for creating a Game instance. */
 export interface GameConfig {
@@ -20,14 +20,14 @@ export interface GameConfig {
 	sessionId: string;
 	/** MoQ connection to the relay. */
 	connection: Moq.Connection;
-	/** The origin viewer broadcasts are published into; the connection serves it. */
+	/** The origin the game broadcast arrives in; the connection feeds it. */
 	origin: Moq.Origin.Producer;
+	/** This viewer's socket endpoint, under {@link gamePrefix}, which dials the game's. */
+	endpoint: Moq.socket.Endpoint;
 	/** Shared signal tracking which game is currently expanded. */
 	expanded: Moq.Signals.Signal<string | undefined>;
 	/** MoQ path prefix for game broadcasts (e.g. "anon/boy/game"). */
 	gamePrefix: string;
-	/** MoQ path prefix for viewer broadcasts (e.g. "anon/boy/viewer"). */
-	viewerPrefix: string;
 }
 
 /** A command with captured timestamps, published via the command signal. */
@@ -36,7 +36,7 @@ interface Command {
 	timestamps: { label: string; ts: number }[];
 }
 
-// Stop publishing feedback after 60s of no input.
+// Close the session to the emulator after 60s of no input.
 const FEEDBACK_IDLE = Nano.fromSecond(Second(60));
 
 // Game Boy native resolution.
@@ -72,7 +72,7 @@ export class Game {
 
 	/** The session currently expanded, shared by every game on the page. */
 	readonly expanded: Moq.Signals.Signal<string | undefined>;
-	readonly #viewerPrefix: string;
+	readonly #endpoint: Moq.socket.Endpoint;
 
 	/** Whether the pointer is over this game's tile. */
 	readonly hovered = new Moq.Signals.Signal(false);
@@ -86,8 +86,8 @@ export class Game {
 	readonly volume = new Moq.Signals.Signal(0.25);
 	/** The latest status the emulator published, or undefined before the first. */
 	readonly status = new Moq.Signals.Signal<GameStatus | undefined>(undefined);
-	/** The identifier of this viewer's feedback broadcast while it publishes. */
-	readonly viewerId = new Moq.Signals.Signal<string | undefined>(undefined);
+	/** This viewer's latency breakdown, as the emulator last reported it while a session is open. */
+	readonly latency = new Moq.Signals.Signal<LatencyEntry[] | undefined>(undefined);
 
 	/** The canvas the video renders into, set by the UI once it is mounted. */
 	readonly canvas = new Moq.Signals.Signal<HTMLCanvasElement | undefined>(undefined);
@@ -120,10 +120,10 @@ export class Game {
 	#feedbackActive = new Moq.Signals.Signal(false);
 
 	constructor(config: GameConfig) {
-		const { sessionId, connection, expanded, gamePrefix, viewerPrefix } = config;
+		const { sessionId, connection, expanded, gamePrefix } = config;
 		this.sessionId = sessionId;
 		this.expanded = expanded;
-		this.#viewerPrefix = viewerPrefix;
+		this.#endpoint = config.endpoint;
 
 		// Derive active state from expanded + hovered.
 		this.#signals.run(this.#runActive.bind(this));
@@ -203,8 +203,8 @@ export class Game {
 		// Subscribe to status track.
 		this.#signals.run(this.#runStatus.bind(this));
 
-		// Command publishing.
-		this.#signals.run(this.#runCommands.bind(this, connection, config.origin));
+		// The session to the emulator, open while this viewer gives input.
+		this.#signals.run(this.#runSession.bind(this, connection));
 		this.#signals.run(this.#runFeedbackIdle.bind(this));
 	}
 
@@ -215,7 +215,7 @@ export class Game {
 
 	/** Send a command to the emulator. */
 	sendCommand(cmd: Record<string, unknown>) {
-		// Activate feedback broadcasting on input, with idle timeout.
+		// Open the session on input, with idle timeout.
 		this.#feedbackActive.set(true);
 
 		this.#command.set({ cmd, timestamps: this.#timestamps() }, true);
@@ -305,9 +305,8 @@ export class Game {
 		effect.timer(() => this.#feedbackActive.set(false), FEEDBACK_IDLE);
 	}
 
-	#runCommands(connection: Moq.Connection, origin: Moq.Origin.Producer, effect: Moq.Signals.Effect) {
-		// Publishing goes through the origin, but gate on a live connection anyway: a command
-		// broadcast for a game nobody is connected to is feedback into the void.
+	#runSession(connection: Moq.Connection, effect: Moq.Signals.Effect) {
+		// Gate on a live connection: a dial is answered only through the relay.
 		if (effect.get(connection.status) !== "connected") return;
 
 		if (!effect.get(this.active)) {
@@ -317,35 +316,80 @@ export class Game {
 			return;
 		}
 
-		const active = effect.get(this.#feedbackActive);
-		if (!active) return;
+		if (!effect.get(this.#feedbackActive)) return;
 
-		const viewerId = Math.random().toString(36).slice(2, 8);
-		this.viewerId.set(viewerId);
-
-		const viewerRoute = origin.route(Moq.Path.from(this.#viewerPrefix, this.sessionId, viewerId));
-		const viewerBroadcast = viewerRoute.broadcast;
+		// One session per activation: a reload or an idle timeout ends it, and the next input dials a new one.
+		const abort = new AbortController();
+		const stream = new Moq.Signals.Signal<Moq.socket.TrackStream | undefined>(undefined);
 		effect.cleanup(() => {
-			viewerRoute.close();
-			this.viewerId.set(undefined);
+			abort.abort();
+			const open = stream.peek();
+			open?.producer.finish();
+			open?.consumer.close();
+			this.latency.set(undefined);
 		});
 
-		const track = viewerBroadcast.createTrack("command", { timescale: Moq.Time.Timescale.MILLI });
-		const producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track });
-		effect.cleanup(() => producer.finish());
-		effect.run(this.#runCommandTrack.bind(this, track, producer));
+		effect.spawn(async () => {
+			let open: Moq.socket.TrackStream;
+			try {
+				open = await this.#endpoint.dialTrack(this.sessionId, undefined, { signal: abort.signal });
+			} catch (err) {
+				if (abort.signal.aborted) return;
+				console.warn("Dial failed:", err);
+				// Redial on the next input rather than dropping commands into no session.
+				this.#feedbackActive.set(false);
+				return;
+			}
+			if (abort.signal.aborted) {
+				open.producer.finish();
+				open.consumer.close();
+				return;
+			}
+			stream.set(open);
+			await this.#readReplies(open.consumer, abort.signal);
+			// The emulator ended the session, so close this side and redial on the next input.
+			if (!abort.signal.aborted) this.#feedbackActive.set(false);
+		});
+
+		effect.run(this.#runCommands.bind(this, stream));
 	}
 
-	#runCommandTrack(
-		track: Moq.Track.Producer,
-		producer: Json.Snapshot.Producer<Record<string, unknown>>,
-		effect: Moq.Signals.Effect,
-	) {
-		if (effect.get(track.closed) !== undefined) return;
+	#runCommands(stream: Moq.Signals.Signal<Moq.socket.TrackStream | undefined>, effect: Moq.Signals.Effect) {
+		const open = effect.get(stream);
+		if (!open) return;
 
 		const command = effect.get(this.#command);
 		if (!command) return;
 
-		producer.update({ value: { ...command.cmd, timestamps: command.timestamps }, at: Moq.Time.Timestamp.now() });
+		// One command per group, so a late one never holds up the next.
+		const value = { ...command.cmd, timestamps: command.timestamps };
+		open.producer.writeFrame({ payload: new TextEncoder().encode(JSON.stringify(value)) });
+	}
+
+	// Read the emulator's replies until the session ends.
+	async #readReplies(consumer: Moq.Track.Subscriber, signal: AbortSignal) {
+		const replies = consumer.ordered();
+		try {
+			for (;;) {
+				const group = await replies.nextGroup();
+				if (!group) return;
+
+				let reply: unknown;
+				try {
+					reply = await group.readJson();
+				} catch (err) {
+					console.warn("Invalid reply:", err);
+					continue;
+				}
+				const parsed = ReplySchema.safeParse(reply);
+				if (!parsed.success) {
+					console.warn("Invalid reply:", parsed.error);
+					continue;
+				}
+				this.latency.set(parsed.data.latency);
+			}
+		} catch (err) {
+			if (!signal.aborted) console.warn("Session ended:", err);
+		}
 	}
 }

@@ -14,6 +14,9 @@ if (result.captureError || result.errors.length) throw new Error("invalid captur
 const encoded = new Map(result.encoded.map((frame) => [frame.timestamp, frame]));
 const sent = new Map(result.sent.map((frame) => [frame.timestamp, frame]));
 const arrivals = new Map(result.arrivals.map((frame) => [Math.round(frame[1] * 1000), frame]));
+// The playout target the ring held at `at`: it checks each write against the delay of that moment,
+// which "auto" moves with its estimate.
+const delayAt = (at: number) => result.delays.findLast((entry) => entry.at <= at)?.delay;
 // The first decode of each timestamp; a later one would be a re-decode, not the frame's first.
 const decoded = new Map<number, (typeof result.decoded)[number]>();
 for (const frame of result.decoded) if (!decoded.has(frame.timestamp)) decoded.set(frame.timestamp, frame);
@@ -52,26 +55,25 @@ const presses = result.presses
 		// from their media timestamps, slowest minus fastest. An ideal path leaves only capture cadence.
 		const offsets = received.map(([at, media]) => at - media);
 		const spread = offsets.length ? Math.max(...offsets) - Math.min(...offsets) : null;
+		const first = input[0];
+		// The first PCM that reached the delay from the head: the ring leaves its stall on it, and a
+		// later frame decoded before the onset only adds to a ring already playing.
+		const filled = input
+			.flatMap((frame) => decoded.get(frame.timestamp) ?? [])
+			.toSorted((a, b) => a.at - b.at)
+			.find((frame) => {
+				const delay = delayAt(frame.at);
+				return delay !== undefined && frame.timestamp + (frame.duration ?? 0) - first.timestamp >= delay * 1000;
+			});
 		// The head frame's path from the press to projected output, one boundary after another, so
 		// the parts sum to `audible`. Capture and packetization split at the head frame's end on the
 		// media clock, placed against the newest captured chunk delivered before the press.
-		const first = input[0];
 		const path = (() => {
-			if (!audible || !first || !press.capture) return null;
+			if (!audible || !first || !press.capture || !filled) return null;
 			const write = sent.get(first.timestamp);
 			const arrival = arrivals.get(first.timestamp);
 			const output = decoded.get(first.timestamp);
-			// The first PCM that reached the delay from the head: the ring leaves its stall on it, and a
-			// later frame decoded before the onset only adds to a ring already playing.
-			const delay = result.state?.delay;
-			const filled =
-				delay === undefined
-					? undefined
-					: input
-							.flatMap((frame) => decoded.get(frame.timestamp) ?? [])
-							.toSorted((a, b) => a.at - b.at)
-							.find((frame) => frame.timestamp + (frame.duration ?? 0) - first.timestamp >= delay * 1000);
-			if (!write || !arrival || !output || !filled) return null;
+			if (!write || !arrival || !output) return null;
 			const pressed = press.capture.end / 1000 + (press.at - press.capture.at);
 			const packetization = (first.timestamp + (first.duration ?? 0)) / 1000 - pressed;
 			return {
@@ -100,6 +102,7 @@ const presses = result.presses
 			audible: audible ? audible.at - press.at : null,
 			delivery,
 			spread,
+			delay: filled ? (delayAt(filled.at) ?? null) : null,
 			playout: audible && delivery !== null ? audible.rendered - press.at - delivery : null,
 			output: audible ? audible.at - audible.rendered : null,
 			path,
@@ -124,7 +127,8 @@ const summary = {
 	path: Object.fromEntries(
 		parts.map((part) => [part, summarize(presses.map((press) => press.path?.[part] ?? null))]),
 	),
-	delay: result.state?.delay,
+	// The playout target each head filled.
+	delay: summarize(presses.map((press) => press.delay)),
 	presses,
 	captures: result.captures,
 	encoders: result.encoders,

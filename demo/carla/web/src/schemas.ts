@@ -66,6 +66,14 @@ const LatencyEntrySchema = z.object({
 	label: z.string(),
 	ms: z.number(),
 });
+export type LatencyEntry = z.infer<typeof LatencyEntrySchema>;
+
+/** The truck's answer on a driver's session to each command it accepted from the lease holder. */
+export const ReplySchema = z.object({
+	sequence: z.number(),
+	media_pipeline: z.array(LatencyEntrySchema),
+});
+export type Reply = z.infer<typeof ReplySchema>;
 
 /** Per-update telemetry the truck publishes on the `status` track. */
 export const TruckStatusSchema = z.object({
@@ -76,8 +84,6 @@ export const TruckStatusSchema = z.object({
 	estopped: z.boolean(),
 	estop_by: z.optional(z.string()),
 	driver: z.optional(z.string()),
-	sequence: z.optional(z.number()),
-	media_pipeline: z.record(z.string(), z.array(LatencyEntrySchema)),
 	location: z.optional(z.string()),
 	// Absent until the simulator's first physics tick reports where the vehicle is.
 	map: z.optional(z.string()),
