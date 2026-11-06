@@ -155,14 +155,14 @@ async fn an_abandoned_setup_returns_credit_with_the_publisher_still_live() {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let viewer = origin(2);
-		let broadcast = publisher.create_broadcast("live").unwrap();
+		let broadcast = publisher.publish("live", moq_net::broadcast::Info::default()).unwrap();
 		let info = track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_max_age(None);
-		let first = broadcast.create_track("first", info.clone()).unwrap();
-		let second = broadcast.create_track("second", info.clone()).unwrap();
-		let third = broadcast.create_track("third", info).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let first = broadcast.broadcast().create_track("first", info.clone()).unwrap();
+		let second = broadcast.broadcast().create_track("second", info.clone()).unwrap();
+		let third = broadcast.broadcast().create_track("third", info).unwrap();
+		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
 		options.transport.max_concurrent_bi_streams = Some(credit);
