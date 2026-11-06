@@ -1772,7 +1772,7 @@ run_finishes() {
     if [[ "$VERSION" == moq-transport-* ]]; then
         for pub in "${PUB_LIST[@]}"; do
             for sub in "${SUB_LIST[@]}"; do
-                record skip case=finish publisher="$pub" subscriber="$sub" detail="moq-transport finish: quest/m2/ietf-finish.md"
+                record skip case=finish publisher="$pub" subscriber="$sub" detail="moq-transport finish: quest/m3/ietf-finish.md"
             done
         done
         return

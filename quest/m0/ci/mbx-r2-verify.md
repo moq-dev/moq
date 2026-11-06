@@ -25,7 +25,7 @@ nightly.yml --branch main --event schedule`), never a dispatch on a branch.
 ## Plan
 
 Decided 2026-11-05 (maintainer, /quest-audit): ✅ the release pull request
-check moved to [m2](/quest/m2/mbx-r2-release-cache.md) behind the cut, since
+check moved to [m3](/quest/m3/mbx-r2-release-cache.md) (m2 before the milestone re-cut) behind the cut, since
 `release` gets the platform Rust cache only when the cut merges `main` into
 it; the Nightly checks stay here. Not chosen: moving this whole quest; merging
 `main` into `release` now, which reverses the 2026-11-04 decision.

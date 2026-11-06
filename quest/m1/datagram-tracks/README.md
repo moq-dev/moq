@@ -22,7 +22,7 @@ Decided 2026-11-01 (maintainer, in `/quest-plan`):
 
 - **Datagrams are a track-level decision.** ✅ A track is datagrams or
   streams, never a mix. This reverses the
-  [subscribe-ranges](/quest/m1/subscribe-ranges/README.md) decision of
+  [subscribe-ranges](/quest/m2/subscribe-ranges/README.md) decision of
   2026-10-20 that any single-frame group may go as a datagram, including a
   copy of a streamed one. With no mixing, the stream/datagram dedup rule, the
   ordering of a datagram among its group's streams, NOT_FETCHABLE, and every
@@ -39,7 +39,7 @@ Decided 2026-11-01 (maintainer, in `/quest-plan`):
   the group sequence space. On moq-transport it maps to a group ID with
   object ID 0.
   - This exempts datagrams from
-    [lite-07 by start](/quest/m1/time-addressing/lite07.md): they keep a
+    [lite-07 by start](/quest/m2/time-addressing/lite07.md): they keep a
     sequence, while stream tracks address groups by start.
   - The timestamp stays, as it does for every frame.
 - **Discovery.** ✅ The application knows which kind a track is, through its
@@ -93,7 +93,7 @@ Decided 2026-11-01 (maintainer, in `/quest-plan`):
   - Reason: a stream handler need not answer a name it doesn't serve, and
     the bindings' rejection carries only an application error.
 - **Version.** ✅ lite-07, before it is finalized.
-  [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) requires this epic.
+  [Finalize moq-lite-07](/quest/m2/lite07-finalize.md) requires this epic.
   lite-01..06 keep today's group datagrams.
 
 Decided by the Rust child ([moq-dev/moq#7752](https://github.com/moq-dev/moq/pull/7752)),
@@ -109,7 +109,7 @@ not the maintainer, so open to revisiting:
   while compression would cost every datagram an Inflated Size and a decoder.
 - **Timestamp on a `Timescale` 0 track.** The datagram carries none, and its
   Sequence stands in for its time. Why: it mirrors the
-  [model](/quest/m1/time-addressing/model.md)'s rule that a scale-less frame's
+  [model](/quest/m2/time-addressing/model.md)'s rule that a scale-less frame's
   timestamp is its group's key, since a datagram's address is its sequence.
   Until that model lands, Rust's datagram writes take `Option<Timestamp>` like
   frame writes do (`None` on an untimed track), and the model quest converts
@@ -125,7 +125,7 @@ datagram track on lite-07, direct and through a relay.
 
 ## Related
 
-- [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - ranges no longer cover datagrams
-- [Address groups by timestamp](/quest/m1/time-addressing/README.md) - stream tracks address by start; datagram tracks keep a sequence
-- [Wrapper traits over moq-net](/quest/m2/net-wrap/README.md) - the traits mirror the separate datagram types
-- [moq-lite session tails count drops](/quest/m2/lite-tail-drop-count.md) - datagram holes matter only on lite-05/06
+- [Subscribe ranges](/quest/m2/subscribe-ranges/README.md) - ranges no longer cover datagrams
+- [Address groups by timestamp](/quest/m2/time-addressing/README.md) - stream tracks address by start; datagram tracks keep a sequence
+- [Wrapper traits over moq-net](/quest/m5/net-wrap/README.md) - the traits mirror the separate datagram types
+- [moq-lite session tails count drops](/quest/m3/lite-tail-drop-count.md) - datagram holes matter only on lite-05/06

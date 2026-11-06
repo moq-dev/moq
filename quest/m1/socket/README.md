@@ -5,16 +5,16 @@
 `moq-net` gains a generic dial/accept primitive. An `Endpoint` announces one
 hidden broadcast, dials other endpoints, and accepts their dials, and each
 connection is a session between the two ends: a reliable, ordered byte pipe
-each way (`tcp`), or a track of messages each way (`track`). moq-boy, CARLA, [byte streams](/quest/m2/stream/README.md), and the
-mesh [Endpoint](/quest/m2/mesh/endpoint.md) all build on it instead of each
+each way (`tcp`), or a track of messages each way (`track`). moq-boy, CARLA, [byte streams](/quest/m3/stream/README.md), and the
+mesh [Endpoint](/quest/m3/mesh/endpoint.md) all build on it instead of each
 hand-rolling the announce, watch, and request loop. Rust, JS, and Python
 (through moq-ffi) expose the same surface and interoperate.
 
 Non-goals: a wire change to moq-lite (a socket is a path and track convention
 over existing announce and subscribe streams); session caps, leases, or idle
 timeouts, which stay application logic (boy's 60 s idle, CARLA's one-driver
-lease and 1 s watchdog); signing and encryption, which the m2
-[mesh](/quest/m2/mesh/README.md) owns by making endpoint ids public keys.
+lease and 1 s watchdog); signing and encryption, which the m3
+[mesh](/quest/m3/mesh/README.md) owns by making endpoint ids public keys.
 
 ## Plan
 
@@ -81,10 +81,10 @@ pipe below; the second round above adds the acceptor to the session name:
   16 MiB past its reader on each hop, and a reader that falls off the tail
   fails with `Evicted` rather than skipping data. Where pacing doesn't reach
   yet, that `Evicted` is the failure mode, never silent loss: browsers and JS
-  read unpaced ([JS fastest-reader pacing](/quest/m2/js-fastest-reader.md)),
+  read unpaced ([JS fastest-reader pacing](/quest/m4/js-fastest-reader.md)),
   and a session past its paused-credit cap (about two paused group streams at
   the client defaults) reads and sheds instead of pausing. That remaining
-  pacing work stays in the [unbounded groups](/quest/m1/unbounded-groups/README.md)
+  pacing work stays in the [unbounded groups](/quest/m2/unbounded-groups/README.md)
   epic, which this depends on for lossless `tcp` in those cases.
 
 Implementation choices in
@@ -180,7 +180,7 @@ replacement arc), still standing:
 Later, not built now: a multiplexed `quic` protocol, `quic/<dialer>/<acceptor>/<S>` on
 the same endpoint with no new announcement, which brings back several groups
 or streams per session; and signed or encrypted sessions with ids as public
-keys, in the m2 [mesh](/quest/m2/mesh/README.md).
+keys, in the m3 [mesh](/quest/m3/mesh/README.md).
 
 This epic owns removing the hand-rolled loops: after the ports, no
 announce-watch-request pairing remains in `rs/moq-boy`, `js/moq-boy`, or
@@ -193,5 +193,5 @@ announce-watch-request pairing remains in `rs/moq-boy`, `js/moq-boy`, or
 
 ## Related
 
-- [Byte streams](/quest/m2/stream/README.md) - TCP over sockets, one session per connection
-- [Endpoint API](/quest/m2/mesh/endpoint.md) - the mesh's `connect`/`accept`, a socket endpoint plus signing
+- [Byte streams](/quest/m3/stream/README.md) - TCP over sockets, one session per connection
+- [Endpoint API](/quest/m3/mesh/endpoint.md) - the mesh's `connect`/`accept`, a socket endpoint plus signing
