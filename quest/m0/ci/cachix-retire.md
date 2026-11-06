@@ -26,12 +26,12 @@ build from source. Not chosen: copying the retained release paths to
 nix.moq.dev first (old flakes still only name Cachix); deleting the cache and
 accepting source builds.
 
-[moq-dev/moq#8062](https://github.com/moq-dev/moq/pull/8062) is the backport
-to `release`: `main`'s `release-nix.yml` (on `release`'s `libmoq-v*` tag and
-`libmoq` attribute), the `infra/nix` Just module, `main`'s `cache.yml`, the
-deletion of `cachix.yml`, and a `flake.nix` `nixConfig` that names nix.moq.dev
-instead of Cachix. Until it merges, tags run `release`'s copies and push only
-to Cachix, as every tag has through `moq-relay-v0.17.13` on 2026-11-05.
+[moq-dev/moq#8062](https://github.com/moq-dev/moq/pull/8062) backported this
+to `release` on 2026-11-06: `main`'s `release-nix.yml` (on `release`'s
+`libmoq-v*` tag and `libmoq` attribute), the `infra/nix` Just module, `main`'s
+`cache.yml`, the deletion of `cachix.yml`, and a `flake.nix` `nixConfig` that
+names nix.moq.dev instead of Cachix. Every tag before it, through
+`moq-relay-v0.17.13` on 2026-11-05, pushed only to Cachix.
 
 - On the first `moq-relay-v*` or `moq-cli-v*` tag after the backport, record
   its `release-nix.yml` pushes from all three legs, then
@@ -46,16 +46,9 @@ Public API: none. Wire: none.
 
 ## Waiting
 
-- Maintainer: add `libmoq-v*` to the `cache-write` Environment's deployment
-  policy before merging the backport, since `libmoq` tags are cut about daily and it admits `main`'s `moq-c-v*`
-  but not `release`'s `libmoq-v*` and that tag's Release Nix run would be
-  refused. Agents lack repository admin. Command:
-  `gh api -X POST repos/moq-dev/moq/environments/cache-write/deployment-branch-policies -f name='libmoq-v*' -f type=tag`.
-  Check: `gh api repos/moq-dev/moq/environments/cache-write/deployment-branch-policies --jq '.branch_policies[].name'`
-  lists `libmoq-v*`.
-- Maintainer: merge [moq-dev/moq#8062](https://github.com/moq-dev/moq/pull/8062)
-  into `release`; agents never merge into `release`. Check:
-  `gh pr view 8062 --json state`.
+- moq-dev/moq: the first `moq-relay-v*` or `moq-cli-v*` tag cut from
+  `release` after 2026-11-06. Check:
+  `gh run list --workflow release-nix.yml --json headBranch,conclusion`.
 - Maintainer: record both bucket sizes no earlier than 2026-11-24, a month
   after the first `cache.yml` push to `nix-ci-moq-dev` on 2026-10-24, against
   the 30-day expiry in `infra/nix/lifecycle.json`. Sizes need a
