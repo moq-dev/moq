@@ -132,7 +132,7 @@ mod tests {
 	use super::*;
 	use crate::{
 		Hop, Instance,
-		origin::{Cost, Route},
+		origin::{Cost, RouteInfo, RouteOptions},
 	};
 
 	/// The listing's next event as `present path` or `absent path`, within the update hold.
@@ -154,8 +154,8 @@ mod tests {
 		}
 	}
 
-	fn route(instance: &Instance) -> Route {
-		Route::default().with_instance(instance.clone(), 0)
+	fn route(instance: &Instance) -> RouteOptions {
+		RouteOptions::default().with_instance(instance.clone(), 0)
 	}
 
 	/// A path stays present while another instance takes it over or its route changes, and is
@@ -166,18 +166,22 @@ mod tests {
 		let mut announced = origin.consume().announced();
 		let mut routes = origin.consume().routes();
 
-		let first = origin.publish("live", route(&Instance::random())).unwrap();
+		let first = origin.route("live", route(&Instance::random())).unwrap();
 		assert_eq!(listed(&mut announced).await, "present live");
 		assert!(matches!(routes.next().await, Some(RouteEvent::Start(_))));
 
 		first
-			.announce(route(&Instance::random()).with_cost(Cost::new(5)))
+			.announce_info(
+				RouteInfo::default()
+					.with_instance(Instance::random(), 0)
+					.with_cost(Cost::new(5)),
+			)
 			.unwrap();
 		quiet(&mut announced).await;
 		// The relay-level stream still reports the replacement.
 		assert!(matches!(routes.next().await, Some(RouteEvent::Restart(_))));
 
-		let second = origin.publish("live", route(&Instance::random())).unwrap();
+		let second = origin.route("live", route(&Instance::random())).unwrap();
 		drop(first);
 		quiet(&mut announced).await;
 

@@ -56,7 +56,7 @@ fn initial(c: &mut Criterion) {
 						origin::RouteEvent::Update(announce::Announce {
 							prefix: moq_net::Path::new(&format!("route/{route}")).unwrap(),
 							captures: None,
-							route: moq_net::origin::Route::default().with_cost(cost),
+							route: moq_net::fuzz::route_info(moq_net::Hops::new(), cost, None),
 						})
 					})
 				})

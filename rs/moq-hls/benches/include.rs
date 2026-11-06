@@ -10,7 +10,7 @@ use moq_hls::{Server, export::Route};
 use moq_mux::catalog::hang::Catalog;
 
 fn publish_catalog(
-	broadcast: &moq_net::origin::Publication,
+	broadcast: &moq_net::broadcast::Producer,
 	catalog: &Catalog,
 ) -> moq_json::snapshot::Producer<Catalog> {
 	let track = broadcast
@@ -42,7 +42,12 @@ fn include(c: &mut Criterion) {
 					let id = format!("c{index}");
 					let instance = moq_net::Instance::random();
 					first.get_or_insert(instance.clone());
-					let broadcast = origin.create_broadcast(format!("room/{id}")).unwrap();
+					let route = origin
+						.route(
+							format!("room/{id}"),
+							moq_net::origin::RouteOptions::hidden().with_instance(instance, 0),
+						)
+						.unwrap();
 					let mut catalog = Catalog::default();
 					catalog.media = root.media;
 					for rendition in 0..renditions {
@@ -51,23 +56,24 @@ fn include(c: &mut Criterion) {
 						video.coded_height = Some(240);
 						catalog.video.renditions.insert(format!("v{rendition}"), video);
 					}
-					catalogs.push(publish_catalog(&broadcast, &catalog));
-					broadcast
-						.announce(moq_net::origin::Route::default().with_instance(instance, 0))
-						.unwrap();
-					publications.push(broadcast);
+					catalogs.push(publish_catalog(route.broadcast(), &catalog));
+					route.announce().unwrap();
+					publications.push(route);
 					root.include.insert(
 						id.clone(),
 						Include::new(moq_net::path::Relative::new(&format!("./{id}")).unwrap()),
 					);
 				}
 				let parent = moq_net::Instance::random();
-				let broadcast = origin.create_broadcast("room/live").unwrap();
-				catalogs.push(publish_catalog(&broadcast, &root));
-				broadcast
-					.announce(moq_net::origin::Route::default().with_instance(parent.clone(), 0))
+				let route = origin
+					.route(
+						"room/live",
+						moq_net::origin::RouteOptions::hidden().with_instance(parent.clone(), 0),
+					)
 					.unwrap();
-				publications.push(broadcast);
+				catalogs.push(publish_catalog(route.broadcast(), &root));
+				route.announce().unwrap();
+				publications.push(route);
 				let server = Server::new(origin.consume(), Default::default()).unwrap();
 				let broadcaster = server.broadcaster("room/live").await.unwrap();
 				kio::clock::timeout(Duration::from_secs(5), async {

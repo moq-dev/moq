@@ -10,7 +10,7 @@ use tower::ServiceExt;
 use super::Server;
 
 struct Published {
-	publication: moq_net::origin::Publication,
+	route: moq_net::origin::Route,
 	catalog: moq_json::snapshot::Producer<Catalog>,
 	video: track::Producer,
 	audio: track::Producer,
@@ -31,7 +31,13 @@ fn catalog() -> Catalog {
 }
 
 fn publish(origin: &moq_net::origin::Producer, path: &str, instance: &Instance, value: &Catalog) -> Published {
-	let publication = origin.create_broadcast(path).unwrap();
+	let route = origin
+		.route(
+			path,
+			moq_net::origin::RouteOptions::hidden().with_instance(instance.clone(), 0),
+		)
+		.unwrap();
+	let publication = route.broadcast();
 	let track = publication
 		.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 		.unwrap();
@@ -44,11 +50,9 @@ fn publish(origin: &moq_net::origin::Producer, path: &str, instance: &Instance, 
 	let audio = publication
 		.create_track("audio", hang::container::track_info(2))
 		.unwrap();
-	publication
-		.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
-		.unwrap();
+	route.announce().unwrap();
 	Published {
-		publication,
+		route,
 		catalog,
 		video,
 		audio,
@@ -153,7 +157,8 @@ async fn an_idle_predecessor_does_not_strand_a_requested_reconfigure() {
 	let uri = format!("/room/live/@{root}/include/rung%2Fa/video/same/@{child}/media.m3u8");
 	assert_eq!(request(&server, &uri).await.0, StatusCode::OK);
 	let next = include
-		.publication
+		.route
+		.broadcast()
 		.create_track("next", hang::container::track_info(1))
 		.unwrap();
 	let video = value.video.renditions.get_mut("same").unwrap();
@@ -208,7 +213,7 @@ async fn a_failed_parent_catalog_stops_its_includes() {
 	let root = Instance::random();
 	let child = Instance::random();
 	let Published {
-		publication: _parent,
+		route: _parent,
 		catalog: parent_catalog_track,
 		video,
 		audio,
@@ -278,7 +283,8 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 	assert_eq!(request(&server, &uri).await.0, StatusCode::OK);
 	// Reconfigure onto another track; the predecessor ends with its own track.
 	let next = include
-		.publication
+		.route
+		.broadcast()
 		.create_track("next", hang::container::track_info(1))
 		.unwrap();
 	let video = value.video.renditions.get_mut("same").unwrap();
@@ -342,7 +348,9 @@ async fn an_include_rendition_whose_broadcast_failed_is_not_listed() {
 	let parent = publish(&origin, "room/live", &root, &parent_catalog());
 	frames(&parent.video, 0);
 	frames(&parent.audio, 0);
-	let other = origin.requests("room/other").unwrap();
+	let other = origin
+		.route_prefix("room/other", moq_net::origin::RouteOptions::default())
+		.unwrap();
 	let child = Instance::random();
 	let mut value = catalog();
 	value.audio.renditions.clear();
@@ -351,7 +359,7 @@ async fn an_include_rendition_whose_broadcast_failed_is_not_listed() {
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
 	master(&server, &format!("@{root}/video/same"), true).await;
 	// Not a denial, but its media still can't be read.
-	kio::clock::timeout(Duration::from_secs(5), other.requested_broadcast())
+	kio::clock::timeout(Duration::from_secs(5), other.requested())
 		.await
 		.expect("the binding never asked")
 		.unwrap()
@@ -403,7 +411,9 @@ async fn an_include_rendition_is_listed_once_its_broadcast_resolves() {
 	frames(&parent.video, 0);
 	frames(&parent.audio, 0);
 	// The include's only rendition reads a sibling whose route has not answered yet.
-	let other = origin.requests("room/other").unwrap();
+	let other = origin
+		.route_prefix("room/other", moq_net::origin::RouteOptions::default())
+		.unwrap();
 	let child = Instance::random();
 	let mut value = catalog();
 	value.audio.renditions.clear();
@@ -415,7 +425,7 @@ async fn an_include_rendition_is_listed_once_its_broadcast_resolves() {
 		!listed.contains("include/"),
 		"a pending binding may yet be denied: {listed}"
 	);
-	let request = kio::clock::timeout(Duration::from_secs(5), other.requested_broadcast())
+	let request = kio::clock::timeout(Duration::from_secs(5), other.requested())
 		.await
 		.expect("the binding never asked")
 		.unwrap();
@@ -525,11 +535,9 @@ async fn late_instances_replace_unpinned_entries_and_do_not_replace_pins() {
 	let listed = master(&server, &old_uri, true).await;
 	assert!(listed.contains(&format!("include/pinned/video/same/@{first}")));
 	assert_eq!(old.video.demand().wanted(), None);
-	old.publication.unannounce();
+	old.route.withdraw();
 	master(&server, "include/", false).await;
-	old.publication
-		.announce(moq_net::origin::Route::default().with_instance(first.clone(), 0))
-		.unwrap();
+	old.route.announce().unwrap();
 	master(&server, &format!("include/pinned/video/same/@{first}"), true).await;
 	let new = publish(&origin, "room/ladder", &second, &catalog());
 	let listed = master(&server, &format!("include/rung%2Fa/video/same/@{second}"), true).await;
@@ -542,7 +550,7 @@ async fn late_instances_replace_unpinned_entries_and_do_not_replace_pins() {
 			.0,
 		StatusCode::NOT_FOUND
 	);
-	new.publication.unannounce();
+	new.route.withdraw();
 	master(&server, &format!("include/pinned/video/same/@{first}"), true).await;
 }
 
@@ -602,21 +610,23 @@ async fn a_refused_include_is_listed_once_announced() {
 	frames(&parent.video, 0);
 	frames(&parent.audio, 0);
 	// An on-demand route that drops its prepared answer refuses the first resolution.
-	let claim = origin.requests("room/ladder").unwrap();
+	let claim = origin
+		.route_prefix("room/ladder", moq_net::origin::RouteOptions::default())
+		.unwrap();
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
 	let refuse = async {
-		let request = kio::clock::timeout(Duration::from_secs(5), claim.requested_broadcast())
+		let request = kio::clock::timeout(Duration::from_secs(5), claim.requested())
 			.await
 			.expect("never asked")
 			.unwrap();
-		drop(request.prepare().unwrap());
+		drop(request.route(moq_net::origin::RouteOptions::hidden()).unwrap());
 	};
 	let own = format!("@{root}/video/same");
 	let (listed, ()) = futures::join!(master(&server, &own, true), refuse);
 	assert!(!listed.contains("include/"), "{listed}");
 	// The refusing route is not asked again on a timer.
 	assert!(
-		kio::clock::timeout(Duration::from_secs(30), claim.requested_broadcast())
+		kio::clock::timeout(Duration::from_secs(30), claim.requested())
 			.await
 			.is_err()
 	);

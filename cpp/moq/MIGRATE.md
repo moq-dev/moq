@@ -6,6 +6,18 @@
 
 `moq::Following::available()` resolves to a null `std::shared_ptr<moq::BroadcastConsumer>` once the path goes offline (or, for a follow pinned to an instance, once another instance takes it over), then the next broadcast when something serves the path again. The first call is never null. Check for null before using a later result, and treat it like the previous instance ending.
 
+### Publishing goes through one `moq::Route` handle
+
+`OriginProducer::create_broadcast(path)` is `route(path, options)`, and `requests(prefix)` is `route_prefix(prefix, options)`; `{}` options are the default. Each returns a `std::shared_ptr<moq::Route>`, which replaces `moq::Publication`, `moq::OriginRequests`, and `moq::BroadcastPrepared`:
+
+- `Publication::broadcast()` is `Route::broadcast()`, which returns an error on a prefix route.
+- `Publication::announce(route)` is `announce()`, and re-pricing is `set_cost(cost)`; `unannounce()` is `withdraw()`.
+- `OriginRequests::requested_broadcast()` is `requested()`, which resolves to `nullptr` once the origin closes.
+- `BroadcastRequest::prepare()` then `BroadcastPrepared::publish()` is `BroadcastRequest::route(options)`: create it hidden to fill it first, then `announce()`.
+- `instance_id()` is the stream's instance, kept across `withdraw()` and `announce()`.
+
+`moq::AnnounceRoute` is `moq::RouteOptions{hidden, cost, instance, epoch}`, given at creation. A route is visible at once unless `hidden`; set it and call `announce()` after filling the catalog to keep the old order. Hold the route while the broadcast should stay announced: `cancel()` or releasing its last handle retracts it, and closing its broadcast ends both. `moq::Route`, the record on `moq::Announce::route`, is `moq::RouteInfo`.
+
 ### Separate datagram tracks
 
 Replace stream-track datagram methods with `BroadcastProducer::create_datagrams(name, info)` and `BroadcastConsumer::datagrams(name)`. The generated `DatagramProducer` exposes `append(timestamp, payload)` and `insert(Datagram)`; `DatagramConsumer::recv()` returns an optional datagram through a future. `DatagramInfo` has only priority and optional timescale. Demand is aggregate subscriber `priority()` / `priority_changed(last)`; on-demand datagram requests come from `BroadcastRequests::datagrams()` / `DatagramRequests::requested()`. Stream tracks of the same name are independent.

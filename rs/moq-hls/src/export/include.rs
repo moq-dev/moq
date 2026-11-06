@@ -304,7 +304,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_sync_after_clear_adds_nothing() {
 		let origin = moq_tokio::origin::spawn();
-		let _parent = origin.publish("room/live", Default::default()).unwrap();
+		let _parent = origin.route("room/live", Default::default()).unwrap();
 		let source = crate::resolved(&origin, "room/live").await;
 		let mut catalog = Catalog::default();
 		catalog.include.insert(
@@ -322,12 +322,12 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_cold_lookup_waits_for_the_first_follow_event() {
 		let origin = moq_tokio::origin::spawn();
-		let _parent = origin.publish("room/live", Default::default()).unwrap();
+		let _parent = origin.route("room/live", Default::default()).unwrap();
 		let child_id = moq_net::Instance::random();
 		let child = origin
-			.publish(
+			.route(
 				"room/child",
-				moq_net::origin::Route::default().with_instance(child_id.clone(), 0),
+				moq_net::origin::RouteOptions::default().with_instance(child_id.clone(), 0),
 			)
 			.unwrap();
 		let source = crate::resolved(&origin, "room/live").await;
@@ -338,6 +338,7 @@ mod tests {
 		video.coded_height = Some(240);
 		catalog.video.renditions.insert("v".into(), video);
 		let track = child
+			.broadcast()
 			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.unwrap();
 		let mut json = moq_json::snapshot::Producer::new(track, Default::default());

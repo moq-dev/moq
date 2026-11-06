@@ -167,7 +167,7 @@ stale, including `doc/concept/identity.md`.
 
 ## Required
 
-- [One Route handle](/quest/m1/api-audit/route/handle.md) - `Publication`, `Prepared`, `Announcer` and `Requests` become one `Route` that owns its broadcast, with app options separate from transit facts
+- [Transit facts stay read-only](/quest/m1/api-audit/route/facts.md) - `Hop`, `Hops` and `HopLimit` leave the public API, and JS `RouteInfo` hides epoch and auth
 
 ## Related
 

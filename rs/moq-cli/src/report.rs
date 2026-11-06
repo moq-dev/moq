@@ -254,7 +254,7 @@ pub struct EchoTarget {
 struct Feedback {
 	path: moq_net::Path,
 	// Held for the route: dropping it retracts the announcement.
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 	tracks: ReportTrack<hang::echo::Snapshot<ts::stats::Report>>,
 }
 
@@ -348,10 +348,13 @@ impl Echo {
 	}
 
 	fn publish(&self, path: &moq_net::Path) -> anyhow::Result<Feedback> {
-		let broadcast = self.target.origin.create_broadcast(path)?;
+		let broadcast = self
+			.target
+			.origin
+			.route(path, moq_net::origin::RouteOptions::hidden())?;
 		let tracks = ReportTrack::create(&mut broadcast.broadcast().clone(), hang::echo::TRACK)?;
 		// A fresh instance, so a reader sees a replaced feedback broadcast as a restart.
-		broadcast.announce(moq_net::origin::Route::default())?;
+		broadcast.announce()?;
 		Ok(Feedback {
 			path: path.clone(),
 			_broadcast: broadcast,
@@ -654,10 +657,12 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn an_ended_feedback_reader_stops_after_draining() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("viewer.echo").unwrap();
-		let track = broadcast.create_track(hang::echo::TRACK, None).unwrap();
+		let broadcast = origin
+			.route("viewer.echo", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let track = broadcast.broadcast().create_track(hang::echo::TRACK, None).unwrap();
 		let mut feedback = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 
 		let (out, read) = tokio::io::duplex(4096);
 		let mut lines = BufReader::new(read).lines();
@@ -667,7 +672,7 @@ mod tests {
 		let line = lines.next_line().await.unwrap().unwrap();
 		assert!(line.contains(r#""n":1"#), "{line}");
 
-		broadcast.unannounce();
+		broadcast.withdraw();
 		kio::clock::sleep(DRAIN * 2).await;
 		feedback.update(&serde_json::json!({ "n": 2 })).unwrap();
 		let late = kio::clock::timeout(Duration::from_secs(1), lines.next_line()).await;
@@ -683,18 +688,22 @@ mod tests {
 		let mut lines = BufReader::new(read).lines();
 		tokio::spawn(write_echo(origin.consume(), String::new(), out));
 
-		let claim = origin.requests("viewer.echo").unwrap();
-		kio::clock::timeout(Duration::from_secs(1), claim.requested_broadcast())
+		let claim = origin
+			.route_prefix("viewer.echo", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		kio::clock::timeout(Duration::from_secs(1), claim.requested())
 			.await
 			.expect("never asked")
 			.expect("the claim closed")
 			.reject(moq_net::Error::NotFound);
 		kio::clock::sleep(Duration::from_secs(1)).await;
 
-		let broadcast = origin.create_broadcast("viewer.echo").unwrap();
-		let track = broadcast.create_track(hang::echo::TRACK, None).unwrap();
+		let route = origin
+			.route("viewer.echo", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let track = route.broadcast().create_track(hang::echo::TRACK, None).unwrap();
 		let mut feedback = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
-		broadcast.announce(Default::default()).unwrap();
+		route.announce().unwrap();
 		feedback.update(&serde_json::json!({ "n": 1 })).unwrap();
 		let line = kio::clock::timeout(Duration::from_secs(5), lines.next_line()).await;
 		let line = line.expect("the takeover was never read").unwrap().unwrap();
@@ -725,10 +734,12 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_hidden_prefix_finds_its_feedback() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast(".viewers/alice.echo").unwrap();
-		let track = broadcast.create_track(hang::echo::TRACK, None).unwrap();
+		let broadcast = origin
+			.route(".viewers/alice.echo", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let track = broadcast.broadcast().create_track(hang::echo::TRACK, None).unwrap();
 		let mut feedback = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 
 		let (out, read) = tokio::io::duplex(4096);
 		let mut lines = BufReader::new(read).lines();

@@ -12,7 +12,7 @@ OBS Studio install.
 - **Subscribe**: add a "MoQ Source", enter the relay URL and broadcast path, and the stream appears in the scene.
 - **Dock**: a **MoQ** dock with Go Live, encoding that uses the OBS Output settings or custom settings for this stream only, and live stats (protocol, RTT, bandwidth, loss), and the reason while a stream connects or reconnects.
 
-Each Start Streaming publishes under a fresh instance. The client's automatic
+Each Start Streaming publishes under a fresh instance, which the dock shows. The client's automatic
 reconnects keep the same instance. A
 stop/start, or an OBS auto-reconnect after the client gives up, republishes
 the broadcast under a new instance, which viewers see as a new stream.
