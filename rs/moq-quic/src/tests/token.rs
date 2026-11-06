@@ -93,7 +93,7 @@ fn oversized_retry_token() {
 			version: initial.version,
 		};
 		let mut retry = Vec::new();
-		header.encode(&mut retry);
+		header.encode(&mut retry, 0);
 		retry.resize(retry.len() + token_len, 0);
 		let tag =
 			server_config()

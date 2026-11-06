@@ -541,8 +541,8 @@ async fn play_audio<O: Output>(
 	// and the sink is where it lives: a sample handed over now sounds that much
 	// later. That estimate times each packet when `read` hands it over, so this
 	// receiver never waits on the speaker between reads. Live playback lets
-	// the callback stretch toward the target; declared ends queue their replacements
-	// until the old sink drains. The window
+	// the callback stretch toward the target; a declared end plays comfort noise
+	// until the old media drains and its replacement is due. The window
 	// schedules video against where the speaker actually is, which keeps the two
 	// together whatever the target does.
 	let role = presentation.track(Kind::Audio);
@@ -671,6 +671,10 @@ async fn play_audio<O: Output>(
 		let mut ended = false;
 		let mut deferred = None;
 		let mut sequential = false;
+		// The sink was told its audio ends in a declared silence and has not been told what follows.
+		let mut silent = false;
+		// The frame being written resumes a timeline whose end is already declared.
+		let mut declare = false;
 		loop {
 			let (event, delay, crossing, _) = loop {
 				if let Some(event) = received.lock().unwrap().pop_front() {
@@ -691,10 +695,16 @@ async fn play_audio<O: Output>(
 							ended = false;
 							role.gap();
 							sequential = false;
+							// What follows a declared silence starts the next utterance however many
+							// groups were lost on the way, rather than filling the silence as a hole.
+							if std::mem::take(&mut silent) {
+								timeline = AudioTimeline::default();
+								sink.next();
+							}
 						}
 						Some(Crossing::Resume(transition)) => {
-							// A declared boundary preserves the old sink, unlike an undeclared hole.
-							drain(sink).await;
+							// A declared boundary preserves the old sink, unlike an undeclared hole:
+							// its tail and then comfort noise play while the old media drains.
 							let first = lead(delay);
 							let mapping = role.resume(transition, frame.timestamp, Some(first)).ready().await?;
 							role.apply(transition, mapping);
@@ -711,16 +721,24 @@ async fn play_audio<O: Output>(
 							{
 								role.end(end)?;
 								ended = true;
+								declare = true;
 							}
 							sequential = true;
 							timeline = AudioTimeline::default();
-							sink = speaker.sink(input.clone())?;
+							// Comfort noise fills the wait, so this frame plays one target out.
+							silent = false;
+							sink.next();
 						}
 						None => {}
 					}
 					frame
 				}
 				Ok(Some(moq_audio::decode::Read::End { end })) => {
+					// The stopped encoder's final frames may follow, and play before the silence.
+					if !silent {
+						sink.end();
+						silent = true;
+					}
 					if playing && ended {
 						deferred = Some(end);
 					} else {
@@ -758,6 +776,7 @@ async fn play_audio<O: Output>(
 			// timeline region the player skipped.
 			if timing.reset_sink {
 				sequential = false;
+				silent = false;
 				drop(sink);
 				presentation.audio_restarted();
 				sink = speaker.sink(input.clone())?;
@@ -807,6 +826,10 @@ async fn play_audio<O: Output>(
 			}
 			let skip = fit.skip as usize * stride;
 			let _ = sink.write(&frame.data[skip.min(frame.data.len())..])?;
+			if std::mem::take(&mut declare) {
+				sink.end();
+				silent = true;
+			}
 
 			// Anchor the playout clock on where the speaker has actually reached, which
 			// is the only half of the pipeline that cannot skip ahead. A move has to
@@ -926,7 +949,8 @@ mod tests {
 		producer.write(packet(0, 0.5)).unwrap();
 		producer.finish().unwrap();
 		task.await.unwrap();
-		assert_eq!(recorder.latencies(), vec![AUDIO_BUFFER_MIN, delay]);
+		// The resume keeps the sink, which fills the declared silence with comfort noise.
+		assert_eq!(recorder.latencies(), vec![AUDIO_BUFFER_MIN]);
 		let played = recorder.played();
 		let old: Vec<_> = played.iter().filter(|part| part.sample == 0.25).collect();
 		let new: Vec<_> = played.iter().filter(|part| part.sample == 0.5).collect();
@@ -939,6 +963,96 @@ mod tests {
 			PACKET_DURATION
 		);
 		assert!(old.last().unwrap().to <= new.first().unwrap().from);
+	}
+
+	/// A push-to-talk mute declares its silence and sends nothing until the next
+	/// press. The sink carries on through it, so the native ring fills it with
+	/// comfort noise, and the next press plays one delay after it arrives.
+	#[tokio::test]
+	async fn a_mute_keeps_the_sink_and_the_next_press_plays_one_delay_out() {
+		mute(false).await;
+	}
+
+	/// A group lost after the mute's marker still leaves the next press its own
+	/// utterance, rather than a hole filled with two seconds of silence.
+	#[tokio::test]
+	async fn a_press_after_a_lost_group_still_plays_one_delay_out() {
+		mute(true).await;
+	}
+
+	async fn mute(lost: bool) {
+		tokio::time::pause();
+		let delay = Duration::from_millis(300);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
+		let mut options = moq_audio::decode::Options::new();
+		options.delay = moq_audio::decode::Delay {
+			min: Some(delay),
+			max: Some(delay),
+		};
+		options.estimate = false;
+		options.output.format = moq_audio::Format::F32;
+		let consumer = moq_audio::decode::Consumer::new(
+			&broadcast.consume(),
+			&AudioConfig::new(AudioCodec::Pcm, SAMPLE_RATE, 1),
+			"audio",
+			options,
+		)
+		.await
+		.unwrap();
+		let recorder = Recorder::default();
+		let playback = AudioPlayback {
+			changed: Default::default(),
+			speaker: recorder.clone(),
+			presentation: Presentation::new(delay),
+			latency: delay,
+			output: recorder.clone(),
+		};
+		let task = tokio::spawn(async move {
+			play_audio(consumer, playback, std::future::pending())
+				.await
+				.unwrap()
+				.finish()
+				.await;
+		});
+		for index in 0..10 {
+			producer.write(packet(index, 0.25)).unwrap();
+			kio::clock::sleep(PACKET_DURATION).await;
+		}
+		producer.discontinuity().unwrap();
+		// One group per packet and one for the marker, so the next press would be group 11.
+		if lost {
+			producer.seek(12).unwrap();
+		}
+		// Two seconds muted, with the timeline running on through it.
+		kio::clock::sleep(Duration::from_secs(2)).await;
+		let pressed = Instant::now();
+		for index in 110..120 {
+			producer.write(packet(index, 0.5)).unwrap();
+			kio::clock::sleep(PACKET_DURATION).await;
+		}
+		producer.finish().unwrap();
+		task.await.unwrap();
+
+		assert_eq!(recorder.latencies(), vec![delay], "the mute replaced the sink");
+		let played = recorder.played();
+		let first = played.iter().find(|part| part.sample == 0.5).unwrap();
+		assert_eq!(first.utterance, 1);
+		let waited = first.from - pressed;
+		if lost {
+			// The ordered read first waits within its age budget for the lost group.
+			assert!(waited > delay && waited < 2 * delay, "{played:?}");
+		} else {
+			assert_eq!(waited, delay, "{played:?}");
+		}
+		let new: Vec<_> = played.iter().filter(|part| part.sample == 0.5).collect();
+		assert_eq!(
+			new.iter().map(|part| part.to - part.from).sum::<Duration>(),
+			10 * PACKET_DURATION
+		);
 	}
 
 	#[tokio::test]
@@ -1215,19 +1329,13 @@ mod tests {
 			played
 				.iter()
 				.filter(|part| range.contains(&part.sample))
-				.map(|part| part.sink)
+				.map(|part| (part.sink, part.utterance))
 				.collect::<std::collections::BTreeSet<_>>()
 		};
 		let (old, short, new) = (sinks(0.2..0.3), sinks(0.4..0.6), sinks(0.7..0.8));
 		assert!(!short.is_empty(), "the short timeline played: {played:?}");
-		assert!(
-			old.is_disjoint(&short),
-			"the short timeline resumed on its own sink: {played:?}"
-		);
-		assert!(
-			short.is_disjoint(&new),
-			"the next timeline resumed on its own sink: {played:?}"
-		);
+		assert!(old.is_disjoint(&short), "the short timeline did not resume: {played:?}");
+		assert!(short.is_disjoint(&new), "the next timeline did not resume: {played:?}");
 	}
 
 	#[tokio::test]
@@ -1285,7 +1393,7 @@ mod tests {
 		let resumed: Vec<_> = played.iter().filter(|part| part.sample == 0.5).collect();
 		assert!(!resumed.is_empty(), "{played:?}");
 		assert!(
-			resumed.iter().all(|part| part.sink > 0),
+			resumed.iter().all(|part| part.utterance > 0),
 			"the replacement resumed its declared transition: {played:?}"
 		);
 	}
