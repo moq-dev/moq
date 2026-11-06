@@ -96,7 +96,7 @@ This README's own work, once the children land:
 
 ## Required
 
-- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - shipping Chrome and Safari publishers adapt to the relay's PROBE estimate, since they have no `getStats()`
+- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - browser publishers adapt to `getStats()`'s send estimate once Chrome and Safari report one
 - [One page-wide getStats sampling ticker](/quest/m2/probe/stats-ticker.md) - a page's connections share one sampling ticker
 - [Padding probes](/quest/m2/probe/padding.md) - a browser probes with a lowest-priority padding stream on an ALR schedule
 - [JS rung disable](/quest/m2/probe/rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding

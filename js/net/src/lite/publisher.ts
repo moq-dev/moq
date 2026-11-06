@@ -5,6 +5,7 @@ import { Gate } from "../auth_gate.ts";
 import type { AuthSession } from "../auth_session.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
+import { statsOf } from "../connection/stats.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
 import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
@@ -2340,11 +2341,8 @@ export class Publisher {
 	 * @internal
 	 */
 	async runProbe(stream: Stream) {
-		// getStats is not yet in the TypeScript WebTransport type definitions.
-		const quic = this.#quic as unknown as {
-			getStats?: () => Promise<{ estimatedSendRate: number | null; smoothedRtt?: number | null }>;
-		};
-		if (!quic.getStats) {
+		const getStats = statsOf(this.#quic);
+		if (!getStats) {
 			// Best-effort: we can't supply bandwidth estimates, so close the
 			// whole bidi (FIN + STOP_SENDING) to let the peer release its end.
 			stream.close();
@@ -2395,7 +2393,7 @@ export class Publisher {
 				// unknown, so a transport exposing only one still has something to
 				// report. Anything this version can't carry is dropped here rather
 				// than by the encoder, so it reads as unknown to every check below.
-				const stats = await quic.getStats();
+				const stats = await getStats();
 				// `smoothedRtt` is a DOMHighResTimeStamp, i.e. a double, but the wire
 				// carries whole milliseconds and the varint encoder throws on a
 				// fractional value. Round before it ever reaches `Probe`.
