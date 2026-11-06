@@ -104,8 +104,10 @@ async function measure(
 ): Promise<{ ns: number; ops: number; gaps: number; warnings: number }> {
 	const delay = new Signal<Track.Delay>({ max: HOLD });
 	// Stamped like a hang publisher's media, so the transport finds its live edge at the newest group.
+	// No publisher max age, so HOLD alone decides what a player keeps, and a sparse group arriving
+	// behind a newer one is still delivered.
 	const tracks = Array.from({ length: publishers }, (_, i) =>
-		new Track.Producer(`p${i}`).accept({ timescale: Time.Timescale.MICRO }),
+		new Track.Producer(`p${i}`).accept({ timescale: Time.Timescale.MICRO, maxAge: null }),
 	);
 	const players = tracks.flatMap((track) => Array.from({ length: readers }, () => open(track, delay)));
 	let warnings = 0;
