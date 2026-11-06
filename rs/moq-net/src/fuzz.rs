@@ -358,16 +358,21 @@ pub fn lite_wire(data: &[u8]) -> bool {
 	}
 }
 
+/// The hop chain a session would decode from `ids`; panics on one it would refuse.
+fn hop_chain(ids: impl IntoIterator<Item = u64>) -> Hops {
+	Hops::try_from(ids.into_iter().map(crate::Hop::from_wire).collect::<Vec<_>>()).expect("a valid hop chain")
+}
+
 /// One announcement on an announce stream, resolved: what the application sees.
 ///
 /// The hop chain travels only on lite-06: lite-07 names the claim's route instead, so
 /// its writer drops the chain and its reader decodes an empty one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Announced {
-	/// ANNOUNCE_START: a route's suffix and wire hop chain, taking the next id.
-	Start(Path, Hops),
-	/// ANNOUNCE_UPDATE: a live id's new wire hop chain.
-	Update(u64, Hops),
+	/// ANNOUNCE_START: a route's suffix and wire hop ids, taking the next id.
+	Start(Path, Vec<u64>),
+	/// ANNOUNCE_UPDATE: a live id's new wire hop ids.
+	Update(u64, Vec<u64>),
 	/// ANNOUNCE_END: a live id retired.
 	End(u64),
 }
@@ -426,10 +431,10 @@ impl AnnounceWriter {
 	}
 
 	/// The hop chain as this version carries it: none on lite-07.
-	fn chain(&self, hops: &Hops) -> Hops {
+	fn chain(&self, hops: &[u64]) -> Hops {
 		match self.version.has_routes() {
 			true => Hops::default(),
-			false => hops.clone(),
+			false => hop_chain(hops.iter().copied()),
 		}
 	}
 }
@@ -440,15 +445,25 @@ pub fn received(track: &track::Producer) {
 	track.received();
 }
 
-/// `origin` as a session connected to `peer` serves it, for the viewers bench.
-pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::origin::Consumer {
-	origin.excluding(peer)
+/// `origin` as a session connected to the peer with hop id `peer` serves it, for the
+/// viewers bench.
+pub fn excluding(origin: crate::origin::Consumer, peer: u64) -> crate::origin::Consumer {
+	origin.excluding(crate::Hop::from_wire(peer))
 }
 
-/// A peer's wire route: its hop chain, cost, and instance at an epoch, as a session
+/// A peer's wire route: its hop ids, cost, and instance at an epoch, as a session
 /// decodes one, for benches and tests that land or update forwarded routes.
-pub fn route_info(hops: crate::Hops, cost: u64, instance: Option<(crate::Instance, u64)>) -> crate::origin::RouteInfo {
-	let info = crate::origin::RouteInfo::default().with_hops(hops).with_cost(cost);
+///
+/// Panics on a chain no session would decode: longer than 32, or naming a non-zero id
+/// twice.
+pub fn route_info(
+	hops: impl IntoIterator<Item = u64>,
+	cost: u64,
+	instance: Option<(crate::Instance, u64)>,
+) -> crate::origin::RouteInfo {
+	let info = crate::origin::RouteInfo::default()
+		.with_hops(hop_chain(hops))
+		.with_cost(cost);
 	match instance {
 		Some((instance, epoch)) => info.with_instance(instance, epoch),
 		None => info,
@@ -586,10 +601,12 @@ pub fn decode_announces(data: &[u8], compress: bool) -> Vec<Announced> {
 	let mut resolved = Vec::new();
 	while let Ok(msg) = lite::AnnounceBroadcast::decode(&mut data, version) {
 		let announced = match msg {
-			lite::AnnounceBroadcast::Active { suffix, hops, .. } => {
-				decoder.start(suffix).map(|suffix| Announced::Start(suffix, hops))
+			lite::AnnounceBroadcast::Active { suffix, hops, .. } => decoder
+				.start(suffix)
+				.map(|suffix| Announced::Start(suffix, hops.into_ids())),
+			lite::AnnounceBroadcast::Update { id, hops, .. } => {
+				decoder.get(id).map(|_| Announced::Update(id, hops.into_ids()))
 			}
-			lite::AnnounceBroadcast::Update { id, hops, .. } => decoder.get(id).map(|_| Announced::Update(id, hops)),
 			lite::AnnounceBroadcast::EndedId { id } => decoder.end(id).map(|_| Announced::End(id)),
 			_ => continue,
 		};
@@ -1497,14 +1514,11 @@ pub fn seeds() -> Vec<Seed> {
 	// Announce streams from our own encoder: routes sharing path heads and relay tails,
 	// with retractions and updates moving the bases around.
 	let mut announced = Vec::new();
-	let hop = |id: u64| crate::Hop::new(id).expect("a valid hop");
 	for n in 0..12u64 {
 		let suffix = Path::new(&format!("pid{}/private/channel_{}/health-{n}", n % 3, n % 2)).unwrap();
-		let hops = Hops::try_from(vec![hop(100 + n % 3), hop(1 << 40), hop(1 << 41)]).expect("valid hops");
-		announced.push(Announced::Start(suffix, hops));
+		announced.push(Announced::Start(suffix, vec![100 + n % 3, 1 << 40, 1 << 41]));
 		if n % 4 == 3 {
-			let hops = Hops::try_from(vec![hop(200), hop(1 << 41)]).expect("valid hops");
-			announced.push(Announced::Update(n, hops));
+			announced.push(Announced::Update(n, vec![200, 1 << 41]));
 		}
 		if n % 5 == 4 {
 			announced.push(Announced::End(n));

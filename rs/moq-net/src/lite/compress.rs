@@ -494,11 +494,11 @@ mod tests {
 		use crate::fuzz::Announced;
 		// Lite-07 names a route instead of a hop chain, so none travels.
 		vec![
-			Announced::Start(Path::from_static("room/a/cam"), crate::Hops::new()),
-			Announced::Start(Path::from_static("room/a/mic"), crate::Hops::new()),
-			Announced::Update(0, crate::Hops::new()),
+			Announced::Start(Path::from_static("room/a/cam"), vec![]),
+			Announced::Start(Path::from_static("room/a/mic"), vec![]),
+			Announced::Update(0, vec![]),
 			Announced::End(1),
-			Announced::Start(Path::from_static("room/b"), crate::Hops::new()),
+			Announced::Start(Path::from_static("room/b"), vec![]),
 		]
 	}
 
