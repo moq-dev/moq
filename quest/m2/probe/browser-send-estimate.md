@@ -36,5 +36,5 @@ Public API: none expected. Wire: none, unless the decision below picks a receive
 
 ## Related
 
-- [Padding probes](/quest/m2/probe/padding.md) - raises the estimate once one exists
+- [Padding probes](/quest/m3/probe-padding.md) - raises the estimate once one exists
 - [Media stats](/quest/m3/stats/README.md) - its JS stats read PROBE for the downlink

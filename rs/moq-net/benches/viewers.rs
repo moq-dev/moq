@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Hop, Timestamp, kio, origin};
+use moq_net::{Timestamp, kio, origin};
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
@@ -114,7 +114,8 @@ impl Room {
 
 	/// Viewer `n` joins and reads the latest group of its broadcast.
 	fn join(&mut self, n: usize) -> moq_net::track::Subscriber {
-		let session = moq_net::fuzz::excluding(self.producer.consume(), Hop::random());
+		// Each viewer's own peer id, clear of the origin's random one below 2^53.
+		let session = moq_net::fuzz::excluding(self.producer.consume(), (1 << 60) + n as u64);
 		let path = format!("room/{}", n % self.broadcasts);
 		let resolved = self.drive(session.request(path, None)).unwrap();
 		let mut subscription = self.drive(resolved.track("video").unwrap().subscribe(None)).unwrap();
