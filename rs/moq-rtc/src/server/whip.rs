@@ -314,7 +314,6 @@ mod tests {
 	/// it leaves.
 	#[tokio::test]
 	async fn a_reconnect_replaces_the_stale_session() {
-		kio::clock::allow_host_timers();
 		let server = Server::new(crate::server::Config::default());
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();

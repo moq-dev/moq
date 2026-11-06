@@ -252,7 +252,6 @@ mod tests {
 	/// [`Client::publish`] fails once that instance's route dies.
 	#[tokio::test]
 	async fn a_whip_push_stays_on_its_instance_until_the_route_dies() {
-		kio::clock::allow_host_timers();
 		let origin = moq_tokio::origin::spawn();
 		let (old_route, mut old, old_catalog) = publish_opus(&origin, moq_net::Instance::random());
 		push(&mut *old, 20_000, OPUS_PACKET);
@@ -363,7 +362,6 @@ mod tests {
 	#[tokio::test]
 	#[tracing_test::traced_test]
 	async fn a_capped_whip_publisher_is_steered_by_remb() {
-		kio::clock::allow_host_timers();
 		/// Wait for the logs to contain `line`: the REMB is only visible in the client's.
 		async fn logged(line: &str) {
 			kio::clock::timeout(TIMEOUT, async {
@@ -412,7 +410,6 @@ mod tests {
 	/// closed with the typed error.
 	#[tokio::test]
 	async fn a_whip_publisher_past_its_cap_plus_burst_is_closed() {
-		kio::clock::allow_host_timers();
 		let origin = moq_tokio::origin::spawn();
 		let (_route, mut opus, _catalog) = publish_opus(&origin, moq_net::Instance::random());
 		// 8 kbps with a tenth of a second of burst allows 100 bytes up front.
@@ -437,7 +434,6 @@ mod tests {
 	#[tokio::test]
 	#[tracing_test::traced_test]
 	async fn whip_and_whep_round_trip_opus() {
-		kio::clock::allow_host_timers();
 		let source_origin = moq_tokio::origin::spawn();
 		let source_consumer = source_origin.consume();
 		let mut announcements = source_consumer.announced();
