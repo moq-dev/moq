@@ -727,3 +727,40 @@ async fn a_track_ended_under_a_datagram_flood_keeps_its_stream() {
 			.unwrap_or_else(|_| panic!("{version}: the track never released its stream"));
 	}
 }
+
+/// The publisher's answer, first datagram, and end can all reach one receive pass.
+#[kio::test]
+async fn an_ietf_datagram_sent_with_its_answer_and_end_arrives() {
+	for version in ["moq-transport-18", "moq-transport-20", "moq-transport-22"] {
+		let chain = Chain::new(&[version]).await;
+		let mut producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
+		let mut consumer = chain.remote().await.datagrams(TRACK).unwrap();
+		consumer.set_priority(5);
+		datagram_priority(&producer, Some(5)).await;
+		producer.append(millis(1), &b"first"[..]).unwrap();
+		producer.finish();
+		consumer.info().await.unwrap();
+		let datagram = recv(&mut consumer).await.unwrap().expect("first datagram");
+		assert_eq!(&datagram.payload[..], b"first", "{version}");
+		assert!(recv(&mut consumer).await.unwrap().is_none(), "{version}");
+	}
+}
+
+/// Ending a track must preserve its queued datagrams across the receiver's budget.
+#[kio::test]
+async fn an_ietf_datagram_burst_sent_with_its_end_arrives() {
+	for version in ["moq-transport-18", "moq-transport-20", "moq-transport-22"] {
+		let chain = Chain::new(&[version]).await;
+		let mut producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
+		let mut consumer = chain.consume(&producer, 5).await;
+		for i in 0..64 {
+			producer.append(millis(i), bytes::Bytes::from(vec![i as u8])).unwrap();
+		}
+		producer.finish();
+		for i in 0..64 {
+			let datagram = recv(&mut consumer).await.unwrap().expect("queued datagram");
+			assert_eq!(datagram.sequence, i, "{version}");
+		}
+		assert!(recv(&mut consumer).await.unwrap().is_none(), "{version}");
+	}
+}

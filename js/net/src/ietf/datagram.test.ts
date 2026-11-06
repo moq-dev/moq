@@ -1,11 +1,13 @@
 import { expect, spyOn, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import { accept, connect } from "../connection/index.ts";
 import { ProtocolViolation, SessionCode } from "../error.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, type MockTransport } from "../mock.ts";
 import { Producer as Origin } from "../origin.ts";
 import * as Path from "../path.ts";
 import { encodeVarint, Stream } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
+import { Budget } from "../util/yield.ts";
 import { wireOf } from "../wire.ts";
 import { Connection } from "./connection.ts";
 import { ObjectDatagram } from "./datagram.ts";
@@ -240,3 +242,123 @@ test("a relay shares one IETF subscription across stream and datagram readers", 
 		}
 	}
 });
+
+function lagAnswers(transport: MockTransport, lag: number): void {
+	if (lag === 0) return;
+	const lagging = (writable: WritableStream<Uint8Array>) => {
+		const writer = writable.getWriter();
+		let chain = Promise.resolve();
+		const later = (op: () => Promise<void>) => {
+			// A write the session's close fails is lost, as it would be on the wire.
+			chain = chain
+				.then(async () => {
+					for (let i = 0; i < lag; i++) await Promise.resolve();
+					await op();
+				})
+				.catch(() => {});
+			return chain;
+		};
+		return new WritableStream<Uint8Array>({
+			// Copied: the write resolves now, after which the stream may reuse its buffer.
+			write: (chunk) => {
+				const copy = chunk.slice();
+				void later(() => writer.write(copy));
+			},
+			close: () => later(() => writer.close()),
+			abort: (reason) => writer.abort(reason),
+		});
+	};
+	const incoming = transport.incomingBidirectionalStreams.pipeThrough(
+		new TransformStream<WebTransportBidirectionalStream, WebTransportBidirectionalStream>({
+			transform: (bidi, controller) =>
+				controller.enqueue({
+					readable: bidi.readable,
+					writable: lagging(bidi.writable),
+				} as WebTransportBidirectionalStream),
+		}),
+	);
+	Object.defineProperty(transport, "incomingBidirectionalStreams", { value: incoming });
+}
+
+for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22]) {
+	for (const [lag, finish] of [
+		[0, false],
+		[100, false],
+		[0, true],
+		[100, true],
+	] as const) {
+		test(`${alpn}: a datagram sent right behind its answer arrives (answer ${lag} microtasks late${finish ? ", then the end" : ""})`, async () => {
+			const source = new Origin();
+			const publication = source.route(Path.from("live"), { hidden: true });
+			const datagrams = publication.broadcast.createDatagrams("audio");
+			publication.announce();
+			const pair = createMockTransportPair(alpn);
+			lagAnswers(pair.server, lag);
+			const [client, server] = await Promise.all([
+				connect({ url: new URL("https://localhost/datagrams"), transport: pair.client }),
+				accept({
+					url: new URL("https://localhost/datagrams"),
+					transport: pair.server,
+					publish: source.consume(),
+				}),
+			]);
+			const remote = wireOf(client).consume(Path.from("live"));
+			const reader = remote.datagrams("audio");
+			// Only the subscription carries this priority: a lite-06 TRACK lookup asks for none.
+			reader.setPriority(5);
+			try {
+				while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
+				datagrams.append(undefined, Uint8Array.of(1));
+				if (finish) datagrams.finish();
+				await reader.info();
+				if (!finish) datagrams.append(undefined, Uint8Array.of(2));
+				expect((await reader.recv())?.payload).toEqual(Uint8Array.of(1));
+				if (finish) expect(await reader.recv()).toBeUndefined();
+				else expect((await reader.recv())?.payload).toEqual(Uint8Array.of(2));
+			} finally {
+				reader.close();
+				remote.close();
+				client.abort();
+				server.abort();
+				source.close();
+			}
+		});
+	}
+}
+
+for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22]) {
+	test(`${alpn}: a datagram burst reaches its reader before the end across a receive yield`, async () => {
+		const source = new Origin();
+		const publication = source.route(Path.from("live"), { hidden: true });
+		const datagrams = publication.broadcast.createDatagrams("audio");
+		publication.announce();
+		const pair = createMockTransportPair(alpn);
+		const url = new URL("https://localhost/datagrams");
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client }),
+			accept({ url, transport: pair.server, publish: source.consume() }),
+		]);
+		const remote = wireOf(client).consume(Path.from("live"));
+		const reader = remote.datagrams("audio");
+		reader.setPriority(5);
+		let polls = 0;
+		const budget = spyOn(Budget.prototype, "poll").mockImplementation(() =>
+			++polls % 32 === 0 ? yieldNow() : undefined,
+		);
+		try {
+			await reader.info();
+			while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
+			for (let i = 0; i < 64; i++) datagrams.append(undefined, Uint8Array.of(i));
+			datagrams.finish();
+			for (let i = 0; i < 64; i++) expect((await reader.recv())?.payload).toEqual(Uint8Array.of(i));
+			expect(await reader.recv()).toBeUndefined();
+		} finally {
+			budget.mockRestore();
+			reader.close();
+			remote.close();
+			client.abort();
+			server.abort();
+			source.close();
+		}
+	});
+}

@@ -1,4 +1,4 @@
-import { Milli } from "@moq/clock";
+import { Milli, yieldNow } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
@@ -38,6 +38,7 @@ import { Deadline } from "../util/deadline.ts";
 import { abandoned as demandAbandoned, isAbandoned, unrequested, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { min } from "../util/sequence.ts";
+import { Budget } from "../util/yield.ts";
 import { bounded, wireSpan } from "../window.ts";
 import { wireOf } from "../wire.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
@@ -175,6 +176,7 @@ export class Subscriber {
 
 	// Publisher-chosen aliases used by incoming group streams.
 	#aliases = new TrackAliases<Binding>();
+	#receiveYield?: Promise<void>;
 
 	// Units for each track's object Timestamps, from the TIMESCALE Track Property in
 	// SUBSCRIBE_OK. A track missing from this map declared no timeline, so its frames
@@ -1372,7 +1374,10 @@ export class Subscriber {
 		if (done.statusCode !== PublishDoneStatus.TRACK_ENDED) {
 			throw new Error(`publish done: subscription ended reason=${done.reasonPhrase}`);
 		}
-		subscription.datagrams?.producer.finish();
+		if (subscription.datagrams) {
+			await this.#datagramsRouted();
+			subscription.datagrams.producer.finish();
+		}
 		// The track ended and every stream is accounted for, so no tail is coming: a head nothing
 		// claimed is its whole group. A draft-18 joining FETCH is not in the Stream Count; its
 		// head held the settle.
@@ -2211,8 +2216,11 @@ export class Subscriber {
 		const reader = DatagramStream.datagramReader(this.#quic);
 		if (!reader) return;
 
+		const budget = new Budget();
 		try {
 			for (;;) {
+				const yielded = budget.poll();
+				if (yielded !== undefined) await this.#yieldDatagrams(yielded);
 				// The stream errors once the session closes, which ends this loop like any other.
 				const next = await reader.read().catch(() => undefined);
 				if (!next || next.done) return;
@@ -2220,6 +2228,22 @@ export class Subscriber {
 			}
 		} finally {
 			reader.releaseLock();
+		}
+	}
+
+	async #yieldDatagrams(yielded: Promise<void>): Promise<void> {
+		this.#receiveYield = yielded;
+		await yielded;
+		this.#receiveYield = undefined;
+	}
+
+	// A clean end waits for datagrams already received with it. A budget yield or an
+	// unanswered alias can interrupt that drain; each next host task lets it continue.
+	async #datagramsRouted(): Promise<void> {
+		await yieldNow();
+		while (this.#receiveYield !== undefined) {
+			await this.#receiveYield;
+			await yieldNow();
 		}
 	}
 
@@ -2236,7 +2260,13 @@ export class Subscriber {
 			throw new ProtocolViolation(`undefined object status ${datagram.body.status}`);
 		}
 
-		const alias = this.#aliases.peek(datagram.trackAlias);
+		let alias = this.#aliases.peek(datagram.trackAlias);
+		if (!alias) {
+			// The answer can arrive in the same packet, behind its datagram. Keep only
+			// this receive slot while the control stream decodes, then drop an unknown alias.
+			await this.#yieldDatagrams(yieldNow());
+			alias = this.#aliases.peek(datagram.trackAlias);
+		}
 		const binding = alias?.datagrams && {
 			producer: alias.datagrams.producer,
 			timescale: alias.timescale,
