@@ -2,8 +2,10 @@ set fallback
 
 mod apt
 mod rpm
+mod nix
 
 # Deploy all infra workers.
 deploy:
     just apt deploy
     just rpm deploy
+    just nix deploy
