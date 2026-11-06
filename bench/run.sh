@@ -447,6 +447,8 @@ unavailable() {
 # Measure the selected targets in quick mode. With a base, run each target's base build
 # beside it, alternating which goes first, then confirm the screen's worst slowdowns.
 # A failed current target fails the run; the base only marks its targets unavailable.
+# A base build byte-identical to the current one is not run: the runner's own drift
+# measured identical builds up to 12% apart, so comparing them can only raise false alarms.
 measure_criterion() {
     local current=$RUN/criterion-current.targets base=$RUN/criterion-base.targets
     local key side targets index=0 status=0
@@ -474,9 +476,13 @@ measure_criterion() {
             for key in "${targets[@]}"; do unavailable "$key" "base build failed"; done
         fi
     fi
+    : >"$RUN/paired-identical.txt"
     for key in "${targets[@]}"; do
-        local order=(current)
-        if [[ -n $(target_line "$base" "$key") ]]; then
+        local order=(current) base_line
+        base_line=$(target_line "$base" "$key")
+        if [[ -n $base_line ]] && cmp -s "$(target_line "$current" "$key" | cut -f3)" "$(cut -f3 <<<"$base_line")"; then
+            printf '%s\n' "$key" >>"$RUN/paired-identical.txt"
+        elif [[ -n $base_line ]]; then
             if ((index++ % 2)); then order=(current base); else order=(base current); fi
         fi
         for side in "${order[@]}"; do
@@ -497,23 +503,40 @@ measure_criterion() {
 
 # One quick run per side can land on noise, so each slowdown the screen flags is
 # re-measured in alternating rounds with the comparison settings before it can fail.
+# Round sides stop starting after CONFIRM_SECONDS, worst slowdown first, so a group of slow
+# cases cannot push the Nightly leg past its timeout. A case cut off mid-rounds is left out
+# of confirm.tsv, so it and every later case stay unconfirmed.
+CONFIRM_SECONDS=300
 confirm_criterion() {
-    local key benchmark round side index=0
-    python3 "$ROOT/bench/compare.py" --criterion-screen "$RUN" >"$RUN/confirm.tsv" || return 1
+    local key benchmark round side index=0 deadline=$((SECONDS + CONFIRM_SECONDS))
+    python3 "$ROOT/bench/compare.py" --criterion-screen "$RUN" >"$RUN/screen.tsv" || return 1
+    : >"$RUN/confirm.tsv"
     while IFS=$'\t' read -r key benchmark; do
         index=$((index + 1))
+        # compare.py ignores every case of an unavailable target, so its rounds would only spend the budget.
+        if [[ -f $RUN/paired-unavailable.tsv ]] &&
+            awk -F'\t' -v target="$key" '$1 == target { found = 1 } END { exit !found }' "$RUN/paired-unavailable.tsv"; then
+            printf '%s\t%s\n' "$key" "$benchmark" >>"$RUN/confirm.tsv"
+            continue
+        fi
         for ((round = 1; round <= ROUNDS; round++)); do
             local order=(base current)
             if ((round % 2 == 0)); then order=(current base); fi
             for side in "${order[@]}"; do
+                if ((SECONDS >= deadline)); then
+                    printf 'Confirmation budget of %ds spent; later slowdowns stay unconfirmed\n' "$CONFIRM_SECONDS"
+                    break 3
+                fi
                 if ! criterion_exec "$RUN/criterion-$side.targets" "$RUN/confirm/$index/round-$round/$side" "$key" \
                     "${CRITERION_ARGS[@]}" "$benchmark" --exact; then
                     unavailable "$key" "confirmation failed"
+                    printf '%s\t%s\n' "$key" "$benchmark" >>"$RUN/confirm.tsv"
                     continue 3
                 fi
             done
         done
-    done <"$RUN/confirm.tsv"
+        printf '%s\t%s\n' "$key" "$benchmark" >>"$RUN/confirm.tsv"
+    done <"$RUN/screen.tsv"
     python3 "$ROOT/bench/compare.py" --criterion-paired "$RUN"
 }
 

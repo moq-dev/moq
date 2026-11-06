@@ -30,6 +30,5 @@ padding probes in [lite07-finalize](/quest/m2/lite07-finalize.md).
 
 ## Required
 
-- [rind CPU error](/quest/m1/rind/cpu-error.md) - claim held rind
 - [Release on leave](/quest/m1/stream-credit/release-on-leave.md) - claim held stream-credit
 - [Probe padding](/quest/m2/probe/padding.md) - claim held probe

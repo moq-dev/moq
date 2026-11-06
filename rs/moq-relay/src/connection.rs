@@ -86,7 +86,7 @@ impl<R: Incoming> Connection<R> {
 		lifecycle.run(Self::serve(request, &lifecycle)).await;
 	}
 
-	async fn serve(request: R, lifecycle: &Lifecycle) -> anyhow::Result<()> {
+	async fn serve(mut request: R, lifecycle: &Lifecycle) -> anyhow::Result<()> {
 		// Abandoned at the drain deadline, so the deadline bounds this task and its
 		// socket like it bounds a session, and at the handshake deadline, so a peer
 		// cannot hold the connection open behind a decision that never comes.
