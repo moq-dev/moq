@@ -784,11 +784,14 @@ export namespace Track {
 		close(abort?: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		finished(): Promise<Track.Position>;
+		floor(): bigint | undefined;
 		info(): Promise<Track.Info>;
 		largest(): Promise<Track.Position | undefined>;
 		readonly name: string;
+		nextInRange(from: bigint): bigint | undefined;
 		ordered(): Track.Ordered;
 		recvGroup(): Promise<Group.Consumer | undefined>;
+		start(): Promise<bigint | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		tryRecvGroup(): Group.Consumer | undefined;
 		update(options: Track.Subscription): void;
