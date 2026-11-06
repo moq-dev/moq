@@ -621,9 +621,6 @@ fn proto_status(err: &web::proto::ConnectError) -> Option<u16> {
 
 pub(crate) struct Server {
 	pub quic: driver::endpoint::Endpoint,
-	/// The configured receive window, opened once a session is admitted: until then a
-	/// connection holds [`moq_net::transport::SETUP_RECEIVE_WINDOW`].
-	pub window: Option<std::num::NonZeroU64>,
 	/// Builds each accepted client's identity against the listener's current roots.
 	pub(crate) tls: crate::tls::Serve,
 	/// Reloads the QUIC-LB peers for as long as the server runs.
@@ -649,7 +646,8 @@ impl Server {
 		} = options;
 		let quic = quic.resolve();
 		let mut transport = transport(&quic, "server")?;
-		let window = transport.limits.receive_window;
+		// Held back until admission, when moq-net opens the configured window
+		// (`moq_net::Server::with_receive_window`).
 		transport.limits.receive_window = std::num::NonZeroU64::new(moq_net::transport::SETUP_RECEIVE_WINDOW);
 		let keylog = quic
 			.keylog
@@ -765,7 +763,6 @@ impl Server {
 
 		Ok(Self {
 			quic,
-			window,
 			tls: served,
 			_peers: peers,
 		})

@@ -218,9 +218,7 @@ impl Fetcher {
 
 		// reqwest reads rustls's process default and panics without one, so install rind's
 		// unless the host already chose a provider.
-		let _ = rind_rustls::default_provider()
-			.map_err(Error::unsupported_cpu)?
-			.install_default();
+		moq_crypto::provider::install_default()?;
 
 		let client = Client::builder()
 			.user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))

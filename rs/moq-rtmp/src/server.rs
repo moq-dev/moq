@@ -266,7 +266,7 @@ pub struct Server {
 impl Server {
 	/// Bind an RTMP listener on `addr` (RTMP's well-known port is 1935).
 	pub async fn bind(addr: SocketAddr) -> Result<Self> {
-		rind::cpu::check().map_err(std::io::Error::other)?;
+		moq_crypto::cpu::check()?;
 		let listener = TcpListener::bind(addr).await?;
 
 		Ok(Self {
@@ -496,6 +496,7 @@ pub fn configure_socket(stream: &TcpStream, peer: SocketAddr) {
 /// `play`. The handshake must finish in five seconds; wrap the call in
 /// [`kio::clock::timeout`] to also bound the wait for a publish or play request.
 pub async fn accept_stream<S: Stream>(stream: S, peer: SocketAddr) -> Result<Option<Request<S>>> {
+	moq_crypto::cpu::check()?;
 	Ok(accept_until_request(stream, peer).await?)
 }
 
@@ -1470,7 +1471,7 @@ async fn feed_input<S: Stream>(
 /// Perform the RTMP server handshake, returning any leftover bytes that followed
 /// the client's final handshake packet (the start of the chunk stream).
 async fn run_handshake<S: Stream>(stream: &mut S, peer: SocketAddr) -> anyhow::Result<Vec<u8>> {
-	let mut handshake = Handshake::new(PeerType::Server)?;
+	let mut handshake = Handshake::new(PeerType::Server);
 	let mut buffer = [0u8; 4096];
 	loop {
 		let n = stream.read(&mut buffer).await?;
@@ -1952,7 +1953,7 @@ mod tests {
 
 	/// The client half of the RTMP handshake, returning the bytes read past it.
 	async fn client_handshake<S: Stream>(stream: &mut S) -> Vec<u8> {
-		let mut handshake = Handshake::new(PeerType::Client).unwrap();
+		let mut handshake = Handshake::new(PeerType::Client);
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -2033,7 +2034,7 @@ mod tests {
 		media: tokio::sync::mpsc::UnboundedSender<Media>,
 	) {
 		// Handshake.
-		let mut handshake = Handshake::new(PeerType::Client).unwrap();
+		let mut handshake = Handshake::new(PeerType::Client);
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -2121,7 +2122,7 @@ mod tests {
 			None
 		}
 
-		let mut handshake = Handshake::new(PeerType::Client).unwrap();
+		let mut handshake = Handshake::new(PeerType::Client);
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -2882,7 +2883,7 @@ mod tests {
 		let mut stream = TcpStream::connect(addr).await.unwrap();
 
 		// Client handshake.
-		let mut handshake = Handshake::new(PeerType::Client).unwrap();
+		let mut handshake = Handshake::new(PeerType::Client);
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
