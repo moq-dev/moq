@@ -54,9 +54,9 @@ struct Pending {
 	flight: bool,
 	// How many joins still read each sequence: one a reader narrowed away is no longer owed.
 	wants: RangeMap<u64, u32>,
-	// What its handler accepted that no join has let go of yet, which holds back the next
+	// What its handler accepted that no join has picked up yet, which holds back the next
 	// group: see [`Fill::poll_wanted_changed`].
-	untaken: RangeSet<u64>,
+	unseen: RangeSet<u64>,
 	// Readers hold consumers, so it counts the fill's demand; the handler's copy says what
 	// became of each sequence.
 	result: kio::Producer<Outcome>,
@@ -76,11 +76,10 @@ impl Pending {
 		}
 	}
 
-	/// Count one join out of reading `groups`, which it counted in: it took them or stopped
-	/// waiting, either of which lets its handler move on. Returns the runs nobody reads any
-	/// more.
+	/// Count one join out of reading `groups`, which it counted in. Returns the runs nobody
+	/// reads any more.
 	fn unwant(&mut self, groups: ops::Range<u64>) -> Vec<ops::Range<u64>> {
-		self.untaken.remove(groups.clone());
+		self.unseen.remove(groups.clone());
 		let counts: Vec<(ops::Range<u64>, u32)> = self
 			.wants
 			.overlapping(&groups)
@@ -354,6 +353,19 @@ impl Join {
 		self.held.is_empty()
 	}
 
+	/// The reader picked up `groups` the fill accepted, so its handler may serve the next one.
+	pub(super) fn saw(&self, groups: &RangeSet<u64>) {
+		let mut fills = self.fills.lock();
+		if let Some(pending) = fills.pending.get_mut(&self.id)
+			&& self.is_ours(pending)
+			&& groups.iter().any(|run| pending.unseen.overlaps(run))
+		{
+			for run in groups.iter() {
+				pending.unseen.remove(run.clone());
+			}
+		}
+	}
+
 	/// Stop reading `lost`, so the fill no longer owes this reader any of it.
 	pub(super) fn release(&mut self, lost: &RangeSet<u64>) {
 		let released: Vec<ops::Range<u64>> = lost
@@ -529,7 +541,7 @@ impl FillState {
 					queued: true,
 					flight: false,
 					wants: RangeMap::from_iter([(groups.clone(), 1)]),
-					untaken: RangeSet::new(),
+					unseen: RangeSet::new(),
 					result,
 				},
 			);
@@ -580,7 +592,7 @@ impl FillState {
 						queued: true,
 						flight: true,
 						wants: RangeMap::from_iter([(groups.clone(), 1)]),
-						untaken: RangeSet::new(),
+						unseen: RangeSet::new(),
 						result: Default::default(),
 					},
 				);
@@ -630,7 +642,7 @@ impl FillState {
 				queued: true,
 				flight: false,
 				wants: RangeMap::new(),
-				untaken: RangeSet::new(),
+				unseen: RangeSet::new(),
 				result,
 			},
 		);
@@ -955,7 +967,7 @@ impl Fill {
 	/// The next group still owed in the fill's order: a reader still reads it, and it was
 	/// neither answered nor delivered live since it was asked. `None` once none is owed or
 	/// no reader waits on the fill, so stop serving it. It does not wait for the readers to
-	/// take what was served before it; [`wanted_changed`](Self::wanted_changed) does.
+	/// pick up what was served before it; [`wanted_changed`](Self::wanted_changed) does.
 	pub fn wanted(&self) -> Option<u64> {
 		self.wanted_except(None)
 	}
@@ -999,9 +1011,9 @@ impl Fill {
 		}
 	}
 
-	/// The next group to serve: [`wanted`](Self::wanted) once a reader took every group this
-	/// fill accepted, or stopped waiting for it, and once it differs from what this handle
-	/// last returned. The first call returns at once unless a group is still untaken.
+	/// The next group to serve: [`wanted`](Self::wanted) once every group this fill accepted
+	/// reached a reader, which picks it up as it asks for its next group, and once it differs
+	/// from what this handle last returned. The first call returns at once.
 	///
 	/// So `while let Some(sequence) = fill.wanted_changed().await` writes one group at a time,
 	/// at the pace of the fastest reader, and ends once the fill is withdrawn or answered. A
@@ -1018,17 +1030,17 @@ impl Fill {
 		let _ = self.inner.fills.poll(waiter, |_| Poll::Pending);
 		let _ = self.inner.asks.poll(waiter, |_| Poll::Pending);
 		let wanted = self.wanted();
-		if self.prev == Some(wanted) || (wanted.is_some() && self.inner.is_untaken()) {
+		if self.prev == Some(wanted) || (wanted.is_some() && self.inner.is_unseen()) {
 			return Poll::Pending;
 		}
 		self.prev = Some(wanted);
 		Poll::Ready(wanted)
 	}
 
-	/// Poll until a reader took every group this fill accepted or stopped waiting for it, or
-	/// nobody waits on the fill, as [`Self::poll_wanted_changed`] paces.
+	/// Poll until every group this fill accepted reached a reader, or nobody waits on the
+	/// fill, as [`Self::poll_wanted_changed`] paces.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn poll_taken(&self, waiter: &kio::Waiter) -> Poll<()> {
+	pub(crate) fn poll_paced(&self, waiter: &kio::Waiter) -> Poll<()> {
 		if self.poll_withdrawn(waiter).is_ready() {
 			return Poll::Ready(());
 		}
@@ -1036,7 +1048,7 @@ impl Fill {
 		self.inner
 			.fills
 			.poll(waiter, |fills| match fills.pending.get(&id) {
-				Some(pending) if !pending.untaken.is_empty() => Poll::Pending,
+				Some(pending) if !pending.unseen.is_empty() => Poll::Pending,
 				_ => Poll::Ready(()),
 			})
 			.map(drop)
@@ -1182,13 +1194,13 @@ impl Inner {
 		self.result.wanted() && self.fills.read().wants(self.id, sequence)
 	}
 
-	/// Whether a group this fill accepted still waits for a reader to take it.
-	fn is_untaken(&self) -> bool {
+	/// Whether a group this fill accepted has yet to reach a reader.
+	fn is_unseen(&self) -> bool {
 		self.fills
 			.read()
 			.pending
 			.get(&self.id)
-			.is_some_and(|pending| !pending.untaken.is_empty())
+			.is_some_and(|pending| !pending.unseen.is_empty())
 	}
 
 	fn max_delay(&self) -> Option<Duration> {
@@ -1272,12 +1284,12 @@ impl Inner {
 		for range in fills.routed(self.id, &(sequence..end)) {
 			fills.covers.remove(range);
 		}
-		// Written for a reader that has yet to take it, which the next group waits on.
+		// Written for a reader that has yet to pick it up, which the next group waits on.
 		if res.is_ok()
 			&& let Some(pending) = fills.pending.get_mut(&self.id)
 			&& pending.wants.contains_key(&sequence)
 		{
-			pending.untaken.insert(sequence..end);
+			pending.unseen.insert(sequence..end);
 		}
 		drop(fills);
 		res

@@ -536,10 +536,9 @@ impl MoqFill {
 		self.inner.wanted()
 	}
 
-	/// The next group to serve: `wanted` once a reader took every group this fill accepted, or
-	/// stopped waiting for it, and once it changed. The first call returns at once unless a
-	/// group is still untaken. Serve one group per call, so the cache never holds a batch the
-	/// readers have yet to take.
+	/// The next group to serve: `wanted` once every group this fill accepted reached a reader
+	/// and it changed. The first call returns at once. Serve one group per call, so the cache
+	/// never holds a batch the readers have yet to take.
 	pub async fn wanted_changed(&self) -> Result<Option<u64>, MoqError> {
 		// Polled in place: a cancelled call left unfreed must not advance the
 		// watcher and swallow the change the next call waits for.

@@ -87,8 +87,8 @@ public final class Fill: Sendable {
         ffi.wanted()
     }
 
-    /// Suspend until a reader took every group this fill accepted and `wanted` changed, and
-    /// return it. The first call returns at once unless an accepted group still waits.
+    /// Suspend until every group this fill accepted reached a reader and `wanted` changed, and
+    /// return it. The first call returns at once.
     public func wantedChanged() async throws -> UInt64? {
         try await ffi.wantedChanged()
     }

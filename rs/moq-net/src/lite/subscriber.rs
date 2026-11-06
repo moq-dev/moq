@@ -11153,9 +11153,9 @@ impl kio::Task for FillServeRun {
 			if self.fill.poll_withdrawn(waiter).is_ready() {
 				return Poll::Ready(());
 			}
-			// The next fetch waits for a reader to take the group the last one brought, so a
+			// The next fetch waits for a reader to pick up the group the last one brought, so a
 			// fill wider than the cache never evicts its own groups before they are read.
-			ready!(self.fill.poll_taken(waiter));
+			ready!(self.fill.poll_paced(waiter));
 			let Some(sequence) = self.fill.wanted() else {
 				return Poll::Ready(());
 			};

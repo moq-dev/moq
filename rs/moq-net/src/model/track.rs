@@ -19943,7 +19943,8 @@ mod test {
 	}
 
 	/// A parked [`Fill::poll_wanted_changed`] wakes on every move of the group owed: a
-	/// reader narrowing past it, an answer, and the last reader leaving, which ends at `None`.
+	/// reader narrowing past it, a reader picking up an answer, and the last reader leaving,
+	/// which ends at `None`.
 	#[test]
 	fn fill_wanted_changed_follows_the_group_owed() {
 		let mut producer = track_producer("test", Info::timed());
@@ -19972,7 +19973,13 @@ mod test {
 		assert!(fill.poll_wanted_changed(&waiter).is_pending());
 
 		write_filled(fill.accept(8, None), 8);
-		assert!(flag.take(), "an answer woke the parked poll");
+		flag.take();
+		assert!(
+			fill.poll_wanted_changed(&waiter).is_pending(),
+			"group 9 waits for the reader to pick up 8"
+		);
+		assert!(matches!(subscriber.poll_recv_group(&noop), Poll::Ready(Ok(Some(_)))));
+		assert!(flag.take(), "the reader picking it up woke the parked poll");
 		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(9)));
 		assert!(fill.poll_wanted_changed(&waiter).is_pending());
 
@@ -20650,14 +20657,16 @@ mod test {
 			while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
 				fills.push(fill);
 			}
-			fills.retain_mut(|fill| loop {
-				match fill.poll_wanted_changed(&waiter) {
-					Poll::Ready(Some(sequence)) => {
-						write(fill.accept(sequence, None), sequence);
-						refilled += 1;
+			fills.retain_mut(|fill| {
+				loop {
+					match fill.poll_wanted_changed(&waiter) {
+						Poll::Ready(Some(sequence)) => {
+							write(fill.accept(sequence, None), sequence);
+							refilled += 1;
+						}
+						Poll::Ready(None) => break false,
+						Poll::Pending => break true,
 					}
-					Poll::Ready(None) => break false,
-					Poll::Pending => break true,
 				}
 			});
 		};
@@ -20767,6 +20776,36 @@ mod test {
 		assert_eq!(read, (0..=GROUPS).collect::<Vec<_>>(), "every group once, in order");
 		assert!(drained_drops(&mut subscriber).is_empty());
 		assert_eq!(ahead, 1, "one group served at a time");
+	}
+
+	/// A reader asking newest first but reading in sequence picks up each group the fill writes
+	/// while it waits on the oldest, so the fill never waits on a group the reader cannot take
+	/// yet.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_fill_against_its_readers_order_still_finishes() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let subscriber = producer.subscribe(replay().with_range(0..).with_order(Order::Descending));
+		let mut ordered = subscriber.ordered();
+		producer.start_at(4).unwrap();
+		write_group(&producer, 4);
+		let waiter = kio::Waiter::noop();
+		assert!(ordered.poll_next_group(&waiter).is_pending(), "group 0 is a miss");
+		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the reader asked for the batch");
+		};
+		assert_eq!(fill.order(), Order::Descending);
+		let (mut served, mut read) = (Vec::new(), Vec::new());
+		while let Poll::Ready(Some(sequence)) = fill.poll_wanted_changed(&waiter) {
+			write_filled(fill.accept(sequence, None), sequence);
+			served.push(sequence);
+			while let Poll::Ready(Ok(Some(group))) = ordered.poll_next_group(&waiter) {
+				read.push(group.sequence);
+			}
+		}
+		assert_eq!(served, [3, 2, 1, 0]);
+		assert_eq!(read, [0, 1, 2, 3, 4]);
 	}
 
 	/// A reader forgets the misses it gave up once its window moves past them, as it forgets

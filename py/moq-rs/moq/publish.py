@@ -258,10 +258,10 @@ class Fill:
         return self._inner.wanted()
 
     async def wanted_changed(self) -> int | None:
-        """The next group to serve, once a reader took every group this fill accepted.
+        """The next group to serve, once every group this fill accepted reached a reader.
 
-        Returns ``wanted`` once it changed and no accepted group waits for a reader; the first
-        call returns at once unless one does.
+        Returns ``wanted`` once it changed and the readers picked up what was served; the first
+        call returns at once.
         """
         return await self._inner.wanted_changed()
 

@@ -365,9 +365,8 @@ func (f *Fill) Wanted() *uint64 {
 	return f.inner.Wanted()
 }
 
-// WantedChanged blocks until a reader took every group this fill accepted and
-// Wanted changed, and returns it. The first call returns at once unless an
-// accepted group still waits for a reader.
+// WantedChanged blocks until every group this fill accepted reached a reader
+// and Wanted changed, and returns it. The first call returns at once.
 func (f *Fill) WantedChanged(ctx context.Context) (*uint64, error) {
 	return f.inner.WantedChanged(ctx)
 }

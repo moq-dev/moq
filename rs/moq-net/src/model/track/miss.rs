@@ -538,6 +538,7 @@ impl Misses {
 			// What is answered is no longer owed this reader, except a filled group: held until
 			// taken, so its source keeps writing it while the reader picks it up.
 			let mut taken = RangeSet::new();
+			let mut seen = RangeSet::new();
 			for (groups, answer) in answers {
 				self.wanted.remove(groups.clone());
 				taken.insert(groups.clone());
@@ -545,6 +546,7 @@ impl Misses {
 					// What the cache holds is filled, and the rest settled by run: a fill that
 					// ended unanswered may span far more groups than were ever cached.
 					Ok(()) => {
+						seen.insert(groups.clone());
 						self.settle(&state, groups.clone(), given_up);
 						for (&sequence, slot) in state.lookup.range(groups) {
 							if slot.serves_end() {
@@ -563,6 +565,10 @@ impl Misses {
 				}
 			}
 			drop(state);
+			// Picked up, so its handler may serve the next group.
+			if !seen.is_empty() {
+				self.joins[&key].saw(&seen);
+			}
 			self.release(&taken);
 			// Judged again: the same join may have more to answer, or park the waiter now.
 		}

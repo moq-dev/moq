@@ -957,7 +957,7 @@ impl Publish {
 		}
 	}
 
-	/// Hand `fill` to C a group at a time, each once a reader took the one before it or
+	/// Hand `fill` to C a group at a time, each once the one before it reached a reader or
 	/// nobody reads it any more, until every group is answered or nobody waits on the fill.
 	async fn serve_fill(callback: OnStatus, fill: Arc<moq_net::track::Fill>) {
 		let mut changes = (*fill).clone();
