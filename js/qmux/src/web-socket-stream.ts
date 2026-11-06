@@ -222,7 +222,9 @@ export class WebSocketStream implements WebSocketStreamLike {
 				// reaches 0 only once the socket is behind. Counting every chunk would report
 				// backpressure for each write in flight, however small the backlog.
 				highWaterMark: 1,
+				// The DOM typing admits `undefined`, which a WebSocket can't send.
 				size: (chunk) => {
+					if (chunk === undefined) throw new TypeError("WebSocketStream cannot send undefined");
 					queued += byteLength(chunk);
 					return ws.bufferedAmount + queued > this.#highWaterMark ? 1 : 0;
 				},

@@ -958,6 +958,8 @@ mod tests {
 			let server_name = tls.get_ref().1.server_name().map(str::to_string);
 			let host = Arc::new(Mutex::new(None));
 			let request_host = host.clone();
+			let protocol = Arc::new(Mutex::new(None));
+			let selected = protocol.clone();
 			#[expect(
 				clippy::result_large_err,
 				reason = "the error type is tungstenite's handshake response, not ours"
@@ -980,12 +982,17 @@ mod tests {
 						http::header::SEC_WEBSOCKET_PROTOCOL,
 						http::HeaderValue::from_str(protocol).unwrap(),
 					);
+					*selected.lock().unwrap() = Some(protocol.to_string());
 				}
 				Ok(response)
 			};
-			let _websocket = tokio_tungstenite::accept_hdr_async(tls, callback).await.unwrap();
+			let websocket = tokio_tungstenite::accept_hdr_async(tls, callback).await.unwrap();
+			let protocol = protocol.lock().unwrap().take().unwrap();
+			// The client returns once QMux is established, so answer with its parameters.
+			let (session, driver) = qmux::ws::Upgraded::new(websocket, &protocol).accept().await.unwrap();
+			tokio::spawn(driver);
 			let host = host.lock().unwrap().take();
-			(server_name, host)
+			(server_name, host, session)
 		});
 
 		let config = Config::default();
@@ -1009,7 +1016,7 @@ mod tests {
 		.await
 		.unwrap();
 		drop(session);
-		let (server_name, host) = accepted.await.unwrap();
+		let (server_name, host, _session) = accepted.await.unwrap();
 		assert_eq!(server_name.as_deref(), expected_sni);
 		assert_eq!(host.as_deref(), Some(expected_host.as_str()));
 	}
