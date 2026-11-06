@@ -1,11 +1,14 @@
-# [L] moq play reaches zero steady-state underruns by time-stretching
+# [L] moq play converges inaudibly by time-stretching
 
 ## Goal
 
 `rs/moq-audio`'s playback converges on its playout target by time-stretching
 received audio, as WebRTC NetEq does, instead of running its ring dry and
 padding with silence or trimming buffered audio. `moq play`'s native rows in
-`test/audio-quality` reach zero underruns once the target settles. The
+`test/audio-quality` play with no audible glitch once the target settles,
+with underrun ceilings measured by `budgets.json`'s rule rather than fixed at
+zero, as decided 2026-11-06 in
+[Watch](/quest/m1/audio-jitter-target/watch.md). The
 stretch shares one algorithm and one set of test vectors with the browser's.
 
 Boundaries: no packet loss concealment, so a frame that never arrives is
@@ -32,10 +35,11 @@ The port retains WebRTC's BSD notice and patent grant, 4 kHz analysis,
 8192/16384 fast admission thresholds, passive-speech VAD, 20 ms decision
 band, 4x fast threshold, and 60 ms startup / 50 ms successful-stretch
 cooldowns.
-[moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) departs from
-NetEq's preemptive expand in both players, recorded in the shared spec:
+[moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) adds a fast
+expand to both players behind `FAST_EXPAND`, recorded in the shared spec:
 below the target, expand ignores the cooldown and takes every whole period
-that fits at the lower threshold. It also drains a declared end's tail
+that fits at the lower threshold. Watch's listening check picks it or
+NetEq's exact expand. It also drains a declared end's tail
 unstretched, as finishing does. Analysis samples NetEq's 48 kHz FIR on a virtual clock for other
 device rates and uses floating-point peak refinement and fades. Those
 arithmetic adaptations are documented, not claimed bit-identical to int16
@@ -49,8 +53,8 @@ capacity watermark and an incoming excess at the fast threshold trim.
 
 Remaining verification:
 
-- Native `test/audio-quality` rows must show zero steady-state underruns
-  once their targets settle. Keep a failed or void row explicit and fix
+- Native `test/audio-quality` rows must meet their measured underrun
+  ceilings once their targets settle. Keep a failed or void row explicit and fix
   any implementation cause before calling this complete.
 - Re-measure the provisional native budgets from seven scheduled nightly
   artifacts using `budgets.json`'s rule: worst clean run times 1.25, plus

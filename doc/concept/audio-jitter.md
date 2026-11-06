@@ -669,8 +669,12 @@ A ring below its target is short of the cushion its arrivals need, and running
 dry re-stalls it for a whole target of silence. So expand mirrors fast
 accelerate instead: every window, at the lower admission threshold, as many
 whole periods as fit before the middle, up to 15 ms of every 30 ms. That took
-every replay row to zero player underruns. The cost is a stronger stretch while
-the ring is short, which the listening check judges. NetEq's extra
+every replay row to zero player underruns, at the cost of a stronger stretch
+while the ring is short. The departure is not settled: the target is no
+audible glitch, not zero underruns, so a listening check decides between it
+and NetEq's exact expand, which both players keep behind a `FAST_EXPAND`
+switch until then. With it off, step 2 moves after step 4 and expands one
+period at the normal threshold. NetEq's extra
 packet-history maximum-delay term is not added again: this controller sees the
 already decoded PCM queue and its jitter target rather than an RTP playout
 timestamp and packet-arrival history. There is no concealment state.
