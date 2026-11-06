@@ -36,11 +36,14 @@ export interface Refusal {
 }
 
 async function writeRefusal(w: Writer, version: IetfVersion, kind: RequestKind, refusal: Refusal): Promise<void> {
+	const errorCode = toRequestCode(refusal.condition, kind, version);
+	// 0 asks the peer never to retry. As in Rust's `retry_interval`, the code must leave the
+	// request open too: UNINTERESTED tells an offer to stop, and the rest are verdicts.
+	const open = errorCode === 0x0 || errorCode === 0x6 || errorCode === 0x10;
 	const err = new RequestError({
-		errorCode: toRequestCode(refusal.condition, kind, version),
+		errorCode,
 		reasonPhrase: refusal.reasonPhrase,
-		// 0 asks the peer never to retry.
-		retryInterval: refusal.retryable ? BigInt(RETRY_INITIAL) : 0n,
+		retryInterval: refusal.retryable && open ? BigInt(RETRY_INITIAL) : 0n,
 	});
 	await Message.write(w, RequestError.id, err, version);
 }

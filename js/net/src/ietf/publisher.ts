@@ -39,7 +39,7 @@ import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import * as Cluster from "./cluster.ts";
-import { requestReason } from "./error.ts";
+import { type RequestCondition, requestReason } from "./error.ts";
 import { type Fetch, FetchHeader, FetchOk, type FetchType } from "./fetch.ts";
 import * as Filter from "./filter.ts";
 import { MAX_AGE_PARAMETER } from "./max_age.ts";
@@ -300,6 +300,24 @@ interface RunFill {
 
 	/** The subscription's data stream count, which PUBLISH_DONE reports. */
 	streams: StreamCount;
+}
+
+// The condition a request failed by its session closing is refused with: a session verdict stays
+// one, as in Rust's `to_code`, so the peer is never invited to retry it.
+function sessionVerdict(code: SessionCode): RequestCondition {
+	switch (code) {
+		case SessionCode.Unauthorized:
+			return "unauthorized";
+		case SessionCode.Expired:
+			return "expired";
+		case SessionCode.Timeout:
+			return "timeout";
+		case SessionCode.Version:
+		case SessionCode.Unsupported:
+			return "not_supported";
+		default:
+			return "internal";
+	}
 }
 
 /**
@@ -2555,7 +2573,8 @@ export class Publisher {
 		const missing =
 			e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable);
 		if (missing && wait) return { condition: "timeout", reasonPhrase };
-		return { condition: missing ? "does_not_exist" : "internal", reasonPhrase, retryable: routeFailed(e) };
+		const condition = missing ? "does_not_exist" : e instanceof SessionError ? sessionVerdict(e.code) : "internal";
+		return { condition, reasonPhrase, retryable: routeFailed(e) };
 	}
 
 	/**
