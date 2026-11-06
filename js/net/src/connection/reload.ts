@@ -20,6 +20,7 @@ import type { Established } from "./established.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinnedTransport, target } from "./goaway.ts";
 import { estimates, type Probe } from "./stats.ts";
+import { tick } from "./ticker.ts";
 import { heldOf } from "./tokens.ts";
 
 function sameTokens(a: readonly string[], b: readonly string[]): boolean {
@@ -454,7 +455,8 @@ export class Reload {
 			};
 
 			void sample();
-			effect.interval(() => void sample(), BANDWIDTH_POLL);
+			// One page-wide ticker samples every connection in the same wakeup.
+			effect.cleanup(tick(BANDWIDTH_POLL, () => void sample()));
 		});
 
 		// The live session holds the current tokens on AUTH; a dial picks them up itself.
