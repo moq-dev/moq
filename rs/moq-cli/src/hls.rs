@@ -27,8 +27,8 @@ pub struct ImportArgs {
 
 	/// Publish each fMP4 fragment whole as CMAF instead of splitting it into one frame per
 	/// sample. Keeps the source's exact sample timing, but every player has to parse ISO BMFF.
-	#[usage(long = "cmaf")]
-	pub passthrough: bool,
+	#[usage(long)]
+	pub cmaf: bool,
 }
 
 /// HLS export (serve over HTTP, record to a directory) args.
@@ -188,7 +188,7 @@ pub async fn import(target: ImportTarget, args: ImportArgs, instance: moq_net::I
 	let mut listed = catalog.consume()?;
 
 	let mut config = moq_hls::import::Config::new(playlist_url(&args.playlist)?);
-	config.passthrough = args.passthrough;
+	config.cmaf = args.cmaf;
 	let mut importer = moq_hls::import::Import::new(route.broadcast().clone(), catalog, config)?;
 
 	tracing::info!(%name, "importing HLS");
@@ -524,7 +524,7 @@ mod test {
 		};
 		let args = ImportArgs {
 			playlist: playlist.to_str().unwrap().to_string(),
-			passthrough: false,
+			cmaf: false,
 		};
 		let importing = tokio::spawn(import(target, args, moq_net::Instance::random()));
 
