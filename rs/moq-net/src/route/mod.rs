@@ -837,6 +837,18 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 		best.map(|(_, selected)| selected)
 	}
 
+	/// Every usable feasible route to `id` through a neighbor, with this node's
+	/// metric through each. Any of them forwards without a loop.
+	pub fn routes(&self, id: Id) -> Vec<(N, Metric)> {
+		if self.origins.contains_key(&id) {
+			return Vec::new();
+		}
+		(self.rx.get(&id).into_iter().flatten())
+			.filter(|(_, entry)| !entry.held && self.feasible(id, entry.advert))
+			.filter_map(|(&next, entry)| Some((next, add(entry.advert.metric, self.neighbors[&next].link.cost)?)))
+			.collect()
+	}
+
 	/// The route this node would offer an upstream link for `id`.
 	pub fn export(&self, id: Id) -> Option<Selected<N>> {
 		self.selected(id).filter(|route| !route.down_only)

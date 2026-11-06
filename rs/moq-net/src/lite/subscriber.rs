@@ -8039,6 +8039,29 @@ mod tests {
 		}
 	}
 
+	/// A lite-07 ROUTE_START to the origin node `node`.
+	fn route_start(node: crate::route::Id) -> impl Fn(&mut crate::coding::Encoder<'_>) {
+		move |w| {
+			let advert = crate::route::Advert {
+				seqno: 0,
+				metric: 0,
+				down_only: false,
+			};
+			lite::AnnounceBroadcast::RouteStart { node, advert }
+				.encode(w, Version::Lite07)
+				.unwrap()
+		}
+	}
+
+	/// A lite-07 ANNOUNCE_FLOOR closing the batch of Route ID `id`.
+	fn floor(id: u64, revision: Option<crate::route::Rev>) -> impl Fn(&mut crate::coding::Encoder<'_>) {
+		move |w| {
+			lite::AnnounceBroadcast::Floor { id, revision }
+				.encode(w, Version::Lite07)
+				.unwrap()
+		}
+	}
+
 	/// The announce stream for the root of a fresh origin, its peer replaying `session`.
 	fn root_prefix(
 		version: Version,
@@ -8182,7 +8205,19 @@ mod tests {
 	#[kio::test]
 	async fn an_incomplete_announce_waits_for_its_body() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
-			let mut script = announce_script(version, &[&announce_ok(version, 1), &announce_start(version, "room")]);
+			// Lite-07 names the claim's route, and serves it once a floor closes its batch.
+			let mut script = match version.has_routes() {
+				true => announce_script(
+					version,
+					&[
+						&announce_ok(version, 0),
+						&route_start(7),
+						&announce_start(version, "room"),
+						&floor(0, Some(0)),
+					],
+				),
+				false => announce_script(version, &[&announce_ok(version, 1), &announce_start(version, "room")]),
+			};
 			let last = script.pop().unwrap();
 			let session = crate::lite::test_transport::ScriptedSession::new(script);
 			let log = session.log.clone();

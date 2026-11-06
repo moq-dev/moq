@@ -112,7 +112,9 @@ fn lite07(version: Version) -> bool {
 }
 
 /// `W -> R -> E`: the edge reads through `W`'s claim on its first subscription, and each
-/// hop announces the answer as a takeover of the claim on lite-07, a start before it.
+/// hop announces the answer. Lite-07 routes the answer as another of `W`'s claims, a
+/// restart at the claim's own path and a start beneath it, and never sends
+/// ANNOUNCE_TAKEOVER, which quest/m2/announce-takeover.md removes.
 async fn chain(version: &str, claim: &str) {
 	let version: Version = version.parse().unwrap();
 	let worker = Worker::new(1, claim, "w");
@@ -137,18 +139,14 @@ async fn chain(version: &str, claim: &str) {
 	assert_eq!(watch(&edge, "pool/p").await, "w", "{version}");
 	assert_eq!(worker.outputs.borrow().len(), 1, "{version}");
 
-	let answered = if !lite07(version) {
+	let answered = match (lite07(version), claim == "pool/p") {
 		// An ordinary announcement, or one replacing the claim at its own path.
-		if claim == "pool/p" {
-			vec![
-				("end", "pool/p".to_string(), None),
-				("start", "pool/p".to_string(), None),
-			]
-		} else {
-			vec![("start", "pool/p".to_string(), None)]
-		}
-	} else {
-		vec![("takeover", "pool/p".to_string(), Some(claim.to_string()))]
+		(false, true) => vec![
+			("end", "pool/p".to_string(), None),
+			("start", "pool/p".to_string(), None),
+		],
+		(true, true) => vec![("restart", "pool/p".to_string(), None)],
+		(_, false) => vec![("start", "pool/p".to_string(), None)],
 	};
 	assert_eq!(drain(&mut at_relay).await, answered, "{version}: at the relay");
 	assert_eq!(drain(&mut at_edge).await, answered, "{version}: at the edge");
@@ -254,10 +252,7 @@ async fn an_older_downstream_gets_a_start() {
 		drain(&mut at_edge).await;
 
 		assert_eq!(watch(&relay, "pool/p").await, "w");
-		assert_eq!(
-			drain(&mut at_relay).await,
-			[("takeover", "pool/p".to_string(), Some("pool".to_string()))]
-		);
+		assert_eq!(drain(&mut at_relay).await, [("start", "pool/p".to_string(), None)]);
 		assert_eq!(drain(&mut at_edge).await, [("start", "pool/p".to_string(), None)]);
 		assert_eq!(watch(&edge, "pool/p").await, "w");
 		assert_eq!(worker.outputs.borrow().len(), 1, "the edge asked the worker again");

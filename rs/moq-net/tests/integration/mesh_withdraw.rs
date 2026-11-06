@@ -357,8 +357,7 @@ impl Cluster {
 /// #4349: a publisher on one relay cleanly closes a broadcast, and a client
 /// watching from another relay sees one retraction and no re-announce. On the
 /// release before the retraction quarantine (#5376), this client saw it
-/// retracted, announced, and retracted again. Relay 0 still restarts onto a
-/// stale path after the hold; see [`residual_slow_ring_reannounces`].
+/// retracted, announced, and retracted again. See [`slow_ring_retracts_once`].
 #[kio::test]
 async fn cross_node_close_retracts_once_lite07() {
 	cross_node_close_retracts_once("moq-lite-07-wip").await;
@@ -453,31 +452,28 @@ async fn late_better_path(mesh: &str, client: &str) -> (Vec<Kind>, Vec<Kind>) {
 }
 
 /// A relay that first hears a broadcast over a longer path moves to the shorter
-/// one when it arrives, and a client watching it sees a live broadcast only
-/// update. Lite-07 relays carry the instance the publisher's relay minted for
-/// its lite-06 or lite-07 publisher, so the move keeps the instance, and a
-/// lite-06 watcher gets the update in place rather than a retraction and a new
-/// announcement.
+/// one when it arrives, and a client watching it sees nothing change: lite-07
+/// relays route by the publisher's origin node, so the move is a next hop the
+/// relay picks, under the same claim and instance.
 #[kio::test]
-async fn late_better_path_updates_in_place() {
+async fn late_better_path_is_invisible() {
 	for client in ["moq-lite-06", "moq-lite-07-wip"] {
 		let (published, closed) = late_better_path("moq-lite-07-wip", client).await;
-		assert_eq!(published, [Kind::Start, Kind::Update], "{client}");
+		assert_eq!(published, [Kind::Start], "{client}");
 		assert_eq!(closed, [Kind::End], "{client}");
 	}
 }
 
-// Residual counterexamples on `main`, with the hold and the retraction
-// quarantine. Each pins what the cluster does today, so a change either way
-// fails here. Routes and announces (quest/m2/cluster-routing/routes/README.md) must
-// bring each to a single retraction everywhere.
+// Counterexamples to the hop-chain cluster (with the hold and the retraction
+// quarantine), each of which moved onto a stale path or revived a broadcast
+// before retracting it. Routed by origin node, each retracts once everywhere.
 
 /// A ring of six relays with links under 150 ms. Relay 3 hears the withdrawal
-/// from relay 2 at 84 ms, but relay 5's equal-cost copy, the long way round,
-/// stays live until 446 ms. That outlasts the hold, so relay 3 moves onto the
-/// stale copy and its client sees the route update before it ends.
+/// from relay 2 at 84 ms, while relay 5's equal-cost copy, the long way round,
+/// stays live until 446 ms. Hop chains moved relay 3 onto the stale copy; the
+/// origin's own retraction is final for every relay.
 #[kio::test]
-async fn residual_slow_ring_reannounces() {
+async fn slow_ring_retracts_once() {
 	#[rustfmt::skip]
 	const EDGES: &[Link] = &[
 		((0, 1), ms(141)), ((0, 2), ms(55)), ((2, 3), ms(29)), ((1, 4), ms(135)), ((4, 5), ms(148)), ((3, 5), ms(22)),
@@ -486,16 +482,16 @@ async fn residual_slow_ring_reannounces() {
 	let mut cluster = Cluster::new("moq-lite-07-wip", EDGES, origin::Config::default(), 0, 3).await;
 	let (broadcast, _) = cluster.publish("room/a").await;
 	let (client, relays) = cluster.close("room/a", broadcast).await;
-	assert_eq!(client, [Update, End]);
-	let relays: Vec<&[Kind]> = relays.iter().map(Vec::as_slice).collect();
-	assert_eq!(relays, [&[End][..], &[End], &[End], &[Update, End], &[End], &[End]]);
+	assert_eq!(client, [End]);
+	assert!(relays.iter().all(|kinds| kinds == &[End]), "{relays:?}");
 	assert_capped_withdrawal(EDGES, 0, 3).await;
 }
 
 /// Nine relays, reduced from a seeded random mesh with [`random_mesh`]'s
-/// links. Relays 0, 5, 6, 7 and 8 move onto stale paths before they retract.
+/// links, on which hop chains moved relays 0, 5, 6, 7 and 8 onto stale paths
+/// before they retracted.
 #[kio::test]
-async fn residual_mesh_revives() {
+async fn mesh_retracts_once() {
 	#[rustfmt::skip]
 	const EDGES: &[Link] = &[
 		((3, 4), ms(10)), ((3, 5), ms(12)), ((1, 6), ms(149)), ((0, 7), ms(73)), ((6, 8), ms(20)), ((1, 4), ms(26)),
@@ -505,22 +501,8 @@ async fn residual_mesh_revives() {
 	let mut cluster = Cluster::new("moq-lite-07-wip", EDGES, origin::Config::default(), 4, 8).await;
 	let (broadcast, _) = cluster.publish("room/a").await;
 	let (client, relays) = cluster.close("room/a", broadcast).await;
-	assert_eq!(client, [Update, End]);
-	let relays: Vec<&[Kind]> = relays.iter().map(Vec::as_slice).collect();
-	assert_eq!(
-		relays,
-		[
-			&[Update, End][..],
-			&[End],
-			&[End],
-			&[End],
-			&[End],
-			&[Update, End],
-			&[Update, End],
-			&[Update, End],
-			&[Update, End],
-		]
-	);
+	assert_eq!(client, [End]);
+	assert!(relays.iter().all(|kinds| kinds == &[End]), "{relays:?}");
 	assert_capped_withdrawal(EDGES, 4, 8).await;
 }
 
@@ -590,19 +572,19 @@ fn random_mesh(seed: u64) -> (Vec<Link>, usize) {
 /// One clean close on each of 200 seeded random meshes: how many relays
 /// announce the broadcast again before their last retraction (by restarting
 /// onto a stale path, or by reviving it after retracting), how many of those
-/// revive, and how many updates they send beyond the one retraction. Pinned at
-/// today's counts; Routes and announces brings all three to zero.
+/// revive, and how many updates they send beyond the one retraction. Hop chains
+/// counted (231, 3, 290); routed by origin node, none.
 #[kio::test]
-async fn residual_random_meshes() {
-	assert_eq!(withdrawal_counts(false).await, (231, 3, 290));
+async fn random_meshes_retract_once() {
+	assert_eq!(withdrawal_counts(false).await, (0, 0, 0));
 }
 
 /// The same topologies and terminal states with room for the diameter and two
-/// extra hops, including the publishing client outside the relay graph.
+/// extra hops, including the publishing client outside the relay graph. Hop
+/// chains counted (177, 0, 192).
 #[kio::test]
-async fn capped_random_meshes_hunt_less() {
-	let capped = withdrawal_counts(true).await;
-	assert_eq!(capped, (177, 0, 192));
+async fn capped_random_meshes_retract_once() {
+	assert_eq!(withdrawal_counts(true).await, (0, 0, 0));
 }
 
 fn diameter(edges: &[Link]) -> usize {

@@ -17,11 +17,11 @@ fn produce(hop: u64) -> origin::Producer {
 }
 
 /// A draft-18 peer declaring `u64::MAX` keeps its session and its place in the path.
-/// Forwarded on, the hop survives lite-07's leading-ones varint and becomes 0 on
-/// lite-06's QUIC varint, while the relay's own hop still follows it.
+/// Forwarded on, the hop becomes 0 on lite-06's QUIC varint, while the relay's own hop
+/// still follows it. Lite-07 carries no hop chain: a claim names its origin node.
 #[kio::test]
 async fn widest_hop_crosses_each_varint_form() {
-	for (downstream, forwarded) in [("moq-lite-06", Hop::UNKNOWN.id()), ("moq-lite-07-wip", u64::MAX)] {
+	for (downstream, forwarded) in [("moq-lite-06", Hop::UNKNOWN.id())] {
 		let source = produce(u64::MAX);
 		let relay = produce(2);
 		let sink = produce(3);

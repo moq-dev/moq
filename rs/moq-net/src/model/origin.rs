@@ -810,9 +810,9 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 		!entry.local,
 		entry.hops.len(),
 		match (entry.node, entry.link == Link::Local && entry.prefix == *path) {
+			(_, true) => (0, 0),
 			// Every node that knows the claim ranks its origin node alike.
-			(Some(node), _) => (fnv_key(path.as_str(), node.to_le_bytes()), 0),
-			(None, true) => (0, 0),
+			(Some(node), false) => (fnv_key(path.as_str(), node.to_le_bytes()), 0),
 			(None, false) => (
 				instance_key(path.as_str(), &entry.instance),
 				chain_key(path.as_str(), &entry.hops),
@@ -7159,11 +7159,17 @@ impl Consumer {
 		self.horizon.upstream
 	}
 
-	/// Whether this handle reaches the absolute `path` as the origin keys it: in its
-	/// scope, and not under a mount, which resolves elsewhere.
+	/// Whether this handle reaches a claim at the absolute `path` as the origin keys
+	/// it: a path at or beneath it may be in its scope, as a covering reader sees, and
+	/// it is not under a mount, which resolves elsewhere, or an excluded subtree.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn reaches(&self, path: &Path) -> bool {
-		self.scope.mount(path).is_none() && self.scope.permits(path)
+		let Ok(subtree) = Pattern::subtree(path.as_str()) else {
+			return false;
+		};
+		self.scope.mount(path).is_none()
+			&& self.scope.allowed.overlaps(&subtree)
+			&& !self.scope.excluded.iter().any(|excluded| path.has_prefix(excluded))
 	}
 
 	/// Whether this handle reaches every path at or beneath the absolute `prefix`,

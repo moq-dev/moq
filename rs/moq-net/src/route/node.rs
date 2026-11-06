@@ -8,10 +8,11 @@
 //!
 //! The node does no I/O. A stream's session feeds it what the peer sent and takes
 //! [`Output`]s from its queue: wire messages to send, and the shown claims it
-//! serves into the origin as the next hop of their selected route. A claim moves
-//! to another stream's session when its identity's selected route does, and the
-//! old session lets go only once the new one serves it, so the origin always
-//! holds a route for it.
+//! serves into the origin as the next hop of a feasible route. A claim is served
+//! through every stream with a usable feasible route to its identity, each at its
+//! own metric, so the origin ranks them and fails over at once when one goes; any
+//! feasible route forwards without a loop. A stream that stops carrying one lets go
+//! only once another serves it, so the origin always holds a route for it.
 
 use std::{
 	collections::{BTreeMap, BTreeSet, HashMap},
@@ -95,15 +96,40 @@ struct State {
 	homes: BTreeMap<(Id, Path), Home>,
 }
 
-/// Where one shown claim is served.
+/// Where one shown claim is served: each stream, what it was last sent, and
+/// whether it confirmed serving it.
 #[derive(Default)]
 struct Home {
-	/// The stream it is served through, and what it was last sent.
-	key: Option<(Key, Served)>,
-	/// Streams that served it before and let go once `key` confirms.
-	leaving: BTreeSet<Key>,
-	/// Whether `key` confirmed it serves the claim.
+	keys: BTreeMap<Key, Slot>,
+}
+
+struct Slot {
+	served: Served,
 	confirmed: bool,
+	/// No longer a route to the claim's identity: let go once a wanted stream confirms.
+	leaving: bool,
+}
+
+impl Home {
+	/// Unserve every leaving stream once a wanted one serves the claim.
+	fn release(&mut self, queues: &HashMap<Key, kio::Queue<Output>>, id: Id, claim: &Path) {
+		if !self.keys.values().any(|slot| !slot.leaving && slot.confirmed) {
+			return;
+		}
+		self.keys.retain(|key, slot| {
+			if slot.leaving {
+				push(
+					queues,
+					*key,
+					Output::Unserve {
+						id,
+						claim: claim.clone(),
+					},
+				);
+			}
+			!slot.leaving
+		});
+	}
 }
 
 impl Node {
@@ -271,28 +297,22 @@ impl Stream {
 		self.with(|router, key| router.goaway(key));
 	}
 
-	/// This stream's session now serves `claim` of `id`, so wherever it was served
-	/// before lets go.
+	/// This stream's session now serves `claim` of `id`, so a stream that no longer
+	/// carries a route to it lets go.
 	pub fn serving(&self, id: Id, claim: &Path) {
 		let mut state = self.node.lock();
 		let State { homes, queues, .. } = &mut *state;
 		let Some(home) = homes.get_mut(&(id, claim.clone())) else {
 			return;
 		};
-		if home.key.as_ref().is_none_or(|(key, _)| *key != self.key) || home.confirmed {
+		let Some(slot) = home.keys.get_mut(&self.key) else {
+			return;
+		};
+		if slot.confirmed {
 			return;
 		}
-		home.confirmed = true;
-		for key in std::mem::take(&mut home.leaving) {
-			push(
-				queues,
-				key,
-				Output::Unserve {
-					id,
-					claim: claim.clone(),
-				},
-			);
-		}
+		slot.confirmed = true;
+		home.release(queues, id, claim);
 	}
 }
 
@@ -302,13 +322,9 @@ impl Drop for Stream {
 		let mut state = self.node.lock();
 		state.queues.remove(&self.key);
 		state.router.disconnect(self.key);
+		// Its session is gone, and what it served with it.
 		for home in state.homes.values_mut() {
-			home.leaving.remove(&self.key);
-			if home.key.as_ref().is_some_and(|(key, _)| *key == self.key) {
-				// Served nowhere until the router moves it: nothing is left here to wait for.
-				home.key = None;
-				home.confirmed = false;
-			}
+			home.keys.remove(&self.key);
 		}
 		let _ = state.router.bump();
 		state.flush();
@@ -344,61 +360,70 @@ impl State {
 		}
 	}
 
-	/// Serve each shown claim of `id` through the stream its selected route
-	/// goes through, keeping it where it is while no route is selected.
+	/// Serve each shown claim of `id` through every stream with a usable feasible
+	/// route to it, keeping it where it is, unavailable, while there is none.
 	fn home(&mut self, id: Id) {
-		let selected = self.router.selected(id);
+		let routes = self.router.routes(id);
 		let claims: Vec<(Path, Claim, bool)> = (self.router.shown().range((id, Path::empty())..))
 			.take_while(|((shown, _), _)| *shown == id)
 			.map(|((_, claim), shown)| (claim.clone(), shown.item.clone(), shown.available))
 			.collect();
-		let mut gone: BTreeSet<Path> = self
-			.homes
-			.range((id, Path::empty())..)
+		let mut gone: BTreeSet<Path> = (self.homes.range((id, Path::empty())..))
 			.take_while(|((home, _), _)| *home == id)
 			.map(|((_, claim), _)| claim.clone())
 			.collect();
 		for (claim, item, available) in claims {
 			gone.remove(&claim);
 			let home = self.homes.entry((id, claim.clone())).or_default();
-			let current = home.key.as_ref().map(|(key, served)| (*key, served.metric));
-			let Some((key, metric)) = selected.and_then(|route| Some((route.next?, route.metric))).or(current) else {
-				continue;
+			let wanted: Vec<(Key, Metric, bool)> = match routes.is_empty() {
+				true => (home.keys.iter())
+					.map(|(key, slot)| (*key, slot.served.metric, false))
+					.collect(),
+				false => routes.iter().map(|&(key, metric)| (key, metric, available)).collect(),
 			};
-			let served = Served {
-				claim: item,
-				metric,
-				available,
-			};
-			match &home.key {
-				Some((at, sent)) if *at == key && *sent == served => continue,
-				Some((at, _)) if *at == key => {}
-				Some((at, _)) => {
-					if home.confirmed {
-						home.leaving.insert(*at);
-					}
-					home.confirmed = false;
-				}
-				None => home.confirmed = false,
+			for slot in home.keys.values_mut() {
+				slot.leaving = true;
 			}
-			home.key = Some((key, served.clone()));
-			let named = self.router.name(key, id);
-			push(
-				&self.queues,
-				key,
-				Output::Serve {
+			for (key, metric, available) in wanted {
+				let served = Served {
+					claim: item.clone(),
+					metric,
+					available,
+				};
+				match home.keys.get_mut(&key) {
+					Some(slot) if slot.served == served => {
+						slot.leaving = false;
+						continue;
+					}
+					Some(slot) => {
+						slot.served = served.clone();
+						slot.leaving = false;
+					}
+					None => {
+						let slot = Slot {
+							served: served.clone(),
+							confirmed: false,
+							leaving: false,
+						};
+						home.keys.insert(key, slot);
+					}
+				}
+				let named = self.router.name(key, id);
+				let serve = Output::Serve {
 					id,
 					named,
-					claim,
+					claim: claim.clone(),
 					served,
-				},
-			);
+				};
+				push(&self.queues, key, serve);
+			}
+			home.release(&self.queues, id, &claim);
 		}
 		for claim in gone {
 			let Some(home) = self.homes.remove(&(id, claim.clone())) else {
 				continue;
 			};
-			for key in home.key.map(|(key, _)| key).into_iter().chain(home.leaving) {
+			for key in home.keys.into_keys() {
 				push(
 					&self.queues,
 					key,
@@ -507,7 +532,7 @@ mod tests {
 	}
 
 	#[test]
-	fn a_claim_moves_to_a_cheaper_stream_once_that_one_serves_it() {
+	fn a_claim_is_served_through_every_feasible_route_at_its_own_metric() {
 		let instance = Instance::random();
 		let origin = Node::new(1, 1);
 		let relay = Node::new(2, 2);
@@ -521,21 +546,22 @@ mod tests {
 			)
 			.unwrap();
 		let far_answer = origin.answer(Link::default(), Path::empty()).unwrap();
-		origin.own(p("live/x"), Some(claim(&instance, 0)));
-		pump(&far_answer, &far);
-		assert!(matches!(served(outputs(&far))[..], [Output::Serve { .. }]));
-		far.serving(1, &p("live/x"));
-
 		let near = relay.receive(Link::default(), Path::empty()).unwrap();
 		let near_answer = origin.answer(Link::default(), Path::empty()).unwrap();
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
 		pump(&far_answer, &far);
 		pump(&near_answer, &near);
-		assert!(matches!(&served(outputs(&near))[..], [Output::Serve { served, .. }] if served.metric == 1));
-		assert!(
-			served(outputs(&far)).is_empty(),
-			"the old stream serves until the new one does"
-		);
+		let metric = |outputs: Vec<Output>| match &served(outputs)[..] {
+			[.., Output::Serve { served, .. }] => Some(served.metric),
+			_ => None,
+		};
+		assert_eq!(metric(outputs(&far)), Some(3));
+		assert_eq!(metric(outputs(&near)), Some(1));
+		far.serving(1, &p("live/x"));
 		near.serving(1, &p("live/x"));
+
+		// A stream whose route ends lets go, since the other still serves it.
+		far.route(1, None);
 		assert_eq!(
 			served(outputs(&far)),
 			[Output::Unserve {
@@ -543,6 +569,28 @@ mod tests {
 				claim: p("live/x")
 			}]
 		);
+		assert!(served(outputs(&near)).is_empty(), "the remaining route serves on");
+	}
+
+	#[test]
+	fn a_route_lost_with_its_session_leaves_the_others_serving() {
+		let instance = Instance::random();
+		let origin = Node::new(1, 1);
+		let relay = Node::new(2, 2);
+		let first = relay.receive(Link::default(), Path::empty()).unwrap();
+		let first_answer = origin.answer(Link::default(), Path::empty()).unwrap();
+		let second = relay.receive(Link::default(), Path::empty()).unwrap();
+		let second_answer = origin.answer(Link::default(), Path::empty()).unwrap();
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
+		pump(&first_answer, &first);
+		pump(&second_answer, &second);
+		outputs(&first);
+		assert!(matches!(served(outputs(&second))[..], [.., Output::Serve { .. }]));
+		second.serving(1, &p("live/x"));
+
+		drop(first);
+		assert!(served(outputs(&second)).is_empty(), "already served where it still is");
+		assert!(relay.shown().contains_key(&(1, p("live/x"))));
 	}
 
 	#[test]

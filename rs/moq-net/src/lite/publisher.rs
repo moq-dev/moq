@@ -7858,7 +7858,8 @@ mod serve_group_test {
 					.unwrap();
 				track.start_at(0).unwrap();
 				broadcast.announce().unwrap();
-				let relay = origin(2);
+				// A relay forwards what it learned from its upstream (moq-lite-07).
+				let relay = origin(2).with_proxy(true);
 				let _upstream = connect(version, &publisher, &relay).await;
 				let remote = relay
 					.consume()

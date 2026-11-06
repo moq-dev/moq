@@ -68,6 +68,8 @@ pub(super) struct Routed {
 	slots: crate::session::Slots,
 	held: Vec<crate::session::Slot>,
 	served: HashMap<(route::Id, Path), ServedClaim>,
+	/// What the stream served before it filed again, while the new one takes it up.
+	previous: HashMap<(route::Id, Path), ServedClaim>,
 	/// Served claims whose request queue woke since the last pass.
 	ready: kio::Queue<(route::Id, Path)>,
 	/// Messages for the peer, written by the stream's task.
@@ -121,6 +123,7 @@ impl Routed {
 			slots: subscriber.announces.clone(),
 			held: Vec::new(),
 			served: HashMap::new(),
+			previous: HashMap::new(),
 			ready: Default::default(),
 			replies: Vec::new(),
 			drained: false,
@@ -314,6 +317,9 @@ impl Routed {
 			.node
 			.receive(scoped(&self.link, &regions, key), self.prefix.clone())
 			.map_err(refused)?;
+		// What the old stream served stays in the origin until the new one serves it
+		// again, or lets go after.
+		let previous = std::mem::take(&mut self.served);
 		let mut ids: Vec<_> = self.routes.keys().copied().collect();
 		ids.sort_unstable();
 		for id in &ids {
@@ -331,9 +337,12 @@ impl Routed {
 			stream.goaway();
 		}
 		self.regions = regions;
-		// Dropping the old stream lets go of what it served once the new one serves it.
 		drop(std::mem::replace(&mut self.stream, stream));
+		self.previous = previous;
 		self.outputs(subscriber);
+		for (_, served) in std::mem::take(&mut self.previous) {
+			served.route.dynamic.withdrawn();
+		}
 		Ok(())
 	}
 
@@ -382,6 +391,9 @@ impl Routed {
 			.with_via(subscriber.via(None))
 			.with_node(Some(id));
 		let key = (id, claim);
+		if let Some(entry) = self.previous.remove(&key) {
+			self.served.insert(key.clone(), entry);
+		}
 		if let Some(entry) = self.served.get_mut(&key) {
 			let same = entry.route.route.instance == route.instance && entry.route.route.epoch == route.epoch;
 			if same {
