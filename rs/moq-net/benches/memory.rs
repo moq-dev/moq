@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::{Client, Hop, Server, Timestamp, Version, cache, origin, track, transport::memory};
+use moq_net::{Client, Server, Timestamp, Version, cache, origin, track, transport::memory};
 
 const VERSION: &str = "moq-lite-06";
 
@@ -115,7 +115,7 @@ impl Link {
 		let mut pools = Vec::new();
 		let version: Version = VERSION.parse().unwrap();
 		let mut origin = |hop: u64| {
-			let mut config = origin::Config::new(Hop::new(hop).unwrap());
+			let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 			config.pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
 			pools.push(config.pool.clone());
 			let (producer, driver) = origin::Producer::new(config);

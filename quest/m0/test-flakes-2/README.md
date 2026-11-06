@@ -108,9 +108,10 @@ Public API: none. Wire: none.
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
 - [reload.test.ts's close-drain tests pass under load](/quest/m0/test-flakes-2/reload-close-drain.md) - the drain cases in `js/net`'s reload tests pass in loaded multi-file runs
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
-- [Diagnose and re-enable the FFI datagram connection test](/quest/m0/test-flakes-2/ffi-datagram-roundtrip.md) - diagnose the default-connection timeout and re-enable the quarantined test
 - [Test PulseAudio servers stay off the desktop's D-Bus](/quest/m0/test-flakes-2/pulse-dbus.md) - concurrent media runs on one desktop never collide on `org.PulseAudio1`
 - [moq-net's pool-debt flight test holds its bound in parallel runs](/quest/m0/test-flakes-2/pool-debt-flight.md) - `pool_debt_sheds_a_flight_without_its_cached_group` stays under `2 * POOL` when it shares a process with moq-net's other tests
 - [The Python audio playout-delay test reads its frames](/quest/m0/test-flakes-2/audio-playout-delay.md) - `test_audio_consumer_reports_its_playout_delay` stops timing out on its first read in the merge queue
 - [The dev host's locked-memory limit fits parallel sessions](/quest/m0/test-flakes-2/uring-memlock.md) - the maintainer's host raises the user's `RLIMIT_MEMLOCK`, which Node.js rings from parallel agent sessions fill before io_uring tests start
 - [The FFI concurrent-ready test wakes both calls under load](/quest/m0/test-flakes-2/ffi-concurrent-ready.md) - `concurrent_ready_calls_all_wake` stops stalling its reader drain under load and is re-enabled
+- [lite-05 copy fill checks idleness without wall time](/quest/m0/test-flakes-2/copy-fill-idle.md) - the copy-fill test proves no FETCH went out on the `Manual` clock, not a 200 ms real-time wait
+- [OBS TSan runs report no leaked FFI worker thread](/quest/m0/test-flakes-2/obs-tsan-thread-leak.md) - the OBS TSan tests stop flagging a finished `moq-ffi-worker` thread at exit under load

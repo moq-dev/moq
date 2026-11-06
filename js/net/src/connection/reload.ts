@@ -225,8 +225,8 @@ export class Reload {
 	 * its rate rather than encode at zero. It is sampled from the transport only
 	 * while a reservation reads it, so the first reservation after none waits one
 	 * snapshot for its slice. It stays `undefined` on a transport that cannot
-	 * report one: the WebSocket fallback, WebRTC, or WebTransport without
-	 * `getStats()`.
+	 * report one: the WebSocket fallback, WebRTC, WebTransport without
+	 * `getStats()`, or Safari's stub, which reads as none.
 	 */
 	readonly allocator: Allocator;
 
@@ -876,7 +876,7 @@ export class Reload {
  */
 export function pumpAnnounced(effect: Effect, upstream: Announce.Routes, producer: Announce.Producer) {
 	// The last event per active route rides along for its retraction.
-	const active = new Map<Path.Valid, Announce.Announce>();
+	const active = new Map<Path.Valid, Announce.Routed>();
 	let live = true;
 	const retract = () => {
 		live = false;
