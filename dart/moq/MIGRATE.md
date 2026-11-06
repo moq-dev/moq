@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Socket sessions
+
+package:moq/socket.dart now exposes TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
+
+`GroupProducer.ready(size)` is a new `Future` that completes once a frame of `size` bytes fits a window ahead of the fastest reader. Await it before each `writeFrame` so the writer waits for its fastest reader instead of evicting it, though not for slower readers; a TCP socket stream's producer needs it to behave like TCP. Existing writers are unchanged.
+
 ### `Following.available()` returns null once the path goes offline
 
 `await following.available()` returns `BroadcastConsumer?`.
@@ -25,6 +31,17 @@ while (true) {
   play(broadcast);
 }
 ```
+
+### Publishing goes through one `MoqRoute` handle
+
+`Moq.createBroadcast(path)`, `Server.createBroadcast(path)`, and `OriginProducer.createBroadcast(path: ...)` are `route(path, options: ...)` (`route(path: ..., options: RouteOptions())` on the generated `OriginProducer`), and `OriginProducer.requests(prefix: ...)` is `routePrefix(prefix: ..., options: RouteOptions())`. Each returns a `MoqRoute`, which replaces `Publication`, `OriginRequests`, and `BroadcastPrepared`:
+
+- `Publication.announce(route: AnnounceRoute(...))` is `announce()`, and re-pricing is `setCost(cost: ...)`; `unannounce()` is `withdraw()`.
+- `OriginRequests.requestedBroadcast()` is `requested()`, which returns `null` once the origin closes.
+- `BroadcastRequest.prepare()` then `publish()` is `BroadcastRequest.route(options: ...)`: create it hidden to fill it first, then `announce()`.
+- `instance()` is the stream's instance, kept across `withdraw()` and `announce()`.
+
+`AnnounceRoute` is `RouteOptions(hidden:, cost:, instance:, epoch:)`, given at creation. A route is visible at once unless `hidden: true`; pass it and call `announce()` after filling the catalog to keep the old order. Hold the route while the broadcast should stay announced: cancelling or disposing it retracts it, and closing its broadcast ends both. `MoqRoute`, the facts on `Announce.route`, is `RouteInfo` (`MoqRouteInfo`), and the route handle keeps the `Moq` prefix because Flutter owns `Route`.
 
 ### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
 

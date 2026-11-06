@@ -182,6 +182,10 @@ name = "interop-tail"
 path = "../../test/interop/clients/rust/tail.rs"
 
 [[example]]
+name = "interop-socket-js"
+path = "../../test/interop/clients/rust/socket-js.rs"
+
+[[example]]
 name = "interop-catalog"
 path = "../../test/interop/clients/rust/catalog.rs"
 
@@ -208,6 +212,10 @@ path = "../../test/interop/clients/rust/hls.rs"
 [[example]]
 name = "interop-audio"
 path = "../../test/interop/clients/rust/audio.rs"
+
+[[example]]
+name = "interop-socket"
+path = "../../test/interop/clients/rust/socket.rs"
 
 [lints]
 workspace = true

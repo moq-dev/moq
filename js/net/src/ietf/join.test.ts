@@ -58,14 +58,14 @@ async function nextStream(
 }
 
 /** A subscriber with one track, and the SUBSCRIBE it sent, still unanswered. */
-async function subscribed(version: IetfVersion = VERSION) {
+async function subscribed(version: IetfVersion = VERSION, subscription: Partial<track.Subscription> = {}) {
 	const pair = createMockTransportPair(ALPNS[version]);
 	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
 	const consumer = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ ...track.Subscription.default(), ranges: [{ start: { relative: 0n } }] });
+		.subscribe({ ...track.Subscription.default(), ranges: [{ start: { relative: 0n } }], ...subscription });
 	onTestFinished(() => {
 		consumer.close();
 		session.close();
@@ -86,8 +86,11 @@ async function subscribed(version: IetfVersion = VERSION) {
  * A draft-18 subscriber with one track answered with Largest `largest`, and the joining
  * FETCH it sent in response, still unanswered.
  */
-async function join(largest: MessageLocation | null = { groupId: GROUP, objectId: 1n }) {
-	const subscription = await subscribed();
+async function join(
+	largest: MessageLocation | null = { groupId: GROUP, objectId: 1n },
+	options: Partial<track.Subscription> = {},
+) {
+	const subscription = await subscribed(VERSION, options);
 	await subscription.answer(largest);
 
 	const fetching = await nextStream(subscription.client);
@@ -262,6 +265,38 @@ for (const outcome of ["a refused joining FETCH", "an empty joining FETCH"] as c
 		expect(group?.sequence).toBe(GROUP + 1n);
 		expect(await frames(group)).toEqual(["n0"]);
 	});
+}
+
+test("a reader in sequence order with no delay budget skips headless groups", async () => {
+	const { subscriber, consumer, fetching } = await join(undefined, { order: "ascending", delay: { max: null } });
+	await refuse(fetching);
+
+	// The joined group's head was refused, and the next group's stream starts mid-group.
+	await subscriber.handleGroup(...liveStream(GROUP, 2, ["t2"]));
+	await subscriber.handleGroup(...liveStream(GROUP + 1n, 1, ["m1"]));
+	await subscriber.handleGroup(...liveStream(GROUP + 2n, 0, ["n0"]));
+
+	const group = await timeout(Nano.fromMilli(Milli(1000)), consumer.ordered().nextGroup());
+	expect(group?.sequence).toBe(GROUP + 2n);
+});
+
+for (const version of VERSIONS) {
+	for (const objectId of [0n, 2n]) {
+		test(`draft ${version}: a group-0 reader skips the Largest group's cut tail after object ${objectId}`, async () => {
+			const { subscriber, consumer, answer } = await subscribed(version, {
+				order: "ascending",
+				delay: { max: null },
+				ranges: [{ start: { absolute: 0n } }],
+			});
+			await answer({ groupId: 0n, objectId });
+			// Largest is inclusive, including object 0: its following tail is no whole message.
+			await subscriber.handleGroup(...liveStream(0n, Number(objectId) + 1, ["cut"], version));
+			await subscriber.handleGroup(...liveStream(1n, 0, ["whole"], version));
+			const group = await consumer.ordered().nextGroup();
+			expect(group?.sequence).toBe(1n);
+			expect(await frames(group)).toEqual(["whole"]);
+		});
+	}
 }
 
 test("a tail parked on a refused joining FETCH is dropped", async () => {
@@ -589,8 +624,7 @@ async function publishing(version: IetfVersion) {
 		server.abort();
 	});
 
-	const publication = origin.createBroadcast(Path.from("room"));
-	publication.announce();
+	const publication = origin.route(Path.from("room"));
 	const broadcast = publication.broadcast;
 	// Written once, before anyone subscribed, and left open: only the head can deliver it.
 	const catalog = broadcast.createTrack("catalog.json", { timescale: Timescale.MILLI });

@@ -16,7 +16,7 @@ const url = new URL(address);
 
 try {
 	if (mode === "publish") {
-		const publication = origin.createBroadcast(path);
+		const publication = origin.route(path, { hidden: true });
 		// One group per track, never finished, so every group the reader receives stays live.
 		for (let i = 0; i < count; i++) {
 			const group = publication.broadcast.createTrack(String(i)).appendGroup();

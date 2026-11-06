@@ -117,8 +117,8 @@ const connection = await Moq.Connection.connect({
 });
 try {
 	if (role === "publish") {
-		const broadcastPublication = origin.createBroadcast(Moq.Path.from(path));
-		const broadcast = broadcastPublication.broadcast;
+		const broadcastRoute = origin.route(Moq.Path.from(path), { hidden: true });
+		const broadcast = broadcastRoute.broadcast;
 		// `cached` and `late` read groups a newer one supersedes, which the default zero max age
 		// would leave stale.
 		const track = broadcast.createTrack("tail", { compress, maxAge: null, ...(status ? { priority: 2 } : {}) });
@@ -129,7 +129,7 @@ try {
 			head = track.appendGroup();
 			for (const payload of frames(0).slice(0, LATE_HEAD)) head.writeFrame({ payload });
 		}
-		broadcastPublication.announce();
+		broadcastRoute.announce();
 		const lines = createInterface({ input: process.stdin });
 		const commands = lines[Symbol.asyncIterator]();
 		if (head) {

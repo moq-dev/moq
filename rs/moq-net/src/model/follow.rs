@@ -397,7 +397,7 @@ mod tests {
 	use super::*;
 	use crate::{
 		Error, Hop, Instance, Pattern, Patterns,
-		origin::{Cost, Route},
+		origin::{Cost, RouteInfo, RouteOptions},
 	};
 
 	/// The follower's next event, which must arrive within the origin's update hold.
@@ -422,8 +422,12 @@ mod tests {
 		}
 	}
 
-	fn route(instance: &Instance) -> Route {
-		Route::default().with_instance(instance.clone(), 0)
+	fn route(instance: &Instance) -> RouteInfo {
+		RouteInfo::default().with_instance(instance.clone(), 0)
+	}
+
+	fn options(instance: &Instance) -> RouteOptions {
+		RouteOptions::default().with_instance(instance.clone(), 0)
 	}
 
 	#[kio::test]
@@ -433,30 +437,30 @@ mod tests {
 		let instance = Instance::random();
 
 		// A prefix above the path covers it.
-		let pool = origin.requests_route("pool", route(&instance), None).unwrap();
+		let pool = origin.forward("pool", route(&instance), None).unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		// A route beneath the path serves another broadcast.
-		let _beneath = origin.publish("pool/job/thumbnail", Route::default()).unwrap();
+		let _beneath = origin.route("pool/job/thumbnail", RouteOptions::default()).unwrap();
 		quiet(&mut follow).await;
 
 		// The path itself, from the same instance, takes over without a restart.
-		let exact = origin.publish("pool/job", route(&instance)).unwrap();
+		let exact = origin.route("pool/job", options(&instance)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("update", "pool/job".into()));
 
 		// The covering prefix no longer serves the path, so its changes are not seen.
-		pool.update_route(pool.route().with_cost(5)).unwrap();
+		pool.update(pool.route().unwrap().with_cost(5)).unwrap();
 		quiet(&mut follow).await;
 
 		// Another instance at the path.
-		exact.announce(route(&Instance::random())).unwrap();
+		exact.announce_info(route(&Instance::random())).unwrap();
 		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
 
 		// It goes, so the prefix serves the path again: another instance.
 		drop(exact);
 		assert_eq!(followed(&mut follow).await, ("restart", "pool".into()));
 
-		pool.update_route(pool.route().with_cost(9)).unwrap();
+		pool.update(pool.route().unwrap().with_cost(9)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("update", "pool".into()));
 
 		drop(pool);
@@ -468,8 +472,8 @@ mod tests {
 	#[kio::test]
 	async fn follow_starts_on_the_serving_route_when_joining_late() {
 		let origin = Hop::new(1).unwrap().produce();
-		let _pool = origin.requests_route("pool", Route::default(), None).unwrap();
-		let _exact = origin.publish("pool/job", Route::default()).unwrap();
+		let _pool = origin.forward("pool", RouteInfo::default(), None).unwrap();
+		let _exact = origin.route("pool/job", RouteOptions::default()).unwrap();
 
 		let mut follow = origin.consume().path_routes("pool/job").unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
@@ -482,19 +486,19 @@ mod tests {
 	async fn follow_keeps_a_gap_between_routes_of_one_instance() {
 		let origin = Hop::new(1).unwrap().produce();
 		let instance = Instance::random();
-		let exact = origin.publish("pool/job", route(&instance)).unwrap();
+		let exact = origin.route("pool/job", options(&instance)).unwrap();
 		let mut follow = origin.consume().path_routes("pool/job").unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
 
 		// Both land before the follower reads again, and the cursor delivers the prefix's start
 		// ahead of the path's end, but the path went unserved in between.
 		drop(exact);
-		let _pool = origin.requests_route("pool", route(&instance), None).unwrap();
+		let _pool = origin.forward("pool", route(&instance), None).unwrap();
 		assert_eq!(followed(&mut follow).await, ("end", "pool/job".into()));
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		// A prefix standing while the path's route goes takes over in place.
-		let exact = origin.publish("pool/job", route(&instance)).unwrap();
+		let exact = origin.route("pool/job", options(&instance)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("update", "pool/job".into()));
 		drop(exact);
 		assert_eq!(followed(&mut follow).await, ("update", "pool".into()));
@@ -505,13 +509,13 @@ mod tests {
 	#[kio::test]
 	async fn follow_hands_over_to_a_prefix_that_started_before_the_last_change() {
 		let origin = Hop::new(1).unwrap().produce();
-		let exact = origin.publish("pool/job", route(&Instance::random())).unwrap();
+		let exact = origin.route("pool/job", RouteOptions::default()).unwrap();
 		let mut follow = origin.consume().path_routes("pool/job").unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
 
 		let instance = Instance::random();
-		let _pool = origin.requests_route("pool", route(&instance), None).unwrap();
-		exact.announce(route(&instance)).unwrap();
+		let _pool = origin.forward("pool", route(&instance), None).unwrap();
+		exact.announce_info(route(&instance)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
 
 		drop(exact);
@@ -524,10 +528,10 @@ mod tests {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut follow = origin.consume().path_routes("pool/job").unwrap();
 
-		let _pool = origin.requests_route("pool", Route::default(), None).unwrap();
+		let _pool = origin.forward("pool", RouteInfo::default(), None).unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
-		let _exact = origin.publish("pool/job", Route::default()).unwrap();
+		let _exact = origin.route("pool/job", RouteOptions::default()).unwrap();
 		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
 	}
 
@@ -540,11 +544,13 @@ mod tests {
 		let _chat = origin
 			.scope("", &chat)
 			.unwrap()
-			.requests_route("room/alice", Route::default(), None)
+			.forward("room/alice", RouteInfo::default(), None)
 			.unwrap();
 		let mut follow = origin.consume().path_routes("room/alice").unwrap();
 
-		let first = origin.publish("room/alice", Route::default().with_cost(5)).unwrap();
+		let first = origin
+			.route("room/alice", RouteOptions::default().with_cost(5))
+			.unwrap();
 		let event = kio::clock::timeout(Duration::from_secs(1), follow.next())
 			.await
 			.unwrap()
@@ -555,7 +561,9 @@ mod tests {
 		);
 
 		// A republish is another instance of the route that serves the path.
-		let _second = origin.publish("room/alice", Route::default().with_cost(5)).unwrap();
+		let _second = origin
+			.route("room/alice", RouteOptions::default().with_cost(5))
+			.unwrap();
 		drop(first);
 		let event = kio::clock::timeout(Duration::from_secs(1), follow.next())
 			.await
@@ -599,8 +607,8 @@ mod tests {
 	}
 
 	/// The next request a dynamic route receives for its path.
-	async fn requested(dynamic: &crate::origin::Requests) -> crate::origin::Request {
-		kio::clock::timeout(Duration::from_secs(1), dynamic.requested_broadcast())
+	async fn requested(dynamic: &crate::origin::Route) -> crate::origin::Request {
+		kio::clock::timeout(Duration::from_secs(1), dynamic.requested())
 			.await
 			.expect("never asked")
 			.expect("the route closed")
@@ -611,13 +619,13 @@ mod tests {
 	#[kio::test]
 	async fn announced_hands_out_a_held_takeover_once() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.requests("live").unwrap();
+		let dynamic = origin.route_prefix("live", RouteOptions::default()).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 
 		// The wait is on the dynamic route's answer when the exact path takes over under another instance.
 		let (_takeover, _publish) = futures::join!(available(&mut announced), async {
 			let _unanswered = requested(&dynamic).await;
-			origin.publish("live", Route::default()).unwrap()
+			origin.route("live", RouteOptions::default()).unwrap()
 		});
 		none(&mut announced).await;
 	}
@@ -628,14 +636,14 @@ mod tests {
 	#[kio::test]
 	async fn announced_hands_out_a_gap_while_resolving_once() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.requests("").unwrap();
+		let dynamic = origin.route_prefix("", RouteOptions::default()).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 
 		let (_arrival, _publish) = futures::join!(available(&mut announced), async {
 			let _unanswered = requested(&dynamic).await;
 			drop(dynamic);
 			kio::clock::sleep(super::super::origin_impl::DEFAULT_UPDATE_HOLD * 2).await;
-			origin.publish("live", Route::default()).unwrap()
+			origin.route("live", RouteOptions::default()).unwrap()
 		});
 		none(&mut announced).await;
 	}
@@ -648,11 +656,11 @@ mod tests {
 		let origin = Hop::new(1).unwrap().produce();
 		let instance = Instance::random();
 		let mut announced = origin.consume().follow("live", None).unwrap();
-		let exact = origin.publish("live", route(&instance)).unwrap();
+		let exact = origin.route("live", options(&instance)).unwrap();
 		let first = available(&mut announced).await;
 
-		let dynamic = origin.requests_route("", route(&instance), None).unwrap();
-		exact.unannounce();
+		let dynamic = origin.forward("", route(&instance), None).unwrap();
+		exact.withdraw();
 		ended(&mut announced).await;
 		let served = broadcast::Info::new().produce();
 		let (again, ()) = futures::join!(available(&mut announced), async {
@@ -667,12 +675,12 @@ mod tests {
 	async fn announced_pinned_refuses_another_instance() {
 		let origin = Hop::new(1).unwrap().produce();
 		let instance = Instance::random();
-		let _first = origin.publish("live", route(&instance)).unwrap();
+		let _first = origin.route("live", options(&instance)).unwrap();
 		let mut announced = origin.consume().follow("live", instance.clone()).unwrap();
 		let pinned = available(&mut announced).await;
 		assert_eq!(pinned.info().instance.as_ref(), Some(&instance));
 
-		let second = origin.publish("live", route(&Instance::random())).unwrap();
+		let second = origin.route("live", RouteOptions::default()).unwrap();
 		ended(&mut announced).await;
 		none(&mut announced).await;
 
@@ -698,13 +706,13 @@ mod tests {
 		let mut announced = origin.consume().follow("live", None).unwrap();
 		none(&mut announced).await;
 
-		let first = origin.publish("live", Route::default()).unwrap();
+		let first = origin.route("live", RouteOptions::default()).unwrap();
 		let started = available(&mut announced).await;
 		drop(first);
 		ended(&mut announced).await;
 		none(&mut announced).await;
 
-		let _second = origin.publish("live", Route::default()).unwrap();
+		let _second = origin.route("live", RouteOptions::default()).unwrap();
 		assert!(!available(&mut announced).await.is_clone(&started));
 	}
 
@@ -712,16 +720,16 @@ mod tests {
 	async fn announced_pinned_hands_out_its_instance_after_a_gap() {
 		let origin = Hop::new(1).unwrap().produce();
 		let instance = Instance::random();
-		let first = origin.publish("live", route(&instance)).unwrap();
+		let first = origin.route("live", options(&instance)).unwrap();
 		let mut announced = origin.consume().follow("live", instance.clone()).unwrap();
 		assert_eq!(
 			available(&mut announced).await.info().instance.as_ref(),
 			Some(&instance)
 		);
-		first.unannounce();
+		first.withdraw();
 		ended(&mut announced).await;
 		none(&mut announced).await;
-		first.announce(route(&instance)).unwrap();
+		first.announce().unwrap();
 		assert_eq!(
 			available(&mut announced).await.info().instance.as_ref(),
 			Some(&instance)
@@ -731,12 +739,12 @@ mod tests {
 	#[kio::test]
 	async fn announced_reports_a_dropped_prepared_answer() {
 		let origin = Hop::new(1).unwrap().produce();
-		let claim = origin.requests("live").unwrap();
+		let claim = origin.route_prefix("live", RouteOptions::default()).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 		let (result, ()) = futures::join!(
 			kio::clock::timeout(Duration::from_secs(1), announced.available()),
 			async {
-				let prepared = requested(&claim).await.prepare().unwrap();
+				let prepared = requested(&claim).await.route(RouteOptions::hidden()).unwrap();
 				drop(prepared);
 			}
 		);
@@ -747,12 +755,12 @@ mod tests {
 		// The refusing route is not asked again, and the next announcement is handed out.
 		let ((), again) = futures::join!(
 			none(&mut announced),
-			kio::clock::timeout(Duration::from_secs(1), claim.requested_broadcast())
+			kio::clock::timeout(Duration::from_secs(1), claim.requested())
 		);
 		assert!(again.is_err(), "the refusing route was asked again");
 		drop(claim);
 		let instance = Instance::random();
-		let _published = origin.publish("live", route(&instance)).unwrap();
+		let _published = origin.route("live", options(&instance)).unwrap();
 		assert_eq!(
 			available(&mut announced).await.info().instance.as_ref(),
 			Some(&instance)
@@ -764,7 +772,7 @@ mod tests {
 	async fn announced_retries_a_refusal_on_another_route_of_the_instance() {
 		let origin = Hop::new(1).unwrap().produce();
 		let instance = Instance::random();
-		let claim = origin.requests_route("", route(&instance), None).unwrap();
+		let claim = origin.route_prefix("", options(&instance)).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 		let (result, ()) = futures::join!(
 			kio::clock::timeout(Duration::from_secs(1), announced.available()),
@@ -776,7 +784,7 @@ mod tests {
 			result.expect("the refusal must answer"),
 			Err(Error::Unroutable)
 		));
-		let _exact = origin.publish("live", route(&instance)).unwrap();
+		let _exact = origin.route("live", options(&instance)).unwrap();
 		assert_eq!(
 			available(&mut announced).await.info().instance.as_ref(),
 			Some(&instance)
@@ -788,7 +796,7 @@ mod tests {
 	#[kio::test]
 	async fn announced_waits_for_a_route_change_after_a_refusal() {
 		let origin = Hop::new(1).unwrap().produce();
-		let claim = origin.requests("live").unwrap();
+		let claim = origin.route_prefix("live", RouteOptions::default()).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 		let (result, ()) = futures::join!(
 			kio::clock::timeout(Duration::from_secs(1), announced.available()),
@@ -796,11 +804,11 @@ mod tests {
 		);
 		assert!(matches!(result.expect("the refusal answers"), Err(Error::NotFound)));
 		none(&mut announced).await;
-		let again = kio::clock::timeout(Duration::from_secs(1), claim.requested_broadcast()).await;
+		let again = kio::clock::timeout(Duration::from_secs(1), claim.requested()).await;
 		assert!(again.is_err(), "the refusing handler was asked again");
 
 		// A publisher takes the path over from the claim, and is handed out.
-		let _publisher = origin.publish("live", route(&Instance::random())).unwrap();
+		let _publisher = origin.route("live", options(&Instance::random())).unwrap();
 		let _served = available(&mut announced).await;
 	}
 
@@ -810,8 +818,8 @@ mod tests {
 	#[kio::test]
 	async fn announced_does_not_retry_a_refusal_after_a_takeover() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.requests_route("", route(&Instance::random()), None).unwrap();
-		let exact = origin.publish("live", route(&Instance::random())).unwrap();
+		let dynamic = origin.route_prefix("", options(&Instance::random())).unwrap();
+		let exact = origin.route("live", options(&Instance::random())).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 		let _first = available(&mut announced).await;
 
@@ -822,7 +830,7 @@ mod tests {
 		);
 		assert!(matches!(result.expect("the refusal answers"), Err(Error::NotFound)));
 		none(&mut announced).await;
-		let again = kio::clock::timeout(Duration::from_secs(1), dynamic.requested_broadcast()).await;
+		let again = kio::clock::timeout(Duration::from_secs(1), dynamic.requested()).await;
 		assert!(again.is_err(), "the refusing handler was asked again");
 
 		// The broadcast handed out before the refusal is still owed its end once the path goes

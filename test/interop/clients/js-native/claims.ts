@@ -20,7 +20,7 @@ function endpoint(address: string): URL {
 
 const published = new Moq.Origin.Producer();
 const received = new Moq.Origin.Producer();
-const claim = published.requests(Moq.Path.from(prefix));
+const claim = published.routePrefix(Moq.Path.from(prefix));
 const broadcasts = new Map<Moq.Path.Valid, Moq.Broadcast.Producer>();
 const serving = (async () => {
 	for await (const request of claim.requested()) {

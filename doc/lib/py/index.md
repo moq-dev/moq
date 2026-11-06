@@ -71,8 +71,9 @@ import asyncio, moq
 async def main():
     # opus_init_bytes, payload, pts, and rgba come from your encoder or capture source.
     async with moq.Client("https://cdn.moq.dev/anon") as client:
-        publication = client.create_broadcast("my-stream.hang")
-        broadcast = publication.broadcast
+        # Hidden until announced, so viewers find a filled catalog. Hold the route: dropping it retracts it.
+        route = client.route("my-stream.hang", hidden=True)
+        broadcast = route.broadcast
 
         # Already-encoded frames: the catalog is filled from the bitstream
         audio = moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_init_bytes))
@@ -99,7 +100,7 @@ async def main():
         status = moq.json.SnapshotProducer(broadcast, status_track)
         status.update({"state": "live", "viewers": 42}, catalog_producer.now())
 
-        publication.announce()  # each broadcast mints a fresh instance
+        route.announce()  # each route mints a fresh instance, route.instance
         audio.finish()
         video.finish()
         events.finish()
@@ -124,12 +125,12 @@ shows which module holds each.
 - **Decoded frames hold decoder buffers.** Drop each frame from a `moq.video.Consumer` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
 - **Closing.** `session.shutdown()` requests a drain immediately; `await session.closed()` waits up to one second and reports its result. `cancel(code)` closes at once. Finish or abort live tracks first. moq-lite-05 and newer wait for the peer to receive finished tails; older Lite versions and IETF wait only for transport ACKs.
 - **Ending cleanly.** When the input ends, finish every track, then call `finish()` on its `moq.media.CatalogProducer` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `broadcast.close()` takes it offline. How long to keep it up is yours to decide. A track still open at the close, or released without a finish, ends with `Unroutable` (`Internal` over moq-transport, which has no such code). Readers follow a publisher's runs by announcement, not by that error: see [identity and recovery](/concept/identity).
-- **Stats.** `session.stats()` reports `rtt`, `estimated_send_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`). A field is `None` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol. Connect returns a connecting session; read its coherent `state()` snapshot and wait with that snapshot's revision to observe first-dial failures and reconnects. Each watcher keeps its own revision. Hold the owned `BandwidthConsumer` returned by `session.recv_bandwidth()` to receive bandwidth estimates. `rate()` reads the current estimate in bits per second and `rate_changed()` waits for a new one. Release the consumer or call `cancel()` when finished; releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
+- **Stats.** `session.stats()` reports `rtt`, `estimated_send_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`), and `datagrams_unrouted`, the datagrams received for a subscription with no datagram track, reported only on moq-lite 05 and later, which carry datagrams. A field is `None` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol. Connect returns a connecting session; read its coherent `state()` snapshot and wait with that snapshot's revision to observe first-dial failures and reconnects. Each watcher keeps its own revision. Hold the owned `BandwidthConsumer` returned by `session.recv_bandwidth()` to receive bandwidth estimates. `rate()` reads the current estimate in bits per second and `rate_changed()` waits for a new one. Release the consumer or call `cancel()` when finished; releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
 - **Viewers.** `session.viewers()` divides the receive estimate among the broadcasts you watch. `watch(max_bps)` returns a `Viewer` claiming up to a ceiling, the bitrate of the largest rendition you would switch to; its `rate()` reads that viewer's fair share in bits per second, `None` while there is no estimate (keep the current rendition), and `update(max_bps)` changes the ceiling. Holding a viewer requests the estimate like `recv_bandwidth()`, and dropping it releases the claim. The session sends the summed ceilings as its PROBE target; `set_target(bps)` overrides that, `0` sends none, and `None` follows the viewers again. Ceilings or a target past 2^53 - 1 bps, the most a PROBE target carries, raise `moq.Error.OutOfRange`.
 - **Authorization.** On `moq-lite-07-wip` (opt in with `versions=`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), `async for grant in session.grants()` yields the `Grant` the relay sent back and each change, `None` until it answers and while a client session reconnects. `grants().grant()` reads it once; cancelling or leaving an `async with` releases the wait.
 - **Tokens.** Pass `tokens=[...]` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `session.tokens().set([...])` replaces a client session's tokens before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. `await tokens.answered()` returns once the relay accepts them and raises its refusal with the relay's code. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
-- **Disabled renditions.** A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode. Audio and video subscribe setup returns `moq.Error.UnsupportedConfig` when the decoder refuses the codec, layout, or description; a player can then try its next ranked rendition. Decoder faults and later peer or decode failures do not report that setup refusal.
+- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode. Audio and video subscribe setup returns `moq.Error.UnsupportedConfig` when the decoder refuses the codec, layout, or description; a player can then try its next ranked rendition. Decoder faults and later peer or decode failures do not report that setup refusal.
 - **Subscription defaults.** A bare `moq.Subscription()`, passing no subscription, and `moq.Subscription.default()` all mean moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded one at once. Pass `delay=moq.Delay(max=None)` for no subscriber limit, or `min=None` to leave the target latency unstated. Decoders take the same `moq.Delay`.
 - **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one.
 
@@ -155,3 +156,43 @@ A catalog that needs a newer moq-hang draft than this build reads raises `Error.
 - API source: [py/moq-rs/moq](https://github.com/moq-dev/moq/tree/main/py/moq-rs/moq)
 - Source and examples: [`py/moq-rs`](https://github.com/moq-dev/moq/tree/main/py/moq-rs)
 - Raw bindings: [`moq-ffi`](https://pypi.org/project/moq-ffi/) on PyPI, for the unwrapped API
+
+## Socket sessions
+
+`moq.socket` connects endpoints through relays in either direction. Wire one
+origin to both session directions, then hold an endpoint while its sessions run:
+
+```python
+import asyncio, moq
+
+async def socket_client():
+    origin = moq.OriginProducer()
+    versions = ["moq-lite-07-wip"]
+    async with moq.Client("https://cdn.moq.dev/anon", versions=versions, publish=origin, consume=origin):
+        async with moq.socket.Endpoint(origin, "room", "client") as endpoint:
+            stream = await endpoint.dial_tcp("server")
+            stream.producer.write_frame(b"command")
+            stream.producer.finish()  # FIN; abort(error_code) sends RST instead.
+            async for frame in stream.consumer:
+                print(frame.payload)
+
+asyncio.run(socket_client())
+```
+
+Sockets need lite-07 or moq-transport on every hop, so the example opts into
+`moq-lite-07-wip`. No client offers it by default while its wire format is a
+work in progress, and the relay must accept it too.
+
+A server awaits `endpoint.accept_tcp()`, then calls `await incoming.accept()`
+or `incoming.reject()`. Accepting verifies that the claimed peer really dialed.
+`TcpStream` exposes group `producer` and `consumer` handles, plus `peer` and
+`session`. Keep the session id private. Its bounded cache reports eviction if a
+reader falls behind; it never skips bytes.
+
+Use `dial_track(peer, info=None)` and `accept_track()` for independent groups of
+messages. `TrackStream` exposes a track producer and a reliably subscribed,
+ascending consumer. Omitted `info` keeps messages without a publisher age limit;
+update the consumer's subscription to change delivery. The protocols have
+separate accept queues. Cancelling a dial or acceptance resets that dial;
+closing the endpoint resets all its sessions. See [Sockets](/concept/socket)
+for routing and authorization.

@@ -20,6 +20,12 @@ session` shares its held-FIN fixture (`holdFins`), and `a URL change connects
 the replacement while the old session drains until …` waits out a drain
 deadline. Check them for the same race.
 
+The gated `just ci origin/main` on the JS socket branch reproduced this on
+2026-11-05: `fin.closed` was already true after advancing 999 ms, where the
+assertion expected false. The standalone full `js/net` run passed this case.
+[moq-dev/moq#7884](https://github.com/moq-dev/moq/pull/7884) quarantines it
+with every assertion retained; restore it when this quest fixes the race.
+
 Reproduce first: run `reload.test.ts` together with the rest of `js/net` under
 CPU contention and `--rerun-each`, as the epic's earlier JS fixes did
 ([moq-dev/moq#7658](https://github.com/moq-dev/moq/pull/7658) fixed

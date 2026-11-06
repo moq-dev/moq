@@ -117,9 +117,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			const pair = createMockTransportPair(ALPN_05);
 			const origin = new OriginProducer();
 			const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-			const broadcastPublication = origin.createBroadcast(Path.from("room"));
-			const broadcast = broadcastPublication.broadcast;
-			broadcastPublication.announce();
+			const broadcastRoute = origin.route(Path.from("room"));
+			const broadcast = broadcastRoute.broadcast;
 			let producer: TrackProducer | undefined;
 			const serving = (async () => {
 				for (;;) {
@@ -155,9 +154,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const closing = spyOn(pair.server, "close");
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcastPublication = origin.createBroadcast(Path.from("room"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
+		const broadcastRoute = origin.route(Path.from("room"));
+		const broadcast = broadcastRoute.broadcast;
 
 		const client = await Stream.open(pair.client, { version });
 		const server = await Stream.accept(pair.server, version);
@@ -179,9 +177,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			const pair = createMockTransportPair(ALPN_05);
 			const origin = new OriginProducer();
 			const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-			const broadcastPublication = origin.createBroadcast(Path.from("room"));
-			const broadcast = broadcastPublication.broadcast;
-			broadcastPublication.announce();
+			const broadcastRoute = origin.route(Path.from("room"));
+			const broadcast = broadcastRoute.broadcast;
 			let producer: TrackProducer | undefined;
 			const serving = (async () => {
 				for (;;) {
@@ -227,9 +224,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcastPublication = origin.createBroadcast(Path.from("room"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
+		const broadcastRoute = origin.route(Path.from("room"));
+		const broadcast = broadcastRoute.broadcast;
 		const producers: TrackProducer[] = [];
 		const serving = (async () => {
 			for (;;) {
@@ -269,9 +265,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcastPublication = origin.createBroadcast(Path.from("room"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
+		const broadcastRoute = origin.route(Path.from("room"));
+		const broadcast = broadcastRoute.broadcast;
 		const producers: TrackProducer[] = [];
 		const serving = (async () => {
 			for (;;) {
@@ -328,9 +323,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			const pair = createMockTransportPair(ALPN_05);
 			const origin = new OriginProducer();
 			const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-			const broadcastPublication = origin.createBroadcast(Path.from("room"));
-			const broadcast = broadcastPublication.broadcast;
-			broadcastPublication.announce();
+			const broadcastRoute = origin.route(Path.from("room"));
+			const broadcast = broadcastRoute.broadcast;
 			// Answered by hand, once every requester has left.
 			const requested = wireOf(broadcast).requested();
 
@@ -356,9 +350,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcastPublication = origin.createBroadcast(Path.from("room"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
+		const broadcastRoute = origin.route(Path.from("room"));
+		const broadcast = broadcastRoute.broadcast;
 		const requested = wireOf(broadcast).requested();
 
 		await requester(pair, publisher, kind);
@@ -379,9 +372,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcastPublication = origin.createBroadcast(Path.from("room"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
+		const broadcastRoute = origin.route(Path.from("room"));
+		const broadcast = broadcastRoute.broadcast;
 		// Answered by hand, after the first TRACK stream has left.
 		const requested = wireOf(broadcast).requested();
 
@@ -410,9 +402,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcastPublication = origin.createBroadcast(Path.from("room"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
+		const broadcastRoute = origin.route(Path.from("room"));
+		const broadcast = broadcastRoute.broadcast;
 		const serving = (async () => {
 			for (;;) {
 				const request = await wireOf(broadcast).requested();

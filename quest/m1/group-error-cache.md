@@ -83,4 +83,4 @@ mirror, if a caller outside moq-net needs it; otherwise none. Wire: none.
 
 ## Related
 
-- [A group a subscriber gives up on is always reported](/quest/m1/group-drops.md) - reports what a subscriber gives up; this decides how long the track remembers it
+- [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - reports what a subscriber gives up; this decides how long the track remembers it

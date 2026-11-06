@@ -176,11 +176,15 @@ impl Following {
 					Some(source) => {
 						// Dropping the old ladder cancels its pending requests and rung tasks.
 						drop(running.take());
-						let output = self.publish.create_broadcast(&self.output_path)?;
+						let output = self.publish.route(&self.output_path, moq_net::origin::RouteOptions::hidden())?;
 						let transcoder = moq_transcode::Transcoder::new(source, output.broadcast().clone(), self.config.clone())?;
-						output.announce(moq_net::origin::Route::default())?;
+						output.announce()?;
 						tracing::info!(source = %self.source_path, output = %self.output_path, "transcoding");
-						running = Some(Box::pin(transcoder.run()));
+						// The ladder holds its route, so the output stays announced while it runs.
+						running = Some(Box::pin(async move {
+							let _output = output;
+							transcoder.run().await
+						}));
 					}
 					None => tracing::info!(source = %self.source_path, "offline, waiting for it to return"),
 				},
@@ -216,21 +220,21 @@ mod tests {
 		restart(false).await;
 	}
 
-	/// `named` announces each source under an instance the route names, rather than the one its
-	/// handle mints.
+	/// `named` announces each source under an instance its options name, rather than the one
+	/// its route mints.
 	async fn restart(named: bool) {
 		let origin = moq_tokio::origin::spawn();
 		let publish = moq_tokio::origin::spawn();
-		let route = || {
-			let route = moq_net::origin::Route::default();
+		let options = || {
+			let options = moq_net::origin::RouteOptions::default();
 			if named {
-				route.with_instance(moq_net::Instance::random(), 0)
+				options.with_instance(moq_net::Instance::random(), 0)
 			} else {
-				route
+				options
 			}
 		};
-		let old = origin.publish("source", route()).unwrap();
-		let _old_dynamic = old.requests();
+		let old = origin.route("source", options()).unwrap();
+		let _old_dynamic = old.broadcast().requests();
 		let mut derivatives = publish.consume().follow("derived", None).unwrap();
 		let following = Following {
 			origin: origin.consume(),
@@ -247,8 +251,8 @@ mod tests {
 			.subscribe(None)
 			.await
 			.unwrap();
-		let new = origin.publish("source", route()).unwrap();
-		let _new_dynamic = new.requests();
+		let new = origin.route("source", options()).unwrap();
+		let _new_dynamic = new.broadcast().requests();
 		let second = next(&mut derivatives).await;
 		assert!(!first.is_clone(&second));
 		assert_ne!(first.info().instance, second.info().instance);
@@ -262,7 +266,7 @@ mod tests {
 		}
 		assert!(!second.is_closed(), "the new ladder serves immediately");
 		assert!(
-			!old.consume().is_closed(),
+			!old.broadcast().consume().is_closed(),
 			"replacement does not close the source publisher"
 		);
 		task.abort();
@@ -275,8 +279,9 @@ mod tests {
 	async fn a_source_ending_before_its_video_waits_for_the_next_instance() {
 		let origin = moq_tokio::origin::spawn();
 		let publish = moq_tokio::origin::spawn();
-		let route = || moq_net::origin::Route::default();
-		let old = origin.publish("source", route()).unwrap();
+		let old = origin
+			.route("source", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let mut catalog = moq_mux::catalog::Producer::new(&mut old.broadcast().clone(), Default::default()).unwrap();
 		let mut derivatives = publish.consume().follow("derived", None).unwrap();
 		let following = Following {
@@ -295,8 +300,10 @@ mod tests {
 			.expect("the ladder outlived its source's end");
 		assert!(!task.is_finished(), "a clean end stopped following");
 
-		let new = origin.publish("source", route()).unwrap();
-		let _new_dynamic = new.requests();
+		let new = origin
+			.route("source", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		let _new_dynamic = new.broadcast().requests();
 		let second = next(&mut derivatives).await;
 		assert!(!first.is_clone(&second));
 		task.abort();

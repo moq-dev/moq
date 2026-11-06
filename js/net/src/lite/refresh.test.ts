@@ -13,9 +13,8 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 	const installed = clock.install();
 	const source = new Producer();
 	const b = new Producer();
-	const broadcastPublication = source.createBroadcast(Path.from("room"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = source.route(Path.from("room"));
+	const broadcast = broadcastRoute.broadcast;
 	const producer = broadcast.createTrack("data", { refresh: 1 });
 	const pair = createMockTransportPair(alpn);
 	const url = new URL("https://localhost/refresh");
