@@ -13,6 +13,12 @@ moq-lite-07-wip (opt-in) replaces the hop list with routes: each origin node dec
 - A route carries no hop chain. `RouteInfo::hops()` on a route learned over moq-lite-07 names only its origin node, and `origin::Config::max_hops` does not bound it: routes are loop-free by feasibility instead.
 - A pool's paths spread by a hash of the path and each origin node's routing identity, which every relay computes alike, rather than by publisher instance, so every relay picks the same origin for a path.
 
+### Snapshots split connected sessions into idle and active
+
+`stats::Snapshot::activity()` returns each tier's `stats::Activity`: connected sessions with
+media payload moved within `Activity::WINDOW` (10 seconds) and those without. Additive; no
+migration needed.
+
 ### `track::Consumer::unmetered` reads outside any stats session
 
 `track::Consumer::unmetered()` returns the handle with its stats scope cleared, so the
