@@ -28,9 +28,9 @@ use std::{
 
 use crate::Path;
 
-pub use proof::RouteKey;
 #[cfg(feature = "async")]
 pub(crate) use proof::EXPORTER_LABEL;
+pub use proof::RouteKey;
 pub(crate) use proof::{Proof, Transcript};
 pub(crate) use view::{View, overlaps, within};
 
