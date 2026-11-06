@@ -1697,8 +1697,18 @@ mod tests {
 		let mut edge = rung.clone();
 		while edge.largest().await.map(|position| (position.group, position.frame)) != Some((0, 1)) {}
 
-		// The group is lost before its end, and the next one follows.
+		// The group is lost before its end. The rung aborts its copy right away
+		// rather than at a next group that may never come, and never finishes it
+		// short: a group name always means the same content.
 		lost.abort(moq_net::Error::Old).unwrap();
+		let partial = async {
+			let mut partial = rung.fetch_group(0, None).await?;
+			while partial.read_frame().await?.is_some() {}
+			moq_net::Result::Ok(())
+		};
+		assert!(partial.await.is_err(), "the lost group was finished short");
+
+		// The next group arrives whole.
 		let mut next = source._track.create_group(1u64.into()).unwrap();
 		write(&mut next, &[66_666, 99_999]);
 		next.finish().unwrap();
@@ -1716,15 +1726,6 @@ mod tests {
 			frames += 1;
 		}
 		assert_eq!(frames, 2, "group 1 lost frames");
-
-		// The output's copy of the lost group is never finished short: a group
-		// name always means the same content.
-		let partial = async {
-			let mut partial = rung.fetch_group(0, None).await?;
-			while partial.read_frame().await?.is_some() {}
-			moq_net::Result::Ok(())
-		};
-		assert!(partial.await.is_err(), "the lost group was finished short");
 
 		transcoder.abort();
 	}

@@ -38,10 +38,10 @@ pub(crate) enum Item {
 	End,
 	/// The source track ended cleanly; no more items follow.
 	Finished,
-	/// Never broadcast: synthesized by [`Listener::recv`] when this listener
-	/// fell behind and the queue rolled over. Abandon the current group and
-	/// pick up at the next [`Item::Group`].
-	Lagged,
+	/// The current group will never end: its source read failed, or this
+	/// listener fell behind and the queue rolled over. Abandon it and pick up at
+	/// the next [`Item::Group`].
+	Lost,
 }
 
 /// Handle to the shared live decode of one source track. Cloning shares the
@@ -129,7 +129,7 @@ impl Listener {
 	pub(crate) async fn recv(&mut self) -> Option<Item> {
 		match self.receiver.recv().await {
 			Ok(item) => Some(item),
-			Err(broadcast::error::RecvError::Lagged(_)) => Some(Item::Lagged),
+			Err(broadcast::error::RecvError::Lagged(_)) => Some(Item::Lost),
 			Err(broadcast::error::RecvError::Closed) => None,
 		}
 	}
@@ -228,13 +228,15 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 		// boundary so those frames stay in this group rather than appearing after
 		// the next group's keyframe.
 		let tail = decoder.flush().await?;
-		// A lost group gets no End, so every rung aborts its copy at the next Group
-		// rather than finishing it short.
+		// A lost group is never finished short, and every rung hears of it now
+		// rather than at a next group that may never come.
 		if complete {
 			for decoded in tail {
 				let _ = sender.send(Item::Frame(Arc::new(decoded)));
 			}
 			let _ = sender.send(Item::End);
+		} else {
+			let _ = sender.send(Item::Lost);
 		}
 	}
 	Ok(())
