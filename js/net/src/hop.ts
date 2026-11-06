@@ -98,9 +98,48 @@ export const Cost = {
 export interface RouteInfo {
 	/**
 	 * The stream the route serves: routes with one instance serve one continuous sequence
-	 * space, so a subscription resumes from one to another. Always set on a route the origin
-	 * delivers; pass it to an origin `request` to pin this stream.
+	 * space, so a subscription resumes from one to another. Pass it to an origin `request` to
+	 * pin this stream.
 	 */
+	readonly instance?: Instance.Valid;
+	/**
+	 * The hop ids of the origins the route has traversed, oldest first. A 0 entry is the
+	 * anonymous mark; see {@link anonymous}. A route announced on this origin has none.
+	 */
+	readonly hops: readonly bigint[];
+	/** What pulling content via this route costs; lower wins. */
+	readonly cost: Cost;
+	/**
+	 * Whether the route passed through an anonymous hop (id 0) at any depth. An anonymous route
+	 * ranks below every fully identified one, whatever the costs say. An empty chain is a local
+	 * announcement, not the anonymous mark.
+	 */
+	readonly anonymous: boolean;
+}
+
+/**
+ * The read-only facts an announcement shows of `route`, leaving its epoch and credential internal.
+ *
+ * @internal
+ */
+export function routeInfo(route: WireRoute): RouteInfo {
+	return {
+		instance: route.instance,
+		hops: [...route.hops],
+		cost: route.cost,
+		anonymous: isAnonymous(route),
+	};
+}
+
+/**
+ * A route as the origin and sessions carry it: the {@link RouteInfo} facts plus the epoch that
+ * orders an instance's incarnations and the credential that advertises it, which applications
+ * never see.
+ *
+ * @internal
+ */
+export interface WireRoute {
+	/** See {@link RouteInfo.instance}. Always set on a route the origin delivers. */
 	readonly instance?: Instance.Valid;
 	/**
 	 * Which incarnation of {@link instance} this is: among its routes at one prefix only the
@@ -124,13 +163,13 @@ export interface RouteInfo {
 	readonly auth?: Credential;
 }
 
-/** Constructors and helpers for {@link RouteInfo}. @internal */
-export const RouteInfo = {
+/** Constructors and helpers for {@link WireRoute}. @internal */
+export const WireRoute = {
 	/** An empty hop chain at zero cost: what a publisher seeds for a live broadcast. */
-	default: { hops: [], cost: Cost.zero } as RouteInfo,
+	default: { hops: [], cost: Cost.zero } as WireRoute,
 
 	/** Fill route defaults and saturate the static price at the wire ceiling. */
-	normalize(route: Partial<RouteInfo> = {}): RouteInfo {
+	normalize(route: Partial<WireRoute> = {}): WireRoute {
 		const cost = route.cost ?? Cost.zero;
 		if (typeof cost !== "bigint" || cost < 0n) throw new RangeError("route cost must be a non-negative bigint");
 		const max = 2n ** 62n - 1n;
@@ -150,13 +189,19 @@ export const RouteInfo = {
  *
  * An empty chain is a local announcement, not the anonymous mark. Ingress fills a
  * received empty list with the anonymous hop before yielding it.
+ *
+ * @internal
  */
-export function isAnonymous(route: RouteInfo): boolean {
+export function isAnonymous(route: WireRoute): boolean {
 	return route.hops.includes(UNKNOWN_HOP);
 }
 
-/** Whether two routes name the same instance, epoch, hop chain, cost, and auth. */
-export function routesEqual(a: RouteInfo | undefined, b: RouteInfo | undefined): boolean {
+/**
+ * Whether two routes name the same instance, epoch, hop chain, cost, and auth.
+ *
+ * @internal
+ */
+export function routesEqual(a: WireRoute | undefined, b: WireRoute | undefined): boolean {
 	if (a === b) return true;
 	if (!a || !b) return false;
 	return (

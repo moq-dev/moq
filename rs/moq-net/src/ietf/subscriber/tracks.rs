@@ -1842,7 +1842,7 @@ mod tests {
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			Control::new(false),
 			None,
 			peer::PeerSetup::declared(peer::Peer::default()),

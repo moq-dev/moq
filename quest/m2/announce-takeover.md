@@ -26,7 +26,7 @@ edge mints a new instance for each announcement,
 
 ## Plan
 
-Re-planned 2026-10-30 (maintainer, the [route epic](/quest/m1/api-audit/route/README.md)):
+Re-planned 2026-10-30 (maintainer, the [route epic](https://github.com/moq-dev/moq/blob/1a6ac473d75fcbfd5d23bdbdfd64eb4750b077ad/quest/m1/api-audit/route/README.md)):
 continuity is the instance promise, not an `ANNOUNCE_TAKEOVER` predecessor
 ID. An instance is one continuous sequence space at a path, so the exact
 route and the claim's answer are the same consumer route,
@@ -128,7 +128,7 @@ separate from the identity rewrite of this Plan, which landed with
 [moq-dev/moq#7420](https://github.com/moq-dev/moq/pull/7420).
 "We're replacing EPOCH with IDENTITY soon" (maintainer, 2026-10-31). The
 broadcast "identity" was renamed `instance` on 2026-11-01 (maintainer, in
-[the route API audit](/quest/m1/api-audit/route/README.md), landed in
+[the route API audit](https://github.com/moq-dev/moq/blob/1a6ac473d75fcbfd5d23bdbdfd64eb4750b077ad/quest/m1/api-audit/route/README.md), landed in
 [moq-dev/moq#7489](https://github.com/moq-dev/moq/pull/7489)), so that
 IDENTITY is now the instance.
 
