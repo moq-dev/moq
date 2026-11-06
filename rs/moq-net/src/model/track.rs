@@ -4919,6 +4919,14 @@ impl Consumer {
 		self
 	}
 
+	/// This handle with its stats scope cleared, so the subscriptions, fetches, and groups
+	/// derived from it count toward no stats session: for reads a consumer makes for itself
+	/// rather than on behalf of whoever its origin is metered for.
+	pub fn unmetered(mut self) -> Self {
+		self.stats = stats::Scope::default();
+		self
+	}
+
 	/// The track name this handle is bound to.
 	pub fn name(&self) -> &str {
 		&self.name

@@ -331,11 +331,7 @@ impl Session {
 	/// Both protocols withdraw this session's announcements and wait for their
 	/// delivery.
 	pub async fn close(self) -> Result<(), Error> {
-		if let Ok(mut close) = self.close.write()
-			&& close.is_none()
-		{
-			*close = Some(Close::Drain);
-		}
+		self.start_close();
 		// The drain outlives this handle, so dropping it cannot cut the drain short.
 		let closed = self.closed.clone();
 		drop(self);
@@ -368,8 +364,8 @@ impl Session {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
-	/// See [`Self::closed`].
-	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
+	/// Poll form of [`closed`](Self::closed).
+	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		Poll::Ready(
 			match ready!(poll_ended(&self.closed, waiter, |ended| ended.err.clone())) {
 				Ok(err) => err,
@@ -377,6 +373,15 @@ impl Session {
 				Err(kio::Closed) => Error::Cancel,
 			},
 		)
+	}
+
+	/// Start the drain [`close`](Self::close) runs, without waiting for it or giving up this handle.
+	pub(crate) fn start_close(&self) {
+		if let Ok(mut close) = self.close.write()
+			&& close.is_none()
+		{
+			*close = Some(Close::Drain);
+		}
 	}
 
 	/// Drain the peer gracefully: the handle for sending this session's single

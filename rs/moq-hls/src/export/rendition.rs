@@ -2308,6 +2308,9 @@ impl WatchMedia {
 					};
 					let subscription = moq_net::track::Subscription::default()
 						.with_delay(moq_net::track::Delay::default().with_max(FEED_MAX_DELAY));
+					// The index is the export's own bookkeeping, not delivery to a client, so a
+					// metered source counts only the segments and inits clients fetch.
+					let track = track.unmetered();
 					let subscribing = track.subscribe(subscription).into_inner();
 					self.step = Step::Subscribing {
 						_track: track,

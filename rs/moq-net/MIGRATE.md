@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `track::Consumer::unmetered` reads outside any stats session
+
+`track::Consumer::unmetered()` returns the handle with its stats scope cleared, so the
+subscriptions, fetches, and groups derived from it count toward no stats session, though
+the broadcast or origin it came from is metered. Existing callers need no migration.
+
 ### Socket readers start at the beginning
 
 New `track` socket sessions subscribe from group 0, and `tcp` sessions join their

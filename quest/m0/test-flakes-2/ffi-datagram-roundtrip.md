@@ -39,8 +39,15 @@ Investigation 2026-11-05 on `main` at `419b799c75`:
   [moq-dev/moq#7951](https://github.com/moq-dev/moq/pull/7951) is real,
   but was not reproduced by these tests. Do not claim it caused this timeout.
 - `datagrams_cross_a_default_connection` is disabled pending diagnosis, per
-  the repository's flaky-test rule. Its requested siblings have not failed
-  in this investigation and remain enabled. No retry or longer wait was added.
+  the repository's flaky-test rule. No retry or longer wait was added.
+- `requested_datagrams_cross_a_default_connection` is quarantined too, by
+  [moq-dev/moq#7904](https://github.com/moq-dev/moq/pull/7904): its single
+  datagram missed the 10 s wait in that PR's
+  [Check](https://github.com/moq-dev/moq/actions/runs/42076855917/job/127419261608)
+  (panic at `rs/moq-ffi/src/test.rs:6111`), the same symptom as the plain
+  test, then passed 100 of 100 stress runs on an idle host. Re-enable it with
+  the plain test once this quest's cause is fixed; its other requested
+  siblings stay enabled.
 
 ## Waiting
 
