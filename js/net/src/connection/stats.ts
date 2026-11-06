@@ -82,7 +82,7 @@ export interface Probe {
 	 */
 	rtt?: Milli;
 
-	/** The peer's estimate of the bitrate it is receiving from us, in bits per second. */
+	/** The peer's send-rate estimate toward us, so our receive rate, in bits per second. */
 	estimatedRecvRate?: number;
 }
 
@@ -132,7 +132,8 @@ export async function transportStats(quic: WebTransport): Promise<Stats> {
 /**
  * Whether `quic` can report a send-rate estimate: only a WebTransport session with
  * `getStats()`. The WebSocket fallback's qmux session reports no counters, the WebRTC
- * data channel's throws, and shipping Chromium and Safari implement none.
+ * data channel's throws, and shipping Chromium implements none. Safari's always reports a
+ * null estimate, so it is sampled but reads `undefined`.
  *
  * @internal
  */
