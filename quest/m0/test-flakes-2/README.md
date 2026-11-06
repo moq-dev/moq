@@ -86,6 +86,13 @@ explains. That batch predates #7658's merge at 15:56Z, and no queue run since
 has failed it, so it needs no child of its own (noted 2026-11-03,
 `/quest-plan`).
 
+The JS reload close-drain test lost a race in the lite-07 publisher: the
+subscriber's FIN after reading the tail could land while a reply write, such as
+SUBSCRIBE_FINISH, still yielded on the write budget. That exit stopped owing the
+opened group streams, so a draining close aborted a final group whose FIN was
+still in flight. Every exit now owes them, fixed by
+[moq-dev/moq#8047](https://github.com/moq-dev/moq/pull/8047).
+
 Added 2026-11-03 (maintainer, `/quest-plan`): five more merge-queue failures
 from 2026-11-03 and early 2026-11-04 UTC, one child each.
 
@@ -115,7 +122,6 @@ Public API: none. Wire: none.
 ## Required
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
-- [reload.test.ts's close-drain tests pass under load](/quest/m0/test-flakes-2/reload-close-drain.md) - the drain cases in `js/net`'s reload tests pass in loaded multi-file runs
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
 - [Test PulseAudio servers stay off the desktop's D-Bus](/quest/m0/test-flakes-2/pulse-dbus.md) - concurrent media runs on one desktop never collide on `org.PulseAudio1`
 - [The Python audio playout-delay test reads its frames](/quest/m0/test-flakes-2/audio-playout-delay.md) - `test_audio_consumer_reports_its_playout_delay` stops timing out on its first read in the merge queue
