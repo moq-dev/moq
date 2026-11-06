@@ -337,7 +337,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	] as const) {
 		test(`${alpn}: a datagram sent right behind its answer arrives (answer ${lag} microtasks late${finish ? ", then the end" : ""})`, async () => {
 			const source = new Origin();
-			const publication = source.createBroadcast(path);
+			const publication = source.route(path, { hidden: true });
 			const datagrams = publication.broadcast.createDatagrams("audio");
 			publication.announce();
 			const pair = createMockTransportPair(alpn);
@@ -376,7 +376,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	test(`${alpn}: a datagram sent right before its end arrives`, async () => {
 		const source = new Origin();
-		const publication = source.createBroadcast(path);
+		const publication = source.route(path, { hidden: true });
 		const datagrams = publication.broadcast.createDatagrams("audio");
 		publication.announce();
 		const pair = createMockTransportPair(alpn);
@@ -412,7 +412,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		// As many as a datagram track buffers unread, past two receive budgets.
 		const BURST = 64;
 		const source = new Origin();
-		const publication = source.createBroadcast(path);
+		const publication = source.route(path, { hidden: true });
 		const datagrams = publication.broadcast.createDatagrams("audio");
 		publication.announce();
 		const pair = createMockTransportPair(alpn);
@@ -453,7 +453,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	test(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
 		const source = new Origin();
-		const publication = source.createBroadcast(path);
+		const publication = source.route(path, { hidden: true });
 		const datagrams = publication.broadcast.createDatagrams("audio");
 		publication.announce();
 		const pair = createMockTransportPair(alpn);
@@ -534,7 +534,7 @@ function holdNextAnswer(transport: MockTransport): { arm(): void; release(): voi
 // up an answered track's last datagram, which its end, arriving with it, would otherwise drop.
 test("lite-07: an unanswered track's datagrams don't delay another track's last", async () => {
 	const source = new Origin();
-	const publication = source.createBroadcast(path);
+	const publication = source.route(path, { hidden: true });
 	const b = publication.broadcast.createDatagrams("b");
 	// Answers "a" on demand.
 	const requested = wireOf(publication.broadcast).requestedDatagrams();

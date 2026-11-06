@@ -883,15 +883,15 @@ impl Subscriber {
 		self.subscribes.lock().remove(&id);
 	}
 
-	/// Remove a subscription its publisher finished. On lite-05/06 its datagrams keep their
-	/// route until the ends apply, which the returned consumer's close reports.
-	fn finish_subscribe(&self, id: u64) -> kio::Consumer<()> {
+	/// Remove a subscription its publisher finished. On lite-05/06 it keeps routing its
+	/// datagrams to its name's datagram track, which may register meanwhile, until the ends
+	/// apply, which the returned consumer's close reports.
+	fn finish_subscribe(&self, id: u64) -> Option<kio::Consumer<()>> {
 		let removed = self.subscribes.lock().remove(&id);
+		let legacy = removed.and_then(|mut entry| entry.legacy.take())?;
 		let mut ends = self.datagram_ends.lock();
-		if let Some(legacy) = removed.and_then(|mut entry| entry.legacy.take()) {
-			ends.subscribes.push((id, legacy));
-		}
-		ends.applied.consume()
+		ends.subscribes.push((id, legacy));
+		Some(ends.applied.consume())
 	}
 
 	/// Apply the datagram ends the sources read, once the driver routed the datagrams received
@@ -4183,6 +4183,16 @@ mod tests {
 		assert_eq!(subscriber.datagrams_unrouted.load(atomic::Ordering::Relaxed), 0);
 	}
 
+	/// Poll `running` as the driver does, which applies the datagram ends queued in its pass.
+	fn poll_run(running: &mut TrackServeRun, waiter: &kio::Waiter) -> Poll<()> {
+		let res = kio::Task::poll(running, waiter);
+		running.serve.subscriber.end_datagrams();
+		match running.state {
+			TrackRunState::Ending { .. } => kio::Task::poll(running, waiter),
+			_ => res,
+		}
+	}
+
 	#[kio::test]
 	async fn padding_is_discarded_only_on_lite07() {
 		for version in [
@@ -4879,7 +4889,7 @@ mod tests {
 				gate,
 				datagrams: None,
 			};
-			kio::wait(|waiter| kio::Task::poll(&mut running, waiter)).await;
+			kio::wait(|waiter| poll_run(&mut running, waiter)).await;
 
 			let end = loop {
 				match reader.recv_group().await {
@@ -5193,7 +5203,7 @@ mod tests {
 			datagrams: None,
 		};
 		assert!(
-			kio::Task::poll(&mut running, &kio::Waiter::noop()).is_ready(),
+			poll_run(&mut running, &kio::Waiter::noop()).is_ready(),
 			"{version:?}: FIN must settle immediately"
 		);
 		if clean {
@@ -5308,11 +5318,11 @@ mod tests {
 			datagrams: None,
 		};
 		assert!(
-			kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending(),
+			poll_run(&mut running, &kio::Waiter::noop()).is_pending(),
 			"{version:?}: the tail still owes group 0"
 		);
 		crate::transport::poll::Session::close(&session, crate::SessionError::App(7).to_code(), "died");
-		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_ready());
+		assert!(poll_run(&mut running, &kio::Waiter::noop()).is_ready());
 		let res = reader.recv_group().await.err();
 		assert!(matches!(res, Some(Error::Session(_))), "{version:?}: {res:?}");
 	}
@@ -6647,7 +6657,7 @@ mod tests {
 				gate,
 				datagrams: None,
 			};
-			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_ready());
+			assert!(poll_run(&mut running, &kio::Waiter::noop()).is_ready());
 			let end = reader.recv_group().now_or_never().expect("the track ended").map(|_| ());
 			match reset {
 				false => assert!(matches!(end, Ok(())), "{end:?}"),
@@ -9932,16 +9942,17 @@ impl kio::Task for TrackServeRun {
 					}
 
 					if let Sub::Active(active) = serve_loop.sub {
-						let version = self.serve.subscriber.version;
-						if !finished {
-							self.serve.subscriber.remove_subscribe(active.id);
-						} else if version.has_datagrams() && !version.has_datagram_tracks() {
-							// The subscription carries its name's datagrams, which end with it.
-							let applied = self.serve.subscriber.finish_subscribe(active.id);
+						let applied = match finished {
+							true => self.serve.subscriber.finish_subscribe(active.id),
+							false => {
+								self.serve.subscriber.remove_subscribe(active.id);
+								None
+							}
+						};
+						// The subscription carries its name's datagrams, which end with it.
+						if let Some(applied) = applied {
 							self.state = TrackRunState::Ending { applied, active };
 							continue;
-						} else {
-							self.serve.subscriber.remove_subscribe(active.id);
 						}
 						if self.finish_sub(active, finished) {
 							continue;
