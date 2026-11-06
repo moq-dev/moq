@@ -543,6 +543,36 @@ impl Permit {
 		self.limit.as_ref().is_none_or(|limit| limit.matches(path))
 	}
 
+	/// Whether this allows every path at or beneath `prefix`, judged pattern by
+	/// pattern, so a `false` may be spurious but a `true` never is.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn covers_subtree(&self, prefix: &str) -> bool {
+		let Ok(subtree) = moq_pattern::Pattern::subtree(prefix) else {
+			return false;
+		};
+		let covers = |patterns: &Option<Patterns>| patterns.as_ref().is_none_or(|patterns| patterns.contains(&subtree));
+		covers(&self.granted) && covers(&self.limit)
+	}
+
+	/// The prefixes this confines a peer to, or `None` when it allows every path:
+	/// the heads of the grant's patterns, narrowed by the limit's.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn regions(&self) -> Option<Vec<crate::Path>> {
+		if self.covers_subtree("") {
+			return None;
+		}
+		let heads = |patterns: &Option<Patterns>| patterns.as_ref().map(crate::model::interest_prefixes);
+		let regions = match (heads(&self.granted), heads(&self.limit)) {
+			(Some(granted), Some(limit)) => granted
+				.iter()
+				.flat_map(|a| limit.iter().filter_map(move |b| narrower(a, b)))
+				.collect(),
+			(Some(regions), None) | (None, Some(regions)) => regions,
+			(None, None) => return None,
+		};
+		Some(regions)
+	}
+
 	/// Whether this allows everything `other` does, judged part by part, so a `false`
 	/// may be spurious but a `true` never is.
 	pub(crate) fn covers(&self, other: &Self) -> bool {
@@ -552,6 +582,17 @@ impl Permit {
 			(Some(this), Some(other)) => this.covers(other),
 		};
 		covers(&self.granted, &other.granted) && covers(&self.limit, &other.limit)
+	}
+}
+
+/// Whichever of two prefixes lies within the other, or `None` when they are disjoint.
+fn narrower(a: &crate::Path, b: &crate::Path) -> Option<crate::Path> {
+	if a.has_prefix(b) {
+		Some(a.clone())
+	} else if b.has_prefix(a) {
+		Some(b.clone())
+	} else {
+		None
 	}
 }
 

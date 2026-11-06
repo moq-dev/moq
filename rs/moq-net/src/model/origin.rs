@@ -517,6 +517,12 @@ pub struct RouteInfo {
 
 	/// Where the route entered this origin; see [`Self::source`]. Never forwarded.
 	pub(crate) source: Source,
+
+	/// The origin node that serves the route, for a route the lite-07 route layer
+	/// selected: a request resolved through it names that node to the next hop.
+	/// `None` for a route this node serves itself, published here or learned from a
+	/// peer that names no node.
+	pub(crate) node: Option<u64>,
 }
 
 impl Default for RouteInfo {
@@ -529,6 +535,7 @@ impl Default for RouteInfo {
 			auth: None,
 			via: Hop::UNKNOWN,
 			source: Source::Local,
+			node: None,
 		}
 	}
 }
@@ -610,6 +617,18 @@ impl RouteInfo {
 	pub(crate) fn with_via(mut self, via: Hop) -> Self {
 		self.via = via;
 		self
+	}
+
+	/// The origin node a route-layer route serves; see [`Self::node`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn with_node(mut self, node: Option<u64>) -> Self {
+		self.node = node;
+		self
+	}
+
+	/// The origin node serving this route, when the route layer selected it.
+	pub(crate) fn node(&self) -> Option<u64> {
+		self.node
 	}
 
 	/// Whether this route passed through an anonymous hop.
@@ -794,9 +813,11 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 		entry.cost,
 		!entry.local,
 		entry.hops.len(),
-		match entry.link == Link::Local && entry.prefix == *path {
-			true => (0, 0),
-			false => (
+		match (entry.node, entry.link == Link::Local && entry.prefix == *path) {
+			// Every node that knows the claim ranks its origin node alike.
+			(Some(node), _) => (fnv_key(path.as_str(), node.to_le_bytes()), 0),
+			(None, true) => (0, 0),
+			(None, false) => (
 				instance_key(path.as_str(), &entry.instance),
 				chain_key(path.as_str(), &entry.hops),
 			),
@@ -808,9 +829,9 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 /// The key [`route_order`] ranks an entry by: lower wins.
 type RouteOrder = (Reverse<Preference>, bool, Cost, bool, usize, (u64, u64), Reverse<u64>);
 
-/// The `(hops, cost, source, instance, epoch, auth)` metadata an announce cursor delivers
+/// The `(hops, cost, source, instance, epoch, auth, node)` metadata an announce cursor delivers
 /// alongside a prefix.
-type RouteMeta = (Hops, Cost, Source, Instance, u64, Option<crate::auth::Credential>);
+type RouteMeta = (Hops, Cost, Source, Instance, u64, Option<crate::auth::Credential>, Option<u64>);
 
 /// The earlier of two optional deadlines.
 fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
@@ -1289,6 +1310,7 @@ impl OriginConsumerState {
 				instance: Some(meta.3),
 				epoch: meta.4,
 				auth: meta.5,
+				node: meta.6,
 			},
 		};
 		let event = match kind {
@@ -1328,6 +1350,8 @@ struct RouteEntry {
 	local: bool,
 	/// The link the entry arrived on, from the handle that inserted it.
 	link: Link,
+	/// The origin node serving the route; see [`RouteInfo::node`].
+	node: Option<u64>,
 	/// The queue requests under this route are served from, when the announcer
 	/// serves content on demand (a prefix [`Route`]). `None` for an advertise-only
 	/// announcement ([`Producer::announce`]) and for a local broadcast.
@@ -1402,18 +1426,20 @@ impl RouteEntry {
 			self.instance.clone(),
 			self.epoch,
 			self.auth.clone(),
+			self.node,
 		)
 	}
 
 	/// Whether [`Self::meta`] would equal `meta`, without building it.
 	fn delivers(&self, meta: &RouteMeta) -> bool {
-		let (hops, cost, source, instance, epoch, auth) = meta;
+		let (hops, cost, source, instance, epoch, auth, node) = meta;
 		*hops == self.hops
 			&& *cost == self.cost
 			&& *source == self.entered()
 			&& *instance == self.instance
 			&& *epoch == self.epoch
 			&& *auth == self.auth
+			&& *node == self.node
 	}
 
 	/// Whether a request for `path` can be served through this entry. A served
@@ -1520,6 +1546,31 @@ struct Horizon {
 	/// forwards them ([`Consumer::forwardable`]). Selection then falls back to a
 	/// shorter route instead of withdrawing a prefix an in-cap path still reaches.
 	max_hops: Option<HopLimit>,
+	/// Which origin nodes' routes this reader sees ([`Consumer::with_node`]).
+	node: NodeFilter,
+}
+
+/// Which origin nodes' routes a reader sees: a request naming a node resolves only
+/// through that node's routes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) enum NodeFilter {
+	/// Every route.
+	#[default]
+	Any,
+	/// Only the routes this node serves itself.
+	Own,
+	/// Only the routes the route layer selected toward this origin node.
+	Is(u64),
+}
+
+impl NodeFilter {
+	fn admits(self, node: Option<u64>) -> bool {
+		match self {
+			Self::Any => true,
+			Self::Own => node.is_none(),
+			Self::Is(id) => node == Some(id),
+		}
+	}
 }
 
 impl Horizon {
@@ -1528,6 +1579,7 @@ impl Horizon {
 		self.admits_link(entry.link)
 			&& entry.visible_to(self.exclude)
 			&& self.max_hops.is_none_or(|max| entry.hops.len() < max.get())
+			&& self.node.admits(entry.node)
 	}
 
 	/// Whether routes arriving on `link` may be observed through this horizon.
@@ -2297,6 +2349,25 @@ impl Producer {
 		self
 	}
 
+	/// The rank of the link this handle is given to; see [`Self::with_preference`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn preference(&self) -> Preference {
+		self.preference
+	}
+
+	/// The link this handle's routes arrive on; see [`Self::with_link`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn link(&self) -> Link {
+		self.link
+	}
+
+	/// The route layer node every lite-07 session on this origin shares; see
+	/// [`Consumer::route_node`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn route_node(&self) -> crate::route::Node {
+		self.consume().route_node()
+	}
+
 	/// This origin's construction config.
 	pub fn config(&self) -> Config {
 		let shared = self.shared.lock();
@@ -2885,6 +2956,7 @@ impl Announcing {
 				via,
 				local: self.local,
 				link: self.link,
+				node: route.node,
 				server: serving.server.clone(),
 				source: serving.source.clone(),
 				advertised: serving.advertised,
@@ -3329,6 +3401,7 @@ impl AnnounceProducer {
 			entry.cost = route.cost;
 			entry.auth = route.auth.clone();
 			entry.via = route.via;
+			entry.node = route.node;
 			entry.advertised = true;
 			let claim = entry.claim.clone();
 			if advertising {
@@ -3380,6 +3453,7 @@ impl AnnounceProducer {
 			auth: entry.auth.clone(),
 			via: entry.via,
 			source: entry.entered(),
+			node: entry.node,
 		})
 	}
 
@@ -3478,6 +3552,38 @@ impl Drop for AnnounceProducer {
 
 /// Drives origin lifecycle work and cache expiration with caller-supplied time.
 ///
+/// Feeds a route layer node the routes this node serves itself, best per prefix,
+/// for as long as the origin lives.
+struct OwnClaims {
+	routes: Routes,
+	node: crate::route::Node,
+}
+
+impl kio::Task for OwnClaims {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		while let Some(event) = ready!(self.routes.poll_next(waiter)) {
+			match event {
+				RouteEvent::Start(announce)
+				| RouteEvent::Update(announce)
+				| RouteEvent::Restart(announce)
+				| RouteEvent::Takeover { announce, .. } => {
+					let route = announce.route;
+					let claim = route.instance.map(|instance| crate::route::Claim {
+						instance,
+						epoch: route.epoch,
+						cost: route.cost.value(),
+					});
+					self.node.own(announce.prefix, claim);
+				}
+				RouteEvent::End(announce) => self.node.own(announce.prefix, None),
+			}
+		}
+		Poll::Ready(())
+	}
+}
+
 /// Returned by [`Producer::new`]. Poll on external activity or at the deadline
 /// it returns, supplying nondecreasing instants. RouteInfo changes, track serving, linger,
 /// failover, and teardown run here; the route table and announce cursors update
@@ -5748,6 +5854,10 @@ struct OriginState {
 
 	// The sessions withholding this origin's hidden routes from their peer.
 	hidden_withheld: HiddenWithheld,
+
+	// The route layer node this origin's lite-07 sessions share; see
+	// [`Consumer::route_node`].
+	route_node: Option<crate::route::Node>,
 }
 
 impl OriginState {
@@ -5766,6 +5876,7 @@ impl OriginState {
 			listeners: Vec::new(),
 			next_listener: 0,
 			hidden_withheld: HiddenWithheld::default(),
+			route_node: None,
 		}
 	}
 
@@ -6948,6 +7059,46 @@ impl Consumer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn excluding(mut self, peer: Hop) -> Self {
 		self.horizon.exclude = Some(peer);
+		self
+	}
+
+	/// The route layer node every lite-07 session on this origin shares, created on
+	/// first use along with the task that feeds it the routes this node serves
+	/// itself: everything in the table the route layer did not select.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn route_node(&self) -> crate::route::Node {
+		let mut shared = self.shared.lock();
+		if let Some(node) = &shared.route_node {
+			return node.clone();
+		}
+		let node = crate::route::Node::random();
+		shared.route_node = Some(node.clone());
+		drop(shared);
+		// The whole table, whatever this handle's scope.
+		let own = Self {
+			scope: OriginScope::default(),
+			root: Path::default(),
+			horizon: Horizon {
+				node: NodeFilter::Own,
+				..Horizon::default()
+			},
+			covering: false,
+			..self.clone()
+		}
+		.with_hidden(true);
+		self.tasks.push(OwnClaims {
+			routes: own.routes(),
+			node: node.clone(),
+		});
+		node
+	}
+
+	/// A clone that sees only the routes `node` admits: a request naming an origin
+	/// node resolves only through that node's routes, and the route layer's own
+	/// claims are the routes this node serves itself.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn with_node(mut self, node: NodeFilter) -> Self {
+		self.horizon.node = node;
 		self
 	}
 

@@ -56,6 +56,7 @@ pub use timed::Timed;
 pub mod origin {
 	pub use super::follow::Following;
 	pub(crate) use super::origin_impl::HiddenWithheld;
+	pub(crate) use super::origin_impl::NodeFilter;
 	#[cfg(feature = "async")]
 	pub(crate) use super::origin_impl::HiddenWithholding;
 	#[cfg(feature = "async")]

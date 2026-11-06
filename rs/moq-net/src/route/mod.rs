@@ -13,6 +13,7 @@
 
 #![cfg_attr(not(test), allow(dead_code, reason = "the lite-07 session does not drive it yet"))]
 
+mod node;
 mod proof;
 mod view;
 
@@ -29,6 +30,7 @@ use std::{
 
 use crate::Path;
 
+pub(crate) use node::{Claim, Node};
 pub use proof::RouteKey;
 pub(crate) use proof::{EXPORTER_LABEL, Proof, Transcript};
 pub(crate) use view::{View, within};
@@ -298,6 +300,8 @@ pub(crate) struct Router<N, A> {
 	heard: BTreeMap<(Id, N), Heard<A>>,
 	sent_views: BTreeMap<(Id, N), View<A>>,
 	shown: BTreeMap<(Id, Path), Shown<A>>,
+	/// The identities recomputed since [`Self::changed`] last took them.
+	changed: BTreeSet<Id>,
 	/// Mints a fresh identity on rotation.
 	rng: u64,
 	/// Per claim this node has shown, how many times it forgot that claim.
@@ -340,6 +344,7 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 			heard: BTreeMap::new(),
 			sent_views: BTreeMap::new(),
 			shown: BTreeMap::new(),
+			changed: BTreeSet::new(),
 			rng: seed | 1,
 			#[cfg(test)]
 			forgot: BTreeMap::new(),
@@ -348,6 +353,12 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 			out: Vec::new(),
 			events: Vec::new(),
 		}
+	}
+
+	/// Take the identities recomputed since the last call: their selection or
+	/// shown claims may have changed.
+	pub fn changed(&mut self) -> BTreeSet<Id> {
+		std::mem::take(&mut self.changed)
 	}
 
 	/// Take the messages queued for neighbors, in order.
@@ -922,7 +933,7 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 
 	/// The identity this node names for `id` in a request to `next`: the one
 	/// `next` advertised, if this node qualified it.
-	fn name(&self, next: N, id: Id) -> Id {
+	pub fn name(&self, next: N, id: Id) -> Id {
 		self.filed.get(&(id, next)).copied().unwrap_or(id)
 	}
 
@@ -1154,6 +1165,7 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 		{
 			self.touched += ids.len();
 		}
+		self.changed.extend(&ids);
 		for id in ids {
 			self.prune(id);
 			self.advertise(id, &peers);
