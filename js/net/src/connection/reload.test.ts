@@ -364,13 +364,11 @@ for (const code of [SessionCode.Unauthorized, SessionCode.MalformedAuthToken, Se
 		const original = globalThis.WebTransport;
 		const url = new URL("https://example.com/");
 		const closes: (Error | null)[] = [];
+		let server: MockTransport | undefined;
 		const stub = function StubWebTransport() {
 			const pair = createMockTransportPair(Lite.ALPN_06);
-			// Reject at the MoQ layer: accept the transport, then close with a code, the
-			// way a relay's Request::close does after it has already accepted the transport.
-			void accept(pair.server, url).then(() => {
-				pair.server.close({ closeCode: code, reason: "unauthorized" });
-			});
+			server = pair.server;
+			void accept(pair.server, url);
 			return pair.client;
 		};
 		globalThis.WebTransport = stub as unknown as typeof WebTransport;
@@ -388,6 +386,9 @@ for (const code of [SessionCode.Unauthorized, SessionCode.MalformedAuthToken, Se
 				effect.spawn(async () => {
 					closes.push(await conn.closed);
 				});
+				// Reject at the MoQ layer once both sides are set up, the way a relay's
+				// Request::close does after it has already accepted the transport.
+				server?.close({ closeCode: code, reason: "unauthorized" });
 			}
 		});
 
