@@ -186,7 +186,9 @@ where
 		if let Some(stats) = &options.socket_stats {
 			upgraded = upgraded.with_socket_stats(stats.clone());
 		}
-		let session = crate::spawn_qmux(upgraded.accept().await.map_err(Error::accept)?);
+		// The deadline covers QMux establishment too, which waits for the peer's parameters.
+		let accepted = async { upgraded.accept().await.map_err(Error::accept) };
+		let session = crate::spawn_qmux(crate::server::within(deadline, accepted).await?);
 		crate::server::accept_websocket(session, options, deadline).await
 	})
 	.await
@@ -1157,6 +1159,34 @@ mod timeout_tests {
 	use super::*;
 	use futures::FutureExt;
 	use moq_net::transport::poll::Session as _;
+
+	/// A peer that upgrades but never sends its QMux parameters is refused at the accept's own
+	/// deadline, not QMux's longer handshake timeout.
+	#[tokio::test(start_paused = true)]
+	async fn silent_qmux_peer_is_refused_at_the_deadline() {
+		const ALPN: &str = "qmux-01.moq-lite-06";
+		let activity = moq_net::server::Activity::default();
+		let mut options = Options::new(
+			"ws://localhost/".parse().unwrap(),
+			Default::default(),
+			activity.enter().unwrap(),
+		);
+		options.link.alpn = Some(ALPN.into());
+		let timeout = time::Duration::from_secs(1);
+		options.timeout = Some(timeout);
+		let (server, _peer) = tokio::io::duplex(4096);
+		let server =
+			tokio_tungstenite::WebSocketStream::from_raw_socket(server, tungstenite::protocol::Role::Server, None)
+				.await;
+		let start = kio::clock::now();
+		let result = accept(server, options).await;
+		assert!(
+			matches!(result, Err(crate::Error::MoqNet(moq_net::Error::Timeout))),
+			"accept outcome: {:?}",
+			result.map(|_| ())
+		);
+		assert_eq!(start.elapsed(), timeout);
+	}
 
 	#[tokio::test(start_paused = true)]
 	async fn unset_timeout_uses_the_default_and_zero_disables_it() {
