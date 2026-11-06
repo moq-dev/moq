@@ -25,7 +25,7 @@ export class Consumer {
 }
 
 export interface ConsumerProps {
-	delay?: Signals.GetterInit<Delay>;
+	delay?: Signals.GetterInit<Net.Track.Delay>;
 	format: Format;
 	maxBuffer?: number;
 	predecessor?: Consumer;
@@ -33,11 +33,6 @@ export interface ConsumerProps {
 }
 
 export const DEFAULT_MAX_BUFFER: number;
-
-export interface Delay {
-	max?: Milli | null;
-	min?: Milli;
-}
 
 export interface Format {
 	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp | undefined): Frame[];
@@ -78,9 +73,11 @@ export namespace Legacy {
 
 export * as Loc from "@moq/loc";
 
+export const MAX_AGE: Milli;
+
 export type Read = {
 	frame: ReceivedFrame;
-	group: number;
+	group: bigint;
 	kind: "frame";
 } | {
 	duration: Micro;
@@ -88,7 +85,7 @@ export type Read = {
 	timestamp: Micro;
 } | {
 	end: Micro;
-	group: number;
+	group: bigint;
 	kind: "end";
 };
 
@@ -97,11 +94,11 @@ export interface ReceivedFrame extends Frame {
 }
 
 export type TrackInfoOptions = {
-	maxAge?: Milli;
+	maxAge?: Milli | null;
 	priority: number;
 };
 
 export function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): BufferedRanges;
 
-export function trackInfo(options: TrackInfoOptions): Partial<Net.Track.Info>;
+export function trackInfo(options: TrackInfoOptions): Net.Track.InfoInit;
 ```

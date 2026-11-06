@@ -2,15 +2,14 @@ import { expect, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
 import * as Announce from "./announced.ts";
 import type { Producer as BroadcastProducer } from "./broadcast.ts";
-import { Route } from "./hop.ts";
+import { RouteInfo } from "./hop.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { wireOf } from "./wire.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid): BroadcastProducer {
-	const broadcastPublication = origin.createBroadcast(path);
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(path);
+	const broadcast = broadcastRoute.broadcast;
 	return broadcast;
 }
 
@@ -20,7 +19,7 @@ test("next streams every appended event in order", async () => {
 	const producer = new Announce.Producer();
 	const consumer = producer.consume();
 
-	const route = Route.default;
+	const route = RouteInfo.default;
 	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
 	producer.append({ prefix: p("a"), captures: undefined, kind: "end", route });
 
@@ -28,11 +27,25 @@ test("next streams every appended event in order", async () => {
 	expect(await consumer.next()).toEqual({ prefix: p("a"), captures: undefined, kind: "end", route });
 });
 
+test("a listing reports only a path becoming present or absent", async () => {
+	const producer = new Announce.Producer();
+	const listing = Announce.list(producer.consume());
+
+	const route = RouteInfo.default;
+	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
+	producer.append({ prefix: p("a"), captures: undefined, kind: "update", route });
+	producer.append({ prefix: p("a"), captures: undefined, kind: "restart", route });
+	producer.append({ prefix: p("a"), captures: undefined, kind: "end", route });
+
+	expect((await listing.next())?.kind).toBe("present");
+	expect((await listing.next())?.kind).toBe("absent");
+});
+
 test("the consumer is an async iterable of the same events", async () => {
 	const producer = new Announce.Producer();
 	const consumer = producer.consume();
 
-	const route = Route.default;
+	const route = RouteInfo.default;
 	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
 	producer.append({ prefix: p("a"), captures: undefined, kind: "end", route });
 
@@ -51,7 +64,7 @@ test("a same-name re-announce is a distinct update", async () => {
 	// The stream is a log, not a set: it carries a redundant announce as its own update rather
 	// than collapsing it. Deciding what a repeat means belongs to the session layer, which resolves
 	// a restart into either nothing (an identical route) or an in-place update.
-	const route = Route.default;
+	const route = RouteInfo.default;
 	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
 	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
 
@@ -84,7 +97,7 @@ test("closing a consumer releases only that handle", async () => {
 	expect(producer.closed.peek()).toBeUndefined();
 
 	// The other reader keeps the stream: an event still reaches it.
-	const route = Route.default;
+	const route = RouteInfo.default;
 	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
 	expect((await second.next())?.prefix).toBe(p("a"));
 
@@ -161,11 +174,11 @@ test("the local route wins over a blind request on a no-discovery origin", async
 });
 
 const tick = () => yieldNow();
-const start = (prefix: string): Announce.Event => ({
+const start = (prefix: string): Announce.RouteEvent => ({
 	prefix: p(prefix),
 	captures: undefined,
 	kind: "start",
-	route: Route.default,
+	route: RouteInfo.default,
 });
 
 test("a stream syncs once the reader is past what was queued at the boundary", async () => {
@@ -217,7 +230,7 @@ test("behind takes sync back, and closing hands it back for good", () => {
 test("an origin with no session delivering syncs on its own replay", async () => {
 	const origin = new OriginProducer();
 	const room = publish(origin, p("room"));
-	const announced = origin.consume().announced();
+	const announced = origin.consume().routes();
 	expect(await announced.next()).toMatchObject({ prefix: p("room"), kind: "start" });
 	void announced.next();
 	await tick();
@@ -232,8 +245,8 @@ test("an origin stream waits on every overlapping initial set in flight", async 
 	const room = wire.snapshot(p("room"));
 	const other = wire.snapshot(p("other"));
 
-	const scoped = origin.consume().announced(Path.Pattern.subtree(p("room")));
-	const all = origin.consume().announced();
+	const scoped = origin.consume().routes(Path.Pattern.subtree(p("room")));
+	const all = origin.consume().routes();
 	await tick();
 	expect(scoped.synced.peek()).toBe(false);
 	expect(all.synced.peek()).toBe(false);
@@ -268,7 +281,7 @@ test("an origin stream waits on every overlapping initial set in flight", async 
 test("a snapshot elsewhere never holds a scoped stream", async () => {
 	const origin = new OriginProducer();
 	const other = wireOf(origin).snapshot(p("other"));
-	const scoped = origin.consume().announced(Path.Pattern.subtree(p("room")));
+	const scoped = origin.consume().routes(Path.Pattern.subtree(p("room")));
 	await tick();
 	expect(scoped.synced.peek()).toBe(true);
 	other();
@@ -278,8 +291,8 @@ test("a snapshot elsewhere never holds a scoped stream", async () => {
 test("a snapshot under a hidden segment holds only a reader that opts in", async () => {
 	const origin = new OriginProducer();
 	const stats = wireOf(origin).snapshot(p(".stats"));
-	const all = origin.consume().announced();
-	const hidden = origin.consume().announced(Path.Pattern.all(), { hidden: true });
+	const all = origin.consume().routes();
+	const hidden = origin.consume().routes(Path.Pattern.all(), { hidden: true });
 	await tick();
 	expect(all.synced.peek()).toBe(true);
 	expect(hidden.synced.peek()).toBe(false);

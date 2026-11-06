@@ -2,19 +2,20 @@
 
 //! An endpoint linked to two CDNs uses its preferred one and fails over to the next.
 //!
-//! A publisher `P` pushes one broadcast, under one epoch, to CDN relays `A` and `B`. A
+//! A publisher `P` pushes one broadcast, under one instance, to CDN relays `A` and `B`. A
 //! subscriber `S` links to both, ranking `A` first with
 //! [`origin::Producer::with_preference`] while pricing `B` cheaper, so only the
 //! preference puts `A` ahead. Losing `A` moves `S` to `B`, and `A` returning moves it
-//! back. Between lite-07 routes with the same epoch each move resumes the subscription.
-//! A moq-transport `B` carries no epoch, so moving onto it restarts the path.
+//! back. Between lite-07 routes, which carry the instance, each move resumes the
+//! subscription. A moq-transport `B` carries none, so `S` mints one for it, and the move
+//! onto it is a restart that ends the subscription rather than stitching onto it.
 
 use crate::support;
 
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
-use moq_net::{Error, Hop, Timestamp, Version, announce, origin, track};
+use moq_net::{Error, Hop, Timestamp, Version, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -126,15 +127,15 @@ async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Option<Timest
 }
 
 /// Whether the route passes through the preferred CDN.
-fn via_a(announce: &announce::Event) -> bool {
+fn via_a(announce: &origin::RouteEvent) -> bool {
 	let route = match announce {
-		announce::Event::Start(a)
-		| announce::Event::Update(a)
-		| announce::Event::Restart(a)
-		| announce::Event::Takeover { announce: a, .. } => &a.route,
-		announce::Event::End(_) => return false,
+		origin::RouteEvent::Start(a)
+		| origin::RouteEvent::Update(a)
+		| origin::RouteEvent::Restart(a)
+		| origin::RouteEvent::Takeover { announce: a, .. } => &a.route,
+		origin::RouteEvent::End(_) => return false,
 	};
-	route.hops.iter().any(|hop| *hop == Hop::new(A).unwrap())
+	route.hops().iter().any(|hop| *hop == Hop::new(A).unwrap())
 }
 
 struct Topology {
@@ -143,7 +144,7 @@ struct Topology {
 	cdn_b: origin::Producer,
 	subscriber: origin::Producer,
 	track: track::Producer,
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 	_pushes: Vec<MockPair>,
 	s_to_a: Option<MockPair>,
 	s_to_b: MockPair,
@@ -160,11 +161,11 @@ impl Topology {
 		let cdn_b = produce_origin(3);
 		let subscriber = produce_origin(4);
 
-		let broadcast = publisher.create_broadcast("live").unwrap();
-		let track = broadcast.create_track("video", timed()).unwrap();
-		broadcast
-			.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
+		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+		broadcast.announce().unwrap();
 
 		let pushes = vec![
 			push(lite, &publisher, &cdn_a).await,
@@ -190,7 +191,8 @@ impl Topology {
 
 	async fn subscribe(&self) -> mpsc::UnboundedReceiver<Delivery> {
 		let remote = self.subscriber.consume().request("live", None).await.unwrap();
-		let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
+		let prefs =
+			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 		read(remote.track("video").unwrap().subscribe(prefs).await.unwrap())
 	}
 
@@ -268,15 +270,15 @@ fn assert_continuous(seen: &[(u64, Vec<u8>, Option<Timestamp>)], groups: u64) {
 	}
 }
 
-/// Two CDNs under one epoch, `B` over `secondary`: `S` reads through `A` although `B` is
+/// Two CDNs under one instance, `B` over `secondary`: `S` reads through `A` although `B` is
 /// cheaper, resumes on `B` when `A` goes, and moves back once `A` returns, every frame once.
 async fn fails_over_and_back(secondary: &str) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		let mut topology = Topology::new(secondary.parse().unwrap()).await;
-		let mut announced = topology.subscriber.consume().announced();
+		let mut announced = topology.subscriber.consume().routes();
 		let start = announced.next().await.expect("announced");
 		assert!(
-			matches!(start, announce::Event::Start(_)) && via_a(&start),
+			matches!(start, origin::RouteEvent::Start(_)) && via_a(&start),
 			"the preferred CDN wins over the cheaper one: {start:?}"
 		);
 
@@ -286,15 +288,15 @@ async fn fails_over_and_back(secondary: &str) {
 		topology.lose_a().await;
 		let update = announced.next().await.expect("announced");
 		assert!(
-			matches!(update, announce::Event::Update(_)) && !via_a(&update),
-			"same epoch over B: {update:?}"
+			matches!(update, origin::RouteEvent::Update(_)) && !via_a(&update),
+			"same instance over B: {update:?}"
 		);
 		seen.extend(topology.group_anywhere(&mut rx).await);
 
 		topology.restore_a().await;
 		let update = announced.next().await.expect("announced");
 		assert!(
-			matches!(update, announce::Event::Update(_)) && via_a(&update),
+			matches!(update, origin::RouteEvent::Update(_)) && via_a(&update),
 			"back on A: {update:?}"
 		);
 		seen.extend(topology.group_through_a(&mut rx).await);
@@ -313,11 +315,12 @@ async fn preferred_cdn_fails_over_and_back() {
 	fails_over_and_back("moq-lite-07-wip").await;
 }
 
-/// Losing the epoch-carrying route restarts onto the epochless moq-transport route.
+/// A moq-transport `B` carries no instance, so `S` mints one for its route and losing `A`
+/// is a restart onto another stream: the track ends with no frame of `B`'s.
 async fn restarts_across_protocols(secondary: &str) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		let mut topology = Topology::new(secondary.parse().unwrap()).await;
-		let mut announced = topology.subscriber.consume().announced();
+		let mut announced = topology.subscriber.consume().routes();
 		let start = announced.next().await.expect("announced");
 		assert!(via_a(&start), "{start:?}");
 
@@ -328,8 +331,8 @@ async fn restarts_across_protocols(secondary: &str) {
 		topology.lose_a().await;
 		let update = announced.next().await.expect("announced");
 		assert!(
-			matches!(update, announce::Event::Restart(_)) && !via_a(&update),
-			"epochless route over B: {update:?}"
+			matches!(update, origin::RouteEvent::Restart(_)) && !via_a(&update),
+			"another instance over B: {update:?}"
 		);
 		topology.group();
 		settle().await;

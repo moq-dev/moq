@@ -1,7 +1,7 @@
 import { Micro } from "@moq/clock";
 import type { AudioFrame } from "./capture";
 
-type Entry = { frame: AudioFrame; end: Micro };
+type Entry = { frame: AudioFrame; end: Micro; cut: boolean };
 
 /** @internal Codec-sized PCM retained until demanded, bounded by time and sample count. */
 export class Backlog {
@@ -18,17 +18,28 @@ export class Backlog {
 		this.#limit = Math.ceil((retention * sampleRate) / 1_000_000);
 	}
 
-	/** Store one complete frame, expiring against both capture time and the clock. */
-	push(frame: AudioFrame, end: Micro, now: Micro): void {
-		this.#frames.push({ frame, end });
+	/**
+	 * Store one complete frame, expiring against both capture time and the clock. `cut` marks the
+	 * first frame after a break in the timeline, such as a disable.
+	 */
+	push(frame: AudioFrame, end: Micro, now: Micro, cut = false): void {
+		this.#frames.push({ frame, end, cut });
 		this.#samples += frame.channels[0].length;
 		this.expire(Micro(Math.max(now, end)));
 		while (this.#samples > this.#limit) this.#evict();
 	}
 
-	/** Drop expired frames even when capture has stopped delivering samples. */
-	expire(now: Micro): void {
-		while (this.deadline !== undefined && this.deadline <= now) this.#evict();
+	/**
+	 * Drop expired frames even when capture has stopped delivering samples. A `budget` shorter than
+	 * the retention also drops what a subscriber that far behind the live edge would find stale.
+	 */
+	expire(now: Micro, budget: Micro = this.#retention): void {
+		const age = Math.min(budget, this.#retention);
+		for (;;) {
+			const first = this.#frames[this.#head];
+			if (!first || first.end + age > now) return;
+			this.#evict();
+		}
 	}
 
 	/** Whether frames were dropped unencoded since the last call, leaving a gap in the timeline. */
@@ -43,10 +54,31 @@ export class Backlog {
 		this.shift();
 	}
 
+	/** Whether nothing is retained. */
+	get empty(): boolean {
+		return this.#frames[this.#head] === undefined;
+	}
+
+	/**
+	 * Whether the oldest frame starts after a break, clearing the mark. An evicted mark needs no
+	 * carrying forward: the eviction is a break of its own ({@link takeEvicted}).
+	 */
+	takeCut(): boolean {
+		const first = this.#frames[this.#head];
+		if (!first?.cut) return false;
+		first.cut = false;
+		return true;
+	}
+
 	/** The oldest frame's expiry, or undefined while empty. */
 	get deadline(): Micro | undefined {
 		const first = this.#frames[this.#head];
 		return first && Micro(first.end + this.#retention);
+	}
+
+	/** The oldest retained frame, left in place. */
+	peek(): AudioFrame | undefined {
+		return this.#frames[this.#head]?.frame;
 	}
 
 	/** Remove the oldest retained frame. */

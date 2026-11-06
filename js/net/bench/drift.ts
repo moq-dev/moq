@@ -1,6 +1,7 @@
 /** Sweep publishers, readers, and retained history for a parked frame read's drift check. */
 import { Manual, Milli } from "@moq/clock";
 import { type Group, Time, Track } from "@moq/net";
+import { hooks } from "../src/internal.ts";
 
 /** Read live frames after a retained window, checking every delivered payload. */
 export async function run(): Promise<void> {
@@ -12,15 +13,16 @@ export async function run(): Promise<void> {
 	const offsets = [0, 80, 40];
 	try {
 		// The same reordered-PTS verdict runs here in Chromium before timing any work.
-		const check = new Track.Producer("reordered").accept({ timescale: Time.Timescale.MILLI });
-		const reader = check.subscribe({ maxDelay: Milli(80) });
+		// No publisher limit, so the reader's own 80 ms budget alone judges the reordered tail.
+		const check = new Track.Producer("reordered").accept({ timescale: Time.Timescale.MILLI, maxAge: null });
+		const reader = check.subscribe({ delay: { max: Milli(80) } });
 		try {
 			for (const timestamps of [[0], [100], [150, 200, 160]]) {
 				const group = check.appendGroup();
 				for (const ms of timestamps) group.writeFrame({ payload, timestamp: Time.Timestamp.fromMillis(ms) });
 				group.finish();
 			}
-			if ((await reader.recvGroup())?.sequence !== 1) throw new Error("B-frame tail rewound the drift edge");
+			if ((await reader.recvGroup())?.sequence !== 1n) throw new Error("B-frame tail rewound the drift edge");
 		} finally {
 			reader.close();
 			check.finish();
@@ -38,12 +40,17 @@ export async function run(): Promise<void> {
 									? Time.Timestamp.fromMicros(ms * 1000)
 									: Time.Timestamp.fromMillis(ms);
 						const tracks = Array.from({ length: publishers }, (_, i) =>
-							new Track.Producer(`p${i}`).accept(mode !== 0 ? { timescale: Time.Timescale.MILLI } : {}),
+							// No publisher limit: the retained history is what the readers drift over.
+							new Track.Producer(`p${i}`).accept(
+								mode !== 0 ? { timescale: Time.Timescale.MILLI, maxAge: null } : { maxAge: null },
+							),
 						);
 						const sources: Group.Producer[] = [];
 						const consumers: Group.Consumer[] = [];
+						const waiting: Track.Ordered[] = [];
 						try {
 							for (const track of tracks) {
+								hooks.receiveTrack(track);
 								for (let sequence = 0; sequence < retained; sequence++) {
 									const group = track.appendGroup();
 									group.writeFrame({
@@ -54,9 +61,12 @@ export async function run(): Promise<void> {
 								}
 								const subscribers = Array.from({ length: readers }, () =>
 									track.subscribe({
-										maxDelay: Milli(
-											(retained + Math.ceil((iterations + warmup) / offsets.length) + 1) * 100,
-										),
+										delay: {
+											max: Milli(
+												(retained + Math.ceil((iterations + warmup) / offsets.length) + 1) *
+													100,
+											),
+										},
 									}),
 								);
 								// Drain replay through the normal ordered cursor while retaining its timeline.
@@ -64,7 +74,7 @@ export async function run(): Promise<void> {
 								for (let sequence = 0; sequence < retained; sequence++)
 									for (const reader of ordered) {
 										const group = await reader.nextGroup();
-										if (group?.sequence !== sequence) throw new Error("history missing");
+										if (group?.sequence !== BigInt(sequence)) throw new Error("history missing");
 										await group.readFrame();
 									}
 								sources.push(track.appendGroup());
@@ -73,6 +83,10 @@ export async function run(): Promise<void> {
 									if (!group) throw new Error("live group missing");
 									consumers.push(group);
 								}
+								// A frameless candidate beyond one owed group keeps the ordered
+								// cursor parked while frames advance its presentation edge.
+								track.createGroup(BigInt(retained + 2));
+								waiting.push(...ordered);
 							}
 							let start = 0;
 							for (let iteration = 0; iteration < iterations + warmup; iteration++) {
@@ -85,6 +99,8 @@ export async function run(): Promise<void> {
 									iteration,
 								);
 								for (const source of sources) source.writeFrame({ payload, timestamp });
+								for (const reader of waiting)
+									if (reader.tryNextGroup()) throw new Error("an owed hole was skipped");
 								for (const frame of await Promise.all(pending))
 									if (
 										frame?.payload[0] !== 7 ||

@@ -79,9 +79,8 @@ test("an empty GOAWAY migrates the follower to the replacement session", async (
 	const clock = new Manual();
 	const installed = clock.install();
 	const { dials, origin } = fleet();
-	const broadcastPublication = origin.createBroadcast(Path.from("cam"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("cam"));
+	const broadcast = broadcastRoute.broadcast;
 
 	const consume = new OriginProducer();
 	const reload = new Reload({
@@ -111,7 +110,7 @@ test("an empty GOAWAY migrates the follower to the replacement session", async (
 		expect(drained.closed).toBe(false);
 		expect(reload.status.peek()).toBe("connected");
 
-		// Without an epoch the replacement route is a new publisher instance.
+		// Without an instance the replacement route is a new publisher instance.
 		// The follower follows it while the old session finishes draining.
 		await elapse(clock, () => watched.active.peek() !== undefined && watched.active.peek() !== served);
 		expect(watched.closed.peek()).toBeUndefined();

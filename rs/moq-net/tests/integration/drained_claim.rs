@@ -13,7 +13,7 @@ use crate::support;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use moq_net::{Epoch, Hop, Timestamp, Version, goaway::Goaway, origin, track};
+use moq_net::{Hop, Timestamp, Version, goaway::Goaway, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -46,26 +46,31 @@ async fn settle() {
 /// A worker claiming `pool`, answering each request with an output whose `video`
 /// track carries the worker's name.
 struct Worker {
-	_claim: Rc<origin::Requests>,
-	/// Each output with its track, which would end once its publication drops.
-	outputs: Rc<RefCell<Vec<(origin::Publication, track::Producer)>>>,
+	_claim: Rc<origin::Route>,
+	/// Each output with its track, which would end once its route drops.
+	outputs: Rc<RefCell<Vec<(origin::Route, track::Producer)>>>,
 	origin: origin::Producer,
 }
 
 impl Worker {
 	fn new(hop: u64, name: &'static str) -> Self {
 		let origin = produce_origin(hop);
-		let claim = Rc::new(origin.requests("pool").unwrap());
+		let claim = Rc::new(
+			origin
+				.route_prefix("pool", moq_net::origin::RouteOptions::default())
+				.unwrap(),
+		);
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(kio::clock::sim::spawn(async move {
-			while let Ok(request) = handler.requested_broadcast().await {
-				let prepared = request.prepare(Epoch::mint()).unwrap();
+			while let Some(request) = handler.requested().await {
+				let prepared = request.route(moq_net::origin::RouteOptions::hidden()).unwrap();
 				let track = prepared.broadcast().create_track("video", timed()).unwrap();
 				let mut group = track.append_group().unwrap();
 				group.write_frame(Timestamp::ZERO, name.as_bytes().to_vec()).unwrap();
 				group.finish().unwrap();
-				served.borrow_mut().push((prepared.publish().unwrap(), track));
+				prepared.announce().unwrap();
+				served.borrow_mut().push((prepared, track));
 			}
 		}));
 		Self {
@@ -110,7 +115,10 @@ async fn drained_claim(version: &str) {
 	assert_eq!(watch(version, &relay).await, "a", "{version}");
 
 	// A closes its output and drains its session, so B wins the path from here on.
-	a.outputs.borrow().iter().for_each(|(output, _)| output.close());
+	a.outputs
+		.borrow()
+		.iter()
+		.for_each(|(output, _)| output.broadcast().close());
 	a_link.server.drain().send(Goaway::new()).unwrap();
 	// Past the linger, which is as long as the cache window, nothing reads the relay's
 	// front for the path.

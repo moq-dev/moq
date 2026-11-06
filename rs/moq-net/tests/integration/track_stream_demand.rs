@@ -81,9 +81,9 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 	}
 	let reader: &MockSession = &links.last().unwrap().client_transport;
 
-	let broadcast = nodes[0].create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.requests();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = nodes[0].route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let mut dynamic = broadcast.broadcast().requests();
+	broadcast.announce().unwrap();
 	// Serve every request for the track, keeping what it started.
 	let requests = Rc::new(RefCell::new(Vec::new()));
 	let track_edges = Rc::new(RefCell::new(None));
@@ -103,7 +103,13 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 	});
 
 	let consumer = nodes.last().unwrap().consume();
-	let remote = consumer.follow("room", None).unwrap().available().await.unwrap();
+	let remote = consumer
+		.follow("room", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
 
 	let subscribing = remote.track("video").unwrap().subscribe(None);
 	if reorder {
@@ -175,9 +181,9 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 		links.push(link(version, &pair[0], &pair[1]).await);
 	}
 
-	let broadcast = nodes[0].create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.requests();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = nodes[0].route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let mut dynamic = broadcast.broadcast().requests();
+	broadcast.announce().unwrap();
 	let requests = Rc::new(RefCell::new(Vec::new()));
 	let served = requests.clone();
 	let publisher = kio::clock::sim::spawn(async move {
@@ -190,7 +196,13 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 	});
 
 	let consumer = nodes.last().unwrap().consume();
-	let remote = consumer.follow("room", None).unwrap().available().await.unwrap();
+	let remote = consumer
+		.follow("room", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
 
 	let handle = remote.track("video").unwrap();
 	kio::clock::sleep(Duration::from_secs(1)).await;

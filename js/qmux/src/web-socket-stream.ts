@@ -1,7 +1,7 @@
 /** A ponyfill for the WHATWG [`WebSocketStream`][spec] API.
  *
- * `WebSocketStream` exposes a WebSocket as a pair of streams —
- * `{ readable, writable }` — with backpressure on the writable. It currently
+ * `WebSocketStream` exposes a WebSocket as a pair of streams -
+ * `{ readable, writable }` - with backpressure on the writable. It currently
  * ships only in Chromium. This module wraps a plain `WebSocket` to present the
  * same surface (`opened`, `closed`, `close()`), applying write backpressure by
  * polling `bufferedAmount` against a configurable high-water mark.
@@ -57,7 +57,7 @@ export interface WebSocketStreamLike {
 	/** Close the connection, with an optional code and reason. */
 	close(closeInfo?: WebSocketStreamCloseInfo): void;
 	/** Ponyfill-only: resize the write-backpressure high-water mark at runtime.
-	 *  Absent on the native API, which sizes its own send buffer — callers should treat it as optional. */
+	 *  Absent on the native API, which sizes its own send buffer - callers should treat it as optional. */
 	setHighWaterMark?(bytes: number): void;
 }
 
@@ -143,7 +143,7 @@ function validCloseCode(code: number | undefined): code is number {
 /** Resolve once `bufferedAmount` drains below the mark (write backpressure).
  *  The mark is read live via `highWaterMark()` on every check, so a runtime
  *  resize (see {@link WebSocketStream.setHighWaterMark}) takes effect mid-drain.
- *  Returns `undefined` synchronously when there's already room — no microtask
+ *  Returns `undefined` synchronously when there's already room - no microtask
  *  on the hot path, so `writer.ready` stays resolved when the socket is keeping up. */
 function drain(ws: WebSocketLike, highWaterMark: () => number): Promise<void> | undefined {
 	if (ws.bufferedAmount <= highWaterMark()) return undefined;
@@ -239,7 +239,7 @@ export class WebSocketStream implements WebSocketStreamLike {
 		};
 
 		// An adopted socket may already have finished (or missed) its handshake, in
-		// which case `onopen`/`onclose` will never fire — settle from readyState.
+		// which case `onopen`/`onclose` will never fire - settle from readyState.
 		if (ws.readyState !== CONNECTING) {
 			if (ws.readyState === OPEN) {
 				opened.resolve({ readable, writable, extensions: ws.extensions, protocol: ws.protocol });
@@ -259,13 +259,13 @@ export class WebSocketStream implements WebSocketStreamLike {
 		}
 	}
 
-	/** Wrap a socket that already exists — typically one a server accepted from an
+	/** Wrap a socket that already exists - typically one a server accepted from an
 	 *  HTTP upgrade (`Deno.upgradeWebSocket`, `ws`, ...), where there is no URL to
 	 *  dial and the handshake (including subprotocol selection) is already done.
 	 *
 	 *  Ownership transfers: this overwrites the socket's `onopen`/`onmessage`/
 	 *  `onerror`/`onclose` handlers, so adopt it before anything else reads from
-	 *  it — messages delivered before adoption are dropped by the platform, not
+	 *  it - messages delivered before adoption are dropped by the platform, not
 	 *  buffered. A socket that is already open resolves {@link opened} without
 	 *  waiting for an `onopen` that has already fired (or was never going to).
 	 *

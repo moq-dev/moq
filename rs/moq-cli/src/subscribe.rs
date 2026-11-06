@@ -373,7 +373,8 @@ impl Subscribe {
 		Ok(())
 	}
 
-	/// Record a regular MP4 until the broadcast ends or `finish` is cancelled, then finish it.
+	/// Record a regular MP4 until the broadcast ends or `finish` is cancelled, then finish it with
+	/// everything it received.
 	async fn run_mp4(self) -> anyhow::Result<()> {
 		let path = self.args.output.clone().context("an mp4 export records to --output")?;
 		let finish = self.finish.clone();
@@ -389,10 +390,16 @@ impl Subscribe {
 			.with_context(|| format!("failed to create {}", path.display()))?;
 
 		// A failed export still finishes what it recorded; a failed write leaves the file as is.
+		let mut stopped = false;
 		let ended = loop {
 			let next = tokio::select! {
 				next = mp4.next() => next,
-				() = finish.cancelled() => break Ok(()),
+				// Write out what was received before finishing.
+				() = finish.cancelled(), if !stopped => {
+					mp4.stop();
+					stopped = true;
+					continue;
+				}
 			};
 			match next {
 				Ok(Some(data)) => file.write_all(&data).await?,
@@ -403,12 +410,7 @@ impl Subscribe {
 
 		match mp4.finish()? {
 			Some(trailer) => {
-				file.write_all(&trailer.moov).await?;
-				// The header points readers past the media at the moov, so the moov must be on disk first.
-				file.sync_data().await?;
-				file.seek(std::io::SeekFrom::Start(trailer.mdat_offset)).await?;
-				file.write_all(&trailer.mdat).await?;
-				file.sync_all().await?;
+				write_finish(&mut file, &trailer).await?;
 				tracing::info!(path = %path.display(), "recording finished");
 			}
 			// Nothing reached the file, so there is no recording to keep.
@@ -596,4 +598,17 @@ impl Subscribe {
 
 		Ok(())
 	}
+}
+
+/// Make the writes that turn a recording into a regular MP4: the moov where the media ends,
+/// then the mdat header over the reserved box.
+pub async fn write_finish(file: &mut tokio::fs::File, finish: &moq_mux::container::mp4::Finish) -> std::io::Result<()> {
+	file.set_len(finish.moov_offset).await?;
+	file.seek(std::io::SeekFrom::Start(finish.moov_offset)).await?;
+	file.write_all(&finish.moov).await?;
+	// The header points readers past the media at the moov, so the moov must be on disk first.
+	file.sync_data().await?;
+	file.seek(std::io::SeekFrom::Start(finish.mdat_offset)).await?;
+	file.write_all(&finish.mdat).await?;
+	file.sync_all().await
 }

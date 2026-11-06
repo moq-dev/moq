@@ -152,81 +152,56 @@ pub(crate) struct Frame {
 	pub payload: Bytes,
 }
 
-/// One stored sequence, in the form it was forwarded in.
+/// One stored group: all of its frames, or the run of them this object holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Entry {
-	/// A group's frames: all of them, or the run of them this object holds.
-	Group { sequence: u64, frames: Vec<Frame> },
-	/// A datagram: one payload and timestamp, never split.
-	Datagram { sequence: u64, frame: Frame },
-}
-
-impl Entry {
-	pub(crate) fn sequence(&self) -> u64 {
-		match self {
-			Self::Group { sequence, .. } | Self::Datagram { sequence, .. } => *sequence,
-		}
-	}
-
-	fn first(&self) -> &Frame {
-		match self {
-			Self::Group { frames, .. } => &frames[0],
-			Self::Datagram { frame, .. } => frame,
-		}
-	}
+pub(crate) struct Entry {
+	pub sequence: u64,
+	pub frames: Vec<Frame>,
 }
 
 /// One object: entries in ascending sequence order, the first starting at `frame_start`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct Object {
-	/// The index of the first group's first stored frame; zero when the first entry is a datagram.
+	/// The index of the first entry's first stored frame.
 	pub frame_start: u64,
 	pub entries: Vec<Entry>,
 }
 
-const GROUP: u64 = 0;
-const DATAGRAM: u64 = 1;
+/// The form field version 2 and 3 entries carry: 0 for a group, 1 for a datagram.
+const LEGACY_GROUP: u64 = 0;
 
 impl Object {
 	/// The key this object is stored under.
 	pub(crate) fn start(&self) -> Result<Start> {
 		let first = self.entries.first().ok_or(Error::Empty)?;
 		Ok(Start {
-			group: first.sequence(),
+			group: first.sequence,
 			frame: self.frame_start,
-			pts: first.first().timestamp,
+			pts: first.frames.first().ok_or(Error::Empty)?.timestamp,
 		})
 	}
 
 	/// Its payload bytes plus a small per-frame overhead, for a byte-bounded cache.
 	pub(crate) fn weight(&self) -> u64 {
-		let frames = self.entries.iter().flat_map(|entry| match entry {
-			Entry::Group { frames, .. } => frames.as_slice(),
-			Entry::Datagram { frame, .. } => std::slice::from_ref(frame),
-		});
+		let frames = self.entries.iter().flat_map(|entry| &entry.frames);
 		frames.map(|frame| frame.payload.len() as u64 + 32).sum::<u64>() + 64
 	}
 
-	/// The position just past the last stored frame or datagram.
+	/// The position just past the last stored frame.
 	pub(crate) fn end(&self) -> Result<Position> {
 		let last = self.entries.last().ok_or(Error::Empty)?;
-		Ok(match last {
-			Entry::Datagram { sequence, .. } => Position::group(sequence.checked_add(1).ok_or(Error::Overflow)?),
-			Entry::Group { sequence, frames } => {
-				let first = match self.entries.len() {
-					1 => self.frame_start,
-					_ => 0,
-				};
-				Position {
-					group: *sequence,
-					frame: first.checked_add(frames.len() as u64).ok_or(Error::Overflow)?,
-				}
-			}
+		let first = match self.entries.len() {
+			1 => self.frame_start,
+			_ => 0,
+		};
+		Ok(Position {
+			group: last.sequence,
+			frame: first.checked_add(last.frames.len() as u64).ok_or(Error::Overflow)?,
 		})
 	}
 
 	/// The version, the first frame index, then each entry's sequence (the first absolute, the
-	/// rest `current - previous - 1`), form, and frame table, followed by every payload in order.
+	/// rest `current - previous - 1`) and frame table, followed by every payload in order.
 	pub(crate) fn encode(&self, timed: bool) -> Result<Bytes> {
 		self.validate(timed)?;
 
@@ -236,36 +211,21 @@ impl Object {
 		write(&mut table, self.entries.len() as u64)?;
 
 		let mut payload = BytesMut::new();
-		let mut frame = |table: &mut BytesMut, frame: &Frame| -> Result<()> {
-			if let Some(timestamp) = frame.timestamp {
-				write(table, timestamp)?;
-			}
-			write(table, frame.payload.len() as u64)?;
-			payload.extend_from_slice(&frame.payload);
-			Ok(())
-		};
-
 		let mut prev: Option<u64> = None;
 		for entry in &self.entries {
-			let sequence = entry.sequence();
 			let delta = match prev {
-				None => sequence,
-				Some(prev) => sequence - prev - 1,
+				None => entry.sequence,
+				Some(prev) => entry.sequence - prev - 1,
 			};
-			prev = Some(sequence);
+			prev = Some(entry.sequence);
 			write(&mut table, delta)?;
-			match entry {
-				Entry::Group { frames, .. } => {
-					write(&mut table, GROUP)?;
-					write(&mut table, frames.len() as u64)?;
-					for f in frames {
-						frame(&mut table, f)?;
-					}
+			write(&mut table, entry.frames.len() as u64)?;
+			for frame in &entry.frames {
+				if let Some(timestamp) = frame.timestamp {
+					write(&mut table, timestamp)?;
 				}
-				Entry::Datagram { frame: f, .. } => {
-					write(&mut table, DATAGRAM)?;
-					frame(&mut table, f)?;
-				}
+				write(&mut table, frame.payload.len() as u64)?;
+				payload.extend_from_slice(&frame.payload);
 			}
 		}
 
@@ -274,32 +234,21 @@ impl Object {
 	}
 
 	/// Decode a whole table before slicing any payload; `timed` is whether the track's `.info`
-	/// declares a timescale, which says whether each frame stores a timestamp. Version 2 objects
-	/// are identical to the current ones.
+	/// declares a timescale, which says whether each frame stores a timestamp. A version 2 or 3
+	/// object's entries each carry a form, and one holding a datagram is refused: an archive
+	/// replays groups only, and skipping the entry would read as a gap the recording never had.
 	pub(crate) fn decode(mut buf: impl Buf, timed: bool) -> Result<Self> {
 		let version = read(&mut buf)?;
 		if !(VERSION_MIN..=VERSION).contains(&version) {
 			return Err(Error::Version(version));
 		}
+		let legacy = version < 4;
 		let frame_start = read(&mut buf)?;
-		// Each entry is at least a sequence, a form, and a frame count or length.
-		let count = read_count(&mut buf, 3)?;
+		// Each entry is at least a sequence and a frame count, plus a form when legacy.
+		let count = read_count(&mut buf, if legacy { 3 } else { 2 })?;
 
 		let per_frame = if timed { 2 } else { 1 };
 		let mut lengths = Vec::new();
-		let mut read_frame = |buf: &mut dyn Buf| -> Result<Option<u64>> {
-			let timestamp = match timed {
-				true => Some(check_id(read(buf)?)?),
-				false => None,
-			};
-			lengths.push(read(buf)?);
-			Ok(timestamp)
-		};
-
-		enum Raw {
-			Group(u64, Vec<Option<u64>>),
-			Datagram(u64, Option<u64>),
-		}
 		let mut raw = Vec::with_capacity(count);
 		let mut prev: Option<u64> = None;
 		for _ in 0..count {
@@ -313,18 +262,22 @@ impl Object {
 			};
 			check_id(sequence)?;
 			prev = Some(sequence);
-			match read(&mut buf)? {
-				GROUP => {
-					let frames = read_count(&mut buf, per_frame)?;
-					let mut timestamps = Vec::with_capacity(frames);
-					for _ in 0..frames {
-						timestamps.push(read_frame(&mut buf)?);
-					}
-					raw.push(Raw::Group(sequence, timestamps));
+			if legacy {
+				let form = read(&mut buf)?;
+				if form != LEGACY_GROUP {
+					return Err(Error::Form(form));
 				}
-				DATAGRAM => raw.push(Raw::Datagram(sequence, read_frame(&mut buf)?)),
-				_ => return Err(Error::Table),
 			}
+			let frames = read_count(&mut buf, per_frame)?;
+			let mut timestamps = Vec::with_capacity(frames);
+			for _ in 0..frames {
+				timestamps.push(match timed {
+					true => Some(check_id(read(&mut buf)?)?),
+					false => None,
+				});
+				lengths.push(read(&mut buf)?);
+			}
+			raw.push((sequence, timestamps));
 		}
 
 		let mut payload = buf.copy_to_bytes(buf.remaining());
@@ -337,24 +290,20 @@ impl Object {
 		}
 
 		let mut lengths = lengths.into_iter();
-		let mut take = |timestamp: Option<u64>| -> Frame {
-			let len = lengths.next().expect("one length per frame") as usize;
-			Frame {
-				timestamp,
-				payload: payload.split_to(len),
-			}
-		};
 		let entries = raw
 			.into_iter()
-			.map(|raw| match raw {
-				Raw::Group(sequence, timestamps) => Entry::Group {
-					sequence,
-					frames: timestamps.into_iter().map(&mut take).collect(),
-				},
-				Raw::Datagram(sequence, timestamp) => Entry::Datagram {
-					sequence,
-					frame: take(timestamp),
-				},
+			.map(|(sequence, timestamps)| Entry {
+				sequence,
+				frames: timestamps
+					.into_iter()
+					.map(|timestamp| {
+						let len = lengths.next().expect("one length per frame") as usize;
+						Frame {
+							timestamp,
+							payload: payload.split_to(len),
+						}
+					})
+					.collect(),
 			})
 			.collect();
 
@@ -364,23 +313,20 @@ impl Object {
 	}
 
 	fn validate(&self, timed: bool) -> Result<()> {
-		let first = self.entries.first().ok_or(Error::Empty)?;
-		if matches!(first, Entry::Datagram { .. }) && self.frame_start != 0 {
-			return Err(Error::Table);
+		if self.entries.is_empty() {
+			return Err(Error::Empty);
 		}
 		let mut prev = None;
 		for entry in &self.entries {
-			let sequence = check_id(entry.sequence())?;
+			let sequence = check_id(entry.sequence)?;
 			if prev.is_some_and(|prev| sequence <= prev) {
 				return Err(Error::Sequence);
 			}
 			prev = Some(sequence);
-			let frames = match entry {
-				Entry::Group { frames, .. } if frames.is_empty() => return Err(Error::Empty),
-				Entry::Group { frames, .. } => frames.as_slice(),
-				Entry::Datagram { frame, .. } => std::slice::from_ref(frame),
-			};
-			for frame in frames {
+			if entry.frames.is_empty() {
+				return Err(Error::Empty);
+			}
+			for frame in &entry.frames {
 				match frame.timestamp {
 					Some(timestamp) if timed => {
 						check_id(timestamp)?;
@@ -497,19 +443,15 @@ mod tests {
 	}
 
 	#[test]
-	fn groups_and_datagrams_keep_their_form() {
+	fn groups_roundtrip() {
 		let object = Object {
 			frame_start: 4,
 			entries: vec![
-				Entry::Group {
+				Entry {
 					sequence: 3,
 					frames: vec![frame(Some(10), b"a"), frame(Some(9), b"bb")],
 				},
-				Entry::Datagram {
-					sequence: 4,
-					frame: frame(Some(11), b"d"),
-				},
-				Entry::Group {
+				Entry {
 					sequence: 7,
 					frames: vec![frame(Some(12), b"ccc")],
 				},
@@ -533,32 +475,41 @@ mod tests {
 			entries: vec![object.entries[0].clone()],
 		};
 		assert_eq!(split.end().unwrap(), Position { group: 3, frame: 6 });
-
-		let datagram = Object {
-			frame_start: 0,
-			entries: vec![object.entries[1].clone()],
-		};
-		assert_eq!(datagram.end().unwrap(), Position::group(5));
 	}
 
 	#[test]
 	fn an_untimed_object_stores_no_timestamps() {
 		let object = Object {
 			frame_start: 0,
-			entries: vec![Entry::Group {
+			entries: vec![Entry {
 				sequence: 2,
 				frames: vec![frame(None, b"x"), frame(None, b"yz")],
 			}],
 		};
 		let bytes = object.encode(false).unwrap();
-		// version, frame start, one entry: sequence 2, a group of two frames, then the payloads.
-		assert_eq!(bytes.as_ref(), &[VERSION as u8, 0, 1, 2, 0, 2, 1, 2, b'x', b'y', b'z']);
+		// version, frame start, one entry: sequence 2 with two frames, then the payloads.
+		assert_eq!(bytes.as_ref(), &[VERSION as u8, 0, 1, 2, 2, 1, 2, b'x', b'y', b'z']);
 		assert_eq!(Object::decode(bytes.clone(), false).unwrap(), object);
 		assert!(matches!(object.encode(true), Err(Error::Timing)));
+	}
 
-		let mut v2 = bytes.to_vec();
-		v2[0] = 2;
-		assert_eq!(Object::decode(&v2[..], false).unwrap(), object);
+	/// Version 2 and 3 entries carry a form: a group reads as today's entry, and a datagram
+	/// refuses the whole object rather than reading as a gap.
+	#[test]
+	fn older_objects_read_groups_and_refuse_datagrams() {
+		let object = Object {
+			frame_start: 0,
+			entries: vec![Entry {
+				sequence: 2,
+				frames: vec![frame(None, b"x"), frame(None, b"yz")],
+			}],
+		};
+		for version in [2, 3] {
+			let group = [version, 0, 1, 2, 0, 2, 1, 2, b'x', b'y', b'z'];
+			assert_eq!(Object::decode(&group[..], false).unwrap(), object);
+			let datagram = [version, 0, 1, 2, 1, 1, b'x'];
+			assert!(matches!(Object::decode(&datagram[..], false), Err(Error::Form(1))));
+		}
 	}
 
 	#[test]
@@ -569,44 +520,41 @@ mod tests {
 		let descending = Object {
 			frame_start: 0,
 			entries: vec![
-				Entry::Datagram {
+				Entry {
 					sequence: 5,
-					frame: frame(None, b"a"),
+					frames: vec![frame(None, b"a")],
 				},
-				Entry::Datagram {
+				Entry {
 					sequence: 5,
-					frame: frame(None, b"b"),
+					frames: vec![frame(None, b"b")],
 				},
 			],
 		};
 		assert!(matches!(descending.encode(false), Err(Error::Sequence)));
 
-		let datagram_mid_group = Object {
-			frame_start: 1,
-			entries: vec![Entry::Datagram {
+		let no_frames = Object {
+			frame_start: 0,
+			entries: vec![Entry {
 				sequence: 5,
-				frame: frame(None, b"a"),
+				frames: Vec::new(),
 			}],
 		};
-		assert!(matches!(datagram_mid_group.encode(false), Err(Error::Table)));
+		assert!(matches!(no_frames.encode(false), Err(Error::Empty)));
 
 		let good = Object {
 			frame_start: 0,
-			entries: vec![Entry::Group {
+			entries: vec![Entry {
 				sequence: 1,
 				frames: vec![frame(None, b"abc")],
 			}],
 		}
 		.encode(false)
 		.unwrap();
-		// Truncated payload, trailing bytes, an unknown form, and an absurd count.
+		// Truncated payload, trailing bytes, and an absurd count.
 		assert!(Object::decode(&good[..good.len() - 1], false).is_err());
 		let mut trailing = good.to_vec();
 		trailing.push(0);
 		assert!(Object::decode(&trailing[..], false).is_err());
-		let mut form = good.to_vec();
-		form[4] = 2;
-		assert!(matches!(Object::decode(&form[..], false), Err(Error::Table)));
 		assert!(matches!(
 			Object::decode(&[VERSION as u8, 0, 0x7f][..], false),
 			Err(Error::Table)

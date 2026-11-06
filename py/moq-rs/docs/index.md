@@ -17,7 +17,7 @@ import moq
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
         async for event in client.announced():
-            if isinstance(event, moq.AnnounceEventStart):
+            if isinstance(event, moq.AnnounceEventPresent):
                 broadcast = await client.request(event.announce.prefix)
                 print(await moq.media.catalog(broadcast))
 
@@ -62,6 +62,9 @@ asyncio.run(main())
    BroadcastRequests
    BroadcastRequest
    TrackProducer
+   DatagramProducer
+   DatagramRequests
+   DatagramRequest
    TrackDemand
    TrackRequests
    TrackRequest
@@ -80,6 +83,7 @@ asyncio.run(main())
 
    BroadcastConsumer
    TrackConsumer
+   DatagramConsumer
    GroupConsumer
 ```
 
@@ -166,17 +170,13 @@ broadcast, and producers advertise it in the catalog.
 
    OriginProducer
    OriginConsumer
-   OriginRequests
-   Publication
+   Route
    AnnounceConsumer
    Following
    Announce
    AnnounceEvent
-   AnnounceEventStart
-   AnnounceEventUpdate
-   AnnounceEventEnd
-   AnnounceEventRestart
-   AnnounceEventTakeover
+   AnnounceEventPresent
+   AnnounceEventAbsent
 ```
 
 ## Data types
@@ -215,8 +215,7 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    Subscription
    TrackInfo
    FetchGroupOptions
-   AnnounceRoute
-   Route
+   RouteInfo
    ConnectionStats
 ```
 
@@ -234,7 +233,6 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    is_shutdown
    protocol_error
    log_level
-   mint_epoch
 ```
 
 ```{toctree}
@@ -242,4 +240,23 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
 :maxdepth: 2
 
 self
+```
+
+## Sockets
+
+`moq.socket` connects endpoints through relays, using the same origin for both
+publishing and consuming. See the [socket convention](https://doc.moq.dev/concept/socket).
+
+```{eval-rst}
+.. currentmodule:: moq.socket
+
+.. autosummary::
+   :toctree: api
+   :nosignatures:
+
+   Endpoint
+   IncomingTcp
+   IncomingTrack
+   TcpStream
+   TrackStream
 ```

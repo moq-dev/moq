@@ -73,29 +73,6 @@ impl ObjectDatagram {
 	}
 }
 
-impl crate::model::datagram::Wire {
-	/// Whether a datagram of this shape is defined, as ingress checks one. Egress resolves
-	/// the Object ID and priority each draft needs.
-	pub(crate) fn defined(&self) -> bool {
-		let shape = ObjectDatagram {
-			track_alias: 0,
-			group_id: 0,
-			object_id: self.object_id,
-			publisher_priority: self.priority,
-			end_of_group: self.end_of_group,
-			properties: self.properties.block.is_some().then(Vec::new),
-			body: match self.status {
-				Some(status) => DatagramBody::Status(status),
-				None => DatagramBody::Payload(Bytes::new()),
-			},
-		};
-		ObjectDatagram::valid(shape.kind())
-			&& self.status.is_none_or(|status| {
-				super::object::status_defined(status) && (self.properties.block.is_none() || status == 0)
-			})
-	}
-}
-
 impl Encode<Version> for ObjectDatagram {
 	fn encode(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
 		let kind = self.kind();

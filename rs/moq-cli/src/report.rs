@@ -254,7 +254,7 @@ pub struct EchoTarget {
 struct Feedback {
 	path: moq_net::Path,
 	// Held for the route: dropping it retracts the announcement.
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 	tracks: ReportTrack<hang::echo::Snapshot<ts::stats::Report>>,
 }
 
@@ -348,10 +348,13 @@ impl Echo {
 	}
 
 	fn publish(&self, path: &moq_net::Path) -> anyhow::Result<Feedback> {
-		let broadcast = self.target.origin.create_broadcast(path)?;
+		let broadcast = self
+			.target
+			.origin
+			.route(path, moq_net::origin::RouteOptions::hidden())?;
 		let tracks = ReportTrack::create(&mut broadcast.broadcast().clone(), hang::echo::TRACK)?;
 		// A fresh instance, so a reader sees a replaced feedback broadcast as a restart.
-		broadcast.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))?;
+		broadcast.announce()?;
 		Ok(Feedback {
 			path: path.clone(),
 			_broadcast: broadcast,
@@ -393,10 +396,10 @@ async fn next<S: Stream>(catalog: &mut Option<S>) -> moq_mux::Result<Option<moq_
 }
 
 /// Read a report track, holding at most [`MAX_REPORT`] of it.
-fn reader(subscriber: moq_net::track::Subscriber) -> moq_json::snapshot::Consumer<serde_json::Value> {
+fn reader(track: moq_net::track::Consumer) -> moq_json::snapshot::Consumer<serde_json::Value> {
 	let mut config = moq_json::snapshot::consumer::Config::default();
 	config.max_size = Some(MAX_REPORT);
-	moq_json::snapshot::Consumer::new(subscriber, config)
+	moq_json::snapshot::Consumer::new(track, config)
 }
 
 /// The next snapshot of a report track, or never while there is none.
@@ -417,7 +420,8 @@ pub async fn print_report(origin: moq_net::origin::Consumer, path: String) -> an
 		.follow(path.as_str(), None)?
 		.available()
 		.await
-		.with_context(|| format!("failed to resolve broadcast `{path}`"))?;
+		.with_context(|| format!("failed to resolve broadcast `{path}`"))?
+		.context("went offline before serving")?;
 	let source = moq_mux::Source::new(origin, broadcast.clone());
 	let mut catalog = Some(source.catalog::<()>(CatalogFormat::Hang).await?);
 
@@ -437,10 +441,7 @@ pub async fn print_report(origin: moq_net::origin::Consumer, path: String) -> an
 				let stats = update.stats.map(|stats| stats.track);
 				if stats != named {
 					track = match &stats {
-						Some(name) => {
-							let subscriber = broadcast.track(name)?.subscribe(None).await?;
-							Some(reader(subscriber))
-						}
+						Some(name) => Some(reader(broadcast.track(name)?)),
 						None => None,
 					};
 					named = stats;
@@ -488,12 +489,8 @@ async fn write_echo(
 			event = announced.next() => {
 				let event = event.context("announcements ended")?;
 				let (announce, active) = match event {
-					// A restart is another publisher instance, which a reader still on the old one never sees.
-					moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) | moq_net::announce::Event::Takeover { announce, .. } => {
-						(announce, true)
-					}
-					moq_net::announce::Event::End(announce) => (announce, false),
-					_ => continue,
+					moq_net::announce::Event::Present(announce) => (announce, true),
+					moq_net::announce::Event::Absent(announce) => (announce, false),
 				};
 				let path = announce.prefix;
 				if !path.has_prefix(&prefix) || !hang::echo::is_echo(&path) {
@@ -565,28 +562,57 @@ impl Readers {
 
 /// Send a line for each feedback snapshot the broadcast at `path` publishes, until it ends.
 async fn read_echo(origin: moq_net::origin::Consumer, path: moq_net::Path, lines: tokio::sync::mpsc::Sender<String>) {
-	let read = async {
-		let broadcast = origin.request(&path, None).await?;
-		let subscriber = broadcast.track(hang::echo::TRACK)?.subscribe(None).await?;
-		let mut track = reader(subscriber);
-		while let Some(moq_net::Timed { value: feedback, .. }) = track.latest().await? {
-			let line = EchoLine {
-				broadcast: path.as_str(),
-				feedback,
-			};
-			if lines
-				.send(format!("{}\n", serde_json::to_string(&line)?))
-				.await
-				.is_err()
-			{
-				break;
+	let mut following = match origin.follow(&path, None) {
+		Ok(following) => following,
+		Err(err) => return tracing::debug!(%err, path = %path.as_str(), "stopped reading feedback"),
+	};
+	// The instance being read; a restarted publisher replaces it, and going offline keeps it
+	// draining its final snapshot.
+	let mut reading = None;
+	loop {
+		tokio::select! {
+			change = following.available() => match change {
+				Ok(Some(broadcast)) => reading = Some(Box::pin(read_feedback(broadcast, path.clone(), lines.clone()))),
+				Ok(None) => {}
+				Err(moq_net::Error::Closed) => return,
+				// The listing reports nothing new while the path stays present, so a refusal
+				// waits here for the serving route to change.
+				Err(err) => tracing::debug!(%err, path = %path.as_str(), "feedback not resolved; waiting for a route change"),
+			},
+			read = async { reading.as_mut().expect("guarded").await }, if reading.is_some() => {
+				reading = None;
+				if let Err(err) = read {
+					tracing::debug!(%err, path = %path.as_str(), "stopped reading feedback");
+				}
+				if lines.is_closed() {
+					return;
+				}
 			}
 		}
-		anyhow::Ok(())
-	};
-	if let Err(err) = read.await {
-		tracing::debug!(%err, path = %path.as_str(), "stopped reading feedback");
 	}
+}
+
+/// Write one publisher instance's feedback to `lines` until its track ends or `lines` closes.
+async fn read_feedback(
+	broadcast: moq_net::broadcast::Consumer,
+	path: moq_net::Path,
+	lines: tokio::sync::mpsc::Sender<String>,
+) -> anyhow::Result<()> {
+	let mut track = reader(broadcast.track(hang::echo::TRACK)?);
+	while let Some(moq_net::Timed { value: feedback, .. }) = track.latest().await? {
+		let line = EchoLine {
+			broadcast: path.as_str(),
+			feedback,
+		};
+		if lines
+			.send(format!("{}\n", serde_json::to_string(&line)?))
+			.await
+			.is_err()
+		{
+			break;
+		}
+	}
+	Ok(())
 }
 
 #[cfg(test)]
@@ -601,7 +627,7 @@ mod tests {
 			.produce()
 			.create_track(STATS_TRACK, None)
 			.unwrap();
-		let mut read = reader(track.subscribe(None));
+		let mut read = reader(track.consume());
 		let mut report = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
 		report
 			.update(&serde_json::json!({ "pad": "x".repeat(MAX_REPORT) }))
@@ -631,10 +657,12 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn an_ended_feedback_reader_stops_after_draining() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("viewer.echo").unwrap();
-		let track = broadcast.create_track(hang::echo::TRACK, None).unwrap();
+		let broadcast = origin
+			.route("viewer.echo", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let track = broadcast.broadcast().create_track(hang::echo::TRACK, None).unwrap();
 		let mut feedback = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 
 		let (out, read) = tokio::io::duplex(4096);
 		let mut lines = BufReader::new(read).lines();
@@ -644,11 +672,42 @@ mod tests {
 		let line = lines.next_line().await.unwrap().unwrap();
 		assert!(line.contains(r#""n":1"#), "{line}");
 
-		broadcast.unannounce();
+		broadcast.withdraw();
 		kio::clock::sleep(DRAIN * 2).await;
 		feedback.update(&serde_json::json!({ "n": 2 })).unwrap();
 		let late = kio::clock::timeout(Duration::from_secs(1), lines.next_line()).await;
 		assert!(late.is_err(), "a drained reader wrote {late:?}");
+	}
+
+	/// A refused path stays followed: the listing reports nothing new when a publisher takes it
+	/// over, so only the follower can pick it up.
+	#[tokio::test(start_paused = true)]
+	async fn a_refused_feedback_path_is_read_once_a_publisher_takes_over() {
+		let origin = moq_tokio::origin::spawn();
+		let (out, read) = tokio::io::duplex(4096);
+		let mut lines = BufReader::new(read).lines();
+		tokio::spawn(write_echo(origin.consume(), String::new(), out));
+
+		let claim = origin
+			.route_prefix("viewer.echo", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		kio::clock::timeout(Duration::from_secs(1), claim.requested())
+			.await
+			.expect("never asked")
+			.expect("the claim closed")
+			.reject(moq_net::Error::NotFound);
+		kio::clock::sleep(Duration::from_secs(1)).await;
+
+		let route = origin
+			.route("viewer.echo", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let track = route.broadcast().create_track(hang::echo::TRACK, None).unwrap();
+		let mut feedback = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
+		route.announce().unwrap();
+		feedback.update(&serde_json::json!({ "n": 1 })).unwrap();
+		let line = kio::clock::timeout(Duration::from_secs(5), lines.next_line()).await;
+		let line = line.expect("the takeover was never read").unwrap().unwrap();
+		assert!(line.contains(r#""n":1"#), "{line}");
 	}
 
 	/// A reader is forgotten once its drain passes, unless a start at its path replaced it.
@@ -675,10 +734,12 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_hidden_prefix_finds_its_feedback() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast(".viewers/alice.echo").unwrap();
-		let track = broadcast.create_track(hang::echo::TRACK, None).unwrap();
+		let broadcast = origin
+			.route(".viewers/alice.echo", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let track = broadcast.broadcast().create_track(hang::echo::TRACK, None).unwrap();
 		let mut feedback = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 
 		let (out, read) = tokio::io::duplex(4096);
 		let mut lines = BufReader::new(read).lines();

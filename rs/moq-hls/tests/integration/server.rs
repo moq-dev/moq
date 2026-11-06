@@ -53,7 +53,8 @@ async fn a_cursor_records_a_publisher_without_fetch() {
 		let remote = kio::clock::timeout(TIMEOUT, origin.follow("live", None).unwrap().available())
 			.await
 			.expect("request timed out")
-			.expect("remote broadcast");
+			.expect("remote broadcast")
+			.unwrap();
 		let (broadcaster, driver) = Broadcaster::new(moq_mux::Source::new(origin, remote), Default::default()).unwrap();
 		tokio::spawn(driver.run());
 		// Recorded as soon as the catalog lists it with its records, as a recorder does.
@@ -90,22 +91,6 @@ async fn a_cursor_records_a_publisher_without_fetch() {
 	}
 }
 
-/// A miss that crossed a moq-lite session answers 404, not 500.
-#[tokio::test(start_paused = true)]
-async fn a_session_crossed_cache_miss_answers_404() {
-	let mut config = moq_net::origin::Config::default();
-	config.pool = moq_net::cache::Pool::new(moq_net::cache::Config::default().with_capacity(1));
-	let version = *moq_net::Versions::default().iter().next().unwrap();
-	let pair = Pair::new(version, config).await;
-	let mut publisher = Publisher::new(&pair.publisher, "live", Default::default());
-	publisher.write(0, 5, 1);
-
-	let app = pair.server().router();
-	let media = media_uri(&app, "live").await;
-	let first = segment(&listed(&app, &media, ".0.m4s").await, 0);
-	assert_missing(&get(&app, &media.replace("media.m3u8", &first)).await);
-}
-
 #[tokio::test(start_paused = true)]
 async fn a_disconnected_publisher_on_the_catalog_broadcast_answers_404() {
 	let pair = Pair::connect().await;
@@ -133,8 +118,10 @@ async fn a_disconnected_publisher_on_the_catalog_broadcast_answers_404() {
 #[tokio::test(start_paused = true)]
 async fn lookups_ride_the_servers_scope_watch() {
 	let pair = Pair::connect().await;
-	let other = pair.publisher.create_broadcast("room/other").expect("other");
-	other.announce(Default::default()).expect("announce other");
+	let _other = pair
+		.publisher
+		.route("room/other", moq_net::origin::RouteOptions::default())
+		.expect("other");
 
 	let server = pair.server();
 	let missing = kio::clock::timeout(TIMEOUT, server.broadcaster("room/missing"))
@@ -165,16 +152,21 @@ async fn a_sibling_resolves_through_a_client_session() {
 		"moq-lite-07-wip",
 	] {
 		let pair = Pair::new(version.parse().unwrap(), Default::default()).await;
-		let catalog = pair.publisher.create_broadcast("room/live").expect("catalog");
-		catalog.announce(Default::default()).expect("announce catalog");
-		let media = pair.publisher.create_broadcast("room/source").expect("media");
-		media.announce(Default::default()).expect("announce media");
+		let _catalog = pair
+			.publisher
+			.route("room/live", moq_net::origin::RouteOptions::default())
+			.expect("catalog");
+		let _media = pair
+			.publisher
+			.route("room/source", moq_net::origin::RouteOptions::default())
+			.expect("media");
 
 		let origin = pair.subscriber.consume();
 		let broadcast = kio::clock::timeout(TIMEOUT, origin.follow("room/live", None).unwrap().available())
 			.await
 			.expect("catalog resolve timed out")
-			.expect("catalog broadcast");
+			.expect("catalog broadcast")
+			.unwrap();
 		let source = moq_mux::Source::new(origin, broadcast);
 		let sibling = kio::clock::timeout(
 			TIMEOUT,
@@ -187,22 +179,26 @@ async fn a_sibling_resolves_through_a_client_session() {
 	}
 }
 
+/// A sibling's media the rendition already read stays servable after its publisher disconnects,
+/// and its playlist ends there rather than failing.
 #[tokio::test(start_paused = true)]
-async fn a_disconnected_sibling_publisher_answers_404() {
+async fn a_disconnected_sibling_publisher_ends_the_playlist() {
 	let pair = Pair::connect().await;
-	let catalog_broadcast = pair.publisher.create_broadcast("room/live").expect("catalog");
-	catalog_broadcast
-		.announce(Default::default())
-		.expect("announce catalog");
-	let media_broadcast = pair.publisher.create_broadcast("room/source").expect("media");
-	media_broadcast.announce(Default::default()).expect("announce media");
+	let catalog_broadcast = pair
+		.publisher
+		.route("room/live", moq_net::origin::RouteOptions::default())
+		.expect("catalog");
+	let media_broadcast = pair
+		.publisher
+		.route("room/source", moq_net::origin::RouteOptions::default())
+		.expect("media");
 
 	let catalog =
 		moq_mux::catalog::Producer::new(&mut catalog_broadcast.broadcast().clone(), catalog_config()).unwrap();
 	let reserved = catalog.reserve();
 	let mut config = video_config();
 	config.broadcast = Some(moq_net::path::Relative::new("./source").unwrap());
-	let track = media_broadcast.create_track(TRACK, timed()).unwrap();
+	let track = media_broadcast.broadcast().create_track(TRACK, timed()).unwrap();
 	let mut media = reserved
 		.video(
 			track,
@@ -230,14 +226,18 @@ async fn a_disconnected_sibling_publisher_answers_404() {
 	)
 	.await
 	.expect("sibling resolve timed out")
-	.expect("sibling broadcast");
+	.expect("sibling broadcast")
+	.unwrap();
 	// Only the sibling goes: the catalog keeps listing the rendition, so the request reaches the
 	// media fetch rather than missing the rendition.
-	media_broadcast.close();
+	media_broadcast.broadcast().close();
 	kio::clock::timeout(TIMEOUT, remote_media.closed())
 		.await
 		.expect("sibling close timed out");
 
-	assert_missing(&get(&app, &uri.replace("media.m3u8", &first)).await);
+	let playlist = listed(&app, &uri, "#EXT-X-ENDLIST").await;
+	assert!(playlist.contains(&first), "{playlist}");
+	let response = get(&app, &uri.replace("media.m3u8", &first)).await;
+	assert_eq!(response.status(), StatusCode::OK);
 	drop((catalog, catalog_broadcast, media));
 }

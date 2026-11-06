@@ -7,6 +7,7 @@
 //! anchor instead of resolving it against the part of the track it happens to hold.
 
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -44,14 +45,17 @@ fn millis(ms: u64) -> Timestamp {
 /// over one session on it.
 async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("room").unwrap();
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
+		.broadcast()
 		.create_track(
 			"data",
 			Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
 		)
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 	for sequence in 0..5 {
 		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 		group.write_frame(millis(sequence * 1000), &b"x"[..]).unwrap();
@@ -73,11 +77,12 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 				.await
 				.expect("resolve timeout")
 				.expect("broadcast resolves")
+				.unwrap()
 		}
 	};
 
 	let subscription = Subscription::default()
-		.with_max_delay(FOREVER)
+		.with_delay(Delay::default().with_max(FOREVER))
 		.with_order(Order::Ascending)
 		.with_ranges([range]);
 	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
@@ -155,7 +160,7 @@ async fn every_wire_carries_the_live_and_oldest_starts() {
 		let mut oldest = read(Some(version), Range::oldest()).await.unwrap();
 		oldest.sort_unstable();
 		let want: &[u64] = match *version {
-			"moq-lite-05" | "moq-transport-18" | "moq-transport-22" => &[4],
+			"moq-lite-03" | "moq-lite-04" | "moq-lite-05" | "moq-transport-18" | "moq-transport-22" => &[4],
 			_ => &[0, 1, 2, 3, 4],
 		};
 		assert_eq!(oldest, want, "{version}: oldest reads every group its start reaches");

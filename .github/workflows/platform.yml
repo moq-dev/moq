@@ -89,12 +89,9 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: ./.github/actions/nasm
       - uses: ./.github/actions/just
-      # Bump with the macOS job's copy and .oss-scanner/Dockerfile's NEXTEST_VERSION.
       - name: Install nextest
         if: needs.scope.outputs.rs == 'true'
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
-        with:
-          tool: nextest@0.9.146
+        uses: ./.github/actions/nextest
       # Nightly writes these platforms; `release` pull requests read.
       - name: Rust cache
         uses: ./.github/actions/rust-cache
@@ -105,24 +102,30 @@ jobs:
         if: needs.scope.outputs.c == 'true' || needs.scope.outputs.cpp == 'true' || needs.scope.outputs.obs == 'true'
         with:
           generator: cpp
-      - name: Rust compile and tests
-        if: needs.scope.outputs.rs == 'true'
+      # Later suites are independent once tool and generator setup succeeds.
+      - name: Setup complete
+        id: setup
+        run: echo "Platform tools ready"
+      - name: Rust compile
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.rs == 'true') }}
         shell: bash
         env:
           CI_BASE: ${{ github.event_name != 'pull_request' && '--all' || '' }}
-        run: |
-          just rs windows "$CI_BASE"
-          just rs windows-test
+        run: just rs windows "$CI_BASE"
+      - name: Rust tests
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.rs == 'true') }}
+        shell: bash
+        run: just rs windows-test
       - name: C
-        if: needs.scope.outputs.c == 'true'
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.c == 'true') }}
         shell: bash
         run: just c check
       - name: C++
-        if: needs.scope.outputs.cpp == 'true'
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.cpp == 'true') }}
         shell: bash
         run: just cpp check
       - name: OBS
-        if: needs.scope.outputs.obs == 'true'
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.obs == 'true') }}
         shell: bash
         run: just obs package --target x86_64-pc-windows-msvc --output "$RUNNER_TEMP/obs"
 
@@ -144,9 +147,7 @@ jobs:
       - uses: ./.github/actions/just
       - name: Install nextest
         if: needs.scope.outputs.rs == 'true'
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
-        with:
-          tool: nextest@0.9.146
+        uses: ./.github/actions/nextest
       - name: Rust cache
         uses: ./.github/actions/rust-cache
         with:
@@ -156,36 +157,41 @@ jobs:
         if: needs.scope.outputs.obs == 'true'
         with:
           generator: cpp
-      - name: Rust compile and tests
-        if: needs.scope.outputs.rs == 'true'
+      # Later suites are independent once tool and generator setup succeeds.
+      - name: Setup complete
+        id: setup
+        run: echo "Platform tools ready"
+      - name: Rust compile
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.rs == 'true') }}
         env:
           CI_BASE: ${{ github.event_name != 'pull_request' && '--all' || '' }}
-        run: |
-          just rs macos "$CI_BASE"
-          just rs macos-test
+        run: just rs macos "$CI_BASE"
+      - name: Rust tests
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.rs == 'true') }}
+        run: just rs macos-test
       - name: Swift simulator check
-        if: needs.scope.outputs.swift == 'true'
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.swift == 'true') }}
         run: just swift simulator
       - name: Swift
-        if: needs.scope.outputs.swift == 'true'
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.swift == 'true') }}
         run: just swift check
       # At a token budget, so the runner keeps working at this commit; rust2's
       # `just bench-ffi` measures it at its pinned moq revision.
       - name: Swift binding benchmark runner
-        if: inputs.benchmarks
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (inputs.benchmarks) }}
         env:
           MOQ_BENCH_SECONDS: "0.05"
         run: |
           just swift bench
           test -s target/bench/ffi/swift.json
       - name: OBS
-        if: needs.scope.outputs.obs == 'true'
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.obs == 'true') }}
         run: just obs package --target aarch64-apple-darwin --output "$RUNNER_TEMP/obs"
       - name: Installer fixtures
-        if: needs.scope.outputs.moq_sh == 'true'
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.moq_sh == 'true') }}
         run: just infra moq-sh test
       - name: Installer smoke
-        if: needs.scope.outputs.moq_sh == 'true'
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.moq_sh == 'true') }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: just infra moq-sh smoke

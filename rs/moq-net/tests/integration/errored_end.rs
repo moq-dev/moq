@@ -5,6 +5,7 @@
 //! Before lite-07 the end has nowhere to carry its error, so the subscription resets with it.
 
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -27,7 +28,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 async fn read(broadcast: &moq_net::broadcast::Consumer) -> (Vec<(u64, Vec<Vec<u8>>)>, Option<Error>) {
 	let subscription = Subscription::default()
 		.with_range(0..)
-		.with_max_delay(Duration::from_secs(30));
+		.with_delay(Delay::default().with_max(Duration::from_secs(30)));
 	let mut sub = kio::clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")
@@ -77,10 +78,14 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 		let label = format!("{name} subscribe_first={subscribe_first}");
 		let version: Version = name.parse().unwrap();
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast("bcast").unwrap();
-		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
-		let mut track = broadcast.create_track("video", info).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let info = moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None);
+		let mut track = broadcast.broadcast().create_track("video", info).unwrap();
+		broadcast.announce().unwrap();
 		for _ in 0..GROUPS {
 			let mut group = track.append_group().unwrap();
 			for frame in FRAMES {
@@ -98,7 +103,8 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 		let remote = kio::clock::timeout(TIMEOUT, subscriber.consume().follow("bcast", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
-			.expect("broadcast resolves");
+			.expect("broadcast resolves")
+			.unwrap();
 
 		session.server_transport.split_unis();
 		if subscribe_first {
@@ -130,7 +136,7 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 				false => assert!(err.is_some(), "{label} {what}: ended cleanly"),
 			}
 		}
-		// Lite-07 ends the subscription after SUBSCRIBE_END rather than resetting it.
+		// Lite-07 ends the subscription after SUBSCRIBE_FINISH rather than resetting it.
 		let reset = session.server_transport.resets().contains(&(64 + 7));
 		assert_eq!(
 			reset,

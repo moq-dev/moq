@@ -27,7 +27,7 @@ use crate::catalog;
 /// The PAT is followed as it changes. A program a later PAT adds waits for its PMT as the first
 /// PAT's do, and each program follows its PMT to the PID the latest PAT names. One a later PAT
 /// drops is retired: its tracks finish and its broadcast is unannounced, while the other
-/// programs carry on. A program that returns publishes a new instance, under a new epoch.
+/// programs carry on. A program that returns publishes a new stream, under a new instance.
 ///
 /// The multiplex is parsed once: framing, continuity, the PAT and the SI sections are shared,
 /// and each program reads only the packets on the PIDs its PAT entry and PMT claim. A packet on a
@@ -74,6 +74,10 @@ pub struct Programs {
 	clock: Clock,
 	/// The [`Clock`] reading past which the longest-waiting program is late, while one waits.
 	deadline: Option<u64>,
+	/// Where the input can next expire a program's health check, so a program that reads no
+	/// packet is advanced without a scan of every program per packet. Kept early when a routed
+	/// packet moves its check later.
+	due: health::Due,
 	/// The packets on PIDs no program reads.
 	unclaimed: Unclaimed,
 }
@@ -123,13 +127,14 @@ impl Clock {
 struct Program {
 	/// The PAT's program number.
 	number: u16,
-	/// Owns announcement control while the importer holds a fill clone.
-	broadcast: moq_net::origin::Publication,
+	/// The program's route, created hidden: dropping it retracts the broadcast the importer
+	/// fills.
+	route: moq_net::origin::Route,
 	import: Import<Ext>,
 	catalog: catalog::Producer<Ext>,
-	/// The route and catalog track until the catalog first names a servable track: announced any
-	/// sooner, a relay would ask for tracks it cannot serve yet.
-	pending: Option<(moq_net::origin::Route, moq_net::track::Consumer)>,
+	/// The catalog track until the catalog first names a servable track: announced any sooner,
+	/// a relay would ask for tracks it cannot serve yet.
+	pending: Option<moq_net::track::Consumer>,
 	/// The PIDs this program is listed under in [`Programs::readers`], sorted.
 	claims: Vec<u16>,
 	/// The ways it reads each PID, sorted, but for the PAT and the SI PIDs every program reads.
@@ -141,7 +146,7 @@ struct Program {
 impl Program {
 	/// Announce the broadcast once its catalog has gone out.
 	fn announce_if_listed(&mut self) -> anyhow::Result<bool> {
-		let Some((route, listed)) = &mut self.pending else {
+		let Some(listed) = &mut self.pending else {
 			return Ok(true);
 		};
 		if !matches!(
@@ -150,8 +155,8 @@ impl Program {
 		) {
 			return Ok(false);
 		}
-		self.broadcast
-			.announce(route.clone())
+		self.route
+			.announce()
 			.with_context(|| format!("failed to announce program {}", self.number))?;
 		self.pending = None;
 		Ok(true)
@@ -203,17 +208,15 @@ struct Before {
 	stats: stats::Snapshot,
 	errors: health::Errors,
 	health: Health,
-	now: Option<u64>,
 }
 
 impl Before {
 	fn of(import: &Import<Ext>) -> Self {
-		let (health, now) = import.timing();
+		let health = import.timing();
 		Self {
 			stats: import.stats(),
 			errors: import.errors().clone(),
 			health: health.clone(),
-			now,
 		}
 	}
 }
@@ -319,6 +322,7 @@ impl Programs {
 			announced: false,
 			clock: Clock::default(),
 			deadline: None,
+			due: health::Due::default(),
 			unclaimed: Unclaimed::default(),
 		}
 	}
@@ -333,7 +337,20 @@ impl Programs {
 
 	fn decode_with(&mut self, demux: &mut Demux, data: &[u8]) -> anyhow::Result<()> {
 		demux.push(data);
+		let mut read = None;
 		while let Some(packet) = demux.next() {
+			let at = health::At {
+				count: packet.count,
+				arrival: packet.arrival,
+			};
+			read = Some(at.arrival);
+			if self.due.count.is_some_and(|due| at.count >= due) {
+				self.due = health::Due::default();
+				for program in &mut self.programs {
+					program.import.timing_mut().advance(at);
+					self.due = self.due.min(program.import.timing().due());
+				}
+			}
 			if let Some(pat) = &packet.pat {
 				self.follow(pat)?;
 			} else if self.pmt_pids[usize::from(packet.pid)] {
@@ -359,6 +376,7 @@ impl Programs {
 				let before = (self.pmt_pids[usize::from(packet.pid)] && import.pmt_pid() == Some(packet.pid))
 					.then(|| Before::of(import));
 				import.packet(&packet)?;
+				self.due = self.due.min(import.timing().due());
 				self.clock.offer(index, import);
 				if import.claims_changed() {
 					changed.push((index, before));
@@ -383,6 +401,16 @@ impl Programs {
 			}
 		}
 		demux.drain();
+		// Every packet this chunk completed is read: grade the input through its arrival.
+		if let Some(arrival) = read
+			&& self.due.arrival.is_some_and(|due| arrival >= due)
+		{
+			self.due = health::Due::default();
+			for program in &mut self.programs {
+				program.import.timing_mut().settle(arrival);
+				self.due = self.due.min(program.import.timing().due());
+			}
+		}
 		// Only a program that read something has anything to flush or announce, so a call
 		// costs what it carried rather than one pass over every program.
 		for index in self.touched.drain(..) {
@@ -608,7 +636,7 @@ impl Programs {
 			}
 		}
 		for (program, _) in gone.values() {
-			program.broadcast.close();
+			program.route.broadcast().close();
 		}
 		Ok(())
 	}
@@ -698,9 +726,11 @@ impl Programs {
 	fn start(&mut self, number: u16, pmt_pid: u16, sections: SectionReassembler) -> anyhow::Result<()> {
 		let pat = self.pat.as_ref().expect("a program waits on its PAT");
 		let name = program_broadcast(self.name.as_str(), number);
-		let broadcast = self
+		// Each program is its own publisher instance for this run, minted by its route, so a
+		// restart replaces it rather than resuming into it.
+		let route = self
 			.origin
-			.create_broadcast(&name)
+			.route(&name, moq_net::origin::RouteOptions::hidden())
 			.with_context(|| format!("failed to create broadcast {name}"))?;
 		// TS carries undecoded elementary streams verbatim, so each catalog carries the
 		// `mpegts` extension, and owns its broadcast's catalog tracks.
@@ -708,22 +738,19 @@ impl Programs {
 			.config
 			.clone()
 			.with_catalog(catalog::hang::Catalog::<Ext>::default());
-		let catalog = catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
+		let catalog = catalog::Producer::new(&mut route.broadcast().clone(), config)?;
 		let pmt_pid = Pid::new(pmt_pid).expect("a packet's PID fits 13 bits");
-		let mut import = Import::new(broadcast.broadcast().clone(), catalog.reserve())
+		let mut import = Import::new(route.broadcast().clone(), catalog.reserve())
 			.with_program(number)
 			.with_pmt(pmt_pid, sections);
 		import.handle_pat(pat)?;
-		// Each program is its own publisher instance for this run, so a restart
-		// replaces it rather than resuming into it.
-		let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
-		let listed = broadcast.consume().track(hang::Catalog::DEFAULT_NAME)?;
+		let listed = route.broadcast().consume().track(hang::Catalog::DEFAULT_NAME)?;
 		self.programs.push(Program {
 			number,
-			broadcast,
+			route,
 			import,
 			catalog,
-			pending: Some((route, listed)),
+			pending: Some(listed),
 			claims: Vec::new(),
 			reads: Vec::new(),
 			touched: false,
@@ -741,6 +768,8 @@ impl Programs {
 	/// counts each PID in each way it reads it now or did, given its counts `before` the packet
 	/// that moved them, if that was a PMT.
 	fn reclaim(&mut self, index: usize, before: Option<&Before>) {
+		// A handover may bring an older interval into another program's health checks.
+		self.due = health::Due::NOW;
 		let program = &mut self.programs[index];
 		let claims = program.import.claims();
 		for &pid in program.claims.iter().filter(|pid| claims.binary_search(pid).is_err()) {
@@ -802,7 +831,7 @@ impl Programs {
 			return;
 		};
 		match before.filter(|_| current == index) {
-			Some(before) => (self.programs[next].import).take_over(read.0, (&before.health, before.now)),
+			Some(before) => (self.programs[next].import).take_over(read.0, &before.health),
 			None => {
 				let [from, to] = self
 					.programs
@@ -863,7 +892,7 @@ impl Programs {
 		Ok(self
 			.programs
 			.iter()
-			.map(|program| program.broadcast.broadcast().clone())
+			.map(|program| program.route.broadcast().clone())
 			.collect())
 	}
 
@@ -902,19 +931,12 @@ mod test {
 		two_section_pat, video_pes,
 	};
 
-	/// The epoch each running program publishes under, announced yet or not.
-	fn epochs(programs: &Programs) -> Vec<(u16, moq_net::Epoch)> {
+	/// The instance each running program publishes under, announced yet or not.
+	fn instances(programs: &Programs) -> Vec<(u16, moq_net::Instance)> {
 		programs
 			.programs
 			.iter()
-			.map(|program| {
-				let route = program.broadcast.route();
-				let route = route.as_ref().or(program.pending.as_ref().map(|(route, _)| route));
-				(
-					program.number,
-					route.and_then(|route| route.epoch.clone()).expect("an epoch"),
-				)
-			})
+			.map(|program| (program.number, program.route.instance()))
 			.collect()
 	}
 
@@ -965,18 +987,18 @@ mod test {
 		let mut steps = Steps::new();
 
 		steps.step(&mut programs, &[(1, 0x100)]);
-		let one = epochs(&programs);
+		let one = instances(&programs);
 		assert_eq!(one.len(), 1);
 
 		steps.step(&mut programs, &[(1, 0x100), (2, 0x200)]);
-		let both = epochs(&programs);
+		let both = instances(&programs);
 		assert_eq!(both[0], one[0], "program 1 carries on");
 		assert_eq!(both[1].0, 2, "the added program publishes");
-		let two = programs.programs[1].broadcast.consume();
+		let two = programs.programs[1].route.broadcast().consume();
 		let mut catalog = hang::catalog::Catalog::<()>::subscribe(&two).await.unwrap();
 
 		steps.step(&mut programs, &[(1, 0x100)]);
-		assert_eq!(epochs(&programs), one, "program 1 carries on");
+		assert_eq!(instances(&programs), one, "program 1 carries on");
 		assert!(two.is_closed(), "the dropped program is unannounced");
 		while catalog.next().await.unwrap().is_some() {}
 		let retired = &programs.stats().streams[&0x71];
@@ -984,7 +1006,7 @@ mod test {
 		assert_eq!(retired.quiet, None, "nothing is expected on a retired PID");
 
 		steps.step(&mut programs, &[(1, 0x100), (2, 0x200)]);
-		let back = epochs(&programs);
+		let back = instances(&programs);
 		assert_eq!(back[0], one[0], "program 1 carries on");
 		assert_eq!(back[1].0, 2);
 		assert_ne!(back[1].1, both[1].1, "the returning program is a new instance");
@@ -1013,7 +1035,7 @@ mod test {
 		for packet in std::mem::take(&mut steps.mux.out).chunks(188) {
 			programs.decode(packet).unwrap();
 		}
-		let running: Vec<_> = epochs(&programs).into_iter().map(|(number, _)| number).collect();
+		let running: Vec<_> = instances(&programs).into_iter().map(|(number, _)| number).collect();
 		assert_eq!(running, [2]);
 		programs.finish().unwrap();
 		assert_eq!(programs.stats().streams[&0x71].units, 4, "program 2 read on");
@@ -1261,6 +1283,132 @@ mod test {
 		assert_eq!(outage(Leave::Drop), 2, "counted on by the program still carrying it");
 	}
 
+	#[tokio::test(start_paused = true)]
+	async fn a_shared_pts_timer_keeps_its_age_when_clocks_are_sampled_apart() {
+		let mut programs = Programs::new(
+			crate::source::produce_origin(),
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
+		let mut mux = Mux::default();
+		let both = [(1, 0x100), (2, 0x200)];
+		mux.pat(&both[..1]).pmt(0x100, 1, 0x1ff, &[(MP2, 0x61)], 0);
+		mux.packet(0x1ff, Flags::pcr(27_000_000));
+		mux.out.extend(mp2_pes(0x61, 0, 90_000, [0x61; 2]));
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(200)).await;
+		mux.pat(&both).pmt(0x200, 2, 0x1f2, &[(MP2, 0x61)], 0);
+		mux.packet(0x1f2, Flags::pcr(27_000_000));
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(1)).await;
+		mux.packet(0x1fff, Flags::default());
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(19)).await;
+		mux.packet(0x1f2, Flags::pcr(27_000_000 + 20 * MS));
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(30)).await;
+		mux.pmt_at(1, 0x100, 1, 0x1ff, &[(MP2, 0x62, &[])], 0);
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(450)).await;
+		mux.packet(0x1fff, Flags::default());
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert_eq!(programs.stats().pts_error, 0, "exactly 700 ms is on time");
+		tokio::time::advance(std::time::Duration::from_millis(1)).await;
+		mux.packet(0x1fff, Flags::default());
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert_eq!(
+			programs.stats().pts_error,
+			1,
+			"701 ms since the PTS, across the handover"
+		);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_missing_shared_pcr_counts_once_across_a_late_handover() {
+		let mut programs = Programs::new(
+			crate::source::produce_origin(),
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
+		let mut mux = Mux::default();
+		let both = [(1, 0x100), (2, 0x200)];
+		mux.pat(&both[..1]).pmt(0x100, 1, 0x1ff, &[(MP2, 0x61)], 0);
+		mux.packet(0x1ff, Flags::pcr(27_000_000));
+		mux.out.extend(mp2_pes(0x61, 0, 90_000, [0x61; 2]));
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(200)).await;
+		mux.pat(&both).pmt(0x200, 2, 0x1ff, &[(MP2, 0x61)], 0);
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert_eq!(programs.stats().pcr_repetition_error, 1);
+		tokio::time::advance(std::time::Duration::from_millis(50)).await;
+		mux.pat(&both[1..]);
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		for _ in 0..3 {
+			tokio::time::advance(std::time::Duration::from_millis(100)).await;
+			mux.packet(0x1fff, Flags::default());
+			programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+			assert_eq!(programs.stats().pcr_repetition_error, 1, "the same outage still runs");
+		}
+		// The PTS was seen at t=0. Rebasing against a stale destination clock must
+		// not turn its exact 700 ms boundary into an early PTS error.
+		tokio::time::advance(std::time::Duration::from_millis(150)).await;
+		mux.packet(0x1fff, Flags::default());
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert_eq!(programs.stats().pts_error, 0);
+		tokio::time::advance(std::time::Duration::from_millis(1)).await;
+		mux.packet(0x1fff, Flags::default());
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert_eq!(programs.stats().pts_error, 1);
+		programs.finish().unwrap();
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_stalled_owner_cannot_hide_a_shared_pids_outage() {
+		for shared_clock in [false, true] {
+			for continuing in [false, true] {
+				let mut programs = Programs::new(
+					crate::source::produce_origin(),
+					moq_net::Path::from_static("event.hang"),
+					catalog::Config::default(),
+				);
+				let mut mux = Mux::default();
+				let both = [(1, 0x100), (2, 0x200)];
+				let clocks = [0x1f1, if shared_clock { 0x1f1 } else { 0x1f2 }];
+				mux.pat(&both);
+				for ((number, pid), clock) in both.into_iter().zip(clocks) {
+					mux.pmt(pid, number, clock, &[(MP2, 0x61)], 0);
+					mux.packet(clock, Flags::pcr(27_000_000));
+				}
+				mux.out.extend(mp2_pes(0x61, 0, 90_000, [0x61; 2]));
+				programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+				for i in 1..=10 {
+					tokio::time::advance(std::time::Duration::from_millis(100)).await;
+					if continuing {
+						mux.pat(&both);
+						for ((number, pid), clock) in both.into_iter().zip(clocks) {
+							mux.pmt(pid, number, clock, &[(MP2, 0x61)], 0);
+						}
+						mux.out
+							.extend(mp2_pes(0x61, i, 90_000 + u64::from(i) * 9_000, [0x61; 2]));
+					}
+					if !shared_clock {
+						mux.packet(clocks[1], Flags::pcr(27_000_000 + u64::from(i) * 100 * MS));
+					}
+					// No program reads this packet: it must still advance every health check.
+					mux.packet(0x1fff, Flags::default());
+					programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+				}
+				let stats = programs.stats();
+				assert_eq!(stats.pcr_repetition_error, 1, "{shared_clock} {continuing}: {stats:?}");
+				assert_eq!(stats.pat_error, u64::from(!continuing), "{stats:?}");
+				assert_eq!(stats.pmt_error, 2 * u64::from(!continuing), "{stats:?}");
+				assert_eq!(stats.pts_error, u64::from(!continuing), "{stats:?}");
+				assert_eq!(stats.streams[&0x61].pts_error, stats.pts_error);
+				programs.finish().unwrap();
+			}
+		}
+	}
+
 	/// A section stream refused for want of a PCR keeps its refusal in the totals once, though
 	/// the PMT that adds it counts it before its program reads the PID, while the programs
 	/// listing it run and as one leaves.
@@ -1388,7 +1536,7 @@ mod test {
 		step(&mut mux, &[(2, 0x100), (4, 0x100)], 1);
 		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
 		programs.finish().unwrap();
-		let running: Vec<_> = epochs(&programs).into_iter().map(|(number, _)| number).collect();
+		let running: Vec<_> = instances(&programs).into_iter().map(|(number, _)| number).collect();
 		assert_eq!(running, [2, 4]);
 		let units = |pid| programs.stats().streams[&pid].units;
 		assert_eq!([0x61, 0x72, 0x74].map(units), [4; 3], "the programs kept read on");
@@ -1856,7 +2004,7 @@ mod test {
 	/// Each program announces as its own publisher instance for the run, so a restart
 	/// replaces it rather than resuming into it.
 	#[test]
-	fn every_program_mints_its_own_epoch() {
+	fn every_program_names_its_own_instance() {
 		let origin = crate::source::produce_origin();
 		let mut programs = Programs::new(
 			origin,
@@ -1865,14 +2013,17 @@ mod test {
 		);
 		programs.decode(&two_section_pat()).unwrap();
 		programs.finish().unwrap();
-		let epochs: Vec<_> = programs
+		assert!(
+			programs.programs.iter().all(|program| program.route.is_announced()),
+			"every program announces"
+		);
+		let instances: Vec<_> = programs
 			.programs
 			.iter()
-			.map(|program| program.broadcast.route().and_then(|route| route.epoch))
+			.map(|program| program.route.instance())
 			.collect();
-		assert_eq!(epochs.len(), 2);
-		assert!(epochs.iter().all(Option::is_some), "every program names its instance");
-		assert_ne!(epochs[0], epochs[1]);
+		assert_eq!(instances.len(), 2);
+		assert_ne!(instances[0], instances[1]);
 	}
 
 	/// A program is announced only once its catalog lists its tracks, never on the PAT alone,
@@ -1893,10 +2044,7 @@ mod test {
 				.unwrap();
 		}
 		assert!(
-			programs
-				.programs
-				.iter()
-				.all(|program| program.broadcast.route().is_none()),
+			programs.programs.iter().all(|program| !program.route.is_announced()),
 			"announced on the PSI alone"
 		);
 		for packet in packets {
@@ -1904,10 +2052,7 @@ mod test {
 		}
 		programs.finish().unwrap();
 		assert!(
-			programs
-				.programs
-				.iter()
-				.all(|program| program.broadcast.route().is_some()),
+			programs.programs.iter().all(|program| program.route.is_announced()),
 			"every program is announced once it has declared its tracks"
 		);
 	}
@@ -1946,10 +2091,7 @@ mod test {
 		};
 		assert!(err.to_string().contains("declared a track"), "{err:#}");
 		assert!(
-			programs
-				.programs
-				.iter()
-				.all(|program| program.broadcast.route().is_none()),
+			programs.programs.iter().all(|program| !program.route.is_announced()),
 			"no empty program is announced"
 		);
 	}
@@ -2072,6 +2214,7 @@ mod test {
 			assert!(fills.contains(&frame.payload[4]), "{path} carries only its own program");
 			let skew = Duration::from_secs(2);
 			let wall = catalog
+				.media
 				.clock
 				.expect("the catalog advertises a clock")
 				.wall_clock(frame.timestamp)

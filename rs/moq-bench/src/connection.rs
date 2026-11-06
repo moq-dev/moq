@@ -108,7 +108,7 @@ pub async fn run(ctx: Connection) {
 		config.name()
 	};
 
-	let mut broadcasts = Vec::new();
+	let mut routes = Vec::new();
 	let mut publishing = Vec::new();
 	let mut own = HashSet::new();
 	let mut tasks = JoinSet::new();
@@ -126,16 +126,18 @@ pub async fn run(ctx: Connection) {
 	};
 
 	for (relative, path) in paths {
-		let broadcast = match publish.create_broadcast(&path) {
-			Ok(broadcast) => broadcast,
+		let route = match publish.route(&path, moq_net::origin::RouteOptions::hidden()) {
+			Ok(route) => route,
 			Err(err) => {
 				tracing::error!(connection, %err, "failed to create broadcast");
 				continue;
 			}
 		};
-		let track = match broadcast.create_track(
+		let track = match route.broadcast().create_track(
 			TRACK,
-			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			moq_net::track::Info::default()
+				.with_timescale(moq_net::Timescale::MILLI)
+				.with_max_age(None),
 		) {
 			Ok(track) => track,
 			Err(err) => {
@@ -143,14 +145,14 @@ pub async fn run(ctx: Connection) {
 				continue;
 			}
 		};
-		if let Err(err) = broadcast.announce(Default::default()) {
+		if let Err(err) = route.announce() {
 			tracing::error!(connection, %err, "failed to announce broadcast");
 			continue;
 		}
 		own.insert(relative);
-		// Hold the broadcast producer for the connection's lifetime so it stays
-		// published and advertised.
-		broadcasts.push(broadcast);
+		// Hold the route for the connection's lifetime so it stays published and
+		// advertised.
+		routes.push(route);
 
 		let published = Published::new(stats.clone());
 		publishing.push(Arc::downgrade(&published));
@@ -315,7 +317,11 @@ async fn subscribe_named(
 	max_delay: Duration,
 	stats: Arc<Stats>,
 ) -> anyhow::Result<()> {
-	let broadcast = consume.follow(path.as_str(), None)?.available().await?;
+	let broadcast = consume
+		.follow(path.as_str(), None)?
+		.available()
+		.await?
+		.ok_or_else(|| anyhow::anyhow!("the first change is an instance"))?;
 	drain(broadcast, max_delay, &stats).await
 }
 
@@ -357,11 +363,9 @@ async fn subscribe(
 			update = announced.next() => {
 				let update = match update {
 					Some(
-						moq_net::announce::Event::Start(update)
-						| moq_net::announce::Event::Update(update)
-						| moq_net::announce::Event::Restart(update) | moq_net::announce::Event::Takeover { announce: update, .. },
+						moq_net::announce::Event::Present(update),
 					) => update,
-					Some(moq_net::announce::Event::End(_)) => continue,
+					Some(moq_net::announce::Event::Absent(_)) => continue,
 					None => break,
 				};
 				let path = update.prefix.to_string();
@@ -386,13 +390,8 @@ async fn subscribe(
 	// there is nothing to spread over.
 	while selected < want {
 		let update = match announced.next().await {
-			Some(
-				moq_net::announce::Event::Start(update)
-				| moq_net::announce::Event::Update(update)
-				| moq_net::announce::Event::Restart(update)
-				| moq_net::announce::Event::Takeover { announce: update, .. },
-			) => update,
-			Some(moq_net::announce::Event::End(_)) => continue,
+			Some(moq_net::announce::Event::Present(update)) => update,
+			Some(moq_net::announce::Event::Absent(_)) => continue,
 			None => break,
 		};
 		let path = update.prefix.to_string();
@@ -454,7 +453,7 @@ fn spawn_drain(
 async fn drain(broadcast: broadcast::Consumer, max_delay: Duration, stats: &Stats) -> anyhow::Result<()> {
 	let _gauge = Gauge::inc(&stats.subscriptions);
 
-	let subscription = track::Subscription::default().with_max_delay(max_delay);
+	let subscription = track::Subscription::default().with_delay(track::Delay::default().with_max(max_delay));
 	let mut track = broadcast.track(TRACK)?.subscribe(subscription).await?;
 	let mut gaps = GapTracker::new(stats);
 	let mut learned_shape = false;
@@ -766,6 +765,7 @@ mod tests {
 		reason = "the benchmark measures real establishment time"
 	)]
 	fn benchmark_readiness_establishment() {
+		println!("connections,broadcasts_per_connection,elapsed_ns");
 		for connections in [1, 16, 128] {
 			for broadcasts in [1, 16, 128] {
 				let count = connections * broadcasts;
@@ -793,18 +793,18 @@ mod tests {
 					}
 				}
 				assert!(std::hint::black_box(stats.ready()));
-				println!(
-					"readiness connections={connections} broadcasts_per_connection={broadcasts} elapsed_ns={}",
-					start.elapsed().as_nanos()
-				);
+				println!("{connections},{broadcasts},{}", start.elapsed().as_nanos());
 				assert_eq!(stats.broadcasts_established.load(Ordering::Relaxed), count);
 			}
 		}
 	}
 
-	/// A millisecond track: the frames written here carry timestamps.
+	/// A millisecond track with no publisher max age, for tests that write timestamps and
+	/// rely on the subscription's own delay rather than the authored zero default.
 	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+		moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None)
 	}
 
 	async fn wait_for(counter: &AtomicU64, value: u64) {
@@ -824,7 +824,7 @@ mod tests {
 	}
 
 	fn replay() -> track::Subscription {
-		track::Subscription::default().with_max_delay(Duration::from_secs(30))
+		track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)))
 	}
 
 	/// A produced group must start with the JSON keyframe describing the rolled
@@ -991,22 +991,26 @@ mod tests {
 		let origin = moq_tokio::origin::spawn();
 
 		// The relay-internal broadcast: announced, but with no bench data track.
-		let _internal = origin.create_broadcast(".stats/node/host").unwrap();
-		_internal.announce(Default::default()).unwrap();
+		let _internal = origin
+			.route(".stats/node/host", moq_net::origin::RouteOptions::default())
+			.unwrap();
 
 		// Our own broadcast: in the namespace, but excluded via the `own` set
 		// (paths relative to the namespace, matching the scoped announce consumer).
-		let _previous = origin.create_broadcast("bench/previous/0/0").unwrap();
-		_previous.announce(Default::default()).unwrap();
+		let _previous = origin
+			.route("bench/previous/0/0", moq_net::origin::RouteOptions::default())
+			.unwrap();
 
-		let _own = origin.create_broadcast("bench/current/9/9").unwrap();
-		_own.announce(Default::default()).unwrap();
+		let _own = origin
+			.route("bench/current/9/9", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let own = HashSet::from(["9/9".to_string()]);
 
 		// One legitimate peer under the bench namespace with a single finished group.
-		let peer = origin.create_broadcast("bench/current/0/0").unwrap();
-		peer.announce(Default::default()).unwrap();
-		let track = peer.create_track(TRACK, timed()).unwrap();
+		let peer = origin
+			.route("bench/current/0/0", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		let track = peer.broadcast().create_track(TRACK, timed()).unwrap();
 		let mut group = track.append_group().unwrap();
 		group
 			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
@@ -1036,9 +1040,10 @@ mod tests {
 			stats.clone(),
 		));
 
-		let broadcast = origin.create_broadcast("bench/run/chat").unwrap();
-		broadcast.announce(Default::default()).unwrap();
-		let track = broadcast.create_track(TRACK, timed()).unwrap();
+		let broadcast = origin
+			.route("bench/run/chat", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		let track = broadcast.broadcast().create_track(TRACK, timed()).unwrap();
 		tokio::task::yield_now().await;
 		let mut group = track.append_group().unwrap();
 		let header = serde_json::json!({
@@ -1055,7 +1060,7 @@ mod tests {
 
 		task.await.unwrap().unwrap();
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 1);
-		broadcast.close();
+		broadcast.broadcast().close();
 	}
 
 	/// The relay fails a group it gave up on (`Error::Lagged` once a subscriber

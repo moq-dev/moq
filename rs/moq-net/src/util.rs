@@ -1,47 +1,22 @@
-//! Future boxing and the driver-owned task set.
+//! The driver-owned task set.
 
-use std::{collections::VecDeque, future::Future, pin::Pin, task::Poll};
+use std::{collections::VecDeque, task::Poll};
 
 mod cell;
+mod idle;
 #[cfg(feature = "async")]
 mod later;
 mod wake;
 pub(crate) use cell::SendCell;
+pub(crate) use idle::Idle;
 #[cfg(feature = "async")]
 pub(crate) use later::{Later, Learning};
 pub(crate) use wake::QueueWake;
 
-/// Prove a future's Send bound here rather than inside every caller's future.
-pub(crate) fn sendable<F: Future + Send>(future: F) -> impl Future<Output = F::Output> + Send {
-	future
-}
-
-/// A boxed `Send` future, the same type as `futures::future::BoxFuture`.
-pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-
-/// A boxed [`kio::Tasks`] task: hand-rolled machines and adapted futures alike.
+/// A boxed [`kio::Tasks`] task.
 pub(crate) type BoxTask = Box<dyn FnMut(&kio::Waiter) -> Poll<()> + Send>;
 
-/// Adapt a boxed future into a [`kio::Tasks`] task.
-fn future_task(mut task: BoxFuture<'static, ()>) -> BoxTask {
-	Box::new(move |waiter| waiter.poll_future(task.as_mut()))
-}
-
-/// Resolve with the error of a fallible future, parking forever on success.
-///
-/// The building block for racing "watchdog" futures whose clean completion should
-/// not end the race (only their failure should).
-#[cfg(feature = "async")]
-pub(crate) fn err_only<E>(fut: impl Future<Output = Result<(), E>> + Send) -> impl Future<Output = E> + Send {
-	sendable(async move {
-		if let Err(err) = fut.await {
-			return err;
-		}
-		std::future::pending().await
-	})
-}
-
-/// Cloneable handle for submitting futures to a driver-owned [`TaskSet`].
+/// Cloneable handle for submitting tasks to a driver-owned [`TaskSet`].
 #[derive(Clone)]
 pub(crate) struct Tasks {
 	state: kio::Shared<Submissions>,
@@ -52,7 +27,7 @@ pub(crate) struct Tasks {
 }
 
 /// A claim on a [`TaskSet`]'s lifetime with no submission queue: what a
-/// broadcast published on an origin and an `origin::Requests` hold, so the
+/// broadcast published on an origin and an `origin::Route` hold, so the
 /// driver outlives the producer handles a session was given and dropped.
 pub(crate) struct Keepalive {
 	_alive: kio::Producer<()>,
@@ -61,22 +36,24 @@ pub(crate) struct Keepalive {
 /// The submission queue between [`Tasks`] handles and their [`TaskSet`].
 #[derive(Default)]
 struct Submissions {
-	queued: VecDeque<BoxFuture<'static, ()>>,
+	queued: VecDeque<BoxTask>,
 	/// The set dropped: submissions are discarded, as the driver that would
 	/// have polled them has torn down.
 	closed: bool,
 }
 
 impl Tasks {
-	/// Queue a future for polling by the associated [`TaskSet`].
+	/// Queue a task for polling by the associated [`TaskSet`].
 	///
 	/// A task submitted after the set is gone is dropped: the driver has torn down,
 	/// so the task would have been cancelled anyway.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub fn push(&self, task: impl Future<Output = ()> + Send + 'static) {
+	pub fn push(&self, mut task: impl kio::Task<Output = ()> + Send + 'static) {
 		let mut state = self.state.lock();
 		if !state.closed {
-			state.queued.push_back(Box::pin(task));
+			state
+				.queued
+				.push_back(Box::new(move |waiter: &kio::Waiter| task.poll(waiter)));
 		}
 	}
 }
@@ -109,12 +86,14 @@ pub(crate) struct TasksWeak {
 }
 
 impl TasksWeak {
-	/// Queue a future for polling by the associated [`TaskSet`], dropped if the
+	/// Queue a task for polling by the associated [`TaskSet`], dropped if the
 	/// set (or every owning handle) is already gone.
-	pub fn push(&self, task: impl Future<Output = ()> + Send + 'static) {
+	pub fn push(&self, mut task: impl kio::Task<Output = ()> + Send + 'static) {
 		let mut state = self.state.lock();
 		if !state.closed && !self.alive.is_closed() {
-			state.queued.push_back(Box::pin(task));
+			state
+				.queued
+				.push_back(Box::new(move |waiter: &kio::Waiter| task.poll(waiter)));
 		}
 	}
 
@@ -162,10 +141,11 @@ impl TaskSet {
 		}
 	}
 
-	/// Queue a future for polling by this set.
+	/// Queue a task for polling by this set.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub fn push(&mut self, task: impl Future<Output = ()> + Send + 'static) {
-		self.active.push(future_task(Box::pin(task)));
+	pub fn push(&mut self, mut task: impl kio::Task<Output = ()> + Send + 'static) {
+		self.active
+			.push(Box::new(move |waiter: &kio::Waiter| task.poll(waiter)));
 	}
 
 	/// Adopt every queued submission into the active set, then poll the children.
@@ -192,7 +172,7 @@ impl TaskSet {
 				break;
 			};
 			while let Some(task) = state.queued.pop_front() {
-				self.active.push(future_task(task));
+				self.active.push(task);
 			}
 			// No handles left: nothing can ever submit again.
 			if orphaned {
@@ -205,25 +185,6 @@ impl TaskSet {
 			Poll::Ready(()) if submissions_done => Poll::Ready(()),
 			_ => Poll::Pending,
 		}
-	}
-
-	/// Poll every child while polling `f`, returning its output.
-	///
-	/// `f` is a poll function rather than a future, so an accept loop polls the
-	/// transport directly and there is no accept future to cancel or rebuild when
-	/// a child finishes.
-	#[cfg(feature = "async")]
-	pub async fn drive<T>(&mut self, mut f: impl FnMut(&kio::Waiter) -> Poll<T> + Unpin) -> T {
-		kio::wait(|waiter| {
-			if let Poll::Ready(output) = f(waiter) {
-				return Poll::Ready(output);
-			}
-			// The children never end the drive; a `Ready` here just means they're
-			// drained until the next submission.
-			let _ = self.poll(waiter);
-			Poll::Pending
-		})
-		.await
 	}
 
 	/// Drive submitted children until every submission handle is dropped and all
@@ -277,42 +238,19 @@ mod tests {
 
 		let nested_tasks = tasks.clone();
 		let outer_completed = completed.clone();
-		tasks.push(async move {
+		tasks.push(move |_: &kio::Waiter| {
 			outer_completed.fetch_add(1, Ordering::SeqCst);
 
 			let inner_completed = outer_completed.clone();
-			nested_tasks.push(async move {
+			nested_tasks.push(move |_: &kio::Waiter| {
 				inner_completed.fetch_add(1, Ordering::SeqCst);
+				Poll::Ready(())
 			});
+			Poll::Ready(())
 		});
 		drop(tasks);
 
 		futures::executor::block_on(task_set.run());
 		assert_eq!(completed.load(Ordering::SeqCst), 2);
-	}
-
-	#[test]
-	fn drive_polls_children_alongside_the_accept_future() {
-		let (tasks, mut set) = TaskSet::new();
-		let completed = Arc::new(AtomicUsize::new(0));
-
-		let child_completed = completed.clone();
-		tasks.push(async move {
-			child_completed.fetch_add(1, Ordering::SeqCst);
-		});
-
-		// The driven poll only resolves after the child ran, proving drive()
-		// interleaves both without an executor.
-		let gate = completed.clone();
-		let output = futures::executor::block_on(set.drive(move |waiter| {
-			if gate.load(Ordering::SeqCst) == 1 {
-				std::task::Poll::Ready(42)
-			} else {
-				waiter.waker().wake_by_ref();
-				std::task::Poll::Pending
-			}
-		}));
-
-		assert_eq!(output, 42);
 	}
 }

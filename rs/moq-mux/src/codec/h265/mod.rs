@@ -15,13 +15,13 @@ mod sps;
 pub use export::*;
 pub use import::*;
 pub use split::*;
+pub use sps::{Sps, VideoSignal};
 
 use bytes::{Buf, Bytes, BytesMut};
 
 use crate::codec::annexb::{InBandCodec, ParameterSets};
-use scuffle_h265::{NALUnitType, SpsNALUnit};
-use sps::Sps;
-pub(crate) use sps::id as sps_id;
+use scuffle_h265::NALUnitType;
+pub(crate) use sps::{id as sps_id, parse_full as parse_full_rbsp};
 
 /// Wrap one hvc1 (length-prefixed NALU) access unit as a single
 /// [`Frame`](crate::container::Frame), with the keyframe flag set when it
@@ -237,7 +237,7 @@ pub(crate) fn apply_hvcc_sps(hvcc: &mp4_atom::Hvcc, config: &mut hang::catalog::
 
 /// Resolve either sample framing from the same SPS dimensions and VUI metadata.
 pub(crate) fn config_from_sps(sps_nal: &[u8], in_band: bool) -> Result<hang::catalog::VideoConfig> {
-	let sps = Sps::parse(sps_nal)?;
+	let sps = Sps::parse_or_head(sps_nal)?;
 	let color = sps.color();
 	let Sps { head, full } = sps;
 	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
@@ -280,29 +280,35 @@ pub(crate) fn config_from_sps(sps_nal: &[u8], in_band: bool) -> Result<hang::cat
 	Ok(config)
 }
 
+/// The picture size an SPS NAL (header included) declares, inside its conformance window. `None`
+/// when it fails to parse.
+pub(crate) fn sps_size(nal: &[u8]) -> Option<(u32, u32)> {
+	let head = Sps::parse_or_head(nal).ok()?.head;
+	Some((head.width, head.height))
+}
+
 /// The reordering an SPS NAL unit declares for its highest sub-layer: `sps_max_num_reorder_pics`,
 /// and the picture period when the VUI's HRD parameters fix the picture rate within the CVS
 /// (ITU-T H.265 E.3.2).
 ///
 /// `None` when the SPS fails to parse.
 pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
-	let sps = SpsNALUnit::parse(&mut &nal[..]).ok()?;
-	let highest = sps.rbsp.sps_max_sub_layers_minus1 as usize;
-	let reorder = &sps.rbsp.sub_layer_ordering_info.sps_max_num_reorder_pics;
+	let sps = parse_full_rbsp(nal).ok()?;
+	let highest = sps.sps_max_sub_layers_minus1 as usize;
+	let reorder = &sps.sub_layer_ordering_info.sps_max_num_reorder_pics;
 	let depth = *reorder.get(highest).or(reorder.last())?;
 	Some(crate::codec::video::Reorder {
 		depth: u32::try_from(depth).ok()?,
-		period: sps_period(&sps.rbsp),
+		period: sps_period(&sps),
 	})
 }
 
 /// The HRD an SPS NAL unit's VUI declares at its highest sub-layer, when it carries one: the
 /// NAL HRD's last schedule, or the VCL HRD's when that is all there is.
 pub(crate) fn sps_hrd(nal: &[u8]) -> Option<crate::codec::video::Hrd> {
-	let sps = SpsNALUnit::parse(&mut &nal[..]).ok()?;
-	let highest = sps.rbsp.sps_max_sub_layers_minus1 as usize;
+	let sps = parse_full_rbsp(nal).ok()?;
+	let highest = sps.sps_max_sub_layers_minus1 as usize;
 	let hrd = sps
-		.rbsp
 		.vui_parameters
 		.as_ref()?
 		.vui_timing_info
@@ -504,7 +510,7 @@ pub(crate) fn build_hvcc(vps_nals: &[Bytes], sps_nals: &[Bytes], pps_nals: &[Byt
 		}
 	}
 
-	let sps = Sps::parse(first_sps)?.head;
+	let sps = Sps::parse_or_head(first_sps)?.head;
 	let arrays = [
 		(NALUnitType::VpsNut, vps_nals),
 		(NALUnitType::SpsNut, sps_nals),
@@ -610,8 +616,12 @@ pub(crate) fn pack_constraint_flags(profile: &scuffle_h265::Profile) -> [u8; 6] 
 }
 
 /// Real parameter sets, mostly from a single-frame x265 encode (1280x720, Main profile),
-/// for tests that need an SPS rather than hand-built bytes.
-#[cfg(test)]
+/// for tests that need an SPS rather than hand-built bytes, and the fuzz seeds.
+#[cfg(any(test, feature = "fuzz"))]
+#[cfg_attr(
+	not(test),
+	allow(dead_code, reason = "the fuzz seeds use only the Main parameter sets")
+)]
 pub(crate) mod fixtures {
 	use bytes::Bytes;
 

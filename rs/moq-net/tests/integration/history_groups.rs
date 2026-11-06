@@ -9,6 +9,7 @@
 //! releases them newest first to make that race deterministic.
 
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -41,14 +42,17 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usize)> {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
+		.broadcast()
 		.create_track(
 			"history",
 			Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
 		)
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let relay_origin = produce_origin(2);
 	let upstream = match relay {
@@ -74,10 +78,13 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 
 	let reader = kio::clock::sim::spawn(async move {
-		let subscription = Subscription::default().with_max_delay(FOREVER).with_range(0..);
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(FOREVER))
+			.with_range(0..);
 		let mut sub = remote
 			.track("history")
 			.unwrap()
@@ -197,14 +204,17 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	// Older drafts canonicalize group 0 to the live edge instead of replay.
 	let version: Version = "moq-lite-07-wip".parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
+		.broadcast()
 		.create_track(
 			"history",
 			Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
 		)
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 	let relay = produce_origin(2);
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(publisher.consume());
@@ -216,8 +226,16 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	options.client_subscribe = Some(first.clone());
 	let first_pair = connect_mock(options).await;
 	let consumer = first.consume();
-	let remote = consumer.follow("bcast", None).unwrap().available().await.unwrap();
-	let subscription = Subscription::default().with_max_delay(FOREVER).with_range(0..);
+	let remote = consumer
+		.follow("bcast", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
+	let subscription = Subscription::default()
+		.with_delay(Delay::default().with_max(FOREVER))
+		.with_range(0..);
 	let first_subscription = subscription.clone();
 	let first_reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote
@@ -253,7 +271,13 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	options.client_subscribe = Some(late.clone());
 	let late_pair = connect_mock(options).await;
 	let consumer = late.consume();
-	let remote = consumer.follow("bcast", None).unwrap().available().await.unwrap();
+	let remote = consumer
+		.follow("bcast", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
 	let mut late_sub = remote.track("history").unwrap().subscribe(subscription).await.unwrap();
 	kio::clock::timeout(TIMEOUT, read_history(&mut late_sub))
 		.await

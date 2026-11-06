@@ -105,7 +105,7 @@ export interface AuthWire {
 	unsupported(stream: Stream, reason: string): Promise<void>;
 }
 
-/** The paths any of `grants` allows. Reduced once, so it costs about the grants' total size. */
+/** The paths any of `grants` allows. Reduced once over all of them, not pairwise. */
 function union(grants: Iterable<Grant>): Grant {
 	const publish: Path.Pattern[] = [];
 	const subscribe: Path.Pattern[] = [];

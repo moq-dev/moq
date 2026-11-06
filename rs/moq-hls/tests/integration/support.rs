@@ -87,26 +87,25 @@ fn origin(config: moq_net::origin::Config) -> moq_net::origin::Producer {
 	origin
 }
 
-/// One publisher run of a broadcast: a catalog and a single VP8 rendition whose HLS records the
-/// catalog advertises.
+/// One publisher run of a broadcast: a catalog declaring its join interval and a single VP8
+/// rendition.
 pub struct Publisher {
-	/// The broadcast, which announces its path while it lives.
-	pub broadcast: moq_net::origin::Publication,
+	/// The route, which announces its path while it lives.
+	pub route: moq_net::origin::Route,
 	/// The catalog.
 	pub catalog: moq_mux::catalog::Producer,
-	/// The media track, recording its HLS records as it is written.
+	/// The media track.
 	pub media: moq_mux::container::Producer<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>,
 }
 
 impl Publisher {
-	/// Announce `path` on `origin` under `route` and publish its catalog.
-	pub fn new(origin: &moq_net::origin::Producer, path: &str, route: moq_net::origin::Route) -> Self {
-		let broadcast = origin.create_broadcast(path).expect("publish");
-		broadcast.announce(route).expect("announce");
+	/// Announce `path` on `origin` with `options` and publish its catalog.
+	pub fn new(origin: &moq_net::origin::Producer, path: &str, options: moq_net::origin::RouteOptions) -> Self {
+		let route = origin.route(path, options).expect("publish");
 		let catalog =
-			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), catalog_config()).expect("catalog");
+			moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), catalog_config()).expect("catalog");
 		let reserved = catalog.reserve();
-		let track = broadcast.create_track(TRACK, timed()).expect("track");
+		let track = route.broadcast().create_track(TRACK, timed()).expect("track");
 		let media = reserved
 			.video(
 				track,
@@ -115,15 +114,11 @@ impl Publisher {
 			)
 			.expect("rendition");
 		drop(reserved);
-		Self {
-			broadcast,
-			catalog,
-			media,
-		}
+		Self { route, catalog, media }
 	}
 
 	/// Write one-second frames for each second in `start..end`, a keyframe on every even second.
-	/// Segments are cut every four seconds, so writing up to 13 completes segments 0 to 2 and
+	/// Segments are cut on a four-second grid, so writing up to 13 completes segments 0 to 2 and
 	/// leaves the GOP at 12s open.
 	pub fn write(&mut self, start: u64, end: u64, payload: u8) {
 		for second in start..end {
@@ -138,16 +133,20 @@ impl Publisher {
 	}
 }
 
-/// A catalog config publishing HLS records, hinted so they are advertised before any media and a
-/// recorder can start first.
+/// A catalog config declaring a four-second join interval up front, so renditions are listed before
+/// any media and a recorder can start first. The two-second GOPs pack two to a segment.
 pub fn catalog_config() -> moq_mux::catalog::Config {
-	let hls = moq_mux::hls::Config::default().with_duration_hint(Duration::from_secs(2));
-	moq_mux::catalog::Config::default().with_hls(hls)
+	let mut catalog = moq_mux::catalog::hang::Catalog::default();
+	catalog.media.join = hang::catalog::Join::new(Duration::from_secs(4));
+	moq_mux::catalog::Config::default().with_catalog(catalog)
 }
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond track: the frames written here carry timestamps. It sets no publisher max
+/// age, so the segments a playlist lists stay fetchable once superseded.
 pub fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
 }
 
 /// A 320x240 VP8 rendition, whose init its catalog config alone describes.

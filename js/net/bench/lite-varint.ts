@@ -60,7 +60,7 @@ const audio = frames(
 
 const group: Sample = {
 	name: "Group",
-	encode: (w, version) => new Group({ subscribe: 3n, sequence: 1_234 }).encode(w, version),
+	encode: (w, version) => new Group({ subscribe: 3n, sequence: 1_234n }).encode(w, version),
 	decode: (r, version) => Group.decode(r, version),
 };
 
@@ -79,7 +79,7 @@ const subscribe: Sample = {
 
 const datagram: Sample = {
 	name: "Datagram",
-	encode: (w, version) => w.write(new Datagram(3n, 1_234, 1_234_567_890, new Uint8Array()).encode(version)),
+	encode: (w, version) => w.write(new Datagram(3n, 1_234n, 1_234_567_890, new Uint8Array()).encode(version)),
 	decode: (r, version) => r.readAll().then((data) => Datagram.decode(data, version, () => ({ timed: true }))),
 };
 

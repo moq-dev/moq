@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
+import Qmux, { selectSubprotocol, type WebSocketLike } from "@moq/qmux";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import { ClientSetup, ServerSetup } from "../lite/compat.ts";
@@ -644,6 +645,144 @@ test("the WebSocket fallback offers the same versions", async () => {
 	const asked = await websocketOffer({ versions: ["moq-lite-07-wip", "moq-lite-06"] });
 	expect(asked[0]?.endsWith(ALPN_07_WIP)).toBe(true);
 	expect(asked.some((protocol) => protocol.endsWith(ALPN_05))).toBe(false);
+});
+
+// Read wire parameters without making qmux's private codec part of net's TS project.
+const { decodeRecord } = require("../../../qmux/src/frame.ts");
+
+interface ReceiveWindows {
+	initialMaxData: bigint;
+	initialMaxStreamDataBidiLocal: bigint;
+	initialMaxStreamDataBidiRemote: bigint;
+	initialMaxStreamDataUni: bigint;
+}
+
+// How many streams the WebSocket fallback lets a server open in each direction: a qmux
+// server accepts the dial and opens streams until the client's limit refuses one.
+async function websocketStreamLimits(props: Omit<ConnectProps, "url">) {
+	const original = globalThis.WebTransport;
+	// No WebTransport, so the WebSocket attempt goes at once.
+	globalThis.WebTransport = undefined as unknown as typeof WebTransport;
+	const accepted = Promise.withResolvers<Qmux>();
+	const parameters = Promise.withResolvers<ReceiveWindows>();
+	// Bun's server socket, shaped as the `WebSocketLike` that `Qmux.accept` adopts.
+	let adopted: WebSocketLike | undefined;
+	const server = Bun.serve<{ protocol: string }>({
+		port: 0,
+		fetch(request, server) {
+			const protocol = selectSubprotocol(request.headers.get("sec-websocket-protocol"), {
+				protocols: [ALPN_06],
+				versions: { [ALPN_06]: null },
+			});
+			if (!protocol) return new Response("no protocol", { status: 400 });
+			const headers = { "sec-websocket-protocol": protocol };
+			if (server.upgrade(request, { headers, data: { protocol } })) return;
+			return new Response("no upgrade", { status: 400 });
+		},
+		websocket: {
+			open(socket) {
+				socket.binaryType = "arraybuffer";
+				adopted = {
+					binaryType: "arraybuffer",
+					get bufferedAmount() {
+						return socket.getBufferedAmount();
+					},
+					get readyState() {
+						return socket.readyState;
+					},
+					protocol: "",
+					extensions: "",
+					send: (data) => void socket.send(data as Uint8Array),
+					close: (code, reason) => socket.close(code, reason),
+					onopen: null,
+					onmessage: null,
+					onerror: null,
+					onclose: null,
+				};
+				accepted.resolve(Qmux.accept(adopted, { protocol: socket.data.protocol }));
+			},
+			message(_socket, data) {
+				if (typeof data === "string") throw new Error("expected binary QMux record");
+				for (const frame of decodeRecord(new Uint8Array(data))) {
+					if (frame.type === "transport_parameters") parameters.resolve(frame.params);
+				}
+				adopted?.onmessage?.({ data });
+			},
+			close(_socket, code, reason) {
+				adopted?.onclose?.({ code, reason });
+			},
+		},
+	});
+	const controller = new AbortController();
+	try {
+		// SETUP goes unanswered, so the attempt stays open until aborted.
+		const attempt = connect(new URL(`http://127.0.0.1:${server.port}/`), {
+			signal: controller.signal,
+			versions: ["moq-lite-06"],
+			...props,
+		}).catch(() => undefined);
+		const session = await accepted.promise;
+		const count = async (open: () => Promise<unknown>) => {
+			let opened = 0;
+			try {
+				for (; ; opened++) await open();
+			} catch {
+				return opened;
+			}
+		};
+		const now = { waitUntilAvailable: false };
+		const limits = {
+			bidi: await count(() => session.createBidirectionalStream(now)),
+			uni: await count(() => session.createUnidirectionalStream(now)),
+		};
+		controller.abort();
+		await attempt;
+		session.close();
+		return { ...limits, params: await parameters.promise };
+	} finally {
+		globalThis.WebTransport = original;
+		server.stop(true);
+	}
+}
+
+test("the WebSocket fallback grants stream limits and receive windows", async () => {
+	const defaults = await websocketStreamLimits({});
+	expect(defaults).toMatchObject({
+		bidi: 10_000,
+		uni: 10_000,
+		params: {
+			initialMaxData: 4_194_304n,
+			initialMaxStreamDataBidiLocal: 1_048_576n,
+			initialMaxStreamDataBidiRemote: 1_048_576n,
+			initialMaxStreamDataUni: 1_048_576n,
+		},
+	});
+	expect(
+		await websocketStreamLimits({
+			websocket: {
+				maxStreams: 3,
+				receiveWindow: 65_537,
+				streamReceiveWindow: 16_385,
+			},
+		}),
+	).toMatchObject({
+		bidi: 3,
+		uni: 3,
+		params: {
+			initialMaxData: 65_537n,
+			initialMaxStreamDataBidiLocal: 16_385n,
+			initialMaxStreamDataBidiRemote: 16_385n,
+			initialMaxStreamDataUni: 16_385n,
+		},
+	});
+});
+
+test("WebSocket limits must be positive safe integers", async () => {
+	for (const key of ["maxStreams", "receiveWindow", "streamReceiveWindow"] as const) {
+		for (const value of [0, -1, 1.5, Number.NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+			await expect(connect(url, { websocket: { [key]: value } })).rejects.toThrow(RangeError);
+		}
+	}
 });
 
 // A WebTransport whose handshake nothing ever answers, as a dial to a dead target is.

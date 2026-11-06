@@ -91,14 +91,8 @@ async fn follow(
 		};
 
 		let (announce, active) = match event {
-			Event::Start(announce) => (announce, true),
-			Event::End(announce) => (announce, false),
-			// A new route or a new instance for a path already announced, which changes
-			// nothing shown.
-			Event::Update(_) | Event::Restart(_) => continue,
-			// A route continuing another: new to the list unless it replaced that one in place.
-			Event::Takeover { announce, predecessor } if predecessor != announce.prefix => (announce, true),
-			Event::Takeover { .. } => continue,
+			Event::Present(announce) => (announce, true),
+			Event::Absent(announce) => (announce, false),
 		};
 
 		let path = announce.prefix.as_str();
@@ -187,13 +181,13 @@ mod tests {
 		/// Stops the relay, which ends every session on it.
 		shutdown: moq_relay::shutdown::Trigger,
 		/// The published broadcasts by path; dropping one retracts it.
-		broadcasts: Vec<(&'static str, moq_net::origin::Publication)>,
+		broadcasts: Vec<(&'static str, moq_net::origin::Route)>,
 		_publisher: moq_tokio::Connection,
 	}
 
 	impl Fixture {
 		async fn new() -> Self {
-			let _ = moq_tokio::crypto::install_default();
+			moq_tokio::crypto::install_default().unwrap();
 			let fixture = moq_relay::test_relay().await.expect("test relay");
 			let ready = fixture.relay.ready();
 			let shutdown = fixture.relay.shutdown_trigger().clone();
@@ -212,8 +206,9 @@ mod tests {
 			let broadcasts = ["demo/a", "demo/b", "other/c"]
 				.into_iter()
 				.map(|path| {
-					let broadcast = origin.create_broadcast(path).expect("broadcast");
-					broadcast.announce(Default::default()).expect("announce");
+					let broadcast = origin
+						.route(path, moq_net::origin::RouteOptions::default())
+						.expect("broadcast");
 					(path, broadcast)
 				})
 				.collect::<Vec<_>>();
@@ -234,7 +229,8 @@ mod tests {
 				kio::clock::timeout(TIMEOUT, relay.follow(*path, None).unwrap().available())
 					.await
 					.expect("relay routes the broadcast")
-					.expect("broadcast");
+					.expect("broadcast")
+					.unwrap();
 			}
 
 			Self {
@@ -298,8 +294,6 @@ mod tests {
 	fn net() -> crate::Net {
 		crate::Net {
 			quic: Default::default(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
 		}
 	}
 
@@ -378,7 +372,8 @@ mod tests {
 	/// screen through changes and a shrink rather than scrolling away.
 	#[test]
 	fn the_view_fits_the_terminal() {
-		let mut term = vt100::Parser::new(4, 20, 0);
+		let size = |n: u16| std::num::NonZeroU16::new(n).unwrap();
+		let mut term = vt100::Parser::new(size(4), size(20), 0);
 		let mut view = View::default();
 		// What a tty does to each `\n` on its way to the screen.
 		let draw = |term: &mut vt100::Parser, frame: String| term.process(frame.replace('\n', "\r\n").as_bytes());
@@ -391,7 +386,7 @@ mod tests {
 		draw(&mut term, view.apply("a", false, 4).unwrap());
 		assert_eq!(term.screen().contents(), "b\nc\n(3 more)");
 
-		term.screen_mut().set_size(3, 20);
+		term.screen_mut().set_size(size(3), size(20));
 		draw(&mut term, view.apply("b", false, 3).unwrap());
 		assert_eq!(term.screen().contents(), "c\n(3 more)");
 

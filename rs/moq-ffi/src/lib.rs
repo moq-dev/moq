@@ -16,6 +16,7 @@ pub mod audio;
 pub mod auth;
 pub mod bandwidth;
 pub mod consumer;
+pub mod datagram;
 pub mod demand;
 pub mod error;
 mod ffi;
@@ -26,6 +27,7 @@ pub mod origin;
 pub mod producer;
 pub mod server;
 pub mod session;
+pub mod socket;
 #[cfg(feature = "video")]
 pub mod video;
 

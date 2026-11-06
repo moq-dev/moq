@@ -74,12 +74,16 @@ fn connect(origin: &moq_net::origin::Producer, port: u16, versions: Vec<moq_net:
 		.connect(format!("tcp://127.0.0.1:{port}/").parse::<url::Url>().unwrap())
 }
 
-/// Announce `name` on `origin` as `route`, and publish a group carrying its own sequence
-/// number every 20ms for the rest of the test.
-fn publish(origin: &moq_net::origin::Producer, name: &str, route: moq_net::origin::Route) {
-	let broadcast = origin.create_broadcast(name).expect("create broadcast");
-	broadcast.announce(route).expect("announce");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+/// Announce `name` on `origin`, and publish a group carrying its own sequence number every
+/// 20ms for the rest of the test.
+fn publish(origin: &moq_net::origin::Producer, name: &str) {
+	let broadcast = origin
+		.route(name, moq_net::origin::RouteOptions::default())
+		.expect("announce");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	tokio::spawn(async move {
 		let _broadcast = broadcast;
 		loop {
@@ -106,9 +110,11 @@ fn view(origin: &moq_net::origin::Producer, name: &str) -> tokio::sync::mpsc::Un
 			.expect("follow")
 			.available()
 			.await
-			.expect("the broadcast resolves");
+			.expect("the broadcast resolves")
+			.unwrap();
 		// A budget, so a group the move delays is late rather than skipped.
-		let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(5));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5)));
 		let mut track = broadcast
 			.track("video")
 			.expect("track")
@@ -172,9 +178,9 @@ async fn a_migrated_session_closes_once_nothing_flows() {
 		.expect("the client never connected")
 		.expect("the relay stopped");
 
-	let epoch = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
-	publish(&local, "up", epoch());
-	publish(&origin, "down", epoch());
+	// Each broadcast mints an instance the migration carries across sessions.
+	publish(&local, "up");
+	publish(&origin, "down");
 	let mut upstream = view(&origin, "up");
 	let mut downstream = view(&local, "down");
 	let (mut up, mut down) = (Vec::new(), Vec::new());
@@ -211,7 +217,7 @@ async fn a_predecessor_serves_until_its_last_subscription_leaves() {
 		.expect("the client never connected")
 		.expect("the relay stopped");
 
-	publish(&origin, "down", moq_net::origin::Route::default());
+	publish(&origin, "down");
 	let mut downstream = view(&local, "down");
 	let mut down = Vec::new();
 	read(&mut downstream, GROUPS, &mut down).await;

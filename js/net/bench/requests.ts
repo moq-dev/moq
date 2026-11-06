@@ -1,6 +1,5 @@
 /** Sweep request restart, cancellation, and discovery settlement over independent origin and waiter dimensions. */
 import { Producer as Broadcast } from "../src/broadcast";
-import * as Epoch from "../src/epoch";
 import { Publisher as IetfPublisher } from "../src/ietf/publisher";
 import { RequestOk } from "../src/ietf/request";
 import { NativeSession } from "../src/ietf/session";
@@ -10,7 +9,7 @@ import {
 	SubscribeNamespaceEntryDone,
 } from "../src/ietf/subscribe_namespace";
 import { ALPN, Version } from "../src/ietf/version";
-import { hooks } from "../src/internal";
+import * as Instance from "../src/instance.ts";
 import { createMockTransportPair } from "../src/mock";
 import { Producer } from "../src/origin";
 import * as Path from "../src/path";
@@ -29,9 +28,8 @@ for (const touched of ["watched", "unrelated"])
 			const origin = new Producer();
 			const path = Path.from("room/0");
 			const broadcasts = Array.from({ length: routes }, (_, i) => {
-				const broadcastPublication = origin.createBroadcast(Path.from(`room/${i}`));
-				const broadcast = broadcastPublication.broadcast;
-				broadcastPublication.announce();
+				const broadcastRoute = origin.route(Path.from(`room/${i}`));
+				const broadcast = broadcastRoute.broadcast;
 				return broadcast;
 			});
 			const requests = Array.from({ length: followers }, () => origin.follow(path));
@@ -42,9 +40,8 @@ for (const touched of ["watched", "unrelated"])
 			for (let round = 0; round < 6; round++) {
 				const start = performance.now();
 				for (let i = 0; i < 128; i++) {
-					const nextPublication = origin.createBroadcast(touched === "watched" ? path : Path.from("other"));
-					const next = nextPublication.broadcast;
-					nextPublication.announce();
+					const nextRoute = origin.route(touched === "watched" ? path : Path.from("other"));
+					const next = nextRoute.broadcast;
 					if (touched === "watched") {
 						current.close();
 						current = next;
@@ -74,7 +71,7 @@ console.log("unrelated,waiters,cancel_us");
 for (const unrelated of [8, 128, 2048])
 	for (const waiters of [1, 8, 32]) {
 		const origin = new Producer();
-		origin.requestsRoute(Path.from("pending"));
+		origin.routePrefix(Path.from("pending"));
 		const held = Array.from({ length: unrelated }, (_, i) => origin.request(Path.from(`pending/${i}`)));
 		const wire = wireOf(origin.consume());
 		const samples: number[] = [];
@@ -128,7 +125,7 @@ for (const pending of [128, 1024, 8192])
 		console.log(`${pending},${landed},${samples[2].toFixed(2)}`);
 	}
 
-// Keep old instances on distinct same-epoch failovers, then cancel new demand.
+// Keep old instances on distinct same-instance failovers, then cancel new demand.
 // This exercises ownership checks inside one cleanup, independently of wire sharing.
 console.log("failovers,extra_routes,cancel_us");
 for (const failovers of [0, 1, 16, 128])
@@ -141,21 +138,21 @@ for (const failovers of [0, 1, 16, 128])
 			const entries = [];
 			const sources: Broadcast[] = [];
 			for (let i = 0; i < failovers; i++) {
-				const epoch = Epoch.mint();
-				const primary = origin.requestsRoute(prefix, { epoch, cost: 0n });
+				const instance = Instance.random();
+				const primary = origin.routePrefix(prefix, { instance, cost: 0n });
 				const ar = primary.requested();
-				const br = origin.requestsRoute(prefix, { epoch, cost: 1n }).requested();
+				const br = origin.routePrefix(prefix, { instance, cost: 1n }).requested();
 				const held = origin.request(path);
 				const source = new Broadcast();
 				sources.push(source);
 				const answer = (await ar.next()).value;
-				if (answer) hooks.acceptRequest(answer, source);
+				if (answer) answer.serve(source);
 				await settle();
 				entries.push({ primary, ar, br, held });
 			}
-			const epoch = Epoch.mint();
-			origin.requestsRoute(prefix, { epoch });
-			for (let i = 0; i < extraRoutes; i++) origin.requestsRoute(prefix, { epoch, cost: BigInt(i + 1) });
+			const instance = Instance.random();
+			origin.routePrefix(prefix, { instance });
+			for (let i = 0; i < extraRoutes; i++) origin.routePrefix(prefix, { instance, cost: BigInt(i + 1) });
 			const pending = [];
 			for (const entry of entries) {
 				entry.primary.close();
@@ -186,7 +183,7 @@ for (const failovers of [0, 1, 16, 128])
 				for (let i = 0; i < entries.length; i++) {
 					const source = new Broadcast();
 					sources.push(source);
-					hooks.acceptRequest(pending[i], source);
+					pending[i].serve(source);
 					await settle();
 					if (!readsFrom(entries[i].held.active.peek(), source)) throw new Error("lost failover");
 				}
@@ -217,7 +214,7 @@ for (const operation of ["cancel-forward", "cancel-reverse", "drain-local"])
 			const settled: number[] = [];
 			for (let round = 0; round < 4; round++) {
 				const origin = new Producer();
-				const dynamic = origin.requestsRoute(Path.from("pending"));
+				const dynamic = origin.routePrefix(Path.from("pending"));
 				const requests = dynamic.requested();
 				const wire = wireOf(origin.consume());
 				const names = Array.from({ length: paths }, (_, i) => Path.from(`pending/${i}`));
@@ -275,7 +272,7 @@ for (const survivor of [false, true])
 				const origin = new Producer();
 				const prefix = Path.from("competing");
 				const path = Path.from("competing/touched");
-				for (let i = 0; i < routes; i++) origin.requestsRoute(prefix, { cost: BigInt(i) });
+				for (let i = 0; i < routes; i++) origin.routePrefix(prefix, { cost: BigInt(i) });
 				const wire = wireOf(origin.consume());
 				const kept = survivor ? new AbortController() : undefined;
 				const remaining = kept ? wire.demand(path, undefined, kept.signal).catch(() => {}) : undefined;
@@ -315,9 +312,8 @@ for (const [version, alpn] of [
 			const sources = [];
 			for (const prefix of ["a", "b"])
 				for (let i = 0; i < namespaces; i++) {
-					const sourcePublication = origin.createBroadcast(Path.from(`${prefix}/${i}`));
-					const source = sourcePublication.broadcast;
-					sourcePublication.announce();
+					const sourceRoute = origin.route(Path.from(`${prefix}/${i}`));
+					const source = sourceRoute.broadcast;
 					sources.push(source);
 				}
 			const peers = await Promise.all(

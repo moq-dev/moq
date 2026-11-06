@@ -10,15 +10,16 @@ import (
 )
 
 // BroadcastProducer publishes a collection of tracks. Create one at a path with
-// [OriginProducer.CreateBroadcast] (or [Client.CreateBroadcast]) and take it
-// from the [Publication], then publish tracks onto it.
+// [OriginProducer.Route] (or [Client.Route]) and take it from the [Route], then
+// publish tracks onto it.
 type BroadcastProducer struct {
 	inner *ffi.MoqBroadcastProducer
 }
 
 // NewBroadcastProducer creates a standalone broadcast, not attached to any
-// origin: use it to serve a dynamic request ([BroadcastRequest.Accept]) or for
-// local pub/sub. To publish at a path, use [OriginProducer.CreateBroadcast].
+// origin: pass its [BroadcastProducer.Consume] result to [BroadcastRequest.Serve]
+// for a dynamic request, or use it for local pub/sub. To publish at a path, use
+// [OriginProducer.Route].
 func NewBroadcastProducer() (*BroadcastProducer, error) {
 	inner, err := ffi.NewMoqBroadcastProducer()
 	if err != nil {
@@ -61,9 +62,9 @@ func (b *BroadcastProducer) Consume() (*BroadcastConsumer, error) {
 }
 
 // Close ends the broadcast for good: it retracts and serves no new tracks.
-// Tracks still open on it end with Unroutable, which readers take as the
-// publisher leaving, and their later calls fail with ErrClosed; finish a track
-// first to end it cleanly. Closing again is a no-op.
+// Tracks still open on it end with Unroutable (Internal to a moq-transport
+// reader), and their later calls fail with ErrClosed; finish a track first to
+// end it cleanly. Closing again is a no-op.
 func (b *BroadcastProducer) Close() error {
 	return b.inner.Close()
 }
@@ -209,19 +210,7 @@ func (t *TrackProducer) WriteFrame(frame Frame) error {
 	return t.inner.WriteFrame(frame)
 }
 
-// AppendDatagram sends frame as a best-effort datagram and returns the sequence number
-// assigned to it. Payloads are capped at 1200 bytes. There is no stream fallback.
-func (t *TrackProducer) AppendDatagram(frame Frame) (uint64, error) {
-	return t.inner.AppendDatagram(frame)
-}
-
-// InsertDatagram sends frame as a best-effort datagram at an explicit sequence, for a
-// caller that allocates its own. AppendDatagram continues after the largest one.
-func (t *TrackProducer) InsertDatagram(sequence uint64, frame Frame) error {
-	return t.inner.InsertDatagram(sequence, frame)
-}
-
-// Largest reports the newest group or datagram written, at its newest frame, or nil
+// Largest reports the newest group written, at its newest frame, or nil
 // before any.
 func (t *TrackProducer) Largest() (*Position, error) {
 	return t.inner.Largest()
@@ -276,7 +265,18 @@ func (g *GroupProducer) Consume() (*GroupConsumer, error) {
 	return &GroupConsumer{inner: inner}, nil
 }
 
-// WriteFrame appends frame to the group.
+// Ready blocks until a frame of size bytes fits a window ahead of the fastest
+// reader. Call it before each WriteFrame so that reader paces the writer, as TCP
+// backpressure does, instead of the group shedding frames it has not taken, which
+// fails it with Evicted; slower readers are not waited on. It also waits until a reader holds
+// the group, and returns once the group is closed so the next write reports why.
+// It fails with Closed after Abort.
+func (g *GroupProducer) Ready(ctx context.Context, size uint64) error {
+	return g.inner.Ready(ctx, size)
+}
+
+// WriteFrame appends frame to the group. It never blocks: without Ready, a writer
+// that outpaces its readers sheds the front of the group instead.
 func (g *GroupProducer) WriteFrame(frame Frame) error {
 	return g.inner.WriteFrame(frame)
 }

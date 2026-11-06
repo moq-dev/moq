@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use super::Catalog;
 use crate::Result;
 
-/// Reads typed catalog roots from an already subscribed catalog track.
+/// Reads typed catalog roots from a catalog track, subscribing to it at catalog priority.
 pub struct Consumer<E = ()> {
 	// Decoded in two steps, so a catalog needing a newer reader fails with a typed error.
 	inner: moq_json::snapshot::Consumer<serde_json::Value>,
@@ -17,24 +17,30 @@ pub struct Consumer<E = ()> {
 }
 
 impl<E: DeserializeOwned + Default> Consumer<E> {
-	/// Wrap a catalog track subscription, compressed or not.
-	pub fn new(track: moq_net::track::Subscriber) -> Self {
+	/// Read a catalog track, compressed or not.
+	///
+	/// Subscribes to it at [`Catalog::default_subscription`]'s priority, reading only the newest
+	/// catalog; see [`moq_json::snapshot::Consumer::new`].
+	pub fn new(track: moq_net::track::Consumer) -> Self {
+		let mut config = moq_json::snapshot::consumer::Config::default();
+		config.priority = Catalog::default_subscription().priority;
 		Self {
 			base: track.broadcast().path.clone(),
-			inner: moq_json::snapshot::Consumer::new(track, Default::default()),
+			inner: moq_json::snapshot::Consumer::new(track, config),
 			_ext: std::marker::PhantomData,
 		}
 	}
 
-	/// Poll for the next catalog update.
+	/// Get the next catalog update, or `None` when the track ends.
 	///
 	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if any rendition's
-	/// `broadcast` reference, contribution, or echo prefix walks above the root. Such a reference names no broadcast, and the
+	/// `broadcast` reference, include, or echo prefix walks above the root. Such a reference names no broadcast, and the
 	/// root is the consumer's authorized subtree, so it is an attempt to reference content the
 	/// consumer cannot name. The whole catalog is rejected rather than the one rendition: a
 	/// publisher that emits one has a bug (or is hostile), and silently serving the rest hides
 	/// that from the operator while the missing rendition surfaces much later as a track that
 	/// never fills.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
 		let value = ready!(self.inner.poll_latest(waiter))
 			.map_err(|err| match err {
@@ -50,17 +56,9 @@ impl<E: DeserializeOwned + Default> Consumer<E> {
 		}
 		Poll::Ready(Ok(catalog))
 	}
-
-	/// Wait for the next catalog update, or return `None` when the track ends.
-	pub async fn next(&mut self) -> Result<Option<Catalog<E>>>
-	where
-		Catalog<E>: Unpin,
-	{
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
 }
 
-/// Reject the catalog if a track reference, contribution, or echo prefix walks above the root.
+/// Reject the catalog if a track reference, include, or echo prefix walks above the root.
 ///
 /// Every section carrying a relative broadcast path must be included here; a section left out
 /// silently exempts its paths from the containment check.
@@ -78,7 +76,7 @@ fn check_resolvable<E>(base: &Path, catalog: &Catalog<E>) -> Result<()> {
 		.chain(json.map(|(_, config)| config.broadcast.as_ref()))
 		.chain(binary.map(|(_, config)| config.broadcast.as_ref()))
 		.flatten()
-		.chain(catalog.contributions.values().map(|entry| &entry.broadcast))
+		.chain(catalog.include.values().map(|entry| &entry.broadcast))
 	{
 		if !rel.is_empty() && base.try_resolve(rel).is_none() {
 			return Err(crate::Error::EscapingBroadcast(rel.to_string()));
@@ -114,10 +112,10 @@ mod test {
 	}
 
 	#[test]
-	fn contributions_cannot_escape_the_root() {
+	fn includes_cannot_escape_the_root() {
 		let base = moq_net::Path::from_static("room/main.hang");
 		for (reference, accepted) in [("./alice.hang", true), ("../alice.hang", true), ("../../escape", false)] {
-			let json = serde_json::json!({ "contributions": { "alice": { "broadcast": reference } } }).to_string();
+			let json = serde_json::json!({ "include": { "alice": { "broadcast": reference } } }).to_string();
 			let catalog = Catalog::<()>::from_str(&json).unwrap();
 			match check_resolvable(&base, &catalog) {
 				Ok(()) => assert!(accepted, "{reference} must be refused"),

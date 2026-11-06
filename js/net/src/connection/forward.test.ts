@@ -1,11 +1,10 @@
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import { type Installed, Manual, Milli, Nano } from "@moq/clock";
-import { Once } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { AuthSession } from "../auth_session.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "../broadcast.ts";
-import * as Epoch from "../epoch.ts";
-import { Route } from "../hop.ts";
+import { RouteInfo } from "../hop.ts";
+import * as Instance from "../instance.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { closeUnwanted } from "../util/announce.ts";
@@ -72,7 +71,6 @@ class FakeSession {
 	constructor({ exclusive = false } = {}) {
 		registerWire(this, {
 			consume: (path) => this.consume(path),
-			goaway: new Once(),
 			exclusive,
 			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
 		});
@@ -81,7 +79,7 @@ class FakeSession {
 		});
 	}
 
-	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
+	routes(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Routes {
 		const stream = new Announce.Producer();
 		this.requests.push({ scope: scope.text, hidden: options?.hidden, covering: options?.covering, stream });
 		if (this.syncedAtOnce) stream.synced();
@@ -134,12 +132,12 @@ class FakeSession {
 	}
 }
 
-function start(stream: Announce.Producer, prefix: string, route: Route = Route.default) {
+function start(stream: Announce.Producer, prefix: string, route: RouteInfo = RouteInfo.default) {
 	stream.append({ prefix: Path.from(prefix), captures: undefined, kind: "start", route });
 }
 
 /** Every event an origin announcement stream yields, as `kind prefix`. */
-function record(stream: Announce.Consumer): string[] {
+function record(stream: Announce.Routes): string[] {
 	const events: string[] = [];
 	void (async () => {
 		for await (const event of stream) events.push(`${event.kind} ${event.prefix}`);
@@ -174,7 +172,7 @@ test("a watch opens its request, and the request closes once the linger expires"
 	const session = new FakeSession();
 	forwardAnnounced(session.session, origin);
 
-	const watch = origin.announced(Path.Pattern.subtree(Path.from("room")));
+	const watch = origin.routes(Path.Pattern.subtree(Path.from("room")));
 	await settle();
 	expect(session.requests.map(({ scope, hidden }) => ({ scope, hidden }))).toEqual([
 		{ scope: "room/**", hidden: true },
@@ -185,7 +183,7 @@ test("a watch opens its request, and the request closes once the linger expires"
 	await advance(LINGER - 1);
 	expect(session.open()).toEqual(["room/**"]);
 
-	const again = origin.announced(Path.Pattern.subtree(Path.from("room")));
+	const again = origin.routes(Path.Pattern.subtree(Path.from("room")));
 	await advance(LINGER);
 	expect(session.open()).toEqual(["room/**"]);
 	expect(session.requests.length).toBe(1);
@@ -205,15 +203,15 @@ test("a watch arriving as the linger expires opens a fresh request", async () =>
 	const session = new FakeSession();
 	forwardAnnounced(session.session, origin);
 
-	const watch = origin.announced(Path.Pattern.subtree(Path.from("room")));
+	const watch = origin.routes(Path.Pattern.subtree(Path.from("room")));
 	await settle();
 	watch.close();
 	await settle();
 
 	// The expiry closes the old request, and the next watch lands before its stream winds down.
-	let again: Announce.Consumer | undefined;
+	let again: Announce.Routes | undefined;
 	session.onClose = () => {
-		again ??= origin.announced(Path.Pattern.subtree(Path.from("room")));
+		again ??= origin.routes(Path.Pattern.subtree(Path.from("room")));
 	};
 	await advance(LINGER);
 	expect(again).toBeDefined();
@@ -287,7 +285,7 @@ test("a pattern watches its literal head", async () => {
 	const session = new FakeSession();
 	forwardAnnounced(session.session, origin);
 
-	const chat = origin.announced(Path.Pattern.parse("room/*/chat"));
+	const chat = origin.routes(Path.Pattern.parse("room/*/chat"));
 	await settle();
 	expect(session.open()).toEqual(["room/**"]);
 
@@ -301,8 +299,8 @@ test("a narrower watch rides an open broader request and keeps it open", async (
 	const session = new FakeSession();
 	forwardAnnounced(session.session, origin);
 
-	const broad = origin.announced(Path.Pattern.subtree(Path.from("a")));
-	const narrow = origin.announced(Path.Pattern.subtree(Path.from("a/b")));
+	const broad = origin.routes(Path.Pattern.subtree(Path.from("a")));
+	const narrow = origin.routes(Path.Pattern.subtree(Path.from("a/b")));
 	const events = record(narrow);
 	await settle();
 	expect(session.open()).toEqual(["a/**"]);
@@ -335,14 +333,14 @@ test("a narrower request stays open until the broader one covering it goes", asy
 	const session = new FakeSession();
 	forwardAnnounced(session.session, origin);
 
-	const narrow = origin.announced(Path.Pattern.subtree(Path.from("a/b")));
+	const narrow = origin.routes(Path.Pattern.subtree(Path.from("a/b")));
 	await settle();
 	start(session.stream("a/b/**"), "a/b/x");
 	await settle();
 
 	// A broader watch opens its own request, which has yet to answer when the narrower watch
 	// leaves. The narrower request stays open, so the route never retracts.
-	const broad = origin.announced(Path.Pattern.subtree(Path.from("a")));
+	const broad = origin.routes(Path.Pattern.subtree(Path.from("a")));
 	const events = record(broad);
 	await settle();
 	narrow.close();
@@ -367,8 +365,8 @@ test("an exclusive session closes every request beneath a broader one before it 
 	const session = new FakeSession({ exclusive: true });
 	forwardAnnounced(session.session, origin);
 
-	const narrow = origin.announced(Path.Pattern.subtree(Path.from("a/b")));
-	const lingering = origin.announced(Path.Pattern.subtree(Path.from("a/c")));
+	const narrow = origin.routes(Path.Pattern.subtree(Path.from("a/b")));
+	const lingering = origin.routes(Path.Pattern.subtree(Path.from("a/c")));
 	await settle();
 	start(session.stream("a/b/**"), "a/b/x");
 	lingering.close();
@@ -377,7 +375,7 @@ test("an exclusive session closes every request beneath a broader one before it 
 
 	// Watched or lingering, each narrower request closes for the broader one, on purpose: the
 	// session stays discovering, and the route returns once the broader request reports it.
-	const broad = origin.announced(Path.Pattern.subtree(Path.from("a")));
+	const broad = origin.routes(Path.Pattern.subtree(Path.from("a")));
 	const events = record(broad);
 	await settle();
 	expect(session.open()).toEqual(["a/**"]);
@@ -400,25 +398,25 @@ test("an exclusive session closes every request beneath a broader one before it 
 	origin.close();
 });
 
-const first = Epoch.mint();
-for (const [name, epochs] of [
-	["no epoch", [undefined, undefined]],
-	["one epoch", [first, first]],
-	["another epoch", [first, Epoch.mint()]],
+const first = Instance.random();
+for (const [name, instances] of [
+	["no instance", [undefined, undefined]],
+	["one instance", [first, first]],
+	["another instance", [first, Instance.random()]],
 ] as const) {
-	test(`a route changing hands restarts unless one epoch proves one instance (${name})`, async () => {
+	test(`a route changing hands restarts unless both routes carry one instance (${name})`, async () => {
 		const origin = new OriginProducer();
 		const session = new FakeSession();
 		forwardAnnounced(session.session, origin);
 
-		const narrow = origin.announced(Path.Pattern.subtree(Path.from("a/b")));
+		const narrow = origin.routes(Path.Pattern.subtree(Path.from("a/b")));
 		await settle();
-		start(session.stream("a/b/**"), "a/b/x", { ...Route.default, epoch: epochs[0] });
+		start(session.stream("a/b/**"), "a/b/x", { ...RouteInfo.default, instance: instances[0] });
 		await settle();
-		const broad = origin.announced(Path.Pattern.subtree(Path.from("a")));
+		const broad = origin.routes(Path.Pattern.subtree(Path.from("a")));
 		const events = record(broad);
 		await settle();
-		start(session.stream("a/**"), "a/b/x", { ...Route.default, epoch: epochs[1] });
+		start(session.stream("a/**"), "a/b/x", { ...RouteInfo.default, instance: instances[1] });
 		await settle();
 		expect(events).toEqual(["start a/b/x"]);
 
@@ -426,7 +424,7 @@ for (const [name, epochs] of [
 		session.stream("a/b/**").close(new Error("reset"));
 		await settle();
 		expect(wireOf(origin).routes(Path.from("a/b/x"))).toBe(true);
-		expect(events).toEqual(name === "one epoch" ? ["start a/b/x"] : ["start a/b/x", "restart a/b/x"]);
+		expect(events).toEqual(name === "one instance" ? ["start a/b/x"] : ["start a/b/x", "restart a/b/x"]);
 
 		narrow.close();
 		broad.close();
@@ -440,8 +438,8 @@ test("a reconnect re-opens every live watch and skips a lingering one", async ()
 	const first = new FakeSession();
 	forwardAnnounced(first.session, origin);
 
-	const kept = origin.announced(Path.Pattern.subtree(Path.from("kept")));
-	const dropped = origin.announced(Path.Pattern.subtree(Path.from("dropped")));
+	const kept = origin.routes(Path.Pattern.subtree(Path.from("kept")));
+	const dropped = origin.routes(Path.Pattern.subtree(Path.from("dropped")));
 	await settle();
 	expect(first.open()).toEqual(["kept/**", "dropped/**"]);
 
@@ -485,7 +483,7 @@ test("a refused announce request downgrades the session once, and later watches 
 	expect(plain.active.peek()).toBeDefined();
 	expect(session.consumes(path)).toBe(1);
 
-	const later = origin.announced(Path.Pattern.subtree(Path.from("other")));
+	const later = origin.routes(Path.Pattern.subtree(Path.from("other")));
 	await settle();
 	expect(session.requests.length).toBe(1);
 
@@ -538,7 +536,7 @@ test("a session dying does not downgrade discovery for the next one", async () =
 	const origin = new OriginProducer();
 	const first = new FakeSession();
 	forwardAnnounced(first.session, origin);
-	const watch = origin.announced();
+	const watch = origin.routes();
 	await settle();
 	expect(origin.discovery.peek()).toBe(true);
 
@@ -565,7 +563,7 @@ test("a request replaced across one coalesced wakeup still gets answered", async
 
 	forwardAnnounced(session.session, origin);
 	// Refusing discovery downgrades the session, so plain requests take its blind answers.
-	const listing = origin.announced(Path.Pattern.subtree(path));
+	const listing = origin.routes(Path.Pattern.subtree(path));
 	await settle();
 	session.stream("wanted/**").close(new Error("namespace rejected"));
 	await settle();
@@ -602,15 +600,15 @@ test("a scoped origin narrows a root watch to its disjoint literal heads", async
 	const session = new FakeSession();
 	forwardAnnounced(session.session, scoped);
 
-	const all = origin.announced();
+	const all = origin.routes();
 	await settle();
 	expect(session.open()).toEqual(["other/**", "room/**"]);
 	all.close();
 
 	// A watch inside a head rides the head's open request, and one outside the scope asks for
 	// nothing.
-	let inside = origin.announced(Path.Pattern.subtree(Path.from("room/alice/chat")));
-	const outside = origin.announced(Path.Pattern.subtree(Path.from("elsewhere")));
+	let inside = origin.routes(Path.Pattern.subtree(Path.from("room/alice/chat")));
+	const outside = origin.routes(Path.Pattern.subtree(Path.from("elsewhere")));
 	await advance(LINGER);
 	expect(session.open()).toEqual(["room/**"]);
 
@@ -618,7 +616,7 @@ test("a scoped origin narrows a root watch to its disjoint literal heads", async
 	inside.close();
 	await advance(LINGER);
 	expect(session.open()).toEqual([]);
-	inside = origin.announced(Path.Pattern.subtree(Path.from("room/alice/chat")));
+	inside = origin.routes(Path.Pattern.subtree(Path.from("room/alice/chat")));
 	await settle();
 	expect(session.open()).toEqual(["room/alice/chat/**"]);
 
@@ -634,7 +632,7 @@ test("a scoped session filters discovered routes and requests under its root", a
 	const session = new FakeSession();
 	forwardAnnounced(session.session, scoped);
 
-	const all = origin.announced();
+	const all = origin.routes();
 	const events = record(all);
 	await settle();
 	// Session-relative: the scope's root is the session's.
@@ -667,8 +665,8 @@ test("one failed request leaves the other routes live until the session ends", a
 	const session = new FakeSession();
 	forwardAnnounced(session.session, origin);
 
-	const a = origin.announced(Path.Pattern.subtree(Path.from("a")));
-	const b = origin.announced(Path.Pattern.subtree(Path.from("b")));
+	const a = origin.routes(Path.Pattern.subtree(Path.from("a")));
+	const b = origin.routes(Path.Pattern.subtree(Path.from("b")));
 	await settle();
 	start(session.stream("a/**"), "a");
 	start(session.stream("b/**"), "b");
@@ -696,7 +694,7 @@ test("an origin watcher syncs with the session's initial set, not before", async
 	const session = new FakeSession();
 	forwardAnnounced(session.session, origin);
 
-	const watch = origin.announced(Path.Pattern.subtree(Path.from("room")));
+	const watch = origin.routes(Path.Pattern.subtree(Path.from("room")));
 	const events = record(watch);
 	await settle();
 	expect(watch.synced.peek()).toBe(false);
@@ -722,7 +720,7 @@ test("a session ending before its initial set lands stops holding the watcher", 
 	const session = new FakeSession();
 	forwardAnnounced(session.session, origin);
 
-	const watch = origin.announced();
+	const watch = origin.routes();
 	record(watch);
 	await settle();
 	expect(watch.synced.peek()).toBe(false);
@@ -741,7 +739,7 @@ test("a request synced as it opens releases the watcher", async () => {
 	session.syncedAtOnce = true;
 	forwardAnnounced(session.session, origin);
 
-	const watch = origin.announced();
+	const watch = origin.routes();
 	record(watch);
 	await settle();
 	expect(session.requests).toHaveLength(1);

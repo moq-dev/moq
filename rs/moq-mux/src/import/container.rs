@@ -112,6 +112,8 @@ impl<E: crate::container::ts::Catalog> Container<E> {
 	}
 
 	/// Decode a chunk of container bytes.
+	///
+	/// An fMP4 or MKV decode error is terminal: replace the importer before feeding more input.
 	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
 		self.inner.decode(data)
 	}

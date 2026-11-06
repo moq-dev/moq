@@ -112,6 +112,31 @@ bool same_time(const moq::Timestamp &a, const moq::Timestamp &b)
 	return a.value * b.scale == b.value * a.scale;
 }
 
+// A datagram-only request reaches its own handler and demand.
+void datagram_tracks()
+{
+	auto broadcast = ok(moq::BroadcastProducer::init(), "datagram broadcast");
+	auto stream = ok(broadcast->publish_track("events", std::nullopt), "stream");
+	auto requests = ok(broadcast->requests(), "requests");
+	auto datagrams = ok(requests->datagrams(), "datagram requests");
+	auto source = ok(broadcast->consume(), "broadcast consumer");
+	auto consumer = ok(source->datagrams("events"), "datagram consumer");
+	ok(consumer->set_priority(12), "priority update");
+	auto request = ok(datagrams->requested().get(), "datagram request");
+	CHECK(ok(request->name(), "request name") == "events");
+	auto producer = ok(request->accept(std::nullopt), "accept datagrams");
+	CHECK(ok(producer->priority(), "aggregate priority") == 12);
+	CHECK(!ok(stream->demand(), "stream demand")->wanted());
+	ok(producer->insert({7, std::nullopt, bytes("seven")}), "insert datagram");
+	auto received = ok(consumer->recv().get(), "receive datagram");
+	CHECK(received && received->sequence == 7 && received->payload == bytes("seven"));
+	consumer->cancel();
+	CHECK(!ok(producer->priority_changed(12).get(), "released demand"));
+	ok(producer->finish(), "finish datagrams");
+	datagrams->cancel();
+	ok(broadcast->close(), "close datagram broadcast");
+}
+
 // Timestamps are exact records: a 90 kHz tick and a present zero read back as written, an
 // untimed frame reads back untimed, and a record past the bounds is refused.
 void timestamp_roundtrip()
@@ -142,11 +167,13 @@ void timestamp_roundtrip()
 	ok(broadcast->close(), "close timestamp broadcast");
 }
 
-// Only the defaults carry moq-net's zero max delay; a bare record sets no subscriber limit.
+// Only the defaults carry moq-net's zero delay; a bare record leaves both bounds unset.
 void subscription_defaults()
 {
-	CHECK(moq::subscription_defaults().max_delay == std::chrono::nanoseconds::zero());
-	CHECK(!moq::Subscription{}.max_delay.has_value());
+	auto defaults = moq::subscription_defaults();
+	CHECK(defaults.delay.min == std::chrono::nanoseconds::zero());
+	CHECK(defaults.delay.max == std::chrono::nanoseconds::zero());
+	CHECK(!moq::Subscription{}.delay.max.has_value());
 }
 
 // Exercise the installed audio publisher and consumer rather than only generated signatures.
@@ -165,7 +192,7 @@ void audio_roundtrip()
 	CHECK(snapshot.has_value());
 	moq::AudioDecoderOutput decoded{};
 	decoded.format = moq::AudioSampleFormat::kF32;
-	// The track's whole retention: reading starts only after finish, and the budget ages
+	// The track's whole max age: reading starts only after finish, and the budget ages
 	// groups by wall clock, so a stalled host would otherwise skip the start.
 	decoded.delay = moq::Delay{std::chrono::seconds(0), std::chrono::seconds(30)};
 	auto consumer = ok(moq::AudioConsumer::subscribe(receiver, "tone", snapshot->audio.at("tone"), decoded).get(),
@@ -234,6 +261,7 @@ void audio_roundtrip()
 int main()
 {
 	timestamp_roundtrip();
+	datagram_tracks();
 	subscription_defaults();
 	audio_roundtrip();
 	auto timebase_owner = ok(moq::BroadcastProducer::init(), "timebase owner");
@@ -265,24 +293,23 @@ int main()
 	// It prints the message Rust's Display gives.
 	CHECK(fingerprints.error().to_string() == "bind: not listening; call listen() first");
 
-	// Publisher: a server whose origin serves one broadcast with one track. Dropping the
-	// publication keeps the route, which lasts until the broadcast closes.
+	// Publisher: a server whose origin serves one broadcast with one track. The route, created
+	// hidden until its track exists, keeps the broadcast announced while it is held.
 	auto origin = moq::OriginProducer::init({});
-	std::shared_ptr<moq::BroadcastProducer> broadcast;
-	std::shared_ptr<moq::TrackProducer> track;
-	{
-		auto publication = ok(origin->create_broadcast("probe"), "create_broadcast");
-		broadcast = publication->broadcast();
-		moq::TrackInfo info;
-		info.timescale = 1000000;
-		track = ok(broadcast->publish_track("data", info), "publish_track");
-		ok(publication->announce({}), "announce");
-	}
+	moq::RouteOptions hidden;
+	hidden.hidden = true;
+	auto route = ok(origin->route("probe", hidden), "route");
+	CHECK(!route->instance_id().empty());
+	auto broadcast = ok(route->broadcast(), "route broadcast");
+	moq::TrackInfo info;
+	info.timescale = 1000000;
+	auto track = ok(broadcast->publish_track("data", info), "publish_track");
+	ok(route->announce(), "announce");
 
-	// A closed broadcast's publication can no longer announce.
-	auto stale = ok(origin->create_broadcast("stale"), "create_broadcast");
-	ok(stale->broadcast()->close(), "close stale broadcast");
-	auto reannounced = stale->announce({});
+	// A route whose broadcast closed can no longer announce.
+	auto stale = ok(origin->route("stale", {}), "route");
+	ok(ok(stale->broadcast(), "stale broadcast")->close(), "close stale broadcast");
+	auto reannounced = stale->announce();
 	CHECK(!reannounced);
 	CHECK(std::holds_alternative<moq::Error::kClosed>(reannounced.error().get_variant()));
 
@@ -313,7 +340,9 @@ int main()
 
 	// Subscriber: resolve the announced broadcast and subscribe to its track.
 	auto announced = ok(session->consume()->follow("probe", std::nullopt), "follow");
+	// The first available() is never offline.
 	auto remote = ok(announced->available().get(), "available");
+	CHECK(remote);
 	auto consumer = ok(remote->subscribe_track("data", std::nullopt).get(), "subscribe_track");
 
 	// Cancel a read that has nothing to deliver yet.

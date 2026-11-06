@@ -585,8 +585,10 @@ public:
 		  uint64_t start_us = 1'000'000)
 		: timestamp_us(start_us)
 	{
-		auto publication = TestOk(relay.origin->create_broadcast(path), "create_broadcast");
-		broadcast = publication->broadcast();
+		moq::RouteOptions hidden;
+		hidden.hidden = true;
+		route = TestOk(relay.origin->route(path, hidden), "route");
+		broadcast = TestOk(route->broadcast(), "route broadcast");
 		if (video) {
 			moq::VideoInit init{};
 			init.format = moq::VideoFormat::kAvc3;
@@ -603,7 +605,7 @@ public:
 				TestOk(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, init),
 				       "audio producer");
 		}
-		TestOk(publication->announce(moq::AnnounceRoute{}), "announce");
+		TestOk(route->announce(), "announce");
 	}
 
 	~Publisher() { (void)broadcast->close(); }
@@ -632,6 +634,8 @@ public:
 			timeout);
 	}
 
+	// Keeps the broadcast announced for the publisher's lifetime.
+	std::shared_ptr<moq::Route> route;
 	std::shared_ptr<moq::BroadcastProducer> broadcast;
 	std::shared_ptr<moq::MediaTrackProducer> video;
 	std::shared_ptr<moq::MediaTrackProducer> audio;
@@ -1187,41 +1191,12 @@ int main()
 		       std::vector<std::string>{"f-stereo", "d-mono", "e-slow", "c-low", "b-unknown-bitrate",
 						"a-disabled"}));
 
-		// Only enabled renditions are candidates while any is, even one the source holds.
-		const auto all = [](const auto &) {
-			return true;
-		};
-		const auto none = [](const auto &) {
-			return false;
-		};
-		CHECK((names(moq_source_candidates(moq_source_ranked_audio(audios), all)) ==
+		// Only enabled renditions are candidates.
+		CHECK((names(moq_source_candidates(moq_source_ranked_audio(audios))) ==
 		       std::vector<std::string>{"f-stereo", "d-mono", "e-slow", "c-low", "b-unknown-bitrate"}));
-		// With every rendition disabled, only a held one remains, and nothing when none is held.
 		for (auto &entry : audios)
 			entry.second.enabled = false;
-		const auto held = [](const auto &entry) {
-			return entry.first == "c-low";
-		};
-		CHECK((names(moq_source_candidates(moq_source_ranked_audio(audios), held)) ==
-		       std::vector<std::string>{"c-low"}));
-		CHECK(moq_source_candidates(moq_source_ranked_audio(audios), none).empty());
-
-		// The codecs moq-audio decodes, with AAC-LC in either spelling hang parses.
-		const auto decodes = [&](const char *codec, uint32_t channels) {
-			auto config = base_audio;
-			config.codec = codec;
-			config.channel_count = channels;
-			return moq_source_audio_decodes(config);
-		};
-		for (const char *codec : {"opus", "pcm", "mp4a.40.2", "mp4a.40.02"})
-			CHECK(decodes(codec, 2));
-		for (const char *codec : {"flac", "mp4a.40.5", "mp4a.40.20", "mp4a.40.", "mp4a.40.0"})
-			CHECK(!decodes(codec, 2));
-		// moq-audio decodes AAC only in mono or stereo, unlike Opus and PCM.
-		CHECK(decodes("mp4a.40.2", 1));
-		CHECK(!decodes("mp4a.40.2", 6));
-		CHECK(decodes("opus", 6));
-		CHECK(decodes("pcm", 6));
+		CHECK(moq_source_candidates(moq_source_ranked_audio(audios)).empty());
 	}
 	report("renditions rank like hang");
 
@@ -1273,6 +1248,23 @@ int main()
 		he_aac_audio.description.reset();
 		he_aac_audio.bitrate = 5500000;
 		catalog.audio.emplace("he-aac", he_aac_audio);
+		// A recognized codec with a malformed description is also a setup refusal.
+		auto malformed_audio = audio;
+		malformed_audio.description = std::vector<uint8_t>{};
+		malformed_audio.bitrate = 5600000;
+		catalog.audio.emplace("malformed", malformed_audio);
+		// AAC-LC by name, but its description declares SBR, which moq-audio refuses.
+		auto sbr_audio = audio;
+		sbr_audio.codec = "mp4a.40.2";
+		sbr_audio.description = std::vector<uint8_t>{0x12, 0x10, 0x56, 0xe5, 0x98};
+		sbr_audio.bitrate = 5400000;
+		catalog.audio.emplace("sbr", sbr_audio);
+		// Two bytes can still be malformed: this ASC promises a missing explicit sample rate.
+		auto truncated_aac_audio = audio;
+		truncated_aac_audio.codec = "mp4a.40.2";
+		truncated_aac_audio.description = std::vector<uint8_t>{0x17, 0x90};
+		truncated_aac_audio.bitrate = 5450000;
+		catalog.audio.emplace("truncated-aac", truncated_aac_audio);
 		// 5.1 AAC-LC: OBS has the layout, but moq-audio decodes AAC only in mono or stereo.
 		auto surround_aac_audio = audio;
 		surround_aac_audio.codec = "mp4a.40.2";
@@ -1295,17 +1287,21 @@ int main()
 			moq_source_subscribe_video(ctx, conn, catalog);
 			moq_source_subscribe_audio(ctx, conn, catalog);
 			CHECK(conn->pending_video && conn->pending_video->id == "c");
-			CHECK(conn->pending_audio && conn->pending_audio->id == "c");
+			// Selection continues asynchronously when setup refuses a rendition.
 			// The playing tracks stay until the replacement delivers.
 			CHECK(conn->video && conn->video->id == video_id);
 			CHECK(conn->audio && conn->audio->id == audio_id);
 		}
+		CHECK(publisher.WriteUntil([&] {
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			return ctx->connection->audio && ctx->connection->audio->id == "c";
+		}));
 		destroySource(source);
 	}
 	report("disabled and undecodable renditions fall through");
 
-	// With every rendition disabled, the source holds the one it plays; with none of them
-	// held, the section is handled like an absent one.
+	// With every rendition disabled, the section is handled like an absent one, even the
+	// rendition the source plays.
 	{
 		TestRelay relay;
 		reset(relay.Url());
@@ -1314,29 +1310,10 @@ int main()
 		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
 		auto snapshot = CatalogSnapshot(publisher);
 		auto *ctx = static_cast<moq_source *>(source);
-		std::weak_ptr<Track> video;
-		std::weak_ptr<Track> audio;
 		for (auto &entry : snapshot.video)
 			entry.second.enabled = false;
 		for (auto &entry : snapshot.audio)
 			entry.second.enabled = false;
-		{
-			std::lock_guard<std::mutex> lock(ctx->mutex);
-			const auto &conn = ctx->connection;
-			video = conn->video;
-			audio = conn->audio;
-			moq_source_subscribe_video(ctx, conn, snapshot);
-			moq_source_subscribe_audio(ctx, conn, snapshot);
-			CHECK(conn->video && conn->video == video.lock() && !conn->pending_video);
-			CHECK(conn->audio && conn->audio == audio.lock() && !conn->pending_audio);
-		}
-		const int frames = g_output_frames;
-		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));
-
-		// A disabled rendition the source does not play is not held.
-		auto &config = snapshot.video.begin()->second;
-		config.coded = moq::Dimensions{(config.coded ? config.coded->width : 0) + 16, 16};
-		snapshot.audio.begin()->second.sample_rate += 1;
 		const int blanks = g_blank_calls;
 		{
 			std::lock_guard<std::mutex> lock(ctx->mutex);
@@ -1349,9 +1326,9 @@ int main()
 		CHECK(g_blank_calls > blanks);
 		destroySource(source);
 	}
-	report("all-disabled section holds the playing rendition");
+	report("an all-disabled section clears the playing rendition");
 
-	// A rendition's publisher epoch is part of its identity, for the active and the pending
+	// A rendition's stream instance is part of what names it, for the active and the pending
 	// track alike: a sibling publisher restarting behind a stable catalog resubscribes.
 	{
 		TestRelay relay;
@@ -1364,20 +1341,20 @@ int main()
 		{
 			std::lock_guard<std::mutex> lock(ctx->mutex);
 			const auto &conn = ctx->connection;
-			snapshot.video.begin()->second.epoch = "01900000-0000-7000-8000-000000000001";
-			snapshot.audio.begin()->second.epoch = "01900000-0000-7000-8000-000000000001";
+			snapshot.video.begin()->second.instance = "01900000-0000-7000-8000-000000000001";
+			snapshot.audio.begin()->second.instance = "01900000-0000-7000-8000-000000000001";
 			moq_source_subscribe_video(ctx, conn, snapshot);
 			moq_source_subscribe_audio(ctx, conn, snapshot);
 			CHECK(conn->pending_video && conn->pending_audio);
 			const auto pending_video = conn->pending_video;
 			const auto pending_audio = conn->pending_audio;
-			// The same epoch keeps the pending track.
+			// The same instance keeps the pending track.
 			moq_source_subscribe_video(ctx, conn, snapshot);
 			moq_source_subscribe_audio(ctx, conn, snapshot);
 			CHECK(conn->pending_video == pending_video && conn->pending_audio == pending_audio);
-			// Another epoch replaces it.
-			snapshot.video.begin()->second.epoch = "01900000-0000-7000-8000-000000000002";
-			snapshot.audio.begin()->second.epoch = "01900000-0000-7000-8000-000000000002";
+			// Another instance replaces it.
+			snapshot.video.begin()->second.instance = "01900000-0000-7000-8000-000000000002";
+			snapshot.audio.begin()->second.instance = "01900000-0000-7000-8000-000000000002";
 			moq_source_subscribe_video(ctx, conn, snapshot);
 			moq_source_subscribe_audio(ctx, conn, snapshot);
 			CHECK(conn->pending_video && conn->pending_video != pending_video);
@@ -1385,7 +1362,7 @@ int main()
 		}
 		destroySource(source);
 	}
-	report("epoch change resubscribes");
+	report("instance change resubscribes");
 
 	// A new rendition that has not delivered a frame cannot stop the old track.
 	{
@@ -1603,11 +1580,15 @@ int main()
 		auto snapshot = TestOk(catalogs->next().get(), "catalog snapshot");
 		CHECK(snapshot.has_value());
 		auto config = snapshot->video.begin()->second;
-		std::shared_ptr<moq::Publication> hidden;
+		std::shared_ptr<moq::Route> hidden;
 		if (sibling) {
-			hidden = TestOk(relay.origin->create_broadcast("obs/hidden"), "unannounced sibling");
+			// A different stream than the one the rendition pins, hidden until announced.
+			moq::RouteOptions options;
+			options.hidden = true;
+			options.instance = "obs-test-other";
+			hidden = TestOk(relay.origin->route("obs/hidden", options), "unannounced sibling");
 			config.broadcast = "./hidden";
-			config.epoch = "01900000-0000-7000-8000-000000000001";
+			config.instance = "obs-test-pinned";
 		}
 		snapshot->video.clear();
 		snapshot->video.emplace("!unavailable", config);
@@ -1627,10 +1608,8 @@ int main()
 			// An unannounced sibling stays pending, without interrupting current playback.
 			const int frames = g_output_frames;
 			CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));
-			// A different publisher instance is a real resolution failure.
-			moq::AnnounceRoute route;
-			route.epoch = "01900000-0000-7000-8000-000000000002";
-			TestOk(hidden->announce(route), "announce mismatched sibling");
+			// A different stream is a real resolution failure.
+			TestOk(hidden->announce(), "announce mismatched sibling");
 		}
 		CHECK(WaitFor([] {
 			std::lock_guard<std::mutex> lock(g_candidate_mutex);

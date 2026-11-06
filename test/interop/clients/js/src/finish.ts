@@ -70,17 +70,18 @@ export function finish(
 			state.result = await readFinish(origin, path, frames, Milli(timeout));
 			return;
 		}
-		const broadcastPublication = origin.createBroadcast(Moq.Path.from(path));
-		const broadcast = broadcastPublication.broadcast;
+		const broadcastRoute = origin.route(Moq.Path.from(path), { hidden: true });
+		const broadcast = broadcastRoute.broadcast;
 		const config: Catalog.VideoConfig = {
 			codec: "avc1.42001e",
 			codedWidth: Catalog.u53(320),
 			codedHeight: Catalog.u53(240),
 			container: { kind: "legacy" },
 		};
+		// Late readers read the finished video from group 0.
 		const track = broadcast.createTrack("video", {
 			timescale: Moq.Time.Timescale.MICRO,
-			maxAge: Milli(Number.MAX_SAFE_INTEGER),
+			maxAge: null,
 			priority: Catalog.PRIORITY.video,
 		});
 		const media = new Container.Legacy.Producer(track, new Container.Legacy.Format(config));
@@ -127,27 +128,26 @@ export function finish(
 		catalog.serve(
 			broadcast.createTrack(Catalog.TRACK, {
 				timescale: Moq.Time.Timescale.MILLI,
-				maxAge: Milli(Number.MAX_SAFE_INTEGER),
 				priority: Catalog.PRIORITY.catalog,
 			}),
 			serving,
 		);
 		serving.close();
-		broadcastPublication.announce();
+		broadcastRoute.announce();
 		// Keep the finished broadcast up for the late readers, then take it offline.
 		state.lingerUs = LINGER * 1000;
 		state.ready = true;
 		await sleep(Nano.fromMilli(LINGER));
 		broadcast.close();
-		const healthPublication = origin.createBroadcast(Moq.Path.from(`${path}.health`));
-		const health = healthPublication.broadcast;
+		const healthRoute = origin.route(Moq.Path.from(`${path}.health`), { hidden: true });
+		const health = healthRoute.broadcast;
 		const healthTrack = health.createTrack("live");
 		const group = healthTrack.appendGroup();
 		group.writeFrame({ payload: new TextEncoder().encode("session-alive") });
 		group.finish();
 		healthTrack.finish();
 		healthTrack.close();
-		healthPublication.announce();
+		healthRoute.announce();
 		state.ended = true;
 		await ack;
 		health.close();

@@ -26,9 +26,11 @@ async fn after_abort(version: &str, hops: u32) {
 	let publisher = produce_origin(1);
 	let relay = produce_origin(2);
 	let far = produce_origin(3);
-	let broadcast = publisher.create_broadcast("bench").unwrap();
-	let track = broadcast.create_track("video", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher
+		.route("bench", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	broadcast.announce().unwrap();
 	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(relay.clone());
@@ -38,7 +40,13 @@ async fn after_abort(version: &str, hops: u32) {
 	options.client_subscribe = Some(far.clone());
 	let _pair2 = connect_mock(options).await;
 	let consumer = if hops == 2 { far.consume() } else { relay.consume() };
-	let remote = consumer.follow("bench", None).unwrap().available().await.unwrap();
+	let remote = consumer
+		.follow("bench", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
 	let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut open = track.append_group().unwrap();
 	open.write_frame(Timestamp::ZERO, b"head".as_ref()).unwrap();
@@ -71,16 +79,14 @@ abort_test!(abort_05_two, "moq-lite-05", 2);
 abort_test!(abort_06_one, "moq-lite-06", 1);
 abort_test!(abort_06_two, "moq-lite-06", 2);
 
-/// The publisher replaces an aborted track. The epoch lets the front resume onto the
+/// The publisher replaces an aborted track. The instance lets the front resume onto the
 /// replacement, and a group reader alone must drive that, without polling the next
 /// group.
 async fn recreate(finish: bool) {
 	let origin = produce_origin(1);
-	let broadcast = origin.create_broadcast("bench").unwrap();
-	broadcast
-		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
-		.unwrap();
-	let track = broadcast.create_track("video", timed()).unwrap();
+	let broadcast = origin.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+	broadcast.announce().unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	let remote = origin.consume().request("bench", None).await.unwrap();
 	let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut open = track.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
@@ -89,7 +95,7 @@ async fn recreate(finish: bool) {
 	assert_eq!(group.sequence, 2);
 	group.read_frame().await.unwrap().unwrap();
 	track.abort(moq_net::Error::Cancel).unwrap();
-	let fresh = broadcast.create_track("video", timed()).unwrap();
+	let fresh = broadcast.broadcast().create_track("video", timed()).unwrap();
 	let mut next = fresh.create_group(moq_net::group::Info { sequence: 3 }).unwrap();
 	next.write_frame(Timestamp::from_millis(1).unwrap(), b"next".as_ref())
 		.unwrap();

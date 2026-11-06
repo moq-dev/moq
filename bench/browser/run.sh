@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Real-browser transport and media benchmarks against a temporary relay.
 #
-#     bench/browser/run.sh [BASE] [--smoke] [--rounds N] [--scenarios transport,cmaf,media,racing]
+#     bench/browser/run.sh [BASE] [--smoke] [--rounds N] [--scenarios transport,cmaf,media,racing,stats]
 #
 # Variants, each bundled from the same page sources:
 #   current  this checkout, the reference
@@ -10,7 +10,7 @@
 #   base     BASE's checkout, when given
 #
 # The run directory is always kept: report.json, gzipped Chrome traces, and the
-# relay log. See bench/README.md.
+# relay log and page consoles. See bench/README.md.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -21,6 +21,7 @@ source "$WORKSPACE/test/lib/harness.sh"
 
 RERUN="$(harness_env BENCH_PROFILE RELAY_BIN BROWSER_BIN)just bench-browser$(harness_argv "$@")"
 
+ARGS=("$@")
 BASE=
 DRIVER=()
 while [[ $# -gt 0 ]]; do
@@ -63,6 +64,10 @@ if [[ -n $BASE ]]; then
     BASE_COMMIT=$(git -C "$WORKSPACE" rev-parse --verify "$BASE^{commit}")
 fi
 
+# shellcheck source-path=SCRIPTDIR source=../lock.sh
+source "$HERE/../lock.sh"
+bench_lock "$0" ${ARGS[@]+"${ARGS[@]}"}
+
 harness_begin bench-browser "$RERUN"
 
 for tool in cargo bun git; do
@@ -88,11 +93,11 @@ bun install --frozen-lockfile
 
 cd "$HERE"
 # The in-memory paths share Chromium installation and artifact retention with this lane.
-for benchmark in frames drift ledger resume-history; do
+for benchmark in frames drift ledger bandwidth replay resume-history buffered pattern; do
     bun micro.ts --bench "$benchmark" --rounds 1 --out "$HARNESS_RUN/$benchmark.json" \
         current="$WORKSPACE" aa="$WORKSPACE"
 done
-bun test ./fixture.test.ts ./summary.test.ts
+bun test ./fixture.test.ts ./summary.test.ts ./consoles.browser.ts
 variants=(current="$WORKSPACE" aa="$WORKSPACE" copy="$WORKSPACE:copy")
 names=current,aa,copy
 if [[ -n $BASE_COMMIT ]]; then

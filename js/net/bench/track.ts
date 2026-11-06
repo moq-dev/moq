@@ -57,12 +57,12 @@ async function measure(
 	const held = hold.count;
 	const window = Milli(held > 0 ? 3_600_000 : retained);
 	const producer = new Producer("bench").accept({ timescale: Timescale.MILLI, maxAge: window });
-	const subscribers = Array.from({ length: subscriberCount }, () => producer.subscribe({ maxDelay: window }));
+	const subscribers = Array.from({ length: subscriberCount }, () => producer.subscribe({ delay: { max: window } }));
 	let sequence = 0;
 	// Inserted by sequence, the way the wire hands a subscribed track its groups.
 	const publish = (close: boolean) => {
 		clock += held > 0 ? 1 : CACHE_WINDOW_MS / retained;
-		const group = producer.createGroup(sequence);
+		const group = producer.createGroup(BigInt(sequence));
 		group.writeFrame({ payload, timestamp: Timestamp.fromMillis(sequence++) });
 		if (close) group.finish();
 		return group;
@@ -106,7 +106,7 @@ async function measure(
 	// Completion wakes every subscriber independently of producer closure.
 	const ending = subscribers.map((subscriber) => subscriber.recvGroup());
 	const endStart = now();
-	producer.finishAt({ group: sequence, frame: 0 });
+	producer.finishAt({ group: BigInt(sequence), frame: 0 });
 	for (const group of await Promise.all(ending)) {
 		if (group) throw new Error("track did not end at its declared boundary");
 	}
@@ -116,7 +116,7 @@ async function measure(
 	// Ending the track releases the newest group too; idle cleanup reclaims the cache.
 	clock += CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8 + 1;
 	const idleStart = now();
-	const replay = producer.subscribe({ maxDelay: window });
+	const replay = producer.subscribe({ delay: { max: window } });
 	if (replay.tryRecvGroup()) throw new Error("idle cache entries were retained");
 	const idle = (now() - idleStart) * 1000;
 	replay.close();

@@ -30,7 +30,7 @@ publish or play request to accept, map to a path, or reject. The CLI listener
 is unauthenticated; firewall it.
 
 Each push or pull is its own broadcast, under a fresh
-[epoch](/concept/moq-lite#publisher-epochs): an encoder that reconnects while
+[instance](/concept/moq-lite#publisher-instances): an encoder that reconnects while
 its stale connection is still open replaces it at once. Viewers see the
 broadcast restart and their next subscribe reaches the new push, while what
 they already read from the stale push stays until they drop it or it closes. Import publishes the encoder's own timestamps

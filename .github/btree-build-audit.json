@@ -1,712 +1,704 @@
 {
-  "base_commit": "65ea670311d68058f5c3df74af669bc09c324c5c",
-  "date": "2026-10-26",
-  "compiler": "Rust 1.98.1 from repository Nix devshell",
-  "llvm_lines_version": "0.4.48 from repository-pinned nixpkgs",
-  "logical_cpus": 24,
-  "cpu_models": [
-    "Intel(R) Core(TM) Ultra 7 270K Plus"
-  ],
-  "environment": {
-    "MBX_DISABLE": "1",
-    "CARGO_INCREMENTAL": "0",
-    "CARGO_BUILD_JOBS": "2",
-    "CARGO_TARGET_DIR": "private worktree .tmp/target",
-    "host_cargo_profile_dev_debug": false
-  },
-  "method": "Warm dependencies; rebuild the package by restoring the selected source snapshot before every cohort. ABBA order, library then unit-test harness per cohort. Each process is admitted independently with quest gate. GNU time measures user+system CPU of cargo llvm-lines, including IR analysis, not only rustc. Unit-test harness uses --lib --profile test, which supplies --test itself.",
-  "commands": {
-    "lib": "cargo llvm-lines --locked -p moq-net --lib",
-    "test": "cargo llvm-lines --locked -p moq-net --lib --profile test"
-  },
-  "candidate_patch": "--- a/rs/moq-net/src/model/expiry.rs\n+++ b/rs/moq-net/src/model/expiry.rs\n@@ -73,8 +73,8 @@\n \t/// Reads parked on a time end, by the lowest sequence whose start could move it.\n \tstarts: BTreeMap<u64, kio::WaiterList>,\n \tstarts_sweep: usize,\n-\t/// Reads by wall-clock deadline, released by the pool's driver.\n-\twall: BTreeMap<crate::time::Instant, kio::WaiterList>,\n+\t/// Reads by wall-clock nanoseconds from the origin, released by the pool's driver.\n+\twall: BTreeMap<u64, kio::WaiterList>,\n \twall_sweep: usize,\n \t/// The earliest `wall` deadline the pool was asked to release, so arming a later one\n \t/// skips the pool's lock.\n@@ -162,7 +162,7 @@\n \t\t\tparked.wall.retain(|_, list| !list.is_empty());\n \t\t\tparked.wall_sweep = sweep_at(parked.wall.len());\n \t\t}\n-\t\tparked.wall.entry(at).or_default().register(waiter);\n+\t\tparked.wall.entry(nanos(at)).or_default().register(waiter);\n \t\tif parked.wall_armed.is_some_and(|armed| armed <= at) {\n \t\t\treturn None;\n \t\t}\n@@ -181,11 +181,11 @@\n \t\tlet next = {\n \t\t\tlet mut parked = self.parked.lock();\n \t\t\twhile let Some(entry) = parked.wall.first_entry()\n-\t\t\t\t&& *entry.key() <= now\n+\t\t\t\t&& *entry.key() <= nanos(now)\n \t\t\t{\n \t\t\t\twoken.push(entry.remove());\n \t\t\t}\n-\t\t\tparked.wall_armed = parked.wall.first_key_value().map(|(at, _)| *at);\n+\t\t\tparked.wall_armed = parked.wall.first_key_value().map(|(at, _)| crate::time::Instant::ZERO + Duration::from_nanos(*at));\n \t\t\tparked.wall_sweep = lower(parked.wall_sweep, parked.wall.len());\n \t\t\tparked.wall_armed\n \t\t};\n@@ -328,6 +328,14 @@\n }\n \n /// Saturate a microsecond count into a deadline key.\n+// Instant's entire domain is u64 nanoseconds from this origin.\n+fn nanos(at: crate::time::Instant) -> u64 {\n+\tat.duration_since(crate::time::Instant::ZERO)\n+\t\t.as_nanos()\n+\t\t.try_into()\n+\t\t.expect(\"instant fits u64 nanoseconds\")\n+}\n+\n fn micros(value: u128) -> u64 {\n \tvalue.try_into().unwrap_or(u64::MAX)\n }\n",
-  "concrete_btree_map_key_value_spellings": [
-    "(moq_clock::instant::Instant, alloc::sync::Arc<str>), alloc::collections::btree::set_val::SetValZST",
-    "(moq_clock::instant::Instant, moq_net::path::Path), alloc::collections::btree::set_val::SetValZST",
-    "(moq_clock::instant::Instant, u64), alloc::collections::btree::set_val::SetValZST",
-    "(moq_clock::instant::Instant, u64), moq_net::path::Path",
-    "(moq_clock::instant::Instant, usize), alloc::sync::Weak<moq_net::model::cache::Track>",
-    "(u64, u64), alloc::collections::btree::set_val::SetValZST",
-    "alloc::sync::Arc<str>, moq_net::model::front::Track",
-    "alloc::sync::Arc<str>, moq_net::model::track::Info",
-    "core::time::Duration, usize",
-    "i8, usize",
-    "moq_clock::instant::Instant, kio::waiter::WaiterList",
-    "moq_net::model::subscription::Range, usize",
-    "moq_net::path::Path, alloc::collections::btree::set_val::SetValZST",
-    "moq_net::path::Path, moq_net::model::origin_impl::Announce",
-    "moq_net::priority::PriorityItem, alloc::collections::btree::set_val::SetValZST",
-    "rangemap::range_wrapper::RangeInclusiveStartWrapper<u64>, ()",
-    "rangemap::range_wrapper::RangeInclusiveStartWrapper<u64>, core::time::Duration",
-    "rangemap::range_wrapper::RangeStartWrapper<u64>, ()",
-    "rangemap::range_wrapper::RangeStartWrapper<u64>, moq_net::error::StreamError",
-    "rangemap::range_wrapper::RangeStartWrapper<u64>, moq_net::model::track::fill::Refusal",
-    "rangemap::range_wrapper::RangeStartWrapper<u64>, u32",
-    "rangemap::range_wrapper::RangeStartWrapper<u64>, u64",
-    "u64, alloc::collections::btree::set_val::SetValZST",
-    "u64, kio::waiter::WaiterList",
-    "u64, moq_net::auth::Attached",
-    "u64, moq_net::auth::Grant",
-    "u64, moq_net::auth::Slot",
-    "u64, moq_net::auth::Token",
-    "u64, moq_net::ledger::Run",
-    "u64, moq_net::lite::subscriber::HeldFetch",
-    "u64, moq_net::model::bandwidth::Entry",
-    "u64, moq_net::model::time::Timestamp",
-    "u64, moq_net::model::track::Slot",
-    "u64, moq_net::path::Path",
-    "u64, moq_net::stats::Content",
-    "u64, u64",
-    "u64, usize",
-    "usize, kio::lock::Lock<moq_net::model::aborts::State>"
-  ],
-  "btree_ir_lines": {
-    "baseline_lib": 308892,
-    "candidate_lib": 302479,
-    "baseline_test": 364034,
-    "candidate_test": 357621
-  },
-  "samples": [
-    {
-      "user": 13.0,
-      "system": 0.79,
-      "wall": 13.82,
-      "max_rss_kib": 1321180,
-      "lines": 1360948,
-      "label": "baseline",
-      "target": "lib",
-      "serial": 1,
-      "load_before": "23.64 21.40 13.79 10/7295 3105938",
-      "load_after": "22.20 21.20 13.85 13/7303 3113127",
-      "cpu_seconds": 13.79
-    },
-    {
-      "user": 48.91,
-      "system": 3.44,
-      "wall": 50.91,
-      "max_rss_kib": 2997632,
-      "lines": 3292164,
-      "label": "baseline",
-      "target": "test",
-      "serial": 1,
-      "load_before": "20.52 20.88 13.86 20/7344 3125026",
-      "load_after": "20.20 20.60 14.13 11/7379 3155706",
-      "cpu_seconds": 52.35
-    },
-    {
-      "user": 15.63,
-      "system": 1.35,
-      "wall": 17.7,
-      "max_rss_kib": 1315024,
-      "lines": 1354463,
-      "label": "candidate",
-      "target": "lib",
-      "serial": 2,
-      "load_before": "22.48 21.06 14.42 39/7643 3169708",
-      "load_after": "24.33 21.60 14.74 32/7487 3175331",
-      "cpu_seconds": 16.98
-    },
-    {
-      "user": 48.89,
-      "system": 4.03,
-      "wall": 50.91,
-      "max_rss_kib": 2993380,
-      "lines": 3285679,
-      "label": "candidate",
-      "target": "test",
-      "serial": 2,
-      "load_before": "23.71 22.17 15.31 14/6672 3206092",
-      "load_after": "20.76 21.53 15.45 18/6576 3235480",
-      "cpu_seconds": 52.92
-    },
-    {
-      "user": 12.26,
-      "system": 0.95,
-      "wall": 13.31,
-      "max_rss_kib": 1290452,
-      "lines": 1354463,
-      "label": "candidate",
-      "target": "lib",
-      "serial": 3,
-      "load_before": "21.23 21.61 15.54 25/6814 3240464",
-      "load_after": "20.31 21.39 15.54 16/6609 3261066",
-      "cpu_seconds": 13.21
-    },
-    {
-      "user": 46.9,
-      "system": 3.55,
-      "wall": 48.02,
-      "max_rss_kib": 2994248,
-      "lines": 3285679,
-      "label": "candidate",
-      "target": "test",
-      "serial": 3,
-      "load_before": "20.31 21.39 15.54 16/6624 3261150",
-      "load_after": "16.94 20.35 15.49 9/6463 3307124",
-      "cpu_seconds": 50.45
-    },
-    {
-      "user": 11.85,
-      "system": 0.82,
-      "wall": 12.7,
-      "max_rss_kib": 1309320,
-      "lines": 1360948,
-      "label": "baseline",
-      "target": "lib",
-      "serial": 4,
-      "load_before": "16.94 20.35 15.49 10/6458 3307273",
-      "load_after": "16.18 20.01 15.46 30/6401 3329839",
-      "cpu_seconds": 12.67
-    },
-    {
-      "user": 54.18,
-      "system": 3.74,
-      "wall": 59.9,
-      "max_rss_kib": 2996428,
-      "lines": 3292164,
-      "label": "baseline",
-      "target": "test",
-      "serial": 4,
-      "load_before": "16.18 20.01 15.46 14/6391 3330130",
-      "load_after": "27.19 22.38 16.55 19/6374 3426402",
-      "cpu_seconds": 57.92
-    }
-  ],
-  "decision": "Original source restored; candidate not retained. CPU ranges overlap and library/test median directions disagree; no CPU improvement demonstrated on this shared host.",
-  "rustc_version_verbose": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8",
-  "quiet_host_repeat": {
-    "date": "2026-10-31",
-    "base_commit": "51836997ce9352e3594f33a75d4ae69ec268bb95",
-    "compiler": "Rust 1.98.1 (48a229cea 2026-09-01), LLVM 22.1.8, from repository Nix devshell",
-    "llvm_lines_version": "0.4.48",
-    "perf_version": "7.2.10",
-    "host": "dedicated idle NixOS desktop, Intel Core i7-8700 (6 cores / 12 threads), 15 GiB RAM; one-minute load 1.14-1.71 throughout",
-    "environment": {
-      "MBX_DISABLE": "1",
-      "CARGO_INCREMENTAL": "0",
-      "CARGO_BUILD_JOBS": "2",
-      "CARGO_PROFILE_DEV_DEBUG": "false",
-      "CARGO_TARGET_DIR": "private scratch target"
-    },
-    "method": "Warm dependencies, then 6 rounds of baseline/candidate/candidate/baseline (12 samples per variant and target). Each sample restores the selected expiry.rs, touches moq-net's lib.rs so only moq-net rebuilds, and runs the command under perf stat (instructions:u, cycles:u, task-clock over the whole cargo process tree). Significance is a two-sided permutation test on the difference of means (20,000 shuffles).",
-    "commands": {
-      "lib": "cargo build --locked -p moq-net --lib",
-      "test": "cargo test --locked -p moq-net --lib --no-run"
-    },
-    "llvm_lines": {
-      "baseline_lib": 1379943,
-      "candidate_lib": 1373458,
-      "baseline_test": 3451146,
-      "candidate_test": 3444661,
-      "btree_rows_baseline_lib": 332566,
-      "btree_rows_candidate_lib": 326153,
-      "btree_rows_baseline_test": 407587,
-      "btree_rows_candidate_test": 401174
-    },
-    "summary": {
-      "lib": {
-        "instructions_u_mean_diff_pct": -0.191,
-        "instructions_u_p": 0.0,
-        "task_clock_median_ms": [
-          16346.4,
-          16318.6
-        ],
-        "task_clock_mean_diff_pct": 0.605,
-        "task_clock_p": 0.32
-      },
-      "test": {
-        "instructions_u_mean_diff_pct": -0.062,
-        "instructions_u_p": 0.0,
-        "task_clock_median_ms": [
-          47362.7,
-          47089.4
-        ],
-        "task_clock_mean_diff_pct": -0.317,
-        "task_clock_p": 0.4
-      }
-    },
-    "samples": [
-      {
-        "serial": 1,
-        "label": "baseline",
-        "target": "lib",
-        "instructions_u": 78595762786,
-        "cycles_u": 69441868007,
-        "task_clock_ms": 16350.18,
-        "load1_before": 1.14,
-        "load1_after": 1.19
-      },
-      {
-        "serial": 2,
-        "label": "baseline",
-        "target": "test",
-        "instructions_u": 216774234434,
-        "cycles_u": 192492201144,
-        "task_clock_ms": 47286.77,
-        "load1_before": 1.19,
-        "load1_after": 1.33
-      },
-      {
-        "serial": 3,
-        "label": "candidate",
-        "target": "lib",
-        "instructions_u": 78489626476,
-        "cycles_u": 69301121813,
-        "task_clock_ms": 16346.15,
-        "load1_before": 1.33,
-        "load1_after": 1.33
-      },
-      {
-        "serial": 4,
-        "label": "candidate",
-        "target": "test",
-        "instructions_u": 216628350647,
-        "cycles_u": 192395167557,
-        "task_clock_ms": 46803.22,
-        "load1_before": 1.33,
-        "load1_after": 1.33
-      },
-      {
-        "serial": 5,
-        "label": "candidate",
-        "target": "lib",
-        "instructions_u": 78451207627,
-        "cycles_u": 69047613411,
-        "task_clock_ms": 16354.2,
-        "load1_before": 1.33,
-        "load1_after": 1.28
-      },
-      {
-        "serial": 6,
-        "label": "candidate",
-        "target": "test",
-        "instructions_u": 216629651137,
-        "cycles_u": 193584953916,
-        "task_clock_ms": 47502.61,
-        "load1_before": 1.28,
-        "load1_after": 1.28
-      },
-      {
-        "serial": 7,
-        "label": "baseline",
-        "target": "lib",
-        "instructions_u": 78587855482,
-        "cycles_u": 69556149337,
-        "task_clock_ms": 16344.7,
-        "load1_before": 1.28,
-        "load1_after": 1.32
-      },
-      {
-        "serial": 8,
-        "label": "baseline",
-        "target": "test",
-        "instructions_u": 216805109236,
-        "cycles_u": 193093035221,
-        "task_clock_ms": 47497.12,
-        "load1_before": 1.32,
-        "load1_after": 1.3
-      },
-      {
-        "serial": 9,
-        "label": "baseline",
-        "target": "lib",
-        "instructions_u": 78586793969,
-        "cycles_u": 69247560039,
-        "task_clock_ms": 16261.34,
-        "load1_before": 1.3,
-        "load1_after": 1.34
-      },
-      {
-        "serial": 10,
-        "label": "baseline",
-        "target": "test",
-        "instructions_u": 216795833118,
-        "cycles_u": 192518719869,
-        "task_clock_ms": 46505.67,
-        "load1_before": 1.34,
-        "load1_after": 1.54
-      },
-      {
-        "serial": 11,
-        "label": "candidate",
-        "target": "lib",
-        "instructions_u": 78442268347,
-        "cycles_u": 71069503430,
-        "task_clock_ms": 17176.58,
-        "load1_before": 1.54,
-        "load1_after": 1.71
-      },
-      {
-        "serial": 12,
-        "label": "candidate",
-        "target": "test",
-        "instructions_u": 216762068930,
-        "cycles_u": 192635112392,
-        "task_clock_ms": 47566.34,
-        "load1_before": 1.71,
-        "load1_after": 1.55
-      },
-      {
-        "serial": 13,
-        "label": "candidate",
-        "target": "lib",
-        "instructions_u": 78468082012,
-        "cycles_u": 69031279354,
-        "task_clock_ms": 16280.24,
-        "load1_before": 1.55,
-        "load1_after": 1.51
-      },
-      {
-        "serial": 14,
-        "label": "candidate",
-        "target": "test",
-        "instructions_u": 216668434184,
-        "cycles_u": 192447669523,
-        "task_clock_ms": 47076.29,
-        "load1_before": 1.51,
-        "load1_after": 1.5
-      },
-      {
-        "serial": 15,
-        "label": "baseline",
-        "target": "lib",
-        "instructions_u": 78618679615,
-        "cycles_u": 69017574402,
-        "task_clock_ms": 16228.39,
-        "load1_before": 1.5,
-        "load1_after": 1.47
-      },
-      {
-        "serial": 16,
-        "label": "baseline",
-        "target": "test",
-        "instructions_u": 216795919266,
-        "cycles_u": 192859306046,
-        "task_clock_ms": 46988.58,
-        "load1_before": 1.47,
-        "load1_after": 1.4
-      },
-      {
-        "serial": 17,
-        "label": "baseline",
-        "target": "lib",
-        "instructions_u": 78597781947,
-        "cycles_u": 69623999251,
-        "task_clock_ms": 16399.98,
-        "load1_before": 1.4,
-        "load1_after": 1.34
-      },
-      {
-        "serial": 18,
-        "label": "baseline",
-        "target": "test",
-        "instructions_u": 216817372818,
-        "cycles_u": 192805325692,
-        "task_clock_ms": 47392.38,
-        "load1_before": 1.34,
-        "load1_after": 1.25
-      },
-      {
-        "serial": 19,
-        "label": "candidate",
-        "target": "lib",
-        "instructions_u": 78432203711,
-        "cycles_u": 68890381885,
-        "task_clock_ms": 16242.27,
-        "load1_before": 1.25,
-        "load1_after": 1.21
-      },
-      {
-        "serial": 20,
-        "label": "candidate",
-        "target": "test",
-        "instructions_u": 216651065719,
-        "cycles_u": 193871815485,
-        "task_clock_ms": 47992.03,
-        "load1_before": 1.21,
-        "load1_after": 1.17
-      },
-      {
-        "serial": 21,
-        "label": "candidate",
-        "target": "lib",
-        "instructions_u": 78455530670,
-        "cycles_u": 68870942571,
-        "task_clock_ms": 16209.19,
-        "load1_before": 1.17,
-        "load1_after": 1.23
-      },
-      {
-        "serial": 22,
-        "label": "candidate",
-        "target": "test",
-        "instructions_u": 216655858135,
-        "cycles_u": 192547468970,
-        "task_clock_ms": 47077.06,
-        "load1_before": 1.23,
-        "load1_after": 1.28
-      },
-      {
-        "serial": 23,
-        "label": "baseline",
-        "target": "lib",
-        "instructions_u": 78597338790,
-        "cycles_u": 69090890812,
-        "task_clock_ms": 16274.39,
-        "load1_before": 1.28,
-        "load1_after": 1.3
-      },
-      {
-        "serial": 24,
-        "label": "baseline",
-        "target": "test",
-        "instructions_u": 216827838520,
-        "cycles_u": 192468073363,
-        "task_clock_ms": 47211.18,
-        "load1_before": 1.3,
-        "load1_after": 1.39
-      },
-      {
-        "serial": 25,
-        "label": "baseline",
-        "target": "lib",
-        "instructions_u": 78609925814,
-        "cycles_u": 68819836843,
-        "task_clock_ms": 16230.3,
-        "load1_before": 1.39,
-        "load1_after": 1.39
-      },
-      {
-        "serial": 26,
-        "label": "baseline",
-        "target": "test",
-        "instructions_u": 216789508765,
-        "cycles_u": 194904685774,
-        "task_clock_ms": 47991.34,
-        "load1_before": 1.39,
-        "load1_after": 1.49
-      },
-      {
-        "serial": 27,
-        "label": "candidate",
-        "target": "lib",
-        "instructions_u": 78448532205,
-        "cycles_u": 68692242869,
-        "task_clock_ms": 16201.5,
-        "load1_before": 1.49,
-        "load1_after": 1.46
-      },
-      {
-        "serial": 28,
-        "label": "candidate",
-        "target": "test",
-        "instructions_u": 216644562328,
-        "cycles_u": 194213570131,
-        "task_clock_ms": 47627.72,
-        "load1_before": 1.46,
-        "load1_after": 1.48
-      },
-      {
-        "serial": 29,
-        "label": "candidate",
-        "target": "lib",
-        "instructions_u": 78473964093,
-        "cycles_u": 69126975746,
-        "task_clock_ms": 16291.0,
-        "load1_before": 1.48,
-        "load1_after": 1.45
-      },
-      {
-        "serial": 30,
-        "label": "candidate",
-        "target": "test",
-        "instructions_u": 216720281303,
-        "cycles_u": 192045974626,
-        "task_clock_ms": 46706.68,
-        "load1_before": 1.45,
-        "load1_after": 1.39
-      },
-      {
-        "serial": 31,
-        "label": "baseline",
-        "target": "lib",
-        "instructions_u": 78613048515,
-        "cycles_u": 69261210118,
-        "task_clock_ms": 16348.11,
-        "load1_before": 1.39,
-        "load1_after": 1.33
-      },
-      {
-        "serial": 32,
-        "label": "baseline",
-        "target": "test",
-        "instructions_u": 216843517919,
-        "cycles_u": 192783302492,
-        "task_clock_ms": 46967.5,
-        "load1_before": 1.33,
-        "load1_after": 1.16
-      },
-      {
-        "serial": 33,
-        "label": "baseline",
-        "target": "lib",
-        "instructions_u": 78625377197,
-        "cycles_u": 69803117569,
-        "task_clock_ms": 16393.42,
-        "load1_before": 1.16,
-        "load1_after": 1.21
-      },
-      {
-        "serial": 34,
-        "label": "baseline",
-        "target": "test",
-        "instructions_u": 216786558657,
-        "cycles_u": 192922877744,
-        "task_clock_ms": 47461.4,
-        "load1_before": 1.21,
-        "load1_after": 1.25
-      },
-      {
-        "serial": 35,
-        "label": "candidate",
-        "target": "lib",
-        "instructions_u": 78454978368,
-        "cycles_u": 69077238599,
-        "task_clock_ms": 16277.33,
-        "load1_before": 1.25,
-        "load1_after": 1.29
-      },
-      {
-        "serial": 36,
-        "label": "candidate",
-        "target": "test",
-        "instructions_u": 216633074769,
-        "cycles_u": 192318663559,
-        "task_clock_ms": 46268.57,
-        "load1_before": 1.29,
-        "load1_after": 1.32
-      },
-      {
-        "serial": 37,
-        "label": "candidate",
-        "target": "lib",
-        "instructions_u": 78445987701,
-        "cycles_u": 69624949328,
-        "task_clock_ms": 16436.63,
-        "load1_before": 1.32,
-        "load1_after": 1.33
-      },
-      {
-        "serial": 38,
-        "label": "candidate",
-        "target": "test",
-        "instructions_u": 216679473223,
-        "cycles_u": 191932626075,
-        "task_clock_ms": 47101.67,
-        "load1_before": 1.33,
-        "load1_after": 1.32
-      },
-      {
-        "serial": 39,
-        "label": "baseline",
-        "target": "lib",
-        "instructions_u": 78607319488,
-        "cycles_u": 69571751776,
-        "task_clock_ms": 16356.71,
-        "load1_before": 1.32,
-        "load1_after": 1.27
-      },
-      {
-        "serial": 40,
-        "label": "baseline",
-        "target": "test",
-        "instructions_u": 216800195033,
-        "cycles_u": 193959718658,
-        "task_clock_ms": 47356.87,
-        "load1_before": 1.27,
-        "load1_after": 1.34
-      },
-      {
-        "serial": 41,
-        "label": "baseline",
-        "target": "lib",
-        "instructions_u": 78615471249,
-        "cycles_u": 68947274708,
-        "task_clock_ms": 16237.16,
-        "load1_before": 1.34,
-        "load1_after": 1.37
-      },
-      {
-        "serial": 42,
-        "label": "baseline",
-        "target": "test",
-        "instructions_u": 216759603439,
-        "cycles_u": 193300506758,
-        "task_clock_ms": 47368.51,
-        "load1_before": 1.37,
-        "load1_after": 1.33
-      },
-      {
-        "serial": 43,
-        "label": "candidate",
-        "target": "lib",
-        "instructions_u": 78461376573,
-        "cycles_u": 70117331779,
-        "task_clock_ms": 16770.41,
-        "load1_before": 1.33,
-        "load1_after": 1.44
-      },
-      {
-        "serial": 44,
-        "label": "candidate",
-        "target": "test",
-        "instructions_u": 216614030718,
-        "cycles_u": 192545968501,
-        "task_clock_ms": 47378.44,
-        "load1_before": 1.44,
-        "load1_after": 1.37
-      },
-      {
-        "serial": 45,
-        "label": "candidate",
-        "target": "lib",
-        "instructions_u": 78459256605,
-        "cycles_u": 69581518063,
-        "task_clock_ms": 16401.82,
-        "load1_before": 1.37,
-        "load1_after": 1.39
-      },
-      {
-        "serial": 46,
-        "label": "candidate",
-        "target": "test",
-        "instructions_u": 216704795723,
-        "cycles_u": 192467732513,
-        "task_clock_ms": 46599.3,
-        "load1_before": 1.39,
-        "load1_after": 1.37
-      },
-      {
-        "serial": 47,
-        "label": "baseline",
-        "target": "lib",
-        "instructions_u": 78632568022,
-        "cycles_u": 69451805342,
-        "task_clock_ms": 16378.99,
-        "load1_before": 1.37,
-        "load1_after": 1.37
-      },
-      {
-        "serial": 48,
-        "label": "baseline",
-        "target": "test",
-        "instructions_u": 216819785465,
-        "cycles_u": 193556633274,
-        "task_clock_ms": 47471.53,
-        "load1_before": 1.37,
-        "load1_after": 1.35
-      }
-    ],
-    "decision": "Candidate not retained. The instruction reduction is real but small (0.19% lib, 0.06% test, about 150M instructions or roughly 30 ms of CPU per build); CPU time does not drop beyond noise on a quiet host with 12 samples per variant."
-  }
+	"base_commit": "65ea670311d68058f5c3df74af669bc09c324c5c",
+	"date": "2026-10-26",
+	"compiler": "Rust 1.98.1 from repository Nix devshell",
+	"llvm_lines_version": "0.4.48 from repository-pinned nixpkgs",
+	"logical_cpus": 24,
+	"cpu_models": ["Intel(R) Core(TM) Ultra 7 270K Plus"],
+	"environment": {
+		"MBX_DISABLE": "1",
+		"CARGO_INCREMENTAL": "0",
+		"CARGO_BUILD_JOBS": "2",
+		"CARGO_TARGET_DIR": "private worktree .tmp/target",
+		"host_cargo_profile_dev_debug": false
+	},
+	"method": "Warm dependencies; rebuild the package by restoring the selected source snapshot before every cohort. ABBA order, library then unit-test harness per cohort. Each process is admitted independently with quest gate. GNU time measures user+system CPU of cargo llvm-lines, including IR analysis, not only rustc. Unit-test harness uses --lib --profile test, which supplies --test itself.",
+	"commands": {
+		"lib": "cargo llvm-lines --locked -p moq-net --lib",
+		"test": "cargo llvm-lines --locked -p moq-net --lib --profile test"
+	},
+	"candidate_patch": "--- a/rs/moq-net/src/model/expiry.rs\n+++ b/rs/moq-net/src/model/expiry.rs\n@@ -73,8 +73,8 @@\n \t/// Reads parked on a time end, by the lowest sequence whose start could move it.\n \tstarts: BTreeMap<u64, kio::WaiterList>,\n \tstarts_sweep: usize,\n-\t/// Reads by wall-clock deadline, released by the pool's driver.\n-\twall: BTreeMap<crate::time::Instant, kio::WaiterList>,\n+\t/// Reads by wall-clock nanoseconds from the origin, released by the pool's driver.\n+\twall: BTreeMap<u64, kio::WaiterList>,\n \twall_sweep: usize,\n \t/// The earliest `wall` deadline the pool was asked to release, so arming a later one\n \t/// skips the pool's lock.\n@@ -162,7 +162,7 @@\n \t\t\tparked.wall.retain(|_, list| !list.is_empty());\n \t\t\tparked.wall_sweep = sweep_at(parked.wall.len());\n \t\t}\n-\t\tparked.wall.entry(at).or_default().register(waiter);\n+\t\tparked.wall.entry(nanos(at)).or_default().register(waiter);\n \t\tif parked.wall_armed.is_some_and(|armed| armed <= at) {\n \t\t\treturn None;\n \t\t}\n@@ -181,11 +181,11 @@\n \t\tlet next = {\n \t\t\tlet mut parked = self.parked.lock();\n \t\t\twhile let Some(entry) = parked.wall.first_entry()\n-\t\t\t\t&& *entry.key() <= now\n+\t\t\t\t&& *entry.key() <= nanos(now)\n \t\t\t{\n \t\t\t\twoken.push(entry.remove());\n \t\t\t}\n-\t\t\tparked.wall_armed = parked.wall.first_key_value().map(|(at, _)| *at);\n+\t\t\tparked.wall_armed = parked.wall.first_key_value().map(|(at, _)| crate::time::Instant::ZERO + Duration::from_nanos(*at));\n \t\t\tparked.wall_sweep = lower(parked.wall_sweep, parked.wall.len());\n \t\t\tparked.wall_armed\n \t\t};\n@@ -328,6 +328,14 @@\n }\n \n /// Saturate a microsecond count into a deadline key.\n+// Instant's entire domain is u64 nanoseconds from this origin.\n+fn nanos(at: crate::time::Instant) -> u64 {\n+\tat.duration_since(crate::time::Instant::ZERO)\n+\t\t.as_nanos()\n+\t\t.try_into()\n+\t\t.expect(\"instant fits u64 nanoseconds\")\n+}\n+\n fn micros(value: u128) -> u64 {\n \tvalue.try_into().unwrap_or(u64::MAX)\n }\n",
+	"concrete_btree_map_key_value_spellings": [
+		"(moq_clock::instant::Instant, alloc::sync::Arc<str>), alloc::collections::btree::set_val::SetValZST",
+		"(moq_clock::instant::Instant, moq_net::path::Path), alloc::collections::btree::set_val::SetValZST",
+		"(moq_clock::instant::Instant, u64), alloc::collections::btree::set_val::SetValZST",
+		"(moq_clock::instant::Instant, u64), moq_net::path::Path",
+		"(moq_clock::instant::Instant, usize), alloc::sync::Weak<moq_net::model::cache::Track>",
+		"(u64, u64), alloc::collections::btree::set_val::SetValZST",
+		"alloc::sync::Arc<str>, moq_net::model::front::Track",
+		"alloc::sync::Arc<str>, moq_net::model::track::Info",
+		"core::time::Duration, usize",
+		"i8, usize",
+		"moq_clock::instant::Instant, kio::waiter::WaiterList",
+		"moq_net::model::subscription::Range, usize",
+		"moq_net::path::Path, alloc::collections::btree::set_val::SetValZST",
+		"moq_net::path::Path, moq_net::model::origin_impl::Announce",
+		"moq_net::priority::PriorityItem, alloc::collections::btree::set_val::SetValZST",
+		"rangemap::range_wrapper::RangeInclusiveStartWrapper<u64>, ()",
+		"rangemap::range_wrapper::RangeInclusiveStartWrapper<u64>, core::time::Duration",
+		"rangemap::range_wrapper::RangeStartWrapper<u64>, ()",
+		"rangemap::range_wrapper::RangeStartWrapper<u64>, moq_net::error::StreamError",
+		"rangemap::range_wrapper::RangeStartWrapper<u64>, moq_net::model::track::fill::Refusal",
+		"rangemap::range_wrapper::RangeStartWrapper<u64>, u32",
+		"rangemap::range_wrapper::RangeStartWrapper<u64>, u64",
+		"u64, alloc::collections::btree::set_val::SetValZST",
+		"u64, kio::waiter::WaiterList",
+		"u64, moq_net::auth::Attached",
+		"u64, moq_net::auth::Grant",
+		"u64, moq_net::auth::Slot",
+		"u64, moq_net::auth::Token",
+		"u64, moq_net::ledger::Run",
+		"u64, moq_net::lite::subscriber::HeldFetch",
+		"u64, moq_net::model::bandwidth::Entry",
+		"u64, moq_net::model::time::Timestamp",
+		"u64, moq_net::model::track::Slot",
+		"u64, moq_net::path::Path",
+		"u64, moq_net::stats::Content",
+		"u64, u64",
+		"u64, usize",
+		"usize, kio::lock::Lock<moq_net::model::aborts::State>"
+	],
+	"btree_ir_lines": {
+		"baseline_lib": 308892,
+		"candidate_lib": 302479,
+		"baseline_test": 364034,
+		"candidate_test": 357621
+	},
+	"samples": [
+		{
+			"user": 13.0,
+			"system": 0.79,
+			"wall": 13.82,
+			"max_rss_kib": 1321180,
+			"lines": 1360948,
+			"label": "baseline",
+			"target": "lib",
+			"serial": 1,
+			"load_before": "23.64 21.40 13.79 10/7295 3105938",
+			"load_after": "22.20 21.20 13.85 13/7303 3113127",
+			"cpu_seconds": 13.79
+		},
+		{
+			"user": 48.91,
+			"system": 3.44,
+			"wall": 50.91,
+			"max_rss_kib": 2997632,
+			"lines": 3292164,
+			"label": "baseline",
+			"target": "test",
+			"serial": 1,
+			"load_before": "20.52 20.88 13.86 20/7344 3125026",
+			"load_after": "20.20 20.60 14.13 11/7379 3155706",
+			"cpu_seconds": 52.35
+		},
+		{
+			"user": 15.63,
+			"system": 1.35,
+			"wall": 17.7,
+			"max_rss_kib": 1315024,
+			"lines": 1354463,
+			"label": "candidate",
+			"target": "lib",
+			"serial": 2,
+			"load_before": "22.48 21.06 14.42 39/7643 3169708",
+			"load_after": "24.33 21.60 14.74 32/7487 3175331",
+			"cpu_seconds": 16.98
+		},
+		{
+			"user": 48.89,
+			"system": 4.03,
+			"wall": 50.91,
+			"max_rss_kib": 2993380,
+			"lines": 3285679,
+			"label": "candidate",
+			"target": "test",
+			"serial": 2,
+			"load_before": "23.71 22.17 15.31 14/6672 3206092",
+			"load_after": "20.76 21.53 15.45 18/6576 3235480",
+			"cpu_seconds": 52.92
+		},
+		{
+			"user": 12.26,
+			"system": 0.95,
+			"wall": 13.31,
+			"max_rss_kib": 1290452,
+			"lines": 1354463,
+			"label": "candidate",
+			"target": "lib",
+			"serial": 3,
+			"load_before": "21.23 21.61 15.54 25/6814 3240464",
+			"load_after": "20.31 21.39 15.54 16/6609 3261066",
+			"cpu_seconds": 13.21
+		},
+		{
+			"user": 46.9,
+			"system": 3.55,
+			"wall": 48.02,
+			"max_rss_kib": 2994248,
+			"lines": 3285679,
+			"label": "candidate",
+			"target": "test",
+			"serial": 3,
+			"load_before": "20.31 21.39 15.54 16/6624 3261150",
+			"load_after": "16.94 20.35 15.49 9/6463 3307124",
+			"cpu_seconds": 50.45
+		},
+		{
+			"user": 11.85,
+			"system": 0.82,
+			"wall": 12.7,
+			"max_rss_kib": 1309320,
+			"lines": 1360948,
+			"label": "baseline",
+			"target": "lib",
+			"serial": 4,
+			"load_before": "16.94 20.35 15.49 10/6458 3307273",
+			"load_after": "16.18 20.01 15.46 30/6401 3329839",
+			"cpu_seconds": 12.67
+		},
+		{
+			"user": 54.18,
+			"system": 3.74,
+			"wall": 59.9,
+			"max_rss_kib": 2996428,
+			"lines": 3292164,
+			"label": "baseline",
+			"target": "test",
+			"serial": 4,
+			"load_before": "16.18 20.01 15.46 14/6391 3330130",
+			"load_after": "27.19 22.38 16.55 19/6374 3426402",
+			"cpu_seconds": 57.92
+		}
+	],
+	"decision": "Original source restored; candidate not retained. CPU ranges overlap and library/test median directions disagree; no CPU improvement demonstrated on this shared host.",
+	"rustc_version_verbose": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8",
+	"quiet_host_repeat": {
+		"date": "2026-10-31",
+		"base_commit": "51836997ce9352e3594f33a75d4ae69ec268bb95",
+		"compiler": "Rust 1.98.1 (48a229cea 2026-09-01), LLVM 22.1.8, from repository Nix devshell",
+		"llvm_lines_version": "0.4.48",
+		"perf_version": "7.2.10",
+		"host": "dedicated idle NixOS desktop, Intel Core i7-8700 (6 cores / 12 threads), 15 GiB RAM; one-minute load 1.14-1.71 throughout",
+		"environment": {
+			"MBX_DISABLE": "1",
+			"CARGO_INCREMENTAL": "0",
+			"CARGO_BUILD_JOBS": "2",
+			"CARGO_PROFILE_DEV_DEBUG": "false",
+			"CARGO_TARGET_DIR": "private scratch target"
+		},
+		"method": "Warm dependencies, then 6 rounds of baseline/candidate/candidate/baseline (12 samples per variant and target). Each sample restores the selected expiry.rs, touches moq-net's lib.rs so only moq-net rebuilds, and runs the command under perf stat (instructions:u, cycles:u, task-clock over the whole cargo process tree). Significance is a two-sided permutation test on the difference of means (20,000 shuffles).",
+		"commands": {
+			"lib": "cargo build --locked -p moq-net --lib",
+			"test": "cargo test --locked -p moq-net --lib --no-run"
+		},
+		"llvm_lines": {
+			"baseline_lib": 1379943,
+			"candidate_lib": 1373458,
+			"baseline_test": 3451146,
+			"candidate_test": 3444661,
+			"btree_rows_baseline_lib": 332566,
+			"btree_rows_candidate_lib": 326153,
+			"btree_rows_baseline_test": 407587,
+			"btree_rows_candidate_test": 401174
+		},
+		"summary": {
+			"lib": {
+				"instructions_u_mean_diff_pct": -0.191,
+				"instructions_u_p": 0.0,
+				"task_clock_median_ms": [16346.4, 16318.6],
+				"task_clock_mean_diff_pct": 0.605,
+				"task_clock_p": 0.32
+			},
+			"test": {
+				"instructions_u_mean_diff_pct": -0.062,
+				"instructions_u_p": 0.0,
+				"task_clock_median_ms": [47362.7, 47089.4],
+				"task_clock_mean_diff_pct": -0.317,
+				"task_clock_p": 0.4
+			}
+		},
+		"samples": [
+			{
+				"serial": 1,
+				"label": "baseline",
+				"target": "lib",
+				"instructions_u": 78595762786,
+				"cycles_u": 69441868007,
+				"task_clock_ms": 16350.18,
+				"load1_before": 1.14,
+				"load1_after": 1.19
+			},
+			{
+				"serial": 2,
+				"label": "baseline",
+				"target": "test",
+				"instructions_u": 216774234434,
+				"cycles_u": 192492201144,
+				"task_clock_ms": 47286.77,
+				"load1_before": 1.19,
+				"load1_after": 1.33
+			},
+			{
+				"serial": 3,
+				"label": "candidate",
+				"target": "lib",
+				"instructions_u": 78489626476,
+				"cycles_u": 69301121813,
+				"task_clock_ms": 16346.15,
+				"load1_before": 1.33,
+				"load1_after": 1.33
+			},
+			{
+				"serial": 4,
+				"label": "candidate",
+				"target": "test",
+				"instructions_u": 216628350647,
+				"cycles_u": 192395167557,
+				"task_clock_ms": 46803.22,
+				"load1_before": 1.33,
+				"load1_after": 1.33
+			},
+			{
+				"serial": 5,
+				"label": "candidate",
+				"target": "lib",
+				"instructions_u": 78451207627,
+				"cycles_u": 69047613411,
+				"task_clock_ms": 16354.2,
+				"load1_before": 1.33,
+				"load1_after": 1.28
+			},
+			{
+				"serial": 6,
+				"label": "candidate",
+				"target": "test",
+				"instructions_u": 216629651137,
+				"cycles_u": 193584953916,
+				"task_clock_ms": 47502.61,
+				"load1_before": 1.28,
+				"load1_after": 1.28
+			},
+			{
+				"serial": 7,
+				"label": "baseline",
+				"target": "lib",
+				"instructions_u": 78587855482,
+				"cycles_u": 69556149337,
+				"task_clock_ms": 16344.7,
+				"load1_before": 1.28,
+				"load1_after": 1.32
+			},
+			{
+				"serial": 8,
+				"label": "baseline",
+				"target": "test",
+				"instructions_u": 216805109236,
+				"cycles_u": 193093035221,
+				"task_clock_ms": 47497.12,
+				"load1_before": 1.32,
+				"load1_after": 1.3
+			},
+			{
+				"serial": 9,
+				"label": "baseline",
+				"target": "lib",
+				"instructions_u": 78586793969,
+				"cycles_u": 69247560039,
+				"task_clock_ms": 16261.34,
+				"load1_before": 1.3,
+				"load1_after": 1.34
+			},
+			{
+				"serial": 10,
+				"label": "baseline",
+				"target": "test",
+				"instructions_u": 216795833118,
+				"cycles_u": 192518719869,
+				"task_clock_ms": 46505.67,
+				"load1_before": 1.34,
+				"load1_after": 1.54
+			},
+			{
+				"serial": 11,
+				"label": "candidate",
+				"target": "lib",
+				"instructions_u": 78442268347,
+				"cycles_u": 71069503430,
+				"task_clock_ms": 17176.58,
+				"load1_before": 1.54,
+				"load1_after": 1.71
+			},
+			{
+				"serial": 12,
+				"label": "candidate",
+				"target": "test",
+				"instructions_u": 216762068930,
+				"cycles_u": 192635112392,
+				"task_clock_ms": 47566.34,
+				"load1_before": 1.71,
+				"load1_after": 1.55
+			},
+			{
+				"serial": 13,
+				"label": "candidate",
+				"target": "lib",
+				"instructions_u": 78468082012,
+				"cycles_u": 69031279354,
+				"task_clock_ms": 16280.24,
+				"load1_before": 1.55,
+				"load1_after": 1.51
+			},
+			{
+				"serial": 14,
+				"label": "candidate",
+				"target": "test",
+				"instructions_u": 216668434184,
+				"cycles_u": 192447669523,
+				"task_clock_ms": 47076.29,
+				"load1_before": 1.51,
+				"load1_after": 1.5
+			},
+			{
+				"serial": 15,
+				"label": "baseline",
+				"target": "lib",
+				"instructions_u": 78618679615,
+				"cycles_u": 69017574402,
+				"task_clock_ms": 16228.39,
+				"load1_before": 1.5,
+				"load1_after": 1.47
+			},
+			{
+				"serial": 16,
+				"label": "baseline",
+				"target": "test",
+				"instructions_u": 216795919266,
+				"cycles_u": 192859306046,
+				"task_clock_ms": 46988.58,
+				"load1_before": 1.47,
+				"load1_after": 1.4
+			},
+			{
+				"serial": 17,
+				"label": "baseline",
+				"target": "lib",
+				"instructions_u": 78597781947,
+				"cycles_u": 69623999251,
+				"task_clock_ms": 16399.98,
+				"load1_before": 1.4,
+				"load1_after": 1.34
+			},
+			{
+				"serial": 18,
+				"label": "baseline",
+				"target": "test",
+				"instructions_u": 216817372818,
+				"cycles_u": 192805325692,
+				"task_clock_ms": 47392.38,
+				"load1_before": 1.34,
+				"load1_after": 1.25
+			},
+			{
+				"serial": 19,
+				"label": "candidate",
+				"target": "lib",
+				"instructions_u": 78432203711,
+				"cycles_u": 68890381885,
+				"task_clock_ms": 16242.27,
+				"load1_before": 1.25,
+				"load1_after": 1.21
+			},
+			{
+				"serial": 20,
+				"label": "candidate",
+				"target": "test",
+				"instructions_u": 216651065719,
+				"cycles_u": 193871815485,
+				"task_clock_ms": 47992.03,
+				"load1_before": 1.21,
+				"load1_after": 1.17
+			},
+			{
+				"serial": 21,
+				"label": "candidate",
+				"target": "lib",
+				"instructions_u": 78455530670,
+				"cycles_u": 68870942571,
+				"task_clock_ms": 16209.19,
+				"load1_before": 1.17,
+				"load1_after": 1.23
+			},
+			{
+				"serial": 22,
+				"label": "candidate",
+				"target": "test",
+				"instructions_u": 216655858135,
+				"cycles_u": 192547468970,
+				"task_clock_ms": 47077.06,
+				"load1_before": 1.23,
+				"load1_after": 1.28
+			},
+			{
+				"serial": 23,
+				"label": "baseline",
+				"target": "lib",
+				"instructions_u": 78597338790,
+				"cycles_u": 69090890812,
+				"task_clock_ms": 16274.39,
+				"load1_before": 1.28,
+				"load1_after": 1.3
+			},
+			{
+				"serial": 24,
+				"label": "baseline",
+				"target": "test",
+				"instructions_u": 216827838520,
+				"cycles_u": 192468073363,
+				"task_clock_ms": 47211.18,
+				"load1_before": 1.3,
+				"load1_after": 1.39
+			},
+			{
+				"serial": 25,
+				"label": "baseline",
+				"target": "lib",
+				"instructions_u": 78609925814,
+				"cycles_u": 68819836843,
+				"task_clock_ms": 16230.3,
+				"load1_before": 1.39,
+				"load1_after": 1.39
+			},
+			{
+				"serial": 26,
+				"label": "baseline",
+				"target": "test",
+				"instructions_u": 216789508765,
+				"cycles_u": 194904685774,
+				"task_clock_ms": 47991.34,
+				"load1_before": 1.39,
+				"load1_after": 1.49
+			},
+			{
+				"serial": 27,
+				"label": "candidate",
+				"target": "lib",
+				"instructions_u": 78448532205,
+				"cycles_u": 68692242869,
+				"task_clock_ms": 16201.5,
+				"load1_before": 1.49,
+				"load1_after": 1.46
+			},
+			{
+				"serial": 28,
+				"label": "candidate",
+				"target": "test",
+				"instructions_u": 216644562328,
+				"cycles_u": 194213570131,
+				"task_clock_ms": 47627.72,
+				"load1_before": 1.46,
+				"load1_after": 1.48
+			},
+			{
+				"serial": 29,
+				"label": "candidate",
+				"target": "lib",
+				"instructions_u": 78473964093,
+				"cycles_u": 69126975746,
+				"task_clock_ms": 16291.0,
+				"load1_before": 1.48,
+				"load1_after": 1.45
+			},
+			{
+				"serial": 30,
+				"label": "candidate",
+				"target": "test",
+				"instructions_u": 216720281303,
+				"cycles_u": 192045974626,
+				"task_clock_ms": 46706.68,
+				"load1_before": 1.45,
+				"load1_after": 1.39
+			},
+			{
+				"serial": 31,
+				"label": "baseline",
+				"target": "lib",
+				"instructions_u": 78613048515,
+				"cycles_u": 69261210118,
+				"task_clock_ms": 16348.11,
+				"load1_before": 1.39,
+				"load1_after": 1.33
+			},
+			{
+				"serial": 32,
+				"label": "baseline",
+				"target": "test",
+				"instructions_u": 216843517919,
+				"cycles_u": 192783302492,
+				"task_clock_ms": 46967.5,
+				"load1_before": 1.33,
+				"load1_after": 1.16
+			},
+			{
+				"serial": 33,
+				"label": "baseline",
+				"target": "lib",
+				"instructions_u": 78625377197,
+				"cycles_u": 69803117569,
+				"task_clock_ms": 16393.42,
+				"load1_before": 1.16,
+				"load1_after": 1.21
+			},
+			{
+				"serial": 34,
+				"label": "baseline",
+				"target": "test",
+				"instructions_u": 216786558657,
+				"cycles_u": 192922877744,
+				"task_clock_ms": 47461.4,
+				"load1_before": 1.21,
+				"load1_after": 1.25
+			},
+			{
+				"serial": 35,
+				"label": "candidate",
+				"target": "lib",
+				"instructions_u": 78454978368,
+				"cycles_u": 69077238599,
+				"task_clock_ms": 16277.33,
+				"load1_before": 1.25,
+				"load1_after": 1.29
+			},
+			{
+				"serial": 36,
+				"label": "candidate",
+				"target": "test",
+				"instructions_u": 216633074769,
+				"cycles_u": 192318663559,
+				"task_clock_ms": 46268.57,
+				"load1_before": 1.29,
+				"load1_after": 1.32
+			},
+			{
+				"serial": 37,
+				"label": "candidate",
+				"target": "lib",
+				"instructions_u": 78445987701,
+				"cycles_u": 69624949328,
+				"task_clock_ms": 16436.63,
+				"load1_before": 1.32,
+				"load1_after": 1.33
+			},
+			{
+				"serial": 38,
+				"label": "candidate",
+				"target": "test",
+				"instructions_u": 216679473223,
+				"cycles_u": 191932626075,
+				"task_clock_ms": 47101.67,
+				"load1_before": 1.33,
+				"load1_after": 1.32
+			},
+			{
+				"serial": 39,
+				"label": "baseline",
+				"target": "lib",
+				"instructions_u": 78607319488,
+				"cycles_u": 69571751776,
+				"task_clock_ms": 16356.71,
+				"load1_before": 1.32,
+				"load1_after": 1.27
+			},
+			{
+				"serial": 40,
+				"label": "baseline",
+				"target": "test",
+				"instructions_u": 216800195033,
+				"cycles_u": 193959718658,
+				"task_clock_ms": 47356.87,
+				"load1_before": 1.27,
+				"load1_after": 1.34
+			},
+			{
+				"serial": 41,
+				"label": "baseline",
+				"target": "lib",
+				"instructions_u": 78615471249,
+				"cycles_u": 68947274708,
+				"task_clock_ms": 16237.16,
+				"load1_before": 1.34,
+				"load1_after": 1.37
+			},
+			{
+				"serial": 42,
+				"label": "baseline",
+				"target": "test",
+				"instructions_u": 216759603439,
+				"cycles_u": 193300506758,
+				"task_clock_ms": 47368.51,
+				"load1_before": 1.37,
+				"load1_after": 1.33
+			},
+			{
+				"serial": 43,
+				"label": "candidate",
+				"target": "lib",
+				"instructions_u": 78461376573,
+				"cycles_u": 70117331779,
+				"task_clock_ms": 16770.41,
+				"load1_before": 1.33,
+				"load1_after": 1.44
+			},
+			{
+				"serial": 44,
+				"label": "candidate",
+				"target": "test",
+				"instructions_u": 216614030718,
+				"cycles_u": 192545968501,
+				"task_clock_ms": 47378.44,
+				"load1_before": 1.44,
+				"load1_after": 1.37
+			},
+			{
+				"serial": 45,
+				"label": "candidate",
+				"target": "lib",
+				"instructions_u": 78459256605,
+				"cycles_u": 69581518063,
+				"task_clock_ms": 16401.82,
+				"load1_before": 1.37,
+				"load1_after": 1.39
+			},
+			{
+				"serial": 46,
+				"label": "candidate",
+				"target": "test",
+				"instructions_u": 216704795723,
+				"cycles_u": 192467732513,
+				"task_clock_ms": 46599.3,
+				"load1_before": 1.39,
+				"load1_after": 1.37
+			},
+			{
+				"serial": 47,
+				"label": "baseline",
+				"target": "lib",
+				"instructions_u": 78632568022,
+				"cycles_u": 69451805342,
+				"task_clock_ms": 16378.99,
+				"load1_before": 1.37,
+				"load1_after": 1.37
+			},
+			{
+				"serial": 48,
+				"label": "baseline",
+				"target": "test",
+				"instructions_u": 216819785465,
+				"cycles_u": 193556633274,
+				"task_clock_ms": 47471.53,
+				"load1_before": 1.37,
+				"load1_after": 1.35
+			}
+		],
+		"decision": "Candidate not retained. The instruction reduction is real but small (0.19% lib, 0.06% test, about 150M instructions or roughly 30 ms of CPU per build); CPU time does not drop beyond noise on a quiet host with 12 samples per variant."
+	}
 }

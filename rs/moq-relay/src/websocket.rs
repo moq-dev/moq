@@ -73,6 +73,7 @@ pub(crate) async fn serve_ws(
 	options.socket_stats = socket_stats.map(|Extension(stats)| stats.0);
 	// The listener reads `None` as no deadline; `Options` reads it as the default.
 	options.timeout = Some(state.timeout.unwrap_or_default());
+	options.quic = state.quic.clone();
 
 	let upgrade = hyper::upgrade::on(&mut request);
 	tokio::spawn(async move {

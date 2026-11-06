@@ -6,12 +6,12 @@ use crate::container::Frame;
 ///
 /// The catalog comes from an AudioSpecificConfig (variable-length, typically extracted from an MP4
 /// ESDS atom); build the config with [`config`]. Every AAC packet is independently decodable, so
-/// [`decode`](Self::decode) marks only the first frame of each group a keyframe (the rest extend it):
-/// frames accumulate into the current group until the caller [`cut`](Self::cut)s or [`seek`](Self::seek)s.
-/// The [`import::Track`](crate::import::Track) facade passes that through, so boundaries are the
-/// caller's either way: cut per packet for one group (one QUIC stream) the relay forwards without
-/// waiting, or at a segment cadence to align with video. The codec's packet loss concealment
-/// handles drops.
+/// [`decode`](Self::decode) marks only the first frame of each group a keyframe (the rest extend
+/// it): frames accumulate into the current group until the caller [`cut`](Self::cut)s or
+/// [`seek`](Self::seek)s. The [`import::Track`](crate::import::Track) facade passes that through,
+/// so boundaries are the caller's either way: cut per packet for one group (one QUIC stream) the
+/// relay forwards without waiting, or less often to batch frames into fewer groups. The codec's
+/// packet loss concealment handles drops.
 pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::AudioConfig>,
 }

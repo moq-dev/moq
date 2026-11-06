@@ -262,28 +262,32 @@ pub(crate) struct Session {
 }
 
 impl Session {
-	/// Create the broadcast/catalog producers and spawn the connect task. Returns the producers for the
-	/// element to write into; the session task owns only the origin, the connection, and the status.
+	/// Create the route and catalog producer and spawn the connect task. Returns them for the element
+	/// to hold and write into; the session task owns only the origin, the connection, and the status.
 	pub fn start(
 		settings: ResolvedSettings,
 		element: glib::WeakRef<Element>,
 	) -> Result<(
 		Self,
 		SessionRegistration,
-		moq_net::origin::Publication,
+		moq_net::origin::Route,
 		moq_mux::catalog::Producer,
 	)> {
 		// Producer setup may touch tokio time (group eviction), so run it inside the runtime context.
 		let _rt = RUNTIME.enter();
 
 		let origin = moq_tokio::origin::spawn();
-		// Each run is a new publisher instance: a restarted pipeline takes over from one whose route still
-		// lingers, rather than resuming viewers into the old run's group sequence. Reconnects keep it.
-		let epoch = moq_net::Epoch::mint();
-		gst::info!(CAT, "publishing {} under epoch {epoch}", settings.broadcast);
-		let broadcast = origin.publish(&settings.broadcast, moq_net::origin::Route::default().with_epoch(epoch))?;
+		// Each run is a new stream under a fresh instance, which the route mints: a restarted
+		// pipeline never resumes viewers into the old run's group sequence. Reconnects keep it.
+		let route = origin.route(&settings.broadcast, moq_net::origin::RouteOptions::default())?;
+		gst::info!(
+			CAT,
+			"publishing {} under instance {}",
+			settings.broadcast,
+			route.instance()
+		);
 		let catalog =
-			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())?;
+			moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), moq_mux::catalog::Config::default())?;
 
 		let status = Arc::new(Status::default());
 		let completion = CompletionState::new();
@@ -331,7 +335,7 @@ impl Session {
 				completion,
 			},
 			SessionRegistration { gate },
-			broadcast,
+			route,
 			catalog,
 		))
 	}
@@ -380,9 +384,9 @@ impl Session {
 
 	/// Stop the session: a clean local close, never an error. Returns once the reconnect loop has ended.
 	///
-	/// Aborting only cancels the loop at its next await point, and a worker may be mid-dial, generating
-	/// TLS randomness. A process exiting in that window (`gst-launch` right after NULL) races aws-lc's
-	/// exit destructors, which free its seed DRBG and then `abort()` a thread asking for more.
+	/// Aborting only cancels the loop at its next await point, and a worker may be mid-dial. Without the
+	/// wait, that dial outlives the state change an application waits on before it exits (`gst-launch`
+	/// right after NULL).
 	pub fn stop(self) {
 		// The status task goes first, so it never reports the loop's end as a failure.
 		self.join.abort();
@@ -549,7 +553,7 @@ mod tests {
 		assert_eq!(structure.get::<u64>("ended"), Ok(2));
 	}
 
-	fn started_with_broadcast() -> (Session, moq_net::origin::Publication) {
+	fn started_with_broadcast() -> (Session, moq_net::origin::Route) {
 		gst::init().unwrap();
 		let settings = ResolvedSettings {
 			url: "https://127.0.0.1:1".parse().unwrap(),
@@ -557,9 +561,9 @@ mod tests {
 			connect: crate::connection::Settings::default().resolve().unwrap().0,
 			quic: Default::default(),
 		};
-		let (session, registration, broadcast, _) = Session::start(settings, glib::WeakRef::new()).unwrap();
+		let (session, registration, route, _) = Session::start(settings, glib::WeakRef::new()).unwrap();
 		registration.mark_registered();
-		(session, broadcast)
+		(session, route)
 	}
 
 	fn started() -> (Session, moq_tokio::Connection) {
@@ -568,19 +572,20 @@ mod tests {
 		(session, connection)
 	}
 
-	fn announced_epoch(broadcast: &moq_net::origin::Publication) -> moq_net::Epoch {
-		broadcast.route().expect("announced").epoch.expect("an epoch")
+	fn announced_instance(route: &moq_net::origin::Route) -> moq_net::Instance {
+		assert!(route.is_announced());
+		route.instance()
 	}
 
-	// Without an epoch, a restart whose old route lingers resumes viewers into the old run's groups.
+	// Under one instance, a restart whose old route lingers would resume viewers into the old run's groups.
 	#[test]
-	fn each_run_announces_a_newer_epoch() {
+	fn each_run_announces_a_new_instance() {
 		let (first, first_broadcast) = started_with_broadcast();
-		let first_epoch = announced_epoch(&first_broadcast);
+		let first_instance = announced_instance(&first_broadcast);
 		first.stop();
 
 		let (second, second_broadcast) = started_with_broadcast();
-		assert!(announced_epoch(&second_broadcast) > first_epoch);
+		assert_ne!(announced_instance(&second_broadcast), first_instance);
 		second.stop();
 	}
 
@@ -588,8 +593,8 @@ mod tests {
 		connection.poll_closed(&moq_net::kio::Waiter::noop()).is_ready()
 	}
 
-	// A dial still running once the element reached NULL can outlive `main`, and aws-lc aborts the
-	// process when a thread asks it for randomness after its exit destructors ran.
+	// A dial still running once the element reached NULL would outlive the state change an application
+	// waits on before it exits.
 	#[test]
 	fn stop_returns_after_the_reconnect_loop_ends() {
 		let (session, connection) = started();

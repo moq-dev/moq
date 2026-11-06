@@ -9,9 +9,12 @@ use crate::support;
 
 use moq_net::{Error, Hop, Timestamp};
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond track with no publisher max age: the frames written here carry timestamps,
+/// and superseded groups stay readable.
 fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
 }
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
@@ -27,13 +30,13 @@ const GROUPS: u64 = 2;
 /// or in sequence order, and how the read ended.
 async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 	let origin = produce_origin(1);
-	let broadcast = origin.create_broadcast("bcast").unwrap();
-	let mut track = broadcast.create_track("video", timed()).unwrap();
+	let broadcast = origin.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let mut track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	// From the first group with a replay window: a late reader is owed the whole track,
 	// not the live edge.
 	let subscription = moq_net::track::Subscription::default()
 		.with_range(0..)
-		.with_max_delay(std::time::Duration::from_secs(30));
+		.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
 	let mut consumer = track.subscribe(subscription);
 
 	for _ in 0..GROUPS {

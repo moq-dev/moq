@@ -194,9 +194,12 @@ int publish(
     const auto forever = Clock::now() + std::chrono::hours(24);
     auto session = connect(url, dial, forever);
 
-    // Hold the producer for the lifetime of the publish loop; close() unpublishes.
-    auto publication = ok(session->publish()->create_broadcast(path), "create_broadcast");
-    auto broadcast = publication->broadcast();
+    // Hold the route for the lifetime of the publish loop: it keeps the broadcast announced, and
+    // close() unpublishes. Hidden until the catalog is filled.
+    moq::RouteOptions hidden;
+    hidden.hidden = true;
+    auto route = ok(session->publish()->route(path, hidden), "route");
+    auto broadcast = ok(route->broadcast(), "route broadcast");
     auto catalog = ok(moq::MediaCatalogProducer::init(broadcast), "catalog producer");
     auto media = ok(
         moq::MediaTrackStreamProducer::video(broadcast, moq::MediaTarget::kNamed{}, {moq::VideoFormat::kAvc3, {}}),
@@ -214,7 +217,7 @@ int publish(
         ),
         "audio producer"
     );
-    ok(publication->announce({}), "announce");
+    ok(route->announce(), "announce");
     std::printf(
         "publishing \"%s\" (Annex-B H.264 from stdin + a %zu-channel tone) to %s\n", path.c_str(), tones.size(),
         url.c_str()
@@ -257,13 +260,13 @@ int publish(
         ok(broadcast->close(), "broadcast close");
         std::puts("finish ended");
         std::fflush(stdout);
-        auto health_publication = ok(session->publish()->create_broadcast(path + ".health"), "health broadcast");
-        auto health = health_publication->broadcast();
+        auto health_route = ok(session->publish()->route(path + ".health", hidden), "health route");
+        auto health = ok(health_route->broadcast(), "health broadcast");
         auto track = ok(health->publish_track("live", std::nullopt), "health track");
         const std::string payload = "session-alive";
         ok(track->write_frame({std::vector<uint8_t>(payload.begin(), payload.end()), std::nullopt}), "health write");
         ok(track->finish(), "health finish");
-        ok(health_publication->announce({}), "health announce");
+        ok(health_route->announce(), "health announce");
         // Only teardown waits on the FIFO; linger has already completed on its own clock.
         std::ifstream ack(finish_ack);
         std::string line;
@@ -350,6 +353,7 @@ int subscribe(
         : deadline;
     auto announced = ok(session->consume()->follow(path, std::nullopt), "follow");
     auto consumer = until(announced->available(), read_deadline, "available");
+    if (!consumer) fail("first available() reported offline");
 
     // The catalog is a live track. A lazy publisher (e.g. the browser, which only encodes on
     // demand) may announce a rendition in a later update rather than the first snapshot, so
@@ -364,8 +368,8 @@ int subscribe(
     }
     const auto &[id, video] = *catalog->video.begin();
 
-    moq::Subscription subscription;
-    subscription.max_delay =
+    auto subscription = moq::subscription_defaults();
+    subscription.delay.max =
         finish ? std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(timeout)) : MAX_DELAY;
     auto media = until(
         moq::MediaTrackConsumer::subscribe(consumer, {moq::Rendition::kVideo{id, video}, subscription}), read_deadline,
@@ -399,13 +403,14 @@ int subscribe(
         if (frames != expected_frames) fail("wrong finished media frame count");
         while (until(catalogs->next(), read_deadline, "catalog EOF")) {}
         for (;;) {
-            auto event = until(routes->next(), read_deadline, "announcement END");
+            auto event = until(routes->next(), read_deadline, "announcement absent");
             if (!event) fail("origin ended before broadcast withdrawal");
-            const auto *end = std::get_if<moq::AnnounceEvent::kEnd>(&event->get_variant());
+            const auto *end = std::get_if<moq::AnnounceEvent::kAbsent>(&event->get_variant());
             if (end && end->announce.prefix == path) break;
         }
         auto watch = ok(session->consume()->follow(path + ".health", std::nullopt), "health watch");
         auto health = until(watch->available(), read_deadline, "health available");
+        if (!health) fail("first health available() reported offline");
         auto track = until(health->subscribe_track("live", std::nullopt), read_deadline, "health subscribe");
         auto group = until(track->next_group(), read_deadline, "health group");
         if (!group) fail("missing health group");

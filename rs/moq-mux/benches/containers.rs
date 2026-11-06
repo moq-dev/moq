@@ -56,11 +56,12 @@ async fn prepare(video: Video, payload: &Bytes) -> (moq_mux::Source, impl Stream
 	} = video;
 	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 	let driver = tokio::spawn(moq_net::time::run(driver));
-	let broadcast = origin.create_broadcast("bench").unwrap();
+	let broadcast = origin.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 	let mut publishers = Vec::new();
 	for index in 0..tracks {
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				format!("video{index}"),
 				catalog.track_info(hang::catalog::PRIORITY.video),
@@ -84,7 +85,7 @@ async fn prepare(video: Video, payload: &Bytes) -> (moq_mux::Source, impl Stream
 		publishers.push(publisher);
 	}
 	catalog.finish().unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 	let resolved = origin.consume().request("bench", None).await.unwrap();
 	let source = moq_mux::Source::new(origin.consume(), resolved);
 	let stream = source.catalog::<()>(CatalogFormat::Hang).await.unwrap();
@@ -303,6 +304,78 @@ fn interleaved_runs(c: &mut Criterion) {
 			}
 		}
 	}
+}
+
+/// Receive-side init and sample parsing, across metadata counts and media payload sizes.
+fn cmaf_receive(c: &mut Criterion) {
+	use moq_mux::container::Container;
+	use mp4_atom::{Decode, Encode};
+
+	let mut source = include_bytes!("../src/container/fmp4/test_data/bbb.mp4").as_slice();
+	mp4_atom::Ftyp::decode(&mut source).unwrap();
+	let mut moov = mp4_atom::Moov::decode(&mut source).unwrap();
+	let trak = moov
+		.trak
+		.iter()
+		.find(|trak| trak.mdia.hdlr.handler.as_ref() == b"soun")
+		.unwrap()
+		.clone();
+	let id = trak.tkhd.track_id;
+	moov.trak = vec![trak];
+	let mut init = Vec::new();
+	moov.encode(&mut init).unwrap();
+	let wire = moq_mux::container::fmp4::Wire::from_init(&init).unwrap();
+	let mut group = c.benchmark_group("cmaf-receive");
+	group.bench_function("init", |b| {
+		b.iter(|| moq_mux::container::fmp4::Wire::from_init(std::hint::black_box(&init)).unwrap())
+	});
+	for samples in [1, 32, 1024] {
+		for size in [1, 4096] {
+			let mut moof = mp4_atom::Moof {
+				mfhd: mp4_atom::Mfhd { sequence_number: 1 },
+				traf: vec![mp4_atom::Traf {
+					tfhd: mp4_atom::Tfhd {
+						track_id: id,
+						..Default::default()
+					},
+					tfdt: Some(mp4_atom::Tfdt {
+						base_media_decode_time: 0,
+					}),
+					trun: vec![mp4_atom::Trun {
+						data_offset: Some(0),
+						samples: vec![
+							mp4_atom::TrunEntry {
+								size: Some(size),
+								duration: Some(1024),
+								flags: Some(0),
+								cts: None
+							};
+							samples
+						]
+						.into(),
+					}],
+					..Default::default()
+				}],
+			};
+			let mut data = Vec::new();
+			moof.encode(&mut data).unwrap();
+			moof.traf[0].trun[0].data_offset = Some((data.len() + 8) as i32);
+			data.clear();
+			moof.encode(&mut data).unwrap();
+			mp4_atom::Mdat {
+				data: vec![1; size as usize * samples],
+			}
+			.encode(&mut data)
+			.unwrap();
+			let frame = moq_net::frame::Frame::new(None, Bytes::from(data));
+			assert_eq!(wire.decode(frame.clone()).unwrap().len(), samples);
+			group.throughput(Throughput::Elements(samples as u64));
+			group.bench_function(BenchmarkId::new(samples.to_string(), size), |b| {
+				b.iter(|| wire.decode(std::hint::black_box(frame.clone())).unwrap())
+			});
+		}
+	}
+	group.finish();
 }
 
 fn containers(c: &mut Criterion) {
@@ -772,6 +845,7 @@ fn mkv_payloads(c: &mut Criterion) {
 criterion_group!(
 	benches,
 	containers,
+	cmaf_receive,
 	mkv_chunks,
 	mkv_payloads,
 	interleaved_runs,

@@ -205,10 +205,14 @@ export class Local {
 		});
 		this.#signals.cleanup(() => cameraAudioCapture.close());
 
+		// A muted microphone stays in the catalog and its listeners stay subscribed, so the next word
+		// reaches them at once; its capture is still released.
+		const microphoneMuted = new Signal(!this.microphoneEnabled.peek());
+		this.#signals.run((effect) => microphoneMuted.set(!effect.get(this.microphoneEnabled)));
 		const cameraAudio = new Publish.Audio.Encoder("audio", {
 			broadcast: this.camera,
 			capture: cameraAudioCapture,
-			enabled: this.microphoneEnabled,
+			muted: microphoneMuted,
 			bandwidth,
 		});
 		this.#signals.cleanup(() => cameraAudio.close());

@@ -36,13 +36,17 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 		Ok::<_, anyhow::Error>(())
 	});
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast("age")?;
+	let broadcast = publisher.route("age", moq_net::origin::RouteOptions::hidden())?;
 	let tracks: Vec<_> = AGES
 		.into_iter()
 		.enumerate()
-		.map(|(i, age)| broadcast.create_track(i.to_string(), moq_net::track::Info::default().with_max_age(age)))
+		.map(|(i, age)| {
+			broadcast
+				.broadcast()
+				.create_track(i.to_string(), moq_net::track::Info::default().with_max_age(age))
+		})
 		.collect::<Result<_, _>>()?;
-	broadcast.announce(Default::default())?;
+	broadcast.announce()?;
 	let subscriber = moq_tokio::origin::spawn();
 	let consumer = subscriber.consume();
 	let mut announced = consumer.announced();
@@ -100,7 +104,7 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 				.next()
 				.await
 				.ok_or_else(|| anyhow::anyhow!("announcements closed"))?,
-			moq_net::announce::Event::Start(_)
+			moq_net::announce::Event::Present(_)
 		) {}
 		let front = consumer.request("age", None).await?;
 		for (i, age) in AGES.into_iter().enumerate() {

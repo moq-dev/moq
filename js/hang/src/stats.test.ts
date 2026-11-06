@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Path } from "@moq/net";
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import * as Echo from "./echo";
 import * as Stats from "./stats";
 
@@ -34,6 +34,16 @@ test("missing rendition counters mean zero while parsing preserves omission", ()
 	expect(Object.hasOwn(echo.renditions?.reset ?? {}, "latency")).toBe(false);
 	expect(Stats.SnapshotSchema.parse({})).toEqual({});
 	expect(Echo.SnapshotSchema.parse({})).toEqual({});
+});
+
+test("rendition IDs are any string, and a malformed one refuses the snapshot", () => {
+	const kept = JSON.parse('{"renditions":{"":{},"__proto__":{"frames":1},"constructor":{}}}');
+	for (const schema of [Stats.SnapshotSchema, Echo.SnapshotSchema]) {
+		const renditions = schema.parse(kept).renditions ?? {};
+		expect(Object.keys(renditions)).toEqual(["", "__proto__", "constructor"]);
+		expect(Object.hasOwn(renditions, "__proto__")).toBe(true);
+		expect(() => schema.parse(JSON.parse('{"renditions":{"ok":{},"__proto__":{"frames":-1}}}'))).toThrow();
+	}
 });
 
 test("optional null measurements mean unavailable rather than measured zero", () => {

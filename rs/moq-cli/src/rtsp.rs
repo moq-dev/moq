@@ -1,4 +1,4 @@
-//! RTSP import: pull an IP camera's session, reconnecting under a fresh epoch per run.
+//! RTSP import: pull an IP camera's session, reconnecting under a fresh instance per run.
 
 use std::time::Duration;
 
@@ -25,7 +25,7 @@ pub struct ImportArgs {
 
 /// Pull `url` into the Origin as `target.name` until a fatal error, reconnecting with backoff.
 ///
-/// Each run is its own broadcast under a fresh epoch, with a fresh catalog starting on a
+/// Each run is its own broadcast under a fresh instance, with a fresh catalog starting on a
 /// keyframe: a new session's RTP time restarts, so it never splices onto the old one.
 pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()> {
 	let client = moq_rtsp::Client::new(url.clone())?;
@@ -69,14 +69,15 @@ fn is_fatal(err: &anyhow::Error) -> bool {
 /// Publish one session as one broadcast, announced once its catalog names a track, setting
 /// `published` then.
 async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut bool) -> anyhow::Result<moq_rtsp::End> {
-	let broadcast = target
+	// Each run is a new route under a fresh instance, so a redial replaces the last run.
+	let route = target
 		.origin
-		.create_broadcast(&target.name)
+		.route(&target.name, moq_net::origin::RouteOptions::hidden())
 		.context("failed to create broadcast")?;
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(target.max_age)
 		.with_bandwidth(target.bandwidth.clone());
-	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
+	let mut catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), config)?;
 
 	// A relay asks for a broadcast's tracks the moment it is announced, so wait for the
 	// first keyframe to put them in the catalog.
@@ -86,21 +87,18 @@ async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut b
 		if updates.next().await?.is_none() {
 			return std::future::pending().await;
 		}
-		let epoch = moq_net::Epoch::mint();
-		broadcast
-			.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
-			.context("failed to announce broadcast")?;
-		tracing::info!(name = %target.name, %epoch, "publishing RTSP broadcast");
+		route.announce().context("failed to announce broadcast")?;
+		tracing::info!(name = %target.name, instance = %route.instance(), "publishing RTSP broadcast");
 		*published = true;
 		std::future::pending::<anyhow::Result<moq_rtsp::End>>().await
 	};
 
 	let end = tokio::select! {
-		end = client.pull(&broadcast, &catalog) => end.map_err(anyhow::Error::from),
+		end = client.pull(route.broadcast(), &catalog) => end.map_err(anyhow::Error::from),
 		err = announce => err,
 	};
 	// Closed at once even after a clean end: the pull redials and publishes the next run under a
-	// newer epoch, so a run's end is not the content's, and a retained run's finished catalog
+	// new instance, so a run's end is not the content's, and a retained run's finished catalog
 	// would tell readers to stop if the next run dropped.
 	let finished = match &end {
 		Ok(_) => catalog.finish(),
@@ -109,7 +107,7 @@ async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut b
 			Ok(())
 		}
 	};
-	broadcast.close();
+	route.broadcast().close();
 	finished?;
 	end
 }

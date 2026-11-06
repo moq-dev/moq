@@ -5,9 +5,6 @@ timestamp, are owned in `_records` instead.
 """
 
 from moq_ffi import (
-    MoqAnnounceRoute as AnnounceRoute,
-)
-from moq_ffi import (
     MoqAudioCodec as AudioCodec,
 )
 from moq_ffi import (
@@ -22,6 +19,7 @@ from moq_ffi import (
 from moq_ffi import (
     MoqConnectionState as ConnectionState,
 )
+from moq_ffi import MoqDatagramInfo as DatagramInfo
 from moq_ffi import (
     MoqErrorScope as ErrorScope,
 )
@@ -41,7 +39,10 @@ from moq_ffi import (
     MoqProtocolKind as ProtocolKind,
 )
 from moq_ffi import (
-    MoqRoute as Route,
+    MoqRateTarget as RateTarget,
+)
+from moq_ffi import (
+    MoqRouteInfo as RouteInfo,
 )
 from moq_ffi import (
     MoqVideoCodec as VideoCodec,
@@ -68,6 +69,7 @@ from ._records import (
     ClientTls,
     ConnectionStats,
     Datagram,
+    Delay,
     Frame,
     Grant,
     QuicConfig,
@@ -80,7 +82,6 @@ from ._records import (
 )
 
 __all__ = [
-    "AnnounceRoute",
     "Anchor",
     "AudioCodec",
     "AudioEncoderInput",
@@ -91,6 +92,8 @@ __all__ = [
     "ConnectionPhase",
     "ConnectionState",
     "Datagram",
+    "DatagramInfo",
+    "Delay",
     "ErrorScope",
     "Frame",
     "FetchGroupOptions",
@@ -101,7 +104,8 @@ __all__ = [
     "ProtocolKind",
     "QuicConfig",
     "Range",
-    "Route",
+    "RateTarget",
+    "RouteInfo",
     "Subscription",
     "Timestamp",
     "TrackInfo",

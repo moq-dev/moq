@@ -1,45 +1,64 @@
-# [M] Unify dependency features with cargo-hakari
+# [S] Record hosted cargo-hakari cache evidence
 
 ## Goal
 
-Every CI job, the queue gate, Nightly's platform jobs, and the FFI builds
-compile each dependency with the same features, so mbx's cache hits across
-them. A cargo-hakari workspace-hack crate pins the union of the dependency
-features, and the gate fails when it is out of date. Record mbx's hit rate across
-jobs, and their CPU time, before and after.
+Nightly's hosted macOS and Windows jobs record their mbx cache-hit evidence and
+estimated compiler work saved before and after the workspace-hack.
 
 ## Plan
 
-Decided with the maintainer on 2026-10-25: use cargo-hakari, the standard tool
-from guppy's authors, rather than only trimming CI's feature permutations. mbx
-keys every compilation on its inputs, so a dependency built with a different
-feature set in another job is a miss, however warm the cache.
+Decided 2026-11-04 (maintainer, /quest-unblock): ✅ accept the mbx cache-hit
+evidence and estimated compiler savings as sufficient. Not chosen: add per-job
+CPU instrumentation and measure CPU totals. The estimates are not measured CPU
+savings.
 
-- Generate the workspace-hack crate with `cargo hakari generate`, and add a
-  `cargo hakari generate --diff` and `cargo hakari manage-deps --dry-run` check to
-  `just check`.
-- moq publishes crates with release-plz, and a published crate cannot depend on
-  an unpublished workspace-hack. Use hakari's supported setup for published
-  workspaces, and prove a release-plz dry run still publishes.
-- Keep the feature-contract checks, which `just rs features` runs nightly and
-  on release PRs, testing each crate's own declarations: the
-  `quic-features` recipe in `rs/justfile` (moq-quic has no native runtime),
-  `sh/rs/media-features.sh` (minimal builds exclude codecs and rendering), and
-  `sh/rs/net-features.sh` and `sh/rs/tokio-features.sh`. A workspace-hack would
-  inject the union into them and hide a missing declaration. Exclude the crates
-  they guard from the hack, or run those checks with it disabled
-  (`cargo hakari disable`), and show each still fails on a planted violation.
-- Unifying features means some packages build features they don't use. Measure
-  whether that costs more CPU than the cache hits save; target, profile, and
-  `RUSTFLAGS` differences still split keys.
-- Measure the baseline here, before generating the hack: across jobs, which
-  compilations one job misses although another job built the same crate at
-  the same version, grouped by what differs (features, profile, `RUSTFLAGS`,
-  target). Repeat it after, from the same commit.
+Decided with the maintainer on 2026-10-25: use cargo-hakari rather than only
+trimming CI's feature permutations.
+[moq-dev/moq#6985](https://github.com/moq-dev/moq/pull/6985) added the path-only
+dev-dependency layout, unifying test, lint, and bench builds. Keep that layout;
+library-only builds do not need the hack.
 
-Decided 2026-10-27 (maintainer): this quest no longer waits on
-[Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md). It measures its own
-before and after baseline, so the cross-job miss report moved here from that
-quest, which stays a waiting quest for the R2 numbers alone.
+The remaining FFI invocation alignment landed in
+[moq-dev/moq#7666](https://github.com/moq-dev/moq/pull/7666) (merged
+2026-11-05): default builds use
+`cargo build-ffi` with `openh264`, native builds omit `--target`, and only cross
+builds name a target. Python and Dart host tests retain `testing` for the manual
+clock and leak allocator, with separate target directories so they cannot
+replace the default cdylib. Their third-party feature identities match the
+default host build; the intentional `kio/manual` split affects workspace crates.
 
-Public API: none; the workspace-hack crate is not published.
+Compare the mbx summaries of the last scheduled Nightly before the
+[2026-11-02 merge](https://github.com/moq-dev/moq/commit/8e53bf32185fec578e460ff6ccbe41a80a039a6a)
+with the first two after. Query only scheduled runs on `main`:
+`gh run list --workflow nightly.yml --branch main --event schedule`.
+The baseline is [2026-11-01](https://github.com/moq-dev/moq/actions/runs/41313466339).
+The [2026-11-02 run](https://github.com/moq-dev/moq/actions/runs/41483654426)
+has partial macOS summaries before a websocket-test timeout and no Windows
+compilation (NASM installation returned HTTP 503).
+[2026-11-03](https://github.com/moq-dev/moq/actions/runs/41656613559) completed
+both platform jobs. [2026-11-04](https://github.com/moq-dev/moq/actions/runs/41852517544)
+completed Windows, but cancelled macOS before any step ran. Windows therefore
+has two complete after-runs; macOS has only one. Logs expose object-cache counts
+and estimated compiler work saved, but no measured user/system CPU totals.
+Do not call elapsed time CPU time, or attribute these earlier runs to the FFI
+alignment, which landed only on 2026-11-05.
+
+The 2026-11-04 maintainer decision accepts hosted CI as the strict Nix gate;
+a local namespace-probe skip is expected. The pkg-config and Gradle repairs
+have landed, so neither remains an external prerequisite.
+
+Public API and wire: none.
+
+## Waiting
+
+- moq-dev/moq: inspect the next scheduled Nightly for a second complete macOS
+  after-run. The macOS job cannot give one until
+  [Nightly's macOS platform job passes](/quest/m0/nightly/macos.md) fixes
+  `moq-audio`'s macOS test build: the
+  [2026-11-05 macOS job](https://github.com/moq-dev/moq/actions/runs/42050683248/job/127326015410)
+  failed compiling it (E0277, `rs/moq-audio/src/capture.rs:859`), and the
+  [Nov 4](https://github.com/moq-dev/moq/actions/runs/41852517544/job/126656206251)
+  one was cancelled with no steps. Run
+  `gh run list --repo moq-dev/moq --workflow nightly.yml --event schedule`,
+  inspect the next macOS job and record its mbx summaries alongside Nov 3.
+  This measurement wait outlives the implementation PR; never dispatch Nightly.

@@ -266,12 +266,13 @@ int main(void)
 	moq_dispatcher dispatcher = {loop_dispatch, loop_shutdown, NULL};
 	moq_set_dispatcher(&dispatcher);
 
-	/* Only the defaults carry moq-net's zero max delay; a bare record sets no subscriber limit. */
+	/* Only the defaults carry moq-net's zero delay; a bare record leaves both bounds unset. */
 	moq_subscription *defaults = moq_subscription_defaults();
-	CHECK(defaults->max_delay.has_value && defaults->max_delay.value == 0);
+	CHECK(defaults->delay.min.has_value && defaults->delay.min.value == 0);
+	CHECK(defaults->delay.max.has_value && defaults->delay.max.value == 0);
 	moq_subscription_free(defaults);
 	moq_subscription bare = moq_subscription_default();
-	CHECK(!bare.max_delay.has_value);
+	CHECK(!bare.delay.max.has_value);
 
 	/* A synchronous error is a returned value with Rust's Display message. */
 	moq_server_config unbound_config = moq_server_config_default();
@@ -287,18 +288,22 @@ int main(void)
 	/* Publisher: a server whose origin serves one broadcast with one track. */
 	moq_origin_config origin_config = moq_origin_config_default();
 	moq_origin_producer *origin = moq_origin_producer_new(&origin_config);
-	moq_publication *publication = NULL;
-	ok(moq_origin_producer_create_broadcast(origin, "probe", &publication), "create_broadcast");
-	moq_broadcast_producer *broadcast = moq_publication_broadcast(publication);
+	/* Hidden until its track exists; the route keeps it announced while it is held. */
+	moq_route_options route_options = moq_route_options_default();
+	route_options.hidden = true;
+	moq_route *route = NULL;
+	ok(moq_origin_producer_route(origin, "probe", &route_options, &route), "route");
+	moq_broadcast_producer *broadcast = NULL;
+	ok(moq_route_broadcast(route, &broadcast), "route broadcast");
+	char *instance = moq_route_instance_id(route);
+	CHECK(instance && instance[0] != '\0');
+	moq_string_free(instance);
 	moq_track_info info = moq_track_info_default();
 	info.timescale.has_value = true;
 	info.timescale.value = 1000000;
 	moq_track_producer *track = NULL;
 	ok(moq_broadcast_producer_publish_track(broadcast, "data", &info, &track), "publish_track");
-	moq_announce_route route = moq_announce_route_default();
-	ok(moq_publication_announce(publication, &route), "announce");
-	/* Releasing the publication keeps the route: the subscriber below still reaches it. */
-	moq_publication_free(publication);
+	ok(moq_route_announce(route), "announce");
 
 	const char *generate[] = {"localhost"};
 	const char *versions[] = {"moq-lite-07-wip"};
@@ -418,6 +423,7 @@ int main(void)
 	moq_server_free(server);
 	moq_track_producer_free(track);
 	moq_broadcast_producer_free(broadcast);
+	moq_route_free(route);
 	moq_origin_producer_free(origin);
 
 	/* A first dial that keeps failing still returns the session, whose state names each failed
@@ -454,10 +460,13 @@ int main(void)
      * while moq_shutdown drains the dispatcher; none may run once it returns, even as the
      * handles are freed afterward. */
 	moq_origin_producer *late_origin = moq_origin_producer_new(&origin_config);
-	moq_publication *late_publication = NULL;
-	ok(moq_origin_producer_create_broadcast(late_origin, "late", &late_publication), "late broadcast");
-	moq_broadcast_producer *late_broadcast = moq_publication_broadcast(late_publication);
-	moq_publication_free(late_publication);
+	moq_route_options late_options = moq_route_options_default();
+	late_options.hidden = true;
+	moq_route *late_route = NULL;
+	ok(moq_origin_producer_route(late_origin, "late", &late_options, &late_route), "late route");
+	moq_broadcast_producer *late_broadcast = NULL;
+	ok(moq_route_broadcast(late_route, &late_broadcast), "late broadcast");
+	moq_route_free(late_route);
 	moq_track_producer *late_track = NULL;
 	ok(moq_broadcast_producer_publish_track(late_broadcast, "data", &info, &late_track), "late track");
 	moq_track_consumer *late = NULL;

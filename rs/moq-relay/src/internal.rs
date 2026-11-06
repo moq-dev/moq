@@ -18,7 +18,7 @@
 //!   crossing it, so they have no place on the `moq-stats` wire.
 //! - `/health` - a liveness mirror of the public probe, for internal checks
 //!   that don't want to hit the customer port.
-//! - `/nodes` - the cluster peers this relay dialed and holds a session with.
+//! - `/nodes` - configured outbound cluster peers, live transports, and connect history.
 //! - `/sessions` and `/sessions/revalidate` - list or nudge live sessions on
 //!   this node. A push only causes a re-check, so a caller on this trusted
 //!   plane gains nothing a scheduled cadence would not do.
@@ -463,7 +463,7 @@ async fn serve_metrics(State(state): State<InternalState>) -> Response {
 	{
 		scrape.demux = state.demux;
 	}
-	scrape.draining = state.shutdown.map(|shutdown| shutdown.tally().draining);
+	scrape.draining = state.shutdown.map(|shutdown| shutdown.draining_count());
 	scrape.refusals = state.refusals.map(|refusals| refusals.snapshot());
 	(
 		[(
@@ -475,7 +475,7 @@ async fn serve_metrics(State(state): State<InternalState>) -> Response {
 		.into_response()
 }
 
-/// Cluster peers this relay dialed and currently holds a session with. Accepted
+/// Configured outbound cluster peers, their live sessions and connection history. Accepted
 /// peer sessions are omitted, since a peer declares no URL to list it under.
 async fn serve_nodes(State(state): State<InternalState>) -> Json<crate::nodes::Snapshot> {
 	Json(state.nodes.map(|nodes| nodes.snapshot()).unwrap_or_default())
@@ -729,7 +729,7 @@ impl Scrape {
 			("moq_relay_groups", "Media groups transferred.", |c| c.groups),
 			(
 				"moq_relay_datagrams",
-				"Single-frame groups carried over unreliable QUIC datagrams; a subset of groups.",
+				"Datagrams of datagram tracks transferred, disjoint from groups.",
 				|c| c.datagrams,
 			),
 			(
@@ -751,11 +751,6 @@ impl Scrape {
 				"moq_relay_stale_groups",
 				"Media groups skipped after drifting beyond a subscriber's latency budget.",
 				|c| c.stale.groups,
-			),
-			(
-				"moq_relay_stale_datagrams",
-				"Media datagrams skipped after drifting beyond a subscriber's latency budget.",
-				|c| c.stale.datagrams,
 			),
 			("moq_relay_fetches", "One-shot group fetches requested.", |c| c.fetches),
 			("moq_relay_announces_started", "Broadcast announces started.", |c| {
@@ -909,8 +904,8 @@ fn encode_accepts(encoder: &mut DescriptorEncoder, listeners: &[moq_tokio::accep
 	)
 }
 
-/// The io_uring runtime's per-worker counters, one `worker` label per bound
-/// worker.
+/// The io_uring runtime's per-worker counters and gauges, one `worker` label
+/// per bound worker.
 ///
 /// These describe the runtime rather than the traffic: how well the receive
 /// pool, the batching mechanisms, and the ring itself are holding up on each
@@ -923,7 +918,9 @@ fn encode_accepts(encoder: &mut DescriptorEncoder, listeners: &[moq_tokio::accep
 /// The ratios are what to watch, not the raw counts: `rx_datagrams / rx_receives`
 /// is the GRO coalescing actually achieved, `tx_datagrams / tx_sends` the GSO
 /// batching, and datagrams over `enters` the syscall amortization the runtime
-/// exists for.
+/// exists for. The pool gauges are the buffer space each worker has allocated,
+/// which stays at its high-water mark after a burst; only the pages datagrams
+/// have touched count toward RSS.
 #[cfg(all(target_os = "linux", feature = "_uring"))]
 fn encode_uring(encoder: &mut DescriptorEncoder, workers: &[UringWorker]) -> std::fmt::Result {
 	use moq_uring::metrics::Snapshot;
@@ -996,6 +993,11 @@ fn encode_uring(encoder: &mut DescriptorEncoder, workers: &[UringWorker]) -> std
 			|snap| snap.turns,
 		),
 		(
+			"moq_relay_uring_passes",
+			"Worker passes over its woken tasks; over turns, the passes a turn takes to settle.",
+			|snap| snap.passes,
+		),
+		(
 			"moq_relay_uring_sq_full_enters",
 			"io_uring_enter calls forced by a full submission queue.",
 			|snap| snap.sq_full_enters,
@@ -1034,6 +1036,30 @@ fn encode_uring(encoder: &mut DescriptorEncoder, workers: &[UringWorker]) -> std
 		"Timers currently in a worker's heap.",
 		rows(Snapshot::timers_active),
 	)?;
+	for (name, help, field) in [
+		(
+			"moq_relay_uring_rx_pool_bytes",
+			"Receive buffer bytes a worker's sockets have allocated; pools grow under load and never shrink; reserved, not resident.",
+			(|snap: &Snapshot| snap.rx_pool_bytes) as fn(&Snapshot) -> u64,
+		),
+		(
+			"moq_relay_uring_rx_pool_in_use_bytes",
+			"Receive buffer bytes holding a packet the relay has not consumed yet.",
+			|snap| snap.rx_pool_in_use_bytes,
+		),
+		(
+			"moq_relay_uring_tx_pool_bytes",
+			"Send buffer bytes a worker's sockets have allocated; pools grow under load and never shrink; reserved, not resident.",
+			|snap| snap.tx_pool_bytes,
+		),
+		(
+			"moq_relay_uring_tx_pool_in_use_bytes",
+			"Send buffer bytes being filled or in flight to the kernel.",
+			|snap| snap.tx_pool_in_use_bytes,
+		),
+	] {
+		gauge(encoder, name, help, rows(field))?;
+	}
 
 	for (name, help, field) in [
 		(
@@ -1323,13 +1349,13 @@ mod tests {
 	}
 
 	/// The next route and whether it is active.
-	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::announce::Event::Start(route)
-			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route)
-			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-			moq_net::announce::Event::End(route) => Some((route, false)),
+			moq_net::origin::RouteEvent::Start(route)
+			| moq_net::origin::RouteEvent::Update(route)
+			| moq_net::origin::RouteEvent::Restart(route)
+			| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 		}
 	}
 
@@ -1455,8 +1481,8 @@ mod tests {
 			&internal.uring,
 		);
 
-		// Every counter the module documents, for every worker, plus the derived
-		// gauge. A name that drifts out of the renderer silently deletes a
+		// Every counter the module documents, for every worker, plus the
+		// gauges. A name that drifts out of the renderer silently deletes a
 		// dashboard, so the list is spelled out rather than derived from it.
 		let counters = [
 			"rx_datagrams",
@@ -1470,6 +1496,7 @@ mod tests {
 			"completions",
 			"enters",
 			"turns",
+			"passes",
 			"sq_full_enters",
 			"parks",
 			"wakes",
@@ -1501,8 +1528,23 @@ mod tests {
 				assert!(body.contains(&format!("{name}_sum{{worker=\"{worker}\"}} 0.0")));
 			}
 		}
-		assert!(body.contains("# TYPE moq_relay_uring_timers_active gauge"));
-		assert!(body.contains("moq_relay_uring_timers_active{worker=\"1\"} 0"));
+		for gauge in [
+			"timers_active",
+			"rx_pool_bytes",
+			"rx_pool_in_use_bytes",
+			"tx_pool_bytes",
+			"tx_pool_in_use_bytes",
+		] {
+			let name = format!("moq_relay_uring_{gauge}");
+			assert!(
+				body.contains(&format!("# TYPE {name} gauge")),
+				"missing type for {name}"
+			);
+			for worker in 0..2 {
+				let line = format!("{name}{{worker=\"{worker}\"}} 0");
+				assert!(body.contains(&line), "missing {line} in:\n{body}");
+			}
+		}
 	}
 
 	/// A worker's cumulative buckets come out cumulative again, not summed twice.
@@ -1617,7 +1659,7 @@ mod tests {
 	#[tokio::test]
 	async fn nodes_endpoint_uses_the_attached_cluster_registry() {
 		let nodes = crate::nodes::Nodes::default();
-		let _connection = nodes.connect_outbound(0, "https://relay-b.example/");
+		let _connection = nodes.dial("https://relay-b.example/");
 		let state = InternalState {
 			stats: moq_net::stats::Registry::disabled(),
 			nodes: Some(nodes),
@@ -1744,8 +1786,9 @@ mod tests {
 				.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("edge")))
 				.session(moq_net::Path::from_static("root")),
 		);
-		let broadcast = producer.create_broadcast("demo/retired").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = producer
+			.route("demo/retired", moq_net::origin::RouteOptions::default())
+			.unwrap();
 
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
 		assert!(
@@ -1757,7 +1800,7 @@ mod tests {
 			"live announce end:\n{body}"
 		);
 
-		broadcast.unannounce();
+		broadcast.withdraw();
 		drop(broadcast);
 		drop(producer);
 		let mut report = moq_net::stats::Report::default();
@@ -1789,10 +1832,11 @@ mod tests {
 		let default_ctx = stats.tier(Tier::default()).session(moq_net::Path::from_static("acme"));
 		let pub_origin = moq_tokio::origin::spawn();
 		let egress = pub_origin.consume().with_stats(default_ctx.clone());
-		let mut announced = egress.announced();
-		let pub_source = pub_origin.create_broadcast("demo/x").unwrap();
-		pub_source.announce(Default::default()).unwrap();
-		let pub_track = pub_source.create_track("video", timed()).unwrap();
+		let mut announced = egress.routes();
+		let pub_source = pub_origin
+			.route("demo/x", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		let pub_track = pub_source.broadcast().create_track("video", timed()).unwrap();
 
 		// Named-tier ingress: a tagged ingress producer writes, so subscriber
 		// `bytes` advance on the regional tier.
@@ -1800,9 +1844,10 @@ mod tests {
 			.tier(Tier::new(moq_net::Path::from_static("region/sjc")))
 			.session(moq_net::Path::from_static("peer"));
 		let sub_origin = moq_tokio::origin::spawn().with_stats(regional_ctx.clone());
-		let sub_source = sub_origin.create_broadcast("demo/x").unwrap();
-		sub_source.announce(Default::default()).unwrap();
-		let sub_track = sub_source.create_track("audio", timed()).unwrap();
+		let sub_source = sub_origin
+			.route("demo/x", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		let sub_track = sub_source.broadcast().create_track("audio", timed()).unwrap();
 
 		kio::clock::sleep(std::time::Duration::from_millis(1)).await;
 		kio::clock::sleep(std::time::Duration::from_millis(1)).await;
@@ -1860,10 +1905,6 @@ mod tests {
 			"stale egress groups:\n{body}"
 		);
 		assert!(
-			body.contains("moq_relay_stale_datagrams_total{tier=\"\",role=\"publisher\"} 0"),
-			"stale egress datagrams:\n{body}"
-		);
-		assert!(
 			body.contains("moq_relay_sessions_opened_total{tier=\"\"} 1"),
 			"session presence:\n{body}"
 		);
@@ -1877,9 +1918,11 @@ mod tests {
 
 		let stats = Registry::new(Default::default());
 		let origin = moq_tokio::origin::spawn();
-		let source = origin.create_broadcast("demo/x").unwrap();
-		source.announce(Default::default()).unwrap();
+		let source = origin
+			.route("demo/x", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let track = source
+			.broadcast()
 			.create_track("catalog.json", timed().with_compress(true))
 			.unwrap();
 		let payload = format!("{{\"pad\":\"{}\"}}", "abc".repeat(300));
@@ -1981,8 +2024,7 @@ mod tests {
 		let stats = moq_net::stats::Registry::new(Default::default());
 		let edge = stats.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("edge")));
 		let origin = moq_tokio::origin::spawn().with_stats(edge.session(moq_net::Path::from_static("root")));
-		let broadcast = origin.create_broadcast("demo").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let _broadcast = origin.route("demo", moq_net::origin::RouteOptions::default()).unwrap();
 		drop(edge.request(moq_net::Path::from_static("root")));
 		let refusals = crate::refusals::Refusals::default();
 		refusals.record(crate::refusals::RefusalKind::Unavailable);
@@ -2045,7 +2087,6 @@ mod tests {
 # TYPE moq_relay_sessions_opened_total counter
 # TYPE moq_relay_sessions_refused_total counter
 # TYPE moq_relay_stale_bytes_total counter
-# TYPE moq_relay_stale_datagrams_total counter
 # TYPE moq_relay_stale_frames_total counter
 # TYPE moq_relay_stale_groups_total counter
 # TYPE moq_relay_stun_dropped_total counter
@@ -2091,8 +2132,6 @@ counter moq_relay_sessions_refused_total{reason="request"} 0
 counter moq_relay_sessions_refused_total{reason="unavailable"} 1
 counter moq_relay_stale_bytes_total{role="publisher",tier="edge"} 0
 counter moq_relay_stale_bytes_total{role="subscriber",tier="edge"} 0
-counter moq_relay_stale_datagrams_total{role="publisher",tier="edge"} 0
-counter moq_relay_stale_datagrams_total{role="subscriber",tier="edge"} 0
 counter moq_relay_stale_frames_total{role="publisher",tier="edge"} 0
 counter moq_relay_stale_frames_total{role="subscriber",tier="edge"} 0
 counter moq_relay_stale_groups_total{role="publisher",tier="edge"} 0
@@ -2124,9 +2163,12 @@ gauge moq_relay_draining_sessions{} 0
 # TYPE moq_relay_uring_cqes_per_enter histogram
 # TYPE moq_relay_uring_enters_total counter
 # TYPE moq_relay_uring_parks_total counter
+# TYPE moq_relay_uring_passes_total counter
 # TYPE moq_relay_uring_rx_datagrams_total counter
 # TYPE moq_relay_uring_rx_enobufs_total counter
 # TYPE moq_relay_uring_rx_exhausted_total counter
+# TYPE moq_relay_uring_rx_pool_bytes gauge
+# TYPE moq_relay_uring_rx_pool_in_use_bytes gauge
 # TYPE moq_relay_uring_rx_receives_total counter
 # TYPE moq_relay_uring_sq_full_enters_total counter
 # TYPE moq_relay_uring_sqes_per_enter histogram
@@ -2137,12 +2179,15 @@ gauge moq_relay_draining_sessions{} 0
 # TYPE moq_relay_uring_timers_fired_total counter
 # TYPE moq_relay_uring_turns_total counter
 # TYPE moq_relay_uring_tx_datagrams_total counter
+# TYPE moq_relay_uring_tx_pool_bytes gauge
+# TYPE moq_relay_uring_tx_pool_in_use_bytes gauge
 # TYPE moq_relay_uring_tx_sends_total counter
 # TYPE moq_relay_uring_tx_stalls_total counter
 # TYPE moq_relay_uring_wakes_total counter
 counter moq_relay_uring_completions_total{worker="0"} 0
 counter moq_relay_uring_enters_total{worker="0"} 0
 counter moq_relay_uring_parks_total{worker="0"} 0
+counter moq_relay_uring_passes_total{worker="0"} 0
 counter moq_relay_uring_rx_datagrams_total{worker="0"} 0
 counter moq_relay_uring_rx_enobufs_total{worker="0"} 0
 counter moq_relay_uring_rx_exhausted_total{worker="0"} 0
@@ -2157,7 +2202,11 @@ counter moq_relay_uring_tx_datagrams_total{worker="0"} 0
 counter moq_relay_uring_tx_sends_total{worker="0"} 0
 counter moq_relay_uring_tx_stalls_total{worker="0"} 0
 counter moq_relay_uring_wakes_total{worker="0"} 0
+gauge moq_relay_uring_rx_pool_bytes{worker="0"} 0
+gauge moq_relay_uring_rx_pool_in_use_bytes{worker="0"} 0
 gauge moq_relay_uring_timers_active{worker="0"} 0
+gauge moq_relay_uring_tx_pool_bytes{worker="0"} 0
+gauge moq_relay_uring_tx_pool_in_use_bytes{worker="0"} 0
 histogram moq_relay_uring_cqes_per_enter_bucket{le="0",worker="0"} 0
 histogram moq_relay_uring_cqes_per_enter_bucket{le="1",worker="0"} 0
 histogram moq_relay_uring_cqes_per_enter_bucket{le="128",worker="0"} 0

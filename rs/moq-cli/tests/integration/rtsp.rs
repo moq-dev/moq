@@ -1,5 +1,5 @@
 //! `moq import rtsp` over a real relay: every RTSP session is its own broadcast under a fresh
-//! epoch, so a camera whose RTP time restarts never splices onto the broadcast before it.
+//! instance, so a camera whose RTP time restarts never splices onto the broadcast before it.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -56,17 +56,17 @@ fn import(url: &str, fingerprint: &str, rtsp: &str) -> Child {
 async fn next_broadcast(
 	child: &mut Child,
 	consumer: &moq_net::origin::Consumer,
-	announced: &mut moq_net::announce::Consumer,
+	announced: &mut moq_net::origin::Routes,
 ) -> hang::catalog::Consumer {
 	loop {
 		match running(child, "the announce", announced.next())
 			.await
 			.expect("origin closed")
 		{
-			moq_net::announce::Event::Start(_)
-			| moq_net::announce::Event::Restart(_)
-			| moq_net::announce::Event::Takeover { .. } => break,
-			moq_net::announce::Event::End(_) | moq_net::announce::Event::Update(_) => {}
+			moq_net::origin::RouteEvent::Start(_)
+			| moq_net::origin::RouteEvent::Restart(_)
+			| moq_net::origin::RouteEvent::Takeover { .. } => break,
+			moq_net::origin::RouteEvent::End(_) | moq_net::origin::RouteEvent::Update(_) => {}
 		}
 	}
 	let broadcast = running(child, "the broadcast", consumer.request("camera", None))
@@ -118,7 +118,7 @@ async fn finished(child: &mut Child, mut catalogs: hang::catalog::Consumer) {
 
 #[tokio::test]
 async fn every_rtsp_session_is_a_fresh_broadcast() {
-	let _ = moq_tokio::crypto::install_default();
+	moq_tokio::crypto::install_default().unwrap();
 	let fixture = moq_relay::test_relay().await.expect("test relay");
 	let ready = fixture.relay.ready();
 	tokio::spawn(fixture.relay.run());
@@ -135,7 +135,7 @@ async fn every_rtsp_session_is_a_fresh_broadcast() {
 
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
-	let mut announced = consumer.announced();
+	let mut announced = consumer.routes();
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -174,14 +174,14 @@ async fn every_rtsp_session_is_a_fresh_broadcast() {
 
 	child.kill().await.expect("kill moq");
 	let log = log.await.expect("stderr task");
-	let mut epochs: Vec<&str> = log
+	let mut instances: Vec<&str> = log
 		.lines()
 		.filter(|line| line.contains("publishing RTSP broadcast"))
-		.filter_map(|line| line.split("epoch=").nth(1))
+		.filter_map(|line| line.split("instance=").nth(1))
 		.map(|rest| rest.split_whitespace().next().unwrap())
 		.collect();
-	assert_eq!(epochs.len(), 3, "one broadcast per session:\n{log}");
-	epochs.sort_unstable();
-	epochs.dedup();
-	assert_eq!(epochs.len(), 3, "every session mints its own epoch:\n{log}");
+	assert_eq!(instances.len(), 3, "one broadcast per session:\n{log}");
+	instances.sort_unstable();
+	instances.dedup();
+	assert_eq!(instances.len(), 3, "every session mints its own instance:\n{log}");
 }

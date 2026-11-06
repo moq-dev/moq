@@ -37,7 +37,7 @@ export async function readFinish(
 			if (!format) throw new Error("unsupported finish media container");
 			const subscription = broadcast
 				.track(Catalog.track(name, config))
-				.subscribe({ maxDelay, groups: { start: { included: 0 } } });
+				.subscribe({ delay: { max: maxDelay }, ranges: [{ start: { absolute: 0n } }] });
 			const media = new Container.Consumer(subscription, { format, delay: { max: maxDelay } });
 			let count = 0;
 			try {
@@ -56,7 +56,7 @@ export async function readFinish(
 			for (;;) {
 				const event = await routes.next();
 				if (!event) throw new Error("origin ended before broadcast withdrawal");
-				if (event.kind === "end" && event.prefix === path) break;
+				if (event.kind === "absent" && event.prefix === path) break;
 			}
 			let health = healthRequest.active.peek();
 			while (!health) {

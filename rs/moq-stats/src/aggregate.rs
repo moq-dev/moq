@@ -14,11 +14,11 @@ use std::time::Duration;
 use kio::clock::Instant;
 use moq_net::kio::{self, Pending, Waiter};
 use moq_net::stats::{Presence, Traffic};
-use moq_net::track::Subscribing;
-use moq_net::{Epoch, Path, broadcast, origin};
+use moq_net::track::Resolving;
+use moq_net::{Instance, Path, broadcast, origin};
 
 use crate::{
-	Group, GroupFrame, Prefix, PrefixFrame, PresenceFrame, Result, Totals, TotalsFrame, Usage, group_track,
+	Epoch, Group, GroupFrame, Prefix, PrefixFrame, PresenceFrame, Result, Totals, TotalsFrame, Usage, group_track,
 	parse_node_path, prefix_track, presence_track, totals_track,
 };
 
@@ -37,8 +37,7 @@ pub struct Config {
 	pub prefix: Path,
 	/// How long a departed node's traffic waits for its path to return before
 	/// folding into the retired total (default 10 minutes). A return within it
-	/// under the same epoch (or again without one) resumes the node's own
-	/// counters; a return after it with counters intact counts its earlier
+	/// under the same instance resumes the node's own counters; a return after it with counters intact counts its earlier
 	/// traffic twice, so size this above reconnect times.
 	pub grace: Duration,
 }
@@ -88,31 +87,29 @@ impl Default for Config {
 /// within [`Config::grace`] with its counters intact never looks like new
 /// traffic. After the grace, a departed node's contribution folds into one
 /// retired total and the node is forgotten, so memory follows live nodes and
-/// the keys ever reported, not every node ever seen. Each route epoch is its
-/// own node: a restarted producer announces a new epoch whose counters add to
-/// the old epoch's kept contribution instead of regressing it, and a group
-/// track's new instance, under a new [`GroupFrame::epoch`], adds to the old
-/// instance's the same way. A reader stays pinned to its epoch, so a
-/// replacement never feeds it. When epoch metadata disappears or returns at a
-/// path (one publisher reached through mixed-version links), only the
-/// immediately outgoing contribution carries across; a different known epoch
-/// keeps its own entry, even when an unversioned reader resolves it first.
+/// the keys ever reported, not every node ever seen. Each route instance is its
+/// own node: a restarted producer announces a new instance whose counters add to
+/// the old one's kept contribution instead of regressing it, and a group
+/// track's new [`GroupFrame::epoch`] adds to the old epoch's counters the same
+/// way. A reader stays pinned to its broadcast instance, so a
+/// replacement never feeds it. A wire that carries no instance has its relay
+/// mint one per announcement, so a node reached through one announces anew each
+/// time it is announced again.
 ///
 /// A group's per-label sessions are the exception: they are a gauge, so a
 /// departed node stops counting them immediately.
 ///
 /// The totals, presence, and prefix counters never regress: a node's counter
-/// going down is that node resetting (a restart on a route without an epoch,
-/// or a presence or prefix track held again from zero), so its previous
+/// going down is that node resetting (a presence or prefix track held again
+/// from zero), so its previous
 /// readout is kept as a baseline the new one adds to. A prefix's children are
 /// the exception: they sum the live nodes' current children, so a child leaves
 /// the merged map with the last node carrying it while its tail stays in the
 /// rollup. A node that resumes after its departure closed its open pairs
 /// reopens them as new starts rather than lowering their ends. A group's
 /// per-path traffic also reopens pairs when a node resumes without regressing,
-/// but keeps the reset contract of a single node: a route without an epoch
-/// that returns within the grace with a lower counter regresses the merged
-/// counter.
+/// but keeps the reset contract of a single node: one that returns within the
+/// grace with a lower counter regresses the merged counter.
 pub struct Consumer {
 	origin: origin::Consumer,
 	config: Config,
@@ -173,8 +170,9 @@ pub struct TotalsConsumer {
 impl TotalsConsumer {
 	/// The next merged frame, or `None` once the announce stream ends (the
 	/// source origin went away).
-	pub async fn next(&mut self) -> Result<Option<TotalsFrame>> {
-		kio::wait(|waiter| self.inner.poll_next(waiter)).await
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next(&mut self, waiter: &Waiter) -> Poll<Result<Option<TotalsFrame>>> {
+		self.inner.poll_next(waiter)
 	}
 }
 
@@ -187,8 +185,9 @@ pub struct GroupConsumer {
 impl GroupConsumer {
 	/// The next merged frame, each tier's [`Group`] keyed by tier label as in
 	/// [`GroupFrame::tiers`], or `None` once the announce stream ends.
-	pub async fn next(&mut self) -> Result<Option<BTreeMap<String, Group>>> {
-		kio::wait(|waiter| self.inner.poll_next(waiter)).await
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next(&mut self, waiter: &Waiter) -> Poll<Result<Option<BTreeMap<String, Group>>>> {
+		self.inner.poll_next(waiter)
 	}
 }
 
@@ -200,8 +199,9 @@ pub struct PresenceConsumer {
 
 impl PresenceConsumer {
 	/// The next merged frame, or `None` once the announce stream ends.
-	pub async fn next(&mut self) -> Result<Option<PresenceFrame>> {
-		kio::wait(|waiter| self.inner.poll_next(waiter)).await
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next(&mut self, waiter: &Waiter) -> Poll<Result<Option<PresenceFrame>>> {
+		self.inner.poll_next(waiter)
 	}
 }
 
@@ -213,8 +213,9 @@ pub struct PrefixConsumer {
 
 impl PrefixConsumer {
 	/// The next merged frame, or `None` once the announce stream ends.
-	pub async fn next(&mut self) -> Result<Option<PrefixFrame>> {
-		kio::wait(|waiter| self.inner.poll_next(waiter)).await
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next(&mut self, waiter: &Waiter) -> Poll<Result<Option<PrefixFrame>>> {
+		self.inner.poll_next(waiter)
 	}
 }
 
@@ -315,7 +316,6 @@ impl Mergeable for Traffic {
 			|| self.stale.bytes < prev.stale.bytes
 			|| self.stale.frames < prev.stale.frames
 			|| self.stale.groups < prev.stale.groups
-			|| self.stale.datagrams < prev.stale.datagrams
 	}
 }
 
@@ -624,7 +624,7 @@ impl<V: Mergeable> Shape for Keyed<V> {
 /// traffic, and each `(tier, label)`'s sessions.
 #[derive(Default)]
 struct Grouped {
-	/// The track instance the last frame came from.
+	/// The group counter epoch the last frame came from.
 	epoch: Option<Epoch>,
 	totals: Keyed<Totals>,
 	paths: Keyed<Usage, (String, String)>,
@@ -637,7 +637,7 @@ impl Shape for Grouped {
 	const LISTED: bool = true;
 
 	fn observe(&mut self, frame: GroupFrame) {
-		// A new instance counts from zero, whatever its counters read by the time
+		// A new epoch counts from zero, whatever its counters read by the time
 		// this reader sees them.
 		let reset = self.epoch.as_ref().is_some_and(|epoch| *epoch != frame.epoch);
 		self.epoch = Some(frame.epoch);
@@ -700,8 +700,9 @@ enum Reader<F> {
 	Resolving(Box<Pending<origin::Requesting>>),
 	/// Waiting for the node's listing to offer the track.
 	Waiting,
-	/// Awaiting the subscription handshake.
-	Subscribing(Pending<Subscribing>),
+	/// Awaiting the subscription handshake: the reader has subscribed, and the
+	/// track's info resolving shows whether the track exists.
+	Subscribing(Box<moq_json::snapshot::Consumer<F>>, Box<Pending<Resolving>>),
 	/// Reading frames. Boxed: the snapshot consumer dwarfs the other variants,
 	/// and one lives per node in a map.
 	Active(Box<moq_json::snapshot::Consumer<F>>),
@@ -721,10 +722,8 @@ struct Node<S: Shape> {
 	/// The announced path, relative to the announce cursor: what a re-resolve
 	/// after the reader ends requests again.
 	path: Path,
-	/// The publisher instance every initial and retry resolution must serve.
-	epoch: Option<Epoch>,
-	/// The last known publisher identity, retained while route metadata vanishes.
-	identity: Option<Epoch>,
+	/// The instance every initial and retry resolution must serve.
+	instance: Instance,
 	shape: S,
 	/// When the path unannounced, starting its grace; cleared by a reannounce.
 	/// Only an unannounced node folds, so a still-announced node whose reader
@@ -768,16 +767,16 @@ impl<S: Shape> Node<S> {
 struct Merged<S: Shape> {
 	/// Resolves announced node paths into broadcasts.
 	origin: origin::Consumer,
-	announce: moq_net::announce::Consumer,
+	announce: moq_net::origin::Routes,
 	prefix: Path,
 	/// Track name subscribed on each node broadcast.
 	name: String,
 	config: moq_json::snapshot::consumer::Config,
 	/// One entry per live or recently departed node broadcast, keyed by
-	/// absolute announced path and route epoch, so each epoch is its own entry.
-	nodes: HashMap<(Path, Option<Epoch>), Node<S>>,
-	/// The immediately outgoing identity, including while it remains in grace.
-	last_announced: HashMap<Path, Option<Epoch>>,
+	/// absolute announced path and route instance, so each instance is its own entry.
+	nodes: HashMap<(Path, Instance), Node<S>>,
+	/// The instance last announced at each path, including while it remains in grace.
+	last_announced: HashMap<Path, Instance>,
 	/// How long a departed node waits before folding into `retired`.
 	grace: Duration,
 	/// The summed last frames of every node whose grace elapsed.
@@ -788,7 +787,7 @@ impl<S: Shape> Merged<S> {
 	fn new(origin: origin::Consumer, config: &Config, name: String) -> Self {
 		Self {
 			// Stats live under a `.`-named prefix, which discovery hides by default.
-			announce: origin.clone().with_hidden(true).announced(),
+			announce: origin.clone().with_hidden(true).routes(),
 			origin,
 			prefix: config.prefix.clone(),
 			name,
@@ -813,23 +812,27 @@ impl<S: Shape> Merged<S> {
 			match self.announce.poll_next(waiter) {
 				// A takeover continues what was read through its predecessor, like an update.
 				Poll::Ready(Some(
-					moq_net::announce::Event::Start(update)
-					| moq_net::announce::Event::Update(update)
-					| moq_net::announce::Event::Takeover { announce: update, .. },
-				)) => changed |= self.apply_announce(update, true),
-				Poll::Ready(Some(moq_net::announce::Event::End(update))) => {
-					changed |= self.apply_announce(update, false)
+					moq_net::origin::RouteEvent::Start(update)
+					| moq_net::origin::RouteEvent::Update(update)
+					| moq_net::origin::RouteEvent::Takeover { announce: update, .. },
+				)) => {
+					let instance = update.route.instance().clone();
+					changed |= self.apply_announce(&update, instance, true)
 				}
-				// Another publisher instance: the one tracked at the path ends, then the
-				// new one starts, so its reader resolves afresh.
-				Poll::Ready(Some(moq_net::announce::Event::Restart(update))) => {
-					let mut ended = update.clone();
+				Poll::Ready(Some(moq_net::origin::RouteEvent::End(update))) => {
+					let instance = update.route.instance().clone();
+					changed |= self.apply_announce(&update, instance, false)
+				}
+				// Another instance: the one tracked at the path ends, then the new one
+				// starts, so its reader resolves afresh.
+				Poll::Ready(Some(moq_net::origin::RouteEvent::Restart(update))) => {
 					// An announced prefix is a path beneath the root, so rooting it fits.
 					let absolute = self.announce.absolute(&update.prefix).ok();
-					ended.route.epoch =
-						absolute.and_then(|absolute| self.last_announced.get(&absolute).cloned().flatten());
-					changed |= self.apply_announce(ended, false);
-					changed |= self.apply_announce(update, true);
+					if let Some(previous) = absolute.and_then(|absolute| self.last_announced.get(&absolute).cloned()) {
+						changed |= self.apply_announce(&update, previous, false);
+					}
+					let instance = update.route.instance().clone();
+					changed |= self.apply_announce(&update, instance, true);
 				}
 				Poll::Ready(None) => return Poll::Ready(Ok(None)),
 				Poll::Pending => break,
@@ -847,10 +850,10 @@ impl<S: Shape> Merged<S> {
 		let grace = self.grace;
 		let retired = &mut self.retired;
 		let last_announced = &mut self.last_announced;
-		self.nodes.retain(|(path, epoch), node| {
+		self.nodes.retain(|(path, instance), node| {
 			changed |= advance(node, origin, config, name, waiter);
 			if node.fold_expired(retired, grace, now) {
-				if last_announced.get(path) == Some(epoch) {
+				if last_announced.get(path) == Some(instance) {
 					last_announced.remove(path);
 				}
 				false
@@ -874,10 +877,16 @@ impl<S: Shape> Merged<S> {
 	/// Apply one announce update to the node set. Returns whether the merged view
 	/// changed (only a departure closing open pairs, or a gauge's contribution
 	/// leaving, does).
-	fn apply_announce(&mut self, update: moq_net::announce::Announce, active: bool) -> bool {
-		let path = update.prefix;
+	/// Fold `update` in under `instance`: the route's own, or the one a restart replaced.
+	fn apply_announce(
+		&mut self,
+		update: &moq_net::announce::Announce,
+		instance: moq_net::Instance,
+		active: bool,
+	) -> bool {
+		let path = &update.prefix;
 		// An announced prefix is a path beneath the root, so rooting it fits.
-		let Ok(absolute) = self.announce.absolute(&path) else {
+		let Ok(absolute) = self.announce.absolute(path) else {
 			return false;
 		};
 
@@ -889,7 +898,7 @@ impl<S: Shape> Merged<S> {
 		}
 		// Publisher replacement can race reader polling on another worker, so every
 		// reader pins the identity it contributes to, independent of announce order.
-		let key = (absolute, update.route.epoch);
+		let key = (absolute, instance);
 
 		if !active {
 			// Unannounce: keep the cumulative counters, close the open pairs,
@@ -904,29 +913,7 @@ impl<S: Shape> Merged<S> {
 			};
 		}
 
-		if let Some(previous) = self.last_announced.insert(key.0.clone(), key.1.clone()) {
-			// An unversioned route cannot identify a restart. Carry only the
-			// immediately outgoing contribution across loss or recovery of metadata;
-			// distinct known epochs remain separate, even while several are in grace.
-			if previous != key.1
-				&& (previous.is_none() || key.1.is_none())
-				&& let Some(mut node) = self.nodes.remove(&(key.0.clone(), previous))
-			{
-				node.depart();
-				if key.1.is_some() && node.identity.is_some() && node.identity != key.1 {
-					// Recovery identifies a distinct known publisher. Keep the outgoing
-					// lineage in grace and re-arm the incoming identity's own entry.
-					node.epoch = node.identity.clone();
-					self.nodes.insert((key.0.clone(), node.identity.clone()), node);
-				} else {
-					node.epoch = key.1.clone();
-					if key.1.is_some() {
-						node.identity = key.1.clone();
-					}
-					self.nodes.insert(key.clone(), node);
-				}
-			}
-		}
+		self.last_announced.insert(key.0.clone(), key.1.clone());
 		// A route update on a node already tracked (a reprice, or a takeover
 		// with different metadata) keeps the live reader: existing
 		// subscriptions survive a takeover, and the reader re-resolves through
@@ -942,18 +929,17 @@ impl<S: Shape> Merged<S> {
 				node.fold_expired(&mut self.retired, self.grace, kio::clock::now());
 				node.departed = None;
 				if matches!(node.reader, Reader::Ended) {
-					node.reader = resolve(&self.origin, &node.path, node.epoch.clone());
+					node.reader = resolve(&self.origin, &node.path, node.instance.clone());
 				}
 			}
 			Entry::Vacant(entry) => {
-				let epoch = entry.key().1.clone();
+				let instance = entry.key().1.clone();
 				entry.insert(Node {
-					reader: resolve(&self.origin, &path, epoch.clone()),
+					reader: resolve(&self.origin, path, instance.clone()),
 					listing: None,
 					offered: false,
-					identity: epoch.clone(),
-					epoch,
-					path,
+					instance,
+					path: path.clone(),
 					shape: S::default(),
 					departed: None,
 				});
@@ -1013,21 +999,6 @@ fn advance<S: Shape>(
 
 		match &mut node.reader {
 			Reader::Resolving(pending) => match pending.poll_ok(waiter) {
-				// An unpinned retry on a known lineage can reach a replacement publisher
-				// before its announcement drains here. Its counters belong to its own entry,
-				// which that announcement creates, so this lineage keeps its last frame.
-				Poll::Ready(Ok(broadcast))
-					if node.epoch.is_none()
-						&& node.identity.is_some()
-						&& broadcast
-							.info()
-							.epoch
-							.as_ref()
-							.is_some_and(|epoch| node.identity.as_ref() != Some(epoch)) =>
-				{
-					tracing::debug!(name, "stats: node resolved another publisher");
-					return changed | node.depart();
-				}
 				Poll::Ready(Ok(broadcast)) if S::LISTED => match broadcast.tracks() {
 					Ok(listing) => {
 						node.listing = Some(listing);
@@ -1040,7 +1011,7 @@ fn advance<S: Shape>(
 					}
 				},
 				Poll::Ready(Ok(broadcast)) => match broadcast.track(name) {
-					Ok(track) => node.reader = Reader::Subscribing(track.subscribe(None)),
+					Ok(track) => node.reader = subscribing(track, config),
 					Err(err) => {
 						tracing::debug!(?err, name, "stats: node missing track");
 						return changed | node.depart();
@@ -1061,7 +1032,7 @@ fn advance<S: Shape>(
 						return changed;
 					}
 					rearmed = true;
-					node.reader = resolve(origin, &node.path, node.epoch.clone());
+					node.reader = resolve(origin, &node.path, node.instance.clone());
 					continue;
 				};
 				if !node.offered {
@@ -1069,17 +1040,19 @@ fn advance<S: Shape>(
 				}
 				node.offered = false;
 				match listing.broadcast().track(name) {
-					Ok(track) => node.reader = Reader::Subscribing(track.subscribe(None)),
+					Ok(track) => node.reader = subscribing(track, config),
 					Err(err) => {
 						tracing::debug!(?err, name, "stats: node missing track");
 						return changed | node.depart();
 					}
 				}
 			}
-			Reader::Subscribing(pending) => match pending.poll_ok(waiter) {
-				Poll::Ready(Ok(subscriber)) => {
-					node.reader =
-						Reader::Active(Box::new(moq_json::snapshot::Consumer::new(subscriber, config.clone())));
+			Reader::Subscribing(_, pending) => match pending.poll_ok(waiter) {
+				Poll::Ready(Ok(_)) => {
+					let Reader::Subscribing(reader, _) = std::mem::replace(&mut node.reader, Reader::Waiting) else {
+						unreachable!("matched above");
+					};
+					node.reader = Reader::Active(reader);
 				}
 				// The listed instance ended before the subscription landed: wait for
 				// the next one.
@@ -1124,7 +1097,7 @@ fn advance<S: Shape>(
 						return changed;
 					}
 					rearmed = true;
-					node.reader = resolve(origin, &node.path, node.epoch.clone());
+					node.reader = resolve(origin, &node.path, node.instance.clone());
 				}
 				Poll::Pending => return changed,
 			},
@@ -1133,10 +1106,20 @@ fn advance<S: Shape>(
 	}
 }
 
-/// Start resolving `path` (relative to the announce cursor) into a broadcast.
-fn resolve<F>(origin: &origin::Consumer, path: &Path, epoch: Option<Epoch>) -> Reader<F> {
-	let pending = origin.request(path, epoch);
+/// Start resolving `path` (relative to the announce cursor) into a broadcast of `instance`.
+fn resolve<F>(origin: &origin::Consumer, path: &Path, instance: Instance) -> Reader<F> {
+	let pending = origin.request(path, instance);
 	Reader::Resolving(Box::new(pending))
+}
+
+/// Subscribe a node's reader to `track`, awaiting the handshake.
+fn subscribing<F: serde::de::DeserializeOwned>(
+	track: moq_net::track::Consumer,
+	config: &moq_json::snapshot::consumer::Config,
+) -> Reader<F> {
+	// The reader subscribes first, so resolving the info rides on its subscription.
+	let reader = Box::new(moq_json::snapshot::Consumer::new(track.clone(), config.clone()));
+	Reader::Subscribing(reader, Box::new(track.info()))
 }
 
 #[cfg(test)]
@@ -1160,19 +1143,19 @@ mod tests {
 	}
 
 	/// The next route and whether it is active.
-	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::announce::Event::Start(route)
-			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route)
-			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-			moq_net::announce::Event::End(route) => Some((route, false)),
+			moq_net::origin::RouteEvent::Start(route)
+			| moq_net::origin::RouteEvent::Update(route)
+			| moq_net::origin::RouteEvent::Restart(route)
+			| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 		}
 	}
 
 	use std::time::Duration;
 
-	use moq_net::{Path, Timestamp, announce, broadcast, origin, track};
+	use moq_net::{Path, Timestamp, broadcast, origin, track};
 
 	use moq_net::stats::Tier;
 
@@ -1250,7 +1233,7 @@ mod tests {
 	}
 
 	/// The group epoch every hand-published group frame carries, so a new
-	/// [`NodeBroadcast`] at the same path is the same track instance returning.
+	/// [`NodeBroadcast`] at the same path resumes that group's counters.
 	fn group_epoch() -> Epoch {
 		"01900000-0000-7000-8000-0000000000ff".parse().unwrap()
 	}
@@ -1271,8 +1254,8 @@ mod tests {
 	/// announce, bumping the `_closed` counters.
 	#[allow(dead_code, reason = "held for their drop, never read")]
 	struct Feed {
-		announced: announce::Consumer,
-		source: origin::Publication,
+		announced: origin::Routes,
+		source: origin::Route,
 		consumer: broadcast::Consumer,
 		sub: track::Subscriber,
 		ctx: moq_net::stats::Session,
@@ -1289,10 +1272,11 @@ mod tests {
 		let feed_origin = produce_origin();
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
-		let mut announced = egress.announced();
-		let source = feed_origin.create_broadcast(path).expect("create_broadcast");
-		source.announce(origin::Route::default()).expect("announce");
-		let track = source.create_track("video", timed()).expect("create_track");
+		let mut announced = egress.routes();
+		let source = feed_origin
+			.route(path, moq_net::origin::RouteOptions::default())
+			.expect("route");
+		let track = source.broadcast().create_track("video", timed()).expect("create_track");
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);
@@ -1351,11 +1335,12 @@ mod tests {
 	/// group track carrying default-tier egress per path, so a test controls
 	/// the exact frames and can fail one node's reader alone (the
 	/// registry-driven producer only publishes whole broadcasts). Its route
-	/// carries no epoch, so a new one at the same path is that node returning.
+	/// carries one instance per node name, so a new one at the same path is that
+	/// node returning.
 	/// Dropping it unannounces the node.
 	#[allow(dead_code, reason = "held for their drop, never read")]
 	struct NodeBroadcast {
-		source: origin::Publication,
+		source: origin::Route,
 		group: moq_json::snapshot::Producer<GroupFrame>,
 		track: track::Producer,
 		frame: TrafficFrame,
@@ -1363,10 +1348,15 @@ mod tests {
 
 	impl NodeBroadcast {
 		fn new(origin: &origin::Producer, group: &str, node: &str) -> Self {
+			Self::with_instance(origin, group, node, format!("node-{node}").parse().unwrap())
+		}
+
+		fn with_instance(origin: &origin::Producer, group: &str, node: &str, instance: moq_net::Instance) -> Self {
 			let path = format!(".stats/node/{node}");
-			let source = origin.create_broadcast(path.as_str()).expect("create broadcast");
-			source.announce(origin::Route::default()).expect("announce");
+			let options = origin::RouteOptions::default().with_instance(instance, 0);
+			let source = origin.route(path.as_str(), options).expect("announce");
 			let track = source
+				.broadcast()
 				.create_track(group_track(moq_net::Path::new(group).unwrap()), timed())
 				.expect("create track");
 			let config = moq_json::snapshot::Config::default().with_deltas(false);
@@ -1465,10 +1455,10 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn restarted_producer_adds_a_new_epoch() {
-		// A restarted node announces a new epoch with fresh counters. The new
-		// epoch adds to the old one's kept contribution instead of regressing
-		// the total, and the old epoch folds into the retired total once the
+	async fn restarted_producer_adds_a_new_instance() {
+		// A restarted node announces a new instance with fresh counters. The new
+		// instance adds to the old one's kept contribution instead of regressing
+		// the total, and the old instance folds into the retired total once the
 		// grace elapses.
 		let origin = produce_origin();
 		let node_a = node_producer(&origin, "a");
@@ -1492,19 +1482,19 @@ mod tests {
 
 		let frame = read_monotonic_until(&mut traffic, "acme/room", 140, 170).await;
 		assert_eq!(frame.get("acme/room").expect("entry").bytes, 170, "100 + 30 + 40");
-		assert_eq!(traffic.inner.nodes.len(), 3, "the old epoch lingers for its grace");
+		assert_eq!(traffic.inner.nodes.len(), 3, "the old instance lingers for its grace");
 
 		tokio::time::advance(GRACE).await;
 		settle(&mut traffic).await;
-		assert_eq!(traffic.inner.nodes.len(), 2, "the old epoch folded");
+		assert_eq!(traffic.inner.nodes.len(), 2, "the old instance folded");
 		assert_eq!(retired_bytes(&traffic, "acme/room"), Some(100));
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn replaced_epoch_keeps_its_own_counters() {
+	async fn replaced_instance_keeps_its_own_counters() {
 		// A node restarts while its old instance is still announced. The newer
-		// epoch replaces the old one at the same path; the old entry keeps its
-		// last contribution and never reads the new epoch, so nothing counts
+		// instance replaces the old one at the same path; the old entry keeps its
+		// last contribution and never reads the new instance, so nothing counts
 		// twice while the old instance keeps publishing.
 		let origin = produce_origin();
 		let old_a = node_producer(&origin, "a");
@@ -1531,7 +1521,7 @@ mod tests {
 				assert_eq!(frame.get("acme/room").expect("entry").bytes, 170, "counted once");
 			}
 		}
-		assert_eq!(traffic.inner.nodes.len(), 3, "one entry per epoch");
+		assert_eq!(traffic.inner.nodes.len(), 3, "one entry per instance");
 	}
 
 	#[test]
@@ -1554,238 +1544,6 @@ mod tests {
 			let combined = &merged.merged()[""];
 			assert_eq!(if received { combined.wire_rx } else { combined.wire_tx }, 13);
 			assert_eq!(combined.active(), 1, "retiring closes the earlier segment");
-		}
-	}
-
-	#[test]
-	fn outgoing_epoch_metadata_migrates_without_choosing_a_grace_entry() {
-		let origin = produce_origin();
-		let path = Path::from_static(".stats/node/a");
-		let a: Epoch = "01900000-0000-7000-8000-000000000001".parse().unwrap();
-		let b: Epoch = "01900000-0000-7000-8000-000000000002".parse().unwrap();
-		let c: Epoch = "01900000-0000-7000-8000-000000000003".parse().unwrap();
-		let d: Epoch = "01900000-0000-7000-8000-000000000004".parse().unwrap();
-		let mut merged = Merged::<Keyed<Traffic>>::new(origin.consume(), &Config::new(), "traffic".into());
-		let update = |epoch: Option<Epoch>| moq_net::announce::Announce {
-			prefix: path.clone(),
-			captures: None,
-			route: {
-				let mut route = origin::Route::default();
-				route.epoch = epoch;
-				route
-			},
-		};
-		for (epoch, bytes) in [(a.clone(), 100), (b.clone(), 30), (c.clone(), 7)] {
-			merged.apply_announce(update(Some(epoch.clone())), true);
-			merged
-				.nodes
-				.get_mut(&(path.clone(), Some(epoch.clone())))
-				.unwrap()
-				.shape
-				.last = Some(BTreeMap::from([("room".into(), {
-				let mut traffic = Traffic::default();
-				traffic.bytes = bytes;
-				traffic
-			})]));
-			merged.apply_announce(update(Some(epoch)), false);
-		}
-		assert_eq!(merged.merged()["room"].bytes, 137);
-		merged.apply_announce(update(None), true);
-		assert_eq!(
-			merged.nodes.len(),
-			3,
-			"only the immediately outgoing C becomes unversioned"
-		);
-		assert!(merged.nodes.contains_key(&(path.clone(), Some(a.clone()))));
-		assert!(merged.nodes.contains_key(&(path.clone(), Some(b.clone()))));
-		assert!(!merged.nodes.contains_key(&(path.clone(), Some(c.clone()))));
-		assert_eq!(
-			merged.merged()["room"].bytes,
-			137,
-			"metadata loss preserves the last snapshot"
-		);
-
-		// A fresh unversioned snapshot replaces only the outgoing contribution.
-		merged.nodes.get_mut(&(path.clone(), None)).unwrap().shape.last = Some(BTreeMap::from([("room".into(), {
-			let mut traffic = Traffic::default();
-			traffic.bytes = 8;
-			traffic
-		})]));
-		merged.apply_announce(update(None), false);
-		merged.apply_announce(update(Some(a.clone())), true);
-		assert_eq!(
-			merged.nodes.len(),
-			3,
-			"recovering A retains both outgoing C and grace B"
-		);
-		assert!(merged.nodes.contains_key(&(path.clone(), Some(c))));
-		assert_eq!(
-			merged.nodes[&(path.clone(), Some(a.clone()))]
-				.shape
-				.last
-				.as_ref()
-				.unwrap()["room"]
-				.bytes,
-			100
-		);
-		assert_eq!(
-			merged.merged()["room"].bytes,
-			138,
-			"retained A is not overwritten by outgoing C"
-		);
-
-		merged.apply_announce(update(Some(a.clone())), false);
-		merged.apply_announce(update(None), true);
-		merged.apply_announce(update(None), false);
-		merged.apply_announce(update(Some(d.clone())), true);
-		assert_eq!(
-			merged.nodes.len(),
-			4,
-			"a distinct recovered epoch gets its own contribution"
-		);
-		assert!(merged.nodes.contains_key(&(path.clone(), Some(a))));
-		assert!(merged.nodes.contains_key(&(path.clone(), Some(d))));
-		assert!(!merged.nodes.contains_key(&(path, None)));
-		assert_eq!(
-			merged.merged()["room"].bytes,
-			138,
-			"known grace entries remain counted once each"
-		);
-	}
-
-	/// A known replacement must not overwrite the outgoing known epoch's counters.
-	#[test]
-	fn replacement_between_announce_drain_and_reader_retry() {
-		replacement_while_reader_retries(false);
-	}
-
-	/// Missing metadata must not let the outgoing lineage consume a recovered known epoch.
-	#[test]
-	fn unknown_replacement_between_announce_drain_and_reader_retry() {
-		replacement_while_reader_retries(true);
-	}
-
-	/// Arrange replacement on another worker after announcements drain and before retrying.
-	fn replacement_while_reader_retries(drop_epoch: bool) {
-		use std::sync::Barrier;
-
-		let now = kio::clock::now();
-		// The clock never advances here, so nothing may wait out the update hold.
-		let mut config = origin::Config::default();
-		config.update_hold = std::time::Duration::ZERO;
-		let (origin, mut driver) = origin::Producer::new(config);
-		let epoch_a: Epoch = "01900000-0000-7000-8000-000000000001".parse().unwrap();
-		let epoch_b: Epoch = "01900000-0000-7000-8000-000000000002".parse().unwrap();
-		let mut old = NodeBroadcast::new(&origin, "acme", "a");
-		old.source
-			.announce(origin::Route::default().with_epoch(epoch_a.clone()))
-			.unwrap();
-		old.publish("acme/room", 100);
-		let name = group_track(moq_net::Path::from_static("acme"));
-		let mut merged = Merged::<Grouped>::new(origin.consume(), &Config::new(), name.clone());
-		let initial = futures::executor::block_on(kio::wait(|waiter| {
-			driver.poll(now, waiter).unwrap();
-			merged.poll_next(waiter)
-		}))
-		.unwrap()
-		.unwrap();
-		assert_eq!(initial[""].paths["acme/room"].publisher.bytes, 100);
-		if drop_epoch {
-			old.source.announce(origin::Route::default()).unwrap();
-			let unversioned = futures::executor::block_on(kio::wait(|waiter| {
-				driver.poll(now, waiter).unwrap();
-				merged.poll_next(waiter)
-			}))
-			.unwrap()
-			.unwrap();
-			assert_eq!(unversioned[""].paths["acme/room"].publisher.bytes, 100);
-			assert!(matches!(
-				merged.nodes[&(Path::from_static(".stats/node/a"), None)].reader,
-				Reader::Active(_)
-			));
-		}
-		assert!(merged.announce.poll_next(&Waiter::noop()).is_pending());
-
-		let ready = Barrier::new(2);
-		let release = Barrier::new(2);
-		std::thread::scope(|scope| {
-			let worker = scope.spawn(|| {
-				let mut new = NodeBroadcast::new(&origin, "acme", "a");
-				new.source
-					.announce(origin::Route::default().with_epoch(epoch_b.clone()))
-					.unwrap();
-				new.publish("acme/room", 30);
-				let mut pending = origin.consume().request(".stats/node/a", None);
-				let front = futures::executor::block_on(kio::wait(|waiter| {
-					driver.poll(now, waiter).unwrap();
-					pending.poll_ok(waiter)
-				}))
-				.unwrap();
-				let pending = front.track(&name).unwrap().subscribe(None);
-				let subscriber = futures::executor::block_on(kio::wait(|waiter| {
-					driver.poll(now, waiter).unwrap();
-					pending.poll_ok(waiter)
-				}))
-				.unwrap();
-				let mut warm = moq_json::snapshot::Consumer::<GroupFrame>::new(subscriber, Default::default());
-				let frame = futures::executor::block_on(kio::wait(|waiter| {
-					driver.poll(now, waiter).unwrap();
-					warm.poll_latest(waiter)
-				}))
-				.unwrap()
-				.unwrap();
-				assert_eq!(frame.value.tiers[""].paths["acme/room"].publisher.bytes, 30);
-				ready.wait();
-				release.wait();
-				(new, front, warm, driver)
-			});
-			ready.wait();
-			let key = (Path::from_static(".stats/node/a"), (!drop_epoch).then_some(epoch_a));
-			let node = merged.nodes.get_mut(&key).unwrap();
-			advance(node, &merged.origin, &merged.config, &name, &Waiter::noop());
-			let paths = node.shape.paths.last.as_ref().unwrap();
-			let old_bytes = paths[&(String::new(), "acme/room".to_string())].publisher.bytes;
-			// Release before asserting, so a failed regression also joins its worker.
-			release.wait();
-			let (_new, _front, _warm, mut driver) = worker.join().unwrap();
-			let combined = futures::executor::block_on(kio::wait(|waiter| {
-				driver.poll(now, waiter).unwrap();
-				merged.poll_next(waiter)
-			}))
-			.unwrap()
-			.unwrap();
-			assert_eq!(combined[""].paths["acme/room"].publisher.bytes, 130);
-			assert_eq!(old_bytes, 100, "the replacement frame overwrote the old epoch");
-		});
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn unversioned_restart_regresses_the_total() {
-		// A node whose route carries no epoch (an older producer, or a session
-		// older than moq-lite 07) returns at the same path with a fresh counter:
-		// it replaces its contribution wholesale, and the total regresses once,
-		// the fresh-segment contract.
-		let origin = produce_origin();
-		let mut node_a = NodeBroadcast::new(&origin, "acme", "a");
-		let mut node_b = NodeBroadcast::new(&origin, "acme", "b");
-		node_a.publish("acme/room", 100);
-		node_b.publish("acme/room", 40);
-
-		let agg = Consumer::new(origin.consume(), Config::new());
-		let mut traffic = traffic(&agg);
-		read_until_bytes(&mut traffic, "acme/room", 140).await;
-
-		drop(node_a);
-		settle(&mut traffic).await;
-		let mut node_a = NodeBroadcast::new(&origin, "acme", "a");
-		node_a.publish("acme/room", 30);
-
-		// An earlier frame may retire A's live gauges first.
-		loop {
-			let frame = traffic.next().await.expect("read").expect("frame");
-			if frame.get("acme/room").map(|t| t.bytes) == Some(70) {
-				break;
-			}
 		}
 	}
 
@@ -1942,7 +1700,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn churn_keeps_nodes_bounded() {
-		// Distinct nodes come and go, as epochs make every restart do. The
+		// Distinct nodes come and go, as instances make every restart do. The
 		// node map holds only the live node plus those within their grace, while
 		// the merged total stays exact and never regresses.
 		const CHURN: u64 = 64;
@@ -2153,9 +1911,9 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn a_relisted_group_adds_its_new_epoch() {
-		// A group's track that lingers out and is listed again is a new instance
-		// counted from zero under a new epoch: the reader follows the listing to
-		// it, and its totals add to the old instance's instead of regressing.
+		// A group's track that lingers out and is listed again starts a new epoch
+		// counted from zero: the reader follows the listing to it, and its totals
+		// add to the old epoch's instead of regressing.
 		let origin = produce_origin();
 		let node = crate::produce::spawned(Producer::new(
 			produce::Config::new()
@@ -2198,20 +1956,25 @@ mod tests {
 	}
 
 	/// A hand-published node broadcast at `.stats/node/<node>` with a plain
-	/// totals track and no epoch, so a new one at the same path is that node
+	/// totals track and no instance, so a new one at the same path is that node
 	/// restarting without telling the reader.
 	struct TotalsNode {
-		_source: origin::Publication,
+		_source: origin::Route,
 		totals: moq_json::snapshot::Producer<TotalsFrame>,
 	}
 
 	impl TotalsNode {
 		fn new(origin: &origin::Producer, node: &str) -> Self {
 			let source = origin
-				.create_broadcast(format!(".stats/node/{node}").as_str())
+				.route(
+					format!(".stats/node/{node}").as_str(),
+					moq_net::origin::RouteOptions::default(),
+				)
 				.expect("create broadcast");
-			source.announce(origin::Route::default()).expect("announce");
-			let track = source.create_track(totals_track(), timed()).expect("create track");
+			let track = source
+				.broadcast()
+				.create_track(totals_track(), timed())
+				.expect("create track");
 			let config = moq_json::snapshot::Config::default().with_deltas(false);
 			Self {
 				_source: source,
@@ -2232,9 +1995,9 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn totals_never_regress_on_an_unversioned_restart() {
-		// A node returning without an epoch with a lower counter reset: its old
-		// readout becomes a baseline, so the merged totals keep growing.
+	async fn totals_never_regress_on_a_restart() {
+		// A node returning under a new instance with a lower counter: its old
+		// readout stays as its own contribution, so the merged totals keep growing.
 		let origin = produce_origin();
 		let mut node_a = TotalsNode::new(&origin, "a");
 		let mut node_b = TotalsNode::new(&origin, "b");
@@ -2256,21 +2019,22 @@ mod tests {
 		read_until(&mut totals.inner, grew, |frame| frame[""].publisher.bytes == 175).await;
 	}
 
-	/// A node announced at `.stats/node/a` with no epoch, ready to observe
-	/// frames by hand.
-	fn hand_merged<V: Mergeable>() -> (Merged<Keyed<V>>, (Path, Option<Epoch>)) {
+	/// A node announced at `.stats/node/a`, ready to observe frames by hand.
+	fn hand_merged<V: Mergeable>() -> (Merged<Keyed<V>>, (Path, Instance)) {
 		let origin = produce_origin();
 		let path = Path::from_static(".stats/node/a");
+		let instance: Instance = "a".parse().unwrap();
 		let mut merged = Merged::<Keyed<V>>::new(origin.consume(), &Config::new(), "p".into());
 		merged.apply_announce(
-			moq_net::announce::Announce {
+			&moq_net::announce::Announce {
 				prefix: path.clone(),
 				captures: None,
-				route: origin::Route::default(),
+				route: Default::default(),
 			},
+			instance.clone(),
 			true,
 		);
-		(merged, (path, None))
+		(merged, (path, instance))
 	}
 
 	#[test]
@@ -2284,14 +2048,15 @@ mod tests {
 		};
 		let path = Path::from_static(".stats/node/b");
 		merged.apply_announce(
-			moq_net::announce::Announce {
+			&moq_net::announce::Announce {
 				prefix: path.clone(),
 				captures: None,
-				route: origin::Route::default(),
+				route: Default::default(),
 			},
+			"b".parse().unwrap(),
 			true,
 		);
-		let second = (path, None);
+		let second = (path, "b".parse().unwrap());
 		merged
 			.nodes
 			.get_mut(&second)
@@ -2313,7 +2078,7 @@ mod tests {
 		assert_eq!(
 			merged.merged()[""],
 			sample(7, 4),
-			"same epoch does not count old errors again"
+			"same instance does not count old errors again"
 		);
 		merged
 			.nodes
@@ -2427,7 +2192,7 @@ mod tests {
 		node.depart();
 		assert_eq!(merged.merged()[""], presence(5, 5));
 
-		// The same epoch resumes with those sessions still open: they start
+		// The same instance resumes with those sessions still open: they start
 		// again rather than un-end, so no counter goes down.
 		let node = merged.nodes.get_mut(&key).expect("node");
 		node.observe(BTreeMap::from([(String::new(), presence(5, 3))]));
@@ -2448,10 +2213,8 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn traffic_resume_reopens_closed_pairs_without_going_down() {
 		let origin = produce_origin();
-		let mut node = NodeBroadcast::new(&origin, "acme", "a");
-		let mut route = origin::Route::default();
-		route.epoch = Some("01900000-0000-7000-8000-000000000001".parse().unwrap());
-		node.source.announce(route.clone()).expect("announce epoch");
+		let instance = "01900000-0000-7000-8000-000000000001".parse().unwrap();
+		let mut node = NodeBroadcast::with_instance(&origin, "acme", "a", instance);
 		let mut raw = Traffic::default();
 		raw.announces_started = 5;
 		raw.announces_ended = 3;
@@ -2467,7 +2230,7 @@ mod tests {
 		let mut traffic = traffic(&agg);
 		let grew = |before: &Traffic, after: &Traffic| !after.regressed(before);
 		read_until(&mut traffic, grew, |frame| frame.get("acme/room") == Some(&raw)).await;
-		node.source.unannounce();
+		node.source.withdraw();
 		let departed = raw.retire();
 		read_until(&mut traffic, grew, |frame| {
 			assert!(!frame["acme/room"].regressed(&raw));
@@ -2475,8 +2238,8 @@ mod tests {
 		})
 		.await;
 
-		// The same publisher epoch returns with all three pairs still open.
-		node.source.announce(route).expect("reannounce epoch");
+		// The same publisher instance returns with all three pairs still open.
+		node.source.announce().expect("reannounce instance");
 		let mut expected = raw;
 		expected.announces_started = 7;
 		expected.announces_ended = 5;
@@ -2556,7 +2319,7 @@ mod tests {
 		expected.subscriptions_ended = 7;
 		assert_eq!(merged.merged()["room"], expected);
 
-		// A route without an epoch still resets, including after a resume.
+		// Regressing counters reset within the same instance, even after a resume.
 		let mut reset = Traffic::default();
 		reset.subscriptions_started = 1;
 		reset.bytes = 10;
@@ -2601,7 +2364,7 @@ mod tests {
 	async fn presence_survives_join_leave_and_restart() {
 		// One label held across nodes: a node joining adds its sessions, one
 		// leaving closes its sessions but keeps its count, and a restarted node
-		// is a new epoch that adds to it. The merged count never goes down.
+		// is a new instance that adds to it. The merged count never goes down.
 		let origin = produce_origin();
 		let node_a = node_producer(&origin, "a");
 		let _fa = feed(&node_a, Tier::default(), "acme", "acme/room", 8).await;
@@ -2626,7 +2389,7 @@ mod tests {
 		let frame = read_until(&mut presence.inner, grew, |frame| frame[""].active() == 1).await;
 		assert_eq!(frame[""].sessions_started, 2);
 
-		// Restart: a new epoch at node b's path.
+		// Restart: a new instance at node b's path.
 		let node_b = node_producer(&origin, "b");
 		let _fb = feed(&node_b, Tier::default(), "acme", "acme/room", 8).await;
 		let frame = read_until(&mut presence.inner, grew, |frame| frame[""].active() == 2).await;
@@ -2637,7 +2400,7 @@ mod tests {
 	async fn prefix_survives_join_leave_and_restart() {
 		// One prefix held across nodes: a node joining adds its traffic and its
 		// children, one leaving closes its subscriptions and drops its children
-		// but keeps its rollup, and a restarted node is a new epoch that adds to
+		// but keeps its rollup, and a restarted node is a new instance that adds to
 		// it. The merged rollup never goes down.
 		let origin = produce_origin();
 		let node_a = node_producer(&origin, "a");
@@ -2672,7 +2435,7 @@ mod tests {
 		assert_eq!(frame[""].publisher.subscriptions_started, 2);
 		assert!(!frame[""].children.contains_key("other"), "{frame:?}");
 
-		// Restart: a new epoch at node b's path.
+		// Restart: a new instance at node b's path.
 		let node_b = node_producer(&origin, "b");
 		let _fb = feed(&node_b, Tier::default(), "acme", "acme/other", 3).await;
 		let frame = read_until(&mut prefix.inner, grew, |frame| {
@@ -2680,7 +2443,10 @@ mod tests {
 		})
 		.await;
 		assert_eq!(frame[""].publisher.subscriptions_started, 3);
-		assert_eq!(frame[""].children["other"].publisher.bytes, 3, "the new epoch's child");
+		assert_eq!(
+			frame[""].children["other"].publisher.bytes, 3,
+			"the new instance's child"
+		);
 	}
 
 	#[test]

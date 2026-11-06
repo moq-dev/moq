@@ -9,6 +9,7 @@
 //! receiver checks them, so it refuses that out-of-order group.
 
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -52,11 +53,14 @@ async fn relay(
 	timescale: Option<moq_net::Timescale>,
 ) -> (Option<moq_net::Timescale>, Vec<Read>) {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast
-		.create_track("data", Info::default().with_timescale(timescale))
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let track = broadcast
+		.broadcast()
+		.create_track("data", Info::default().with_timescale(timescale).with_max_age(None))
+		.unwrap();
+	broadcast.announce().unwrap();
 
 	let relay_origin = produce_origin(2);
 	let mut options = MockConnectOptions::new(upstream.parse::<Version>().unwrap());
@@ -74,9 +78,12 @@ async fn relay(
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 
-	let subscription = Subscription::default().with_max_delay(BUDGET).with_range(0..);
+	let subscription = Subscription::default()
+		.with_delay(Delay::default().with_max(BUDGET))
+		.with_range(0..);
 	let reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote
 			.track("data")
@@ -173,9 +180,14 @@ async fn a_timed_track_keeps_its_timestamps_through_a_relay() {
 /// timestamp.
 async fn fetch_only(version: &str) -> Vec<Result<Option<moq_net::Timestamp>, moq_net::Error>> {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("data", Info::default()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let track = broadcast
+		.broadcast()
+		.create_track("data", Info::default().with_max_age(None))
+		.unwrap();
+	broadcast.announce().unwrap();
 	write_group(&track, 0);
 	write_group(&track, 1);
 	track.finish().unwrap();
@@ -190,7 +202,8 @@ async fn fetch_only(version: &str) -> Vec<Result<Option<moq_net::Timestamp>, moq
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 
 	let mut got = Vec::new();
 	for sequence in [1, 0] {

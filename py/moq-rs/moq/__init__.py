@@ -9,27 +9,23 @@ from . import audio as audio
 
 # Layer namespaces stay out of __all__; json would shadow the stdlib module.
 from . import json as json
+from . import socket as socket
 from . import video as video
 from .client import Client, CongestionControl, connect, qlog_supported, versions
-from .epoch import mint_epoch
+from .datagram import DatagramConsumer, DatagramProducer, DatagramRequest, DatagramRequests
 from .errors import is_auth, is_shutdown, protocol_error
 from .log import log_level
 from .origin import (
     Announce,
     AnnounceConsumer,
     AnnounceEvent,
-    AnnounceEventEnd,
-    AnnounceEventRestart,
-    AnnounceEventStart,
-    AnnounceEventTakeover,
-    AnnounceEventUpdate,
-    BroadcastPrepared,
+    AnnounceEventAbsent,
+    AnnounceEventPresent,
     BroadcastRequest,
     Following,
     OriginConsumer,
     OriginProducer,
-    OriginRequests,
-    Publication,
+    Route,
 )
 from .publish import (
     BroadcastProducer,
@@ -42,7 +38,17 @@ from .publish import (
     TrackRequests,
 )
 from .server import Request, Server, Transport
-from .session import Allocator, BandwidthConsumer, GrantConsumer, Reservation, Session, Tokens
+from .session import (
+    Allocator,
+    BandwidthConsumer,
+    GrantConsumer,
+    RateControl,
+    Reservation,
+    Session,
+    Tokens,
+    Viewer,
+    Viewers,
+)
 from .subscribe import (
     BroadcastConsumer,
     GroupConsumer,
@@ -50,7 +56,6 @@ from .subscribe import (
 )
 from .types import (
     Anchor,
-    AnnounceRoute,
     AudioCodec,
     AudioEncoderInput,
     AudioSampleFormat,
@@ -60,6 +65,8 @@ from .types import (
     ConnectionState,
     ConnectionStats,
     Datagram,
+    DatagramInfo,
+    Delay,
     ErrorScope,
     FetchGroupOptions,
     Frame,
@@ -70,7 +77,8 @@ from .types import (
     ProtocolKind,
     QuicConfig,
     Range,
-    Route,
+    RateTarget,
+    RouteInfo,
     Subscription,
     Timestamp,
     TrackInfo,
@@ -89,12 +97,8 @@ __all__ = [
     "Announce",
     "AnnounceConsumer",
     "AnnounceEvent",
-    "AnnounceEventEnd",
-    "AnnounceEventRestart",
-    "AnnounceEventTakeover",
-    "AnnounceEventStart",
-    "AnnounceEventUpdate",
-    "AnnounceRoute",
+    "AnnounceEventAbsent",
+    "AnnounceEventPresent",
     "AudioCodec",
     "AudioEncoderInput",
     "AudioSampleFormat",
@@ -102,7 +106,6 @@ __all__ = [
     "BandwidthConsumer",
     "BroadcastConsumer",
     "BroadcastRequests",
-    "BroadcastPrepared",
     "BroadcastProducer",
     "BroadcastRequest",
     "Client",
@@ -112,6 +115,12 @@ __all__ = [
     "ConnectionPhase",
     "ConnectionState",
     "Datagram",
+    "DatagramInfo",
+    "DatagramConsumer",
+    "DatagramProducer",
+    "DatagramRequest",
+    "DatagramRequests",
+    "Delay",
     "Error",
     "ErrorScope",
     "Frame",
@@ -126,15 +135,16 @@ __all__ = [
     "GroupConsumer",
     "GroupProducer",
     "OriginConsumer",
-    "OriginRequests",
     "OriginProducer",
     "Order",
     "Position",
-    "Publication",
     "Range",
+    "RateControl",
+    "RateTarget",
     "Request",
     "Reservation",
     "Route",
+    "RouteInfo",
     "Server",
     "Session",
     "Subscription",
@@ -153,12 +163,13 @@ __all__ = [
     "VideoEncoderOutput",
     "VideoDecodedFrame",
     "VideoPixelFormat",
+    "Viewer",
+    "Viewers",
     "WebSocketConfig",
     "connect",
     "is_auth",
     "is_shutdown",
     "log_level",
-    "mint_epoch",
     "protocol_error",
     "qlog_supported",
     "versions",

@@ -13,9 +13,17 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [dependencies]
-serde = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 serde_with = { workspace = true }
+
+[dev-dependencies]
+criterion = { package = "bench-harness", path = "../bench-harness" }
+workspace-hack = { path = "../workspace-hack" }
+
+[[bench]]
+name = "catalog"
+harness = false
 
 [lints]
 workspace = true

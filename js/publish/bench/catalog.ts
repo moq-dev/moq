@@ -27,10 +27,8 @@ async function measure(tracks: number, viewers: number, clock: Manual) {
 	const output = new Track.Producer("catalog.json");
 	catalog.serve(output, scope);
 	const subscribers = Array.from({ length: viewers }, () => {
-		const subscriber = output.subscribe();
 		return {
-			subscriber,
-			catalog: new Json.Snapshot.Consumer<Catalog.Root>({ track: subscriber }),
+			catalog: new Json.Snapshot.Consumer<Catalog.Root>({ track: output }),
 			media: media.map((track) => track.subscribe()),
 		};
 	});
@@ -55,7 +53,7 @@ async function measure(tracks: number, viewers: number, clock: Manual) {
 			for (let index = 0; index < media.length; index++) {
 				// Model the player's changed latency floor with real subscription handles.
 				viewer.media[index].update({
-					maxDelay: Milli(root?.video?.renditions[media[index].name].jitter ?? 0),
+					delay: { max: Milli(root?.video?.renditions[media[index].name].jitter ?? 0) },
 				});
 				updates++;
 			}
@@ -81,7 +79,7 @@ async function measure(tracks: number, viewers: number, clock: Manual) {
 	publishing.close();
 	output.close();
 	for (const viewer of subscribers) {
-		viewer.subscriber.close();
+		viewer.catalog.close();
 		for (const track of viewer.media) track.close();
 	}
 	for (const track of media) track.close();

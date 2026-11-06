@@ -7,9 +7,9 @@
 //! a publisher ends its content by finishing its tracks, and goes offline by closing.
 //!
 //! [Info] is the broadcast's static metadata, fixed for its lifetime.
-use crate::{cache, stats, track};
+use crate::{cache, datagram, stats, track};
 use std::{
-	collections::HashSet,
+	collections::{HashSet, VecDeque},
 	sync::{
 		Arc,
 		atomic::{AtomicUsize, Ordering},
@@ -18,9 +18,7 @@ use std::{
 };
 
 use crate::Error;
-use crate::origin::Route;
 
-use super::origin_impl::Announcer;
 use super::{RequestQueue, WeakCache, WeakEntry};
 
 #[path = "listing.rs"]
@@ -41,13 +39,13 @@ pub struct Info {
 	/// The cache pool this broadcast's tracks and groups inherit.
 	pub pool: cache::Pool,
 
-	/// Ceiling on each track's media-timestamp retention window.
+	/// Local ceiling on each track's max age: how long a superseded group stays fresh here.
 	pub cache_duration: std::time::Duration,
 
 	/// The path this broadcast is named by, which relative references in a catalog it
 	/// serves (hang's `broadcast` field) resolve against.
 	///
-	/// [`origin::Producer::create_broadcast`](super::origin::Producer::create_broadcast) stamps
+	/// [`origin::Producer::route`](super::origin::Producer::route) stamps
 	/// the path the broadcast was created at, relative to the origin root (including through a
 	/// scoped producer). Every [`Consumer`] an origin hands out is then re-stamped with the path
 	/// *that handle* was requested or announced at, relative to its cursor's root, since the
@@ -59,12 +57,12 @@ pub struct Info {
 	/// root: any `..` reference escapes.
 	pub path: crate::Path,
 
-	/// The epoch of the route a [`Consumer`] was resolved through, naming the publisher
-	/// instance it reads.
+	/// The instance of the route a [`Consumer`] was resolved through, naming the stream
+	/// it reads.
 	///
 	/// Stamped on every [`Consumer`] an origin resolves, like [`Self::path`]. `None` for a
-	/// route without an epoch and for a handle not resolved through an origin.
-	pub epoch: Option<crate::Epoch>,
+	/// handle not resolved through an origin.
+	pub instance: Option<crate::Instance>,
 
 	// What the frames this broadcast's groups are still receiving may allocate up front,
 	// inherited from the origin handle that created it.
@@ -77,7 +75,7 @@ impl Default for Info {
 			pool: cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)),
 			cache_duration: std::time::Duration::MAX,
 			path: crate::Path::default(),
-			epoch: None,
+			instance: None,
 			frames: Default::default(),
 		}
 	}
@@ -125,6 +123,18 @@ struct BroadcastState {
 	// The tracks cached since each [`Demand`] handle last looked, by handle, so a
 	// handle watches each track once rather than rescanning the table.
 	demands: slab::Slab<Vec<track::TrackWeak>>,
+
+	// Datagram tracks, a namespace apart from stream tracks: published, requested, or
+	// served. Weak, so a closed entry is reclaimed like a track's.
+	datagrams: WeakCache<Arc<str>, datagram::Weak>,
+	// Datagram tracks consumers asked for, waiting for a [`DatagramRequests`] to take them.
+	datagram_requests: VecDeque<datagram::Request>,
+	// Live [`DatagramRequests`] handles; a datagram track is requested only while one lives.
+	datagram_handlers: usize,
+	// Set on an origin's front: datagram lookups go to the source it serves from, if any.
+	datagram_source: Option<Option<Consumer>>,
+	// A session's source, relaying a peer's broadcast; see [`Consumer::has_local_datagrams`].
+	relayed: bool,
 }
 
 impl BroadcastState {
@@ -167,6 +177,10 @@ impl BroadcastState {
 		for request in self.requests.drain_queued() {
 			request.reject(err.clone());
 		}
+		for request in self.datagram_requests.drain(..) {
+			request.reject(err.clone());
+		}
+		self.datagram_source = None;
 		for track in self.tracks.iter() {
 			track.reject(err.clone());
 		}
@@ -232,7 +246,7 @@ pub struct Producer {
 	state: kio::Shared<BroadcastState>,
 
 	// Ingress stats scope, set by a tagged `origin::Producer` at
-	// `create_broadcast`. Inherited by the tracks this producer creates. Empty
+	// `route`. Inherited by the tracks this producer creates. Empty
 	// (no-op) for an untagged broadcast.
 	stats: stats::Scope,
 }
@@ -250,17 +264,25 @@ impl Producer {
 	}
 
 	/// Attach an ingress stats scope, inherited by the tracks created on this
-	/// broadcast. Set by a tagged `origin::Producer` at `create_broadcast`.
+	/// broadcast. Set by a tagged `origin::Producer` at `route`.
 	pub(super) fn with_stats(mut self, scope: stats::Scope) -> Self {
 		self.stats = scope;
 		self
 	}
 
-	/// Attach the advertisement of this broadcast's exact path. Set by
-	/// `origin::Producer::create_broadcast`; a standalone broadcast has none.
-	pub(super) fn with_announcer(self, announcer: Announcer) -> Self {
-		*self.alive.announcer.lock() = Some(announcer);
-		self
+	/// Run `hook` once the broadcast closes: on [`Self::close`], an abort, or the last
+	/// producer-side handle dropping. Runs at once on a broadcast already closed. One hook
+	/// per broadcast: the route that owns it, which retracts when it closes.
+	pub(super) fn on_close(&self, hook: Box<dyn FnOnce() + Send>) {
+		{
+			let mut slot = self.alive.on_close.lock();
+			debug_assert!(slot.is_none(), "a close hook was already installed");
+			if !self.alive.state.lock().closing {
+				*slot = Some(hook);
+				return;
+			}
+		}
+		hook();
 	}
 
 	/// Answer track requests only while `validity` holds, ending the broadcast once it
@@ -270,75 +292,6 @@ impl Producer {
 			.expect("validity is set on a fresh broadcast")
 			.validity = validity;
 		self
-	}
-
-	/// The route this broadcast is announced with, or `None` while it is not.
-	pub(super) fn route(&self) -> Option<Route> {
-		self.alive.announcer.lock().as_ref()?.route()
-	}
-
-	/// Advertise this broadcast's exact path as a route, or replace the standing
-	/// advertisement's route. The route is taken as given, epoch included: another
-	/// epoch, or none, announces a new broadcast. To re-price the same instance,
-	/// start from the current route:
-	/// `broadcast.announce(broadcast.route().unwrap_or_default().with_cost(cost))`.
-	///
-	/// Until this is called the broadcast exists for nobody: announce cursors do
-	/// not list it and requests for its path fail with [`Error::Unroutable`], for
-	/// local consumers and peers alike. Call it once the tracks a subscriber needs
-	/// first (a catalog) exist, so the advertisement lands with them in place:
-	/// consumers act on it immediately. The route retracts on [`unannounce`](Self::unannounce),
-	/// [`close`](Self::close), or the last producer dropping.
-	///
-	/// Fails with [`Error::Closed`] on a standalone broadcast (one not created
-	/// through an origin, so there is nothing to announce into), on a claim answer
-	/// still being [prepared](super::origin::Request::prepare), once the broadcast
-	/// has closed, or once the origin's driver has been dropped.
-	pub(super) fn announce(&self, route: Route) -> Result<(), Error> {
-		let mut announcer = self.alive.announcer.lock();
-		let announcer = announcer.as_mut().ok_or(Error::Closed)?;
-		announcer.announce(route)
-	}
-
-	/// Hand back an announcer withheld at creation and announce `route` once `admit`
-	/// agrees, decided under the origin's table lock. The announcer is installed only
-	/// when admitted; otherwise it drops, so this broadcast can never announce.
-	pub(super) fn announce_withheld(
-		&self,
-		mut announcer: Announcer,
-		route: Route,
-		predecessor: Option<&kio::Shared<crate::model::origin_impl::ServeState>>,
-		admit: impl FnOnce() -> bool,
-	) -> Result<bool, Error> {
-		let refused = {
-			let mut slot = self.alive.announcer.lock();
-			debug_assert!(slot.is_none(), "an announcer was already installed");
-			// A close already retracted the slot, so an announcer installed now would
-			// outlive the broadcast.
-			if self.alive.state.lock().closing {
-				Err(Error::Closed)
-			} else {
-				match announcer.announce_if(route, predecessor, admit) {
-					Ok(true) => {
-						*slot = Some(announcer);
-						return Ok(true);
-					}
-					refused => refused,
-				}
-			}
-		};
-		// Dropped outside the announcer lock, as in `Alive::retract`.
-		drop(announcer);
-		refused
-	}
-
-	/// Retract this broadcast's advertisement, if any, from local consumers and
-	/// peers alike. New requests for the path fail with [`Error::Unroutable`] and
-	/// the broadcast the origin served from it ends, while tracks already in
-	/// flight carry on to their own end. [`announce`](Self::announce) brings it
-	/// back.
-	pub(super) fn unannounce(&self) {
-		self.alive.unannounce();
 	}
 
 	/// The broadcast's static metadata, fixed when it was created.
@@ -385,6 +338,46 @@ impl Producer {
 		Ok(track.listed(unlist))
 	}
 
+	/// Produce a new datagram track and insert it into the broadcast.
+	///
+	/// Datagram tracks are a namespace apart from stream tracks, so this never conflicts with
+	/// [`Self::create_track`]. Fails with [`Error::Duplicate`] while a live datagram track
+	/// holds the name.
+	///
+	/// Moq-lite 05 and 06 carry it on its name's stream track subscriptions, but only those
+	/// that start once it exists: create it before, or with, a stream track of the same name.
+	/// See [`datagram`](crate::datagram).
+	pub fn create_datagrams(
+		&self,
+		name: impl Into<Arc<str>>,
+		info: datagram::Info,
+	) -> Result<datagram::Producer, Error> {
+		let name = name.into();
+		let mut state = self.state.lock();
+		if let Some(live) = state.datagrams.get(name.as_ref()) {
+			// A consumer asked for it before it existed, and no handler took the request yet:
+			// creating the track serves those consumers.
+			let queued = state
+				.datagram_requests
+				.iter()
+				.position(|request| live.same_channel(&request.weak()));
+			let Some(queued) = queued else {
+				return Err(Error::Duplicate);
+			};
+			let request = state.datagram_requests.remove(queued).expect("found above");
+			return Ok(request.with_stats(self.stats.clone()).accept(info));
+		}
+		let producer = datagram::Producer::new(name.clone(), Some(info)).with_stats(self.stats.clone());
+		state.datagrams.insert(name, producer.weak());
+		Ok(producer)
+	}
+
+	/// Answer datagram lookups from `source`, the broadcast an origin's front serves from,
+	/// or refuse them with [`Error::Unroutable`] while it has none.
+	pub(super) fn serve_datagrams_from(&self, source: Option<Consumer>) {
+		self.state.lock().datagram_source = Some(source);
+	}
+
 	/// Reserve a track by name without finalizing its [`track::Info`].
 	///
 	/// Returns a [`track::Request`] already discoverable by consumers; call
@@ -405,6 +398,15 @@ impl Producer {
 			state: self.state.clone(),
 			name,
 		}))
+	}
+
+	/// [`Self::reserve_track`] for a track no listing ever names, so only a reader who
+	/// already knows the name finds it, as a socket session's track.
+	pub(super) fn reserve_unlisted_track(&self, name: impl Into<Arc<str>>) -> Result<track::Request, Error> {
+		let mut state = self.state.lock();
+		let request = track::Request::new(self.info.clone(), name.into()).with_stats(self.stats.clone());
+		state.insert_track(request.weak())?;
+		Ok(request)
 	}
 
 	/// Create a track with a unique name using the given suffix.
@@ -469,7 +471,7 @@ impl Producer {
 
 	/// End the broadcast for good, whether or not other clones are still alive.
 	///
-	/// Retracts its announcement and local discovery; a later [`super::origin::Publication::announce`] fails
+	/// Retracts its announcement and local discovery; a later [`super::origin::Route::announce`] fails
 	/// with [`Error::Closed`]. Tracks already handed out carry on and end with their
 	/// own finish or abort. Every later [`Consumer::track`], and every name reserved or
 	/// still queued for a handler, answers [`Error::Unroutable`]: the same answer an
@@ -479,6 +481,11 @@ impl Producer {
 	/// Dropping the last producer does the same. Closing twice is a no-op.
 	pub fn close(&self) {
 		self.alive.close();
+	}
+
+	/// `Ready` once the broadcast ended, by [`Self::close`] or the last producer dropping.
+	pub(super) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.alive.token.poll_closed(waiter)
 	}
 
 	/// Whether any [`Consumer`] handle exists, which is not itself demand for a track.
@@ -517,9 +524,9 @@ impl Producer {
 struct Alive {
 	token: kio::Producer<()>,
 	state: kio::Shared<BroadcastState>,
-	// The advertisement of the broadcast's exact path, owned here so it retracts
-	// with the broadcast: on close or the last producer-side handle dropping. `None` for a standalone broadcast.
-	announcer: kio::Lock<Option<Announcer>>,
+	// Run once the broadcast ends: on close or the last producer-side handle dropping.
+	// The route owning the broadcast retracts through it. `None` for a standalone broadcast.
+	on_close: kio::Lock<Option<Box<dyn FnOnce() + Send>>>,
 	// How long a session's source still names the instance that minted it. Held on the
 	// producer side, never by a consumer, so the selection it may hold is dropped by its
 	// session rather than wherever the last consumer goes.
@@ -531,16 +538,9 @@ impl Alive {
 		Arc::new(Self {
 			token: kio::Producer::default(),
 			state,
-			announcer: kio::Lock::new(None),
+			on_close: kio::Lock::new(None),
 			validity: RequestValidity::default(),
 		})
-	}
-
-	/// Withdraw the path's advertisement, if any; the broadcast stays alive.
-	fn unannounce(&self) {
-		if let Some(announcer) = self.announcer.lock().as_mut() {
-			announcer.withdraw();
-		}
 	}
 
 	/// End the broadcast. See [`Producer::close`].
@@ -568,7 +568,7 @@ impl Alive {
 				return true;
 			}
 			// A queued track is a reader on its way that let go of its handle.
-			if !state.requests.is_empty() {
+			if !state.requests.is_empty() || !state.datagram_requests.is_empty() {
 				return false;
 			}
 			// Held under the lock a consumer's first mint takes, so none appears until the
@@ -588,12 +588,13 @@ impl Alive {
 		true
 	}
 
-	/// Drop the announcer for good, so a later `announce` fails with `Closed`. Dropped
-	/// outside the announcer lock: the entry's removal re-syncs the origin's cursors under
-	/// the origin's own lock.
+	/// Run the close hook, if any. Outside the hook's lock: the route's retraction
+	/// re-syncs the origin's cursors under the origin's own lock.
 	fn retract(&self) {
-		let announcer = self.announcer.lock().take();
-		drop(announcer);
+		let hook = self.on_close.lock().take();
+		if let Some(hook) = hook {
+			hook();
+		}
 	}
 }
 
@@ -615,6 +616,8 @@ pub(crate) enum RequestValidity {
 	Period(
 		kio::Consumer<()>,
 		kio::Consumer<()>,
+		// Keeps the selection registered, which is what keeps the two periods open.
+		#[expect(dead_code, reason = "held only for its registration")]
 		std::sync::Arc<crate::model::origin_impl::Selection>,
 	),
 }
@@ -626,7 +629,7 @@ impl RequestValidity {
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn for_source(route: &crate::origin::Requests, path: &crate::Path) -> Self {
+	pub(crate) fn for_source(route: &crate::origin::Route, path: &crate::Path) -> Self {
 		route
 			.request_validity(path)
 			.map(|selected| Self::Selected(std::sync::Arc::new(selected)))
@@ -644,29 +647,19 @@ impl RequestValidity {
 	pub(crate) fn check(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
 		match self {
 			Self::Route(route) if route.poll_closed(waiter).is_ready() => Err(crate::Error::Unroutable),
-			// A replacement retires the period only once its held `Restart` is released.
-			Self::Period(route, _, selected)
-				if route.poll_closed(waiter).is_ready() || selected.poll_retired(waiter).is_ready() =>
-			{
-				Err(crate::Error::Unroutable)
-			}
+			Self::Period(route, _, _) if route.poll_closed(waiter).is_ready() => Err(crate::Error::Unroutable),
 			Self::Selected(_) => self.start().check(waiter),
 			_ => Ok(()),
 		}
 	}
 
 	/// [`Self::check`] for a request already sent but not yet answered: only another
-	/// instance taking the path refuses it, since without an epoch that instance may be
-	/// the one answering. A withdrawal leaves it to its answer, as moq-lite has the
-	/// publisher conclude in-flight requests.
+	/// instance taking the path refuses it. A withdrawal leaves it to its answer, as
+	/// moq-lite has the publisher conclude in-flight requests.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn check_unanswered(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
 		match self {
-			Self::Period(_, answering, selected)
-				if answering.poll_closed(waiter).is_ready() || selected.poll_retired(waiter).is_ready() =>
-			{
-				Err(crate::Error::Unroutable)
-			}
+			Self::Period(_, answering, _) if answering.poll_closed(waiter).is_ready() => Err(crate::Error::Unroutable),
 			Self::Selected(_) => self.start().check_unanswered(waiter),
 			_ => Ok(()),
 		}
@@ -696,6 +689,7 @@ pub(crate) struct SourceGuard(Producer);
 impl SourceGuard {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn new(producer: Producer) -> Self {
+		producer.state.lock().relayed = true;
 		Self(producer)
 	}
 }
@@ -814,6 +808,10 @@ impl Requests {
 		// Cache the served track so concurrent lookups coalesce onto it. If a live track already
 		// holds the name (a publish raced the request), `insert` keeps it rather than shadowing it.
 		let _ = state.cache_track(pending.weak());
+		// Claimed after the lock is released, since claiming wakes the track's subscribers
+		// and an inline executor can re-enter the broadcast from that wake. A close landing
+		// in between rejects the request, as it would one still queued.
+		drop(state);
 		// Attribute the served track to this broadcast's ingress scope (no-op untagged).
 		Poll::Ready(Ok(pending.claim().with_stats(self.stats.clone())))
 	}
@@ -835,6 +833,12 @@ impl Requests {
 		&self.alive.validity
 	}
 
+	/// A handler for the datagram tracks consumers ask for. Until one exists, asking for a
+	/// datagram track nothing publishes fails with [`Error::NotFound`].
+	pub fn datagrams(&self) -> DatagramRequests {
+		DatagramRequests::new(self.alive.clone(), self.state.clone(), self.stats.clone())
+	}
+
 	/// Answer the broadcast's track listings, for a handler that knows the tracks it
 	/// would serve, such as a relay listing its upstream's. See [`Lister`].
 	///
@@ -853,6 +857,62 @@ impl Requests {
 	/// Return true if this is the same broadcast instance.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
+	}
+}
+
+/// Handles on-demand datagram tracks for a broadcast, like [`Requests`] does stream tracks.
+///
+/// Created by [`Requests::datagrams`]. When the last handle drops, the requests it never
+/// took are rejected with [`Error::Dropped`].
+pub struct DatagramRequests {
+	// Keeps the broadcast alive while a handler exists, as `Requests` does.
+	alive: Arc<Alive>,
+	state: kio::Shared<BroadcastState>,
+	stats: stats::Scope,
+}
+
+impl DatagramRequests {
+	fn new(alive: Arc<Alive>, state: kio::Shared<BroadcastState>, stats: stats::Scope) -> Self {
+		state.lock().datagram_handlers += 1;
+		Self { alive, state, stats }
+	}
+
+	/// The next datagram track a consumer asks for, to accept or reject.
+	///
+	/// Returns [`Error::Closed`] once the broadcast has ended.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_requested(&mut self, waiter: &kio::Waiter) -> Poll<Result<datagram::Request, Error>> {
+		if self.alive.validity.check(waiter).is_err() {
+			self.alive.close();
+		}
+		let mut state = ready!(self.state.poll(waiter, |state| {
+			match !state.datagram_requests.is_empty() || state.closing {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}
+		}));
+		match state.datagram_requests.pop_front() {
+			Some(request) => Poll::Ready(Ok(request.with_stats(self.stats.clone()))),
+			None => Poll::Ready(Err(Error::Closed)),
+		}
+	}
+}
+
+impl Clone for DatagramRequests {
+	fn clone(&self) -> Self {
+		Self::new(self.alive.clone(), self.state.clone(), self.stats.clone())
+	}
+}
+
+impl Drop for DatagramRequests {
+	fn drop(&mut self) {
+		let mut state = self.state.lock();
+		state.datagram_handlers -= 1;
+		if state.datagram_handlers == 0 {
+			for request in state.datagram_requests.drain(..) {
+				request.reject(Error::Dropped);
+			}
+		}
 	}
 }
 
@@ -931,11 +991,12 @@ impl Consumer {
 		self
 	}
 
-	/// Stamp the epoch of the route this handle was resolved through, overriding [`Info::epoch`].
-	pub(super) fn with_epoch(mut self, epoch: Option<crate::Epoch>) -> Self {
-		if self.info.epoch != epoch {
+	/// Stamp the instance of the route this handle was resolved through, overriding
+	/// [`Info::instance`].
+	pub(super) fn with_instance(mut self, instance: Option<crate::Instance>) -> Self {
+		if self.info.instance != instance {
 			let mut info = (*self.info).clone();
-			info.epoch = epoch;
+			info.instance = instance;
 			self.info = Arc::new(info);
 		}
 		self
@@ -975,6 +1036,94 @@ impl Consumer {
 			track::Consumer::lookup(name.into(), self.info.clone(), self.clone(), current)
 				.with_stats(self.stats.clone()),
 		)
+	}
+
+	/// Consume the datagram track `name`, live from now.
+	///
+	/// Joins the track a producer publishes, or asks a [`DatagramRequests`] handler for it,
+	/// whose answer the consumer reads. Fails with [`Error::Unroutable`] once the broadcast
+	/// has ended, and [`Error::NotFound`] when nothing publishes the track and no handler
+	/// would serve a request for it.
+	pub fn datagrams(&self, name: &str) -> Result<datagram::Consumer, Error> {
+		let mut state = self.state.lock();
+		if state.closing {
+			return Err(Error::Unroutable);
+		}
+		if let Some(source) = &state.datagram_source {
+			let source = source.clone().ok_or(Error::Unroutable)?;
+			drop(state);
+			return Ok(source.datagrams(name)?.with_stats(self.stats.clone()));
+		}
+		if let Some(live) = state.datagrams.get(name)
+			&& let Some(consumer) = live.try_consume(self.stats.clone())
+		{
+			return Ok(consumer);
+		}
+		if state.datagram_handlers == 0 {
+			return Err(Error::NotFound);
+		}
+		let request = datagram::Request::new(name.into());
+		let consumer = request
+			.weak()
+			.try_consume(self.stats.clone())
+			.expect("a fresh request is open");
+		state.datagrams.insert(name.into(), request.weak());
+		// Requests their readers left are withdrawn, so the queue holds only what someone
+		// still waits for, however long a handler goes without taking any.
+		state.datagram_requests.retain(|queued| !queued.is_closed());
+		state.datagram_requests.push_back(request);
+		Ok(consumer)
+	}
+
+	/// Join the datagram track `name` if one is published or already asked for, asking no
+	/// handler for it otherwise.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn datagrams_live(&self, name: &str) -> Option<datagram::Consumer> {
+		let state = self.state.lock();
+		if state.closing {
+			return None;
+		}
+		if let Some(source) = &state.datagram_source {
+			let source = source.clone()?;
+			drop(state);
+			return Some(source.datagrams_live(name)?.with_stats(self.stats.clone()));
+		}
+		state.datagrams.get(name)?.try_consume(self.stats.clone())
+	}
+
+	/// Whether datagram lookups reach a local producer or handler, rather than a session that
+	/// relays a peer's broadcast, here or at the source an origin serves this broadcast from.
+	///
+	/// A session always answers a lookup, and a moq-lite 05/06 one subscribes to the stream
+	/// track of the same name to answer one, so a lite-05/06 publisher only asks a local one
+	/// for a name's datagram track before its stream track answers.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn has_local_datagrams(&self) -> bool {
+		let state = self.state.lock();
+		match &state.datagram_source {
+			Some(Some(source)) => {
+				let source = source.clone();
+				drop(state);
+				source.has_local_datagrams()
+			}
+			Some(None) => false,
+			None => !state.relayed,
+		}
+	}
+
+	/// Whether a producer serves the stream track `name`, here or at the source an origin
+	/// serves this broadcast from, rather than a request still waiting for an answer.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn publishes_track(&self, name: &str) -> bool {
+		let mut state = self.state.lock();
+		if BroadcastState::live_track(&mut state, name).is_some_and(|live| live.minted()) {
+			return true;
+		}
+		let Some(Some(source)) = state.datagram_source.clone() else {
+			return false;
+		};
+		drop(state);
+		source.publishes_track(name)
 	}
 
 	/// Join the demand of the track serving `name`, requesting it from a [`Requests`]
@@ -2340,5 +2489,145 @@ mod test {
 		assert!(!track.demand().is_wanted());
 		assert!(track.abort_unwanted(Error::Cancel).is_ok());
 		producer.close();
+	}
+
+	fn recv_datagram(consumer: &mut datagram::Consumer) -> Poll<Result<Option<crate::Datagram>, Error>> {
+		consumer.poll_recv(&kio::Waiter::noop())
+	}
+
+	fn received(consumer: &mut datagram::Consumer) -> u64 {
+		match recv_datagram(consumer) {
+			Poll::Ready(Ok(Some(datagram))) => datagram.sequence,
+			other => panic!("expected a datagram, got {other:?}"),
+		}
+	}
+
+	/// A datagram track shares no name with a stream track, and holds its own while live.
+	#[test]
+	fn datagram_tracks_are_a_namespace_apart() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		let _track = producer.create_track("audio", crate::track::Info::timed()).unwrap();
+		let mut datagrams = producer.create_datagrams("audio", datagram::Info::default()).unwrap();
+		assert!(matches!(
+			producer.create_datagrams("audio", datagram::Info::default()),
+			Err(Error::Duplicate)
+		));
+
+		let mut reader = consumer.datagrams("audio").unwrap();
+		datagrams.append(None, "x").unwrap();
+		assert_eq!(received(&mut reader), 0);
+
+		// Once it ends, the name is free again, and a reader no longer joins it.
+		datagrams.finish();
+		assert!(matches!(recv_datagram(&mut reader), Poll::Ready(Ok(None))));
+		assert!(matches!(consumer.datagrams("audio"), Err(Error::NotFound)));
+		producer.create_datagrams("audio", datagram::Info::default()).unwrap();
+	}
+
+	/// A datagram track nothing publishes is asked of a handler, once however many readers
+	/// want it, and the handler's answer reaches them all.
+	#[test]
+	fn a_datagram_request_resolves_with_its_answer() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		assert!(matches!(consumer.datagrams("audio"), Err(Error::NotFound)));
+
+		let mut handler = producer.requests().datagrams();
+		let requested = |handler: &mut DatagramRequests| handler.poll_requested(&kio::Waiter::noop());
+		let mut first = consumer.datagrams("audio").unwrap();
+		let mut second = consumer.datagrams("audio").unwrap();
+		assert!(first.poll_info(&kio::Waiter::noop()).is_pending());
+		let Poll::Ready(Ok(request)) = requested(&mut handler) else {
+			panic!("expected a request");
+		};
+		assert!(requested(&mut handler).is_pending(), "the readers share one request");
+		assert_eq!(request.name(), "audio");
+
+		let info = datagram::Info::default().with_priority(2);
+		let mut served = request.accept(info);
+		assert!(matches!(second.poll_info(&kio::Waiter::noop()), Poll::Ready(Ok(got)) if got == info));
+		served.append(None, "x").unwrap();
+		assert_eq!(received(&mut first), 0);
+		assert_eq!(received(&mut second), 0);
+
+		let mut refused = consumer.datagrams("video").unwrap();
+		let Poll::Ready(Ok(request)) = requested(&mut handler) else {
+			panic!("expected a request");
+		};
+		request.reject(Error::NotFound);
+		assert!(matches!(recv_datagram(&mut refused), Poll::Ready(Err(Error::NotFound))));
+	}
+
+	/// Creating a datagram track serves the readers already asking for it, before any
+	/// handler takes their request.
+	#[test]
+	fn create_datagrams_fulfills_a_queued_request() {
+		let producer = Info::new().produce();
+		let mut handler = producer.requests().datagrams();
+		let mut reader = producer.consume().datagrams("audio").unwrap();
+
+		let info = datagram::Info::default().with_priority(2);
+		let mut datagrams = producer.create_datagrams("audio", info).unwrap();
+		assert!(matches!(reader.poll_info(&kio::Waiter::noop()), Poll::Ready(Ok(got)) if got == info));
+		datagrams.append(None, "x").unwrap();
+		assert_eq!(received(&mut reader), 0);
+		assert!(handler.poll_requested(&kio::Waiter::noop()).is_pending());
+	}
+
+	/// Closing the broadcast refuses its queued datagram requests and every later one, and
+	/// ends its handlers.
+	#[test]
+	fn close_refuses_datagram_requests() {
+		let producer = Info::new().produce();
+		let mut handler = producer.requests().datagrams();
+		let consumer = producer.consume();
+		let mut queued = consumer.datagrams("audio").unwrap();
+
+		producer.close();
+		assert!(matches!(
+			recv_datagram(&mut queued),
+			Poll::Ready(Err(Error::Unroutable))
+		));
+		assert!(matches!(consumer.datagrams("audio"), Err(Error::Unroutable)));
+		assert!(matches!(
+			handler.poll_requested(&kio::Waiter::noop()),
+			Poll::Ready(Err(Error::Closed))
+		));
+	}
+
+	/// A request whose readers all left is withdrawn, so a handler that never polls holds
+	/// only the requests someone still waits for.
+	#[test]
+	fn a_datagram_request_nobody_waits_for_is_withdrawn() {
+		let producer = Info::new().produce();
+		let _handler = producer.requests().datagrams();
+		let consumer = producer.consume();
+		for name in ["a", "b", "c", "d"] {
+			let left = consumer.datagrams(name).unwrap();
+			drop(left);
+		}
+		let mut waiting = consumer.datagrams("e").unwrap();
+		assert_eq!(producer.state.lock().datagram_requests.len(), 1);
+		assert!(recv_datagram(&mut waiting).is_pending());
+		// A withdrawn name is asked for afresh.
+		let _again = consumer.datagrams("a").unwrap();
+		assert_eq!(producer.state.lock().datagram_requests.len(), 2);
+	}
+
+	/// Losing the last datagram handler drops the requests it never took, and readers find
+	/// nothing to ask after.
+	#[test]
+	fn dropping_the_datagram_handler_drops_its_queue() {
+		let producer = Info::new().produce();
+		let handler = producer.requests().datagrams();
+		let consumer = producer.consume();
+		let mut queued = consumer.datagrams("audio").unwrap();
+
+		drop(handler.clone());
+		assert!(recv_datagram(&mut queued).is_pending(), "a clone still handles it");
+		drop(handler);
+		assert!(matches!(recv_datagram(&mut queued), Poll::Ready(Err(Error::Dropped))));
+		assert!(matches!(consumer.datagrams("audio"), Err(Error::NotFound)));
 	}
 }

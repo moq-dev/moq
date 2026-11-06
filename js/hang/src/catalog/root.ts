@@ -1,17 +1,17 @@
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
-import { Path, Track } from "@moq/net";
-import * as z from "@zod/mini";
+import { Path } from "@moq/net";
+import * as z from "zod/mini";
 import { AudioSchema } from "./audio";
 import { BinarySchema } from "./binary";
-import { ClockSchema } from "./clock";
-import { ContributionSchema } from "./contribution";
 import { EchoSchema } from "./echo";
 import { TRACK } from "./format";
+import { IncludeSchema } from "./include";
 import { JsonSchema } from "./json";
+import { MediaSchema } from "./media";
 import type { RelativeBroadcast } from "./path";
 import { PRIORITY } from "./priority";
-import { named, section } from "./section";
+import { named, object, renditions, section } from "./section";
 import { StatsSchema } from "./stats";
 import { TextSchema } from "./text";
 import { track } from "./track";
@@ -46,12 +46,12 @@ const VersionSchema = z.number().check(
 /**
  * The root catalog: the base sections every hang broadcast carries.
  *
- * The media sections are `video`, `audio`, and `text`, alongside the broadcast's `clock` (the
- * one wall-clock mapping);
- * `json` and `binary` list application data tracks that aren't media. A section is omitted
+ * The media sections are `video`, `audio`, and `text`, alongside `media`, which holds what applies
+ * to every audio and video track: the broadcast's `clock` (the one wall-clock mapping) and its
+ * `join` interval. `json` and `binary` list application data tracks that aren't media. A section is omitted
  * when it holds no tracks. `stats` names the publisher's media snapshot track, `echo`
- * solicits viewer feedback under a relative broadcast prefix, and `contributions` lists whole
- * broadcasts without opening them.
+ * solicits viewer feedback under a relative broadcast prefix, and `include` lists whole
+ * broadcasts without opening them; each shares this catalog's PTS timeline and root settings.
  *
  * This is a *loose* object: unknown root sections pass through validation untouched, so an
  * application can add its own sections (e.g. `scte35`) without modifying hang. A base consumer
@@ -67,8 +67,11 @@ export const RootSchema = z.looseObject({
 	version: z.optional(VersionSchema),
 	video: z.optional(VideoSchema),
 	audio: z.optional(AudioSchema),
-	// The broadcast's one continuous clock, if the publisher exposes one.
-	clock: z.optional(ClockSchema),
+	// What applies to every audio and video track, omitted when it holds nothing. `media` is a
+	// generic key an application may already carry, so a value that isn't an object decodes as
+	// absent; an object with a malformed clock fails the catalog, the same as Rust. See `MediaSchema`
+	// for its lenient `join`.
+	media: object(MediaSchema),
 	// Decoded leniently like `text` below: a value without a string `track` or `path` is someone
 	// else's and decodes as absent. See `named`.
 	stats: named(StatsSchema, "track"),
@@ -82,10 +85,10 @@ export const RootSchema = z.looseObject({
 	json: section(JsonSchema, "tracks"),
 	binary: section(BinarySchema, "tracks"),
 	// A new key, so a malformed entry fails the catalog, the same as Rust.
-	contributions: z.optional(z.record(z.string(), ContributionSchema)),
+	include: z.optional(renditions(IncludeSchema, "include")),
 });
 
-/** The root catalog object: the media sections, the clock, the data track sections, plus any app extensions. */
+/** The root catalog object: the media sections, `media`, the data track sections, plus any app extensions. */
 export type Root = z.infer<typeof RootSchema>;
 
 /**
@@ -132,7 +135,8 @@ export function checkRenditions(root: Root): Root {
 
 /**
  * The catalog as a publisher writes it: refused as every reader refuses it, with the root
- * `version` computed rather than carried, so an edit can't claim less than the catalog uses.
+ * `version` computed rather than carried, so an edit can't claim less than the catalog uses, and an
+ * empty `media` left off the wire.
  *
  * Throws {@link DuplicateRendition}. Mirrors Rust's catalog serializer.
  */
@@ -140,6 +144,7 @@ export function encode(root: Root): Root {
 	checkRenditions(root);
 	const value = { ...root };
 	delete value.version;
+	if (value.media && value.media.clock === undefined && value.media.join === undefined) delete value.media;
 	const version = minVersion(root);
 	if (version !== undefined) value.version = version;
 	return value;
@@ -167,7 +172,7 @@ export function checkResolvable(root: Root, base: Moq.Path.Valid): Root {
 		root.text?.renditions,
 		root.json?.tracks,
 		root.binary?.tracks,
-		root.contributions,
+		root.include,
 	];
 	for (const section of sections) {
 		for (const { broadcast } of Object.values(section ?? {})) {
@@ -186,15 +191,18 @@ export function checkResolvable(root: Root, base: Moq.Path.Valid): Root {
  * yielded unresolved.
  */
 export async function* watch(broadcast: Moq.Broadcast.Consumer): AsyncIterable<Root> {
-	const track = broadcast.track(TRACK).subscribe({ ...Track.Subscription.default(), priority: PRIORITY.catalog });
+	const consumer = new Json.Snapshot.Consumer<Root>({
+		track: broadcast.track(TRACK),
+		schema: RootSchema,
+		priority: PRIORITY.catalog,
+	});
 	try {
-		const consumer = new Json.Snapshot.Consumer<Root>({ track, schema: RootSchema });
 		for (;;) {
 			const root = await consumer.latest();
 			if (!root) return;
 			yield checkResolvable(checkRenditions(root.value), broadcast.path);
 		}
 	} finally {
-		track.close();
+		consumer.close();
 	}
 }

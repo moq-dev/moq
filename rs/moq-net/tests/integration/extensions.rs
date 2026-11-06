@@ -40,17 +40,17 @@ fn assert_open(pair: &MockPair, context: &str) {
 
 /// Whether `path` is announced in `origin` right now.
 fn announced(origin: &origin::Producer, path: &str) -> bool {
-	let mut announced = origin.consume().announced();
+	let mut announced = origin.consume().routes();
 	let mut live = false;
 	while let Some(event) = announced.try_next() {
 		match event {
-			moq_net::announce::Event::Start(update)
-			| moq_net::announce::Event::Update(update)
-			| moq_net::announce::Event::Restart(update)
-			| moq_net::announce::Event::Takeover { announce: update, .. } => {
+			moq_net::origin::RouteEvent::Start(update)
+			| moq_net::origin::RouteEvent::Update(update)
+			| moq_net::origin::RouteEvent::Restart(update)
+			| moq_net::origin::RouteEvent::Takeover { announce: update, .. } => {
 				live |= update.prefix.as_str() == path;
 			}
-			moq_net::announce::Event::End(update) => {
+			moq_net::origin::RouteEvent::End(update) => {
 				live &= update.prefix.as_str() != path;
 			}
 		}
@@ -86,8 +86,10 @@ async fn a_side_that_declines_solicit_takes_unsolicited_announces() {
 			}
 			let pair = connect_mock(options).await;
 
-			let broadcast = publisher.create_broadcast("room/cam").unwrap();
-			broadcast.announce(Default::default()).unwrap();
+			let broadcast = publisher
+				.route("room/cam", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
+			broadcast.announce().unwrap();
 			kio::clock::sleep(SETTLE).await;
 
 			assert!(announced(&subscriber, "room/cam"), "{context}: never announced");

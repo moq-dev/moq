@@ -14,13 +14,17 @@ use std::sync::Arc;
 pub mod bbr3;
 /// CUBIC congestion control.
 pub mod cubic;
+pub mod gcc;
 mod pacer;
 mod rate;
+pub mod scream;
 mod unlimited;
 
 pub use bbr3::Bbr3;
 pub use cubic::Cubic;
+pub use gcc::Gcc;
 pub use rate::Packet;
+pub use scream::Scream;
 pub use unlimited::Unlimited;
 
 /// Common interface for different congestion controllers
@@ -128,6 +132,29 @@ pub trait Controller: Send + Sync {
         false
     }
 
+    /// Whether each probe is a cluster the controller sizes and paces itself, so a transport
+    /// filling [`Metrics::probe_inflight`] sends at the controller's [`Controller::pace`]
+    /// rather than holding its duplicates to the session's probe target
+    ///
+    /// A controller that probes by a gain on its estimate for as long as its cycle allows, as
+    /// BBR3 does, leaves the target to bound what its probes cost. One that reads a probe at the
+    /// rate it was sent, as GoogCC does, learns only that rate from a probe held below it, and
+    /// bounds the cost by the cluster's size.
+    fn paces_probe(&self) -> bool {
+        false
+    }
+
+    /// The session's probe target, the rate in bytes per second the application wants to send,
+    /// or zero for none
+    ///
+    /// The transport reports it to each controller it builds and whenever it changes. A
+    /// controller that sizes its own probes, as GoogCC does, may aim them at it.
+    #[allow(
+        unused_variables,
+        reason = "a no-op default that keeps the parameter names for implementors"
+    )]
+    fn on_probe_target(&mut self, bytes_per_second: u64) {}
+
     /// Duplicate the controller's state
     fn clone_box(&self) -> Box<dyn Controller>;
 }
@@ -222,8 +249,8 @@ pub struct Metrics {
     pub pacing_rate: Option<u64>,
     /// Estimated sustainable path bandwidth (bytes/s)
     pub bandwidth_estimate: Option<u64>,
-    /// Bytes in flight up to which an application-limited sender may resend in-flight data,
-    /// while the controller probes for bandwidth (bytes)
+    /// Bytes in flight an application-limited sender may fill by resending in-flight data, the
+    /// last packet crossing it, while the controller probes for bandwidth (bytes)
     ///
     /// `None` when the controller is not probing, or cannot learn from a sender that fills its
     /// pacing with redundant data.
@@ -241,6 +268,9 @@ pub struct Init {
     pub rtt: Duration,
     /// The most bytes per second to pace at, whatever the controller computes.
     pub max_pacing_rate: Option<u64>,
+    /// Seeds whatever the controller randomizes, such as BBR3's probe phases, so a seeded
+    /// connection replays it.
+    pub seed: u64,
 }
 
 /// Constructs controllers on demand
@@ -250,3 +280,47 @@ pub trait Factory {
 }
 
 const BASE_DATAGRAM_SIZE: u64 = 1200;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The largest UDP payload (RFC 9000), whose two datagrams outgrow every 1200-based default
+    const MTU: u16 = 65527;
+
+    fn factories() -> [(&'static str, Arc<dyn Factory>); 5] {
+        [
+            ("bbr3", Arc::new(bbr3::Config::default())),
+            ("cubic", Arc::new(cubic::Config::default())),
+            ("gcc", Arc::new(gcc::Config::default())),
+            ("scream", Arc::new(scream::Config::default())),
+            ("unlimited", Arc::new(Unlimited)),
+        ]
+    }
+
+    fn init(mtu: u16) -> Init {
+        Init {
+            now: Instant::ZERO,
+            mtu,
+            rtt: Duration::from_millis(100),
+            max_pacing_rate: None,
+            seed: 0,
+        }
+    }
+
+    /// The window holds two datagrams at the path MTU (RFC 9002 section 7.2's minimum), or the
+    /// transport could never send its first one.
+    #[test]
+    fn window_holds_two_datagrams_at_large_mtu() {
+        let floor = 2 * u64::from(MTU);
+        for (name, factory) in factories() {
+            let window = factory.clone().build(init(MTU)).window();
+            assert!(window >= floor, "{name} starts at {window}");
+
+            let mut controller = factory.build(init(1200));
+            controller.on_mtu_update(MTU);
+            let window = controller.window();
+            assert!(window >= floor, "{name} grows its MTU to {window}");
+        }
+    }
+}

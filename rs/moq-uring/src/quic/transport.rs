@@ -20,15 +20,15 @@ pub struct Config {
 	///
 	/// - 1024 streams of each kind a peer may have open at once. MoQ opens a
 	///   stream per group, so busy endpoints want this high.
-	/// - A 128 MiB connection window, the unread data and incomplete messages
+	/// - A 4 MiB connection window, the unread data and incomplete messages
 	///   one peer may have in flight across every stream. A moq session needs
 	///   it to fit the largest message it assembles,
 	///   [`MIN_RECEIVE_WINDOW`](moq_net::transport::MIN_RECEIVE_WINDOW), or a
 	///   partial one can stall the connection.
-	/// - A 4 MiB stream window. Stream credit returns as bytes are read,
+	/// - A 1 MiB stream window. Stream credit returns as bytes are read,
 	///   whether or not their message is complete, so this only paces one
 	///   stream.
-	/// - 16 MiB of unacknowledged outgoing data, whatever the peer allows.
+	/// - 4 MiB of unacknowledged outgoing data, whatever the peer allows.
 	pub limits: Limits,
 	/// Which congestion controller to run.
 	pub congestion: Congestion,

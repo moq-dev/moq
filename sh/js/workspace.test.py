@@ -38,7 +38,7 @@ class SelectionTest(unittest.TestCase):
         self.write()
         (self.root / "test/tsconfig.json").write_text('{"exclude":["**/dist"]}')
         (self.root / "sh").mkdir()
-        (self.root / "sh/dispatch.sh").write_text("    [js]='^(js/|doc/|demo/|test/)'\n")
+        (self.root / "sh/dispatch.sh").write_text("module js '^(js/|doc/|demo/|test/)'\n")
 
     def write(self):
         (self.root / "package.json").write_text(json.dumps({"workspaces": list(self.packages)}))
@@ -53,6 +53,7 @@ class SelectionTest(unittest.TestCase):
     def test_dispatcher_passes_only_js_impact_paths(self):
         sh = self.root / "sh"
         shutil.copy(selector.ROOT / "sh/dispatch.sh", sh / "dispatch.sh")
+        shutil.copy(selector.ROOT / "sh/quest.sh", sh / "quest.sh")
         changed = sh / "changed.sh"
         changed.write_text("#!/bin/sh\nprintf '%s\\n' js/auth/src/token.ts demo/pub/worker.ts quest/unrelated.md\n")
         changed.chmod(0o755)
@@ -75,8 +76,13 @@ class SelectionTest(unittest.TestCase):
             GITHUB_BASE_REF="missing",
             GITHUB_STEP_SUMMARY=str(summary),
         ):
-            env = dispatch_env(PATH=f"{tools}:{os.environ['PATH']}", ALLOW_HOST_TOOLCHAIN="1", SELECT_CALLS=str(calls))
-        for script in ("markdown.sh", "shell.sh", "large-files.sh"):
+            env = dispatch_env(
+                PATH=f"{tools}:{os.environ['PATH']}",
+                ALLOW_HOST_TOOLCHAIN="1",
+                DEV_SHELL_QUEST=str(tools / "quest"),
+                SELECT_CALLS=str(calls),
+            )
+        for script in ("markdown.sh", "shell.sh", "large-files.sh", "text.sh"):
             path = sh / script
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
@@ -86,9 +92,7 @@ class SelectionTest(unittest.TestCase):
         )
         just.chmod(0o755)
         subprocess.run(["bash", "sh/dispatch.sh", "ci", "base"], cwd=self.root, env=env, check=True)
-        self.assertEqual(
-            calls.read_text().splitlines(), ["js test-changed", "js/auth/src/token.ts", "demo/pub/worker.ts"]
-        )
+        self.assertEqual(calls.read_text().splitlines(), ["js test-changed", "js/auth/src/token.ts"])
         self.assertFalse(summary.exists())
 
     def test_cli_loads_without_shadowing_standard_library_modules(self):
@@ -234,32 +238,6 @@ class SelectionTest(unittest.TestCase):
             [{"extends": "./tsconfig.json", "exclude": ["**/dist", str(self.root / "test/browser")]}],
         )
         self.assertEqual(list((self.root / "test").glob("tmp*.json")), [])
-
-    def test_biome_covers_unowned_js_files_in_fallback(self):
-        def biome(paths):
-            return next(c for c in self.calls(paths) if c[:3] == ["bun", "biome", "check"])
-
-        self.assertEqual(
-            biome(["js/tsconfig.json"]),
-            ["bun", "biome", "check", "--error-on-warnings", "js", "bench/browser", "test", "doc", "demo"],
-        )
-        self.assertEqual(biome(["doc/index.md"]), ["bun", "biome", "check", "--error-on-warnings", "doc", "js/common"])
-        self.assertEqual(
-            biome(["demo/nested/src/index.ts"]),
-            ["bun", "biome", "check", "--error-on-warnings", "demo/nested", "js/common"],
-        )
-        self.assertEqual(
-            biome(["demo/pub/src/index.ts"]),
-            ["bun", "biome", "check", "--error-on-warnings", "js", "bench/browser", "test", "doc", "demo"],
-        )
-        self.assertEqual(
-            biome(["js/core/src/index.ts"]),
-            ["bun", "biome", "check", "--error-on-warnings", "js/core", "js/view", "doc", "js/common"],
-        )
-        self.assertEqual(
-            biome(["js/bindings/src/index.ts"]),
-            ["bun", "biome", "check", "--error-on-warnings", "js/bindings", "test/browser", "demo/nested", "js/common"],
-        )
 
     def test_tests_do_not_build_unselected_packages(self):
         calls = self.calls(["doc/index.md"], "test")

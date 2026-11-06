@@ -17,7 +17,7 @@ export * as Container from "./container";
 export * as Echo from "./echo";
 /** Client health graded from two consecutive media reports. */
 export * as Health from "./health";
-/** A rendition's HLS segment records, each segment's first group and pts. */
-export * as Hls from "./hls";
+/** The compressed snapshot track a stats or feedback report is written to. */
+export * as Report from "./report";
 /** Publisher media and transport snapshot schemas. */
 export * as Stats from "./stats";

@@ -17,7 +17,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 test-support = ["dep:base64", "dep:tokio", "tokio/io-util", "tokio/macros", "tokio/net", "tokio/rt", "tokio/sync"]
 
 # Pure library: pulls one RTSP session into a caller's broadcast. The CLI lives in
-# `moq-cli` (`moq import rtsp`), which owns reconnect and epochs.
+# `moq-cli` (`moq import rtsp`), which owns reconnect and instances.
 [dependencies]
 base64 = { workspace = true, optional = true }
 futures = { workspace = true }
@@ -39,8 +39,11 @@ url = { workspace = true }
 base64 = { workspace = true }
 # A clock only the stall tests move, so a loaded runner never fires a deadline early.
 kio = { path = "../kio", features = ["manual"] }
+# The tests await the exported catalog and media.
+moq-mux = { path = "../moq-mux", features = ["async"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-test = { workspace = true }
+workspace-hack = { path = "../workspace-hack" }
 
 [lints]
 workspace = true

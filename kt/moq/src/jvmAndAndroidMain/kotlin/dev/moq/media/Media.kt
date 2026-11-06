@@ -13,6 +13,9 @@ typealias TrackProducer = uniffi.moq.MoqMediaTrackProducer
 /** The write side of a media track fed a raw byte stream, with frame boundaries inferred. */
 typealias TrackStreamProducer = uniffi.moq.MoqMediaTrackStreamProducer
 
+/** A single-track producer of either kind, such as a video rendition's `lower`. */
+typealias Producer = uniffi.moq.MoqMediaProducer
+
 /** The write side of a container, which publishes each track it describes. */
 typealias ContainerProducer = uniffi.moq.MoqMediaContainerProducer
 
@@ -87,13 +90,6 @@ typealias Audio = uniffi.moq.MoqAudio
 
 /** A width and height pair, in pixels. */
 typealias Dimensions = uniffi.moq.MoqDimensions
-
-/**
- * How far behind the live edge a decoder plays: `min` is the playout delay and where a cold join
- * starts, and `max`, null for no limit, is how far a stalled group may fall behind before it is
- * skipped. `min` stays on the consumer; a `min` past `max` starts at `max`.
- */
-typealias Delay = uniffi.moq.MoqDelay
 
 /**
  * Where an audio or video decoder starts on a track that already holds groups: `LATEST` for a live

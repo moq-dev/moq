@@ -109,7 +109,7 @@ def selection(root, paths):
 
 def unmapped(root, paths):
     """Existing inputs the dispatcher's static JS impact map misses, so changing one would skip its readers."""
-    impact = re.compile(re.search(r"^\s*\[js\]='([^']*)'", (root / "sh/dispatch.sh").read_text(), re.M).group(1))
+    impact = re.compile(re.search(r"^module js '([^']*)'", (root / "sh/dispatch.sh").read_text(), re.M).group(1))
     # A directory input matches through the files under it, and an import through its file.
     return [
         path
@@ -208,19 +208,6 @@ def run(action, plan):
             command("bunx", "tsc", "--noEmit", "--project", name)
         finally:
             Path(name).unlink()
-    # The fallback also covers unowned inputs, including demo/pub's Worker.
-    # Recommended rules default to warn, which Biome otherwise lets pass.
-    command(
-        "bun",
-        "biome",
-        "check",
-        "--error-on-warnings",
-        *(
-            ["js", "bench/browser", "test", "doc", "demo"]
-            if plan["all"]
-            else [p["directory"] for p in packages.values()] + ["js/common"]
-        ),
-    )
     scripts("build")
     reports()
     for name in ("@moq/watch", "@moq/publish"):

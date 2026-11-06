@@ -5,6 +5,7 @@
 //! not cache the frames it already has as the whole group.
 
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -33,23 +34,27 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 	let downstream = produce_origin(2);
 	let _pair = peer(version.parse::<Version>().unwrap(), &publisher, &downstream).await;
 
-	let broadcast = publisher.create_broadcast("room").unwrap();
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
+		.broadcast()
 		.create_track("data", Info::default().with_timescale(Timescale::MILLI))
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let consumer = downstream.consume();
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 	let mut live = kio::clock::timeout(
 		TIMEOUT,
 		remote
 			.track("data")
 			.unwrap()
-			.subscribe(Subscription::default().with_max_delay(BUDGET)),
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(BUDGET))),
 	)
 	.await
 	.expect("subscribe timeout")
@@ -85,7 +90,7 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 		TIMEOUT,
 		remote.track("data").unwrap().subscribe(
 			Subscription::default()
-				.with_max_delay(Duration::from_secs(3600))
+				.with_delay(Delay::default().with_max(Duration::from_secs(3600)))
 				.with_range(0..),
 		),
 	)

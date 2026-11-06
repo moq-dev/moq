@@ -90,7 +90,7 @@ pub struct Http {
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct Https {
-	/// Socket address to bind the HTTPS listener to, serving `cert`/`key` or the `[acme]` certificate.
+	/// Socket address to bind the HTTPS listener to, serving `cert`/`key`.
 	#[usage(
 		long = "web-https-listen",
 		name = "web-https-listen",
@@ -168,6 +168,8 @@ pub(crate) struct WebState {
 	/// handshake and partial headers included), and a WebSocket wait for its MoQ
 	/// SETUP; `None` waits forever.
 	pub(crate) timeout: Option<std::time::Duration>,
+	/// The `[quic]` windows and stream count each WebSocket session starts with.
+	pub(crate) quic: moq_tokio::quic::Resolved,
 }
 
 /// The bound addresses of the public web listeners.
@@ -195,9 +197,7 @@ pub struct Web {
 	health: moq_tokio::accept::Health,
 	http_listener: Option<net::TcpListener>,
 	https_listener: Option<net::TcpListener>,
-	https_tls: Option<RustlsConfig>,
-	/// The ACME certificate resolver HTTPS serves instead of `https.cert`/`https.key`.
-	acme: Option<Arc<dyn rustls::server::ResolvesServerCert>>,
+	https_tls: Option<(RustlsConfig, moq_tokio::tls::Serve)>,
 	rtmp: rtmp::Handoff,
 	/// Serves `tls://` on the HTTPS listener, when the relay has a listen identity.
 	tls_stream: Option<moq_tokio::tcp::TlsAcceptor>,
@@ -221,6 +221,7 @@ impl Web {
 			shutdown: crate::shutdown::Observer::disabled(),
 			sessions: crate::session::Registry::new(),
 			timeout: moq_tokio::listen::Config::default().resolved_timeout(),
+			quic: Default::default(),
 		});
 		Self {
 			state,
@@ -232,7 +233,6 @@ impl Web {
 			http_listener: None,
 			https_listener: None,
 			https_tls: None,
-			acme: None,
 			rtmp: rtmp::Handoff::default(),
 			tls_stream: None,
 			addrs: Addrs::default(),
@@ -252,11 +252,9 @@ impl Web {
 			}
 		}
 		if self.https_tls.is_none() && self.config.https.listen.is_some() {
-			let tls = match &self.acme {
-				Some(resolver) => build_acme_config(resolver.clone(), &self.config.https.root)?,
-				None => build_https_config(&self.config.https.cert, &self.config.https.key, &self.config.https.root)?,
-			};
-			self.https_tls = Some(RustlsConfig::from_config(tls));
+			let (serve, tls) =
+				build_https_config(&self.config.https.cert, &self.config.https.key, &self.config.https.root)?;
+			self.https_tls = Some((RustlsConfig::from_config(tls), serve));
 		}
 		if let Some(listen) = self.config.http.listen
 			&& self.http_listener.is_none()
@@ -277,19 +275,6 @@ impl Web {
 			self.https_listener = Some(listener);
 		}
 		Ok(self)
-	}
-
-	/// Serve HTTPS from the ACME resolver, which also answers TLS-ALPN-01 challenges.
-	#[cfg(feature = "acme")]
-	pub(crate) fn with_acme(mut self, resolver: Option<Arc<dyn rustls::server::ResolvesServerCert>>) -> Self {
-		self.acme = resolver;
-		self
-	}
-
-	/// The bound HTTPS socket, where ACME answers challenges before serving starts.
-	#[cfg(feature = "acme")]
-	pub(crate) fn https_listener(&self) -> Option<&net::TcpListener> {
-		self.https_listener.as_ref()
 	}
 
 	/// Take the RTMP and RTMPS connections the HTTP and HTTPS listeners classify.
@@ -387,6 +372,15 @@ impl Web {
 		self
 	}
 
+	/// Start each WebSocket session at `quic`'s windows and stream count, the relay's
+	/// `[quic]` section, as its QUIC and `tcp://` sessions do. Defaults to the `[quic]`
+	/// defaults.
+	pub fn with_quic(mut self, quic: &moq_tokio::quic::Config) -> Self {
+		let state = Arc::get_mut(&mut self.state).expect("with_quic called after routes were built");
+		state.quic = quic.resolve();
+		self
+	}
+
 	/// Register WebSocket sessions in the node's live table so they can be listed
 	/// and nudged. Without it they are served but do not appear.
 	pub fn with_sessions(mut self, sessions: crate::session::Registry) -> Self {
@@ -472,7 +466,6 @@ impl Web {
 			http_listener,
 			https_listener,
 			https_tls,
-			acme,
 			rtmp,
 			tls_stream,
 			..
@@ -500,25 +493,13 @@ impl Web {
 				WebAcceptor::plain(ws, rtmp.clone(), state.clone()),
 			)?;
 			server.http_builder().http2().max_concurrent_streams(streams);
-			Some(server.serve(app.clone()))
+			Some(Box::pin(server.serve(app.clone())))
 		} else {
 			None
 		};
 
 		let https = if let Some(listener) = https_listener {
-			let rustls_config = https_tls.expect("HTTPS config was built before binding");
-			// The ACME resolver renews in place, so there are no files to watch.
-			if acme.is_none() {
-				state.cluster.critical.spawn(
-					"HTTPS certificate reload",
-					reload_https_config(
-						rustls_config.clone(),
-						config.https.cert,
-						config.https.key,
-						config.https.root,
-					),
-				);
-			}
+			let (rustls_config, serve) = https_tls.expect("HTTPS config was built before binding");
 			let mut server = crate::listener::server(
 				listener,
 				crate::listener::Config {
@@ -529,6 +510,7 @@ impl Web {
 				WebAcceptor::tls(
 					crate::listener::Tls {
 						http: rustls_config,
+						serve,
 						qmux: tls_stream,
 					},
 					ws,
@@ -537,11 +519,13 @@ impl Web {
 				),
 			)?;
 			server.http_builder().http2().max_concurrent_streams(streams);
-			Some(server.serve(app))
+			Some(Box::pin(server.serve(app)))
 		} else {
 			None
 		};
 
+		// Both servers are boxed, since a debug build copies each one into this poll's
+		// stack frame several times.
 		tokio::select! {
 			Some(res) = async move { Some(http?.await) } => res?,
 			Some(res) = async move { Some(https?.await) } => res?,
@@ -599,15 +583,17 @@ async fn get_cors(request: axum::extract::Request, next: axum::middleware::Next)
 	response
 }
 
-/// Build a [`rustls::ServerConfig`] for the HTTPS listener.
+/// Load the HTTPS listener's TLS policy and build its [`rustls::ServerConfig`].
 ///
-/// TLS version is left at the rustls default (1.2 + 1.3) so older clients
-/// can still hit the HTTPS API; the QUIC server separately forces 1.3.
+/// The policy reloads the certificate, key, and root files in place, so the config
+/// serves each rotation without a rebuild. TLS version is left at the rustls default
+/// (1.2 + 1.3) so older clients can still hit the HTTPS API; the QUIC server
+/// separately forces 1.3.
 fn build_https_config(
 	cert: &[PathBuf],
 	key: &[PathBuf],
 	root: &[PathBuf],
-) -> anyhow::Result<Arc<rustls::ServerConfig>> {
+) -> anyhow::Result<(moq_tokio::tls::Serve, Arc<rustls::ServerConfig>)> {
 	anyhow::ensure!(
 		!cert.is_empty(),
 		"web.https.cert must include at least one certificate when web.https.listen is configured"
@@ -622,60 +608,11 @@ fn build_https_config(
 	tls.key = key.to_vec();
 	tls.root = root.to_vec();
 
-	tls.server_config(vec![b"h2".to_vec(), b"http/1.1".to_vec()])
-		.context("failed to build https TLS config")
-}
-
-/// Build the HTTPS config around the ACME resolver, also offering the TLS-ALPN-01 protocol.
-///
-/// [`WebAcceptor`] closes a challenge connection once its handshake completes.
-fn build_acme_config(
-	resolver: Arc<dyn rustls::server::ResolvesServerCert>,
-	root: &[PathBuf],
-) -> anyhow::Result<Arc<rustls::ServerConfig>> {
-	let mut tls = moq_tokio::tls::Listen::default();
-	tls.root = root.to_vec();
-
-	let alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec(), b"acme-tls/1".to_vec()];
-	moq_tokio::tls::Serve::resolver(resolver, &tls)?
-		.config(alpn)
-		.context("failed to build https TLS config")
-}
-
-fn https_watch_paths(cert: &[PathBuf], key: &[PathBuf], root: &[PathBuf]) -> Vec<PathBuf> {
-	cert.iter()
-		.cloned()
-		.chain(key.iter().cloned())
-		.chain(root.iter().cloned())
-		.collect()
-}
-
-/// Reload the HTTPS certificate and key whenever they change on disk.
-///
-/// `RustlsConfig::reload_from_pem_file` would rebuild with `with_no_client_auth`
-/// (silently stripping mTLS when configured), so we always rebuild via the full
-/// [`build_https_config`] path. The client verifier watches root files itself,
-/// while this watcher also uses them to retry a failed certificate/key rotation.
-async fn reload_https_config(config: RustlsConfig, cert: Vec<PathBuf>, key: Vec<PathBuf>, root: Vec<PathBuf>) {
-	let paths = https_watch_paths(&cert, &key, &root);
-
-	let mut watcher = match moq_tokio::watch::Files::new(&paths) {
-		Ok(watcher) => watcher,
-		Err(err) => {
-			tracing::error!(%err, "failed to watch web certificate files; hot reload disabled");
-			return;
-		}
-	};
-
-	loop {
-		watcher.changed().await;
-		tracing::info!("reloading web certificate");
-
-		match build_https_config(&cert, &key, &root) {
-			Ok(new) => config.reload_from_config(new),
-			Err(err) => tracing::warn!(%err, "failed to reload web certificate"),
-		}
-	}
+	let serve = tls.load().context("failed to load https TLS")?;
+	let config = serve
+		.config(vec![b"h2".to_vec(), b"http/1.1".to_vec()])
+		.context("failed to build https TLS config")?;
+	Ok((serve, config))
 }
 
 /// The kernel's view of the TCP connection a request arrived on.
@@ -817,14 +754,11 @@ impl<S: Send + 'static> Accept<crate::listener::Accepted, S> for WebAcceptor {
 				}
 			};
 			let tls = stream.tls();
-			if tls.is_some_and(|tls| tls.alpn_protocol() == Some(b"acme-tls/1")) {
-				// The validator checked the certificate during the handshake; RFC 8737 has the server close.
-				return Err(std::io::Error::other("answered an ACME TLS-ALPN-01 challenge"));
-			}
 			let peer = tls
 				.and_then(|tls| tls.peer_certificates())
 				.filter(|certs| !certs.is_empty())
-				.map(|certs| MtlsPeer(moq_tokio::tls::PeerIdentity::from_chain(certs.to_vec())));
+				.zip(this.tls.as_ref())
+				.map(|(certs, tls)| MtlsPeer(tls.serve.peer(certs.to_vec())));
 			let server_name = tls
 				.and_then(|tls| tls.server_name())
 				.map(|name| ServerName(name.to_owned()));
@@ -1067,14 +1001,14 @@ async fn serve_announced(
 	};
 
 	let (lease, origin) = admit_http(&state, prefix, query, &uri, server_name, remote, mtls).await?;
-	let mut announced = origin.announced();
+	let mut announced = origin.routes();
 	let mut broadcasts = Vec::new();
 
 	while let Some(event) = announced.try_next() {
-		if let moq_net::announce::Event::Start(update)
-		| moq_net::announce::Event::Update(update)
-		| moq_net::announce::Event::Restart(update)
-		| moq_net::announce::Event::Takeover { announce: update, .. } = event
+		if let moq_net::origin::RouteEvent::Start(update)
+		| moq_net::origin::RouteEvent::Update(update)
+		| moq_net::origin::RouteEvent::Restart(update)
+		| moq_net::origin::RouteEvent::Takeover { announce: update, .. } = event
 		{
 			broadcasts.push(update.prefix);
 		}
@@ -1124,23 +1058,24 @@ async fn serve_fetch(
 		// Block until a route covers the broadcast (within the fetch deadline) so
 		// freshly-connected subscribers don't get a spurious 404 before the announce arrives.
 		let mut following = origin.follow("", None).map_err(|_| StatusCode::NOT_FOUND)?;
-		let broadcast = following.available().await.map_err(|_| StatusCode::NOT_FOUND)?;
+		let broadcast = following
+			.available()
+			.await
+			.ok()
+			.flatten()
+			.ok_or(StatusCode::NOT_FOUND)?;
 		let sequence = match params.group {
 			FetchGroup::Num(sequence) => Some(sequence),
 			FetchGroup::Latest => None,
 		};
 		let group = match async { crate::fetch_group(&broadcast.track(&track)?, sequence).await }.await {
 			Ok(group) => group,
-			// A miss upstream arrives as the stream reset that refused the FETCH. A datagram
-			// group is never cached, and a group past the track's max age is gone, so both
-			// are misses too.
+			// A miss upstream arrives as the stream reset that refused the FETCH. A group past
+			// the track's max age is gone, so it is a miss too.
 			Err(
 				moq_net::Error::NotFound
-				| moq_net::Error::NotFetchable
 				| moq_net::Error::Old
-				| moq_net::Error::Stream(
-					moq_net::StreamError::NotFound | moq_net::StreamError::NotFetchable | moq_net::StreamError::Old,
-				),
+				| moq_net::Error::Stream(moq_net::StreamError::NotFound | moq_net::StreamError::Old),
 			) => {
 				return Err(StatusCode::NOT_FOUND);
 			}
@@ -1238,8 +1173,15 @@ mod tests {
 	/// The state an acceptor built outside [`Web::serve`] hands a `tls://` session.
 	#[cfg(all(feature = "websocket", any(unix, windows)))]
 	fn acceptor_state() -> Arc<WebState> {
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
-		let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
+		let cert = (|| -> std::result::Result<_, rcgen::Error> {
+			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+			params.serial_number = Some(1u64.into());
+			let cert = params.self_signed(&signing_key)?;
+			Ok(rcgen::CertifiedKey { cert, signing_key })
+		})()
+		.unwrap();
 		let certificates = moq_tokio::tls::Certificates::from_pem(cert.cert.pem().as_bytes()).unwrap();
 		Web::new(
 			crate::auth::Auth::refuse("test"),
@@ -1249,7 +1191,8 @@ mod tests {
 		)
 		.state
 	}
-	use rcgen::{CertificateParams, KeyPair};
+	use rcgen::CertificateParams;
+	use rind_rcgen::KeyPair;
 	use std::io::Write;
 	use tempfile::TempDir;
 	use tokio::io::{AsyncRead, AsyncWrite};
@@ -1265,10 +1208,13 @@ mod tests {
 		}
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.unwrap();
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
-		let broadcast = cluster.origin.create_broadcast("room").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
+		let broadcast = cluster
+			.origin
+			.route("room", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				"video",
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
@@ -1358,7 +1304,7 @@ mod tests {
 				} else {
 					auth::Auth::refuse("test")
 				};
-				let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+				let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 				let web = Web::new(auth, cluster, certificates.clone(), Config::default());
 				let state = web.state;
 				let remote = ConnectInfo("127.0.0.1:1234".parse().unwrap());
@@ -1426,7 +1372,7 @@ mod tests {
 			}
 		});
 		let registry = Registry::new(Default::default());
-		let mut cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let mut cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		cluster.refusals = crate::refusals::Refusals::new(&registry);
 		let state = Web::new(auth, cluster, certificates, Config::default()).state;
 		let fetched = serve_fetch(
@@ -1495,11 +1441,14 @@ mod tests {
 			}
 			leases
 		});
-		let mut cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let mut cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		cluster.stats = Registry::new(Default::default());
-		let broadcast = cluster.origin.create_broadcast("room").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = cluster
+			.origin
+			.route("room", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				"video",
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
@@ -1598,10 +1547,13 @@ mod tests {
 		}
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.unwrap();
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
-		let broadcast = cluster.origin.create_broadcast("room").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
+		let broadcast = cluster
+			.origin
+			.route("room", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				"video",
 				moq_net::track::Info::default()
@@ -1656,7 +1608,7 @@ mod tests {
 			}
 			leases
 		});
-		let mut cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let mut cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		cluster.stats = moq_net::stats::Registry::new(Default::default());
 		let state = Web::new(auth, cluster, certificates, Config::default()).state;
 		let peer = || ConnectInfo("127.0.0.1:1234".parse().unwrap());
@@ -1704,17 +1656,27 @@ mod tests {
 	/// Generate a CA + server cert/key on disk and return the temp paths.
 	/// Modeled after `auth.rs::mtls_fixture`.
 	fn make_named_certs(dir: &TempDir, name: &str, hostname: &str) -> (PathBuf, PathBuf, PathBuf) {
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 
-		let ca_kp = KeyPair::generate().unwrap();
-		let mut ca_params = CertificateParams::new(vec![]).unwrap();
+		let ca_kp = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let mut ca_params = CertificateParams::new(vec![])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
+			.unwrap();
 		ca_params.distinguished_name.push(rcgen::DnType::CommonName, "Test CA");
 		ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
 		let ca_cert = ca_params.self_signed(&ca_kp).unwrap();
 		let ca_issuer = rcgen::Issuer::from_params(&ca_params, &ca_kp);
 
-		let server_kp = KeyPair::generate().unwrap();
-		let mut server_params = CertificateParams::new(vec![hostname.to_string()]).unwrap();
+		let server_kp = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let mut server_params = CertificateParams::new(vec![hostname.to_string()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
+			.unwrap();
 		server_params
 			.distinguished_name
 			.push(rcgen::DnType::CommonName, format!("test-{name}"));
@@ -1725,7 +1687,11 @@ mod tests {
 		let key_path = dir.path().join(format!("{name}.key.pem"));
 		std::fs::write(&ca_path, ca_cert.pem()).unwrap();
 		std::fs::write(&cert_path, server_cert.pem()).unwrap();
-		std::fs::write(&key_path, server_kp.serialize_pem()).unwrap();
+		std::fs::write(
+			&key_path,
+			pem::encode(&pem::Pem::new("PRIVATE KEY", server_kp.to_pkcs8().secret_pkcs8_der())),
+		)
+		.unwrap();
 
 		(ca_path, cert_path, key_path)
 	}
@@ -1735,7 +1701,7 @@ mod tests {
 		let dir = TempDir::new().unwrap();
 		let (ca_path, cert_path, key_path) = make_certs(&dir);
 
-		let config =
+		let (_, config) =
 			build_https_config(&[cert_path], &[key_path], &[ca_path]).expect("build_https_config should succeed");
 
 		// ALPN must include h2 + http/1.1; otherwise reqwest's h2 attempt
@@ -1747,21 +1713,6 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn https_watch_paths_include_roots() {
-		let cert = PathBuf::from("cert.pem");
-		let key = PathBuf::from("key.pem");
-		let root = PathBuf::from("root.pem");
-		assert_eq!(
-			https_watch_paths(
-				std::slice::from_ref(&cert),
-				std::slice::from_ref(&key),
-				std::slice::from_ref(&root)
-			),
-			vec![cert, key, root]
-		);
-	}
-
 	#[tokio::test]
 	async fn build_https_config_no_client_auth_when_ca_empty() {
 		let dir = TempDir::new().unwrap();
@@ -1769,7 +1720,7 @@ mod tests {
 
 		// Empty root is the JWT-only path; should still produce a valid
 		// config with ALPN set so axum-server's hyper layer can negotiate h2.
-		let config =
+		let (_, config) =
 			build_https_config(&[cert_path], &[key_path], &[]).expect("no-CA path should still build a usable config");
 
 		assert_eq!(config.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()],);
@@ -1781,7 +1732,7 @@ mod tests {
 		let (_ca_a, cert_a, key_a) = make_named_certs(&dir, "cdn", "cdn.moq.dev");
 		let (_ca_b, cert_b, key_b) = make_named_certs(&dir, "pro", "moq.pro");
 
-		let config = build_https_config(&[cert_a, cert_b], &[key_a, key_b], &[])
+		let (_, config) = build_https_config(&[cert_a, cert_b], &[key_a, key_b], &[])
 			.expect("multiple HTTPS cert/key pairs should build");
 
 		assert_eq!(config.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
@@ -2002,7 +1953,7 @@ mod tests {
 		let auth = auth_config
 			.init("test", &moq_tokio::tls::Connect::default(), false)
 			.unwrap();
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
 
 		let web = Web::new(auth, cluster, certificates, config).bind().unwrap();
@@ -2053,7 +2004,7 @@ mod tests {
 		config.https.key = vec![key];
 		config.ws = true;
 		let (auth, mut admissions) = crate::auth::Auth::embedded("test");
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
 		let web = Web::new(auth, cluster, certificates, config).bind().unwrap();
 		let Addrs {
@@ -2289,7 +2240,7 @@ mod tests {
 			}
 			.init("test", &moq_tokio::tls::Connect::default(), false)
 			.unwrap();
-			let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+			let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 			let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
 			// No idle deadline, so a stalled connection outlives serving below.
 			let mut web = Web::new(auth, cluster, certificates, config)
@@ -2391,7 +2342,7 @@ mod tests {
 		}
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.unwrap();
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
 		let web = Web::new(auth, cluster, certificates, config).bind().unwrap();
 		let http = web.addrs().http.unwrap();
@@ -2430,7 +2381,7 @@ mod tests {
 		for (flag, set) in cases {
 			let mut config = Config::default();
 			set(&mut config.https);
-			let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+			let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 			let web = Web::new(crate::auth::Auth::refuse("test"), cluster, certificates.clone(), config);
 			let err = match web.bind() {
 				Ok(_) => panic!("{flag} was ignored"),
@@ -2451,7 +2402,7 @@ mod tests {
 		let auth = auth_config
 			.init("test", &moq_tokio::tls::Connect::default(), false)
 			.unwrap();
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let dir = TempDir::new().unwrap();
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
@@ -2476,7 +2427,7 @@ mod tests {
 		let auth = auth_config
 			.init("test", &moq_tokio::tls::Connect::default(), false)
 			.unwrap();
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let dir = TempDir::new().unwrap();
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
@@ -2513,7 +2464,7 @@ mod tests {
 		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
 		// Held and never answered: the decider that never decides.
 		let (auth, _admissions) = crate::auth::Auth::embedded("test");
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let dir = TempDir::new().unwrap();
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
@@ -2554,7 +2505,7 @@ mod tests {
 		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
 		let (auth, _admissions) = crate::auth::Auth::embedded("test");
 		let auth = auth.with_verifications(7);
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let dir = TempDir::new().unwrap();
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
@@ -2587,6 +2538,88 @@ mod tests {
 		serving.abort();
 	}
 
+	/// Read the windows advertised by the real relay upgrade, before MoQ admission can
+	/// widen them. Nondefault values distinguish operator configuration from defaults.
+	#[cfg(feature = "websocket")]
+	#[tokio::test]
+	async fn websocket_upgrade_advertises_the_configured_receive_windows() {
+		use bytes::Buf;
+		use futures::StreamExt;
+		use qmux::ws::tungstenite::{Message, client::IntoClientRequest};
+
+		// QMux's frame type, lengths, and QUIC transport parameter values use QUIC varints.
+		fn decode_quic(bytes: &mut bytes::Bytes) -> Result<u64, &'static str> {
+			let first = *bytes.first().ok_or("missing varint")?;
+			let len = 1 << (first >> 6);
+			if bytes.len() < len {
+				return Err("truncated varint");
+			}
+			let mut value = (bytes.get_u8() & 0x3f) as u64;
+			for _ in 1..len {
+				value = (value << 8) | bytes.get_u8() as u64;
+			}
+			Ok(value)
+		}
+
+		let mut config = crate::Config::default();
+		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.web.http.listen = Some("127.0.0.1:0".parse().unwrap());
+		config.web.ws = true;
+		config.auth.public = vec![moq_auth::Pattern::all()];
+		config.quic.receive_window = Some(3 << 20);
+		config.quic.stream_receive_window = Some(384 << 10);
+		config.quic.max_streams = Some(17);
+		let relay = crate::Relay::load(config).await.unwrap().with_signals(false);
+		let http = relay.web_addrs().http.unwrap();
+		let serving = tokio::spawn(relay.run());
+
+		for version in qmux::Version::ALL {
+			let mut request = format!("ws://{http}/").into_client_request().unwrap();
+			request
+				.headers_mut()
+				.insert("sec-websocket-protocol", version.alpn().parse().unwrap());
+			let (mut socket, _) = qmux::ws::tokio_tungstenite::connect_async(request).await.unwrap();
+			let Message::Binary(mut record) = kio::clock::timeout(std::time::Duration::from_secs(5), socket.next())
+				.await
+				.unwrap()
+				.unwrap()
+				.unwrap()
+			else {
+				panic!("expected QMux transport parameters");
+			};
+			assert_eq!(decode_quic(&mut record).unwrap(), 0x3f5153300d0a0d0a);
+			let len = decode_quic(&mut record).unwrap() as usize;
+			let mut params = record.split_to(len);
+			let mut found = std::collections::BTreeMap::new();
+			while params.has_remaining() {
+				let id = decode_quic(&mut params).unwrap();
+				let len = decode_quic(&mut params).unwrap() as usize;
+				let mut value = params.split_to(len);
+				if (0x04..=0x09).contains(&id) {
+					found.insert(id, decode_quic(&mut value).unwrap());
+					assert!(value.is_empty());
+				}
+			}
+			assert_eq!(
+				found,
+				[
+					(4, 3 << 20),
+					(5, 384 << 10),
+					(6, 384 << 10),
+					(7, 384 << 10),
+					(8, 17),
+					(9, 17)
+				]
+				.into_iter()
+				.collect(),
+				"{version:?}"
+			);
+			socket.close(None).await.unwrap();
+		}
+		serving.abort();
+		let _ = serving.await;
+	}
+
 	/// An upgraded WebSocket reads no more than one qmux record at a time: a frame
 	/// declaring more is refused at its header, before SETUP and without buffering it,
 	/// even with no timeout to end the wait. The socket is the listener's own, reclaimed from
@@ -2607,7 +2640,7 @@ mod tests {
 		let auth = auth_config
 			.init("test", &moq_tokio::tls::Connect::default(), false)
 			.unwrap();
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let dir = TempDir::new().unwrap();
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
@@ -2686,7 +2719,11 @@ mod tests {
 		// per-connection service but is independent of it.
 		let mut with_peer = SetConnectionExtensions {
 			inner: EchoExt,
-			peer: Some(MtlsPeer(moq_tokio::tls::PeerIdentity::from_chain(Vec::new()))),
+			peer: Some(MtlsPeer({
+				let mut listen = moq_tokio::tls::Listen::default();
+				listen.generate = vec!["localhost".into()];
+				listen.load().unwrap().peer(Vec::new())
+			})),
 			server_name: None,
 			socket: None,
 			admission: None,
@@ -2919,7 +2956,7 @@ mod tests {
 			use rustls::pki_types::{CertificateDer, pem::PemObject};
 			let dir = TempDir::new().unwrap();
 			let (ca, cert, key) = make_certs(&dir);
-			let tls = build_https_config(&[cert], &[key], &[]).unwrap();
+			let (serve, tls) = build_https_config(&[cert], &[key], &[]).unwrap();
 			let mut roots = rustls::RootCertStore::empty();
 			for cert in CertificateDer::pem_slice_iter(&std::fs::read(ca).unwrap()) {
 				roots.add(cert.unwrap()).unwrap();
@@ -2942,6 +2979,7 @@ mod tests {
 			assert!(activity.close().now_or_never().is_none(), "TLS was not counted");
 			let tls = crate::listener::Tls {
 				http: RustlsConfig::from_config(tls),
+				serve,
 				qmux: None,
 			};
 			let acceptor = WebAcceptor::tls(tls, false, rtmp::Handoff::default(), acceptor_state());

@@ -18,8 +18,9 @@ func ninetyKHz() *moq.TrackInfo {
 	return &moq.TrackInfo{Timescale: &scale}
 }
 
-// Every producer carries an exact timestamp, a present zero, or none at all, and
-// the raw reader gets back exactly what was written.
+// Every producer carries an exact timestamp or a present zero, a raw frame none at
+// all too, and the raw reader gets back exactly what was written. JSON writes
+// always take one, so they have no untimed case.
 func TestDataTimestamps(t *testing.T) {
 	timestamps := []struct {
 		name string
@@ -31,6 +32,9 @@ func TestDataTimestamps(t *testing.T) {
 	}
 	for _, mode := range []string{"frame", "json snapshot", "json stream"} {
 		for _, timestamp := range timestamps {
+			if timestamp.at == nil && mode != "frame" {
+				continue
+			}
 			t.Run(mode+"/"+timestamp.name, func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 				defer cancel()
@@ -93,7 +97,7 @@ func publishData(mode string, broadcast *moq.BroadcastProducer, track *moq.Track
 		if err != nil {
 			return err
 		}
-		if err := producer.Update(map[string]int{"n": 1}, timestamp); err != nil {
+		if err := producer.Update(map[string]int{"n": 1}, *timestamp); err != nil {
 			return err
 		}
 		return producer.Finish()
@@ -102,7 +106,7 @@ func publishData(mode string, broadcast *moq.BroadcastProducer, track *moq.Track
 		if err != nil {
 			return err
 		}
-		if err := producer.Append(map[string]int{"n": 1}, timestamp); err != nil {
+		if err := producer.Append(map[string]int{"n": 1}, *timestamp); err != nil {
 			return err
 		}
 		return producer.Finish()

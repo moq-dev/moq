@@ -87,46 +87,6 @@ fn synth_flv() -> Vec<u8> {
 	out
 }
 
-/// A rendition must never be advertised when its media producer could not be built.
-///
-/// Publishing the media producer is fallible (it mints the track's HLS record track, which can
-/// collide), so publishing the catalog entry first would leave consumers a rendition that is announced but has no producer behind it and is therefore
-/// never served.
-#[tokio::test(start_paused = true)]
-async fn rendition_is_not_published_when_the_media_track_fails() {
-	let data = synth_flv();
-
-	// Control: the same fixture publishes a video rendition when nothing collides, so the
-	// assertion below cannot pass merely because the fixture stopped reaching track import.
-	let name = {
-		let mut producer = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
-		let mut importer = Import::new(producer, catalog.reserve());
-		importer.decode(&bytes::BytesMut::from(data.as_slice())).unwrap();
-		let renditions = catalog.snapshot().video.renditions;
-		assert_eq!(renditions.len(), 1, "fixture must publish a rendition");
-		renditions.into_keys().next().unwrap()
-	};
-
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-
-	// Squat the rendition's HLS record track, so enrolling it (and with it building its media
-	// producer) fails. The handle must stay alive: the broadcast tracks names weakly, so
-	// dropping it frees the name. Unique names are per broadcast, so the track is named as in
-	// the control.
-	let _squat = broadcast.create_track(hang::hls::default_name(&name), None).unwrap();
-
-	let mut importer = Import::new(broadcast, catalog.reserve());
-	// A track it cannot build surfaces in the catalog rather than in this result.
-	let _ = importer.decode(&bytes::BytesMut::from(data.as_slice()));
-
-	assert!(
-		catalog.snapshot().video.renditions.is_empty(),
-		"a rendition whose media producer failed must not be advertised"
-	);
-}
-
 #[tokio::test(start_paused = true)]
 async fn import_populates_catalog() {
 	let mut producer = moq_net::broadcast::Info::new().produce();
@@ -170,7 +130,10 @@ async fn import_emits_frames() {
 	let track = consumer
 		.track(&video_name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+		)
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(
@@ -547,7 +510,10 @@ async fn config_churn_keeps_flat_state() {
 	let replaced = consumer
 		.track(&replaced)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+		)
 		.await
 		.unwrap();
 
@@ -557,16 +523,17 @@ async fn config_churn_keeps_flat_state() {
 	let snap = catalog.snapshot();
 	assert_eq!(snap.video.renditions.len(), 1);
 	assert_eq!(snap.audio.renditions.len(), 1);
-	assert_eq!(catalog.hls_tracks(), 2, "only the live renditions keep records");
 
 	let live = consumer
 		.track(snap.video.renditions.keys().next().unwrap())
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+		)
 		.await
 		.unwrap();
 	drop(importer);
-	assert_eq!(catalog.hls_tracks(), 0, "a dropped importer retires its records");
 
 	for (track, label) in [(replaced, "replaced"), (live, "dropped")] {
 		let mut track = crate::container::Consumer::new(
@@ -609,7 +576,10 @@ async fn import_enhanced_av1() {
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+		)
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(
@@ -743,7 +713,10 @@ async fn import_reports_negative_pts_and_can_resume() {
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+		)
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(
@@ -783,7 +756,10 @@ async fn import_enhanced_hvc1_applies_composition_time() {
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+		)
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(
@@ -884,7 +860,7 @@ async fn import(chunks: &[Vec<u8>]) -> Imported {
 	Imported {
 		published: crate::container::test_util::published(&consumer, &snapshot).await,
 		video: snapshot.video.renditions.keys().next().unwrap().clone(),
-		clock: snapshot.clock.expect("the catalog advertises a clock"),
+		clock: snapshot.media.clock.expect("the catalog advertises a clock"),
 		arrival: before..=after,
 		refused,
 	}
@@ -938,7 +914,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let provisional = catalog.snapshot().clock.expect("a clock");
+	let provisional = catalog.snapshot().media.clock.expect("a clock");
 	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 	let mut importer = Import::new(broadcast, catalog.reserve());
 
@@ -946,7 +922,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	assert_eq!(clocks.drain(), vec![], "the sequence headers alone publish nothing");
 
 	importer.decode(frames).unwrap();
-	let anchored = catalog.snapshot().clock.expect("a clock");
+	let anchored = catalog.snapshot().media.clock.expect("a clock");
 	assert_ne!(anchored, provisional, "the first frame anchors the clock");
 	let published = clocks.drain();
 	assert!(!published.is_empty(), "the first frame publishes the catalog");

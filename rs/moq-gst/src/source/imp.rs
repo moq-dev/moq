@@ -179,9 +179,8 @@ impl SessionController {
 
 	/// Stop the session, returning once its readers have removed their pads and the connection closed.
 	///
-	/// A dial still running once the element reached NULL can outlive `main` (`gst-launch` exits right
-	/// after), and aws-lc aborts the process when a thread asks it for randomness after its exit
-	/// destructors ran.
+	/// A dial still running once the element reached NULL would outlive the state change an application
+	/// waits on before it exits (`gst-launch` exits right after).
 	fn stop(self, element: &super::MoqSrc) {
 		let _ = self.shutdown.send(true);
 
@@ -414,13 +413,27 @@ impl MoqSrc {
 /// The identity a rendition plays under: a change to any field restarts its stream on the same
 /// pad. Caps cover codec/resolution; the container descriptor covers the wire framing (e.g. legacy
 /// -> cmaf); the broadcast and track identify the media, apart from its catalog ID.
-#[derive(Clone, PartialEq)]
+///
+/// The catalog `warmup` rides along without being part of the shape: it matters only to a join,
+/// so a changed one reaches the next reader without restarting the current one.
+#[derive(Clone)]
 struct Shape {
 	caps: gst::Caps,
 	container: hang::catalog::Container,
 	track: String,
 	broadcast: Option<moq_net::path::Relative>,
-	epoch: Option<moq_net::Epoch>,
+	instance: Option<moq_net::Instance>,
+	warmup: Duration,
+}
+
+impl PartialEq for Shape {
+	fn eq(&self, other: &Self) -> bool {
+		self.caps == other.caps
+			&& self.container == other.container
+			&& self.track == other.track
+			&& self.broadcast == other.broadcast
+			&& self.instance == other.instance
+	}
 }
 
 /// A rendition by kind and moq track name: what a pad is kept by.
@@ -456,6 +469,8 @@ struct PadHandle {
 	task: tokio::task::JoinHandle<()>,
 	/// A [`Command::Retire`] is queued, so a further delisting needs none.
 	retiring: bool,
+	/// Ends the pad at once, cutting short the play on it: the rendition was disabled.
+	disable: watch::Sender<bool>,
 }
 
 /// A [`PadActor`]'s queue of commands. Unlike a channel, a reader's cancelled turn leaves it as
@@ -522,7 +537,8 @@ enum Command {
 
 impl Pads {
 	/// Play `play` on the rendition's pad, created if the session has none, once the plays sent
-	/// before it are done. [`Exit::Unlisted`] if the latest catalog does not list the rendition.
+	/// before it are done. [`Exit::Unlisted`] if the latest catalog does not list the rendition, or
+	/// the pad ends before or while it plays.
 	async fn play(&self, element: &glib::WeakRef<super::MoqSrc>, rendition: &Rendition, play: Play) -> Exit {
 		let turn = match self.queue(element, rendition, &play.cancel) {
 			Ok(turn) => turn,
@@ -535,7 +551,7 @@ impl Pads {
 			handoff = turn => match handoff {
 				Ok(handoff) => handoff,
 				// The actor ended the pad first.
-				Err(_) => return Exit::Done,
+				Err(_) => return Exit::Unlisted,
 			},
 		};
 		let (done, exit) = oneshot::channel();
@@ -585,13 +601,15 @@ impl Pads {
 			pad,
 			added: false,
 		};
-		let task = RUNTIME.spawn(STREAMING.scope(element.clone(), actor.run(commands.clone())));
+		let (disable, disabled) = watch::channel(false);
+		let task = RUNTIME.spawn(STREAMING.scope(element.clone(), actor.run(commands.clone(), disabled)));
 		table.pads.insert(
 			rendition.clone(),
 			PadHandle {
 				commands,
 				task,
 				retiring: false,
+				disable,
 			},
 		);
 		Ok(called)
@@ -604,12 +622,20 @@ impl Pads {
 
 	/// List what the latest catalog names, retiring each pad it no longer lists. Its actor ends it
 	/// with EOS once the plays before are done, unless the rendition is listed again by then, so a
-	/// delisted rendition still playing out its track keeps its tail.
+	/// delisted rendition still playing out its track keeps its tail. A `disabled` rendition's pad
+	/// leaves the session now and its actor ends it as soon as a push on it returns, even when its
+	/// reader missed the disable or a re-enable follows, so a re-enable always takes a new pad.
 	/// Nothing once `cancel` fired, since a later run lists the pads then.
-	fn list(&self, listed: HashSet<Rendition>, cancel: &watch::Receiver<bool>) {
+	fn list(&self, listed: HashSet<Rendition>, disabled: &HashSet<Rendition>, cancel: &watch::Receiver<bool>) {
 		let mut table = self.0.lock().unwrap();
 		if *cancel.borrow() {
 			return;
+		}
+		for rendition in disabled {
+			if let Some(handle) = table.pads.remove(rendition) {
+				handle.disable.send_replace(true);
+				table.ending.push(handle.task);
+			}
 		}
 		// A pad is made listed, and an actor finding it listed again keeps it, so only a delisting
 		// retires one. A retirement already queued judges the listing when its turn comes.
@@ -661,8 +687,20 @@ struct PadActor {
 }
 
 impl PadActor {
-	async fn run(mut self, commands: Arc<Inbox>) {
-		while let Some(command) = commands.recv().await {
+	/// Take `commands` until the pad ends, or at once once `disabled`. A disable cuts short the
+	/// play on the pad, which reports [`Exit::Unlisted`] so its follower starts it again on a new
+	/// pad if the rendition is enabled again, and drops the turns queued behind it.
+	async fn run(mut self, commands: Arc<Inbox>, mut disabled: watch::Receiver<bool>) {
+		loop {
+			// A closed sender is a released or dropped pad, which the commands end.
+			let command = tokio::select! {
+				biased;
+				Ok(_) = disabled.wait_for(|disabled| *disabled) => return self.ended(),
+				command = commands.recv() => command,
+			};
+			let Some(command) = command else {
+				return;
+			};
 			match command {
 				Command::Play(turn) => {
 					let (handoff, handed) = oneshot::channel();
@@ -673,21 +711,16 @@ impl PadActor {
 					let Ok((play, done)) = handed.await else {
 						continue;
 					};
-					let exit = self.play(*play).await;
+					let exit = tokio::select! {
+						biased;
+						Ok(_) = disabled.wait_for(|disabled| *disabled) => Exit::Unlisted,
+						exit = self.play(*play) => exit,
+					};
 					let _ = done.send(exit);
 				}
-				Command::Retire => {
-					if self.retired() {
-						// A turn queued behind the retirement drops here, which its reader takes as
-						// done.
-						self.end(true);
-						if let Some(pads) = self.pads.upgrade() {
-							let id = tokio::task::id();
-							pads.lock().unwrap().ending.retain(|task| task.id() != id);
-						}
-						return;
-					}
-				}
+				// A turn queued behind the retirement drops here, which its reader takes as unlisted.
+				Command::Retire if self.retired() => return self.ended(),
+				Command::Retire => {}
 				Command::Release { eos } => return self.end(eos),
 				#[cfg(test)]
 				Command::Settled(settled) => {
@@ -756,6 +789,15 @@ impl PadActor {
 		let handle = pads.remove(&self.rendition).expect("checked above");
 		ending.push(handle.task);
 		true
+	}
+
+	/// End a pad the session already let go, and leave [`PadTable::ending`].
+	fn ended(&self) {
+		self.end(true);
+		if let Some(pads) = self.pads.upgrade() {
+			let id = tokio::task::id();
+			pads.lock().unwrap().ending.retain(|task| task.id() != id);
+		}
 	}
 
 	fn end(&self, eos: bool) {
@@ -828,9 +870,7 @@ impl Session {
 		path: &str,
 		lost: impl Future<Output = anyhow::Error>,
 	) -> Result<()> {
-		use moq_mux::follow::{Event, Instances};
-
-		let mut follow = Instances::new(origin, path, None)?;
+		let mut follow = origin.follow(path, None)?;
 		let mut shutdown = self.shutdown.clone();
 		let mut runs = tokio::task::JoinSet::new();
 		// Cancels the latest run.
@@ -842,16 +882,16 @@ impl Session {
 			let broadcast = tokio::select! {
 				_ = shutdown.changed() => break Ok(()),
 				err = &mut lost => break Err(err),
-				event = follow.next() => match event {
-					Ok(Event::Start(broadcast)) => {
-						tracing::info!(%path, epoch = broadcast.info().epoch.as_ref().map(tracing::field::display), "online");
+				event = follow.available() => match event {
+					Ok(Some(broadcast)) => {
+						tracing::info!(%path, instance = ?broadcast.info().instance, "online");
 						Some(broadcast)
 					}
-					Ok(Event::End) => {
+					Ok(None) => {
 						tracing::info!(%path, "offline, holding pads until it returns");
 						None
 					}
-					Err(moq_mux::Error::Moq(moq_net::Error::Closed)) => break Ok(()),
+					Err(moq_net::Error::Closed) => break Ok(()),
 					Err(err) => break Err(anyhow::Error::from(err).context("broadcast refused")),
 				},
 				joined = runs.join_next(), if !runs.is_empty() => match joined.expect("guarded by is_empty") {
@@ -900,20 +940,10 @@ impl Session {
 	/// with the session, except those of renditions the catalog retired.
 	async fn follow_catalog(&self, source: moq_mux::Source, cancel: &mut watch::Receiver<bool>) -> Result<()> {
 		let broadcast = source.broadcast();
-		let catalog_track = broadcast.track(hang::catalog::Catalog::DEFAULT_NAME)?;
-		// A publisher that never answers would otherwise hold the run until it is cancelled.
-		let catalog_track = tokio::select! {
-			track = catalog_track.subscribe(hang::catalog::Catalog::default_subscription()) => match track {
-				Ok(track) => track,
-				Err(err) if source_lost(&err) => {
-					tracing::warn!(%err, "catalog unavailable, holding pads");
-					return Ok(());
-				}
-				Err(err) => return Err(anyhow::Error::from(err).context("catalog refused")),
-			},
-			_ = cancel.changed() => return Ok(()),
-		};
-		let mut catalog_consumer = moq_mux::catalog::hang::Consumer::new(catalog_track);
+		// The consumer subscribes itself: a refused or lost subscription surfaces from its first read
+		// below, and a publisher that never answers holds the run only until it is cancelled.
+		let mut catalog_consumer =
+			moq_mux::catalog::hang::Consumer::new(broadcast.track(hang::catalog::Catalog::DEFAULT_NAME)?);
 
 		// Follow the catalog for the whole run and reconcile against every update, rather than
 		// building the renditions once from the first frame. This covers reactive publishers (the
@@ -1032,23 +1062,12 @@ fn reconcile(
 	emptied: &Arc<tokio::sync::Notify>,
 	cancel: &watch::Receiver<bool>,
 ) {
-	// Share the players' selection rule: keep an already selected disabled rendition only
-	// while no enabled alternative of its kind exists. Pads alone also include idle renditions
-	// displaced by an alternative, so derive selection from the plans the readers follow.
-	let mut selected = moq_mux::select::Selected::default();
-	for follower in followers.values() {
-		for (kind, name) in follower.plan.borrow().renditions.keys() {
-			match kind {
-				TrackKind::Video => selected.video.insert(name.clone()),
-				TrackKind::Audio => selected.audio.insert(name.clone()),
-			};
-		}
-	}
+	// Read what the players select: every enabled rendition in a container this build knows.
 	let mut playable = catalog.clone();
 	moq_mux::select::Broadcast::default()
 		.video(Default::default())
 		.audio(Default::default())
-		.retain(&mut playable, &selected);
+		.retain(&mut playable);
 
 	// Build the desired shape for each rendition. This is deliberately cheap: caps come from the
 	// catalog config and the container is just the hang descriptor. The reader parses the wire
@@ -1060,6 +1079,7 @@ fn reconcile(
 	                  kind,
 	                  caps: Result<gst::Caps>,
 	                  container: &hang::catalog::Container,
+	                  warmup: Option<Duration>,
 	                  reference: &dyn hang::catalog::Reference| match caps {
 		Ok(caps) => {
 			let shape = Shape {
@@ -1067,53 +1087,57 @@ fn reconcile(
 				container: container.clone(),
 				track: reference.track(name).to_string(),
 				broadcast: reference.broadcast().cloned(),
-				epoch: reference.epoch().cloned(),
+				instance: reference.instance().cloned(),
+				warmup: warmup.unwrap_or_default(),
 			};
 			desired.insert((kind, name.clone()), shape);
 		}
 		Err(err) => gst::warning!(CAT, "ignoring {kind:?} rendition {name}: {err:?}"),
 	};
 	for (name, config) in &playable.video.renditions {
-		insert(name, TrackKind::Video, video_caps(config), &config.container, config);
+		insert(
+			name,
+			TrackKind::Video,
+			video_caps(config),
+			&config.container,
+			config.warmup,
+			config,
+		);
 	}
 	for (name, config) in &playable.audio.renditions {
-		insert(name, TrackKind::Audio, audio_caps(config), &config.container, config);
+		insert(
+			name,
+			TrackKind::Audio,
+			audio_caps(config),
+			&config.container,
+			config.warmup,
+			config,
+		);
 	}
 
-	// A disabled rendition keeps its pad even when an enabled alternative displaced its reader,
-	// since a pipeline links pads by name (`s.video_0 ! ...`).
-	let disabled: Vec<(Rendition, &dyn hang::catalog::Reference)> = catalog
-		.video
-		.renditions
-		.iter()
-		.filter(|(_, config)| !config.enabled)
-		.map(|(name, config)| {
-			(
-				(TrackKind::Video, name.clone()),
-				config as &dyn hang::catalog::Reference,
+	// Only an enabled rendition keeps a pad: a disabled one's pad ends, and a re-enable takes a new
+	// one like any rendition the catalog adds. Listed before any follower hears of the update, so a
+	// reader it stops can't claim a pad.
+	let listed = desired.keys().cloned().collect();
+	// A disabled reader stops now, where one the catalog dropped plays out its tail.
+	let disabled: Arc<HashSet<Rendition>> = Arc::new(
+		catalog
+			.video
+			.renditions
+			.iter()
+			.filter(|(_, config)| !config.enabled)
+			.map(|(name, _)| (TrackKind::Video, name.clone()))
+			.chain(
+				catalog
+					.audio
+					.renditions
+					.iter()
+					.filter(|(_, config)| !config.enabled)
+					.map(|(name, _)| (TrackKind::Audio, name.clone())),
 			)
-		})
-		.chain(
-			catalog
-				.audio
-				.renditions
-				.iter()
-				.filter(|(_, config)| !config.enabled)
-				.map(|(name, config)| {
-					(
-						(TrackKind::Audio, name.clone()),
-						config as &dyn hang::catalog::Reference,
-					)
-				}),
-		)
-		.collect();
-	// Listed before any follower hears of the update, so a reader it stops can't claim a pad.
-	let listed = desired
-		.keys()
-		.cloned()
-		.chain(disabled.iter().map(|(rendition, _)| rendition.clone()))
-		.collect();
-	playback.session.pads.list(listed, cancel);
+			.collect(),
+	);
+	playback.session.pads.list(listed, &disabled, cancel);
 
 	let mut plans: HashMap<moq_net::Path, Plan> = HashMap::new();
 	for (rendition, shape) in desired {
@@ -1127,28 +1151,30 @@ fn reconcile(
 		};
 		plans.entry(path).or_default().renditions.insert(rendition, shape);
 	}
+	for plan in plans.values_mut() {
+		plan.disabled = disabled.clone();
+	}
 
-	// A broadcast no selected rendition reads any more stops its readers, apart from a delisted
+	// A broadcast no enabled rendition reads any more stops its readers, apart from a delisted
 	// one playing out its tail. Its follower stays reachable, with its finished records, while a
-	// disabled rendition still names it or a delisted one drains, so a re-enable or relist reaches
-	// it rather than a new follower. Once it plays nothing, the run lets it go.
-	let held: HashSet<moq_net::Path> = disabled
-		.iter()
-		.filter_map(|(_, reference)| source.resolve_reference(reference.broadcast()))
-		.collect();
+	// delisted one drains, so a relist reaches it rather than a new follower. Once it plays nothing,
+	// the run lets it go.
 	followers.retain(|path, follower| {
 		// A follower whose broadcast failed exited, and this update follows it again.
 		if follower.plan.is_closed() {
 			return false;
 		}
-		follower.held = held.contains(path);
-		follower.plan.send_replace(plans.remove(path).unwrap_or_default());
+		let plan = plans.remove(path).unwrap_or_else(|| Plan {
+			disabled: disabled.clone(),
+			..Default::default()
+		});
+		follower.plan.send_replace(plan);
 		!follower.idle()
 	});
 	for (path, plan) in plans {
 		// Follow without waiting: an unavailable sibling must not park the catalog loop and hold
 		// up every other rendition. The follower resolves its instances under the run. Every
-		// instance is followed, and each rendition checks the epoch it names.
+		// instance is followed, and each rendition checks the instance it names.
 		let shape = plan.renditions.values().next().expect("a plan names a rendition");
 		let instances = match source.follow(shape.broadcast.as_ref(), None) {
 			Ok(instances) => instances,
@@ -1159,7 +1185,6 @@ fn reconcile(
 		};
 		let (plan_tx, plan) = watch::channel(plan);
 		let (empty_tx, empty) = watch::channel(false);
-		let held = held.contains(&path);
 		let follower_task = Follower {
 			playback: playback.clone(),
 			path: path.clone(),
@@ -1178,14 +1203,7 @@ fn reconcile(
 			STREAMING.scope(playback.session.element.clone(), follower_task),
 			RUNTIME.handle(),
 		);
-		followers.insert(
-			path,
-			Followed {
-				plan: plan_tx,
-				empty,
-				held,
-			},
-		);
+		followers.insert(path, Followed { plan: plan_tx, empty });
 	}
 }
 
@@ -1194,16 +1212,13 @@ struct Followed {
 	plan: watch::Sender<Plan>,
 	/// Set while it plays no rendition.
 	empty: watch::Receiver<bool>,
-	/// A disabled rendition names its path, so a re-enable needs its finished records.
-	held: bool,
 }
 
 impl Followed {
-	/// Whether nothing reaches it again: it plays nothing, was asked for nothing, and keeps no
-	/// record a re-enable needs. Judged against the plan sent last, so a plan it has yet to take
-	/// keeps it.
+	/// Whether nothing reaches it again: it plays nothing and was asked for nothing. Judged against
+	/// the plan sent last, so a plan it has yet to take keeps it.
 	fn idle(&self) -> bool {
-		!self.held && *self.empty.borrow() && self.plan.borrow().renditions.is_empty()
+		*self.empty.borrow() && self.plan.borrow().renditions.is_empty()
 	}
 }
 
@@ -1228,6 +1243,9 @@ struct Plan {
 	/// its readers drain, and a sibling's keeps following its instances until the catalog's
 	/// broadcast ends.
 	closed: bool,
+	/// Every rendition the catalog names but disables, whose reader stops at once rather than
+	/// playing out its tail as a removed one does.
+	disabled: Arc<HashSet<Rendition>>,
 }
 
 /// Follows the instances at one path and plays the renditions that read it on each in turn: a
@@ -1245,8 +1263,8 @@ struct Follower {
 	/// The instance last started.
 	current: Option<Current>,
 	/// The number and timeline of each instance a return would resume: the current one and each
-	/// a rendition pins, by epoch. An epochless instance cannot prove it is the one returning.
-	resumable: HashMap<moq_net::Epoch, (u64, Arc<Timeline>)>,
+	/// a rendition pins, by instance.
+	resumable: HashMap<moq_net::Instance, (u64, Arc<Timeline>)>,
 	/// Shared with the readers.
 	finished: Finished,
 	/// How many instances started, numbering each.
@@ -1262,8 +1280,8 @@ struct Follower {
 struct Current {
 	/// Released at its end, so an offline sibling holds none of its state.
 	instance: Option<moq_net::broadcast::Consumer>,
-	/// Its route's, which [`Follower::resumable`] keeps it by.
-	epoch: Option<moq_net::Epoch>,
+	/// Its route's instance, which [`Follower::resumable`] keeps it by.
+	id: Option<moq_net::Instance>,
 	/// Shared by every rendition reading the instance, so their first frames fix one mapping for
 	/// all of them.
 	timeline: Arc<Timeline>,
@@ -1302,7 +1320,7 @@ impl Follower {
 		// The catalog's own broadcast is ready at once, so its renditions play even when the
 		// catalog closed before this follower ran.
 		match instances.poll_next(&moq_net::kio::Waiter::noop()) {
-			std::task::Poll::Ready(Ok(moq_mux::follow::Event::Start(instance))) => self.start(instance),
+			std::task::Poll::Ready(Ok(Some(instance))) => self.start(instance),
 			std::task::Poll::Ready(Err(err)) => {
 				gst::warning!(CAT, "lost {}: {err:?}", self.path);
 				return;
@@ -1316,7 +1334,7 @@ impl Follower {
 		let mut listening = !first.closed;
 		// Following instances, which a sibling does past its catalog's close.
 		let mut following = listening || sibling;
-		self.apply(first.renditions);
+		self.apply(first);
 		self.play();
 
 		loop {
@@ -1342,7 +1360,7 @@ impl Follower {
 						let next = plan.borrow_and_update().clone();
 						listening = !next.closed;
 						following = listening || sibling;
-						let fresh = self.apply(next.renditions);
+						let fresh = self.apply(next);
 						// The final plan starts what it adds or reshapes, but restarts no reader
 						// that already ended.
 						match listening {
@@ -1353,7 +1371,7 @@ impl Follower {
 					// No rendition reads this path any more.
 					Err(_) => {
 						(listening, following) = (false, false);
-						self.apply(HashMap::new());
+						self.apply(Plan::default());
 					}
 				},
 				Some(joined) = self.readers.join_next() => {
@@ -1362,11 +1380,11 @@ impl Follower {
 					}
 				}
 				event = instances.next(), if following => match event {
-					Ok(moq_mux::follow::Event::Start(instance)) => {
+					Ok(Some(instance)) => {
 						gst::info!(CAT, "{} is online, starting its renditions", self.path);
 						self.start(instance);
 					}
-					Ok(moq_mux::follow::Event::End) => {
+					Ok(None) => {
 						gst::info!(CAT, "{} is offline, holding its pads", self.path);
 						self.offline();
 					}
@@ -1388,17 +1406,24 @@ impl Follower {
 		while self.readers.join_next().await.is_some() {}
 	}
 
-	/// Bring the renditions in line with `wanted`, stopping each one reshaped or gone, and return
+	/// Bring the renditions in line with `plan`, stopping each one reshaped or gone, and return
 	/// those added or reshaped. [`Self::play`] starts the rest.
-	fn apply(&mut self, mut wanted: HashMap<Rendition, Shape>) -> HashSet<Rendition> {
+	fn apply(&mut self, plan: Plan) -> HashSet<Rendition> {
+		let Plan {
+			renditions: mut wanted,
+			disabled,
+			..
+		} = plan;
 		let pads = &self.playback.session.pads;
 		let mut fresh = HashSet::new();
 		self.renditions
 			.retain(|rendition, entry| match wanted.remove(rendition) {
 				Some(shape) => {
-					// A new shape hands the pad to a new reader.
-					if shape != entry.shape {
-						entry.shape = shape;
+					// A new shape hands the pad to a new reader, and any shape keeps the latest
+					// warmup for the next one.
+					let reshaped = shape != entry.shape;
+					entry.shape = shape;
+					if reshaped {
 						entry.reader = None;
 						fresh.insert(rendition.clone());
 					}
@@ -1406,10 +1431,10 @@ impl Follower {
 					true
 				}
 				// A delisted rendition plays out the instance it reads, then leaves. One that never
-				// took its pad, was displaced by an enabled alternative, or now reads another
-				// broadcast stops now.
+				// took its pad, or that is disabled or now reads another broadcast, stops now.
 				None => {
 					entry.draining = !pads.is_listed(rendition)
+						&& !disabled.contains(rendition)
 						&& entry
 							.reader
 							.as_ref()
@@ -1446,8 +1471,8 @@ impl Follower {
 		}
 
 		// An instance served again keeps its timeline and the tracks it finished.
-		let epoch = instance.info().epoch.clone();
-		let (serial, timeline) = match epoch.as_ref().and_then(|epoch| self.resumable.get(epoch)) {
+		let id = instance.info().instance.clone();
+		let (serial, timeline) = match id.as_ref().and_then(|id| self.resumable.get(id)) {
 			Some((serial, timeline)) => (*serial, timeline.clone()),
 			None => {
 				self.started += 1;
@@ -1460,12 +1485,12 @@ impl Follower {
 				(self.started, timeline)
 			}
 		};
-		if let Some(epoch) = &epoch {
-			self.resumable.insert(epoch.clone(), (serial, timeline.clone()));
+		if let Some(id) = &id {
+			self.resumable.insert(id.clone(), (serial, timeline.clone()));
 		}
 		self.current = Some(Current {
 			instance: Some(instance),
-			epoch,
+			id,
 			timeline,
 			serial,
 		});
@@ -1475,15 +1500,15 @@ impl Follower {
 	}
 
 	/// Drop the state no return can resume: an instance neither current nor pinned by a rendition,
-	/// and the records of a retired pad. A disabled rendition keeps its pad, and its records.
+	/// and the records of a retired pad.
 	fn forget(&mut self) {
-		let pinned: HashSet<&moq_net::Epoch> = self
+		let pinned: HashSet<&moq_net::Instance> = self
 			.renditions
 			.values()
-			.filter_map(|entry| entry.shape.epoch.as_ref())
-			.chain(self.current.as_ref().and_then(|current| current.epoch.as_ref()))
+			.filter_map(|entry| entry.shape.instance.as_ref())
+			.chain(self.current.as_ref().and_then(|current| current.id.as_ref()))
 			.collect();
-		self.resumable.retain(|epoch, _| pinned.contains(epoch));
+		self.resumable.retain(|instance, _| pinned.contains(instance));
 		let serials: HashSet<u64> = self
 			.resumable
 			.values()
@@ -1525,7 +1550,7 @@ impl Follower {
 			return;
 		};
 		for (rendition, entry) in &mut self.renditions {
-			if entry.reader.is_none() && only(rendition) && serves(instance, entry.shape.epoch.as_ref()) {
+			if entry.reader.is_none() && only(rendition) && serves(instance, entry.shape.instance.as_ref()) {
 				self.next_id += 1;
 				let (cancel, cancelled) = watch::channel(false);
 				let live = Arc::new(AtomicBool::new(false));
@@ -1567,17 +1592,19 @@ impl Follower {
 		} else if let Exit::Unlisted = exit
 			&& self.playback.session.pads.is_listed(&rendition)
 		{
-			// Delisted and listed again while it went to claim its pad, which the plan coalesced.
+			// Its pad went while the rendition was delisted or disabled and listed again, which the
+			// plan coalesced.
 			self.play();
 		}
 	}
 }
 
-/// Whether `instance` may serve a rendition naming `epoch`. An epochless route cannot prove its
-/// instance, so only a known mismatch refuses it.
-fn serves(instance: &moq_net::broadcast::Consumer, epoch: Option<&moq_net::Epoch>) -> bool {
-	match (epoch, &instance.info().epoch) {
-		(Some(expected), Some(actual)) => expected == actual,
+/// Whether `instance` may serve a rendition naming `id`. A broadcast not
+/// resolved through an origin has none to compare, and a minted one proves nothing, so only a
+/// known mismatch refuses it.
+fn serves(instance: &moq_net::broadcast::Consumer, id: Option<&moq_net::Instance>) -> bool {
+	match (id, &instance.info().instance) {
+		(Some(expected), Some(actual)) if !actual.is_minted() => expected == actual,
 		_ => true,
 	}
 }
@@ -1586,7 +1613,8 @@ fn serves(instance: &moq_net::broadcast::Consumer, epoch: Option<&moq_net::Epoch
 enum Exit {
 	/// It is done with the instance.
 	Done,
-	/// The catalog did not list the rendition when it went to claim its pad.
+	/// It lost its pad: the catalog did not list the rendition when it went to claim one, or the
+	/// pad ended first or under it. Its follower starts it again if the rendition is listed.
 	Unlisted,
 }
 
@@ -1640,12 +1668,15 @@ impl Reader {
 		// ending a broadcast produces for a name nobody served). A publisher that answers neither
 		// leaves this waiting, so racing `cancel` keeps such a reader reapable, and holding the
 		// wait here keeps it off every other rendition.
+		// The catalog warmup reaches that much further back for a decoder to start clean.
+		let playout =
+			moq_mux::container::Playout::new(moq_net::track::Delay::default().with_max(max_delay), shape.warmup);
 		let subscriber = tokio::select! {
 			_ = cancel.changed() => return Exit::Done,
 			subscriber = async {
 				instance
 					.track(&shape.track)?
-					.subscribe(moq_net::track::Subscription::default().with_max_delay(max_delay))
+					.subscribe(playout.subscription(moq_net::track::Subscription::default()))
 					.await
 			} => match subscriber {
 				Ok(subscriber) => subscriber,
@@ -1670,7 +1701,7 @@ impl Reader {
 				return Exit::Done;
 			}
 		};
-		let track = moq_mux::container::Consumer::new(subscriber, container);
+		let track = playout.consumer(subscriber, container);
 
 		// Only a rendition that gets this far claims a pad id.
 		let play = Play {
@@ -1723,7 +1754,8 @@ impl Play {
 		let (kind, name) = (rendition.0, &rendition.1);
 		let mut sent_segment = false;
 		// Each play starts a new stream on the pad, which opusdec decodes from a fresh state.
-		let mut pre_skip = PreSkip::new(&shape.caps);
+		let mut clip = OpusClip::new(&shape.caps, shape.warmup);
+		let mut first = true;
 		loop {
 			tokio::select! {
 				// The follower stopped this reader (the instance changed, the rendition was
@@ -1737,7 +1769,16 @@ impl Play {
 				}
 				frame = track.read() => match frame {
 					Ok(Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. })) => {}
-					Ok(Some(moq_mux::container::Read::Frame { frame, .. })) => {
+					Ok(Some(moq_mux::container::Read::Frame { frame, group })) => {
+						// Nothing precedes group 0, and a group delivers from its frame 0 or not at
+						// all, so a play that reads it first decodes from the encoder's first packet,
+						// which has no history to warm up from.
+						if std::mem::take(&mut first)
+							&& group == 0
+							&& let Some(clip) = &mut clip
+						{
+							clip.track_start();
+						}
 						let mut buffer = match build_buffer(frame, kind) {
 							Ok(buffer) => buffer,
 							Err(err) => {
@@ -1747,8 +1788,8 @@ impl Play {
 								return;
 							}
 						};
-						if let Some(pre_skip) = &mut pre_skip
-							&& let Err(err) = pre_skip.apply(buffer.get_mut().unwrap())
+						if let Some(clip) = &mut clip
+							&& let Err(err) = clip.apply(buffer.get_mut().unwrap())
 						{
 							if let Some(obj) = element.upgrade() {
 								gst::element_error!(obj, gst::StreamError::Format, ("track {name} has an invalid Opus packet"), ["{err:#}"]);
@@ -1902,51 +1943,83 @@ fn build_buffer(frame: moq_mux::container::Frame, kind: TrackKind) -> Result<gst
 	Ok(buffer)
 }
 
-/// The Opus pre-skip moqsrc clips: opusdec trims only what a buffer's `GstAudioClippingMeta`
-/// asks for, never the OpusHead's pre-skip, and stamps each output at its input's pts.
-struct PreSkip {
+/// What moqsrc clips from the start of an Opus play: opusdec trims only what a buffer's
+/// `GstAudioClippingMeta` asks for, never the OpusHead's pre-skip, and stamps each output at its
+/// input's pts.
+///
+/// After the pre-skip it clips the catalog `warmup` too, the media the decoder needs before its
+/// output is clean: every packet still reaches the decoder, but nothing decoded before the first
+/// frame plus the warmup plays, as `moq-audio` presents a join. The clipped packets keep their
+/// place on the shared timeline. A play from the track's first packet clips the pre-skip alone.
+struct OpusClip {
 	/// The OpusHead's pre-skip, in 48 kHz samples.
 	total: u64,
-	/// What the next packets still have to clip.
+	/// What the next packets still have to clip of the pre-skip.
 	remaining: u64,
+	/// What the next packets still have to clip of the warmup, in 48 kHz samples.
+	warmup: u64,
 }
 
-impl PreSkip {
-	/// The pre-skip of an `audio/x-opus` caps' OpusHead, or `None` for other caps or none to skip.
-	fn new(caps: &gst::CapsRef) -> Option<Self> {
+impl OpusClip {
+	/// The clip of an `audio/x-opus` caps' OpusHead pre-skip and the rendition's `warmup`, or `None`
+	/// for other caps or nothing to clip.
+	fn new(caps: &gst::CapsRef, warmup: Duration) -> Option<Self> {
 		let structure = caps.structure(0).filter(|s| s.name() == "audio/x-opus")?;
-		let headers = structure.get_optional::<gst::Array>("streamheader").ok()??;
-		let head = headers.first()?.get::<gst::Buffer>().ok()?;
-		let head = head.map_readable().ok()?;
-		let total = moq_mux::codec::opus::Config::parse(&mut head.as_slice())
-			.ok()?
-			.pre_skip
-			.into();
-		(total > 0).then_some(Self {
+		let total = structure
+			.get_optional::<gst::Array>("streamheader")
+			.ok()
+			.flatten()
+			.and_then(|headers| {
+				let head = headers.first()?.get::<gst::Buffer>().ok()?;
+				let head = head.map_readable().ok()?;
+				let config = moq_mux::codec::opus::Config::parse(&mut head.as_slice()).ok()?;
+				Some(u64::from(config.pre_skip))
+			})
+			.unwrap_or(0);
+		// Rounded up, so presentation never starts inside the warmup.
+		let warmup = u64::try_from((warmup.as_nanos() * 48_000).div_ceil(1_000_000_000)).unwrap_or(u64::MAX);
+		(total > 0 || warmup > 0).then_some(Self {
 			total,
 			remaining: total,
+			warmup,
 		})
 	}
 
-	/// Clip this packet's share of the pre-skip, and stamp it where its first kept sample plays.
-	/// A packet's timestamp is where its decode would start without the pre-skip, so each one plays
-	/// the pre-skip earlier, less what it clips itself.
+	/// Decode from the track's first packet: the pre-skip is all the priming its encoder declared,
+	/// so no warmup is clipped.
+	fn track_start(&mut self) {
+		self.warmup = 0;
+	}
+
+	/// Clip this packet's share of the pre-skip and then of the warmup, and stamp it where its
+	/// first kept sample plays. A packet's timestamp is where its decode would start without the
+	/// pre-skip, so each one plays the pre-skip earlier, less what it clips of it, and later by
+	/// what it clips of the warmup.
 	fn apply(&mut self, buffer: &mut gst::BufferRef) -> Result<()> {
-		let mut clip = 0;
-		if self.remaining > 0 {
-			let samples =
-				moq_mux::codec::opus::packet_samples(&buffer.map_readable()?).context("malformed Opus packet")?;
-			clip = self.remaining.min(samples.into());
+		let (mut clip, mut warm) = (0, 0);
+		if self.remaining > 0 || self.warmup > 0 {
+			let samples: u64 = moq_mux::codec::opus::packet_samples(&buffer.map_readable()?)
+				.context("malformed Opus packet")?
+				.into();
+			clip = self.remaining.min(samples);
 			self.remaining -= clip;
-			gst_audio::AudioClippingMeta::add(buffer, gst::format::Default::from_u64(clip), gst::format::Default::ZERO);
+			warm = self.warmup.min(samples - clip);
+			self.warmup -= warm;
+			gst_audio::AudioClippingMeta::add(
+				buffer,
+				gst::format::Default::from_u64(clip + warm),
+				gst::format::Default::ZERO,
+			);
 		}
-		let early = gst::ClockTime::from_nseconds(
-			(self.total - clip)
+		let time = |samples: u64| {
+			samples
 				.mul_div_round(gst::ClockTime::SECOND.nseconds(), 48_000)
-				.context("pre-skip overflows the clock")?,
-		);
+				.map(gst::ClockTime::from_nseconds)
+				.context("clip overflows the clock")
+		};
+		let (early, late) = (time(self.total - clip)?, time(warm)?);
 		// Only a packet clipped whole can reach before zero, and it plays nothing.
-		buffer.set_pts(buffer.pts().map(|pts| pts.saturating_sub(early)));
+		buffer.set_pts(buffer.pts().map(|pts| pts.saturating_add(late).saturating_sub(early)));
 		Ok(())
 	}
 }
@@ -2087,6 +2160,7 @@ fn opus_caps(config: &hang::catalog::AudioConfig, rate: i32, channels: i32) -> R
 mod tests {
 	use super::{Timeline, ended};
 	use moq_net::Timestamp;
+	use std::time::Duration;
 
 	/// A reader cancelled as its track ends records the end only when no media is left to read,
 	/// passing over the markers a publisher closes with.
@@ -2187,6 +2261,61 @@ mod tests {
 		}
 	}
 
+	/// Every surround layout reaches opusdec as its family 1 mapping, RFC 7845's Vorbis order.
+	#[test]
+	fn surround_opus_caps_carry_the_family_1_mapping() {
+		gst::init().unwrap();
+		let layouts: [(u8, u8, &[u8]); 6] = [
+			(2, 1, &[0, 2, 1]),
+			(2, 2, &[0, 1, 2, 3]),
+			(3, 2, &[0, 4, 1, 2, 3]),
+			(4, 2, &[0, 4, 1, 2, 3, 5]),
+			(4, 3, &[0, 4, 1, 2, 3, 5, 6]),
+			(5, 3, &[0, 6, 1, 2, 3, 4, 5, 7]),
+		];
+		for (streams, coupled, table) in layouts {
+			let channels = table.len() as u32;
+			let mut head = moq_mux::codec::opus::Config::new(48_000, channels).with_pre_skip(312);
+			head.mapping = Some(
+				moq_mux::codec::opus::Mapping::new(moq_mux::codec::opus::mapping::Config {
+					family: 1,
+					streams,
+					coupled,
+					table,
+				})
+				.unwrap(),
+			);
+			let description = head.encode().unwrap();
+			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, channels);
+			config.description = Some(description.clone());
+			let caps = super::audio_caps(&config).unwrap();
+			let structure = caps.structure(0).unwrap();
+			assert_eq!(structure.get::<i32>("channels").unwrap(), channels as i32);
+			assert_eq!(structure.get::<i32>("channel-mapping-family").unwrap(), 1);
+			assert_eq!(structure.get::<i32>("stream-count").unwrap(), i32::from(streams));
+			assert_eq!(structure.get::<i32>("coupled-count").unwrap(), i32::from(coupled));
+			let mapping: Vec<i32> = structure
+				.get::<gst::Array>("channel-mapping")
+				.unwrap()
+				.iter()
+				.map(|entry| entry.get::<i32>().unwrap())
+				.collect();
+			assert_eq!(
+				mapping,
+				table.iter().map(|&c| i32::from(c)).collect::<Vec<_>>(),
+				"{channels} channels"
+			);
+			let head: gst::Buffer = structure
+				.get::<gst::Array>("streamheader")
+				.unwrap()
+				.first()
+				.unwrap()
+				.get()
+				.unwrap();
+			assert_eq!(head.map_readable().unwrap().as_slice(), description.as_ref());
+		}
+	}
+
 	/// opusdec only clips what a buffer's meta asks, one packet at a time, and stamps what's left
 	/// at the packet's pts, so the pre-skip spreads over as many packets as it spans and every
 	/// packet moves to where its first kept sample plays.
@@ -2194,7 +2323,7 @@ mod tests {
 	fn opus_pre_skip_is_clipped_across_packets() {
 		gst::init().unwrap();
 		let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
-		assert!(super::PreSkip::new(&super::audio_caps(&config).unwrap()).is_none());
+		assert!(super::OpusClip::new(&super::audio_caps(&config).unwrap(), Duration::ZERO).is_none());
 		config.description = Some(
 			moq_mux::codec::opus::Config::new(48_000, 2)
 				.with_pre_skip(312)
@@ -2208,7 +2337,7 @@ mod tests {
 			(0xe0, 2_500, &[(120, 0), (120, 0), (72, 0), (0, 1_000), (0, 3_500)][..]),
 			(0xf8, 20_000, &[(312, 0), (0, 13_500)][..]),
 		] {
-			let mut pre_skip = super::PreSkip::new(&caps).unwrap();
+			let mut pre_skip = super::OpusClip::new(&caps, Duration::ZERO).unwrap();
 			for (index, &(clip, pts)) in expected.iter().enumerate() {
 				let mut buffer = gst::Buffer::from_slice([toc]);
 				let buffer = buffer.get_mut().unwrap();
@@ -2223,6 +2352,81 @@ mod tests {
 					buffer.pts(),
 					Some(gst::ClockTime::from_useconds(pts)),
 					"packet {index} of {micros}us"
+				);
+			}
+		}
+	}
+
+	/// After a join, the catalog warmup is clipped from the decoded output after the pre-skip, so
+	/// the first sample that plays is the first frame plus the warmup, while every packet still
+	/// reaches the decoder and keeps its place on the timeline. The track's first packet has no
+	/// warmup to clip.
+	#[test]
+	fn opus_warmup_is_clipped_after_the_pre_skip() {
+		gst::init().unwrap();
+		let warmup = Duration::from_millis(80);
+		let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		let bare = super::audio_caps(&config).unwrap();
+		config.description = Some(
+			moq_mux::codec::opus::Config::new(48_000, 2)
+				.with_pre_skip(312)
+				.encode()
+				.unwrap(),
+		);
+		let headed = super::audio_caps(&config).unwrap();
+		assert!(super::OpusClip::new(&gst::Caps::new_empty_simple("video/x-h264"), warmup).is_none());
+
+		// 20 ms (960-sample) CELT packets: (clipped samples, pts in microseconds) for each, after a
+		// join, and from the track's first packet.
+		for (caps, track_start, expected) in [
+			(
+				&bare,
+				false,
+				&[
+					(960, 20_000),
+					(960, 40_000),
+					(960, 60_000),
+					(960, 80_000),
+					(0, 80_000),
+					(0, 100_000),
+				][..],
+			),
+			(
+				&headed,
+				false,
+				&[
+					(960, 13_500),
+					(960, 33_500),
+					(960, 53_500),
+					(960, 73_500),
+					(312, 80_000),
+					(0, 93_500),
+				][..],
+			),
+			(&bare, true, &[(0, 0), (0, 20_000)][..]),
+			(&headed, true, &[(312, 0), (0, 13_500)][..]),
+		] {
+			let mut clip = super::OpusClip::new(caps, warmup).unwrap();
+			if track_start {
+				clip.track_start();
+			}
+			for (index, &(clipped, pts)) in expected.iter().enumerate() {
+				let mut buffer = gst::Buffer::from_slice([0xf8u8]);
+				let buffer = buffer.get_mut().unwrap();
+				buffer.set_pts(gst::ClockTime::from_useconds(index as u64 * 20_000));
+				clip.apply(buffer).unwrap();
+				let meta = buffer
+					.meta::<gst_audio::AudioClippingMeta>()
+					.map(|meta| meta.start().value() as u64);
+				assert_eq!(
+					meta.unwrap_or(0),
+					clipped,
+					"packet {index} of {caps}, start {track_start}"
+				);
+				assert_eq!(
+					buffer.pts(),
+					Some(gst::ClockTime::from_useconds(pts)),
+					"packet {index} of {caps}, start {track_start}"
 				);
 			}
 		}
@@ -2279,7 +2483,10 @@ mod session_tests {
 	use hang::catalog::{AudioCodec, AudioConfig, Container, H264, VideoCodec, VideoConfig};
 	use tokio::sync::watch;
 
-	use super::{DEFAULT_MAX_DELAY, NEXT_VIDEO_PAD_ID, Pads, ResolvedSettings, Session, SessionController, TrackKind};
+	use super::{
+		DEFAULT_MAX_DELAY, NEXT_AUDIO_PAD_ID, NEXT_VIDEO_PAD_ID, Pads, ResolvedSettings, Session, SessionController,
+		TrackKind,
+	};
 
 	/// The pad-id counters are process-global, so a test reading one has to be the only test
 	/// allocating while it runs. `cargo test` shares a process across tests (nextest doesn't),
@@ -2341,10 +2548,10 @@ mod session_tests {
 		}
 	}
 
-	/// Selection follows the reader plans, independently by kind; idle pads do not keep a
-	/// displaced rendition selected. Reconcile against a plan receiver without starting readers.
+	/// A disabled rendition drops out of its reader's plan, each kind on its own, and an enable
+	/// brings it back. Reconcile against a plan receiver without starting readers.
 	#[test]
-	fn disabled_renditions_follow_the_player_selection_rule() {
+	fn disabled_renditions_leave_the_plan() {
 		let element = element();
 		let (origin, _driver) = moq_net::origin::Producer::new(Default::default());
 		let broadcast = moq_net::broadcast::Info::new().produce();
@@ -2360,11 +2567,7 @@ mod session_tests {
 		let (_empty, empty) = watch::channel(false);
 		let mut followers = std::collections::HashMap::from([(
 			source.resolve_reference(None).unwrap(),
-			super::Followed {
-				plan,
-				empty,
-				held: false,
-			},
+			super::Followed { plan, empty },
 		)]);
 		let mut tasks = tokio::task::JoinSet::new();
 		let emptied = Arc::default();
@@ -2393,23 +2596,15 @@ mod session_tests {
 		catalog.audio.renditions.insert("main".into(), audio);
 		check(&catalog, &[]);
 
-		let both = [(TrackKind::Video, "main"), (TrackKind::Audio, "main")];
 		catalog.video.renditions.get_mut("main").unwrap().enabled = true;
 		catalog.audio.renditions.get_mut("main").unwrap().enabled = true;
-		check(&catalog, &both);
-		catalog.video.renditions.get_mut("main").unwrap().enabled = false;
+		check(&catalog, &[(TrackKind::Video, "main"), (TrackKind::Audio, "main")]);
 		catalog.audio.renditions.get_mut("main").unwrap().enabled = false;
-		check(&catalog, &both);
-
-		catalog.video.renditions.insert("alternative".into(), video_rendition());
-		let alternative = [(TrackKind::Video, "alternative"), (TrackKind::Audio, "main")];
-		check(&catalog, &alternative);
-		catalog.video.renditions.get_mut("alternative").unwrap().enabled = false;
-		check(&catalog, &alternative);
-
-		catalog.video.renditions.remove("alternative");
-		catalog.audio.renditions.remove("main");
-		check(&catalog, &[]);
+		check(&catalog, &[(TrackKind::Video, "main")]);
+		// Its pad ends rather than waiting for a re-enable, and its reader stops without a drain.
+		let audio = (TrackKind::Audio, "main".to_string());
+		assert!(!playback.session.pads.is_listed(&audio));
+		assert!(received.borrow().disabled.contains(&audio));
 	}
 
 	fn video_rendition() -> VideoConfig {
@@ -2602,21 +2797,27 @@ mod session_tests {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let origin = origin();
-		let catalog_broadcast = origin.create_broadcast("room/catalog").unwrap();
-		let mut local = catalog_broadcast.requests();
-		let left = origin.create_broadcast("room/left").unwrap();
-		let mut remote = left.requests();
-		let right = origin.create_broadcast("room/right").unwrap();
-		let mut replacement = right.requests();
+		let catalog_broadcast = origin
+			.route("room/catalog", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let mut local = catalog_broadcast.broadcast().requests();
+		let left = origin
+			.route("room/left", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let mut remote = left.broadcast().requests();
+		let right = origin
+			.route("room/right", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let mut replacement = right.broadcast().requests();
 		let mut catalog =
 			moq_mux::catalog::Producer::new(&mut catalog_broadcast.broadcast().clone(), Default::default()).unwrap();
 		let mut config = video_rendition();
 		config.broadcast = Some(moq_net::path::Relative::new("./left").unwrap());
 		config.track = Some("encoded".into());
 		catalog.modify().unwrap().video.renditions.insert("view".into(), config);
-		catalog_broadcast.announce(Default::default()).unwrap();
-		left.announce(Default::default()).unwrap();
-		right.announce(Default::default()).unwrap();
+		catalog_broadcast.announce().unwrap();
+		left.announce().unwrap();
+		right.announce().unwrap();
 		let (stopping, shutdown) = watch::channel(false);
 		let consumer = origin.consume();
 		let weak = element.downgrade();
@@ -2757,10 +2958,60 @@ mod session_tests {
 		});
 
 		let request = await_request(&mut dynamic);
-		assert_eq!(request.subscription().unwrap().max_delay, Some(max_delay));
+		assert_eq!(request.subscription().unwrap().delay.max, Some(max_delay));
 
 		let _ = shutdown.send(true);
 		super::RUNTIME.block_on(session).unwrap().unwrap();
+	}
+
+	/// A rendition's catalog warmup widens its subscription past the session max delay, so the
+	/// publisher keeps the media its decoder needs before the start.
+	#[test]
+	fn a_rendition_subscribes_with_its_catalog_warmup() {
+		let warmup = Duration::from_millis(300);
+		for kind in [TrackKind::Video, TrackKind::Audio] {
+			let element = element();
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let mut dynamic = broadcast.requests();
+			let mut catalog =
+				moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			{
+				let mut guard = catalog.modify().unwrap();
+				match kind {
+					TrackKind::Video => {
+						let mut video = video_rendition();
+						video.warmup = Some(warmup);
+						guard.video.renditions = BTreeMap::from([("media".to_string(), video)]);
+					}
+					TrackKind::Audio => {
+						let mut audio = audio_rendition();
+						audio.warmup = Some(warmup);
+						guard.audio.renditions = BTreeMap::from([("media".to_string(), audio)]);
+					}
+				}
+			}
+
+			let max_delay = Duration::from_secs(5);
+			let (shutdown, mut cancelled) = watch::channel(false);
+			let weak = element.downgrade();
+			let source = moq_mux::Source::new(origin().consume(), broadcast.consume());
+			let session = super::RUNTIME.spawn(async move {
+				let stopping = cancelled.clone();
+				Session::new(weak, stopping, max_delay)
+					.follow_catalog(source, &mut cancelled)
+					.await
+			});
+
+			let request = await_request(&mut dynamic);
+			assert_eq!(
+				request.subscription().unwrap().delay.max,
+				Some(max_delay + warmup),
+				"{kind:?}"
+			);
+
+			let _ = shutdown.send(true);
+			super::RUNTIME.block_on(session).unwrap().unwrap();
+		}
 	}
 
 	/// A rendition delisted while its reader is still subscribing ends that reader, and answering
@@ -3441,29 +3692,42 @@ mod session_tests {
 
 	/// A broadcast with one video rendition, and what feeds it.
 	struct Publisher {
-		publication: Option<moq_net::origin::Publication>,
+		route: Option<moq_net::origin::Route>,
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		video: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
+		/// The video track, for what its readers subscribe with.
+		track: moq_net::track::Producer,
 		start: kio::clock::Instant,
 	}
 
 	impl Publisher {
-		/// Publish at `room` on `origin` under `route`.
-		fn new(origin: &moq_net::origin::Producer, route: moq_net::origin::Route, config: VideoConfig) -> Self {
-			let publication = origin.create_broadcast("room").unwrap();
-			let mut publisher = Self::build(publication.broadcast().clone(), config);
-			publication.announce(route).unwrap();
-			publisher.publication = Some(publication);
-			publisher
+		/// Publish at `room` on `origin` under `instance`, or a fresh one.
+		fn new(origin: &moq_net::origin::Producer, instance: Option<moq_net::Instance>, config: VideoConfig) -> Self {
+			Self::routed(origin, "room", instance, config)
 		}
 
-		/// The `cam` broadcast a rendition of `room` references as `./cam`, under `route`.
-		fn sibling(origin: &moq_net::origin::Producer, route: moq_net::origin::Route) -> Self {
-			let publication = origin.create_broadcast("cam").unwrap();
-			let mut publisher = Self::build(publication.broadcast().clone(), video_rendition());
-			publication.announce(route).unwrap();
-			publisher.publication = Some(publication);
+		/// The `cam` broadcast a rendition of `room` references as `./cam`, under `instance`, or
+		/// a fresh one.
+		fn sibling(origin: &moq_net::origin::Producer, instance: Option<moq_net::Instance>) -> Self {
+			Self::routed(origin, "cam", instance, video_rendition())
+		}
+
+		/// Announce `path` once its catalog is built.
+		fn routed(
+			origin: &moq_net::origin::Producer,
+			path: &str,
+			instance: Option<moq_net::Instance>,
+			config: VideoConfig,
+		) -> Self {
+			let options = match instance {
+				Some(instance) => moq_net::origin::RouteOptions::hidden().with_instance(instance, 0),
+				None => moq_net::origin::RouteOptions::hidden(),
+			};
+			let route = origin.route(path, options).unwrap();
+			let mut publisher = Self::build(route.broadcast().clone(), config);
+			route.announce().unwrap();
+			publisher.route = Some(route);
 			publisher
 		}
 
@@ -3477,15 +3741,17 @@ mod session_tests {
 				let mut guard = catalog.modify().unwrap();
 				guard.video.renditions = BTreeMap::from([("video".to_string(), config)]);
 			}
+			let track = video.clone();
 			let video = moq_mux::container::Producer::new(
 				video,
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 			);
 			Self {
-				publication: None,
+				route: None,
 				broadcast,
 				catalog,
 				video,
+				track,
 				start: kio::clock::now(),
 			}
 		}
@@ -3514,8 +3780,8 @@ mod session_tests {
 		}
 	}
 
-	// A dial still running once the element reached NULL can outlive `main`, and aws-lc aborts the
-	// process when a thread asks it for randomness after its exit destructors ran.
+	// A dial still running once the element reached NULL would outlive the state change an application
+	// waits on before it exits.
 	#[test]
 	fn stop_returns_after_the_connection_closes() {
 		let element = element();
@@ -3619,7 +3885,7 @@ mod session_tests {
 		let (_shutdown, shutdown) = watch::channel(true);
 		let (_stop, stop) = watch::channel(false);
 		let pads = Pads::default();
-		pads.list(HashSet::from([rendition.clone()]), &cancel);
+		pads.list(HashSet::from([rendition.clone()]), &HashSet::new(), &cancel);
 		let instance = publisher.broadcast.consume();
 		let reader = super::Reader {
 			playback: super::Playback {
@@ -3639,7 +3905,8 @@ mod session_tests {
 				container: Container::Legacy,
 				track: "video".into(),
 				broadcast: None,
-				epoch: None,
+				instance: None,
+				warmup: Duration::ZERO,
 			},
 			instance,
 			serial: 1,
@@ -3652,6 +3919,77 @@ mod session_tests {
 			.block_on(async { kio::clock::timeout(Duration::from_secs(10), super::RUNTIME.spawn(reader.run())).await })
 			.expect("a push on a pad added after the flush blocked")
 			.unwrap();
+	}
+
+	/// A disable ends the pad even when its reader never hears of it, as when the follower takes
+	/// the disable and a re-enable as one plan. The reader reports its pad lost, so its follower
+	/// starts it again on a new pad.
+	#[test]
+	fn a_disable_its_reader_missed_cuts_its_play() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let mut publisher = Publisher::new(&origin(), Default::default(), video_rendition());
+
+		let rendition = (TrackKind::Video, "video".to_string());
+		let (cancelling, cancel) = watch::channel(false);
+		let (_shutdown, shutdown) = watch::channel(false);
+		let (_stop, stop) = watch::channel(false);
+		let pads = Pads::default();
+		pads.list(HashSet::from([rendition.clone()]), &HashSet::new(), &cancel);
+		let instance = publisher.broadcast.consume();
+		let reader = super::Reader {
+			playback: super::Playback {
+				session: Session {
+					max_delay: DEFAULT_MAX_DELAY,
+					element: element.downgrade(),
+					pads: pads.clone(),
+					shutdown,
+				},
+				broadcast: instance.clone(),
+				timeline: Arc::default(),
+				stop,
+			},
+			rendition: rendition.clone(),
+			shape: super::Shape {
+				caps: gst::Caps::new_empty_simple("video/x-h264"),
+				container: Container::Legacy,
+				track: "video".into(),
+				broadcast: None,
+				instance: None,
+				warmup: Duration::ZERO,
+			},
+			instance,
+			serial: 1,
+			timeline: Arc::default(),
+			finished: super::Finished::default(),
+			live: Arc::default(),
+			cancel,
+		};
+		let run = super::RUNTIME.spawn(reader.run());
+		let pad = recorder.written(&mut publisher, 1);
+
+		pads.list(
+			HashSet::new(),
+			&HashSet::from([rendition.clone()]),
+			&cancelling.subscribe(),
+		);
+		pads.list(
+			HashSet::from([rendition.clone()]),
+			&HashSet::new(),
+			&cancelling.subscribe(),
+		);
+		let exit = super::RUNTIME
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), run).await })
+			.expect("the disable never cut the play")
+			.unwrap();
+		assert!(
+			matches!(exit, super::Exit::Unlisted),
+			"the reader took its pad's end as done"
+		);
+		recorder.wait("the disabled pad never ended", |seen| {
+			seen.contains(&Seen::Eos(pad.clone())).then_some(())
+		});
 	}
 
 	/// A bus sync or pad handler can stop the element from inside a reader's push. Waiting for the
@@ -3823,7 +4161,7 @@ mod session_tests {
 	}
 
 	/// Block until the path's announcements report an event `wanted` accepts.
-	fn await_event(follow: &mut moq_net::announce::Consumer, wanted: impl Fn(&moq_net::announce::Event) -> bool) {
+	fn await_event(follow: &mut moq_net::origin::Routes, wanted: impl Fn(&moq_net::origin::RouteEvent) -> bool) {
 		let next = async {
 			while let Some(event) = follow.next().await {
 				if wanted(&event) {
@@ -3847,35 +4185,33 @@ mod session_tests {
 	}
 
 	/// The announcements of the routes covering `path` on `origin`.
-	fn watch(origin: &moq_net::origin::Producer, path: &str) -> moq_net::announce::Consumer {
+	fn watch(origin: &moq_net::origin::Producer, path: &str) -> moq_net::origin::Routes {
 		let path = moq_net::Patterns::from(moq_net::Pattern::literal(path).unwrap());
-		origin.consume().scope("", &path).unwrap().announced()
+		origin.consume().scope("", &path).unwrap().routes()
 	}
 
 	/// Follow `room` on `origin` past its start.
-	fn announced(origin: &moq_net::origin::Producer) -> moq_net::announce::Consumer {
+	fn announced(origin: &moq_net::origin::Producer) -> moq_net::origin::Routes {
 		let mut follow = watch(origin, "room");
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 		follow
-	}
-
-	fn epoch() -> moq_net::origin::Route {
-		moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint())
 	}
 
 	/// A publisher restarted while the old one stays up switches at once, on the same pad, and
 	/// nothing more from the old broadcast gets through.
-	fn restart(route: impl Fn() -> moq_net::origin::Route) {
+	fn restart() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 
-		let mut old = Publisher::new(&origin, route(), video_rendition());
+		let mut old = Publisher::new(&origin, None, video_rendition());
 		let session = follow(&element, &origin);
 		let pad = recorder.written(&mut old, 1);
 
-		let mut new = Publisher::new(&origin, route(), video_rendition());
+		let mut new = Publisher::new(&origin, None, video_rendition());
 		assert_eq!(recorder.written(&mut new, 2), pad, "the restart moved to another pad");
 
 		// The old broadcast still writes, but nothing reads it any more.
@@ -3897,13 +4233,7 @@ mod session_tests {
 
 	#[test]
 	fn a_restart_switches_on_the_same_pad() {
-		restart(epoch);
-	}
-
-	/// Without epochs (moq-lite 06), the newest announcement still replaces the old one.
-	#[test]
-	fn an_epochless_restart_switches_on_the_same_pad() {
-		restart(moq_net::origin::Route::default);
+		restart();
 	}
 
 	/// The route serving the path can be a prefix covering it, here the root, and a restart of
@@ -3915,13 +4245,16 @@ mod session_tests {
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 
-		let claim = origin.requests("").unwrap();
+		let claim = origin
+			.route_prefix("", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let (answers, answered) = std::sync::mpsc::channel();
 		let handler = super::RUNTIME.spawn(async move {
-			while let Ok(request) = claim.requested_broadcast().await {
-				let prepared = request.prepare(moq_net::Epoch::mint()).unwrap();
-				let answer = Publisher::build(prepared.broadcast().clone(), video_rendition());
-				prepared.publish().unwrap();
+			while let Some(request) = claim.requested().await {
+				let route = request.route(moq_net::origin::RouteOptions::hidden()).unwrap();
+				let mut answer = Publisher::build(route.broadcast().clone(), video_rendition());
+				route.announce().unwrap();
+				answer.route = Some(route);
 				answers.send(answer).unwrap();
 			}
 		});
@@ -3932,7 +4265,7 @@ mod session_tests {
 			.expect("the claim answered");
 		let pad = recorder.written(&mut old, 1);
 
-		let mut new = Publisher::new(&origin, epoch(), video_rendition());
+		let mut new = Publisher::new(&origin, Default::default(), video_rendition());
 		assert_eq!(recorder.written(&mut new, 2), pad, "the restart moved to another pad");
 
 		stop(session);
@@ -3948,15 +4281,17 @@ mod session_tests {
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
-		let pool = origin.requests("").unwrap();
+		let pool = origin
+			.route_prefix("", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let session = follow(&element, &origin);
 		let pending = super::RUNTIME.block_on(async {
-			kio::clock::timeout(Duration::from_secs(10), pool.requested_broadcast())
+			kio::clock::timeout(Duration::from_secs(10), pool.requested())
 				.await
 				.unwrap()
 				.unwrap()
 		});
-		let mut new = Publisher::new(&origin, epoch(), video_rendition());
+		let mut new = Publisher::new(&origin, Default::default(), video_rendition());
 		recorder.written(&mut new, 2);
 		pending.reject(moq_net::Error::Unauthorized);
 		recorder.written(&mut new, 3);
@@ -3964,11 +4299,11 @@ mod session_tests {
 		recorder.assert_one_pad_held();
 	}
 
-	/// A `room` whose video rendition references the `cam` sibling, naming `epoch` when given.
-	fn referencing(origin: &moq_net::origin::Producer, epoch: Option<moq_net::Epoch>) -> Publisher {
+	/// A `room` whose video rendition references the `cam` sibling, naming `instance` when given.
+	fn referencing(origin: &moq_net::origin::Producer, instance: Option<moq_net::Instance>) -> Publisher {
 		let mut config = video_rendition();
 		config.broadcast = Some(moq_net::path::Relative::new("./cam").unwrap());
-		config.epoch = epoch;
+		config.instance = instance;
 		Publisher::new(origin, Default::default(), config)
 	}
 
@@ -3986,9 +4321,13 @@ mod session_tests {
 		let mut first = Publisher::sibling(&origin, Default::default());
 		let pad = recorder.written(&mut first, 1);
 		let mut follow = watch(&origin, "cam");
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 		drop(first);
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::End(_))
+		});
 
 		let mut second = Publisher::sibling(&origin, Default::default());
 		assert_eq!(recorder.written(&mut second, 2), pad, "the return moved to another pad");
@@ -3999,6 +4338,71 @@ mod session_tests {
 			"no new stream on the kept pad"
 		);
 		recorder.assert_one_pad_held();
+	}
+
+	/// A warmup-only catalog update neither restarts the reader playing the rendition nor is lost:
+	/// the next instance's reader subscribes with the updated warmup.
+	#[test]
+	fn a_warmup_update_keeps_the_reader_and_reaches_the_next_one() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let mut config = video_rendition();
+		config.broadcast = Some(moq_net::path::Relative::new("./cam").unwrap());
+		config.warmup = Some(Duration::from_millis(300));
+		let mut room = Publisher::new(&origin, Default::default(), config);
+		let session = follow(&element, &origin);
+
+		let mut first = Publisher::sibling(&origin, Default::default());
+		let pad = recorder.written(&mut first, 1);
+		assert_eq!(
+			first.track.subscription().unwrap().delay.max,
+			Some(DEFAULT_MAX_DELAY + Duration::from_millis(300))
+		);
+
+		// Change only the warmup, then list an audio rendition in the same catalog. Its pad shows
+		// the run took the warmup too, since a catalog snapshot carries both, and the cam follower
+		// takes a plan before any instance event.
+		let audio = room
+			.broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut audio = moq_mux::container::Producer::new(
+			audio,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		{
+			let mut guard = room.catalog.modify().unwrap();
+			guard.video.renditions.get_mut("video").unwrap().warmup = Some(Duration::from_millis(600));
+			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
+		}
+		audio.write(room.frame(9)).unwrap();
+		await_pad(&element, "audio_");
+		assert_eq!(recorder.written(&mut first, 2), pad);
+
+		let mut follow = watch(&origin, "cam");
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
+		drop(first);
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::End(_))
+		});
+		let mut second = Publisher::sibling(&origin, Default::default());
+		assert_eq!(recorder.written(&mut second, 3), pad, "the return moved to another pad");
+		assert_eq!(
+			second.track.subscription().unwrap().delay.max,
+			Some(DEFAULT_MAX_DELAY + Duration::from_millis(600))
+		);
+		stop(session);
+
+		let seen = recorder.seen();
+		assert_eq!(
+			recorder.count(|seen| matches!(seen, Seen::Start(start) if *start == pad)),
+			1,
+			"only the next instance starts a new stream on the pad: {seen:?}"
+		);
 	}
 
 	/// A rendition that joins a sibling instance after another started on it shares that instance's
@@ -4073,18 +4477,23 @@ mod session_tests {
 		let session = follow(&element, &origin);
 		let mut follow = watch(&origin, "cam");
 
-		let route = epoch();
-		let mut first = Publisher::sibling(&origin, route.clone());
+		let mut first = Publisher::sibling(&origin, None);
 		let pad = recorder.written(&mut first, 1);
 		first.video.finish().unwrap();
 		await_finished(&first);
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
-		first.publication.as_ref().unwrap().unannounce();
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
-		first.publication.as_ref().unwrap().announce(route).unwrap();
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
+		first.route.as_ref().unwrap().withdraw();
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::End(_))
+		});
+		first.route.as_ref().unwrap().announce().unwrap();
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 
-		let mut second = Publisher::sibling(&origin, epoch());
+		let mut second = Publisher::sibling(&origin, Default::default());
 		assert_eq!(
 			recorder.written(&mut second, 2),
 			pad,
@@ -4157,9 +4566,13 @@ mod session_tests {
 		let pad = recorder.written(&mut first, 1);
 		room.catalog.finish().unwrap();
 		let mut follow = watch(&origin, "cam");
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 		drop(first);
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::End(_))
+		});
 
 		let mut second = Publisher::sibling(&origin, Default::default());
 		assert_eq!(recorder.written(&mut second, 2), pad, "the return moved to another pad");
@@ -4229,74 +4642,6 @@ mod session_tests {
 		});
 	}
 
-	/// A sibling track that finished stays finished for its instance only: a disable and an enable
-	/// replays nothing on that instance, and the next instance plays even before the enable.
-	#[test]
-	fn a_reenabled_sibling_rendition_plays_the_next_instance_after_a_finish() {
-		let _pad_ids = pad_ids();
-		let element = element();
-		let recorder = Recorder::attach(&element);
-		let origin = origin();
-		let mut room = referencing(&origin, None);
-		let _audio = ["audio", "again"].map(|name| {
-			room.broadcast
-				.create_track(name, hang::container::track_info(hang::catalog::PRIORITY.audio))
-				.unwrap()
-		});
-		let session = follow(&element, &origin);
-
-		let mut first = Publisher::sibling(&origin, Default::default());
-		let pad = recorder.written(&mut first, 1);
-		first.video.finish().unwrap();
-		await_finished(&first);
-
-		// The catalog consumer only yields the newest snapshot, so each update lists another audio
-		// rendition: its pad appearing proves the run acted on it.
-		{
-			let mut guard = room.catalog.modify().unwrap();
-			guard.video.renditions.get_mut("video").unwrap().enabled = false;
-			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
-		}
-		await_pad(&element, "audio_");
-		let mut second = Publisher::sibling(&origin, Default::default());
-		assert_eq!(
-			recorder.written(&mut second, 2),
-			pad,
-			"the next instance moved to another pad"
-		);
-
-		{
-			let mut guard = room.catalog.modify().unwrap();
-			guard.video.renditions.get_mut("video").unwrap().enabled = true;
-			let mut again = audio_rendition();
-			again.track = Some("again".into());
-			guard.audio.renditions.insert("again".to_string(), again);
-		}
-		for _ in 0..200 {
-			if pads(&element, "audio_").len() == 2 {
-				break;
-			}
-			block(Duration::from_millis(50));
-		}
-		assert_eq!(pads(&element, "audio_").len(), 2, "the re-enable never landed");
-		let replayed = recorder.count(|seen| *seen == Seen::Buffer(pad.clone(), 1));
-
-		assert_eq!(recorder.written(&mut second, 3), pad);
-
-		stop(session);
-
-		// Only the next instance starts a stream: the finished one stays finished on its pad.
-		let seen = recorder.seen();
-		assert_eq!(recorder.count(|seen| *seen == Seen::Start(pad.clone())), 1, "{seen:?}");
-		assert_eq!(
-			recorder.count(|seen| *seen == Seen::Buffer(pad.clone(), 1)),
-			replayed,
-			"{seen:?}"
-		);
-		recorder.assert_one_pad_held();
-		drop(first);
-	}
-
 	/// A sibling rendition delisted while it plays and listed again before its track finishes stays
 	/// with the reader that drained it: the finished track does not replay on its pad, and the
 	/// next instance plays there.
@@ -4358,23 +4703,23 @@ mod session_tests {
 	}
 
 	/// A publisher handoff after a sibling track finished, the catalog naming the new instance's
-	/// epoch, plays that instance on the same pad.
+	/// instance, plays that instance on the same pad.
 	#[test]
-	fn an_epoch_handoff_after_a_sibling_finish_plays_the_new_instance() {
+	fn an_instance_handoff_after_a_sibling_finish_plays_the_new_instance() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
-		let (old, new) = (moq_net::Epoch::mint(), moq_net::Epoch::mint());
+		let (old, new) = (moq_net::Instance::random(), moq_net::Instance::random());
 		let mut room = referencing(&origin, Some(old.clone()));
 		let session = follow(&element, &origin);
 
-		let mut first = Publisher::sibling(&origin, moq_net::origin::Route::default().with_epoch(old));
+		let mut first = Publisher::sibling(&origin, Some(old));
 		let pad = recorder.written(&mut first, 1);
 		first.video.finish().unwrap();
 		await_finished(&first);
 
-		let mut second = Publisher::sibling(&origin, moq_net::origin::Route::default().with_epoch(new.clone()));
+		let mut second = Publisher::sibling(&origin, Some(new.clone()));
 		room.catalog
 			.modify()
 			.unwrap()
@@ -4382,7 +4727,7 @@ mod session_tests {
 			.renditions
 			.get_mut("video")
 			.unwrap()
-			.epoch = Some(new);
+			.instance = Some(new);
 		assert_eq!(
 			recorder.written(&mut second, 2),
 			pad,
@@ -4402,20 +4747,24 @@ mod session_tests {
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
-		let (pinned, other, next) = (moq_net::Epoch::mint(), moq_net::Epoch::mint(), moq_net::Epoch::mint());
+		let (pinned, other, next) = (
+			moq_net::Instance::random(),
+			moq_net::Instance::random(),
+			moq_net::Instance::random(),
+		);
 		let mut room = referencing(&origin, Some(pinned.clone()));
 		{
 			let mut guard = room.catalog.modify().unwrap();
 			let mut again = guard.video.renditions["video"].clone();
 			again.track = Some("video".into());
-			again.epoch = None;
+			again.instance = None;
 			guard.video.renditions.insert("again".into(), again);
 		}
 		let session = follow(&element, &origin);
 
 		// Each rendition plays the first instance on a pad of its own. Written once, so a second
 		// copy on either pad can only be a replay.
-		let mut first = Publisher::sibling(&origin, moq_net::origin::Route::default().with_epoch(pinned));
+		let mut first = Publisher::sibling(&origin, Some(pinned));
 		first.write(1);
 		let played = recorder.wait("1 never reached both renditions", |seen| {
 			let pads = reached(seen, 1);
@@ -4426,22 +4775,24 @@ mod session_tests {
 
 		// Another instance wins the path, which only the unpinned rendition plays, then leaves it
 		// to the pinned one.
-		let mut second = Publisher::sibling(&origin, moq_net::origin::Route::default().with_epoch(other));
+		let mut second = Publisher::sibling(&origin, Some(other));
 		let unpinned = recorder.written(&mut second, 2);
 		let pad = played.into_iter().find(|pad| *pad != unpinned).unwrap();
 		let mut follow = watch(&origin, "cam");
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 		drop(second);
 		await_event(&mut follow, |event| {
 			matches!(
 				event,
-				moq_net::announce::Event::Restart(_)
-					| moq_net::announce::Event::Takeover { .. }
-					| moq_net::announce::Event::Start(_)
+				moq_net::origin::RouteEvent::Restart(_)
+					| moq_net::origin::RouteEvent::Takeover { .. }
+					| moq_net::origin::RouteEvent::Start(_)
 			)
 		});
 
-		let mut third = Publisher::sibling(&origin, moq_net::origin::Route::default().with_epoch(next.clone()));
+		let mut third = Publisher::sibling(&origin, Some(next.clone()));
 		room.catalog
 			.modify()
 			.unwrap()
@@ -4449,7 +4800,7 @@ mod session_tests {
 			.renditions
 			.get_mut("video")
 			.unwrap()
-			.epoch = Some(next);
+			.instance = Some(next);
 		third.write(3);
 		recorder.wait("the next instance never reached the pinned pad", |seen| {
 			reached(seen, 3).contains(&pad).then_some(())
@@ -4482,9 +4833,13 @@ mod session_tests {
 		let mut first = Publisher::sibling(&origin, Default::default());
 		let pad = recorder.written(&mut first, 1);
 		let mut follow = watch(&origin, "cam");
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 		drop(first);
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::End(_))
+		});
 
 		room.catalog.modify().unwrap().video.renditions.clear();
 		for _ in 0..200 {
@@ -4499,7 +4854,9 @@ mod session_tests {
 		);
 
 		let mut second = Publisher::sibling(&origin, Default::default());
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 		for _ in 0..10 {
 			second.write(2);
 			block(Duration::from_millis(50));
@@ -4524,9 +4881,13 @@ mod session_tests {
 		let mut first = Publisher::sibling(&origin, Default::default());
 		let pad = recorder.written(&mut first, 1);
 		let mut follow = watch(&origin, "cam");
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
 		drop(first);
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::End(_))
+		});
 
 		let listed = room.catalog.modify().unwrap().video.renditions.clone();
 		room.catalog.modify().unwrap().video.renditions.clear();
@@ -4547,19 +4908,19 @@ mod session_tests {
 		stop(session);
 	}
 
-	/// A sibling replaced while the old one stays up restarts a reference that names no epoch, on
+	/// A sibling replaced while the old one stays up restarts a reference that names no instance, on
 	/// the same pad, and nothing more from the old instance gets through.
-	fn sibling_restart(route: impl Fn() -> moq_net::origin::Route) {
+	fn sibling_restart() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 		let _room = referencing(&origin, None);
-		let mut old = Publisher::sibling(&origin, route());
+		let mut old = Publisher::sibling(&origin, None);
 		let session = follow(&element, &origin);
 		let pad = recorder.written(&mut old, 1);
 
-		let mut new = Publisher::sibling(&origin, route());
+		let mut new = Publisher::sibling(&origin, None);
 		assert_eq!(recorder.written(&mut new, 2), pad, "the restart moved to another pad");
 		old.write(1);
 		recorder.written(&mut new, 3);
@@ -4579,25 +4940,20 @@ mod session_tests {
 
 	#[test]
 	fn a_sibling_restart_switches_on_the_same_pad() {
-		sibling_restart(epoch);
+		sibling_restart();
 	}
 
-	#[test]
-	fn an_epochless_sibling_restart_switches_on_the_same_pad() {
-		sibling_restart(moq_net::origin::Route::default);
-	}
-
-	/// A reference naming its sibling's epoch never reads the instance replacing it: the pad
+	/// A reference naming its sibling's instance never reads the instance replacing it: the pad
 	/// idles, and plays again once the named instance serves the path again.
 	#[test]
-	fn a_sibling_restart_idles_a_reference_naming_the_old_epoch() {
+	fn a_sibling_restart_idles_a_reference_naming_the_old_instance() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
-		let named = moq_net::Epoch::mint();
+		let named = moq_net::Instance::random();
 		let _room = referencing(&origin, Some(named.clone()));
-		let mut old = Publisher::sibling(&origin, moq_net::origin::Route::default().with_epoch(named));
+		let mut old = Publisher::sibling(&origin, Some(named));
 		let session = follow(&element, &origin);
 		await_demand(&old, true);
 		let pad = recorder.written(&mut old, 1);
@@ -4605,16 +4961,18 @@ mod session_tests {
 		// The reference lets the old instance go once another wins its path, and only then
 		// does the new one leave, so the return is a resume rather than a missed restart.
 		let mut follow = watch(&origin, "cam");
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
-		let mut new = Publisher::sibling(&origin, epoch());
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::announce::Event::Restart(_))
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
+		let mut new = Publisher::sibling(&origin, Default::default());
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Restart(_))
 		});
 		await_demand(&old, false);
 		new.write(2);
 		drop(new);
 		await_event(&mut follow, |event| {
-			matches!(event, moq_net::announce::Event::Restart(_))
+			matches!(event, moq_net::origin::RouteEvent::Restart(_))
 		});
 
 		await_demand(&old, true);
@@ -4626,7 +4984,7 @@ mod session_tests {
 		stop(session);
 		assert!(
 			!recorder.seen().contains(&Seen::Buffer(pad, 2)),
-			"another epoch played: {:?}",
+			"another instance played: {:?}",
 			recorder.seen()
 		);
 		recorder.assert_one_pad_held();
@@ -4707,21 +5065,14 @@ mod session_tests {
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
-		let route = epoch();
-
-		let mut publisher = Publisher::new(&origin, route.clone(), video_rendition());
+		let mut publisher = Publisher::new(&origin, None, video_rendition());
 		let mut announced = announced(&origin);
 		let session = follow(&element, &origin);
 		recorder.written(&mut publisher, 1);
 
-		publisher
-			.publication
-			.as_ref()
-			.unwrap()
-			.announce(route.with_cost(5))
-			.unwrap();
+		publisher.route.as_ref().unwrap().set_cost(5).unwrap();
 		await_event(&mut announced, |event| {
-			matches!(event, moq_net::announce::Event::Update(_))
+			matches!(event, moq_net::origin::RouteEvent::Update(_))
 		});
 		recorder.written(&mut publisher, 2);
 		stop(session);
@@ -4744,13 +5095,13 @@ mod session_tests {
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 
-		let mut old = Publisher::new(&origin, epoch(), video_rendition());
+		let mut old = Publisher::new(&origin, Default::default(), video_rendition());
 		let session = follow(&element, &origin);
 		let pad = recorder.written(&mut old, 1);
 
 		let mut vp8 = VideoConfig::new(VideoCodec::VP8);
 		vp8.container = Container::Legacy;
-		let mut new = Publisher::new(&origin, epoch(), vp8);
+		let mut new = Publisher::new(&origin, Default::default(), vp8);
 		assert_eq!(recorder.written(&mut new, 2), pad, "the new caps moved to another pad");
 		stop(session);
 
@@ -4759,37 +5110,38 @@ mod session_tests {
 		recorder.assert_one_pad_held();
 	}
 
-	/// With no enabled alternative, disabling holds the reader as well as its pad, so media that
-	/// beats the re-enable catalog update plays without a new subscription or stream.
+	/// Disabling a rendition ends its reader and its pad with an EOS, holding nothing for a
+	/// re-enable, which takes a new pad from a fresh subscription like any added rendition.
 	#[test]
-	fn a_disabled_rendition_keeps_reading_on_the_same_pad() {
+	fn a_disabled_rendition_ends_its_pad() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 
-		let mut publisher = Publisher::new(&origin, epoch(), video_rendition());
-		let _audio = publisher
-			.broadcast
-			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
-			.unwrap();
+		let mut publisher = Publisher::new(&origin, Default::default(), video_rendition());
 		let session = follow(&element, &origin);
 		let pad = recorder.written(&mut publisher, 1);
 
-		// The catalog consumer only yields the newest snapshot, so the same update lists an audio
-		// rendition: its pad appearing proves the run acted on the disable.
-		{
-			let mut guard = publisher.catalog.modify().unwrap();
-			guard.video.renditions.get_mut("video").unwrap().enabled = false;
-			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
+		publisher
+			.catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.get_mut("video")
+			.unwrap()
+			.enabled = false;
+		recorder.wait("the disabled pad never ended", |seen| {
+			seen.contains(&Seen::Eos(pad.clone())).then_some(())
+		});
+		for _ in 0..100 {
+			if pads(&element, "video_").is_empty() {
+				break;
+			}
+			block(Duration::from_millis(50));
 		}
-		await_pad(&element, "audio_");
-
-		assert_eq!(
-			recorder.written(&mut publisher, 2),
-			pad,
-			"media before the re-enable did not reach the held reader"
-		);
+		assert!(pads(&element, "video_").is_empty(), "the disabled pad stayed");
 
 		publisher
 			.catalog
@@ -4800,19 +5152,88 @@ mod session_tests {
 			.get_mut("video")
 			.unwrap()
 			.enabled = true;
-		assert_eq!(
-			recorder.written(&mut publisher, 3),
+		assert_ne!(
+			recorder.written(&mut publisher, 2),
 			pad,
-			"the re-enabled rendition moved to another pad"
+			"the re-enable reused the ended pad"
 		);
 		stop(session);
 
 		let seen = recorder.seen();
+		assert_eq!(recorder.count(|seen| matches!(seen, Seen::Pad(_))), 2, "{seen:?}");
 		assert!(
 			!seen.contains(&Seen::Start(pad)),
-			"the disable restarted the stream: {seen:?}"
+			"the ended pad started again: {seen:?}"
 		);
-		recorder.assert_one_pad_held();
+	}
+
+	/// A disable ends the pad even when the rendition is re-enabled while a push on it is still
+	/// blocked downstream, so its actor takes both catalog updates only once the push returns.
+	#[test]
+	fn a_disable_ends_the_pad_while_its_push_is_blocked() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+
+		let mut publisher = Publisher::new(&origin, Default::default(), video_rendition());
+		let (shutdown, stopping) = watch::channel(false);
+		let session = Session::new(element.downgrade(), stopping, DEFAULT_MAX_DELAY);
+		let pads = session.pads.clone();
+		let consumer = origin.consume();
+		let task =
+			super::RUNTIME.spawn(async move { session.follow_path(&consumer, "room", std::future::pending()).await });
+		let pad = recorder.written(&mut publisher, 1);
+
+		let blocking = element.static_pad(&pad).unwrap();
+		let (blocked, reached) = std::sync::mpsc::channel();
+		let probe = blocking
+			.add_probe(gst::PadProbeType::BLOCK | gst::PadProbeType::BUFFER, move |_, _| {
+				let _ = blocked.send(());
+				gst::PadProbeReturn::Ok
+			})
+			.unwrap();
+		publisher.write(2);
+		reached
+			.recv_timeout(Duration::from_secs(10))
+			.expect("the frame never reached the pad");
+
+		let rendition = (TrackKind::Video, "video".to_string());
+		for enabled in [false, true] {
+			publisher
+				.catalog
+				.modify()
+				.unwrap()
+				.video
+				.renditions
+				.get_mut("video")
+				.unwrap()
+				.enabled = enabled;
+			for _ in 0..200 {
+				if pads.is_listed(&rendition) == enabled {
+					break;
+				}
+				block(Duration::from_millis(50));
+			}
+			assert_eq!(pads.is_listed(&rendition), enabled, "the catalog update never applied");
+		}
+		blocking.remove_probe(probe);
+
+		recorder.wait("the disabled pad never ended", |seen| {
+			seen.contains(&Seen::Eos(pad.clone())).then_some(())
+		});
+		assert_ne!(
+			recorder.written(&mut publisher, 3),
+			pad,
+			"the re-enable reused the disabled pad"
+		);
+		stop((shutdown, task));
+
+		let seen = recorder.seen();
+		assert!(
+			!seen.contains(&Seen::Start(pad)),
+			"the disabled pad started again: {seen:?}"
+		);
 	}
 
 	/// A publisher that stops ends its media, a beat later its catalog, then its announcement.
@@ -4836,7 +5257,7 @@ mod session_tests {
 		old.catalog.finish().unwrap();
 		drop(old);
 		await_event(&mut announced, |event| {
-			matches!(event, moq_net::announce::Event::End(_))
+			matches!(event, moq_net::origin::RouteEvent::End(_))
 		});
 
 		let mut new = Publisher::new(&origin, Default::default(), video_rendition());
@@ -4864,9 +5285,9 @@ mod session_tests {
 		let session = follow(&element, &origin);
 		let pad = recorder.written(&mut old, 1);
 
-		old.publication.as_ref().unwrap().unannounce();
+		old.route.as_ref().unwrap().withdraw();
 		await_event(&mut announced, |event| {
-			matches!(event, moq_net::announce::Event::End(_))
+			matches!(event, moq_net::origin::RouteEvent::End(_))
 		});
 		drop(old);
 
@@ -4885,19 +5306,19 @@ mod session_tests {
 	/// route drops and returns as across a reconnect. The pad's actor takes each play, idle, and
 	/// retirement in turn, so every round lands on the first pad and none ends it.
 	#[test]
+	#[ignore = "flaky under load; see quest/m0/test-flakes-2/gst-reconnect-interleave.md"]
 	fn restarts_under_reconnects_interleave_on_one_pad() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 
-		let mut current = Publisher::new(&origin, epoch(), video_rendition());
+		let mut current = Publisher::new(&origin, Default::default(), video_rendition());
 		let session = follow(&element, &origin);
 		let pad = recorder.written(&mut current, 1);
 		for round in 0..4u8 {
 			let tag = 2 + round * 3;
-			let route = epoch();
-			let mut next = Publisher::new(&origin, route.clone(), video_rendition());
+			let mut next = Publisher::new(&origin, None, video_rendition());
 			assert_eq!(
 				recorder.written(&mut next, tag),
 				pad,
@@ -4916,12 +5337,12 @@ mod session_tests {
 			);
 
 			let mut announced = announced(&origin);
-			let publication = next.publication.as_ref().unwrap();
-			publication.unannounce();
+			let route = next.route.as_ref().unwrap();
+			route.withdraw();
 			await_event(&mut announced, |event| {
-				matches!(event, moq_net::announce::Event::End(_))
+				matches!(event, moq_net::origin::RouteEvent::End(_))
 			});
-			publication.announce(route).unwrap();
+			route.announce().unwrap();
 			assert_eq!(
 				recorder.written(&mut next, tag + 2),
 				pad,
@@ -4939,8 +5360,7 @@ mod session_tests {
 	fn a_refused_catalog_fails_the_session() {
 		let element = element();
 		let origin = origin();
-		let broadcast = origin.create_broadcast("room").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let _route = origin.route("room", moq_net::origin::RouteOptions::default()).unwrap();
 
 		let (_shutdown, session) = follow(&element, &origin);
 		let err = super::RUNTIME
@@ -4948,8 +5368,12 @@ mod session_tests {
 			.expect("the refusal held the session")
 			.unwrap()
 			.expect_err("the refusal did not fail the session");
+		// The catalog consumer subscribes itself, so the refusal surfaces from its first read.
 		assert!(
-			matches!(err.downcast_ref::<moq_net::Error>(), Some(moq_net::Error::NotFound)),
+			matches!(
+				err.downcast_ref::<moq_mux::Error>(),
+				Some(moq_mux::Error::Moq(moq_net::Error::NotFound))
+			),
 			"{err:?}"
 		);
 	}
@@ -5041,15 +5465,20 @@ mod session_tests {
 		}
 	}
 
-	/// `moqsrc` playing `room` from `url`, its first video pad linked by name to a synced sink
-	/// that drops anything more than 100ms late.
-	fn pipeline(url: &url::Url) -> (gst::Pipeline, gst::Element) {
+	/// Makes both elements available to pipeline descriptions.
+	fn register() {
 		static REGISTER: std::sync::Once = std::sync::Once::new();
 		gst::init().unwrap();
 		REGISTER.call_once(|| {
 			gst::Element::register(None, "moqsrc", gst::Rank::NONE, super::super::MoqSrc::static_type()).unwrap();
+			gst::Element::register(None, "moqsink", gst::Rank::NONE, crate::sink::MoqSink::static_type()).unwrap();
 		});
+	}
 
+	/// `moqsrc` playing `room` from `url`, its first video pad linked by name to a synced sink
+	/// that drops anything more than 100ms late.
+	fn pipeline(url: &url::Url) -> (gst::Pipeline, gst::Element) {
+		register();
 		let first = NEXT_VIDEO_PAD_ID.load(Ordering::Relaxed);
 		let pipeline = gst::parse::launch(&format!(
 			"moqsrc name=src url={url} broadcast=room \
@@ -5192,7 +5621,7 @@ mod session_tests {
 	fn a_refused_redial_posts_a_bus_error_after_playback() {
 		let _pad_ids = pad_ids();
 		let relay = Relay::new();
-		let mut publisher = Publisher::new(&relay.origin, epoch(), video_rendition());
+		let mut publisher = Publisher::new(&relay.origin, Default::default(), video_rendition());
 		let (pipeline, sink) = pipeline(&relay.url);
 		rendered(&sink, &mut publisher, 1);
 		*relay.admit.lock().unwrap() = Admit::Refuse;
@@ -5214,7 +5643,7 @@ mod session_tests {
 	fn a_protocol_violation_posts_a_bus_error_after_playback() {
 		let _pad_ids = pad_ids();
 		let relay = Relay::new();
-		let mut publisher = Publisher::new(&relay.origin, epoch(), video_rendition());
+		let mut publisher = Publisher::new(&relay.origin, Default::default(), video_rendition());
 		let (pipeline, sink) = pipeline(&relay.url);
 		rendered(&sink, &mut publisher, 1);
 		relay.close.send(moq_net::Error::ProtocolViolation).unwrap();
@@ -5231,7 +5660,7 @@ mod session_tests {
 		assert!(error.debug().unwrap().contains("protocol violation"), "{error:?}");
 	}
 
-	/// End to end through a relay: a publisher restarted under a new epoch, the old one still up.
+	/// End to end through a relay: a publisher restarted under a new instance, the old one still up.
 	/// The pad linked by name keeps flowing into a synced sink, which renders the new broadcast on
 	/// time even though its timestamps start over.
 	#[test]
@@ -5239,13 +5668,13 @@ mod session_tests {
 		let _pad_ids = pad_ids();
 		let relay = Relay::new();
 
-		let mut old = Publisher::new(&relay.origin, epoch(), video_rendition());
+		let mut old = Publisher::new(&relay.origin, Default::default(), video_rendition());
 		let (pipeline, sink) = pipeline(&relay.url);
 		rendered(&sink, &mut old, 1);
 
 		// Long enough that a restarted run placed at the old segment would be a second late.
 		block(Duration::from_secs(1));
-		let mut new = Publisher::new(&relay.origin, epoch(), video_rendition());
+		let mut new = Publisher::new(&relay.origin, Default::default(), video_rendition());
 		rendered(&sink, &mut new, 2);
 		assert_played_cleanly(pipeline);
 	}
@@ -5390,11 +5819,139 @@ mod session_tests {
 		let mut announced = announced(&relay.origin);
 		session.abort(moq_net::Error::App(1));
 		await_event(&mut announced, |event| {
-			matches!(event, moq_net::announce::Event::End(_))
+			matches!(event, moq_net::origin::RouteEvent::End(_))
 		});
 
 		let mut new = Publisher::new(&relay.origin, Default::default(), video_rendition());
 		rendered(&sink, &mut new, 2);
 		assert_played_cleanly(pipeline);
+	}
+
+	/// The surround path end to end: `opusenc` 5.1 through moqsink, a relay, moqsrc, and
+	/// `opusdec` decodes six channels, each carrying its own tone, so a mapping that drops,
+	/// duplicates, or swaps a channel fails. The LFE tone sits low enough to survive the band
+	/// limit libopus applies to that channel.
+	#[test]
+	fn surround_opus_plays_every_channel_through_a_relay() {
+		const RATE: usize = 48_000;
+		// GStreamer's order for channel-mask 0x3f: FL, FR, FC, LFE, RL, RR. Every tone completes
+		// whole cycles in the analysis window.
+		const TONES: [f64; 6] = [440.0, 660.0, 880.0, 60.0, 1_100.0, 1_320.0];
+		const CHANNELS: usize = TONES.len();
+		const AMPLITUDE: f64 = 8_000.0;
+		// Analyze the last half second of the first second decoded, past the encoder's warm-up.
+		const FRAMES: usize = RATE;
+		const WINDOW: usize = RATE / 2;
+		// 10 ms per pushed buffer.
+		const CHUNK: usize = RATE / 100;
+
+		let _pad_ids = pad_ids();
+		let relay = Relay::new();
+		register();
+		let launch = |description: String| {
+			gst::parse::launch(&description)
+				.unwrap()
+				.downcast::<gst::Pipeline>()
+				.unwrap()
+		};
+		// The identity paces the source to the clock, like a live capture.
+		let publisher = launch(format!(
+			"appsrc name=raw is-live=true format=time block=true \
+			 caps=audio/x-raw,format=S16LE,layout=interleaved,rate={RATE},channels={CHANNELS},channel-mask=(bitmask)0x3f \
+			 ! identity sync=true ! opusenc bitrate=256000 ! moqsink url={} broadcast=room",
+			relay.url
+		));
+		let first = NEXT_AUDIO_PAD_ID.load(Ordering::Relaxed);
+		let subscriber = launch(format!(
+			"moqsrc name=src url={} broadcast=room src.audio_{first} ! opusdec ! appsink name=sink sync=false",
+			relay.url
+		));
+		let sink = subscriber.by_name("sink").unwrap();
+		publisher.set_state(gst::State::Playing).unwrap();
+		subscriber.set_state(gst::State::Playing).unwrap();
+
+		// Push tones until the pipeline stops taking buffers.
+		let raw = publisher.by_name("raw").unwrap();
+		let feeder = std::thread::spawn(move || {
+			for chunk in 0u64.. {
+				let start = chunk as usize * CHUNK;
+				let mut data = Vec::with_capacity(CHUNK * CHANNELS * 2);
+				for frame in start..start + CHUNK {
+					let time = frame as f64 / RATE as f64;
+					for tone in TONES {
+						let sample = (AMPLITUDE * (std::f64::consts::TAU * tone * time).sin()) as i16;
+						data.extend_from_slice(&sample.to_le_bytes());
+					}
+				}
+				let mut buffer = gst::Buffer::from_mut_slice(data);
+				{
+					let buffer = buffer.get_mut().unwrap();
+					buffer.set_pts(gst::ClockTime::SECOND.mul_div_floor(start as u64, RATE as u64));
+					buffer.set_duration(gst::ClockTime::SECOND.mul_div_floor(CHUNK as u64, RATE as u64));
+				}
+				if raw.emit_by_name::<gst::FlowReturn>("push-buffer", &[&buffer]) != gst::FlowReturn::Ok {
+					break;
+				}
+			}
+		});
+
+		let errors = || {
+			[&publisher, &subscriber].map(|pipeline| pipeline.bus().unwrap().pop_filtered(&[gst::MessageType::Error]))
+		};
+		let deadline = kio::clock::now() + Duration::from_secs(30);
+		let mut samples = Vec::new();
+		while samples.len() < FRAMES * CHANNELS {
+			assert!(
+				kio::clock::now() < deadline,
+				"{} of {FRAMES} frames decoded; errors: {:?}",
+				samples.len() / CHANNELS,
+				errors()
+			);
+			let Some(sample) = sink.emit_by_name::<Option<gst::Sample>>("try-pull-sample", &[&100_000_000u64]) else {
+				continue;
+			};
+			let info = gst_audio::AudioInfo::from_caps(sample.caps().unwrap()).unwrap();
+			assert_eq!(info.channels() as usize, CHANNELS, "opusdec decoded {info:?}");
+			assert_eq!(info.format(), gst_audio::AudioFormat::S16le);
+			let buffer = sample.buffer().unwrap().map_readable().unwrap();
+			samples.extend(
+				buffer
+					.as_chunks::<2>()
+					.0
+					.iter()
+					.map(|&sample| f64::from(i16::from_le_bytes(sample))),
+			);
+		}
+		subscriber.set_state(gst::State::Null).unwrap();
+		publisher.set_state(gst::State::Null).unwrap();
+		feeder.join().unwrap();
+		relay.stop();
+		let errors = errors();
+		assert!(errors.iter().all(Option::is_none), "{errors:?}");
+
+		// Each tone's amplitude in a channel, by the Goertzel algorithm.
+		let window = &samples[(FRAMES - WINDOW) * CHANNELS..FRAMES * CHANNELS];
+		let amplitude = |channel: usize, tone: f64| {
+			let coeff = 2.0 * (std::f64::consts::TAU * tone / RATE as f64).cos();
+			let (mut prev, mut prev2) = (0.0, 0.0);
+			for &sample in window.iter().skip(channel).step_by(CHANNELS) {
+				(prev, prev2) = (sample + coeff * prev - prev2, prev);
+			}
+			2.0 * (prev * prev + prev2 * prev2 - coeff * prev * prev2).sqrt() / WINDOW as f64
+		};
+		for (channel, own) in TONES.into_iter().enumerate() {
+			let heard = TONES.map(|tone| amplitude(channel, tone).round());
+			assert!(
+				heard[channel] > AMPLITUDE / 2.0,
+				"channel {channel} lost its {own} Hz tone: {heard:?}"
+			);
+			for (other, &level) in heard.iter().enumerate() {
+				assert!(
+					other == channel || level < AMPLITUDE / 20.0,
+					"channel {channel} carries channel {other}'s {} Hz tone: {heard:?}",
+					TONES[other]
+				);
+			}
+		}
 	}
 }

@@ -25,14 +25,6 @@ impl Assembler {
 		Self::default()
 	}
 
-	/// Reset to the initial state
-	pub(super) fn reinit(&mut self) {
-		let old_data = mem::take(&mut self.data);
-		*self = Self::default();
-		self.data = old_data;
-		self.data.clear();
-	}
-
 	/// Get the the next chunk
 	pub(super) fn read(&mut self, max_length: usize) -> Option<Chunk> {
 		while self.data.front()?.end() <= self.bytes_read {

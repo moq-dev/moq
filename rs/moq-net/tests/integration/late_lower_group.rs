@@ -8,6 +8,7 @@
 //! spelling of both an omitted floor and group 0; the draft says that 0 is group 0.
 
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -82,8 +83,11 @@ async fn read_all(sub: &mut moq_net::track::Subscriber) -> Vec<(u64, usize)> {
 async fn session(version: &str, relay: bool, start: Option<u64>) -> Vec<(u64, usize)> {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
+		.broadcast()
 		.create_track(
 			"late",
 			Info::default()
@@ -91,7 +95,7 @@ async fn session(version: &str, relay: bool, start: Option<u64>) -> Vec<(u64, us
 				.with_max_age(FOREVER),
 		)
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let relay_origin = produce_origin(2);
 	let upstream = match relay {
@@ -117,10 +121,11 @@ async fn session(version: &str, relay: bool, start: Option<u64>) -> Vec<(u64, us
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 
 	let subscription = Subscription::default()
-		.with_max_delay(BUDGET)
+		.with_delay(Delay::default().with_max(BUDGET))
 		.with_ranges([floored(start)]);
 	let reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote
@@ -154,8 +159,11 @@ async fn session(version: &str, relay: bool, start: Option<u64>) -> Vec<(u64, us
 
 async fn in_process(start: Option<u64>) -> Vec<(u64, usize)> {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
+		.broadcast()
 		.create_track(
 			"late",
 			Info::default()
@@ -164,7 +172,7 @@ async fn in_process(start: Option<u64>) -> Vec<(u64, usize)> {
 		)
 		.unwrap();
 	let subscription = Subscription::default()
-		.with_max_delay(BUDGET)
+		.with_delay(Delay::default().with_max(BUDGET))
 		.with_ranges([floored(start)]);
 	let mut sub = track.subscribe(subscription);
 	let reader = kio::clock::sim::spawn(async move { read_all(&mut sub).await });
@@ -207,8 +215,11 @@ async fn an_explicit_floor_receives_a_group_created_below_the_first_served_group
 async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
+		.broadcast()
 		.create_track(
 			"late",
 			Info::default()
@@ -216,7 +227,7 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 				.with_max_age(FOREVER),
 		)
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let relay_origin = produce_origin(2);
 	let mut options = MockConnectOptions::new(version);
@@ -234,12 +245,15 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 
 	let subscribe = |range: Range| {
 		let track = remote.track("late").unwrap();
 		async move {
-			let subscription = Subscription::default().with_max_delay(BUDGET).with_ranges([range]);
+			let subscription = Subscription::default()
+				.with_delay(Delay::default().with_max(BUDGET))
+				.with_ranges([range]);
 			kio::clock::timeout(TIMEOUT, track.subscribe(subscription))
 				.await
 				.expect("subscribe timeout")

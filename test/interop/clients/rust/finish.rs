@@ -77,11 +77,10 @@ async fn main() -> anyhow::Result<()> {
 		.await?;
 	let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
 	if args.role == "publish" {
-		let broadcast = origin.create_broadcast(&args.broadcast)?;
-		let mut catalog =
-			moq_mux::catalog::Producer::<()>::new(&mut broadcast.broadcast().clone(), Default::default())?;
+		let route = origin.route(&args.broadcast, moq_net::origin::RouteOptions::hidden())?;
+		let mut catalog = moq_mux::catalog::Producer::<()>::new(&mut route.broadcast().clone(), Default::default())?;
 		let mut media = moq_mux::import::TrackStream::video(
-			broadcast.reserve_track("video")?,
+			route.broadcast().reserve_track("video")?,
 			catalog.reserve(),
 			moq_mux::import::VideoInit::new(moq_mux::import::VideoFormat::Avc3, Vec::new()),
 		)?;
@@ -90,24 +89,29 @@ async fn main() -> anyhow::Result<()> {
 		media.decode(&data)?;
 		media.finish()?;
 		catalog.finish()?;
-		broadcast.announce(Default::default())?;
+		route.announce()?;
 		// Keep the finished broadcast up for the late readers, then take it offline.
-		let linger = moq_mux::Linger::new([broadcast.broadcast().clone()], (media, catalog), LINGER);
+		let linger = moq_mux::Linger::new([route.broadcast().clone()], (media, catalog, route), LINGER);
 		println!("finish ready linger_us={}", LINGER.as_micros());
 		linger.wait().await;
 		println!("finish ended");
-		let health = origin.create_broadcast(format!("{}.health", args.broadcast))?;
-		let mut track = health.create_track("live", moq_net::track::Info::default())?;
+		let health = origin.route(
+			format!("{}.health", args.broadcast),
+			moq_net::origin::RouteOptions::hidden(),
+		)?;
+		let mut track = health
+			.broadcast()
+			.create_track("live", moq_net::track::Info::default())?;
 		track.write_frame(None, b"session-alive".to_vec())?;
 		track.finish()?;
-		health.announce(Default::default())?;
+		health.announce()?;
 		let ack = args.finish_ack.context("publisher needs --finish-ack")?;
 		let mut complete = String::new();
 		tokio::io::BufReader::new(tokio::fs::File::open(ack).await?)
 			.read_line(&mut complete)
 			.await?;
 		ensure!(complete == "complete\n", "finish acknowledgement was not complete");
-		health.close();
+		health.broadcast().close();
 		println!("finish acknowledged");
 	} else {
 		ensure!(args.role == "subscribe" && args.finish, "expected finish subscriber");
@@ -117,7 +121,11 @@ async fn main() -> anyhow::Result<()> {
 		ensure!(command == "read\n", "finish read phase was not released");
 		kio::clock::timeout(args.timeout, async {
 			let mut routes = consumer.announced();
-			let broadcast = consumer.follow(&args.broadcast, None)?.available().await?;
+			let broadcast = consumer
+				.follow(&args.broadcast, None)?
+				.available()
+				.await?
+				.context("went offline before serving")?;
 			let mut catalogs =
 				moq_mux::catalog::Consumer::<()>::new(&broadcast, moq_mux::catalog::CatalogFormat::Hang).await?;
 			let catalog = loop {
@@ -131,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
 				.track(name)?
 				.subscribe(Some(
 					moq_net::track::Subscription::default()
-						.with_max_delay(args.timeout)
+						.with_delay(moq_net::track::Delay::default().with_max(args.timeout))
 						.with_range(0..),
 				))
 				.await?;
@@ -156,7 +164,7 @@ async fn main() -> anyhow::Result<()> {
 					.next()
 					.await
 					.context("origin ended before broadcast withdrawal")?;
-				if let moq_net::announce::Event::End(announce) = event
+				if let moq_net::announce::Event::Absent(announce) = event
 					&& announce.prefix.as_str() == args.broadcast
 				{
 					break;
@@ -165,7 +173,8 @@ async fn main() -> anyhow::Result<()> {
 			let health = consumer
 				.follow(format!("{}.health", args.broadcast), None)?
 				.available()
-				.await?;
+				.await?
+				.context("went offline before serving")?;
 			let mut track = health.track("live")?.subscribe(None).await?;
 			let mut group = track.recv_group().await?.context("no health group")?;
 			let frame = group.read_frame().await?.context("no health frame")?;

@@ -52,7 +52,16 @@ for vendor in "${!vendors[@]}"; do
             LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
                 just rs test -p moq-video --features render,openh264 --lib --run-ignored only \
                 -E 'test(=render::export::vulkan::tests::vulkan_export_round_trips) | test(/^render::export::tests::(choosing_passes_over|a_named_encoder)_/)'
-            echo "GPU $vendor: Vulkan driver verified; encoder hardware tests arrive with its backend"
+            if [[ "$vendor" == 0x8086 ]]; then
+                va=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#libva.out)
+                media=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#intel-media-driver)
+                LD_LIBRARY_PATH="$va/lib" LIBVA_DRIVERS_PATH="$media/lib/dri" LIBVA_DRIVER_NAME=iHD \
+                    just rs test -p moq-video --no-default-features --features vaapi --lib --run-ignored only \
+                    -E 'test(=encode::backend::vaapi::hardware_tests::vaapi_1080p_ladder_stays_on_the_gpu)'
+            else
+                echo 'AMD VA-API encode and VPP are not covered by this hardware selection'
+            fi
+            echo "GPU $vendor: Vulkan driver verified"
             ;;
     esac
 done

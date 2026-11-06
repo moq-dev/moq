@@ -38,8 +38,13 @@ pub(crate) fn supported() -> bool {
 /// A CA on disk plus a certificate it signed, for the mTLS test. Returns the
 /// root, the client's certificate, and its key.
 fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
-	let ca_key = rcgen::KeyPair::generate().expect("ca keypair");
-	let mut ca_params = rcgen::CertificateParams::new(Vec::new()).expect("ca params");
+	let ca_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("ca keypair");
+	let mut ca_params = rcgen::CertificateParams::new(Vec::new())
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("ca params");
 	ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
 	ca_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign, rcgen::KeyUsagePurpose::CrlSign];
 	ca_params
@@ -47,8 +52,13 @@ fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathB
 		.push(rcgen::DnType::CommonName, "moq test ca");
 	let ca = rcgen::CertifiedIssuer::self_signed(ca_params, ca_key).expect("self-signed ca");
 
-	let key = rcgen::KeyPair::generate().expect("client keypair");
-	let mut params = rcgen::CertificateParams::new(vec!["client.localhost".to_string()]).expect("client params");
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("client keypair");
+	let mut params = rcgen::CertificateParams::new(vec!["client.localhost".to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("client params");
 	params.use_authority_key_identifier_extension = true;
 	params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
 	let cert = params.signed_by(&key, &ca).expect("signed client cert");
@@ -58,19 +68,32 @@ fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathB
 	let key_path = dir.join("client.key.pem");
 	std::fs::write(&root_path, ca.pem()).expect("write ca");
 	std::fs::write(&cert_path, cert.pem()).expect("write client cert");
-	std::fs::write(&key_path, key.serialize_pem()).expect("write client key");
+	std::fs::write(
+		&key_path,
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+	)
+	.expect("write client key");
 	(root_path, cert_path, key_path)
 }
 
 /// A self-signed certificate on disk.
 fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-	let key = rcgen::KeyPair::generate().expect("keypair");
-	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("cert params");
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("cert params");
 	let cert = params.self_signed(&key).expect("self-signed cert");
 	let cert_path = dir.join("cert.pem");
 	let key_path = dir.join("key.pem");
 	std::fs::write(&cert_path, cert.pem()).expect("write cert");
-	std::fs::write(&key_path, key.serialize_pem()).expect("write key");
+	std::fs::write(
+		&key_path,
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+	)
+	.expect("write key");
 	(cert_path, key_path)
 }
 
@@ -89,9 +112,15 @@ fn uring_config(cert: &std::path::Path, key: &std::path::Path) -> Config {
 }
 
 fn client() -> moq_tokio::Client {
+	offering(Vec::new())
+}
+
+/// A one-shot client offering only `version` (every version when empty).
+fn offering(version: Vec<moq_net::Version>) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
+	config.version = version;
 	config
 		.init(Default::default())
 		.expect("client init")
@@ -111,7 +140,7 @@ async fn connect(client: moq_tokio::Client, url: url::Url) -> moq_tokio::Connect
 /// shared origin.
 #[tokio::test]
 async fn uring_workers_serve_webtransport_and_raw_quic() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -126,7 +155,9 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 
 	// The stock loop serves everything: the uring workers own QUIC, the shared
 	// runtime owns auth and supervision.
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 
 	// A WebTransport publisher (https, the browser path)...
 	let wt_url: url::Url = format!("https://127.0.0.1:{port}/uring").parse().expect("parse url");
@@ -134,9 +165,13 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 	let raw_url: url::Url = format!("moql://127.0.0.1:{port}/uring").parse().expect("parse url");
 
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -150,7 +185,7 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 	for url in [&wt_url, &raw_url, &wt_url, &raw_url] {
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
-		let announced = consumer.announced();
+		let announced = consumer.routes();
 		let connection = connect(client().with_subscriber(origin), url.clone()).await;
 		subscribers.push((connection, consumer, announced));
 	}
@@ -204,24 +239,14 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 /// each of which must negotiate exactly the version it was pinned to.
 #[tokio::test]
 async fn uring_workers_serve_every_configured_version() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
 
 	let pinned = |version: &str| {
 		let version: moq_net::Version = version.parse().expect("known version");
-		let mut config = moq_tokio::connect::Config::default();
-		config.tls.insecure = Some(true);
-		config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
-		config.version = vec![version];
-		(
-			version,
-			config
-				.init(Default::default())
-				.expect("client init")
-				.with_reconnect(false),
-		)
+		(version, offering(vec![version]))
 	};
 
 	let dir = tempfile::tempdir().expect("tempdir");
@@ -231,12 +256,18 @@ async fn uring_workers_serve_every_configured_version() {
 		.expect("load relay")
 		.with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -256,7 +287,7 @@ async fn uring_workers_serve_every_configured_version() {
 			let (version, client) = pinned(name);
 			let origin = moq_tokio::origin::spawn();
 			let consumer = origin.consume();
-			let mut announced = consumer.announced();
+			let mut announced = consumer.routes();
 			let connection = connect(client.with_subscriber(origin), url).await;
 			assert_eq!(connection.version(), Some(version), "{scheme} {name}");
 
@@ -303,7 +334,7 @@ async fn uring_workers_serve_every_configured_version() {
 /// sends no SNI, rather than the WebTransport CONNECT host.
 #[tokio::test]
 async fn uring_workers_report_link_facts() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -317,7 +348,9 @@ async fn uring_workers_report_link_facts() {
 	let local = relay.addr().expect("bound address");
 	let port = local.port();
 	let sessions = relay.sessions().clone();
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 
 	let mut connections = Vec::new();
 	for scheme in ["moql", "https"] {
@@ -358,16 +391,23 @@ async fn uring_workers_report_link_facts() {
 /// are each sent a GOAWAY and leave, and `run` then returns with the worker
 /// threads joined and the port free.
 ///
-/// What an arrival is told is left of the window only reaches the wire on
-/// moq-transport, which this test does not dial; `shutdown_signal.rs`
-/// reads it through the shared runtime, whose supervision this path shares.
+/// Run once offering every version, and once pinned to moq-transport, whose
+/// GOAWAY carries the deadline on the wire: the established session is told
+/// the whole window, and the arrival only what is left of it.
 #[tokio::test]
 async fn uring_workers_drain_on_the_trigger() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
 
+	drain_on_the_trigger(None).await;
+	drain_on_the_trigger(Some("moq-transport-18".parse().expect("known version"))).await;
+}
+
+/// One relay drained under [`uring_workers_drain_on_the_trigger`], its two
+/// sessions offering only `version`, or every version when `None`.
+async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 	const DRAIN: Duration = Duration::from_secs(2);
 
 	let dir = tempfile::tempdir().expect("tempdir");
@@ -380,12 +420,17 @@ async fn uring_workers_drain_on_the_trigger() {
 	let port = relay.addr().expect("workers bound an address").port();
 	let trigger = relay.shutdown_trigger().clone();
 	let mut admissions = relay.admissions().expect("embedded admission");
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 
-	// One-shot (see `client`), so a session leaves on its GOAWAY rather than
+	// One-shot (see `offering`), so a session leaves on its GOAWAY rather than
 	// migrating, and closing cleanly shows it was one.
-	let client = client();
+	let client = offering(version.into_iter().collect());
 	let url: url::Url = format!("moql://127.0.0.1:{port}/drain").parse().expect("parse url");
+	let label = version.map_or("every version", |version| version.as_str());
+	// Only moq-transport puts the deadline on the wire.
+	let ietf = matches!(version, Some(moq_net::Version::Ietf(_)));
 
 	let connecting = tokio::spawn(connect(client.clone(), url.clone()));
 	let first = admissions.next().await.expect("first admission");
@@ -393,24 +438,46 @@ async fn uring_workers_drain_on_the_trigger() {
 	let (_first_lease, first_consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
 	first.grant(first_consumer);
 	let established = connecting.await.expect("client task");
+	if version.is_some() {
+		assert_eq!(established.version(), version, "{label}: negotiated version");
+	}
 
 	// Hold the next real connection at authentication. Its admission keeps the
 	// drain open even after the first session leaves, without an unrelated peer.
 	let arriving = tokio::spawn(connect(client, url));
 	let pending = admissions.next().await.expect("pending admission");
+	// The relay fixes its deadline inside `start`, so these bracket it: what is
+	// left of each bounds what the relay tells the arrival from below and above.
+	let earliest = kio::clock::now() + DRAIN;
 	trigger.start();
+	let deadline = kio::clock::now() + DRAIN;
 	let draining = established.draining().expect("connected");
 	let goaway = kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
 		.await
-		.expect("no GOAWAY after the trigger")
+		.unwrap_or_else(|_| panic!("{label}: no GOAWAY after the trigger"))
 		.expect("session closed without a GOAWAY");
-	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
+	assert_eq!(goaway.uri(), "", "{label}: expected a reconnect-to-me GOAWAY");
+	if ietf {
+		let timeout = goaway.timeout().expect("the GOAWAY carries its deadline");
+		assert!(
+			timeout > DRAIN / 2 && timeout <= DRAIN,
+			"{label}: an established session gets the whole window, got {timeout:?}"
+		);
+	}
 	kio::clock::timeout(TIMEOUT, established.closed())
 		.await
-		.expect("the drained session never closed")
+		.unwrap_or_else(|_| panic!("{label}: the drained session never closed"))
 		.expect("a one-shot session leaves cleanly on GOAWAY");
 
+	if ietf {
+		// Admit the arrival halfway into the window, so what is left of it is
+		// distinguishable from a fresh one. Measured from the deadline, not from
+		// the first session leaving, so a slow close cannot push the admission
+		// past the deadline (where the relay rejects it).
+		kio::clock::sleep_until(deadline - DRAIN / 2).await;
+	}
 	let (_arrival_lease, arrival_consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
+	let granted = kio::clock::now();
 	pending.grant(arrival_consumer);
 	let arrival = arriving.await.expect("arrival task");
 	let draining = arrival.draining().expect("connected");
@@ -419,19 +486,36 @@ async fn uring_workers_drain_on_the_trigger() {
 		moq_net::kio::wait(|waiter| draining.poll(waiter)),
 	)
 	.await
-	.expect("an arrival mid-drain was not sent a GOAWAY")
+	.unwrap_or_else(|_| panic!("{label}: an arrival mid-drain was not sent a GOAWAY"))
 	.expect("arrival closed without a GOAWAY");
-	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
+	assert_eq!(goaway.uri(), "", "{label}: expected a reconnect-to-me GOAWAY");
+	if ietf {
+		// Only what is left of the window, not a fresh one that would outlive the
+		// relay. The wire rounds up to whole milliseconds.
+		let left = deadline.saturating_duration_since(granted) + Duration::from_millis(1);
+		let timeout = goaway.timeout().expect("the GOAWAY carries its deadline");
+		assert!(
+			timeout <= left,
+			"{label}: an arrival mid-drain got {timeout:?}, past the {left:?} left of the window"
+		);
+		// Nor less: the relay read its clock no later than now, and the wire
+		// rounds up, so the remaining window is a floor.
+		let least = earliest.saturating_duration_since(kio::clock::now());
+		assert!(
+			timeout >= least,
+			"{label}: an arrival mid-drain got {timeout:?}, short of the {least:?} left of the window"
+		);
+	}
 	kio::clock::timeout(TIMEOUT, arrival.closed())
 		.await
-		.expect("the arrival never closed")
+		.unwrap_or_else(|_| panic!("{label}: the arrival never closed"))
 		.expect("a one-shot session leaves cleanly on GOAWAY");
 
 	// `run` joins the worker threads before returning, so returning at all is
 	// the clean join; the rebind proves every worker let go of the port.
 	kio::clock::timeout(TIMEOUT, running)
 		.await
-		.expect("run did not return after the drain window")
+		.unwrap_or_else(|_| panic!("{label}: run did not return after the drain window"))
 		.expect("run panicked")
 		.expect("run returned an error after the drain");
 	std::net::UdpSocket::bind(("127.0.0.1", port)).expect("a worker still holds the QUIC port");
@@ -457,7 +541,7 @@ async fn http_get(addr: SocketAddr, path: &str) -> String {
 /// The advertised fingerprint pins fresh handshakes before and after rotation.
 #[tokio::test]
 async fn workers_publish_their_rotated_certificate_fingerprint() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	for io_uring in [false, true] {
 		if io_uring && !supported() {
 			continue;
@@ -474,7 +558,9 @@ async fn workers_publish_their_rotated_certificate_fingerprint() {
 		let addr = listener.local_addr().expect("local addr");
 		let routes = relay.web().routes();
 		let serving = tokio::spawn(async move { axum::serve(listener, routes).await });
+		let ready = relay.ready();
 		let running = tokio::spawn(relay.run());
+		ready.wait().await.expect("relay ready");
 		let result = kio::clock::timeout(TIMEOUT, async {
 			for rotated in [false, true] {
 				if rotated {
@@ -521,7 +607,7 @@ async fn workers_publish_their_rotated_certificate_fingerprint() {
 /// A generated worker identity is advertised once and accepted by pinned clients.
 #[tokio::test]
 async fn workers_share_a_generated_identity() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	for io_uring in [false, true] {
 		if io_uring && !supported() {
 			continue;
@@ -543,7 +629,9 @@ async fn workers_share_a_generated_identity() {
 		let addr = listener.local_addr().unwrap();
 		let routes = relay.web().routes();
 		let serving = tokio::spawn(async move { axum::serve(listener, routes).await });
+		let ready = relay.ready();
 		let running = tokio::spawn(relay.run());
+		ready.wait().await.expect("relay ready");
 		let fingerprint = http_get(addr, "/certificate.sha256").await;
 		let mut dial = moq_tokio::connect::Config::default();
 		dial.tls.fingerprint = vec![fingerprint];
@@ -570,7 +658,7 @@ async fn workers_share_a_generated_identity() {
 /// nothing else, so only the mTLS path can carry the round trip through.
 #[tokio::test]
 async fn an_mtls_client_authenticates_without_a_token() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -585,7 +673,9 @@ async fn an_mtls_client_authenticates_without_a_token() {
 
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 
 	let client = || {
 		let mut dial = moq_tokio::connect::Config::default();
@@ -604,9 +694,13 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	// connecting proves nothing.
 	let url: url::Url = format!("moql://127.0.0.1:{port}/mtls").parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -616,7 +710,7 @@ async fn an_mtls_client_authenticates_without_a_token() {
 
 	let subscriber_origin = moq_tokio::origin::spawn();
 	let consumer = subscriber_origin.consume();
-	let mut announced = consumer.announced();
+	let mut announced = consumer.routes();
 	let subscriber = connect(client().with_subscriber(subscriber_origin), url).await;
 
 	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
@@ -664,7 +758,7 @@ async fn an_mtls_client_authenticates_without_a_token() {
 #[cfg(feature = "qlog")]
 #[tokio::test]
 async fn uring_workers_write_qlog_traces() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -677,15 +771,21 @@ async fn uring_workers_write_qlog_traces() {
 	config.quic.qlog = Some(traces.clone());
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 
 	// A real session, so a trace covers a handshake and application data
 	// rather than a connection that only ever exchanged Initials.
 	let url: url::Url = format!("moql://127.0.0.1:{port}/qlog").parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -695,7 +795,7 @@ async fn uring_workers_write_qlog_traces() {
 
 	let subscriber_origin = moq_tokio::origin::spawn();
 	let consumer = subscriber_origin.consume();
-	let mut announced = consumer.announced();
+	let mut announced = consumer.routes();
 	let subscriber = connect(client().with_subscriber(subscriber_origin), url).await;
 	let (_, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 		.await
@@ -750,7 +850,7 @@ async fn uring_workers_write_qlog_traces() {
 /// refuses, over WebTransport and raw QUIC alike.
 #[tokio::test]
 async fn uring_refusals_reach_metrics() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -763,7 +863,9 @@ async fn uring_refusals_reach_metrics() {
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 	let internal = relay.internal().addr().expect("internal listener bound");
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 
 	// `/rooms` is outside the public rules. A client may finish connecting before
 	// the verdict lands, so a session that closes promptly counts as refused.
@@ -824,13 +926,13 @@ async fn spawn_auth_server(policy: moq_auth::serve::Policy) -> url::Url {
 }
 
 /// The next route and whether it is active.
-async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route)
-		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route)
-		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-		moq_net::announce::Event::End(route) => Some((route, false)),
+		moq_net::origin::RouteEvent::Start(route)
+		| moq_net::origin::RouteEvent::Update(route)
+		| moq_net::origin::RouteEvent::Restart(route)
+		| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 	}
 }
 
@@ -840,7 +942,7 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 async fn uring_forwards_the_setup_token() {
 	use moq_tokio::quic::{driver, web};
 
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -872,7 +974,9 @@ async fn uring_forwards_the_setup_token() {
 			admission.grant(moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(all.clone(), all)));
 		}
 	});
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	let tls = config.tls.build().unwrap();
@@ -885,10 +989,9 @@ async fn uring_forwards_the_setup_token() {
 		} else {
 			b"moqt-18".to_vec()
 		}];
-		let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
 		let conn = client
 			.connect(
-				&driver::client::Config::new(std::sync::Arc::new(crypto)),
+				&driver::client::Config::new(std::sync::Arc::new(tls)),
 				addr,
 				"localhost",
 			)
@@ -931,7 +1034,7 @@ async fn uring_forwards_the_setup_token() {
 /// The embedded auth decider receives the same transport facts as the Tokio path.
 #[tokio::test]
 async fn uring_auth_reports_distinct_quic_and_webtransport() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -963,7 +1066,9 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 		}
 		leases
 	});
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 	let mut connections = Vec::new();
 	for scheme in ["moql", "https"] {
 		let url = format!("{scheme}://127.0.0.1:{port}/transport").parse().unwrap();
@@ -981,7 +1086,7 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 /// request would carry it.
 #[tokio::test]
 async fn uring_workers_offer_the_configured_extensions() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -996,7 +1101,9 @@ async fn uring_workers_offer_the_configured_extensions() {
 		let mut relay = Relay::load(config).await.unwrap().with_signals(false);
 		let port = relay.addr().unwrap().port();
 		let mut admissions = relay.admissions().expect("embedded auth");
+		let ready = relay.ready();
 		let running = tokio::spawn(relay.run());
+		ready.wait().await.expect("relay ready");
 
 		let mut dial = moq_tokio::connect::Config::default();
 		dial.tls.insecure = Some(true);
@@ -1050,12 +1157,12 @@ async fn uring_workers_offer_the_configured_extensions() {
 #[cfg(feature = "quic")]
 #[test]
 fn uring_workers_bound_stalled_handshakes() {
+	use moq_net::transport::Error as _;
 	use moq_tokio::quic::{driver, web};
-	use web_transport_trait::Error as _;
 
 	const LISTEN: Duration = Duration::from_millis(200);
 
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -1073,7 +1180,9 @@ fn uring_workers_bound_stalled_handshakes() {
 		let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 		let port = relay.addr().expect("workers bound an address").port();
 		let addr = SocketAddr::from(([127, 0, 0, 1], port));
+		let ready = relay.ready();
 		let running = tokio::spawn(relay.run());
+		ready.wait().await.expect("relay ready");
 
 		let mut config = moq_tokio::connect::Config::default();
 		config.tls.insecure = Some(true);
@@ -1081,10 +1190,9 @@ fn uring_workers_bound_stalled_handshakes() {
 		let crypto = |alpn: &[u8]| {
 			let mut tls = tls.clone();
 			tls.alpn_protocols = vec![alpn.to_vec()];
-			let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("QUIC crypto");
 			let mut transport = driver::transport::Config::default();
 			transport.congestion = std::sync::Arc::new(moq_congestion::Unlimited);
-			let mut config = driver::client::Config::new(std::sync::Arc::new(crypto));
+			let mut config = driver::client::Config::new(std::sync::Arc::new(tls));
 			config.transport = transport;
 			config
 		};
@@ -1182,7 +1290,7 @@ async fn stall_after_hello(server: SocketAddr) -> (SocketAddr, tokio::sync::ones
 /// The harness keeps only the connection target, including its span on worker and shared tasks.
 #[tokio::test]
 async fn uring_sessions_log_their_close_under_a_connection_span() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -1198,7 +1306,9 @@ async fn uring_sessions_log_their_close_under_a_connection_span() {
 		.with_signals(false);
 	let port = relay.addr().unwrap().port();
 	let trigger = relay.shutdown_trigger().clone();
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 	let mut connections = Vec::new();
 	for (id, scheme) in ["moql", "https"].into_iter().enumerate() {
 		let url = format!("{scheme}://127.0.0.1:{port}/logs").parse().unwrap();
@@ -1239,4 +1349,60 @@ async fn uring_sessions_log_their_close_under_a_connection_span() {
 			);
 		}
 	}
+}
+
+/// A ring refused at worker startup reaches a `Ready` waiter with the actionable error.
+#[tokio::test]
+async fn uring_startup_reports_the_memlock_limit() {
+	// Resource limits belong to the process, so isolate even under libtest.
+	if !test_env::Env::default().set("MOQ_TEST_MEMLOCK", "0").isolate() {
+		return;
+	}
+	let _ = rind_rustls::default_provider().unwrap().install_default();
+	if !supported() {
+		return;
+	}
+	// CAP_IPC_LOCK, which root holds, exempts io_uring from the limit.
+	let status = std::fs::read_to_string("/proc/self/status").expect("process status");
+	let effective = status
+		.lines()
+		.find_map(|line| line.strip_prefix("CapEff:"))
+		.expect("effective capabilities");
+	let effective = u64::from_str_radix(effective.trim(), 16).expect("capability mask");
+	const CAP_IPC_LOCK: u32 = 14;
+	if effective & (1 << CAP_IPC_LOCK) != 0 {
+		eprintln!("skipping the memlock test: CAP_IPC_LOCK lifts the limit");
+		return;
+	}
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	let relay = Relay::load(uring_config(&cert, &key))
+		.await
+		.expect("load relay")
+		.with_signals(false);
+	let mut limit = libc::rlimit {
+		rlim_cur: 0,
+		rlim_max: 0,
+	};
+	// SAFETY: valid out-pointer in an isolated test process.
+	assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) }, 0);
+	limit.rlim_cur = 0;
+	// SAFETY: valid limit in an isolated test process.
+	assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &limit) }, 0);
+	let ready = relay.ready();
+	let running = tokio::spawn(relay.run());
+	let error = ready.wait().await.expect_err("a worker needs locked memory");
+	let message = format!("{error:#}");
+	for expected in [
+		"io_uring worker 0 failed to start",
+		"RLIMIT_MEMLOCK",
+		"ulimit -l",
+		"LimitMEMLOCK=",
+	] {
+		assert!(message.contains(expected), "{message}");
+	}
+	running
+		.await
+		.expect("join relay")
+		.expect_err("run fails with the waiter");
 }

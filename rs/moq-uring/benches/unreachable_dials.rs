@@ -82,8 +82,8 @@ mod linux {
 				};
 				let handle = worker.handle();
 				let endpoint = quic::Endpoint::new(
-					handle.udp(v6_only(), udp::Config::default()).expect("socket"),
 					quic::endpoint::Config::default(),
+					handle.udp(v6_only(), udp::Config::default()).expect("socket"),
 				)
 				.expect("endpoint");
 

@@ -15,7 +15,7 @@
 //! catalog rendition through their container producer.
 //!
 //! A single-codec importer takes a track the caller mints, typically
-//! `broadcast.unique_track(suffix, catalog.track_info())`, so the retention the catalog
+//! `broadcast.unique_track(suffix, catalog.track_info())`, so the max age the catalog
 //! declares reaches the track.
 
 mod container;
@@ -34,14 +34,8 @@ pub use track::*;
 /// retires many sources would otherwise hold each one's largest input chunk or element. Each source
 /// here buffers a [`PAD`]-sized element (an atom, a tag, a block, an access unit) or chunk, then the
 /// test measures what dropping the finished importers frees while their tracks are still held.
-///
-/// The counting allocator below serves this crate's whole unit-test binary, but it counts only on a
-/// thread inside [`released`], so other tests are unaffected.
 #[cfg(test)]
 mod tests {
-	use std::alloc::{GlobalAlloc, Layout, System};
-	use std::cell::Cell;
-
 	use super::*;
 	use bytes::Bytes;
 
@@ -51,45 +45,10 @@ mod tests {
 	/// Small enough that an element spans many writes, so the importer accumulates it.
 	const CHUNK: usize = 64 * 1024;
 
-	thread_local! {
-		/// Bytes this thread freed minus those it allocated while measuring. Per thread so concurrent
-		/// tests don't mix, and `const` so the allocator can read it without allocating.
-		static RELEASED: Cell<Option<isize>> = const { Cell::new(None) };
-	}
-
-	fn count(bytes: isize) {
-		// `try_with` because TLS is unavailable while a thread is being torn down.
-		let _ = RELEASED.try_with(|released| released.set(released.get().map(|n| n + bytes)));
-	}
-
-	/// Counts on the measuring thread; every call forwards to the system allocator unchanged.
-	struct Counting;
-
-	unsafe impl GlobalAlloc for Counting {
-		unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-			count(-(layout.size() as isize));
-			unsafe { System.alloc(layout) }
-		}
-
-		unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-			count(layout.size() as isize);
-			unsafe { System.dealloc(ptr, layout) }
-		}
-
-		unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-			count(layout.size() as isize - new_size as isize);
-			unsafe { System.realloc(ptr, layout, new_size) }
-		}
-	}
-
-	#[global_allocator]
-	static ALLOCATOR: Counting = Counting;
-
 	/// The heap `f` gives back, net of what it allocates on the way.
 	fn released(f: impl FnOnce()) -> isize {
-		RELEASED.with(|released| released.set(Some(0)));
-		f();
-		RELEASED.with(|released| released.replace(None).unwrap())
+		let ((), usage) = crate::allocation::measure(f);
+		usage.freed as isize - usage.allocated as isize
 	}
 
 	/// One source's importer, finished and kept the way a binding keeps it.
@@ -101,10 +60,7 @@ mod tests {
 	/// frees while every published track is still held.
 	fn retire(sources: usize, import: Import) -> isize {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		// No HLS records: retiring them frees their compressed groups' encoders, which the
-		// catalog owns rather than the importer.
-		let config = crate::catalog::Config::default().with_hls(None);
-		let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let consumer = broadcast.consume();
 
 		let finished: Vec<Finished> = (0..sources).map(|_| import(&broadcast, &catalog)).collect();

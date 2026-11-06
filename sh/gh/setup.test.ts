@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/noTemplateCurlyInString: GitHub Actions expressions are literal strings.
 // Runner timing and action execution stay in CI. These tests check the setup gates.
 import { expect, test } from "bun:test";
 
@@ -16,7 +17,7 @@ const workflow = Bun.YAML.parse(await Bun.file(".github/workflows/check.yml").te
 };
 
 for (const name of ["check"]) {
-	test(`${name} queries before setup and keeps its required check name`, () => {
+	test(`${name} queries before setup and keeps its check name`, () => {
 		const job = workflow.jobs[name];
 		expect(job.name).toBe("Check");
 		const scopeIndex = job.steps.findIndex((step) => step.id === "scope");
@@ -64,7 +65,13 @@ test("self-hosted queue jobs use local caches without R2 credentials", async () 
 	const startsWith = (value: string, prefix: string) => value.startsWith(prefix);
 	const guard = new Function("runner", "github", "startsWith", `return (${action.runs.steps[0].if});`);
 	const queue = "refs/heads/gh-readonly-queue/main/pr-1-0123456789abcdef0123456789abcdef01234567";
-	const refs = ["refs/heads/main", "refs/heads/feature", "refs/pull/1/merge", queue, "refs/heads/gh-readonly-queue/release/pr-1-0"];
+	const refs = [
+		"refs/heads/main",
+		"refs/heads/feature",
+		"refs/pull/1/merge",
+		queue,
+		"refs/heads/gh-readonly-queue/release/pr-1-0",
+	];
 	for (const name of ["Queue", "Land", "Check", "Untrusted"]) {
 		for (const event of ["merge_group", "pull_request", "push"]) {
 			for (const ref of refs) {

@@ -10,7 +10,7 @@
 //! `Ok(None)` only after that FIN; any other ending is an error.
 //!
 //! The publisher opens the final group and writes its first frame (the group stream
-//! opens), finishes the track (SUBSCRIBE_END goes out), then writes the rest, finishes
+//! opens), finishes the track (SUBSCRIBE_FINISH goes out), then writes the rest, finishes
 //! the group and disconnects with no await in between, so the final group's tail and
 //! its FIN never leave. The close lands before the subscriber reads on. The subscriber
 //! must then either see every frame or end with an error; it must not end `Ok(None)`
@@ -56,9 +56,11 @@ fn expected() -> Vec<Vec<u8>> {
 /// payloads and the error it ended with, if any.
 async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("video", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	broadcast.announce().unwrap();
 
 	let subscriber = produce_origin(2);
 	let mut options = MockConnectOptions::new("moq-lite-05".parse::<Version>().unwrap());
@@ -70,7 +72,8 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 
 	// The publisher only learns of a subscription once the subscriber polls it, so the
 	// reader runs concurrently. It reports the head group drained, then waits to be told
@@ -125,7 +128,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 		.expect("reader gone");
 
 	// The final group opens and its first frame is sent, then the track's end is
-	// declared: SUBSCRIBE_END reaches the subscriber with the group still open, as it
+	// declared: SUBSCRIBE_FINISH reaches the subscriber with the group still open, as it
 	// does whenever a finish races a group still in flight.
 	let mut tail = track.append_group().unwrap();
 	tail.write_frame(Timestamp::ZERO, TAIL[0]).unwrap();
@@ -213,9 +216,11 @@ enum Kill {
 /// `recv_group` and that group end with once it drains what arrived.
 async fn killed(version: &str, kill: Kill) -> (Option<moq_net::Error>, Option<moq_net::Error>) {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("video", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	broadcast.announce().unwrap();
 
 	let subscriber = produce_origin(2);
 	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
@@ -229,7 +234,8 @@ async fn killed(version: &str, kill: Kill) -> (Option<moq_net::Error>, Option<mo
 		.unwrap()
 		.available()
 		.await
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 	// Subscribing resolves only once the publisher serves the track, which it does
 	// only after seeing the subscription, so the reader runs concurrently.
 	let reader = kio::clock::sim::spawn(async move {
@@ -318,9 +324,11 @@ async fn a_session_close_cancels_the_track_from_either_side() {
 /// the error the fetch ends with.
 async fn fetch_killed(version: &str, kill: Kill) -> moq_net::Error {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let mut dynamic = broadcast.requests();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let mut dynamic = broadcast.broadcast().requests();
+	broadcast.announce().unwrap();
 
 	let subscriber = produce_origin(2);
 	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
@@ -334,7 +342,8 @@ async fn fetch_killed(version: &str, kill: Kill) -> moq_net::Error {
 		.unwrap()
 		.available()
 		.await
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 	let mut fetching = kio::clock::sim::spawn(async move { remote.track("video").unwrap().fetch_group(0, None).await });
 
 	let request = dynamic.requested_track().await.expect("the track request arrives");

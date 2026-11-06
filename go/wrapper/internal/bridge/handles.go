@@ -12,6 +12,19 @@ import (
 // moq, so they are set before a subpackage can call them. They take and return
 // `any` because this package cannot import moq's types without a cycle.
 var (
+	// OriginProducer returns the handle behind a *moq.OriginProducer.
+	OriginProducer func(any) *ffi.MoqOriginProducer
+	// WrapGroupProducer wraps a socket write half.
+	WrapGroupProducer func(*ffi.MoqGroupProducer) any
+	// WrapGroupConsumer wraps a socket read half.
+	WrapGroupConsumer func(*ffi.MoqGroupConsumer) any
+	// WrapTrackProducer wraps a socket write half.
+	WrapTrackProducer func(*ffi.MoqTrackProducer) any
+	// WrapTrackConsumer retains a socket's subscribed read half.
+	WrapTrackConsumer func(*ffi.MoqTrackConsumer) any
+	// TrackInfo converts a *moq.TrackInfo to the generated record.
+	TrackInfo func(any) (*ffi.MoqTrackInfo, error)
+
 	// BroadcastProducer returns the handle behind a *moq.BroadcastProducer.
 	BroadcastProducer func(any) *ffi.MoqBroadcastProducer
 	// TrackProducer returns the handle behind a *moq.TrackProducer.
@@ -41,6 +54,9 @@ var TrackRequest func(any) *ffi.MoqTrackRequest
 // Subscription converts a *moq.Subscription to the generated record.
 var Subscription func(any) (*ffi.MoqSubscription, error)
 
+// Delay converts a moq.Delay to the generated record.
+var Delay func(any) (ffi.MoqDelay, error)
+
 // NonNegative refuses a negative duration, which the generated converter
 // would panic on rather than return an error.
 func NonNegative(value *time.Duration, name string) error {
@@ -50,10 +66,26 @@ func NonNegative(value *time.Duration, name string) error {
 	return nil
 }
 
-// Rendition refuses an audio rendition's negative jitter, for the same reason.
+// Rendition refuses a rendition's negative jitter or warmup, for the same reason.
 func Rendition(rendition ffi.MoqRendition) error {
-	if audio, ok := rendition.(ffi.MoqRenditionAudio); ok {
-		return NonNegative(audio.Config.Jitter, "jitter")
+	switch rendition := rendition.(type) {
+	case ffi.MoqRenditionAudio:
+		return Audio(rendition.Config)
+	case ffi.MoqRenditionVideo:
+		return Video(rendition.Config)
 	}
 	return nil
+}
+
+// Audio refuses an audio rendition's negative jitter or warmup.
+func Audio(audio ffi.MoqAudio) error {
+	if err := NonNegative(audio.Jitter, "jitter"); err != nil {
+		return err
+	}
+	return NonNegative(audio.Warmup, "warmup")
+}
+
+// Video refuses a video rendition's negative warmup.
+func Video(video ffi.MoqVideo) error {
+	return NonNegative(video.Warmup, "warmup")
 }

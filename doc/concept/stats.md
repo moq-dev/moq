@@ -36,7 +36,11 @@ measurement stays explicit, so it remains distinct from unavailable.
 [CLI](/bin/cli#reports-and-feedback), and `moq import --echo-path` solicits
 feedback. An import counts the frames and payload
 bytes it writes to each rendition, and video keyframes; an export counts what
-it reads and records its newest arrival. See the
+it reads and records its newest arrival. In the browser, `<moq-publish stats>`
+and `echo-path` do the same for the [publisher](/lib/js/publish#stats-and-feedback),
+and `<moq-watch echo>` reports what its [player](/lib/js/watch#feedback)
+received, decoded, and played, with only the PROBE round-trip time as its
+transport. See the
 [hang draft](/draft/moq-hang#media-stats) for track framing, field units, and
 the feedback convention.
 
@@ -85,9 +89,16 @@ fixed limits:
 An import grades the stream as it arrived. An export builds every header
 itself and runs no checks, so its counters stay zero and only its rows'
 `units` and `quiet` move. Neither grades the wire a receiver sees downstream.
-The PCR checks are graded on PCR values, not arrival: they speak for the
-encoder's insertion, since the network re-times arrival, and a forward step
-over 100 ms counts as both. 1.6 `PID_error` is covered, more strictly, by each
+The checks grade the encoder's insertion, not the network's delivery: a forward
+PCR step over 100 ms counts as both PCR errors, and a missing or frozen PCR
+counts once per outage, clearing when the PCR advances again. The table, PCR
+and PTS intervals run on a health clock that follows the PCR and, across a
+stall, the packets the multiplex carries at the constant rate its PCR measured,
+so a file read instantly grades the same as a live feed, however either is
+batched. Until a constant rate is measured, or on VBR input, the clock falls
+back to arrival once each input chunk is read, which includes upstream delays.
+A fully stopped input adds no time, by timer or at EOF: the PCR's step when it
+resumes counts an encoder outage. 1.6 `PID_error` is covered by each
 row's `units` and `quiet`: a dead video path behind a live mux still sends
 PCR-only packets on its PID, which a packet count reads as live.
 `PCR_accuracy_error` is not measured. No verdict is computed: a sparse stream
@@ -113,7 +124,7 @@ source's. `export ts --passthrough` reports it without `mpegts`.
 `hang::health` and `Hang.Health` in `@moq/hang` grade a client from two
 consecutive reports: `publisher` takes a pair of `stats` snapshots, `viewer` a
 pair of `.echo` snapshots. Each report names the broadcast it was read from
-(its path and epoch), which observed every number in it; the caller states the
+(its path and instance), which observed every number in it; the caller states the
 interval between the two and how long ago the newer one arrived. Both
 languages compute the same result from the shared fixtures in
 `rs/hang/fixtures/health.json`.
@@ -127,7 +138,7 @@ listed as `unknown`, and a verdict with nothing graded is `unknown`: a browser
 publisher that knows only its PROBE RTT grades on RTT alone. A report older
 than the stale limit is `unknown` throughout, as is a transport sample whose
 `age` plus the report's exceeds it, and a client with no report has no sample at all. A changed
-path or epoch (`replaced`) or a decreasing counter (`decrease`) is a reset:
+path or instance (`replaced`) or a decreasing counter (`decrease`) is a reset:
 the deltas start over, so only gauges are graded until the next pair.
 Container sections such as `mpegts` are not read.
 
@@ -146,8 +157,9 @@ A viewer's loss counters describe its own uplink, so they are reported but not
 graded. Loss and headroom divide the connection's transport counters by the
 report's own media, so they hold when the broadcast is the only one its
 connection publishes. The transport limits were measured on one paced TS feed
-through a shaped link over five-second intervals; no CLI reporter emits
-`skipped`, `late`, `errors`, or `stalled`, so their limits are not measured.
+through a shaped link over five-second intervals. Only `import capture`
+emits `skipped`, and no CLI reporter emits `late`, `errors`, or `stalled`, so
+those limits are not measured.
 
 A publisher whose link falls below its media rate sends no report at all,
 since its report track sits below every media track. Its health goes stale
@@ -170,15 +182,13 @@ generate more stats.
   prefix, so a consumer skips any path without `node` where it expects one.
 
 The broadcast stays announced for the producer's life. Each announcement
-carries a fresh [publisher epoch](/concept/moq-lite#publisher-epochs) on its
+carries a fresh [instance](/concept/moq-lite#publisher-instances) on its
 route, so a restarted node is a new broadcast at the same path: it replaces the
-old one, and no relay serves it groups cached under the old epoch. A reader
-treats each epoch as its own set of counters. The epoch rides only moq-lite 07
-announcements; over moq-transport and older moq-lite versions a reader sees the same
-change as an end and a start at the path.
-An aggregating reader pins each node's subscription to its epoch, and when one
-publisher is reached through both kinds of link (with and without an epoch), it
-carries only that path's outgoing counters across the change.
+old one, and no relay serves it groups cached under the old instance. A reader
+treats each instance as its own set of counters. The instance rides moq-lite 07
+announcements; over anything else the receiving session mints one per
+announcement, so a reader sees the same change as an end and a start at the path.
+An aggregating reader pins each node's subscription to its instance.
 
 Every group shares the node's broadcast, so a token scoped to the stats prefix
 reads every group's tracks; scope by group with an aggregating reader instead.
@@ -262,11 +272,11 @@ earlier instance wrote.
 }
 ```
 
-Each tier that recorded anything in the epoch, with its egress (`publisher`)
+Each tier that recorded anything in the node's run, with its egress (`publisher`)
 and ingress (`subscriber`) [Traffic](#traffic) and its [Presence](#presence),
 summed over every broadcast and stats label. Unlike a group's paths and labels,
 an entry that ends stays counted, so the next frame always carries everything
-since the epoch began: a reader that misses frames loses nothing while the
+since the run began: a reader that misses frames loses nothing while the
 node stays announced. Billing reads this track.
 
 ### Group
@@ -285,7 +295,7 @@ node stays announced. Billing reads this track.
 ```
 
 `epoch` is a UUIDv7 minted for each instance of the group's track, and a
-reader keeps each epoch's counters apart, as it does for a broadcast's epochs.
+reader keeps each epoch's counters apart, as it does for a broadcast's instances.
 `tiers` maps each tier the group recorded on since then. Its top-level
 `publisher`, `subscriber`, and `sessions` are the group's [totals](#totals), so
 a totals reader parses them unchanged, and like the node's totals they keep
@@ -313,7 +323,7 @@ anyone holds the track. A track held again starts over.
 
 Wire bytes start at zero on every hold, including the first. Other presence
 fields seed from the root's current live-session counters; they do not recover
-closed roots from before the hold. Node totals keep the full epoch's
+closed roots from before the hold. Node totals keep the full run's
 history. Each recreated track starts a fresh snapshot group numbered by its
 publish interval, past any group of an earlier hold, so relay caches can
 distinguish the two.
@@ -360,7 +370,7 @@ limit: the track then ends with `FRAME_TOO_LARGE` instead of going stale.
     "fetches": 0,
     "bytes": 1048576, "frames": 900, "groups": 30, "datagrams": 0,
     "inflated": 0,
-    "stale": { "bytes": 0, "frames": 0, "groups": 0, "datagrams": 0 },
+    "stale": { "bytes": 0, "frames": 0, "groups": 0 },
     "announced": 1, "announced_closed": 0,
     "broadcasts": 3, "broadcasts_closed": 1,
     "subscriptions": 6, "subscriptions_closed": 2
@@ -375,10 +385,10 @@ limit: the track then ends with `FRAME_TOO_LARGE` instead of going stale.
 | `broadcasts_started` / `broadcasts_ended` | On egress (`publisher`), a session's first subscription to the broadcast and its last one closing. Started minus ended is the viewer count. Ingress (`subscriber`) leaves both at zero: it does not count viewers. |
 | `subscriptions_started` / `subscriptions_ended` | Track subscriptions opened and closed. |
 | `fetches` | One-shot group fetches requested, including ones that found nothing. Their payload counts in `bytes`, `frames`, and `groups`. |
-| `bytes` / `frames` / `groups` | Payload delivered. |
-| `datagrams` | Groups delivered as an unreliable datagram. A subset of `groups`. |
-| `inflated` | Bytes inflated from compressed groups for plain readers, counted once per group however many share the copy, plus received compressed datagrams, which inflate on arrival. Not part of `bytes`, which counts payload as stored or sent. |
-| `stale` | Payload skipped because it aged past a subscriber's latency budget, with the same four fields. Disjoint from the top-level payload counters. |
+| `bytes` / `frames` / `groups` | Payload delivered. `bytes` includes datagram payloads. |
+| `datagrams` | Datagrams of datagram tracks delivered. A datagram belongs to no group, so it counts in neither `groups` nor `frames`. |
+| `inflated` | Bytes inflated from compressed groups for plain readers, counted once per group however many share the copy. Not part of `bytes`, which counts payload as stored or sent. |
+| `stale` | Payload skipped because it aged past a subscriber's latency budget, with `bytes`, `frames`, and `groups`. Disjoint from the top-level payload counters. |
 
 The last six fields are legacy spellings of the `*_started` and `*_ended`
 counters, still written so an older consumer reads a newer relay. A reader
@@ -471,13 +481,13 @@ Every counter is a cumulative, monotonic unsigned integer. A rate is the
 difference between two frames divided by the time between them, and a live
 count is started minus ended. A frame never shows ended above started.
 
-A new epoch starts every counter from zero, so a reader summing a node over
-time adds each epoch's counters rather than diffing across them. Within one
-epoch the totals never go down. A group's path or label counter going **down**
+A new instance starts every counter from zero, so a reader summing a node over
+time adds each instance's counters rather than diffing across them. Within one
+instance the totals never go down. A group's path or label counter going **down**
 means the entry was dropped and re-created, and a presence or prefix counter going down
 means the track was held again. Treat it as the start of a fresh segment
-rather than a negative rate. On a route without an epoch (an older relay, or a session older
-than moq-lite 07), a counter going down also means the node restarted.
+rather than a negative rate. On a route whose instance a session minted (an older relay, or
+a session older than moq-lite 07), a counter going down also means the node restarted.
 
 A reader ignores unknown fields, so a newer relay can add counters, and
 defaults a missing field to zero, so it can read an older relay.

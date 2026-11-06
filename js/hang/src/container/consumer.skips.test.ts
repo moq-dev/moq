@@ -2,19 +2,19 @@ import { expect, spyOn, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Time, Track, Varint } from "@moq/net";
 import { Signal } from "@moq/signals";
-import { Consumer, type Delay } from "./consumer.ts";
+import { Consumer } from "./consumer.ts";
 import { Format } from "./legacy.ts";
 
 for (const count of [1, 16, 256]) {
 	test(`Consumer summarizes ${count} skipped groups once per catch-up`, async () => {
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
 		const track = new Track.Producer("tone");
-		const delay = new Signal<Delay>({ max: Milli(30_000) });
-		const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
+		const delay = new Signal<Track.Delay>({ max: Milli(30_000) });
+		const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) } }), {
 			format: new Format("data"),
 			delay,
 		});
-		const write = (sequence: number, timestamp: number) => {
+		const write = (sequence: bigint, timestamp: number) => {
 			const group = track.createGroup(sequence);
 			group.writeFrame({ payload: Varint.encode(timestamp), timestamp: Time.Timestamp.now() });
 			return group;
@@ -24,19 +24,19 @@ for (const count of [1, 16, 256]) {
 		};
 		try {
 			// Sparse sequence numbers make the count differ from the sequence range.
-			for (let i = 0; i < count; i++) write(i * 2, i * 1000);
+			for (let i = 0; i < count; i++) write(BigInt(i) * 2n, i * 1000);
 			await buffered(count - 1);
 			expect(warn).not.toHaveBeenCalled();
 			delay.set({ max: Milli.zero });
-			const newest = write(count * 2, count * 1000);
+			const newest = write(BigInt(count) * 2n, count * 1000);
 			await buffered(count);
 			expect(warn).toHaveBeenCalledTimes(1);
 			expect(warn).toHaveBeenLastCalledWith(`skipping slow groups: track=tone 0 -> ${count * 2} count=${count}`);
 			expect(consumer.buffered.peek()[0]?.start).toBe(Milli(count));
 			// The retained group is still delivered, and another catch-up reports separately.
-			expect(await consumer.next()).toMatchObject({ kind: "frame", group: count * 2 });
+			expect(await consumer.next()).toMatchObject({ kind: "frame", group: BigInt(count) * 2n });
 			newest.writeFrame({ payload: Varint.encode(count * 1000), timestamp: Time.Timestamp.now() });
-			write(count * 2 + 2, (count + 1) * 1000);
+			write(BigInt(count) * 2n + 2n, (count + 1) * 1000);
 			await buffered(count + 1);
 			expect(warn).toHaveBeenCalledTimes(2);
 			expect(warn).toHaveBeenLastCalledWith(
@@ -59,18 +59,18 @@ for (const open of [true, false]) {
 	test(`a buffered backlog starts within the budget (sixth group ${open ? "open" : "finished"})`, async () => {
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
 		const track = new Track.Producer("backlog");
-		const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
+		const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) } }), {
 			format: new Format("data"),
 			delay: { max: Milli(1500) },
 		});
 		const frame = (micros: number) => ({ payload: Varint.encode(micros), timestamp: Time.Timestamp.now() });
 		try {
-			for (let g = 0; g < 5; g++) {
+			for (let g = 0n; g < 5n; g++) {
 				const group = track.createGroup(g);
-				for (let f = 0; f < 10; f++) group.writeFrame(frame(g * 1_000_000 + f * 100_000));
+				for (let f = 0; f < 10; f++) group.writeFrame(frame(Number(g) * 1_000_000 + f * 100_000));
 				group.finish();
 			}
-			const last = track.createGroup(5);
+			const last = track.createGroup(5n);
 			last.writeFrame(frame(5_000_000));
 			if (!open) last.finish();
 			while (consumer.buffered.peek().at(-1)?.end !== 5000) await consumer.buffered.changed();
@@ -99,12 +99,12 @@ for (const open of [true, false]) {
 test("a backlog start waits on a successor without frames", async () => {
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const track = new Track.Producer("backlog");
-	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
+	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) } }), {
 		format: new Format("data"),
 		delay: { max: Milli(1500) },
 	});
 	const frame = (micros: number) => ({ payload: Varint.encode(micros), timestamp: Time.Timestamp.now() });
-	const frames = (g: number) => Array.from({ length: 10 }, (_, f) => g * 1_000_000 + f * 100_000);
+	const frames = (g: bigint) => Array.from({ length: 10 }, (_, f) => Number(g) * 1_000_000 + f * 100_000);
 	const read: number[] = [];
 	const readN = async (n: number) => {
 		for (let i = 0; i < n; i++) {
@@ -114,24 +114,70 @@ test("a backlog start waits on a successor without frames", async () => {
 		}
 	};
 	try {
-		for (let g = 0; g < 4; g++) {
+		for (let g = 0n; g < 4n; g++) {
 			const group = track.createGroup(g);
 			for (const micros of frames(g)) group.writeFrame(frame(micros));
 			group.finish();
 		}
-		const fifth = track.createGroup(4);
+		const fifth = track.createGroup(4n);
 		// The fifth group's frames left before the sixth's, though they land after it.
 		const sent = Time.Timestamp.now();
-		const last = track.createGroup(5);
+		const last = track.createGroup(5n);
 		last.writeFrame(frame(5_000_000));
 		last.finish();
 		while (consumer.buffered.peek().at(-1)?.end !== 5000) await consumer.buffered.changed();
 
 		await readN(10);
-		for (const micros of frames(4)) fifth.writeFrame({ payload: Varint.encode(micros), timestamp: sent });
+		for (const micros of frames(4n)) fifth.writeFrame({ payload: Varint.encode(micros), timestamp: sent });
 		fifth.finish();
 		await readN(11);
-		expect(read).toEqual([...frames(3), ...frames(4), 5_000_000]);
+		expect(read).toEqual([...frames(3n), ...frames(4n), 5_000_000]);
+	} finally {
+		consumer.close();
+		track.finish();
+		track.close();
+		warn.mockRestore();
+	}
+});
+
+test("Consumer measures each skip's span over every group left, not just the new oldest", async () => {
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const track = new Track.Producer("tone");
+	const delay = new Signal<Track.Delay>({ max: Milli(30_000) });
+	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) } }), {
+		format: new Format("data"),
+		delay,
+	});
+	const write = (sequence: bigint, timestamp: number) => {
+		const group = track.createGroup(sequence);
+		group.writeFrame({ payload: Varint.encode(timestamp), timestamp: Time.Timestamp.now() });
+	};
+	const buffered = async (timestamp: number) => {
+		while (consumer.buffered.peek().at(-1)?.end !== timestamp) await consumer.buffered.changed();
+	};
+	try {
+		// Group 2 starts below group 1, so the span after skipping group 0 still reaches back to it.
+		for (const [sequence, timestamp] of [
+			[0n, 0],
+			[1n, 10_000],
+			[2n, 1_000],
+			[3n, 12_000],
+		] as const)
+			write(sequence, timestamp);
+		await buffered(12);
+		// Reading the first frame warms the reader, so the age skip runs on the max delay alone.
+		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 0n });
+		delay.set({ max: Milli(5) });
+		write(4n, 13_000);
+		await buffered(13);
+		expect(warn).toHaveBeenLastCalledWith("skipping slow groups: track=tone 0 -> 3 count=3");
+		expect(consumer.buffered.peek()).toEqual([
+			{ start: Milli(12), end: Milli(12) },
+			{ start: Milli(13), end: Milli(13) },
+		]);
+		// The skipped groups held media past the first frame, so their span reads as a gap first.
+		expect(await consumer.next()).toMatchObject({ kind: "gap", timestamp: 0, duration: 12_000 });
+		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 3n });
 	} finally {
 		consumer.close();
 		track.finish();

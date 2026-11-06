@@ -34,6 +34,7 @@ cfg_aliases = "0.2"
 criterion = { package = "bench-harness", path = "../bench-harness" }
 rand = "0.10"
 tracing-test = "0.2"
+workspace-hack = { path = "../workspace-hack" }
 
 [target.'cfg(target_vendor = "apple")'.dev-dependencies]
 nix = { workspace = true }

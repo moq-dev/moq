@@ -1,4 +1,6 @@
 import { Milli } from "@moq/clock";
+import type { Established } from "./established.ts";
+import { transportOf } from "./transport.ts";
 /**
  * Connection statistics: what the local transport counts, and what the peer reports.
  *
@@ -51,6 +53,13 @@ export interface Stats {
 
 	/** Packets currently declared lost. The estimate can decrease when a loss proves spurious. */
 	packetsLost?: number;
+
+	/**
+	 * Datagrams received for a subscription with no datagram track: one this session doesn't
+	 * know, has ended, or whose answer it hasn't received. Absent on a version without datagrams:
+	 * moq-transport and moq-lite before 05.
+	 */
+	datagramsUnrouted?: number;
 }
 
 /**
@@ -118,4 +127,33 @@ export async function transportStats(quic: WebTransport): Promise<Stats> {
 	} catch {
 		return {};
 	}
+}
+
+/**
+ * Whether `quic` can report a send-rate estimate: only a WebTransport session with
+ * `getStats()`. The WebSocket fallback's qmux session reports no counters, the WebRTC
+ * data channel's throws, and shipping Chromium and Safari implement none.
+ *
+ * @internal
+ */
+export function canEstimate(quic: WebTransport): boolean {
+	if (transportOf(quic) !== "webtransport") return false;
+	return typeof (quic as { getStats?: unknown }).getStats === "function";
+}
+
+// The sessions whose transport can report a send-rate estimate.
+const estimating = new WeakSet<Established>();
+
+/** Record whether `session`'s transport `quic` can report a send-rate estimate. @internal */
+export function detect(session: Established, quic: WebTransport): void {
+	if (canEstimate(quic)) estimating.add(session);
+}
+
+/**
+ * Whether `session` can report a send-rate estimate, so sampling it is worth a timer.
+ *
+ * @internal
+ */
+export function estimates(session: Established): boolean {
+	return estimating.has(session);
 }

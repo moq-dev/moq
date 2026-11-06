@@ -279,12 +279,12 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 	let relay_b = produce_origin(3);
 	let subscriber = produce_origin(4);
 
-	let broadcast = publisher.create_broadcast("live").unwrap();
-	let info = track::Info::default().with_timescale(moq_net::Timescale::MILLI);
-	let track = broadcast.create_track("catalog.json", info).unwrap();
-	broadcast
-		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
+	let info = track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+	let track = broadcast.broadcast().create_track("catalog.json", info).unwrap();
+	broadcast.announce().unwrap();
 
 	let upstream = vec![
 		link(version, &publisher, &relay_a).await,
@@ -447,13 +447,13 @@ async fn churn(version: &str) {
 	assert!(failures.is_empty(), "{version}:\n{}", failures.join("\n"));
 }
 
-/// Routes carry the publisher's epoch, so subscriptions resume across them.
+/// Routes carry the publisher's instance, so subscriptions resume across them.
 #[kio::test]
 async fn catalog_churn_lite_07() {
 	churn("moq-lite-07-wip").await;
 }
 
-/// No epoch on the wire: a route change ends subscriptions, which must fail loudly.
+/// No instance on the wire: a route change ends subscriptions, which must fail loudly.
 #[kio::test]
 async fn catalog_churn_lite_06() {
 	churn("moq-lite-06").await;

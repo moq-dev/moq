@@ -1,11 +1,11 @@
 import { Nano, Second } from "@moq/clock";
-import { type Getter, Once, race, Signal } from "@moq/signals";
-import type * as announce from "../announced.ts";
+import { type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
+import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
 import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
-import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
+import { detect, type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError, sessionClosed } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
@@ -169,6 +169,7 @@ export class Connection implements Established {
 		this.url = url;
 		this.version = versionName(version);
 		this.transport = transportOf(quic);
+		detect(this, quic);
 		this.#quic = quic;
 		this.#client = client;
 		this.peerImplementation = Promise.resolve(peerImplementation);
@@ -228,7 +229,6 @@ export class Connection implements Established {
 		});
 		registerWire(this, {
 			consume: (path) => this.#subscriber.consume(path),
-			goaway: this.#goaway,
 			// The drafts refuse overlapping SUBSCRIBE_NAMESPACEs (PREFIX_OVERLAP). A peer that
 			// declared MoQ Solicit is ours and holds both; any other may enforce it.
 			exclusive: solicit === undefined,
@@ -264,8 +264,8 @@ export class Connection implements Established {
 		if (this.#closed) return;
 
 		this.#closed = true;
-		this.#publisher.close();
 
+		this.#publisher.close();
 		this.#auth.close();
 
 		// Before the session, whose own close would send a clean code first.
@@ -313,9 +313,14 @@ export class Connection implements Established {
 		}
 	}
 
-	/** Gets an announced reader for `scope`; see {@link Established.announced}. */
+	/** The paths announced matching `scope`, each present or absent; see {@link Established.announced}. */
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
-		return this.#subscriber.announced(scope, options);
+		return announce.list(this.#subscriber.routes(scope, options));
+	}
+
+	/** Every route change matching `scope`, for code that forwards routes. @internal */
+	routes(scope?: Path.Pattern, options?: announce.Options): announce.Routes {
+		return this.#subscriber.routes(scope, options);
 	}
 
 	/** Accepts request streams and dispatches them. */
@@ -586,6 +591,11 @@ export class Connection implements Established {
 			throw new ProtocolViolation(`unexpected message on setup stream: 0x${typeId.toString(16)}`);
 		}
 		return GoAway.decode(controlStream.reader, version);
+	}
+
+	/** Settles with the peer's GOAWAY; see {@link Established.draining}. */
+	get draining(): GetPromise<Drain> {
+		return this.#goaway;
 	}
 
 	/** Resolves when the session closes, decoding the peer's close code; see {@link Established.closed}. */

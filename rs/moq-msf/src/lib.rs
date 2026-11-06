@@ -21,6 +21,7 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -155,12 +156,12 @@ pub struct Track {
 	/// Bitrate in bits per second.
 	pub bitrate: Option<u64>,
 
-	/// Resolved base64 initialization data.
+	/// Resolved base64 initialization data, shared by tracks with the same `initRef`.
 	///
 	/// On the wire this is carried indirectly through draft-01's `initDataList` +
 	/// `initRef`; [`Catalog`] (de)serialization resolves it so callers always see
 	/// the inline payload here. draft-00's inline `initData` is also accepted.
-	pub init_data: Option<String>,
+	pub init_data: Option<Arc<str>>,
 
 	/// Wire-only pointer into the catalog's `initDataList` (draft-01). Populated
 	/// only while (de)serializing; resolved into `init_data` on parse and never
@@ -283,13 +284,19 @@ impl<E: CatalogExt> Serialize for Catalog<E> {
 		// point each track at its entry via initRef. That's the draft-01 wire
 		// shape; identical payloads across tracks collapse to one entry.
 		let mut init_data_list: Vec<InitData> = Vec::new();
-		let mut ids: HashMap<String, String> = HashMap::new();
+		let mut ids: HashMap<Arc<str>, String> = HashMap::new();
+		let mut pointers: HashMap<(usize, usize), String> = HashMap::new();
 		let mut tracks = Vec::with_capacity(self.tracks.len());
 
 		for track in &self.tracks {
 			let mut track = track.clone();
 			if let Some(payload) = track.init_data.take() {
-				let id = if let Some(id) = ids.get(&payload) {
+				// A parsed initRef shares one Arc across tracks. Avoid hashing its
+				// entire payload again for each track when writing a catalog.
+				let pointer = (payload.as_ptr() as usize, payload.len());
+				let id = if let Some(id) = pointers.get(&pointer) {
+					id.clone()
+				} else if let Some(id) = ids.get(&payload) {
 					id.clone()
 				} else {
 					let id = format!("init{}", init_data_list.len());
@@ -301,6 +308,7 @@ impl<E: CatalogExt> Serialize for Catalog<E> {
 					ids.insert(payload, id.clone());
 					id
 				};
+				pointers.insert(pointer, id.clone());
 				track.init_ref = Some(id);
 			}
 			tracks.push(track);
@@ -343,8 +351,9 @@ impl<'de, E: CatalogExt> Deserialize<'de> for Catalog<E> {
 			.into_iter()
 			.map(|mut track| -> Result<Track, D::Error> {
 				// Resolve draft-01 initRef into inline init_data so callers never
-				// see the indirection. Inline init_data (draft-00) is kept as-is,
-				// but a catalog that carries both forms must not disagree.
+				// see the indirection. Inline init_data (draft-00) that matches its
+				// initRef entry shares that entry's allocation; a catalog that
+				// carries both forms must not disagree.
 				if let Some(id) = track.init_ref.take() {
 					let entry = by_id.get(id.as_str()).ok_or_else(|| {
 						serde::de::Error::custom(format!(
@@ -360,16 +369,13 @@ impl<'de, E: CatalogExt> Deserialize<'de> for Catalog<E> {
 						)));
 					}
 
-					match &track.init_data {
-						Some(inline) if inline != &entry.data => {
-							return Err(serde::de::Error::custom(format!(
-								"MSF track {:?} carries conflicting initData and initRef {:?}",
-								track.name, id
-							)));
-						}
-						Some(_) => {}
-						None => track.init_data = Some(entry.data.clone()),
+					if track.init_data.as_ref().is_some_and(|inline| inline != &entry.data) {
+						return Err(serde::de::Error::custom(format!(
+							"MSF track {:?} carries conflicting initData and initRef {:?}",
+							track.name, id
+						)));
 					}
+					track.init_data = Some(entry.data.clone());
 				}
 				track.init_ref = None;
 				Ok(track)
@@ -476,7 +482,7 @@ struct InitData {
 	#[serde(rename = "type")]
 	kind: String,
 	/// The init payload, interpreted per `kind`. For `"inline"`, base64.
-	data: String,
+	data: Arc<str>,
 }
 
 impl Track {
@@ -819,7 +825,7 @@ mod test {
 		track.max_grp_sap_starting_type = None;
 		track.max_obj_sap_starting_type = None;
 		track.jitter = None;
-		track.init_data = Some("AQID".to_string());
+		track.init_data = Some("AQID".into());
 
 		let catalog = Catalog::new(vec![track]);
 
@@ -1051,12 +1057,18 @@ mod test {
 			],
 			"tracks": [
 				{ "name": "video0", "packaging": "cmaf", "isLive": true, "role": "video",
+				  "codec": "avc1.640028", "initData": "AQID", "initRef": "v0" },
+				{ "name": "video1", "packaging": "cmaf", "isLive": true, "role": "video",
 				  "codec": "avc1.640028", "initData": "AQID", "initRef": "v0" }
 			]
 		}"#;
 
 		let catalog = Catalog::<()>::from_str(json).unwrap();
-		assert_eq!(catalog.tracks[0].init_data.as_deref(), Some("AQID"));
+		let first = catalog.tracks[0].init_data.as_ref().unwrap();
+		let second = catalog.tracks[1].init_data.as_ref().unwrap();
+		assert_eq!(first.as_ref(), "AQID");
+		// The matching inline copies are dropped in favor of the shared initRef payload.
+		assert!(Arc::ptr_eq(first, second));
 	}
 
 	#[test]
@@ -1079,16 +1091,46 @@ mod test {
 	}
 
 	#[test]
+	fn draft01_shared_init_ref_keeps_one_payload() {
+		let data = "A".repeat(64 * 1024);
+		let tracks = (0..32)
+			.map(|n| {
+				serde_json::json!({
+					"name": format!("video{n}"), "packaging": "cmaf",
+					"isLive": true, "role": "video", "initRef": "shared"
+				})
+			})
+			.collect::<Vec<_>>();
+		let json = serde_json::json!({
+			"version": "draft-01",
+			"initDataList": [{ "id": "shared", "type": "inline", "data": data }],
+			"tracks": tracks
+		})
+		.to_string();
+
+		let catalog = Catalog::<()>::from_str(&json).unwrap();
+		let first = catalog.tracks[0].init_data.as_ref().unwrap();
+		assert!(
+			catalog
+				.tracks
+				.iter()
+				.all(|track| Arc::ptr_eq(first, track.init_data.as_ref().unwrap()))
+		);
+		let encoded: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
+		assert_eq!(encoded["initDataList"].as_array().unwrap().len(), 1);
+	}
+
+	#[test]
 	fn serialize_hoists_and_dedups_init_data() {
 		// Two tracks sharing the same init payload must collapse to a single
 		// initDataList entry, with both tracks referencing it via initRef and no
 		// inline initData left on the tracks.
 		let mut a = video_track();
 		a.name = "a".to_string();
-		a.init_data = Some("AQID".to_string());
+		a.init_data = Some("AQID".into());
 		let mut b = video_track();
 		b.name = "b".to_string();
-		b.init_data = Some("AQID".to_string());
+		b.init_data = Some("AQID".into());
 
 		let catalog = Catalog::new(vec![a, b]);
 		let value: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
@@ -1296,5 +1338,18 @@ mod test {
 		let value: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
 		assert_eq!(value["mpegts"]["program"]["pmtPid"], serde_json::json!(100));
 		assert_eq!(value["somethingElse"], serde_json::json!([1, 2, 3]));
+	}
+
+	#[test]
+	fn shared_extension_names_roundtrip() {
+		type Extra = serde_json::Map<String, serde_json::Value>;
+		let raw = include_str!("../fixtures/catalog-names.json");
+		let mut expected: Extra = serde_json::from_str(raw).unwrap();
+		expected.remove("version");
+		expected.remove("tracks");
+		let catalog = Catalog::<Extra>::from_str(raw).unwrap();
+		assert_eq!(catalog.ext, expected);
+		let wire: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
+		assert_eq!(wire, serde_json::from_str::<serde_json::Value>(raw).unwrap());
 	}
 }

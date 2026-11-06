@@ -646,10 +646,7 @@ impl MoqTokens {
 	/// [`MoqError::Unsupported`] when the session cannot carry an in-band token, and the
 	/// connection's end, such as a refused dial, is its close reason.
 	pub async fn answered(&self) -> Result<(), MoqError> {
-		{
-			let tokens = self.inner.clone();
-			crate::ffi::detached(async move { tokens.answered().await.map_err(MoqError::from) }).await
-		}
+		crate::ffi::run(self.inner.answered()).await
 	}
 }
 
@@ -682,6 +679,11 @@ pub struct MoqConnectionStats {
 	/// connection's version with another's numbers.
 	#[uniffi(default = None)]
 	pub version: Option<String>,
+	/// Total datagrams received for a subscription with no datagram track: one the session
+	/// doesn't know, has ended, or whose answer it hasn't received. `None` on a version
+	/// without datagrams: moq-transport and moq-lite before 05.
+	#[uniffi(default = None)]
+	pub datagrams_unrouted: Option<u64>,
 }
 
 impl MoqConnectionStats {
@@ -696,6 +698,7 @@ impl MoqConnectionStats {
 			packets_received: stats.packets_received,
 			packets_lost: stats.packets_lost,
 			version: version.map(|version| version.to_string()),
+			datagrams_unrouted: stats.datagrams_unrouted,
 		}
 	}
 }
@@ -810,13 +813,13 @@ impl Shutdown {
 	async fn finished(&self) -> Result<(), MoqError> {
 		// Publish a background panic before reading the channel it dropped.
 		self.task.finished().await?;
-		self.result
-			.wait(|result| match &**result {
-				Some(result) => std::task::Poll::Ready(result.clone()),
-				None => std::task::Poll::Pending,
-			})
-			.await
-			.map_err(|_| MoqError::Cancelled)?
+		// The drain is a root child, so its wake must not run the host's continuation there.
+		crate::ffi::host(self.result.wait(|result| match &**result {
+			Some(result) => std::task::Poll::Ready(result.clone()),
+			None => std::task::Poll::Pending,
+		}))
+		.await
+		.map_err(|_| MoqError::Cancelled)?
 	}
 }
 
@@ -992,8 +995,8 @@ impl MoqSession {
 	/// handle or a `closed()` waiter; repeated requests share the same drain.
 	/// `cancel` stays immediate. The name avoids Kotlin's generated
 	/// `AutoCloseable.close()`, which releases the handle.
-	/// Explicit `moq-lite-07-wip` waits for the peer to receive the tail. Older Lite
-	/// versions, including the default lite-06, and IETF wait only for transport ACKs.
+	/// `moq-lite-05` and newer wait for the peer to receive the tail; older Lite
+	/// versions and IETF wait only for transport ACKs.
 	/// A drain that takes longer than one second ends with a delivery timeout.
 	pub fn shutdown(&self) {
 		let _guard = crate::ffi::enter();
@@ -1051,6 +1054,19 @@ impl MoqSession {
 	/// an unlimited allocator, which reports `None` for every reservation.
 	pub fn allocator(&self) -> Arc<MoqAllocator> {
 		self.allocator.clone()
+	}
+
+	/// The session's viewers, used to divide the connection's receive estimate among
+	/// the broadcasts watched over it.
+	///
+	/// Every call returns a handle to the same registry, and the session sends what its
+	/// viewers add up to as its PROBE target. A client handle survives reconnects: a
+	/// viewer reads `None` while disconnected and resumes on the next connection.
+	pub fn viewers(&self) -> Arc<crate::bandwidth::MoqViewers> {
+		Arc::new(crate::bandwidth::MoqViewers::new(match &self.inner {
+			Inner::Connection(connection) => connection.viewers(),
+			Inner::Session(session) => session.viewers(),
+		}))
 	}
 
 	/// Follow the grant the peer gave this session.

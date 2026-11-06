@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use moq_auth::{Grant, Pattern, lease};
-use moq_net::{announce, origin};
+use moq_net::origin;
 use moq_relay::{
 	Connection, auth,
 	cluster::{self, Peer},
@@ -80,14 +80,19 @@ fn grant(path: &str) -> Grant {
 	grant
 }
 
+const LITE_07: &str = "moq-lite-07-wip";
+
 async fn node(id: u64, connect: Vec<Peer>) -> Node {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let mut tasks = tokio::task::JoinSet::new();
 
 	let mut listen = moq_tokio::listen::Config::default();
 	listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 	listen.tcp.tls = Some(true);
 	listen.tls.generate = vec!["localhost".into()];
+	// Links speak lite-07, which carries each route's instance, so every edge ranks a path's
+	// routes alike: over an older version each edge mints instances of its own.
+	listen.version = vec![LITE_07.parse().expect("lite-07")];
 	let mut listener = listen
 		.init(Default::default())
 		.expect("server init")
@@ -98,13 +103,12 @@ async fn node(id: u64, connect: Vec<Peer>) -> Node {
 
 	let mut client = moq_tokio::connect::Config::default();
 	client.tls.insecure = Some(true);
+	client.version = vec![LITE_07.parse().expect("lite-07")];
 
 	let mut config = cluster::Config::default();
 	config.id = Some(id);
 	config.connect = connect;
-	let cluster = cluster::Cluster::new(cluster::Options::new(config))
-		.expect("cluster init")
-		.with_connect(client, Default::default());
+	let cluster = crate::spawn_cluster(cluster::Options::new(config)).with_connect(client, Default::default());
 
 	let (auth, mut admissions) = auth::Auth::embedded(format!("node-{id}"));
 	tasks.spawn(async move {
@@ -140,7 +144,7 @@ async fn node(id: u64, connect: Vec<Peer>) -> Node {
 /// A broadcast writing a group every 50ms on `origin`, so a subscriber attaching
 /// at any point receives one. Dropping it ends the broadcast.
 struct Publisher {
-	_broadcast: moq_net::origin::Publication,
+	_route: moq_net::origin::Route,
 	writer: tokio::task::AbortHandle,
 }
 
@@ -151,8 +155,8 @@ impl Drop for Publisher {
 }
 
 fn publish(origin: &origin::Producer, path: &str) -> Publisher {
-	let broadcast = origin.publish(path, Default::default()).expect("publish");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let route = origin.route(path, Default::default()).expect("publish");
+	let track = route.broadcast().create_track("video", timed()).expect("create track");
 	let writer = tokio::spawn(async move {
 		loop {
 			let Ok(mut group) = track.append_group() else { break };
@@ -163,10 +167,7 @@ fn publish(origin: &origin::Producer, path: &str) -> Publisher {
 		}
 	})
 	.abort_handle();
-	Publisher {
-		_broadcast: broadcast,
-		writer,
-	}
+	Publisher { _route: route, writer }
 }
 
 /// Subscribe to `path` through `origin`'s routes and read one frame.
@@ -177,8 +178,10 @@ async fn read_frame(origin: &origin::Producer, path: &str) {
 		consumer.follow(path, None).unwrap().available(),
 	)
 	.await
-	.unwrap_or_else(|err| panic!("{path} unroutable: {err}"));
-	let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1));
+	.unwrap_or_else(|err| panic!("{path} unroutable: {err}"))
+	.expect("the first change is an instance");
+	let subscription = moq_net::track::Subscription::default()
+		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1)));
 	let mut track = within(
 		&format!("subscribe to {path}"),
 		broadcast.track("video").expect("track handle").subscribe(subscription),
@@ -202,13 +205,13 @@ async fn read_frame(origin: &origin::Producer, path: &str) {
 /// cursor replays that set when it registers, all starts and none held, so it
 /// drains without waiting.
 fn routes(origin: &origin::Producer) -> BTreeMap<String, Vec<u64>> {
-	let mut announced = origin.consume().announced();
+	let mut announced = origin.consume().routes();
 	let mut routes = BTreeMap::new();
 	while let Some(event) = announced.try_next() {
-		let announce::Event::Start(announce) = event else {
+		let origin::RouteEvent::Start(announce) = event else {
 			panic!("an initial set is only starts: got {event:?}");
 		};
-		let hops = announce.route.hops.iter().map(|hop| hop.id()).collect();
+		let hops = announce.route.hops().iter().map(|hop| hop.id()).collect();
 		routes.insert(announce.prefix.as_str().to_string(), hops);
 	}
 	routes
@@ -222,7 +225,7 @@ async fn routes_when(
 ) -> BTreeMap<String, Vec<u64>> {
 	within(step, async {
 		// Created first, so a change landing between two reads still wakes us.
-		let mut changes = origin.consume().announced();
+		let mut changes = origin.consume().routes();
 		loop {
 			let routes = routes(origin);
 			if ready(&routes) {

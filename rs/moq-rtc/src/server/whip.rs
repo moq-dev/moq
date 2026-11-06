@@ -129,7 +129,7 @@ impl<'a> Request<'a> {
 /// scope is enforced by moq-net exactly as for a native session; the bundled
 /// [`Server::publish_router`] passes the server's own (unauthenticated) producer. It parses the
 /// offer, registers a media session on the shared mux, announces the
-/// broadcast under a fresh epoch once negotiation succeeds (so a fast subscriber
+/// broadcast under a fresh instance once negotiation succeeds (so a fast subscriber
 /// doesn't 404 in the gap before the first RTP packet, and a reconnecting
 /// encoder replaces a stale session's broadcast at once), and returns the SDP answer plus an opaque `resource_id` for the WHIP
 /// `Location` header. The caller must run the returned [`Response`] to drive the
@@ -158,12 +158,12 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 
 	// Create the broadcast hidden up front, so an out-of-scope offer is refused before
 	// any mux work. It announces only once negotiation succeeds (below).
-	let producer = publisher.create_broadcast(&broadcast)?;
-	let handle = producer.clone();
+	// The session's sink holds the route, so it stays announced until the session ends.
+	let route = publisher.route(&broadcast, moq_net::origin::RouteOptions::hidden())?;
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(server.config().max_age)
 		.with_bandwidth(server.config().bandwidth.clone());
-	let sink = Box::new(IngestSink::new(producer.broadcast().clone(), config)?);
+	let sink = Box::new(IngestSink::routed(route.clone(), config)?);
 
 	// Register a session on the shared media mux: known ICE credentials (so the
 	// demux routes this peer's STUN by ufrag), an inbox to read datagrams from,
@@ -183,10 +183,10 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	// Announce only once negotiation succeeded, so a failed offer leaves a live
 	// session's broadcast alone, but before returning the answer, so a fast
 	// subscriber doesn't see a 404 in the gap before the first RTP packet. Each
-	// offer is its own publisher instance, so a reconnect replaces a stale
-	// session's broadcast instead of resuming into it.
-	let epoch = moq_net::Epoch::mint();
-	handle.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))?;
+	// offer is its own route under a fresh instance, so a reconnect replaces a
+	// stale session's broadcast instead of resuming into it.
+	route.announce()?;
+	let instance = route.instance();
 
 	let resource_id = sdp::new_resource_id();
 	let socket = moq_ice::Socket::new(mux.socket(), mux.candidates().to_vec(), inbound)?;
@@ -196,7 +196,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	// finds the session; Response::run unregisters itself when it ends.
 	let cancel = server.register_session(resource_id.clone());
 	let cap = rate.get();
-	tracing::info!(%broadcast, %epoch, cap = cap.map(|cap| cap.rate.as_bps()), "whip publish accepted");
+	tracing::info!(%broadcast, %instance, cap = cap.map(|cap| cap.rate.as_bps()), "whip publish accepted");
 
 	let mut answer = sdp::render_answer(&answer);
 	if let Some(cap) = cap {
@@ -309,7 +309,7 @@ mod tests {
 	}
 
 	/// An encoder reconnecting to the same broadcast while its stale session is still
-	/// open restarts the broadcast at once: each offer is its own epoch, so a fresh
+	/// open restarts the broadcast at once: each offer is its own instance, so a fresh
 	/// request reaches the reconnect, while the stale viewer stays on the old one until
 	/// it leaves.
 	#[tokio::test]

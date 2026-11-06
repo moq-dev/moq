@@ -29,10 +29,8 @@ import moq
 async def main():
     async with moq.connect("https://cdn.moq.dev/anon") as client:
         async for event in client.announced():
-            # A restart is a new publisher run at the same path: request it again. A
-            # takeover continues what an earlier route served, like a start.
-            if not isinstance(event, (moq.AnnounceEventStart, moq.AnnounceEventRestart, moq.AnnounceEventTakeover)):
-                continue  # AnnounceEventUpdate or AnnounceEventEnd
+            if not isinstance(event, moq.AnnounceEventPresent):
+                continue  # AnnounceEventAbsent
             # A route covers a prefix and carries no broadcast, so resolve the path.
             broadcast = await client.request(event.announce.prefix)
             catalog = await moq.media.catalog(broadcast)
@@ -59,8 +57,9 @@ import moq
 
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
-        publication = client.create_broadcast("my-stream")
-        broadcast = publication.broadcast
+        # Hidden until announced; hold the route, since dropping it retracts the broadcast.
+        route = client.route("my-stream", hidden=True)
+        broadcast = route.broadcast
 
         # Publish an Opus audio track (init bytes from your encoder)
         audio = moq.media.TrackProducer.audio(
@@ -74,8 +73,8 @@ async def main():
         audio.write_frame(payload, timestamp=moq.Timestamp(20, 1_000))
         audio.cut()
 
-        # A fresh epoch per run tells viewers a restart is a new broadcast.
-        publication.announce(moq.AnnounceRoute(epoch=moq.mint_epoch()))
+        # Each route mints a fresh instance, so viewers see a restart as a new stream.
+        route.announce()
 
         # Clean up
         audio.finish()
@@ -94,9 +93,9 @@ import moq
 
 async def main():
     async with moq.Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
-        publication = server.create_broadcast("hello")
-        track = publication.broadcast.publish_track("events")
-        publication.announce()
+        route = server.route("hello", hidden=True)
+        track = route.broadcast.publish_track("events")
+        route.announce()
         print(f"listening on https://{server.local_addr}")
 
         sessions = []
@@ -150,7 +149,7 @@ client = moq.Client(
   - `keylog`. Write TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a capture; without `SSLKEYLOGFILE` entering the server fails.
   - `.local_addr`. The bound address (useful when binding to port `0`).
   - `.cert_fingerprints()`. SHA-256 fingerprints of the configured TLS certificates, for `serverCertificateHashes` browser cert pinning.
-  - `.create_broadcast(path) → Publication`. Create an unannounced broadcast, invisible to everyone; fill `.broadcast`, then `announce()` makes it discoverable and reachable; `.broadcast.close()` ends it.
+  - `.route(path, *, hidden=False, cost=0, instance=None, epoch=0) → Route`. Create a route owning a broadcast to fill at `.broadcast`. Create it `hidden` to fill it before `announce()` makes it discoverable and reachable; dropping or cancelling the route retracts it, and `.broadcast.close()` ends both.
 - **`Request`**. An incoming session, yielded by `async for request in server`.
   - `.url`, `.path`, `.query`, `.transport`. The query-free path is uniform across transports; the root or missing path is `""`. The encoded query may contain credentials.
   - `await .accept(*, publish=None, consume=None) → Session`. Origins are captured when accept starts; None inherits the server default and a supplied origin replaces it. Pass fresh origins for isolation, or the same origin on both sides to share it. A second response raises `AlreadyResponded`; calls after cancel raise `Cancelled`. Complete the handshake (hold the result to keep the connection alive).
@@ -158,11 +157,12 @@ client = moq.Client(
   - `.cancel()`. Cancel an in-flight `accept()`/`reject()` call.
 - **`Session`**. A connection, connecting or connected. Holding it keeps the connection alive; it is also an `async with` context manager that drains on a clean exit and cancels on an error.
   - `await .closed()`. Wait until the session closes.
-  - `.cancel(code)`, `session.shutdown()`. Cancel immediately, or request a drain now and await `session.closed()` for its result, including a delivery timeout after one second. Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older Lite versions, including default lite-06, wait only for transport ACKs. IETF also waits for transport ACKs.
+  - `.cancel(code)`, `session.shutdown()`. Cancel immediately, or request a drain now and await `session.closed()` for its result, including a delivery timeout after one second. moq-lite-05 and newer wait for the peer to receive finished tails; older Lite versions and IETF wait only for transport ACKs.
   - `.publish() → OriginProducer`, `.consume() → OriginConsumer`. The wired origin sides.
   - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
   - `.state()` and `await .state_changed(after)`. Read one lifecycle snapshot and wait with its revision; first-dial failures and reconnects share the same session.
   - `.allocator() → Allocator`. Divide the send estimate between encoders and app-owned tracks.
+  - `.viewers() → Viewers`. Divide the receive estimate between watched broadcasts: `.watch(max_bps) → Viewer` claims up to a ceiling, `Viewer.rate()` reads its slice (`None` while there is no estimate), and dropping the viewer releases it. The summed ceilings are the PROBE target; `.set_target(bps)` overrides it (`0` sends none, `None` follows the viewers again).
   - `.grants() → GrantConsumer`. On `moq-lite-07-wip` and on moq-transport draft-18+ with the MoQ Auth extension, `.grant()` reads the peer's `Grant` and `async for grant in session.grants()` follows it.
   - `.tokens() → Tokens | None`. A client session's credentials: `.set([...])` replaces them without reconnecting and `await .answered()` raises the relay's refusal.
 
@@ -178,13 +178,12 @@ client = moq.Client(
   - Async iterator yielding `TrackRequest`
 - **`TrackProducer` / `GroupProducer`**. Write raw payloads with no codec parsing.
   - `.write_frame(payload, timestamp=None)` writes a payload with optional capture time.
+  - `await .ready(size)` (`GroupProducer`) waits until a frame of `size` bytes fits a window ahead of the fastest reader. Await it before each write for backpressure. A writer that doesn't wait sheds the front of the group instead.
   - `.create_group(sequence)` creates a sparse or replayed group at an explicit sequence.
   - `.finish()` ends at the live edge; the handle remains so `.abort(error_code)` can still run.
   - `.finish_at(final_sequence)` declares the first group that will never be produced while leaving lower groups writable.
   - `.abort(error_code)` terminates the track or group with an application error.
-  - `.append_datagram(payload, timestamp=None) -> sequence` (`TrackProducer`) sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
-  - `.insert_datagram(sequence, payload, timestamp=None)` (`TrackProducer`) sends one at the caller's own sequence.
-  - `.largest() -> Position | None` (`TrackProducer`) reports the newest group or datagram written, at its newest frame.
+  - `.largest() -> Position | None` (`TrackProducer`) reports the newest group written, at its newest frame. Datagrams are numbered apart from groups and never move it.
 
 ### Media
 
@@ -222,13 +221,15 @@ subscriber waits. `.cut()` / `.seek(sequence)` draw group boundaries; `.finish()
 
 ### Data
 
-`moq.json.SnapshotProducer.update(value, timestamp=None)`,
-`moq.json.StreamProducer.append(value, timestamp=None)`, and
-`moq.json.WindowProducer.push(value, timestamp=None)` / `.pop(count, timestamp=None)` preserve
-optional capture time. A window keeps a sliding run of records a reader can join at any point,
+`moq.json.SnapshotProducer.update(value, timestamp)`,
+`moq.json.StreamProducer.append(value, timestamp)`, and
+`moq.json.WindowProducer.push(value, timestamp)` / `.pop(count, timestamp)` require a capture time
+on the broadcast clock, read with `media.CatalogProducer.now()`, so their track needs a `timescale`.
+A window keeps a sliding run of records a reader can join at any point,
 and `.cut()` ends its open group so the next edit opens one restating the window; the catalog has
 no window mode, so `WindowProducer` takes only the track.
-Omitting time leaves data untimed; choose the track's `timescale` to match. Publish JSON tracks with
+A raw frame may omit its timestamp on an untimed track, but every JSON write takes one on the
+broadcast clock. Publish JSON tracks with
 `TrackInfo(compress=True)`: the track compresses each group on the wire, and consumers read it the
 same either way. Opaque bytes go on a plain `TrackProducer`.
 
@@ -241,30 +242,57 @@ same either way. Opaque bytes go on a plain `TrackProducer`.
   - `await .recv_group() → GroupConsumer | None`. Arrival order, which may be out of sequence. Prefer it when latency matters more than order.
   - `.groups_as_arrived()`. Async iterator over `recv_group()`.
   - `.read_frame() -> Frame | None` returns the first frame of the next group. Empty groups are skipped; `None` is track EOF.
-  - `await .recv_datagram() -> Datagram | None` for best-effort raw track datagrams.
   - `.info() → TrackInfo`
   - `.update(subscription)`. Change delivery priority, staleness, or group range after subscribing.
 - **`GroupConsumer`**. Async iterator of raw `Frame`s.
   - `.read_frame() -> Frame | None` returns a raw frame with optional capture time.
 
-Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `json.WindowConsumer`, `AnnounceConsumer`, `Following`) and the dynamic sources (`OriginRequests`, `BroadcastRequests`, `TrackRequests`).
+Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `json.WindowConsumer`, `AnnounceConsumer`, `Following`) and the dynamic sources (`Route`, `BroadcastRequests`, `TrackRequests`).
+
+### Sockets
+
+`from moq import socket` exposes `socket.Endpoint(origin, prefix, id)`. Use the
+same origin as the session's publish and consume sides. Hold the endpoint while
+sessions run, or use it as an async context manager. It announces only
+`<prefix>/.socket/<id>`; keep each session id private.
+
+- `await endpoint.dial_tcp(peer)` and `await endpoint.accept_tcp()` use the TCP queue.
+- `await endpoint.dial_track(peer, info=None)` and `await endpoint.accept_track()` use the track queue.
+- An incoming dial has `peer` and `session`; `await incoming.accept()` verifies
+  return routability, and `incoming.reject()` refuses it. Track accepts also take `info=`.
+- `TcpStream` exposes `producer: GroupProducer`, `consumer: GroupConsumer`, `peer`,
+  and `session`. Write frames, finish for FIN, and abort for RST. Await
+  `producer.ready(len(payload))` before each write so a slow reader slows the
+  writer, as TCP backpressure does. A writer that doesn't wait sheds the front
+  of its half, and a reader that falls behind fails with eviction rather than
+  skipping bytes.
+- `TrackStream` exposes `producer: TrackProducer`, `consumer: TrackConsumer`, `peer`,
+  and `session`. Its subscription starts reliable and ascending, and omitted
+  `info` keeps messages without a publisher age limit. Hold or cancel the consumer
+  to retain or release that subscription. A message no hop will deliver, such as
+  one a cache reclaimed after 30 s unread or a refused fetch, is skipped rather
+  than ending the session.
+
+Cancelling a dial or its acceptance resets that dial. Cancelling an accept wait
+leaves the endpoint listening. `endpoint.close()` resets sessions and pending dials.
+The [socket convention](https://doc.moq.dev/concept/socket) needs lite-07 or
+moq-transport on every relay hop; this API does not add pre-07 capability detection.
 
 ### Origin (advanced)
 
 - **`OriginProducer(*, cache_capacity_bytes=None)`**. Manage broadcast announcements. Set `cache_capacity_bytes` to bound cached groups under this origin.
   - `.consume() → OriginConsumer`
-  - `.requests(prefix) → OriginRequests`
-  - `.create_broadcast(path) → Publication`
-- **`Publication`**. A broadcast published on an origin. Dropping it keeps the route; closing the broadcast ends it.
-  - `.broadcast → BroadcastProducer`. The broadcast to fill.
-  - `.announce(route=None)`, `.unannounce()`. Advertise or retract its exact path; both raise `Closed` once the broadcast closed.
-- **`OriginRequests`**. Async source of broadcasts requested by consumers.
-  - `await .requested_broadcast() → BroadcastRequest`. Call `.prepare(mint_epoch())`, fill its `.broadcast`, then `.publish() → Publication` to serve it under a new epoch, or `.reject(code)` to fail the requester.
-  - Async iterator yielding `BroadcastRequest`
+  - `.route(path, *, hidden=False, cost=0, instance=None, epoch=0) → Route`. An exact route owning a new broadcast, visible at once unless `hidden`, under a fresh instance unless `instance` names one.
+  - `.route_prefix(prefix, *, hidden=False, cost=0, instance=None, epoch=0) → Route`. A prefix route that yields the requests beneath it.
+- **`Route`**. A route on an origin. Hold it: dropping or cancelling it retracts it, and so does closing its broadcast.
+  - `.broadcast → BroadcastProducer`. The broadcast an exact route owns; raises `Internal` on a prefix route.
+  - `.instance`. The stream it serves, kept across `withdraw()` and `announce()`.
+  - `.announce()`, `.withdraw()`, `.set_cost(cost)`. Show, hide, or re-price it in place; `announce` and `set_cost` raise `Closed` once the broadcast closed.
+  - `await .requested() → BroadcastRequest | None`, or async iteration over a prefix route. Call `.serve(consumer)` to answer with held content under the prefix route's continuous sequence space, `.route(hidden=..., ...)` for the path's own route under a fresh instance, as an independently restarting job, or `.reject(code)` to fail the requester.
 - **`OriginConsumer`**. Discover broadcasts.
-  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, `AnnounceEventRestart`, or `AnnounceEventTakeover`, each carrying an `Announce` whose `.route.epoch` names the publisher run; on a restart, request the path again; a takeover continues what the route at `.predecessor` served); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` reports wildcard matches
-  - `.follow(path, epoch=None) → Following` (awaitable, waits until something serves the path, then each instance that takes over; an `epoch` follows only that instance)
-  - `.request(path, epoch=None) → BroadcastConsumer` (awaitable; owns discovery and resolves one instance, or raises once synced without a route; an `epoch` refuses any other instance)
+  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventPresent` or `AnnounceEventAbsent`, each carrying an `Announce` whose `.route.instance` names the stream; another instance taking a path over keeps it present, so `follow` the path to see that); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` is a required list of wildcard matches, empty without wildcards
+  - `.follow(path, instance=None) → Following` (awaitable, waits until something serves the path, then returns each stream that takes over, or `None` once the path goes offline; an `instance` follows only that stream)
+  - `.request(path, instance=None) → BroadcastConsumer` (awaitable; owns discovery and resolves one stream, or raises once synced without a route; an `instance` refuses any other stream)
 
 ### Types
 
@@ -272,7 +300,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 - **`Timestamp`**. `.value: int` units at `.scale: int` units per second, exact at any scale such as 90 kHz. `Timestamp.from_timedelta(duration)` is exact at microsecond scale; `.to_timedelta()` rounds down to a whole microsecond. A write with a scale of 0 or past `2**62 - 1`, or a value past `2**61 - 1`, raises `Error.TimeOverflow`.
 - **`Frame`**. `.payload: bytes`, `.timestamp: Timestamp | None`. The unit of every write and every raw read; `None` means untimed when publishing or reading.
 - **`media.MediaFrame`**. `.payload: bytes`, `.timestamp: Timestamp`, `.keyframe: bool`. The frame variant of a media read. `keyframe` marks a group start or video keyframe; for audio it is true only at a group start.
-- **`Datagram`**. `.sequence: int`, `.timestamp: Timestamp | None`, `.payload: bytes`. Delivered only on datagram-capable transports with lite-05 or newer moq-lite, or moq-transport.
+- **`Datagram`**. `.sequence: int`, `.timestamp: Timestamp | None`, `.payload: bytes`. Delivered only on datagram-capable transports with lite-05 or newer moq-lite.
 - **`media.Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.enabled`, `.description`.
 - **`media.Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.enabled`, `.framerate`, `.description`. A false `.enabled` means no frames are coming, so don't select the rendition.
 - **`Subscription`**. Subscriber delivery preferences: priority, staleness, and optional group range.
@@ -292,3 +320,18 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 
 - [`moq-ffi`](https://pypi.org/project/moq-ffi/). The raw UniFFI bindings this package wraps. Use it directly only if you need the unwrapped `Moq`-prefixed API.
 - [MoQ project](https://github.com/moq-dev/moq). Full monorepo with Rust server, TypeScript browser lib, and more.
+
+## Datagram tracks
+
+Create a separate live track with `broadcast.create_datagrams(name, info)` and subscribe
+with `broadcast.consume().datagrams(name)`. The `DatagramProducer` writes with
+`append(payload, timestamp=...)` or `insert(Datagram(...))`, and the `DatagramConsumer`
+reads with `await recv()` or async iteration. Demand is aggregate subscriber `priority()` /
+`await priority_changed(last)`; `broadcast.requests().datagrams()` handles on-demand tracks.
+Keep payloads below the path MTU. Delivery needs a datagram-capable transport and lite-05 or
+newer, without a stream fallback. Stream tracks of the same name are independent.
+
+On lite-05/06, a local datagram handler is asked for an on-demand name without waiting
+for the stream handler, and answers it unless a stream track of that name is published. A
+relayed broadcast asks its upstream for the datagram track only once the stream track is
+not found. lite-07 uses independent requests.

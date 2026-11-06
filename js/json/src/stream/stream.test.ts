@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { StreamCode, Time, Track } from "@moq/net";
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import { Consumer, Producer, Rolled } from "./index.ts";
 
 type Rec = { n: number };
@@ -59,7 +59,7 @@ test("the whole log rides one group, never rolled", async () => {
 	// A single group holds everything, and the consumer reads it all in order.
 	const subscriber = track.subscribe().ordered();
 	const group0 = await subscriber.nextGroup();
-	expect(group0?.sequence).toBe(0);
+	expect(group0?.sequence).toBe(0n);
 	const group1 = await subscriber.nextGroup();
 	expect(group1).toBeUndefined();
 });
@@ -99,7 +99,7 @@ test("a second group is reported while the first is still open", async () => {
 
 	// Ask for a replay window, so the first group is delivered rather than skipped by the
 	// subscriber's default max delay budget once a newer group exists.
-	const consumer = new Consumer<Rec>({ track: track.subscribe({ maxDelay: Milli(30_000) }) });
+	const consumer = new Consumer<Rec>({ track: track.subscribe({ delay: { max: Milli(30_000) } }) });
 	expect((await consumer.next())?.value).toEqual({ n: 0 });
 	await expect(consumer.next()).rejects.toBeInstanceOf(Rolled);
 

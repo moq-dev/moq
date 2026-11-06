@@ -16,9 +16,9 @@ fn protocol() -> &'static str {
 /// A one-frame broadcast named `test` and the handles that keep it alive.
 fn broadcast(payload: &[u8]) -> (moq_net::origin::Producer, impl Sized) {
 	let origin = crate::origin::spawn();
-	let broadcast = origin.create_broadcast("test").unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = origin.route("test", moq_net::origin::RouteOptions::default()).unwrap();
 	let track = broadcast
+		.broadcast()
 		.create_track(
 			"video",
 			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
@@ -60,7 +60,7 @@ async fn transfer(offerer: &Offerer, answerer: &Answerer, payload: &[u8]) {
 	.expect("handshake timed out");
 
 	let read = async {
-		let Some(moq_net::announce::Event::Start(route)) = announced.next().await else {
+		let Some(moq_net::announce::Event::Present(route)) = announced.next().await else {
 			panic!("expected the broadcast to be announced");
 		};
 		assert_eq!(route.prefix.as_str(), "test");

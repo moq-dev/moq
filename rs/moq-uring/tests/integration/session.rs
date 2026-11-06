@@ -56,9 +56,13 @@ fn lite_session_over_the_worker() {
 
 	// Content ready before anyone connects: one broadcast, one track, one
 	// finished group.
-	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("data", timed()).expect("create track");
+	let broadcast = pub_origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("data", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, PAYLOAD)
@@ -95,10 +99,7 @@ fn lite_session_over_the_worker() {
 			.with_publisher(&pub_origin)
 			.accept(
 				moq_net::time::Instant::now(),
-				moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-					quic::web::Session::raw(conn),
-					moq_net::transport::Address::Setup,
-				)),
+				moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 			)
 			.await
 			.expect("accept");
@@ -119,10 +120,7 @@ fn lite_session_over_the_worker() {
 				.with_subscriber(sub.clone())
 				.connect(
 					moq_net::time::Instant::now(),
-					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-						quic::web::Session::raw(conn),
-						moq_net::transport::Address::Setup,
-					)),
+					moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 				)
 				.await
 				.expect("connect");
@@ -139,6 +137,7 @@ fn lite_session_over_the_worker() {
 					.available()
 					.await
 					.expect("broadcast resolves")
+					.unwrap()
 			};
 			let mut track = bc
 				.track("data")
@@ -194,9 +193,13 @@ fn two_lite_sessions_share_the_server_socket() {
 		});
 	});
 
-	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("data", timed()).expect("create track");
+	let broadcast = pub_origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("data", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, PAYLOAD)
@@ -215,8 +218,8 @@ fn two_lite_sessions_share_the_server_socket() {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("server socket");
 	let endpoint = quic::Endpoint::new(
-		server_sock,
 		quic::endpoint::Config::default().with_server(server_config),
+		server_sock,
 	)
 	.expect("endpoint");
 	let server_addr = endpoint.local_addr();
@@ -232,10 +235,7 @@ fn two_lite_sessions_share_the_server_socket() {
 					.with_publisher(&pub_origin)
 					.accept(
 						moq_net::time::Instant::now(),
-						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-							quic::web::Session::raw(conn),
-							moq_net::transport::Address::Setup,
-						)),
+						moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 					)
 					.await
 					.expect("accept");
@@ -263,10 +263,7 @@ fn two_lite_sessions_share_the_server_socket() {
 					.with_subscriber(sub.clone())
 					.connect(
 						moq_net::time::Instant::now(),
-						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-							quic::web::Session::raw(conn),
-							moq_net::transport::Address::Setup,
-						)),
+						moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 					)
 					.await
 					.expect("connect");
@@ -283,6 +280,7 @@ fn two_lite_sessions_share_the_server_socket() {
 						.available()
 						.await
 						.expect("broadcast resolves")
+						.unwrap()
 				};
 				let mut track = bc
 					.track("data")
@@ -391,8 +389,8 @@ fn required_client_auth_refuses_an_anonymous_client() {
 		.expect("client socket");
 
 	let endpoint = quic::Endpoint::new(
-		server_sock,
 		quic::endpoint::Config::default().with_server(server_config),
+		server_sock,
 	)
 	.expect("endpoint");
 	let server_addr = endpoint.local_addr();

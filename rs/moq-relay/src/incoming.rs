@@ -57,10 +57,16 @@ pub trait Sealed: Sized {
 	/// Refuse the session, closing it with `code`.
 	async fn reject(self, code: moq_net::SessionError);
 
-	/// The QUIC connection under the request, to widen a peer's limits before SETUP OK.
-	#[cfg(feature = "quic")]
-	fn quic(&self) -> Option<&moq_tokio::quic::driver::connection::Connection> {
+	/// What holds the connection to a capped grant once the session runs, or `None` on
+	/// a transport that cannot, which refuses one.
+	fn pacer(&self) -> Option<auth::Pacer> {
 		None
+	}
+
+	/// Apply QUIC limits before answering SETUP, which then opens the receive window the
+	/// handshake held back. A transport without moq-quic ignores them.
+	fn with_quic_limits(self, _limits: moq_quic::Limits) -> anyhow::Result<Self> {
+		Ok(self)
 	}
 
 	fn auth(&self) -> moq_net::auth::Handle;
@@ -103,8 +109,18 @@ impl Sealed for moq_tokio::server::Request {
 	}
 
 	#[cfg(feature = "quic")]
-	fn quic(&self) -> Option<&moq_tokio::quic::driver::connection::Connection> {
-		moq_tokio::server::Request::quic(self)
+	fn pacer(&self) -> Option<auth::Pacer> {
+		let quic = moq_tokio::server::Request::quic(self)?.clone();
+		Some(auth::Pacer::new(move |caps| {
+			if let Err(err) = quic.set_limits(caps.limits()) {
+				tracing::warn!(%err, "failed to apply bitrate caps");
+			}
+		}))
+	}
+
+	#[cfg(feature = "quic")]
+	fn with_quic_limits(self, limits: moq_quic::Limits) -> anyhow::Result<Self> {
+		Ok(moq_tokio::server::Request::with_quic_limits(self, limits)?)
 	}
 
 	fn auth(&self) -> moq_net::auth::Handle {

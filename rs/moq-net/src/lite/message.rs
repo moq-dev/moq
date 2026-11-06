@@ -152,15 +152,25 @@ mod tests {
 		assert!(matches!(err, DecodeError::MessageTooLarge { .. }), "{err:?}");
 	}
 
-	/// ANNOUNCE_INIT carries the whole initial set in one message, so it keeps the room
-	/// a large origin needs.
+	/// ANNOUNCE_INIT carries the whole initial set in one message, so it keeps the room of a
+	/// storage segment, and no more.
 	#[test]
 	fn announce_init_waits_for_a_large_body() {
-		let mut wire = Vec::new();
-		Encoder::new(&mut wire, Version::Lite02.into())
-			.varint(1024 * 1024)
-			.unwrap();
-		let err = super::super::AnnounceInit::decode_slice(&wire, Version::Lite02).unwrap_err();
-		assert!(matches!(err, DecodeError::Short), "{err:?}");
+		let max = <super::super::AnnounceInit as Message>::MAX_SIZE;
+		let decode = |size: usize| {
+			let mut wire = Vec::new();
+			Encoder::new(&mut wire, Version::Lite02.into())
+				.varint(size as u64)
+				.unwrap();
+			super::super::AnnounceInit::decode_slice(&wire, Version::Lite02).unwrap_err()
+		};
+		assert!(
+			matches!(decode(max), DecodeError::Short),
+			"within the cap waits for the body"
+		);
+		assert!(
+			matches!(decode(max + 1), DecodeError::MessageTooLarge { .. }),
+			"past the cap is refused"
+		);
 	}
 }

@@ -2,18 +2,72 @@
 
 How to update your code for each breaking change, newest first.
 
+## Unreleased
+
+### `moq_connection_stats` counts unrouted datagrams ([#7951](https://github.com/moq-dev/moq/pull/7951))
+
+`moq_connection_stats` gains `datagrams_unrouted` and `datagrams_unrouted_valid` at its end, which changes its ABI: recompile against the new header.
+`datagrams_unrouted` counts the datagrams received for a subscription with no datagram track, and is valid on versions with datagrams (moq-lite 05 and newer).
+
+### Socket sessions
+
+The generated socket endpoint, incoming dial, and stream handles now expose TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
+
+### Publishing goes through one `moq_route` handle
+
+`moq_origin_producer_create_broadcast(origin, path, &publication)` is `moq_origin_producer_route(origin, path, &options, &route)`, and `moq_origin_producer_requests(origin, prefix, &requests)` is `moq_origin_producer_route_prefix(origin, prefix, &options, &route)`; start `options` from `moq_route_options_default()`. A `moq_route` replaces `moq_publication`, `moq_origin_requests`, and `moq_broadcast_prepared`:
+
+- `moq_publication_broadcast(publication)` is `moq_route_broadcast(route, &broadcast)`, which fails on a prefix route.
+- `moq_publication_announce(publication, &route)` is `moq_route_announce(route)`, and re-pricing is `moq_route_set_cost(route, cost)`; `moq_publication_unannounce` is `moq_route_withdraw`.
+- `moq_origin_requests_requested_broadcast` is `moq_route_requested`, whose value is NULL once the origin closes.
+- `moq_broadcast_request_prepare` then `moq_broadcast_prepared_publish` is `moq_broadcast_request_route(request, &options, &route)`: create it hidden to fill it first, then announce it.
+- `moq_route_instance_id(route)` returns the stream's instance, kept across withdraw and announce.
+
+`moq_announce_route` is `moq_route_options`, given at creation, with a leading `hidden`. The default route is visible at once, so set `hidden` and call `moq_route_announce` after filling the catalog to keep the old order. Hold the route while the broadcast should stay announced: `moq_route_cancel` or freeing its last handle retracts it, and `moq_broadcast_producer_close` ends both. The `moq_route` record on `moq_announce.route` is `moq_route_info`.
+
+### Separate datagram tracks
+
+Create a separate producer with `moq_publish_datagrams` and `moq_datagram_info`; replace `moq_publish_track_datagram` with `moq_publish_datagrams_append` on that handle, or `moq_publish_datagrams_insert` for an explicit sequence. `moq_consume_datagrams` now takes a subscriber priority before its callback and never subscribes to a stream track. Use `moq_publish_datagrams_demand` and `moq_datagram_demand_priority` for aggregate priority, and `moq_publish_datagrams_requests` / `moq_datagram_request_accept` for on-demand publishing. Finish or abort datagram producers separately. A zeroed datagram info is untimed, unlike the microsecond default of stream-track info.
+
+### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
+
+Viewer ceilings and PROBE target overrides are refused with the new `MOQ_ERROR_OUT_OF_RANGE` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `moq_viewers_watch`, `moq_viewers_set_target`, and `moq_viewer_update` return it. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
+
+### Media setup refusals are typed
+
+Audio and video subscribe setup now reports `MOQ_ERROR_UNSUPPORTED_CONFIG` when the decoder refuses a codec, layout, or description, or when every video decoder for the codec reports that this device cannot decode the stream. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a missing driver or no device, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+
 ## moq-c 0.7, the hand-written ABI
 
 The hand-written crate never published as moq-c: a libmoq 0.6 user applies these entries before moving to the generated API.
 
-### A subscription without `max_delay_present` has no limit
+### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
 
-A `moq_subscription` with `max_delay_present` false sets no subscriber limit, leaving the publisher's max age alone to bound it, instead of moq-net's default of zero.
-Start from `moq_subscription_defaults()`, or set `max_delay_present`, where you relied on a zeroed struct; a NULL pointer still means the defaults.
+`moq_announce_kind` is `MOQ_ANNOUNCE_KIND_PRESENT` (0) or `MOQ_ANNOUNCE_KIND_ABSENT` (1), and `moq_announce_event` loses `predecessor` and `predecessor_len`, changing the C ABI.
+Another instance taking a path over keeps it present, and a route's cost changing is not reported.
+Map `_START` to `_PRESENT` and `_END` to `_ABSENT`, and drop `_UPDATE` handling. Where you requested the path again on `_RESTART` or `_TAKEOVER`, call `moq_origin_follow`, whose callback delivers a broadcast handle for each new instance.
+
+`moq_origin_follow` takes a `moq_follow_callback`, `(void *user_data, moq_follow_event event, int32_t code)`, instead of a `moq_status_callback`. `MOQ_FOLLOW_EVENT_ONLINE` carries each broadcast handle (where a positive code did), `MOQ_FOLLOW_EVENT_OFFLINE` reports the path going offline (or, for a follow pinned to an instance, another instance taking it over) with code `0`, and `MOQ_FOLLOW_EVENT_END` is the terminal callback, with `0` or a negative error that `moq_error()` explains (where a code `<= 0` was). Release `user_data` on `MOQ_FOLLOW_EVENT_END`.
+
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A NULL or zeroed `moq_track_info` now advertises a zero max age, serving only the live edge, instead of no publisher limit. `max_age_present` is gone and `max_age_us` always applies; set the new `max_age_unlimited`, which ignores `max_age_us`, where you relied on `max_age_present` false meaning no limit. Zero-initialize the struct (`moq_track_info info = {0};`) or assign every member. In the generated API, an unset `moq_track_info.max_age` is likewise zero, and `max_age_unlimited` sets no limit.
+
+### JSON writes refuse a NULL timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`moq_publish_json_snapshot_update`, `moq_publish_json_stream_append`, `moq_publish_json_window_push`, and `moq_publish_json_window_pop` fail with `MOQ_ERROR_INVALID_POINTER` on a NULL `timestamp` instead of stamping the broadcast clock. Stamp media and JSON from `moq_publish_catalog_now()`; in the generated API, JSON `update`, `append`, `push`, and `pop` take a required `moq_timestamp` from the media catalog producer's `now`, and the JSON producers refuse a track without a timescale.
+
+### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
+
+`moq_announce_event.has_captures` is removed, changing the C ABI. Read `captures_len` directly: zero means the filter has no wildcards. Rebuild consumers against the regenerated header and matching native library.
+
+### Subscriptions take a `moq_delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`moq_subscription.max_delay_us` and `max_delay_present` are `moq_delay delay`. A zeroed `moq_subscription` is moq-net's defaults, the same as `moq_subscription_defaults()` and a NULL pointer: set `delay.max_us` to the old `max_delay_us`, and `delay.max_unlimited` for no subscriber limit. `delay.min_unstated` leaves the target latency unstated.
 
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
-`moq_origin_create_broadcast`, `moq_origin_requests`, `moq_origin_announced_broadcast`, and `moq_origin_request` return an error for a path with a leading, trailing, or doubled `/` instead of collapsing it. Pass the canonical path, such as `room/cam`. The generated API refuses the same paths.
+`moq_origin_create_broadcast`, `moq_origin_requests`, `moq_origin_follow`, and `moq_origin_request` return an error for a path with a leading, trailing, or doubled `/` instead of collapsing it. Pass the canonical path, such as `room/cam`. The generated API refuses the same paths.
 
 ### Session allocator ([#6751](https://github.com/moq-dev/moq/pull/6751))
 
@@ -56,11 +110,16 @@ With deltas on, the track carries a refresh ratio of 8 and the producer restates
 Higher is first and 0 is the unset midpoint, so a zeroed `moq_track_info` now uses the default priority rather than the least urgent one.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `moq_origin_follow` replaces `moq_origin_announced_broadcast`, and both resolutions take an instance ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
+
+Rename `moq_origin_announced_broadcast` and `moq_origin_announced_broadcast_cancel` to `moq_origin_follow` and `moq_origin_follow_cancel`.
+`moq_origin_request` and `moq_origin_follow` take `instance, instance_len` after `path_len`: pass `NULL, 0` to accept whichever publisher instance serves the path, or an instance to refuse every other.
+`moq_origin_request` resolves one publisher instance: it retries as the routes covering the path change, and fails as unroutable only once discovery has synced with no covering route. `moq_origin_follow` hands out each instance that serves the path in turn.
+
 ### A client asks only about what it watches (#6165)
 
-On moq-lite, a client session asks its relay for announcements only under paths something watches, through `moq_origin_announced` or `moq_origin_announced_broadcast`, instead of under its whole scope at connect.
-`moq_origin_request` watches nothing, so on a client it fails with a negative code for a path nothing watches, even when the relay announces it.
-Resolve the path with `moq_origin_announced_broadcast`, or hold `moq_origin_announced` over its prefix while requesting.
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `moq_origin_announced`, `moq_origin_request`, or `moq_origin_follow`, instead of under its whole scope at connect.
+`moq_origin_request` owns the discovery of its path, so it finds a broadcast the relay serves with nothing else watching first; no announcement stream is needed beside it.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
 ### `MOQ_CONTAINER_FORMAT_FMP4` unwraps to Legacy (#6250)
@@ -82,7 +141,8 @@ Publish a replacement under a new name, and expect a finished track's demand ter
 ### A claim answers by publishing (#5678)
 
 `moq_origin_dynamic` takes no route, and `moq_origin_dynamic_update` is gone.
-`moq_broadcast_request_accept` is replaced by `moq_broadcast_request_prepare`, which returns a prepared answer under the epoch you pass: fill its broadcast, then `moq_broadcast_prepared_publish` announces it at the exact path under that epoch.
+`moq_broadcast_request_accept` is replaced by `moq_broadcast_request_prepare`, which returns a prepared answer: fill its broadcast, then `moq_broadcast_prepared_publish` announces it at the exact path under a fresh instance of its own.
+To answer with a broadcast you already hold, `moq_broadcast_request_serve(request, consumer)` serves it under the prefix route without announcing an exact route; the consumer stays yours to free.
 `moq_broadcast_prepared_free` refuses an answer you will not publish.
 
 ### `moq_track_info` gains `compress` (#5928)
@@ -148,7 +208,7 @@ if (consumer > 0) {
 }
 ```
 
-### `moq_origin_announced_broadcast` delivers every publisher instance (#5700)
+### `moq_origin_follow` delivers every publisher instance (#5700)
 
 Its callback gets a new broadcast handle each time another instance takes over the path or the broadcast returns, and its terminal `0` only on cancel.
 Free each handle with `moq_consume_close` once its successor arrives.

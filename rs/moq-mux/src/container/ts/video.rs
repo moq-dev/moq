@@ -144,11 +144,18 @@ impl Assembly {
 		} else {
 			self.retained = Some(pending.retained);
 		}
-		self.spans.push_back(Span {
-			len: pending.data.len(),
-			pts,
-			reorder,
-		});
+		if pending.continuation
+			&& let Some(span) = self.spans.back_mut()
+		{
+			// Read boundaries within one PES add no timestamp owner or retained unit.
+			span.len += pending.data.len();
+		} else {
+			self.spans.push_back(Span {
+				len: pending.data.len(),
+				pts,
+				reorder,
+			});
+		}
 		self.tail.extend_from_slice(&pending.data);
 		self.account()
 	}

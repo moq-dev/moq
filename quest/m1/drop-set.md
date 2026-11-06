@@ -14,11 +14,10 @@ narrower budget is served after a widening, as a cold relay would.
 
 ## Plan
 
-Decided 2026-10-27 (maintainer): this runs after
-[Range count cost](/quest/m1/subscribe-ranges/fill-linear.md), since both edit
-`given_up` in `rs/moq-net/src/model/track/miss.rs` (made a `Required` entry
-2026-10-30, in [moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995)), and before
-[Rust groups by start](/quest/m1/time-addressing/model.md), which requires it
+Decided 2026-10-27 (maintainer): this runs after the range count cost work,
+which finished in [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542),
+since both edit `given_up` in `rs/moq-net/src/model/track/miss.rs`, and before
+[Rust groups by start](/quest/m2/time-addressing/model.md), which requires it
 because runs keyed by group sequence convert mechanically to starts.
 
 Decided by the maintainer on 2026-10-19, splitting this from the widened
@@ -191,7 +190,7 @@ A cursor judges an unknown missing sequence (never a stale run its record
 still holds as reported, which only a widening settles) as it would a
 group never received: locally against its own budget (`TrackState::drifted`),
 and otherwise as a cache miss, which the relay fills upstream by range
-([Subscribe ranges](/quest/m1/subscribe-ranges/README.md)), so no reader
+([Subscribe ranges](/quest/m2/subscribe-ranges/README.md)), so no reader
 waits indefinitely on forgotten state. Extend `track_subscriber_churn` in
 `rs/moq-net/benches/track.rs` with a fragmented set up to pool capacity,
 swept over subscriber count, shared runs, runs per cursor record, and run
@@ -259,6 +258,10 @@ Test on mock time through a relay:
   2026-10-28).
 
 Mirror each case in `js/net`.
+In `js/net`, a group a sink buffers keeps its source wanted only while
+`Subscriber.#reading` says its reader will still read it
+([moq-dev/moq#7948](https://github.com/moq-dev/moq/pull/7948)), so a change to
+how a cursor judges a missing or stale group keeps that verdict in step.
 
 Public API: none. Wire: lite-07 SUBSCRIBE_DROP (unpublished) gains `Max Age`
 and the widening and ordering rules above; published versions are
@@ -304,10 +307,15 @@ a cancelled fetch below a track's end still holds the end open until the cache
 expiry scan removes it, so how fast a subscription ends depends on expiry
 timing. Settle it here, where cancelled and expired runs get a reason.
 
-## Required
+### Untimed fills below a resolved start
 
-- [Range count cost](/quest/m1/subscribe-ranges/fill-linear.md) - the remaining range-count walks stop growing per poll; both edit `miss.rs`
+Noted 2026-10-31 from [moq-dev/moq#7235](https://github.com/moq-dev/moq/pull/7235),
+which made everything below a resolved SUBSCRIBE_START fillable from upstream:
+a lite-07 copy with no media time asks a fill below the start even for a reader
+whose budget the publisher already exceeded, and that fill ends empty. If the
+extra FETCH shows up in relay traffic, bound it here, where a run below the
+start can carry the budget it was resolved under.
 
 ## Related
 
-- [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - fills the cache miss an evicted run leaves
+- [Subscribe ranges](/quest/m2/subscribe-ranges/README.md) - fills the cache miss an evicted run leaves

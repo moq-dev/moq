@@ -33,7 +33,7 @@ struct Setup {
 	pair: MockPair,
 	track: moq_net::track::Producer,
 	reader: kio::clock::sim::JoinHandle<Read>,
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 }
 
 async fn setup(version: &str) -> Setup {
@@ -42,9 +42,11 @@ async fn setup(version: &str) -> Setup {
 
 async fn setup_with_gate(version: &str, gate: Option<kio::Consumer<bool>>) -> Setup {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("video", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	broadcast.announce().unwrap();
 
 	let subscriber = produce_origin(2);
 	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
@@ -57,7 +59,8 @@ async fn setup_with_gate(version: &str, gate: Option<kio::Consumer<bool>>) -> Se
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 
 	// The publisher only learns of a subscription once the subscriber polls it.
 	let (ready, active) = futures::channel::oneshot::channel();
@@ -104,16 +107,24 @@ async fn setup_with_gate(version: &str, gate: Option<kio::Consumer<bool>>) -> Se
 async fn track_info_interest_precedes_a_subscription() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast("bcast").unwrap();
-		let track = broadcast.create_track("video", timed()).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+		broadcast.announce().unwrap();
 		let subscriber = produce_origin(2);
 		let mut options = MockConnectOptions::new(version.parse().unwrap());
 		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(subscriber.clone());
 		let _pair = connect_mock(options).await;
 		let consumer = subscriber.consume();
-		let remote = consumer.follow("bcast", None).unwrap().available().await.unwrap();
+		let remote = consumer
+			.follow("bcast", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let copy = remote.track("video").unwrap();
 		copy.info().await.expect("TRACK_INFO");
 		crate::support::wanted(track.demand())
@@ -226,8 +237,10 @@ async fn abort_cuts_a_drain_short_for(version: &str) {
 async fn close_withdraws_announcements_before_closing_the_transport() {
 	for version in ["moq-lite-01", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast("bcast").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		broadcast.announce().unwrap();
 		let subscriber = produce_origin(2);
 		let mut options = MockConnectOptions::new(version.parse().unwrap());
 		options.client_publish = Some(publisher.consume());
@@ -247,8 +260,10 @@ async fn close_withdraws_announcements_before_closing_the_transport() {
 async fn close_times_out_waiting_for_announcement_acknowledgements() {
 	for version in ["moq-lite-01", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast("bcast").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		broadcast.announce().unwrap();
 		let subscriber = produce_origin(2);
 		let mut options = MockConnectOptions::new(version.parse().unwrap());
 		options.client_publish = Some(publisher.consume());
@@ -262,12 +277,22 @@ async fn close_times_out_waiting_for_announcement_acknowledgements() {
 	}
 }
 
-/// A transport ACK is not proof the subscriber read the final group.
+/// The versions whose SUBSCRIBE_FINISH lets a subscriber settle its tail, and FIN, at once.
+const SETTLED_TAIL: [&str; 3] = ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
+
+/// A transport ACK is not proof the subscriber read the final group: a receiver may drop
+/// unread bytes on close.
 #[kio::test]
 async fn close_tail() {
+	for version in SETTLED_TAIL {
+		close_tail_for(version).await;
+	}
+}
+
+async fn close_tail_for(version: &str) {
 	let Setup {
 		pair, track, reader, ..
-	} = setup("moq-lite-07-wip").await;
+	} = setup(version).await;
 	pair.client_transport.ack_fins();
 	pair.client_transport.hold_unis();
 	let mut group = track.append_group().unwrap();
@@ -278,27 +303,34 @@ async fn close_tail() {
 	kio::clock::sleep(Duration::from_millis(100)).await;
 	assert!(
 		!close.is_finished(),
-		"close must wait for the subscriber, not the transport ACK"
+		"{version}: close must wait for the subscriber, not the transport ACK"
 	);
 	pair.client_transport.release_unis();
-	close
-		.await
-		.unwrap()
-		.expect("close drains after the subscriber reads the tail");
+	let res = close.await.unwrap();
+	assert!(
+		res.is_ok(),
+		"{version}: close drains after the subscriber reads the tail: {res:?}"
+	);
 	let (got, end) = reader.await.unwrap();
-	assert_eq!(got, vec![b"last".to_vec()]);
-	end.expect("track ends cleanly");
+	assert_eq!(got, vec![b"last".to_vec()], "{version}");
+	assert!(end.is_ok(), "{version}: track ends cleanly: {end:?}");
 }
 
-/// A lite07 peer that never acknowledges the track end cannot report a successful close.
+/// A peer that never acknowledges the track end cannot report a successful close.
 #[kio::test]
 async fn close_requires_subscriber_fin() {
+	for version in SETTLED_TAIL {
+		close_requires_subscriber_fin_for(version).await;
+	}
+}
+
+async fn close_requires_subscriber_fin_for(version: &str) {
 	let Setup {
 		pair,
 		track,
 		reader: _reader,
 		..
-	} = setup("moq-lite-07-wip").await;
+	} = setup(version).await;
 	pair.client_transport.ack_fins();
 	pair.server_transport.withhold_bidi_fins();
 	let mut group = track.append_group().unwrap();
@@ -306,18 +338,13 @@ async fn close_requires_subscriber_fin() {
 	group.finish().unwrap();
 	track.finish().unwrap();
 	let started = kio::clock::now();
-	assert!(matches!(pair.client.close().await, Err(Error::Timeout)));
-	assert_eq!(kio::clock::now() - started, Duration::from_secs(1));
+	let res = pair.client.close().await;
+	assert!(matches!(res, Err(Error::Timeout)), "{version}: {res:?}");
+	assert_eq!(kio::clock::now() - started, Duration::from_secs(1), "{version}");
 }
 
-/// Released drafts retain ACK-based close even when application delivery is delayed.
-#[kio::test]
-async fn older_lite_close_keeps_ack_drain() {
-	for version in ["moq-lite-05", "moq-lite-06"] {
-		peer_close_reads_buffered_tail(version).await;
-	}
-}
-
+/// Before lite-05 only the subscriber's grace settles its tail, so the close keeps the
+/// ACK drain rather than wait out that timer.
 #[kio::test]
 async fn earlier_lite_peer_close_reads_buffered_tail() {
 	for version in ["moq-lite-01", "moq-lite-02", "moq-lite-03", "moq-lite-04"] {
@@ -369,7 +396,12 @@ async fn peer_close_before_receiver_poll_keeps_buffered_tail() {
 		group.write_frame(Timestamp::ZERO, b"last".as_slice()).unwrap();
 		group.finish().unwrap();
 		track.finish().unwrap();
-		pair.client.close().await.expect("FIN delivery needs no receiver poll");
+		let res = pair.client.close().await;
+		// From lite-05 the close waits for the subscriber's FIN, which the gate holds back.
+		match version {
+			"moq-lite-05" | "moq-lite-06" => assert!(matches!(res, Err(Error::Timeout)), "{version}: {res:?}"),
+			_ => assert!(res.is_ok(), "{version}: FIN delivery needs no receiver poll: {res:?}"),
+		}
 		*gate.write().ok().expect("receiver gate remains open") = true;
 		let (got, _) = reader.await.unwrap();
 		assert_eq!(got, vec![b"last".to_vec()], "{version}");

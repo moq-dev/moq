@@ -20,7 +20,7 @@ path patterns under a root, and the session can only see that part of the tree.
 
 ## The contract
 
-The relay POSTs one JSON body per session event (`connect`, `revalidate`,
+The relay POSTs one JSON body per session event (`connect`, `attach`, `revalidate`,
 `end`) to `--auth-url` and reads a grant back. The request carries everything
 the relay knows: a session id, its own `node` name, the transport, addresses,
 SNI and ALPN, the path and query exactly as dialed, a moq-transport SETUP
@@ -79,7 +79,11 @@ reaches `expires` closes as `Expired` rather than `Unauthorized`, which also
 stops the reconnect loop: refresh the token, then reconnect with the new URL.
 
 **End.** Every close reports `end` with the reason, the duration, and the
-bytes sent and received. A shutdown waits for these reports before exiting.
+bytes sent and received. An event with `auth` names one attached credential;
+its `end` releases only that credential. Without `auth`, `end` closes the
+connection, after every attachment has reported its own end. A shutdown waits
+for these reports before exiting. Auth servers must accept `attach` and handle `auth` before enabling
+in-band credentials. An older server refuses `attach` before a credential is admitted.
 
 **The link.** `https://` presents the relay's `connect.tls` client certificate
 when one is configured, so a remote server can tell which relay is asking;
@@ -180,17 +184,25 @@ The grant reports its real expiry so the client can renew in time.
 
 The relay verifies a presented JWT through the same admission path, replacing
 `jwt` in the original query and preserving the connection's identity. The auth
-server sees another `connect` for the same session id. Attached grants revalidate
-independently but never report `end`; only the connection reports its end, even
-if its first credential expired earlier, after its attached grants stop. Each
-attached JWT counts against its own `--limit-token` cap until the connection
-ends. The initial credential remains responsible for the connection's stats tier.
+server sees `attach` for the same session id, with a fresh `auth` id
+that also names its revalidations and end. Attached grants revalidate and end
+independently. Each JWT counts against its own `--limit-token` cap while any
+credential using it remains on that connection. The initial credential remains
+responsible for the connection's stats tier.
 Certificate sessions cannot renew a certificate in band, and public rules
-cannot verify a presented token; both refuse it as unsupported. A moq-transport
-`AUTHORIZATION TOKEN` on a `SUBSCRIBE` or `PUBLISH_NAMESPACE` is verified the
-same way on any draft, but its grant authorizes only that request and ends with
-it; it never joins the union. A `PUBLISH_NAMESPACE` grant must cover the whole
-namespace: `room/**`, not just `room`. A session verifies at most
+cannot verify a presented token; both refuse it as unsupported. On moq-transport,
+each distinct `AUTHORIZATION TOKEN` is verified once while any open request on
+that session names it. Its grant admits only requests naming that token,
+independently of the session's scope. Discovery reveals only paths it grants;
+a `PUBLISH_NAMESPACE` grant must cover the whole namespace: `room/**`, not just
+`room`. The last naming request ending releases the lease at the auth server;
+a later request verifies the token again. Expiry or revocation ends every
+request naming it. Expiry says so, so the client knows to renew the token: a
+request not yet answered is refused with `EXPIRED_AUTH_TOKEN`, and an answered
+one resets with it. A subscription resets its open group streams, a `FETCH`
+its data and request streams, and a `PUBLISH_NAMESPACE` cancels its request
+stream both ways. A subscription still reports `PUBLISH_DONE` as `UNAUTHORIZED`.
+A revoked token ends them without it. A joining `FETCH` still follows its subscription. A session verifies at most
 128 tokens at once, counting
 checks still running past the admission timeout. Later tokens wait their turn
 rather than being refused. Each HTTP request is admitted on its own, so an
@@ -223,9 +235,25 @@ everything. Put application data somewhere other than the token.
 Tokens and key scopes from the older `moq-token` format still work: each `put`
 and `get` prefix `p` reads as the subtree `p/**`.
 
-Roles are pattern arrays. Object roles, including bitrate caps such as
-`{"path":["alice/**"],"rate":8000000}`, are refused in full by token and
-auth-server grant parsing. No transport currently enforces bitrate caps.
+### Bitrate caps
+
+A role may cap its bitrate, in bits per second, by naming its patterns as
+`{"path":["alice/**"],"rate":8000000}` in a token or an auth-server grant. A
+`publish` cap bounds what the session sends the relay, and a `subscribe` cap
+what the relay sends it, QUIC overhead and retransmissions included. Each
+averages over a second, with one second of the rate as a burst. Older relays
+refuse a capped role rather than drop the cap.
+
+Only QUIC and WebTransport on the tokio or io\_uring listener enforce caps.
+WebSocket and HTTP `/fetch` and `/announced` refuse a capped grant,
+whether it arrives at connect, in band, or at revalidation. When in-band tokens
+add grants to one session, each direction takes the highest cap among them, and
+a grant giving that direction paths without a cap lifts it. A cap changed at
+revalidation applies to the live session.
+
+Every QUIC session starts with only the flow-control credit its SETUP needs, so
+a client cannot bank the full `[quic] receive_window` before its cap applies;
+the relay opens the window once it admits the session.
 
 ### Path matching
 
@@ -304,10 +332,13 @@ no wildcard, such as `anon`, refuses to start; write `anon/**` for the subtree.
 bad chain fails there. What the certificate admits is the server's decision:
 the relay reports it in the request and enforces the grant it gets back.
 `moq auth serve` grants a certificate only what `--mtls-publish` and
-`--mtls-subscribe` name, nothing by default. Public rules ignore certificates,
-so `--auth-public` with a client CA refuses to start. Only the QUIC listener
-and a `tls://` TCP listener (`listen.tcp.tls`) verify client certificates, so a
-relay with neither refuses `listen.tls.root` too.
+`--mtls-subscribe` name, nothing by default, unless a rule in its config file
+scopes that certificate (below). Public rules ignore certificates,
+so `--auth-public` with a client CA refuses to start. The QUIC listener and
+every `tls://` listener (`listen.tcp.tls`, and the HTTPS port's `tls://`) verify
+client certificates under `listen.tls.root`; plain HTTPS verifies them under
+`web.https.root`. A relay with neither a QUIC nor a `tls://` TCP listener
+refuses `listen.tls.root`.
 
 Cluster peers are admitted the same way, so a mesh runs
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer` (or a
@@ -328,6 +359,50 @@ root = ["/etc/moq/peer-ca.pem"]
 [connect.tls]
 cert = "/etc/moq/relay.pem"    # presented on outbound dials and to an https:// auth server
 key = "/etc/moq/relay.key"
+```
+
+The request's `tls.chain` lists the SHA-256 of the leaf and of each certificate
+the leaf provably descends from, nearest first, ending at the root the listener
+verified it against (`listen.tls.root`, or `web.https.root` on the HTTPS
+listener) whether or not the client sent that root. Only a certificate whose
+key signed a link up from the leaf is listed, so a client cannot claim an
+intermediate by sending it, and the relay refuses a chain too tangled to trace
+rather than report the leaf alone. A rule can scope a leaf, an intermediate,
+or a whole root. A hash names one certificate, not a key: a cross-signed CA
+has a hash per certificate it was issued as, so revoke each one. When two
+certificates sit equally near the leaf, the order the client presented its
+chain in decides which rule applies.
+
+`moq auth serve` takes an optional TOML file holding every flag under its
+dotted key; a flag given on the command line wins. Only the file holds
+per-certificate rules, keyed by any hash in `tls.chain`. The rule naming the
+certificate nearest the leaf applies: it can set `publish`, `subscribe`, `link`
+(`peer`, `upstream`, or `none`), `tier`, `publish_rate`, and `subscribe_rate`,
+and each field it omits takes the server-wide value. Its patterns replace the
+shared ones, so a rule with empty lists revokes. A certificate no rule names
+gets `--mtls-*`. The server watches the file: an edit takes effect at each
+session's next re-check, and one that fails to load keeps the last valid
+config and logs an error. Listener and mesh settings apply on restart.
+
+```toml
+# moq auth serve /etc/moq/auth.toml
+revalidate = "1m"
+expires = "1d"
+
+[mtls]
+publish = ["**"]
+subscribe = ["**"]
+link = "peer"                  # cluster CA: every other certificate is a relay
+
+[mtls.certificates.3f2a...]    # an affiliate's intermediate CA: everything it issued
+publish = ["affiliate-a/**"]
+subscribe = ["affiliate-a/**"]
+link = "none"
+tier = "affiliate-a"
+
+[mtls.certificates.9c41...]    # one revoked leaf under it
+publish = []
+subscribe = []
 ```
 
 ## Auth server
@@ -354,7 +429,7 @@ evaluated or refused: nothing is ignored, and no two are combined.
 | --- | --- | --- |
 | nothing | the public rules | `--public-*`, or refused |
 | a JWT | refused | verified, or refused |
-| a certificate | never requested: a client CA refuses to start | `--mtls-*`, or refused |
+| a certificate | never requested: a client CA refuses to start | its rule, else `--mtls-*`, or refused |
 | a JWT and a certificate | never requested | refused |
 
 A JWT is verified against `--key FILE`, `--key-dir DIR`, or `--key-set FILE`

@@ -33,14 +33,14 @@ func ExampleClient_Announced() {
 			}
 			log.Fatal(err)
 		}
-		if event, ok := event.(moq.AnnounceEventStart); ok {
+		if event, ok := event.(moq.AnnounceEventPresent); ok {
 			fmt.Println("broadcast:", event.Announce.Prefix)
 		}
 	}
 }
 
-// Publish a media track to a relay.
-func ExampleClient_CreateBroadcast() {
+// Read a broadcast across publisher restarts, noticing when it goes offline.
+func ExampleClient_Follow() {
 	ctx := context.Background()
 
 	client, err := moq.Dial(ctx, "https://relay.example.com", moq.ClientConfig{})
@@ -49,17 +49,58 @@ func ExampleClient_CreateBroadcast() {
 	}
 	defer client.Close()
 
-	publication, err := client.CreateBroadcast("me/mic")
+	following, err := client.Follow("demos/bbb", nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-	broadcast := publication.Broadcast()
+	defer following.Cancel()
+
+	for {
+		broadcast, err := following.Available(ctx)
+		if err != nil {
+			if moq.IsShutdown(err) {
+				break
+			}
+			log.Fatal(err)
+		}
+		if broadcast == nil {
+			fmt.Println("offline")
+			continue
+		}
+		catalog, err := moqmedia.CatalogSnapshot(ctx, broadcast)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("online: %+v\n", catalog)
+	}
+}
+
+// Publish a media track to a relay.
+func ExampleClient_Route() {
+	ctx := context.Background()
+
+	client, err := moq.Dial(ctx, "https://relay.example.com", moq.ClientConfig{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer client.Close()
+
+	// Hidden until the catalog is filled; hold the route while it should stay announced.
+	route, err := client.Route("me/mic", moq.RouteOptions{Hidden: true})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer route.Cancel()
+	broadcast, err := route.Broadcast()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusHead()})
 	if err != nil {
 		log.Fatal(err)
 	}
-	_ = publication.Announce(moq.AnnounceRoute{})
+	_ = route.Announce()
 
 	// 20 ms in, counted on the Opus 48 kHz sample clock.
 	pts := moq.Timestamp{Value: 960, Scale: 48_000}

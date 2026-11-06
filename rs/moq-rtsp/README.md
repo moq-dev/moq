@@ -8,7 +8,7 @@ interleaved), so run it on the camera's network and the camera needs no inbound
 port. Audio the stack cannot play, such as G.711, is skipped with a warning.
 
 `moq import rtsp` in [`moq-cli`](../moq-cli) wraps this crate with reconnect and
-a fresh epoch per session.
+a fresh instance per session.
 
 ## Library
 
@@ -20,19 +20,19 @@ the session and finishes its tracks.
 
 A broadcast name always means the same content, so a restarted timeline must
 not continue the old broadcast: finish it and publish a fresh one under a new
-epoch.
+instance.
 
 ```rust
 let client = moq_rtsp::Client::new("rtsp://admin:secret@192.168.1.64/stream1".parse()?)?;
 
 loop {
-	let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
-	let mut broadcast = origin.publish("camera", route)?;
-	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default())?;
+	// Each route mints a fresh instance.
+	let route = origin.route("camera", moq_net::origin::RouteOptions::default())?;
+	let mut catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), Default::default())?;
 
-	let end = client.pull(&broadcast, &catalog).await;
+	let end = client.pull(route.broadcast(), &catalog).await;
 	catalog.finish()?;
-	broadcast.close();
+	route.broadcast().close();
 	end?;
 }
 ```

@@ -102,7 +102,7 @@ impl Script {
 	async fn handle(State(script): State<Script>, Json(request): Json<Request>) -> Response {
 		script.seen.lock().unwrap().push(request.clone());
 		let answer = match request.event {
-			Event::Connect => script.connect.lock().unwrap().clone(),
+			Event::Connect | Event::Attach => script.connect.lock().unwrap().clone(),
 			Event::Revalidate if request.transport == moq_auth::Transport::Http => script
 				.revalidate_http
 				.lock()
@@ -166,7 +166,7 @@ fn build_auth(url: url::Url) -> moq_relay::auth::Auth {
 /// Stand up the relay's accept loop on a plain-TCP qmux listener and return the
 /// port plus an abort handle.
 async fn spawn_relay(auth: moq_relay::auth::Auth) -> (u16, tokio::task::JoinHandle<()>) {
-	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	let cluster = crate::spawn_cluster(cluster::Options::default());
 	spawn_relay_with(auth, cluster).await
 }
 
@@ -175,9 +175,15 @@ async fn spawn_relay_with(
 	auth: moq_relay::auth::Auth,
 	cluster: cluster::Cluster,
 ) -> (u16, tokio::task::JoinHandle<()>) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	spawn_relay_config(auth, cluster, moq_tokio::listen::Config::default()).await
+}
 
-	let mut config = moq_tokio::listen::Config::default();
+async fn spawn_relay_config(
+	auth: moq_relay::auth::Auth,
+	cluster: cluster::Cluster,
+	mut config: moq_tokio::listen::Config,
+) -> (u16, tokio::task::JoinHandle<()>) {
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 	// Opt in to lite-07 beside the defaults, so a client pinned to it can reach the AUTH stream.
 	config.version = moq_net::Versions::all()
@@ -206,7 +212,7 @@ async fn spawn_relay_with(
 /// Stand up the relay's axum web stack with WebSocket enabled and return the
 /// port plus an abort handle.
 async fn spawn_ws_relay(auth: moq_relay::auth::Auth) -> (u16, tokio::task::JoinHandle<()>) {
-	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	let cluster = crate::spawn_cluster(cluster::Options::default());
 	spawn_ws_relay_with(auth, cluster).await
 }
 
@@ -214,7 +220,7 @@ async fn spawn_ws_relay_with(
 	auth: moq_relay::auth::Auth,
 	cluster: cluster::Cluster,
 ) -> (u16, tokio::task::JoinHandle<()>) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	// Stream listeners bind lazily, so this server never opens a socket; only
 	// its certificate handle is used.
@@ -265,9 +271,13 @@ fn room_url(scheme: &str, port: u16) -> url::Url {
 /// round-trips. Returns both sessions so the caller can watch them close.
 async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_tokio::Connection) {
 	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = pub_origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -288,7 +298,7 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 
 	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();
-	let mut announcements = sub_consumer.announced();
+	let mut announcements = sub_consumer.routes();
 	let sub_session = kio::clock::timeout(
 		TIMEOUT,
 		client()
@@ -363,7 +373,7 @@ async fn spawn_quic_relay(
 	auth: moq_relay::auth::Auth,
 	root: Option<std::path::PathBuf>,
 ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
-	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	let cluster = crate::spawn_cluster(cluster::Options::default());
 	spawn_quic_relay_with(auth, root, cluster).await
 }
 
@@ -373,7 +383,7 @@ async fn spawn_quic_relay_with(
 	root: Option<std::path::PathBuf>,
 	cluster: cluster::Cluster,
 ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let mut config = moq_tokio::listen::Config::default();
 	config.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.tls.generate = vec!["localhost".into()];
@@ -596,7 +606,7 @@ async fn a_moved_tier_retags_the_live_session() {
 	let mut labeled = grant(Duration::from_secs(3600));
 	labeled.label = Some("project/key/1".into());
 	let script = Script::new(labeled);
-	let mut cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	let mut cluster = crate::spawn_cluster(cluster::Options::default());
 	cluster.stats = stats::Registry::new(stats::Config::new());
 	let registry = cluster.stats.clone();
 	let (port, relay) = spawn_relay_with(build_auth(script.spawn().await), cluster).await;
@@ -638,9 +648,13 @@ async fn a_moved_tier_retags_the_live_session() {
 
 	// A publisher whose track stays open across the move, and a subscriber to it.
 	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = pub_origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let pub_session = kio::clock::timeout(
 		TIMEOUT,
 		client()
@@ -655,7 +669,7 @@ async fn a_moved_tier_retags_the_live_session() {
 
 	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();
-	let mut announcements = sub_consumer.announced();
+	let mut announcements = sub_consumer.routes();
 	let sub_session = kio::clock::timeout(
 		TIMEOUT,
 		client()
@@ -780,9 +794,14 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 		let pub_origin = moq_tokio::origin::spawn();
 		let mut tracks = Vec::new();
 		for path in ["alice/audio", "alice/video"] {
-			let broadcast = pub_origin.create_broadcast(path).expect("create broadcast");
-			let track = broadcast.create_track("media", timed()).expect("create track");
-			broadcast.announce(Default::default()).expect("announce broadcast");
+			let broadcast = pub_origin
+				.route(path, moq_net::origin::RouteOptions::hidden())
+				.expect("create broadcast");
+			let track = broadcast
+				.broadcast()
+				.create_track("media", timed())
+				.expect("create track");
+			broadcast.announce().expect("announce broadcast");
 			tracks.push((broadcast, track));
 		}
 		let pub_session = kio::clock::timeout(
@@ -816,7 +835,8 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 			let broadcast = kio::clock::timeout(TIMEOUT, sub_consumer.follow(path, None).unwrap().available())
 				.await
 				.expect("announcement timeout")
-				.expect("announced broadcast resolves");
+				.expect("announced broadcast resolves")
+				.unwrap();
 			subs.push(
 				broadcast
 					.track("media")
@@ -879,7 +899,8 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 		let broadcast = kio::clock::timeout(TIMEOUT, sub_consumer.follow("alice/audio", None).unwrap().available())
 			.await
 			.expect("the undeafened path was never announced again")
-			.expect("announced broadcast resolves");
+			.expect("announced broadcast resolves")
+			.unwrap();
 		let mut audio = broadcast
 			.track("media")
 			.unwrap()
@@ -975,9 +996,13 @@ async fn http_routes_hold_a_lease() {
 
 	// A publisher whose group stays open, so a fetch of it keeps streaming.
 	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = pub_origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -997,7 +1022,7 @@ async fn http_routes_hold_a_lease() {
 	// Wait until the announcement reaches the relay before asking over HTTP:
 	// the /announced handler only reports what has arrived so far.
 	let sub_origin = moq_tokio::origin::spawn();
-	let mut announcements = sub_origin.consume().announced();
+	let mut announcements = sub_origin.consume().routes();
 	let _sub_session = kio::clock::timeout(
 		TIMEOUT,
 		client()
@@ -1136,67 +1161,118 @@ async fn the_end_carries_duration_and_bytes() {
 	relay.abort();
 }
 
-/// A session the drain deadline force-closes reports its `end` to the auth server,
-/// and the drain waits for that report rather than exiting under it.
+/// The drain distinguishes a deadline cut from a peer already closed and only
+/// reporting its end, and holds both registrations until those reports finish.
 #[tokio::test]
 async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 	let clock = manual();
 	let script = Script::new(grant(Duration::from_secs(3600)));
 	let gate = script.hold_ends();
 	let auth = build_auth(script.spawn().await);
-	let drain_timeout = Duration::from_millis(100);
-	let (trigger, observer) = moq_relay::shutdown::Observer::new(drain_timeout);
+	let drain_timeout = Duration::from_secs(4);
+	let (trigger, mut observer) = moq_relay::shutdown::Observer::new(drain_timeout);
+	let registry = moq_relay::session::Registry::new();
+	let mut clients = Vec::new();
+	let mut supervised = Vec::new();
+	for _ in 0..2 {
+		let request = auth.request(moq_auth::Transport::Quic, "/room");
+		let lease = auth.admit(request.clone()).await.expect("admitted before draining");
+		let registration = registry.register(request);
+		let (client, server, _driving) = memory_sessions().await;
+		clients.push(client);
+		supervised.push(tokio::spawn(moq_relay::supervise(
+			server,
+			lease,
+			observer.serve(),
+			Some(registration),
+		)));
+	}
+	assert_eq!(
+		observer.changed().await,
+		moq_relay::shutdown::Tally { open: 2, ending: 0 }
+	);
+	for view in registry.list(&Default::default()) {
+		assert_eq!(view.closed, None);
+		assert!(serde_json::to_value(view).unwrap().get("closed").is_none());
+	}
 
-	let lease = auth
-		.admit(auth.request(moq_auth::Transport::Quic, "/room"))
-		.await
-		.expect("admitted before draining");
-	let (client, server) = memory_sessions().await;
-	let supervised = tokio::spawn(moq_relay::supervise(server, lease, observer.serve(), None));
-
-	// Keep the deadline from racing the client receiving GOAWAY under load.
-	tokio::time::pause();
 	trigger.start();
-	kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| client.draining().poll(waiter)))
+	let started = kio::clock::now();
+	for client in &clients {
+		kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| client.draining().poll(waiter)))
+			.await
+			.expect("GOAWAY timeout")
+			.expect("a GOAWAY");
+	}
+	clock.advance(Duration::from_secs(1));
+	let closed = kio::clock::wall();
+	clients[0].abort(moq_net::Error::Cancel);
+	kio::clock::timeout(TIMEOUT, script.end_arrived.notified())
 		.await
-		.expect("GOAWAY timeout")
-		.expect("a GOAWAY");
+		.expect("first end");
+	assert_eq!(
+		observer.changed().await,
+		moq_relay::shutdown::Tally { open: 1, ending: 1 }
+	);
+	let views = registry.list(&Default::default());
+	assert_eq!(views.iter().filter(|view| view.closed == Some(closed)).count(), 1);
+	let view = views.iter().find(|view| view.closed.is_some()).unwrap();
+	let json = serde_json::to_value(view).unwrap();
+	assert!(json["closed"].is_number(), "{json}");
+	assert_eq!(serde_json::from_value::<moq_relay::session::View>(json).unwrap(), *view);
+
 	let drained = tokio::spawn({
 		let observer = observer.clone();
 		async move { observer.drained().await }
 	});
-	clock.advance(drain_timeout);
-	tokio::time::advance(drain_timeout).await;
-	// The end report crosses HTTP, so resume real time after forcing the close.
-	tokio::time::resume();
+	clock.advance(drain_timeout - Duration::from_secs(1));
 	kio::clock::timeout(TIMEOUT, script.end_arrived.notified())
 		.await
-		.expect("the end never reached the server");
-	tokio::task::yield_now().await;
+		.expect("deadline end");
+	assert_eq!(
+		observer.changed().await,
+		moq_relay::shutdown::Tally { open: 0, ending: 2 }
+	);
 	assert!(
 		!drained.is_finished(),
-		"the drain ended before the server answered the end"
+		"drain ended before the server answered the ends"
 	);
+	let views = registry.list(&Default::default());
+	assert_eq!(views.iter().filter(|view| view.closed.is_some()).count(), 2);
 
-	gate.add_permits(1);
-	kio::clock::timeout(TIMEOUT, drained)
+	clock.advance(Duration::from_secs(2));
+	gate.add_permits(2);
+	let summary = kio::clock::timeout(TIMEOUT, drained)
 		.await
-		.expect("the drain outlived the end")
+		.expect("drain outlived the ends")
 		.unwrap();
-	supervised.await.expect("supervisor task").expect("drained session");
+	for supervised in supervised {
+		supervised.await.expect("supervisor task").expect("drained session");
+	}
+	assert_eq!(
+		summary,
+		moq_relay::shutdown::Drained {
+			forced: 1,
+			ending: 1,
+			elapsed: Duration::from_secs(6),
+		}
+	);
+	assert_eq!(observer.tally(), Default::default());
+	assert!(registry.list(&Default::default()).is_empty());
+	clock.advance(Duration::from_secs(100));
+	assert!(started.elapsed() > summary.elapsed);
+	assert_eq!(observer.drained().await, summary, "a late observer changed the outcome");
 	let ends = script.ends();
-	let [end] = ends.as_slice() else {
-		panic!("one end per session: {ends:?}")
-	};
+	assert_eq!(ends.len(), 2);
 	assert!(
-		matches!(
-			&end.event,
+		ends.iter().all(|end| matches!(
+			end.event,
 			Event::End {
 				reason: moq_auth::lease::Reason::Shutdown,
 				..
 			}
-		),
-		"{end:?}"
+		)),
+		"{ends:?}"
 	);
 }
 
@@ -1205,7 +1281,7 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 /// with a client certificate, and over WebSocket where none can be presented.
 #[tokio::test]
 async fn a_certificate_admits_only_what_the_server_grants() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (root, client_cert, client_key) = signed_client(dir.path());
 
@@ -1299,7 +1375,7 @@ async fn an_mtls_client_ingests_here() {
 /// The source the relay records for a broadcast announced over a certificate
 /// session, admitted by `moq auth serve` with the peer link role when requested.
 async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (root, client_cert, client_key) = signed_client(dir.path());
 
@@ -1311,7 +1387,7 @@ async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 	let server = moq_auth::serve::Server::new(policy).unwrap();
 	tokio::spawn(async move { server.serve(listener).await });
 
-	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	let cluster = crate::spawn_cluster(cluster::Options::default());
 	let (addr, relay) = spawn_quic_relay_with(build_auth(auth_url), Some(root), cluster.clone()).await;
 
 	let mut config = moq_tokio::connect::Config::default();
@@ -1320,8 +1396,9 @@ async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 	config.tls.cert = Some(client_cert);
 	config.tls.key = Some(client_key);
 	let peer = moq_tokio::origin::spawn();
-	let _forwarded = peer.create_broadcast("forwarded").expect("create");
-	_forwarded.announce(Default::default()).expect("announce");
+	let _forwarded = peer
+		.route("forwarded", moq_net::origin::RouteOptions::default())
+		.expect("create");
 	let url: url::Url = format!("moql://127.0.0.1:{}/", addr.port()).parse().unwrap();
 	let _session = kio::clock::timeout(
 		TIMEOUT,
@@ -1337,7 +1414,7 @@ async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 	.expect("connect timeout")
 	.expect("the peer is admitted");
 
-	let mut announced = cluster.origin.consume().announced();
+	let mut announced = cluster.origin.consume().routes();
 	let (update, _) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 		.await
 		.expect("timed out waiting for forwarded")
@@ -1348,8 +1425,13 @@ async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 }
 
 fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
-	let ca_key = rcgen::KeyPair::generate().expect("ca keypair");
-	let mut ca_params = rcgen::CertificateParams::new(Vec::new()).expect("ca params");
+	let ca_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("ca keypair");
+	let mut ca_params = rcgen::CertificateParams::new(Vec::new())
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("ca params");
 	ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
 	ca_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign, rcgen::KeyUsagePurpose::CrlSign];
 	ca_params
@@ -1357,8 +1439,13 @@ fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathB
 		.push(rcgen::DnType::CommonName, "moq test ca");
 	let ca = rcgen::CertifiedIssuer::self_signed(ca_params, ca_key).expect("self-signed ca");
 
-	let key = rcgen::KeyPair::generate().expect("client keypair");
-	let mut params = rcgen::CertificateParams::new(vec!["client.localhost".to_string()]).expect("client params");
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("client keypair");
+	let mut params = rcgen::CertificateParams::new(vec!["client.localhost".to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("client params");
 	params.use_authority_key_identifier_extension = true;
 	params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
 	let cert = params.signed_by(&key, &ca).expect("signed client cert");
@@ -1368,7 +1455,11 @@ fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathB
 	let key_path = dir.join("client.key.pem");
 	std::fs::write(&root_path, ca.pem()).expect("write ca");
 	std::fs::write(&cert_path, cert.pem()).expect("write client cert");
-	std::fs::write(&key_path, key.serialize_pem()).expect("write client key");
+	std::fs::write(
+		&key_path,
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+	)
+	.expect("write client key");
 	(root_path, cert_path, key_path)
 }
 
@@ -1459,8 +1550,8 @@ async fn a_fixed_lease_still_expires() {
 
 /// A connected `(client, server)` session pair over the in-memory transport, so a
 /// test on Tokio's paused clock never waits on a socket: the clock only advances
-/// once every message in flight has landed.
-async fn memory_sessions() -> (moq_net::Session, moq_net::Session) {
+/// once every message in flight has landed. The handle can pause the server driver.
+async fn memory_sessions() -> (moq_net::Session, moq_net::Session, kio::Producer<bool>) {
 	let mut config = moq_net::transport::memory::Config::default();
 	config.protocol = Some(crate::memory::newest().alpn().to_string());
 	let (client, server) = moq_net::transport::memory::pair(config);
@@ -1474,15 +1565,29 @@ async fn memory_sessions() -> (moq_net::Session, moq_net::Session) {
 		tokio::spawn(moq_net::time::run(driver));
 		session
 	};
+	let driving = kio::Producer::new(true);
+	let gate = driving.consume();
 	let server = async {
 		let (session, driver) = moq_net::Server::new()
 			.accept(now, server)
 			.await
 			.expect("server handshake");
-		tokio::spawn(moq_net::time::run(driver));
+		tokio::spawn(async move {
+			let mut driver = std::pin::pin!(moq_net::time::run(driver));
+			kio::wait(|waiter| {
+				std::task::ready!(gate.poll(waiter, |running| match **running {
+					true => std::task::Poll::Ready(()),
+					false => std::task::Poll::Pending,
+				}))
+				.unwrap_or(());
+				waiter.poll_future(driver.as_mut())
+			})
+			.await
+		});
 		session
 	};
-	tokio::join!(client, server)
+	let (client, server) = tokio::join!(client, server);
+	(client, server, driving)
 }
 
 /// An outage keeps the session until `expires`, then closes it as expired and
@@ -1521,12 +1626,15 @@ async fn closes_at_expires(clock: &kio::clock::Installed, consumer: moq_auth::le
 	let (lease, ()) = tokio::join!(auth.admit(auth.request(moq_auth::Transport::Tcp, "/room")), async {
 		admissions.next().await.expect("an admission").grant(consumer);
 	});
-	let (client, server) = memory_sessions().await;
+	let (client, server, driving) = memory_sessions().await;
+	let observer = moq_relay::shutdown::Observer::disabled();
+	let registry = moq_relay::session::Registry::new();
+	let registration = registry.register(auth.request(moq_auth::Transport::Tcp, "/room"));
 	let supervised = tokio::spawn(moq_relay::supervise(
 		server,
 		lease.expect("admitted"),
-		moq_relay::shutdown::Observer::disabled().serve(),
-		None,
+		observer.serve(),
+		Some(registration),
 	));
 
 	clock.advance(EXPIRES - Duration::from_nanos(1));
@@ -1538,7 +1646,19 @@ async fn closes_at_expires(clock: &kio::clock::Installed, consumer: moq_auth::le
 	)]
 	let early = tokio::time::timeout(Duration::from_secs(1), client.closed()).await;
 	assert!(early.is_err(), "closed before expires");
+	*driving.write().unwrap_or_else(|_| panic!("driver gate closed")) = false;
 	clock.advance(Duration::from_nanos(1));
+	#[expect(
+		clippy::disallowed_methods,
+		reason = "the watchdog runs on paused tokio, beside the installed manual clock"
+	)]
+	let parked = tokio::time::timeout(Duration::from_secs(1), client.closed()).await;
+	assert!(parked.is_err(), "the paused driver closed the transport");
+	assert_eq!(observer.tally(), moq_relay::shutdown::Tally { open: 1, ending: 0 });
+	let views = registry.list(&Default::default());
+	assert_eq!(views.len(), 1, "registration left before its transport closed");
+	assert_eq!(views[0].closed, None);
+	*driving.write().unwrap_or_else(|_| panic!("driver gate closed")) = true;
 	#[expect(
 		clippy::disallowed_methods,
 		reason = "the watchdog runs on paused tokio, beside the installed manual clock"
@@ -1550,6 +1670,8 @@ async fn closes_at_expires(clock: &kio::clock::Installed, consumer: moq_auth::le
 		.await
 		.expect("supervisor")
 		.expect("a lease end is not a session error");
+	assert_eq!(observer.tally(), Default::default());
+	assert!(registry.list(&Default::default()).is_empty());
 }
 
 /// A relay whose config names no auth source is the embedder's to decide: `run`
@@ -1557,7 +1679,7 @@ async fn closes_at_expires(clock: &kio::clock::Installed, consumer: moq_auth::le
 /// decider's grant admits sessions through the assembled relay.
 #[tokio::test]
 async fn a_relay_without_an_auth_source_is_decided_by_the_embedder() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let config = || {
 		let mut config = Config::default();
 		config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
@@ -1600,7 +1722,7 @@ async fn connect_through_embedded_admission(
 	auth::Admissions,
 	tokio::task::JoinHandle<moq_tokio::Result<moq_tokio::Connection>>,
 ) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let mut config = Config::default();
 	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 	config.listen.timeout = Some((timeout).into());
@@ -1690,13 +1812,13 @@ async fn a_late_decision_within_the_deadline_admits() {
 }
 
 /// The next route and whether it is active.
-async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route)
-		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route)
-		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-		moq_net::announce::Event::End(route) => Some((route, false)),
+		moq_net::origin::RouteEvent::Start(route)
+		| moq_net::origin::RouteEvent::Update(route)
+		| moq_net::origin::RouteEvent::Restart(route)
+		| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 	}
 }
 
@@ -1749,12 +1871,12 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			config.init(Default::default()).unwrap().with_reconnect(false)
 		};
 		let origin = moq_tokio::origin::spawn();
-		let a = origin.create_broadcast("a/cam").unwrap();
-		let a_track = a.create_track("video", timed()).unwrap();
-		a.announce(Default::default()).unwrap();
-		let b = origin.create_broadcast("b/cam").unwrap();
-		let b_track = b.create_track("video", timed()).unwrap();
-		b.announce(Default::default()).unwrap();
+		let a = origin.route("a/cam", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let a_track = a.broadcast().create_track("video", timed()).unwrap();
+		a.announce().unwrap();
+		let b = origin.route("b/cam", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let b_track = b.broadcast().create_track("video", timed()).unwrap();
+		b.announce().unwrap();
 		let publisher = kio::clock::timeout(
 			TIMEOUT,
 			client()
@@ -1780,6 +1902,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		let a_read = kio::clock::timeout(TIMEOUT, read.follow("a/cam", None).unwrap().available())
 			.await
 			.unwrap()
+			.unwrap()
 			.unwrap();
 		let mut a_sub = a_read.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut replacement = Grant::new(all(), "b/**".parse::<moq_auth::Pattern>().unwrap());
@@ -1792,6 +1915,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		let b_read = kio::clock::timeout(TIMEOUT, read.follow("b/cam", None).unwrap().available())
 			.await
 			.expect("new prefix not announced")
+			.unwrap()
 			.unwrap();
 		let mut b_sub = b_read.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = b_track.append_group().unwrap();
@@ -1837,6 +1961,103 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 	}
 }
 
+/// Request tokens share one auth-server lease until their last announce ends.
+#[tokio::test]
+async fn request_token_lease_ends_before_the_connection_and_reopens_later() {
+	let script = Script::new(Grant::new(all(), all()));
+	let mut server = moq_tokio::listen::Config::default();
+	server.extensions.solicit = false;
+	let cluster = crate::spawn_cluster(cluster::Options::default());
+	let (port, relay) = spawn_relay_config(build_auth(script.spawn().await), cluster, server).await;
+	let mut config = moq_tokio::connect::Config::default();
+	config.version = vec!["moq-transport-22".parse().unwrap()];
+	config.extensions.auth = false;
+	config.extensions.solicit = false;
+	let client = config.init(Default::default()).unwrap().with_reconnect(false);
+	let origin = moq_tokio::origin::spawn();
+	let publisher = client
+		.clone()
+		.with_publisher(origin.consume())
+		.connect(room_url("tcp", port))
+		.established()
+		.await
+		.unwrap();
+	let received = moq_tokio::origin::spawn();
+	let read = received.consume();
+	let subscriber = client
+		.with_subscriber(received)
+		.connect(room_url("tcp", port))
+		.established()
+		.await
+		.unwrap();
+	let (token, _) = publisher.auth().add("shared").await.unwrap();
+	let first = origin
+		.route(
+			"first",
+			moq_net::origin::RouteOptions::default().with_auth(token.clone()),
+		)
+		.unwrap();
+	let second = origin
+		.route(
+			"second",
+			moq_net::origin::RouteOptions::default().with_auth(token.clone()),
+		)
+		.unwrap();
+	for path in ["first", "second"] {
+		kio::clock::timeout(TIMEOUT, read.follow(path, None).unwrap().available())
+			.await
+			.unwrap()
+			.unwrap();
+	}
+	let attaches = || {
+		script
+			.seen
+			.lock()
+			.unwrap()
+			.iter()
+			.filter(|request| request.event == Event::Attach)
+			.cloned()
+			.collect::<Vec<_>>()
+	};
+	let attached = attaches();
+	assert_eq!(attached.len(), 1);
+	let mut announced = read.routes();
+	drop(first);
+	kio::clock::timeout(TIMEOUT, async {
+		while let Some((route, live)) = next_update(&mut announced).await {
+			if route.prefix.as_str() == "first" && !live {
+				break;
+			}
+		}
+	})
+	.await
+	.unwrap();
+	assert!(script.ends().iter().all(|request| request.auth.is_none()));
+	drop(second);
+	kio::clock::timeout(TIMEOUT, script.end_arrived.notified())
+		.await
+		.unwrap();
+	let ended = script.ends();
+	assert_eq!(ended.len(), 1);
+	assert_eq!(ended[0].id, attached[0].id);
+	assert_eq!(ended[0].auth, attached[0].auth);
+	assert!(ended[0].auth.is_some());
+	let _later = origin
+		.route("later", moq_net::origin::RouteOptions::default().with_auth(token))
+		.unwrap();
+	kio::clock::timeout(TIMEOUT, read.follow("later", None).unwrap().available())
+		.await
+		.unwrap()
+		.unwrap();
+	let reopened = attaches();
+	assert_eq!(reopened.len(), 2);
+	assert_ne!(reopened[0].auth, reopened[1].auth);
+	publisher.abort(moq_net::Error::Cancel);
+	subscriber.abort(moq_net::Error::Cancel);
+	relay.abort();
+	let _ = relay.await;
+}
+
 /// Both admission paths apply the selected cap before starting the session driver.
 #[tokio::test]
 async fn relay_request_limits_distinguish_clients_and_peers() {
@@ -1849,9 +2070,9 @@ async fn relay_request_limits_distinguish_clients_and_peers() {
 			let mut options = cluster::Options::default();
 			options.session.announces = 1;
 			options.peer.announces = 2;
-			let cluster = cluster::Cluster::new(options).unwrap();
+			let cluster = crate::spawn_cluster(options);
 			let consumer = cluster.origin.consume();
-			let mut observed = consumer.announced();
+			let mut observed = consumer.routes();
 			let (port, relay) = match scheme {
 				"tcp" => spawn_relay_with(auth, cluster).await,
 				_ => spawn_ws_relay_with(auth, cluster).await,
@@ -1864,14 +2085,12 @@ async fn relay_request_limits_distinguish_clients_and_peers() {
 				.established()
 				.await
 				.unwrap();
-			let first = origin.create_broadcast("one").unwrap();
-			first.announce(Default::default()).unwrap();
+			let _first = origin.route("one", moq_net::origin::RouteOptions::default()).unwrap();
 			kio::clock::timeout(TIMEOUT, next_update(&mut observed))
 				.await
 				.unwrap()
 				.unwrap();
-			let second = origin.create_broadcast("two").unwrap();
-			second.announce(Default::default()).unwrap();
+			let _second = origin.route("two", moq_net::origin::RouteOptions::default()).unwrap();
 			if peer {
 				let (route, active) = kio::clock::timeout(TIMEOUT, next_update(&mut observed))
 					.await

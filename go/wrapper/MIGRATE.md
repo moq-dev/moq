@@ -4,12 +4,111 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Socket sessions
+
+moq.dev/moq/socket now exposes TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
+
+`GroupProducer.Ready(ctx, size)` is new: it blocks until a frame of `size` bytes fits a window ahead of the fastest reader. Call it before each `WriteFrame` so the writer waits for its fastest reader instead of evicting it, though not for slower readers; a TCP socket stream's producer needs it to behave like TCP. Existing writers are unchanged.
+
+### `Following.Available` reports the path going offline
+
+After the first call, `Available` returns `(nil, nil)` once the followed path goes offline, or, for a `Follow` pinned to an instance, once another instance takes it over.
+The next call returns whatever serves the path next. The first call is never nil.
+Check for nil before using the broadcast, and drop what was read from the previous instance either way.
+
+### Announcements are a listing
+
+`AnnounceConsumer` yields only `AnnounceEventPresent`, when a route now covers a path that was absent, and `AnnounceEventAbsent`, when none does any more.
+Rename `AnnounceEventStart` to `AnnounceEventPresent` and `AnnounceEventEnd` to `AnnounceEventAbsent`.
+`AnnounceEventUpdate`, `AnnounceEventRestart`, and `AnnounceEventTakeover` with its `Predecessor` are gone: a route changing cost or hops, a restarted publisher, and a takeover all keep the path present and report nothing.
+Instead of requesting the path again on a restart, hold `Follow` and read each new publisher instance from `Available`, dropping what was read from the previous one.
+
+```go
+following, err := client.Follow(path, nil)
+if err != nil {
+	return err
+}
+defer following.Cancel()
+for {
+	broadcast, err := following.Available(ctx)
+	if err != nil {
+		return err
+	}
+	if broadcast == nil {
+		continue // offline until the next instance
+	}
+	play(broadcast)
+}
+```
+
+### Publishing goes through one `Route`
+
+`OriginProducer.CreateBroadcast(path)`, `Client.CreateBroadcast`, and `Server.CreateBroadcast` are `Route(path, moq.RouteOptions{})`, and `OriginProducer.Requests(prefix)` is `RoutePrefix(prefix, moq.RouteOptions{})`. Both return a `*Route`, which replaces `*Publication`, `*OriginRequests`, and `*BroadcastPrepared`:
+
+- `Publication.Broadcast()` is `Route.Broadcast()`, which now also returns an error, on a prefix route.
+- `Publication.Announce(moq.AnnounceRoute{...})` is `Announce()`, and re-pricing is `SetCost(cost)`. `Unannounce()` is `Withdraw()`.
+- `OriginRequests.RequestedBroadcast(ctx)` is `Route.Requested(ctx)`, which returns `(nil, nil)` once the origin closes; `All(ctx)` and `Cancel()` keep their names. Cancelling ctx no longer retracts the route, only the wait.
+- `BroadcastRequest.Prepare()` then `BroadcastPrepared.Publish()` is `BroadcastRequest.Route(options)`: create it hidden to fill it first, then `Announce()`. `BroadcastPrepared.Close()` is `Route.Cancel()`.
+- `Route.Instance()` is the stream's instance, minted at creation and kept across `Withdraw` and `Announce`.
+
+`moq.AnnounceRoute` is `moq.RouteOptions{Hidden, Cost, Instance, Epoch}`, given once at creation. A route is visible at once unless `Hidden`; set it and call `Announce()` after filling the catalog to keep the old create-then-announce order. A stable `Instance` is fixed for the route's lifetime: announcing another one is a new route.
+
+Keep the `*Route` reachable for as long as the broadcast should stay announced: the collector reclaiming it, or `Cancel()`, retracts it, while `BroadcastProducer.Close()` still ends both. A `*BroadcastProducer` alone no longer keeps it announced.
+
+`moq.Route`, the received facts in `Announce.Route`, is renamed `moq.RouteInfo`; its fields are unchanged.
+
+### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
+
+`ffi.MoqVideo` and `ffi.MoqAudio` (`media.Video` and `media.Audio`) gain `Warmup`, the catalog's decoder warmup, nil when absent. `media.NewTrackConsumer` and the audio and video `Subscribe` read it from the rendition and start that much earlier; a negative one is refused with an error. Only unkeyed struct literals change.
+
+### Separate datagram tracks
+
+Replace stream-track `AppendDatagram` / `InsertDatagram` / `RecvDatagram` with `BroadcastProducer.CreateDatagrams(name, info)` and `BroadcastConsumer.Datagrams(name)`. `DatagramProducer.Append(timestamp, payload)` assigns a sequence and `Insert(Datagram)` preserves one. `DatagramConsumer.Recv(ctx)` and `All(ctx)` read its independent cursor. `DatagramInfo` carries priority and optional timescale. Watch `Priority()` / `PriorityChanged(ctx, last)` and serve on-demand tracks through `BroadcastRequests.Datagrams()` / `DatagramRequests.Requested(ctx)`.
+
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`TrackInfo.MaxAge` is a `time.Duration` instead of a `*time.Duration`, like `Delay.Max`: the zero value, and a nil `*TrackInfo`, now advertise a zero max age, serving only the live edge, instead of no publisher limit. Assign the duration directly, and set the new `MaxAgeUnlimited`, which ignores `MaxAge`, where you relied on nil meaning no limit. A received track's `Info()` sets it when its publisher advertised no limit.
+
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`json.NewSnapshotConsumer(broadcast, name, options)` takes the `*BroadcastConsumer`, the track name, and `SnapshotConsumerOptions` instead of a `*TrackConsumer`, and subscribes to the track itself at a zero `Delay.Max` and the options' `Priority`. Drop the `SubscribeTrack` call; a refused subscription now fails the first read. `Next` skips every group a newer one supersedes, and `Latest` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
+
+### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
+
+Viewer ceilings and PROBE target overrides are refused with the new `ErrOutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers.Watch` returns `(*Viewer, error)`, and `Viewers.SetTarget` and `Viewer.Update` return an `error`. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
+
+### `media.VideoInit.Lower` is a `media.Producer` ([#7699](https://github.com/moq-dev/moq/pull/7699))
+
+`Lower` is the `media.Producer` interface instead of `*media.TrackProducer`, so a `*media.TrackStreamProducer` fits too. Assigning a `*media.TrackProducer`, nil included, compiles unchanged; code that reads `Lower` back type-asserts it.
+
+### Media setup refusals are typed
+
+Audio and video subscribe setup now reports `ErrUnsupportedConfig` when the decoder refuses a codec, layout, or description, or when every video decoder for the codec reports that this device cannot decode the stream. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a missing driver or no device, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`json.SnapshotProducer.Update`, `json.StreamProducer.Append`, and `json.WindowProducer.Push` / `Pop` take a `moq.Timestamp` instead of a `*moq.Timestamp`, so there is no untimed write. Stamp it from `media.CatalogProducer.Now()`, the broadcast clock every track shares. Their track needs a `TrackInfo.Timescale`; one without is refused.
+
+### Subscriptions take a `moq.Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`Subscription.MaxDelay` is `Delay moq.Delay`, and the zero `Subscription{}` is moq-net's defaults, the same as `DefaultSubscription()`: set `Delay.Max` to the old `*MaxDelay`, and `Delay.MaxUnlimited` where `MaxDelay` was nil.
+`media.Delay` is `moq.Delay`, a struct of its own whose zero value states zero for both: `Min` and `Max` are `time.Duration`, `MinUnstated` leaves the target latency unstated, and `MaxUnlimited` sets no limit.
+`audio.DecoderOutput.Delay` and `video.DecoderOutput.Delay` are a `moq.Delay` value instead of a `*media.Delay`; the zero value is what nil meant.
+
+### `media.VideoInit` is a struct
+
+`media.VideoInit` is its own struct rather than an alias of the generated record, so its new `Lower` field takes a `*media.TrackProducer`. A composite literal with `Format`, `Data`, `Label`, and `Hint` compiles unchanged; build one that way where you converted a generated `MoqVideoInit`.
+
+### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
+
+`Announce.Captures` is `[]string` instead of `*[]string`. Remove pointer checks and dereferences; an empty slice means the filter has no wildcards. Regenerate bindings and rebuild with the matching native library.
+
 ### Decoder outputs take a `media.Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
 `audio.DecoderOutput` replaces `MaxDelay` and the playout `Delay *time.Duration` with `Delay *media.Delay` and `Estimate *bool` (nil estimates).
 `video.DecoderOutput.MaxDelay` is `Delay *media.Delay`.
 `media.Delay{Min, Max}`: `Max` (nil for no limit) is the old `MaxDelay`, and `Min` is the playout delay, where a cold join starts.
-A fixed audio playout delay `d` is `Delay: &media.Delay{Min: d, Max: &max}` with `Estimate` set to false.
+A fixed audio playout delay `d` is `Delay: moq.Delay{Min: d, Max: max}` with `Estimate` set to false.
 
 ### Compression moves to the track
 
@@ -57,8 +156,8 @@ the matching generated bindings and native library.
 
 ### `Announce` takes an `AnnounceRoute`
 
-`BroadcastProducer.Announce` takes `moq.AnnounceRoute{Cost, Epoch}` instead of a `moq.Route`: the origin builds the hop chain, so `Hops` is no longer an input, and `ErrInvalidRoute` is gone.
-`Route` is only what announcements report. To re-announce an observed route, copy its `Cost` and `Epoch`.
+`BroadcastProducer.Announce` takes `moq.AnnounceRoute{Cost, Instance, Epoch}` instead of a `moq.Route`: the origin builds the hop chain, so `Hops` is no longer an input, and `ErrInvalidRoute` is gone.
+`Route` is only what announcements report. To re-announce an observed route, copy its `Cost`, and its `Instance` only when forwarding that same stream; leave `Instance` unset to keep the one the broadcast minted.
 
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
@@ -93,11 +192,16 @@ Publish the track with a `Refresh` ratio so a joiner gets the value restated in 
 Higher is first and the zero value is the unset midpoint, so a `TrackInfo` that leaves `Priority` zero now gets the default rather than the least urgent priority; drop any `Priority: 127` that asked for the midpoint.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `Request` and `Follow` name the two resolutions ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
+
+On `OriginConsumer` and `Client`, `RequestBroadcast(ctx, path)` is `Request(ctx, path, nil)`, `AnnouncedBroadcast(path)` is `Follow(path, nil)`, and `*moq.AnnouncedBroadcast` is `*moq.Following`.
+Pass `&instance` instead of `nil` to refuse every other publisher instance.
+`Request` resolves one publisher instance: it retries as the routes covering the path change, and fails with an unroutable error only once discovery has synced with no covering route. `Follow` hands out each instance that serves the path in turn.
+
 ### A client asks only about what it watches (#6165)
 
-On moq-lite, a client session asks its relay for announcements only under paths something watches, through `Announced()` or `AnnouncedBroadcast()`, instead of under its whole scope at connect.
-`OriginConsumer.RequestBroadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
-Resolve the path with `AnnouncedBroadcast()`, or hold `Announced()` over its prefix while requesting.
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `Announced()`, `Request()`, or `Follow()`, instead of under its whole scope at connect.
+`OriginConsumer.Request()` owns the discovery of its path, so it finds a broadcast the relay serves with nothing else watching first; no announcement stream is needed beside it.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
 ### `media.ContainerFormatFmp4` unwraps to Legacy (#6250)
@@ -105,11 +209,11 @@ moq-transport and moq-lite-03/04 sessions are unchanged.
 A container import with `media.ContainerFormatFmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
 Pass the new `media.ContainerFormatCmaf` to keep publishing CMAF.
 
-### Catalog references carry their epoch
+### Catalog references carry their instance
 
-`ffi.MoqVideo` and `ffi.MoqAudio` gain `Epoch`, the publisher instance their `Broadcast` reference names.
-`BroadcastConsumer.Resolve(ctx, reference)` becomes `Resolve(ctx, rendition)`, taking the catalog rendition (`media.VideoRendition` or `media.AudioRendition`) and reading its `Broadcast` and `Epoch` from it.
-Resolving, and the rendition-based consumers, error for a rendition whose broadcast is proven to serve another epoch.
+`ffi.MoqVideo` and `ffi.MoqAudio` gain `Instance`, the publisher instance their `Broadcast` reference names.
+`BroadcastConsumer.Resolve(ctx, reference)` becomes `Resolve(ctx, rendition)`, taking the catalog rendition (`media.VideoRendition` or `media.AudioRendition`) and reading its `Broadcast` and `Instance` from it.
+Resolving, and the rendition-based consumers, error for a rendition whose broadcast is proven to serve another instance.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
 
@@ -125,7 +229,8 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 ### A claim answers by publishing (#5678)
 
 `OriginProducer.Dynamic(prefix)` takes no route, and `OriginDynamic.Update` is gone.
-Replace `request.Accept(broadcast)` with `request.Prepare(epoch)`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under that epoch and returns its producer.
+Replace `request.Accept(broadcast)` with `request.Prepare()`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under a fresh instance of its own and returns its producer.
+To answer with a broadcast you already hold, `request.Serve(consumer)` serves it under the prefix route without announcing an exact route; the consumer stays yours to close.
 Where you rejected a request after a failed setup, `Close()` the prepared answer instead.
 
 ### `TrackInfo` gains `Compress` (#5928)
@@ -147,7 +252,7 @@ Application calls are unchanged.
 ### JSON consumers return `*json.Timed` (#5677)
 
 `SnapshotConsumer.Next`, `StreamConsumer.Next`, and `All` return `*Timed{Value, Timestamp}` instead of the raw message; `Timestamp` is a `*time.Duration`, nil when untimed.
-A snapshot consumer's `Next` now yields every state in order; call `Latest(ctx)` for the newest.
+A snapshot consumer's `Next` now yields each state in order, skipping every group a newer one supersedes (see the zero-delay entry above); call `Latest(ctx)` for the newest.
 Timestamps are rounded down to a whole microsecond.
 
 ### Ranges filter reads (#5929)
@@ -182,7 +287,7 @@ The connection stats no longer carry a receive estimate.
 Hold the consumer `Session.RecvBandwidth` returns to request PROBE, read it with `Rate()` or wait with `RateChanged(ctx)`, and `Close()` it to stop.
 It returns `nil` when the version has no PROBE.
 
-### `AnnouncedBroadcast.Available` waits for the next publisher instance (#5700)
+### `Following.Available` waits for the next publisher instance (#5700)
 
 The first call returns the broadcast serving the path, as before.
 Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.

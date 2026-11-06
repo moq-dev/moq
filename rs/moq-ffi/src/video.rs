@@ -499,7 +499,7 @@ impl VideoProducer {
 /// pixel format declared by the [`MoqVideoEncoderInput`] passed at publish time.
 ///
 /// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which readers take as the publisher leaving.
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqVideoProducer {
 	inner: Arc<std::sync::Mutex<Option<VideoProducer>>>,
@@ -818,7 +818,7 @@ impl MoqVideoProducer {
 			};
 			Ok(moq_video::encode::Producer::with_track(
 				track,
-				state.catalog.reserve().with_hls_hint(gop),
+				state.catalog.reserve().with_interval(gop),
 				rendition,
 			)?)
 		})?;
@@ -1050,7 +1050,7 @@ pub struct MoqVideoDecoderOutput {
 	/// `None` keeps the moq-mux default of zero for both (start at the newest group,
 	/// skip aggressively).
 	#[uniffi(default = None)]
-	pub delay: Option<crate::media::MoqDelay>,
+	pub delay: Option<crate::consumer::MoqDelay>,
 	/// Keep each frame in the surface its decoder produced, for
 	/// [`MoqVideoDecodedFrame::surface`]. `false`, the default, downloads every
 	/// frame to CPU memory as it is decoded, so
@@ -1231,11 +1231,20 @@ impl MoqVideoConsumer {
 /// is rejected here; a recognized one the native backends can't open is rejected when the decoder
 /// opens, which is still before the first frame.
 fn video_config(catalog_video: crate::media::MoqVideo) -> Result<hang::catalog::VideoConfig, MoqError> {
-	let codec: hang::catalog::VideoCodec = catalog_video.codec.parse().map_err(|_| MoqError::Unsupported)?;
-	// Parsing is total: an unrecognized name becomes `Unknown` rather than failing. Reject it here
-	// so a typo in the catalog is an error at subscribe, not an opaque backend failure later.
+	if !catalog_video.enabled {
+		return Err(MoqError::NotFound);
+	}
+	let codec = catalog_video
+		.codec
+		.parse::<hang::catalog::VideoCodec>()
+		.map_err(|err| MoqError::UnsupportedConfig {
+			reason: format!("{err}"),
+		})?;
+
 	if matches!(codec, hang::catalog::VideoCodec::Unknown(_)) {
-		return Err(MoqError::Unsupported);
+		return Err(MoqError::UnsupportedConfig {
+			reason: format!("unknown video codec: {codec}"),
+		});
 	}
 
 	let mut config = hang::catalog::VideoConfig::new(codec);
@@ -1254,6 +1263,7 @@ fn video_config(catalog_video: crate::media::MoqVideo) -> Result<hang::catalog::
 	config.preference = catalog_video.preference;
 	config.framerate = catalog_video.framerate;
 	config.container = catalog_video.container.into();
+	config.warmup = catalog_video.warmup;
 	Ok(config)
 }
 
@@ -1278,13 +1288,12 @@ impl MoqVideoConsumer {
 	///
 	/// `catalog_video` comes from the catalog (see
 	/// [`MoqMediaCatalogConsumer::next`](crate::media::MoqMediaCatalogConsumer::next)); the codec is read
-	/// from it. Errors if no native backend handles that codec, rather than failing on the first
-	/// frame. Also fails with [`MoqError::Unsupported`] when
+	/// from it. A codec or description this build cannot decode, or a stream every decoder's device
+	/// refuses, returns [`MoqError::UnsupportedConfig`] before decoding starts. Also fails with [`MoqError::Unsupported`] when
 	/// [`surface`](MoqVideoDecoderOutput::surface) is set on a platform with no surface to expose.
 	///
-	/// A [disabled](crate::media::MoqVideo::enabled) rendition subscribes too, and decodes once its
-	/// publisher re-enables it. Don't pick one, but keep one already playing while no enabled
-	/// rendition is on offer.
+	/// A [disabled](crate::media::MoqVideo::enabled) rendition returns [`MoqError::NotFound`]: no
+	/// frames are coming.
 	///
 	/// `id` is the rendition's catalog key. Its [`track`](crate::media::MoqVideo::track), or `id`
 	/// when unset, is subscribed in the broadcast its
@@ -1299,11 +1308,13 @@ impl MoqVideoConsumer {
 		// Reject the codec and output before resolving: resolving reaches the origin, which can
 		// invoke a dynamic handler and open an upstream subscription we would immediately drop.
 		let reference = catalog_video.broadcast.clone();
-		let epoch = catalog_video.epoch.clone();
+		let instance = catalog_video.instance.clone();
 		let cfg = video_config(catalog_video)?;
 		let mut options = moq_video::decode::Options::default();
 		options.decoder.output = decoder_output(output.surface, HAS_SURFACE)?;
-		let resolved = broadcast.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
+		let resolved = broadcast
+			.resolve_inner(reference.as_deref(), instance.as_deref())
+			.await?;
 
 		options.decoder.scale_hint = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
 		options.delay = output.delay.map(Into::into).unwrap_or_default();
@@ -1333,7 +1344,7 @@ mod decode_tests {
 			preference: 0,
 			label: None,
 			broadcast: None,
-			epoch: None,
+			instance: None,
 			track: None,
 			codec: codec.to_string(),
 			description: None,
@@ -1346,15 +1357,29 @@ mod decode_tests {
 			enabled: true,
 			framerate: Some(30.0),
 			container: MoqContainer::Legacy,
+			warmup: None,
 		}
 	}
 
-	/// A consumer holds a disabled rendition it already plays, so one converts like any other.
+	/// The max-delay decoder opens only for a catalog warmup, so it must survive the trip through
+	/// the FFI record.
 	#[test]
-	fn video_config_accepts_disabled_renditions() {
+	fn video_config_keeps_the_warmup() {
+		let mut video = catalog_video("vp8");
+		video.warmup = Some(std::time::Duration::from_millis(500));
+		assert_eq!(
+			video_config(video).unwrap().warmup,
+			Some(std::time::Duration::from_millis(500))
+		);
+	}
+
+	#[test]
+	fn video_config_refuses_disabled_renditions() {
 		let mut config = catalog_video("avc1.64001f");
 		config.enabled = false;
 		config.preference = -1;
+		assert!(matches!(video_config(config.clone()), Err(MoqError::NotFound)));
+		config.enabled = true;
 		assert_eq!(video_config(config).unwrap().preference, -1);
 	}
 
@@ -1370,7 +1395,7 @@ mod decode_tests {
 	#[test]
 	fn video_config_rejects_an_unknown_codec() {
 		let error = video_config(catalog_video("nope")).unwrap_err();
-		assert!(matches!(error, MoqError::Unsupported));
+		assert!(matches!(error, MoqError::UnsupportedConfig { .. }));
 	}
 }
 
@@ -1870,10 +1895,11 @@ mod rung_tests {
 			.subscribe_track(
 				"high".into(),
 				Some(crate::consumer::MoqSubscription {
-					priority: 0,
-					max_delay: None,
-					ranges: None,
-					order: None,
+					delay: crate::consumer::MoqDelay {
+						min: Some(std::time::Duration::ZERO),
+						max: None,
+					},
+					..crate::consumer::moq_subscription_defaults()
 				}),
 			)
 			.await

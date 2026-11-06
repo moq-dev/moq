@@ -16,7 +16,7 @@ use crate::refresh::Refresh;
 /// An [`Encoder`] that owns its track: it writes each encoded frame and rolls a group whenever the
 /// encoder emits a header. When something else already owns the track, use the [`Encoder`] directly.
 ///
-/// A group runs until a joiner wants a fresh one, which [`refresh`](Self::refresh) answers, or until
+/// A group runs until a joiner wants a fresh one, which [`poll_refresh`](Self::poll_refresh) answers, or until
 /// it reaches the encoder's caps. Set the track's [`refresh`](moq_net::track::Info::refresh) ratio
 /// when creating it, or joins never ask.
 ///
@@ -97,11 +97,7 @@ impl<T> Producer<T> {
 	///
 	/// The producer has no runtime of its own, so the owner drives this: loop on it, or select on it
 	/// beside the edits. Errors once the track is finished or closed.
-	pub async fn refresh(&self) -> Result<()> {
-		kio::wait(|waiter| self.poll_refresh(waiter)).await
-	}
-
-	/// Poll for [`refresh`](Self::refresh), for an owner driving the producer synchronously.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_refresh(&self, waiter: &kio::Waiter) -> std::task::Poll<Result<()>> {
 		self.inner.lock().unwrap().poll_refresh(waiter)
 	}
@@ -157,6 +153,7 @@ struct Inner<T> {
 impl<T> Inner<T> {
 	fn pop(&mut self, count: Timed<u64>) -> Result<()> {
 		self.ensure_open()?;
+		let at = self.track.rescale(count.at)?;
 		let Inner { track, encoder, .. } = self;
 
 		let Some(frame) = encoder.pop(count.value)? else {
@@ -165,9 +162,9 @@ impl<T> Inner<T> {
 
 		// A failed write drops the frame uncommitted. The pop is discarded, and the next edit opens a
 		// new group, since a consumer may hold the group the frame was meant for.
-		track.write(count.at, &frame)?;
+		track.write(at, &frame)?;
 		frame.commit();
-		self.at = self.at.max(count.at);
+		self.at = self.at.max(at);
 
 		Ok(())
 	}
@@ -224,12 +221,13 @@ impl<T> Inner<T> {
 impl<T: Serialize> Inner<T> {
 	fn push(&mut self, value: Timed<&T>) -> Result<()> {
 		self.ensure_open()?;
+		let at = self.track.rescale(value.at)?;
 		let Inner { track, encoder, .. } = self;
 
 		let frame = encoder.push(value.value)?;
-		track.write(value.at, &frame)?;
+		track.write(at, &frame)?;
 		frame.commit();
-		self.at = self.at.max(value.at);
+		self.at = self.at.max(at);
 
 		Ok(())
 	}
@@ -247,14 +245,19 @@ struct Track {
 }
 
 impl Track {
-	/// Write one encoded frame, rolling a group when it is a header.
-	fn write(&mut self, timestamp: Option<moq_net::Timestamp>, encoded: &Encoded) -> Result<()> {
-		// Check before touching a group: a header publishes a new group before its frame is
-		// written, so a mismatch found by `write_frame` would leave an empty newest group behind.
-		if timestamp.is_some() != self.inner.info().timescale.is_some() {
-			return Err(moq_net::Error::TimestampMismatch.into());
-		}
+	/// `timestamp` at the track's timescale, or [`moq_net::Error::TimestampMismatch`] when it is
+	/// missing on a timed track, present on an untimed one, or beyond what the scale can hold.
+	///
+	/// An edit checks this before encoding. Found by `write_frame` instead, the mismatch would
+	/// come after a header published its group, leaving an empty newest group behind, and the
+	/// dropped frame would reset the encoder, rolling a group for an edit that changed nothing.
+	fn rescale(&self, timestamp: Option<moq_net::Timestamp>) -> Result<Option<moq_net::Timestamp>> {
+		Ok(self.inner.info().rescale(timestamp)?)
+	}
 
+	/// Write one encoded frame at a timestamp already [rescaled](Self::rescale) to the track, rolling a
+	/// group when it is a header.
+	fn write(&mut self, timestamp: Option<moq_net::Timestamp>, encoded: &Encoded) -> Result<()> {
 		match encoded.keyframe {
 			true => self.write_header(timestamp, encoded.payload.clone()),
 			false => self.write_op(timestamp, encoded.payload.clone()),

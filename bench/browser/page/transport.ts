@@ -32,7 +32,7 @@ async function publish(config: Transport): Promise<void> {
 	// Fixture generation stays outside every timed interval.
 	const fixtures = Array.from({ length: config.frames }, (_, frame) => payload(config.size, frame));
 	const origin = new Moq.Origin.Producer();
-	const publication = origin.createBroadcast(Moq.Path.from(config.path));
+	const publication = origin.route(Moq.Path.from(config.path), { hidden: true });
 	const producer = publication.broadcast;
 	// Retention covers the whole run, so a slow consumer cannot lose a group to eviction.
 	const track = producer.createTrack("data", { timescale: Moq.Time.Timescale.MILLI, maxAge: Milli(600_000) });
@@ -92,7 +92,7 @@ async function consume(config: Transport): Promise<Delivery> {
 	if (!broadcast) throw new Error("consume before prepare");
 	const groups = Math.ceil(config.frames / config.group);
 	const start = performance.now();
-	const subscriber = broadcast.track("data").subscribe({ maxDelay: Milli(600_000), order: "ascending" });
+	const subscriber = broadcast.track("data").subscribe({ delay: { max: Milli(600_000) }, order: "ascending" });
 	cleanup.push(() => subscriber.close());
 	let frames = 0;
 	let bytes = 0;
@@ -102,11 +102,12 @@ async function consume(config: Transport): Promise<Delivery> {
 	for (let received = 0; received < groups; received++) {
 		const group = await subscriber.recvGroup();
 		if (!group) throw new Error(`track ended after ${received} of ${groups} groups`);
-		if (group.sequence >= groups || seen.has(group.sequence)) throw new Error(`unexpected group ${group.sequence}`);
-		seen.add(group.sequence);
+		const sequence = Number(group.sequence);
+		if (sequence >= groups || seen.has(sequence)) throw new Error(`unexpected group ${group.sequence}`);
+		seen.add(sequence);
 		readers.push(
 			(async () => {
-				const first = group.sequence * config.group;
+				const first = sequence * config.group;
 				const last = Math.min(first + config.group, config.frames);
 				try {
 					for (let frame = first; frame < last; frame++) {

@@ -1010,6 +1010,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "input_scratch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "uniffi",
+ "uniffi-dart",
+]
+
+[[package]]
 name = "instant"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"

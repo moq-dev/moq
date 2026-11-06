@@ -20,6 +20,7 @@ from moq_ffi import (
 from ._records import _subscription, _track_info
 from ._stream import _Stream
 from .types import (
+    DatagramInfo,
     Frame,
     Position,
     Subscription,
@@ -28,6 +29,7 @@ from .types import (
 )
 
 if TYPE_CHECKING:
+    from .datagram import DatagramProducer, DatagramRequests
     from .subscribe import BroadcastConsumer, GroupConsumer, TrackConsumer
 
 
@@ -48,8 +50,24 @@ class GroupProducer:
 
         return GroupConsumer(self._inner.consume())
 
+    async def ready(self, size: int) -> None:
+        """Wait until a frame of ``size`` bytes fits a window ahead of the fastest reader.
+
+        Await it before each :meth:`write_frame` so that reader paces the writer,
+        as TCP backpressure does, instead of the group shedding frames it has not
+        taken, which fails it with ``moq.Error.Evicted``; slower readers are not
+        waited on. It also
+        waits until a reader holds the group, and resolves once the group is closed
+        so the next write raises why. Raises ``moq.Error.Closed`` after :meth:`abort`.
+        """
+        await self._inner.ready(size)
+
     def write_frame(self, payload: bytes, timestamp: Timestamp | None = None) -> None:
-        """Write a frame with its presentation timestamp."""
+        """Write a frame with its presentation timestamp.
+
+        Never blocks: without :meth:`ready`, a writer that outpaces its readers
+        sheds the front of the group instead.
+        """
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
     def finish(self) -> None:
@@ -122,24 +140,8 @@ class TrackProducer:
         """Write a single-frame group with its presentation timestamp."""
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
-    def append_datagram(self, payload: bytes, timestamp: Timestamp | None = None) -> int:
-        """Send a best-effort datagram and return its sequence number.
-
-        Payloads are capped at 1200 bytes. Datagram delivery requires a datagram-capable
-        transport and wire version; there is no stream fallback.
-        """
-        return self._inner.append_datagram(Frame(payload, timestamp)._ffi())
-
-    def insert_datagram(self, sequence: int, payload: bytes, timestamp: Timestamp | None = None) -> None:
-        """Send a best-effort datagram at an explicit sequence number.
-
-        For a caller that allocates its own sequences; :meth:`append_datagram`
-        continues after the largest one.
-        """
-        self._inner.insert_datagram(sequence, Frame(payload, timestamp)._ffi())
-
     def largest(self) -> Position | None:
-        """The newest group or datagram written, at its newest frame; ``None`` before any."""
+        """The newest group written, at its newest frame; ``None`` before any."""
         return self._inner.largest()
 
     def consume(self, subscription: Subscription | None = None) -> TrackConsumer:
@@ -318,6 +320,12 @@ class BroadcastRequests(_Stream[TrackRequest]):
         """Await the next track a subscriber requested but that isn't published yet."""
         return TrackRequest(await self._inner.requested_track())
 
+    def datagrams(self) -> DatagramRequests:
+        """Serve on-demand datagram tracks through their own request queue."""
+        from .datagram import DatagramRequests
+
+        return DatagramRequests(self._inner.datagrams())
+
     def cancel(self) -> None:
         """Stop accepting track requests and release the underlying handle."""
         self._inner.cancel()
@@ -326,9 +334,9 @@ class BroadcastRequests(_Stream[TrackRequest]):
 class BroadcastProducer:
     """Wraps MoqBroadcastProducer with a cleaner interface.
 
-    It fills tracks; announcing belongs to the :class:`moq.Publication` that
-    :meth:`moq.OriginProducer.create_broadcast` returns, the way to publish at a
-    path. Constructing one directly creates a standalone broadcast for local pub/sub.
+    It fills tracks; announcing belongs to the :class:`moq.Route` that
+    :meth:`moq.OriginProducer.route` returns, the way to publish at a path.
+    Constructing one directly creates a standalone broadcast for local pub/sub.
     """
 
     def __init__(self) -> None:
@@ -345,6 +353,12 @@ class BroadcastProducer:
         """Accept subscriptions to tracks that are not published yet."""
         return BroadcastRequests(self._inner.requests())
 
+    def create_datagrams(self, name: str, info: DatagramInfo | None = None) -> DatagramProducer:
+        """Create a live datagram track, independent of stream tracks with the same name."""
+        from .datagram import DatagramProducer
+
+        return DatagramProducer(self._inner.create_datagrams(name, info))
+
     def publish_track(self, name: str, info: TrackInfo | None = None) -> TrackProducer:
         """Create a track. Send any bytes, no codec validation. ``info`` sets track
         properties (priority, cache, timescale); omit for defaults."""
@@ -359,8 +373,8 @@ class BroadcastProducer:
     def close(self) -> None:
         """End the broadcast for good: retract it and serve no new tracks.
 
-        Tracks still open on it end with ``Unroutable``, which readers take as the publisher
-        leaving, and their later calls raise ``moq.Error.Closed``; finish a track first to end it
-        cleanly. Closing again is a no-op.
+        Tracks still open on it end with ``Unroutable`` (``Internal`` to a moq-transport reader),
+        and their later calls raise ``moq.Error.Closed``; finish a track first to end it cleanly.
+        Closing again is a no-op.
         """
         self._inner.close()

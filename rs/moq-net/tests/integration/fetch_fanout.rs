@@ -19,8 +19,9 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
-		let broadcast = publisher.publish("room", Default::default()).unwrap();
+		let broadcast = publisher.route("room", origin::RouteOptions::default()).unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				"video",
 				track::Info::default().with_timescale(moq_net::Timescale::MILLI),
@@ -44,6 +45,7 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 				.unwrap()
 				.available()
 				.await
+				.unwrap()
 				.unwrap();
 			viewers.push((viewer, pair, remote));
 		}

@@ -177,7 +177,7 @@ export class Truck {
 		this.#canvas.set(canvas);
 	}
 
-	/** Prepare a bumpless handoff from the latest vehicle feedback. */
+	/** Take over with measured steering and gear, zero throttle, and full brake. */
 	beginTakeover(): boolean {
 		const status = this.status.peek();
 		if (this.estopped.peek() || !status) return false;
@@ -365,13 +365,12 @@ export class Truck {
 		this.#sawStatusSource = true;
 		this.statusState.set("pending");
 
-		const statusTrack = active.track("status").subscribe({ priority: 10 });
-		effect.cleanup(() => statusTrack.close());
-
 		const consumer = new Json.Snapshot.Consumer({
-			track: statusTrack,
+			track: active.track("status"),
 			schema: TruckStatusSchema,
+			priority: 10,
 		});
+		effect.cleanup(() => consumer.close());
 
 		effect.spawn(async () => {
 			for (;;) {
@@ -415,8 +414,8 @@ export class Truck {
 		const driverId = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
 		this.driverId.set(driverId);
 
-		const driverBroadcastPublication = conn.createBroadcast(driverPath(this.name, driverId));
-		const driverBroadcast = driverBroadcastPublication.broadcast;
+		const driverBroadcastRoute = conn.route(driverPath(this.name, driverId), { hidden: true });
+		const driverBroadcast = driverBroadcastRoute.broadcast;
 		effect.cleanup(() => {
 			driverBroadcast.close();
 			this.driverId.set(undefined);
@@ -428,8 +427,9 @@ export class Truck {
 		const producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track });
 		effect.cleanup(() => producer.finish());
 		effect.run(this.#runControlTrack.bind(this, track, producer));
-		// A fresh epoch per lease: the truck binds its single driver to this path and epoch.
-		driverBroadcastPublication.announce({ epoch: Moq.Epoch.mint() });
+		// A fresh instance per lease, which each publication mints: the truck binds its single
+		// driver to this path and instance.
+		driverBroadcastRoute.announce();
 	}
 
 	#runSafetyControl(connection: Moq.Connection, effect: Moq.Signals.Effect) {
@@ -438,10 +438,10 @@ export class Truck {
 		if (!conn || !command) return;
 
 		const driverId = `safety-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
-		const broadcastPublication = conn.createBroadcast(driverPath(this.name, driverId));
-		const broadcast = broadcastPublication.broadcast;
+		const broadcastRoute = conn.route(driverPath(this.name, driverId), { hidden: true });
+		const broadcast = broadcastRoute.broadcast;
 		const safety = new SafetyCommandBroadcast(command, broadcast);
-		broadcastPublication.announce({ epoch: Moq.Epoch.mint() });
+		broadcastRoute.announce();
 		effect.cleanup(() => safety.close());
 	}
 

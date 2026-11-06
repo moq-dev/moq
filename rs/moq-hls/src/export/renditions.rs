@@ -2,8 +2,8 @@
 //!
 //! The `Producer` holds the current renditions, reconciled from the catalog by its `sync`;
 //! the HTTP serve path reads them synchronously (look one up, render the master playlist). Each
-//! rendition follows its own HLS records; the `Fanout` handle holds what they share: the
-//! discontinuity counts and the publisher run.
+//! rendition follows its own media track onto the broadcast's grid; the `Fanout` handle holds what
+//! they share: the discontinuity counts and the publisher run.
 //! A [`Consumer`] is a cursor for a recorder that mirrors the *whole* broadcast: [`next`](Consumer::next)
 //! yields one [`Event`] at a time as renditions are added or removed, replaying the current
 //! set as [`Added`](Event::Added) when first consumed, and returning `None` once the catalog
@@ -25,9 +25,9 @@ use super::rendition::{Kind, Rendition};
 /// and an audio rendition may share a name without colliding.
 pub(crate) type Key = (Kind, String);
 
-/// Numbers each rendition's content breaks: its segments after a stop, or after records nobody
-/// saw, start a new discontinuity, as does every rendition's next segment after a publisher-run
-/// restart.
+/// Numbers each rendition's content breaks: its segments after its media timestamps went back, or
+/// after a reconfigure's hand-over, start a new discontinuity, as does every rendition's next
+/// segment after a publisher-run restart.
 ///
 /// Counted per rendition, since each numbers its own segments. A break in one rendition only
 /// makes its count diverge from its siblings', which players resync across by
@@ -64,8 +64,8 @@ impl Discontinuities {
 /// A change to the rendition set, yielded by [`Consumer::next`].
 #[non_exhaustive]
 pub enum Event {
-	/// A rendition appeared, with its HLS records advertised (or was reconfigured: a `Removed`
-	/// for the old one precedes it).
+	/// A rendition appeared, once the catalog declares its join interval (or was reconfigured: a
+	/// `Removed` for the old one precedes it).
 	Added(Arc<Rendition>),
 	/// A rendition disappeared (removed from the catalog, or replaced by a reconfigure).
 	Removed {
@@ -121,10 +121,84 @@ pub(crate) struct Producer {
 #[derive(Default)]
 struct State {
 	renditions: BTreeMap<Key, Arc<Rendition>>,
+	media: Option<hang::catalog::Media>,
 	/// The catalog's confirmed end, distinct from dropping its watcher.
 	finished: Option<crate::Result<()>>,
 	// Cache catalog quality order without counting it as a holder.
 	audio: Vec<Weak<Rendition>>,
+	/// Each media track a catalog without a join interval yet lists, by the reference it was held
+	/// on, held subscribed so an on-demand publisher produces the media its interval is measured
+	/// from (see [`hold`]).
+	waiting: BTreeMap<Key, (Held, Owner)>,
+}
+
+/// Where a rendition's media track is: its broadcast, instance, and track name.
+type Held = (Option<moq_net::path::Relative>, Option<moq_net::Instance>, String);
+
+/// Holds `track` on `binding` subscribed until dropped, as demand for its media.
+///
+/// A publisher that measures its join interval does so from media, and an on-demand one produces
+/// media only for a subscriber: without this, an export that subscribes only once the interval
+/// is declared would never see one.
+struct Hold {
+	binding: moq_mux::Binding,
+	track: String,
+	state: Holding,
+}
+
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per track a catalog lists before its join interval, held in place until dropped"
+)]
+enum Holding {
+	Binding,
+	Subscribing {
+		_broadcast: moq_net::broadcast::Consumer,
+		_track: moq_net::track::Consumer,
+		subscribing: moq_net::track::Subscribing,
+	},
+	Held {
+		_broadcast: moq_net::broadcast::Consumer,
+		_track: moq_net::track::Consumer,
+		_subscriber: moq_net::track::Subscriber,
+	},
+}
+
+impl kio::Task for Hold {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if let Holding::Binding = self.state {
+			let Ok(broadcast) = std::task::ready!(self.binding.poll_broadcast(waiter)) else {
+				return Poll::Ready(());
+			};
+			let Ok(track) = broadcast.track(&self.track) else {
+				return Poll::Ready(());
+			};
+			let subscribing = track.subscribe(moq_net::track::Subscription::default()).into_inner();
+			self.state = Holding::Subscribing {
+				_broadcast: broadcast,
+				_track: track,
+				subscribing,
+			};
+		}
+		if let Holding::Subscribing { subscribing, .. } = &self.state {
+			let Ok(subscriber) = std::task::ready!(subscribing.poll_ok(waiter)) else {
+				return Poll::Ready(());
+			};
+			let Holding::Subscribing { _broadcast, _track, .. } = std::mem::replace(&mut self.state, Holding::Binding)
+			else {
+				unreachable!("subscribing above");
+			};
+			self.state = Holding::Held {
+				_broadcast,
+				_track,
+				_subscriber: subscriber,
+			};
+		}
+		// Held until the owner drops it.
+		Poll::Pending
+	}
 }
 
 /// The shared state handle each rendition's record watcher reaches.
@@ -134,6 +208,7 @@ struct State {
 /// channel open (so `renditions()` cursors would never terminate).
 #[derive(Clone)]
 pub(crate) struct Fanout {
+	pub(super) lazy: bool,
 	feed: kio::Producer<Feed>,
 	/// Starts each rendition's background work on the broadcaster's driver.
 	spawner: Spawner,
@@ -144,6 +219,7 @@ impl Producer {
 		Self {
 			state: kio::Producer::new(State::default()),
 			fanout: Fanout {
+				lazy: false,
 				feed: kio::Producer::new(Feed {
 					targets: Vec::new(),
 					discontinuities: Discontinuities::default(),
@@ -157,6 +233,12 @@ impl Producer {
 				spawner,
 			},
 		}
+	}
+
+	pub fn lazy(window: Duration, spawner: Spawner) -> Self {
+		let mut producer = Self::new(window, spawner);
+		producer.fanout.lazy = true;
+		producer
 	}
 
 	/// A producer whose renditions run on a driver spawned on the ambient runtime.
@@ -208,6 +290,22 @@ impl Producer {
 		self.state.read().renditions.get(&(kind, name.to_string())).cloned()
 	}
 
+	#[cfg(feature = "server")]
+	pub fn poll_get(&self, waiter: &kio::Waiter, kind: Kind, name: &str) -> Poll<Option<Arc<Rendition>>> {
+		match self.state.poll_ref(waiter, |state| {
+			if state.media.is_some() {
+				Poll::Ready(state.renditions.get(&(kind, name.to_string())).cloned())
+			} else {
+				Poll::Pending
+			}
+		}) {
+			Poll::Ready(Ok(rendition)) => Poll::Ready(rendition),
+			// Read through the closed state's guard: `get` would lock it again.
+			Poll::Ready(Err(state)) => Poll::Ready(state.renditions.get(&(kind, name.to_string())).cloned()),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
 	/// Snapshot video by name and audio in catalog quality order (for the master playlist).
 	pub fn snapshot(&self) -> Vec<Arc<Rendition>> {
 		let current = self.state.read();
@@ -233,6 +331,19 @@ impl Producer {
 	)]
 	pub fn is_empty(&self) -> bool {
 		self.state.read().renditions.is_empty()
+	}
+
+	/// Whether any rendition could still be listed: enabled and not failed on its own.
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
+	pub fn listable(&self) -> bool {
+		self.state
+			.read()
+			.renditions
+			.values()
+			.any(|rendition| rendition.is_enabled() && !rendition.failed_alone())
 	}
 
 	/// Release every rendition the map is holding.
@@ -299,7 +410,7 @@ impl Producer {
 
 impl Fanout {
 	/// Run `task` on the broadcaster's driver until it finishes or the returned [`Owner`] drops.
-	pub fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) -> Owner {
+	pub fn spawn(&self, task: impl kio::Task<Output = ()> + Send + 'static) -> Owner {
 		self.spawner.spawn(task)
 	}
 
@@ -386,11 +497,10 @@ impl Fanout {
 }
 
 impl Producer {
-	/// Resolve once at least one rendition has a playable media playlist. Bounding how long to
-	/// wait is the caller's policy, so wrap this in a timeout rather than passing one in.
-	pub async fn ready(&self) {
-		let _ = kio::wait(|waiter| {
-			self.state.poll_ref(waiter, |current| {
+	/// Ready once at least one rendition has a playable media playlist, or the set closed.
+	pub fn poll_ready(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state
+			.poll_ref(waiter, |current| {
 				if current
 					.renditions
 					.values()
@@ -401,8 +511,7 @@ impl Producer {
 					Poll::Pending
 				}
 			})
-		})
-		.await;
+			.map(|_| ())
 	}
 
 	/// Resolve once at least one enabled rendition is [advertised](Rendition::is_advertised), so a
@@ -411,33 +520,45 @@ impl Producer {
 		not(feature = "server"),
 		allow(dead_code, reason = "only the `server` feature uses it")
 	)]
-	pub(crate) async fn advertised(&self) {
-		let _ = kio::wait(|waiter| {
-			self.state.poll_ref(waiter, |current| {
-				if current
-					.renditions
-					.values()
-					.any(|rendition| rendition.is_enabled() && rendition.poll_advertised(waiter).is_ready())
-				{
+	pub(crate) fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state
+			.poll_ref(waiter, |current| {
+				if current.renditions.values().any(|rendition| {
+					rendition.is_enabled() && (self.fanout.lazy || rendition.poll_advertised(waiter).is_ready())
+				}) {
 					Poll::Ready(())
 				} else {
 					Poll::Pending
 				}
 			})
-		})
-		.await;
+			.map(|_| ())
 	}
 
-	/// Start every enabled video rendition's init build, then resolve once one of them has its
-	/// init and is [advertised](Rendition::is_advertised), so a manifest lists it, or none is left
+	/// Ready once a catalog was read, or the set closed.
+	#[cfg(feature = "server")]
+	pub(crate) fn poll_catalogued(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state
+			.poll_ref(waiter, |current| {
+				if current.media.is_some() {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			})
+			.map(|_| ())
+	}
+
+	/// Start every enabled video rendition's init build, then be ready once one of them has its
+	/// init and lists a segment of its own, so a manifest lists it, or none is left
 	/// that listings do not refuse: a denied or failed one can never be listed. A build that has
 	/// nothing to read from yet starts on the wake that indexes its media.
 	#[cfg_attr(
 		not(feature = "server"),
 		allow(dead_code, reason = "only the `server` feature uses it")
 	)]
-	pub(crate) async fn video_init(&self) {
-		kio::wait(|waiter| {
+	#[cfg_attr(test, kio::wrapper)]
+	pub(crate) fn poll_video_init(&self, waiter: &kio::Waiter) -> Poll<()> {
+		{
 			let poll = self.state.poll_ref(waiter, |current| {
 				let mut video = current
 					.renditions
@@ -453,7 +574,7 @@ impl Producer {
 						// Rerun on every wake: `poll_refused` registered `waiter` on its records, so
 						// the rows a build needs wake this wait to start it.
 						rendition.start_init();
-						rendition.poll_init(waiter).is_ready() && rendition.poll_advertised(waiter).is_ready()
+						rendition.poll_init(waiter).is_ready() && rendition.poll_represented(waiter).is_ready()
 					}) {
 					Poll::Ready(())
 				} else {
@@ -466,8 +587,7 @@ impl Producer {
 				// and the predicate registered `waiter` on each of them.
 				Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
 			}
-		})
-		.await
+		}
 	}
 
 	/// Enroll freshly created renditions with what their siblings share, and start following
@@ -505,7 +625,7 @@ impl Producer {
 				if let Some(err) = &feed.failed {
 					rendition.fail(err.clone());
 					rendition.close();
-				} else {
+				} else if !self.fanout.lazy {
 					rendition.watch();
 				}
 				feed.targets.push(Arc::downgrade(&rendition));
@@ -538,10 +658,11 @@ impl Producer {
 	/// new advertised bitrate, since the publisher republishes the catalog every time its
 	/// measured bitrate, jitter, or framerate moves.
 	///
-	/// A rendition joins the set only once its entry advertises HLS records (its `hls` field),
-	/// which an unhinted publisher declares after its first segment: without them there is
-	/// nothing to render its playlist from, so it is neither listed nor reported as
-	/// [`Event::Added`].
+	/// Renditions join the set only once the catalog declares `media.join.interval`, which a
+	/// publisher measures over its first second or group when it knows no GOP: without that grid
+	/// nothing numbers their segments, so none is listed or reported as [`Event::Added`]. The
+	/// interval is fixed for a broadcast instance; should it change anyway, every rendition is
+	/// rebuilt on the new grid.
 	///
 	/// `source` holds the broadcast the snapshot was read from, so each rendition serves media
 	/// from that same broadcast rather than whatever is at the path by the time it is asked. A
@@ -549,12 +670,54 @@ impl Producer {
 	/// all, so it is dropped with a warning rather than served. So is a rendition named `""`, `.`, or
 	/// `..`, which no URL path segment can address, so the master playlist, the DASH manifest, and
 	/// the router agree on what is served.
+	/// Hold every video and audio track `catalog` lists subscribed in `waiting`, releasing those
+	/// it no longer lists.
+	fn wait(&self, source: &moq_mux::Source, catalog: &Catalog, waiting: &mut BTreeMap<Key, (Held, Owner)>) {
+		use hang::catalog::Reference;
+		let video = catalog.video.renditions.iter().map(|(name, config)| {
+			let reference = (
+				config.broadcast.clone(),
+				config.instance.clone(),
+				config.track(name).to_string(),
+			);
+			((Kind::Video, name.clone()), reference)
+		});
+		let audio = catalog.audio.renditions.iter().map(|(name, config)| {
+			let reference = (
+				config.broadcast.clone(),
+				config.instance.clone(),
+				config.track(name).to_string(),
+			);
+			((Kind::Audio, name.clone()), reference)
+		});
+		let listed: BTreeMap<Key, Held> = video.chain(audio).collect();
+		// A rendition that now names another track drops the old hold for a new one.
+		waiting.retain(|key, (held, _)| listed.get(key) == Some(held));
+		for (key, held) in listed {
+			if waiting.contains_key(&key) {
+				continue;
+			}
+			let (broadcast, instance, track) = &held;
+			let Ok(binding) = source.bind(broadcast.as_ref(), instance.as_ref()) else {
+				continue;
+			};
+			let owner = self.fanout.spawn(Hold {
+				binding,
+				track: track.clone(),
+				state: Holding::Binding,
+			});
+			waiting.insert(key, (held, owner));
+		}
+	}
+
 	pub fn sync(&self, source: &moq_mux::Source, catalog: &Catalog) {
-		let clock = catalog.clock;
+		let clock = catalog.media.clock;
+		let interval = catalog.media.interval();
 
 		let Ok(mut current) = self.state.write() else {
 			return;
 		};
+		current.media = Some(catalog.media);
 
 		// Renditions the catalog dropped or reconfigured. Retire each as it goes so any cursor
 		// over it drains and ends, instead of parking on a window that never finishes -- the
@@ -563,6 +726,7 @@ impl Producer {
 			.renditions
 			.iter()
 			.filter(|((kind, name), rendition)| match kind {
+				_ if interval != Some(rendition.interval()) => true,
 				Kind::Video => !catalog
 					.video
 					.renditions
@@ -576,17 +740,31 @@ impl Producer {
 			})
 			.map(|(key, _)| key.clone())
 			.collect();
-		// A replacement lists the records its retired predecessor won't, so no record is muxed
+		// A replacement lists the segments its retired predecessor won't, so no segment is muxed
 		// under both configs.
 		let mut handoffs = BTreeMap::new();
 		for key in stale {
 			if let Some(rendition) = current.renditions.remove(&key) {
-				handoffs.insert(key, rendition.retire());
+				let successor = match &key {
+					(Kind::Video, name) => catalog.video.renditions.get(name),
+					(Kind::Audio, _) => None,
+				};
+				handoffs.insert(key, rendition.retire(successor));
 			}
 		}
 
+		// Until the interval is declared, nothing is listed, but every media track is held wanted.
+		let current = &mut *current;
+		match interval {
+			Some(_) => current.waiting.clear(),
+			None if !self.fanout.lazy => self.wait(source, catalog, &mut current.waiting),
+			None => current.waiting.clear(),
+		}
+
 		let mut added = Vec::new();
-		for (name, video) in &catalog.video.renditions {
+		let video = catalog.video.renditions.iter().filter(|_| interval.is_some());
+		let audio = catalog.audio.renditions.iter().filter(|_| interval.is_some());
+		for (name, video) in video {
 			if !master::is_path_segment(name) {
 				tracing::warn!(
 					rendition = name,
@@ -602,15 +780,13 @@ impl Producer {
 				rendition.refresh(video.bitrate, video.framerate, video.enabled);
 				continue;
 			}
-			let Some(hls) = video.hls.clone() else {
-				continue;
-			};
-			match Rendition::video(name.clone(), video, source, hls, clock, self.fanout()) {
+			let interval = interval.expect("filtered above");
+			match Rendition::video(name.clone(), video, source, interval, clock, self.fanout()) {
 				Ok(rendition) => added.push(rendition.after(handoffs.get(&key))),
 				Err(err) => tracing::warn!(rendition = name, %err, "ignoring unservable video rendition"),
 			}
 		}
-		for (name, audio) in &catalog.audio.renditions {
+		for (name, audio) in audio {
 			if !master::is_path_segment(name) {
 				tracing::warn!(
 					rendition = name,
@@ -623,10 +799,8 @@ impl Producer {
 				rendition.refresh(audio.bitrate, None, audio.enabled);
 				continue;
 			}
-			let Some(hls) = audio.hls.clone() else {
-				continue;
-			};
-			match Rendition::audio(name.clone(), audio, source, hls, clock, self.fanout()) {
+			let interval = interval.expect("filtered above");
+			match Rendition::audio(name.clone(), audio, source, interval, clock, self.fanout()) {
 				Ok(rendition) => added.push(rendition.after(handoffs.get(&key))),
 				Err(err) => tracing::warn!(rendition = name, %err, "ignoring unservable audio rendition"),
 			}
@@ -639,7 +813,7 @@ impl Producer {
 		if current.renditions.is_empty()
 			&& (!catalog.video.renditions.is_empty() || !catalog.audio.renditions.is_empty())
 		{
-			tracing::debug!("no rendition advertises HLS records yet; nothing to serve");
+			tracing::debug!("the catalog declares no join interval yet; nothing to serve");
 		}
 
 		// Rank once per catalog update, keeping playlist reads linear. Updating state also wakes
@@ -668,9 +842,10 @@ pub struct Consumer {
 
 impl Consumer {
 	/// The next rendition change; `None` only after the catalog finishes cleanly.
-	pub async fn next(&mut self) -> crate::Result<Option<Event>> {
-		let Some(event) = kio::wait(|waiter| self.poll_next(waiter)).await? else {
-			return Ok(None);
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Event>>> {
+		let Some(event) = std::task::ready!(self.poll_event(waiter))? else {
+			return Poll::Ready(Ok(None));
 		};
 		match &event {
 			Event::Added(rendition) => {
@@ -681,10 +856,10 @@ impl Consumer {
 				self.seen.remove(&(*kind, name.clone()));
 			}
 		}
-		Ok(Some(event))
+		Poll::Ready(Ok(Some(event)))
 	}
 
-	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Event>>> {
+	fn poll_event(&self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Event>>> {
 		// A failed catalog cannot wait for the change stream to close.
 		if let Poll::Ready(Ok(err)) = self
 			.feed
@@ -733,6 +908,20 @@ fn next_event(current: &BTreeMap<Key, Arc<Rendition>>, seen: &BTreeMap<Key, Arc<
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A set whose catalog closed before its first snapshot answers a lookup instead of
+	/// locking its state a second time.
+	#[cfg(feature = "server")]
+	#[test]
+	fn a_set_closed_before_its_catalog_answers_a_lookup() {
+		let (spawner, _driver) = Spawner::new();
+		let renditions = Producer::lazy(Duration::from_secs(16), spawner);
+		renditions.close();
+		assert!(matches!(
+			renditions.poll_get(&kio::Waiter::noop(), Kind::Video, "v"),
+			Poll::Ready(None)
+		));
+	}
 
 	#[tokio::test]
 	async fn cursors_end_only_with_a_finished_catalog() {

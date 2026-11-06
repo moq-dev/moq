@@ -8,8 +8,9 @@ use std::{pin::Pin, task::Poll, time::Duration};
 /// Subscribers already reading a track get its tail when the broadcast closes; this serves
 /// the ones that arrive after the end, such as a relay or player that read the final catalog
 /// late. Finish the catalog and media tracks first, then hand over the broadcasts and
-/// `owner`, whatever holds their track producers: a finished track stops being served once
-/// its producers drop, so the owner drops only after the broadcasts close.
+/// `owner`, whatever holds their routes and track producers: a broadcast stays announced only
+/// while its [`Route`](moq_net::origin::Route) lives, and a finished track stops being served
+/// once its producers drop, so the owner drops only after the broadcasts close.
 ///
 /// The deadline is fixed at [`new`](Self::new), however late [`poll_wait`](Self::poll_wait) is
 /// first polled. Dropping the handle closes the broadcasts at once, which is how an interrupt
@@ -61,6 +62,9 @@ impl<T> Linger<T> {
 	}
 
 	/// Wait for the deadline on the ambient clock, then close the broadcasts.
+	///
+	/// Hand-written rather than generated, since it consumes the handle to close them.
+	#[cfg(feature = "async")]
 	pub async fn wait(mut self) {
 		kio::wait(|waiter| self.poll_wait(waiter)).await
 	}
@@ -81,17 +85,25 @@ mod tests {
 
 	const PATH: &str = "live";
 
-	/// A broadcast at [`PATH`] whose one track, `video`, has three finished groups.
-	fn finished(origin: &moq_net::origin::Producer) -> (moq_net::broadcast::Producer, moq_net::track::Producer) {
-		let broadcast = origin.publish(PATH, moq_net::origin::Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+	/// A broadcast at [`PATH`] whose one track, `video`, has three finished groups, and the
+	/// owner holding its route and track. It declares media's max age, so its superseded groups
+	/// stay fetchable as long as the default linger.
+	fn finished(
+		origin: &moq_net::origin::Producer,
+	) -> (
+		moq_net::broadcast::Producer,
+		(moq_net::origin::Route, moq_net::track::Producer),
+	) {
+		let route = origin.route(PATH, moq_net::origin::RouteOptions::default()).unwrap();
+		let info = moq_net::track::Info::default().with_max_age(hang::container::MAX_AGE);
+		let track = route.broadcast().create_track("video", info).unwrap();
 		for _ in 0..3 {
 			let mut group = track.append_group().unwrap();
 			group.write_frame(None, bytes::Bytes::from_static(b"frame")).unwrap();
 			group.finish().unwrap();
 		}
 		track.finish().unwrap();
-		(broadcast.broadcast().clone(), track)
+		(route.broadcast().clone(), (route, track))
 	}
 
 	/// Whether the origin has stopped routing [`PATH`].
@@ -107,9 +119,9 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_late_subscriber_drains_the_tail_until_the_deadline() {
 		let origin = crate::source::produce_origin();
-		let (broadcast, track) = finished(&origin);
+		let (broadcast, owner) = finished(&origin);
 		let start = kio::clock::now();
-		let linger = tokio::spawn(Linger::new([broadcast], track, Duration::from_secs(30)).wait());
+		let linger = tokio::spawn(Linger::new([broadcast], owner, Duration::from_secs(30)).wait());
 
 		kio::clock::sleep(Duration::from_secs(29)).await;
 		let late = origin.consume().request(PATH, None).await.unwrap();
@@ -135,9 +147,9 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn the_deadline_is_fixed_at_the_end() {
 		let origin = crate::source::produce_origin();
-		let (broadcast, track) = finished(&origin);
+		let (broadcast, owner) = finished(&origin);
 		let start = kio::clock::now();
-		let linger = Linger::new([broadcast], track, Duration::from_secs(30));
+		let linger = Linger::new([broadcast], owner, Duration::from_secs(30));
 
 		kio::clock::sleep(Duration::from_secs(20)).await;
 		linger.wait().await;
@@ -148,8 +160,8 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn dropping_closes_at_once() {
 		let origin = crate::source::produce_origin();
-		let (broadcast, track) = finished(&origin);
-		let linger = Linger::new([broadcast], track, Duration::from_secs(30));
+		let (broadcast, owner) = finished(&origin);
+		let linger = Linger::new([broadcast], owner, Duration::from_secs(30));
 		assert!(!unroutable(&origin).await);
 
 		drop(linger);

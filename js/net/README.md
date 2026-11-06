@@ -63,6 +63,12 @@ await quicheLoaded; //This is a promise, connect after it resolves
 - **[Waiting](examples/wait.ts)** - Wait for one known broadcast to come online, and follow it
 - **[Server side usage](https://github.com/sb2702/webcodecs-examples/tree/main/src/moq-server)** - Publish from browser to a server
 
+## Integer precision
+
+Group identities and relative group counts use `bigint`. Frame indices, timestamps,
+and durations use bounded numbers and refuse unsafe wire values. See
+[wire integer precision](INTEGERS.md) for the field-by-field limits.
+
 ## License
 
 Licensed under either:

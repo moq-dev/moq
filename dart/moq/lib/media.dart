@@ -9,6 +9,9 @@ typedef TrackProducer = MoqMediaTrackProducer;
 /// The write side of a media track fed a raw byte stream, with frame boundaries inferred.
 typedef TrackStreamProducer = MoqMediaTrackStreamProducer;
 
+/// A single-track producer of either kind, such as a video rendition's `lower`.
+typedef Producer = MoqMediaProducer;
+
 /// The write side of a container, which publishes each track it describes.
 typedef ContainerProducer = MoqMediaContainerProducer;
 
@@ -74,9 +77,6 @@ typedef ContainerInit = MoqContainerInit;
 
 /// A width and height pair, in pixels.
 typedef Dimensions = MoqDimensions;
-
-/// How far behind the live edge a decoder plays: `min` is the playout delay and where a cold join starts, and `max`, null for no limit, is how far a stalled group may fall behind before it is skipped. `min` stays on the consumer; a `min` past `max` starts at `max`.
-typedef Delay = MoqDelay;
 
 /// Where an audio or video decoder starts on a track that already holds groups: `latest` for a live player.
 typedef DecodeStart = MoqDecodeStart;

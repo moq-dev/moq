@@ -96,7 +96,7 @@ async function sendLiteGoaway(server: WebTransport): Promise<void> {
 /**
  * After GOAWAY the old session keeps opening subscribe, fetch, and announce-interest streams
  * while it is the only route, at the drain cost. Once a replacement answers, it outranks the
- * old session and new requests open there instead. These wires carry no epoch, so the
+ * old session and new requests open there instead. These wires carry no instance, so the
  * replacement is another instance: the request already open stays on the draining session.
  */
 async function handover(kind: "lite" | "ietf"): Promise<void> {
@@ -107,9 +107,8 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 
 	const consume = new OriginProducer();
 	const publish = new OriginProducer();
-	const broadcastPublication = publish.createBroadcast(Path.from("room"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = publish.route(Path.from("room"));
+	const broadcast = broadcastRoute.broadcast;
 
 	const served: TrackProducer[] = [];
 	let armVideo = true;
@@ -117,7 +116,8 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		for (;;) {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
-			const track = req.accept({ timescale: Timescale.MILLI });
+			// The draining session fetches the superseded group 0 below.
+			const track = req.accept({ timescale: Timescale.MILLI, maxAge: null });
 			if (req.name === "video" && armVideo) track.writeFrame(textFrame("one"));
 			if (req.name === "later") track.writeFrame(textFrame("from-draining"));
 			if (req.name === "audio") track.writeFrame(textFrame("from-replacement"));
@@ -130,10 +130,10 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		accept({ transport: pair.server, url, publish: publish.consume() }),
 	]);
 
-	const announced = client.announced();
+	const announced = client.routes();
 	// Watching the origin has the session discover routes into it. Request once the route
 	// lands, so the request resolves through the table rather than blind.
-	const watching = consume.announced();
+	const watching = consume.routes();
 	expect((await watching.next())?.kind).toBe("start");
 	const request = consume.request(Path.from("room"));
 	let replacement: Awaited<ReturnType<typeof connect>> | undefined;
@@ -162,7 +162,7 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 
 		if (inject && goawayBytes) await inject.inject(goawayBytes);
 		else await sendLiteGoaway(pair.server);
-		await wireOf(client).goaway;
+		await client.draining;
 
 		const update = await announced.next();
 		expect(update?.kind).toBe("update");
@@ -180,12 +180,13 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		expect(await later.readString()).toBe("from-draining");
 
 		// A fresh consumer caches nothing, so the publisher's answer proves the FETCH reached the wire.
-		const fetched = wireOf(client).consume(Path.from("room")).track("video").fetchGroup(0);
-		if (kind === "lite") expect(await (await fetched).readString()).toBe("one");
-		else await expect(fetched).rejects.toThrow(/not supported/);
+		const fetched = wireOf(client).consume(Path.from("room")).track("video").fetchGroup(0n);
+		const group = await fetched;
+		expect(await group.readString()).toBe("one");
+		group.close();
 
 		// A new announce-interest opens too, and sees the route at the drain cost.
-		const interest = client.announced();
+		const interest = client.routes();
 		const drained = await interest.next();
 		expect(drained?.route.cost).toBe(DRAIN);
 		interest.close();
@@ -193,7 +194,7 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		expect(pair.client.sendStreams.bidi.length).toBeGreaterThan(opened);
 		const drainingOpened = pair.client.sendStreams.bidi.length;
 
-		const routes = consume.consume().announced();
+		const routes = consume.consume().routes();
 		expect((await routes.next())?.kind).toBe("start");
 
 		const pair2 = createMockTransportPair(protocol);
@@ -274,7 +275,7 @@ test("announcing and subscribing after GOAWAY still open streams", async () => {
 		expect(opened).toBe(true);
 
 		opened = false;
-		const announced = subscriber.announced();
+		const announced = subscriber.routes();
 		await waitUntil(() => opened);
 		announced.close();
 	}
@@ -297,9 +298,8 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 
 	const consume = new OriginProducer();
 	const publish = new OriginProducer();
-	const broadcastPublication = publish.createBroadcast(Path.from("room"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = publish.route(Path.from("room"));
+	const broadcast = broadcastRoute.broadcast;
 
 	const served: TrackProducer[] = [];
 	const serving = (async () => {
@@ -317,9 +317,9 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 		accept({ transport: pair.server, url, publish: publish.consume() }),
 	]);
 
-	const watching = consume.announced();
+	const watching = consume.routes();
 	const request = consume.request(Path.from("room"));
-	let routes: ReturnType<typeof consume.announced> | undefined;
+	let routes: ReturnType<typeof consume.routes> | undefined;
 	let replacement: Awaited<ReturnType<typeof connect>> | undefined;
 	let replacementServer: Awaited<ReturnType<typeof accept>> | undefined;
 
@@ -333,9 +333,9 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 
 		if (inject && goawayBytes) await inject.inject(goawayBytes);
 		else await sendLiteGoaway(pair.server);
-		await wireOf(client).goaway;
+		await client.draining;
 
-		routes = consume.announced();
+		routes = consume.routes();
 		expect((await routes.next())?.kind).toBe("start");
 		const pair2 = createMockTransportPair(protocol);
 		[replacement, replacementServer] = await Promise.all([

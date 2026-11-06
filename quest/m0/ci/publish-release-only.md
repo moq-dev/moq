@@ -1,35 +1,64 @@
-# [M] Release credentials off main
+# [XS] Drop main from the publish Environment
 
 ## Goal
 
 The `publish` Environment, which holds registry tokens, signing keys, and
-deploy credentials, admits only `release` and the protected release tags.
-Code that lands on `main` can no longer publish a package or sign a release.
-Every release publisher still runs, from the tag or `release` that triggers
-it.
+deploy credentials, admits only `release` and the protected release tags
+(`moq-ffi-v*`, `moq-relay-v*`, `moq-cli-v*`). Code that lands on `main` can no
+longer publish a package or sign a release. This waits on the maintainer's
+live GitHub settings changes below; check them with
+`gh api repos/moq-dev/moq/environments/publish/deployment-branch-policies`
+and `gh api repos/moq-dev/moq/environments/publish/secrets`.
 
 ## Plan
 
-Decided 2026-10-29 (maintainer): the moq-bot key moved to its own `bot`
-Environment, which keeps `main` for the land gate, Dependabot, and the Smoke
-toolchain update ([land](/quest/m0/ci/land.md)). Release credentials should
-not follow it there.
+[moq-dev/moq#7431](https://github.com/moq-dev/moq/pull/7431) moved every job
+that names `publish` off `main`: the tag's own run dispatches `release-winget`
+on the tag and calls the Kotlin wrapper, instead of chaining them by
+`workflow_run`. apt and rpm dispatches name `--ref release`, and `alert` names
+the `alert` Environment, which the maintainer created on 2026-11-02 (admits
+only `main`, holds `DISCORD_WEBHOOK`).
 
-`publish` still admits `main` because GitHub runs `workflow_run`, `schedule`,
-and the default `workflow_dispatch` on the default branch, whatever triggered
-them. As of 2026-10-29 these jobs run as `main` and name `publish`:
+The same PR dropped Cachix from `main` (decided 2026-11-02): Smoke's nix
+channel substitutes from `nix.moq.dev` and no longer pushes, so it names no
+Environment and `CACHIX_AUTH_TOKEN` needs no new home. The alternatives were
+moving the token into `cache-write`, or deleting Cachix everywhere now with a
+`release` backport. Changed 2026-11-05 (maintainer, /quest-unblock):
+[Release tags push to nix.moq.dev](/quest/m0/ci/cachix-retire.md) backports
+`release-nix.yml` and drops `cachix.yml` on `release` now, and deletes
+`CACHIX_AUTH_TOKEN` once a release tag substitutes from `nix.moq.dev`.
 
-- `release-kt-lib` (Maven and signing) and `release-winget` (`WINGET_TOKEN`),
-  started by `workflow_run` after a release build.
-- `alert`, for `DISCORD_WEBHOOK`, also `workflow_run`.
-- `smoke`'s Nix channel on `main`, for `CACHIX_AUTH_TOKEN`, which goes away
-  with Cachix ([Nix cache](/quest/m0/ci/nix-cache-verify.md)).
-- `apt-repo` and `rpm-repo`, dispatched by hand, which can name `release`.
+Decided 2026-11-05 (maintainer, /quest-audit): `publish` still admits
+`main`, so this does not wait for the next cut.
 
-Move each publisher onto its tag's ref, for example a `workflow_call` from the
-tag workflow that built it instead of `workflow_run`, and give `alert` a
-credential home that is not `publish`. Then the maintainer drops `main` from
-`publish`'s deployment policy. `release-brew`, `release-go`, and
-`release-swift-lib` already use `bot` and are not blocked on this.
+- ✅ Backport only #7431's workflow change to `release` now, as
+  [moq-dev/moq#7202](https://github.com/moq-dev/moq/pull/7202) and
+  [moq-dev/moq#7421](https://github.com/moq-dev/moq/pull/7421) backported
+  workflow changes, so a tag's run dispatches winget and calls the Kotlin
+  wrapper itself, and `release`'s apt and rpm dispatches name `--ref release`.
+- Not chosen: moving this quest to m2 behind the cut with the other
+  release-gated CI quests; merging `main` into `release` now, which reverses
+  the 2026-11-04 decision below.
+
+What remains, in order:
+
+1. Open the backport PR against `release` (agent work).
+2. Once it merges, the maintainer drops `main` from `publish`'s deployment
+   policy. Environment settings need the maintainer's admin access.
+   `publish` holds neither `DISCORD_WEBHOOK` (it lives in `alert`) nor
+   `CACHIX_AUTH_TOKEN` (a repository secret that
+   [Release tags push to nix.moq.dev](/quest/m0/ci/cachix-retire.md) revokes),
+   so there is nothing to remove from it.
+
+Decided 2026-11-04 (maintainer, /quest-unblock): ✅ cut the combined patch
+release on `release` soon, once [moq-dev/moq#7596](https://github.com/moq-dev/moq/pull/7596)'s
+remaining ports and [moq-dev/moq#7680](https://github.com/moq-dev/moq/pull/7680)
+are ready, and merge `main` into `release` for the next minor line
+separately, later. Not chosen: one combined cut that merges `main` first, or
+neither this week.
 
 Public API: none. Wire: none.
+
+## Related
+
+- [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - moves the repository secrets into the Environments this names

@@ -25,6 +25,9 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 	const videoCard = statCard("video", "Video", videoIcon);
 	const vRes = statLine(videoCard.grid, "Resolution");
 	const vCodec = statLine(videoCard.grid, "Codec");
+	// The same encoder stats the broadcast's stats track reports.
+	const vTarget = statLine(videoCard.grid, "Target");
+	const vSkipped = statLine(videoCard.grid, "Skipped");
 	const vBitrateGraph = graph(parent, "Bitrate", { color: "#a855f7", format: formatBitrate });
 	const vFpsGraph = graph(parent, "Frame rate", { color: "#facc15", format: formatFps });
 	videoCard.el.append(vBitrateGraph.el, vFpsGraph.el);
@@ -52,18 +55,18 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 		const display = capture ? effect.get(capture.out.display) : undefined;
 		const cfg = effect.get(publish.video.out.catalog);
 		videoCard.el.style.display = display ? "" : "none";
-		vRes.textContent = display ? `${display.width}×${display.height}` : "—";
-		vCodec.textContent = cfg?.codec ?? "—";
+		vRes.textContent = display ? `${display.width}×${display.height}` : "-";
+		vCodec.textContent = cfg?.codec ?? "-";
 	});
 
 	parent.run((effect) => {
 		const cfg = effect.get(publish.audio.out.catalog);
 		audioCard.el.style.display = cfg ? "" : "none";
 		if (!cfg) return;
-		aCodec.textContent = cfg.codec ?? "—";
-		aRate.textContent = cfg.sampleRate ? formatHz(cfg.sampleRate) : "—";
-		aChannels.textContent = cfg.numberOfChannels ? `${cfg.numberOfChannels}` : "—";
-		aBitrate.textContent = cfg.bitrate ? formatBitrate(cfg.bitrate) : "—";
+		aCodec.textContent = cfg.codec ?? "-";
+		aRate.textContent = cfg.sampleRate ? formatHz(cfg.sampleRate) : "-";
+		aChannels.textContent = cfg.numberOfChannels ? `${cfg.numberOfChannels}` : "-";
+		aBitrate.textContent = cfg.bitrate ? formatBitrate(cfg.bitrate) : "-";
 	});
 
 	parent.run((effect) => {
@@ -71,8 +74,8 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 		const status = effect.get(publish.connection.status);
 		const name = effect.get(publish.broadcast.in.name);
 		nStatus.textContent = status;
-		nServer.textContent = url?.host ?? "—";
-		nName.textContent = name?.toString() || "—";
+		nServer.textContent = url?.host ?? "-";
+		nName.textContent = name?.toString() || "-";
 	});
 
 	// Live graphs: frame rate from captured frames, bitrate measured from the bytes we encoded.
@@ -118,6 +121,10 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 		const frameDelta = frames - prevFrames;
 		prevFrames = frames;
 		vFpsGraph.push(elapsed > 0 && frameDelta > 0 ? frameDelta / (elapsed / 1000) : undefined);
+
+		const stats = publish.video.out.stats.peek();
+		vTarget.textContent = stats.bitrate !== undefined ? formatBitrate(stats.bitrate) : "-";
+		vSkipped.textContent = `${stats.skipped}`;
 
 		const bytes = encoded();
 		const byteDelta = bytes - prevBytes;
