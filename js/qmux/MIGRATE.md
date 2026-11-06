@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `ready` waits for the peer's transport parameters
+
+`Session.ready` resolves once the peer's transport parameters arrive, as a WebTransport handshake completes, rather than when the WebSocket opens, so `datagrams.maxDatagramSize` and the stream limits are known from then on. A peer that sends none leaves `ready` pending until the session closes.
+
 ### Accepted bidi streams hold credit until both halves end
 
 A peer's bidirectional stream returns its `MAX_STREAMS` credit only once it is accepted and both halves have ended, as in QUIC. Close or abort the writable of every accepted bidi stream, even one you never write to, or the peer eventually runs out of streams to open.

@@ -636,7 +636,8 @@ export default class Session implements WebTransport {
 		return this.#protocol;
 	}
 
-	/** Resolves once the WebSocket opens and the session can carry streams. */
+	/** Resolves once the peer's transport parameters arrive, as a WebTransport handshake completes:
+	 *  stream limits and `datagrams.maxDatagramSize` are known from then on. */
 	readonly ready: Promise<void>;
 	#readyResolve: () => void;
 	#readyReject: (err: Error) => void;
@@ -935,8 +936,6 @@ export default class Session implements WebTransport {
 		// Our own deadline applies until the peer's parameters arrive, so a peer
 		// that never sends them can't hold the session open.
 		this.#startIdleTimerIfEnabled();
-
-		this.#readyResolve();
 	}
 
 	#onData(data: Uint8Array) {
@@ -1112,6 +1111,7 @@ export default class Session implements WebTransport {
 
 		// The peer's limit may be shorter than ours.
 		this.#startIdleTimerIfEnabled();
+		this.#readyResolve();
 	}
 
 	/** Effective idle timeout in ms, or 0 if disabled.

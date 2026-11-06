@@ -186,7 +186,7 @@ where
 		if let Some(stats) = &options.socket_stats {
 			upgraded = upgraded.with_socket_stats(stats.clone());
 		}
-		let session = crate::spawn_qmux(upgraded.accept().map_err(Error::accept)?);
+		let session = crate::spawn_qmux(upgraded.accept().await.map_err(Error::accept)?);
 		crate::server::accept_websocket(session, options, deadline).await
 	})
 	.await
@@ -532,6 +532,7 @@ async fn connect_tls_override(
 		.with_keep_alive(qmux::ws::KeepAlive::default())
 		.with_session_config(session.clone())
 		.connect()
+		.await
 		.map(crate::spawn_qmux)
 		.map_err(Error::connect)
 }
@@ -757,6 +758,7 @@ impl Listener {
 				.with_keep_alive(qmux::ws::KeepAlive::default())
 				.with_session_config(session)
 				.accept()
+				.await
 				.map(crate::spawn_qmux)
 				.map_err(Error::accept)?;
 			Ok((session, url, Accepted { remote: addr, protocol }))
@@ -1040,7 +1042,7 @@ mod tests {
 		options.quic = quic.resolve();
 		let server = tokio::spawn(accept(server_ws, options));
 
-		let (session, driver) = qmux::ws::Upgraded::new(client_ws, &alpn).connect().unwrap();
+		let (session, driver) = qmux::ws::Upgraded::new(client_ws, &alpn).connect().await.unwrap();
 		tokio::spawn(driver);
 		// Runs until aborted: its driver sends SETUP, and ending it would cancel the request.
 		let client = tokio::spawn(async move {
@@ -1170,9 +1172,12 @@ mod timeout_tests {
 			let peer =
 				tokio_tungstenite::WebSocketStream::from_raw_socket(peer, tungstenite::protocol::Role::Client, None)
 					.await;
-			let peer = crate::spawn_qmux(qmux::ws::Upgraded::new(peer, ALPN).connect().unwrap());
 			let mut accept = Box::pin(accept(server, options));
-			assert!(accept.as_mut().now_or_never().is_none());
+			// Each end waits for the other's QMux parameters, so the accept runs meanwhile.
+			let peer = tokio::select! {
+				peer = qmux::ws::Upgraded::new(peer, ALPN).connect() => crate::spawn_qmux(peer.unwrap()),
+				result = accept.as_mut() => panic!("accepted before SETUP: {:?}", result.map(|_| ())),
+			};
 			let _stream = moq_net::kio::wait(|waiter| peer.poll_open_bi(waiter, Default::default()))
 				.await
 				.unwrap();
