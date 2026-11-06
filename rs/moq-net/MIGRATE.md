@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Snapshots split connected sessions into idle and active
+
+`stats::Snapshot::activity()` returns each tier's `stats::Activity`: connected sessions with
+media payload moved within `Activity::WINDOW` (10 seconds) and those without. Additive; no
+migration needed.
+
 ### `track::Consumer::unmetered` reads outside any stats session
 
 `track::Consumer::unmetered()` returns the handle with its stats scope cleared, so the
