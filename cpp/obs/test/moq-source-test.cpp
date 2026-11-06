@@ -585,8 +585,10 @@ public:
 		  uint64_t start_us = 1'000'000)
 		: timestamp_us(start_us)
 	{
-		auto publication = TestOk(relay.origin->create_broadcast(path), "create_broadcast");
-		broadcast = publication->broadcast();
+		moq::RouteOptions hidden;
+		hidden.hidden = true;
+		route = TestOk(relay.origin->route(path, hidden), "route");
+		broadcast = TestOk(route->broadcast(), "route broadcast");
 		if (video) {
 			moq::VideoInit init{};
 			init.format = moq::VideoFormat::kAvc3;
@@ -603,7 +605,7 @@ public:
 				TestOk(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, init),
 				       "audio producer");
 		}
-		TestOk(publication->announce(moq::AnnounceRoute{}), "announce");
+		TestOk(route->announce(), "announce");
 	}
 
 	~Publisher() { (void)broadcast->close(); }
@@ -632,6 +634,8 @@ public:
 			timeout);
 	}
 
+	// Keeps the broadcast announced for the publisher's lifetime.
+	std::shared_ptr<moq::Route> route;
 	std::shared_ptr<moq::BroadcastProducer> broadcast;
 	std::shared_ptr<moq::MediaTrackProducer> video;
 	std::shared_ptr<moq::MediaTrackProducer> audio;
@@ -1187,24 +1191,12 @@ int main()
 		       std::vector<std::string>{"f-stereo", "d-mono", "e-slow", "c-low", "b-unknown-bitrate",
 						"a-disabled"}));
 
-		// Only enabled renditions are candidates while any is, even one the source holds.
-		const auto all = [](const auto &) {
-			return true;
-		};
-		const auto none = [](const auto &) {
-			return false;
-		};
-		CHECK((names(moq_source_candidates(moq_source_ranked_audio(audios), all)) ==
+		// Only enabled renditions are candidates.
+		CHECK((names(moq_source_candidates(moq_source_ranked_audio(audios))) ==
 		       std::vector<std::string>{"f-stereo", "d-mono", "e-slow", "c-low", "b-unknown-bitrate"}));
-		// With every rendition disabled, only a held one remains, and nothing when none is held.
 		for (auto &entry : audios)
 			entry.second.enabled = false;
-		const auto held = [](const auto &entry) {
-			return entry.first == "c-low";
-		};
-		CHECK((names(moq_source_candidates(moq_source_ranked_audio(audios), held)) ==
-		       std::vector<std::string>{"c-low"}));
-		CHECK(moq_source_candidates(moq_source_ranked_audio(audios), none).empty());
+		CHECK(moq_source_candidates(moq_source_ranked_audio(audios)).empty());
 	}
 	report("renditions rank like hang");
 
@@ -1308,8 +1300,8 @@ int main()
 	}
 	report("disabled and undecodable renditions fall through");
 
-	// With every rendition disabled, the source holds the one it plays; with none of them
-	// held, the section is handled like an absent one.
+	// With every rendition disabled, the section is handled like an absent one, even the
+	// rendition the source plays.
 	{
 		TestRelay relay;
 		reset(relay.Url());
@@ -1318,29 +1310,10 @@ int main()
 		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
 		auto snapshot = CatalogSnapshot(publisher);
 		auto *ctx = static_cast<moq_source *>(source);
-		std::weak_ptr<Track> video;
-		std::weak_ptr<Track> audio;
 		for (auto &entry : snapshot.video)
 			entry.second.enabled = false;
 		for (auto &entry : snapshot.audio)
 			entry.second.enabled = false;
-		{
-			std::lock_guard<std::mutex> lock(ctx->mutex);
-			const auto &conn = ctx->connection;
-			video = conn->video;
-			audio = conn->audio;
-			moq_source_subscribe_video(ctx, conn, snapshot);
-			moq_source_subscribe_audio(ctx, conn, snapshot);
-			CHECK(conn->video && conn->video == video.lock() && !conn->pending_video);
-			CHECK(conn->audio && conn->audio == audio.lock() && !conn->pending_audio);
-		}
-		const int frames = g_output_frames;
-		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));
-
-		// A disabled rendition the source does not play is not held.
-		auto &config = snapshot.video.begin()->second;
-		config.coded = moq::Dimensions{(config.coded ? config.coded->width : 0) + 16, 16};
-		snapshot.audio.begin()->second.sample_rate += 1;
 		const int blanks = g_blank_calls;
 		{
 			std::lock_guard<std::mutex> lock(ctx->mutex);
@@ -1353,7 +1326,7 @@ int main()
 		CHECK(g_blank_calls > blanks);
 		destroySource(source);
 	}
-	report("all-disabled section holds the playing rendition");
+	report("an all-disabled section clears the playing rendition");
 
 	// A rendition's stream instance is part of what names it, for the active and the pending
 	// track alike: a sibling publisher restarting behind a stable catalog resubscribes.
@@ -1607,9 +1580,13 @@ int main()
 		auto snapshot = TestOk(catalogs->next().get(), "catalog snapshot");
 		CHECK(snapshot.has_value());
 		auto config = snapshot->video.begin()->second;
-		std::shared_ptr<moq::Publication> hidden;
+		std::shared_ptr<moq::Route> hidden;
 		if (sibling) {
-			hidden = TestOk(relay.origin->create_broadcast("obs/hidden"), "unannounced sibling");
+			// A different stream than the one the rendition pins, hidden until announced.
+			moq::RouteOptions options;
+			options.hidden = true;
+			options.instance = "obs-test-other";
+			hidden = TestOk(relay.origin->route("obs/hidden", options), "unannounced sibling");
 			config.broadcast = "./hidden";
 			config.instance = "obs-test-pinned";
 		}
@@ -1632,9 +1609,7 @@ int main()
 			const int frames = g_output_frames;
 			CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));
 			// A different stream is a real resolution failure.
-			moq::AnnounceRoute route;
-			route.instance = "obs-test-other";
-			TestOk(hidden->announce(route), "announce mismatched sibling");
+			TestOk(hidden->announce(), "announce mismatched sibling");
 		}
 		CHECK(WaitFor([] {
 			std::lock_guard<std::mutex> lock(g_candidate_mutex);

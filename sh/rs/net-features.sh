@@ -28,6 +28,10 @@ if grep -qE 'moq-net feature "(async|default|fuzz)"' <<<"$features"; then
     exit 1
 fi
 
-cargo clippy --locked -p moq-net --no-default-features --lib -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --locked -p moq-net --no-default-features --no-deps
-bash sh/rs/nextest.sh cargo nextest run --locked -p moq-net --no-default-features --tests
+# shellcheck source=sh/checks.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../checks.sh"
+
+run cargo clippy --locked -p moq-net --no-default-features --lib -- -D warnings
+run env RUSTDOCFLAGS="-D warnings" cargo doc --locked -p moq-net --no-default-features --no-deps
+run bash sh/rs/nextest.sh cargo nextest run --locked -p moq-net --no-default-features --tests
+finish

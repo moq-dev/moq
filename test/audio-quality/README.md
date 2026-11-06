@@ -130,7 +130,9 @@ just test push-to-talk
 
 This separate, roughly nine-minute run drives the shipped publish and watch elements in one Chromium
 page. A constant tone loops through the fake microphone, encoded as 128 kbit/s Opus with 60 ms
-frames. The listener holds a fixed 300 ms delay. After warmup and a mute, it measures 22 presses,
+frames. A release mutes the publisher, which sends nothing until the next press while its rendition
+stays enabled, so the listener keeps its subscription and plays comfort noise in between. The
+listener holds a fixed 300 ms delay. After warmup and a mute, it measures 22 presses,
 alternating two and three seconds: the first after the warmup's five-second mute, seven with no
 intervening wait, seven after five seconds, and seven after sixty seconds. Both elements reach a
 local relay directly over WebTransport, with no shaping, loss, or queueing, so every millisecond
@@ -139,7 +141,7 @@ measured belongs to the media pipeline rather than the path.
 `presses.json` records captured chunks at each press, WebCodecs encoder and decoder inputs and
 outputs, container writes, frame arrivals before reordering, and audible output onsets. Publisher,
 receiver, and worklet observations share the page's monotonic clock. A listening worklet detects
-each nonzero output onset. Its render time is mapped through the context's render clock, read with
+each output onset above -40 dBFS, which clears the comfort noise (at most -60 dBFS RMS). Its render time is mapped through the context's render clock, read with
 the page clock when the port message lands, so a late message moves neither boundary; its projected
 output comes from `getOutputTimestamp`. This measures the browser's projected device output, not
 acoustic output from a physical speaker. Zero-gap presses can remain continuously audible, and a
@@ -150,8 +152,9 @@ separated presses have an identifiable onset.
 is still attributed to its utterance. The command checks pipeline completeness, not the epic's
 latency verdict. It refuses missing encoder inputs, a head that never reaches the listener or never
 decodes, submitted frames that never encode or reach the container, written frames that never reach
-the listener, reopened capture, a new encoder (a probe or a rebuilt codec) or subscription, and
-separated utterances with no audible output. It also fails on a broken driver or invalid capture.
+the listener, reopened capture, a new encoder (a probe or a rebuilt codec) or subscription, a mute
+that disables or drops the rendition, any underrun or stall across the presses, and separated
+utterances with no audible output. It also fails on a broken driver or invalid capture.
 
 The latency goal is at most 300 ms of playout added on top of one-way delivery. For each separated
 press, `delivery` is the slowest of the utterance's frames that arrived before its onset, measured
@@ -166,11 +169,10 @@ playout delay), `render` (that PCM to the render onset: the worklet hand-off and
 render callback), and `device`, as the stages below name them. `spread` is how far an utterance's frames
 stray from a steady arrival: the latest arrival relative to its media timestamp minus the earliest,
 which on this ideal path is the capture graph's cadence and what `"auto"`'s jitter estimate measures.
-The release's flushed lookahead chunk is not one of the utterance's frames and is left out. `latency`
-and `path` give each one's min, median and max.
+`latency` and `path` give each one's min, median and max.
 
-The command prints `latency`, `path`, and the completeness counts, and keeps its run directory
-even when it passes (set `HARNESS_KEEP=0` to drop it). Nightly runs it and keeps the raw evidence
+The command prints `latency`, `path`, the completeness counts, and `playback`'s underruns and
+stalls, and keeps its run directory even when it passes (set `HARNESS_KEEP=0` to drop it). Nightly runs it and keeps the raw evidence
 alongside the audio quality rows.
 
 ## Traces

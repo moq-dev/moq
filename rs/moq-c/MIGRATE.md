@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `moq_connection_stats` counts unrouted datagrams ([#7951](https://github.com/moq-dev/moq/pull/7951))
+
+`moq_connection_stats` gains `datagrams_unrouted` and `datagrams_unrouted_valid` at its end, which changes its ABI: recompile against the new header.
+`datagrams_unrouted` counts the datagrams received for a subscription with no datagram track, and is valid on versions with datagrams (moq-lite 05 and newer).
+
+### Consumers and decoders refuse a disabled rendition ([#7942](https://github.com/moq-dev/moq/pull/7942))
+
+`moq_consume_audio`, `moq_consume_video`, `moq_decode_audio`, and `moq_decode_video` return `MOQ_ERROR_NOT_FOUND` when the catalog snapshot marks the rendition disabled, instead of subscribing and waiting for a re-enable. Check `moq_consume_audio_enabled` or `moq_consume_video_enabled` on the latest snapshot first, and cancel a consumer whose rendition a newer snapshot disables.
+
 ### Pre-encoded simulcast
 
 `moq_video_init` gains `lower`, changing its C ABI layout. Rebuild against the
@@ -21,6 +30,22 @@ Another instance taking a path over keeps it present, and a route's cost changin
 Map `_START` to `_PRESENT` and `_END` to `_ABSENT`, and drop `_UPDATE` handling. Where you requested the path again on `_RESTART` or `_TAKEOVER`, call `moq_origin_follow`, whose callback delivers a broadcast handle for each new instance.
 
 `moq_origin_follow` takes a `moq_follow_callback`, `(void *user_data, moq_follow_event event, int32_t code)`, instead of a `moq_status_callback`. `MOQ_FOLLOW_EVENT_ONLINE` carries each broadcast handle (where a positive code did), `MOQ_FOLLOW_EVENT_OFFLINE` reports the path going offline (or, for a follow pinned to an instance, another instance taking it over) with code `0`, and `MOQ_FOLLOW_EVENT_END` is the terminal callback, with `0` or a negative error that `moq_error()` explains (where a code `<= 0` was). Release `user_data` on `MOQ_FOLLOW_EVENT_END`.
+
+### Publishing goes through one route handle
+
+A route handle replaces the publication, the prepared answer, and the request handler:
+
+- `moq_origin_create_broadcast(origin, path, len, &broadcast)` is `moq_origin_route(origin, path, len, options)`, which returns a route; `moq_route_broadcast(route)` gives the broadcast handle to fill.
+- `moq_publication_announce(publication, route)` is `moq_route_announce(route)`, and re-pricing is `moq_route_set_cost(route, cost)`. `moq_publication_unannounce` is `moq_route_withdraw`, and `moq_publication_free` is `moq_route_free`.
+- `moq_origin_requests(origin, prefix, len, on_request, user_data)` is `moq_origin_route_prefix(origin, prefix, len, options, on_request, user_data)`, and `moq_origin_requests_cancel` is `moq_route_free`.
+- `moq_broadcast_request_prepare(request, &broadcast)` then `moq_broadcast_prepared_publish` is `moq_broadcast_request_route(request, options)`: create it hidden to fill it first, then `moq_route_announce`. `moq_broadcast_prepared_free` is `moq_route_free`.
+- `moq_route_instance(route, &dst)` reads the stream's instance, minted at creation and kept across withdraw and announce.
+
+`moq_announce_route` is `moq_route_options`, given once at creation, and gains a trailing `hidden`. A zeroed or NULL `moq_route_options` is visible at once, so set `hidden` and call `moq_route_announce` after filling the catalog to keep the old create-then-announce order. A stable `instance` is fixed for the route's lifetime: announcing another one is a new route.
+
+Hold the route for as long as the broadcast should stay announced. `moq_route_free` now retracts it, while `moq_publish_close` still ends both; the broadcast handle alone no longer keeps it announced.
+
+`moq_route`, the struct carried by `moq_announce_event.route`, is renamed `moq_route_info`; its fields are unchanged. Recompile against the regenerated `moq.h`.
 
 ### Separate datagram tracks
 

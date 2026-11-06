@@ -33,16 +33,18 @@ type (
 	ProtocolKind = ffi.MoqProtocolKind
 	// OriginConfig configures a new origin, such as its maximum cache size in bytes.
 	OriginConfig = ffi.MoqOriginConfig
-	// AnnounceRoute is how a broadcast advertises its exact path: its static production Cost (lower wins) and, optionally, a stable Instance.
-	// A nil Instance keeps the one the broadcast minted, which it keeps across re-announcing, so a restarted
-	// publisher is a new stream viewers restart onto. Set one only for a publisher that continues its group
-	// sequences across restarts and raises Epoch on each: readers stitch every route of one instance together,
-	// so restarting the sequences under an old instance splices unrelated groups into their tracks.
-	AnnounceRoute = ffi.MoqAnnounceRoute
-	// Route is an observed route: the Instance of the stream it serves (routes with one instance are one continuous stream), the hop chain it took to reach an origin, and its static production and link cost (lower wins).
-	Route = ffi.MoqRoute
+	// RouteOptions is how a [Route] advertises itself: Hidden until [Route.Announce], its static
+	// production Cost (lower wins) and, optionally, a stable Instance. The zero value is visible at
+	// once, at cost 0, under a fresh instance the route keeps for its lifetime, so a restarted
+	// publisher is a new stream viewers restart onto. Set Instance only for a publisher that
+	// continues its group sequences across restarts and raises Epoch on each: readers stitch every
+	// route of one instance together, so restarting the sequences under an old instance splices
+	// unrelated groups into their tracks.
+	RouteOptions = ffi.MoqRouteOptions
+	// RouteInfo is the read-only facts on a received route: the Instance of the stream it serves (routes with one instance are one continuous stream), the hop chain it took to reach an origin, and its static production and link cost (lower wins).
+	RouteInfo = ffi.MoqRouteInfo
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
-	// wildcard matched (Captures), and the Route serving it. It carries no broadcast;
+	// wildcard matched (Captures), and the RouteInfo serving it. It carries no broadcast;
 	// resolve a path with [OriginConsumer.Request]. Captures is a required slice,
 	// empty when the filter has no wildcards.
 	Announce = ffi.MoqAnnounce

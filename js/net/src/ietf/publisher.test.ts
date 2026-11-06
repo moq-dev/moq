@@ -42,9 +42,8 @@ import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
-	const broadcastPublication = origin.createBroadcast(path);
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(path);
+	const broadcast = broadcastRoute.broadcast;
 	return broadcast;
 }
 
@@ -295,7 +294,7 @@ test("TRACK_STATUS finished at once is answered on every draft", async () => {
 		const pair = createMockTransportPair(ALPNS[version]);
 		const session = new NativeSession(pair.server, version, true);
 		const { pub, origin } = publisher(pair.server, { session });
-		const requests = origin.requestsRoute(Path.from("room")).requested();
+		const requests = origin.routePrefix(Path.from("room")).requested();
 
 		// The FIN arrives while the broadcast still resolves.
 		const { stream, wire, finish } = requestStream(version);
@@ -341,7 +340,7 @@ test("TRACK_STATUS outside the grant is refused on every draft", async () => {
 		const session = new NativeSession(pair.server, version, true);
 		const grant = new Signal<Grant | undefined>(nothing());
 		const { pub, origin } = publisher(pair.server, { session, grant });
-		const requests = origin.requestsRoute(Path.from("room")).requested();
+		const requests = origin.routePrefix(Path.from("room")).requested();
 
 		const outside = requestStream(version);
 		await pub.runTrackStatusRequest(trackStatus("room"), outside.stream);
@@ -368,7 +367,7 @@ test("a second GOAWAY on an unanswered SUBSCRIBE closes the session", async () =
 		const pair = createMockTransportPair(ALPNS[version]);
 		const session = new NativeSession(pair.server, version, true);
 		const { pub, origin } = publisher(pair.server, { session });
-		const requests = origin.requests(Path.from("room")).requested();
+		const requests = origin.routePrefix(Path.from("room")).requested();
 
 		const held = requestStream(version);
 		const task = pub.runSubscribe(
@@ -426,7 +425,7 @@ test("a cancelled TRACK_STATUS releases its demand on every draft", async () => 
 		const pair = createMockTransportPair(ALPNS[version]);
 		const session = new NativeSession(pair.server, version, true);
 		const { pub, origin } = publisher(pair.server, { session });
-		const requests = origin.requestsRoute(Path.from("room")).requested();
+		const requests = origin.routePrefix(Path.from("room")).requested();
 
 		// The broadcast is still resolving: its handler never answers.
 		const early = requestStream(version);
@@ -478,7 +477,7 @@ test("a SUBSCRIBE withdrawn during setup releases its demand on every draft", as
 		const pair = createMockTransportPair(ALPNS[version]);
 		const session = new NativeSession(pair.server, version, true);
 		const { pub, origin } = publisher(pair.server, { session });
-		const requests = origin.requestsRoute(Path.from("room")).requested();
+		const requests = origin.routePrefix(Path.from("room")).requested();
 
 		// The broadcast is still resolving: its handler never answers.
 		const early = requestStream(version);
@@ -645,7 +644,7 @@ test("reserved namespace requests get DOES_NOT_EXIST while other dot namespaces 
 			// Navigation segments cannot be published. A covering application
 			// route still proves these reserved requests are refused before lookup.
 			const navigation = path.split("/")[0] === ".";
-			const claim = navigation ? origin.requests(Path.empty()) : undefined;
+			const claim = navigation ? origin.routePrefix(Path.empty()) : undefined;
 			const requested = claim?.requested().next();
 			const broadcast = navigation ? undefined : publish(origin, Path.from(path));
 			const track = broadcast?.createTrack("video", { timescale: Timescale.MILLI });
@@ -1156,7 +1155,7 @@ test("a subscription outside a covering route's claim does not hear it", async (
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
 	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("room/chat"))]));
-	const dynamic = chat.requestsRoute(Path.from("room"));
+	const dynamic = chat.routePrefix(Path.from("room"));
 
 	const subscription = await Stream.open(pair.client, { version: VERSION });
 	const accepted = await Stream.accept(pair.server, VERSION);
@@ -1188,8 +1187,8 @@ test("a subscription hears the best covering route its claim allows", async () =
 	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
 	const scoped = (path: string) =>
 		origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from(path))]));
-	const chat = scoped("room/chat").requestsRoute(Path.from("room"), { cost: 1n });
-	const video = scoped("room/video").requestsRoute(Path.from("room"), { cost: 5n });
+	const chat = scoped("room/chat").routePrefix(Path.from("room"), { cost: 1n });
+	const video = scoped("room/video").routePrefix(Path.from("room"), { cost: 5n });
 
 	const subscription = await Stream.open(pair.client, { version: VERSION });
 	const accepted = await Stream.accept(pair.server, VERSION);
@@ -1229,8 +1228,8 @@ test("a subscription hears a broader covering route when the narrowest cannot se
 	});
 	const chat = origin
 		.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("tenant/chat"))]))
-		.requestsRoute(Path.from("tenant"));
-	const broad = origin.requestsRoute(Path.empty(), { cost: 5n });
+		.routePrefix(Path.from("tenant"));
+	const broad = origin.routePrefix(Path.empty(), { cost: 5n });
 
 	const subscription = await Stream.open(pair.client, { version: VERSION });
 	const accepted = await Stream.accept(pair.server, VERSION);
@@ -1267,7 +1266,7 @@ test("a covering route's claim is compared relative to the served root", async (
 		requiresSolicitation: true,
 	});
 	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("tenant/room/chat"))]));
-	const dynamic = chat.requestsRoute(Path.from("tenant/room"));
+	const dynamic = chat.routePrefix(Path.from("tenant/room"));
 
 	const subscription = await Stream.open(pair.client, { version: VERSION });
 	const accepted = await Stream.accept(pair.server, VERSION);
@@ -1351,8 +1350,7 @@ test("a new instance at the same path clears a refusal", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
-	const broadcast = origin.createBroadcast(Path.from("restarted"));
-	broadcast.announce({ instance: Instance.random() });
+	const broadcast = origin.route(Path.from("restarted"), { instance: Instance.random() });
 
 	void pub.runPublishNamespaces();
 
@@ -1362,7 +1360,7 @@ test("a new instance at the same path clears a refusal", async () => {
 	await declinePublishNamespace(declined, 0n);
 	await sleep(Nano.fromMilli(Milli(SETTLE)));
 
-	broadcast.announce({ ...broadcast.route, instance: Instance.random() });
+	wireOf(broadcast).update({ ...wireOf(broadcast).info, instance: Instance.random() });
 
 	const retried = await nextStream(pair.client);
 	if (!retried) throw new Error("the new instance was never offered");
@@ -1563,18 +1561,18 @@ const OTHER: Hop = HopSchema.parse(5n);
 test("a price change on a held namespace is one REQUEST_UPDATE, not a withdrawal", async () => {
 	const { clock, self, pub, origin, streams, close } = clustered();
 	try {
-		const broadcast = origin.createBroadcast(Path.from("mine"));
-		broadcast.announce({ hops: [VIA], cost: 4n });
+		const broadcast = origin.route(Path.from("mine"), { hidden: true });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
 		const stream = await take(clock, streams);
 		expect(await acceptClustered(stream)).toEqual({ hops: [VIA, self], cost: 4n });
 
-		broadcast.announce({ hops: [VIA], cost: 8n });
+		wireOf(broadcast).update({ hops: [VIA], cost: 8n });
 		expect(await readUpdate(stream)).toEqual({ hops: undefined, cost: 8n });
 		await acceptPublishNamespace(stream);
 
-		broadcast.announce({ hops: [VIA], cost: 0n });
+		wireOf(broadcast).update({ hops: [VIA], cost: 0n });
 		expect(await readUpdate(stream)).toEqual({ hops: undefined, cost: 0n });
 		await acceptPublishNamespace(stream);
 
@@ -1591,14 +1589,14 @@ test("a price change on a held namespace is one REQUEST_UPDATE, not a withdrawal
 test("a hop path change behind the same publisher is one REQUEST_UPDATE carrying HOP_PATH", async () => {
 	const { clock, self, pub, origin, streams, close } = clustered();
 	try {
-		const broadcast = origin.createBroadcast(Path.from("mine"));
-		broadcast.announce({ hops: [VIA], cost: 4n });
+		const broadcast = origin.route(Path.from("mine"), { hidden: true });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
 		const stream = await take(clock, streams);
 		await acceptClustered(stream);
 
-		broadcast.announce({ hops: [VIA, MID], cost: 4n });
+		wireOf(broadcast).update({ hops: [VIA, MID], cost: 4n });
 		expect(await readUpdate(stream)).toEqual({ hops: [VIA, MID, self], cost: undefined });
 		await acceptPublishNamespace(stream);
 
@@ -1621,8 +1619,8 @@ test.each([
 ] as const)("a solicited namespace takes %s as one NAMESPACE and no NAMESPACE_DONE", async (_, hops, cost) => {
 	const { clock, self, pair, pub, origin, close } = clustered(true);
 	try {
-		const broadcast = origin.createBroadcast(Path.from("mine"));
-		broadcast.announce({ hops: [VIA], cost: 4n });
+		const broadcast = origin.route(Path.from("mine"), { hidden: true });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n });
 
 		const subscription = await Stream.open(pair.client, { version: VERSION });
 		const stream = await Stream.accept(pair.server, VERSION);
@@ -1641,7 +1639,7 @@ test.each([
 			params: { cluster: { hops: [VIA, self], cost: 4n } },
 		});
 
-		broadcast.announce({ hops: [...hops], cost });
+		wireOf(broadcast).update({ hops: [...hops], cost });
 		expect(await entry()).toMatchObject({
 			suffix: Path.from("mine"),
 			params: { cluster: { hops: [...hops, self], cost } },
@@ -1663,14 +1661,14 @@ test.each([
 test("a first-hop change is one REQUEST_UPDATE carrying HOP_PATH, not a withdrawal", async () => {
 	const { clock, self, pub, origin, streams, close } = clustered();
 	try {
-		const broadcast = origin.createBroadcast(Path.from("mine"));
-		broadcast.announce({ hops: [VIA], cost: 4n });
+		const broadcast = origin.route(Path.from("mine"), { hidden: true });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
 		const stream = await take(clock, streams);
 		await acceptClustered(stream);
 
-		broadcast.announce({ hops: [OTHER], cost: 4n });
+		wireOf(broadcast).update({ hops: [OTHER], cost: 4n });
 		expect(await readUpdate(stream)).toEqual({ hops: [OTHER, self], cost: undefined });
 		await acceptPublishNamespace(stream);
 
@@ -1685,8 +1683,8 @@ test("a first-hop change is one REQUEST_UPDATE carrying HOP_PATH, not a withdraw
 
 /** A different broadcast is not an update: it withdraws the old one and advertises again. */
 function republish(origin: OriginProducer, old: BroadcastProducer) {
-	const next = origin.createBroadcast(Path.from("mine"));
-	next.announce({ hops: [VIA], cost: 4n });
+	const next = origin.route(Path.from("mine"), { hidden: true });
+	wireOf(next).update({ hops: [VIA], cost: 4n });
 	old.close();
 }
 
@@ -1750,15 +1748,15 @@ test("swapping a route's token is one REQUEST_UPDATE carrying it", async () => {
 	const { clock, pub, origin, streams, close } = clustered(false, tokens);
 	const { sent, restore } = carriedTokens();
 	try {
-		const broadcast = origin.createBroadcast(Path.from("mine"));
-		broadcast.announce({ hops: [VIA], cost: 4n, auth: tokens.issue("first") });
+		const broadcast = origin.route(Path.from("mine"), { hidden: true });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n, auth: tokens.issue("first") });
 		void pub.runPublishNamespaces();
 
 		const stream = await take(clock, streams);
 		await acceptClustered(stream);
 		expect(sent).toEqual(["first"]);
 
-		broadcast.announce({ hops: [VIA], cost: 4n, auth: tokens.issue("second") });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n, auth: tokens.issue("second") });
 		expect(await readUpdate(stream)).toEqual({ hops: undefined, cost: undefined });
 		await acceptPublishNamespace(stream);
 		expect(sent).toEqual(["first", "second"]);
@@ -1775,13 +1773,13 @@ test("a foreign route token is not carried", async () => {
 	const { clock, pub, origin, streams, close } = clustered(false, new Tokens());
 	const { sent, restore } = carriedTokens();
 	try {
-		const broadcast = origin.createBroadcast(Path.from("mine"));
-		broadcast.announce({ hops: [VIA], cost: 4n, auth: foreign.issue("first") });
+		const broadcast = origin.route(Path.from("mine"), { hidden: true });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n, auth: foreign.issue("first") });
 		void pub.runPublishNamespaces();
 
 		const stream = await take(clock, streams);
 		await acceptClustered(stream);
-		broadcast.announce({ hops: [VIA], cost: 4n, auth: foreign.issue("second") });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n, auth: foreign.issue("second") });
 		const more = watch(stream.reader.u53());
 		await clock.advance(Nano.zero);
 		expect(more.state).toBe("pending");
@@ -1798,13 +1796,13 @@ test("naming a token on an unnamed request makes it again", async () => {
 	const { clock, pub, origin, streams, close } = clustered(false, tokens);
 	const { sent, restore } = carriedTokens();
 	try {
-		const broadcast = origin.createBroadcast(Path.from("mine"));
-		broadcast.announce({ hops: [VIA], cost: 4n });
+		const broadcast = origin.route(Path.from("mine"), { hidden: true });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
 		const old = await take(clock, streams);
 		await acceptClustered(old);
-		broadcast.announce({ hops: [VIA], cost: 4n, auth: tokens.issue("first") });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n, auth: tokens.issue("first") });
 
 		expect(await old.reader.done().catch(error)).toMatchObject({ code: StreamCode.Cancel });
 		await acceptClustered(await take(clock, streams));
@@ -1821,9 +1819,9 @@ test("closing a route's token makes its request again without it", async () => {
 	const { clock, pub, origin, streams, close } = clustered(false, tokens);
 	const { sent, restore } = carriedTokens();
 	try {
-		const broadcast = origin.createBroadcast(Path.from("mine"));
+		const broadcast = origin.route(Path.from("mine"), { hidden: true });
 		const token = tokens.issue("first");
-		broadcast.announce({ hops: [VIA], cost: 4n, auth: token });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n, auth: token });
 		void pub.runPublishNamespaces();
 
 		const old = await take(clock, streams);
@@ -1842,9 +1840,9 @@ test("closing a route's token makes its request again without it", async () => {
 test("a republish withdraws the PUBLISH_NAMESPACE and advertises again", async () => {
 	const { clock, pub, origin, streams, close } = clustered();
 	try {
-		const broadcastPublication = origin.createBroadcast(Path.from("mine"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce({ hops: [VIA], cost: 4n });
+		const broadcastRoute = origin.route(Path.from("mine"), { hidden: true });
+		const broadcast = broadcastRoute.broadcast;
+		wireOf(broadcastRoute).update({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
 		const old = await take(clock, streams);
@@ -1864,9 +1862,9 @@ test("a republish withdraws the PUBLISH_NAMESPACE and advertises again", async (
 test("a republish withdraws the solicited NAMESPACE and sends it again", async () => {
 	const { pair, pub, origin, close } = clustered(true);
 	try {
-		const broadcastPublication = origin.createBroadcast(Path.from("mine"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce({ hops: [VIA], cost: 4n });
+		const broadcastRoute = origin.route(Path.from("mine"), { hidden: true });
+		const broadcast = broadcastRoute.broadcast;
+		wireOf(broadcastRoute).update({ hops: [VIA], cost: 4n });
 
 		const subscription = await Stream.open(pair.client, { version: VERSION });
 		const stream = await Stream.accept(pair.server, VERSION);
@@ -1903,14 +1901,14 @@ test.each([
 ])("a refused update %s", async (_, retryInterval) => {
 	const { clock, pub, origin, streams, close } = clustered();
 	try {
-		const broadcast = origin.createBroadcast(Path.from("mine"));
-		broadcast.announce({ hops: [VIA], cost: 4n });
+		const broadcast = origin.route(Path.from("mine"), { hidden: true });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
 		const stream = await take(clock, streams);
 		await acceptClustered(stream);
 
-		broadcast.announce({ hops: [VIA], cost: 8n });
+		wireOf(broadcast).update({ hops: [VIA], cost: 8n });
 		await readUpdate(stream);
 		await declinePublishNamespace(stream, retryInterval);
 
@@ -1944,8 +1942,8 @@ test.each([
 test("a refused update whose peer closes the request keeps the loop running", async () => {
 	const { clock, pub, origin, streams, close } = clustered();
 	try {
-		const broadcast = origin.createBroadcast(Path.from("mine"));
-		broadcast.announce({ hops: [VIA], cost: 4n });
+		const broadcast = origin.route(Path.from("mine"), { hidden: true });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n });
 		let failed: unknown;
 		void pub.runPublishNamespaces().catch((err: unknown) => {
 			failed = err;
@@ -1954,7 +1952,7 @@ test("a refused update whose peer closes the request keeps the loop running", as
 		const stream = await take(clock, streams);
 		await acceptClustered(stream);
 
-		broadcast.announce({ hops: [VIA], cost: 8n });
+		wireOf(broadcast).update({ hops: [VIA], cost: 8n });
 		await readUpdate(stream);
 		await declinePublishNamespace(stream, 1n);
 		stream.close();
@@ -1975,17 +1973,17 @@ test("a refused update whose peer closes the request keeps the loop running", as
 test("a change while an update is unanswered waits for its answer", async () => {
 	const { clock, pub, origin, streams, close } = clustered();
 	try {
-		const broadcast = origin.createBroadcast(Path.from("mine"));
-		broadcast.announce({ hops: [VIA], cost: 4n });
+		const broadcast = origin.route(Path.from("mine"), { hidden: true });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
 		const stream = await take(clock, streams);
 		await acceptClustered(stream);
 
-		broadcast.announce({ hops: [VIA], cost: 8n });
+		wireOf(broadcast).update({ hops: [VIA], cost: 8n });
 		expect(await readUpdate(stream)).toEqual({ hops: undefined, cost: 8n });
 
-		broadcast.announce({ hops: [VIA], cost: 12n });
+		wireOf(broadcast).update({ hops: [VIA], cost: 12n });
 		const second = watch(stream.reader.u53());
 		await clock.advance(Nano.fromMilli(Milli(1_000)));
 		expect(second.state).toBe("pending");
@@ -2013,7 +2011,7 @@ test("a change while an update is unanswered waits for its answer", async () => 
 test("an advertisement the peer keeps ending comes back on a growing backoff", async () => {
 	const { clock, pub, origin, streams, close } = clustered();
 	try {
-		origin.createBroadcast(Path.from("mine")).announce({ hops: [VIA], cost: 4n });
+		wireOf(origin.route(Path.from("mine"), { hidden: true })).update({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
 		let stream = await take(clock, streams);
@@ -2041,14 +2039,14 @@ test("an advertisement the peer keeps ending comes back on a growing backoff", a
 test("an unanswered update drops the request and re-offers the namespace fresh", async () => {
 	const { clock, pub, origin, streams, close } = clustered();
 	try {
-		const broadcast = origin.createBroadcast(Path.from("mine"));
-		broadcast.announce({ hops: [VIA], cost: 4n });
+		const broadcast = origin.route(Path.from("mine"), { hidden: true });
+		wireOf(broadcast).update({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
 		const stream = await take(clock, streams);
 		await acceptClustered(stream);
 
-		broadcast.announce({ hops: [VIA], cost: 8n });
+		wireOf(broadcast).update({ hops: [VIA], cost: 8n });
 		await readUpdate(stream);
 		const reset = watch(stream.reader.u53());
 
@@ -2079,8 +2077,7 @@ test.each([
 	const self: Hop = HopSchema.parse(7n);
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server, { cluster: { self, peer } });
-	const broadcast = origin.createBroadcast(Path.from("mine"));
-	broadcast.announce({ cost: 4n });
+	const broadcast = origin.route(Path.from("mine"), { cost: 4n });
 	void pub.runPublishNamespaces();
 
 	const stream = await nextStream(pair.client);
@@ -2090,7 +2087,7 @@ test.each([
 	expect(msg.trackNamespace).toBe(Path.from("mine"));
 	await acceptPublishNamespace(stream);
 
-	broadcast.announce({ cost: peer === undefined ? 8n : 4n });
+	broadcast.setCost(peer === undefined ? 8n : 4n);
 	await noStream(pair.client, clock);
 
 	origin.close();
@@ -2448,6 +2445,51 @@ test("draft-22: an absolute subscribe is no join", async () => {
 });
 
 /**
+ * A filterless SUBSCRIBE without a fill joins the latest group, as a relay cache always served
+ * one; only an absolute start from group 0 replays the groups before it. Ascending order sends
+ * history first, so the first stream tells them apart.
+ */
+test.each(IETF_VERSIONS)("version %d: only an absolute start replays history", async (version) => {
+	// Bounded, since draft 20 spells an open {0, 0} as no filter at all.
+	const zero: Filter.Filter = { kind: "absolute", startGroup: 0n, startObject: 0n, endGroup: 1n };
+	for (const [filter, expected] of [
+		[{ kind: "unfiltered" }, [1n]],
+		[zero, [0n, 1n]],
+	] as const) {
+		const fx = fixture(version);
+		// Unlimited max age, so the first group is still served once its successor exists.
+		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+		writeGroup(track, 1);
+		writeGroup(track, 1);
+
+		const { client } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 7n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 0,
+				groupOrder: "ascending",
+				filter,
+			}),
+		);
+
+		try {
+			const served: bigint[] = [];
+			for (const _ of expected) {
+				const stream = await nextUni(fx.uni);
+				if (!stream) throw new Error(`${version} ${filter.kind}: missing group stream`);
+				served.push((await GroupMessage.decode(new Reader(stream, undefined, version), version)).groupId);
+			}
+			expect(served).toEqual([...expected]);
+		} finally {
+			fx.close();
+			client.close();
+		}
+	}
+});
+
+/**
  * The draft's own current-group join: a Next Object subscription for the live tail, plus a
  * StartGroup=1 fill for the head already published. The two must meet exactly, so the head
  * arrives once, on the fetch stream, and the subscription picks up at the next object.
@@ -2621,8 +2663,8 @@ test("draft-22: a backwards range within one group serves nothing and ends the s
 	}
 });
 
-// Flaky in the workspace suite: the live group sometimes resets while read. Isolate its
-// clock and stream ordering before re-enabling.
+// Quarantined: the live group intermittently resets while read.
+// Investigation: quest/m0/test-flakes-2/ietf-wider-fill.md.
 test.skip.each(["ascending", "descending"] as const)("draft-22: a wider fill is refused in %s order", async (order) => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });

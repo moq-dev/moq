@@ -157,8 +157,11 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 
 	let publisher = origin_producer(1);
 	let viewer = origin_producer(2);
-	let broadcast = publisher.create_broadcast("live").unwrap();
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let source = broadcast
+		.broadcast()
 		.create_track(
 			"video",
 			track::Info::default()
@@ -166,7 +169,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 				.with_max_age(None),
 		)
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let accept = async {
 		let conn = server.accept().await.unwrap().accept().unwrap().await.unwrap();

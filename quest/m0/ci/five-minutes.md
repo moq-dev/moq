@@ -30,6 +30,16 @@ Decided 2026-10-29 (user): time queued in `quest gate` admission counts.
 kixelated/quest redesigns the gate so admission no longer outlasts a worker's
 cache; this quest owns the gated commands' own run time.
 
+Decided 2026-11-05 (maintainer, /quest-audit): ✅ drop the wait on
+moq-dev/quest's admission work. Its admission changes landed
+([moq-dev/quest#324](https://github.com/moq-dev/quest/pull/324),
+[moq-dev/quest#342](https://github.com/moq-dev/quest/pull/342)), and the
+5-minute-cache premise PR
+([moq-dev/quest#276](https://github.com/moq-dev/quest/pull/276)) closed
+unmerged. Re-measure the net route with landed admission, then finish or
+narrow this quest. Not chosen: wait on moq-dev/quest's m1 worker cache and
+move this to m1; delete this quest.
+
 Baseline, 2026-10-22 to 10-29: successful agent-run gates on the desktop, from
 Claude Code transcripts. Times include admission wait and load from concurrent
 agents, so this is an observation, not a controlled benchmark.
@@ -131,9 +141,9 @@ require a capable builder.
 
 What remains:
 
-- Admission still makes the measured net route exceed 5 minutes despite its
-  command taking 227 s. The 2026-10-29 admission decision above remains with
-  moq-dev/quest.
+- Re-measure the net route with landed admission: on 2026-11-02, admission
+  made it exceed 5 minutes despite its command taking 227 s. Then finish or
+  narrow this quest.
 - Repeat the default FFI route without the override; the Gradle fix
   ([moq-dev/moq#7632](https://github.com/moq-dev/moq/pull/7632)) merged
   2026-11-04.
@@ -145,11 +155,6 @@ What remains:
 - Prefer the epic's levers and tighter diff selection over moving coverage.
   Moving a check to the queue or nightly still needs evidence and an explicit
   coverage tradeoff. Split a large independent lever into its own quest.
-
-## Waiting
-
-- moq-dev/quest: admission must keep the whole gate inside the worker's cache
-  window; repeat the net measurement after its admission work lands.
 
 ## Related
 

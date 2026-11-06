@@ -35,8 +35,7 @@ test.each(["table", "consumer", "structural"] as const)("Player borrows a %s ori
 	const player = new Player({ origin: origins[role], name, catalogFormat: "manual", catalog: {} });
 	try {
 		const active = player.broadcast.out.active.changed();
-		const publication = producer.createBroadcast(name);
-		publication.announce();
+		const publication = producer.route(name);
 		expect((await active)?.path).toBe(name);
 		expect(player.in.origin.peek()).toBe(origins[role]);
 		expect(player.broadcast.in.origin.peek()).toBe(origins[role]);

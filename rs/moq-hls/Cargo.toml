@@ -58,7 +58,7 @@ tracing-test = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }
 
 [[bench]]
-name = "contributions"
+name = "include"
 harness = false
 required-features = ["server"]
 

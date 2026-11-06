@@ -856,6 +856,51 @@ test("Consumer measures arrivals as they land", async () => {
 	}
 });
 
+test("Consumer does not relax its measurement across a declared silence", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	// Two identical paths, except that one publisher declares its silence and the other just stops.
+	const declared = new Track.Producer("declared");
+	const undeclared = new Track.Producer("undeclared");
+	const options = { format: new LegacyFormat("audio"), delay: { max: 5000 as Milli } };
+	const quiet = new Consumer(declared.subscribe(), options);
+	const lapsed = new Consumer(undeclared.subscribe(), options);
+	const producers = [new LegacyProducer(declared, options.format), new LegacyProducer(undeclared, options.format)];
+	const payload = new Uint8Array([1]);
+	let media = 0;
+	const send = async (count: number) => {
+		for (let i = 0; i < count; i++) {
+			for (const producer of producers) producer.encode(payload, (media * 1000) as Micro, true);
+			media += 520;
+			await clock.advance(Nano.fromMilli(Milli(520)));
+		}
+	};
+
+	try {
+		// Arrivals exactly as fast as their media until the cold-start prior is spent.
+		await send(40);
+		const settled = quiet.spread.peek();
+		expect(lapsed.spread.peek()).toBe(settled);
+
+		// A minute of silence on both, declared on one.
+		producers[0].discontinuity();
+		media += 60_000;
+		await clock.advance(Nano.fromMilli(Milli(60_000)));
+		await send(2);
+
+		expect(quiet.spread.peek()).toBe(settled);
+		expect(lapsed.spread.peek()).toBeGreaterThan(settled);
+	} finally {
+		for (const track of [declared, undeclared]) {
+			track.finish();
+			track.close();
+		}
+		quiet.close();
+		lapsed.close();
+		installed.close();
+	}
+});
+
 // --- Ordering ---
 
 test("Consumer delivers groups in sequence order regardless of arrival order", async () => {

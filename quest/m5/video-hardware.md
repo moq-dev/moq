@@ -1,0 +1,104 @@
+# [L] Video hardware validation
+
+## Goal
+
+The encode, capture, and zero-copy paths that were written but never run on
+real hardware get run on it, and what breaks gets fixed.
+
+## Plan
+
+Every item here is blocked on a physical machine rather than on code, which is
+why they sit together and why they sit in m5. Decided in the 2026-09-30 audit:
+the KDE DMA-BUF capture and PipeWire camera validations fold in here, and the
+V4L2 `VIDIOC_EXPBUF` source is dropped with the export itself (see
+[#2819](/quest/m4/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md)).
+
+Decided 2026-10-08: the VAAPI low-power entrypoint check is dropped. Neither
+Meteor Lake nor the Arrow Lake test host exposes `EncSliceLP`, so no machine
+on hand reaches that fallback. A render node other than the first is checked
+by [VA-API external images](/quest/m3/vaapi-vulkan-import.md).
+
+- **Windows Media Foundation capture**: the camera opens while capture is
+  enabled and closes when it is disabled, so the LED is off whenever capture
+  is; with the `on_demand` opt-in it also opens and closes as the first viewer
+  arrives and the last leaves. NV12 delivery from MJPEG and YUY2 cameras.
+- **A GPU export on a hardware encoder**: run the ignored
+  `render::export::dx12::tests::exports_an_nv12_texture` (the Platform runner
+  has only WARP, which has no Direct3D11 video device) and
+  `render::export::dx12::tests::media_foundation_encodes_the_export_in_place`
+  on a Windows GPU with a Media Foundation H.264 encoder. The
+  [studio](https://github.com/moq-dev/studio), the export's main consumer,
+  confirms its Output panel reports no readback on that machine and a Mac in
+  its own repository.
+- **A live camera run per platform**: capture needs device permission that a
+  headless or agent process cannot grant itself.
+- **OBS follows its grant on a shaped uplink**: stream from a real OBS build
+  through `tc netem` (or `rs/moq-shaper`), narrow and reopen the link, and
+  confirm the Stats tab's video target drops at once, climbs back over a few
+  seconds, and the encoder output follows (`cpp/obs/src/moq-rate.h`).
+
+### PipeWire DMA-BUF capture on KDE
+
+Reported in [#2893](https://github.com/moq-dev/moq/issues/2893). On a
+KDE/Wayland desktop the portal source was selected, but the ignored
+`portal_captures_frames` test never received a frame and timed out at 120
+seconds:
+
+```sh
+cargo nextest run --profile ci -p moq-video --all-features --run-ignored ignored-only portal_captures_frames --no-capture
+```
+
+- Reproduce the post-selection timeout, then add tracing around portal
+  completion, PipeWire connection, format fixation, buffer allocation, and
+  first-frame delivery to locate the stall.
+- A DMA-BUF-capable compositor produces `Surface::DmaBuf`; confirm the linear
+  DMA-BUF CPU fallback and shared-memory capture still work when DMA-BUF is
+  unavailable.
+- Refine the ignored test so this failure is distinguishable from a
+  portal-selection timeout.
+
+### PipeWire cameras on a portal and a Pi
+
+Open `pipewire` and one `pipewire:<node>` in a sandbox, where the portal
+raises its permission dialog, and on a Raspberry Pi whose CSI camera is a
+PipeWire node (spa-libcamera). Record the mode that opened, whether frames
+arrived, and whether the producer used one memory block or one per plane.
+No new capture API, and no libcamera source.
+
+A separate-plane producer belongs to
+[multi-plane cameras](/quest/m5/pipewire-camera-planes.md); if that is why a
+Pi produces nothing, write it down and stop. `doc/lib/rs/moq-video.md` says
+both paths are reachable; correct that sentence if one cannot capture.
+
+### Windows GPU probes
+
+Ignored moq-video tests that only a GPU on that platform can run, and that no
+runner hosts (found by the m0 coverage audit):
+
+- Direct3D11 video processing: `d3d11_resize_defaults_to_the_gpu`,
+  `d3d11_resize_matches_cpu`, and
+  `mediafoundation_resized_texture_reencodes_in_place`. `VideoProcessorBlt`
+  can hang on affected drivers, so run them one at a time.
+- WGC conversion and encode: `wgc_conversion_crops_odd_edges_and_preserves_color`,
+  `wgc_conversion_workload`, and
+  `wgc_nv12_encodes_with_matching_color_on_gpu_and_software`. The `wgc_*`
+  capture tests belong to [Windows.Graphics.Capture](/quest/m4/capture-wgc.md).
+- Media Foundation encode: `mediafoundation_cpu_rgba` and
+  `mediafoundation_camera_texture`.
+
+### Fixes
+
+Fix only a defect a run hits. Precedent for what this catches: NVENC
+validation on an RTX 3070 Ti found that NVENC rejects stream-ordered pool
+memory, so buffers registered with it must come from plain `cuMemAlloc`. That
+is not a bug any amount of review finds.
+
+## Required
+
+- [Video validation hardware is on hand](/quest/m5/video-hardware-access.md) - the machines to run it on
+
+## Related
+
+- [#2819](/quest/m4/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - the DMA-BUF import validation this capture feeds
+- [Capture multi-plane PipeWire cameras](/quest/m5/pipewire-camera-planes.md) - separate-plane I420 and NV12, when the Pi pass finds them
+- [Embedded video path](/quest/m5/video-embedded.md) - presenting on a Pi, which is a different gap

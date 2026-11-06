@@ -17,7 +17,7 @@ narrower budget is served after a widening, as a cold relay would.
 Decided 2026-10-27 (maintainer): this runs after the range count cost work,
 which finished in [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542),
 since both edit `given_up` in `rs/moq-net/src/model/track/miss.rs`, and before
-[Rust groups by start](/quest/m1/time-addressing/model.md), which requires it
+[Rust groups by start](/quest/m2/time-addressing/model.md), which requires it
 because runs keyed by group sequence convert mechanically to starts.
 
 Decided by the maintainer on 2026-10-19, splitting this from the widened
@@ -190,7 +190,7 @@ A cursor judges an unknown missing sequence (never a stale run its record
 still holds as reported, which only a widening settles) as it would a
 group never received: locally against its own budget (`TrackState::drifted`),
 and otherwise as a cache miss, which the relay fills upstream by range
-([Subscribe ranges](/quest/m1/subscribe-ranges/README.md)), so no reader
+([Subscribe ranges](/quest/m2/subscribe-ranges/README.md)), so no reader
 waits indefinitely on forgotten state. Extend `track_subscriber_churn` in
 `rs/moq-net/benches/track.rs` with a fragmented set up to pool capacity,
 swept over subscriber count, shared runs, runs per cursor record, and run
@@ -318,4 +318,4 @@ start can carry the budget it was resolved under.
 
 ## Related
 
-- [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - fills the cache miss an evicted run leaves
+- [Subscribe ranges](/quest/m2/subscribe-ranges/README.md) - fills the cache miss an evicted run leaves

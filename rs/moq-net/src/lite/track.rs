@@ -17,7 +17,7 @@ const LEGACY_UNLIMITED: u64 = (1u64 << 53) - 1;
 #[derive(Clone, Debug)]
 pub struct Track<'a> {
 	pub broadcast: Path,
-	/// The instance the subscriber expects; see [`crate::origin::Route::instance`].
+	/// The instance the subscriber expects; see [`crate::origin::RouteInfo::instance`].
 	/// Lite07+ only.
 	pub instance: Option<crate::Instance>,
 	pub track: Cow<'a, str>,
