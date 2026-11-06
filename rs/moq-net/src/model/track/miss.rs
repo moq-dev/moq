@@ -609,14 +609,22 @@ impl Misses {
 			return asks;
 		}
 		// A received stale run this reader cannot trust is still asked for, though nothing above
-		// it arrived; see `TrackState::unfed`. Only runs above the newest group need a look.
+		// it arrived; see `TrackState::unfed`. Only runs above the newest group need a look, and
+		// only while a handler may fill them: otherwise the reader waits for new terms.
 		let unknown = state
-			.drops
-			.iter()
-			.rev()
-			.take_while(|(run, _)| state.newest_produced.is_none_or(|newest| run.end - 1 > newest))
-			.find(|(run, hole)| !drift.settles(state, run.start, hole))
-			.map(|(run, _)| run.end - 1);
+			.fills
+			.read()
+			.has_handlers()
+			.then(|| {
+				state
+					.drops
+					.iter()
+					.rev()
+					.take_while(|(run, _)| state.newest_produced.is_none_or(|newest| run.end - 1 > newest))
+					.find(|(run, hole)| !drift.settles(state, run.start, hole))
+					.map(|(run, _)| run.end - 1)
+			})
+			.flatten();
 		let Some(newest) = state.newest_produced.max(bound).max(unknown) else {
 			return asks;
 		};
