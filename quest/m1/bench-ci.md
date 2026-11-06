@@ -7,17 +7,16 @@ The paired Rust Criterion comparison each Nightly runs (see
 regressions in every paired group: `rust-bench` finishes its paired leg within
 its hour and A/A runs on the hosted ARM runners hold its threshold,
 confirmation budget, and round count, and separate builds of unchanged code
-stop measuring as a stable slowdown.
-
-## Waiting
-
-- Maintainer: authorize one A/A Nightly dispatch for `rust-bench` once its
-  paired leg fits its hour, or now for an agent to dispatch then. Agents
-  dispatch Nightly only under a recorded authorization: a dispatch spends an
-  hour of every ARM leg and cancels any Nightly in progress. Check: a dated
-  authorization in this Plan.
+stop measuring as a stable slowdown, so `rust-shared`'s gate fails Nightly
+again.
 
 ## Plan
+
+Decided 2026-11-05 (maintainer, after
+[moq-dev/moq#7928](https://github.com/moq-dev/moq/pull/7928)'s A/A runs):
+authorize one A/A Nightly dispatch for `rust-bench` once its paired leg fits
+its hour, for the agent that fixes its benches to dispatch straight after.
+Not chosen: asking again once it fits.
 
 Decided 2026-11-05 (maintainer, /quest-unblock): authorize two A/A Nightly
 runs and one slowed-bench run on `main` after
@@ -103,11 +102,12 @@ addresses. Include moq-quic's windowed `benches/streams.rs` cases too: an
 unchanged base varied 17 to 43% between back-to-back runs on a shared host
 ([moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950)).
 
-Decided 2026-11-05 (agent, recorded in
-[moq-dev/moq#7928](https://github.com/moq-dev/moq/pull/7928)): the threshold
-stays at 10% despite the A/A false alarm at +12.1%. The 2026-10-23 decision
-already accepts false paired alarms while this quest tunes the gate. Raising
-the threshold would hide the bias this quest fixes, along with real
+Decided 2026-11-05 (maintainer, after the A/A false alarm at +12.1%):
+`rust-shared`'s gate is report-only until the build bias is fixed, and the
+threshold stays at 10%; Nightly's `report-only` matrix flag skips its gate
+step. Restore the gate once an A/A run of the fixed harness confirms nothing.
+Not chosen: keeping the gate failing at 10% (the 2026-10-23 decision's
+default); raising the threshold to about 15%, which would hide real
 regressions of 10 to 15%.
 
 Decided 2026-11-05 (agent, recorded in

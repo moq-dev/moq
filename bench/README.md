@@ -901,7 +901,9 @@ measurement, 30 samples). A case whose rounds are all slower with a median
 beyond 10% is a confirmed regression and fails its job after the upload, so the
 Alert workflow posts the failed Nightly. A target the base cannot build or run
 fails the job too, rather than passing uncompared; a bench target the base does
-not have yet is only reported as new.
+not have yet is only reported as new. `rust-shared` is report-only for now: its
+confirmed regressions show on the site but do not fail the job, until the
+build bias below is fixed.
 
 Runs on the hosted runner set these numbers. In four A/A runs of the
 `rust-shared`, `rust-extra` and `rust-uring` groups, and two of `rust-relay`,
