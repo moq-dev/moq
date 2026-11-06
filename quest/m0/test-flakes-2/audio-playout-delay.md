@@ -31,6 +31,13 @@ Python suite passed locally (125 tests). The PR landed on requeue. No other
 failed run from 2026-11-03 to 2026-11-06 shows this test, and no other PR
 comment names it.
 
+It failed again on 2026-11-06 in the merge queue entry for
+[moq-dev/moq#7904](https://github.com/moq-dev/moq/pull/7904) at `565d07a3f6`
+(same TimeoutError). The land fixer found the PR unrelated and the full
+Python suite passing locally, then stopped on the repeated failure. The test
+is now skipped with `@pytest.mark.skip` pointing here; remove the skip with
+the fix.
+
 Lead, unverified: the test writes only two 20 ms Opus frames (40 ms) and
 doesn't finish the track until after both reads. Any path that needs more
 input before the first frame goes out can stall the read for good. Candidates
