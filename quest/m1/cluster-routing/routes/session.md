@@ -146,10 +146,6 @@ by a proven key, every remaining attack stays inside the forger's grant, with
 no grant field, no issuer-coordinated labels, and support for token-less
 admission.
 
-## Required
-
-- [One Route handle](/quest/m1/api-audit/route/handle.md) - the origin's route surface this rewrites
-
 ## Related
 
 - [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - the contract

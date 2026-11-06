@@ -93,19 +93,21 @@ class TruckSession:
     def __init__(
         self,
         truck: Truck,
-        publication: moq.Publication,
+        route: moq.Route,
         video: BridgeStream,
         location: str | None,
         map_name: str | None,
         clock: Clock,
     ) -> None:
         self._truck = truck
+        # Held for the session's lifetime: dropping the route retracts the broadcast.
+        self._route = route
         self._video = video
         self._clock = clock
         self._location = location
         self._map_name = map_name
         self._drive = Drive()
-        self._status = StatusPublisher(publication.broadcast)
+        self._status = StatusPublisher(route.broadcast)
         # Bounded: drivers are untrusted publishers, so an unbounded queue is a
         # memory-growth path under one that floods; a full queue instead blocks
         # that driver's own task.
@@ -113,12 +115,12 @@ class TruckSession:
         self._media_pipeline: dict[str, list[dict[str, Any]]] = {}
         self._deadline: float | None = None
         self._stuck = StuckDetector()
-        # A broadcast starts unadvertised; the player discovers trucks by
-        # announcement, so advertise once the status and video tracks exist.
-        # The stream's are there already: opening it advertised them. The
-        # broadcast mints a fresh instance, so viewers see a restarted worker
-        # as a restart rather than a stalled broadcast.
-        publication.announce()
+        # The route starts hidden; the player discovers trucks by announcement,
+        # so advertise once the status and video tracks exist. The stream's are
+        # there already: opening it advertised them. The route mints a fresh
+        # instance, so viewers see a restarted worker as a restart rather than
+        # a stalled broadcast.
+        route.announce()
 
     def stop_video(self) -> None:
         """End the video tracks cleanly and stop the bridge encoding them."""

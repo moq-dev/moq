@@ -10,8 +10,8 @@ import (
 )
 
 // BroadcastProducer publishes a collection of tracks. Create one at a path with
-// [OriginProducer.CreateBroadcast] (or [Client.CreateBroadcast]) and take it
-// from the [Publication], then publish tracks onto it.
+// [OriginProducer.Route] (or [Client.Route]) and take it from the [Route], then
+// publish tracks onto it.
 type BroadcastProducer struct {
 	inner *ffi.MoqBroadcastProducer
 }
@@ -19,7 +19,7 @@ type BroadcastProducer struct {
 // NewBroadcastProducer creates a standalone broadcast, not attached to any
 // origin: pass its [BroadcastProducer.Consume] result to [BroadcastRequest.Serve]
 // for a dynamic request, or use it for local pub/sub. To publish at a path, use
-// [OriginProducer.CreateBroadcast].
+// [OriginProducer.Route].
 func NewBroadcastProducer() (*BroadcastProducer, error) {
 	inner, err := ffi.NewMoqBroadcastProducer()
 	if err != nil {

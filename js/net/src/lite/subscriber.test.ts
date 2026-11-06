@@ -17,7 +17,7 @@ import {
 	TimestampMismatch,
 } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
-import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
+import { HopSchema, isAnonymous, MAX_HOPS, RouteInfo, UNKNOWN_HOP } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
@@ -201,8 +201,8 @@ test("an announce consumer closed while its stream opens sends nothing on it", a
 });
 
 test("a local empty hop chain is not anonymous", () => {
-	expect(isAnonymous(Route.default)).toBe(false);
-	expect(isAnonymous({ hops: [UNKNOWN_HOP], cost: Route.default.cost })).toBe(true);
+	expect(isAnonymous(RouteInfo.default)).toBe(false);
+	expect(isAnonymous({ hops: [UNKNOWN_HOP], cost: RouteInfo.default.cost })).toBe(true);
 });
 
 test("a max-length chain plus withheld responder is dropped", async () => {
@@ -2352,7 +2352,7 @@ test.each(
 	const runResponses = internal.runResponses.bind(internal);
 	const responses = spyOn(internal, "runResponses").mockImplementation((stream, entry) => {
 		counters.push(
-			...[entry.track.subscription, entry.track.demand().wanted, hooks.producerLargest(entry.track)].map(
+			...[hooks.requested(entry.track), entry.track.demand().wanted, hooks.producerLargest(entry.track)].map(
 				countChanges,
 			),
 		);

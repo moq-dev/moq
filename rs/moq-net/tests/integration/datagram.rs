@@ -41,7 +41,7 @@ fn timed() -> datagram::Info {
 struct Chain {
 	nodes: Vec<origin::Producer>,
 	pairs: Vec<MockPair>,
-	publication: origin::Publication,
+	publication: origin::Route,
 }
 
 impl Chain {
@@ -57,8 +57,8 @@ impl Chain {
 			let version = version.parse::<Version>().unwrap();
 			pairs.push(peer_with_latency(version, &pair[0], &pair[1], latency).await);
 		}
-		let publication = nodes[0].create_broadcast("room").unwrap();
-		publication.announce(Default::default()).unwrap();
+		let publication = nodes[0].route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+		publication.announce().unwrap();
 		Self {
 			nodes,
 			pairs,
@@ -110,7 +110,7 @@ async fn a_datagram_track_crosses_a_session() {
 	for timescale in [Some(Timescale::MILLI), None] {
 		let chain = Chain::new(&["moq-lite-07-wip"]).await;
 		let info = datagram::Info::default().with_timescale(timescale).with_priority(3);
-		let mut producer = chain.publication.create_datagrams(TRACK, info).unwrap();
+		let mut producer = chain.publication.broadcast().create_datagrams(TRACK, info).unwrap();
 		let timestamp = |ms| timescale.map(|_| millis(ms));
 		// Nobody reads it yet, so nobody ever will.
 		assert_eq!(producer.append(timestamp(1), &b"early"[..]).unwrap(), 0);
@@ -132,7 +132,7 @@ async fn a_datagram_track_crosses_a_session() {
 #[kio::test]
 async fn an_aborted_datagram_track_ends_with_its_error() {
 	let chain = Chain::new(&["moq-lite-07-wip"]).await;
-	let producer = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+	let producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
 	let mut consumer = chain.consume(&producer, 0).await;
 	producer.abort(Error::App(7));
 	let err = recv(&mut consumer).await.unwrap_err();
@@ -144,7 +144,7 @@ async fn an_aborted_datagram_track_ends_with_its_error() {
 #[kio::test]
 async fn a_consumer_priority_reaches_the_publisher() {
 	let chain = Chain::with_latency(&["moq-lite-07-wip"], Duration::from_millis(10)).await;
-	let producer = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+	let producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
 	let mut consumer = chain.remote().await.datagrams(TRACK).unwrap();
 	kio::clock::timeout(TIMEOUT, datagram_priority(&producer, Some(0)))
 		.await
@@ -161,7 +161,7 @@ async fn a_consumer_priority_reaches_the_publisher() {
 #[kio::test]
 async fn the_last_consumer_leaving_ends_the_subscription() {
 	let chain = Chain::new(&["moq-lite-07-wip"]).await;
-	let producer = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+	let producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
 	let consumer = chain.consume(&producer, 0).await;
 	drop(consumer);
 	kio::clock::timeout(TIMEOUT, datagram_priority(&producer, None))
@@ -173,7 +173,7 @@ async fn the_last_consumer_leaving_ends_the_subscription() {
 #[kio::test]
 async fn a_relay_carries_a_datagram_track() {
 	let chain = Chain::new(&["moq-lite-07-wip", "moq-lite-07-wip"]).await;
-	let mut producer = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+	let mut producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
 	let mut consumer = chain.consume(&producer, 2).await;
 
 	assert_eq!(producer.append(millis(5), &b"relayed"[..]).unwrap(), 0);
@@ -198,9 +198,10 @@ async fn a_stream_track_and_a_datagram_track_share_a_name_independently() {
 	let chain = Chain::new(&["moq-lite-07-wip"]).await;
 	let mut track = chain
 		.publication
+		.broadcast()
 		.create_track(TRACK, moq_net::track::Info::default().with_timescale(Timescale::MILLI))
 		.unwrap();
-	let mut datagrams = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+	let mut datagrams = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
 	let remote = chain.remote().await;
 	let mut subscriber = kio::clock::timeout(TIMEOUT, remote.track(TRACK).unwrap().subscribe(None))
 		.await
@@ -241,7 +242,7 @@ async fn a_stream_track_and_a_datagram_track_share_a_name_independently() {
 #[kio::test]
 async fn a_lite07_stream_subscription_never_takes_datagrams() {
 	let chain = Chain::new(&["moq-lite-07-wip"]).await;
-	let _datagrams = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+	let _datagrams = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
 	let remote = chain.remote().await;
 	let result = kio::clock::timeout(TIMEOUT, remote.track(TRACK).unwrap().subscribe(None))
 		.await
@@ -262,7 +263,7 @@ async fn a_lite07_stream_subscription_never_takes_datagrams() {
 async fn lite05_and_lite06_map_a_datagram_track_onto_a_subscription() {
 	for version in ["moq-lite-05", "moq-lite-06"] {
 		let chain = Chain::new(&[version]).await;
-		let mut producer = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+		let mut producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
 		producer.append(millis(1), &b"early"[..]).unwrap();
 		// A priority other than the default, which the TRACK lookup ahead of the SUBSCRIBE
 		// holds while it is answered.
@@ -299,12 +300,13 @@ async fn lite05_and_lite06_carry_both_kinds_of_a_name() {
 		let chain = Chain::new(hops).await;
 		let mut track = chain
 			.publication
+			.broadcast()
 			.create_track(TRACK, moq_net::track::Info::default().with_timescale(Timescale::MILLI))
 			.unwrap();
 		// Another scale than the stream track's, whose TRACK_INFO declares the one both
 		// kinds are stamped in on the wire.
 		let info = datagram::Info::default().with_timescale(Timescale::MICRO);
-		let mut producer = chain.publication.create_datagrams(TRACK, info).unwrap();
+		let mut producer = chain.publication.broadcast().create_datagrams(TRACK, info).unwrap();
 		let remote = chain.remote().await;
 		let mut subscriber = kio::clock::timeout(TIMEOUT, remote.track(TRACK).unwrap().subscribe(None))
 			.await
@@ -353,9 +355,10 @@ async fn lite06_shared_datagrams_end_with_their_subscription() {
 	let chain = Chain::new(&["moq-lite-06"]).await;
 	let track = chain
 		.publication
+		.broadcast()
 		.create_track(TRACK, moq_net::track::Info::default().with_timescale(Timescale::MILLI))
 		.unwrap();
-	let producer = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+	let producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
 	let remote = chain.remote().await;
 	let _subscriber = kio::clock::timeout(TIMEOUT, remote.track(TRACK).unwrap().subscribe(None))
 		.await
@@ -382,7 +385,7 @@ async fn lite06_shared_datagrams_end_with_their_subscription() {
 async fn lite05_and_lite06_finish_a_datagram_track_as_a_stream_subscriber_expects() {
 	for version in ["moq-lite-05", "moq-lite-06"] {
 		let chain = Chain::new(&[version]).await;
-		let mut producer = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+		let mut producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
 		let remote = chain.remote().await;
 		let mut subscriber = kio::clock::timeout(TIMEOUT, remote.track(TRACK).unwrap().subscribe(None))
 			.await
@@ -415,7 +418,7 @@ async fn lite05_and_lite06_answer_a_datagram_request_beside_a_silent_stream_hand
 	for version in ["moq-lite-05", "moq-lite-06"] {
 		let chain = Chain::new(&[version]).await;
 		// Never polled: a stream lookup of the name waits on it for good.
-		let requests = chain.publication.requests();
+		let requests = chain.publication.broadcast().requests();
 		let mut handler = requests.datagrams();
 		let mut consumer = chain.remote().await.datagrams(TRACK).unwrap();
 		let request = kio::clock::timeout(TIMEOUT, handler.requested())
@@ -444,7 +447,7 @@ async fn lite05_and_lite06_answer_a_datagram_request_beside_a_silent_stream_hand
 #[kio::test]
 async fn lite06_asks_a_late_datagram_handler_once_the_stream_track_is_not_found() {
 	let chain = Chain::new(&["moq-lite-06"]).await;
-	let mut requests = chain.publication.requests();
+	let mut requests = chain.publication.broadcast().requests();
 	let mut consumer = chain.remote().await.datagrams(TRACK).unwrap();
 	let stream = kio::clock::timeout(TIMEOUT, requests.requested_track())
 		.await
@@ -474,7 +477,7 @@ async fn lite06_asks_a_late_datagram_handler_once_the_stream_track_is_not_found(
 #[kio::test]
 async fn an_old_subscriber_reaches_a_datagram_track_through_a_lite07_relay() {
 	let chain = Chain::new(&["moq-lite-07-wip", "moq-lite-06"]).await;
-	let mut producer = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+	let mut producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
 	let mut consumer = chain.consume(&producer, 2).await;
 	producer.append(millis(4), &b"relayed"[..]).unwrap();
 	let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
@@ -494,6 +497,7 @@ async fn an_old_subscriber_keeps_a_stream_track_across_mixed_hops() {
 		let chain = Chain::new(hops).await;
 		let mut track = chain
 			.publication
+			.broadcast()
 			.create_track(TRACK, moq_net::track::Info::default().with_timescale(Timescale::MILLI))
 			.unwrap();
 		let remote = chain.remote().await;
@@ -525,7 +529,7 @@ async fn a_datagram_track_needs_datagrams() {
 			// The second node subscribes through the session it accepted.
 			chain.pairs[0].server_transport.disable_datagrams();
 		}
-		let _producer = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+		let _producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
 		let mut consumer = chain.remote().await.datagrams(TRACK).unwrap();
 		let err = recv(&mut consumer).await.unwrap_err();
 		assert!(matches!(err, Error::Unsupported), "{version}: {err:?}");
@@ -539,9 +543,10 @@ async fn moq_transport_has_no_datagram_tracks() {
 	let chain = Chain::new(&["moq-transport-22"]).await;
 	let mut track = chain
 		.publication
+		.broadcast()
 		.create_track(TRACK, moq_net::track::Info::default().with_timescale(Timescale::MILLI))
 		.unwrap();
-	let _datagrams = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+	let _datagrams = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
 	let remote = chain.remote().await;
 	assert!(matches!(remote.datagrams(TRACK), Err(Error::NotFound)));
 

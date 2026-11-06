@@ -858,20 +858,20 @@ mod tests {
 			async move {
 				let mut ends = Vec::new();
 				for _ in 0..2 {
-					let instance = moq_net::Instance::random();
-					let route = moq_net::origin::Route::default().with_instance(instance.clone(), 0);
-					let broadcast = origin.publish("camera", route).unwrap();
+					let route = origin
+						.route("camera", moq_net::origin::RouteOptions::default())
+						.unwrap();
+					let broadcast = route.broadcast();
 					let mut catalog =
-						moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default())
-							.unwrap();
+						moq_mux::catalog::Producer::new(&mut broadcast.clone(), Default::default()).unwrap();
 					published_tx
-						.send((instance, broadcast.clone(), catalog.clone()))
+						.send((route.instance(), broadcast.clone(), catalog.clone()))
 						.unwrap();
 					// The first session to return ends the run; dropping the other's pull
 					// finishes its tracks.
 					let end = tokio::select! {
-						end = sd_client.pull(&broadcast, &catalog) => end,
-						end = hd_client.pull(&broadcast, &catalog) => end,
+						end = sd_client.pull(broadcast, &catalog) => end,
+						end = hd_client.pull(broadcast, &catalog) => end,
 					};
 					ends.push(end.unwrap());
 					catalog.finish().unwrap();

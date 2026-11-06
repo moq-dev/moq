@@ -174,10 +174,8 @@ quests that require them.
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
 - [Remove the moq-e2ee stub](/quest/m1/moq-e2ee-remove.md) - `rs/moq-e2ee` leaves the workspace and release config now that its final release points to moq-crypto
-- [crates.io trusts the workflow](/quest/m1/crates-trusted-publisher.md) - maintainer action: every published crate gets a trusted publisher for `release-rs.yml`
-- [Rust releases publish through OIDC](/quest/m1/release-rs-oidc.md) - release-plz publishes with trusted publishing and `CARGO_REGISTRY_TOKEN` is revoked
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
-- [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
+- [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - `rust-bench` fits its hour and gets A/A runs, and separate builds of unchanged code stop measuring as a slowdown, so every paired regression alert can be trusted
 - [moq-json's table/deltas bench measures the same work every iteration](/quest/m1/bench-json-deltas.md) - the `table/deltas/1%` cases stop flipping between snapshot and delta timings, so their trend history is usable
 - [Publish moq-bench to crates.io](/quest/m1/bench-publish.md) - `cargo install moq-bench` installs one binary, with the host sampler as `moq-bench host`, first as 0.1.0
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh

@@ -890,8 +890,8 @@ the table requires no new renderer or data branch. A source's `paired.json`, as
 
 ### Paired comparison
 
-Each Nightly's Rust bench groups (`rust-bench`, `rust-shared`, `rust-extra` and
-`rust-uring`) also build the previous scheduled Nightly's commit beside their
+Each Nightly's Rust bench groups (`rust-bench`, `rust-shared`, `rust-relay`,
+`rust-extra` and `rust-uring`) also build the previous scheduled Nightly's commit beside their
 own, on the same runner, so night-to-night runner variance drops out. Each
 built target runs once per side in the trend's quick mode, alternating which
 side goes first; the current side is the trend point. A case more than 10%
@@ -901,8 +901,21 @@ measurement, 30 samples). A case whose rounds are all slower with a median
 beyond 10% is a confirmed regression and fails its job after the upload, so the
 Alert workflow posts the failed Nightly. A target the base cannot build or run
 fails the job too, rather than passing uncompared; a bench target the base does
-not have yet is only reported as new. The threshold is a starting point until
-A/A runs on the hosted runner measure its noise floor.
+not have yet is only reported as new. `rust-shared` is report-only for now: its
+confirmed regressions show on the site but do not fail the job, until the
+build bias below is fixed.
+
+Runs on the hosted runner set these numbers. In four A/A runs of the
+`rust-shared`, `rust-extra` and `rust-uring` groups, and two of `rust-relay`,
+1 to 9% of cases crossed 10% either way in the screen, at most 17 of them
+slower in one group. The rounds rejected all but one:
+`wire_decode/padded/packets_64` at +12%, which read +2% in the next A/A run.
+A run whose base cut one case's work by a quarter failed with that case alone
+at +35%; its rounds also agreed, at medians of +9.3 to +9.7%, on `stats/tick`
+cases whose source was identical on both sides. Separate builds of the same
+source can measure up to 12% apart, so the threshold cannot go lower until
+that bias is fixed.
+`rust-bench` is not calibrated yet: its paired leg outlasts its hour.
 
 The table page shows tonight's comparison above the trend: confirmed
 regressions, targets not compared, cases faster in the screen, slowdowns the
@@ -922,6 +935,11 @@ Each run's evidence directory keeps both builds' estimates (`criterion` and
 `criterion-base`), the confirmation rounds under `confirm/`, and the run's
 `paired.json`. The base build streams its diagnostics and retains them in
 `base-build.log`, including when it fails.
+
+Each revision builds in its own Cargo target directory (`base` and `current`
+under `CARGO_TARGET_DIR`, default `target/bench`). For an A/B comparison, use
+`run.sh`'s `BENCH_BASE` mode or a target directory per source tree: two trees
+sharing one can leave a bench linked against the other tree's library.
 
 ### CodSpeed
 

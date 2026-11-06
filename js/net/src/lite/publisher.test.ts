@@ -32,9 +32,8 @@ import { Track as TrackMessage } from "./track.ts";
 import { ALPN_05, ALPN_06, ALPN_07_WIP, hasRanges, keepsSubscribeOpen, Version } from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
-	const broadcastPublication = origin.createBroadcast(path);
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(path);
+	const broadcast = broadcastRoute.broadcast;
 	return broadcast;
 }
 
@@ -116,9 +115,8 @@ test.each([
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-	const broadcastPublication = origin.createBroadcast(Path.from("cam"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce({ cost: 7n });
+	const broadcastRoute = origin.route(Path.from("cam"), { cost: 7n });
+	const broadcast = broadcastRoute.broadcast;
 
 	const written: Uint8Array[] = [];
 	const stream = new Stream({
@@ -136,7 +134,7 @@ test.each([
 	const initial = written.length;
 	expect(initial).toBeGreaterThan(0);
 
-	broadcastPublication.announce({ cost: 9n });
+	broadcastRoute.setCost(9n);
 	await settle();
 	expect(written.length > initial).toBe(sent);
 
@@ -734,7 +732,7 @@ async function servedSubscription(
 		broadcast = new BroadcastProducer();
 		const front = new Front();
 		front.serve(broadcast.consume());
-		const dynamic = origin.requestsRoute(Path.from("test"));
+		const dynamic = origin.routePrefix(Path.from("test"));
 		void (async () => {
 			for await (const request of dynamic.requested()) request.serve(front.consumer);
 		})();
@@ -2831,9 +2829,8 @@ test("lite draft-06: announces wait for the setup grant", async () => {
 		answered = resolve;
 	});
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), { grant, ready });
-	const broadcastPublication = origin.createBroadcast(Path.from("foo/bar"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("foo/bar"));
+	const broadcast = broadcastRoute.broadcast;
 
 	const written: Uint8Array[] = [];
 	const stream = new Stream({
@@ -2909,7 +2906,7 @@ test("lite draft-06: closing while announces wait for the setup grant does not h
 test("lite draft-06: a grant that shrinks while a TRACK resolves refuses it", async () => {
 	const pair = createMockTransportPair(ALPN_06);
 	const origin = new OriginProducer();
-	const handle = origin.requestsRoute(Path.from("live"));
+	const handle = origin.routePrefix(Path.from("live"));
 	const requests = handle.requested();
 	const grant = new Signal<Grant | undefined>(grantOf("live"));
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), {
@@ -2950,7 +2947,7 @@ test("lite draft-06: a grant that shrinks while a TRACK resolves refuses it", as
 test("lite draft-06: a grant that shrinks while TRACK_INFO is blocked resets it", async () => {
 	const pair = createMockTransportPair(ALPN_06);
 	const origin = new OriginProducer();
-	const handle = origin.requestsRoute(Path.from("live"));
+	const handle = origin.routePrefix(Path.from("live"));
 	const requests = handle.requested();
 	const grant = new Signal<Grant | undefined>(grantOf("live"));
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), {
@@ -3013,7 +3010,7 @@ test("lite draft-06: a grant that shrinks while TRACK_INFO is blocked resets it"
 test("lite draft-06: a grant that shrinks while the broadcast resolves resets the subscription", async () => {
 	const pair = createMockTransportPair(ALPN_06);
 	const origin = new OriginProducer();
-	const handle = origin.requestsRoute(Path.from("live"));
+	const handle = origin.routePrefix(Path.from("live"));
 	const requests = handle.requested();
 	const grant = new Signal<Grant | undefined>(grantOf("live"));
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), {

@@ -46,10 +46,10 @@ let mut config = moq_transcode::Config::default();
 // renditions are referenced through its parent.
 config.source = Some(moq_net::path::Relative::new("."));
 
-let output = origin.create_broadcast(format!("{path}/transcode.hang"))?;
-output.announce(Default::default())?;
+// Dropping the route withdraws the derivative, so hold it while the transcoder runs.
+let route = origin.route(format!("{path}/transcode.hang"), RouteOptions::default())?;
 
-moq_transcode::run(source, output, config).await?;
+moq_transcode::run(source, route.broadcast().clone(), config).await?;
 ```
 
 Rung sizes measure the coded frame's short side: a 1080x1920 source produces
