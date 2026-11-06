@@ -116,9 +116,7 @@ impl Answer {
 			let answer = node
 				.answer(self.link.clone(), self.prefix.clone())
 				.map_err(|_| Error::ProtocolViolation)?;
-			// Held before its first outputs, so an end it acks at once reaches the node.
-			self.stream = Some(answer);
-			while let Some(output) = self.stream.as_ref().and_then(node::Stream::try_output) {
+			while let Some(output) = answer.try_output() {
 				self.output(stream, output)?;
 			}
 			// Every route the peer holds has a floor before SYNCED; one the node has
@@ -134,6 +132,7 @@ impl Answer {
 				}
 			}
 			stream.writer.buffer(&Msg::Synced)?;
+			self.stream = Some(answer);
 			self.phase = Phase::Running;
 		}
 
@@ -254,15 +253,8 @@ impl Answer {
 				}
 				self.echoes.insert(sent.wire, id);
 			}
-			// The node coalesced the route's start away: the peer never held it, so nothing
-			// of it lingers, and the end is acked at once.
-			(None, None) => {
-				if let Some(answer) = &self.stream {
-					answer.echo(id);
-				}
-			}
-			// Held only follows a route the peer holds.
-			(Some(route::Reach::Held), None) => {}
+			// Held only follows a route the peer holds, and an end of one it does not is moot.
+			(Some(route::Reach::Held) | None, None) => {}
 		}
 		Ok(())
 	}

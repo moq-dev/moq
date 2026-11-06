@@ -99,24 +99,26 @@ impl std::fmt::Debug for Node {
 type Queues = HashMap<Key, kio::Shared<Outbox>>;
 
 /// What one stream has yet to read. Route changes and claim batches coalesce per
-/// identity, and a claim the reader was never sent leaves nothing when it ends, so a
-/// stream whose reader stalls holds one entry per identity, bounded by its claims,
-/// however much the node changes meanwhile.
+/// identity, and what the reader was never sent leaves nothing when it ends: a route
+/// started and ended unread is acked to the router at once, as the reader would. A
+/// stream whose reader stalls holds one entry per route it holds or will start,
+/// bounded by its claims, however much the node changes meanwhile.
 #[derive(Default)]
 struct Outbox {
-	/// Identities with route changes or claims pending, in the order they first queued.
-	order: VecDeque<Id>,
-	pending: HashMap<Id, Pending>,
+	/// Identities with route changes or claims pending, by when they first queued.
+	order: BTreeMap<u64, Id>,
+	next: u64,
+	pending: HashMap<Id, (u64, Pending)>,
 	/// Outputs to read in order: the other kinds, and a pending entry once taken.
 	ready: VecDeque<Output>,
-	/// The claims the reader was sent for each identity.
+	/// Each route the reader holds, and the claims it was sent under it.
 	delivered: HashMap<Id, BTreeSet<Path>>,
 }
 
 /// One identity's route changes and claim batches since the reader last took it.
 #[derive(Default)]
 struct Pending {
-	/// A ROUTE_END goes first, retiring every claim sent before.
+	/// A ROUTE_END goes first, ending the route the reader holds and its claims.
 	ended: bool,
 	/// The last finite reach since, which starts the route if the reader holds none.
 	finite: Option<Reach>,
@@ -135,35 +137,57 @@ impl Outbox {
 	}
 
 	/// The pending entry for `id`, queued behind the others when new.
-	fn entry<'a>(order: &mut VecDeque<Id>, pending: &'a mut HashMap<Id, Pending>, id: Id) -> &'a mut Pending {
-		pending.entry(id).or_insert_with(|| {
-			order.push_back(id);
-			Pending::default()
-		})
+	fn entry(&mut self, id: Id) -> &mut Pending {
+		let (order, next) = (&mut self.order, &mut self.next);
+		let (_, entry) = self.pending.entry(id).or_insert_with(|| {
+			let seq = *next;
+			*next += 1;
+			order.insert(seq, id);
+			(seq, Pending::default())
+		});
+		entry
 	}
 
-	fn push(&mut self, output: Output) {
+	/// Queue `output`. Returns the identity of a ROUTE_END the reader will never read,
+	/// since it never read the route it ends, for the caller to ack in its place.
+	fn push(&mut self, output: Output) -> Option<Id> {
 		match output {
-			Output::Route { id, reach } => {
-				let entry = Self::entry(&mut self.order, &mut self.pending, id);
-				match reach {
-					None => {
-						*entry = Pending {
-							ended: true,
-							..Pending::default()
-						}
-					}
-					Some(Reach::Held) => entry.held = true,
-					Some(finite) => {
-						entry.finite = Some(finite);
-						entry.held = false;
-					}
+			Output::Route { id, reach: None } => {
+				let holds = self.delivered.contains_key(&id);
+				let entry = self.entry(id);
+				// The reader holds the route once it reads what is pending: an end of
+				// that keeps any end before, an end of a start it never read is acked.
+				let ended = entry.ended;
+				let acked = !holds || ended;
+				*entry = Pending {
+					ended: holds,
+					..Pending::default()
+				};
+				if !holds && let Some((seq, _)) = self.pending.remove(&id) {
+					self.order.remove(&seq);
 				}
+				acked.then_some(id)
+			}
+			Output::Route {
+				id,
+				reach: Some(Reach::Held),
+			} => {
+				self.entry(id).held = true;
+				None
+			}
+			Output::Route {
+				id,
+				reach: Some(finite),
+			} => {
+				let entry = self.entry(id);
+				entry.finite = Some(finite);
+				entry.held = false;
+				None
 			}
 			Output::Batch { id, changes, floor } => {
-				let entry = Self::entry(&mut self.order, &mut self.pending, id);
+				let ended = self.entry(id).ended;
+				let (_, entry) = self.pending.get_mut(&id).expect("just queued");
 				let sent = self.delivered.get(&id);
-				let ended = entry.ended;
 				let (merged, last) = entry.batch.get_or_insert_default();
 				for (path, claim) in changes {
 					// The reader holds nothing here once the entry reaches it.
@@ -174,15 +198,19 @@ impl Outbox {
 					};
 				}
 				*last = floor;
+				None
 			}
-			other => self.ready.push_back(other),
+			other => {
+				self.ready.push_back(other);
+				None
+			}
 		}
 	}
 
 	fn pop(&mut self) -> Option<Output> {
 		if self.ready.is_empty() {
-			let id = self.order.pop_front()?;
-			let pending = self.pending.remove(&id).expect("every queued identity is pending");
+			let (_, id) = self.order.pop_first()?;
+			let (_, pending) = self.pending.remove(&id).expect("every queued identity is pending");
 			self.take(id, pending);
 		}
 		self.ready.pop_front()
@@ -195,6 +223,7 @@ impl Outbox {
 			self.ready.push_back(Output::Route { id, reach: None });
 		}
 		if let Some(reach) = pending.finite {
+			self.delivered.entry(id).or_default();
 			self.ready.push_back(Output::Route { id, reach: Some(reach) });
 		}
 		if pending.held {
@@ -204,17 +233,15 @@ impl Outbox {
 			});
 		}
 		if let Some((merged, floor)) = pending.batch {
-			let sent = self.delivered.entry(id).or_default();
 			// As the router orders a batch: what starts or changes, then what ends.
 			let (ends, starts): (Vec<_>, Vec<_>) = merged.into_iter().partition(|(_, claim)| claim.is_none());
-			for (path, _) in &starts {
-				sent.insert(path.clone());
-			}
-			for (path, _) in &ends {
-				sent.remove(path);
-			}
-			if sent.is_empty() {
-				self.delivered.remove(&id);
+			if let Some(sent) = self.delivered.get_mut(&id) {
+				for (path, _) in &starts {
+					sent.insert(path.clone());
+				}
+				for (path, _) in &ends {
+					sent.remove(path);
+				}
 			}
 			let changes = starts.into_iter().chain(ends).collect();
 			self.ready.push_back(Output::Batch { id, changes, floor });
@@ -481,23 +508,35 @@ impl Drop for Stream {
 	}
 }
 
-fn push(queues: &Queues, key: Key, output: Output) {
-	if let Some(queue) = queues.get(&key) {
-		queue.lock().push(output);
-	}
+/// Queue `output` for the stream `key`. Returns the identity of a ROUTE_END its
+/// reader will never read, whose echo the router is owed.
+fn push(queues: &Queues, key: Key, output: Output) -> Option<Id> {
+	queues.get(&key).and_then(|queue| queue.lock().push(output))
 }
 
 impl State {
 	/// Route the router's messages and shown claims to the streams.
 	fn flush(&mut self) {
-		for out in self.router.drain() {
-			let (key, output) = match out {
-				Out::Route { to, id, reach } => (to, Output::Route { id, reach }),
-				Out::Batch { to, id, changes, floor } => (to, Output::Batch { id, changes, floor }),
-				Out::Request { to, id, seqno } => (to, Output::Request { id, seqno }),
-				Out::Echo { to, id } => (to, Output::Echo { id }),
-			};
-			push(&self.queues, key, output);
+		loop {
+			let mut acked = Vec::new();
+			for out in self.router.drain() {
+				let (key, output) = match out {
+					Out::Route { to, id, reach } => (to, Output::Route { id, reach }),
+					Out::Batch { to, id, changes, floor } => (to, Output::Batch { id, changes, floor }),
+					Out::Request { to, id, seqno } => (to, Output::Request { id, seqno }),
+					Out::Echo { to, id } => (to, Output::Echo { id }),
+				};
+				if let Some(id) = push(&self.queues, key, output) {
+					acked.push((key, id));
+				}
+			}
+			if acked.is_empty() {
+				break;
+			}
+			// A ROUTE_END coalesced away before its reader read the route: no peer holds it.
+			for (key, id) in acked {
+				self.router.echo(key, id);
+			}
 		}
 		// The shown claims below are read whole; the events only say which changed.
 		self.router.events();
@@ -789,17 +828,13 @@ mod tests {
 		);
 	}
 
-	/// A route that starts and ends while the reader stalls reaches it as an end alone,
-	/// which the reader acks at once since it never held the route.
+	/// Routes that start and end while the reader stalls leave nothing for it, and the
+	/// router is acked at once as the reader would: churning fresh identities holds
+	/// nothing. A route the reader holds ends once, however often it restarted unread.
 	#[test]
-	fn a_route_started_and_ended_unread_is_an_end() {
+	fn routes_ended_unread_leave_nothing() {
 		let instance = Instance::random();
-		let origin = Node::new(1, 1);
 		let relay = Node::new(2, 2);
-		let receive = relay.receive(Link::default(), Path::empty()).unwrap();
-		let answer = origin.answer(Link::default(), Path::empty()).unwrap();
-		origin.own(p("live/x"), Some(claim(&instance, 0)), None);
-		pump(&answer, &receive);
 		let edge = relay
 			.answer(
 				Link {
@@ -809,13 +844,46 @@ mod tests {
 				Path::empty(),
 			)
 			.unwrap();
-		drop(receive);
-		let read: Vec<Output> = (outputs(&edge).into_iter())
-			.filter(|output| matches!(output, Output::Route { id: 1, .. } | Output::Batch { id: 1, .. }))
-			.collect();
-		assert_eq!(read, [Output::Route { id: 1, reach: None }]);
-		assert_eq!(relay.retained().echoes, 1, "the end awaits its echo");
-		edge.echo(1);
+		outputs(&edge);
+		let advert = |seqno| {
+			Some(Reach::Finite(Advert {
+				seqno,
+				metric: 0,
+				down_only: false,
+			}))
+		};
+		for origin in 10..110 {
+			let receive = relay.receive(Link::default(), Path::empty()).unwrap();
+			receive.route(origin, advert(0));
+			receive.batch(origin, vec![(p("live/x"), Some(claim(&instance, 0)))], Some(1));
+			drop(receive);
+		}
+		let of = |read: Vec<Output>, of: fn(Id) -> bool| -> Vec<Output> {
+			(read.into_iter())
+				.filter(|output| matches!(output, Output::Route { id, .. } | Output::Batch { id, .. } if of(*id)))
+				.collect()
+		};
+		let read = of(outputs(&edge), |id| id >= 10);
+		assert_eq!(read, [], "the churned routes");
+		assert_eq!(relay.retained().echoes, 0);
+
+		// The reader holds a route, which ends, restarts, and ends again unread.
+		let receive = relay.receive(Link::default(), Path::empty()).unwrap();
+		receive.route(7, advert(0));
+		receive.batch(7, vec![(p("live/x"), Some(claim(&instance, 0)))], Some(1));
+		assert_eq!(of(outputs(&edge), |id| id == 7).len(), 2, "the route and its batch");
+		receive.route(7, None);
+		receive.route(7, advert(1));
+		receive.batch(7, vec![(p("live/x"), Some(claim(&instance, 0)))], Some(2));
+		receive.route(7, None);
+		let read = of(outputs(&edge), |id| id == 7);
+		assert_eq!(read, [Output::Route { id: 7, reach: None }]);
+		assert_eq!(
+			relay.retained().echoes,
+			1,
+			"only the end the reader reads awaits its echo"
+		);
+		edge.echo(7);
 		assert_eq!(relay.retained().echoes, 0);
 	}
 
