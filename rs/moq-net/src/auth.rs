@@ -554,23 +554,18 @@ impl Permit {
 		covers(&self.granted) && covers(&self.limit)
 	}
 
-	/// The prefixes this confines a peer to, or `None` when it allows every path:
-	/// the heads of the grant's patterns, narrowed by the limit's.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	/// The prefixes this confines the peer to, or `None` when it confines nothing: the
+	/// heads of the scope's patterns, which grants this side issued. What the peer
+	/// granted this side limits only what this side does, so a client never scopes the
+	/// relay that answered its token.
+	#[cfg(feature = "async")]
 	pub(crate) fn regions(&self) -> Option<Vec<crate::Path>> {
-		if self.covers_subtree("") {
+		let limit = self.limit.as_ref()?;
+		let everything = moq_pattern::Pattern::subtree("").ok()?;
+		if limit.contains(&everything) {
 			return None;
 		}
-		let heads = |patterns: &Option<Patterns>| patterns.as_ref().map(crate::model::interest_prefixes);
-		let regions = match (heads(&self.granted), heads(&self.limit)) {
-			(Some(granted), Some(limit)) => granted
-				.iter()
-				.flat_map(|a| limit.iter().filter_map(move |b| narrower(a, b)))
-				.collect(),
-			(Some(regions), None) | (None, Some(regions)) => regions,
-			(None, None) => return None,
-		};
-		Some(regions)
+		Some(crate::model::interest_prefixes(limit))
 	}
 
 	/// Whether this allows everything `other` does, judged part by part, so a `false`
@@ -582,17 +577,6 @@ impl Permit {
 			(Some(this), Some(other)) => this.covers(other),
 		};
 		covers(&self.granted, &other.granted) && covers(&self.limit, &other.limit)
-	}
-}
-
-/// Whichever of two prefixes lies within the other, or `None` when they are disjoint.
-fn narrower(a: &crate::Path, b: &crate::Path) -> Option<crate::Path> {
-	if a.has_prefix(b) {
-		Some(a.clone())
-	} else if b.has_prefix(a) {
-		Some(b.clone())
-	} else {
-		None
 	}
 }
 
@@ -2927,6 +2911,30 @@ mod tests {
 			subscribe: patterns(subscribe),
 			expires: None,
 		}
+	}
+
+	/// Only a grant this side issued confines the peer's claims: a client scoped by the
+	/// relay that answered its token leaves the relay's own routes unscoped.
+	#[cfg(feature = "async")]
+	#[test]
+	fn regions_come_from_the_issued_scope_alone() {
+		let earned = Permit {
+			granted: Some(patterns(&[".socket"])),
+			limit: None,
+		};
+		assert_eq!(earned.regions(), None, "the peer's grant to us scoped the peer");
+
+		let issued = Permit {
+			granted: None,
+			limit: Some(patterns(&[".socket/bob"])),
+		};
+		assert_eq!(issued.regions(), Some(vec![crate::Path::from_static(".socket/bob")]));
+
+		let everything = Permit {
+			granted: Some(patterns(&[".socket"])),
+			limit: Some(patterns(&[""])),
+		};
+		assert_eq!(everything.regions(), None, "a root grant confines nothing");
 	}
 
 	/// A limit replaces the last one, narrower or wider, and applies to a version
