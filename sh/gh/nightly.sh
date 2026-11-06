@@ -54,11 +54,8 @@ if [[ -n $report ]]; then
     mkdir -p "$out/raw"
 fi
 
-failed=()
-run() {
-    echo "nightly: $*"
-    if ! "$@"; then failed+=("$*"); fi
-}
+# shellcheck source=sh/checks.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../checks.sh"
 
 criterion() {
     local label=$1
@@ -147,7 +144,7 @@ case "$1" in
             -p moq-quic -p moq-sock -p moq-tokio -p moq-transcode -p moq-hls --features moq-quic/fuzz \
             --bench protect --bench sign --bench codec --bench table --bench allocations --bench window \
             --bench producer --bench play_buffer --bench jitter --bench timeline --bench decode_clock --bench ts_programs --bench ts_video \
-            --bench bus --bench batches --bench parameter_sets --bench sent_packets --bench demux --bench receive_bursts --bench ladder --bench fanout --bench contributions
+            --bench bus --bench batches --bench parameter_sets --bench sent_packets --bench demux --bench receive_bursts --bench ladder --bench fanout --bench include
         criterion audio-capture -p moq-audio --features capture --bench capture
         # moq-auth's published release is its own dev-dependency, so `-p moq-auth` is ambiguous.
         # The concurrent cases' latency percentiles stay in the run's stdout.
@@ -161,7 +158,7 @@ case "$1" in
         done
         ;;
     js)
-        for benchmark in broadcasts requests fills fetch forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop refresh observed compression datagrams; do
+        for benchmark in broadcasts requests fills fetch forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop refresh observed compression datagrams socket; do
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench
@@ -202,10 +199,7 @@ case "$1" in
         ;;
 esac
 
-if ((${#failed[@]})); then
-    printf 'nightly: failed: %s\n' "${failed[@]}" >&2
-    exit 1
-fi
+finish
 
 if [[ -n $report ]]; then
     just gh benchmark-report "$report" "$out" "$out/report.json"

@@ -64,16 +64,14 @@ async fn main() -> anyhow::Result<()> {
 
 	match config.role {
 		Command::Publish => {
-			let broadcast = origin
-				.create_broadcast(&config.broadcast)
+			// Created hidden, so it is announced only once the track exists and a
+			// subscriber acting on the announcement finds it.
+			let route = origin
+				.route(&config.broadcast, moq_net::origin::RouteOptions::hidden())
 				.context("failed to create broadcast")?;
 			let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
-			let track = broadcast.create_track(track, info)?;
-			// Announced once the track exists, so a subscriber acting on the
-			// announcement finds it.
-			broadcast
-				.announce(Default::default())
-				.context("failed to announce broadcast")?;
+			let track = route.broadcast().create_track(track, info)?;
+			route.announce().context("failed to announce broadcast")?;
 			let clock = Publisher::new(track);
 
 			let reconnect = client.with_publisher(&origin).connect(url);
@@ -86,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
 			};
 
 			// End the broadcast on exit.
-			broadcast.close();
+			route.broadcast().close();
 			result
 		}
 		Command::Subscribe => {

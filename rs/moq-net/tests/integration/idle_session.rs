@@ -95,8 +95,8 @@ async fn busy_viewer_sees_the_estimate_move() {
 			..STATS
 		});
 		// Server work for this session: announcing a broadcast to the viewer.
-		let broadcast = origin.create_broadcast("live").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+		broadcast.announce().unwrap();
 
 		let moved = kio::clock::timeout(Duration::from_millis(1), probe.changed()).await;
 		assert_eq!(

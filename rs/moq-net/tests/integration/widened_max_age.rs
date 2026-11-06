@@ -78,9 +78,11 @@ impl Chain {
 		if let Some(relay) = &relay {
 			links.push(peer(version, relay, &viewer).await);
 		}
-		let broadcast = publisher.create_broadcast("live").unwrap();
-		let source = broadcast.create_track("video", timed()).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let source = broadcast.broadcast().create_track("video", timed()).unwrap();
+		broadcast.announce().unwrap();
 		Self {
 			source,
 			viewer,
@@ -307,8 +309,10 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 		.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("upstream")))
 		.session(moq_net::Path::from_static(""));
 	let _upstream = connect_mock(options).await;
-	let broadcast = publisher.create_broadcast("live").unwrap();
-	let source = broadcast.create_track("video", timed()).unwrap();
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let source = broadcast.broadcast().create_track("video", timed()).unwrap();
 	for sequence in 0..GROUPS {
 		let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
 		group
@@ -316,7 +320,7 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 			.unwrap();
 		group.finish().unwrap();
 	}
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let mut links = Vec::new();
 	let mut readers = Vec::new();
@@ -365,9 +369,11 @@ async fn a_legacy_viewer_beating_a_relay_copy_joins_at_the_live_edge() {
 		options.client_subscribe = Some(relay.clone());
 		let upstream = connect_mock(options).await;
 		let _downstream = peer(legacy.parse().unwrap(), &relay, &viewer).await;
-		let broadcast = publisher.create_broadcast("live").unwrap();
-		let source = broadcast.create_track("video", timed()).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let route = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let source = route.broadcast().create_track("video", timed()).unwrap();
+		route.announce().unwrap();
 		for sequence in 0..GROUPS {
 			let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
 			group

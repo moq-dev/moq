@@ -121,11 +121,16 @@ are expanding sooner or more often as the ring nears empty, or accepting the
 remaining re-stalls. Each departure from NetEq's constants is recorded with
 the replay numbers that justify it.
 
+- Port the shared specification rather than NetEq independently:
+  [moq-dev/moq#7856](https://github.com/moq-dev/moq/pull/7856) landed the
+  native stretch with `doc/concept/audio-jitter.md` specifying the shared
+  floating-point adaptation and `doc/concept/audio-jitter/stretch/corpus.json`
+  holding literal PCM vectors for both languages. Implement that spec and
+  pass those vectors, so both players stretch alike; record any departure
+  from it in the spec, not only here.
 - Put the stretch where `js/watch/src/audio/replay.ts` exercises it, such as
   `AudioRingBuffer`'s read path or a module the render worklet and the replay
-  share, so the replay rows measure the stretch and not a model of it. Port
-  the search with unit tests against NetEq's behaviour on synthetic periodic
-  and noise signals.
+  share, so the replay rows measure the stretch and not a model of it.
 - Accelerate replaces the skip-ahead when the ring sits above the high
   limit. A re-stall remains for a ring that empties despite the stretch, and a
   skip-ahead remains only above what fast accelerate can close.
@@ -173,4 +178,4 @@ latency, Bluetooth included, is part of the lip sync.
 
 - [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - re-measures the AAC browser budgets after the publisher change, no gate on this proof
 - [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md) - the native time-stretch sharing one NetEq algorithm and its test vectors with this one
-- [Watch worker](/quest/m2/watch-worker.md) - moves the worklet this stretch changes
+- [Watch worker](/quest/m3/watch-worker.md) - moves the worklet this stretch changes

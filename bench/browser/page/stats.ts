@@ -91,7 +91,7 @@ async function allocator(connection: Moq.Connection): Promise<Moq.Bandwidth.Hand
 
 /** A reservation on `handle` for a fresh, unannounced track: the allocator sees only its demand. */
 function reserve(handle: Moq.Bandwidth.Handle, origin: Moq.Origin.Producer, name: string) {
-	const publication = origin.createBroadcast(Moq.Path.from(name));
+	const publication = origin.route(Moq.Path.from(name), { hidden: true });
 	const track = publication.broadcast.createTrack("video", { priority: 1 });
 	const reservation = handle.reserve(track.demand(), 2_500_000);
 	cleanup.push(() => {
@@ -149,7 +149,7 @@ async function setup(config: Sampling): Promise<void> {
 /** Publishes one small-frame track and plays it on every connection. */
 async function receive(config: Sampling): Promise<void> {
 	const publishing = new Moq.Origin.Producer();
-	const publication = publishing.createBroadcast(Moq.Path.from(`${config.path}/live`));
+	const publication = publishing.route(Moq.Path.from(`${config.path}/live`), { hidden: true });
 	const track = publication.broadcast.createTrack("data", { timescale: Moq.Time.Timescale.MILLI });
 	publication.announce();
 	const publisher = await Moq.Connection.connect({
@@ -249,7 +249,7 @@ async function resume(config: Sampling & { cycles: number; idle_ms: number; limi
 	const waits: number[] = [];
 	for (let cycle = 0; cycle < config.cycles; cycle++) {
 		await new Promise((resolve) => setTimeout(resolve, config.idle_ms));
-		const publication = origin.createBroadcast(Moq.Path.from(`${config.path}/resume/${cycle}`));
+		const publication = origin.route(Moq.Path.from(`${config.path}/resume/${cycle}`), { hidden: true });
 		const track = publication.broadcast.createTrack("video", { priority: 1 });
 		const start = performance.now();
 		const reservation = handle.reserve(track.demand(), 2_500_000);

@@ -35,7 +35,7 @@ export function section<T extends z.ZodMiniType>(schema: T, map: string) {
 }
 
 /**
- * A catalog map keyed by ID (renditions, data tracks, contributions), refusing the catalog if any
+ * A catalog map keyed by ID (renditions, data tracks, includes), refusing the catalog if any
  * entry is malformed.
  *
  * Each entry must parse with `schema`; the issue names the entry. An unknown container
@@ -43,7 +43,7 @@ export function section<T extends z.ZodMiniType>(schema: T, map: string) {
  * `deserialize_renditions`.
  *
  * @param schema - one entry's schema.
- * @param kind - what an entry is, naming it in the issue (`rendition`, `contribution`).
+ * @param kind - what an entry is, naming it in the issue (`rendition`, `include`).
  */
 export function renditions<T extends z.ZodMiniType>(schema: T, kind = "rendition") {
 	return z.pipe(

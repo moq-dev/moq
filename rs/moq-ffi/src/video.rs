@@ -1231,6 +1231,9 @@ impl MoqVideoConsumer {
 /// is rejected here; a recognized one the native backends can't open is rejected when the decoder
 /// opens, which is still before the first frame.
 fn video_config(catalog_video: crate::media::MoqVideo) -> Result<hang::catalog::VideoConfig, MoqError> {
+	if !catalog_video.enabled {
+		return Err(MoqError::NotFound);
+	}
 	let codec = catalog_video
 		.codec
 		.parse::<hang::catalog::VideoCodec>()
@@ -1289,9 +1292,8 @@ impl MoqVideoConsumer {
 	/// refuses, returns [`MoqError::UnsupportedConfig`] before decoding starts. Also fails with [`MoqError::Unsupported`] when
 	/// [`surface`](MoqVideoDecoderOutput::surface) is set on a platform with no surface to expose.
 	///
-	/// A [disabled](crate::media::MoqVideo::enabled) rendition subscribes too, and decodes once its
-	/// publisher re-enables it. Don't pick one, but keep one already playing while no enabled
-	/// rendition is on offer.
+	/// A [disabled](crate::media::MoqVideo::enabled) rendition returns [`MoqError::NotFound`]: no
+	/// frames are coming.
 	///
 	/// `id` is the rendition's catalog key. Its [`track`](crate::media::MoqVideo::track), or `id`
 	/// when unset, is subscribed in the broadcast its
@@ -1371,12 +1373,13 @@ mod decode_tests {
 		);
 	}
 
-	/// A consumer holds a disabled rendition it already plays, so one converts like any other.
 	#[test]
-	fn video_config_accepts_disabled_renditions() {
+	fn video_config_refuses_disabled_renditions() {
 		let mut config = catalog_video("avc1.64001f");
 		config.enabled = false;
 		config.preference = -1;
+		assert!(matches!(video_config(config.clone()), Err(MoqError::NotFound)));
+		config.enabled = true;
 		assert_eq!(video_config(config).unwrap().preference, -1);
 	}
 

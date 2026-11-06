@@ -437,7 +437,7 @@ async function guardedPlayback(
 		republishMedia(path?: string): Moq.Track.Producer | undefined {
 			media.peek().close();
 			mediaProducer = path
-				? new Moq.Origin.Producer().createBroadcast(Moq.Path.from(path)).broadcast
+				? new Moq.Origin.Producer().route(Moq.Path.from(path), { hidden: true }).broadcast
 				: new Moq.Broadcast.Producer();
 			const track = live
 				? mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE })
@@ -580,28 +580,6 @@ it("keeps the clock when only the catalog's broadcast is republished", async () 
 		// The media is the same instance, so its timeline did not start over.
 		expect(playback.decoder.out.timestamp.peek()).toBe(Milli(10_000));
 		expect(reset).not.toHaveBeenCalled();
-	} finally {
-		playback.close();
-	}
-});
-
-it("holds the picture and decoder while the only rendition is disabled", async () => {
-	const playback = await guardedPlayback("legacy", [sample(10n, 1000)]);
-	try {
-		const held = playback.decoder.out.frame.peek();
-		expect(held).toBeDefined();
-		const codecs = playback.codecs;
-
-		const video = playback.catalog.peek().video?.renditions.video;
-		if (!video) throw new Error("missing rendition");
-		playback.catalog.set({ video: { renditions: { video: { ...video, enabled: false } } } });
-		await microtasks();
-		// The last picture before the disable stays up; the stock publisher makes it black.
-		expect(playback.decoder.out.frame.peek()).toBe(held);
-
-		playback.catalog.set({ video: { renditions: { video } } });
-		await microtasks();
-		expect(playback.codecs).toBe(codecs);
 	} finally {
 		playback.close();
 	}

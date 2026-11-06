@@ -22,9 +22,8 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18]) {
 			new Path.Patterns(["room/**", "other/**"].map(Path.Pattern.parse)),
 		);
 		const broadcasts = ["room/live", "room/.hidden", "other/live", "outside"].map((path) => {
-			const broadcastPublication = publish.createBroadcast(Path.from(path));
-			const broadcast = broadcastPublication.broadcast;
-			broadcastPublication.announce();
+			const broadcastRoute = publish.route(Path.from(path));
+			const broadcast = broadcastRoute.broadcast;
 			return broadcast;
 		});
 		const [client, server] = await Promise.all([

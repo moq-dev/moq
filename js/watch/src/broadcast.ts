@@ -191,7 +191,7 @@ export class Broadcast {
 	// strands the filtered copy on the previous contents.
 	readonly #raw = new Signal<Catalog.Root | undefined>(undefined);
 
-	// Set only on a contribution: its broadcast resolves through the parent catalog's references,
+	// Set only on an include: its broadcast resolves through the parent catalog's references,
 	// so the two never resolve one path independently.
 	readonly #resolve = new Signal<((effect: Effect) => Moq.Broadcast.Consumer | undefined) | undefined>(undefined);
 
@@ -530,31 +530,31 @@ export class Broadcast {
 	}
 
 	/**
-	 * Select a whole contribution, opening its catalog only while the caller owns this effect.
+	 * Select a whole include, opening its catalog only while the caller owns this effect.
 	 *
-	 * Listing a contribution in the catalog opens nothing; this is the demand. The child tracks
+	 * Listing an include in the catalog opens nothing; this is the demand. The child tracks
 	 * the catalog entry and resolves through this broadcast's `relativeBroadcast`, sharing
-	 * its request: while following announcements it follows the contribution's restarts, and
+	 * its request: while following announcements it follows the include's restarts, and
 	 * otherwise it requests the first instance once. With an `instance` it is offline while its
 	 * broadcast resolves another stream. An absent entry leaves the child disabled, and an
-	 * unavailable contribution reads as offline. Its rendition IDs stay local to the child, so
+	 * unavailable include reads as offline. Its rendition IDs stay local to the child, so
 	 * they never shadow this catalog's IDs.
 	 *
 	 * ```ts
 	 * effects.run((effect) => {
-	 *   const child = broadcast.contribution(effect, "alice");
+	 *   const child = broadcast.include(effect, "alice");
 	 *   const source = new Video.Source({ broadcast: child, supported: Video.Decoder.supported });
 	 *   effect.cleanup(() => source.close());
 	 *   // Feed source into a decoder as with any broadcast.
 	 * });
 	 * ```
 	 */
-	contribution(effect: Effect, id: string): Broadcast {
+	include(effect: Effect, id: string): Broadcast {
 		// Each computed notifies only on a real change, so an update that leaves the child's path
 		// alone (such as a new `instance`) never restarts its catalog.
 		const entry = effect.computed((run) => {
-			const contributions = run.get(this.out.catalog)?.contributions;
-			return contributions && Object.hasOwn(contributions, id) ? contributions[id] : undefined;
+			const include = run.get(this.out.catalog)?.include;
+			return include && Object.hasOwn(include, id) ? include[id] : undefined;
 		});
 		const name = effect.computed((run) => {
 			// An empty reference is present: it names the catalog's own broadcast.

@@ -762,6 +762,45 @@ fn an_unanswerable_request_stops() {
 	assert_eq!(sim.retained().pending, 0);
 }
 
+/// A request newer than the one pending raises it and is sent on again, so the
+/// newer requester is not left waiting on an answer that only meets the older
+/// one; a repeat of the pending Seqno, or an older one, is a duplicate.
+#[test]
+fn a_newer_request_raises_the_pending_one() {
+	let (up, a, b) = (0, 1, 2);
+	let mut relay = Router::<Node, Item>::new(9);
+	for neighbor in [up, a, b] {
+		relay.connect(neighbor, Link::default()).unwrap();
+	}
+	let advert = Advert {
+		seqno: 0,
+		metric: 1,
+		down_only: false,
+	};
+	relay.route(up, 7, Some(Reach::Finite(advert)));
+	relay.drain();
+
+	let requests = |relay: &mut Router<Node, Item>| -> Vec<(Node, Seqno)> {
+		relay
+			.drain()
+			.into_iter()
+			.filter_map(|out| match out {
+				Out::Request { to, id: 7, seqno } => Some((to, seqno)),
+				_ => None,
+			})
+			.collect()
+	};
+
+	relay.request(a, 7, 1);
+	assert_eq!(requests(&mut relay), [(up, 1)]);
+	relay.request(b, 7, 1);
+	assert_eq!(requests(&mut relay), [], "a duplicate");
+	relay.request(b, 7, 2);
+	assert_eq!(requests(&mut relay), [(up, 2)], "raised and sent again");
+	relay.request(a, 7, 1);
+	assert_eq!(requests(&mut relay), [], "older than the pending one");
+}
+
 /// Each message recomputes only the identity it names, so the work a message
 /// costs does not grow with how many other origins a node routes to.
 #[test]
@@ -813,7 +852,7 @@ fn an_overflowing_route_neither_certifies_nor_holds() {
 	};
 	let (near, far) = (1, 2);
 	let far_link = Link {
-		cost: MAX - 1,
+		cost: MAX,
 		..Link::default()
 	};
 

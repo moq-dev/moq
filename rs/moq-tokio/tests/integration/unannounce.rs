@@ -10,14 +10,14 @@ use moq_tokio::moq_net;
 /// publisher's demand to go unused.
 async fn release(unannounce: bool, settle: bool) {
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.publish("a/b", moq_net::origin::Route::default()).unwrap();
-	let track = broadcast.create_track("t", None).unwrap();
+	let broadcast = origin.route("a/b", moq_net::origin::RouteOptions::default()).unwrap();
+	let track = broadcast.broadcast().create_track("t", None).unwrap();
 	let consumer = origin.consume().request("a/b", None).await.unwrap();
 	let sub = consumer.track("t").unwrap().subscribe(None).await.unwrap();
 	crate::wanted(track.demand()).await.unwrap();
 
 	if unannounce {
-		broadcast.unannounce();
+		broadcast.withdraw();
 		if settle {
 			kio::clock::sleep(Duration::from_secs(1)).await;
 		}

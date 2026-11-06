@@ -19,7 +19,7 @@ import {
 	unauthorized,
 } from "../error.ts";
 import type * as group from "../group.ts";
-import type { Hop, Route } from "../hop.ts";
+import type { Hop, RouteInfo } from "../hop.ts";
 import { finalSequence, firstEligible, hiddenBelow, hooks, presented, type ReadGroupFrame } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -79,7 +79,7 @@ const RETRY_BASE = 100;
 const RETRY_MAX = 5000;
 
 /** Cluster parameters for one snapshot: the advertised hops, then our own id last. */
-function clusterFor(base: Cluster.Advert | undefined, route: Route): Cluster.Advert | undefined {
+function clusterFor(base: Cluster.Advert | undefined, route: RouteInfo): Cluster.Advert | undefined {
 	if (!base) return undefined;
 	const self = base.hops.at(-1);
 	if (self === undefined) return undefined;
@@ -485,7 +485,7 @@ export class Publisher {
 		const subscribe = (source: broadcast.Consumer) => {
 			// A range that resolves without the live edge has a fixed start, which is no join:
 			// bound the subscription before subscribing so the refresh ratio never judges it.
-			const fixed = subscribeRange(msg, {}, version);
+			const fixed = filterRange(msg.filter, {});
 			// Parked past a bounded window's end: the peer reads this stream's end as the track's.
 			return hooks.parked(
 				source.track(msg.trackName).subscribe({
@@ -685,7 +685,7 @@ export class Publisher {
 				msg.fill && msg.forward && Filter.isDraft20(version)
 					? fillRange(msg.fill, msg.filter, edge.largest)
 					: undefined;
-			const requested = subscribeRange(msg, edge, version);
+			const requested = filterRange(msg.filter, edge);
 			// A copy, since an update moves the cursor in place and must not move the bounds too.
 			const range = { ...afterFill(requested, fill, edge) };
 			// What the subscriber asked for, which only a narrowing changes: the fill's split
@@ -1819,7 +1819,7 @@ export class Publisher {
 	/**
 	 * The extension parameters an advertisement of `route` carries.
 	 */
-	#params(route: Route): AdvertParams {
+	#params(route: RouteInfo): AdvertParams {
 		return { cluster: clusterFor(this.#advert, route) };
 	}
 
@@ -1828,7 +1828,7 @@ export class Publisher {
 	 * is logged and skipped: a peer that wants none of this rejects each one and stays
 	 * connected.
 	 */
-	async #advertise(path: Path.Valid, requests: Requests, route: Route): Promise<Answer> {
+	async #advertise(path: Path.Valid, requests: Requests, route: RouteInfo): Promise<Answer> {
 		const params = this.#params(route);
 		const auth = this.#carry(route.auth);
 		const requestId = await this.#session.nextRequestId();
@@ -1840,7 +1840,7 @@ export class Publisher {
 		// leaving this one namespace unadvertised.
 		let request: RequestStream | undefined;
 		try {
-			const deadline = new Deadline();
+			const deadline = new Deadline(Milli(ADVERTISE_TIMEOUT_MS));
 			const answer = await deadline.wait(
 				(async (): Promise<Answer> => {
 					const opened = await RequestStream.open(this.#session, deadline, { quic: this.#quic });
@@ -2869,31 +2869,13 @@ function liveEdge(track: TrackSubscriber): LiveEdge {
 	};
 }
 
-/**
- * Resolve a SUBSCRIBE's Location Filter into the range to serve.
- *
- * Draft-22 is honored whole. Earlier drafts honor only Largest Object, which a joining
- * FETCH pairs with to recover the group's head: their Filter Type tag has absolute forms
- * we never served, and starting to interpret them now would change what an existing peer
- * receives.
- */
-function subscribeRange(msg: Subscribe, edge: LiveEdge, version: IetfVersion): ServeRange {
-	if (!Filter.isDraft20(version) && msg.filter.kind !== "nextObject") {
-		if (msg.filter.kind !== "unfiltered") {
-			console.warn(`filter not supported before draft-22, ignoring: ${msg.filter.kind}`);
-		}
-		return {};
-	}
-
-	return filterRange(msg.filter, edge);
-}
-
 /** The Locations a single Location Filter selects, resolved against the live edge. */
 function filterRange(filter: Filter.Filter, edge: LiveEdge): ServeRange {
 	switch (filter.kind) {
 		// No restriction. moq-lite starts at the beginning of the latest group, which is the
 		// join point it is built around; a subscription passes objects as they are published,
-		// so an absent filter is not a request to replay history.
+		// so an absent filter is not a request to replay history. A subscriber that wants the
+		// track from its start fetches the groups before the live one.
 		case "unfiltered":
 			return {};
 		// `{Largest.Group, Largest.Object + 1}`. Everything below it, including the already

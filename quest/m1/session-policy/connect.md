@@ -24,7 +24,7 @@ reconnect moves too, not just the deadline.
   `connection.rs` tests to the moq-net machines on kio's simulator, so the same
   timings are asserted without tokio.
 - This also gives a future io_uring client
-  ([uring-cluster-dial](/quest/m3/uring-cluster-dial.md)) the policy to reuse
+  ([uring-cluster-dial](/quest/m5/uring-cluster-dial.md)) the policy to reuse
   rather than copy.
 
 Public API: breaking in moq-net's `Client` and new reconnect types; moq-tokio's
