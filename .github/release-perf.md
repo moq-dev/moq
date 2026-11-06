@@ -25,13 +25,15 @@ They are not aligned to individual cells and do not establish that each
 measurement window was quiet. All snapshots are retained in the evidence.
 The CPU sign holds in every pair despite that changing load.
 
-Reproduce in a fresh project shell (the clean environment avoids inheriting
-obsolete variables from a session opened before the shell fix):
+Reproduce from the recorded main source in a detached checkout. The clean
+environment avoids inheriting obsolete variables from a session opened before
+the shell fix; the recorded revision already includes that fix:
 
 ```bash
+git switch --detach 56d7989c78a107e0cb72487c43006495005c27a3
 nix develop --ignore-environment --keep HOME --keep USER --keep XDG_RUNTIME_DIR \
   --command quest gate bash -c \
-  'BENCH_ARTIFACTS="$PWD/.tmp/bench" BENCH_RUNTIME_ROUNDS=7 just bench-relay origin/release quic'
+  'BENCH_ARTIFACTS="$PWD/.tmp/bench" BENCH_RUNTIME_ROUNDS=7 just bench-relay dc3478a863d8aab42afaae8d40c3b84794ae4a4b quic'
 ```
 
 The first attempts failed before measurements because `MOQ_QUEST` reached
