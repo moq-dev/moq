@@ -513,6 +513,12 @@ confirm_criterion() {
     : >"$RUN/confirm.tsv"
     while IFS=$'\t' read -r key benchmark; do
         index=$((index + 1))
+        # compare.py ignores every case of an unavailable target, so its rounds would only spend the budget.
+        if [[ -f $RUN/paired-unavailable.tsv ]] &&
+            awk -F'\t' -v target="$key" '$1 == target { found = 1 } END { exit !found }' "$RUN/paired-unavailable.tsv"; then
+            printf '%s\t%s\n' "$key" "$benchmark" >>"$RUN/confirm.tsv"
+            continue
+        fi
         for ((round = 1; round <= ROUNDS; round++)); do
             local order=(base current)
             if ((round % 2 == 0)); then order=(current base); fi
