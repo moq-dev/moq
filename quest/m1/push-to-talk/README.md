@@ -43,7 +43,7 @@ Decided 2026-10-28 (maintainer):
   same idea special-cased.
 
 The epic's own work: the acceptance proof `just test push-to-talk` (22
-presses, default Opus, 300 ms delay). A listener's unmute pays no catalog
+presses, 60 ms Opus, 300 ms delay). A listener's unmute pays no catalog
 round trip and no resubscribe, and every frame of each utterance is encoded,
 sent, received, and decoded from its first frame, with no catalog flip and no
 underrun or stall across the presses.

@@ -129,11 +129,10 @@ just test push-to-talk
 ```
 
 This separate, roughly nine-minute run drives the shipped publish and watch elements in one Chromium
-page. The publisher keeps its default Opus at 20 ms frames. The listener holds a fixed 300 ms delay,
-since `"auto"` still underruns on push-to-talk's capture spread and the run fails on any underrun.
-A constant tone loops through the fake microphone. A release mutes the publisher, which sends nothing until the next press while
-its rendition stays enabled, so the listener keeps its subscription and plays comfort noise in
-between. After warmup and a mute, it measures 22 presses,
+page. A constant tone loops through the fake microphone, encoded as 128 kbit/s Opus with 60 ms
+frames. A release mutes the publisher, which sends nothing until the next press while its rendition
+stays enabled, so the listener keeps its subscription and plays comfort noise in between. The
+listener holds a fixed 300 ms delay. After warmup and a mute, it measures 22 presses,
 alternating two and three seconds: the first after the warmup's five-second mute, seven with no
 intervening wait, seven after five seconds, and seven after sixty seconds. Both elements reach a
 local relay directly over WebTransport, with no shaping, loss, or queueing, so every millisecond
