@@ -125,7 +125,7 @@ Public API: none. Wire: none.
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
 - [Test PulseAudio servers stay off the desktop's D-Bus](/quest/m0/test-flakes-2/pulse-dbus.md) - concurrent media runs on one desktop never collide on `org.PulseAudio1`
 - [The Python audio playout-delay test reads its frames](/quest/m0/test-flakes-2/audio-playout-delay.md) - `test_audio_consumer_reports_its_playout_delay` stops timing out on its first read in the merge queue
-- [io_uring tests fit the shared locked-memory budget](/quest/m0/test-flakes-2/uring-memlock.md) - concurrent moq-relay and moq-uring test runs stop exhausting the user's `RLIMIT_MEMLOCK`, fixed at the cause rather than by raising the limit
+- [The dev host's locked-memory limit fits parallel sessions](/quest/m0/test-flakes-2/uring-memlock.md) - the maintainer's host raises the user's `RLIMIT_MEMLOCK`, which Node.js rings from parallel agent sessions fill before io_uring tests start
 - [The FFI concurrent-ready test wakes both calls under load](/quest/m0/test-flakes-2/ffi-concurrent-ready.md) - `concurrent_ready_calls_all_wake` stops stalling its reader drain under load and is re-enabled
 - [The datagram-end close test survives load](/quest/m0/test-flakes-2/datagram-end-close.md) - `a session close right after a datagram track's end keeps the end` stops aborting the track under load and is re-enabled
 - [lite-05 copy fill checks idleness without wall time](/quest/m0/test-flakes-2/copy-fill-idle.md) - the copy-fill test proves no FETCH went out on the `Manual` clock, not a 200 ms real-time wait
