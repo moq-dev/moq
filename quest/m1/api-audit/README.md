@@ -75,7 +75,7 @@ Rejected in planning:
 ## Required
 
 - [Routes are the origin API](/quest/m1/api-audit/route/README.md) - apps announce exact or prefix routes through one `Route` handle that owns its broadcast and carries an `instance`, prefix routes can serve a held broadcast, and readers get a listing plus `follow`
-- [Encoders take a join interval](/quest/m1/api-audit/join-interval.md) - video's `keyframeInterval`/`Gop`, audio's `groupDuration`, and the C hints become one `joinInterval` time in JS, Rust, FFI, and C
+- [Encoders take a join](/quest/m1/api-audit/join.md) - video's `keyframeInterval`/`Gop`, audio's `groupDuration`, and the C hints become one `join` time in JS, Rust, FFI, and C
 
 ## Related
 
