@@ -37,9 +37,34 @@ struct ConsumeCatalog {
 	audio_codec: Vec<String>,
 	video_codec: Vec<String>,
 
+	/// Each rendition's broadcast reference and instance as strings, for the same reason.
+	audio_ref: Vec<Reference>,
+	video_ref: Vec<Reference>,
+
 	/// Section names and their JSON, serialized on the heap so the section iterator
 	/// and direct-lookup APIs can hand C borrowed pointers into stable storage.
 	sections: Vec<(String, String)>,
+}
+
+/// A rendition's reference, rendered once so C can borrow it.
+#[derive(Default)]
+struct Reference {
+	broadcast: Option<String>,
+	instance: Option<String>,
+}
+
+impl Reference {
+	fn new(broadcast: &Option<moq_net::path::Relative>, instance: &Option<moq_net::Instance>) -> Self {
+		Self {
+			broadcast: broadcast.as_ref().map(ToString::to_string),
+			instance: instance.as_ref().map(ToString::to_string),
+		}
+	}
+}
+
+/// Borrow an optional string as a C pointer and length, NULL when absent.
+fn lend(value: Option<&String>) -> (*const c_char, usize) {
+	value.map_or((std::ptr::null(), 0), |value| (value.as_ptr().cast(), value.len()))
 }
 
 impl ConsumeCatalog {
@@ -378,6 +403,19 @@ impl Consume {
 				.map(|config| config.codec.to_string())
 				.collect();
 
+			let audio_ref = update
+				.audio
+				.renditions
+				.values()
+				.map(|config| Reference::new(&config.broadcast, &config.instance))
+				.collect();
+			let video_ref = update
+				.video
+				.renditions
+				.values()
+				.map(|config| Reference::new(&config.broadcast, &config.instance))
+				.collect();
+
 			// Serialize the untyped application sections to owned strings so the
 			// C section APIs can borrow stable pointers from the snapshot.
 			let sections = update
@@ -392,6 +430,8 @@ impl Consume {
 				catalog: update,
 				audio_codec,
 				video_codec,
+				audio_ref,
+				video_ref,
 				sections,
 			};
 
@@ -412,6 +452,10 @@ impl Consume {
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
 		let codec = consume.video_codec.get(index).ok_or(Error::NoIndex)?;
+		let reference = consume.video_ref.get(index).ok_or(Error::NoIndex)?;
+		let (broadcast, broadcast_len) = lend(reference.broadcast.as_ref());
+		let (instance, instance_len) = lend(reference.instance.as_ref());
+		let (track, track_len) = lend(config.track.as_ref());
 
 		*dst = moq_video_config {
 			preference: config.preference,
@@ -436,6 +480,12 @@ impl Consume {
 			label_len: config.label.as_ref().map_or(0, String::len),
 			warmup_us: micros(config.warmup),
 			has_warmup: config.warmup.is_some(),
+			broadcast,
+			broadcast_len,
+			instance,
+			instance_len,
+			track,
+			track_len,
 		};
 
 		Ok(())
@@ -482,6 +532,10 @@ impl Consume {
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
 		let codec = consume.audio_codec.get(index).ok_or(Error::NoIndex)?;
+		let reference = consume.audio_ref.get(index).ok_or(Error::NoIndex)?;
+		let (broadcast, broadcast_len) = lend(reference.broadcast.as_ref());
+		let (instance, instance_len) = lend(reference.instance.as_ref());
+		let (track, track_len) = lend(config.track.as_ref());
 
 		*dst = moq_audio_config {
 			name: rendition.as_str().as_ptr() as *const c_char,
@@ -507,6 +561,12 @@ impl Consume {
 			has_jitter: config.jitter.is_some(),
 			warmup_us: micros(config.warmup),
 			has_warmup: config.warmup.is_some(),
+			broadcast,
+			broadcast_len,
+			instance,
+			instance_len,
+			track,
+			track_len,
 		};
 
 		Ok(())
@@ -1330,6 +1390,8 @@ mod supervision_tests {
 				catalog,
 				audio_codec: Vec::new(),
 				video_codec: Vec::new(),
+				audio_ref: Vec::new(),
+				video_ref: Vec::new(),
 				sections: Vec::new(),
 			})
 			.unwrap();
@@ -1364,6 +1426,8 @@ mod rendition_tests {
 				catalog,
 				audio_codec: Vec::new(),
 				video_codec: Vec::new(),
+				audio_ref: Vec::new(),
+				video_ref: Vec::new(),
 				sections: Vec::new(),
 			})
 			.unwrap();
@@ -1512,6 +1576,8 @@ mod tests {
 						catalog,
 						audio_codec: Vec::new(),
 						video_codec: Vec::new(),
+						audio_ref: Vec::new(),
+						video_ref: Vec::new(),
 						sections: Vec::new(),
 					})
 					.unwrap();

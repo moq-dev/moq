@@ -444,6 +444,19 @@ pub struct moq_video_config {
 	pub warmup_us: u64,
 	/// Whether `warmup_us` is present; absent means none.
 	pub has_warmup: bool,
+	/// The broadcast holding the rendition's track, relative to the catalog's own broadcast
+	/// (`./source`), or NULL when it is the catalog's broadcast.
+	pub broadcast: *const c_char,
+	/// Length of `broadcast` in bytes.
+	pub broadcast_len: usize,
+	/// The stream instance `broadcast` must resolve to, or NULL for whichever resolves first.
+	pub instance: *const c_char,
+	/// Length of `instance` in bytes.
+	pub instance_len: usize,
+	/// The track's name in its broadcast, or NULL when it is `name`.
+	pub track: *const c_char,
+	/// Length of `track` in bytes.
+	pub track_len: usize,
 }
 
 /// Catalog properties shared by every video rendition.
@@ -515,6 +528,19 @@ pub struct moq_audio_config {
 	pub warmup_us: u64,
 	/// Whether `warmup_us` is present; absent means none.
 	pub has_warmup: bool,
+	/// The broadcast holding the rendition's track, relative to the catalog's own broadcast
+	/// (`./source`), or NULL when it is the catalog's broadcast.
+	pub broadcast: *const c_char,
+	/// Length of `broadcast` in bytes.
+	pub broadcast_len: usize,
+	/// The stream instance `broadcast` must resolve to, or NULL for whichever resolves first.
+	pub instance: *const c_char,
+	/// Length of `instance` in bytes.
+	pub instance_len: usize,
+	/// The track's name in its broadcast, or NULL when it is `name`.
+	pub track: *const c_char,
+	/// Length of `track` in bytes.
+	pub track_len: usize,
 }
 
 /// Options for a JSON snapshot producer (lossy latest-value mode).
@@ -3109,9 +3135,41 @@ pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const
 		video.coded_height = (config.coded_height > 0).then_some(config.coded_height);
 		video.container = unsafe { parse_container(&config.container)? };
 		video.warmup = config.has_warmup.then(|| std::time::Duration::from_micros(config.warmup_us));
+		(video.broadcast, video.instance, video.track) = unsafe {
+			parse_reference(
+				(config.broadcast, config.broadcast_len),
+				(config.instance, config.instance_len),
+				(config.track, config.track_len),
+			)?
+		};
 
 		State::lock().publish.video_config(broadcast, name, video)
 	})
+}
+
+/// A rendition's reference fields, as [moq_video_config] and [moq_audio_config] carry them.
+///
+/// # Safety
+/// - Each non-NULL pointer must be valid for its length.
+unsafe fn parse_reference(
+	broadcast: (*const c_char, usize),
+	instance: (*const c_char, usize),
+	track: (*const c_char, usize),
+) -> Result<(Option<moq_net::path::Relative>, Option<moq_net::Instance>, Option<String>), Error> {
+	let broadcast = unsafe { ffi::parse_str_optional(broadcast.0, broadcast.1)? }
+		.filter(|broadcast| !broadcast.is_empty())
+		.map(moq_net::path::Relative::new)
+		.transpose()
+		.map_err(|err| Error::InvalidConfig(err.to_string()))?;
+	let instance = unsafe { ffi::parse_str_optional(instance.0, instance.1)? }
+		.filter(|instance| !instance.is_empty())
+		.map(moq_net::Instance::from_str)
+		.transpose()
+		.map_err(|err| Error::InvalidConfig(err.to_string()))?;
+	let track = unsafe { ffi::parse_str_optional(track.0, track.1)? }
+		.filter(|track| !track.is_empty())
+		.map(str::to_string);
+	Ok((broadcast, instance, track))
 }
 
 /// Add or replace an audio rendition in a broadcast's catalog.
@@ -3157,6 +3215,13 @@ pub unsafe extern "C" fn moq_publish_audio_config(broadcast: u32, config: *const
 		}
 		audio.jitter = config.has_jitter.then(|| std::time::Duration::from_micros(config.jitter_us));
 		audio.warmup = config.has_warmup.then(|| std::time::Duration::from_micros(config.warmup_us));
+		(audio.broadcast, audio.instance, audio.track) = unsafe {
+			parse_reference(
+				(config.broadcast, config.broadcast_len),
+				(config.instance, config.instance_len),
+				(config.track, config.track_len),
+			)?
+		};
 
 		State::lock().publish.audio_config(broadcast, name, audio)
 	})
