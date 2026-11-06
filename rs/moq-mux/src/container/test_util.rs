@@ -317,7 +317,7 @@ pub(crate) fn common_offset(
 
 /// An origin at `hop`, its driver spawned.
 pub(crate) fn origin(hop: u64) -> moq_net::origin::Producer {
-	let config = moq_net::origin::Config::new(moq_net::Hop::new(hop).unwrap());
+	let config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	let (producer, driver) = moq_net::origin::Producer::new(config);
 	tokio::spawn(moq_net::time::run(driver));
 	producer

@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use moq_net::{Hop, Version, origin};
+use moq_net::{Version, origin};
 
 use crate::support;
 use support::harness::{MockConnectOptions, connect_mock};
@@ -16,7 +16,7 @@ use support::harness::{MockConnectOptions, connect_mock};
 const SETTLE: Duration = Duration::from_secs(1);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }

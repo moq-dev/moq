@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use moq_net::{Error, Hop, Pattern, Patterns, Version, origin};
+use moq_net::{Error, Pattern, Patterns, Version, origin};
 
 use crate::support;
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
@@ -24,7 +24,7 @@ const LINGERED: Duration = Duration::from_secs(3);
 const ANNOUNCE: u8 = 1;
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }

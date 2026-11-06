@@ -172,7 +172,7 @@ async fn embed_and_stop(mut config: Config) {
 		relay.config().quic.max_streams,
 		Some(moq_tokio::quic::DEFAULT_MAX_STREAMS)
 	);
-	assert_eq!(relay.cluster().id(), relay.cluster().origin.hop().id());
+	assert_eq!(relay.cluster().id(), relay.cluster().origin.hop().get());
 
 	// The application handles: in-process workers publish into the origin the
 	// QUIC sessions see, and the trigger stops the owner from any task. Both

@@ -6,7 +6,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Timestamp, Version, group, origin, track};
+use moq_net::{Timestamp, Version, group, origin, track};
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,
@@ -22,7 +22,8 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Build an origin producer, spawning its driver on the ambient runtime.
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }

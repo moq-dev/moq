@@ -101,8 +101,8 @@ did not move.
 - History: compare at least five nights by commit, now that it exists. Nightly
   stores every series on `gh-pages` (`bench/costs`, `bench/rates`); re-runs add
   duplicate points for one commit. Read the paired comparison on the table
-  page instead of raw history, once
-  [its calibration](/quest/m1/bench-ci.md) lands. The first JS series (841) appeared on
+  page instead of raw history, calibrated in
+  [Paired comparison](/bench/README.md#paired-comparison). The first JS series (841) appeared on
   Oct 22, and Dart still needs a recheck against the bindings history.
 - The per-group write cost above, then the resume reader: at 16 single-frame
   groups `track::Subscriber::poll_group` is 44% of the Annex B export

@@ -2,12 +2,12 @@
 
 use std::time::Duration;
 
-use moq_net::{Hop, Timestamp, Version, broadcast, origin, track};
+use moq_net::{Timestamp, Version, broadcast, origin, track};
 
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	origin
 }

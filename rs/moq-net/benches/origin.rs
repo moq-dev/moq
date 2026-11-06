@@ -50,7 +50,7 @@ use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Hop, Hops, Instance, Pattern, Patterns, Timestamp, auth, broadcast, kio, origin, track};
+use moq_net::{Instance, Pattern, Patterns, Timestamp, auth, broadcast, kio, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -266,13 +266,7 @@ fn bench_withdraw_wave(c: &mut Criterion) {
 	group.sample_size(10);
 	let instance: Instance = "01900000-0000-7000-8000-000000000001".parse().unwrap();
 	// One instance, so the winner moving between the peers is an update, which is held.
-	let route = |chain: &[u64]| {
-		let mut hops = Hops::new();
-		for &hop in chain {
-			hops.push(Hop::new(hop).unwrap()).unwrap();
-		}
-		moq_net::fuzz::route_info(hops, 0, Some((instance.clone(), 0)))
-	};
+	let route = |chain: &[u64]| moq_net::fuzz::route_info(chain.iter().copied(), 0, Some((instance.clone(), 0)));
 	for broadcasts in [1_000, 10_000] {
 		for subscribers in [1, 20, 100] {
 			let id = BenchmarkId::from_parameter(format!("{broadcasts}b_{subscribers}s"));
@@ -344,33 +338,34 @@ fn bench_route_churn(c: &mut Criterion) {
 	for broadcasts in [1_000, 10_000] {
 		for subscribers in [1, 20, 100] {
 			let id = BenchmarkId::from_parameter(format!("{broadcasts}b_{subscribers}s"));
+			// Criterion calls the closure once per sample, so the fixture is built on the first call and kept.
+			let mut fixture = None;
 			group.bench_function(id, |b| {
-				let (producer, _driver) = origin::Producer::new(origin::Config::default());
-				let _routes: Vec<_> = (0..broadcasts)
-					.map(|i| {
-						moq_net::fuzz::requests_route(
-							&producer,
-							moq_net::Path::new(&format!("room/{i}")).unwrap(),
-							peer_route(1, 1),
-						)
-						.unwrap()
-					})
-					.collect();
-				let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().routes()).collect();
-				for cursor in &mut cursors {
-					while cursor.try_next().is_some() {}
-				}
+				let (cursors, _routes, producer, _driver) = fixture.get_or_insert_with(|| {
+					let (producer, driver) = origin::Producer::new(origin::Config::default());
+					let routes: Vec<_> = (0..broadcasts)
+						.map(|i| {
+							moq_net::fuzz::requests_route(
+								&producer,
+								moq_net::Path::new(&format!("room/{i}")).unwrap(),
+								peer_route(1, 1),
+							)
+							.unwrap()
+						})
+						.collect();
+					let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().routes()).collect();
+					for cursor in &mut cursors {
+						while cursor.try_next().is_some() {}
+					}
+					(cursors, routes, producer, driver)
+				});
 				b.iter(|| {
 					drop(
-						moq_net::fuzz::requests_route(
-							&producer,
-							moq_net::Path::from_static("room/0"),
-							peer_route(2, 5),
-						)
-						.unwrap(),
+						moq_net::fuzz::requests_route(producer, moq_net::Path::from_static("room/0"), peer_route(2, 5))
+							.unwrap(),
 					)
 				});
-				for cursor in &mut cursors {
+				for cursor in cursors.iter_mut() {
 					assert!(cursor.try_next().is_none(), "the winner is unchanged");
 				}
 			});
@@ -623,9 +618,7 @@ fn peer_route(peer: u64, cost: u64) -> origin::RouteInfo {
 
 /// [`peer_route`], serving `instance` when it names one.
 fn peer_instance(peer: u64, cost: u64, instance: Option<Instance>) -> origin::RouteInfo {
-	let mut hops = Hops::new();
-	hops.push(Hop::new(peer).expect("peer id")).expect("hop chain");
-	moq_net::fuzz::route_info(hops, cost, instance.map(|instance| (instance, 0)))
+	moq_net::fuzz::route_info([peer], cost, instance.map(|instance| (instance, 0)))
 }
 
 /// An announcement of an unrelated prefix with `fronts` remote fronts parked on
@@ -845,24 +838,30 @@ fn bench_request(c: &mut Criterion) {
 fn bench_retire(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/retire");
 	for fronts in [100, 1_000, 10_000] {
+		// Criterion calls the closure once per sample, so the fixture is built on the first call and kept.
+		let mut fixture = None;
 		group.bench_function(BenchmarkId::from_parameter(format!("{fronts}f")), |b| {
-			let mut fleet = fanout(fronts + 1, 0);
-			let waiter = kio::Waiter::noop();
-			let held: Vec<_> = (0..fronts)
-				.map(|i| fleet.consumer.request(format!("room/{i}"), None))
-				.collect();
-			fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
-			let _held: Vec<_> = held
-				.into_iter()
-				.map(|pending| pending.now_or_never().expect("resolved once driven").expect("local"))
-				.collect();
+			let (_held, fleet, waiter) = fixture.get_or_insert_with(|| {
+				let mut fleet = fanout(fronts + 1, 0);
+				let waiter = kio::Waiter::noop();
+				let held: Vec<_> = (0..fronts)
+					.map(|i| fleet.consumer.request(format!("room/{i}"), None))
+					.collect();
+				fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+				let held: Vec<_> = held
+					.into_iter()
+					.map(|pending| pending.now_or_never().expect("resolved once driven").expect("local"))
+					.collect();
+				(held, fleet, waiter)
+			});
+			let waiter = &*waiter;
 			let path = format!("room/{fronts}");
 			b.iter(|| {
 				let pending = fleet.consumer.request(&path, None);
-				fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+				fleet.driver.poll(moq_net::time::Instant::now(), waiter).unwrap();
 				drop(pending.now_or_never().expect("resolved once driven").expect("local"));
 				// Nothing holds it and a local source keeps no track, so it retires here.
-				fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+				fleet.driver.poll(moq_net::time::Instant::now(), waiter).unwrap();
 			});
 		});
 	}
@@ -903,7 +902,7 @@ impl Pool {
 }
 
 fn pool(members: usize, paths: usize, cursors: usize) -> Pool {
-	let (producer, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+	let (producer, mut driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 	let consumer = producer.consume();
 	let cursors = (0..cursors).map(|_| consumer.routes()).collect();
 	let members: Vec<_> = (0..members)
@@ -1157,7 +1156,7 @@ fn watched_path(index: usize) -> String {
 
 async fn watching(routes: usize, subscribers: usize) -> Watching {
 	let spawn = |hop| {
-		let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+		let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 		support::harness::spawn(driver);
 		producer
 	};

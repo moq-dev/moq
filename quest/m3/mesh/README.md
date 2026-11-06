@@ -52,7 +52,7 @@ Decided 2026-10-25 with the maintainer (planning interview), still in force:
   reaching an ID is subscribing there. There is no separate directory.
 - The token is the binding: enrollment proves the device key, then the
   coordinator issues a grant to publish `mesh/<id>/**` and subscribe
-  `mesh/**`, plus publish on its own [socket](/quest/m1/socket/README.md)
+  `mesh/**`, plus publish on its own [socket](/doc/concept/socket.md)
   endpoint, `.socket/<id>`, so it can dial and accept under its own id
   (amended 2026-11-01, 2026-11-03 when sockets became endpoints, and
   2026-11-04 when the segment became `.socket`). Relays need no new check. Membership is the coordinator's

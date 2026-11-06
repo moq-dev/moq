@@ -94,15 +94,16 @@ class Command:
     `drive`, `estop`, `reset_estop`, and `respawn` arrive on the wire;
     `driver_left` and `watchdog_expired` are synthesized locally.
 
-    `driver_id` is the driver's path segment, which `status` echoes. `instance`
-    names the run that sent it, one per publisher instance serving the path: the
-    same id under another instance is another run of the driver, so it is a
-    different driver for the lease.
+    `driver_id` is the driver's socket endpoint id, which `status` echoes.
+    `session` is the socket session that carried it, one per lease the player
+    takes: the same id on another session is a different driver for the lease.
+    The session id is the secret that keeps a session to its two ends, so it
+    never leaves this process.
     """
 
     kind: CommandKind
     driver_id: str = ""
-    instance: str | None = None
+    session: str | None = None
     sequence: int = 0
     state: DriveState | None = None
     timestamps: tuple[TimestampEntry, ...] = ()
@@ -114,19 +115,19 @@ class Drive:
     The first driver to send a command owns the truck until it disconnects or
     its command lease expires. Other drivers cannot silently steal control.
 
-    The lease binds to the driver's broadcast path and the run serving it, so a
-    driver whose broadcast ends or restarts loses it.
-    It is still cooperative, not enforced: the holder's id is echoed on the
-    public `status` track, so anyone allowed to publish there can announce at
-    that path under another instance, which ends the holder's broadcast and frees
-    the lease for the newcomer. This stops two honest drivers colliding; it
-    does not stop a deliberate takeover.
+    The lease binds to the driver's socket session, so a driver whose session
+    ends loses it, and another session claiming the same driver id is another
+    driver. It is still cooperative, not enforced: anonymous drivers share one
+    grant, so anyone can announce an endpoint under the holder's id, which the
+    public `status` track echoes. Their own sessions never continue the
+    holder's lease, but they can disrupt it: a relay may route the truck's
+    accept of the holder's next session to the impostor instead. This stops two
+    honest drivers colliding; it does not stop a deliberate disruption.
     """
 
     def __init__(self) -> None:
         self._driver: str | None = None
-        self._instance: str | None = None
-        self._sequence: int | None = None
+        self._session: str | None = None
         self._state = DriveState.stopped()
         self._takeover_pedals: tuple[float, float] | None = None
         self._estopped = False
@@ -135,10 +136,6 @@ class Drive:
     @property
     def driver(self) -> str | None:
         return self._driver
-
-    @property
-    def sequence(self) -> int | None:
-        return self._sequence
 
     @property
     def state(self) -> DriveState:
@@ -153,8 +150,8 @@ class Drive:
         return self._estop_by
 
     def holds(self, command: Command) -> bool:
-        """Whether `command` comes from the run of the driver holding the lease."""
-        return self._driver is not None and (self._driver, self._instance) == (command.driver_id, command.instance)
+        """Whether `command` comes from the session holding the lease."""
+        return self._driver is not None and (self._driver, self._session) == (command.driver_id, command.session)
 
     def accepted(self) -> Accepted:
         return Accepted(state=self._state, estopped=self._estopped)
@@ -166,8 +163,7 @@ class Drive:
                 return False
             claiming = self._driver is None
             self._driver = command.driver_id
-            self._instance = command.instance
-            self._sequence = command.sequence
+            self._session = command.session
             state = (command.state or DriveState.stopped()).sanitized()
             pedals = (state.throttle, state.brake)
             if claiming:
@@ -188,11 +184,7 @@ class Drive:
             # latches and brings the truck to a stop, but it must never transfer
             # the driving lease to its sender. Otherwise a bystander could
             # e-stop, then reset_estop, and drive off with a lease they never
-            # legitimately claimed. Only refresh the acknowledgement sequence
-            # when the sender already holds the lease, so a bystander's e-stop
-            # cannot masquerade as the authoritative command either.
-            if self.holds(command):
-                self._sequence = command.sequence
+            # legitimately claimed.
             self._state = DriveState.stopped()
             self._estopped = True
             if not was_estopped:
@@ -202,9 +194,7 @@ class Drive:
             if not self._estopped:
                 return False
             # Reset clears the global latch without claiming or transferring the
-            # lease. Only the holder's sequence is authoritative for that lease.
-            if self.holds(command):
-                self._sequence = command.sequence
+            # lease.
             self._state = DriveState.stopped()
             self._estopped = False
             self._estop_by = None
@@ -228,7 +218,6 @@ class Drive:
 
     def _clear_driver(self) -> None:
         self._driver = None
-        self._instance = None
-        self._sequence = None
+        self._session = None
         self._state = DriveState.stopped()
         self._takeover_pedals = None

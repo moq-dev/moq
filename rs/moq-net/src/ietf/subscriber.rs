@@ -8276,7 +8276,7 @@ mod tests {
 
 	/// The same, for a subscriber whose own SETUP declared MoQ Solicit only if `ours`.
 	fn unsolicited_is_a_violation_to(ours: bool, solicit: Option<bool>, version: Version) -> bool {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer {
@@ -8345,7 +8345,7 @@ mod tests {
 	/// so sending it asks for a prefix that matches nothing there.
 	#[kio::test]
 	async fn a_rooted_subscriber_asks_for_its_scope_not_its_root() {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let scope = crate::Patterns::from(crate::Pattern::subtree("cam").unwrap());
 		let scoped = origin.scope("rootns", &scope).expect("scope the origin");
 
@@ -8404,7 +8404,7 @@ mod tests {
 			let mut subscriber = Subscriber::new(
 				crate::time::sim(),
 				crate::driver::Transport::new(session.clone()),
-				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				Control::new(false),
 				None,
 				peer::PeerSetup::declared(peer::Peer::default()),
@@ -8485,7 +8485,7 @@ mod tests {
 	async fn a_rooted_subscriber_mounts_a_reply_under_its_root_once() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let scope = crate::Patterns::from(crate::Pattern::subtree("cam").unwrap());
 		let scoped = origin.scope("rootns", &scope).expect("scope the origin");
@@ -8583,7 +8583,7 @@ mod tests {
 		}
 		let script = log.writes.lock().unwrap().clone();
 
-		let origin = crate::origin::Config::new(us).produce();
+		let origin = crate::origin::Config::from(us).produce();
 		let session = crate::lite::test_transport::ScriptedSession::new(script);
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let peer_setup = peer::PeerSetup::default();
@@ -8655,7 +8655,7 @@ mod tests {
 				.unwrap();
 			let response = log.writes.lock().unwrap().clone();
 
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let session = crate::lite::test_transport::ScriptedSession::new(response);
 			let (tasks, _task_set) = crate::util::TaskSet::new();
 			let peer_setup = peer::PeerSetup::default();
@@ -8740,7 +8740,7 @@ mod tests {
 		active_count: bool,
 		session: crate::lite::test_transport::ScriptedSession,
 	) -> (Subscriber, crate::origin::Consumer, crate::model::Snapshot) {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let snapshot = origin.snapshot("");
 		let (tasks, _task_set) = crate::util::TaskSet::new();
@@ -8932,7 +8932,7 @@ mod tests {
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(crate::lite::test_transport::SinkSession::new(Default::default())),
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			Control::new(false),
 			None,
 			peer::PeerSetup::default(),
@@ -9213,7 +9213,7 @@ mod tests {
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			Control::new(false),
 			None,
 			peer::PeerSetup::declared(peer::Peer::default()),
@@ -9276,7 +9276,7 @@ mod tests {
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			Control::new(false),
 			None,
 			peer::PeerSetup::default(),
@@ -9385,7 +9385,7 @@ mod tests {
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			Control::new(false),
 			None,
 			peer::PeerSetup::declared(peer::Peer::default()),
@@ -9453,7 +9453,7 @@ mod tests {
 			let mut subscriber = Subscriber::new(
 				crate::time::sim(),
 				crate::driver::Transport::new(session.clone()),
-				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				Control::new(false),
 				None,
 				peer::PeerSetup::declared(peer::Peer::default()),
@@ -9514,7 +9514,7 @@ mod tests {
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			Control::new(false),
 			None,
 			peer::PeerSetup::declared(peer::Peer::default()),
@@ -9597,7 +9597,7 @@ mod tests {
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			control.clone(),
 			None,
 			peer::PeerSetup::declared(peer::Peer::default()),
@@ -9856,7 +9856,7 @@ mod tests {
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			Control::new(false),
 			None,
 			peer::PeerSetup::declared(peer::Peer::default()),
@@ -9969,7 +9969,7 @@ mod tests {
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			Control::new(false),
 			None,
 			peer::PeerSetup::declared(peer::Peer::default()),
@@ -10077,7 +10077,7 @@ mod tests {
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			Control::new(false),
 			None,
 			peer::PeerSetup::declared(peer::Peer::default()),
@@ -10207,7 +10207,7 @@ mod tests {
 					let mut subscriber = Subscriber::new(
 						crate::time::sim(),
 						crate::driver::Transport::new(session.clone()),
-						crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce(),
+						crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce(),
 						Control::new(false),
 						None,
 						peer::PeerSetup::declared(peer::Peer::default()),
@@ -10230,7 +10230,7 @@ mod tests {
 		}
 
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let source = origin.route("broadcast", Default::default()).unwrap();
 			let resolved = origin.consume().request("broadcast", None).await.unwrap();
 			let peer = Arc::new(Peer {
@@ -10273,7 +10273,7 @@ mod tests {
 					let mut subscriber = Subscriber::new(
 						crate::time::sim(),
 						crate::driver::Transport::new(session.clone()),
-						crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+						crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 						Control::new(false),
 						None,
 						peer::PeerSetup::declared(peer::Peer::default()),
@@ -10360,7 +10360,7 @@ mod tests {
 			let mut subscriber = Subscriber::new(
 				crate::time::sim(),
 				crate::driver::Transport::new(session.clone()),
-				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				Control::new(false),
 				None,
 				peer::PeerSetup::declared(peer::Peer::default()),
@@ -10453,7 +10453,7 @@ mod tests {
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			Control::new(false),
 			None,
 			peer::PeerSetup::declared(peer::Peer::default()),
@@ -10557,7 +10557,7 @@ mod tests {
 	async fn namespaces_past_the_cap_close_the_session() {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let log = session.log.clone();
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
@@ -10614,7 +10614,7 @@ mod tests {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let assigned = crate::Hop::new(777).unwrap();
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
@@ -10658,7 +10658,7 @@ mod tests {
 		let peer = crate::Hop::new(777).unwrap();
 		let self_origin = crate::Hop::new(1).unwrap();
 
-		let origin = crate::origin::Config::new(self_origin).produce();
+		let origin = crate::origin::Config::from(self_origin).produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.routes();
 
@@ -10714,7 +10714,7 @@ mod tests {
 		let peer = crate::Hop::new(777).unwrap();
 		let self_origin = crate::Hop::new(1).unwrap();
 
-		let origin = crate::origin::Config::new(self_origin).produce();
+		let origin = crate::origin::Config::from(self_origin).produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.routes();
 
@@ -10764,7 +10764,7 @@ mod tests {
 
 	fn cluster_subscriber(self_origin: crate::Hop) -> (Subscriber, crate::origin::Producer) {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
-		let origin = crate::origin::Config::new(self_origin).produce();
+		let origin = crate::origin::Config::from(self_origin).produce();
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		// The set only drains announce-serving tasks; the tests here drive the model
 		// directly, so leaking it keeps the handles alive without a spawner.
@@ -10897,7 +10897,7 @@ mod tests {
 	async fn a_lost_namespace_stream_closes_the_broadcast() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		// The peer answers, advertises one namespace, then the stream ends without ever
@@ -10951,7 +10951,7 @@ mod tests {
 	async fn a_re_sent_namespace_reprices_in_place() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		let script = {
@@ -11062,7 +11062,7 @@ mod tests {
 	async fn publish_namespace_requester_fin_keeps_the_route() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for reset in [false, true] {
-				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+				let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 				let consumer = origin.consume();
 				let session = if reset {
 					crate::lite::test_transport::ScriptedSession::per_stream_reset(vec![vec![]])
@@ -11120,7 +11120,7 @@ mod tests {
 	async fn a_broken_publish_namespace_stream_closes_the_broadcast() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		// The peer sends something that does not belong on this stream, ending it with an
@@ -11521,7 +11521,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 		let session = crate::lite::test_transport::ScriptedSession::new(script);
 		let log = session.log.clone();
-		let (origin, driver) = crate::origin::Producer::new(crate::origin::Config::new(self_origin));
+		let (origin, driver) = crate::origin::Producer::new(crate::origin::Config::from(self_origin));
 		let consumer = origin.consume();
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		// The tests drive the loop directly, so nothing spawns; leaking keeps the
@@ -11724,7 +11724,7 @@ mod tests {
 		let script = publish_namespace_updates(&[looped, clean.clone()]).await;
 		let session = crate::lite::test_transport::ScriptedSession::new(script);
 		let log = session.log.clone();
-		let (origin, driver) = crate::origin::Producer::new(crate::origin::Config::new(self_origin));
+		let (origin, driver) = crate::origin::Producer::new(crate::origin::Config::from(self_origin));
 		std::mem::forget(driver);
 		let consumer = origin.consume();
 		let (tasks, task_set) = crate::util::TaskSet::new();
@@ -12101,7 +12101,7 @@ mod tests {
 			// An open gate, so the rejection actually reaches the wire.
 			let gate = kio::Producer::new(true);
 			let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let consumer = origin.consume();
 			let (tasks, task_set) = crate::util::TaskSet::new();
 			std::mem::forget(task_set);
@@ -12211,7 +12211,7 @@ mod tests {
 		origin::Consumer,
 		S,
 	) {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		std::mem::forget(task_set);
@@ -13663,7 +13663,7 @@ mod tests {
 		origin::Consumer,
 		crate::lite::test_transport::ScriptedSession,
 	) {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		std::mem::forget(task_set);
@@ -14583,7 +14583,7 @@ mod stitch_tests {
 		/// track.
 		fn with_timescale(fill: Fill, scripts: Vec<Vec<u8>>, timescale: Option<Timescale>) -> Self {
 			let session = ScriptedSession::per_stream_eof(scripts);
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let tasks = TaskSet::new();
 
 			let subscriber = Subscriber::new(
@@ -14958,7 +14958,7 @@ mod stitch_tests {
 		hop: bool,
 	) -> (Vec<u8>, crate::lite::test_transport::Log) {
 		use crate::lite::test_transport::Sent;
-		let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
 		let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let track = broadcast
 			.broadcast()
@@ -17149,7 +17149,7 @@ mod stitch_tests {
 			let subscriber = Subscriber::new(
 				crate::time::sim(),
 				crate::driver::Transport::new(session.clone()),
-				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				Control::new(false),
 				None,
 				peer::PeerSetup::default(),
@@ -17333,7 +17333,7 @@ mod joining_fetch_tests {
 			let subscriber = Subscriber::new(
 				crate::time::sim(),
 				crate::driver::Transport::new(session.clone()),
-				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				control,
 				None,
 				peer::PeerSetup::declared(peer::Peer::default()),
@@ -17404,7 +17404,7 @@ mod joining_fetch_tests {
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
 			session,
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			Control::new(false),
 			None,
 			peer::PeerSetup::default(),
@@ -17443,7 +17443,7 @@ mod joining_fetch_tests {
 			let mut subscriber = Subscriber::new(
 				crate::time::sim(),
 				crate::driver::Transport::new(session.clone()),
-				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				Control::new(false),
 				None,
 				peer::PeerSetup::declared(peer::Peer::default()),
@@ -18231,7 +18231,7 @@ mod joining_fetch_tests {
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			Control::new(false),
 			None,
 			peer::PeerSetup::default(),
@@ -18479,7 +18479,7 @@ mod joining_fetch_tests {
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			Control::new(false),
 			None,
 			peer::PeerSetup::default(),
@@ -18543,7 +18543,7 @@ mod joining_fetch_tests {
 				let subscriber = Subscriber::new(
 					crate::time::sim(),
 					crate::driver::Transport::new(session.clone()),
-					crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+					crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 					Control::new(false),
 					None,
 					peer::PeerSetup::default(),
@@ -18673,7 +18673,7 @@ mod joining_fetch_tests {
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			Control::new(false),
 			None,
 			peer::PeerSetup::default(),
@@ -18799,7 +18799,7 @@ mod new_group_tests {
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			Control::new(false),
 			None,
 			peer::PeerSetup::declared(peer::Peer::default()),
@@ -19337,7 +19337,7 @@ mod track_property_tests {
 		let mut subscriber = Subscriber::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			Control::new(false),
 			None,
 			peer::PeerSetup::declared(peer::Peer::default()),
@@ -19531,7 +19531,7 @@ mod full_track_name_tests {
 			let subscriber = Subscriber::new(
 				crate::time::sim(),
 				crate::driver::Transport::new(session.clone()),
-				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				Control::new(false),
 				None,
 				peer::PeerSetup::declared(peer::Peer::default()),

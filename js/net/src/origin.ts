@@ -16,7 +16,7 @@ import * as announce from "./announced.ts";
 import type { Credential } from "./auth.ts";
 import * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
-import { type Cost, RouteInfo, routesEqual } from "./hop.ts";
+import { type Cost, routesEqual, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
 import {
 	compareRouteCandidates,
@@ -44,8 +44,7 @@ import {
 	wireOf,
 } from "./wire.ts";
 
-export type { Cost, Hop, RouteInfo } from "./hop.ts";
-export { HopSchema, isAnonymous } from "./hop.ts";
+export type { Cost, RouteInfo } from "./hop.ts";
 
 /** The rooted permissions shared by a handle and every route it inserts. */
 class Scope {
@@ -286,7 +285,7 @@ interface RouteEntry {
 	readonly scope: Scope;
 	/** The paths the entry may serve beneath its prefix, when its producer is scoped. */
 	readonly claim?: Path.Patterns;
-	readonly route: Signal<RouteInfo>;
+	readonly route: Signal<WireRoute>;
 	readonly originated: boolean;
 	readonly server?: ServeState;
 }
@@ -318,7 +317,7 @@ function preferredEntry(
 	prefix: Path.Valid,
 	entries: readonly RouteEntry[],
 	skip?: (entry: RouteEntry) => boolean,
-	others: readonly RouteInfo[] = [],
+	others: readonly WireRoute[] = [],
 ): RouteEntry | undefined {
 	const eligible = entries.filter((entry) => !skip?.(entry));
 	// `others` compete at the prefix too, such as a broadcast announced here at the path.
@@ -545,7 +544,7 @@ class OriginState {
 	// directions echo-free.
 	created: Map<Path.Valid, Created> | undefined = new Map();
 	local = new VersionedSignal<Map<Path.Valid, broadcast.Consumer> | undefined>(new Map());
-	advertisedLocal = new VersionedSignal<Map<Path.Valid, RouteInfo> | undefined>(new Map());
+	advertisedLocal = new VersionedSignal<Map<Path.Valid, WireRoute> | undefined>(new Map());
 	routes = new VersionedSignal<Map<Path.Valid, RouteEntry[]> | undefined>(new Map());
 
 	#snapshotVersion = "";
@@ -586,7 +585,7 @@ class OriginState {
 		for (const [path, front] of this.local.peek() ?? []) {
 			const local = {
 				identity: front,
-				route: advertised?.get(path) ?? RouteInfo.default,
+				route: advertised?.get(path) ?? WireRoute.default,
 				exact: true,
 			};
 			const list = out.get(path);
@@ -1453,7 +1452,7 @@ export class Producer implements Table {
 		const created = this.#state.created;
 		if (!created) throw new Error("origin is closed");
 		// Normalized first, so a bad cost throws before anything is created.
-		let info = RouteInfo.normalize({
+		let info = WireRoute.normalize({
 			instance: options.instance ?? Instance.random(),
 			epoch: options.instance === undefined ? 0n : options.epoch,
 			cost: options.cost,
@@ -1523,7 +1522,7 @@ export class Producer implements Table {
 			}
 			answerJob(job);
 		};
-		const change = (next: RouteInfo) => {
+		const change = (next: WireRoute) => {
 			if (producer.closed.peek() !== undefined) throw new Error("broadcast is closed");
 			if (!this.#state.created) throw new Error("origin is closed");
 			info = next;
@@ -1536,12 +1535,12 @@ export class Producer implements Table {
 			announce,
 			withdraw: retract,
 			announced,
-			change: (update) => change(RouteInfo.normalize({ ...info, ...update })),
+			change: (update) => change(WireRoute.normalize({ ...info, ...update })),
 			requested: async function* () {},
 			close: release,
 			info: () => (announced() ? this.#state.advertisedLocal.peek()?.get(path) : undefined),
 			update: (next) => {
-				const named = RouteInfo.normalize(next);
+				const named = WireRoute.normalize(next);
 				info = named.instance === undefined ? { ...named, instance: info.instance, epoch: info.epoch } : named;
 				announce();
 			},
@@ -1550,7 +1549,7 @@ export class Producer implements Table {
 		return route;
 	}
 
-	#advertiseExact(path: Path.Valid, front: broadcast.Consumer, route: RouteInfo): void {
+	#advertiseExact(path: Path.Valid, front: broadcast.Consumer, route: WireRoute): void {
 		if (!this.#state.local.peek()) throw new Error("origin is closed");
 		if (this.#state.created?.get(path)?.front !== front) throw new Error("broadcast is closed");
 		// Both maps move together, so every reader sees the broadcast and its route at once.
@@ -1596,7 +1595,7 @@ export class Producer implements Table {
 	 * exact {@link route} instead, so subscribers can enumerate them.
 	 */
 	routePrefix(prefix: Path.Valid, options: RouteOptions = {}): Route {
-		const info = RouteInfo.normalize({
+		const info = WireRoute.normalize({
 			instance: options.instance,
 			epoch: options.epoch,
 			cost: options.cost,
@@ -1606,11 +1605,11 @@ export class Producer implements Table {
 	}
 
 	/** Land a route a peer announced, taken as given. Not originated, so a session never announces it back. */
-	#receive(prefix: Path.Valid, route?: Partial<RouteInfo>): Route {
-		return this.#serving(prefix, RouteInfo.normalize(route), false, false, true);
+	#receive(prefix: Path.Valid, route?: Partial<WireRoute>): Route {
+		return this.#serving(prefix, WireRoute.normalize(route), false, false, true);
 	}
 
-	#serving(prefix: Path.Valid, route: RouteInfo, originated: boolean, publishes: boolean, visible: boolean): Route {
+	#serving(prefix: Path.Valid, route: WireRoute, originated: boolean, publishes: boolean, visible: boolean): Route {
 		prefix = this.#scope.prefix(prefix);
 		// A route that names no instance serves one of its own, and a claim hands that one to its jobs.
 		const minted = route.instance === undefined;
@@ -1685,7 +1684,7 @@ export class Producer implements Table {
 		// An `advance` to a fresh instance of the claim's own keeps the requests its handler holds,
 		// which a job binding at announce answers under the new instance, and the held answers it
 		// served; only readers restart.
-		const update = (next: RouteInfo, advance = false) => {
+		const update = (next: WireRoute, advance = false) => {
 			open();
 			const previous = entry.route.peek().instance;
 			const restart = inserted && previous !== next.instance;
@@ -1724,13 +1723,13 @@ export class Producer implements Table {
 				remove(() => server.reset());
 			},
 			announced: () => inserted && this.#state.routes.peek() !== undefined,
-			change: (changed) => update(RouteInfo.normalize({ ...entry.route.peek(), ...changed })),
+			change: (changed) => update(WireRoute.normalize({ ...entry.route.peek(), ...changed })),
 			requested: () => serveRequests(server, publisher),
 			close: release,
 			info: () => (inserted && this.#state.routes.peek() ? entry.route.peek() : undefined),
 			update: (next) => {
 				// A route naming no instance keeps the one it serves.
-				const named = RouteInfo.normalize(next);
+				const named = WireRoute.normalize(next);
 				const current = entry.route.peek();
 				update(
 					named.instance === undefined
@@ -2702,11 +2701,11 @@ interface RouteControl {
 	announce(): void;
 	withdraw(): void;
 	announced(): boolean;
-	change(update: Partial<Pick<RouteInfo, "cost" | "auth">>): void;
+	change(update: Partial<Pick<WireRoute, "cost" | "auth">>): void;
 	requested(): AsyncIterableIterator<Request>;
 	close(): void;
-	info(): RouteInfo | undefined;
-	update(info: Partial<RouteInfo>): void;
+	info(): WireRoute | undefined;
+	update(info: Partial<WireRoute>): void;
 }
 
 /** The requests arriving on a prefix route's `server`, each answerable with a route of `publisher`'s when it has one. */
