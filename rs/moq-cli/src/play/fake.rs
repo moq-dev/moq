@@ -16,6 +16,8 @@ use super::window::Event;
 pub(super) struct Played {
 	/// Which sink it went through, in the order they were opened.
 	pub sink: usize,
+	/// Which utterance on that sink: each [`Sink::next`] starts another.
+	pub utterance: usize,
 	/// Its first sample, which tells a test's renditions apart.
 	pub sample: f32,
 	/// When it starts sounding.
@@ -117,6 +119,9 @@ impl Speaker for Recorder {
 			sample_rate: input.sample_rate,
 			latency: input.latency,
 			refill: false,
+			declared: false,
+			next: false,
+			utterance: 0,
 			prime: Some(input.latency),
 			pending: Vec::new(),
 			queued: Duration::ZERO,
@@ -135,6 +140,11 @@ pub(super) struct FakeSink {
 	sample_rate: u32,
 	latency: Duration,
 	refill: bool,
+	/// Running dry is a declared silence rather than an underrun.
+	declared: bool,
+	/// The next write starts the next utterance one latency out.
+	next: bool,
+	utterance: usize,
 	prime: Option<Duration>,
 	pending: Vec<(f32, Duration)>,
 	queued: Duration,
@@ -167,8 +177,27 @@ impl Sink for FakeSink {
 		// heard until fresh writes refill the target after a genuine gap.
 		if let Some(prime) = self.prime.take() {
 			self.end = now + prime;
+			// The opening silence already holds the first utterance one latency out.
+			if std::mem::take(&mut self.next) {
+				self.declared = false;
+				self.utterance += 1;
+			}
+		} else if std::mem::take(&mut self.next) {
+			self.utterance += 1;
+			// Comfort noise tops the queue up to the latency ahead of the utterance.
+			if self.refill {
+				self.resume();
+			}
+			self.declared = false;
+			let ahead = self.end.saturating_duration_since(now);
+			self.end = self.end.max(now) + self.latency.saturating_sub(ahead);
 		} else if self.end < now {
-			self.refill = true;
+			// Comfort noise filled a declared silence, so this plays as it lands.
+			if self.declared {
+				self.end = now;
+			} else {
+				self.refill = true;
+			}
 		}
 
 		let frames = (samples.len() / self.stride) as u64;
@@ -191,6 +220,14 @@ impl Sink for FakeSink {
 		Ok(written)
 	}
 
+	fn end(&mut self) {
+		self.declared = true;
+	}
+
+	fn next(&mut self) {
+		self.next = true;
+	}
+
 	fn buffered(&self) -> Duration {
 		if let Some(prime) = self.prime {
 			prime
@@ -206,6 +243,7 @@ impl FakeSink {
 	fn play(&mut self, sample: f32, duration: Duration) {
 		self.state.lock().unwrap().played.push(Played {
 			sink: self.id,
+			utterance: self.utterance,
 			sample,
 			from: self.end,
 			to: self.end + duration,
