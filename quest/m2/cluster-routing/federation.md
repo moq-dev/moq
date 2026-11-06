@@ -21,8 +21,7 @@ affects its own scope (decided 2026-10-14; see [Routes and
 announces](/quest/m2/cluster-routing/routes/README.md)). Decided 2026-11-04
 (maintainer): those identities are keyed by the route key the peer proves,
 read from a key file the local relay's uplinks share ([Route session
-integration](/quest/m2/cluster-routing/routes/session.md), [Scoped peers prove
-a route key](/quest/m2/cluster-routing/routes/proof.md)). Without a key, a
+integration](/quest/m2/cluster-routing/routes/session.md)). Without a key, a
 scoped forger declaring a victim's id captures claims outside its scope
 (`forged_identity_hijacks_claims_outside_the_forgers_scope`). The scope itself
 (`hash(scope, id)`) was rejected 2026-10-15, and the grant's issuer-qualified

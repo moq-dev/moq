@@ -161,8 +161,7 @@ the bullets below are the contract it carries.
   keyed by the route key the peer proves, so relays configured with the same
   key file fail over as one; a scoped peer that proves no key, such as one on
   qmux, gets a per-session key
-  ([session integration](/quest/m2/cluster-routing/routes/session.md),
-  [Scoped peers prove a route key](/quest/m2/cluster-routing/routes/proof.md)).
+  ([session integration](/quest/m2/cluster-routing/routes/session.md)).
   The router takes the key from the caller (`Scope::qualify`).
 - Decided 2026-10-14: qualified keys carry a marker every relay recognizes,
   and a scoped connection forwarding an already qualified identity has that
