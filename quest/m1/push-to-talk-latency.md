@@ -40,12 +40,13 @@ fails on the defaults by design?
 [moq-dev/moq#8009](https://github.com/moq-dev/moq/pull/8009) landed the
 analyzer's delay timeline: the page records the resolved delay over time, so
 each press's `jitter_buffer` ends at the first PCM that reaches the target the
-ring held when that PCM landed. The run keeps 60 ms / 128 kbit/s Opus too: a
-2026-11-06 Linux run on the default 20 ms Opus at the fixed 300 ms delay had no
-underrun or stall but lost 2 of 22 heads ("utterance head was not decoded"),
-as the defaults' Linux run below did, while the nightly at 60 ms passes. That
-is the ordering defect [Push-to-talk](/quest/m1/push-to-talk/README.md) owns.
-What remains is to switch the page to the defaults, measure on `kixtop` again,
+ring held when that PCM landed. The run also keeps 60 ms / 128 kbit/s Opus,
+the setup the nightly passes on. On the loaded agent host, 2026-11-06 runs at
+the fixed 300 ms delay had no underrun or stall but lost heads ("utterance
+head was not decoded"): 2 of 22 on the default 20 ms Opus and 1 on 60 ms.
+Whether 20 ms frames hit that ordering defect, which
+[Push-to-talk](/quest/m1/push-to-talk/README.md) owns, more often is not
+settled. What remains is to switch the page to the defaults, measure on `kixtop` again,
 and set and enforce the budget.
 
 Measured 2026-11-05 on the defaults, before Watch, one run of 22 presses
