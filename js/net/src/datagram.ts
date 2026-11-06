@@ -246,6 +246,11 @@ export class Consumer {
 		consume = (name, state, cursor, priority) => new Consumer(name, state, cursor, priority);
 		hooks.datagramPriority = (consumer) => consumer.#priority;
 		hooks.datagramClosed = (consumer) => consumer.#closed;
+		hooks.datagramSameTrack = (a, b) => a.#state === b.#state;
+		hooks.observeDatagramConsumer = (consumer) => {
+			if (consumer.#closed.peek() !== undefined) throw new Error("datagram consumer is closed");
+			return consume(consumer.name, consumer.#state, consumer.#cursor, null);
+		};
 	}
 
 	/** The track's publisher properties, once accepted. */

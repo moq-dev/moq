@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Shared unsupported CPU error
+
+`e2ee::Error::Unsupported(String)` is now `UnsupportedCpu(cpu::UnsupportedCpu)`. The shared `UnsupportedCpu` type and `check()` move from `provider` to `cpu`, enabled by the new `cpu` feature and by `e2ee` and `provider`. `cpu` needs only rind; `provider` adds rustls.
+
 ### Async wrappers are opt-in
 
 Enable the `async` Cargo feature to keep awaiting `read_frame`, `recv_group`, `recv`,
