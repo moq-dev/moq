@@ -16,8 +16,8 @@ use std::{
 	task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
 
-use crate::quic::driver::runtime::{AsyncUdpSocket, wrap_udp_socket};
 use crate::quic::driver::Duration;
+use crate::quic::driver::runtime::{AsyncUdpSocket, wrap_udp_socket};
 use bytes::{Buf, Bytes};
 use kio::clock::{sleep, timeout};
 use moq_quic::RandomConnectionIdGenerator;

@@ -2657,7 +2657,11 @@ async fn one_shot_connect_surfaces_the_session_close() {
 	// `closed` resolved, so the loop has stopped: its own count is final, and a
 	// redial that landed before then would also have reached the server.
 	assert_eq!(connection.connects(), 1, "one-shot mode must dial exactly once");
-	assert_eq!(accepts.load(Ordering::SeqCst), 1, "one-shot mode must dial exactly once");
+	assert_eq!(
+		accepts.load(Ordering::SeqCst),
+		1,
+		"one-shot mode must dial exactly once"
+	);
 
 	drop(connection);
 	server_handle.abort();
