@@ -47,8 +47,6 @@ use request_queue::RequestQueue;
 use weak_cache::{WeakCache, WeakEntry};
 
 pub use bytes::*;
-// The payload type stays flat at the crate root beside `Timestamp`.
-pub use datagram::Datagram;
 pub use time::*;
 pub use timed::Timed;
 

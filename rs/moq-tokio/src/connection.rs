@@ -2070,7 +2070,7 @@ mod tests {
 				break;
 			}
 			if let Some(added) = added.take() {
-				token = Some(added.await.unwrap().expect("granted").0);
+				token = Some(added.await.unwrap().expect("granted"));
 			}
 			let mut grant = token.as_ref().unwrap().grant();
 			while grant.peek() != Some(moq_net::auth::Grant::all()) {

@@ -480,7 +480,7 @@ impl Key {
 		}
 	}
 
-	pub(crate) fn to_decoding_key(&self) -> crate::Result<&DecodingKey> {
+	fn to_decoding_key(&self) -> crate::Result<&DecodingKey> {
 		if let Some(key) = self.decode.get() {
 			return Ok(key);
 		}
@@ -544,7 +544,7 @@ impl Key {
 		Ok(self.decode.get_or_init(|| decoding_key))
 	}
 
-	pub(crate) fn to_encoding_key(&self) -> crate::Result<&EncodingKey> {
+	fn to_encoding_key(&self) -> crate::Result<&EncodingKey> {
 		if let Some(key) = self.encode.get() {
 			return Ok(key);
 		}
@@ -625,7 +625,7 @@ impl Key {
 	}
 
 	/// Refuse a key that cannot verify, or a token whose `kid` header names another key.
-	pub(crate) fn check_kid(&self, token: &str) -> crate::Result<()> {
+	fn check_kid(&self, token: &str) -> crate::Result<()> {
 		if !self.operations.contains(&KeyOperation::Verify) {
 			return Err(KeyError::VerifyUnsupported.into());
 		}
@@ -682,7 +682,7 @@ impl Key {
 		self
 	}
 
-	pub(crate) fn validate_scope(&self, claims: &Claims) -> crate::Result<()> {
+	fn validate_scope(&self, claims: &Claims) -> crate::Result<()> {
 		if let Some(scope) = &self.scope {
 			scope.validate()?;
 			if !scope.allows(claims) {
