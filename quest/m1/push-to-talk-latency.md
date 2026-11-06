@@ -15,8 +15,8 @@ Decided 2026-11-04 (maintainer, planning in
 
 - ✅ Budget the default path with realistic settings, not the fixed 300 ms /
   60 ms setup [moq-dev/moq#7760](https://github.com/moq-dev/moq/pull/7760)
-  measured; drop the fixed-delay row from `just test push-to-talk`. The
-  maintainer is fine assuming the constants are the problem.
+  measured; drop the fixed-delay row from `just test push-to-talk` (once Watch
+  lands, per the 2026-11-06 decision below). The maintainer is fine assuming the constants are the problem.
 - ✅ Measure capture and output latency on real macOS hardware (`kixtop`)
   first; set the budget from those numbers, and keep output-side knobs until
   then.
@@ -25,14 +25,32 @@ Decided 2026-11-04 (maintainer, planning in
   budget is measured on silence suppression, which
   [moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942) landed.
 
-[moq-dev/moq#8009](https://github.com/moq-dev/moq/pull/8009) runs
-`just test push-to-talk` on the defaults and splits each press's jitter buffer
-at the target `"auto"` held when its PCM landed. Measured 2026-11-05, one run
-of 22 presses each, Chromium 156 headless through a local relay. `kixtop` is a
-MacBook Air on macOS 26 with its built-in speakers as the default output.
-Linux is the agent host under heavy load, with PipeWire output.
-The table gives the median and max in ms over the separated presses with a
-breakdown: 15 on `kixtop`, 13 on Linux, which lost two heads.
+Decided 2026-11-06 (maintainer, on
+[moq-dev/moq#8009](https://github.com/moq-dev/moq/pull/8009)): how should
+`just test push-to-talk` run until Watch lands, since its no-underrun check
+fails on the defaults by design?
+
+- ✅ (a) Require [Watch](/quest/m1/audio-jitter-target/watch.md) for this
+  quest. The run holds a fixed 300 ms delay until then, and the defaults are
+  budgeted after Watch lands, on the jitter buffer users will get.
+- (b) Run the defaults now and stop failing on underruns while `"auto"` is
+  on.
+- (c) Run both rows, roughly doubling the nine-minute nightly step.
+
+What did not depend on Watch landed in
+[moq-dev/moq#8009](https://github.com/moq-dev/moq/pull/8009): the run uses the publisher's
+default Opus (20 ms frames, 64 kbit/s), and the page records the resolved
+delay over time, so each press's `jitter_buffer` ends at the first PCM that
+reaches the target the ring held when that PCM landed. What remains is to
+switch the page to `delay: "auto"`, measure on `kixtop` again, and set and
+enforce the budget.
+
+Measured 2026-11-05 on the defaults, before Watch, one run of 22 presses
+each, Chromium 156 headless through a local relay. `kixtop` is a MacBook Air
+on macOS 26 with its built-in speakers as the default output. Linux is the
+agent host under heavy load, with PipeWire output. The table gives the median
+and max in ms over the separated presses with a breakdown: 15 on `kixtop`, 13
+on Linux, which lost two heads.
 
 | Part | `kixtop` | Linux |
 | --- | --- | --- |
@@ -48,14 +66,12 @@ breakdown: 15 on `kixtop`, 13 on Linux, which lost two heads.
 | `"auto"` target | 40 (max 80) | 60 |
 | underruns / stalls | 10 / 9 | 64 / 33 |
 
-Both runs fail the run's no-underrun check. `"auto"` targets the 0.95
-quantile of arrival lateness and accepts the re-stalls past it by design
-until [Watch](/quest/m1/audio-jitter-target/watch.md) time-stretches the
-ring. Push-to-talk's capture spread on this ideal path reached 60 ms on
-`kixtop` and 78 ms on Linux, past a 40 or 60 ms target. Linux's much higher
-count is not separated from its host load (load average above 20) or its
-43 ms render callbacks draining a 60 ms target. Watch changes the jitter
-buffer part too, so a budget set before it lands would move.
+Both runs failed the no-underrun check. `"auto"` targets the 0.95 quantile of
+arrival lateness and accepts the re-stalls past it by design until Watch
+time-stretches the ring. Push-to-talk's capture spread on this ideal path
+reached 60 ms on `kixtop` and 78 ms on Linux, past a 40 or 60 ms target.
+Linux's much higher count is not separated from its host load (load average
+above 20) or its 43 ms render callbacks draining a 60 ms target.
 
 Measurement limits: the harness's headless Chromium mutes its output and reads
 a fake microphone, so `device` is Chromium's projected output for the default
@@ -69,19 +85,9 @@ measured term (`js/watch/src/audio/latency.ts`); device and render follow the
 watch AudioContext's `latencyHint` (`"interactive"` in
 `js/watch/src/audio/decoder.ts`), otherwise the platform.
 
-## Waiting
+## Required
 
-- Maintainer: decide how `just test push-to-talk` runs until
-  [Watch](/quest/m1/audio-jitter-target/watch.md) lands, since its
-  no-underrun check fails on the defaults by design. Options: (a) require
-  Watch here, keep the fixed 300 ms delay until then, and budget the
-  defaults after it lands (recommended: the check stays green, and the budget
-  is set on the jitter buffer users will get); (b) run the defaults now and
-  stop failing on underruns while `"auto"` is on, which also drops the
-  [Push-to-talk](/quest/m1/push-to-talk/README.md) proof's check that a
-  declared silence is never an underrun; (c) run both rows, roughly doubling
-  the nine-minute nightly step. Answer on
-  [moq-dev/moq#8009](https://github.com/moq-dev/moq/pull/8009).
+- [Watch](/quest/m1/audio-jitter-target/watch.md) - `"auto"` stops underrunning by time-stretching the ring, so the run can hold the default delay
 
 ## Related
 
