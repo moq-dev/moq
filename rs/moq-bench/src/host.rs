@@ -69,6 +69,31 @@ pub struct Args {
 	threads: bool,
 }
 
+/// `moq-bench host` parsed apart from the load generator, whose parser fills its
+/// fields from `MOQ_*` variables: on a relay host those are the relay's, and the
+/// sampler reads no environment.
+#[derive(usage_rs::Cli)]
+#[usage(name = "moq-bench host", version = env!("CARGO_PKG_VERSION"))]
+#[usage(unknown_flags = "error", args_override_self = false)]
+struct Standalone {
+	#[usage(flatten)]
+	args: Args,
+}
+
+/// Parse the words after `host`.
+pub fn parse(argv: &[&std::ffi::OsStr]) -> anyhow::Result<Args> {
+	match Standalone::parse_from(argv) {
+		Ok(standalone) => Ok(standalone.args),
+		Err(err) => {
+			let answer = moq_tokio::cli::answer(Standalone::spec(), Standalone::command(), argv, err);
+			if answer.is_question() {
+				answer.exit();
+			}
+			anyhow::bail!("{}", answer.message());
+		}
+	}
+}
+
 /// Sample until the duration elapses, the process is interrupted, or every target exits (an error).
 #[cfg(target_os = "linux")]
 pub fn run(args: Args) -> anyhow::Result<()> {

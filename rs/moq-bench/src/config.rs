@@ -196,6 +196,15 @@ impl Config {
 			.skip(1)
 			.map(std::ffi::OsString::as_os_str)
 			.collect::<Vec<_>>();
+		if let Some((command, rest)) = argv.split_first()
+			&& *command == "host"
+		{
+			let args = crate::host::parse(rest)?;
+			return Ok(Self {
+				command: Some(Command::Host(args)),
+				..Self::default()
+			});
+		}
 		// Help and version are questions rather than failures. Answered and exited
 		// here, because wrapping them renders an empty `anyhow` error and exits
 		// non-zero having printed nothing. A real failure still comes back as an
@@ -210,17 +219,12 @@ impl Config {
 				anyhow::bail!("{}", answer.message());
 			}
 		};
-		// The load generator's flags configure nothing a subcommand runs, so refuse
-		// them rather than silently drop them.
-		if config.command.is_some() {
-			let deprecated = config.deprecated();
-			anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
-			anyhow::ensure!(
-				cli_layer.is_empty() && config.file.is_none(),
-				"`moq-bench host` takes only its own flags, given after `host`"
-			);
-			return Ok(config);
-		}
+		// Declared for help and completions, but parsed above: reaching here means
+		// load generator flags came first, and they configure nothing it runs.
+		anyhow::ensure!(
+			config.command.is_none(),
+			"`moq-bench host` takes only its own flags, given after `host`"
+		);
 		let env = usage_rs::config::EnvLayer::from_process();
 		let file_path = config.file.clone();
 		let file_body = file_path
