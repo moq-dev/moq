@@ -30,7 +30,7 @@ export default class extends HTMLElement {
 	get catalogFormat(): CatalogFormat | undefined;
 	set catalogFormat(value: CatalogFormat | undefined);
 	connectedCallback(): void;
-	connection: Net.Connection;
+	readonly connection: Net.Connection;
 	readonly controls: {
 		audio: {
 			muted: Signals.Signal<boolean>;
@@ -57,7 +57,7 @@ export default class extends HTMLElement {
 	disconnectedCallback(): void;
 	get echo(): string | undefined;
 	set echo(value: string | undefined);
-	emitter: Audio.Emitter;
+	readonly emitter: Audio.Emitter;
 	get follow(): boolean;
 	set follow(value: boolean);
 	get muted(): boolean;
@@ -72,8 +72,8 @@ export default class extends HTMLElement {
 	reset(): void;
 	readonly signals: Signals.Effect;
 	readonly sync: Sync;
-	text: Text.Source;
-	textRenderer: Text.Renderer;
+	readonly text: Text.Source;
+	readonly textRenderer: Text.Renderer;
 	get url(): URL | undefined;
 	set url(value: string | URL | undefined);
 	get versions(): readonly string[] | undefined;

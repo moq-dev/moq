@@ -431,7 +431,7 @@ describe("Truck sessions", () => {
 			driving,
 			focused,
 		});
-		const endpoint = new Moq.socket.Endpoint(origin, SOCKET, "truck1");
+		const endpoint = new Moq.Socket.Endpoint(origin, SOCKET, "truck1");
 		const close = () => {
 			truck.close();
 			endpoint.close();
@@ -441,7 +441,7 @@ describe("Truck sessions", () => {
 		return { truck, driving, endpoint, close };
 	}
 
-	async function read(stream: Moq.socket.TrackStream, reader = stream.consumer.ordered()) {
+	async function read(stream: Moq.Socket.TrackStream, reader = stream.consumer.ordered()) {
 		const frame = await reader.readFrame();
 		return frame && JSON.parse(decoder.decode(frame.payload));
 	}
@@ -555,7 +555,7 @@ describe("Truck safety sessions", () => {
 			driving,
 			focused,
 		});
-		const endpoint = new Moq.socket.Endpoint(origin, SOCKET, "truck1");
+		const endpoint = new Moq.Socket.Endpoint(origin, SOCKET, "truck1");
 		try {
 			const incoming = endpoint.acceptTrack();
 			truck.emergencyStop();

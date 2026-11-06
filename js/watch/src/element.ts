@@ -143,7 +143,7 @@ export default class MoqWatch extends HTMLElement {
 	 * The relay connection, shared with every other element on the page pointing at the
 	 * same URL. Its `origin` is where the broadcasts live.
 	 */
-	connection: Moq.Connection;
+	readonly connection: Moq.Connection;
 
 	/** Headless playback pipeline behind this element. */
 	readonly player: Player;
@@ -160,13 +160,13 @@ export default class MoqWatch extends HTMLElement {
 	readonly renderer: Video.Renderer;
 
 	/** Plays decoded samples through the speakers. */
-	emitter: Audio.Emitter;
+	readonly emitter: Audio.Emitter;
 
 	/** Selects the caption track. `text.out.available` lists the renditions for a picker. */
-	text: Text.Source;
+	readonly text: Text.Source;
 
 	/** Renders the selected text cues into an overlay above the canvas. */
-	textRenderer: Text.Renderer;
+	readonly textRenderer: Text.Renderer;
 
 	/** Keeps audio and video playing at the configured delay. */
 	readonly sync: Sync;

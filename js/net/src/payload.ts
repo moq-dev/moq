@@ -5,6 +5,7 @@
  * @module
  */
 import { race } from "@moq/signals";
+import type * as frame from "./frame.ts";
 import type * as group from "./group.ts";
 import { hooks, type ReadGroupFrame } from "./internal.ts";
 import type { Cursor, Reader } from "./stream.ts";
@@ -61,7 +62,7 @@ export function readSize(read: ReadGroupFrame): number {
 
 /** Write a streamed payload with `write` as it arrives. Throws if `closed` settles first, since the stream can take no more. */
 export async function sendPayload(
-	chunks: group.FrameConsumer,
+	chunks: frame.Consumer,
 	write: (chunk: Uint8Array) => Promise<unknown>,
 	closed: Promise<void>,
 ): Promise<void> {
