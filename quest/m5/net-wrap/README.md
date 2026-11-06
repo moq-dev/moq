@@ -33,18 +33,18 @@ and its trait-versus-bridge comparison:
 - **Mirror moq-net's current API exactly.** The trait methods are the
   methods writers and readers call today, with the same names, arguments,
   and errors: `create_track`, `reserve_track`, `requests`, `demand`,
-  `create_group(group::Info)`, `append_group`, `append_datagram`,
-  `insert_datagram`, `write_frame`, `create_frame`, `write`, `finish`,
-  `abort(self, Error)`, `closed`, `track(name)` then `.subscribe(..)`,
-  `recv_group`, `recv_datagram`, `read_frame`, `next_frame`, `read_chunk`,
+  `create_group(group::Info)`, `append_group`, `write_frame`,
+  `create_frame`, `write`, `finish`, `abort(self, Error)`, `closed`,
+  `track(name)` then `.subscribe(..)`, `recv_group`, `read_frame`,
+  `next_frame`, `read_chunk`,
   the broadcast consumer's `tracks` listing (maintainer, 2026-10-24), and
   their `poll_*` forms. A wrapper adapts
   to moq-net, not the other way around: `moq_crypto::e2ee::Error` converts into
   `moq_net::Error`.
 - **Datagrams follow the datagram types.** Datagram tracks have their own
-  producer and consumer types in place of `append_datagram`,
-  `insert_datagram`, and `recv_datagram` on stream tracks, so the traits
-  mirror those types instead.
+  producer and consumer types (`datagram::Producer::append` and `insert`,
+  `datagram::Consumer::poll_info` and `poll_recv`), so the traits mirror
+  those types rather than stream tracks.
 - **Terminal propagation crosses the wrapper.** Finish, typed aborts (such
   as e2ee's authentication error), and handle teardown reach the other side
   at every level, rather than collapsing into `Error::Dropped` or keeping a
