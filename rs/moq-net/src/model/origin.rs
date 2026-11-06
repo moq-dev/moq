@@ -14214,11 +14214,11 @@ mod tests {
 	async fn a_replacement_aborted_after_its_answer_keeps_the_incumbent() {
 		let (producer, _server, _upstream, old, mut subscription) = remote_front().await;
 
-		let newcomer = producer.create_broadcast("room/alice").unwrap();
-		let mut handler = newcomer.requests();
-		newcomer
-			.announce(Route::default().with_instance(instance(), 0))
+		let newcomer = producer
+			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
 			.unwrap();
+		let mut handler = newcomer.broadcast().requests();
+		newcomer.announce().unwrap();
 		let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
 			.await
 			.expect("the front asked the newcomer")
@@ -14253,11 +14253,11 @@ mod tests {
 	async fn a_replacement_aborted_after_the_incumbent_finished_ends_the_track_cleanly() {
 		let (producer, _server, _upstream, old, mut subscription) = remote_front().await;
 
-		let newcomer = producer.create_broadcast("room/alice").unwrap();
-		let mut handler = newcomer.requests();
-		newcomer
-			.announce(Route::default().with_instance(instance(), 0))
+		let newcomer = producer
+			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
 			.unwrap();
+		let mut handler = newcomer.broadcast().requests();
+		newcomer.announce().unwrap();
 		let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
 			.await
 			.expect("the front asked the newcomer")
@@ -14302,11 +14302,11 @@ mod tests {
 		group.write_frame(crate::Timestamp::ZERO, b"last".as_ref()).unwrap();
 		group.finish().unwrap();
 
-		let newcomer = producer.create_broadcast("room/alice").unwrap();
-		let mut handler = newcomer.requests();
-		newcomer
-			.announce(Route::default().with_instance(instance(), 0))
+		let newcomer = producer
+			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
 			.unwrap();
+		let mut handler = newcomer.broadcast().requests();
+		newcomer.announce().unwrap();
 		let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
 			.await
 			.expect("the front asked the newcomer")
@@ -14338,11 +14338,11 @@ mod tests {
 	async fn an_awaited_replacement_follows_the_readers_demand() {
 		let (producer, _server, _upstream, _old, mut subscription) = remote_front().await;
 
-		let newcomer = producer.create_broadcast("room/alice").unwrap();
-		let mut handler = newcomer.requests();
-		newcomer
-			.announce(Route::default().with_instance(instance(), 0))
+		let newcomer = producer
+			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
 			.unwrap();
+		let mut handler = newcomer.broadcast().requests();
+		newcomer.announce().unwrap();
 		let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
 			.await
 			.expect("the front asked the newcomer")
@@ -14372,9 +14372,9 @@ mod tests {
 	async fn a_replacement_finished_without_a_group_ends_the_track() {
 		let producer = origin(1).produce();
 		let server = producer
-			.requests_route(
+			.forward(
 				"room",
-				Route::default().with_instance(instance(), 0).with_hops(hops(&[10])),
+				RouteInfo::default().with_instance(instance(), 0).with_hops(hops(&[10])),
 				None,
 			)
 			.unwrap();
@@ -14385,11 +14385,11 @@ mod tests {
 		let resolved = pending.await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 
-		let newcomer = producer.create_broadcast("room/alice").unwrap();
-		let mut handler = newcomer.requests();
-		newcomer
-			.announce(Route::default().with_instance(instance(), 0))
+		let newcomer = producer
+			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
 			.unwrap();
+		let mut handler = newcomer.broadcast().requests();
+		newcomer.announce().unwrap();
 		let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
 			.await
 			.expect("the front asked the newcomer")
@@ -14419,11 +14419,11 @@ mod tests {
 			kio::clock::sim::yield_now().await;
 		}
 
-		let newcomer = producer.create_broadcast("room/alice").unwrap();
-		let mut handler = newcomer.requests();
-		newcomer
-			.announce(Route::default().with_instance(instance(), 0))
+		let newcomer = producer
+			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
 			.unwrap();
+		let mut handler = newcomer.broadcast().requests();
+		newcomer.announce().unwrap();
 		let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
 			.await
 			.expect("the front asked the newcomer")
