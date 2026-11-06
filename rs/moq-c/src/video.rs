@@ -185,6 +185,11 @@ pub struct moq_video_decoder_output {
 	/// holds groups. 0 = the oldest, decoding everything cached; a live player
 	/// sets `MOQ_DECODE_START_LATEST`.
 	pub start: u32,
+	/// Decode to the platform's own surface and hand it out as each frame's `surface`,
+	/// skipping the CPU conversion: `format`, `width`, and `height` are then ignored and
+	/// `data` is NULL. Only Apple platforms have one, an IOSurface-backed NV12
+	/// `CVPixelBufferRef`; elsewhere [`moq_decode_video`] fails with `MOQ_ERROR_UNSUPPORTED`.
+	pub surface: bool,
 }
 
 /// One decoded video frame from [`moq_decode_video`]: pixels plus a
@@ -209,10 +214,14 @@ pub struct moq_video_frame {
 	pub width: u32,
 	/// The decoded height in pixels.
 	pub height: u32,
-	/// The raw frame bytes in the configured layout.
+	/// The raw frame bytes in the configured layout, or NULL for a `surface` decode.
 	pub data: *const u8,
 	/// The length in bytes of `data`.
 	pub data_size: usize,
+	/// The decoder's `CVPixelBufferRef` for a `surface` decode, otherwise NULL. Borrowed: it
+	/// belongs to the decoder's pool, valid until the read is freed, so keep the read until
+	/// every GPU command reading the surface has completed.
+	pub surface: *const c_void,
 }
 
 /// One read from [`moq_decode_video`]: a decoded picture, or a break between them.
@@ -479,6 +488,25 @@ impl VideoFrame {
 pub struct DecoderOutput {
 	format: moq_video_pixel_format,
 	size: Option<moq_video::Size>,
+	/// Hand out the decoder's surface instead of converting to `format`.
+	surface: bool,
+}
+
+/// Whether this platform has a surface [`moq_video_frame::surface`] can expose.
+const HAS_SURFACE: bool = cfg!(any(target_os = "macos", target_os = "ios"));
+
+/// The `CVPixelBufferRef` a frame decoded into, or NULL when it is in CPU memory.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn surface(frame: &moq_video::Frame) -> *const c_void {
+	match &frame.surface {
+		moq_video::Surface::PixelBuffer(pixels) => std::ptr::from_ref(pixels.buffer()).cast(),
+		_ => std::ptr::null(),
+	}
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+fn surface(_frame: &moq_video::Frame) -> *const c_void {
+	std::ptr::null()
 }
 
 /// End a video track, given the result of draining its encoder into it.
@@ -1208,13 +1236,21 @@ pub unsafe extern "C" fn moq_decode_video(
 		let mut options = moq_video::decode::Options::new();
 		options.start = start;
 		options.delay = raw.delay.into();
-		// The C caller takes packed pixels, so let a backend that can decode
-		// straight to the CPU do that rather than downloading afterwards.
-		options.decoder.output = moq_video::Output::Cpu;
+		// A caller taking packed pixels lets a backend that can decode straight to the CPU do
+		// that rather than downloading afterwards.
+		options.decoder.output = match (raw.surface, HAS_SURFACE) {
+			(false, _) => moq_video::Output::Cpu,
+			(true, true) => moq_video::Output::Native,
+			(true, false) => return Err(Error::Unsupported("no decoder surface on this platform".into())),
+		};
 		// A backend with a hardware scaler (NVDEC) honors this for free; the
 		// delivery loop still enforces it, since other backends ignore it.
 		options.decoder.scale_hint = size;
-		let output = DecoderOutput { format, size };
+		let output = DecoderOutput {
+			format,
+			size,
+			surface: raw.surface,
+		};
 		let on_read = unsafe { OnStatus::new(user_data, on_read)? };
 
 		let mut state = State::lock();
@@ -1263,6 +1299,18 @@ pub unsafe extern "C" fn moq_decode_video_read(id: u32, dst: *mut moq_video_read
 		let read = State::lock().video.read(id)?;
 		let (kind, gap, end) = read.info();
 		let frame = match &read {
+			Read::Frame(frame) if frame.output.surface => {
+				let size = frame.frame.size();
+				moq_video_frame {
+					timestamp: frame.frame.timestamp.into(),
+					width: size.width,
+					height: size.height,
+					data: std::ptr::null(),
+					data_size: 0,
+					// The slab keeps the frame, and with it the surface, until the id is freed.
+					surface: surface(&frame.frame),
+				}
+			}
 			Read::Frame(frame) => {
 				let pixels = frame.pixels()?;
 				moq_video_frame {
@@ -1273,6 +1321,7 @@ pub unsafe extern "C" fn moq_decode_video_read(id: u32, dst: *mut moq_video_read
 					// never replaced once set, so the pointer outlives this call.
 					data: pixels.data.as_ptr(),
 					data_size: pixels.data.len(),
+					surface: std::ptr::null(),
 				}
 			}
 			_ => moq_video_frame {
@@ -1281,6 +1330,7 @@ pub unsafe extern "C" fn moq_decode_video_read(id: u32, dst: *mut moq_video_read
 				height: 0,
 				data: std::ptr::null(),
 				data_size: 0,
+				surface: std::ptr::null(),
 			},
 		};
 		*dst = moq_video_read { kind, frame, gap, end };

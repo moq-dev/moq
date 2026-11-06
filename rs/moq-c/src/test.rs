@@ -355,6 +355,7 @@ fn video_read(id: u32) -> (i32, moq_video_read) {
 			height: 0,
 			data: std::ptr::null(),
 			data_size: 0,
+			surface: std::ptr::null(),
 		},
 		gap: moq_decode_gap::default(),
 		end: moq_timestamp::default(),
@@ -5989,6 +5990,7 @@ fn video_raw_publish_consume() {
 		width: 0,
 		height: 0,
 		start: 0,
+		surface: false,
 	};
 	let frame_cb = Callback::new();
 	let consumer = id(unsafe { moq_decode_video(catalog_id, 0, &decoder, Some(channel_callback), frame_cb.ptr) });
@@ -6057,6 +6059,7 @@ fn video_raw_decode_output_rejected() {
 		width: 0,
 		height: 0,
 		start: 0,
+		surface: false,
 	};
 	assert_eq!(
 		unsafe { moq_decode_video(1, 0, &bad_format, Some(ignore_callback), std::ptr::null_mut()) },
@@ -6069,6 +6072,7 @@ fn video_raw_decode_output_rejected() {
 		width: 0,
 		height: 0,
 		start: moq_decode_start::MOQ_DECODE_START_LATEST as u32 + 1,
+		surface: false,
 	};
 	assert_eq!(
 		unsafe { moq_decode_video(1, 0, &bad_start, Some(ignore_callback), std::ptr::null_mut()) },
@@ -6082,6 +6086,7 @@ fn video_raw_decode_output_rejected() {
 			width,
 			height,
 			start: 0,
+			surface: false,
 		};
 		assert_eq!(
 			unsafe { moq_decode_video(1, 0, &bad_size, Some(ignore_callback), std::ptr::null_mut()) },
@@ -6101,6 +6106,7 @@ fn video_raw_decode_output_rejected() {
 		width: 160,
 		height: 120,
 		start: 0,
+		surface: false,
 	};
 	assert_eq!(
 		unsafe { moq_decode_video(u32::MAX / 2, 0, &valid, Some(ignore_callback), std::ptr::null_mut(),) },
@@ -6204,6 +6210,7 @@ fn video_raw_decode_rgba() {
 		width: 0,
 		height: 0,
 		start: 0,
+		surface: false,
 	};
 	assert_eq!(decode_first_frame(&output), (320, 240, 320 * 240 * 4));
 }
@@ -6221,6 +6228,7 @@ fn video_raw_decode_resize() {
 		width: 160,
 		height: 120,
 		start: 0,
+		surface: false,
 	};
 	assert_eq!(decode_first_frame(&output), (160, 120, 160 * 120 * 3 / 2));
 }
@@ -6631,6 +6639,7 @@ fn video_raw_decode() {
 		width: 0,
 		height: 0,
 		start: 0,
+		surface: false,
 	};
 	let frame_cb = Callback::new();
 	let consumer = id(unsafe { moq_decode_video(catalog_id, 0, &output, Some(channel_callback), frame_cb.ptr) });
