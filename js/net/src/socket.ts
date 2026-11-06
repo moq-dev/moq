@@ -565,17 +565,18 @@ class Session {
 	async #copy(): Promise<void> {
 		const ordered = this.#parts.consumer.ordered();
 		const group = await ordered.nextGroup();
-		if (group) {
-			try {
-				if (group.sequence !== 0n) throw new ProtocolViolation("second group on a TCP session");
-				for (;;) {
-					const frame = await group.readFrame();
-					if (!frame) break;
-					this.#local?.writeFrame({ payload: frame.payload });
-				}
-			} finally {
-				group.close();
+		// Even an empty TCP half publishes group 0. The ordered cursor skips lost
+		// groups, so reaching track end without it is loss, not a clean FIN.
+		if (!group) throw new NotFound("TCP session group");
+		try {
+			if (group.sequence !== 0n) throw new ProtocolViolation("second group on a TCP session");
+			for (;;) {
+				const frame = await group.readFrame();
+				if (!frame) break;
+				this.#local?.writeFrame({ payload: frame.payload });
 			}
+		} finally {
+			group.close();
 		}
 		if (this.#abort.signal.aborted) return;
 		this.#received = true;

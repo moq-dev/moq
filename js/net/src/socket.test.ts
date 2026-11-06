@@ -468,6 +468,36 @@ test("a second TCP group resets the session even after the first FIN", async () 
 	}
 });
 
+for (const dropped of [false, true]) {
+	test(`TCP fails when its only group ${dropped ? "is dropped" : "never arrives"}`, async () => {
+		const { origin, b } = setup();
+		const route = origin.route(Path.from("room/.socket/raw"));
+		const name = `tcp/raw/bob/missing-${dropped}`;
+		const answer = hooks.reserveUnlistedTrack(route.broadcast, name);
+		const next = b.acceptTcp();
+		const subscriber = await raw(origin, "bob", name);
+		const acceptance = (await next).accept();
+		const clock = time();
+		await clock.advance(Nano.zero);
+		const producer = answer.accept();
+		const stream = await acceptance;
+		const reading = stream.consumer.readFrame();
+		if (dropped) hooks.dropTrackGroups(producer, 0n, 1n, new NotFound("TCP group unavailable"));
+		producer.finish();
+		await expect(reading).rejects.toBeInstanceOf(NotFound);
+		expect(await stream.producer.closed).toBeInstanceOf(NotFound);
+		subscriber.close();
+	});
+}
+
+test("an empty TCP group still delivers a clean FIN", async () => {
+	const { local, remote } = await tcp();
+	local.producer.finish();
+	remote.producer.finish();
+	expect(await remote.consumer.readFrame()).toBeUndefined();
+	expect(await local.consumer.readFrame()).toBeUndefined();
+});
+
 test("unpaced TCP eviction is an error, never a skipped frame or clean FIN", async () => {
 	const clock = time();
 	const { local, remote } = await tcp();
