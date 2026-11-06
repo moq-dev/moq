@@ -538,7 +538,10 @@ mod tests {
 		use std::time::Duration;
 
 		fn real() -> tokio::runtime::Runtime {
-			tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap()
+			tokio::runtime::Builder::new_current_thread()
+				.enable_time()
+				.build()
+				.unwrap()
 		}
 
 		#[test]

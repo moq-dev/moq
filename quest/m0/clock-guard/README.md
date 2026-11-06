@@ -42,4 +42,3 @@ or longer real wait, and the same fix in every language's sibling test.
 ## Required
 
 - [JS tests fail when a real timer fires](/quest/m0/clock-guard/js.md) - `@moq/clock` fails a test whose real-clock timer fires, with today's offenders opted out
-- [Spike a Rust real-timer guard](/quest/m0/clock-guard/rust.md) - try the same guard in `kio`, or fall back to a grep check for new real-clock tests
