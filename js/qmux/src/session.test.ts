@@ -920,7 +920,9 @@ describe("Session integration (scripted peer)", () => {
 
 	test("disabled config uses null and invalid durations fail before opening", () => {
 		for (const value of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
-			expect(() => new Session("https://example/test", { config: { idleTimeout: value } })).toThrow("idleTimeout");
+			expect(() => new Session("https://example/test", { config: { idleTimeout: value } })).toThrow(
+				"idleTimeout",
+			);
 			expect(() => new Session("https://example/test", { config: { handshakeTimeout: value } })).toThrow(
 				"handshakeTimeout",
 			);

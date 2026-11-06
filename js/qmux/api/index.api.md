@@ -6,6 +6,7 @@ export interface AcceptOptions extends Pick<SessionOptions, "config" | "sendBuff
 }
 
 export interface Config {
+	handshakeTimeout?: number | null;
 	idleTimeout?: number | null;
 	maxDatagramFrameSize?: bigint | null;
 	maxRecordSize?: bigint;
