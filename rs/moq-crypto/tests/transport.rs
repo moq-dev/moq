@@ -1,4 +1,4 @@
-//! Grouped tracks on moq-lite and MoQ Transport, and datagram tracks on moq-lite.
+//! Grouped tracks and datagrams on moq-lite and MoQ Transport.
 
 mod support;
 
@@ -155,4 +155,9 @@ async fn datagrams_over_lite_05() {
 #[tokio::test]
 async fn max_datagram_over_lite_07() {
 	datagram_roundtrip("moq-lite-07-wip", &[7; moq_crypto::e2ee::MAX_DATAGRAM_PLAINTEXT]).await;
+}
+
+#[tokio::test]
+async fn datagrams_over_ietf() {
+	datagram_roundtrip("moq-transport-22", b"opus").await;
 }

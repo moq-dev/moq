@@ -133,6 +133,8 @@ mod util;
 mod version;
 
 #[cfg(feature = "async")]
+pub mod reconnect;
+#[cfg(feature = "async")]
 pub mod server;
 #[cfg(feature = "async")]
 pub mod session;
@@ -149,6 +151,8 @@ pub use error::*;
 pub use instance::{Instance, InvalidInstance};
 pub use model::*;
 pub use path::{InvalidPattern, Path, Pattern, Patterns};
+#[cfg(feature = "async")]
+pub use reconnect::Reconnect;
 #[cfg(feature = "async")]
 pub use server::Server;
 #[cfg(feature = "async")]
