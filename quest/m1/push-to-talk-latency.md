@@ -10,77 +10,13 @@ playback is out of scope.
 
 ## Plan
 
-Measured 2026-11-04 by
-[moq-dev/moq#7760](https://github.com/moq-dev/moq/pull/7760), for
-[Push-to-talk](/quest/m1/push-to-talk/README.md). The setup was `just test
-push-to-talk` through a local relay, publisher and listener on separate
-sessions, with no shaping or loss, 60 ms Opus at 128 kbit/s, and a fixed 300
-ms `delay`. Chromium 156 ran headless on Linux. There were five runs of 22
-presses each, 15 of them separated, so 75 separated presses in all; one press
-lost its head (see Push-to-talk) and has no breakdown, leaving 74.
-`summary.json` `path` splits each press at page-clock boundaries that sum
-exactly to press → projected output.
-
-| Part | Boundaries | Median ms | Max ms |
-| --- | --- | --- | --- |
-| capture | worklet delivery and framing | 29 | 110 |
-| packetization | media the head frame still needed after the press | 39 | 60 |
-| encode | encoder input to container write | 0.8 | 14 |
-| network | container write to arrival, through the relay | 3.2 | 15 |
-| decode | arrival to decoded PCM | 0.7 | 13 |
-| jitter buffer | head's PCM to the first PCM that filled the delay | 252 | 268 |
-| render | that PCM to the render onset | 21 | 54 |
-| device | render onset to projected output | 115 | 119 |
-| total | press to projected output | 469 | 576 |
-
-The capture and packetization split is approximate, but their 66 ms median sum
-is exact. Playout on top of one-way delivery was 261 ms median and 294 ms max
-over all 75, inside the 300 ms the maintainer set.
-
-Biggest contributors and their knobs:
-
-- **Playout delay, about 300 ms.** The ring starts once it holds the delay in
-  decoded PCM, counted from the head's first sample. That is why the jitter
-  buffer plus packetization sum to about 291 ms. Knob: `<moq-watch>` `delay`.
-  This test fixes it at 300 ms. In `"auto"`, the default, the target is
-  `max(measured, advertised) + frame + catalog delay`
-  (`js/watch/src/audio/latency.ts`).
-- **Device output, about 115 ms.** This matches Chromium's declared
-  `baseLatency + outputLatency` on this headless Linux host. Knob: the watch
-  AudioContext's `latencyHint` (`"interactive"` in
-  `js/watch/src/audio/decoder.ts`), otherwise the platform. A real device,
-  such as `kixtop`'s macOS output, should be measured before acting on it.
-- **Capture and render, about 52 ms together.** Both followed the
-  AudioContext callback cadence on this host: PipeWire gives Chromium 2048
-  samples (43 ms) per callback even at `"interactive"`. Capture no longer
-  does, since its context renders to no device
-  ([moq-dev/moq#7881](https://github.com/moq-dev/moq/pull/7881)): on this host
-  its median dropped from 29 ms to 1-9 ms, and the median per-press arrival
-  spread from 45 ms to 12 ms. Render still does. Knob: the watch AudioContext's
-  `latencyHint`, otherwise the platform.
-- **Opus frame, 60 ms.** This test chooses it; the publisher defaults to
-  20 ms. Under a fixed delay it is absorbed by the delay. In `"auto"` it adds
-  one frame to the target. Knob: the encoder's `frameDuration`.
-
-No part looked like a bug. On an ideal path, encode and decode take about 1 ms
-and the relay hop about 3 ms, and the head is not trimmed as decoder warmup.
-The one lost head is an ordering defect, owned by
-[Push-to-talk](/quest/m1/push-to-talk/README.md), not a latency part. The
-fixed delay bypasses the jitter estimator. In `"auto"`, the 46 ms median
-per-press arrival-lateness spread, from capture bursts rather than the
-network, would make the measured term nonzero; that is the estimator working
-as specified in [Audio jitter
-target](/quest/m1/audio-jitter-target/README.md). With capture fixed, the
-spread left on Chromium 155+ is its 10 ms capture chunks; a release no longer
-flushes the codec's lookahead chunk out ahead of its media.
-Older Chromium still paces capture at the device's callback size.
-
 Decided 2026-11-04 (maintainer, planning in
 [moq-dev/moq#7816](https://github.com/moq-dev/moq/pull/7816)):
 
 - ✅ Budget the default path with realistic settings, not the fixed 300 ms /
-  60 ms setup above; drop the fixed-delay row from `just test push-to-talk`.
-  The maintainer is fine assuming the constants are the problem.
+  60 ms setup [moq-dev/moq#7760](https://github.com/moq-dev/moq/pull/7760)
+  measured; drop the fixed-delay row from `just test push-to-talk` (once Watch
+  lands, per the 2026-11-06 decision below). The maintainer is fine assuming the constants are the problem.
 - ✅ Measure capture and output latency on real macOS hardware (`kixtop`)
   first; set the budget from those numbers, and keep output-side knobs until
   then.
@@ -88,6 +24,74 @@ Decided 2026-11-04 (maintainer, planning in
 - The catalog toggle forced at least a round trip of jitter buffer, so the
   budget is measured on silence suppression, which
   [moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942) landed.
+
+Decided 2026-11-06 (maintainer, on
+[moq-dev/moq#8009](https://github.com/moq-dev/moq/pull/8009)): how should
+`just test push-to-talk` run until Watch lands, since its no-underrun check
+fails on the defaults by design?
+
+- ✅ (a) Require [Watch](/quest/m1/audio-jitter-target/watch.md) for this
+  quest. The run holds a fixed 300 ms delay until then, and the defaults are
+  budgeted after Watch lands, on the jitter buffer users will get.
+- (b) Run the defaults now and stop failing on underruns while `"auto"` is
+  on.
+- (c) Run both rows, roughly doubling the nine-minute nightly step.
+
+[moq-dev/moq#8009](https://github.com/moq-dev/moq/pull/8009) landed the
+analyzer's delay timeline: the page records the resolved delay over time, so
+each press's `jitter_buffer` ends at the first PCM that reaches the target the
+ring held when that PCM landed. The run also keeps 60 ms / 128 kbit/s Opus,
+the setup the nightly passes on. On the loaded agent host, 2026-11-06 runs at
+the fixed 300 ms delay had no underrun or stall but lost heads ("utterance
+head was not decoded"): 2 of 22 on the default 20 ms Opus and 1 on 60 ms.
+Whether 20 ms frames hit that ordering defect, which
+[Push-to-talk](/quest/m1/push-to-talk/README.md) owns, more often is not
+settled. What remains is to switch the page to the defaults, measure on `kixtop` again,
+and set and enforce the budget.
+
+Measured 2026-11-05 on the defaults, before Watch, one run of 22 presses
+each, Chromium 156 headless through a local relay. `kixtop` is a MacBook Air
+on macOS 26 with its built-in speakers as the default output. Linux is the
+agent host under heavy load, with PipeWire output. The table gives the median
+and max in ms over the separated presses with a breakdown: 15 on `kixtop`, 13
+on Linux, which lost two heads.
+
+| Part | `kixtop` | Linux |
+| --- | --- | --- |
+| capture | 9 / 12 | 10 / 11 |
+| packetization | 16 / 20 | 16 / 20 |
+| encode | 0.5 / 0.6 | 0.5 / 8 |
+| network | 2 / 12 | 3 / 5 |
+| decode | 0.5 / 3 | 0.6 / 17 |
+| jitter buffer | 21 / 59 | 40 / 43 |
+| render | 23 / 34 | -1 / 24 |
+| press to render onset | 73 / 110 | 71 / 95 |
+| device | 54 / 57 | 105 / 113 |
+| `"auto"` target | 40 (max 80) | 60 |
+| underruns / stalls | 10 / 9 | 64 / 33 |
+
+Both runs failed the no-underrun check. `"auto"` targets the 0.95 quantile of
+arrival lateness and accepts the re-stalls past it by design until Watch
+time-stretches the ring. Push-to-talk's capture spread on this ideal path
+reached 60 ms on `kixtop` and 78 ms on Linux, past a 40 or 60 ms target.
+Linux's much higher count is not separated from its host load (load average
+above 20) or its 43 ms render callbacks draining a 60 ms target.
+
+Measurement limits: the harness's headless Chromium mutes its output and reads
+a fake microphone, so `device` is Chromium's projected output for the default
+device and `capture` excludes the microphone's own input latency. Linux's
+render callbacks are 43 ms, so its `render` can be negative by up to one
+callback. The lost heads are the ordering defect
+[Push-to-talk](/quest/m1/push-to-talk/README.md) owns.
+
+Knobs: the target's frame term (`frameDuration`, 20 ms by default) and its
+measured term (`js/watch/src/audio/latency.ts`); device and render follow the
+watch AudioContext's `latencyHint` (`"interactive"` in
+`js/watch/src/audio/decoder.ts`), otherwise the platform.
+
+## Required
+
+- [Watch](/quest/m1/audio-jitter-target/watch.md) - `"auto"` stops underrunning by time-stretching the ring, so the run can hold the default delay
 
 ## Related
 

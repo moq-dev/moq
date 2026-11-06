@@ -22,7 +22,7 @@ block that cut forever. The release cut's PR re-creates it at this path while
 it shifts the milestones, after removing this path from every `Required`. The
 new gate keeps this Goal and this paragraph, gets a fresh "main is no slower
 than release" child with its Goal and no measurements yet, and takes the
-[vendor sync](/quest/m2/cut-gate/vendor-sync/README.md) questline that this
+[vendor sync](/quest/m3/vendor-sync/README.md) questline that this
 run re-created in m3. The pre-cut audit is a one-time child and does not
 recur. Only `/quest-delete` ends the recurrence.
 
@@ -32,5 +32,4 @@ records the accepted costs and final relay pairing for this cut.
 ## Required
 
 - [Pre-cut audit findings](/quest/m2/cut-gate/cut-audit/README.md) - fix the crashes, hostile-input costs, and correctness bugs the 2026-10-24 audit of main found
-- [Vendored code has every upstream fix it needs](/quest/m2/cut-gate/vendor-sync/README.md) - quinn, libv4l-rs, nvidia-video-codec-sdk, rust-media-libs, cros-codecs, and UniFFI generator fixes are ported or planned, once per release cycle
 - [moq-c at parity](/quest/m2/cut-gate/c/README.md) - the hand-written `moq-c` ships at the cut with every binding feature moq-ffi gains

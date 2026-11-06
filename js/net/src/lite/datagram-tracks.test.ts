@@ -466,15 +466,20 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		const remote = wireOf(client).consume(path);
 		const reader = remote.datagrams("audio");
 		reader.setPriority(5);
+		// The end has to reach the client before the abort, and the mock delivers it in
+		// microtasks. A write-budget yield is a host task that the drain below can't advance,
+		// so under CPU load the publisher's answer could still be stalled when the abort lands.
+		const budget = spyOn(Budget.prototype, "poll").mockImplementation(() => undefined);
 		try {
 			await reader.info();
 			while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
 			datagrams.finish();
 			// The mock delivers the end in microtasks, all within this host task.
-			for (let i = 0; i < 1000; i++) await Promise.resolve();
+			for (let i = 0; i < 10000; i++) await Promise.resolve();
 			client.abort();
 			expect(await reader.recv()).toBeUndefined();
 		} finally {
+			budget.mockRestore();
 			reader.close();
 			remote.close();
 			client.abort();

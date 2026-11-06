@@ -27,6 +27,8 @@ const records = {
 	encoders: [] as number[],
 	// Each time the published rendition became unselectable (disabled or dropped) or selectable again.
 	catalog: [] as { at: number; selectable: boolean }[],
+	// The resolved playout delay since the measurement's start: "auto" moves it with the estimate.
+	delays: [] as { at: number; delay: number }[],
 	errors: [] as string[],
 };
 
@@ -208,6 +210,7 @@ publish.audio.out.catalog.subscribe((config) => {
 	if (now !== selectable) records.catalog.push({ at: performance.now(), selectable: now });
 	selectable = now;
 });
+watch.player.sync.out.delay.subscribe((delay) => records.delays.push({ at: performance.now(), delay }));
 // Playback counts from the measurement's start, so the warmup's tune-in is not charged to it.
 let baseline = { underruns: 0, stalls: 0 };
 const playback = () => {
@@ -241,6 +244,7 @@ export const measurement = {
 	},
 	reset() {
 		for (const list of Object.values(records)) list.length = 0;
+		records.delays.push({ at: performance.now(), delay: watch.player.sync.out.delay.peek() });
 		capture.drain();
 		arrivals.length = 0;
 		const stats = audio.out.stats.peek();

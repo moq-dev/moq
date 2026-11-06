@@ -345,33 +345,34 @@ fn bench_route_churn(c: &mut Criterion) {
 	for broadcasts in [1_000, 10_000] {
 		for subscribers in [1, 20, 100] {
 			let id = BenchmarkId::from_parameter(format!("{broadcasts}b_{subscribers}s"));
+			// Criterion calls the closure once per sample, so the fixture is built on the first call and kept.
+			let mut fixture = None;
 			group.bench_function(id, |b| {
-				let (producer, _driver) = origin::Producer::new(origin::Config::default());
-				let _routes: Vec<_> = (0..broadcasts)
-					.map(|i| {
-						moq_net::fuzz::requests_route(
-							&producer,
-							moq_net::Path::new(&format!("room/{i}")).unwrap(),
-							peer_route(1, 1),
-						)
-						.unwrap()
-					})
-					.collect();
-				let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().routes()).collect();
-				for cursor in &mut cursors {
-					while cursor.try_next().is_some() {}
-				}
+				let (cursors, _routes, producer, _driver) = fixture.get_or_insert_with(|| {
+					let (producer, driver) = origin::Producer::new(origin::Config::default());
+					let routes: Vec<_> = (0..broadcasts)
+						.map(|i| {
+							moq_net::fuzz::requests_route(
+								&producer,
+								moq_net::Path::new(&format!("room/{i}")).unwrap(),
+								peer_route(1, 1),
+							)
+							.unwrap()
+						})
+						.collect();
+					let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().routes()).collect();
+					for cursor in &mut cursors {
+						while cursor.try_next().is_some() {}
+					}
+					(cursors, routes, producer, driver)
+				});
 				b.iter(|| {
 					drop(
-						moq_net::fuzz::requests_route(
-							&producer,
-							moq_net::Path::from_static("room/0"),
-							peer_route(2, 5),
-						)
-						.unwrap(),
+						moq_net::fuzz::requests_route(producer, moq_net::Path::from_static("room/0"), peer_route(2, 5))
+							.unwrap(),
 					)
 				});
-				for cursor in &mut cursors {
+				for cursor in cursors.iter_mut() {
 					assert!(cursor.try_next().is_none(), "the winner is unchanged");
 				}
 			});
@@ -841,24 +842,30 @@ fn bench_request(c: &mut Criterion) {
 fn bench_retire(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/retire");
 	for fronts in [100, 1_000, 10_000] {
+		// Criterion calls the closure once per sample, so the fixture is built on the first call and kept.
+		let mut fixture = None;
 		group.bench_function(BenchmarkId::from_parameter(format!("{fronts}f")), |b| {
-			let mut fleet = fanout(fronts + 1, 0);
-			let waiter = kio::Waiter::noop();
-			let held: Vec<_> = (0..fronts)
-				.map(|i| fleet.consumer.request(format!("room/{i}"), None))
-				.collect();
-			fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
-			let _held: Vec<_> = held
-				.into_iter()
-				.map(|pending| pending.now_or_never().expect("resolved once driven").expect("local"))
-				.collect();
+			let (_held, fleet, waiter) = fixture.get_or_insert_with(|| {
+				let mut fleet = fanout(fronts + 1, 0);
+				let waiter = kio::Waiter::noop();
+				let held: Vec<_> = (0..fronts)
+					.map(|i| fleet.consumer.request(format!("room/{i}"), None))
+					.collect();
+				fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+				let held: Vec<_> = held
+					.into_iter()
+					.map(|pending| pending.now_or_never().expect("resolved once driven").expect("local"))
+					.collect();
+				(held, fleet, waiter)
+			});
+			let waiter = &*waiter;
 			let path = format!("room/{fronts}");
 			b.iter(|| {
 				let pending = fleet.consumer.request(&path, None);
-				fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+				fleet.driver.poll(moq_net::time::Instant::now(), waiter).unwrap();
 				drop(pending.now_or_never().expect("resolved once driven").expect("local"));
 				// Nothing holds it and a local source keeps no track, so it retires here.
-				fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+				fleet.driver.poll(moq_net::time::Instant::now(), waiter).unwrap();
 			});
 		});
 	}

@@ -21,7 +21,7 @@ crates.io would commit permanent names to code already slated for
 retirement, and switching moq to it would be churn on the way to the
 exporter. Until the switch, moq keeps building from its pinned
 `kixelated/uniffi-*` forks, checked each release cycle by
-[the vendor sync](/quest/m2/cut-gate/vendor-sync/README.md).
+[the vendor sync](/quest/m3/vendor-sync/README.md).
 Not chosen: publish the fork and switch to it first; decide later.
 
 Carried over from the fork plan, where they still apply to the exporter's

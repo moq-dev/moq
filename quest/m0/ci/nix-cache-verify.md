@@ -38,17 +38,21 @@ Cachix retirement, and bucket sizes moved to
 [Release tags push to nix.moq.dev](/quest/m0/ci/cachix-retire.md), which
 backports `release-nix.yml` to `release` now instead of waiting for the cut.
 
+Recorded 2026-11-06 (/quest-unblock): #7662 merged 2026-11-05 22:15Z, and the
+first successful Cache run after it,
+[42119995773](https://github.com/moq-dev/moq/actions/runs/42119995773/job/127569533619),
+uploaded both the `moq-cli` and `moq-relay` closures from its
+`Runtime (ubuntu-24.04)` job.
+
 Use the scheduled and push runs; never dispatch Nightly for this evidence.
 
 ## Waiting
 
-- moq-dev/moq: Once
-  [moq-dev/moq#7662](https://github.com/moq-dev/moq/pull/7662) merges, record the first successful Cache run's
-  `Runtime (ubuntu-24.04)` job uploading both closures
-  (`gh run list --workflow cache.yml --branch main`), then the next Smoke run
-  on that head or later (the 08:00 UTC schedule) whose
-  `ubuntu-latest / nix` job copies `moq-relay` and `moq` from
-  `https://nix.moq.dev` instead of compiling them.
+- moq-dev/moq: the next scheduled Smoke run (08:00 UTC) on
+  [moq-dev/moq#7662](https://github.com/moq-dev/moq/pull/7662)'s merge or
+  later, whose `ubuntu-latest / nix` job copies `moq-relay` and `moq` from
+  `https://nix.moq.dev` instead of compiling them. Check with
+  `gh run list --workflow smoke.yml --event schedule`.
 
 ## Related
 

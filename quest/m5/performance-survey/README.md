@@ -219,4 +219,3 @@ The `js/replay` nightly series and the browser smoke's `replay.json` protect it.
 
 - [Performance audit](/quest/m3/audit-perf.md) - nightly regression attribution and remaining coverage
 - [Benchmark sources](/quest/m4/bench-sources.md) - publishing existing measurements to the trend table
-- [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - noise floor of the paired nightly regression report
