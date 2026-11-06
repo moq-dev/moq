@@ -34,7 +34,3 @@ moq-net rather than a copy of the policy.
 
 Public API: moq-tokio adds `accept_with` and `connect_with` and drops internals
 it re-exported, with MIGRATE notes. Wire: none.
-
-## Required
-
-- [Connect policy in moq-net](/quest/m1/session-policy/connect.md) - the connect policy the handoff runs
