@@ -12,8 +12,9 @@ changed to obtain this result, and nothing was backported to release.
 configurations, execution order, all 42 cell summaries, and the comparator's
 three reports. The source was [56d7989c78](https://github.com/moq-dev/moq/commit/56d7989c78a107e0cb72487c43006495005c27a3),
 paired against release [dc3478a863](https://github.com/moq-dev/moq/commit/dc3478a863d8aab42afaae8d40c3b84794ae4a4b).
-Raw logs, process samples and the harness snapshot remain in the measuring
-checkout's `.tmp/bench/run.87XzvK`.
+Raw logs, process samples and the harness snapshot were captured in the measuring
+checkout's disposable `.tmp/bench/run.87XzvK`; they are not durably retained.
+The committed JSON is the portable evidence.
 
 The established harness ran on `desktop`, pinned to its eight performance
 CPUs (0-7), under the host benchmark lock and `quest gate`. Both sides used
@@ -71,8 +72,8 @@ confirmation rounds for the largest moves, JS on bun, and the relay load
 harness. It ran on a shared 8-core host, so a small wall-time change may be
 noise.
 
-- The epic gates the cut through the [m1 milestone](/quest/m1/README.md),
-  because `main` must not ship slower than `release` without a decision.
+- The epic gated this cut because `main` must not ship slower than `release`
+  without a decision. It completed on 2026-11-05; see Final relay pairing.
 - In scope: the five cases that held through confirmation, plus the large
   screen-only moves. The screen-only moves are re-measured with callgrind
   instruction counts, and any that hold are fixed.
@@ -269,7 +270,7 @@ Decided 2026-10-25 (maintainer), in
   flattened it.
 - The TS schedule's growth is left to the
   [performance audit](/quest/m3/audit-perf.md); it does not block the cut.
-- Now that the sparse fix has landed, re-run the relay fanout pairing on a
+- ✅ Completed 2026-11-05 (see Final relay pairing): re-run the relay fanout pairing on a
   quiet host, recording `/proc/loadavg`, with
   `BENCH_ARTIFACTS=<scratch> just bench origin/release` (it also re-checks
   the sparse rows). Fix it if the relay
@@ -324,7 +325,8 @@ every group machine's wake. Its own pairing, 14 alternating rounds at load 7
 to 28, found no high-mode round on either side: relay CPU 0.066 to 0.090 cores
 against release's 0.062 to 0.104, with mixed-sign paired deltas inside
 release's own spread, and 5 to 36% fewer user-space instructions than release
-in every round. The re-pair above, on a quieter host, is what remains.
+in every round. The remaining re-pair completed on 2026-11-05 (see Final relay
+pairing), with the shared host load disclosed.
 
 Decided 2026-11-01 (maintainer), in
 [moq-dev/moq#7493](https://github.com/moq-dev/moq/pull/7493): ✅ the new
