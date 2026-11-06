@@ -549,17 +549,21 @@ mod tests {
 			)
 			.await
 			.unwrap();
-		let (session, driver) = accept.await.unwrap().unwrap();
-		tokio::spawn(driver);
-
-		// A masked binary frame declaring 1 MiB, with none of its payload sent.
+		// A masked binary frame declaring 1 MiB, with none of its payload sent, before the
+		// client's transport parameters: the accept fails on it rather than awaiting them.
 		let mut frame = vec![0x82, 0x80 | 127];
 		frame.extend_from_slice(&(1u64 << 20).to_be_bytes());
 		frame.extend_from_slice(&[0; 4]);
 		client.write_all(&frame).await.unwrap();
 
-		kio::clock::timeout(Duration::from_secs(1), session.closed())
+		let accepted = kio::clock::timeout(Duration::from_secs(1), accept)
 			.await
-			.expect("the socket waited to buffer a frame larger than a record");
+			.expect("the socket waited to buffer a frame larger than a record")
+			.unwrap();
+		assert!(
+			matches!(&accepted, Err(err) if !matches!(err, Error::HandshakeTimeout)),
+			"{:?}",
+			accepted.map(|_| ())
+		);
 	}
 }
