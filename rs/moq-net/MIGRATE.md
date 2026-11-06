@@ -4,21 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Hop chains are plain ids ([#8007](https://github.com/moq-dev/moq/pull/8007))
-
-`Hop`, `Hops`, `InvalidHop` and `origin::HopLimit` are no longer public. The origin and the relays fill in a route's hop chain, so applications pass and read plain ids.
-
-| Before | After |
-| --- | --- |
-| `origin::Config::new(Hop::new(id)?)` | `origin::Config::new(NonZeroU64::new(id).context("…")?)` |
-| `origin::Config::new(Hop::random())` | `origin::Config::default()`, which picks a random id |
-| `config.max_hops = origin::HopLimit::new(n)?` | `config.max_hops = NonZeroUsize::new(n).context("…")?`; above 32 acts as 32 |
-| `origin.hop().id()` | `origin.hop().get()` |
-| `route.hops().iter().map(\|hop\| hop.id())` | `route.hops()`, an iterator of `u64` ids where 0 is an anonymous hop |
-| `origin::Source::Peer(hop)` with a `Hop` | `origin::Source::Peer(id)` with a `u64` |
-| `Client::with_peer_hop(hop)`, `server::Handshake::with_peer_hop(hop)` | take a `NonZeroU64` |
-| `server::Handshake::peer_hop()` returns `Option<Hop>` | returns `Option<NonZeroU64>` |
-
 ### Snapshots split connected sessions into idle and active
 
 `stats::Snapshot::activity()` returns each tier's `stats::Activity`: connected sessions with
