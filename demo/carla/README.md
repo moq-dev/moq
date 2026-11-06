@@ -88,9 +88,10 @@ such as a reset right before a drive, still arrives whole.
 { "sequence": 44, "media_pipeline": [ { "label": "received→decoded", "ms": 12 } ] }
 ```
 
-Sent for each command the truck accepted from the lease holder, so the player
-measures its round trip and its own media pipeline. A bystander's e-stop, or a
-command the gate refused, gets none.
+Sent for each `drive`, `estop`, and `reset_estop` the truck accepted from the
+lease holder, so the player measures its round trip and its own media pipeline.
+A bystander's e-stop, a command the gate refused, or an accepted `respawn`
+(confirmed from `status` instead) gets none.
 
 ### Status (truck to every viewer)
 
