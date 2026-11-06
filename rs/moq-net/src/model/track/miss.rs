@@ -608,7 +608,16 @@ impl Misses {
 		if state.start_pending || !state.readable() && bound.is_none() {
 			return asks;
 		}
-		let Some(newest) = state.newest_produced.max(bound) else {
+		// A received stale run this reader cannot trust is still asked for, though nothing above
+		// it arrived; see `TrackState::unfed`. Only runs above the newest group need a look.
+		let unknown = state
+			.drops
+			.iter()
+			.rev()
+			.take_while(|(run, _)| state.newest_produced.is_none_or(|newest| run.end - 1 > newest))
+			.find(|(run, hole)| !drift.settles(state, run.start, hole))
+			.map(|(run, _)| run.end - 1);
+		let Some(newest) = state.newest_produced.max(bound).max(unknown) else {
 			return asks;
 		};
 		let at = (
@@ -1398,22 +1407,35 @@ impl TrackState {
 			unfed.insert(hole);
 			return (unfed, awaited);
 		}
-		let mut from = hole.start;
 		let grace = self.miss_grace();
 		let mut gap =
 			|groups: ops::Range<u64>, unfed: &mut RangeSet<u64>| match self.arrivals.folds_at(groups.start, grace) {
 				Some(at) if at <= now => unfed.insert(groups),
 				folds => awaited.push((groups, folds)),
 			};
-		for arrived in self.arrivals.accounted(from..hole.end) {
-			if from < arrived.start {
-				gap(from..arrived.start, &mut unfed);
+		// The upstream accounted for a received stale run, so the feed brings none of it unless
+		// an update supersedes the run.
+		let mut fed = RangeSet::new();
+		fed.insert(hole.clone());
+		for (run, given) in self.drops.overlapping(&hole) {
+			if given.stale_budget().is_some() {
+				let run = run.start.max(hole.start)..run.end.min(hole.end);
+				fed.remove(run.clone());
+				unfed.insert(run);
 			}
-			from = arrived.end;
-			unfed.insert(arrived);
 		}
-		if from < hole.end {
-			gap(from..hole.end, &mut unfed);
+		for hole in fed.iter() {
+			let mut from = hole.start;
+			for arrived in self.arrivals.accounted(hole.clone()) {
+				if from < arrived.start {
+					gap(from..arrived.start, &mut unfed);
+				}
+				from = arrived.end;
+				unfed.insert(arrived);
+			}
+			if from < hole.end {
+				gap(from..hole.end, &mut unfed);
+			}
 		}
 		(unfed, awaited)
 	}

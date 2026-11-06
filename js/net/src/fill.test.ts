@@ -774,6 +774,36 @@ test("fill: a stale run that does not settle the reader is still asked for", asy
 	broadcast.close();
 });
 
+// A stale verdict this reader cannot trust is asked for even when no group has arrived to
+// bound the misses, so the reader still settles. Mirrors Rust.
+test("fill: an unsettled stale run is asked for with nothing received", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video", { maxAge: null });
+	hooks.receiveTrack(track);
+	const requests = track.requests();
+	// The upstream judged ranges ending at 6 under 500ms, and gave up both of them as stale.
+	hooks.supersedeStale(track, 6n);
+	hooks.dropTrackGroups(track, 0n, 2n, staleHole(500));
+	hooks.dropTrackGroups(track, 4n, 6n, staleHole(500));
+	// The same ranges: only the last one is contiguous to the judged end, so the first is unknown.
+	const reader = track.subscribe({
+		ranges: [
+			{ start: { absolute: 0n }, end: { absolute: 2n } },
+			{ start: { absolute: 4n }, end: { absolute: 6n } },
+		],
+		delay: { max: Milli(500) },
+	});
+	const done = drain(reader).then(() => "done");
+	const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+	expect(fill && [fill.start, fill.end]).toEqual([0n, 2n]);
+	fill?.close();
+	expect(await Promise.race([done, yieldNow().then(() => "pending")])).toBe("done");
+
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
 test("fill: a cache-miss fetch of a dynamic track serves the one track the broadcast already has", async () => {
 	const broadcast = new BroadcastProducer();
 	// Pulled first, so the broadcast serves tracks on demand.

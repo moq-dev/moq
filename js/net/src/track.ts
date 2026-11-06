@@ -2919,10 +2919,16 @@ export class Subscriber {
 			const budget = drift.budget;
 			const coverage = this.#coverage();
 			const drops = this.#state.drops.peek();
-			for (const run of this.#wants(
-				floor === undefined ? start : max(start, floor),
-				min(end, max(this.#state.received.peek(), (fillEdge(producer) ?? -1n) + 1n)),
-			)) {
+			const low = floor === undefined ? start : max(start, floor);
+			const edge = min(end, max(this.#state.received.peek(), (fillEdge(producer) ?? -1n) + 1n));
+			const spans: Run[] = [{ start: low, end: edge }];
+			// The upstream accounted for a stale run, so the live feed brings none of it unless an
+			// update supersedes it: asked even above the newest group received.
+			for (const dropped of drops) {
+				const span = { ...dropped, start: max(dropped.start, max(low, edge)), end: min(dropped.end, end) };
+				if (span.start < span.end && !settles(span, budget, coverage, this.#state.judgedEnd)) spans.push(span);
+			}
+			for (const run of spans.flatMap((span) => this.#wants(span.start, span.end))) {
 				const gone = [...accounted];
 				for (const dropped of drops) {
 					if (dropped.end <= run.start || run.end <= dropped.start) continue;

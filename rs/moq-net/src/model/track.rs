@@ -22641,6 +22641,39 @@ mod test {
 		assert_eq!((fill.start().group, fill.end()), (0, 3));
 	}
 
+	/// A stale verdict a reader cannot trust is asked for even when no group arrived to bound
+	/// the misses, so the reader still settles. Mirrors JS.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unsettled_stale_run_is_asked_for_with_nothing_received() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		let dynamic = producer.requests();
+		let budget = Duration::from_millis(500);
+		// The upstream judged ranges ending at 6 under 500ms, and gave up both of them as stale.
+		producer.supersede_stale(Some(6));
+		producer.give_up(0..2, Hole::stale(budget));
+		producer.give_up(4..6, Hole::stale(budget));
+		// The same ranges: only the last one is contiguous to the judged end, so the first is
+		// unknown.
+		let mut subscriber = producer.subscribe(
+			Subscription::default()
+				.with_delay(Delay::default().with_max(budget))
+				.with_ranges([Range::groups(0..2), Range::groups(4..6)]),
+		);
+		let waiter = kio::Waiter::noop();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the unsettled stale run is asked for");
+		};
+		assert_eq!((fill.start().group, fill.end()), (0, 2));
+		drop(fill);
+		assert!(
+			matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))),
+			"nothing is owed once the fill gave up"
+		);
+	}
+
 	/// Creating a group past the next sequence says nothing about the gap: groups may be
 	/// created out of order, so a late one in it still reaches readers, and nothing is skipped.
 	#[test]
