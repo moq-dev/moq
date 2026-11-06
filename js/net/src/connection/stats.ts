@@ -103,17 +103,50 @@ export interface TransportStats {
 	packetsLost?: number;
 }
 
+// Transports whose `getStats()` is a stub that measures nothing.
+const stubs = new WeakSet<WebTransport>();
+
+/**
+ * Decide at setup whether `quic`'s `getStats()` measures anything. Safari's is a stub
+ * whose `smoothedRtt` and counters are always 0, and QUIC's smoothed RTT starts at
+ * 333 ms, so a 0 means nothing was measured: the transport is then treated as having
+ * no `getStats()` at all. Only this setup-time call decides, so a real RTT from a
+ * later WebKit lifts the rule.
+ *
+ * @internal
+ */
+export async function inspect(quic: WebTransport): Promise<void> {
+	const getStats = (quic as { getStats?: () => Promise<TransportStats> }).getStats;
+	if (typeof getStats !== "function") return;
+	try {
+		if ((await getStats.call(quic)).smoothedRtt === 0) stubs.add(quic);
+	} catch {
+		// A transport that can't answer now may later; `transportStats` handles the rejection.
+	}
+}
+
+/**
+ * `quic`'s `getStats()`, or `undefined` when it has none or {@link inspect} found a stub.
+ *
+ * @internal
+ */
+export function statsOf(quic: WebTransport): (() => Promise<TransportStats>) | undefined {
+	const getStats = (quic as { getStats?: () => Promise<TransportStats> }).getStats;
+	if (typeof getStats !== "function" || stubs.has(quic)) return undefined;
+	return () => getStats.call(quic);
+}
+
 /**
  * Snapshot `quic` via `getStats()`, or an empty snapshot when the transport doesn't
- * implement it (older browsers) or the call fails.
+ * implement it (older browsers), it is a stub, or the call fails.
  *
  * @internal
  */
 export async function transportStats(quic: WebTransport): Promise<Stats> {
-	const getStats = (quic as { getStats?: () => Promise<TransportStats> }).getStats;
-	if (typeof getStats !== "function") return {};
+	const getStats = statsOf(quic);
+	if (!getStats) return {};
 	try {
-		const stats = await getStats.call(quic);
+		const stats = await getStats();
 		return {
 			rtt: stats.smoothedRtt !== undefined ? Milli(stats.smoothedRtt) : undefined,
 			estimatedSendRate: stats.estimatedSendRate ?? undefined,
@@ -130,16 +163,14 @@ export async function transportStats(quic: WebTransport): Promise<Stats> {
 }
 
 /**
- * Whether `quic` can report a send-rate estimate: only a WebTransport session with
- * `getStats()`. The WebSocket fallback's qmux session reports no counters, the WebRTC
- * data channel's throws, and shipping Chromium implements none. Safari's always reports a
- * null estimate, so it is sampled but reads `undefined`.
+ * Whether `quic` can report a send-rate estimate: only a WebTransport session with a
+ * real `getStats()`. The WebSocket fallback's qmux session reports no counters, the WebRTC
+ * data channel's throws, shipping Chromium implements none, and Safari's is a stub.
  *
  * @internal
  */
 export function canEstimate(quic: WebTransport): boolean {
-	if (transportOf(quic) !== "webtransport") return false;
-	return typeof (quic as { getStats?: unknown }).getStats === "function";
+	return transportOf(quic) === "webtransport" && statsOf(quic) !== undefined;
 }
 
 // The sessions whose transport can report a send-rate estimate.

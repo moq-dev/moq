@@ -226,7 +226,7 @@ export class Reload {
 	 * while a reservation reads it, so the first reservation after none waits one
 	 * snapshot for its slice. It stays `undefined` on a transport that cannot
 	 * report one: the WebSocket fallback, WebRTC, WebTransport without
-	 * `getStats()`, or Safari's, whose estimate is always null.
+	 * `getStats()`, or Safari's stub, which reads as none.
 	 */
 	readonly allocator: Allocator;
 
