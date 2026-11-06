@@ -30,7 +30,6 @@ padding probes in [lite07-finalize](/quest/m2/lite07-finalize.md).
 
 ## Required
 
-- [Datagram answer race](/quest/m1/datagram-tracks/answer-race.md) - claim held datagram-tracks
 - [IETF datagram tracks](/quest/m1/datagram-tracks/ietf.md) - claim held datagram-tracks
 - [rind CPU error](/quest/m1/rind/cpu-error.md) - claim held rind
 - [Connect policy](/quest/m1/session-policy/connect.md) - claim held session-policy
