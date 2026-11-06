@@ -51,14 +51,6 @@ function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
  * Resumed readers backfill superseded groups, so it sets no publisher limit.
  */
 function copy(source: BroadcastProducer) {
-	const copied = authoredCopy(source);
-	// A route's copy is received, so its groups arrive in any order.
-	hooks.receiveTrack(copied.producer);
-	return copied;
-}
-
-/** A {@link copy} its source writes itself, so no live feed owes the groups it lacks. */
-function authoredCopy(source: BroadcastProducer) {
 	const producer = source.createTrack("seq", { maxAge: null });
 	return {
 		producer,
@@ -283,9 +275,7 @@ test("a backfill waits on a fill the finished route still owes", async () => {
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
-	// A received copy would owe the groups below its first arrival to its live feed for the
-	// reader's grace, an hour here, before a fill may serve them.
-	const [ta, tb] = sources.map(authoredCopy);
+	const [ta, tb] = sources.map(copy);
 	const requests = tb.producer.requests();
 	const fills: track.Fill[] = [];
 	void (async () => {
