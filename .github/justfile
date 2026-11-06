@@ -12,7 +12,7 @@ test:
     python3 sh/gh/install-formula.test.py
     sh/gh/release.test.sh
     python3 sh/gh/ffi.test.py
-    bun test sh/gh/ffi.test.ts
+    bun test sh/gh/ffi.test.ts sh/gh/publish.test.ts
     python3 sh/rs/package-rename.test.py
     sh/go/publish-wrapper.test.sh
     bash .claude/hooks/direnv.test.sh

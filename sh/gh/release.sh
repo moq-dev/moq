@@ -239,9 +239,10 @@ maven_exists() {
 # wrappers build against bindings generated from this checkout but depend on
 # the published moq-ffi, so releasing one while this is true can ship calls to
 # FFI API that no published moq-ffi has. Callers defer instead: release-plz
-# bumps and tags moq-ffi, and each language's FFI release re-triggers its
-# wrapper release via workflow_run. A tag missing from the checkout (which
-# needs fetch-depth: 0) means that release is mid-flight, so it counts too.
+# bumps and tags moq-ffi, and each language's FFI release then releases its
+# wrapper (Kotlin by calling release-kt-lib, the others via workflow_run). A
+# tag missing from the checkout (which needs fetch-depth: 0) means that
+# release is mid-flight, so it counts too.
 # Writes unreleased=true|false to $GITHUB_OUTPUT.
 ffi_unreleased() {
     local version="$1"
