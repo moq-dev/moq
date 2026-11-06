@@ -13,8 +13,20 @@ upstream bandwidth.
 Each broadcast carries the list of relays it passed through. That hop list
 catches loops and picks the shortest route, and every relay breaks ties the
 same way so the cluster converges instead of flapping. Both wire protocols
-carry it: natively on moq-lite, and via the [cluster extension](/draft/moq-cluster)
-on moq-transport.
+carry it: natively on moq-lite up to moq-lite-06, and via the
+[cluster extension](/draft/moq-cluster) on moq-transport.
+
+moq-lite-07-wip carries no hop list. Each publishing node declares a random
+routing identity, and relays run a distance-vector route to it, loop-free by
+Babel's feasibility condition, so every claim of one origin shares that route.
+The first relay a request reaches picks the origin node, by a hash of the path
+and the node's identity that every relay computes alike, and names it on the
+request so later hops follow their own route to that node. A relay running both
+versions translates: a moq-lite-06 peer's routes enter the route layer as the
+relay's own claims, and lite-07 routes reach a moq-lite-06 peer as a hop list
+that starts at their origin node. A relay drops a moq-lite-06 route whose hop
+list names its own routing identity, since that is one of its claims coming
+back.
 
 A track from a moq-transport publisher keeps its Object IDs, object properties,
 and END\_OF\_GROUP status objects across a moq-lite-07 link, since relays
@@ -94,8 +106,9 @@ max_hops = 6
 ```
 
 The same setting is `--cluster-max-hops` or `MOQ_CLUSTER_MAX_HOPS`. It covers
-moq-lite-03 through moq-lite-07-wip and moq-transport drafts 18 through 22 when
-the MoQ Cluster extension is negotiated. A forwarded path counts this relay's
+moq-lite-03 through moq-lite-06 and moq-transport drafts 18 through 22 when
+the MoQ Cluster extension is negotiated. moq-lite-07-wip routes carry no hop
+path, so it does not bound them. A forwarded path counts this relay's
 own hop even when its peer appends it on receipt. Older versions and peers
 without hop paths hide their depth, which this setting cannot bound.
 

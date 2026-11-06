@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### moq-lite-07 routes through the route layer ([#8023](https://github.com/moq-dev/moq/pull/8023))
+
+moq-lite-07-wip (opt-in) replaces the hop list with routes: each origin node declares a random routing identity, every session on an origin feeds one router, and a request names the origin node the first hop picked. Older versions are unchanged. On moq-lite-07:
+
+- A relay built on the library must opt into proxying, or its peers are sent only the routes to its origin's own claims: publish `origin.clone().with_proxy(true)`, or mark one consumer with `consumer.with_proxy(true)`. `moq-relay` does this for every session; an application publishing only its own broadcasts leaves it off.
+- A link cost of 0 is refused at SETUP: `Client::with_cost(0)` fails the session. Use 1, the price of an unpriced link.
+- A route carries no hop chain. `RouteInfo::hops()` on a route learned over moq-lite-07 names only its origin node, and `origin::Config::max_hops` does not bound it: routes are loop-free by feasibility instead.
+- ANNOUNCE_TAKEOVER is never sent. A job answering a claim at the claim's own path arrives as a restart, and one beneath it as a start, until [announce takeover](https://github.com/moq-dev/moq/blob/main/quest/m2/announce-takeover.md) carries the claim's instance onto the job.
+- A pool's paths spread by a hash of the path and each origin node's routing identity, which every relay computes alike, rather than by publisher instance, so every relay picks the same origin for a path.
+
 ### Socket readers start at the beginning
 
 New `track` socket sessions subscribe from group 0, and `tcp` sessions join their
