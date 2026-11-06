@@ -22,7 +22,7 @@ Trust this checkout's source over published API references, which may describe a
 
 The API is the most important thing to get right: a bad shape costs a breaking change in every language.
 
-- PRs never edit `MIGRATE.md`: a breaking PR puts its migration note in its Impact section, and the release cut writes it into the package's guide.
+- Only the release cut edits `MIGRATE.md`: a breaking PR puts its migration note in its Impact section, and the cut writes it into the package's guide.
 - Replace a callback parameter with a handle, an event, or a Producer/Consumer split.
 - Nest related API, configuration, and output fields under their shared role.
 - Propose alternatives when a name or shape feels awkward.
