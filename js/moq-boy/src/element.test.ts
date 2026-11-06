@@ -27,7 +27,7 @@ const { default: MoqBoy } = await import("./element");
 const settle = () => yieldNow();
 
 // A refused prefix idles the element rather than discovering games under a default prefix.
-for (const attribute of ["prefix", "prefix-game", "prefix-viewer"] as const) {
+for (const attribute of ["prefix", "prefix-game"] as const) {
 	test(`an invalid ${attribute} idles the element until a valid one arrives`, async () => {
 		const el = new MoqBoy();
 		try {

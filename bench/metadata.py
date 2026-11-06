@@ -57,8 +57,8 @@ metadata = {
     },
     "profile": "profiling" if mode == "--profile" else "release",
     "features": {
-        "--runtime": "default + moq-relay/io-uring,moq-bench/uring",
-        "--profile": "default + moq-relay/io-uring,moq-bench/uring; heap adds moq-relay/jemalloc",
+        "--runtime": "default + moq-relay/io-uring",
+        "--profile": "default + moq-relay/io-uring; heap adds moq-relay/jemalloc",
         "--criterion": "see criterion-command.json",
     }.get(mode, "default"),
     "mode": mode,
