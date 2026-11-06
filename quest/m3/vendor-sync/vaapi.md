@@ -16,9 +16,9 @@ says how each run works and recurs. moq-vaapi lives in its own repository and
 ships from crates.io for build reasons; its README's `Upstream` section is the
 record.
 
-moq-vaapi vendors Discord's forks: cros-libva tag `discord-0.0.13`
+moq-vaapi vendors Discord's forks: cros-libva branch `discord-0.0.13`
 ([`896a248e`](https://github.com/discord/cros-libva/commit/896a248e003caae7a7120812f7eaa423c93a920d))
-and cros-codecs tag `discord-0.0.5`
+and cros-codecs branch `discord-0.0.5`
 ([`9cdecb19`](https://github.com/discord/cros-codecs/commit/9cdecb192ee3682950d02bd80a7f106163531b76)).
 Track the ChromeOS default branches against these diverged baselines, without
 undoing Discord's additions.
