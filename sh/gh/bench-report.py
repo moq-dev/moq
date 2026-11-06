@@ -108,7 +108,10 @@ def paired(directory):
 
 
 def gate(directory):
-    """Print confirmed paired regressions and what was not compared; nonzero on a regression or a comparison that could not run."""
+    """Print confirmed paired regressions and what was not compared.
+
+    Nonzero on a regression or a comparison that could not run.
+    """
     path = directory / "paired.json"
     if not path.exists():
         raise ValueError(f"no paired comparison in {directory}")
