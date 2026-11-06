@@ -882,13 +882,14 @@ class Reader implements ResumeSource {
 		return undefined;
 	}
 
-	// Whether `copy`, bounded where it was replaced, ran out under that bound: its track ended and
-	// holds nothing there unread. Its subscriber would park on a group past the bound instead, as
-	// one past a local cap waits for it to rise, but the reader moves this bound itself by asking
-	// again. Mirrors the Rust arrival cursor ending on a complete track.
+	// Whether `copy`, bounded where it was replaced, ran out under that bound: its track ended, no
+	// fill still owes it a group, and it holds nothing there unread. Its subscriber would park on a
+	// group past the bound instead, as one past a local cap waits for it to rise, but the reader
+	// moves this bound itself by asking again. Mirrors the Rust arrival cursor ending on a complete
+	// track. Judged right after a read, which records whether it waits on a fill.
 	#drained(copy: Copy, delivered: Delivered): boolean {
 		const end = copyEnd(copy);
-		if (end === undefined) return false;
+		if (end === undefined || hooks.awaitsFill(copy.sub)) return false;
 		const start = max(this.#shell.cursor.peek().start, copy.floor ?? 0n);
 		return hooks.spent(copy.sub, start, end, delivered);
 	}

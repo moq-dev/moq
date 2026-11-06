@@ -604,6 +604,8 @@ export const hooks: {
 	 * Whether a subscriber's track ended and it holds nothing left to read: no group in `[start, end)` that `delivered` lacks.
 	 */
 	spent: (subscriber: Subscriber, start: bigint, end: bigint | undefined, delivered: Delivered) => boolean;
+	/** Whether a subscriber's last read waits on a fill that still owes it a group. Mirrors the Rust `awaits_fill`. */
+	awaitsFill: (subscriber: Subscriber) => boolean;
 	/**
 	 * Mark a wire publisher's reader to park past the end of a bounded window rather than end the
 	 * read there, since its peer reads the end of a stream as the track's. Mirrors the Rust
@@ -891,6 +893,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	spent: () => {
+		throw new Error("track.ts not loaded");
+	},
+	awaitsFill: () => {
 		throw new Error("track.ts not loaded");
 	},
 	parked: () => {
