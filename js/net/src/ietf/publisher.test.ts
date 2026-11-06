@@ -2691,7 +2691,7 @@ test.each(["ascending", "descending"] as const)("draft-22: a wider fill is refus
 		const fill = await nextUni(fx.uni);
 		if (!fill) throw new Error("missing fill stream");
 		const served = await readFill(fill, order);
-		expect(served.reset).toBeDefined();
+		expect(served.reset).toBeInstanceOf(StreamError);
 		expect(served.objects).toEqual([]);
 		const live = track.appendGroup();
 		live.writeFrame({ payload: new TextEncoder().encode("live"), timestamp: Timestamp.now() });
