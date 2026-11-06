@@ -352,6 +352,17 @@ export interface StreamCredit {
 	blocked: boolean;
 }
 
+/** What a send stream has sent so far, the shape of W3C WebTransport's `WebTransportSendStreamStats`. */
+export interface SendStreamStats {
+	/** The bytes written to the stream. */
+	bytesWritten: number;
+	/** The bytes handed to the WebSocket. */
+	bytesSent: number;
+	/** The bytes the peer has acknowledged, which are `bytesSent`: QMux acknowledges data once
+	 *  it is passed to the underlying transport. */
+	bytesAcknowledged: number;
+}
+
 /** Options for opening a QMux Session over WebSocket. */
 export interface SessionOptions extends WebTransportOptions {
 	/** Application-level subprotocols to advertise via `Sec-WebSocket-Protocol`.
@@ -1701,7 +1712,13 @@ export default class Session implements WebTransport {
 		await scheduler.enqueueStream(streamId, bytes);
 	}
 
-	async #sendStreamDataWithFlowControl(id: Stream.Id, streamId: bigint, data: Uint8Array, signal: AbortSignal) {
+	async #sendStreamDataWithFlowControl(
+		id: Stream.Id,
+		streamId: bigint,
+		data: Uint8Array,
+		signal: AbortSignal,
+		stats: SendStreamStats,
+	) {
 		const flow = this.#streamFlow.get(streamId);
 		if (!flow) throw new Error(`missing flow state for stream ${streamId}`);
 
@@ -1738,13 +1755,16 @@ export default class Session implements WebTransport {
 
 			flow.sendOffset += BigInt(sendable);
 			offset += sendable;
+			stats.bytesSent += sendable;
+			stats.bytesAcknowledged = stats.bytesSent;
 		}
 	}
 
-	async #sendStreamData(id: Stream.Id, data: Uint8Array, signal: AbortSignal) {
+	async #sendStreamData(id: Stream.Id, data: Uint8Array, signal: AbortSignal, stats: SendStreamStats) {
 		const streamId = id.value.value;
 
-		await this.#sendStreamDataWithFlowControl(id, streamId, data, signal);
+		stats.bytesWritten += data.byteLength;
+		await this.#sendStreamDataWithFlowControl(id, streamId, data, signal, stats);
 	}
 
 	/** Send the FIN. Routed through the stream's own queue so it stays ordered
@@ -1908,6 +1928,7 @@ export default class Session implements WebTransport {
 	/** The writable for a stream's send half. */
 	#sendWritable(id: Stream.Id, sendOrder: number): WritableStream<Uint8Array> {
 		const streamId = id.value.value;
+		const stats: SendStreamStats = { bytesWritten: 0, bytesSent: 0, bytesAcknowledged: 0 };
 		let signal!: AbortSignal;
 		const reset = (e: unknown) => {
 			this.#scheduler?.dropStream(streamId, e instanceof Error ? e : new Error("stream aborted"));
@@ -1941,7 +1962,7 @@ export default class Session implements WebTransport {
 				);
 			},
 			write: async (chunk, controller) => {
-				await this.#sendStreamData(id, chunk, controller.signal);
+				await this.#sendStreamData(id, chunk, controller.signal, stats);
 			},
 			abort: reset,
 			close: async () => {
@@ -1960,6 +1981,11 @@ export default class Session implements WebTransport {
 			},
 		});
 		this.#attachSendOrder(writable, streamId, sendOrder);
+		// W3C `WebTransportSendStream.getStats()`, so a caller can tell what the peer has.
+		Object.defineProperty(writable, "getStats", {
+			configurable: true,
+			value: async (): Promise<SendStreamStats> => ({ ...stats }),
+		});
 		return writable;
 	}
 

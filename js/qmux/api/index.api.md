@@ -24,6 +24,12 @@ export type SendStreamOptions = WebTransportSendStreamOptions & {
 	waitUntilAvailable?: boolean;
 };
 
+export interface SendStreamStats {
+	bytesAcknowledged: number;
+	bytesSent: number;
+	bytesWritten: number;
+}
+
 export class SessionError extends Error implements Pick<WebTransportError, "source" | "streamErrorCode"> {
 	constructor(message: string, options?: {
 		cause?: unknown;

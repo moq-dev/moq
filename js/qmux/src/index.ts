@@ -3,7 +3,15 @@ import type { Version } from "./session.ts";
 import Session from "./session.ts";
 
 export { SessionError, StreamError } from "./error.ts";
-export type { AcceptOptions, Config, SendStreamOptions, SessionOptions, StreamCredit, Version } from "./session.ts";
+export type {
+	AcceptOptions,
+	Config,
+	SendStreamOptions,
+	SendStreamStats,
+	SessionOptions,
+	StreamCredit,
+	Version,
+} from "./session.ts";
 export { selectSubprotocol } from "./session.ts";
 export type {
 	WebSocketLike,
