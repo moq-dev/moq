@@ -74,7 +74,7 @@ import { clamped, type Resolved, type Window } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
 // Stream codes that report the route failing to deliver rather than judging what it carried:
-// another copy may still deliver what it failed. Mirrors the Rust `route_failed`.
+// another copy may still deliver what it failed. Mirrors the Rust `Error::retryable`.
 const ROUTE_FAILURES: ReadonlySet<number> = new Set([
 	StreamCode.Internal,
 	StreamCode.Cancel,
@@ -113,7 +113,7 @@ function closing(err: Error): boolean {
 
 // A source losing its route to the content: only another route continues it, since asking the
 // same one again could only replace the withdrawal's cause with a refusal. Mirrors the Rust
-// `unroutable`.
+// `Error::unroutable`.
 function unroutable(err: Error): boolean {
 	return err instanceof StreamError && err.code === StreamCode.Unroutable;
 }
