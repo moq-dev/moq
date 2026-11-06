@@ -542,11 +542,24 @@ async fn fetches(
 
 /// Spawn one fill, taking a slot of `limit` for each group it transcodes.
 fn spawn_fill(tasks: &mut tokio::task::JoinSet<()>, rung: Rung, mut fill: moq_net::track::Fill, limit: Arc<Semaphore>) {
+	let mut retire = rung.retire.clone();
 	tasks.spawn(async move {
-		// A group at a time as its readers pick them up, so a wide fetch never evicts its own
-		// earlier groups before they are read. The slot is released before waiting on them, so
-		// a reader that stops reading never holds an encoder session.
-		while let Some(sequence) = fill.wanted_changed().await {
+		let mut last = None;
+		loop {
+			// A group at a time as its readers pick them up, so a wide fetch never evicts its
+			// own earlier groups before they are read. The slot is released before waiting on
+			// them, so a reader that stops reading never holds an encoder session.
+			//
+			// Once retired, the track ends only after this drain, so serve what is still owed
+			// without waiting on a reader that may never read again. Each group once: one this
+			// fill left unanswered is not asked for again.
+			let sequence = tokio::select! {
+				biased;
+				() = retire.fired() => fill.wanted().filter(|sequence| last != Some(*sequence)),
+				sequence = fill.wanted_changed() => sequence,
+			};
+			let Some(sequence) = sequence else { break };
+			last = Some(sequence);
 			let _permit = limit.acquire().await.expect("the semaphore stays open");
 			if let Err(err) = fetch(&rung, &fill, sequence).await {
 				tracing::warn!(%err, sequence, "transcode fetch failed");
@@ -989,6 +1002,63 @@ mod tests {
 			.expect("the fill waited behind group 7, which nobody reads")
 			.unwrap();
 		assert_eq!(next.start().group, 8);
+	}
+
+	/// Retirement's drain finishes a fill whose reader stopped reading: the groups still owed
+	/// are served without waiting for that reader to pick up the last one.
+	#[tokio::test(start_paused = true)]
+	async fn retirement_serves_a_fill_past_a_reader_that_stopped() {
+		use std::task::Poll;
+		let (rung, source, retire) = idle_rung();
+		let source_fills = source.create_track("video", None).unwrap().requests();
+
+		let output = moq_net::broadcast::Info::default().produce();
+		let timed = moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(hang::container::MAX_AGE);
+		let mut track = output.create_track("video/120p", timed).unwrap();
+		let fills = track.requests();
+		let mut reader = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(None))
+				.with_range(7..)
+				.with_order(moq_net::track::Order::Ascending),
+		);
+		track.start_at(10).unwrap();
+		let mut live = track.create_group(moq_net::group::Info { sequence: 10 }).unwrap();
+		live.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"x"[..])
+			.unwrap();
+		live.finish().unwrap();
+		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
+		let fill = fills.requested_fill().await.unwrap();
+		assert_eq!((fill.start().group, fill.end()), (7, 10));
+
+		// Group 7 is served, and the reader never reads again to pick it up.
+		fill.clone().accept(7, None).unwrap().finish().unwrap();
+		let mut tasks = tokio::task::JoinSet::new();
+		spawn_fill(&mut tasks, rung, fill, Arc::new(Semaphore::new(1)));
+		let wait = std::time::Duration::from_secs(5);
+		assert!(
+			kio::clock::timeout(wait, source_fills.requested_fill()).await.is_err(),
+			"group 8 waits for a reader to pick up group 7"
+		);
+
+		retire.send(true).unwrap();
+		for sequence in 8..10 {
+			let requested = kio::clock::timeout(wait, source_fills.requested_fill())
+				.await
+				.expect("a retired rung serves what its fill still owes")
+				.unwrap();
+			assert_eq!(requested.start().group, sequence);
+			// The source no longer has it, so the fill drops it and moves on.
+			requested.drop_groups(sequence..sequence + 1);
+		}
+		kio::clock::timeout(wait, tasks.join_next())
+			.await
+			.expect("the drain finishes")
+			.unwrap()
+			.unwrap();
 	}
 
 	/// A restarted source cancels the serving future even while a rung waits for media.
