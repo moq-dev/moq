@@ -4099,7 +4099,11 @@ mod tests {
 			(
 				ietf::Subscribe::ID,
 				// A Retry Interval of 1000ms, as a draft-18 varint.
-				frame(VERSION, ietf::RequestError::ID, &[&[0x6, 0x83, 0xe8][..], &body[1..]].concat()),
+				frame(
+					VERSION,
+					ietf::RequestError::ID,
+					&[&[0x6, 0x83, 0xe8][..], &body[1..]].concat(),
+				),
 			),
 		] {
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
