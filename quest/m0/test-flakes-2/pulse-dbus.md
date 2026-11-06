@@ -24,17 +24,34 @@ main. A scratch copy restoring the daemon's session-bus inheritance fails
 with `D-Bus name org.PulseAudio1 already taken` under the test's private bus.
 No desktop services were modified. No remaining launch path has been reproduced.
 
-Two overlapping `just test media --media-cases none` runs in the Nix shell
-both stop before browser startup: the relay rejects `MOQ_QUEST`, which the
-shell exports. Concurrent Bun installs also collide in the shared
-`node_modules` (`EEXIST`/`ENOENT`). Do not infer an audio result from these runs.
+2026-11-06 validation: main includes the merged
+[dev-shell environment fix](https://github.com/moq-dev/moq/pull/7979).
+`nix develop --command quest gate bun install --frozen-lockfile` and
+`nix develop --command python3 test/lib/pulse.test.py` pass.
 
-After the shell fix lands, finish dependency installation before starting
-the overlapping runs. If those pass, retire this duplicate quest; otherwise
-trace the failing daemon from its run's `pulse.log` and isolate that source.
+The previous `--media-cases none` command now selects an empty focused case
+set, which the browser runner rejects. Validate two overlapping
+`just test media --media-cases pause` runs instead, without changing the
+harness environment. Dependency installation is complete before overlap.
+
+The overlapping pause runs both failed after reaching playback (2026-11-06
+06:53 UTC): run `interop-JSI7CQaU` failed `resume takes effect` with the
+presented frame stuck at 31; run `interop-om6rAC4x` failed `audio tone` after
+resume (63/75 samples). The latter recorded host idle time of 0.1–2.9%,
+which suggests contention but does not establish the cause.
+
+Both runs' `pulse-1/pulse.log` show `Daemon startup complete.`, independent
+runtime directories and normal SIGTERM teardown. Neither reports a D-Bus
+name collision. Both warn that D-Bus autolaunch is unavailable without
+`DISPLAY`, then successfully start. No failing daemon launch was found.
+The relay environment rejection and Bun install collisions did not recur.
+
+These runs do not meet the requested passing-overlap condition for retirement.
+Keep the existing isolation. Investigate the resume failures separately before
+claiming an overlap pass; do not infer a PulseAudio defect from these failures.
 
 Public API: none. Wire: none.
 
 ## Waiting
 
-- moq-dev/moq: land [the dev-shell environment fix](https://github.com/moq-dev/moq/pull/7979), then rerun overlapping media cases without altering the harness environment. Recommendation: retain the existing isolation unless a remaining audio collision is reproduced.
+- Maintainer: choose whether to retain this quest pending a passing overlap or retire it based on the existing daemon-isolation test and successful daemon startups. Recommend retaining it pending validation of the resume failures; the requested passing-overlap condition was not met. An agent cannot authorize deletion.
