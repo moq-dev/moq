@@ -20,6 +20,7 @@ mod view;
 mod tests;
 
 use std::{
+	borrow::Cow,
 	cmp::Reverse,
 	collections::{BTreeMap, BTreeSet},
 	fmt,
@@ -30,7 +31,7 @@ use crate::Path;
 
 pub use proof::RouteKey;
 pub(crate) use proof::{EXPORTER_LABEL, Proof, Transcript};
-pub(crate) use view::{View, overlaps, within};
+pub(crate) use view::{View, within};
 
 /// An opaque routing identity, declared by an origin or derived by [`Scope`].
 pub(crate) type Id = u64;
@@ -141,13 +142,15 @@ pub(crate) enum Reach {
 pub(crate) enum Out<N, A> {
 	/// ROUTE_START or ROUTE_UPDATE, ROUTE_HOLD for a held reach, or ROUTE_END for `None`.
 	Route { to: N, id: Id, reach: Option<Reach> },
-	/// A batch of announcement changes for `id`, closed by its floor list, which
-	/// replaces the last one sent for that route.
+	/// A batch of announcement changes for `id`, as the neighbor's request presents
+	/// them, closed by ANNOUNCE_FLOOR: the revision the stream's claims for the route
+	/// are the origin's at, across the neighbor's whole interest, or `None` when this
+	/// node does not know them there at one revision.
 	Batch {
 		to: N,
 		id: Id,
 		changes: Vec<(Path, Option<A>)>,
-		floors: BTreeMap<Path, Rev>,
+		floor: Option<Rev>,
 	},
 	/// ROUTE_REQUEST, toward the neighbor whose route this node would use.
 	Request { to: N, id: Id, seqno: Seqno },
@@ -240,6 +243,9 @@ struct Peer {
 	draining: bool,
 	/// The prefix the neighbor asked this node for, once it opened a stream.
 	watch: Option<Path>,
+	/// The prefix this node asked the neighbor for, which its floors certify; the
+	/// node's interest when unset.
+	asked: Option<Path>,
 }
 
 /// An identity this node serves itself.
@@ -367,6 +373,7 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 				link,
 				draining: false,
 				watch: None,
+				asked: None,
 			},
 		);
 		// Nothing is sent or learned until a stream opens.
@@ -413,6 +420,14 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 		peer.watch = Some(prefix);
 		self.sent_views.retain(|(_, to), _| *to != neighbor);
 		self.update_all();
+		Ok(())
+	}
+
+	/// This node asked `neighbor` for announcements under `prefix`: the region its
+	/// floors certify.
+	pub fn asks(&mut self, neighbor: N, prefix: Path) -> Result<(), Error> {
+		let peer = self.neighbors.get_mut(&neighbor).ok_or(Error::UnknownNeighbor)?;
+		peer.asked = Some(prefix);
 		Ok(())
 	}
 
@@ -632,15 +647,10 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 	}
 
 	/// A batch of announcement changes for `named` from `from`, closed by its
-	/// floor list, on the stream answering interest generation `interest`.
-	pub fn batch(
-		&mut self,
-		from: N,
-		named: Id,
-		changes: Vec<(Path, Option<A>)>,
-		floors: BTreeMap<Path, Rev>,
-		interest: u32,
-	) {
+	/// floor, on the stream answering interest generation `interest`. A floor
+	/// certifies the whole region this node asked for at that revision; `None`
+	/// certifies nothing, so the stream's claims stay only while it carries them.
+	pub fn batch(&mut self, from: N, named: Id, changes: Vec<(Path, Option<A>)>, floor: Option<Rev>, interest: u32) {
 		let Some(peer) = self.neighbors.get(&from) else {
 			return;
 		};
@@ -652,6 +662,8 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 			return;
 		};
 		let scope = peer.link.scope.as_ref().map(|scope| scope.regions.clone());
+		let region = peer.asked.clone().unwrap_or_else(|| self.watch.clone());
+		let floors = floor.map(|rev| BTreeMap::from([(region, rev)])).unwrap_or_default();
 		let heard = self.heard.entry((id, from)).or_insert_with(|| Heard {
 			raw: View::default(),
 			view: View::default(),
@@ -664,7 +676,7 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 		}
 		heard.raw.apply(changes, floors);
 		heard.view = match &scope {
-			Some(regions) => heard.raw.restrict_all(regions),
+			Some(regions) => heard.raw.present_all(regions),
 			None => heard.raw.clone(),
 		};
 		let view = heard.view.clone();
@@ -1041,18 +1053,58 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 	fn forgot_outside(&mut self, id: Id, kept: &[Path]) {
 		#[cfg(test)]
 		for ((key, claim), count) in self.forgot.iter_mut() {
-			if *key == id && !kept.iter().any(|region| overlaps(claim, region)) {
+			if *key == id && !kept.iter().any(|region| within(claim, region)) {
 				*count += 1;
 			}
 		}
 	}
 
-	/// The view this node shows and forwards for `id`, having selected `route`.
-	fn adopted(&self, id: Id, route: Option<Selected<N>>) -> Option<&View<A>> {
+	/// The view this node shows and forwards for `id`, having selected `route`: what
+	/// it knows certified, and each claim a certifier carries uncertified where no
+	/// floor it knows covers the claim.
+	fn adopted(&self, id: Id, route: Option<Selected<N>>) -> Option<Cow<'_, View<A>>> {
 		if let Some(origin) = self.origins.get(&id) {
-			return Some(&origin.view);
+			return Some(Cow::Borrowed(&origin.view));
 		}
-		self.live(id, route).then(|| self.views.get(&id)).flatten()
+		if !self.live(id, route) {
+			return None;
+		}
+		let merged = self.views.get(&id);
+		let mut loose = self.loose(id, route, merged).peekable();
+		if loose.peek().is_none() {
+			return merged.map(Cow::Borrowed);
+		}
+		let mut view = merged.cloned().unwrap_or_default();
+		for (claim, item, _) in loose {
+			view.items.entry(claim.clone()).or_insert_with(|| item.clone());
+		}
+		Some(Cow::Owned(view))
+	}
+
+	/// The uncertified claims of `id` its certifiers carry on streams answering the
+	/// current interest where `merged` certifies nothing, the selected next hop's
+	/// first, and whether the carrier is held.
+	fn loose<'a>(
+		&'a self,
+		id: Id,
+		route: Option<Selected<N>>,
+		merged: Option<&'a View<A>>,
+	) -> impl Iterator<Item = (&'a Path, &'a A, bool)> + 'a {
+		let mut certifiers = self.certifiers(id);
+		if let Some(next) = route.and_then(|route| route.next) {
+			certifiers.sort_by_key(|&n| n != next);
+		}
+		let routes = self.rx.get(&id);
+		certifiers.into_iter().flat_map(move |next| {
+			let held = routes.is_some_and(|routes| routes[&next].held);
+			self.heard
+				.get(&(id, next))
+				.filter(|heard| heard.interest == self.interest)
+				.into_iter()
+				.flat_map(|heard| heard.view.uncertified())
+				.filter(move |(claim, _)| merged.is_none_or(|merged| merged.as_of(claim).is_none()))
+				.map(move |(claim, item)| (claim, item, held))
+		})
 	}
 
 	/// Whether this node sends `id` to `neighbor` at all: its own identities to
@@ -1135,12 +1187,13 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 		// Recording may have tightened the feasibility distance: select again.
 		let route = self.selected(id);
 		let live = self.live(id, route);
-		let adopted = self.adopted(id, route).cloned();
-		// A sender that certifies anything answers every stream, even one whose
-		// interest none of its regions meets, so the receiver knows it certifies
-		// nothing there.
-		let answers = adopted.as_ref().is_some_and(|view| !view.floors.is_empty());
-		let mut restricted: Vec<(Path, View<A>)> = Vec::new();
+		let adopted = self.adopted(id, route).map(Cow::into_owned);
+		// A sender that knows anything answers every stream, even one whose interest
+		// none of its regions meets, so the receiver knows it certifies nothing there.
+		let answers = adopted
+			.as_ref()
+			.is_some_and(|view| !view.floors.is_empty() || !view.items.is_empty());
+		let mut presented: Vec<(Path, View<A>)> = Vec::new();
 
 		for &to in peers {
 			let peer = &self.neighbors[&to];
@@ -1174,20 +1227,18 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 				self.sent_views.remove(&(id, to));
 				continue;
 			}
-			// Peers mostly share an interest, so restrict once per interest.
-			let index = match restricted.iter().position(|(interest, _)| *interest == watch) {
+			// Peers mostly share an interest, so present once per interest.
+			let index = match presented.iter().position(|(interest, _)| *interest == watch) {
 				Some(index) => index,
 				None => {
-					let view = adopted
-						.as_ref()
-						.map_or_else(View::default, |view| view.restrict(&watch));
-					restricted.push((watch, view));
-					restricted.len() - 1
+					let view = adopted.as_ref().map_or_else(View::default, |view| view.present(&watch));
+					presented.push((watch.clone(), view));
+					presented.len() - 1
 				}
 			};
-			let view = &restricted[index].1;
+			let view = &presented[index].1;
 			let changes = match self.sent_views.get(&(id, to)) {
-				Some(sent) if sent == view => continue,
+				Some(sent) if sent.items == view.items && sent.floor(&watch) == view.floor(&watch) => continue,
 				Some(sent) => view.diff(sent),
 				None if !answers => continue,
 				None => view.diff(&View::default()),
@@ -1197,7 +1248,7 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 				to,
 				id,
 				changes,
-				floors: view.floors.clone(),
+				floor: view.floor(&watch),
 			});
 		}
 	}
@@ -1255,23 +1306,39 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 	fn show(&mut self, id: Id) {
 		let mut shown = BTreeMap::new();
 		let route = self.selected(id);
+		let usable = route.is_some();
+		let own = self.origins.contains_key(&id);
+		let merged = match own {
+			true => None,
+			false => self.views.get(&id),
+		};
+		// An uncertified claim is available through a carrier that is not held.
+		let mut loose: BTreeMap<&Path, bool> = BTreeMap::new();
+		if !own && self.live(id, route) {
+			for (claim, _, held) in self.loose(id, route, merged) {
+				*loose.entry(claim).or_insert(false) |= !held;
+			}
+		}
 		if let Some(view) = self.adopted(id, route) {
-			let usable = route.is_some();
-			let own = self.origins.contains_key(&id);
-			// A claim is available only through a certifier that is not held:
-			// another scope's usable route cannot serve it.
+			// A certified claim is available only through a certifier that is not
+			// held: another scope's usable route cannot serve it.
 			let serving = match usable && !view.items.is_empty() && !own {
 				true => self.certified(id, false),
 				false => None,
 			};
 			let current = self.current.get(&id);
 			for (claim, item) in &view.items {
-				let certified = current.is_none_or(|regions| regions.iter().any(|region| overlaps(claim, region)));
+				// A claim a stream answering the current interest carries is current.
+				let certified = loose.contains_key(claim)
+					|| current.is_none_or(|regions| regions.iter().any(|region| within(claim, region)));
 				let available = usable
-					&& serving
-						.as_ref()
-						.is_none_or(|regions| regions.iter().any(|region| overlaps(claim, region)));
-				if overlaps(claim, &self.watch) && certified {
+					&& match loose.get(claim) {
+						Some(&unheld) => unheld || serving.is_none(),
+						None => serving
+							.as_ref()
+							.is_none_or(|regions| regions.iter().any(|region| within(claim, region))),
+					};
+				if within(claim, &self.watch) && certified {
 					shown.insert(
 						claim.clone(),
 						Shown {
@@ -1303,13 +1370,20 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 					}
 				}
 				None => {
-					// A claim no routed neighbor's region covers was let go, not ended.
+					// A claim no routed neighbor's region covers was let go, not ended,
+					// and so was one the view never certified: only its stream left.
 					let uncertified = self
 						.certified(id, true)
-						.is_some_and(|regions| !regions.iter().any(|region| overlaps(claim, region)));
-					let kind = if !overlaps(claim, &self.watch) {
+						.is_some_and(|regions| !regions.iter().any(|region| within(claim, region)))
+						|| !own && self.views.get(&id).is_none_or(|view| view.as_of(claim).is_none());
+					// A claim presented at a narrower interest moved up to the claim it
+					// stood for, which is still shown.
+					let moved = shown
+						.iter()
+						.any(|(above, now)| above != claim && within(claim, above) && now.item == was.item);
+					let kind = if !within(claim, &self.watch) {
 						Kind::Unwatched
-					} else if self.live(id, route) && !uncertified {
+					} else if self.live(id, route) && !uncertified && !moved {
 						Kind::End
 					} else {
 						Kind::Offline
