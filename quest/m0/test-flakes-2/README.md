@@ -101,10 +101,11 @@ tests' shared locked-memory budget, one child each. On 2026-11-06, moq-ffi's
 concurrent-ready test, quarantined here instead of in the unrelated
 [moq-dev/moq#7981](https://github.com/moq-dev/moq/pull/7981).
 
-Added 2026-11-06 (fix run on
-[moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670), which
-quarantines it): `js/net`'s datagram end-before-close case, one child. It
-reproduces on `main`, so it is not that PR's.
+Added 2026-11-06 (maintainer's standing rule that flakes join this epic):
+`js/net`'s datagram end-before-close case, one child. It failed
+[moq-dev/moq#7986](https://github.com/moq-dev/moq/pull/7986)'s and
+[moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670)'s checks and
+reproduces on unchanged `main`; both quarantined it.
 
 Public API: none. Wire: none.
 
@@ -120,3 +121,4 @@ Public API: none. Wire: none.
 - [io_uring tests fit the shared locked-memory budget](/quest/m0/test-flakes-2/uring-memlock.md) - concurrent moq-relay and moq-uring test runs stop exhausting the user's `RLIMIT_MEMLOCK`, fixed at the cause rather than by raising the limit
 - [The FFI concurrent-ready test wakes both calls under load](/quest/m0/test-flakes-2/ffi-concurrent-ready.md) - `concurrent_ready_calls_all_wake` stops stalling its reader drain under load and is re-enabled
 - [lite-05 copy fill checks idleness without wall time](/quest/m0/test-flakes-2/copy-fill-idle.md) - the copy-fill test proves no FETCH went out on the `Manual` clock, not a 200 ms real-time wait
+- [OBS TSan runs report no leaked FFI worker thread](/quest/m0/test-flakes-2/obs-tsan-thread-leak.md) - the OBS TSan tests stop flagging a finished `moq-ffi-worker` thread at exit under load

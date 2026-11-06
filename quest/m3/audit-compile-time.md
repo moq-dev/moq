@@ -52,7 +52,7 @@ What to check first:
   dev-dependencies (tests, lint, benches), such as the mux test-profile IR
   count. Treat a shift in those rows across it as the hack's, not the code's.
   Keep feature-unification and cross-job cache work with the
-  [hakari quest](/quest/m0/ci/hakari.md), and test work with the
+  [hakari follow-ups](/quest/m0/ci/hakari-followups.md), and test work with the
   [test cost audit](/quest/m3/audit-test-cost.md). Dependency and manifest
   removal belongs to the [dependency audit](/quest/m3/audit-deps.md).
 - Transport-session duplication is fixed by

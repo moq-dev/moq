@@ -27,8 +27,9 @@ fixes, the pre-cut audit re-run, and moq-c parity) live under the recurring
 
 Held by open claims: the m1 epics and quests marked below stay where they
 are until their claims merge, and the [probe epic](/quest/m2/probe/README.md)
-stays here while its padding claim is open, so the cut waits on it until the
-[re-cut follow-up](/quest/m2/recut-held.md) moves it to m3.
+stays here while its open claims last, so the cut waits on it until the
+[re-cut follow-up](/quest/m2/recut-held.md) moves it to m3. Its padding and JS
+rung disable quests already moved to m3 on 2026-11-06.
 
 Carried from m1's Plan before the re-cut, where "m1" means the whole pre-cut
 milestone, now m1 and m2:
@@ -85,8 +86,9 @@ and the API-diff tooling. Public routes now wait on cluster routing.
 Added 2026-10-20 (maintainer): the probe target, native probing, and the
 native rung disable moved up from the [m2 probe epic](/quest/m2/probe/README.md),
 so Rust, FFI, and OBS publishers recover a stopped rendition in this release;
-padding and the browser's rung disable stay in m2, with only padding's
-lite-07 stream type here.
+padding and the browser's rung disable stayed in m2, with only padding's
+lite-07 stream type here. Both moved to m3 on 2026-11-06 (maintainer,
+/quest-unblock), parked for a rethink of padding.
 
 Added 2026-10-22 (maintainer, clustering audit): three interim fixes for
 announce churn on today's hop-list mesh, shipping with the next cut from
@@ -186,5 +188,5 @@ quests that require them.
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto (held in m1 by an open claim)
 - [Rename buffer to lookahead](/quest/m2/watch-lookahead.md) - `<moq-watch>`'s `buffer` becomes `lookahead`, so it is no longer mistaken for a jitter buffer on live streams
 - [Cut readiness](/quest/m2/cut-gate/README.md) - the checks the cut needs that break nothing: main no slower than release, vendored fixes ported, the pre-cut audit re-run, and moq-c at parity
-- [Probe](/quest/m2/probe/README.md) - a session probes up to the bitrate it wants to send or receive, so a stopped simulcast rendition resumes and a viewer up-switches; the browser pads where native sessions retransmit (held in m2 by an open claim; moves to m3)
+- [Probe](/quest/m2/probe/README.md) - a session probes up to the bitrate it wants to send or receive, so a stopped simulcast rendition resumes and a viewer up-switches; browser padding is parked in m3 (held in m2 by open claims; moves to m3)
 - [Finish the milestone re-cut](/quest/m2/recut-held.md) - claim-held epics move to the milestone their kind and priority give them once their claims merge
