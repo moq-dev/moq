@@ -16,6 +16,7 @@
 
 use std::{
 	collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+	num::NonZeroU64,
 	sync::{Arc, Mutex, MutexGuard},
 	task::{Poll, ready},
 };
@@ -642,8 +643,8 @@ pub(crate) fn hop(id: Id) -> crate::Hop {
 		hash ^= u64::from(byte);
 		hash = hash.wrapping_mul(0x0100_0000_01b3);
 	}
-	let id = (hash & ((1 << 53) - 1)).max(1);
-	crate::Hop::new(id).expect("a non-zero hop id")
+	let id = NonZeroU64::new(hash & ((1 << 53) - 1)).unwrap_or(NonZeroU64::MIN);
+	crate::Hop::from(id)
 }
 
 #[cfg(test)]
