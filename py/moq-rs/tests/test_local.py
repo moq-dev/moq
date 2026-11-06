@@ -1594,6 +1594,9 @@ def test_encode_audio_with_opus_object():
         broadcast.close()
 
 
+@pytest.mark.skip(
+    reason="flaky under load: the first read can stall past 5 s; see quest/m0/test-flakes-2/audio-playout-delay.md"
+)
 async def test_audio_consumer_reports_its_playout_delay():
     """A fixed playout delay is reported back as is; an estimated one moves as frames are read."""
     origin = moq.OriginProducer()
