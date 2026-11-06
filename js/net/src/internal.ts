@@ -459,6 +459,10 @@ export const hooks: {
 	observeDatagrams: (producer: datagram.Producer) => datagram.Consumer;
 	/** Settles once this consumer is closed, the end of whatever request it serves. */
 	datagramClosed: (consumer: datagram.Consumer) => GetPromise<Error | null>;
+	/** Whether two consumers read the same datagram track. */
+	datagramSameTrack: (a: datagram.Consumer, b: datagram.Consumer) => boolean;
+	/** Another consumer at the same position that adds no demand, until its priority is set. */
+	observeDatagramConsumer: (consumer: datagram.Consumer) => datagram.Consumer;
 	/**
 	 * Declare the end a wire subscription received: repeating it is a no-op, and a mid-group
 	 * end may refine the group boundary it falls just before. Throws `ProtocolViolation` on
@@ -781,6 +785,12 @@ export const hooks: {
 		throw new Error("datagram module not loaded");
 	},
 	datagramClosed: () => {
+		throw new Error("datagram module not loaded");
+	},
+	datagramSameTrack: () => {
+		throw new Error("datagram module not loaded");
+	},
+	observeDatagramConsumer: () => {
 		throw new Error("datagram module not loaded");
 	},
 	endTrack: () => {

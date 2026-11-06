@@ -48,6 +48,9 @@ export default class extends HTMLElement {
 			target: Signals.Signal<Video.Target | undefined>;
 			visible: Signals.Signal<Video.Visible>;
 		};
+		viewer: {
+			max: Signals.Signal<number | undefined>;
+		};
 	};
 	get delay(): Delay;
 	set delay(value: Delay);

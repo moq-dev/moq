@@ -79,8 +79,7 @@ function GameCardInner() {
 
 	// Label: session name + player count.
 	const label = () => {
-		const status = ctx.status();
-		const n = status ? Object.keys(status.latency).length : 0;
+		const n = ctx.status()?.players ?? 0;
 		return n > 0 ? `${game.sessionId} (${n})` : game.sessionId;
 	};
 

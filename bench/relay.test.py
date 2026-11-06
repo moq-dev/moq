@@ -78,7 +78,7 @@ if not a.pid:
         ready.write('ready')
     while True: signal.pause()
 else:
-    assert '--threads' in rest
+    assert rest[0] == 'host' and '--threads' in rest
     with open(os.environ['READY']) as ready: assert ready.read() == 'ready'
     a.output.write_text(''.join(json.dumps(dict(timestamp_ms=t, pid=pid, cpu_user=t/1000,
         cpu_system=0, ctx_voluntary=t, ctx_involuntary=0, rss_bytes=1, threads=1,
@@ -86,7 +86,7 @@ else:
 """)
             fake.chmod(0o755)
             script = """set -euo pipefail
-ROOT=$1 RUN=$2 LOAD_BIN=$3 HOST_BIN=$3
+ROOT=$1 RUN=$2 LOAD_BIN=$3 HOST_CMD=("$3" host)
 RELAY_PID= HOST_PID= LOAD_PID=
 trap 'for pid in "$LOAD_PID" "$HOST_PID"; do if [[ -n $pid ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; done' EXIT
 source "$ROOT/bench/relay.sh"
@@ -125,7 +125,7 @@ a.output.write_text(''.join(json.dumps(dict(timestamp_ms=t, bytes_sent=t*10, byt
 """)
             fake.chmod(0o755)
             script = """set -euo pipefail
-ROOT=$1 RUN=$2 LOAD_BIN=$3 HOST_BIN=false
+ROOT=$1 RUN=$2 LOAD_BIN=$3 HOST_CMD=(false)
 source "$ROOT/bench/relay.sh"
 # Exercise the non-Linux branch on Linux CI too.
 uname() { printf 'Darwin\\n'; }

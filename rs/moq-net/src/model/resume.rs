@@ -466,45 +466,10 @@ impl Consumer {
 	}
 }
 
-/// Whether `err` is the route failing to deliver rather than judging what it carried, so a new
-/// copy may fix it. Anything else would repeat on every copy. Mirrors `routeFailed` in
-/// `js/net/src/resume.ts`.
-pub(super) fn route_failed(err: &Error) -> bool {
-	unroutable(err) || retryable(err)
-}
-
-/// Whether `err` is a source losing its route to the content: only another route continues it.
-fn unroutable(err: &Error) -> bool {
-	matches!(err, Error::Unroutable | Error::Stream(StreamError::Unroutable))
-}
-
-/// Whether the same source may deliver a fresh copy. An unroutable source needs a new
-/// route instead: asking it again can replace the withdrawal's cause with a refusal.
-pub(super) fn retryable(err: &Error) -> bool {
-	matches!(
-		err,
-		Error::Transport(_)
-			| Error::IdleTimeout
-			| Error::Session(_)
-			| Error::GoingAway
-			| Error::GoawayTimeout
-			| Error::Dropped
-			| Error::Closed
-			| Error::Cancel
-			| Error::Stream(
-				StreamError::Session(_)
-					| StreamError::Internal
-					| StreamError::Cancel
-					| StreamError::GoingAway
-					| StreamError::ControlTimeout
-			)
-	)
-}
-
 /// Whether `copy` lost its route, so an error read from it is no verdict on what it carried.
 /// A terminal track verdict, unlike a delivery failure, still judges its content.
 fn copy_failed(copy: &track::Consumer) -> bool {
-	matches!(copy.poll_complete(&kio::Waiter::noop()), Poll::Ready(Err(err)) if route_failed(&err))
+	matches!(copy.poll_complete(&kio::Waiter::noop()), Poll::Ready(Err(err)) if err.retryable())
 }
 
 /// A route's copy, as one reader reads it.
@@ -1667,7 +1632,7 @@ impl Reader {
 		// failure is the front's to replace. Mirrors the JS reader's `#end`.
 		match serving.and_then(&done) {
 			Some(Ok(())) => return Some(Poll::Ready(Ok(None))),
-			Some(Err(err)) if !route_failed(&err) => return Some(Poll::Ready(Err(err))),
+			Some(Err(err)) if !err.retryable() => return Some(Poll::Ready(Err(err))),
 			_ => {}
 		}
 		let end = self.route.end();
@@ -1728,12 +1693,12 @@ impl Reader {
 					Poll::Ready(Ok(sub)) => match sub.poll_finished(waiter) {
 						Poll::Ready(Ok(fin)) => return Poll::Ready(Ok(fin)),
 						// Only a delivery failure waits for the front to replace its copy.
-						Poll::Ready(Err(err)) if !route_failed(&err) || concluded.is_some() => {
+						Poll::Ready(Err(err)) if !err.retryable() || concluded.is_some() => {
 							return Poll::Ready(Err(err));
 						}
 						_ => {}
 					},
-					Poll::Ready(Err(err)) if !route_failed(&err) || concluded.is_some() => {
+					Poll::Ready(Err(err)) if !err.retryable() || concluded.is_some() => {
 						return Poll::Ready(Err(err));
 					}
 					_ => {}
@@ -1771,7 +1736,7 @@ impl Reader {
 			}
 		}
 		for (run, err) in given_up {
-			if !route_failed(&Error::Stream(err.clone())) {
+			if !Error::Stream(err.clone()).retryable() {
 				self.drops.insert(run, err);
 			}
 		}
@@ -2106,7 +2071,7 @@ impl Recover {
 	/// exists, so neither is a verdict on a fetch: one answered from a group still arriving
 	/// over a subscription asks the route again for the rest when that delivery gives up on it.
 	fn undelivered(&self, err: &Error) -> bool {
-		route_failed(err)
+		err.retryable()
 			|| copy_failed(&self.copy)
 			|| matches!(err, Error::Lagged)
 			|| (self.reader.is_none() && matches!(StreamError::from(err), StreamError::Old | StreamError::Evicted))
@@ -2171,7 +2136,7 @@ impl Recover {
 			}
 			// An unroutable copy waits for another route: asking its own again could only replace
 			// the withdrawal's cause with a refusal. None comes once the front is done.
-			let withdrawn = failed.filter(|err| generation == self.generation && unroutable(err));
+			let withdrawn = failed.filter(|err| generation == self.generation && err.unroutable());
 			if let Some(err) = withdrawn
 				&& terminal
 			{
@@ -2259,7 +2224,7 @@ impl Recover {
 			// route's subscription, not whether the group exists, so it is no verdict on a
 			// fetch; nor is one a copy that failed dropped its open groups with, or a failure
 			// of the route it came through.
-			Poll::Ready(Err(err)) if self.reader.is_some() && !route_failed(&err) && !copy_failed(serving) => {
+			Poll::Ready(Err(err)) if self.reader.is_some() && !err.retryable() && !copy_failed(serving) => {
 				return Poll::Ready(Err(err));
 			}
 			_ => {}
@@ -2272,7 +2237,7 @@ impl Recover {
 		if self.reader.is_some()
 			&& serving.poll_closed(waiter).is_ready()
 			&& let Poll::Ready(Err(err)) = serving.poll_complete(&kio::Waiter::noop())
-			&& !route_failed(&err)
+			&& !err.retryable()
 		{
 			verdict = Some(err);
 		}
@@ -2313,7 +2278,7 @@ impl Recover {
 		};
 		let err = match fetch {
 			// That route failed: the next one is asked.
-			Fetch::Refused(err) if route_failed(err) || copy_failed(serving) => return Poll::Pending,
+			Fetch::Refused(err) if err.retryable() || copy_failed(serving) => return Poll::Pending,
 			Fetch::Refused(err) => err.clone(),
 			Fetch::Pending(pending) => match ready!(kio::Task::poll(&mut **pending, waiter)) {
 				Ok(group) => {
@@ -2330,7 +2295,7 @@ impl Recover {
 					Error::NotFound
 				}
 				// That route is failing too: wait for the next one.
-				Err(err) if route_failed(&err) || copy_failed(serving) => {
+				Err(err) if err.retryable() || copy_failed(serving) => {
 					*fetch = Fetch::Refused(err);
 					return Poll::Pending;
 				}
@@ -2576,7 +2541,7 @@ impl kio::Task for Fetching {
 				}
 				// The route failed: ask the next one, unless none will come. Kept as the answer,
 				// since the same copy is never asked twice.
-				Err(err) if (route_failed(&err) || copy_failed(&serving)) && self.route.end().is_none() => {
+				Err(err) if (err.retryable() || copy_failed(&serving)) && self.route.end().is_none() => {
 					if let Some(asked) = &mut self.pending {
 						asked.answer = Some(Err(err));
 					}
@@ -6550,9 +6515,9 @@ mod test {
 		const DELIVERY: [u32; 6] = [0x0, 0x1, 0x3, 0x4, 0x31, 0x36];
 		for code in (0..0x40).chain([64, 64 + 5, 0xffff_ffff]) {
 			let err = Error::Stream(StreamError::from_code(code));
-			assert_eq!(route_failed(&err), DELIVERY.contains(&code), "{code:#x}: {err:?}");
+			assert_eq!(err.retryable(), DELIVERY.contains(&code), "{code:#x}: {err:?}");
 		}
-		assert!(route_failed(&Error::Unroutable));
+		assert!(Error::Unroutable.retryable());
 	}
 
 	/// A failure judging the group repeats on every copy from its route, so it ends a read or

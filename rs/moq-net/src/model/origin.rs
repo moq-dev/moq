@@ -3863,7 +3863,7 @@ impl kio::Task for FrontServeRun {
 					}
 					Poll::Ready(Err(err)) => {
 						// No metadata ever arrived: a lost route cannot answer the request.
-						let err = match super::resume::route_failed(&err) {
+						let err = match err.retryable() {
 							true => io.end.clone(),
 							false => err,
 						};

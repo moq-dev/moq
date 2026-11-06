@@ -4387,7 +4387,7 @@ dependencies = [
 
 [[package]]
 name = "moq-bench"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "humantime",
@@ -4395,7 +4395,6 @@ dependencies = [
  "libc",
  "moq-net",
  "moq-tokio",
- "moq-uring",
  "procfs",
  "rand 0.10.3",
  "serde",
@@ -4425,6 +4424,7 @@ dependencies = [
  "moq-tokio",
  "moq-video",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "usage-rs",
@@ -4563,13 +4563,6 @@ dependencies = [
  "uuid",
  "workspace-hack",
  "zeroize",
-]
-
-[[package]]
-name = "moq-e2ee"
-version = "0.0.11"
-dependencies = [
- "workspace-hack",
 ]
 
 [[package]]

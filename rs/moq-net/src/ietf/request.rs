@@ -86,6 +86,23 @@ pub struct RequestError<'a> {
 	pub retry_interval: u64,
 }
 
+impl<'a> RequestError<'a> {
+	/// The REQUEST_ERROR refusing a `kind` request with `err`.
+	pub(crate) fn refuse(
+		err: &crate::Error,
+		kind: super::error::request::Kind,
+		reason: impl Into<Cow<'a, str>>,
+		version: Version,
+	) -> Self {
+		let error_code = super::error::request::to_code(err, kind, version);
+		Self {
+			error_code,
+			reason_phrase: reason.into(),
+			retry_interval: super::error::request::retry_interval(err, error_code),
+		}
+	}
+}
+
 impl<'a> Message<'a> for RequestError<'a> {
 	const ID: u64 = 0x05;
 

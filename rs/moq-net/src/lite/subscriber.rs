@@ -6721,6 +6721,78 @@ mod tests {
 		}
 	}
 
+	/// A peer that stops reading holds one PROBE target, and once it drains, only the
+	/// latest is sent: the targets set while the writer was stalled never pile up behind it.
+	#[kio::test]
+	async fn a_stalled_probe_writer_sends_only_the_latest_target() {
+		use crate::transport::poll::{RecvStream as _, Session as _};
+		let version = Version::Lite06;
+		// One queued message per stream, so a peer that stops reading stalls the writer.
+		let config = crate::transport::memory::Config {
+			stream_buffer: 0,
+			..Default::default()
+		};
+		let (session, peer) = crate::transport::memory::pair(config);
+		let producer = bandwidth::Producer::new();
+		let _estimate = producer.consume();
+		let peer_setup = lite::PeerSetup::new(false, crate::transport::Address::Setup);
+		peer_setup
+			.set(lite::Setup {
+				probe: lite::ProbeLevel::Increase,
+				..Default::default()
+			})
+			.unwrap();
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: Some(producer),
+			version,
+			peer_setup,
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let viewer = subscriber.viewers.watch(bandwidth::Rate::from_mbps(1)).unwrap();
+		let mut probe = RecvBandwidth::new(subscriber);
+
+		// The stream type fills the stream, so the first target waits in the writer.
+		let (_send, mut recv) = kio::wait(|waiter| {
+			let _ = probe.poll(waiter);
+			peer.poll_accept_bi(waiter)
+		})
+		.await
+		.unwrap();
+		assert!(probe.poll(&kio::Waiter::noop()).is_pending());
+		for mbps in 2..=4 {
+			viewer.update(bandwidth::Rate::from_mbps(mbps)).unwrap();
+			assert!(probe.poll(&kio::Waiter::noop()).is_pending());
+		}
+
+		let target = |mbps| lite::Probe {
+			bitrate: Some(bandwidth::Rate::from_mbps(mbps).as_bps()),
+			rtt: None,
+		};
+		let expected = [
+			lite::ControlType::Probe.encode_bytes(version).unwrap(),
+			target(1).encode_bytes(version).unwrap(),
+			target(4).encode_bytes(version).unwrap(),
+		];
+		for expected in expected {
+			let chunk = kio::wait(|waiter| {
+				let _ = probe.poll(waiter);
+				recv.poll_read_chunk(waiter, usize::MAX)
+			})
+			.await
+			.unwrap()
+			.expect("the stream stays open");
+			assert_eq!(chunk, expected);
+		}
+		assert!(probe.poll(&kio::Waiter::noop()).is_pending());
+		assert!(recv.poll_read_chunk(&kio::Waiter::noop(), usize::MAX).is_pending());
+	}
+
 	/// The model's groups map to wire ranges starting and ending at a group's first frame,
 	/// with empty ranges dropped. Off by one here would silently drop or duplicate a group
 	/// at every relay hop.
@@ -11113,6 +11185,8 @@ struct FillServeRun {
 	fill: track::Fill,
 	info: FetchInfo,
 	run: Option<(u64, FetchServeRun)>,
+	/// The group the last run answered.
+	last: Option<u64>,
 }
 
 impl Drop for FillServeRun {
@@ -11132,6 +11206,7 @@ impl FillServeRun {
 			fill,
 			info,
 			run: None,
+			last: None,
 		}
 	}
 }
@@ -11141,25 +11216,24 @@ impl kio::Task for FillServeRun {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
-			let last = match &mut self.run {
-				Some((sequence, run)) => {
-					ready!(run.poll(waiter));
-					let sequence = *sequence;
-					self.run = None;
-					Some(sequence)
-				}
-				None => None,
-			};
+			if let Some((sequence, run)) = &mut self.run {
+				ready!(run.poll(waiter));
+				self.last = Some(*sequence);
+				self.run = None;
+			}
 			// Withdrawn: nobody waits on what is left, so it records nothing.
 			if self.fill.poll_withdrawn(waiter).is_ready() {
 				return Poll::Ready(());
 			}
+			// The next fetch waits for a reader to pick up the group the last one brought, so a
+			// fill wider than the cache never evicts its own groups before they are read.
+			ready!(self.fill.poll_paced(waiter));
 			let Some(sequence) = self.fill.wanted() else {
 				return Poll::Ready(());
 			};
 			// Every run answers its group, so the same one coming back is a bug; ending the
 			// fill names it dropped rather than fetching it forever.
-			if last == Some(sequence) {
+			if self.last == Some(sequence) {
 				debug_assert!(false, "fill group {sequence} left unanswered");
 				return Poll::Ready(());
 			}

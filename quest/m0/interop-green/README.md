@@ -62,8 +62,8 @@ showed more causes, fixed in this quest's own PR:
 
 The P2P data-channel test timed out in 41668668824 and again in
 [42062226837](https://github.com/moq-dev/moq/actions/runs/42062226837)
-(2026-11-05); [its quest](/quest/m0/test-flakes-2/p2p-data-channel.md) under
-test flakes owns it.
+(2026-11-05): Chromium dropped the accepting side's first record, sent before
+its SCTP stream opened. The accepting side now waits to hear the dialer first.
 
 Scheduled run
 [41863118968](https://github.com/moq-dev/moq/actions/runs/41863118968)
