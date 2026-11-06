@@ -13,7 +13,9 @@ Unblocked 2026-11-06 (/quest-unblock): [ashpd 0.14.0](https://crates.io/crates/a
 published 2026-11-05, depends on zbus `^6.0.0`, carrying the
 [zbus 6 port](https://github.com/bilelmoussaoui/ashpd/pull/491). Upgrade to it,
 adapt the portal capture client to any 0.14 API changes, drop the three
-exceptions, and run `just rs audit`.
+exceptions, then run `just rs audit` and, on Linux,
+`cargo check --locked -p moq-video --no-default-features --features pipewire`
+so the portal capture client compiles against the new API.
 
 ## Related
 
