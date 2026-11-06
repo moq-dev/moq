@@ -141,7 +141,9 @@ async fn max_age_relay_rust() {
 #[tokio::test]
 #[ignore = "requires Bun; run by just test max-age in the interop workflow"]
 async fn max_age_relay_javascript() {
-	for version in ["moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
+	// moq-lite-07-wip returns once js/net speaks its route layer
+	// (quest/m2/cluster-routing/routes/js.md).
+	for version in ["moq-transport-18", "moq-transport-22"] {
 		for publish in [false, true] {
 			kio::clock::timeout(TIMEOUT, relay(version.parse().unwrap(), Some(publish)))
 				.await

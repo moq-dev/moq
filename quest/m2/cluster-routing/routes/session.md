@@ -12,11 +12,13 @@ node table, and the public API drops what the route layer replaced.
 ## Plan
 
 - Scope route state to interested origins, not the CDN's whole node table.
-  Today the router advertises every route to every watching stream, because
-  the epic's handoff contract (`routes/README.md`, "a sender that certifies
-  anything for a route answers every stream") has a sender answer even a
-  stream whose interest none of the route's regions meets. Scoping needs
-  that sentence amended (see Waiting).
+  Today the router advertises every route to every watching stream. The
+  epic's handoff contract now has a sender send a route on a stream only
+  while it meets the stream's interest, with a floor certifying the last
+  withdrawal before the route ends (`routes/README.md` Plan item 15, decided
+  2026-11-06): start the route before its first claim in or covering the
+  interest, and end it after the floor that certifies its last such claim's
+  withdrawal. Update `a_disjoint_interest_is_answered_with_nothing` to match.
   What a peer makes the router hold is already capped: each route and claim
   it sends takes one of the session's announce slots
   (`a_lite07_claim_past_the_cap_closes_the_session`). What this bounds is
@@ -32,17 +34,6 @@ node table, and the public API drops what the route layer replaced.
 
 ## Waiting
 
-- Maintainer: amend the handoff contract's "a sender that certifies anything
-  for a route answers every stream" (`routes/README.md`), or keep it. It is a
-  decided contract, so an agent does not change it. Options: **send a route
-  only while it meets the stream's interest (recommended)**: a route starts on
-  a stream before its first claim in or covering the interest, and when its
-  last such claim goes it sends a floor certifying the withdrawal, then ends
-  the route, so withdrawals still END and per-stream state is bounded by the
-  origins a peer reads, at a ROUTE_END round trip when an origin leaves an
-  interest; or **keep answering every stream** and bound only by per-peer
-  caps, simpler but carrying the whole node table on every stream. Done when
-  the README says which.
 - Maintainer: decide when `Hops`, `RouteInfo::hops`, and the saturating
   `Cost` leave the public API. Every older wire still fills them, so an agent
   cannot drop them without picking the rollout's end. Options: **when lite-06
