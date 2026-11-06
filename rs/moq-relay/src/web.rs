@@ -1209,9 +1209,12 @@ mod tests {
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.unwrap();
 		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
-		let broadcast = cluster.origin.create_broadcast("room").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = cluster
+			.origin
+			.route("room", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				"video",
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
@@ -1440,9 +1443,12 @@ mod tests {
 		});
 		let mut cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		cluster.stats = Registry::new(Default::default());
-		let broadcast = cluster.origin.create_broadcast("room").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = cluster
+			.origin
+			.route("room", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				"video",
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
@@ -1542,9 +1548,12 @@ mod tests {
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.unwrap();
 		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
-		let broadcast = cluster.origin.create_broadcast("room").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = cluster
+			.origin
+			.route("room", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				"video",
 				moq_net::track::Info::default()

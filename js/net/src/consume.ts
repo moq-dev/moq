@@ -1,6 +1,6 @@
 import type * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
-import type { Route } from "./hop.ts";
+import type { RouteInfo } from "./hop.ts";
 import * as Instance from "./instance.ts";
 import { compareRouteCandidates, coveringPrefixes, Epochs } from "./internal.ts";
 import type * as Path from "./path.ts";
@@ -52,13 +52,13 @@ export class BroadcastCache {
 		Path.Valid,
 		Map<Instance.Valid | object, { consumer: broadcast.Consumer; selection: Selection }>
 	>();
-	#announced = new Map<Path.Valid, Map<object, { identity: object; route: Route }>>();
+	#announced = new Map<Path.Valid, Map<object, { identity: object; route: RouteInfo }>>();
 	#blind = new Map<Path.Valid, Blind>();
 	#blindPrefixes = new Map<Path.Valid, Set<Path.Valid>>();
 	#paths = new Map<Path.Valid, Set<Path.Valid>>();
 
 	/** Record this interest's live advertisement, preserving identity across route updates. */
-	announce(path: Path.Valid, owner: object, route: Route, restart = false): void {
+	announce(path: Path.Valid, owner: object, route: RouteInfo, restart = false): void {
 		// Only unannounced consumers covered by this advertisement lose their blind identity.
 		for (const covered of this.#blindPrefixes.get(path) ?? []) this.#forgetBlind(covered);
 		let entries = this.#announced.get(path);
@@ -84,7 +84,7 @@ export class BroadcastCache {
 		for (const prefix of coveringPrefixes(path)) {
 			const entries = this.#announced.get(prefix);
 			if (!entries) continue;
-			let best: { identity: object; route: Route } | undefined;
+			let best: { identity: object; route: RouteInfo } | undefined;
 			const epochs = new Epochs([...entries.values()].map((entry) => entry.route));
 			for (const entry of entries.values()) {
 				if (epochs.supersedes(entry.route)) continue;

@@ -21,7 +21,7 @@ import {
 	unauthorized,
 } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type Hop, MAX_HOPS, type RouteInfo, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import { hiddenBelow, hooks, maxDelayOf, minDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import type { Lister } from "../listing.ts";
@@ -409,7 +409,7 @@ export class Subscriber {
 		// retract that one's state.
 		type Advertisement = {
 			live: boolean;
-			route: Route;
+			route: RouteInfo;
 			captures: Path.Pattern[] | undefined;
 		};
 		// Each holds one of the session's announce slots, reflected and hidden ones included.
@@ -721,7 +721,7 @@ export class Subscriber {
 					});
 					continue;
 				}
-				const route: Route = { instance, epoch, hops: fullHops, cost: this.#cost(cost) };
+				const route: RouteInfo = { instance, epoch, hops: fullHops, cost: this.#cost(cost) };
 				const captures = scopeCaptures(scope, path);
 				if (!visible(path)) {
 					advertised.set(path, { live: false, route, captures });
@@ -2141,7 +2141,7 @@ export class Subscriber {
 	#covered(entry: SubscribeEntry): boolean {
 		// Without SUBSCRIBE_FINISH (older drafts) nothing says which groups are owed.
 		if (entry.end === undefined) return false;
-		const ranges = wireRanges(entry.track.subscription.peek()?.ranges ?? [{}]);
+		const ranges = wireRanges(hooks.requested(entry.track).peek()?.ranges ?? [{}]);
 		const end = min(entry.end, wireSpan(ranges).end ?? entry.end);
 		const floor = rangesStart(ranges);
 		// Lite-07 answers with SUBSCRIBE_OK once the track ends, unless nothing was asked below the
@@ -2218,10 +2218,10 @@ export class Subscriber {
 				wanted !== sentWanted
 					? wanted
 					: undefined;
-			const current = track.subscription.peek();
+			const current = hooks.requested(track).peek();
 			if (current === undefined || (refresh === undefined && this.#sameSubscription(current, lastSent))) {
 				// Each wake releases the quiet signals too, including when termination wins.
-				const next = await race([Signal.race(track.subscription, demand.wanted, edge), stopped]);
+				const next = await race([Signal.race(hooks.requested(track), demand.wanted, edge), stopped]);
 				if (next === null) return;
 				continue;
 			}

@@ -15,7 +15,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	for (const streams of [false, true]) {
 		test(`${alpn}: ${streams ? "same-name kinds" : "datagram-only track"} delivery`, async () => {
 			const source = new Origin();
-			const publication = source.createBroadcast(path);
+			const publication = source.route(path, { hidden: true });
 			const datagrams = publication.broadcast.createDatagrams("audio", {
 				timescale: Timescale.MICRO,
 				priority: -7,
@@ -104,7 +104,7 @@ test("lite-04 refuses datagram tracks at setup", async () => {
 
 test("lite-07 bounds and prioritizes independent createWritable datagram queues", async () => {
 	const source = new Origin();
-	const publication = source.createBroadcast(path);
+	const publication = source.route(path, { hidden: true });
 	const datagrams = publication.broadcast.createDatagrams("audio");
 	publication.broadcast.createTrack("audio", { compress: true });
 	publication.announce();
@@ -155,7 +155,7 @@ for (const alpn of [ALPN_05, ALPN_06])
 	for (const first of ["stream", "datagram"]) {
 		test(`${alpn}: datagram readers rejoin and outlive streams (${first} first)`, async () => {
 			const source = new Origin();
-			const publication = source.createBroadcast(path);
+			const publication = source.route(path, { hidden: true });
 			const datagrams = publication.broadcast.createDatagrams("audio");
 			const track = publication.broadcast.createTrack("audio");
 			publication.announce();
@@ -200,7 +200,7 @@ for (const alpn of [ALPN_05, ALPN_06])
 
 test("lite-07 forwards a priority change made while the previous DATAGRAMS_UPDATE writes", async () => {
 	const source = new Origin();
-	const publication = source.createBroadcast(path);
+	const publication = source.route(path, { hidden: true });
 	const datagrams = publication.broadcast.createDatagrams("audio");
 	publication.announce();
 	const pair = createMockTransportPair(ALPN_07_WIP);
@@ -231,7 +231,7 @@ test("lite-07 forwards a priority change made while the previous DATAGRAMS_UPDAT
 
 test("lite-06: a request cancelled behind the shared datagram writer sends nothing", async () => {
 	const source = new Origin();
-	const publication = source.createBroadcast(path);
+	const publication = source.route(path, { hidden: true });
 	const first = publication.broadcast.createDatagrams("a");
 	const second = publication.broadcast.createDatagrams("b");
 	publication.announce();

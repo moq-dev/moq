@@ -220,6 +220,10 @@ export class Encoder {
 	// discontinuity and re-anchors on.
 	#pipeline: Pipeline | undefined;
 	#encoding = false;
+	// The demand's max delay, past which retained audio is stale to every subscriber, or undefined
+	// for the retention alone. Replayed groups land as fresh arrivals, so only this cut keeps a
+	// rejoining live viewer from receiving all the retained audio before the live edge.
+	#budget: Micro | undefined;
 
 	// The rendition's track and producer, kept across subscriber changes.
 	// `start` is the open group's first timestamp, undefined until a frame opens one.
@@ -487,6 +491,9 @@ export class Encoder {
 
 			const onDemand = effect.get(broadcast.in.onDemand) ?? true;
 			const demanded = !!track && effect.get(track.demand().wanted) !== undefined;
+			// Demand from fetches alone carries no subscription, so no budget beyond the retention.
+			const max = track && effect.get(track.subscription)?.delay?.max;
+			this.#budget = max === undefined || max === null ? undefined : Micro.fromMilli(max);
 			// Not gated on `enabled` or `muted`: a paused rendition takes no capture, but still encodes what it retained.
 			this.#encoding = !!format && !!track && !fatal && (!onDemand || demanded);
 			effect.set(this.#out.active, enabled && this.#encoding, false);
@@ -846,7 +853,7 @@ export class Encoder {
 				const pipeline: Pipeline = {
 					channelCount: config.numberOfChannels,
 					drain: () => {
-						backlog.expire(clock());
+						backlog.expire(clock(), this.#budget);
 						// Expired history is a real gap, unlike a loss of demand: end the epoch where the
 						// encoded audio stops, so its last frame isn't stretched across the gap.
 						if (backlog.takeEvicted()) cut();

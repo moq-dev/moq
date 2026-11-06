@@ -53,7 +53,7 @@ final class ListenOptions {
 
 /// A listening MoQ server with publishing and subscription conveniences.
 ///
-/// Build one with [Server.listen]. Broadcasts created via [createBroadcast] are
+/// Build one with [Server.listen]. Broadcasts of routes created via [route] are
 /// served to incoming sessions, and [requests] streams each incoming [Request]
 /// for the caller to accept or reject. [close] stops accepting new sessions and
 /// releases the listening socket before it returns; in-flight sessions stay
@@ -111,15 +111,16 @@ final class Server {
     }
   }
 
-  /// Create a broadcast at [path], served to incoming sessions.
+  /// Create a route at exactly [path], owning a broadcast served to incoming sessions.
   ///
-  /// Advertise it with `announce` after populating its `broadcast`. Throws
-  /// when [listen] was given a [ListenOptions.consume] origin but no
-  /// [ListenOptions.publish] one, since there is then nothing to serve from.
-  Publication createBroadcast(String path) {
+  /// Visible at once unless [options] is hidden; hold the route, since
+  /// cancelling or disposing it retracts it. Throws when [listen] was given a
+  /// [ListenOptions.consume] origin but no [ListenOptions.publish] one, since
+  /// there is then nothing to serve from.
+  MoqRoute route(String path, {RouteOptions? options}) {
     final origin = _publishOrigin;
     if (origin == null) throw StateError('no publish origin configured');
-    return origin.createBroadcast(path: path);
+    return origin.route(path: path, options: options ?? RouteOptions());
   }
 
   /// SHA-256 fingerprints of the configured TLS certificates, hex-encoded.
