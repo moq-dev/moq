@@ -9597,6 +9597,7 @@ mod tests {
 	fn legacy_track() -> lite::Track<'static> {
 		lite::Track {
 			instance: None,
+			node: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "events".into(),
 		}
@@ -9606,6 +9607,7 @@ mod tests {
 		lite::Subscribe {
 			order: crate::track::Order::Descending,
 			instance: None,
+			node: 0,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "events".into(),
