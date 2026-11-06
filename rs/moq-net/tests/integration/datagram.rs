@@ -498,6 +498,57 @@ async fn an_old_subscriber_reaches_a_datagram_track_through_a_lite07_relay() {
 	assert_eq!(datagram.timestamp, Some(millis(4)));
 }
 
+/// A relay's upstream datagram subscription outlives its last demanding reader while an old
+/// subscriber's stream subscription still forwards the datagrams passively, parking rather
+/// than spinning, and ends once that subscription goes too. Lite-07 upstream asks on a
+/// Datagrams Stream, lite-06 upstream shares the stream track's subscription.
+#[kio::test]
+async fn a_relayed_datagram_track_parks_while_only_passive_readers_remain() {
+	for upstream in ["moq-lite-07-wip", "moq-lite-06"] {
+		let chain = Chain::new(&[upstream, "moq-lite-06"]).await;
+		let _track = chain
+			.publication
+			.broadcast()
+			.create_track(TRACK, moq_net::track::Info::default().with_timescale(Timescale::MILLI))
+			.unwrap();
+		let producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
+
+		// The relay's own reader is the only demand on its upstream datagram subscription.
+		let relay = chain.nodes[1].consume();
+		kio::clock::timeout(TIMEOUT, support::announced(&relay, "room"))
+			.await
+			.expect("announce timeout");
+		let relayed = kio::clock::timeout(TIMEOUT, relay.request("room", None))
+			.await
+			.expect("resolve timeout")
+			.unwrap();
+		let mut reader = relayed.datagrams(TRACK).unwrap();
+		reader.set_priority(1);
+		kio::clock::timeout(TIMEOUT, datagram_priority(&producer, Some(1)))
+			.await
+			.unwrap_or_else(|_| panic!("{upstream}: the request never reached the publisher"));
+		kio::clock::timeout(TIMEOUT, reader.info())
+			.await
+			.expect("info timeout")
+			.unwrap();
+
+		// The old subscriber's stream subscription joins the relay's datagram track passively.
+		let subscriber = kio::clock::timeout(TIMEOUT, chain.remote().await.track(TRACK).unwrap().subscribe(None))
+			.await
+			.expect("subscribe timeout")
+			.unwrap();
+
+		drop(reader);
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		assert!(producer.priority().is_some(), "{upstream}: a passive reader keeps the subscription");
+
+		drop(subscriber);
+		kio::clock::timeout(TIMEOUT, datagram_priority(&producer, None))
+			.await
+			.unwrap_or_else(|_| panic!("{upstream}: the subscription outlived its last reader"));
+	}
+}
+
 /// An old hop answers a datagram lookup for every stream track it carries, so a relay serving
 /// an old subscriber keeps a stream track's name a stream track, though that relayed answer
 /// may arrive before the stream track's.
