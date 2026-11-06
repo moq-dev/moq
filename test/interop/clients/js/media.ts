@@ -163,7 +163,7 @@ const playerEngine = requestedPlayer as Engine;
 const wants = (name: Case) => selected.has(name);
 if (!native && values.cases === undefined && playerEngine === "firefox") {
 	console.error(
-		"SKIP Firefox replacement: intermittent audio tone; investigate with https://github.com/moq-dev/moq/pull/8058",
+		"QUARANTINE\treplacement\tintermittent audio tone; investigate with https://github.com/moq-dev/moq/pull/8058",
 	);
 }
 
