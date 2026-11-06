@@ -7,9 +7,9 @@ run_socket_client() {
     local runtime="$1"
     shift
     case "$runtime" in
-        rust) timeout -k 3 "$TIMEOUT" "$EXAMPLES/interop-socket-js" "$@" ;;
-        js-native-node) (cd "$CLIENTS/js-native" && timeout -k 3 "$TIMEOUT" node --import tsx socket.ts "$@") ;;
-        js-native-bun) (cd "$CLIENTS/js-native" && timeout -k 3 "$TIMEOUT" bun socket.ts "$@") ;;
+    rust) timeout -k 3 "$TIMEOUT" "$EXAMPLES/interop-socket-js" "$@" ;;
+    js-native-node) (cd "$CLIENTS/js-native" && timeout -k 3 "$TIMEOUT" node --import tsx socket.ts "$@") ;;
+    js-native-bun) (cd "$CLIENTS/js-native" && timeout -k 3 "$TIMEOUT" bun socket.ts "$@") ;;
     esac
 }
 
@@ -65,14 +65,13 @@ run_socket_pair() {
 }
 
 socket_pairs() {
-    local action="$1" runtime version protocol
+    local action="$1" runtime protocol
+    local version=moq-lite-07-wip
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
-        for version in moq-lite-07-wip; do
-            for protocol in tcp track; do
-                "$action" rust "$runtime" "$protocol" "$version"
-                "$action" "$runtime" rust "$protocol" "$version"
-            done
+        for protocol in tcp track; do
+            "$action" rust "$runtime" "$protocol" "$version"
+            "$action" "$runtime" rust "$protocol" "$version"
         done
     done
 }
