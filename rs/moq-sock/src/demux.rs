@@ -1,6 +1,6 @@
 //! Splitting one UDP socket between QUIC and the WebRTC media path.
 //!
-//! [`classify`] reads a datagram's first byte by RFC 7983's partition, which QUIC
+//! Datagrams are classified by their first byte, per RFC 7983's partition, which QUIC
 //! fills as long as its fixed bit is set: every endpoint served through this must
 //! turn QUIC-bit greasing (RFC 9287) off. [`Flows`] pins a remote address to a
 //! stack regardless of what it sends, and [`Queue`] buffers one stack's datagrams
@@ -20,8 +20,7 @@ use arc_swap::ArcSwap;
 
 /// What a datagram carries, judged by its first byte and, for STUN, its attributes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Class {
+enum Class {
 	/// A QUIC packet: the fixed bit is set, in a long (192 to 255) or short (64 to 127) header.
 	Quic,
 	/// ICE: a STUN Binding request carrying USERNAME (a connectivity check), or a
@@ -46,7 +45,7 @@ const STUN_BINDING_ERROR: [u8; 2] = [0x01, 0x11];
 const STUN_USERNAME: u16 = 0x0006;
 
 /// Classify a datagram by RFC 7983's first-byte ranges.
-pub fn classify(datagram: &[u8]) -> Class {
+fn classify(datagram: &[u8]) -> Class {
 	match datagram.first() {
 		Some(0..=3) if is_ice(datagram) => Class::Ice,
 		Some(0..=3) => Class::Stun,
@@ -173,7 +172,7 @@ impl FlowsState {
 }
 
 impl Flows {
-	/// Route `datagram` from `remote`: a pin wins, otherwise its [`Class`] decides.
+	/// Route `datagram` from `remote`: a pin wins, otherwise its first byte decides.
 	pub fn route(&self, remote: SocketAddr, datagram: &[u8]) -> Route {
 		if self.is_pinned(remote) {
 			return Route::WebRtc;
@@ -232,7 +231,7 @@ impl Drop for Pin {
 
 /// A FIFO of one stack's datagrams, bounded by cost with a per-source share.
 ///
-/// A source may hold at most [`Queue::SHARE`] of the capacity, so one flooding
+/// A source may hold at most an eighth of the capacity, so one flooding
 /// sender is refused while the rest still get in; filling the queue takes that
 /// many sources at once.
 #[derive(Debug)]
@@ -246,7 +245,7 @@ pub struct Queue<T> {
 
 impl<T> Queue<T> {
 	/// The fraction of the capacity, as a divisor, one source may hold.
-	pub const SHARE: usize = 8;
+	const SHARE: usize = 8;
 
 	/// An empty queue holding up to `capacity` in total cost.
 	pub fn new(capacity: usize) -> Self {

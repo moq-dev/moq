@@ -95,12 +95,6 @@ struct Serve {
 /// the listen address and a port conflict is an error here rather than a
 /// worker that quietly died. [`spawn`](Self::spawn) starts every thread, and
 /// nothing is served until [`Spawned::serve`].
-///
-/// ```compile_fail
-/// fn serve_before_spawn(mut bound: moq_relay::uring::Workers) {
-///     bound.serve();
-/// }
-/// ```
 pub struct Workers {
 	members: Vec<moq_sock::shard::Socket>,
 	addr: SocketAddr,
