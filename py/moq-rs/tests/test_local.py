@@ -1594,9 +1594,6 @@ def test_encode_audio_with_opus_object():
         broadcast.close()
 
 
-@pytest.mark.skip(
-    reason="flaky under load: the first read can stall past 5 s; see quest/m0/test-flakes-2/audio-playout-delay.md"
-)
 async def test_audio_consumer_reports_its_playout_delay():
     """A fixed playout delay is reported back as is; an estimated one moves as frames are read."""
     origin = moq.OriginProducer()
@@ -1616,10 +1613,13 @@ async def test_audio_consumer_reports_its_playout_delay():
     catalog = await asyncio.wait_for(moq.media.catalog(broadcast_consumer), timeout=5.0)
     rendition = catalog.audio["mic"]
 
+    # No max delay: a zero one skips a group once its successor is a warmup old by the wall
+    # clock, so a read that late starts on the second frame, and its warmup trims all the audio
+    # left. This test reads every frame it wrote, however late.
     def output(delay: timedelta | None) -> moq.audio.DecoderOutput:
         if delay is None:
-            return moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32)
-        fixed = moq.Delay(min=delay)
+            return moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32, delay=moq.Delay(max=None))
+        fixed = moq.Delay(min=delay, max=None)
         return moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32, delay=fixed, estimate=False)
 
     fixed = await moq.audio.Consumer.subscribe(broadcast_consumer, "mic", rendition, output(timedelta(milliseconds=80)))
