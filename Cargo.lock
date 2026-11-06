@@ -4425,6 +4425,7 @@ dependencies = [
  "moq-tokio",
  "moq-video",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "usage-rs",
