@@ -409,3 +409,139 @@ pub(crate) fn hop(id: Id) -> crate::Hop {
 	let id = (hash & ((1 << 53) - 1)).max(1);
 	crate::Hop::new(id).expect("a non-zero hop id")
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::route::Advert;
+
+	fn p(path: &'static str) -> Path {
+		Path::from_static(path)
+	}
+
+	fn claim(instance: &Instance, cost: u64) -> Claim {
+		Claim {
+			instance: instance.clone(),
+			epoch: 0,
+			cost,
+		}
+	}
+
+	fn outputs(stream: &Stream) -> Vec<Output> {
+		std::iter::from_fn(|| stream.try_output()).collect()
+	}
+
+	/// Deliver everything `from` would send on the wire to the stream receiving it,
+	/// returning what else it queued.
+	fn pump(from: &Stream, to: &Stream) -> Vec<Output> {
+		let mut rest = Vec::new();
+		for output in outputs(from) {
+			match output {
+				Output::Route { id, reach } => to.route(id, reach),
+				Output::Batch { id, changes, floor } => to.batch(id, changes, floor),
+				other => rest.push(other),
+			}
+		}
+		rest
+	}
+
+	/// The serve commands among a stream's outputs.
+	fn served(outputs: Vec<Output>) -> Vec<Output> {
+		(outputs.into_iter())
+			.filter(|output| matches!(output, Output::Serve { .. } | Output::Unserve { .. }))
+			.collect()
+	}
+
+	#[test]
+	fn a_claim_is_served_through_the_stream_its_route_arrived_on() {
+		let instance = Instance::random();
+		let (origin, relay) = (Node::new(1, 1), Node::new(2, 2));
+		let answer = origin.answer(Link::default(), Path::empty()).unwrap();
+		let receive = relay.receive(Link::default(), Path::empty()).unwrap();
+		origin.own(p("live/x"), Some(claim(&instance, 5)));
+		pump(&answer, &receive);
+		assert_eq!(
+			served(outputs(&receive)),
+			[Output::Serve {
+				id: 1,
+				named: 1,
+				claim: p("live/x"),
+				served: Served {
+					claim: claim(&instance, 5),
+					metric: 1,
+					available: true,
+				},
+			}]
+		);
+
+		origin.own(p("live/x"), None);
+		pump(&answer, &receive);
+		assert_eq!(
+			served(outputs(&receive)),
+			[Output::Unserve {
+				id: 1,
+				claim: p("live/x")
+			}]
+		);
+	}
+
+	#[test]
+	fn a_claim_moves_to_a_cheaper_stream_once_that_one_serves_it() {
+		let instance = Instance::random();
+		let origin = Node::new(1, 1);
+		let relay = Node::new(2, 2);
+		let far = relay
+			.receive(
+				Link {
+					cost: 3,
+					..Link::default()
+				},
+				Path::empty(),
+			)
+			.unwrap();
+		let far_answer = origin.answer(Link::default(), Path::empty()).unwrap();
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
+		pump(&far_answer, &far);
+		assert!(matches!(served(outputs(&far))[..], [Output::Serve { .. }]));
+		far.serving(1, &p("live/x"));
+
+		let near = relay.receive(Link::default(), Path::empty()).unwrap();
+		let near_answer = origin.answer(Link::default(), Path::empty()).unwrap();
+		pump(&far_answer, &far);
+		pump(&near_answer, &near);
+		assert!(matches!(&served(outputs(&near))[..], [Output::Serve { served, .. }] if served.metric == 1));
+		assert!(served(outputs(&far)).is_empty(), "the old stream serves until the new one does");
+		near.serving(1, &p("live/x"));
+		assert_eq!(
+			served(outputs(&far)),
+			[Output::Unserve {
+				id: 1,
+				claim: p("live/x")
+			}]
+		);
+	}
+
+	#[test]
+	fn a_held_route_keeps_serving_where_it_was_but_unavailable() {
+		let instance = Instance::random();
+		let relay = Node::new(2, 2);
+		let receive = relay.receive(Link::default(), Path::empty()).unwrap();
+		let advert = Advert {
+			seqno: 0,
+			metric: 0,
+			down_only: false,
+		};
+		receive.route(1, Some(Reach::Finite(advert)));
+		receive.batch(1, vec![(p("live/x"), Some(claim(&instance, 0)))], Some(1));
+		assert!(matches!(served(outputs(&receive))[..], [Output::Serve { .. }]));
+		receive.serving(1, &p("live/x"));
+
+		receive.route(1, Some(Reach::Held));
+		assert!(matches!(
+			&served(outputs(&receive))[..],
+			[Output::Serve { served, .. }] if !served.available
+		));
+		receive.route(1, None);
+		assert!(matches!(served(outputs(&receive))[..], [Output::Unserve { .. }]));
+	}
+}
