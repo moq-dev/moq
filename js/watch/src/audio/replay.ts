@@ -3,9 +3,9 @@
  *
  * Every frame is written into its group at the instant the trace says it arrived, and the player's
  * real `Container.Consumer` decides what to deliver, wait for, and skip, at the max delay the delay
- * sets. Delivered frames go into the real ring, and a new codec epoch resets it, the way the decoder
- * does. One render quantum is read every quantum's worth of that same clock, which is what the
- * AudioWorklet does. A real {@link Sync} resolves the delay from the playout target the decoder
+ * sets. Delivered frames go into the real ring, which carries on through a gap the way the decoder's
+ * does: a gap restarts only the codec. One render quantum is read every quantum's worth of that same
+ * clock, which is what the AudioWorklet does. A real {@link Sync} resolves the delay from the playout target the decoder
  * registers, measured by that same consumer from the recorded catalog config, and the ring and the
  * decode gate follow it the way the decoder's audio buffer moves them, so a change to any of them
  * moves what a replay hears. Decoding is taken as instant and sample exact.
@@ -27,7 +27,6 @@ import { Backpressure } from "./buffer";
 import { frameDuration } from "./config";
 import { target } from "./latency";
 import { AudioRingBuffer } from "./ring-buffer";
-import { Terminal } from "./terminal";
 
 /** An AudioWorklet render quantum, in frames. */
 export const QUANTUM = 128;
@@ -150,7 +149,8 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			delay: config.delay !== undefined ? Milli(config.delay) : undefined,
 		}),
 	);
-	signals.cleanup(sync.register(playout));
+	const audio = sync.track({ target: playout });
+	signals.cleanup(() => audio.close());
 	await settle();
 
 	let delay = sync.out.delay.peek();
@@ -168,8 +168,8 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 		if (gate.queued(newest)) ring.setLatency(millis(rate, gate.floor));
 	});
 
-	// The decoder's read loop, with the codec taken out. A failure is rethrown at the next quantum.
-	const terminal = new Terminal();
+	// The decoder's read loop, with the codec taken out. Traces record no declared ends, so a gap is
+	// the only codec epoch a replay meets. A failure is rethrown at the next quantum.
 	const arrivals: Diagnostic[] = [];
 	const delivery = Promise.withResolvers<void>();
 	if (options.decodeAfter === undefined) delivery.resolve();
@@ -180,17 +180,13 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 		for (;;) {
 			const next = await consumer.next();
 			if (!next) return;
-			if (terminal.update(next)) {
-				ring.reset();
-				gate.reset();
-			}
 			if (next.kind === "gap") arrivals.push(gap(next));
 			if (next.kind !== "frame") continue;
 
 			const { timestamp, arrival } = next.frame;
 			read.set(timestamp);
 			const media = Milli.fromMicro(timestamp);
-			const late = sync.received(media, arrival);
+			const late = audio.received(media, arrival);
 			arrivals.push({ kind: "frame", timestamp: media, arrival, late });
 			const entry = recorded.get(timestamp);
 			if (!entry) throw new Error(`the consumer delivered an unrecorded frame at ${timestamp} us`);

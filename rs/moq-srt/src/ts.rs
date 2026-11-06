@@ -75,8 +75,8 @@ struct Instance {
 	import: ts::Import<ts::Ext>,
 	// Finished at a clean end, so the finished broadcast keeps serving the catalog.
 	catalog: moq_mux::catalog::Producer<ts::Ext>,
-	// Controls publication while the importer fills it, including finish or close at EOF.
-	broadcast: moq_net::origin::Publication,
+	// Keeps the path announced while the importer fills it, through the linger after a clean end.
+	route: moq_net::origin::Route,
 }
 
 impl Instance {
@@ -90,19 +90,15 @@ impl Instance {
 		config: moq_mux::catalog::Config,
 		program: Option<u16>,
 	) -> Result<(Self, moq_net::Instance)> {
-		let id = moq_net::Instance::random();
-		let broadcast = origin.publish(path, moq_net::origin::Route::default().with_instance(id.clone(), 0))?;
+		let route = origin.route(path, moq_net::origin::RouteOptions::default())?;
+		let id = route.instance();
 		let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
-		let mut import = ts::Import::new(broadcast.broadcast().clone(), catalog.reserve());
+		let catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), config)?;
+		let mut import = ts::Import::new(route.broadcast().clone(), catalog.reserve());
 		if let Some(program) = program {
 			import = import.with_program(program);
 		}
-		let instance = Self {
-			import,
-			catalog,
-			broadcast,
-		};
+		let instance = Self { import, catalog, route };
 		Ok((instance, id))
 	}
 
@@ -187,7 +183,7 @@ impl Publisher {
 					self.span.in_scope(|| self.log.finish(&instance.import.stats()));
 					let (next, id) = Instance::publish(origin, path, config.clone(), *program)?;
 					tracing::warn!(%path, step = %restart.step, instance = %id, "the source's clock stepped; republishing");
-					// The finished broadcast ends with its publication.
+					// The finished broadcast ends with its route.
 					*instance = next;
 					self.log = ts::stats::Log::default();
 					data = restart.remainder;
@@ -216,7 +212,7 @@ impl Publisher {
 		let finished = match &mut self.importer {
 			Importer::One(one) => {
 				one.instance.finish()?;
-				vec![one.instance.broadcast.broadcast().clone()]
+				vec![one.instance.route.broadcast().clone()]
 			}
 			Importer::All(programs) => programs.finish().map_err(moq_mux::Error::from)?,
 		};
@@ -232,9 +228,9 @@ impl Publisher {
 	pub fn abort(self, err: moq_net::Error) {
 		match self.importer {
 			Importer::One(one) => {
-				let Instance { import, broadcast, .. } = one.instance;
+				let Instance { import, route, .. } = one.instance;
 				import.abort(err);
-				broadcast.close();
+				route.broadcast().close();
 			}
 			Importer::All(programs) => programs.abort(err),
 		}
@@ -292,7 +288,9 @@ impl Subscriber {
 		// Join the broadcast once announced. The export resolves any referenced sibling
 		// broadcast (the catalog `broadcast` field) through the same origin.
 		let broadcast = match following.available().await {
-			Ok(broadcast) => broadcast,
+			Ok(Some(broadcast)) => broadcast,
+			// The first change is always an instance.
+			Ok(None) => return Ok(None),
 			Err(moq_net::Error::Closed) => return Ok(None),
 			Err(err) => return Err(err.into()),
 		};
@@ -631,7 +629,7 @@ mod tests {
 	/// announced.
 	async fn program(origin: &moq_net::origin::Producer, path: &str) -> (u16, Vec<u16>) {
 		let consumer = origin.consume();
-		let broadcast = consumer.follow(path, None).unwrap().available().await.unwrap();
+		let broadcast = consumer.follow(path, None).unwrap().available().await.unwrap().unwrap();
 		let mut catalog = moq_mux::catalog::Consumer::<ts::Ext>::new(&broadcast, CatalogFormat::Hang)
 			.await
 			.unwrap();
@@ -727,7 +725,13 @@ mod tests {
 		publisher.feed(Bytes::from_static(BBB5S)).unwrap();
 
 		let consumer = origin.consume();
-		let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
+		let broadcast = consumer
+			.follow("live/cam0", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let start = kio::clock::now();
 		let wait = tokio::spawn(publisher.finish(linger).unwrap().wait());
 		kio::clock::sleep(linger / 2).await;
@@ -760,7 +764,13 @@ mod tests {
 		publisher.feed(Bytes::from(ts)).unwrap();
 
 		let consumer = origin.consume();
-		let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
+		let broadcast = consumer
+			.follow("live/cam0", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let info = broadcast.track("0.avc3").unwrap().info().await.unwrap();
 		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
@@ -831,7 +841,13 @@ mod tests {
 		let mut publisher = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
 
 		let consumer = origin.consume();
-		let broadcast = consumer.follow("ingest", None).unwrap().available().await.unwrap();
+		let broadcast = consumer
+			.follow("ingest", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 
 		publisher.feed(bytes::Bytes::from_static(BBB5S)).unwrap();
 

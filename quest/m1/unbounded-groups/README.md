@@ -2,18 +2,19 @@
 
 ## Goal
 
-Groups and frames have no fixed size cap. `MAX_GROUP_FRAMES` (8192) goes
-away, and `MAX_CACHE_BYTES` (32 MB) stops capping groups and frames and
-instead bounds how much of a group's live tail is held. A group sheds whole
-frames from its front once its tail passes 32 MB, or sooner when the shared
-cache pool is over budget, so one long group never grows without bound even
-on a relay with no cache capacity set. A reader or FETCH that reaches a shed
-front is served by a flight, a separate paced copy filled from upstream or
-the publisher's own refill handler; failing that, it asks for a new group
-(refresh), and otherwise it gets `Evicted`. Readers never fail just because a group got big. The motivating
-workloads are long-lived single groups (data/log tracks, audio, window
-timelines), video with very long GOPs, and file transfers where a frame is a
-whole file.
+Groups and frames have no fixed size cap. `MAX_GROUP_FRAMES` is already gone
+([moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)), and
+`MAX_CACHE_BYTES` (32 MB) stops capping groups and frames and instead bounds
+how much of a group's live tail is held. A group sheds whole frames from its
+front once its tail passes 32 MB, or sooner when the shared cache pool is over
+budget, so one long group never grows without bound even on a relay with no
+cache capacity set. A reader or FETCH that reaches a shed front is served by a
+flight, a separate paced copy filled from upstream or the publisher's own
+refill handler; failing that, it asks for a new group (refresh), and otherwise
+it gets `Evicted`. Readers never fail just because a group got big. The
+motivating workloads are long-lived single groups (data/log tracks, audio,
+window timelines), video with very long GOPs, and file transfers where a frame
+is a whole file.
 
 The hot write and read path for ordinary groups does not regress.
 
@@ -22,6 +23,25 @@ moq-transport, and starting a reader mid-group at whatever the cache still
 holds (a tail join).
 
 ## Plan
+
+Decided 2026-11-05 (maintainer, /quest-plan), on the open questions of
+[moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944), which landed
+flights:
+
+- A compressed group's flight starts at frame 0, since every later frame
+  builds on the ones before it, and its riders skip ahead to their frame. The
+  prefix is transferred once per flight. Carrying the inflater's state from the
+  cached copy, and keeping refresh or `Evicted` for compressed groups, were
+  rejected.
+- Paced batch fills are [their own quest](/quest/m1/unbounded-groups/paced-batch-fills.md).
+- No cap on concurrent flights per group: memory is bounded by each flight's
+  tail and pool debt, and the cost of more flights is upstream transfer.
+  Revisit with relay evidence.
+- A moq-transport FETCH is answered from metadata: FETCH_OK follows once the
+  publisher learns the group's live edge, and its objects stream after it,
+  riding flights, with no whole-group buffer. A FETCH of a live group is
+  refused unless its range ends below the live edge, and a failure after
+  FETCH_OK resets the stream. FETCH stays single-group.
 
 Decided 2026-10-28 (maintainer, after an audit of the plan and
 [moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)):
@@ -39,7 +59,7 @@ Decided 2026-10-28 (maintainer, after an audit of the plan and
   window is at most 16 MB, so a reader within the behind half of the
   fastest one keeps up and a slower one falls off.
 - A reader at a shed frame, a late joiner or one that fell off, is served by
-  a [flight](/quest/m1/unbounded-groups/flights.md) when the publisher has a
+  a flight ([moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944)) when the publisher has a
   refill handler: a separate copy with its own upstream fill and 32 MB tail,
   paced by its fastest rider. A reader joins a flight only within 16 MB of
   its fastest rider, and hands over to the copy ahead at the same frame once
@@ -145,17 +165,20 @@ A flight's fill is the `track::Requests` fill (`track::Fill`). A handler serves 
 group producer bounded to that range, the same API as a live write, so an
 origin can regenerate data from disk or an archive.
 
-This epic owns the end-to-end test: a relay chain carries one live group well
-past the old caps. A late joiner gets its head through a flight and hands
-over to the live copy, and a live reader keeps the tail, over lite and
-moq-transport, with memory held near 32 MB per copy. It also carries a long
-compressed group through a small cache pool with a plain reader on a legacy
-wire, which [moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)
-covered only at the model layer (maintainer, 2026-10-30).
+Most of the end-to-end test landed in
+[moq-dev/moq#7944](https://github.com/moq-dev/moq/pull/7944)
+(`rs/moq-net/tests/integration/flights.rs`): a relay chain carries one live
+group past its 32 MiB tail, a late joiner replays it through a flight and
+hands over to the live copy over lite, and over moq-transport the live
+group's replay is refused and a finished group's replays. This epic still
+owns the rest: a long compressed group through a small cache pool with a
+plain reader on a legacy wire, which
+[moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993) covered only at
+the model layer (maintainer, 2026-10-30).
 
 ## Required
 
-- [Flights](/quest/m1/unbounded-groups/flights.md) - a reader at a shed frame replays through a separate paced copy that hands over to the copy ahead
+- [Paced batch fills](/quest/m1/unbounded-groups/paced-batch-fills.md) - fills that write a batch of groups stop evicting their own earlier groups before the reader takes them
 - [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) - segments inside a frame shed like front frames and flights start at `(frame, byte)` on the current lite wip; the frame cap goes
 - [JS byte holes](/quest/m1/unbounded-groups/js-byte-holes.md) - `@moq/net` mirrors the byte-offset wire and continues a frame cut off mid-way
 - [Compressed frames have no size cap and inflate as a bounded stream](/quest/m1/unbounded-groups/compressed-stream.md) - A compressed frame of any size publishes and is received in Rust and `@moq/net`, like a plain one

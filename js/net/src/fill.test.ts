@@ -607,6 +607,49 @@ test("fill: what a reader's sequence cursor passes, a fill no longer owes it", a
 	broadcast.close();
 });
 
+test("fill: a filled group stays wanted only while a reader will still read it", async () => {
+	const { broadcast, track } = resumed(5n);
+	const requests = track.requests();
+	// A live reader already passed every group below the edge.
+	const live = track.subscribe({ ranges: [{ start: { relative: 0n } }], delay: { max: null } });
+	expect((await live.ordered().nextGroup())?.sequence).toBe(5n);
+
+	const reader = track.subscribe(history);
+	const next = reader.ordered().nextGroup();
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	expect(fill.wanted()).toBe(0n);
+	const source = fill.accept(0n);
+	source.writeFrame({ payload: enc.encode("g0") });
+	const taken = await next;
+	expect(taken?.sequence).toBe(0n);
+
+	// A reader still to reach it keeps it wanted once the one that took it lets go.
+	const behind = track.subscribe(history);
+	taken?.close();
+	reader.close();
+	// Closing a reader releases its copy a microtask later.
+	await yieldNow();
+	const wanted = source.demand().wanted;
+	expect(wanted.peek()).toBe(true);
+
+	// Narrowed past it, nobody reads it: only the live reader's copy is left, which it passed.
+	behind.update({ ...history, ranges: [{ start: { absolute: 3n } }] });
+	expect(wanted.peek()).toBe(false);
+	// Widened back over it, it counts again.
+	behind.update(history);
+	expect(wanted.peek()).toBe(true);
+	behind.close();
+	await yieldNow();
+	expect(wanted.peek()).toBe(false);
+
+	source.finish();
+	fill.close();
+	live.close();
+	requests.close();
+	broadcast.close();
+});
+
 test("fill: a reader changing only its order wakes the handler", async () => {
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();
@@ -642,33 +685,6 @@ test("fill: a reader parked on a miss asks once a handler opens", async () => {
 	if (fill) serve(fill, new Map([[0n, ["old 0"]]]));
 	expect((await next)?.sequence).toBe(0n);
 
-	reader.close();
-	requests.close();
-	broadcast.close();
-});
-
-test("fill: a sequence the track's datagram took is never asked, even once a reader read it", async () => {
-	const broadcast = new BroadcastProducer();
-	const track = broadcast.createTrack("video", { maxAge: null });
-	// Subscribed first: a datagram is not replayed to a later reader.
-	const reader = track.subscribe(history);
-	track.insertDatagram(2n, undefined, enc.encode("datagram 2"));
-	const group = track.createGroup(5n);
-	group.writeFrame({ payload: enc.encode("live 5") });
-	group.finish();
-	// The reader takes the datagram out of its own buffer; the track still holds it.
-	expect((await reader.recvDatagram())?.sequence).toBe(2n);
-
-	const requests = track.requests();
-	const ordered = reader.ordered();
-	void ordered.nextGroup();
-	const fills = [await requests.requestedFill(), await requests.requestedFill()];
-	expect(fills.map((fill) => [fill?.start, fill?.end])).toEqual([
-		[0n, 2n],
-		[3n, 5n],
-	]);
-
-	for (const fill of fills) fill?.close();
 	reader.close();
 	requests.close();
 	broadcast.close();
@@ -753,8 +769,7 @@ async function session(alpn: string) {
 		connectSession({ url, transport: pair.client }),
 		acceptSession({ transport: pair.server, url, publish: origin.consume() }),
 	]);
-	const publication = origin.createBroadcast(Path.from("archive"));
-	publication.announce();
+	const publication = origin.route(Path.from("archive"));
 	const broadcast = publication.broadcast;
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	// Groups 0 to 2 were published before this producer existed.

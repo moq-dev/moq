@@ -2,11 +2,14 @@
 
 ## Goal
 
-The work in flight now: a passing Nightly, fixes for the `release` line, the
-quest merge driver, local reviews, CI cost and latency, test flakes, and
-replacing the catalog's HLS records with a declared segment grid. That last
-one is a breaking catalog and API change, pulled ahead of m1's other planned
-format changes; it lands on `main` and ships with the next cut.
+The work in flight now: passing Nightly, Interop, and Video runs, backports
+and patch releases for the `release` line, CI cost and latency, test flakes,
+and a few small fixes for hostile input, WebSocket throughput, agent disk use,
+and CRLF checkouts. The quest merge driver
+([moq-dev/moq#6728](https://github.com/moq-dev/moq/pull/6728)), local reviews
+([moq-dev/moq#7175](https://github.com/moq-dev/moq/pull/7175)), and the
+declared HLS segment grid
+([moq-dev/moq#7652](https://github.com/moq-dev/moq/pull/7652)) landed.
 
 ## Plan
 
@@ -25,15 +28,10 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the scheduled Nightly passes end to end, so red means a new break
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the scheduled Interop and Video workflows pass, so red means a new break
-- [moq-video shares moq-mux's bounded H.265 SPS walk](/quest/m0/video-sps-walk.md) - a hostile publisher's H.265 SPS can't panic a subscriber's decoder
-- [Publish the release line's drain() wrappers](/quest/m0/ffi-shutdown-backport.md) - Python `moq-rs` 0.5.2 and Dart `moq` 0.1.1 reach PyPI and pub.dev from `release`
+- [Publish the release line's drain() wrappers](/quest/m0/ffi-shutdown-backport.md) - Dart `moq` 0.1.1 reaches pub.dev from `release`
 - [Backport audio groupDuration](/quest/m0/backport-audio-group-duration.md) - `@moq/publish` 0.5.4 on `release` can pack several Opus frames per group, making Cloudflare's relay drop audio less often
-- [Backport the SETUP-path and iroh-key fixes](/quest/m0/backport-security-fixes.md) - `release` refuses a conflicting SETUP Path and keeps persisted iroh keys private, in one patch release
 - [Backport the joined-head FETCH race fix](/quest/m0/backport-fill-head-race.md) - a `release` relay stops FETCHing a group head its own SUBSCRIBE is bringing, which left live readers hanging
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in GitHub's merge queue, one tested entry at a time, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
-- [More tests under load](/quest/m0/test-flakes-2/README.md) - load-only and queue failures, one quest per flake, fixed at the cause, since each one fails a whole batch
-- [Benchmark sessions can't overlap on a host](/quest/m0/bench-host-lock.md) - a host-level lock keeps a second benchmark or profile session from measuring under the first's load
-- [A waiter's record limit changes no behavior](/quest/m0/kio-waiter-records.md) - two moq-net tests stop failing when kio's waiters remember 16 lists, and the limit becomes a tuning knob worth 3.9% per delivered group
+- [More tests under load](/quest/m0/test-flakes-2/README.md) - load-only and queue failures, one quest per flake, fixed at the cause, since each one drops a queued PR
 - [Backport the relay and auth hardening to release](/quest/m0/backport-release-hardening.md) - `release`'s relay refuses dot-segment paths, serves its HTTP routes with main's response hardening, and withdraws advertisements a peer starves of send credit; its auth client refuses redirects
 - [Agent build output can't fill the desktop's disk](/quest/m0/agent-disk-budget.md) - finished agent checkouts reclaim their mbx targets automatically, so parallel agent builds stop filling the root disk
-- [@moq/net's WebSocket receive windows match Rust](/quest/m0/qmux-receive-windows.md) - WebSocket JS throughput stops being capped below Rust's

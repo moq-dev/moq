@@ -67,6 +67,9 @@ pub(crate) trait Media: hang::catalog::Reference + Clone {
 
 	/// Its renditions, keyed by ID.
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self>;
+
+	/// Whether the publisher is serving this rendition.
+	fn enabled(&self) -> bool;
 }
 
 impl Media for hang::catalog::VideoConfig {
@@ -79,6 +82,10 @@ impl Media for hang::catalog::VideoConfig {
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self> {
 		&catalog.video.renditions
 	}
+
+	fn enabled(&self) -> bool {
+		self.enabled
+	}
 }
 
 impl Media for hang::catalog::AudioConfig {
@@ -90,6 +97,10 @@ impl Media for hang::catalog::AudioConfig {
 
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self> {
 		&catalog.audio.renditions
+	}
+
+	fn enabled(&self) -> bool {
+		self.enabled
 	}
 }
 
@@ -283,20 +294,17 @@ impl Consume {
 
 		let driver = origin.as_ref().map(|origin| origin.driver.clone()).unwrap_or_default();
 
-		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task
-		// to keep this entrypoint non-blocking.
+		// Reads wait on SUBSCRIBE_OK, so run them inside the task to keep this entrypoint
+		// non-blocking.
 		self.catalog_task.spawn(
 			on_catalog,
 			|state| &mut state.consume.catalog_task,
-			|mut close| async move {
+			|close| async move {
 				driver
 					.watch(async move {
-						let subscription = hang::catalog::Catalog::default_subscription();
-						let subscribe = Self::subscribe(&broadcast, hang::catalog::Catalog::DEFAULT_NAME, subscription);
-						let Some(catalog) = Self::until_closed(&mut close, subscribe).await? else {
-							return Ok(());
-						};
-						Self::run_catalog(on_catalog, broadcast.clone(), origin, catalog.into(), close).await
+						// The consumer subscribes itself at catalog priority.
+						let catalog = broadcast.track(hang::catalog::Catalog::DEFAULT_NAME)?.into();
+						Self::run_catalog(on_catalog, broadcast.clone(), origin, catalog, close).await
 					})
 					.await
 			},
@@ -527,7 +535,7 @@ impl Consume {
 	where
 		for<'a> moq_mux::catalog::hang::Container: TryFrom<&'a C, Error = moq_mux::Error>,
 	{
-		let (consume, name, config) = self.select::<C>(catalog, index)?;
+		let (consume, name, config) = self.select_enabled::<C>(catalog, index)?;
 		let name = hang::catalog::Reference::track(config, name).to_string();
 		// Consume with the container the catalog actually advertises (Legacy / Cmaf / Loc)
 		// instead of assuming Legacy, otherwise CMAF/fMP4 sources (e.g. ffmpeg moqenc,
@@ -964,20 +972,19 @@ impl Consume {
 		let broadcast = context.broadcast.clone();
 		let name = name.to_string();
 
-		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
+		// Reads wait on SUBSCRIBE_OK, so run them inside the task.
 		self.json_task.spawn(
 			on_value,
 			|state| &mut state.consume.json_task,
-			|mut close| async move {
+			|close| async move {
 				driver
 					.watch(async move {
-						let Some(track) =
-							Self::until_closed(&mut close, Self::subscribe(&broadcast, &name, None)).await?
-						else {
-							return Ok(());
-						};
-						let consumer =
-							moq_json::snapshot::Consumer::<serde_json::Value>::new(track, Default::default());
+						// The consumer subscribes itself; `run_json_snapshot` keeps a close ahead of
+						// a SUBSCRIBE_OK that never comes.
+						let consumer = moq_json::snapshot::Consumer::<serde_json::Value>::new(
+							broadcast.track(&name)?,
+							Default::default(),
+						);
 						Self::run_json_snapshot(on_value, consumer, close).await
 					})
 					.await
@@ -1176,8 +1183,17 @@ impl Consume {
 
 	/// Look up a video or audio rendition by catalog index, mirroring the selection in [`Self::media`].
 	pub fn rendition<C: Media>(&self, catalog: Id, index: usize) -> Result<Rendition<C>, Error> {
-		let (consume, name, config) = self.select(catalog, index)?;
+		let (consume, name, config) = self.select_enabled(catalog, index)?;
 		Ok(consume.rendition(name, config))
+	}
+
+	/// [`Self::select`], refusing a disabled rendition with [`Error::NotFound`]: no frames are coming.
+	fn select_enabled<C: Media>(&self, catalog: Id, index: usize) -> Result<(&ConsumeCatalog, &String, &C), Error> {
+		let selected = self.select::<C>(catalog, index)?;
+		if !selected.2.enabled() {
+			return Err(Error::NotFound);
+		}
+		Ok(selected)
 	}
 
 	/// A catalog and its rendition at `index`, in catalog order.
@@ -1226,6 +1242,35 @@ mod supervision_tests {
 		assert!(matches!(driver.finished().await, Err(Error::Panic)));
 		let result = rendition.driver.check();
 		assert!(matches!(result, Err(Error::Panic)), "{result:?}");
+	}
+}
+
+#[cfg(test)]
+mod rendition_tests {
+	use super::*;
+
+	/// A decoder refuses a disabled rendition, as a track consumer does: no frames are coming.
+	#[test]
+	fn a_disabled_rendition_is_not_decoded() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = moq_mux::catalog::hang::Catalog::<moq_mux::catalog::hang::Extra>::default();
+		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		audio.enabled = false;
+		catalog.audio.renditions.insert("audio".into(), audio);
+		let mut consume = Consume::default();
+		let id = consume
+			.catalog
+			.insert(ConsumeCatalog {
+				broadcast: broadcast.consume(),
+				origin: None,
+				catalog,
+				audio_codec: Vec::new(),
+				video_codec: Vec::new(),
+				sections: Vec::new(),
+			})
+			.unwrap();
+		let result = consume.rendition::<hang::catalog::AudioConfig>(id, 0);
+		assert!(matches!(result, Err(Error::NotFound)));
 	}
 }
 

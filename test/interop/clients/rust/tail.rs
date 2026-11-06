@@ -105,8 +105,8 @@ async fn main() -> anyhow::Result<()> {
 
 	match args[1].as_str() {
 		"publish" => {
-			let broadcast = origin.create_broadcast(&args[3])?;
-			let mut track = broadcast.create_track(
+			let route = origin.route(&args[3], moq_net::origin::RouteOptions::hidden())?;
+			let mut track = route.broadcast().create_track(
 				"tail",
 				moq_net::track::Info::default()
 					.with_timescale(moq_net::Timescale::MILLI)
@@ -115,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
 					// zero max age would leave stale.
 					.with_max_age(None),
 			)?;
-			broadcast.announce(Default::default())?;
+			route.announce()?;
 			if cached {
 				write(&mut track, mode)?;
 			}
@@ -161,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
 				commands.next_line().await?.as_deref() == Some("clean end"),
 				"reader did not acknowledge a clean end"
 			);
-			broadcast.close();
+			route.broadcast().close();
 			session.close().await?;
 			eprintln!("tail acknowledged");
 		}
@@ -173,7 +173,11 @@ async fn main() -> anyhow::Result<()> {
 				.connect(url)
 				.established()
 				.await?;
-			let broadcast = consumer.follow(&args[3], None)?.available().await?;
+			let broadcast = consumer
+				.follow(&args[3], None)?
+				.available()
+				.await?
+				.context("went offline before serving")?;
 			let remote = broadcast.track("tail")?;
 			if status {
 				// Query before subscribing so draft-18+ must use TRACK_STATUS,

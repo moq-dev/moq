@@ -52,8 +52,9 @@ async fn spawn_peer() -> (u16, tokio::runtime::Runtime) {
 	let (bound, port) = tokio::sync::oneshot::channel();
 	runtime.spawn(async move {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("peer").expect("create broadcast");
-		broadcast.announce(Default::default()).expect("announce");
+		let broadcast = origin
+			.route("peer", moq_net::origin::RouteOptions::default())
+			.expect("create broadcast");
 
 		let mut config = moq_tokio::listen::Config::default();
 		config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
@@ -108,13 +109,13 @@ async fn silent_peer_detected() {
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.idle_timeout = Some((IDLE).into());
 	let cluster = crate::spawn_cluster(cluster::Options::new(config)).with_connect(connect, quic);
-	let mut announced = cluster.origin.consume().announced();
+	let mut announced = cluster.origin.consume().routes();
 	let run = tokio::spawn(cluster.clone().start().await.expect("cluster start").run());
 
 	kio::clock::timeout(DETECT, async {
 		loop {
 			let event = announced.next().await.expect("origin closed");
-			if let moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update) = event
+			if let moq_net::origin::RouteEvent::Start(update) | moq_net::origin::RouteEvent::Update(update) = event
 				&& update.prefix.as_str() == "peer"
 			{
 				break;
@@ -132,7 +133,7 @@ async fn silent_peer_detected() {
 	kio::clock::timeout(DETECT, async {
 		loop {
 			let event = announced.next().await.expect("origin closed");
-			if let moq_net::announce::Event::End(update) = event
+			if let moq_net::origin::RouteEvent::End(update) = event
 				&& update.prefix.as_str() == "peer"
 			{
 				break;

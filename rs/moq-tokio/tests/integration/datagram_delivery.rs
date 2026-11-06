@@ -103,7 +103,8 @@ impl Viewer {
 		let broadcast = kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
-			.expect("broadcast resolves");
+			.expect("broadcast resolves")
+			.unwrap();
 		let datagrams = broadcast.datagrams("audio").expect("datagram track");
 		// Answered once the publisher's session reads the track, so what it sends next arrives.
 		kio::clock::timeout(TIMEOUT, datagrams.info())
@@ -198,9 +199,11 @@ async fn measure(version: &str, cell: Cell) {
 	let version: moq_net::Version = version.parse().expect("version");
 
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast("room").expect("broadcast");
-	let mut datagrams = broadcast.create_datagrams("audio", timed()).unwrap();
-	broadcast.announce(Default::default()).expect("announce");
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::hidden())
+		.expect("broadcast");
+	let mut datagrams = broadcast.broadcast().create_datagrams("audio", timed()).unwrap();
+	broadcast.announce().expect("announce");
 
 	let mut config = moq_tokio::listen::Config::default();
 	config.bind = Some("127.0.0.1:0".parse().unwrap());

@@ -49,14 +49,16 @@ typealias Request = uniffi.moq.MoqRequest
 typealias Transport = uniffi.moq.MoqTransport
 
 // Origin (broadcast discovery / announcement).
-/** The publish side of an origin: create broadcasts so subscribers can discover them. */
+/** The publish side of an origin: create routes so subscribers can discover them. */
 typealias OriginProducer = uniffi.moq.MoqOriginProducer
 
 /**
- * An origin's handle on one broadcast: `broadcast()` to fill it, `announce` and `unannounce` to
- * advertise it.
+ * A route on an origin: an exact route owning one broadcast (`broadcast()` to fill it), or a prefix
+ * route yielding the requests beneath it (`requested()`). `announce`, `withdraw`, and `setCost`
+ * advertise it. Closing or cancelling it retracts it, as does ending its broadcast; a broadcast
+ * handle alone does not keep it announced.
  */
-typealias Publication = uniffi.moq.MoqPublication
+typealias Route = uniffi.moq.MoqRoute
 
 /** Config for creating an origin, such as its total cache budget. */
 typealias OriginConfig = uniffi.moq.MoqOriginConfig
@@ -64,14 +66,8 @@ typealias OriginConfig = uniffi.moq.MoqOriginConfig
 /** The subscribe side of an origin: discover and request published broadcasts. */
 typealias OriginConsumer = uniffi.moq.MoqOriginConsumer
 
-/** A served route: advertises a path prefix and yields broadcast requests beneath it. */
-typealias OriginRequests = uniffi.moq.MoqOriginRequests
-
-/** A requested broadcast not yet accepted: fulfill it with a producer or reject it. */
+/** A requested broadcast not yet answered: serve it, route it, or reject it. */
 typealias BroadcastRequest = uniffi.moq.MoqBroadcastRequest
-
-/** A claim answer being filled before its exact route is announced. */
-typealias BroadcastPrepared = uniffi.moq.MoqBroadcastPrepared
 
 /** A stream of announce events under a prefix. */
 typealias AnnounceConsumer = uniffi.moq.MoqAnnounceConsumer
@@ -92,33 +88,20 @@ typealias Following = uniffi.moq.MoqFollowing
 typealias Announce = uniffi.moq.MoqAnnounce
 
 /**
- * What an [AnnounceConsumer] yields: [AnnounceEventStart], [AnnounceEventUpdate],
- * [AnnounceEventEnd], [AnnounceEventRestart], or [AnnounceEventTakeover].
+ * What an [AnnounceConsumer] yields: [AnnounceEventPresent] or [AnnounceEventAbsent].
+ *
+ * Another publisher instance taking a path over keeps it present: hold a [Following] to see the
+ * broadcast change.
  */
 typealias AnnounceEvent = uniffi.moq.MoqAnnounceEvent
 
 // Kotlin cannot reach a sealed class's subtypes through its typealias, so each
 // variant gets its own.
-/** A route now covers the prefix; the stream had none there. */
-typealias AnnounceEventStart = uniffi.moq.MoqAnnounceEvent.Start
+/** A route now covers the path, which was absent. */
+typealias AnnounceEventPresent = uniffi.moq.MoqAnnounceEvent.Present
 
-/** The route covering the prefix changed hops or cost. */
-typealias AnnounceEventUpdate = uniffi.moq.MoqAnnounceEvent.Update
-
-/** No route covers the prefix any more; carries its last route. */
-typealias AnnounceEventEnd = uniffi.moq.MoqAnnounceEvent.End
-
-/**
- * Another publisher instance now serves the prefix: drop what was resolved under it and request
- * afresh.
- */
-typealias AnnounceEventRestart = uniffi.moq.MoqAnnounceEvent.Restart
-
-/**
- * A route now covers the prefix and continues what the route at `predecessor` served beneath it:
- * keep what was resolved through that one.
- */
-typealias AnnounceEventTakeover = uniffi.moq.MoqAnnounceEvent.Takeover
+/** No route covers the path any more; carries its last route. */
+typealias AnnounceEventAbsent = uniffi.moq.MoqAnnounceEvent.Absent
 
 // Broadcast / track / group producers and consumers.
 /** The write side of a broadcast: publish tracks into it. */
@@ -169,17 +152,17 @@ typealias Frame = uniffi.moq.MoqFrame
 typealias Timestamp = uniffi.moq.MoqTimestamp
 
 /**
- * How a broadcast advertises its exact path: its static production cost (lower wins), an optional
- * stable instance (null keeps the one the broadcast minted), and the epoch, which only matters with
- * a stable instance.
+ * How a [Route] advertises itself: `hidden` until `announce`, its static production cost (lower
+ * wins), an optional stable instance (null mints a fresh one the route keeps for its lifetime), and
+ * the epoch, which only matters with a stable instance.
  */
-typealias AnnounceRoute = uniffi.moq.MoqAnnounceRoute
+typealias RouteOptions = uniffi.moq.MoqRouteOptions
 
 /**
- * An observed path-prefix route: the instance of the stream it serves, relay hop ids (oldest
- * first), and static production and link cost (lower wins).
+ * The read-only facts on a received route: the instance of the stream it serves, relay hop ids
+ * (oldest first), and static production and link cost (lower wins).
  */
-typealias Route = uniffi.moq.MoqRoute
+typealias RouteInfo = uniffi.moq.MoqRouteInfo
 
 /** Tunes how a track subscription is delivered: priority, delay, ranges, and group ordering. */
 typealias Subscription = uniffi.moq.MoqSubscription

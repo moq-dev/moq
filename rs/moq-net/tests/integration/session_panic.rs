@@ -13,7 +13,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Client, Hop, Server, Session, Version, announce, origin};
+use moq_net::{Client, Hop, Server, Session, Version, origin};
 use support::harness::{now, spawn};
 use support::mock::{MockSession, create_mock_session_pair};
 
@@ -34,13 +34,13 @@ struct Publisher {
 	server_driver: kio::clock::sim::JoinHandle<moq_net::Error>,
 	/// The client's origin, which it publishes from.
 	origin: origin::Producer,
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 }
 
 async fn publish(version: Version, relay: &origin::Producer, hop: u64, name: &str) -> Publisher {
 	let origin = produce_origin(hop);
-	let broadcast = origin.create_broadcast(name).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = origin.route(name, moq_net::origin::RouteOptions::hidden()).unwrap();
+	broadcast.announce().unwrap();
 
 	let mut mock = moq_net::transport::memory::Config::default();
 	mock.protocol = Some(version.alpn().to_string());
@@ -77,15 +77,15 @@ async fn publish(version: Version, relay: &origin::Producer, hop: u64, name: &st
 }
 
 /// Wait until `path` is announced (`true`) or withdrawn (`false`) on `announced`.
-async fn until(announced: &mut announce::Consumer, path: &str, active: bool) {
+async fn until(announced: &mut origin::Routes, path: &str, active: bool) {
 	let wait = async {
 		loop {
 			let (announce, now_active) = match announced.next().await.expect("origin closed") {
-				announce::Event::Start(announce)
-				| announce::Event::Update(announce)
-				| announce::Event::Restart(announce)
-				| announce::Event::Takeover { announce, .. } => (announce, true),
-				announce::Event::End(announce) => (announce, false),
+				origin::RouteEvent::Start(announce)
+				| origin::RouteEvent::Update(announce)
+				| origin::RouteEvent::Restart(announce)
+				| origin::RouteEvent::Takeover { announce, .. } => (announce, true),
+				origin::RouteEvent::End(announce) => (announce, false),
 			};
 			if announce.prefix.as_str() == path && now_active == active {
 				return;
@@ -102,7 +102,7 @@ async fn a_panicking_session_leaves_the_others_serving() {
 	for version in ["moq-lite-07-wip", "moq-transport-22"] {
 		let version: Version = version.parse().unwrap();
 		let relay = produce_origin(100);
-		let mut announced = relay.consume().announced();
+		let mut announced = relay.consume().routes();
 
 		let broken = publish(version, &relay, 1, "broken").await;
 		until(&mut announced, "broken", true).await;
@@ -125,8 +125,11 @@ async fn a_panicking_session_leaves_the_others_serving() {
 			.unwrap_or_else(|_| panic!("{version}: the panicked session never closed"));
 
 		// The other session still serves: a fresh announcement reaches the relay.
-		let later = healthy.origin.create_broadcast("later").unwrap();
-		later.announce(Default::default()).unwrap();
+		let later = healthy
+			.origin
+			.route("later", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		later.announce().unwrap();
 		until(&mut announced, "later", true).await;
 		crate::support::announced(&relay.consume(), "healthy").await;
 		drop((healthy, broken.client, later));

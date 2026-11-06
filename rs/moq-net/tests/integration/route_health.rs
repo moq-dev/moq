@@ -54,18 +54,22 @@ async fn silent_kill(budget: Duration, detect: Duration) -> Vec<u64> {
 		produce_origin(4),
 		produce_origin(5),
 	);
-	let broadcast = p.create_broadcast("live").unwrap();
-	let track = broadcast.create_track("video", timed()).unwrap();
-	broadcast
-		.announce(origin::Route::default().with_instance(moq_net::Instance::random(), 0))
-		.unwrap();
+	let broadcast = p.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	broadcast.announce().unwrap();
 	let p_o = link(version, &p, &o).await;
 	let o_m1 = link(version, &o, &m1).await;
 	let o_m2 = link(version, &o, &m2).await;
 	let m1_e = link(version, &m1, &e).await;
 
 	let consumer = e.consume();
-	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
+	let remote = consumer
+		.follow("live", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
 	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(budget));
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 	let m2_e = priced_link(version, &m2, &e, Some(1_000)).await;
@@ -191,11 +195,9 @@ async fn payload_stall(stall: Stall, span: Duration) -> (Observed, Observed) {
 		produce_origin(5),
 		produce_origin(6),
 	);
-	let broadcast = p.create_broadcast("live").unwrap();
-	let track = broadcast.create_track("video", timed()).unwrap();
-	broadcast
-		.announce(origin::Route::default().with_instance(moq_net::Instance::random(), 0))
-		.unwrap();
+	let broadcast = p.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	broadcast.announce().unwrap();
 	let p_o = link(version, &p, &o).await;
 	let o_m1 = link(version, &o, &m1).await;
 	let o_m2 = link(version, &o, &m2).await;
@@ -204,7 +206,13 @@ async fn payload_stall(stall: Stall, span: Duration) -> (Observed, Observed) {
 
 	async fn subscribe(origin: &origin::Producer) -> track::Subscriber {
 		let consumer = origin.consume();
-		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
+		let remote = consumer
+			.follow("live", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(2)));
 		remote.track("video").unwrap().subscribe(prefs).await.unwrap()
 	}

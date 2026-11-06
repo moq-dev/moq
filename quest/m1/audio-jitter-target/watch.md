@@ -121,11 +121,16 @@ are expanding sooner or more often as the ring nears empty, or accepting the
 remaining re-stalls. Each departure from NetEq's constants is recorded with
 the replay numbers that justify it.
 
+- Port the shared specification rather than NetEq independently:
+  [moq-dev/moq#7856](https://github.com/moq-dev/moq/pull/7856) landed the
+  native stretch with `doc/concept/audio-jitter.md` specifying the shared
+  floating-point adaptation and `doc/concept/audio-jitter/stretch/corpus.json`
+  holding literal PCM vectors for both languages. Implement that spec and
+  pass those vectors, so both players stretch alike; record any departure
+  from it in the spec, not only here.
 - Put the stretch where `js/watch/src/audio/replay.ts` exercises it, such as
   `AudioRingBuffer`'s read path or a module the render worklet and the replay
-  share, so the replay rows measure the stretch and not a model of it. Port
-  the search with unit tests against NetEq's behaviour on synthetic periodic
-  and noise signals.
+  share, so the replay rows measure the stretch and not a model of it.
 - Accelerate replaces the skip-ahead when the ring sits above the high
   limit. A re-stall remains for a ring that empties despite the stretch, and a
   skip-ahead remains only above what fast accelerate can close.
@@ -150,6 +155,16 @@ path, so the 20 ms default stays.
 Decided 2026-10-15: keep this proof in m1 with the existing playback and
 A/V clock work.
 
+Decided 2026-11-05 (maintainer, /quest-plan): steady-state lip sync comes
+from this stretch converging the ring's playhead on `Sync.now()`, the shared
+clock on local time anchored at the earliest arrival. The clock never follows
+audio: one slow track must not hold the others, so audio and video stay in sync
+in the steady state and drift apart only while a track is congested.
+[moq-dev/moq#7941](https://github.com/moq-dev/moq/pull/7941) dropped an
+audio-driven clock for this. Recommendation: measure the gap against the sample
+reaching the output, through `AudioContext.getOutputTimestamp()`, so output
+latency, Bluetooth included, is part of the lip sync.
+
 ## Waiting
 
 - Maintainer: Safari with 40 ms or more of added RTT, the baseline row the
@@ -158,10 +173,6 @@ A/V clock work.
   `sudo dnctl`/`pfctl`, then play `cdn.moq.dev/anon` in Safari with the stats
   panel open for two minutes, and record its audio Underruns after 30 s and the
   latency tab's auto delay.
-
-## Required
-
-- [A/V clock](/quest/m1/av-clock.md) - the clock the stretch converges toward
 
 ## Related
 

@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Muting suppresses audio instead of disabling the rendition ([#7942](https://github.com/moq-dev/moq/pull/7942))
+
+`<moq-publish muted>` no longer marks the audio rendition `enabled: false`: it sends nothing, the rendition stays enabled in the catalog, and listeners stay subscribed, so the next word reaches them at once.
+Each muted span ends with a discontinuity marker, which players treat as intentional silence.
+The same is available on `Audio.Encoder` as the new `muted` knob; keep `enabled: false` for a stop the rendition does not come back from soon.
+A viewer that read `enabled: false` in the catalog as "muted" no longer sees one; publish that state in your own catalog section or data track.
+
 ### The capture graph renders to no output device ([#7881](https://github.com/moq-dev/moq/pull/7881))
 
 `Audio.Capture`'s and `Audio.Encoder`'s `root` now sit in an `AudioContext` built with `sinkId: { type: "none" }`, which shortens the bursts capture hands the encoder.

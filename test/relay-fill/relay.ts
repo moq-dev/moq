@@ -38,7 +38,7 @@ const clock = new Manual();
 const installed = clock.install();
 // A session never announces a received broadcast to another, so the relay advertises it itself.
 const origin = new Producer();
-const route = origin.requests(path);
+const route = origin.routePrefix(path);
 
 async function dial(address: string, publish?: ReturnType<Producer["consume"]>) {
 	const url = new URL(address);

@@ -16,6 +16,7 @@ interface Case {
 	delay?: number;
 	arrival: number[];
 	media: number[];
+	ends?: number[];
 	target: [number, number][];
 }
 
@@ -41,6 +42,7 @@ describe("audio jitter conformance", () => {
 			"idle",
 			"paced",
 			"reorder",
+			"silence",
 			"spike",
 			"straggler",
 			"tunein",
@@ -51,8 +53,10 @@ describe("audio jitter conformance", () => {
 		it(c.name, () => {
 			const jitter = new Jitter();
 			const expected = new Map(c.target);
+			const ends = new Set(c.ends);
 			let current: number | undefined;
 			for (let i = 0; i < c.arrival.length; i++) {
+				if (ends.has(i)) jitter.end();
 				jitter.observe(c.arrival[i] as Milli, c.media[i] as Milli);
 				const value = target(jitter, c);
 				const listed = expected.get(i);
@@ -82,6 +86,17 @@ describe("Jitter", () => {
 			jitter.observe((10 + i * 20) as Milli, (14_500 + i * 20) as Milli);
 		}
 		expect(jitter.measured).toBe(20 as Milli);
+	});
+
+	it("ignores an end before any observation", () => {
+		// A cold estimator has no interval for a silence to stretch, so the end must not linger and
+		// excuse the first unexplained gap.
+		const jitter = new Jitter();
+		jitter.end();
+		for (let i = 0; i < 500; i++) jitter.observe((50 + i * 20) as Milli, (i * 20) as Milli);
+		const settled = jitter.measured;
+		jitter.observe((50 + 500 * 20 + 30_000) as Milli, (500 * 20 + 30_000) as Milli);
+		expect(jitter.measured).toBeGreaterThan(settled);
 	});
 
 	it("does not follow the absolute delay", () => {

@@ -74,8 +74,8 @@ async fn main() -> anyhow::Result<()> {
 	let origin = moq_tokio::origin::spawn();
 
 	if args[1] == "publish" {
-		let publication = origin.create_broadcast(path)?;
-		let mut broadcast = publication.broadcast().clone();
+		let route = origin.route(path, moq_net::origin::RouteOptions::hidden())?;
+		let mut broadcast = route.broadcast().clone();
 		let mut catalog = moq_mux::catalog::Producer::<()>::new(&mut broadcast, Default::default())?;
 		let track = broadcast.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))?;
 		let config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
@@ -94,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
 			.connect(url)
 			.established()
 			.await?;
-		publication.announce(Default::default())?;
+		route.announce()?;
 		println!("hls ready");
 		let mut commands = tokio::io::BufReader::new(tokio::io::stdin()).lines();
 		ensure!(
@@ -115,7 +115,12 @@ async fn main() -> anyhow::Result<()> {
 		.established()
 		.await?;
 	kio::clock::timeout(Duration::from_secs(30), async {
-		let broadcast = origin.consume().follow(path, None)?.available().await?;
+		let broadcast = origin
+			.consume()
+			.follow(path, None)?
+			.available()
+			.await?
+			.context("went offline before serving")?;
 		let mut catalogs =
 			moq_mux::catalog::Consumer::<()>::new(&broadcast, moq_mux::catalog::CatalogFormat::Hang).await?;
 		// Both renditions, once the interval is declared.

@@ -60,3 +60,19 @@ through a JS relay between Rust peers (`just test relay-fill`).
 
 Public API: `Fill` gains `time` and a frame start, matching Rust's
 `Fill::time` and `Fill::start`. Wire: none.
+
+Decided 2026-11-05 (maintainer, /quest-plan): this waits for [Drop set](/quest/m1/drop-set.md), since its head-fill
+half rewrites the same JS fill and miss code as
+[moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670) and Drop set,
+which also redefine the stale-drop judgment it relies on. Not chosen:
+splitting the `Fill.time` lookup off to start now.
+
+Decided 2026-11-05 (maintainer, /quest-audit): ✅ this also waits for
+[Lite-07 FETCH is single-group only](/quest/m1/subscribe-ranges/lite07-fetch.md),
+which moves JS multi-group fills in the same `#runFills` onto the
+subscription.
+
+## Required
+
+- [Drop set](/quest/m1/drop-set.md) - redefines the JS stale-drop judgment and fill code this rewrites
+- [Lite-07 FETCH is single-group only](/quest/m1/subscribe-ranges/lite07-fetch.md) - moves JS multi-group fills onto the subscription in the same `#runFills`

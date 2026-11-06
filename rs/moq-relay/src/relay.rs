@@ -853,9 +853,10 @@ async fn drain(
 
 	tokio::select! {
 		() = signal() => {
-			tracing::warn!(open = shutdown.tally().live, "second shutdown signal; exiting immediately");
+			let tally = shutdown.tally();
+			tracing::warn!(open = tally.open, ending = tally.ending, "second shutdown signal; exiting immediately");
 		}
-		() = shutdown.drained() => {}
+		_ = shutdown.drained() => {}
 	}
 }
 
@@ -1016,9 +1017,9 @@ mod tests {
 		tokio::pin!(draining);
 		assert!(draining.as_mut().now_or_never().is_none());
 
-		// Arrives before the drain observes the count reach zero: it is counted.
-		drop(last);
+		// Arrives before the last connection leaves: it is counted.
 		let arrival = activity.enter().expect("admitted before the drain committed");
+		drop(last);
 		assert!(
 			draining.as_mut().now_or_never().is_none(),
 			"drain exited under an admitted arrival"
@@ -1033,21 +1034,18 @@ mod tests {
 		);
 	}
 
-	/// A long-lived task's panic ends `run` with that panic, instead of leaving a
-	/// relay that accepts sessions it can no longer serve.
+	/// A long-lived task's failure ends `run` with it, instead of leaving a relay
+	/// that accepts sessions it can no longer serve.
 	#[tokio::test]
-	async fn a_critical_panic_stops_the_relay() {
+	async fn a_critical_failure_stops_the_relay() {
 		let mut config = crate::Config::default();
 		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 		let mut relay = super::Relay::load(config).await.unwrap().with_signals(false);
 		let _admissions = relay.admissions().unwrap();
-		relay
-			.cluster()
-			.critical
-			.spawn("injected task", async { panic!("injected") });
+		relay.cluster().critical.fail(anyhow::anyhow!("injected"));
 
 		let err = relay.run().await.expect_err("the relay kept running");
-		assert_eq!(err.root_cause().to_string(), "injected task panicked: injected");
+		assert_eq!(err.root_cause().to_string(), "injected");
 	}
 
 	/// A panic in the cluster's driver, which `run` polls rather than spawns, ends

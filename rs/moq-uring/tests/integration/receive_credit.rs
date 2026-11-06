@@ -89,10 +89,11 @@ fn partial_frame_gives_way() {
 		});
 	});
 
-	let broadcast = pub_origin.create_broadcast("room").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce");
-	let low = broadcast.create_track("low", timed()).expect("low track");
-	let high = broadcast.create_track("high", timed()).expect("high track");
+	let broadcast = pub_origin
+		.route("room", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let low = broadcast.broadcast().create_track("low", timed()).expect("low track");
+	let high = broadcast.broadcast().create_track("high", timed()).expect("high track");
 
 	let certs = support::certs().expect("certificates");
 	let server_config = quic::server::Config::new(
@@ -157,7 +158,8 @@ fn partial_frame_gives_way() {
 				consumer.follow("room", None).unwrap().available(),
 			)
 			.await
-			.expect("broadcast resolves");
+			.expect("broadcast resolves")
+			.expect("the first change is an instance");
 			let subscribe = |name: &str, priority: i8| {
 				let track = remote.track(name).expect("track");
 				async move {
@@ -309,7 +311,8 @@ fn javascript_partial_frame_gives_way() {
 				consumer.follow("room", None).unwrap().available(),
 			)
 			.await
-			.expect("broadcast resolves");
+			.expect("broadcast resolves")
+			.expect("the first change is an instance");
 			let subscribe = |name: &str, priority: i8| {
 				let track = remote.track(name).expect("track");
 				async move {

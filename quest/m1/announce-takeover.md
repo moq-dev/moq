@@ -49,19 +49,18 @@ this quest removes the predecessor machinery and grows to [XL].
   `rs/moq-net/src/model/origin.rs` and `front.rs` (the `seen` stamps in
   `OriginConsumerState` and `PendingFront::via`); relay forwarding in
   `rs/moq-relay`; and `rs/moq-net/tests/integration/announce_takeover.rs`.
-  Remove the `Takeover` event from Rust (unless
-  [Listing and follow](/quest/m1/api-audit/route/events.md) has already
-  removed the event kinds), `TAKEOVER` and the predecessor fields from
-  `MoqAnnounceEvent` in `rs/moq-ffi/src/origin.rs` and from
-  `moq_announce_event` in `rs/moq-c/src/api.rs`, and their wrapper and
-  binding-doc mentions. In `js/net`, drop the ANNOUNCE_TAKEOVER decoding in
+  Remove `RouteEvent::Takeover` from the relay-level `routes()` stream
+  (`rs/moq-net/src/model/origin.rs`, and its folds in `follow.rs`,
+  `announced.rs` and the session publishers); the app listing, `MoqAnnounceEvent`
+  and `moq_announce_event` dropped it already in
+  [moq-dev/moq#7678](https://github.com/moq-dev/moq/pull/7678). In `js/net`, drop the ANNOUNCE_TAKEOVER decoding in
   `lite/announce.ts` and `lite/subscriber.ts`. Remove the takeover sections
   from `drafts/draft-lcurley-moq-lite.md`, `doc/concept/identity.md` and
   `doc/concept/moq-lite.md`.
 - **Inheriting the instance.** Decided 2026-11-03 (maintainer, on
   [moq-dev/moq#7770](https://github.com/moq-dev/moq/pull/7770)):
-  `request.route(options)` from
-  [One Route handle](/quest/m1/api-audit/route/handle.md) mints a fresh
+  `request.route(options)`, from
+  [One Route handle](https://github.com/moq-dev/moq/pull/7806), mints a fresh
   instance by default, and ending a job leaves its prefix route open, with
   no history of ended paths. Carrying the prefix route's instance onto the
   path's exact route, so that the answer the waiting request gets is that
@@ -122,39 +121,37 @@ Remove the cold-start warm-up reads (`claimed` in
 assert that the first subscription succeeds. Keep them for moq-transport.
 Run `just check`, `just test interop --all` and `just drafts check`.
 
-### Once identity replaces ANNOUNCE_TAKEOVER
+### Once the instance replaces ANNOUNCE_TAKEOVER
 
 Decided 2026-10-31 (maintainer, the /quest-complete requeue session). Kept
 separate from the identity rewrite of this Plan, which landed with
 [moq-dev/moq#7420](https://github.com/moq-dev/moq/pull/7420).
-"We're replacing EPOCH with IDENTITY soon" (maintainer, 2026-10-31).
+"We're replacing EPOCH with IDENTITY soon" (maintainer, 2026-10-31). The
+broadcast "identity" was renamed `instance` on 2026-11-01 (maintainer, in
+[the route API audit](/quest/m1/api-audit/route/README.md), landed in
+[moq-dev/moq#7489](https://github.com/moq-dev/moq/pull/7489)), so that
+IDENTITY is now the instance.
 
-- Reword "takeover" as an event or operation, in terms of identity
+- Reword "takeover" as an event or operation, in terms of instance
   continuity, in [moq-bench pins the instances it measures](/quest/m2/bench-epoch-pin.md)
-  (Goal and Plan), [the HLS server follows each path once](/quest/m2/hls-follow-once.md)
-  (Goal and Tests), and [lite-07 route wire](/quest/m1/cluster-routing/routes/wire.md)
-  (the wire sketch, "the separately proven Takeover operation").
+  (Goal and Plan) and [the HLS server follows each path once](/quest/m2/hls-follow-once.md)
+  (Goal and Tests).
 - Rewrite the EPOCH references in `drafts/draft-lcurley-moq-cluster.md` and
-  `drafts/draft-lcurley-moq-epoch.md` in terms of IDENTITY.
+  `drafts/draft-lcurley-moq-epoch.md` in terms of the instance.
 - Add a regression test where a publisher restart's new announcement
   arrives before the old one's reset, on `solicit = false` moq-transport
   sessions. [moq-dev/moq#7239](https://github.com/moq-dev/moq/pull/7239)
   found that the subscriber (`rs/moq-net/src/ietf/subscriber.rs`, `attach`)
   folds such a PUBLISH_NAMESPACE into the same epochless route as an update
-  instead of End then Start; per-announcement identities resolve it, and
+  instead of End then Start; per-announcement instances resolve it, and
   the test proves they do.
 
 Public API: breaking; removes `Takeover` and the predecessor fields in every
 language. Wire: removes lite-07's ANNOUNCE_TAKEOVER (0x5), adding nothing
 beyond [Instance and epoch](https://github.com/moq-dev/moq/pull/7489)'s fields.
 
-## Required
-
-- [One Route handle](/quest/m1/api-audit/route/handle.md) - `request.route` creates the path's exact route, minting a fresh instance by default
-
 ## Related
 
-- [Listing and follow](/quest/m1/api-audit/route/events.md) - continuity shows up inside `follow`, not as an event
 - [Claim answer epochs](https://github.com/moq-dev/moq/pull/5678) - why a restarted job must never be stitched to its predecessor
 - [Retired requests](https://github.com/moq-dev/moq/pull/5294) - replacements never substitute content into held handles
 - [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - the route layer whose ANNOUNCE_START layout carries the instance

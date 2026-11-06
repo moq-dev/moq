@@ -115,9 +115,13 @@ mod linux {
 				});
 			});
 
-			let broadcast = pub_origin.create_broadcast("bench").expect("create broadcast");
-			broadcast.announce(Default::default()).expect("create broadcast");
-			let track = broadcast.create_track("data", timed()).expect("create track");
+			let broadcast = pub_origin
+				.route("bench", moq_net::origin::RouteOptions::default())
+				.expect("create broadcast");
+			let track = broadcast
+				.broadcast()
+				.create_track("data", timed())
+				.expect("create track");
 
 			let certs = support::certs().expect("certificates");
 			let server_config = quic::server::Config::new(
@@ -181,6 +185,7 @@ mod linux {
 							.available()
 							.await
 							.expect("broadcast resolves")
+							.unwrap()
 					};
 					let sub = bc
 						.track("data")

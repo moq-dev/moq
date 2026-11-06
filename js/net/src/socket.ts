@@ -25,7 +25,6 @@ type Stream = TcpStream | TrackStream;
 const reliable: Track.Subscription = {
 	order: "ascending",
 	delay: { max: null },
-	ranges: [{ start: { absolute: 0n } }],
 };
 const cancelled = () => new StreamError(StreamCode.Cancel, { message: "socket operation cancelled" });
 const ended = () => new StreamError(StreamCode.SessionClosed, { message: "socket endpoint closed" });
@@ -112,11 +111,11 @@ export class TcpStream {
 	}
 }
 
-/** A track session with an ascending, reliable subscription and no default publisher max age. */
+/** A track session whose ascending reader skips unavailable groups, with no default publisher max age. */
 export class TrackStream {
 	/** This side's track; write groups as independent messages. */
 	readonly producer: Track.Producer;
-	/** The peer's subscribed track; update its subscription or read through ordered(). */
+	/** The peer's subscribed track; ordered() skips groups that are refused, dropped, or evicted. */
 	readonly consumer: Track.Subscriber;
 	/** The peer endpoint's id, verified by accepting the dial. */
 	readonly peer: string;
@@ -217,7 +216,7 @@ export class Endpoint {
 	#closed = new Once<Error | null>();
 	#abort = new AbortController();
 	#origin: Origin.Producer;
-	#publication: Origin.Publication;
+	#route: Origin.Route;
 	#queues = { tcp: new Queue(), track: new Queue() };
 	#serving = false;
 	#sessions = new Set<Session>();
@@ -230,9 +229,8 @@ export class Endpoint {
 		this.prefix = Path.from(prefix);
 		this.#origin = origin;
 		this.#withheld = hooks.hiddenWithheld(origin);
-		this.#publication = origin.createBroadcast(endpointPath(this.prefix, id));
-		this.#unclose = hooks.onClosed(this.#publication.broadcast, () => this.close());
-		this.#publication.announce();
+		this.#route = origin.route(endpointPath(this.prefix, id));
+		this.#unclose = hooks.onClosed(this.#route.broadcast, () => this.close());
 	}
 
 	static {
@@ -297,7 +295,7 @@ export class Endpoint {
 	async #serve(): Promise<void> {
 		try {
 			for (;;) {
-				const request = await wireOf(this.#publication.broadcast).requested();
+				const request = await wireOf(this.#route.broadcast).requested();
 				if (!request) return;
 				const name = parse(request.name);
 				if (!name || name.acceptor !== this.id || name.dialer === this.id) {
@@ -337,6 +335,7 @@ export class Endpoint {
 	}
 
 	async #remote(
+		protocol: Protocol,
 		peer: string,
 		name: string,
 		signal: AbortSignal,
@@ -351,7 +350,13 @@ export class Endpoint {
 		try {
 			const broadcast = await waitFor(following.active, (active) => active !== undefined, pending);
 			if (!broadcast) throw ended();
-			return { consumer: broadcast.track(name).subscribe(reliable), peer: broadcast.closed };
+			return {
+				consumer: broadcast.track(name).subscribe({
+					...reliable,
+					ranges: protocol === "track" ? [{ start: { absolute: 0n } }] : undefined,
+				}),
+				peer: broadcast.closed,
+			};
 		} finally {
 			stop();
 		}
@@ -365,14 +370,14 @@ export class Endpoint {
 		signal.throwIfAborted();
 		const session = fromBytes(crypto.getRandomValues(new Uint8Array(16)));
 		const name = `${protocol}/${this.id}/${peer}/${session}`;
-		const answer = hooks.reserveUnlistedTrack(this.#publication.broadcast, name);
+		const answer = hooks.reserveUnlistedTrack(this.#route.broadcast, name);
 		let following: Origin.Following | undefined;
 		let consumer: Track.Subscriber | undefined;
 		let producer: Track.Producer | undefined;
 		let stop: Dispose = () => {};
 		const unreached = this.#reachable(abort);
 		try {
-			const remote = await this.#remote(peer, name, signal, (value) => {
+			const remote = await this.#remote(protocol, peer, name, signal, (value) => {
 				following = value;
 			});
 			consumer = remote.consumer;
@@ -419,7 +424,7 @@ export class Endpoint {
 		try {
 			check();
 			signal.throwIfAborted();
-			const remote = await this.#remote(name.dialer, request.name, signal, (value) => {
+			const remote = await this.#remote(protocol, name.dialer, request.name, signal, (value) => {
 				following = value;
 			});
 			consumer = remote.consumer;
@@ -472,7 +477,7 @@ export class Endpoint {
 		this.#abort.abort(error ?? ended());
 		for (const queue of Object.values(this.#queues)) queue.close();
 		for (const session of this.#sessions) session.reset(ended());
-		this.#publication.broadcast.close();
+		this.#route.broadcast.close();
 	}
 }
 

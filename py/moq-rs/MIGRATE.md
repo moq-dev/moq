@@ -4,6 +4,38 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Socket sessions
+
+moq.socket now exposes TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
+
+`await GroupProducer.ready(size)` is new: it waits until a frame of `size` bytes fits a window ahead of the fastest reader. Await it before each `write_frame` so the writer waits for its fastest reader instead of evicting it, though not for slower readers; a `TcpStream` producer needs it to behave like TCP. Existing writers are unchanged.
+
+### Announcements are a listing of present and absent paths
+
+`AnnounceConsumer` yields `AnnounceEventPresent` when a route starts covering a path and `AnnounceEventAbsent` when none covers it any more, each carrying an `Announce` as `announce`.
+`AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, `AnnounceEventRestart`, and `AnnounceEventTakeover` are removed: read `AnnounceEventStart` as `AnnounceEventPresent` and `AnnounceEventEnd` as `AnnounceEventAbsent`, and drop the `Update` branch, since a re-priced route is no longer reported.
+Another publisher instance taking a path over keeps it present and is not listed. Where you requested the path again on `AnnounceEventRestart`, hold `follow(path)` instead and read each `BroadcastConsumer` that `await following.available()` returns, dropping what you read from the previous one.
+
+### `Following.available()` returns `None` once the path goes offline
+
+`await following.available()` (or `await following`) returns `BroadcastConsumer | None`.
+Later calls return `None` when the path goes offline, or, when following an `instance`, when another instance takes it over, then the next broadcast once something serves the path again; the first call never returns `None`.
+Stop reading the previous broadcast on `None` and call `available()` again. A caller that only awaits the first broadcast can assert it is not `None`.
+
+### Publishing goes through one `Route` handle
+
+`OriginProducer.create_broadcast(path)` (and `Client.create_broadcast` / `Server.create_broadcast`) is `route(path, *, hidden=False, cost=0, instance=None, epoch=0)`, and `OriginProducer.requests(prefix)` is `route_prefix(prefix, ...)`. Both return a `moq.Route`, which replaces `Publication`, `OriginRequests`, and `BroadcastPrepared`:
+
+- `Publication.broadcast` is `Route.broadcast`, which raises `Error.Internal` on a prefix route.
+- `Publication.announce(AnnounceRoute(...))` is `Route.announce()`; pass the cost and instance to `route()` instead, and re-price with `set_cost(cost)`. `unannounce()` is `withdraw()`.
+- `OriginRequests.requested_broadcast()` is `Route.requested()`, which returns `None` once the origin closes; `async for` still iterates the requests.
+- `BroadcastRequest.prepare()` then `.publish()` is `BroadcastRequest.route(hidden=True)`, then fill `.broadcast` and call `announce()`.
+- `Route.instance` is the stream's instance, minted at creation and kept across `withdraw()` and `announce()`.
+
+A route is visible at once unless `hidden=True`, so pass it and call `announce()` after filling the catalog to keep the old create-then-announce order. Hold the `Route` while the broadcast should stay announced: dropping or cancelling it retracts it, while `broadcast.close()` still ends both.
+
+`AnnounceRoute` is gone, and `moq.Route` now names the handle: the read-only facts on `Announce.route` are `moq.RouteInfo`.
+
 ### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
 
 `Video` and `Audio` gain `warmup`, the catalog's decoder warmup; it defaults to `None` as the last field, so existing code keeps working. `TrackConsumer` and the audio and video consumers read it from the rendition and start that much earlier.
@@ -15,6 +47,10 @@ Replace stream-track `append_datagram` / `insert_datagram` / `recv_datagram` wit
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 `TrackInfo.max_age` defaults to `timedelta(0)`, like `Delay.max`, so a bare `TrackInfo()` and an omitted one now advertise a zero max age, serving only the live edge, instead of no publisher limit. `None` still means no limit: pass `max_age=None` where you relied on the default.
+
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`moq.json.SnapshotConsumer(broadcast, name, *, priority=0)` takes the `BroadcastConsumer` and the track name instead of a `TrackConsumer`, and subscribes to the track itself at a zero `delay.max` and `priority`. Drop the `subscribe_track` call; a refused subscription now raises from the first read. Iteration skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
 
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
@@ -183,7 +219,7 @@ and native library together; application calls are unchanged.
 ### JSON consumers yield `json.Timed` (#5677)
 
 `json.SnapshotConsumer` and `json.StreamConsumer` yield `Timed(value, timestamp)` instead of the bare value; `timestamp` is a `timedelta`, or `None` when untimed.
-Iterating a snapshot consumer now yields every state in order; `await consumer.latest()` returns the newest.
+Iterating a snapshot consumer now yields each state in order, skipping every group a newer one supersedes (see the zero-delay entry above); `await consumer.latest()` returns the newest.
 Timestamps are rounded down to a whole microsecond.
 
 ### Ranges filter reads (#5929)

@@ -39,9 +39,11 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 /// the subscriber read: the frame payloads and the error it ended with, if any.
 async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("video", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	broadcast.announce().unwrap();
 
 	let subscriber = produce_origin(2);
 	let mut options = MockConnectOptions::new("moq-lite-05".parse::<Version>().unwrap());
@@ -53,7 +55,8 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 
 	// Resolved before the ending starts: a SUBSCRIBE sent alongside its TRACK reaches the
 	// publisher before the subscriber has the TRACK_INFO it accepts the track with.
@@ -92,7 +95,7 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 	track.finish().unwrap();
 	drop(track);
 	if finish_broadcast {
-		broadcast.close();
+		broadcast.broadcast().close();
 	}
 
 	// The session and both origins stay up until the reader is done.

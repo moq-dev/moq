@@ -20,9 +20,99 @@ IETF advertisements retain their answer budget.
 The additive `socket` namespace exports `Endpoint`, `TcpStream`, and `TrackStream`.
 Use `dialTcp` / `acceptTcp` or `dialTrack` / `acceptTrack` on endpoints sharing a prefix;
 cancel pending operations with an `AbortSignal`, and explicitly close endpoints when done.
-The existing wire is unchanged. Every hop must support moq-lite-07 (currently an
+Track readers skip groups that are refused, dropped, or evicted instead of waiting forever.
+TCP readers join their one group live, recovering its head with a joining FETCH or fill
+over moq-transport. The existing wire is unchanged. Every hop must support moq-lite-07 (currently an
 explicit `moq-lite-07-wip` offer) or moq-transport; while the endpoint's own client
 connection is moq-lite before 07, its dials and accepts fail as unsupported.
+
+### Absolute IETF subscriptions keep their prefix
+
+Explicit group ranges now keep their requested start when the subscription answer
+arrives after its first data. IETF publishers honor absolute starts on all
+supported drafts instead of silently joining at the live edge. A start of group 0
+is a filterless SUBSCRIBE on every draft, and the groups below the answer's Largest
+Object come from one range FETCH. A `Subscribe` with an unfiltered filter now omits
+LOCATION\_FILTER, and a SUBSCRIBE without one still joins live. There is no API
+change.
+
+### WebSocket receive windows match Rust
+
+The fallback now grants 4 MiB per connection and 1 MiB per stream, up from
+1 MiB and 256 KiB. Set `websocket.receiveWindow` and
+`websocket.streamReceiveWindow` in connection options to tune these byte budgets
+or retain the old limits. Both accept positive safe integers, like
+`websocket.maxStreams`. `@moq/qmux`'s standalone defaults are unchanged.
+
+### Datagrams use separate track types ([#7846](https://github.com/moq-dev/moq/pull/7846))
+
+Create a datagram track with `broadcast.createDatagrams(name, info)` and read it with
+`broadcast.datagrams(name)`. Replace `Track.Producer.appendDatagram(timestamp, payload)`
+with `Datagram.Producer.append(timestamp, payload)`, `insertDatagram(sequence, timestamp, payload)`
+with `insert({ sequence, timestamp, payload })`, and `Subscriber.recvDatagram()` or
+`Ordered.recvDatagram()` with `Datagram.Consumer.recv()`. The payload type is now
+`Datagram.Datagram`, replacing `Track.Datagram`.
+
+Stream and datagram tracks may share a name, with separate sequence counters. Datagram
+consumers start live, have only a priority (`setPriority`), and have no range, order,
+compression, FETCH, or cache API. `finish()` drains existing readers; `abort(error)`
+fails them immediately. Close consumers when done.
+
+A datagram consumer binds to the broadcast's serving source when opened. It keeps no
+stream resume state and does not move to a replacement route.
+
+Lite-07-wip uses DATAGRAMS on stream type 0x9 and carries no Inflated Size. Lite-05/06
+keep their wire format and carry both kinds of a name on one SUBSCRIBE, without deduplication.
+Create a datagram track before or with its same-name stream track on those versions.
+Lite-01..04 and transports without datagrams refuse datagram requests. moq-transport
+currently refuses them while its separate datagram-track adapter is implemented.
+
+### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`Announce.Event` is `{ kind: "present" | "absent" } & Announce`. Another instance taking a path over keeps it present, and a route's cost or hops changing is not reported, so `start`, `update`, `restart` and `end` are gone.
+Map `"start"` to `"present"` and `"end"` to `"absent"`, and drop `"update"` branches. Where you requested the path again on `"restart"`, hold `origin.follow(path)`: its `active` moves to each new instance's broadcast.
+
+### One `Origin.Route` handle replaces publications, claims, and prepared answers
+
+`Origin.Producer.createBroadcast`, `requests`, and `requestsRoute`, and the `Origin.Publication`, `Origin.Prepared`, and `Origin.Requests` classes are gone.
+An `Origin.Route` owns what you publish: `origin.route(path, options?)` creates an exact route that owns a new broadcast, and `origin.routePrefix(prefix, options?)` creates a prefix route that yields requests.
+A route is visible at once unless created with `{ hidden: true }`; `announce()` and `withdraw()` toggle it, `announced` says which, and `close()` retracts it and closes its broadcast, as closing the broadcast does.
+Its `instance` is minted when the route is created and kept across `withdraw()` and `announce()`, so a reader continues rather than restarts. A new route is a new stream.
+`RouteOptions` sets what `announce(route)` took: `cost`, `auth`, and a stable `instance` with its `epoch`. Re-price with `setCost(cost)` and swap the credential with `setAuth(auth)`.
+
+```ts
+// Before
+const publication = origin.createBroadcast(path);
+publication.broadcast.createTrack("catalog.json");
+publication.announce({ cost: 5n });
+publication.unannounce();
+
+// After
+const route = origin.route(path, { hidden: true, cost: 5n });
+route.broadcast.createTrack("catalog.json");
+route.announce();
+route.withdraw(); // announce() again continues the same instance
+```
+
+Drop the separate `announce()` call when nothing needs filling first: `origin.route(path)` is already visible.
+A prefix route replaces `requests(prefix)`: iterate `route.requested()` as before, and answer each request with `serve(broadcast)`, `reject(err)`, or `request.route(options?)`, which replaces `prepare()` and `Prepared.publish()`.
+A job's route is visible at once and answers the waiting requesters unless created hidden; a hidden one answers them on `announce()`, and closing it or its broadcast before then refuses them as `Unroutable`.
+
+```ts
+// Before
+using prepared = request.prepare();
+prepared.broadcast.createTrack("video");
+const publication = prepared.publish();
+
+// After
+const job = request.route({ hidden: true });
+job.broadcast.createTrack("video");
+job.announce();
+```
+
+`route.broadcast` throws on a prefix route, and `requested()` ends at once on an exact one.
+The route metadata interface `Origin.Route` is now the read-only `Origin.RouteInfo`, carried on announce events; applications never build one.
+`Origin.Table` exposes `route` and `routePrefix` in place of `createBroadcast`, `requests`, and `requestsRoute`, and `Origin.RequestSlot` and `Origin.RouteEntry` are no longer exported.
 
 ### Opens wait their turn for stream credit ([#7894](https://github.com/moq-dev/moq/pull/7894))
 

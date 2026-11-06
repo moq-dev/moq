@@ -21,15 +21,15 @@ import {
 } from "../error.ts";
 import { type Fill, fillChanged, type Requests, wantedRuns } from "../fill.ts";
 import type * as netGroup from "../group.ts";
-import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type RouteInfo, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import { finalSequence, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { receiveFrame, skipPayload } from "../payload.ts";
-import { type Cursor, Reader, type Stream } from "../stream.ts";
+import type { Cursor, Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import type { Timescale, Timestamp } from "../time.ts";
+import type { Timescale } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
@@ -48,14 +48,7 @@ import { isDraft20 } from "./filter.ts";
 import { Join } from "./join.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import {
-	decodeFetchObject,
-	decodeObjectTime,
-	EndOfTrackProperties,
-	Frame,
-	type Group as GroupMessage,
-	ObjectIdGap,
-} from "./object.ts";
+import { decodeFetchObject, EndOfTrackProperties, Frame, type Group as GroupMessage, ObjectIdGap } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { DEFAULT_WIRE, fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishDoneStatus, publishDoneClean } from "./publish.ts";
@@ -126,7 +119,7 @@ type SubscribeSetupState = {
 };
 
 /** An announced path: each live advertisement referencing it, oldest first, and the route it holds. */
-type Announced = { adverts: { id: number; route: Route }[]; route: Route };
+type Announced = { adverts: { id: number; route: RouteInfo }[]; route: RouteInfo };
 
 /** A local announce reader's filter: its scope, the prefix it asked for, and its hidden opt-in. */
 type Filter = { scope: Path.Pattern; prefix: Path.Valid; hidden: boolean; covering: boolean };
@@ -273,7 +266,7 @@ export class Subscriber {
 	}
 
 	// What a route costs once the peer has asked us to leave.
-	#priced(route: Route): Route {
+	#priced(route: RouteInfo): RouteInfo {
 		if (!this.#goingAway()) return route;
 		if (route.cost === DRAIN_COST) return route;
 		return { ...route, cost: DRAIN_COST };
@@ -307,7 +300,7 @@ export class Subscriber {
 	/**
 	 * The route an advertisement carries, before it is minted an instance; one without a path is anonymous and free.
 	 */
-	#route({ cluster }: AdvertParams): Route {
+	#route({ cluster }: AdvertParams): RouteInfo {
 		return cluster === undefined ? { hops: [UNKNOWN_HOP], cost: Cost.zero } : { ...cluster };
 	}
 
@@ -330,7 +323,7 @@ export class Subscriber {
 	 * The request goes out once every overlapping request already closed here is off the
 	 * wire, so a peer that refuses overlapping requests never sees this one beside them.
 	 */
-	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
+	routes(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Routes {
 		// The wire speaks announce interest by prefix.
 		const prefix = scopeHead(scope);
 		const filter: Asking = {
@@ -377,7 +370,7 @@ export class Subscriber {
 	 * Record one more advertisement for a path, returning the id that names it. Consumers
 	 * hear `start` for the first; a later one stands as the newest (see `#settleAnnounce`).
 	 */
-	#attachAnnounce(path: Path.Valid, route: Route): number {
+	#attachAnnounce(path: Path.Valid, route: RouteInfo): number {
 		const id = this.#nextAdvert++;
 		const existing = this.#announced.get(path);
 		if (existing) {
@@ -403,7 +396,7 @@ export class Subscriber {
 	}
 
 	/** Replace the route of advertisement `id`, which moves the path only while it is the newest. */
-	#updateAnnounce(path: Path.Valid, id: number, route: Route) {
+	#updateAnnounce(path: Path.Valid, id: number, route: RouteInfo) {
 		const existing = this.#announced.get(path);
 		const advert = existing?.adverts.find((advert) => advert.id === id);
 		if (existing === undefined || advert === undefined) return;
@@ -703,6 +696,13 @@ export class Subscriber {
 				void this.#runSubscribe(path, request, instance.validity?.signal);
 			}
 		})();
+		void (async () => {
+			for (;;) {
+				const request = await wireOf(consumer).requestedDatagrams();
+				if (!request) return;
+				request.reject(new NotFound("datagram tracks over moq-transport"));
+			}
+		})();
 		return this.#consumes.insert(path, instance, consumer);
 	}
 
@@ -987,7 +987,7 @@ export class Subscriber {
 
 	#needsLive(producer: track.Producer, edge: bigint): boolean {
 		if (hooks.trackFinished(producer) || !hooks.subscribing(producer).peek()) return false;
-		const ranges = producer.subscription.peek()?.ranges ?? [];
+		const ranges = hooks.requested(producer).peek()?.ranges ?? [];
 		if (!bounded(ranges)) return true;
 		const end = wireSpan(ranges).end;
 		// A relative end resolves against Largest, or against the first group when none exists yet,
@@ -997,7 +997,7 @@ export class Subscriber {
 
 	async #historyOnly(producer: track.Producer, edge: bigint): Promise<void> {
 		while (this.#needsLive(producer, edge) && hooks.trackReleased(producer).peek() === undefined) {
-			await Signal.race(producer.subscription, hooks.subscribing(producer), hooks.trackReleased(producer));
+			await Signal.race(hooks.requested(producer), hooks.subscribing(producer), hooks.trackReleased(producer));
 		}
 	}
 
@@ -1076,7 +1076,7 @@ export class Subscriber {
 			const subscribing = hooks.subscribing(producer);
 			for (;;) {
 				if (hooks.trackReleased(producer).peek() !== undefined) return;
-				const subscription = producer.subscription.peek();
+				const subscription = hooks.requested(producer).peek();
 				if (!subscription) {
 					hooks.releaseTrack(producer);
 					return;
@@ -1087,7 +1087,7 @@ export class Subscriber {
 					continue;
 				}
 				await untilAborted(
-					Promise.resolve(Signal.race(producer.subscription, subscribing, hooks.trackReleased(producer))),
+					Promise.resolve(Signal.race(hooks.requested(producer), subscribing, hooks.trackReleased(producer))),
 					signal,
 				);
 			}
@@ -1373,14 +1373,14 @@ export class Subscriber {
 		for (;;) {
 			// With no subscriber left there is nothing to follow: the subscription is ending, or
 			// keeps what it last asked for until one returns, as on lite and in Rust.
-			const subscription = producer.subscription.peek();
+			const subscription = hooks.requested(producer).peek();
 			const wanted = toWire(subscription?.priority ?? 0);
 			const wantedMaxAge = this.#maxAge && subscription ? maxDelayOf(subscription) : undefined;
 			if (!subscription || (wanted === sent && wantedMaxAge === sentMaxAge) || unanswered.peek() > 0) {
 				const disposes: Dispose[] = [];
 				const wake = new Promise<void>((resolve) => {
 					disposes.push(
-						producer.subscription.changed(() => resolve()),
+						hooks.requested(producer).changed(() => resolve()),
 						unanswered.changed(() => resolve()),
 					);
 				});
@@ -1534,6 +1534,7 @@ export class Subscriber {
 		// that the stream is recorded, so settling this promise hands it back to be torn down.
 		if (cancelled.aborted) throw new Error("subscribe cancelled before it was sent");
 
+		const bounds = wireSpan(request.subscription.ranges ?? [{}]);
 		const msg = new Subscribe({
 			requestId,
 			trackNamespace: broadcast,
@@ -1543,10 +1544,10 @@ export class Subscriber {
 			maxAge: this.#maxAge ? maxDelayOf(request.subscription) : undefined,
 			// Fixed for the subscription's life: no REQUEST_UPDATE parameter carries it.
 			groupOrder: request.subscription.order,
-			// Joins at the current group, from its first object: the subscription delivers the
-			// objects after Largest, and the group's head before it comes on a fetch stream
-			// (see {@link Join}). Fixed for the subscription's life.
-			...joinFilter(version),
+			// A known start is absolute, except group 0, which joins live with no filter. A Next
+			// Object join recovers its head through a fetch stream (see {@link Join}). Fixed for
+			// the subscription's life.
+			...joinFilter(version, bounds.start),
 		});
 		if (msg.fill) {
 			// The fill names this request and can overtake SUBSCRIBE_OK, so it waits on it here.
@@ -1603,10 +1604,12 @@ export class Subscriber {
 		if (!known) state.requests = producer.requests();
 		const tail = new Tail();
 		const subscription: Subscription = { track: producer, tail, timescale: ok.properties.timescale, fetchIds: [] };
-		// The subscription starts after Largest, so the joining FETCH or the fill brings its
-		// group's head. With no Largest the track is empty and every group whole. A draft-22 fill
-		// is one of the subscription's own streams, so the Stream Count already waits for it.
-		if (ok.largest) {
+		// A live join starts at Largest's group: a filterless one from its first object, and Next
+		// Object after Largest, so the joining FETCH or the fill brings that group's head. With no
+		// Largest the track is empty and every group whole. A draft-22 fill is one of the
+		// subscription's own streams, so the Stream Count already waits for it.
+		const live = msg.filter.kind !== "absolute";
+		if (msg.filter.kind === "nextObject" && ok.largest) {
 			subscription.join = new Join(ok.largest.groupId, tail, { counted: msg.fill !== undefined });
 			const join = subscription.join;
 			this.#joins.set(producer, join);
@@ -1622,12 +1625,11 @@ export class Subscriber {
 			// no object, so a Next Object join served onward still starts at the group's first.
 			hooks.reportedGroup(producer, ok.largest.groupId);
 		}
-		// The live join starts at the publisher's edge, whatever floor the demand asked for.
-		// With no Largest it skips nothing, so every group is owed: a lower one's stream may
-		// still arrive after a higher one's.
+		// Absolute subscriptions keep their prefix even when the answer follows its first data. A
+		// live join's earlier start is left to the copy's fills, one range FETCH per run.
 		hooks.startTrack(producer, {
-			start: ok.largest ? ok.largest.groupId : 0n,
-			requested: wireSpan(request.subscription.ranges ?? [{}]).start,
+			start: live ? (ok.largest?.groupId ?? 0n) : (bounds.start ?? 0n),
+			requested: bounds.start,
 		});
 		staged?.commit();
 		state.fill?.(subscription);
@@ -1854,6 +1856,24 @@ export class Subscriber {
 			}
 			return producer;
 		};
+		// A group that will never arrive whole is dropped, so readers stop owing it.
+		const dropHeadless = () =>
+			hooks.dropTrackGroups(
+				track,
+				group.groupId,
+				group.groupId + 1n,
+				new StreamError(StreamCode.NotFound, { message: "the group's head was lost" }),
+			);
+		// After an END_OF_GROUP or END_OF_TRACK status only the stream's end may follow: an
+		// object past the group's final one makes the track malformed.
+		const last = async () => {
+			const done = await race([stream.done(), producer?.closed ?? hooks.trackReleased(track)]);
+			if (done === false) {
+				throw new StreamError(StreamCode.MalformedTrack, {
+					message: `data past the group's final object: group=${group.groupId}`,
+				});
+			}
+		};
 
 		try {
 			// The alias binds after SUBSCRIBE_OK commits the track property; an omitted
@@ -1907,6 +1927,7 @@ export class Subscriber {
 							console.debug(
 								`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId} start=${start}`,
 							);
+							dropHeadless();
 							stream.stop(new Error("no head to stitch a mid-group stream onto"));
 							return;
 						}
@@ -1920,6 +1941,7 @@ export class Subscriber {
 						console.debug(
 							`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`,
 						);
+						dropHeadless();
 						stream.stop(new Error("a group must start at object 0"));
 						return;
 					}
@@ -1931,6 +1953,7 @@ export class Subscriber {
 					// No object at or past this location exists: after the group's last object
 					// the track ends with it, and at object 0 it ends before it.
 					if (producer && frame.idDelta !== 0) throw new ObjectIdGap(frame.idDelta);
+					await last();
 					const end = { group: group.groupId, frame: nextObject + frame.idDelta };
 					producer?.finish();
 					try {
@@ -1941,7 +1964,10 @@ export class Subscriber {
 					subscription.end ??= finalSequence(end);
 					return;
 				}
-				if (!frame.isObject) break;
+				if (!frame.isObject) {
+					await last();
+					break;
+				}
 
 				// A track that declared TIMESCALE stamps every object, so one without a Timestamp is
 				// malformed rather than something to invent a time for.
@@ -1976,6 +2002,7 @@ export class Subscriber {
 			// as the keyframe the group opens with.
 			if (producer === undefined && e instanceof ObjectIdGap && !group.flags.firstObject) {
 				console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
+				dropHeadless();
 				stream.stop(new Error("a group must start at object 0"));
 				return;
 			}
@@ -2152,67 +2179,10 @@ export class Subscriber {
 		}
 	}
 
-	/**
-	 * Deliver one OBJECT_DATAGRAM as a datagram on its subscription's track: a single-frame
-	 * group at the Group ID.
-	 *
-	 * One the model cannot carry is dropped like any lost datagram: an Object past ID 0 (the
-	 * group would need a second object), a status other than Normal, an alias that is not
-	 * bound yet (the draft lets us drop rather than buffer), or no Timestamp on a track that
-	 * declared a timescale.
-	 */
+	// Stream subscriptions never admit datagrams; the separate IETF datagram-track adapter
+	// owns mapping DATAGRAMS demand onto SUBSCRIBE/OBJECT_DATAGRAM.
 	async #recvDatagram(data: Uint8Array): Promise<void> {
-		const version = this.#session.version;
-		const datagram = await ObjectDatagram.decode(data, version);
-		const { trackAlias: alias, groupId: sequence } = datagram;
-
-		if ((datagram.objectId ?? 0n) !== 0n) {
-			console.debug(`dropping a datagram past object 0: alias=${alias} group=${sequence}`);
-			return;
-		}
-		let payload: Uint8Array;
-		if ("status" in datagram.body) {
-			if (datagram.body.status !== 0) {
-				console.debug(
-					`dropping a datagram status: alias=${alias} group=${sequence} status=${datagram.body.status}`,
-				);
-				return;
-			}
-			payload = new Uint8Array();
-		} else {
-			payload = datagram.body.payload;
-		}
-
-		const subscription = this.#aliases.peek(alias);
-		if (!subscription) {
-			console.debug(`dropping a datagram for an unbound alias: alias=${alias} group=${sequence}`);
-			return;
-		}
-
-		// Like a subgroup object: a track that declared no timescale is untimed.
-		const timescale = this.#timescales.get(alias);
-		let timestamp: Timestamp | undefined;
-		if (timescale !== undefined && datagram.properties !== undefined) {
-			try {
-				timestamp = await new Reader(undefined, datagram.properties, version).decode((c) =>
-					decodeObjectTime(c, timescale),
-				);
-			} catch (err: unknown) {
-				throw new ProtocolViolation(`malformed OBJECT_DATAGRAM properties: ${reason(error(err))}`, {
-					cause: err,
-				});
-			}
-		}
-		if (timescale !== undefined && timestamp === undefined) {
-			console.debug(`dropping an unstamped datagram: alias=${alias} group=${sequence}`);
-			return;
-		}
-
-		try {
-			subscription.track.insertDatagram(sequence, timestamp, payload);
-		} catch (err: unknown) {
-			console.debug(`dropping datagram: alias=${alias} group=${sequence} error=${reason(error(err))}`);
-		}
+		await ObjectDatagram.decode(data, this.#session.version);
 	}
 }
 

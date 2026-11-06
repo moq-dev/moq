@@ -68,12 +68,6 @@ impl Session {
 		})
 	}
 
-	/// Open a unidirectional stream scheduled by `options`, waiting its turn for credit.
-	pub(crate) async fn open_uni(&self, options: SendOptions<'_, Group>) -> Result<SendStream, Error> {
-		let mut open = Open::default();
-		kio::wait(|waiter| self.poll_open_uni(&mut open, waiter, options)).await
-	}
-
 	/// The handle each stream this session yields reserves its paused credit through.
 	fn budget(&self) -> Budget {
 		Arc::downgrade(&self.inner)
@@ -355,6 +349,7 @@ pub(super) trait ErasedSession: Send + Sync {
 	fn probe(&self) -> Option<Probe>;
 	fn receive_window(&self) -> Option<ReceiveWindow>;
 	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit>;
+	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]>;
 }
 
 trait ErasedGroup: Send + Sync {
@@ -493,6 +488,10 @@ impl<S: poll::Boxable> ErasedSession for S {
 
 	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit> {
 		poll::Session::stream_credit(self, dir)
+	}
+
+	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+		poll::Session::export_keying_material(self, label, context)
 	}
 }
 
@@ -681,6 +680,10 @@ impl poll::Session for Session {
 
 	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit> {
 		self.inner.session.stream_credit(dir)
+	}
+
+	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+		self.inner.session.export_keying_material(label, context)
 	}
 }
 

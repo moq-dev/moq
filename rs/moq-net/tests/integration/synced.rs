@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use moq_net::{Hop, Version, announce, origin};
+use moq_net::{Hop, Version, origin};
 
 use crate::support;
 use support::harness::{MockConnectOptions, connect_mock};
@@ -22,7 +22,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 }
 
 /// Read events until the consumer syncs, returning the prefixes then announced.
-async fn read_until_synced(announced: &mut announce::Consumer) -> BTreeSet<String> {
+async fn read_until_synced(announced: &mut origin::Routes) -> BTreeSet<String> {
 	let mut seen = BTreeSet::new();
 	while !announced.poll_synced(&moq_net::kio::Waiter::noop()).is_ready() {
 		let event = kio::clock::timeout(SETTLE, announced.next())
@@ -30,15 +30,15 @@ async fn read_until_synced(announced: &mut announce::Consumer) -> BTreeSet<Strin
 			.expect("synced in time")
 			.expect("the cursor stays open");
 		match event {
-			announce::Event::Start(announce)
-			| announce::Event::Restart(announce)
-			| announce::Event::Takeover { announce, .. } => {
+			origin::RouteEvent::Start(announce)
+			| origin::RouteEvent::Restart(announce)
+			| origin::RouteEvent::Takeover { announce, .. } => {
 				seen.insert(announce.prefix.to_string());
 			}
-			announce::Event::End(announce) => {
+			origin::RouteEvent::End(announce) => {
 				seen.remove(announce.prefix.as_str());
 			}
-			announce::Event::Update(_) => {}
+			origin::RouteEvent::Update(_) => {}
 		}
 	}
 	seen
@@ -48,10 +48,10 @@ async fn read_until_synced(announced: &mut announce::Consumer) -> BTreeSet<Strin
 /// origin's consumer had read when it synced.
 async fn synced(version: &str) -> BTreeSet<String> {
 	let publisher = produce_origin(1);
-	let a = publisher.create_broadcast("a").unwrap();
-	a.announce(Default::default()).unwrap();
-	let b = publisher.create_broadcast("b").unwrap();
-	b.announce(Default::default()).unwrap();
+	let a = publisher.route("a", moq_net::origin::RouteOptions::hidden()).unwrap();
+	a.announce().unwrap();
+	let b = publisher.route("b", moq_net::origin::RouteOptions::hidden()).unwrap();
+	b.announce().unwrap();
 
 	let subscriber = produce_origin(2);
 	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
@@ -59,7 +59,7 @@ async fn synced(version: &str) -> BTreeSet<String> {
 	options.client_subscribe = Some(subscriber.clone());
 	let _pair = connect_mock(options).await;
 
-	let mut announced = subscriber.consume().announced();
+	let mut announced = subscriber.consume().routes();
 	read_until_synced(&mut announced).await
 }
 
@@ -94,8 +94,8 @@ async fn a_best_effort_boundary_still_catches_up() {
 #[kio::test]
 async fn a_second_session_catches_up() {
 	let publisher = produce_origin(1);
-	let a = publisher.create_broadcast("a").unwrap();
-	a.announce(Default::default()).unwrap();
+	let a = publisher.route("a", moq_net::origin::RouteOptions::hidden()).unwrap();
+	a.announce().unwrap();
 
 	let subscriber = produce_origin(2);
 	let connect = || {
@@ -105,7 +105,7 @@ async fn a_second_session_catches_up() {
 		connect_mock(options)
 	};
 	let first = connect().await;
-	let mut announced = subscriber.consume().announced();
+	let mut announced = subscriber.consume().routes();
 	assert_eq!(
 		read_until_synced(&mut announced).await,
 		["a"].into_iter().map(String::from).collect()
@@ -128,18 +128,20 @@ async fn a_cold_relay_syncs_then_forwards_upstream_routes_as_live() {
 	downstream.server_publish = Some(relay.consume());
 	downstream.client_subscribe = Some(subscriber.clone());
 	let _downstream = connect_mock(downstream).await;
-	let mut announced = subscriber.consume().announced();
+	let mut announced = subscriber.consume().routes();
 	moq_net::kio::wait(|waiter| announced.poll_synced(waiter)).await;
 	assert!(announced.try_next().is_none());
 
 	let upstream = produce_origin(1);
-	let broadcast = upstream.create_broadcast("room/cam").unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = upstream
+		.route("room/cam", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	broadcast.announce().unwrap();
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(upstream.consume());
 	options.client_subscribe = Some(relay.clone());
 	let _upstream = connect_mock(options).await;
 	let event = announced.next().await.unwrap();
-	assert!(matches!(event, announce::Event::Start(route) if route.prefix.as_str() == "room/cam"));
+	assert!(matches!(event, origin::RouteEvent::Start(route) if route.prefix.as_str() == "room/cam"));
 	assert!(announced.poll_synced(&moq_net::kio::Waiter::noop()).is_ready());
 }

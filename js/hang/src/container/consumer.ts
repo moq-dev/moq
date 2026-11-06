@@ -221,6 +221,11 @@ export class Consumer {
 	 * floor. Starts at the predecessor's estimate, or the cold-start estimate without one.
 	 */
 	readonly spread: Getter<Milli>;
+	// The newest group opened by a declared end, until a later group's first frame tells the jitter
+	// estimator the silence is over. Not at the marker itself: the stopped encoder's final packets may
+	// follow it in its own group, and they belong to the speech before the silence.
+	#declared?: bigint;
+	#mediaSequence?: bigint;
 
 	#signals = new Effect();
 	#closed = new Once<Error | null>();
@@ -378,6 +383,13 @@ export class Consumer {
 		}
 	}
 
+	// Note an end the publisher declared in `group`, which a later group's first frame resumes from.
+	#declare(group: Group): void {
+		const sequence = group.consumer.sequence;
+		if (this.#mediaSequence !== undefined && sequence < this.#mediaSequence) return;
+		if (this.#declared === undefined || sequence > this.#declared) this.#declared = sequence;
+	}
+
 	// Decode one wire frame into `group`, charging what it buffers. A payload that fails to decode sets
 	// the group's fault, which next() raises once the frames ahead of it are read.
 	#decode(group: Group, wire: Moq.Group.Frame): void {
@@ -401,6 +413,7 @@ export class Consumer {
 				return;
 			}
 			group.bare = decoded.length === 0;
+			if (group.bare) this.#declare(group);
 		}
 
 		// Decoded payloads are views of the wire payload, which stays allocated until the last of them is
@@ -412,8 +425,17 @@ export class Consumer {
 			// Observed here, before any gap handling or age budget: a target derived from
 			// what survives the budget would only ever confirm the budget it was cut to.
 			if (!marker) {
+				if (this.#mediaSequence === undefined || group.consumer.sequence > this.#mediaSequence)
+					this.#mediaSequence = group.consumer.sequence;
+				if (this.#declared !== undefined && group.consumer.sequence > this.#declared) {
+					this.#jitter.end();
+					this.#declared = undefined;
+				}
 				this.#jitter.observe(arrival, Milli.fromMicro(sample.timestamp));
 				this.#spread.set(this.#jitter.measured);
+			} else if (!group.media) {
+				// Only a marker ahead of any media declares an end; one after it is a frame's endpoint.
+				this.#declare(group);
 			}
 			const frame: ReceivedFrame = {
 				arrival,

@@ -1,5 +1,6 @@
 //! One-shot CMAF muxing for individually fetched groups.
 
+use std::task::{Poll, ready};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -177,11 +178,23 @@ impl Muxer {
 	/// block until the publisher closes it). Parameter-set frames are absorbed into the codec
 	/// config record; the group's first emitted frame is marked a keyframe (a group opens on
 	/// one by convention).
+	#[cfg(feature = "async")]
 	pub async fn read(&mut self, group: &mut moq_net::group::Consumer) -> crate::Result<Vec<Frame>> {
+		let mut out = Vec::new();
+		kio::wait(|waiter| self.poll_read(waiter, group, &mut out)).await
+	}
+
+	/// [`read`](Self::read), polled: ready with the group's frames once it ends. Pass the same
+	/// empty `out` to every poll of one group, which holds the frames decoded so far.
+	pub fn poll_read(
+		&mut self,
+		waiter: &kio::Waiter,
+		group: &mut moq_net::group::Consumer,
+		out: &mut Vec<Frame>,
+	) -> Poll<crate::Result<Vec<Frame>>> {
 		use crate::container::Container as _;
 
-		let mut out: Vec<Frame> = Vec::new();
-		while let Some(wire) = group.read_frame().await? {
+		while let Some(wire) = ready!(group.poll_read_frame(waiter))? {
 			for frame in self.container.decode(wire)? {
 				if let Some(bound) = self.container.end(&frame) {
 					if matches!(self.kind, Kind::Video(_))
@@ -211,10 +224,11 @@ impl Muxer {
 				}
 			}
 		}
+		let mut out = std::mem::take(out);
 		if let Some(first) = out.first_mut() {
 			first.keyframe = true;
 		}
-		Ok(out)
+		Poll::Ready(Ok(out))
 	}
 
 	/// The picture size `keyframe` decodes to: from its in-band parameter sets (Annex-B, or

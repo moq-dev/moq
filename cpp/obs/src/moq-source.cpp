@@ -448,7 +448,8 @@ static void moq_source_on_connect(struct moq_source *ctx, const std::shared_ptr<
 	moq_source_next_broadcast(ctx, conn);
 }
 
-// Waits for the next publisher instance: the first one announced, then each that takes over.
+// Waits for the next publisher instance: the first one announced, then each that takes over
+// or returns after the broadcast went offline.
 static void moq_source_next_broadcast(struct moq_source *ctx, const std::shared_ptr<Connection> &conn)
 {
 	conn->available_call = conn->announced->available().then(
@@ -463,6 +464,14 @@ static void moq_source_on_broadcast(struct moq_source *ctx, const std::shared_pt
 		LOG_ERROR("Failed to resolve broadcast '%s': %s", conn->broadcast.c_str(),
 			  result.error().to_string().c_str());
 		moq_source_fail_locked(ctx);
+		return;
+	}
+
+	// The offline instance's tracks end on their own once its route dies, holding the last
+	// frame, so only wait for whatever serves the path next.
+	if (!*result) {
+		LOG_INFO("Broadcast went offline: %s", conn->broadcast.c_str());
+		moq_source_next_broadcast(ctx, conn);
 		return;
 	}
 
@@ -602,18 +611,15 @@ moq_source_ranked_audio(const std::unordered_map<std::string, moq::Audio> &rendi
 	});
 }
 
-// The ranked renditions to try in turn: the enabled ones. With none enabled, a consumer
-// should not select a rendition but holds the one it has, so only those `held` accepts.
-template<typename Rendition, typename Held>
+// The ranked renditions to try in turn: the enabled ones, since a consumer must not select a
+// disabled rendition.
+template<typename Rendition>
 static std::vector<const CatalogEntry<Rendition> *>
-moq_source_candidates(std::vector<const CatalogEntry<Rendition> *> ranked, Held held)
+moq_source_candidates(std::vector<const CatalogEntry<Rendition> *> ranked)
 {
-	const bool any_enabled =
-		std::any_of(ranked.begin(), ranked.end(), [](const auto *entry) { return entry->second.enabled; });
-	ranked.erase(
-		std::remove_if(ranked.begin(), ranked.end(),
-			       [&](const auto *entry) { return any_enabled ? !entry->second.enabled : !held(*entry); }),
-		ranked.end());
+	ranked.erase(std::remove_if(ranked.begin(), ranked.end(),
+				    [](const auto *entry) { return !entry->second.enabled; }),
+		     ranked.end());
 	return ranked;
 }
 
@@ -967,10 +973,7 @@ static void moq_source_subscribe_track(struct moq_source *ctx, const std::shared
 static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				       const moq::Catalog &catalog)
 {
-	const auto candidates = moq_source_candidates(moq_source_ranked_video(catalog.video), [&](const auto &entry) {
-		return moq_source_same_video(conn->video.get(), entry.first, entry.second) ||
-		       moq_source_same_video(conn->pending_video.get(), entry.first, entry.second);
-	});
+	const auto candidates = moq_source_candidates(moq_source_ranked_video(catalog.video));
 	if (candidates.empty()) {
 		LOG_INFO("Catalog has no enabled video rendition; audio only");
 		moq_source_clear_video_locked(ctx);
@@ -1012,10 +1015,7 @@ static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared
 static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				       const moq::Catalog &catalog)
 {
-	const auto candidates = moq_source_candidates(moq_source_ranked_audio(catalog.audio), [&](const auto &entry) {
-		return moq_source_same_audio(conn->audio.get(), entry.first, entry.second) ||
-		       moq_source_same_audio(conn->pending_audio.get(), entry.first, entry.second);
-	});
+	const auto candidates = moq_source_candidates(moq_source_ranked_audio(catalog.audio));
 	if (candidates.empty()) {
 		LOG_INFO("Catalog has no enabled audio rendition; video only");
 		moq_source_clear_audio_locked(ctx);

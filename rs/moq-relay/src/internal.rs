@@ -463,7 +463,7 @@ async fn serve_metrics(State(state): State<InternalState>) -> Response {
 	{
 		scrape.demux = state.demux;
 	}
-	scrape.draining = state.shutdown.map(|shutdown| shutdown.tally().draining);
+	scrape.draining = state.shutdown.map(|shutdown| shutdown.draining_count());
 	scrape.refusals = state.refusals.map(|refusals| refusals.snapshot());
 	(
 		[(
@@ -1349,13 +1349,13 @@ mod tests {
 	}
 
 	/// The next route and whether it is active.
-	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::announce::Event::Start(route)
-			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route)
-			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-			moq_net::announce::Event::End(route) => Some((route, false)),
+			moq_net::origin::RouteEvent::Start(route)
+			| moq_net::origin::RouteEvent::Update(route)
+			| moq_net::origin::RouteEvent::Restart(route)
+			| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 		}
 	}
 
@@ -1786,8 +1786,9 @@ mod tests {
 				.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("edge")))
 				.session(moq_net::Path::from_static("root")),
 		);
-		let broadcast = producer.create_broadcast("demo/retired").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = producer
+			.route("demo/retired", moq_net::origin::RouteOptions::default())
+			.unwrap();
 
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
 		assert!(
@@ -1799,7 +1800,7 @@ mod tests {
 			"live announce end:\n{body}"
 		);
 
-		broadcast.unannounce();
+		broadcast.withdraw();
 		drop(broadcast);
 		drop(producer);
 		let mut report = moq_net::stats::Report::default();
@@ -1831,10 +1832,11 @@ mod tests {
 		let default_ctx = stats.tier(Tier::default()).session(moq_net::Path::from_static("acme"));
 		let pub_origin = moq_tokio::origin::spawn();
 		let egress = pub_origin.consume().with_stats(default_ctx.clone());
-		let mut announced = egress.announced();
-		let pub_source = pub_origin.create_broadcast("demo/x").unwrap();
-		pub_source.announce(Default::default()).unwrap();
-		let pub_track = pub_source.create_track("video", timed()).unwrap();
+		let mut announced = egress.routes();
+		let pub_source = pub_origin
+			.route("demo/x", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		let pub_track = pub_source.broadcast().create_track("video", timed()).unwrap();
 
 		// Named-tier ingress: a tagged ingress producer writes, so subscriber
 		// `bytes` advance on the regional tier.
@@ -1842,9 +1844,10 @@ mod tests {
 			.tier(Tier::new(moq_net::Path::from_static("region/sjc")))
 			.session(moq_net::Path::from_static("peer"));
 		let sub_origin = moq_tokio::origin::spawn().with_stats(regional_ctx.clone());
-		let sub_source = sub_origin.create_broadcast("demo/x").unwrap();
-		sub_source.announce(Default::default()).unwrap();
-		let sub_track = sub_source.create_track("audio", timed()).unwrap();
+		let sub_source = sub_origin
+			.route("demo/x", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		let sub_track = sub_source.broadcast().create_track("audio", timed()).unwrap();
 
 		kio::clock::sleep(std::time::Duration::from_millis(1)).await;
 		kio::clock::sleep(std::time::Duration::from_millis(1)).await;
@@ -1915,9 +1918,11 @@ mod tests {
 
 		let stats = Registry::new(Default::default());
 		let origin = moq_tokio::origin::spawn();
-		let source = origin.create_broadcast("demo/x").unwrap();
-		source.announce(Default::default()).unwrap();
+		let source = origin
+			.route("demo/x", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let track = source
+			.broadcast()
 			.create_track("catalog.json", timed().with_compress(true))
 			.unwrap();
 		let payload = format!("{{\"pad\":\"{}\"}}", "abc".repeat(300));
@@ -2019,8 +2024,7 @@ mod tests {
 		let stats = moq_net::stats::Registry::new(Default::default());
 		let edge = stats.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("edge")));
 		let origin = moq_tokio::origin::spawn().with_stats(edge.session(moq_net::Path::from_static("root")));
-		let broadcast = origin.create_broadcast("demo").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let _broadcast = origin.route("demo", moq_net::origin::RouteOptions::default()).unwrap();
 		drop(edge.request(moq_net::Path::from_static("root")));
 		let refusals = crate::refusals::Refusals::default();
 		refusals.record(crate::refusals::RefusalKind::Unavailable);

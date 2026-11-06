@@ -11,7 +11,7 @@ export namespace Announce {
 	export interface Announce {
 		captures: Path.Pattern[] | undefined;
 		prefix: Path.Valid;
-		route: Origin.Route;
+		route: Origin.RouteInfo;
 	}
 	export class Consumer {
 		[Symbol.asyncIterator](): AsyncGenerator<Announce.Event, void, undefined>;
@@ -21,7 +21,7 @@ export namespace Announce {
 		get synced(): Signals.Getter<boolean>;
 	}
 	export type Event = {
-		kind: "start" | "update" | "restart" | "end";
+		kind: "present" | "absent";
 	} & Announce.Announce;
 	export interface Options {
 		covering?: boolean;
@@ -95,6 +95,7 @@ export namespace Broadcast {
 		clone(): Broadcast.Consumer;
 		close(): void;
 		get closed(): Signals.GetPromise<null>;
+		datagrams(name: string): Datagram.Consumer;
 		get instance(): Instance.Valid | undefined;
 		get path(): Path.Valid;
 		protected shareState(): never;
@@ -106,6 +107,7 @@ export namespace Broadcast {
 		close(): void;
 		get closed(): Signals.GetPromise<null>;
 		consume(): Broadcast.Consumer;
+		createDatagrams(name: string, info?: Partial<Datagram.Info>): Datagram.Producer;
 		createTrack(name: string, info?: Track.InfoInit): Track.Producer;
 		removeTrack(name: string): void;
 		track(name: string): Track.Consumer;
@@ -230,6 +232,8 @@ export namespace Connection {
 		delay?: Milli;
 		enabled?: boolean;
 		maxStreams?: number;
+		receiveWindow?: number;
+		streamReceiveWindow?: number;
 		url?: URL;
 	}
 	export interface WebTransportProps extends Omit<WebTransportOptions, "serverCertificateHashes" | "protocols"> {
@@ -260,6 +264,50 @@ export class Connection {
 	url: Signals.Signal<URL | undefined>;
 	versions: Signals.Signal<readonly string[] | undefined>;
 	readonly viewers: Signals.Getter<Pick<Bandwidth.Viewers, "watch" | "setTarget" | "target"> | undefined>;
+}
+
+export namespace Datagram {
+	export class Consumer {
+		clone(): Datagram.Consumer;
+		close(error?: Error): void;
+		info(): Promise<Datagram.Info>;
+		readonly name: string;
+		get priority(): number;
+		recv(): Promise<Datagram.Datagram | undefined>;
+		setPriority(value: number): void;
+	}
+	export interface Datagram {
+		payload: Uint8Array;
+		sequence: bigint;
+		timestamp?: Time.Timestamp;
+	}
+	export interface Info {
+		priority: number;
+		timescale?: Time.Timescale | null;
+	}
+	export class Producer {
+		constructor(name: string);
+		abort(error: Error): void;
+		accept(properties?: Partial<Datagram.Info>): this;
+		append(timestamp: Time.Timestamp | undefined, payload: Uint8Array): bigint;
+		get closed(): Signals.GetPromise<Error | null>;
+		consume(): Datagram.Consumer;
+		finish(): void;
+		info(): Promise<Datagram.Info>;
+		insert(datagram: Datagram.Datagram): void;
+		readonly name: string;
+		get priority(): Signals.Getter<number | undefined>;
+	}
+	export class Request {
+		accept(properties?: Partial<Datagram.Info>): Datagram.Producer;
+		get closed(): Signals.GetPromise<Error | null>;
+		get name(): string;
+		get priority(): Signals.Getter<number | undefined>;
+		reject(error: Error): void;
+	}
+	export function rescale(info: {
+		timescale?: Time.Timescale | null;
+	}, timestamp: Time.Timestamp | undefined): Time.Timestamp | undefined;
 }
 
 export namespace Error {
@@ -418,36 +466,18 @@ export namespace Origin {
 	}
 	export type Hop = infer<typeof Origin.HopSchema>;
 	export const HopSchema: $ZodBranded<ZodMiniBigInt<bigint>, "Hop", "out">;
-	export class Prepared {
-		[Symbol.dispose](): void;
-		readonly broadcast: Broadcast.Producer;
-		close(): void;
-		publish(): Origin.Publication;
-	}
 	export class Producer implements Origin.Table {
 		constructor();
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		close(abort?: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		consume(): Origin.Consumer;
-		createBroadcast(path: Path.Valid): Origin.Publication;
 		get discovery(): Signals.Getter<boolean | undefined>;
 		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
-		requests(prefix: Path.Valid): Origin.Requests;
+		route(path: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
+		routePrefix(prefix: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
 		scope(root: Path.Valid, patterns: Path.Patterns): Origin.Producer;
-	}
-	export class Publication {
-		announce(route?: Origin.Route | {
-			auth?: Origin.Route["auth"];
-			cost?: Origin.Route["cost"];
-			epoch?: Origin.Route["epoch"];
-			hops?: Origin.Route["hops"];
-			instance?: Origin.Route["instance"];
-		}): void;
-		readonly broadcast: Broadcast.Producer;
-		get route(): Origin.Route | undefined;
-		unannounce(): void;
 	}
 	export interface Reader {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
@@ -458,8 +488,8 @@ export namespace Origin {
 	}
 	export class Request {
 		readonly path: Path.Valid;
-		prepare(): Origin.Prepared;
 		reject(err: Error): void;
+		route(options?: Origin.RouteOptions): Origin.Route;
 		serve(source: Broadcast.Producer | Broadcast.Consumer): void;
 	}
 	export interface RequestOptions {
@@ -471,24 +501,37 @@ export namespace Origin {
 		readonly closed: Signals.GetPromise<Error | null>;
 		readonly path: Path.Valid;
 	}
-	export class Requests {
+	export class Route {
+		[Symbol.dispose](): void;
+		announce(): void;
+		get announced(): boolean;
+		get broadcast(): Broadcast.Producer;
 		close(): void;
-		readonly prefix: Path.Valid;
+		get instance(): Instance.Valid;
 		requested(): AsyncIterableIterator<Origin.Request>;
-		get route(): Origin.Route;
+		setAuth(auth?: Auth.Credential): void;
+		setCost(cost: Origin.Cost): void;
+		withdraw(): void;
 	}
-	export interface Route {
+	export interface RouteInfo {
+		readonly auth?: Auth.Credential;
+		readonly cost: Origin.Cost;
+		readonly epoch?: bigint;
+		readonly hops: readonly Origin.Hop[];
+		readonly instance?: Instance.Valid;
+	}
+	export interface RouteOptions {
 		auth?: Auth.Credential;
-		cost: Origin.Cost;
+		cost?: Origin.Cost;
 		epoch?: bigint;
-		hops: Origin.Hop[];
+		hidden?: boolean;
 		instance?: Instance.Valid;
 	}
 	export interface Table extends Origin.Reader {
-		createBroadcast(path: Path.Valid): Origin.Publication;
-		requests(prefix: Path.Valid): Origin.Requests;
+		route(path: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
+		routePrefix(prefix: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
 	}
-	export function isAnonymous(route: Origin.Route): boolean;
+	export function isAnonymous(route: Origin.RouteInfo): boolean;
 }
 
 export namespace Path {
@@ -626,11 +669,6 @@ export namespace Track {
 		readonly name: string;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 	}
-	export interface Datagram {
-		payload: Uint8Array;
-		sequence: bigint;
-		timestamp?: Time.Timestamp;
-	}
 	export interface Delay {
 		max?: Milli | null;
 		min?: Milli | null;
@@ -694,7 +732,6 @@ export namespace Track {
 		} & Group.Frame | undefined>;
 		readJson(): Promise<unknown | undefined>;
 		readString(): Promise<string | undefined>;
-		recvDatagram(): Promise<Track.Datagram | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		tryNextGroup(): Group.Consumer | undefined;
 		update(options: Track.Subscription): void;
@@ -708,7 +745,6 @@ export namespace Track {
 		constructor(name: string);
 		abort(error: Error): void;
 		accept(info?: Track.InfoInit): this;
-		appendDatagram(timestamp: Time.Timestamp | undefined, payload: Uint8Array): bigint;
 		appendGroup(): Group.Producer;
 		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
@@ -717,7 +753,6 @@ export namespace Track {
 		finish(): void;
 		finishAt(end: Track.Position, error?: Error): void;
 		info(): Promise<Track.Info>;
-		insertDatagram(sequence: bigint, timestamp: Time.Timestamp | undefined, payload: Uint8Array): void;
 		largest(): Track.Position | undefined;
 		readonly name: string;
 		get priority(): number;
@@ -752,7 +787,6 @@ export namespace Track {
 		largest(): Promise<Track.Position | undefined>;
 		readonly name: string;
 		ordered(): Track.Ordered;
-		recvDatagram(): Promise<Track.Datagram | undefined>;
 		recvGroup(): Promise<Group.Consumer | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		tryRecvGroup(): Group.Consumer | undefined;
@@ -769,7 +803,7 @@ export namespace Track {
 		ranges?: Track.Range[];
 	}
 	export function infoDefaults(info?: Partial<Track.Info>): Track.Info;
-	export function rescale(info: Pick<Track.Info, "timescale">, timestamp: Time.Timestamp | undefined): Time.Timestamp | undefined;
+	export import rescale = Datagram.rescale;
 }
 
 export namespace Varint {

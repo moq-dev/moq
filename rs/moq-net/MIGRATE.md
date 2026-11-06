@@ -4,6 +4,119 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Socket readers start at the beginning
+
+New `track` socket sessions subscribe from group 0, and `tcp` sessions join their
+half's only group from its first frame, so an acceptor's first burst is preserved
+when its subscription answer arrives after its writes. Existing
+callers need no migration; socket naming and the public API are unchanged.
+IETF subscribers and publishers also honor explicit starts on every supported
+draft, keeping a prefix written before the answer arrived. A start of group 0 is a
+filterless SUBSCRIBE on every draft, and the groups below the answer's Largest
+Object come from one range FETCH. A SUBSCRIBE that omits the filter still joins
+live, so third-party readers and relay caches see no change.
+
+### Origins prove a route key ([#7937](https://github.com/moq-dev/moq/pull/7937))
+
+`origin::Config::route_key` takes an `origin::RouteKey`, which every lite-07 session on the origin proves to its peer in SETUP. Origins sharing a key fail over as one to a peer that scopes them; `None`, the default, proves nothing.
+A proof binds to the session through the new `poll::Session::export_keying_material`, which defaults to `None`: a transport over TLS returns its exporter, and a wrapper around another transport forwards it.
+
+### Group batch operations and `poll_next_frame` are crate-private ([#7874](https://github.com/moq-dev/moq/pull/7874))
+
+Read a frame in chunks with the async `group::Consumer::next_frame`, or read whole frames with `poll_read_frame` from a poll loop.
+`group::Consumer::{read_frames, poll_read_frames, keep_alive}`, `frame::Buffer`, and `group::Producer::write_frames` are now crate-private. Replace batch reads with repeated `read_frame` or `poll_read_frame` calls, and batch writes with `write_frame`. Cache access is refreshed by those reads.
+
+### Readers at a shed frame ask a `track::Requests` handler for a flight ([#7944](https://github.com/moq-dev/moq/pull/7944))
+
+A reader that reaches a frame its group copy shed no longer gets `Error::Evicted` when the track has a live `track::Requests` handle: the handler receives a `Fill` of that one group from that frame (`Fill::start`), or from frame 0 on a compressed track, even though the group is still cached and live.
+Accept it as usual and write from that frame, waiting on `group::Producer::ready` so its readers pace it, and stop once `Fill::is_wanted` is false and the group's `demand()` has no reader: they left it for the live copy.
+A handler that cannot serve old frames refuses the fill (`Fill::refuse_groups` or dropping it), and the reader falls back to refresh or `Evicted` as before. A track without a handler is unchanged.
+
+### The `async` feature is opt-in ([#7607](https://github.com/moq-dev/moq/pull/7607))
+
+`async` is no longer a default feature. Enable it to keep the sessions (`Client`, `Server`, `Session`), `time::run`, the announcement `Stream` adapter, and every async wrapper such as `next_group`, `read_frame`, or `closed`:
+`moq-net = { version = "...", features = ["async"] }`.
+Each wrapper is now generated from its `poll_*` method, which stays available without the feature, and its docs live on that poll.
+`frame::Consumer::read_all`, `track::Demand::closed`, and `track::Ordered::finished` gain theirs as the new `poll_read_all`, `poll_closed`, and `poll_finished`.
+`moq-tokio`'s `net` feature enables it for you.
+`group::Producer::ready` now needs the feature too.
+
+### Admission completion records its own time
+
+`server::Activity::drain()` begins closing admission once its active set empties.
+`Activity::close()` and the new poll-native `poll_close()` return that instant,
+even for a late observer. Replace matches against `()` with a discarded result
+or read the returned `kio::clock::Instant`. Once draining begins, the last `Active`
+drop closes admission synchronously, including when a close wait was cancelled.
+This is native listener bookkeeping; the protocol wire is unchanged.
+
+### Announcements are a listing; `follow` reports the path going offline ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`origin::Consumer::announced()` lists paths: `announce::Event` is `Present(Announce)` or `Absent(Announce)`.
+Another instance taking a path over keeps it present, and a route's cost or hops changing is not reported, so `Start`, `Update`, `End`, `Restart` and `Takeover` are gone.
+Map `Start` to `Present` and `End` to `Absent`, and drop `Update` arms.
+Where you requested the path again on `Restart`, hold `consumer.follow(path, None)` instead: each `available()` returns the next instance's broadcast.
+
+`Following::available()` returns `Result<Option<broadcast::Consumer>, Error>`: `None` reports the path going offline (or, when pinned, another instance taking it over), and the next `Some` is whatever serves it again.
+The first call never returns `None`. After a resolution failure, such as a handler refusing the path, the next `available()` waits for the serving route to change instead of asking the same handler again, so keep the follower rather than dropping it.
+
+```rust
+// Before
+match announced.next().await {
+    Some(announce::Event::Start(a) | announce::Event::Restart(a)) => play(consumer.request(&a.prefix, None).await?),
+    _ => {}
+}
+let broadcast = consumer.follow(path, None)?.available().await?;
+// After
+if let Some(announce::Event::Present(a)) = announced.next().await {
+    let mut following = consumer.follow(&a.prefix, None)?;
+    while let Some(broadcast) = following.available().await? {
+        play(broadcast);
+    }
+}
+let broadcast = consumer.follow(path, None)?.available().await?.expect("the first change is an instance");
+```
+
+Relays and stats that forward every route change call `consumer.routes()`, a hidden `origin::Routes` stream of `origin::RouteEvent`, which keeps the old five variants.
+
+### One `origin::Route` handle replaces publications and claims
+
+On the publishing side ownership runs origin → route → broadcast. `origin::Publication`, `origin::Prepared` and `origin::Requests` are gone, as are `origin::Producer::{create_broadcast, publish, requests}` and the broadcast's own announcement.
+An `origin::Route` is created with `RouteOptions` and owns its broadcast. Dropping its last clone retracts it, and so does closing its broadcast; a broadcast producer clone alone no longer keeps it announced, so hold the route for as long as the content should stay up.
+
+| Before | After |
+| --- | --- |
+| `origin.publish(path, Route::default())` | `origin.route(path, RouteOptions::default())` |
+| `origin.create_broadcast(path)` then `publication.announce(route)` | `origin.route(path, RouteOptions::hidden())` then `route.announce()` |
+| `publication.broadcast()` / `Deref` | `route.broadcast()` |
+| `publication.unannounce()` | `route.withdraw()` |
+| `publication.announce(Route::default().with_cost(c))` | `route.set_cost(c)` |
+| `Route::default().with_auth(cred)` | `RouteOptions::default().with_auth(cred)`, or `route.set_auth(Some(cred))` |
+| `Route::default().with_instance(instance, epoch)` | `RouteOptions::default().with_instance(instance, epoch)`, at creation only |
+| `publication.route().and_then(\|r\| r.instance)` | `route.instance()` |
+| `origin.requests(prefix)` | `origin.route_prefix(prefix, RouteOptions::default())` |
+| `requests.requested_broadcast().await` (`Result`) | `route.requested().await` (`Option`, `None` once retracted or the origin closes) |
+| `request.prepare()?` … `prepared.publish()?` | `request.route(RouteOptions::hidden())?` … `job.announce()?` |
+
+A route mints its instance when it is created and keeps it for its lifetime, across `withdraw()` and `announce()`: re-announcing continues the same stream, and a new run is a new route.
+A job's route from `request.route(options)` serves a fresh instance unless `options` names one; created visible, it announces and answers the waiting requesters at once.
+`requested()` on an exact route returns `None` at once, and `broadcast()` on a prefix route panics.
+A prefix route takes a cost, a credential and hidden visibility like an exact one.
+
+The route metadata a reader receives is `origin::RouteInfo` (was `origin::Route`), with read-only getters: `announce.route.instance()` (an `&Instance`, no longer an `Option`), `cost()`, `hops()`, `is_anonymous()` and `source()`.
+Applications cannot build or edit one.
+
+```rust
+// Before
+let publication = origin.create_broadcast("live/alice")?;
+publication.create_track("catalog.json", info)?;
+publication.announce(Route::default().with_cost(5))?;
+// After
+let route = origin.route("live/alice", RouteOptions::hidden().with_cost(5))?;
+route.broadcast().create_track("catalog.json", info)?;
+route.announce()?;
+```
+
 ### Opens wait their turn for stream credit ([#7894](https://github.com/moq-dev/moq/pull/7894))
 
 A request no longer fails with `Error::NoStreamCredit` when the peer grants no more streams: every stream a session opens waits for credit, and returning credit goes to the open whose stream the transport would send first. The variant is removed; drop any arm matching it.

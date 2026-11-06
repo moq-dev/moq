@@ -68,11 +68,12 @@ hyper = { workspace = true, optional = true }
 # `server-auto` reclaims the socket from under the auto builder `axum_server` serves with.
 hyper-util = { workspace = true, features = ["server-auto"] }
 kio = { workspace = true, features = ["runtime", "serde"] }
-moq-auth = { workspace = true, features = ["client"] }
+moq-auth = { workspace = true, features = ["async", "client"] }
+moq-crypto = { workspace = true, features = ["sign"] }
 moq-net = { workspace = true }
 # The flow-control limits both QUIC runtimes take, for widening a peer's connection.
 moq-quic = { workspace = true }
-moq-stats = { workspace = true }
+moq-stats = { workspace = true, features = ["async"] }
 moq-tokio = { workspace = true, default-features = false, features = ["watch", "tcp"] }
 # The /metrics text encoder; the protobuf features stay off.
 prometheus-client = "0.25.1"

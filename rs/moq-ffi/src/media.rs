@@ -144,9 +144,7 @@ pub struct MoqVideo {
 	pub display_aspect: Option<MoqDimensions>,
 	/// The maximum encoded bitrate in bits per second.
 	pub bitrate: Option<u64>,
-	/// Whether the publisher is serving this rendition; when false, no frames are coming until it
-	/// re-enables. Pick an enabled rendition, but keep one already playing while every rendition
-	/// of its kind is disabled, so a re-enable plays without a resubscribe.
+	/// Whether this rendition may be selected; when false, no frames are coming.
 	#[uniffi(default = true)]
 	pub enabled: bool,
 	/// Higher values are preferred; compatibility transcodes use -1 and the default is 0.
@@ -192,9 +190,7 @@ pub struct MoqAudio {
 	pub channel_count: u32,
 	/// The maximum encoded bitrate in bits per second.
 	pub bitrate: Option<u64>,
-	/// Whether the publisher is serving this rendition; when false, no frames are coming until it
-	/// re-enables. Pick an enabled rendition, but keep one already playing while every rendition
-	/// of its kind is disabled, so a re-enable plays without a resubscribe.
+	/// Whether this rendition may be selected; when false, no frames are coming.
 	#[uniffi(default = true)]
 	pub enabled: bool,
 	/// The framing used to carry this rendition.
@@ -1834,17 +1830,8 @@ impl MoqMediaCatalogConsumer {
 	/// Subscribe to this broadcast's catalog snapshots.
 	#[uniffi::constructor]
 	pub async fn subscribe(broadcast: &MoqBroadcastConsumer) -> Result<Arc<MoqMediaCatalogConsumer>, MoqError> {
-		let track = broadcast
-			.driver
-			.watch(async {
-				Ok(broadcast
-					.inner
-					.track(hang::catalog::Catalog::DEFAULT_NAME)?
-					.subscribe(hang::catalog::Catalog::default_subscription())
-					.await?)
-			})
-			.await?;
-		let consumer = moq_mux::catalog::hang::Consumer::from(track);
+		let consumer =
+			moq_mux::catalog::hang::Consumer::new(broadcast.inner.track(hang::catalog::Catalog::DEFAULT_NAME)?);
 		Ok(Arc::new(MoqMediaCatalogConsumer {
 			reads: Polled::new(consumer).supervised(broadcast.driver.clone()),
 		}))
@@ -2193,9 +2180,6 @@ mod timebase_tests {
 				.consume_inner()
 				.unwrap()
 				.track(hang::catalog::Catalog::DEFAULT_NAME)
-				.unwrap()
-				.subscribe(moq_net::track::Subscription::default())
-				.await
 				.unwrap();
 			let mut catalog = moq_mux::catalog::hang::Consumer::<Extra>::new(track);
 			assert!(catalog.poll_next(&kio::Waiter::noop()).is_pending());
@@ -2221,9 +2205,6 @@ mod timebase_tests {
 			.consume_inner()
 			.unwrap()
 			.track(hang::catalog::Catalog::DEFAULT_NAME)
-			.unwrap()
-			.subscribe(moq_net::track::Subscription::default())
-			.await
 			.unwrap();
 		let mut reader = moq_mux::catalog::hang::Consumer::<Extra>::new(track);
 		let catalog = MoqMediaCatalogProducer::new(owner.clone()).unwrap();

@@ -52,6 +52,14 @@ Rust CLI swap its channels' tones, and every subscriber must refuse every rendit
 as the wrong tone, not fail some other way. `interop.sh` is the one place the tones
 and each publisher's codecs are chosen.
 
+When Python is selected, the in-tree run also connects Python and Rust socket
+endpoints through the relay in both dial directions and both `tcp` and `track`
+protocols. Each direction checks exact frames, empty writes, ordered groups,
+and clean FIN. A stdin drain acknowledgement keeps Rust alive until Python has
+read its entire half. The lane runs only in the normal pass, pinned to lite-07:
+moq-net endpoints speak moq-lite to each other, never moq-transport. Older lite
+hops are outside this lane.
+
 The normal run also checks a finite raw track through the relay. Its publisher
 announces end 4 before writing four 256 KiB groups; the reader verifies every byte,
 exactly groups 0 through 3, and a clean end at 4. Rust-to-Rust always runs. Selecting
@@ -77,8 +85,8 @@ wire-compat lanes, which swap in released relays and clients, skip them.
 
 Socket lanes cross Rust and native JS in both dial directions under Node and Bun,
 using `tcp` and `track` through the relay. They verify both peers' bytes, FIN, RST,
-rejection, and separate rooted publish grants. Each pins moq-lite-07-wip or IETF
-draft 18, 20, or 22; older moq-lite hops do not carry hidden endpoints. These lanes
+rejection, and separate rooted publish grants. Each pins moq-lite-07-wip; moq-net endpoints use lite to talk to each other,
+and older moq-lite hops do not carry hidden endpoints. These lanes
 run in the normal in-tree test when native JS is selected. `just test interop --sockets` runs them alone.
 
 On lite-07, Node and Bun also replace tracks in a claimed broadcast through the

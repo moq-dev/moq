@@ -5,6 +5,39 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Socket sessions
+
+MoqSocketEndpoint, MoqSocketIncomingTcp, MoqSocketIncomingTrack, MoqSocketTcpStream, and MoqSocketTrackStream now expose TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change. Dropping an unfinished group producer now resets it with `Unroutable` instead of leaking Rust's programming-error `Dropped`; finished groups still end cleanly.
+
+`MoqGroupProducer::ready(size)` is a new async call that waits until a frame of `size` bytes fits a window ahead of the group's fastest reader. Await it before each `write_frame` so the writer waits for its fastest reader instead of evicting it, though not for slower readers; a TCP socket session needs it to behave like TCP. Existing writers are unchanged and still shed the group's front when they outpace their readers.
+
+### Decoders refuse a disabled rendition ([#7942](https://github.com/moq-dev/moq/pull/7942))
+
+`MoqAudioConsumer::subscribe` and `MoqVideoConsumer::subscribe` fail with `MoqError::NotFound` when the rendition's `enabled` is false, instead of subscribing and waiting for a re-enable. Pick an enabled rendition from the latest catalog, and close a decoder whose rendition a newer catalog disables.
+
+### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`MoqAnnounceEvent` is `Present { announce }` or `Absent { announce }`. `Start`, `Update`, `End`, `Restart` and `Takeover` (with its `predecessor`) are gone: another instance taking a path over keeps it present, and a route's cost changing is not reported.
+Map `Start` to `Present` and `End` to `Absent`, and drop `Update` handling. Where you requested the path again on `Restart`, hold `MoqOriginConsumer::follow(path)` and await `available()` for each new instance.
+
+`MoqFollowing::available()` returns `Option<Arc<MoqBroadcastConsumer>>`: `None` once the path goes offline (or, for a follow pinned to an `instance`, once another instance takes it over), then the next broadcast when something serves the path again. The first call never returns `None`. Handle `None` as offline: drop what you read from the last broadcast and call `available()` again.
+
+### Publishing goes through one `MoqRoute` handle
+
+`MoqOriginProducer::create_broadcast(path)` is `route(path, MoqRouteOptions)`, and `requests(prefix)` is `route_prefix(prefix, MoqRouteOptions)`. Both return a `MoqRoute`, which replaces `MoqPublication`, `MoqOriginRequests`, and `MoqBroadcastPrepared`:
+
+- `MoqPublication::broadcast()` is `MoqRoute::broadcast()`, which errors with `Internal` on a prefix route.
+- `MoqPublication::announce(MoqAnnounceRoute)` is `announce()`, and re-pricing is `set_cost(cost)`. `unannounce()` is `withdraw()`.
+- `MoqOriginRequests::requested_broadcast()` is `requested()`, which returns `None` once the origin closes instead of `Closed`. A call after `cancel()` fails with `Cancelled`.
+- `MoqBroadcastRequest::prepare()` then `MoqBroadcastPrepared::publish()` is `MoqBroadcastRequest::route(options)`: create it hidden to fill it first, then `announce()`.
+- `MoqRoute::instance_id()` is the stream's instance, minted at creation and kept across `withdraw` and `announce` (Kotlin names it `instance()`; the Python, Go and Swift wrappers expose `instance`). It is not `instance()` because the generated C and C++ objects reserve that name.
+
+`MoqAnnounceRoute` is `MoqRouteOptions { hidden, cost, instance, epoch }`, given once at creation. A route is visible at once unless `hidden`; pass `hidden: true` and call `announce()` after filling the catalog to keep the old create-then-announce order. A stable `instance` is fixed for the route's lifetime: announcing a different one is a new route.
+
+Hold the `MoqRoute` for as long as the broadcast should stay announced. Dropping or cancelling it retracts the route, while `MoqBroadcastProducer::close()` still ends both; a broadcast handle alone no longer keeps it announced.
+
+`MoqRoute`, the record carried by `MoqAnnounce.route`, is renamed `MoqRouteInfo`; its fields are unchanged.
+
 ### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
 
 `MoqVideo` and `MoqAudio` gain `warmup`, the catalog's decoder warmup, null when absent. `MoqMediaTrackConsumer::subscribe` reads it from the rendition: it starts that much further back than the subscription's min delay and asks the publisher for its max delay plus the warmup, while it still skips at the max delay alone. `MoqAudioConsumer::subscribe` and `MoqVideoConsumer::subscribe` now honor it too.
@@ -18,6 +51,10 @@ The field defaults to null, so only code that builds these records exhaustively,
 
 A null `MoqTrackInfo.max_age`, and a null `MoqTrackInfo`, now advertise a zero max age, serving only the live edge, instead of no publisher limit. Set the new `max_age_unlimited`, which ignores `max_age`, where you relied on null meaning no limit.
 A received track's `info()` sets `max_age_unlimited` when its publisher advertised no limit, so the record republishes unchanged.
+
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`MoqJsonSnapshotConsumer::new(broadcast, name, priority)` takes a `MoqBroadcastConsumer`, the track name, and the subscription's priority (default 0) instead of a `MoqTrackConsumer`, and subscribes to the track itself at a zero `delay.max`. Drop the `subscribe_track` call; a refused subscription now fails the first read. `next()` skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes.
 
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 

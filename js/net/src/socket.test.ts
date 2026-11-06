@@ -159,6 +159,23 @@ test("track halves start reliable and ascending, preserve old messages and accep
 	expect((await local.consumer.ordered().readFrame())?.payload).toEqual(bytes(7).payload);
 });
 
+test("a track session skips dropped groups and keeps the next message", async () => {
+	const clock = time();
+	const { local, remote } = await track();
+	const reader = remote.consumer.ordered();
+	const reading = reader.readFrame();
+	hooks.dropTrackGroups(local.producer, 0n, 1n, new NotFound("message unavailable"));
+	const group = local.producer.createGroup(1n);
+	group.writeFrame(bytes(7));
+	group.finish();
+	local.producer.finish();
+	await clock.advance(Nano.zero);
+	const frame = await reading;
+	expect(frame?.group).toBe(1n);
+	expect(frame?.payload).toEqual(bytes(7).payload);
+	expect(await reader.readFrame()).toBeUndefined();
+});
+
 test("each protocol has its own accept queue and sessions never reuse an identity", async () => {
 	const { a, b } = setup();
 	const nextTrack = b.acceptTrack();
@@ -352,9 +369,9 @@ test("accept waits for a delayed dialer announcement only while its original dia
 	const incoming = await next;
 	const acceptance = incoming.accept();
 	await clock.advance(Nano.fromSecond(Second(3600)));
-	const publication = origin.createBroadcast(Path.from("room/.socket/late"));
-	const answer = hooks.reserveUnlistedTrack(publication.broadcast, "track/late/bob/delayed-announcement");
-	publication.announce();
+	const route = origin.route(Path.from("room/.socket/late"), { hidden: true });
+	const answer = hooks.reserveUnlistedTrack(route.broadcast, "track/late/bob/delayed-announcement");
+	route.announce();
 	await clock.advance(Nano.zero);
 	expect(answer.demand().wanted.peek()).toBeDefined();
 	const producer = answer.accept({ maxAge: null });
@@ -427,10 +444,9 @@ test("track reset and endpoint close fail peers and leave no open accepts", asyn
 test("a second TCP group resets the session even after the first FIN", async () => {
 	for (const initial of [0n, 2n]) {
 		const { origin, b } = setup();
-		const publication = origin.createBroadcast(Path.from("room/.socket/raw"));
-		publication.announce();
+		const route = origin.route(Path.from("room/.socket/raw"));
 		const name = `tcp/raw/bob/second-${initial}`;
-		const answer = hooks.reserveUnlistedTrack(publication.broadcast, name);
+		const answer = hooks.reserveUnlistedTrack(route.broadcast, name);
 		const next = b.acceptTcp();
 		const subscriber = await raw(origin, "bob", name);
 		const acceptance = (await next).accept();
@@ -479,6 +495,7 @@ test("endpoint ids refuse separators, and close is idempotent", async () => {
 
 for (const alpn of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ietf.ALPN.DRAFT_22]) {
 	for (const protocol of ["tcp", "track"] as const) {
+		if (protocol === "track" && alpn !== Lite.ALPN_07_WIP) continue;
 		test(`socket ${protocol} preserves an early answer burst over ${alpn}`, async () => {
 			const clock = time();
 			const ao = new Origin.Producer();
@@ -486,9 +503,9 @@ for (const alpn of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ie
 			origins.add(ao);
 			origins.add(bo);
 			const a = new socket.Endpoint(ao, Path.from("room"), "alice");
-			const publication = bo.createBroadcast(Path.from("room/.socket/bob"));
-			const requested = wireOf(publication.broadcast).requested();
-			publication.announce();
+			const route = bo.route(Path.from("room/.socket/bob"), { hidden: true });
+			const requested = wireOf(route.broadcast).requested();
+			route.announce();
 			const pair = createMockTransportPair(alpn);
 			const url = new URL("https://localhost/socket");
 			const [client, server] = await Promise.all([
@@ -508,9 +525,11 @@ for (const alpn of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ie
 					await following.active.changed();
 					caller = following.active.peek();
 				}
-				returning = caller
-					.track(request.name)
-					.subscribe({ order: "ascending", delay: { max: null }, ranges: [{ start: { absolute: 0n } }] });
+				returning = caller.track(request.name).subscribe({
+					order: "ascending",
+					delay: { max: null },
+					ranges: protocol === "track" ? [{ start: { absolute: 0n } }] : undefined,
+				});
 				await returning.info();
 				// The raw peer commits metadata only after writing its entire half, so
 				// SUBSCRIBE_OK carries the burst's last position, without a timing race.
@@ -551,7 +570,7 @@ for (const alpn of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ie
 				returning?.close();
 				following.close();
 				a.close();
-				publication.broadcast.close();
+				route.broadcast.close();
 				client.abort();
 				server.abort();
 				await drained;

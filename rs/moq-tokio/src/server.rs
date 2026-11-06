@@ -234,7 +234,7 @@ pub struct Server {
 	streams: StreamListeners,
 	/// The `tls://` config another listener can serve, when a listen identity is loaded.
 	#[cfg(all(feature = "tcp", feature = "_certs"))]
-	tls_stream: Option<std::sync::Arc<rustls::ServerConfig>>,
+	tls_stream: Option<TcpTls>,
 	#[cfg(feature = "quic")]
 	quic: Option<crate::quic::Server>,
 	#[cfg(feature = "websocket")]
@@ -406,10 +406,7 @@ impl Server {
 		);
 
 		#[cfg(all(feature = "tcp", feature = "_certs"))]
-		let tls_stream = tls
-			.map(|tls| TcpTls::new(&config, &versions, tls))
-			.transpose()?
-			.map(|tls| tls.config);
+		let tls_stream = tls.map(|tls| TcpTls::new(&config, &versions, tls)).transpose()?;
 
 		let mut moq = moq_net::Server::new()
 			.with_versions(versions.clone())
@@ -508,10 +505,16 @@ impl Server {
 	/// server without `--listen-tcp-tls` does not.
 	#[cfg(all(feature = "tcp", feature = "_certs"))]
 	pub fn tls_acceptor(&self) -> Option<crate::tcp::TlsAcceptor> {
-		let config = self.tls_stream.clone()?;
+		let tls = self.tls_stream.as_ref()?;
 		let server = self.moq.clone().with_versions(self.streams.versions.clone());
 		let session = crate::qmux_config(&self.streams.quic);
-		Some(crate::tcp::TlsAcceptor::new(config, session, server, self.timeout))
+		Some(crate::tcp::TlsAcceptor::new(
+			tls.config.clone(),
+			tls.serve.clone(),
+			session,
+			server,
+			self.timeout,
+		))
 	}
 
 	/// A live handle to the certificates this server is serving.
@@ -638,6 +641,8 @@ impl Server {
 			// The window a QUIC session opens to once admitted.
 			#[cfg(feature = "quic")]
 			let window = self.quic.as_ref().and_then(|quic| quic.window);
+			#[cfg(feature = "quic")]
+			let quic_tls = self.quic.as_ref().map(|quic| quic.tls.clone());
 
 			// tokio::select! does not support cfg directives on arms, so we need to create the futures here.
 			// `Some(None)` once a configured endpoint stops, which only losing its
@@ -711,6 +716,7 @@ impl Server {
 							return Err(Error::Accept(Transport::Quic));
 						};
 						let alpns = versions.alpns();
+						let tls = quic_tls.expect("an accepting QUIC endpoint has its TLS");
 						let deadline = setup.deadline();
 						// Closed for drain: refuse so the peer redials elsewhere at once.
 						let Some(active) = setup.activity.enter() else {
@@ -721,7 +727,7 @@ impl Server {
 							// Accept the transport (capturing url + mTLS identity) and exchange the
 							// MoQ SETUP up front, so path/role are known before the caller authorizes
 							// (like the stream bindings).
-							let Accepted { session, url, identity, authority, mut link } = within(deadline, crate::quic::accept(_conn, alpns)).await?;
+							let Accepted { session, url, identity, authority, mut link } = within(deadline, crate::quic::accept(_conn, alpns, tls)).await?;
 							link.local = local;
 							let quic = Some(session.connection().clone());
 							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
@@ -1155,6 +1161,7 @@ enum StreamBind {
 #[cfg(feature = "tcp")]
 struct TcpTls {
 	config: std::sync::Arc<rustls::ServerConfig>,
+	serve: crate::tls::Serve,
 }
 
 #[cfg(all(feature = "tcp", feature = "_certs"))]
@@ -1173,6 +1180,7 @@ impl TcpTls {
 			.collect();
 		Ok(Self {
 			config: serve.config(alpn)?,
+			serve,
 		})
 	}
 }
@@ -1297,7 +1305,7 @@ impl StreamListeners {
 						.with_accept_health(health);
 					let encrypted = tls.is_some();
 					if let Some(tls) = tls {
-						listener = listener.with_tls(tls.config.clone());
+						listener = listener.with_tls(tls.serve.clone(), tls.config.clone());
 						self._tcp_tls = Some(tls);
 					}
 					let local = listener.local_addr()?;
@@ -1406,6 +1414,7 @@ fn spawn_tcp_loop(
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) -> tokio::task::JoinHandle<std::convert::Infallible> {
 	let local = listener.local_addr().ok();
+	let tls = listener.serve.clone();
 	crate::runtime::spawn(async move {
 		// Owned by the loop so stopping it (listener close or drop) also aborts
 		// every in-flight handshake, releasing its socket.
@@ -1422,10 +1431,11 @@ fn spawn_tcp_loop(
 			let deadline = setup.deadline();
 			let setup = setup.clone();
 			let tx = tx.clone();
+			let tls = tls.clone();
 			handshakes.spawn(crate::panic::isolate(async move {
 				match within(deadline, pending).await {
 					Ok((session, remote)) => {
-						let incoming = Incoming::tcp(&session, Some(remote), local, deadline, active);
+						let incoming = Incoming::tcp(&session, tls.as_ref(), Some(remote), local, deadline, active);
 						stream_request(session, &setup, tx, incoming).await;
 					}
 					// Per-connection: a failed `accept(2)` is the listener's own to
@@ -1498,18 +1508,19 @@ pub(crate) struct Incoming {
 #[cfg(feature = "tcp")]
 impl Incoming {
 	/// A TCP session's facts. On `tls://` these are the SNI, and the client
-	/// certificate its verifier already accepted.
+	/// certificate the verifier of `tls` already accepted.
 	pub(crate) fn tcp(
 		session: &qmux::Session,
+		tls: Option<&crate::tls::Serve>,
 		remote: Option<std::net::SocketAddr>,
 		local: Option<std::net::SocketAddr>,
 		deadline: Option<kio::clock::Instant>,
 		active: moq_net::server::Active,
 	) -> Self {
 		let server_name = session.server_name().map(str::to_owned);
-		let identity = session
-			.peer_certificates()
-			.map(|chain| crate::tls::PeerIdentity::from_chain(chain.to_vec()));
+		let identity = tls
+			.zip(session.peer_certificates())
+			.map(|(tls, chain)| tls.peer(chain.to_vec()));
 		Self {
 			transport: Transport::Tcp,
 			link: Link {
@@ -2017,11 +2028,8 @@ mod tests {
 	#[cfg(all(feature = "uds", unix))]
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::announce::Event::Start(route)
-			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route)
-			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-			moq_net::announce::Event::End(route) => Some((route, false)),
+			moq_net::announce::Event::Present(route) => Some((route, true)),
+			moq_net::announce::Event::Absent(route) => Some((route, false)),
 		}
 	}
 
@@ -2831,9 +2839,13 @@ mod tests {
 		let _ = std::fs::remove_file(&path);
 
 		let origin = crate::origin::spawn();
-		let broadcast = origin.create_broadcast("test").expect("create broadcast");
-		broadcast.announce(Default::default()).expect("announce broadcast");
-		let track = broadcast.create_track("video", timed()).expect("create track");
+		let broadcast = origin
+			.route("test", moq_net::origin::RouteOptions::default())
+			.expect("create broadcast");
+		let track = broadcast
+			.broadcast()
+			.create_track("video", timed())
+			.expect("create track");
 		let mut group = track.append_group().expect("append group");
 		group
 			.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())

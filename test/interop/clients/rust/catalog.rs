@@ -32,13 +32,15 @@ async fn main() -> anyhow::Result<()> {
 	let client = config.init(Default::default())?.with_reconnect(false);
 	let origin = moq_tokio::origin::spawn();
 
-	let broadcast = origin.create_broadcast(&args[2])?;
-	let track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
+	let route = origin.route(&args[2], moq_net::origin::RouteOptions::hidden())?;
+	let track = route
+		.broadcast()
+		.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
 	ensure!(track.info().compress, "hang catalogs are compressed");
 	let mut catalog = moq_json::snapshot::Producer::<hang::Catalog>::new(track, Default::default());
 	let value = hang::Catalog::from_slice(CATALOG.as_bytes())?;
 	catalog.update(moq_net::Timed::from(&value).at(moq_net::Timestamp::ZERO))?;
-	broadcast.announce(Default::default())?;
+	route.announce()?;
 
 	// A local reader sees the inflated snapshot, as a plain peer of the relay does. The group
 	// stays open for deltas, and this catalog never writes one.
@@ -61,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
 		"readers did not acknowledge the catalog"
 	);
 	catalog.finish()?;
-	broadcast.close();
+	route.broadcast().close();
 	session.close().await?;
 	eprintln!("catalog acknowledged");
 	Ok(())

@@ -70,9 +70,13 @@ fn url(port: u16, path: &str) -> url::Url {
 /// handles alive for as long as the broadcast should stay announced.
 async fn publish(url: url::Url, name: &str) -> Box<dyn std::any::Any> {
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast(name).expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = origin
+		.route(name, moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -96,7 +100,7 @@ async fn publish(url: url::Url, name: &str) -> Box<dyn std::any::Any> {
 async fn first_broadcast(url: url::Url) -> String {
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
-	let mut announcements = consumer.announced();
+	let mut announcements = consumer.routes();
 	let _session = kio::clock::timeout(
 		TIMEOUT,
 		client()
@@ -111,7 +115,7 @@ async fn first_broadcast(url: url::Url) -> String {
 
 	let update = kio::clock::timeout(TIMEOUT, async {
 		match announcements.next().await.expect("origin closed") {
-			moq_net::announce::Event::Start(update) => update,
+			moq_net::origin::RouteEvent::Start(update) => update,
 			other => panic!("expected announce, got {other:?}"),
 		}
 	})

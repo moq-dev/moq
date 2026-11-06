@@ -152,9 +152,13 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let upstream_origin = moq_tokio::origin::spawn();
-	let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = upstream_origin
+		.route("cam", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 
 	let (port_a, mut accepted_a, _handle_a) = spawn_upstream(upstream_origin.clone()).await;
 	let (port_b, mut accepted_b, _handle_b) = spawn_upstream(upstream_origin.clone()).await;
@@ -178,7 +182,8 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 		.unwrap()
 		.available()
 		.await
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 	let mut sub = within("subscribe", bc.track("video").expect("track").subscribe(None))
 		.await
 		.expect("subscribe");
@@ -205,7 +210,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 
 	// The cursor replays A's route first. After the GOAWAY, A's re-prices to DRAIN, so
 	// the next route at any other cost is B's.
-	let mut announced = consumer.announced();
+	let mut announced = consumer.routes();
 	within("A's route", announced.next()).await.expect("announce update");
 	session_a
 		.drain()
@@ -216,11 +221,11 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 		loop {
 			let event = announced.next().await.expect("announce update");
 			// Under another instance, B's route is another source: a restart.
-			if let moq_net::announce::Event::Start(update)
-			| moq_net::announce::Event::Update(update)
-			| moq_net::announce::Event::Restart(update)
-			| moq_net::announce::Event::Takeover { announce: update, .. } = event
-				&& update.route.cost != moq_net::origin::Cost::DRAIN
+			if let moq_net::origin::RouteEvent::Start(update)
+			| moq_net::origin::RouteEvent::Update(update)
+			| moq_net::origin::RouteEvent::Restart(update)
+			| moq_net::origin::RouteEvent::Takeover { announce: update, .. } = event
+				&& update.route.cost() != moq_net::origin::Cost::DRAIN
 			{
 				break;
 			}
@@ -291,9 +296,13 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		// ── the shared "live" broadcast both siblings can serve ─────────
 		let upstream_origin = moq_tokio::origin::spawn();
-		let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
-		broadcast.announce(Default::default()).expect("create broadcast");
-		let track = broadcast.create_track("video", timed()).expect("create track");
+		let broadcast = upstream_origin
+			.route("cam", moq_net::origin::RouteOptions::default())
+			.expect("create broadcast");
+		let track = broadcast
+			.broadcast()
+			.create_track("video", timed())
+			.expect("create track");
 
 		let (port_a, mut accepted_a, _handle_a) = spawn_upstream(upstream_origin.clone()).await;
 		let (port_b, mut accepted_b, _handle_b) = spawn_upstream(upstream_origin.clone()).await;
@@ -322,7 +331,8 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 			.unwrap()
 			.available()
 			.await
-			.expect("broadcast resolves");
+			.expect("broadcast resolves")
+			.unwrap();
 		let mut sub = bc
 			.track("video")
 			.expect("track handle")
@@ -345,7 +355,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		// Watch for retraction during the swap: the migration must never
 		// unannounce the path (metadata updates are expected: the drain
 		// re-prices the old route and the sibling announces its own).
-		let mut announcements = cluster.origin.consume().announced();
+		let mut announcements = cluster.origin.consume().routes();
 		let (first, _) = next_update(&mut announcements).await.expect("initial announce");
 		assert_eq!(first.prefix.as_str(), "cam");
 
@@ -483,11 +493,13 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	// ── TOP: origin server serving the same broadcast to both mids ──────
 	let top_origin = moq_tokio::origin::spawn();
-	let broadcast = top_origin.create_broadcast("diamond").expect("create broadcast");
-	broadcast
-		.announce(moq_net::origin::Route::default())
+	let broadcast = top_origin
+		.route("diamond", moq_net::origin::RouteOptions::default())
 		.expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 
 	let (top_port, mut top_accepted, _top_handle) = spawn_upstream(top_origin.clone()).await;
 	let top_url = format!("tcp://127.0.0.1:{top_port}/");
@@ -552,7 +564,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	// Watch announcements for the whole test: the failover must never
 	// unannounce the broadcast under the subscriber.
-	let mut announcements = sub_origin.consume().announced();
+	let mut announcements = sub_origin.consume().routes();
 	let (first, _) = within(
 		"broadcast announced through the MID-A leg",
 		next_update(&mut announcements),
@@ -563,7 +575,13 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	let bc = within("broadcast resolves on the subscriber origin", async {
 		let consumer = sub_origin.consume();
-		consumer.follow("diamond", None).unwrap().available().await.ok()
+		consumer
+			.follow("diamond", None)
+			.unwrap()
+			.available()
+			.await
+			.ok()
+			.flatten()
 	})
 	.await
 	.expect("broadcast announced");
@@ -851,12 +869,12 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 }
 
 /// The next route and whether it is active.
-async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route)
-		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route)
-		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-		moq_net::announce::Event::End(route) => Some((route, false)),
+		moq_net::origin::RouteEvent::Start(route)
+		| moq_net::origin::RouteEvent::Update(route)
+		| moq_net::origin::RouteEvent::Restart(route)
+		| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 	}
 }

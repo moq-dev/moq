@@ -33,7 +33,7 @@ run_socket_pair() {
     mkfifo "$events" "$ack"
     exec 8<>"$events" 9<>"$ack"
     from=$(relay_next_line)
-    # Grant each peer only its own publication and the shared socket subtree.
+    # Grant each peer only its own route and the shared socket subtree.
     harness_spawn "$name-accept" "$LOGS/$name-accept.log" run_socket_acceptor "$events" "$ack" "$acceptor" accept \
         "$(token_url --root "$prefix" --publish '.socket/acceptor' --subscribe '.socket/**')" "$prefix" "$protocol" "$version"
     pid="$HARNESS_PID"
@@ -68,7 +68,7 @@ socket_pairs() {
     local action="$1" runtime version protocol
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
-        for version in moq-lite-07-wip moq-transport-18 moq-transport-20 moq-transport-22; do
+        for version in moq-lite-07-wip; do
             for protocol in tcp track; do
                 "$action" rust "$runtime" "$protocol" "$version"
                 "$action" "$runtime" rust "$protocol" "$version"

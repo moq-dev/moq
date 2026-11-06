@@ -4,6 +4,59 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Socket sessions
+
+moq.dev/moq/socket now exposes TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
+
+`GroupProducer.Ready(ctx, size)` is new: it blocks until a frame of `size` bytes fits a window ahead of the fastest reader. Call it before each `WriteFrame` so the writer waits for its fastest reader instead of evicting it, though not for slower readers; a TCP socket stream's producer needs it to behave like TCP. Existing writers are unchanged.
+
+### `Following.Available` reports the path going offline
+
+After the first call, `Available` returns `(nil, nil)` once the followed path goes offline, or, for a `Follow` pinned to an instance, once another instance takes it over.
+The next call returns whatever serves the path next. The first call is never nil.
+Check for nil before using the broadcast, and drop what was read from the previous instance either way.
+
+### Announcements are a listing
+
+`AnnounceConsumer` yields only `AnnounceEventPresent`, when a route now covers a path that was absent, and `AnnounceEventAbsent`, when none does any more.
+Rename `AnnounceEventStart` to `AnnounceEventPresent` and `AnnounceEventEnd` to `AnnounceEventAbsent`.
+`AnnounceEventUpdate`, `AnnounceEventRestart`, and `AnnounceEventTakeover` with its `Predecessor` are gone: a route changing cost or hops, a restarted publisher, and a takeover all keep the path present and report nothing.
+Instead of requesting the path again on a restart, hold `Follow` and read each new publisher instance from `Available`, dropping what was read from the previous one.
+
+```go
+following, err := client.Follow(path, nil)
+if err != nil {
+	return err
+}
+defer following.Cancel()
+for {
+	broadcast, err := following.Available(ctx)
+	if err != nil {
+		return err
+	}
+	if broadcast == nil {
+		continue // offline until the next instance
+	}
+	play(broadcast)
+}
+```
+
+### Publishing goes through one `Route`
+
+`OriginProducer.CreateBroadcast(path)`, `Client.CreateBroadcast`, and `Server.CreateBroadcast` are `Route(path, moq.RouteOptions{})`, and `OriginProducer.Requests(prefix)` is `RoutePrefix(prefix, moq.RouteOptions{})`. Both return a `*Route`, which replaces `*Publication`, `*OriginRequests`, and `*BroadcastPrepared`:
+
+- `Publication.Broadcast()` is `Route.Broadcast()`, which now also returns an error, on a prefix route.
+- `Publication.Announce(moq.AnnounceRoute{...})` is `Announce()`, and re-pricing is `SetCost(cost)`. `Unannounce()` is `Withdraw()`.
+- `OriginRequests.RequestedBroadcast(ctx)` is `Route.Requested(ctx)`, which returns `(nil, nil)` once the origin closes; `All(ctx)` and `Cancel()` keep their names. Cancelling ctx no longer retracts the route, only the wait.
+- `BroadcastRequest.Prepare()` then `BroadcastPrepared.Publish()` is `BroadcastRequest.Route(options)`: create it hidden to fill it first, then `Announce()`. `BroadcastPrepared.Close()` is `Route.Cancel()`.
+- `Route.Instance()` is the stream's instance, minted at creation and kept across `Withdraw` and `Announce`.
+
+`moq.AnnounceRoute` is `moq.RouteOptions{Hidden, Cost, Instance, Epoch}`, given once at creation. A route is visible at once unless `Hidden`; set it and call `Announce()` after filling the catalog to keep the old create-then-announce order. A stable `Instance` is fixed for the route's lifetime: announcing another one is a new route.
+
+Keep the `*Route` reachable for as long as the broadcast should stay announced: the collector reclaiming it, or `Cancel()`, retracts it, while `BroadcastProducer.Close()` still ends both. A `*BroadcastProducer` alone no longer keeps it announced.
+
+`moq.Route`, the received facts in `Announce.Route`, is renamed `moq.RouteInfo`; its fields are unchanged.
+
 ### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
 
 `ffi.MoqVideo` and `ffi.MoqAudio` (`media.Video` and `media.Audio`) gain `Warmup`, the catalog's decoder warmup, nil when absent. `media.NewTrackConsumer` and the audio and video `Subscribe` read it from the rendition and start that much earlier; a negative one is refused with an error. Only unkeyed struct literals change.
@@ -15,6 +68,10 @@ Replace stream-track `AppendDatagram` / `InsertDatagram` / `RecvDatagram` with `
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 `TrackInfo.MaxAge` is a `time.Duration` instead of a `*time.Duration`, like `Delay.Max`: the zero value, and a nil `*TrackInfo`, now advertise a zero max age, serving only the live edge, instead of no publisher limit. Assign the duration directly, and set the new `MaxAgeUnlimited`, which ignores `MaxAge`, where you relied on nil meaning no limit. A received track's `Info()` sets it when its publisher advertised no limit.
+
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`json.NewSnapshotConsumer(broadcast, name, options)` takes the `*BroadcastConsumer`, the track name, and `SnapshotConsumerOptions` instead of a `*TrackConsumer`, and subscribes to the track itself at a zero `Delay.Max` and the options' `Priority`. Drop the `SubscribeTrack` call; a refused subscription now fails the first read. `Next` skips every group a newer one supersedes, and `Latest` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
 
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
@@ -195,7 +252,7 @@ Application calls are unchanged.
 ### JSON consumers return `*json.Timed` (#5677)
 
 `SnapshotConsumer.Next`, `StreamConsumer.Next`, and `All` return `*Timed{Value, Timestamp}` instead of the raw message; `Timestamp` is a `*time.Duration`, nil when untimed.
-A snapshot consumer's `Next` now yields every state in order; call `Latest(ctx)` for the newest.
+A snapshot consumer's `Next` now yields each state in order, skipping every group a newer one supersedes (see the zero-delay entry above); call `Latest(ctx)` for the newest.
 Timestamps are rounded down to a whole microsecond.
 
 ### Ranges filter reads (#5929)

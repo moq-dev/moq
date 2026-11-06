@@ -56,17 +56,17 @@ fn import(url: &str, fingerprint: &str, rtsp: &str) -> Child {
 async fn next_broadcast(
 	child: &mut Child,
 	consumer: &moq_net::origin::Consumer,
-	announced: &mut moq_net::announce::Consumer,
+	announced: &mut moq_net::origin::Routes,
 ) -> hang::catalog::Consumer {
 	loop {
 		match running(child, "the announce", announced.next())
 			.await
 			.expect("origin closed")
 		{
-			moq_net::announce::Event::Start(_)
-			| moq_net::announce::Event::Restart(_)
-			| moq_net::announce::Event::Takeover { .. } => break,
-			moq_net::announce::Event::End(_) | moq_net::announce::Event::Update(_) => {}
+			moq_net::origin::RouteEvent::Start(_)
+			| moq_net::origin::RouteEvent::Restart(_)
+			| moq_net::origin::RouteEvent::Takeover { .. } => break,
+			moq_net::origin::RouteEvent::End(_) | moq_net::origin::RouteEvent::Update(_) => {}
 		}
 	}
 	let broadcast = running(child, "the broadcast", consumer.request("camera", None))
@@ -135,7 +135,7 @@ async fn every_rtsp_session_is_a_fresh_broadcast() {
 
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
-	let mut announced = consumer.announced();
+	let mut announced = consumer.routes();
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().unwrap());

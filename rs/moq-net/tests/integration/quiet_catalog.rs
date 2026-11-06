@@ -47,10 +47,10 @@ async fn settle() {
 }
 
 /// Announce `live/catalog.json` holding one finished snapshot group.
-fn publish(origin: &origin::Producer) -> (moq_net::origin::Publication, track::Producer) {
-	let broadcast = origin.create_broadcast("live").unwrap();
-	let track = broadcast.create_track("catalog.json", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+fn publish(origin: &origin::Producer) -> (moq_net::origin::Route, track::Producer) {
+	let broadcast = origin.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let track = broadcast.broadcast().create_track("catalog.json", timed()).unwrap();
+	broadcast.announce().unwrap();
 	let mut group = track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, b"snapshot").unwrap();
 	group.finish().unwrap();
@@ -59,7 +59,13 @@ fn publish(origin: &origin::Producer) -> (moq_net::origin::Publication, track::P
 
 async fn request(origin: &origin::Producer) -> broadcast::Consumer {
 	let consumer = origin.consume();
-	consumer.follow("live", None).unwrap().available().await.unwrap()
+	consumer
+		.follow("live", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap()
 }
 
 /// Subscribe without a floor and expect the snapshot as group 0.
@@ -167,32 +173,33 @@ async fn resume_then_fresh(version: Version, in_process: bool) -> Result<(), Str
 	let _fresh_link = link(version, &relay, &fresh).await;
 
 	let resume_remote = request(&resuming).await;
-	// Held until the scenario returns. Dropping it would cancel the upstream
-	// subscription and let the fresh reader open a new one at the live edge.
-	let _resume = kio::clock::sim::spawn(async move {
-		let _sub = resume_remote
-			.track("catalog.json")
-			.unwrap()
-			.subscribe(track::Subscription::default().with_range(1..))
+	// Drive both readers to their answers before tearing down either link. Demand reaches
+	// the publisher before the resume's handshake necessarily resolves.
+	let (_resume, _fresh) = futures::try_join!(
+		async {
+			resume_remote
+				.track("catalog.json")
+				.unwrap()
+				.subscribe(track::Subscription::default().with_range(1..))
+				.await
+				.map_err(|err| format!("resume subscribe: {err}"))
+		},
+		async {
+			// The fresh reader widens the existing upstream subscription.
+			let resumed = vec![track::Range::groups(1..)];
+			kio::clock::timeout(TIMEOUT, async {
+				while track.subscription().map(|sub| sub.ranges).as_ref() != Some(&resumed) {
+					track.subscription_changed().await.unwrap();
+				}
+			})
 			.await
-			.expect("resume subscribe");
-		kio::clock::sleep(Duration::from_secs(60)).await;
-	});
+			.map_err(|_| "the resume never reached the publisher")?;
 
-	// Wait for the resume to reach the publisher, so the fresh reader widens it
-	// rather than opening its own floorless subscription.
-	let resumed = vec![track::Range::groups(1..)];
-	kio::clock::timeout(TIMEOUT, async {
-		while track.subscription().map(|sub| sub.ranges).as_ref() != Some(&resumed) {
-			track.subscription_changed().await.unwrap();
+			let remote = request(if in_process { &relay } else { &fresh }).await;
+			read_snapshot(&remote)
+				.await
+				.map_err(|err| format!("fresh reader: {err}"))
 		}
-	})
-	.await
-	.map_err(|_| "the resume never reached the publisher")?;
-
-	let remote = request(if in_process { &relay } else { &fresh }).await;
-	read_snapshot(&remote)
-		.await
-		.map_err(|err| format!("fresh reader: {err}"))?;
+	)?;
 	Ok(())
 }

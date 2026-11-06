@@ -3717,9 +3717,9 @@
 		"refused": true
 	},
 	{
-		"name": "contribution IDs are any string",
+		"name": "include IDs are any string",
 		"catalog": {
-			"contributions": {
+			"include": {
 				"": {
 					"broadcast": "./a.hang"
 				},
@@ -3734,12 +3734,12 @@
 				}
 			}
 		},
-		"contributions": ["", "__proto__", "constructor", "toString"]
+		"include": ["", "__proto__", "constructor", "toString"]
 	},
 	{
-		"name": "contribution malformed __proto__ refuses the catalog",
+		"name": "include malformed __proto__ refuses the catalog",
 		"catalog": {
-			"contributions": {
+			"include": {
 				"ok": {
 					"broadcast": "./a.hang"
 				},
@@ -3749,9 +3749,9 @@
 		"refused": true
 	},
 	{
-		"name": "contribution malformed bad refuses the catalog",
+		"name": "include malformed bad refuses the catalog",
 		"catalog": {
-			"contributions": {
+			"include": {
 				"__proto__": {
 					"broadcast": "./a.hang"
 				},

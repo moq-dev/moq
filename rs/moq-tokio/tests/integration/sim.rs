@@ -68,17 +68,7 @@ fn lossy() {
 #[test]
 fn congested() {
 	for version in VERSIONS {
-		let mut link = Link::default();
-		// 500 kbps, under the track's 640 kbps, behind a 16 KB queue: 256 ms, six round trips.
-		link.bottleneck = Some(Bottleneck::new(62_500, 16_000, false));
-		let down = Path {
-			latency: Duration::from_millis(20),
-			link,
-		};
-		let up = Path {
-			latency: Duration::from_millis(20),
-			..Path::default()
-		};
+		let (up, down) = congested_paths();
 		let (arrivals, network) = run(version, 7, up, down);
 		assert_eq!(sequences(&arrivals), (0..GROUPS).collect::<Vec<_>>(), "{version}");
 		let stats = network.path(SERVER, CLIENT, |path| {
@@ -91,16 +81,43 @@ fn congested() {
 	}
 }
 
-/// The same seed replays the run exactly, down to when each group arrived.
+/// The same seed replays the run exactly, down to when each packet reached the bottleneck and
+/// each group arrived. Random impairments ride the congested path, whose pacing comes from the
+/// sender's controller, so both the impairments and the controller's probing must replay. One
+/// seed's run may not hinge on a probe draw, so several seeds replay.
 #[test]
 fn replays() {
-	let path = || Path {
-		latency: Duration::from_millis(25),
-		link: lossy_link(),
+	let replay = |seed| {
+		let (mut up, mut down) = congested_paths();
+		up.link = lossy_link();
+		let mut bottleneck = down.link.bottleneck.take().unwrap();
+		bottleneck.trace = Some(Vec::new());
+		down.link = lossy_link();
+		down.link.bottleneck = Some(bottleneck);
+		let (arrivals, network) = run(VERSIONS[0], seed, up, down);
+		let trace = network.path(SERVER, CLIENT, |path| path.link.bottleneck.take().unwrap().trace);
+		(arrivals, trace)
 	};
-	let first = run(VERSIONS[0], 3, path(), path()).0;
-	let second = run(VERSIONS[0], 3, path(), path()).0;
-	assert_eq!(first, second);
+	for seed in 0..4 {
+		assert!(replay(seed) == replay(seed), "seed {seed} did not replay");
+	}
+}
+
+/// A clean uplink, and a downlink bottlenecked below the track's bitrate behind a deep but
+/// finite queue
+fn congested_paths() -> (Path, Path) {
+	let mut link = Link::default();
+	// 500 kbps, under the track's 640 kbps, behind a 16 KB queue: 256 ms, six round trips.
+	link.bottleneck = Some(Bottleneck::new(62_500, 16_000, false));
+	let down = Path {
+		latency: Duration::from_millis(20),
+		link,
+	};
+	let up = Path {
+		latency: Duration::from_millis(20),
+		..Path::default()
+	};
+	(up, down)
 }
 
 fn lossy_link() -> Link {
@@ -133,17 +150,18 @@ fn run(version: &str, seed: u64, up: Path, down: Path) -> (Arrivals, Network) {
 }
 
 async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
-	let (mut server_config, mut client_config) = tls(version);
-	server_config.transport = transport(seed);
-	client_config.transport = transport(seed);
+	let (server_config, client_config) = tls(version);
 	let server =
 		driver::endpoint::Endpoint::new(endpoint(seed, 1).with_server(server_config), network.bind(SERVER)).unwrap();
 	let client = driver::endpoint::Endpoint::new(endpoint(seed, 2), network.bind(CLIENT)).unwrap();
 
 	let publisher = origin_producer(1);
 	let viewer = origin_producer(2);
-	let broadcast = publisher.create_broadcast("live").unwrap();
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let source = broadcast
+		.broadcast()
 		.create_track(
 			"video",
 			track::Info::default()
@@ -151,7 +169,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 				.with_max_age(None),
 		)
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let accept = async {
 		let conn = server.accept().await.unwrap().accept().unwrap().await.unwrap();
@@ -224,24 +242,14 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 	arrivals
 }
 
-/// An endpoint whose keys, connection IDs, and packet-number skips `seed` and `host` replay
+/// An endpoint whose timing-relevant randomness, such as packet-number skips and congestion
+/// probing, `seed` and `host` replay
 fn endpoint(seed: u64, host: u8) -> driver::endpoint::Config {
 	let mut rng_seed = [host; 32];
 	rng_seed[..8].copy_from_slice(&seed.to_le_bytes());
 	let mut config = driver::endpoint::Config::default();
 	config.rng_seed = Some(rng_seed);
 	config
-}
-
-/// The default transport, with BBR3's probe phases drawn from `seed`
-fn transport(seed: u64) -> driver::transport::Config {
-	let mut bbr = moq_congestion::bbr3::Config::default();
-	let mut probe = [0; 16];
-	probe[..8].copy_from_slice(&seed.to_le_bytes());
-	bbr.probe_rng_seed(probe);
-	let mut transport = driver::transport::Config::default();
-	transport.congestion = Arc::new(bbr);
-	transport
 }
 
 /// A self-signed certificate for `localhost`, and the configs that serve and trust it with

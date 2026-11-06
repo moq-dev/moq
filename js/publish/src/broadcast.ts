@@ -31,7 +31,7 @@ export type BroadcastInput = {
 	// see or subscribe to it. The flip rather than a gate on creating it: tracks can be
 	// populated while this is false, then announced once ready. The catalog is served from the
 	// first announce, so its first snapshot is the one current at announce time.
-	// Turning it off unannounces the broadcast.
+	// Turning it off withdraws the route, and turning it back on continues the same stream.
 	announce: Getter<boolean>;
 
 	// The broadcast name.
@@ -445,13 +445,13 @@ export class Broadcast {
 			);
 		}
 
-		// Creating into the origin outlives any single session: a reconnect re-announces the
-		// broadcast and new subscriptions land on the same producer.
-		const broadcastPublication = origin.createBroadcast(name);
-		const broadcast = broadcastPublication.broadcast;
-		// The publication mints one instance, kept across unannounce and announce, so a restart
-		// is a new stream rather than a resume into the old one.
-		effect.cleanup(() => broadcast.close());
+		// Routing into the origin outlives any single session: a reconnect re-announces the
+		// broadcast and new subscriptions land on the same producer. Hidden until the catalog is
+		// served. The route mints one instance, kept across withdraw and announce, so toggling
+		// `announce` continues the same stream for viewers; a new route is a new stream.
+		const route = origin.route(name, { hidden: true });
+		const broadcast = route.broadcast;
+		effect.cleanup(() => route.close());
 
 		// Expose it before serving so an application reacting to `net` can insert its own tracks.
 		this.#net.set(broadcast);
@@ -483,7 +483,7 @@ export class Broadcast {
 		let serving = false;
 		effect.run((inner) => {
 			if (!inner.get(this.in.announce)) {
-				broadcastPublication.unannounce();
+				route.withdraw();
 				return;
 			}
 
@@ -510,11 +510,14 @@ export class Broadcast {
 				this.catalog.serve(track, effect);
 			}
 
-			broadcastPublication.announce();
+			route.announce();
 		});
 
 		// Static tracks fan out to every subscriber. The encoder-facing handle stays set while the
 		// track is open. Audio keeps it while buffering PCM; on-demand video gates it on a subscriber.
+		effect.cleanup(() => {
+			for (const handle of this.#handles.values()) handle.track.set(undefined);
+		});
 		effect.run((inner) => {
 			const renditions = inner.get(this.#renditions);
 			inner.get(publication.renames);
@@ -539,6 +542,7 @@ export class Broadcast {
 				} else if (entry.track && entry.track.closed.peek() !== undefined) {
 					// A failure leaves this rendition down until it clears. It then recovers under a fresh
 					// track name, so its group sequence can start over.
+					handle.track.set(undefined);
 					if (!cause) publication.rename(entry);
 					continue;
 				}
@@ -551,20 +555,23 @@ export class Broadcast {
 				}
 				entry.owner = rendition;
 				const served = entry.track;
+				// Set directly rather than undone on cleanup: this effect reruns for every rendition when
+				// any one registers or renames, and the gate's rerun lands a microtask after its cleanup,
+				// so an unchanged rendition would see its track vanish and return. Audio ends its epoch on
+				// any track change.
 				inner.run((gate) => {
 					const closed = gate.get(served.closed);
 					if (closed !== undefined) {
 						// A producer aborting its track directly fails the rendition the same way.
 						if (closed && !entry.slot.error.peek()) entry.slot.error.set(closed);
+						handle.track.set(undefined);
 						return;
 					}
-					if (
+					const idle =
 						rendition.kind !== "audio" &&
 						gate.get(this.in.onDemand) &&
-						gate.get(served.demand().wanted) === undefined
-					)
-						return;
-					gate.set(handle.track, served);
+						gate.get(served.demand().wanted) === undefined;
+					handle.track.set(idle ? undefined : served);
 				});
 			}
 		});

@@ -11,7 +11,7 @@ yanked = "deny"
 ignore = [
     # rsa 0.9.x Marvin Attack: test-only compatibility fixtures use published
     # moq-auth 0.2.1 and moq-token 0.7, which still depend on rsa. Production
-    # key generation and signing use aws-lc-rs; no normal/build graph holds rsa.
+    # key generation and signing use rind; no normal/build graph holds rsa.
     "RUSTSEC-2023-0071",
 
     # paste is unmaintained (proc-macro, build-time only). Pulled by

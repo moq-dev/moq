@@ -212,27 +212,8 @@ impl Session {
 		.await
 	}
 
-	/// Accept the next unidirectional stream after its WebTransport header.
-	pub async fn accept_uni(&self) -> Result<RecvStream, SessionError> {
-		kio::wait(|waiter| self.poll_accept_uni(waiter)).await
-	}
-
-	/// Accept the next bidirectional stream after its WebTransport header.
-	pub async fn accept_bi(&self) -> Result<(SendStream, RecvStream), SessionError> {
-		kio::wait(|waiter| self.poll_accept_bi(waiter)).await
-	}
-
-	/// Open a unidirectional stream scheduled by `options`.
-	pub async fn open_uni(&self, options: send::Options<'_>) -> Result<SendStream, SessionError> {
-		kio::wait(|waiter| self.poll_open_uni(waiter, options)).await
-	}
-
-	/// Open a bidirectional stream scheduled by `options`.
-	pub async fn open_bi(&self, options: send::Options<'_>) -> Result<(SendStream, RecvStream), SessionError> {
-		kio::wait(|waiter| self.poll_open_bi(waiter, options)).await
-	}
-
-	/// Poll for the next unidirectional stream after its WebTransport header.
+	/// The next unidirectional stream, after its WebTransport header.
+	#[kio::wrapper]
 	pub fn poll_accept_uni(&self, waiter: &Waiter) -> Poll<Result<RecvStream, SessionError>> {
 		if let Some(accept) = &self.accept {
 			poll_accept_uni_shared(accept, waiter).map_err(|e| self.map_error(e))
@@ -244,7 +225,8 @@ impl Session {
 		}
 	}
 
-	/// Poll for the next bidirectional stream after its WebTransport header.
+	/// The next bidirectional stream, after its WebTransport header.
+	#[kio::wrapper]
 	pub fn poll_accept_bi(&self, waiter: &Waiter) -> Poll<Result<(SendStream, RecvStream), SessionError>> {
 		if let Some(accept) = &self.accept {
 			poll_accept_bi_shared(accept, waiter).map_err(|e| self.map_error(e))
@@ -261,7 +243,8 @@ impl Session {
 		}
 	}
 
-	/// Poll to open a unidirectional stream and write its WebTransport header.
+	/// Open a unidirectional stream scheduled by `options`, writing its WebTransport header.
+	#[kio::wrapper]
 	pub fn poll_open_uni(&self, waiter: &Waiter, options: send::Options<'_>) -> Poll<Result<SendStream, SessionError>> {
 		self.opening.poll(waiter, |opening, cx| {
 			if opening.uni.is_none() {
@@ -286,7 +269,8 @@ impl Session {
 		})
 	}
 
-	/// Poll to open a bidirectional stream and write its WebTransport header.
+	/// Open a bidirectional stream scheduled by `options`, writing its WebTransport header.
+	#[kio::wrapper]
 	pub fn poll_open_bi(
 		&self,
 		waiter: &Waiter,
@@ -319,15 +303,11 @@ impl Session {
 		})
 	}
 
-	/// Receive the next datagram with its WebTransport session header removed.
-	pub async fn recv_datagram(&self) -> Result<Bytes, SessionError> {
-		kio::wait(|waiter| self.poll_recv_datagram(waiter)).await
-	}
-
-	/// Poll for a datagram with its WebTransport session header removed.
+	/// The next datagram, with its WebTransport session header removed.
 	///
 	/// A datagram that does not name this session, such as another session's on the same
 	/// connection, is dropped: datagrams are unreliable, so a stray one must not end the session.
+	#[kio::wrapper]
 	pub fn poll_recv_datagram(&self, waiter: &Waiter) -> Poll<Result<Bytes, SessionError>> {
 		loop {
 			let mut datagram =
@@ -498,19 +478,6 @@ impl Session {
 		}
 	}
 
-	/// Wait until the session is closed, returning the error. See [`crate::quic::driver::connection::Connection::closed`].
-	///
-	/// If the peer sent a `CloseWebTransportSession` capsule, the returned error will be
-	/// [`WebTransportError::Closed`] with the code and reason from the capsule.
-	///
-	/// Unlike [`crate::quic::driver::connection::Connection::closed`], this does **not** return early when
-	/// [`close()`](Self::close) has been called. It waits for the underlying QUIC
-	/// connection to shut down, ensuring the `CloseWebTransportSession` capsule has
-	/// been delivered. Use [`close_reason()`](Self::close_reason) for a non-blocking check.
-	pub async fn closed(&self) -> SessionError {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
-	}
-
 	/// Return why the session was closed, or None if it's not closed. See
 	/// [`crate::quic::driver::connection::Connection::close_reason`].
 	pub fn close_reason(&self) -> Option<SessionError> {
@@ -577,7 +544,16 @@ impl Session {
 		}
 	}
 
-	/// Poll until the session's connection has closed.
+	/// The error the session closed with. See [`crate::quic::driver::connection::Connection::closed`].
+	///
+	/// If the peer sent a `CloseWebTransportSession` capsule, the returned error will be
+	/// [`WebTransportError::Closed`] with the code and reason from the capsule.
+	///
+	/// Unlike [`crate::quic::driver::connection::Connection::closed`], this does **not** return early when
+	/// [`close()`](Self::close) has been called. It waits for the underlying QUIC
+	/// connection to shut down, ensuring the `CloseWebTransportSession` capsule has
+	/// been delivered. Use [`close_reason()`](Self::close_reason) for a non-blocking check.
+	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<SessionError> {
 		self.conn.poll_closed(waiter).map(|e| self.map_error(e))
 	}
@@ -1074,6 +1050,31 @@ impl moq_net::transport::poll::Session for Session {
 	fn stream_credit(&self, dir: moq_net::transport::Dir) -> Option<moq_net::transport::StreamCredit> {
 		Some(self.conn.stream_credit(dir))
 	}
+	/// The connection's exporter on raw QUIC; on WebTransport, this session's own.
+	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+		match self.session_id {
+			None => self.conn.export_keying_material(label, context),
+			Some(id) => self.conn.export_keying_material(
+				WEBTRANSPORT_EXPORTER,
+				&webtransport_exporter_context(id.into_inner(), label, context)?,
+			),
+		}
+	}
+}
+
+/// The TLS exporter label WebTransport derives each session's exporter under.
+const WEBTRANSPORT_EXPORTER: &[u8] = b"EXPORTER-WebTransport";
+
+/// The TLS exporter context for WebTransport session `id`'s exporter (draft-ietf-webtrans-http3
+/// section 4.8), or `None` when `label` or `context` exceeds 255 bytes.
+fn webtransport_exporter_context(id: u64, label: &[u8], context: &[u8]) -> Option<Vec<u8>> {
+	let mut exporter = Vec::with_capacity(10 + label.len() + context.len());
+	exporter.extend_from_slice(&id.to_be_bytes());
+	exporter.push(u8::try_from(label.len()).ok()?);
+	exporter.extend_from_slice(label);
+	exporter.push(u8::try_from(context.len()).ok()?);
+	exporter.extend_from_slice(context);
+	Some(exporter)
 }
 
 #[cfg(all(test, feature = "_certs"))]
@@ -1338,6 +1339,36 @@ mod tests {
 			assert!(
 				!client.stream_credit(Dir::Uni).unwrap().blocked,
 				"each direction blocks alone"
+			);
+		}
+	}
+
+	/// Both ends of a session export the same keying material as soon as it starts. A
+	/// WebTransport session derives its own from the connection's, so it differs from what
+	/// raw QUIC on the same connection would export.
+	#[tokio::test]
+	async fn both_ends_export_the_same_keying_material() {
+		use moq_net::transport::poll::Session as _;
+
+		for framed in [false, true] {
+			let (client, server, _endpoints) = pair().await;
+			let (client, server) = sessions(framed, client, server).await;
+			let exported = client.export_keying_material(b"label", b"context");
+			assert!(exported.is_some(), "framed: {framed}");
+			assert_eq!(
+				server.export_keying_material(b"label", b"context"),
+				exported,
+				"framed: {framed}"
+			);
+			assert_ne!(
+				client.export_keying_material(b"label", b""),
+				exported,
+				"framed: {framed}"
+			);
+			assert_eq!(
+				client.conn.export_keying_material(b"label", b"context") == exported,
+				!framed,
+				"framed: {framed}"
 			);
 		}
 	}

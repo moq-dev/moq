@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let info = track::Info::default().with_timescale(Timescale::MILLI);
 	let state = broadcast.create_track("control.json", info.clone())?;
 	let commands = broadcast.create_track("commands.json", info)?;
-	let mut state_reader = snapshot::Consumer::<Control>::new(state.subscribe(None), Default::default());
+	let mut state_reader = snapshot::Consumer::<Control>::new(state.consume(), Default::default());
 	let mut command_reader = stream::Consumer::<Command>::new(commands.subscribe(None), Default::default());
 	let mut state = snapshot::Producer::new(state, Default::default());
 	let mut commands = stream::Producer::new(commands, Default::default());

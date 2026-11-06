@@ -71,8 +71,8 @@ per-press arrival-lateness spread, from capture bursts rather than the
 network, would make the measured term nonzero; that is the estimator working
 as specified in [Audio jitter
 target](/quest/m1/audio-jitter-target/README.md). With capture fixed, the
-spread left on Chromium 155+ is its 10 ms capture chunks, plus the release
-flush's lookahead chunk, which goes out up to a frame ahead of its media.
+spread left on Chromium 155+ is its 10 ms capture chunks; a release no longer
+flushes the codec's lookahead chunk out ahead of its media.
 Older Chromium still paces capture at the device's callback size.
 
 Decided 2026-11-04 (maintainer, planning in
@@ -85,12 +85,9 @@ Decided 2026-11-04 (maintainer, planning in
   first; set the budget from those numbers, and keep output-side knobs until
   then.
 - ✅ Browser only.
-- The catalog toggle forces at least a round trip of jitter buffer, so the
-  budget is measured once push-to-talk runs on DTX (Required below).
-
-## Required
-
-- [Push-to-talk suppresses silence instead of toggling the catalog](/quest/m1/push-to-talk/dtx.md) - removes the catalog round trip the budget would otherwise carry
+- The catalog toggle forced at least a round trip of jitter buffer, so the
+  budget is measured on silence suppression, which
+  [moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942) landed.
 
 ## Related
 

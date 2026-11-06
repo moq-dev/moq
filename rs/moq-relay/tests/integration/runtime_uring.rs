@@ -165,9 +165,13 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 	let raw_url: url::Url = format!("moql://127.0.0.1:{port}/uring").parse().expect("parse url");
 
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -181,7 +185,7 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 	for url in [&wt_url, &raw_url, &wt_url, &raw_url] {
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
-		let announced = consumer.announced();
+		let announced = consumer.routes();
 		let connection = connect(client().with_subscriber(origin), url.clone()).await;
 		subscribers.push((connection, consumer, announced));
 	}
@@ -257,9 +261,13 @@ async fn uring_workers_serve_every_configured_version() {
 	ready.wait().await.expect("relay ready");
 
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -279,7 +287,7 @@ async fn uring_workers_serve_every_configured_version() {
 			let (version, client) = pinned(name);
 			let origin = moq_tokio::origin::spawn();
 			let consumer = origin.consume();
-			let mut announced = consumer.announced();
+			let mut announced = consumer.routes();
 			let connection = connect(client.with_subscriber(origin), url).await;
 			assert_eq!(connection.version(), Some(version), "{scheme} {name}");
 
@@ -686,9 +694,13 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	// connecting proves nothing.
 	let url: url::Url = format!("moql://127.0.0.1:{port}/mtls").parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -698,7 +710,7 @@ async fn an_mtls_client_authenticates_without_a_token() {
 
 	let subscriber_origin = moq_tokio::origin::spawn();
 	let consumer = subscriber_origin.consume();
-	let mut announced = consumer.announced();
+	let mut announced = consumer.routes();
 	let subscriber = connect(client().with_subscriber(subscriber_origin), url).await;
 
 	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
@@ -767,9 +779,13 @@ async fn uring_workers_write_qlog_traces() {
 	// rather than a connection that only ever exchanged Initials.
 	let url: url::Url = format!("moql://127.0.0.1:{port}/qlog").parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -779,7 +795,7 @@ async fn uring_workers_write_qlog_traces() {
 
 	let subscriber_origin = moq_tokio::origin::spawn();
 	let consumer = subscriber_origin.consume();
-	let mut announced = consumer.announced();
+	let mut announced = consumer.routes();
 	let subscriber = connect(client().with_subscriber(subscriber_origin), url).await;
 	let (_, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 		.await
@@ -910,13 +926,13 @@ async fn spawn_auth_server(policy: moq_auth::serve::Policy) -> url::Url {
 }
 
 /// The next route and whether it is active.
-async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route)
-		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route)
-		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-		moq_net::announce::Event::End(route) => Some((route, false)),
+		moq_net::origin::RouteEvent::Start(route)
+		| moq_net::origin::RouteEvent::Update(route)
+		| moq_net::origin::RouteEvent::Restart(route)
+		| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 	}
 }
 

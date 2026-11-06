@@ -268,6 +268,9 @@ impl<T: Send + Sync + 'static> Writer<T> {
 	/// first segment.
 	pub const HEAP: usize = Self::SHARED + Segment::<T>::heap(FIRST_SEGMENT);
 
+	/// Bytes the largest segment occupies: the most one eviction frees at once.
+	pub const SEGMENT_HEAP: usize = Segment::<T>::heap(MAX_SEGMENT);
+
 	/// An empty log whose first entry gets index `start`.
 	pub fn new(start: u64) -> Self {
 		Self {

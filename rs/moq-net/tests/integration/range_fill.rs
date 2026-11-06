@@ -34,7 +34,7 @@ struct Fixture {
 	track: moq_net::track::Producer,
 	remote: moq_net::broadcast::Consumer,
 	pair: MockPair,
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 	_origins: (moq_net::origin::Producer, moq_net::origin::Producer),
 }
 
@@ -42,14 +42,17 @@ impl Fixture {
 	/// A lite-07 publisher holding `groups` for good, and a copy whose cache expires them.
 	async fn new(groups: u64) -> Self {
 		let publisher = origin(1, Some(cache::Pool::unbounded()));
-		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				"video",
 				Info::default().with_timescale(Timescale::MILLI).with_max_age(None),
 			)
 			.unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 		for sequence in 0..groups {
 			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 			group
@@ -63,7 +66,14 @@ impl Fixture {
 		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(copy.clone());
 		let pair = connect_mock(options).await;
-		let remote = copy.consume().follow("bcast", None).unwrap().available().await.unwrap();
+		let remote = copy
+			.consume()
+			.follow("bcast", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		Self {
 			track,
 			remote,

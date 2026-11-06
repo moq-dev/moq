@@ -12,7 +12,7 @@
 //	ffmpeg ... -f h264 - | go-interop publish --url http://localhost:4443 --broadcast b.hang --tone 440,660
 //	go-interop subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20 --audio-out /tmp/audio --audio-ms 600
 //
-// --finish verifies a finite tail, natural media/catalog EOF, announcement END, and
+// --finish verifies a finite tail, natural media/catalog EOF, the announcement going absent, and
 // same-session health; --frames sets its exact size. --finish-ack selects publisher
 // finish mode and names the FIFO releasing teardown after the real linger.
 // --version offers only that version. --grant waits for the grant the relay sends
@@ -143,12 +143,17 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	}
 	defer client.Close()
 
-	// Hold the producer for the lifetime of the publish loop; Close unpublishes.
-	publication, err := client.CreateBroadcast(broadcast)
+	// Hold the route for the lifetime of the publish loop, hidden until the
+	// catalog is filled; Close on its broadcast unpublishes.
+	route, err := client.Route(broadcast, moq.RouteOptions{Hidden: true})
 	if err != nil {
 		return err
 	}
-	producer := publication.Broadcast()
+	defer route.Cancel()
+	producer, err := route.Broadcast()
+	if err != nil {
+		return err
+	}
 	defer producer.Close()
 
 	catalog, err := moqmedia.NewCatalogProducer(producer)
@@ -175,7 +180,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err != nil {
 		return err
 	}
-	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := route.Announce(); err != nil {
 		return err
 	}
 	fmt.Printf("publishing %q (Annex-B H.264 from stdin + a %v Hz tone) to %s\n", broadcast, tones, url)
@@ -236,11 +241,15 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err := producer.Close(); err != nil {
 		return err
 	}
-	healthPublication, err := client.CreateBroadcast(broadcast + ".health")
+	healthRoute, err := client.Route(broadcast+".health", moq.RouteOptions{Hidden: true})
 	if err != nil {
 		return err
 	}
-	health := healthPublication.Broadcast()
+	defer healthRoute.Cancel()
+	health, err := healthRoute.Broadcast()
+	if err != nil {
+		return err
+	}
 	defer health.Close()
 	live, err := health.PublishTrack("live", nil)
 	if err != nil {
@@ -252,7 +261,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err := live.Finish(); err != nil {
 		return err
 	}
-	if err := healthPublication.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := healthRoute.Announce(); err != nil {
 		return err
 	}
 	ack, err := os.Open(finishAck)
@@ -380,24 +389,21 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 			break
 		}
 	}
-	started := false
+	present := false
 	for {
 		event, err := announcements.Next(ctx)
 		if err != nil {
 			return err
 		}
 		if event == nil {
-			return errors.New("announcement stream ended before broadcast END")
+			return errors.New("announcement stream ended before the broadcast went absent")
 		}
-		if start, ok := event.(moq.AnnounceEventStart); ok && start.Announce.Prefix == broadcast {
-			started = true
+		if added, ok := event.(moq.AnnounceEventPresent); ok && added.Announce.Prefix == broadcast {
+			present = true
 		}
-		if restart, ok := event.(moq.AnnounceEventRestart); ok && restart.Announce.Prefix == broadcast {
-			return errors.New("broadcast restarted during finish")
-		}
-		if end, ok := event.(moq.AnnounceEventEnd); ok && end.Announce.Prefix == broadcast {
-			if !started {
-				return errors.New("broadcast ended without announcement")
+		if removed, ok := event.(moq.AnnounceEventAbsent); ok && removed.Announce.Prefix == broadcast {
+			if !present {
+				return errors.New("broadcast went absent without being present")
 			}
 			break
 		}

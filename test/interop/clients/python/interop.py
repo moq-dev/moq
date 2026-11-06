@@ -9,7 +9,7 @@ subscribe: connect, wait for a catalog with video and audio, and exit 0 once a
            has been decoded to --audio-out.<codec> for tone.py to judge (exit 1 on
            timeout / no data).
 
---finish verifies a finite tail, natural media/catalog EOF, announcement END, and
+--finish verifies a finite tail, natural media/catalog EOF, the announcement going absent, and
 same-session health; --frames sets its exact size. --finish-ack selects publisher
 finish mode and names the FIFO releasing teardown after the real linger.
 --version offers only that version. --grant waits for the grant the relay sends over
@@ -109,9 +109,9 @@ async def publish(
     async with _client(url, version) as client:
         if grant:
             await _print_grant(client, timeout)
-        # Hold the producer for the lifetime of the publish loop.
-        publication = client.create_broadcast(broadcast)
-        producer = publication.broadcast
+        # Hold the route for the lifetime of the publish loop: dropping it retracts the broadcast.
+        route = client.route(broadcast, hidden=True)
+        producer = route.broadcast
         catalog = moq.media.CatalogProducer(producer)
         media = moq.media.TrackStreamProducer.video(
             producer, moq.media.VideoInit(format=moq.media.VideoFormat.AVC3, data=b"")
@@ -125,7 +125,7 @@ async def publish(
             ),
             track=AUDIO_TRACK,
         )
-        publication.announce()
+        route.announce()
         print(f"publishing {broadcast!r} (Annex-B H.264 from stdin + a {tones} Hz tone) to {url}")
 
         tone = asyncio.create_task(_publish_tone(audio, tones))
@@ -155,7 +155,7 @@ async def publish(
             print(f"finish ready linger_us={LINGER // timedelta(microseconds=1)}", flush=True)
             await asyncio.sleep(LINGER.total_seconds())
             producer.close()
-            health = client.create_broadcast(f"{broadcast}.health")
+            health = client.route(f"{broadcast}.health", hidden=True)
             live = health.broadcast.publish_track("live")
             live.write_frame(b"session-alive")
             live.finish()
@@ -184,10 +184,11 @@ async def _catalog_with_media(consumer: moq.BroadcastConsumer) -> moq.media.Cata
 
 
 async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> None:
-    # Watch the exact path before resolving it, retaining END while media drains.
+    # Watch the exact path before resolving it, retaining its absence while media drains.
     async with client.announced(broadcast) as announcements:
-        async with client.follow(broadcast) as announced:
-            consumer = await announced
+        async with client.follow(broadcast) as following:
+            consumer = await following
+            assert consumer is not None
             async with await moq.media.CatalogConsumer.subscribe(consumer) as catalogs:
                 async for catalog in catalogs:
                     if catalog.video:
@@ -218,19 +219,18 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
 
         started = False
         async for event in announcements:
-            if isinstance(event, moq.AnnounceEventRestart) and event.announce.prefix == broadcast:
-                raise RuntimeError("broadcast restarted during finish")
-            if isinstance(event, moq.AnnounceEventStart) and event.announce.prefix == broadcast:
+            if isinstance(event, moq.AnnounceEventPresent) and event.announce.prefix == broadcast:
                 started = True
-            if isinstance(event, moq.AnnounceEventEnd) and event.announce.prefix == broadcast:
+            if isinstance(event, moq.AnnounceEventAbsent) and event.announce.prefix == broadcast:
                 if not started:
                     raise RuntimeError("broadcast ended without announcement")
                 break
         else:
-            raise RuntimeError("announcement stream ended before broadcast END")
+            raise RuntimeError("announcement stream ended before the broadcast went absent")
 
     async with client.follow(f"{broadcast}.health") as announced_health:
         health = await announced_health
+        assert health is not None
         async with await health.subscribe_track("live") as live:
             seen = False
             async for group in live:
@@ -305,6 +305,7 @@ async def subscribe(
             return
         assert audio_out is not None and audio_ms is not None
         consumer = await asyncio.wait_for(client.follow(broadcast), timeout)
+        assert consumer is not None
         catalog = await asyncio.wait_for(_catalog_with_media(consumer), timeout)
 
         id, video = next(iter(catalog.video.items()))

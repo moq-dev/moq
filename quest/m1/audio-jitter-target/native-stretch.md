@@ -16,10 +16,12 @@ specifies it.
 ## Plan
 
 Decided 2026-11-03 (maintainer, on
-[moq-dev/moq#7679](https://github.com/moq-dev/moq/pull/7679)): copy NetEq in m1.
-The implementation now ports its received-audio accelerate and preemptive
-expand into the native playback callback. The estimator is unchanged.
-`doc/concept/audio-jitter.md` specifies the shared floating-point algorithm;
+[moq-dev/moq#7679](https://github.com/moq-dev/moq/pull/7679)): copy NetEq in
+m1. The implementation, merged 2026-11-04 in
+[moq-dev/moq#7856](https://github.com/moq-dev/moq/pull/7856), ports its
+received-audio accelerate and preemptive expand into the native playback
+callback. The estimator is unchanged. `doc/concept/audio-jitter.md` specifies
+the shared floating-point algorithm;
 `doc/concept/audio-jitter/stretch/corpus.json` supplies literal PCM vectors
 for both languages. The browser half remains
 [Watch](/quest/m1/audio-jitter-target/watch.md); neither implementation waits
@@ -86,39 +88,19 @@ nightlies on `main` read 160 to 280 ms. So the ceiling stays as it is,
 as `test/audio-quality/budgets.json`'s note budgets startup holds as measured,
 until the seven-nightly calibration below.
 
+Listened 2026-11-05 (maintainer, /quest-unblock): the stretch is inaudible
+in all four runs on `kixtop` at `main` `7e621623a8`, two minutes each of
+`say` speech from `LICENSE-APACHE` over Opus 128 kb/s, the relay at
+`test/audio-quality/relay.toml`, and the shaper's `bursty` profile, seed 7.
+The player's metrics confirm the stretch was active: media per render second
+was 1.0020 (fast, direct) and 1.0018 (fast, shaped) against a 1.002
+publisher, and 0.9981 and 0.9979 against 0.998; the shaped runs raised the
+target delay from 120 to 260 ms. Each direct run stalled once at startup,
+none in steady state. This settles the perceptual check; the calibration and
+bench waits below remain.
+
 ## Waiting
 
-- Maintainer: listen for the stretch on `kixtop` and record whether it is
-  audible. Recommend this check before claiming the perceptual goal;
-  automated amplitude tests cannot decide it.
-  Run it in `~/work/moq` on `kixtop`, with its speakers or headphones as
-  the default output, at
-  [moq-dev/moq#7856](https://github.com/moq-dev/moq/pull/7856)'s head
-  (`gh pr checkout 7856 --detach`), or `main` once it lands. The source is
-  macOS's `say` voice reading `LICENSE-APACHE`, about ten minutes of
-  continuous speech, so nothing is downloaded (an archive's speech file
-  returned 403):
-
-  ```bash
-  nix develop
-  mkdir -p .tmp/listen && say -v Samantha -o .tmp/listen/speech.aiff -f LICENSE-APACHE
-  # Terminal 1: the relay, and a shaper in front of it replaying the audio-quality `bursty` path.
-  cargo run -p moq-relay -- test/audio-quality/relay.toml &
-  cargo run -p moq-shaper -- --listen 127.0.0.1:4500 --target 127.0.0.1:4443 --seed 7 --profile bursty
-  # Terminal 2: publish 2 ms/s fast (accelerate); rerun with -readrate 0.998 for 2 ms/s slow (preemptive expand).
-  ffmpeg -hide_banner -v error -readrate 1.002 -stream_loop -1 -i .tmp/listen/speech.aiff \
-    -ac 2 -c:a libopus -b:a 128k -f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer -frag_duration 1000 - |
-    cargo run -p moq-cli --features play -- --connect http://127.0.0.1:4443 --broadcast speech.hang import fmp4
-  # Terminal 3: two minutes direct (drift alone), then two through the shaper (the measured expansions).
-  cargo run -p moq-cli --features play -- --connect http://127.0.0.1:4443 --broadcast speech.hang \
-    play --video off --metrics .tmp/listen/drift.ndjson
-  cargo run -p moq-cli --features play -- --connect https://127.0.0.1:4500 \
-    --connect-tls-fingerprint "$(curl -s http://127.0.0.1:4443/certificate.sha256)" \
-    --broadcast speech.hang play --video off --metrics .tmp/listen/bursty.ndjson
-  ```
-
-  Record, for each of the four runs (fast/slow × direct/shaped), whether the
-  stretching is audible, and attach the `.ndjson` files.
 - moq-dev/moq: collect seven scheduled native nightly rows for this
   implementation, then apply the existing calibration rule. Keep the
   current provisional budgets until those artifacts exist.

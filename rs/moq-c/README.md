@@ -61,10 +61,9 @@ int32_t moq_session_request_free(uint32_t request);
 // Origin
 int32_t moq_origin_create(void);
 int32_t moq_origin_close(uint32_t origin);
-int32_t moq_origin_create_broadcast(uint32_t origin, const char *path, uintptr_t path_len, uint32_t *broadcast);
 int32_t moq_origin_request(uint32_t origin, const char *path, uintptr_t path_len, const char *instance, uintptr_t instance_len, moq_status_callback on_broadcast, void *user_data);
 int32_t moq_origin_request_cancel(uint32_t task);
-int32_t moq_origin_follow(uint32_t origin, const char *path, uintptr_t path_len, const char *instance, uintptr_t instance_len, moq_status_callback on_broadcast, void *user_data);
+int32_t moq_origin_follow(uint32_t origin, const char *path, uintptr_t path_len, const char *instance, uintptr_t instance_len, moq_follow_callback on_follow, void *user_data);
 int32_t moq_origin_follow_cancel(uint32_t task);
 int32_t moq_origin_announced(uint32_t origin, const moq_announce_config *config, moq_status_callback on_announce, void *user_data);
 int32_t moq_origin_announced_info(uint32_t announced, moq_announce_event *dst);
@@ -72,11 +71,21 @@ int32_t moq_origin_announced_free(uint32_t announced);
 int32_t moq_origin_announced_cancel(uint32_t announced);
 // config (NULL for everything): filter is relative to the literal prefix, or NULL for **. hidden also lists `.`-named paths. Updates stay relative to the origin.
 
-// Publishing: Announcement (a publication from moq_origin_create_broadcast or moq_broadcast_prepared_publish)
-int32_t moq_publication_announce(uint32_t publication, const moq_announce_route *route);
-// route (NULL for the default): a cost, and an optional stable instance with its epoch. Hops are the origin's to add.
-int32_t moq_publication_unannounce(uint32_t publication);
-int32_t moq_publication_free(uint32_t publication);
+// Publishing: Routes (freeing one retracts it; moq_publish_close on its broadcast ends both)
+int32_t moq_origin_route(uint32_t origin, const char *path, uintptr_t path_len, const moq_route_options *options);
+int32_t moq_origin_route_prefix(uint32_t origin, const char *prefix, uintptr_t prefix_len, const moq_route_options *options, moq_status_callback on_request, void *user_data);
+// options (NULL for the default): hidden until moq_route_announce, a cost, and an optional stable instance with its epoch. Hops are the origin's to add.
+int32_t moq_route_broadcast(uint32_t route);
+int32_t moq_route_instance(uint32_t route, moq_string *dst);
+int32_t moq_route_announce(uint32_t route);
+int32_t moq_route_withdraw(uint32_t route);
+int32_t moq_route_set_cost(uint32_t route, uint64_t cost);
+int32_t moq_route_free(uint32_t route);
+int32_t moq_broadcast_request_path(uint32_t request, moq_string *dst);
+int32_t moq_broadcast_request_serve(uint32_t request, uint32_t broadcast);
+int32_t moq_broadcast_request_route(uint32_t request, const moq_route_options *options);
+int32_t moq_broadcast_request_reject(uint32_t request, uint16_t error_code);
+int32_t moq_broadcast_request_free(uint32_t request);
 
 // Publishing
 int32_t moq_publish_close(uint32_t broadcast);
@@ -172,3 +181,24 @@ converted to the track's milliseconds; pass NULL to stamp the broadcast clock.
 int32_t moq_publish_json_window_push(uint32_t window, const char *value, uintptr_t value_len, const moq_timestamp *timestamp);
 int32_t moq_publish_json_window_pop(uint32_t window, uint64_t count, const moq_timestamp *timestamp);
 ```
+
+### Pre-encoded simulcast
+
+Publish video renditions from lowest to highest, passing the next lower media
+handle in `moq_video_init.lower` (0 for the lowest). This orders delivery so
+higher renditions yield to lower ones. `moq_publish_media_set_enabled` updates
+the catalog and marks a discontinuity when disabling; resume on a keyframe.
+Audio importers do not support this toggle.
+
+Reserve each media track with `moq_allocator_reserve_media`. Create a
+`moq_rate_control_create` handle bound to the reservation, with `moq_rate_policy.max_bps` and, for higher
+rungs, `has_lower` and `lower_bps`. Read its initial `moq_rate_control_target`,
+then call `moq_rate_control_update` on every frame,
+including while disabled. It returns 0 or a negative error; `target.changed`
+is true for a new target and false to hold the last one. Apply the target's `bitrate_bps`
+to your encoder and `enabled` through `moq_publish_media_set_enabled`.
+The shared controller drops immediately, ramps raises, ignores small changes,
+and holds without an estimate. A rung disables only with a probing session,
+which on native transports requires moq-quic with BBR3, so bandwidth can recover.
+Close controls with `moq_rate_control_close` and reservations with
+`moq_reservation_close`; neither owns or closes the media track.

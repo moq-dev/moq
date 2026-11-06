@@ -369,11 +369,19 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		// Server publishes a broadcast with one live track.
 		let pub_origin = produce_origin(Hop::random());
-		let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-		broadcast.announce(moq_net::origin::Route::default()).expect("announce");
-		let track = broadcast.create_track("video", timed()).expect("create track");
+		let broadcast = pub_origin
+			.route("test", moq_net::origin::RouteOptions::hidden())
+			.expect("create broadcast");
+		broadcast.announce().expect("announce");
+		let track = broadcast
+			.broadcast()
+			.create_track("video", timed())
+			.expect("create track");
 		// A second track with content ready for the subscribe opened after the GOAWAY.
-		let audio = broadcast.create_track("audio", timed()).expect("create track");
+		let audio = broadcast
+			.broadcast()
+			.create_track("audio", timed())
+			.expect("create track");
 		let mut audio_group = audio.append_group().expect("append group");
 		audio_group
 			.write_frame(moq_net::Timestamp::ZERO, b"audio".as_ref())
@@ -395,7 +403,8 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 			.unwrap()
 			.available()
 			.await
-			.expect("broadcast resolves");
+			.expect("broadcast resolves")
+			.unwrap();
 		let mut existing = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
 
 		let mut group = track.append_group().expect("append group");
@@ -483,8 +492,10 @@ async fn goaway_keeps_new_subscribes_moq_transport_22() {
 async fn goaway_drains_routes(version: Version) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		let pub_origin = produce_origin(Hop::random());
-		let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-		broadcast.announce(moq_net::origin::Route::default()).expect("announce");
+		let broadcast = pub_origin
+			.route("test", moq_net::origin::RouteOptions::hidden())
+			.expect("create broadcast");
+		broadcast.announce().expect("announce");
 
 		let sub_origin = produce_origin(Hop::random());
 
@@ -496,7 +507,7 @@ async fn goaway_drains_routes(version: Version) {
 		let sub = sub_origin.consume();
 		let route = crate::support::announced(&sub, "test").await;
 		assert_ne!(
-			route.cost,
+			route.cost(),
 			moq_net::origin::Cost::DRAIN,
 			"a healthy route must not start out draining"
 		);
@@ -507,14 +518,14 @@ async fn goaway_drains_routes(version: Version) {
 		// Nothing else is sent on the announce stream, so this only resolves if the
 		// subscriber acted on the GOAWAY rather than on another message. The drain
 		// re-prices the route in place, which arrives as another active update.
-		let mut announced = sub.announced();
+		let mut announced = sub.routes();
 		loop {
-			let (moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update)) =
+			let (moq_net::origin::RouteEvent::Start(update) | moq_net::origin::RouteEvent::Update(update)) =
 				announced.next().await.expect("update")
 			else {
 				continue;
 			};
-			if update.prefix.as_str() == "test" && update.route.cost == moq_net::origin::Cost::DRAIN {
+			if update.prefix.as_str() == "test" && update.route.cost() == moq_net::origin::Cost::DRAIN {
 				break;
 			}
 		}

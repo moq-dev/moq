@@ -24,8 +24,9 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 		let a = origin(2);
 		let b = origin(3);
 		let reader = origin(4);
-		let broadcast = source.create_broadcast("room").unwrap();
+		let broadcast = source.route("room", origin::RouteOptions::hidden()).unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				"state",
 				track::Info::default()
@@ -34,7 +35,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 			)
 			.unwrap();
 		let mut producer = snapshot::Producer::<Value>::new(track.clone(), Default::default());
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 		let mut links = vec![peer(version, &a, &b).await];
 		for (upstream, downstream) in [(&source, &a), (&b, &reader)] {
 			let mut options = MockConnectOptions::new(version);
@@ -48,6 +49,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let remote = remote.track("state").unwrap();
 		let mut baseline = remote.subscribe(None).await.unwrap();
@@ -75,8 +77,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 				json!({ "n": n })
 			);
 			if n == 1 || n == 2 * u64::from(ratio) {
-				let mut join =
-					snapshot::Consumer::<Value>::new(remote.subscribe(None).await.unwrap(), Default::default());
+				let mut join = snapshot::Consumer::<Value>::new(remote.clone(), Default::default());
 				let received = join.latest().await.unwrap().unwrap();
 				assert_eq!((received.value, received.at), (value(n), Some(at(n))));
 				assert!(producer.poll_refresh(&kio::Waiter::noop()).is_pending());
@@ -138,7 +139,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 			serde_json::from_slice::<Value>(&delta.payload).unwrap(),
 			json!({ "n": n + 1 })
 		);
-		let mut current = snapshot::Consumer::<Value>::new(remote.subscribe(None).await.unwrap(), Default::default());
+		let mut current = snapshot::Consumer::<Value>::new(remote.clone(), Default::default());
 		let received = current.latest().await.unwrap().unwrap();
 		assert_eq!((received.value, received.at), (value(n + 1), Some(at(n + 1))));
 		assert!(producer.poll_refresh(&kio::Waiter::noop()).is_pending());
@@ -154,11 +155,12 @@ async fn ratio_joins_cross_two_relays() {
 		let source = origin(1);
 		let a = origin(2);
 		let b = origin(3);
-		let broadcast = source.create_broadcast("room").unwrap();
+		let broadcast = source.route("room", origin::RouteOptions::hidden()).unwrap();
 		let producer = broadcast
+			.broadcast()
 			.create_track("data", track::Info::default().with_refresh(1))
 			.unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 		let mut links = Vec::new();
 		for (upstream, downstream) in [(&source, &a), (&a, &b)] {
 			let mut options = MockConnectOptions::new(version);
@@ -166,7 +168,14 @@ async fn ratio_joins_cross_two_relays() {
 			options.client_subscribe = Some(downstream.clone());
 			links.push(connect_mock(options).await);
 		}
-		let remote = b.consume().follow("room", None).unwrap().available().await.unwrap();
+		let remote = b
+			.consume()
+			.follow("room", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let remote = remote.track("data").unwrap();
 		let mut baseline = remote.subscribe(None).await.unwrap();
 		assert_eq!(baseline.info().refresh, (name == "moq-lite-07-wip").then_some(1));

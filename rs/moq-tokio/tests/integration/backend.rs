@@ -114,11 +114,11 @@ async fn connect_test(config: ConnectTest<'_>) {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
-	broadcast
-		.announce(Default::default())
+	let broadcast = pub_origin
+		.route("test", moq_net::origin::RouteOptions::default())
 		.expect("failed to create broadcast");
 	let track = broadcast
+		.broadcast()
 		.create_track("video", timed())
 		.expect("failed to create track");
 
@@ -640,9 +640,11 @@ async fn quic_client_close_drains_finished_track() {
 			.expect("client runtime");
 		runtime.block_on(async move {
 			let origin = moq_tokio::origin::spawn();
-			let broadcast = origin.create_broadcast("test").expect("failed to create broadcast");
-			broadcast.announce(Default::default()).expect("failed to announce");
+			let broadcast = origin
+				.route("test", moq_net::origin::RouteOptions::default())
+				.expect("failed to create broadcast");
 			let mut track = broadcast
+				.broadcast()
 				.create_track("video", timed())
 				.expect("failed to create track");
 
@@ -775,9 +777,11 @@ async fn quic_client_close_drains_migrated_predecessor() {
 			.expect("client runtime");
 		runtime.block_on(async move {
 			let origin = moq_tokio::origin::spawn();
-			let broadcast = origin.create_broadcast("test").expect("failed to create broadcast");
-			broadcast.announce(Default::default()).expect("failed to announce");
+			let broadcast = origin
+				.route("test", moq_net::origin::RouteOptions::default())
+				.expect("failed to create broadcast");
 			let mut track = broadcast
+				.broadcast()
 				.create_track("video", timed())
 				.expect("failed to create track");
 
@@ -916,10 +920,12 @@ async fn quic_client_close_keeps_predecessor_handover() {
 			.expect("client runtime");
 		runtime.block_on(async move {
 			let origin = moq_tokio::origin::spawn();
-			let broadcast = origin.create_broadcast("test").expect("failed to create broadcast");
-			broadcast.announce(Default::default()).expect("failed to announce");
+			let broadcast = origin
+				.route("test", moq_net::origin::RouteOptions::default())
+				.expect("failed to create broadcast");
 			// Never finished, so the predecessor serving it cannot drain.
 			let mut track = broadcast
+				.broadcast()
 				.create_track("video", timed())
 				.expect("failed to create track");
 
@@ -1187,10 +1193,7 @@ async fn quic_windows() {
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route)
-		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route)
-		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-		moq_net::announce::Event::End(route) => Some((route, false)),
+		moq_net::announce::Event::Present(route) => Some((route, true)),
+		moq_net::announce::Event::Absent(route) => Some((route, false)),
 	}
 }

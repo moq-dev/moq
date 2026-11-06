@@ -3,7 +3,8 @@
 pub mod harness;
 pub mod mock;
 
-use moq_net::{announce, datagram, goaway, origin, track};
+use futures::channel::mpsc;
+use moq_net::{datagram, goaway, origin, track};
 
 /// Wait until anyone wants the track, returning the group they want.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
@@ -34,13 +35,13 @@ pub async fn datagram_priority(producer: &datagram::Producer, want: Option<i8>) 
 
 /// Wait until `consumer` sees a route announced at exactly `path`, and return it.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
-pub async fn announced(consumer: &origin::Consumer, path: &str) -> origin::Route {
-	let mut announced = consumer.announced();
+pub async fn announced(consumer: &origin::Consumer, path: &str) -> origin::RouteInfo {
+	let mut announced = consumer.routes();
 	loop {
 		match announced.next().await.expect("the origin closed") {
-			announce::Event::Start(announce)
-			| announce::Event::Update(announce)
-			| announce::Event::Restart(announce)
+			origin::RouteEvent::Start(announce)
+			| origin::RouteEvent::Update(announce)
+			| origin::RouteEvent::Restart(announce)
 				if announce.prefix.as_str() == path =>
 			{
 				return announce.route;
@@ -48,6 +49,51 @@ pub async fn announced(consumer: &origin::Consumer, path: &str) -> origin::Route
 			_ => {}
 		}
 	}
+}
+
+/// The kind of an [`origin::RouteEvent`] for a prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+pub enum Kind {
+	Start,
+	Update,
+	Restart,
+	Takeover,
+	End,
+}
+
+/// Every update per prefix the watcher has seen. Await [`kio::clock::sim::idle`]
+/// first, so every link, hold and quarantine in the mesh has settled.
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+pub fn drain(watched: &mut mpsc::UnboundedReceiver<(String, Kind)>) -> std::collections::HashMap<String, Vec<Kind>> {
+	let mut updates = std::collections::HashMap::<String, Vec<Kind>>::new();
+	while let Ok((prefix, kind)) = watched.try_recv() {
+		updates.entry(prefix).or_default().push(kind);
+	}
+	updates
+}
+
+/// Watch `announced` from its own task, the way a session's announce writer does:
+/// it runs when woken, between the relays' own tasks, rather than only once the
+/// test task is polled again, which would coalesce every intermediate update.
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+pub fn watch(mut announced: origin::Routes) -> mpsc::UnboundedReceiver<(String, Kind)> {
+	let (tx, rx) = mpsc::unbounded();
+	kio::clock::sim::spawn(async move {
+		while let Some(event) = announced.next().await {
+			let (kind, announce) = match event {
+				origin::RouteEvent::Start(announce) => (Kind::Start, announce),
+				origin::RouteEvent::Update(announce) => (Kind::Update, announce),
+				origin::RouteEvent::Restart(announce) => (Kind::Restart, announce),
+				origin::RouteEvent::Takeover { announce, .. } => (Kind::Takeover, announce),
+				origin::RouteEvent::End(announce) => (Kind::End, announce),
+			};
+			if tx.unbounded_send((announce.prefix.to_string(), kind)).is_err() {
+				break;
+			}
+		}
+	});
+	rx
 }
 
 /// Reads of the peer's GOAWAY over [`goaway::Consumer::poll`].
