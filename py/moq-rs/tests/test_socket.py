@@ -108,7 +108,10 @@ async def test_tcp_rst_and_endpoint_close_are_errors():
     assert reset.value.details.code == 64 + 17
     client, server = await tcp(a, b)
     a.close()
-    with pytest.raises(moq.Error.Cancelled):
+    # The stream's reset and the endpoint's retraction race, so either shutdown error can
+    # reach the reader. The contract promises no clean EOF here, not a cause.
+    shutdown: tuple[type[BaseException], ...] = (moq.Error.Cancelled, moq.Error.Closed)
+    with pytest.raises(shutdown):
         await server.consumer.read_frame()
     b.close()
 

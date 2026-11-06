@@ -101,7 +101,6 @@ This README's own work, once the children land:
 - [JS rung disable](/quest/m2/probe/rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding
 - [Players set viewer targets](/quest/m2/probe/players.md) - players hold a viewer handle per watched broadcast at its highest enabled rendition's bitrate
 - [Viewer up-switch](/quest/m2/probe/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
-- [Viewer targets are tested end to end and documented in Python](/quest/m2/probe/viewer-followups.md) - three gaps moq-dev/moq#7090 left are closed
 
 ## Related
 
