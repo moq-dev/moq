@@ -6,6 +6,8 @@ export interface Report {
 	server: string;
 	version: string;
 	bytes: number;
+	/** The subscriber's close error, or null for a clean close. */
+	closed: string | null;
 	peerStates: string[];
 }
 
@@ -55,9 +57,7 @@ window.checkTransport = async () => {
 	const track = broadcast.createTrack("data", { timescale: Moq.Time.Timescale.MILLI });
 	let client: Awaited<ReturnType<typeof Moq.Connection.connect>> | undefined;
 	let server: Awaited<ReturnType<typeof Moq.Connection.accept>> | undefined;
-	const mark = (m: string) => console.log(`STAGE ${new Date().toISOString()} ${m}`);
 	try {
-		mark('offer');
 		await left.setLocalDescription(await left.createOffer());
 		await gathered(left);
 		if (!left.localDescription) throw new Error("missing offer");
@@ -66,30 +66,24 @@ window.checkTransport = async () => {
 		await gathered(right);
 		if (!right.localDescription) throw new Error("missing answer");
 		await left.setRemoteDescription(right.localDescription);
-		mark('incoming');
 		const accepted = await incoming;
-		mark('setup');
 		const url = new URL("https://peer.invalid/");
 		[client, server] = await Promise.all([
 			Moq.Connection.connect({ url, transport, consume: consuming }),
 			Moq.Connection.accept({ url, transport: accepted, publish: publishing.consume() }),
 		]);
-		mark('request');
 		const request = consuming.request(path);
 		try {
 			while (!request.active.peek()) await request.active.changed();
 			const active = request.active.peek();
 			if (!active) throw new Error("broadcast disappeared");
-			mark('subscribe');
 			const subscriber = active.track("data").subscribe().ordered();
 			try {
 				const demand = track.demand().wanted;
 				while (demand.peek() === undefined) await demand.changed();
 				const payload = Uint8Array.from({ length: 256 * 1024 }, (_, i) => i % 251);
-				mark('write');
 				track.writeFrame({ payload, timestamp: Moq.Time.Timestamp.now() });
 				const frame = await subscriber.readFrame();
-				mark('read');
 				if (
 					!frame ||
 					frame.payload.byteLength !== payload.byteLength ||
@@ -97,19 +91,19 @@ window.checkTransport = async () => {
 				) {
 					throw new Error("data-channel frame payload changed");
 				}
-				const report: Report = {
+				subscriber.close();
+				// Closing both ends at once makes the publisher's drain race the subscriber's
+				// close, so the publisher closes and the subscriber observes its clean close.
+				await server.close();
+				const closed = await client.closed;
+				return {
 					client: client.transport,
 					server: server.transport,
 					version: client.version,
 					bytes: frame.payload.byteLength,
-					peerStates: [],
+					closed: closed?.message ?? null,
+					peerStates: [left.signalingState, right.signalingState],
 				};
-				subscriber.close();
-				mark('close');
-				await Promise.all([client.close().then(() => mark('client closed'), (e) => { mark('client close err ' + e); throw e; }), server.close().then(() => mark('server closed'), (e) => { mark('server close err ' + e); throw e; })]);
-				mark('closed');
-				report.peerStates = [left.signalingState, right.signalingState];
-				return report;
 			} finally {
 				subscriber.close();
 			}
@@ -117,7 +111,6 @@ window.checkTransport = async () => {
 			request.close();
 		}
 	} finally {
-		mark('finally');
 		client?.abort();
 		server?.abort();
 		transport.close();
@@ -126,9 +119,7 @@ window.checkTransport = async () => {
 		broadcast.close();
 		publishing.close();
 		consuming.close();
-		mark('pc close');
 		left.close();
 		right.close();
-		mark('done');
 	}
 };

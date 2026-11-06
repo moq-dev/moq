@@ -70,7 +70,7 @@ export class Transport implements WebTransport {
 		}
 		if (channel.protocol !== protocol) throw new TypeError("data-channel protocol does not match the agreed ALPN");
 		this.protocol = protocol;
-		this.#socket = new Channel(peer, channel, protocol);
+		this.#socket = new Channel({ peer, channel, protocol, accepted: server });
 		this.closed = this.#closed.promise;
 		// SCTP's negotiated limit is known only after the data channel opens.
 		this.#session = this.#socket.opened.then(() => {

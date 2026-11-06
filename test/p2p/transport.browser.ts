@@ -41,7 +41,6 @@ test("two peer connections complete MoQ SETUP and transfer a frame without a rel
 	const page = await browser.newPage();
 	const errors: string[] = [];
 	page.on("pageerror", (error) => errors.push(error.message));
-	page.on("console", (m) => console.log(m.text()));
 	try {
 		await page.goto(`http://127.0.0.1:${server.port}/`);
 		const report: Report = await page.evaluate(() => window.checkTransport());
@@ -49,6 +48,7 @@ test("two peer connections complete MoQ SETUP and transfer a frame without a rel
 		expect(report.server).toBe("webrtc");
 		expect(report.version).toBe("moq-lite-07-wip");
 		expect(report.bytes).toBe(256 * 1024);
+		expect(report.closed).toBeNull();
 		expect(report.peerStates).toEqual(["stable", "stable"]);
 		expect(errors).toEqual([]);
 	} finally {

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import { Channel } from "./channel.ts";
 import { peers } from "./mock.ts";
 import { Transport } from "./transport.ts";
@@ -74,6 +75,25 @@ test("qmux carries large streams in bounded binary records and preserves both st
 	}
 });
 
+test("the accepting side stays silent until the dialer's first record proves its stream open", async () => {
+	const mock = peers();
+	const client = Transport.connect({ peer: mock.left.asPeer(), protocol });
+	mock.right.incoming.readyState = "open";
+	mock.right.incoming.stream = false;
+	const server = Transport.accept({ peer: mock.right.asPeer(), channel: mock.right.incoming.asChannel(), protocol });
+	// Give the accepting side every chance to speak into the dropped window.
+	await yieldNow();
+	mock.left.channel.open();
+	// The client opens a stream only on credit from the server's transport parameters.
+	const receiving = next(server.incomingUnidirectionalStreams).then(readAll);
+	const writer = (await client.createUnidirectionalStream()).getWriter();
+	await writer.write(new Uint8Array([4, 2]));
+	await writer.close();
+	expect(await receiving).toEqual(new Uint8Array([4, 2]));
+	client.close();
+	await Promise.all([client.closed, server.closed]);
+});
+
 test("close before the channel opens settles closed and rejects ready without closing the peer", async () => {
 	const { left } = peers();
 	const transport = Transport.connect({ peer: left.asPeer(), protocol });
@@ -114,7 +134,7 @@ test("writer.ready follows bufferedamountlow and closing releases a blocked writ
 	const { left } = peers();
 	const channel = left.createDataChannel("moq", { ordered: true, protocol });
 	left.channel.autoDrain = false;
-	const socket = new Channel(left.asPeer(), channel, protocol);
+	const socket = new Channel({ peer: left.asPeer(), channel, protocol, accepted: false });
 	left.channel.open();
 	const { writable } = await socket.opened;
 	const writer = writable.getWriter();
@@ -149,7 +169,7 @@ test("malformed binary input and an overflowing receive queue close the channel"
 	for (const data of ["text", new ArrayBuffer(16385), new ArrayBuffer(16384)]) {
 		const { left } = peers();
 		const channel = left.createDataChannel("moq", { ordered: true, protocol });
-		const socket = new Channel(left.asPeer(), channel, protocol);
+		const socket = new Channel({ peer: left.asPeer(), channel, protocol, accepted: false });
 		left.channel.open();
 		await socket.opened;
 		if (data instanceof ArrayBuffer && data.byteLength === 16384) {

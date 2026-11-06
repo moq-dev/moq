@@ -3,6 +3,18 @@ const RECORD_SIZE = 16 * 1024;
 const MIN_RECORD_SIZE = 16382;
 const SEND_WINDOW = RECORD_SIZE * 4;
 
+/** The data channel a {@link Channel} owns, and whether it arrived from the peer. */
+export interface ChannelProps {
+	/** The peer connection carrying the channel, read for its SCTP message limit. */
+	peer: RTCPeerConnection;
+	/** The reliable ordered data channel to own. */
+	channel: RTCDataChannel;
+	/** The negotiated MoQ ALPN. */
+	protocol: string;
+	/** Whether the peer created the channel, so this side speaks only after it hears the peer. */
+	accepted: boolean;
+}
+
 /** The WebSocketStream shape qmux consumes, backed by one owned data channel. */
 export class Channel {
 	readonly url = "webrtc://data-channel";
@@ -19,6 +31,8 @@ export class Channel {
 	#drain?: ReturnType<typeof Promise.withResolvers<void>>;
 	#reader?: ReadableStreamDefaultController<Uint8Array>;
 	#ended = false;
+	#limited = false;
+	#heard: boolean;
 	#readable: ReadableStream<Uint8Array>;
 	#writable: WritableStream<Uint8Array | string>;
 
@@ -26,10 +40,14 @@ export class Channel {
 	private channel: RTCDataChannel;
 	private protocol: string;
 
-	constructor(peer: RTCPeerConnection, channel: RTCDataChannel, protocol: string) {
+	constructor({ peer, channel, protocol, accepted }: ChannelProps) {
 		this.peer = peer;
 		this.channel = channel;
 		this.protocol = protocol;
+		// Chromium reports a channel the peer announced as open before its SCTP stream is, and
+		// silently drops what is sent in between. Only a delivered record proves the stream open,
+		// and the dialing side always speaks first, so the accepting side waits to hear it.
+		this.#heard = !accepted;
 		this.opened = this.#open.promise;
 		this.closed = this.#closed.promise;
 		void this.opened.catch(() => {});
@@ -84,13 +102,19 @@ export class Channel {
 			this.#finish(new Error(`SCTP message limit ${max} is smaller than qmux's minimum ${MIN_RECORD_SIZE}`));
 			return;
 		}
+		this.#limited = true;
+		this.#ready();
+	};
+
+	#ready() {
+		if (!this.#limited || !this.#heard) return;
 		this.#open.resolve({
 			readable: this.#readable,
 			writable: this.#writable,
 			extensions: "",
 			protocol: `qmux-01.${this.protocol}`,
 		});
-	};
+	}
 
 	#onMessage = (event: MessageEvent) => {
 		if (this.#ended) return;
@@ -103,6 +127,10 @@ export class Channel {
 			return;
 		}
 		this.#reader?.enqueue(new Uint8Array(event.data));
+		if (!this.#heard) {
+			this.#heard = true;
+			this.#ready();
+		}
 	};
 	#onDrain = () => {
 		this.#drain?.resolve();
