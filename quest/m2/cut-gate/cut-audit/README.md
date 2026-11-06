@@ -42,9 +42,9 @@ internal and can ship after the cut:
 [moq-transport request leases](/quest/m3/ietf-request-lease.md),
 [group heads filled in place](/quest/m3/ietf-fill-refill.md),
 moqsrc pad actors and publish rendition identity (both since landed). The
-[one relay serve path](/quest/m1/session-policy/uring.md) proposal moved into
-m1 on 2026-11-04, as part of moving session policy into moq-net before the
-cut. Other redesign evidence went into the quests that already own the
+one relay serve path proposal moved into m1 on 2026-11-04, as part of moving
+session policy into moq-net before the cut, and landed in
+[moq-dev/moq#8082](https://github.com/moq-dev/moq/pull/8082). Other redesign evidence went into the quests that already own the
 mechanism:
 [subscribe ranges](/quest/m2/subscribe-ranges/README.md),
 [drop set](/quest/m1/drop-set.md),

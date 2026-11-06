@@ -168,6 +168,8 @@ pub(crate) struct WebState {
 	/// handshake and partial headers included), and a WebSocket wait for its MoQ
 	/// SETUP; `None` waits forever.
 	pub(crate) timeout: Option<std::time::Duration>,
+	/// The moq-net server each upgraded WebSocket accepts its session with.
+	pub(crate) server: moq_net::Server,
 	/// The `[quic]` windows and stream count each WebSocket session starts with.
 	pub(crate) quic: moq_tokio::quic::Resolved,
 }
@@ -182,18 +184,12 @@ pub struct Addrs {
 	pub https: Option<net::SocketAddr>,
 }
 
-/// The implementation WebSocket sessions advertise in SETUP, or `None` for the library's.
-#[derive(Clone, Default)]
-#[cfg_attr(not(feature = "websocket"), allow(dead_code, reason = "websocket-only"))]
-pub(crate) struct Implementation(pub Option<String>);
-
 /// Run a HTTP server using Axum
 pub struct Web {
 	state: Arc<WebState>,
 	config: Config,
+	/// The versions [`WebState::server`] accepts, which pick the WebSocket subprotocol.
 	versions: moq_net::Versions,
-	extensions: moq_net::setup::Extensions,
-	implementation: Implementation,
 	health: moq_tokio::accept::Health,
 	http_listener: Option<net::TcpListener>,
 	https_listener: Option<net::TcpListener>,
@@ -214,21 +210,21 @@ impl Web {
 		certificates: moq_tokio::tls::Certificates,
 		config: Config,
 	) -> Self {
+		let listen = moq_tokio::listen::Config::default();
 		let state = Arc::new(WebState {
 			auth,
 			cluster,
 			certificates,
 			shutdown: crate::shutdown::Observer::disabled(),
 			sessions: crate::session::Registry::new(),
-			timeout: moq_tokio::listen::Config::default().resolved_timeout(),
+			timeout: listen.resolved_timeout(),
+			server: listen.server(),
 			quic: Default::default(),
 		});
 		Self {
 			state,
 			config,
-			versions: moq_net::Versions::all(),
-			extensions: Default::default(),
-			implementation: Default::default(),
+			versions: listen.versions(),
 			health: moq_tokio::accept::Health::new("web"),
 			http_listener: None,
 			https_listener: None,
@@ -311,21 +307,28 @@ impl Web {
 		self.state.certificates.fingerprints()
 	}
 
-	/// Restrict which MoQ versions WebSocket sessions accept, in preference order.
-	pub fn with_versions(mut self, versions: moq_net::Versions) -> Self {
-		self.versions = versions;
+	/// Accept WebSocket sessions as `listen` describes, and bound connections by its timeout
+	/// (see [`with_timeout`](Self::with_timeout)).
+	pub(crate) fn with_listen(mut self, listen: &moq_tokio::listen::Config) -> Self {
+		let state = Arc::get_mut(&mut self.state).expect("with_listen called after routes were built");
+		state.timeout = listen.resolved_timeout();
+		state.server = listen.server();
+		self.versions = listen.versions();
 		self
 	}
 
-	/// Choose which moq-transport extensions WebSocket sessions offer in SETUP.
-	pub(crate) fn with_extensions(mut self, extensions: moq_net::setup::Extensions) -> Self {
-		self.extensions = extensions;
+	/// Restrict which MoQ versions WebSocket sessions accept, in preference order.
+	pub fn with_versions(mut self, versions: moq_net::Versions) -> Self {
+		let state = Arc::get_mut(&mut self.state).expect("with_versions called after routes were built");
+		state.server = state.server.clone().with_versions(versions.clone());
+		self.versions = versions;
 		self
 	}
 
 	/// Set the implementation WebSocket sessions advertise in SETUP; empty advertises nothing.
 	pub fn with_implementation(mut self, implementation: impl Into<String>) -> Self {
-		self.implementation = Implementation(Some(implementation.into()));
+		let state = Arc::get_mut(&mut self.state).expect("with_implementation called after routes were built");
+		state.server = state.server.clone().with_implementation(implementation);
 		self
 	}
 
@@ -369,6 +372,7 @@ impl Web {
 		// hyper adds the header timeout to the clock unchecked, so an unreachable
 		// one would panic on every connection.
 		state.timeout = timeout.filter(|timeout| kio::clock::now().checked_add(*timeout).is_some());
+		state.server = state.server.clone().with_timeout(state.timeout);
 		self
 	}
 
@@ -444,8 +448,6 @@ impl Web {
 		};
 
 		app.layer(Extension(self.versions.clone()))
-			.layer(Extension(self.extensions))
-			.layer(Extension(self.implementation.clone()))
 			.with_state(self.state.clone())
 	}
 

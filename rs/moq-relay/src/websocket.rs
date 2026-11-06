@@ -28,8 +28,6 @@ pub(crate) async fn serve_ws(
 	socket_stats: Option<Extension<crate::web::SocketStats>>,
 	admission: Option<Extension<crate::listener::Admission>>,
 	Extension(versions): Extension<moq_net::Versions>,
-	Extension(extensions): Extension<moq_net::setup::Extensions>,
-	Extension(crate::web::Implementation(implementation)): Extension<crate::web::Implementation>,
 	State(state): State<Arc<WebState>>,
 	mut request: Request,
 ) -> axum::response::Result<Response> {
@@ -59,14 +57,7 @@ pub(crate) async fn serve_ws(
 		uri.path_and_query().map_or("/", |value| value.as_str())
 	))
 	.map_err(|_| StatusCode::BAD_REQUEST)?;
-	let mut server = moq_net::Server::new()
-		.with_timeout(state.timeout)
-		.with_versions(versions)
-		.with_extensions(extensions);
-	if let Some(implementation) = implementation {
-		server = server.with_implementation(implementation);
-	}
-	let mut options = moq_tokio::websocket::Options::new(url, server, active);
+	let mut options = moq_tokio::websocket::Options::new(url, state.server.clone(), active);
 	options.link.remote = Some(remote);
 	options.link.alpn = Some(protocol.clone());
 	options.link.server_name = server_name.map(|Extension(ServerName(name))| name);
