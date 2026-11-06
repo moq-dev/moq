@@ -237,6 +237,8 @@ fn cells() -> Vec<Cell> {
 mod benchmark_socket_queues {
 	macro_rules! axes {
 		($($axis:ident),+ $(,)?) => {
+			pub(super) const AXES: &[&str] = &[$(stringify!($axis)),+];
+
 			$(
 				#[test]
 				#[ignore = "benchmark: run explicitly; prints a table"]
@@ -268,7 +270,14 @@ fn benchmark(axis: &str) {
 		 socket_drops,path_drops,unattributed,snmp_rcvbuf_errors,backlog_drops,enobufs,peak_queue_kib,p50_ms,p99_ms,max_ms,\
 		 goodput_mbps,rx_cpu_us_per_dgram"
 	);
-	let cells: Vec<_> = cells().into_iter().filter(|cell| cell.axis == axis).collect();
+	let cells = cells();
+	assert!(
+		cells
+			.iter()
+			.all(|cell| benchmark_socket_queues::AXES.contains(&cell.axis)),
+		"every cell's axis must have a benchmark test"
+	);
+	let cells: Vec<_> = cells.into_iter().filter(|cell| cell.axis == axis).collect();
 	for run in 0..runs {
 		for path in &paths {
 			for cell in &cells {
