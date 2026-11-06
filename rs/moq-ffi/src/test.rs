@@ -9454,7 +9454,6 @@ async fn ready_after_abort_is_closed() {
 /// Two calls waiting on the same group both wake once the reader drains, though the group
 /// keeps only one writer waker.
 #[tokio::test]
-#[ignore = "flaky: reader drain can stall while concurrent ready calls wake; investigate synchronization"]
 async fn concurrent_ready_calls_all_wake() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("tcp".into(), None).unwrap();
