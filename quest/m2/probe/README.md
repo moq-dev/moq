@@ -96,12 +96,10 @@ This README's own work, once the children land:
 
 ## Required
 
-- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - shipping Chrome and Safari publishers adapt to the relay's PROBE estimate, since they have no `getStats()`
+- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - browser publishers adapt to `getStats()`'s send estimate once Chrome and Safari report one
 - [Padding probes](/quest/m2/probe/padding.md) - a browser probes with a lowest-priority padding stream on an ALR schedule
 - [JS rung disable](/quest/m2/probe/rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding
-- [Players set viewer targets](/quest/m2/probe/players.md) - players hold a viewer handle per watched broadcast at its highest enabled rendition's bitrate
 - [Viewer up-switch](/quest/m2/probe/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
-- [Viewer targets are tested end to end and documented in Python](/quest/m2/probe/viewer-followups.md) - three gaps moq-dev/moq#7090 left are closed
 
 ## Related
 

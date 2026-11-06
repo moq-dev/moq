@@ -108,15 +108,20 @@ def paired(directory):
 
 
 def gate(directory):
-    """Print confirmed paired regressions and comparisons that could not run; nonzero when any exist."""
+    """Print confirmed paired regressions and what was not compared.
+
+    Nonzero on a regression or a comparison that could not run.
+    """
     path = directory / "paired.json"
     if not path.exists():
         raise ValueError(f"no paired comparison in {directory}")
     comparison = json.loads(path.read_text())
     regressions = [case for case in comparison["cases"] if case["verdict"] == "regression"]
+    identical = sum(case["verdict"] == "identical" for case in comparison["cases"])
     lines = [
         f"Paired comparison of {comparison['commit'][:9]} against {comparison['base'][:9]}: "
-        f"{len(regressions)} confirmed regressions, {len(comparison['unavailable'])} targets not compared",
+        f"{len(regressions)} confirmed regressions, {len(comparison['unavailable'])} targets not compared, "
+        f"{identical} cases not compared as the same build on both sides",
         "",
     ]
     for case in regressions:
@@ -379,6 +384,7 @@ PAIRED_SECTIONS = [
     ({"unconfirmed", "noise"}, "Slower in the screen, not confirmed", False),
     ({"new", "removed"}, "Measured on one side only", False),
     ({"unchanged"}, "Unchanged", False),
+    ({"identical"}, "Same build on both sides, not compared", False),
 ]
 
 

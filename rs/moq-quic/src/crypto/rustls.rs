@@ -375,7 +375,7 @@ fn no_initial_suite() -> rustls::Error {
 ///
 /// The convenience constructors return rustls errors already; the refusal stays typed inside
 /// [`rustls::Error::Other`], so a caller can downcast it to
-/// [`UnsupportedCpu`](moq_crypto::provider::UnsupportedCpu).
+/// [`UnsupportedCpu`](moq_crypto::cpu::UnsupportedCpu).
 pub(crate) fn provider() -> Result<Arc<rustls::crypto::CryptoProvider>, rustls::Error> {
 	moq_crypto::provider::provider().map_err(|err| rustls::Error::Other(rustls::OtherError(Arc::new(err))))
 }

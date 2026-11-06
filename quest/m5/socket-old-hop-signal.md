@@ -94,5 +94,4 @@ Wire: a new per-path marker on the current moq-lite wip.
 
 ## Related
 
-- [Sockets](/quest/m1/socket/README.md) - the dial and accept this reports on, and #7888's first-hop check
 - [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - the route layer a marker may ride, and how interest crosses cluster links

@@ -88,6 +88,7 @@ impl Client<TcpStream> {
 	/// For `rtmps://` or any other transport, establish the stream yourself and use
 	/// [`with_stream`](Self::with_stream) instead.
 	pub async fn connect(addr: SocketAddr, app: &str) -> Result<Self> {
+		moq_crypto::cpu::check()?;
 		kio::clock::timeout(crate::server::REQUEST_TIMEOUT, async {
 			let stream = TcpStream::connect(addr).await?;
 			crate::server::configure_socket(&stream, addr);
@@ -107,6 +108,7 @@ impl<S: Stream> Client<S> {
 	/// The bring-your-own-transport entry point: establish the connection (and, for
 	/// `rtmps://`, the TLS handshake) yourself, then hand the stream here.
 	pub async fn with_stream(stream: S, app: &str) -> Result<Self> {
+		moq_crypto::cpu::check()?;
 		kio::clock::timeout(
 			crate::server::REQUEST_TIMEOUT,
 			Self::with_stream_config(stream, app, None),
@@ -548,7 +550,7 @@ fn is_status_failure(code: &str) -> bool {
 /// handshake read can also carry the first RTMP chunks, so those `remaining_bytes`
 /// must be fed to the session or chunk parsing desyncs.
 async fn client_handshake<S: Stream>(stream: &mut S) -> anyhow::Result<Vec<u8>> {
-	let mut handshake = Handshake::new(PeerType::Client)?;
+	let mut handshake = Handshake::new(PeerType::Client);
 	let p0_p1 = handshake
 		.generate_outbound_p0_and_p1()
 		.map_err(|e| anyhow::anyhow!("rtmp handshake p0/p1: {e:?}"))?;
