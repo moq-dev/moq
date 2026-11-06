@@ -82,6 +82,7 @@ test("waits on a stable clock leave nothing behind", async () => {
 // reads each frame, the shared clock anchors on it, and presentation waits on the clock against
 // the effect's teardown. Retention anywhere along it grows with the frame count.
 test("a long subscription through the player path leaves nothing behind", async () => {
+	hostTime();
 	const broadcast = new Moq.Broadcast.Producer();
 	// The track's cache keeps every group here for its fixed 30s idle window whatever maxAge the
 	// track declares, and holds no reactions or listeners while it does.
