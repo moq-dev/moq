@@ -1,11 +1,11 @@
-# [S] moq-gst releases publish again
+# [XS] moq-gst releases publish again
 
 ## Goal
 
-A `moq-gst-v*` tag's run passes its `Build tarball (aarch64-apple-darwin)`
-job, so its `Release` job publishes the GitHub release, and the next moq-gst
-release appears under the repository's releases. The fix addresses why
-`brew test` hangs, without raising its timeout or skipping the test.
+`release` carries `main`'s Homebrew formula test, so a `moq-gst-v*` tag's
+`Build tarball (aarch64-apple-darwin)` job passes, its `Release` job publishes
+the GitHub release, and the next moq-gst release appears under the
+repository's releases.
 
 ## Plan
 
@@ -16,16 +16,22 @@ Every moq-gst tag since 0.4.20 failed the same way:
 [0.4.22](https://github.com/moq-dev/moq/actions/runs/41711099214), and
 [0.4.23](https://github.com/moq-dev/moq/actions/runs/42129723974) (also on
 its 2026-11-06 re-run). The `Test Homebrew formula against tarball` step
-(`just gst-formula`, `sh/gh/gst-formula.test.py`) runs
-`brew test moq-dev/ci-gst/moq-gst`. `gst-inspect-1.0` logs LaunchServices
-and `com.apple.hiservices-xpcservice` "Connection invalid" errors, then the
-test hits Homebrew's 5-minute timeout. The `Release` job is skipped, so those
-three GitHub releases never published; their crates did.
+(`just gh gst-formula "$VERSION" "$TARGET" dist`, which runs
+`sh/gh/gst-formula.py`) runs `brew test moq-dev/ci-gst/moq-gst`, whose
+`test do` calls `gst-inspect-1.0`. That hangs at startup inside Homebrew's
+test sandbox on a headless Mac, so the step hits Homebrew's 5-minute timeout
+and `Release` is skipped. Those three GitHub releases never published; their
+crates did.
 
-Nightly's same job passes on `main` (2026-11-06), so start by comparing what
-differs on `release`: the workflow and Just recipe, the formula, the GStreamer
-or Homebrew versions it installs, and the plugin build. Reproduce on a macOS
-runner before changing anything.
+`main` already fixed this in
+[moq-dev/moq#5841](https://github.com/moq-dev/moq/pull/5841): its
+`.github/homebrew/Formula/moq-gst.rb.tmpl` test checks that the plugin exists
+and links `libgstreamer-1.0` instead of loading it, while the workflow still
+loads the plugin into GStreamer outside the sandbox. `release` got the
+formula step in the backport `be7f785b` but kept the pre-#5841 test. The fix
+is a backport of that template change to `release`; the rest of the
+`release`/`main` difference in `moq-gst.yml` (the Nix action and artifact
+pins) is unrelated. The next moq-gst tag then proves it.
 
 Decided 2026-11-06 (maintainer, /quest-unblock): ✅ plan it in m0, and publish
 the next release rather than backfilling 0.4.21 to 0.4.23. Not chosen:
@@ -35,4 +41,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - its secret cleanup waits on release tag runs passing, and this job is the one still failing
+- [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - its secret cleanup re-ran the tag runs that exposed this
