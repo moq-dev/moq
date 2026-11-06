@@ -18,7 +18,3 @@ separate cases, or give every iteration the same snapshot cadence. Check the
 fix with repeated quick screens of both cases on one host.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - its rounds rejected these cases as outliers

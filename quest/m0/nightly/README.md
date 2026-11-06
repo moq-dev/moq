@@ -27,8 +27,8 @@ This README's own work, after the children:
   [audio jitter target](/quest/m1/audio-jitter-target/README.md), the
   macOS `receive_credit` timeout has no owner since its quest was deleted in
   [moq-dev/moq#6732](https://github.com/moq-dev/moq/pull/6732), so plan one under
-  [test flakes](/quest/m0/test-flakes-2/README.md) if it recurs, the paired bench
-  threshold to [bench CI](/quest/m1/bench-ci.md). The moq-net benchmark
+  [test flakes](/quest/m0/test-flakes-2/README.md) if it recurs, and the paired bench
+  threshold is calibrated in [Paired comparison](/bench/README.md#paired-comparison). The moq-net benchmark
   fixtures were repaired in [moq-dev/moq#7940](https://github.com/moq-dev/moq/pull/7940).
   The receive-windows benchmark's overcommitted cells, skipped since
   [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838), moved to
