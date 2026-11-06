@@ -101,10 +101,14 @@ tests' shared locked-memory budget, one child each. On 2026-11-06, moq-ffi's
 concurrent-ready test, quarantined here instead of in the unrelated
 [moq-dev/moq#7981](https://github.com/moq-dev/moq/pull/7981).
 
+Added 2026-11-06: `js/net`'s flate tail-shed test, which timed out in a
+merge-queue batch, one child.
+
 Public API: none. Wire: none.
 
 ## Required
 
+- [Flate's tail-shed test passes under load](/quest/m0/test-flakes-2/flate-tail-shed.md) - `js/net`'s compressed tail-shed cases finish within bun's timeout under load, re-enabled once fixed
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
 - [reload.test.ts's close-drain tests pass under load](/quest/m0/test-flakes-2/reload-close-drain.md) - the drain cases in `js/net`'s reload tests pass in loaded multi-file runs
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
