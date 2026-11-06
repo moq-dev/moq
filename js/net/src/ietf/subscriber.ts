@@ -1858,12 +1858,9 @@ export class Subscriber {
 		};
 		// A group that will never arrive whole is dropped, so readers stop owing it.
 		const dropHeadless = () =>
-			hooks.dropTrackGroups(
-				track,
-				group.groupId,
-				group.groupId + 1n,
-				{ error: new StreamError(StreamCode.NotFound, { message: "the group's head was lost" }) },
-			);
+			hooks.dropTrackGroups(track, group.groupId, group.groupId + 1n, {
+				error: new StreamError(StreamCode.NotFound, { message: "the group's head was lost" }),
+			});
 		// After an END_OF_GROUP or END_OF_TRACK status only the stream's end may follow: an
 		// object past the group's final one makes the track malformed.
 		const last = async () => {

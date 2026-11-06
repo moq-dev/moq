@@ -7161,7 +7161,9 @@ impl DropCursor {
 		if let Some(drift) = within.drift {
 			self.drift = Some((drift.budget, drift.coverage));
 		}
-		let judged = self.drift.map(|(budget, coverage)| (budget, coverage, state.judged_end));
+		let judged = self
+			.drift
+			.map(|(budget, coverage)| (budget, coverage, state.judged_end));
 		let scan = (state.drops_revision, span.clone(), within.revision, judged);
 		if self.scanned.as_ref() != Some(&scan) {
 			self.scanned = Some(scan);
