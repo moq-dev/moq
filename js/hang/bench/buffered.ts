@@ -124,7 +124,7 @@ async function measure(
 		if (scenario === "steady") {
 			// The player reads each frame as it lands, so nothing builds up behind it.
 			for (const i of order) {
-				const sources = tracks.map((track) => track.createGroup(i));
+				const sources = tracks.map((track) => track.createGroup(BigInt(i)));
 				for (let frame = 0; frame < frames; frame++) {
 					const reads = players.map((player) => player.consumer.next());
 					for (const source of sources) source.writeFrame(wire(i, frame));
@@ -139,7 +139,7 @@ async function measure(
 
 		// Everything arrives before the player reads: a stalled reader, or history after a join.
 		for (const i of order) {
-			const sources = tracks.map((track) => track.createGroup(sequence(i)));
+			const sources = tracks.map((track) => track.createGroup(BigInt(sequence(i))));
 			for (let frame = 0; frame < frames; frame++) await arrive(sources, players, sequence(i), frame);
 			for (const source of sources) source.finish();
 		}
@@ -163,7 +163,7 @@ async function measure(
 			// The budget drops to nothing, so the next arrival makes every older group too stale to keep.
 			delay.set({ max: Milli.zero });
 			start = performance.now();
-			const sources = tracks.map((track) => track.createGroup(groups));
+			const sources = tracks.map((track) => track.createGroup(BigInt(groups)));
 			await arrive(sources, players, groups, 0);
 			const elapsed = (performance.now() - start) * 1e6;
 			const newest = timestamp(groups, 0) / 1000;
