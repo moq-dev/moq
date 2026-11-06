@@ -368,12 +368,8 @@ fn bench_route_churn(c: &mut Criterion) {
 				});
 				b.iter(|| {
 					drop(
-						moq_net::fuzz::requests_route(
-							producer,
-							moq_net::Path::from_static("room/0"),
-							peer_route(2, 5),
-						)
-						.unwrap(),
+						moq_net::fuzz::requests_route(producer, moq_net::Path::from_static("room/0"), peer_route(2, 5))
+							.unwrap(),
 					)
 				});
 				for cursor in cursors.iter_mut() {
