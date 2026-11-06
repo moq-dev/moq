@@ -125,3 +125,16 @@ test("unaccount reopens a gap for a fresh grace", () => {
 	ledger.expire(at(2000), grace);
 	expect(ledger.covers(0n, 10n)).toBe(true);
 });
+
+test("unaccount restarts the older gap it joins", () => {
+	const ledger = new Ledger();
+	const grace = Milli(1000);
+	ledger.account(0n, 2n, at(0));
+	ledger.account(4n, 6n, at(0));
+	ledger.unaccount(1n, 2n, at(900));
+	// Its grace runs from the reversal, not from when the older gap opened.
+	ledger.expire(at(1000), grace);
+	expect(ledger.covers(1n, 2n)).toBe(false);
+	ledger.expire(at(1900), grace);
+	expect(ledger.covers(0n, 6n)).toBe(true);
+});

@@ -157,7 +157,7 @@ export class Ledger {
 	/**
 	 * Take `[start, end)` back out of what is accounted for, owed again from `at`: a verdict that
 	 * accounted for it was reversed. The gap it leaves opens at `at`, so it is waited for a fresh
-	 * grace. Mirrors the Rust `Ledger::unaccount`.
+	 * grace, even where it joins an older gap. Mirrors the Rust `Ledger::unaccount`.
 	 */
 	unaccount(start: bigint, end: bigint, at: Instant): void {
 		if (start >= end) return;
@@ -167,6 +167,7 @@ export class Ledger {
 			if (run.start >= end) break;
 			if (run.end > start) overlapping.push(run);
 		}
+		if (overlapping.length === 0) return;
 		for (const run of overlapping) {
 			this.#remove(run);
 			if (this.#last === run) this.#last = undefined;
@@ -183,7 +184,7 @@ export class Ledger {
 		}
 		const last = this.#runs.maxKey();
 		this.#last = last === undefined ? undefined : this.#runs.get(last);
-		this.#nextExpiry();
+		this.demand(start, end, at);
 	}
 
 	/** Restart the age of every gap reaching into `[start, end)`, which the demand newly asks for. */

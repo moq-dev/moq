@@ -157,12 +157,15 @@ impl Ledger {
 
 	/// Take `groups` back out of what is accounted for, owed again from `now`: a verdict that
 	/// accounted for them was reversed. The gap they leave opens now, so it is waited for a
-	/// fresh grace.
+	/// fresh grace, even where it joins an older gap.
 	pub fn unaccount(&mut self, groups: Range<u64>, now: Instant) {
 		if groups.is_empty() {
 			return;
 		}
 		let overlapping: Vec<u64> = self.accounted(groups.clone()).map(|run| run.start).collect();
+		if overlapping.is_empty() {
+			return;
+		}
 		for clipped in overlapping {
 			let start = self
 				.runs
@@ -194,6 +197,7 @@ impl Ledger {
 				self.changes.insert(groups.end..run.end);
 			}
 		}
+		self.demand(groups, now);
 	}
 
 	/// Account a live arrival, refreshing a cached incarnation even if its sequence was
@@ -509,6 +513,22 @@ mod tests {
 		assert!(!ledger.covers(3..5), "its grace runs from the reversal");
 		ledger.expire(start + GRACE * 2);
 		assert!(ledger.covers(0..10));
+	}
+
+	/// A reopened gap that joins an older one is waited for a fresh grace as a whole, rather
+	/// than folding with the older gap's age.
+	#[test]
+	fn unaccount_restarts_the_older_gap_it_joins() {
+		let start = Instant::now();
+		let mut ledger = Ledger::new(GRACE);
+		arrive(&mut ledger, 0..2, start);
+		arrive(&mut ledger, 4..6, start);
+		let reversed = start + GRACE * 9 / 10;
+		ledger.unaccount(1..2, reversed);
+		ledger.expire(start + GRACE);
+		assert!(!ledger.covers(1..2), "its grace runs from the reversal");
+		ledger.expire(reversed + GRACE);
+		assert!(ledger.covers(0..6));
 	}
 
 	#[test]
