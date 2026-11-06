@@ -13,8 +13,20 @@ upstream bandwidth.
 Each broadcast carries the list of relays it passed through. That hop list
 catches loops and picks the shortest route, and every relay breaks ties the
 same way so the cluster converges instead of flapping. Both wire protocols
-carry it: natively on moq-lite, and via the [cluster extension](/draft/moq-cluster)
-on moq-transport.
+carry it: natively on moq-lite up to moq-lite-06, and via the
+[cluster extension](/draft/moq-cluster) on moq-transport.
+
+moq-lite-07-wip carries no hop list. Each publishing node declares a random
+routing identity, and relays run a distance-vector route to it, loop-free by
+Babel's feasibility condition, so every claim of one origin shares that route.
+The first relay a request reaches picks the origin node, by a hash of the path
+and the node's identity that every relay computes alike, and names it on the
+request so later hops follow their own route to that node. A relay running both
+versions translates: a moq-lite-06 peer's routes enter the route layer as the
+relay's own claims, and lite-07 routes reach a moq-lite-06 peer as a hop list
+that starts at their origin node. A relay drops a moq-lite-06 route whose hop
+list names its own routing identity, since that is one of its claims coming
+back.
 
 A track from a moq-transport publisher keeps its Object IDs, object properties,
 and END\_OF\_GROUP status objects across a moq-lite-07 link, since relays
@@ -94,8 +106,9 @@ max_hops = 6
 ```
 
 The same setting is `--cluster-max-hops` or `MOQ_CLUSTER_MAX_HOPS`. It covers
-moq-lite-03 through moq-lite-07-wip and moq-transport drafts 18 through 22 when
-the MoQ Cluster extension is negotiated. A forwarded path counts this relay's
+moq-lite-03 through moq-lite-06 and moq-transport drafts 18 through 22 when
+the MoQ Cluster extension is negotiated. moq-lite-07-wip routes carry no hop
+path, so it does not bound them. A forwarded path counts this relay's
 own hop even when its peer appends it on receipt. Older versions and peers
 without hop paths hide their depth, which this setting cannot bound.
 
@@ -153,9 +166,10 @@ connect = [{ url = "tls://core-a.internal:4443/", upstream = true }]
 ## Link costs
 
 Add `?cost=N` to a peer URL to route by price instead of hop count. An unpriced
-link costs 1, which reproduces plain hop counting. Each relay adds the price of
-the link an announcement arrived on before forwarding it, so a route's cost is
-the sum of what it crossed.
+link costs 1, which reproduces plain hop counting, and 1 is also the minimum: a
+cost of 0 is refused. Each relay adds the price of the link an announcement
+arrived on before forwarding it, so a route's cost is the sum of what it
+crossed.
 
 Routing prefers the longest covering prefix, then a fully identified hop list
 over one holding an anonymous hop (0), then the lowest cost, then the shortest
@@ -167,7 +181,7 @@ restarts takes over from its lingering old session at once.
 
 ```toml
 [cluster]
-connect = ["https://sibling.same-dc/?cost=0", "https://us-east.example.com/?cost=10"]
+connect = ["https://sibling.same-dc/?cost=1", "https://us-east.example.com/?cost=10"]
 ```
 
 The same policy reads as an object, the only form that accepts `token` and
@@ -176,7 +190,7 @@ The same policy reads as an object, the only form that accepts `token` and
 ```toml
 [cluster]
 connect = [
-  { url = "https://sibling.same-dc/", cost = 0 },
+  { url = "https://sibling.same-dc/", cost = 1 },
   { url = "https://us-east.example.com/", cost = 10, token = "PEER_JWT" },
 ]
 ```
@@ -253,11 +267,9 @@ decides which relays receive the cluster token.
 ## Identity
 
 Each relay has a Hop ID: the value it adds to a route's hop list for loop
-detection and shortest-path routing. It is random on every start, which is fine
-for loop detection but makes a restarted relay look like a new node. Set
-`cluster.id` to a stable non-zero 64-bit integer to pin it: below 2^53 if older
-browser clients decode it, and below 2^62 to keep loop detection over moq-lite-06
-and older links, which carry a larger id as 0.
+detection and shortest-path routing. It is random on every start, so a
+restarted relay is a new node to the rest of the mesh, and there is no setting
+to pin it.
 
 ## Failure detection
 

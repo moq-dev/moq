@@ -359,6 +359,9 @@ pub fn lite_wire(data: &[u8]) -> bool {
 }
 
 /// One announcement on an announce stream, resolved: what the application sees.
+///
+/// The hop chain travels only on lite-06: lite-07 names the claim's route instead, so
+/// its writer drops the chain and its reader decodes an empty one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Announced {
 	/// ANNOUNCE_START: a route's suffix and wire hop chain, taking the next id.
@@ -397,19 +400,20 @@ impl AnnounceWriter {
 	pub fn write(&mut self, announced: &Announced, data: &mut Vec<u8>) {
 		let msg = match announced {
 			Announced::Start(suffix, hops) => {
-				let (_, suffix, hops) = self.encoder.start(suffix.clone(), hops.clone());
+				let (_, suffix) = self.encoder.start(suffix.clone());
 				// A fixed instance, so the bytes stay pinned and match what `js/net` writes.
 				lite::AnnounceBroadcast::Active {
+					route: 0,
 					instance: self.version.has_instance().then(|| "a".parse().unwrap()),
 					epoch: 0,
 					suffix,
-					hops,
+					hops: self.chain(hops),
 					cost: Default::default(),
 				}
 			}
 			Announced::Update(id, hops) => lite::AnnounceBroadcast::Update {
 				id: *id,
-				hops: self.encoder.update(*id, hops.clone()),
+				hops: self.chain(hops),
 				cost: Default::default(),
 			},
 			Announced::End(id) => {
@@ -419,6 +423,14 @@ impl AnnounceWriter {
 		};
 		msg.encode(&mut Encoder::new(data, self.version.into()), self.version)
 			.expect("could not encode an announcement");
+	}
+
+	/// The hop chain as this version carries it: none on lite-07.
+	fn chain(&self, hops: &Hops) -> Hops {
+		match self.version.has_routes() {
+			true => Hops::default(),
+			false => hops.clone(),
+		}
 	}
 }
 
@@ -574,12 +586,10 @@ pub fn decode_announces(data: &[u8], compress: bool) -> Vec<Announced> {
 	let mut resolved = Vec::new();
 	while let Ok(msg) = lite::AnnounceBroadcast::decode(&mut data, version) {
 		let announced = match msg {
-			lite::AnnounceBroadcast::Active { suffix, hops, .. } => decoder
-				.start(suffix, hops)
-				.map(|(suffix, hops)| Announced::Start(suffix, hops)),
-			lite::AnnounceBroadcast::Update { id, hops, .. } => {
-				decoder.update(id, hops).map(|(_, hops)| Announced::Update(id, hops))
+			lite::AnnounceBroadcast::Active { suffix, hops, .. } => {
+				decoder.start(suffix).map(|suffix| Announced::Start(suffix, hops))
 			}
+			lite::AnnounceBroadcast::Update { id, hops, .. } => decoder.get(id).map(|_| Announced::Update(id, hops)),
 			lite::AnnounceBroadcast::EndedId { id } => decoder.end(id).map(|_| Announced::End(id)),
 			_ => continue,
 		};
@@ -682,6 +692,7 @@ impl LiteSample {
 			Self::Subscribe => lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
+				node: 0,
 				id: 3,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
@@ -880,6 +891,7 @@ impl Default for Messages {
 			lite_subscribe: lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
+				node: 0,
 				id: 7,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
@@ -1062,6 +1074,7 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			id: 0,
 			broadcast: broadcast.clone(),
 			instance: None,
+			node: 0,
 			track: track.into(),
 			priority: 0,
 			max_delay: std::time::Duration::ZERO,

@@ -13,7 +13,7 @@ const PARAM_PATH: u64 = 0x2;
 const PARAM_ROLE: u64 = 0x3;
 /// Setup Parameter id for the link cost the dialer assigns to this connection.
 const PARAM_COST: u64 = 0x4;
-/// Setup Parameter id for the endpoint's Hop ID.
+/// Setup Parameter id for the endpoint's Hop ID (before lite-07, which names routes instead).
 const PARAM_HOP: u64 = 0x5;
 /// Setup Parameter id for the sender's implementation, as `name/version` product tokens.
 const PARAM_IMPLEMENTATION: u64 = 0x6;
@@ -27,9 +27,9 @@ const PARAM_IETF: u64 = 0x4945_5446;
 /// The cost of crossing a link that neither end priced.
 ///
 /// One, so a mesh that configures no costs accumulates a route cost equal to the
-/// hop count and ranks routes exactly as pre-lite-06 shortest-path routing did. Pricing
-/// a link at 0 makes it free (a sibling in the same datacenter); pricing it higher
-/// makes it a last resort (a metered backbone).
+/// hop count and ranks routes exactly as pre-lite-06 shortest-path routing did. Before
+/// lite-07, pricing a link at 0 makes it free (a sibling in the same datacenter); pricing
+/// it higher makes it a last resort (a metered backbone).
 pub const DEFAULT_COST: u64 = 1;
 
 /// The probe capability an endpoint advertises in SETUP.
@@ -191,13 +191,15 @@ pub struct Setup {
 	/// route cost of every announcement we forward it.
 	///
 	/// Directional: it prices the sender's own egress, so both ends declare their own
-	/// and the two need not match. `None` means the default cost of 1.
+	/// and the two need not match. `None` means the default cost of 1. Lite-07 refuses 0
+	/// both ways: a free link would leave a route as close as the one it came from.
 	pub cost: Option<u64>,
 	/// This endpoint's Hop ID, the identity forwarded announcements name it by.
 	/// The peer uses it to serve this endpoint's subscriptions from a route that
 	/// does not flow through it (the same split horizon the announce filter
 	/// applies). `None` when the endpoint has no meaningful identity (a
-	/// leaf that never forwards); a wire value of 0 decodes as `None`.
+	/// leaf that never forwards); a wire value of 0 decodes as `None`. Lite-07 names
+	/// routes instead, so it never sends one and ignores one received.
 	pub hop: Option<crate::Hop>,
 	/// The connection credential (lite-07+), which the empty-token Auth Stream names.
 	/// Sent only by the client. The parameter carries no Token Type, so it is always
@@ -260,9 +262,12 @@ impl<'a> Message<'a> for Setup {
 			params.set_varint(PARAM_ROLE, role.to_code(), version)?;
 		}
 		if let Some(cost) = self.cost {
+			if cost == 0 && version.has_routes() {
+				return Err(EncodeError::InvalidState);
+			}
 			params.set_varint(PARAM_COST, cost, version)?;
 		}
-		if let Some(hop) = self.hop {
+		if let Some(hop) = self.hop.filter(|_| !version.has_routes()) {
 			params.set_varint(PARAM_HOP, hop.wire_id(version.into()), version)?;
 		}
 		if let Some(implementation) = &self.implementation {
@@ -328,11 +333,18 @@ impl<'a> Message<'a> for ReceivedSetup {
 		let role_code = params.get_varint(PARAM_ROLE, version)?;
 		let role = role_code.and_then(Role::from_code);
 		let cost = params.get_varint(PARAM_COST, version)?;
+		if cost == Some(0) && version.has_routes() {
+			return Err(DecodeError::InvalidValue);
+		}
 		// 0 is legal on the wire but carries no identity (it can't be excluded),
-		// so it decodes as "not declared" rather than an error.
-		let hop = params
-			.get_varint(PARAM_HOP, version)?
-			.and_then(|id| crate::Hop::new(id).ok());
+		// so it decodes as "not declared" rather than an error. Lite-07 dropped the
+		// parameter, so it ignores one like any unknown parameter.
+		let hop = match version.has_routes() {
+			true => None,
+			false => params
+				.get_varint(PARAM_HOP, version)?
+				.and_then(|id| crate::Hop::new(id).ok()),
+		};
 		let implementation = if version.has_implementation() {
 			crate::setup::decode_implementation(params.get_bytes(PARAM_IMPLEMENTATION))?
 		} else {
@@ -513,12 +525,18 @@ impl PeerSetup {
 	}
 
 	/// The route key the peer proved, once its SETUP arrived.
-	#[cfg_attr(
-		not(test),
-		expect(dead_code, reason = "session integration files a scoped peer's routes under it")
-	)]
 	pub fn route_key(&self) -> Option<[u8; 32]> {
 		self.0.lock().route_key
+	}
+
+	/// Poll for the route key the peer proved, waiting until its SETUP arrives.
+	/// `None` when it proved none.
+	pub fn poll_route_key(&self, waiter: &kio::Waiter) -> std::task::Poll<Option<[u8; 32]>> {
+		let state = std::task::ready!(self.0.poll(waiter, |state| match state.setup.is_some() {
+			true => std::task::Poll::Ready(()),
+			false => std::task::Poll::Pending,
+		}));
+		std::task::Poll::Ready(state.route_key)
 	}
 
 	/// Claim the Setup Stream before decoding its body, refusing any second stream.
@@ -649,15 +667,40 @@ mod tests {
 
 	#[test]
 	fn cost_round_trip() {
-		// Zero is a meaningful price (a free same-datacenter link), so it must survive
-		// the round trip as `Some(0)` rather than collapsing into "unpriced".
+		// Zero is a meaningful price before lite-07 (a free same-datacenter link), so it
+		// must survive the round trip as `Some(0)` rather than collapsing into "unpriced".
 		for cost in [None, Some(0), Some(1), Some(7)] {
 			let msg = Setup {
 				cost,
 				..Default::default()
 			};
 			assert_eq!(round_trip(&msg), msg);
+			if cost != Some(0) {
+				let buf = msg.encode_bytes(Version::Lite07).unwrap();
+				assert_eq!(Setup::decode_slice(&buf, Version::Lite07).unwrap().0, msg);
+			}
 		}
+	}
+
+	/// Lite-07 refuses a free link both ways: the feasibility condition relies on every
+	/// link adding at least 1.
+	#[test]
+	fn lite07_refuses_a_zero_cost() {
+		let msg = Setup {
+			cost: Some(0),
+			..Default::default()
+		};
+		assert!(matches!(
+			msg.encode_bytes(Version::Lite07),
+			Err(EncodeError::InvalidState)
+		));
+		// Length, one parameter, Cost, a one-byte value of 0.
+		let wire = [0x04, 0x01, 0x04, 0x01, 0x00];
+		assert!(matches!(
+			Setup::decode_slice(&wire, Version::Lite07),
+			Err(DecodeError::InvalidValue)
+		));
+		assert_eq!(Setup::decode_slice(&wire, Version::Lite06).unwrap().0, msg);
 	}
 
 	/// Parameter values follow the session's varint codec, not a fixed one: a value that
@@ -913,18 +956,37 @@ mod tests {
 
 	// A hop past 2^62 - 1 travels as 0 on a QUIC-varint version, which reads as undeclared.
 	#[test]
-	fn wide_hop_needs_leading_ones() {
+	fn wide_hop_reads_as_undeclared_on_lite06() {
 		let msg = Setup {
 			hop: Some(crate::Hop::new(u64::MAX).unwrap()),
 			..Default::default()
 		};
-		for (version, want) in [(Version::Lite06, None), (Version::Lite07, msg.hop)] {
-			let mut buf = Vec::new();
-			msg.encode(&mut Encoder::new(&mut buf, version.into()), version)
-				.unwrap();
-			let got = crate::coding::decode_buf(&mut &buf[..], version, |r, v| Setup::decode(r, v)).unwrap();
-			assert_eq!(got.hop, want, "{version:?}");
-		}
+		let buf = msg.encode_bytes(Version::Lite06).unwrap();
+		assert_eq!(Setup::decode_slice(&buf, Version::Lite06).unwrap().0.hop, None);
+	}
+
+	/// Lite-07 names routes instead of hops: it never sends the Hop parameter, and ignores
+	/// one a peer sends like any unknown parameter.
+	#[test]
+	fn lite07_drops_the_hop() {
+		let version = Version::Lite07;
+		let msg = Setup {
+			hop: Some(crate::Hop::new(42).unwrap()),
+			..Default::default()
+		};
+		assert_eq!(
+			msg.encode_bytes(version).unwrap(),
+			Setup::default().encode_bytes(version).unwrap()
+		);
+
+		let mut params = Parameters::default();
+		params.set_varint(super::PARAM_HOP, 42, version).unwrap();
+		let mut data = Vec::new();
+		let mut writer = Encoder::new(&mut data, version.into());
+		let prefix = writer.prefix_varint();
+		params.encode(&mut writer, version).unwrap();
+		writer.fill(prefix).unwrap();
+		assert_eq!(Setup::decode_slice(&data, version).unwrap().0.hop, None);
 	}
 
 	// A declared id of 0 carries no identity (it cannot be excluded), so it

@@ -184,3 +184,31 @@ async fn an_announce_past_the_cap_closes_the_session() {
 		);
 	}
 }
+
+/// On moq-lite-07 the peer's route takes a slot as well as each claim under it, so
+/// whatever a peer makes the route layer hold stays under the cap: here its route and
+/// first claim fill it, and the second claim closes the session.
+#[kio::test]
+async fn a_lite07_claim_past_the_cap_closes_the_session() {
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let client = produce_origin(1);
+	let server = produce_origin(2);
+	let a = client.route("a", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let b = client.route("b", moq_net::origin::RouteOptions::hidden()).unwrap();
+	a.announce().unwrap();
+	b.announce().unwrap();
+
+	let mut options = MockConnectOptions::new(version);
+	options.client_publish = Some(client.consume());
+	options.server_subscribe = Some(server.clone());
+	options.server_limits = Some(limits(2));
+	let pair = connect_mock(options).await;
+
+	let err = kio::clock::timeout(TIMEOUT, pair.client.closed())
+		.await
+		.expect("the session stayed open");
+	assert!(
+		matches!(err, moq_net::Error::Session(moq_net::SessionError::TooManyRequests)),
+		"closed with {err}"
+	);
+}
