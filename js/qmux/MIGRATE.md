@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Send streams expose `getStats()` ([#8005](https://github.com/moq-dev/moq/pull/8005))
+
+Send streams gain W3C WebTransport's `getStats()`, resolving to the new `SendStreamStats` (`bytesWritten`, `bytesSent`, `bytesAcknowledged`). Data counts as acknowledged once it is written to the WebSocket. Existing code needs no change.
+
 ### Accepted bidi streams hold credit until both halves end
 
 A peer's bidirectional stream returns its `MAX_STREAMS` credit only once it is accepted and both halves have ended, as in QUIC. Close or abort the writable of every accepted bidi stream, even one you never write to, or the peer eventually runs out of streams to open.

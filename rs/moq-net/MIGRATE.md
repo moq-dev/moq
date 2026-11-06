@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Send streams report acknowledgement ([#8005](https://github.com/moq-dev/moq/pull/8005))
+
+`transport::poll::SendStream` gains `acknowledged()`, which returns whether the peer has acknowledged every byte written so far. It defaults to `None`, meaning the transport can't tell, so existing implementations need no change. A transport that tracks acknowledgement returns `Some`, and a wrapper around another stream forwards it.
+
 ### Socket readers start at the beginning
 
 New `track` socket sessions subscribe from group 0, and `tcp` sessions join their
