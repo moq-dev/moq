@@ -829,8 +829,10 @@ async fn play_audio<O: Output>(
 				quiet -= frames as u64;
 			}
 			let skip = fit.skip as usize * stride;
-			let _ = sink.write(&frame.data[skip.min(frame.data.len())..])?;
-			if std::mem::take(&mut utterance) {
+			let written = sink.write(&frame.data[skip.min(frame.data.len())..])?;
+			// A dropped write leaves the utterance to start on the next frame the sink accepts.
+			if utterance && written.accepted_sample_frames > 0 {
+				utterance = false;
 				let skipped = Duration::from_secs_f64(fit.skip as f64 / sample_rate as f64);
 				output.send(Event::Utterance(Duration::from(frame.timestamp) + skipped));
 			}

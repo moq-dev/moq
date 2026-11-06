@@ -265,3 +265,16 @@ test("a native underrun or stall after the first press fails the run, and one be
 		}
 	}
 });
+
+test("a native underrun open as the first press lands fails the run", async () => {
+	const result = trace();
+	const native = nativeTrace(result);
+	const sample = native.find((sample) => sample.at >= result.presses[0].at + NATIVE + 250);
+	if (!sample?.render) throw new Error("no sample");
+	// It starts 100 ms before the window, which opens at the first press's head, and runs 200 ms into it.
+	const start = result.presses[0].at + NATIVE + 2;
+	sample.gaps = [{ at: sample.render - (sample.at - (start - 100)), ms: 300, quanta: 113, short: 0 }];
+	const { exitCode, stderr } = await analyze(result, native);
+	expect(exitCode).toBe(1);
+	expect(stderr).toContain("native: playback underran or stalled");
+});

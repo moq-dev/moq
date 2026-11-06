@@ -154,8 +154,9 @@ for (const [i, press] of presses.entries()) {
 const start = offset === null ? undefined : result.presses[0].at + offset;
 const windowed = native.filter((sample) => start !== undefined && sample.at >= start);
 const nativePlayback = {
+	// Each gap that ends in the window, so one open as it starts still counts.
 	underruns: native.flatMap((sample) =>
-		(sample.gaps ?? []).filter((gap) => start !== undefined && placed(sample, gap.at) >= start),
+		(sample.gaps ?? []).filter((gap) => start !== undefined && placed(sample, gap.at) + gap.ms >= start),
 	).length,
 	// Each stall that starts in the window, and one already open when it does.
 	stalls:
