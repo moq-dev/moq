@@ -323,7 +323,9 @@ impl Session {
 	pub fn tokens(&self, id: Id) -> Result<moq_net::auth::Tokens, Error> {
 		match self.link(id)? {
 			Link::Dialed { connection, .. } => Ok(connection.tokens()),
-			Link::Accepted(_) => Err(Error::Unsupported("a server-accepted session presents no tokens".into())),
+			Link::Accepted(_) => Err(Error::Unsupported(
+				"a server-accepted session presents no tokens".into(),
+			)),
 		}
 	}
 

@@ -1887,7 +1887,8 @@ pub(crate) unsafe fn parse_server(config: &moq_server_config) -> Result<moq_toki
 		.map(Into::into)
 		.collect();
 	listen.tls.generate = unsafe { ffi::parse_strings(config.tls_generate, config.tls_generate_len)? };
-	listen.version = crate::client::parse_versions(&unsafe { ffi::parse_strings(config.versions, config.versions_len)? })?;
+	listen.version =
+		crate::client::parse_versions(&unsafe { ffi::parse_strings(config.versions, config.versions_len)? })?;
 
 	let quic = unsafe {
 		crate::client::Quic {
@@ -1896,7 +1897,10 @@ pub(crate) unsafe fn parse_server(config: &moq_server_config) -> Result<moq_toki
 			keep_alive_us: config.has_quic_keep_alive.then_some(config.quic_keep_alive_us),
 			gso: config.has_quic_gso.then_some(config.quic_gso),
 			mtu_discovery: config.has_quic_mtu_discovery.then_some(config.quic_mtu_discovery),
-			congestion_control: ffi::parse_str_optional(config.quic_congestion_control, config.quic_congestion_control_len)?,
+			congestion_control: ffi::parse_str_optional(
+				config.quic_congestion_control,
+				config.quic_congestion_control_len,
+			)?,
 			qlog: ffi::parse_str_optional(config.quic_qlog, config.quic_qlog_len)?,
 			keylog: config.quic_keylog,
 		}
@@ -3134,7 +3138,9 @@ pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const
 		video.coded_width = (config.coded_width > 0).then_some(config.coded_width);
 		video.coded_height = (config.coded_height > 0).then_some(config.coded_height);
 		video.container = unsafe { parse_container(&config.container)? };
-		video.warmup = config.has_warmup.then(|| std::time::Duration::from_micros(config.warmup_us));
+		video.warmup = config
+			.has_warmup
+			.then(|| std::time::Duration::from_micros(config.warmup_us));
 		(video.broadcast, video.instance, video.track) = unsafe {
 			parse_reference(
 				(config.broadcast, config.broadcast_len),
@@ -3155,7 +3161,14 @@ unsafe fn parse_reference(
 	broadcast: (*const c_char, usize),
 	instance: (*const c_char, usize),
 	track: (*const c_char, usize),
-) -> Result<(Option<moq_net::path::Relative>, Option<moq_net::Instance>, Option<String>), Error> {
+) -> Result<
+	(
+		Option<moq_net::path::Relative>,
+		Option<moq_net::Instance>,
+		Option<String>,
+	),
+	Error,
+> {
 	let broadcast = unsafe { ffi::parse_str_optional(broadcast.0, broadcast.1)? }
 		.filter(|broadcast| !broadcast.is_empty())
 		.map(moq_net::path::Relative::new)
@@ -3213,8 +3226,12 @@ pub unsafe extern "C" fn moq_publish_audio_config(broadcast: u32, config: *const
 			let description = unsafe { ffi::parse_slice(config.description, config.description_len)? };
 			audio.description = Some(bytes::Bytes::copy_from_slice(description));
 		}
-		audio.jitter = config.has_jitter.then(|| std::time::Duration::from_micros(config.jitter_us));
-		audio.warmup = config.has_warmup.then(|| std::time::Duration::from_micros(config.warmup_us));
+		audio.jitter = config
+			.has_jitter
+			.then(|| std::time::Duration::from_micros(config.jitter_us));
+		audio.warmup = config
+			.has_warmup
+			.then(|| std::time::Duration::from_micros(config.warmup_us));
 		(audio.broadcast, audio.instance, audio.track) = unsafe {
 			parse_reference(
 				(config.broadcast, config.broadcast_len),
@@ -3475,7 +3492,12 @@ pub extern "C" fn moq_publish_track_finish_at(track: u32, final_sequence: u64) -
 /// # Safety
 /// - `group`, `frame`, and `present` must point at writable values.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_track_largest(track: u32, group: *mut u64, frame: *mut u64, present: *mut bool) -> i32 {
+pub unsafe extern "C" fn moq_publish_track_largest(
+	track: u32,
+	group: *mut u64,
+	frame: *mut u64,
+	present: *mut bool,
+) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
 		let group = unsafe { group.as_mut() }.ok_or(Error::InvalidPointer)?;

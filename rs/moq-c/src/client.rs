@@ -179,7 +179,10 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 			keep_alive_us: config.has_quic_keep_alive.then_some(config.quic_keep_alive_us),
 			gso: config.has_quic_gso.then_some(config.quic_gso),
 			mtu_discovery: config.has_quic_mtu_discovery.then_some(config.quic_mtu_discovery),
-			congestion_control: ffi::parse_str_optional(config.quic_congestion_control, config.quic_congestion_control_len)?,
+			congestion_control: ffi::parse_str_optional(
+				config.quic_congestion_control,
+				config.quic_congestion_control_len,
+			)?,
 			qlog: ffi::parse_str_optional(config.quic_qlog, config.quic_qlog_len)?,
 			keylog: config.quic_keylog,
 		}

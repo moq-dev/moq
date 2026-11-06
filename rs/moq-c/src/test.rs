@@ -1327,9 +1327,18 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(video_cfg.coded_height, 1080);
 	assert_eq!((video_cfg.warmup_us, video_cfg.has_warmup), (250_000, true));
 	// Normalized: a reader sees the plain relative path.
-	assert_eq!(borrowed_string(video_cfg.broadcast, video_cfg.broadcast_len).as_deref(), Some("source"));
-	assert_eq!(borrowed_string(video_cfg.instance, video_cfg.instance_len), Some(instance.clone()));
-	assert_eq!(borrowed_string(video_cfg.track, video_cfg.track_len).as_deref(), Some(track));
+	assert_eq!(
+		borrowed_string(video_cfg.broadcast, video_cfg.broadcast_len).as_deref(),
+		Some("source")
+	);
+	assert_eq!(
+		borrowed_string(video_cfg.instance, video_cfg.instance_len),
+		Some(instance.clone())
+	);
+	assert_eq!(
+		borrowed_string(video_cfg.track, video_cfg.track_len).as_deref(),
+		Some(track)
+	);
 	let mut enabled = std::mem::MaybeUninit::<bool>::uninit();
 	assert_eq!(
 		unsafe { moq_consume_video_enabled(catalog_id, 0, enabled.as_mut_ptr()) },

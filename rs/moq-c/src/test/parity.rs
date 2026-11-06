@@ -59,7 +59,10 @@ fn connect(a: u32, b: u32, track: bool) -> (u32, u32, [Callback; 3]) {
 
 	let incoming = id(accepts.recv());
 	let (mut claimed, mut session) = (moq_str(""), moq_str(""));
-	assert_eq!(unsafe { moq_socket_incoming_info(incoming, &mut claimed, &mut session) }, 0);
+	assert_eq!(
+		unsafe { moq_socket_incoming_info(incoming, &mut claimed, &mut session) },
+		0
+	);
 	assert_eq!(lent(claimed), "a");
 	let accepted = Callback::new();
 	let _accepting =
@@ -86,10 +89,20 @@ fn socket_tcp_round_trip() {
 	assert_eq!(unsafe { moq_socket_stream_info(client, &mut peer, &mut session) }, 0);
 	assert_eq!(lent(peer), "b");
 	let client_session = lent(session);
-	assert_eq!(unsafe { moq_socket_stream_info(server, &mut peer, std::ptr::null_mut()) }, 0);
+	assert_eq!(
+		unsafe { moq_socket_stream_info(server, &mut peer, std::ptr::null_mut()) },
+		0
+	);
 	assert_eq!(lent(peer), "a");
-	assert_eq!(unsafe { moq_socket_stream_info(server, std::ptr::null_mut(), &mut session) }, 0);
-	assert_eq!(lent(session), client_session, "both sides share the dialer's session id");
+	assert_eq!(
+		unsafe { moq_socket_stream_info(server, std::ptr::null_mut(), &mut session) },
+		0
+	);
+	assert_eq!(
+		lent(session),
+		client_session,
+		"both sides share the dialer's session id"
+	);
 
 	let writer = id(moq_socket_stream_writer(client));
 	assert!(moq_socket_stream_writer(client) < 0, "the writer is taken once");
@@ -151,7 +164,10 @@ fn socket_track_round_trip_and_endpoint_close() {
 
 	// Closing the endpoint ends its open track halves.
 	assert_eq!(moq_socket_close(a), 0);
-	assert!(moq_publish_track_finish(track) < 0, "the endpoint's close released the track");
+	assert!(
+		moq_publish_track_finish(track) < 0,
+		"the endpoint's close released the track"
+	);
 	assert!(frames.recv_terminal() < 0, "the peer's half reset");
 
 	assert_eq!(moq_socket_stream_free(client), 0);
@@ -174,13 +190,24 @@ fn socket_reject_and_cancel() {
 		id(unsafe { moq_socket_dial_tcp(a, peer.as_ptr().cast(), peer.len(), Some(channel_callback), dialed.ptr) });
 	let incoming = id(accepts.recv());
 	assert_eq!(moq_socket_incoming_reject(incoming), 0);
-	assert!(moq_socket_incoming_reject(incoming) < 0, "rejecting releases the handle");
+	assert!(
+		moq_socket_incoming_reject(incoming) < 0,
+		"rejecting releases the handle"
+	);
 	assert!(dialed.recv_terminal() < 0, "a rejected dial fails");
 
 	// Dialing oneself is refused at once.
 	let me = "a";
 	assert_eq!(
-		unsafe { moq_socket_dial_tcp(a, me.as_ptr().cast(), me.len(), Some(ignore_callback), std::ptr::null_mut()) },
+		unsafe {
+			moq_socket_dial_tcp(
+				a,
+				me.as_ptr().cast(),
+				me.len(),
+				Some(ignore_callback),
+				std::ptr::null_mut(),
+			)
+		},
 		MOQ_ERROR_UNSUPPORTED
 	);
 
@@ -188,7 +215,13 @@ fn socket_reject_and_cancel() {
 	let waiting = Callback::new();
 	let absent = "nobody";
 	let dial = id(unsafe {
-		moq_socket_dial_tcp(a, absent.as_ptr().cast(), absent.len(), Some(channel_callback), waiting.ptr)
+		moq_socket_dial_tcp(
+			a,
+			absent.as_ptr().cast(),
+			absent.len(),
+			Some(channel_callback),
+			waiting.ptr,
+		)
 	});
 	assert_eq!(moq_socket_cancel(dial), 0);
 	assert_eq!(waiting.recv_terminal(), 0);
@@ -354,7 +387,10 @@ fn session_tokens_and_grants() {
 		unsafe { moq_session_tokens_set(client, empty.as_ptr(), empty.len()) },
 		MOQ_ERROR_INVALID_CONFIG
 	);
-	assert_eq!(unsafe { moq_session_tokens_set(client, token.as_ptr(), token.len()) }, 0);
+	assert_eq!(
+		unsafe { moq_session_tokens_set(client, token.as_ptr(), token.len()) },
+		0
+	);
 
 	// The grant is delivered at once; the default protocol carries no AUTH, so it stays absent.
 	let grants = Callback::new();

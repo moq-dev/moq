@@ -1472,7 +1472,10 @@ impl Publish {
 	) -> Result<(), Error> {
 		let group = self.groups.get(group).ok_or(Error::GroupNotFound)?;
 		let mut group = group.inner.lock();
-		group.as_mut().ok_or(Error::GroupNotFound)?.write_frame(timestamp, bytes::Bytes::copy_from_slice(payload))?;
+		group
+			.as_mut()
+			.ok_or(Error::GroupNotFound)?
+			.write_frame(timestamp, bytes::Bytes::copy_from_slice(payload))?;
 		Ok(())
 	}
 
@@ -1488,21 +1491,35 @@ impl Publish {
 	pub fn group(
 		&self,
 		group: Id,
-	) -> Result<(crate::state::Shared<moq_net::group::Producer>, tokio::sync::watch::Receiver<()>), Error> {
+	) -> Result<
+		(
+			crate::state::Shared<moq_net::group::Producer>,
+			tokio::sync::watch::Receiver<()>,
+		),
+		Error,
+	> {
 		let entry = self.groups.get(group).ok_or(Error::GroupNotFound)?;
 		Ok((entry.inner.clone(), entry.ended.subscribe()))
 	}
 
 	/// Finish a raw group. No more frames can be written.
 	pub fn group_finish(&mut self, group: Id) -> Result<(), Error> {
-		let mut group = self.groups.remove(group).and_then(|group| group.inner.take()).ok_or(Error::GroupNotFound)?;
+		let mut group = self
+			.groups
+			.remove(group)
+			.and_then(|group| group.inner.take())
+			.ok_or(Error::GroupNotFound)?;
 		group.finish()?;
 		Ok(())
 	}
 
 	/// Abort a raw group with an application error code.
 	pub fn group_abort(&mut self, group: Id, error_code: u16) -> Result<(), Error> {
-		let group = self.groups.remove(group).and_then(|group| group.inner.take()).ok_or(Error::GroupNotFound)?;
+		let group = self
+			.groups
+			.remove(group)
+			.and_then(|group| group.inner.take())
+			.ok_or(Error::GroupNotFound)?;
 		group.abort(moq_net::Error::App(error_code))?;
 		Ok(())
 	}

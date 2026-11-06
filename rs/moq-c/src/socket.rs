@@ -125,8 +125,18 @@ impl Socket {
 		})
 	}
 
-	fn dial(&mut self, endpoint: Id, peer: &str, track: Option<Option<moq_net::track::Info>>, callback: OnStatus) -> Result<Id, Error> {
-		let EndpointEntry { inner, driver, children } = self.endpoint(endpoint)?;
+	fn dial(
+		&mut self,
+		endpoint: Id,
+		peer: &str,
+		track: Option<Option<moq_net::track::Info>>,
+		callback: OnStatus,
+	) -> Result<Id, Error> {
+		let EndpointEntry {
+			inner,
+			driver,
+			children,
+		} = self.endpoint(endpoint)?;
 		let (driver, children) = (driver.clone(), children.clone());
 		let watch = driver.clone();
 		let pending: std::pin::Pin<Box<dyn Future<Output = Result<StreamEntry, Error>> + Send>> = match track {
@@ -147,7 +157,11 @@ impl Socket {
 	}
 
 	fn accept(&mut self, endpoint: Id, track: bool, callback: OnStatus) -> Result<Id, Error> {
-		let EndpointEntry { inner, driver, children } = self.endpoint(endpoint)?;
+		let EndpointEntry {
+			inner,
+			driver,
+			children,
+		} = self.endpoint(endpoint)?;
 		let (inner, driver, children) = (inner.clone(), driver.clone(), children.clone());
 		let poll = move |waiter: &kio::Waiter| match track {
 			false => inner.poll_accept_tcp(waiter).map_ok(IncomingKind::Tcp),
@@ -202,14 +216,22 @@ impl Socket {
 		)
 	}
 
-	fn incoming_accept(&mut self, incoming: Id, info: Option<moq_net::track::Info>, callback: OnStatus) -> Result<Id, Error> {
+	fn incoming_accept(
+		&mut self,
+		incoming: Id,
+		info: Option<moq_net::track::Info>,
+		callback: OnStatus,
+	) -> Result<Id, Error> {
 		let entry = self.incoming.get(incoming).ok_or(Error::NotFound)?;
 		entry.driver.check()?;
 		if info.is_some() && matches!(entry.inner, IncomingKind::Tcp(_)) {
 			return Err(Error::InvalidConfig("a tcp session has no track info".into()));
 		}
 		let IncomingEntry {
-			inner, driver, children, ..
+			inner,
+			driver,
+			children,
+			..
 		} = self.incoming.remove(incoming).ok_or(Error::NotFound)?;
 		let watch = driver.clone();
 		let pending: std::pin::Pin<Box<dyn Future<Output = Result<StreamEntry, Error>> + Send>> = match inner {
@@ -229,13 +251,23 @@ impl Socket {
 		)
 	}
 
-	fn incoming_info(&self, incoming: Id, peer: Option<&mut moq_string>, session: Option<&mut moq_string>) -> Result<(), Error> {
+	fn incoming_info(
+		&self,
+		incoming: Id,
+		peer: Option<&mut moq_string>,
+		session: Option<&mut moq_string>,
+	) -> Result<(), Error> {
 		let entry = self.incoming.get(incoming).ok_or(Error::NotFound)?;
 		write_ids(&entry.peer, &entry.session, peer, session);
 		Ok(())
 	}
 
-	fn stream_info(&self, stream: Id, peer: Option<&mut moq_string>, session: Option<&mut moq_string>) -> Result<(), Error> {
+	fn stream_info(
+		&self,
+		stream: Id,
+		peer: Option<&mut moq_string>,
+		session: Option<&mut moq_string>,
+	) -> Result<(), Error> {
 		let entry = self.streams.get(stream).ok_or(Error::NotFound)?;
 		write_ids(&entry.peer, &entry.session, peer, session);
 		Ok(())
@@ -424,7 +456,11 @@ pub extern "C" fn moq_socket_cancel(task: u32) -> i32 {
 /// # Safety
 /// - `peer` and `session` must each be NULL or point at a writable [moq_string].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_socket_incoming_info(incoming: u32, peer: *mut moq_string, session: *mut moq_string) -> i32 {
+pub unsafe extern "C" fn moq_socket_incoming_info(
+	incoming: u32,
+	peer: *mut moq_string,
+	session: *mut moq_string,
+) -> i32 {
 	ffi::enter(move || {
 		let incoming = ffi::parse_id(incoming)?;
 		let (peer, session) = unsafe { (peer.as_mut(), session.as_mut()) };

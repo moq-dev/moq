@@ -33,7 +33,10 @@ impl GrantRecord {
 	fn new(grant: Option<moq_net::auth::Grant>) -> Self {
 		let patterns = |patterns: &moq_net::Patterns| patterns.iter().map(ToString::to_string).collect::<Vec<_>>();
 		let publish = grant.as_ref().map(|grant| patterns(&grant.publish)).unwrap_or_default();
-		let subscribe = grant.as_ref().map(|grant| patterns(&grant.subscribe)).unwrap_or_default();
+		let subscribe = grant
+			.as_ref()
+			.map(|grant| patterns(&grant.subscribe))
+			.unwrap_or_default();
 		let views = |strings: &[String]| {
 			strings
 				.iter()

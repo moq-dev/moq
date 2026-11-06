@@ -1,9 +1,9 @@
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
 use crate::auth::Auth;
+use crate::bandwidth::Bandwidth;
 use crate::encoder::Encoders;
 use crate::socket::Socket;
-use crate::bandwidth::Bandwidth;
 use crate::{Consume, Origin, Publish, Server, Session, audio::Audio, video::Video};
 
 pub struct State {
