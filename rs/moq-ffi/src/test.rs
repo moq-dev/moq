@@ -2000,7 +2000,7 @@ async fn track_request_demand_ends_on_rejection() {
 	let subscribe = tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await });
 	let request = dynamic.requested_track().await.unwrap();
 	let demand = request.demand().unwrap();
-	request.abort(404).unwrap();
+	request.reject(404).unwrap();
 	assert!(subscribe.await.unwrap().is_err());
 	assert!(demand.until_wanted().await.is_err());
 	assert!(matches!(request.demand(), Err(MoqError::Closed)));
@@ -2290,7 +2290,7 @@ async fn dynamic_track_request_can_abort() {
 		.expect("timed out waiting for requested track")
 		.unwrap();
 
-	track.abort(404).unwrap();
+	track.reject(404).unwrap();
 	assert!(matches!(track.name(), Err(MoqError::Closed)));
 
 	let result = kio::clock::timeout(TIMEOUT, subscribe)
@@ -2656,10 +2656,8 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 		.await
 		.expect("timed out waiting for fill")
 		.unwrap();
-	assert_eq!(
-		(request.start_group(), request.start_frame(), request.end_group()),
-		(5, 0, 6)
-	);
+	assert_eq!(request.start(), MoqPosition { group: 5, frame: 0 });
+	assert_eq!(request.end(), 6);
 	assert_eq!(request.priority(), 11);
 	assert_eq!(request.wanted(), Some(5));
 
@@ -2808,7 +2806,7 @@ async fn requested_track_dynamic_survives_accept() {
 		.await
 		.expect("timed out waiting for fill")
 		.unwrap();
-	assert_eq!(fill.start_group(), 9);
+	assert_eq!(fill.start().group, 9);
 	let group = fill.accept(9).unwrap();
 	group
 		.write_frame(MoqFrame {

@@ -174,7 +174,7 @@ client = moq.Client(
   - `moq.audio.Producer(media.CatalogProducer(broadcast), input, output, *, track=None, bandwidth=None)`. Encode raw PCM frames. A zero frame duration uses the codec's own frame.
   - `.close()` ends the broadcast for good; a second call is a no-op.
 - **`BroadcastRequests`**. Async source of tracks requested by subscribers.
-  - `await .requested_track() → TrackRequest`. Call `.accept()` on it for a `TrackProducer`, or `.abort(code)` to reject.
+  - `await .requested_track() → TrackRequest`. Call `.accept()` on it for a `TrackProducer`, or `.reject(code)` to fail the subscriber.
   - Async iterator yielding `TrackRequest`
 - **`TrackProducer` / `GroupProducer`**. Write raw payloads with no codec parsing.
   - `.write_frame(payload, timestamp=None)` writes a payload with optional capture time.
