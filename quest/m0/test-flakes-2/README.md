@@ -97,7 +97,9 @@ timeout, one child.
 
 Added 2026-11-05 (maintainer, `/quest-complete` follow-ups): moq-net's
 pool-debt flight test, the Python audio playout-delay test, and the io_uring
-tests' shared locked-memory budget, one child each.
+tests' shared locked-memory budget, one child each. On 2026-11-06, moq-ffi's
+concurrent-ready test, quarantined here instead of in the unrelated
+[moq-dev/moq#7981](https://github.com/moq-dev/moq/pull/7981).
 
 Public API: none. Wire: none.
 
@@ -114,3 +116,4 @@ Public API: none. Wire: none.
 - [moq-net's pool-debt flight test holds its bound in parallel runs](/quest/m0/test-flakes-2/pool-debt-flight.md) - `pool_debt_sheds_a_flight_without_its_cached_group` stays under `2 * POOL` when it shares a process with moq-net's other tests
 - [The Python audio playout-delay test reads its frames](/quest/m0/test-flakes-2/audio-playout-delay.md) - `test_audio_consumer_reports_its_playout_delay` stops timing out on its first read in the merge queue
 - [io_uring tests fit the shared locked-memory budget](/quest/m0/test-flakes-2/uring-memlock.md) - concurrent moq-relay and moq-uring test runs stop exhausting the user's `RLIMIT_MEMLOCK`, fixed at the cause rather than by raising the limit
+- [The FFI concurrent-ready test wakes both calls under load](/quest/m0/test-flakes-2/ffi-concurrent-ready.md) - `concurrent_ready_calls_all_wake` stops stalling its reader drain under load and is re-enabled
