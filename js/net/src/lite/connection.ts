@@ -5,7 +5,7 @@ import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
 import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
-import { detect, type Probe, type Stats, transportStats } from "../connection/stats.ts";
+import { detect, type Probe, type Stats, statsOf, type TransportStats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCause } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
@@ -581,17 +581,13 @@ export class Connection implements Established {
  * @internal
  */
 export async function probeLevel(quic: WebTransport, version: Version): Promise<ProbeLevel> {
-	const getStats = (
-		quic as unknown as {
-			getStats?: () => Promise<{ estimatedSendRate: number | null; smoothedRtt?: number | null }>;
-		}
-	).getStats;
-	if (typeof getStats !== "function") return ProbeLevel.None;
+	const getStats = statsOf(quic);
+	if (!getStats) return ProbeLevel.None;
 
 	// A transport that can't answer tells us nothing, which is itself an answer.
-	let stats: { estimatedSendRate: number | null; smoothedRtt?: number | null };
+	let stats: TransportStats;
 	try {
-		stats = await getStats.call(quic);
+		stats = await getStats();
 	} catch {
 		return ProbeLevel.None;
 	}

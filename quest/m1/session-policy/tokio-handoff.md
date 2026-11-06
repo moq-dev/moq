@@ -23,7 +23,7 @@ moq-net rather than a copy of the policy.
 
 - The handoff's signature (transport plus link metadata in, request or session
   out) is fixed by this quest and does not change if policy moves further.
-- Delete moq-tokio's now-unused `Deadline`, `Backoff` and the like, and its
+- Delete moq-tokio's now-unused `Backoff` and the like (the accept `Deadline` already went), and its
   per-transport `Request` construction that moq-net now owns. Bounding the
   transport handshake (`within`) stays here, since moq-net has no session yet
   at that point.
@@ -34,7 +34,3 @@ moq-net rather than a copy of the policy.
 
 Public API: moq-tokio adds `accept_with` and `connect_with` and drops internals
 it re-exported, with MIGRATE notes. Wire: none.
-
-## Required
-
-- [Accept policy in moq-net](/quest/m1/session-policy/accept.md) - the accept policy the handoff runs

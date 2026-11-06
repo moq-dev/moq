@@ -97,7 +97,11 @@ timeout, one child.
 
 Added 2026-11-05 (maintainer, `/quest-complete` follow-ups): moq-net's
 pool-debt flight test, the Python audio playout-delay test, and the io_uring
-tests' shared locked-memory budget, one child each. On 2026-11-06, moq-ffi's
+tests' shared locked-memory budget, one child each. The pool-debt test
+overshot because shed frames whose payload canonical content owned stayed
+billed until crossbeam-epoch reclamation, which other tests' reads in the same
+process held back; eviction now lets go of that content itself, fixed by
+[moq-dev/moq#8052](https://github.com/moq-dev/moq/pull/8052). On 2026-11-06, moq-ffi's
 concurrent-ready test, quarantined here instead of in the unrelated
 [moq-dev/moq#7981](https://github.com/moq-dev/moq/pull/7981).
 
@@ -106,6 +110,11 @@ zero max delay, a read more than the 80 ms warmup late found the first frame's
 group stale, and the warmup then trimmed all the audio left. The test now asks
 for no max delay, fixed by [moq-dev/moq#8050](https://github.com/moq-dev/moq/pull/8050).
 
+Added 2026-11-06 (maintainer's standing rule that flakes join this epic):
+`js/net`'s datagram-end close case, which failed
+[moq-dev/moq#7986](https://github.com/moq-dev/moq/pull/7986)'s Check while
+reproducing on unchanged `main`.
+
 Public API: none. Wire: none.
 
 ## Required
@@ -113,8 +122,9 @@ Public API: none. Wire: none.
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
 - [reload.test.ts's close-drain tests pass under load](/quest/m0/test-flakes-2/reload-close-drain.md) - the drain cases in `js/net`'s reload tests pass in loaded multi-file runs
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
-- [Diagnose and re-enable the FFI datagram connection test](/quest/m0/test-flakes-2/ffi-datagram-roundtrip.md) - diagnose the default-connection timeout and re-enable the quarantined test
 - [Test PulseAudio servers stay off the desktop's D-Bus](/quest/m0/test-flakes-2/pulse-dbus.md) - concurrent media runs on one desktop never collide on `org.PulseAudio1`
-- [moq-net's pool-debt flight test holds its bound in parallel runs](/quest/m0/test-flakes-2/pool-debt-flight.md) - `pool_debt_sheds_a_flight_without_its_cached_group` stays under `2 * POOL` when it shares a process with moq-net's other tests
 - [io_uring tests fit the shared locked-memory budget](/quest/m0/test-flakes-2/uring-memlock.md) - concurrent moq-relay and moq-uring test runs stop exhausting the user's `RLIMIT_MEMLOCK`, fixed at the cause rather than by raising the limit
 - [The FFI concurrent-ready test wakes both calls under load](/quest/m0/test-flakes-2/ffi-concurrent-ready.md) - `concurrent_ready_calls_all_wake` stops stalling its reader drain under load and is re-enabled
+- [The datagram-end close test survives load](/quest/m0/test-flakes-2/datagram-end-close.md) - `a session close right after a datagram track's end keeps the end` stops aborting the track under load and is re-enabled
+- [lite-05 copy fill checks idleness without wall time](/quest/m0/test-flakes-2/copy-fill-idle.md) - the copy-fill test proves no FETCH went out on the `Manual` clock, not a 200 ms real-time wait
+- [OBS TSan runs report no leaked FFI worker thread](/quest/m0/test-flakes-2/obs-tsan-thread-leak.md) - the OBS TSan tests stop flagging a finished `moq-ffi-worker` thread at exit under load

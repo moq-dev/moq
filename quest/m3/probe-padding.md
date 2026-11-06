@@ -14,6 +14,13 @@ probe to the larger of their send target and the peer's PROBE target.
 
 ## Plan
 
+Parked 2026-11-06 (maintainer, /quest-unblock): ✅ moved from the m2 probe
+epic to m3, because the maintainer doesn't think padding is the right
+approach. Rethink how a browser raises its estimate before building this; the
+padding overhead budget's denominator was left open for that rethink. Its draft,
+[moq-dev/moq#7390](https://github.com/moq-dev/moq/pull/7390), was closed; its
+send target and ALR schedule remain at `refs/pull/7390/head` (ca3813d7e1).
+
 Decided with the maintainer on 2026-10-17 (see the
 [epic](/quest/m2/probe/README.md)):
 
@@ -54,6 +61,11 @@ Decided with the maintainer on 2026-10-17 (see the
   what it says, and run `just drafts check`.
 - A browser sender can't see whether it is app-limited; settle how to judge
   it from what it sends against the estimate.
+- Decided 2026-11-06 (maintainer, /quest-unblock): ✅ keep `setTarget` on
+  `Handle`, so an app on a pooled `Connection.allocator` can set or clear the
+  target; the last sharer to set it wins, as in Rust. It adds a required member
+  to an exported interface, so the PR is breaking. Not chosen: setting it on
+  the allocator only.
 - Settle how the schedule stays within its overhead budget: how padding's
   share of sent bytes is counted over time, and what a cluster does once it
   would exceed the budget.
@@ -84,4 +96,4 @@ Tests, on `@moq/clock`'s `Manual`:
 
 ## Required
 
-- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - shipping Chrome and Safari have no estimate for a probe cluster to pace against or raise until the PROBE estimate feeds the allocator
+- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - a probe cluster needs a browser `getStats()` send estimate to pace against, which shipping Chrome lacks and Safari reports as null

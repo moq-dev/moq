@@ -4,7 +4,7 @@
 //! claim does, so the claim lands through the hidden `fuzz` module.
 
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
-use moq_net::{Hop, Version, broadcast, origin};
+use moq_net::{Version, broadcast, origin};
 use std::sync::Arc;
 
 // Moxygen's moqtest/Utils.cpp, pinned in nix/moxygen-sources.nix.
@@ -12,7 +12,7 @@ const PREFIX: &str = "moq-test-00";
 const NAMESPACE: &str = "moq-test-00/0/0/0/1/2/2/1024/100/50/1/1/1/-1/-1/0";
 
 fn origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	producer
 }

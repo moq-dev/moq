@@ -4,7 +4,7 @@
  * @module
  */
 import { type GetPromise, type Getter, Once, Signal } from "@moq/signals";
-import type { RouteInfo } from "./hop.js";
+import { type RouteInfo, routeInfo, type WireRoute } from "./hop.ts";
 import type * as Path from "./path.js";
 
 /**
@@ -30,6 +30,13 @@ export interface Announce {
 }
 
 /**
+ * An {@link Announce} as the origin and sessions carry it, with the route's internal metadata.
+ *
+ * @internal
+ */
+export type Routed = Omit<Announce, "route"> & { route: WireRoute };
+
+/**
  * What an announcement listing yields: a path becoming present or absent.
  *
  * `present`: a route now covers the path, which was absent. `absent`: no route covers it any
@@ -49,7 +56,7 @@ export type Event = { kind: "present" | "absent" } & Announce;
  *
  * @internal
  */
-export type RouteEvent = { kind: "start" | "update" | "restart" | "end" } & Announce;
+export type RouteEvent = { kind: "start" | "update" | "restart" | "end" } & Routed;
 
 /**
  * Options for an announcement stream.
@@ -316,9 +323,9 @@ export class Consumer {
 		for (;;) {
 			const event = await this.#routes.next();
 			if (!event) return undefined;
-			const { kind, ...announce } = event;
-			if (kind === "start") return { kind: "present", ...announce };
-			if (kind === "end") return { kind: "absent", ...announce };
+			const { kind, prefix, captures, route } = event;
+			if (kind === "start") return { kind: "present", prefix, captures, route: routeInfo(route) };
+			if (kind === "end") return { kind: "absent", prefix, captures, route: routeInfo(route) };
 		}
 	}
 
