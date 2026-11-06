@@ -1112,8 +1112,8 @@ impl Handshake {
 	///
 	/// Self-declared, so treat it as a correlation hint rather than an
 	/// authenticated identity: authorize on the token or client certificate.
-	pub fn peer_hop(&self) -> Option<crate::Hop> {
-		self.origin
+	pub fn peer_hop(&self) -> Option<std::num::NonZeroU64> {
+		self.origin.and_then(|hop| std::num::NonZeroU64::new(hop.id()))
 	}
 
 	/// The implementation the client advertised in its SETUP, such as `moq-net-rs/0.3.10`.
@@ -1169,7 +1169,7 @@ impl Handshake {
 		self.configure(|server| server.subscribe = Some(subscribe))
 	}
 
-	/// Assign the identity this peer's routes are attributed to, overriding the fresh
+	/// Assign the hop id this peer's routes are attributed to, overriding the fresh
 	/// per-session default.
 	///
 	/// Only for a peer whose identity the server has actually established, such as one
@@ -1181,8 +1181,8 @@ impl Handshake {
 	/// with the other's. That is the point when they really are one peer reconnecting or
 	/// running redundant links, and a bug otherwise. Derive it from the authenticated
 	/// identity, never from something coarser like the remote address.
-	pub fn with_peer_hop(mut self, hop: crate::Hop) -> Self {
-		self.assigned_hop = hop;
+	pub fn with_peer_hop(mut self, hop: std::num::NonZeroU64) -> Self {
+		self.assigned_hop = crate::Hop::from(hop);
 		self
 	}
 
@@ -2277,13 +2277,13 @@ mod tests {
 		let hop = Hop::new(42).unwrap();
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, Some(hop))]);
 		let request = Server::new().accept_request(kio::clock::now(), session).await.unwrap();
-		assert_eq!(request.peer_hop(), Some(hop));
+		assert_eq!(request.peer_hop(), Some(std::num::NonZeroU64::new(42).unwrap()));
 	}
 
 	#[kio::test]
 	async fn anonymous_peer_hop_filters_routes_from_server_session() {
 		let other = Hop::new(778).unwrap();
-		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 
 		let gate = kio::Producer::new(true);
 		let transport = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());

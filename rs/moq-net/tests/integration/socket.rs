@@ -11,7 +11,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use moq_net::broadcast::TracksEvent;
 use moq_net::socket::{Endpoint, TcpStream, TrackStream};
-use moq_net::{Error, Hop, Version, frame, group, origin, track};
+use moq_net::{Error, Version, frame, group, origin, track};
 
 use crate::support::harness::{MockConnectOptions, MockPair, connect_mock, spawn};
 
@@ -24,7 +24,7 @@ const LITE: &str = "moq-lite-07-wip";
 const IETF: &str = "moq-transport-18";
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	origin
 }

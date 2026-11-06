@@ -236,7 +236,7 @@ impl Publisher {
 		// Identity stamped onto outbound announce hops. Derived from the
 		// origin we're consuming so it matches the local relay identity
 		// across every session, required for cross-session loop detection.
-		let self_origin = config.origin.hop();
+		let self_origin = crate::Hop::from(config.origin.hop());
 		let accept = config.session.clone();
 		let enforce = (config.client && config.version.has_auth()).then(Enforce::default);
 		Self {
@@ -3633,7 +3633,11 @@ mod announce_test {
 			),
 			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
 		};
-		let mut run = AnnounceRun::new(crate::Path::from_static(""), consumer.hop(), Version::Lite07);
+		let mut run = AnnounceRun::new(
+			crate::Path::from_static(""),
+			crate::Hop::from(consumer.hop()),
+			Version::Lite07,
+		);
 		let waiter = kio::Waiter::noop();
 		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
 		drop(removed);
@@ -3679,7 +3683,11 @@ mod announce_test {
 			),
 			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
 		};
-		let mut run = AnnounceRun::new(crate::Path::from_static(""), consumer.hop(), Version::Lite07);
+		let mut run = AnnounceRun::new(
+			crate::Path::from_static(""),
+			crate::Hop::from(consumer.hop()),
+			Version::Lite07,
+		);
 		let waiter = kio::Waiter::noop();
 		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
 		let auth = crate::auth::Link::new(false);
@@ -3721,7 +3729,11 @@ mod announce_test {
 			),
 			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
 		};
-		let mut run = AnnounceRun::new(crate::Path::from_static(""), consumer.hop(), Version::Lite07);
+		let mut run = AnnounceRun::new(
+			crate::Path::from_static(""),
+			crate::Hop::from(consumer.hop()),
+			Version::Lite07,
+		);
 		let waiter = kio::Waiter::noop();
 		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
 		let auth = crate::auth::Link::new(false);
@@ -3777,7 +3789,11 @@ mod announce_test {
 			),
 			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
 		};
-		let mut run = AnnounceRun::new(crate::Path::from_static(""), consumer.hop(), Version::Lite07);
+		let mut run = AnnounceRun::new(
+			crate::Path::from_static(""),
+			crate::Hop::from(consumer.hop()),
+			Version::Lite07,
+		);
 		let waiter = kio::Waiter::noop();
 		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
 		drop(unseen);
@@ -3817,7 +3833,11 @@ mod announce_test {
 			),
 			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
 		};
-		let mut run = AnnounceRun::new(crate::Path::from_static(""), consumer.hop(), Version::Lite07);
+		let mut run = AnnounceRun::new(
+			crate::Path::from_static(""),
+			crate::Hop::from(consumer.hop()),
+			Version::Lite07,
+		);
 		assert!(
 			run.poll(&mut stream, &consumer, &mut announced, &kio::Waiter::noop())
 				.is_pending()
@@ -3929,7 +3949,7 @@ mod announce_test {
 		};
 		let _task = kio::clock::sim::spawn(async move {
 			let mut announced = consumer.routes();
-			let self_origin = consumer.hop();
+			let self_origin = crate::Hop::from(consumer.hop());
 			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, VERSION, None).await
 		});
 		settle().await;
@@ -3962,7 +3982,7 @@ mod announce_test {
 		};
 		let task = kio::clock::sim::spawn(async move {
 			let mut announced = consumer.routes();
-			let self_origin = consumer.hop();
+			let self_origin = crate::Hop::from(consumer.hop());
 			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, version, auth).await
 		});
 		settle().await;
@@ -4223,7 +4243,7 @@ mod announce_test {
 		};
 		let task = kio::clock::sim::spawn(async move {
 			let mut announced = consumer.routes();
-			let self_origin = consumer.hop();
+			let self_origin = crate::Hop::from(consumer.hop());
 			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, VERSION, None).await
 		});
 		settle().await;
@@ -7849,7 +7869,7 @@ mod serve_group_test {
 		}
 
 		fn origin(hop: u64) -> origin::Producer {
-			let (origin, driver) = origin::Producer::new(origin::Config::new(crate::Hop::new(hop).unwrap()));
+			let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 			drive(driver);
 			origin
 		}
@@ -8672,7 +8692,7 @@ mod tests {
 	async fn serving_origin_falls_back_to_the_assigned_identity() {
 		let assigned = crate::Hop::new(777).unwrap();
 		let upstream = crate::Hop::new(778).unwrap();
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 
 		let mut echoed_hops = Hops::new();
 		echoed_hops.push(crate::Hop::UNKNOWN).unwrap();
@@ -8733,7 +8753,7 @@ mod tests {
 		let assigned = crate::Hop::new(777).unwrap();
 		let clean_publisher = crate::Hop::new(778).unwrap();
 		let self_origin = crate::Hop::new(1).unwrap();
-		let origin = crate::origin::Config::new(self_origin).produce();
+		let origin = crate::origin::Config::from(self_origin).produce();
 
 		let mut tainted_hops = Hops::new();
 		tainted_hops.push(crate::Hop::UNKNOWN).unwrap();
@@ -8787,7 +8807,7 @@ mod tests {
 	#[kio::test]
 	async fn announce_init_past_the_cap_fails() {
 		let self_origin = crate::Hop::new(1).unwrap();
-		let origin = crate::origin::Config::new(self_origin).produce();
+		let origin = crate::origin::Config::from(self_origin).produce();
 		let max = <lite::AnnounceInit as lite::Message>::MAX_SIZE;
 		// Each suffix costs its length plus a varint prefix, so these overflow the cap.
 		let name = "x".repeat(500);
@@ -8824,7 +8844,7 @@ mod tests {
 	#[kio::test]
 	async fn announce_init_broadcast_ends() {
 		let self_origin = crate::Hop::new(1).unwrap();
-		let origin = crate::origin::Config::new(self_origin).produce();
+		let origin = crate::origin::Config::from(self_origin).produce();
 		let cam = origin.announce("cam", crate::origin::RouteInfo::default()).unwrap();
 
 		let gate = kio::Producer::new(true);
@@ -8860,7 +8880,7 @@ mod tests {
 	#[kio::test]
 	async fn withdraw_before_init_sends_the_initial_burst() {
 		let self_origin = crate::Hop::new(1).unwrap();
-		let origin = crate::origin::Config::new(self_origin).produce();
+		let origin = crate::origin::Config::from(self_origin).produce();
 		let _cam = origin.announce("cam", crate::origin::RouteInfo::default()).unwrap();
 
 		let gate = kio::Producer::new(true);
@@ -9258,7 +9278,7 @@ mod tests {
 	/// requester close its send side.
 	async fn leave_request<R: Request>(version: Version, request: &impl Encode<Version>, wait: Wait, close: Close) {
 		let case = format!("{} over {version:?}, waiting on the {wait:?}, {close:?}", R::KIND);
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		// Held, never answered.
 		let mut _route = None;
 		let mut held = None;
@@ -9398,7 +9418,7 @@ mod tests {
 	#[kio::test]
 	async fn a_broadcast_too_long_under_the_root_is_refused_per_request() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let root = "r".repeat(crate::Path::MAX_BYTES - 2);
 			let scoped = origin
 				.consume()
@@ -9464,7 +9484,7 @@ mod tests {
 	#[kio::test]
 	async fn track_info_outranks_the_track_groups() {
 		let version = Version::Lite07;
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 		let _track = broadcast
 			.broadcast()
@@ -9595,7 +9615,7 @@ mod tests {
 		for version in [Version::Lite05, Version::Lite06] {
 			for stream in [false, true] {
 				let case = format!("{version:?}, stream track {stream}");
-				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+				let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 				let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 				let mut datagrams = broadcast
 					.broadcast()
@@ -9636,7 +9656,7 @@ mod tests {
 	#[kio::test]
 	async fn a_waiting_subscribe_sends_the_datagrams_written_since_its_track_info() {
 		for version in [Version::Lite05, Version::Lite06] {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 			let _relayed = crate::model::broadcast::SourceGuard::new(broadcast.broadcast().clone());
 			let mut datagrams = broadcast
@@ -9665,7 +9685,7 @@ mod tests {
 	#[kio::test]
 	async fn a_subscribe_reads_from_the_oldest_hold() {
 		for version in [Version::Lite05, Version::Lite06] {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 			let mut datagrams = broadcast
 				.broadcast()
@@ -9691,7 +9711,7 @@ mod tests {
 	#[kio::test]
 	async fn a_subscribe_reads_the_current_datagram_track_past_an_older_hold() {
 		for version in [Version::Lite05, Version::Lite06] {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 			let mut first = broadcast
 				.broadcast()
@@ -9730,7 +9750,7 @@ mod tests {
 			for close in [Close::Fin, Close::Reset] {
 				for blocked in [false, true] {
 					let case = format!("{version:?}, {close:?}, blocked {blocked}");
-					let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+					let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 					let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 					let track = broadcast
 						.broadcast()
@@ -9865,7 +9885,7 @@ mod tests {
 				Answer::Empty,
 			] {
 				for start in [None, Some(0)] {
-					let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+					let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 					let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 					let mut dynamic = broadcast.broadcast().requests();
 					broadcast.announce().unwrap();
@@ -10011,7 +10031,7 @@ mod tests {
 	/// exists the same value asks for nothing more.
 	#[kio::test]
 	async fn a_subscribe_update_is_not_a_close() {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 		let mut dynamic = broadcast.broadcast().requests();
 		broadcast.announce().unwrap();
@@ -10140,7 +10160,7 @@ mod tests {
 	}
 
 	async fn running() -> Running {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 		let mut dynamic = broadcast.broadcast().requests();
 		broadcast.announce().unwrap();
@@ -10393,7 +10413,7 @@ mod tests {
 	/// store an undecodable tail merely because that was the downstream reader's floor.
 	#[kio::test]
 	async fn a_cold_bounded_fetch_requests_the_prefix() {
-		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 		let track = broadcast
 			.broadcast()
@@ -10443,7 +10463,7 @@ mod tests {
 	#[kio::test]
 	async fn an_expired_fetch_resets_rather_than_finishing() {
 		const VERSION: Version = Version::Lite07;
-		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 		let track = broadcast
 			.broadcast()
@@ -10589,7 +10609,7 @@ mod tests {
 	async fn malformed_subscribe_update_closes_after_request_setup() {
 		use kio::Task;
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
-			let origin = crate::origin::Config::new(Hop::random()).produce();
+			let origin = crate::origin::Config::default().produce();
 			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 			let _dynamic = broadcast.broadcast().requests();
 			broadcast.announce().unwrap();
@@ -10648,7 +10668,7 @@ mod tests {
 	async fn a_newer_listing_of_a_broadcast_replaces_the_older() {
 		use kio::Task;
 		let version = Version::Lite07;
-		let origin = crate::origin::Config::new(Hop::random()).produce();
+		let origin = crate::origin::Config::default().produce();
 		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 		broadcast.announce().unwrap();
 		let request = lite::Tracks {
@@ -10701,7 +10721,7 @@ mod tests {
 	async fn a_producer_decode_error_stays_on_its_request() {
 		use kio::Task;
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
-			let origin = crate::origin::Config::new(Hop::random()).produce();
+			let origin = crate::origin::Config::default().produce();
 			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 			let mut dynamic = broadcast.broadcast().requests();
 			broadcast.announce().unwrap();
@@ -10887,7 +10907,7 @@ mod tests {
 	/// publisher's track priority breaks a tie between two at one subscriber priority.
 	#[kio::test]
 	async fn send_group_ranks_by_the_subscriber_then_the_publisher() {
-		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let broadcast = origin.route("a", crate::origin::RouteOptions::hidden()).unwrap();
 		let mut dynamic = broadcast.broadcast().requests();
 		broadcast.announce().unwrap();

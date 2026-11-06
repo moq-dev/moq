@@ -14,7 +14,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Error, Hop, StreamError, Timescale, Timestamp, Version, broadcast, datagram, origin};
+use moq_net::{Error, StreamError, Timescale, Timestamp, Version, broadcast, datagram, origin};
 use support::datagram_priority;
 use support::harness::{MockPair, peer_with_latency};
 
@@ -23,7 +23,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const TRACK: &str = "audio";
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }

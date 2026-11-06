@@ -1588,10 +1588,10 @@ impl Request {
 		self
 	}
 
-	/// Assign the identity this peer's routes are attributed to; see
+	/// Assign the hop id this peer's routes are attributed to; see
 	/// [`moq_net::server::Handshake::with_peer_hop`]. Derive it from [`Self::peer_identity`],
 	/// never from something coarser.
-	pub fn with_peer_hop(mut self, hop: moq_net::Hop) -> Self {
+	pub fn with_peer_hop(mut self, hop: std::num::NonZeroU64) -> Self {
 		*self.handshake = (*self.handshake).with_peer_hop(hop);
 		self
 	}
@@ -1803,7 +1803,7 @@ impl Request {
 	///
 	/// Self-declared, so treat it as a correlation hint rather than an
 	/// authenticated identity: authorize on the token or client certificate.
-	pub fn peer_hop(&self) -> Option<moq_net::Hop> {
+	pub fn peer_hop(&self) -> Option<std::num::NonZeroU64> {
 		self.handshake.peer_hop()
 	}
 
