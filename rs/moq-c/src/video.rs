@@ -261,7 +261,7 @@ pub struct Video {
 ///
 /// `pollster` rather than a tokio helper because those panic when the calling
 /// thread is driving a runtime, which the one dispatching a callback is.
-fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+pub(crate) fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 	pollster::block_on(future)
 }
 
@@ -957,6 +957,29 @@ unsafe fn encoder_kind(output: &moq_video_encoder_output) -> Result<moq_video::e
 	})
 }
 
+/// The pixel layout and encoder configuration `input` and `output` describe.
+///
+/// # Safety
+/// - As [encoder_kind], for `output`.
+pub(crate) unsafe fn encoder_config(
+	input: &moq_video_encoder_input,
+	output: &moq_video_encoder_output,
+) -> Result<(moq_video_pixel_format, moq_video::encode::Config), Error> {
+	let format = pixel_format_from_u32(input.format)?;
+	let framerate = moq_video::FrameRate::new(input.framerate.numerator, input.framerate.denominator)
+		.map_err(|err| Error::InvalidConfig(format!("invalid framerate: {err}")))?;
+	let mut config = moq_video::encode::Config::new(input.width, input.height, framerate);
+	config.codec = codec_from_u32(output.codec)?;
+	config.kind = unsafe { encoder_kind(output)? };
+	// The C ABI spells an unset knob as 0, which neither field accepts as a real
+	// value: a zero bitrate or GOP is the default, not a request.
+	config.bitrate = (output.bitrate != 0).then(|| moq_net::bandwidth::Rate::from_bps(output.bitrate));
+	if output.gop != 0 {
+		config.gop = moq_video::encode::Gop::Keyframe { interval: output.gop };
+	}
+	Ok((format, config))
+}
+
 /// Open a video track on a broadcast, encoding the raw frames you publish to it.
 ///
 /// The encoder is opened here, so an unsupported codec, resolution, or backend
@@ -992,21 +1015,7 @@ pub unsafe extern "C" fn moq_encode_video(
 			));
 		}
 
-		let format = pixel_format_from_u32(raw_input.format)?;
-
-		let framerate = moq_video::FrameRate::new(raw_input.framerate.numerator, raw_input.framerate.denominator)
-			.map_err(|err| Error::InvalidConfig(format!("invalid framerate: {err}")))?;
-		let mut config = moq_video::encode::Config::new(raw_input.width, raw_input.height, framerate);
-		config.codec = codec_from_u32(raw_output.codec)?;
-		config.kind = unsafe { encoder_kind(raw_output)? };
-		// The C ABI spells an unset knob as 0, which neither field accepts as a real
-		// value: a zero bitrate or GOP is the default, not a request.
-		config.bitrate = (raw_output.bitrate != 0).then(|| moq_net::bandwidth::Rate::from_bps(raw_output.bitrate));
-		if raw_output.gop != 0 {
-			config.gop = moq_video::encode::Gop::Keyframe {
-				interval: raw_output.gop,
-			};
-		}
+		let (format, config) = unsafe { encoder_config(raw_input, raw_output)? };
 
 		// Both before the global lock is taken: bringing up a hardware encoder is slow
 		// enough that every other call would wait behind it. The probe runs first and
