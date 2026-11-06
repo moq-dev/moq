@@ -532,7 +532,7 @@ mod tests {
 
 	#[test]
 	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
-	fn a_real_interval_aborts_on_its_second_tick() {
+	fn a_real_interval_aborts() {
 		assert!(aborts("interval"));
 	}
 
@@ -584,14 +584,16 @@ mod tests {
 		}
 
 		#[test]
-		#[ignore = "aborts; a_real_interval_aborts_on_its_second_tick runs it in a child"]
+		#[ignore = "aborts; a_real_interval_aborts runs it in a child"]
 		fn interval() {
 			real().block_on(async {
 				let mut interval = crate::clock::interval(Duration::from_millis(1));
-				// So the second tick waits even if the first was late.
 				interval.set_missed_tick_behavior(crate::clock::MissedTickBehavior::Delay);
-				interval.tick().await;
-				interval.tick().await;
+				// A descheduled tick re-arms already due and fires without waiting, so tick
+				// until one waits; returning means none did.
+				for _ in 0..1_000 {
+					interval.tick().await;
+				}
 			});
 		}
 
