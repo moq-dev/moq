@@ -10852,7 +10852,8 @@ mod serve_tests {
 	/// "does not exist" value, 0x10, not 0x4 (MALFORMED_AUTH_TOKEN): a peer told the wrong
 	/// one re-authenticates instead of waiting for the announcement. The reply is encoded here rather than matched by code alone, so
 	/// a value slipping outside the draft's table cannot pass, and the reason phrase is the
-	/// origin's own, which is what carries a refusal the registry has no value for.
+	/// origin's own, which is what carries a refusal the registry has no value for. The
+	/// publisher may still come up, so the refusal invites a retry.
 	#[kio::test]
 	async fn a_missing_broadcast_is_refused_with_the_draft_s_code() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
@@ -10881,7 +10882,7 @@ mod serve_tests {
 					.encode(&ietf::RequestError {
 						error_code,
 						reason_phrase: Error::Unroutable.to_string().into(),
-						retry_interval: 0,
+						retry_interval: crate::auth::RETRY_INITIAL.as_millis() as u64,
 					})
 					.await
 					.unwrap();

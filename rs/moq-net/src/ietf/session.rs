@@ -4088,7 +4088,7 @@ mod tests {
 
 	/// A request past our GOAWAY cutoff is refused in the answer its kind reads: an AUTH
 	/// with AUTH_ERROR carrying GOING_AWAY, since its presenter takes anything else as a
-	/// violation, and the rest with REQUEST_ERROR.
+	/// violation, and the rest with REQUEST_ERROR, inviting a retry on the next session.
 	#[kio::test]
 	async fn a_request_past_our_goaway_is_refused_in_its_own_answer() {
 		const VERSION: Version = Version::Draft18;
@@ -4098,7 +4098,8 @@ mod tests {
 			(auth::Auth::ID, frame(VERSION, auth::AuthError::ID, &body)),
 			(
 				ietf::Subscribe::ID,
-				frame(VERSION, ietf::RequestError::ID, &[&[0x6, 0][..], &body[1..]].concat()),
+				// A Retry Interval of 1000ms, as a draft-18 varint.
+				frame(VERSION, ietf::RequestError::ID, &[&[0x6, 0x83, 0xe8][..], &body[1..]].concat()),
 			),
 		] {
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
