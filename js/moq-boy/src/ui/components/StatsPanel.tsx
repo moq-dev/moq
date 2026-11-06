@@ -18,13 +18,9 @@ export default function StatsPanel() {
 	const location = () => ctx.status()?.location;
 	const stats = () => ctx.status()?.stats;
 
-	const playerCount = () => Object.keys(ctx.status()?.latency ?? {}).length;
+	const playerCount = () => ctx.status()?.players ?? 0;
 
-	const latencyEntries = () => {
-		const id = ctx.viewerId();
-		if (!id) return [];
-		return ctx.status()?.latency?.[id] ?? [];
-	};
+	const latencyEntries = () => ctx.latency() ?? [];
 
 	const pct = (value: number) => {
 		const wall = stats()?.wall_secs ?? 0;
