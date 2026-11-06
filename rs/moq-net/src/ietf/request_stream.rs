@@ -315,7 +315,7 @@ impl Deliver {
 	}
 }
 
-/// Buffer the REQUEST_ERROR refusing a `kind` request with `err`.
+/// Buffer the REQUEST_ERROR refusing a `kind` request with `err`, asking the peer not to retry.
 pub(super) fn buffer_error<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
 	kind: super::error::request::Kind,
@@ -323,14 +323,39 @@ pub(super) fn buffer_error<W: crate::transport::poll::SendStream>(
 	reason: &str,
 	version: Version,
 ) -> Result<(), Error> {
-	writer.buffer_message(
-		super::RequestError::ID,
-		&super::RequestError {
-			error_code: super::error::request::to_code(err, kind, version),
-			reason_phrase: reason.into(),
-			retry_interval: 0,
-		},
-	)
+	writer.buffer_message(ID, &request_error(kind, err, None, reason, version))
+}
+
+/// Buffer the REQUEST_ERROR refusing a `kind` request with `refusal`, carrying its retry hint.
+pub(super) fn buffer_refusal<W: crate::transport::poll::SendStream>(
+	writer: &mut Writer<W, Version>,
+	kind: super::error::request::Kind,
+	refusal: &crate::Refusal,
+	reason: &str,
+	version: Version,
+) -> Result<(), Error> {
+	let error = request_error(kind, &refusal.error, refusal.retry_after, reason, version);
+	writer.buffer_message(ID, &error)
+}
+
+const ID: u64 = super::RequestError::ID;
+
+/// The REQUEST_ERROR for a refusal. The Retry Interval rounds up to whole milliseconds, since
+/// 0 tells the peer never to retry.
+fn request_error<'a>(
+	kind: super::error::request::Kind,
+	err: &Error,
+	retry_after: Option<std::time::Duration>,
+	reason: &'a str,
+	version: Version,
+) -> super::RequestError<'a> {
+	super::RequestError {
+		error_code: super::error::request::to_code(err, kind, version),
+		reason_phrase: reason.into(),
+		retry_interval: retry_after.map_or(0, |after| {
+			u64::try_from(after.as_nanos().div_ceil(1_000_000)).unwrap_or(u64::MAX)
+		}),
+	}
 }
 
 /// A framed subscription update, preserving omitted preferences.

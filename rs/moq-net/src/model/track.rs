@@ -549,6 +549,8 @@ pub(crate) struct TrackState {
 
 	// The error that caused the track to be aborted, if any.
 	abort: Option<Error>,
+	// The retry hint the abort or rejection carried, for a request it refuses.
+	retry_after: Option<Duration>,
 
 	// Whether the declared end settled before a write that could reopen it or an abort, or
 	// `closed()` reported it: every group below it was produced and finished then, so the
@@ -3906,10 +3908,16 @@ impl Producer {
 	///
 	/// [`finish`](Self::finish) is deliberately not terminal: it declares the final
 	/// sequence, and lower-numbered groups may still be written afterwards.
-	pub fn abort(self, err: Error) -> Result<()> {
+	///
+	/// A bare [`Error`] converts; see [`Refusal`](crate::Refusal) to tell a request it
+	/// refuses when to retry.
+	pub fn abort(self, refusal: impl Into<crate::Refusal>) -> Result<()> {
+		let crate::Refusal { error, retry_after } = refusal.into();
 		// Unlisted first, so the track leaves the listing before its name is free again.
 		self.alive.unlist(false);
-		commit_abort(self.modify()?, err).abort();
+		let mut state = self.modify()?;
+		state.retry_after = retry_after;
+		commit_abort(state, error).abort();
 		Ok(())
 	}
 
@@ -5523,6 +5531,12 @@ impl Subscribing {
 		}
 	}
 
+	/// The retry hint the track's abort or rejection carried.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn retry_after(&self) -> Option<Duration> {
+		self.state.read().retry_after
+	}
+
 	/// Poll until the peer confirms the subscription, yielding the [`Subscriber`].
 	/// Errors if the track is aborted or not found.
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<Subscriber>> {
@@ -5587,6 +5601,11 @@ pub struct Resolving {
 }
 
 impl Resolving {
+	/// The retry hint the track's abort or rejection carried.
+	pub(crate) fn retry_after(&self) -> Option<Duration> {
+		self.state.read().retry_after
+	}
+
 	/// A handle on the track instance this resolves, whatever its broadcast serves later.
 	pub fn track(&self) -> Consumer {
 		Consumer {
@@ -9458,10 +9477,14 @@ impl Request {
 		}
 	}
 
-	/// Reject the request, waking all waiting subscribers with `err`.
-	pub fn reject(self, err: Error) {
+	/// Reject the request, waking all waiting subscribers with the refusal's error.
+	///
+	/// A bare [`Error`] converts; see [`Refusal`](crate::Refusal) to add a retry hint.
+	pub fn reject(self, refusal: impl Into<crate::Refusal>) {
+		let crate::Refusal { error, retry_after } = refusal.into();
 		if let Ok(mut state) = self.state.write() {
-			state.abort = Some(err);
+			state.abort = Some(error);
+			state.retry_after = retry_after;
 		}
 	}
 

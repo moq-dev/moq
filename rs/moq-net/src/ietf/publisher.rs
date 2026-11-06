@@ -83,13 +83,20 @@ fn track_properties(
 
 /// The rendezvous cap is zero, but asking to wait still makes a missing publisher a timeout.
 /// Once the broadcast resolves, a missing track is the publisher's answer and stays DOES_NOT_EXIST.
-fn rendezvous_error(error: Error, requested: bool, resolved: bool) -> Error {
-	let missing = match &error {
+/// The timeout keeps the refusal's retry hint: it still says when to ask again.
+fn rendezvous_error(refusal: crate::Refusal, requested: bool, resolved: bool) -> crate::Refusal {
+	let missing = match &refusal.error {
 		Error::Unroutable | Error::Stream(crate::StreamError::Unroutable) => true,
 		Error::NotFound | Error::Stream(crate::StreamError::NotFound) => !resolved,
 		_ => false,
 	};
-	if requested && missing { Error::Timeout } else { error }
+	match requested && missing {
+		true => crate::Refusal {
+			error: Error::Timeout,
+			..refusal
+		},
+		false => refusal,
+	}
 }
 
 #[cfg_attr(
@@ -782,8 +789,8 @@ struct SubscriptionUpdates {
 
 /// How an admitted subscription came out of serving.
 enum Subscribed {
-	/// It never started, refused with this reason and error before SUBSCRIBE_OK.
-	Refused(String, Error),
+	/// It never started, refused with this reason and refusal before SUBSCRIBE_OK.
+	Refused(String, crate::Refusal),
 	/// The subscriber withdrew it, or the session closed, before SUBSCRIBE_OK.
 	Withdrawn,
 	/// It was served, and opened this many group streams.
@@ -1244,8 +1251,13 @@ impl SubscribeRequest {
 
 	/// Refuse the request with `err`, delivering its REQUEST_ERROR next.
 	fn refuse(&mut self, err: &Error, reason: &str) -> Result<SubscribeState, Error> {
+		self.refuse_with(&err.clone().into(), reason)
+	}
+
+	/// [`Self::refuse`], carrying the refusal's retry hint.
+	fn refuse_with(&mut self, refusal: &crate::Refusal, reason: &str) -> Result<SubscribeState, Error> {
 		let stream = self.stream.as_mut().expect("open until PUBLISH_DONE");
-		let deliver = self.publisher.reject_subscribe(&mut stream.writer, err, reason)?;
+		let deliver = self.publisher.reject_subscribe(&mut stream.writer, refusal, reason)?;
 		Ok(SubscribeState::Refuse(deliver))
 	}
 
@@ -1315,7 +1327,7 @@ impl SubscribeRequest {
 				}
 			}
 			Ok(Ok(Subscribed::Served(served, streams))) => self.publish_done(served, streams, retain),
-			Ok(Ok(Subscribed::Refused(reason, err))) => self.refuse(&err, &reason)?,
+			Ok(Ok(Subscribed::Refused(reason, refusal))) => self.refuse_with(&refusal, &reason)?,
 			// Nobody is left to answer.
 			Ok(Ok(Subscribed::Withdrawn)) => SubscribeState::Release,
 			Ok(Err(err)) => return Err(err),
@@ -1452,8 +1464,11 @@ impl Serving {
 	/// Stats (subscriptions, viewer refcount, groups/frames/bytes) are counted in the model,
 	/// through the tagged `origin::Consumer` the broadcast resolves from.
 	fn poll(&mut self, waiter: &kio::Waiter, request: &mut SubscribeRequest) -> Poll<Result<Subscribed, Error>> {
-		let refused = |err: Error, rendezvous, resolved| {
-			Subscribed::Refused(err.to_string(), rendezvous_error(err, rendezvous, resolved))
+		let refused = |refusal: crate::Refusal, rendezvous, resolved| {
+			Subscribed::Refused(
+				refusal.error.to_string(),
+				rendezvous_error(refusal, rendezvous, resolved),
+			)
 		};
 		let version = request.publisher.version;
 		loop {
@@ -1465,12 +1480,18 @@ impl Serving {
 						// The reason is the origin's, not ours: a dynamic router refusing on
 						// authorization or a drain says so, and only an unroutable path means the
 						// broadcast is not here.
-						Err(err) => return Poll::Ready(Ok(refused(err, request.msg.rendezvous, false))),
+						Err(error) => {
+							let refusal = crate::Refusal {
+								error,
+								retry_after: resolve.retry_after,
+							};
+							return Poll::Ready(Ok(refused(refusal, request.msg.rendezvous, false)));
+						}
 						Ok(None) => return Poll::Ready(Ok(Subscribed::Withdrawn)),
 					};
 					let track = match broadcast.track(&request.msg.track_name) {
 						Ok(track) => track,
-						Err(err) => return Poll::Ready(Ok(refused(err, request.msg.rendezvous, true))),
+						Err(err) => return Poll::Ready(Ok(refused(err.into(), request.msg.rendezvous, true))),
 					};
 					self.broadcast = Some(broadcast);
 					self.step = ServingStep::Subscribe {
@@ -1483,7 +1504,13 @@ impl Serving {
 						ready!(subscribe.poll(waiter, &request.publisher, stream, track, &request.msg, &request.lapse));
 					let (serve, edge) = match subscribed {
 						Some(Ok(subscribed)) => subscribed,
-						Some(Err(err)) => return Poll::Ready(Ok(refused(err, request.msg.rendezvous, true))),
+						Some(Err(error)) => {
+							let refusal = crate::Refusal {
+								error,
+								retry_after: subscribe.retry_after,
+							};
+							return Poll::Ready(Ok(refused(refusal, request.msg.rendezvous, true)));
+						}
 						None => return Poll::Ready(Ok(Subscribed::Withdrawn)),
 					};
 					let ServingStep::Subscribe { track: cache, .. } =
@@ -1505,7 +1532,7 @@ impl Serving {
 					let properties =
 						match track_properties(serve.track.info(), request.msg.properties_wanted, version, flate) {
 							Ok(properties) => properties,
-							Err(err) => return Poll::Ready(Ok(Subscribed::Refused(err.to_string(), err))),
+							Err(err) => return Poll::Ready(Ok(Subscribed::Refused(err.to_string(), err.into()))),
 						};
 					request.save_join(self.filter, edge.largest, &cache, &serve.ranking);
 
@@ -1762,12 +1789,15 @@ impl SubscribeRequest {
 /// the request, since the producer may never answer.
 struct SubscribeTrack {
 	state: SubscribeTrackState,
+	/// The retry hint the track's refusal carried, once it refused.
+	retry_after: Option<Duration>,
 }
 
 #[kio::machine(self.state: SubscribeTrackState)]
 impl SubscribeTrack {
 	fn new() -> Self {
 		Self {
+			retry_after: None,
 			state: SubscribeTrackState::Start,
 		}
 	}
@@ -1825,7 +1855,10 @@ impl SubscribeTrack {
 		let mut subscribed: track::Subscriber = match answer {
 			// A peer reads the end of the subscription as the track's.
 			Some(Ok(found)) => found.parked(),
-			Some(Err(err)) => return Poll::Ready(Some(Err(err))),
+			Some(Err(err)) => {
+				self.retry_after = subscribing.retry_after();
+				return Poll::Ready(Some(Err(err)));
+			}
 			None => return Poll::Ready(None),
 		};
 
@@ -3236,10 +3269,10 @@ impl Publisher {
 	fn reject_subscribe(
 		&self,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
-		err: &Error,
+		refusal: &crate::Refusal,
 		reason: &str,
 	) -> Result<super::request_stream::Deliver, Error> {
-		self.buffer_subscribe_error(writer, err, reason)?;
+		super::request_stream::buffer_refusal(writer, request::Kind::Subscribe, refusal, reason, self.version)?;
 		Ok(super::request_stream::Deliver::new())
 	}
 
@@ -4213,6 +4246,8 @@ struct Resolve {
 	session: Transport,
 	fin_cancels: bool,
 	path: crate::Path,
+	/// The retry hint the broadcast's refusal carried, once it refused.
+	retry_after: Option<Duration>,
 	state: ResolveState,
 }
 
@@ -4223,6 +4258,7 @@ impl Resolve {
 			session,
 			path,
 			fin_cancels,
+			retry_after: None,
 			state: ResolveState::Start,
 		}
 	}
@@ -4244,9 +4280,15 @@ impl Resolve {
 		let requesting: kio::Pending<crate::model::origin::Lookup> = origin.lookup(self.path.clone(), None);
 		let found = wait!(Lookup => match publisher.poll_withdrawn(&mut self.session, stream, self.fin_cancels, waiter) {
 			Poll::Ready(()) => Poll::Ready(None),
-			Poll::Pending => requesting.poll_ok(waiter).map(Some),
+			Poll::Pending => requesting.poll_refused(waiter).map(Some),
 		});
-		Poll::Ready(found.transpose())
+		Poll::Ready(match found.transpose() {
+			Ok(found) => Ok(found),
+			Err(refusal) => {
+				self.retry_after = refusal.retry_after;
+				Err(refusal.error)
+			}
+		})
 	}
 }
 
@@ -4674,9 +4716,14 @@ impl FetchServe {
 	/// Refuse the FETCH with `err`. See [`Publisher::reject_subscribe`] for why the close is
 	/// not optional.
 	fn reject(&mut self, err: &Error, reason: &str) -> Result<(), Error> {
+		self.reject_with(&err.clone().into(), reason)
+	}
+
+	/// [`Self::reject`], carrying the refusal's retry hint.
+	fn reject_with(&mut self, refusal: &crate::Refusal, reason: &str) -> Result<(), Error> {
 		let stream = self.stream.as_mut().expect("refused before answering");
 		let kind = request::Kind::Fetch;
-		super::request_stream::buffer_error(&mut stream.writer, kind, err, reason, self.publisher.version)?;
+		super::request_stream::buffer_refusal(&mut stream.writer, kind, refusal, reason, self.publisher.version)?;
 		self.state = FetchState::Reject(super::request_stream::Deliver::new());
 		Ok(())
 	}
@@ -4963,6 +5010,7 @@ impl FetchServe {
 						Some(err) => Err(err),
 						None => ready!(resolve.poll(waiter, &self.publisher, stream)),
 					};
+					let retry_after = resolve.retry_after;
 					let FetchState::Resolve { gate, request, .. } =
 						std::mem::replace(&mut self.state, FetchState::Done)
 					else {
@@ -4972,7 +5020,14 @@ impl FetchServe {
 						Ok(Some(broadcast)) => broadcast,
 						Ok(None) => return Poll::Ready(Ok(())),
 						Err(err) => {
-							self.reject(&err, &err.to_string())?;
+							let reason = err.to_string();
+							self.reject_with(
+								&crate::Refusal {
+									error: err,
+									retry_after,
+								},
+								&reason,
+							)?;
 							continue;
 						}
 					};
@@ -5329,9 +5384,14 @@ impl TrackStatusServe {
 
 	/// Refuse the TRACK_STATUS with `err`, delivered on the following polls.
 	fn reject(&mut self, err: &Error) -> Result<(), Error> {
+		self.reject_with(&err.clone().into())
+	}
+
+	/// [`Self::reject`], carrying the refusal's retry hint.
+	fn reject_with(&mut self, refusal: &crate::Refusal) -> Result<(), Error> {
 		let stream = self.stream.as_mut().expect("refused before answering");
-		let (kind, reason) = (request::Kind::TrackStatus, err.to_string());
-		super::request_stream::buffer_error(&mut stream.writer, kind, err, &reason, self.publisher.version)?;
+		let (kind, reason) = (request::Kind::TrackStatus, refusal.error.to_string());
+		super::request_stream::buffer_refusal(&mut stream.writer, kind, refusal, &reason, self.publisher.version)?;
 		self.state = TrackStatusState::Reject(super::request_stream::Deliver::new());
 		Ok(())
 	}
@@ -5378,11 +5438,12 @@ impl TrackStatusServe {
 						Some(err) => Err(err),
 						None => ready!(resolve.poll(waiter, &self.publisher, stream)),
 					};
+					let retry_after = resolve.retry_after;
 					let broadcast = match resolved {
 						Ok(Some(broadcast)) => broadcast,
 						Ok(None) => return Poll::Ready(Ok(())),
-						Err(err) => {
-							self.reject(&err)?;
+						Err(error) => {
+							self.reject_with(&crate::Refusal { error, retry_after })?;
 							continue;
 						}
 					};
@@ -15443,6 +15504,122 @@ mod serve_tests {
 			"{version} {setup:?}: answered a withdrawn request"
 		);
 		drop(claim);
+	}
+
+	/// What an `answer` keeps alive until its refusal is on the wire.
+	type Held = Box<dyn std::any::Any>;
+
+	/// A SUBSCRIBE `answer` refuses, as the REQUEST_ERROR it writes: (code, Retry Interval).
+	async fn refused_subscribe(
+		version: Version,
+		rendezvous: bool,
+		answer: impl FnOnce(&origin::Producer) -> std::pin::Pin<Box<dyn Future<Output = Held> + '_>>,
+	) -> (u64, u64) {
+		let ms = std::time::Duration::from_millis;
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
+		let publisher = Publisher::new(
+			crate::time::sim(),
+			crate::driver::Transport::new(ScriptedSession::new(Vec::new())),
+			origin.consume(),
+			Control::new(false),
+			None,
+			peer_setup,
+			version,
+		);
+		let request = ScriptedSession::new(Vec::new());
+		let stream = Stream::open(&crate::driver::Transport::new(request.clone()), version)
+			.await
+			.unwrap();
+		let mut msg = subscribe(Filter::NextObject, None);
+		msg.rendezvous = rendezvous;
+		let mut serving = std::pin::pin!(publisher.clone().run_subscribe_stream(stream, msg));
+		let answering = answer(&origin);
+		futures::pin_mut!(answering);
+		let _held = match futures::future::select(answering, serving.as_mut()).await {
+			futures::future::Either::Left((held, _)) => held,
+			futures::future::Either::Right((res, _)) => panic!("{version}: ended unasked: {res:?}"),
+		};
+		kio::clock::timeout(std::time::Duration::from_secs(10), async {
+			while request.log.writes.lock().unwrap().is_empty() && futures::poll!(serving.as_mut()).is_pending() {
+				kio::clock::sleep(ms(1)).await;
+			}
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{version}: the refusal never went out"));
+
+		let wire = request.log.writes.lock().unwrap().clone();
+		let mut buf = Decoder::new(&wire, version.into());
+		assert_eq!(buf.varint().unwrap(), ietf::RequestError::ID, "{version}");
+		let error = ietf::RequestError::decode(&mut buf, version).unwrap();
+		(error.error_code, error.retry_interval)
+	}
+
+	/// A router's refusal of a broadcast sends its retry hint as REQUEST_ERROR's Retry
+	/// Interval, rounded up to a millisecond so it never reads as "do not retry". A bare
+	/// refusal sends 0, and a rendezvous that times out keeps the hint.
+	#[kio::test]
+	async fn a_broadcast_refusal_carries_its_retry_interval() {
+		let ms = std::time::Duration::from_millis;
+		for version in ALL_VERSIONS {
+			for (refusal, rendezvous, expected) in [
+				(crate::Refusal::from(Error::Unroutable), false, (0x10, 0)),
+				(crate::Refusal::retry(Error::Unroutable, ms(1500)), false, (0x10, 1500)),
+				(
+					crate::Refusal::retry(Error::Unroutable, std::time::Duration::from_micros(1)),
+					false,
+					(0x10, 1),
+				),
+				(
+					crate::Refusal::retry(Error::Unroutable, std::time::Duration::ZERO),
+					false,
+					(0x10, 0),
+				),
+				(crate::Refusal::retry(Error::Unauthorized, ms(250)), false, (0x1, 250)),
+				(crate::Refusal::retry(Error::Unroutable, ms(1500)), true, (0x2, 1500)),
+			] {
+				let case = format!("{version}: {refusal:?} rendezvous={rendezvous}");
+				let wire = refused_subscribe(version, rendezvous, |origin| {
+					Box::pin(async move {
+						let route = origin
+							.forward("room", crate::origin::RouteInfo::default(), None)
+							.unwrap();
+						route.requested().await.unwrap().reject(refusal);
+						// The route stays up: only its answer refuses.
+						Box::new(route) as Held
+					})
+				})
+				.await;
+				assert_eq!(wire, expected, "{case}");
+			}
+		}
+	}
+
+	/// A dynamic track's rejection carries its retry hint the same way.
+	#[kio::test]
+	async fn a_track_refusal_carries_its_retry_interval() {
+		for version in ALL_VERSIONS {
+			for (refusal, expected) in [
+				(crate::Refusal::from(Error::NotFound), (0x10, 0)),
+				(
+					crate::Refusal::retry(Error::NotFound, std::time::Duration::from_secs(2)),
+					(0x10, 2000),
+				),
+			] {
+				let case = format!("{version}: {refusal:?}");
+				let wire = refused_subscribe(version, false, |origin| {
+					Box::pin(async move {
+						let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
+						let mut dynamic = broadcast.broadcast().requests();
+						dynamic.requested_track().await.unwrap().reject(refusal);
+						Box::new((broadcast, dynamic)) as Held
+					})
+				})
+				.await;
+				assert_eq!(wire, expected, "{case}");
+			}
+		}
 	}
 
 	/// A resume subscribes again as a new SUBSCRIBE does, so a subscriber withdrawing the
