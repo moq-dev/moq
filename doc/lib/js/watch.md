@@ -189,6 +189,7 @@ const player = new Watch.Player({
     probe: connection.probe,
     name: Moq.Path.from("alice.hang"),
     video: { canvas },
+    viewer: { viewers: connection.viewers },
 });
 // player.broadcast, player.video, player.audio, player.text, player.sync,
 // player.renderer, and player.emitter expose the pipeline.
@@ -198,6 +199,16 @@ const player = new Watch.Player({
 Pass a signal from [`@moq/signals`](/lib/js/signals) for any control you want
 to change later, such as `audio.muted` or `delay`. `Player` is the pipeline inside
 `<moq-watch>`; its parts are exported for custom composition.
+
+`viewer.viewers` claims the broadcast's share of the connection's receive
+estimate (see [`connection.viewers`](/lib/js/net)). Its ceiling follows the
+catalog: the rate at which selection would pick the best enabled video
+rendition the `video.target` allows, plus the selected audio rendition's
+bitrate, counting only media being downloaded. A relay that probes raises the
+estimate toward it, so a larger rendition can become affordable. Set
+`viewer.max` (`controls.viewer.max` on `<moq-watch>`) to claim a fixed ceiling
+in bits per second instead, or `0` to claim nothing; omit `viewer.viewers` to
+leave the connection's estimate unclaimed.
 
 To chart when each audio frame arrived against when it plays, open an
 `arrivals()` handle on the audio decoder. It yields every frame received while it is open, stamped

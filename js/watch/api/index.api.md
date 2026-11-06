@@ -148,7 +148,7 @@ export class Player {
 	readonly broadcast: Broadcast;
 	close(): void;
 	readonly emitter: Audio.Emitter;
-	readonly in: Signals.Readonlys<Omit<PlayerInput, "video" | "audio" | "text">> & { readonly [K in "video" | "audio" | "text"]: Signals.Readonlys<PlayerInput[K]> };
+	readonly in: Signals.Readonlys<Omit<PlayerInput, "video" | "audio" | "text" | "viewer">> & { readonly [K in "video" | "audio" | "text" | "viewer"]: Signals.Readonlys<PlayerInput[K]> };
 	readonly renderer: Video.Renderer;
 	reset(): void;
 	readonly sync: Sync;
@@ -183,9 +183,13 @@ export type PlayerInput = {
 		target: Signals.Getter<Video.Target | undefined>;
 		visible: Signals.Getter<Video.Visible>;
 	};
+	viewer: {
+		max: Signals.Getter<number | undefined>;
+		viewers: Signals.Getter<Pick<Net.Bandwidth.Viewers, "watch"> | undefined>;
+	};
 };
 
-export type PlayerProps = Signals.Inputs<Omit<PlayerInput, "video" | "audio" | "text">> & { [K in "video" | "audio" | "text"]?: Signals.Inputs<PlayerInput[K]> };
+export type PlayerProps = Signals.Inputs<Omit<PlayerInput, "video" | "audio" | "text" | "viewer">> & { [K in "video" | "audio" | "text" | "viewer"]?: Signals.Inputs<PlayerInput[K]> };
 
 export * as Signals from "@moq/signals";
 
@@ -314,6 +318,7 @@ export namespace Video {
 	export type SourceOutput = {
 		available: Signals.Signal<Record<string, Hang.Catalog.Video.VideoConfig>>;
 		catalog: Signals.Signal<Hang.Catalog.Video | undefined>;
+		ceiling: Signals.Signal<number | undefined>;
 		config: Signals.Signal<Hang.Catalog.Video.VideoConfig | undefined>;
 		error: Signals.Signal<Error | undefined>;
 		track: Signals.Signal<string | undefined>;

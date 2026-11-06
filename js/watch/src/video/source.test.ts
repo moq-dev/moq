@@ -6,7 +6,7 @@ import { Signal } from "@moq/signals";
 import { Broadcast } from "../broadcast";
 import { supportCacheKey } from "../support-probe";
 import { decoderConfigKey } from "./config";
-import { Source } from "./source";
+import { Source, type Target } from "./source";
 
 const flush = () => yieldNow();
 
@@ -487,6 +487,97 @@ describe("conflicting rendition metadata", () => {
 			if (!source.pending.peek()) await source.pending.changed();
 			while (source.pending.peek()) await source.pending.changed();
 			expect(source.out.track.peek()).toBe("picture");
+		} finally {
+			source.close();
+		}
+	});
+});
+
+describe("Source viewer ceiling", () => {
+	const ladder = () => ({
+		"360p": config("avc1.640028", { codedWidth: 640, codedHeight: 360, bitrate: 800_000 }),
+		"720p": config("avc1.640028", { codedWidth: 1280, codedHeight: 720, bitrate: 2_400_000 }),
+		"1080p": config("avc1.640028", { codedWidth: 1920, codedHeight: 1080, bitrate: 4_000_000 }),
+	});
+
+	it("follows the highest enabled rendition through enable and disable flips", async () => {
+		const renditions = ladder();
+		const { broadcast, catalog } = mutableBroadcast(renditions);
+		const source = new Source({ broadcast, supported: async () => true });
+		try {
+			await settle();
+			// Over the selection margin, so an estimate that reaches it selects 1080p.
+			expect(source.out.ceiling.peek()).toBe(5_000_000);
+
+			catalog.set({
+				video: { renditions: { ...renditions, "1080p": { ...renditions["1080p"], enabled: false } } },
+			});
+			await settle();
+			expect(source.out.ceiling.peek()).toBe(3_000_000);
+
+			catalog.set({ video: { renditions } });
+			await settle();
+			expect(source.out.ceiling.peek()).toBe(5_000_000);
+		} finally {
+			source.close();
+		}
+	});
+
+	it("is an estimate that selects that rendition", async () => {
+		const probe = new Signal<{ estimatedRecvRate: number } | undefined>(undefined);
+		const source = new Source({
+			broadcast: mockBroadcast(ladder()),
+			supported: async () => true,
+			probe: probe as never,
+		});
+		try {
+			await settle();
+			const ceiling = source.out.ceiling.peek() ?? 0;
+			probe.set({ estimatedRecvRate: ceiling });
+			await settle();
+			expect(source.out.track.peek()).toBe("1080p");
+			probe.set({ estimatedRecvRate: ceiling - 1 });
+			await settle();
+			expect(source.out.track.peek()).toBe("720p");
+		} finally {
+			source.close();
+		}
+	});
+
+	it("skips renditions without a catalog bitrate, and is unset when none has one", async () => {
+		const { broadcast, catalog } = mutableBroadcast({
+			"360p": config("avc1.640028", { codedWidth: 640, codedHeight: 360, bitrate: 800_000 }),
+			"4k": config("avc1.640028", { codedWidth: 3840, codedHeight: 2160 }),
+		});
+		const source = new Source({ broadcast, supported: async () => true });
+		try {
+			await settle();
+			expect(source.out.ceiling.peek()).toBe(1_000_000);
+
+			catalog.set({
+				video: { renditions: { "4k": config("avc1.640028", { codedWidth: 3840, codedHeight: 2160 }) } },
+			});
+			await settle();
+			expect(source.out.ceiling.peek()).toBeUndefined();
+		} finally {
+			source.close();
+		}
+	});
+
+	it("stays within the target's caps, without margin when the estimate cannot steer", async () => {
+		const target = new Signal<Target | undefined>({ height: 720 });
+		const source = new Source({ broadcast: mockBroadcast(ladder()), target, supported: async () => true });
+		try {
+			await settle();
+			expect(source.out.ceiling.peek()).toBe(3_000_000);
+
+			target.set({ name: "360p" });
+			await settle();
+			expect(source.out.ceiling.peek()).toBe(800_000);
+
+			target.set({ bitrate: 3_000_000 });
+			await settle();
+			expect(source.out.ceiling.peek()).toBe(2_400_000);
 		} finally {
 			source.close();
 		}

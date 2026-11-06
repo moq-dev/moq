@@ -32,8 +32,8 @@ which finishes viewer targets.
 - Python docs: list the five types with one-line descriptions, following
   the file's existing sections.
 
-Native players (`moq play`, `moqsrc`, and the OBS source) holding a
-viewer once they adapt renditions is [players](/quest/m2/probe/players.md)'
-work, not this quest's.
+Native players (`moq play`, `moqsrc`, and the OBS source) don't adapt
+renditions to bandwidth, so they hold no viewer; one that starts adapting
+should hold one the way `@moq/watch`'s `Player` does. Not this quest's work.
 
 Public API: none (tests and docs). Wire: none.

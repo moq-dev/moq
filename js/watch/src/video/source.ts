@@ -56,7 +56,15 @@ export type SourceOutput = {
 	// The name of the active rendition.
 	track: Signal<string | undefined>;
 	config: Signal<Catalog.VideoConfig | undefined>;
+
+	// The receive rate, in bits per second, at which selection settles on the best rendition
+	// the target allows, or undefined when no candidate has a catalog bitrate. A player claims it
+	// as its viewer ceiling, so a probe that reaches it makes that rendition selectable.
+	ceiling: Signal<number | undefined>;
 };
+
+// Automatic selection spends at most this share of the receive estimate, to avoid oscillation.
+const MARGIN = 0.8;
 
 /**
  * A filter that returns matching renditions sorted by preference (most preferred first).
@@ -195,6 +203,11 @@ function preferredRenditions(renditions: Record<string, Catalog.VideoConfig>): R
 	return Object.fromEntries(entries.filter(([, config]) => (config.preference ?? 0) === top));
 }
 
+/** Whether the receive estimate steers selection: not with a pinned rendition or bitrate. */
+function steers(available: Record<string, Catalog.VideoConfig>, target: Target | undefined): boolean {
+	return !(target?.name && target.name in available) && !target?.bitrate;
+}
+
 /**
  * Source handles catalog extraction, support checking, and rendition selection
  * for video playback. The Decoder consumes whichever rendition it picks.
@@ -211,6 +224,7 @@ export class Source {
 		error: this.#probe.error,
 		track: new Signal<string | undefined>(undefined),
 		config: new Signal<Catalog.VideoConfig | undefined>(undefined),
+		ceiling: new Signal<number | undefined>(undefined),
 	};
 	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
@@ -230,6 +244,7 @@ export class Source {
 		this.#signals.run(this.#runCatalog.bind(this));
 		this.#signals.run(this.#runSupported.bind(this));
 		this.#signals.run(this.#runSelected.bind(this));
+		this.#signals.run(this.#runCeiling.bind(this));
 	}
 
 	#runCatalog(effect: Effect): void {
@@ -252,30 +267,42 @@ export class Source {
 
 	#runSelected(effect: Effect): void {
 		const available = enabledRenditions(effect.get(this.#out.available));
-		const selected = this.#choose(effect, available, effect.get(this.in.target));
+		const target = effect.get(this.in.target);
+		// Read the estimate only when it steers selection: observing it requests PROBE.
+		const estimate = steers(available, target) ? effect.get(this.in.probe)?.estimatedRecvRate : undefined;
+		const selected = this.#choose(available, target, estimate);
 		if (!selected) return;
 
 		effect.set(this.#out.track, selected);
 		effect.set(this.#out.config, available[selected]);
 	}
 
-	// Pick among the enabled renditions.
-	#choose(effect: Effect, available: Record<string, Catalog.VideoConfig>, target?: Target): string | undefined {
+	#runCeiling(effect: Effect): void {
+		const available = enabledRenditions(effect.get(this.#out.available));
+		const target = effect.get(this.in.target);
+		// An unlimited estimate picks the best rendition bandwidth could ever buy.
+		const best = this.#choose(available, target, Number.POSITIVE_INFINITY);
+		const bitrate = best === undefined ? undefined : available[best].bitrate;
+		if (bitrate === undefined) return;
+		// Only the estimate's discounted share counts, so it must reach the bitrate over the margin.
+		const ceiling = steers(available, target) ? Math.ceil(bitrate / MARGIN) : bitrate;
+		effect.set(this.#out.ceiling, ceiling, undefined);
+	}
+
+	// Pick among the enabled renditions, given the receive estimate if known.
+	#choose(
+		available: Record<string, Catalog.VideoConfig>,
+		target: Target | undefined,
+		estimate: number | undefined,
+	): string | undefined {
 		if (target?.name && target.name in available) return target.name;
 		if (Object.keys(available).length === 0) return undefined;
 
-		// Auto-select: use recv bandwidth if no explicit bitrate target.
-		let effectiveTarget = target;
-		if (!target?.bitrate) {
-			const estimate = effect.get(this.in.probe)?.estimatedRecvRate;
-			if (estimate != null) {
-				// Apply a safety margin (80%) to avoid oscillation.
-				const safeBitrate = Math.round(estimate * 0.8);
-				effectiveTarget = { ...target, bitrate: safeBitrate };
-			}
+		if (estimate != null && steers(available, target)) {
+			target = { ...target, bitrate: Math.round(estimate * MARGIN) };
 		}
 
-		return this.#select(preferredRenditions(available), effectiveTarget);
+		return this.#select(preferredRenditions(available), target);
 	}
 
 	/**

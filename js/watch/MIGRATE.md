@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Players claim a viewer target from the catalog
+
+`<moq-watch>` and `@moq/room` now hold a viewer on their connection's `viewers` for as long as they download, with a ceiling taken from the catalog, so a relay that probes raises the receive estimate toward the best enabled rendition.
+A headless `Player` does the same when given `viewer: { viewers: connection.viewers }`; without it nothing changes.
+Override the ceiling with `viewer.max` (`controls.viewer.max` on the element), or set it to `0` to claim nothing.
+
 ### A disabled rendition is deselected; a declared silence is not a stall ([#7942](https://github.com/moq-dev/moq/pull/7942))
 
 The audio and video sources no longer keep a rendition selected, and subscribed, once its publisher disables it and no enabled one remains: they deselect it, as the hang draft's MUST NOT select requires, and select it again when it re-enables.
