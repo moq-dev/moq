@@ -28,8 +28,10 @@ use std::{
 
 use crate::Path;
 
+#[cfg(feature = "async")]
+pub(crate) use proof::EXPORTER_LABEL;
 pub use proof::RouteKey;
-pub(crate) use proof::{EXPORTER_LABEL, Proof, Transcript};
+pub(crate) use proof::{Proof, Transcript};
 pub(crate) use view::{View, overlaps, within};
 
 /// An opaque routing identity, declared by an origin or derived by [`Scope`].

@@ -322,8 +322,7 @@ async fn benchmark_datagram_delivery() {
 	println!(
 		"version,cell,viewer,offered,lost_packets,overflowed_packets,undelivered_frame_packets,reordered_packets,p50_ms,p99_ms,max_ms"
 	);
-	// moq-transport has no datagram tracks.
-	for version in ["moq-lite-06", "moq-lite-07-wip"] {
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
 		for cell in cells {
 			measure(version, cell).await;
 		}

@@ -1010,6 +1010,7 @@ export class Publisher {
 			endFrame: msg.endFrame,
 		};
 		let legacy: datagram.Consumer | undefined;
+		const legacyPriority = new Signal(msg.priority);
 		let controls: SubscriptionControls | undefined;
 		// Lite-05 and later name every sequence below the end that this subscription never
 		// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
@@ -1087,8 +1088,8 @@ export class Publisher {
 			if (this.#datagramWriter && !hasDatagramTracks(this.version)) {
 				legacy = wireOf(front).liveDatagrams(msg.track);
 				if (legacy) {
-					legacy.setPriority(msg.priority);
-					datagrams = this.#runDatagrams(legacy, { sub: msg.id, stamp })
+					if (wireOf(front).localDatagrams) legacy.setPriority(msg.priority);
+					datagrams = this.#runDatagrams(legacy, { sub: msg.id, stamp, priority: legacyPriority })
 						.then(() => {})
 						.catch((err) => console.debug(`datagram send stopped: ${reason(err)}`));
 				}
@@ -1105,7 +1106,8 @@ export class Publisher {
 				version: this.version,
 				live: new LiveRanges(this.version, asked),
 				apply: (update, live) => {
-					legacy?.setPriority(update.priority);
+					legacyPriority.set(update.priority);
+					if (wireOf(front).localDatagrams) legacy?.setPriority(update.priority);
 					if (hasRanges(this.version)) {
 						const resolved = hooks.servingResolved(track);
 						const entries = live.map(({ id, entry }) => {
@@ -2060,12 +2062,16 @@ export class Publisher {
 	}
 
 	// Shared by dedicated lite-07 requests and the old SUBSCRIBE carry-both mapping.
-	async #runDatagrams(track: datagram.Consumer, options: { sub: bigint; stamp?: Stamp }): Promise<bigint> {
+	async #runDatagrams(
+		track: datagram.Consumer,
+		options: { sub: bigint; stamp?: Stamp; priority?: Getter<number> },
+	): Promise<bigint> {
 		if (!this.#datagramWriter) throw new Error("transport does not support datagrams");
 		const info = await track.info();
-		const rank = () => sendOrder({ priority: track.priority, publisher: info.priority });
+		const priority = options.priority ?? hooks.datagramPriority(track);
+		const rank = () => sendOrder({ priority: priority.peek(), publisher: info.priority });
 		const sender = this.#datagramWriter.open(rank());
-		const dispose = hooks.datagramPriority(track).subscribe(() => sender.setPriority(rank()));
+		const dispose = priority.subscribe(() => sender.setPriority(rank()));
 		const left = hooks.datagramClosed(track);
 		const { writer } = sender;
 		const maxSize = Math.min(DatagramMessage.MAX_SIZE, DatagramStream.maxDatagramSize(this.#quic));
