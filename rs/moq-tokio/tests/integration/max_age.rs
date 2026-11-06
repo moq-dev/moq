@@ -9,7 +9,8 @@ const AGES: [Option<Duration>; 3] = [None, Some(Duration::ZERO), Some(Duration::
 async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::Result<()> {
 	let mut cache = moq_net::origin::Config::default();
 	cache.cache_duration = Duration::from_secs(1);
-	let relay = moq_tokio::origin::spawn_config(cache);
+	// A relay carries what it learned on to its other peers (moq-lite-07).
+	let relay = moq_tokio::origin::spawn_config(cache).with_proxy(true);
 	let ws = moq_tokio::websocket::Listener::bind("127.0.0.1:0".parse()?)
 		.await?
 		.with_protocols([version.alpn()])?;

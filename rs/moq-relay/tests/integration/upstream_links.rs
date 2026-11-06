@@ -52,10 +52,9 @@ where
 		.expect("test thread panicked");
 }
 
-/// One relay: its Hop ID, origin, listen port, and every task it runs. Dropping
-/// it aborts them all, closing its sessions like a crash.
+/// One relay: its origin, listen port, and every task it runs. Dropping it
+/// aborts them all, closing its sessions like a crash.
 struct Node {
-	id: u64,
 	origin: origin::Producer,
 	port: u16,
 	_tasks: tokio::task::JoinSet<()>,
@@ -136,7 +135,6 @@ async fn node(connect: Vec<Peer>) -> Node {
 	});
 
 	Node {
-		id,
 		origin: cluster.origin.clone(),
 		port,
 		_tasks: tasks,
@@ -244,8 +242,10 @@ fn has(routes: &BTreeMap<String, Vec<u64>>, paths: &[&str]) -> bool {
 }
 
 /// Two regions: two edges whose links to two cores are upstream, and one relay
-/// that also serves clients. Both edges send a path to the same core, an edge's
-/// broadcast reaches the far relay, and losing a core moves only its paths.
+/// that also serves clients. The far region's broadcasts reach both edges, an edge's
+/// broadcast reaches the far relay, and losing a core leaves every path reachable
+/// through the other. Lite-07 carries no hop chain, so which core a path takes is the
+/// route layer's choice, not something this asserts.
 #[test]
 fn tiered_regions() {
 	run_cluster_test(tiered_regions_inner());
@@ -258,34 +258,16 @@ async fn tiered_regions_inner() {
 	let e1 = node(vec![c1.dial(true, false), c2.dial(true, false)]).await;
 	let e2 = node(vec![c1.dial(true, false), c2.dial(true, false)]).await;
 
-	// Each path's core is a hash over the random Hop IDs, so enough paths that both
-	// cores get some: all 32 on one core is a 2^-31 chance.
-	let paths: Vec<String> = (0..32).map(|i| format!("live/{i}")).collect();
+	let paths: Vec<String> = (0..8).map(|i| format!("live/{i}")).collect();
 	let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
 	let _published: Vec<_> = paths.iter().map(|path| publish(&r.origin, path)).collect();
-	routes_when("both cores learn the far region", &c1.origin, |routes| {
-		has(routes, &paths)
-	})
-	.await;
-	routes_when("both cores learn the far region", &c2.origin, |routes| {
-		has(routes, &paths)
-	})
-	.await;
-
-	// A route is delivered before a later one: once an edge holds both cores'
-	// markers, it holds both cores' routes to the far region too.
-	let _c1_mark = publish(&c1.origin, "zz/c1");
-	let _c2_mark = publish(&c2.origin, "zz/c2");
-	let marks = ["zz/c1", "zz/c2"];
-	let at_e1 = routes_when("edge 1 hears both cores", &e1.origin, |routes| has(routes, &marks)).await;
-	let at_e2 = routes_when("edge 2 hears both cores", &e2.origin, |routes| has(routes, &marks)).await;
-
-	// Every edge sends a given path to the same core, so the far region serves
-	// one subscription per broadcast whichever edges watch it.
-	let core = |routes: &BTreeMap<String, Vec<u64>>, path: &str| *routes[path].last().expect("hops");
-	for path in &paths {
-		assert_eq!(at_e1[*path].len(), 2, "{path} at edge 1: {:?}", at_e1[*path]);
-		assert_eq!(core(&at_e1, path), core(&at_e2, path), "{path} split across cores");
+	for (step, at) in [
+		("core 1 learns the far region", &c1),
+		("core 2 learns the far region", &c2),
+		("edge 1 learns the far region", &e1),
+		("edge 2 learns the far region", &e2),
+	] {
+		routes_when(step, &at.origin, |routes| has(routes, &paths)).await;
 	}
 	read_frame(&e1.origin, paths[0]).await;
 	read_frame(&e2.origin, paths[0]).await;
@@ -294,24 +276,17 @@ async fn tiered_regions_inner() {
 	let _edge = publish(&e1.origin, "edge/cam");
 	read_frame(&r.origin, "edge/cam").await;
 
-	// Losing a core moves only its paths.
-	let on = |core_id: u64| -> Vec<&str> { paths.iter().copied().filter(|p| core(&at_e1, p) == core_id).collect() };
-	let (on_c1, on_c2) = (on(c1.id), on(c2.id));
-	assert!(
-		!on_c1.is_empty() && !on_c2.is_empty(),
-		"paths all on one core: {at_e1:?}"
-	);
-	let lost = c1.id;
+	// Losing a core: once edge 1 sees core 1's own broadcast go, every route it had
+	// through core 1 went with it, and each path is still served through core 2.
+	let _c1_mark = publish(&c1.origin, "zz/c1");
+	routes_when("edge 1 hears core 1", &e1.origin, |routes| has(routes, &["zz/c1"])).await;
 	drop(c1);
-	let after = routes_when("edge 1 drops the lost core", &e1.origin, |routes| {
-		has(routes, &paths) && routes.values().all(|hops| !hops.contains(&lost))
+	routes_when("edge 1 drops the lost core", &e1.origin, |routes| {
+		has(routes, &paths) && !routes.contains_key("zz/c1")
 	})
 	.await;
-	for path in &on_c2 {
-		assert_eq!(after[*path], at_e1[*path], "{path} moved off the surviving core");
-	}
-	for path in &on_c1 {
-		assert_eq!(after[*path], [r.id, c2.id], "{path} did not fail over");
+	for path in &paths {
+		read_frame(&e1.origin, path).await;
 	}
 }
 
