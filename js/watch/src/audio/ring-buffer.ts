@@ -288,6 +288,16 @@ export class AudioRingBuffer {
 	truncate(timestamp: Micro): void {
 		const target = Math.round(Second.fromMicro(timestamp) * this.rate);
 		if (target >= this.#writeIndex) return;
+		// A staged window runs the read index ahead of the playhead. Unstage it so the successor
+		// replaces whatever of it is still unplayed, resuming the ring at the sample now playing.
+		const stretch = this.#stretch;
+		if (target < this.#readIndex && stretch.available > 0) {
+			const staged = (stretch.available * this.#window) / stretch.length;
+			const capacity = this.#buffer[0].length;
+			this.#readIndex = Math.max(Math.round(this.#readIndex - staged), this.#writeIndex - capacity);
+			stretch.clear();
+			this.#window = 0;
+		}
 		// Never retreat past the playhead: those samples are already due.
 		this.#writeIndex = Math.max(target, this.#readIndex);
 		this.#pauses = this.#pauses.filter((pause) => pause.start < this.#writeIndex);
