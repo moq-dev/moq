@@ -52,9 +52,12 @@ on 2026-11-05, passed `Tests (rs miri)` with both passes:
   `model::group::test::debt_sheds_the_front_but_not_the_newest_frame` 335.8 s,
   past the 300 s SLOW mark and inside the 900 s cap.
 
-Remaining: shrink `debt_sheds_the_front_but_not_the_newest_frame`'s Miri
-workload so it finishes under SLOW, as #7895 did for the strict pass's
-slowest tests. If the job nears 60 minutes, split the strict and epoch passes
+[moq-dev/moq#7997](https://github.com/moq-dev/moq/pull/7997) shrank
+`debt_sheds_the_front_but_not_the_newest_frame` from four 1 MiB pseudo-random
+frames to four 1 KiB frames; shedding counts frames, not bytes.
+
+Remaining: confirm on the next scheduled Nightly that the epoch pass has no
+SLOW test, then delete this quest. If the job nears 60 minutes, split the strict and epoch passes
 into separate matrix entries rather than raising the timeout, and keep
 nextest's 15-minute per-test cap.
 
