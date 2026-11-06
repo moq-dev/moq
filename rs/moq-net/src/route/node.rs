@@ -36,11 +36,6 @@ pub(crate) struct Claim {
 	pub epoch: u64,
 	/// The origin's Announce Cost.
 	pub cost: u64,
-	/// The claim of the same identity this one took over, at or above its path, and the
-	/// instance that claim served: what was resolved through it beneath this path is
-	/// this claim's broadcast. Kept while the instance stays, and sent as
-	/// ANNOUNCE_TAKEOVER to a peer still holding that claim.
-	pub continues: Option<(Path, Instance)>,
 }
 
 /// A shown claim as the origin serves it through the selected route.
@@ -331,22 +326,13 @@ impl Node {
 			.expect("a node always declares an identity")
 	}
 
-	/// This node's own claim at `path` changed: `None` withdraws it. A claim taking over
-	/// the own claim at `predecessor` continues the instance that one serves now.
-	pub fn own(&self, path: Path, claim: Option<Claim>, predecessor: Option<&Path>) {
+	/// This node's own claim at `path` changed: `None` withdraws it.
+	pub fn own(&self, path: Path, claim: Option<Claim>) {
 		let mut state = self.lock();
 		let changed = match claim {
-			Some(mut claim) => {
+			Some(claim) => {
 				let view = state.router.declared().and_then(|id| state.router.view(id));
 				let current = view.and_then(|view| view.items.get(&path));
-				claim.continues = match predecessor {
-					Some(predecessor) => (view.and_then(|view| view.items.get(predecessor)))
-						.map(|taken| (predecessor.clone(), taken.instance.clone())),
-					// A re-price or a newer epoch of the same instance continues what it did.
-					None => current
-						.filter(|current| current.instance == claim.instance)
-						.and_then(|current| current.continues.clone()),
-				};
 				let changed = current != Some(&claim);
 				changed && state.router.announce(path, claim).is_ok()
 			}
@@ -660,7 +646,6 @@ mod tests {
 			instance: instance.clone(),
 			epoch: 0,
 			cost,
-			continues: None,
 		}
 	}
 
@@ -695,7 +680,7 @@ mod tests {
 		let (origin, relay) = (Node::new(1, 1), Node::new(2, 2));
 		let answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		let receive = relay.receive(Link::default(), Path::empty()).unwrap();
-		origin.own(p("live/x"), Some(claim(&instance, 5)), None);
+		origin.own(p("live/x"), Some(claim(&instance, 5)));
 		pump(&answer, &receive);
 		assert_eq!(
 			served(outputs(&receive)),
@@ -711,7 +696,7 @@ mod tests {
 			}]
 		);
 
-		origin.own(p("live/x"), None, None);
+		origin.own(p("live/x"), None);
 		pump(&answer, &receive);
 		assert_eq!(
 			served(outputs(&receive)),
@@ -739,7 +724,7 @@ mod tests {
 		let far_answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		let near = relay.receive(Link::default(), Path::empty()).unwrap();
 		let near_answer = origin.answer(Link::default(), Path::empty()).unwrap();
-		origin.own(p("live/x"), Some(claim(&instance, 0)), None);
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
 		pump(&far_answer, &far);
 		pump(&near_answer, &near);
 		let metric = |outputs: Vec<Output>| match &served(outputs)[..] {
@@ -778,8 +763,8 @@ mod tests {
 		};
 		let b = relay.receive(costly, p("live/b")).unwrap();
 		let b_answer = origin.answer(Link::default(), p("live/b")).unwrap();
-		origin.own(p("live/a/x"), Some(claim(&instance, 0)), None);
-		origin.own(p("live/b/y"), Some(claim(&instance, 0)), None);
+		origin.own(p("live/a/x"), Some(claim(&instance, 0)));
+		origin.own(p("live/b/y"), Some(claim(&instance, 0)));
 		pump(&a_answer, &a);
 		pump(&b_answer, &b);
 		let claims = |outputs: Vec<Output>| -> Vec<Path> {
@@ -803,9 +788,9 @@ mod tests {
 		let answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		outputs(&answer);
 		for cost in 0..1000 {
-			origin.own(p("live/x"), Some(claim(&instance, cost)), None);
-			origin.own(p("live/churn"), Some(claim(&instance, cost)), None);
-			origin.own(p("live/churn"), None, None);
+			origin.own(p("live/x"), Some(claim(&instance, cost)));
+			origin.own(p("live/churn"), Some(claim(&instance, cost)));
+			origin.own(p("live/churn"), None);
 		}
 		let read = outputs(&answer);
 		let batch = |read: &[Output]| match read {
@@ -817,9 +802,9 @@ mod tests {
 
 		// Once sent, a claim's end is kept, behind what started.
 		for cost in 0..1000 {
-			origin.own(p("live/y"), Some(claim(&instance, cost)), None);
+			origin.own(p("live/y"), Some(claim(&instance, cost)));
 		}
-		origin.own(p("live/x"), None, None);
+		origin.own(p("live/x"), None);
 		let read = outputs(&answer);
 		assert_eq!(read.len(), 1, "{read:?}");
 		assert_eq!(
@@ -896,7 +881,7 @@ mod tests {
 		let first_answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		let second = relay.receive(Link::default(), Path::empty()).unwrap();
 		let second_answer = origin.answer(Link::default(), Path::empty()).unwrap();
-		origin.own(p("live/x"), Some(claim(&instance, 0)), None);
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
 		pump(&first_answer, &first);
 		pump(&second_answer, &second);
 		outputs(&first);

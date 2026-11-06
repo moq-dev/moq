@@ -119,7 +119,9 @@ class BroadcastRequest:
     def route(self, *, hidden: bool = False, cost: int = 0, instance: str | None = None, epoch: int = 0) -> Route:
         """Answer with the path's own exact :class:`Route`, owning a new broadcast.
 
-        The route serves a fresh instance unless ``instance`` names one, so a job that
+        Unless ``instance`` names one, the route takes the instance its prefix route lends
+        when it first announces, so readers that resolved the path through the prefix route
+        continue on it; its end moves the prefix route to a fresh instance, so a job that
         restarts is a new stream. Created visible, it announces now and answers the waiting
         requesters; created ``hidden``, they wait until :meth:`Route.announce`, so the job can
         fill its catalog first, and cancelling the route before then refuses them. Ending the

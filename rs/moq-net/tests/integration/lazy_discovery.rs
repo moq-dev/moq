@@ -109,9 +109,9 @@ async fn synced(announced: &mut origin::Routes) -> Vec<String> {
 			.expect("synced in time")
 			.expect("the stream stays open");
 		match event {
-			origin::RouteEvent::Start(announce)
-			| origin::RouteEvent::Restart(announce)
-			| origin::RouteEvent::Takeover { announce, .. } => seen.push(announce.prefix.to_string()),
+			origin::RouteEvent::Start(announce) | origin::RouteEvent::Restart(announce) => {
+				seen.push(announce.prefix.to_string())
+			}
 			origin::RouteEvent::End(announce) => seen.retain(|prefix| *prefix != announce.prefix.as_str()),
 			origin::RouteEvent::Update(_) => {}
 		}
@@ -423,9 +423,9 @@ async fn settled(announced: &mut origin::Routes, held: &mut Vec<String>) -> bool
 	let mut ended = false;
 	while let Some(event) = announced.try_next() {
 		match event {
-			origin::RouteEvent::Start(announce)
-			| origin::RouteEvent::Restart(announce)
-			| origin::RouteEvent::Takeover { announce, .. } => held.push(announce.prefix.to_string()),
+			origin::RouteEvent::Start(announce) | origin::RouteEvent::Restart(announce) => {
+				held.push(announce.prefix.to_string())
+			}
 			origin::RouteEvent::End(announce) => {
 				ended = true;
 				held.retain(|prefix| *prefix != announce.prefix.as_str())

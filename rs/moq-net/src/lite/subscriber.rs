@@ -600,9 +600,8 @@ impl Subscriber {
 				)?;
 			}
 			lite::AnnounceBroadcast::Skipped | lite::AnnounceBroadcast::Synced => {}
-			// Only lite-07 carries the route layer and takeovers, which `routed` handles above.
-			lite::AnnounceBroadcast::Takeover { .. }
-			| lite::AnnounceBroadcast::RouteStart { .. }
+			// Only lite-07 carries the route layer, which `routed` handles above.
+			lite::AnnounceBroadcast::RouteStart { .. }
 			| lite::AnnounceBroadcast::RouteUpdate { .. }
 			| lite::AnnounceBroadcast::RouteHold { .. }
 			| lite::AnnounceBroadcast::RouteEnd { .. }
@@ -8740,7 +8739,7 @@ impl Announced {
 			return false;
 		}
 		// An error means the prefix is outside our origin's scope, so don't serve it.
-		match subscriber.origin.forward(&path, route.clone(), None) {
+		match subscriber.origin.forward(&path, route.clone()) {
 			Ok(dynamic) => {
 				self.attach(path, route, dynamic);
 				true

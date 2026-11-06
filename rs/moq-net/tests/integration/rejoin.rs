@@ -836,11 +836,7 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 			assert!(
 				matches!(
 					event,
-					Some(
-						origin::RouteEvent::Update(_)
-							| origin::RouteEvent::Restart(_)
-							| origin::RouteEvent::Takeover { .. }
-					)
+					Some(origin::RouteEvent::Update(_) | origin::RouteEvent::Restart(_))
 				),
 				"{version}: {event:?}"
 			);

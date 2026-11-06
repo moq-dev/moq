@@ -11,9 +11,8 @@ use crate::{Error, Instance, Path, broadcast};
 /// and a request resolves through the most specific one, so only that route's events come
 /// through. Another route taking over is a [`Restart`](RouteEvent::Restart), unless both
 /// carry the same instance: those serve one continuous stream, so it is an
-/// [`Update`](RouteEvent::Update). One announced as a
-/// [`Takeover`](RouteEvent::Takeover) of the serving route continues it, and comes through
-/// as one. Routes beneath the path serve other broadcasts and are ignored.
+/// [`Update`](RouteEvent::Update), as for a job's route continuing the prefix route it
+/// answered. Routes beneath the path serve other broadcasts and are ignored.
 pub(crate) struct Follow {
 	announced: Routes,
 	path: Path,
@@ -130,7 +129,6 @@ impl Follow {
 		let (RouteEvent::Start(announce)
 		| RouteEvent::Update(announce)
 		| RouteEvent::Restart(announce)
-		| RouteEvent::Takeover { announce, .. }
 		| RouteEvent::End(announce)) = &event;
 		if !self.path.has_prefix(&announce.prefix) {
 			return None;
@@ -145,12 +143,11 @@ impl Follow {
 			.iter()
 			.position(|standing| standing.announce.prefix == prefix)
 			.map(|index| self.covering.swap_remove(index).since);
-		let (announce, since, restart, predecessor) = match event {
-			RouteEvent::End(_) => (None, None, false, None),
-			RouteEvent::Start(announce) => (Some(announce), None, false, None),
-			RouteEvent::Update(announce) => (Some(announce), standing, false, None),
-			RouteEvent::Restart(announce) => (Some(announce), standing, true, None),
-			RouteEvent::Takeover { announce, predecessor } => (Some(announce), None, true, Some(predecessor)),
+		let (announce, since, restart) = match event {
+			RouteEvent::End(_) => (None, None, false),
+			RouteEvent::Start(announce) => (Some(announce), None, false),
+			RouteEvent::Update(announce) => (Some(announce), standing, false),
+			RouteEvent::Restart(announce) => (Some(announce), standing, true),
 		};
 		if let Some(announce) = announce {
 			self.covering.push(Standing {
@@ -172,15 +169,6 @@ impl Follow {
 				if before.prefix == prefix && before.prefix != after.prefix && since > self.dry.max(seen) =>
 			{
 				Some(RouteEvent::End(before))
-			}
-			// The serving route continues as this one.
-			(Some((before, _)), Some((after, _)))
-				if after.prefix == prefix && predecessor.as_ref() == Some(&before.prefix) =>
-			{
-				Some(RouteEvent::Takeover {
-					announce: after,
-					predecessor: before.prefix,
-				})
 			}
 			(Some((before, _)), Some((after, _))) if before.prefix != after.prefix => {
 				let same = before.route.instance == after.route.instance;
@@ -323,9 +311,9 @@ impl Following {
 				}
 			};
 
-			// Resolving can run ahead of the follower: a takeover resolves at once while the
-			// origin holds its restart, and that restart then names the instance handed out.
-			// The caller freeing it before reading the restart is owed it again.
+			// Resolving can run ahead of the follower: another instance resolves at once while
+			// the origin holds its restart, and that restart then names the instance handed
+			// out. The caller freeing it before reading the restart is owed it again.
 			let weak = broadcast.weak();
 			if self.last.as_ref().is_some_and(|last| last.same_channel(&weak)) {
 				self.absorbed = true;
@@ -380,10 +368,9 @@ impl Following {
 				self.end();
 			}
 			// After a refusal, another route may answer what the last one refused.
-			RouteEvent::Update(_) | RouteEvent::Takeover { .. } if self.refused => self.unseen = true,
-			// The same instance over another route, which its subscriptions ride out, or one
-			// continuing what was handed out.
-			RouteEvent::Update(_) | RouteEvent::Takeover { .. } => return false,
+			RouteEvent::Update(_) if self.refused => self.unseen = true,
+			// The same instance over another route, which its subscriptions ride out.
+			RouteEvent::Update(_) => return false,
 		}
 		true
 	}
@@ -410,7 +397,6 @@ mod tests {
 			RouteEvent::Start(announce) => ("start", announce.prefix.to_string()),
 			RouteEvent::Update(announce) => ("update", announce.prefix.to_string()),
 			RouteEvent::Restart(announce) => ("restart", announce.prefix.to_string()),
-			RouteEvent::Takeover { announce, .. } => ("takeover", announce.prefix.to_string()),
 			RouteEvent::End(announce) => ("end", announce.prefix.to_string()),
 		}
 	}
@@ -437,7 +423,7 @@ mod tests {
 		let instance = Instance::random();
 
 		// A prefix above the path covers it.
-		let pool = origin.forward("pool", route(&instance), None).unwrap();
+		let pool = origin.forward("pool", route(&instance)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		// A route beneath the path serves another broadcast.
@@ -472,7 +458,7 @@ mod tests {
 	#[kio::test]
 	async fn follow_starts_on_the_serving_route_when_joining_late() {
 		let origin = Hop::new(1).unwrap().produce();
-		let _pool = origin.forward("pool", RouteInfo::default(), None).unwrap();
+		let _pool = origin.forward("pool", RouteInfo::default()).unwrap();
 		let _exact = origin.route("pool/job", RouteOptions::default()).unwrap();
 
 		let mut follow = origin.consume().path_routes("pool/job").unwrap();
@@ -493,7 +479,7 @@ mod tests {
 		// Both land before the follower reads again, and the cursor delivers the prefix's start
 		// ahead of the path's end, but the path went unserved in between.
 		drop(exact);
-		let _pool = origin.forward("pool", route(&instance), None).unwrap();
+		let _pool = origin.forward("pool", route(&instance)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("end", "pool/job".into()));
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
@@ -514,7 +500,7 @@ mod tests {
 		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
 
 		let instance = Instance::random();
-		let _pool = origin.forward("pool", route(&instance), None).unwrap();
+		let _pool = origin.forward("pool", route(&instance)).unwrap();
 		exact.announce_info(route(&instance)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
 
@@ -528,7 +514,7 @@ mod tests {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut follow = origin.consume().path_routes("pool/job").unwrap();
 
-		let _pool = origin.forward("pool", RouteInfo::default(), None).unwrap();
+		let _pool = origin.forward("pool", RouteInfo::default()).unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		let _exact = origin.route("pool/job", RouteOptions::default()).unwrap();
@@ -544,7 +530,7 @@ mod tests {
 		let _chat = origin
 			.scope("", &chat)
 			.unwrap()
-			.forward("room/alice", RouteInfo::default(), None)
+			.forward("room/alice", RouteInfo::default())
 			.unwrap();
 		let mut follow = origin.consume().path_routes("room/alice").unwrap();
 
@@ -659,7 +645,7 @@ mod tests {
 		let exact = origin.route("live", options(&instance)).unwrap();
 		let first = available(&mut announced).await;
 
-		let dynamic = origin.forward("", route(&instance), None).unwrap();
+		let dynamic = origin.forward("", route(&instance)).unwrap();
 		exact.withdraw();
 		ended(&mut announced).await;
 		let served = broadcast::Info::new().produce();

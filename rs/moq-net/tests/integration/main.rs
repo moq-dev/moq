@@ -8,13 +8,13 @@
 //! apply to every test in the binary.
 
 mod announce_covering_route;
-mod announce_takeover;
 mod announce_to_serve;
 mod auth;
 mod broadcast_close;
 mod catalog_acquisition;
 mod catalog_churn;
 mod catalog_handover;
+mod claim_continues;
 mod compress;
 mod control_stats;
 mod datagram;

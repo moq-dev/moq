@@ -824,9 +824,9 @@ async def test_dynamic_broadcast_request():
     assert request is not None
     assert request.path == "dynamic/broadcast"
 
-    # A hidden job route answers once it announces, under its own instance.
+    # A hidden job route answers once it announces, under the instance its prefix route lends.
     served = request.route(hidden=True)
-    assert served.instance != dynamic.instance
+    assert served.instance == dynamic.instance
     track = served.broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
     served.announce()
     with pytest.raises(Exception):

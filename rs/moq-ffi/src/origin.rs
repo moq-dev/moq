@@ -553,8 +553,10 @@ impl MoqBroadcastRequest {
 
 	/// Answer with the path's own exact route, owning a new broadcast.
 	///
-	/// The route serves a fresh instance unless `options` names one, so a job that restarts
-	/// is a new stream. Created visible, it announces now and answers the waiting
+	/// Unless `options` names an instance, the route takes the one its prefix route lends
+	/// when it first announces, so readers that resolved the path through the prefix route
+	/// continue on it; its end moves the prefix route to a fresh instance, so a job that
+	/// restarts is a new stream. Created visible, it announces now and answers the waiting
 	/// requesters; created hidden, they wait until [`MoqRoute::announce`], so the job can
 	/// fill its catalog first, and cancelling the route before then refuses them. Ending the
 	/// route withdraws only this path.
@@ -571,7 +573,8 @@ impl MoqBroadcastRequest {
 	/// Serve a held broadcast under the prefix route's instance without announcing an exact route.
 	///
 	/// Every answer at this path must continue the same sequences and bytes. Start a new
-	/// prefix route for different content, or route a job with its own instance.
+	/// prefix route for different content, or route a job, whose end moves the prefix route
+	/// to another instance.
 	pub fn serve(&self, broadcast: &Arc<MoqBroadcastConsumer>) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;

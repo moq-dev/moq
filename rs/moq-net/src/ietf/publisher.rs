@@ -4111,8 +4111,7 @@ impl Publisher {
 			match event {
 				crate::origin::RouteEvent::Start(update)
 				| crate::origin::RouteEvent::Update(update)
-				| crate::origin::RouteEvent::Restart(update)
-				| crate::origin::RouteEvent::Takeover { announce: update, .. } => {
+				| crate::origin::RouteEvent::Restart(update) => {
 					initial.insert(update.prefix.clone(), update);
 				}
 				crate::origin::RouteEvent::End(update) => {
@@ -5881,11 +5880,6 @@ impl ForwardNamespaces {
 					(update, true, false)
 				}
 				crate::origin::RouteEvent::Restart(update) => (update, true, true),
-				// moq-transport has no takeover: another instance, in place or not.
-				crate::origin::RouteEvent::Takeover { announce, predecessor } => {
-					let restart = predecessor == announce.prefix;
-					(announce, true, restart)
-				}
 				crate::origin::RouteEvent::End(update) => (update, false, false),
 			})));
 		}
@@ -11359,10 +11353,7 @@ mod serve_tests {
 
 		for version in ALL_VERSIONS {
 			let mut h = serve(version);
-			let claim = h
-				._origin
-				.forward("live", crate::origin::RouteInfo::default(), None)
-				.unwrap();
+			let claim = h._origin.forward("live", crate::origin::RouteInfo::default()).unwrap();
 			let auth = crate::auth::Link::new(false);
 			auth.handle().authorize(&nothing());
 			h.publisher = h.publisher.clone().with_auth(auth);
@@ -11382,10 +11373,7 @@ mod serve_tests {
 
 		for version in ALL_VERSIONS {
 			let mut h = serve(version);
-			let claim = h
-				._origin
-				.forward("live", crate::origin::RouteInfo::default(), None)
-				.unwrap();
+			let claim = h._origin.forward("live", crate::origin::RouteInfo::default()).unwrap();
 			let auth = crate::auth::Link::new(false);
 			h.publisher = h.publisher.clone().with_auth(auth.clone());
 
@@ -11702,10 +11690,7 @@ mod serve_tests {
 		let version = Version::Draft22;
 		for path in [".", "./child", ".session", ".session/extension"] {
 			let h = serve(version);
-			let claim = h
-				._origin
-				.forward("", crate::origin::RouteInfo::default(), None)
-				.unwrap();
+			let claim = h._origin.forward("", crate::origin::RouteInfo::default()).unwrap();
 			settle().await;
 			let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
 				.await
@@ -13851,11 +13836,7 @@ mod serve_tests {
 				{
 					*namespace = crate::Path::from_static("lobby");
 				}
-				Some(
-					h._origin
-						.forward("lobby", crate::origin::RouteInfo::default(), None)
-						.unwrap(),
-				)
+				Some(h._origin.forward("lobby", crate::origin::RouteInfo::default()).unwrap())
 			}
 			FetchParked::Responding => None,
 		};
@@ -15463,11 +15444,7 @@ mod serve_tests {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let (claim, published) = match parked {
 			Parked::Resolving => (
-				Some(
-					origin
-						.forward("room", crate::origin::RouteInfo::default(), None)
-						.unwrap(),
-				),
+				Some(origin.forward("room", crate::origin::RouteInfo::default()).unwrap()),
 				None,
 			),
 			Parked::Acking | Parked::Ending => {
@@ -15704,9 +15681,7 @@ mod serve_tests {
 		let mut idle = None;
 		match setup {
 			Setup::Resolving => {
-				let route = origin
-					.forward("room", crate::origin::RouteInfo::default(), None)
-					.unwrap();
+				let route = origin.forward("room", crate::origin::RouteInfo::default()).unwrap();
 				let request = {
 					let requested = std::pin::pin!(route.requested());
 					match futures::future::select(requested, serving.as_mut()).await {

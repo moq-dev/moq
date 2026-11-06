@@ -1233,8 +1233,7 @@ impl AnnounceRun {
 			match event {
 				origin::RouteEvent::Start(update)
 				| origin::RouteEvent::Update(update)
-				| origin::RouteEvent::Restart(update)
-				| origin::RouteEvent::Takeover { announce: update, .. } => {
+				| origin::RouteEvent::Restart(update) => {
 					current.insert(update.prefix, update.route);
 				}
 				origin::RouteEvent::End(update) => {
@@ -1598,15 +1597,10 @@ impl AnnounceRun {
 				return Poll::Pending;
 			};
 
-			let (update, active, restart, predecessor) = match next {
-				Some(origin::RouteEvent::Start(update) | origin::RouteEvent::Update(update)) => {
-					(update, true, false, None)
-				}
-				Some(origin::RouteEvent::Restart(update)) => (update, true, true, None),
-				Some(origin::RouteEvent::Takeover { announce, predecessor }) => {
-					(announce, true, false, Some(predecessor))
-				}
-				Some(origin::RouteEvent::End(update)) => (update, false, false, None),
+			let (update, active, restart) = match next {
+				Some(origin::RouteEvent::Start(update) | origin::RouteEvent::Update(update)) => (update, true, false),
+				Some(origin::RouteEvent::Restart(update)) => (update, true, true),
+				Some(origin::RouteEvent::End(update)) => (update, false, false),
 				None => {
 					if self.initial.take().is_some() {
 						stream.writer.buffer(&lite::AnnounceBroadcast::Synced)?;
@@ -1628,9 +1622,6 @@ impl AnnounceRun {
 				continue;
 			}
 
-			// Only lite-07 carries a takeover, and it answers from the route layer. Here one
-			// is another instance, in place or not.
-			let restart = restart || predecessor.as_ref() == Some(&suffix);
 			match self.outgoing(&update.route, &absolute) {
 				Some((hops, cost)) if restart && self.live.contains_key(&suffix) => {
 					self.restart(stream, suffix, hops, cost, served(&update.route), &absolute)?;
@@ -8707,14 +8698,13 @@ mod tests {
 				crate::origin::RouteInfo::default()
 					.with_hops(echoed_hops)
 					.with_via(assigned),
-				None,
 			)
 			.unwrap();
 
 		let mut local_hops = Hops::new();
 		local_hops.push(upstream).unwrap();
 		let _local = origin
-			.forward("local", crate::origin::RouteInfo::default().with_hops(local_hops), None)
+			.forward("local", crate::origin::RouteInfo::default().with_hops(local_hops))
 			.unwrap();
 
 		// A SETUP that declares no origin of its own, so only the assigned one applies.
@@ -9288,13 +9278,7 @@ mod tests {
 		let mut _route = None;
 		let mut held = None;
 		match wait {
-			Wait::Broadcast => {
-				_route = Some(
-					origin
-						.forward("room", crate::origin::RouteInfo::default(), None)
-						.unwrap(),
-				)
-			}
+			Wait::Broadcast => _route = Some(origin.forward("room", crate::origin::RouteInfo::default()).unwrap()),
 			Wait::Track => {
 				let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 				let dynamic = broadcast.broadcast().requests();
@@ -9597,6 +9581,7 @@ mod tests {
 	fn legacy_track() -> lite::Track<'static> {
 		lite::Track {
 			instance: None,
+			node: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "events".into(),
 		}
@@ -9606,6 +9591,7 @@ mod tests {
 		lite::Subscribe {
 			order: crate::track::Order::Descending,
 			instance: None,
+			node: 0,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "events".into(),

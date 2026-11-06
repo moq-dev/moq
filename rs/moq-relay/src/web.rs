@@ -1007,8 +1007,7 @@ async fn serve_announced(
 	while let Some(event) = announced.try_next() {
 		if let moq_net::origin::RouteEvent::Start(update)
 		| moq_net::origin::RouteEvent::Update(update)
-		| moq_net::origin::RouteEvent::Restart(update)
-		| moq_net::origin::RouteEvent::Takeover { announce: update, .. } = event
+		| moq_net::origin::RouteEvent::Restart(update) = event
 		{
 			broadcasts.push(update.prefix);
 		}
