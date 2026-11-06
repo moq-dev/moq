@@ -583,3 +583,33 @@ describe("Source viewer ceiling", () => {
 		}
 	});
 });
+
+describe("Source probe observation", () => {
+	it("does not observe the probe without a selectable rendition", async () => {
+		let reads = 0;
+		const probe = new Signal(undefined);
+		const counted = {
+			peek: () => {
+				reads++;
+				return probe.peek();
+			},
+			subscribe: (fn: () => void) => {
+				reads++;
+				return probe.subscribe(fn);
+			},
+			changed: () => probe.changed(),
+		};
+		const source = new Source({
+			broadcast: mockBroadcast({ hd: config("avc1.640028", { bitrate: 1_000_000, enabled: false }) }),
+			supported: async () => true,
+			probe: counted as never,
+		});
+		try {
+			await settle();
+			expect(source.out.track.peek()).toBeUndefined();
+			expect(reads).toBe(0);
+		} finally {
+			source.close();
+		}
+	});
+});

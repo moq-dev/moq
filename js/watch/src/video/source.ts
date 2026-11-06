@@ -203,8 +203,9 @@ function preferredRenditions(renditions: Record<string, Catalog.VideoConfig>): R
 	return Object.fromEntries(entries.filter(([, config]) => (config.preference ?? 0) === top));
 }
 
-/** Whether the receive estimate steers selection: not with a pinned rendition or bitrate. */
+/** Whether the receive estimate steers selection: not with nothing to select, or a pinned rendition or bitrate. */
 function steers(available: Record<string, Catalog.VideoConfig>, target: Target | undefined): boolean {
+	if (Object.keys(available).length === 0) return false;
 	return !(target?.name && target.name in available) && !target?.bitrate;
 }
 
