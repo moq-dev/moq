@@ -122,8 +122,6 @@ pub(crate) struct Timer {
 	sleep: Pin<Box<host::Sleep>>,
 	/// When it was last armed, so firing can tell whether it waited.
 	armed: host::Instant,
-	/// Where tokio's clock read against std's when armed, while the guard is on.
-	offset: Option<guard::Offset>,
 }
 
 #[cfg(feature = "runtime")]
@@ -134,13 +132,11 @@ impl Timer {
 			origin,
 			sleep: Box::pin(host::sleep_until(origin + at.since_origin().saturating_sub(LEAD))),
 			armed,
-			offset: guard::offset(),
 		}
 	}
 
 	pub(crate) fn reset(&mut self, at: Instant) {
 		self.armed = host::Instant::now();
-		self.offset = guard::offset();
 		self.sleep
 			.as_mut()
 			.reset(self.origin + at.since_origin().saturating_sub(LEAD));
@@ -155,7 +151,7 @@ impl Timer {
 		if let Some(waited) = self.sleep.deadline().checked_duration_since(self.armed)
 			&& !waited.is_zero()
 		{
-			guard::fired(waited, self.offset);
+			guard::fired(waited);
 		}
 		Poll::Ready(())
 	}
@@ -204,42 +200,23 @@ mod guard {
 		})
 	}
 
-	/// Bounds on how far tokio's clock reads from std's, in nanoseconds.
+	/// Whether the calling runtime's tokio clock runs, as opposed to paused.
 	///
-	/// A running tokio clock, resumed after a pause included, keeps a fixed offset from
-	/// std's, so the bounds taken when a timer is armed and when it fires overlap. Pausing
-	/// or advancing it moves the offset by the time it skipped.
-	#[derive(Clone, Copy)]
-	pub(super) struct Offset {
-		low: i128,
-		high: i128,
-	}
-
-	/// The current [`Offset`], while the guard is on.
-	pub(super) fn offset() -> Option<Offset> {
-		if !denied() {
-			return None;
+	/// A paused clock reads the same until a pause or advance moves it, which cannot happen
+	/// mid-poll on the current-thread runtime pausing needs. A running one, resumed included,
+	/// moves whenever std's does.
+	fn running() -> bool {
+		let first = host::Instant::now();
+		let std = std::time::Instant::now();
+		while std::time::Instant::now() == std {
+			std::hint::spin_loop();
 		}
-		let before = std::time::Instant::now();
-		let reading = host::Instant::now().into_std();
-		let after = std::time::Instant::now();
-		let signed = |from: std::time::Instant| match reading.checked_duration_since(from) {
-			Some(ahead) => ahead.as_nanos() as i128,
-			None => -((from - reading).as_nanos() as i128),
-		};
-		Some(Offset {
-			low: signed(after),
-			high: signed(before),
-		})
+		host::Instant::now() > first
 	}
 
-	/// A host timer armed at `armed`'s offset fired after waiting `waited`.
-	pub(super) fn fired(waited: Duration, armed: Option<Offset>) {
-		let (Some(armed), Some(now)) = (armed, offset()) else {
-			return;
-		};
-		// A paused or advanced clock moved its offset; one that ran kept it.
-		if ALLOWED.load(Ordering::Relaxed) || now.high < armed.low || now.low > armed.high {
+	/// A host timer that waited `waited` fired.
+	pub(super) fn fired(waited: Duration) {
+		if !denied() || ALLOWED.load(Ordering::Relaxed) || !running() {
 			return;
 		}
 		// Abort rather than panic: a panic in a spawned task never reaches the test.
