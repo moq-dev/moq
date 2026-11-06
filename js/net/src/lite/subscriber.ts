@@ -22,7 +22,7 @@ import {
 	unauthorized,
 } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Hop, MAX_HOPS, type RouteInfo, routesEqual, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type Hop, MAX_HOPS, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import {
 	type DropRun,
@@ -464,7 +464,7 @@ export class Subscriber {
 		// retract that one's state.
 		type Advertisement = {
 			live: boolean;
-			route: RouteInfo;
+			route: WireRoute;
 			captures: Path.Pattern[] | undefined;
 		};
 		// Each holds one of the session's announce slots, reflected and hidden ones included.
@@ -776,7 +776,7 @@ export class Subscriber {
 					});
 					continue;
 				}
-				const route: RouteInfo = { instance, epoch, hops: fullHops, cost: this.#cost(cost) };
+				const route: WireRoute = { instance, epoch, hops: fullHops, cost: this.#cost(cost) };
 				const captures = scopeCaptures(scope, path);
 				if (!visible(path)) {
 					advertised.set(path, { live: false, route, captures });

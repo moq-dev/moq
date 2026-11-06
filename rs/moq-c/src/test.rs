@@ -7728,7 +7728,7 @@ fn announce_route_hops_cross_a_relay_session() {
 	let sink = id(moq_origin_create());
 	let hops = {
 		let state = State::lock();
-		[source, relay].map(|origin| state.origin.get(Id::try_from(origin).unwrap()).unwrap().hop().id())
+		[source, relay].map(|origin| state.origin.get(Id::try_from(origin).unwrap()).unwrap().hop().get())
 	};
 	let server_cb = Callback::new();
 	let (server, addr, fingerprint) = listen(&server_cb);

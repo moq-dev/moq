@@ -1,11 +1,8 @@
 # `@moq/net`
 
 ```ts
-import { $ZodBranded } from "zod/v4/core";
 import { Instant } from "@moq/clock";
 import { Milli } from "@moq/clock";
-import { ZodMiniBigInt } from "zod/mini";
-import { infer } from "zod/mini";
 
 export namespace Announce {
 	export interface Announce {
@@ -469,8 +466,6 @@ export namespace Origin {
 		readonly closed: Signals.GetPromise<Error | null>;
 		readonly path: Path.Valid;
 	}
-	export type Hop = infer<typeof Origin.HopSchema>;
-	export const HopSchema: $ZodBranded<ZodMiniBigInt<bigint>, "Hop", "out">;
 	export class Producer implements Origin.Table {
 		constructor();
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
@@ -519,10 +514,9 @@ export namespace Origin {
 		withdraw(): void;
 	}
 	export interface RouteInfo {
-		readonly auth?: Auth.Credential;
+		readonly anonymous: boolean;
 		readonly cost: Origin.Cost;
-		readonly epoch?: bigint;
-		readonly hops: readonly Origin.Hop[];
+		readonly hops: readonly bigint[];
 		readonly instance?: Instance.Valid;
 	}
 	export interface RouteOptions {
@@ -536,7 +530,6 @@ export namespace Origin {
 		route(path: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
 		routePrefix(prefix: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
 	}
-	export function isAnonymous(route: Origin.RouteInfo): boolean;
 }
 
 export namespace Path {

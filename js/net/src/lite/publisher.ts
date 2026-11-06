@@ -5,6 +5,7 @@ import { Gate } from "../auth_gate.ts";
 import type { AuthSession } from "../auth_session.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
+import { statsOf } from "../connection/stats.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
 import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
@@ -19,7 +20,7 @@ import {
 	unauthorized,
 } from "../error.ts";
 import type * as group from "../group.ts";
-import { Cost, type Hop, type RouteInfo, routesEqual } from "../hop.ts";
+import { Cost, type Hop, routesEqual, type WireRoute } from "../hop.ts";
 import {
 	type DropRun,
 	finalSequence,
@@ -626,7 +627,7 @@ export class Publisher {
 		let nextAnnounceId = 0n;
 		const announceIds = new Map<Path.Valid, bigint>();
 
-		const wireHops = (route: RouteInfo): Hop[] => {
+		const wireHops = (route: WireRoute): Hop[] => {
 			if (hasAnnounceOk(this.version)) return [...route.hops];
 			return [...route.hops, this.hop];
 		};
@@ -634,7 +635,7 @@ export class Publisher {
 		// What the peer decodes for a route: pre-lite-06 wires carry no cost, so a re-price
 		// there must not restart.
 		// moq-lite carries no per-request auth, so a swap alone sends nothing.
-		const onWire = (route: RouteInfo): RouteInfo => ({
+		const onWire = (route: WireRoute): WireRoute => ({
 			...route,
 			cost: hasRouteCost(this.version) ? route.cost : Cost.zero,
 			auth: undefined,
@@ -646,7 +647,7 @@ export class Publisher {
 			!sameInstance(prev, next) ||
 			(hasInstance(this.version) && (prev.route.epoch ?? 0n) !== (next.route.epoch ?? 0n));
 
-		const announce = async (suffix: Path.Valid, route: RouteInfo) => {
+		const announce = async (suffix: Path.Valid, route: WireRoute) => {
 			console.debug(`announce: broadcast=${suffix} active=true instance=${route.instance}`);
 			if (hasAnnounceId(this.version)) announceIds.set(suffix, nextAnnounceId++);
 			await encodeAnnounceBroadcast(
@@ -663,7 +664,7 @@ export class Publisher {
 			);
 		};
 
-		const update = async (suffix: Path.Valid, route: RouteInfo) => {
+		const update = async (suffix: Path.Valid, route: WireRoute) => {
 			if (!hasAnnounceId(this.version)) {
 				await retract(suffix);
 				await announce(suffix, route);
@@ -683,7 +684,7 @@ export class Publisher {
 		};
 
 		// Another instance or epoch: ANNOUNCE_RESTART on lite-07, an end and a start before it.
-		const restart = async (suffix: Path.Valid, route: RouteInfo) => {
+		const restart = async (suffix: Path.Valid, route: WireRoute) => {
 			const id = announceIds.get(suffix);
 			if (id === undefined || !hasAnnounceRestart(this.version)) {
 				await retract(suffix);
@@ -2494,11 +2495,8 @@ export class Publisher {
 	 * @internal
 	 */
 	async runProbe(stream: Stream) {
-		// getStats is not yet in the TypeScript WebTransport type definitions.
-		const quic = this.#quic as unknown as {
-			getStats?: () => Promise<{ estimatedSendRate: number | null; smoothedRtt?: number | null }>;
-		};
-		if (!quic.getStats) {
+		const getStats = statsOf(this.#quic);
+		if (!getStats) {
 			// Best-effort: we can't supply bandwidth estimates, so close the
 			// whole bidi (FIN + STOP_SENDING) to let the peer release its end.
 			stream.close();
@@ -2549,7 +2547,7 @@ export class Publisher {
 				// unknown, so a transport exposing only one still has something to
 				// report. Anything this version can't carry is dropped here rather
 				// than by the encoder, so it reads as unknown to every check below.
-				const stats = await quic.getStats();
+				const stats = await getStats();
 				// `smoothedRtt` is a DOMHighResTimeStamp, i.e. a double, but the wire
 				// carries whole milliseconds and the varint encoder throws on a
 				// fractional value. Round before it ever reaches `Probe`.
