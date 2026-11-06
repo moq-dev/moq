@@ -679,6 +679,11 @@ pub struct MoqConnectionStats {
 	/// connection's version with another's numbers.
 	#[uniffi(default = None)]
 	pub version: Option<String>,
+	/// Total datagrams received for a subscription with no datagram track: one the session
+	/// doesn't know, has ended, or whose answer it hasn't received. `None` on a version
+	/// without datagrams: moq-transport and moq-lite before 05.
+	#[uniffi(default = None)]
+	pub datagrams_unrouted: Option<u64>,
 }
 
 impl MoqConnectionStats {
@@ -693,6 +698,7 @@ impl MoqConnectionStats {
 			packets_received: stats.packets_received,
 			packets_lost: stats.packets_lost,
 			version: version.map(|version| version.to_string()),
+			datagrams_unrouted: stats.datagrams_unrouted,
 		}
 	}
 }

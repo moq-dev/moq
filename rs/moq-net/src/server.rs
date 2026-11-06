@@ -240,6 +240,7 @@ impl Server {
 				bandwidth: crate::bandwidth::Allocator::default(),
 				viewers,
 				peer_implementation: start.peer_implementation,
+				datagrams_unrouted: start.datagrams_unrouted,
 			},
 		))
 	}
@@ -805,6 +806,7 @@ impl PausedIetf {
 				bandwidth: crate::bandwidth::Allocator::default(),
 				viewers: Default::default(),
 				peer_implementation,
+				datagrams_unrouted: None,
 			},
 		))
 	}
@@ -935,6 +937,7 @@ impl NegotiatedStart {
 				bandwidth: crate::bandwidth::Allocator::default(),
 				viewers,
 				peer_implementation: start.peer_implementation,
+				datagrams_unrouted: start.datagrams_unrouted,
 			},
 		))
 	}

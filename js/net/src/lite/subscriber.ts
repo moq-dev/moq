@@ -1,4 +1,4 @@
-import { Milli } from "@moq/clock";
+import { Milli, yieldNow } from "@moq/clock";
 import { type Dispose, Effect, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
@@ -96,6 +96,10 @@ import {
 // and removals of one name never reaches the announces cap: yield so it cannot starve the host.
 const listingBudget = new Budget();
 const datagramBudget = new Budget();
+// The datagrams held for unanswered subscriptions at once, as many as a Rust pass holds: past it,
+// one is dropped and counted rather than stalling the receive queue, which would hold up other
+// tracks' datagrams behind their ends.
+const HELD_DATAGRAMS = 32;
 
 // Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
 // candidate outranks it, while the route stays selectable as the last path. Matches Rust
@@ -133,6 +137,9 @@ interface Consumed {
 interface DatagramEntry {
 	producer: datagram.Producer;
 	timescale?: Time.Timescale;
+	// Set once the publisher ended the track, while the datagrams received with the end route:
+	// a session close meanwhile finishes it rather than cutting it off.
+	ended?: boolean;
 }
 
 interface SubscribeEntry {
@@ -244,6 +251,16 @@ export class Subscriber {
 	#datagrams = new Map<bigint, DatagramEntry>();
 	#legacyDatagrams = new Map<string, DatagramEntry>();
 	#legacyRequests = new Map<string, datagram.Request>();
+	// Lite-07 datagram requests sent and not yet answered.
+	#unanswered = new Set<bigint>();
+	// Datagrams for a subscription still awaiting its answer, in arrival order, routed a host task
+	// later while the rest go on.
+	#held: { subscribe: bigint; payload: Uint8Array }[] = [];
+	#heldRouted?: Promise<void>;
+	// Set while the receive loop yields to its budget, which may leave datagrams queued.
+	#receiveYield?: Promise<void>;
+	/** Datagrams received for a subscription with no datagram track; see `Stats.datagramsUnrouted`. */
+	datagramsUnrouted = 0;
 	// A SUBSCRIBE sent alongside its TRACK, until its TRACK_INFO lands: settles with the
 	// entry, or `undefined` if it never does.
 	#pending = new Map<bigint, Promise<SubscribeEntry | undefined>>();
@@ -892,6 +909,7 @@ export class Subscriber {
 					{ version: this.version },
 					async (opened) => {
 						stream = opened;
+						this.#unanswered.add(id);
 						await opened.writer.u53(StreamId.Datagrams);
 						await new Datagrams({
 							id,
@@ -910,12 +928,17 @@ export class Subscriber {
 			signal.throwIfAborted();
 			if (!stream) throw new Error("datagram stream was not opened");
 			producer = request.accept(answered);
-			this.#datagrams.set(id, { producer, timescale: answered.timescale });
+			const route: DatagramEntry = { producer, timescale: answered.timescale };
+			this.#datagrams.set(id, route);
+			this.#unanswered.delete(id);
 			const opened = stream;
 			const receiving = producer;
-			// The only thing following DATAGRAMS_INFO is the publisher's FIN.
-			const ended = opened.reader.done().then((done) => {
+			// The only thing following DATAGRAMS_INFO is the publisher's FIN. Its last datagram may
+			// arrive alongside, so the datagrams already received route first.
+			const ended = opened.reader.done().then(async (done) => {
 				if (!done) throw new ProtocolViolation("data after DATAGRAMS_INFO");
+				route.ended = true;
+				await this.#datagramsRouted(id);
 				receiving.finish();
 			});
 			void ended.catch(() => {});
@@ -943,6 +966,7 @@ export class Subscriber {
 			if (legacyKey !== undefined && this.#legacyRequests.get(legacyKey) === request)
 				this.#legacyRequests.delete(legacyKey);
 			grant?.();
+			this.#unanswered.delete(id);
 			this.#datagrams.delete(id);
 			cancel.abort(new StreamError(StreamCode.Cancel));
 			stream?.reader.stop(StreamCode.Cancel);
@@ -1370,6 +1394,11 @@ export class Subscriber {
 			entry.held?.close();
 			entry.datagramDemand?.();
 			if (entry.datagrams) {
+				// The stream track's end is its datagrams' end: those received with it route first.
+				if (entry.end !== undefined && !(hooks.trackReleased(producer).peek() instanceof Error)) {
+					entry.datagrams.ended = true;
+					await this.#datagramsRouted(id);
+				}
 				const closed = hooks.trackReleased(producer).peek();
 				if (closed instanceof Error) entry.datagrams.producer.abort(closed);
 				else if (entry.end !== undefined) entry.datagrams.producer.finish();
@@ -2383,7 +2412,11 @@ export class Subscriber {
 			try {
 				for (;;) {
 					const yielded = datagramBudget.poll();
-					if (yielded !== undefined) await yielded;
+					if (yielded !== undefined) {
+						this.#receiveYield = yielded;
+						await yielded;
+						this.#receiveYield = undefined;
+					}
 					const { value, done } = await reader.read();
 					if (done) break;
 					if (!value) continue;
@@ -2407,24 +2440,92 @@ export class Subscriber {
 		}
 	}
 
-	// Decode one datagram body and hand it to the matching subscription's producer. Drops the
-	// datagram (best-effort) if the subscription is unknown or closed.
+	// Decode one datagram body and hand it to the datagram track it was sent for. A publisher
+	// sends a track's first datagram right behind its answer, which the transport may hand over
+	// first: one for a subscription still awaiting its answer is held a host task, so an answer
+	// already received decodes before it, while other tracks' datagrams go on. One that still
+	// finds no track is dropped and counted.
 	async #routeDatagram(payload: Uint8Array): Promise<void> {
 		if (payload.byteLength > DatagramMessage.MAX_SIZE) return;
+		let unrouted = await this.#deliverDatagram(payload, true);
+		if (unrouted === undefined) return;
+		// Its track may have registered while the decode awaited.
+		if (!this.#isHeld(unrouted) && this.#datagrams.has(unrouted))
+			unrouted = await this.#deliverDatagram(payload, true);
+		if (unrouted === undefined) return;
+		const awaiting = this.#isHeld(unrouted) || this.#unanswered.has(unrouted) || this.#pending.has(unrouted);
+		if (awaiting && this.#held.length < HELD_DATAGRAMS) {
+			this.#held.push({ subscribe: unrouted, payload });
+			this.#heldRouted ??= this.#routeHeld();
+			return;
+		}
+		this.#dropUnrouted(unrouted);
+	}
+
+	// Wait for the datagrams received for `subscribe` so far to route: a host task, then until the
+	// receive loop reads the transport's queue empty rather than yielding to its budget, and those
+	// held for its answer. A peer keeping the queue full delays the end, holding nothing more.
+	async #datagramsRouted(subscribe: bigint): Promise<void> {
+		await yieldNow();
+		for (;;) {
+			const receiveYield = this.#receiveYield;
+			if (receiveYield !== undefined) {
+				await receiveYield;
+				// The loop reads on in microtasks, until the queue empties or its next yield.
+				await yieldNow();
+			} else if (this.#isHeld(subscribe)) {
+				// A held datagram keeps its routing pass running.
+				await this.#heldRouted;
+			} else return;
+		}
+	}
+
+	// Whether a datagram for `subscribe` is held, which later ones wait behind to keep its order.
+	#isHeld(subscribe: bigint): boolean {
+		return this.#held.some((held) => held.subscribe === subscribe);
+	}
+
+	// A host task later, route the datagrams held until now, then any held meanwhile.
+	async #routeHeld(): Promise<void> {
+		await yieldNow();
+		for (let count = this.#held.length; count > 0; count--) {
+			const [{ payload }] = this.#held;
+			try {
+				const unrouted = await this.#deliverDatagram(payload, false);
+				if (unrouted !== undefined) this.#dropUnrouted(unrouted);
+			} catch (err: unknown) {
+				console.debug(`dropping datagram: ${reason(err)}`);
+			}
+			this.#held.shift();
+		}
+		this.#heldRouted = this.#held.length > 0 ? this.#routeHeld() : undefined;
+	}
+
+	#dropUnrouted(subscribe: bigint): void {
+		this.datagramsUnrouted++;
+		console.debug(`dropping datagram for a subscription with no datagram track: id=${subscribe}`);
+	}
+
+	// Deliver one datagram body, returning its Subscribe ID if that subscription has no datagram
+	// track, or, `behindHeld`, has a datagram held.
+	async #deliverDatagram(payload: Uint8Array, behindHeld: boolean): Promise<bigint | undefined> {
 		// Read with the entry it was decoded with: one registered while the decode awaited would
-		// read a datagram parsed with the defaults. An unknown subscription's datagram, or one
-		// whose TRACK_INFO had not landed, which a datagram cannot wait for, is dropped below.
+		// read a datagram parsed with the defaults.
 		let entry: DatagramEntry | undefined;
 		const dg = await DatagramMessage.decode(payload, this.version, (id) => {
 			entry = this.#datagrams.get(id);
 			return { timed: entry?.timescale !== undefined };
 		});
-		if (!dg || !entry || this.#datagrams.get(dg.subscribe) !== entry) return;
+		// Padding, which names no subscription.
+		if (!dg) return undefined;
+		if (!entry || this.#datagrams.get(dg.subscribe) !== entry) return dg.subscribe;
+		if (behindHeld && this.#isHeld(dg.subscribe)) return dg.subscribe;
 		const timestamp =
 			dg.timestamp === undefined || entry.timescale === undefined
 				? undefined
 				: new Time.Timestamp(dg.timestamp, entry.timescale);
 		entry.producer.insert({ sequence: dg.sequence, timestamp, payload: dg.payload });
+		return undefined;
 	}
 
 	/**
@@ -2554,7 +2655,7 @@ export class Subscriber {
 	/**
 	 * Ends every subscribed track, fetch, and setup exchange with `err`, the session's end, which
 	 * defaults to a clean close: they were cut off rather than ended. A track whose publisher
-	 * already ended it finishes instead.
+	 * already ended it finishes instead, datagram tracks included.
 	 */
 	close(err: Error = new SessionError(SessionCode.Cancel)) {
 		this.#closed.abort(err);
@@ -2565,7 +2666,10 @@ export class Subscriber {
 		}
 
 		this.#subscribes.clear();
-		for (const { producer } of this.#datagrams.values()) producer.abort(err);
+		for (const { producer, ended } of this.#datagrams.values()) {
+			if (ended) producer.finish();
+			producer.abort(err);
+		}
 		this.#datagrams.clear();
 		this.#legacyDatagrams.clear();
 

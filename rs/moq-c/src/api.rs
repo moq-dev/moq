@@ -1159,6 +1159,12 @@ pub struct moq_connection_stats {
 	pub packets_lost: u64,
 	/// Whether `packets_lost` is available in this sample.
 	pub packets_lost_valid: bool,
+
+	/// Total datagrams received for a subscription with no datagram track: one the session
+	/// doesn't know, has ended, or whose answer it hasn't received.
+	pub datagrams_unrouted: u64,
+	/// Whether `datagrams_unrouted` is available: false on a version without datagrams.
+	pub datagrams_unrouted_valid: bool,
 }
 
 impl From<&moq_net::session::Stats> for moq_connection_stats {
@@ -1177,6 +1183,7 @@ impl From<&moq_net::session::Stats> for moq_connection_stats {
 		let (packets_sent, packets_sent_valid) = split(stats.packets_sent);
 		let (packets_received, packets_received_valid) = split(stats.packets_received);
 		let (packets_lost, packets_lost_valid) = split(stats.packets_lost);
+		let (datagrams_unrouted, datagrams_unrouted_valid) = split(stats.datagrams_unrouted);
 
 		Self {
 			rtt_us,
@@ -1195,6 +1202,8 @@ impl From<&moq_net::session::Stats> for moq_connection_stats {
 			packets_received_valid,
 			packets_lost,
 			packets_lost_valid,
+			datagrams_unrouted,
+			datagrams_unrouted_valid,
 		}
 	}
 }

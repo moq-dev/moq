@@ -549,7 +549,9 @@ export class Connection implements Established {
 
 	/** Snapshot the transport's counters; see {@link Established.stats}. */
 	async stats(): Promise<Stats> {
-		return transportStats(this.#quic);
+		const stats = await transportStats(this.#quic);
+		if (hasDatagrams(this.#version)) stats.datagramsUnrouted = this.#subscriber.datagramsUnrouted;
+		return stats;
 	}
 
 	/** Settles with the peer's GOAWAY; see {@link Established.draining}. */

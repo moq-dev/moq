@@ -76,14 +76,15 @@ test("stats() snapshots the transport on demand", async () => {
 	}
 });
 
-test("stats() is empty on a transport without getStats", async () => {
+test("stats() has no transport counters on a transport without getStats", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	// Shadow the mock's getStats to imitate the qmux/WebSocket fallback.
 	(pair.client as unknown as { getStats?: unknown }).getStats = undefined;
 	const url = new URL("https://example.com/");
 	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
 	try {
-		expect(await client.stats()).toEqual({});
+		// Only the session's own counter, which needs nothing from the transport.
+		expect(await client.stats()).toEqual({ datagramsUnrouted: 0 });
 	} finally {
 		client.abort();
 		server.abort();

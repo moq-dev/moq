@@ -4160,6 +4160,7 @@ class MoqConnectionStats {
   final int? packetsReceived;
   final int? packetsLost;
   final String? version;
+  final int? datagramsUnrouted;
   MoqConnectionStats({
     this.rtt,
     this.estimatedSendRateBps,
@@ -4170,6 +4171,7 @@ class MoqConnectionStats {
     this.packetsReceived,
     this.packetsLost,
     this.version = null,
+    this.datagramsUnrouted = null,
   });
 }
 
@@ -4225,6 +4227,11 @@ class FfiConverterMoqConnectionStats {
     );
     final version = version_lifted.value;
     new_offset += version_lifted.bytesRead;
+    final datagramsUnrouted_lifted = FfiConverterOptionalUInt64.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final datagramsUnrouted = datagramsUnrouted_lifted.value;
+    new_offset += datagramsUnrouted_lifted.bytesRead;
     return LiftRetVal(
       MoqConnectionStats(
         rtt: rtt,
@@ -4236,6 +4243,7 @@ class FfiConverterMoqConnectionStats {
         packetsReceived: packetsReceived,
         packetsLost: packetsLost,
         version: version,
+        datagramsUnrouted: datagramsUnrouted,
       ),
       new_offset - buf.offsetInBytes,
     );
@@ -4252,6 +4260,7 @@ class FfiConverterMoqConnectionStats {
         FfiConverterOptionalUInt64.allocationSize(value.packetsReceived) +
         FfiConverterOptionalUInt64.allocationSize(value.packetsLost) +
         FfiConverterOptionalString.allocationSize(value.version) +
+        FfiConverterOptionalUInt64.allocationSize(value.datagramsUnrouted) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -4296,6 +4305,10 @@ class FfiConverterMoqConnectionStats {
       value.version,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterOptionalUInt64.write(
+      value.datagramsUnrouted,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -4309,6 +4322,7 @@ class FfiConverterMoqConnectionStats {
         FfiConverterOptionalUInt64.allocationSize(value.packetsReceived) +
         FfiConverterOptionalUInt64.allocationSize(value.packetsLost) +
         FfiConverterOptionalString.allocationSize(value.version) +
+        FfiConverterOptionalUInt64.allocationSize(value.datagramsUnrouted) +
         0;
   }
 }

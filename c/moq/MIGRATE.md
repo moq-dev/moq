@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `moq_connection_stats` counts unrouted datagrams ([#7951](https://github.com/moq-dev/moq/pull/7951))
+
+`moq_connection_stats` gains `datagrams_unrouted` and `datagrams_unrouted_valid` at its end, which changes its ABI: recompile against the new header.
+`datagrams_unrouted` counts the datagrams received for a subscription with no datagram track, and is valid on versions with datagrams (moq-lite 05 and newer).
+
 ### Socket sessions
 
 The generated socket endpoint, incoming dial, and stream handles now expose TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.

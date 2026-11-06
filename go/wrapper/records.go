@@ -208,6 +208,9 @@ type ConnectionStats struct {
 	PacketsLost          *uint64
 	// Version is the negotiated protocol version, spelled like ClientConfig.Versions.
 	Version *string
+	// DatagramsUnrouted counts datagrams received for a subscription with no datagram
+	// track; nil on a version without datagrams.
+	DatagramsUnrouted *uint64
 }
 
 func connectionStatsFromFFI(s ffi.MoqConnectionStats) ConnectionStats {
@@ -221,6 +224,7 @@ func connectionStatsFromFFI(s ffi.MoqConnectionStats) ConnectionStats {
 		PacketsReceived:      s.PacketsReceived,
 		PacketsLost:          s.PacketsLost,
 		Version:              s.Version,
+		DatagramsUnrouted:    s.DatagramsUnrouted,
 	}
 }
 
