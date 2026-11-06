@@ -52,8 +52,6 @@ function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
  */
 function copy(source: BroadcastProducer) {
 	const producer = source.createTrack("seq", { maxAge: null });
-	// A route's copy is received, so its groups arrive in any order.
-	hooks.receiveTrack(producer);
 	return {
 		producer,
 		write(sequence: bigint, frames = 1, close = true) {
