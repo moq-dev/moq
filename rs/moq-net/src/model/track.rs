@@ -3878,7 +3878,7 @@ impl Producer {
 	}
 
 	/// Evict group `sequence` from the cache, as expiry does.
-	#[cfg(test)]
+	#[cfg(all(test, feature = "async"))]
 	pub(crate) fn evict(&self, sequence: u64) {
 		self.modify().unwrap().evict_group(sequence, Error::Evicted);
 	}
@@ -23539,6 +23539,7 @@ mod test {
 	}
 
 	/// The frame a read takes right now, as its number in [`numbered`].
+	#[cfg(feature = "async")]
 	fn read_numbered(reader: &mut group::Consumer) -> Option<u32> {
 		let frame = reader.read_frame().now_or_never()?;
 		let frame = frame.expect("read failed").expect("the group ended");
@@ -23655,6 +23656,7 @@ mod test {
 	}
 
 	/// The size of `payload` as a frame, for [`group::Producer::poll_ready`].
+	#[cfg(feature = "async")]
 	fn frame_info(payload: &bytes::Bytes) -> frame::Info {
 		frame::Info {
 			size: payload.len() as u64,
@@ -23664,6 +23666,7 @@ mod test {
 
 	/// A live group of `frames` numbered frames past its tail, read along by a live reader,
 	/// on a track with a handler.
+	#[cfg(feature = "async")]
 	fn shed_live_group(frames: u32) -> (Producer, Requests, group::Producer, group::Consumer) {
 		let producer = track_producer("test", Info::default());
 		let requests = producer.requests();
@@ -23677,6 +23680,7 @@ mod test {
 	}
 
 	/// The next fill asked of `requests`, if any.
+	#[cfg(feature = "async")]
 	fn asked(requests: &Requests) -> Option<Fill> {
 		match requests.poll_requested_fill(&kio::Waiter::noop()) {
 			Poll::Ready(fill) => Some(fill.unwrap()),
