@@ -834,12 +834,8 @@ impl Scrape {
 			"moq_relay_sessions_connected",
 			"Connected sessions; active if media payload moved through them within the last 10 seconds, idle otherwise.",
 			activity.iter().flat_map(|(tier, activity)| {
-				[("idle", activity.idle), ("active", activity.active)].map(|(state, count)| {
-					(
-						[("tier", Label(tier.as_str())), ("state", Label(state))],
-						count,
-					)
-				})
+				[("idle", activity.idle), ("active", activity.active)]
+					.map(|(state, count)| ([("tier", Label(tier.as_str())), ("state", Label(state))], count))
 			}),
 		)?;
 
@@ -1795,7 +1791,9 @@ mod tests {
 			check();
 			let body = render_metrics(&registry.snapshot(), &[], &[]);
 			assert!(
-				body.contains(&format!("moq_relay_sessions_connected{{tier=\"{tier}\",state=\"idle\"}} 1")),
+				body.contains(&format!(
+					"moq_relay_sessions_connected{{tier=\"{tier}\",state=\"idle\"}} 1"
+				)),
 				"transport bytes alone leave a session idle:\n{body}"
 			);
 			drop(guard);

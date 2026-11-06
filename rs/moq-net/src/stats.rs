@@ -3024,16 +3024,28 @@ mod tests {
 		let _request = stats.tier(tier.clone()).request(crate::Path::from_static("acme"));
 		let meter = busy.egress(crate::Path::from_static("acme/live")).meter();
 		let _held = quiet.ingress(crate::Path::from_static("acme/other")).meter();
-		assert_eq!(activity(0), both(2, 0), "connecting moves no payload; requests never count");
+		assert_eq!(
+			activity(0),
+			both(2, 0),
+			"connecting moves no payload; requests never count"
+		);
 
 		meter.bytes(1);
 		assert_eq!(activity(1), both(1, 1));
-		assert_eq!(activity(10), both(1, 1), "still within the window of the readout that saw it");
+		assert_eq!(
+			activity(10),
+			both(1, 1),
+			"still within the window of the readout that saw it"
+		);
 		assert_eq!(activity(11), both(2, 0), "the window ends");
 
 		meter.datagram(1);
 		drop(busy);
-		assert_eq!(activity(12), both(1, 0), "an ended session is neither, even with a live meter");
+		assert_eq!(
+			activity(12),
+			both(1, 0),
+			"an ended session is neither, even with a live meter"
+		);
 	}
 
 	#[test]
