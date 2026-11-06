@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
-use moq_net::{Error, Hop, Timestamp, Version, origin, track};
+use moq_net::{Error, Timestamp, Version, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,
@@ -39,7 +39,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const FRAMES: u64 = 4;
 
 pub(super) fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }

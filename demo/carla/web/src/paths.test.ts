@@ -13,7 +13,7 @@ describe("parseCamera", () => {
 			"carla/truck1/front",
 			"carla/truck1/rear/extra.hang",
 			"other/truck1/front.hang",
-			"viewer/carla/truck1/abc",
+			"carla/.socket/truck1",
 		]) {
 			expect(parseCamera(path)).toBeUndefined();
 		}

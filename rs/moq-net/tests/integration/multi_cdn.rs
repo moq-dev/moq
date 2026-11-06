@@ -15,7 +15,7 @@ use crate::support;
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
-use moq_net::{Error, Hop, Timestamp, Version, origin, track};
+use moq_net::{Error, Timestamp, Version, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -32,7 +32,7 @@ const FRAMES: u64 = 4;
 const A: u64 = 2;
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -135,7 +135,7 @@ fn via_a(announce: &origin::RouteEvent) -> bool {
 		| origin::RouteEvent::Takeover { announce: a, .. } => &a.route,
 		origin::RouteEvent::End(_) => return false,
 	};
-	route.hops().iter().any(|hop| *hop == Hop::new(A).unwrap())
+	route.hops().any(|hop| hop == A)
 }
 
 struct Topology {

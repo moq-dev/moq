@@ -52,7 +52,7 @@ pub trait Sealed: Sized {
 	fn admission(&self, auth: &auth::Auth) -> moq_auth::Request;
 
 	/// Finish `work` before the handshake deadline, closing the session if it passes.
-	async fn within<T>(&self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T>;
+	async fn within<T>(&mut self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T>;
 
 	/// Refuse the session, closing it with `code`.
 	async fn reject(self, code: moq_net::SessionError);
@@ -100,7 +100,7 @@ impl Sealed for moq_tokio::server::Request {
 		auth::request_for(auth, self)
 	}
 
-	async fn within<T>(&self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T> {
+	async fn within<T>(&mut self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T> {
 		Ok(moq_tokio::server::Request::within(self, work).await?)
 	}
 
@@ -181,9 +181,12 @@ impl Sealed for Accepted {
 		auth::request_for_setup(auth, &self.handshake, self.transport)
 	}
 
-	/// No listener deadline: whoever owns the transport bounds the handshake.
-	async fn within<T>(&self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T> {
-		Ok(work.await)
+	async fn within<T>(&mut self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T> {
+		let expired = self.handshake.expired();
+		match futures::future::select(std::pin::pin!(work), std::pin::pin!(expired)).await {
+			futures::future::Either::Left((done, _)) => Ok(done),
+			futures::future::Either::Right(_) => Err(moq_net::Error::Timeout.into()),
+		}
 	}
 
 	async fn reject(self, code: moq_net::SessionError) {

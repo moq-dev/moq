@@ -157,6 +157,25 @@ for (const kind of kinds) {
 	}
 }
 
+// Safari's stub getStats() reports a 0 RTT: decided once at setup, it reads as no getStats().
+test("a session whose getStats reports a 0 RTT at setup is treated as having none", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06, { stats: { smoothedRtt: 0, bytesSent: 0 } });
+	const url = new URL("https://example.com/");
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+	try {
+		expect(estimates(client)).toBe(false);
+		const stats = await client.stats();
+		expect(stats.rtt).toBeUndefined();
+		expect(stats.bytesSent).toBeUndefined();
+		// A real RTT later doesn't revive it; only the setup-time answer counts.
+		pair.client.stats = { smoothedRtt: 20 };
+		expect(canEstimate(pair.client)).toBe(false);
+	} finally {
+		client.abort();
+		server.abort();
+	}
+});
+
 test("Reload exposes its established session stats and probe only while connected", async () => {
 	const original = globalThis.WebTransport;
 	const pair = createMockTransportPair(Lite.ALPN_06, { stats: { bytesSent: 99 } });

@@ -264,6 +264,31 @@ async fn set_limits_widens_and_refuses_a_rate_cap() {
 	));
 }
 
+/// moq-net opens a session's receive window through the transport trait, unless the session's
+/// window is fixed, which it reports as a limit it cannot change.
+#[tokio::test(start_paused = true)]
+async fn the_transport_widens_unless_its_window_is_fixed() {
+	let mut limits = net::Limits::default();
+	limits.receive_window = std::num::NonZeroU64::new(16 << 20);
+
+	let (_client, server) = pair(config(Version::QMux02), config(Version::QMux02)).await;
+	poll::Session::set_limits(&server, limits).expect("widened");
+	assert_eq!(poll::Session::receive_window(&server).unwrap().connection, 16 << 20);
+
+	let mut fixed = config(Version::QMux02);
+	fixed.fixed_receive_window = true;
+	let (_client, server) = pair(config(Version::QMux02), fixed).await;
+	let window = poll::Session::receive_window(&server).unwrap().connection;
+	assert_eq!(
+		poll::Session::set_limits(&server, limits),
+		Err(net::LimitsError::Unsupported)
+	);
+	let mut direct = moq_quic::Limits::default();
+	direct.receive_window = limits.receive_window;
+	assert!(matches!(server.set_limits(direct), Err(Error::InvalidConfig(_))));
+	assert_eq!(poll::Session::receive_window(&server).unwrap().connection, window);
+}
+
 /// A reset seen through a lease frees the stream while the reader still holds it, returning
 /// its stream credit and the connection credit its partial message withheld.
 #[tokio::test(start_paused = true)]
