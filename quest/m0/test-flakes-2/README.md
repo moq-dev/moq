@@ -101,7 +101,6 @@ Public API: none. Wire: none.
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
 - [The draft-22 wider-fill refusal test is deterministic](/quest/m0/test-flakes-2/ietf-wider-fill.md) - fix its intermittent live-group reset and re-enable both ordering cases without weakening their assertions
-- [moq-gst's interleaved restart test passes under load](/quest/m0/test-flakes-2/gst-reconnect-interleave.md) - `restarts_under_reconnects_interleave_on_one_pad` passes in loaded runs and the merge queue, its missed delivery and its stray `Eos` each fixed at the cause
 - [reload.test.ts's close-drain tests pass under load](/quest/m0/test-flakes-2/reload-close-drain.md) - the drain cases in `js/net`'s reload tests pass in loaded multi-file runs
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
 - [Diagnose and re-enable the FFI datagram connection test](/quest/m0/test-flakes-2/ffi-datagram-roundtrip.md) - diagnose the default-connection timeout and re-enable the quarantined test

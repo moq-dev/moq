@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Playback fills a declared silence with comfort noise
+
+`Sink::end()` declares that the audio written so far is followed by a silence
+its publisher announced, such as a push-to-talk mute: once it has played, the
+sink plays comfort noise rather than running dry, and the `Observer` counts no
+gap. `Sink::next()` starts the next utterance with the next write, one latency
+out, as a new sink's first write would. A player that opened a new sink at each
+declared end can keep the one it has, calling `end()` at the marker and `next()`
+before the first frame after it. Existing callers need no change.
+
 ### Playback follows a changing latency with received-audio stretch
 
 `Sink::set_latency(duration)?` updates the device callback's playout target
