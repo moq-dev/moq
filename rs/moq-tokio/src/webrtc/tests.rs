@@ -387,3 +387,46 @@ async fn trickled_candidates_wait_for_the_driver() {
 	second.await.unwrap();
 	assert!(matches!(driver.recv().await, Some(Command::Candidate(_))));
 }
+
+/// A drain that starts while the channel is still coming up waits for the connection,
+/// which is admitted rather than refused once its MoQ handshake starts.
+#[tokio::test]
+async fn a_drain_waits_for_an_establishing_peer() {
+	let config = Config::default();
+	let (offerer, offer) = Offerer::with_hosts(&config, protocol(), vec![LOOPBACK]).await.unwrap();
+	let (answerer, answer) = Answerer::with_hosts(&config, &offer, protocol(), vec![LOOPBACK])
+		.await
+		.unwrap();
+
+	let activity = moq_net::server::Activity::default();
+	let listener = crate::server::Config {
+		activity: activity.clone(),
+		..Default::default()
+	}
+	.init_streams()
+	.unwrap()
+	.listen()
+	.await
+	.unwrap();
+	let mut accept = std::pin::pin!(listener.accept_webrtc(&answerer));
+	// The answer is not applied yet, so the channel cannot open.
+	assert!(futures::poll!(accept.as_mut()).is_pending());
+	let mut closed = std::pin::pin!(activity.close());
+	assert!(
+		futures::poll!(closed.as_mut()).is_pending(),
+		"the drain skipped the establishing peer"
+	);
+
+	offerer.accept(&answer).await.unwrap();
+	let client = crate::client::Config::default().init().unwrap();
+	let (request, session) =
+		kio::clock::timeout(TIMEOUT, async { tokio::join!(accept, client.connect_webrtc(&offerer)) })
+			.await
+			.expect("handshake timed out");
+	let request = request.expect("the drain refused an establishing peer");
+	assert!(futures::poll!(closed.as_mut()).is_pending());
+	drop((request, session));
+	kio::clock::timeout(TIMEOUT, closed)
+		.await
+		.expect("the drain never finished");
+}

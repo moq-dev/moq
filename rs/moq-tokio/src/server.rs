@@ -876,11 +876,15 @@ impl Listener {
 	///
 	/// The handshake timeout bounds ICE and the channel coming up, then
 	/// [`Self::accept_with`] bounds the MoQ handshake. The channel must carry the
-	/// answerer's protocol, a MoQ ALPN this server speaks.
+	/// answerer's protocol, a MoQ ALPN this server speaks. Returns [`Error::Stopped`] once
+	/// the listener is closing.
 	#[cfg(feature = "webrtc")]
 	pub async fn accept_webrtc(&self, peer: &crate::webrtc::Answerer) -> crate::Result<Request> {
 		use crate::webrtc::Error as WebRtcError;
 
+		// Counted toward the drain while establishing; a drain admits `accept_with`'s own
+		// guard while this one is held, so the connection is tracked throughout.
+		let _establishing = self.server.activity.enter().ok_or(Error::Stopped)?;
 		if !self.server.versions.alpns().contains(&peer.protocol()) {
 			return Err(WebRtcError::Protocol(peer.protocol().to_string()).into());
 		}
