@@ -4,8 +4,8 @@
  * Connects to the relay, discovers camera broadcasts by announcement (like
  * moq-boy), renders each on a map with a video preview, and lets you take
  * control of one vehicle with the keyboard or a steering wheel. The
- * {@link Truck} backend publishes a `control` track and subscribes to the
- * vehicle's `status` track for round-trip confirmation.
+ * {@link Truck} backend dials the vehicle's socket endpoint to drive it and
+ * subscribes to its `status` track.
  *
  * @module
  */
@@ -53,12 +53,13 @@ import {
 export const PREVIEW = import.meta.env.DEV && new URLSearchParams(location.search).has("preview");
 
 /**
- * Render the player into `root` and run it on `connection`.
+ * Render the player into `root` and run it on `connection`, which serves and
+ * fills `origin`.
  *
  * Everything it starts, window listeners and the input loop included, stops
  * when the returned function is called.
  */
-export function mount(root: ShadowRoot, connection: Moq.Connection): () => void {
+export function mount(root: ShadowRoot, connection: Moq.Connection, origin: Moq.Origin.Producer): () => void {
 	root.innerHTML = `<style>${style}</style>${template}`;
 	preloadAerials();
 
@@ -126,7 +127,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 				// A restarted simulator keeps its path present, and the watch broadcast
 				// follows it, so only an absence removes the tile.
 				if (entry.kind !== "absent" && !tiles.has(entry.prefix)) {
-					const truck = new Truck({ broadcastId: entry.prefix, connection, driving, focused, hovered });
+					const truck = new Truck({ broadcastId: entry.prefix, connection, origin, driving, focused, hovered });
 					tiles.set(entry.prefix, new TruckTile(truck));
 					vehicles.set(tiles.size);
 					refreshFocusLayout();
@@ -1092,8 +1093,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 								? "Manual"
 								: "Unknown";
 				q(".mode").className = `mode${s?.estopped ? " estopped" : ""}`;
-				const me = effect.get(this.truck.driverId);
-				const mine = me ? s?.media_pipeline[me] : undefined;
+				const mine = effect.get(this.truck.pipeline);
 				const roundTrip = effect.get(this.truck.roundTripMs);
 				q(".rtt").textContent = roundTrip == null ? "Not measured" : `${Math.round(roundTrip)} ms`;
 				q(".lat").textContent = mine?.length
@@ -1232,7 +1232,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 			const { populatePreview } = await import("./preview.ts");
 			if (abort.signal.aborted) return;
 			const cleanup = populatePreview((path) => {
-				const truck = new Truck({ broadcastId: path, connection, driving, focused, hovered });
+				const truck = new Truck({ broadcastId: path, connection, origin, driving, focused, hovered });
 				const tile = new TruckTile(truck);
 				tiles.set(path, tile);
 				vehicles.set(tiles.size);

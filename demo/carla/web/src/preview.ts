@@ -30,7 +30,6 @@ export function populatePreview(add: (path: Moq.Path.Valid) => Truck) {
 				estopped: false,
 				map: "Town10HD_Opt",
 				pose,
-				media_pipeline: {},
 			},
 		});
 		cleanup.push(() => {

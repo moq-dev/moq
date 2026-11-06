@@ -30,8 +30,8 @@ See the [epic](/quest/m1/socket/README.md) for the convention.
   `moq auth serve` line it documents) let an anonymous viewer publish its own
   endpoint and subscribe to the game endpoints, instead of boy's use of
   `demo/viewer/**`. Anonymous viewers share one grant, so record how a viewer's
-  endpoint id is kept from being claimed by another. Whichever of this and
-  [CARLA on sockets](/quest/m1/socket/carla.md) lands second removes
-  `demo/viewer/**`.
+  endpoint id is kept from being claimed by another. CARLA's drivers already
+  dial from `demo/carla/.socket/driver-*`, so boy is the last user of
+  `demo/viewer/**`: remove it.
 - Update `doc/bin/demo.md` and the boy README or CHANGELOG where they describe
   the viewer path.
