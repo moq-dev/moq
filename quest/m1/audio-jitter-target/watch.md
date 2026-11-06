@@ -12,8 +12,8 @@ sizes.
 
 The measured rows are the `relay-mic-rtt40` replay row, whose
 `player_underruns_per_min` must reach 0, and a live re-run of the 2026-11-03
-rows below on Chrome and Safari with a real microphone and 40 ms or more of
-added RTT, read from the stats panel's audio Underruns.
+Chrome rows below with a real microphone and 40 ms or more of added RTT, read
+from the stats panel's audio Underruns.
 
 Boundaries: no packet loss concealment, so a frame that never arrives is still
 missing audio; only received audio is stretched. The estimator stays as
@@ -138,8 +138,8 @@ the replay numbers that justify it.
   budget is tightened to the new measurement. No other replay row regresses,
   and the nightly browser rows are re-measured by the budgets note's rule. A
   listening check confirms that a 2 ms/s drift and the measured expansions are
-  inaudible or close to it. The 2026-11-03 Chrome and Safari +40 ms rows are
-  re-run on real hardware.
+  inaudible or close to it. The 2026-11-03 Chrome +40 ms rows are re-run on
+  real hardware.
 
 ### Publisher, measured in the same run
 
@@ -165,14 +165,10 @@ audio-driven clock for this. Recommendation: measure the gap against the sample
 reaching the output, through `AudioContext.getOutputTimestamp()`, so output
 latency, Bluetooth included, is part of the lip sync.
 
-## Waiting
-
-- Maintainer: Safari with 40 ms or more of added RTT, the baseline row the
-  2026-11-03 run could not shape. On the MacBook Air (`kixtop`), install
-  Network Link Conditioner (Additional Tools for Xcode) or allow
-  `sudo dnctl`/`pfctl`, then play `cdn.moq.dev/anon` in Safari with the stats
-  panel open for two minutes, and record its audio Underruns after 30 s and the
-  latency tab's auto delay.
+Decided 2026-11-06 (maintainer, /quest-unblock): ✅ drop the Safari row with
+40 ms or more of added RTT, which needed the maintainer to shape the link on
+their laptop. The Safari direct rows stay. Not chosen: running it by hand, or
+allowing `sudo dnctl`/`pfctl` there.
 
 ## Related
 

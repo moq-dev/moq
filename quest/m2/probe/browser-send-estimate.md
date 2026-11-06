@@ -11,7 +11,7 @@ Found by [moq-dev/moq#7524](https://github.com/moq-dev/moq/pull/7524), which gat
 Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-afk run): m2, in the probe epic, feeding the peer's PROBE estimate to the send allocator. The relay already reports what it receives from us: `Probe.estimatedRecvRate` in `js/net/src/connection/stats.ts`, exposed as `Reload.probe` (`js/net/src/connection/reload.ts`).
 
 - Source order: a transport `getStats()` estimate where the browser has one, else the peer's PROBE `estimatedRecvRate`, else `undefined` (hold the rate, as today). Settle in the PR whether a present-but-empty `getStats` counts as absent.
-- A receive-rate report lags the send side by about an RTT plus the peer's report cadence, and reads what arrived rather than what the path could carry. Check how the allocator should treat it while app-limited (it can only fall or hold, not rise past what was sent), and leave raising it to [padding](/quest/m2/probe/padding.md).
+- A receive-rate report lags the send side by about an RTT plus the peer's report cadence, and reads what arrived rather than what the path could carry. Check how the allocator should treat it while app-limited (it can only fall or hold, not rise past what was sent), and leave raising it to [padding](/quest/m3/probe-padding.md).
 - Observing `Reload.probe` requests reports from the peer; request them only while a reservation reads the estimate, matching #7524's gate.
 - Test on `@moq/clock`'s `Manual` with a mock session whose transport has no `getStats`: a PROBE report reaches `Reservation.rate`, a falling report lowers it, and a reconnect clears it. Verify in shipping Chromium (no flag) through a shaped link that a publisher's bitrate follows a capacity drop.
 

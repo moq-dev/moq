@@ -148,14 +148,11 @@ What remains:
   ([moq-dev/moq#7632](https://github.com/moq-dev/moq/pull/7632)) merged
   2026-11-04.
 - Keep the dependency-build and cache work with
-  [hakari](/quest/m0/ci/hakari.md). Decided 2026-10-30 (user): defer parallel
-  Rust lint until that quest lands, then measure it. The slow-tests reduction
+  [hakari follow-ups](/quest/m0/ci/hakari-followups.md). Decided 2026-10-30
+  (user): defer parallel Rust lint until the cargo-hakari quest lands, then
+  measure it. That quest finished 2026-11-06, so it can be measured now. The slow-tests reduction
   landed in [moq-dev/moq#6987](https://github.com/moq-dev/moq/pull/6987); the
   BTree thin-generics lever measured about 30 ms of CPU per build and was dropped.
 - Prefer the epic's levers and tighter diff selection over moving coverage.
   Moving a check to the queue or nightly still needs evidence and an explicit
   coverage tradeoff. Split a large independent lever into its own quest.
-
-## Related
-
-- [Unify dependency features](/quest/m0/ci/hakari.md) - cache hits across feature shapes

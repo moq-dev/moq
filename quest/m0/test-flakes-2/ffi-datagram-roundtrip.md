@@ -51,14 +51,12 @@ Investigation 2026-11-05 on `main` at `419b799c75`:
 
 ## Waiting
 
-- moq-dev/moq: wait for
-  [moq-dev/moq#7951](https://github.com/moq-dev/moq/pull/7951) to merge, then
-  capture a failing run under CI load with send/route diagnostics. Check the
-  PR's merged state with `gh pr view 7951 --json state,mergedAt`; once merged,
-  run the ignored case locally under CI-like concurrent build/test load,
-  with diagnostics at `DatagramSend::send` and `Subscriber::route_datagram`,
-  retaining a failing trace. Explicitly include the quarantine with
-  `quest gate just rs test -p moq-ffi --lib
+- moq-dev/moq: capture a failing run under CI load with send/route
+  diagnostics ([moq-dev/moq#7951](https://github.com/moq-dev/moq/pull/7951)
+  merged 2026-11-06). Run the ignored case locally under CI-like concurrent
+  build/test load, with diagnostics at `DatagramSend::send` and
+  `Subscriber::route_datagram`, retaining a failing trace. Explicitly include
+  the quarantine with `quest gate just rs test -p moq-ffi --lib
   -E 'test(datagrams_cross_a_default_connection)' --run-ignored all --no-capture`;
   normal Check and queue runs intentionally skip it. Use it to distinguish ordinary transport loss, a route miss, or
   another lifecycle bug and choose the corresponding fix before re-enabling.

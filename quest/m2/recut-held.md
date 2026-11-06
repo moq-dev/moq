@@ -25,11 +25,12 @@ Drop-set is a single quest, not an epic, so it has no `Required` entry here:
 when this runs, move it if it still exists and nothing claims it.
 
 Prose that names a held epic's milestone becomes stale when it moves; update
-it in the same PR: datagram tracks in [net-wrap](/quest/m5/net-wrap/README.md), and the browser
-padding probes in [lite07-finalize](/quest/m2/lite07-finalize.md).
+it in the same PR: datagram tracks in [net-wrap](/quest/m5/net-wrap/README.md). The browser
+padding probes already moved to m3 on 2026-11-06.
 
 ## Required
 
 - [rind CPU error](/quest/m1/rind/cpu-error.md) - claim held rind
 - [Release on leave](/quest/m1/stream-credit/release-on-leave.md) - claim held stream-credit
-- [Probe padding](/quest/m2/probe/padding.md) - claim held probe
+- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - claim held probe
+- [One page-wide getStats sampling ticker](/quest/m2/probe/stats-ticker.md) - claim held probe
