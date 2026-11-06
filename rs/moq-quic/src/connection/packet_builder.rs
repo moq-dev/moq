@@ -117,7 +117,7 @@ impl PacketBuilder {
 				version,
 			}),
 		};
-		let partial_encode = header.encode(buffer);
+		let partial_encode = header.encode(buffer, buffer_capacity.saturating_sub(buffer.len()));
 		if conn.peer_params.grease_quic_bit && conn.rng.random() {
 			buffer[partial_encode.start] ^= FIXED_BIT;
 		}
