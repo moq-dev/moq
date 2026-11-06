@@ -164,7 +164,7 @@ native-play:
 audio-quality *args:
     ./audio-quality/run.sh "$@"
 
-# Measure 22 push-to-talk presses with the default delay and codec on an ideal local path.
+# Measure 22 push-to-talk presses at 300 ms on an ideal local path.
 push-to-talk:
     ./audio-quality/ptt.sh
 

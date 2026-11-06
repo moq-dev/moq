@@ -127,6 +127,9 @@ const listener = new URL(required("relay"));
 listener.searchParams.set("role", "listener");
 watch.url = listener.toString();
 watch.name = publish.name;
+// Fixed until "auto" stops underrunning on push-to-talk's capture spread
+// (quest/m1/audio-jitter-target/watch.md): the run fails on any underrun.
+watch.setAttribute("delay", "300ms");
 watch.setAttribute("visible", "always");
 watch.volume = 1;
 watch.muted = false;
