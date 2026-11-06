@@ -10936,8 +10936,7 @@ mod tests {
 	fn a_request_after_a_gap_skips_the_front_already_ending() {
 		let (producer, mut driver) = Producer::new(Config::default());
 		let consumer = producer.consume();
-		let route = Route::default();
-		let publication = producer.publish("room/alice", route.clone()).unwrap();
+		let publication = producer.route("room/alice", RouteOptions::default()).unwrap();
 		let path = consumer.absolute("room/alice").unwrap();
 		let key = (path.clone(), Horizon::default(), None);
 		let broadcast = broadcast::Info::new().produce();
@@ -10986,10 +10985,10 @@ mod tests {
 			panic!("the first front did not resolve")
 		};
 
-		publication.unannounce();
+		publication.withdraw();
 		let ending = front.select();
 		assert!(matches!(ending, Event::Selected { best: None, .. }));
-		publication.announce(route).unwrap();
+		publication.announce().unwrap();
 		let next = consumer.lookup(Path::new("room/alice").unwrap(), None).into_inner();
 		assert!(next.poll_ok(&waiter).is_pending(), "joined the front already ending");
 
