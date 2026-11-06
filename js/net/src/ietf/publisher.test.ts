@@ -479,7 +479,12 @@ test("a relay forwards an upstream SUBSCRIBE refusal's retry interval", async ()
 
 			const reader = requestStream(version);
 			const subscribing = pub.runSubscribe(
-				new Subscribe({ requestId: 7n, trackNamespace: Path.from("room"), trackName: "video", subscriberPriority: 0 }),
+				new Subscribe({
+					requestId: 7n,
+					trackNamespace: Path.from("room"),
+					trackName: "video",
+					subscriberPriority: 0,
+				}),
 				reader.stream,
 			);
 			const request = (await requests.next()).value;

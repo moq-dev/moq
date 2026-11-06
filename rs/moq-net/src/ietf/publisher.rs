@@ -15919,7 +15919,11 @@ mod serve_tests {
 					(Error::Unauthorized, (0x1, 0)),
 				] {
 					let case = format!("{version} {kind:?} {err:?}");
-					assert_eq!(refused_track(version, kind, Refuser::Local(err)).await, expected, "{case}");
+					assert_eq!(
+						refused_track(version, kind, Refuser::Local(err)).await,
+						expected,
+						"{case}"
+					);
 				}
 			}
 		}
@@ -15932,7 +15936,11 @@ mod serve_tests {
 	async fn a_relay_forwards_an_upstream_refusal_s_retry_interval() {
 		for version in ALL_VERSIONS {
 			for refusal in [(0x10, 5000), (0x6, 0)] {
-				let relayed = refused_track(version, request::Kind::Subscribe, Refuser::Upstream(refusal.0, refusal.1));
+				let relayed = refused_track(
+					version,
+					request::Kind::Subscribe,
+					Refuser::Upstream(refusal.0, refusal.1),
+				);
 				assert_eq!(relayed.await, refusal, "{version}");
 			}
 		}

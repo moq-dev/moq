@@ -4566,7 +4566,11 @@ impl kio::Task for FrontServe {
 								io.end(Ok(()), None);
 							}
 						}
-						Action::Abort { track: name, err, retry } => {
+						Action::Abort {
+							track: name,
+							err,
+							retry,
+						} => {
 							if let Some(io) = self.tracks.get_mut(&name) {
 								tracing::debug!(name = %name, %err, "aborting track");
 								io.end(Err(err), retry);
