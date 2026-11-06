@@ -774,32 +774,81 @@ test("fill: a stale run that does not settle the reader is still asked for", asy
 	broadcast.close();
 });
 
-// A stale verdict this reader cannot trust is asked for even when no group has arrived to
-// bound the misses, so the reader still settles. Mirrors Rust.
-test("fill: an unsettled stale run is asked for with nothing received", async () => {
+// The upstream judged 0..2 and 4..6 under 500ms, and gave up both of them as stale.
+function judgedTwice() {
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("video", { maxAge: null });
 	hooks.receiveTrack(track);
 	const requests = track.requests();
-	// The upstream judged ranges ending at 6 under 500ms, and gave up both of them as stale.
-	hooks.supersedeStale(track, 6n);
+	hooks.supersedeStale(track, [
+		{ start: 0n, end: 2n },
+		{ start: 4n, end: 6n },
+	]);
 	hooks.dropTrackGroups(track, 0n, 2n, staleHole(500));
 	hooks.dropTrackGroups(track, 4n, 6n, staleHole(500));
-	// The same ranges: only the last one is contiguous to the judged end, so the first is unknown.
-	const reader = track.subscribe({
-		ranges: [
-			{ start: { absolute: 0n }, end: { absolute: 2n } },
-			{ start: { absolute: 4n }, end: { absolute: 6n } },
-		],
-		delay: { max: Milli(500) },
-	});
-	const done = drain(reader).then(() => "done");
+	const reader = (ranges: [bigint, bigint][]) =>
+		track.subscribe({
+			ranges: ranges.map(([start, end]) => ({ start: { absolute: start }, end: { absolute: end } })),
+			delay: { max: Milli(500) },
+		});
+	return { broadcast, requests, reader };
+}
+
+// A stale verdict settles a reader that reads every range the upstream judged it against, however
+// many there are, with nothing received and no fill asked. Mirrors Rust.
+test("fill: a stale verdict settles a reader of every range it judged", async () => {
+	const { broadcast, requests, reader: subscribe } = judgedTwice();
+	const reader = subscribe([
+		[0n, 2n],
+		[4n, 6n],
+	]);
+	expect(hooks.tryDrop(reader)).toMatchObject({ start: 0n, end: 2n, stale: 500 });
+	expect(hooks.tryDrop(reader)).toMatchObject({ start: 4n, end: 6n, stale: 500 });
+	expect(hooks.tryRecvGroup(reader, false)).toEqual({ kind: "done" });
 	const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
-	expect(fill && [fill.start, fill.end]).toEqual([0n, 2n]);
-	fill?.close();
-	expect(await Promise.race([done, yieldNow().then(() => "pending")])).toBe("done");
+	expect(fill).toBeUndefined();
 
 	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+// A reader whose ranges only partly overlap the ones a stale verdict was judged against is settled
+// where it reads every judged group above the run, and asks a fill for the rest, even with nothing
+// received: no update brings it, since its ranges add nothing to the upstream's terms. Mirrors Rust.
+test("fill: a stale verdict settles a partly overlapping reader only where it reads above", async () => {
+	const { broadcast, requests, reader: subscribe } = judgedTwice();
+	// Reads every judged group above each run, and more past them: settled.
+	const wider = subscribe([
+		[1n, 2n],
+		[4n, 8n],
+	]);
+	expect(hooks.tryDrop(wider)).toMatchObject({ start: 1n, end: 2n, stale: 500 });
+	expect(hooks.tryDrop(wider)).toMatchObject({ start: 4n, end: 6n, stale: 500 });
+	expect(hooks.tryDrop(wider)).toBeUndefined();
+	expect(await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)])).toBeUndefined();
+	// Stops at 4, which the upstream judged against 5: its own newest, which no verdict convicts.
+	// Both runs are unknown to it, and asked for.
+	const narrower = subscribe([
+		[0n, 2n],
+		[4n, 5n],
+	]);
+	expect(hooks.tryRecvGroup(narrower, false)).toEqual({ kind: "idle" });
+	expect(hooks.tryDrop(narrower)).toBeUndefined();
+	const asked: bigint[][] = [];
+	for (;;) {
+		const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+		if (!fill) break;
+		asked.push([fill.start, fill.end]);
+	}
+	asked.sort((a, b) => Number(a[0] - b[0]));
+	expect(asked).toEqual([
+		[0n, 2n],
+		[4n, 5n],
+	]);
+
+	wider.close();
+	narrower.close();
 	requests.close();
 	broadcast.close();
 });

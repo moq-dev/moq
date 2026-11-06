@@ -235,6 +235,24 @@ review stand as recorded, numbered as in its body:
   run decided stays the upstream's to judge after an update
   (`DropCursor::reported_received`, JS `#reportedReceived`).
 
+Decided 2026-11-06 (maintainer, /quest-complete), replacing agent decision 27
+of [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670), which asked a
+fill for every unknown stale run instead:
+
+- ✅ **27: a stale verdict accepts every range.** A relay keeps every group
+  its current upstream terms' ranges name (`TrackState::judged`, JS
+  `judged`), taking a bound only the publisher resolves at its widest. A
+  received stale run settles a reader no wider than the budget it was judged
+  under that reads every one of those groups above the run's start, however
+  many ranges they span, since a group's verdict looks only above it. A
+  reader with the upstream's own ranges is settled with nothing received. A
+  reader narrower than the upstream's ranges still treats the run as unknown,
+  and asks a fill for it even above the newest group received, since its
+  ranges add nothing to the upstream's terms and no update brings the run
+  back. Not chosen: asking a fill for every unknown stale run without the
+  multi-range verdict; reversing the fix and tracking the hang as a
+  follow-up.
+
 Decided 2026-10-27 (maintainer): this runs after the range count cost work,
 which finished in [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542),
 and before [Rust groups by start](/quest/m2/time-addressing/model.md), which

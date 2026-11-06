@@ -29,9 +29,11 @@ import {
 	hiddenBelow,
 	hooks,
 	insertDrop,
+	insertRun,
 	maxDelayOf,
 	minDelayOf,
 	removeRun,
+	type Run,
 	scopeCaptures,
 	scopeHead,
 	scopeOverlaps,
@@ -253,16 +255,18 @@ export class Minted {
 }
 
 /**
- * Where a stale drop judged under `ranges` stops looking: the exclusive end past every group they
- * name, undefined when one stays open or ends at an anchor only the publisher resolves.
+ * Every group `ranges` name, which a stale drop under them was judged against. A bound only the
+ * publisher resolves is taken at its widest: a start from group 0, an end past the live edge
+ * (`UNBOUNDED`). Mirrors the Rust `judged`.
  */
-function judgedEnd(ranges: readonly track.Range[]): bigint | undefined {
-	let end: bigint | undefined;
+function judged(ranges: readonly track.Range[]): Run[] {
+	const runs: Run[] = [];
 	for (const range of ranges) {
-		if (range.end?.absolute === undefined) return undefined;
-		if (end === undefined || range.end.absolute > end) end = range.end.absolute;
+		const start = range.start?.absolute ?? 0n;
+		const end = range.end?.absolute ?? UNBOUNDED;
+		if (start < end) insertRun(runs, start, end);
 	}
-	return end;
+	return runs;
 }
 
 /** Subscribe to the peer and own its receive-side protocol tasks.
@@ -1568,8 +1572,8 @@ export class Subscriber {
 			resolvesStart: resolvesStart(this.version),
 			fillsFromStart: fillsFromStart(this.version),
 		});
-		// The SUBSCRIBE's terms: where a stale drop judged under them stops looking.
-		hooks.supersedeStale(producer, judgedEnd(ranges));
+		// The SUBSCRIBE's terms: the groups a stale drop under them was judged against.
+		hooks.supersedeStale(producer, judged(ranges));
 		if (!hasRanges(this.version)) hooks.dropAnchors(producer);
 		// Lite-06+ resolves where the feed starts only with SUBSCRIBE_START, so a relay serving
 		// this copy holds its first group until the answer arrives.
@@ -2371,7 +2375,7 @@ export class Subscriber {
 			entry.update = update.update;
 			entry.maxDelay = update.maxDelay;
 			entry.tail.updated();
-			const held = hooks.supersedeStale(entry.track, judgedEnd(ranges));
+			const held = hooks.supersedeStale(entry.track, judged(ranges));
 			// A lite-07 publisher re-offers every group it reported stale on any update, and drops
 			// again under the new number what is still stale, so the tail owes every stale run again.
 			// A group that arrived since its stale drop won over it: the publisher served it, so it

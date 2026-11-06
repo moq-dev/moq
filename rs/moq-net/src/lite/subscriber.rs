@@ -9723,7 +9723,7 @@ impl TrackServe {
 					// Open an upstream SUBSCRIBE for the first subscriber. Its terms are new, so a
 					// stale run an earlier subscription reported is no verdict on them.
 					Sub::None => {
-						producer.supersede_stale(judged_end(&wire.ranges));
+						producer.supersede_stale(judged(&wire.ranges));
 						Ok(Begin::Establish(self.prepare_establish(producer, wire, &fills.groups)))
 					}
 					Sub::Active(active) => {
@@ -10062,19 +10062,25 @@ fn wire_max_delay(max_delay: Option<std::time::Duration>) -> std::time::Duration
 	max_delay.unwrap_or(std::time::Duration::from_millis(super::MAX_SAFE_DELAY_MS))
 }
 
-/// Where a stale drop judged under `ranges` stops looking: the exclusive end past every
-/// group they name, `None` when one stays open or ends at an anchor only the publisher
-/// resolves.
-fn judged_end<'a>(ranges: impl IntoIterator<Item = &'a lite::Range>) -> Option<u64> {
-	ranges
-		.into_iter()
-		.map(|range| match range.end {
-			Some(lite::Anchor::Absolute(end)) => Some(end.group.saturating_add(u64::from(end.frame > 0))),
-			_ => None,
-		})
-		.collect::<Option<Vec<_>>>()?
-		.into_iter()
-		.max()
+/// Every group `ranges` name, which a stale drop under them was judged against. A bound only
+/// the publisher resolves is taken at its widest: a start from group 0, an end past the live
+/// edge (an exclusive end of `u64::MAX`).
+fn judged<'a>(ranges: impl IntoIterator<Item = &'a lite::Range>) -> Option<RangeSet<u64>> {
+	let mut judged = RangeSet::new();
+	for range in ranges {
+		let start = match range.start {
+			Some(lite::Anchor::Absolute(start)) => start.group,
+			_ => 0,
+		};
+		let end = match range.end {
+			Some(lite::Anchor::Absolute(end)) => end.group.saturating_add(u64::from(end.frame > 0)),
+			_ => u64::MAX,
+		};
+		if start < end {
+			judged.insert(start..end);
+		}
+	}
+	Some(judged)
 }
 
 /// Buffer the current SUBSCRIBE parameters as the next update, with `ranges` the change to
@@ -10095,7 +10101,7 @@ fn buffer_update(
 	now: crate::time::Instant,
 ) -> Result<(), Error> {
 	active.update += 1;
-	let held = serving.supersede_stale(judged_end(active.live.iter().map(|(_, range)| range)));
+	let held = serving.supersede_stale(judged(active.live.iter().map(|(_, range)| range)));
 	let recorded = std::mem::take(&mut active.stale);
 	if let Ok(mut tail) = active.tail.write() {
 		tail.updated();

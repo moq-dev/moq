@@ -3504,7 +3504,7 @@ test("a superseded received stale report stays owed after an update", () => {
 	producer.close();
 });
 
-test("a received stale run settles a bounded reader only to the judged end", () => {
+test("a received stale run settles a bounded reader only through the judged ranges", () => {
 	const producer = new TrackProducer("video").accept({ maxAge: null });
 	hooks.receiveTrack(producer);
 	const bounded = (max: number) =>
@@ -3515,7 +3515,7 @@ test("a received stale run settles a bounded reader only to the judged end", () 
 	const wider = bounded(5000);
 	const matching = bounded(500);
 	// The upstream judged its own range of 0..2 under 500ms.
-	hooks.supersedeStale(producer, 2n);
+	hooks.supersedeStale(producer, [{ start: 0n, end: 2n }]);
 	hooks.dropTrackGroups(producer, 0n, 2n, staleHole(500));
 	// A wider budget still wants the groups, however the feed accounted for them.
 	expect(hooks.tryRecvGroup(wider, false)).toEqual({ kind: "idle" });
@@ -3544,15 +3544,15 @@ test("a superseded stale run leaves a bounded reader waiting, and a later reader
 			ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }],
 		});
 	const wider = bounded(5000);
-	hooks.supersedeStale(producer, 2n);
+	hooks.supersedeStale(producer, [{ start: 0n, end: 2n }]);
 	producer.createGroup(2n).finish();
 	hooks.dropTrackGroups(producer, 0n, 2n, staleHole(500));
-	// A reader added after the verdict judges it against the same judged end.
+	// A reader added after the verdict judges it against the same judged ranges.
 	const later = bounded(500);
 	expect(hooks.tryDrop(later)).toMatchObject({ start: 0n, end: 2n, stale: 500 });
 	expect(hooks.tryRecvGroup(wider, false)).toEqual({ kind: "idle" });
 	// New terms make the groups unknown again: still wanted, never proven delivered.
-	hooks.supersedeStale(producer, 2n);
+	hooks.supersedeStale(producer, [{ start: 0n, end: 2n }]);
 	expect(hooks.tryRecvGroup(wider, false)).toEqual({ kind: "idle" });
 	for (const reader of [wider, later]) reader.close();
 	producer.finish();
@@ -4584,11 +4584,11 @@ test("a skip is reported over a reported drop", () => {
 });
 
 // A received stale run is judged from where it meets the reader's span, as Rust clips it: a reader
-// asking only its suffix, up to where the upstream's range ended, is settled by that suffix.
+// asking only its suffix, through every group the upstream's range named, is settled by that suffix.
 test("a received stale run settles the suffix a narrower range asks for", () => {
 	const producer = new TrackProducer("video").accept({});
 	hooks.receiveTrack(producer);
-	hooks.supersedeStale(producer, 10n);
+	hooks.supersedeStale(producer, [{ start: 0n, end: 10n }]);
 	const reader = producer.subscribe({
 		delay: { max: Milli(500) },
 		ranges: [{ start: { absolute: 5n }, end: { absolute: 10n } }],

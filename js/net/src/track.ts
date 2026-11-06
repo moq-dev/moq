@@ -705,9 +705,9 @@ class TrackState {
 	// DROP costs one entry. Replaced rather than mutated, so a cursor can tell it changed by
 	// identity.
 	drops = new Signal<readonly DropRun[]>([]);
-	// Where the ranges a received copy's upstream judges stale runs against end: the exclusive end
-	// of its current terms, undefined past the live edge or unknown.
-	judgedEnd?: bigint;
+	// Every group the ranges of a received copy's current upstream terms name, which its stale runs
+	// were judged against; undefined when unknown, which counts as every group.
+	judged?: readonly Run[];
 	// Every group still in the producer's replay cache, including groups this
 	// subscriber already consumed, sorted by sequence. Drift anchors have the same
 	// lifetime as content. Sorted so the latency guard, evaluated per group and per
@@ -845,8 +845,18 @@ let startsOf: (producer: Producer) => readonly Start[];
 // deliver, undefined while it may; assigned in its static block.
 let goneAt: (producer: Producer, sequence: bigint) => bigint | undefined;
 
-/** A reader's last contiguous run of groups: its start, and its exclusive end unless it reads past the live edge. */
-type Coverage = { start: bigint; end?: bigint } | undefined;
+/** The groups a reader reads, and the exclusive end it stops at; undefined before its ranges resolve. */
+type Coverage = { runs: readonly Run[]; cap?: bigint } | undefined;
+
+/** Whether two coverages hold the same groups and cap. */
+function sameCoverage(a: Coverage, b: Coverage): boolean {
+	if (a === undefined || b === undefined) return a === b;
+	return (
+		a.cap === b.cap &&
+		a.runs.length === b.runs.length &&
+		a.runs.every((run, i) => run.start === b.runs[i].start && run.end === b.runs[i].end)
+	);
+}
 
 /**
  * Whether the live edge `received` reached `final`: no sequence below it is left that was neither
@@ -858,17 +868,28 @@ function reaches(received: bigint, drops: readonly Run[], final: bigint): boolea
 
 /**
  * Whether `run` settles a reader judging under `budget` with `coverage`, on a track whose upstream
- * judged stale runs against ranges ending at `judgedEnd` (undefined past the live edge, or
- * unknown). Any run but a received stale one does. A stale verdict holds for a reader no wider
- * than the budget it was judged under, whose range covers the run and every group above it up to
- * where the upstream's range ended: its own successor and edge are then no older than those the
- * verdict was judged against. Mirrors the Rust `settles`.
+ * judged stale runs against ranges naming the groups in `judged` (undefined for every group). Any
+ * run but a received stale one does. A stale verdict holds for a reader no wider than the budget it
+ * was judged under that reads every group the upstream's ranges name above the run's start: its
+ * own successor and edge are then no older than those the verdict was judged against, since a
+ * group's verdict looks only above it. Mirrors the Rust `settles`.
  */
-function settles(run: DropRun, budget: number, coverage: Coverage, judgedEnd: bigint | undefined): boolean {
+function settles(run: DropRun, budget: number, coverage: Coverage, judged: readonly Run[] | undefined): boolean {
 	if (run.stale === undefined) return true;
-	if (budget > run.stale || coverage === undefined || coverage.start > run.start) return false;
-	if (coverage.end === undefined) return true;
-	return judgedEnd !== undefined && coverage.end >= judgedEnd;
+	if (budget > run.stale || coverage === undefined) return false;
+	const above = run.start + 1n;
+	// Whether the reader reads every group from `start` up to the exclusive `end`, `UNBOUNDED`
+	// past the live edge.
+	const reads = (start: bigint, end: bigint): boolean => {
+		if (coverage.cap !== undefined && (end === UNBOUNDED || end > coverage.cap)) return false;
+		const held = coverage.runs.find((run) => run.start <= start && start < run.end);
+		return held !== undefined && held.end >= end;
+	};
+	for (const range of judged ?? [{ start: 0n, end: UNBOUNDED }]) {
+		if (range.end <= above) continue;
+		if (!reads(max(range.start, above), range.end)) return false;
+	}
+	return true;
 }
 // Actual object metadata outlives cached payloads, unlike empty group heads in model largest.
 let objectLargest: (producer: Producer) => Position | undefined;
@@ -1111,10 +1132,10 @@ export class Producer {
 		hooks.trackFinished = (producer) => producer.#state.end.peek() !== undefined;
 		hooks.dropTrackGroups = (producer, start, end, hole) => producer.#drop(start, end, hole, true);
 		hooks.skipTrackGroups = (producer, start, end) => producer.#skipReceived(start, end);
-		hooks.supersedeStale = (producer, judgedEnd) => {
+		hooks.supersedeStale = (producer, judged) => {
 			const held = producer.#state.drops.peek().filter((run) => run.stale !== undefined);
 			for (const state of [producer.#state, ...producer.#sinks]) {
-				state.judgedEnd = judgedEnd;
+				state.judged = judged;
 				const drops = state.drops.peek();
 				if (drops.some((run) => run.stale !== undefined))
 					state.drops.set(drops.filter((run) => run.stale === undefined));
@@ -1450,7 +1471,7 @@ export class Producer {
 		this.#prune();
 		for (const entry of this.#cache) this.#mirror(entry, sink);
 		sink.drops.set(this.#state.drops.peek());
-		sink.judgedEnd = this.#state.judgedEnd;
+		sink.judged = this.#state.judged;
 
 		sink.received.set(this.#received);
 		sink.endError = this.#state.endError;
@@ -2284,7 +2305,7 @@ export class Subscriber {
 		revision: number;
 		budget: number;
 		coverage?: Coverage;
-		judgedEnd?: bigint;
+		judged?: readonly Run[];
 	};
 	#reported: Run[] = [];
 	// The reported runs judged stale, for a wire whose update re-offers them; see
@@ -2926,7 +2947,7 @@ export class Subscriber {
 			// update supersedes it: asked even above the newest group received.
 			for (const dropped of drops) {
 				const span = { ...dropped, start: max(dropped.start, max(low, edge)), end: min(dropped.end, end) };
-				if (span.start < span.end && !settles(span, budget, coverage, this.#state.judgedEnd)) spans.push(span);
+				if (span.start < span.end && !settles(span, budget, coverage, this.#state.judged)) spans.push(span);
 			}
 			for (const run of spans.flatMap((span) => this.#wants(span.start, span.end))) {
 				const gone = [...accounted];
@@ -2934,7 +2955,7 @@ export class Subscriber {
 					if (dropped.end <= run.start || run.end <= dropped.start) continue;
 					// Judged from where it meets the asked run, as the reader would read it.
 					const clipped = { ...dropped, start: max(dropped.start, run.start) };
-					if (settles(clipped, budget, coverage, this.#state.judgedEnd))
+					if (settles(clipped, budget, coverage, this.#state.judged))
 						insertRun(gone, clipped.start, dropped.end);
 				}
 				for (const open of runGaps(gone, run.start, run.end)) {
@@ -3081,8 +3102,8 @@ export class Subscriber {
 				const overlapping = all
 					.filter((run) => run.start < gap.end && gap.start < run.end)
 					.map((run) => ({ ...run, start: max(run.start, gap.start), end: min(run.end, gap.end) }));
-				const drops = overlapping.filter((run) => settles(run, budget, coverage, this.#state.judgedEnd));
-				const unknown = overlapping.filter((run) => !settles(run, budget, coverage, this.#state.judgedEnd));
+				const drops = overlapping.filter((run) => settles(run, budget, coverage, this.#state.judged));
+				const unknown = overlapping.filter((run) => !settles(run, budget, coverage, this.#state.judged));
 				for (const open of runGaps(drops, gap.start, gap.end)) {
 					if (unknown.some((run) => run.start < open.end && open.start < run.end)) return false;
 					// Not received yet, so it may still arrive.
@@ -3685,7 +3706,7 @@ export class Subscriber {
 		const revision = this.#revision;
 		const { budget } = this.#drift();
 		const coverage = this.#coverage();
-		const judgedEnd = this.#state.judgedEnd;
+		const judged = this.#state.judged;
 		const seen = this.#dropsSeen;
 		if (
 			!seen ||
@@ -3694,11 +3715,10 @@ export class Subscriber {
 			seen.end !== end ||
 			seen.revision !== revision ||
 			seen.budget !== budget ||
-			seen.coverage?.start !== coverage?.start ||
-			seen.coverage?.end !== coverage?.end ||
-			seen.judgedEnd !== judgedEnd
+			!sameCoverage(seen.coverage, coverage) ||
+			seen.judged !== judged
 		) {
-			this.#dropsSeen = { drops, start, end, revision, budget, coverage, judgedEnd };
+			this.#dropsSeen = { drops, start, end, revision, budget, coverage, judged };
 			// The track's runs are folded in afresh, so one it forgot, such as a stale run new terms
 			// superseded, or one that stopped settling this reader, leaves nothing behind.
 			this.#pending = this.#pending.filter((run) => !run.received);
@@ -3707,7 +3727,7 @@ export class Subscriber {
 				const run = { ...dropped, start: max(dropped.start, start), end: min(dropped.end, end ?? dropped.end) };
 				if (run.start >= run.end) continue;
 				// A received stale run that does not settle this reader is unknown to it.
-				if (!settles(run, budget, coverage, judgedEnd)) continue;
+				if (!settles(run, budget, coverage, judged)) continue;
 				this.#pending = insertDrop(this.#pending, run.start, run.end, { ...run, received: true });
 			}
 		}
@@ -3720,14 +3740,10 @@ export class Subscriber {
 		return undefined;
 	}
 
-	// This reader's last contiguous run of groups, capped; see `Coverage`.
+	// The groups this reader reads, and its cap; see `Coverage`.
 	#coverage(): Coverage {
 		if (this.#window.pending) return undefined;
-		const last = this.#window.runs().at(-1);
-		if (!last) return undefined;
-		const cap = this.#cursor.peek().end;
-		const end = last.end === UNBOUNDED ? cap : cap === undefined ? last.end : min(last.end, cap);
-		return { start: last.start, end };
+		return { runs: this.#window.runs(), cap: this.#cursor.peek().end };
 	}
 
 	// A group from the routes' copies; see #resume.

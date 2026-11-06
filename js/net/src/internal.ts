@@ -549,11 +549,11 @@ export const hooks: {
 	skipTrackGroups: (producer: Producer, start: bigint, end: bigint) => Run[];
 	/**
 	 * Forget every run a received copy holds as stale: the terms its upstream judged them under
-	 * were replaced, so they are unknown again. The new terms' ranges end at `judgedEnd`,
-	 * undefined past the live edge or unknown. Returns the runs forgotten: a group that arrived
-	 * since its stale drop replaced it, so it is not among them. Mirrors the Rust `supersede_stale`.
+	 * were replaced, so they are unknown again. `judged` is every group the new terms' ranges name,
+	 * undefined when unknown. Returns the runs forgotten: a group that arrived since its stale drop
+	 * replaced it, so it is not among them. Mirrors the Rust `supersede_stale`.
 	 */
-	supersedeStale: (producer: Producer, judgedEnd: bigint | undefined) => Run[];
+	supersedeStale: (producer: Producer, judged: readonly Run[] | undefined) => Run[];
 	/**
 	 * Mark a track as fed by a wire subscription, which owes missing groups. `starts` says how
 	 * that wire's start bounds the fills its readers ask below it. Assigned by `track.ts`.

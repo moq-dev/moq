@@ -521,10 +521,11 @@ pub(crate) struct TrackState {
 	// One past the last `append_group`: every sequence below it arrived, was given up, or
 	// was skipped.
 	appended: Option<u64>,
-	// Where the ranges a received copy's upstream judges stale runs against end: the
-	// exclusive end of its current terms, `None` past the live edge or unknown.
-	judged_end: Option<u64>,
-	// Bumped on every insert into `drops`, so a cursor rescans it only after a change.
+	// Every group the ranges of a received copy's current upstream terms name, which its
+	// stale runs were judged against; `None` when unknown, which counts as every group.
+	judged: Option<RangeSet<u64>>,
+	// Bumped on every insert into `drops`, and when `judged` changes, so a cursor rescans
+	// it only after a change.
 	drops_revision: u64,
 	drops_changes: ledger::Changes,
 	// How many copies the cache took in that the live feed didn't deliver: fetched backfill,
@@ -3878,15 +3879,18 @@ impl Producer {
 
 	/// Forget every run held as stale: the terms a received copy's upstream judged them
 	/// under were replaced, so they are unknown again, and a reader that wants one fills it.
-	/// The new terms' ranges end at `judged_end`, `None` past the live edge or unknown.
-	/// Returns the runs forgotten; a group that arrived since its stale drop replaced it, so
-	/// it is not among them.
+	/// `judged` is every group the new terms' ranges name, `None` when unknown. Returns the
+	/// runs forgotten; a group that arrived since its stale drop replaced it, so it is not
+	/// among them.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn supersede_stale(&self, judged_end: Option<u64>) -> RangeSet<u64> {
+	pub(crate) fn supersede_stale(&self, judged: Option<RangeSet<u64>>) -> RangeSet<u64> {
 		let Ok(mut state) = self.modify() else {
 			return RangeSet::new();
 		};
-		state.judged_end = judged_end;
+		if state.judged != judged {
+			state.judged = judged;
+			state.drops_revision += 1;
+		}
 		state.supersede_stale()
 	}
 
@@ -6261,41 +6265,56 @@ struct Drift {
 	/// The budget is the track's max age bound, which no widening passes: its verdicts are final.
 	bounded: bool,
 	edge: Edge,
-	/// This reader's last contiguous run of groups: where it starts and its exclusive end,
-	/// `None` when it reads up past the live edge; see [`Coverage`].
+	/// The groups this reader reads; see [`Coverage`].
 	coverage: Coverage,
 }
 
-/// A reader's last contiguous run of groups, its start and exclusive end (`None` past the
-/// live edge), or `None` before its ranges resolve.
-type Coverage = Option<(u64, Option<u64>)>;
+/// The groups a reader reads, and the exclusive end it stops at, or `None` before its ranges
+/// resolve.
+type Coverage = Option<(Layered, Option<u64>)>;
 
 /// Whether a reader judging under `budget` with `coverage` is settled by `hole` over a run
-/// from `start`, on a track whose upstream judged stale runs against ranges ending at
-/// `judged_end` (`None` past the live edge, or unknown). Any hole but a received stale one
-/// settles every reader. A stale verdict holds for a reader no wider than the budget it was
-/// judged under, whose range covers the run and every group above it up to where the
-/// upstream's range ended: its own successor and edge are then no older than those the
-/// verdict was judged against. Any other reader treats the run as unknown, and fills it.
-fn settles(budget: Duration, coverage: Coverage, start: u64, hole: &Hole, judged_end: Option<u64>) -> bool {
-	let Some(judged) = hole.stale_budget() else {
+/// from `start`, on a track whose upstream judged stale runs against ranges naming the groups
+/// in `judged` (`None` for every group). Any hole but a received stale one settles every
+/// reader. A stale verdict holds for a reader no wider than the budget it was judged under
+/// that reads every group the upstream's ranges name above the run's start: its own successor
+/// and edge are then no older than those the verdict was judged against, since a group's
+/// verdict looks only above it. Any other reader treats the run as unknown, and fills it.
+fn settles(budget: Duration, coverage: &Coverage, start: u64, hole: &Hole, judged: Option<&RangeSet<u64>>) -> bool {
+	let Some(stale) = hole.stale_budget() else {
 		return true;
 	};
-	let covers = coverage.is_some_and(|(from, until)| {
-		from <= start
-			&& match (until, judged_end) {
-				(None, _) => true,
-				(Some(until), Some(end)) => until >= end,
-				(Some(_), None) => false,
-			}
-	});
-	budget <= judged && covers
+	let Some((groups, cap)) = coverage else {
+		return false;
+	};
+	let Some(above) = start.checked_add(1) else {
+		return budget <= stale;
+	};
+	// Whether the reader reads every group of `run`, an exclusive end of `u64::MAX` past the
+	// live edge.
+	let reads = |run: ops::Range<u64>| {
+		let open = run.end == u64::MAX;
+		if cap.is_some_and(|cap| open || run.end > cap) {
+			return false;
+		}
+		groups.first(run.start, run.start).is_some_and(|held| match open {
+			true => *held.end() == u64::MAX,
+			false => *held.end() >= run.end - 1,
+		})
+	};
+	let covers = match judged {
+		Some(judged) => judged
+			.overlapping(&(above..u64::MAX))
+			.all(|run| reads(run.start.max(above)..run.end)),
+		None => reads(above..u64::MAX),
+	};
+	budget <= stale && covers
 }
 
 impl Drift {
 	/// Whether `hole`, over a run from `start`, settles this reader on `state`; see [`settles`].
 	fn settles(&self, state: &TrackState, start: u64, hole: &Hole) -> bool {
-		settles(self.budget, self.coverage, start, hole, state.judged_end)
+		settles(self.budget, &self.coverage, start, hole, state.judged.as_ref())
 	}
 }
 
@@ -7059,7 +7078,7 @@ impl Pending {
 
 /// The [`TrackState::drops_revision`], span, window revision, and the budget and coverage
 /// that settle received stale runs (see [`Drift::settles`]) a [`DropCursor`] folded in.
-type Scan = (u64, ops::Range<u64>, u64, Option<(Duration, Coverage, Option<u64>)>);
+type Scan = (u64, ops::Range<u64>, u64, Option<(Duration, Coverage)>);
 
 /// What a wire publisher's cursor gave up, found as it changes rather than by rescanning
 /// the cache on every poll.
@@ -7181,12 +7200,9 @@ impl DropCursor {
 		// Rescan only after the drops change, the window moves, or what settles a stale run
 		// does; out-of-window and unsettling runs were skipped and may be owed now.
 		if let Some(drift) = within.drift {
-			self.drift = Some((drift.budget, drift.coverage));
+			self.drift = Some((drift.budget, drift.coverage.clone()));
 		}
-		let judged = self
-			.drift
-			.map(|(budget, coverage)| (budget, coverage, state.judged_end));
-		let scan = (state.drops_revision, span.clone(), within.revision, judged);
+		let scan = (state.drops_revision, span.clone(), within.revision, self.drift.clone());
 		if self.scanned.as_ref() != Some(&scan) {
 			self.scanned = Some(scan);
 			let stale: Vec<_> = self
@@ -7201,8 +7217,8 @@ impl DropCursor {
 			for (dropped, hole) in state.drops.overlapping(span.clone()) {
 				let run = dropped.start.max(span.start)..dropped.end.min(span.end);
 				// A received stale run that does not settle this reader is unknown to it.
-				let settled = match self.drift {
-					Some((budget, coverage)) => settles(budget, coverage, run.start, hole, state.judged_end),
+				let settled = match &self.drift {
+					Some((budget, coverage)) => settles(*budget, coverage, run.start, hole, state.judged.as_ref()),
 					None => hole.stale_budget().is_none(),
 				};
 				if settled {
@@ -7531,31 +7547,30 @@ impl Cursor {
 		let coverage = self.coverage();
 		let state = self.state.read();
 		let budget = clamp_max_delay(self.subscription.read().budget(), state.max_age_bound());
-		let accounted = |gap: ops::Range<u64>| {
-			let mut left = RangeSet::new();
-			left.insert(gap.clone());
-			for run in self.filter.written_off.overlapping(&gap) {
-				left.remove(run.clone());
-			}
-			if let Some(given_up) = given_up {
-				for run in given_up.overlapping(&gap) {
+		let accounted =
+			|gap: ops::Range<u64>| {
+				let mut left = RangeSet::new();
+				left.insert(gap.clone());
+				for run in self.filter.written_off.overlapping(&gap) {
 					left.remove(run.clone());
 				}
-			}
-			// A received stale run that does not settle this reader is unknown to it, so it
-			// still wants those groups.
-			for (run, _) in state
-				.drops
-				.overlapping(&gap)
-				.filter(|(run, hole)| settles(budget, coverage, run.start.max(gap.start), hole, state.judged_end))
-			{
-				left.remove(run.clone());
-			}
-			for sequence in self.seek_pending.range(gap).map(|(sequence, _)| *sequence) {
-				left.remove(sequence..sequence + 1);
-			}
-			left.is_empty()
-		};
+				if let Some(given_up) = given_up {
+					for run in given_up.overlapping(&gap) {
+						left.remove(run.clone());
+					}
+				}
+				// A received stale run that does not settle this reader is unknown to it, so it
+				// still wants those groups.
+				for (run, _) in state.drops.overlapping(&gap).filter(|(run, hole)| {
+					settles(budget, &coverage, run.start.max(gap.start), hole, state.judged.as_ref())
+				}) {
+					left.remove(run.clone());
+				}
+				for sequence in self.seek_pending.range(gap).map(|(sequence, _)| *sequence) {
+					left.remove(sequence..sequence + 1);
+				}
+				left.is_empty()
+			};
 		self.filter
 			.window
 			.runs(self.filter.window.floor().unwrap_or(0))
@@ -7853,19 +7868,9 @@ impl Cursor {
 		std::mem::take(&mut self.stale)
 	}
 
-	/// This reader's last contiguous run of groups, capped; see [`Coverage`].
+	/// The groups this reader reads, and its cap; see [`Coverage`].
 	fn coverage(&self) -> Coverage {
-		let run = self.filter.window.groups()?.last(0, u64::MAX)?;
-		let end = match *run.end() {
-			u64::MAX => None,
-			last => Some(last + 1),
-		};
-		let end = match (end, self.end_sequence) {
-			(end, None) => end,
-			(None, Some(cap)) => Some(cap),
-			(Some(end), Some(cap)) => Some(end.min(cap)),
-		};
-		Some((*run.start(), end))
+		Some((self.filter.window.groups()?.clone(), self.end_sequence))
 	}
 
 	/// This subscriber's clamped drift budget and the live edge to measure against,
@@ -7891,7 +7896,7 @@ impl Cursor {
 				budget: clamp_max_delay(max_delay, bound),
 				bounded: bound.is_some_and(|bound| max_delay >= bound),
 				edge: state.drift_edge(servable),
-				coverage,
+				coverage: coverage.clone(),
 			}))
 		})
 	}
@@ -22730,6 +22735,9 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_received_stale_drop_settles_only_the_readers_it_covers() {
 		let producer = track_producer("test", Info::timed());
+		// A received copy's serving session keeps a handler, so an unsettled run is asked
+		// rather than given up as unfillable.
+		let _dynamic = producer.requests();
 		let budget = Duration::from_millis(500);
 		let reader = |max: Duration, groups: Range| {
 			producer.subscribe(
@@ -22825,37 +22833,126 @@ mod test {
 		assert_eq!((fill.start().group, fill.end()), (0, 3));
 	}
 
-	/// A stale verdict a reader cannot trust is asked for even when no group arrived to bound
-	/// the misses, so the reader still settles. Mirrors JS.
+	/// Every group a set of ranges names, as a received copy's upstream terms judge them.
+	fn judged(runs: impl IntoIterator<Item = ops::Range<u64>>) -> Option<RangeSet<u64>> {
+		Some(runs.into_iter().collect())
+	}
+
+	/// A stale verdict settles a reader that reads every range the upstream judged it
+	/// against, however many there are, with nothing received and no fill asked. Mirrors JS.
 	#[test]
 	#[cfg(feature = "async")]
-	fn an_unsettled_stale_run_is_asked_for_with_nothing_received() {
+	fn a_stale_verdict_settles_a_reader_of_every_range_it_judged() {
 		let producer = track_producer("test", Info::timed());
 		producer.received();
 		let dynamic = producer.requests();
 		let budget = Duration::from_millis(500);
-		// The upstream judged ranges ending at 6 under 500ms, and gave up both of them as stale.
-		producer.supersede_stale(Some(6));
+		// The upstream judged 0..2 and 4..6 under 500ms, and gave up both of them as stale.
+		producer.supersede_stale(judged([0..2, 4..6]));
 		producer.give_up(0..2, Hole::stale(budget));
 		producer.give_up(4..6, Hole::stale(budget));
-		// The same ranges: only the last one is contiguous to the judged end, so the first is
-		// unknown.
 		let mut subscriber = producer.subscribe(
 			Subscription::default()
 				.with_delay(Delay::default().with_max(budget))
 				.with_ranges([Range::groups(0..2), Range::groups(4..6)]),
 		);
 		let waiter = kio::Waiter::noop();
-		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((0..2, Hole::stale(budget))));
+		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((4..6, Hole::stale(budget))));
+		assert!(
+			matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))),
+			"nothing is owed"
+		);
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "nothing is asked");
+	}
+
+	/// A reader whose ranges only partly overlap the ones a stale verdict was judged against
+	/// is settled where it reads every judged group above the run, and asks a fill for the
+	/// rest, even with nothing received: no update brings it, since its ranges add nothing to
+	/// the upstream's terms. Mirrors JS.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_stale_verdict_settles_a_partly_overlapping_reader_only_where_it_reads_above() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		let dynamic = producer.requests();
+		let budget = Duration::from_millis(500);
+		producer.supersede_stale(judged([0..2, 4..6]));
+		producer.give_up(0..2, Hole::stale(budget));
+		producer.give_up(4..6, Hole::stale(budget));
+		let reader = |ranges: [Range; 2]| {
+			producer.subscribe(
+				Subscription::default()
+					.with_delay(Delay::default().with_max(budget))
+					.with_ranges(ranges),
+			)
+		};
+		let waiter = kio::Waiter::noop();
+		// Reads every judged group above each run, and more past them: settled.
+		let mut wider = reader([Range::groups(1..2), Range::groups(4..8)]);
+		assert_eq!(wider.poll_drop(&waiter), Poll::Ready((1..2, Hole::stale(budget))));
+		assert_eq!(wider.poll_drop(&waiter), Poll::Ready((4..6, Hole::stale(budget))));
+		assert!(wider.poll_drop(&waiter).is_pending());
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "nothing is asked");
+		// Stops at 4, which the upstream judged against 5: its own newest, which no verdict
+		// convicts. Both runs are unknown to it, and asked for.
+		let mut narrower = reader([Range::groups(0..2), Range::groups(4..5)]);
+		assert!(narrower.poll_recv_group(&waiter).is_pending());
+		assert!(narrower.poll_drop(&waiter).is_pending());
+		let mut asked = Vec::new();
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+			asked.push((fill.start().group, fill.end()));
+		}
+		asked.sort();
+		assert_eq!(asked, [(0, 2), (4, 5)]);
+	}
+
+	/// A fill taken before the last handler closed still answers an unsettled stale run: a
+	/// reader that asks afterwards joins it while it runs, and reads its groups from the cache
+	/// once it is done.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_taken_fill_answers_an_unsettled_stale_run_after_its_handler_closes() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		let dynamic = producer.requests();
+		let budget = Duration::from_millis(500);
+		producer.supersede_stale(judged([0..2, 4..6]));
+		producer.give_up(0..2, Hole::stale(budget));
+		producer.give_up(4..6, Hole::stale(budget));
+		// Stops at 2, though the upstream judged 0..2 against 4..6 too: the run is unknown to it.
+		let reader = || {
+			producer.subscribe(
+				Subscription::default()
+					.with_delay(Delay::default().with_max(budget))
+					.with_ranges([Range::groups(0..2)]),
+			)
+		};
+		let waiter = kio::Waiter::noop();
+		let mut first = reader();
+		assert!(first.poll_recv_group(&waiter).is_pending());
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the unsettled stale run is asked for");
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, 2));
+		drop(dynamic);
+		let mut joined = reader();
+		assert!(joined.poll_recv_group(&waiter).is_pending(), "it joins the taken fill");
+		for sequence in 0..2 {
+			let mut group = fill.accept(sequence, None).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(sequence).unwrap(), &b"x"[..])
+				.unwrap();
+			group.finish().unwrap();
+		}
 		drop(fill);
-		assert!(
-			matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))),
-			"nothing is owed once the fill gave up"
-		);
+		let mut late = reader();
+		for subscriber in [&mut first, &mut joined, &mut late] {
+			let mut got = drain_groups(subscriber);
+			got.sort_unstable();
+			assert_eq!(got, [0, 1]);
+			assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+		}
 	}
 
 	/// Creating a group past the next sequence says nothing about the gap: groups may be
@@ -23181,13 +23278,15 @@ mod test {
 		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((1..3, Hole::stale(budget))));
 	}
 
-	/// A bounded reader is settled by a received stale run only when its range reaches where
-	/// the upstream's did; otherwise it still waits for the groups the run names.
+	/// A bounded reader is settled by a received stale run only when it reads every group the
+	/// upstream's ranges name above the run; otherwise it still wants the groups the run names.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_received_stale_run_settles_a_bounded_reader_only_to_the_judged_end() {
+	fn a_received_stale_run_settles_a_bounded_reader_only_through_the_judged_ranges() {
 		let producer = track_producer("test", Info::timed());
 		producer.received();
+		// As its serving session does, so an unsettled run is asked rather than given up.
+		let _dynamic = producer.requests();
 		let bounded = |max: Duration| {
 			producer.subscribe(
 				Subscription::default()
@@ -23199,7 +23298,7 @@ mod test {
 		let mut matching = bounded(Duration::from_millis(500));
 		let waiter = kio::Waiter::noop();
 		// The upstream judged its own range of 0..2 under 500ms.
-		producer.supersede_stale(Some(2));
+		producer.supersede_stale(judged([0..2]));
 		producer.give_up(0..2, Hole::stale(Duration::from_millis(500)));
 		assert!(
 			wider.poll_recv_group(&waiter).is_pending(),
