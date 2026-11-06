@@ -6745,7 +6745,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: Some(producer),
 			version,
 			peer_setup,

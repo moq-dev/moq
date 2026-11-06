@@ -15784,7 +15784,7 @@ mod serve_tests {
 	/// A `kind` request whose track the publisher refuses with `err`, as the REQUEST_ERROR it
 	/// writes: (code, Retry Interval).
 	async fn refused_track(version: Version, kind: request::Kind, err: Error) -> (u64, u64) {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let route = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let mut requests = route.broadcast().requests();
 		let peer_setup = peer::PeerSetup::default();

@@ -9615,7 +9615,7 @@ mod tests {
 		for version in [Version::Lite05, Version::Lite06] {
 			for stream in [false, true] {
 				let case = format!("{version:?}, stream track {stream}");
-				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+				let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 				let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 				let mut datagrams = broadcast
 					.broadcast()
@@ -9656,7 +9656,7 @@ mod tests {
 	#[kio::test]
 	async fn a_waiting_subscribe_sends_the_datagrams_written_since_its_track_info() {
 		for version in [Version::Lite05, Version::Lite06] {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 			let _relayed = crate::model::broadcast::SourceGuard::new(broadcast.broadcast().clone());
 			let mut datagrams = broadcast
@@ -9685,7 +9685,7 @@ mod tests {
 	#[kio::test]
 	async fn a_subscribe_reads_from_the_oldest_hold() {
 		for version in [Version::Lite05, Version::Lite06] {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 			let mut datagrams = broadcast
 				.broadcast()
@@ -9711,7 +9711,7 @@ mod tests {
 	#[kio::test]
 	async fn a_subscribe_reads_the_current_datagram_track_past_an_older_hold() {
 		for version in [Version::Lite05, Version::Lite06] {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 			let mut first = broadcast
 				.broadcast()
