@@ -165,8 +165,8 @@ int32_t moq_consume_audio(uint32_t catalog, uint32_t index, const moq_delay *del
 int32_t moq_consume_audio_cancel(uint32_t track);
 
 // Consuming: Frames
-int32_t moq_consume_frame(uint32_t frame, moq_frame *dst);
-int32_t moq_consume_frame_free(uint32_t frame);
+int32_t moq_consume_read(uint32_t read, moq_media_read *dst);
+int32_t moq_consume_read_free(uint32_t read);
 moq_subscription moq_subscription_defaults(void);
 int32_t moq_consume_track(uint32_t broadcast, const char *name, uintptr_t name_len, const moq_subscription *subscription, moq_status_callback on_frame, void *user_data);
 int32_t moq_consume_track_frame(uint32_t frame, moq_frame *dst);
