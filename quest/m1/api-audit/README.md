@@ -75,7 +75,3 @@ Rejected in planning:
   language's reserved names.
 - A follow policy enum folding `linger` and `stitch`: one name per meaning
   (the export wait is `--follow`) fixes the confusion more cheaply.
-
-## Related
-
-- [Main is no slower than release](/quest/m1/release-perf/README.md) - the other release-readiness check
