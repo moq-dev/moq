@@ -9043,11 +9043,17 @@ mod tests {
 		group.finish().unwrap();
 
 		let mut read = unmetered.recv_group().await.unwrap().expect("a group");
-		assert_eq!(read.read_frame().await.unwrap().expect("a frame").payload.as_ref(), b"frame");
+		assert_eq!(
+			read.read_frame().await.unwrap().expect("a frame").payload.as_ref(),
+			b"frame"
+		);
 		assert_eq!(bytes(), 0, "an unmetered read counts nothing");
 
 		let mut read = metered.recv_group().await.unwrap().expect("a group");
-		assert_eq!(read.read_frame().await.unwrap().expect("a frame").payload.as_ref(), b"frame");
+		assert_eq!(
+			read.read_frame().await.unwrap().expect("a frame").payload.as_ref(),
+			b"frame"
+		);
 		assert_eq!(bytes(), 5, "the metered handle still counts");
 	}
 
