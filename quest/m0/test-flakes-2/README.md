@@ -101,6 +101,10 @@ tests' shared locked-memory budget, one child each. On 2026-11-06, moq-ffi's
 concurrent-ready test, quarantined here instead of in the unrelated
 [moq-dev/moq#7981](https://github.com/moq-dev/moq/pull/7981).
 
+Added 2026-11-06 (CI fix run): `js/net`'s lite datagram-end close test, which
+fails on loaded `main` too and was quarantined in
+[moq-dev/moq#8007](https://github.com/moq-dev/moq/pull/8007), one child.
+
 Public API: none. Wire: none.
 
 ## Required
@@ -116,3 +120,4 @@ Public API: none. Wire: none.
 - [The Python audio playout-delay test reads its frames](/quest/m0/test-flakes-2/audio-playout-delay.md) - `test_audio_consumer_reports_its_playout_delay` stops timing out on its first read in the merge queue
 - [io_uring tests fit the shared locked-memory budget](/quest/m0/test-flakes-2/uring-memlock.md) - concurrent moq-relay and moq-uring test runs stop exhausting the user's `RLIMIT_MEMLOCK`, fixed at the cause rather than by raising the limit
 - [The FFI concurrent-ready test wakes both calls under load](/quest/m0/test-flakes-2/ffi-concurrent-ready.md) - `concurrent_ready_calls_all_wake` stops stalling its reader drain under load and is re-enabled
+- [A close after a datagram track's end keeps the end under load](/quest/m0/test-flakes-2/lite-datagram-end-close.md) - `js/net`'s lite datagram-end close test waits for the FIN to arrive instead of a microtask count, then is re-enabled
