@@ -56,8 +56,9 @@ on 2026-11-05, passed `Tests (rs miri)` with both passes:
 `debt_sheds_the_front_but_not_the_newest_frame` from four 1 MiB pseudo-random
 frames to four 1 KiB frames; shedding counts frames, not bytes.
 
-Remaining: confirm on the next scheduled Nightly that the epoch pass has no
-SLOW test, then delete this quest. If the job nears 60 minutes, split the strict and epoch passes
+Remaining: confirm on the next scheduled Nightly that neither pass has a SLOW
+test (strict pass included, since its slowest sits near 200 s), then delete
+this quest. If the job nears 60 minutes, split the strict and epoch passes
 into separate matrix entries rather than raising the timeout, and keep
 nextest's 15-minute per-test cap.
 
