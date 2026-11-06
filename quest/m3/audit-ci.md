@@ -71,9 +71,9 @@ verdicts:
   check (69/78 samples); shared benches confirm six paired slowdowns;
   supplemental benches lack 15 base comparisons after the baseline lacks
   `moq-sign`; relay session benches panic with `Evicted`; Rust bench targets
-  reach measurement but are cancelled at 60.4 minutes. Confirm calibration
-  before calling paired slowdowns product regressions: [bench CI](/quest/m1/bench-ci.md)
-  owns it. [moq-dev/moq#7592](https://github.com/moq-dev/moq/pull/7592) already
+  reach measurement but are cancelled at 60.4 minutes. The paired calibration
+  in [Paired comparison](/bench/README.md#paired-comparison) says which paired
+  slowdowns to trust. [moq-dev/moq#7592](https://github.com/moq-dev/moq/pull/7592) already
   verifies that the old paired-base Cargo alias blocker is past.
 - Latest scheduled [Interop](https://github.com/moq-dev/moq/actions/runs/41317901057)
   costs 48.2 Linux minutes and fails buffering, a catalog assertion, and the
