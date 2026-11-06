@@ -4425,6 +4425,7 @@ dependencies = [
  "moq-tokio",
  "moq-video",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "usage-rs",
@@ -4563,13 +4564,6 @@ dependencies = [
  "uuid",
  "workspace-hack",
  "zeroize",
-]
-
-[[package]]
-name = "moq-e2ee"
-version = "0.0.11"
-dependencies = [
- "workspace-hack",
 ]
 
 [[package]]

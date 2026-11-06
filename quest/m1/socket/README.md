@@ -188,7 +188,6 @@ announce-watch-request pairing remains in `rs/moq-boy`, `js/moq-boy`, or
 
 ## Required
 
-- [moq-boy on sockets](/quest/m1/socket/boy.md) - viewers dial the emulator's endpoint and send commands and receive latency on their session
 - [CARLA on sockets](/quest/m1/socket/carla.md) - drivers dial the truck's endpoint and send control and receive acks on their session
 
 ## Related
