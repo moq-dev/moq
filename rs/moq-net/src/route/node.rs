@@ -15,8 +15,9 @@
 //! only once another serves it, so the origin always holds a route for it.
 
 use std::{
-	collections::{BTreeMap, BTreeSet, HashMap},
+	collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
 	sync::{Arc, Mutex, MutexGuard},
+	task::{Poll, ready},
 };
 
 use crate::{Instance, Path};
@@ -53,7 +54,8 @@ pub(crate) struct Served {
 	pub available: bool,
 }
 
-/// What a stream's session acts on, in order.
+/// What a stream's session acts on, in order. One identity's route changes and
+/// batches coalesce while the session leaves them unread.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Output {
 	/// Send ROUTE_START, ROUTE_UPDATE, ROUTE_HOLD, or for `None` ROUTE_END.
@@ -93,10 +95,134 @@ impl std::fmt::Debug for Node {
 	}
 }
 
+/// Each stream's outputs, by its key.
+type Queues = HashMap<Key, kio::Shared<Outbox>>;
+
+/// What one stream has yet to read. Route changes and claim batches coalesce per
+/// identity, and a claim the reader was never sent leaves nothing when it ends, so a
+/// stream whose reader stalls holds one entry per identity, bounded by its claims,
+/// however much the node changes meanwhile.
+#[derive(Default)]
+struct Outbox {
+	/// Identities with route changes or claims pending, in the order they first queued.
+	order: VecDeque<Id>,
+	pending: HashMap<Id, Pending>,
+	/// Outputs to read in order: the other kinds, and a pending entry once taken.
+	ready: VecDeque<Output>,
+	/// The claims the reader was sent for each identity.
+	delivered: HashMap<Id, BTreeSet<Path>>,
+}
+
+/// One identity's route changes and claim batches since the reader last took it.
+#[derive(Default)]
+struct Pending {
+	/// A ROUTE_END goes first, retiring every claim sent before.
+	ended: bool,
+	/// The last finite reach since, which starts the route if the reader holds none.
+	finite: Option<Reach>,
+	/// The route was held after that.
+	held: bool,
+	/// The batches since, merged: each claim's last change, and the last floor.
+	batch: Option<(BTreeMap<Path, Option<Claim>>, Option<Rev>)>,
+}
+
+impl Outbox {
+	fn is_empty(&self) -> bool {
+		self.ready.is_empty() && self.order.is_empty()
+	}
+
+	/// The pending entry for `id`, queued behind the others when new.
+	fn entry<'a>(order: &mut VecDeque<Id>, pending: &'a mut HashMap<Id, Pending>, id: Id) -> &'a mut Pending {
+		pending.entry(id).or_insert_with(|| {
+			order.push_back(id);
+			Pending::default()
+		})
+	}
+
+	fn push(&mut self, output: Output) {
+		match output {
+			Output::Route { id, reach } => {
+				let entry = Self::entry(&mut self.order, &mut self.pending, id);
+				match reach {
+					None => {
+						*entry = Pending {
+							ended: true,
+							..Pending::default()
+						}
+					}
+					Some(Reach::Held) => entry.held = true,
+					Some(finite) => {
+						entry.finite = Some(finite);
+						entry.held = false;
+					}
+				}
+			}
+			Output::Batch { id, changes, floor } => {
+				let entry = Self::entry(&mut self.order, &mut self.pending, id);
+				let sent = self.delivered.get(&id);
+				let ended = entry.ended;
+				let (merged, last) = entry.batch.get_or_insert_default();
+				for (path, claim) in changes {
+					// The reader holds nothing here once the entry reaches it.
+					let unsent = ended || sent.is_none_or(|sent| !sent.contains(&path));
+					match claim {
+						None if unsent => merged.remove(&path),
+						claim => merged.insert(path, claim),
+					};
+				}
+				*last = floor;
+			}
+			other => self.ready.push_back(other),
+		}
+	}
+
+	fn pop(&mut self) -> Option<Output> {
+		if self.ready.is_empty() {
+			let id = self.order.pop_front()?;
+			let pending = self.pending.remove(&id).expect("every queued identity is pending");
+			self.take(id, pending);
+		}
+		self.ready.pop_front()
+	}
+
+	/// Queue one identity's pending entry to read, as the router would have sent it.
+	fn take(&mut self, id: Id, pending: Pending) {
+		if pending.ended {
+			self.delivered.remove(&id);
+			self.ready.push_back(Output::Route { id, reach: None });
+		}
+		if let Some(reach) = pending.finite {
+			self.ready.push_back(Output::Route { id, reach: Some(reach) });
+		}
+		if pending.held {
+			self.ready.push_back(Output::Route {
+				id,
+				reach: Some(Reach::Held),
+			});
+		}
+		if let Some((merged, floor)) = pending.batch {
+			let sent = self.delivered.entry(id).or_default();
+			// As the router orders a batch: what starts or changes, then what ends.
+			let (ends, starts): (Vec<_>, Vec<_>) = merged.into_iter().partition(|(_, claim)| claim.is_none());
+			for (path, _) in &starts {
+				sent.insert(path.clone());
+			}
+			for (path, _) in &ends {
+				sent.remove(path);
+			}
+			if sent.is_empty() {
+				self.delivered.remove(&id);
+			}
+			let changes = starts.into_iter().chain(ends).collect();
+			self.ready.push_back(Output::Batch { id, changes, floor });
+		}
+	}
+}
+
 struct State {
 	router: Router<Key, Claim>,
 	next_key: Key,
-	queues: HashMap<Key, kio::Queue<Output>>,
+	queues: Queues,
 	/// Each shown claim of another identity, and the streams serving it.
 	homes: BTreeMap<(Id, Path), Home>,
 }
@@ -117,7 +243,7 @@ struct Slot {
 
 impl Home {
 	/// Unserve every leaving stream once a wanted one serves the claim.
-	fn release(&mut self, queues: &HashMap<Key, kio::Queue<Output>>, id: Id, claim: &Path) {
+	fn release(&mut self, queues: &Queues, id: Id, claim: &Path) {
 		if !self.keys.values().any(|slot| !slot.leaving && slot.confirmed) {
 			return;
 		}
@@ -220,7 +346,7 @@ impl Node {
 		let key = state.next_key;
 		state.next_key += 1;
 		state.router.connect(key, link)?;
-		let queue = kio::Queue::new();
+		let queue = kio::Shared::default();
 		state.queues.insert(key, queue.clone());
 		if let Err(err) = open(&mut state.router, key) {
 			state.router.disconnect(key);
@@ -238,6 +364,11 @@ impl Node {
 	}
 
 	#[cfg(test)]
+	pub(crate) fn retained(&self) -> super::Retained {
+		self.lock().router.retained()
+	}
+
+	#[cfg(test)]
 	pub(crate) fn shown(&self) -> BTreeMap<(Id, Path), (Claim, bool)> {
 		(self.lock().router.shown().iter())
 			.map(|(key, shown)| (key.clone(), (shown.item.clone(), shown.available)))
@@ -249,7 +380,7 @@ impl Node {
 pub(crate) struct Stream {
 	node: Node,
 	key: Key,
-	queue: kio::Queue<Output>,
+	queue: kio::Shared<Outbox>,
 }
 
 impl std::fmt::Debug for Stream {
@@ -260,17 +391,21 @@ impl std::fmt::Debug for Stream {
 
 impl Stream {
 	/// The next output for this stream's session.
-	pub fn poll_output(&self, waiter: &kio::Waiter) -> std::task::Poll<Output> {
-		match self.queue.poll_pop(waiter) {
-			std::task::Poll::Ready(Ok(output)) => std::task::Poll::Ready(output),
-			// The queue closes only once the stream dropped.
-			_ => std::task::Poll::Pending,
-		}
+	pub fn poll_output(&self, waiter: &kio::Waiter) -> Poll<Output> {
+		let ready = |outbox: &kio::Ref<'_, Outbox>| match outbox.is_empty() {
+			true => Poll::Pending,
+			false => Poll::Ready(()),
+		};
+		let mut outbox = ready!(self.queue.poll(waiter, ready));
+		Poll::Ready(outbox.pop().expect("an outbox holding something pops it"))
 	}
 
 	/// The next output already queued, without waiting.
 	pub fn try_output(&self) -> Option<Output> {
-		self.queue.try_pop().ok().flatten()
+		if self.queue.read().is_empty() {
+			return None;
+		}
+		self.queue.lock().pop()
 	}
 
 	fn with<R>(&self, f: impl FnOnce(&mut Router<Key, Claim>, Key) -> R) -> R {
@@ -331,7 +466,6 @@ impl Stream {
 
 impl Drop for Stream {
 	fn drop(&mut self) {
-		self.queue.close();
 		let mut state = self.node.lock();
 		state.queues.remove(&self.key);
 		state.router.disconnect(self.key);
@@ -344,9 +478,9 @@ impl Drop for Stream {
 	}
 }
 
-fn push(queues: &HashMap<Key, kio::Queue<Output>>, key: Key, output: Output) {
+fn push(queues: &Queues, key: Key, output: Output) {
 	if let Some(queue) = queues.get(&key) {
-		let _ = queue.try_push(output);
+		queue.lock().push(output);
 	}
 }
 
@@ -616,6 +750,70 @@ mod tests {
 		};
 		assert_eq!(claims(outputs(&a)), [p("live/a/x")]);
 		assert_eq!(claims(outputs(&b)), [p("live/b/y")]);
+	}
+
+	/// A reader that stops reading holds one entry for the route, however often its
+	/// claims change: the last change to each, and none for a claim it was never sent.
+	#[test]
+	fn a_stalled_reader_holds_the_net_change() {
+		let instance = Instance::random();
+		let origin = Node::new(1, 1);
+		let answer = origin.answer(Link::default(), Path::empty()).unwrap();
+		outputs(&answer);
+		for cost in 0..1000 {
+			origin.own(p("live/x"), Some(claim(&instance, cost)), None);
+			origin.own(p("live/churn"), Some(claim(&instance, cost)), None);
+			origin.own(p("live/churn"), None, None);
+		}
+		let read = outputs(&answer);
+		let batch = |read: &[Output]| match read {
+			[.., Output::Batch { changes, .. }] => changes.clone(),
+			_ => panic!("no batch: {read:?}"),
+		};
+		assert!(read.len() <= 2, "{read:?}");
+		assert_eq!(batch(&read), [(p("live/x"), Some(claim(&instance, 999)))]);
+
+		// Once sent, a claim's end is kept, behind what started.
+		for cost in 0..1000 {
+			origin.own(p("live/y"), Some(claim(&instance, cost)), None);
+		}
+		origin.own(p("live/x"), None, None);
+		let read = outputs(&answer);
+		assert_eq!(read.len(), 1, "{read:?}");
+		assert_eq!(
+			batch(&read),
+			[(p("live/y"), Some(claim(&instance, 999))), (p("live/x"), None)]
+		);
+	}
+
+	/// A route that starts and ends while the reader stalls reaches it as an end alone,
+	/// which the reader acks at once since it never held the route.
+	#[test]
+	fn a_route_started_and_ended_unread_is_an_end() {
+		let instance = Instance::random();
+		let origin = Node::new(1, 1);
+		let relay = Node::new(2, 2);
+		let receive = relay.receive(Link::default(), Path::empty()).unwrap();
+		let answer = origin.answer(Link::default(), Path::empty()).unwrap();
+		origin.own(p("live/x"), Some(claim(&instance, 0)), None);
+		pump(&answer, &receive);
+		let edge = relay
+			.answer(
+				Link {
+					proxy: true,
+					..Link::default()
+				},
+				Path::empty(),
+			)
+			.unwrap();
+		drop(receive);
+		let read: Vec<Output> = (outputs(&edge).into_iter())
+			.filter(|output| matches!(output, Output::Route { id: 1, .. } | Output::Batch { id: 1, .. }))
+			.collect();
+		assert_eq!(read, [Output::Route { id: 1, reach: None }]);
+		assert_eq!(relay.retained().echoes, 1, "the end awaits its echo");
+		edge.echo(1);
+		assert_eq!(relay.retained().echoes, 0);
 	}
 
 	#[test]
