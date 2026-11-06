@@ -54,7 +54,6 @@ the same reason, gates the cut through the
 - [Remove the moq-e2ee stub](/quest/m1/moq-e2ee-remove.md) - `rs/moq-e2ee` leaves the workspace and release config now that its final release points to moq-crypto
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - `rust-bench` fits its hour and gets A/A runs, and separate builds of unchanged code stop measuring as a slowdown, so every paired regression alert can be trusted
-- [moq-json's table/deltas bench measures the same work every iteration](/quest/m1/bench-json-deltas.md) - the `table/deltas/1%` cases stop flipping between snapshot and delta timings, so their trend history is usable
 - [Publish moq-bench to crates.io](/quest/m1/bench-publish.md) - `cargo install moq-bench` installs one binary, with the host sampler as `moq-bench host`, first as 0.1.0
 - [Session policy lives in moq-net](/quest/m1/session-policy/README.md) - accept and connect deadlines, admission, window widening and reconnect live once in moq-net; moq-tokio and moq-relay's io_uring path call them
 - [Vendor and trim the WebRTC stack](/quest/m1/webrtc-vendor.md) - str0m, dimpl, `is`, and sctp-proto live in moq-webrtc with unused code removed, so moq-rtc can take rind
