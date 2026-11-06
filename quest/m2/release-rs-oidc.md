@@ -8,6 +8,11 @@ secret is removed and revoked.
 
 ## Plan
 
+Moved to m2 on 2026-11-05 (/quest-unblock), with
+[crates.io trusts the workflow](/quest/m2/crates-trusted-publisher.md), which
+waits on the cut's first publishes.
+
+
 Moved from m2 to m1 on 2026-10-29 (maintainer): after
 [moq-dev/moq#7166](https://github.com/moq-dev/moq/pull/7166) moved publish
 secrets into the `publish` Environment, `CARGO_REGISTRY_TOKEN` is the
@@ -30,4 +35,4 @@ authentication Action is needed.
 ## Required
 
 - [Remove the moq-e2ee stub](/quest/m1/moq-e2ee-remove.md) - release-plz stops tracking a retired crate that has no trusted publisher
-- [crates.io trusts the workflow](/quest/m1/crates-trusted-publisher.md) - every published crate has the trusted publisher configured
+- [crates.io trusts the workflow](/quest/m2/crates-trusted-publisher.md) - every published crate has the trusted publisher configured

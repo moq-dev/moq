@@ -19,8 +19,10 @@ channel error just before:
 ERROR:third_party/blink/renderer/modules/peerconnection/rtc_data_channel.cc:867] Send failedINVALID_STATE
 ```
 
-A send on a data channel that was not open (or already closing) failed, and
-the transfer then stalled instead of failing. It timed out once before, in
+The log names neither the channel's sender nor its timing against the
+stall, so this is a correlation to investigate, not a diagnosis: a send on a
+data channel that was not open (or already closing) failed, and the transfer
+stalled instead of failing. It timed out once before, in
 [41668668824](https://github.com/moq-dev/moq/actions/runs/41668668824), and
 passed locally then.
 

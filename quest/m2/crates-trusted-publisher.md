@@ -4,18 +4,26 @@
 
 Every crate that `release-rs.yml` publishes has a crates.io trusted publisher
 for `moq-dev/moq`, workflow `release-rs.yml`, and environment `publish`, so
-[Rust releases publish through OIDC](/quest/m1/release-rs-oidc.md) can start.
+[Rust releases publish through OIDC](/quest/m2/release-rs-oidc.md) can start.
 Delete this quest once every crate has one.
 
 ## Waiting
 
-- Maintainer: after the next `main` to `release` cut publishes kio-macros, moq-c,
+- Maintainer: after [the cut](/quest/m2/release/cut.md) publishes kio-macros, moq-c,
   moq-congestion, moq-crypto, moq-ice, moq-quic, and moq-rtsp by token (and
   moq-bench, whenever [its first publish](/quest/m1/bench-publish.md) lands), add
   their trusted publishers the same way. Settings pages need a crates.io
   login, so check with a `release-rs.yml` run that publishes through OIDC.
 
 ## Plan
+
+Decided 2026-11-05 (maintainer left the choice to the agent, /quest-unblock):
+✅ move this quest and [Rust releases publish through OIDC](/quest/m2/release-rs-oidc.md)
+to m2 behind [the cut](/quest/m2/release/cut.md). The seven crates the cut
+first-publishes by token cannot get a trusted publisher before it, and the cut
+runs after m1, so neither quest could finish inside m1. Not chosen: keeping
+both in m1 and treating the cut as part of finishing m1.
+
 
 Moved from m2 to m1 on 2026-10-29 (maintainer): after
 [moq-dev/moq#7166](https://github.com/moq-dev/moq/pull/7166) moved publish
@@ -48,3 +56,7 @@ Decided 2026-11-05 (maintainer, /quest-audit): moq-e2ee, published but
 retired in favor of moq-crypto, gets no trusted publisher;
 [Remove the moq-e2ee stub](/quest/m1/moq-e2ee-remove.md) takes it out of the
 workspace instead.
+
+## Required
+
+- [Cut the release](/quest/m2/release/cut.md) - the cut first-publishes the seven crates by token
