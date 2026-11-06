@@ -155,7 +155,9 @@ async fn an_abandoned_setup_returns_credit_with_the_publisher_still_live() {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let viewer = origin(2);
-		let broadcast = publisher.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let info = track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_max_age(None);
