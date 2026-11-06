@@ -523,7 +523,8 @@ pub enum Source {
 	#[default]
 	Local,
 	/// Learned from a cluster peer, named by the hop id the announcing session declared
-	/// or was assigned. 0 when a peer handle announced it in-process, with no session.
+	/// or was assigned. 0 when the announcing handle named none: a peer handle in-process,
+	/// or a session whose peer declared no hop and was assigned none.
 	Peer(u64),
 }
 
