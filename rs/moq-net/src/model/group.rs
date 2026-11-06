@@ -4246,6 +4246,7 @@ impl Consumer {
 	/// This is a short read: it returns as soon as anything is ready rather than
 	/// waiting for `out` to fill. A zero count means the group ended when the buffer
 	/// has non-zero capacity.
+	#[cfg(feature = "async")]
 	#[cfg(any(test, feature = "fuzz"))]
 	pub(crate) fn poll_read_frames<const N: usize>(
 		&mut self,

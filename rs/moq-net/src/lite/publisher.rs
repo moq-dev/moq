@@ -2094,8 +2094,12 @@ enum TrackInfoServe {
 	Track(track::Resolving, Option<Box<Legacy>>, Option<DatagramHold>),
 	/// Lite-05/06: a name no stream track has, answered for its datagram track.
 	Datagrams(datagram::Consumer),
-	/// Answered from the datagram track, now held for the SUBSCRIBE alongside.
-	Held(#[expect(dead_code, reason = "held for its drop")] DatagramHold),
+	/// Answered from the datagram track, which stays asked for while held for the SUBSCRIBE
+	/// alongside.
+	Held(
+		#[expect(dead_code, reason = "held for its drop")] datagram::Consumer,
+		#[expect(dead_code, reason = "held for its drop")] DatagramHold,
+	),
 }
 
 impl Request for TrackInfoServe {
@@ -2173,10 +2177,11 @@ impl Request for TrackInfoServe {
 				if ietf {
 					writer.buffer(&lite::ietf::TrackProperties(Default::default()))?;
 				}
-				*self = Self::Held(shared.held_datagrams.hold(consumer.clone()));
+				let hold = shared.held_datagrams.hold(consumer);
+				*self = Self::Held(consumer.clone(), hold);
 				return Poll::Ready(Ok(ControlFlow::Break(())));
 			}
-			Self::Held(_) => unreachable!("answered once"),
+			Self::Held(..) => unreachable!("answered once"),
 		};
 		let info = ready!(querying.poll_ok(waiter))?;
 		crate::ietf::flate::egress(&info, shared.version.has_compression())?;
@@ -2185,7 +2190,7 @@ impl Request for TrackInfoServe {
 		*held = legacy
 			.take()
 			.and_then(|legacy| legacy.live())
-			.map(|consumer| shared.held_datagrams.hold(consumer));
+			.map(|consumer| shared.held_datagrams.hold(&consumer));
 
 		// Ahead of the track's groups, which a subscriber holds unread until it lands.
 		writer.set_priority(crate::coding::TRACK_INFO_SEND_ORDER);
@@ -2761,8 +2766,8 @@ impl Legacy {
 /// its TRACK open until the SUBSCRIBE has a response, so the hold outlasts its arrival.
 ///
 /// A hold is matched by the track it reads, not by name, so one left on a track a route
-/// change replaced never stands in for the current one. It sits at the lowest priority, so
-/// it keeps a position without outranking the subscriptions that read the track.
+/// change replaced never stands in for the current one. It is a passive observer: it keeps
+/// a position without adding demand, which the SUBSCRIBE adds when it reads the track.
 #[derive(Clone, Default)]
 struct HeldDatagrams(Arc<Mutex<HeldState>>);
 
@@ -2774,9 +2779,9 @@ struct HeldState {
 }
 
 impl HeldDatagrams {
-	/// Hold `consumer` until the returned hold drops.
-	fn hold(&self, mut consumer: datagram::Consumer) -> DatagramHold {
-		consumer.set_priority(i8::MIN);
+	/// Hold `consumer`'s track from its position until the returned hold drops.
+	fn hold(&self, consumer: &datagram::Consumer) -> DatagramHold {
+		let consumer = consumer.observe();
 		let mut state = self.0.lock().unwrap();
 		let key = state.next;
 		state.next += 1;
@@ -2815,6 +2820,7 @@ impl Drop for DatagramHold {
 /// Lite-05/06: a name's datagram track carried on the subscription of its stream track, as
 /// one subscription carries both kinds there. A subscriber keeps the kind it asked for.
 struct LegacyDatagrams {
+	demand: bool,
 	consumer: datagram::Consumer,
 	id: u64,
 	priority: i8,
@@ -2832,9 +2838,14 @@ impl LegacyDatagrams {
 	/// subscribes to, so this asks no handler: a request would subscribe to the name again.
 	/// The request's own ask joins only once answered, the track then being live.
 	fn join(legacy: Option<Box<Legacy>>, id: u64, priority: i8, timescale: Option<crate::Timescale>) -> Option<Self> {
-		let mut consumer = legacy?.live()?;
-		consumer.set_priority(priority);
+		let legacy = legacy?;
+		let demand = legacy.broadcast.has_local_datagrams();
+		let mut consumer = legacy.live()?;
+		if demand {
+			consumer.set_priority(priority);
+		}
 		Some(Self {
+			demand,
 			consumer,
 			id,
 			priority,
@@ -2846,7 +2857,9 @@ impl LegacyDatagrams {
 	/// Move the datagrams to the subscriber's new `priority`.
 	fn steer(&mut self, priority: i8) {
 		self.priority = priority;
-		self.consumer.set_priority(priority);
+		if self.demand {
+			self.consumer.set_priority(priority);
+		}
 		if let Some(send) = &mut self.send {
 			send.steer(priority);
 		}
@@ -9574,7 +9587,7 @@ mod tests {
 	/// Lite-05/06: a requester reads TRACK_INFO as the name being accepted, and its SUBSCRIBE,
 	/// on a stream of its own, can arrive after a datagram written meanwhile. That SUBSCRIBE
 	/// still sends it, whether the datagram track answered the TRACK or rides beside a stream
-	/// track of the same name, and the hold keeps no priority of its own.
+	/// track of the same name.
 	#[kio::test]
 	async fn a_subscribe_sends_the_datagrams_written_since_its_track_info() {
 		for version in [Version::Lite05, Version::Lite06] {
@@ -9603,11 +9616,10 @@ mod tests {
 				let mut subscribe = legacy_request::<SubscribeServe>(&publisher, version, &legacy_subscribe(-5)).await;
 				assert!(!drive(&mut subscribe).await, "{case}: the subscription is live");
 				assert_eq!(log.lock().unwrap().len(), 1, "{case}");
-				assert_eq!(
-					datagrams.priority(),
-					Some(-5),
-					"{case}: the SUBSCRIBE's priority stands"
-				);
+				// Beside a stream track, only the SUBSCRIBE asks for the datagrams.
+				if stream {
+					assert_eq!(datagrams.priority(), Some(-5), "{case}: the SUBSCRIBE's priority stands");
+				}
 			}
 		}
 	}

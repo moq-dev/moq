@@ -45,7 +45,7 @@ class State {
 	closed = new Once<Error | null>();
 	changed = new Signal(0);
 	priority = new Signal<number | undefined>(undefined);
-	consumers = new Map<object, number>();
+	consumers = new Map<object, number | undefined>();
 	buffer: Datagram[] = [];
 	bytes = 0;
 	offset = 0n;
@@ -65,9 +65,10 @@ class State {
 
 	updatePriority(): void {
 		let highest: number | undefined;
-		for (const value of this.consumers.values()) highest = Math.max(highest ?? -128, value);
+		for (const value of this.consumers.values())
+			if (value !== undefined) highest = Math.max(highest ?? -128, value);
 		this.priority.set(highest);
-		if (highest === undefined) {
+		if (this.consumers.size === 0) {
 			if (this.info.peek() === undefined) this.end(new StreamError(StreamCode.Cancel));
 			if (this.closed.peek() !== undefined) this.release();
 		}
@@ -88,7 +89,7 @@ async function info(state: State, local?: GetPromise<Error | null>): Promise<Inf
 	}
 }
 
-let consume: (name: string, state: State, cursor?: bigint, priority?: number) => Consumer;
+let consume: (name: string, state: State, cursor?: bigint, priority?: number | null) => Consumer;
 
 /** Writes a live datagram track, independently of any stream track of the same name. */
 export class Producer {
@@ -101,6 +102,7 @@ export class Producer {
 	}
 
 	static {
+		hooks.observeDatagrams = (producer) => consume(producer.name, producer.#state, undefined, null);
 		hooks.closeUnusedDatagrams = (producer) => {
 			if (producer.#state.consumers.size > 0) return false;
 			producer.abort(new StreamError(StreamCode.Cancel));
@@ -230,13 +232,13 @@ export class Consumer {
 	#closed = new Once<Error | null>();
 	#priority: Signal<number>;
 
-	private constructor(name: string, state: State, cursor?: bigint, value = 0) {
+	private constructor(name: string, state: State, cursor?: bigint, value: number | null = 0) {
 		this.name = name;
 		this.#state = state;
 		this.#cursor = cursor ?? state.offset + BigInt(state.buffer.length);
-		this.#priority = new Signal(value);
+		this.#priority = new Signal(value ?? 0);
 		if (state.closed.peek() === undefined || cursor !== undefined) {
-			state.consumers.set(this, value);
+			state.consumers.set(this, value ?? undefined);
 			state.updatePriority();
 		}
 	}
@@ -245,6 +247,10 @@ export class Consumer {
 		hooks.datagramPriority = (consumer) => consumer.#priority;
 		hooks.datagramClosed = (consumer) => consumer.#closed;
 		hooks.datagramSameTrack = (a, b) => a.#state === b.#state;
+		hooks.observeDatagramConsumer = (consumer) => {
+			if (consumer.#closed.peek() !== undefined) throw new Error("datagram consumer is closed");
+			return consume(consumer.name, consumer.#state, consumer.#cursor, null);
+		};
 	}
 
 	/** The track's publisher properties, once accepted. */
@@ -268,7 +274,8 @@ export class Consumer {
 	/** Another consumer at the same position and priority. */
 	clone(): Consumer {
 		if (this.#closed.peek() !== undefined) throw new Error("datagram consumer is closed");
-		return consume(this.name, this.#state, this.#cursor, this.#priority.peek());
+		const passive = this.#state.consumers.has(this) && this.#state.consumers.get(this) === undefined;
+		return consume(this.name, this.#state, this.#cursor, passive ? null : this.#priority.peek());
 	}
 
 	/** Read the next datagram as a copy this consumer owns, skipping any dropped by the bounded shared buffer. */

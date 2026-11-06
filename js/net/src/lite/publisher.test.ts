@@ -3457,7 +3457,7 @@ function legacyPublisher(version: Version) {
 // Lite-05/06: a requester reads TRACK_INFO as the name being accepted, and its SUBSCRIBE, on a
 // stream of its own, can arrive after a datagram written meanwhile. That SUBSCRIBE still sends
 // it, whether the datagram track answered the TRACK or rides beside a stream track of the name,
-// and the hold keeps no priority of its own.
+// and the hold adds no demand of its own.
 for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 	const label = version === Version.DRAFT_06 ? "lite-06" : "lite-05";
 	for (const stream of [false, true]) {
@@ -3470,7 +3470,8 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 				datagrams.append(undefined, Uint8Array.of(0xaa));
 				await legacy.subscribe(-5);
 				expect(legacy.sent.length).toBe(1);
-				expect(datagrams.priority.peek()).toBe(-5);
+				// Beside a stream track, only the SUBSCRIBE asks for the datagrams.
+				if (stream) expect(datagrams.priority.peek()).toBe(-5);
 			} finally {
 				legacy.close();
 			}

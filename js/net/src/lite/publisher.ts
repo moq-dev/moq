@@ -549,8 +549,8 @@ export class Publisher {
 	// own arrival, which would lose what was written in between. The requester keeps its TRACK
 	// open until the SUBSCRIBE has a response, so the hold outlasts its arrival. A hold is
 	// matched by the track it reads, not by name, so one left on a replaced track never stands
-	// in for the current one. It sits at the lowest priority, keeping a position without
-	// outranking the subscriptions that read the track.
+	// in for the current one. It is a passive observer: it keeps a position without adding
+	// demand, which the SUBSCRIBE adds when it reads the track.
 	#heldDatagrams = new Set<datagram.Consumer>();
 
 	/**
@@ -1021,6 +1021,7 @@ export class Publisher {
 			endFrame: msg.endFrame,
 		};
 		let legacy: datagram.Consumer | undefined;
+		const legacyPriority = new Signal(msg.priority);
 		let controls: SubscriptionControls | undefined;
 		// Lite-05 and later name every sequence below the end that this subscription never
 		// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
@@ -1099,8 +1100,8 @@ export class Publisher {
 				const live = wireOf(front).liveDatagrams(msg.track);
 				legacy = live && this.#adopt(live);
 				if (legacy) {
-					legacy.setPriority(msg.priority);
-					datagrams = this.#runDatagrams(legacy, { sub: msg.id, stamp })
+					if (wireOf(front).localDatagrams) legacy.setPriority(msg.priority);
+					datagrams = this.#runDatagrams(legacy, { sub: msg.id, stamp, priority: legacyPriority })
 						.then(() => {})
 						.catch((err) => console.debug(`datagram send stopped: ${reason(err)}`));
 				}
@@ -1117,7 +1118,8 @@ export class Publisher {
 				version: this.version,
 				live: new LiveRanges(this.version, asked),
 				apply: (update, live) => {
-					legacy?.setPriority(update.priority);
+					legacyPriority.set(update.priority);
+					if (wireOf(front).localDatagrams) legacy?.setPriority(update.priority);
 					if (hasRanges(this.version)) {
 						const resolved = hooks.servingResolved(track);
 						const entries = live.map(({ id, entry }) => {
@@ -1932,13 +1934,15 @@ export class Publisher {
 		}
 	}
 
-	// Hold `consumer` for the SUBSCRIBE alongside until `hold` aborts.
+	// Hold `consumer`'s track from its position for the SUBSCRIBE alongside until `hold`
+	// aborts, as a passive observer in place of `consumer`.
 	#holdDatagrams(consumer: datagram.Consumer, hold: AbortSignal) {
-		consumer.setPriority(-128);
-		this.#heldDatagrams.add(consumer);
+		const held = hooks.observeDatagramConsumer(consumer);
+		consumer.close();
+		this.#heldDatagrams.add(held);
 		const release = () => {
-			this.#heldDatagrams.delete(consumer);
-			consumer.close();
+			this.#heldDatagrams.delete(held);
+			held.close();
 		};
 		if (hold.aborted) release();
 		else hold.addEventListener("abort", release, { once: true });
@@ -2102,12 +2106,16 @@ export class Publisher {
 	}
 
 	// Shared by dedicated lite-07 requests and the old SUBSCRIBE carry-both mapping.
-	async #runDatagrams(track: datagram.Consumer, options: { sub: bigint; stamp?: Stamp }): Promise<bigint> {
+	async #runDatagrams(
+		track: datagram.Consumer,
+		options: { sub: bigint; stamp?: Stamp; priority?: Getter<number> },
+	): Promise<bigint> {
 		if (!this.#datagramWriter) throw new Error("transport does not support datagrams");
 		const info = await track.info();
-		const rank = () => sendOrder({ priority: track.priority, publisher: info.priority });
+		const priority = options.priority ?? hooks.datagramPriority(track);
+		const rank = () => sendOrder({ priority: priority.peek(), publisher: info.priority });
 		const sender = this.#datagramWriter.open(rank());
-		const dispose = hooks.datagramPriority(track).subscribe(() => sender.setPriority(rank()));
+		const dispose = priority.subscribe(() => sender.setPriority(rank()));
 		const left = hooks.datagramClosed(track);
 		const { writer } = sender;
 		const maxSize = Math.min(DatagramMessage.MAX_SIZE, DatagramStream.maxDatagramSize(this.#quic));
