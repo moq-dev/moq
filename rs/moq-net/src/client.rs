@@ -448,7 +448,7 @@ impl Client {
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Connect::Started(Session::new(
+				return Ok(Connect::Started(Box::new(Session::new(
 					runtime,
 					session,
 					v,
@@ -466,7 +466,7 @@ impl Client {
 						peer_implementation,
 						datagrams_unrouted: None,
 					},
-				)));
+				))));
 			}
 			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06 | ALPN_LITE_07_WIP)) => {
 				let version = match alpn {
@@ -477,7 +477,7 @@ impl Client {
 				self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
 				return self
 					.start_lite(runtime, session, version, peer_hop)
-					.map(Connect::Started);
+					.map(|started| Connect::Started(Box::new(started)));
 			}
 			Some(ALPN_LITE_04) => {
 				self.versions
@@ -485,7 +485,7 @@ impl Client {
 					.ok_or(Error::Version)?;
 				return self
 					.start_lite(runtime, session, lite::Version::Lite04, peer_hop)
-					.map(Connect::Started);
+					.map(|started| Connect::Started(Box::new(started)));
 			}
 			Some(ALPN_LITE_03) => {
 				self.versions
@@ -493,7 +493,7 @@ impl Client {
 					.ok_or(Error::Version)?;
 				return self
 					.start_lite(runtime, session, lite::Version::Lite03, peer_hop)
-					.map(Connect::Started);
+					.map(|started| Connect::Started(Box::new(started)));
 			}
 			// No ALPN, or `moql`: negotiate moq-lite in a bidi SETUP.
 			Some(ALPN_LITE) | None => self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?,
@@ -588,8 +588,9 @@ struct Negotiation {
 enum Connect {
 	/// Not polled yet: the transport's ALPN picks the path.
 	Start { runtime: Deadlines, session: Transport },
-	/// Started without waiting on the peer.
-	Started((Session, crate::Driver)),
+	/// Started without waiting on the peer. Boxed, being several times the size of the
+	/// handshake steps.
+	Started(Box<(Session, crate::Driver)>),
 	/// Waiting its turn for credit to open the bidi stream the SETUP is negotiated on.
 	Open {
 		negotiation: Negotiation,
@@ -634,7 +635,7 @@ impl Connect {
 					let Self::Started(started) = std::mem::replace(self, Self::Done) else {
 						unreachable!("matched above");
 					};
-					return Poll::Ready(Ok(started));
+					return Poll::Ready(Ok(*started));
 				}
 				Self::Open { negotiation, open } => {
 					// The SETUP keeps lite-01's framing whichever version it offers.
