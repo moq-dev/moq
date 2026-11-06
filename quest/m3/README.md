@@ -172,3 +172,16 @@ federation) land.
 - [MKV imports ffmpeg's multichannel FLAC](/quest/m3/mkv-flac-channel-mask.md) - a channel-mask-only Vorbis comment is accepted, so default ffmpeg multichannel FLAC needs no remux
 - [The publish support panel lists only codecs publishing accepts](/quest/m3/publish-support-probe.md) - the settings panel runs the publisher's Annex B encoder probe
 - [TLS reload follows symlinked certificate files](/quest/m3/watch-symlink-targets.md) - in-place rewrites of symlink targets in other directories reload roots, served chains, and client certificates
+- [A published capture exposes its bandwidth grant](/quest/m3/video-publish-grant.md) - a moq-video publish shows each track's granted bitrate, not only its target
+- [The test relay can enable stats](/quest/m3/relay-test-stats.md) - `moq_relay::test_relay` starts with stats on when asked
+- [macOS capture listing futures are Send](/quest/m3/capture-shareable-send.md) - ScreenCaptureKit listing and start no longer hold a non-Send block across an await
+- [Denied macOS system audio names its settings pane](/quest/m3/audio-system-denied-hint.md) - a permission error pointing at Screen & System Audio Recording
+- [One encoder follows several connections' estimates](/quest/m3/bandwidth-multi-connection.md) - a track published to two relays tracks both estimates
+- [Bandwidth reservations ignore in-process readers](/quest/m3/reservation-local-readers.md) - a local recorder no longer counts as uplink demand
+- [Container export starts apart from its skip budget](/quest/m3/export-live-start.md) - fMP4 and MP4 export start at the live edge and report sample counts
+- [MP4 export trims exactly at both ends](/quest/m3/mp4-export-window.md) - a presentation window with no lead-in and no presented tail
+- [Audio capture opens a format the mix accepts](/quest/m3/audio-capture-negotiate.md) - multichannel and odd-rate devices capture, with discrete input selection
+- [A mix-minus removes several sources](/quest/m3/bus-minus-several.md) - a guest's return feed drops every copy of their own sound
+- [Bus writes land at a bus position](/quest/m3/bus-positioned-write.md) - callers sync audio to video without copying the bus's private latency
+- [moq-mux imports a regular MP4](/quest/m3/mp4-import.md) - non-fragmented MP4, `moov` first or last
+- [An audio encoder flushes without ending its track](/quest/m3/audio-encode-flush.md) - a clip's last partial frame is heard while the source stays live
