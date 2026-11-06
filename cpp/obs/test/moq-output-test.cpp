@@ -861,10 +861,12 @@ int main()
 		CHECK(catalog.has_value());
 		if (catalog) {
 			const auto &[name, rendition] = *catalog->video.begin();
-			auto media = TestOk(
-				moq::MediaTrackConsumer::subscribe(broadcast, {moq::Rendition::kVideo{name, rendition}})
-					.get(),
-				"container consumer");
+			// No max delay: the default of zero lets the publisher reset the first
+			// group's unsent end (its duration marker and FIN) the moment the large
+			// keyframe supersedes it, which reads as a gap. This reader wants every group.
+			moq::MediaTrackConfig config{moq::Rendition::kVideo{name, rendition}, moq::Subscription{}};
+			auto media = TestOk(moq::MediaTrackConsumer::subscribe(broadcast, config).get(),
+					    "container consumer");
 			// Read a frame first, so the relay is subscribed before the last one is written.
 			auto next = media->next();
 			CHECK(next.wait_for(std::chrono::seconds(10)) == std::future_status::ready);

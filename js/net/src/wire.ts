@@ -11,7 +11,7 @@ import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type * as broadcast from "./broadcast.ts";
 import type * as datagram from "./datagram.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
-import type { RouteInfo } from "./hop.ts";
+import type { WireRoute } from "./hop.ts";
 import type * as Instance from "./instance.ts";
 import type { Lister, Tracks } from "./listing.ts";
 import type * as origin from "./origin.ts";
@@ -62,7 +62,7 @@ export interface OriginProducer {
 	/** Whether an advertised prefix overlaps the handle's allowed paths. */
 	accepts(prefix: Path.Valid): boolean;
 	/** Land a route a peer announced, taken as given and never forwarded back to a peer. */
-	receive(prefix: Path.Valid, route?: Partial<RouteInfo>): origin.Route;
+	receive(prefix: Path.Valid, route?: Partial<WireRoute>): origin.Route;
 	attach(discovery: boolean): Dispose;
 	/**
 	 * Hold the origin's announcement streams overlapping `prefix` unsynced until
@@ -80,13 +80,13 @@ export interface OriginProducer {
 /** The protocol-facing operations behind an origin route. */
 export interface Route {
 	/** The metadata the route is advertised with, or undefined while hidden. */
-	readonly info: RouteInfo | undefined;
+	readonly info: WireRoute | undefined;
 	/**
 	 * Advertise the route with `info` as given, as a session's update does: a named instance
 	 * replaces the route's, which restarts its readers; otherwise it keeps the route's own.
 	 * Announces a hidden route.
 	 */
-	update(info: Partial<RouteInfo>): void;
+	update(info: Partial<WireRoute>): void;
 }
 
 /** The protocol-facing operations behind an origin consumer. */
@@ -103,7 +103,7 @@ export interface OriginConsumer {
 /** One originated advertisement exposed to the publishing wire. */
 export interface Advertised {
 	readonly identity: object;
-	readonly route: RouteInfo;
+	readonly route: WireRoute;
 	/** The paths a scoped route may serve beneath its prefix, relative like its key; unset for the whole subtree. */
 	readonly claim?: Path.Patterns;
 	/**
@@ -117,7 +117,7 @@ export interface Advertised {
 /** What names a stream: an advertisement, and the instance its route serves. */
 export interface Served {
 	readonly identity: object;
-	readonly route: Pick<RouteInfo, "instance">;
+	readonly route: Pick<WireRoute, "instance">;
 }
 
 /**

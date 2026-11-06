@@ -17,7 +17,7 @@ import {
 	TimestampMismatch,
 } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
-import { HopSchema, isAnonymous, MAX_HOPS, RouteInfo, UNKNOWN_HOP } from "../hop.ts";
+import { HopSchema, isAnonymous, MAX_HOPS, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
@@ -201,8 +201,8 @@ test("an announce consumer closed while its stream opens sends nothing on it", a
 });
 
 test("a local empty hop chain is not anonymous", () => {
-	expect(isAnonymous(RouteInfo.default)).toBe(false);
-	expect(isAnonymous({ hops: [UNKNOWN_HOP], cost: RouteInfo.default.cost })).toBe(true);
+	expect(isAnonymous(WireRoute.default)).toBe(false);
+	expect(isAnonymous({ hops: [UNKNOWN_HOP], cost: WireRoute.default.cost })).toBe(true);
 });
 
 test("a max-length chain plus withheld responder is dropped", async () => {
@@ -2937,6 +2937,8 @@ function probeTargetHarness(level: ProbeLevel, options?: { failTarget?: boolean;
 	let writes = 0;
 	let stall!: () => void;
 	const stalled = new Promise<void>((resolve) => (stall = resolve));
+	let release!: () => void;
+	const released = new Promise<void>((resolve) => (release = resolve));
 	let reset!: (reason: unknown) => void;
 	const aborted = new Promise<unknown>((resolve) => (reset = resolve));
 	const quic = {
@@ -2947,10 +2949,12 @@ function probeTargetHarness(level: ProbeLevel, options?: { failTarget?: boolean;
 					// Only the stream type precedes the first target.
 					if (writes++ > 0) {
 						if (options?.failTarget) throw new Error("write failed");
-						// A peer that never drains the stream: only a reset ends the write.
-						if (options?.stallTarget) {
+						// A peer that stops draining the stream at the first target: only `release`
+						// or a reset ends that write.
+						if (options?.stallTarget && writes === 2) {
 							stall();
-							await new Promise<void>((_, reject) => {
+							await new Promise<void>((resolve, reject) => {
+								void released.then(resolve);
 								controller.signal.addEventListener("abort", () => {
 									reset(controller.signal.reason);
 									reject(controller.signal.reason);
@@ -2971,6 +2975,7 @@ function probeTargetHarness(level: ProbeLevel, options?: { failTarget?: boolean;
 		sent,
 		version,
 		stalled,
+		release,
 		aborted,
 		finish: () => inbound.close(),
 	};
@@ -2979,6 +2984,9 @@ function probeTargetHarness(level: ProbeLevel, options?: { failTarget?: boolean;
 // The viewers' sum reaches the peer as its PROBE target: only once nonzero, on every change,
 // and retracted with a zero, while an opt-out sends nothing at all.
 test("the PROBE stream sends the viewers' target to an Increase peer", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	using _clock = { [Symbol.dispose]: () => installed.close() };
 	const { subscriber, sent, version, finish } = probeTargetHarness(ProbeLevel.Increase);
 	const viewers = new Viewers();
 	viewers.setTarget(0);
@@ -3000,6 +3008,9 @@ test("the PROBE stream sends the viewers' target to an Increase peer", async () 
 	second.close();
 	expect((await Probe.decode(sent, version)).bitrate).toBeUndefined();
 
+	// Reading the target back only proves its bytes were written: the writer may still be
+	// yielding its write budget, and a FIN then would reset the stream instead of closing it.
+	await clock.advance(Nano.zero);
 	finish();
 	await running;
 	expect(await sent.done()).toBe(true);
@@ -3036,6 +3047,39 @@ test("ending the probe resets a stalled PROBE target write", async () => {
 	stop.abort();
 	await running;
 	expect(await aborted).toBeDefined();
+	viewer.close();
+	subscriber.close();
+	viewers.close();
+});
+
+// A peer that stops reading holds one target: the changes made meanwhile queue nothing
+// behind it, and only the latest is sent once the write drains.
+test("a stalled PROBE writer sends only the latest target once it drains", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	using _clock = { [Symbol.dispose]: () => installed.close() };
+	const { subscriber, sent, version, stalled, release, finish } = probeTargetHarness(ProbeLevel.Increase, {
+		stallTarget: true,
+	});
+	const viewers = new Viewers();
+	const viewer = viewers.watch(1_000_000);
+	const running = subscriber.runProbe(undefined, viewers.target);
+	expect(await sent.u53()).toBe(StreamId.Probe);
+	await stalled;
+
+	for (const rate of [2_000_000, 3_000_000, 4_000_000]) {
+		viewer.update(rate);
+		await drainReactions();
+	}
+	release();
+	expect((await Probe.decode(sent, version)).bitrate).toBe(1_000_000);
+	expect((await Probe.decode(sent, version)).bitrate).toBe(4_000_000);
+
+	// Let the last write finish yielding before the FIN, as in the test above.
+	await clock.advance(Nano.zero);
+	finish();
+	await running;
+	expect(await sent.done()).toBe(true);
 	viewer.close();
 	subscriber.close();
 	viewers.close();

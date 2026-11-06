@@ -100,7 +100,7 @@ pub struct MoqRouteInfo {
 impl From<moq_net::origin::RouteInfo> for MoqRouteInfo {
 	fn from(route: moq_net::origin::RouteInfo) -> Self {
 		Self {
-			hops: route.hops().iter().map(|origin| origin.id()).collect(),
+			hops: route.hops().collect(),
 			cost: route.cost().value(),
 			anonymous: route.is_anonymous(),
 			instance: route.instance().to_string(),

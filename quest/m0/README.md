@@ -31,4 +31,7 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 - [Publish the release line's drain() wrappers](/quest/m0/ffi-shutdown-backport.md) - Dart `moq` 0.1.1 reaches pub.dev from `release`
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in GitHub's merge queue, one tested entry at a time, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
 - [More tests under load](/quest/m0/test-flakes-2/README.md) - load-only and queue failures, one quest per flake, fixed at the cause, since each one drops a queued PR
+- [Tests can't wait on the real clock](/quest/m0/clock-guard/README.md) - a test whose real-clock timer fires fails every run, in JS and, if the spike holds, Rust
+- [A lite subscriber parks once only passive readers remain](/quest/m0/lite-passive-spin.md) - a datagram subscription left with only passive readers stops busy-looping
+- [moq-net builds without async](/quest/m0/moq-net-no-async.md) - the no-async lib tests and doc links build, and CI checks them
 - [Agent build output can't fill the desktop's disk](/quest/m0/agent-disk-budget.md) - finished agent checkouts reclaim their mbx targets automatically, so parallel agent builds stop filling the root disk

@@ -798,9 +798,10 @@ async fn serve_connection(
 		alpn,
 		url,
 	};
+	let at = accepted.deadline.at;
 	let request = accepted
 		.deadline
-		.bound(server.accept_request(now, session))
+		.bound(server.accept_request(now, session).with_deadline(at))
 		.await
 		.context("moq handshake failed")?;
 	serve_request(accepted, request, lifecycle).await
@@ -905,11 +906,6 @@ async fn serve_request(
 	}
 	if let Some(publisher) = publisher {
 		request = request.with_subscriber(publisher);
-	}
-	// moq-net enforces the handshake deadline on the reply, so one the peer never
-	// took counts in the session's stats.
-	if let Some(at) = deadline.at {
-		request = request.with_deadline(at);
 	}
 	// A grant that no longer holds is refused, so the session records why it ended.
 	let lease = match lease.preparing(request.auth(), request.requests(), request.role()) {
