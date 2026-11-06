@@ -7,6 +7,7 @@
  * @module
  */
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import {
 	type Browser,
@@ -124,7 +125,7 @@ export function launch(args: string[] = [], engine: Engine = "chromium"): Promis
 		// Only the Nix browser needs Nix's dlopened media libraries. Downloaded Firefox
 		// uses the system libraries installed by Playwright; mixing in Nix's libraries
 		// can require a newer glibc than the host's and prevent the audio backend starting.
-		if (firefox.executablePath().startsWith("/nix/store/"))
+		if (realpathSync(firefox.executablePath()).startsWith("/nix/store/"))
 			env.LD_LIBRARY_PATH = [process.env.PLAYWRIGHT_FIREFOX_LIBRARY_PATH, process.env.LD_LIBRARY_PATH]
 				.filter(Boolean)
 				.join(":");
