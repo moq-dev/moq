@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Route facts are plain ids ([#8007](https://github.com/moq-dev/moq/pull/8007))
+
+`Origin.Hop`, `Origin.HopSchema` and `Origin.isAnonymous` are removed. An announcement's `Origin.RouteInfo` carries only `instance`, `cost`, `hops` (plain `bigint` ids, `0n` for an anonymous hop) and `anonymous`; its `epoch` and `auth` stay inside the origin, as in Rust. Replace `Origin.isAnonymous(event.route)` with `event.route.anonymous`.
+
 ### Track requests wait for their answer instead of timing out
 
 A subscription, `info()`, or `fetchGroup()` the publisher hasn't answered no longer fails

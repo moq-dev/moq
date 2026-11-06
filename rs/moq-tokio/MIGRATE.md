@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Peer hops are plain ids ([#8007](https://github.com/moq-dev/moq/pull/8007))
+
+`Client::with_peer_hop` and `server::Request::with_peer_hop` take a `NonZeroU64`, and `server::Request::peer_hop` returns `Option<NonZeroU64>`, since `moq_net::Hop` is no longer public. Pass the id you passed to `Hop::new`.
+
 ### A listener builds its peers' identities
 
 `tls::PeerIdentity::from_chain` is removed. A listener outside this crate that ran its own mTLS handshake, such as the `moq-uring` workers, calls `tls::Serve::peer(chain)` on the `Serve` its TLS config came from.

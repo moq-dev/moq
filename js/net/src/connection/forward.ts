@@ -7,7 +7,7 @@
 import { Milli, Nano } from "@moq/clock";
 import { type Dispose, race } from "@moq/signals";
 import type * as Announce from "../announced.ts";
-import { type RouteInfo, routesEqual } from "../hop.ts";
+import { type WireRoute, routesEqual } from "../hop.ts";
 import { coveringPrefixes } from "../internal.ts";
 import type { Producer as OriginProducer, Route } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -41,7 +41,7 @@ interface Interest {
 interface Reported {
 	handle: Route;
 	/** Each request's latest route for the prefix. */
-	readonly reporters: Map<Interest, RouteInfo>;
+	readonly reporters: Map<Interest, WireRoute>;
 }
 
 /**
@@ -118,7 +118,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 	 * instance, so nothing resolved through the old one is joined again, and an in-place
 	 * update otherwise.
 	 */
-	const updateReported = (existing: Reported, prefix: Path.Valid, route: RouteInfo, restart: boolean) => {
+	const updateReported = (existing: Reported, prefix: Path.Valid, route: WireRoute, restart: boolean) => {
 		const current = wireOf(existing.handle).info;
 		if (restart || route.epoch !== current?.epoch) {
 			// Inserted before the old one leaves, so local readers see one restart rather than

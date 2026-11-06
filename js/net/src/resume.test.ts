@@ -3,7 +3,7 @@ import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
-import { RouteInfo } from "./hop.ts";
+import { WireRoute } from "./hop.ts";
 import type { Session as IetfSession } from "./ietf/session.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
@@ -39,7 +39,7 @@ async function isPending(promise: Promise<unknown>): Promise<boolean> {
 
 /** A stand-in session announcing `path` under the shared instance at `cost`, serving `source`. */
 function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
-	const handle = wireOf(origin).receive(path, RouteInfo.normalize({ instance: INSTANCE, cost }));
+	const handle = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost }));
 	void (async () => {
 		for await (const request of handle.requested()) request.serve(source.consume());
 	})();
@@ -1193,7 +1193,7 @@ test("between routes a reader keeps reading the copy it has", async () => {
 	expect(drain(sub)).toEqual([0n]);
 
 	// The next route has not answered when the old one is retracted.
-	const next = wireOf(origin).receive(path, RouteInfo.normalize({ instance: INSTANCE, cost: 1n }));
+	const next = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost: 1n }));
 	const asked = next.requested();
 	disposeA();
 	await settle();
@@ -2082,7 +2082,7 @@ test("a fetched group that fails on the route still serving waits for the next r
 	const b = new BroadcastProducer();
 	const ta = copy(a);
 	const tb = copy(b);
-	// RouteInfo a's request handler holds the refetch of its failed group open, as Rust's tests do
+	// WireRoute a's request handler holds the refetch of its failed group open, as Rust's tests do
 	// with `requests()`: without one, a miss there is NotFound at once.
 	const pending = ta.producer.requests();
 	const failing = ta.write(5n, 1, false);
@@ -2114,7 +2114,7 @@ test("a group handed out already failed with its route still continues on the ne
 	const b = new BroadcastProducer();
 	const ta = copy(a);
 	const tb = copy(b);
-	// RouteInfo a's request handler holds the refetch of its failed group open until the next route.
+	// WireRoute a's request handler holds the refetch of its failed group open until the next route.
 	const pending = ta.producer.requests();
 	front.serve(a.consume());
 	const sub = front.consumer.track("seq").subscribe();

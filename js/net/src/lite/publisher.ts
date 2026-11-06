@@ -19,7 +19,7 @@ import {
 	unauthorized,
 } from "../error.ts";
 import type * as group from "../group.ts";
-import { Cost, type Hop, type RouteInfo, routesEqual } from "../hop.ts";
+import { Cost, type Hop, type WireRoute, routesEqual } from "../hop.ts";
 import { finalSequence, hiddenBelow, hooks, insertRun, presented, type Run, runGaps } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -601,7 +601,7 @@ export class Publisher {
 		let nextAnnounceId = 0n;
 		const announceIds = new Map<Path.Valid, bigint>();
 
-		const wireHops = (route: RouteInfo): Hop[] => {
+		const wireHops = (route: WireRoute): Hop[] => {
 			if (hasAnnounceOk(this.version)) return [...route.hops];
 			return [...route.hops, this.hop];
 		};
@@ -609,7 +609,7 @@ export class Publisher {
 		// What the peer decodes for a route: pre-lite-06 wires carry no cost, so a re-price
 		// there must not restart.
 		// moq-lite carries no per-request auth, so a swap alone sends nothing.
-		const onWire = (route: RouteInfo): RouteInfo => ({
+		const onWire = (route: WireRoute): WireRoute => ({
 			...route,
 			cost: hasRouteCost(this.version) ? route.cost : Cost.zero,
 			auth: undefined,
@@ -621,7 +621,7 @@ export class Publisher {
 			!sameInstance(prev, next) ||
 			(hasInstance(this.version) && (prev.route.epoch ?? 0n) !== (next.route.epoch ?? 0n));
 
-		const announce = async (suffix: Path.Valid, route: RouteInfo) => {
+		const announce = async (suffix: Path.Valid, route: WireRoute) => {
 			console.debug(`announce: broadcast=${suffix} active=true instance=${route.instance}`);
 			if (hasAnnounceId(this.version)) announceIds.set(suffix, nextAnnounceId++);
 			await encodeAnnounceBroadcast(
@@ -638,7 +638,7 @@ export class Publisher {
 			);
 		};
 
-		const update = async (suffix: Path.Valid, route: RouteInfo) => {
+		const update = async (suffix: Path.Valid, route: WireRoute) => {
 			if (!hasAnnounceId(this.version)) {
 				await retract(suffix);
 				await announce(suffix, route);
@@ -658,7 +658,7 @@ export class Publisher {
 		};
 
 		// Another instance or epoch: ANNOUNCE_RESTART on lite-07, an end and a start before it.
-		const restart = async (suffix: Path.Valid, route: RouteInfo) => {
+		const restart = async (suffix: Path.Valid, route: WireRoute) => {
 			const id = announceIds.get(suffix);
 			if (id === undefined || !hasAnnounceRestart(this.version)) {
 				await retract(suffix);
