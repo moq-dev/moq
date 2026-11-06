@@ -25,6 +25,8 @@ pub(crate) struct Inner {
 	pub(crate) wire: net::Wire,
 	socket_stats: Option<SharedSocketStats>,
 	address: Address,
+	/// From [`Config::fixed_receive_window`].
+	fixed_receive_window: bool,
 }
 
 pub(crate) struct State {
@@ -178,6 +180,7 @@ impl Session {
 			wire: net::Wire::new(),
 			socket_stats: transport.socket_stats(),
 			address: transport.address(),
+			fixed_receive_window: config.fixed_receive_window,
 		});
 		let session = Self {
 			_guard: Arc::new(Guard(inner.clone())),
@@ -223,9 +226,13 @@ impl Session {
 	///
 	/// Refuses, changing nothing, a rate cap (QMux never paces, so only
 	/// [`Rate::Unlimited`](moq_quic::Rate::Unlimited) is accepted), a receive window below
-	/// moq-net's [`MIN_RECEIVE_WINDOW`](net::MIN_RECEIVE_WINDOW), and limits a peer would
-	/// refuse. A window only grows at once: credit already granted cannot be taken back.
+	/// moq-net's [`MIN_RECEIVE_WINDOW`](net::MIN_RECEIVE_WINDOW) or on a session whose window
+	/// is [fixed](Config::fixed_receive_window), and limits a peer would refuse. A window only
+	/// grows at once: credit already granted cannot be taken back.
 	pub fn set_limits(&self, limits: moq_quic::Limits) -> Result<(), Error> {
+		if self.inner.fixed_receive_window && limits.receive_window.is_some() {
+			return Err(Error::InvalidConfig("this session's receive window is fixed"));
+		}
 		crate::config::check_limits(&limits)?;
 		let capped = |rate: Option<moq_quic::Rate>| matches!(rate, Some(moq_quic::Rate::BytesPerSecond(_)));
 		if capped(limits.receive_rate) || capped(limits.send_rate) {
@@ -391,6 +398,15 @@ impl poll::Session for Session {
 			state.conn.receive_window(),
 			state.conn.stream_receive_window(),
 		))
+	}
+
+	fn set_limits(&self, limits: net::Limits) -> Result<(), net::LimitsError> {
+		if self.inner.fixed_receive_window {
+			return Err(net::LimitsError::Unsupported);
+		}
+		let mut quic = moq_quic::Limits::default();
+		quic.receive_window = limits.receive_window;
+		Session::set_limits(self, quic).map_err(|err| net::LimitsError::Refused(err.to_string()))
 	}
 
 	fn stream_credit(&self, dir: net::Dir) -> Option<net::StreamCredit> {

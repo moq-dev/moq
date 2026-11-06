@@ -14,7 +14,7 @@ use bytes::{Buf, Bytes};
 
 use super::open::{self, Open};
 use super::poll::{self, SendOptions};
-use super::{Address, CloseKind, Dir, Probe, ReceiveWindow, StreamCredit, Wire};
+use super::{Address, CloseKind, Dir, Limits, LimitsError, Probe, ReceiveWindow, StreamCredit, Wire};
 
 /// A boxed [`poll::Boxable`] session, shared by every task that uses it.
 #[derive(Clone)]
@@ -348,6 +348,7 @@ pub(super) trait ErasedSession: Send + Sync {
 	fn wire(&self) -> Option<Wire>;
 	fn probe(&self) -> Option<Probe>;
 	fn receive_window(&self) -> Option<ReceiveWindow>;
+	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError>;
 	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit>;
 	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]>;
 }
@@ -484,6 +485,10 @@ impl<S: poll::Boxable> ErasedSession for S {
 
 	fn receive_window(&self) -> Option<ReceiveWindow> {
 		poll::Session::receive_window(self)
+	}
+
+	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError> {
+		poll::Session::set_limits(self, limits)
 	}
 
 	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit> {
@@ -676,6 +681,10 @@ impl poll::Session for Session {
 
 	fn receive_window(&self) -> Option<ReceiveWindow> {
 		self.inner.session.receive_window()
+	}
+
+	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError> {
+		self.inner.session.set_limits(limits)
 	}
 
 	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit> {

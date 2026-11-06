@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Request::within` takes `&mut self`
+
+Admission is bounded by moq-net's accept deadline (`moq_net::server::Handshake::expired`), which refuses the session through the request, so hold the `Request` mutably while it waits: `request.within(admit).await`.
+
 ### A listener builds its peers' identities
 
 `tls::PeerIdentity::from_chain` is removed. A listener outside this crate that ran its own mTLS handshake, such as the `moq-uring` workers, calls `tls::Serve::peer(chain)` on the `Serve` its TLS config came from.

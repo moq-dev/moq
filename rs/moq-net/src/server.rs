@@ -1,7 +1,9 @@
 //! Accepting a MoQ session, including the paused handshake that inspects the
 //! peer's SETUP before granting origins.
 
+use std::num::NonZeroU64;
 use std::task::{Poll, ready};
+use std::time::Duration;
 
 use crate::driver::Transport;
 use crate::origin;
@@ -81,8 +83,12 @@ impl Drop for Active {
 	}
 }
 
+/// How long [`Server`] gives a connection to be accepted, from its arrival through the SETUP
+/// reply, unless [`Server::with_timeout`] says otherwise.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A MoQ server session builder.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct Server {
 	publish: Option<origin::Consumer>,
 	subscribe: Option<origin::Producer>,
@@ -91,6 +97,24 @@ pub struct Server {
 	limits: crate::session::Limits,
 	extensions: setup::Extensions,
 	implementation: Option<String>,
+	timeout: Option<Duration>,
+	receive_window: Option<NonZeroU64>,
+}
+
+impl Default for Server {
+	fn default() -> Self {
+		Self {
+			publish: None,
+			subscribe: None,
+			stats: Default::default(),
+			versions: Default::default(),
+			limits: Default::default(),
+			extensions: Default::default(),
+			implementation: None,
+			timeout: Some(DEFAULT_TIMEOUT),
+			receive_window: None,
+		}
+	}
 }
 
 impl Server {
@@ -150,6 +174,33 @@ impl Server {
 	/// an empty string advertises nothing.
 	pub fn with_implementation(mut self, implementation: impl Into<String>) -> Self {
 		self.implementation = Some(implementation.into());
+		self
+	}
+
+	/// Bound each accept, from the connection's arrival through SETUP, the caller's admission,
+	/// and the SETUP reply. A connection that overruns it is closed with [`Error::Timeout`]'s
+	/// code. `None` waits forever. Defaults to [`DEFAULT_TIMEOUT`].
+	pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+		self.timeout = timeout;
+		self
+	}
+
+	/// When a connection that arrived at `arrived` must be accepted by, or `None` to wait
+	/// forever, including past the clock's range.
+	///
+	/// A caller that runs a transport handshake before [`accept_request`](Self::accept_request)
+	/// bounds that handshake by this instant, then hands it to [`Accept::with_deadline`].
+	pub fn deadline(&self, arrived: Instant) -> Option<Instant> {
+		arrived.checked_add(self.timeout?)
+	}
+
+	/// Open the connection's receive window to `window` once the caller admits the session,
+	/// before SETUP is answered, so a transport can hold most of it back until then.
+	///
+	/// A transport that cannot change its window keeps its own. Unset, the window stays as the
+	/// transport set it.
+	pub fn with_receive_window(mut self, window: NonZeroU64) -> Self {
+		self.receive_window = Some(window);
 		self
 	}
 
@@ -285,11 +336,11 @@ impl Server {
 			token,
 			peer_implementation,
 			assigned_hop: crate::Hop::random(),
+			timer: Timer::new(None),
 			auth: crate::auth::Link::new(version.has_auth()),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
-				deadline: None,
 				handshake,
 			}),
 		}
@@ -297,7 +348,8 @@ impl Server {
 
 	/// Perform the MoQ handshake as a server, returning the [`Session`] and its [`Driver`](crate::Driver).
 	///
-	/// Poll the returned driver with nondecreasing time, starting at `now`.
+	/// Poll the returned driver with nondecreasing time, starting at `now`. The accept
+	/// deadline counts from `now` too.
 	///
 	/// Convenience wrapper over [`accept_request`](Self::accept_request) that
 	/// completes the handshake immediately. Use `accept_request` when you need to
@@ -307,13 +359,12 @@ impl Server {
 		now: Instant,
 		session: impl crate::transport::poll::Boxable,
 	) -> impl Future<Output = Result<(Session, crate::Driver), Error>> {
-		// Box before any protocol code runs, so it is compiled once rather than per transport.
-		let mut accept = Accept::new(Deadlines::new(now), Transport::new(session));
+		let mut accept = self.accept_request(now, session);
 		let mut answer = None;
 		kio::wait(move |waiter| {
 			let answer = match &mut answer {
 				Some(answer) => answer,
-				None => answer.insert(Answer::new(ready!(accept.poll(self, waiter))?)),
+				None => answer.insert(Answer::new(ready!(accept.poll(waiter))?)),
 			};
 			answer.poll(waiter)
 		})
@@ -332,14 +383,19 @@ impl Server {
 	///
 	/// A SETUP that fails to parse or negotiate closes the session with the matching code,
 	/// so the peer learns why instead of seeing a bare disconnect.
-	pub fn accept_request(
-		&self,
-		now: Instant,
-		session: impl crate::transport::poll::Boxable,
-	) -> impl Future<Output = Result<Handshake, Error>> {
-		// Box before any protocol code runs, so it is compiled once rather than per transport.
-		let mut accept = Accept::new(Deadlines::new(now), Transport::new(session));
-		kio::wait(move |waiter| accept.poll(self, waiter))
+	///
+	/// The session's clock starts at `now`, and so does the accept deadline
+	/// ([`with_timeout`](Self::with_timeout)) unless [`Accept::with_deadline`] moves it. The
+	/// deadline goes on to bound the caller's admission ([`Handshake::expired`]) and the SETUP
+	/// reply ([`Handshake::ok`]).
+	pub fn accept_request(&self, now: Instant, session: impl crate::transport::poll::Boxable) -> Accept {
+		Accept {
+			server: self.clone(),
+			timer: Timer::new(self.deadline(now)),
+			// Box before any protocol code runs, so it is compiled once rather than per transport.
+			handshake: Handshaking::new(Deadlines::new(now), Transport::new(session)),
+			park: kio::Park::default(),
+		}
 	}
 
 	/// Pause a lite-01/02 handshake once the client's SETUP picked the version; `ok()` sends
@@ -359,12 +415,12 @@ impl Server {
 			token: None,
 			peer_implementation: None,
 			assigned_hop: crate::Hop::random(),
+			timer: Timer::new(None),
 			// Lite 01/02 carry no AUTH.
 			auth: crate::auth::Link::new(false),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
-				deadline: None,
 				handshake: PausedHandshake::Negotiated(PausedNegotiated {
 					session,
 					stream,
@@ -394,13 +450,13 @@ impl Server {
 			token: options.token.clone(),
 			peer_implementation: options.implementation.clone(),
 			assigned_hop: crate::Hop::random(),
+			timer: Timer::new(None),
 			// The client's SETUP already settled whether it offered MoQ Auth, so it is
 			// negotiated exactly when we offer it too.
 			auth: crate::auth::Link::ietf(options.declared.auth && self.extensions.auth),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
-				deadline: None,
 				handshake: PausedHandshake::Ietf(PausedIetf {
 					session,
 					version,
@@ -411,13 +467,87 @@ impl Server {
 	}
 }
 
-/// The server's side of a handshake, up to the pause where [`Handshake`] hands the client's
-/// SETUP to the caller.
+/// A connection being accepted, up to the pause where [`Handshake`] hands the client's SETUP to
+/// the caller. Await it, or [`poll`](Self::poll) it.
 ///
 /// A failure closes the transport with the error's code, so the peer learns why instead of
-/// seeing a bare disconnect. Dropped while pending, it releases what its step holds and
-/// closes nothing.
-struct Accept {
+/// seeing a bare disconnect; past the deadline, that is [`Error::Timeout`]. Dropped while
+/// pending, it releases what it holds and closes nothing.
+#[must_use = "an accept does nothing unless awaited or polled"]
+pub struct Accept {
+	server: Server,
+	timer: Timer,
+	handshake: Handshaking,
+	park: kio::Park,
+}
+
+impl Accept {
+	/// Give up at `at` rather than [`Server::with_timeout`] after the accept's start, or never
+	/// with `None`: for a connection whose transport handshake started the clock earlier, at
+	/// the instant [`Server::deadline`] gave.
+	pub fn with_deadline(mut self, at: Option<Instant>) -> Self {
+		self.timer = Timer::new(at);
+		self
+	}
+
+	/// The paused handshake, or the error the transport was closed with.
+	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<Handshake, Error>> {
+		Self::resolve(&self.server, &mut self.timer, &mut self.handshake, waiter)
+	}
+
+	fn resolve(
+		server: &Server,
+		timer: &mut Timer,
+		handshake: &mut Handshaking,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Handshake, Error>> {
+		let res = ready!(handshake.poll(server, timer, waiter));
+		Poll::Ready(res.map(|mut handshake| {
+			// The same deadline bounds admission and the reply.
+			handshake.timer = std::mem::replace(timer, Timer::new(None));
+			handshake
+		}))
+	}
+}
+
+impl Future for Accept {
+	type Output = Result<Handshake, Error>;
+
+	fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+		let Self {
+			server,
+			timer,
+			handshake,
+			park,
+		} = self.get_mut();
+		Self::resolve(server, timer, handshake, park.hold(cx))
+	}
+}
+
+/// A deadline's timer, armed on its first poll, that never fires without a deadline.
+struct Timer {
+	at: Option<Instant>,
+	sleep: Option<kio::clock::Sleep>,
+}
+
+impl Timer {
+	fn new(at: Option<Instant>) -> Self {
+		Self { at, sleep: None }
+	}
+
+	/// Ready once the deadline has passed.
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let Some(at) = self.at else {
+			return Poll::Pending;
+		};
+		let sleep = self.sleep.get_or_insert_with(|| kio::clock::sleep_until(at));
+		waiter.poll_future(std::pin::Pin::new(sleep))
+	}
+}
+
+/// The server's side of a handshake, up to the pause where [`Handshake`] hands the client's
+/// SETUP to the caller.
+struct Handshaking {
 	/// Closed on failure. Released once resolved, so it never outlives the handshake.
 	refused: Option<Transport>,
 	/// After a hand-off, the negotiation stream's receive half, kept open until the handshake
@@ -426,7 +556,7 @@ struct Accept {
 	step: AcceptStep,
 }
 
-/// Where [`Accept`] waits. Every step but `Done` holds the session's clock and transport,
+/// Where [`Handshaking`] waits. Every step but `Done` holds the session's clock and transport,
 /// which move into the [`Handshake`].
 enum AcceptStep {
 	/// Not polled yet: the transport's ALPN picks the path.
@@ -472,7 +602,7 @@ enum AcceptStep {
 	Done,
 }
 
-impl Accept {
+impl Handshaking {
 	fn new(runtime: Deadlines, session: Transport) -> Self {
 		Self {
 			refused: Some(session.clone()),
@@ -482,8 +612,15 @@ impl Accept {
 	}
 
 	/// The paused handshake, or the error the transport was closed with.
-	fn poll(&mut self, server: &Server, waiter: &kio::Waiter) -> Poll<Result<Handshake, Error>> {
-		let res = ready!(self.poll_step(server, waiter));
+	fn poll(&mut self, server: &Server, timer: &mut Timer, waiter: &kio::Waiter) -> Poll<Result<Handshake, Error>> {
+		let res = match self.poll_step(server, waiter) {
+			Poll::Ready(res) => res,
+			// Polled second, so a SETUP that is ready wins even past the deadline.
+			Poll::Pending => {
+				ready!(timer.poll(waiter));
+				Err(Error::Timeout)
+			}
+		};
 		// Release everything the handshake held before closing over a failure.
 		self.step = AcceptStep::Done;
 		self.held = None;
@@ -703,7 +840,9 @@ pub struct Handshake {
 	/// The session's auth handle, available before [`Handshake::ok`] so the caller can
 	/// take the peer's token requests before any arrive.
 	auth: crate::auth::Link,
-	// Taken by `ok`/`close`; `Drop` rejects the handshake if neither ran.
+	/// The accept deadline, which bounds admission and the reply.
+	timer: Timer,
+	// Taken by `ok`/`close`, or by the deadline; `Drop` rejects the handshake if none ran.
 	inner: Option<RequestInner>,
 }
 
@@ -712,8 +851,6 @@ struct RequestInner {
 	server: Server,
 	/// Supplies the clock and timers for the accepted session.
 	runtime: Deadlines,
-	/// When [`Handshake::ok`] gives up on a peer that has not taken the SETUP reply.
-	deadline: Option<Instant>,
 	handshake: PausedHandshake,
 }
 
@@ -1021,15 +1158,14 @@ impl Handshake {
 
 	/// Publish to the connected client. Overrides any value from the [`Server`]
 	/// builder; typically set after inspecting [`path`](Self::path).
-	pub fn with_publisher(mut self, publish: impl Consume<origin::Consumer>) -> Self {
-		self.inner_mut().server.publish = Some(publish.consume());
-		self
+	pub fn with_publisher(self, publish: impl Consume<origin::Consumer>) -> Self {
+		let publish = publish.consume();
+		self.configure(|server| server.publish = Some(publish))
 	}
 
 	/// Subscribe to the connected client. Overrides any value from the [`Server`] builder.
-	pub fn with_subscriber(mut self, subscribe: origin::Producer) -> Self {
-		self.inner_mut().server.subscribe = Some(subscribe);
-		self
+	pub fn with_subscriber(self, subscribe: origin::Producer) -> Self {
+		self.configure(|server| server.subscribe = Some(subscribe))
 	}
 
 	/// Assign the identity this peer's routes are attributed to, overriding the fresh
@@ -1051,31 +1187,50 @@ impl Handshake {
 
 	/// Set the per-connection [`stats::Session`] context. Overrides any value from the
 	/// [`Server`] builder.
-	pub fn with_stats(mut self, stats: stats::Session) -> Self {
-		self.inner_mut().server.stats = stats;
-		self
+	pub fn with_stats(self, stats: stats::Session) -> Self {
+		self.configure(|server| server.stats = stats)
 	}
 
 	/// Set the session's limits after authorizing the peer and before answering SETUP.
-	pub fn with_limits(mut self, limits: crate::session::Limits) -> Self {
-		self.inner_mut().server.limits = limits;
+	pub fn with_limits(self, limits: crate::session::Limits) -> Self {
+		self.configure(|server| server.limits = limits)
+	}
+
+	/// Open the receive window to `window` on [`ok`](Self::ok). Overrides any value from the
+	/// [`Server`] builder; see [`Server::with_receive_window`].
+	pub fn with_receive_window(self, window: NonZeroU64) -> Self {
+		self.configure(|server| server.receive_window = Some(window))
+	}
+
+	/// Change the server config the session starts with, unless the deadline already refused it.
+	fn configure(mut self, change: impl FnOnce(&mut Server)) -> Self {
+		if let Some(inner) = &mut self.inner {
+			change(&mut inner.server);
+		}
 		self
 	}
 
-	/// Refuse the session with [`Error::Timeout`] if [`ok`](Self::ok) has not answered
-	/// SETUP by `at`, as when the peer withholds flow-control credit for the reply.
+	/// Resolve once the accept deadline passes, having refused the session with
+	/// [`Error::Timeout`]; never, without a deadline.
 	///
-	/// Dropping a pending `ok` refuses it the same way, so a caller's own deadline counts too.
-	pub fn with_deadline(mut self, at: Instant) -> Self {
-		self.inner_mut().deadline = Some(at);
-		self
-	}
-
-	fn inner_mut(&mut self) -> &mut RequestInner {
-		self.inner.as_mut().expect("request already responded")
+	/// Race the admission decision against it, so a peer cannot hold the connection open
+	/// behind a decision that never comes. Once it resolves, [`ok`](Self::ok) fails with the
+	/// timeout.
+	#[kio::wrapper]
+	pub fn poll_expired(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		ready!(self.timer.poll(waiter));
+		if let Some(inner) = self.inner.take() {
+			inner.close(Error::Timeout);
+		}
+		Poll::Ready(())
 	}
 
 	/// Accept the session, returning the [`Session`] and its [`Driver`](crate::Driver).
+	///
+	/// Opens the receive window first ([`with_receive_window`](Self::with_receive_window)).
+	/// Fails with [`Error::Timeout`] once the accept deadline passes, whether admission or a
+	/// peer that never takes the SETUP reply ran it out. Dropping a pending `ok` refuses the
+	/// session the same way, so a caller's own deadline counts too.
 	///
 	/// Poll or spawn the returned driver to run the session.
 	pub async fn ok(self) -> Result<(Session, crate::Driver), Error> {
@@ -1083,10 +1238,12 @@ impl Handshake {
 		kio::wait(|waiter| answer.poll(waiter)).await
 	}
 
-	/// Reject the session, closing the transport with `err`'s wire code.
+	/// Reject the session, closing the transport with `err`'s wire code. Does nothing once
+	/// the deadline refused it.
 	pub fn close(mut self, err: Error) {
-		let inner = self.inner.take().expect("request already responded");
-		inner.close(err);
+		if let Some(inner) = self.inner.take() {
+			inner.close(err);
+		}
 	}
 }
 
@@ -1102,36 +1259,43 @@ impl RequestInner {
 /// server SETUP. Dropped before it resolves, it refuses the session as the deadline does.
 // Fields drop in order: the reply before the guard refuses, and the handshake last.
 struct Answer {
-	/// What starts the session, taken by the first poll.
+	/// What starts the session, taken by the first poll; `None` when the deadline already
+	/// refused it.
 	start: Option<(Server, Deadlines, PausedHandshake)>,
 	/// A negotiated client's server SETUP on its way out. Boxed so the bidi SETUP write of
 	/// these old versions doesn't size every caller's handshake.
 	reply: Option<Box<NegotiatedReply>>,
-	/// The deadline's timer, armed once the reply first waits.
-	timer: Option<kio::clock::Sleep>,
+	/// The accept deadline.
+	timer: Timer,
 	unanswered: Unanswered,
-	/// When to give up on the peer taking the reply.
-	deadline: Option<Instant>,
 	/// The request being answered, emptied of what the start took.
 	handshake: Handshake,
 }
 
 impl Answer {
 	fn new(mut handshake: Handshake) -> Self {
-		let RequestInner {
+		let timer = std::mem::replace(&mut handshake.timer, Timer::new(None));
+		let Some(RequestInner {
 			server,
 			runtime,
-			deadline,
 			handshake: paused,
-		} = handshake.inner.take().expect("request already responded");
+		}) = handshake.inner.take()
+		else {
+			return Self {
+				start: None,
+				reply: None,
+				timer,
+				unanswered: Unanswered(None),
+				handshake,
+			};
+		};
 		let stats = server.stats.clone();
 		let (session, version) = paused.transport();
 		Self {
 			start: Some((server, runtime, paused)),
 			reply: None,
-			timer: None,
-			unanswered: Unanswered(Some((session, version, stats.clone()))),
-			deadline,
+			timer,
+			unanswered: Unanswered(Some((session, version, stats))),
 			handshake,
 		}
 	}
@@ -1141,7 +1305,7 @@ impl Answer {
 		let res = ready!(self.poll_reply(waiter));
 		// Release the reply before the guard closes over a deadline.
 		self.reply = None;
-		self.timer = None;
+		self.timer = Timer::new(None);
 		let Some(res) = res else {
 			drop(std::mem::replace(&mut self.unanswered, Unanswered(None)));
 			return Poll::Ready(Err(Error::Timeout));
@@ -1156,6 +1320,13 @@ impl Answer {
 	/// The reply's outcome, or `None` once the deadline passed first.
 	fn poll_reply(&mut self, waiter: &kio::Waiter) -> Poll<Option<Result<(Session, crate::Driver), Error>>> {
 		if let Some((server, runtime, paused)) = self.start.take() {
+			// Admission ran out the deadline: refuse rather than start.
+			if self.timer.poll(waiter).is_ready() {
+				return Poll::Ready(None);
+			}
+			if let Err(err) = open_window(&server, &paused) {
+				return Poll::Ready(Some(Err(err)));
+			}
 			let peer_hop = Some(self.handshake.assigned_hop);
 			let auth = self.handshake.auth.clone();
 			let started = match paused {
@@ -1181,17 +1352,30 @@ impl Answer {
 			};
 			return Poll::Ready(Some(started));
 		}
-		let reply = self.reply.as_mut().expect("answer polled after it resolved");
+		// Neither a start nor a reply: the deadline refused the request before `ok`.
+		let Some(reply) = self.reply.as_mut() else {
+			return Poll::Ready(None);
+		};
 		// The reply is polled first, so one that is ready wins even past the deadline.
 		if let Poll::Ready(res) = reply.poll(waiter) {
 			return Poll::Ready(Some(res));
 		}
-		let Some(at) = self.deadline else {
-			return Poll::Pending;
-		};
-		let timer = self.timer.get_or_insert_with(|| kio::clock::sleep_until(at));
-		ready!(waiter.poll_future(std::pin::Pin::new(timer)));
+		ready!(self.timer.poll(waiter));
 		Poll::Ready(None)
+	}
+}
+
+/// Open the receive window the transport held back until admission, before anything answers
+/// SETUP. A transport that cannot change it never held it back.
+fn open_window(server: &Server, paused: &PausedHandshake) -> Result<(), Error> {
+	let Some(window) = server.receive_window else {
+		return Ok(());
+	};
+	let mut limits = crate::transport::Limits::default();
+	limits.receive_window = Some(window);
+	match paused.transport().0.set_limits(limits) {
+		Ok(()) | Err(crate::transport::LimitsError::Unsupported) => Ok(()),
+		Err(err) => Err(Error::Transport(err.to_string())),
 	}
 }
 
@@ -1326,6 +1510,9 @@ mod tests {
 		stops: Arc<Mutex<Vec<u32>>>,
 		/// The peer grants no credit, so nothing this side writes is ever taken.
 		withheld: bool,
+		/// The receive window `set_limits` opened, or why it refused, or `None` when the
+		/// transport cannot change it.
+		window: Option<Arc<Mutex<Result<Option<std::num::NonZeroU64>, String>>>>,
 	}
 
 	impl FakeSession {
@@ -1338,7 +1525,24 @@ mod tests {
 				closed: Default::default(),
 				stops: Default::default(),
 				withheld: false,
+				window: None,
 			}
+		}
+
+		/// A transport that can change its receive window, or refuses with `refusal`.
+		fn widening(mut self, refusal: Option<&str>) -> Self {
+			let state = match refusal {
+				Some(reason) => Err(reason.to_string()),
+				None => Ok(None),
+			};
+			self.window = Some(Arc::new(Mutex::new(state)));
+			self
+		}
+
+		/// The receive window `set_limits` opened.
+		fn window(&self) -> Option<std::num::NonZeroU64> {
+			let window = self.window.as_ref().expect("a widening transport");
+			window.lock().unwrap().clone().expect("limits accepted")
 		}
 
 		fn withholding_credit(mut self) -> Self {
@@ -1402,6 +1606,19 @@ mod tests {
 			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> std::task::Poll<Result<Self::SendStream, Self::Error>> {
 			std::task::Poll::Pending
+		}
+		fn set_limits(&self, limits: crate::transport::Limits) -> Result<(), crate::transport::LimitsError> {
+			let Some(window) = &self.window else {
+				return Err(crate::transport::LimitsError::Unsupported);
+			};
+			let mut window = window.lock().unwrap();
+			match &mut *window {
+				Ok(opened) => {
+					*opened = limits.receive_window;
+					Ok(())
+				}
+				Err(reason) => Err(crate::transport::LimitsError::Refused(reason.clone())),
+			}
 		}
 		fn send_group(&self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
 			None
@@ -1610,7 +1827,7 @@ mod tests {
 			.with_bi(moql_setup())
 			.withholding_credit();
 		let start = kio::clock::now();
-		let deadline = start + std::time::Duration::from_secs(10);
+		let deadline = start + DEFAULT_TIMEOUT;
 		let request = Server::new()
 			.accept_request(start, session.clone())
 			.await
@@ -1619,8 +1836,7 @@ mod tests {
 				registry
 					.tier(Default::default())
 					.session(crate::Path::from_static("room")),
-			)
-			.with_deadline(deadline);
+			);
 		let Err(err) = request.ok().await else {
 			panic!("a reply the peer never took completed");
 		};
@@ -1629,6 +1845,120 @@ mod tests {
 		assert_eq!(session.close_code(), Some(version.session_code(&SessionError::Timeout)));
 		let failed = registry.snapshot().sessions()[0].1.sessions_failed;
 		assert_eq!(failed.count(stats::Failure::Application), 1, "{failed:?}");
+	}
+
+	/// A client that never sends its SETUP is refused at the accept deadline with the timeout
+	/// code, which its version can't pick yet. The deadline is the one the caller handed over,
+	/// as after a transport handshake that started the clock.
+	#[kio::test]
+	async fn a_setup_that_never_arrives_fails_at_the_deadline() {
+		for session in [
+			FakeSession::new(ALPN_22, []),
+			FakeSession::new(ALPN_LITE_05, []),
+			FakeSession::new(ALPN_LITE, []),
+		] {
+			let deadline = kio::clock::now() + std::time::Duration::from_secs(3);
+			let accept = Server::new()
+				.accept_request(kio::clock::now(), session.clone())
+				.with_deadline(Some(deadline));
+			let Err(err) = accept.await else {
+				panic!("{:?}: accepted without a SETUP", session.protocol);
+			};
+			assert!(matches!(err, Error::Timeout), "{err:?}");
+			assert_eq!(kio::clock::now(), deadline);
+			assert_eq!(session.close_code(), Some(SessionError::Timeout.to_code()));
+		}
+	}
+
+	/// An admission decision that never comes is refused at the deadline the accept started,
+	/// counted in the session's stats, and `ok` after it fails rather than starting.
+	#[kio::test]
+	async fn an_admission_past_the_deadline_is_refused() {
+		let registry = stats::Registry::new(Default::default());
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("room"), None, None)]);
+		let start = kio::clock::now();
+		let mut request = Server::new()
+			.with_timeout(Some(std::time::Duration::from_secs(5)))
+			.accept_request(start, session.clone())
+			.await
+			.unwrap()
+			.with_stats(
+				registry
+					.tier(Default::default())
+					.session(crate::Path::from_static("room")),
+			);
+		request.expired().await;
+		assert_eq!(kio::clock::now(), start + std::time::Duration::from_secs(5));
+		let version = Version::Lite(lite::Version::Lite05);
+		assert_eq!(session.close_code(), Some(version.session_code(&SessionError::Timeout)));
+		let failed = registry.snapshot().sessions()[0].1.sessions_failed;
+		assert_eq!(failed.count(stats::Failure::Application), 1, "{failed:?}");
+		let Err(err) = request.with_limits(Default::default()).ok().await else {
+			panic!("an expired handshake started");
+		};
+		assert!(matches!(err, Error::Timeout), "{err:?}");
+	}
+
+	/// A caller that admits past the deadline without racing it gets the timeout from `ok`.
+	#[kio::test]
+	async fn ok_past_the_deadline_is_refused() {
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
+		let request = Server::new()
+			.with_timeout(Some(std::time::Duration::from_secs(1)))
+			.accept_request(kio::clock::now(), session.clone())
+			.await
+			.unwrap();
+		kio::clock::sleep(std::time::Duration::from_secs(1)).await;
+		let Err(err) = request.ok().await else {
+			panic!("a late admission started");
+		};
+		assert!(matches!(err, Error::Timeout), "{err:?}");
+		let version = Version::Lite(lite::Version::Lite05);
+		assert_eq!(session.close_code(), Some(version.session_code(&SessionError::Timeout)));
+	}
+
+	/// Admitting opens the receive window the server or the request names, before the
+	/// session starts; a transport that cannot change its window starts as it is.
+	#[kio::test]
+	async fn ok_opens_the_receive_window() {
+		let window = std::num::NonZeroU64::new(1 << 20).unwrap();
+		let wider = std::num::NonZeroU64::new(4 << 20).unwrap();
+		let server = Server::new().with_receive_window(window);
+
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]).widening(None);
+		let request = server.accept_request(kio::clock::now(), session.clone()).await.unwrap();
+		let _accepted = request.ok().await.expect("ok");
+		assert_eq!(session.window(), Some(window));
+
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]).widening(None);
+		let request = server.accept_request(kio::clock::now(), session.clone()).await.unwrap();
+		let _accepted = request.with_receive_window(wider).ok().await.expect("ok");
+		assert_eq!(session.window(), Some(wider));
+
+		let fixed = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
+		let request = server.accept_request(kio::clock::now(), fixed.clone()).await.unwrap();
+		let _accepted = request.ok().await.expect("a transport that can't widen starts");
+		assert_eq!(fixed.close_code(), None);
+	}
+
+	/// A window the transport refuses fails the session and tells the peer, rather than
+	/// serving it on the window it was held back to.
+	#[kio::test]
+	async fn a_refused_window_closes_the_session() {
+		let window = std::num::NonZeroU64::new(1 << 20).unwrap();
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]).widening(Some("too small"));
+		let request = Server::new()
+			.with_receive_window(window)
+			.accept_request(kio::clock::now(), session.clone())
+			.await
+			.unwrap();
+		let Err(err) = request.ok().await else {
+			panic!("served on a refused window");
+		};
+		assert!(matches!(err, Error::Transport(_)), "{err:?}");
+		let version = Version::Lite(lite::Version::Lite05);
+		let code = version.session_code(&SessionError::from(&err));
+		assert_eq!(session.close_code(), Some(code));
 	}
 
 	/// A reply the caller stops waiting for, as a relay does at its drain deadline, is
@@ -1962,10 +2292,10 @@ mod tests {
 			peer_implementation: None,
 			assigned_hop: Hop::random(),
 			auth: crate::auth::Link::ietf(false),
+			timer: Timer::new(None),
 			inner: Some(RequestInner {
 				server: Server::new().with_publisher(&origin),
 				runtime: Deadlines::new(kio::clock::now()),
-				deadline: None,
 				handshake: PausedHandshake::Ietf(PausedIetf {
 					session: Transport::new(transport),
 					version,

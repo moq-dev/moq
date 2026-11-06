@@ -4,6 +4,19 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Accepting a session runs under one deadline and opens the receive window
+
+`Server` now bounds each accept, from SETUP through the caller's admission and the SETUP reply, closing a connection that overruns it with `Error::Timeout`'s code.
+The default is `server::DEFAULT_TIMEOUT` (10 s); call `Server::with_timeout(None)` to keep waiting forever.
+`Server::accept_request` returns a `server::Accept`, which you `.await` as before, or poll; pass it to `kio::clock::timeout` and the like directly, since it is a `Future`.
+A caller that runs a transport handshake first computes `Server::deadline(arrived)`, bounds that handshake by it, and passes it on with `Accept::with_deadline`.
+`Handshake::with_deadline` is gone: the deadline set at accept bounds `ok` too.
+Race your admission decision against the new `Handshake::expired` (or `poll_expired`), which refuses the session with the timeout once the deadline passes; `ok` past the deadline fails with `Error::Timeout`.
+
+`Server::with_receive_window` and `Handshake::with_receive_window` name the connection receive window `ok` opens before answering SETUP, through the new `transport::poll::Session::set_limits`.
+A transport implementation that can change its window overrides `set_limits`; the default reports `LimitsError::Unsupported`, and `ok` then leaves the window as it is.
+A wrapper around another transport forwards it.
+
 ### Socket readers start at the beginning
 
 New `track` socket sessions subscribe from group 0, and `tcp` sessions join their
