@@ -1076,7 +1076,8 @@ impl Consumer {
 	}
 
 	/// Join the datagram track `name` if one is published or already asked for, asking no
-	/// handler for it otherwise.
+	/// handler for it otherwise. The reader adds no demand until `set_priority` is called:
+	/// an existing stream subscription already carries this forwarding work.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn datagrams_live(&self, name: &str) -> Option<datagram::Consumer> {
 		let state = self.state.lock();
@@ -1088,7 +1089,7 @@ impl Consumer {
 			drop(state);
 			return Some(source.datagrams_live(name)?.with_stats(self.stats.clone()));
 		}
-		state.datagrams.get(name)?.try_consume(self.stats.clone())
+		state.datagrams.get(name)?.observe(self.stats.clone())
 	}
 
 	/// Whether datagram lookups reach a local producer or handler, rather than a session that
