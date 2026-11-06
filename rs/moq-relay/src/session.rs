@@ -590,7 +590,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn a_push_wakes_the_registration_once() {
-		kio::clock::allow_host_timers();
+		kio::clock::host_time();
 		let registry = Registry::new();
 		let request = request("abc", "/room", "127.0.0.1:1");
 		let reg = registry.register(request);

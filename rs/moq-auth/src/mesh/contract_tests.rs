@@ -183,7 +183,7 @@ async fn refresh_issues_a_new_token_until_revoked() {
 
 #[tokio::test]
 async fn renew_refreshes_before_expiry() {
-	kio::clock::allow_host_timers();
+	kio::clock::host_time();
 	let mesh = Mesh::with_ttl(Duration::from_secs(3)).await;
 	let device = mesh.device();
 	let enrollment = device.enroll(&mesh.key(true), None).await.unwrap();
@@ -218,7 +218,7 @@ async fn only_an_issued_challenge_is_accepted() {
 
 #[tokio::test]
 async fn renew_retries_a_transient_refusal() {
-	kio::clock::allow_host_timers();
+	kio::clock::host_time();
 	use wiremock::matchers::{method, path};
 	use wiremock::{Mock, MockServer, ResponseTemplate};
 

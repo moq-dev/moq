@@ -38,7 +38,7 @@ impl Socket {
 		}
 		// ICE on a real socket races the network on the host clock: pacing, checks, and
 		// retransmits fire whenever the scheduler lets them.
-		kio::clock::allow_host_timers();
+		kio::clock::host_time();
 		Ok(Self { udp, locals, inbound })
 	}
 

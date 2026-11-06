@@ -11,7 +11,7 @@ use super::AsyncUdpSocket;
 pub(crate) fn wrap_udp_socket(sock: std::net::UdpSocket) -> io::Result<Box<dyn AsyncUdpSocket>> {
 	// QUIC on a real socket races the network on the host clock: pacing, acks, and loss
 	// detection fire whenever the scheduler lets them.
-	kio::clock::allow_host_timers();
+	kio::clock::host_time();
 	let _runtime = crate::runtime::enter();
 	Ok(Box::new(UdpSocket {
 		inner: moq_sock::udp::UdpSocketState::new((&sock).into())?,

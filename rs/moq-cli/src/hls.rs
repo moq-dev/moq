@@ -488,7 +488,7 @@ mod test {
 	/// with the cause, so subscribers see the failure rather than a dropped producer.
 	#[tokio::test]
 	async fn a_failed_import_aborts_its_tracks() {
-		kio::clock::allow_host_timers();
+		kio::clock::host_time();
 		use moq_mux::container::{Frame, fmp4::Muxer};
 
 		let dir = tempfile::tempdir().unwrap();

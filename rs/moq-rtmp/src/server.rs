@@ -2800,7 +2800,7 @@ mod tests {
 	/// until it leaves.
 	#[tokio::test]
 	async fn a_reconnect_replaces_the_stale_publish() {
-		kio::clock::allow_host_timers();
+		kio::clock::host_time();
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
 		let origin = moq_tokio::origin::spawn();

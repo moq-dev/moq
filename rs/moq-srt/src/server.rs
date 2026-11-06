@@ -1198,7 +1198,7 @@ mod tests {
 	/// task and its socket until the follow runs out.
 	#[tokio::test]
 	async fn a_caller_hanging_up_during_the_follow_ends_the_egress() {
-		kio::clock::allow_host_timers();
+		kio::clock::host_time();
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(moq_net::time::run(driver));
 		let mut live = Instance::publish(&origin, "a.aac");

@@ -165,8 +165,8 @@ impl Timer {
 ///
 /// With `KIO_DENY_HOST_TIMERS=1` in the environment, a timer that waits on the host clock
 /// aborts the process unless it called this. It lasts for the process, which is one test
-/// under nextest.
-pub fn allow_host_timers() {
+/// under nextest. `@moq/clock/test`'s `hostTime()` is the JS counterpart.
+pub fn host_time() {
 	#[cfg(feature = "runtime")]
 	guard::ALLOWED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
@@ -249,7 +249,7 @@ mod guard {
 			"kio: a {waited:?} timer fired on the host clock, which {VAR}=1 denies.\n\
 			 Run the test on a mocked clock (`#[tokio::test(start_paused = true)]`, `#[kio::test]`, \
 			 or `kio::clock::Manual`), or await the event it waits for. A test on real sockets, \
-			 devices, or processes calls `kio::clock::allow_host_timers()`, and clears {VAR} from \
+			 devices, or processes calls `kio::clock::host_time()`, and clears {VAR} from \
 			 any process it spawns.\n{}",
 			std::backtrace::Backtrace::force_capture()
 		);
@@ -651,7 +651,7 @@ mod tests {
 		#[test]
 		#[ignore = "an_allowed_wait_passes runs it in a child"]
 		fn allowed() {
-			crate::clock::allow_host_timers();
+			crate::clock::host_time();
 			real().block_on(async { crate::clock::sleep(Duration::from_millis(1)).await });
 		}
 	}

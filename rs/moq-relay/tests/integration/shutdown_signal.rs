@@ -120,7 +120,7 @@ fn a_drain_ends_once_every_session_leaves() {
 
 #[test]
 fn a_trigger_before_run_keeps_the_deadline() {
-	kio::clock::allow_host_timers();
+	kio::clock::host_time();
 	run_test(a_trigger_before_run_keeps_the_deadline_inner);
 }
 
