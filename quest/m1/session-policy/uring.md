@@ -32,10 +32,6 @@ see it for the decisions and research.
 
 Public API: none. Wire: none.
 
-## Required
-
-- [Accept policy in moq-net](/quest/m1/session-policy/accept.md) - the shared policy this path calls
-
 ## Related
 
 - [io_uring relay package](/quest/m3/relay-io-uring-package.md) - ships the path this unifies

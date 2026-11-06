@@ -1,6 +1,6 @@
-//! Host-side resource sampler, the other half of `moq-bench`.
+//! Host-side resource sampler: `moq-bench host`.
 //!
-//! `moq-bench` drives load from one machine; this binary runs next to the process
+//! The load generator drives load from one machine; this runs next to the process
 //! under test (a relay, usually) and records what that load costs. It is safe on
 //! production hosts: it only reads `/proc`, needs no privileges beyond visibility
 //! of the target process, and never touches the process itself (no ptrace, no
@@ -14,13 +14,103 @@
 //! its `/proc` entry. Combine with the load generator's `--output` to compute CPU
 //! per connection and CPU per message (see the README).
 
+use std::time::Duration;
+
 #[cfg(target_os = "linux")]
-#[path = "host/udp.rs"]
 mod udp;
+
+/// Parse a duration and reject zero: a zero interval would busy-loop over
+/// /proc and flood the output, which a sampler meant to sit on production
+/// hosts must never do.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PositiveDuration(Duration);
+
+impl std::str::FromStr for PositiveDuration {
+	type Err = anyhow::Error;
+
+	fn from_str(arg: &str) -> Result<Self, Self::Err> {
+		let duration = humantime::parse_duration(arg)?;
+		anyhow::ensure!(!duration.is_zero(), "must be greater than 0s");
+		Ok(Self(duration))
+	}
+}
+
+/// Sample CPU, memory, context-switch and UDP socket counters for a running process.
+#[derive(usage_rs::Args, Clone, Debug)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+#[cfg_attr(
+	not(target_os = "linux"),
+	expect(dead_code, reason = "only the Linux sampler reads the arguments")
+)]
+pub struct Args {
+	/// Sample these PIDs. When set, --name is ignored.
+	#[usage(long)]
+	pid: Vec<i32>,
+
+	/// Find target processes by name (/proc/<pid>/comm, 15 bytes max).
+	#[usage(long, default = "moq-relay")]
+	name: String,
+
+	/// How often to sample.
+	#[usage(long, default = "1s")]
+	interval: PositiveDuration,
+
+	/// Stop after this duration. Runs until interrupted (or the targets exit) otherwise.
+	#[usage(long)]
+	duration: Option<moq_tokio::cli::Duration>,
+
+	/// Write JSON lines to this file instead of stdout. Truncates on start.
+	#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("jsonl", "json"))]
+	output: Option<std::path::PathBuf>,
+
+	/// Include a per-thread breakdown in every sample. Costs one /proc read per
+	/// thread per interval, so leave it off for casual monitoring.
+	#[usage(long)]
+	threads: bool,
+}
+
+/// Sample the CPU, memory, and sockets of the process under test (Linux only).
+//
+// Parsed apart from the load generator, whose parser fills its fields from
+// `MOQ_*` variables: on a relay host those are the relay's, and the sampler
+// reads no environment.
+#[derive(usage_rs::Cli)]
+#[usage(name = "moq-bench host", version = env!("CARGO_PKG_VERSION"))]
+#[usage(unknown_flags = "error", args_override_self = false)]
+struct Standalone {
+	#[usage(flatten)]
+	args: Args,
+}
+
+/// Parse the words after `host`.
+pub fn parse(argv: &[&std::ffi::OsStr]) -> anyhow::Result<Args> {
+	match Standalone::parse_from(argv) {
+		Ok(standalone) => Ok(standalone.args),
+		Err(err) => {
+			let answer = moq_tokio::cli::answer(Standalone::spec(), Standalone::command(), argv, err);
+			if answer.is_question() {
+				answer.exit();
+			}
+			anyhow::bail!("{}", answer.message());
+		}
+	}
+}
+
+/// Sample until the duration elapses, the process is interrupted, or every target exits (an error).
+#[cfg(target_os = "linux")]
+pub fn run(args: Args) -> anyhow::Result<()> {
+	linux::run(args)
+}
+
+/// Sample until the duration elapses, the process is interrupted, or every target exits (an error).
+#[cfg(not(target_os = "linux"))]
+pub fn run(_args: Args) -> anyhow::Result<()> {
+	anyhow::bail!("moq-bench host reads /proc, so it only runs on Linux")
+}
 
 #[cfg(target_os = "linux")]
 mod linux {
-	use super::udp;
+	use super::{Args, udp};
 	use kio::clock::Wall;
 	use std::collections::{HashMap, HashSet};
 	use std::io::Write;
@@ -30,54 +120,6 @@ mod linux {
 	use procfs::CurrentSI;
 	use procfs::process::Process;
 	use serde::Serialize;
-
-	/// Parse a duration and reject zero: a zero interval would busy-loop over
-	/// /proc and flood the output, which a sampler meant to sit on production
-	/// hosts must never do.
-	#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-	struct PositiveDuration(Duration);
-
-	impl std::str::FromStr for PositiveDuration {
-		type Err = anyhow::Error;
-
-		fn from_str(arg: &str) -> Result<Self, Self::Err> {
-			let duration = humantime::parse_duration(arg)?;
-			anyhow::ensure!(!duration.is_zero(), "must be greater than 0s");
-			Ok(Self(duration))
-		}
-	}
-
-	/// Sample CPU, memory, context-switch and UDP socket counters for a running process.
-	#[derive(usage_rs::Cli, Debug)]
-	#[usage(unknown_flags = "error", args_override_self = false)]
-	#[usage(name = "moq-bench-host", version = env!("CARGO_PKG_VERSION"))]
-	#[usage(completion)]
-	pub struct Args {
-		/// Sample these PIDs. When set, --name is ignored.
-		#[usage(long)]
-		pub pid: Vec<i32>,
-
-		/// Find target processes by name (/proc/<pid>/comm, 15 bytes max).
-		#[usage(long, default = "moq-relay")]
-		pub name: String,
-
-		/// How often to sample.
-		#[usage(long, default = "1s")]
-		interval: PositiveDuration,
-
-		/// Stop after this duration. Runs until interrupted (or the targets exit) otherwise.
-		#[usage(long)]
-		duration: Option<moq_tokio::cli::Duration>,
-
-		/// Write JSON lines to this file instead of stdout. Truncates on start.
-		#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("jsonl", "json"))]
-		pub output: Option<std::path::PathBuf>,
-
-		/// Include a per-thread breakdown in every sample. Costs one /proc read per
-		/// thread per interval, so leave it off for casual monitoring.
-		#[usage(long)]
-		pub threads: bool,
-	}
 
 	/// One process snapshot. All counters are cumulative since process (or system) start.
 	#[derive(Serialize)]
@@ -339,8 +381,7 @@ mod linux {
 
 	/// Resolve the targets, then sample them every interval until the duration
 	/// elapses, the process is interrupted, or every target exits (an error).
-	pub fn run() -> anyhow::Result<()> {
-		let args = Args::parse();
+	pub(super) fn run(args: Args) -> anyhow::Result<()> {
 		let tps = procfs::ticks_per_second() as f64;
 		let page = procfs::page_size();
 
@@ -436,20 +477,6 @@ mod linux {
 	mod tests {
 		use super::*;
 
-		/// `--interval 0s` must be rejected at parse time: with no pacing the
-		/// sampler busy-loops over /proc on the very hosts it is meant to be
-		/// harmless on.
-		#[test]
-		fn zero_interval_rejected() {
-			let argv = [std::ffi::OsStr::new("--interval"), std::ffi::OsStr::new("0s")];
-			let err = Args::parse_from(&argv).unwrap_err();
-			let err = usage_rs::render_failure(Args::spec(), &argv, &err);
-			assert!(err.contains("greater than 0s"), "unexpected error: {err}");
-
-			// The default still passes the same check.
-			Args::parse_from(&[]).unwrap();
-		}
-
 		/// A duration shorter than the interval must cap the sleep, not stretch the
 		/// run to the full interval (10ms of sampling used to take a whole second).
 		#[test]
@@ -514,14 +541,4 @@ mod linux {
 			assert!(udp_sample(&mut target, &all, Ok(HashSet::new())).unwrap().is_some());
 		}
 	}
-}
-
-#[cfg(target_os = "linux")]
-fn main() -> anyhow::Result<()> {
-	linux::run()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn main() -> anyhow::Result<()> {
-	anyhow::bail!("moq-bench-host reads /proc, so it only runs on Linux")
 }

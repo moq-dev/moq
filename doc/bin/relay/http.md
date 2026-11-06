@@ -74,6 +74,14 @@ count control-message bytes by `tier` and `class` (`session`, `announce`, `track
 include message size prefixes but leave out media payload and transport
 overhead such as QUIC framing, ACKs, and retransmissions.
 
+`moq_relay_sessions_connected` is a gauge of connected sessions by `tier` and
+`state`: `active` if media payload moved through the session, either way,
+within the last 10 seconds, `idle` otherwise. Transport and control bytes alone
+leave a session idle. Moves are noticed when the stats are read, by a scrape or
+the stats feed, so with no other reader the window is effectively the scrape
+interval. Regress process CPU and memory against both to price an idle session
+apart from one forwarding media.
+
 A few worth alerting on:
 
 - `moq_relay_accept_failures_total{class="exhausted"}`: the process ran out of

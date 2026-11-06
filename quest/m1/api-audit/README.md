@@ -1,4 +1,4 @@
-# A smaller, safer API than release
+# [M] A smaller, safer API than release
 
 ## Goal
 
@@ -7,6 +7,10 @@ to misuse than `release`'s. Every surface added since release has a consumer
 or is removed or made private. Overlapping operations are collapsed into one.
 Names mirror across Rust, JS, and the bindings. Every break says how
 to migrate.
+
+This epic's own work, now that its children have landed: diff `main`'s public
+API against `release`'s once more, and make private, remove, or record here
+each surface added since the audit below that breaks these rules.
 
 Non-goals: redesigning independently scoped surfaces
 ([subscribe ranges](/quest/m2/subscribe-ranges/README.md),
@@ -74,9 +78,4 @@ Rejected in planning:
 
 ## Required
 
-- [Routes are the origin API](/quest/m1/api-audit/route/README.md) - apps announce exact or prefix routes through one `Route` handle that owns its broadcast and carries an `instance`, prefix routes can serve a held broadcast, and readers get a listing plus `follow`
 - [Encoders take a join](/quest/m1/api-audit/join.md) - video's `keyframeInterval`/`Gop`, audio's `groupDuration`, and the C hints become one `join` time in JS, Rust, FFI, and C
-
-## Related
-
-- [Main is no slower than release](/quest/m1/release-perf/README.md) - the other release-readiness check

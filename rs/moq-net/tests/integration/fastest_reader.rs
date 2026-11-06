@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_net::{Hop, Timestamp, Version, origin, track, transport::ReceiveWindow};
+use moq_net::{Timestamp, Version, origin, track, transport::ReceiveWindow};
 
 use crate::support::harness::{MockPair, peer, spawn};
 
@@ -24,7 +24,7 @@ fn uncapped() -> ReceiveWindow {
 }
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	origin
 }
