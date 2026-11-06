@@ -3105,7 +3105,6 @@ mod tests {
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
 			fill_groups: Default::default(),
-			fills_changed: false,
 			tail: tail.clone(),
 			served: None,
 			started: false,
@@ -3260,7 +3259,6 @@ mod tests {
 				demand: Some(Subscription::default()),
 				fill_ids: Default::default(),
 				fill_groups: Default::default(),
-			fills_changed: false,
 				tail: Default::default(),
 				served: None,
 				started: false,
@@ -3726,7 +3724,6 @@ mod tests {
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
 			fill_groups: Default::default(),
-			fills_changed: false,
 			tail: Default::default(),
 			served: None,
 			started: false,
@@ -3840,7 +3837,6 @@ mod tests {
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
 			fill_groups: Default::default(),
-			fills_changed: false,
 			tail: Default::default(),
 			served: Some(4),
 			started: true,
@@ -3906,7 +3902,6 @@ mod tests {
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
 			fill_groups: Default::default(),
-			fills_changed: false,
 			tail: Default::default(),
 			served: Some(4),
 			started: true,
@@ -10902,7 +10897,10 @@ impl ServeLoop {
 				ServeMode::Establish(est) => {
 					let _ = self.fetches.poll(waiter);
 					let read = crate::util::poll_unwanted(&mut self.demand, waiter).is_pending();
-					match self.range_fills.poll(serve, &self.serving, Some(&est.tail), read, waiter) {
+					match self
+						.range_fills
+						.poll(serve, &self.serving, Some(&est.tail), read, waiter)
+					{
 						Ok(changed) => est.fills_changed |= changed,
 						Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
 					}
