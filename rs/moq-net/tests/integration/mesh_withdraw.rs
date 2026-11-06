@@ -635,3 +635,47 @@ async fn withdrawal_counts(capped: bool) -> (usize, usize, usize) {
 	}
 	(hunted, revived, extra)
 }
+
+/// A relay translating a moq-lite-07 claim for a lite-06 peer starts its chain with
+/// the claiming node's route identity, not that node's hop, so the claim coming
+/// back to that node over lite-06 is a reflection all the same. Filed as one of its
+/// own claims again, the broadcast would outlive its publisher, carried around the
+/// ring by itself.
+#[kio::test]
+async fn mixed_version_ring_withdraw_retracts() {
+	let lite07: Version = "moq-lite-07-wip".parse().unwrap();
+	let lite06: Version = "moq-lite-06".parse().unwrap();
+	let a = produce_origin(1);
+	let b = produce_origin(2);
+	let c = produce_origin(3);
+	let _ab = peer(lite07, &a, &b).await;
+	let _bc = peer(lite06, &b, &c).await;
+	// C publishes to A but hears nothing from it directly, so its only route to A's
+	// broadcast is B's translation.
+	let mut options = MockConnectOptions::new(lite06);
+	options.client_publish = Some(c.clone().with_link(origin::Link::Peer).consume().with_hidden(true));
+	options.server_subscribe = Some(a.clone().with_link(origin::Link::Peer));
+	let _ca = connect_mock(options).await;
+
+	let mut at_a = watch(a.consume().routes());
+	let mut at_c = watch(c.consume().routes());
+	let broadcast = a.route("room/x", origin::RouteOptions::hidden()).unwrap();
+	broadcast.announce().unwrap();
+	kio::clock::sim::idle().await;
+	assert_eq!(drain(&mut at_a).get("room/x"), Some(&vec![Kind::Start]));
+	assert_eq!(drain(&mut at_c).get("room/x"), Some(&vec![Kind::Start]));
+
+	drop(broadcast);
+	// A reflected claim circles the ring at one instant forever, so a regression never
+	// settles here and fails on the runner's timeout instead.
+	kio::clock::sim::idle().await;
+	for (relay, watched) in [("a", &mut at_a), ("c", &mut at_c)] {
+		let updates = drain(watched);
+		let kinds = updates.get("room/x");
+		assert_eq!(
+			kinds.and_then(|kinds| kinds.last()),
+			Some(&Kind::End),
+			"{relay}: {kinds:?}"
+		);
+	}
+}

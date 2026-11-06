@@ -865,6 +865,10 @@ impl Subscriber {
 			}
 			None => hops.contains(&self.self_origin),
 		};
+		// A claim of this node's that a moq-lite-07 relay translated for a lite-06 peer
+		// starts with its route identity's hop instead of this origin's. Filed again as
+		// an own claim, it would keep itself alive once its source left.
+		let reflected = reflected || self.origin.route_hop().is_some_and(|hop| hops.contains(&hop));
 		if reflected {
 			tracing::debug!(route = %self.log_path(path), "dropping reflected announce");
 			return None;

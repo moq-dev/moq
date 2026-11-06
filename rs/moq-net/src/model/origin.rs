@@ -2388,6 +2388,15 @@ impl Producer {
 		self.consume().route_node()
 	}
 
+	/// The lite-06 hop this node's route identity travels as, once a moq-lite-07
+	/// session created the route node: a relay translating this node's claims for a
+	/// lite-06 peer starts their chain with it. `None` while no session has, which
+	/// leaves the node uncreated.
+	pub(crate) fn route_hop(&self) -> Option<Hop> {
+		let node = self.shared.lock().route_node.clone()?;
+		Some(crate::route::node::hop(node.declared()))
+	}
+
 	/// This origin's construction config.
 	pub fn config(&self) -> Config {
 		let shared = self.shared.lock();
