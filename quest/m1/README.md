@@ -50,7 +50,6 @@ the same reason, gates the cut through the
 - [Push-to-talk's press-to-audible latency fits a budget on the defaults](/quest/m1/push-to-talk-latency.md) - press to audible on the browser defaults, excluding device output, stays under a kixtop-measured budget that `just test push-to-talk` enforces
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
-- [Remove the moq-e2ee stub](/quest/m1/moq-e2ee-remove.md) - `rs/moq-e2ee` leaves the workspace and release config now that its final release points to moq-crypto
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - `rust-bench` fits its hour and gets A/A runs, and separate builds of unchanged code stop measuring as a slowdown, so every paired regression alert can be trusted
 - [moq-json's table/deltas bench measures the same work every iteration](/quest/m1/bench-json-deltas.md) - the `table/deltas/1%` cases stop flipping between snapshot and delta timings, so their trend history is usable
