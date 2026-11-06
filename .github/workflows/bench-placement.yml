@@ -43,7 +43,9 @@ jobs:
         id: workload
         run: nix develop --command just gh nightly ${{ matrix.group }}
         env:
-          BENCH_BASE: 0672ad56ce
+          # The full commit: a shallow checkout fetches the base by commit, and a short
+          # SHA is not a remote ref.
+          BENCH_BASE: 0672ad56ce29ae168c7122fe6ece20de08cdc12a
 
       - name: Compare builds
         if: ${{ !cancelled() }}
