@@ -374,9 +374,9 @@ impl State {
 	}
 
 	/// Serve each shown claim of `id` through every stream with a usable feasible
-	/// route to it, keeping it where it is, unavailable, while there is none.
+	/// route to it that can carry the claim, keeping it where it is, unavailable, while
+	/// there is none.
 	fn home(&mut self, id: Id) {
-		let routes = self.router.routes(id);
 		let claims: Vec<(Path, Claim, bool)> = (self.router.shown().range((id, Path::empty())..))
 			.take_while(|((shown, _), _)| *shown == id)
 			.map(|((_, claim), shown)| (claim.clone(), shown.item.clone(), shown.available))
@@ -387,6 +387,7 @@ impl State {
 			.collect();
 		for (claim, item, available) in claims {
 			gone.remove(&claim);
+			let routes = self.router.routes(id, &claim);
 			let home = self.homes.entry((id, claim.clone())).or_default();
 			let wanted: Vec<(Key, Metric, bool)> = match routes.is_empty() {
 				true => (home.keys.iter())
@@ -584,6 +585,37 @@ mod tests {
 			}]
 		);
 		assert!(served(outputs(&near)).is_empty(), "the remaining route serves on");
+	}
+
+	/// Two streams reach one origin node for different prefixes: each claim is served
+	/// only through the streams that asked for it, however cheap the other.
+	#[test]
+	fn a_claim_is_served_only_through_streams_that_carry_it() {
+		let instance = Instance::random();
+		let origin = Node::new(1, 1);
+		let relay = Node::new(2, 2);
+		let a = relay.receive(Link::default(), p("live/a")).unwrap();
+		let a_answer = origin.answer(Link::default(), p("live/a")).unwrap();
+		let costly = Link {
+			cost: 3,
+			..Link::default()
+		};
+		let b = relay.receive(costly, p("live/b")).unwrap();
+		let b_answer = origin.answer(Link::default(), p("live/b")).unwrap();
+		origin.own(p("live/a/x"), Some(claim(&instance, 0)), None);
+		origin.own(p("live/b/y"), Some(claim(&instance, 0)), None);
+		pump(&a_answer, &a);
+		pump(&b_answer, &b);
+		let claims = |outputs: Vec<Output>| -> Vec<Path> {
+			(served(outputs).into_iter())
+				.filter_map(|output| match output {
+					Output::Serve { claim, .. } => Some(claim),
+					_ => None,
+				})
+				.collect()
+		};
+		assert_eq!(claims(outputs(&a)), [p("live/a/x")]);
+		assert_eq!(claims(outputs(&b)), [p("live/b/y")]);
 	}
 
 	#[test]

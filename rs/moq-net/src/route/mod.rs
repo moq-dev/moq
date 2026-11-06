@@ -271,6 +271,16 @@ struct Peer {
 	asked: Option<Path>,
 }
 
+impl Peer {
+	/// Whether a request for a claim at `claim` may go through this neighbor: the
+	/// claim lies within what this node asked it for and within its scope. A route
+	/// reaches an origin node, not each of its claims.
+	fn carries(&self, claim: &Path) -> bool {
+		self.asked.as_ref().is_none_or(|asked| within(claim, asked))
+			&& (self.link.scope.as_ref()).is_none_or(|scope| scope.regions.iter().any(|region| within(claim, region)))
+	}
+}
+
 /// An identity this node serves itself.
 struct Origin<A> {
 	seqno: Seqno,
@@ -846,14 +856,16 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 		best.map(|(_, selected)| selected)
 	}
 
-	/// Every usable feasible route to `id` through a neighbor, with this node's
-	/// metric through each. Any of them forwards without a loop.
-	pub fn routes(&self, id: Id) -> Vec<(N, Metric)> {
+	/// Every usable feasible route to `id` through a neighbor that can carry
+	/// `claim`, with this node's metric through each. Any of them forwards without a
+	/// loop.
+	pub fn routes(&self, id: Id, claim: &Path) -> Vec<(N, Metric)> {
 		if self.origins.contains_key(&id) {
 			return Vec::new();
 		}
 		(self.rx.get(&id).into_iter().flatten())
 			.filter(|(_, entry)| !entry.held && self.feasible(id, entry.advert))
+			.filter(|(next, _)| self.neighbors[*next].carries(claim))
 			.filter_map(|(&next, entry)| Some((next, add(entry.advert.metric, self.neighbors[&next].link.cost)?)))
 			.collect()
 	}

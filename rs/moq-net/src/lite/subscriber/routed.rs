@@ -24,11 +24,23 @@ struct WireRoute {
 	reach: route::Reach,
 	/// The Announce IDs of its live claims.
 	claims: BTreeSet<u64>,
-	/// Claim changes since its last ANNOUNCE_FLOOR.
-	pending: Vec<(Path, Option<node::Claim>)>,
+	/// How its claims differ from `committed`, by path, so what the stream keeps
+	/// between floors is bounded by its claims rather than the messages it read.
+	pending: BTreeMap<Path, Option<node::Claim>>,
 	/// Its claims and floor as of that ANNOUNCE_FLOOR, replayed when the stream
 	/// files again. `None` until the first.
 	committed: Option<(BTreeMap<Path, node::Claim>, Option<route::Rev>)>,
+}
+
+impl WireRoute {
+	/// The claim at `path` is now `claim`, pending the next floor.
+	fn change(&mut self, path: Path, claim: Option<node::Claim>) {
+		let committed = self.committed.as_ref().and_then(|(claims, _)| claims.get(&path));
+		match committed == claim.as_ref() {
+			true => self.pending.remove(&path),
+			false => self.pending.insert(path, claim),
+		};
+	}
 }
 
 /// One live claim the peer sent, by its Announce ID.
@@ -54,6 +66,9 @@ pub(super) struct Routed {
 	link: route::Link,
 	/// The scope's regions it filed under, or `None` unscoped.
 	regions: Option<Vec<Path>>,
+	/// The permit it filed under. The node holds only the peer's claims its limit
+	/// admits; the regions alone can be wider.
+	permit: crate::auth::Permit,
 	/// The peer's SETUP, whose proven route key files a scoped peer's identities.
 	peer_setup: crate::lite::PeerSetup,
 	/// Files them instead while the peer proved none: this session's own.
@@ -113,6 +128,7 @@ impl Routed {
 			stream,
 			link,
 			regions,
+			permit: permit.clone(),
 			peer_setup,
 			session_key,
 			prefix,
@@ -153,7 +169,7 @@ impl Routed {
 						node,
 						reach,
 						claims: BTreeSet::new(),
-						pending: Vec::new(),
+						pending: BTreeMap::new(),
 						committed: None,
 					},
 				);
@@ -173,6 +189,7 @@ impl Routed {
 				self.replies.push(AnnounceReply::RouteEnd { id });
 			}
 			Msg::Floor { id, revision } => {
+				let certifies = self.certifies();
 				let route = self.routes.get_mut(&id).ok_or(Error::ProtocolViolation)?;
 				let changes = std::mem::take(&mut route.pending);
 				let (committed, floor) = route.committed.get_or_insert_default();
@@ -183,6 +200,11 @@ impl Routed {
 					};
 				}
 				*floor = revision;
+				// The node never held a claim the limit leaves out, so it neither starts nor ends.
+				let changes = (changes.into_iter())
+					.filter(|(path, _)| admits(&self.root, &self.permit, path))
+					.collect();
+				let revision = revision.filter(|_| certifies);
 				self.stream.batch(route.node, changes, revision);
 			}
 			Msg::Active {
@@ -275,7 +297,7 @@ impl Routed {
 		}
 		self.held.push(self.slots.acquire()?);
 		wire.claims.insert(id);
-		wire.pending.push((path.clone(), Some(claim.clone())));
+		wire.change(path.clone(), Some(claim.clone()));
 		self.claims.insert(id, WireClaim { route, path, claim });
 		Ok(())
 	}
@@ -286,14 +308,14 @@ impl Routed {
 		self.held.pop();
 		let route = self.routes.get_mut(&claim.route).ok_or(Error::ProtocolViolation)?;
 		route.claims.remove(&id);
-		route.pending.push((claim.path, None));
+		route.change(claim.path, None);
 		Ok(())
 	}
 
 	fn pending(&mut self, id: u64, change: (Path, Option<node::Claim>)) -> Result<(), Error> {
 		let route = self.claims.get(&id).ok_or(Error::ProtocolViolation)?.route;
 		let route = self.routes.get_mut(&route).ok_or(Error::ProtocolViolation)?;
-		route.pending.push(change);
+		route.change(change.0, change.1);
 		Ok(())
 	}
 
@@ -310,12 +332,18 @@ impl Routed {
 		self.outputs(subscriber);
 	}
 
-	/// The session's permit changed: a scope the stream no longer matches files it
-	/// again, the peer's routes and claims replayed under a new key before the old
-	/// one lets go.
+	/// The session's permit changed: a scope the stream no longer matches, or a
+	/// limit admitting a different set of the peer's claims, files it again, the
+	/// peer's routes and the claims the limit admits replayed before the old stream
+	/// lets go. The peer still holds each claim either way.
 	pub(super) fn limit(&mut self, subscriber: &Subscriber, permit: &crate::auth::Permit) -> Result<(), Error> {
 		let regions = regions(&self.root, permit);
-		if regions == self.regions {
+		let admitted = (self.routes.values())
+			.filter_map(|route| route.committed.as_ref())
+			.flat_map(|(claims, _)| claims.keys())
+			.any(|path| admits(&self.root, &self.permit, path) != admits(&self.root, permit, path));
+		self.permit = permit.clone();
+		if regions == self.regions && !admitted {
 			return Ok(());
 		}
 		let key = self.peer_setup.route_key().unwrap_or(self.session_key);
@@ -332,11 +360,14 @@ impl Routed {
 			let route = &self.routes[id];
 			stream.route(route.node, Some(route.reach));
 		}
+		let certifies = self.certifies();
 		for id in &ids {
 			let route = &self.routes[id];
 			if let Some((claims, floor)) = &route.committed {
-				let changes = claims.iter().map(|(path, claim)| (path.clone(), Some(claim.clone())));
-				stream.batch(route.node, changes.collect(), *floor);
+				let changes = (claims.iter())
+					.filter(|(path, _)| admits(&self.root, &self.permit, path))
+					.map(|(path, claim)| (path.clone(), Some(claim.clone())));
+				stream.batch(route.node, changes.collect(), floor.filter(|_| certifies));
 			}
 		}
 		if self.drained {
@@ -350,6 +381,26 @@ impl Routed {
 			served.route.dynamic.withdrawn();
 		}
 		Ok(())
+	}
+
+	/// Whether the peer's floors may certify what reaches the node: the limit admits
+	/// all of the requested prefix within the scope's regions. A narrower limit leaves
+	/// claims out that a floor would certify absent, so the claims it admits stay only
+	/// while the peer carries them.
+	fn certifies(&self) -> bool {
+		let Some(regions) = &self.regions else {
+			return true;
+		};
+		(regions.iter())
+			.filter_map(|region| match () {
+				_ if self.prefix.has_prefix(region) => Some(&self.prefix),
+				_ if region.has_prefix(&self.prefix) => Some(region),
+				_ => None,
+			})
+			.all(|covered| {
+				(covered.strip_prefix(&self.root))
+					.is_some_and(|relative| self.permit.within_limit_subtree(relative.as_str()))
+			})
 	}
 
 	/// Act on everything the node queued for the stream: serve the claims it hands
@@ -492,6 +543,12 @@ fn hops(id: route::Id) -> crate::Hops {
 	hops
 }
 
+/// Whether `permit`'s limit admits the peer's claim at the absolute `path`.
+fn admits(root: &Path, permit: &crate::auth::Permit, path: &Path) -> bool {
+	path.strip_prefix(root)
+		.is_some_and(|relative| permit.within_limit(relative.as_str()))
+}
+
 /// The absolute regions a permit confines the peer's claims to.
 fn regions(root: &Path, permit: &crate::auth::Permit) -> Option<Vec<Path>> {
 	let regions = permit.regions()?;
@@ -511,7 +568,116 @@ fn scoped(link: &route::Link, regions: &Option<Vec<Path>>, key: [u8; 32]) -> rou
 #[cfg(test)]
 mod tests {
 	use crate::lite::{AnnounceBroadcast as Msg, AnnounceDecoder, PathRef, test_transport::SinkSession};
-	use crate::{Instance, Path, origin::Cost, route::Advert};
+	use crate::{Instance, Path, auth::Permit, origin::Cost, route::Advert};
+
+	const ADVERT: Advert = Advert {
+		seqno: 0,
+		metric: 0,
+		down_only: false,
+	};
+
+	fn start(path: &'static str) -> Msg {
+		Msg::Active {
+			suffix: PathRef::literal(Path::from_static(path)),
+			route: 0,
+			instance: Some(Instance::random()),
+			epoch: 0,
+			hops: Default::default(),
+			cost: Cost::new(0),
+		}
+	}
+
+	fn limited(pattern: &str) -> Permit {
+		Permit::limited([pattern.parse::<crate::Pattern>().unwrap()].into_iter().collect())
+	}
+
+	/// The claims the stream serves into the origin, by path.
+	fn served(routed: &super::Routed) -> Vec<String> {
+		let mut served: Vec<String> = routed.served.keys().map(|(_, path)| path.to_string()).collect();
+		served.sort();
+		served
+	}
+
+	/// A limit narrower than its regions still leaves out the claims it does not
+	/// admit, and a change that keeps the regions brings them in and out again.
+	#[kio::test]
+	async fn the_limit_admits_each_claim() {
+		let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+		let prefix = Path::empty();
+		let public = limited("live/*/public/**");
+		let everything = limited("live/**");
+		assert_eq!(public.regions(), everything.regions(), "the limits share their regions");
+
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &public).unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		let floor = Msg::Floor {
+			id: 0,
+			revision: Some(0),
+		};
+		let route = Msg::RouteStart {
+			node: 7,
+			advert: ADVERT,
+		};
+		for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
+			routed.receive(&prefix, msg, &mut decoder).unwrap();
+		}
+		routed.outputs(&subscriber);
+		assert_eq!(served(&routed), ["live/a/public/x"]);
+
+		routed.limit(&subscriber, &everything).unwrap();
+		assert_eq!(served(&routed), ["live/a/private/y", "live/a/public/x"]);
+
+		routed.limit(&subscriber, &public).unwrap();
+		assert_eq!(served(&routed), ["live/a/public/x"]);
+	}
+
+	/// What the stream keeps between floors is the net change to its committed claims,
+	/// however many messages the peer sends without one.
+	#[kio::test]
+	async fn pending_changes_net_out() {
+		let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+		let prefix = Path::empty();
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		let floor = Msg::Floor {
+			id: 0,
+			revision: Some(0),
+		};
+		let route = Msg::RouteStart {
+			node: 7,
+			advert: ADVERT,
+		};
+		for msg in [route, start("room/host"), floor] {
+			routed.receive(&prefix, msg, &mut decoder).unwrap();
+		}
+		let pending = |routed: &super::Routed| routed.routes[&0].pending.len();
+		assert_eq!(pending(&routed), 0);
+
+		for cost in 1..1000 {
+			let update = Msg::Update {
+				id: 0,
+				hops: Default::default(),
+				cost: Cost::new(cost),
+			};
+			routed.receive(&prefix, update, &mut decoder).unwrap();
+		}
+		assert_eq!(pending(&routed), 1, "updates to one claim");
+
+		let back = Msg::Update {
+			id: 0,
+			hops: Default::default(),
+			cost: Cost::new(0),
+		};
+		routed.receive(&prefix, back, &mut decoder).unwrap();
+		assert_eq!(pending(&routed), 0, "an update back to the committed claim");
+
+		for _ in 0..100 {
+			routed.receive(&prefix, start("room/guest"), &mut decoder).unwrap();
+			let id = decoder.last();
+			routed.receive(&prefix, Msg::EndedId { id }, &mut decoder).unwrap();
+		}
+		assert_eq!(pending(&routed), 0, "claims started and ended between floors");
+	}
 
 	/// A takeover in place keeps the sources the predecessor minted open: they serve the
 	/// instance it continues. A restart in place closes them.

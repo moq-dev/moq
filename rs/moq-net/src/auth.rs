@@ -527,6 +527,15 @@ pub(crate) struct Permit {
 }
 
 impl Permit {
+	/// A permit limiting the peer to `limit`, with no grant of its own.
+	#[cfg(test)]
+	pub(crate) fn limited(limit: Patterns) -> Self {
+		Self {
+			granted: None,
+			limit: Some(limit),
+		}
+	}
+
 	/// Whether both allow `path`.
 	pub(crate) fn matches(&self, path: &str) -> bool {
 		self.granted(path) && self.within_limit(path)
@@ -552,6 +561,16 @@ impl Permit {
 		};
 		let covers = |patterns: &Option<Patterns>| patterns.as_ref().is_none_or(|patterns| patterns.contains(&subtree));
 		covers(&self.granted) && covers(&self.limit)
+	}
+
+	/// Whether the limit alone allows every path at or beneath `prefix`, judged
+	/// pattern by pattern, so a `false` may be spurious but a `true` never is.
+	#[cfg(feature = "async")]
+	pub(crate) fn within_limit_subtree(&self, prefix: &str) -> bool {
+		let Ok(subtree) = moq_pattern::Pattern::subtree(prefix) else {
+			return false;
+		};
+		self.limit.as_ref().is_none_or(|limit| limit.contains(&subtree))
 	}
 
 	/// The prefixes this confines the peer to, or `None` when it confines nothing: the
