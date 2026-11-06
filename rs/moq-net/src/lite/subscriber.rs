@@ -6443,7 +6443,7 @@ mod tests {
 			let opening = kio::Producer::new(true);
 			let session = SinkSession::gated_bi(gate.consume()).with_open_bi_gate(opening.consume());
 
-			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
@@ -6540,7 +6540,7 @@ mod tests {
 		let opening = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume()).with_open_bi_gate(opening.consume());
 
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -6602,7 +6602,7 @@ mod tests {
 			let opening = kio::Producer::new(true);
 			let session = SinkSession::gated_bi(gate.consume()).with_open_bi_gate(opening.consume());
 
-			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
