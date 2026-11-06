@@ -101,9 +101,13 @@ async fn the_connect_count_advances_on_reconnect() {
 	let session = sessions.recv().await.expect("server stopped accepting");
 	drop(session);
 
+	// Revisions, not `status()`: a drop and redial between polls would leave the status
+	// reading `Connected`, unchanged, with nothing left to wake it.
+	let monitor = connection.monitor();
 	kio::clock::timeout(Duration::from_secs(10), async {
-		while connection.connects() < 2 {
-			connection.status().await.expect("status failed");
+		let mut state = monitor.state();
+		while state.connects < 2 {
+			state = monitor.state_changed(state.revision).await.expect("monitor stopped");
 		}
 	})
 	.await
