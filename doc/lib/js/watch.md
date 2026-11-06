@@ -210,7 +210,8 @@ instead of each selecting against all of it. Set
 `viewer.max` (`controls.viewer.max` on `<moq-watch>`) to claim a fixed ceiling
 in bits per second instead while media downloads, which also caps what video selects, or `0` to claim nothing; omit `viewer.viewers` to
 leave the connection's estimate unclaimed. Without a claim, video selects the best rendition its
-`video.target` allows.
+`video.target` allows. To stop the relay probing while still adapting, keep the claim and call
+`connection.viewers.setTarget(0)`.
 
 To chart when each audio frame arrived against when it plays, open an
 `arrivals()` handle on the audio decoder. It yields every frame received while it is open, stamped
