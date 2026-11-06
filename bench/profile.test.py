@@ -204,7 +204,7 @@ class Orchestration(unittest.TestCase):
             (bench / "profile.py").write_text("")
             (bench / "relay.sh").write_text("""PROFILE=
 run_workload() {
-    printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "$1" "$4" "$5" "$LOAD_BIN" "$HOST_BIN" >> "$RUN/calls.tsv"
+    printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "$1" "$4" "$5" "$LOAD_BIN" "${HOST_CMD[*]}" >> "$RUN/calls.tsv"
     local directory=$RUN/relay/$1/$3
     mkdir -p "$directory/cpu"
     printf '{"recv_fps":100,"cpu_cores":1}\\n' > "$directory/summary.json"
@@ -217,9 +217,9 @@ run_workload() {
             cargo.write_text("""#!/usr/bin/env python3
 import os
 from pathlib import Path
-output = Path(os.environ['CARGO_TARGET_DIR']) / 'profiling'
+output = Path(os.environ['CARGO_TARGET_DIR']) / 'profiling' / 'examples'
 output.mkdir(parents=True, exist_ok=True)
-check = output / 'moq-bench-uring-check'
+check = output / 'probe'
 check.write_text('#!/bin/sh\\nexit 0\\n')
 check.chmod(0o755)
 """)

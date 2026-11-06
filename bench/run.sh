@@ -743,7 +743,7 @@ run_audio_comparison() {
     printf 'Building relay and audio load generator...\n'
     CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release -p moq-relay -p moq-bench
     LOAD_BIN=$CURRENT_TARGET/release/moq-bench
-    HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
+    HOST_CMD=("$LOAD_BIN" host)
 
     printf '\nAudio grouping: 50 / 400 fps, 200-byte frames, per-packet / 20 / 100 / 200 ms groups\n'
     printf 'shape\trecv-fps\tp99-ms\tCPU\tRSS-MiB\n'
@@ -798,7 +798,7 @@ generate_certificate() {
 
 # The runtime matrix and profiling use identical feature selection and support checks.
 build_workers() {
-    local checkout=$1 target=$2 profile=$3 features=moq-relay/io-uring,moq-bench/uring
+    local checkout=$1 target=$2 profile=$3 features=moq-relay/io-uring
     if [[ ${4:-} == heap ]]; then
         features+=,moq-relay/jemalloc
     fi
@@ -812,9 +812,12 @@ build_workers() {
     )
 }
 
+# Support is the host's, not a revision's, so the current tree's probe answers for
+# every revision. Takes the current tree's target directory and Cargo profile.
 check_uring() {
     printf 'Checking io_uring support...\n'
-    if ! "$1/moq-bench-uring-check"; then
+    CARGO_TARGET_DIR=$1 cargo build --locked --quiet --profile "$2" -p moq-uring --no-default-features --example probe
+    if ! "$1/$2/examples/probe"; then
         printf 'worker benchmarks need Linux 6.12+ with io_uring permitted by the host\n' >&2
         return 1
     fi
@@ -829,8 +832,8 @@ run_runtime_comparison() {
 
     build_workers "$ROOT" "$CURRENT_TARGET" release
     LOAD_BIN=$CURRENT_TARGET/release/moq-bench
-    HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
-    check_uring "$CURRENT_TARGET/release"
+    HOST_CMD=("$LOAD_BIN" host)
+    check_uring "$CURRENT_TARGET" release
 
     local -a runtimes=(tokio-shared tokio-workers io-uring-workers)
     local round workload offset index runtime
@@ -867,7 +870,7 @@ run_shard_sweep() {
     printf 'Building relay and load generator...\n'
     CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release -p moq-relay -p moq-bench
     LOAD_BIN=$CURRENT_TARGET/release/moq-bench
-    HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
+    HOST_CMD=("$LOAD_BIN" host)
 
     local cpus workload connections shards label
     cpus=$(usable_cpus)
@@ -938,20 +941,20 @@ run_profiles() {
     local label checkout target
     local -a revisions=(current)
     if [[ -n $BASE ]]; then revisions=(base current); fi
+    if [[ $PROFILE_RUNTIME == io-uring-workers ]]; then
+        check_uring "$CURRENT_TARGET/profile" profiling
+    fi
     for mode in $PROFILE_MODES; do
         # The current generator and sampler drive both revisions, including old bases
         # whose own harness cannot select the io_uring runtime.
         build_workers "$ROOT" "$CURRENT_TARGET/profile" profiling "$mode"
         LOAD_BIN=$CURRENT_TARGET/profile/profiling/moq-bench
-        HOST_BIN=$CURRENT_TARGET/profile/profiling/moq-bench-host
+        HOST_CMD=("$LOAD_BIN" host)
         for label in "${revisions[@]}"; do
             checkout=$ROOT target=$CURRENT_TARGET/profile
             if [[ $label == base ]]; then
                 checkout=$WORKTREE target=$BASE_TARGET/profile
                 build_workers "$checkout" "$target" profiling "$mode"
-            fi
-            if [[ $PROFILE_RUNTIME == io-uring-workers ]]; then
-                check_uring "$target/profiling"
             fi
             run_profile "$mode" "$label" "$target/profiling/moq-relay"
         done
@@ -1005,7 +1008,7 @@ revision_checkout() {
 # sampler drive every relay, including old bases whose own harness cannot select
 # the io_uring runtime: BENCH_GENERATOR's, or else the current tree's.
 run_instructions() {
-    local label sha round index next generator built
+    local label sha round index next generator
     # Measured revisions, then what gets built: those plus a generator measured nowhere.
     local -a labels=() targets=() checkouts=()
     for sha in ${BASES[@]+"${BASES[@]}"}; do
@@ -1032,7 +1035,11 @@ run_instructions() {
         fi
     fi
     LOAD_BIN=$generator/profiling/moq-bench
-    HOST_BIN=$generator/profiling/moq-bench-host
+    HOST_CMD=("$LOAD_BIN" host)
+    # A generator pinned before the sampler became `moq-bench host` ships it as its own binary.
+    if [[ -n $GENERATOR && $(git show "$GENERATOR:rs/moq-bench/Cargo.toml") == *'"moq-bench-host"'* ]]; then
+        HOST_CMD=("$generator/profiling/moq-bench-host")
+    fi
 
     mkdir -p "$RUN/build"
     QUEUED_BUILDS=() QUEUED_LOGS=()
@@ -1051,9 +1058,7 @@ run_instructions() {
         tail -n 1 "$RUN/build/${build_labels[$index]}.log"
     done
     if [[ $PROFILE_RUNTIME == io-uring-workers ]]; then
-        for built in "${build_targets[@]}"; do
-            check_uring "$built/profiling"
-        done
+        check_uring "${targets[-1]}" profiling
     fi
     for ((round = 1; round <= ROUNDS; round++)); do
         for ((index = 0; index < ${#labels[@]}; index++)); do
@@ -1287,7 +1292,7 @@ generate_certificate
 
 CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release -p moq-relay -p moq-bench
 LOAD_BIN=$CURRENT_TARGET/release/moq-bench
-HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
+HOST_CMD=("$LOAD_BIN" host)
 
 if [[ -n $BASE ]]; then
     printf '\nRelay workloads: paired base/current\n'

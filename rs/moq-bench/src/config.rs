@@ -105,10 +105,22 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub file: Option<String>,
 
+	/// Run another tool instead of generating load.
+	#[usage(subcommand)]
+	#[serde(skip)]
+	pub(crate) command: Option<Command>,
+
 	/// Provenance from the last [`Self::parse_and_merge`].
 	#[usage(skip)]
 	#[serde(skip)]
 	origins: Option<usage_rs::config::Resolved>,
+}
+
+/// A tool that runs instead of the load generator.
+#[derive(usage_rs::Subcommands, Clone, Debug)]
+pub(crate) enum Command {
+	/// Sample the CPU, memory, and sockets of the process under test (Linux only).
+	Host(crate::host::Args),
 }
 
 impl Default for Config {
@@ -131,6 +143,7 @@ impl Default for Config {
 			quic: Default::default(),
 			log: Default::default(),
 			file: None,
+			command: None,
 			origins: None,
 		}
 	}
@@ -193,6 +206,17 @@ impl Config {
 				anyhow::bail!("{}", answer.message());
 			}
 		};
+		// The load generator's flags configure nothing a subcommand runs, so refuse
+		// them rather than silently drop them.
+		if config.command.is_some() {
+			let deprecated = config.deprecated();
+			anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
+			anyhow::ensure!(
+				cli_layer.is_empty() && config.file.is_none(),
+				"`moq-bench host` takes only its own flags, given after `host`"
+			);
+			return Ok(config);
+		}
 		let env = usage_rs::config::EnvLayer::from_process();
 		let file_path = config.file.clone();
 		let file_body = file_path
@@ -554,6 +578,48 @@ url = "https://example.com"
 			let answer = moq_tokio::cli::answer(Config::spec(), Config::command(), &argv, err);
 			assert!(answer.is_question(), "{flag} was treated as a failure");
 			assert!(!answer.message().trim().is_empty(), "{flag} rendered nothing");
+		}
+	}
+
+	/// `--interval 0s` must be rejected at parse time: with no pacing the sampler
+	/// busy-loops over /proc on the very hosts it is meant to be harmless on.
+	#[test]
+	fn host_refuses_a_zero_interval() {
+		let err = Config::parse_and_merge(["moq-bench", "host", "--interval", "0s"]).unwrap_err();
+		assert!(err.to_string().contains("greater than 0s"), "unexpected error: {err}");
+	}
+
+	/// The sampler's `--duration` and `--output` are its own, not the generator's.
+	#[test]
+	fn host_takes_its_own_flags() {
+		let config = Config::parse_and_merge([
+			"moq-bench",
+			"host",
+			"--pid",
+			"7",
+			"--duration",
+			"5s",
+			"--output",
+			"host.jsonl",
+		])
+		.unwrap();
+		assert!(matches!(config.command, Some(Command::Host(_))));
+		assert!(config.duration.is_none());
+		assert!(config.output.is_none());
+
+		let config = Config::parse_and_merge(["moq-bench"]).unwrap();
+		assert!(config.command.is_none());
+	}
+
+	/// A generator flag beside `host` would configure nothing, so it is an error.
+	#[test]
+	fn host_refuses_generator_flags() {
+		for argv in [
+			&["moq-bench", "--fps", "60", "host"][..],
+			&["moq-bench", "--file", "bench.toml", "host"][..],
+			&["moq-bench", "host", "--fps", "60"][..],
+		] {
+			assert!(Config::parse_and_merge(argv).is_err(), "{argv:?} was accepted");
 		}
 	}
 

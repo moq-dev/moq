@@ -1,4 +1,7 @@
-//! Checks whether the host can construct the io_uring worker used by runtime benchmarks.
+//! Exits nonzero, naming why, when this host cannot construct an io_uring worker.
+//!
+//! The relay benchmarks run it before an io_uring matrix, so an unsupported
+//! kernel fails once and legibly instead of in every relay start.
 
 #[cfg(target_os = "linux")]
 fn main() {

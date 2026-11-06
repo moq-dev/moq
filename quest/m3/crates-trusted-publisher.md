@@ -9,9 +9,8 @@ Delete this quest once every crate has one.
 
 ## Waiting
 
-- Maintainer: after [the cut](/quest/m3/release/cut.md) publishes kio-macros, moq-c,
-  moq-congestion, moq-crypto, moq-ice, moq-quic, and moq-rtsp by token (and
-  moq-bench, whenever [its first publish](/quest/m1/bench-publish.md) lands), add
+- Maintainer: after [the cut](/quest/m3/release/cut.md) publishes kio-macros, moq-bench,
+  moq-c, moq-congestion, moq-crypto, moq-ice, moq-quic, and moq-rtsp by token, add
   their trusted publishers the same way. Settings pages need a crates.io
   login, so check with a `release-rs.yml` run that publishes through OIDC.
 
@@ -59,4 +58,4 @@ workspace instead.
 
 ## Required
 
-- [Cut the release](/quest/m3/release/cut.md) - the cut first-publishes the seven crates by token
+- [Cut the release](/quest/m3/release/cut.md) - the cut first-publishes these crates by token
