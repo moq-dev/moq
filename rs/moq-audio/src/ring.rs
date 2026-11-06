@@ -445,6 +445,9 @@ impl Convert {
 				return false;
 			}
 			self.input[self.pending * self.channels..].fill(0.0);
+			// The padding is input too, so a later flush, after the next utterance,
+			// owes that utterance's tail rather than counting this padding against it.
+			self.fed += (self.chunk - self.pending) as u64;
 			self.convert(ring);
 		}
 		true
@@ -588,7 +591,8 @@ impl Consumer {
 	/// Fill `output` from the queue, returning the samples written.
 	fn fill(&mut self, output: &mut [f32]) -> usize {
 		if self.refill && !self.shared.finished.load(Ordering::Relaxed) {
-			if self.available() < self.shared.target.load(Ordering::Relaxed) {
+			// Nothing more comes before a declared silence, so its tail plays now.
+			if !self.declared() && self.available() < self.shared.target.load(Ordering::Relaxed) {
 				return 0;
 			}
 			self.refill = false;
@@ -1156,5 +1160,54 @@ mod tests {
 		assert!(noise(&out[..600 * STEREO]));
 		assert!(out[600 * STEREO..].iter().all(|&sample| sample == 0.5));
 		assert_eq!(cons.read(&mut out), Read::Underflow { frames: 0 });
+	}
+
+	/// Each resume flushes the resampler, and a later flush still owes the next
+	/// utterance's whole tail rather than counting the earlier padding against it.
+	#[test]
+	fn every_utterance_through_the_resampler_is_heard() {
+		let (mut prod, mut cons) = queue(44_100, 48_000, Duration::from_secs(1));
+		let mut out = vec![0.0; 48_000 * STEREO];
+		// The first flush pads nearly a whole chunk, more than the second leaves pending.
+		for (sample, frames) in [(0.25f32, CHUNK + 1), (0.5, CHUNK + 100)] {
+			prod.end();
+			prod.next();
+			assert_eq!(prod.push(&vec![sample; frames * STEREO]), Push::Ok);
+		}
+		assert!(prod.flush());
+		let _ = cons.read(&mut out);
+		// Past half amplitude, where the resampled edges cross.
+		let heard = out.iter().step_by(STEREO).filter(|&&sample| sample > 0.375).count();
+		let want = (CHUNK + 100) * 48_000 / 44_100;
+		assert!(heard.abs_diff(want) <= 1, "heard {heard}, want {want}");
+	}
+
+	/// A tail stuck short of an emergency refill when its end is declared plays
+	/// out, rather than waiting through the silence for audio that is not coming.
+	#[test]
+	fn a_declared_end_releases_an_emergency_refill() {
+		let (mut prod, mut cons) = channel(
+			STEREO,
+			48_000,
+			48_000,
+			Config {
+				latency: Duration::from_millis(50),
+				capacity: Duration::from_secs(1),
+				pad: true,
+				trim: false,
+			},
+		);
+		cons.stretch(48_000);
+		cons.start();
+		assert_eq!(prod.push(&[]), Push::Ok);
+		let mut out = vec![0.0; LATENCY * STEREO];
+		assert_eq!(cons.read(&mut out), Read::Ok);
+		assert_eq!(cons.read(&mut out[..128 * STEREO]), Read::Underflow { frames: 0 });
+		assert_eq!(prod.push(&[0.25; 960 * STEREO]), Push::Ok);
+		assert_eq!(cons.read(&mut out[..128 * STEREO]), Read::Underflow { frames: 0 });
+		prod.end();
+		let mut out = vec![0.0; 1000 * STEREO];
+		assert_eq!(cons.read(&mut out), Read::Comfort { frames: 960 });
+		assert!(out[..960 * STEREO].iter().all(|&sample| sample == 0.25));
 	}
 }
