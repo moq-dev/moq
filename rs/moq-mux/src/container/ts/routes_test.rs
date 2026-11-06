@@ -187,7 +187,7 @@ async fn mpeg2_video_rides_whole_and_survives_a_round_trip() {
 		super::export_test::open_ts(
 			crate::source::announced(&imported.consumer).await,
 			crate::catalog::CatalogFormat::Hang,
-			std::time::Duration::ZERO,
+			Duration::from_secs(30),
 		)
 		.await
 		.unwrap(),
