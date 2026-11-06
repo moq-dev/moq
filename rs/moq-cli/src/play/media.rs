@@ -1054,7 +1054,11 @@ mod tests {
 				_ => None,
 			})
 			.collect();
-		assert_eq!(utterances, vec![110 * PACKET_DURATION], "the press starts from its first frame");
+		assert_eq!(
+			utterances,
+			vec![110 * PACKET_DURATION],
+			"the press starts from its first frame"
+		);
 		let played = recorder.played();
 		let first = played.iter().find(|part| part.sample == 0.5).unwrap();
 		assert_eq!(first.utterance, 1);
