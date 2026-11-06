@@ -425,7 +425,9 @@ export class Truck {
 			// The truck refused the dial or ended the session, which ended the lease.
 			if (stream === null) return this.#release();
 			if (!stream) return;
-			nested.spawn(() => this.#readReplies(nested, stream));
+			nested.spawn(async () => {
+				if (await this.#readReplies(nested, stream)) this.#release();
+			});
 			nested.run((inner) => {
 				const command = inner.get(this.#command);
 				if (command) write(stream, command);
@@ -440,8 +442,28 @@ export class Truck {
 		const session = this.#dial(effect, driverId());
 		effect.run((nested) => {
 			const stream = nested.get(session);
-			if (stream) write(stream, command);
+			if (stream === null) return this.#undelivered(command);
+			if (!stream) return;
+			write(stream, command);
+			// The truck answers a bystander with nothing but the session's end.
+			nested.spawn(async () => {
+				if (await this.#readReplies(nested, stream)) this.#undelivered(command);
+			});
 		});
+	}
+
+	/**
+	 * Drop a safety command whose session failed before the status confirmed it.
+	 *
+	 * The local latch then follows the truck's status again, rather than showing a
+	 * stop that never arrived: the viewer sees it and can press again.
+	 */
+	#undelivered(command: Command) {
+		if (this.#safetyCommand.peek() !== command) return;
+		console.warn(`${String(command.cmd.type)} for ${this.name} was not delivered`);
+		this.#safetyCommand.set(undefined);
+		this.#estopUnconfirmed = false;
+		this.estopped.set(this.status.peek()?.estopped ?? false);
 	}
 
 	/** Dial the truck from a new endpoint `id`, both closed with `effect`. */
@@ -465,15 +487,15 @@ export class Truck {
 		return session;
 	}
 
-	/** Read the truck's acknowledgements until the session ends, which ends the lease. */
-	async #readReplies(effect: Moq.Signals.Effect, stream: Moq.socket.TrackStream) {
+	/** Read the truck's acknowledgements, returning true once the session ends unless `effect` closed it. */
+	async #readReplies(effect: Moq.Signals.Effect, stream: Moq.socket.TrackStream): Promise<boolean> {
 		// An acknowledgement a heartbeat late is superseded by the next one.
 		stream.consumer.update({ order: "ascending", delay: { max: CONTROL_HEARTBEAT } });
 		const replies = stream.consumer.ordered();
 		try {
 			for (;;) {
 				const frame = await effect.race(replies.readFrame());
-				if (effect.abort.aborted) return;
+				if (effect.abort.aborted) return false;
 				if (!frame) break;
 				let reply: Reply;
 				try {
@@ -485,10 +507,10 @@ export class Truck {
 				this.#acknowledge(reply);
 			}
 		} catch (err) {
-			if (effect.abort.aborted) return;
+			if (effect.abort.aborted) return false;
 			console.warn(`session with ${this.name} failed:`, err);
 		}
-		this.#release();
+		return true;
 	}
 
 	/** Give up driving this truck, if this player still is. */

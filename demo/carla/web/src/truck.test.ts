@@ -542,6 +542,40 @@ describe("Truck sessions", () => {
 	});
 });
 
+describe("Truck safety sessions", () => {
+	test("an e-stop whose session ends unconfirmed stops showing as latched", async () => {
+		const connection = new Moq.Connection({ enabled: false });
+		const origin = new Moq.Origin.Producer();
+		const driving = new Moq.Signals.Signal<string | undefined>(undefined);
+		const focused = new Moq.Signals.Signal<string | undefined>(undefined);
+		const truck = new Truck({
+			broadcastId: Moq.Path.from("carla/truck1/front.hang"),
+			connection,
+			origin,
+			driving,
+			focused,
+		});
+		const endpoint = new Moq.socket.Endpoint(origin, SOCKET, "truck1");
+		try {
+			const incoming = endpoint.acceptTrack();
+			truck.emergencyStop();
+			expect(truck.estopped.peek()).toBe(true);
+			const stream = await (await incoming).accept();
+			await stream.consumer.ordered().readFrame();
+
+			// The truck goes away before its status ever echoed the latch.
+			const cleared = truck.estopped.changed();
+			stream.producer.finish();
+			expect(await cleared).toBe(false);
+		} finally {
+			truck.close();
+			endpoint.close();
+			connection.close();
+			origin.close();
+		}
+	});
+});
+
 describe("Truck respawn", () => {
 	test("requires the truck's current lease and clears old input", async () => {
 		const connection = new Moq.Connection({ enabled: false });

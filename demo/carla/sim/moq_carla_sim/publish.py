@@ -359,8 +359,10 @@ class Drivers:
     async def _serve(self, incoming: moq.socket.IncomingTrack) -> None:
         """Feed one driver session's controls into the command queue.
 
-        Always emits `driver_left` once the session was open, however it ends,
-        so the gate releases a lease even when the session fails.
+        Emits `driver_left` once the session was open, however it ends, so the
+        gate releases a lease even when the session fails. Cancellation is the
+        exception: that is the truck shutting down, whose gate no longer reads
+        the queue, so waiting to enqueue there would hang the shutdown.
         """
         driver = incoming.peer
         try:
@@ -394,7 +396,7 @@ class Drivers:
             with contextlib.suppress(moq.Error):  # pyright: ignore[reportGeneralTypeIssues]
                 stream.producer.finish()
             log.info("driver %s disconnected", driver)
-            await self._commands.put(Command(kind="driver_left", driver_id=driver, session=session))
+        await self._commands.put(Command(kind="driver_left", driver_id=driver, session=session))
 
 
 def _decode(payload: bytes) -> Any:

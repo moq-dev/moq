@@ -312,6 +312,30 @@ def test_a_failed_session_still_releases_its_lease(monkeypatch: pytest.MonkeyPat
     asyncio.run(serving(scenario, monkeypatch))
 
 
+def test_shutdown_never_waits_on_a_full_command_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shutdown stops the gate first, so a pump cancelled then must not wait to report its departure."""
+
+    async def scenario() -> None:
+        endpoint = Endpoint()
+        monkeypatch.setattr(moq.socket, "Endpoint", endpoint, raising=False)
+        commands: asyncio.Queue = asyncio.Queue(maxsize=1)
+        drivers = publish.Drivers("truck1", commands)
+        task = asyncio.create_task(drivers.run(SimpleNamespace()))
+        session = endpoint.dial("driver-abc", "s1")
+        session.send(DRIVE)
+        session.send(DRIVE)
+        # The queue is full and the second control is waiting for room.
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert commands.full()
+
+        task.cancel()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=1)
+        assert session.finished
+
+    asyncio.run(scenario())
+
+
 def test_a_new_session_of_the_same_driver_is_a_new_driver(monkeypatch: pytest.MonkeyPatch) -> None:
     """A lease is one session: an endpoint posing under the holder's id never continues it."""
 
