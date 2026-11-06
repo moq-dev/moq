@@ -275,9 +275,12 @@ pub(crate) enum Header {
 }
 
 impl Header {
-	pub(crate) fn encode(&self, w: &mut Vec<u8>) -> PartialEncode {
+	/// Write the header, reserving a Length field wide enough for a packet of up to `max_len` bytes
+	pub(crate) fn encode(&self, w: &mut Vec<u8>, max_len: usize) -> PartialEncode {
 		use Header::*;
 		let start = w.len();
+		// The Length counts fewer bytes than the whole packet, so `max_len` bounds it
+		let len_size = if max_len < 2usize.pow(14) { 2 } else { 4 };
 		match self {
 			Initial(InitialHeader {
 				dst_cid,
@@ -292,12 +295,12 @@ impl Header {
 				src_cid.encode_long(w);
 				w.write_var(token.len() as u64);
 				w.put_slice(token);
-				w.write::<u16>(0); // Placeholder for payload length; see `set_payload_length`
+				w.put_bytes(0, len_size); // Placeholder for the Length; see `PartialEncode::finish`
 				number.encode(w);
 				PartialEncode {
 					start,
 					header_len: w.len() - start,
-					pn: Some((number.len(), true)),
+					pn: Some((number.len(), len_size)),
 				}
 			}
 			Long {
@@ -311,12 +314,12 @@ impl Header {
 				w.write(*version);
 				dst_cid.encode_long(w);
 				src_cid.encode_long(w);
-				w.write::<u16>(0); // Placeholder for payload length; see `set_payload_length`
+				w.put_bytes(0, len_size); // Placeholder for the Length; see `PartialEncode::finish`
 				number.encode(w);
 				PartialEncode {
 					start,
 					header_len: w.len() - start,
-					pn: Some((number.len(), true)),
+					pn: Some((number.len(), len_size)),
 				}
 			}
 			Retry {
@@ -351,7 +354,7 @@ impl Header {
 				PartialEncode {
 					start,
 					header_len: w.len() - start,
-					pn: Some((number.len(), false)),
+					pn: Some((number.len(), 0)),
 				}
 			}
 			VersionNegotiate {
@@ -439,8 +442,8 @@ impl Header {
 pub(crate) struct PartialEncode {
 	pub(crate) start: usize,
 	pub(crate) header_len: usize,
-	// Packet number length, payload length needed
-	pn: Option<(usize, bool)>,
+	// Packet number length, and the Length field's size, or 0 when the header has none
+	pn: Option<(usize, usize)>,
 }
 
 impl PartialEncode {
@@ -451,16 +454,24 @@ impl PartialEncode {
 		crypto: Option<(u64, &dyn crypto::PacketKey)>,
 	) {
 		let Self { header_len, pn, .. } = self;
-		let Some((pn_len, write_len)) = pn else {
+		let Some((pn_len, len_size)) = pn else {
 			return;
 		};
 
 		let pn_pos = header_len - pn_len;
-		if write_len {
-			let len = buf.len() - header_len + pn_len;
-			assert!(len < 2usize.pow(14)); // Fits in reserved space
-			let mut slice = &mut buf[pn_pos - 2..pn_pos];
-			slice.put_u16(len as u16 | (0b01 << 14));
+		let len = buf.len() - pn_pos;
+		let mut slice = &mut buf[pn_pos - len_size..pn_pos];
+		match len_size {
+			0 => {}
+			2 => {
+				assert!(len < 2usize.pow(14), "packet exceeds its Length field");
+				slice.put_u16(len as u16 | (0b01 << 14));
+			}
+			4 => {
+				assert!(len < 2usize.pow(30), "packet exceeds its Length field");
+				slice.put_u32(len as u32 | (0b10 << 30));
+			}
+			_ => unreachable!("unsupported Length field size"),
 		}
 
 		if let Some((number, crypto)) = crypto {
@@ -982,7 +993,7 @@ mod tests {
 			token: Bytes::new(),
 			version: crate::Version::V1.wire(),
 		});
-		let encode = header.encode(&mut buf);
+		let encode = header.encode(&mut buf, crate::INITIAL_MTU.into());
 		let header_len = buf.len();
 		buf.resize(header_len + 16 + client.packet.local.tag_len(), 0);
 		encode.finish(&mut buf, &*client.header.local, Some((0, &*client.packet.local)));
