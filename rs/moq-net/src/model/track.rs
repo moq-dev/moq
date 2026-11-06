@@ -20645,13 +20645,21 @@ mod test {
 		};
 		let waiter = kio::Waiter::noop();
 		let mut refilled = 0;
+		let mut fills = Vec::new();
 		let mut serve = || {
 			while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
-				while let Some(sequence) = fill.wanted() {
-					write(fill.accept(sequence, None), sequence);
-					refilled += 1;
-				}
+				fills.push(fill);
 			}
+			fills.retain_mut(|fill| loop {
+				match fill.poll_wanted_changed(&waiter) {
+					Poll::Ready(Some(sequence)) => {
+						write(fill.accept(sequence, None), sequence);
+						refilled += 1;
+					}
+					Poll::Ready(None) => break false,
+					Poll::Pending => break true,
+				}
+			});
 		};
 		let (mut read, mut drops) = (Vec::new(), Vec::new());
 		// A wire publisher forwards what the reader gives up as it reads.
@@ -20716,6 +20724,49 @@ mod test {
 		let lost: Vec<u64> = (0..GROUPS).filter(|sequence| !read.contains(sequence)).collect();
 		let named: Vec<u64> = drops.iter().flat_map(|&(start, end)| start..end).collect();
 		assert_eq!(lost, named, "every group lost is named dropped");
+	}
+
+	/// A batch far past the cache, asked by one slow reader: served through `wanted_changed`,
+	/// the fill writes one group at a time as the reader takes them, so nothing it wrote is
+	/// evicted before the reader gets it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_batch_fill_waits_for_its_reader() {
+		let size = 10_000;
+		let (mut producer, _pool) = pooled_producer(4 * size as u64);
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_range(0..).with_order(Order::Ascending));
+		let write = |group: Result<group::Producer>, sequence: u64| {
+			let mut group = group.unwrap();
+			group
+				.write_frame(Timestamp::from_millis(sequence).unwrap(), vec![0u8; size])
+				.unwrap();
+			group.finish().unwrap();
+		};
+		producer.start_at(GROUPS).unwrap();
+		write(producer.create_group(group::Info { sequence: GROUPS }), GROUPS);
+		let waiter = kio::Waiter::noop();
+		assert!(subscriber.poll_next_group(&waiter).is_pending(), "group 0 is a miss");
+		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the reader asked for the batch");
+		};
+		assert_eq!((fill.start().group, fill.end()), (0, GROUPS));
+		let (mut read, mut ahead) = (Vec::new(), 0);
+		loop {
+			let mut served = 0;
+			while let Poll::Ready(Some(sequence)) = fill.poll_wanted_changed(&waiter) {
+				write(fill.accept(sequence, None), sequence);
+				served += 1;
+			}
+			ahead = ahead.max(served);
+			match subscriber.poll_next_group(&waiter) {
+				Poll::Ready(Ok(Some(group))) => read.push(group.sequence),
+				_ => break,
+			}
+		}
+		assert_eq!(read, (0..=GROUPS).collect::<Vec<_>>(), "every group once, in order");
+		assert!(drained_drops(&mut subscriber).is_empty());
+		assert_eq!(ahead, 1, "one group served at a time");
 	}
 
 	/// A reader forgets the misses it gave up once its window moves past them, as it forgets

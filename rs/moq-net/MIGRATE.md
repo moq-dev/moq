@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `track::Fill::wanted_changed` waits for a reader to take the group served before
+
+`Fill::wanted_changed` (and `poll_wanted_changed`) now yields the next group only once a reader took every group the fill accepted, or stopped waiting for it, so a handler writes a batch one group at a time at its fastest reader's pace.
+Serve a fill with `while let Some(sequence) = fill.wanted_changed().await` rather than looping over `Fill::wanted`, which still names the next group owed without waiting: a batch written ahead of its readers lets a bounded cache evict its earlier groups before they are read.
+Serve the fills you take concurrently: an ordered reader may take a fill's group only after another fill answers an earlier one, which a handler serving fills one after another would never reach.
+
 ### Socket readers start at the beginning
 
 New `track` socket sessions subscribe from group 0, and `tcp` sessions join their

@@ -11113,6 +11113,8 @@ struct FillServeRun {
 	fill: track::Fill,
 	info: FetchInfo,
 	run: Option<(u64, FetchServeRun)>,
+	/// The group the last run answered.
+	last: Option<u64>,
 }
 
 impl Drop for FillServeRun {
@@ -11132,6 +11134,7 @@ impl FillServeRun {
 			fill,
 			info,
 			run: None,
+			last: None,
 		}
 	}
 }
@@ -11141,25 +11144,24 @@ impl kio::Task for FillServeRun {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
-			let last = match &mut self.run {
-				Some((sequence, run)) => {
-					ready!(run.poll(waiter));
-					let sequence = *sequence;
-					self.run = None;
-					Some(sequence)
-				}
-				None => None,
-			};
+			if let Some((sequence, run)) = &mut self.run {
+				ready!(run.poll(waiter));
+				self.last = Some(*sequence);
+				self.run = None;
+			}
 			// Withdrawn: nobody waits on what is left, so it records nothing.
 			if self.fill.poll_withdrawn(waiter).is_ready() {
 				return Poll::Ready(());
 			}
+			// The next fetch waits for a reader to take the group the last one brought, so a
+			// fill wider than the cache never evicts its own groups before they are read.
+			ready!(self.fill.poll_taken(waiter));
 			let Some(sequence) = self.fill.wanted() else {
 				return Poll::Ready(());
 			};
 			// Every run answers its group, so the same one coming back is a bug; ending the
 			// fill names it dropped rather than fetching it forever.
-			if last == Some(sequence) {
+			if self.last == Some(sequence) {
 				debug_assert!(false, "fill group {sequence} left unanswered");
 				return Poll::Ready(());
 			}

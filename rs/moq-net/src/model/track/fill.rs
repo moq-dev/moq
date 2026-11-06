@@ -54,6 +54,9 @@ struct Pending {
 	flight: bool,
 	// How many joins still read each sequence: one a reader narrowed away is no longer owed.
 	wants: RangeMap<u64, u32>,
+	// What its handler accepted that no join has let go of yet, which holds back the next
+	// group: see [`Fill::poll_wanted_changed`].
+	untaken: RangeSet<u64>,
 	// Readers hold consumers, so it counts the fill's demand; the handler's copy says what
 	// became of each sequence.
 	result: kio::Producer<Outcome>,
@@ -73,9 +76,11 @@ impl Pending {
 		}
 	}
 
-	/// Count one join out of reading `groups`, which it counted in. Returns the runs nobody
-	/// reads any more.
+	/// Count one join out of reading `groups`, which it counted in: it took them or stopped
+	/// waiting, either of which lets its handler move on. Returns the runs nobody reads any
+	/// more.
 	fn unwant(&mut self, groups: ops::Range<u64>) -> Vec<ops::Range<u64>> {
+		self.untaken.remove(groups.clone());
 		let counts: Vec<(ops::Range<u64>, u32)> = self
 			.wants
 			.overlapping(&groups)
@@ -524,6 +529,7 @@ impl FillState {
 					queued: true,
 					flight: false,
 					wants: RangeMap::from_iter([(groups.clone(), 1)]),
+					untaken: RangeSet::new(),
 					result,
 				},
 			);
@@ -574,6 +580,7 @@ impl FillState {
 						queued: true,
 						flight: true,
 						wants: RangeMap::from_iter([(groups.clone(), 1)]),
+						untaken: RangeSet::new(),
 						result: Default::default(),
 					},
 				);
@@ -623,6 +630,7 @@ impl FillState {
 				queued: true,
 				flight: false,
 				wants: RangeMap::new(),
+				untaken: RangeSet::new(),
 				result,
 			},
 		);
@@ -790,7 +798,9 @@ pub(super) fn poll_requested(
 /// [`start`](Self::start)'s frame. Its [`priority`](Self::priority),
 /// [`max_delay`](Self::max_delay), and [`order`](Self::order) follow its readers as they
 /// change, so read them as each group is served. The handler calls [`accept`](Self::accept) for each group
-/// it has and [`drop_groups`](Self::drop_groups) for the rest. Dropping the fill names
+/// it has and [`drop_groups`](Self::drop_groups) for the rest, one group at a time as
+/// [`wanted_changed`](Self::wanted_changed) yields them, so the cache never holds a batch its
+/// readers have yet to take. Dropping the fill names
 /// whatever is left as dropped while a reader still wants it; once nobody does, the fill is
 /// withdrawn and records nothing, so stop serving it once [`wanted`](Self::wanted) is `None`.
 /// A reader narrowing its ranges may leave a single group, so stop serving that one when
@@ -944,7 +954,8 @@ impl Fill {
 
 	/// The next group still owed in the fill's order: a reader still reads it, and it was
 	/// neither answered nor delivered live since it was asked. `None` once none is owed or
-	/// no reader waits on the fill, so stop serving it.
+	/// no reader waits on the fill, so stop serving it. It does not wait for the readers to
+	/// take what was served before it; [`wanted_changed`](Self::wanted_changed) does.
 	pub fn wanted(&self) -> Option<u64> {
 		self.wanted_except(None)
 	}
@@ -988,11 +999,14 @@ impl Fill {
 		}
 	}
 
-	/// [`wanted`](Self::wanted) once it differs from what this handle last returned:
-	/// immediately on the first call, then on each change.
+	/// The next group to serve: [`wanted`](Self::wanted) once a reader took every group this
+	/// fill accepted, or stopped waiting for it, and once it differs from what this handle
+	/// last returned. The first call returns at once unless a group is still untaken.
 	///
-	/// So `while let Some(sequence) = fill.wanted_changed().await` serves each group as it
-	/// becomes owed, and ends once the fill is withdrawn or answered.
+	/// So `while let Some(sequence) = fill.wanted_changed().await` writes one group at a time,
+	/// at the pace of the fastest reader, and ends once the fill is withdrawn or answered. A
+	/// batch written ahead of its readers would let the cache evict its earlier groups before
+	/// they take them.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		// Arm every input of `wanted` before reading it, so a change in between still wakes:
@@ -1004,11 +1018,28 @@ impl Fill {
 		let _ = self.inner.fills.poll(waiter, |_| Poll::Pending);
 		let _ = self.inner.asks.poll(waiter, |_| Poll::Pending);
 		let wanted = self.wanted();
-		if self.prev == Some(wanted) {
+		if self.prev == Some(wanted) || (wanted.is_some() && self.inner.is_untaken()) {
 			return Poll::Pending;
 		}
 		self.prev = Some(wanted);
 		Poll::Ready(wanted)
+	}
+
+	/// Poll until a reader took every group this fill accepted or stopped waiting for it, or
+	/// nobody waits on the fill, as [`Self::poll_wanted_changed`] paces.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn poll_taken(&self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.poll_withdrawn(waiter).is_ready() {
+			return Poll::Ready(());
+		}
+		let id = self.inner.id;
+		self.inner
+			.fills
+			.poll(waiter, |fills| match fills.pending.get(&id) {
+				Some(pending) if !pending.untaken.is_empty() => Poll::Pending,
+				_ => Poll::Ready(()),
+			})
+			.map(drop)
 	}
 
 	/// Refuse every group still owed with `err`, which says nothing about whether the source
@@ -1151,6 +1182,15 @@ impl Inner {
 		self.result.wanted() && self.fills.read().wants(self.id, sequence)
 	}
 
+	/// Whether a group this fill accepted still waits for a reader to take it.
+	fn is_untaken(&self) -> bool {
+		self.fills
+			.read()
+			.pending
+			.get(&self.id)
+			.is_some_and(|pending| !pending.untaken.is_empty())
+	}
+
 	fn max_delay(&self) -> Option<Duration> {
 		self.asks.read().max_delay()
 	}
@@ -1228,7 +1268,18 @@ impl Inner {
 				outcome.partial.insert(sequence, group.handle());
 			}
 		}
-		uncover(&self.fills, self.id, sequence..end);
+		let mut fills = self.fills.lock();
+		for range in fills.routed(self.id, &(sequence..end)) {
+			fills.covers.remove(range);
+		}
+		// Written for a reader that has yet to take it, which the next group waits on.
+		if res.is_ok()
+			&& let Some(pending) = fills.pending.get_mut(&self.id)
+			&& pending.wants.contains_key(&sequence)
+		{
+			pending.untaken.insert(sequence..end);
+		}
+		drop(fills);
 		res
 	}
 
