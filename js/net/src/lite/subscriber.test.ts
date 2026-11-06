@@ -2984,6 +2984,9 @@ function probeTargetHarness(level: ProbeLevel, options?: { failTarget?: boolean;
 // The viewers' sum reaches the peer as its PROBE target: only once nonzero, on every change,
 // and retracted with a zero, while an opt-out sends nothing at all.
 test("the PROBE stream sends the viewers' target to an Increase peer", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	using _clock = { [Symbol.dispose]: () => installed.close() };
 	const { subscriber, sent, version, finish } = probeTargetHarness(ProbeLevel.Increase);
 	const viewers = new Viewers();
 	viewers.setTarget(0);
@@ -3005,6 +3008,9 @@ test("the PROBE stream sends the viewers' target to an Increase peer", async () 
 	second.close();
 	expect((await Probe.decode(sent, version)).bitrate).toBeUndefined();
 
+	// Reading the target back only proves its bytes were written: the writer may still be
+	// yielding its write budget, and a FIN then would reset the stream instead of closing it.
+	await clock.advance(Nano.zero);
 	finish();
 	await running;
 	expect(await sent.done()).toBe(true);
@@ -3049,6 +3055,9 @@ test("ending the probe resets a stalled PROBE target write", async () => {
 // A peer that stops reading holds one target: the changes made meanwhile queue nothing
 // behind it, and only the latest is sent once the write drains.
 test("a stalled PROBE writer sends only the latest target once it drains", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	using _clock = { [Symbol.dispose]: () => installed.close() };
 	const { subscriber, sent, version, stalled, release, finish } = probeTargetHarness(ProbeLevel.Increase, {
 		stallTarget: true,
 	});
@@ -3066,6 +3075,8 @@ test("a stalled PROBE writer sends only the latest target once it drains", async
 	expect((await Probe.decode(sent, version)).bitrate).toBe(1_000_000);
 	expect((await Probe.decode(sent, version)).bitrate).toBe(4_000_000);
 
+	// Let the last write finish yielding before the FIN, as in the test above.
+	await clock.advance(Nano.zero);
 	finish();
 	await running;
 	expect(await sent.done()).toBe(true);

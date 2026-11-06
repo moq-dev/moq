@@ -90,8 +90,9 @@ asyncio.run(main())
 ## Bandwidth
 
 A session's estimates, split among what shares the connection: an `Allocator`
-divides the send estimate among tracks, and `Viewers` divides the receive estimate
-among watched broadcasts, whose ceilings summed ask the peer to probe for more.
+divides the send estimate among tracks, which a `RateControl` turns into each sender's
+`RateTarget`, and `Viewers` divides the receive estimate among watched broadcasts,
+whose ceilings summed ask the peer to probe for more.
 
 ```{eval-rst}
 .. currentmodule:: moq
@@ -102,6 +103,8 @@ among watched broadcasts, whose ceilings summed ask the peer to probe for more.
 
    Allocator
    Reservation
+   RateControl
+   RateTarget
    BandwidthConsumer
    Viewers
    Viewer
