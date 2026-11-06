@@ -6106,7 +6106,10 @@ impl OpenGroup {
 						{
 							tracing::warn!(sequence, start, "no fill to stitch a mid-group stream onto");
 							// Never arriving whole, the group is dropped so readers stop owing it.
-							track.give_up(sequence..sequence + 1, crate::track::Hole::drop(crate::StreamError::NotFound));
+							track.give_up(
+								sequence..sequence + 1,
+								crate::track::Hole::drop(crate::StreamError::NotFound),
+							);
 							return Poll::Ready(Err(Error::Unsupported));
 						}
 						return Poll::Ready(Ok(Opened::Group(create(track)?, start)));
@@ -6149,7 +6152,10 @@ impl OpenGroup {
 						(Some(start), Some((producer, _))) => Ok(Opened::Group(producer, start)),
 						(Some(start), None) => {
 							tracing::warn!(sequence, start, "no fill to stitch a mid-group stream onto");
-							track.give_up(sequence..sequence + 1, crate::track::Hole::drop(crate::StreamError::NotFound));
+							track.give_up(
+								sequence..sequence + 1,
+								crate::track::Hole::drop(crate::StreamError::NotFound),
+							);
 							Err(Error::Unsupported)
 						}
 						(None, Some((producer, next))) => Ok(Opened::Group(producer, next)),
