@@ -1807,6 +1807,7 @@ impl Serve {
 	pub fn peer(&self, chain: Vec<CertificateDer<'static>>) -> PeerIdentity {
 		PeerIdentity {
 			chain,
+			#[cfg(feature = "_certs")]
 			roots: self.0.roots.current(),
 		}
 	}
@@ -1827,12 +1828,13 @@ impl Serve {
 pub struct PeerIdentity {
 	chain: Vec<CertificateDer<'static>>,
 	/// Every root the accepting listener had trusted when it built this.
+	#[cfg(feature = "_certs")]
 	roots: Arc<[CertificateDer<'static>]>,
 }
 
 impl PeerIdentity {
 	/// A chain with no listener roots behind it.
-	#[cfg(test)]
+	#[cfg(all(test, feature = "_transport"))]
 	pub(crate) fn from_chain(chain: Vec<CertificateDer<'static>>) -> Self {
 		Self {
 			chain,
