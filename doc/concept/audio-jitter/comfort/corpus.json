@@ -1,0 +1,53 @@
+[
+	{
+		"name": "quietest",
+		"about": "The quietest whole block sets the level, not the last or the mean",
+		"rate": 1000,
+		"channels": 1,
+		"steps": [{ "play": [0.5], "frames": 40 }, { "play": [0.0002], "frames": 20 }, { "play": [0.3], "frames": 20 }, { "fill": 0.0002 }]
+	},
+	{
+		"name": "straddle",
+		"about": "Blocks are counted from the first frame played, so a quiet run that straddles two blocks is diluted",
+		"rate": 1000,
+		"channels": 1,
+		"steps": [{ "play": [0.0002], "frames": 15 }, { "play": [0.0004], "frames": 25 }, { "fill": 0.00026457513110645906 }]
+	},
+	{
+		"name": "stereo",
+		"about": "A block's mean square spans every channel",
+		"rate": 1000,
+		"channels": 2,
+		"steps": [{ "play": [0.0002, 0.0004], "frames": 20 }, { "fill": 0.00031622776601683794 }]
+	},
+	{
+		"name": "cap",
+		"about": "Audio that never falls quiet fills a silence at -60 dBFS, not at its own level",
+		"rate": 1000,
+		"channels": 1,
+		"steps": [{ "play": [0.5], "frames": 40 }, { "fill": 0.001 }]
+	},
+	{
+		"name": "silent",
+		"about": "A source that was already silent gets no noise",
+		"rate": 1000,
+		"channels": 1,
+		"steps": [{ "play": [0], "frames": 40 }, { "fill": 0 }]
+	},
+	{
+		"name": "remeasure",
+		"about": "Too little audio to fill a block keeps the previous level, and each silence measures afresh from the audio after the last one",
+		"rate": 1000,
+		"channels": 1,
+		"steps": [
+			{ "play": [0.0002], "frames": 19 },
+			{ "fill": 0 },
+			{ "play": [0.0003], "frames": 20 },
+			{ "fill": 0.0003 },
+			{ "play": [0.5], "frames": 10 },
+			{ "fill": 0.0003 },
+			{ "play": [0.0005], "frames": 20 },
+			{ "fill": 0.0005 }
+		]
+	}
+]

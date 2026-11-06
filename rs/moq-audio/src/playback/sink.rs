@@ -218,6 +218,28 @@ impl Sink {
 		Ok(Write::from_accepted(requested_sample_frames, accepted_sample_frames))
 	}
 
+	/// Declare that the audio written so far is followed by a silence its
+	/// publisher announced, such as a push-to-talk mute.
+	///
+	/// Once that audio has played, the sink plays comfort noise at the level of
+	/// the quietest 20 ms it played, at most -60 dBFS, rather than running dry,
+	/// and the [`Observer`](super::Observer) counts no gap. That lasts until the
+	/// utterance [`next`](Self::next) starts plays. Writes before then, such as a
+	/// codec's final frames, continue the audio before the silence.
+	pub fn end(&mut self) {
+		self.channel.lock().unwrap().prod.end();
+	}
+
+	/// Start the next utterance after a declared silence with the next
+	/// [`write`](Self::write).
+	///
+	/// It plays one [`latency`](Input::latency) after that write, behind
+	/// whatever is still queued, with comfort noise filling the wait, the way a
+	/// new sink's first write plays behind its opening silence.
+	pub fn next(&mut self) {
+		self.channel.lock().unwrap().prod.next();
+	}
+
 	/// How much audio is queued between the last [`write`](Self::write) and the
 	/// speaker.
 	///
@@ -439,7 +461,8 @@ impl Registration {
 		let mut current = self.channel.lock().unwrap();
 		let mut input = self.input.clone();
 		input.latency = current.prod.latency();
-		let (channel, cons) = channel(&input, rate, bus);
+		let (mut channel, cons) = channel(&input, rate, bus);
+		channel.prod.carry(&current.prod);
 		*current = channel;
 		self.pending = Some(cons);
 	}
@@ -646,6 +669,79 @@ mod tests {
 		let buffer = Duration::from_secs_f64(512.0 / 48_000.0);
 		assert!(stall.at >= tail, "{observation:?}");
 		assert!(gap.at <= stall.at && stall.at - gap.at < buffer, "{observation:?}");
+	}
+
+	/// A declared silence plays comfort noise at the level heard before it, through
+	/// the wait before the next utterance, which then plays one latency after its
+	/// first write. None of it is a gap or a stall.
+	#[test]
+	fn a_declared_silence_plays_comfort_noise_until_the_next_utterance() {
+		let shared = Arc::new(Shared::default());
+		let mut observer = super::super::Observer::new(shared.observe.clone()).unwrap();
+		let engine = Arc::new(super::super::Handle {
+			commands: super::super::driver::Commands::default(),
+		});
+		let latency = Duration::from_millis(40);
+		let input = Input {
+			latency,
+			..Default::default()
+		};
+		let (mut sink, mut registration) = new(0, 48_000, Layout::Stereo, input, shared.clone(), engine).unwrap();
+		let (commands, rx) = std::sync::mpsc::sync_channel(8);
+		let (retired, _rx) = std::sync::mpsc::sync_channel(8);
+		let mut mixer = mixer::Mixer::new(rx, retired, 48_000, Layout::Stereo, shared.observe.clone()).unwrap();
+		registration.attach(&commands);
+		let pcm = |sample: f32, frames: usize| -> Vec<u8> {
+			std::iter::repeat_n(sample.to_le_bytes(), frames * 2).flatten().collect()
+		};
+		let rms = |samples: &[f32]| (samples.iter().map(|&s| s as f64 * s as f64).sum::<f64>() / samples.len() as f64).sqrt();
+		let mut out = [0.0; 960];
+		mixer.fill(&mut out, Duration::ZERO);
+
+		// 100 ms of a quiet background, then a declared end.
+		let quiet = 0.0002;
+		let _ = sink.write(&pcm(quiet, 4_800)).unwrap();
+		sink.end();
+		let mut heard = Vec::new();
+		for _ in 0..150 {
+			mixer.fill(&mut out, Duration::ZERO);
+			heard.extend_from_slice(&out);
+		}
+		// The primed silence, the background, then a second of noise at its level.
+		let noise = &heard[heard.len() - 48_000 * 2..];
+		assert!(noise.iter().all(|s| s.abs() <= quiet * 3f32.sqrt() * 1.0001));
+		assert!((rms(noise) - quiet as f64).abs() < 0.00001, "rms {}", rms(noise));
+
+		// The next utterance plays one latency after its first write, with noise until then.
+		sink.next();
+		let _ = sink.write(&pcm(0.5, 960)).unwrap();
+		let mut until = 0;
+		loop {
+			mixer.fill(&mut out, Duration::ZERO);
+			if let Some(at) = out.iter().position(|s| *s == 0.5) {
+				until += at / 2;
+				break;
+			}
+			assert!(out.iter().all(|s| s.abs() <= quiet * 3f32.sqrt() * 1.0001 && *s != 0.0));
+			until += out.len() / 2;
+		}
+		assert_eq!(until, 48_000 * 40 / 1000);
+		for _ in 0..10 {
+			let _ = sink.write(&pcm(0.5, 480)).unwrap();
+			mixer.fill(&mut out, Duration::ZERO);
+		}
+
+		let observation = observer.read().unwrap();
+		assert!(observation.gaps.is_empty(), "{observation:?}");
+		assert!(!observation.stalled && observation.stalls.len() == 1, "{observation:?}");
+
+		// Once the next utterance plays, running dry is a gap again.
+		for _ in 0..20 {
+			mixer.fill(&mut out, Duration::ZERO);
+		}
+		let _ = sink.write(&pcm(0.5, 2_400)).unwrap();
+		mixer.fill(&mut out, Duration::ZERO);
+		assert_eq!(observer.read().unwrap().gaps.len(), 1);
 	}
 
 	/// The resampler only converts whole blocks and its filter lags the input, so
