@@ -2708,10 +2708,10 @@ test("draft-22: a backwards range within one group serves nothing and ends the s
 	}
 });
 
-// Quarantined: the live group intermittently resets while read.
-// Investigation: quest/m0/test-flakes-2/ietf-wider-fill.md.
-test.skip.each(["ascending", "descending"] as const)("draft-22: a wider fill is refused in %s order", async (order) => {
+test.each(["ascending", "descending"] as const)("draft-22: a wider fill is refused in %s order", async (order) => {
 	const fx = fixture();
+	// No max age: group 9 is served live, and a zero budget would give it up mid-write once the
+	// live group supersedes it, racing this test's read of the refused fill.
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	for (const sequence of [0n, 3n, 9n]) {
 		const group = track.createGroup(sequence);
@@ -2736,7 +2736,7 @@ test.skip.each(["ascending", "descending"] as const)("draft-22: a wider fill is 
 		const fill = await nextUni(fx.uni);
 		if (!fill) throw new Error("missing fill stream");
 		const served = await readFill(fill, order);
-		expect(served.reset).toBeDefined();
+		expect(served.reset).toBeInstanceOf(StreamError);
 		expect(served.objects).toEqual([]);
 		const live = track.appendGroup();
 		live.writeFrame({ payload: new TextEncoder().encode("live"), timestamp: Timestamp.now() });
