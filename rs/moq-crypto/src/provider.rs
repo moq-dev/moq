@@ -1,8 +1,8 @@
 //! rind's rustls cryptography provider.
 //!
 //! rind's primitives panic on a CPU missing a feature they require, so each entry point
-//! here refuses such a CPU with [`UnsupportedCpu`] instead. The transport crates report
-//! this one type, and rind stays out of their public APIs.
+//! here refuses such a CPU with [`crate::cpu::UnsupportedCpu`] instead. The [`crate::cpu`]
+//! module owns the shared error reported by transport crates, keeping rind out of their APIs.
 
 use std::sync::{Arc, OnceLock};
 

@@ -9,8 +9,8 @@
 //!
 //! The `sign` and `e2ee` features, both default, gate those halves; `provider`, off by default,
 //! gates the rustls provider and enables `cpu`, which needs only rind. Without any of these
-//! features the crate holds only
-//! [`sign::PublicKey`], the endpoint ID, and its canonical z-base-32 text, with no `moq-net`
+//! features the crate holds only [`sign::PublicKey`], the endpoint ID, and its canonical
+//! z-base-32 text, with no `moq-net`
 //! or crypto backend; `serde` adds its string serialization.
 //!
 //! The `poll_*` methods are always available. Enable the `async` feature for their generated
