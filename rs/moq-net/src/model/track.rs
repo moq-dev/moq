@@ -3893,6 +3893,7 @@ impl Producer {
 	/// Record `groups` given up as `hole` describes, returning the runs recorded: a drop
 	/// leaves a skipped sequence skipped, and a stale verdict leaves a group that arrived and
 	/// was not aborted, since a group stream wins over its drop.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn give_up(&self, groups: ops::Range<u64>, hole: Hole) -> RangeSet<u64> {
 		let error = match &hole {
 			Hole::Drop { error, .. } => error.clone(),
@@ -7050,6 +7051,10 @@ struct DropCursor {
 	/// What `pending` last folded in; see [`Scan`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	scanned: Option<Scan>,
+	/// The budget and coverage of the last drift judged, which settle received stale runs
+	/// until the next: a queue-only poll judges none, and must not unsettle them.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	drift: Option<(Duration, Coverage)>,
 	/// Every sequence this cursor already reported.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	reported: RangeSet<u64>,
@@ -7075,6 +7080,7 @@ impl DropCursor {
 			cuts: state.cache.watch_cuts(),
 			pending: RangeMap::new(),
 			scanned: None,
+			drift: None,
 			reported: RangeSet::new(),
 			reported_stale: RangeSet::new(),
 			reported_received: RangeSet::new(),
@@ -7152,10 +7158,11 @@ impl DropCursor {
 		}
 		// Rescan only after the drops change, the window moves, or what settles a stale run
 		// does; out-of-window and unsettling runs were skipped and may be owed now.
-		let settles = within
-			.drift
-			.map(|drift| (drift.budget, drift.coverage, state.judged_end));
-		let scan = (state.drops_revision, span.clone(), within.revision, settles);
+		if let Some(drift) = within.drift {
+			self.drift = Some((drift.budget, drift.coverage));
+		}
+		let judged = self.drift.map(|(budget, coverage)| (budget, coverage, state.judged_end));
+		let scan = (state.drops_revision, span.clone(), within.revision, judged);
 		if self.scanned.as_ref() != Some(&scan) {
 			self.scanned = Some(scan);
 			let stale: Vec<_> = self
@@ -7170,8 +7177,8 @@ impl DropCursor {
 			for (dropped, hole) in state.drops.overlapping(span.clone()) {
 				let run = dropped.start.max(span.start)..dropped.end.min(span.end);
 				// A received stale run that does not settle this reader is unknown to it.
-				let settled = match within.drift {
-					Some(drift) => drift.settles(state, run.start, hole),
+				let settled = match self.drift {
+					Some((budget, coverage)) => settles(budget, coverage, run.start, hole, state.judged_end),
 					None => hole.stale_budget().is_none(),
 				};
 				if settled {
@@ -22566,6 +22573,29 @@ mod test {
 			[(3..4, Hole::Skip)],
 			"the stale run is outside its range"
 		);
+	}
+
+	/// A queue-only poll, which judges no drift, still reports the received stale runs the
+	/// last probing poll found settled, rather than forgetting them until the next probe.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_queued_drop_poll_keeps_the_last_drift() {
+		let producer = track_producer("test", Info::timed());
+		let budget = Duration::from_millis(500);
+		let mut subscriber = producer.subscribe(
+			Subscription::default()
+				.with_delay(Delay::default().with_max(budget))
+				.with_ranges([Range::groups(0..)]),
+		);
+		producer.give_up(1..2, Hole::stale(budget));
+		producer.give_up(3..4, Hole::stale(budget));
+		let waiter = kio::Waiter::noop();
+		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((1..2, Hole::stale(budget))));
+		assert_eq!(
+			subscriber.poll_queued_drop(&waiter),
+			Poll::Ready((3..4, Hole::stale(budget)))
+		);
+		assert!(subscriber.poll_queued_drop(&waiter).is_pending());
 	}
 
 	/// A stale run that settled a reader is no verdict once the reader's budget widens past

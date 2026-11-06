@@ -344,7 +344,7 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x32  | GROUP_TOO_LARGE | The group grew past the publisher's cache budget and was aborted. |
 | ------- | ------------- | ----------- |
-|  0x33  | NOT_FOUND | The requested group, track, or broadcast is not here. A sequence its publisher declared it will never produce is named by SUBSCRIBE_SKIP instead; any other sequence a publisher never had, including a gap it never declared, is named with NOT_FOUND. |
+|  0x33  | NOT_FOUND | The requested group, track, or broadcast is not here. A sequence its publisher declared it will never produce is named by SUBSCRIBE_SKIP instead; any other sequence a publisher never had, including a gap it never declared, is named with NOT_FOUND unless it is past the subscriber's budget (see [SUBSCRIBE_DROP](#subscribe-drop)). |
 | ------- | ------------- | ----------- |
 |  0x34  | OLD | The group was superseded by a newer group and dropped. In SUBSCRIBE_DROP, the next SUBSCRIBE_UPDATE reopens it: the publisher re-offers the group or drops it again. |
 | ------- | ------------- | ----------- |
@@ -571,8 +571,8 @@ Drops and Groups name absolute sequences, so the subscriber judges them against 
 The publisher never closes its side first: a subscription whose every Range has an `End` other than None and whose every Group has been delivered, skipped, or dropped stays open for an update to widen it.
 
 A subscriber fills Groups it misses by asking for them as Ranges, adding them to an open subscription with SUBSCRIBE_UPDATE or opening a bounded SUBSCRIBE when none is open, rather than with a FETCH of each Group; FETCH remains for one Group, or a slice of one.
-A publisher never sends a Group twice on one subscription, so a Group the subscription already delivered or named in SUBSCRIBE_DROP is asked for with a SUBSCRIBE of its own.
-The subscriber asks that way, once, for a Group a subscription dropped with OLD that it still wants, with a `Subscriber Max Age` its age does not reach, and never for a Group that may still arrive on the existing subscription.
+A publisher never sends a Group twice on one subscription, except to re-offer one whose stream it reset, so a Group the subscription already delivered or named in a final SUBSCRIBE_DROP is asked for with a SUBSCRIBE of its own.
+A Group dropped with OLD that the subscriber still wants needs no new SUBSCRIBE: a SUBSCRIBE_UPDATE with a `Subscriber Max Age` its age does not reach reopens it on the same subscription (see [SUBSCRIBE_UPDATE](#subscribe-update)).
 
 The subscriber closes its side (FIN) once it wants nothing more from the subscription, and the publisher then closes its side (FIN), cancelling any Group Stream still open.
 After SUBSCRIBE_FINISH, the subscriber SHOULD close its side once its tail accounting has settled: every received Group Stream has been read to its FIN, reset, or dropped, and every sequence in range has arrived, been named by SUBSCRIBE_SKIP or SUBSCRIBE_DROP, or exhausted the subscriber's grace period.
@@ -1531,7 +1531,7 @@ Every field but the Ranges restates the subscription, and the latest one applies
 The Ranges are an edit, growing or shrinking the subscription: the update retires the live Ranges it names by Range ID, then adds its own, each taking the next Range ID.
 Lowering a `Start` covers the groups below the old one that the publisher still holds, not only those that arrive later; a group already sent is not sent again.
 Growing the subscription asks for what it newly covers: the publisher MUST serve the newly covered Groups it holds and never delivered on this subscription.
-Every SUBSCRIBE_UPDATE, whatever it changes, reopens every stale (OLD) SUBSCRIBE_DROP sent before it: the publisher MUST serve again the Groups it named in one that it still holds and the new terms cover, and MUST name again, in a SUBSCRIBE_DROP carrying the new `Update`, those still stale.
+Every SUBSCRIBE_UPDATE, whatever it changes, reopens every stale (OLD) SUBSCRIBE_DROP sent before it: the publisher MUST serve each Group named in one that it still holds, that the new terms cover, and that is no longer stale under them, and MUST name each that is still stale in a SUBSCRIBE_DROP carrying the new `Update`.
 A SUBSCRIBE_DROP with any other Error Code is final, and no update reopens it.
 A SUBSCRIBE_UPDATE never resets the subscription, since a reset would race Group Streams already in flight, and shrinking it sends no SUBSCRIBE_SKIP or SUBSCRIBE_DROP.
 
