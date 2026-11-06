@@ -151,7 +151,7 @@ impl Default for Config {
 
 impl Config {
 	/// Parse from CLI args, optionally merging a TOML file, refuse any `MOQ_*`
-	/// variable moq-bench does not read, then init the logger.
+	/// variable the load generator does not read, then init the logger.
 	pub fn load() -> anyhow::Result<Self> {
 		let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
 		// `#[usage(completion)]` installs the `__complete_word__` interception in the
@@ -163,7 +163,11 @@ impl Config {
 			std::process::exit(0);
 		}
 		let config = Self::parse_and_merge(args)?;
-		moq_tokio::cli::check_env(&[Self::spec()], &[])?;
+		// The sampler reads no environment, and runs beside a relay whose own
+		// `MOQ_*` settings would otherwise be refused as unknown.
+		if config.command.is_none() {
+			moq_tokio::cli::check_env(&[Self::spec()], &[])?;
+		}
 		config.log.init()?;
 		tracing::trace!(?config, "final config");
 		Ok(config)

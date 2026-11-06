@@ -179,68 +179,90 @@ END = 271707 * 1_000_000_000
 
 
 class Orchestration(unittest.TestCase):
-    def test_old_base_uses_current_harness_and_generator(self):
+    def harness(self, directory, sampler_binary):
+        """A checkout whose committed revision has the old harness and, when
+        `sampler_binary`, the standalone `moq-bench-host`; the working tree is current."""
         root = Path(__file__).resolve().parent.parent
-        with tempfile.TemporaryDirectory() as directory:
-            checkout = Path(directory) / "repo"
-            bench = checkout / "bench"
-            bench.mkdir(parents=True)
-            (bench / "workloads").mkdir()
-            (bench / "run.sh").write_text("exit 87\n")
-            environment = dict(
-                os.environ,
-                GIT_CONFIG_NOSYSTEM="1",
-                GIT_CONFIG_GLOBAL="/dev/null",
-                GIT_AUTHOR_NAME="Test",
-                GIT_AUTHOR_EMAIL="test@example.com",
-                GIT_COMMITTER_NAME="Test",
-                GIT_COMMITTER_EMAIL="test@example.com",
-            )
-            for command in [["init", "-q"], ["add", "."], ["commit", "-qm", "old harness"]]:
-                subprocess.run(["git", *command], cwd=checkout, env=environment, check=True, capture_output=True)
-            (bench / "run.sh").write_text((root / "bench/run.sh").read_text())
-            (bench / "metadata.py").write_text("")
-            (bench / "lock.sh").write_text("bench_lock() { :; }\n")
-            (bench / "profile.py").write_text("")
-            (bench / "relay.sh").write_text("""PROFILE=
+        checkout = Path(directory) / "repo"
+        bench = checkout / "bench"
+        bench.mkdir(parents=True)
+        (bench / "workloads").mkdir()
+        (bench / "run.sh").write_text("exit 87\n")
+        manifest = checkout / "rs/moq-bench/Cargo.toml"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text('[[bin]]\nname = "moq-bench-host"\n' if sampler_binary else "")
+        environment = dict(
+            os.environ,
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_CONFIG_GLOBAL="/dev/null",
+            GIT_AUTHOR_NAME="Test",
+            GIT_AUTHOR_EMAIL="test@example.com",
+            GIT_COMMITTER_NAME="Test",
+            GIT_COMMITTER_EMAIL="test@example.com",
+        )
+        for command in [["init", "-q"], ["add", "."], ["commit", "-qm", "old harness"]]:
+            subprocess.run(["git", *command], cwd=checkout, env=environment, check=True, capture_output=True)
+        manifest.write_text("")
+        (bench / "run.sh").write_text((root / "bench/run.sh").read_text())
+        for name in ["metadata.py", "profile.py", "instructions.py"]:
+            (bench / name).write_text("")
+        (bench / "lock.sh").write_text("bench_lock() { :; }\n")
+        (bench / "relay.sh").write_text("""PROFILE=
 run_workload() {
     printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "$1" "$4" "$5" "$LOAD_BIN" "${HOST_CMD[*]}" >> "$RUN/calls.tsv"
     local directory=$RUN/relay/$1/$3
-    mkdir -p "$directory/cpu"
+    mkdir -p "$directory/cpu" "$directory/instructions"
     printf '{"recv_fps":100,"cpu_cores":1}\\n' > "$directory/summary.json"
     printf '{"samples":999,"sampled_cores":1}\\n' > "$directory/cpu/cpu.json"
+    printf '{"instructions_per_frame":1000,"recv_fps":100}\\n' > "$directory/instructions/instructions.json"
 }
 """)
-            commands = Path(directory) / "bin"
-            commands.mkdir()
-            cargo = commands / "cargo"
-            cargo.write_text("""#!/usr/bin/env python3
-import os
+        commands = Path(directory) / "bin"
+        commands.mkdir()
+        cargo = commands / "cargo"
+        # Builds what each revision's manifest names: the workers, or the probe.
+        cargo.write_text("""#!/usr/bin/env python3
+import os, sys
 from pathlib import Path
-output = Path(os.environ['CARGO_TARGET_DIR']) / 'profiling' / 'examples'
+args = sys.argv[1:]
+profile = args[args.index('--profile') + 1]
+output = Path(os.environ['CARGO_TARGET_DIR']) / profile
 output.mkdir(parents=True, exist_ok=True)
-check = output / 'probe'
-check.write_text('#!/bin/sh\\nexit 0\\n')
-check.chmod(0o755)
+if '--manifest-path' in args:
+    checkout = Path(args[args.index('--manifest-path') + 1]).parent
+    names = ['moq-relay', 'moq-bench']
+    if 'moq-bench-host' in (checkout / 'rs/moq-bench/Cargo.toml').read_text():
+        names.append('moq-bench-host')
+else:
+    names = ['moq-uring-probe']
+for name in names:
+    (output / name).write_text('#!/bin/sh\\nexit 0\\n')
+    (output / name).chmod(0o755)
 """)
-            cargo.chmod(0o755)
-            artifacts = Path(directory) / "evidence"
-            environment.update(
-                PATH=str(commands) + os.pathsep + os.environ["PATH"],
-                BENCH_ARTIFACTS=str(artifacts),
-                BENCH_PROFILE_MODES="cpu",
-                BENCH_PROFILE_WORKLOAD="fixture",
-                BENCH_PROFILE_WORKERS="2",
-                BENCH_PROFILE_RUNTIME="io-uring-workers",
-                BENCH_BASE="HEAD",
-                CARGO_TARGET_DIR=str(Path(directory) / "target"),
-            )
-            result = subprocess.run(
-                ["bash", "bench/run.sh", "--profile"], cwd=checkout, env=environment, capture_output=True, text=True
-            )
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            (run,) = artifacts.glob("run.*")
-            calls = [line.split("\t") for line in (run / "calls.tsv").read_text().splitlines()]
+        cargo.chmod(0o755)
+        environment.update(
+            PATH=str(commands) + os.pathsep + os.environ["PATH"],
+            BENCH_ARTIFACTS=str(Path(directory) / "evidence"),
+            BENCH_PROFILE_WORKLOAD="fixture",
+            BENCH_PROFILE_WORKERS="2",
+            BENCH_PROFILE_RUNTIME="io-uring-workers",
+            CARGO_TARGET_DIR=str(Path(directory) / "target"),
+        )
+        return checkout, environment
+
+    def calls(self, checkout, environment):
+        result = subprocess.run(
+            ["bash", "bench/run.sh", "--profile"], cwd=checkout, env=environment, capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (run,) = Path(environment["BENCH_ARTIFACTS"]).glob("run.*")
+        return run, [line.split("\t") for line in (run / "calls.tsv").read_text().splitlines()]
+
+    def test_old_base_uses_current_harness_and_generator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, environment = self.harness(directory, sampler_binary=False)
+            environment.update(BENCH_PROFILE_MODES="cpu", BENCH_BASE="HEAD")
+            run, calls = self.calls(checkout, environment)
             self.assertEqual(
                 [call[0] for call in calls],
                 ["base/control-cpu-2", "base/cpu-2", "current/control-cpu-2", "current/cpu-2"],
@@ -248,8 +270,23 @@ check.chmod(0o755)
             for _, backend, count, generator, sampler in calls:
                 self.assertEqual((backend, count), ("io-uring-workers", "2"))
                 self.assertIn("/current/profile/profiling/", generator)
-                self.assertIn("/current/profile/profiling/", sampler)
+                self.assertEqual(sampler, generator + " host")
             self.assertFalse((run / "base").exists(), "temporary base worktree must be removed")
+
+    def test_pinned_generator_keeps_its_own_sampler(self):
+        for sampler_binary in [True, False]:
+            with self.subTest(sampler_binary=sampler_binary), tempfile.TemporaryDirectory() as directory:
+                checkout, environment = self.harness(directory, sampler_binary)
+                generator = subprocess.run(
+                    ["git", "rev-parse", "HEAD"], cwd=checkout, check=True, capture_output=True, text=True
+                ).stdout.strip()
+                environment.update(BENCH_PROFILE_MODES="instructions", BENCH_GENERATOR=generator, BENCH_RUNTIME_ROUNDS="1")
+                _, calls = self.calls(checkout, environment)
+                self.assertEqual([call[0] for call in calls], ["current/round-1/instructions-2"])
+                (_, _, _, load, sampler), = calls
+                self.assertIn(f"/revisions/{generator}/profile/profiling/", load)
+                expected = load + "-host" if sampler_binary else load + " host"
+                self.assertEqual(sampler, expected)
 
 
 class Parse(unittest.TestCase):

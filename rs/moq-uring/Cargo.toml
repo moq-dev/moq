@@ -23,6 +23,9 @@ qlog = ["moq-quic?/qlog"]
 # Workers created inside a tokio runtime with a `kio::clock::Manual` clock installed
 # run on that clock, so a test decides when their time passes. For test builds.
 _manual = ["kio/manual"]
+# Builds `moq-uring-probe`, the relay benchmarks' host check. A binary rather than an
+# example, so building it skips the dev-dependencies. For the bench harness.
+_probe = []
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bytes = "1"
@@ -79,6 +82,12 @@ rustls = { version = "0.23", default-features = false, features = ["std", "tls12
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tracing = "0.1"
+
+[[bin]]
+name = "moq-uring-probe"
+path = "src/bin/probe.rs"
+required-features = ["_probe"]
+doc = false
 
 [[bench]]
 name = "udp_tokio"

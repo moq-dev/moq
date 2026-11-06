@@ -816,8 +816,8 @@ build_workers() {
 # every revision. Takes the current tree's target directory and Cargo profile.
 check_uring() {
     printf 'Checking io_uring support...\n'
-    CARGO_TARGET_DIR=$1 cargo build --locked --quiet --profile "$2" -p moq-uring --no-default-features --example probe
-    if ! "$1/$2/examples/probe"; then
+    CARGO_TARGET_DIR=$1 cargo build --locked --quiet --profile "$2" -p moq-uring --no-default-features --features _probe
+    if ! "$1/$2/moq-uring-probe"; then
         printf 'worker benchmarks need Linux 6.12+ with io_uring permitted by the host\n' >&2
         return 1
     fi
@@ -1034,12 +1034,6 @@ run_instructions() {
             build_targets+=("$generator")
         fi
     fi
-    LOAD_BIN=$generator/profiling/moq-bench
-    HOST_CMD=("$LOAD_BIN" host)
-    # A generator pinned before the sampler became `moq-bench host` ships it as its own binary.
-    if [[ -n $GENERATOR && $(git show "$GENERATOR:rs/moq-bench/Cargo.toml") == *'"moq-bench-host"'* ]]; then
-        HOST_CMD=("$generator/profiling/moq-bench-host")
-    fi
 
     mkdir -p "$RUN/build"
     QUEUED_BUILDS=() QUEUED_LOGS=()
@@ -1057,6 +1051,13 @@ run_instructions() {
         fi
         tail -n 1 "$RUN/build/${build_labels[$index]}.log"
     done
+    LOAD_BIN=$generator/profiling/moq-bench
+    HOST_CMD=("$LOAD_BIN" host)
+    # A generator pinned before the sampler became `moq-bench host` built it as its
+    # own binary; each revision builds into its own target, so none is stale.
+    if [[ -x $generator/profiling/moq-bench-host ]]; then
+        HOST_CMD=("$generator/profiling/moq-bench-host")
+    fi
     if [[ $PROFILE_RUNTIME == io-uring-workers ]]; then
         check_uring "${targets[-1]}" profiling
     fi
