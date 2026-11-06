@@ -28,10 +28,6 @@ const ROUTE_START: u64 = 6;
 const ROUTE_UPDATE: u64 = 7;
 const ROUTE_END: u64 = 8;
 const ANNOUNCE_FLOOR: u64 = 9;
-#[cfg_attr(
-	not(any(test, feature = "fuzz")),
-	allow(dead_code, reason = "the lite-07 session does not drive the route layer yet")
-)]
 const ROUTE_REQUEST: u64 = 10;
 const ROUTE_HOLD: u64 = 11;
 
@@ -638,10 +634,6 @@ impl<'a> Message<'a> for AnnounceRequest {
 
 /// A message the subscriber sends on the Announce Stream after its ANNOUNCE_REQUEST
 /// (lite-07+), toward the publisher that sent the routes.
-#[cfg_attr(
-	not(any(test, feature = "fuzz")),
-	allow(dead_code, reason = "the lite-07 session does not drive the route layer yet")
-)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AnnounceReply {
 	/// ROUTE_REQUEST: asks for a route to `node`, as the publisher named it, at least

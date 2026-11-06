@@ -11,7 +11,10 @@
 //! drains [`Out`] messages and reader [`Event`]s. Neighbor keys `N` and claim
 //! attributes `A` are opaque to it.
 
-#![cfg_attr(not(test), allow(dead_code, reason = "the lite-07 session does not drive it yet"))]
+#![cfg_attr(
+	not(feature = "async"),
+	allow(dead_code, reason = "only the async session drives it")
+)]
 
 pub(crate) mod node;
 mod proof;
@@ -31,8 +34,10 @@ use std::{
 use crate::Path;
 
 pub(crate) use node::Node;
+#[cfg(feature = "async")]
+pub(crate) use proof::EXPORTER_LABEL;
 pub use proof::RouteKey;
-pub(crate) use proof::{EXPORTER_LABEL, Proof, Transcript};
+pub(crate) use proof::{Proof, Transcript};
 pub(crate) use view::{View, within};
 
 /// An opaque routing identity, declared by an origin or derived by [`Scope`].
@@ -275,6 +280,7 @@ struct Origin<A> {
 }
 
 /// Retained state, summed over the node, for budgets and leak checks.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Retained {
 	pub items: usize,
@@ -473,6 +479,7 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 		self.update(ids);
 	}
 
+	#[cfg(test)]
 	/// Ask every neighbor for announcements under `prefix` instead, returning
 	/// the new interest generation. Each neighbor answers on a new stream, and a
 	/// batch from an older one is discarded.
@@ -537,11 +544,13 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 			.map(|(id, _)| *id)
 	}
 
+	#[cfg(test)]
 	/// The declared identity's seqno.
 	pub fn seqno(&self) -> Option<Seqno> {
 		self.origins.values().find(|origin| origin.declared).map(|o| o.seqno)
 	}
 
+	#[cfg(test)]
 	/// The declared identity's claim revision.
 	pub fn revision(&self) -> Option<Rev> {
 		let origin = self.origins.values().find(|origin| origin.declared)?;
@@ -849,16 +858,19 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 			.collect()
 	}
 
+	#[cfg(test)]
 	/// The route this node would offer an upstream link for `id`.
 	pub fn export(&self, id: Id) -> Option<Selected<N>> {
 		self.selected(id).filter(|route| !route.down_only)
 	}
 
+	#[cfg(test)]
 	/// Whether this node holds a reachable route to `id` but none is feasible.
 	pub fn starved(&self, id: Id) -> bool {
 		self.selected(id).is_none() && self.infeasible(id).next().is_some()
 	}
 
+	#[cfg(test)]
 	/// Whether this node, with no usable route to `id`, holds a held route it
 	/// could recover through.
 	pub fn grounded(&self, id: Id) -> bool {
@@ -870,21 +882,25 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 		self.rx.contains_key(&id)
 	}
 
+	#[cfg(test)]
 	/// Whether this node keeps a feasibility distance for `id`.
 	pub fn remembers(&self, id: Id) -> bool {
 		self.fd.contains_key(&id)
 	}
 
+	#[cfg(test)]
 	/// How many identities this node holds routes to.
 	pub fn identities(&self) -> usize {
 		self.rx.len()
 	}
 
+	#[cfg(test)]
 	/// How many qualified keys this node remembers the forwarded name of.
 	pub fn aliases(&self) -> usize {
 		self.filed.len()
 	}
 
+	#[cfg(test)]
 	/// How many region floors this node keeps for `id`.
 	pub fn floors(&self, id: Id) -> usize {
 		self.views.get(&id).map_or(0, |view| view.floors.len())
@@ -918,11 +934,13 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 		&self.shown
 	}
 
+	#[cfg(test)]
 	/// Whether this node shows `claim` from `id`, and whether it is available.
 	pub fn shows(&self, id: Id, claim: &Path) -> Option<bool> {
 		self.shown.get(&(id, claim.clone())).map(|shown| shown.available)
 	}
 
+	#[cfg(test)]
 	pub fn retained(&self) -> Retained {
 		let mut out = Retained::default();
 		for (id, view) in &self.views {

@@ -76,6 +76,7 @@ pub(crate) struct Proof {
 
 impl Proof {
 	/// Its encoded size; any other is malformed.
+	#[cfg(test)]
 	pub const LEN: usize = KEY_LEN + SIGNATURE_LEN;
 
 	pub fn to_bytes(self) -> Vec<u8> {

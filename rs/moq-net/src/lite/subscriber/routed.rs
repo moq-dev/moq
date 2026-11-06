@@ -404,6 +404,7 @@ impl Routed {
 			}
 		}
 		// A new instance or epoch replaces the old route, attached before it goes.
+		tracing::debug!(route = %subscriber.log_path(&path), node = id, "announce");
 		match subscriber.origin.forward(&path, route.clone(), None) {
 			Ok(dynamic) => {
 				let wake = crate::util::QueueWake::new(key.clone(), self.ready.clone());
@@ -433,7 +434,7 @@ impl Routed {
 			writer.buffer(&reply)?;
 		}
 		if let Poll::Ready(Err(err)) = writer.poll_flush(waiter) {
-			return Err(err.into());
+			return Err(err);
 		}
 		while let Poll::Ready(Ok(key)) = self.ready.poll_pop(waiter) {
 			let Some(entry) = self.served.get_mut(&key) else {

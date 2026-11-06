@@ -323,6 +323,7 @@ impl Answer {
 		let key = (id, path);
 		match (self.live.get_mut(&key), wanted) {
 			(None, Some(claim)) => {
+				tracing::debug!(route = %key.1, node = id, "announce");
 				let suffix = key
 					.1
 					.strip_prefix(&self.prefix)
@@ -341,6 +342,7 @@ impl Answer {
 			}
 			(Some((announce, held)), Some(claim)) => {
 				if held.instance != claim.instance || held.epoch != claim.epoch {
+					tracing::debug!(route = %key.1, "restart");
 					stream.writer.buffer(&Msg::Restart {
 						id: *announce,
 						instance: Some(claim.instance.clone()),
