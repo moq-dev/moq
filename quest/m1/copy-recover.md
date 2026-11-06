@@ -7,12 +7,6 @@ group: its `group::Consumer` continues on the successor copy the held
 re-offer carries in the same track, at the same frame, instead of surfacing
 the failure. Rust and `js/net` behave the same.
 
-## Waiting
-
-- moq-dev/moq: [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670)
-  merges. It adds the held re-offer (its decision 24) this builds on. Check
-  that it is merged into `main`.
-
 ## Plan
 
 Planned 2026-11-05 (maintainer, /quest-plan of the follow-ups from the
@@ -24,8 +18,13 @@ path. A successor that diverges from what the reader already consumed fails
 the reader, as a route switch does. Test on mock time: a reader mid-group on a
 copy that fails continues on the re-offer with no duplicate or missing frame.
 
+Decided 2026-11-05 (maintainer, /quest-audit): ✅ the wait on
+[moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670), Drop set's own
+PR, becomes a `Required` link to [Drop set](/quest/m1/drop-set.md), since
+#7670 adds the held re-offer (its decision 24) this builds on.
+
 Public API: none expected. Wire: none.
 
-## Related
+## Required
 
-- [Drop set](/quest/m1/drop-set.md) - reworks the re-offer path this reads from
+- [Drop set](/quest/m1/drop-set.md) - adds the held re-offer this builds on

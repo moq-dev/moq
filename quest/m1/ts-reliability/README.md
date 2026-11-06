@@ -125,8 +125,6 @@ catalog linger (#5305).
 
 - [PCR jump flag](/quest/m1/ts-reliability/pcr-jump-flag.md) - finish interop validation for actual clock-jump flags
 
-- [A CBR import's muxRate can't stick low](/quest/m1/ts-reliability/mux-rate-raise.md) - a stable window above the published rate raises it, and an export's deadline miss names the rate it needed
-
 ## Related
 
-- [MSFTS mapping](/quest/m3/msfts-convergence.md) - document the exact equivalence and differences between the carriage modes
+- [MSFTS mapping](/quest/m5/msfts-convergence.md) - document the exact equivalence and differences between the carriage modes

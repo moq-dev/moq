@@ -1,3 +1,4 @@
+import { ComfortNoise } from "./comfort";
 import type { Message, State } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
 
@@ -8,6 +9,7 @@ const RAMP = 64;
 class Render extends AudioWorkletProcessor {
 	// Created by the main thread's init message.
 	#ring?: AudioRingBuffer;
+	#comfort?: ComfortNoise;
 	#underflow = 0;
 	#stateCounter = 0;
 	#epoch = 0;
@@ -22,6 +24,7 @@ class Render extends AudioWorkletProcessor {
 			const msg = event.data;
 			if (msg.type === "init") {
 				this.#ring = new AudioRingBuffer(msg);
+				this.#comfort = new ComfortNoise(msg.rate);
 				this.#playing = msg.playing ?? true;
 				this.#underflow = 0;
 				this.#short = false;
@@ -33,10 +36,16 @@ class Render extends AudioWorkletProcessor {
 					this.#ring?.park();
 					this.#epoch = msg.park;
 				}
+			} else if (msg.type === "end") {
+				this.#ring?.end(msg.timestamp);
 			} else if (msg.type === "truncate") {
 				this.#ring?.truncate(msg.timestamp);
 			} else if (msg.type === "reset") {
-				this.#ring?.reset();
+				if (msg.next) this.#ring?.next();
+				else {
+					this.#ring?.reset();
+					this.#comfort = this.#ring ? new ComfortNoise(this.#ring.rate) : undefined;
+				}
 				this.#epoch = msg.epoch;
 				this.#playing = msg.playing ?? true;
 			} else if (msg.type === "playing" && msg.epoch === this.#epoch) {
@@ -49,28 +58,31 @@ class Render extends AudioWorkletProcessor {
 		const output = outputs[0];
 		const ring = this.#ring;
 		const samplesRead = this.#playing ? (ring?.read(output) ?? 0) : 0;
+		// A declared silence between two buffered utterances plays as comfort noise, faded like any other.
+		const quiet = this.#playing ? ring?.quiet : undefined;
+		if (quiet) {
+			const [from, to] = quiet;
+			this.#comfort?.played(output, 0, from);
+			fadeOut(output, from);
+			fadeIn(output, to, samplesRead);
+			this.#comfort?.fill(output, from, to);
+			this.#comfort?.played(output, to, samplesRead);
+		} else {
+			this.#comfort?.played(output, 0, samplesRead);
+		}
 
 		if (samplesRead < output[0].length) {
 			// Fade the tail of what we did read down to the silence that follows it.
-			for (const channel of output) {
-				const ramp = Math.min(RAMP, samplesRead);
-				for (let i = 0; i < ramp; i++) {
-					channel[samplesRead - ramp + i] *= 1 - (i + 1) / ramp;
-				}
-			}
-			if (this.#playing) this.#underflow += output[0].length - samplesRead;
+			fadeOut(output, samplesRead);
+			// The publisher declared this silence, including the refill before its next utterance.
+			if (ring?.silent) this.#comfort?.fill(output, samplesRead);
+			else if (this.#playing) this.#underflow += output[0].length - samplesRead;
 			this.#short = true;
 		} else {
-			if (this.#short) {
-				// Fade back in from the silence the shortfall left behind.
-				const ramp = Math.min(RAMP, samplesRead);
-				for (const channel of output) {
-					for (let i = 0; i < ramp; i++) {
-						channel[i] *= (i + 1) / ramp;
-					}
-				}
-				this.#short = false;
-			}
+			// Fade back in from the silence the shortfall left behind.
+			if (this.#short) fadeIn(output, 0, samplesRead);
+			// A declared silence running to the end of the quantum fades the next one in.
+			this.#short = quiet !== undefined && quiet[1] === samplesRead;
 			if (this.#underflow > 0 && ring) {
 				console.debug(`audio underflow: ${Math.round((1000 * this.#underflow) / ring.rate)}ms`);
 				this.#underflow = 0;
@@ -88,6 +100,7 @@ class Render extends AudioWorkletProcessor {
 					stalled: ring.stalled,
 					anchored: ring.anchored,
 					underruns: ring.underruns,
+					silent: ring.silent,
 					epoch: this.#epoch,
 				};
 				this.port.postMessage(state);
@@ -95,6 +108,22 @@ class Render extends AudioWorkletProcessor {
 		}
 
 		return true;
+	}
+}
+
+// Fade `output` down over the samples just before `at`.
+function fadeOut(output: Float32Array[], at: number): void {
+	const ramp = Math.min(RAMP, at);
+	for (const channel of output) {
+		for (let i = 0; i < ramp; i++) channel[at - ramp + i] *= 1 - (i + 1) / ramp;
+	}
+}
+
+// Fade `output` up over the samples from `at`, short of `end`.
+function fadeIn(output: Float32Array[], at: number, end: number): void {
+	const ramp = Math.min(RAMP, end - at);
+	for (const channel of output) {
+		for (let i = 0; i < ramp; i++) channel[at + i] *= (i + 1) / ramp;
 	}
 }
 

@@ -16,7 +16,7 @@ and reqwest switches to its no-provider feature. The existing browser
 interop tests prove the switch.
 
 Decided 2026-10-30 (maintainer): the stack is vendored into moq-webrtc
-([epic](/quest/m2/webrtc/README.md)) with DTLS 1.2 only, so this quest
+([epic](/quest/m3/webrtc/README.md)) with DTLS 1.2 only, so this quest
 changes the vendored crypto provider directly and offers no DTLS 1.3.
 
 Decided 2026-10-31 (maintainer): the vendored crates are private modules, so

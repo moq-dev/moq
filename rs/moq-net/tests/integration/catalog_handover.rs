@@ -91,7 +91,7 @@ struct Topology {
 	p_to_a: Option<MockPair>,
 	a_to_r: Option<MockPair>,
 	links: Vec<MockPair>,
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 	_track: track::Producer,
 	/// Every payload written to the open group so far.
 	written: Vec<String>,
@@ -104,11 +104,11 @@ impl Topology {
 		let relay_b = produce_origin(3);
 		let subscriber = produce_origin(4);
 
-		let broadcast = publisher.create_broadcast("live").unwrap();
-		let track = broadcast.create_track("catalog.json", timed()).unwrap();
-		broadcast
-			.announce(origin::Route::default().with_instance(moq_net::Instance::random(), 0))
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
+		let track = broadcast.broadcast().create_track("catalog.json", timed()).unwrap();
+		broadcast.announce().unwrap();
 		let group = track.append_group().unwrap();
 
 		let p_to_a = link(version, &publisher, &relay_a, None).await;

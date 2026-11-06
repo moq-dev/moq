@@ -144,9 +144,7 @@ pub struct MoqVideo {
 	pub display_aspect: Option<MoqDimensions>,
 	/// The maximum encoded bitrate in bits per second.
 	pub bitrate: Option<u64>,
-	/// Whether the publisher is serving this rendition; when false, no frames are coming until it
-	/// re-enables. Pick an enabled rendition, but keep one already playing while every rendition
-	/// of its kind is disabled, so a re-enable plays without a resubscribe.
+	/// Whether this rendition may be selected; when false, no frames are coming.
 	#[uniffi(default = true)]
 	pub enabled: bool,
 	/// Higher values are preferred; compatibility transcodes use -1 and the default is 0.
@@ -192,9 +190,7 @@ pub struct MoqAudio {
 	pub channel_count: u32,
 	/// The maximum encoded bitrate in bits per second.
 	pub bitrate: Option<u64>,
-	/// Whether the publisher is serving this rendition; when false, no frames are coming until it
-	/// re-enables. Pick an enabled rendition, but keep one already playing while every rendition
-	/// of its kind is disabled, so a re-enable plays without a resubscribe.
+	/// Whether this rendition may be selected; when false, no frames are coming.
 	#[uniffi(default = true)]
 	pub enabled: bool,
 	/// The framing used to carry this rendition.

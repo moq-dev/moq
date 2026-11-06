@@ -16,7 +16,7 @@ const input: { draft: number; subscribe: number[]; updates: number[][] } = JSON.
 const version = (0xff000000 + input.draft) as IetfVersion;
 const pair = createMockTransportPair(`moqt-${input.draft}`);
 const origin = new OriginProducer();
-const publication = origin.createBroadcast(Path.from("room"));
+const publication = origin.route(Path.from("room"), { hidden: true });
 // The updates replay groups a newer one superseded, which the default zero max age would stale.
 const track = publication.broadcast.createTrack("video", { maxAge: null });
 publication.announce();

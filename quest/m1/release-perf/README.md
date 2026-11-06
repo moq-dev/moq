@@ -10,7 +10,7 @@ and the reason is written here.
 This epic's own work: once its children have landed, re-pair the relay
 `fanout` workload against `release` and confirm main's relay CPU is no higher
 in every round. The sparse rows are accepted (2026-10-30). The browser frame path
-needs no repeat; the [performance audit](/quest/m2/audit-perf.md) now pairs
+needs no repeat; the [performance audit](/quest/m3/audit-perf.md) now pairs
 every later cut with `release`.
 
 ## Plan
@@ -181,7 +181,7 @@ Accepted, flat per operation:
 - e2ee `protect` is 1.5x release on grouped frames and 1.21x on datagrams. The
   crypto is unchanged; the rest is the per-group model cost accepted above.
   Both branches expand the AES-GCM key on every frame, about a quarter of
-  `protect`, which the [performance audit](/quest/m2/audit-perf.md) owns.
+  `protect`, which the [performance audit](/quest/m3/audit-perf.md) owns.
 - gst `moqsink/eos` is +12% instructions per event, from
   [#5512](https://github.com/moq-dev/moq/pull/5512) and the gstreamer-rs 0.25
   bump in [#6169](https://github.com/moq-dev/moq/pull/6169).
@@ -194,7 +194,7 @@ Accepted, flat per operation:
   frame) and the IETF `/fetch` delivery rows also reappear unchanged.
 - The TS export still grows with track count (1.50x at `1x1` to 2.24x at
   `16x64`). The T-STD schedule scans and sorts every queued unit per PCR slot,
-  which the [performance audit](/quest/m2/audit-perf.md) owns.
+  which the [performance audit](/quest/m3/audit-perf.md) owns.
 
 Noise: `frame_recv/upfront/size=262144/streams=64` is 3 to 4x in wall time at
 0.96x instructions. Its 1.6M page faults (against 192k) are glibc returning
@@ -220,7 +220,7 @@ Decided 2026-10-25 (maintainer), in
   the cut; [moq-dev/moq#6921](https://github.com/moq-dev/moq/pull/6921)
   flattened it.
 - The TS schedule's growth is left to the
-  [performance audit](/quest/m2/audit-perf.md); it does not block the cut.
+  [performance audit](/quest/m3/audit-perf.md); it does not block the cut.
 - Now that the sparse fix has landed, re-run the relay fanout pairing on a
   quiet host, recording `/proc/loadavg`, with
   `BENCH_ARTIFACTS=<scratch> just bench origin/release` (it also re-checks
@@ -356,5 +356,5 @@ live read is accepted, per delivered group through the session (see the
 
 ## Related
 
-- [Performance audit](/quest/m2/audit-perf.md) - compares nightly to nightly; this epic compares main to release
+- [Performance audit](/quest/m3/audit-perf.md) - compares nightly to nightly; this epic compares main to release
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - noise floor of the paired nightly-to-nightly comparison on one runner

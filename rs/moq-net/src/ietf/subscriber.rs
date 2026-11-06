@@ -864,18 +864,18 @@ impl TrackState {
 struct BroadcastState {
 	// The route announced into our origin for this namespace, post-charge: the newest
 	// live advertisement's.
-	route: crate::origin::Route,
+	route: crate::origin::RouteInfo,
 
 	// Each live advertisement of the namespace with the route it describes, oldest first.
 	// A publisher replacing its instance withdraws one advertisement and makes another, on
 	// separate streams that can arrive in either order: the newest stands until it goes,
 	// and an update to an older one changes nothing.
-	adverts: Vec<(u64, crate::origin::Route)>,
+	adverts: Vec<(u64, crate::origin::RouteInfo)>,
 
 	// The served route: dropping it (and the serve task's clone) retracts the
 	// route and rejects its queued requests. `None` while the session's limit holds
 	// it back, though the peer still advertises it.
-	dynamic: Option<crate::origin::Requests>,
+	dynamic: Option<crate::origin::Route>,
 
 	// Bumped each time the route attaches, so a serve task outlived by a limit that
 	// took the route away and gave it back ends rather than serve beside the new one.
@@ -944,7 +944,7 @@ enum Withdraw {
 struct Advertised {
 	/// The route it describes, with this link's price already charged. The prefix
 	/// is stamped where the advertisement attaches (the namespace).
-	route: crate::origin::Route,
+	route: crate::origin::RouteInfo,
 }
 
 /// One NAMESPACE a SUBSCRIBE_NAMESPACE stream holds, live on the wire until its
@@ -1289,11 +1289,11 @@ impl Subscriber {
 	/// its true length. An anonymous route already ranks below every identified one,
 	/// so that understatement cannot beat a real path. Price such a link with
 	/// [`crate::Client::with_cost`] among other anonymous routes.
-	fn session_route(&self, peer: &cluster::Peer) -> crate::origin::Route {
+	fn session_route(&self, peer: &cluster::Peer) -> crate::origin::RouteInfo {
 		let mut hops = crate::Hops::new();
 		hops.push(crate::Hop::UNKNOWN)
 			.expect("an empty hop chain has room for one entry");
-		crate::origin::Route::default()
+		crate::origin::RouteInfo::default()
 			.with_hops(hops)
 			.with_via(self.via(peer))
 			// A peer without Cluster contributes only the arriving link price.
@@ -2812,7 +2812,7 @@ impl Subscriber {
 		if self.going_away.is_set() {
 			route.cost = crate::origin::Cost::DRAIN;
 		}
-		entry.dynamic = Some(self.origin.requests_route(path, route, None)?);
+		entry.dynamic = Some(self.origin.forward(path, route, None)?);
 		entry.generation += 1;
 		tracing::info!(route = %crate::path::Rooted(self.origin.root(), path), "namespace authorized again");
 		Ok(Some(entry.generation))
@@ -2873,7 +2873,7 @@ impl Subscriber {
 				if *newest == id {
 					entry.route = route.clone();
 					if let Some(dynamic) = &entry.dynamic {
-						dynamic.update_route(entry.route.clone())?;
+						dynamic.update(entry.route.clone())?;
 					}
 				}
 				Ok(())
@@ -2905,7 +2905,7 @@ impl Subscriber {
 					return Ok(());
 				}
 				// Propagates Error::Unauthorized if the namespace is out of scope.
-				let dynamic = self.origin.requests_route(&path, route.clone(), None)?;
+				let dynamic = self.origin.forward(&path, route.clone(), None)?;
 
 				entry.insert(BroadcastState {
 					route: route.clone(),
@@ -2960,7 +2960,7 @@ impl Subscriber {
 				if *newest != state.route {
 					state.route = newest.clone();
 					if let Some(dynamic) = &state.dynamic {
-						dynamic.update_route(state.route.clone())?;
+						dynamic.update(state.route.clone())?;
 					}
 				}
 				if state.tokens == 0
@@ -3006,7 +3006,7 @@ impl Subscriber {
 			route.cost = crate::origin::Cost::DRAIN;
 		}
 		if let Some(dynamic) = &entry.dynamic {
-			let _ = dynamic.update_route(entry.route.clone());
+			let _ = dynamic.update(entry.route.clone());
 		}
 	}
 
@@ -3153,7 +3153,9 @@ impl RunRoute {
 			entry.live = Default::default();
 		}
 		match &mut entry.dynamic {
-			Some(dynamic) => dynamic.poll_requested_broadcast(waiter).map(Some),
+			Some(dynamic) => dynamic
+				.poll_requested(waiter)
+				.map(|request| Some(request.ok_or(crate::Error::Closed))),
 			None => Poll::Ready(None),
 		}
 	}
@@ -3569,7 +3571,9 @@ struct SubscribeOnce {
 	deferred: bool,
 	start: Option<u64>,
 	join: Join,
-	/// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest.
+	/// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest; the
+	/// copy's fills fetch an earlier start's groups. An absolute start keeps its requested
+	/// prefix even if the answer arrives late.
 	live: bool,
 	/// A listed track's paused subscription, which this one resumes rather than open a
 	/// second one.
@@ -3770,9 +3774,7 @@ impl SubscribeOnce {
 					};
 					self.start = subscription.as_ref().and_then(|s| s.start());
 					self.join = subscribe_join(self.start, subscription.as_ref().and_then(|s| s.end()), this.version);
-					// Every draft-18 join is a live one, since its joining FETCH carries that
-					// group alone.
-					self.live = self.start.is_none() || self.join.fetch;
+					self.live = !matches!(self.join.filter, Filter::Absolute { .. });
 					self.subscription = subscription;
 					self.target = Some(target);
 
@@ -4365,6 +4367,16 @@ impl SubscribeOnce {
 				held.producer = Some(track.clone());
 				held.timescale = timescale;
 				held.fill_ok(largest);
+				// A group-0 start joins filterless with no fill for the Largest group's head,
+				// so a stream there that starts mid-group is a cut message: drop it, and the
+				// readers skip that group, rather than surface its tail as the whole group.
+				// Largest's object is inclusive, so even object 0 may already be gone.
+				if self.live
+					&& self.start == Some(0)
+					&& let Some(largest) = largest
+				{
+					held.headless_through = held.headless_through.max(Some(largest.group));
+				}
 			}
 		}
 		this.entry_info(&self.key, request_id, track.info());
@@ -5860,6 +5872,11 @@ impl RecvGroup {
 				let _ = track.abort(Error::ProtocolViolation);
 				return Poll::Ready(Err(Error::ProtocolViolation));
 			}
+			Err(Error::MalformedTrack) => {
+				tracing::warn!(group = group.group_id, "malformed track");
+				let _ = track.abort(Error::MalformedTrack);
+				return Poll::Ready(Err(Error::MalformedTrack));
+			}
 			Err(err) => return Poll::Ready(Err(err)),
 			Ok(opened) => opened,
 		};
@@ -5987,6 +6004,8 @@ enum OpenStep {
 	PeekFirst,
 	/// Claiming the head a mid-group stream continues, from its first Object ID if it has one.
 	ClaimTail(Option<u64>),
+	/// A standalone END_OF_TRACK: consuming its marker, then refusing any byte past it.
+	EndOfTrack { object: u64, properties: bool },
 }
 
 impl OpenGroup {
@@ -6063,20 +6082,31 @@ impl OpenGroup {
 						}
 					};
 					if let Some(first) = first.filter(|first| first.end_of_track) {
-						return Poll::Ready(Ok(Opened::EndOfTrack {
+						// Only the stream's end may follow the track's end: an object past it
+						// makes the track malformed.
+						match header.flags.has_extensions {
+							true => ready!(stream.poll_decode::<PeekFirst<true>>(waiter)).map(drop)?,
+							false => ready!(stream.poll_decode::<PeekFirst<false>>(waiter)).map(drop)?,
+						}
+						self.step = OpenStep::EndOfTrack {
 							object: first.id,
 							properties: first.has_properties,
-						}));
+						};
+						continue;
 					}
 
 					// Without a fill, a relay preserves the subgroup's first Object ID and
 					// FIRST_OBJECT claim independently. Plain readers see only frame ordinals. A
 					// head that was owed and never came is the exception: the stream is the same
-					// unstitchable tail it is when it arrives before the fill settles, below.
+					// unstitchable tail it is when it arrives before the fill settles, below,
+					// unless it claims FIRST_OBJECT: a group may start past object 0.
 					if !fill.read().outstanding() {
 						let start = first.map_or(0, |first| first.id);
-						if start != 0 && (self.headless || fill.read().headless(sequence)) {
+						if start != 0 && !header.flags.first_object && (self.headless || fill.read().headless(sequence))
+						{
 							tracing::warn!(sequence, start, "no fill to stitch a mid-group stream onto");
+							// Never arriving whole, the group is dropped so readers stop owing it.
+							track.drop_groups(sequence..sequence + 1, crate::StreamError::NotFound);
 							return Poll::Ready(Err(Error::Unsupported));
 						}
 						return Poll::Ready(Ok(Opened::Group(create(track)?, start)));
@@ -6107,12 +6137,19 @@ impl OpenGroup {
 						start => self.step = OpenStep::ClaimTail(start),
 					}
 				}
+				OpenStep::EndOfTrack { object, properties } => {
+					if ready!(stream.poll_has_more(waiter))? {
+						return Poll::Ready(Err(Error::MalformedTrack));
+					}
+					return Poll::Ready(Ok(Opened::EndOfTrack { object, properties }));
+				}
 				OpenStep::ClaimTail(start) => {
 					let claimed = ready!(poll_claim_fill(fill, track, sequence, start, reading, waiter))?;
 					return Poll::Ready(match (start, claimed) {
 						(Some(start), Some((producer, _))) => Ok(Opened::Group(producer, start)),
 						(Some(start), None) => {
 							tracing::warn!(sequence, start, "no fill to stitch a mid-group stream onto");
+							track.drop_groups(sequence..sequence + 1, crate::StreamError::NotFound);
 							Err(Error::Unsupported)
 						}
 						(None, Some((producer, next))) => Ok(Opened::Group(producer, next)),
@@ -6210,7 +6247,8 @@ enum IngestPhase {
 	Admit { header: frame::Header },
 	/// Streaming the object payload.
 	Payload { frame: frame::Producer },
-	/// An explicit end-of-group or end-of-track status arrived.
+	/// An explicit end-of-group or end-of-track status arrived, so only the stream end may
+	/// follow.
 	Finished(Ended),
 }
 
@@ -7784,9 +7822,10 @@ impl GroupIngest {
 		})
 	}
 
-	/// `Ready(Ok(_))` once the stream FINs on an object boundary, or an explicit
-	/// end-of-group or end-of-track status arrives. The caller finishes or aborts the
-	/// group; an object cut short mid-payload was already aborted here with the reason.
+	/// `Ready(Ok(_))` once the stream ends, whether on an object boundary or after an
+	/// explicit end-of-group or end-of-track status; a byte past that status is refused as
+	/// `MalformedTrack`. The caller finishes or aborts the group; an object cut short
+	/// mid-payload was already aborted here with the reason.
 	pub(crate) fn poll<R: crate::transport::poll::RecvStream + crate::coding::Pause>(
 		&mut self,
 		reader: &mut Reader<R, Version>,
@@ -7905,6 +7944,10 @@ impl GroupIngest {
 					}
 				}
 				IngestPhase::Finished(ended) => {
+					// An object past the group's final one makes the track malformed.
+					if ready!(reader.poll_has_more(waiter))? {
+						return Poll::Ready(Err(Error::MalformedTrack));
+					}
 					let ended = std::mem::replace(ended, Ended::Group);
 					return Poll::Ready(Ok(ended));
 				}
@@ -9940,11 +9983,11 @@ mod tests {
 
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let source = origin.publish("broadcast", Default::default()).unwrap();
+			let source = origin.route("broadcast", Default::default()).unwrap();
 			let resolved = origin.consume().request("broadcast", None).await.unwrap();
 			let peer = Arc::new(Peer {
 				version,
-				dynamic: Mutex::new(Some(source.requests())),
+				dynamic: Mutex::new(Some(source.broadcast().requests())),
 				park: Default::default(),
 				log: Default::default(),
 			});
@@ -10379,7 +10422,10 @@ mod tests {
 		// What we are publishing to the peer: a real upstream route.
 		let upstream = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 		let _source = origin
-			.announce("room/host", crate::origin::Route::default().with_hops(upstream.clone()))
+			.announce(
+				"room/host",
+				crate::origin::RouteInfo::default().with_hops(upstream.clone()),
+			)
 			.unwrap();
 		announced.expect_next_active("room/host").await;
 		let _advertised = publishing.expect_next_active("room/host").await;
@@ -10493,7 +10539,7 @@ mod tests {
 	}
 
 	/// The current best route covering `path`, if any (synchronous peek).
-	fn routed_now(consumer: &crate::origin::Consumer, path: &str) -> Option<crate::origin::Route> {
+	fn routed_now(consumer: &crate::origin::Consumer, path: &str) -> Option<crate::origin::RouteInfo> {
 		use futures::FutureExt;
 		match consumer.path_routes(path).ok()?.next().now_or_never()?? {
 			crate::origin::RouteEvent::End(_) => None,
@@ -10994,7 +11040,7 @@ mod tests {
 		let path = crate::Path::from_static("room/host");
 
 		let first = Advertised {
-			route: crate::origin::Route::default()
+			route: crate::origin::RouteInfo::default()
 				.with_hops(hop_path(&[7, 9]).hops().clone())
 				.with_cost(4),
 		};
@@ -11005,7 +11051,7 @@ mod tests {
 
 		// A new chain and cost: the route updates in place.
 		let rerouted = Advertised {
-			route: crate::origin::Route::default()
+			route: crate::origin::RouteInfo::default()
 				.with_hops(hop_path(&[7, 11]).hops().clone())
 				.with_cost(2),
 		};
@@ -13913,19 +13959,25 @@ struct Join {
 /// to honor. It splits the group across two streams, the fill carrying the head and the
 /// subscription the tail, which `claim_fill` stitches back into one group producer.
 ///
-/// Earlier drafts have no fill parameter. Every subscription is a live join: Largest
-/// Object, followed by a joining FETCH relative at offset 0 for that group's head. An
-/// earlier start's missing groups are left to the copy's fills, one FETCH per run of them,
-/// and a later start skips the head locally. A join landing past a gap after a resumed
-/// copy's cache leaves those cached groups unjudgeable, so a finite budget gives them up
-/// rather than fetching them again. A bounded end has no joining-FETCH spelling
-/// either, so the join stays open and readers stop at their own end: refusing it would
-/// abort a resumed copy for every reader it serves.
+/// Earlier drafts have no fill parameter, so a live join uses Largest Object followed
+/// by a joining FETCH relative at offset 0 for that group's head.
 ///
-/// A start group we already know is absolute on draft-22 and needs no fill: the
-/// subscription's own range covers it, which is what our publisher serves from its cache.
+/// A start of group 0 with no end is a filterless SUBSCRIBE on every draft, which our
+/// publishers serve from the start of the latest group, and the copy's fills fetch the
+/// groups below it as one range FETCH. Draft 20 has no absolute {0, 0} distinct from no
+/// filter, so no draft spells one.
+///
+/// Any other known start group is absolute on every draft and needs no fill: the
+/// subscription's own range covers it, including a first burst that overtook its answer.
 fn subscribe_join(start: Option<u64>, end: Option<u64>, version: Version) -> Join {
-	if !Filter::is_draft20(version) {
+	if start == Some(0) && end.is_none() {
+		return Join {
+			filter: Filter::Unfiltered,
+			fill: None,
+			fetch: false,
+		};
+	}
+	if !Filter::is_draft20(version) && start.is_none() {
 		return Join {
 			filter: Filter::NextObject,
 			fill: None,
@@ -13943,12 +13995,6 @@ fn subscribe_join(start: Option<u64>, end: Option<u64>, version: Version) -> Joi
 				filter: Some(Filter::Relative(1)),
 				range_filters: false,
 			}),
-			fetch: false,
-		},
-		// An absolute {0, 0} with no end is defined as unfiltered, so it spells itself.
-		Some(0) if end.is_none() => Join {
-			filter: Filter::Unfiltered,
-			fill: None,
 			fetch: false,
 		},
 		Some(start) => Join {
@@ -14045,28 +14091,28 @@ mod filter_tests {
 		);
 	}
 
-	/// The whole track has a spelling of its own: an absent filter is unrestricted.
+	/// The whole track joins live with no filter on every draft, and fetches what came before.
 	#[test]
 	fn the_whole_track_is_unfiltered() {
-		assert_eq!(
-			subscribe_join(Some(0), None, Version::Draft22),
-			Join {
-				filter: Filter::Unfiltered,
-				fill: None,
-				fetch: false,
-			}
-		);
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			assert_eq!(
+				subscribe_join(Some(0), None, version),
+				Join {
+					filter: Filter::Unfiltered,
+					fill: None,
+					fetch: false,
+				}
+			);
+		}
 	}
 
 	const JOINING_DRAFTS: [Version; 1] = [Version::Draft18];
 
-	/// Every draft-18 join is Largest Object plus a joining FETCH, whatever its start or
-	/// end, so the current group's head arrives on the fetch stream and the live tail on the
-	/// subscription.
+	/// A draft-18 live join gets its current group's head through a joining FETCH.
 	#[test]
-	fn older_drafts_always_join_live() {
+	fn older_drafts_join_live_without_an_absolute_start() {
 		for version in JOINING_DRAFTS {
-			for (start, end) in [(None, None), (Some(7), None), (Some(7), Some(10))] {
+			for (start, end) in [(None, None), (None, Some(10))] {
 				assert_eq!(
 					subscribe_join(start, end, version),
 					Join {
@@ -14166,7 +14212,7 @@ mod stitch_tests {
 	/// The subscription's own subgroup stream, starting at `start` because a strict
 	/// publisher delivers nothing before it: that head is the fill's job. Each object
 	/// carries the Timestamp of its Object ID.
-	fn tail_stream(sequence: u64, start: u64, payloads: &[&[u8]]) -> Vec<u8> {
+	pub(super) fn tail_stream(sequence: u64, start: u64, payloads: &[&[u8]]) -> Vec<u8> {
 		let mut buf = Vec::new();
 		ietf::GroupHeader {
 			track_alias: ALIAS,
@@ -14413,6 +14459,34 @@ mod stitch_tests {
 		(sequence, frames)
 	}
 
+	/// Only the stream's end may follow an END_OF_GROUP or END_OF_TRACK status: an object
+	/// past the final one makes the track malformed, rather than ending it or its group clean.
+	#[kio::test]
+	async fn an_object_after_an_end_status_ends_the_track() {
+		use futures::FutureExt;
+
+		let header = tail_stream(SEQUENCE, 0, &[]).len();
+		let object = &tail_stream(SEQUENCE, 0, &[b"past"])[header..];
+		for (payloads, status) in [
+			(&[&b"last"[..]][..], END_OF_GROUP),
+			(&[&b"last"[..]][..], END_OF_TRACK),
+			// A standalone END_OF_TRACK, which opens no group.
+			(&[][..], END_OF_TRACK),
+		] {
+			let mut bytes = end_marker(tail_stream(SEQUENCE, 0, payloads), status);
+			bytes.extend_from_slice(object);
+
+			let h = Harness::new(Fill::Done, vec![bytes]);
+			let mut stream = h.stream().await;
+			let res = h.subscriber.clone().recv_group(&mut stream).await;
+			assert!(matches!(res, Err(Error::MalformedTrack)), "{status}: {res:?}");
+			assert!(
+				matches!(h.track.closed().now_or_never(), Some(Err(Error::MalformedTrack))),
+				"{status}"
+			);
+		}
+	}
+
 	/// The canonical join: the fill carries the objects published before we subscribed and
 	/// the subscription the ones after, and they land in one group in order.
 	///
@@ -14638,8 +14712,9 @@ mod stitch_tests {
 	) -> (Vec<u8>, crate::lite::test_transport::Log) {
 		use crate::lite::test_transport::Sent;
 		let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
-		let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
+		let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				"video",
 				accepted_info(
@@ -15779,6 +15854,71 @@ mod stitch_tests {
 		});
 
 		assert!(matches!(group.read_frame().await, Err(Error::Cancel)));
+	}
+
+	/// A stream for a headless group that claims FIRST_OBJECT is whole even though its first
+	/// Object ID is past zero, so it is delivered rather than dropped as a cut tail.
+	#[kio::test]
+	async fn a_headless_group_claiming_its_first_object_is_delivered() {
+		let h = Harness::new(Fill::Done, vec![draft18_subgroup(SEQUENCE, true, 6, &[b"six"])]);
+		h.subscriber
+			.state
+			.lock()
+			.subscribes
+			.get_mut(&REQUEST)
+			.unwrap()
+			.headless_through = Some(SEQUENCE);
+		let mut consumer = h.track.subscribe(None);
+
+		let mut stream = h.stream().await;
+		h.subscriber.clone().recv_group(&mut stream).await.expect("group");
+		let (sequence, frames) = read_group(&mut consumer).await;
+		assert_eq!(sequence, SEQUENCE);
+		assert_eq!(frames.len(), 1);
+	}
+
+	/// A refused headless group is reported dropped, so a reader in sequence order, as a
+	/// `track` socket session reads, moves on to the next group rather than wait on it.
+	#[kio::test]
+	async fn a_refused_headless_group_does_not_stall_an_ordered_reader() {
+		let h = Harness::new(
+			Fill::Done,
+			vec![
+				tail_stream(SEQUENCE, 2, &[b"tail-2"]),
+				tail_stream(SEQUENCE + 1, 0, &[b"next-0"]),
+			],
+		);
+		// Subscribed before the answer, as the socket does.
+		let mut ordered = h
+			.track
+			.subscribe(Some(
+				track::Subscription::default()
+					.with_order(crate::track::Order::Ascending)
+					.with_delay(track::Delay::default().with_max(None)),
+			))
+			.with_range(0..)
+			.ordered();
+		h.track.received();
+		h.track.anchored_cached();
+		h.track.clone().start_at(SEQUENCE).unwrap();
+		h.subscriber
+			.state
+			.lock()
+			.subscribes
+			.get_mut(&REQUEST)
+			.unwrap()
+			.headless_through = Some(SEQUENCE);
+
+		h.dispatch_refused().await;
+
+		let mut next = h.stream().await;
+		h.subscriber.clone().recv_group(&mut next).await.expect("next group");
+		let group = match ordered.poll_next_group(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(Some(group))) => group,
+			Poll::Ready(other) => panic!("no next group: {:?}", other.map(|group| group.map(|g| g.sequence))),
+			Poll::Pending => panic!("the ordered reader still waits on the refused group"),
+		};
+		assert_eq!(group.sequence, SEQUENCE + 1);
 	}
 
 	/// Widening updates replaced fills that failed to head this group and the next, and the
@@ -17255,29 +17395,131 @@ mod joining_fetch_tests {
 		}
 	}
 
-	/// A start below, at, or past the Largest group joins that group alone: a group below it
-	/// is left to the copy's fills.
+	/// A known start stays absolute even below or past Largest, so it needs no live head fetch.
 	#[kio::test]
-	async fn a_join_from_any_start_fetches_only_the_largest_group() {
+	async fn an_absolute_start_never_becomes_a_largest_group_join() {
 		let largest = Some(ietf::Location { group: 9, object: 0 });
 		for version in JOINING_DRAFTS {
 			for start in [7, 9, 11] {
 				let run = JoinRun::start(version, Some(start), subscribe_ok(version, largest), fetch_ok(version)).await;
 
 				let messages = decode_messages(&run.session.log, version);
-				let fetch = messages.iter().find(|(id, _)| *id == ietf::Fetch::ID).expect("FETCH");
-				let body = &fetch.1;
-				let msg = crate::coding::decode_from(&mut &body[..], version, ietf::Fetch::decode_msg).unwrap();
+				let subscribe = messages
+					.iter()
+					.find(|(id, _)| *id == ietf::Subscribe::ID)
+					.expect("SUBSCRIBE");
+				let body = &subscribe.1;
+				let msg = crate::coding::decode_from(&mut &body[..], version, ietf::Subscribe::decode_msg).unwrap();
 				assert_eq!(
-					msg.fetch_type,
-					FetchType::RelativeJoining {
-						subscriber_request_id: RequestId(1),
-						group_offset: 0,
+					msg.filter,
+					Filter::Absolute {
+						start: ietf::Location {
+							group: start,
+							object: 0,
+						},
+						end: None,
 					},
 					"{version} from {start}"
 				);
+				assert!(msg.fill.is_none(), "{version} from {start}");
+				assert!(
+					!messages.iter().any(|(id, _)| *id == ietf::Fetch::ID),
+					"{version} from {start}: an absolute stream includes its head"
+				);
 			}
 		}
+	}
+
+	/// A start of group 0 joins live with no filter on every draft and sends no joining
+	/// FETCH: the whole latest group arrives on the subscription, and the copy's fills fetch
+	/// the groups below it once a reader misses them.
+	#[kio::test]
+	async fn a_zero_start_joins_unfiltered_without_a_joining_fetch() {
+		let largest = Some(ietf::Location { group: 9, object: 0 });
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			let run = JoinRun::start(version, Some(0), subscribe_ok(version, largest), fetch_ok(version)).await;
+
+			let messages = decode_messages(&run.session.log, version);
+			let subscribe = messages
+				.iter()
+				.find(|(id, _)| *id == ietf::Subscribe::ID)
+				.expect("SUBSCRIBE");
+			let msg = crate::coding::decode_from(&mut &subscribe.1[..], version, ietf::Subscribe::decode_msg).unwrap();
+			assert_eq!(msg.filter, Filter::Unfiltered, "{version}");
+			assert!(msg.fill.is_none(), "{version}");
+			assert!(
+				!messages.iter().any(|(id, _)| *id == ietf::Fetch::ID),
+				"{version}: no head to join"
+			);
+			assert!(!run.fill_outstanding(), "{version}");
+		}
+	}
+
+	/// A group-0 start fetches only the groups below Largest, so when the publisher is
+	/// already partway through the Largest group, that group's mid-group stream is a cut
+	/// message. It is marked headless, so the stream is dropped and readers skip the group
+	/// (`a_headless_tail_after_its_fill_was_replaced_is_dropped`), rather than reading its
+	/// tail as a whole group. Largest's object is inclusive, so a Largest at object 0 marks
+	/// the group too.
+	#[kio::test]
+	async fn a_zero_start_drops_the_largest_groups_cut_tail() {
+		for (object, headless) in [(2, Some(4)), (0, Some(4))] {
+			let largest = Some(ietf::Location { group: 4, object });
+			for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+				let run = JoinRun::start(version, Some(0), subscribe_ok(version, largest), fetch_ok(version)).await;
+				let state = run.subscriber.state.lock();
+				let held = state
+					.subscribes
+					.values()
+					.next()
+					.expect("the subscription is registered");
+				assert_eq!(held.headless_through, headless, "{version}: Largest object {object}");
+			}
+		}
+	}
+
+	/// A Largest at object 0 already sent that object, so the Largest group's stream starting
+	/// at object 1 without FIRST_OBJECT is a cut tail: it is refused and readers get the next
+	/// group instead.
+	#[kio::test]
+	async fn a_zero_start_drops_a_tail_cut_after_object_0() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 0 });
+		let session = ScriptedSession::per_stream(vec![
+			subscribe_ok(version, largest),
+			super::stitch_tests::tail_stream(4, 1, &[b"tail-1"]),
+			super::stitch_tests::tail_stream(5, 0, &[b"next-0"]),
+		]);
+		let run = JoinRun::subscribe(version, Some(0), session.clone(), Control::new(false)).await;
+		let track = {
+			let state = run.subscriber.state.lock();
+			let held = state
+				.subscribes
+				.values()
+				.next()
+				.expect("the subscription is registered");
+			held.producer.clone().expect("SUBSCRIBE_OK bound the track")
+		};
+		let mut consumer = track.subscribe(None);
+
+		let mut streams = Vec::new();
+		for _ in 0..2 {
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
+			streams.push(Reader::new(crate::transport::boxed::RecvStream::new(recv), version));
+		}
+		let [tail, next] = &mut streams[..] else { unreachable!() };
+		// Accepted, the tail's stream would park unended, so it must be refused at once.
+		let refused = run.subscriber.clone().recv_group(tail).now_or_never();
+		assert!(matches!(refused, Some(Err(Error::Unsupported))), "{refused:?}");
+
+		// The next group's stream never ends, so read it while it is still ingesting.
+		let mut ingesting = run.subscriber.clone();
+		let ingest = ingesting.recv_group(next);
+		let group = futures::select_biased! {
+			group = consumer.recv_group().fuse() => group.expect("track aborted").expect("track finished"),
+			res = ingest.fuse() => panic!("the next group's stream ended: {res:?}"),
+		};
+		assert_eq!(group.sequence, 5, "the cut group was skipped");
 	}
 
 	/// A publisher that serves no FETCH refuses the joining FETCH. That costs the head of

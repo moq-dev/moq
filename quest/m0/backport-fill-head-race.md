@@ -27,8 +27,9 @@ that arrives, and a remaining miss still FETCHes. Older history does not wait.
 
 Local review also exposed a pending miss no longer being polled during the
 PUBLISH_DONE grace. The backport adds that poll and a paused-time reproduction.
-[moq-dev/moq#7903](https://github.com/moq-dev/moq/pull/7903) lands the same
-correction on main first, following the main-first backport rule. Its other
+[moq-dev/moq#7903](https://github.com/moq-dev/moq/pull/7903) landed the same
+correction on main first (merged 2026-11-05), following the main-first
+backport rule. Its other
 change, driving a lingering copy's fetches while a resumed SUBSCRIBE is set up,
 has no `release` counterpart: release creates its fetch set after SUBSCRIBE_OK
 and never lingers.

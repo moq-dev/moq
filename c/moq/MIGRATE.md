@@ -4,6 +4,27 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `moq_connection_stats` counts unrouted datagrams ([#7951](https://github.com/moq-dev/moq/pull/7951))
+
+`moq_connection_stats` gains `datagrams_unrouted` and `datagrams_unrouted_valid` at its end, which changes its ABI: recompile against the new header.
+`datagrams_unrouted` counts the datagrams received for a subscription with no datagram track, and is valid on versions with datagrams (moq-lite 05 and newer).
+
+### Socket sessions
+
+The generated socket endpoint, incoming dial, and stream handles now expose TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
+
+### Publishing goes through one `moq_route` handle
+
+`moq_origin_producer_create_broadcast(origin, path, &publication)` is `moq_origin_producer_route(origin, path, &options, &route)`, and `moq_origin_producer_requests(origin, prefix, &requests)` is `moq_origin_producer_route_prefix(origin, prefix, &options, &route)`; start `options` from `moq_route_options_default()`. A `moq_route` replaces `moq_publication`, `moq_origin_requests`, and `moq_broadcast_prepared`:
+
+- `moq_publication_broadcast(publication)` is `moq_route_broadcast(route, &broadcast)`, which fails on a prefix route.
+- `moq_publication_announce(publication, &route)` is `moq_route_announce(route)`, and re-pricing is `moq_route_set_cost(route, cost)`; `moq_publication_unannounce` is `moq_route_withdraw`.
+- `moq_origin_requests_requested_broadcast` is `moq_route_requested`, whose value is NULL once the origin closes.
+- `moq_broadcast_request_prepare` then `moq_broadcast_prepared_publish` is `moq_broadcast_request_route(request, &options, &route)`: create it hidden to fill it first, then announce it.
+- `moq_route_instance_id(route)` returns the stream's instance, kept across withdraw and announce.
+
+`moq_announce_route` is `moq_route_options`, given at creation, with a leading `hidden`. The default route is visible at once, so set `hidden` and call `moq_route_announce` after filling the catalog to keep the old order. Hold the route while the broadcast should stay announced: `moq_route_cancel` or freeing its last handle retracts it, and `moq_broadcast_producer_close` ends both. The `moq_route` record on `moq_announce.route` is `moq_route_info`.
+
 ### Separate datagram tracks
 
 Create a separate producer with `moq_publish_datagrams` and `moq_datagram_info`; replace `moq_publish_track_datagram` with `moq_publish_datagrams_append` on that handle, or `moq_publish_datagrams_insert` for an explicit sequence. `moq_consume_datagrams` now takes a subscriber priority before its callback and never subscribes to a stream track. Use `moq_publish_datagrams_demand` and `moq_datagram_demand_priority` for aggregate priority, and `moq_publish_datagrams_requests` / `moq_datagram_request_accept` for on-demand publishing. Finish or abort datagram producers separately. A zeroed datagram info is untimed, unlike the microsecond default of stream-track info.

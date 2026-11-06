@@ -106,14 +106,16 @@ jobs:
       - name: Setup complete
         id: setup
         run: echo "Platform tools ready"
-      - name: Rust compile and tests
+      - name: Rust compile
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.rs == 'true') }}
         shell: bash
         env:
           CI_BASE: ${{ github.event_name != 'pull_request' && '--all' || '' }}
-        run: |
-          just rs windows "$CI_BASE"
-          just rs windows-test
+        run: just rs windows "$CI_BASE"
+      - name: Rust tests
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.rs == 'true') }}
+        shell: bash
+        run: just rs windows-test
       - name: C
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.c == 'true') }}
         shell: bash
@@ -159,13 +161,14 @@ jobs:
       - name: Setup complete
         id: setup
         run: echo "Platform tools ready"
-      - name: Rust compile and tests
+      - name: Rust compile
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.rs == 'true') }}
         env:
           CI_BASE: ${{ github.event_name != 'pull_request' && '--all' || '' }}
-        run: |
-          just rs macos "$CI_BASE"
-          just rs macos-test
+        run: just rs macos "$CI_BASE"
+      - name: Rust tests
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.rs == 'true') }}
+        run: just rs macos-test
       - name: Swift simulator check
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.swift == 'true') }}
         run: just swift simulator

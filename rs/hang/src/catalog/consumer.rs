@@ -34,7 +34,7 @@ impl<E: DeserializeOwned + Default> Consumer<E> {
 	/// Get the next catalog update, or `None` when the track ends.
 	///
 	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if any rendition's
-	/// `broadcast` reference, contribution, or echo prefix walks above the root. Such a reference names no broadcast, and the
+	/// `broadcast` reference, include, or echo prefix walks above the root. Such a reference names no broadcast, and the
 	/// root is the consumer's authorized subtree, so it is an attempt to reference content the
 	/// consumer cannot name. The whole catalog is rejected rather than the one rendition: a
 	/// publisher that emits one has a bug (or is hostile), and silently serving the rest hides
@@ -58,7 +58,7 @@ impl<E: DeserializeOwned + Default> Consumer<E> {
 	}
 }
 
-/// Reject the catalog if a track reference, contribution, or echo prefix walks above the root.
+/// Reject the catalog if a track reference, include, or echo prefix walks above the root.
 ///
 /// Every section carrying a relative broadcast path must be included here; a section left out
 /// silently exempts its paths from the containment check.
@@ -76,7 +76,7 @@ fn check_resolvable<E>(base: &Path, catalog: &Catalog<E>) -> Result<()> {
 		.chain(json.map(|(_, config)| config.broadcast.as_ref()))
 		.chain(binary.map(|(_, config)| config.broadcast.as_ref()))
 		.flatten()
-		.chain(catalog.contributions.values().map(|entry| &entry.broadcast))
+		.chain(catalog.include.values().map(|entry| &entry.broadcast))
 	{
 		if !rel.is_empty() && base.try_resolve(rel).is_none() {
 			return Err(crate::Error::EscapingBroadcast(rel.to_string()));
@@ -112,10 +112,10 @@ mod test {
 	}
 
 	#[test]
-	fn contributions_cannot_escape_the_root() {
+	fn includes_cannot_escape_the_root() {
 		let base = moq_net::Path::from_static("room/main.hang");
 		for (reference, accepted) in [("./alice.hang", true), ("../alice.hang", true), ("../../escape", false)] {
-			let json = serde_json::json!({ "contributions": { "alice": { "broadcast": reference } } }).to_string();
+			let json = serde_json::json!({ "include": { "alice": { "broadcast": reference } } }).to_string();
 			let catalog = Catalog::<()>::from_str(&json).unwrap();
 			match check_resolvable(&base, &catalog) {
 				Ok(()) => assert!(accepted, "{reference} must be refused"),

@@ -283,6 +283,12 @@ impl Connection {
 		self.shared.conn.borrow().peer_identity()
 	}
 
+	/// 32 bytes of keying material exported from the TLS session under `label` and `context`,
+	/// or `None` before the handshake completes.
+	pub(crate) fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+		self.shared.conn.borrow().export_keying_material(label, context)
+	}
+
 	/// The peer's current UDP address, following any migration.
 	pub fn remote_address(&self) -> SocketAddr {
 		self.shared.conn.borrow().remote_address()

@@ -16,9 +16,8 @@ for (const retained of [1, 64, 1024])
 			const installed = clock.install();
 			const source = new Producer();
 			const destination = new Producer();
-			const broadcastPublication = source.createBroadcast(Path.from("room"));
-			const broadcast = broadcastPublication.broadcast;
-			broadcastPublication.announce();
+			const broadcastRoute = source.route(Path.from("room"));
+			const broadcast = broadcastRoute.broadcast;
 			const producers = Array.from({ length: tracks }, (_, i) =>
 				broadcast.createTrack(`data${i}`, { refresh: 1 }),
 			);

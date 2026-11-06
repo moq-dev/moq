@@ -580,6 +580,9 @@ pub(super) struct Schedule {
 	window: u128,
 	/// The multiplex rate, in bits per second.
 	rate: Option<u64>,
+	/// Full padded slots at the current rate since one last had a spare null position: how
+	/// long, with the slot being laid out, the backlog a deadline miss reports has built.
+	busy_slots: u128,
 	/// The next slot to lay out.
 	next: Option<u128>,
 	/// The latest due slot pushed: the clock runs at least that far.
@@ -630,6 +633,7 @@ impl Schedule {
 			units: VecDeque::new(),
 			window: slot(window.as_nanos()),
 			rate: None,
+			busy_slots: 0,
 			next: None,
 			horizon: None,
 			last: None,
@@ -687,6 +691,9 @@ impl Schedule {
 
 	/// Pad to `rate` bits per second from the next slot on, or stop padding.
 	pub fn set_rate(&mut self, rate: Option<u64>) {
+		if self.rate != rate {
+			self.busy_slots = 0;
+		}
 		self.rate = rate;
 	}
 
@@ -1003,8 +1010,9 @@ impl Schedule {
 		let Some(program) = &self.units[i].tables else {
 			return false;
 		};
-		self.clock = Some(program.clock);
-		self.rate = program.rate;
+		let (clock, rate) = (program.clock, program.rate);
+		self.clock = Some(clock);
+		self.set_rate(rate);
 		if std::mem::take(&mut self.opening) {
 			self.clocked = self.clocked.max(index + OPENING);
 		}
@@ -1035,6 +1043,7 @@ impl Schedule {
 		self.system = None;
 		self.mb.clear();
 		self.next = None;
+		self.busy_slots = 0;
 		self.horizon = None;
 		self.last = None;
 		self.ended = false;
@@ -1467,7 +1476,7 @@ impl Schedule {
 					&& pid == unit.pid
 					&& done > unit.timing.decode as i128
 				{
-					return Err(self.missed(pid, rate));
+					return Err(self.missed(pid, index, rate));
 				}
 				self.transport.insert(tb, (arrived, since));
 				if let Some((empty, floor_empty, _)) = bsys {
@@ -1558,19 +1567,31 @@ impl Schedule {
 			&& let Some(unit) = self.units.iter().find(|unit| {
 				!unit.late && unit.place.is_none() && unit.timing.by as i128 <= end && unit.remaining() > 0
 			}) {
-			return Err(self.missed(unit.pid, rate));
+			return Err(self.missed(unit.pid, index, rate));
 		}
 		for unit in self.units.iter().filter(|unit| unit.remaining() == 0) {
 			self.decoding.extend(unit.leaving());
 		}
 		self.units.retain(|unit| unit.remaining() > 0);
+		self.busy_slots = if out.nulls > 0 { 0 } else { self.busy_slots + 1 };
 		Ok(out)
 	}
 
 	/// The error for a unit on `pid` that misses its decode deadline at `rate`, naming what
 	/// would carry it: the delay at which it goes as far ahead as its decoder buffer holds,
 	/// where the window cut it short, else a faster multiplex.
-	fn missed(&self, pid: u16, rate: u64) -> anyhow::Error {
+	fn missed(&self, pid: u16, index: u128, rate: u64) -> anyhow::Error {
+		// Every slot since the last with a spare null position went out full, so the packets
+		// released by now and still unsent built up over that stretch alone. Units not yet
+		// released are the delay's lookahead, not a deficit.
+		let backlog: u128 = self
+			.units
+			.iter()
+			.filter(|unit| self.release(unit) <= index)
+			.map(|unit| unit.remaining() as u128)
+			.sum();
+		let elapsed = (self.busy_slots + 1) * PCR_INTERVAL.as_nanos();
+		let needed = u128::from(rate) + (backlog * TsPacket::SIZE as u128 * 8 * 1_000_000_000).div_ceil(elapsed);
 		let reach = self
 			.buffers
 			.get(&pid)
@@ -1579,11 +1600,11 @@ impl Schedule {
 			.filter(|&reach| reach > self.window);
 		match reach {
 			Some(reach) => anyhow::anyhow!(
-				"MPEG-TS output missed a decode deadline on PID {pid} at {rate} b/s; raise the delay to {:?}, which sends it as far ahead as its decoder buffer holds, or the multiplex rate",
+				"MPEG-TS output missed a decode deadline on PID {pid} at {rate} b/s (estimated needed rate {needed} b/s); raise the delay to {:?}, which sends it as far ahead as its decoder buffer holds, or the multiplex rate",
 				PCR_INTERVAL * u32::try_from(reach).unwrap_or(u32::MAX)
 			),
 			None => anyhow::anyhow!(
-				"MPEG-TS output missed a decode deadline on PID {pid} at {rate} b/s, sent as far ahead as its decoder buffer holds; raise the multiplex rate"
+				"MPEG-TS output missed a decode deadline on PID {pid} at {rate} b/s (estimated needed rate {needed} b/s), sent as far ahead as its decoder buffer holds; raise the multiplex rate"
 			),
 		}
 	}
@@ -2705,10 +2726,16 @@ mod tests {
 					..VIDEO
 				},
 			);
+			// Padding with room to spare before the burst is no part of its deficit.
+			schedule.push(1, timing(950), unit(1, 10), true).unwrap();
 			schedule.push(1, timing(1_000), unit(1, 200), true).unwrap();
+			schedule.push(1, timing(2_000), unit(1, 10), false).unwrap();
 			let err = std::iter::from_fn(|| schedule.next(None).transpose()).find_map(Result::err);
 			let err = err.expect("a burst past the window must fail the export").to_string();
 			assert!(err.contains(fix), "window {window} ms, reach {reach} ms: {err}");
+			// Three full 40-packet slots each send 39 media packets. The 83 left over 75 ms
+			// add 1,664,427 b/s to the grid; the unreleased future unit adds nothing.
+			assert!(err.contains("estimated needed rate 4070827 b/s"), "{err}");
 		}
 	}
 
