@@ -60,6 +60,7 @@ pub(crate) async fn serve_ws(
 	))
 	.map_err(|_| StatusCode::BAD_REQUEST)?;
 	let mut server = moq_net::Server::new()
+		.with_timeout(state.timeout)
 		.with_versions(versions)
 		.with_extensions(extensions);
 	if let Some(implementation) = implementation {
@@ -71,8 +72,6 @@ pub(crate) async fn serve_ws(
 	options.link.server_name = server_name.map(|Extension(ServerName(name))| name);
 	options.identity = mtls.map(|Extension(MtlsPeer(identity))| identity);
 	options.socket_stats = socket_stats.map(|Extension(stats)| stats.0);
-	// The listener reads `None` as no deadline; `Options` reads it as the default.
-	options.timeout = Some(state.timeout.unwrap_or_default());
 	options.quic = state.quic.clone();
 
 	let upgrade = hyper::upgrade::on(&mut request);
@@ -701,11 +700,12 @@ mod tests {
 		let activity = moq_net::server::Activity::default();
 		let mut options = moq_tokio::websocket::Options::new(
 			"ws://localhost/".parse().unwrap(),
-			moq_net::Server::new().with_versions(moq_net::Versions::all()),
+			moq_net::Server::new()
+				.with_versions(moq_net::Versions::all())
+				.with_timeout(None),
 			activity.enter().unwrap(),
 		);
 		options.link.alpn = Some(alpn.clone());
-		options.timeout = Some(Duration::ZERO);
 		let server = tokio::spawn(moq_tokio::websocket::accept(
 			Pipe::new(server_incoming, server_to_client, frozen.clone()),
 			options,
@@ -754,11 +754,12 @@ mod tests {
 		let activity = moq_net::server::Activity::default();
 		let mut options = moq_tokio::websocket::Options::new(
 			"ws://localhost/".parse().unwrap(),
-			moq_net::Server::new().with_versions(moq_net::Versions::all()),
+			moq_net::Server::new()
+				.with_versions(moq_net::Versions::all())
+				.with_timeout(Some(timeout)),
 			activity.enter().unwrap(),
 		);
 		options.link.alpn = Some(alpn.clone());
-		options.timeout = Some(timeout);
 		let start = kio::clock::now();
 		let server = tokio::spawn(moq_tokio::websocket::accept(
 			Pipe::new(server_incoming, server_to_client, Arc::new(AtomicBool::new(false))),

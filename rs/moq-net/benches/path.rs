@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::FutureExt;
 use moq_net::{
-	Hop, Hops, Path, Pattern, Patterns,
+	Path, Pattern, Patterns,
 	fuzz::{Announced, Messages, decode_announces, decode_namespaces, encode_announces, encode_namespaces},
 	kio, origin,
 };
@@ -64,10 +64,6 @@ const SHORT: &str = "room/alice";
 const MEDIUM: &str = "anon/7f3a9c2e1b/camera";
 const LONG: &str = "1234/private/channel_7/stream-health-1700000000";
 
-fn hops(ids: &[u64]) -> Hops {
-	Hops::try_from(ids.iter().map(|id| Hop::new(*id).unwrap()).collect::<Vec<_>>()).unwrap()
-}
-
 fn paths() {
 	for (name, s) in [("short", SHORT), ("medium", MEDIUM), ("long", LONG)] {
 		let path = Path::new(s).unwrap();
@@ -109,7 +105,7 @@ fn decode() {
 		let stream: Vec<Announced> = paths
 			.iter()
 			.enumerate()
-			.map(|(i, path)| Announced::Start(path.clone(), hops(&[0x1111 + i as u64, 0x2222])))
+			.map(|(i, path)| Announced::Start(path.clone(), vec![0x1111 + i as u64, 0x2222]))
 			.collect();
 		for compress in [false, true] {
 			let data = encode_announces(&stream, compress);

@@ -65,5 +65,4 @@ The epic's own work, once every child has merged:
 
 ## Required
 
-- [One typed unsupported-CPU error](/quest/m1/rind/cpu-error.md) - moq-auth, moq-hls and moq-crypto e2ee carry `moq_crypto::provider::UnsupportedCpu` and drop their own CPU-check helpers
 - [moq-rtc on rind](/quest/m1/rind/rtc.md) - str0m and dimpl run DTLS, SRTP, and STUN on rind
