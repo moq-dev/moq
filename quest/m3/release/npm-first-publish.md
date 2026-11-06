@@ -1,18 +1,14 @@
-# [XS] Claim the new @moq npm and JSR names
+# [XS] Claim the new @moq npm names
 
 ## Goal
 
-`@moq/clock`, `@moq/libav`, and `@moq/video` exist on npm, and
-the two with JSR packages exist on JSR, each with trusted publishing
-attached to `moq-dev/moq`. The cut's release workflow can then publish
+`@moq/clock`, `@moq/libav`, and `@moq/video` exist on npm, each with trusted
+publishing attached to `moq-dev/moq` and the `npm` Environment. The cut's release workflow can then publish
 their real versions. A maintainer does this by hand. Delete this quest once
 the checks pass:
 
 - `npm view @moq/<name>` resolves for all three, and the package settings show
-  the `moq-dev/moq` trusted publisher.
-- `https://api.jsr.io/scopes/moq/packages/<name>` returns 200 for `clock`
-  and `video`, each linked to the repository. `@moq/libav` sets
-  `"jsr": false`.
+  the `moq-dev/moq` trusted publisher with Environment `npm`.
 
 ## Plan
 
@@ -42,6 +38,10 @@ it clears with the same publication.
 `@moq/p2p` is out of scope: it is private with no release script, so the cut
 does not publish it. [Watch opts in](/quest/m4/p2p/watch.md) owns its first
 publication, including claiming its names.
+
+Decided 2026-11-06 (maintainer, /quest-unblock): JSR is dropped
+([Stop publishing to JSR](/quest/m0/ci/jsr-retire.md)), so no JSR names are
+claimed.
 
 Public API: none. Wire: none.
 

@@ -13,6 +13,16 @@ set -euo pipefail
 # `--fanout` counts the chat fan-out's instructions per delivered group on one thread,
 # for each BENCH_BASE revision and the current tree, independent of host load.
 
+# Reuse the paired relay suite without repeating unrelated Criterion measurements.
+RELAY_ONLY=false
+if [[ ${1:-} == --relay ]]; then
+    RELAY_ONLY=true
+    shift
+    if (($# > 1)) || [[ ${1:-} == --* ]]; then
+        printf 'usage: run.sh --relay [BASE]\n' >&2
+        exit 2
+    fi
+fi
 MODE=${1:-}
 ROUNDS=${BENCH_RUNTIME_ROUNDS:-3}
 if [[ ! $ROUNDS =~ ^[0-9]+$ ]] || ((10#$ROUNDS < 1)); then
@@ -185,6 +195,10 @@ case $MODE in
         RUNTIME_WORKERS=$((10#$RUNTIME_WORKERS))
         ;;
     *)
+        if (($# > 1)); then
+            printf 'usage: run.sh [BASE], or run.sh --relay [BASE]\n' >&2
+            exit 2
+        fi
         BASE=$MODE
         # Video stays on QUIC; chat (per-message cost) and fanout (per-byte cost) sweep the transports.
         RELAY_CASES=(quic/video)
@@ -200,7 +214,11 @@ esac
 ROOT=$(git rev-parse --show-toplevel)
 # shellcheck source=bench/lock.sh
 source "$ROOT/bench/lock.sh"
-bench_lock "$0" "$@"
+if [[ $RELAY_ONLY == true ]]; then
+    bench_lock "$0" --relay "$@"
+else
+    bench_lock "$0" "$@"
+fi
 TARGET=${CARGO_TARGET_DIR:-$ROOT/target/bench}
 if [[ $TARGET != /* ]]; then
     TARGET=$ROOT/$TARGET
@@ -282,7 +300,11 @@ STDOUT_PID=$!
 exec 2> >(tee "$RUN/stderr.log" >&4)
 STDERR_PID=$!
 
-python3 "$ROOT/bench/metadata.py" "$RUN" "$BASE" "$MODE" "${RUNTIME_WORKERS:-}" "$ROUNDS"
+METADATA_MODE=$MODE
+if [[ $RELAY_ONLY == true ]]; then METADATA_MODE=--relay; fi
+python3 "$ROOT/bench/metadata.py" "$RUN" "$BASE" "$METADATA_MODE" "${RUNTIME_WORKERS:-}" "$ROUNDS"
+# Record external load before this session's builds and measurements add their own.
+if [[ -r /proc/loadavg ]]; then cat /proc/loadavg >"$RUN/loadavg-start.txt"; fi
 cp -R "$ROOT/bench/workloads" "$RUN/workloads"
 cp -R "$ROOT/bench" "$RUN/harness"
 
@@ -1303,9 +1325,11 @@ elif [[ -n $BASE ]]; then
         python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE_COMMIT" comparison-base
     )
 
-    printf 'Criterion comparison: %s (%s) versus current\n' "$BASE" "$BASE_COMMIT"
-    compare_criterion "$WORKTREE" "$ROOT"
-    report_set_changes
+    if [[ $RELAY_ONLY == false ]]; then
+        printf 'Criterion comparison: %s (%s) versus current\n' "$BASE" "$BASE_COMMIT"
+        compare_criterion "$WORKTREE" "$ROOT"
+        report_set_changes
+    fi
 
     printf '\nBuilding relay binaries...\n'
     (
@@ -1315,8 +1339,10 @@ elif [[ -n $BASE ]]; then
     cp "$BASE_TARGET/release/moq-relay" "$RUN/moq-relay-base"
     chmod +x "$RUN/moq-relay-base"
 else
-    printf 'Criterion current: %s\n' "$(git rev-parse --short HEAD)"
-    run_criterion "$ROOT" --discard-baseline
+    if [[ $RELAY_ONLY == false ]]; then
+        printf 'Criterion current: %s\n' "$(git rev-parse --short HEAD)"
+        run_criterion "$ROOT" --discard-baseline
+    fi
     printf '\nBuilding relay binaries...\n'
 fi
 generate_certificate
