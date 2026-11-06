@@ -57,14 +57,14 @@ class BroadcastState {
 }
 
 // Datagram tracks never enter the stream listing or cache.
-function liveDatagrams(state: BroadcastState, name: string): datagram.Consumer | undefined {
+function liveDatagrams(state: BroadcastState, name: string, passive = false): datagram.Consumer | undefined {
 	const producer = state.datagrams.get(name);
 	if (!producer) return;
 	if (producer.closed.peek() !== undefined) {
 		state.datagrams.delete(name);
 		return;
 	}
-	return producer.consume();
+	return passive ? hooks.observeDatagrams(producer) : producer.consume();
 }
 
 function createDatagrams(state: BroadcastState, name: string, info: Partial<datagram.Info>): datagram.Producer {
@@ -378,13 +378,14 @@ export class Producer {
 
 	constructor() {
 		registerWire(this, {
+			localDatagrams: !this.#state.unheld,
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
 			largest: (name) => largest(this.#state, name),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => requested(this.#state),
 			datagrams: (name) => datagrams(this.#state, name),
-			liveDatagrams: (name) => liveDatagrams(this.#state, name),
+			liveDatagrams: (name) => liveDatagrams(this.#state, name, true),
 			createDatagrams: (name, info) => createDatagrams(this.#state, name, info),
 			requestedDatagrams: () => requestedDatagrams(this.#state),
 			tracks: (owner) => listTracks(this.#state.listing, owner),
@@ -539,13 +540,14 @@ export class Consumer {
 		}
 		this.#state.consumers++;
 		registerWire(this, {
+			localDatagrams: !this.#state.unheld,
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
 			largest: (name) => largest(this.#state, name),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => requested(this.#state),
 			datagrams: (name) => datagrams(this.#state, name),
-			liveDatagrams: (name) => liveDatagrams(this.#state, name),
+			liveDatagrams: (name) => liveDatagrams(this.#state, name, true),
 			createDatagrams: (name, info) => createDatagrams(this.#state, name, info),
 			requestedDatagrams: () => requestedDatagrams(this.#state),
 			tracks: (owner) => this.#tracks(owner),
