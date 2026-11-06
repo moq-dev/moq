@@ -671,22 +671,15 @@ impl Listener {
 	/// A failed `accept(2)` is handled here rather than yielded: it is classified,
 	/// counted, logged, and paced by [`accept_health`](Self::accept_health), then
 	/// retried, because the caller has no better answer than to ask again. A
-	/// per-connection upgrade failure is still yielded as `Some(Err(..))`.
-	///
-	/// As in [`crate::tcp`], the `Option` has no `None` case left to report.
-	pub async fn accept(&self) -> Option<Result<qmux::Session>> {
-		crate::runtime::scope(async move {
-			self.accept_with_url()
-				.await
-				.map(|result| result.map(|(session, _, _)| session))
-		})
-		.await
+	/// per-connection upgrade failure is still returned as an error.
+	pub async fn accept(&self) -> Result<qmux::Session> {
+		crate::runtime::scope(async move { self.accept_with_url().await.map(|(session, _, _)| session) }).await
 	}
 
 	/// Accept the next connection and retain the WebSocket request URL, the chosen
 	/// sub-protocol, and the peer's address.
-	pub(crate) async fn accept_with_url(&self) -> Option<Result<(qmux::Session, Url, Accepted)>> {
-		Some(self.accept_pending().await.await)
+	pub(crate) async fn accept_with_url(&self) -> Result<(qmux::Session, Url, Accepted)> {
+		self.accept_pending().await.await
 	}
 
 	/// Accept a socket and return its independently driven WebSocket upgrade, so a
@@ -853,7 +846,7 @@ mod tests {
 	async fn listener_refuses_a_client_without_subprotocol() {
 		let listener = Listener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = listener.local_addr().unwrap();
-		let accepted = tokio::spawn(async move { listener.accept_with_url().await.unwrap() });
+		let accepted = tokio::spawn(async move { listener.accept_with_url().await });
 
 		let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
 		let err = tokio_tungstenite::client_async(format!("ws://{addr}/room"), stream)
