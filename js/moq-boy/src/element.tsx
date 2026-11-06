@@ -13,10 +13,20 @@ import { Game } from "./game.ts";
 import { BoyUI } from "./ui/element.tsx";
 
 /** The attributes the element observes. */
-const OBSERVED = ["url", "prefix", "prefix-game", "prefix-viewer"] as const;
+const OBSERVED = ["url", "prefix", "prefix-game"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 const DEFAULT_PREFIX = Moq.Path.from("boy");
+
+// Sockets need moq-lite-07 or moq-transport on every hop, and the relay offers moq-lite-07 only when asked.
+const VERSIONS = ["moq-lite-07-wip"];
+
+// A viewer's endpoint id: random, so no other viewer can claim it, under the prefix the relay lets anonymous
+// viewers publish, so no viewer can claim a game's.
+function viewerId(): string {
+	const bytes = crypto.getRandomValues(new Uint8Array(16));
+	return `viewer-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
 
 const cleanup = new FinalizationRegistry<Moq.Signals.Effect>((signals) => signals.close());
 
@@ -26,9 +36,11 @@ const cleanup = new FinalizationRegistry<Moq.Signals.Effect>((signals) => signal
  *
  * Attributes:
  *   - `url` - MoQ relay URL
- *   - `prefix` - Base path prefix (default: "boy"). Derives prefix-game and prefix-viewer.
- *   - `prefix-game` - Path prefix for game broadcasts (default: `{prefix}/game`)
- *   - `prefix-viewer` - Path prefix for viewer broadcasts (default: `{prefix}/viewer`)
+ *   - `prefix` - Base path prefix (default: "boy"). Derives prefix-game.
+ *   - `prefix-game` - Path prefix for game broadcasts and the socket endpoints of games and viewers
+ *     (default: `{prefix}/game`)
+ *
+ * Each viewer runs one socket endpoint with a random id and dials each game it plays.
  */
 export default class MoqBoy extends HTMLElement {
 	/** The attributes the browser reports changes to. */
@@ -36,7 +48,7 @@ export default class MoqBoy extends HTMLElement {
 
 	/** The relay connection, shared by every game. */
 	readonly connection: Moq.Connection;
-	/** The origin viewer broadcasts are published into, served across reconnects. */
+	/** The origin this viewer's endpoint is published into, served across reconnects. */
 	readonly origin = new Moq.Origin.Producer();
 	/** The session currently expanded, or undefined for the grid. */
 	readonly expanded = new Moq.Signals.Signal<string | undefined>(undefined);
@@ -53,7 +65,6 @@ export default class MoqBoy extends HTMLElement {
 	readonly #enabled = new Moq.Signals.Signal(false);
 	readonly #prefix = new Moq.Signals.Signal<Moq.Path.Valid>(DEFAULT_PREFIX);
 	readonly #gamePrefixOverride = new Moq.Signals.Signal<Moq.Path.Valid | undefined>(undefined);
-	readonly #viewerPrefixOverride = new Moq.Signals.Signal<Moq.Path.Valid | undefined>(undefined);
 	readonly #sessions = new Map<string, Game>();
 	#dispose?: () => void;
 
@@ -65,10 +76,11 @@ export default class MoqBoy extends HTMLElement {
 			this.#enabled.set(effect.get(this.#connected) && effect.get(this.#refused).size === 0);
 		});
 
-		// One origin, both directions: viewer broadcasts are published into it and the
-		// relay's announced games arrive in it, with no risk of echoing either back.
+		// One origin, both directions: the viewer's endpoint is published into it and the
+		// relay's announced games and endpoints arrive in it, with no risk of echoing either back.
 		this.connection = new Moq.Connection({
 			enabled: this.#enabled,
+			versions: VERSIONS,
 			publish: this.origin.consume(),
 			consume: this.origin,
 			share: false,
@@ -110,10 +122,8 @@ export default class MoqBoy extends HTMLElement {
 
 		if (name === "prefix") {
 			this.#prefix.set(path ?? DEFAULT_PREFIX);
-		} else if (name === "prefix-game") {
-			this.#gamePrefixOverride.set(path);
 		} else {
-			this.#viewerPrefixOverride.set(path);
+			this.#gamePrefixOverride.set(path);
 		}
 	}
 
@@ -153,20 +163,20 @@ export default class MoqBoy extends HTMLElement {
 		this.#refuse("prefix-game", false);
 	}
 
-	/** The path prefix for viewer broadcasts, mirrored by the `prefix-viewer` attribute. */
-	get prefixViewer(): string {
-		return this.#viewerPrefixOverride.peek() ?? Moq.Path.from(this.#prefix.peek(), "viewer");
-	}
-
-	set prefixViewer(value: string) {
-		this.#viewerPrefixOverride.set(Moq.Path.from(value));
-		this.#refuse("prefix-viewer", false);
-	}
-
 	#runDiscovery(effect: Moq.Signals.Effect) {
 		const base = effect.get(this.#prefix);
 		const gamePrefix = effect.get(this.#gamePrefixOverride) ?? Moq.Path.from(base, "game");
-		const viewerPrefix = effect.get(this.#viewerPrefixOverride) ?? Moq.Path.from(base, "viewer");
+
+		// The endpoint every game under this prefix is dialed from.
+		const endpoint = new Moq.socket.Endpoint(this.origin, gamePrefix, viewerId());
+		effect.cleanup(() => endpoint.close());
+
+		// Games under the old prefix dial from the old endpoint, so they go with it.
+		effect.cleanup(() => {
+			for (const game of this.#sessions.values()) game.close();
+			this.#sessions.clear();
+			this.games.set(new Map());
+		});
 
 		// The origin's stream spans reconnects: entries retract when the session dies and
 		// return when the next one re-announces them, so this loop never needs to restart.
@@ -188,9 +198,9 @@ export default class MoqBoy extends HTMLElement {
 						sessionId: id,
 						connection: this.connection,
 						origin: this.origin,
+						endpoint,
 						expanded: this.expanded,
 						gamePrefix,
-						viewerPrefix,
 					};
 					const game = new Game(config);
 					this.#sessions.set(id, game);

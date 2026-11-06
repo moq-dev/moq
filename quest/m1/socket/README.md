@@ -186,10 +186,6 @@ This epic owns removing the hand-rolled loops: after the ports, no
 announce-watch-request pairing remains in `rs/moq-boy`, `js/moq-boy`, or
 `demo/carla`.
 
-## Required
-
-- [moq-boy on sockets](/quest/m1/socket/boy.md) - viewers dial the emulator's endpoint and send commands and receive latency on their session
-
 ## Related
 
 - [Byte streams](/quest/m3/stream/README.md) - TCP over sockets, one session per connection
