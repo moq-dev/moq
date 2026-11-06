@@ -34,4 +34,3 @@ stays in m1 until its claim merges, so this gate lists it as a blocker; the
 
 - [Pre-cut audit findings](/quest/m2/cut-gate/cut-audit/README.md) - fix the crashes, hostile-input costs, and correctness bugs the 2026-10-24 audit of main found
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason (held in m1 by an open claim)
-- [moq-c at parity](/quest/m2/cut-gate/c/README.md) - the hand-written `moq-c` ships at the cut with every binding feature moq-ffi gains
