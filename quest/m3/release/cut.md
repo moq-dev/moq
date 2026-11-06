@@ -46,7 +46,7 @@ and adoption quests move to m0, m3's other quests split by kind into m1
 (additive) and m2 (breaking), m4's move to m3, m5 stays, and every link to a
 moved path is rewritten. A recurring cut-gate child that its last run
 re-created in m3, such as the [vendor
-sync](/quest/m2/cut-gate/vendor-sync/README.md), moves under the re-created
+sync](/quest/m3/vendor-sync/README.md), moves under the re-created
 gate instead. That PR also removes this path from every `Required`, which
 releases the audits waiting on it. It then re-creates the [cut
 gate](/quest/m2/cut-gate/README.md) in m2 as that gate's Plan describes, and
