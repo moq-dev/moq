@@ -6476,14 +6476,10 @@ mod tests {
 			if stage == "credit" {
 				*opening.write().ok().expect("gate live") = false;
 			}
-			let wire = Wire {
-				subscription: Subscription::default(),
-				demand: Some(Subscription::default()),
-				demand_ranges: vec![lite::Range::OLDEST],
-				ranges: vec![lite::Range::OLDEST],
-			};
-			let establish = serve.prepare_establish(&mut serving.serving, wire, &Default::default());
-			serving.mode = ServeMode::Establish(establish);
+			serving.linger.set(Some(serve.subscriber.runtime.now()));
+			let pref = serving.serving.subscription();
+			serving.begin(&serve, pref).unwrap();
+			assert!(serving.linger.deadline().is_none(), "new demand ends the old linger");
 			let gate_run = serve.gate();
 			let mut running = TrackServeRun {
 				serve,
@@ -6535,6 +6531,66 @@ mod tests {
 			assert!(serving.fetches.is_empty());
 			drop(gate);
 		}
+	}
+
+	/// Equal demand returning between cancellation and Select must open a new setup.
+	#[kio::test]
+	async fn identical_demand_after_setup_cancellation_is_not_already_served() {
+		let gate = kio::Producer::new(false);
+		let opening = kio::Producer::new(true);
+		let session = SinkSession::gated_bi(gate.consume()).with_open_bi_gate(opening.consume());
+
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin,
+			recv_bandwidth: None,
+			version: Version::Lite07,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let subscribes = subscriber.subscribes.clone();
+		let serve = TrackServe {
+			validity: Default::default(),
+			route: None,
+			source: None,
+			subscriber,
+			path: Path::from_static("room/host"),
+			instance: None,
+			name: "audio".to_string(),
+		};
+
+		let broadcast = crate::broadcast::Info::new().produce();
+		let request = broadcast.reserve_track("audio").unwrap();
+		let mut serving = ServeLoop::new(&serve, request, Default::default());
+		let held = Stream::open(&serve.subscriber.session, Version::Lite07).await.unwrap();
+		serving.held = Some(HeldTrack(held));
+		let wire = Wire {
+			subscription: Subscription::default(),
+			demand: Some(Subscription::default()),
+			demand_ranges: vec![lite::Range::OLDEST],
+			ranges: vec![lite::Range::OLDEST],
+		};
+		let reader = serving.serving.subscribe(None);
+		serving.serving.seen_subscription(Some(Subscription::default()));
+		let establish = serve.prepare_establish(&mut serving.serving, wire, &Default::default());
+		serving.mode = ServeMode::Establish(establish);
+
+		drop(reader);
+		serving.abandon_setup();
+		let _returning = serving.serving.subscribe(None);
+		assert!(matches!(
+			serving.serving.poll_subscription_changed(&kio::Waiter::noop()),
+			Poll::Ready(Ok(Some(_)))
+		));
+		let pref = serving.serving.subscription();
+		serving.begin(&serve, pref).unwrap();
+		assert!(matches!(serving.mode, ServeMode::Establish(_)));
+		assert_eq!(subscribes.lock().len(), 1);
 	}
 
 	/// A setup no reader has reached yet is not abandoned: it may attach after the
@@ -10708,11 +10764,21 @@ impl ServeLoop {
 			tail.set_grace(self.serving.tail_grace(pipelined.pref.budget()));
 		}
 		self.parked = Some(pipelined.id());
-		self.serving.seen_subscription(pipelined.pref);
+		self.serving.seen_subscription(Some(pipelined.pref));
 		match pipelined.state {
 			PipelinedState::Opening(establish) => self.mode = ServeMode::Establish(establish),
 			PipelinedState::Open(active) => self.sub = Sub::Active(active),
 		}
+	}
+
+	/// Release a setup that no longer has demand, including the demand it acted on.
+	fn abandon_setup(&mut self) {
+		let ServeMode::Establish(est) = std::mem::replace(&mut self.mode, ServeMode::Select) else {
+			unreachable!()
+		};
+		est.abort(&Error::Cancel);
+		self.held = None;
+		self.serving.seen_subscription(None);
 	}
 
 	/// Apply a demand change: open, update, or cancel the upstream subscription.
@@ -10725,6 +10791,7 @@ impl ServeLoop {
 			self.supports_update,
 		)? {
 			Begin::Establish(est) => {
+				self.linger.set(None);
 				// A fresh subscription may deliver what the last one would not.
 				self.range_fills.forget_refused();
 				self.mode = ServeMode::Establish(est);
@@ -11005,11 +11072,7 @@ impl ServeLoop {
 						&& self.range_fills.is_empty()
 						&& est.arrived && !read
 					{
-						let ServeMode::Establish(est) = std::mem::replace(&mut self.mode, ServeMode::Select) else {
-							unreachable!()
-						};
-						est.abort(&Error::Cancel);
-						self.held = None;
+						self.abandon_setup();
 						continue;
 					}
 					let res = ready!(est.poll(waiter));

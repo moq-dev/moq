@@ -4111,10 +4111,11 @@ impl Producer {
 
 	/// Count `seen` as the aggregate already acted on, so
 	/// [`Self::poll_subscription_changed`] reports only a change from it: the demand a
-	/// subscriber session asked upstream for before accepting the track.
+	/// subscriber session asked upstream for before accepting the track, or `None`
+	/// after abandoning that setup.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn seen_subscription(&mut self, seen: Subscription) {
-		self.prev_subscription = Some(seen);
+	pub(crate) fn seen_subscription(&mut self, seen: Option<Subscription>) {
+		self.prev_subscription = seen;
 	}
 
 	/// How long a subscriber session's tail waits for a late group: `budget`, bounded by how
