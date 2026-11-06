@@ -14461,6 +14461,7 @@ abstract class MoqTrackProducerInterface {
   void finishAt({required int finalSequence});
   MoqPosition? largest();
   MoqTrackRequests requests();
+  void skipGroups({required int start, required int end});
   void writeFrame({required MoqFrame frame});
 }
 
@@ -14596,6 +14597,17 @@ class MoqTrackProducer implements MoqTrackProducerInterface {
       FfiConverterMoqTrackRequests.lift,
       moqExceptionErrorHandler,
     );
+  }
+
+  void skipGroups({required int start, required int end}) {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqtrackproducer_skip_groups(
+        uniffiClonePointer(),
+        FfiConverterUInt64.lower(start),
+        FfiConverterUInt64.lower(end),
+        status,
+      );
+    }, moqExceptionErrorHandler);
   }
 
   void writeFrame({required MoqFrame frame}) {
@@ -22067,6 +22079,16 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqtrackproducer_requests(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Void Function(Pointer<Void>, Uint64, Uint64, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqtrackproducer_skip_groups(
+  Pointer<Void> ptr,
+  int start,
+  int end,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Void Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -23876,6 +23898,9 @@ external int uniffi_moq_ffi_checksum_method_moqtrackproducer_largest();
 external int uniffi_moq_ffi_checksum_method_moqtrackproducer_requests();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqtrackproducer_skip_groups();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqtrackproducer_write_frame();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -24760,6 +24785,9 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackproducer_requests() != 60252) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqtrackproducer_skip_groups() != 25592) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackproducer_write_frame() != 46891) {

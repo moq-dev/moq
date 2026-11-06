@@ -800,6 +800,19 @@ impl MoqTrackProducer {
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 
+	/// Declare that groups `start` up to the exclusive `end` will never be produced.
+	///
+	/// Readers waiting on them move past without ending, and a relay forwards the skip. A
+	/// skip is final: creating a group there is then refused. A group already written keeps
+	/// what it is. [`append_group`](Self::append_group) skips the gap below it on its own.
+	pub fn skip_groups(&self, start: u64, end: u64) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		let guard = self.inner.lock().unwrap();
+		let raw = guard.as_ref().ok_or(MoqError::Closed)?;
+		raw.skip_groups(start..end);
+		Ok(())
+	}
+
 	/// Write `frame` as a single-frame group.
 	///
 	/// A timestamp at another scale than the track's is converted to it, rounding down. The frame must

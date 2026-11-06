@@ -2395,6 +2395,23 @@ fn raw_track_sparse_groups_and_known_end() {
 }
 
 #[test]
+fn raw_track_skips_are_final() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"raw-track-skips-are-final");
+	let name = b"skipped";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+
+	assert_eq!(moq_publish_track_skip(track, 1, 3), 0);
+	assert!(moq_publish_track_group_at(track, 2) < 0);
+	let group = id(moq_publish_track_group_at(track, 3));
+	assert_eq!(moq_publish_group_finish(group), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert!(moq_publish_track_skip(track, 4, 5) < 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+}
+
+#[test]
 fn raw_track_and_group_abort_consume_their_handles() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"raw-track-and-group-abort-consume-their-handles");
