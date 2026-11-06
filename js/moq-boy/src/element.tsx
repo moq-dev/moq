@@ -168,7 +168,7 @@ export default class MoqBoy extends HTMLElement {
 		const gamePrefix = effect.get(this.#gamePrefixOverride) ?? Moq.Path.from(base, "game");
 
 		// The endpoint every game under this prefix is dialed from.
-		const endpoint = new Moq.socket.Endpoint(this.origin, gamePrefix, viewerId());
+		const endpoint = new Moq.Socket.Endpoint(this.origin, gamePrefix, viewerId());
 		effect.cleanup(() => endpoint.close());
 
 		// Games under the old prefix dial from the old endpoint, so they go with it.

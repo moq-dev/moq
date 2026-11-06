@@ -16,7 +16,7 @@ assert(
 		version,
 );
 const origin = new Moq.Origin.Producer();
-const endpoint = new Moq.socket.Endpoint(origin, Moq.Path.from(prefix), role === "dial" ? "dialer" : "acceptor");
+const endpoint = new Moq.Socket.Endpoint(origin, Moq.Path.from(prefix), role === "dial" ? "dialer" : "acceptor");
 const next = role === "accept" ? (protocol === "tcp" ? endpoint.acceptTcp() : endpoint.acceptTrack()) : undefined;
 const connection = await Moq.Connection.connect({
 	url: new URL(address),
@@ -29,9 +29,9 @@ const lines = createInterface({ input: process.stdin });
 const commands = lines[Symbol.asyncIterator]();
 // Every Incoming is a claim: a pipelined request can outlive its refused metadata.
 // Verify each new incoming once; a failed caller's dial still fails the harness.
-async function accepted(): Promise<Moq.socket.TcpStream | Moq.socket.TrackStream> {
+async function accepted(): Promise<Moq.Socket.TcpStream | Moq.Socket.TrackStream> {
 	for (;;) {
-		const incoming: Moq.socket.Incoming<Moq.socket.TcpStream> | Moq.socket.Incoming<Moq.socket.TrackStream> =
+		const incoming: Moq.Socket.Incoming<Moq.Socket.TcpStream> | Moq.Socket.Incoming<Moq.Socket.TrackStream> =
 			await (protocol === "tcp" ? endpoint.acceptTcp() : endpoint.acceptTrack());
 		try {
 			return await incoming.accept();
@@ -59,7 +59,7 @@ try {
 	assert.match(stream.session, /^[0-9a-f]{32}$/);
 	const own = role === "dial" ? 16 : 32;
 	const peer = role === "dial" ? 32 : 16;
-	if (stream instanceof Moq.socket.TcpStream) {
+	if (stream instanceof Moq.Socket.TcpStream) {
 		// Exchange a request and reply before FIN, then drain both independent halves.
 		for (let i = 0; i < 3; i++) stream.producer.writeFrame({ payload: new Uint8Array([own + i]) });
 		stream.producer.finish();
@@ -84,7 +84,7 @@ try {
 		: protocol === "tcp"
 			? await endpoint.dialTcp("acceptor")
 			: await endpoint.dialTrack("acceptor");
-	const resetReader = second instanceof Moq.socket.TcpStream ? second.consumer : second.consumer.ordered();
+	const resetReader = second instanceof Moq.Socket.TcpStream ? second.consumer : second.consumer.ordered();
 	if (role === "dial") {
 		second.producer.writeFrame({ payload: new Uint8Array([48]) });
 		await assert.rejects(resetReader.readFrame());

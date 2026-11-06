@@ -75,7 +75,7 @@ export interface ConnectionProps {
 	client?: boolean;
 	/** The connection credential the client's SETUP presents, on versions that carry one (lite-07+). */
 	token?: Uint8Array;
-	/** The implementation our SETUP advertises (lite-05+). Defaults to {@link IMPLEMENTATION}; empty sends nothing. */
+	/** The implementation our SETUP advertises (lite-05+). Defaults to this library's; empty sends nothing. */
 	implementation?: string;
 	/** The PROBE target to send a peer that advertised `Increase`, in bits per second; zero sends none. */
 	probeTarget?: Getter<number>;
