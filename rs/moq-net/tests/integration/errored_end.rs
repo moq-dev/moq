@@ -10,7 +10,7 @@ use moq_net::track::Delay;
 use std::time::Duration;
 
 use moq_net::track::{Position, Subscription};
-use moq_net::{Error, Hop, StreamError, Timestamp, Version};
+use moq_net::{Error, StreamError, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -18,7 +18,8 @@ const GROUPS: u64 = 2;
 const FRAMES: [&[u8]; 2] = [b"first", b"second"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }

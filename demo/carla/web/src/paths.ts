@@ -1,9 +1,10 @@
 /**
- * The broadcast paths shared with the simulator.
+ * The paths and connection settings shared with the simulator.
  *
- * Trucks publish one media broadcast per camera at `carla/{truck}/{camera}.hang`.
- * Drivers publish their `control` track at `viewer/carla/{truck}/{driver}`, a
- * prefix the demo relay lets anonymous viewers publish under.
+ * Trucks publish one media broadcast per camera at `carla/{truck}/{camera}.hang`,
+ * and accept drivers on a socket endpoint named for the truck. A driver dials it
+ * from an endpoint of its own, `driver-{id}`, a form the demo relay lets
+ * anonymous viewers publish.
  *
  * @module
  */
@@ -27,7 +28,16 @@ export function parseCamera(path: string): Camera | undefined {
 	return { truck, id: `${truck}/${file.slice(0, -".hang".length)}` };
 }
 
-/** Where one driver of a truck publishes its control broadcast. */
-export function driverPath(truck: string, driver: string): Moq.Path.Valid {
-	return Moq.Path.from(`viewer/carla/${truck}/${driver}`);
+/** The prefix every truck and driver socket endpoint sits under, as `carla/.socket/{id}`. */
+export const SOCKET = Moq.Path.from("carla");
+
+/**
+ * The versions offered to the relay, most preferred first: the ones that carry socket
+ * endpoints, which are hidden broadcasts that moq-lite before 07 never carries.
+ */
+export const VERSIONS = ["moq-lite-07-wip", "moq-transport-22"] as const;
+
+/** A fresh driver endpoint id. Public, since the truck's status names its driver. */
+export function driverId(): string {
+	return `driver-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 }

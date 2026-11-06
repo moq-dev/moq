@@ -8,6 +8,7 @@
  */
 
 import * as Moq from "@moq/net";
+import { VERSIONS } from "./paths.ts";
 import { mount, PREVIEW } from "./player.ts";
 
 /** The attributes the element observes. */
@@ -30,13 +31,22 @@ export default class MoqCarla extends HTMLElement {
 	/** The relay connection, open while the element is in a document. */
 	readonly connection: Moq.Connection;
 
+	// Owned rather than borrowed from the connection, since a driver's socket
+	// endpoint publishes into it.
+	readonly #origin = new Moq.Origin.Producer();
+
 	// Set when the element is connected to the DOM.
 	readonly #connected = new Moq.Signals.Signal(false);
 	#dispose?: () => void;
 
 	constructor() {
 		super();
-		this.connection = new Moq.Connection({ enabled: PREVIEW ? false : this.#connected });
+		this.connection = new Moq.Connection({
+			enabled: PREVIEW ? false : this.#connected,
+			versions: VERSIONS,
+			publish: this.#origin.consume(),
+			consume: this.#origin,
+		});
 		cleanup.register(this, this.connection);
 	}
 
@@ -46,7 +56,7 @@ export default class MoqCarla extends HTMLElement {
 
 		// Render into a Shadow DOM, reusing the existing one on reconnect.
 		const shadow = this.shadowRoot ?? this.attachShadow({ mode: "open" });
-		this.#dispose = mount(shadow, this.connection);
+		this.#dispose = mount(shadow, this.connection, this.#origin);
 	}
 
 	/** Called by the browser when the element leaves its document. */

@@ -45,7 +45,10 @@ publisher-local padding handle:
   resends in-flight data during BBR3's Startup and one ProbeBW_UP per probe
   wait ([moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)). A browser over WebTransport can't
   reach its controller, so a lowest-priority padding stream on an ALR probe
-  schedule does ([padding](/quest/m2/probe/padding.md)).
+  schedule does ([padding](/quest/m3/probe-padding.md)). Parked 2026-11-06
+  (maintainer, /quest-unblock): the maintainer doubts padding is the right
+  approach, so padding and the [JS rung disable](/quest/m3/probe-rung-disable-js.md),
+  which recovers through it, moved to m3 for a rethink.
 
 Decided with the maintainer on 2026-10-20:
 
@@ -66,7 +69,7 @@ Decided with the maintainer on 2026-10-20:
   native rung recovery needs, and viewer handles, viewer grants, the peer's
   PROBE target, and `Increase` came back here as viewer targets, beside their
   consumers, and landed in [moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090).
-  The `js/net` send target moved to [padding](/quest/m2/probe/padding.md), its
+  The `js/net` send target moved to [padding](/quest/m3/probe-padding.md), its
   only sender.
 
 Decided with the maintainer on 2026-11-03, in review of
@@ -96,10 +99,8 @@ This README's own work, once the children land:
 
 ## Required
 
-- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - shipping Chrome and Safari publishers adapt to the relay's PROBE estimate, since they have no `getStats()`
+- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - browser publishers adapt to `getStats()`'s send estimate once Chrome and Safari report one
 - [One page-wide getStats sampling ticker](/quest/m2/probe/stats-ticker.md) - a page's connections share one sampling ticker
-- [Padding probes](/quest/m2/probe/padding.md) - a browser probes with a lowest-priority padding stream on an ALR schedule
-- [JS rung disable](/quest/m2/probe/rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding
 
 ## Related
 

@@ -9,9 +9,39 @@ import { Broadcast } from "../src/broadcast";
 const Native = AudioEncoder;
 const codecs = new Set<AudioEncoder>();
 globalThis.AudioEncoder = class extends Native {
+	#pending = 0;
+	#flushing = false;
+
 	constructor(init: AudioEncoderInit) {
-		super(init);
+		super({
+			...init,
+			output: (chunk, metadata) => {
+				// Native Opus flush adds end padding after the last input. The live publisher
+				// never flushes: discard only this benchmark's padding, keeping its input/output
+				// accounting intact and forwarding unexpected extra live chunks as usual.
+				if (this.#flushing && this.#pending === 0) return;
+				this.#pending--;
+				init.output(chunk, metadata);
+			},
+		});
 		codecs.add(this);
+	}
+
+	override encode(data: AudioData): void {
+		this.#pending++;
+		super.encode(data);
+	}
+
+	override flush(): Promise<void> {
+		this.#flushing = true;
+		return super
+			.flush()
+			.then(() => {
+				if (this.#pending !== 0) throw new Error(`codec still owes ${this.#pending} inputs`);
+			})
+			.finally(() => {
+				this.#flushing = false;
+			});
 	}
 };
 const flush = () =>
