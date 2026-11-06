@@ -43,6 +43,7 @@ async fn transfer(offerer: &Offerer, answerer: &Answerer, payload: &[u8]) {
 	let server = async {
 		let request = listener.accept_webrtc(answerer).await.unwrap();
 		assert_eq!(request.transport(), crate::Transport::WebRtc);
+		assert_eq!(request.alpn(), Some(answerer.protocol()));
 		request.with_publisher(&origin).ok().await.unwrap()
 	};
 
