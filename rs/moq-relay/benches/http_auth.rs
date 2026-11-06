@@ -74,8 +74,10 @@ impl Fixture {
 		let driver = tokio::spawn(async move { driver.run().await.unwrap() });
 		// No admission timeout, so held requests stay waiting however long setup and the
 		// measurement take.
+		let mut listen = moq_tokio::listen::Config::default();
+		listen.timeout = Some(std::time::Duration::ZERO.into());
 		let web = web::Web::new(auth, cluster, certificates, config)
-			.with_timeout(None)
+			.with_listen(&listen)
 			.bind()
 			.unwrap();
 		let addr = web.addrs().http.unwrap();
