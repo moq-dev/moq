@@ -1843,7 +1843,7 @@ pub struct moq_server_config {
 ///
 /// # Safety
 /// - Every non-NULL pointer in `config` must be valid for its length.
-unsafe fn parse_server(config: &moq_server_config) -> Result<moq_tokio::Server, Error> {
+pub(crate) unsafe fn parse_server(config: &moq_server_config) -> Result<moq_tokio::Server, Error> {
 	let mut listen = moq_tokio::listen::Config::default();
 	let prefix = unsafe { ffi::parse_str_optional(config.implementation, config.implementation_len)? };
 	listen.implementation = Some(crate::client::implementation(prefix)?);
@@ -3792,16 +3792,20 @@ pub unsafe extern "C" fn moq_publish_group_ready(
 	ffi::enter(move || {
 		let group = ffi::parse_id(group)?;
 		let callback = unsafe { ffi::OnStatus::new(user_data, on_ready)? };
-		let group = State::lock().publish.group(group)?;
+		let (group, mut ended) = State::lock().publish.group(group)?;
 		let frame = moq_net::frame::Info { size, timestamp: None };
 		tokio::spawn(async move {
 			let res = ffi::run(async {
-				kio::wait(|waiter| match group.lock().as_ref() {
+				let ready = kio::wait(|waiter| match group.lock().as_ref() {
 					Some(group) => group.poll_ready(waiter, &frame),
 					// Finished or aborted: the next write reports why.
 					None => std::task::Poll::Ready(()),
-				})
-				.await;
+				});
+				// The handle ending also resolves it: a finish does not wake `poll_ready`.
+				tokio::select! {
+					() = ready => {}
+					_ = ended.changed() => {}
+				}
 				Ok(())
 			})
 			.await;

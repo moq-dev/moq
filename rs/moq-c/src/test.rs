@@ -5,6 +5,8 @@ use std::ffi::{c_char, c_void};
 use std::sync::mpsc;
 use std::time::Duration;
 
+mod parity;
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A timestamp of `value` microseconds.
@@ -1149,8 +1151,8 @@ fn publish_catalog_roundtrip() {
 		coded_width: width,
 		coded_height: height,
 		container: moq_container::default(),
-		warmup_us: 0,
-		has_warmup: false,
+		warmup_us: 250_000,
+		has_warmup: true,
 	};
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
 	let disabled_video_name = "video-disabled";
@@ -1209,10 +1211,10 @@ fn publish_catalog_roundtrip() {
 		sample_rate: 48000,
 		channel_count: 2,
 		container: moq_container::default(),
-		jitter_us: 0,
-		has_jitter: false,
-		warmup_us: 0,
-		has_warmup: false,
+		jitter_us: 20_000,
+		has_jitter: true,
+		warmup_us: 40_000,
+		has_warmup: true,
 	};
 	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &audio) }, 0);
 
@@ -1254,6 +1256,7 @@ fn publish_catalog_roundtrip() {
 	);
 	assert_eq!(video_cfg.coded_width, 1920);
 	assert_eq!(video_cfg.coded_height, 1080);
+	assert_eq!((video_cfg.warmup_us, video_cfg.has_warmup), (250_000, true));
 	let mut enabled = std::mem::MaybeUninit::<bool>::uninit();
 	assert_eq!(
 		unsafe { moq_consume_video_enabled(catalog_id, 0, enabled.as_mut_ptr()) },
@@ -1319,6 +1322,8 @@ fn publish_catalog_roundtrip() {
 	);
 	assert_eq!(audio_cfg.sample_rate, 48000);
 	assert_eq!(audio_cfg.channel_count, 2);
+	assert_eq!((audio_cfg.jitter_us, audio_cfg.has_jitter), (20_000, true));
+	assert_eq!((audio_cfg.warmup_us, audio_cfg.has_warmup), (40_000, true));
 
 	// Removing the video rendition republishes a catalog without it.
 	assert_eq!(

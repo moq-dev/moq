@@ -162,6 +162,8 @@ enum RawControl {
 	Pending(Option<moq_net::track::Subscription>),
 	/// Subscribed: updates apply at once, so a refusal reaches the caller.
 	Live(moq_net::track::Control),
+	/// A socket's `tcp` half: one group, with no subscription to update.
+	Group,
 }
 
 /// Outcome of polling a raw track source alongside its control channels.
@@ -806,31 +808,83 @@ impl Consume {
 					RawStep::End | RawStep::Stop => return Ok(()),
 				};
 
-			loop {
-				let frame = match moq_net::kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::frame::Frame>, Error>> {
-					if Pin::new(&mut close).poll(&mut waiter.context()).is_ready() {
-						return Poll::Ready(Ok(RawStep::Stop));
-					}
-					match ready!(group.poll_read_frame(waiter))? {
-						Some(frame) => Poll::Ready(Ok(RawStep::Item(frame))),
-						None => Poll::Ready(Ok(RawStep::End)),
-					}
-				})
-				.await?
-				{
-					RawStep::Item(frame) => frame,
-					// Group fully read: advance to the next group.
-					RawStep::End => break,
-					// Consumer closed mid-group: terminate without touching `close` again.
-					RawStep::Stop => return Ok(()),
-				};
-
-				// Hold the lock only to buffer the read; release it before the callback.
-				let frame = Timed::new(frame.payload, frame.timestamp);
-				let frame_id = State::lock().consume.raw_frame.insert(frame)?;
-				callback.call(Ok(frame_id));
+			if Self::run_group(callback, &mut group, &mut close).await? {
+				return Ok(());
 			}
 		}
+	}
+
+	/// Deliver every frame of `group` in order, returning whether `close` fired.
+	///
+	/// `close` is a oneshot that panics if polled after completion, so a `true` must unwind
+	/// the whole task.
+	async fn run_group(
+		callback: OnStatus,
+		group: &mut moq_net::group::Consumer,
+		close: &mut oneshot::Receiver<()>,
+	) -> Result<bool, Error> {
+		loop {
+			let frame = match moq_net::kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::frame::Frame>, Error>> {
+				if Pin::new(&mut *close).poll(&mut waiter.context()).is_ready() {
+					return Poll::Ready(Ok(RawStep::Stop));
+				}
+				match ready!(group.poll_read_frame(waiter))? {
+					Some(frame) => Poll::Ready(Ok(RawStep::Item(frame))),
+					None => Poll::Ready(Ok(RawStep::End)),
+				}
+			})
+			.await?
+			{
+				RawStep::Item(frame) => frame,
+				// Group fully read.
+				RawStep::End => return Ok(false),
+				// Consumer closed mid-group: terminate without touching `close` again.
+				RawStep::Stop => return Ok(true),
+			};
+
+			// Hold the lock only to buffer the read; release it before the callback.
+			let frame = Timed::new(frame.payload, frame.timestamp);
+			let frame_id = State::lock().consume.raw_frame.insert(frame)?;
+			callback.call(Ok(frame_id));
+		}
+	}
+
+	/// Read a socket stream's peer half as a raw track reader: `track` for a `track` session,
+	/// or the one group of a `tcp` session.
+	///
+	/// The `track` half keeps the reliable, oldest-first subscription the socket opened it with
+	/// until [`Self::raw_track_update`] changes it.
+	pub(crate) fn socket_read(
+		&mut self,
+		half: crate::socket::Half,
+		driver: crate::ffi::Background,
+		on_frame: OnStatus,
+	) -> Result<Id, Error> {
+		let (task, mut close) = Task::new(on_frame);
+		let control = match &half {
+			crate::socket::Half::Track(track) => RawControl::Live(track.control()),
+			crate::socket::Half::Group(_) => RawControl::Group,
+		};
+		let id = self.raw_task.insert(RawTaskEntry { task, control })?;
+
+		tokio::spawn(async move {
+			let res = crate::ffi::run(driver.watch(async move {
+				match half {
+					crate::socket::Half::Track(track) => Self::run_raw(on_frame, track.ordered(), close).await,
+					crate::socket::Half::Group(mut group) => {
+						Self::run_group(on_frame, &mut group, &mut close).await.map(drop)
+					}
+				}
+			}))
+			.await;
+
+			let entry = State::lock().consume.raw_task.remove(id);
+			if let Some(entry) = entry {
+				entry.task.callback.call(res);
+			}
+		});
+
+		Ok(id)
 	}
 
 	pub fn raw_track_update(
@@ -843,6 +897,9 @@ impl Consume {
 		match &mut entry.control {
 			RawControl::Pending(pending) => *pending = Some(subscription),
 			RawControl::Live(control) => Self::update_raw(control, subscription)?,
+			RawControl::Group => {
+				return Err(Error::Unsupported("a tcp socket stream has no subscription".into()));
+			}
 		}
 		Ok(())
 	}
