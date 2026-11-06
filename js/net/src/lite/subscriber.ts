@@ -34,7 +34,7 @@ import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
 import { Deadline } from "../util/deadline.ts";
-import { abandoned, isAbandoned, unwanted } from "../util/demand.ts";
+import { isUnrequested, unrequested, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { min, UNBOUNDED } from "../util/sequence.ts";
 import { Budget } from "../util/yield.ts";
@@ -1154,11 +1154,11 @@ export class Subscriber {
 			for (;;) {
 				const ready = await this.#auth?.ready(broadcast, "subscribe", {
 					signal: consumed.valid,
-					until: () => abandoned(request.demand()),
+					until: () => unrequested(request),
 				});
 				if (ready !== false) break;
 				// Demand returning before we commit is not abandonment, matching the serving loop.
-				if (!isAbandoned(request.demand())) continue;
+				if (!isUnrequested(request)) continue;
 				request.reject(new Error("subscribe abandoned before it was authorized"));
 				return;
 			}
@@ -1222,7 +1222,7 @@ export class Subscriber {
 		const wanted = hooks.requestWanted(request);
 		let unwatch: Dispose | undefined;
 		const watch = () => {
-			if (hooks.demandReleased(demand).peek() !== undefined || !wanted.peek()) {
+			if (isUnrequested(request)) {
 				left.abort(
 					new StreamError(StreamCode.Cancel, { message: "subscribe abandoned before it was accepted" }),
 				);
