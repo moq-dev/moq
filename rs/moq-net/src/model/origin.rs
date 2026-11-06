@@ -1564,6 +1564,10 @@ pub(crate) enum NodeFilter {
 	/// Only the routes this node serves itself.
 	Own,
 	/// Only the routes the route layer selected toward this origin node.
+	#[cfg_attr(
+		not(feature = "async"),
+		allow(dead_code, reason = "only the async session names a node")
+	)]
 	Is(u64),
 }
 
@@ -4764,10 +4768,13 @@ impl kio::Task for FrontServe {
 								}
 								// Nothing in flight: unread, or nothing serving it.
 								if !wanted || io.copy.is_none() {
+									// A track that already ended keeps its copy, which subscribes
+									// nothing any more, so a fetch still reads what it cached.
+									let ended = io.routes.ended();
 									io.end(Err(err.clone()));
 									// An unread track the front has not parked yet still holds
 									// its copy, which would keep its source subscribed.
-									if !wanted {
+									if !wanted && !ended {
 										io.routes.release();
 									}
 									continue;
