@@ -329,7 +329,7 @@ pub fn seeds() -> Vec<Seed> {
 /// The catalog an import of bbb.mp4 publishes, with CMAF passthrough or without.
 fn imported(passthrough: bool) -> crate::catalog::hang::Catalog<()> {
 	let (broadcast, catalog) = broadcast();
-	let mut import = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
+	let mut import = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_cmaf(passthrough);
 	import
 		.decode(&include_bytes!("container/fmp4/test_data/bbb.mp4")[..2035])
 		.expect("the fixture imports");

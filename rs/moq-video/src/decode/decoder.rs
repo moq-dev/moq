@@ -714,7 +714,7 @@ mod tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let subscriber = broadcast.consume();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(true);
+		let mut import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve()).with_cmaf(true);
 		import.decode(&init).unwrap();
 		import.decode(&fragment).unwrap();
 
