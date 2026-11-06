@@ -312,22 +312,37 @@ interface RunFill {
 	streams: StreamCount;
 }
 
-// The condition a request failed by its session closing is refused with: a session verdict stays
-// one, as in Rust's `to_code`, so the peer is never invited to retry it.
-function sessionVerdict(code: SessionCode): RequestCondition {
-	switch (code) {
-		case SessionCode.Unauthorized:
-			return "unauthorized";
-		case SessionCode.Expired:
-			return "expired";
-		case SessionCode.Timeout:
-			return "timeout";
-		case SessionCode.Version:
-		case SessionCode.Unsupported:
-			return "not_supported";
-		default:
-			return "internal";
+// The condition a request that failed for `err` is refused with, mirroring Rust's `to_code`: a
+// verdict stays one, so the peer is never invited to retry it.
+function refusedAs(err: Error): RequestCondition {
+	if (err instanceof SessionError) {
+		switch (err.code) {
+			case SessionCode.Unauthorized:
+				return "unauthorized";
+			case SessionCode.Expired:
+				return "expired";
+			case SessionCode.Timeout:
+				return "timeout";
+			case SessionCode.Version:
+			case SessionCode.Unsupported:
+				return "not_supported";
+		}
+	} else if (err instanceof StreamError) {
+		switch (err.code) {
+			case StreamCode.Unauthorized:
+				return "unauthorized";
+			case StreamCode.DeliveryTimeout:
+				return "timeout";
+			case StreamCode.MalformedTrack:
+				return "malformed_track";
+			case StreamCode.GoingAway:
+				return "going_away";
+			case StreamCode.NotFound:
+			case StreamCode.Unroutable:
+				return "does_not_exist";
+		}
 	}
+	return "internal";
 }
 
 /**
@@ -2735,12 +2750,10 @@ export class Publisher {
 		const e = error(err);
 		const reasonPhrase = reason(e);
 		const missing =
-			e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable);
-		if (missing && wait && (!resolved || e.code === StreamCode.Unroutable)) {
-			return { condition: "timeout", reasonPhrase };
-		}
-		const condition = missing ? "does_not_exist" : e instanceof SessionError ? sessionVerdict(e.code) : "internal";
-		return { condition, reasonPhrase, retryable: routeFailed(e) };
+			e instanceof StreamError &&
+			(e.code === StreamCode.Unroutable || (e.code === StreamCode.NotFound && !resolved));
+		if (wait && missing) return { condition: "timeout", reasonPhrase };
+		return { condition: refusedAs(e), reasonPhrase, retryable: routeFailed(e) };
 	}
 
 	/**

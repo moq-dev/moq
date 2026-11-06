@@ -425,12 +425,17 @@ test("TRACK_STATUS for a missing broadcast or track is refused DOES_NOT_EXIST", 
 test("a TRACK_STATUS refusal that may pass invites a retry", async () => {
 	for (const version of IETF_VERSIONS) {
 		for (const [err, errorCode, retryInterval] of [
-			[new StreamError(StreamCode.GoingAway, { message: "draining" }), 0x0, 1000n],
+			[new StreamError(StreamCode.GoingAway, { message: "draining" }), 0x6, 1000n],
 			[new SessionError(SessionCode.Internal), 0x0, 1000n],
 			[new StreamError(StreamCode.NotFound, { message: "no video" }), 0x10, 0n],
+			[new StreamError(StreamCode.Unauthorized), 0x1, 0n],
+			[new StreamError(StreamCode.DeliveryTimeout), 0x2, 0n],
+			[new StreamError(StreamCode.MalformedTrack), 0x12, 0n],
 			[new SessionError(SessionCode.Unauthorized), 0x1, 0n],
 			[new SessionError(SessionCode.Expired), 0x5, 0n],
+			[new SessionError(SessionCode.Timeout), 0x2, 0n],
 			[new SessionError(SessionCode.Version), 0x3, 0n],
+			[new SessionError(SessionCode.Unsupported), 0x3, 0n],
 		] as const) {
 			const pair = createMockTransportPair(ALPNS[version]);
 			const session = new NativeSession(pair.server, version, true);
