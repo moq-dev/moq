@@ -1272,6 +1272,14 @@ impl Inner {
 			deferred.wake();
 			res
 		});
+		// Written for a reader that has yet to pick it up, which the next group waits on.
+		// Recorded before the answer goes out, so a reader picking it up at once clears it.
+		if res.is_ok()
+			&& let Some(pending) = self.fills.lock().pending.get_mut(&self.id)
+			&& pending.wants.contains_key(&sequence)
+		{
+			pending.unseen.insert(sequence..end);
+		}
 		if let Ok(mut outcome) = self.result.write() {
 			outcome.accept(sequence..end);
 			if let Ok(group) = &res
@@ -1280,18 +1288,7 @@ impl Inner {
 				outcome.partial.insert(sequence, group.handle());
 			}
 		}
-		let mut fills = self.fills.lock();
-		for range in fills.routed(self.id, &(sequence..end)) {
-			fills.covers.remove(range);
-		}
-		// Written for a reader that has yet to pick it up, which the next group waits on.
-		if res.is_ok()
-			&& let Some(pending) = fills.pending.get_mut(&self.id)
-			&& pending.wants.contains_key(&sequence)
-		{
-			pending.unseen.insert(sequence..end);
-		}
-		drop(fills);
+		uncover(&self.fills, self.id, sequence..end);
 		res
 	}
 
