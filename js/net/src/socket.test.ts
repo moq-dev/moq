@@ -523,95 +523,88 @@ test("endpoint ids refuse separators, and close is idempotent", async () => {
 	await expect(a.dialTrack("bob")).rejects.toBeInstanceOf(Error);
 });
 
-for (const alpn of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ietf.ALPN.DRAFT_22]) {
-	for (const protocol of ["tcp", "track"] as const) {
-		if (protocol === "track" && alpn !== Lite.ALPN_07_WIP) continue;
-		// Quarantine draft 18: the CI batch saw an empty receive before its joining FETCH
-		// completed. Follow-up: drive this fixture by completion rather than a host turn.
-		test.skipIf(alpn === Ietf.ALPN.DRAFT_18)(
-			`socket ${protocol} preserves an early answer burst over ${alpn}`,
-			async () => {
-				const clock = time();
-				const ao = new Origin.Producer();
-				const bo = new Origin.Producer();
-				origins.add(ao);
-				origins.add(bo);
-				const a = new socket.Endpoint(ao, Path.from("room"), "alice");
-				const route = bo.route(Path.from("room/.socket/bob"), { hidden: true });
-				const requested = wireOf(route.broadcast).requested();
-				route.announce();
-				const pair = createMockTransportPair(alpn);
-				const url = new URL("https://localhost/socket");
-				const [client, server] = await Promise.all([
-					connect({ url, transport: pair.client, publish: ao.consume(), consume: ao }),
-					acceptConnection({ url, transport: pair.server, publish: bo.consume(), consume: bo }),
-				]);
-				let returning: Track.Subscriber | undefined;
-				let drained: Promise<void> | undefined;
-				const following = bo.follow(Path.from("room/.socket/alice"));
-				try {
-					const dialing = protocol === "tcp" ? a.dialTcp("bob") : a.dialTrack("bob");
-					void dialing.catch(() => {});
-					const request = await requested;
-					if (!request) throw new Error("missing dial");
-					let caller = following.active.peek();
-					while (!caller) {
-						await following.active.changed();
-						caller = following.active.peek();
-					}
-					returning = caller.track(request.name).subscribe({
-						order: "ascending",
-						delay: { max: null },
-						ranges: protocol === "track" ? [{ start: { absolute: 0n } }] : undefined,
-					});
-					await returning.info();
-					// The raw peer commits metadata only after writing its entire half, so
-					// SUBSCRIBE_OK carries the burst's last position, without a timing race.
-					hooks.keepRequest(request);
-					const staged = hooks.stageRequest(request, { maxAge: null });
-					if (protocol === "tcp") {
-						const group = staged.producer.createGroup(0n);
-						for (let i = 1; i <= 3; i++) group.writeFrame(bytes(i));
-						group.finish();
-					} else {
-						for (let i = 1; i <= 3; i++) staged.producer.writeFrame(bytes(i));
-					}
-					staged.producer.finish();
-					staged.commit();
-					await clock.advance(Nano.zero);
-					const local = await dialing;
-					const reader = local instanceof socket.TcpStream ? local.consumer : local.consumer.ordered();
-					const received: number[] = [];
-					let completed = false;
-					let failure: unknown;
-					drained = (async () => {
-						for (let frame = await reader.readFrame(); frame; frame = await reader.readFrame())
-							received.push(...frame.payload);
-					})().then(
-						() => {
-							completed = true;
-						},
-						(error) => {
-							failure = error;
-						},
-					);
-					await clock.advance(Nano.zero);
-					expect(failure).toBeUndefined();
-					expect(received).toEqual([1, 2, 3]);
-					expect(completed).toBe(true);
-					local.producer.finish();
-				} finally {
-					returning?.close();
-					following.close();
-					a.close();
-					route.broadcast.close();
-					client.abort();
-					server.abort();
-					await drained;
-				}
-			},
-		);
-	}
+for (const protocol of ["tcp", "track"] as const) {
+	const alpn = Lite.ALPN_07_WIP;
+	test(`socket ${protocol} preserves an early answer burst over ${alpn}`, async () => {
+		const clock = time();
+		const ao = new Origin.Producer();
+		const bo = new Origin.Producer();
+		origins.add(ao);
+		origins.add(bo);
+		const a = new socket.Endpoint(ao, Path.from("room"), "alice");
+		const route = bo.route(Path.from("room/.socket/bob"), { hidden: true });
+		const requested = wireOf(route.broadcast).requested();
+		route.announce();
+		const pair = createMockTransportPair(alpn);
+		const url = new URL("https://localhost/socket");
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client, publish: ao.consume(), consume: ao }),
+			acceptConnection({ url, transport: pair.server, publish: bo.consume(), consume: bo }),
+		]);
+		let returning: Track.Subscriber | undefined;
+		let drained: Promise<void> | undefined;
+		const following = bo.follow(Path.from("room/.socket/alice"));
+		try {
+			const dialing = protocol === "tcp" ? a.dialTcp("bob") : a.dialTrack("bob");
+			void dialing.catch(() => {});
+			const request = await requested;
+			if (!request) throw new Error("missing dial");
+			let caller = following.active.peek();
+			while (!caller) {
+				await following.active.changed();
+				caller = following.active.peek();
+			}
+			returning = caller.track(request.name).subscribe({
+				order: "ascending",
+				delay: { max: null },
+				ranges: protocol === "track" ? [{ start: { absolute: 0n } }] : undefined,
+			});
+			await returning.info();
+			// The raw peer commits metadata only after writing its entire half, so
+			// SUBSCRIBE_OK carries the burst's last position, without a timing race.
+			hooks.keepRequest(request);
+			const staged = hooks.stageRequest(request, { maxAge: null });
+			if (protocol === "tcp") {
+				const group = staged.producer.createGroup(0n);
+				for (let i = 1; i <= 3; i++) group.writeFrame(bytes(i));
+				group.finish();
+			} else {
+				for (let i = 1; i <= 3; i++) staged.producer.writeFrame(bytes(i));
+			}
+			staged.producer.finish();
+			staged.commit();
+			await clock.advance(Nano.zero);
+			const local = await dialing;
+			const reader = local instanceof socket.TcpStream ? local.consumer : local.consumer.ordered();
+			const received: number[] = [];
+			let completed = false;
+			let failure: unknown;
+			drained = (async () => {
+				for (let frame = await reader.readFrame(); frame; frame = await reader.readFrame())
+					received.push(...frame.payload);
+			})().then(
+				() => {
+					completed = true;
+				},
+				(error) => {
+					failure = error;
+				},
+			);
+			await clock.advance(Nano.zero);
+			expect(failure).toBeUndefined();
+			expect(received).toEqual([1, 2, 3]);
+			expect(completed).toBe(true);
+			local.producer.finish();
+		} finally {
+			returning?.close();
+			following.close();
+			a.close();
+			route.broadcast.close();
+			client.abort();
+			server.abort();
+			await drained;
+		}
+	});
 }
 
 for (const alpn of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ietf.ALPN.DRAFT_22]) {
