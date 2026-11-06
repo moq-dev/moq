@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { yieldNow } from "@moq/clock";
+import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Channel } from "./channel.ts";
 import { peers } from "./mock.ts";
 import { Transport } from "./transport.ts";
@@ -92,6 +92,26 @@ test("the accepting side stays silent until the dialer's first record proves its
 	expect(await receiving).toEqual(new Uint8Array([4, 2]));
 	client.close();
 	await Promise.all([client.closed, server.closed]);
+});
+
+test("an accepted channel whose dialer stays silent still idles out without sending", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const { left, right } = peers();
+		left.createDataChannel("moq", { ordered: true, protocol });
+		const server = Transport.accept({ peer: right.asPeer(), channel: right.incoming.asChannel(), protocol });
+		right.incoming.open();
+		// The session starts on open, so its 30 s idle deadline runs while its first write waits.
+		await server.ready;
+		// The idle check polls every 5 s and skips ticks a single long jump would miss.
+		for (let i = 0; i < 7; i++) await clock.advance(Nano.fromMilli(Milli(5_000)));
+		await expect(server.closed).rejects.toThrow("idle timeout");
+		expect(right.incoming.records).toEqual([]);
+		expect(right.incoming.listeners.size).toBe(0);
+	} finally {
+		installed.close();
+	}
 });
 
 test("close before the channel opens settles closed and rejects ready without closing the peer", async () => {

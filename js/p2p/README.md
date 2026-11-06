@@ -26,7 +26,7 @@ field. Records are capped at 16 KiB and the negotiated SCTP message limit;
 a limit below qmux-01's 16,382-byte minimum is refused. There are no datagrams.
 SCTP preserves ordering, so packet loss can hold back every stream.
 The accepting side sends nothing until the dialer's first record arrives, since
-Chromium reports an announced channel open before its stream is and silently drops
+Chromium reports an announced channel open before its stream is open and silently drops
 what is sent in between.
 
 `just test p2p` runs SETUP and a media transfer between two real peer connections
