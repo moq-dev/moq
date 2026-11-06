@@ -4326,6 +4326,55 @@ fn connect_detects_mtu() {
 	}
 }
 
+/// A path MTU past a 2-byte Length field's 16,383 bytes still carries long-header packets: a
+/// server Handshake flight bigger than that, and a client Initial padded to such a `min_mtu`.
+#[test]
+fn long_header_packets_fit_a_large_mtu() {
+	let _guard = subscribe();
+	const MTU: u16 = 20_000;
+
+	// Two thousand names make a certificate past 16,383 bytes
+	let (cert, key) = (|| -> std::result::Result<_, rcgen::Error> {
+		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let names = iter::once("localhost".into()).chain((0..2000).map(|x| format!("foo_{x}")));
+		let mut params = rcgen::CertificateParams::new(names.collect::<Vec<_>>())?;
+		params.serial_number = Some(1u64.into());
+		let cert = params.self_signed(&signing_key)?;
+		Ok((
+			CertificateDer::from(cert),
+			PrivateKeyDer::Pkcs8(signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
+		))
+	})()
+	.unwrap();
+	assert!(cert.len() > 16_383);
+
+	for client_min_mtu in [INITIAL_MTU, MTU] {
+		let transport = transport::Config {
+			initial_mtu: MTU,
+			mtu: None,
+			..transport::Config::default()
+		};
+		let mut server = server_config_with_cert(cert.clone(), key.clone_key());
+		server.transport = transport.clone();
+		let mut client = client_config_with_certs(vec![cert.clone()]);
+		client.transport = transport::Config {
+			min_mtu: client_min_mtu,
+			..transport
+		};
+		let endpoint = endpoint::Config {
+			max_udp_payload_size: MTU,
+			..endpoint::Config::default()
+		};
+
+		let mut pair = Pair::new(endpoint, server);
+		pair.mtu = MTU.into();
+		let (client_ch, server_ch) = pair.connect_with(client);
+
+		assert_eq!(pair.client_conn_mut(client_ch).path_mtu(), MTU);
+		assert_eq!(pair.server_conn_mut(server_ch).path_mtu(), MTU);
+	}
+}
+
 #[test]
 fn migrate_without_mtud_respects_peer_max_udp_payload_size() {
 	let _guard = subscribe();
@@ -6004,7 +6053,7 @@ fn application_close_in_initial_is_rejected() {
 		version,
 	});
 	let mut packet = Vec::new();
-	let partial = header.encode(&mut packet);
+	let partial = header.encode(&mut packet, INITIAL_MTU.into());
 	let header_len = packet.len();
 	// APPLICATION_CLOSE: type 0x1d, Error Code (varint) = 42, Reason Phrase Length (varint) = 0
 	packet.extend_from_slice(&[0x1d, 0x2a, 0x00]);
