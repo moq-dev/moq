@@ -144,8 +144,8 @@ the replay numbers that justify it.
   budget is tightened to the new measurement. No other replay row regresses,
   and the nightly browser rows are re-measured by the budgets note's rule. A
   listening check confirms that a 2 ms/s drift and the measured expansions are
-  inaudible or close to it. The 2026-11-03 Chrome and Safari +40 ms rows are
-  re-run on real hardware.
+  inaudible or close to it. The 2026-11-03 rows are re-run on real hardware:
+  Chrome's at +40 ms and Safari's on the direct path.
 
 ### Publisher, measured in the same run
 
