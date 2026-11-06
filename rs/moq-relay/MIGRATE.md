@@ -5,6 +5,20 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### `cluster.id` is removed
+
+Remove `--cluster-id`, `MOQ_CLUSTER_ID`, and `[cluster] id`; in Rust, drop `cluster::Config::id`.
+A relay that still sets one stops at startup: the flag, variable, and key are refused as unknown settings.
+Each relay picks a random Hop ID on every start and nothing pins it, so a restarted relay is a new node to the mesh.
+`Cluster::id()` still reports the one in use.
+
+### Zero-cost cluster links are refused
+
+A link costs at least 1, the price of an unpriced link, since routing needs every link to cost something.
+A peer priced at 0 (`?cost=0` on its URL, or an object `cost` or `egress` of 0) stops startup in `cluster.connect` and rejects a `cluster.api.url` update, which keeps the last good list.
+With LAN discovery on, a `cluster.node` whose `?cost=` is 0 or malformed stops startup, and a LAN peer advertising one is skipped.
+Price a same-datacenter sibling at 1, and raise the other links' costs if it must stay relatively cheaper.
+
 ### Shutdown reports deadline cuts separately from end reports
 
 `shutdown::Observer::drained()` now returns `shutdown::Drained` instead of `()`.

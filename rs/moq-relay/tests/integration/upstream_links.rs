@@ -52,9 +52,10 @@ where
 		.expect("test thread panicked");
 }
 
-/// One relay: its origin, listen port, and every task it runs. Dropping it
-/// aborts them all, closing its sessions like a crash.
+/// One relay: its Hop ID, origin, listen port, and every task it runs. Dropping
+/// it aborts them all, closing its sessions like a crash.
 struct Node {
+	id: u64,
 	origin: origin::Producer,
 	port: u16,
 	_tasks: tokio::task::JoinSet<()>,
@@ -82,7 +83,7 @@ fn grant(path: &str) -> Grant {
 
 const LITE_07: &str = "moq-lite-07-wip";
 
-async fn node(id: u64, connect: Vec<Peer>) -> Node {
+async fn node(connect: Vec<Peer>) -> Node {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let mut tasks = tokio::task::JoinSet::new();
 
@@ -106,9 +107,9 @@ async fn node(id: u64, connect: Vec<Peer>) -> Node {
 	client.version = vec![LITE_07.parse().expect("lite-07")];
 
 	let mut config = cluster::Config::default();
-	config.id = Some(id);
 	config.connect = connect;
 	let cluster = crate::spawn_cluster(cluster::Options::new(config)).with_connect(client, Default::default());
+	let id = cluster.id();
 
 	let (auth, mut admissions) = auth::Auth::embedded(format!("node-{id}"));
 	tasks.spawn(async move {
@@ -135,6 +136,7 @@ async fn node(id: u64, connect: Vec<Peer>) -> Node {
 	});
 
 	Node {
+		id,
 		origin: cluster.origin.clone(),
 		port,
 		_tasks: tasks,
@@ -241,12 +243,6 @@ fn has(routes: &BTreeMap<String, Vec<u64>>, paths: &[&str]) -> bool {
 	paths.iter().all(|path| routes.contains_key(*path))
 }
 
-const R: u64 = 1;
-const C1: u64 = 11;
-const C2: u64 = 12;
-const E1: u64 = 21;
-const E2: u64 = 22;
-
 /// Two regions: two edges whose links to two cores are upstream, and one relay
 /// that also serves clients. Both edges send a path to the same core, an edge's
 /// broadcast reaches the far relay, and losing a core moves only its paths.
@@ -256,13 +252,15 @@ fn tiered_regions() {
 }
 
 async fn tiered_regions_inner() {
-	let r = node(R, vec![]).await;
-	let c1 = node(C1, vec![r.dial(false, false)]).await;
-	let c2 = node(C2, vec![r.dial(false, false)]).await;
-	let e1 = node(E1, vec![c1.dial(true, false), c2.dial(true, false)]).await;
-	let e2 = node(E2, vec![c1.dial(true, false), c2.dial(true, false)]).await;
+	let r = node(vec![]).await;
+	let c1 = node(vec![r.dial(false, false)]).await;
+	let c2 = node(vec![r.dial(false, false)]).await;
+	let e1 = node(vec![c1.dial(true, false), c2.dial(true, false)]).await;
+	let e2 = node(vec![c1.dial(true, false), c2.dial(true, false)]).await;
 
-	let paths: Vec<String> = (0..8).map(|i| format!("live/{i}")).collect();
+	// Each path's core is a hash over the random Hop IDs, so enough paths that both
+	// cores get some: all 32 on one core is a 2^-31 chance.
+	let paths: Vec<String> = (0..32).map(|i| format!("live/{i}")).collect();
 	let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
 	let _published: Vec<_> = paths.iter().map(|path| publish(&r.origin, path)).collect();
 	routes_when("both cores learn the far region", &c1.origin, |routes| {
@@ -298,21 +296,22 @@ async fn tiered_regions_inner() {
 
 	// Losing a core moves only its paths.
 	let on = |core_id: u64| -> Vec<&str> { paths.iter().copied().filter(|p| core(&at_e1, p) == core_id).collect() };
-	let (on_c1, on_c2) = (on(C1), on(C2));
+	let (on_c1, on_c2) = (on(c1.id), on(c2.id));
 	assert!(
 		!on_c1.is_empty() && !on_c2.is_empty(),
 		"paths all on one core: {at_e1:?}"
 	);
+	let lost = c1.id;
 	drop(c1);
 	let after = routes_when("edge 1 drops the lost core", &e1.origin, |routes| {
-		has(routes, &paths) && routes.values().all(|hops| !hops.contains(&C1))
+		has(routes, &paths) && routes.values().all(|hops| !hops.contains(&lost))
 	})
 	.await;
 	for path in &on_c2 {
 		assert_eq!(after[*path], at_e1[*path], "{path} moved off the surviving core");
 	}
 	for path in &on_c1 {
-		assert_eq!(after[*path], [R, C2], "{path} did not fail over");
+		assert_eq!(after[*path], [r.id, c2.id], "{path} did not fail over");
 	}
 }
 
@@ -324,11 +323,11 @@ fn edges_never_transit_between_cores() {
 }
 
 async fn edges_never_transit_between_cores_inner() {
-	let c1 = node(C1, vec![]).await;
-	let e1 = node(E1, vec![c1.dial(true, false)]).await;
+	let c1 = node(vec![]).await;
+	let e1 = node(vec![c1.dial(true, false)]).await;
 	// The core dials this edge, which still treats it as upstream.
-	let c2 = node(C2, vec![e1.dial(false, true)]).await;
-	let e2 = node(E2, vec![c1.dial(true, false), c2.dial(true, false)]).await;
+	let c2 = node(vec![e1.dial(false, true)]).await;
+	let e2 = node(vec![c1.dial(true, false), c2.dial(true, false)]).await;
 
 	let _core = publish(&c1.origin, "live/c1");
 	routes_when("edge 1 learns core 1", &e1.origin, |routes| has(routes, &["live/c1"])).await;
@@ -358,9 +357,9 @@ fn uplink_transits_both_ways() {
 }
 
 async fn uplink_transits_both_ways_inner() {
-	let cdn = node(31, vec![]).await;
-	let uplink = node(32, vec![cdn.dial(true, false)]).await;
-	let mesh = node(33, vec![uplink.dial(false, false)]).await;
+	let cdn = node(vec![]).await;
+	let uplink = node(vec![cdn.dial(true, false)]).await;
+	let mesh = node(vec![uplink.dial(false, false)]).await;
 
 	let _mesh = publish(&mesh.origin, "mesh/cam");
 	let _cdn = publish(&cdn.origin, "cdn/cam");

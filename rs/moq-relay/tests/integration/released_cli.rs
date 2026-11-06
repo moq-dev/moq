@@ -54,7 +54,6 @@ const RELEASED: &[(&str, Option<&str>)] = &[
 	("client-version", Some("MOQ_CLIENT_VERSION")),
 	("cluster-connect", Some("MOQ_CLUSTER_CONNECT")),
 	("cluster-connect-api", Some("MOQ_CLUSTER_CONNECT_API")),
-	("cluster-id", Some("MOQ_CLUSTER_ID")),
 	("cluster-node", Some("MOQ_CLUSTER_NODE")),
 	("cluster-tier", Some("MOQ_CLUSTER_TIER")),
 	("cluster-token", Some("MOQ_CLUSTER_TOKEN")),

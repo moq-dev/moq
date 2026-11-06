@@ -4,6 +4,16 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
+### `--cluster-id` is removed
+
+Remove `--cluster-id` and `MOQ_CLUSTER_ID`: `moq` refuses both as unknown settings.
+The Hop ID is random on every run and nothing pins it.
+
+### Zero-cost cluster links are refused
+
+A `--cluster-connect` or `--cluster-api-url` peer priced at 0 (`?cost=0`, or an object `cost` or `egress` of 0) is refused, as is a `--cluster-node` carrying `?cost=0` under `--cluster-lan`.
+A link costs at least 1, the price of an unpriced link: use `?cost=1` for a same-datacenter sibling.
+
 ### The iroh transport is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
 
 The `iroh` Cargo feature and the `--iroh-*` flags are gone, and a `MOQ_IROH_*` variable stops startup like any other unknown `MOQ_*` variable.

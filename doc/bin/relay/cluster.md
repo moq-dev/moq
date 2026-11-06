@@ -153,9 +153,10 @@ connect = [{ url = "tls://core-a.internal:4443/", upstream = true }]
 ## Link costs
 
 Add `?cost=N` to a peer URL to route by price instead of hop count. An unpriced
-link costs 1, which reproduces plain hop counting. Each relay adds the price of
-the link an announcement arrived on before forwarding it, so a route's cost is
-the sum of what it crossed.
+link costs 1, which reproduces plain hop counting, and 1 is also the minimum: a
+cost of 0 is refused. Each relay adds the price of the link an announcement
+arrived on before forwarding it, so a route's cost is the sum of what it
+crossed.
 
 Routing prefers the longest covering prefix, then a fully identified hop list
 over one holding an anonymous hop (0), then the lowest cost, then the shortest
@@ -167,7 +168,7 @@ restarts takes over from its lingering old session at once.
 
 ```toml
 [cluster]
-connect = ["https://sibling.same-dc/?cost=0", "https://us-east.example.com/?cost=10"]
+connect = ["https://sibling.same-dc/?cost=1", "https://us-east.example.com/?cost=10"]
 ```
 
 The same policy reads as an object, the only form that accepts `token` and
@@ -176,7 +177,7 @@ The same policy reads as an object, the only form that accepts `token` and
 ```toml
 [cluster]
 connect = [
-  { url = "https://sibling.same-dc/", cost = 0 },
+  { url = "https://sibling.same-dc/", cost = 1 },
   { url = "https://us-east.example.com/", cost = 10, token = "PEER_JWT" },
 ]
 ```
@@ -253,11 +254,9 @@ decides which relays receive the cluster token.
 ## Identity
 
 Each relay has a Hop ID: the value it adds to a route's hop list for loop
-detection and shortest-path routing. It is random on every start, which is fine
-for loop detection but makes a restarted relay look like a new node. Set
-`cluster.id` to a stable non-zero 64-bit integer to pin it: below 2^53 if older
-browser clients decode it, and below 2^62 to keep loop detection over moq-lite-06
-and older links, which carry a larger id as 0.
+detection and shortest-path routing. It is random on every start, so a
+restarted relay is a new node to the rest of the mesh, and there is no setting
+to pin it.
 
 ## Failure detection
 

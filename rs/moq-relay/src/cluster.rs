@@ -287,6 +287,10 @@ impl DialTarget {
 				"cluster peer sets token alongside a URL ?jwt=; use one or the other"
 			);
 		}
+		anyhow::ensure!(
+			peer.cost != Some(0) && peer.egress != Some(0),
+			"cluster peer sets a cost or egress of 0; a link costs at least 1, the price of an unpriced link"
+		);
 		let cost = peer.cost.or(take_cost(&mut url)?);
 		// An unpriced link costs 1 (see `moq_net::Client::with_cost`), so `egress`
 		// alone is symmetric only at that price.
@@ -722,23 +726,6 @@ impl Drop for Held {
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Config {
-	/// Fixed origin (hop) id for this relay, identifying it in the hop chains
-	/// carried on each broadcast for loop detection and shortest-path routing.
-	///
-	/// Unset (the default) picks a fresh random id on every start. Set it to give
-	/// a node a stable identity across restarts. Must be non-zero; 0 errors at
-	/// startup. Keep it below 2^53 for compatibility with older `@moq/lite` JS
-	/// clients, which decode hop ids as a `u53` and reject anything larger. A
-	/// moq-lite-06 or older link carries an id at or above 2^62 as 0, losing loop
-	/// detection through this relay on that link.
-	#[usage(
-		name = "cluster-id",
-		long = "cluster-id",
-		env = "MOQ_CLUSTER_ID",
-		setting = "cluster.id"
-	)]
-	pub id: Option<u64>,
-
 	/// Route key file: the Ed25519 key this relay proves to every moq-lite-07 peer,
 	/// which files the routes this relay sends under it when this relay's grant is scoped.
 	///
@@ -770,11 +757,12 @@ pub struct Config {
 	///
 	/// A `?cost=N` query param (or object `cost`) prices the link (moq-lite-06+):
 	/// every announcement crossing it adds `N` to its route cost, so routing
-	/// prefers cheap paths over short ones. Use `0` for a same-datacenter sibling
-	/// and something large for a metered backbone; an unpriced link costs 1,
-	/// which reproduces plain hop counting. The param is consumed by this relay,
-	/// not sent to the peer. Object `egress` defaults to `cost`; anything else is
-	/// rejected until asymmetric routing lands.
+	/// prefers cheap paths over short ones. The minimum and the price of an
+	/// unpriced link is 1, which reproduces plain hop counting: use it for a
+	/// same-datacenter sibling and something large for a metered backbone. A
+	/// cost of 0 is refused. The param is consumed by this relay, not sent to the
+	/// peer. Object `egress` defaults to `cost`; anything else is rejected until
+	/// asymmetric routing lands.
 	#[usage(
 		name = "cluster-connect",
 		long = "cluster-connect",
@@ -1379,8 +1367,9 @@ impl Cluster {
 	/// and stops publishing stats. A stats publisher panic ends the driver like
 	/// its other work. Needs no Tokio runtime.
 	///
-	/// Errors if `config.id` is set to 0. An unset id picks a fresh random origin.
-	/// Errors too if the `peer.quic` receive window does not fit a QUIC varint,
+	/// The origin takes a fresh random Hop ID on every call.
+	///
+	/// Errors if the `peer.quic` receive window does not fit a QUIC varint,
 	/// `config.tier` is not a valid stats tier, or the stats config is invalid.
 	pub fn new(options: Options) -> anyhow::Result<(Self, Driver)> {
 		let Options {
@@ -1390,10 +1379,6 @@ impl Cluster {
 			peer,
 			stats,
 		} = options;
-		let id = match config.id {
-			Some(id) => Hop::new(id).context("--cluster-id must be non-zero")?,
-			None => Hop::random(),
-		};
 		let deprecated = config.deprecated();
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 		// Reject a repeated static identity with conflicting policy up front,
@@ -1406,7 +1391,7 @@ impl Cluster {
 		crate::configured_tier(config.tier.clone()).context("invalid --cluster-tier")?;
 		peer.quic.validate()?;
 		let mut work = kio::Tasks::new();
-		let mut origin_config = origin::Config::new(id);
+		let mut origin_config = origin::Config::new(Hop::random());
 		origin_config.route_key = Some(match &config.route_key {
 			Some(path) => (&moq_crypto::sign::SecretKey::load_or_generate(path)
 				.with_context(|| format!("--cluster-route-key {}", path.display()))?)
@@ -1432,7 +1417,7 @@ impl Cluster {
 		work.push(Child::new("stats publisher", publisher.run()));
 		let stats = stats_producer.registry().clone();
 		let nodes = crate::nodes::Nodes::default();
-		tracing::info!(hop_id = %origin.hop(), configured = config.id.is_some(), "cluster initialized");
+		tracing::info!(hop_id = %origin.hop(), "cluster initialized");
 		let cluster = Cluster {
 			session_limits: session.resolve(),
 			peer_limits: peer.resolve(),
@@ -2316,6 +2301,8 @@ async fn lan_discovery(
 			 Only `?cost=` may be advertised; pass credentials with `--cluster-token` instead.",
 			published.join(", ")
 		);
+		// Every LAN peer skips an advertised cost that is malformed or 0, so refuse it here.
+		take_cost(&mut url.clone()).context("invalid --cluster-node")?;
 		config = config.with_node(url);
 	}
 	if let Some(secret) = secret {
@@ -2330,7 +2317,9 @@ async fn lan_discovery(
 /// The param is dial-side configuration, not something the peer reads off the
 /// URL (it rides SETUP instead), so it is stripped before connecting. An
 /// unparseable value is an error rather than a silent default: a mispriced link
-/// skews routing for every broadcast crossing it.
+/// skews routing for every broadcast crossing it. So is 0: route selection needs
+/// every link to cost something, or a route could match its own feasibility
+/// distance.
 fn take_cost(url: &mut Url) -> anyhow::Result<Option<u64>> {
 	let Some(value) = url
 		.query_pairs()
@@ -2341,6 +2330,10 @@ fn take_cost(url: &mut Url) -> anyhow::Result<Option<u64>> {
 	let cost: u64 = value
 		.parse()
 		.with_context(|| format!("invalid cost {value:?} on cluster peer URL"))?;
+	anyhow::ensure!(
+		cost > 0,
+		"cost 0 on cluster peer URL; a link costs at least 1, the price of an unpriced link"
+	);
 
 	let remaining: Vec<(String, String)> = url
 		.query_pairs()
@@ -2770,8 +2763,8 @@ mod tests {
 	/// silent default.
 	#[test]
 	fn cost_param_is_consumed() {
-		let mut url = Url::parse("https://peer.example/?jwt=abc&cost=0").unwrap();
-		assert_eq!(take_cost(&mut url).unwrap(), Some(0));
+		let mut url = Url::parse("https://peer.example/?jwt=abc&cost=1").unwrap();
+		assert_eq!(take_cost(&mut url).unwrap(), Some(1));
 		assert_eq!(url.as_str(), "https://peer.example/?jwt=abc");
 
 		let mut url = Url::parse("https://peer.example/").unwrap();
@@ -3356,18 +3349,6 @@ mod tests {
 		assert!(commands.is_empty(), "an invalid list must not reach the dial map");
 	}
 
-	#[tokio::test]
-	async fn cluster_id_sets_origin() {
-		for id in [42, u64::MAX] {
-			let cluster = new_cluster(Config {
-				id: Some(id),
-				..Default::default()
-			})
-			.expect("valid id");
-			assert_eq!(cluster.origin.hop().id(), id);
-		}
-	}
-
 	/// Cache settings land on the one origin serving and stats share. A handle
 	/// cloned at construction stays on that origin.
 	#[tokio::test]
@@ -3380,22 +3361,16 @@ mod tests {
 		let cache = cache.init().expect("cache");
 		let pool = cache.pool.clone();
 
-		let cluster = Cluster::spawn(
-			Options::new(Config {
-				id: Some(42),
-				..Default::default()
-			})
-			.with_cache(cache)
-			.with_stats(crate::stats::Config {
+		let cluster = Cluster::spawn(Options::new(Config::default()).with_cache(cache).with_stats(
+			crate::stats::Config {
 				enabled: true,
 				node: Some("test".to_string()),
 				..Default::default()
-			}),
-		)
+			},
+		))
 		.expect("cluster");
 
 		let origin = cluster.origin.clone();
-		assert_eq!(origin.hop().id(), 42);
 		assert_eq!(origin.config().cache_duration, duration);
 		assert_eq!(origin.config().pool.expiry(), Some(duration));
 
@@ -3423,17 +3398,21 @@ mod tests {
 		.unwrap();
 	}
 
-	/// The reserved `cluster.id` 0 is rejected, since it cannot be excluded for loop
-	/// detection.
+	/// A link costs at least 1, so a static peer priced at 0 stops startup, in the
+	/// URL or the object form.
 	#[test]
-	fn cluster_id_zero_errors() {
-		let err = new_cluster(Config {
-			id: Some(0),
-			..Default::default()
-		})
-		.err()
-		.expect("should error");
-		assert!(format!("{err}").contains("--cluster-id"), "got: {err}");
+	fn zero_cost_peer_errors() {
+		for peer in [
+			Peer::new("https://peer.example/?cost=0"),
+			Peer::new("https://peer.example/").with_cost(0),
+			Peer::new("https://peer.example/").with_egress(0),
+		] {
+			let config = Config {
+				connect: vec![peer.clone()],
+				..Default::default()
+			};
+			assert!(new_cluster(config).is_err(), "{peer:?} was accepted");
+		}
 	}
 
 	#[tokio::test]
