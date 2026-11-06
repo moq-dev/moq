@@ -6,7 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from moq_carla_sim import main as main_module
-from moq_carla_sim.main import broadcast_path, default_trucks, driver_prefix, parse_args
+from moq_carla_sim.main import broadcast_path, default_trucks, parse_args
+from moq_carla_sim.publish import Drivers
 from moq_carla_sim.watchdog import Heartbeat
 
 
@@ -37,7 +38,13 @@ def test_relay_url_defaults_to_the_local_relay(monkeypatch: pytest.MonkeyPatch) 
 
 def test_paths_match_the_player() -> None:
     assert broadcast_path("truck1", "front") == "carla/truck1/front.hang"
-    assert driver_prefix("truck1") == "viewer/carla/truck1"
+    assert Drivers("truck1", asyncio.Queue()).path == "carla/.socket/truck1"
+
+
+def test_a_truck_named_like_a_driver_is_refused() -> None:
+    """Anonymous drivers may publish `driver-*` endpoints, so such a truck could be impersonated."""
+    with pytest.raises(SystemExit):
+        parse_args(["--url", "http://localhost:4443", "--truck", "driver-1"])
 
 
 def test_log_level_configures_python_and_rust(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -188,7 +195,7 @@ def test_actors_are_destroyed_before_the_relay_session_closes(monkeypatch: pytes
     class FakeConnect:
         async def __aenter__(self):
             events.append("session.open")
-            return SimpleNamespace()
+            return SimpleNamespace(session=SimpleNamespace(publish=SimpleNamespace))
 
         async def __aexit__(self, *_exc) -> None:
             events.append("session.close")
@@ -209,7 +216,12 @@ def test_actors_are_destroyed_before_the_relay_session_closes(monkeypatch: pytes
 
     monkeypatch.setattr(main_module.World, "connect", staticmethod(lambda *_args: FakeWorld()))
     monkeypatch.setattr(main_module, "connect_bridge", fake_connect_bridge)
-    monkeypatch.setattr(main_module.moq, "connect", lambda _url: FakeConnect(), raising=False)
+    def fake_connect(_url: str, *, versions: tuple[str, ...]) -> FakeConnect:
+        # Drivers dial the trucks' endpoints, which only these versions carry.
+        assert versions == ("moq-lite-07-wip", "moq-transport-22")
+        return FakeConnect()
+
+    monkeypatch.setattr(main_module.moq, "connect", fake_connect, raising=False)
     monkeypatch.setattr(main_module, "supervise", fake_supervise)
 
     asyncio.run(main_module.run(parse_args(["--url", "http://localhost:4443"])))
