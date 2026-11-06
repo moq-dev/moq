@@ -29,26 +29,18 @@ moving the token into `cache-write`, or deleting Cachix everywhere now with a
 `CACHIX_AUTH_TOKEN` once a release tag substitutes from `nix.moq.dev`.
 
 Decided 2026-11-05 (maintainer, /quest-audit): `publish` still admits
-`main`, so this does not wait for the next cut.
+`main`, so this does not wait for the next cut. #7431's workflow change is
+backported alone to `release` in
+[moq-dev/moq#8015](https://github.com/moq-dev/moq/pull/8015), as
+[moq-dev/moq#7202](https://github.com/moq-dev/moq/pull/7202) and
+[moq-dev/moq#7421](https://github.com/moq-dev/moq/pull/7421) backported
+workflow changes. Not chosen: moving this quest to m2 behind the cut, or
+merging `main` into `release` now.
 
-- ✅ Backport only #7431's workflow change to `release` now, as
-  [moq-dev/moq#7202](https://github.com/moq-dev/moq/pull/7202) and
-  [moq-dev/moq#7421](https://github.com/moq-dev/moq/pull/7421) backported
-  workflow changes, so a tag's run dispatches winget and calls the Kotlin
-  wrapper itself, and `release`'s apt and rpm dispatches name `--ref release`.
-- Not chosen: moving this quest to m2 behind the cut with the other
-  release-gated CI quests; merging `main` into `release` now, which reverses
-  the 2026-11-04 decision below.
-
-What remains, in order:
-
-1. Open the backport PR against `release` (agent work).
-2. Once it merges, the maintainer drops `main` from `publish`'s deployment
-   policy. Environment settings need the maintainer's admin access.
-   `publish` holds neither `DISCORD_WEBHOOK` (it lives in `alert`) nor
-   `CACHIX_AUTH_TOKEN` (a repository secret that
-   [Release tags push to nix.moq.dev](/quest/m0/ci/cachix-retire.md) revokes),
-   so there is nothing to remove from it.
+`publish` holds neither `DISCORD_WEBHOOK` (it lives in `alert`) nor
+`CACHIX_AUTH_TOKEN` (a repository secret that
+[Release tags push to nix.moq.dev](/quest/m0/ci/cachix-retire.md) revokes),
+so dropping `main` is the only settings change.
 
 Decided 2026-11-04 (maintainer, /quest-unblock): ✅ cut the combined patch
 release on `release` soon, once [moq-dev/moq#7596](https://github.com/moq-dev/moq/pull/7596)'s
@@ -58,6 +50,14 @@ separately, later. Not chosen: one combined cut that merges `main` first, or
 neither this week.
 
 Public API: none. Wire: none.
+
+## Waiting
+
+- Maintainer: merge [moq-dev/moq#8015](https://github.com/moq-dev/moq/pull/8015);
+  agents never merge into `release`.
+- Maintainer: once it merges, drop `main` from `publish`'s deployment branch
+  policy. Environment settings need admin access, which no agent token holds.
+  Check with `gh api repos/moq-dev/moq/environments/publish/deployment-branch-policies`.
 
 ## Related
 
