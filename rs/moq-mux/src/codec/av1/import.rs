@@ -322,8 +322,9 @@ fn is_sequence_header(obu: &[u8]) -> bool {
 fn parse_sequence_header(obu: &[u8]) -> Result<Option<SequenceHeaderObu>> {
 	let mut reader = obu;
 	let header = ObuHeader::parse(&mut reader)?;
-	validate_timing(reader)?;
-	Ok(SequenceHeaderObu::parse(header, &mut reader).ok())
+	Ok(validate_timing(reader)
+		.and_then(|()| SequenceHeaderObu::parse(header, &mut reader))
+		.ok())
 }
 
 /// Reject an out-of-range picture interval before scuffle-av1 counts its UVLC zeros in a u8.
@@ -669,6 +670,10 @@ mod tests {
 		}
 		assert!(validate_timing(&[]).is_err());
 		assert!(validate_timing(&[0x04]).is_err(), "truncated timing info");
+		for payload in [&[][..], &[0x04]] {
+			let obu = [&[0x08], payload].concat();
+			assert!(parse_sequence_header(&obu).unwrap().is_none(), "unparseable config");
+		}
 	}
 
 	/// A key frame declares its own size below the sequence maximum, which is all
