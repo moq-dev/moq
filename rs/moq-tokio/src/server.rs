@@ -858,7 +858,12 @@ impl Listener {
 	/// establishing the session is the caller's to bound. Returns [`Error::Stopped`] once
 	/// the listener is closing.
 	#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
-	pub async fn accept_with(&self, transport: Transport, session: qmux::Session, link: Link) -> crate::Result<Request> {
+	pub async fn accept_with(
+		&self,
+		transport: Transport,
+		session: qmux::Session,
+		link: Link,
+	) -> crate::Result<Request> {
 		let server = &self.server;
 		let active = server.activity.enter().ok_or(Error::Stopped)?;
 		let mut incoming = Incoming::new(transport, server.moq.deadline(kio::clock::now()), active);
@@ -1354,13 +1359,7 @@ fn spawn_unix_loop(
 			handshakes.spawn(crate::panic::isolate(async move {
 				match within(deadline, pending).await {
 					Ok((session, _cred)) => {
-						stream_request(
-							session,
-							&setup,
-							tx,
-							Incoming::new(Transport::Unix, deadline, active),
-						)
-						.await;
+						stream_request(session, &setup, tx, Incoming::new(Transport::Unix, deadline, active)).await;
 					}
 					// Per-connection, as in `spawn_tcp_loop`.
 					Err(err) => tracing::warn!(%err, "unix qmux handshake failed"),
@@ -1388,7 +1387,11 @@ pub(crate) struct Incoming {
 #[cfg(any(test, feature = "websocket", feature = "tcp", feature = "webrtc"))]
 impl Incoming {
 	/// A connection with no facts beyond its transport.
-	pub(crate) fn new(transport: Transport, deadline: Option<kio::clock::Instant>, active: moq_net::server::Active) -> Self {
+	pub(crate) fn new(
+		transport: Transport,
+		deadline: Option<kio::clock::Instant>,
+		active: moq_net::server::Active,
+	) -> Self {
 		Self {
 			transport,
 			url: None,
