@@ -1941,7 +1941,7 @@ async fn long_faults_hold_their_latency() {
 			// Two seconds of every twenty.
 			congested: |at| (17..19).contains(&(at.as_secs() % 20)) && at < Duration::from_secs(100),
 		}),
-		// Five cycles, each with four scheduled losses and one shared congestion interval.
+		// Live pacing pads these delivery holes while media is absent, so the PCR clock never jumps.
 		..arm(Profile::Long, faults).breaks(0)
 	})
 	.await;
