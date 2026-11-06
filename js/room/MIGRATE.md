@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Turning the microphone off mutes it ([#7942](https://github.com/moq-dev/moq/pull/7942))
+
+`local.microphoneEnabled.set(false)` still releases the microphone, but the camera broadcast's audio rendition now stays enabled in the catalog, sending nothing, so listeners stay subscribed and hear the next word at once.
+
 ### `claims` refuses an identity with an empty segment ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 `claims(room, identity)` throws on an identity with a leading, trailing, or doubled `/` instead of collapsing it: pass `alice`, not `alice/`.

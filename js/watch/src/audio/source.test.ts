@@ -91,7 +91,7 @@ test("skips a disabled rendition on the initial selection", async () => {
 	}
 });
 
-test("holds the selected rendition while every rendition is disabled", async () => {
+test("deselects a rendition once it is disabled, and selects it again once re-enabled", async () => {
 	const state = broadcast({ mic: config("opus") });
 	const source = new Source({ broadcast: state.broadcast, supported: async () => true });
 	try {
@@ -100,13 +100,12 @@ test("holds the selected rendition while every rendition is disabled", async () 
 
 		state.catalog.set({ audio: { renditions: { mic: config("opus", { enabled: false }) } } });
 		await settled(source);
-		expect(source.out.track.peek()).toBe("mic");
-		expect(source.out.config.peek()?.enabled).toBe(false);
+		expect(source.out.track.peek()).toBeUndefined();
+		expect(source.out.config.peek()).toBeUndefined();
 
 		state.catalog.set({ audio: { renditions: { mic: config("opus") } } });
 		await settled(source);
 		expect(source.out.track.peek()).toBe("mic");
-		expect(source.out.config.peek()?.enabled).toBeUndefined();
 	} finally {
 		source.close();
 	}
@@ -124,80 +123,6 @@ test("an enabled alternative takes over from a disabled rendition", async () => 
 		});
 		await settled(source);
 		expect(source.out.track.peek()).toBe("backup");
-	} finally {
-		source.close();
-	}
-});
-
-test("drops a held rendition once it is removed", async () => {
-	const state = broadcast({ mic: config("opus") });
-	const source = new Source({ broadcast: state.broadcast, supported: async () => true });
-	try {
-		await settled(source);
-		state.catalog.set({ audio: { renditions: { mic: config("opus", { enabled: false }) } } });
-		await settled(source);
-		expect(source.out.track.peek()).toBe("mic");
-
-		state.catalog.set({ audio: { renditions: { other: config("opus", { enabled: false }) } } });
-		await settled(source);
-		expect(source.out.track.peek()).toBeUndefined();
-		expect(source.out.config.peek()).toBeUndefined();
-	} finally {
-		source.close();
-	}
-});
-
-test("does not carry a hold to another broadcast", async () => {
-	const first = broadcast({ mic: config("opus") });
-	const current = new Signal<Broadcast | undefined>(first.broadcast);
-	const source = new Source({ broadcast: current, supported: async () => true });
-	try {
-		await settled(source);
-		first.catalog.set({ audio: { renditions: { mic: config("opus", { enabled: false }) } } });
-		await settled(source);
-		expect(source.out.track.peek()).toBe("mic");
-
-		// The same catalog on another broadcast probes nothing new, so wait on a timer, not the probe.
-		current.set(broadcast({ mic: config("opus", { enabled: false }) }).broadcast);
-		await yieldNow();
-		expect(source.out.track.peek()).toBeUndefined();
-	} finally {
-		source.close();
-	}
-});
-
-test("does not hold an enabled selection into another broadcast's disabled rendition", async () => {
-	const current = new Signal<Broadcast | undefined>(broadcast({ mic: config("opus") }).broadcast);
-	const source = new Source({ broadcast: current, supported: async () => true });
-	try {
-		await settled(source);
-		expect(source.out.track.peek()).toBe("mic");
-
-		current.set(broadcast({ mic: config("opus", { enabled: false }) }).broadcast);
-		for (let i = 0; i < 5; i++) await yieldNow();
-		expect(source.out.track.peek()).toBeUndefined();
-		expect(source.out.config.peek()).toBeUndefined();
-	} finally {
-		source.close();
-	}
-});
-
-test("holds on a broadcast whose renditions match the previous one", async () => {
-	const current = new Signal<Broadcast | undefined>(broadcast({ mic: config("opus") }).broadcast);
-	const source = new Source({ broadcast: current, supported: async () => true });
-	try {
-		await settled(source);
-
-		// The new probe publishes an equal `available`, so only its broadcast tag changes.
-		const next = broadcast({ mic: config("opus") });
-		current.set(next.broadcast);
-		await settled(source);
-		expect(source.out.track.peek()).toBe("mic");
-
-		next.catalog.set({ audio: { renditions: { mic: config("opus", { enabled: false }) } } });
-		await settled(source);
-		expect(source.out.track.peek()).toBe("mic");
-		expect(source.out.config.peek()?.enabled).toBe(false);
 	} finally {
 		source.close();
 	}
@@ -313,7 +238,7 @@ test("serves unchanged configs from the cache when the catalog changes", async (
 	}
 });
 
-test("mute and unmute reuse the decoder support verdict and publish the new metadata", async () => {
+test("a disable and re-enable reuse the decoder support verdict and publish the new metadata", async () => {
 	const initial = config("opus");
 	const state = broadcast({ mic: initial });
 	let probes = 0;
@@ -333,8 +258,7 @@ test("mute and unmute reuse the decoder support verdict and publish the new meta
 			});
 			await settled(source);
 			expect(source.out.available.peek().mic.enabled).toBe(enabled);
-			expect(source.out.track.peek()).toBe("mic");
-			expect(source.out.config.peek()?.enabled).toBe(enabled);
+			expect(source.out.track.peek()).toBe(enabled ? "mic" : undefined);
 			expect(probes).toBe(1);
 		}
 

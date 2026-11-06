@@ -129,13 +129,14 @@ pub enum Preset {
 /// requested [`Preset`] names the one whose controls it did apply, and one that
 /// could not confirm the controls a preset needs names none.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Applied {
+#[non_exhaustive]
+pub struct Applied {
 	/// The preset whose controls took effect, or `None` when the backend could
 	/// not confirm them (a refused or advisory low-latency setting).
-	pub(crate) preset: Option<Preset>,
+	pub preset: Option<Preset>,
 	/// The backend controls that took effect, for display, e.g.
 	/// `"p1, low-latency tuning, no B-frames, CBR, 1-frame VBV"`. Not a parse target.
-	pub(crate) controls: String,
+	pub controls: String,
 }
 
 impl Applied {
@@ -417,7 +418,7 @@ impl Encoder {
 
 	/// The latency and compression controls the backend applied for
 	/// [`Config::preset`], fixed for the session's lifetime.
-	pub(crate) fn applied(&self) -> Applied {
+	pub fn applied(&self) -> Applied {
 		self.backend.applied()
 	}
 
@@ -1001,7 +1002,7 @@ mod tests {
 	/// which GPU-less CI runners lack. Run with `--ignored`.
 	#[cfg(target_os = "windows")]
 	#[test]
-	#[ignore = "needs a Media Foundation hardware encoder; see quest/m3/video-hardware.md"]
+	#[ignore = "needs a Media Foundation hardware encoder; see quest/m5/video-hardware.md"]
 	fn mediafoundation_cpu_rgba() {
 		let config = Config {
 			kind: Kind::Named("mediafoundation".into()),
@@ -1044,7 +1045,7 @@ mod tests {
 	/// a GPU. Run with `--ignored`.
 	#[cfg(all(target_os = "windows", feature = "capture"))]
 	#[tokio::test]
-	#[ignore = "needs a Windows camera and GPU; see quest/m3/video-hardware.md"]
+	#[ignore = "needs a Windows camera and GPU; see quest/m5/video-hardware.md"]
 	async fn mediafoundation_camera_texture() {
 		let mut camera = crate::capture::open(&crate::capture::Config::default())
 			.await

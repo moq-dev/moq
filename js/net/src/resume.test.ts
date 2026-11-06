@@ -3,12 +3,12 @@ import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
-import { Route } from "./hop.ts";
+import { RouteInfo } from "./hop.ts";
 import type { Session as IetfSession } from "./ietf/session.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
 import * as Instance from "./instance.ts";
-import { hooks, MAX_DATAGRAMS } from "./internal.ts";
+import { hooks } from "./internal.ts";
 import type { Lister } from "./listing.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -39,7 +39,7 @@ async function isPending(promise: Promise<unknown>): Promise<boolean> {
 
 /** A stand-in session announcing `path` under the shared instance at `cost`, serving `source`. */
 function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
-	const handle = wireOf(origin).receive(path, Route.normalize({ instance: INSTANCE, cost }));
+	const handle = wireOf(origin).receive(path, RouteInfo.normalize({ instance: INSTANCE, cost }));
 	void (async () => {
 		for await (const request of handle.requested()) request.serve(source.consume());
 	})();
@@ -485,9 +485,8 @@ test("a resumed fork shares an on-demand track request", async () => {
 test("a lagging same-instance replica resumes from one publisher's bytes exactly once", async () => {
 	const { clock, installed } = manual();
 	const publisher = new Producer();
-	const originalPublication = publisher.createBroadcast(path);
-	const original = originalPublication.broadcast;
-	originalPublication.announce({ instance: INSTANCE });
+	const originalRoute = publisher.route(path, { instance: INSTANCE });
+	const original = originalRoute.broadcast;
 	const source = original.createTrack("seq", { maxAge: null });
 	const origin = new Producer();
 
@@ -758,6 +757,257 @@ test("a replacement differing only in unchecked takes over", async () => {
 	close();
 });
 
+// Mirrors `a_replacement_aborted_after_its_answer_keeps_the_incumbent` in rs/moq-net/src/model/origin.rs.
+test("a replacement that answers and then aborts before its first group leaves the incumbent serving", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+
+	await swap();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	expect(sub.closed.peek()).toBeUndefined();
+
+	ta.write(1n);
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+
+	// The incumbent's clean end is the track's, not the replacement's error.
+	ta.producer.finish();
+	expect(await sub.recvGroup()).toBeUndefined();
+
+	sub.close();
+	close();
+});
+
+// Mirrors the Rust front: an incumbent that finished cleanly ends the track whoever serves it.
+test("a replacement that aborts before its first group after the incumbent finished ends the track cleanly", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+
+	await swap();
+	ta.write(1n);
+	ta.producer.finish();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	const groups: bigint[] = [];
+	for (let group = await sub.recvGroup(); group; group = await sub.recvGroup()) {
+		groups.push(group.sequence);
+		group.close();
+	}
+	expect(groups).toEqual([1n]);
+
+	sub.close();
+	close();
+});
+
+// Mirrors `readers_owed_nothing_below_the_incumbents_end_end_cleanly` in rs/moq-net/src/model/origin.rs:
+// a reader owed nothing below the incumbent's end, and one joining while the replacement has yet
+// to deliver, end cleanly once the incumbent finished and the replacement aborted.
+test("readers owed nothing below the incumbent's end end cleanly when the replacement aborts", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const later = active.track("seq").subscribe({ ranges: [{ start: { absolute: 3n } }] });
+	ta.write(0n);
+	ta.write(1n);
+	await swap();
+	const joiner = active.track("seq").subscribe();
+	await settle();
+	ta.producer.finish();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+
+	expect(await later.recvGroup()).toBeUndefined();
+	const groups: bigint[] = [];
+	for (let group = await joiner.recvGroup(); group; group = await joiner.recvGroup()) {
+		groups.push(group.sequence);
+		group.close();
+	}
+	expect(groups).toEqual([1n]);
+
+	later.close();
+	joiner.close();
+	close();
+});
+
+// A reader arriving after the replacement answered reads the incumbent too, as the Rust front
+// serves it until the replacement delivers.
+test("a reader joining before the replacement delivers keeps the incumbent when the replacement aborts", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const first = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(first)).toEqual([0n]);
+	await swap();
+	const joiner = active.track("seq").subscribe();
+	await settle();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	ta.write(1n);
+	await settle();
+	expect(drain(joiner)).toContain(1n);
+	expect(joiner.closed.peek()).toBeUndefined();
+
+	first.close();
+	joiner.close();
+	close();
+});
+
+// The incumbent is the source that last delivered, however many replacements answered since.
+test("a reader joining after two undelivered replacements keeps the incumbent when both abort", async () => {
+	const { origin, a, b, swap, active, close } = await setup();
+	const c = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const tc = copy(c);
+	const first = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(first)).toEqual([0n]);
+	await swap();
+	const disposeC = serve(origin, c, 0n);
+	await settle();
+	await settle();
+	const joiner = active.track("seq").subscribe();
+	await settle();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	tc.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	ta.write(1n);
+	await settle();
+	expect(drain(joiner)).toContain(1n);
+	expect(joiner.closed.peek()).toBeUndefined();
+
+	first.close();
+	joiner.close();
+	disposeC();
+	close();
+});
+
+// A fork joins like any reader arriving before the replacement delivers.
+test("a fork made before the replacement delivers keeps the incumbent when the replacement aborts", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+	await swap();
+	const fork = sub.fork();
+	await settle();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	ta.write(1n);
+	await settle();
+	expect(drain(fork)).toContain(1n);
+	expect(fork.closed.peek()).toBeUndefined();
+
+	sub.close();
+	fork.close();
+	close();
+});
+
+// Only an end some other copy settled cleanly excuses the serving copy's failure.
+test("a serving copy that declares an end and then aborts short of it keeps the error", async () => {
+	const { a, active, close } = await setup();
+	const ta = copy(a);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n, 1, false);
+	ta.producer.finishAt({ group: 1n, frame: 0 });
+	const group = await sub.recvGroup();
+	group?.close();
+	ta.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	await expect(sub.recvGroup()).rejects.toThrow("64");
+
+	sub.close();
+	close();
+});
+
+// Mirrors `a_replacement_aborted_after_its_answer_keeps_the_incumbent` for a reader awaiting only the end.
+test("waiting for the end of a track whose replacement aborts before its first group follows the incumbent", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+
+	await swap();
+	const finished = sub.finished();
+	finished.catch(() => {});
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	ta.producer.finish();
+	await expect(finished).resolves.toEqual({ group: 1n, frame: 0 });
+
+	sub.close();
+	close();
+});
+
+// The Rust front judges the replacement by its copy, whatever each reader's window took from it:
+// one that held a group delivered, so its later abort is the track's verdict for every reader.
+test("a replacement that delivered is not undone by a reader whose window skipped its groups", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const first = active.track("seq").subscribe();
+	const later = active.track("seq").subscribe({ ranges: [{ start: { absolute: 3n } }] });
+	ta.write(0n);
+	expect(drain(first)).toEqual([0n]);
+	expect(drain(later)).toEqual([]);
+
+	await swap();
+	tb.write(1n);
+	await settle();
+	expect(drain(first)).toEqual([1n]);
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	expect(() => drain(later)).toThrow("64");
+	ta.write(2n);
+	await settle();
+	expect(() => drain(first)).toThrow("64");
+
+	first.close();
+	later.close();
+	close();
+});
+
+test("a replacement that aborts before its first group after the front concludes leaves the incumbent serving", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+
+	front.serve(b.consume());
+	await settle();
+	// No front is left to replace the replacement, but the incumbent still feeds the track.
+	front.conclude();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	expect(sub.closed.peek()).toBeUndefined();
+
+	ta.write(1n);
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+	ta.producer.finish();
+	expect(await sub.recvGroup()).toBeUndefined();
+	sub.close();
+});
+
 test("waiting for the end of a track whose replacement was refused ends with the refusal", async () => {
 	const { a, b, swap, active, close } = await setup();
 	const old = a.createTrack("seq", { priority: 1 });
@@ -869,103 +1119,6 @@ test("a fetched group failing as it is handed out releases its route once", asyn
 	}
 });
 
-test("datagrams a new copy replays are handed out once", async () => {
-	const { a, b, swap, active, close } = await setup();
-	const ta = copy(a);
-	const tb = copy(b);
-	const sub = active.track("seq").subscribe();
-	ta.producer.appendDatagram(undefined, enc.encode("a0"));
-	expect(dec.decode((await sub.recvDatagram())?.payload)).toBe("a0");
-
-	tb.producer.appendDatagram(undefined, enc.encode("b0"));
-	await swap();
-	tb.producer.appendDatagram(undefined, enc.encode("b1"));
-	expect(dec.decode((await sub.recvDatagram())?.payload)).toBe("b1");
-
-	sub.close();
-	close();
-});
-
-test("a replacement delivers unseen datagrams below the newest sequence", async () => {
-	const clock = new Manual();
-	const installed = clock.install();
-	try {
-		const { a, b, swap, active, close } = await setup();
-		const ta = copy(a);
-		const tb = copy(b);
-		const sub = active.track("seq").subscribe({ delay: { max: Milli(100) } });
-		ta.producer.insertDatagram(10n, undefined, enc.encode("10"));
-		expect((await sub.recvDatagram())?.sequence).toBe(10n);
-		await swap();
-		tb.producer.insertDatagram(10n, undefined, enc.encode("10"));
-		tb.producer.insertDatagram(5n, undefined, enc.encode("5"));
-		const next = hooks.tryRecvDatagram(sub);
-		expect(next.kind).toBe("datagram");
-		if (next.kind === "datagram") expect(next.datagram.sequence).toBe(5n);
-		expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
-		sub.close();
-		close();
-	} finally {
-		installed.close();
-	}
-});
-
-test.each([0, 100])("datagram identities stay within the reader's %p ms budget", async (budget) => {
-	const clock = new Manual();
-	const installed = clock.install();
-	try {
-		const front = new Front();
-		const a = new BroadcastProducer();
-		const ta = copy(a);
-		front.serve(a.consume());
-		const sub = front.consumer.track("seq").subscribe({ delay: { max: Milli(budget) } });
-		const send = (sequence: number) => ta.producer.insertDatagram(BigInt(sequence), undefined, enc.encode("d"));
-		const recv = () => hooks.tryRecvDatagram(sub);
-		send(10);
-		expect(recv().kind).toBe("datagram");
-		await clock.advance(Nano(60_000_000_000));
-		send(10);
-		expect(recv().kind).toBe("idle");
-		send(5);
-		expect(recv().kind).toBe("datagram");
-		if (budget > 0) {
-			await clock.advance(Nano(budget * 500_000));
-			send(10);
-			expect(recv().kind).toBe("idle");
-			await clock.advance(Nano(budget * 500_000));
-		}
-		send(10);
-		expect(recv().kind).toBe("datagram");
-		sub.close();
-		front.consumer.close();
-		a.close();
-	} finally {
-		installed.close();
-	}
-});
-
-test("datagram identities are capped by the replay buffer", () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const ta = copy(a);
-	front.serve(a.consume());
-	// Superseded identities never expire within an hour, so only the cap bounds them.
-	const sub = front.consumer.track("seq").subscribe({ delay: { max: Milli(3_600_000) } });
-	const send = (sequence: number) => ta.producer.insertDatagram(BigInt(sequence), undefined, enc.encode("d"));
-	const recv = () => hooks.tryRecvDatagram(sub).kind;
-	for (let sequence = 0; sequence <= MAX_DATAGRAMS + 1; sequence++) {
-		send(sequence);
-		expect(recv()).toBe("datagram");
-	}
-	send(1);
-	expect(recv()).toBe("idle");
-	send(0);
-	expect(recv()).toBe("datagram");
-	sub.close();
-	front.consumer.close();
-	a.close();
-});
-
 test("a route that goes for good ends the track as its last copy does", async () => {
 	const { a, active, disposeA, request, close } = await setup();
 	const ta = copy(a);
@@ -982,6 +1135,55 @@ test("a route that goes for good ends the track as its last copy does", async ()
 	close();
 });
 
+// A relay refuses a subscription it cannot serve with a bare Internal, which is also how a
+// route fails to deliver. While that route still serves, no move will replace the copy, so
+// the read has to end with the refusal rather than wait for one.
+test("a route that refuses the track while still serving ends the read with its cause", async () => {
+	const { a, active, close } = await setup();
+	const ta = copy(a);
+	const sub = active.track("seq").subscribe();
+	const read = sub.recvGroup().catch((e: unknown) => e);
+	ta.producer.abort(new StreamError(StreamCode.Internal));
+	expect(await isPending(read)).toBe(false);
+	const err = await read;
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.Internal);
+
+	close();
+});
+
+test("a copy that fails mid-serve on a route still serving is subscribed afresh", async () => {
+	const { a, active, close } = await setup();
+	const ta = copy(a);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+
+	ta.producer.abort(new StreamError(StreamCode.Internal));
+	const again = copy(a);
+	again.write(1n);
+	const group = await sub.recvGroup();
+	expect(group?.sequence).toBe(1n);
+
+	sub.close();
+	close();
+});
+
+// Mirrors `a_copy_verdict_aborts_without_querying_again` in rs/moq-net/src/model/front.rs.
+test("a copy that loses its route mid-serve on a route still serving ends the read", async () => {
+	const { a, active, close } = await setup();
+	const ta = copy(a);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+
+	ta.producer.abort(new StreamError(StreamCode.Unroutable));
+	await expect(sub.recvGroup()).rejects.toMatchObject({ code: StreamCode.Unroutable });
+
+	sub.close();
+	close();
+});
+
 test("between routes a reader keeps reading the copy it has", async () => {
 	const { origin, a, b, active, request, disposeA, close } = await setup();
 	const ta = copy(a);
@@ -991,7 +1193,7 @@ test("between routes a reader keeps reading the copy it has", async () => {
 	expect(drain(sub)).toEqual([0n]);
 
 	// The next route has not answered when the old one is retracted.
-	const next = wireOf(origin).receive(path, Route.normalize({ instance: INSTANCE, cost: 1n }));
+	const next = wireOf(origin).receive(path, RouteInfo.normalize({ instance: INSTANCE, cost: 1n }));
 	const asked = next.requested();
 	disposeA();
 	await settle();
@@ -1115,6 +1317,29 @@ test("an ordered reader takes a replaced copy's buffered group before the new co
 	front.consumer.close();
 	a.close();
 	b.close();
+});
+
+test("a routed read right after an update picks its group under the new preferences", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: null } })
+		.ordered();
+	try {
+		ta.write(0n);
+		ta.write(1n);
+		await settle();
+		// The copy learns of the update a microtask later; the read must not pick under its old budget.
+		ordered.update({ delay: { max: Milli.zero } });
+		expect(ordered.tryNextGroup()?.sequence).toBe(1n);
+	} finally {
+		ordered.close();
+		front.consumer.close();
+		a.close();
+	}
 });
 
 for (const resolution of ["arrival", "drop", "other copy", "budget"] as const) {
@@ -1467,28 +1692,6 @@ for (const [field, first, second] of [
 	});
 }
 
-test("a datagram reader lets go of the copies a swap replaced", async () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const b = new BroadcastProducer();
-	const ta = copy(a);
-	copy(b);
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe();
-	expect(ta.producer.demand().wanted.peek()).toBeDefined();
-	front.serve(b.consume());
-	await settle();
-	// A read with nothing to deliver is the pass that lets go of a's copy.
-	void sub.recvDatagram();
-	await settle();
-	expect(ta.producer.demand().wanted.peek()).toBeUndefined();
-
-	sub.close();
-	front.consumer.close();
-	a.close();
-	b.close();
-});
-
 test("a failed group on a route whose replacement was refused ends with the refusal", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
@@ -1565,48 +1768,6 @@ test("a failed group whose replacement cannot fetch ends with the failure, or co
 		a.close();
 		b.close();
 	}
-});
-
-test("draining groups to their end leaves buffered datagrams readable", async () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const ta = copy(a);
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe();
-	ta.write(0n);
-	ta.producer.appendDatagram(undefined, enc.encode("d"));
-	ta.producer.finish();
-	ta.producer.close();
-	expect(drain(sub)).toEqual([0n]);
-	expect(await sub.recvGroup()).toBeUndefined();
-	expect(dec.decode((await sub.recvDatagram())?.payload)).toBe("d");
-
-	sub.close();
-	front.consumer.close();
-	a.close();
-});
-
-test("a datagram read keeps a replaced copy a group reader still needs", async () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const b = new BroadcastProducer();
-	const ta = copy(a);
-	copy(b);
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe({ delay: { max: 10_000 as track.Delay["max"] } });
-	ta.write(0n);
-	expect(drain(sub)).toEqual([0n]);
-	ta.write(1n);
-
-	front.serve(b.consume());
-	await settle();
-	void sub.recvDatagram();
-	expect(drain(sub)).toEqual([1n]);
-
-	sub.close();
-	front.consumer.close();
-	a.close();
-	b.close();
 });
 
 test("a fetch never reads a replacement refused for its track properties", async () => {
@@ -1921,7 +2082,7 @@ test("a fetched group that fails on the route still serving waits for the next r
 	const b = new BroadcastProducer();
 	const ta = copy(a);
 	const tb = copy(b);
-	// Route a's request handler holds the refetch of its failed group open, as Rust's tests do
+	// RouteInfo a's request handler holds the refetch of its failed group open, as Rust's tests do
 	// with `requests()`: without one, a miss there is NotFound at once.
 	const pending = ta.producer.requests();
 	const failing = ta.write(5n, 1, false);
@@ -1953,7 +2114,7 @@ test("a group handed out already failed with its route still continues on the ne
 	const b = new BroadcastProducer();
 	const ta = copy(a);
 	const tb = copy(b);
-	// Route a's request handler holds the refetch of its failed group open until the next route.
+	// RouteInfo a's request handler holds the refetch of its failed group open until the next route.
 	const pending = ta.producer.requests();
 	front.serve(a.consume());
 	const sub = front.consumer.track("seq").subscribe();
@@ -2496,62 +2657,6 @@ test("a clean end waits for a group the replaced copy still carries", async () =
 	}
 });
 
-test.each([false, true])(
-	"a reader that asked for groups keeps a replaced copy's unread group across a datagram read (datagrams first: %p)",
-	async (datagramsFirst) => {
-		const front = new Front();
-		const a = new BroadcastProducer();
-		const b = new BroadcastProducer();
-		const ta = copy(a);
-		copy(b);
-		front.serve(a.consume());
-		const sub = front.consumer.track("seq").subscribe({ delay: { max: Milli(10_000) } });
-		expect(hooks.tryRecvGroup(sub, false).kind).toBe("idle");
-		expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
-		ta.write(0n);
-		front.serve(b.consume());
-		await settle();
-		if (datagramsFirst) expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
-		expect(drain(sub)).toEqual([0n]);
-
-		sub.close();
-		front.consumer.close();
-		a.close();
-		b.close();
-	},
-);
-
-test.each([Milli(100), Milli(3_600_000)])(
-	"a datagram reader keeps no replaced copy, whatever its budget (%p ms)",
-	async (maxDelay) => {
-		const front = new Front();
-		const sources: BroadcastProducer[] = [];
-		const copies: ReturnType<typeof copy>[] = [];
-		const sub = front.consumer.track("seq").subscribe({ delay: { max: maxDelay } });
-		try {
-			for (let sequence = 0n; sequence < 20n; sequence++) {
-				const source = new BroadcastProducer();
-				const held = copy(source);
-				sources.push(source);
-				copies.push(held);
-				front.serve(source.consume());
-				await settle();
-				held.write(sequence);
-				expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
-				await settle();
-				const subscribed = copies.filter((held) => held.producer.demand().wanted.peek() !== undefined);
-				expect(subscribed).toEqual([held]);
-			}
-			// Only the serving copy's group is left.
-			expect(drain(sub)).toEqual([19n]);
-		} finally {
-			sub.close();
-			front.consumer.close();
-			for (const source of sources) source.close();
-		}
-	},
-);
-
 test("a group-only reader of a finite track settles closed and lets go of its copy", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
@@ -2614,28 +2719,6 @@ test("a group-only fork of a finite track settles closed and lets go of its copy
 	a.close();
 });
 
-test("the serving copy closing cleanly settles closed and leaves its datagrams readable", async () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const ta = copy(a);
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe();
-	ta.write(0n);
-	ta.producer.appendDatagram(undefined, enc.encode("d"));
-	ta.producer.finish();
-	ta.producer.close();
-	await settle();
-	expect(sub.closed.peek()).toBeNull();
-	expect(drain(sub)).toEqual([0n]);
-	expect(dec.decode((await sub.recvDatagram())?.payload)).toBe("d");
-	expect(await sub.recvDatagram()).toBeUndefined();
-	expect(await sub.recvGroup()).toBeUndefined();
-
-	sub.close();
-	front.consumer.close();
-	a.close();
-});
-
 test("an end a replaced copy declared holds across a swap", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
@@ -2662,32 +2745,6 @@ test("an end a replaced copy declared holds across a swap", async () => {
 	// Refused, the reader holds no copy.
 	expect(ta.producer.demand().wanted.peek()).toBeUndefined();
 	expect(tb.producer.demand().wanted.peek()).toBeUndefined();
-
-	sub.close();
-	front.consumer.close();
-	a.close();
-	b.close();
-});
-
-test("an end a replaced copy declared holds once the copy is let go in the same turn", async () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const b = new BroadcastProducer();
-	const ta = copy(a);
-	const tb = copy(b);
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe();
-	front.serve(b.consume());
-	await settle();
-
-	// A datagram read lets go of the replaced copy before its end is reported.
-	ta.producer.finishAt({ group: 2n, frame: 0 });
-	expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
-	expect(hooks.subscriberEnd(sub)).toEqual({ group: 2n, frame: 0 });
-
-	tb.producer.finishAt({ group: 3n, frame: 0 });
-	await settle();
-	expect(sub.closed.peek()).toBeInstanceOf(Error);
 
 	sub.close();
 	front.consumer.close();
@@ -2899,29 +2956,6 @@ test.each([
 	},
 );
 
-test("a datagram below the group floor does not keep a finite track's copy", async () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const ta = copy(a);
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe();
-	ta.producer.appendDatagram(undefined, enc.encode("d"));
-	await settle();
-	// The floor passes the datagram: a datagram read would only discard it.
-	sub.withRange({ start: { included: 1n } });
-	ta.write(1n);
-	ta.producer.finishAt({ group: 2n, frame: 0 });
-	expect(drain(sub)).toEqual([1n]);
-	expect(await sub.recvGroup()).toBeUndefined();
-	await settle();
-	expect(sub.closed.peek()).toBeNull();
-	expect(ta.producer.demand().wanted.peek()).toBeUndefined();
-
-	sub.close();
-	front.consumer.close();
-	a.close();
-});
-
 test("a clean end keeps the serving copy while a group read from a replaced one may continue from it", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
@@ -3054,34 +3088,6 @@ test.each(["handed out", "buffered"])("an end below a group another copy %s is r
 		tb.producer.finishAt({ group: 3n, frame: 0 });
 		await settle();
 		expect(() => sub.tryRecvGroup()).toThrow("changed its properties");
-		expect(sub.closed.peek()).toBeInstanceOf(Error);
-	} finally {
-		sub.close();
-		front.consumer.close();
-		a.close();
-		b.close();
-	}
-});
-
-test.each(["handed out", "buffered"])("an end below a datagram another copy %s is refused", async (seen) => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const b = new BroadcastProducer();
-	const ta = copy(a);
-	const tb = copy(b);
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe();
-	try {
-		ta.producer.insertDatagram(5n, undefined, enc.encode("5"));
-		if (seen === "handed out") expect(hooks.tryRecvDatagram(sub).kind).toBe("datagram");
-		front.serve(b.consume());
-		await settle();
-		// The new route delivers an older datagram last, then ends the track before the old route's.
-		tb.producer.insertDatagram(2n, undefined, enc.encode("2"));
-		if (seen === "handed out") expect(hooks.tryRecvDatagram(sub).kind).toBe("datagram");
-		tb.producer.finishAt({ group: 3n, frame: 0 });
-		await settle();
-		expect(hooks.tryRecvDatagram(sub).kind).toBe("error");
 		expect(sub.closed.peek()).toBeInstanceOf(Error);
 	} finally {
 		sub.close();
@@ -3406,4 +3412,34 @@ test("a route whose IETF session closed before subscribing moves the track to th
 	sub.close();
 	front.consumer.close();
 	b.close();
+});
+
+test("routed metadata receives a refusal without polling a group cursor", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const origin = new Producer();
+	try {
+		origin.route(Path.from("missing-track"));
+		for (const request of [origin.request(Path.from("missing-track")), origin.follow(Path.from("missing-track"))]) {
+			const broadcast = request.active.peek();
+			if (!broadcast) throw new Error("local broadcast missing");
+			const subscriber = broadcast.track("absent").subscribe();
+			let outcome: unknown;
+			void subscriber.info().then(
+				() => {
+					outcome = "accepted";
+				},
+				(error) => {
+					outcome = error;
+				},
+			);
+			await clock.advance(Nano.zero);
+			expect(outcome).toBeInstanceOf(NotFound);
+			subscriber.close();
+			request.close();
+		}
+	} finally {
+		origin.close();
+		installed.close();
+	}
 });

@@ -325,7 +325,7 @@ async function readCatalog(broadcast: Broadcast): Promise<Catalog.Root | undefin
 	const effect = new Effect();
 	broadcast.catalog.serve(track, effect);
 	try {
-		return (await new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() }).latest())?.value;
+		return (await new Json.Snapshot.Consumer<Catalog.Root>({ track }).latest())?.value;
 	} finally {
 		effect.close();
 	}
@@ -1337,16 +1337,15 @@ test("an on-demand rendition declares its keyframe interval, and a media subscri
 		capture: recording.capture as never,
 		config,
 	});
-	const subscribers: Moq.Track.Subscriber[] = [];
+	const subscribers: { close(): void }[] = [];
 	try {
 		await settle();
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
 		expect(encoder.out.active.peek()).toBe(false);
 
-		const catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
-		subscribers.push(catalogSubscriber);
-		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber });
+		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: net.track(Broadcast.CATALOG_TRACK) });
+		subscribers.push(catalog);
 		const first = (await catalog.latest())?.value;
 		expect(first?.media?.join).toEqual({ interval: Catalog.u53(3000) });
 		expect(first?.video?.renditions.video).not.toHaveProperty("hls");
@@ -1467,7 +1466,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 	const encoder = new Encoder("video/hd", { broadcast, capture: capture as never, bandwidth, enabled, config: {} });
 	let subscriber: Moq.Track.Subscriber | undefined;
 	let siblingSubscriber: Moq.Track.Subscriber | undefined;
-	let catalogSubscriber: Moq.Track.Subscriber | undefined;
+	let catalog: Json.Snapshot.Consumer<Catalog.Root> | undefined;
 	let recovered: Moq.Track.Subscriber | undefined;
 	let announced: Moq.Origin.Following | undefined;
 	try {
@@ -1487,8 +1486,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		const siblingTrack = sibling.track.peek();
 		if (!siblingTrack) throw new Error("expected demanded sibling track");
 		expect(siblingTrack.appendGroup().sequence).toBe(0n);
-		catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
-		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber });
+		catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: net.track(Broadcast.CATALOG_TRACK) });
 		expect((await catalog.latest())?.value.video?.renditions["video/hd"]?.enabled).not.toBe(false);
 		const live = FakeVideoEncoder.instances.find((instance) => instance.state === "configured");
 		if (!live) throw new Error("expected live video encoder");
@@ -1550,7 +1548,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 	} finally {
 		subscriber?.close();
 		siblingSubscriber?.close();
-		catalogSubscriber?.close();
+		catalog?.close();
 		recovered?.close();
 		encoder.close();
 		bandwidth.close();
@@ -2043,8 +2041,7 @@ test("ceiling growth updates the served track in place", async () => {
 	const encoder = new Encoder("video", { broadcast, capture: capture as never, config: { frameRate: 60 } });
 	const net = broadcast.net.peek() ?? (await broadcast.net.changed());
 	if (!net) throw new Error("expected a network broadcast");
-	const subscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
-	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: subscriber });
+	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: net.track(Broadcast.CATALOG_TRACK) });
 	const next = async (done: (config: Catalog.VideoConfig) => boolean) => {
 		for (;;) {
 			const config = (await catalog.latest())?.value.video?.renditions.video;
@@ -2068,7 +2065,7 @@ test("ceiling growth updates the served track in place", async () => {
 		expect(grown.track).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);
 	} finally {
-		subscriber.close();
+		catalog.close();
 		encoder.close();
 		broadcast.close();
 	}

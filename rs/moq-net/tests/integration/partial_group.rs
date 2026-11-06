@@ -34,17 +34,21 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 	let downstream = produce_origin(2);
 	let _pair = peer(version.parse::<Version>().unwrap(), &publisher, &downstream).await;
 
-	let broadcast = publisher.create_broadcast("room").unwrap();
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
+		.broadcast()
 		.create_track("data", Info::default().with_timescale(Timescale::MILLI))
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let consumer = downstream.consume();
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 	let mut live = kio::clock::timeout(
 		TIMEOUT,
 		remote

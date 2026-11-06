@@ -97,6 +97,10 @@ pub enum Error {
 	#[error("invalid quic config: {0}")]
 	Config(#[from] driver::ConfigError),
 
+	/// This CPU lacks a feature that rind, MoQ's cryptography, requires.
+	#[error(transparent)]
+	UnsupportedCpu(#[from] crate::crypto::UnsupportedCpu),
+
 	/// The qlog trace file couldn't be created, usually a missing directory.
 	#[cfg(feature = "qlog")]
 	#[error("failed to create qlog file")]
@@ -449,8 +453,7 @@ impl Client {
 
 				// Even a plaintext fetch builds reqwest's TLS stack, which panics without a
 				// process default when another crate in the graph builds it as `rustls-no-provider`.
-				// An error only means one is already installed.
-				let _ = crate::crypto::install_default();
+				crate::crypto::install_default()?;
 
 				let resp = reqwest::get(fingerprint.as_str())
 					.await
@@ -621,7 +624,8 @@ pub(crate) struct Server {
 	/// The configured receive window, opened once a session is admitted: until then a
 	/// connection holds [`moq_net::transport::SETUP_RECEIVE_WINDOW`].
 	pub window: Option<std::num::NonZeroU64>,
-	tls: crate::tls::Serve,
+	/// Builds each accepted client's identity against the listener's current roots.
+	pub(crate) tls: crate::tls::Serve,
 	/// Reloads the QUIC-LB peers for as long as the server runs.
 	_peers: Option<notify::RecommendedWatcher>,
 }
@@ -819,6 +823,7 @@ impl Closer {
 pub(crate) async fn accept(
 	conn: driver::endpoint::Incoming,
 	alpns: Vec<&'static str>,
+	tls: crate::tls::Serve,
 ) -> Result<crate::server::Accepted<web::Session>> {
 	let mut conn = conn.accept()?;
 
@@ -852,10 +857,7 @@ pub(crate) async fn accept(
 				.await
 				.map_err(|err| Error::RecvRequest(crate::error::message(err)))?;
 			let url = Some(request.url.clone());
-			let identity = request
-				.connection()
-				.peer_identity()
-				.map(crate::tls::PeerIdentity::from_chain);
+			let identity = request.connection().peer_identity().map(|chain| tls.peer(chain));
 			// The authority the client put in its CONNECT URL.
 			let authority = request.url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
 
@@ -882,7 +884,7 @@ pub(crate) async fn accept(
 		// this also covers versions omitted from `moq_net::ALPNS` but enabled
 		// in this server's configuration.
 		alpn if alpns.contains(&alpn) => {
-			let identity = conn.peer_identity().map(crate::tls::PeerIdentity::from_chain);
+			let identity = conn.peer_identity().map(|chain| tls.peer(chain));
 			// Raw QUIC carries no request URL; the path rides the SETUP. The TLS SNI is the
 			// only authority the client can offer here, and it is optional.
 			let authority = (!host.is_empty()).then_some(host);
@@ -1082,7 +1084,7 @@ mod tests {
 		let dial = client.connect(&tls, url.into(), &versions);
 		let accept = async {
 			let incoming = server.accept().await.expect("incoming connection");
-			super::accept(incoming, versions.alpns()).await
+			super::accept(incoming, versions.alpns(), server.tls.clone()).await
 		};
 		let webrtc = async {
 			let mut received = Vec::new();
@@ -1159,7 +1161,7 @@ mod tests {
 		let dial = client.connect(&tls, url.into(), &versions);
 		let accept = async {
 			let incoming = server.accept().await.expect("incoming connection");
-			super::accept(incoming, versions.alpns()).await
+			super::accept(incoming, versions.alpns(), server.tls.clone()).await
 		};
 		let result = kio::clock::timeout(Duration::from_secs(5), async { tokio::try_join!(dial, accept) })
 			.await
@@ -1204,6 +1206,7 @@ mod tests {
 			mtu: 1200,
 			rtt: std::time::Duration::from_millis(333),
 			max_pacing_rate: None,
+			seed: 0,
 		};
 
 		let loss = congestion_factory(CongestionControl::Loss).build(init);

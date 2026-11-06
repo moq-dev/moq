@@ -12,8 +12,9 @@ use std::task::Poll;
 
 use bytes::{Buf, Bytes};
 
+use super::open::{self, Open};
 use super::poll::{self, SendOptions};
-use super::{Address, CloseKind, Probe, ReceiveWindow, Wire};
+use super::{Address, CloseKind, Dir, Probe, ReceiveWindow, StreamCredit, Wire};
 
 /// A boxed [`poll::Boxable`] session, shared by every task that uses it.
 #[derive(Clone)]
@@ -23,18 +24,48 @@ pub(crate) struct Session {
 	closing: std::sync::Arc<crate::session::Closing>,
 	/// Shared by every clone, so each task counts the subscriptions and fetches it carries.
 	work: crate::session::Work,
+	/// Shared by every clone, so every open waits for the peer's stream credit in one line.
+	pub(super) opens: Arc<open::Lines>,
 }
 
 impl Session {
 	pub(crate) fn new<S: poll::Boxable>(session: S) -> Self {
+		let inner: Arc<Shared<dyn ErasedSession>> = Arc::new(Shared {
+			paused: AtomicU64::new(0),
+			session,
+		});
 		Self {
-			inner: Arc::new(Shared {
-				paused: AtomicU64::new(0),
-				session,
-			}),
+			opens: Arc::new(open::Lines::new(Arc::downgrade(&inner))),
+			inner,
 			closing: Default::default(),
 			work: Default::default(),
 		}
+	}
+
+	/// Poll opening a unidirectional stream scheduled by `options`, once `open` is the most
+	/// important open waiting for the peer's stream credit.
+	pub(crate) fn poll_open_uni(
+		&self,
+		open: &mut Open,
+		waiter: &kio::Waiter,
+		options: SendOptions<'_, Group>,
+	) -> Poll<Result<SendStream, Error>> {
+		open.poll(&self.opens, Dir::Uni, waiter, &options, |waiter| {
+			self.inner.session.poll_open_uni(waiter, options)
+		})
+	}
+
+	/// Poll opening a bidirectional stream, its sending half scheduled by `options`, once
+	/// `open` is the most important open waiting for the peer's stream credit.
+	pub(crate) fn poll_open_bi(
+		&self,
+		open: &mut Open,
+		waiter: &kio::Waiter,
+		options: SendOptions<'_, Group>,
+	) -> Poll<Result<(SendStream, RecvStream), Error>> {
+		open.poll(&self.opens, Dir::Bi, waiter, &options, |waiter| {
+			self.inner.session.poll_open_bi(waiter, options, self.budget())
+		})
 	}
 
 	/// The handle each stream this session yields reserves its paused credit through.
@@ -60,7 +91,7 @@ impl Session {
 }
 
 /// A boxed transport and the receive credit its paused streams hold.
-struct Shared<S: ?Sized> {
+pub(super) struct Shared<S: ?Sized> {
 	/// The stream credit reserved by streams this session stopped reading to pace a group's
 	/// writer, at most half the connection window; see [`ReceiveWindow`].
 	paused: AtomicU64,
@@ -86,6 +117,15 @@ impl Shared<dyn ErasedSession> {
 /// The session a stream reserves paused credit from, which a stream outliving it never keeps
 /// open: once it is gone, nothing is paused.
 type Budget = Weak<Shared<dyn ErasedSession>>;
+
+/// The transport a session's lines read the peer's stream credit from, which they never keep
+/// open.
+pub(super) type Transport = Weak<Shared<dyn ErasedSession>>;
+
+/// The peer's stream credit in `dir`, or `None` once the transport is gone or cannot say.
+pub(super) fn stream_credit(transport: &Transport, dir: Dir) -> Option<StreamCredit> {
+	transport.upgrade()?.session.stream_credit(dir)
+}
 
 /// A boxed transport error, keeping both code registries and the message.
 #[derive(Debug)]
@@ -124,17 +164,32 @@ impl super::Error for Error {
 }
 
 /// A boxed send group. It only ever goes back to the session that opened it.
-pub(crate) struct Group(Box<dyn ErasedGroup>);
+pub(crate) struct Group {
+	inner: Box<dyn ErasedGroup>,
+	/// Shared by every clone, like the group itself, so an open ranks by its current priority.
+	priority: Arc<std::sync::atomic::AtomicI64>,
+}
+
+impl Group {
+	/// The group's current priority.
+	pub(crate) fn priority(&self) -> i64 {
+		self.priority.load(Ordering::Relaxed)
+	}
+}
 
 impl Clone for Group {
 	fn clone(&self) -> Self {
-		Self(self.0.clone_box())
+		Self {
+			inner: self.inner.clone_box(),
+			priority: self.priority.clone(),
+		}
 	}
 }
 
 impl poll::SendGroup for Group {
 	fn set_priority(&mut self, priority: i64) {
-		self.0.set_priority(priority)
+		self.priority.store(priority, Ordering::Relaxed);
+		self.inner.set_priority(priority)
 	}
 }
 
@@ -156,15 +211,25 @@ impl RecvStream {
 	/// Box a stream outside any session, which therefore never pauses.
 	#[cfg(test)]
 	pub(crate) fn new(stream: impl poll::RecvStream + Send + Sync) -> Self {
-		Self::budgeted(stream, Weak::<Shared<super::memory::Session>>::new())
+		Self::budgeted(stream, Weak::<Shared<super::memory::Session>>::new(), None)
 	}
 
-	fn budgeted(stream: impl poll::RecvStream + Send + Sync, session: Budget) -> Self {
+	/// Box a stream of a session granting `receive`, read when the stream is accepted or
+	/// opened, which sizes its pacing [`window`](Self::window).
+	fn budgeted(stream: impl poll::RecvStream + Send + Sync, session: Budget, receive: Option<ReceiveWindow>) -> Self {
 		Self(Box::new(Budgeted {
 			stream,
 			session,
 			held: 0,
+			window: crate::model::pace::window(receive),
 		}))
+	}
+
+	/// How far ingest reads this stream ahead of its group's fastest reader before pausing:
+	/// the credit the stream may hold, so a paced hop buffers about what its peer can have
+	/// in flight on it.
+	pub(crate) fn window(&self) -> u64 {
+		self.0.window()
 	}
 
 	/// Reserve the receive credit this stream may hold while ingest stops reading it, returning
@@ -186,6 +251,8 @@ struct Budgeted<T> {
 	session: Budget,
 	/// The credit reserved while paused, zero while read.
 	held: u64,
+	/// The pacing window, from the session's receive windows when the stream arrived.
+	window: u64,
 }
 
 impl<T> Budgeted<T> {
@@ -259,7 +326,7 @@ impl super::Metrics for Metrics {
 	}
 }
 
-trait ErasedSession: Send + Sync {
+pub(super) trait ErasedSession: Send + Sync {
 	fn poll_accept_uni(&self, waiter: &kio::Waiter, budget: Budget) -> Poll<Result<RecvStream, Error>>;
 	fn poll_accept_bi(&self, waiter: &kio::Waiter, budget: Budget) -> Poll<Result<(SendStream, RecvStream), Error>>;
 	fn poll_open_uni(&self, waiter: &kio::Waiter, options: SendOptions<'_, Group>) -> Poll<Result<SendStream, Error>>;
@@ -269,12 +336,6 @@ trait ErasedSession: Send + Sync {
 		options: SendOptions<'_, Group>,
 		budget: Budget,
 	) -> Poll<Result<(SendStream, RecvStream), Error>>;
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: SendOptions<'_, Group>,
-		budget: Budget,
-	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>>;
 	fn send_group(&self, priority: i64) -> Option<Group>;
 	fn send_datagram(&self, payload: Bytes, options: SendOptions<'_, Group>) -> Result<(), Error>;
 	fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>>;
@@ -287,6 +348,8 @@ trait ErasedSession: Send + Sync {
 	fn wire(&self) -> Option<Wire>;
 	fn probe(&self) -> Option<Probe>;
 	fn receive_window(&self) -> Option<ReceiveWindow>;
+	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit>;
+	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]>;
 }
 
 trait ErasedGroup: Send + Sync {
@@ -311,6 +374,7 @@ trait ErasedRecv: Send + Sync {
 	fn set_priority(&mut self, priority: i64);
 	fn stop(&mut self, code: u32);
 	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error>;
+	fn window(&self) -> u64;
 	fn pause(&mut self) -> bool;
 	fn resume(&mut self);
 }
@@ -329,7 +393,7 @@ fn unbox<'a, G: 'static>(options: SendOptions<'a, Group>) -> SendOptions<'a, G> 
 	SendOptions {
 		group: options.group.map(|group| {
 			group
-				.0
+				.inner
 				.as_any()
 				.downcast_ref::<G>()
 				.expect("send group belongs to another transport")
@@ -338,18 +402,22 @@ fn unbox<'a, G: 'static>(options: SendOptions<'a, Group>) -> SendOptions<'a, G> 
 	}
 }
 
-fn bi<S: poll::Boxable>((send, recv): poll::BiStreams<S>, budget: Budget) -> (SendStream, RecvStream) {
-	(SendStream(Box::new(send)), RecvStream::budgeted(recv, budget))
+fn bi<S: poll::Boxable>(session: &S, (send, recv): poll::BiStreams<S>, budget: Budget) -> (SendStream, RecvStream) {
+	let receive = poll::Session::receive_window(session);
+	(SendStream(Box::new(send)), RecvStream::budgeted(recv, budget, receive))
 }
 
 impl<S: poll::Boxable> ErasedSession for S {
 	fn poll_accept_uni(&self, waiter: &kio::Waiter, budget: Budget) -> Poll<Result<RecvStream, Error>> {
-		poll::Session::poll_accept_uni(self, waiter)
-			.map(|res| res.map(|recv| RecvStream::budgeted(recv, budget)).map_err(Error::new))
+		poll::Session::poll_accept_uni(self, waiter).map(|res| {
+			res.map(|recv| RecvStream::budgeted(recv, budget, poll::Session::receive_window(self)))
+				.map_err(Error::new)
+		})
 	}
 
 	fn poll_accept_bi(&self, waiter: &kio::Waiter, budget: Budget) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		poll::Session::poll_accept_bi(self, waiter).map(|res| res.map(|bis| bi::<S>(bis, budget)).map_err(Error::new))
+		poll::Session::poll_accept_bi(self, waiter)
+			.map(|res| res.map(|bis| bi::<S>(self, bis, budget)).map_err(Error::new))
 	}
 
 	fn poll_open_uni(&self, waiter: &kio::Waiter, options: SendOptions<'_, Group>) -> Poll<Result<SendStream, Error>> {
@@ -364,23 +432,14 @@ impl<S: poll::Boxable> ErasedSession for S {
 		budget: Budget,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
 		poll::Session::poll_open_bi(self, waiter, unbox(options))
-			.map(|res| res.map(|bis| bi::<S>(bis, budget)).map_err(Error::new))
-	}
-
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: SendOptions<'_, Group>,
-		budget: Budget,
-	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>> {
-		poll::Session::poll_open_request(self, waiter, unbox(options)).map(|res| {
-			res.map(|streams| streams.map(|bis| bi::<S>(bis, budget)))
-				.map_err(Error::new)
-		})
+			.map(|res| res.map(|bis| bi::<S>(self, bis, budget)).map_err(Error::new))
 	}
 
 	fn send_group(&self, priority: i64) -> Option<Group> {
-		poll::Session::send_group(self, priority).map(|group| Group(Box::new(group)))
+		poll::Session::send_group(self, priority).map(|group| Group {
+			inner: Box::new(group),
+			priority: Arc::new(std::sync::atomic::AtomicI64::new(priority)),
+		})
 	}
 
 	fn send_datagram(&self, payload: Bytes, options: SendOptions<'_, Group>) -> Result<(), Error> {
@@ -426,6 +485,14 @@ impl<S: poll::Boxable> ErasedSession for S {
 	fn receive_window(&self) -> Option<ReceiveWindow> {
 		poll::Session::receive_window(self)
 	}
+
+	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit> {
+		poll::Session::stream_credit(self, dir)
+	}
+
+	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+		poll::Session::export_keying_material(self, label, context)
+	}
 }
 
 impl<G: poll::SendGroup + Send + Sync> ErasedGroup for G {
@@ -458,7 +525,7 @@ impl<T: poll::SendStream<Group: Send + Sync> + Send + Sync> ErasedSend for T {
 
 	fn set_group(&mut self, group: &Group) {
 		let group = group
-			.0
+			.inner
 			.as_any()
 			.downcast_ref::<T::Group>()
 			.expect("send group belongs to another transport");
@@ -499,6 +566,10 @@ impl<T: poll::RecvStream + Send + Sync> ErasedRecv for Budgeted<T> {
 
 	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
 		poll::RecvStream::poll_reset(&mut self.stream, waiter).map(Error::new)
+	}
+
+	fn window(&self) -> u64 {
+		self.window
 	}
 
 	fn pause(&mut self) -> bool {
@@ -544,6 +615,8 @@ impl poll::Session for Session {
 		self.inner.session.poll_accept_bi(waiter, self.budget())
 	}
 
+	// These skip the line for stream credit. Session code opens through the inherent
+	// `poll_open_uni` and `poll_open_bi`, which shadow them and take the open's place in line.
 	fn poll_open_uni(&self, waiter: &kio::Waiter, options: SendOptions<'_, Group>) -> Poll<Result<SendStream, Error>> {
 		self.inner.session.poll_open_uni(waiter, options)
 	}
@@ -554,14 +627,6 @@ impl poll::Session for Session {
 		options: SendOptions<'_, Group>,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
 		self.inner.session.poll_open_bi(waiter, options, self.budget())
-	}
-
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: SendOptions<'_, Group>,
-	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>> {
-		self.inner.session.poll_open_request(waiter, options, self.budget())
 	}
 
 	fn send_group(&self, priority: i64) -> Option<Group> {
@@ -611,6 +676,14 @@ impl poll::Session for Session {
 
 	fn receive_window(&self) -> Option<ReceiveWindow> {
 		self.inner.session.receive_window()
+	}
+
+	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit> {
+		self.inner.session.stream_credit(dir)
+	}
+
+	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+		self.inner.session.export_keying_material(label, context)
 	}
 }
 
@@ -734,6 +807,26 @@ mod test {
 		assert!(streams[2].pause(), "a resumed stream returned its share");
 		drop(streams.remove(1));
 		assert!(accept(&session).pause(), "so did a dropped one");
+	}
+
+	/// A stream paces at the credit its session grants it, so a hop holds about what its
+	/// peer can have in flight; a transport without windows takes the cap, never pausing.
+	#[test]
+	fn a_stream_paces_at_its_credit() {
+		use crate::model::pace::AHEAD;
+
+		let gate = kio::Producer::new(true);
+		let session =
+			Session::new(SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(100, 20)));
+		assert_eq!(accept(&session).window(), 20);
+
+		let session = Session::new(
+			SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(u64::MAX, u64::MAX)),
+		);
+		assert_eq!(accept(&session).window(), AHEAD, "capped at half the live tail");
+
+		let session = Session::new(SinkSession::accepted_bi(gate.consume()));
+		assert_eq!(accept(&session).window(), AHEAD);
 	}
 
 	/// A transport that reports no window never pauses a stream, since nothing bounds what

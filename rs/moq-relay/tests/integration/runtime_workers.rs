@@ -22,13 +22,22 @@ const WORKERS: u16 = 4;
 /// A self-signed certificate on disk. Workers refuse `listen.tls.generate`,
 /// since each would generate one of its own and serve a different identity.
 fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-	let key = rcgen::KeyPair::generate().expect("keypair");
-	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("cert params");
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("cert params");
 	let cert = params.self_signed(&key).expect("self-signed cert");
 	let cert_path = dir.join("cert.pem");
 	let key_path = dir.join("key.pem");
 	std::fs::write(&cert_path, cert.pem()).expect("write cert");
-	std::fs::write(&key_path, key.serialize_pem()).expect("write key");
+	std::fs::write(
+		&key_path,
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+	)
+	.expect("write key");
 	(cert_path, key_path)
 }
 
@@ -73,7 +82,7 @@ async fn connect(client: moq_tokio::Client, url: url::Url) -> moq_tokio::Connect
 /// it is what this asserts, whichever way the placement lands.
 #[tokio::test]
 async fn workers_serve_quic_and_share_one_origin() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -89,9 +98,13 @@ async fn workers_serve_quic_and_share_one_origin() {
 
 	// ── publisher ───────────────────────────────────────────────────
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -105,7 +118,7 @@ async fn workers_serve_quic_and_share_one_origin() {
 	for _ in 0..WORKERS {
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
-		let announced = consumer.announced();
+		let announced = consumer.routes();
 		let connection = connect(client().with_subscriber(origin), url.clone()).await;
 		subscribers.push((connection, consumer, announced));
 	}
@@ -152,12 +165,12 @@ async fn workers_serve_quic_and_share_one_origin() {
 }
 
 /// The next route and whether it is active.
-async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route)
-		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route)
-		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-		moq_net::announce::Event::End(route) => Some((route, false)),
+		moq_net::origin::RouteEvent::Start(route)
+		| moq_net::origin::RouteEvent::Update(route)
+		| moq_net::origin::RouteEvent::Restart(route)
+		| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 	}
 }

@@ -1,22 +1,28 @@
-# [S] A departed subscription releases its streams
+# [S] An abandoned subscription setup releases its streams
 
 ## Goal
 
-On lite-07, when a subscription's last reader leaves, every stream it held
-upstream is released, so the credit returns for the next subscription. A
-relay test with exactly 3 bidirectional stream slots serves a second
-subscription after the first leaves, as it already does on moq-transport-22
-and on lite-07 with 4 slots.
+On lite-07, a subscription whose last reader leaves while SUBSCRIBE is still
+opening or awaiting its answer releases its upstream TRACK and pending
+SUBSCRIBE, so their credit can serve later requests.
 
 ## Plan
 
-Found 2026-11-04 by the [scheduler](/quest/m1/stream-credit/scheduler.md)'s
-relay test: on lite-07 with exactly 3 bidirectional slots, a second
-subscription is never served after the first leaves, while 4 slots work and
-moq-transport-22 works with 3. The likely cause is a stream the departed
-subscription keeps open upstream (its request stream, or a companion such as
-the Tracks stream) after its reader leaves. Reproduce it with the 3-slot
-relay test first, find which stream stays open and on which side, fix it, and
-set that relay test's credits back to the tight case. With opens now waiting
-for credit instead of failing, a leaked stream stalls later subscriptions
-silently, and low-credit peers such as browsers hit it first.
+Decided 2026-11-05 (maintainer, /quest-plan): ✅ Keep the TRACK/SUBSCRIBE
+handshake and document the minimum of four concurrent bidirectional streams.
+AUTH and ANNOUNCE hold two slots for the session lifetime; TRACK is briefly
+held alongside SUBSCRIBE. Three slots cannot establish the first subscription.
+Rejected: metadata on SUBSCRIBE (overlaps other lite-07 work and saves no round
+trip), and releasing TRACK early during a live setup.
+
+The established-subscription regression
+`a_subscription_past_the_credit_is_served_once_credit_returns` already passes
+with four slots. Keep that budget. The three-slot reproduction did not show a
+departure leak.
+
+Local review identified remaining pending-setup cleanup: `ServeLoop::poll` in
+`ServeMode::Establish` waits on establishment without observing lost demand,
+while holding `HeldTrack`. Reproduce abandonment with at least four slots,
+keeping the publisher and route live, then ensure both the TRACK hold and the
+pending SUBSCRIBE registration are released when demand leaves. Preserve the
+hold while demand remains. Cover Rust and its JS counterpart where applicable.

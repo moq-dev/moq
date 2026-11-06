@@ -50,16 +50,16 @@ public final class BroadcastConsumer: Sendable {
 
 }
 
-/// Write side of a broadcast: open tracks and publish frames. Its `Publication`,
+/// Write side of a broadcast: open tracks and publish frames. Its `Route`,
 /// if any, announces it.
 ///
 /// Constructing one directly creates a standalone broadcast for local pub/sub.
-/// To publish at a path, use `OriginProducer.createBroadcast(path:)` instead.
+/// To publish at a path, use `OriginProducer.route(path:)` instead.
 public final class BroadcastProducer: Sendable {
     let ffi: MoqBroadcastProducer
 
     /// Create a standalone broadcast for local pub/sub. To publish at a path,
-    /// use `OriginProducer.createBroadcast(path:)`.
+    /// use `OriginProducer.route(path:)`.
     public init() throws {
         ffi = try MoqBroadcastProducer()
     }

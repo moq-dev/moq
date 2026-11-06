@@ -739,6 +739,20 @@ pub struct Config {
 	)]
 	pub id: Option<u64>,
 
+	/// Route key file: the Ed25519 key this relay proves to every moq-lite-07 peer,
+	/// which files the routes this relay sends under it when this relay's grant is scoped.
+	///
+	/// Relays given the same file present an origin under one key, so a scoped peer
+	/// reached through either fails over as one. A missing file is generated (mode 0600).
+	/// Unset generates a fresh key on every start.
+	#[usage(
+		name = "cluster-route-key",
+		long = "cluster-route-key",
+		env = "MOQ_CLUSTER_ROUTE_KEY",
+		setting = "cluster.route_key"
+	)]
+	pub route_key: Option<PathBuf>,
+
 	/// Longest hop path accepted or forwarded, from 1 to 32 (default 32).
 	#[usage(
 		name = "cluster-max-hops",
@@ -1393,6 +1407,12 @@ impl Cluster {
 		peer.quic.validate()?;
 		let mut work = kio::Tasks::new();
 		let mut origin_config = origin::Config::new(id);
+		origin_config.route_key = Some(match &config.route_key {
+			Some(path) => (&moq_crypto::sign::SecretKey::load_or_generate(path)
+				.with_context(|| format!("--cluster-route-key {}", path.display()))?)
+				.into(),
+			None => origin::RouteKey::generate(),
+		});
 		if let Some(max) = config.max_hops {
 			origin_config.max_hops = origin::HopLimit::new(max).context("--cluster-max-hops must be from 1 to 32")?;
 		}
@@ -2510,12 +2530,15 @@ mod tests {
 	#[tokio::test]
 	async fn only_a_peer_grant_discovers_hidden_routes() {
 		let cluster = new_cluster(Config::default()).expect("cluster");
-		let _hidden = cluster.origin.publish(".stats/node", origin::Route::default());
-		let _visible = cluster.origin.publish("room", origin::Route::default());
+		let _hidden = cluster
+			.origin
+			.route(".stats/node", moq_net::origin::RouteOptions::default());
+		let _visible = cluster.origin.route("room", moq_net::origin::RouteOptions::default());
 		let mut request = moq_auth::Request::new("test", moq_auth::Transport::Quic, "/");
 		request.tls = Some(moq_auth::Peer {
 			name: "edge0".into(),
 			fingerprint: "ab".repeat(32),
+			chain: vec!["ab".repeat(32)],
 			expires: None,
 			issuer: "CN=cluster".into(),
 		});
@@ -2529,7 +2552,7 @@ mod tests {
 					false => cluster.scope(lease, &request),
 				}
 				.expect("admitted");
-				let mut announced = admitted.subscriber.expect("subscribe grant").announced();
+				let mut announced = admitted.subscriber.expect("subscribe grant").routes();
 				let mut seen = Vec::new();
 				while let Some(route) = try_next_announced(&mut announced) {
 					seen.push(route.prefix.to_string());
@@ -2547,20 +2570,20 @@ mod tests {
 
 	/// The next route and whether it is active.
 	#[cfg(feature = "cluster-lan")]
-	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::announce::Event::Start(route)
-			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route)
-			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-			moq_net::announce::Event::End(route) => Some((route, false)),
+			moq_net::origin::RouteEvent::Start(route)
+			| moq_net::origin::RouteEvent::Update(route)
+			| moq_net::origin::RouteEvent::Restart(route)
+			| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 		}
 	}
 
 	/// The next announcement without blocking.
-	fn try_next_announced(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Announce> {
+	fn try_next_announced(announced: &mut moq_net::origin::Routes) -> Option<moq_net::announce::Announce> {
 		match announced.try_next()? {
-			moq_net::announce::Event::Start(route) => Some(route),
+			moq_net::origin::RouteEvent::Start(route) => Some(route),
 			other => panic!("expected an announcement: got {other:?}"),
 		}
 	}
@@ -2581,7 +2604,7 @@ mod tests {
 
 		let _worker = cluster
 			.origin
-			.publish(".svc/pid/foo", origin::Route::default())
+			.route(".svc/pid/foo", moq_net::origin::RouteOptions::default())
 			.expect("publish at the fleet path");
 		let subscriber = cluster.subscriber(&token).expect("subscribe grant").consume();
 		let broadcast = subscriber
@@ -2591,8 +2614,14 @@ mod tests {
 		assert_eq!(broadcast.info().path.as_str(), ".svc/foo");
 
 		let publisher = cluster.publisher(&token).expect("publish grant");
-		assert!(publisher.create_broadcast(".svc/foo").is_err());
-		publisher.create_broadcast("cam").expect("publish outside the mount");
+		assert!(
+			publisher
+				.route(".svc/foo", moq_net::origin::RouteOptions::hidden())
+				.is_err()
+		);
+		let _cam = publisher
+			.route("cam", moq_net::origin::RouteOptions::hidden())
+			.expect("publish outside the mount");
 
 		// A mount the origin refuses admits nothing rather than half a grant.
 		grant.mounts.insert(".svc/x".into(), ".other".into());
@@ -2650,7 +2679,15 @@ mod tests {
 		let (cluster, driver) = Cluster::new(with_stats()).unwrap();
 		let consumer = cluster.origin.consume();
 		let path = Path::from_static(".stats/node");
-		let announced = async { consumer.follow(&path, None).unwrap().available().await.unwrap() };
+		let announced = async {
+			consumer
+				.follow(&path, None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap()
+				.unwrap()
+		};
 		let futures::future::Either::Right((broadcast, driver)) =
 			futures::future::select(Box::pin(driver.run()), Box::pin(announced)).await
 		else {
@@ -2689,7 +2726,8 @@ mod tests {
 		)
 		.await
 		.expect("stats broadcast announced within 5s")
-		.expect("stats broadcast resolves");
+		.expect("stats broadcast resolves")
+		.unwrap();
 		assert!(broadcast.info().instance.is_some(), "stats announce under an instance");
 
 		// Several publish intervals (1s each by default) later, the task is still
@@ -3361,9 +3399,10 @@ mod tests {
 		assert_eq!(origin.config().cache_duration, duration);
 		assert_eq!(origin.config().pool.expiry(), Some(duration));
 
-		let broadcast = origin.create_broadcast("cam").expect("create");
-		broadcast.announce(Default::default()).expect("announce");
-		let mut track = broadcast.create_track("data", timed()).expect("track");
+		let broadcast = origin
+			.route("cam", moq_net::origin::RouteOptions::default())
+			.expect("create");
+		let mut track = broadcast.broadcast().create_track("data", timed()).expect("track");
 		track.write_frame(moq_net::Timestamp::ZERO, b"hello").expect("write");
 		assert!(pool.used() > 0, "writes charge the constructed cache pool");
 
@@ -3380,7 +3419,8 @@ mod tests {
 		)
 		.await
 		.expect("stats announced")
-		.expect("stats present");
+		.expect("stats present")
+		.unwrap();
 	}
 
 	/// The reserved `cluster.id` 0 is rejected, since it cannot be excluded for loop
@@ -3759,7 +3799,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn remote_plaintext_api_refuses_startup() {
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		for url in ["http://api.example.com/", "http://192.0.2.1/", "http://[2001:db8::1]/"] {
 			let mut config = Config::default();
 			config.api.url = Some(url.into());
@@ -3792,7 +3832,7 @@ mod tests {
 	#[tokio::test]
 	async fn cluster_api_rejects_redirect_bodies() {
 		use tokio::io::{AsyncReadExt, AsyncWriteExt};
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
 		let server = async move {
@@ -3821,13 +3861,15 @@ mod tests {
 	#[tokio::test]
 	async fn lan_cluster_path_carries_broadcasts_both_ways() {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 
 		let node = new_cluster(Config::default()).expect("node cluster");
 		let fingerprint = new_cluster(Config::default()).expect("fingerprint cluster");
 
-		let _from_node = node.origin.create_broadcast("from-node").expect("create");
-		_from_node.announce(Default::default()).expect("announce");
+		let _from_node = node
+			.origin
+			.route("from-node", moq_net::origin::RouteOptions::default())
+			.expect("create");
 
 		let mut listen = moq_tokio::listen::Config::default();
 		listen.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -3872,7 +3914,7 @@ mod tests {
 		};
 		let _dial = fingerprint.dial_lan_target(&target).expect("dial");
 
-		let mut announced = fingerprint.origin.consume().announced();
+		let mut announced = fingerprint.origin.consume().routes();
 		let (update, _) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 			.await
 			.expect("timed out waiting for from-node")
@@ -3881,9 +3923,11 @@ mod tests {
 		// The dialer marks what the peer forwards: it entered at `node`, not here.
 		assert_eq!(update.route.source(), origin::Source::Peer(node.origin.hop()));
 
-		let _from_fp = fingerprint.origin.create_broadcast("from-fingerprint").expect("create");
-		_from_fp.announce(Default::default()).expect("announce");
-		let mut announced = node.origin.consume().announced();
+		let _from_fp = fingerprint
+			.origin
+			.route("from-fingerprint", moq_net::origin::RouteOptions::default())
+			.expect("create");
+		let mut announced = node.origin.consume().routes();
 		loop {
 			let (update, _) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 				.await
@@ -3897,7 +3941,7 @@ mod tests {
 		}
 
 		// Each relay's local view holds only what it ingested itself.
-		let mut local = node.origin.consume().local().announced();
+		let mut local = node.origin.consume().local().routes();
 		let update = try_next_announced(&mut local).expect("from-node is local");
 		assert_eq!(update.prefix.as_str(), "from-node");
 		assert_eq!(update.route.source(), origin::Source::Local);
@@ -3912,7 +3956,7 @@ mod tests {
 	/// dropping it releases its client rather than leaving it to `close`.
 	#[tokio::test]
 	async fn a_failed_start_leaves_the_dial_bind_free() {
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		let dir = tempfile::tempdir().expect("tempdir");
 		let token = dir.path().join("token");
 		let config = Config {
@@ -3948,8 +3992,12 @@ mod tests {
 		idle: std::time::Duration,
 	) -> moq_tokio::quic::driver::endpoint::Endpoint {
 		use moq_tokio::quic::driver;
-		let key = rcgen::KeyPair::generate().expect("keypair");
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
 		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
 			.expect("cert params")
 			.self_signed(&key)
 			.expect("self-signed cert");
@@ -3957,7 +4005,7 @@ mod tests {
 			.with_no_client_auth()
 			.with_single_cert(
 				vec![cert.der().clone()],
-				rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+				rustls::pki_types::PrivateKeyDer::Pkcs8(key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
 			)
 			.expect("server tls");
 		tls.alpn_protocols = connect
@@ -3984,7 +4032,7 @@ mod tests {
 	async fn cancelling_run_stops_its_dynamic_dials() {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 		const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 
 		let mut connect = moq_tokio::connect::Config::default();
 		connect.tls.insecure = Some(true);
@@ -4033,7 +4081,7 @@ mod tests {
 		use moq_tokio::quic::driver;
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 		const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 
 		let mut connect = moq_tokio::connect::Config::default();
 		connect.tls.insecure = Some(true);
@@ -4068,9 +4116,7 @@ mod tests {
 			.expect("accept")
 			.await
 			.expect("handshake");
-		cluster
-			.critical
-			.spawn("injected", async { panic!("injected critical failure") });
+		cluster.critical.fail(anyhow::anyhow!("injected critical failure"));
 		let result = kio::clock::timeout(TIMEOUT, running)
 			.await
 			.expect("run returns on a critical failure")
@@ -4132,7 +4178,7 @@ mod tests {
 	async fn closing_a_cluster_closes_its_lan_dials() {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 		const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		let mut quic = moq_tokio::quic::Config::default();
 		quic.idle_timeout = Some((IDLE).into());
 
@@ -4181,8 +4227,10 @@ mod tests {
 				let dialer = new_cluster(Config::default())
 					.expect("dialer cluster")
 					.with_connect(Default::default(), quic);
-				let broadcast = dialer.origin.create_broadcast("from-dialer").expect("create");
-				broadcast.announce(Default::default()).expect("announce");
+				let broadcast = dialer
+					.origin
+					.route("from-dialer", moq_net::origin::RouteOptions::default())
+					.expect("create");
 				let dial = dialer.nodes.dial(&target.key);
 				tokio::spawn(dialer.clone().supervise_remote(target, String::new(), dial));
 				(dialer, broadcast)
@@ -4190,7 +4238,7 @@ mod tests {
 			.await
 			.expect("dialer task");
 
-		let mut announced = node.origin.consume().announced();
+		let mut announced = node.origin.consume().routes();
 		loop {
 			let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 				.await
@@ -4232,20 +4280,20 @@ mod tests {
 		let _ingest = cluster
 			.publisher(&client)
 			.expect("client")
-			.publish("ingest", Default::default());
+			.route("ingest", Default::default());
 		let _forwarded = cluster
 			.publisher(&peer)
 			.expect("peer")
-			.publish("forwarded", Default::default());
+			.route("forwarded", Default::default());
 
-		let mut announced = cluster.origin.consume().announced();
+		let mut announced = cluster.origin.consume().routes();
 		let forwarded = try_next_announced(&mut announced).expect("forwarded");
 		assert_eq!(forwarded.prefix.as_str(), "forwarded");
 		assert!(matches!(forwarded.route.source(), origin::Source::Peer(_)));
 		let ingest = try_next_announced(&mut announced).expect("ingest");
 		assert_eq!(ingest.route.source(), origin::Source::Local);
 
-		let mut local = cluster.origin.consume().local().announced();
+		let mut local = cluster.origin.consume().local().routes();
 		assert_eq!(
 			try_next_announced(&mut local).expect("ingest").prefix.as_str(),
 			"ingest"
@@ -4270,24 +4318,24 @@ mod tests {
 		let _ingest = cluster
 			.publisher(&client)
 			.expect("client")
-			.publish("ingest", Default::default());
+			.route("ingest", Default::default());
 		let _mesh = cluster
 			.publisher(&peer)
 			.expect("peer")
-			.publish("mesh", Default::default());
+			.route("mesh", Default::default());
 		let _core = cluster
 			.publisher(&core)
 			.expect("core")
-			.publish("core", Default::default());
+			.route("core", Default::default());
 
-		let mut everyone = cluster.subscriber(&client).expect("client").consume().announced();
+		let mut everyone = cluster.subscriber(&client).expect("client").consume().routes();
 		let mut prefixes = std::iter::from_fn(|| try_next_announced(&mut everyone))
 			.map(|announce| announce.prefix.to_string())
 			.collect::<Vec<_>>();
 		prefixes.sort();
 		assert_eq!(prefixes, ["core", "ingest", "mesh"]);
 
-		let mut toward_core = cluster.subscriber(&core).expect("core").consume().announced();
+		let mut toward_core = cluster.subscriber(&core).expect("core").consume().routes();
 		let mut prefixes = std::iter::from_fn(|| try_next_announced(&mut toward_core))
 			.map(|announce| announce.prefix.to_string())
 			.collect::<Vec<_>>();

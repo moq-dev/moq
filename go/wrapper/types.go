@@ -33,34 +33,28 @@ type (
 	ProtocolKind = ffi.MoqProtocolKind
 	// OriginConfig configures a new origin, such as its maximum cache size in bytes.
 	OriginConfig = ffi.MoqOriginConfig
-	// AnnounceRoute is how a broadcast advertises its exact path: its static production Cost (lower wins) and, optionally, a stable Instance.
-	// A nil Instance keeps the one the broadcast minted, which it keeps across re-announcing, so a restarted
-	// publisher is a new stream viewers restart onto. Set one only for a publisher that continues its group
-	// sequences across restarts and raises Epoch on each: readers stitch every route of one instance together,
-	// so restarting the sequences under an old instance splices unrelated groups into their tracks.
-	AnnounceRoute = ffi.MoqAnnounceRoute
-	// Route is an observed route: the Instance of the stream it serves (routes with one instance are one continuous stream), the hop chain it took to reach an origin, and its static production and link cost (lower wins).
-	Route = ffi.MoqRoute
+	// RouteOptions is how a [Route] advertises itself: Hidden until [Route.Announce], its static
+	// production Cost (lower wins) and, optionally, a stable Instance. The zero value is visible at
+	// once, at cost 0, under a fresh instance the route keeps for its lifetime, so a restarted
+	// publisher is a new stream viewers restart onto. Set Instance only for a publisher that
+	// continues its group sequences across restarts and raises Epoch on each: readers stitch every
+	// route of one instance together, so restarting the sequences under an old instance splices
+	// unrelated groups into their tracks.
+	RouteOptions = ffi.MoqRouteOptions
+	// RouteInfo is the read-only facts on a received route: the Instance of the stream it serves (routes with one instance are one continuous stream), the hop chain it took to reach an origin, and its static production and link cost (lower wins).
+	RouteInfo = ffi.MoqRouteInfo
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
-	// wildcard matched (Captures), and the Route serving it. It carries no broadcast;
+	// wildcard matched (Captures), and the RouteInfo serving it. It carries no broadcast;
 	// resolve a path with [OriginConsumer.Request]. Captures is a required slice,
 	// empty when the filter has no wildcards.
 	Announce = ffi.MoqAnnounce
-	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventStart,
-	// AnnounceEventUpdate, AnnounceEventEnd, AnnounceEventRestart, or AnnounceEventTakeover.
+	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventPresent or AnnounceEventAbsent.
+	// Another publisher instance taking a path over keeps it present; see it with [OriginConsumer.Follow].
 	AnnounceEvent = ffi.MoqAnnounceEvent
-	// AnnounceEventStart reports a route now covering a prefix that had none.
-	AnnounceEventStart = ffi.MoqAnnounceEventStart
-	// AnnounceEventUpdate reports the route covering a prefix changing hops or cost.
-	AnnounceEventUpdate = ffi.MoqAnnounceEventUpdate
-	// AnnounceEventEnd reports that no route covers a prefix any more, carrying its last route.
-	AnnounceEventEnd = ffi.MoqAnnounceEventEnd
-	// AnnounceEventRestart reports another publisher instance now serving a prefix:
-	// drop what was resolved under it and request afresh.
-	AnnounceEventRestart = ffi.MoqAnnounceEventRestart
-	// AnnounceEventTakeover reports a route now covering a prefix that continues what the
-	// route at Predecessor served beneath it: keep what was resolved through that one.
-	AnnounceEventTakeover = ffi.MoqAnnounceEventTakeover
+	// AnnounceEventPresent reports a route now covering a path that was absent.
+	AnnounceEventPresent = ffi.MoqAnnounceEventPresent
+	// AnnounceEventAbsent reports that no route covers a path any more, carrying its last route.
+	AnnounceEventAbsent = ffi.MoqAnnounceEventAbsent
 	// Range is a span of a track to deliver: from Start up to End, or onward when End is nil.
 	// A relative start is the first frame of its group, a relative end includes its whole
 	// group, and an absolute end is exclusive.

@@ -5,20 +5,20 @@
 
 use mp4_atom::{Decode, FourCC, Header};
 
-use super::{Error, MAX_FRAGMENT_SAMPLES, MAX_METADATA_BYTES, MAX_TRACKS, Result};
+use super::{Error, FRAGMENT_SAMPLE_BASE, MAX_FRAGMENT_SAMPLES, MAX_METADATA_BYTES, MAX_TRACKS, Result};
 
 /// Check every box, including ones a caller or mp4-atom will discard.
 pub(crate) fn check(data: &[u8]) -> Result<()> {
 	let mut scan = Scan::default();
 	scan.boxes(data, Namespace::Any)?;
-	scan.finish()
+	scan.finish(data.len())
 }
 
 /// Check a body already framed by the streaming importer.
 pub(super) fn body(kind: FourCC, data: &[u8]) -> Result<()> {
 	let mut scan = Scan::default();
 	scan.body(kind, data)?;
-	scan.finish()
+	scan.finish(data.len())
 }
 
 #[derive(Clone, Copy)]
@@ -43,8 +43,9 @@ struct Scan {
 }
 
 impl Scan {
-	fn finish(self) -> Result<()> {
-		if self.samples > MAX_FRAGMENT_SAMPLES {
+	/// Check the counts gathered from `len` bytes of metadata.
+	fn finish(self, len: usize) -> Result<()> {
+		if self.samples > MAX_FRAGMENT_SAMPLES.min(FRAGMENT_SAMPLE_BASE + len as u64) {
 			return Err(Error::TooManySamples(self.samples));
 		}
 		if self.groups > MAX_FRAGMENT_SAMPLES {
@@ -110,7 +111,6 @@ impl Scan {
 				self.groups += sgpd(data)?;
 				return Ok(());
 			}
-			b"iloc" => return iloc(data),
 			b"moov" | b"trak" | b"mdia" | b"minf" | b"stbl" | b"dinf" | b"edts" | b"mvex" | b"moof" | b"traf"
 			| b"mfra" | b"iprp" | b"ipco" => Namespace::Any,
 			b"udta" => Namespace::Udta,
@@ -231,8 +231,7 @@ fn take<'a>(data: &mut &'a [u8], size: usize) -> Result<&'a [u8]> {
 	Ok(body)
 }
 
-// mp4-atom 0.17.0 still accepts zero-byte descriptions. Keep the upstream #264 bound here
-// until our dependency includes it: every entry must be paid for by at least one input byte.
+// Count descriptions across boxes before allocating the metadata tree.
 fn sgpd(mut data: &[u8]) -> Result<u64> {
 	let version = u32::decode(&mut data)? >> 24;
 	take(&mut data, 4)?; // grouping_type
@@ -243,54 +242,7 @@ fn sgpd(mut data: &[u8]) -> Result<u64> {
 		take(&mut data, 4)?; // default_group_description_index
 	}
 	let count = u32::decode(&mut data)?;
-	if count as usize > data.len() {
-		return Err(mp4_atom::Error::OutOfBounds.into());
-	}
 	Ok(count.into())
-}
-
-// The same dependency also lacks #267. A single zero-size extent names the whole reference;
-// several would allocate without consuming input, and are refused before decoding any item.
-fn iloc(mut data: &[u8]) -> Result<()> {
-	let version = u32::decode(&mut data)? >> 24;
-	let sizes0 = u8::decode(&mut data)?;
-	let sizes1 = u8::decode(&mut data)?;
-	let offset = sizes0 >> 4;
-	let length = sizes0 & 15;
-	let base = sizes1 >> 4;
-	let index = if version == 0 { 0 } else { sizes1 & 15 };
-	if version > 2
-		|| [offset, length, base, index]
-			.iter()
-			.any(|size| ![0, 4, 8].contains(size))
-	{
-		return Err(mp4_atom::Error::InvalidSize.into());
-	}
-	let count = if version < 2 {
-		u32::from(u16::decode(&mut data)?)
-	} else {
-		u32::decode(&mut data)?
-	};
-	for _ in 0..count {
-		take(
-			&mut data,
-			if version == 0 {
-				4
-			} else if version == 1 {
-				6
-			} else {
-				8
-			},
-		)?;
-		take(&mut data, base as usize)?;
-		let extents = u16::decode(&mut data)? as usize;
-		let width = usize::from(offset + length + index);
-		if width == 0 && extents > 1 {
-			return Err(mp4_atom::Error::OutOfBounds.into());
-		}
-		take(&mut data, extents * width)?;
-	}
-	Ok(())
 }
 
 #[cfg(test)]
@@ -327,8 +279,17 @@ pub(crate) mod tests {
 
 	#[test]
 	fn counts_are_checked_across_runs_and_tracks_before_parsing() {
+		// A field-less run stores only a count, so a short moof gets one sample per byte past the base.
+		let short = |count| check(&boxed(b"moof", &boxed(b"traf", &inherited(count))));
+		let fit = (FRAGMENT_SAMPLE_BASE as usize + boxed(b"moof", &boxed(b"traf", &inherited(0))).len()) as u32;
+		short(fit).unwrap();
+		assert!(matches!(short(fit + 1), Err(Error::TooManySamples(count)) if count == u64::from(fit) + 1));
+
+		// Bytes the moof carries, here a padding box, pay for samples up to the cap, which sums
+		// across runs and tracks.
 		let half = (MAX_FRAGMENT_SAMPLES / 2) as u32;
-		let mut data = boxed(b"traf", &inherited(half));
+		let mut data = boxed(b"free", &vec![0; MAX_FRAGMENT_SAMPLES as usize]);
+		data.extend(boxed(b"traf", &inherited(half)));
 		data.extend(boxed(b"traf", &inherited(half)));
 		check(&boxed(b"moof", &data)).unwrap();
 		data.extend(boxed(b"traf", &inherited(1)));
@@ -398,7 +359,7 @@ pub(crate) mod tests {
 				data.extend_from_slice(&0u32.to_be_bytes());
 			}
 			data.extend_from_slice(&1u32.to_be_bytes());
-			assert!(check(&boxed(b"sgpd", &data)).is_err());
+			assert!(mp4_atom::Any::decode(&mut boxed(b"sgpd", &data).as_slice()).is_err());
 		}
 		for version in 0..=2 {
 			for count in [1u16, 2] {
@@ -419,7 +380,10 @@ pub(crate) mod tests {
 					}
 				]);
 				data.extend_from_slice(&count.to_be_bytes());
-				assert_eq!(check(&boxed(b"iloc", &data)).is_ok(), count == 1);
+				assert_eq!(
+					mp4_atom::Any::decode(&mut boxed(b"iloc", &data).as_slice()).is_ok(),
+					count == 1
+				);
 			}
 		}
 	}

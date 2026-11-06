@@ -44,9 +44,8 @@ async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamp
 		accept({ transport: pair.server, url, version: wire.version, publish: origin.consume() }),
 	]);
 
-	const broadcastPublication = origin.createBroadcast(Path.from("test"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("test"));
+	const broadcast = broadcastRoute.broadcast;
 	// Every request is answered, including the TRACK lookup lite-05+ makes before subscribing.
 	const serving = (async () => {
 		for (;;) {
@@ -115,9 +114,8 @@ test("a forwarded untimed track stays untimed", async () => {
 		connect({ url, transport: downstream.client }),
 	]);
 
-	const broadcastPublication = source.createBroadcast(Path.from("test"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = source.route(Path.from("test"));
+	const broadcast = broadcastRoute.broadcast;
 	const serving = (async () => {
 		for (;;) {
 			const request = await wireOf(broadcast).requested();
@@ -130,7 +128,7 @@ test("a forwarded untimed track stays untimed", async () => {
 
 	// Serve the downstream session from the upstream one through a copy the forwarding
 	// node produces.
-	const dynamic = relay.requestsRoute(Path.from("test"));
+	const dynamic = relay.routePrefix(Path.from("test"));
 	const inputs: BroadcastConsumer[] = [];
 	const forwarding = (async () => {
 		for await (const request of dynamic.requested()) {
@@ -179,39 +177,5 @@ for (const wire of WIRES) {
 			expect(info.timescale).toBeUndefined();
 			for (const frame of frames) expect(frame.timestamp).toBeUndefined();
 		}
-	});
-}
-
-for (const wire of WIRES.filter((wire) => wire.name === "lite-06" || wire.name === "lite-07-wip")) {
-	test(`${wire.name}: an untimed datagram arrives ${wire.sends ? "with its send time" : "untimed"}`, async () => {
-		const pair = createMockTransportPair(wire.protocol);
-		const origin = new OriginProducer();
-		const [client, server] = await Promise.all([
-			connect({ url, transport: pair.client }),
-			accept({ transport: pair.server, url, publish: origin.consume() }),
-		]);
-
-		const broadcastPublication = origin.createBroadcast(Path.from("test"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
-		const producer = broadcast.createTrack("video", {});
-		const subscriber = wireOf(client).consume(Path.from("test")).track("video").subscribe();
-
-		// Datagrams aren't cached, so a group read back first proves the subscription is live.
-		const group = producer.appendGroup();
-		group.writeFrame({ payload: new Uint8Array([0]) });
-		group.finish();
-		expect(await subscriber.recvGroup()).toBeDefined();
-
-		producer.appendDatagram(undefined, new Uint8Array([7]));
-		const datagram = await subscriber.recvDatagram();
-
-		expect(datagram?.payload).toEqual(new Uint8Array([7]));
-		expect(datagram?.timestamp !== undefined).toBe(wire.sends);
-
-		broadcast.close();
-		subscriber.close();
-		client.abort();
-		server.abort();
 	});
 }

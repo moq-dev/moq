@@ -4,8 +4,8 @@ package dev.moq
  * A MoQ session with publish/subscribe conveniences.
  *
  * Build one with [Moq.connect]. The underlying [session] always exposes a publisher and a
- * subscriber (wired from the origins in its [ClientConfig], or auto-created), so you can
- * [createBroadcast] and collect [announced] updates without touching the raw [Client] handle.
+ * subscriber (wired from the origins in its [ClientConfig], or auto-created), so you can [route]
+ * and collect [announced] updates without touching the raw [Client] handle.
  *
  * Call [shutdown], then await [Session.closed] to drain finished tracks before disconnecting.
  * [AutoCloseable] disposal through `use { ... }` or [close] cancels immediately.
@@ -17,18 +17,20 @@ internal constructor(
     private val client: Client,
 ) : AutoCloseable {
     /**
-     * Create an unannounced broadcast at [path], invisible to everyone until announced.
+     * Create a route at exactly [path], owning a new broadcast to fill.
      *
-     * Fill `broadcast()`, then advertise it with `announce`. The broadcast's `end()` ends it for
-     * good, as does releasing its last handle: the publication, each `broadcast()`, and
-     * `requests()`.
+     * Visible at once unless [options] is `hidden`: then fill `broadcast()` and advertise it with
+     * `announce()`. Hold the route while it should stay announced: closing it retracts it, and the
+     * broadcast's `end()` ends both.
      */
-    fun createBroadcast(path: String): Publication = session.publish().createBroadcast(path)
+    fun route(path: String, options: RouteOptions = RouteOptions()): Route =
+        session.publish().route(path, options)
 
     /**
-     * Discover routes matching [config]; prefixes stay relative to the origin. Collect
-     * `announced(config).updates()` for a [Flow] of [AnnounceEvent] that cancels the handle when
-     * collection ends.
+     * List the paths matching [config] as each becomes present or absent; prefixes stay relative to
+     * the origin. Collect `announced(config).updates()` for a [Flow] of [AnnounceEvent] that
+     * cancels the handle when collection ends. A new publisher instance keeps its path present, so
+     * use [follow] to see it.
      */
     fun announced(config: AnnounceConfig = AnnounceConfig()): AnnounceConsumer =
         session.consume().announced(config)
@@ -37,8 +39,9 @@ internal constructor(
      * Follow exactly [path], resolving each stream that serves it.
      *
      * Unlike [request] this waits indefinitely for a future announcement, and each later
-     * `available()` waits for the next stream, such as a restarted publisher. Pass an [instance] to
-     * follow only that stream. Cancel the returned handle to stop waiting.
+     * `available()` waits for the next stream, such as a restarted publisher, or returns null once
+     * the path goes offline. Pass an [instance] to follow only that stream; another one taking over
+     * also returns null. Cancel the returned handle to stop waiting.
      */
     fun follow(path: String, instance: String? = null): Following =
         session.consume().follow(path, instance)

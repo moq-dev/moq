@@ -128,7 +128,7 @@ struct Running {
 /// A relay admitting through [`Tenants`], serving QUIC from one io_uring worker
 /// when `io_uring`, else from the shared Tokio listener.
 async fn start(io_uring: bool) -> Running {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let tenants = Tenants::new();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let mut config = config(dir.path(), false);
@@ -212,9 +212,14 @@ impl Publisher {
 	}
 
 	fn publish(&mut self, name: &str) {
-		let broadcast = self.origin.create_broadcast(name).expect("create broadcast");
-		broadcast.announce(Default::default()).expect("announce");
-		let track = broadcast.create_track("video", timed()).expect("create track");
+		let broadcast = self
+			.origin
+			.route(name, moq_net::origin::RouteOptions::default())
+			.expect("create broadcast");
+		let track = broadcast
+			.broadcast()
+			.create_track("video", timed())
+			.expect("create track");
 		let mut group = track.append_group().expect("append group");
 		group
 			.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -236,7 +241,7 @@ impl Watcher {
 	async fn connect(url: url::Url) -> Self {
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 		let session = kio::clock::timeout(
 			TIMEOUT,
 			client()
@@ -256,7 +261,7 @@ impl Watcher {
 			let changed = changed.clone();
 			async move {
 				while let Some(event) = announced.next().await {
-					if let moq_net::announce::Event::Start(route) = event {
+					if let moq_net::origin::RouteEvent::Start(route) = event {
 						seen.lock().unwrap().push(route.prefix.to_string());
 						changed.notify_waiters();
 					}

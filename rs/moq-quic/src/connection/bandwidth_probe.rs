@@ -13,7 +13,7 @@
 //! An attempt that ends short of the target found the path's ceiling, and another would only
 //! spend the same duplicates finding it again. So each miss in a row doubles how long the probe
 //! sits out before retrying the target, up to a bound that finds capacity which returns within a
-//! few seconds. A miss shows within two round trips, as a round of duplicates that raised
+//! few seconds. A miss shows within two rounds, as a round of duplicates that raised
 //! nothing, while the controller's probe lasts several rounds more before it sees the plateau
 //! itself, so an attempt stops there. Each raise restarts that count: an attempt that begins
 //! below the plateau, as once BBR3 has aged an application-limited estimate, climbs back to it
@@ -61,10 +61,32 @@ pub(super) struct BandwidthProbe {
 
 /// Probing toward the target
 struct Attempt {
-	/// When the attempt began or last raised the estimate
-	since: Instant,
 	/// The highest bandwidth estimate since it began, in bytes per second
 	estimate: u64,
+	/// The packet number whose acknowledgment ends the round in progress
+	round: u64,
+	/// Rounds acknowledged in full since the attempt began or last raised the estimate
+	flat: u32,
+}
+
+impl Attempt {
+	/// An attempt from `estimate`, whose first round ends once packet `next` is acknowledged
+	fn new(estimate: u64, next: u64) -> Self {
+		Self {
+			estimate,
+			round: next,
+			flat: 0,
+		}
+	}
+}
+
+/// Where the connection's packet numbers stand, to count an attempt's rounds
+#[derive(Clone, Copy)]
+struct Rounds {
+	/// The largest packet number acknowledged
+	acked: Option<u64>,
+	/// The packet number sent next
+	next: u64,
 }
 
 /// Whether a probe packet may be sent now
@@ -116,7 +138,12 @@ impl BandwidthProbe {
 
 	/// Judge the attempt in progress by `estimate`, returning whether the probe may fill the
 	/// controller's probe now
-	fn judge(&mut self, probing: bool, estimate: Option<u64>, rtt: Duration, now: Instant) -> bool {
+	///
+	/// An attempt stalls once two rounds are acknowledged without a raise: the round in flight
+	/// at the last raise, then one sent at the inflight it allowed. Counted in packets rather
+	/// than round trips, so a round the controller's pacing spreads out, or the peer's ACK delay
+	/// holds back, is still judged whole.
+	fn judge(&mut self, probing: bool, estimate: Option<u64>, rounds: Rounds, now: Instant) -> bool {
 		let estimate = estimate.unwrap_or(0);
 		if estimate >= self.target {
 			self.attempt = None;
@@ -126,10 +153,12 @@ impl BandwidthProbe {
 		}
 		if let Some(attempt) = &mut self.attempt {
 			if estimate > attempt.estimate {
-				attempt.since = now;
-				attempt.estimate = estimate;
+				*attempt = Attempt::new(estimate, rounds.next);
+			} else if rounds.acked.is_some_and(|acked| acked >= attempt.round) {
+				attempt.round = rounds.next;
+				attempt.flat += 1;
 			}
-			let stalled = now > attempt.since + 2 * rtt;
+			let stalled = attempt.flat >= 2;
 			if !probing || stalled {
 				self.attempt = None;
 				self.misses = self.misses.saturating_add(1);
@@ -167,8 +196,9 @@ impl BandwidthProbe {
 }
 
 impl Connection {
-	/// Whether a packet of `bytes` resending in-flight data may go now
-	pub(super) fn bandwidth_probe_ready(&mut self, now: Instant, bytes: u64) -> Ready {
+	/// Whether a packet of up to `segment` bytes resending in-flight data may go now, after the
+	/// `untracked` bytes already built but not yet in flight
+	pub(super) fn bandwidth_probe_ready(&mut self, now: Instant, untracked: u64, segment: u64) -> Ready {
 		let target = self.bandwidth_probe.target;
 		if target == 0
 			|| !self.state.is_established()
@@ -179,10 +209,14 @@ impl Connection {
 		}
 		let metrics = self.path.congestion.metrics();
 		let probing = metrics.probe_inflight.is_some();
-		let rtt = self.path.rtt.get();
+		let space = &self.spaces[SpaceId::Data];
+		let rounds = Rounds {
+			acked: space.largest_acked_packet,
+			next: space.next_packet_number,
+		};
 		if !self
 			.bandwidth_probe
-			.judge(probing, metrics.bandwidth_estimate, rtt, now)
+			.judge(probing, metrics.bandwidth_estimate, rounds, now)
 		{
 			return Ready::Idle;
 		}
@@ -192,7 +226,11 @@ impl Connection {
 		if !self.find_bandwidth_probe_source() {
 			return Ready::Idle;
 		}
-		if self.path.in_flight.bytes + bytes > inflight {
+		// The packet that reaches the bound may cross it. Holding each one under it would leave a
+		// flight of a few packets, as a small BDP has, most of a packet short of the bound, which
+		// is the whole of the gain past BBR.bw the probe has to measure. A probe packet is also
+		// often smaller than the segment, holding only the little a sparse sender has in flight.
+		if self.path.in_flight.bytes + untracked >= inflight {
 			// Before the first duplicate, media alone past the bound, as when another flow's queue
 			// inflates the round trip over BBR.min_rtt, is all the sender has: taking its samples
 			// as the path's would age BBR3's model down to the media
@@ -205,14 +243,14 @@ impl Connection {
 		// target would cap the reading; the cluster's size bounds the duplicates instead
 		let mtu = self.path.current_mtu();
 		if !self.path.congestion.paces_probe()
-			&& let Some(at) = self.bandwidth_probe.pacing.delay(target, bytes, mtu, now)
+			&& let Some(at) = self.bandwidth_probe.pacing.delay(target, untracked + segment, mtu, now)
 		{
 			return Ready::Blocked(Some(at));
 		}
 		let estimate = metrics.bandwidth_estimate.unwrap_or(0);
 		self.bandwidth_probe
 			.attempt
-			.get_or_insert(Attempt { since: now, estimate });
+			.get_or_insert(Attempt::new(estimate, rounds.next));
 		Ready::Send
 	}
 
@@ -331,6 +369,8 @@ mod tests {
 	/// The path's rate, short of the target
 	const PATH: u64 = 375_000;
 	const MS: Duration = Duration::from_millis(1);
+	/// Packets sent each round
+	const ROUND: u64 = 10;
 
 	fn probe(now: Instant) -> BandwidthProbe {
 		let mut probe = BandwidthProbe::new(&transport::Config::default(), now);
@@ -338,22 +378,34 @@ mod tests {
 		probe
 	}
 
-	/// Begin an attempt at `now`, as the first probe packet does
-	fn attempt(probe: &mut BandwidthProbe, now: Instant, estimate: u64) {
-		assert!(probe.judge(true, Some(estimate), RTT, now), "sitting out at {now:?}");
-		probe.attempt.get_or_insert(Attempt { since: now, estimate });
+	/// Packet numbers `n` rounds on: the first packet of this round acknowledged, the rest in
+	/// flight
+	fn round(n: u64) -> Rounds {
+		Rounds {
+			acked: (n > 0).then(|| n * ROUND),
+			next: (n + 1) * ROUND,
+		}
 	}
 
-	/// Miss at `now` with an attempt whose round of duplicates raised nothing
-	fn stall(probe: &mut BandwidthProbe, now: Instant) -> Instant {
-		attempt(probe, now, PATH);
+	/// Begin an attempt in round `n` at `now`, as the first probe packet does
+	fn attempt(probe: &mut BandwidthProbe, n: u64, now: Instant, estimate: u64) {
 		assert!(
-			probe.judge(true, Some(PATH), RTT, now + 2 * RTT),
-			"stopped before a round came back"
+			probe.judge(true, Some(estimate), round(n), now),
+			"sitting out at {now:?}"
 		);
-		let missed = now + 2 * RTT + MS;
+		probe.attempt.get_or_insert(Attempt::new(estimate, round(n).next));
+	}
+
+	/// Miss two round trips after `now`, with an attempt whose duplicates raised nothing
+	fn stall(probe: &mut BandwidthProbe, now: Instant) -> Instant {
+		attempt(probe, 0, now, PATH);
 		assert!(
-			!probe.judge(true, Some(PATH), RTT, missed),
+			probe.judge(true, Some(PATH), round(1), now + RTT),
+			"stopped before a round of duplicates came back"
+		);
+		let missed = now + 2 * RTT;
+		assert!(
+			!probe.judge(true, Some(PATH), round(2), missed),
 			"kept filling a stalled attempt"
 		);
 		missed
@@ -366,9 +418,26 @@ mod tests {
 		let mut probe = probe(now);
 		for backoff in [BACKOFF, MAX_BACKOFF, MAX_BACKOFF] {
 			now = stall(&mut probe, now);
-			assert!(!probe.judge(true, Some(PATH), RTT, now + backoff - MS));
+			assert!(!probe.judge(true, Some(PATH), round(2), now + backoff - MS));
 			now += backoff;
 		}
+	}
+
+	/// A round that takes many round trips, as the controller's pacing or the peer's ACK delay
+	/// spreads it out, is still judged whole
+	#[test]
+	fn slow_round_is_not_a_stall() {
+		let now = Instant::now();
+		let mut probe = probe(now);
+		attempt(&mut probe, 0, now, PATH);
+		let late = now + 10 * RTT;
+		assert!(probe.judge(true, Some(PATH), round(0), late));
+		assert!(probe.judge(true, Some(PATH), round(1), late));
+		assert!(
+			probe.judge(true, Some(PATH + 1), round(1), late + RTT),
+			"a raise in the second round"
+		);
+		assert!(probe.judge(true, Some(PATH + 1), round(2), late + RTT));
 	}
 
 	/// An attempt that raises the estimate goes on until the controller's probe ends, which misses
@@ -377,31 +446,29 @@ mod tests {
 	fn rising_attempt_misses_at_its_end() {
 		let now = Instant::now();
 		let mut probe = probe(now);
-		attempt(&mut probe, now, PATH);
+		attempt(&mut probe, 0, now, PATH);
 		let later = now + 4 * RTT;
-		assert!(probe.judge(true, Some(PATH + 1), RTT, later));
-		assert!(!probe.judge(false, Some(PATH + 1), RTT, later));
-		assert!(!probe.judge(true, Some(PATH + 1), RTT, later + BACKOFF - MS));
-		assert!(probe.judge(true, Some(PATH + 1), RTT, later + BACKOFF));
+		assert!(probe.judge(true, Some(PATH + 1), round(4), later));
+		assert!(!probe.judge(false, Some(PATH + 1), round(4), later));
+		assert!(!probe.judge(true, Some(PATH + 1), round(5), later + BACKOFF - MS));
+		assert!(probe.judge(true, Some(PATH + 1), round(5), later + BACKOFF));
 	}
 
-	/// An attempt that begins below the plateau stalls two round trips after it climbs back,
-	/// rather than going on until the controller's probe ends; dipping and recovering to the
-	/// plateau is not a raise
+	/// An attempt that begins below the plateau stalls two rounds after it climbs back, rather
+	/// than going on until the controller's probe ends; dipping and recovering to the plateau
+	/// is not a raise
 	#[test]
 	fn climbing_back_stalls_at_the_plateau() {
 		let now = Instant::now();
 		let mut probe = probe(now);
-		attempt(&mut probe, now, PATH / 2);
-		let back = now + RTT;
-		assert!(probe.judge(true, Some(PATH), RTT, back));
-		assert!(probe.judge(true, Some(PATH * 3 / 4), RTT, back + RTT));
+		attempt(&mut probe, 0, now, PATH / 2);
+		assert!(probe.judge(true, Some(PATH), round(1), now + RTT));
 		assert!(
-			probe.judge(true, Some(PATH), RTT, back + 2 * RTT),
-			"stalled before a round came back"
+			probe.judge(true, Some(PATH * 3 / 4), round(2), now + 2 * RTT),
+			"stalled before a round of duplicates came back"
 		);
 		assert!(
-			!probe.judge(true, Some(PATH), RTT, back + 2 * RTT + MS),
+			!probe.judge(true, Some(PATH), round(3), now + 3 * RTT),
 			"kept filling once the estimate stopped rising"
 		);
 	}
@@ -415,20 +482,20 @@ mod tests {
 		now = stall(&mut probe, now + BACKOFF);
 
 		// The estimate reached the target, then aged below it
-		assert!(!probe.judge(true, Some(TARGET), RTT, now));
+		assert!(!probe.judge(true, Some(TARGET), round(2), now));
 		now = stall(&mut probe, now);
 		assert!(
-			probe.judge(true, Some(PATH), RTT, now + BACKOFF),
+			probe.judge(true, Some(PATH), round(2), now + BACKOFF),
 			"the misses before still count"
 		);
 
 		now = stall(&mut probe, now + BACKOFF);
 		probe.set_target(TARGET);
 		assert!(
-			!probe.judge(true, Some(PATH), RTT, now),
+			!probe.judge(true, Some(PATH), round(2), now),
 			"the same target retried at once"
 		);
 		probe.set_target(2 * TARGET);
-		assert!(probe.judge(true, Some(PATH), RTT, now));
+		assert!(probe.judge(true, Some(PATH), round(2), now));
 	}
 }

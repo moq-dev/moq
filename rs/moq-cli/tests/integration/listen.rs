@@ -96,7 +96,7 @@ impl Listening {
 }
 
 async fn connects(listening: &Listening, stage: &str) -> (moq_tokio::Connection, moq_net::origin::Consumer) {
-	let _ = moq_tokio::crypto::install_default();
+	moq_tokio::crypto::install_default().unwrap();
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume().with_hidden(true);
 	let client = moq_tokio::connect::Config::default()
@@ -145,11 +145,13 @@ async fn listening_export_drains_publishers_on_sigterm() {
 async fn an_export_stage_ending_during_drain_waits_for_every_session() {
 	let window = Duration::from_secs(3);
 	let listening = listen("export", &["--drain-timeout", "3s"]).await;
-	let _ = moq_tokio::crypto::install_default();
+	moq_tokio::crypto::install_default().unwrap();
 	let origin = moq_tokio::origin::spawn();
-	let source = origin.create_broadcast("demo.hang").unwrap();
-	let catalog = source.create_track("catalog.json", None).unwrap();
-	source.announce(Default::default()).unwrap();
+	let source = origin
+		.route("demo.hang", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let catalog = source.broadcast().create_track("catalog.json", None).unwrap();
+	source.announce().unwrap();
 	let publisher = moq_tokio::connect::Config::default()
 		.init(Default::default())
 		.unwrap()

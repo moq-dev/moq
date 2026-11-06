@@ -4,6 +4,31 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The gateways need the `async` feature
+
+The `import` and `export` modules compile only with the new `async` Cargo feature, which the default
+`server` feature enables. With `default-features = false`, enable it to keep them:
+`moq-hls = { version = "...", default-features = false, features = ["async"] }`.
+Nothing else changes for a build with `server`.
+
+The export waits have polls for a caller that drives them itself: `Broadcaster::poll_closed`
+and `poll_ready`, `Rendition::poll_playable`, and `poll_next` on the `renditions::Consumer` and
+`segments::Consumer` cursors. A `segments::Consumer::next` dropped mid-fetch leaves that fetch to the
+next call, which resumes it rather than starting over.
+
+### HTTP HLS lists includes without starting their media
+
+`Server` follows the root catalog's includes and lists their renditions from their
+catalogs, on the root catalog's join interval and clock. Include media starts
+only when requested and stops once responses finish and it idles for the longer of three
+target durations and the playlist window plus one target duration.
+Their URLs include both instances:
+`@{instance}/include/{id}/{kind}/{rendition}/@{include-instance}/...`.
+`Route::include` identifies that include; `Resource::instance` still names the
+parent broadcast's instance. Embedders using `Server::respond` need no routing change.
+DASH, `Broadcaster::new`, and the recorder cursor continue serving the broadcast's own
+renditions only.
+
 ### `Broadcaster::new` returns a cloneable handle and its `Driver`
 
 `Broadcaster::new(source, config)` returns `(Broadcaster, Driver)` instead of `Arc<Broadcaster>`.

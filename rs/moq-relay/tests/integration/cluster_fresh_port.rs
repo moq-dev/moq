@@ -43,8 +43,9 @@ where
 /// A peer announcing one broadcast.
 async fn spawn_peer() -> SocketAddr {
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast("peer").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce");
+	let broadcast = origin
+		.route("peer", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
 
 	let mut config = moq_tokio::listen::Config::default();
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
@@ -132,7 +133,7 @@ fn an_unbounded_budget_still_leaves_the_dropped_port() {
 /// Dial through a proxy that drops the first flow, with `budget` as the
 /// configured backoff timeout and `effective` as the one a mesh dial runs.
 async fn dropped_flow_recovers(budget: Duration, effective: Duration) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let peer = spawn_peer().await;
 	let (proxy, sources) = spawn_proxy(peer).await;
@@ -152,13 +153,13 @@ async fn dropped_flow_recovers(budget: Duration, effective: Duration) {
 	let mut config = cluster::Config::default();
 	config.connect = vec![Peer::new(format!("https://{proxy}/"))];
 	let cluster = crate::spawn_cluster(cluster::Options::new(config)).with_connect(connect, Default::default());
-	let mut announced = cluster.origin.consume().announced();
+	let mut announced = cluster.origin.consume().routes();
 	let run = tokio::spawn(cluster.clone().start().await.expect("cluster start").run());
 
 	kio::clock::timeout(effective + SLACK, async {
 		loop {
 			let event = announced.next().await.expect("origin closed");
-			if let moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update) = event
+			if let moq_net::origin::RouteEvent::Start(update) | moq_net::origin::RouteEvent::Update(update) = event
 				&& update.prefix.as_str() == "peer"
 			{
 				break;

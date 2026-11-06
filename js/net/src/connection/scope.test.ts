@@ -22,16 +22,15 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18]) {
 			new Path.Patterns(["room/**", "other/**"].map(Path.Pattern.parse)),
 		);
 		const broadcasts = ["room/live", "room/.hidden", "other/live", "outside"].map((path) => {
-			const broadcastPublication = publish.createBroadcast(Path.from(path));
-			const broadcast = broadcastPublication.broadcast;
-			broadcastPublication.announce();
+			const broadcastRoute = publish.route(Path.from(path));
+			const broadcast = broadcastRoute.broadcast;
 			return broadcast;
 		});
 		const [client, server] = await Promise.all([
 			connect({ url, transport: pair.client, consume }),
 			accept({ url, transport: pair.server, publish: publish.consume() }),
 		]);
-		const announced = destination.announced(undefined, { hidden: true });
+		const announced = destination.routes(undefined, { hidden: true });
 		try {
 			const received: string[] = [];
 			for (let index = 0; index < 3; index++) {

@@ -36,7 +36,7 @@ const NON_SYNC: u32 = 0x0001_0000;
 
 /// Subscribe to a moq broadcast and record it as a crash-safe regular MP4.
 ///
-/// [`next`](Self::next) returns the bytes to append to the file, the same fMP4 an
+/// [`poll_next`](Self::poll_next) returns the bytes to append to the file, the same fMP4 an
 /// [`fmp4::Export`] writes plus the reserved box and track descriptions, so the file plays if
 /// the recording never finishes. [`finish`](Self::finish) then returns the trailing `moov` and
 /// the `mdat` header that make it a regular MP4. Writing those needs a file that can be
@@ -60,7 +60,7 @@ pub struct Export<S: Stream> {
 #[derive(Clone, Debug)]
 pub struct Finish {
 	/// Where [`moov`](Self::moov) is written, from the start of the file, which is cut there
-	/// first: the end of everything [`Export::next`] returned, or of a repaired file's last
+	/// first: the end of everything [`Export::poll_next`] returned, or of a repaired file's last
 	/// complete fragment.
 	pub moov_offset: u64,
 
@@ -101,11 +101,7 @@ impl<S: Stream> Export<S> {
 
 	/// The next bytes to append to the file, or `None` once the broadcast ends or the export
 	/// [stops](Self::stop).
-	pub async fn next(&mut self) -> Result<Option<Bytes>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll-based variant of [`Self::next`].
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
 		let Some(chunk) = std::task::ready!(self.fmp4.poll_next_chunk(waiter)?) else {
 			return Poll::Ready(Ok(None));
@@ -118,7 +114,7 @@ impl<S: Stream> Export<S> {
 		Poll::Ready(Ok(Some(data)))
 	}
 
-	/// Stop recording before the broadcast ends. [`next`](Self::next) still returns the media
+	/// Stop recording before the broadcast ends. [`poll_next`](Self::poll_next) still returns the media
 	/// already read, the fragment each track was buffering included, then `None`.
 	pub fn stop(&mut self) {
 		self.fmp4.stop();

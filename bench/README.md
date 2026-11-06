@@ -12,6 +12,18 @@ case dials. `lsof`, included in the Nix shell, verifies
 ownership. A collision uses the existing startup attempts; exhausted attempts
 fail with the relay log before any load starts.
 
+Every session from `run.sh`, `browser/run.sh`, or `local.py` (so every root
+`just bench*` recipe) holds the host's benchmark lock, `/tmp/moq-bench.lock`,
+from the end of its argument checks until it exits, across all checkouts and
+agents. A second session waits, printing the holder's PID, start time,
+directory, and command; the file holds that record. `lock.sh COMMAND` holds it
+for any other measurement. The kernel releases it once the session and every
+process it started exit. It serializes benchmarks only: builds and tests from
+other agents still run, so pick a quiet host and check the load each run
+records. Bench a host as one Unix user: Linux's `fs.protected_regular` keeps a
+second user from opening a lock file the first one created, whatever its mode,
+and `lock.py` refuses a link in the lock file's place.
+
 ## Commands
 
 Run every Criterion target plus the local relay workloads:
@@ -172,6 +184,27 @@ Both ends share one current-thread runtime, so its CPU covers sending and
 receiving alike. It is a local profiling tool rather than a nightly series: the
 `moq-net` session bench owns qmux's series.
 
+Measure qmux receive ownership at the relay client defaults (4 MiB connection,
+1 MiB stream, 4 MiB send):
+
+```bash
+nix develop --command cargo bench --locked --manifest-path rs/qmux/Cargo.toml --bench receive
+```
+
+`qmux_receive` sweeps TCP and WebSocket framing, every qmux version, 1/8/64
+sessions, and 1/8 streams per session. Both endpoints run on one thread over
+bounded in-memory byte pipes; this isolates framing and receive ownership from
+TLS, kernel sockets, and congestion. Each stream holds an unread 512 KiB lease,
+so eight together fill the connection window. The untimed output reports live
+requested heap bytes, including both endpoints, their tasks, the pipes, stream
+tables and receive backings, per session. The shared source payload and runtime
+are excluded. This measures retained allocations, not RSS; allocator counters
+also run during timing. Every timed round reads and checks all payload bytes,
+returns lease credit, and fills each stream again. Throughput counts delivered
+payload once. Nightly's supplemental Rust benchmark leg records the series and
+keeps the memory output with its raw results. The broader MoQ session transport
+and version sweep remains in [its quest](/quest/m4/bench-transport-sweep.md).
+
 Compare one multi-threaded Tokio runtime with the same number of independent
 Tokio/epoll and io\_uring workers:
 
@@ -328,8 +361,8 @@ The relay and generator keep these affinities for every revision. Instructions
 mode runs alone.
 
 Each base builds into its own target under `target/bench/revisions/<sha>`,
-from a detached worktree in `.tmp/` that the run removes when it exits, so a
-later run reuses that build. The revisions build side by side on every allowed
+from a detached worktree at `.tmp/bench-revisions/<sha>` that later runs keep
+using, so a later run reuses that build without a compiler cache. The revisions build side by side on every allowed
 CPU, since fat LTO links on one thread, `BENCH_BUILD_JOBS` (default 4) at a
 time: each link takes gigabytes, so lower it on a host with little memory.
 Every round measures each base and the
@@ -391,7 +424,8 @@ nix develop --command just bench-fanout "cdff3c8f95 21d6da9fc1"
 nix develop --command just bench-fanout "" "model" "1 512"
 ```
 
-Two scenarios run every subscriber count on one thread:
+Each scenario runs every subscriber count on one thread. `model` and `session`
+run by default:
 
 - `model`: one finished group a cycle through the track model, which every
   subscriber takes before parking again, as moq-net's `track_fanout_group`
@@ -402,6 +436,11 @@ Two scenarios run every subscriber count on one thread:
   runtime. It counts the publisher, relay, and viewer sessions together, but no
   QUIC: in-tree qmux, receive leases, and crypto only show in relay counts. A
   revision whose session API predates this harness reports it unsupported.
+- `group`, on request: every subscriber drains one finished 512-frame group in
+  object batches through the relay's private reader, as moq-net's
+  `group_relay_objects/plain/512/*` bench does, so that bench's cost is counted
+  without its wall-clock noise. Revisions before the hidden `ObjectBatch` helper
+  report unsupported; historical frame-batch counts remain in the bisect report.
 
 Each `bench/fanout/<scenario>` crate builds against each base's and the current
 tree's own crates and lock, `BENCH_BUILD_JOBS` at a time, into
@@ -851,8 +890,8 @@ the table requires no new renderer or data branch. A source's `paired.json`, as
 
 ### Paired comparison
 
-Each Nightly's Rust bench groups (`rust-bench`, `rust-shared`, `rust-extra` and
-`rust-uring`) also build the previous scheduled Nightly's commit beside their
+Each Nightly's Rust bench groups (`rust-bench`, `rust-shared`, `rust-relay`,
+`rust-extra` and `rust-uring`) also build the previous scheduled Nightly's commit beside their
 own, on the same runner, so night-to-night runner variance drops out. Each
 built target runs once per side in the trend's quick mode, alternating which
 side goes first; the current side is the trend point. A case more than 10%
@@ -862,8 +901,21 @@ measurement, 30 samples). A case whose rounds are all slower with a median
 beyond 10% is a confirmed regression and fails its job after the upload, so the
 Alert workflow posts the failed Nightly. A target the base cannot build or run
 fails the job too, rather than passing uncompared; a bench target the base does
-not have yet is only reported as new. The threshold is a starting point until
-A/A runs on the hosted runner measure its noise floor.
+not have yet is only reported as new. `rust-shared` is report-only for now: its
+confirmed regressions show on the site but do not fail the job, until the
+build bias below is fixed.
+
+Runs on the hosted runner set these numbers. In four A/A runs of the
+`rust-shared`, `rust-extra` and `rust-uring` groups, and two of `rust-relay`,
+1 to 9% of cases crossed 10% either way in the screen, at most 17 of them
+slower in one group. The rounds rejected all but one:
+`wire_decode/padded/packets_64` at +12%, which read +2% in the next A/A run.
+A run whose base cut one case's work by a quarter failed with that case alone
+at +35%; its rounds also agreed, at medians of +9.3 to +9.7%, on `stats/tick`
+cases whose source was identical on both sides. Separate builds of the same
+source can measure up to 12% apart, so the threshold cannot go lower until
+that bias is fixed.
+`rust-bench` is not calibrated yet: its paired leg outlasts its hour.
 
 The table page shows tonight's comparison above the trend: confirmed
 regressions, targets not compared, cases faster in the screen, slowdowns the
@@ -881,7 +933,13 @@ nix develop --command just gh benchmark-report gate target/bench/nightly/rust-be
 
 Each run's evidence directory keeps both builds' estimates (`criterion` and
 `criterion-base`), the confirmation rounds under `confirm/`, and the run's
-`paired.json`.
+`paired.json`. The base build streams its diagnostics and retains them in
+`base-build.log`, including when it fails.
+
+Each revision builds in its own Cargo target directory (`base` and `current`
+under `CARGO_TARGET_DIR`, default `target/bench`). For an A/B comparison, use
+`run.sh`'s `BENCH_BASE` mode or a target directory per source tree: two trees
+sharing one can leave a bench linked against the other tree's library.
 
 ### CodSpeed
 
@@ -922,3 +980,20 @@ the module lanes `just check` runs at once, sweep `--jobs 1 3` over
 `bash sh/dispatch.sh check BASE`, which is then admitted once as a whole.
 Admission remains outside the suite's timeout clocks. Use separate checkouts to
 avoid measuring Cargo's artifact lock instead of competing work.
+
+`local.py` starts its workers without the benchmark lock's descriptor, which
+`quest gate` and Bun would close anyway, so only `local.py` itself holds the
+lock. Every exit of `local.py` stops its workers first. On Linux a SIGKILL or
+OOM kill does too, even inside a Quest scope: each worker watches `local.py`
+through a pidfd and stops once it exits. macOS has no pidfd, so there killing
+`local.py` with SIGKILL frees the lock while its workers keep measuring until
+their own gates exit, an accepted gap. Stop it with Ctrl-C or SIGTERM instead.
+
+### Python socket sessions
+
+The Python binding runner also sweeps both TCP and track sockets over 1, 4,
+and 16 accepting endpoints and 1, 4, and 16 concurrent sessions per endpoint.
+Each session sends a checked payload and finishes both halves. The
+`socket/<protocol>/endpoints=N/sessions=M` entries report complete sessions per
+second, including handshake, FFI calls, reads, and teardown. Run with
+`just py bench`; Nightly's binding lane runs the same sweep.

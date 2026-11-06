@@ -8,12 +8,13 @@
 import { type Instant, Milli } from "@moq/clock";
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import type { Datagram } from "./datagram.ts";
+import type * as datagram from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
 import { toStreamCode } from "./error.ts";
 import type { Frame, FrameConsumer, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
-import { isAnonymous, type Route } from "./hop.ts";
+import { isAnonymous, type RouteInfo } from "./hop.ts";
 import type * as Instance from "./instance.ts";
+import type { Consumer as OriginConsumer, Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type {
@@ -30,8 +31,11 @@ import type {
 } from "./track.ts";
 import { max, min } from "./util/sequence.ts";
 import * as Varint from "./varint.ts";
-import type { Window } from "./window.ts";
+import type { Resolved, Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
+
+/** The hidden broadcast segment reserved for socket endpoints. */
+export const SOCKET = ".socket";
 
 /** What a null {@link Delay.max} goes out as: the largest value every peer can read, as Rust sends for `None`. */
 export const NO_MAX_DELAY = Milli(Varint.MAX_U53);
@@ -132,12 +136,12 @@ export function presented(
  * candidate supersedes. Supersession is decided among what the reader may see, so a higher epoch
  * it cannot see never hides a route it can.
  */
-export function firstEligible<T extends { readonly route: Route; readonly prefix?: Path.Valid }>(
+export function firstEligible<T extends { readonly route: RouteInfo; readonly prefix?: Path.Valid }>(
 	candidates: readonly T[],
 	admits: (candidate: T) => boolean = () => true,
 ): T | undefined {
 	const admitted = candidates.filter(admits);
-	const byPrefix = new Map<Path.Valid | undefined, Route[]>();
+	const byPrefix = new Map<Path.Valid | undefined, RouteInfo[]>();
 	for (const candidate of admitted) {
 		const routes = byPrefix.get(candidate.prefix);
 		if (routes) routes.push(candidate.route);
@@ -313,13 +317,6 @@ export interface Replacement {
 	discard(): void;
 }
 
-/** A datagram read that does not wait. */
-export type RecvDatagram =
-	| { kind: "datagram"; datagram: Datagram }
-	| { kind: "idle" }
-	| { kind: "done" }
-	| { kind: "error"; error: Error };
-
 /**
  * Which groups of a track's live feed to ask whether one may still land: one the feed has not
  * accounted for, the publisher did not drop, and the feed reaches, in a gap a later arrival
@@ -343,6 +340,8 @@ export interface Land {
  * buffer of its own. Implemented by `resume.ts`, the counterpart of the Rust `Inner::Resume`.
  */
 export interface ResumeSource {
+	/** Observe a serving copy's abort, including delivery failures a resumable reader waits past. */
+	watchError(fn: (error: Error) => void): Dispose;
 	/** Re-evaluate a live-edge join at the serving copy. */
 	join(): void;
 	/**
@@ -352,11 +351,6 @@ export interface ResumeSource {
 	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean): Recv;
 	/** The next run no copy may still deliver, reported once as a `drop`, without taking a group. */
 	tryDrop(delivered: Delivered): (Recv & { kind: "drop" }) | undefined;
-	/**
-	 * The next datagram in arrival order, without waiting. `delivered` is the group record, so a
-	 * copy that still holds a group for a later group read is kept.
-	 */
-	tryDatagram(delivered: Delivered): RecvDatagram;
 	/**
 	 * Whether the reader's bounded `window` has nothing left to deliver, judged by the serving
 	 * copy against what it and the logical reader (`delivered`) handed out. A copy that may still
@@ -375,6 +369,8 @@ export interface ResumeSource {
 	end(): Position | undefined;
 	/** Where each range starts on the serving copy once delivery starts at `from`, undefined without one. */
 	starts(from: bigint): (bigint | undefined)[] | undefined;
+	/** Each range as the serving copy resolved it, undefined without one. */
+	resolved(): (Resolved | undefined)[] | undefined;
 	/** The runs of `[start, end)` the serving copy reads, undefined without one. */
 	runs(start: bigint, end: bigint): Run[] | undefined;
 	/**
@@ -413,6 +409,8 @@ export interface TrackRequestOptions {
 	producer: Producer;
 	/** Requests not yet accepted or rejected by the publisher. */
 	pending: Set<Request>;
+	/** Metadata-only readers holding this request, if its broadcast supports them. */
+	lookups?: { pending: Getter<number>; opened: boolean };
 }
 
 /**
@@ -444,9 +442,6 @@ export interface FillStarts {
 	fillsFromStart?: boolean;
 }
 
-/** Maximum buffered datagrams per subscriber; mirrors Rust's bounded send buffer. */
-export const MAX_DATAGRAMS = 64;
-
 /** The first group an exclusive track end excludes whole: one past the last group that may exist. */
 export function finalSequence(end: Position): bigint {
 	return end.group + (end.frame === 0 ? 0n : 1n);
@@ -454,6 +449,14 @@ export function finalSequence(end: Position): bigint {
 
 /** Hooks assigned in static blocks by the owning class. */
 export const hooks: {
+	/** Make a request for an unanswered datagram track. */
+	datagramRequest: (producer: datagram.Producer, pending: Set<datagram.Request>) => datagram.Request;
+	/** End a received datagram track if its last consumer left. */
+	closeUnusedDatagrams: (producer: datagram.Producer) => boolean;
+	/** Follow this consumer's subscriber priority for transport scheduling. */
+	datagramPriority: (consumer: datagram.Consumer) => Getter<number>;
+	/** Settles once this consumer is closed, the end of whatever request it serves. */
+	datagramClosed: (consumer: datagram.Consumer) => GetPromise<Error | null>;
 	/**
 	 * Declare the end a wire subscription received: repeating it is a no-op, and a mid-group
 	 * end may refine the group boundary it falls just before. Throws `ProtocolViolation` on
@@ -586,19 +589,19 @@ export const hooks: {
 	 * with no group there: what lite-07 SUBSCRIBE_START answers. Assigned by `track.ts`.
 	 */
 	servingStarts: (subscriber: Subscriber, from: bigint) => (bigint | undefined)[];
+	/**
+	 * Each of a subscriber's ranges as resolved where it is served, undefined for one whose start
+	 * still waits: what lite-07 SUBSCRIBE_STARTED answers. Assigned by `track.ts`.
+	 */
+	servingResolved: (subscriber: Subscriber) => (Resolved | undefined)[];
 	/** The lowest buffered candidate, which an ordered take may wait below; `floor` passes sequences taken on other copies. */
 	peekGroup: (subscriber: Subscriber, ordered: boolean, floor?: bigint) => bigint | undefined;
 	/** Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival order. */
 	tryNextGroup: (subscriber: Subscriber, floor?: bigint) => Recv;
-	/** Wake once a subscriber's datagram cursor may read differently; fires at most once. */
-	datagramChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
-	/** Take the next datagram in arrival order without waiting. */
-	tryRecvDatagram: (subscriber: Subscriber) => RecvDatagram;
 	/** Whether a buffered group in `[start, end)` that `delivered` lacks still waits to be read. */
 	hasUnreadGroup: (subscriber: Subscriber, start: bigint, end: bigint | undefined, delivered: Delivered) => boolean;
 	/**
-	 * Whether a subscriber's track ended and it holds nothing left to read: no datagram within its
-	 * cursor, and no group in `[start, end)` that `delivered` lacks.
+	 * Whether a subscriber's track ended and it holds nothing left to read: no group in `[start, end)` that `delivered` lacks.
 	 */
 	spent: (subscriber: Subscriber, start: bigint, end: bigint | undefined, delivered: Delivered) => boolean;
 	/**
@@ -649,6 +652,8 @@ export const hooks: {
 	fetchBudget: (subscriber: Subscriber, maxDelay: Milli | undefined) => void;
 	/** Whether a reader beyond one-shot fetches subscribes to this copy. */
 	subscribing: (producer: Producer) => Getter<boolean>;
+	/** The aggregate across every reader, one-shot fetches included: what the wire asks for. */
+	requested: (producer: Producer) => Getter<Subscription | undefined>;
 	/** Leave a wire copy serving its cache and fills without a live feed. */
 	cacheTrack: (producer: Producer) => void;
 	/** Fail subscriptions reaching beyond `edge`, keeping history readers and one-shot fetches. */
@@ -664,8 +669,6 @@ export const hooks: {
 	 * is refused. Throws `TimestampMismatch` if a buffered frame already disagrees.
 	 */
 	bindGroupTimed: (group: GroupProducer, track: Info) => void;
-	/** Admit a datagram in its stored wire form. */
-	writeDatagram: (producer: Producer, datagram: Datagram, inflated?: number) => void;
 	/** Bind the group to its immutable track codec. */
 	bindGroupCompression: (group: GroupProducer, compressed: boolean) => void;
 	/** Admit a received stored slice without recompressing it. */
@@ -701,6 +704,11 @@ export const hooks: {
 	releaseGroupReader: (group: GroupConsumer, abort?: Error) => void;
 	/** Whether a group reader still reads the copy it was mirrored from, not one its recovery moved it to. */
 	readsMirrored: (group: GroupConsumer) => boolean;
+	/**
+	 * Whether the reader a track buffered `group` for will still read it: only then does it keep
+	 * its source group wanted. Assigned by `group.ts`.
+	 */
+	groupReads: (group: GroupConsumer, reads: boolean) => void;
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
 	/** Return when a group joined its track at this hop, on the installed clock. */
@@ -730,14 +738,23 @@ export const hooks: {
 	 * mirror is released too: not when its group reads on, or may yet, from another copy.
 	 */
 	evictGroup: (group: GroupConsumer) => boolean;
-	/** Attach the origin advertisement of a created broadcast. */
-	attachAnnouncer: (
-		producer: BroadcastProducer,
-		announcer: { announce(route: Route): void; unannounce(): void; route(): Route | undefined },
-	) => void;
-
 	/** Call `fn` synchronously when an open broadcast closes, from any handle. */
 	onClosed: (producer: BroadcastProducer, fn: () => void) => Dispose;
+	/** Reserve an on-demand track without listing it or enabling a request handler. */
+	reserveUnlistedTrack: (producer: BroadcastProducer, name: string) => Request;
+	/** Whether a subscriber or a metadata lookup still holds a requested track. */
+	requestWanted: (request: Request) => Getter<boolean>;
+	/** Transfer a metadata-opened request to its session's producer lifetime. */
+	keepRequest: (request: Request) => void;
+	/** Observe the peer's reset without waiting for routed delivery recovery. */
+	watchSubscriberError: (subscriber: Subscriber, fn: (error: Error) => void) => Dispose;
+	/**
+	 * Count a session withholding the origin's hidden broadcasts from its peer, such as a
+	 * moq-lite client before 07, whose peer can't ask for them, until disposed.
+	 */
+	withholdHidden: (origin: OriginConsumer) => Dispose;
+	/** How many sessions withhold the origin's hidden broadcasts from their peer. */
+	hiddenWithheld: (origin: OriginProducer) => Getter<number>;
 	/** Name a broadcast handle by the path an origin created or resolved it at. */
 	stampPath: (target: BroadcastProducer | BroadcastConsumer, path: Path.Valid) => void;
 	/** Name the instance of the route an origin resolved a broadcast handle through. */
@@ -747,6 +764,18 @@ export const hooks: {
 	/** Whether a broadcast handle was {@link stampUnlisted marked unlisted}. */
 	unlisted: (target: BroadcastConsumer) => boolean;
 } = {
+	datagramRequest: () => {
+		throw new Error("datagram module not loaded");
+	},
+	closeUnusedDatagrams: () => {
+		throw new Error("datagram module not loaded");
+	},
+	datagramPriority: () => {
+		throw new Error("datagram module not loaded");
+	},
+	datagramClosed: () => {
+		throw new Error("datagram module not loaded");
+	},
 	endTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -793,6 +822,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	servingStarts: () => {
+		throw new Error("track.ts not loaded");
+	},
+	servingResolved: () => {
 		throw new Error("track.ts not loaded");
 	},
 	makeRequest: () => {
@@ -849,16 +881,10 @@ export const hooks: {
 	unreport: () => {
 		throw new Error("track.ts not loaded");
 	},
-	tryRecvDatagram: () => {
-		throw new Error("track.ts not loaded");
-	},
 	deliveredRuns: () => {
 		throw new Error("track.ts not loaded");
 	},
 	handedOut: () => {
-		throw new Error("track.ts not loaded");
-	},
-	datagramChanged: () => {
 		throw new Error("track.ts not loaded");
 	},
 	hasUnreadGroup: () => {
@@ -909,13 +935,13 @@ export const hooks: {
 	subscribing: () => {
 		throw new Error("track module not loaded");
 	},
+	requested: () => {
+		throw new Error("track.ts not loaded");
+	},
 	fetchBudget: () => {
 		throw new Error("track.ts not loaded");
 	},
 	askFetch: () => {
-		throw new Error("track.ts not loaded");
-	},
-	writeDatagram: () => {
 		throw new Error("track.ts not loaded");
 	},
 	bindGroupCompression: () => {
@@ -966,6 +992,9 @@ export const hooks: {
 	readsMirrored: () => {
 		throw new Error("group.ts not loaded");
 	},
+	groupReads: () => {
+		throw new Error("group.ts not loaded");
+	},
 	groupTimestamp: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -1005,12 +1034,26 @@ export const hooks: {
 	evictGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
-	attachAnnouncer: () => {
-		throw new Error("broadcast.ts not loaded");
-	},
-
 	onClosed: () => {
 		throw new Error("broadcast.ts not loaded");
+	},
+	reserveUnlistedTrack: () => {
+		throw new Error("broadcast.ts not loaded");
+	},
+	requestWanted: () => {
+		throw new Error("track.ts not loaded");
+	},
+	keepRequest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	watchSubscriberError: () => {
+		throw new Error("track.ts not loaded");
+	},
+	withholdHidden: () => {
+		throw new Error("origin.ts not loaded");
+	},
+	hiddenWithheld: () => {
+		throw new Error("origin.ts not loaded");
 	},
 	stampPath: () => {
 		throw new Error("broadcast.ts not loaded");
@@ -1076,7 +1119,7 @@ export function* coveringPrefixes(path: Path.Valid): Generator<Path.Valid> {
  * a higher epoch at the same prefix. An older incarnation of an instance is never eligible,
  * however cheap, since its publisher was replaced.
  */
-export function superseded(route: Route, others: Iterable<Route>): boolean {
+export function superseded(route: RouteInfo, others: Iterable<RouteInfo>): boolean {
 	return new Epochs(others).supersedes(route);
 }
 
@@ -1088,7 +1131,7 @@ export function superseded(route: Route, others: Iterable<Route>): boolean {
 export class Epochs {
 	readonly #highest = new Map<Instance.Valid | undefined, bigint>();
 
-	constructor(routes: Iterable<Route>) {
+	constructor(routes: Iterable<RouteInfo>) {
 		for (const route of routes) {
 			const epoch = route.epoch ?? 0n;
 			if (epoch === 0n) continue;
@@ -1098,14 +1141,14 @@ export class Epochs {
 	}
 
 	/** Whether a route carries `route`'s instance at a higher epoch. */
-	supersedes(route: Route): boolean {
+	supersedes(route: RouteInfo): boolean {
 		const highest = this.#highest.get(route.instance);
 		return highest !== undefined && highest > (route.epoch ?? 0n);
 	}
 }
 
 /** Prefer identified publishers, then lower static cost. */
-export function compareRoutes(a: Route, b: Route): number {
+export function compareRoutes(a: RouteInfo, b: RouteInfo): number {
 	return Number(isAnonymous(a)) - Number(isAnonymous(b)) || (a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0);
 }
 
@@ -1117,7 +1160,7 @@ export function compareRoutes(a: Route, b: Route): number {
  * matching `route_order` in rs/moq-net for routes a node did not get from a cluster peer, which
  * is every route here.
  */
-export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: Route, b: Route): number {
+export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: RouteInfo, b: RouteInfo): number {
 	const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
 	if (order !== 0 || path === prefix) return order;
 	const ha = spreadHash(path, a.instance ?? "");

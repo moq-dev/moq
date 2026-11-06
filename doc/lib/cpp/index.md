@@ -94,7 +94,7 @@ void ok(moq::expected<void> result) {
 auto client = ok(moq::Client::init({}));   // a moq::ClientConfig; {} takes every default
 auto session = ok(client->connect("https://relay.example.com").get());
 auto announced = ok(session->consume()->follow("my-stream.hang", std::nullopt));
-auto broadcast = ok(announced->available().get());
+auto broadcast = ok(announced->available().get());   // the first call is never null
 auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast).get());
 if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the catalog ends
     for (const auto &[id, video] : catalog->video) {
@@ -111,8 +111,9 @@ The config is generated, so nothing names this package for you: set
 after any product tokens of your own, and moq-ffi appends its own.
 
 Call `available()` again to wait for the next publisher instance at that path, such as a
-restarted publisher, and drop what was read from the previous one then: its tracks end
-when its session does.
+restarted publisher. It returns null once the path goes offline, then the next
+broadcast when something serves it again. Drop what was read from the previous instance
+on either: its tracks end when its session does.
 
 `MediaTrackConsumer` reads `MediaRead` records in decode order: `kFrame`, `kGap`, or
 `kEnd`, like the audio and video decoders. Match the variant before taking its frame.
@@ -136,8 +137,10 @@ A raw `moq::Frame` with `std::nullopt` is untimed.
 // Publish encoded frames, or raw pixels with the codec inside the binding.
 // session is connected as above; opus_init, packet, and rgba come from your
 // encoder or capture source.
-auto publication = ok(session->publish()->create_broadcast("my-stream.hang"));
-auto broadcast = publication->broadcast(); // fill tracks here; announce on the publication
+moq::RouteOptions options;
+options.hidden = true; // fill tracks before anyone finds it; hold the route to stay announced
+auto route = ok(session->publish()->route("my-stream.hang", options));
+auto broadcast = ok(route->broadcast());
 auto audio = ok(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, {moq::AudioFormat::kOpus, opus_init}));
 ok(audio->write_frame({packet, moq::Timestamp{960, 48'000}}));   // 20 ms
 
@@ -145,8 +148,8 @@ moq::VideoEncoderOutput output{moq::VideoCodec::kH264, std::nullopt, std::nullop
 auto catalog = ok(moq::MediaCatalogProducer::init(broadcast));
 auto video = ok(moq::VideoProducer::init(catalog, {{moq::VideoPixelFormat::kRgba, 1280, 720, {30000, 1001}}, output, "camera", nullptr}));
 ok(video->write({{0, 30'000}, rgba}));
-ok(publication->announce({})); // each broadcast mints a fresh instance
-ok(broadcast->close());    // keep the producer alive while publishing, then close explicitly
+ok(route->announce()); // each route mints a fresh instance, route->instance_id()
+ok(broadcast->close()); // keep the producer alive while publishing, then close explicitly
 ```
 
 Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings. For simulcast, give each rendition the next one down as `lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3. A pre-encoded video track takes `lower` in its `VideoInit` too, as a `moq::MediaProducer::kTrack` or `kStream`, which only places it one priority below; follow its reservation with `RateControl`, and while it reports disabled, drop the frames, call `set_enabled(false)` after a `discontinuity()`, and `set_enabled(true)` on the keyframe that resumes it. A `MediaTrackStreamProducer` finds its own frames: `set_enabled(false)` drops what is written to it, and after `set_enabled(true)` it resumes at the stream's next keyframe.
@@ -207,7 +210,7 @@ future completed, which is the executor thread.
 
 ## Disabled renditions
 
-A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode. Audio and video subscribe setup returns `moq::Error::kUnsupportedConfig` when the decoder refuses the codec, layout, or description; a player can then try its next ranked rendition. Decoder faults and later peer or decode failures do not report that setup refusal.
+Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode. Audio and video subscribe setup returns `moq::Error::kUnsupportedConfig` when the decoder refuses the codec, layout, or description; a player can then try its next ranked rendition. Decoder faults and later peer or decode failures do not report that setup refusal.
 
 ## Bandwidth estimates
 

@@ -425,11 +425,10 @@ mod tests {
 		if !test_env::Env::without(&["MOQ_CONNECT"]).isolate() {
 			return;
 		}
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 
 		let origin = moq_tokio::origin::spawn();
-		let _alpha = origin.create_broadcast("alpha").expect("alpha");
-		_alpha.announce(Default::default()).expect("alpha");
+		let _alpha = origin.route("alpha", Default::default()).expect("alpha");
 
 		let mut config = moq_tokio::listen::Config::default();
 		config.bind = Some("127.0.0.1:0".parse().unwrap());

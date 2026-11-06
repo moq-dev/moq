@@ -13,8 +13,8 @@ the same arrival trace.
 
 Boundaries: converging by playing slightly faster or slower is the browser's
 [Watch](/quest/m1/audio-jitter-target/watch.md) quest. No packet loss concealment.
-Video keeps its own target; making the audio playhead the clock is [A/V
-clock](/quest/m1/av-clock.md).
+Video keeps its own target; the shared clock stays on local time, and
+[Watch](/quest/m1/audio-jitter-target/watch.md) converges the audio ring on it.
 
 ## Plan
 
@@ -33,6 +33,12 @@ target, and `moq play` copies NetEq's stretch in m1 as
 [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md), sharing
 one algorithm and its vectors with the browser's.
 
+Decided 2026-11-04 (maintainer), for push-to-talk's silence suppression
+([moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942)): a silence the publisher declares
+with an end marker is not idle, so the estimator folds no idle intervals for
+it and keeps its estimate, where an undeclared gap still relaxes toward the
+prior. The document's `silence` corpus case holds both implementations to it.
+
 What the line still owes once Watch lands: its recorded trace replayed through
 the native decode path too, asserting the same target series the browser's
 `playout.test.ts` does. The audio quality harness's `pulse` rows already grade
@@ -42,7 +48,7 @@ native playback against its budgets.
 
 - [Watch](/quest/m1/audio-jitter-target/watch.md) - the browser plays the measured real-microphone rows with zero steady-state underruns by time-stretching the ring
 - [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md) - `moq play` copies NetEq's accelerate and preemptive expand, sharing the browser's algorithm and vectors, so its native rows reach zero steady-state underruns
-- [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - post-cap nightlies confirm AAC bursty discards about as much audio as Opus bursty and the first row no longer stalls, and every browser row's budgets are re-measured from them
+- [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - the AAC browser budgets are re-measured from nightlies after the TS importer groups each PES
 
 ## Closes
 

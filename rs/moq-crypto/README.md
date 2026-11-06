@@ -2,17 +2,37 @@
 
 # moq-crypto
 
-Content signing and end-to-end encryption for [Media over QUIC](https://moq.dev): the `sign`
-module signs every frame so relays cannot forge it, and the `e2ee` module encrypts groups,
-datagrams, and track names so relays cannot read them. Both wrap `moq-net` and check timestamps
-with its `track::Info::rescale`, so a frame either half accepts is one `moq-net` accepts.
+Cryptography for [Media over QUIC](https://moq.dev): the `sign` module signs every frame so
+relays cannot forge it, and the `e2ee` module encrypts groups, datagrams, and track names so
+relays cannot read them. Both wrap `moq-net` and check timestamps with its
+`track::Info::rescale`, so a frame either half accepts is one `moq-net` accepts. The `provider`
+module is the [rind](https://github.com/moq-dev/rind) rustls provider and CPU check that the
+MoQ transport crates share.
 
 ## Features
 
 `sign` and `e2ee`, both default, enable the two modules. With default features off, the crate is
 only `sign::PublicKey`, the endpoint ID, with its canonical z-base-32 text: it builds without
 `moq-net` or rind, for crates such as `moq-auth` that name endpoints but sign nothing.
-`serde` adds the key's string serialization.
+`serde` adds the key's string serialization. `provider`, off by default, enables the `provider`
+module; it depends only on rind and rustls, never on `moq-net`, so the transport crates can
+use it without a dependency cycle.
+
+## Provider
+
+MoQ runs all of its cryptography on rind. Its primitives panic on a CPU missing a feature rind
+requires, so the `provider` module refuses such a CPU up front. Today that is NEON on aarch64;
+every `x86_64` CPU and armv7 are supported, and a CPU without AES or other crypto extensions
+runs rind's slower paths rather than being refused:
+
+- `provider::check()` returns `UnsupportedCpu`, naming the missing feature.
+- `provider::provider()` returns rind's rustls `CryptoProvider`, or that error. It ignores the
+  process default, so TLS works whether or not one was installed.
+- `provider::install_default()` installs rind as rustls' process default for libraries such as
+  reqwest that read it, leaving a provider the process already installed in place.
+
+moq-quic, moq-tokio, qmux, and moq-uring report the same `UnsupportedCpu`, and
+`moq_tokio::crypto` re-exports this module's API.
 
 ## Signing
 
@@ -28,17 +48,17 @@ An endpoint's `SecretKey` signs; its `PublicKey` is the endpoint ID, displayed a
 characters (a DNS label). `SecretKey::load_or_generate(path)` keeps one key for the life of a host,
 as 52 z-base-32 characters in a `0600` file it never replaces implicitly.
 
-`broadcast::Producer` wraps the `moq-net` broadcast, mints a fresh instance, and signs each frame
-over the application path, instance, track, group, frame index, and timestamp (at the track's
-timescale). Announce the broadcast with that instance on its route:
+`broadcast::Producer` wraps the `moq-net` broadcast and signs each frame over the application
+path, instance, track, group, frame index, and timestamp (at the track's timescale). It signs under
+the instance of the route that serves the broadcast, which the route mints fresh:
 
 ```rust
 let key = SecretKey::load_or_generate("/var/lib/moq/endpoint.key")?;
 let path = moq_net::Path::new(&format!("mesh/{}/agent", key.public()))?;
-let publication = origin.create_broadcast(&path)?;
-let signed = broadcast::Producer::new(publication.broadcast().clone(), key, path);
+let route = origin.route(&path, RouteOptions::hidden())?;
+let signed = broadcast::Producer::new(route.broadcast().clone(), key, path, route.instance());
 let messages = signed.create_track("messages", None)?;
-publication.announce(Route::default().with_instance(signed.instance().clone(), 0))?;
+route.announce()?;
 ```
 
 A subscriber wraps the broadcast an origin resolved in a `broadcast::Consumer` with the key it
@@ -80,10 +100,12 @@ learns only its length rounded up to 16 bytes. A track served on demand is reser
 ```rust
 let credential = Credential::new(credential::Config { context, kid, secret })?;
 let generation = credential.produce();
-let publication = origin.create_broadcast(&credential.path("meeting.hang")?)?;
-let protected = broadcast::Producer::new(publication.broadcast().clone(), generation.clone());
+// The route serves the generation's epoch as its instance, so subscribers find the key.
+let options = RouteOptions::hidden().with_instance(generation.epoch().instance(), 0);
+let route = origin.route(&credential.path("meeting.hang")?, options)?;
+let protected = broadcast::Producer::new(route.broadcast().clone(), generation.clone());
 let video = protected.create_track("video", None)?;
-publication.announce(Route::default().with_instance(generation.epoch().instance(), 0))?;
+route.announce()?;
 ```
 
 A subscriber follows `credential.path(semantic)` with `origin.follow(path, None)`. It takes

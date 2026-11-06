@@ -355,9 +355,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// bounded: a `moov` or `moof` body larger than
 	/// [`MAX_METADATA_BYTES`](super::MAX_METADATA_BYTES), or a text sample larger than
 	/// [`MAX_HELD_BYTES`](super::MAX_HELD_BYTES), is refused before it is held. A `moof` declaring
-	/// more than [`MAX_FRAGMENT_SAMPLES`](super::MAX_FRAGMENT_SAMPLES) samples is refused before
-	/// they are planned, and a `moov` declaring more than [`MAX_TRACKS`](super::MAX_TRACKS)
-	/// tracks before any is created.
+	/// more than [`MAX_FRAGMENT_SAMPLES`](super::MAX_FRAGMENT_SAMPLES) samples, or more than its
+	/// size accepts, is refused before they are planned, and a `moov` declaring more than
+	/// [`MAX_TRACKS`](super::MAX_TRACKS) tracks before any is created.
 	///
 	/// A decode error is terminal: later decodes, cuts, seeks and discontinuities return the same
 	/// error without reading input or changing the tracks.
@@ -768,25 +768,25 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let (mut config, colr, pasp, spatial) = match codec {
 			mp4_atom::Codec::Avc1(avc1) => (
 				self.init_h264(false, &avc1.avcc, &avc1.visual, container)?,
-				avc1.colr.as_ref(),
+				avc1.colr.as_slice(),
 				avc1.pasp.as_ref(),
 				avc1.spatial.as_deref(),
 			),
 			mp4_atom::Codec::Avc3(avc3) => (
 				self.init_h264(true, &avc3.avcc, &avc3.visual, container)?,
-				avc3.colr.as_ref(),
+				avc3.colr.as_slice(),
 				avc3.pasp.as_ref(),
 				avc3.spatial.as_deref(),
 			),
 			mp4_atom::Codec::Hev1(hev1) => (
 				self.init_h265(true, &hev1.hvcc, &hev1.visual, container)?,
-				hev1.colr.as_ref(),
+				hev1.colr.as_slice(),
 				hev1.pasp.as_ref(),
 				hev1.spatial.as_deref(),
 			),
 			mp4_atom::Codec::Hvc1(hvc1) => (
 				self.init_h265(false, &hvc1.hvcc, &hvc1.visual, container)?,
-				hvc1.colr.as_ref(),
+				hvc1.colr.as_slice(),
 				hvc1.pasp.as_ref(),
 				hvc1.spatial.as_deref(),
 			),
@@ -803,7 +803,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				config.coded_width = Some(vp08.visual.width as _);
 				config.coded_height = Some(vp08.visual.height as _);
 				config.container = container;
-				(config, vp08.colr.as_ref(), vp08.pasp.as_ref(), vp08.spatial.as_deref())
+				(
+					config,
+					vp08.colr.as_slice(),
+					vp08.pasp.as_ref(),
+					vp08.spatial.as_deref(),
+				)
 			}
 			mp4_atom::Codec::Vp09(vp09) => {
 				// https://github.com/gpac/mp4box.js/blob/325741b592d910297bf609bc7c400fc76101077b/src/box-codecs.js#L238
@@ -824,7 +829,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				config.coded_width = Some(vp09.visual.width as _);
 				config.coded_height = Some(vp09.visual.height as _);
 				config.container = container;
-				(config, vp09.colr.as_ref(), vp09.pasp.as_ref(), vp09.spatial.as_deref())
+				(
+					config,
+					vp09.colr.as_slice(),
+					vp09.pasp.as_ref(),
+					vp09.spatial.as_deref(),
+				)
 			}
 			mp4_atom::Codec::Av01(av01) => {
 				let mut config = VideoConfig::new(crate::codec::av1::av1_from_av1c(&av01.av1c));
@@ -832,14 +842,21 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				config.coded_width = Some(av01.visual.width as _);
 				config.coded_height = Some(av01.visual.height as _);
 				config.container = container;
-				(config, av01.colr.as_ref(), av01.pasp.as_ref(), av01.spatial.as_deref())
+				(
+					config,
+					av01.colr.as_slice(),
+					av01.pasp.as_ref(),
+					av01.spatial.as_deref(),
+				)
 			}
 			mp4_atom::Codec::Unknown(unknown, _) => return Err(Error::UnknownCodec(*unknown).into()),
 			unsupported => return Err(Error::UnsupportedCodec(Box::new(unsupported.clone())).into()),
 		};
 		// The codec config outranks the colr box a muxer added, which only fills its gaps.
-		let colr = colr.map(super::colr_color).transpose()?.flatten();
-		crate::codec::color::fill(&mut config.color, colr.as_ref(), "colr");
+		for entry in colr {
+			let color = super::colr_color(entry)?;
+			crate::codec::color::fill(&mut config.color, color.as_ref(), "colr");
+		}
 		(config.projection, config.stereo) = super::spatial(spatial)?;
 		if let Some(pasp) = pasp {
 			let width = config.coded_width.ok_or(Error::InvalidAspect("missing width"))?;
@@ -2083,10 +2100,18 @@ mod tests {
 			import.finish().unwrap();
 		}
 
-		// At the bound, the moof is accepted.
-		let (mut import, id, _) = initialized(false);
-		import.decode(&inherited_moof(id, &[half, half])).unwrap();
+		// A short moof declares one field-less sample per body byte past the base, and no more.
+		let (_, id, _) = initialized(false);
+		let fit = (super::super::FRAGMENT_SAMPLE_BASE as usize + inherited_moof(id, &[0]).len() - 8) as u32;
+		let (mut import, _, _) = initialized(false);
+		import.decode(&inherited_moof(id, &[fit])).unwrap();
 		assert!(import.moof.is_some());
+		let (mut import, _, _) = initialized(false);
+		let err = import.decode(&inherited_moof(id, &[fit + 1])).unwrap_err();
+		assert!(
+			matches!(err, crate::Error::Cmaf(Error::TooManySamples(count)) if count == u64::from(fit) + 1),
+			"{err:?}"
+		);
 	}
 
 	/// A fragment within the bounds plans within [`MAX_HELD_BYTES`](super::super::MAX_HELD_BYTES)
@@ -2128,12 +2153,22 @@ mod tests {
 				.collect()
 		};
 		let start = runs_moof(id, gapped(0)).len() + 8;
+		// Field-less samples past the base need a byte each, which entries supply here.
+		let mut paid = entries(MAX_FRAGMENT_SAMPLES as usize / 4, small);
+		paid.push(mp4_atom::Trun {
+			data_offset: None,
+			samples: mp4_atom::TrunSamples::Inherited {
+				count: (MAX_FRAGMENT_SAMPLES - MAX_FRAGMENT_SAMPLES / 4) as u32,
+				first_flags: None,
+			},
+		});
 		let inputs = [
 			(
 				"field-less runs",
 				inherited_moof(id, &[MAX_FRAGMENT_SAMPLES as u32]),
-				None,
+				Some(MAX_FRAGMENT_SAMPLES as usize),
 			),
+			("field-less runs paid in bytes", runs_moof(id, paid), None),
 			("full entries", runs_moof(id, entries(room / 16, full)), None),
 			(
 				"4-byte entries",

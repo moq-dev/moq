@@ -50,7 +50,7 @@ publisher-local padding handle:
 Decided with the maintainer on 2026-10-20:
 
 - The send target, native probing,
-  and the native publishers' [rung disable](/quest/m1/simulcast-rung-disable.md)
+  and the native publishers' rung disable
   moved to m1, so Rust, FFI, and OBS publishers recover a stopped rendition in
   the next breaking release. Their rung disable needs the target and native
   probing, not padding.
@@ -96,7 +96,6 @@ This README's own work, once the children land:
 
 ## Required
 
-- [Native rung disable proof](/quest/m1/simulcast-rung-disable.md) - a shaped uplink through moq-ffi proves the top rendition stops and resumes over real BBR3 probing
 - [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - shipping Chrome and Safari publishers adapt to the relay's PROBE estimate, since they have no `getStats()`
 - [One page-wide getStats sampling ticker](/quest/m2/probe/stats-ticker.md) - a page's connections share one sampling ticker
 - [Padding probes](/quest/m2/probe/padding.md) - a browser probes with a lowest-priority padding stream on an ALR schedule
@@ -107,5 +106,5 @@ This README's own work, once the children land:
 
 ## Related
 
-- [BBR media study](/quest/m2/quic-bbr-study.md) - preserving an estimate and discovering spare capacity are separate problems
-- [Realtime uplink congestion control](/quest/m2/quic-realtime/README.md) - a delay-based alternative to BBR3 on native uplinks; it must implement native probing to ship (decided 2026-10-25)
+- [BBR media study](/quest/m5/quic-bbr-study.md) - preserving an estimate and discovering spare capacity are separate problems
+- [Realtime uplink congestion control](/quest/m3/quic-realtime/README.md) - a delay-based alternative to BBR3 on native uplinks; it must implement native probing to ship (decided 2026-10-25)

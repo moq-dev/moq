@@ -605,6 +605,9 @@ impl MoqAudioConsumer {
 }
 
 fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::AudioConfig, MoqError> {
+	if !catalog_audio.enabled {
+		return Err(MoqError::NotFound);
+	}
 	let codec = catalog_audio
 		.codec
 		.parse::<hang::catalog::AudioCodec>()
@@ -625,6 +628,7 @@ fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::
 	config.description = catalog_audio.description.map(Into::into);
 	config.container = catalog_audio.container.into();
 	config.jitter = catalog_audio.jitter;
+	config.warmup = catalog_audio.warmup;
 	Ok(config)
 }
 
@@ -636,10 +640,8 @@ impl MoqAudioConsumer {
 	/// the codec is inferred from it. A codec, layout, or description the decoder cannot open
 	/// returns [`MoqError::UnsupportedConfig`], so a player can try another rendition.
 	///
-	/// A [disabled](crate::media::MoqAudio::enabled) rendition subscribes too, and decodes once its
-	/// publisher re-enables it: a muted speaker's listener stays subscribed, so the unmute plays
-	/// from its first frame. Don't pick one, but keep one already playing while no enabled
-	/// rendition is on offer.
+	/// A [disabled](crate::media::MoqAudio::enabled) rendition returns [`MoqError::NotFound`]: no
+	/// frames are coming.
 	///
 	/// `id` is the rendition's catalog key. Its [`track`](crate::media::MoqAudio::track), or `id`
 	/// when unset, is subscribed in the broadcast its
@@ -713,14 +715,26 @@ mod tests {
 			enabled: true,
 			container: MoqContainer::Legacy,
 			jitter: None,
+			warmup: None,
 		}
 	}
 
-	/// A consumer holds a disabled rendition it already plays, so one converts like any other.
+	/// The decoder starts the catalog warmup earlier, so it must survive the trip through the FFI
+	/// record.
 	#[test]
-	fn audio_config_accepts_disabled_renditions() {
+	fn audio_config_keeps_the_warmup() {
+		let mut audio = catalog_audio("opus");
+		audio.warmup = Some(Duration::from_millis(80));
+		let config = audio_config(audio).unwrap();
+		assert_eq!(config.warmup, Some(Duration::from_millis(80)));
+	}
+
+	#[test]
+	fn audio_config_refuses_disabled_renditions() {
 		let mut config = catalog_audio("opus");
 		config.enabled = false;
+		assert!(matches!(audio_config(config.clone()), Err(MoqError::NotFound)));
+		config.enabled = true;
 		assert!(audio_config(config).is_ok());
 	}
 

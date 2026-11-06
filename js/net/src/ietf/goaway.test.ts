@@ -209,7 +209,7 @@ for (const [version, alpn] of [
 			version,
 			client: true,
 		});
-		const announced = connection.announced();
+		const announced = connection.routes();
 		try {
 			const request = await Stream.accept(pair.server, version);
 			if (!request) throw new Error("no namespace subscription");
@@ -235,7 +235,7 @@ for (const [version, alpn] of [
 		const control = await Stream.open(pair.server, { version });
 		await Stream.accept(pair.client, version);
 		const origin = new OriginProducer();
-		origin.createBroadcast(Path.from("room")).announce();
+		origin.route(Path.from("room"), { hidden: true }).announce();
 		const connection = new Connection({
 			url: new URL("https://relay.example/"),
 			quic: pair.server,
@@ -265,7 +265,7 @@ for (const [version, alpn] of [
 			const control = await Stream.open(pair.server, { version });
 			await Stream.accept(pair.client, version);
 			const origin = new OriginProducer();
-			origin.createBroadcast(Path.from("room")).announce();
+			origin.route(Path.from("room"), { hidden: true }).announce();
 			const connection = new Connection({
 				url: new URL("https://relay.example/"),
 				quic: pair.server,

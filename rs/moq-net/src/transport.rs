@@ -12,6 +12,8 @@ use std::time::Duration;
 #[cfg(feature = "async")]
 pub(crate) mod boxed;
 pub mod memory;
+#[cfg(feature = "async")]
+pub(crate) mod open;
 
 /// Where a session's request target travels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -162,6 +164,37 @@ impl ReceiveWindow {
 	}
 }
 
+/// Which streams a session opens: one-way, or both ways.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dir {
+	/// Unidirectional streams.
+	Uni,
+	/// Bidirectional streams.
+	Bi,
+}
+
+/// The streams a peer still lets this side open in one direction, as the transport last heard.
+///
+/// A peer grants a bounded number of streams, and an open beyond them waits for it to grant
+/// more. A session reads this to tell an open waiting for that credit from one waiting on
+/// anything else. See [`poll::Session::stream_credit`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StreamCredit {
+	/// The streams this side may still open before the peer grants more.
+	pub available: u64,
+	/// Whether an open was refused for lack of credit since the peer last granted more, so
+	/// this side waits for the peer, as QUIC's STREAMS_BLOCKED says.
+	pub blocked: bool,
+}
+
+impl StreamCredit {
+	/// `available` streams left, `blocked` once an open was refused for lack of them.
+	pub fn new(available: u64, blocked: bool) -> Self {
+		Self { available, blocked }
+	}
+}
+
 /// The smallest connection receive window a transport that leases may offer: one 1 MiB
 /// storage segment.
 ///
@@ -276,18 +309,6 @@ pub mod poll {
 			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
 		) -> Poll<Result<BiStreams<Self>, Self::Error>>;
 
-		/// Open a request stream without waiting for stream credit.
-		///
-		/// `None` refuses the request before opening a stream. `Pending` means the stream
-		/// already has credit but its transport header is waiting for send capacity.
-		/// Native QUIC and qmux implement this admission check; browser-backed sessions
-		/// retain their browser's behavior.
-		fn poll_open_request(
-			&self,
-			waiter: &kio::Waiter,
-			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
-		) -> Poll<Result<Option<BiStreams<Self>>, Self::Error>>;
-
 		/// Open a send group at `priority`, or `None` when the transport orders streams by
 		/// their own priority alone.
 		///
@@ -373,6 +394,27 @@ pub mod poll {
 		/// stream holds, so it never pauses one: ingest reads every stream as it arrives and
 		/// sheds what its readers fall behind on.
 		fn receive_window(&self) -> Option<super::ReceiveWindow> {
+			None
+		}
+
+		/// Return the peer's stream credit in `dir`, or `None` when the transport cannot say,
+		/// as a browser's WebTransport cannot.
+		///
+		/// Read whenever an open waits, so the session knows whether the peer's credit is what
+		/// it waits for.
+		fn stream_credit(&self, dir: super::Dir) -> Option<super::StreamCredit> {
+			let _ = dir;
+			None
+		}
+
+		/// Export 32 bytes of keying material from this session's handshake under `label` and
+		/// `context` (RFC 8446 section 7.5), or `None` when the transport has no exporter.
+		///
+		/// Both ends of one session export the same bytes, and no other session does.
+		/// WebTransport derives them per session as its draft specifies, since other sessions
+		/// may share the connection.
+		fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+			let _ = (label, context);
 			None
 		}
 
@@ -529,14 +571,6 @@ pub mod poll {
 			(**self).poll_open_bi(waiter, options)
 		}
 
-		fn poll_open_request(
-			&self,
-			waiter: &kio::Waiter,
-			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
-		) -> Poll<Result<Option<BiStreams<Self>>, Self::Error>> {
-			(**self).poll_open_request(waiter, options)
-		}
-
 		fn send_group(&self, priority: i64) -> Option<<Self::SendStream as SendStream>::Group> {
 			(**self).send_group(priority)
 		}
@@ -587,6 +621,14 @@ pub mod poll {
 
 		fn receive_window(&self) -> Option<super::ReceiveWindow> {
 			(**self).receive_window()
+		}
+
+		fn stream_credit(&self, dir: super::Dir) -> Option<super::StreamCredit> {
+			(**self).stream_credit(dir)
+		}
+
+		fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+			(**self).export_keying_material(label, context)
 		}
 	}
 

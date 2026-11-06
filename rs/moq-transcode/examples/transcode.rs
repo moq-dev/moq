@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
 	// subscribes upstream on demand.
 	let mut following = remote.consume().follow(&source_path, None)?;
 	let source = tokio::select! {
-		resolved = following.available() => resolved.context("source broadcast unavailable")?,
+		resolved = following.available() => resolved.context("source broadcast unavailable")?.context("went offline before serving")?,
 		closed = session.closed() => {
 			closed.context("session failed before the source broadcast was announced")?;
 			anyhow::bail!("session closed before the source broadcast was announced");
@@ -74,11 +74,9 @@ async fn main() -> anyhow::Result<()> {
 	// publishes the rungs and nothing else.
 	config.source = source_path.relative(&output_path).filter(|rel| !rel.is_empty());
 
+	// Held until the transcoder ends: dropping the route withdraws the derivative.
 	let output = publish
-		.create_broadcast(&output_path)
-		.context("failed to create the derivative broadcast")?;
-	output
-		.announce(Default::default())
+		.route(&output_path, moq_net::origin::RouteOptions::default())
 		.context("failed to announce the derivative broadcast")?;
 	tracing::info!(source = %source_path, output = %output_path, "transcoding");
 

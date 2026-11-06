@@ -239,6 +239,21 @@ test("preserves delay through decode and encode", () => {
 	expect(wireTracks[0].delay).toBe(200);
 });
 
+test("rejects a negative delay", () => {
+	const raw = encodeJson({
+		version: "draft-01",
+		tracks: [{ name: "video0", packaging: "loc", isLive: true, role: "video", codec: "avc1.640028", delay: -1 }],
+	});
+	expect(() => decode(raw)).toThrow();
+	expect(() =>
+		encode({
+			tracks: [
+				{ name: "video0", packaging: "loc", isLive: true, role: "video", codec: "avc1.640028", delay: -1 },
+			],
+		}),
+	).toThrow();
+});
+
 test("carries extension root members through decode and encode", () => {
 	// An extension section (here `mpegts`) rides the catalog root untouched, and a
 	// section this build has never heard of survives the same way.

@@ -10,16 +10,15 @@ final announced = connection.announced(
   options: const AnnounceOptions(prefix: 'live/', filter: '*/camera'),
 );
 await for (final event in announced.updates()) {
-  // A restart is a new publisher run at the same path: request it again. A takeover
-  // continues what an earlier route served, like a start.
+  // The listing reports each path once while it stays present, even as its
+  // publisher restarts; `connection.follow(path)` hands out each new run, or
+  // null once it goes offline.
   switch (event) {
-    case AnnounceEventStart(:final announce) ||
-        AnnounceEventRestart(:final announce) ||
-        AnnounceEventTakeover(:final announce):
+    case AnnounceEventPresent(:final announce):
       // Prefix stays origin-relative; captures reports wildcard matches.
       print(announce.prefix);
       print(announce.captures);
-    default:
+    case AnnounceEventAbsent():
   }
 }
 ```
@@ -34,12 +33,12 @@ final server = await Server.listen(
     tlsGenerate: ['localhost'],
   ),
 );
-final publication = server.createBroadcast('live');
-publication.announce(route: AnnounceRoute()); // unannounced broadcasts are invisible
+final route = server.route('live'); // hold it: disposing the route retracts it
 await for (final request in server.requests()) {
   final session = await request.accept();
   print(session.state().connects);
 }
+route.dispose(); // retracts the route
 ```
 
 The package uses `Future` for asynchronous operations and `Stream` for

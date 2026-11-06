@@ -91,7 +91,12 @@ impl Relay {
 	async fn fetch(&mut self, sequence: u64) -> anyhow::Result<String> {
 		self.command("dial", "dialed").await?;
 		let viewer = self.viewers.recv().await.context("no downstream session")?;
-		let remote = viewer.consume().follow("history", None)?.available().await?;
+		let remote = viewer
+			.consume()
+			.follow("history", None)?
+			.available()
+			.await?
+			.context("offline")?;
 		let mut group = remote.track("video")?.fetch_group(sequence, None).await?;
 		let frame = group.read_frame().await?.context("empty group")?;
 		Ok(String::from_utf8(frame.payload.to_vec())?)
@@ -101,7 +106,12 @@ impl Relay {
 	async fn subscribe(&mut self, subscription: Subscription) -> anyhow::Result<moq_net::track::Subscriber> {
 		self.command("dial", "dialed").await?;
 		let viewer = self.viewers.recv().await.context("no downstream session")?;
-		let remote = viewer.consume().follow("history", None)?.available().await?;
+		let remote = viewer
+			.consume()
+			.follow("history", None)?
+			.available()
+			.await?
+			.context("offline")?;
 		Ok(remote.track("video")?.subscribe(subscription).await?)
 	}
 }
@@ -148,8 +158,8 @@ fn groups(range: std::ops::Range<u64>) -> BTreeMap<u64, String> {
 
 async fn relay(version: Version) -> anyhow::Result<()> {
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast("history")?;
-	let track = broadcast.create_track(
+	let broadcast = publisher.route("history", moq_net::origin::RouteOptions::hidden())?;
+	let track = broadcast.broadcast().create_track(
 		"video",
 		Info::default().with_timescale(Timescale::MILLI).with_max_age(None),
 	)?;
@@ -161,7 +171,7 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 		)?;
 		group.finish()?;
 	}
-	broadcast.announce(Default::default())?;
+	broadcast.announce()?;
 	let (upstream, upstream_serve) = listen(version, true, move || publisher.clone()).await?;
 	let (sessions, viewers) = tokio::sync::mpsc::unbounded_channel();
 	let (downstream, downstream_serve) = listen(version, false, move || {

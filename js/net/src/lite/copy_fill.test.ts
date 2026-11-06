@@ -28,8 +28,7 @@ async function peers(alpn: string) {
 		connectSession({ url, transport: pair.client }),
 		acceptSession({ transport: pair.server, url, publish: origin.consume() }),
 	]);
-	const publication = origin.createBroadcast(Path.from("room"));
-	publication.announce();
+	const publication = origin.route(Path.from("room"));
 	const broadcast = publication.broadcast;
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const requests = track.requests();
@@ -195,7 +194,9 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			const first = peer.remote.track("video").subscribe(history);
 			for (let sequence = 0n; sequence < 4n; sequence++)
 				write(peer.track.createGroup(sequence), sequence, "live");
-			expect([...(await take(first, 4)).keys()]).toEqual([0n, 1n, 2n, 3n]);
+			// Before lite-07 a subscription carries no order and is served newest first, so only
+			// the set of groups is fixed.
+			expect(sorted(await take(first, 4)).map(([sequence]) => sequence)).toEqual([0n, 1n, 2n, 3n]);
 
 			// Both caches age out what nobody touched, a prune slice past the window; only the
 			// live edge stays.
@@ -223,6 +224,77 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 	},
 );
 
+// Resolve once nobody reads `group` any more.
+async function unwanted(group: { demand(): { wanted: { peek(): boolean; changed(): Promise<boolean> } } }) {
+	const wanted = group.demand().wanted;
+	while (wanted.peek()) await wanted.changed();
+}
+
+test("copy fill: a filled group stops downloading once every reader left or passed it, read again or not", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connectSession({ url, transport: pair.client }),
+		acceptSession({ transport: pair.server, url, publish: origin.consume() }),
+	]);
+	const publication = origin.route(Path.from("room"));
+	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	write(track.createGroup(1n), 1n, "live");
+	// The archive answers group 0 with one frame and keeps it open.
+	const requests = track.requests();
+	const fills: Fill[] = [];
+	const archived = (async () => {
+		const fill = await requests.requestedFill();
+		if (!fill) throw new Error("no fill");
+		fills.push(fill);
+		const group = fill.accept(0n);
+		group.writeFrame({ payload: enc.encode("old 0"), timestamp: Timestamp.fromMillis(0) });
+		return group;
+	})();
+	const remote = wireOf(client).consume(Path.from("room"));
+	try {
+		// A live reader keeps the copy up, and has read past group 0 before it lands. It never
+		// reads again, so the copy it still buffers is all that is left of it.
+		const reader = remote.track("video").subscribe({ ranges: [{ start: { relative: 0n } }] });
+		expect((await reader.ordered().nextGroup())?.sequence).toBe(1n);
+		const history = remote
+			.track("video")
+			.subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
+		const group = await history.recvGroup();
+		expect(group?.sequence).toBe(0n);
+		expect(dec.decode((await group?.readFrame())?.payload)).toBe("old 0");
+		const source = await archived;
+
+		// A reader that has yet to reach the group keeps it downloading once the first leaves.
+		const behind = remote
+			.track("video")
+			.subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
+		group?.close();
+		history.close();
+		source.writeFrame({ payload: enc.encode("old 0 more"), timestamp: Timestamp.fromMillis(1) });
+		const reached = await behind.recvGroup();
+		expect(reached?.sequence).toBe(0n);
+		expect(dec.decode((await reached?.readFrame())?.payload)).toBe("old 0");
+		expect(dec.decode((await reached?.readFrame())?.payload)).toBe("old 0 more");
+
+		// Once it leaves too, the copy cancels its FETCH, and the publisher's reader goes with it.
+		reached?.close();
+		behind.close();
+		await unwanted(source);
+		expect(source.closed.peek()).toBeUndefined();
+		source.abort(new Error("done"));
+		reader.close();
+	} finally {
+		for (const fill of fills) fill.close();
+		remote.close();
+		requests.close();
+		publication.broadcast.close();
+		client.abort();
+		server.abort();
+		origin.close();
+	}
+});
+
 test("copy fill: a filled group nobody holds any more stops downloading", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
@@ -230,8 +302,7 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 		connectSession({ url, transport: pair.client }),
 		acceptSession({ transport: pair.server, url, publish: origin.consume() }),
 	]);
-	const publication = origin.createBroadcast(Path.from("room"));
-	publication.announce();
+	const publication = origin.route(Path.from("room"));
 	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	write(track.createGroup(1n), 1n, "live");
 	// The archive answers group 0 with one frame and never finishes it.

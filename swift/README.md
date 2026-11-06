@@ -35,14 +35,10 @@ let session = try await client.connect(to: "https://relay.example.com")
 // origin between both sides.
 let announced = try session.consume.announced(prefix: "demos/", filter: "*/camera")
 for try await event in announced {
-    // `.update` reprices a route and `.end` retracts it. A `.restart` is a new
-    // publisher run at the same path: request it again. A `.takeover` continues what an
-    // earlier route served, like a `.start`.
-    let announcement: Announce
-    switch event {
-    case .start(let started), .restart(let started), .takeover(let started, _): announcement = started
-    default: continue
-    }
+    // The listing reports each path once while it stays present, even as its publisher
+    // restarts; `session.consume.follow(path:)` hands out each new run, or nil once it
+    // goes offline.
+    guard case .present(let announcement) = event else { continue }
     // Prefix stays origin-relative; captures reports what * matched.
     print("got broadcast \(announcement.prefix)")
     print("captures \(announcement.captures)")
@@ -61,9 +57,9 @@ try await session.closed()
 To publish through the auto-created origin:
 
 ```swift
-let publication = try session.publish.createBroadcast(path: "my-stream")
-// ... configure tracks on publication.broadcast ...
-try publication.announce() // unannounced broadcasts are invisible
+let route = try session.publish.route(path: "my-stream", hidden: true)
+// ... configure tracks on route.broadcast ...
+try route.announce() // hidden routes are invisible; hold the route while it should stay announced
 ```
 
 Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `session.shutdown()` requests a drain immediately; `try await session.closed()` waits for it and throws on delivery failure. `cancel(code: 0)` remains immediate.
@@ -94,7 +90,8 @@ not found. lite-07 uses independent requests.
 JSON tracks live under the `Json` namespace, mirroring the `moq-json` crate, and carry your own
 `Codable` types with the framing handled for you. Each type wraps a track: a producer takes over a
 `TrackProducer` and advertises it in the broadcast's catalog, and a consumer takes over a
-`TrackConsumer`. You opt into one of three distinct modes: `Json.SnapshotProducer`/`Json.SnapshotConsumer`
+`TrackConsumer`, except `Json.SnapshotConsumer(broadcast:name:priority:)`, which subscribes itself at a
+zero `delay.max`. You opt into one of three distinct modes: `Json.SnapshotProducer`/`Json.SnapshotConsumer`
 (lossy latest-value, a subscriber only sees the newest value), `Json.StreamProducer`/`Json.StreamConsumer`
 (lossless append-log, every record preserved in order), or `Json.WindowProducer`/`Json.WindowConsumer`
 (a sliding window of records a reader can join at any point, not advertised in the catalog). Values encode/decode at the boundary with

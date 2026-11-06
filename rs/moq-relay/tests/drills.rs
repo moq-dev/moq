@@ -222,7 +222,7 @@ impl RelayHost {
 	/// Bind a relay running `config` and wait for it to be ready to accept.
 	async fn start(config: Config) -> Self {
 		// Process-global; every drill in this binary races to be first.
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let _ = rind_rustls::default_provider().unwrap().install_default();
 
 		let runtime = tokio::runtime::Builder::new_multi_thread()
 			.worker_threads(2)
@@ -417,7 +417,8 @@ async fn subscribe(origin: &moq_net::origin::Consumer, path: &str) -> Reader {
 	let broadcast = kio::clock::timeout(TIMEOUT, origin.follow(path, None).unwrap().available())
 		.await
 		.expect("announcement timed out")
-		.expect("origin closed before announcing");
+		.expect("origin closed before announcing")
+		.unwrap();
 
 	let track = broadcast.track(TRACK).expect("track");
 	let groups = kio::clock::timeout(TIMEOUT, track.subscribe(None))
@@ -451,9 +452,13 @@ async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
 	let url = path.url.clone();
 
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let mut track = broadcast
+		.broadcast()
+		.create_track(TRACK, timed())
+		.expect("create track");
 	let publish_session = kio::clock::timeout(
 		TIMEOUT,
 		client(&url)
@@ -583,9 +588,13 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 	let url = path.url.clone();
 
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let mut track = broadcast
+		.broadcast()
+		.create_track(TRACK, timed())
+		.expect("create track");
 	let mut publish_loop = client(&url).publish(publisher.consume()).expect("no connect url");
 
 	let subscriber = moq_tokio::origin::spawn();
@@ -703,12 +712,16 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 	.await
 	.expect("subscriber connect timed out")
 	.expect("subscriber connect failed");
-	let mut announced = subscribed.announced();
+	let mut announced = subscribed.routes();
 
 	let first = moq_tokio::origin::spawn();
-	let broadcast = first.create_broadcast("live").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
+	let broadcast = first
+		.route("live", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let mut track = broadcast
+		.broadcast()
+		.create_track(TRACK, timed())
+		.expect("create track");
 	let first_session = kio::clock::timeout(
 		TIMEOUT,
 		client(&url)
@@ -744,9 +757,13 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 
 	// Restore: the same name, a new publisher, different content.
 	let second = moq_tokio::origin::spawn();
-	let broadcast = second.create_broadcast("live").expect("re-create broadcast");
-	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, timed()).expect("re-create track");
+	let broadcast = second
+		.route("live", moq_net::origin::RouteOptions::default())
+		.expect("re-create broadcast");
+	let mut track = broadcast
+		.broadcast()
+		.create_track(TRACK, timed())
+		.expect("re-create track");
 	let second_session = kio::clock::timeout(
 		TIMEOUT,
 		client(&url)
@@ -780,7 +797,7 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 lanes!(interrupted_publisher_republishes_new_content);
 
 /// Wait for `path` to be announced (`want`) or unannounced (`!want`).
-async fn expect_announce(announced: &mut moq_net::announce::Consumer, path: &str, want: bool, who: &str) {
+async fn expect_announce(announced: &mut moq_net::origin::Routes, path: &str, want: bool, who: &str) {
 	loop {
 		let (update, active) = kio::clock::timeout(TIMEOUT, next_update(announced))
 			.await
@@ -1026,9 +1043,13 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	let subscribe_path = Path::shaped(lane, &edge, bursty(), seed.wrapping_add(2)).await;
 
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let mut track = broadcast
+		.broadcast()
+		.create_track(TRACK, timed())
+		.expect("create track");
 	let url = publish_path.url.clone();
 	let publish_session = kio::clock::timeout(
 		TIMEOUT,
@@ -1044,7 +1065,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 
 	let subscriber = moq_tokio::origin::spawn();
 	let subscribed = subscriber.consume();
-	let mut announced = subscribed.announced();
+	let mut announced = subscribed.routes();
 	let url = subscribe_path.url.clone();
 	let subscribe_session = kio::clock::timeout(
 		TIMEOUT,
@@ -1358,7 +1379,7 @@ async fn no_publisher_never_delivers(lane: Lane) {
 		Lane::Impaired => Duration::from_secs(2),
 	};
 
-	let mut announced = subscribed.announced();
+	let mut announced = subscribed.routes();
 	let mut following = subscribed.follow("live", None).unwrap();
 	let (update, resolved) = tokio::join!(
 		kio::clock::timeout(quiet, next_update(&mut announced)),
@@ -1378,13 +1399,13 @@ async fn no_publisher_never_delivers(lane: Lane) {
 lanes!(no_publisher_never_delivers);
 
 /// The next route and whether it is active.
-async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route)
-		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route)
-		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-		moq_net::announce::Event::End(route) => Some((route, false)),
+		moq_net::origin::RouteEvent::Start(route)
+		| moq_net::origin::RouteEvent::Update(route)
+		| moq_net::origin::RouteEvent::Restart(route)
+		| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 	}
 }
 
@@ -1421,9 +1442,11 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 	)
 	.await;
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast("live").unwrap();
-	let mut track = broadcast.create_track(TRACK, timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let mut track = broadcast.broadcast().create_track(TRACK, timed()).unwrap();
+	broadcast.announce().unwrap();
 	let mut dial = dial();
 	dial.version = vec![version];
 	let publish_url = relay.url();
@@ -1451,6 +1474,7 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 	write_group(&mut track, b"warmup");
 	let remote = kio::clock::timeout(TIMEOUT, consumed.follow("live", None).unwrap().available())
 		.await
+		.unwrap()
 		.unwrap()
 		.unwrap();
 	let mut groups = remote

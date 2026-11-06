@@ -57,8 +57,8 @@ async fn every_lite_version_negotiates_in_setup() {
 		let version: Version = name.parse().unwrap();
 		let versions: Versions = vec![version, "moq-lite-02".parse().unwrap()].into();
 		let (upstream, downstream) = (origin(), origin());
-		let broadcast = upstream.create_broadcast("room").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = upstream.route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+		broadcast.announce().unwrap();
 
 		let (client, server) = dial(versions.clone(), versions, &upstream, &downstream).await;
 		let sessions = [client.unwrap(), server.unwrap()];

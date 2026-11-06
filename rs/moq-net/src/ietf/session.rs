@@ -6,31 +6,18 @@ use crate::{
 	coding::{Decode, DecodeError, Encode, Reader, Stream, Writer},
 	ietf::{self, FetchHeader, RequestId},
 	setup,
-	util::{BoxFuture, TaskSet, err_only},
+	util::TaskSet,
 };
-use futures::FutureExt as _;
+use std::task::{Poll, ready};
 
 use super::{
-	Control, Message, Publisher, Subscriber, Version, active_count, auth, cluster, hidden, max_age, peer,
-	request_update, solicit, subscriber::is_protocol_violation,
+	Control, Message, Namespaces, PublishNamespaces, Publisher, RecvFill, RecvGroup, Subscriber, Version, active_count,
+	auth, cluster, hidden, max_age, peer, request_stream::Reject, request_update, solicit,
+	subscriber::is_protocol_violation,
 };
 
-/// Keep the session's SUBSCRIBE_NAMESPACE requests open as `discovery` decides, each on
-/// a stream from `open`; with no subscribe half, ask nothing. Only an error ends it.
-async fn run_namespaces<F, O>(
-	subscriber: Subscriber,
-	discovery: Option<crate::discovery::Discovery>,
-	open: F,
-) -> Result<(), Error>
-where
-	F: Fn() -> O,
-	O: std::future::Future<Output = Result<Stream<Transport, Version>, Error>>,
-{
-	match discovery {
-		Some(discovery) => subscriber.run_namespaces(discovery, open).await,
-		None => std::future::pending().await,
-	}
-}
+type RecvStream = crate::transport::boxed::RecvStream;
+type SendStream = crate::transport::boxed::SendStream;
 
 /// Everything one moq-transport session needs to start.
 pub struct Config {
@@ -82,9 +69,9 @@ pub struct Config {
 	pub token: Option<crate::setup::Token>,
 
 	/// The peer's SETUP stream, when it was already read before [`start`] (a server
-	/// that gated on the client's path via [`accept_setup`]). It becomes the
+	/// that gated on the client's path via [`SetupAccept`]). It becomes the
 	/// GOAWAY channel; `None` lets the uni loop read the SETUP itself.
-	pub peer_setup_stream: Option<Reader<crate::transport::boxed::RecvStream, crate::Version>>,
+	pub peer_setup_stream: Option<Reader<RecvStream, crate::Version>>,
 
 	/// What that pre-read SETUP declared, so the session does not have to parse it
 	/// twice. `None` when [`Self::peer_setup_stream`] is.
@@ -98,7 +85,7 @@ pub struct Config {
 
 	/// Uni streams that arrived before that pre-read SETUP (see [`PeerSetup::early`]),
 	/// classified by the session before it accepts any more.
-	pub early_unis: Vec<Reader<crate::transport::boxed::RecvStream, crate::Version>>,
+	pub early_unis: Vec<Reader<RecvStream, crate::Version>>,
 
 	/// The extensions our SETUP offers. MoQ Auth is offered only while [`Self::auth`]
 	/// supports it too.
@@ -116,7 +103,10 @@ pub(crate) struct Driver {
 	pub(crate) withdrawal: crate::session::Withdrawal,
 	// Dispatched SUBSCRIBE and FETCH serves still owing the peer data.
 	owed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-	future: BoxFuture<'static, Result<(), Error>>,
+	machine: Machine,
+	/// Keeps the test executor's registrations alive between polls of the future form.
+	#[cfg(test)]
+	park: Box<kio::Park>,
 }
 
 impl Driver {
@@ -124,12 +114,48 @@ impl Driver {
 	pub(crate) fn drained(&self) -> bool {
 		self.withdrawal.drained() && self.owed.load(std::sync::atomic::Ordering::Relaxed) == 0
 	}
+
+	/// Run the session until it ends, with the error that ended it.
+	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.machine.poll(waiter)
+	}
 }
 
+#[cfg(test)]
 impl std::future::Future for Driver {
 	type Output = Result<(), Error>;
-	fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
-		self.future.as_mut().poll(cx)
+	fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+		let Self { machine, park, .. } = &mut *self;
+		machine.poll(park.hold(cx))
+	}
+}
+
+/// Where the session is in its life.
+enum Machine {
+	/// Not polled yet. The session is built on the first poll, since until then the app
+	/// may still take the peer's Auth requests.
+	Start(Box<Launch>),
+	Running(Box<Running>),
+	Done,
+}
+
+impl Machine {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if matches!(self, Self::Start(_)) {
+			let Self::Start(launch) = std::mem::replace(self, Self::Done) else {
+				unreachable!("matched above");
+			};
+			*self = Self::Running(Box::new(launch.run()));
+		}
+		let Self::Running(running) = self else {
+			panic!("session driver polled after it finished");
+		};
+		let res = ready!(running.poll(waiter));
+		let Self::Running(running) = std::mem::replace(self, Self::Done) else {
+			unreachable!("matched above");
+		};
+		running.finish(&res);
+		Poll::Ready(res)
 	}
 }
 
@@ -137,7 +163,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle, Option<cr
 	let Config {
 		runtime,
 		stats,
-		mut session,
+		session,
 		limits,
 		client,
 		publish,
@@ -185,10 +211,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle, Option<cr
 		.map(|origin| crate::discovery::Discovery::new(origin, client, runtime.clone()));
 
 	let withdrawal = crate::session::Withdrawal::default();
-	let withdrawing = withdrawal.clone();
-	let closing = session.closing().clone();
 	let owed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-	let serving = owed.clone();
 
 	// What the peer declared in its SETUP. Seeded now when that stream was already
 	// read (the legacy handshake, or a gated server accept), and filled by the uni
@@ -204,11 +227,105 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle, Option<cr
 	}
 
 	let credential = setup_token.clone();
-	let driver = async move {
-		// Held for the life of the session.
-		let _setup_token = setup_token;
+	let launch = Launch {
+		setup_token,
+		auth,
+		runtime,
+		stats,
+		session,
+		limits,
+		client,
+		publish,
+		subscribe,
+		peer_hop,
+		cost,
+		version,
+		setup: SetupParams {
+			path,
+			authority,
+			token,
+			implementation,
+			extensions,
+		},
+		peer_setup_stream,
+		early_unis,
+		goaway,
+		peer_grant,
+		discovery,
+		withdrawal: withdrawal.clone(),
+		owed: owed.clone(),
+		peer_setup,
+		setup_read,
+	};
+
+	Ok((
+		Driver {
+			withdrawal,
+			owed,
+			machine: Machine::Start(Box::new(launch)),
+			#[cfg(test)]
+			park: Default::default(),
+		},
+		goaway_handle,
+		credential,
+	))
+}
+
+/// What [`start`] hands the session to build on its first poll.
+struct Launch {
+	setup_token: Option<crate::auth::Credential>,
+	auth: crate::auth::Link,
+	runtime: crate::time::Deadlines,
+	stats: crate::stats::Session,
+	session: Transport,
+	limits: crate::session::Limits,
+	client: bool,
+	publish: Option<origin::Consumer>,
+	subscribe: Option<origin::Producer>,
+	peer_hop: Option<Hop>,
+	cost: Option<u64>,
+	version: Version,
+	setup: SetupParams,
+	peer_setup_stream: Option<Reader<RecvStream, crate::Version>>,
+	early_unis: Vec<Reader<RecvStream, crate::Version>>,
+	goaway: crate::goaway::Protocol,
+	peer_grant: crate::auth::Grant,
+	discovery: Option<crate::discovery::Discovery>,
+	withdrawal: crate::session::Withdrawal,
+	owed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+	peer_setup: peer::PeerSetup,
+	setup_read: bool,
+}
+
+impl Launch {
+	fn run(self) -> Running {
+		let Self {
+			setup_token,
+			auth,
+			runtime,
+			stats,
+			session,
+			limits,
+			client,
+			publish,
+			subscribe,
+			peer_hop,
+			cost,
+			version,
+			setup,
+			peer_setup_stream,
+			early_unis,
+			goaway,
+			peer_grant,
+			discovery,
+			withdrawal,
+			owed,
+			peer_setup,
+			setup_read,
+		} = self;
+
 		// Released on any exit, so nothing waits on a token the session will never answer.
-		let _auth_close = AuthClose(auth.clone());
+		let auth_close = AuthClose(auth.clone());
 		// Decided once, before any Auth request can be accepted: the app took the requests
 		// before running the driver, or the session answers itself.
 		let _ = auth.acceptor();
@@ -234,223 +351,279 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle, Option<cr
 		let announces =
 			crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
 
-		let res = {
-			let control = Control::new(client);
-			// Send SETUP and retain its writer for the session's lifetime. Only a failure
-			// ends the session; the other branches report how it closed.
-			let setup = err_only(run_setup(
-				session.clone(),
-				version,
-				path,
-				authority,
-				token,
-				implementation,
-				self_origin,
-				cost,
-				crate::setup::Extensions {
-					auth: extensions.auth && auth.supported(),
-					..extensions
+		let control = Control::new(client);
+		// Send SETUP and retain its writer for the session's lifetime. Only a failure
+		// ends the session; the other halves report how it closed.
+		let send_setup = SendSetup::new(
+			session.clone(),
+			version,
+			SetupParams {
+				extensions: crate::setup::Extensions {
+					auth: setup.extensions.auth && auth.supported(),
+					..setup.extensions
 				},
+				..setup
+			},
+			self_origin,
+			cost,
+			goaway.clone(),
+			control.clone(),
+			stats.clone(),
+		);
+
+		let mut publisher = Publisher::new(
+			runtime.clone(),
+			session.clone(),
+			publish,
+			control.clone(),
+			peer_hop,
+			peer_setup.clone(),
+			version,
+		)
+		.with_auth(auth.clone());
+		let (tasks, task_set) = TaskSet::new();
+		publisher.withdrawal = withdrawal;
+		publisher.owed = owed;
+		publisher.subscriptions = subscriptions;
+
+		// Only the dialing side fails loud on a publication outside its grant: a
+		// server's publish origin is everything the peer may read, not what it
+		// intends to push.
+		let enforce = client.then(|| EnforceGrant::new(auth.clone(), publisher.clone(), session.clone()));
+
+		let mut subscriber = Subscriber::new(
+			runtime.clone(),
+			session.clone(),
+			subscribe,
+			control.clone(),
+			peer_hop,
+			peer_setup.clone(),
+			self_origin,
+			cost,
+			version,
+			tasks,
+			goaway.going_away.clone(),
+		)
+		.with_auth(auth.clone())
+		.with_solicit(setup.extensions.solicit);
+
+		// Our tokens, one Auth request each, once the peer's SETUP negotiates it.
+		let present = auth::Presenting::new(
+			runtime.clone(),
+			session.clone(),
+			control.clone(),
+			auth.clone(),
+			peer_setup.clone(),
+			version,
+			stats.clone(),
+		);
+		// Only a side that offered MoQ Auth answers the peer's Auth requests: one that
+		// arrives otherwise falls through to the protocol violation in `Dispatch`.
+		let serve = auth.supported().then(|| auth::Serve {
+			runtime: runtime.clone(),
+			handle: auth.clone(),
+			peer_grant,
+		});
+		subscriber.announces = announces;
+
+		// When the peer's SETUP was pre-read (a gated server accept), monitor GOAWAY on
+		// that stream here; otherwise `Unis` does it when the SETUP arrives on the wire.
+		let goaway_recv = peer_setup_stream.map(|reader| {
+			ReadGoaways::new(
+				reader.with_stats(&stats).with_version(version),
+				version,
+				client,
 				goaway.clone(),
-				control.clone(),
-				stats.clone(),
-			));
-
-			let mut publisher = Publisher::new(
-				runtime.clone(),
-				session.clone(),
-				publish,
-				control.clone(),
-				peer_hop,
-				peer_setup.clone(),
-				version,
 			)
-			.with_auth(auth.clone());
-			let (tasks, mut task_set) = TaskSet::new();
-			publisher.withdrawal = withdrawing.clone();
-			publisher.owed = serving.clone();
-			publisher.subscriptions = subscriptions;
+		});
 
-			// Only the dialing side fails loud on a publication outside its grant: a
-			// server's publish origin is everything the peer may read, not what it
-			// intends to push.
-			let enforce = {
-				let auth = auth.clone();
-				let publisher = publisher.clone();
-				let session = session.clone();
-				async move {
-					match client {
-						true => enforce_grant(auth, publisher, session).await,
-						false => std::future::pending().await,
-					}
-				}
-			};
-
-			let mut subscriber = Subscriber::new(
-				runtime.clone(),
-				session.clone(),
-				subscribe,
-				control.clone(),
-				peer_hop,
-				peer_setup.clone(),
-				self_origin,
-				cost,
+		let unis = Unis::new(
+			session.clone(),
+			subscriber.clone(),
+			UniSetup {
+				peer: Some(peer_setup.clone()),
+				read: setup_read,
+				early: early_unis,
+				client,
 				version,
-				tasks,
-				goaway.going_away.clone(),
-			)
-			.with_auth(auth.clone())
-			.with_solicit(extensions.solicit);
+				goaway,
+			},
+		);
+		let publish_namespaces = PublishNamespaces::new(publisher.clone());
+		let dispatch = Dispatch::new(
+			session.clone(),
+			publisher,
+			subscriber.clone(),
+			peer_setup,
+			serve,
+			version,
+		);
+		// A transport without datagrams never delivers one.
+		let datagrams = (session.max_datagram_size() != 0).then(|| Datagrams {
+			session: session.clone(),
+			subscriber: subscriber.clone(),
+			budget: kio::coop::Budget::new(32),
+			charged: false,
+		});
+		// Keep the session's SUBSCRIBE_NAMESPACE requests open as discovery decides, each on
+		// its own stream; with no subscribe half, ask nothing.
+		let namespaces = discovery.map(|discovery| Namespaces::new(subscriber.clone(), discovery));
 
-			// Our tokens, one Auth request each, once the peer's SETUP negotiates it.
-			let present = auth::run_present(
-				runtime.clone(),
-				session.clone(),
-				control.clone(),
-				auth.clone(),
-				peer_setup.clone(),
-				version,
-				stats.clone(),
-			);
-			// Only a side that offered MoQ Auth answers the peer's Auth requests: one that
-			// arrives otherwise falls through to the protocol violation in `run_dispatch`.
-			let serve = auth.supported().then(|| auth::Serve {
-				runtime: runtime.clone(),
-				handle: auth.clone(),
-				peer_grant,
-			});
-			subscriber.announces = announces;
+		Running {
+			race: Race {
+				namespaces,
+				publish_namespaces: Some(publish_namespaces),
+				setup: Some(send_setup),
+				enforce,
+				present: Some(present),
+				goaway: goaway_recv,
+				datagrams,
+				dispatch: Some(dispatch),
+				unis,
+				subscriber,
+				tasks: task_set,
+				session,
+			},
+			ending: None,
+			auth,
+			auth_close,
+			setup_token,
+		}
+	}
+}
 
-			// When the peer's SETUP was pre-read (a gated server accept), monitor
-			// GOAWAY on that stream here; otherwise `run_unis` does it when the SETUP
-			// arrives on the wire.
-			let goaway_recv = {
-				let goaway = goaway.clone();
-				let stats = stats.clone();
-				async move {
-					match peer_setup_stream {
-						Some(reader) => {
-							run_goaway(reader.with_stats(&stats).with_version(version), version, client, goaway).await
-						}
-						None => std::future::pending().await,
-					}
-				}
-			};
+/// A running session: its halves race until one fails or the task set drains.
+struct Running {
+	race: Race,
+	/// How the race ended, held while what already arrived drains.
+	ending: Option<Result<(), Error>>,
+	auth: crate::auth::Link,
+	auth_close: AuthClose,
+	/// Held for the life of the session.
+	setup_token: Option<crate::auth::Credential>,
+}
 
-			// Every half only ends the session on error (err_only parks on clean
-			// completion); `setup` never resolves (it holds the stream open) and the
-			// task set draining is the one clean exit.
-			let mut unis = Unis::new(
-				session.clone(),
-				subscriber.clone(),
-				UniSetup {
-					peer: Some(peer_setup.clone()),
-					read: setup_read,
-					early: early_unis,
-					client,
-					version,
-					goaway,
-				},
-			);
-			let mut dispatch = std::pin::pin!(err_only(run_dispatch(
-				session.clone(),
-				publisher.clone(),
-				subscriber.clone(),
-				peer_setup.clone(),
-				serve,
-				version
-			)));
-			let mut datagrams = std::pin::pin!(err_only(run_datagrams(session.clone(), subscriber.clone())));
-			let mut goaway_recv = std::pin::pin!(err_only(goaway_recv));
-			let mut present = std::pin::pin!(err_only(present));
-			let mut enforce = std::pin::pin!(err_only(enforce));
-			let mut setup = std::pin::pin!(setup);
-			// Unsolicited PUBLISH_NAMESPACE unless the peer requires solicitation;
-			// see `Publisher::run_publish_namespaces`.
-			let mut pub_ns_run = std::pin::pin!(err_only(publisher.clone().run_publish_namespaces()));
-			let sub_ns_run = run_namespaces(subscriber.clone(), discovery, {
-				let session = session.clone();
-				move || {
-					let mut session = session.clone();
-					async move { Stream::open_request(&mut session, version).await }
-				}
-			});
-			let mut sub_ns_run = std::pin::pin!(err_only(sub_ns_run));
-
-			let res = kio::wait(|waiter| {
-				use std::task::Poll;
-				if let Poll::Ready(res) = unis.poll(waiter) {
-					return Poll::Ready(res);
-				}
-				if let Poll::Ready(err) = waiter.poll_future(dispatch.as_mut()) {
-					return Poll::Ready(Err(err));
-				}
-				if let Poll::Ready(err) = waiter.poll_future(datagrams.as_mut()) {
-					return Poll::Ready(Err(err));
-				}
-				if let Poll::Ready(err) = waiter.poll_future(goaway_recv.as_mut()) {
-					return Poll::Ready(Err(err));
-				}
-				// Malformed replies are session-fatal, unlike token refusals.
-				if let Poll::Ready(err) = waiter.poll_future(present.as_mut()) {
-					return Poll::Ready(Err(err));
-				}
-				if let Poll::Ready(err) = waiter.poll_future(enforce.as_mut()) {
-					return Poll::Ready(Err(err));
-				}
-				if let Poll::Ready(err) = waiter.poll_future(setup.as_mut()) {
-					return Poll::Ready(Err(err));
-				}
-				if task_set.poll(waiter).is_ready() {
-					return Poll::Ready(Ok(()));
-				}
-				if let Poll::Ready(err) = waiter.poll_future(sub_ns_run.as_mut()) {
-					return Poll::Ready(Err(err));
-				}
-				if let Poll::Ready(err) = waiter.poll_future(pub_ns_run.as_mut()) {
-					return Poll::Ready(Err(err));
-				}
-				Poll::Pending
-			})
-			.await;
-			close(&mut session, &res);
-			// Before this arm's Auth serve tasks drop, so each settles with the
-			// session's error rather than a bare cancel.
-			auth.close(match &res {
+impl Running {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if self.ending.is_none() {
+			let res = ready!(self.race.poll(waiter));
+			close(&mut self.race.session, &res);
+			// Before the Auth serve tasks drop, so each settles with the session's error
+			// rather than a bare cancel.
+			self.auth.close(match &res {
 				Ok(()) => Error::Cancel,
 				Err(err) => err.clone(),
 			});
-			// Whichever side closed it, read what already arrived.
-			kio::wait(|waiter| unis.poll_drain(waiter)).await;
-			// Closed cleanly by dropping or draining: readers see what the peer's clean
-			// close would have shown them.
-			if closing.is_local() {
-				subscriber.abort(&Error::Session(SessionError::Cancel));
-			} else if let Err(err) = &res {
-				// Every track this session was receiving ends with its error.
-				subscriber.abort(err);
-			}
-			res
-		};
+			self.ending = Some(res);
+		}
+		// Whichever side closed it, read what already arrived.
+		ready!(self.race.unis.poll_drain(waiter));
+		let res = self.ending.take().expect("draining an ended session");
+		// Closed cleanly by dropping or draining: readers see what the peer's clean
+		// close would have shown them.
+		if self.race.session.closing().is_local() {
+			self.race.subscriber.abort(&Error::Session(SessionError::Cancel));
+		} else if let Err(err) = &res {
+			// Every track this session was receiving ends with its error.
+			self.race.subscriber.abort(err);
+		}
+		Poll::Ready(res)
+	}
 
-		auth.close(match &res {
+	/// Drop the halves, then release the auth handle and our connection credential.
+	fn finish(self: Box<Self>, res: &Result<(), Error>) {
+		let Self {
+			race,
+			auth,
+			auth_close,
+			setup_token,
+			..
+		} = *self;
+		drop(race);
+		auth.close(match res {
 			Ok(()) => Error::Cancel,
 			Err(err) => err.clone(),
 		});
-
-		res
+		drop(auth_close);
+		drop(setup_token);
 	}
-	.boxed();
+}
 
-	Ok((
-		Driver {
-			withdrawal,
-			owed,
-			future: driver,
-		},
-		goaway_handle,
-		credential,
-	))
+/// The halves of a running session. Every half but the task set ends the session only by
+/// failing: one that finishes cleanly drops out, and the task set draining is the one clean
+/// exit. Fields drop in declaration order: the halves in the reverse of their poll order,
+/// then the uni streams, the subscriber and the task set.
+struct Race {
+	/// Our SUBSCRIBE_NAMESPACE requests; `None` without a subscribe half.
+	namespaces: Option<Namespaces>,
+	/// Unsolicited PUBLISH_NAMESPACE unless the peer requires solicitation.
+	publish_namespaces: Option<PublishNamespaces>,
+	/// Never finishes while the session lives: it holds our SETUP stream open.
+	setup: Option<SendSetup>,
+	/// `None` on a server, which publishes whatever the peer may read.
+	enforce: Option<EnforceGrant>,
+	present: Option<auth::Presenting>,
+	/// GOAWAY on a pre-read SETUP stream; `None` when `unis` reads the SETUP.
+	goaway: Option<ReadGoaways<RecvStream>>,
+	datagrams: Option<Datagrams>,
+	dispatch: Option<Dispatch>,
+	unis: Unis,
+	subscriber: Subscriber,
+	tasks: TaskSet,
+	session: Transport,
+}
+
+impl Race {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if let Poll::Ready(res) = self.unis.poll(waiter) {
+			return Poll::Ready(res);
+		}
+		if let Poll::Ready(err) = poll_failed(&mut self.dispatch, |dispatch| dispatch.poll(waiter).map(Err)) {
+			return Poll::Ready(Err(err));
+		}
+		if let Poll::Ready(err) = poll_failed(&mut self.datagrams, |datagrams| datagrams.poll(waiter)) {
+			return Poll::Ready(Err(err));
+		}
+		if let Poll::Ready(err) = poll_failed(&mut self.goaway, |goaway| {
+			goaway.poll(waiter).map(|err| Err(control_stream_error(err)))
+		}) {
+			return Poll::Ready(Err(err));
+		}
+		// Malformed replies are session-fatal, unlike token refusals.
+		if let Poll::Ready(err) = poll_failed(&mut self.present, |present| present.poll(waiter)) {
+			return Poll::Ready(Err(err));
+		}
+		if let Poll::Ready(err) = poll_failed(&mut self.enforce, |enforce| enforce.poll(waiter)) {
+			return Poll::Ready(Err(err));
+		}
+		if let Poll::Ready(err) = poll_failed(&mut self.setup, |setup| setup.poll(waiter)) {
+			return Poll::Ready(Err(err));
+		}
+		if self.tasks.poll(waiter).is_ready() {
+			return Poll::Ready(Ok(()));
+		}
+		if let Poll::Ready(err) = poll_failed(&mut self.namespaces, |namespaces| namespaces.poll(waiter).map(Err)) {
+			return Poll::Ready(Err(err));
+		}
+		if let Poll::Ready(err) = poll_failed(&mut self.publish_namespaces, |publish| publish.poll(waiter)) {
+			return Poll::Ready(Err(err));
+		}
+		Poll::Pending
+	}
+}
+
+/// Poll a half of the race, `Ready` only with its failure. A half that finishes, either
+/// way, drops right away and is never polled again.
+fn poll_failed<T>(half: &mut Option<T>, poll: impl FnOnce(&mut T) -> Poll<Result<(), Error>>) -> Poll<Error> {
+	let Some(running) = half else {
+		return Poll::Pending;
+	};
+	let res = ready!(poll(running));
+	*half = None;
+	match res {
+		Ok(()) => Poll::Pending,
+		Err(err) => Poll::Ready(err),
+	}
 }
 
 /// Close the session over the driver's result, while its streams are still open.
@@ -481,7 +654,7 @@ fn close(session: &mut Transport, res: &Result<(), Error>) {
 /// What a peer's SETUP told us, beyond the stream it arrived on.
 pub struct PeerSetup {
 	/// The SETUP stream, which becomes the GOAWAY channel.
-	pub stream: Reader<crate::transport::boxed::RecvStream, crate::Version>,
+	pub stream: Reader<RecvStream, crate::Version>,
 
 	/// The SETUP's encoded size, counted once the session's stats are known.
 	pub size: usize,
@@ -492,7 +665,7 @@ pub struct PeerSetup {
 	/// Uni streams that arrived before the SETUP, type peeked but unread. The drafts say
 	/// to buffer early data until the control streams arrive, so the session classifies
 	/// these once it starts. QUIC stream credit bounds how many can pile up.
-	pub early: Vec<Reader<crate::transport::boxed::RecvStream, crate::Version>>,
+	pub early: Vec<Reader<RecvStream, crate::Version>>,
 }
 
 /// The Hop ID this session declares and detects loops against.
@@ -507,53 +680,105 @@ fn self_origin(publish: Option<&origin::Consumer>, subscribe: Option<&origin::Pr
 		.unwrap_or_else(Hop::random)
 }
 
-/// Server: read the peer's SETUP off its uni stream before starting the
-/// session, returning that stream plus what it declared.
+/// Server: reads the peer's SETUP off its uni stream before starting the
+/// session, resolving to that stream plus what it declared.
 ///
-/// Blocks on the peer's Setup Stream. Any other uni stream racing ahead of it (padding,
+/// Waits for the peer's Setup Stream. Any other uni stream racing ahead of it (padding,
 /// or group data for a subscription the peer already holds) is held in
 /// [`PeerSetup::early`] for the session to classify. Pass the returned reader to
 /// [`start`] as its `peer_setup_stream` so GOAWAY monitoring continues without
 /// re-reading it.
-pub async fn accept_setup(session: &mut Transport, version: Version) -> Result<PeerSetup, Error> {
-	let outer_version = crate::Version::Ietf(version);
-	let mut early = Vec::new();
-
+pub struct SetupAccept {
+	version: Version,
 	// Each stream racing ahead of SETUP is held, so a peer opening them at once must not
 	// hold the task for its whole MAX_STREAMS credit.
-	let mut budget = kio::coop::Budget::new(32);
-	loop {
-		kio::wait(|waiter| budget.poll_yield(waiter)).await;
-		let recv = session.accept_uni().await.map_err(Error::from_transport)?;
-		let mut reader: Reader<crate::transport::boxed::RecvStream, crate::Version> = Reader::new(recv, outer_version);
+	budget: kio::coop::Budget,
+	early: Vec<Reader<crate::transport::boxed::RecvStream, crate::Version>>,
+	step: SetupStep,
+}
 
-		let kind = match reader.varint_peek().await {
-			Ok(kind) => kind,
-			Err(err) if died_before_header(&err) => {
-				tracing::debug!(%err, "dropping uni stream that died before its type");
-				continue;
-			}
-			Err(err) => return Err(err),
-		};
-		if kind != setup::SETUP {
-			early.push(reader);
-			continue;
+/// Where [`SetupAccept`] waits. Streams are taken one at a time: the next is accepted only
+/// once the last one's type has arrived.
+enum SetupStep {
+	/// Spending a pass of the budget before accepting another stream.
+	Yield,
+	/// Waiting for the peer's next uni stream.
+	Accept,
+	/// Waiting for this stream's type.
+	Peek(Reader<crate::transport::boxed::RecvStream, crate::Version>),
+	/// Waiting for the whole SETUP on its stream.
+	Decode(Reader<crate::transport::boxed::RecvStream, crate::Version>),
+}
+
+impl SetupAccept {
+	/// Start waiting for a `version` peer's SETUP.
+	pub fn new(version: Version) -> Self {
+		Self {
+			version,
+			budget: kio::coop::Budget::new(32),
+			early: Vec::new(),
+			step: SetupStep::Yield,
 		}
-
-		reader.set_priority(crate::priority::RECV_CONTROL);
-		let (setup, size) = reader.decode_sized::<setup::Setup>().await?;
-		let options = decode_peer_setup(&setup.parameters, version, false)?;
-		if session.address() == crate::transport::Address::Uri && options.path.is_some() {
-			return Err(Error::ProtocolViolation);
-		}
-
-		return Ok(PeerSetup {
-			stream: reader,
-			size,
-			options,
-			early,
-		});
 	}
+
+	/// The peer's SETUP, with the streams that raced ahead of it.
+	pub fn poll(&mut self, session: &Transport, waiter: &kio::Waiter) -> Poll<Result<PeerSetup, Error>> {
+		loop {
+			match &mut self.step {
+				SetupStep::Yield => {
+					ready!(self.budget.poll_yield(waiter));
+					self.step = SetupStep::Accept;
+				}
+				SetupStep::Accept => {
+					let recv = ready!(session.poll_accept_uni(waiter)).map_err(Error::from_transport)?;
+					self.step = SetupStep::Peek(Reader::new(recv, crate::Version::Ietf(self.version)));
+				}
+				SetupStep::Peek(reader) => {
+					let kind = match ready!(reader.poll_varint_peek(waiter)) {
+						Ok(kind) => kind,
+						Err(err) if died_before_header(&err) => {
+							tracing::debug!(%err, "dropping uni stream that died before its type");
+							self.step = SetupStep::Yield;
+							continue;
+						}
+						Err(err) => return Poll::Ready(Err(err)),
+					};
+					let SetupStep::Peek(mut reader) = std::mem::replace(&mut self.step, SetupStep::Yield) else {
+						unreachable!("matched above");
+					};
+					if kind != setup::SETUP {
+						self.early.push(reader);
+						continue;
+					}
+					reader.set_priority(crate::priority::RECV_CONTROL);
+					self.step = SetupStep::Decode(reader);
+				}
+				SetupStep::Decode(reader) => {
+					let (setup, size) = ready!(reader.poll_decode_sized::<setup::Setup>(waiter))?;
+					let options = decode_peer_setup(&setup.parameters, self.version, false)?;
+					if session.address() == crate::transport::Address::Uri && options.path.is_some() {
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
+					let SetupStep::Decode(stream) = std::mem::replace(&mut self.step, SetupStep::Yield) else {
+						unreachable!("matched above");
+					};
+					return Poll::Ready(Ok(PeerSetup {
+						stream,
+						size,
+						options,
+						early: std::mem::take(&mut self.early),
+					}));
+				}
+			}
+		}
+	}
+}
+
+/// [`SetupAccept`] as a future, for tests.
+#[cfg(test)]
+pub(crate) async fn accept_setup(session: &Transport, version: Version) -> Result<PeerSetup, Error> {
+	let mut accept = SetupAccept::new(version);
+	kio::wait(|waiter| accept.poll(session, waiter)).await
 }
 
 /// What a peer's SETUP parameters say, parsed by [`decode_peer_setup`] for every caller.
@@ -610,125 +835,204 @@ pub(crate) fn decode_peer_setup(parameters: &[u8], version: Version, client: boo
 	})
 }
 
-/// Send our SETUP on a uni stream and keep it alive: this stream is also our GOAWAY
-/// channel, so a fired drain trigger encodes the GOAWAY here.
-///
-/// `path` is the request path we advertise (clients on URL-less transports); a
-/// server passes `None`, as it does for `token`, the client's connection credential.
-/// `self_origin` and `cost` are the MoQ Cluster options, which
-/// declare our identity and (client-only) what this link costs to cross. `extensions`
-/// names the other extensions we offer.
-#[expect(
-	clippy::too_many_arguments,
-	reason = "private plumbing; a single-use argument struct would only rename the parameters"
-)]
-async fn run_setup(
-	session: Transport,
-	version: Version,
+/// What our SETUP declares beyond the MoQ Cluster options.
+struct SetupParams {
+	/// The request path we advertise (clients on URL-less transports); a server passes `None`.
 	path: Option<String>,
 	authority: Option<String>,
+	/// The client's connection credential; a server passes `None`.
 	token: Option<crate::setup::Token>,
 	implementation: Option<String>,
+	/// The other extensions we offer.
+	extensions: crate::setup::Extensions,
+}
+
+/// Sends our SETUP on a uni stream and keeps it alive: this stream is also our GOAWAY
+/// channel, so a fired drain trigger encodes the GOAWAY here.
+///
+/// `self_origin` and `cost` are the MoQ Cluster options, which declare our identity and
+/// (client-only) what this link costs to cross.
+struct SendSetup {
+	session: Transport,
+	version: Version,
 	self_origin: Hop,
 	cost: Option<u64>,
-	extensions: crate::setup::Extensions,
 	goaway: crate::goaway::Protocol,
 	control: Control,
 	stats: crate::stats::Session,
-) -> Result<(), Error> {
-	let outer_version = crate::Version::Ietf(version);
+	step: SetupSend,
+}
 
-	let send = session
-		.open_uni(Default::default())
-		.await
-		.map_err(Error::from_transport)?;
-	let mut writer: Writer<crate::transport::boxed::SendStream, crate::Version> =
-		Writer::new(send, outer_version).with_stats(&stats);
+/// Where [`SendSetup`] waits.
+enum SetupSend {
+	/// Waiting for credit to open the stream.
+	Open(crate::transport::open::Open, SetupParams),
+	/// Flushing the SETUP.
+	Send(Writer<SendStream, crate::Version>),
+	/// Holding the stream until the session closes or the drain trigger fires.
+	Hold {
+		writer: Writer<SendStream, crate::Version>,
+		/// The trigger resolved without a GOAWAY: the session dropped without draining.
+		untriggered: bool,
+	},
+	/// Flushing our GOAWAY.
+	GoAway(Writer<SendStream, Version>),
+	/// Holding the stream after our GOAWAY until the session closes.
+	Linger(Writer<SendStream, Version>),
+	/// Between steps.
+	Done,
+}
 
-	let mut parameters = ietf::Parameters::default();
-	if let Some(implementation) = implementation {
-		parameters.set_bytes(ietf::ParameterBytes::Implementation, implementation.into_bytes());
-	}
-	if let Some(path) = path {
-		parameters.set_bytes(ietf::ParameterBytes::Path, path.into_bytes());
-	}
-	if let Some(authority) = authority {
-		parameters.set_bytes(ietf::ParameterBytes::Authority, authority.into_bytes());
-	}
-	if let Some(token) = &token {
-		super::token::into_setup(&mut parameters, token, version)?;
-	}
-	cluster::peer_into_setup(&mut parameters, self_origin, cost);
-	if extensions.solicit {
-		solicit::into_setup(&mut parameters, version);
-	}
-	hidden::into_setup(&mut parameters, version);
-	max_age::into_setup(&mut parameters, version);
-	if extensions.auth {
-		auth::into_setup(&mut parameters);
-	}
-	active_count::into_setup(&mut parameters);
-	request_update::into_setup(&mut parameters, version);
-	super::flate::into_setup(&mut parameters);
-	let parameters = parameters.encode_bytes(version)?;
-
-	writer
-		.encode(&setup::Setup { parameters })
-		.await
-		.map_err(control_stream_error)?;
-
-	// Hold the writer alive until the session closes, sending a GOAWAY if the
-	// drain trigger fires meanwhile. The trigger resolves `None` when the session
-	// drops without draining; keep holding either way, since a FIN mid-session is
-	// a protocol violation the peer closes over.
-	let mut untriggered = false;
-	let payload = kio::wait(|waiter| {
-		if session.poll_closed(waiter).is_ready() {
-			return std::task::Poll::Ready(Ok(None));
+impl SendSetup {
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "private plumbing; a single-use argument struct would only rename the parameters"
+	)]
+	fn new(
+		session: Transport,
+		version: Version,
+		params: SetupParams,
+		self_origin: Hop,
+		cost: Option<u64>,
+		goaway: crate::goaway::Protocol,
+		control: Control,
+		stats: crate::stats::Session,
+	) -> Self {
+		Self {
+			session,
+			version,
+			self_origin,
+			cost,
+			goaway,
+			control,
+			stats,
+			step: SetupSend::Open(Default::default(), params),
 		}
-		if writer.poll_closed(waiter).is_ready() {
-			return std::task::Poll::Ready(Err(Error::ProtocolViolation));
+	}
+
+	/// Encode what our SETUP declares.
+	fn parameters(&self, params: SetupParams) -> Result<bytes::Bytes, Error> {
+		let version = self.version;
+		let mut parameters = ietf::Parameters::default();
+		if let Some(implementation) = params.implementation {
+			parameters.set_bytes(ietf::ParameterBytes::Implementation, implementation.into_bytes());
 		}
-		if !untriggered {
-			match goaway.poll_triggered(waiter) {
-				std::task::Poll::Ready(Some(payload)) => return std::task::Poll::Ready(Ok(Some(payload))),
-				std::task::Poll::Ready(None) => untriggered = true,
-				std::task::Poll::Pending => {}
+		if let Some(path) = params.path {
+			parameters.set_bytes(ietf::ParameterBytes::Path, path.into_bytes());
+		}
+		if let Some(authority) = params.authority {
+			parameters.set_bytes(ietf::ParameterBytes::Authority, authority.into_bytes());
+		}
+		if let Some(token) = &params.token {
+			super::token::into_setup(&mut parameters, token, version)?;
+		}
+		cluster::peer_into_setup(&mut parameters, self.self_origin, self.cost);
+		if params.extensions.solicit {
+			solicit::into_setup(&mut parameters, version);
+		}
+		hidden::into_setup(&mut parameters, version);
+		max_age::into_setup(&mut parameters, version);
+		if params.extensions.auth {
+			auth::into_setup(&mut parameters);
+		}
+		active_count::into_setup(&mut parameters);
+		request_update::into_setup(&mut parameters, version);
+		super::flate::into_setup(&mut parameters);
+		Ok(parameters.encode_bytes(version)?)
+	}
+
+	/// `Ready` once the session closed with the stream held, or with why it broke.
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		loop {
+			match &mut self.step {
+				SetupSend::Open(open, _) => {
+					let send = ready!(self.session.poll_open_uni(open, waiter, Default::default()))
+						.map_err(Error::from_transport)?;
+					let SetupSend::Open(_, params) = std::mem::replace(&mut self.step, SetupSend::Done) else {
+						unreachable!("matched above");
+					};
+					let mut writer: Writer<SendStream, crate::Version> =
+						Writer::new(send, crate::Version::Ietf(self.version)).with_stats(&self.stats);
+					let parameters = self.parameters(params)?;
+					writer
+						.buffer(&setup::Setup { parameters })
+						.map_err(control_stream_error)?;
+					self.step = SetupSend::Send(writer);
+				}
+				SetupSend::Send(writer) => {
+					ready!(writer.poll_flush(waiter)).map_err(control_stream_error)?;
+					let SetupSend::Send(writer) = std::mem::replace(&mut self.step, SetupSend::Done) else {
+						unreachable!("matched above");
+					};
+					self.step = SetupSend::Hold {
+						writer,
+						untriggered: false,
+					};
+				}
+				// Hold the writer alive until the session closes, sending a GOAWAY if the
+				// drain trigger fires meanwhile. The trigger resolves `None` when the session
+				// drops without draining; keep holding either way, since a FIN mid-session is
+				// a protocol violation the peer closes over.
+				SetupSend::Hold { writer, untriggered } => {
+					if self.session.poll_closed(waiter).is_ready() {
+						writer.finish().ok();
+						return Poll::Ready(Ok(()));
+					}
+					if writer.poll_closed(waiter).is_ready() {
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
+					if *untriggered {
+						return Poll::Pending;
+					}
+					let payload = match ready!(self.goaway.poll_triggered(waiter)) {
+						Some(payload) => payload,
+						None => {
+							*untriggered = true;
+							return Poll::Pending;
+						}
+					};
+					let SetupSend::Hold { writer, .. } = std::mem::replace(&mut self.step, SetupSend::Done) else {
+						unreachable!("matched above");
+					};
+
+					let timeout_ms = payload.timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
+					let msg = ietf::GoAway {
+						new_session_uri: std::borrow::Cow::Borrowed(payload.uri.as_ref()),
+						timeout: timeout_ms,
+						request_id: (self.version == Version::Draft18)
+							.then(|| self.control.goaway())
+							.transpose()?,
+					};
+
+					// Frame as [type_id varint][size u16][body], the same shape as the
+					// control-stream messages this channel otherwise carries.
+					let mut writer = writer.with_version(self.version);
+					writer
+						.buffer_message(ietf::GoAway::ID, &msg)
+						.map_err(control_stream_error)?;
+					self.step = SetupSend::GoAway(writer);
+				}
+				SetupSend::GoAway(writer) => {
+					ready!(writer.poll_flush(waiter)).map_err(control_stream_error)?;
+					let SetupSend::GoAway(writer) = std::mem::replace(&mut self.step, SetupSend::Done) else {
+						unreachable!("matched above");
+					};
+					self.step = SetupSend::Linger(writer);
+				}
+				SetupSend::Linger(writer) => {
+					if self.session.poll_closed(waiter).is_ready() {
+						writer.finish().ok();
+						return Poll::Ready(Ok(()));
+					}
+					if writer.poll_closed(waiter).is_ready() {
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
+					return Poll::Pending;
+				}
+				SetupSend::Done => unreachable!("polled after it finished"),
 			}
 		}
-		std::task::Poll::Pending
-	})
-	.await?;
-
-	if let Some(payload) = payload {
-		let timeout_ms = payload.timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
-		let msg = ietf::GoAway {
-			new_session_uri: std::borrow::Cow::Borrowed(payload.uri.as_ref()),
-			timeout: timeout_ms,
-			request_id: (version == Version::Draft18).then(|| control.goaway()).transpose()?,
-		};
-
-		// Frame as [type_id varint][size u16][body], the same shape as the
-		// control-stream messages this channel otherwise carries.
-		let mut writer = writer.with_version(version);
-		writer.encode_message(&msg).await.map_err(control_stream_error)?;
-		let mut closed = std::pin::pin!(session.closed());
-		kio::wait(|waiter| {
-			if waiter.poll_future(closed.as_mut()).is_ready() {
-				return std::task::Poll::Ready(Ok(()));
-			}
-			if writer.poll_closed(waiter).is_ready() {
-				return std::task::Poll::Ready(Err(Error::ProtocolViolation));
-			}
-			std::task::Poll::Pending
-		})
-		.await?;
-		writer.finish().ok();
-	} else {
-		writer.finish().ok();
 	}
-
-	Ok(())
 }
 
 /// The PADDING stream type (draft-18+): bytes a peer sends to probe for bandwidth.
@@ -773,7 +1077,7 @@ struct UniSetup {
 	peer: Option<peer::PeerSetup>,
 	read: bool,
 	/// Streams accepted before the session started, handled before accepting more.
-	early: Vec<Reader<crate::transport::boxed::RecvStream, crate::Version>>,
+	early: Vec<Reader<RecvStream, crate::Version>>,
 	/// Our role, which decides what the peer's SETUP and GOAWAY may carry.
 	client: bool,
 	version: Version,
@@ -790,7 +1094,7 @@ struct UniSetup {
 struct Unis {
 	session: Transport,
 	uni: Uni,
-	early: std::collections::VecDeque<Reader<crate::transport::boxed::RecvStream, crate::Version>>,
+	early: std::collections::VecDeque<Reader<RecvStream, crate::Version>>,
 	tasks: TaskSet,
 	fatal: kio::Shared<Option<Error>>,
 	ended: Option<Error>,
@@ -824,51 +1128,46 @@ impl Unis {
 			let reader = match self.early.pop_front() {
 				Some(reader) => reader,
 				None => match self.session.poll_accept_uni(waiter) {
-					std::task::Poll::Ready(Ok(recv)) => Reader::new(recv, crate::Version::Ietf(self.uni.version)),
-					std::task::Poll::Ready(Err(err)) => {
+					Poll::Ready(Ok(recv)) => Reader::new(recv, crate::Version::Ietf(self.uni.version)),
+					Poll::Ready(Err(err)) => {
 						self.ended = Some(Error::from_transport(err));
 						break;
 					}
-					std::task::Poll::Pending => break,
+					Poll::Pending => break,
 				},
 			};
-			let uni = self.uni.clone();
-			let fatal = self.fatal.clone();
-			self.tasks.push(async move {
-				if let Err(err) = uni.serve(reader).await {
-					fatal.lock().get_or_insert(err);
-				}
-			});
+			self.tasks
+				.push(UniServe::new(self.uni.clone(), reader, self.fatal.clone()));
 		}
 	}
 
-	fn poll(&mut self, waiter: &kio::Waiter) -> std::task::Poll<Result<(), Error>> {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let _ = self.tasks.poll(waiter);
 		if let Some(err) = self.fatal.lock().take() {
-			return std::task::Poll::Ready(Err(err));
+			return Poll::Ready(Err(err));
 		}
 		self.accept(waiter);
 		let _ = self.tasks.poll(waiter);
 		if let Some(err) = self.fatal.lock().take() {
-			return std::task::Poll::Ready(Err(err));
+			return Poll::Ready(Err(err));
 		}
 		match &self.ended {
-			Some(err) => std::task::Poll::Ready(Err(err.clone())),
-			None => std::task::Poll::Pending,
+			Some(err) => Poll::Ready(Err(err.clone())),
+			None => Poll::Pending,
 		}
 	}
 
-	fn poll_drain(&mut self, waiter: &kio::Waiter) -> std::task::Poll<()> {
+	fn poll_drain(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		self.accept(waiter);
 		let drained = self.tasks.poll(waiter).is_ready();
 		if self.ended.is_none() {
-			return std::task::Poll::Pending;
+			return Poll::Pending;
 		}
 		// Every accepted child has first consumed its buffered header. A fill
 		// still waiting to be promised or opened can no longer arrive.
 		self.uni.subscriber.settle_control();
 		if drained {
-			std::task::Poll::Ready(())
+			Poll::Ready(())
 		} else {
 			self.tasks.poll(waiter)
 		}
@@ -887,92 +1186,155 @@ struct Uni {
 	version: Version,
 }
 
-impl Uni {
-	/// Read the stream's type and serve it, failing only when the stream breaks the session.
-	async fn serve(self, mut reader: Reader<crate::transport::boxed::RecvStream, crate::Version>) -> Result<(), Error> {
-		reader = reader.with_stats(self.subscriber.stats());
-		let Self {
-			mut subscriber,
-			peer_setup,
-			seen_setup,
-			goaway,
-			client,
-			version,
-		} = self;
+/// Reads one incoming uni stream's type and serves it, reporting to `fatal` only when the
+/// stream breaks the session.
+struct UniServe {
+	uni: Uni,
+	step: UniStep,
+	fatal: kio::Shared<Option<Error>>,
+}
 
-		// A stream that dies before its type varint is that stream's failure, not the
-		// session's. RESET_STREAM is how a peer drops a group, and QUIC does not order
-		// the reset behind the data, so one can beat the first byte even of a stream
-		// the peer wrote to. Failing here would tear down the whole session over a
-		// single stream the peer had already given up on. Only death is tolerated:
-		// bytes that arrive and do not parse stay session-fatal.
-		//
-		// A transport error counts as death too. A reset whose code the transport cannot
-		// place in the stream registry surfaces as one: over raw QUIC a moq-transport
-		// peer resets with its own codes (moxygen's CANCELLED is 0x1), which the
-		// WebTransport code mapping rejects. If the connection itself died, the next
-		// accept reports it.
-		let kind: u64 = match kio::wait(|waiter| reader.poll_varint_peek(waiter)).await {
-			Ok(kind) => kind,
-			Err(err) if died_before_header(&err) => {
-				tracing::debug!(%err, "dropping uni stream that died before its type");
-				return Ok(());
-			}
-			Err(err) => return Err(err),
-		};
+/// Where [`UniServe`] waits.
+enum UniStep {
+	/// Waiting for the stream's type.
+	Peek(Reader<RecvStream, crate::Version>),
+	/// Waiting for the peer's whole SETUP.
+	Setup(Reader<RecvStream, crate::Version>),
+	/// Monitoring the peer's SETUP stream for GOAWAY.
+	GoAway(ReadGoaways<RecvStream>),
+	Group(Reader<RecvStream, Version>, RecvGroup),
+	Fill(Reader<RecvStream, Version>, RecvFill),
+	Padding(Reader<RecvStream, crate::Version>),
+	/// Between steps.
+	Done,
+}
 
-		let Some(ty) = UniType::classify(kind) else {
-			tracing::warn!(kind, "unknown uni stream type");
-			return Err(Error::UnexpectedStream);
-		};
+impl UniServe {
+	fn new(uni: Uni, reader: Reader<RecvStream, crate::Version>, fatal: kio::Shared<Option<Error>>) -> Self {
+		let reader = reader.with_stats(uni.subscriber.stats());
+		Self {
+			uni,
+			step: UniStep::Peek(reader),
+			fatal,
+		}
+	}
 
-		match ty {
-			// SETUP then becomes the GOAWAY channel. It is read in the background like any
-			// other stream; the one thing that does need it (the MoQ Cluster negotiation)
-			// waits on `peer_setup` instead, so a slow SETUP delays announcements rather
-			// than the whole session.
-			UniType::Setup => {
-				// Exactly one SETUP per endpoint. A second would let a peer restate its
-				// declared identity mid-session, silently re-attributing every route
-				// already built from the first.
-				if seen_setup.swap(true, std::sync::atomic::Ordering::Relaxed) {
-					return Err(Error::ProtocolViolation);
+	/// `Ready` once the stream is served, failing only when it breaks the session.
+	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let version = self.uni.version;
+		loop {
+			match &mut self.step {
+				UniStep::Peek(reader) => {
+					// A stream that dies before its type varint is that stream's failure, not
+					// the session's. RESET_STREAM is how a peer drops a group, and QUIC does
+					// not order the reset behind the data, so one can beat the first byte even
+					// of a stream the peer wrote to. Failing here would tear down the whole
+					// session over a single stream the peer had already given up on. Only
+					// death is tolerated: bytes that arrive and do not parse stay
+					// session-fatal.
+					//
+					// A transport error counts as death too. A reset whose code the transport
+					// cannot place in the stream registry surfaces as one: over raw QUIC a
+					// moq-transport peer resets with its own codes (moxygen's CANCELLED is
+					// 0x1), which the WebTransport code mapping rejects. If the connection
+					// itself died, the next accept reports it.
+					let kind: u64 = match ready!(reader.poll_varint_peek(waiter)) {
+						Ok(kind) => kind,
+						Err(err) if died_before_header(&err) => {
+							tracing::debug!(%err, "dropping uni stream that died before its type");
+							return Poll::Ready(Ok(()));
+						}
+						Err(err) => return Poll::Ready(Err(err)),
+					};
+
+					let Some(ty) = UniType::classify(kind) else {
+						tracing::warn!(kind, "unknown uni stream type");
+						return Poll::Ready(Err(Error::UnexpectedStream));
+					};
+
+					// Exactly one SETUP per endpoint. A second would let a peer restate its
+					// declared identity mid-session, silently re-attributing every route
+					// already built from the first.
+					if ty == UniType::Setup && self.uni.seen_setup.swap(true, std::sync::atomic::Ordering::Relaxed) {
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
+
+					let UniStep::Peek(mut reader) = std::mem::replace(&mut self.step, UniStep::Done) else {
+						unreachable!("matched above");
+					};
+					self.step = match ty {
+						// SETUP then becomes the GOAWAY channel. It is read in the background
+						// like any other stream; the one thing that does need it (the MoQ
+						// Cluster negotiation) waits on `peer_setup` instead, so a slow SETUP
+						// delays announcements rather than the whole session.
+						//
+						// The negotiation gates the announce and dispatch loops, so a SETUP we
+						// cannot read must end the session rather than leave them parked on a
+						// slot nothing will ever fill.
+						UniType::Setup => {
+							reader.set_priority(crate::priority::RECV_CONTROL);
+							UniStep::Setup(reader)
+						}
+						UniType::Subgroup => UniStep::Group(reader.with_version(version), RecvGroup::new()),
+						// A fill fetch stream carries the head of the group a draft-22
+						// subscription joined part way through. One answering no fill of ours
+						// is refused inside.
+						UniType::Fetch => UniStep::Fill(reader.with_version(version), RecvFill::new()),
+						UniType::Padding => UniStep::Padding(reader),
+					};
 				}
+				UniStep::Setup(reader) => {
+					let msg = ready!(reader.poll_decode::<setup::Setup>(waiter))?;
+					if let Some(peer_setup) = &self.uni.peer_setup {
+						let options = decode_peer_setup(&msg.parameters, version, self.uni.client)?;
+						peer_setup.set(options.declared);
+						peer_setup.set_implementation(options.implementation);
+					}
 
-				// The negotiation gates the announce and dispatch loops, so a SETUP we
-				// cannot read must end the session rather than leave them parked on a
-				// slot nothing will ever fill.
-				reader.set_priority(crate::priority::RECV_CONTROL);
-				let msg = reader.decode::<setup::Setup>().await?;
-				if let Some(peer_setup) = peer_setup {
-					let options = decode_peer_setup(&msg.parameters, version, client)?;
-					peer_setup.set(options.declared);
-					peer_setup.set_implementation(options.implementation);
+					let UniStep::Setup(reader) = std::mem::replace(&mut self.step, UniStep::Done) else {
+						unreachable!("matched above");
+					};
+					// Monitor for GOAWAY after setup completes.
+					self.step = UniStep::GoAway(ReadGoaways::new(
+						reader.with_version(version),
+						version,
+						self.uni.client,
+						self.uni.goaway.clone(),
+					));
 				}
-
-				// Monitor for GOAWAY after setup completes.
-				run_goaway(reader.with_version(version), version, client, goaway).await?;
-			}
-			UniType::Subgroup => {
-				let mut reader = reader.with_version(version);
-				let res = subscriber.recv_group(&mut reader).await;
-				stop_on_error(&mut reader, res)?;
-			}
-			// A fill fetch stream carries the head of the group a draft-22 subscription
-			// joined part way through. One answering no fill of ours is refused inside.
-			UniType::Fetch => {
-				let mut reader = reader.with_version(version);
-				let res = subscriber.recv_fill(&mut reader).await;
-				stop_on_error(&mut reader, res)?;
-			}
-			// The receiver MUST discard padding. One that dies is not the session's failure.
-			UniType::Padding => {
-				if let Err(err) = kio::wait(|waiter| reader.poll_discard(waiter)).await {
-					tracing::debug!(%err, "padding stream ended");
+				UniStep::GoAway(goaways) => {
+					let err = ready!(goaways.poll(waiter));
+					return Poll::Ready(Err(control_stream_error(err)));
 				}
+				UniStep::Group(reader, recv) => {
+					let res = ready!(recv.poll(waiter, &self.uni.subscriber, reader));
+					return Poll::Ready(stop_on_error(reader, res));
+				}
+				UniStep::Fill(reader, recv) => {
+					let res = ready!(recv.poll(waiter, &self.uni.subscriber, reader));
+					return Poll::Ready(stop_on_error(reader, res));
+				}
+				// The receiver MUST discard padding. One that dies is not the session's failure.
+				UniStep::Padding(reader) => {
+					if let Err(err) = ready!(reader.poll_discard(waiter)) {
+						tracing::debug!(%err, "padding stream ended");
+					}
+					return Poll::Ready(Ok(()));
+				}
+				UniStep::Done => unreachable!("polled after it finished"),
 			}
 		}
-		Ok(())
+	}
+}
+
+impl kio::Task for UniServe {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if let Err(err) = ready!(self.poll_serve(waiter)) {
+			self.fatal.lock().get_or_insert(err);
+		}
+		Poll::Ready(())
 	}
 }
 
@@ -992,18 +1354,27 @@ fn died_before_header(err: &Error) -> bool {
 
 /// Receive QUIC datagrams, each an OBJECT_DATAGRAM for one of our subscriptions.
 ///
-/// A transport without datagrams never delivers one, so this parks. A transport failure
-/// or a malformed datagram ends the session.
-async fn run_datagrams(session: Transport, subscriber: Subscriber) -> Result<(), Error> {
-	if session.max_datagram_size() == 0 {
-		return Ok(());
-	}
-	// A peer keeping datagrams ready must not hold the session's other tasks.
-	let mut budget = kio::coop::Budget::new(32);
-	loop {
-		kio::wait(|waiter| budget.poll_yield(waiter)).await;
-		let payload = session.recv_datagram().await.map_err(Error::from_transport)?;
-		subscriber.recv_datagram(payload)?;
+/// A transport failure or a malformed datagram ends the session.
+struct Datagrams {
+	session: Transport,
+	subscriber: Subscriber,
+	/// A peer keeping datagrams ready must not hold the session's other tasks.
+	budget: kio::coop::Budget,
+	/// This pass of the budget is spent, waiting for the next datagram.
+	charged: bool,
+}
+
+impl Datagrams {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		loop {
+			if !self.charged {
+				ready!(self.budget.poll_yield(waiter));
+				self.charged = true;
+			}
+			let payload = ready!(self.session.poll_recv_datagram(waiter)).map_err(Error::from_transport)?;
+			self.charged = false;
+			self.subscriber.recv_datagram(payload)?;
+		}
 	}
 }
 
@@ -1030,98 +1401,136 @@ pub(super) fn stop_on_error<R: crate::transport::poll::RecvStream>(
 	Ok(())
 }
 
-/// Accept incoming bidi streams, leaving each request to read its own header.
-async fn run_dispatch(
+/// Accept incoming bidi streams, leaving each request to read its own header. Only an
+/// error ends it.
+struct Dispatch {
 	session: Transport,
-	publisher: Publisher,
-	subscriber: Subscriber,
-	peer_setup: peer::PeerSetup,
-	// Answers the peer's Auth requests, on the versions that can negotiate them.
-	serve: Option<auth::Serve>,
 	version: Version,
-) -> Result<(), Error> {
-	use std::task::Poll;
+	peer_setup: peer::PeerSetup,
+	/// What `bidi` is built from once the peer's SETUP arrives.
+	start: Option<(Publisher, Subscriber, Option<auth::Serve>)>,
+	/// What each request is served with, once the peer's SETUP says how they decode.
+	bidi: Option<Bidi>,
+	tasks: TaskSet,
+	fatal: kio::Shared<Option<Error>>,
+	/// MAX_STREAMS credit alone lets the peer keep thousands of streams ready, and the
+	/// children are polled only when accepting pends. A yield pends it.
+	budget: kio::coop::Budget,
+	/// One pass per accepted stream, not per wake.
+	charge: bool,
+	/// Each AUTH serve task settles `Issued::closed` from whatever the auth handle
+	/// holds when it drops, and the first reason wins. So the error that ends the
+	/// session has to reach the handle while `tasks` is still alive, or every grant
+	/// reports a bare cancel instead. `None` when the peer never negotiated AUTH,
+	/// which leaves no serve task to settle.
+	handle: Option<crate::auth::Link>,
+}
 
-	// PUBLISH_NAMESPACE decodes differently once the MoQ Cluster extension is
-	// negotiated, so dispatch waits for SETUP, which `run_unis` reads independently.
-	let peer = subscriber.peer().await;
+impl Dispatch {
+	fn new(
+		session: Transport,
+		publisher: Publisher,
+		subscriber: Subscriber,
+		peer_setup: peer::PeerSetup,
+		// Answers the peer's Auth requests, on the versions that can negotiate them.
+		serve: Option<auth::Serve>,
+		version: Version,
+	) -> Self {
+		Self {
+			session,
+			version,
+			peer_setup,
+			start: Some((publisher, subscriber, serve)),
+			bidi: None,
+			tasks: TaskSet::owned(),
+			fatal: Default::default(),
+			budget: kio::coop::Budget::new(32),
+			charge: true,
+			handle: None,
+		}
+	}
 
-	// An AUTH without MoQ Auth negotiated, offered by both sides, is an unknown request,
-	// which falls through to the protocol violation in `Bidi::serve`.
-	let declared_setup = peer_setup.get().await;
-	let serve = match declared_setup.auth {
-		true => serve,
-		false => None,
-	};
+	/// Build what each request is served with, once the peer's SETUP arrives.
+	fn poll_setup(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let (_, subscriber, _) = self.start.as_ref().expect("set up once");
 
-	// From the same slot, so this costs nothing extra: it decides whether an unsolicited
-	// advertisement is the peer ignoring our own SETUP (MoQ Solicit).
-	let declared = subscriber.solicit().await;
+		// PUBLISH_NAMESPACE decodes differently once the MoQ Cluster extension is
+		// negotiated, so dispatch waits for SETUP, which `Unis` reads independently.
+		let peer = ready!(subscriber.poll_peer(waiter));
 
-	// Each AUTH serve task settles `Issued::closed` from whatever the auth handle
-	// holds when it drops, and the first reason wins. So the error that ends the
-	// session has to reach the handle while `tasks` is still alive, or every grant
-	// reports a bare cancel instead. `None` when the peer never negotiated AUTH,
-	// which leaves no serve task to settle.
-	let handle = serve.as_ref().map(|serve| serve.handle.clone());
+		// An AUTH without MoQ Auth negotiated, offered by both sides, is an unknown request,
+		// which falls through to the protocol violation in `BidiServe`.
+		let negotiated = ready!(self.peer_setup.poll_get(waiter)).auth;
 
-	let bidi = Bidi {
-		publisher,
-		subscriber,
-		peer,
-		declared,
-		serve,
-		version,
-	};
-	let mut tasks = TaskSet::owned();
-	let fatal = kio::Shared::<Option<Error>>::default();
-	// MAX_STREAMS credit alone lets the peer keep thousands of streams ready, and the
-	// drive below polls the children only when accepting pends. A yield pends it.
-	let mut budget = kio::coop::Budget::new(32);
+		// From the same slot, so this costs nothing extra: it decides whether an unsolicited
+		// advertisement is the peer ignoring our own SETUP (MoQ Solicit).
+		let declared = ready!(subscriber.poll_solicit(waiter));
 
-	let err = loop {
-		// One pass per accepted stream, not per wake of the drive.
-		let mut charge = true;
-		let accepted = tasks
-			.drive(|waiter| {
-				let broken = fatal.poll(waiter, |fatal| match fatal.is_some() {
+		let (publisher, subscriber, serve) = self.start.take().expect("set up once");
+		let serve = match negotiated {
+			true => serve,
+			false => None,
+		};
+		self.handle = serve.as_ref().map(|serve| serve.handle.clone());
+		self.bidi = Some(Bidi {
+			publisher,
+			subscriber,
+			peer,
+			declared,
+			serve,
+			version: self.version,
+		});
+		Poll::Ready(())
+	}
+
+	/// `Ready` only with the error that ends the session.
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		if self.bidi.is_none() {
+			ready!(self.poll_setup(waiter));
+		}
+		let bidi = self.bidi.as_ref().expect("set up above");
+		loop {
+			let accepted = 'accept: {
+				let broken = self.fatal.poll(waiter, |fatal| match fatal.is_some() {
 					true => Poll::Ready(()),
 					false => Poll::Pending,
 				});
 				if let Poll::Ready(mut fatal) = broken
 					&& let Some(err) = fatal.take()
 				{
-					return Poll::Ready(Err(err));
+					break 'accept Poll::Ready(Err(err));
 				}
-				if std::mem::take(&mut charge) {
-					std::task::ready!(budget.poll_yield(waiter));
+				if std::mem::take(&mut self.charge) && self.budget.poll_yield(waiter).is_pending() {
+					break 'accept Poll::Pending;
 				}
-				Stream::poll_accept(&session, version, waiter)
-			})
-			.await;
-		let stream = match accepted {
-			Ok(stream) => stream,
-			Err(err) => break err,
-		};
-
-		// QUIC may expose an earlier stream before its bytes arrive. Reading the
-		// header here could block later streams whose unread data holds flow control.
-		let bidi = bidi.clone();
-		let fatal = fatal.clone();
-		tasks.push(async move {
-			if let Err(err) = bidi.serve(stream).await {
-				fatal.lock().get_or_insert(err);
+				Stream::poll_accept(&self.session, self.version, waiter)
+			};
+			match accepted {
+				// QUIC may expose an earlier stream before its bytes arrive. Reading the
+				// header here could block later streams whose unread data holds flow control.
+				Poll::Ready(Ok(stream)) => {
+					self.charge = true;
+					self.tasks
+						.push(BidiServe::new(bidi.clone(), stream, self.fatal.clone()));
+				}
+				Poll::Ready(Err(err)) => {
+					// `tasks` still holds the AUTH serve tasks, so the session's error lands on
+					// the handle before they drop. The driver closes it again with the same
+					// error, which then does nothing.
+					if let Some(handle) = &self.handle {
+						handle.close(err.clone());
+					}
+					return Poll::Ready(err);
+				}
+				Poll::Pending => {
+					// The children never end the loop; a `Ready` here just means they're
+					// drained until the next stream.
+					let _ = self.tasks.poll(waiter);
+					return Poll::Pending;
+				}
 			}
-		});
-	};
-
-	// `tasks` still holds the AUTH serve tasks, so the session's error lands on the
-	// handle before they drop. The driver closes it again with the same error, which
-	// then does nothing.
-	if let Some(handle) = &handle {
-		handle.close(err.clone());
+		}
 	}
-	Err(err)
 }
 
 /// What serving one incoming bidi request needs from its session.
@@ -1135,38 +1544,88 @@ struct Bidi {
 	version: Version,
 }
 
-impl Bidi {
-	/// Read and serve a request, failing only when it breaks the session.
-	async fn serve(self, mut stream: Stream<Transport, Version>) -> Result<(), Error> {
-		stream = stream.with_stats(self.publisher.stats());
-		let Self {
+/// Reads one request's header and serves it, reporting to `fatal` only when the request
+/// breaks the session.
+struct BidiServe {
+	bidi: Bidi,
+	step: BidiStep,
+	fatal: kio::Shared<Option<Error>>,
+}
+
+/// Where [`BidiServe`] waits.
+enum BidiStep {
+	/// Reading the request's type, then its body.
+	Header {
+		stream: Stream<Transport, Version>,
+		id: Option<u64>,
+	},
+	/// Refusing a request past our GOAWAY cutoff.
+	Refuse(Reject),
+	/// The publisher or subscriber serving it.
+	Serve(crate::util::BoxTask),
+	/// Answering an Auth request.
+	Auth(Box<auth::Answering>),
+	/// Between steps.
+	Done,
+}
+
+impl BidiServe {
+	fn new(bidi: Bidi, stream: Stream<Transport, Version>, fatal: kio::Shared<Option<Error>>) -> Self {
+		let stream = stream.with_stats(bidi.publisher.stats());
+		Self {
+			bidi,
+			step: BidiStep::Header { stream, id: None },
+			fatal,
+		}
+	}
+
+	/// `Ready` once the request is served, failing only when it breaks the session.
+	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		loop {
+			match &mut self.step {
+				BidiStep::Header { stream, id } => {
+					// Abandoning a request before its header is not a session failure. Bytes
+					// that arrive and do not parse, and dispatch errors, remain session-fatal.
+					let (id, data) = match ready!(poll_header(stream, id, waiter)) {
+						Ok(header) => header,
+						Err(err) if died_before_header(&err) => {
+							tracing::debug!(%err, "dropping bidi stream that died before its header");
+							return Poll::Ready(Ok(()));
+						}
+						Err(err) => return Poll::Ready(Err(err)),
+					};
+					let BidiStep::Header { stream, .. } = std::mem::replace(&mut self.step, BidiStep::Done) else {
+						unreachable!("matched above");
+					};
+					self.step = self.dispatch(id, data, stream)?;
+				}
+				BidiStep::Refuse(reject) => return reject.poll(waiter),
+				BidiStep::Serve(task) => {
+					ready!(task(waiter));
+					return Poll::Ready(Ok(()));
+				}
+				BidiStep::Auth(answering) => return answering.poll(waiter),
+				BidiStep::Done => unreachable!("polled after it finished"),
+			}
+		}
+	}
+
+	/// Hand a request whose header arrived to whatever serves it.
+	fn dispatch(
+		&mut self,
+		id: u64,
+		data: ietf::Body,
+		mut stream: Stream<Transport, Version>,
+	) -> Result<BidiStep, Error> {
+		let Bidi {
 			publisher,
-			mut subscriber,
+			subscriber,
 			peer,
 			declared,
 			serve,
 			version,
-		} = self;
-		let header = async {
-			let id = stream.reader.varint().await?;
-			// The type arrived, so a body cut short by FIN is malformed, not the stream dying.
-			let body = match stream.reader.decode::<ietf::Body>().await {
-				Err(Error::Decode(DecodeError::Short)) => return Err(Error::WrongSize),
-				body => body?,
-			};
-			Ok::<_, Error>((id, body))
-		}
-		.await;
-		// Abandoning a request before its header is not a session failure. Bytes
-		// that arrive and do not parse, and dispatch errors, remain session-fatal.
-		let (id, data) = match header {
-			Ok(header) => header,
-			Err(err) if died_before_header(&err) => {
-				tracing::debug!(%err, "dropping bidi stream that died before its header");
-				return Ok(());
-			}
-			Err(err) => return Err(err),
-		};
+		} = &mut self.bidi;
+		let version = *version;
 		stream.reader = stream.reader.with_stats(publisher.stats());
 		publisher
 			.stats()
@@ -1184,49 +1643,75 @@ impl Bidi {
 		) {
 			let request_id = RequestId::decode(&mut data.decoder(version), version)?;
 			match publisher.control.accept(request_id) {
-				Err(Error::GoingAway) => return refuse_going_away(stream, id, version).await,
+				Err(Error::GoingAway) => return Ok(BidiStep::Refuse(refuse_going_away(stream, id, version))),
 				result => {
 					result?;
 				}
 			}
 		}
-		match id {
+		Ok(match id {
 			// Publisher handles: Subscribe, Fetch, SubscribeNamespace, SubscribeTracks, TrackStatus
 			ietf::Subscribe::ID
 			| ietf::Fetch::ID
 			| ietf::SubscribeNamespace::ID
 			| ietf::SubscribeTracks::ID
-			| ietf::TrackStatus::ID => {
-				publisher.handle_stream(id, data, stream)?.await;
-			}
+			| ietf::TrackStatus::ID => BidiStep::Serve(publisher.handle_stream(id, data, stream)?),
 			// Subscriber handles: Publish, PublishNamespace
 			ietf::Publish::ID | ietf::PublishNamespace::ID => {
-				subscriber.handle_stream(id, data, stream, peer, declared)?.await;
+				BidiStep::Serve(subscriber.handle_stream(id, data, stream, *peer, *declared)?)
 			}
-			auth::Auth::ID if let Some(serve) = serve => {
+			auth::Auth::ID if let Some(serve) = serve.take() => {
 				let mut data = data.decoder(version);
 				let msg = auth::Auth::decode_msg(&mut data, version)?;
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
-				serve.run(stream, msg, version).await?;
+				BidiStep::Auth(Box::new(serve.answer(stream, msg, version)))
 			}
 			_ => {
 				tracing::warn!(id, "unexpected bidi stream type");
 				return Err(Error::UnexpectedStream);
 			}
-		}
-		Ok(())
+		})
 	}
+}
+
+impl kio::Task for BidiServe {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if let Err(err) = ready!(self.poll_serve(waiter)) {
+			self.fatal.lock().get_or_insert(err);
+		}
+		Poll::Ready(())
+	}
+}
+
+/// A request's type, then its body. `id` holds the type once it arrived.
+fn poll_header(
+	stream: &mut Stream<Transport, Version>,
+	id: &mut Option<u64>,
+	waiter: &kio::Waiter,
+) -> Poll<Result<(u64, ietf::Body), Error>> {
+	let id = match *id {
+		Some(id) => id,
+		None => *id.insert(ready!(stream.reader.poll_varint(waiter))?),
+	};
+	// The type arrived, so a body cut short by FIN is malformed, not the stream dying.
+	let body = match ready!(stream.reader.poll_decode::<ietf::Body>(waiter)) {
+		Err(Error::Decode(DecodeError::Short)) => return Poll::Ready(Err(Error::WrongSize)),
+		body => body?,
+	};
+	Poll::Ready(Ok((id, body)))
 }
 
 /// Refuse a request past our GOAWAY cutoff with the answer its kind reads: an AUTH
 /// presenter reads only AUTH_OK and AUTH_ERROR.
-async fn refuse_going_away(stream: Stream<Transport, Version>, id: u64, version: Version) -> Result<(), Error> {
+fn refuse_going_away(stream: Stream<Transport, Version>, id: u64, version: Version) -> Reject {
 	if id == auth::Auth::ID {
-		return auth::refuse_going_away(stream).await;
+		return auth::going_away(stream);
 	}
-	super::request_stream::reject(
+	Reject::new(
 		stream,
 		ietf::RequestError {
 			error_code: super::error::request::to_code(
@@ -1238,20 +1723,6 @@ async fn refuse_going_away(stream: Stream<Transport, Version>, id: u64, version:
 			retry_interval: 0,
 		},
 	)
-	.await
-}
-
-/// Monitor the peer's SETUP stream for GOAWAY until the session closes.
-/// A FIN or reset of this control stream is a protocol violation.
-async fn run_goaway<R: crate::transport::poll::RecvStream>(
-	reader: Reader<R, Version>,
-	version: Version,
-	client: bool,
-	goaway: crate::goaway::Protocol,
-) -> Result<(), Error> {
-	read_goaways(reader, version, client, goaway)
-		.await
-		.map_err(control_stream_error)
 }
 
 /// A control stream cannot end independently of its session, so its own failure is the
@@ -1264,60 +1735,90 @@ pub(super) fn control_stream_error(err: Error) -> Error {
 	}
 }
 
-/// Read every message after SETUP on the peer's SETUP stream, which may only be GOAWAY.
+/// Reads every message after SETUP on the peer's SETUP stream, which may only be GOAWAY.
+/// A FIN or reset of this control stream is a protocol violation, so only an error ends it;
+/// [`control_stream_error`] says which one the session closes with.
 ///
 /// Reading continues past the first GOAWAY until the peer FINs or the session closes.
 /// Dropping the reader would STOP_SENDING the peer's SETUP uni stream, which draft-22
 /// section 6.4.1 forbids closing at the transport layer mid-session, so a strict peer would
 /// tear the session down as a PROTOCOL_VIOLATION in the middle of the drain we are honoring.
-async fn read_goaways<R: crate::transport::poll::RecvStream>(
-	mut reader: Reader<R, Version>,
+struct ReadGoaways<R: crate::transport::poll::RecvStream> {
+	reader: Reader<R, Version>,
 	version: Version,
 	client: bool,
 	goaway: crate::goaway::Protocol,
-) -> Result<(), Error> {
-	while let Some(id) = reader.varint_maybe().await? {
-		// The type arrived, so a body cut short by FIN is malformed, not the stream dying.
-		let body = match reader.decode::<ietf::Body>().await {
-			Err(Error::Decode(DecodeError::Short)) => return Err(Error::WrongSize),
-			body => body?,
-		};
-		if id != ietf::GoAway::ID {
-			return Err(Error::UnexpectedMessage);
+	/// The type of the message whose body is arriving.
+	id: Option<u64>,
+}
+
+impl<R: crate::transport::poll::RecvStream> ReadGoaways<R> {
+	fn new(reader: Reader<R, Version>, version: Version, client: bool, goaway: crate::goaway::Protocol) -> Self {
+		Self {
+			reader,
+			version,
+			client,
+			goaway,
+			id: None,
 		}
-
-		let msg: ietf::GoAway = body.message(version)?;
-		reader
-			.stats()
-			.control(crate::stats::Message::Goaway, body.0.len() + 2, true);
-		tracing::info!(message = ?msg, "received GOAWAY");
-
-		// Draft-18 names the first of our own Request IDs it did not process: even for a
-		// client, odd for a server. The field is required here, on the control stream.
-		match msg.request_id {
-			None if version == Version::Draft18 => return Err(Error::ProtocolViolation),
-			Some(request_id) if request_id.0 % 2 != u64::from(!client) => {
-				return Err(DecodeError::Session(SessionError::InvalidRequestId).into());
-			}
-			_ => {}
-		}
-
-		// Nothing may follow a GOAWAY on this stream, so bytes already here are a violation.
-		// Caught before the GOAWAY surfaces: the application acting on it can close the
-		// session first, without our code.
-		let waiter = &kio::Waiter::noop();
-		if let std::task::Poll::Ready(Ok(true)) = reader.poll_has_more(waiter) {
-			return Err(Error::ProtocolViolation);
-		}
-
-		let timeout = (msg.timeout > 0).then(|| std::time::Duration::from_millis(msg.timeout));
-		// A second GOAWAY is a protocol violation the draft requires we close over.
-		goaway.record(crate::goaway::Goaway {
-			uri: msg.new_session_uri.into_owned(),
-			timeout,
-		})?;
 	}
-	Err(Error::ProtocolViolation)
+
+	/// `Ready` only with the error that ends it.
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		self.poll_read(waiter).map(|Err(err)| err)
+	}
+
+	fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<std::convert::Infallible, Error>> {
+		let version = self.version;
+		loop {
+			let id = match self.id {
+				Some(id) => id,
+				None => match ready!(self.reader.poll_varint_maybe(waiter))? {
+					Some(id) => *self.id.insert(id),
+					None => return Poll::Ready(Err(Error::ProtocolViolation)),
+				},
+			};
+			// The type arrived, so a body cut short by FIN is malformed, not the stream dying.
+			let body = match ready!(self.reader.poll_decode::<ietf::Body>(waiter)) {
+				Err(Error::Decode(DecodeError::Short)) => return Poll::Ready(Err(Error::WrongSize)),
+				body => body?,
+			};
+			self.id = None;
+			if id != ietf::GoAway::ID {
+				return Poll::Ready(Err(Error::UnexpectedMessage));
+			}
+
+			let msg: ietf::GoAway = body.message(version)?;
+			self.reader
+				.stats()
+				.control(crate::stats::Message::Goaway, body.0.len() + 2, true);
+			tracing::info!(message = ?msg, "received GOAWAY");
+
+			// Draft-18 names the first of our own Request IDs it did not process: even for a
+			// client, odd for a server. The field is required here, on the control stream.
+			match msg.request_id {
+				None if version == Version::Draft18 => return Poll::Ready(Err(Error::ProtocolViolation)),
+				Some(request_id) if request_id.0 % 2 != u64::from(!self.client) => {
+					return Poll::Ready(Err(DecodeError::Session(SessionError::InvalidRequestId).into()));
+				}
+				_ => {}
+			}
+
+			// Nothing may follow a GOAWAY on this stream, so bytes already here are a violation.
+			// Caught before the GOAWAY surfaces: the application acting on it can close the
+			// session first, without our code.
+			if let Poll::Ready(Ok(true)) = self.reader.poll_has_more(&kio::Waiter::noop()) {
+				return Poll::Ready(Err(Error::ProtocolViolation));
+			}
+
+			let timeout = (msg.timeout > 0).then(|| std::time::Duration::from_millis(msg.timeout));
+			// A second GOAWAY is a protocol violation the draft requires we close over.
+			self.goaway.record(crate::goaway::Goaway {
+				uri: msg.new_session_uri.into_owned(),
+				timeout,
+			})?;
+		}
+	}
 }
 
 /// Closes the auth handle when the session driver ends without finishing, releasing
@@ -1335,12 +1836,6 @@ impl Drop for AuthClose {
 ///
 /// Judges the publisher's serving origin rather than the raw one: an origin that also
 /// consumes holds what the peer sent us, which is not ours to publish back.
-async fn enforce_grant(auth: crate::auth::Link, publisher: Publisher, session: Transport) -> Result<(), Error> {
-	let mut enforce = EnforceGrant::new(auth, publisher, session);
-	kio::wait(|waiter| enforce.poll(waiter)).await
-}
-
-/// See [`enforce_grant`].
 struct EnforceGrant {
 	auth: crate::auth::Link,
 	publisher: Publisher,
@@ -1362,7 +1857,7 @@ impl EnforceGrant {
 	fn poll(&mut self, waiter: &kio::Waiter) -> std::task::Poll<Result<(), Error>> {
 		let origin: origin::Consumer = wait!(Origin => self.publisher.poll_serving_origin(waiter));
 		// Checking what we publish is not a local reader asking to discover anything.
-		let mut announced: crate::announce::Consumer = origin.clone().serving().announced();
+		let mut announced: crate::origin::Routes = origin.clone().serving().routes();
 		let mut check: crate::auth::Enforce = crate::auth::Enforce::default();
 		let path = wait!(Check => check.poll(&self.auth, announced, waiter));
 		let Some(path) = path else {
@@ -1403,14 +1898,13 @@ mod tests {
 	}
 
 	#[kio::test]
-	async fn announce_interest_without_credit_keeps_the_session_alive() {
-		use std::sync::atomic::Ordering;
+	async fn announce_interest_waits_for_credit() {
 		for version in [Version::Draft18] {
 			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let interest = origin.consume().announced();
-			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
-			let log = session.log.clone();
-			let session = crate::driver::Transport::new(session);
+			let _interest = origin.consume().routes();
+			let scripted = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
+			let log = scripted.log.clone();
+			let session = crate::driver::Transport::new(scripted.clone());
 			let (driver, _goaway, _) = start(Config {
 				runtime: crate::time::sim(),
 				stats: Default::default(),
@@ -1439,23 +1933,17 @@ mod tests {
 			.unwrap();
 			let mut driver = std::pin::pin!(driver);
 			assert!(futures::poll!(driver.as_mut()).is_pending(), "{version}");
-			assert_eq!(
-				log.request_attempts.load(Ordering::Relaxed),
-				1,
-				"{version}: interest was attempted"
-			);
 			kio::clock::sleep(std::time::Duration::from_secs(20)).await;
 			assert!(
 				futures::poll!(driver.as_mut()).is_pending(),
-				"{version}: local refusal ended the session"
+				"{version}: waiting for credit ended the session"
 			);
-			assert_eq!(
-				log.request_attempts.load(Ordering::Relaxed),
-				1,
-				"{version}: interest was not retried"
-			);
+			let opened = log.bi_opens();
 			assert!(log.closes().is_empty());
-			assert!(interest.is_synced(), "a refused interest releases its snapshot");
+
+			scripted.grant_credit();
+			let _ = futures::poll!(driver.as_mut());
+			assert!(log.bi_opens() > opened, "{version}: interest opens once credit returns");
 		}
 	}
 
@@ -1811,7 +2299,7 @@ mod tests {
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		// A client asks only about what is watched.
-		let _watch = origin.consume().announced();
+		let _watch = origin.consume().routes();
 		let session = crate::lite::test_transport::ScriptedSession::new(namespace_without_hop_path(VERSION).await);
 		let log = session.log.clone();
 
@@ -1875,7 +2363,7 @@ mod tests {
 		let scoped = origin
 			.scope("rootns", &scope)
 			.expect("scope the origin to two prefixes");
-		let _watch = scoped.consume().announced();
+		let _watch = scoped.consume().routes();
 
 		let gate = kio::Producer::new(true);
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
@@ -1939,12 +2427,12 @@ mod tests {
 	}
 
 	/// Watch everything under `prefix`.
-	fn watch(origin: &crate::origin::Producer, prefix: &str) -> crate::announce::Consumer {
+	fn watch(origin: &crate::origin::Producer, prefix: &str) -> crate::origin::Routes {
 		origin
 			.consume()
 			.scope(prefix, &crate::Patterns::from(crate::Pattern::all()))
 			.unwrap()
-			.announced()
+			.routes()
 	}
 
 	/// Start a client feeding `subscribe` against a peer that answers nothing and declared
@@ -2127,7 +2615,9 @@ mod tests {
 	/// enough: the question is only whether the bytes went out unasked.
 	async fn announce_occurrences(peer_declared: Option<peer::Peer>) -> usize {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
+		let _cam = origin
+			.announce("solo-cam", crate::origin::RouteInfo::default())
+			.unwrap();
 
 		// An open gate: an unsolicited PUBLISH_NAMESPACE can reach the wire.
 		let gate = kio::Producer::new(true);
@@ -2232,7 +2722,9 @@ mod tests {
 
 	fn auth_session(auth: bool) -> AuthSession {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
+		let cam = origin
+			.announce("solo-cam", crate::origin::RouteInfo::default())
+			.unwrap();
 
 		let gate = kio::Producer::new(true);
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
@@ -2811,16 +3303,14 @@ mod tests {
 			tasks,
 			Default::default(),
 		);
-		let mut dispatch = std::pin::pin!(run_dispatch(
-			transport, publisher, subscriber, peer_setup, None, VERSION
-		));
+		let mut dispatch = Dispatch::new(transport, publisher, subscriber, peer_setup, None, VERSION);
 		// Held open and empty, so each accepted stream waits on its header.
 		let mut opened = Vec::new();
 		for _ in 0..1024 {
 			opened.push(peer.open_bi(Default::default()).await.unwrap());
 		}
 
-		assert!(kio::Waiter::noop().poll_future(dispatch.as_mut()).is_pending());
+		assert!(dispatch.poll(&kio::Waiter::noop()).is_pending());
 		assert!(
 			local.poll_accept_bi(&kio::Waiter::noop()).is_ready(),
 			"one poll accepted every stream"
@@ -2892,8 +3382,8 @@ mod tests {
 		// Stall before the type, then after it while the body has not arrived.
 		for stalled in [Vec::new(), vec![ietf::Subscribe::ID as u8]] {
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-			let mut track = broadcast.create_track("video", None).unwrap();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
+			let mut track = broadcast.broadcast().create_track("video", None).unwrap();
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
 				.with_incoming_bidis(vec![stalled, subscribe.clone()]);
 			let driver = bidi_driver(session, Some(origin.consume()));
@@ -3018,7 +3508,7 @@ mod tests {
 			subgroup_header(VERSION, 7, 0).await,
 			setup,
 		]);
-		let accepted = accept_setup(&mut crate::driver::Transport::new(session.clone()), VERSION)
+		let accepted = accept_setup(&crate::driver::Transport::new(session.clone()), VERSION)
 			.await
 			.expect("accept the SETUP");
 		assert_eq!(accepted.early.len(), 2, "both early streams are held");
@@ -3409,14 +3899,13 @@ mod tests {
 			let session = DeadStreamSession::unis(1);
 			let recv = session.accept_uni().await.unwrap();
 			let (_handle, protocol) = crate::goaway::Handle::new(false);
-			let err = run_goaway(
+			let mut goaways = ReadGoaways::new(
 				Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
 				version,
 				true,
 				protocol,
-			)
-			.await
-			.unwrap_err();
+			);
+			let err = control_stream_error(kio::wait(|waiter| goaways.poll(waiter)).await);
 			assert_eq!(SessionError::from(&err), SessionError::ProtocolViolation, "{version:?}");
 		}
 	}
@@ -3432,14 +3921,14 @@ mod tests {
 			let stream = kio::wait(|waiter| session.poll_accept_uni(waiter)).await.unwrap();
 			let (handle, protocol) = crate::goaway::Handle::new(false);
 
-			let err = read_goaways(
+			let mut goaways = ReadGoaways::new(
 				Reader::new(crate::transport::boxed::RecvStream::new(stream), version),
 				version,
 				true,
 				protocol,
-			)
-			.await
-			.expect_err("a second GOAWAY is fatal");
+			);
+			// A second GOAWAY is fatal.
+			let err = kio::wait(|waiter| goaways.poll(waiter)).await;
 			assert_eq!(SessionError::from(&err), SessionError::ProtocolViolation, "{version:?}");
 			assert!(
 				!matches!(
@@ -3534,22 +4023,24 @@ mod tests {
 			control.accept(RequestId(first)).unwrap();
 			control.accept(RequestId(first + 4)).unwrap();
 			let (handle, goaway_protocol) = crate::goaway::Handle::new(!client);
-			let mut setup = std::pin::pin!(run_setup(
+			let mut setup = SendSetup::new(
 				crate::driver::Transport::new(session.clone()),
 				VERSION,
-				None,
-				None,
-				None,
-				None,
+				SetupParams {
+					path: None,
+					authority: None,
+					token: None,
+					implementation: None,
+					extensions: Default::default(),
+				},
 				Hop::new(1).unwrap(),
 				None,
-				Default::default(),
 				goaway_protocol,
 				control.clone(),
 				Default::default(),
-			));
+			);
 			handle.producer().send(crate::goaway::Goaway::new()).unwrap();
-			assert!(futures::poll!(setup.as_mut()).is_pending());
+			assert!(setup.poll(&kio::Waiter::noop()).is_pending());
 			let sent = goaway(VERSION, Some(first + 6));
 			assert_eq!(occurrences(&log, &sent), 1, "client={client}");
 			control.accept(RequestId(first + 2)).unwrap();
@@ -3619,10 +4110,11 @@ mod tests {
 		] {
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 			let log = session.log.clone();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), VERSION)
 				.await
 				.unwrap();
-			refuse_going_away(stream, id, VERSION).await.unwrap();
+			let mut refusal = refuse_going_away(stream, id, VERSION);
+			kio::wait(|waiter| refusal.poll(waiter)).await.unwrap();
 			assert_eq!(*log.writes.lock().unwrap(), answer, "{id:#x}");
 		}
 	}

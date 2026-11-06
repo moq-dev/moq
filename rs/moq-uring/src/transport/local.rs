@@ -62,16 +62,6 @@ impl<S: poll::Session> poll::Session for Local<S> {
 			.map_ok(|(send, recv)| (Local::new(send), Local::new(recv)))
 	}
 
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: poll::SendOptions<'_, Local<<S::SendStream as poll::SendStream>::Group>>,
-	) -> Poll<Result<Option<poll::BiStreams<Self>>, Self::Error>> {
-		self.0
-			.poll_open_request(waiter, unwrap(options))
-			.map_ok(|streams| streams.map(|(send, recv)| (Local::new(send), Local::new(recv))))
-	}
-
 	fn send_group(&self, priority: i64) -> Option<Local<<S::SendStream as poll::SendStream>::Group>> {
 		self.0.send_group(priority).map(Local::new)
 	}
@@ -122,6 +112,14 @@ impl<S: poll::Session> poll::Session for Local<S> {
 
 	fn receive_window(&self) -> Option<moq::ReceiveWindow> {
 		self.0.receive_window()
+	}
+
+	fn stream_credit(&self, dir: moq::Dir) -> Option<moq::StreamCredit> {
+		self.0.stream_credit(dir)
+	}
+
+	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+		self.0.export_keying_material(label, context)
 	}
 }
 

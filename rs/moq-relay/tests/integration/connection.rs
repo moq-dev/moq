@@ -19,10 +19,12 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 		let auth = memory::public(&["**"], &[], &[]);
 		let cluster = memory::cluster();
 		let publisher = memory::origin();
-		let broadcast = publisher.create_broadcast("ladder").unwrap();
+		let broadcast = publisher
+			.route("ladder", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
-		let track = broadcast.create_track("data", info).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let track = broadcast.broadcast().create_track("data", info).unwrap();
+		broadcast.announce().unwrap();
 		let _publisher = connect(
 			moq_net::Client::new().with_publisher(publisher.consume()),
 			version,
@@ -46,6 +48,7 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let mut sub = remote.track("data").unwrap().subscribe(None).await.unwrap();
 		for sequence in [5, 1 << 32, (1 << 53) - 1, (1 << 53) + 1, (1 << 62) - 1] {
@@ -74,14 +77,15 @@ fn publish(
 	name: &str,
 ) -> (
 	moq_net::origin::Producer,
-	moq_net::origin::Publication,
+	moq_net::origin::Route,
 	moq_net::track::Producer,
 ) {
 	let origin = memory::origin();
-	let broadcast = origin.create_broadcast(name).expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce");
+	let broadcast = origin
+		.route(name, moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
 	let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
-	let track = broadcast.create_track("video", info).expect("create track");
+	let track = broadcast.broadcast().create_track("video", info).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, name.as_bytes())
@@ -91,18 +95,18 @@ fn publish(
 }
 
 /// The next active route's prefix.
-async fn next_active(announced: &mut moq_net::announce::Consumer) -> String {
+async fn next_active(announced: &mut moq_net::origin::Routes) -> String {
 	loop {
 		match kio::clock::timeout(TIMEOUT, announced.next())
 			.await
 			.expect("announcement timeout")
 			.expect("origin closed")
 		{
-			moq_net::announce::Event::Start(route)
-			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route)
-			| moq_net::announce::Event::Takeover { announce: route, .. } => return route.prefix.to_string(),
-			moq_net::announce::Event::End(_) => {}
+			moq_net::origin::RouteEvent::Start(route)
+			| moq_net::origin::RouteEvent::Update(route)
+			| moq_net::origin::RouteEvent::Restart(route)
+			| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => return route.prefix.to_string(),
+			moq_net::origin::RouteEvent::End(_) => {}
 		}
 	}
 }
@@ -179,7 +183,7 @@ async fn two_publish_only_clients_coexist() {
 	.expect("beta connects");
 
 	let origin = memory::origin();
-	let mut announced = origin.consume().announced();
+	let mut announced = origin.consume().routes();
 	let _subscriber = connect(
 		moq_net::Client::new().with_subscriber(origin),
 		newest(),
@@ -224,7 +228,7 @@ async fn the_setup_path_reaches_the_decider_and_roots_the_grant() {
 
 	let origin = memory::origin();
 	let consumer = origin.consume();
-	let mut announced = consumer.announced();
+	let mut announced = consumer.routes();
 	let _subscriber = connect(
 		moq_net::Client::new().with_subscriber(origin),
 		newest(),

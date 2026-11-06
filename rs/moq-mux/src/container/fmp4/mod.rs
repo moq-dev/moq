@@ -46,9 +46,17 @@ pub const MAX_METADATA_BYTES: usize = MAX_HELD_BYTES / 16;
 ///
 /// Every sample's byte range is resolved before any of the fragment publishes, at about 200 bytes
 /// a sample, so a fragment at this bound plans within [`MAX_HELD_BYTES`]. A `moof` at
-/// [`MAX_METADATA_BYTES`] holds this many 16-byte `trun` entries; a run without per-sample fields
-/// could otherwise declare billions of samples in a few bytes.
+/// [`MAX_METADATA_BYTES`] holds this many 16-byte `trun` entries. A shorter fragment is also held
+/// to one sample per metadata byte past the first 4,096.
 pub const MAX_FRAGMENT_SAMPLES: u64 = (MAX_METADATA_BYTES / 16) as u64;
+
+/// Samples a fragment may declare beyond one per byte of its metadata.
+///
+/// A `trun` entry is at least 4 bytes, so only a run without per-sample fields, which stores just
+/// a count, can declare more samples than it has bytes. Its plan is reserved before any payload
+/// arrives, so this keeps a few-byte `moof` from planning megabytes. A live fragment is a handful
+/// of samples.
+pub(crate) const FRAGMENT_SAMPLE_BASE: u64 = 4096;
 
 /// The most tracks [`Import`] accepts from one `moov`, refused before any is created.
 ///
@@ -241,10 +249,10 @@ pub enum Error {
 	#[error("text sample of {0} bytes is more than the {MAX_HELD_BYTES} an importer holds")]
 	TextSampleTooLarge(usize),
 
-	/// A fragment declaring more than [`MAX_FRAGMENT_SAMPLES`] is refused before parsing.
-	/// A `trun` without per-sample fields declares its
-	/// count in four bytes, so the byte bound alone does not limit it.
-	#[error("moof declares {0} samples, more than the {MAX_FRAGMENT_SAMPLES} a fragment accepts")]
+	/// A fragment declaring more than [`MAX_FRAGMENT_SAMPLES`], or more than one sample per byte
+	/// of its metadata past a small base, is refused before parsing. A `trun` without per-sample
+	/// fields declares its count in four bytes, so the byte bound alone does not limit it.
+	#[error("moof declares {0} samples, more than a fragment of its size accepts")]
 	TooManySamples(u64),
 
 	/// A `moov` declaring more than [`MAX_TRACKS`] tracks is refused before any is created.
@@ -996,7 +1004,7 @@ pub(crate) fn synthesize_video_trak(
 	// Codecs that carry an out-of-band config record require `description`.
 	let require_description = || description.ok_or_else(|| Error::MissingVideoDescription(config.codec.to_string()));
 
-	let colr = color_colr(config.color.as_ref());
+	let colr = color_colr(config.color.as_ref()).into_iter().collect();
 	let sample_entry = match &config.codec {
 		VideoCodec::H264(h264) => {
 			let mut cursor = std::io::Cursor::new(require_description()?);

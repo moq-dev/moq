@@ -247,6 +247,8 @@ async fn connect_addrs(
 #[derive(Clone)]
 pub struct TlsAcceptor {
 	config: std::sync::Arc<rustls::ServerConfig>,
+	/// Builds each accepted client's identity against the listener's current roots.
+	tls: crate::tls::Serve,
 	qmux: qmux::tls::Server,
 	server: moq_net::Server,
 	timeout: Option<std::time::Duration>,
@@ -256,6 +258,7 @@ pub struct TlsAcceptor {
 impl TlsAcceptor {
 	pub(crate) fn new(
 		config: std::sync::Arc<rustls::ServerConfig>,
+		tls: crate::tls::Serve,
 		session: qmux::Config,
 		server: moq_net::Server,
 		timeout: Option<std::time::Duration>,
@@ -263,6 +266,7 @@ impl TlsAcceptor {
 		let qmux = qmux::tls::Server::new(config.clone()).with_session_config(session);
 		Self {
 			config,
+			tls,
 			qmux,
 			server,
 			timeout,
@@ -316,7 +320,8 @@ impl TlsAcceptor {
 					.map_err(|err| Error::Accept(crate::error::message(err)))
 			};
 			let session = crate::server::within(deadline, handshake).await?;
-			let incoming = crate::server::Incoming::tcp(&session, remote, local, deadline, active).with_alpn(alpn);
+			let incoming = crate::server::Incoming::tcp(&session, Some(&self.tls), remote, local, deadline, active)
+				.with_alpn(alpn);
 			crate::server::accept_stream(&self.server, session, incoming).await
 		})
 		.await
@@ -332,6 +337,8 @@ pub struct Listener {
 	session: qmux::Config,
 	/// Present when the listener serves TLS; it negotiates the ALPN itself.
 	tls: Option<qmux::tls::Server>,
+	/// The TLS policy behind `tls`, which builds each accepted client's identity.
+	pub(crate) serve: Option<crate::tls::Serve>,
 }
 
 impl Listener {
@@ -345,15 +352,17 @@ impl Listener {
 				health: crate::accept::Health::new("tcp"),
 				session: crate::qmux_default(),
 				tls: None,
+				serve: None,
 			})
 		})
 		.await
 	}
 
-	/// Serve TLS with `config`, whose ALPN list already names each
-	/// `qmux-01.<protocol>` pair to accept.
-	pub(crate) fn with_tls(mut self, config: std::sync::Arc<rustls::ServerConfig>) -> Self {
+	/// Serve TLS with `config`, built from `serve` with an ALPN list that already
+	/// names each `qmux-01.<protocol>` pair to accept.
+	pub(crate) fn with_tls(mut self, serve: crate::tls::Serve, config: std::sync::Arc<rustls::ServerConfig>) -> Self {
 		self.tls = Some(qmux::tls::Server::new(config).with_session_config(self.session.clone()));
+		self.serve = Some(serve);
 		self
 	}
 
@@ -470,10 +479,9 @@ mod tests {
 
 	/// A `tls://` dial carries qmux and the request target over TLS, and a client
 	/// that does not trust the certificate is refused.
-	#[cfg(feature = "aws-lc-rs")]
 	#[tokio::test]
 	async fn tls_carries_qmux_and_refuses_an_untrusted_certificate() {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		crate::crypto::install_default().unwrap();
 		let mut listen = crate::listen::Config::default();
 		listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 		listen.tcp.tls = Some(true);
@@ -485,12 +493,12 @@ mod tests {
 	/// as QUIC does: CA roots accept a chained certificate or a token-only client,
 	/// pinned peers require a pinned certificate. The request reports the chain
 	/// and the SNI.
-	#[cfg(feature = "aws-lc-rs")]
 	#[tokio::test]
 	async fn tls_verifies_a_client_certificate() {
-		use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair};
+		use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer};
+		use rind_rcgen::KeyPair;
 
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		crate::crypto::install_default().unwrap();
 		let dir = tempfile::tempdir().unwrap();
 		let write = |name: &str, contents: String| {
 			let path = dir.path().join(name);
@@ -498,22 +506,38 @@ mod tests {
 			path
 		};
 
-		let ca_key = KeyPair::generate().unwrap();
-		let mut ca_params = CertificateParams::new(Vec::new()).unwrap();
+		let ca_key = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let mut ca_params = CertificateParams::new(Vec::new())
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
+			.unwrap();
 		ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
 		let ca_cert = ca_params.self_signed(&ca_key).unwrap();
 		let issuer = Issuer::from_params(&ca_params, &ca_key);
-		let client_key = KeyPair::generate().unwrap();
-		let mut client_params = CertificateParams::new(vec!["client.example".to_string()]).unwrap();
+		let client_key = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let mut client_params = CertificateParams::new(vec!["client.example".to_string()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
+			.unwrap();
 		client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
 		let client_cert = client_params.signed_by(&client_key, &issuer).unwrap();
 		let fingerprint = crate::tls::PeerIdentity::from_chain(vec![client_cert.der().clone()])
 			.fingerprint()
 			.unwrap();
+		let ca_fingerprint = crate::tls::PeerIdentity::from_chain(vec![ca_cert.der().clone()])
+			.fingerprint()
+			.unwrap();
 		let ca = write("ca.pem", ca_cert.pem());
 		let cert = (
 			write("client.pem", client_cert.pem()),
-			write("client.key", client_key.serialize_pem()),
+			write(
+				"client.key",
+				pem::encode(&pem::Pem::new("PRIVATE KEY", client_key.to_pkcs8().secret_pkcs8_der())),
+			),
 		);
 
 		let listen = |set: &dyn Fn(&mut crate::listen::Config)| {
@@ -533,6 +557,11 @@ mod tests {
 			.expect("CA-rooted certificate refused");
 		let identity = identity.expect("the chain is reported");
 		assert_eq!(identity.name().as_deref(), Some("client.example"));
+		assert_eq!(
+			identity.lineage().unwrap(),
+			[fingerprint.clone(), ca_fingerprint],
+			"lineage ends at the listener root the client did not send"
+		);
 		assert_eq!(sni.as_deref(), Some("localhost"));
 		let (_server, identity, _) = mtls_dial(server, None).await.expect("token-only client refused");
 		assert!(identity.is_none());
@@ -563,7 +592,6 @@ mod tests {
 	/// Dial `server` over `tls://localhost`, presenting `cert` (a PEM cert and key)
 	/// if given. Returns the server with the accepted request's identity and SNI,
 	/// or `None` when the dial is refused.
-	#[cfg(feature = "aws-lc-rs")]
 	async fn mtls_dial(
 		mut server: crate::Listener,
 		cert: Option<&(std::path::PathBuf, std::path::PathBuf)>,
@@ -600,7 +628,6 @@ mod tests {
 		Some((server, identity, sni))
 	}
 
-	#[cfg(feature = "aws-lc-rs")]
 	async fn tls_round_trip(listen: crate::listen::Config) {
 		let mut server = listen.init(Default::default()).unwrap().listen().await.unwrap();
 		let port = server.tcp_local_addr().unwrap().port();

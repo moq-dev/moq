@@ -1,6 +1,6 @@
 import { Milli, Nano } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
-import type * as announce from "../announced.ts";
+import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
 import type { Established } from "../connection/established.ts";
@@ -10,6 +10,7 @@ import { type Transport, transportOf } from "../connection/transport.ts";
 import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCause } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
+import { hooks } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
@@ -18,11 +19,13 @@ import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
 import { AnnounceRequest } from "./announce.ts";
 import { LiteAuthWire } from "./auth.ts";
+import { Datagrams } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
 import { Group } from "./group.ts";
 import { Publisher } from "./publisher.ts";
+import { proveRouteKey } from "./route_key.ts";
 import { SessionInfo } from "./session.ts";
 import { hasClientParameters, ProbeLevel, type Role, Setup } from "./setup.ts";
 import { DataType, StreamId } from "./stream.ts";
@@ -33,9 +36,12 @@ import { Tracks as TracksMessage } from "./tracks.ts";
 import {
 	hasAuth,
 	hasDatagrams,
+	hasDatagramTracks,
 	hasGoaway,
+	hasHidden,
 	hasPadding,
 	hasProbeRtt,
+	hasRouteKey,
 	hasSetupStream,
 	hasTrackStream,
 	hasTracks,
@@ -211,6 +217,13 @@ export class Connection implements Established {
 		// finds this session still active.
 		const leave = () => this.#auth.close();
 		void quic.closed.then(leave, leave);
+		// Before lite-07 the peer can't ask for hidden routes, so a client publishes none of
+		// them, and a socket endpoint behind it is unreachable. A server leaves it to the
+		// client, whose origin holds that endpoint.
+		if (client && publish && !hasHidden(version)) {
+			const withholding = hooks.withholdHidden(publish);
+			void quic.closed.then(withholding, withholding);
+		}
 		this.#auth.violated.subscribe((err) => {
 			if (!err) return;
 			closeViolation(this.#quic, err);
@@ -344,8 +357,14 @@ export class Connection implements Established {
 		}
 	}
 
+	/** The paths announced matching `scope`, each present or absent; see {@link Established.announced}. */
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
-		return this.#subscriber.announced(scope, options);
+		return announce.list(this.#subscriber.routes(scope, options));
+	}
+
+	/** Every route change matching `scope`, for code that forwards routes. @internal */
+	routes(scope?: Path.Pattern, options?: announce.Options): announce.Routes {
+		return this.#subscriber.routes(scope, options);
 	}
 
 	async #runSession() {
@@ -376,10 +395,14 @@ export class Connection implements Established {
 		try {
 			await writer.u53(DataType.Setup);
 			const probe = await probeLevel(this.#quic, this.#version);
-			await new Setup({ probe, hop: this.hop, token: this.#token, implementation: this.#implementation }).encode(
-				writer,
-				this.#version,
-			);
+			const routeKey = hasRouteKey(this.#version) ? await proveRouteKey(this.#quic, this.#client) : undefined;
+			await new Setup({
+				probe,
+				hop: this.hop,
+				token: this.#token,
+				implementation: this.#implementation,
+				routeKey,
+			}).encode(writer, this.#version);
 			writer.close();
 		} catch (err: unknown) {
 			writer.reset(err);
@@ -422,6 +445,14 @@ export class Connection implements Established {
 				(async () => {
 					const msg = await Subscribe.decode(stream.reader, this.#version);
 					await this.#publisher.runSubscribe(msg, stream);
+				})(),
+			);
+		} else if (typ === StreamId.Datagrams) {
+			if (!hasDatagramTracks(this.#version)) throw new Error("DATAGRAMS is not supported on this version");
+			await this.#publisher.owe(
+				(async () => {
+					const msg = await Datagrams.decode(stream.reader, this.#version);
+					await this.#publisher.runDatagrams(msg, stream);
 				})(),
 			);
 		} else if (typ === StreamId.Fetch) {
@@ -518,7 +549,9 @@ export class Connection implements Established {
 
 	/** Snapshot the transport's counters; see {@link Established.stats}. */
 	async stats(): Promise<Stats> {
-		return transportStats(this.#quic);
+		const stats = await transportStats(this.#quic);
+		if (hasDatagrams(this.#version)) stats.datagramsUnrouted = this.#subscriber.datagramsUnrouted;
+		return stats;
 	}
 
 	/** Settles with the peer's GOAWAY; see {@link Established.draining}. */

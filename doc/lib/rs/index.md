@@ -14,13 +14,18 @@ then add [hang](/lib/rs/hang) for media. To run a tool without embedding it,
 see [Applications](/bin/). [Examples](/setup/examples) links runnable consumers;
 [Repository map](/setup/repository) locates internal crates and their tests.
 
+Transport cryptography comes from [rind](https://github.com/moq-dev/rind).
+It supports every x86\_64 CPU, aarch64 with NEON (including Raspberry Pi 4,
+CM4, and Zero 2 W without crypto extensions), and armv7. Setup reports a
+missing required CPU feature before starting transport cryptography.
+
 ## Crates
 
 | Crate | Does |
 | --- | --- |
 | [moq-net](/lib/rs/moq-net) | The pub/sub layer: sessions, origins, broadcasts, tracks, groups, frames. Transport-agnostic. |
 | [moq-pattern](https://docs.rs/moq-pattern) | Path patterns such as `room/**`. Re-exported by moq-net and moq-auth. |
-| [moq-tokio](https://docs.rs/moq-tokio) | Connects and listens over QUIC, WebTransport, WebSocket, TCP, or Unix sockets, from config or CLI flags, and runs WebRTC data channels that the caller signals (`webrtc` feature). With default features off, `driver` plus `aws-lc-rs` or `ring` builds a Tokio QUIC stack without MoQ. |
+| [moq-tokio](https://docs.rs/moq-tokio) | Connects and listens over QUIC, WebTransport, WebSocket, TCP, or Unix sockets, from config or CLI flags, and runs WebRTC data channels that the caller signals (`webrtc` feature). With default features off, `driver` builds a Tokio QUIC stack, with rind cryptography, without MoQ. |
 | [qmux](https://docs.rs/qmux) | QUIC streams, datagrams, and flow control over TCP, TLS, WebSocket, and Unix sockets, on moq-quic's state machine. |
 | [moq-sock](https://docs.rs/moq-sock) | Socket binding and CPU pinning for thread-per-core listeners. |
 | [moq-ice](https://github.com/moq-dev/moq/tree/main/rs/moq-ice) | Internal infrastructure with no stability promise; the ICE agent behind native WebRTC: drives a str0m connection over UDP, with a STUN client. |
@@ -62,9 +67,10 @@ let session = client.with_origin(origin.clone()).connect(url);
 let consumer = origin.consume();
 let mut announced = consumer.announced();
 while let Some(event) = announced.next().await {
-    // Skip updates and retractions.
-    let moq_net::announce::Event::Start(update) = event else { continue };
-    let broadcast = consumer.request(&update.prefix, update.route.instance).await?;
+    // Skip retractions. A path stays present across publisher restarts: hold
+    // `consumer.follow(path, None)` to be handed each new run.
+    let moq_net::announce::Event::Present(update) = event else { continue };
+    let broadcast = consumer.request(&update.prefix, Some(update.route.instance().clone())).await?;
     let catalog = broadcast
         .track(hang::Catalog::DEFAULT_NAME)?
         .subscribe(hang::Catalog::default_subscription())
@@ -74,12 +80,14 @@ while let Some(event) = announced.next().await {
 ```
 
 ```rust
-// Publish: create and announce a broadcast on the origin, then fill it.
-let mut broadcast = origin.publish("my-stream.hang", Default::default())?;
-// moq-mux (from a container) or moq-video / moq-audio (from a device) fill it.
-// The route retracts on `unannounce()` or when the broadcast ends. To serve a whole
-// subtree on demand instead, `origin.requests("room")?` yields each requested path:
-// `prepare()`, fill its broadcast, then `publish()`, or reject it.
+// Publish: create a route on the origin; it owns the broadcast to fill.
+let route = origin.route("my-stream.hang", RouteOptions::default())?;
+// moq-mux (from a container) or moq-video / moq-audio (from a device) fill
+// `route.broadcast()`. Keep the route: dropping it, or closing its broadcast,
+// retracts it, and `withdraw()`/`announce()` hide and show the same stream. To
+// serve a whole subtree on demand instead, `origin.route_prefix("room", ..)?`
+// yields each requested path: answer with `request.route(..)`, `serve` a held
+// broadcast, or `reject`.
 ```
 
 The connection and origin helpers spawn their drivers. Watch

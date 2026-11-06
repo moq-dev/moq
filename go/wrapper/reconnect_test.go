@@ -109,7 +109,7 @@ func waitConnects(t *testing.T, ctx context.Context, session *moq.Session, want 
 	}
 }
 
-// awaitAnnouncement drains announcements until an active one names path.
+// awaitAnnouncement drains announcements until path is present.
 func awaitAnnouncement(t *testing.T, ctx context.Context, announced *moq.AnnounceConsumer, path string) {
 	t.Helper()
 
@@ -121,7 +121,7 @@ func awaitAnnouncement(t *testing.T, ctx context.Context, announced *moq.Announc
 		if event == nil {
 			t.Fatalf("announcement stream ended before %q", path)
 		}
-		if ann, ok := event.(moq.AnnounceEventStart); ok && ann.Announce.Prefix == path {
+		if ann, ok := event.(moq.AnnounceEventPresent); ok && ann.Announce.Prefix == path {
 			return
 		}
 	}
@@ -184,11 +184,15 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	publisher := dialWorker(t, ctx, url)
 	defer publisher.Close()
 
-	publication, err := publisher.CreateBroadcast("live")
+	route, err := publisher.Route("live", moq.RouteOptions{Hidden: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	broadcast := publication.Broadcast()
+	defer route.Cancel()
+	broadcast, err := route.Broadcast()
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer broadcast.Close()
 
 	track, err := broadcast.PublishTrack("data", timedInfo())
@@ -196,7 +200,7 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer track.Finish()
-	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := route.Announce(); err != nil {
 		t.Fatal(err)
 	}
 

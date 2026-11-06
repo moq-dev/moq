@@ -5,7 +5,9 @@ The hack is a path-only dev-dependency, so tests and lints share one build of
 every third-party crate while `cargo publish` strips it. `cargo hakari
 manage-deps` only writes normal dependencies, so this checks the edges instead:
 every member dev-depends on the hack, except those `.config/hakari.toml`
-excludes, which must not depend on it at all. Run from `just rs lint`.
+excludes, and crates whose UI tests use trybuild. Neither may depend on it
+at all: trybuild copies dev-dependencies into every UI test project. Run
+from `just rs lint`.
 """
 
 import json
@@ -38,6 +40,10 @@ for package in metadata["packages"]:
     name = package["name"]
     edges = [dep for dep in package["dependencies"] if dep["name"] == hack]
     manifest = Path(package["manifest_path"]).relative_to(ROOT)
+    if any(dep["name"] == "trybuild" and dep["kind"] == "dev" for dep in package["dependencies"]):
+        if edges:
+            errors.append(f"{manifest}: trybuild copies dev-dependencies into UI tests; remove the {hack} edge")
+        continue
     if name in excluded:
         if edges:
             errors.append(f"{manifest}: {name} is excluded in .config/hakari.toml but depends on {hack}")

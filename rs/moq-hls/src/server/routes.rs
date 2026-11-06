@@ -1,6 +1,8 @@
 //! axum handlers for the HLS endpoints.
 
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
@@ -49,19 +51,19 @@ impl Server {
 				instance,
 				kind,
 				rendition,
-			} => media(self, At::new(broadcast, instance, *kind, rendition), query).await,
+			} => media(self, At::new(route, instance, *kind, rendition), query).await,
 			Resource::Init {
 				instance,
 				kind,
 				rendition,
 				hash,
-			} => init(self, At::new(broadcast, instance, *kind, rendition), hash).await,
+			} => init(self, At::new(route, instance, *kind, rendition), hash).await,
 			Resource::Segment {
 				instance,
 				kind,
 				rendition,
 				segment: id,
-			} => segment(self, At::new(broadcast, instance, *kind, rendition), id).await,
+			} => segment(self, At::new(route, instance, *kind, rendition), id).await,
 		}
 	}
 }
@@ -103,9 +105,24 @@ async fn manifest(server: &Server, broadcast: &str, query: Option<&str>) -> Resp
 }
 
 async fn media(server: &Server, at: At<'_>, query: Option<&str>) -> Response {
-	let Some(rendition) = rendition_for(server, at).await else {
-		return not_found();
+	let rendition = match rendition_for(server, at).await {
+		Ok(Some(rendition)) => rendition,
+		Ok(None) => return not_found(),
+		Err(err) => return server_error(err),
 	};
+	let demand = rendition.demand();
+	if rendition.is_lazy() {
+		// Unbounded on purpose: this request's demand is what starts an on-demand encode, whose
+		// first segment can take longer than `READY_TIMEOUT`, and a 404 then would tell the player
+		// the rendition is missing while it is still starting. The wait ends with the client's
+		// connection, which drops the demand with it.
+		let response = match rendition.playlist(query).await {
+			Ok(Some(playlist)) => m3u8(playlist),
+			Ok(None) => not_found(),
+			Err(err) => server_error(err),
+		};
+		return demanded(response, demand);
+	}
 	match kio::clock::timeout(READY_TIMEOUT, rendition.playlist(query)).await {
 		Ok(Ok(Some(playlist))) => m3u8(playlist),
 		Ok(Ok(None)) | Err(_) => not_found(),
@@ -114,32 +131,76 @@ async fn media(server: &Server, at: At<'_>, query: Option<&str>) -> Response {
 }
 
 async fn init(server: &Server, at: At<'_>, hash: &str) -> Response {
-	let Some(rendition) = rendition_for(server, at).await else {
-		return not_found();
+	let rendition = match rendition_for(server, at).await {
+		Ok(Some(rendition)) => rendition,
+		Ok(None) => return not_found(),
+		Err(err) => return server_error(err),
 	};
-	media_result(rendition.init(hash).await, server)
+	let demand = rendition.demand();
+	let response = media_result(rendition.init(hash).await, server);
+	if rendition.is_lazy() {
+		demanded(response, demand)
+	} else {
+		response
+	}
 }
 
 async fn segment(server: &Server, at: At<'_>, id: &segments::Id) -> Response {
-	let Some(rendition) = rendition_for(server, at).await else {
-		return not_found();
+	let rendition = match rendition_for(server, at).await {
+		Ok(Some(rendition)) => rendition,
+		Ok(None) => return not_found(),
+		Err(err) => return server_error(err),
 	};
-	media_result(rendition.segment(id).await, server)
+	let demand = rendition.demand();
+	let response = media_result(rendition.segment(id).await, server);
+	if rendition.is_lazy() {
+		demanded(response, demand)
+	} else {
+		response
+	}
+}
+
+/// Retain demand through the HTTP body's lifetime, including backpressure from a slow player.
+fn demanded(response: Response, demand: crate::export::Demand) -> Response {
+	let (parts, body) = response.into_parts();
+	Response::from_parts(parts, axum::body::Body::new(Demanded { body, _demand: demand }))
+}
+
+struct Demanded {
+	body: axum::body::Body,
+	_demand: crate::export::Demand,
+}
+
+impl http_body::Body for Demanded {
+	type Data = Bytes;
+	type Error = axum::Error;
+	fn poll_frame(
+		mut self: Pin<&mut Self>,
+		cx: &mut Context<'_>,
+	) -> Poll<Option<Result<http_body::Frame<Bytes>, axum::Error>>> {
+		Pin::new(&mut self.body).poll_frame(cx)
+	}
+	fn is_end_stream(&self) -> bool {
+		self.body.is_end_stream()
+	}
+	fn size_hint(&self) -> http_body::SizeHint {
+		self.body.size_hint()
+	}
 }
 
 /// A rendition of one publisher instance, as an instance-scoped URL names it.
 #[derive(Clone, Copy)]
 struct At<'a> {
-	broadcast: &'a str,
+	route: &'a Route,
 	instance: &'a str,
 	kind: Kind,
 	rendition: &'a str,
 }
 
 impl<'a> At<'a> {
-	fn new(broadcast: &'a str, instance: &'a str, kind: Kind, rendition: &'a str) -> Self {
+	fn new(route: &'a Route, instance: &'a str, kind: Kind, rendition: &'a str) -> Self {
 		Self {
-			broadcast,
+			route,
 			instance,
 			kind,
 			rendition,
@@ -148,10 +209,19 @@ impl<'a> At<'a> {
 }
 
 /// Resolve a rendition, waiting for the catalog to populate.
-async fn rendition_for(server: &Server, at: At<'_>) -> Option<Arc<Rendition>> {
-	let broadcaster = server.instance(at.broadcast, at.instance).await?;
+async fn rendition_for(server: &Server, at: At<'_>) -> crate::Result<Option<Arc<Rendition>>> {
+	let Some(broadcaster) = server.instance(&at.route.broadcast, at.instance).await else {
+		return Ok(None);
+	};
+	if let Some(include) = &at.route.include {
+		// Resolve a cold edge's include before looking up its rendition. This
+		// bounds discovery only; the requested rendition's first encode waits below.
+		return kio::clock::timeout(READY_TIMEOUT, broadcaster.include(include, at.kind, at.rendition))
+			.await
+			.unwrap_or(Ok(None));
+	}
 	let _ = kio::clock::timeout(READY_TIMEOUT, broadcaster.ready()).await;
-	broadcaster.rendition(at.kind, at.rendition)
+	Ok(broadcaster.rendition(at.kind, at.rendition))
 }
 
 fn m3u8(body: String) -> Response {
@@ -231,8 +301,8 @@ mod tests {
 	/// The instance each test's catalog broadcast announces, and so the instance its URLs name.
 	const RUN: &str = "01920000-0000-7000-8000-000000000000";
 
-	fn run() -> moq_net::origin::Route {
-		moq_net::origin::Route::default().with_instance(RUN.parse().unwrap(), 0)
+	fn run() -> moq_net::origin::RouteOptions {
+		moq_net::origin::RouteOptions::default().with_instance(RUN.parse().unwrap(), 0)
 	}
 
 	fn vp8_frame(micros: u64, keyframe: bool) -> moq_mux::container::Frame {
@@ -339,8 +409,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn master_answers_404_until_a_rendition_can_start() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("live").expect("publish");
-		broadcast.announce(run()).expect("announce");
+		let broadcast = origin.route("live", run()).expect("publish");
 		let (_catalog, _registration, _track, mut media) =
 			publish_video(&mut broadcast.broadcast().clone(), video_config(), timed());
 
@@ -358,8 +427,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn the_first_manifest_lists_inline_video() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("live").expect("publish");
-		broadcast.announce(run()).expect("announce");
+		let broadcast = origin.route("live", run()).expect("publish");
 		let inline = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		let (_catalog, _registration, _track, mut media) =
 			publish_video(&mut broadcast.broadcast().clone(), inline, timed());
@@ -380,24 +448,24 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_denied_video_never_holds_the_manifest() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("room/live").unwrap();
-		broadcast.announce(run()).unwrap();
-		let secret = origin.create_broadcast("room/secret").unwrap();
-		secret.announce(Default::default()).unwrap();
+		let broadcast = origin.route("room/live", run()).unwrap();
+		let secret = origin
+			.route("room/secret", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), hls_config()).unwrap();
 		let reserved = catalog.reserve();
 		let mut config = video_config();
 		config.broadcast = Some(moq_net::path::Relative::new("./secret").unwrap());
 		let mut video = reserved
 			.video(
-				secret.create_track("video0", timed()).unwrap(),
+				secret.broadcast().create_track("video0", timed()).unwrap(),
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 				config,
 			)
 			.unwrap();
 		let mut audio = reserved
 			.audio(
-				broadcast.create_track("audio0", timed()).unwrap(),
+				broadcast.broadcast().create_track("audio0", timed()).unwrap(),
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
 				hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
 			)
@@ -434,8 +502,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_restart_lists_the_replacement_under_its_own_urls() {
 		let origin = moq_tokio::origin::spawn();
-		let old = origin.create_broadcast("live").expect("publish");
-		old.announce(run()).expect("announce");
+		let old = origin.route("live", run()).expect("publish");
 		let (old_catalog, _, old_track, mut old_media) =
 			publish_video(&mut old.broadcast().clone(), video_config(), timed());
 		write_three_gops(&mut old_media);
@@ -449,9 +516,12 @@ mod tests {
 		wait_listed(&app, &old_playlist, "seg/8343e7cd.0.m4s").await;
 
 		let next = moq_net::Instance::random();
-		let new = origin.create_broadcast("live").expect("publish");
-		new.announce(moq_net::origin::Route::default().with_instance(next.clone(), 0))
-			.expect("announce");
+		let new = origin
+			.route(
+				"live",
+				moq_net::origin::RouteOptions::default().with_instance(next.clone(), 0),
+			)
+			.expect("publish");
 		let (_new_catalog, _, _new_track, mut new_media) =
 			publish_video(&mut new.broadcast().clone(), video_config(), timed());
 		write_three_gops(&mut new_media);
@@ -482,8 +552,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_replaced_recording_ends_at_what_it_listed() {
 		let origin = moq_tokio::origin::spawn();
-		let old = origin.create_broadcast("live").expect("publish");
-		old.announce(run()).expect("announce");
+		let old = origin.route("live", run()).expect("publish");
 		let (_old_catalog, _, _old_track, mut old_media) =
 			publish_video(&mut old.broadcast().clone(), video_config(), timed());
 		// Keyframes at 0, 2, and 4 s list segments 0 and 1; the third waits for its successor.
@@ -500,9 +569,12 @@ mod tests {
 		let mut old_segments = old_rendition.segments();
 
 		let next = moq_net::Instance::random();
-		let new = origin.create_broadcast("live").expect("publish");
-		new.announce(moq_net::origin::Route::default().with_instance(next.clone(), 0))
-			.expect("announce");
+		let new = origin
+			.route(
+				"live",
+				moq_net::origin::RouteOptions::default().with_instance(next.clone(), 0),
+			)
+			.expect("publish");
 		let (_new_catalog, _, _new_track, mut new_media) =
 			publish_video(&mut new.broadcast().clone(), video_config(), timed());
 		write_three_gops(&mut new_media);
@@ -569,8 +641,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_failed_media_track_answers_an_uncacheable_error() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("live").expect("publish");
-		broadcast.announce(run()).expect("announce");
+		let broadcast = origin.route("live", run()).expect("publish");
 		let (_catalog, _registration, track, mut media) =
 			publish_video(&mut broadcast.broadcast().clone(), video_config(), timed());
 		write_three_gops(&mut media);
@@ -607,8 +678,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn serves_only_versioned_media_urls() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("live").expect("publish");
-		broadcast.announce(run()).expect("announce");
+		let broadcast = origin.route("live", run()).expect("publish");
 		let (_catalog, _registration, _track, mut media) =
 			publish_video(&mut broadcast.broadcast().clone(), video_config(), timed());
 		write_three_gops(&mut media);
@@ -676,19 +746,20 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn denied_sibling_media_answers_403_without_poisoning_allowed_siblings() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("room/live").unwrap();
-		broadcast.announce(run()).unwrap();
-		let source = origin.create_broadcast("room/source").unwrap();
-		source.announce(Default::default()).unwrap();
-		let secret = origin.create_broadcast("room/secret").unwrap();
-		secret.announce(Default::default()).unwrap();
+		let broadcast = origin.route("room/live", run()).unwrap();
+		let source = origin
+			.route("room/source", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		let secret = origin
+			.route("room/secret", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), hls_config()).unwrap();
 		let reserved = catalog.reserve();
 		let mut config = video_config();
 		config.broadcast = Some(moq_net::path::Relative::new("./source").unwrap());
 		let mut allowed = reserved
 			.video(
-				source.create_track("video0", timed()).unwrap(),
+				source.broadcast().create_track("video0", timed()).unwrap(),
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 				config,
 			)
@@ -697,7 +768,7 @@ mod tests {
 		config.broadcast = Some(moq_net::path::Relative::new("./secret").unwrap());
 		let mut denied = reserved
 			.video(
-				secret.create_track("video1", timed()).unwrap(),
+				secret.broadcast().create_track("video1", timed()).unwrap(),
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 				config,
 			)
@@ -752,7 +823,7 @@ mod tests {
 		));
 		// Broader authority can consume the referenced bytes, but cannot warm the
 		// restricted server's export into using them.
-		let broad = moq_mux::Source::new(origin.consume(), broadcast.consume());
+		let broad = moq_mux::Source::new(origin.consume(), broadcast.broadcast().consume());
 		let referenced = broad
 			.resolve(Some(&moq_net::path::Relative::new("./secret").unwrap()), None)
 			.await

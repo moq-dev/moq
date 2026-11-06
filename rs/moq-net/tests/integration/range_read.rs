@@ -63,8 +63,11 @@ async fn fixture(
 	relay: bool,
 ) -> (moq_net::broadcast::Consumer, moq_net::track::Producer, impl Sized) {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let mut track = broadcast
+		.broadcast()
 		.create_track(
 			"video",
 			moq_net::track::Info::default()
@@ -72,7 +75,7 @@ async fn fixture(
 				.with_max_age(None),
 		)
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 	for sequence in 0..3 {
 		write_group(&mut track, sequence);
 	}
@@ -97,7 +100,8 @@ async fn fixture(
 	let remote = kio::clock::timeout(TIMEOUT, client.consume().follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 	(remote, track, (sessions, broadcast, publisher, middle, client))
 }
 

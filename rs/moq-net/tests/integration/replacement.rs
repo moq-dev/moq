@@ -14,7 +14,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Error, Hop, Instance, Timestamp, Version, announce, broadcast, origin, track};
+use moq_net::{Error, Hop, Instance, Timestamp, Version, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -39,7 +39,7 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) 
 }
 
 /// The next announce event, failing on a hang.
-async fn next_event(announced: &mut announce::Consumer) -> announce::Event {
+async fn next_event(announced: &mut origin::Routes) -> origin::RouteEvent {
 	kio::clock::timeout(Duration::from_secs(10), announced.next())
 		.await
 		.expect("announce hung")
@@ -82,19 +82,21 @@ async fn replace(version: &str, instance: Option<Instance>) {
 	let publisher = produce_origin(1);
 	let viewer = produce_origin(3);
 
-	let mut route = origin::Route::default();
-	route.instance = instance.clone();
-	let cam = publisher.publish("cam", route).unwrap();
-	let video = cam.create_track("video", timed()).unwrap();
-	let audio = cam.create_track("audio", timed()).unwrap();
-	let meta = cam.create_track("meta", timed()).unwrap();
+	let options = match &instance {
+		Some(instance) => origin::RouteOptions::default().with_instance(instance.clone(), 0),
+		None => origin::RouteOptions::default(),
+	};
+	let cam = publisher.route("cam", options).unwrap();
+	let video = cam.broadcast().create_track("video", timed()).unwrap();
+	let audio = cam.broadcast().create_track("audio", timed()).unwrap();
+	let meta = cam.broadcast().create_track("meta", timed()).unwrap();
 
 	let _first = link(version, &publisher, &viewer).await;
-	let mut announced = viewer.consume().announced();
+	let mut announced = viewer.consume().routes();
 	match next_event(&mut announced).await {
-		announce::Event::Start(announce) => {
+		origin::RouteEvent::Start(announce) => {
 			assert_eq!(announce.prefix.as_str(), "cam");
-			let carried = announce.route.instance.as_ref().expect("every route has an instance");
+			let carried = announce.route.instance();
 			assert_eq!(carried.is_minted(), !carries, "{version}: minted {carried}");
 			if carries && let Some(instance) = &instance {
 				assert_eq!(carried, instance, "{version}: carried instance");
@@ -131,7 +133,7 @@ async fn replace(version: &str, instance: Option<Instance>) {
 	// A minted instance makes the replacement a restart, delivered at once, and the old
 	// handle refuses new requests from then on.
 	match announced.try_next() {
-		Some(announce::Event::Restart(announce)) => assert_eq!(announce.prefix.as_str(), "cam"),
+		Some(origin::RouteEvent::Restart(announce)) => assert_eq!(announce.prefix.as_str(), "cam"),
 		other => panic!("{version}: expected the restart, got {other:?}"),
 	}
 	let Err(err) = subscribe(&old, "meta").await else {
@@ -157,7 +159,7 @@ async fn minted_lite06() {
 		.expect("timed out");
 }
 
-/// lite-07 carries the instance the publication minted, or the stable one it names.
+/// lite-07 carries the instance the route minted, or the stable one it names.
 #[kio::test]
 async fn carried_lite07() {
 	for instance in [None, Some("cam".parse().unwrap())] {
@@ -190,8 +192,10 @@ async fn route_death(version: &str, relayed: bool, wait: Duration) {
 	let relay = produce_origin(2);
 	let viewer = produce_origin(3);
 
-	let cam = publisher.publish("cam", origin::Route::default()).unwrap();
-	let video = cam.create_track("video", timed()).unwrap();
+	let cam = publisher
+		.route("cam", moq_net::origin::RouteOptions::default())
+		.unwrap();
+	let video = cam.broadcast().create_track("video", timed()).unwrap();
 
 	let upstream = if relayed { &relay } else { &viewer };
 	let old_session = link(version, &publisher, upstream).await;
@@ -199,7 +203,7 @@ async fn route_death(version: &str, relayed: bool, wait: Duration) {
 		true => Some(link(version, &relay, &viewer).await),
 		false => None,
 	};
-	let mut announced = viewer.consume().announced();
+	let mut announced = viewer.consume().routes();
 	next_event(&mut announced).await;
 
 	let old = viewer.consume().request("cam", None).await.unwrap();
@@ -273,10 +277,10 @@ async fn restart_while_the_old_session_lingers(version: &str, old_hop: u64, new_
 	let viewer = produce_origin(3);
 
 	let old = produce_origin(old_hop);
-	let old_cam = old.publish("cam", origin::Route::default()).unwrap();
-	let _old_video = old_cam.create_track("video", timed()).unwrap();
+	let old_cam = old.route("cam", moq_net::origin::RouteOptions::default()).unwrap();
+	let _old_video = old_cam.broadcast().create_track("video", timed()).unwrap();
 	let old_session = link(version, &old, &viewer).await;
-	let mut announced = viewer.consume().announced();
+	let mut announced = viewer.consume().routes();
 	next_event(&mut announced).await;
 
 	// The old process dies without a close: its session falls silent.
@@ -284,8 +288,8 @@ async fn restart_while_the_old_session_lingers(version: &str, old_hop: u64, new_
 	old_session.server_transport.set_latency(Duration::from_secs(3600));
 
 	let new = produce_origin(new_hop);
-	let new_cam = new.publish("cam", origin::Route::default()).unwrap();
-	let new_video = new_cam.create_track("video", timed()).unwrap();
+	let new_cam = new.route("cam", moq_net::origin::RouteOptions::default()).unwrap();
+	let new_video = new_cam.broadcast().create_track("video", timed()).unwrap();
 	let _new_session = link(version, &new, &viewer).await;
 	kio::clock::sleep(PAST_HOLD).await;
 

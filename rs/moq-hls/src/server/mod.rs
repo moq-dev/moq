@@ -61,6 +61,8 @@
 //! # }
 //! ```
 
+#[cfg(test)]
+mod include_tests;
 mod routes;
 
 use std::collections::HashMap;
@@ -69,7 +71,6 @@ use std::task::Poll;
 use std::time::Duration;
 
 use axum::Router;
-use moq_mux::follow;
 
 use crate::export::{Broadcaster, Config};
 
@@ -228,7 +229,10 @@ impl Server {
 			return Some(followed.clone());
 		}
 
-		let instances = follow::Instances::new(&self.inner.origin, name, None)
+		let instances = self
+			.inner
+			.origin
+			.follow(name, None)
 			.map_err(|err| tracing::warn!(%err, %name, "failed to follow broadcast"))
 			.ok()?;
 		// A request answers once the origin has synced with the relay, so a path with no route
@@ -261,13 +265,14 @@ impl Server {
 			broadcasts.insert(name.to_string(), followed.clone());
 		}
 
-		let task = tokio::spawn(run_follow(
-			Arc::downgrade(&self.inner),
-			name.to_string(),
-			Arc::downgrade(&followed),
+		let mut follow = Follow {
+			inner: Arc::downgrade(&self.inner),
+			name: name.to_string(),
+			followed: Arc::downgrade(&followed),
 			instances,
-			broadcast,
-		));
+			served: Some(broadcast),
+		};
+		let task = tokio::spawn(kio::wait(move |waiter| follow.poll(waiter)));
 		*followed.task.lock().unwrap() = Some(task);
 		Some(followed)
 	}
@@ -281,65 +286,74 @@ impl Inner {
 	/// broadcaster.
 	fn serve(&self, broadcast: moq_net::broadcast::Consumer) -> Broadcaster {
 		let source = moq_mux::Source::new(self.origin.consume(), broadcast);
-		let (broadcaster, driver) = Broadcaster::start(source, self.config.clone());
+		let (broadcaster, driver) = Broadcaster::start(source, self.config.clone(), Some(self.origin.clone()));
 		tokio::spawn(driver.run());
 		broadcaster
 	}
 }
 
-/// Follow `name`'s instances into `followed` until nothing serves the path, then forget it, so the
-/// next request follows the path afresh. Holds both weakly, so it never keeps the server's state
-/// alive; dropping `followed` aborts it. `served` is the instance `followed` starts on, which the
-/// follower hands out first unless another took over since, or folds away if it closed first.
-async fn run_follow(
+/// Follows `name`'s instances into `followed` until nothing serves the path, then forgets it, so
+/// the next request follows the path afresh. Holds both weakly, so it never keeps the server's
+/// state alive; dropping `followed` aborts it. `served` is the instance `followed` starts on, which
+/// the follower hands out first unless another took over since, or folds away if it closed first.
+struct Follow {
 	inner: Weak<Inner>,
 	name: String,
 	followed: Weak<Followed>,
-	mut instances: follow::Instances,
-	served: moq_net::broadcast::Consumer,
-) {
-	let mut served = Some(served);
-	let (inner, followed) = loop {
-		let next = kio::wait(|waiter| {
-			let Some(followed) = followed.upgrade() else {
-				return Poll::Ready(None);
-			};
-			followed.forget_closed(waiter);
-			if let Poll::Ready(next) = instances.poll_next(waiter) {
-				return Poll::Ready(Some(next));
-			}
-			// The follower folds away an instance that started and ended before its first poll,
-			// so the served instance closing before it is handed out means nothing serves the path.
-			match &served {
-				Some(served) => served.poll_closed(waiter).map(|()| Some(Ok(follow::Event::End))),
-				None => Poll::Pending,
-			}
-		})
-		.await;
-		let (Some(inner), Some(followed)) = (inner.upgrade(), followed.upgrade()) else {
-			return;
-		};
-		match next {
-			Some(Ok(follow::Event::Start(broadcast))) => {
-				if !served.take().is_some_and(|served| served.is_clone(&broadcast)) {
-					followed.start(inner.serve(broadcast));
-				}
-			}
-			Some(Ok(follow::Event::End)) => break (inner, followed),
-			Some(Err(err)) => {
-				tracing::warn!(%err, %name, "stopped following broadcast");
-				break (inner, followed);
-			}
-			None => return,
-		}
-	};
+	instances: moq_net::origin::Following,
+	served: Option<moq_net::broadcast::Consumer>,
+}
 
-	let mut broadcasts = inner.broadcasts.lock().unwrap();
-	if broadcasts
-		.get(&name)
-		.is_some_and(|current| Arc::ptr_eq(current, &followed))
-	{
-		broadcasts.remove(&name);
+impl Follow {
+	/// The next instance event, or `None` once `followed` is gone.
+	fn poll_next(
+		&mut self,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<Result<Option<moq_net::broadcast::Consumer>, moq_net::Error>>> {
+		let Some(followed) = self.followed.upgrade() else {
+			return Poll::Ready(None);
+		};
+		followed.forget_closed(waiter);
+		if let Poll::Ready(next) = self.instances.poll_available(waiter) {
+			return Poll::Ready(Some(next));
+		}
+		// The follower folds away an instance that started and ended before its first poll,
+		// so the served instance closing before it is handed out means nothing serves the path.
+		match &self.served {
+			Some(served) => served.poll_closed(waiter).map(|()| Some(Ok(None))),
+			None => Poll::Pending,
+		}
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let (inner, followed) = loop {
+			let next = std::task::ready!(self.poll_next(waiter));
+			let (Some(inner), Some(followed)) = (self.inner.upgrade(), self.followed.upgrade()) else {
+				return Poll::Ready(());
+			};
+			match next {
+				Some(Ok(Some(broadcast))) => {
+					if !self.served.take().is_some_and(|served| served.is_clone(&broadcast)) {
+						followed.start(inner.serve(broadcast));
+					}
+				}
+				Some(Ok(None)) => break (inner, followed),
+				Some(Err(err)) => {
+					tracing::warn!(%err, name = %self.name, "stopped following broadcast");
+					break (inner, followed);
+				}
+				None => return Poll::Ready(()),
+			}
+		};
+
+		let mut broadcasts = inner.broadcasts.lock().unwrap();
+		if broadcasts
+			.get(&self.name)
+			.is_some_and(|current| Arc::ptr_eq(current, &followed))
+		{
+			broadcasts.remove(&self.name);
+		}
+		Poll::Ready(())
 	}
 }
 
@@ -456,12 +470,13 @@ mod tests {
 
 	async fn closed_broadcaster() -> Broadcaster {
 		let origin = produce_origin();
-		let producer = origin.create_broadcast("gone").expect("publish allowed");
-		producer.announce(Default::default()).expect("publish allowed");
+		let producer = origin
+			.route("gone", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "gone").await, Config::default());
 		// Close the publisher so the resolved broadcast (and the broadcaster) reports closed.
-		producer.close();
+		producer.broadcast().close();
 		settle().await;
 		broadcaster
 	}
@@ -478,8 +493,9 @@ mod tests {
 			.lock()
 			.unwrap()
 			.insert("live".to_string(), Arc::new(Followed::new(stale.clone())));
-		let _producer = origin.create_broadcast("live").expect("publish allowed");
-		_producer.announce(Default::default()).expect("publish allowed");
+		let _producer = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 
 		let fresh = server.broadcaster("live").await.expect("broadcast announced");
@@ -494,8 +510,9 @@ mod tests {
 	#[tokio::test]
 	async fn dropping_the_server_releases_its_broadcasters() {
 		let origin = produce_origin();
-		let producer = origin.create_broadcast("live").expect("publish allowed");
-		producer.announce(Default::default()).expect("publish allowed");
+		let producer = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 
 		for _ in 0..4 {
@@ -514,7 +531,7 @@ mod tests {
 		settle().await;
 		assert_eq!(held.clones(), 1, "only the response holds it now");
 		assert!(!held.is_closed(), "a held broadcaster keeps serving");
-		producer.close();
+		producer.broadcast().close();
 	}
 
 	/// Wait out the origin's update hold until `ready` holds.
@@ -535,15 +552,18 @@ mod tests {
 	async fn a_replaced_instance_serves_until_it_closes() {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default()).unwrap();
-		let (old_instance, new_instance) = (moq_net::Instance::random(), moq_net::Instance::random());
-		let route = |instance: &moq_net::Instance| moq_net::origin::Route::default().with_instance(instance.clone(), 0);
-
-		let old = origin.publish("live", route(&old_instance)).expect("publish allowed");
+		let old = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
+		let old_instance = old.instance();
 		settle().await;
 		let first = server.broadcaster("live").await.expect("broadcast announced");
 		assert_eq!(first.instance().as_ref(), old_instance.as_str());
 
-		let new = origin.publish("live", route(&new_instance)).expect("publish allowed");
+		let new = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
+		let new_instance = new.instance();
 		eventually(async || {
 			let current = server.broadcaster("live").await.expect("broadcast announced");
 			current.instance().as_ref() == new_instance.as_str()
@@ -570,7 +590,7 @@ mod tests {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default()).unwrap();
 		let publication = origin
-			.publish("live", moq_net::origin::Route::default())
+			.route("live", moq_net::origin::RouteOptions::default())
 			.expect("publish allowed");
 		settle().await;
 
@@ -589,7 +609,7 @@ mod tests {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default()).unwrap();
 		let _old = origin
-			.publish("live", moq_net::origin::Route::default())
+			.route("live", moq_net::origin::RouteOptions::default())
 			.expect("publish allowed");
 		settle().await;
 		let open = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());

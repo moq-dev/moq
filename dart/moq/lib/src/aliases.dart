@@ -13,7 +13,8 @@ import 'package:moq_ffi/moq_ffi.dart';
 //
 //   * `MoqServer` - `Server` is the listen facade in server.dart.
 //   * `MoqContainer` / `MoqRoute` - `Container` and `Route` are Flutter's, and
-//     an ambiguous import would break every Flutter app that uses them.
+//     an ambiguous import would break every Flutter app that uses them. Its
+//     options and facts are still [RouteOptions] and [RouteInfo].
 //   * `MoqException` - `Exception` is in `dart:core`.
 
 /// A MoQ client: configure the TLS/bind knobs, then connect to a relay.
@@ -37,7 +38,7 @@ typedef CongestionControl = MoqCongestionControl;
 /// Certificate trust and the mTLS identity for `ConnectOptions.tls`.
 typedef ClientTls = MoqClientTls;
 
-/// The publish side of an origin: create broadcasts so subscribers can discover them.
+/// The publish side of an origin: create routes so subscribers can discover their broadcasts.
 typedef OriginProducer = MoqOriginProducer;
 
 /// Config for creating an origin, such as its total cache budget.
@@ -46,17 +47,11 @@ typedef OriginConfig = MoqOriginConfig;
 /// The subscribe side of an origin: discover and request published broadcasts.
 typedef OriginConsumer = MoqOriginConsumer;
 
-/// A served route: advertises a path prefix and yields broadcast requests beneath it.
-typedef OriginRequests = MoqOriginRequests;
-
-/// A requested broadcast not yet accepted: fulfill it with a producer or reject it.
+/// A requested broadcast not yet answered: serve a held broadcast, route a new one, or reject it.
 typedef BroadcastRequest = MoqBroadcastRequest;
 
-/// A claim answer being filled before its exact route is announced.
-typedef BroadcastPrepared = MoqBroadcastPrepared;
-
-/// A broadcast published on an origin: the broadcast to fill and its announcement.
-typedef Publication = MoqPublication;
+/// How a route advertises itself: hidden until announced, its static cost, and a stable instance.
+typedef RouteOptions = MoqRouteOptions;
 
 /// A stream of announce events under a prefix.
 typedef AnnounceConsumer = MoqAnnounceConsumer;
@@ -67,33 +62,24 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 /// Follows a specific broadcast path across the publisher instances that serve it.
 typedef Following = MoqFollowing;
 
-/// How a broadcast advertises its exact path: its static production cost and stream instance.
-typedef AnnounceRoute = MoqAnnounceRoute;
+/// The read-only facts on a received route: hops, a static cost, and the stream's instance.
+typedef RouteInfo = MoqRouteInfo;
 
 /// A route over a prefix: its origin-relative path, required wildcard captures (empty without wildcards), and route metadata.
 typedef Announce = MoqAnnounce;
 
-/// What an [AnnounceConsumer] yields: [AnnounceEventStart],
-/// [AnnounceEventUpdate], [AnnounceEventEnd], [AnnounceEventRestart], or
-/// [AnnounceEventTakeover].
+/// What an [AnnounceConsumer] yields: [AnnounceEventPresent] or
+/// [AnnounceEventAbsent].
+///
+/// Another publisher instance taking a path over keeps it present: hold a
+/// [Following] to see the broadcast change.
 typedef AnnounceEvent = MoqAnnounceEvent;
 
-/// A route now covers the prefix; the stream had none there.
-typedef AnnounceEventStart = StartMoqAnnounceEvent;
+/// A route now covers the path, which was absent.
+typedef AnnounceEventPresent = PresentMoqAnnounceEvent;
 
-/// The route covering the prefix changed hops or cost.
-typedef AnnounceEventUpdate = UpdateMoqAnnounceEvent;
-
-/// No route covers the prefix any more; carries its last route.
-typedef AnnounceEventEnd = EndMoqAnnounceEvent;
-
-/// Another publisher instance now serves the prefix: drop what was resolved
-/// under it and request afresh.
-typedef AnnounceEventRestart = RestartMoqAnnounceEvent;
-
-/// A route now covers the prefix and continues what the route at `predecessor`
-/// served beneath it: keep what was resolved through that one.
-typedef AnnounceEventTakeover = TakeoverMoqAnnounceEvent;
+/// No route covers the path any more; carries its last route.
+typedef AnnounceEventAbsent = AbsentMoqAnnounceEvent;
 
 /// The write side of a broadcast: publish tracks into it.
 typedef BroadcastProducer = MoqBroadcastProducer;

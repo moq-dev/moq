@@ -94,16 +94,16 @@ fn traffic(registry: &stats::Registry, role: stats::Role) -> stats::Traffic {
 
 /// The hop the dialer attributed `path` to, once that announce has arrived.
 async fn learned_hop(dialer: &origin::Producer, path: &str) -> Hop {
-	let mut announced = dialer.consume().announced();
+	let mut announced = dialer.consume().routes();
 	let event = kio::clock::timeout(SETTLE, async {
 		loop {
 			let event = announced.next().await.expect("announce cursor closed");
 			let announce = match event {
-				moq_net::announce::Event::Start(announce)
-				| moq_net::announce::Event::Update(announce)
-				| moq_net::announce::Event::Restart(announce)
-				| moq_net::announce::Event::Takeover { announce, .. } => announce,
-				moq_net::announce::Event::End(_) => continue,
+				moq_net::origin::RouteEvent::Start(announce)
+				| moq_net::origin::RouteEvent::Update(announce)
+				| moq_net::origin::RouteEvent::Restart(announce)
+				| moq_net::origin::RouteEvent::Takeover { announce, .. } => announce,
+				moq_net::origin::RouteEvent::End(_) => continue,
 			};
 			if announce.prefix.as_str() == path {
 				return announce;
@@ -147,9 +147,11 @@ async fn split_horizon(version: &str, [publisher_hop, subscriber_hop]: [Hop; 2])
 	let to_publisher = dial(version, &dialer, &publisher).await;
 	let to_subscriber = dial(version, &dialer, &subscriber).await;
 
-	let broadcast = publisher.create_broadcast("room").unwrap();
-	let track = broadcast.create_track("video", None).unwrap();
-	broadcast.announce(origin::Route::default()).unwrap();
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let track = broadcast.broadcast().create_track("video", None).unwrap();
+	broadcast.announce().unwrap();
 
 	let publisher_hop = learned_hop(&dialer, "room").await;
 	assert_ne!(
@@ -160,12 +162,12 @@ async fn split_horizon(version: &str, [publisher_hop, subscriber_hop]: [Hop; 2])
 
 	// The other edge learns the namespace, attributed to a different hop, so the
 	// two dials are not one endpoint.
-	let mut subscriber_announced = subscriber.consume().announced();
+	let mut subscriber_announced = subscriber.consume().routes();
 	let subscriber_saw = kio::clock::timeout(SETTLE, subscriber_announced.next())
 		.await
 		.expect("the other edge never learned the namespace")
 		.expect("announce cursor closed");
-	let moq_net::announce::Event::Start(subscriber_saw) = subscriber_saw else {
+	let moq_net::origin::RouteEvent::Start(subscriber_saw) = subscriber_saw else {
 		panic!("the other edge's first event was not the namespace: {subscriber_saw:?}");
 	};
 	assert_eq!(subscriber_saw.prefix.as_str(), "room");

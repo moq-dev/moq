@@ -29,7 +29,7 @@ struct Node {
 }
 
 async fn spawn_relay(id: u64, connect: Vec<String>, cluster_version: Option<moq_net::Version>) -> Node {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let mut config = Config::default();
 	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
@@ -159,7 +159,7 @@ fn client(version: Option<moq_net::Version>) -> moq_tokio::Client {
 }
 
 struct Publisher {
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 	_session: moq_tokio::Connection,
 	streamer: tokio::task::AbortHandle,
 }
@@ -167,8 +167,7 @@ struct Publisher {
 impl Drop for Publisher {
 	fn drop(&mut self) {
 		// The streaming task owns the track producer; stop it with the
-		// publisher so the broadcast actually ends (a live track producer
-		// would keep it announced).
+		// publisher so the track ends with the route.
 		self.streamer.abort();
 	}
 }
@@ -176,9 +175,13 @@ impl Drop for Publisher {
 async fn publish_version(port: u16, version: &str) -> Publisher {
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast(PATH).expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = origin
+		.route(PATH, moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 
 	// Stream like a real publisher: a fresh group every 100ms, so a subscriber
 	// that attaches at any point receives one (and the test doesn't depend on
@@ -240,7 +243,8 @@ async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 		.unwrap()
 		.available()
 		.await
-		.map_err(|err| format!("broadcast unroutable: {err}"))?;
+		.map_err(|err| format!("broadcast unroutable: {err}"))?
+		.ok_or("the first change is an instance")?;
 
 	// This verifies route propagation rather than real-time backlog skipping. Give
 	// every hop enough tolerance for the next 100ms group to arrive while the
@@ -281,7 +285,7 @@ async fn watch_announces(
 ) -> tokio::task::JoinHandle<Vec<(String, bool)>> {
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn();
-	let mut announced = origin.consume().announced();
+	let mut announced = origin.consume().routes();
 	let session = kio::clock::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url).established())
 		.await
 		.expect("viewer connect timeout")
@@ -368,7 +372,7 @@ async fn unknown_publisher_republish_stays_routable() {
 
 	let url: Url = format!("tcp://127.0.0.1:{}", mesh.d()).parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn();
-	let mut announced = origin.consume().announced();
+	let mut announced = origin.consume().routes();
 	let _session = kio::clock::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url).established())
 		.await
 		.expect("viewer connect timeout")
@@ -423,12 +427,12 @@ async fn unknown_publisher_does_not_flap_across_a_lite04_cluster_triangle() {
 }
 
 /// The next route and whether it is active.
-async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route)
-		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route)
-		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-		moq_net::announce::Event::End(route) => Some((route, false)),
+		moq_net::origin::RouteEvent::Start(route)
+		| moq_net::origin::RouteEvent::Update(route)
+		| moq_net::origin::RouteEvent::Restart(route)
+		| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 	}
 }

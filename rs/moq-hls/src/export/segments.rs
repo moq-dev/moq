@@ -24,6 +24,7 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use super::Rendition;
+use super::rendition::{Fetch, LoadInit};
 use crate::Result;
 
 /// A segment as its URL names it: `seg/[{generation}.]{tag}.{sequence}.m4s`, or `t{pts}` in
@@ -304,6 +305,14 @@ impl Producer {
 		self.close();
 	}
 
+	/// Whether no further segment will ever be listed: the media ended, the window failed,
+	/// or it was closed.
+	#[cfg(feature = "server")]
+	pub fn finished(&self) -> bool {
+		let state = self.state.read();
+		state.ended || state.failed.is_some() || state.is_closed()
+	}
+
 	/// Why the window failed, if it did.
 	pub fn failure(&self) -> Option<crate::Error> {
 		self.state.read().failed.clone()
@@ -397,9 +406,9 @@ impl Producer {
 		}
 	}
 
-	/// Resolve once the window is closed: its media watcher lists no more rows.
-	pub async fn closed(&self) {
-		self.state.closed().await;
+	/// Ready once the window is closed: its media watcher lists no more rows.
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state.poll_closed(waiter)
 	}
 
 	/// Whether the window lists segment `at` of the record track tagged `tag`.
@@ -434,6 +443,7 @@ impl Producer {
 			rendition,
 			position: (state.resets, state.produced - state.rows.len() as u64),
 			feed: None,
+			fetch: None,
 		}
 	}
 }
@@ -474,6 +484,8 @@ pub struct Consumer {
 	/// The reset epoch and next append position; errors leave it unchanged.
 	position: (u64, u64),
 	feed: Option<Feed>,
+	/// The next row's media being fetched, kept across polls.
+	fetch: Option<Fetch>,
 }
 
 /// The live subscription a [`Consumer`] holds on its rendition's media track.
@@ -496,7 +508,8 @@ impl Consumer {
 	/// The rendition's CMAF init segment, built once and cached; `None` until it can be built
 	/// (an inline-parameter-set codec needs the first segment first).
 	pub async fn init(&self) -> Result<Option<Bytes>> {
-		self.rendition.latest_init().await
+		let mut load = LoadInit::default();
+		kio::wait(|waiter| self.rendition.poll_latest_init(waiter, &mut load)).await
 	}
 
 	/// The next segment, with its media; `None` only once the rendition ends cleanly, so a
@@ -516,27 +529,36 @@ impl Consumer {
 	/// silently omitting segments. Fetch/transmux errors leave the cursor in place so the caller
 	/// can retry. A bound instance's retained media drains after End or Restart; a replacement's
 	/// media is never read under the old rows.
-	pub async fn next(&mut self) -> Result<Option<Segment>> {
-		let Some(row) = kio::wait(|waiter| self.poll_next(waiter)).await? else {
-			return Ok(None);
-		};
-		let media = if row.stop {
-			None
-		} else {
-			let media = self.rendition.fetch(&row).await?;
-			Some(media.ok_or(crate::Error::SegmentUnavailable { segment: row.segment })?)
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Segment>>> {
+		let (row, media) = loop {
+			let Some(fetch) = &mut self.fetch else {
+				let Some(row) = ready!(self.poll_row(waiter))? else {
+					return Poll::Ready(Ok(None));
+				};
+				if row.stop {
+					break (row, None);
+				}
+				self.fetch = Some(Fetch::new(row));
+				continue;
+			};
+			let media = ready!(fetch.poll(&self.rendition, waiter));
+			// A failure leaves the position for a retry to fetch the row afresh.
+			let row = self.fetch.take().expect("fetching above").row().clone();
+			let media = media?.ok_or(crate::Error::SegmentUnavailable { segment: row.segment })?;
+			break (row, Some(media));
 		};
 		self.position.1 += 1;
-		Ok(Some(Segment {
+		Poll::Ready(Ok(Some(Segment {
 			segment: row.segment,
 			media,
 			duration: row.duration,
 			program_date_time: self.rendition.wall_clock(row.pts),
 			discontinuity: row.discontinuity,
-		}))
+		})))
 	}
 
-	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Row>>> {
+	fn poll_row(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Row>>> {
 		self.poll_feed(waiter);
 		// A refused binding never held media, so there is nothing to drain. `poll_feed` registered
 		// the wake for a refusal that arrives while the window waits for rows.

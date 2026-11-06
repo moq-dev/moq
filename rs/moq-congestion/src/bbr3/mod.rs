@@ -546,18 +546,7 @@ pub struct Bbr3 {
 impl Bbr3 {
     /// equivalent to BBROnInit <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.2.1>
     fn new(config: Arc<Config>, init: Init) -> Self {
-        let probe_rng = if let Some(probe_seed) = config.probe_rng_seed {
-            Pcg32::from_seed(probe_seed)
-        } else {
-            #[cfg(test)]
-            {
-                Pcg32::from_seed([0; 16])
-            }
-            #[cfg(not(test))]
-            {
-                Pcg32::from_rng(&mut rand::rng())
-            }
-        };
+        let probe_rng = Pcg32::seed_from_u64(init.seed);
         let smss = Ord::min(
             Ord::max(MIN_MAX_DATAGRAM_SIZE, init.mtu) as u64,
             MAX_DATAGRAM_SIZE,
@@ -1955,11 +1944,8 @@ impl Controller for Bbr3 {
     fn on_ack(&mut self, ack: Ack<'_>) {
         // equivalent to RS.newly_acked. It is passed to the ACK's model steps rather than kept in
         // `rs`, so no later `set_cwnd` counts it again.
-        let mut newly_acked = 0;
-        for acked in ack.packets {
-            self.check_recovery_done(acked.sent);
-            newly_acked += u64::from(acked.bytes);
-        }
+        let newly_acked = ack.packets.iter().map(|acked| u64::from(acked.bytes)).sum();
+        let latest_sent = ack.packets.iter().map(|acked| acked.sent).max();
         if let Some(delay) = &mut self.delay {
             delay.on_ack(ack.packets, ack.now);
         }
@@ -1971,11 +1957,21 @@ impl Controller for Bbr3 {
         if ack.app_limited && self.rate.is_app_limited() {
             self.probe_rtt_skip_app_limited = true;
         }
-        let Some(rs) = self.ack_rs else {
+        if let Some(rs) = self.ack_rs {
+            self.rs = Some(rs);
+            self.update_model_and_state(rs.prior_delivered, newly_acked, ack.app_limited, ack.now);
+        }
+        // The ACK that ends a loss round acknowledges the first packet sent after that round's
+        // first loss, which is also what ends the recovery that loss began. The model steps
+        // judge the round they close, so they see the recovery as it was: otherwise Startup's
+        // high-loss exit, which asks for a full round in recovery, misses every round one
+        // recovery episode spans, and an application-limited sender never leaves Startup.
+        if let Some(sent) = latest_sent {
+            self.check_recovery_done(sent);
+        }
+        if self.ack_rs.is_none() {
             return;
-        };
-        self.rs = Some(rs);
-        self.update_model_and_state(rs.prior_delivered, newly_acked, ack.app_limited, ack.now);
+        }
         if let Some(grew) = self.delay.as_mut().map(delay::Detector::take_signal) {
             self.raise_bw_delay();
             if grew {
@@ -2096,9 +2092,11 @@ impl Controller for Bbr3 {
     }
 
     fn metrics(&self) -> Metrics {
-        // The delay bound's `bw_delay` caps the estimate: it marks the path slower than `max_bw`,
-        // so a bandwidth follower, such as an encoder, should follow it. Infinite unless on.
-        let estimate = self.max_bw.min(self.bw_delay);
+        // BBR.bw, recomputed since a short-term model reset or a spurious-loss undo lands
+        // between ACKs: a loss-driven `bw_shortterm` and the delay bound's `bw_delay` both mark
+        // the path slower than `max_bw`, so a bandwidth follower, such as an encoder, should
+        // follow them. Both are infinite while unset.
+        let estimate = self.max_bw.min(self.bw_shortterm).min(self.bw_delay);
         Metrics {
             congestion_window: self.window(),
             ssthresh: None,
@@ -2128,7 +2126,6 @@ impl Controller for Bbr3 {
 #[derive(Debug, Clone)]
 pub struct Config {
     initial_window: u64,
-    probe_rng_seed: Option<[u8; 16]>,
     startup_pacing_gain: Option<f64>,
     default_pacing_gain: Option<f64>,
     probe_bw_down_pacing_gain: Option<f64>,
@@ -2167,13 +2164,6 @@ impl Config {
         self.initial_window = value;
         self
     }
-
-    /// Seed the probe phases for deterministic transport tests.
-    #[cfg(any(test, feature = "testing"))]
-    pub fn probe_rng_seed(&mut self, seed: [u8; 16]) -> &mut Self {
-        self.probe_rng_seed = Some(seed);
-        self
-    }
 }
 
 impl Default for Config {
@@ -2182,7 +2172,6 @@ impl Default for Config {
             // Bounded by the datagram size a path starts at, not [`MAX_DATAGRAM_SIZE`] (the
             // RFC 9000 ceiling), which would clamp 14720 up to 9x the intended window.
             initial_window: 14720.clamp(2 * BASE_DATAGRAM_SIZE, 10 * BASE_DATAGRAM_SIZE),
-            probe_rng_seed: None,
             startup_pacing_gain: None,
             default_pacing_gain: None,
             probe_bw_down_pacing_gain: None,
@@ -2231,6 +2220,7 @@ mod test {
                 mtu,
                 rtt: Duration::from_millis(333),
                 max_pacing_rate: None,
+                seed: 0,
             };
             Self {
                 bbr: Bbr3::new(config, init),
@@ -2593,30 +2583,22 @@ mod test {
 
     #[test]
     fn test_probe_rng() {
-        let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Config {
-            initial_window: 14720.clamp(2 * BASE_DATAGRAM_SIZE, 10 * BASE_DATAGRAM_SIZE),
-            probe_rng_seed: Some(seed),
-            startup_pacing_gain: None,
-            default_pacing_gain: None,
-            probe_bw_down_pacing_gain: None,
-            probe_bw_up_pacing_gain: None,
-            probe_bw_up_cwnd_gain: None,
-            probe_rtt_cwnd_gain: None,
-            drain_pacing_gain: None,
-            pacing_margin_percent: None,
-            default_cwnd_gain: None,
-            delay_bound: false,
+        let init = Init {
+            now: Instant::now(),
+            mtu: 2500,
+            rtt: Duration::from_millis(333),
+            max_pacing_rate: None,
+            seed: 17,
         };
-        let mut bbr3 = Driver::new(Arc::new(config), 2500);
+        let mut bbr3 = Bbr3::new(Arc::new(Config::default()), init);
         bbr3.pick_probe_wait();
         assert_eq!(bbr3.rounds_since_bw_probe, 1);
-        assert_eq!(bbr3.bw_probe_wait, Duration::from_millis(2652));
+        assert_eq!(bbr3.bw_probe_wait, Duration::from_millis(2910));
         // T_reno_bound is re-drawn on every pick, alongside the wall-clock bound
-        assert_eq!(bbr3.reno_rounds_bound, 63);
+        assert_eq!(bbr3.reno_rounds_bound, 62);
         bbr3.pick_probe_wait();
         assert_eq!(bbr3.rounds_since_bw_probe, 0);
-        assert_eq!(bbr3.bw_probe_wait, Duration::from_millis(2461));
+        assert_eq!(bbr3.bw_probe_wait, Duration::from_millis(2244));
         assert_eq!(bbr3.reno_rounds_bound, 63);
     }
 
@@ -3449,6 +3431,70 @@ mod test {
         );
     }
 
+    /// Startup leaves on high loss when one recovery episode spans the whole loss round. The ACK
+    /// that ends the round acknowledges the first packet sent after the round's first loss,
+    /// which also ends that recovery, so the exit must judge the round by the recovery it spent.
+    #[test]
+    fn startup_exits_on_loss_round_one_recovery_spans() {
+        const MSS: u16 = 1200;
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS);
+        let base = Instant::now();
+        let at = |ms: u64| base + Duration::from_millis(ms);
+        let mut inflight = 0;
+        let send = |bbr: &mut Driver, ms: u64, pn: u64, inflight: &mut u64| {
+            bbr.send(at(ms), MSS, pn);
+            *inflight += u64::from(MSS);
+            // An application-limited sender, so only loss can end Startup
+            let held = bbr.bbr.inflight;
+            bbr.bbr.rate.mark_app_limited(held);
+        };
+
+        // An application-limited warmup, a round each 10ms
+        for round in 0..3u64 {
+            let ms = round * 10;
+            for pn in round * 10..round * 10 + 10 {
+                send(&mut bbr, ms, pn, &mut inflight);
+            }
+            for pn in round * 10..round * 10 + 10 {
+                bbr.ack(at(ms + 10), at(ms), MSS.into(), pn);
+                inflight -= u64::from(MSS);
+            }
+            bbr.end_acks(at(ms + 10), inflight, true);
+        }
+        assert_eq!(bbr.state, BbrState::Startup);
+
+        // The flight that overflows the path, sent before any loss
+        for pn in 100..140 {
+            send(&mut bbr, 30, pn, &mut inflight);
+        }
+        for pn in 100..102 {
+            bbr.ack(at(40), at(30), MSS.into(), pn);
+            inflight -= u64::from(MSS);
+        }
+        bbr.end_acks(at(40), inflight, true);
+
+        // Every loss is of that flight, so one recovery episode covers them all
+        let lose = |bbr: &mut Driver, ms: u64, pns: &[u64], inflight: &mut u64| {
+            for &pn in pns {
+                bbr.lose(MSS, pn, at(ms));
+                *inflight -= u64::from(MSS);
+            }
+        };
+        lose(&mut bbr, 50, &[102, 104, 106], &mut inflight);
+        assert!(bbr.in_recovery);
+        send(&mut bbr, 55, 200, &mut inflight);
+        lose(&mut bbr, 60, &[108, 110, 112, 114], &mut inflight);
+        assert_eq!(bbr.state, BbrState::Startup);
+
+        // The first packet sent since the loss round began ends both it and the recovery
+        bbr.ack(at(70), at(55), MSS.into(), 200);
+        inflight -= u64::from(MSS);
+        bbr.end_acks(at(70), inflight, true);
+        assert!(!bbr.in_recovery);
+        assert!(bbr.full_bw_reached, "Startup ignored a round of high loss");
+        assert_eq!(bbr.state, BbrState::Drain);
+    }
+
     /// A.7: Never exiting STARTUP when application-limited with no loss.
     ///
     /// The negative counterpart to A.1 (plateau exit) and A.2 (loss exit): with
@@ -3815,14 +3861,7 @@ mod test {
         /// simulated propagation round-trip time (100ms), matching A.1/A.3/A.5/A.8
         const RTT_NS: u64 = 100_000_000;
 
-        // Drive the production default configuration with a fixed probe RNG seed so
-        // bw_probe_wait is deterministic; its exact value does not matter here since
-        // the deadline is computed from it below.
-        let config = Config {
-            probe_rng_seed: Some([6; 16]),
-            ..Config::default()
-        };
-        let mut sim = Sim::new(config, MSS, BW, RTT_NS);
+        let mut sim = Sim::new(Config::default(), MSS, BW, RTT_NS);
         assert_eq!(sim.bbr.state, BbrState::Startup);
 
         // Whether the flow has reached the PROBE_UP phase; the PROBE_DOWN we care
@@ -4913,14 +4952,7 @@ mod test {
         // bottleneck serialization time for one MSS-sized packet
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
 
-        // Seed the probe RNG so the PROBE_BW bw-probe wait (hence the cruise sojourn length) is
-        // deterministic and the pair-count target below is not flaky.
-        let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Config {
-            probe_rng_seed: Some(seed),
-            ..Config::default()
-        };
-        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -5195,14 +5227,7 @@ mod test {
         /// post-jump probing sees a clean, loss-free 100 Mbit/s link.
         const LOSS_PERIOD: u64 = 25;
 
-        // Seed the probe RNG so the PROBE_BW cycle timing (hence when PROBE_UP is entered) is
-        // deterministic.
-        let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Config {
-            probe_rng_seed: Some(seed),
-            ..Config::default()
-        };
-        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -5446,13 +5471,7 @@ mod test {
         /// drives `bw_shortterm` down and, once the max-bw filter window expires, `max_bw`.
         const BUFFER_BYTES: f64 = BW_HI * (RTT_NS as f64 / 1e9);
 
-        // Seed the probe RNG so the PROBE_BW cycle timing is deterministic.
-        let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Config {
-            probe_rng_seed: Some(seed),
-            ..Config::default()
-        };
-        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -5667,13 +5686,7 @@ mod test {
         const TOTAL_NS: u64 = 20_000_000_000;
         const WINDOW_NS: u64 = 5_000_000_000;
 
-        // Seed the probe RNG so the PROBE_BW cycle timing is deterministic.
-        let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Config {
-            probe_rng_seed: Some(seed),
-            ..Config::default()
-        };
-        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -5888,14 +5901,7 @@ mod test {
         const FWD_NS: u64 = RTT_NS / 2;
         const RET_NS: u64 = RTT_NS / 2;
 
-        // Seed the probe RNG so the PROBE_BW cycle timing (hence when PROBE_UP is entered) is
-        // deterministic.
-        let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Config {
-            probe_rng_seed: Some(seed),
-            ..Config::default()
-        };
-        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -6153,14 +6159,7 @@ mod test {
         const FWD_NS: u64 = RTT_NS / 2;
         const RET_NS: u64 = RTT_NS / 2;
 
-        // Seed the probe RNG so the PROBE_BW cycle timing (hence when PROBE_UP is entered) is
-        // deterministic.
-        let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Config {
-            probe_rng_seed: Some(seed),
-            ..Config::default()
-        };
-        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -6690,14 +6689,7 @@ mod test {
         const FWD_NS: u64 = RTT_NS / 2;
         const RET_NS: u64 = RTT_NS / 2;
 
-        // Seed the probe RNG so the PROBE_BW cycle timing (hence when each PROBE_UP is
-        // entered) is deterministic.
-        let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let config = Config {
-            probe_rng_seed: Some(seed),
-            ..Config::default()
-        };
-        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -6932,14 +6924,7 @@ mod test {
         // bottleneck serialization time for one MSS-sized packet
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
 
-        // Pin this scenario's probe schedule: once app-limiting lifts at the
-        // PROBE_REFILL -> PROBE_UP edge the flow does genuine PROBE_BW cycling, whose
-        // phase timing is RNG-driven (cf. sibling probing tests).
-        let config = Config {
-            probe_rng_seed: Some([6; 16]),
-            ..Config::default()
-        };
-        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
@@ -8314,12 +8299,8 @@ mod test {
     #[test]
     fn sustained_ce_bounds_the_queue_and_recovers() {
         const SEC: u64 = 1_000_000_000;
-        let config = || Config {
-            probe_rng_seed: Some([7; 16]),
-            ..Config::default()
-        };
-        let mut control = Sim::new(config(), 1200, LINK_BW, LINK_RTT);
-        let mut marked = Sim::new(config(), 1200, LINK_BW, LINK_RTT);
+        let mut control = Sim::new(Config::default(), 1200, LINK_BW, LINK_RTT);
+        let mut marked = Sim::new(Config::default(), 1200, LINK_BW, LINK_RTT);
         marked.ce_above_ns = Some(5 * MS);
 
         // Startup and its drain.
@@ -8345,10 +8326,7 @@ mod test {
 
     /// A [`Sim`] whose peer reports receive timestamps, with the delay bound on or off
     fn timestamped(delay_bound: bool) -> Sim {
-        let mut config = Config {
-            probe_rng_seed: Some([7; 16]),
-            ..Config::default()
-        };
+        let mut config = Config::default();
         config.delay_bound(delay_bound);
         let mut sim = Sim::new(config, 1200, LINK_BW, LINK_RTT);
         sim.timestamps = true;
@@ -8422,16 +8400,21 @@ mod test {
         assert_eq!(sim.bbr.delay_round_delivered, 0);
     }
 
-    /// The bandwidth estimate reports the delay bound when it is below `max_bw`, so a bandwidth
-    /// follower slows with the brake
+    /// The bandwidth estimate reports the loss and delay bounds when they are below `max_bw`, so
+    /// a bandwidth follower slows with them, and returns to `max_bw` once a probe lifts them
     #[test]
-    fn delay_bound_caps_the_bandwidth_estimate() {
+    fn bounds_cap_the_bandwidth_estimate() {
         let mut sim = scripted();
         sim.bbr.max_bw = 1_000_000.0;
         assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(1_000_000));
         sim.bbr.bw_delay = 400_000.0;
         assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(400_000));
         sim.bbr.bw_delay = 2_000_000.0;
+        assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(1_000_000));
+        sim.bbr.bw_shortterm = 700_000.0;
+        assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(700_000));
+        // Read between ACKs, before `bound_bw_for_model` folds the reset into BBR.bw
+        sim.bbr.reset_short_term_model();
         assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(1_000_000));
     }
 

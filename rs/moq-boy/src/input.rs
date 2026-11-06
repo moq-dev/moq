@@ -65,61 +65,65 @@ pub async fn handle_viewers(
 	cmd_tx: &tokio::sync::mpsc::Sender<Command>,
 ) -> anyhow::Result<()> {
 	let mut announced = viewer_origin.announced();
-	// The command reader per viewer, so a restarted viewer replaces the old one's.
+	// The follower per viewer, which reads each broadcast a restarted viewer replaces the old with.
 	let mut readers: std::collections::HashMap<String, tokio::task::AbortHandle> = Default::default();
-	loop {
-		let (update, active, restart) = match announced.next().await {
-			// A takeover continues what was read through its predecessor.
-			Some(
-				moq_net::announce::Event::Start(update)
-				| moq_net::announce::Event::Update(update)
-				| moq_net::announce::Event::Takeover { announce: update, .. },
-			) => (update, true, false),
-			// The viewer restarted: read the new broadcast instead of the old one.
-			Some(moq_net::announce::Event::Restart(update)) => (update, true, true),
-			Some(moq_net::announce::Event::End(update)) => (update, false, false),
-			None => break,
-		};
-
-		let viewer_id = update.prefix.to_string();
-
-		if active {
-			if !restart && readers.get(&viewer_id).is_some_and(|reader| !reader.is_finished()) {
-				continue;
-			}
-			let Ok(broadcast) = viewer_origin.request(&update.prefix, None).await else {
-				continue;
-			};
-			tracing::info!(%viewer_id, restart, "viewer connected");
-			if let Some(old) = readers.remove(&viewer_id) {
-				old.abort();
-			}
-			let cmd_tx = cmd_tx.clone();
-			let vid = viewer_id.clone();
-			let reader = tokio::spawn(async move {
-				if let Err(e) = handle_viewer_commands(&vid, broadcast, &cmd_tx).await {
-					tracing::warn!(viewer_id = %vid, error = %e, "viewer command error");
+	while let Some(event) = announced.next().await {
+		match event {
+			moq_net::announce::Event::Present(announce) => {
+				let viewer_id = announce.prefix.to_string();
+				let reader = tokio::spawn(follow_viewer(viewer_origin.clone(), announce.prefix, cmd_tx.clone()));
+				if let Some(old) = readers.insert(viewer_id, reader.abort_handle()) {
+					old.abort();
 				}
-				tracing::info!(viewer_id = %vid, "viewer disconnected");
-				let _ = cmd_tx.send(Command::ViewerLeft { viewer_id: vid }).await;
-			});
-			readers.insert(viewer_id, reader.abort_handle());
-		} else {
-			// Dropping an abort handle leaves its task running. Older versions send a restart
-			// as END then START, and the old track keeps flowing meanwhile, so the old reader
-			// must stop here or it would race the replacement.
-			if let Some(old) = readers.remove(&viewer_id) {
-				old.abort();
 			}
-			tracing::info!(%viewer_id, "viewer went offline");
-			let _ = cmd_tx
-				.send(Command::ViewerLeft {
-					viewer_id: viewer_id.clone(),
-				})
-				.await;
+			moq_net::announce::Event::Absent(announce) => {
+				let viewer_id = announce.prefix.to_string();
+				// Dropping an abort handle leaves its task running, so stop it here.
+				if let Some(old) = readers.remove(&viewer_id) {
+					old.abort();
+				}
+				tracing::info!(%viewer_id, "viewer went offline");
+				let _ = cmd_tx.send(Command::ViewerLeft { viewer_id }).await;
+			}
 		}
 	}
 	Ok(())
+}
+
+/// Read the commands of each broadcast a viewer publishes at `path`, switching to the new one
+/// when the viewer restarts. A refused resolution waits for the serving route to change, since
+/// the listing reports nothing new while the path stays present.
+async fn follow_viewer(
+	origin: moq_net::origin::Consumer,
+	path: moq_net::Path,
+	cmd_tx: tokio::sync::mpsc::Sender<Command>,
+) {
+	let viewer_id = path.to_string();
+	let Ok(mut following) = origin.follow(&path, None) else {
+		return;
+	};
+	let mut reading = None;
+	loop {
+		tokio::select! {
+			change = following.available() => match change {
+				Ok(Some(broadcast)) => {
+					tracing::info!(%viewer_id, "viewer connected");
+					reading = Some(Box::pin(handle_viewer_commands(&viewer_id, broadcast, &cmd_tx)));
+				}
+				Ok(None) => {}
+				Err(moq_net::Error::Closed) => return,
+				Err(err) => tracing::debug!(%viewer_id, %err, "viewer not resolved; waiting for a route change"),
+			},
+			read = async { reading.as_mut().expect("guarded").await }, if reading.is_some() => {
+				reading = None;
+				if let Err(e) = read {
+					tracing::warn!(%viewer_id, error = %e, "viewer command error");
+				}
+				tracing::info!(%viewer_id, "viewer disconnected");
+				let _ = cmd_tx.send(Command::ViewerLeft { viewer_id: viewer_id.clone() }).await;
+			}
+		}
+	}
 }
 
 async fn handle_viewer_commands(
@@ -127,7 +131,7 @@ async fn handle_viewer_commands(
 	broadcast: moq_net::broadcast::Consumer,
 	cmd_tx: &tokio::sync::mpsc::Sender<Command>,
 ) -> anyhow::Result<()> {
-	let track = broadcast.track("command")?.subscribe(None).await?;
+	let track = broadcast.track("command")?;
 	let mut commands =
 		moq_json::snapshot::Consumer::<RawCommand>::new(track, moq_json::snapshot::consumer::Config::default());
 
@@ -186,15 +190,16 @@ mod tests {
 	}
 
 	/// Publish a viewer with a live command track.
-	fn viewer(origin: &moq_net::origin::Producer) -> (moq_net::origin::Publication, moq_net::track::Producer) {
-		let broadcast = origin.create_broadcast("alice").unwrap();
+	fn viewer(origin: &moq_net::origin::Producer) -> (moq_net::origin::Route, moq_net::track::Producer) {
+		let broadcast = origin.route("alice", moq_net::origin::RouteOptions::hidden()).unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				"command",
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
-		broadcast.announce(moq_net::origin::Route::default()).unwrap();
+		broadcast.announce().unwrap();
 		(broadcast, track)
 	}
 
@@ -249,7 +254,7 @@ mod tests {
 		send(&old_track, r#"{"type":"reset"}"#);
 		assert!(matches!(rx.recv().await, Some(Command::Reset)));
 
-		old.unannounce();
+		old.withdraw();
 		assert!(matches!(rx.recv().await, Some(Command::ViewerLeft { .. })));
 		let (_new, new_track) = viewer(&origin);
 		kio::clock::sleep(Duration::from_secs(1)).await;
@@ -265,5 +270,32 @@ mod tests {
 		assert!(matches!(next, Some(Command::Buttons { .. })), "{next:?}");
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(rx.try_recv().is_err(), "the old reader is still running");
+	}
+
+	/// A viewer whose handler refuses it stays followed: the listing reports nothing new when a
+	/// publisher takes the path over, so only the follower can pick it up.
+	#[tokio::test(start_paused = true)]
+	async fn a_refused_viewer_is_read_once_a_publisher_takes_over() {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		tokio::spawn(moq_net::time::run(driver));
+		let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+		let consumer = origin.consume();
+		tokio::spawn(async move { handle_viewers(&consumer, &tx).await });
+
+		let claim = origin
+			.route_prefix("alice", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		kio::clock::timeout(Duration::from_secs(1), claim.requested())
+			.await
+			.expect("never asked")
+			.expect("the claim closed")
+			.reject(moq_net::Error::NotFound);
+		kio::clock::sleep(Duration::from_secs(1)).await;
+
+		let (_viewer, track) = viewer(&origin);
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		send(&track, r#"{"type":"reset"}"#);
+		let next = kio::clock::timeout(Duration::from_secs(1), rx.recv()).await;
+		assert!(matches!(next, Ok(Some(Command::Reset))), "{next:?}");
 	}
 }

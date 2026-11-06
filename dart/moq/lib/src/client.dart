@@ -213,25 +213,29 @@ final class Moq {
     }
   }
 
-  /// Create an unannounced broadcast at [path], invisible to everyone until announced.
+  /// Create a route at exactly [path], owning a new broadcast to fill.
   ///
-  /// Populate its `broadcast`, calling `requests` first if tracks are served
-  /// on demand, then advertise it with `announce`. Disposing the publication
-  /// keeps the route; closing the broadcast ends it.
-  Publication createBroadcast(String path) =>
-      session.publish().createBroadcast(path: path);
+  /// Visible at once unless [options] is hidden: create it hidden to populate
+  /// its `broadcast()` first (calling `requests` if tracks are served on
+  /// demand), then `announce()` it. Hold the route: cancelling or disposing it
+  /// retracts it, and closing the broadcast ends both.
+  MoqRoute route(String path, {RouteOptions? options}) =>
+      session.publish().route(path: path, options: options ?? RouteOptions());
 
-  /// Discover routes matching [options]; prefixes stay relative to the origin.
+  /// List the paths matching [options] as each becomes present or absent;
+  /// prefixes stay relative to the origin.
   ///
   /// Listen to `announced(...).updates()` for a [Stream] of [AnnounceEvent]
-  /// that releases the cursor when the subscription ends.
+  /// that releases the cursor when the subscription ends. A new publisher
+  /// instance keeps its path present, so use [follow] to see it.
   AnnounceConsumer announced({
     AnnounceOptions options = const AnnounceOptions(),
   }) => session.consume().announced(config: options._ffi);
 
   /// Follow the broadcast at exactly [path]: each `available()` resolves the
-  /// next instance serving it, such as a restarted publisher. Pass an
-  /// [instance] to follow only that stream.
+  /// next instance serving it, such as a restarted publisher, or null once the
+  /// path goes offline. Pass an [instance] to follow only that stream; another
+  /// one taking over also resolves null.
   Following follow(String path, {String? instance}) =>
       session.consume().follow(path: path, instance: instance);
 

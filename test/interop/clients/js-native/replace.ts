@@ -21,7 +21,7 @@ function endpoint(address: string): URL {
 
 const published = new Moq.Origin.Producer();
 const received = [new Moq.Origin.Producer(), new Moq.Origin.Producer(), new Moq.Origin.Producer()];
-const claim = published.requests(Moq.Path.from(prefix));
+const claim = published.routePrefix(Moq.Path.from(prefix));
 const broadcast = new Moq.Broadcast.Producer();
 const path = Moq.Path.from(`${prefix}/entity`);
 let track = broadcast.createTrack("value", { maxAge: null });

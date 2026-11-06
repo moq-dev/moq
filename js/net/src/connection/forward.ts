@@ -7,12 +7,12 @@
 import { Milli, Nano } from "@moq/clock";
 import { type Dispose, race } from "@moq/signals";
 import type * as Announce from "../announced.ts";
-import { type Route, routesEqual } from "../hop.ts";
+import { type RouteInfo, routesEqual } from "../hop.ts";
 import { coveringPrefixes } from "../internal.ts";
-import type { Producer as OriginProducer, RequestSlot, Requests } from "../origin.ts";
+import type { Producer as OriginProducer, Route } from "../origin.ts";
 import * as Path from "../path.ts";
 import { after } from "../util/timer.ts";
-import { wireOf } from "../wire.ts";
+import { type RequestSlot, wireOf } from "../wire.ts";
 import type { Established } from "./established.ts";
 
 /** Why a connection refuses the removed `discovery` option rather than ignoring it. */
@@ -24,7 +24,7 @@ const LINGER = Milli(2000);
 
 /** One announce request open on the session, and the routes it currently reports. */
 interface Interest {
-	readonly announced: Announce.Consumer;
+	readonly announced: Announce.Routes;
 	readonly reported: Set<Path.Valid>;
 	/** The pending close, set while nothing at or beneath the prefix is watched. */
 	linger?: () => void;
@@ -39,9 +39,9 @@ interface Interest {
  * request handing over to another never retracts it. The first reporter drives it.
  */
 interface Reported {
-	handle: Requests;
+	handle: Route;
 	/** Each request's latest route for the prefix. */
-	readonly reporters: Map<Interest, Route>;
+	readonly reporters: Map<Interest, RouteInfo>;
 }
 
 /**
@@ -89,7 +89,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 
 	void serveRequests(conn, origin);
 
-	const report = (interest: Interest, event: Announce.Event) => {
+	const report = (interest: Interest, event: Announce.RouteEvent) => {
 		const { prefix, route } = event;
 		if (event.kind === "end") {
 			unreport(interest, prefix);
@@ -118,16 +118,17 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 	 * instance, so nothing resolved through the old one is joined again, and an in-place
 	 * update otherwise.
 	 */
-	const updateReported = (existing: Reported, prefix: Path.Valid, route: Route, restart: boolean) => {
-		if (restart || route.epoch !== existing.handle.route.epoch) {
+	const updateReported = (existing: Reported, prefix: Path.Valid, route: RouteInfo, restart: boolean) => {
+		const current = wireOf(existing.handle).info;
+		if (restart || route.epoch !== current?.epoch) {
 			// Inserted before the old one leaves, so local readers see one restart rather than
 			// an end and a start.
 			const handle = originWire.receive(prefix, route);
 			existing.handle.close();
 			existing.handle = handle;
 			void drive(handle, conn);
-		} else if (!routesEqual(existing.handle.route, route)) {
-			existing.handle.updateRoute(route);
+		} else if (!routesEqual(current, route)) {
+			wireOf(existing.handle).update(route);
 		}
 	};
 
@@ -173,7 +174,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 
 		// Hidden and covering routes are mirrored too; each local reader opts in on its own.
 		const interest: Interest = {
-			announced: conn.announced(Path.Pattern.subtree(prefix), { hidden: true, covering: true }),
+			announced: conn.routes(Path.Pattern.subtree(prefix), { hidden: true, covering: true }),
 			reported: new Set(),
 			closing: false,
 			held: new Map(),
@@ -289,7 +290,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 }
 
 /** Answer the requests under a received route by consuming them from the session. */
-async function drive(handle: Requests, conn: Established): Promise<void> {
+async function drive(handle: Route, conn: Established): Promise<void> {
 	const session = wireOf(conn);
 	try {
 		for await (const request of handle.requested()) {

@@ -365,13 +365,12 @@ export class Truck {
 		this.#sawStatusSource = true;
 		this.statusState.set("pending");
 
-		const statusTrack = active.track("status").subscribe({ priority: 10 });
-		effect.cleanup(() => statusTrack.close());
-
 		const consumer = new Json.Snapshot.Consumer({
-			track: statusTrack,
+			track: active.track("status"),
 			schema: TruckStatusSchema,
+			priority: 10,
 		});
+		effect.cleanup(() => consumer.close());
 
 		effect.spawn(async () => {
 			for (;;) {
@@ -415,8 +414,8 @@ export class Truck {
 		const driverId = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
 		this.driverId.set(driverId);
 
-		const driverBroadcastPublication = conn.createBroadcast(driverPath(this.name, driverId));
-		const driverBroadcast = driverBroadcastPublication.broadcast;
+		const driverBroadcastRoute = conn.route(driverPath(this.name, driverId), { hidden: true });
+		const driverBroadcast = driverBroadcastRoute.broadcast;
 		effect.cleanup(() => {
 			driverBroadcast.close();
 			this.driverId.set(undefined);
@@ -430,7 +429,7 @@ export class Truck {
 		effect.run(this.#runControlTrack.bind(this, track, producer));
 		// A fresh instance per lease, which each publication mints: the truck binds its single
 		// driver to this path and instance.
-		driverBroadcastPublication.announce();
+		driverBroadcastRoute.announce();
 	}
 
 	#runSafetyControl(connection: Moq.Connection, effect: Moq.Signals.Effect) {
@@ -439,10 +438,10 @@ export class Truck {
 		if (!conn || !command) return;
 
 		const driverId = `safety-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
-		const broadcastPublication = conn.createBroadcast(driverPath(this.name, driverId));
-		const broadcast = broadcastPublication.broadcast;
+		const broadcastRoute = conn.route(driverPath(this.name, driverId), { hidden: true });
+		const broadcast = broadcastRoute.broadcast;
 		const safety = new SafetyCommandBroadcast(command, broadcast);
-		broadcastPublication.announce();
+		broadcastRoute.announce();
 		effect.cleanup(() => safety.close());
 	}
 

@@ -12,6 +12,8 @@ pub mod track;
 // modules so neither leaks the other's plumbing.
 #[path = "origin.rs"]
 mod origin_impl;
+// The app-level announcement listing over a route stream.
+mod announced;
 // Reduces the routes covering one path to the one serving it.
 mod follow;
 // The failover state machine origin fronts run; pure, so its transitions are
@@ -27,7 +29,7 @@ mod expiry;
 mod idle;
 mod skipped;
 // How far a group's writer reads ahead of its fastest reader.
-mod pace;
+pub(crate) mod pace;
 // The DEFLATE codec behind compressed tracks.
 mod flate;
 pub(crate) mod object;
@@ -50,7 +52,7 @@ pub use datagram::Datagram;
 pub use time::*;
 pub use timed::Timed;
 
-/// Publishing broadcasts, announcing routes, and consuming both through an origin.
+/// Routing broadcasts into an origin, and consuming them through it.
 pub mod origin {
 	pub use super::follow::Following;
 	pub(crate) use super::origin_impl::HiddenWithheld;
@@ -60,14 +62,21 @@ pub mod origin {
 	// private: capability gap
 	pub(crate) use super::origin_impl::Lookup;
 	pub use super::origin_impl::{
-		Config, Consumer, Cost, Driver, HopLimit, Link, Preference, Prepared, Producer, Publication, Request,
-		Requesting, Requests, Route, Source,
+		Config, Consumer, Cost, Driver, HopLimit, Link, Preference, Producer, Request, Requesting, Route, RouteInfo,
+		RouteOptions, Source,
 	};
+	pub use crate::route::RouteKey;
+
+	// Relay-level: every route change, for forwarding and stats. Apps read
+	// `announce` and `follow` instead.
+	#[doc(hidden)]
+	pub use super::origin_impl::{RouteEvent, Routes};
 }
 
-/// Subscribing to route (un)announcements from an origin.
+/// Listing the paths announced on an origin.
 pub mod announce {
-	pub use super::origin_impl::{Announce, AnnounceConsumer as Consumer, AnnounceEvent as Event};
+	pub use super::announced::{AnnounceConsumer as Consumer, AnnounceEvent as Event};
+	pub use super::origin_impl::Announce;
 }
 
 // Hop identity and the `Consume` conversion trait aren't part of a role

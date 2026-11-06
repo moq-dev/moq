@@ -36,7 +36,13 @@ fn origin(hop: u64) -> origin::Producer {
 
 async fn subscribe(relay: &origin::Producer) -> track::Subscriber {
 	let consumer = relay.consume();
-	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
+	let remote = consumer
+		.follow("live", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
 	remote
 		.track("video")
 		.unwrap()
@@ -65,8 +71,11 @@ async fn a_newcomer_on_a_warm_relay_gets_the_backfill() {
 		let publisher = origin(1);
 		let relay = origin(2);
 		let _link = peer(version.parse::<Version>().unwrap(), &publisher, &relay).await;
-		let broadcast = publisher.create_broadcast("live").unwrap();
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let source = broadcast
+			.broadcast()
 			.create_track(
 				"video",
 				Info::default().with_timescale(Timescale::MILLI).with_max_age(None),
@@ -79,7 +88,7 @@ async fn a_newcomer_on_a_warm_relay_gets_the_backfill() {
 				.unwrap();
 			group.finish().unwrap();
 		}
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 
 		let mut first = kio::clock::timeout(TIMEOUT, subscribe(&relay)).await.unwrap();
 		let cold = kio::clock::timeout(TIMEOUT, received(&mut first)).await.unwrap();
@@ -99,8 +108,11 @@ async fn a_refused_transport_backfill_keeps_delivering_live() {
 		let publisher = origin(1);
 		let relay = origin(2);
 		let _link = peer(version.parse::<Version>().unwrap(), &publisher, &relay).await;
-		let broadcast = publisher.create_broadcast("live").unwrap();
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let source = broadcast
+			.broadcast()
 			.create_track("video", Info::default().with_timescale(Timescale::MILLI))
 			.unwrap();
 		for sequence in 0..GROUPS {
@@ -110,7 +122,7 @@ async fn a_refused_transport_backfill_keeps_delivering_live() {
 				.unwrap();
 			group.finish().unwrap();
 		}
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 		let mut subscriber = kio::clock::timeout(TIMEOUT, subscribe(&relay)).await.unwrap();
 		let got = kio::clock::timeout(TIMEOUT, received(&mut subscriber)).await.unwrap();
 		assert_eq!(got, BTreeSet::from([GROUPS - 1]), "{version}: only the live edge");
