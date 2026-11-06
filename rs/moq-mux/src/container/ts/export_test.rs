@@ -12504,3 +12504,26 @@ async fn a_same_instance_return_before_psi_rebuilds_cold_readers() {
 async fn a_pending_same_instance_return_rebuilds_cold_readers() {
 	cold_same_instance_return(true).await;
 }
+
+/// Changing pacing after output preserves the running program clock and queued media.
+#[tokio::test(start_paused = true)]
+async fn changing_delay_preserves_the_running_schedule() {
+	let origin = crate::source::produce_origin();
+	let (live, mut catalog) = publish_live::<()>(&origin, Default::default());
+	let mut audio = aac_rendition(&mut live.broadcast().clone(), &mut catalog, "a.aac");
+	let mut export = open_export(crate::source::resolved(&origin, "live").await)
+		.await
+		.unwrap()
+		.with_delay(Duration::from_secs(3))
+		.with_replay();
+	for ms in (0..1000).step_by(20) {
+		write_aac(&mut audio, ms);
+	}
+	assert!(export.next().await.unwrap().is_some());
+	export = export.with_delay(Duration::from_secs(2));
+	audio.finish().unwrap();
+	catalog.finish().unwrap();
+	let (frames, end) = drain_to_end(&mut export).await;
+	end.unwrap();
+	assert!(!frames.is_empty());
+}

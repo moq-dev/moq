@@ -29,4 +29,10 @@ established: diagnose before changing the wait or production code, and do not
 keep the case passing by loosening the assertion. The lite-05 and lite-07
 cases remain enabled, since only lite-06 failed.
 
+Decided 2026-11-06 (maintainer, /quest-unblock): investigate the additional
+[CodeRabbit finding](https://github.com/moq-dev/moq/pull/7981#discussion_r4491539836)
+here: an accepted lite-06 `SUBSCRIBE_END` followed by duplicate SETUP can be
+overridden by session failure before subscription finalization. Reproduce this
+ordering deterministically and preserve the accepted end during shutdown.
+
 Public API: none. Wire: none.

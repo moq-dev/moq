@@ -1682,8 +1682,7 @@ where
 		if self.program.replay {
 			self.jitter = jitter::Buffer::new(delay).replay();
 		}
-		self.program.schedule = Schedule::new(delay);
-		self.program.schedule.set_rate(self.program.mux_rate);
+		self.program.schedule.set_window(delay);
 		self
 	}
 
