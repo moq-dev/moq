@@ -54,10 +54,11 @@ Decided 2026-11-01 (maintainer, in `/quest-plan`):
   counter. The datagram types have no group, frame, range, fetch, or cache
   API, so the group terminology disappears for datagrams.
 - **moq-transport mixing.** ✅ Keep the requested kind.
-  - A datagram-track subscription maps to IETF SUBSCRIBE and keeps only
-    datagrams (object 0). Stream objects arriving on it are dropped and
-    logged.
-  - A stream-track subscription drops datagrams.
+  - One upstream IETF SUBSCRIBE serves both kinds of a name, as on lite-05/06.
+    Decided 2026-11-05 (maintainer), on
+    [moq-dev/moq#7959](https://github.com/moq-dev/moq/pull/7959).
+  - Stream consumers receive only stream objects; datagram consumers receive
+    only datagrams with object ID 0. A relay forwards both kinds independently.
   - Outbound, a datagram track sends only OBJECT_DATAGRAM with object ID 0.
 - **Archive.** ✅ moq-archive skips datagram tracks. A datagram track is
   live-only, and an archive's playback doesn't include it.
@@ -117,10 +118,6 @@ not the maintainer, so open to revisiting:
 
 This README owns the work no child owns: the Rust-JS interop test of a
 datagram track on lite-07, direct and through a relay.
-
-## Required
-
-- [moq-transport datagram tracks](/quest/m1/datagram-tracks/ietf.md) - Rust and JS map a datagram track to SUBSCRIBE and OBJECT_DATAGRAM with object ID 0, keeping the requested kind
 
 ## Related
 

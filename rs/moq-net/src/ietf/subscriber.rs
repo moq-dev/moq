@@ -23,7 +23,9 @@ use kio::Lock;
 
 mod namespaces;
 pub(super) use namespaces::Namespaces;
+mod datagrams;
 mod tracks;
+use datagrams::{Requested, Shared};
 
 const TRACK_ALIAS_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -190,6 +192,7 @@ fn retire_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId)
 
 #[derive(Default)]
 struct State {
+	datagram_requests: HashMap<tracks::TrackKey, (std::sync::Arc<()>, crate::datagram::Request)>,
 	// Each active subscription
 	subscribes: HashMap<RequestId, TrackState>,
 
@@ -221,9 +224,15 @@ impl State {
 	/// Active receive tasks abort their own groups. Abort any head waiting for its
 	/// tail here, along with the track. Ordinary unsubscribe removes its entry.
 	fn abort(&mut self, err: &Error) {
+		for (_, (_, request)) in self.datagram_requests.drain() {
+			request.reject(err.clone());
+		}
 		for (_, mut track) in self.subscribes.drain() {
 			if let Some(request) = track.pending.take() {
 				request.reject(err.clone());
+			}
+			if let Some(datagrams) = track.datagram {
+				datagrams.abort(err.clone());
 			}
 			if let Some(producer) = track.producer {
 				let _ = producer.abort(err.clone());
@@ -781,6 +790,7 @@ struct Idle {
 }
 
 struct TrackState {
+	datagram: Option<crate::datagram::Producer>,
 	producer: Option<track::Producer>,
 	/// The origin request, until SUBSCRIBE_OK accepts it. Abort rejects this: the
 	/// producer does not exist yet, and dropping the setup task would be `Dropped`.
@@ -845,6 +855,7 @@ impl TrackState {
 
 	fn pending(name: String, broadcast: Path, fill: kio::Producer<Fill>) -> Self {
 		Self {
+			datagram: None,
 			producer: None,
 			pending: None,
 			name,
@@ -3238,6 +3249,7 @@ impl kio::Task for RunRoute {
 /// until it closes: its namespace is retracted (`route` closes), the peer stops
 /// selecting its instance, nothing holds it any more, or the session dies.
 struct RunBroadcast {
+	datagrams: broadcast::DatagramRequests,
 	this: Subscriber,
 	path: Path,
 	source: crate::model::broadcast::SourceGuard,
@@ -3268,6 +3280,7 @@ impl RunBroadcast {
 			this,
 			path,
 			source,
+			datagrams: broadcast.datagrams(),
 			broadcast,
 			route,
 			subscribes: TaskSet::owned(),
@@ -3285,6 +3298,21 @@ impl RunBroadcast {
 		self.this
 			.poll_listing(&self.path, &self.lister, &mut self.listening, waiter);
 		loop {
+			while let Poll::Ready(Ok(request)) = self.datagrams.poll_requested(waiter) {
+				if self.this.session.max_datagram_size() == 0 {
+					request.reject(Error::Unsupported);
+					continue;
+				}
+				let key = (self.path.clone(), request.name().into());
+				let consumer = self.source.consume();
+				match consumer.track(request.name()) {
+					Ok(track) => {
+						self.subscribes
+							.push(Requested::new(self.this.clone(), key, track, request));
+					}
+					Err(err) => request.reject(err),
+				}
+			}
 			if let Poll::Ready(next) = self.broadcast.poll_requested_track(waiter) {
 				return Poll::Ready(Some(next));
 			}
@@ -3323,13 +3351,17 @@ impl kio::Task for RunBroadcast {
 				}
 			};
 			match next {
-				Some(Ok(request)) => self.subscribes.push(RunSubscribe::new(
-					self.this.clone(),
-					self.path.clone(),
-					self.broadcast.clone(),
-					self.route.clone(),
-					request,
-				)),
+				Some(Ok(request)) => {
+					let mut run = RunSubscribe::new(
+						self.this.clone(),
+						self.path.clone(),
+						self.broadcast.clone(),
+						self.route.clone(),
+						request,
+					);
+					run.source = Some((*self.source).clone());
+					self.subscribes.push(run);
+				}
 				Some(Err(err)) => {
 					tracing::debug!(%err, "broadcast closed");
 					drop(self.listening.take());
@@ -3346,6 +3378,7 @@ impl kio::Task for RunBroadcast {
 /// subscribes to it, keeping the copy lingering between subscriptions until nobody
 /// wants it.
 struct RunSubscribe {
+	source: Option<broadcast::Producer>,
 	this: Subscriber,
 	broadcast_path: Path,
 	track_name: String,
@@ -3397,6 +3430,7 @@ impl RunSubscribe {
 			None => crate::auth::Gate::new(auth, path, direction),
 		};
 		Self {
+			source: None,
 			this,
 			broadcast_path,
 			track_name: request.name().to_owned(),
@@ -3502,6 +3536,7 @@ impl kio::Task for RunSubscribe {
 					));
 				}
 				RunStep::Subscribe(once) => {
+					once.source = self.source.clone();
 					let Some(idle) = ready!(once.poll(
 						waiter,
 						&self.this,
@@ -3555,6 +3590,8 @@ enum ServeEnd {
 /// subscribes any more or the track ended, with the copy kept for [`Linger`], `None` once
 /// it failed.
 struct SubscribeOnce {
+	source: Option<broadcast::Producer>,
+	shared: Option<Shared>,
 	key: tracks::TrackKey,
 	/// This request's own view of the track's gate, which a resumed subscription's token
 	/// binds to.
@@ -3697,6 +3734,8 @@ impl SubscribeOnce {
 		gate: &crate::auth::Gate,
 	) -> Self {
 		Self {
+			source: None,
+			shared: None,
 			key: (broadcast_path.clone(), track_name.into()),
 			gate: gate.unnamed(),
 			target: Some(target),
@@ -3992,6 +4031,9 @@ impl SubscribeOnce {
 					return Poll::Ready(None);
 				}
 				OnceStep::Serve => {
+					if let Some(shared) = &mut self.shared {
+						shared.poll(waiter);
+					}
 					let end = ready!(self.poll_end(waiter, this, group_fetches));
 					if let Some(idle) = self.ended(this, broadcast_path, track_name, group_fetches, end)
 						&& let Some(step) = self.finish(this, idle)
@@ -4350,6 +4392,11 @@ impl SubscribeOnce {
 			true => track.start_at(largest.map_or(0, |largest| largest.group)),
 			false => track.start_at(self.start),
 		};
+		if this.session.max_datagram_size() > 0
+			&& let Some(source) = &self.source
+		{
+			self.shared = Shared::new(this, source, self.key.clone(), &track);
+		}
 		if let Some(staged) = staged {
 			staged.commit();
 		}
@@ -4365,6 +4412,7 @@ impl SubscribeOnce {
 			let mut state = this.state.lock();
 			if let Some(held) = state.subscribes.get_mut(&request_id) {
 				held.producer = Some(track.clone());
+				held.datagram = self.shared.as_ref().map(|shared| shared.producer.clone());
 				held.timescale = timescale;
 				held.fill_ok(largest);
 				// A group-0 start joins filterless with no fill for the Largest group's head,
@@ -4817,6 +4865,10 @@ impl SubscribeOnce {
 	fn finish(&mut self, this: &Subscriber, idle: bool) -> Option<Poll<Option<Idle>>> {
 		let request_id = self.request_id;
 		let live = self.established.as_mut().expect("established");
+		if let Some(mut shared) = self.shared.take() {
+			let end = live.ended.clone().unwrap_or(Err(Error::Cancel));
+			shared.end(end);
+		}
 		// Release an unallocated join now, or let the session cancel its committed request.
 		live.fetching = None;
 
@@ -5671,21 +5723,89 @@ impl Subscriber {
 		kio::wait(|waiter| recv.poll(waiter, self, stream)).await
 	}
 
-	/// Drop an OBJECT_DATAGRAM: a subscription is a stream track's, which takes no datagrams.
+	/// Route OBJECT_DATAGRAM to the shared subscription's datagram model half.
 	///
 	/// A malformed datagram is still a protocol error.
 	pub fn recv_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
 		let (datagram, _) = ietf::ObjectDatagram::decode_slice(&payload, self.version)?;
-		if let ietf::DatagramBody::Status(status) = datagram.body
-			&& !super::object::status_defined(status)
+		if let ietf::DatagramBody::Status(status) = &datagram.body
+			&& !super::object::status_defined(*status)
 		{
 			return Err(Error::Session(SessionError::ProtocolViolation));
 		}
-		tracing::debug!(
-			alias = datagram.track_alias,
-			group = datagram.group_id,
-			"dropping a datagram on a stream track's subscription"
-		);
+
+		let (mut producer, timescale) = {
+			let state = self.state.lock();
+			let aliases = state.aliases.read();
+			let Some(request_id) = aliases.map.get(&datagram.track_alias).and_then(|alias| alias.holder()) else {
+				tracing::debug!(alias = datagram.track_alias, "dropping a datagram for an unknown alias");
+				return Ok(());
+			};
+			let Some(track) = state.subscribes.get(&request_id) else {
+				return Ok(());
+			};
+			match &track.datagram {
+				Some(producer) => (producer.clone(), track.timescale),
+				None => {
+					tracing::debug!(
+						alias = datagram.track_alias,
+						group = datagram.group_id,
+						"dropping a datagram on a stream track's subscription"
+					);
+					return Ok(());
+				}
+			}
+		};
+
+		// A defined status names no payload, and it does not end the datagram track.
+		// PUBLISH_DONE is that end.
+		let ietf::DatagramBody::Payload(payload) = datagram.body else {
+			tracing::debug!(
+				alias = datagram.track_alias,
+				group = datagram.group_id,
+				"dropping a datagram status"
+			);
+			return Ok(());
+		};
+		let object_id = datagram.object_id.unwrap_or(0);
+		if object_id != 0 {
+			tracing::debug!(
+				alias = datagram.track_alias,
+				group = datagram.group_id,
+				object_id,
+				"dropping a datagram with a nonzero object id"
+			);
+			return Ok(());
+		}
+
+		let timestamp = match &datagram.properties {
+			Some(raw) => {
+				let bytes = bytes::Bytes::copy_from_slice(raw);
+				match super::object::read(&bytes, self.version, timescale) {
+					Ok(object) => object.timestamp,
+					Err(err) => {
+						tracing::debug!(%err, "dropping a datagram with unreadable object properties");
+						return Ok(());
+					}
+				}
+			}
+			None => None,
+		};
+		if timescale.is_some() && timestamp.is_none() {
+			tracing::debug!(
+				alias = datagram.track_alias,
+				group = datagram.group_id,
+				"dropping a datagram without a timestamp on a timed track"
+			);
+			return Ok(());
+		}
+		if let Err(err) = producer.insert(crate::datagram::Datagram {
+			sequence: datagram.group_id,
+			timestamp,
+			payload,
+		}) {
+			tracing::debug!(%err, "dropping a datagram the track refused");
+		}
 		Ok(())
 	}
 }
@@ -8876,6 +8996,110 @@ mod tests {
 		// A status datagram cannot end the group.
 		let malformed = bytes::Bytes::from_static(&[0x22, 0x07, 0x04, 0x00]);
 		assert!(is_protocol_violation(&subscriber.recv_datagram(malformed).unwrap_err()));
+	}
+
+	/// A datagram subscription keeps object 0 and drops everything else. An undefined
+	/// status still closes the session, including on this subscription.
+	#[kio::test]
+	async fn a_datagram_subscription_keeps_object_zero() {
+		use crate::coding::Encode as _;
+
+		let info = crate::datagram::Info::default().with_timescale(Timescale::MILLI);
+		let producer = info.produce("audio");
+		let mut consumer = producer.consume();
+		let subscriber = subscriber_with_tracks(&[(RequestId(11), "cam", "audio")]);
+		subscriber.register_alias(RequestId(11), 7).unwrap();
+		{
+			let mut state = subscriber.state.lock();
+			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
+			// Only the datagram model half is present in this receive fixture.
+			track.producer = None;
+			track.datagram = Some(producer);
+			track.timescale = Some(Timescale::MILLI);
+		}
+
+		let mut properties = Vec::new();
+		ietf::encode_object_time(
+			&mut crate::coding::Encoder::new(&mut properties, Version::Draft18.into()),
+			crate::Timestamp::from_millis(9).unwrap(),
+			Timescale::MILLI,
+		)
+		.unwrap();
+		let encode = |object_id, body| {
+			ietf::ObjectDatagram {
+				track_alias: 7,
+				group_id: 4,
+				object_id,
+				publisher_priority: None,
+				end_of_group: !matches!(body, ietf::DatagramBody::Status(_)),
+				properties: Some(properties.clone()),
+				body,
+			}
+			.encode_bytes(Version::Draft18)
+			.unwrap()
+		};
+
+		let unreadable = ietf::ObjectDatagram {
+			track_alias: 7,
+			group_id: 3,
+			object_id: None,
+			publisher_priority: None,
+			end_of_group: false,
+			properties: Some(vec![0x10]),
+			body: ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"bad")),
+		}
+		.encode_bytes(Version::Draft18)
+		.unwrap();
+		subscriber.recv_datagram(unreadable).unwrap();
+		assert!(consumer.poll_recv(&kio::Waiter::noop()).is_pending());
+
+		subscriber
+			.recv_datagram(encode(
+				None,
+				ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"d")),
+			))
+			.unwrap();
+		match consumer.poll_recv(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(Some(datagram))) => {
+				assert_eq!(datagram.sequence, 4);
+				assert_eq!(datagram.payload.as_ref(), b"d");
+			}
+			other => panic!("object 0 was not delivered: {other:?}"),
+		}
+
+		subscriber
+			.recv_datagram(encode(
+				Some(3),
+				ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"x")),
+			))
+			.unwrap();
+		assert!(
+			matches!(consumer.poll_recv(&kio::Waiter::noop()), Poll::Pending),
+			"a nonzero object id must be dropped"
+		);
+
+		// Status 0 is defined, so it is not a payload and not a violation.
+		subscriber
+			.recv_datagram(encode(None, ietf::DatagramBody::Status(0)))
+			.unwrap();
+		assert!(matches!(consumer.poll_recv(&kio::Waiter::noop()), Poll::Pending));
+
+		// Status 1 is undefined on every subscription kind.
+		let undefined = ietf::ObjectDatagram {
+			track_alias: 7,
+			group_id: 4,
+			object_id: None,
+			publisher_priority: None,
+			end_of_group: false,
+			properties: None,
+			body: ietf::DatagramBody::Status(1),
+		}
+		.encode_bytes(Version::Draft18)
+		.unwrap();
+		assert!(matches!(
+			subscriber.recv_datagram(undefined),
+			Err(Error::Session(SessionError::ProtocolViolation))
+		));
 	}
 
 	/// One alias naming two different tracks is the collision section 11.1 makes fatal.
