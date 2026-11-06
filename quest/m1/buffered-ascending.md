@@ -38,7 +38,7 @@ Decided 2026-10-23 by the maintainer:
   max-delay release rules go. Not chosen: delete the hold outright; keep
   #6549's rules unchanged.
 - ✅ The hold stays audio-only. Video's startup hold is the poster quest's.
-- ✅ Placed in m1, requiring [Finalize moq-lite-07](/quest/m1/lite07-finalize.md):
+- ✅ Placed in m1, requiring [Finalize moq-lite-07](/quest/m2/lite07-finalize.md):
   lite-06 and earlier serve an ascending request newest-first, so this is a
   no-op on default sessions until lite-07 negotiates by default. `release`
   has no `order` field, so it ships in the next minor, not a 0.6.x patch.
@@ -77,9 +77,9 @@ keeps waiting on lite-07 for the head-hold simplification.
 
 ## Required
 
-- [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - an ascending request is served newest-first until lite-07 negotiates by default
+- [Finalize moq-lite-07](/quest/m2/lite07-finalize.md) - an ascending request is served newest-first until lite-07 negotiates by default
 
 ## Related
 
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS consumer stops delivering groups below its cursor
-- [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - owns the wire's `Group Order` and the ordered cursor's floor
+- [Subscribe ranges](/quest/m2/subscribe-ranges/README.md) - owns the wire's `Group Order` and the ordered cursor's floor

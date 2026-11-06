@@ -21,7 +21,7 @@ Both carry `peer` and `session`, and no message methods of their own. Session
 tracks are `<protocol>/<dialer>/<acceptor>/<session>` in both endpoints, served only on
 request so no listing names them; an unknown or unaccepted protocol is reset
 as unsupported. JS reads without fastest-reader pacing until
-[JS fastest-reader pacing](/quest/m2/js-fastest-reader.md), so a JS `tcp`
+[JS fastest-reader pacing](/quest/m4/js-fastest-reader.md), so a JS `tcp`
 reader that falls a group tail behind fails with an eviction error; say so in
 the docs. As in Rust, dials and accepts fail as unsupported while the
 endpoint's connection is moq-lite before 07, which never carries its hidden

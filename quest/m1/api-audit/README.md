@@ -9,7 +9,7 @@ Names mirror across Rust, JS, and the bindings. Every break says how
 to migrate.
 
 Non-goals: redesigning independently scoped surfaces
-([subscribe ranges](/quest/m1/subscribe-ranges/README.md),
+([subscribe ranges](/quest/m2/subscribe-ranges/README.md),
 [archives](/doc/concept/archives.md),
 [compressed tracks](/doc/concept/compression.md),
 and `Sync`'s per-track clock handles), and inherited debt that a later quest
@@ -32,7 +32,7 @@ Rules every child follows:
 
 - Removal beats addition. A surface with no consumer in the repository,
   moq.pro, or moq.dev goes private or away. A consumer planned in a quest
-  counts only when that quest is in m1.
+  counts only when that quest is in m1 or m2.
 - Inherited debt is fixed here only when it is cheap or sits on a surface
   this release breaks anyway. Otherwise it joins the later quest that
   reshapes it (the ordered track reader joins rust2's

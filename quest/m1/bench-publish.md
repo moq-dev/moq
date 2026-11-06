@@ -50,9 +50,9 @@ crate, like CONTRIBUTING's bench-only backport. Otherwise skip it, say so in
 the PR, and moq-bench publishes at the cut.
 
 The first publish goes out by token, so add moq-bench to the
-[crates.io trusted publisher](/quest/m2/crates-trusted-publisher.md)
+[crates.io trusted publisher](/quest/m3/crates-trusted-publisher.md)
 `Waiting` list (done in this planning PR).
 
 ## Related
 
-- [crates.io trusts the workflow](/quest/m2/crates-trusted-publisher.md) - moq-bench needs a trusted publisher after its first publish
+- [crates.io trusts the workflow](/quest/m3/crates-trusted-publisher.md) - moq-bench needs a trusted publisher after its first publish

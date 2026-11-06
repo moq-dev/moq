@@ -1,0 +1,36 @@
+# [M] Windows capture parity
+
+## Goal
+
+App capture and system audio work on Windows. Display and window capture,
+including the cursor, move to
+[Windows.Graphics.Capture](/quest/m4/capture-wgc.md).
+
+## Plan
+
+- **Applications** (every window of a process, including ones that open later)
+  are still `Unsupported` outside macOS, where `SCShareableContent` gives it
+  almost free. Windows has no direct equivalent, so this needs per-window
+  composition or an explicit decision that Windows offers window capture only.
+  Decide that rather than leaving a variant that errors at runtime.
+- **System audio** needs WASAPI loopback. `moq_audio::capture::Source::System`
+  exists but is macOS-only and returns `Unsupported` elsewhere. Unlike macOS
+  this does not go through the screen-capture API, so it is an independent path
+  and does not inherit the Screen Recording permission coupling.
+- **Per-app audio** (decided 2026-10-26, maintainer: yes) uses WASAPI process
+  loopback (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) to capture one
+  process tree's output, through the same `moq_audio::capture` source as the
+  Linux and macOS halves. Microsoft documents build 20348 as the floor, though
+  it works from Windows 10 2004 (build 19041) in practice. Activate it at
+  setup and refuse per-app audio with the reason where activation fails,
+  rather than gating on a build number.
+
+WGC does not answer app capture. It captures one monitor or one window per
+item and has no per-process source, so the per-window-composition or
+window-only decision still stands after that backend lands.
+
+## Related
+
+- [Windows.Graphics.Capture](/quest/m4/capture-wgc.md) - display and window capture with the cursor, which this quest no longer owns
+- [Linux capture parity](/quest/m3/capture-linux.md) - the same gaps, through
+  the portal and PipeWire
