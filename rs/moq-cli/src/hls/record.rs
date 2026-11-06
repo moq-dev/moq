@@ -604,7 +604,7 @@ mod tests {
 	/// A broadcast publishing VP8 renditions with aligned two-second GOPs.
 	struct Publisher {
 		origin: moq_net::origin::Producer,
-		broadcast: moq_net::origin::Publication,
+		broadcast: moq_net::origin::Route,
 		catalog: moq_mux::catalog::Producer,
 		video: Vec<Video>,
 	}
@@ -612,7 +612,7 @@ mod tests {
 	impl Publisher {
 		fn new(names: &[&str]) -> Self {
 			let origin = moq_tokio::origin::spawn();
-			let broadcast = origin.create_broadcast("live").unwrap();
+			let broadcast = origin.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
 			// A join interval declared up front lists every rendition before any media, so each
 			// is recorded from its first segment.
 			let mut seeded = moq_mux::catalog::hang::Catalog::<()>::default();
@@ -627,7 +627,7 @@ mod tests {
 					let info = moq_net::track::Info::default()
 						.with_timescale(moq_net::Timescale::MILLI)
 						.with_max_age(hang::container::MAX_AGE);
-					let track = broadcast.create_track(*name, info).unwrap();
+					let track = broadcast.broadcast().create_track(*name, info).unwrap();
 					let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
 					reserved.video(track, container, config_of(320)).unwrap()
 				})
@@ -642,7 +642,7 @@ mod tests {
 		}
 
 		fn broadcaster(&self) -> Broadcaster {
-			let source = moq_mux::Source::new(self.origin.consume(), self.broadcast.consume());
+			let source = moq_mux::Source::new(self.origin.consume(), self.broadcast.broadcast().consume());
 			let (broadcaster, driver) = Broadcaster::new(source, moq_hls::export::Config::default()).unwrap();
 			tokio::spawn(driver.run());
 			broadcaster

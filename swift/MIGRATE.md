@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Socket sessions
+
+Socket now exposes TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
+
+`GroupProducer.ready(size:)` is a new `async throws` call that waits until a frame of `size` bytes fits a window ahead of the fastest reader. Await it before each `writeFrame` so the writer waits for its fastest reader instead of evicting it, though not for slower readers; a TCP socket stream's producer needs it to behave like TCP. Existing writers are unchanged.
+
 ### `Following.available()` returns nil once the path goes offline
 
 `try await following.available()` returns `BroadcastConsumer?`.
@@ -24,6 +30,22 @@ while true {
     play(broadcast)
 }
 ```
+
+### Publishing goes through one `Route`
+
+`OriginProducer.createBroadcast(path:)` is `route(path:hidden:cost:instance:epoch:)`, and `requests(prefix:)` is `routePrefix(prefix:hidden:cost:instance:epoch:)`. Both return a `Route`, which replaces `Publication`, `OriginRequests`, and `BroadcastPrepared`:
+
+- `Publication.broadcast` is `Route.broadcast`, which now throws on a prefix route.
+- `Publication.announce(route: AnnounceRoute(...))` is `announce()`, and re-pricing is `setCost(_:)`. `unannounce()` is `withdraw()`.
+- `OriginRequests.requestedBroadcast()` is `Route.requested()`, which returns `nil` once the origin closes. A prefix `Route` is the `AsyncSequence` of requests, and cancelling the iterating task still cancels the route.
+- `BroadcastRequest.prepare()` then `BroadcastPrepared.publish()` is `BroadcastRequest.route(hidden:cost:instance:epoch:)`: create it hidden to fill it first, then `announce()`.
+- `Route.instance` is the stream's instance, minted at creation and kept across `withdraw` and `announce`.
+
+`AnnounceRoute` is gone: pass its `cost`, `instance`, and `epoch`, plus `hidden`, as labeled arguments when creating the route. A route is visible at once unless `hidden: true`; set it and call `announce()` after filling the catalog to keep the old create-then-announce order. A stable `instance` is fixed for the route's lifetime: announcing another one is a new route.
+
+Hold the `Route` for as long as the broadcast should stay announced: releasing or cancelling it retracts it, while `BroadcastProducer.close()` still ends both. A `BroadcastProducer` alone no longer keeps it announced.
+
+`Route`, the received facts in `Announce.route`, is renamed `RouteInfo`; its fields are unchanged.
 
 ### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
 

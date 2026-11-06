@@ -9,6 +9,7 @@ from . import audio as audio
 
 # Layer namespaces stay out of __all__; json would shadow the stdlib module.
 from . import json as json
+from . import socket as socket
 from . import video as video
 from .client import Client, CongestionControl, connect, qlog_supported, versions
 from .datagram import DatagramConsumer, DatagramProducer, DatagramRequest, DatagramRequests
@@ -20,13 +21,11 @@ from .origin import (
     AnnounceEvent,
     AnnounceEventAbsent,
     AnnounceEventPresent,
-    BroadcastPrepared,
     BroadcastRequest,
     Following,
     OriginConsumer,
     OriginProducer,
-    OriginRequests,
-    Publication,
+    Route,
 )
 from .publish import (
     BroadcastProducer,
@@ -57,7 +56,6 @@ from .subscribe import (
 )
 from .types import (
     Anchor,
-    AnnounceRoute,
     AudioCodec,
     AudioEncoderInput,
     AudioSampleFormat,
@@ -80,7 +78,7 @@ from .types import (
     QuicConfig,
     Range,
     RateTarget,
-    Route,
+    RouteInfo,
     Subscription,
     Timestamp,
     TrackInfo,
@@ -101,7 +99,6 @@ __all__ = [
     "AnnounceEvent",
     "AnnounceEventAbsent",
     "AnnounceEventPresent",
-    "AnnounceRoute",
     "AudioCodec",
     "AudioEncoderInput",
     "AudioSampleFormat",
@@ -109,7 +106,6 @@ __all__ = [
     "BandwidthConsumer",
     "BroadcastConsumer",
     "BroadcastRequests",
-    "BroadcastPrepared",
     "BroadcastProducer",
     "BroadcastRequest",
     "Client",
@@ -139,17 +135,16 @@ __all__ = [
     "GroupConsumer",
     "GroupProducer",
     "OriginConsumer",
-    "OriginRequests",
     "OriginProducer",
     "Order",
     "Position",
-    "Publication",
     "Range",
     "RateControl",
     "RateTarget",
     "Request",
     "Reservation",
     "Route",
+    "RouteInfo",
     "Server",
     "Session",
     "Subscription",

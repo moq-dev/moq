@@ -31,7 +31,7 @@ fn timed_datagrams() -> moq_net::datagram::Info {
 struct Fixture {
 	producer: moq_crypto::e2ee::broadcast::Producer,
 	consumer: moq_crypto::e2ee::broadcast::Consumer,
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 	_pair: MockPair,
 }
 
@@ -48,11 +48,10 @@ async fn connect_protected(version: Version, label: &str) -> Fixture {
 	let publisher = produce_origin(1);
 	let consumer_origin = produce_origin(2);
 
-	let broadcast = publisher.create_broadcast(&path).unwrap();
+	let options = moq_net::origin::RouteOptions::hidden().with_instance(generation.epoch().instance(), 0);
+	let broadcast = publisher.route(&path, options).unwrap();
 	let producer = moq_crypto::e2ee::broadcast::Producer::new(broadcast.broadcast().clone(), generation.clone());
-	broadcast
-		.announce(moq_net::origin::Route::default().with_instance(generation.epoch().instance(), 0))
-		.unwrap();
+	broadcast.announce().unwrap();
 
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(publisher);

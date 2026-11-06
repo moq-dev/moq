@@ -158,12 +158,12 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 
 	// Create the broadcast hidden up front, so an out-of-scope offer is refused before
 	// any mux work. It announces only once negotiation succeeds (below).
-	let producer = publisher.create_broadcast(&broadcast)?;
-	let handle = producer.clone();
+	// The session's sink holds the route, so it stays announced until the session ends.
+	let route = publisher.route(&broadcast, moq_net::origin::RouteOptions::hidden())?;
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(server.config().max_age)
 		.with_bandwidth(server.config().bandwidth.clone());
-	let sink = Box::new(IngestSink::new(producer.broadcast().clone(), config)?);
+	let sink = Box::new(IngestSink::routed(route.clone(), config)?);
 
 	// Register a session on the shared media mux: known ICE credentials (so the
 	// demux routes this peer's STUN by ufrag), an inbox to read datagrams from,
@@ -183,10 +183,10 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	// Announce only once negotiation succeeded, so a failed offer leaves a live
 	// session's broadcast alone, but before returning the answer, so a fast
 	// subscriber doesn't see a 404 in the gap before the first RTP packet. Each
-	// offer is its own publisher instance, so a reconnect replaces a stale
-	// session's broadcast instead of resuming into it.
-	let instance = moq_net::Instance::random();
-	handle.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))?;
+	// offer is its own route under a fresh instance, so a reconnect replaces a
+	// stale session's broadcast instead of resuming into it.
+	route.announce()?;
+	let instance = route.instance();
 
 	let resource_id = sdp::new_resource_id();
 	let socket = moq_ice::Socket::new(mux.socket(), mux.candidates().to_vec(), inbound)?;

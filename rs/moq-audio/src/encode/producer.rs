@@ -468,6 +468,11 @@ impl Producer {
 	#[cfg(any(feature = "capture", test))]
 	pub(crate) fn set_active(&mut self, active: bool, now: Timestamp) -> Result<(), Error> {
 		self.backlog.expire(now);
+		// Replayed groups land as fresh arrivals, so only this cut keeps a rejoining live
+		// subscriber from receiving all the retained audio before the live edge.
+		if active && let Some(budget) = self.track.track().subscription().and_then(|sub| sub.delay.max) {
+			self.backlog.expire_within(now, budget);
+		}
 		// Live input completes the partial frame within one codec frame, so only idle refreshes expire it.
 		if !active {
 			self.expire_partial(now)?;
@@ -881,6 +886,49 @@ mod tests {
 			.write(&pcm_frame(&vec![0.5; 1920], at(151).as_micros() as u64))
 			.unwrap();
 		assert_eq!(packet(&mut reader).await.unwrap().timestamp, at(151));
+		producer.finish().unwrap();
+	}
+
+	/// Replayed groups reach the track as fresh arrivals, so only the encoder can tell they are old:
+	/// a live viewer rejoining after seconds idle would otherwise receive all of them first.
+	#[tokio::test(start_paused = true)]
+	async fn demand_replays_only_the_history_its_max_delay_wants() {
+		let input = Input::default();
+		let options = Options {
+			track: Some("audio".into()),
+			config: Config::from_input(super::super::Codec::Pcm, &input),
+			..Options::default()
+		};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+		let at = |index: u64| Timestamp::from_micros(1_000_000 + index * 20_000).unwrap();
+		producer.set_active(false, at(0)).unwrap();
+		for index in 0..150 {
+			producer
+				.write(&pcm_frame(&vec![index as f32; 1920], at(index).as_micros() as u64))
+				.unwrap();
+		}
+		let track = consumer
+			.track("audio")
+			.unwrap()
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(130))),
+			)
+			.await
+			.unwrap();
+		let mut reader =
+			moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio));
+		// One replay turn, read at once as a network subscriber is served: the group it wrote is
+		// the newest the track holds, so the subscriber's own budget cannot judge it stale.
+		producer.set_active(true, at(150)).unwrap();
+		// A 130 ms budget at frame 150 still wants the frames ending after it: 143 onward.
+		let Some(moq_mux::container::Read::Frame { frame, .. }) = reader.read().await.unwrap() else {
+			panic!("expected a replayed frame");
+		};
+		assert_eq!(frame.timestamp, at(143));
 		producer.finish().unwrap();
 	}
 

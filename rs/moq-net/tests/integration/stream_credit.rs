@@ -21,14 +21,21 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let viewer = origin(2);
-		let broadcast = publisher.create_broadcast("live").unwrap();
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let info = track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_max_age(None);
 		let tracks: Vec<_> = (0..2)
-			.map(|i| broadcast.create_track(format!("{i}"), info.clone()).unwrap())
+			.map(|i| {
+				broadcast
+					.broadcast()
+					.create_track(format!("{i}"), info.clone())
+					.unwrap()
+			})
 			.collect();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
 		// Draft 22 keeps its SETUP stream open, so it needs one more for groups.
@@ -87,13 +94,15 @@ async fn a_subscription_past_the_credit_is_served_once_credit_returns() {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let viewer = origin(2);
-		let broadcast = publisher.create_broadcast("live").unwrap();
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let info = track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_max_age(None);
-		let first = broadcast.create_track("first", info.clone()).unwrap();
-		let second = broadcast.create_track("second", info).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let first = broadcast.broadcast().create_track("first", info.clone()).unwrap();
+		let second = broadcast.broadcast().create_track("second", info).unwrap();
+		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
 		options.transport.max_concurrent_bi_streams = Some(credit);

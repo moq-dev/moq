@@ -74,10 +74,10 @@ test("arrival capture refuses an unsupported container", () => {
 
 test("the observer shares playback demand and closes without ending playback", async () => {
 	const origin = new Origin.Producer();
-	const publishedPublication = origin.createBroadcast(Path.from("tone.hang"));
-	const published = publishedPublication.broadcast;
+	const publishedRoute = origin.route(Path.from("tone.hang"), { hidden: true });
+	const published = publishedRoute.broadcast;
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
-	publishedPublication.announce();
+	publishedRoute.announce();
 	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
 	const capture = new Capture({
 		broadcast: new Signal(source),
@@ -117,10 +117,10 @@ test("at auto the observer asks for the decoder's 2 s budget, not the target", a
 	// A capture cut to the target would drop the frames later than it, which are what the target
 	// is measured from, so a trace recorded that way can never show the player falling short.
 	const origin = new Origin.Producer();
-	const publishedPublication = origin.createBroadcast(Path.from("tone.hang"));
-	const published = publishedPublication.broadcast;
+	const publishedRoute = origin.route(Path.from("tone.hang"), { hidden: true });
+	const published = publishedRoute.broadcast;
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
-	publishedPublication.announce();
+	publishedRoute.announce();
 	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
 	const capture = new Capture({
 		broadcast: new Signal(source),
@@ -147,10 +147,10 @@ test("at auto the observer asks for the decoder's 2 s budget, not the target", a
 /** Capture a legacy track, then end its first group with `end` once that group's reader is in flight. */
 async function captureGroupEnd(end: (group: Group.Producer) => void): Promise<string | undefined> {
 	const origin = new Origin.Producer();
-	const publishedPublication = origin.createBroadcast(Path.from("tone.hang"));
-	const published = publishedPublication.broadcast;
+	const publishedRoute = origin.route(Path.from("tone.hang"), { hidden: true });
+	const published = publishedRoute.broadcast;
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
-	publishedPublication.announce();
+	publishedRoute.announce();
 	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
 	const capture = new Capture({
 		broadcast: new Signal(source),
