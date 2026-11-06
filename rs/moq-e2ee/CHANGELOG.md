@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.23](https://github.com/moq-dev/moq/compare/moq-e2ee-v0.0.22...moq-e2ee-v0.0.23) - 2026-11-06
+
+### Other
+
+- release
+- release
+- release
+- release
+- release
+- release
+- release
+- release
+- release
+- release
+- release
+
 ## [0.0.22](https://github.com/moq-dev/moq/compare/moq-e2ee-v0.0.21...moq-e2ee-v0.0.22) - 2026-11-05
 
 ### Other
