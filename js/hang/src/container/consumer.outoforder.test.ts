@@ -135,3 +135,20 @@ test("an excluded gap between ranges does not stall", async () => {
 	]);
 	consumer.close();
 });
+
+// A relative floor already resolved here still rises to where the publisher says its feed starts,
+// which counts a newest group that held no frame yet, rather than wait under the budget for a group
+// below it that never comes. Mirrors Rust's `a_resolved_relative_floor_rises_to_the_publishers_start`.
+test("a resolved relative floor rises to the publisher's start", async () => {
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
+	for (const sequence of [0n, 1n, 2n, 3n, 4n]) publish(track, sequence, Number(sequence) * 100);
+	const subscriber = track.subscribe({ delay: { max: Milli(10_000) }, ranges: [{ start: { relative: 0n } }] });
+	expect(subscriber.floor()).toBe(4n);
+	// A session declares the publisher's start; a local track has none, so stand in for it.
+	subscriber.start = async () => 5n;
+	const consumer = new Consumer(subscriber, { format: new LegacyFormat("data"), delay: { max: 10_000 as Milli } });
+
+	publish(track, 5n, 500);
+	expect(await drain(consumer)).toEqual([[5n, 5]]);
+	consumer.close();
+});

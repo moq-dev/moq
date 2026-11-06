@@ -161,9 +161,9 @@ function maxMicros(delay: Moq.Track.Delay): number {
 
 /**
  * Reads frames from a MoQ track in group order, buffering groups and skipping ones that fall the max
- * delay behind. Delivery starts at the floor the subscription's ranges name, or else where the publisher
- * reports its feed starts, or else the first group to arrive; a group that arrives below the cursor is
- * never delivered. Read in arrival order from the track itself to keep every group.
+ * delay behind. Delivery starts at the floor the subscription's ranges name, raised to where the
+ * publisher reports its feed starts, or with neither at the first group to arrive; a group that arrives
+ * below the cursor is never delivered. Read in arrival order from the track itself to keep every group.
  */
 export class Consumer {
 	#track: Moq.Track.Subscriber;
@@ -246,9 +246,6 @@ export class Consumer {
 		this.#maxBuffer = props.maxBuffer ?? DEFAULT_MAX_BUFFER;
 		this.#warmup = props.warmup ?? Milli.zero;
 		this.#jitter = props.predecessor ? props.predecessor.#jitter.fork() : new Jitter();
-		// A floor the ranges already name is where delivery starts, waiting for that group under the
-		// budget. Mirrors Rust's `Consumer::new`.
-		this.#startAt(track.floor());
 		this.#spread = new Signal(this.#jitter.measured);
 		this.spread = this.#spread;
 
@@ -283,10 +280,11 @@ export class Consumer {
 				const consumer = await this.#track.recvGroup();
 				if (!consumer) break;
 
-				// A start the feed resolves, such as a relative one, or none at all, begins where the
-				// publisher says its feed starts: it serves nothing below, and resolved a relative start
-				// against its own latest group, which may hold no frame yet. Groups go out newest first,
-				// so the first arrival is not the oldest served; without a reported start it stands in.
+				// Delivery starts at the floor the ranges name, raised to where the publisher says its feed
+				// starts: it serves nothing below, and resolved a relative start against its own latest
+				// group, which may hold no frame yet and so count in no floor resolved here. Groups go out
+				// newest first, so the first arrival is not the oldest served; without either it stands
+				// in. Mirrors Rust's `Consumer::poll_read`.
 				if (this.#active === undefined) {
 					const floor = this.#track.floor();
 					const served = await this.#track.start();
