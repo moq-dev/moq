@@ -20,7 +20,3 @@ Added 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest
 - **Landed:** the dot-segment and auth-redirect items above merged into `release` on 2026-11-02 in [moq-dev/moq#7599](https://github.com/moq-dev/moq/pull/7599), which also settles the redirect follow-up that [moq-dev/moq#7298](https://github.com/moq-dev/moq/pull/7298) and [moq-dev/moq#7278](https://github.com/moq-dev/moq/pull/7278) suggested. What remains is the two ports above, then the patch release. [moq-dev/moq#7596](https://github.com/moq-dev/moq/pull/7596) (open) holds this quest's main-side checkpoint.
 
 Public API: none. Wire: none; as on main, a withdrawal resets a partially written request without waiting for peer credit.
-
-## Related
-
-- [Backport the SETUP-path and iroh-key fixes](/quest/m0/backport-security-fixes.md) - the earlier backport in the same patch release

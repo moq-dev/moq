@@ -605,7 +605,8 @@ fn forged_identity_is_filed_apart_under_a_scoped_grant() {
 
 /// A local mesh publishing through two uplinks, each admitted under the same
 /// subject. Both CDN relays file the local origin under one key, so it
-/// survives losing an uplink; a retracted identity leaves no alias behind.
+/// survives losing an uplink, and so does the local relay's own identity; a
+/// retracted identity leaves no alias behind.
 #[test]
 fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 	let (c1, c2, l1, l2, origin) = (0, 1, 2, 3, 4);
@@ -626,6 +627,16 @@ fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 	assert_eq!(next(&sim, c1, key), Some(l1));
 	assert_eq!(next(&sim, c2, key), Some(l2));
 	assert_eq!(next(&sim, c1, qualified(LOCAL.subject, 20)), Some(l1));
+
+	sim.disconnect(l1, c1);
+	assert!(sim.run());
+	assert_eq!(
+		next(&sim, c1, qualified(LOCAL.subject, 20)),
+		Some(c2),
+		"the local relay's own fails over"
+	);
+	sim.connect(l1, c1);
+	assert!(sim.run());
 
 	sim.disconnect(l2, c2);
 	assert!(sim.run());
@@ -751,6 +762,45 @@ fn an_unanswerable_request_stops() {
 	assert_eq!(sim.retained().pending, 0);
 }
 
+/// A request newer than the one pending raises it and is sent on again, so the
+/// newer requester is not left waiting on an answer that only meets the older
+/// one; a repeat of the pending Seqno, or an older one, is a duplicate.
+#[test]
+fn a_newer_request_raises_the_pending_one() {
+	let (up, a, b) = (0, 1, 2);
+	let mut relay = Router::<Node, Item>::new(9);
+	for neighbor in [up, a, b] {
+		relay.connect(neighbor, Link::default()).unwrap();
+	}
+	let advert = Advert {
+		seqno: 0,
+		metric: 1,
+		down_only: false,
+	};
+	relay.route(up, 7, Some(Reach::Finite(advert)));
+	relay.drain();
+
+	let requests = |relay: &mut Router<Node, Item>| -> Vec<(Node, Seqno)> {
+		relay
+			.drain()
+			.into_iter()
+			.filter_map(|out| match out {
+				Out::Request { to, id: 7, seqno } => Some((to, seqno)),
+				_ => None,
+			})
+			.collect()
+	};
+
+	relay.request(a, 7, 1);
+	assert_eq!(requests(&mut relay), [(up, 1)]);
+	relay.request(b, 7, 1);
+	assert_eq!(requests(&mut relay), [], "a duplicate");
+	relay.request(b, 7, 2);
+	assert_eq!(requests(&mut relay), [(up, 2)], "raised and sent again");
+	relay.request(a, 7, 1);
+	assert_eq!(requests(&mut relay), [], "older than the pending one");
+}
+
 /// Each message recomputes only the identity it names, so the work a message
 /// costs does not grow with how many other origins a node routes to.
 #[test]
@@ -802,7 +852,7 @@ fn an_overflowing_route_neither_certifies_nor_holds() {
 	};
 	let (near, far) = (1, 2);
 	let far_link = Link {
-		cost: MAX - 1,
+		cost: MAX,
 		..Link::default()
 	};
 

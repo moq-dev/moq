@@ -86,12 +86,11 @@ for (const wire of WIRES) {
 		]);
 
 		const path = Path.from("big");
-		const publication = source.createBroadcast(path);
-		publication.announce();
+		const publication = source.route(path);
 		const datagrams = wire.datagrams ? publication.broadcast.createDatagrams("video") : undefined;
 		const track = publication.broadcast.createTrack("video");
 
-		const dynamic = relay.requestsRoute(path);
+		const dynamic = relay.routePrefix(path);
 		const inputs: BroadcastConsumer[] = [];
 		const forwarding = (async () => {
 			for await (const request of dynamic.requested()) {

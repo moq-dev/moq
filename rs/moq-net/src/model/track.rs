@@ -1463,16 +1463,16 @@ impl TrackState {
 	}
 
 	/// The live feed's cached groups within `range`, by sequence: never fetched backfill.
-	fn live(&self, range: impl ops::RangeBounds<u64> + Clone) -> impl DoubleEndedIterator<Item = (&u64, &Slot)> {
+	fn live(&self, range: impl ops::RangeBounds<u64>) -> impl DoubleEndedIterator<Item = (&u64, &Slot)> {
 		// Without backfill every cached group is the feed's, so the cache is walked as is.
-		let all = self.visible.len() == self.lookup.len();
-		let cached = all.then(|| self.lookup.range(range.clone()));
-		let indexed = (!all).then(|| {
-			self.visible
-				.range(range)
-				.map(|sequence| (sequence, self.lookup.get(sequence).expect("an indexed live slot")))
-		});
-		cached.into_iter().flatten().chain(indexed.into_iter().flatten())
+		match self.visible.len() == self.lookup.len() {
+			true => LiveWalk::Cached(self.lookup.range(range)),
+			false => LiveWalk::Indexed(
+				self.visible
+					.range(range)
+					.map(|sequence| (sequence, self.lookup.get(sequence).expect("an indexed live slot"))),
+			),
+		}
 	}
 
 	/// The first live-feed group at or above `from` that `servable` covers for which `f`
@@ -1486,10 +1486,6 @@ impl TrackState {
 		rev: bool,
 		mut f: impl FnMut(&'a Slot) -> Option<R>,
 	) -> Option<R> {
-		let mut scan = |range: &mut dyn DoubleEndedIterator<Item = (&'a u64, &'a Slot)>| match rev {
-			true => range.rev().find_map(|(_, slot)| f(slot)),
-			false => range.map(|(_, slot)| slot).find_map(&mut f),
-		};
 		match servable {
 			Servable::Run { start, end } => {
 				let from = from.max(*start);
@@ -1498,7 +1494,11 @@ impl TrackState {
 					return None;
 				}
 				let end = end.map_or(Bound::Unbounded, Bound::Excluded);
-				scan(&mut self.live((Bound::Included(from), end)))
+				let mut live = self.live((Bound::Included(from), end));
+				match rev {
+					true => live.rev().find_map(|(_, slot)| f(slot)),
+					false => live.find_map(|(_, slot)| f(slot)),
+				}
 			}
 			Servable::Runs(several) => {
 				let hi = match several.cap {
@@ -5430,6 +5430,28 @@ impl Consumer {
 		self.with_state(|state| state?.read().max_sequence)
 	}
 
+	/// Ready once [`Self::latest_sequence`] is `Some`: the track holds a group. Stays pending
+	/// on a track that closed without one.
+	pub(super) fn poll_grouped(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.with_state(|state| {
+			let Some(state) = state else {
+				return Poll::Pending;
+			};
+			let routes = state.read().routes.clone();
+			if let Some(routes) = routes {
+				return routes.poll_grouped(waiter);
+			}
+			match state.poll(waiter, |state| match state.max_sequence {
+				Some(_) => Poll::Ready(()),
+				None => Poll::Pending,
+			}) {
+				Poll::Ready(Ok(())) => Poll::Ready(()),
+				Poll::Ready(Err(closed)) if closed.max_sequence.is_some() => Poll::Ready(()),
+				_ => Poll::Pending,
+			}
+		})
+	}
+
 	/// The first group the declared end excludes whole, or `None` while the track is open ended.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn final_sequence(&self) -> Option<u64> {
@@ -6072,11 +6094,12 @@ impl group::Expiry for FetchExpiry {
 		self.reading.release();
 	}
 
-	fn is_expired(&self, max_delay: Option<Duration>, waiter: &kio::Waiter) -> bool {
+	fn is_expired(&self, recover: Option<&super::resume::Recover>, waiter: &kio::Waiter) -> bool {
 		// Parked first, so a group landing above while this judges wakes it.
 		if !self.cache.wakes().watch_landing(self.sequence, waiter) {
 			return false;
 		}
+		let max_delay = recover.and_then(|recover| recover.poll_budget(waiter));
 		let state = self.state.read();
 		let budget = match (self.max_delay, max_delay) {
 			(Some(fetch), Some(route)) => fetch.min(route),
@@ -6116,14 +6139,16 @@ impl group::Expiry for GroupExpiry {
 	}
 
 	/// A group nothing ever landed above has no successor, so neither clock can convict it:
-	/// that verdict, the common one at the live edge, takes neither the track's lock nor the
-	/// subscription's. Nothing it skips parking on can move it until a group lands above,
-	/// which wakes the read.
-	fn is_expired(&self, max_delay: Option<Duration>, waiter: &kio::Waiter) -> bool {
+	/// that verdict, the common one at the live edge, takes neither the track's lock, the
+	/// subscription's, nor a logical reader's. Nothing it skips parking on can move it until
+	/// a group lands above, which wakes the read; a reader's preferences reach its copies
+	/// without this poll, since every update mirrors them at once.
+	fn is_expired(&self, recover: Option<&super::resume::Recover>, waiter: &kio::Waiter) -> bool {
 		// Parked first, so a group landing above while this judges wakes it.
 		if !self.cache.wakes().watch_landing(self.sequence, waiter) {
 			return false;
 		}
+		let max_delay = recover.and_then(|recover| recover.poll_budget(waiter));
 		let max_delay = max_delay.unwrap_or_else(|| {
 			let mut max_delay = Duration::default();
 			let _ = self.subscription.poll(waiter, |subscription| {
@@ -6275,6 +6300,35 @@ impl Published {
 			revision,
 			cap,
 			servable,
+		}
+	}
+}
+
+/// [`TrackState::live`]'s walk, one branch per call rather than a chain checking both on
+/// every step: every search for live content goes through it.
+enum LiveWalk<C, I> {
+	/// The cache, which holds only the live feed.
+	Cached(C),
+	/// The live index, each sequence looked up in the cache.
+	Indexed(I),
+}
+
+impl<T, C: Iterator<Item = T>, I: Iterator<Item = T>> Iterator for LiveWalk<C, I> {
+	type Item = T;
+
+	fn next(&mut self) -> Option<T> {
+		match self {
+			Self::Cached(cached) => cached.next(),
+			Self::Indexed(indexed) => indexed.next(),
+		}
+	}
+}
+
+impl<T, C: DoubleEndedIterator<Item = T>, I: DoubleEndedIterator<Item = T>> DoubleEndedIterator for LiveWalk<C, I> {
+	fn next_back(&mut self) -> Option<T> {
+		match self {
+			Self::Cached(cached) => cached.next_back(),
+			Self::Indexed(indexed) => indexed.next_back(),
 		}
 	}
 }
@@ -6878,8 +6932,14 @@ impl Cursor {
 		}
 	}
 
+	/// The next run given up, judging the live edge first only when `probe`.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn poll_drop(&mut self, taken: &Delivered, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, StreamError)> {
+	fn poll_drop(
+		&mut self,
+		taken: &Delivered,
+		probe: bool,
+		waiter: &kio::Waiter,
+	) -> Poll<(ops::Range<u64>, StreamError)> {
 		self.sync();
 		if self.drops.is_none() {
 			let mut drops = Box::new(DropCursor::new(&self.state.read()));
@@ -6890,7 +6950,8 @@ impl Cursor {
 			}
 			self.drops = Some(drops);
 		}
-		if self.filter.refused.is_none()
+		if probe
+			&& self.filter.refused.is_none()
 			&& let Poll::Ready(Ok(drift)) = self.poll_drift(&self.servable, waiter)
 		{
 			// From where the reader reads next: an ordered one asks nothing below what it took.
@@ -8747,9 +8808,22 @@ impl Subscriber {
 	/// forwards drops keeps none.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, StreamError)> {
+		self.poll_drop_probing(true, waiter)
+	}
+
+	/// [`Self::poll_drop`] without judging the live edge again: only the runs a read since
+	/// the last judgement gave up, such as a receive that probed after a drop poll found
+	/// nothing. That judgement parked `waiter` on everything that could change it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn poll_queued_drop(&mut self, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, StreamError)> {
+		self.poll_drop_probing(false, waiter)
+	}
+
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn poll_drop_probing(&mut self, probe: bool, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, StreamError)> {
 		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.poll_drop(&self.delivered, waiter),
-			Inner::Resume(resume, _) => resume.poll_drop(&self.delivered, waiter),
+			Inner::Plain(cursor) => cursor.poll_drop(&self.delivered, probe, waiter),
+			Inner::Resume(resume, _) => resume.poll_drop(&self.delivered, probe, waiter),
 		}
 	}
 

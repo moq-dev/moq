@@ -14,13 +14,13 @@ any other failure by its type, the same way in every crate.
 ## Plan
 
 Planned 2026-11-04 with the maintainer, from the suggested follow-up of
-[moq-dev/moq#7873](https://github.com/moq-dev/moq/pull/7873)
-([Transport on rind](/quest/m1/rind/transport.md)). That PR adds the
-`provider` feature to moq-crypto, holding `provider::UnsupportedCpu`
-(`Clone + Copy + Eq`, wrapping rind's `MissingFeature` privately), and moves
-moq-quic, moq-tokio, qmux and moq-uring onto it as
-`UnsupportedCpu(#[from] ...)` with `#[error(transparent)]`. This quest does
-the same for the three crates it left, so it starts once that PR lands.
+[moq-dev/moq#7873](https://github.com/moq-dev/moq/pull/7873), which moved
+the transport crates to rind. That PR added the `provider` feature to
+moq-crypto, holding `provider::UnsupportedCpu` (`Clone + Copy + Eq`, wrapping
+rind's `MissingFeature` privately), and moved moq-quic, moq-tokio, qmux and
+moq-uring onto it as `UnsupportedCpu(#[from] ...)` with
+`#[error(transparent)]`. This quest does the same for the three crates it
+left.
 
 - ✅ #7873 lands as is, with the type in `provider`; this quest moves it
   later (maintainer, 2026-11-04, on
@@ -47,7 +47,3 @@ the same for the three crates it left, so it starts once that PR lands.
 Public API: breaking for moq-auth, moq-hls and moq-crypto (the variants'
 payload type, and e2ee's variant name). Each gets a `## Unreleased` note in
 its `MIGRATE.md`. Wire: none.
-
-## Required
-
-- [Transport on rind](/quest/m1/rind/transport.md) - adds `moq_crypto::provider::UnsupportedCpu`, which this wraps

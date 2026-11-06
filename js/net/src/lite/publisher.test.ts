@@ -32,9 +32,8 @@ import { Track as TrackMessage } from "./track.ts";
 import { ALPN_05, ALPN_06, ALPN_07_WIP, hasRanges, keepsSubscribeOpen, Version } from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
-	const broadcastPublication = origin.createBroadcast(path);
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(path);
+	const broadcast = broadcastRoute.broadcast;
 	return broadcast;
 }
 
@@ -116,9 +115,8 @@ test.each([
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-	const broadcastPublication = origin.createBroadcast(Path.from("cam"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce({ cost: 7n });
+	const broadcastRoute = origin.route(Path.from("cam"), { cost: 7n });
+	const broadcast = broadcastRoute.broadcast;
 
 	const written: Uint8Array[] = [];
 	const stream = new Stream({
@@ -136,7 +134,7 @@ test.each([
 	const initial = written.length;
 	expect(initial).toBeGreaterThan(0);
 
-	broadcastPublication.announce({ cost: 9n });
+	broadcastRoute.setCost(9n);
 	await settle();
 	expect(written.length > initial).toBe(sent);
 
@@ -714,6 +712,8 @@ async function servedSubscription(
 		routed?: boolean;
 		// Groups the track holds before the SUBSCRIBE arrives, stamped by sequence.
 		prefill?: bigint[];
+		// A newer largest group the track's source reported before the SUBSCRIBE arrives.
+		reported?: bigint;
 		// Leave the track unresolved until `accept`, as an on-demand track the SUBSCRIBE beats.
 		pending?: boolean;
 	} = {},
@@ -732,7 +732,7 @@ async function servedSubscription(
 		broadcast = new BroadcastProducer();
 		const front = new Front();
 		front.serve(broadcast.consume());
-		const dynamic = origin.requestsRoute(Path.from("test"));
+		const dynamic = origin.routePrefix(Path.from("test"));
 		void (async () => {
 			for await (const request of dynamic.requested()) request.serve(front.consumer);
 		})();
@@ -748,6 +748,10 @@ async function servedSubscription(
 		const group = track.createGroup(sequence);
 		for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(sequence))));
 		group.finish();
+	}
+	if (options.reported !== undefined) {
+		if (!track) throw new Error("a pending track has no source to report");
+		hooks.reportedGroup(track, options.reported);
 	}
 	// Pulled before the SUBSCRIBE arrives: a broadcast nobody pulls refuses an unknown track.
 	const request = options.pending ? wireOf(broadcast).requested() : undefined;
@@ -796,11 +800,19 @@ async function servedSubscription(
 		serving,
 		parked: gate.parked,
 		release: gate.release,
-		// Resolve a pending track with the publisher's request for it.
-		async accept() {
+		// Resolve a pending track with the publisher's request for it, answering with `held`
+		// and, when `reported`, an upstream's report of a newer largest group.
+		async accept(held: bigint[] = [], reported?: bigint) {
 			const pulled = await request;
 			if (!pulled) throw new Error("the publisher never requested the track");
-			track = pulled.accept(info);
+			const staged = hooks.stageRequest(pulled, info);
+			if (reported !== undefined) hooks.reportedGroup(staged.producer, reported);
+			for (const sequence of held) {
+				const group = staged.producer.createGroup(sequence);
+				for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(sequence))));
+				group.finish();
+			}
+			track = staged.commit();
 		},
 		// Stamped by sequence, so a group served out of order still starts in order.
 		serve(sequence: bigint) {
@@ -1465,18 +1477,67 @@ test("lite draft-05: an update dropping the floor re-pins to the latest group", 
 
 // A SUBSCRIBE can beat its track resolving, as one a relay serves from a copy still fetching
 // upstream. Groups the track holds once it does are older than the join, so an absent Group
-// Start is still the latest group.
-test.each([Version.DRAFT_01, Version.DRAFT_03, Version.DRAFT_05])(
-	"lite %s: a subscribe that beats its track resolving joins at the latest group",
+// Start is still the latest group known then, including one the upstream reported.
+// Routed, the join reads the front's serving copy.
+test.each([
+	[Version.DRAFT_03, undefined, false],
+	[Version.DRAFT_04, undefined, false],
+	[Version.DRAFT_04, 9n, false],
+	[Version.DRAFT_04, 9n, true],
+	[Version.DRAFT_05, undefined, false],
+	[Version.DRAFT_05, undefined, true],
+])(
+	"lite %s (reported %s, routed %s): a subscribe that beats its track resolving joins at its newest group",
+	async (version, reported, routed) => {
+		const sub = await servedSubscription({ version, pending: true, routed });
+		try {
+			await sub.accept([0n, 3n, 7n], reported);
+			if (reported !== undefined) {
+				// The SUBSCRIBE_OK follows the floor, so these arrive after the join took it.
+				expect("ok" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+				sub.serve(8n);
+				sub.serve(9n);
+			}
+			expect(await sub.servedHeader()).toBe(reported ?? 7n);
+			expect(await sub.servedSequence()).toBeUndefined();
+		} finally {
+			await sub.close();
+		}
+	},
+);
+
+// A track that already holds groups when the SUBSCRIBE arrives still joins at a newer largest
+// its source reported, as a cold one would.
+test.each([Version.DRAFT_04, Version.DRAFT_05])(
+	"lite %s: a join on a track already holding groups starts at a reported newer group",
+	async (version) => {
+		const sub = await servedSubscription({ version, prefill: [0n, 3n], reported: 9n });
+		try {
+			if (version === Version.DRAFT_04) {
+				expect("ok" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+			} else {
+				await flush();
+			}
+			sub.serve(7n);
+			sub.serve(9n);
+			expect(await sub.servedHeader()).toBe(9n);
+			expect(await sub.servedSequence()).toBeUndefined();
+		} finally {
+			await sub.close();
+		}
+	},
+);
+
+// Lite-01/02 retain the arrival-only floor even when the answer contains history.
+test.each([Version.DRAFT_01, Version.DRAFT_02])(
+	"lite %s: a pending join retains its arrival-only floor",
 	async (version) => {
 		const sub = await servedSubscription({ version, pending: true });
 		try {
-			await sub.accept();
-			sub.serve(0n);
-			sub.serve(1n);
-			sub.serve(2n);
-			expect(await sub.servedHeader()).toBe(2n);
-			expect(await sub.servedSequence()).toBeUndefined();
+			await sub.accept([0n, 3n, 7n]);
+			expect(await sub.servedHeader()).toBe(0n);
+			expect(await sub.servedHeader()).toBe(3n);
+			expect(await sub.servedHeader()).toBe(7n);
 		} finally {
 			await sub.close();
 		}
@@ -2768,9 +2829,8 @@ test("lite draft-06: announces wait for the setup grant", async () => {
 		answered = resolve;
 	});
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), { grant, ready });
-	const broadcastPublication = origin.createBroadcast(Path.from("foo/bar"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("foo/bar"));
+	const broadcast = broadcastRoute.broadcast;
 
 	const written: Uint8Array[] = [];
 	const stream = new Stream({
@@ -2846,7 +2906,7 @@ test("lite draft-06: closing while announces wait for the setup grant does not h
 test("lite draft-06: a grant that shrinks while a TRACK resolves refuses it", async () => {
 	const pair = createMockTransportPair(ALPN_06);
 	const origin = new OriginProducer();
-	const handle = origin.requestsRoute(Path.from("live"));
+	const handle = origin.routePrefix(Path.from("live"));
 	const requests = handle.requested();
 	const grant = new Signal<Grant | undefined>(grantOf("live"));
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), {
@@ -2887,7 +2947,7 @@ test("lite draft-06: a grant that shrinks while a TRACK resolves refuses it", as
 test("lite draft-06: a grant that shrinks while TRACK_INFO is blocked resets it", async () => {
 	const pair = createMockTransportPair(ALPN_06);
 	const origin = new OriginProducer();
-	const handle = origin.requestsRoute(Path.from("live"));
+	const handle = origin.routePrefix(Path.from("live"));
 	const requests = handle.requested();
 	const grant = new Signal<Grant | undefined>(grantOf("live"));
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), {
@@ -2950,7 +3010,7 @@ test("lite draft-06: a grant that shrinks while TRACK_INFO is blocked resets it"
 test("lite draft-06: a grant that shrinks while the broadcast resolves resets the subscription", async () => {
 	const pair = createMockTransportPair(ALPN_06);
 	const origin = new OriginProducer();
-	const handle = origin.requestsRoute(Path.from("live"));
+	const handle = origin.routePrefix(Path.from("live"));
 	const requests = handle.requested();
 	const grant = new Signal<Grant | undefined>(grantOf("live"));
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), {

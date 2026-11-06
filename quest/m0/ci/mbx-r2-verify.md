@@ -2,14 +2,10 @@
 
 ## Goal
 
-Confirm the cache earns its keep for the hosted jobs that still use R2
-(Nightly on `main`, release pull requests, and the macOS and Windows jobs),
-and record the numbers in the PR that closes this:
+Confirm the cache earns its keep for the hosted Nightly jobs on `main` that
+still use R2 (Linux, macOS and Windows), and record the numbers in the PR
+that closes this:
 
-- A release pull request's `Check the cache` step reports `effective
-  read-only`. Condition: `release` carries the Rust cache, which its
-  `platform.yml` still lacks on 2026-10-28; check with
-  `git show origin/release:.github/workflows/platform.yml | grep rust-cache`.
 - Nightly's Linux, macOS and Windows jobs hit what the previous Nightly
   wrote.
 - Restore plus build time against the 150-210s Actions restore of the ~6 GB
@@ -27,6 +23,12 @@ Use scheduled Nightly runs on `main` only (`gh run list --workflow
 nightly.yml --branch main --event schedule`), never a dispatch on a branch.
 
 ## Plan
+
+Decided 2026-11-05 (maintainer, /quest-audit): ✅ the release pull request
+check moved to [m3](/quest/m3/mbx-r2-release-cache.md) (m2 before the milestone re-cut) behind the cut, since
+`release` gets the platform Rust cache only when the cut merges `main` into
+it; the Nightly checks stay here. Not chosen: moving this whole quest; merging
+`main` into `release` now, which reverses the 2026-11-04 decision.
 
 Decided 2026-10-22 (maintainer): narrowed to hosted jobs. Since
 [#6040](https://github.com/moq-dev/moq/pull/6040) the merge queue runs on the
@@ -70,9 +72,16 @@ compilation is "not looked up".
   where `main` has it. mbx v1.29.1 (2026-11-01) includes
   [#870](https://github.com/jdx/mr-boxington/pull/870), and
   `.github/actions/rust-cache/action.yml` pins 1.29.2 (2026-11-03) since
-  [#7653](https://github.com/moq-dev/moq/pull/7653). Verify it against the
-  Windows criterion in Waiting below. The fix also offers legacy CRLF
-  identities, so an in-window manifest from 1.28.0 remains usable.
+  [#7653](https://github.com/moq-dev/moq/pull/7653). The fix also offers
+  legacy CRLF identities, so an in-window manifest from 1.28.0 remains usable.
+  Verified 2026-11-05: the scheduled
+  [Windows job](https://github.com/moq-dev/moq/actions/runs/42050683248/job/127326015447)
+  of run 42050683248 set up mbx 1.29.2, and its workspace build, against a
+  manifest of 2,604 predictions, reported 846 hits, 224 misses, 168 not looked
+  up and 1,019 prefetched. Its `Cargo.lock` differed from the previous
+  scheduled run's, so those hits point to an inherited manifest, but the
+  summary does not name the manifest identity it looked up; record that
+  identity from a later Windows job before relying on inheritance.
 - macOS: on 2026-10-28 the build did inherit, prefetching 732 predictions,
   yet hit only 13, with 1565 compilations not looked up. The install order is
   not the cause. Find out why the inherited predictions mostly miss, for
@@ -82,7 +91,8 @@ compilation is "not looked up".
   The doctest job hit 0 on 2026-10-24 and 2026-10-27, 115 on 2026-10-25, and
   46 on 2026-10-26. Decided 2026-10-29 (maintainer): give those jobs full
   history (`fetch-depth: 0` with `filter: blob:none`) only once Windows hits
-  after the mbx bump, which shows inheritance pays.
+  after the mbx bump, which shows inheritance pays. Windows hit on
+  2026-11-05 (above), so that condition is met.
 - `Cargo.lock` changed 7, 2, 6, 10, 8 and 8 times between consecutive
   scheduled Nightlies from 2026-10-21 to 2026-10-27. Nightly is the only
   hosted writer for Windows and macOS, so after more than 8 changes the
@@ -118,17 +128,6 @@ feature unification, so changed compiler inputs remain a separate cause.
 
 ## Waiting
 
-- GitHub Actions: a scheduled Windows job on mbx 1.29.1 or later must load
-  a workspace manifest of more than 124 predictions and hit, as its
-  workspace build's mbx summary reports. Check the first run with an
-  available manifest from an earlier scheduled Windows workspace build at the
-  same lockfile state or within 8 earlier states. A setup failure or no
-  in-window predecessor is inconclusive; inspect the next eligible scheduled
-  run. Until this proves inheritance pays, keep Linux's shallow checkout as
-  decided above. Do not dispatch Nightly.
-- moq-dev/moq: `release` still lacks the platform Rust cache as checked on
-  2026-11-04 with the command in the Goal. Once it carries the cache, inspect
-  a release pull request's `Check the cache` step for effective read-only.
 - GitHub Actions: scheduled runs must supply the remaining cross-platform
   reuse, restore-plus-build comparison and rebuild-frequency evidence in the
   Goal. Current timings are not a matched-commit comparison, and macOS's
@@ -142,4 +141,4 @@ feature unification, so changed compiler inputs remain a separate cause.
 
 ## Related
 
-- [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - the same R2 and Environment bootstrap for Nix
+- [Verify the Nix runtime cache](/quest/m0/ci/nix-cache-verify.md) - the same R2 and Environment bootstrap for Nix

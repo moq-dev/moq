@@ -52,7 +52,7 @@ pub use datagram::Datagram;
 pub use time::*;
 pub use timed::Timed;
 
-/// Publishing broadcasts, announcing routes, and consuming both through an origin.
+/// Routing broadcasts into an origin, and consuming them through it.
 pub mod origin {
 	pub use super::follow::Following;
 	pub(crate) use super::origin_impl::HiddenWithheld;
@@ -62,9 +62,11 @@ pub mod origin {
 	// private: capability gap
 	pub(crate) use super::origin_impl::Lookup;
 	pub use super::origin_impl::{
-		Config, Consumer, Cost, Driver, HopLimit, Link, Preference, Prepared, Producer, Publication, Request,
-		Requesting, Requests, Route, Source,
+		Config, Consumer, Cost, Driver, HopLimit, Link, Preference, Producer, Request, Requesting, Route, RouteInfo,
+		RouteOptions, Source,
 	};
+	pub use crate::route::RouteKey;
+
 	// Relay-level: every route change, for forwarding and stats. Apps read
 	// `announce` and `follow` instead.
 	#[doc(hidden)]

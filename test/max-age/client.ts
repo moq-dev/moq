@@ -15,10 +15,10 @@ const origin = new Producer();
 // `null` is an explicit unlimited: an omitted max age is the zero authored default.
 const ages = [null, Milli(0), Milli(30_000)];
 if (mode === "publish") {
-	const broadcastPublication = origin.createBroadcast(Path.from("age"));
-	const broadcast = broadcastPublication.broadcast;
+	const broadcastRoute = origin.route(Path.from("age"), { hidden: true });
+	const broadcast = broadcastRoute.broadcast;
 	for (const [i, maxAge] of ages.entries()) broadcast.createTrack(String(i), { maxAge });
-	broadcastPublication.announce();
+	broadcastRoute.announce();
 }
 const url = new URL(address);
 const transport = new Session(url, {

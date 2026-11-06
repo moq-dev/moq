@@ -103,12 +103,19 @@ observe(arrival, media):
         origin = arrival; interval = 0; peak = delay; return
 
     index = floor((arrival - origin) / RESAMPLE)
+    resumed = ended; ended = false
     if index <= interval:
         peak = max(peak, delay); return
 
     fold(bucket of peak)
-    fold(nothing) for each elapsed empty interval, at most IDLE_MAX
+    if resumed:                         # a declared silence folds nothing
+        origin = arrival; index = 0
+    else:
+        fold(nothing) for each elapsed empty interval, at most IDLE_MAX
     interval = index; peak = delay
+
+end():                                  # a declared end precedes the next observation
+    if not first observation: ended = true
 
 fold(bucket):                           # prior starts at 1
     rest = 1 - FORGET * (1 - prior)     # what the decayed evidence leaves
@@ -383,10 +390,10 @@ them. The cost is over-buffering by the smallest subscribed `delay` when the
 broadcast's earliest rendition is not subscribed.
 
 The playout is recomputed when a rendition is subscribed, unsubscribed, or its
-catalog entry rises, so dropping a slow rendition lowers latency. The shared
-reference itself only ever moves earlier, so once the earliest subscribed track
-leaves, the clock stays anchored to it until playback re-anchors; that errs on
-the safe side.
+catalog entry rises, so dropping a slow rendition lowers latency. Each track's
+own arrivals only ever move its part of the shared reference earlier. A track
+that leaves, or whose timeline restarts, releases its part: the earliest
+remaining track's anchor takes over, or the next frame re-anchors.
 
 A track that replaces another in the same slot and on the same broadcast path,
 such as the new name a codec change publishes under, continues the outgoing
@@ -474,6 +481,25 @@ keeps decaying at the base rate. Only the weight the prior regained is replaced
 quickly, the same way it is at cold start, since it stands for no evidence at
 all.
 
+### Declared silence
+
+A publisher that stops sending on purpose, such as a muted push-to-talk
+speaker, marks the stop with a declared end. The silence after it says
+nothing about the path, so relaxing toward the prior would only make a
+listener who sat through a long mute come back over-buffered. `end()` tells
+the estimator that a declared end lies between the previous observation and
+the next. The next measured observation then folds the pending interval as
+usual and starts a fresh interval at its own arrival instead of folding the
+intervals in between. If it lands in the pending interval it is merged as
+usual, since there is nothing to skip. Either way the end is spent, so a
+later gap the publisher did not declare still relaxes the estimate. The
+reference history, the histogram, and the prior are untouched, and an end
+before the first observation, or under a fixed target, does nothing.
+
+The receiver calls `end()` before observing the first frame from a group later
+than the declared end's own: the stopped encoder's final packets may follow the
+marker in its group, and they belong to the speech before the silence, not after it.
+
 ## Fixed targets
 
 An explicit delay **fixes the target and disables adaptation**. It is taken
@@ -552,7 +578,8 @@ directly, so neither is graded against the other.
 `arrival` and `media` are parallel arrays in **delivery order**, the order the
 receiver observes them, so `media` is deliberately out of order in the
 `reorder` and `backlog` cases. `advertised` and `delay` are present only where the case uses
-them. `target` lists `[frame index, target]` at every frame where the target
+them, as is `ends`: the indices, ascending, of the frames observed right after a
+[declared end](#declared-silence), each of which calls `end()` before it is observed. `target` lists `[frame index, target]` at every frame where the target
 differs from the previous frame's, starting at frame 0, so an implementation
 folds the trace one frame at a time and compares its target at each listed
 index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
@@ -566,6 +593,7 @@ index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
 | `reorder` | A run delivered after a newer one is measured against the frames before it, so the target covers waiting for it |
 | `backlog` | A backlog delivered newest first behind the live edge is not measured, so its media span never reaches the target |
 | `idle` | A 30 s gap relaxes the histogram toward the prior |
+| `silence` | A declared 60 s silence and a declared pause leave the target where it was, and a later undeclared gap still relaxes it |
 | `tunein` | A stale frame then the live edge 14.5 s later leaves the target near the frame duration. This is the #3517 regression |
 | `spike` | A recurring stall raises the target, and it decays once the stalls stop |
 | `straggler` | One late interval after the prior is spent leaves the target where it was |

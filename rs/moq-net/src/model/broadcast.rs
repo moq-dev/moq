@@ -18,9 +18,7 @@ use std::{
 };
 
 use crate::Error;
-use crate::origin::Route;
 
-use super::origin_impl::Announcer;
 use super::{RequestQueue, WeakCache, WeakEntry};
 
 #[path = "listing.rs"]
@@ -47,7 +45,7 @@ pub struct Info {
 	/// The path this broadcast is named by, which relative references in a catalog it
 	/// serves (hang's `broadcast` field) resolve against.
 	///
-	/// [`origin::Producer::create_broadcast`](super::origin::Producer::create_broadcast) stamps
+	/// [`origin::Producer::route`](super::origin::Producer::route) stamps
 	/// the path the broadcast was created at, relative to the origin root (including through a
 	/// scoped producer). Every [`Consumer`] an origin hands out is then re-stamped with the path
 	/// *that handle* was requested or announced at, relative to its cursor's root, since the
@@ -248,7 +246,7 @@ pub struct Producer {
 	state: kio::Shared<BroadcastState>,
 
 	// Ingress stats scope, set by a tagged `origin::Producer` at
-	// `create_broadcast`. Inherited by the tracks this producer creates. Empty
+	// `route`. Inherited by the tracks this producer creates. Empty
 	// (no-op) for an untagged broadcast.
 	stats: stats::Scope,
 }
@@ -266,17 +264,25 @@ impl Producer {
 	}
 
 	/// Attach an ingress stats scope, inherited by the tracks created on this
-	/// broadcast. Set by a tagged `origin::Producer` at `create_broadcast`.
+	/// broadcast. Set by a tagged `origin::Producer` at `route`.
 	pub(super) fn with_stats(mut self, scope: stats::Scope) -> Self {
 		self.stats = scope;
 		self
 	}
 
-	/// Attach the advertisement of this broadcast's exact path. Set by
-	/// `origin::Producer::create_broadcast`; a standalone broadcast has none.
-	pub(super) fn with_announcer(self, announcer: Announcer) -> Self {
-		*self.alive.announcer.lock() = Some(announcer);
-		self
+	/// Run `hook` once the broadcast closes: on [`Self::close`], an abort, or the last
+	/// producer-side handle dropping. Runs at once on a broadcast already closed. One hook
+	/// per broadcast: the route that owns it, which retracts when it closes.
+	pub(super) fn on_close(&self, hook: Box<dyn FnOnce() + Send>) {
+		{
+			let mut slot = self.alive.on_close.lock();
+			debug_assert!(slot.is_none(), "a close hook was already installed");
+			if !self.alive.state.lock().closing {
+				*slot = Some(hook);
+				return;
+			}
+		}
+		hook();
 	}
 
 	/// Answer track requests only while `validity` holds, ending the broadcast once it
@@ -286,74 +292,6 @@ impl Producer {
 			.expect("validity is set on a fresh broadcast")
 			.validity = validity;
 		self
-	}
-
-	/// The route this broadcast is announced with, or `None` while it is not.
-	pub(super) fn route(&self) -> Option<Route> {
-		self.alive.announcer.lock().as_ref()?.route()
-	}
-
-	/// Advertise this broadcast's exact path as a route, or replace the standing
-	/// advertisement's route. A route naming no instance keeps the broadcast's, so
-	/// `broadcast.announce(Route::default().with_cost(cost))` re-prices it; one naming
-	/// another instance announces a new stream.
-	///
-	/// Until this is called the broadcast exists for nobody: announce cursors do
-	/// not list it and requests for its path fail with [`Error::Unroutable`], for
-	/// local consumers and peers alike. Call it once the tracks a subscriber needs
-	/// first (a catalog) exist, so the advertisement lands with them in place:
-	/// consumers act on it immediately. The route retracts on [`unannounce`](Self::unannounce),
-	/// [`close`](Self::close), or the last producer dropping.
-	///
-	/// Fails with [`Error::Closed`] on a standalone broadcast (one not created
-	/// through an origin, so there is nothing to announce into), on a claim answer
-	/// still being [prepared](super::origin::Request::prepare), once the broadcast
-	/// has closed, or once the origin's driver has been dropped.
-	pub(super) fn announce(&self, route: Route) -> Result<(), Error> {
-		let mut announcer = self.alive.announcer.lock();
-		let announcer = announcer.as_mut().ok_or(Error::Closed)?;
-		announcer.announce(route)
-	}
-
-	/// Hand back an announcer withheld at creation and announce `route` once `admit`
-	/// agrees, decided under the origin's table lock. The announcer is installed only
-	/// when admitted; otherwise it drops, so this broadcast can never announce.
-	pub(super) fn announce_withheld(
-		&self,
-		mut announcer: Announcer,
-		route: Route,
-		predecessor: Option<&kio::Shared<crate::model::origin_impl::ServeState>>,
-		admit: impl FnOnce() -> bool,
-	) -> Result<bool, Error> {
-		let refused = {
-			let mut slot = self.alive.announcer.lock();
-			debug_assert!(slot.is_none(), "an announcer was already installed");
-			// A close already retracted the slot, so an announcer installed now would
-			// outlive the broadcast.
-			if self.alive.state.lock().closing {
-				Err(Error::Closed)
-			} else {
-				match announcer.announce_if(route, predecessor, admit) {
-					Ok(true) => {
-						*slot = Some(announcer);
-						return Ok(true);
-					}
-					refused => refused,
-				}
-			}
-		};
-		// Dropped outside the announcer lock, as in `Alive::retract`.
-		drop(announcer);
-		refused
-	}
-
-	/// Retract this broadcast's advertisement, if any, from local consumers and
-	/// peers alike. New requests for the path fail with [`Error::Unroutable`] and
-	/// the broadcast the origin served from it ends, while tracks already in
-	/// flight carry on to their own end. [`announce`](Self::announce) brings it
-	/// back.
-	pub(super) fn unannounce(&self) {
-		self.alive.unannounce();
 	}
 
 	/// The broadcast's static metadata, fixed when it was created.
@@ -533,7 +471,7 @@ impl Producer {
 
 	/// End the broadcast for good, whether or not other clones are still alive.
 	///
-	/// Retracts its announcement and local discovery; a later [`super::origin::Publication::announce`] fails
+	/// Retracts its announcement and local discovery; a later [`super::origin::Route::announce`] fails
 	/// with [`Error::Closed`]. Tracks already handed out carry on and end with their
 	/// own finish or abort. Every later [`Consumer::track`], and every name reserved or
 	/// still queued for a handler, answers [`Error::Unroutable`]: the same answer an
@@ -586,9 +524,9 @@ impl Producer {
 struct Alive {
 	token: kio::Producer<()>,
 	state: kio::Shared<BroadcastState>,
-	// The advertisement of the broadcast's exact path, owned here so it retracts
-	// with the broadcast: on close or the last producer-side handle dropping. `None` for a standalone broadcast.
-	announcer: kio::Lock<Option<Announcer>>,
+	// Run once the broadcast ends: on close or the last producer-side handle dropping.
+	// The route owning the broadcast retracts through it. `None` for a standalone broadcast.
+	on_close: kio::Lock<Option<Box<dyn FnOnce() + Send>>>,
 	// How long a session's source still names the instance that minted it. Held on the
 	// producer side, never by a consumer, so the selection it may hold is dropped by its
 	// session rather than wherever the last consumer goes.
@@ -600,16 +538,9 @@ impl Alive {
 		Arc::new(Self {
 			token: kio::Producer::default(),
 			state,
-			announcer: kio::Lock::new(None),
+			on_close: kio::Lock::new(None),
 			validity: RequestValidity::default(),
 		})
-	}
-
-	/// Withdraw the path's advertisement, if any; the broadcast stays alive.
-	fn unannounce(&self) {
-		if let Some(announcer) = self.announcer.lock().as_mut() {
-			announcer.withdraw();
-		}
 	}
 
 	/// End the broadcast. See [`Producer::close`].
@@ -657,12 +588,13 @@ impl Alive {
 		true
 	}
 
-	/// Drop the announcer for good, so a later `announce` fails with `Closed`. Dropped
-	/// outside the announcer lock: the entry's removal re-syncs the origin's cursors under
-	/// the origin's own lock.
+	/// Run the close hook, if any. Outside the hook's lock: the route's retraction
+	/// re-syncs the origin's cursors under the origin's own lock.
 	fn retract(&self) {
-		let announcer = self.announcer.lock().take();
-		drop(announcer);
+		let hook = self.on_close.lock().take();
+		if let Some(hook) = hook {
+			hook();
+		}
 	}
 }
 
@@ -697,7 +629,7 @@ impl RequestValidity {
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn for_source(route: &crate::origin::Requests, path: &crate::Path) -> Self {
+	pub(crate) fn for_source(route: &crate::origin::Route, path: &crate::Path) -> Self {
 		route
 			.request_validity(path)
 			.map(|selected| Self::Selected(std::sync::Arc::new(selected)))

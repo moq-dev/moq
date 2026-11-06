@@ -5,7 +5,7 @@
  */
 
 import { Instant, Milli, Nano, now, sleepUntil } from "@moq/clock";
-import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import { Derived, type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import { Delivered } from "./delivered.ts";
 import {
 	GroupTooLarge,
@@ -434,7 +434,7 @@ function smallest(a: Milli | null | undefined, b: Milli | null | undefined): Mil
 	return Milli(Math.min(a, b));
 }
 
-// Aggregate the preferences of every live subscriber, matching Rust's Subscription::poll_combined.
+// Aggregate the preferences of `states`, matching Rust's Subscription::poll_combined.
 function combineSubscriptions(states: Iterable<TrackState>): Subscription | undefined {
 	let combined: Subscription | undefined;
 	for (const state of states) {
@@ -476,17 +476,33 @@ export class Request {
 
 	#producer: Producer;
 	#pending: Set<Request>;
+	#lookups?: TrackRequestOptions["lookups"];
+	#wanted?: Getter<boolean>;
 
 	private constructor(options: TrackRequestOptions) {
 		this.name = options.name;
 		this.#producer = options.producer;
 		this.#pending = options.pending;
+		this.#lookups = options.lookups;
 		this.#pending.add(this);
 	}
 
 	static {
 		hooks.makeRequest = (options) => new Request(options);
 		hooks.stageRequest = (request, info) => request.#stage(info);
+		hooks.requestWanted = (request) => {
+			const wanted = request.#producer.demand().wanted;
+			request.#wanted ??= request.#lookups
+				? new Derived(
+						[wanted, request.#lookups.pending],
+						(group, lookups) => group !== undefined || lookups > 0,
+					)
+				: new Derived([wanted], (group) => group !== undefined);
+			return request.#wanted;
+		};
+		hooks.keepRequest = (request) => {
+			if (request.#lookups) request.#lookups.opened = false;
+		};
 	}
 
 	/** Watch the subscribers waiting for this request. */
@@ -494,9 +510,9 @@ export class Request {
 		return this.#producer.demand();
 	}
 
-	/** The aggregate subscription requested for this track. */
+	/** The aggregate subscription requested for this track, one-shot fetches included. */
 	get subscription(): Readonly<Subscription> {
-		return this.#producer.subscription.peek() ?? subscriptionDefaults();
+		return hooks.requested(this.#producer).peek() ?? subscriptionDefaults();
 	}
 
 	/** The subscriber's priority for this track. */
@@ -534,6 +550,12 @@ export class Request {
 		this.#pending.delete(this);
 		this.#producer.abort(err);
 	}
+}
+
+/** Options for {@link Consumer.info}. */
+export interface InfoOptions {
+	/** Abandons the lookup, rejecting with the signal's reason; aborting after it resolves has no effect. */
+	signal?: AbortSignal;
 }
 
 /** Options for {@link Consumer.fetchGroup}. */
@@ -587,9 +609,19 @@ export class Consumer {
 		return this.#broadcast.subscribe(this.name, options);
 	}
 
-	/** Fetch the track's immutable publisher properties without subscribing. */
-	info(): Promise<Info> {
-		return this.#broadcast.resolveTrackInfo(this.name);
+	/**
+	 * Fetch the track's immutable publisher properties without subscribing. It waits for as long
+	 * as the publisher takes to answer: abort `options.signal` to give up.
+	 */
+	info(options?: InfoOptions): Promise<Info> {
+		const signal = options?.signal;
+		if (!signal) return this.#broadcast.resolveTrackInfo(this.name);
+		if (signal.aborted) return Promise.reject(signal.reason);
+		// Held only until the answer, so the signal abandons the lookup but never keeps the track.
+		const answered = new AbortController();
+		return this.#broadcast
+			.resolveTrackInfo(this.name, AbortSignal.any([signal, answered.signal]))
+			.finally(() => answered.abort());
 	}
 
 	/** Fetch a single group by sequence without holding a live subscription. */
@@ -657,6 +689,11 @@ class TrackState {
 	producer?: Producer;
 	/** This sink's reader as the producer's fills know it, once it asked one. */
 	asker?: Asker;
+	/**
+	 * Whether this sink's reader will still read group `sequence`: only a buffered group it will
+	 * read keeps its source wanted. Set once the reader exists.
+	 */
+	reads?: (sequence: bigint) => boolean;
 	groups = new Signal<GroupConsumer[]>([]);
 	// Sequences the upstream publisher gave up, with the error each was given up with: an
 	// incoming SUBSCRIBE_DROP or a producer cut. Kept apart from the cache so reclaim cannot
@@ -783,6 +820,9 @@ let reofferCached: (
 let reofferSequences: (producer: Producer, sink: TrackState, sequences: readonly bigint[]) => void;
 // Whether a group may still land on the producer's live feed; assigned in its static block.
 let mayLand: (producer: Producer, land: Land) => boolean;
+// Recompute the producer's aggregates now, for a sink that just became a fetch; assigned in its
+// static block.
+let resubscribe: (producer: Producer) => void;
 let owedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run & { folds?: number }>;
 let owedGroup: (producer: Producer, start: bigint, end: bigint) => { sequence: bigint; folds?: number } | undefined;
 let fillEdge: (producer: Producer) => bigint | undefined;
@@ -892,6 +932,10 @@ export class Producer {
 	// `max_sequence`, and where the next append lands.
 	#received = 0n;
 	#subscribing = new Signal(false);
+	// The aggregate across live subscribers only. A fetch's preferences judge just the group it
+	// asks for, so a publisher sizing what it serves (such as how much retained media to replay)
+	// must not see them. The wire's aggregate, `#state.update`, keeps them.
+	#live = new Signal<Subscription | undefined>(undefined);
 
 	// Recently written source groups, retained for replay to late subscribers and
 	// pruned once idle for longer than the cache window. Each entry tracks the mirror
@@ -974,6 +1018,8 @@ export class Producer {
 
 	static {
 		hooks.subscribing = (producer) => producer.#subscribing;
+		hooks.requested = (producer) => producer.#state.update;
+		resubscribe = (producer) => producer.#updateSubscription();
 		hooks.cacheTrack = (producer) => {
 			producer.#subscribed = false;
 			producer.#served = undefined;
@@ -1170,12 +1216,9 @@ export class Producer {
 		return this.#state.outcome;
 	}
 
-	/**
-	 * The aggregate subscription across live subscribers, or `undefined` when there are none.
-	 * The wire layer watches this to emit SUBSCRIBE_UPDATE.
-	 */
+	/** The aggregate subscription across live subscribers, or `undefined` when there are none. */
 	get subscription(): Getter<Subscription | undefined> {
-		return this.#state.update;
+		return this.#live;
 	}
 
 	/**
@@ -1329,17 +1372,19 @@ export class Producer {
 		}
 	}
 
-	// Recompute from every live sink because an update or close can narrow as well as widen
-	// the aggregate. The wire layer observes this signal and emits SUBSCRIBE_UPDATE.
+	// Recompute from every sink because an update or close can narrow as well as widen the
+	// aggregates. The wire layer observes `#state.update` and emits SUBSCRIBE_UPDATE.
 	//
 	// The max delay is the subscribers' own, not clamped to the track's maxAge: the publisher
 	// applies its own, as each reader's budget does, so the demand asked upstream is the same
 	// before and after the info lands.
 	#updateSubscription(): void {
-		this.#subscribing.set([...this.#sinks].some((sink) => !sink.fetch && sink.closed.peek() === undefined));
+		const live = [...this.#sinks].filter((sink) => !sink.fetch);
+		this.#subscribing.set(live.some((sink) => sink.closed.peek() === undefined));
 		const combined = combineSubscriptions(this.#sinks);
 		this.#settle();
 		this.#state.update.set(combined);
+		this.#live.set(combineSubscriptions(live));
 		// The requested floor bounds what a pending tail owes.
 		this.#owe();
 	}
@@ -1352,6 +1397,7 @@ export class Producer {
 		hooks.arriveGroup(dst, entry.arrived);
 		if (entry.unverified) hooks.unverifyGroup(dst);
 		entry.mirrors.set(sink, dst);
+		if (sink.reads?.(dst.sequence) === false) hooks.groupReads(dst, false);
 		timelineInsert(sink.timeline, dst);
 		void dst.readable().then(() => sink.timelineChanged.update((revision) => revision + 1));
 		sink.latest = max(sink.latest ?? 0n, dst.sequence);
@@ -2273,6 +2319,8 @@ export class Subscriber {
 	}
 
 	#guard(group: GroupConsumer): GroupConsumer {
+		// Handed out, it is read, whatever this reader judged it while buffered.
+		hooks.groupReads(group, true);
 		const held: Superseded = {};
 		hooks.onShedRead(group, () => {
 			if (this.#state.latest === group.sequence && this.#state.producer) hooks.joinProducer(this.#state.producer);
@@ -2303,6 +2351,8 @@ export class Subscriber {
 		if (ordered) this.#delivered.forgetBelow(sequence);
 		this.#delivered.add(sequence);
 		this.#skipped.delete(sequence);
+		// Another copy of it buffered here is never handed out.
+		this.#judge(sequence, sequence + 1n);
 		if (this.#resume) this.#resume.forgetPastBudget(this.#delivered);
 		else this.#forgetPastBudget(this.#delivered);
 		// What it hands out, and forgets below it, it no longer wants from a fill: tell the fills
@@ -2337,7 +2387,9 @@ export class Subscriber {
 	// Raise the sequence cursor to `floor`: what lies below it is passed for good.
 	#raiseNext(floor: bigint | undefined): void {
 		if (floor === undefined || floor <= this.#nextSequence) return;
+		const passed = this.#nextSequence;
 		this.#nextSequence = floor;
+		this.#judge(passed, floor);
 		this.#fillsMoved();
 	}
 
@@ -2353,6 +2405,7 @@ export class Subscriber {
 		// rather than holding the gaps above it forever.
 		let skipped: bigint | undefined;
 		let scanned = false;
+		let forgot: bigint | undefined;
 		for (let oldest = delivered.aboveGap(); oldest !== undefined; oldest = delivered.aboveGap()) {
 			if (!this.#staleAt(oldest, drift)) break;
 			if (!scanned) {
@@ -2365,10 +2418,14 @@ export class Subscriber {
 			}
 			if (skipped !== undefined && skipped < oldest) {
 				delivered.forgetBelow(skipped);
+				forgot = skipped;
 				break;
 			}
 			delivered.forgetBelow(oldest);
+			forgot = oldest;
 		}
+		// A buffered group in a gap forgotten here is never handed out.
+		if (forgot !== undefined && delivered === this.#delivered) this.#judge(0n, forgot);
 	}
 
 	// Record `sequence` as skipped stale under `budget`, so a wider one offers it again.
@@ -2417,6 +2474,7 @@ export class Subscriber {
 	private constructor(name: string, state: TrackState) {
 		this.name = name;
 		this.#state = state;
+		state.reads = (sequence) => this.#reading(sequence);
 		// Each reader filters locally even when another reader widens upstream demand.
 		this.#resolve();
 	}
@@ -2507,6 +2565,7 @@ export class Subscriber {
 			start: max(local.start, this.#window.floor() ?? 0n),
 			end: end === undefined ? local.end : min(local.end ?? end, end),
 		});
+		this.#judge(0n, UNBOUNDED);
 		// A fill this reader alone waited on for a group it no longer reads is withdrawn.
 		this.#fillsMoved();
 	}
@@ -2515,10 +2574,34 @@ export class Subscriber {
 	// handed out, and not passed by the sequence cursor, which never goes back.
 	#reads(start: bigint, end: bigint): Run[] {
 		if (this.#closed || this.#state.closed.peek() !== undefined) return [];
+		return this.#unread(start, end);
+	}
+
+	// The parts of `[start, end)` this reader's bounds and cursor still leave unread, even once
+	// the track closed, since what it buffered stays readable.
+	#unread(start: bigint, end: bigint): Run[] {
 		const cursor = this.#cursor.peek();
 		const from = max(max(start, cursor.start), this.#nextSequence);
 		const to = cursor.end === undefined ? end : min(end, cursor.end);
 		return this.#window.runs(from, to).flatMap((run) => this.#delivered.gaps(run.start, run.end));
+	}
+
+	// Tell each group buffered in `[start, end)` whether this reader will still read it, as the
+	// Rust `Join` holds a run until its reader takes it, passes it, or stops reading it. A budget
+	// judges a group only once a read reaches it, as there.
+	#judge(start: bigint, end: bigint): void {
+		const groups = this.#state.groups.peek();
+		for (let i = timelineIndex(groups, start); i < groups.length && groups[i].sequence < end; i++) {
+			hooks.groupReads(groups[i], this.#reading(groups[i].sequence));
+		}
+	}
+
+	// Whether this reader will still read group `sequence` once buffered: what it wants from a
+	// fill, judged even once the track closed.
+	#reading(sequence: bigint): boolean {
+		if (this.#closed) return false;
+		const unread = this.#unread(sequence, sequence + 1n);
+		return unread.length > 0 && runGaps(this.#givenUp, sequence, sequence + 1n).length > 0;
 	}
 
 	// What this reader still wants from a fill: what it reads, less what it gave up as stale.
@@ -2598,7 +2681,10 @@ export class Subscriber {
 			break;
 		}
 		if (stale.length > 0) {
-			for (const run of stale) insertRun(this.#givenUp, run.start, run.end);
+			for (const run of stale) {
+				insertRun(this.#givenUp, run.start, run.end);
+				this.#judge(run.start, run.end);
+			}
 			this.#fillsMoved();
 		}
 		return owed;
@@ -2671,6 +2757,7 @@ export class Subscriber {
 		const [group] = groups.splice(index, 1);
 		for (const passed of groups.splice(0, index)) passed.close();
 		this.#nextSequence = group.sequence + 1n;
+		this.#judge(group.sequence, this.#nextSequence);
 	}
 
 	// Whether this read ends because its bounded window has nothing left to deliver; see
@@ -2844,6 +2931,15 @@ export class Subscriber {
 			});
 			return subscriber;
 		};
+		hooks.watchSubscriberError = (subscriber, fn) => {
+			if (subscriber.#resume) return subscriber.#resume.watchError(fn);
+			const check = (error: Error | null | undefined) => {
+				if (error instanceof Error) fn(error);
+			};
+			const stop = subscriber.closed.subscribe(check);
+			check(subscriber.closed.peek());
+			return stop;
+		};
 		hooks.latestSequence = (subscriber) =>
 			subscriber.#resume ? subscriber.#resume.latest() : subscriber.#state.latest;
 		hooks.bufferedLargest = (subscriber) => subscriber.#bufferedLargest();
@@ -2884,6 +2980,8 @@ export class Subscriber {
 		hooks.fetchBudget = (subscriber, maxDelay) => {
 			subscriber.#fetchBudget = maxDelay ?? Number.POSITIVE_INFINITY;
 			subscriber.#state.fetch = true;
+			// The sink joined as a live subscriber; leave the live aggregate before anyone sees it.
+			if (subscriber.#state.producer) resubscribe(subscriber.#state.producer);
 			const update = subscriber.#state.update.peek();
 			if (update) subscriber.#state.update.set(update, true);
 		};

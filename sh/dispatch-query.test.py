@@ -25,7 +25,7 @@ class QueryTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.repo = self.root / "repo"
         (self.repo / "sh").mkdir(parents=True)
-        for script in ("dispatch.sh", "changed.sh", "local.sh"):
+        for script in ("dispatch.sh", "changed.sh", "local.sh", "quest.sh"):
             shutil.copy(ROOT / "sh" / script, self.repo / "sh" / script)
         # The stub belongs in the base so it does not widen every test's diff.
         (self.repo / "sh/kvm.sh").write_text("#!/bin/sh\nexit 0\n")
@@ -83,6 +83,11 @@ class QueryTests(unittest.TestCase):
     def test_quest_only_has_no_tests_but_keeps_repository_lints(self):
         self.change("quest/m1/example.md")
         self.expect(True, rust=False)
+
+    def test_quest_check_uses_the_checkout_pin(self):
+        self.change("quest/m1/example.md")
+        calls = self.run_ci()
+        self.assertIn("pinned quest check", calls)
 
     def test_biome_checks_files_outside_the_js_impact_map(self):
         for path in ("cpp/obs/buildspec.json", "sh/gh/setup.test.ts", ".github/ci-selection-audit.json"):
@@ -281,7 +286,9 @@ class QueryTests(unittest.TestCase):
         nix = self.bin / "nix"
         nix.write_text('#!/usr/bin/env bash\nprintf "nix %s\\n" "$*" >>"$CALLS"\n')
         nix.chmod(0o755)
-        self.env.update(IN_MOQ_DEV_SHELL="1", CALLS=str(self.root / "calls"))
+        quest = self.bin / "quest"
+        quest.write_text('#!/usr/bin/env bash\nprintf "pinned quest %s\\n" "$*" >>"$CALLS"\n')
+        self.env.update(IN_MOQ_DEV_SHELL="1", DEV_SHELL_QUEST=str(quest), CALLS=str(self.root / "calls"))
         (self.root / "calls").unlink(missing_ok=True)
         for script in ("markdown.sh", "shell.sh", "large-files.sh", "text.sh"):
             path = self.repo / "sh" / script
@@ -654,7 +661,6 @@ esac
             ("flake.nix", True),
             ("flake.lock", True),
             ("nix/runner/hog.py", True),
-            ("nix/runner/migrate.sh", True),
             ("infra/example.nix", True),
             ("quest/m1/example.md", False),
         ):

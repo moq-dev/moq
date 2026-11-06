@@ -36,8 +36,8 @@ instead, so every crate drops C, not just the relay.
   and aws-lc-rs do, so their aarch64 builds keep running, and every area
   that runs in moq-cli or moq-relay switches only once that rind release
   ships. This keeps
-  [cli-packaging](/quest/m2/cli-packaging.md)'s Pi 4 V4L2 publishing and
-  [embedded video](/quest/m3/video-embedded.md) on those boards.
+  [cli-packaging](/quest/m3/cli-packaging.md)'s Pi 4 V4L2 publishing and
+  [embedded video](/quest/m5/video-embedded.md) on those boards.
 - x86_64 CPUs without AVX2, BMI2, ADX, or AES-NI get the same treatment
   (maintainer, 2026-11-01): rind picks slower paths for them at startup, and
   the same areas wait on that release too.
@@ -48,7 +48,7 @@ instead, so every crate drops C, not just the relay.
   uses, so most areas switch on rind 0.1.2 (published 2026-11-01), which runs on
   CPUs without the crypto extensions (e2ee, which no binary links, switched
   on 0.1.0). Relay ACME, the one area that waited on `rind-instant-acme`, is
-  removed for now instead (maintainer, 2026-11-03), and returns on rind in m3.
+  removed for now instead (maintainer, 2026-11-03), and returns on rind in m5.
   aws-lc-rs stays in the workspace until
   the last area lands, which is when this epic removes it.
 - Split per area, each landing once rind covers it. Docs a change makes stale
@@ -65,6 +65,5 @@ The epic's own work, once every child has merged:
 
 ## Required
 
-- [Transport on rind](/quest/m1/rind/transport.md) - moq-quic, moq-tokio, moq-uring, moq-rtmp, and qmux take rind, and the `aws-lc-rs`/`ring` features go
 - [One typed unsupported-CPU error](/quest/m1/rind/cpu-error.md) - moq-auth, moq-hls and moq-crypto e2ee carry `moq_crypto::provider::UnsupportedCpu` and drop their own CPU-check helpers
 - [moq-rtc on rind](/quest/m1/rind/rtc.md) - str0m and dimpl run DTLS, SRTP, and STUN on rind

@@ -35,7 +35,3 @@ See the [epic](/quest/m1/socket/README.md) for the convention.
   `demo/viewer/**`.
 - Update `doc/bin/demo.md` and the boy README or CHANGELOG where they describe
   the viewer path.
-
-## Required
-
-- [JS sockets](/quest/m1/socket/js.md) - the viewer's dial

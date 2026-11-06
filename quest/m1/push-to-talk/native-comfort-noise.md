@@ -8,13 +8,6 @@ plays level-matched comfort noise instead of plain silence, counts no underrun
 or stall, and keeps that silence through the next utterance's refill. A
 push-to-talk listener on `moq play` then matches the browser.
 
-## Waiting
-
-- moq-dev/moq: [moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942)
-  merges. It defines how a suppressed span is declared and already gives
-  `moq-audio`'s jitter estimator the declared-silence exception. Check that
-  it is merged and `quest/m1/push-to-talk/dtx.md` is gone from `main`.
-
 ## Plan
 
 Planned 2026-11-05 (maintainer, /quest-plan of the follow-ups from the
@@ -30,8 +23,9 @@ browser through `doc/concept/audio-jitter.md` and a corpus case rather than
 two descriptions. Cover it in `test/audio-quality`'s native rows or
 `just test push-to-talk` if that can drive `moq play`.
 
-Coordinate with [moq play reaches zero steady-state underruns by
-time-stretching](/quest/m1/audio-jitter-target/native-stretch.md), which edits
-the same playback ring: whichever lands second rebases onto the other.
+Build on [moq play reaches zero steady-state underruns by
+time-stretching](/quest/m1/audio-jitter-target/native-stretch.md), whose
+stretch in the same playback ring is on `main` since
+[moq-dev/moq#7856](https://github.com/moq-dev/moq/pull/7856).
 
 Public API: none expected. Wire: none.

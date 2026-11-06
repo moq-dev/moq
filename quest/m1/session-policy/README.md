@@ -19,8 +19,10 @@ where moq-webrtc should plug its externally established transport in. The
 maintainer asked what that means for io_uring and how much of moq-tokio belongs
 in moq-net, and decided:
 
-- ✅ **Move the policy first**, then give moq-tokio thin handoffs; #7804 waits
-  on [moq-tokio becomes a thin shell](/quest/m1/session-policy/tokio-handoff.md).
+- ✅ **Move the policy first**, then give moq-tokio thin handoffs; the
+  [WebRTC rename](/quest/m2/webrtc-rename.md) waits on
+  [moq-tokio becomes a thin shell](/quest/m1/session-policy/tokio-handoff.md)
+  (#7804 closed unmerged).
   Not chosen: a moq-tokio handoff now with the move later; moq-webrtc calling
   moq-net directly with its own policy.
 - ✅ **Reconnect is in scope**: the reconnect, backoff and GOAWAY candidate
@@ -55,7 +57,7 @@ Research (2026-11-04, `origin/main` at e6be13d5f8):
 - Widening on admit needs a transport hook: moq-net's `transport::poll`
   session exposes only `receive_window()`, while tokio QUIC, qmux and uring's
   `web::Session` all have `set_limits`. Add a trait method whose default
-  reports unsupported, the same move [QUIC deadline](/quest/m2/quic-deadline.md)
+  reports unsupported, the same move [QUIC deadline](/quest/m5/quic-deadline.md)
   plans for per-stream deadlines.
 - moq-net stays poll-first and spawns nothing
   ([libraries spawn nothing](https://github.com/moq-dev/moq/pull/6849)):

@@ -153,9 +153,9 @@ async fn moq_transport_relays_a_cold_finished_group() {
 	let upper = origin(2, &pools[1]);
 	let lower = origin(3, &pools[2]);
 
-	let broadcast = publisher.create_broadcast("live").unwrap();
-	let track = broadcast.create_track("data", track::Info::default()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let route = publisher.route("live", origin::RouteOptions::hidden()).unwrap();
+	let track = route.broadcast().create_track("data", track::Info::default()).unwrap();
+	route.announce().unwrap();
 	let (written, ended) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
 	serve(track.requests(), written, ended, true);
 	let mut group = track.append_group().unwrap();
@@ -210,9 +210,9 @@ async fn chain(version: &str, replay: Replay) {
 	let upper = origin(2, &pools[1]);
 	let lower = origin(3, &pools[2]);
 
-	let broadcast = publisher.create_broadcast("live").unwrap();
-	let track = broadcast.create_track("data", track::Info::default()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let route = publisher.route("live", origin::RouteOptions::hidden()).unwrap();
+	let track = route.broadcast().create_track("data", track::Info::default()).unwrap();
+	route.announce().unwrap();
 	let (written, ended) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
 	serve(
 		track.requests(),

@@ -123,7 +123,7 @@ moq-rtmp = { workspace = true }
 moq-rtsp = { workspace = true }
 moq-srt = { workspace = true }
 # Raw qmux listeners are part of the CLI surface. `uds` compiles only on Unix.
-moq-tokio = { workspace = true, default-features = false, features = ["tcp", "uds"] }
+moq-tokio = { workspace = true, default-features = false, features = ["tcp", "uds", "watch"] }
 moq-transcode = { workspace = true, optional = true }
 moq-video = { workspace = true, optional = true }
 object_store = { workspace = true, features = ["fs"] }
@@ -131,8 +131,6 @@ percent-encoding = { workspace = true }
 pollster = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["rustls-no-provider", "json"] }
 rind-object-store = { workspace = true, optional = true }
-# The process default rustls provider, which reqwest, axum-server, and object_store read.
-rind-rustls = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["std"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -140,9 +138,10 @@ terminal_size = "0.4.4"
 tokio = { workspace = true, features = ["full"] }
 # Tells a recording to finish its file on the first shutdown signal.
 tokio-util = { workspace = true }
+toml = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
-url = { workspace = true }
+url = { workspace = true, features = ["serde"] }
 usage-rs = { workspace = true, features = ["completions", "config"] }
 winit = { version = "0.30.13", optional = true }
 
@@ -183,6 +182,10 @@ name = "interop-tail"
 path = "../../test/interop/clients/rust/tail.rs"
 
 [[example]]
+name = "interop-socket-js"
+path = "../../test/interop/clients/rust/socket-js.rs"
+
+[[example]]
 name = "interop-catalog"
 path = "../../test/interop/clients/rust/catalog.rs"
 
@@ -209,6 +212,10 @@ path = "../../test/interop/clients/rust/hls.rs"
 [[example]]
 name = "interop-audio"
 path = "../../test/interop/clients/rust/audio.rs"
+
+[[example]]
+name = "interop-socket"
+path = "../../test/interop/clients/rust/socket.rs"
 
 [lints]
 workspace = true

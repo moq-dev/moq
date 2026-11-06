@@ -79,9 +79,8 @@ test("an empty GOAWAY migrates the follower to the replacement session", async (
 	const clock = new Manual();
 	const installed = clock.install();
 	const { dials, origin } = fleet();
-	const broadcastPublication = origin.createBroadcast(Path.from("cam"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("cam"));
+	const broadcast = broadcastRoute.broadcast;
 
 	const consume = new OriginProducer();
 	const reload = new Reload({

@@ -277,11 +277,7 @@ audio-device dependencies:
 cargo install moq-cli --no-default-features --features "quic,websocket,play,openh264"
 ```
 
-`moq play` skips disabled renditions when it picks one. If no enabled rendition
-matches its name and codec filters, it waits for a later catalog. Disabling the
-current rendition switches to an enabled one of its kind that matches the
-filters; with none, it stays subscribed, so re-enabling it (an unmute) plays at
-once.
+`moq play` skips disabled renditions. If none are enabled, it waits for a later catalog. Disabling the current rendition stops it and selects an enabled replacement.
 
 ## Capture
 
@@ -504,7 +500,11 @@ moq auth serve --listen 127.0.0.1:4440 --key-dir keys/ --public-subscribe 'anon/
 `--publish` and `--subscribe` take patterns: `alice` is one broadcast,
 `alice/**` is a subtree, `**` is everything under `--root`. `moq auth serve`
 answers a relay's auth requests with the same keys (see [Auth
-server](/bin/relay/auth#auth-server)). `moq auth sessions` and
+server](/bin/relay/auth#auth-server)). It also reads every setting from an
+optional TOML file (`moq auth serve auth.toml`), where flags win and
+`[mtls.certificates.<sha256>]` scopes a client certificate by its
+[chain](/bin/relay/auth#mtls); it reloads the file when it changes.
+`moq auth sessions` and
 `moq auth revalidate` list and re-check sessions on a relay's internal
 listener; a re-check asks the auth server again, and its reply is what kicks.
 See [Authentication](/bin/relay/auth).
