@@ -461,7 +461,8 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 /// detached. Retirement takes whatever the handler already had queued, closes
 /// admission by dropping it, and drains those fetches before the track is
 /// aborted. Other teardown aborts them, so no source subscription or encoder
-/// session survives a failed track. A semaphore bounds how many run at once.
+/// session survives a failed track. A semaphore bounds how many groups transcode at
+/// once; a fill waiting on its readers between groups holds none.
 ///
 /// Owns the handler rather than borrowing it, since closing admission is
 /// dropping it.
@@ -479,18 +480,6 @@ async fn fetches(
 		// Reap finished fetches so the set doesn't grow without bound.
 		while tasks.try_join_next().is_some() {}
 
-		// Take a slot before popping a fill, so retirement never strands one in
-		// the handler while all slots are busy.
-		let permit = tokio::select! {
-			biased;
-			() = retire.fired() => {
-				retired = true;
-				break;
-			},
-			_ = finishing.wait_for(|finished| *finished) => break,
-			permit = limit.clone().acquire_owned() => permit.expect("the semaphore stays open"),
-		};
-
 		let fill = tokio::select! {
 			biased;
 			() = retire.fired() => {
@@ -505,7 +494,7 @@ async fn fetches(
 			},
 		};
 
-		spawn_fill(&mut tasks, rung.clone(), fill, permit);
+		spawn_fill(&mut tasks, rung.clone(), fill, limit.clone());
 	}
 
 	if retired {
@@ -517,16 +506,15 @@ async fn fetches(
 		// Taken in one pass, before waiting on anything, and then the handler is
 		// dropped. A consumer holding the retired track can keep fetching, and the
 		// handler admits a cache miss for as long as it is alive, so a drain that
-		// waited for a slot with it still open would keep taking those in too and
-		// the rung would never finish. Dropping it closes admission and releases
-		// whatever arrived after the pass; the fills already popped are held
-		// here, so they are unaffected.
-		let mut queued = Vec::new();
+		// waited with it still open would keep taking those in too and the rung
+		// would never finish. Dropping it closes admission and releases whatever
+		// arrived after the pass; the fills already popped are served here, so
+		// they are unaffected.
 		loop {
 			tokio::select! {
 				biased;
 				fill = dynamic.requested_fill() => match fill {
-					Ok(fill) => queued.push(fill),
+					Ok(fill) => spawn_fill(&mut tasks, rung.clone(), fill, limit.clone()),
 					// The output track closed; nothing left to serve.
 					Err(_) => break,
 				},
@@ -535,11 +523,6 @@ async fn fetches(
 			}
 		}
 		drop(dynamic);
-
-		for fill in queued {
-			let permit = limit.clone().acquire_owned().await.expect("the semaphore stays open");
-			spawn_fill(&mut tasks, rung.clone(), fill, permit);
-		}
 
 		// Finish every group the handler accepted, or its producer stays open and
 		// the fetch stalls forever. `serve` ends the track only once this returns,
@@ -557,18 +540,14 @@ async fn fetches(
 	Ok(())
 }
 
-/// Spawn one fill, holding its concurrency slot for the life of the task.
-fn spawn_fill(
-	tasks: &mut tokio::task::JoinSet<()>,
-	rung: Rung,
-	mut fill: moq_net::track::Fill,
-	permit: tokio::sync::OwnedSemaphorePermit,
-) {
+/// Spawn one fill, taking a slot of `limit` for each group it transcodes.
+fn spawn_fill(tasks: &mut tokio::task::JoinSet<()>, rung: Rung, mut fill: moq_net::track::Fill, limit: Arc<Semaphore>) {
 	tasks.spawn(async move {
-		let _permit = permit;
 		// A group at a time as its readers pick them up, so a wide fetch never evicts its own
-		// earlier groups before they are read.
+		// earlier groups before they are read. The slot is released before waiting on them, so
+		// a reader that stops reading never holds an encoder session.
 		while let Some(sequence) = fill.wanted_changed().await {
+			let _permit = limit.acquire().await.expect("the semaphore stays open");
 			if let Err(err) = fetch(&rung, &fill, sequence).await {
 				tracing::warn!(%err, sequence, "transcode fetch failed");
 			}
@@ -581,7 +560,7 @@ fn spawn_fill(
 /// The group is dropped only once the source says it no longer has it. Any other
 /// failure while someone still wants the group refuses it for those readers alone,
 /// so a later reader asks again. Once nobody wants the group, it is left unanswered
-/// instead, releasing the permit for the groups the fill still owes: its last reader
+/// instead, releasing the slot for the groups the fill still owes: its last reader
 /// already left it, and accepting afterwards would cache the group a fresh fill is
 /// about to serve.
 async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Result<(), Error> {
@@ -995,8 +974,7 @@ mod tests {
 		assert_eq!((fill.start().group, fill.end()), (7, 10));
 
 		let mut tasks = tokio::task::JoinSet::new();
-		let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
-		spawn_fill(&mut tasks, rung, fill, permit);
+		spawn_fill(&mut tasks, rung, fill, Arc::new(Semaphore::new(1)));
 		let wait = std::time::Duration::from_secs(5);
 		let first = kio::clock::timeout(wait, source_fills.requested_fill())
 			.await
