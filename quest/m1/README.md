@@ -27,9 +27,7 @@ cannot move until its PR merges, and an epic moves with its children. These
 breaking epics and quests stay in m1 for now and are listed in m2's
 `Required`, so the cut still waits on them: api-audit, drop-set, rind, session-policy, and
 stream-credit. The [re-cut follow-up](/quest/m2/recut-held.md)
-moves what remains of them once their claims merge. release-perf, held for
-the same reason, gates the cut through the
-[cut gate](/quest/m2/cut-gate/README.md).
+moves what remains of them once their claims merge.
 
 ## Required
 
@@ -51,7 +49,6 @@ the same reason, gates the cut through the
 - [CARLA's driver ids stay private](/quest/m1/carla-driver-ids.md) - 128-bit driver ids, and `status` shows a handle that isn't the endpoint id
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
-- [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
 - [Session policy lives in moq-net](/quest/m1/session-policy/README.md) - accept and connect deadlines, admission, window widening and reconnect live once in moq-net; moq-tokio and moq-relay's io_uring path call them
 - [Vendor and trim the WebRTC stack](/quest/m1/webrtc-vendor.md) - str0m, dimpl, `is`, and sctp-proto live in moq-webrtc with unused code removed, so moq-rtc can take rind
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
