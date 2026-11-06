@@ -9,6 +9,11 @@ on that host prints at least 65536, the 64 MiB hosted CI already uses.
 
 ## Plan
 
+Decided 2026-11-06 (maintainer, /quest-complete): ✅ raise the host limit and
+keep this quest as a host action. Not chosen: cap the `io-uring` test group at
+one thread (about +45 s per workspace check), or first make the 10 s endpoint
+tests fast; add a public ring-geometry knob so tests use small rings.
+
 Measured 2026-11-06 in [moq-dev/moq#8051](https://github.com/moq-dev/moq/pull/8051)
 on that host (kernel 7.0, 8 MiB limit). The tests are not what fills the
 budget:
