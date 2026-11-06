@@ -401,7 +401,7 @@ impl poll::Session for Session {
 	}
 
 	fn set_limits(&self, limits: net::Limits) -> Result<(), net::LimitsError> {
-		if self.inner.fixed_receive_window {
+		if self.inner.fixed_receive_window && limits.receive_window.is_some() {
 			return Err(net::LimitsError::Unsupported);
 		}
 		let mut quic = moq_quic::Limits::default();
