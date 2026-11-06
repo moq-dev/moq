@@ -19,6 +19,12 @@ How to update your code for each breaking change, newest first.
 | `Client::with_peer_hop(hop)`, `server::Handshake::with_peer_hop(hop)` | take a `NonZeroU64` |
 | `server::Handshake::peer_hop()` returns `Option<Hop>` | returns `Option<NonZeroU64>` |
 
+### `track::Consumer::unmetered` reads outside any stats session
+
+`track::Consumer::unmetered()` returns the handle with its stats scope cleared, so the
+subscriptions, fetches, and groups derived from it count toward no stats session, though
+the broadcast or origin it came from is metered. Existing callers need no migration.
+
 ### Socket readers start at the beginning
 
 New `track` socket sessions subscribe from group 0, and `tcp` sessions join their
