@@ -5,7 +5,7 @@ import * as Announce from "../announced.ts";
 import { Viewers } from "../bandwidth.ts";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import { ConnectTimeout, SessionCode, SessionError, StreamCode, toTransport } from "../error.ts";
-import { RouteInfo } from "../hop.ts";
+import { WireRoute } from "../hop.ts";
 import { ALPN as IetfALPN } from "../ietf/version.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair, type MockTransport, textFrame } from "../mock.ts";
@@ -1031,7 +1031,7 @@ test("closing an announce consumer during upstream teardown does not append retr
 			prefix: Path.from("alice/camera.hang"),
 			captures: undefined,
 			kind: "start",
-			route: RouteInfo.default,
+			route: WireRoute.default,
 		});
 		await consumer.next();
 		upstream.close();
@@ -1137,7 +1137,7 @@ test("a pump owes the retractions of the upstream it replaces", async () => {
 	const consumer = producer.consume();
 
 	const first = new Announce.Producer();
-	first.append({ prefix: Path.from("a"), captures: undefined, kind: "start", route: RouteInfo.default });
+	first.append({ prefix: Path.from("a"), captures: undefined, kind: "start", route: WireRoute.default });
 	first.synced();
 	const upstream = new Signal(first);
 	const pump = new Effect((effect) => pumpAnnounced(effect, effect.get(upstream).consume(), producer));

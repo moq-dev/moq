@@ -735,7 +735,7 @@ pub(crate) async fn test_hop(
 ) -> (crate::origin::Producer, [crate::Session; 2]) {
 	use crate::model::ProduceTest;
 	let version = crate::Version::Lite(Version::Lite07);
-	let downstream = crate::origin::Config::new(crate::Hop::new(3).unwrap()).produce();
+	let downstream = crate::origin::Config::new(std::num::NonZeroU64::new(3).unwrap()).produce();
 	let (client, server) = crate::transport::memory::pair(crate::transport::memory::Config {
 		protocol: Some(version.alpn().to_string()),
 		..Default::default()
@@ -874,7 +874,7 @@ mod hop_tests {
 	async fn relayed_state_crosses_while_the_group_is_open() {
 		for offer in [[true, true], [true, false], [false, true]] {
 			let negotiated = offer == [true, true];
-			let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+			let upstream = crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
 			let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
 			let mut info = track::Info::timed().with_timescale(Timescale::MILLI);
 			info.max_age = Some(Duration::from_secs(7));
@@ -981,7 +981,7 @@ mod hop_tests {
 
 	/// Subscribe across a negotiated hop to a track with `info`.
 	async fn subscribe_across_info(info: track::Info) -> Result<(), crate::Error> {
-		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+		let upstream = crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
 		let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let _track = broadcast.broadcast().create_track("video", info).unwrap();
 
@@ -1090,7 +1090,7 @@ mod hop_tests {
 	/// relay state appears on the way, nor a moq-transport draft.
 	#[kio::test]
 	async fn plain_media_crosses_unchanged() {
-		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+		let upstream = crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
 		let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let track = broadcast
 			.broadcast()
@@ -1130,7 +1130,7 @@ mod hop_tests {
 	async fn ietf_timestamps_keep_their_provenance_across_a_hop() {
 		for offer in [[true, true], [true, false], [false, true]] {
 			let negotiated = offer == [true, true];
-			let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+			let upstream = crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
 			let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
 			let info = track::Info {
 				properties: draft22(Vec::new()),
@@ -1198,7 +1198,7 @@ mod hop_tests {
 	/// follows its Object Record.
 	#[kio::test]
 	async fn compressed_media_crosses_a_negotiated_hop() {
-		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+		let upstream = crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
 		let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let info = track::Info::timed()
 			.with_timescale(Timescale::MILLI)
