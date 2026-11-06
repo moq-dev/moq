@@ -3153,6 +3153,13 @@ pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const
 	})
 }
 
+/// A rendition's broadcast reference, instance, and track name.
+type Reference = (
+	Option<moq_net::path::Relative>,
+	Option<moq_net::Instance>,
+	Option<String>,
+);
+
 /// A rendition's reference fields, as [moq_video_config] and [moq_audio_config] carry them.
 ///
 /// # Safety
@@ -3161,14 +3168,7 @@ unsafe fn parse_reference(
 	broadcast: (*const c_char, usize),
 	instance: (*const c_char, usize),
 	track: (*const c_char, usize),
-) -> Result<
-	(
-		Option<moq_net::path::Relative>,
-		Option<moq_net::Instance>,
-		Option<String>,
-	),
-	Error,
-> {
+) -> Result<Reference, Error> {
 	let broadcast = unsafe { ffi::parse_str_optional(broadcast.0, broadcast.1)? }
 		.filter(|broadcast| !broadcast.is_empty())
 		.map(moq_net::path::Relative::new)

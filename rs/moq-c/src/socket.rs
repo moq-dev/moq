@@ -47,7 +47,7 @@ struct IncomingEntry {
 
 /// The peer's half of a stream, read through [Consume](crate::Consume).
 pub(crate) enum Half {
-	Track(moq_net::track::Subscriber),
+	Track(Box<moq_net::track::Subscriber>),
 	Group(moq_net::group::Consumer),
 }
 
@@ -85,7 +85,7 @@ impl StreamEntry {
 			peer,
 			session,
 			writer: Some(Writer::Track(stream.producer)),
-			reader: Some(Half::Track(stream.consumer)),
+			reader: Some(Half::Track(Box::new(stream.consumer))),
 			driver,
 			children,
 		}

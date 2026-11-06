@@ -291,6 +291,10 @@ fn track_largest_and_group_ready() {
 	);
 	// Let the wait park first: finishing must still end it, though moq-net does not wake
 	// `poll_ready` on a finish.
+	#[expect(
+		clippy::disallowed_methods,
+		reason = "the test thread has no runtime; it gives the C API's runtime time to park the wait"
+	)]
 	std::thread::sleep(Duration::from_millis(50));
 	assert_eq!(moq_publish_group_finish(first), 0);
 	assert_eq!(ready.rx.recv_timeout(Duration::from_secs(2)), Ok(0));

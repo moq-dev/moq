@@ -930,7 +930,7 @@ impl Consume {
 		tokio::spawn(async move {
 			let res = crate::ffi::run(driver.watch(async move {
 				match half {
-					crate::socket::Half::Track(track) => Self::run_raw(on_frame, track.ordered(), close).await,
+					crate::socket::Half::Track(track) => Self::run_raw(on_frame, (*track).ordered(), close).await,
 					crate::socket::Half::Group(mut group) => {
 						Self::run_group(on_frame, &mut group, &mut close).await.map(drop)
 					}
