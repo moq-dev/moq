@@ -49,13 +49,15 @@ retrying the test are not fixes.
 
 ## Related
 
-- [moq-dev/moq#8000](https://github.com/moq-dev/moq/pull/8000), open, edits
-  this case where it still runs on `main`: it stubs `Budget.prototype.poll` so the
-  publisher's write budget never yields a host task, and raises the
-  microtask count to 10000. Stubbing the budget removes the suspected
-  outstanding `yieldNow`, so check whether it is the cause before choosing
-  this fix; the raised count alone is not one. Whichever lands second merges
-  the other's hunk.
+- [moq-dev/moq#8000](https://github.com/moq-dev/moq/pull/8000), merged
+  first, edited this case: it stubs
+  `Budget.prototype.poll` so the publisher's write budget never yields a host
+  task, and raises the microtask count to 10000. The quarantined case keeps
+  both. Stubbing the budget removes the suspected outstanding `yieldNow`, so
+  check whether it is the cause before choosing this fix; the raised count
+  alone is not one. On 2026-11-06, ten loaded runs (six busy loops pinned to
+  four of 24 cores) passed with and without the stub, so that setup no longer
+  reproduces it and cannot tell.
 - [moq-dev/moq#7981](https://github.com/moq-dev/moq/pull/7981), a draft,
   quarantines only the lite-06 case and adds its own quest at this same
   path. Whichever lands second keeps one quest and this whole-case
