@@ -1,5 +1,26 @@
 --- a/moxygen/moqtest/MoQTestClient.cpp
 +++ b/moxygen/moqtest/MoQTestClient.cpp
+@@ -18,8 +18,7 @@
+ DEFINE_int32(transaction_timeout, 1000, "transaction timeout in ms");
+ const int kDefaultRequestId = 0;
+ const std::string kDefaultTrackName = "test";
+ const GroupOrder kDefaultGroupOrder = GroupOrder::OldestFirst;
+-const LocationFilter kDefaultLocationFilter = LocationFilter::relativeStart(0);
+ 
+ MoQTestClient::MoQTestClient(
+     PrivateTag,
+@@ -179,7 +178,10 @@
+ 
+   sub.fullTrackName = ftn;
+   sub.groupOrder = kDefaultGroupOrder;
+-  sub.filter = kDefaultLocationFilter;
++  // Verify the complete configured fixture, not whichever groups start after
++  // the relay resolves its live edge. Upstream may already be sending group 0
++  // when a cold relay answers a Next Group subscription.
++  sub.filter = LocationFilter::absoluteStart(resolveFetchWindow(params).first);
+ 
+   // Add delivery timeout parameter if configured
+   if (params.deliveryTimeout > 0) {
 @@ -539,6 +539,10 @@
    XLOG(DBG1) << "MoQTest DEBUGGING: calling onObjectStatus";
  

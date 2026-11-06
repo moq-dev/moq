@@ -8,11 +8,16 @@ published-package smoke matrix.
 
 Sections 1-7 run on draft 18, the one draft both support, through one relay
 and through a two-relay cluster joined by native lite-07. Each cell
-runs 29 upstream SUBSCRIBE cases. A direct-origin control runs the same cases
+runs 24 upstream SUBSCRIBE cases. A direct-origin control runs the same cases
 once, separating suite or pin failures from relay behavior. FETCH is
 skipped using upstream's `SKIP_FETCH`; section 8 uses PUBLISH and is outside the
 relay's support. Cases using forwarding modes 1 or 2 send
-nonzero subgroups and are explicitly excluded. Modes 0 and 3 are retained.
+nonzero subgroups and are explicitly excluded. Mode 3 is also excluded: its five
+cases require multi-object datagram groups, opaque object properties, or a terminal
+stream cursor shared with datagrams. The relay's datagram model has one object-ID-zero
+payload per group, an optional timestamp, and a separate lifetime from its stream half.
+The 24 mode-0 cases retain all stream payload, property, and terminal checks.
+First-party datagram delivery is covered by the interop matrix.
 The staged script preserves every selected case's arguments and deadline.
 A client that crashes after printing SUCCESS still fails. Selection tests prove
 these exclusions and failure sensitivity, and refuse a changed script anchor.
@@ -55,7 +60,12 @@ The client runs under a relay conformance profile, applied by
 alternates priority by group and never ends the track in-band. This relay ranks
 egress by the track's priority and keeps END\_OF\_TRACK, as decided in
 [the runner decision](https://github.com/moq-dev/moq/blob/5f09861634b793056f840408a589f89a8c464fb0/quest/m1/interop-coverage/runner-cases.md).
-The profile therefore accepts:
+The profile requests the exact start of the configured fixture with an absolute
+filter. A Next Group filter would exclude the current group when a cold relay
+learns its upstream edge, even though the verifier expects that group's objects.
+Object and group checks still cover the complete configured fixture.
+
+The profile accepts:
 
 - the track's advertised publisher priority (200) on any group, besides the
   per-group value;
@@ -73,7 +83,7 @@ Measured on the current pin:
 
 | Draft | Direct origin | One relay | Two relays |
 | --- | --- | --- | --- |
-| 18 | 29 pass | 29 pass | 29 pass |
+| 18 | 24 pass | 24 pass | 24 pass |
 
 A cluster's edge asks the origin about a track with TRACK\_STATUS before
 subscribing. The pinned MoQTestPublisher answers it with what its
