@@ -9498,14 +9498,19 @@ async fn concurrent_ready_calls_all_wake() {
 	];
 	assert!(waits.iter().all(|wait| !wait.is_finished()), "the window was not full");
 
-	while let Some(_frame) = kio::clock::timeout(TIMEOUT, reader.read_frame())
-		.await
-		.expect("the read stalled")
-		.unwrap()
-	{
+	// Every read wakes both calls. Run them before the next read, and read no more than
+	// was written: draining the window faster than the runtime polls a woken call must
+	// not leave this loop waiting on a group nobody writes again.
+	for _ in 0..24 {
 		if waits.iter().all(|wait| wait.is_finished()) {
 			break;
 		}
+		kio::clock::timeout(TIMEOUT, reader.read_frame())
+			.await
+			.expect("the read stalled")
+			.unwrap()
+			.expect("the group ended early");
+		tokio::task::yield_now().await;
 		ffi_caught_up().await;
 	}
 	for wait in waits {
