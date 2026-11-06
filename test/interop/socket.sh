@@ -7,9 +7,9 @@ run_socket_client() {
     local runtime="$1"
     shift
     case "$runtime" in
-    rust) timeout -k 3 "$TIMEOUT" "$EXAMPLES/interop-socket-js" "$@" ;;
-    js-native-node) (cd "$CLIENTS/js-native" && timeout -k 3 "$TIMEOUT" node --import tsx socket.ts "$@") ;;
-    js-native-bun) (cd "$CLIENTS/js-native" && timeout -k 3 "$TIMEOUT" bun socket.ts "$@") ;;
+        rust) timeout -k 3 "$TIMEOUT" "$EXAMPLES/interop-socket-js" "$@" ;;
+        js-native-node) (cd "$CLIENTS/js-native" && timeout -k 3 "$TIMEOUT" node --import tsx socket.ts "$@") ;;
+        js-native-bun) (cd "$CLIENTS/js-native" && timeout -k 3 "$TIMEOUT" bun socket.ts "$@") ;;
     esac
 }
 
