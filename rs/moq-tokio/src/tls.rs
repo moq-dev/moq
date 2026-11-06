@@ -1807,7 +1807,6 @@ impl Serve {
 	pub fn peer(&self, chain: Vec<CertificateDer<'static>>) -> PeerIdentity {
 		PeerIdentity {
 			chain,
-			#[cfg(feature = "_certs")]
 			roots: self.0.roots.current(),
 		}
 	}
