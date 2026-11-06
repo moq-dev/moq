@@ -260,7 +260,9 @@ the one playing. With `--video off`, `--metrics <PATH>` writes a JSON line every
 250 ms with the playhead, the delay, and every gap and stall the speaker hit, in
 the schema the
 [audio quality harness](https://github.com/moq-dev/moq/tree/main/test/audio-quality)
-reduces to underruns, skips, and silence.
+reduces to underruns, skips, and silence. A silence the publisher declares, such
+as a push-to-talk mute, plays as comfort noise at the level of the quietest audio
+heard before it, and counts as no gap or stall.
 
 The broadcast's announcement is its online signal, followed until the window
 closes. Playback starts when the name is announced. A
@@ -277,11 +279,7 @@ audio-device dependencies:
 cargo install moq-cli --no-default-features --features "quic,websocket,play,openh264"
 ```
 
-`moq play` skips disabled renditions when it picks one. If no enabled rendition
-matches its name and codec filters, it waits for a later catalog. Disabling the
-current rendition switches to an enabled one of its kind that matches the
-filters; with none, it stays subscribed, so re-enabling it (an unmute) plays at
-once.
+`moq play` skips disabled renditions. If none are enabled, it waits for a later catalog. Disabling the current rendition stops it and selects an enabled replacement.
 
 ## Capture
 

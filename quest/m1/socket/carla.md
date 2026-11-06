@@ -26,10 +26,11 @@ See the [epic](/quest/m1/socket/README.md) for the convention.
   or a second session of its own; decide in the PR and record why, such as
   keeping the e-stop off the control session's queue.
 - The anonymous grants let a driver publish its own endpoint and subscribe to
-  the truck endpoints. Whichever of this and
-  [moq-boy on sockets](/quest/m1/socket/boy.md) lands second removes
+  the truck endpoints. moq-boy moved to sockets already, so this removes
   `demo/viewer/**` from `demo/relay/prod.toml` and its documented
-  `moq auth serve` line. The worker's token keeps publish on `carla/**`, which
+  `moq auth serve` line. Anonymous sessions share one grant, so follow boy's
+  scheme: random driver ids under a fixed id prefix that the anonymous grant
+  covers and no truck id takes, as `demo/boy/.socket/viewer-*` does for boy. The worker's token keeps publish on `carla/**`, which
   covers its endpoints, and swaps its subscribe scope from `viewer/carla/**`
   to the driver endpoints; say so in `demo/carla/README.md`.
 - Update `demo/carla/README.md` (paths, lease) and `doc/bin/demo.md`.
@@ -39,8 +40,3 @@ See the [epic](/quest/m1/socket/README.md) for the convention.
   make that counter moot, add a `MoqBroadcastConsumer::instance()` accessor
   (and its Python wrapper) and key the lease on the real instance. Options
   shown: m0; ✅ m1, in this quest; m2.
-
-## Required
-
-- [Python sockets](/quest/m1/socket/py.md) - the truck's endpoint
-- [JS sockets](/quest/m1/socket/js.md) - the driver's dial

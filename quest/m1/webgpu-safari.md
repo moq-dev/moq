@@ -87,4 +87,4 @@ Public API: possibly a new `out.error` name. Wire: none.
 
 ## Related
 
-- [WebGPU HDR](/quest/m2/webgpu-hdr.md) - builds on the same renderer
+- [WebGPU HDR](/quest/m5/webgpu-hdr.md) - builds on the same renderer

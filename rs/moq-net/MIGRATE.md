@@ -4,10 +4,42 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Snapshots split connected sessions into idle and active
+
+`stats::Snapshot::activity()` returns each tier's `stats::Activity`: connected sessions with
+media payload moved within `Activity::WINDOW` (10 seconds) and those without. Additive; no
+migration needed.
+
+### `track::Consumer::unmetered` reads outside any stats session
+
+`track::Consumer::unmetered()` returns the handle with its stats scope cleared, so the
+subscriptions, fetches, and groups derived from it count toward no stats session, though
+the broadcast or origin it came from is metered. Existing callers need no migration.
+
+### Socket readers start at the beginning
+
+New `track` socket sessions subscribe from group 0, and `tcp` sessions join their
+half's only group from its first frame, so an acceptor's first burst is preserved
+when its subscription answer arrives after its writes. Existing
+callers need no migration; socket naming and the public API are unchanged.
+IETF subscribers and publishers also honor explicit starts on every supported
+draft, keeping a prefix written before the answer arrived. A start of group 0 is a
+filterless SUBSCRIBE on every draft, and the groups below the answer's Largest
+Object come from one range FETCH. A SUBSCRIBE that omits the filter still joins
+live, so third-party readers and relay caches see no change.
+
 ### Origins prove a route key ([#7937](https://github.com/moq-dev/moq/pull/7937))
 
 `origin::Config::route_key` takes an `origin::RouteKey`, which every lite-07 session on the origin proves to its peer in SETUP. Origins sharing a key fail over as one to a peer that scopes them; `None`, the default, proves nothing.
 A proof binds to the session through the new `poll::Session::export_keying_material`, which defaults to `None`: a transport over TLS returns its exporter, and a wrapper around another transport forwards it.
+
+### moq-transport datagram tracks
+
+Datagram tracks now work over moq-transport using SUBSCRIBE and OBJECT\_DATAGRAM.
+The sequence is the group ID and the object ID is zero. One upstream subscription
+serves both kinds of a name, including through relays. Stream and datagram
+consumers keep only their requested kind; nonzero object IDs are dropped by
+datagram consumers. No application API or wire encoding changes are required.
 
 ### Group batch operations and `poll_next_frame` are crate-private ([#7874](https://github.com/moq-dev/moq/pull/7874))
 
@@ -66,6 +98,44 @@ let broadcast = consumer.follow(path, None)?.available().await?.expect("the firs
 ```
 
 Relays and stats that forward every route change call `consumer.routes()`, a hidden `origin::Routes` stream of `origin::RouteEvent`, which keeps the old five variants.
+
+### One `origin::Route` handle replaces publications and claims
+
+On the publishing side ownership runs origin → route → broadcast. `origin::Publication`, `origin::Prepared` and `origin::Requests` are gone, as are `origin::Producer::{create_broadcast, publish, requests}` and the broadcast's own announcement.
+An `origin::Route` is created with `RouteOptions` and owns its broadcast. Dropping its last clone retracts it, and so does closing its broadcast; a broadcast producer clone alone no longer keeps it announced, so hold the route for as long as the content should stay up.
+
+| Before | After |
+| --- | --- |
+| `origin.publish(path, Route::default())` | `origin.route(path, RouteOptions::default())` |
+| `origin.create_broadcast(path)` then `publication.announce(route)` | `origin.route(path, RouteOptions::hidden())` then `route.announce()` |
+| `publication.broadcast()` / `Deref` | `route.broadcast()` |
+| `publication.unannounce()` | `route.withdraw()` |
+| `publication.announce(Route::default().with_cost(c))` | `route.set_cost(c)` |
+| `Route::default().with_auth(cred)` | `RouteOptions::default().with_auth(cred)`, or `route.set_auth(Some(cred))` |
+| `Route::default().with_instance(instance, epoch)` | `RouteOptions::default().with_instance(instance, epoch)`, at creation only |
+| `publication.route().and_then(\|r\| r.instance)` | `route.instance()` |
+| `origin.requests(prefix)` | `origin.route_prefix(prefix, RouteOptions::default())` |
+| `requests.requested_broadcast().await` (`Result`) | `route.requested().await` (`Option`, `None` once retracted or the origin closes) |
+| `request.prepare()?` … `prepared.publish()?` | `request.route(RouteOptions::hidden())?` … `job.announce()?` |
+
+A route mints its instance when it is created and keeps it for its lifetime, across `withdraw()` and `announce()`: re-announcing continues the same stream, and a new run is a new route.
+A job's route from `request.route(options)` serves a fresh instance unless `options` names one; created visible, it announces and answers the waiting requesters at once.
+`requested()` on an exact route returns `None` at once, and `broadcast()` on a prefix route panics.
+A prefix route takes a cost, a credential and hidden visibility like an exact one.
+
+The route metadata a reader receives is `origin::RouteInfo` (was `origin::Route`), with read-only getters: `announce.route.instance()` (an `&Instance`, no longer an `Option`), `cost()`, `hops()`, `is_anonymous()` and `source()`.
+Applications cannot build or edit one.
+
+```rust
+// Before
+let publication = origin.create_broadcast("live/alice")?;
+publication.create_track("catalog.json", info)?;
+publication.announce(Route::default().with_cost(5))?;
+// After
+let route = origin.route("live/alice", RouteOptions::hidden().with_cost(5))?;
+route.broadcast().create_track("catalog.json", info)?;
+route.announce()?;
+```
 
 ### Opens wait their turn for stream credit ([#7894](https://github.com/moq-dev/moq/pull/7894))
 

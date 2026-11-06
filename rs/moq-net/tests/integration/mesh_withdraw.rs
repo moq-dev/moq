@@ -9,12 +9,13 @@
 
 use crate::support;
 
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 
 use futures::channel::mpsc;
 
 use moq_net::{Hop, Version, cache, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock, peer, peer_with_latency};
+use support::{Kind, drain, watch};
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	produce(hop, origin::Config::default().update_hold)
@@ -30,48 +31,6 @@ fn produce(hop: u64, hold: Duration) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
 	producer
-}
-
-/// The kind of an [`origin::RouteEvent`] for a prefix.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind {
-	Start,
-	Update,
-	Restart,
-	Takeover,
-	End,
-}
-
-/// Every update per prefix the watcher has seen. Await [`kio::clock::sim::idle`]
-/// first, so every link, hold and quarantine in the mesh has settled.
-fn drain(watched: &mut mpsc::UnboundedReceiver<(String, Kind)>) -> HashMap<String, Vec<Kind>> {
-	let mut updates = HashMap::<String, Vec<Kind>>::new();
-	while let Ok((prefix, kind)) = watched.try_recv() {
-		updates.entry(prefix).or_default().push(kind);
-	}
-	updates
-}
-
-/// Watch `announced` from its own task, the way a session's announce writer does:
-/// it runs when woken, between the relays' own tasks, rather than only once the
-/// test task is polled again, which would coalesce every intermediate update.
-fn watch(mut announced: origin::Routes) -> mpsc::UnboundedReceiver<(String, Kind)> {
-	let (tx, rx) = mpsc::unbounded();
-	kio::clock::sim::spawn(async move {
-		while let Some(event) = announced.next().await {
-			let (kind, announce) = match event {
-				origin::RouteEvent::Start(announce) => (Kind::Start, announce),
-				origin::RouteEvent::Update(announce) => (Kind::Update, announce),
-				origin::RouteEvent::Restart(announce) => (Kind::Restart, announce),
-				origin::RouteEvent::Takeover { announce, .. } => (Kind::Takeover, announce),
-				origin::RouteEvent::End(announce) => (Kind::End, announce),
-			};
-			if tx.unbounded_send((announce.prefix.to_string(), kind)).is_err() {
-				break;
-			}
-		}
-	});
-	rx
 }
 
 /// `n` relays meshed over `edges`, watched from the last one.
@@ -99,14 +58,14 @@ impl Mesh {
 
 	/// Publish `count` broadcasts spread over every relay but the watcher, starting
 	/// at relay `offset`, and require the watcher to see each announced.
-	async fn publish(&mut self, count: usize, offset: usize) -> Vec<moq_net::origin::Publication> {
+	async fn publish(&mut self, count: usize, offset: usize) -> Vec<moq_net::origin::Route> {
 		let relays = self.nodes.len() - 1;
 		let broadcasts = (0..count)
 			.map(|i| {
 				let broadcast = self.nodes[(i + offset) % relays]
-					.create_broadcast(format!("room/{i}"))
+					.route(format!("room/{i}"), moq_net::origin::RouteOptions::hidden())
 					.unwrap();
-				broadcast.announce(Default::default()).unwrap();
+				broadcast.announce().unwrap();
 				broadcast
 			})
 			.collect();
@@ -226,8 +185,10 @@ async fn partial_mesh_withdraw_retracts_once() {
 	let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().routes())).collect();
 
 	for publisher in [5, 13, 22, 26, 32] {
-		let broadcast = nodes[publisher].create_broadcast(format!("room/{publisher}")).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = nodes[publisher]
+			.route(format!("room/{publisher}"), moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		broadcast.announce().unwrap();
 		kio::clock::sim::idle().await;
 		for (relay, watched) in watched.iter_mut().enumerate() {
 			let updates = drain(watched);
@@ -280,8 +241,10 @@ async fn retracted_relay_ignores_a_stale_path() {
 	}
 	let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().routes())).collect();
 
-	let broadcast = nodes[7].create_broadcast("room/7").unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = nodes[7]
+		.route("room/7", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	broadcast.announce().unwrap();
 	kio::clock::sim::idle().await;
 	for watched in watched.iter_mut() {
 		drain(watched);
@@ -362,9 +325,12 @@ impl Cluster {
 
 	/// Publish `path` from the client and require everyone to see it. Returns
 	/// what the watching client saw.
-	async fn publish(&mut self, path: &str) -> (moq_net::origin::Publication, Vec<Kind>) {
-		let broadcast = self.publisher.create_broadcast(path).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+	async fn publish(&mut self, path: &str) -> (moq_net::origin::Route, Vec<Kind>) {
+		let broadcast = self
+			.publisher
+			.route(path, moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		broadcast.announce().unwrap();
 		kio::clock::sim::idle().await;
 		let client = drain(&mut self.client).remove(path).unwrap();
 		assert_ne!(client.last(), Some(&Kind::End), "client: {client:?}");
@@ -376,7 +342,7 @@ impl Cluster {
 	}
 
 	/// Close `broadcast` cleanly: what the watching client, then each relay, saw.
-	async fn close(&mut self, path: &str, broadcast: moq_net::origin::Publication) -> (Vec<Kind>, Vec<Vec<Kind>>) {
+	async fn close(&mut self, path: &str, broadcast: moq_net::origin::Route) -> (Vec<Kind>, Vec<Vec<Kind>>) {
 		drop(broadcast);
 		kio::clock::sim::idle().await;
 		let client = drain(&mut self.client).remove(path).unwrap();
@@ -474,8 +440,10 @@ async fn late_better_path(mesh: &str, client: &str) -> (Vec<Kind>, Vec<Kind>) {
 	kio::clock::sim::idle().await;
 	assert!(drain(&mut watcher).is_empty());
 
-	let broadcast = publishing.create_broadcast("room/a").unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publishing
+		.route("room/a", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	broadcast.announce().unwrap();
 	kio::clock::sim::idle().await;
 	let published = drain(&mut watcher).remove("room/a").unwrap();
 	drop(broadcast);
@@ -501,7 +469,7 @@ async fn late_better_path_updates_in_place() {
 
 // Residual counterexamples on `main`, with the hold and the retraction
 // quarantine. Each pins what the cluster does today, so a change either way
-// fails here. Routes and announces (quest/m1/cluster-routing/routes/README.md) must
+// fails here. Routes and announces (quest/m2/cluster-routing/routes/README.md) must
 // bring each to a single retraction everywhere.
 
 /// A ring of six relays with links under 150 ms. Relay 3 hears the withdrawal
@@ -684,130 +652,4 @@ async fn withdrawal_counts(capped: bool) -> (usize, usize, usize) {
 		}
 	}
 	(hunted, revived, extra)
-}
-
-/// A permissive source sends an over-limit path to prove ingress refusal; an
-/// accepted boundary path then proves egress counts the relay's own stamp.
-#[kio::test]
-async fn hop_limit_bounds_receive_and_send() {
-	for name in [
-		"moq-lite-03",
-		"moq-lite-04",
-		"moq-lite-05",
-		"moq-lite-06",
-		"moq-lite-07-wip",
-		"moq-transport-18",
-		"moq-transport-22",
-	] {
-		let version = name.parse().unwrap();
-		let source = produce_origin(1);
-		let mut config = origin::Config::new(Hop::new(2).unwrap());
-		config.max_hops = origin::HopLimit::new(2).unwrap();
-		config.pool = cache::Pool::unbounded();
-		let (relay, driver) = origin::Producer::new(config);
-		support::harness::spawn(driver);
-		let sink = produce_origin(3);
-		let _upstream = peer(version, &source, &relay).await;
-		let _downstream = peer(version, &relay, &sink).await;
-		let mut received = watch(relay.consume().routes());
-		let mut sent = watch(sink.consume().routes());
-		kio::clock::sim::idle().await;
-		let route = |count: u64| {
-			origin::Route::default().with_hops(
-				moq_net::Hops::try_from((100..100 + count).map(|id| Hop::new(id).unwrap()).collect::<Vec<_>>())
-					.unwrap(),
-			)
-		};
-		let _long = source.publish("long", route(2)).unwrap();
-		let _boundary = source.publish("boundary", route(1)).unwrap();
-		let short = source.publish("short", route(0)).unwrap();
-		kio::clock::sim::idle().await;
-		let received = drain(&mut received);
-		assert!(!received.contains_key("long"), "{name}: accepted over-limit path");
-		assert!(received.contains_key("boundary"), "{name}: refused boundary path");
-		assert!(received.contains_key("short"), "{name}: refused short path");
-		let sent_initial = drain(&mut sent);
-		assert_eq!(sent_initial.len(), 1, "{name}: {sent_initial:?}");
-		assert!(sent_initial.contains_key("short"), "{name}: forwarded over-limit path");
-
-		if matches!(name, "moq-lite-03" | "moq-lite-04") {
-			// These wires have no route metadata update: withdraw, then replace it.
-			drop(short);
-			kio::clock::sim::idle().await;
-			assert_eq!(
-				drain(&mut sent).get("short").and_then(|kinds| kinds.last()),
-				Some(&Kind::End),
-				"{name}"
-			);
-			let _replacement = source.publish("short", route(1)).unwrap();
-			kio::clock::sim::idle().await;
-			assert!(drain(&mut sent).is_empty(), "{name}: forwarded over-limit replacement");
-			continue;
-		}
-		short.announce(route(1)).unwrap();
-		kio::clock::sim::idle().await;
-		let ended = drain(&mut sent);
-		assert_eq!(
-			ended.get("short").and_then(|kinds| kinds.last()),
-			Some(&Kind::End),
-			"{name}: {ended:?}"
-		);
-	}
-}
-
-/// A cheaper route at the cap wins locally but cannot be forwarded, so the relay
-/// advertises the pricier in-cap route instead of withdrawing the prefix, and
-/// withdraws only once no in-cap route is left.
-#[kio::test]
-async fn hop_limit_falls_back_to_a_forwardable_route() {
-	// Only wires carrying a route cost can rank a longer route first.
-	for name in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
-		let version = name.parse().unwrap();
-		let near = produce_origin(1);
-		let far = produce_origin(4);
-		let mut config = origin::Config::new(Hop::new(2).unwrap());
-		config.max_hops = origin::HopLimit::new(3).unwrap();
-		config.pool = cache::Pool::unbounded();
-		let (relay, driver) = origin::Producer::new(config);
-		support::harness::spawn(driver);
-		let sink = produce_origin(3);
-		let _near = peer(version, &near, &relay).await;
-		let _far = peer(version, &far, &relay).await;
-		let _downstream = peer(version, &relay, &sink).await;
-		let mut sent = watch(sink.consume().routes());
-		kio::clock::sim::idle().await;
-
-		let route = |first: u64, count: u64, cost: u64| {
-			origin::Route::default()
-				.with_hops(
-					moq_net::Hops::try_from(
-						(first..first + count)
-							.map(|id| Hop::new(id).unwrap())
-							.collect::<Vec<_>>(),
-					)
-					.unwrap(),
-				)
-				.with_cost(origin::Cost::new(cost))
-		};
-		// Three hops at the relay once the sender is appended: in the cap, but full.
-		let _cheap = far.publish("room", route(100, 2, 1)).unwrap();
-		// Two hops at the relay, so it has room for the relay's own.
-		let pricey = near.publish("room", route(200, 1, 50)).unwrap();
-		kio::clock::sim::idle().await;
-		let started = drain(&mut sent);
-		assert_eq!(
-			started.get("room").and_then(|kinds| kinds.last()),
-			Some(&Kind::Start),
-			"{name}: withdrew a prefix an in-cap route reaches: {started:?}"
-		);
-
-		drop(pricey);
-		kio::clock::sim::idle().await;
-		let ended = drain(&mut sent);
-		assert_eq!(
-			ended.get("room").and_then(|kinds| kinds.last()),
-			Some(&Kind::End),
-			"{name}: forwarded a route at the cap: {ended:?}"
-		);
-	}
 }

@@ -56,7 +56,7 @@ fn bufferbloat(bits_per_second: u64) -> moq_shaper::Profile {
 /// A server publishing broadcast `room`, and a client subscribed to its origin over a
 /// connection with the given transport settings.
 struct Setup {
-	broadcast: moq_net::origin::Publication,
+	broadcast: moq_net::origin::Route,
 	remote: moq_net::broadcast::Consumer,
 	/// The client's connection, for its credit stats.
 	conn: driver::connection::Connection,
@@ -81,8 +81,9 @@ async fn setup_through(
 	let version: moq_net::Version = version.parse().expect("version");
 
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast("room").expect("broadcast");
-	broadcast.announce(Default::default()).expect("announce");
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::default())
+		.expect("broadcast");
 
 	let mut config = moq_tokio::listen::Config::default();
 	config.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -203,7 +204,7 @@ async fn subscribe(remote: &moq_net::broadcast::Consumer, name: &str, priority: 
 impl Setup {
 	/// Subscribe to a new track at `priority`.
 	async fn subscribe(&self, name: &str, priority: i8) -> (moq_net::track::Producer, moq_net::track::Subscriber) {
-		let track = self.broadcast.create_track(name, timed()).unwrap();
+		let track = self.broadcast.broadcast().create_track(name, timed()).unwrap();
 		(track, subscribe(&self.remote, name, priority).await)
 	}
 
@@ -407,7 +408,7 @@ async fn lite_frame_past_the_window_gives_way() {
 /// A subscriber served on the raw driver with a connection window of [`WINDOW`], and a
 /// publisher dialing it whose connection can also send raw streams.
 struct Reversed {
-	broadcast: moq_net::origin::Publication,
+	broadcast: moq_net::origin::Route,
 	remote: moq_net::broadcast::Consumer,
 	/// The publisher's connection, for streams no session would send.
 	conn: driver::connection::Connection,
@@ -471,8 +472,9 @@ async fn reversed(version: &str) -> Reversed {
 	);
 
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast("room").expect("broadcast");
-	broadcast.announce(Default::default()).expect("announce");
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::default())
+		.expect("broadcast");
 	let subscriber = moq_tokio::origin::spawn();
 	let session = |conn: driver::connection::Connection| web::Session::raw(conn);
 	// A moq-lite client's driver sends its half of the handshake, so it runs meanwhile.
@@ -511,7 +513,7 @@ async fn reversed(version: &str) -> Reversed {
 impl Reversed {
 	/// Subscribe to a new track at `priority`.
 	async fn subscribe(&self, name: &str, priority: i8) -> (moq_net::track::Producer, moq_net::track::Subscriber) {
-		let track = self.broadcast.create_track(name, timed()).unwrap();
+		let track = self.broadcast.broadcast().create_track(name, timed()).unwrap();
 		(track, subscribe(&self.remote, name, priority).await)
 	}
 
@@ -628,7 +630,7 @@ async fn groups_waiting_for_track_info_give_way_first() {
 	read_partial(&mut partial, WINDOW / 4).await;
 
 	// Subscription 1, sent alongside a TRACK whose TRACK_INFO the publisher holds back.
-	let mut requests = setup.broadcast.requests();
+	let mut requests = setup.broadcast.broadcast().requests();
 	let every = Subscription::default()
 		.with_order(moq_net::track::Order::Ascending)
 		.with_range(0..)
@@ -938,7 +940,7 @@ const SEGMENT: usize = 1 << 20;
 /// Why cells whose incomplete units overcommit the window are skipped: the quest that makes
 /// `track::Subscriber` report each group it abandons, which their readers need to return its
 /// in-flight credit.
-const OVERCOMMITTED: &str = "waits on quest/m1/group-drops.md";
+const OVERCOMMITTED: &str = "waits on quest/m2/group-drops.md";
 
 /// One benchmark configuration.
 #[derive(Clone, Copy)]
@@ -998,6 +1000,7 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 		// than expire at the publisher's default zero max age.
 		let track = setup
 			.broadcast
+			.broadcast()
 			.create_track(name.as_str(), timed().with_max_age(None))
 			.unwrap();
 		// Groups in flight fall behind the live edge, so a zero budget would skip them.

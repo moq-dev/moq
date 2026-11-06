@@ -90,41 +90,6 @@ Then deploy with `nixos-rebuild switch --flake .#queue-ci --target-host
 root@10.231.0.2`, using the dedicated deployment key. Host rebuilds update the VM
 launcher. Back up the deployment private key separately.
 
-## Migrating an existing ext4 guest
-
-An existing `root.qcow2` must be migrated before activating the new host
-configuration. The launcher refuses to replace it with an empty guest.
-Build the migration tool and the host configuration first, while the old guest
-continues running:
-
-```bash
-nix build .#nixosConfigurations.queue-ci.config.system.build.runner-migrate -o runner-migrate
-nixos-rebuild build --flake .#build-host
-```
-
-Once the runner is idle, stop its VM and copy its filesystem into the new image:
-
-```bash
-sudo systemctl stop queue-ci
-sudo ./runner-migrate/bin/runner-migrate /var/lib/queue-ci/root.qcow2 /var/lib/queue-ci/root.raw
-```
-
-The tool keeps the source read-only, preserves registration, caches, ownership,
-permissions and hard links, and grows the new XFS filesystem to `resources.disk`.
-It refuses an open source disk or an existing destination. Guest filesystems stay
-inside libguestfs appliances rather than being mounted in the host kernel.
-
-Activate the built host configuration and start the VM:
-
-```bash
-nixos-rebuild switch --sudo --flake .#build-host
-sudo systemctl start queue-ci
-```
-
-Verify the runner is online, its root filesystem is XFS, and a representative
-job passes before removing the old disk. To roll back, stop the VM, reactivate
-the previous host configuration, and start it with its retained `root.qcow2`.
-
 The runner's home is `/var/cache/github-runner-home`; mbx uses
 `/var/cache/github-runner-home/.cache/mbx`. Workflows must select mbx's local backend
 on this runner. There is no cache-warming service or cache server. Persistent job
@@ -158,7 +123,6 @@ settings, the runner's locked-memory budget, symlink-free home and work director
 with state migrated from the former DynamicUser layout, free page reporting and
 idle cache drops, killing a job that fills memory before it thrashes the disk, and
 Nix/mbx persistence across runner and guest restarts.
-It also migrates a disposable ext4 disk, boots the resulting XFS image through
-UEFI, checks filesystem growth and a second boot, and measures ordinary copies
+It also boots the built XFS image through UEFI, checks filesystem growth and a second boot, and measures ordinary copies
 against reflinks at 1, 16, and 64 MiB. Timings are reported without a flaky
 performance threshold; reflink support and copy-on-write isolation are required.

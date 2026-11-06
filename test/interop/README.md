@@ -52,6 +52,14 @@ Rust CLI swap its channels' tones, and every subscriber must refuse every rendit
 as the wrong tone, not fail some other way. `interop.sh` is the one place the tones
 and each publisher's codecs are chosen.
 
+When Python is selected, the in-tree run also connects Python and Rust socket
+endpoints through the relay in both dial directions and both `tcp` and `track`
+protocols. Each direction checks exact frames, empty writes, ordered groups,
+and clean FIN. A stdin drain acknowledgement keeps Rust alive until Python has
+read its entire half. The lane runs only in the normal pass, pinned to lite-07:
+moq-net endpoints speak moq-lite to each other, never moq-transport. Older lite
+hops are outside this lane.
+
 The normal run also checks a finite raw track through the relay. Its publisher
 announces end 4 before writing four 256 KiB groups; the reader verifies every byte,
 exactly groups 0 through 3, and a clean end at 4. Rust-to-Rust always runs. Selecting
@@ -74,6 +82,12 @@ head with a joining FETCH before draft 22 and a fill from it.
 
 `--tail` runs the FETCH round, the late joins, and the five finite-tail lanes. The
 wire-compat lanes, which swap in released relays and clients, skip them.
+
+Socket lanes cross Rust and native JS in both dial directions under Node and Bun,
+using `tcp` and `track` through the relay. They verify both peers' bytes, FIN, RST,
+rejection, and separate rooted publish grants. Each pins moq-lite-07-wip; moq-net endpoints use lite to talk to each other,
+and older moq-lite hops do not carry hidden endpoints. These lanes
+run in the normal in-tree test when native JS is selected. `just test interop --sockets` runs them alone.
 
 On lite-07, Node and Bun also replace tracks in a claimed broadcast through the
 relay over WebSocket and WebTransport. Pre-connected readers subscribe immediately
@@ -107,7 +121,7 @@ broadcast, since an announcement means online/offline, so it has no end,
 withdrawal, or session to report. It joins once the broadcast has finished and
 requires exactly ten nonempty video buffers; its cell passes with the end check
 marked N/A. A pinned moq-transport pass records the case as skipped until
-[`quest/m2/ietf-finish.md`](../../quest/m2/ietf-finish.md) makes it pass.
+[`quest/m3/ietf-finish.md`](../../quest/m3/ietf-finish.md) makes it pass.
 
 Every client closes its session on the way out: publishers stop when their input
 ends (the browser on SIGTERM), and subscribers close once they have their frame.
@@ -225,6 +239,11 @@ one cell. The tails check their own connections, so a fallback fails the lane.
 
 The in-tree control lanes also run with `--tail`:
 
+- Four untimed 900-byte datagrams cross the relay in both directions between Rust
+  and each native JS runtime. The subscriber acknowledges resolved metadata before
+  sending begins, then acknowledges each packet, so this checks framing and bytes
+  rather than best-effort burst capacity. The publisher stays open until the read is
+  acknowledged, keeping a reliable track end from overtaking the datagrams.
 - A JS wire requester gets the Rust publisher's exact largest location through
   TRACK\_STATUS on every draft. Rust also queries the JS publisher's
   non-default priority before subscribing, when the answer can describe a track.
@@ -238,7 +257,7 @@ The in-tree control lanes also run with `--tail`:
 
 The standalone control endpoints use OS-assigned ports and production QMux,
 SETUP codecs, and request sessions. They verify their negotiated version directly.
-The query lanes through moq-relay use their usual version-log check.
+The datagram and query lanes through moq-relay use their usual version-log check.
 
 Some cases change shape on moq-transport:
 

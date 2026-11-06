@@ -150,11 +150,15 @@ func benchThroughput(b *testing.B, c benchCase) {
 	origin := moq.NewOriginProducerWithConfig(moq.OriginConfig{CacheCapacityBytes: &cacheBytes})
 	// The origin owns the cache policy; keep it until the case ends.
 	b.Cleanup(func() { runtime.KeepAlive(origin) })
-	publication, err := origin.CreateBroadcast("bench")
+	route, err := origin.Route("bench", moq.RouteOptions{Hidden: true})
 	if err != nil {
 		b.Fatal(err)
 	}
-	broadcast := publication.Broadcast()
+	b.Cleanup(func() { runtime.KeepAlive(route) })
+	broadcast, err := route.Broadcast()
+	if err != nil {
+		b.Fatal(err)
+	}
 	b.Cleanup(func() { _ = broadcast.Close() })
 	tracks := make([]*moq.TrackProducer, c.publishers)
 	consumers := make([]*moq.TrackConsumer, 0, c.publishers*c.subscribers)

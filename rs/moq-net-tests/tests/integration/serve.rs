@@ -16,7 +16,7 @@ async fn first_subscribe(version: &str, publish: bool) {
 	let version: Version = version.parse().unwrap();
 	let server = origin(1);
 	let client = origin(2);
-	let requests = server.requests("").unwrap();
+	let requests = server.route_prefix("", origin::RouteOptions::default()).unwrap();
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(server.consume());
 	options.client_subscribe = Some(client.clone());
@@ -42,7 +42,12 @@ async fn first_subscribe(version: &str, publish: bool) {
 	group.finish().unwrap();
 	let handler = async {
 		if publish {
-			let prepared = requests.requested_broadcast().await.unwrap().prepare().unwrap();
+			let prepared = requests
+				.requested()
+				.await
+				.unwrap()
+				.route(origin::RouteOptions::hidden())
+				.unwrap();
 			let track = prepared
 				.broadcast()
 				.create_track(
@@ -53,13 +58,14 @@ async fn first_subscribe(version: &str, publish: bool) {
 			let mut group = track.append_group().unwrap();
 			group.write_frame(Timestamp::ZERO, b"held".as_slice()).unwrap();
 			group.finish().unwrap();
-			Some((prepared.publish().unwrap(), track))
+			prepared.announce().unwrap();
+			Some((prepared, track))
 		} else {
-			requests.requested_broadcast().await.unwrap().serve(&held);
+			requests.requested().await.unwrap().serve(&held);
 			None
 		}
 	};
-	let (result, _publication) = futures::join!(read, handler);
+	let (result, _route) = futures::join!(read, handler);
 	if publish && version != "moq-lite-07-wip".parse().unwrap() {
 		assert!(
 			result.is_err(),

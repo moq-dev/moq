@@ -10,8 +10,8 @@ import (
 )
 
 // BroadcastProducer publishes a collection of tracks. Create one at a path with
-// [OriginProducer.CreateBroadcast] (or [Client.CreateBroadcast]) and take it
-// from the [Publication], then publish tracks onto it.
+// [OriginProducer.Route] (or [Client.Route]) and take it from the [Route], then
+// publish tracks onto it.
 type BroadcastProducer struct {
 	inner *ffi.MoqBroadcastProducer
 }
@@ -19,7 +19,7 @@ type BroadcastProducer struct {
 // NewBroadcastProducer creates a standalone broadcast, not attached to any
 // origin: pass its [BroadcastProducer.Consume] result to [BroadcastRequest.Serve]
 // for a dynamic request, or use it for local pub/sub. To publish at a path, use
-// [OriginProducer.CreateBroadcast].
+// [OriginProducer.Route].
 func NewBroadcastProducer() (*BroadcastProducer, error) {
 	inner, err := ffi.NewMoqBroadcastProducer()
 	if err != nil {
@@ -265,7 +265,18 @@ func (g *GroupProducer) Consume() (*GroupConsumer, error) {
 	return &GroupConsumer{inner: inner}, nil
 }
 
-// WriteFrame appends frame to the group.
+// Ready blocks until a frame of size bytes fits a window ahead of the fastest
+// reader. Call it before each WriteFrame so that reader paces the writer, as TCP
+// backpressure does, instead of the group shedding frames it has not taken, which
+// fails it with Evicted; slower readers are not waited on. It also waits until a reader holds
+// the group, and returns once the group is closed so the next write reports why.
+// It fails with Closed after Abort.
+func (g *GroupProducer) Ready(ctx context.Context, size uint64) error {
+	return g.inner.Ready(ctx, size)
+}
+
+// WriteFrame appends frame to the group. It never blocks: without Ready, a writer
+// that outpaces its readers sheds the front of the group instead.
 func (g *GroupProducer) WriteFrame(frame Frame) error {
 	return g.inner.WriteFrame(frame)
 }

@@ -19,4 +19,4 @@ Public API: none expected (the estimate's source is internal). Wire: none; PROBE
 
 ## Related
 
-- [Media stats](/quest/m2/stats/README.md) - its JS stats also read PROBE because `getStats()` is missing
+- [Media stats](/quest/m3/stats/README.md) - its JS stats also read PROBE because `getStats()` is missing

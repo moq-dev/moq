@@ -31,7 +31,7 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | `url`, `name` | Relay URL (with `?jwt=` if needed) and broadcast name. |
 | `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-18,moq-lite-06`. Every stable version by default. |
 | `source` | `camera`, `screen`, or `file`. |
-| `muted`, `invisible` | Stop publishing audio or video. By default the microphone and camera stay open, so unmuting or unhiding is instant and the browser's capture indicators stay lit. |
+| `muted`, `invisible` | Stop sending audio, or stop publishing video. A muted rendition stays in the catalog and its listeners stay subscribed, so the next word reaches them at once, as push-to-talk needs; they play the pause as comfort noise. By default the microphone and camera stay open, so unmuting or unhiding is instant and the browser's capture indicators stay lit. |
 | `capture` | What a muted or invisible track does with its device: `hold` (default) keeps it open, `release` closes it so its capture indicator goes dark, and resuming reopens it. A screen share or file stops once both tracks are off. Clearing `source` or removing the element releases everything either way. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
 | `backend` | How a `<canvas>` preview is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
@@ -74,17 +74,20 @@ with a warning, since every viewer would refuse it.
 Video encodes while enabled, so its recent groups wait in the track's cache for
 a late subscription's `delay.max` or a fetch. The cache keeps an idle group for
 30 seconds whatever `maxAge` says; `maxAge` only bounds how far back a reader
-may reach into it. Audio keeps raw PCM while nobody listens, then encodes that
-history ahead of live audio when a subscriber arrives. Raw audio keeps up to
+may reach into it. Audio keeps raw PCM while nobody listens, then encodes the part of
+that history within the subscribers' max delay ahead of live audio when one arrives. Raw audio keeps up to
 `maxAge`, which for media defaults to 30 seconds (about 11.5 MB for 48 kHz
 stereo f32). With `maxAge: null`, which sets no publisher limit on the media, raw
 audio still keeps 30 seconds, since raw history needs a bound. The catalog and
 HLS record tracks keep `@moq/net`'s zero default, since a viewer needs only
 their newest group. Capture stays open. Disabling an audio encoder keeps what it retained: a
 subscriber still gets that history, and it expires on its own. Players skip a
-disabled rendition, so that history reaches subscribers that are already held
-on it or that subscribe directly. The codec stays
-configured across the disable, so re-enabling resumes at once.
+disabled rendition, so that history reaches only subscribers that ask for the
+track directly. The codec stays configured across the disable, so re-enabling
+resumes at once. To pause audio that comes back, such as push-to-talk, set the
+encoder's `muted` instead: it sends nothing, keeps the rendition enabled, and
+marks where each utterance ends, so listeners stay subscribed and treat the gap
+as intentional silence.
 
 Pass `onDemand: false` to `Publish.Broadcast` to encode audio continuously too.
 `onDemand: true` also gates video, which then loses its unsubscribed past.

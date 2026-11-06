@@ -19,7 +19,7 @@ use std::time::Duration;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed, TestCaseError, TestRunner};
 
-use super::origin::{Producer, Route};
+use super::origin::{Producer, RouteInfo};
 use crate::{Error, Hop, Hops, Instance, SessionError, StreamError, Timestamp, broadcast, group, origin, track};
 
 /// Groups in the logical track; group `g` has `1 + g % 3` frames.
@@ -448,17 +448,17 @@ impl Model {
 		let mut hops = Hops::new();
 		hops.push(Hop::new(10 * (instance as u64 + 1) + slot as u64).unwrap())
 			.unwrap();
-		let route = Route::default()
+		let route = RouteInfo::default()
 			.with_instance(self::instance(instance), 0)
 			.with_hops(hops)
 			// The second instance's routes all undercut the first's.
 			.with_cost(((INSTANCES - instance) * SLOTS - slot) as u64);
-		let requests = self.origin.requests_route(PATH, route, None).unwrap();
+		let requests = self.origin.forward(PATH, route, None).unwrap();
 		let broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track("video", track::Info::timed()).unwrap();
 		let upstream = broadcast.consume();
 		let serving = kio::clock::sim::spawn(async move {
-			while let Ok(request) = kio::wait(|waiter| requests.poll_requested_broadcast(waiter)).await {
+			while let Some(request) = kio::wait(|waiter| requests.poll_requested(waiter)).await {
 				request.serve(&upstream);
 			}
 		});
@@ -1223,6 +1223,32 @@ fn regressions() {
 				},
 			],
 			finish: true,
+		},
+		// A switch's backfill of a group the finished route never had lets the track end.
+		Case {
+			ops: vec![
+				Op::Up { instance: 1, slot: 1 },
+				Op::Up { instance: 1, slot: 2 },
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 1,
+					slot: 1,
+					group: Some(11),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 1,
+					slot: 2,
+					group: Some(1),
+					frames: 1,
+				},
+				Op::Down { instance: 1, slot: 2 },
+				Op::End { instance: 1, slot: 1 },
+			],
+			finish: false,
 		},
 	];
 	for case in cases {

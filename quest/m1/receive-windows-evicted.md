@@ -8,7 +8,7 @@ overcommitted cells again, and Nightly's `Rust benchmark tests` job
 (`gh nightly rust-test`) still passes. Those cells are 256 streams,
 4 MiB frames, and 4 MiB frames with a following stream window. Until
 then, the benchmark skips them and prints each one with
-`quest/m1/group-drops.md` as the reason.
+`quest/m2/group-drops.md` as the reason.
 
 Every cell keeps the workload it offers. A cell whose incomplete units
 fit the connection window fails on any eviction. A cell that
@@ -20,7 +20,7 @@ alongside throughput and latency, instead of failing.
 Moved to m1 2026-11-04 with the maintainer, after
 [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838) landed the
 fitting cells: what remains waits on
-[group-drops](/quest/m1/group-drops.md), an m1 quest, and with the
+[group-drops](/quest/m2/group-drops.md), an m2 quest, and with the
 overcommitted cells skipped the benchmark no longer fails Nightly, so this
 no longer holds the m0
 [Nightly passes on main](/quest/m0/nightly/README.md) epic open. It replaces
@@ -37,7 +37,7 @@ Overload policy, decided 2026-11-04 (maintainer):
 
 Silent loss, decided 2026-11-04 (maintainer):
 
-- ✅ Fix it at the source in `quest/m1/group-drops.md`, planned in
+- ✅ Fix it at the source in `quest/m2/group-drops.md`, planned in
   [moq-dev/moq#7890](https://github.com/moq-dev/moq/pull/7890). There,
   the wire always names an abandoned group, and `track::Subscriber`'s
   drop signal becomes public.
@@ -84,7 +84,7 @@ What remains:
   `Cell::fits` partition in `benchmark_receive_windows`), and run the full
   sweep through `quest gate`.
 - Retain the stream/frame/window axes and the actual offered workload
-  for [Receive pool](/quest/m2/receive-pool.md).
+  for [Receive pool](/quest/m5/receive-pool.md).
 - Repro: `just rs test -p moq-tokio --test integration --release -E
   'test(benchmark_receive_windows)' --run-ignored only --success-output
   immediate`.
@@ -99,4 +99,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [A group a subscriber gives up on is always reported](/quest/m1/group-drops.md) - the public drop signal the reader needs to return a dropped group's permit
+- [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - the public drop signal the reader needs to return a dropped group's permit

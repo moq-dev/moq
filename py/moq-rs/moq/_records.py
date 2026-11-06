@@ -448,6 +448,8 @@ class ConnectionStats:
     packets_lost: int | None
     version: str | None = None
     """The negotiated protocol version, spelled like ``Client(versions=...)``."""
+    datagrams_unrouted: int | None = None
+    """Datagrams received for a subscription with no datagram track; ``None`` on a version without datagrams."""
 
     @staticmethod
     def _from_ffi(stats: MoqConnectionStats) -> ConnectionStats:
@@ -461,6 +463,7 @@ class ConnectionStats:
             packets_received=stats.packets_received,
             packets_lost=stats.packets_lost,
             version=stats.version,
+            datagrams_unrouted=stats.datagrams_unrouted,
         )
 
 

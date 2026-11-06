@@ -3878,7 +3878,7 @@ impl Producer {
 	}
 
 	/// Evict group `sequence` from the cache, as expiry does.
-	#[cfg(test)]
+	#[cfg(all(test, feature = "async"))]
 	pub(crate) fn evict(&self, sequence: u64) {
 		self.modify().unwrap().evict_group(sequence, Error::Evicted);
 	}
@@ -4919,6 +4919,14 @@ impl Consumer {
 		self
 	}
 
+	/// This handle with its stats scope cleared, so the subscriptions, fetches, and groups
+	/// derived from it count toward no stats session: for reads a consumer makes for itself
+	/// rather than on behalf of whoever its origin is metered for.
+	pub fn unmetered(mut self) -> Self {
+		self.stats = stats::Scope::default();
+		self
+	}
+
 	/// The track name this handle is bound to.
 	pub fn name(&self) -> &str {
 		&self.name
@@ -5428,6 +5436,28 @@ impl Consumer {
 			return serving.latest_sequence();
 		}
 		self.with_state(|state| state?.read().max_sequence)
+	}
+
+	/// Ready once [`Self::latest_sequence`] is `Some`: the track holds a group. Stays pending
+	/// on a track that closed without one.
+	pub(super) fn poll_grouped(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.with_state(|state| {
+			let Some(state) = state else {
+				return Poll::Pending;
+			};
+			let routes = state.read().routes.clone();
+			if let Some(routes) = routes {
+				return routes.poll_grouped(waiter);
+			}
+			match state.poll(waiter, |state| match state.max_sequence {
+				Some(_) => Poll::Ready(()),
+				None => Poll::Pending,
+			}) {
+				Poll::Ready(Ok(())) => Poll::Ready(()),
+				Poll::Ready(Err(closed)) if closed.max_sequence.is_some() => Poll::Ready(()),
+				_ => Poll::Pending,
+			}
+		})
 	}
 
 	/// The first group the declared end excludes whole, or `None` while the track is open ended.
@@ -23325,6 +23355,7 @@ mod test {
 	}
 
 	/// The frame a read takes right now, as its number in [`numbered`].
+	#[cfg(feature = "async")]
 	fn read_numbered(reader: &mut group::Consumer) -> Option<u32> {
 		let frame = reader.read_frame().now_or_never()?;
 		let frame = frame.expect("read failed").expect("the group ended");
@@ -23441,6 +23472,7 @@ mod test {
 	}
 
 	/// The size of `payload` as a frame, for [`group::Producer::poll_ready`].
+	#[cfg(feature = "async")]
 	fn frame_info(payload: &bytes::Bytes) -> frame::Info {
 		frame::Info {
 			size: payload.len() as u64,
@@ -23450,6 +23482,7 @@ mod test {
 
 	/// A live group of `frames` numbered frames past its tail, read along by a live reader,
 	/// on a track with a handler.
+	#[cfg(feature = "async")]
 	fn shed_live_group(frames: u32) -> (Producer, Requests, group::Producer, group::Consumer) {
 		let producer = track_producer("test", Info::default());
 		let requests = producer.requests();
@@ -23463,6 +23496,7 @@ mod test {
 	}
 
 	/// The next fill asked of `requests`, if any.
+	#[cfg(feature = "async")]
 	fn asked(requests: &Requests) -> Option<Fill> {
 		match requests.poll_requested_fill(&kio::Waiter::noop()) {
 			Poll::Ready(fill) => Some(fill.unwrap()),

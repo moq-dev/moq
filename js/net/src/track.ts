@@ -5,7 +5,7 @@
  */
 
 import { Instant, Milli, Nano, now, sleepUntil } from "@moq/clock";
-import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import { Derived, type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import { Delivered } from "./delivered.ts";
 import {
 	GroupTooLarge,
@@ -434,7 +434,7 @@ function smallest(a: Milli | null | undefined, b: Milli | null | undefined): Mil
 	return Milli(Math.min(a, b));
 }
 
-// Aggregate the preferences of every live subscriber, matching Rust's Subscription::poll_combined.
+// Aggregate the preferences of `states`, matching Rust's Subscription::poll_combined.
 function combineSubscriptions(states: Iterable<TrackState>): Subscription | undefined {
 	let combined: Subscription | undefined;
 	for (const state of states) {
@@ -476,17 +476,33 @@ export class Request {
 
 	#producer: Producer;
 	#pending: Set<Request>;
+	#lookups?: TrackRequestOptions["lookups"];
+	#wanted?: Getter<boolean>;
 
 	private constructor(options: TrackRequestOptions) {
 		this.name = options.name;
 		this.#producer = options.producer;
 		this.#pending = options.pending;
+		this.#lookups = options.lookups;
 		this.#pending.add(this);
 	}
 
 	static {
 		hooks.makeRequest = (options) => new Request(options);
 		hooks.stageRequest = (request, info) => request.#stage(info);
+		hooks.requestWanted = (request) => {
+			const wanted = request.#producer.demand().wanted;
+			request.#wanted ??= request.#lookups
+				? new Derived(
+						[wanted, request.#lookups.pending],
+						(group, lookups) => group !== undefined || lookups > 0,
+					)
+				: new Derived([wanted], (group) => group !== undefined);
+			return request.#wanted;
+		};
+		hooks.keepRequest = (request) => {
+			if (request.#lookups) request.#lookups.opened = false;
+		};
 	}
 
 	/** Watch the subscribers waiting for this request. */
@@ -494,9 +510,9 @@ export class Request {
 		return this.#producer.demand();
 	}
 
-	/** The aggregate subscription requested for this track. */
+	/** The aggregate subscription requested for this track, one-shot fetches included. */
 	get subscription(): Readonly<Subscription> {
-		return this.#producer.subscription.peek() ?? subscriptionDefaults();
+		return hooks.requested(this.#producer).peek() ?? subscriptionDefaults();
 	}
 
 	/** The subscriber's priority for this track. */
@@ -534,6 +550,12 @@ export class Request {
 		this.#pending.delete(this);
 		this.#producer.abort(err);
 	}
+}
+
+/** Options for {@link Consumer.info}. */
+export interface InfoOptions {
+	/** Abandons the lookup, rejecting with the signal's reason; aborting after it resolves has no effect. */
+	signal?: AbortSignal;
 }
 
 /** Options for {@link Consumer.fetchGroup}. */
@@ -587,9 +609,19 @@ export class Consumer {
 		return this.#broadcast.subscribe(this.name, options);
 	}
 
-	/** Fetch the track's immutable publisher properties without subscribing. */
-	info(): Promise<Info> {
-		return this.#broadcast.resolveTrackInfo(this.name);
+	/**
+	 * Fetch the track's immutable publisher properties without subscribing. It waits for as long
+	 * as the publisher takes to answer: abort `options.signal` to give up.
+	 */
+	info(options?: InfoOptions): Promise<Info> {
+		const signal = options?.signal;
+		if (!signal) return this.#broadcast.resolveTrackInfo(this.name);
+		if (signal.aborted) return Promise.reject(signal.reason);
+		// Held only until the answer, so the signal abandons the lookup but never keeps the track.
+		const answered = new AbortController();
+		return this.#broadcast
+			.resolveTrackInfo(this.name, AbortSignal.any([signal, answered.signal]))
+			.finally(() => answered.abort());
 	}
 
 	/** Fetch a single group by sequence without holding a live subscription. */
@@ -788,6 +820,9 @@ let reofferCached: (
 let reofferSequences: (producer: Producer, sink: TrackState, sequences: readonly bigint[]) => void;
 // Whether a group may still land on the producer's live feed; assigned in its static block.
 let mayLand: (producer: Producer, land: Land) => boolean;
+// Recompute the producer's aggregates now, for a sink that just became a fetch; assigned in its
+// static block.
+let resubscribe: (producer: Producer) => void;
 let owedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run & { folds?: number }>;
 let owedGroup: (producer: Producer, start: bigint, end: bigint) => { sequence: bigint; folds?: number } | undefined;
 let fillEdge: (producer: Producer) => bigint | undefined;
@@ -897,6 +932,10 @@ export class Producer {
 	// `max_sequence`, and where the next append lands.
 	#received = 0n;
 	#subscribing = new Signal(false);
+	// The aggregate across live subscribers only. A fetch's preferences judge just the group it
+	// asks for, so a publisher sizing what it serves (such as how much retained media to replay)
+	// must not see them. The wire's aggregate, `#state.update`, keeps them.
+	#live = new Signal<Subscription | undefined>(undefined);
 
 	// Recently written source groups, retained for replay to late subscribers and
 	// pruned once idle for longer than the cache window. Each entry tracks the mirror
@@ -979,6 +1018,8 @@ export class Producer {
 
 	static {
 		hooks.subscribing = (producer) => producer.#subscribing;
+		hooks.requested = (producer) => producer.#state.update;
+		resubscribe = (producer) => producer.#updateSubscription();
 		hooks.cacheTrack = (producer) => {
 			producer.#subscribed = false;
 			producer.#served = undefined;
@@ -1175,12 +1216,9 @@ export class Producer {
 		return this.#state.outcome;
 	}
 
-	/**
-	 * The aggregate subscription across live subscribers, or `undefined` when there are none.
-	 * The wire layer watches this to emit SUBSCRIBE_UPDATE.
-	 */
+	/** The aggregate subscription across live subscribers, or `undefined` when there are none. */
 	get subscription(): Getter<Subscription | undefined> {
-		return this.#state.update;
+		return this.#live;
 	}
 
 	/**
@@ -1334,17 +1372,19 @@ export class Producer {
 		}
 	}
 
-	// Recompute from every live sink because an update or close can narrow as well as widen
-	// the aggregate. The wire layer observes this signal and emits SUBSCRIBE_UPDATE.
+	// Recompute from every sink because an update or close can narrow as well as widen the
+	// aggregates. The wire layer observes `#state.update` and emits SUBSCRIBE_UPDATE.
 	//
 	// The max delay is the subscribers' own, not clamped to the track's maxAge: the publisher
 	// applies its own, as each reader's budget does, so the demand asked upstream is the same
 	// before and after the info lands.
 	#updateSubscription(): void {
-		this.#subscribing.set([...this.#sinks].some((sink) => !sink.fetch && sink.closed.peek() === undefined));
+		const live = [...this.#sinks].filter((sink) => !sink.fetch);
+		this.#subscribing.set(live.some((sink) => sink.closed.peek() === undefined));
 		const combined = combineSubscriptions(this.#sinks);
 		this.#settle();
 		this.#state.update.set(combined);
+		this.#live.set(combineSubscriptions(live));
 		// The requested floor bounds what a pending tail owes.
 		this.#owe();
 	}
@@ -2850,6 +2890,7 @@ export class Subscriber {
 		hooks.spent = (subscriber, start, end, delivered) =>
 			(subscriber.#state.closed.peek() !== undefined || subscriber.#complete()) &&
 			!hooks.hasUnreadGroup(subscriber, start, end, delivered);
+		hooks.awaitsFill = (subscriber) => subscriber.#fillWait;
 		hooks.staleAt = (subscriber, sequence) => {
 			const held: Superseded = {};
 			return {
@@ -2891,6 +2932,15 @@ export class Subscriber {
 			});
 			return subscriber;
 		};
+		hooks.watchSubscriberError = (subscriber, fn) => {
+			if (subscriber.#resume) return subscriber.#resume.watchError(fn);
+			const check = (error: Error | null | undefined) => {
+				if (error instanceof Error) fn(error);
+			};
+			const stop = subscriber.closed.subscribe(check);
+			check(subscriber.closed.peek());
+			return stop;
+		};
 		hooks.latestSequence = (subscriber) =>
 			subscriber.#resume ? subscriber.#resume.latest() : subscriber.#state.latest;
 		hooks.bufferedLargest = (subscriber) => subscriber.#bufferedLargest();
@@ -2931,6 +2981,8 @@ export class Subscriber {
 		hooks.fetchBudget = (subscriber, maxDelay) => {
 			subscriber.#fetchBudget = maxDelay ?? Number.POSITIVE_INFINITY;
 			subscriber.#state.fetch = true;
+			// The sink joined as a live subscriber; leave the live aggregate before anyone sees it.
+			if (subscriber.#state.producer) resubscribe(subscriber.#state.producer);
 			const update = subscriber.#state.update.peek();
 			if (update) subscriber.#state.update.set(update, true);
 		};

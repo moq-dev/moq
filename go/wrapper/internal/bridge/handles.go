@@ -12,6 +12,19 @@ import (
 // moq, so they are set before a subpackage can call them. They take and return
 // `any` because this package cannot import moq's types without a cycle.
 var (
+	// OriginProducer returns the handle behind a *moq.OriginProducer.
+	OriginProducer func(any) *ffi.MoqOriginProducer
+	// WrapGroupProducer wraps a socket write half.
+	WrapGroupProducer func(*ffi.MoqGroupProducer) any
+	// WrapGroupConsumer wraps a socket read half.
+	WrapGroupConsumer func(*ffi.MoqGroupConsumer) any
+	// WrapTrackProducer wraps a socket write half.
+	WrapTrackProducer func(*ffi.MoqTrackProducer) any
+	// WrapTrackConsumer retains a socket's subscribed read half.
+	WrapTrackConsumer func(*ffi.MoqTrackConsumer) any
+	// TrackInfo converts a *moq.TrackInfo to the generated record.
+	TrackInfo func(any) (*ffi.MoqTrackInfo, error)
+
 	// BroadcastProducer returns the handle behind a *moq.BroadcastProducer.
 	BroadcastProducer func(any) *ffi.MoqBroadcastProducer
 	// TrackProducer returns the handle behind a *moq.TrackProducer.

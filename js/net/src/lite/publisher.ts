@@ -19,7 +19,7 @@ import {
 	unauthorized,
 } from "../error.ts";
 import type * as group from "../group.ts";
-import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
+import { Cost, type Hop, type RouteInfo, routesEqual } from "../hop.ts";
 import { finalSequence, hiddenBelow, hooks, insertRun, presented, type Run, runGaps } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -601,15 +601,15 @@ export class Publisher {
 		let nextAnnounceId = 0n;
 		const announceIds = new Map<Path.Valid, bigint>();
 
-		const wireHops = (route: Route): Hop[] => {
-			if (hasAnnounceOk(this.version)) return route.hops;
+		const wireHops = (route: RouteInfo): Hop[] => {
+			if (hasAnnounceOk(this.version)) return [...route.hops];
 			return [...route.hops, this.hop];
 		};
 
 		// What the peer decodes for a route: pre-lite-06 wires carry no cost, so a re-price
 		// there must not restart.
 		// moq-lite carries no per-request auth, so a swap alone sends nothing.
-		const onWire = (route: Route): Route => ({
+		const onWire = (route: RouteInfo): RouteInfo => ({
 			...route,
 			cost: hasRouteCost(this.version) ? route.cost : Cost.zero,
 			auth: undefined,
@@ -621,7 +621,7 @@ export class Publisher {
 			!sameInstance(prev, next) ||
 			(hasInstance(this.version) && (prev.route.epoch ?? 0n) !== (next.route.epoch ?? 0n));
 
-		const announce = async (suffix: Path.Valid, route: Route) => {
+		const announce = async (suffix: Path.Valid, route: RouteInfo) => {
 			console.debug(`announce: broadcast=${suffix} active=true instance=${route.instance}`);
 			if (hasAnnounceId(this.version)) announceIds.set(suffix, nextAnnounceId++);
 			await encodeAnnounceBroadcast(
@@ -638,7 +638,7 @@ export class Publisher {
 			);
 		};
 
-		const update = async (suffix: Path.Valid, route: Route) => {
+		const update = async (suffix: Path.Valid, route: RouteInfo) => {
 			if (!hasAnnounceId(this.version)) {
 				await retract(suffix);
 				await announce(suffix, route);
@@ -658,7 +658,7 @@ export class Publisher {
 		};
 
 		// Another instance or epoch: ANNOUNCE_RESTART on lite-07, an end and a start before it.
-		const restart = async (suffix: Path.Valid, route: Route) => {
+		const restart = async (suffix: Path.Valid, route: RouteInfo) => {
 			const id = announceIds.get(suffix);
 			if (id === undefined || !hasAnnounceRestart(this.version)) {
 				await retract(suffix);
@@ -1010,6 +1010,7 @@ export class Publisher {
 			endFrame: msg.endFrame,
 		};
 		let legacy: datagram.Consumer | undefined;
+		const legacyPriority = new Signal(msg.priority);
 		let controls: SubscriptionControls | undefined;
 		// Lite-05 and later name every sequence below the end that this subscription never
 		// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
@@ -1087,8 +1088,8 @@ export class Publisher {
 			if (this.#datagramWriter && !hasDatagramTracks(this.version)) {
 				legacy = wireOf(front).liveDatagrams(msg.track);
 				if (legacy) {
-					legacy.setPriority(msg.priority);
-					datagrams = this.#runDatagrams(legacy, { sub: msg.id, stamp })
+					if (wireOf(front).localDatagrams) legacy.setPriority(msg.priority);
+					datagrams = this.#runDatagrams(legacy, { sub: msg.id, stamp, priority: legacyPriority })
 						.then(() => {})
 						.catch((err) => console.debug(`datagram send stopped: ${reason(err)}`));
 				}
@@ -1105,7 +1106,8 @@ export class Publisher {
 				version: this.version,
 				live: new LiveRanges(this.version, asked),
 				apply: (update, live) => {
-					legacy?.setPriority(update.priority);
+					legacyPriority.set(update.priority);
+					if (wireOf(front).localDatagrams) legacy?.setPriority(update.priority);
 					if (hasRanges(this.version)) {
 						const resolved = hooks.servingResolved(track);
 						const entries = live.map(({ id, entry }) => {
@@ -2060,12 +2062,16 @@ export class Publisher {
 	}
 
 	// Shared by dedicated lite-07 requests and the old SUBSCRIBE carry-both mapping.
-	async #runDatagrams(track: datagram.Consumer, options: { sub: bigint; stamp?: Stamp }): Promise<bigint> {
+	async #runDatagrams(
+		track: datagram.Consumer,
+		options: { sub: bigint; stamp?: Stamp; priority?: Getter<number> },
+	): Promise<bigint> {
 		if (!this.#datagramWriter) throw new Error("transport does not support datagrams");
 		const info = await track.info();
-		const rank = () => sendOrder({ priority: track.priority, publisher: info.priority });
+		const priority = options.priority ?? hooks.datagramPriority(track);
+		const rank = () => sendOrder({ priority: priority.peek(), publisher: info.priority });
 		const sender = this.#datagramWriter.open(rank());
-		const dispose = hooks.datagramPriority(track).subscribe(() => sender.setPriority(rank()));
+		const dispose = priority.subscribe(() => sender.setPriority(rank()));
 		const left = hooks.datagramClosed(track);
 		const { writer } = sender;
 		const maxSize = Math.min(DatagramMessage.MAX_SIZE, DatagramStream.maxDatagramSize(this.#quic));

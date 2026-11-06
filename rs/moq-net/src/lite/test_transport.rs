@@ -936,6 +936,7 @@ impl poll::Chunks for Script {
 #[derive(Clone)]
 pub struct ScriptedSession {
 	pub log: Log,
+	max_datagram_size: usize,
 	/// Optional notifications for tests that drive per-stream readiness queues.
 	wake: Option<kio::Shared<()>>,
 	stats: SinkStats,
@@ -966,6 +967,11 @@ pub struct ScriptedSession {
 }
 
 impl ScriptedSession {
+	pub fn with_datagrams(mut self, max_size: usize) -> Self {
+		self.max_datagram_size = max_size;
+		self
+	}
+
 	pub fn without_credit(self) -> Self {
 		*self.credit.write().ok().expect("credit is live") = false;
 		self
@@ -983,6 +989,7 @@ impl ScriptedSession {
 	pub fn new(script: Vec<u8>) -> Self {
 		Self {
 			log: Log::default(),
+			max_datagram_size: 0,
 			wake: None,
 			stats: SinkStats::default(),
 			close: Default::default(),
@@ -1243,7 +1250,7 @@ impl poll::Session for ScriptedSession {
 	}
 
 	fn max_datagram_size(&self) -> usize {
-		0
+		self.max_datagram_size
 	}
 
 	fn address(&self) -> crate::transport::Address {

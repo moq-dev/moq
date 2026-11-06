@@ -53,8 +53,7 @@ function serve(version: IetfVersion, grant?: Signal<Grant | undefined>, priority
 		requiresSolicitation: false,
 		grant,
 	});
-	const publication = origin.createBroadcast(Path.from("room"));
-	publication.announce();
+	const publication = origin.route(Path.from("room"));
 	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, priority, maxAge });
 	const uni = pair.client.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
@@ -487,8 +486,7 @@ test("a FETCH preserves relayed metadata and cached groups without upstream FETC
 		for (const warm of [false, true]) {
 			using fx = serve(version);
 			const upstream = new OriginProducer();
-			const publication = upstream.createBroadcast(Path.from("archive"));
-			publication.announce();
+			const publication = upstream.route(Path.from("archive"));
 			const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 			writeGroup(track, 3n, ["3-0", "3-1"]);
 			// lite-04 has no FETCH; lite-05 can fetch, but refuses empty subscription ranges.
@@ -507,7 +505,7 @@ test("a FETCH preserves relayed metadata and cached groups without upstream FETC
 					while (await group?.readFrame()) {}
 					group?.close();
 				}
-				const requests = fx.origin.requestsRoute(Path.from("relayed"));
+				const requests = fx.origin.routePrefix(Path.from("relayed"));
 				const cursor = requests.requested();
 				const requested = cursor.next();
 				const type = { ...range(version, at(3, 0), at(3, 0)), trackNamespace: Path.from("relayed") };

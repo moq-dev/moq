@@ -4425,6 +4425,7 @@ dependencies = [
  "moq-tokio",
  "moq-video",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "usage-rs",
@@ -4566,13 +4567,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-e2ee"
-version = "0.0.11"
-dependencies = [
- "workspace-hack",
-]
-
-[[package]]
 name = "moq-ffi"
 version = "0.4.12"
 dependencies = [
@@ -4708,6 +4702,7 @@ dependencies = [
 name = "moq-msf"
 version = "0.5.1"
 dependencies = [
+ "bench-harness",
  "serde",
  "serde_json",
  "serde_with",

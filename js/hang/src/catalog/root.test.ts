@@ -54,7 +54,7 @@ test("rendition broadcast reference is parsed and normalized", () => {
 test("every reference-bearing section carries an optional instance", () => {
 	const INSTANCE = "01890a5d-ac96-774b-bcce-b302099a8057" as ReferenceInstance;
 	const catalog = (instance: string) => ({
-		contributions: { c: { broadcast: "./a", instance } },
+		include: { c: { broadcast: "./a", instance } },
 		video: {
 			renditions: {
 				v: { broadcast: "./a", instance, codec: "avc1.64001f", container: { kind: "legacy" } },
@@ -85,36 +85,36 @@ test("every reference-bearing section carries an optional instance", () => {
 	expect(parsed.text?.renditions.t?.instance).toBe(INSTANCE);
 	expect(parsed.json?.tracks.j?.instance).toBe(INSTANCE);
 	expect(parsed.binary?.tracks.b?.instance).toBe(INSTANCE);
-	expect(parsed.contributions?.c?.instance).toBe(INSTANCE);
+	expect(parsed.include?.c?.instance).toBe(INSTANCE);
 
 	// An empty instance refuses the catalog, as in Rust.
 	expect(RootSchema.safeParse(catalog("")).success).toBe(false);
 });
 
-// Mirrors Rust's `contributions_roundtrip_and_refuse_malformed_entries`.
-test("a contribution parses beside a same-ID rendition and a malformed one is refused", () => {
+// Mirrors Rust's `includes_roundtrip_and_refuse_malformed_entries`.
+test("an include parses beside a same-ID rendition and a malformed one is refused", () => {
 	const video = { alice: { codec: "avc1.64001f", container: { kind: "legacy" } } };
 	const parsed = RootSchema.parse({
-		contributions: { alice: { broadcast: "./alice.hang" } },
+		include: { alice: { broadcast: "./alice.hang" } },
 		video: { renditions: video },
 	});
-	expect(parsed.contributions?.alice).toEqual({ broadcast: "alice.hang" as RelativeBroadcast });
-	// Contribution IDs are their own namespace, so one may share a rendition's ID.
+	expect(parsed.include?.alice).toEqual({ broadcast: "alice.hang" as RelativeBroadcast });
+	// Include IDs are their own namespace, so one may share a rendition's ID.
 	expect(() => checkRenditions(parsed)).not.toThrow();
 	expect(encode(parsed).version).toBeUndefined();
 
-	for (const contributions of [
+	for (const include of [
 		[],
 		{ alice: null },
 		{ alice: {} },
 		{ alice: { broadcast: 42 } },
 		{ alice: { broadcast: "./alice.hang", instance: "" } },
 	]) {
-		expect(RootSchema.safeParse({ contributions }).success).toBe(false);
+		expect(RootSchema.safeParse({ include }).success).toBe(false);
 	}
-	// The issue names a contribution, not a rendition.
-	const refused = RootSchema.safeParse({ contributions: { alice: {} } });
-	expect(refused.error?.message).toContain("malformed contribution alice");
+	// The issue names an include, not a rendition.
+	const refused = RootSchema.safeParse({ include: { alice: {} } });
+	expect(refused.error?.message).toContain("malformed include alice");
 });
 
 test("rendition parent broadcast reference stays distinct from empty", () => {

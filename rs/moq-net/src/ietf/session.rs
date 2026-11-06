@@ -462,8 +462,8 @@ impl Launch {
 		let datagrams = (session.max_datagram_size() != 0).then(|| Datagrams {
 			session: session.clone(),
 			subscriber: subscriber.clone(),
-			budget: kio::coop::Budget::new(32),
-			charged: false,
+			held: Vec::new(),
+			caught_up: true,
 		});
 		// Keep the session's SUBSCRIBE_NAMESPACE requests open as discovery decides, each on
 		// its own stream; with no subscribe half, ask nothing.
@@ -518,6 +518,15 @@ impl Running {
 		}
 		// Whichever side closed it, read what already arrived.
 		ready!(self.race.unis.poll_drain(waiter));
+		let _ = self.race.tasks.poll(waiter);
+		if let Some(datagrams) = &mut self.race.datagrams {
+			let _ = datagrams.poll(waiter, false);
+			if !datagrams.caught_up {
+				return Poll::Pending;
+			}
+		}
+		self.race.subscriber.datagrams_routed();
+		let _ = self.race.tasks.poll(waiter);
 		let res = self.ending.take().expect("draining an ended session");
 		// Closed cleanly by dropping or draining: readers see what the peer's clean
 		// close would have shown them.
@@ -581,7 +590,7 @@ impl Race {
 		if let Poll::Ready(err) = poll_failed(&mut self.dispatch, |dispatch| dispatch.poll(waiter).map(Err)) {
 			return Poll::Ready(Err(err));
 		}
-		if let Poll::Ready(err) = poll_failed(&mut self.datagrams, |datagrams| datagrams.poll(waiter)) {
+		if let Poll::Ready(err) = poll_failed(&mut self.datagrams, |datagrams| datagrams.poll(waiter, true)) {
 			return Poll::Ready(Err(err));
 		}
 		if let Poll::Ready(err) = poll_failed(&mut self.goaway, |goaway| {
@@ -607,6 +616,12 @@ impl Race {
 		}
 		if let Poll::Ready(err) = poll_failed(&mut self.publish_namespaces, |publish| publish.poll(waiter)) {
 			return Poll::Ready(Err(err));
+		}
+		if let Poll::Ready(err) = poll_failed(&mut self.datagrams, |datagrams| datagrams.poll(waiter, false)) {
+			return Poll::Ready(Err(err));
+		}
+		if self.datagrams.as_ref().is_none_or(|datagrams| datagrams.caught_up) {
+			self.subscriber.datagrams_routed();
 		}
 		Poll::Pending
 	}
@@ -1358,23 +1373,46 @@ fn died_before_header(err: &Error) -> bool {
 struct Datagrams {
 	session: Transport,
 	subscriber: Subscriber,
-	/// A peer keeping datagrams ready must not hold the session's other tasks.
-	budget: kio::coop::Budget,
-	/// This pass of the budget is spent, waiting for the next datagram.
-	charged: bool,
+	/// Unknown aliases held before the source machines run: at most one receive budget.
+	held: Vec<bytes::Bytes>,
+	/// Whether the receive pass read the queue empty rather than yielding to its budget.
+	caught_up: bool,
 }
 
 impl Datagrams {
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		loop {
-			if !self.charged {
-				ready!(self.budget.poll_yield(waiter));
-				self.charged = true;
+	fn poll(&mut self, waiter: &kio::Waiter, hold: bool) -> Poll<Result<(), Error>> {
+		if !hold {
+			for payload in std::mem::take(&mut self.held) {
+				self.route(payload, false)?;
 			}
-			let payload = ready!(self.session.poll_recv_datagram(waiter)).map_err(Error::from_transport)?;
-			self.charged = false;
-			self.subscriber.recv_datagram(payload)?;
 		}
+		let mut budget = kio::coop::Budget::new(32);
+		loop {
+			self.caught_up = false;
+			ready!(budget.poll_yield(waiter));
+			self.caught_up = true;
+			let payload = match ready!(self.session.poll_recv_datagram(waiter)) {
+				Ok(payload) => payload,
+				Err(err) => {
+					for payload in std::mem::take(&mut self.held) {
+						self.route(payload, false)?;
+					}
+					return Poll::Ready(Err(Error::from_transport(err)));
+				}
+			};
+			self.route(payload, hold)?;
+		}
+	}
+
+	fn route(&mut self, payload: bytes::Bytes, hold: bool) -> Result<(), Error> {
+		if let Some(alias) = self.subscriber.recv_datagram(payload.clone())? {
+			if hold {
+				self.held.push(payload);
+			} else {
+				tracing::debug!(alias, "dropping a datagram for an unknown alias");
+			}
+		}
+		Ok(())
 	}
 }
 
@@ -1711,17 +1749,10 @@ fn refuse_going_away(stream: Stream<Transport, Version>, id: u64, version: Versi
 	if id == auth::Auth::ID {
 		return auth::going_away(stream);
 	}
+	let kind = super::error::request::Kind::Subscribe;
 	Reject::new(
 		stream,
-		ietf::RequestError {
-			error_code: super::error::request::to_code(
-				&Error::GoingAway,
-				super::error::request::Kind::Subscribe,
-				version,
-			),
-			reason_phrase: "going away".into(),
-			retry_interval: 0,
-		},
+		ietf::RequestError::refuse(&Error::GoingAway, kind, "going away", version),
 	)
 }
 
@@ -2615,7 +2646,9 @@ mod tests {
 	/// enough: the question is only whether the bytes went out unasked.
 	async fn announce_occurrences(peer_declared: Option<peer::Peer>) -> usize {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
+		let _cam = origin
+			.announce("solo-cam", crate::origin::RouteInfo::default())
+			.unwrap();
 
 		// An open gate: an unsolicited PUBLISH_NAMESPACE can reach the wire.
 		let gate = kio::Producer::new(true);
@@ -2720,7 +2753,9 @@ mod tests {
 
 	fn auth_session(auth: bool) -> AuthSession {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
+		let cam = origin
+			.announce("solo-cam", crate::origin::RouteInfo::default())
+			.unwrap();
 
 		let gate = kio::Producer::new(true);
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
@@ -3378,8 +3413,8 @@ mod tests {
 		// Stall before the type, then after it while the body has not arrived.
 		for stalled in [Vec::new(), vec![ietf::Subscribe::ID as u8]] {
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-			let mut track = broadcast.create_track("video", None).unwrap();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
+			let mut track = broadcast.broadcast().create_track("video", None).unwrap();
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
 				.with_incoming_bidis(vec![stalled, subscribe.clone()]);
 			let driver = bidi_driver(session, Some(origin.consume()));
@@ -4091,7 +4126,7 @@ mod tests {
 
 	/// A request past our GOAWAY cutoff is refused in the answer its kind reads: an AUTH
 	/// with AUTH_ERROR carrying GOING_AWAY, since its presenter takes anything else as a
-	/// violation, and the rest with REQUEST_ERROR.
+	/// violation, and the rest with REQUEST_ERROR, inviting a retry on the next session.
 	#[kio::test]
 	async fn a_request_past_our_goaway_is_refused_in_its_own_answer() {
 		const VERSION: Version = Version::Draft18;
@@ -4101,7 +4136,12 @@ mod tests {
 			(auth::Auth::ID, frame(VERSION, auth::AuthError::ID, &body)),
 			(
 				ietf::Subscribe::ID,
-				frame(VERSION, ietf::RequestError::ID, &[&[0x6, 0][..], &body[1..]].concat()),
+				// A Retry Interval of 1000ms, as a draft-18 varint.
+				frame(
+					VERSION,
+					ietf::RequestError::ID,
+					&[&[0x6, 0x83, 0xe8][..], &body[1..]].concat(),
+				),
 			),
 		] {
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());

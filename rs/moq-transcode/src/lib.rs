@@ -724,8 +724,10 @@ mod tests {
 		// the output must be minted through an origin: a standalone producer has no path, and
 		// `..` from it would escape, failing the catalog read below.
 		let origin = moq_tokio::origin::spawn();
-		let output = origin.create_broadcast("room/transcode").unwrap();
-		let consumer = output.consume();
+		let output = origin
+			.route("room/transcode", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let consumer = output.broadcast().consume();
 		let transcoder = tokio::spawn(run(source.broadcast.consume(), output.broadcast().clone(), config));
 
 		// The derivative catalog appears before anything is encoded, with the
@@ -1623,6 +1625,111 @@ mod tests {
 
 			transcoder.abort();
 		}
+	}
+
+	/// A source group the subscription loses mid-stream costs the rungs that
+	/// group alone. A relay gives up a superseded group it could not deliver in
+	/// time, which a moq-lite-06 peer reads as `Old`; the shared decode carries
+	/// on at the next group instead of ending every rung with it.
+	#[tokio::test(start_paused = true)]
+	async fn a_lost_source_group_costs_only_that_group() {
+		let source = source_catalog(320, 240);
+		let mut encoder = moq_video::encode::Encoder::new(&{
+			let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
+			config.kind = moq_video::encode::Kind::Software;
+			config
+		})
+		.unwrap();
+		let gray = vec![0x80u8; 320 * 240 * 4];
+		let mut write = |group: &mut moq_net::group::Producer, timestamps: &[u64]| {
+			encoder.cut().unwrap();
+			for &timestamp in timestamps {
+				for encoded in encoder.encode(&gray_frame(&gray, timestamp)).unwrap() {
+					hang::container::Frame {
+						timestamp: encoded.timestamp,
+						payload: encoded.payload,
+					}
+					.write_to(group)
+					.unwrap();
+				}
+			}
+		};
+
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let catalog = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog);
+		await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+
+		// A viewer is the rung's demand, so its live path attaches to the feed.
+		let _viewer = subscribe(&consumer, "video/120p").await;
+		let mut source_demand = source._track.demand();
+		while source_demand.wanted_changed().await.unwrap().is_none() {}
+		// What the hop upstream acts on: a superseded group is still worth
+		// delivering, so its tail is not given up just because the next one began.
+		let asked = source._track.subscription().expect("the feed's subscription");
+		assert_ne!(
+			asked.delay.max,
+			Some(std::time::Duration::ZERO),
+			"the feed gives up every superseded group"
+		);
+
+		// The live path opens output group 0 on the source's first frame.
+		let mut lost = source._track.create_group(0u64.into()).unwrap();
+		write(&mut lost, &[0, 33_333]);
+		let rung = consumer.track("video/120p").unwrap();
+		let mut edge = rung.clone();
+		while edge.largest().await.map(|position| (position.group, position.frame)) != Some((0, 1)) {}
+
+		// The group is lost before its end. The rung aborts its copy right away
+		// rather than at a next group that may never come, and never finishes it
+		// short: a group name always means the same content.
+		lost.abort(moq_net::Error::Old).unwrap();
+		let partial = async {
+			let mut partial = rung.fetch_group(0, None).await?;
+			while partial.read_frame().await?.is_some() {}
+			moq_net::Result::Ok(())
+		};
+		assert!(partial.await.is_err(), "the lost group was finished short");
+
+		// The next group arrives whole.
+		let mut next = source._track.create_group(1u64.into()).unwrap();
+		write(&mut next, &[66_666, 99_999]);
+		next.finish().unwrap();
+
+		loop {
+			match edge.largest().await {
+				Some(position) if (position.group, position.frame) >= (1, 1) => break,
+				Some(_) => {}
+				None => panic!("the rung ended with its lost source group"),
+			}
+		}
+		let mut fetched = rung.fetch_group(1, None).await.unwrap();
+		let mut frames = 0;
+		while fetched.read_frame().await.expect("group 1 failed").is_some() {
+			frames += 1;
+		}
+		assert_eq!(frames, 2, "group 1 lost frames");
+
+		transcoder.abort();
 	}
 
 	/// Two transcoders fed the same source publish groups that mirror the

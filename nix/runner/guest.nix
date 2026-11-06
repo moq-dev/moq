@@ -20,7 +20,7 @@
   assertions = [
     {
       assertion = resources.disk >= 8;
-      message = "Runner guests and migrations need at least 8 GiB for the base image.";
+      message = "Runner guests need at least 8 GiB for the base image.";
     }
   ];
 
@@ -64,23 +64,6 @@
     options = [ "umask=0077" ];
   };
   system.stateVersion = "26.05";
-
-  # Build the offline migration tool with the same image and disk budget.
-  system.build.runner-migrate = pkgs.writeShellApplication {
-    name = "runner-migrate";
-    runtimeInputs = with pkgs; [
-      coreutils
-      gptfdisk
-      libguestfs-with-appliance
-      psmisc
-      qemu_kvm
-    ];
-    text = ''
-      runner_image=${config.system.build.image}/${config.image.fileName}
-      runner_capacity=${toString resources.disk}G
-      ${builtins.readFile ./migrate.sh}
-    '';
-  };
 
   services.openssh = {
     enable = true;

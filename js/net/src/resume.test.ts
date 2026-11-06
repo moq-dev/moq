@@ -3,7 +3,7 @@ import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
-import { Route } from "./hop.ts";
+import { RouteInfo } from "./hop.ts";
 import type { Session as IetfSession } from "./ietf/session.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
@@ -39,7 +39,7 @@ async function isPending(promise: Promise<unknown>): Promise<boolean> {
 
 /** A stand-in session announcing `path` under the shared instance at `cost`, serving `source`. */
 function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
-	const handle = wireOf(origin).receive(path, Route.normalize({ instance: INSTANCE, cost }));
+	const handle = wireOf(origin).receive(path, RouteInfo.normalize({ instance: INSTANCE, cost }));
 	void (async () => {
 		for await (const request of handle.requested()) request.serve(source.consume());
 	})();
@@ -267,6 +267,60 @@ test("a group below the replacement's resume point is backfilled", async () => {
 	}
 });
 
+// The switch's backfill waits on a fill the finished new route's handler still owes, rather
+// than counting as drained while the fill is out.
+test("a backfill waits on a fill the finished route still owes", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	const requests = tb.producer.requests();
+	const fills: track.Fill[] = [];
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) fills.push(fill);
+	})();
+	tb.write(6n);
+	tb.producer.finish();
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Milli(3_600_000) } });
+	try {
+		await clock.advance(Nano.zero);
+		ta.write(5n);
+		expect(drain(sub)).toEqual([5n]);
+		front.serve(handles[1]);
+		await clock.advance(Nano.zero);
+		expect(drain(sub)).toEqual([6n]);
+		await clock.advance(Nano.zero);
+		expect(fills.length).toBeGreaterThan(0);
+		expect(drain(sub)).toEqual([]);
+		expect(sub.closed.peek()).toBeUndefined();
+		// Only group 2 is in the route's history.
+		for (const fill of fills) {
+			for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
+				if (sequence !== 2n) {
+					fill.dropGroups(sequence, sequence + 1n);
+					continue;
+				}
+				const group = fill.accept(sequence);
+				group.writeFrame({ payload: enc.encode("2.0") });
+				group.finish();
+			}
+			fill.close();
+		}
+		await clock.advance(Nano.zero);
+		expect(drain(sub)).toEqual([2n]);
+	} finally {
+		requests.close();
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
 test("a routed source start follows the serving copy and its subscriber floor", async () => {
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
@@ -485,9 +539,8 @@ test("a resumed fork shares an on-demand track request", async () => {
 test("a lagging same-instance replica resumes from one publisher's bytes exactly once", async () => {
 	const { clock, installed } = manual();
 	const publisher = new Producer();
-	const originalPublication = publisher.createBroadcast(path);
-	const original = originalPublication.broadcast;
-	originalPublication.announce({ instance: INSTANCE });
+	const originalRoute = publisher.route(path, { instance: INSTANCE });
+	const original = originalRoute.broadcast;
 	const source = original.createTrack("seq", { maxAge: null });
 	const origin = new Producer();
 
@@ -758,6 +811,257 @@ test("a replacement differing only in unchecked takes over", async () => {
 	close();
 });
 
+// Mirrors `a_replacement_aborted_after_its_answer_keeps_the_incumbent` in rs/moq-net/src/model/origin.rs.
+test("a replacement that answers and then aborts before its first group leaves the incumbent serving", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+
+	await swap();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	expect(sub.closed.peek()).toBeUndefined();
+
+	ta.write(1n);
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+
+	// The incumbent's clean end is the track's, not the replacement's error.
+	ta.producer.finish();
+	expect(await sub.recvGroup()).toBeUndefined();
+
+	sub.close();
+	close();
+});
+
+// Mirrors the Rust front: an incumbent that finished cleanly ends the track whoever serves it.
+test("a replacement that aborts before its first group after the incumbent finished ends the track cleanly", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+
+	await swap();
+	ta.write(1n);
+	ta.producer.finish();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	const groups: bigint[] = [];
+	for (let group = await sub.recvGroup(); group; group = await sub.recvGroup()) {
+		groups.push(group.sequence);
+		group.close();
+	}
+	expect(groups).toEqual([1n]);
+
+	sub.close();
+	close();
+});
+
+// Mirrors `readers_owed_nothing_below_the_incumbents_end_end_cleanly` in rs/moq-net/src/model/origin.rs:
+// a reader owed nothing below the incumbent's end, and one joining while the replacement has yet
+// to deliver, end cleanly once the incumbent finished and the replacement aborted.
+test("readers owed nothing below the incumbent's end end cleanly when the replacement aborts", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const later = active.track("seq").subscribe({ ranges: [{ start: { absolute: 3n } }] });
+	ta.write(0n);
+	ta.write(1n);
+	await swap();
+	const joiner = active.track("seq").subscribe();
+	await settle();
+	ta.producer.finish();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+
+	expect(await later.recvGroup()).toBeUndefined();
+	const groups: bigint[] = [];
+	for (let group = await joiner.recvGroup(); group; group = await joiner.recvGroup()) {
+		groups.push(group.sequence);
+		group.close();
+	}
+	expect(groups).toEqual([1n]);
+
+	later.close();
+	joiner.close();
+	close();
+});
+
+// A reader arriving after the replacement answered reads the incumbent too, as the Rust front
+// serves it until the replacement delivers.
+test("a reader joining before the replacement delivers keeps the incumbent when the replacement aborts", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const first = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(first)).toEqual([0n]);
+	await swap();
+	const joiner = active.track("seq").subscribe();
+	await settle();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	ta.write(1n);
+	await settle();
+	expect(drain(joiner)).toContain(1n);
+	expect(joiner.closed.peek()).toBeUndefined();
+
+	first.close();
+	joiner.close();
+	close();
+});
+
+// The incumbent is the source that last delivered, however many replacements answered since.
+test("a reader joining after two undelivered replacements keeps the incumbent when both abort", async () => {
+	const { origin, a, b, swap, active, close } = await setup();
+	const c = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const tc = copy(c);
+	const first = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(first)).toEqual([0n]);
+	await swap();
+	const disposeC = serve(origin, c, 0n);
+	await settle();
+	await settle();
+	const joiner = active.track("seq").subscribe();
+	await settle();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	tc.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	ta.write(1n);
+	await settle();
+	expect(drain(joiner)).toContain(1n);
+	expect(joiner.closed.peek()).toBeUndefined();
+
+	first.close();
+	joiner.close();
+	disposeC();
+	close();
+});
+
+// A fork joins like any reader arriving before the replacement delivers.
+test("a fork made before the replacement delivers keeps the incumbent when the replacement aborts", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+	await swap();
+	const fork = sub.fork();
+	await settle();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	ta.write(1n);
+	await settle();
+	expect(drain(fork)).toContain(1n);
+	expect(fork.closed.peek()).toBeUndefined();
+
+	sub.close();
+	fork.close();
+	close();
+});
+
+// Only an end some other copy settled cleanly excuses the serving copy's failure.
+test("a serving copy that declares an end and then aborts short of it keeps the error", async () => {
+	const { a, active, close } = await setup();
+	const ta = copy(a);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n, 1, false);
+	ta.producer.finishAt({ group: 1n, frame: 0 });
+	const group = await sub.recvGroup();
+	group?.close();
+	ta.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	await expect(sub.recvGroup()).rejects.toThrow("64");
+
+	sub.close();
+	close();
+});
+
+// Mirrors `a_replacement_aborted_after_its_answer_keeps_the_incumbent` for a reader awaiting only the end.
+test("waiting for the end of a track whose replacement aborts before its first group follows the incumbent", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+
+	await swap();
+	const finished = sub.finished();
+	finished.catch(() => {});
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	ta.producer.finish();
+	await expect(finished).resolves.toEqual({ group: 1n, frame: 0 });
+
+	sub.close();
+	close();
+});
+
+// The Rust front judges the replacement by its copy, whatever each reader's window took from it:
+// one that held a group delivered, so its later abort is the track's verdict for every reader.
+test("a replacement that delivered is not undone by a reader whose window skipped its groups", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const first = active.track("seq").subscribe();
+	const later = active.track("seq").subscribe({ ranges: [{ start: { absolute: 3n } }] });
+	ta.write(0n);
+	expect(drain(first)).toEqual([0n]);
+	expect(drain(later)).toEqual([]);
+
+	await swap();
+	tb.write(1n);
+	await settle();
+	expect(drain(first)).toEqual([1n]);
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	expect(() => drain(later)).toThrow("64");
+	ta.write(2n);
+	await settle();
+	expect(() => drain(first)).toThrow("64");
+
+	first.close();
+	later.close();
+	close();
+});
+
+test("a replacement that aborts before its first group after the front concludes leaves the incumbent serving", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+
+	front.serve(b.consume());
+	await settle();
+	// No front is left to replace the replacement, but the incumbent still feeds the track.
+	front.conclude();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	expect(sub.closed.peek()).toBeUndefined();
+
+	ta.write(1n);
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+	ta.producer.finish();
+	expect(await sub.recvGroup()).toBeUndefined();
+	sub.close();
+});
+
 test("waiting for the end of a track whose replacement was refused ends with the refusal", async () => {
 	const { a, b, swap, active, close } = await setup();
 	const old = a.createTrack("seq", { priority: 1 });
@@ -943,7 +1247,7 @@ test("between routes a reader keeps reading the copy it has", async () => {
 	expect(drain(sub)).toEqual([0n]);
 
 	// The next route has not answered when the old one is retracted.
-	const next = wireOf(origin).receive(path, Route.normalize({ instance: INSTANCE, cost: 1n }));
+	const next = wireOf(origin).receive(path, RouteInfo.normalize({ instance: INSTANCE, cost: 1n }));
 	const asked = next.requested();
 	disposeA();
 	await settle();
@@ -1832,7 +2136,7 @@ test("a fetched group that fails on the route still serving waits for the next r
 	const b = new BroadcastProducer();
 	const ta = copy(a);
 	const tb = copy(b);
-	// Route a's request handler holds the refetch of its failed group open, as Rust's tests do
+	// RouteInfo a's request handler holds the refetch of its failed group open, as Rust's tests do
 	// with `requests()`: without one, a miss there is NotFound at once.
 	const pending = ta.producer.requests();
 	const failing = ta.write(5n, 1, false);
@@ -1864,7 +2168,7 @@ test("a group handed out already failed with its route still continues on the ne
 	const b = new BroadcastProducer();
 	const ta = copy(a);
 	const tb = copy(b);
-	// Route a's request handler holds the refetch of its failed group open until the next route.
+	// RouteInfo a's request handler holds the refetch of its failed group open until the next route.
 	const pending = ta.producer.requests();
 	front.serve(a.consume());
 	const sub = front.consumer.track("seq").subscribe();
@@ -3162,4 +3466,34 @@ test("a route whose IETF session closed before subscribing moves the track to th
 	sub.close();
 	front.consumer.close();
 	b.close();
+});
+
+test("routed metadata receives a refusal without polling a group cursor", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const origin = new Producer();
+	try {
+		origin.route(Path.from("missing-track"));
+		for (const request of [origin.request(Path.from("missing-track")), origin.follow(Path.from("missing-track"))]) {
+			const broadcast = request.active.peek();
+			if (!broadcast) throw new Error("local broadcast missing");
+			const subscriber = broadcast.track("absent").subscribe();
+			let outcome: unknown;
+			void subscriber.info().then(
+				() => {
+					outcome = "accepted";
+				},
+				(error) => {
+					outcome = error;
+				},
+			);
+			await clock.advance(Nano.zero);
+			expect(outcome).toBeInstanceOf(NotFound);
+			subscriber.close();
+			request.close();
+		}
+	} finally {
+		origin.close();
+		installed.close();
+	}
 });
