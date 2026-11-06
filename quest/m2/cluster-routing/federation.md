@@ -69,5 +69,4 @@ Rust/JS parity. Run `just check`, `just test interop --all`, and `just drafts ch
 ## Related
 
 - [Route health](/quest/m5/route-health/README.md) - epoch-only detection of stalled delivery on still-open links
-- [Scoped peers prove a route key](/quest/m2/cluster-routing/routes/proof.md) - the key this connection's identities are qualified under
 - [Routing guide](/quest/m1/routing-guide.md) - runnable operator setup after integration

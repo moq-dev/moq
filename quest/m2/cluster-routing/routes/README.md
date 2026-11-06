@@ -532,7 +532,6 @@ benchmarks.
 
 ## Required
 
-- [Scoped peers prove a route key](/quest/m2/cluster-routing/routes/proof.md) - records the session proof decision and implementation
 - [Route session integration](/quest/m2/cluster-routing/routes/session.md) - one router per origin node drives the origin and every lite-07 announce stream
 - [Announcement availability](/quest/m2/cluster-routing/routes/availability.md) - announcements report availability, and a let-go is offline rather than END, in Rust and JS
 - [js/net route layer](/quest/m2/cluster-routing/routes/js.md) - `js/net` encodes, decodes, and resolves the route layer
