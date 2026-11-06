@@ -9618,7 +9618,11 @@ mod tests {
 				assert_eq!(log.lock().unwrap().len(), 1, "{case}");
 				// Beside a stream track, only the SUBSCRIBE asks for the datagrams.
 				if stream {
-					assert_eq!(datagrams.priority(), Some(-5), "{case}: the SUBSCRIBE's priority stands");
+					assert_eq!(
+						datagrams.priority(),
+						Some(-5),
+						"{case}: the SUBSCRIBE's priority stands"
+					);
 				}
 			}
 		}
