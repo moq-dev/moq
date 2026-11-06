@@ -196,7 +196,8 @@ export default class MoqPublish extends HTMLElement {
 	// The preview element, either a <video> (raw source via srcObject) or a <canvas> (rendered frames).
 	#preview = new Signal<HTMLVideoElement | HTMLCanvasElement | undefined>(undefined);
 
-	// Whether to encode each track: connected and allowed by `muted` and `invisible`.
+	// Whether each track publishes: connected and allowed by `muted` and `invisible`. Video encodes only
+	// while it does; muted audio stays served and sends nothing, so an unmute needs no catalog update.
 	#videoEnabled = new Signal(false);
 	#audioEnabled = new Signal(false);
 
@@ -284,7 +285,8 @@ export default class MoqPublish extends HTMLElement {
 
 		this.audio = new Audio.Encoder("audio", {
 			broadcast: this.broadcast,
-			enabled: this.#audioEnabled,
+			enabled: this.#enabled,
+			muted: this.controls.muted,
 			capture: audioCapture,
 			bandwidth: this.connection.allocator,
 		});
@@ -392,8 +394,17 @@ export default class MoqPublish extends HTMLElement {
 				return;
 			}
 
+			// Keep the pre-metadata placeholder out of the UI's retained aspect ratio.
+			let ready = false;
+			const resize = () => {
+				if (ready || preview.videoWidth === 0) return;
+				// Later media resizes must preserve the page's display choice.
+				ready = true;
+				preview.style.display = "block";
+			};
+			effect.event(preview, "loadedmetadata", resize);
+			effect.event(preview, "resize", resize);
 			preview.srcObject = new MediaStream([Video.normalizeSource(source).track]);
-			preview.style.display = "block";
 
 			effect.cleanup(() => {
 				preview.srcObject = null;
@@ -630,8 +641,9 @@ export default class MoqPublish extends HTMLElement {
 	}
 
 	/**
-	 * Whether audio is muted, mirrored by the `muted` attribute. Muting stops encoding; `capture`
-	 * decides whether the microphone stays open.
+	 * Whether audio is muted, mirrored by the `muted` attribute. Muting sends nothing while keeping the
+	 * rendition live, so unmuting reaches every listener at once; `capture` decides whether the
+	 * microphone stays open.
 	 */
 	get muted(): boolean {
 		return this.controls.muted.peek();

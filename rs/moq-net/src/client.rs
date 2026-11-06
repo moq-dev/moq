@@ -331,6 +331,8 @@ impl Client {
 				token: self.setup_token.clone().filter(|_| version.has_auth()),
 				ietf: self.extensions.ietf && version.has_ietf(),
 				implementation: self.implementation(),
+				// Filled by `lite::start` from the attached origin handles.
+				route_key: None,
 			}
 		} else {
 			lite::Setup::default()
@@ -371,6 +373,7 @@ impl Client {
 				bandwidth: self.allocator(),
 				viewers,
 				peer_implementation: start.peer_implementation,
+				datagrams_unrouted: start.datagrams_unrouted,
 			},
 		))
 	}
@@ -461,6 +464,7 @@ impl Client {
 						bandwidth: self.allocator(),
 						viewers: self.viewers(),
 						peer_implementation,
+						datagrams_unrouted: None,
 					},
 				)));
 			}
@@ -562,6 +566,7 @@ impl Client {
 				bandwidth: self.allocator(),
 				viewers,
 				peer_implementation: start.peer_implementation,
+				datagrams_unrouted: start.datagrams_unrouted,
 			},
 		))
 	}

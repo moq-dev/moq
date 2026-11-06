@@ -36,13 +36,13 @@ const websocket = certificate === "websocket";
 if (!websocket) install();
 
 const origin = new Moq.Origin.Producer();
-const broadcastPublication = origin.createBroadcast(Moq.Path.from("room"));
-const broadcast = broadcastPublication.broadcast;
+const broadcastRoute = origin.route(Moq.Path.from("room"), { hidden: true });
+const broadcast = broadcastRoute.broadcast;
 // No publisher limit, so the open `low` group stays the receiver's to give up on rather than
 // going stale here once a newer group arrives.
 const low = broadcast.createTrack("low", { maxAge: null });
 const high = broadcast.createTrack("high", { maxAge: null });
-broadcastPublication.announce();
+broadcastRoute.announce();
 
 const session = await Moq.Connection.connect({
 	url: new URL(address),

@@ -46,7 +46,18 @@ impl Backlog {
 	}
 
 	pub fn expire(&mut self, now: Timestamp) {
-		while self.deadline().is_some_and(|deadline| deadline <= Duration::from(now)) {
+		self.expire_within(now, self.retention);
+	}
+
+	/// [`expire`](Self::expire), also dropping what a subscriber `budget` behind the live edge
+	/// would find stale.
+	pub fn expire_within(&mut self, now: Timestamp, budget: Duration) {
+		let age = budget.min(self.retention);
+		while self
+			.frames
+			.front()
+			.is_some_and(|first| Duration::from(first.end).saturating_add(age) <= Duration::from(now))
+		{
 			self.evict();
 		}
 	}
@@ -57,6 +68,7 @@ impl Backlog {
 		Duration::from(end).saturating_add(self.retention) <= Duration::from(now)
 	}
 
+	#[cfg(any(feature = "capture", test))]
 	pub fn deadline(&self) -> Option<Duration> {
 		Some(Duration::from(self.frames.front()?.end).saturating_add(self.retention))
 	}

@@ -135,7 +135,7 @@ fn via_a(announce: &origin::RouteEvent) -> bool {
 		| origin::RouteEvent::Takeover { announce: a, .. } => &a.route,
 		origin::RouteEvent::End(_) => return false,
 	};
-	route.hops.iter().any(|hop| *hop == Hop::new(A).unwrap())
+	route.hops().iter().any(|hop| *hop == Hop::new(A).unwrap())
 }
 
 struct Topology {
@@ -144,7 +144,7 @@ struct Topology {
 	cdn_b: origin::Producer,
 	subscriber: origin::Producer,
 	track: track::Producer,
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 	_pushes: Vec<MockPair>,
 	s_to_a: Option<MockPair>,
 	s_to_b: MockPair,
@@ -161,11 +161,11 @@ impl Topology {
 		let cdn_b = produce_origin(3);
 		let subscriber = produce_origin(4);
 
-		let broadcast = publisher.create_broadcast("live").unwrap();
-		let track = broadcast.create_track("video", timed()).unwrap();
-		broadcast
-			.announce(origin::Route::default().with_instance(moq_net::Instance::random(), 0))
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
+		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+		broadcast.announce().unwrap();
 
 		let pushes = vec![
 			push(lite, &publisher, &cdn_a).await,

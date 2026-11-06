@@ -13,8 +13,8 @@ use crate::sign::{PublicKey, SecretKey};
 
 /// The publishing side of a signed broadcast.
 ///
-/// Mints a fresh instance, so a restart never signs a sequence an earlier instance already signed.
-/// Announce the wrapped broadcast with [`Self::instance`] on its route.
+/// Signs under the instance of the route that serves it, which a route mints fresh, so a restart
+/// never signs a sequence an earlier instance already signed.
 #[derive(Clone)]
 pub struct Producer {
 	inner: moq_net::broadcast::Producer,
@@ -26,18 +26,25 @@ pub struct Producer {
 }
 
 impl Producer {
-	/// Sign `inner` with `key`, as the broadcast at application path `path`.
-	pub fn new(inner: moq_net::broadcast::Producer, key: SecretKey, path: moq_net::Path) -> Self {
+	/// Sign `inner` with `key`, as the broadcast at application path `path` served under
+	/// `instance`: the instance of the route that serves it, such as
+	/// [`Route::instance`](moq_net::origin::Route::instance) for the route that owns `inner`.
+	pub fn new(
+		inner: moq_net::broadcast::Producer,
+		key: SecretKey,
+		path: moq_net::Path,
+		instance: moq_net::Instance,
+	) -> Self {
 		Self {
 			inner,
 			key,
 			path,
-			instance: moq_net::Instance::random(),
+			instance,
 			next: Arc::default(),
 		}
 	}
 
-	/// The instance this producer signs under, to announce on the broadcast's route.
+	/// The instance this producer signs under: the route's that serves the broadcast.
 	pub fn instance(&self) -> &moq_net::Instance {
 		&self.instance
 	}

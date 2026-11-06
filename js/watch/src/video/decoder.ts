@@ -20,7 +20,7 @@ import { base64ToBytes } from "../base64";
 import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feedback";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 import { supportCacheKey } from "../support-probe";
-import type { Sync } from "../sync";
+import type { Sync, Track } from "../sync";
 import { type DecoderConfig, decoderConfigKey, type PlaybackIdentity, playbackIdentity } from "./config";
 import { caughtUp, renditionJitter, switchJitter } from "./playhead";
 import { Recovery } from "./recovery";
@@ -111,6 +111,8 @@ export class Decoder {
 	readonly source: Source;
 	/** The clock that schedules playback. */
 	readonly sync: Sync;
+	// Video's hold on the clock: its target, startup span, arrivals, and paced frames.
+	readonly #clock: Track;
 
 	readonly #out: DecoderOutput = {
 		error: new Signal<Error | undefined>(undefined),
@@ -178,9 +180,7 @@ export class Decoder {
 		const startup = this.#signals.computed((effect) => {
 			if (!effect.get(this.in.enabled)) return undefined;
 			if (effect.get(this.source.pending)) return null;
-			// A held disabled rendition has no frames coming, so startup does not wait on it.
-			const config = effect.get(this.source.out.config);
-			if (!config || config.enabled === false) return undefined;
+			if (!effect.get(this.source.out.config)) return undefined;
 			const active = effect.get(this.#active);
 			if (!active) return null;
 			const timestamp = effect.get(active.first);
@@ -188,7 +188,8 @@ export class Decoder {
 			const ranges = effect.get(active.buffered);
 			return startupSpan(ranges, timestamp);
 		});
-		this.#signals.cleanup(this.sync.register(target, startup));
+		this.#clock = this.sync.track({ target, startup });
+		this.#signals.cleanup(() => this.#clock.close());
 		this.#identity = this.#signals.computed((effect) => {
 			const config = effect.get(this.source.out.config);
 			return config ? playbackIdentity(config) : undefined;
@@ -256,6 +257,8 @@ export class Decoder {
 			// Close the active track when disabled (e.g. paused or not visible).
 			// The pending cleanup won't do this because it was already promoted to #active.
 			this.#active.set(undefined);
+			// Nothing arrives until it resumes, so its arrivals stop holding the clock.
+			this.#clock.reset();
 			// Pause and visibility keep the picture while the broadcast is active. Disconnecting
 			// the broadcast or removing every rendition releases it.
 			if (!broadcast || !effect.get(broadcast.out.active) || (enabled && !track)) {
@@ -268,6 +271,7 @@ export class Decoder {
 		if (!active || !key) {
 			// Going offline should clear the last rendered frame.
 			this.#active.set(undefined);
+			this.#clock.reset();
 			this.#clearCurrentFrame();
 			this.#out.buffered.set([]);
 			return;
@@ -293,6 +297,7 @@ export class Decoder {
 		// Start a new pending effect.
 		let pending: Rendition | undefined = new Rendition({
 			sync: this.sync,
+			clock: this.#clock,
 			broadcast: active,
 			track,
 			name: Catalog.track(track, identity),
@@ -316,6 +321,8 @@ export class Decoder {
 			pending.close();
 			pending = undefined;
 			this.#pending.set(undefined);
+			// With no active rendition left, nothing holds video's timeline.
+			if (!this.#active.peek()) this.#clock.reset();
 		});
 		effect.set(this.#pending, { track, catalog: broadcast.out.catalog });
 
@@ -364,6 +371,8 @@ export class Decoder {
 			if (!error) return;
 			this.#recordError(active, error);
 			this.#active.set(undefined);
+			// A pending replacement carries video's timeline on; its parked frames must stay.
+			if (!this.#pending.peek()) this.#clock.reset();
 			this.#clearCurrentFrame();
 		});
 
@@ -474,6 +483,8 @@ export class Decoder {
 
 interface DecoderTrackProps {
 	sync: Sync;
+	// Video's hold on the clock, shared by every rendition: their frames are one timeline.
+	clock: Track;
 	// Set for the max-delay decoder of a rendition with a catalog `warmup`: its start and its
 	// lateness budget reach this much further, and it leaves the shared clock and stats alone.
 	warmup?: Getter<Milli>;
@@ -504,6 +515,7 @@ interface DecoderTrackProps {
 class DecoderTrack {
 	error = new Signal<Error | undefined>(undefined);
 	sync: Sync;
+	clock: Track;
 	broadcast: Moq.Broadcast.Consumer;
 	track: string;
 	name: string;
@@ -574,6 +586,7 @@ class DecoderTrack {
 
 	constructor(props: DecoderTrackProps) {
 		this.sync = props.sync;
+		this.clock = props.clock;
 		this.broadcast = props.broadcast;
 		this.track = props.track;
 		this.name = props.name;
@@ -608,7 +621,7 @@ class DecoderTrack {
 	#receive(frame: Container.ReceivedFrame, accepted: boolean): void {
 		if (!this.#drives) return;
 		const timestamp = Milli.fromMicro(frame.timestamp as Micro);
-		const late = accepted && this.sync.received(timestamp, frame.arrival);
+		const late = accepted && this.clock.received(timestamp, frame.arrival);
 		const bytes = frame.payload.byteLength;
 		const arrived = arrivedAt(frame.arrival);
 		this.tally?.arrive(this.key, timestamp, arrived);
@@ -676,14 +689,14 @@ class DecoderTrack {
 					// Render something while we wait for the sync to catch up, unless the frame is
 					// already off the timeline: WebCodecs can hold a picture past a reset or a skip.
 					// Only the min-delay decoder posts one: the max-delay picture shows on the clock.
-					if (this.#drives && this.frame.peek() === undefined && this.sync.presentable(timestamp)) {
+					if (this.#drives && this.frame.peek() === undefined && this.clock.presentable(timestamp)) {
 						this.group = group;
 						this.frame.set(frame.clone());
 					}
 
 					// Resolves at once when the delay is "instant". Closing the track releases it.
 					// Check the captured signal again in case cancellation followed the resolved wait.
-					if (!(await this.sync.wait(timestamp, signal)) || signal.aborted) return;
+					if (!(await this.clock.wait(timestamp, signal)) || signal.aborted) return;
 					// The max-delay decoder restarts its timeline after the clock did, so the clock's own
 					// epoch cannot tell its leftover pictures apart.
 					if (this.#generation !== generation) return;
@@ -903,7 +916,7 @@ class DecoderTrack {
 		try {
 			// Wait on the first picture, which is due the moment startup releases, so decoding
 			// resumes with the whole floor still ahead instead of once it has played out.
-			await effect.race(refill, this.sync.wait(first, waiting.abort));
+			await effect.race(refill, this.clock.wait(first, waiting.abort));
 		} finally {
 			waiting.close();
 		}
@@ -930,8 +943,9 @@ class DecoderTrack {
 		this.#buffered.set([]);
 		this.#generation++;
 		this.start.set(group);
-		// The min-delay decoder restarts the shared clock. The max-delay one reads the same end later.
-		if (this.#drives) this.sync.reset();
+		// The min-delay decoder restarts video's timeline, leaving audio's. The max-delay one reads the
+		// same end later.
+		if (this.#drives) this.clock.reset();
 		this.#resetPending = true;
 	}
 

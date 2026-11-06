@@ -178,8 +178,7 @@ export const VideoConfigSchema = z.object({
 	bitrate: z.optional(u53Schema),
 
 	// Whether this rendition may be selected. When false, no frames are coming and a consumer
-	// should not select it, though one may keep it selected while no enabled alternative exists.
-	// Default: true, so publishers only write it when false.
+	// must not select it. Default: true, so publishers only write it when false.
 	enabled: z.optional(z.boolean()),
 
 	// Higher is preferred: a player selects among the highest preference it can decode, then by

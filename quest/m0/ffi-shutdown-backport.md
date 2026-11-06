@@ -2,17 +2,14 @@
 
 ## Goal
 
-The `release` line's hand-written wrappers that gained `drain()` in
-[moq-dev/moq#6642](https://github.com/moq-dev/moq/pull/6642) are on their
-registries:
+The `release` line's hand-written Dart wrapper that gained `drain()` in
+[moq-dev/moq#6642](https://github.com/moq-dev/moq/pull/6642), Dart
+[`moq`](https://pub.dev/packages/moq) 0.1.1, is on pub.dev.
 
-- Python [`moq-rs`](https://pypi.org/project/moq-rs/) 0.5.2 on PyPI.
-- Dart [`moq`](https://pub.dev/packages/moq) 0.1.1 on pub.dev.
-
-Check: each registry lists the version. Both versions are already set on
-`release` (`py/moq-rs/pyproject.toml`, `dart/moq/pubspec.yaml`), so this needs
-a publish, not code. Each publish is outward-facing, so the maintainer runs it;
-agents do not push tags, dispatch workflows, or bump versions.
+Check: pub.dev lists the version. It is already set on `release`
+(`dart/moq/pubspec.yaml`), so this needs a tag push, not code. The publish
+is outward-facing, so the maintainer runs it; agents do not push tags,
+dispatch workflows, or bump versions.
 
 ## Plan
 
@@ -23,33 +20,16 @@ from `gh workflow run release-kt-lib.yml --ref release`
 ([run](https://github.com/moq-dev/moq/actions/runs/40904381781), after
 [moq-dev/moq#7026](https://github.com/moq-dev/moq/pull/7026)'s fix).
 
-Decided 2026-10-30 (maintainer): `moq-rs` 0.5.2 and Dart `moq` 0.1.1 ship in
-the next combined patch cut on `release`, which the maintainer cuts.
+Python [`moq-rs`](https://pypi.org/project/moq-rs/) 0.5.2 reached PyPI on
+2026-10-31.
 
-Python: `workflow_run` runs `main`'s `release-py.yml` against the `release`
-checkout, which lacked `.github/actions/nix`. The maintainer picked the
-backport of that action to `release`, which landed in
-[moq-dev/moq#7421](https://github.com/moq-dev/moq/pull/7421). The
-`moq-ffi-v0.4.20` tag's chained run
-([failed](https://github.com/moq-dev/moq/actions/runs/41038297141)) came before
-that merge, and a re-run checks out the same tag commit, so it fails again.
-`release`'s `release-py.yml` has no `workflow_dispatch` until the maintainer's
-cut carries the manual retry trigger from `main`. What publishes 0.5.2 now:
-
-- The next `moq-ffi-v*` tag at a `release` commit with the nix action, which
-  chains Release Py FFI into Release Py.
-- A `release` push touching `py/moq-rs/**`, `.github/workflows/release-py.yml`,
-  or `sh/gh/release.sh`: the push gate publishes, since `release`'s moq-ffi
-  0.4.20 is tagged and on PyPI.
-
-After that cut adopts the trigger, the maintainer can retry with
-`gh workflow run release-py.yml --ref release`; the same published-wrapper
-and published-FFI gates apply.
+Decided 2026-10-30 (maintainer): Dart `moq` 0.1.1 ships in the next combined
+patch cut on `release`, which the maintainer cuts.
 
 Dart: pub.dev publishes `moq` only from a `moq-dart-v*` tag, and only
 `moq-dart-v0.1.0` exists. Pushing `moq-dart-v0.1.1` at `release`'s head
 publishes 0.1.1 and exercises the unproven path in
-[A Dart tag publishes unattended](/quest/m2/release/dart-publish.md). Decided
+[A Dart tag publishes unattended](/quest/m3/release/dart-publish.md). Decided
 2026-10-30 (maintainer): push it during the combined cut, not before.
 
 Decided 2026-11-04 (maintainer, /quest-unblock): ✅ cut the combined patch
@@ -63,4 +43,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [A Dart tag publishes unattended](/quest/m2/release/dart-publish.md) - proves the `moq-dart-v*` tag path this publish uses
+- [A Dart tag publishes unattended](/quest/m3/release/dart-publish.md) - proves the `moq-dart-v*` tag path this publish uses

@@ -337,11 +337,12 @@ impl Consumer {
 		waiter: &kio::Waiter,
 	) -> Poll<Option<Position>> {
 		loop {
-			let (generation, copy) = {
+			// One read, so a copy served just before the front concluded is the one polled.
+			let (generation, copy, end) = {
 				let route = self.state.read();
-				(route.generation, route.copy.clone())
+				let end = route.phase.terminal().then(|| route.phase.end().cloned());
+				(route.generation, route.copy.clone(), end)
 			};
-			let end = self.end();
 			// A replacement copy can start below what an earlier one reported.
 			match copy.map(|copy| copy.poll_largest_after(seen, bounds, waiter)) {
 				Some(Poll::Ready(Some(largest))) => return Poll::Ready(Some(largest)),
@@ -349,6 +350,25 @@ impl Consumer {
 				Some(Poll::Pending) if end.is_some() => return Poll::Pending,
 				Some(Poll::Ready(None)) | None if end.is_some() => return Poll::Ready(None),
 				_ => {}
+			}
+			ready!(self.poll_changed(generation, waiter));
+		}
+	}
+
+	/// Ready once the serving copy holds a group. Stays pending once the front settled on a
+	/// last copy without one.
+	pub(super) fn poll_grouped(&self, waiter: &kio::Waiter) -> Poll<()> {
+		loop {
+			// One read, so a copy served just before the front concluded is the one polled.
+			let (generation, copy, terminal) = {
+				let route = self.state.read();
+				(route.generation, route.copy.clone(), route.phase.terminal())
+			};
+			if copy.is_some_and(|copy| copy.poll_grouped(waiter).is_ready()) {
+				return Poll::Ready(());
+			}
+			if terminal {
+				return Poll::Pending;
 			}
 			ready!(self.poll_changed(generation, waiter));
 		}

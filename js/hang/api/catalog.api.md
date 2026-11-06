@@ -173,13 +173,6 @@ export const ContainerSchema: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscr
 	kind: string;
 }>>]>>;
 
-export type Contribution = infer<typeof ContributionSchema>;
-
-export const ContributionSchema: ZodMiniObject<{
-	broadcast: ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>;
-	instance: ZodMiniOptional<ZodMiniType<ReferenceInstance, string, $ZodTypeInternals<ReferenceInstance, string>>>;
-}, $strip>;
-
 export const DEFAULT_FORMAT: Format;
 
 export class DuplicateRendition extends Error {
@@ -203,6 +196,13 @@ export const FORMATS: readonly ["hang", "msf"];
 export type Format = typeof FORMATS[number];
 
 export type Hex = infer<typeof hexSchema>;
+
+export type Include = infer<typeof IncludeSchema>;
+
+export const IncludeSchema: ZodMiniObject<{
+	broadcast: ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>;
+	instance: ZodMiniOptional<ZodMiniType<ReferenceInstance, string, $ZodTypeInternals<ReferenceInstance, string>>>;
+}, $strip>;
 
 export const InstanceSchema: ZodMiniType<ReferenceInstance, string>;
 
@@ -330,13 +330,13 @@ export const RootSchema: ZodMiniObject<{
 			track?: string | undefined;
 		}>, Record<string, unknown>>>;
 	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;
-	contributions: ZodMiniOptional<ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
-		broadcast: RelativeBroadcast;
-		instance?: ReferenceInstance | undefined;
-	}>, Record<string, unknown>>>>;
 	echo: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniObject<{
 		path: ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>;
 	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;
+	include: ZodMiniOptional<ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
+		broadcast: RelativeBroadcast;
+		instance?: ReferenceInstance | undefined;
+	}>, Record<string, unknown>>>>;
 	json: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniObject<{
 		tracks: ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
 			[x: string]: unknown;

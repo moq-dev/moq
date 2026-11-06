@@ -18,7 +18,7 @@ import {
 	TimestampMismatch,
 } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
-import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
+import { HopSchema, isAnonymous, MAX_HOPS, RouteInfo, UNKNOWN_HOP } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import { hooks } from "../internal.ts";
 import { CACHE_EXPIRY, GRACE } from "../ledger.ts";
@@ -45,7 +45,7 @@ import {
 	SubscribeStart,
 	SubscribeUpdate,
 } from "./subscribe.ts";
-import { Minted, SUBSCRIBE_SETUP_TIMEOUT_MS, Subscriber } from "./subscriber.ts";
+import { Minted, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { Version, versionName } from "./version.ts";
 
@@ -204,8 +204,8 @@ test("an announce consumer closed while its stream opens sends nothing on it", a
 });
 
 test("a local empty hop chain is not anonymous", () => {
-	expect(isAnonymous(Route.default)).toBe(false);
-	expect(isAnonymous({ hops: [UNKNOWN_HOP], cost: Route.default.cost })).toBe(true);
+	expect(isAnonymous(RouteInfo.default)).toBe(false);
+	expect(isAnonymous({ hops: [UNKNOWN_HOP], cost: RouteInfo.default.cost })).toBe(true);
 });
 
 test("a max-length chain plus withheld responder is dropped", async () => {
@@ -1185,13 +1185,14 @@ test.each([
 	await stuck.aborted;
 });
 
-// A setup that outlived its deadline is over: its TRACK stream is reset, along with the SUBSCRIBE
-// sent beside it, and the subscription is not registered again.
+// An unanswered setup waits as long as it is wanted. Once its last subscriber leaves it is over: its
+// TRACK stream is reset along with the SUBSCRIBE sent beside it,
+// and the subscription is not registered again.
 test.each([
 	["lite-05 subscribe waiting on the TRACK_INFO", Version.DRAFT_05],
 	["lite-06 subscribe waiting on the TRACK_INFO", Version.DRAFT_06],
 	["lite-07 subscribe waiting on the TRACK_INFO", Version.DRAFT_07],
-] as const)("a %s that times out leaves nothing behind", async (_, version) => {
+] as const)("a %s abandoned before its answer leaves nothing behind", async (_, version) => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
@@ -1202,8 +1203,9 @@ test.each([
 		await opened(0);
 		await streams[0].reading;
 
-		await clock.advance(Nano.fromMilli(Milli(SUBSCRIBE_SETUP_TIMEOUT_MS)));
-		await track.closed;
+		await clock.advance(Nano.fromMilli(Milli(3_600_000)));
+		expect(track.closed.peek()).toBeUndefined();
+		track.close();
 
 		await streams[0].aborted;
 		await streams[1].aborted;
@@ -1238,13 +1240,10 @@ test("a lite subscribe waiting on a stream slot for the SUBSCRIBE outlasts the d
 		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 		await opened(0);
 		await streams[0].reading;
-		// TRACK_INFO lands halfway, so the SUBSCRIBE open's own deadline is still ahead when the
-		// setup deadline fires.
-		await clock.advance(Nano.fromMilli(Milli(SUBSCRIBE_SETUP_TIMEOUT_MS / 2)));
 		await answerTrackInfo(streams[0]);
 		await opened(1);
 
-		await clock.advance(Nano.fromMilli(Milli(3 * SUBSCRIBE_SETUP_TIMEOUT_MS)));
+		await clock.advance(Nano.fromMilli(Milli(3_600_000)));
 		expect(track.closed.peek()).toBeUndefined();
 
 		streams[1].release();
@@ -1313,9 +1312,9 @@ test("a lite subscribe whose readers leave while it waits for a stream gives up 
 	}
 });
 
-// A SUBSCRIBE write blocked on flow control may never let the setup settle, so the deadline
+// A SUBSCRIBE write blocked on flow control may never let the setup settle, so abandonment
 // lets go of the held TRACK stream without waiting for it.
-test("a lite subscribe whose SUBSCRIBE write stalls past the deadline closes its TRACK stream", async () => {
+test("a lite subscribe abandoned while its SUBSCRIBE write stalls closes its TRACK stream", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
@@ -1328,9 +1327,10 @@ test("a lite subscribe whose SUBSCRIBE write stalls past the deadline closes its
 		await answerTrackInfo(streams[0]);
 		await (await opened(1)).writing;
 
-		await clock.advance(Nano.fromMilli(Milli(SUBSCRIBE_SETUP_TIMEOUT_MS)));
-		await track.closed;
-		await streams[0].aborted;
+		await clock.advance(Nano.fromMilli(Milli(3_600_000)));
+		expect(track.closed.peek()).toBeUndefined();
+		track.close();
+		await streams[0].finished;
 	} finally {
 		subscriber.close();
 		warn.mockRestore();
@@ -2428,7 +2428,7 @@ test.each(
 	const runResponses = internal.runResponses.bind(internal);
 	const responses = spyOn(internal, "runResponses").mockImplementation((stream, entry) => {
 		counters.push(
-			...[entry.track.subscription, entry.track.demand().wanted, hooks.producerLargest(entry.track)].map(
+			...[hooks.requested(entry.track), entry.track.demand().wanted, hooks.producerLargest(entry.track)].map(
 				countChanges,
 			),
 		);
@@ -3296,36 +3296,40 @@ test("announce init is the initial set", async () => {
 	subscriber.close();
 });
 
-// The FETCH shares the TRACK's deadline, which only runs while neither stream waits to open:
-// waiting for credit is waiting its turn, so only an unanswered request fails.
-test.each(["answer", "credit"] as const)("FETCH shares the TRACK deadline while waiting for %s", async (stage) => {
+// A FETCH waits for its answer, or a slot a transport queued it for, until its caller leaves.
+test.each(["answer", "credit"] as const)("FETCH waiting for %s ends with its caller", async (stage) => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const { quic, streams, opened } = fakeSession(stage === "credit" ? [1] : []);
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const cancel = new AbortController();
 	let failure: unknown;
-	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0n).catch((err: unknown) => {
-		failure = err;
-	});
+	const fetch = subscriber
+		.fetchGroup(Path.from("room"), "video", 0n, { signal: cancel.signal })
+		.catch((err: unknown) => {
+			failure = err;
+		});
 	try {
 		await opened(0);
 		await streams[0].reading;
-		await clock.advance(Nano.fromMilli(Milli(5_000)));
 		await answerTrackInfo(streams[0], Version.DRAFT_07);
 		await opened(1);
-		if (stage === "credit") {
-			await clock.advance(Nano.fromMilli(Milli(30_000)));
-			expect(failure).toBeUndefined();
-			streams[1].release();
-		}
-		await streams[1].reading;
-		// Opened alongside the TRACK, the FETCH shares its budget; one that waited for credit
-		// gets a whole budget from its open.
-		await clock.advance(Nano.fromMilli(Milli(stage === "credit" ? 9_999 : 4_999)));
+		if (stage === "answer") await streams[1].reading;
+		await clock.advance(Nano.fromMilli(Milli(3_600_000)));
 		expect(failure).toBeUndefined();
-		await clock.advance(Nano.fromMilli(Milli(1)));
+		const reason = new Error("left");
+		cancel.abort(reason);
 		await fetch;
-		expect((failure as StreamError).code).toBe(StreamCode.ControlTimeout);
+		expect(failure).toBe(reason);
+		// Credit granted once the caller has left can't send the FETCH.
+		await clock.advance(Nano.zero);
+		if (stage === "credit") streams[1].release();
+		if (stage === "credit") {
+			await drainReactions();
+			expect(streams[1].written).toEqual([]);
+		} else {
+			await streams[1].aborted;
+		}
 	} finally {
 		subscriber.close();
 		installed.close();

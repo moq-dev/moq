@@ -28,8 +28,7 @@ async function received(reader: TrackSubscriber, count: number): Promise<bigint[
 test("a widened maxDelay re-offers what the publisher skipped below the start", async () => {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const origin = new OriginProducer();
-	const publication = origin.createBroadcast(Path.from("room"));
-	publication.announce();
+	const publication = origin.route(Path.from("room"));
 	const broadcast = publication.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	// One group per second, so a budget picks how far back a reader reaches.
@@ -71,8 +70,7 @@ for (const [version, alpn] of [
 	test(`a widened maxDelay ${reoffers ? "re-offers" : "keeps dropped"} the groups reported stale on ${alpn}`, async () => {
 		const pair = createMockTransportPair(alpn);
 		const origin = new OriginProducer();
-		const publication = origin.createBroadcast(Path.from("room"));
-		publication.announce();
+		const publication = origin.route(Path.from("room"));
 		const broadcast = publication.broadcast;
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 		const write = (sequence: number, millis: number) => {
@@ -120,8 +118,7 @@ for (const [version, alpn] of [
 test("a widening keeps a bounded lite-07 subscription open for the stale groups it re-offers", async () => {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const origin = new OriginProducer();
-	const publication = origin.createBroadcast(Path.from("room"));
-	publication.announce();
+	const publication = origin.route(Path.from("room"));
 	const broadcast = publication.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const write = (sequence: number, millis: number) => {
@@ -169,8 +166,7 @@ test("a widening keeps a bounded lite-07 subscription open for the stale groups 
 test("an update keeping the budget drops the stale groups again on lite-07", async () => {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const origin = new OriginProducer();
-	const publication = origin.createBroadcast(Path.from("room"));
-	publication.announce();
+	const publication = origin.route(Path.from("room"));
 	const broadcast = publication.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const write = (sequence: number, millis: number) => {

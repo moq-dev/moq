@@ -235,7 +235,7 @@ review stand as recorded, numbered as in its body:
 
 Decided 2026-10-27 (maintainer): this runs after the range count cost work,
 which finished in [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542),
-and before [Rust groups by start](/quest/m1/time-addressing/model.md), which
+and before [Rust groups by start](/quest/m2/time-addressing/model.md), which
 requires it because runs keyed by group sequence convert mechanically to
 starts.
 
@@ -329,4 +329,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - fills the cache miss an evicted run leaves
+- [Subscribe ranges](/quest/m2/subscribe-ranges/README.md) - fills the cache miss an evicted run leaves

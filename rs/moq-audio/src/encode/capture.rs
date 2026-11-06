@@ -844,8 +844,11 @@ mod tests {
 		}
 	}
 
-	async fn subscribe(broadcast: &moq_net::broadcast::Consumer) -> Track<Wire> {
-		let subscriber = broadcast.track("audio").unwrap().subscribe(None).await.unwrap();
+	/// Subscribe with a `max` delay, which bounds how much retained history the encoder replays.
+	async fn subscribe(broadcast: &moq_net::broadcast::Consumer, max: Duration) -> Track<Wire> {
+		let subscription =
+			moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(max));
+		let subscriber = broadcast.track("audio").unwrap().subscribe(subscription).await.unwrap();
 		Track::new(subscriber, Wire(Kind::Audio))
 	}
 
@@ -874,8 +877,8 @@ mod tests {
 				let (capture, samples) = capture::test_source();
 				let (origin, origin_driver) = moq_net::origin::Producer::new(Default::default());
 				tokio::spawn(moq_net::time::run(origin_driver));
-				let publication = origin.create_broadcast("live").unwrap();
-				publication.announce(Default::default()).unwrap();
+				let publication = origin.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+				publication.announce().unwrap();
 				let mut broadcast = publication.broadcast().clone();
 				let catalog =
 					moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -999,7 +1002,7 @@ mod tests {
 				mix(960);
 				let capture_task = tokio::task::spawn_local(capture.run());
 				let encode_task = tokio::spawn(driver.run());
-				let mut track = subscribe(&broadcast).await;
+				let mut track = subscribe(&broadcast, Duration::ZERO).await;
 				for (index, gap) in [false, true, false].into_iter().enumerate() {
 					let captured = epoch + Duration::from_millis([100, 200, 220][index]);
 					let value = (index + 1) as f32 / 8.0;
@@ -1109,7 +1112,7 @@ mod tests {
 				samples.try_push(Ok(block)).unwrap();
 				observer.read().await.unwrap();
 				tokio::task::yield_now().await;
-				let mut track = subscribe(&broadcast).await;
+				let mut track = subscribe(&broadcast, Duration::from_secs(30)).await;
 				let encoded = packet(&mut track).await;
 				assert_eq!(encoded.timestamp.as_micros(), 100_000);
 				control.stop();
@@ -1166,7 +1169,7 @@ mod tests {
 						// Past the track's 30 s max_age.
 						tokio::time::advance(Duration::from_secs(31)).await;
 					}
-					let mut track = subscribe(&broadcast).await;
+					let mut track = subscribe(&broadcast, Duration::from_secs(30)).await;
 					if expire {
 						// Only fresh capture after a restart reaches the subscriber.
 						control.start();
@@ -1224,7 +1227,7 @@ mod tests {
 					assert!(!control.is_finished());
 					control.start();
 					let track = if subscribe_late {
-						let mut track = subscribe(&broadcast).await;
+						let mut track = subscribe(&broadcast, Duration::from_secs(30)).await;
 						assert_eq!(packet(&mut track).await.timestamp.as_micros(), 100_000);
 						Some(track)
 					} else {
@@ -1270,7 +1273,7 @@ mod tests {
 				let mut observer = capture.consume();
 				let capture_task = tokio::task::spawn_local(capture.run());
 				let encode_task = tokio::spawn(driver.run());
-				let mut track = subscribe(&broadcast).await;
+				let mut track = subscribe(&broadcast, Duration::ZERO).await;
 				// The original consumer is still selected and encoding.
 				let mut block = Samples::plain(vec![0.25; 1920], false);
 				block.captured = Some(epoch + Duration::from_millis(100));
@@ -1305,7 +1308,7 @@ mod tests {
 					let mut observer = replacement.consume();
 					let capture_task = tokio::task::spawn_local(replacement.run());
 					let encode_task = tokio::spawn(driver.run());
-					let mut track = subscribe(&broadcast).await;
+					let mut track = subscribe(&broadcast, Duration::ZERO).await;
 					// The replacement starts at live capture, so let the driver select it first.
 					status(&mut control, Status::Live).await;
 					// Ten whole 10 ms resampler chunks plus a partial one.
@@ -1376,7 +1379,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn dropping_an_unfinished_driver_cancels_its_track() {
 		let Fixture { driver, broadcast, .. } = fixture(false);
-		let mut track = subscribe(&broadcast).await;
+		let mut track = subscribe(&broadcast, Duration::ZERO).await;
 		drop(driver);
 		let error = track.read().await.unwrap_err();
 		assert!(format!("{error:?}").contains("Cancel"), "{error:?}");
@@ -1399,7 +1402,7 @@ mod tests {
 					let mut observer = capture.consume();
 					let capture_task = tokio::task::spawn_local(capture.run());
 					let encode_task = tokio::spawn(driver.run());
-					let mut track = subscribe(&broadcast).await;
+					let mut track = subscribe(&broadcast, Duration::ZERO).await;
 					let now = Instant::now();
 					let (captured, expected) = match placement {
 						0 => (Some(now - Duration::from_millis(40)), 960_000),

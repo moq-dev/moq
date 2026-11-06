@@ -39,20 +39,20 @@ async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 
 // Produce a broadcast and publish it to the origin.
 async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
-	// Create a broadcast on the origin. A broadcast is a collection of tracks,
-	// but in this example we'll only create one. The live route announces it.
+	// Create a route on the origin, which announces a new broadcast. A broadcast is a
+	// collection of tracks, but in this example we'll only create one.
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	// If you put "alice" here, it would be published as "anon/chat-example/alice".
-	let broadcast = origin.create_broadcast("").context("failed to create broadcast")?;
-	broadcast
-		.announce(Default::default())
+	// Dropping the route withdraws the broadcast, so keep it for as long as it should be live.
+	let route = origin
+		.route("", moq_net::origin::RouteOptions::default())
 		.context("failed to announce broadcast")?;
 
 	// Create a track that we'll insert into the broadcast.
 	// A track is a series of groups representing a live stream.
 	// Frames are stamped with the wall clock, so the track declares a timescale.
 	let info = moq_tokio::moq_net::track::Info::default().with_timescale(moq_tokio::moq_net::Timescale::MILLI);
-	let mut track = broadcast.create_track("chat", info)?;
+	let mut track = route.broadcast().create_track("chat", info)?;
 
 	// Create a group.
 	// Each group is independent and the newest group(s) will be prioritized.
@@ -85,8 +85,8 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	// Sleep before exiting and closing the broadcast.
 	kio::clock::sleep(tokio::time::Duration::from_secs(10)).await;
 
-	// End the broadcast. Dropping the producer does the same; closing is explicit.
-	broadcast.close();
+	// End the broadcast. Dropping the route withdraws it; closing ends it for good.
+	route.broadcast().close();
 
 	Ok(())
 }

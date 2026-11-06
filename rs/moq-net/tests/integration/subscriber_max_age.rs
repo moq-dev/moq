@@ -39,8 +39,11 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 		let viewer = origin(3);
 		let _upstream = peer(version, &publisher, &relay).await;
 		let _downstream = peer(version, &relay, &viewer).await;
-		let broadcast = publisher.create_broadcast("live").unwrap();
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let mut source = broadcast
+			.broadcast()
 			.create_track(
 				"catalog",
 				track::Info::default().with_timescale(moq_net::Timescale::MILLI),
@@ -49,7 +52,7 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 		let mut group = source.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, b"catalog").unwrap();
 		group.finish().unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 		let consumer = viewer.consume();
 		let remote = consumer
 			.follow("live", None)
@@ -111,8 +114,11 @@ async fn relay_forwards_the_smallest_stated_min_delay() {
 	let _upstream = peer(lite07, &publisher, &relay).await;
 	let _modern = peer(lite07, &relay, &modern).await;
 	let _legacy = peer(lite06, &relay, &legacy).await;
-	let broadcast = publisher.create_broadcast("live").unwrap();
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let mut source = broadcast
+		.broadcast()
 		.create_track(
 			"catalog",
 			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
@@ -121,7 +127,7 @@ async fn relay_forwards_the_smallest_stated_min_delay() {
 	let mut group = source.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, b"catalog").unwrap();
 	group.finish().unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let cache = |origin: &origin::Producer| {
 		let origin = origin.clone();

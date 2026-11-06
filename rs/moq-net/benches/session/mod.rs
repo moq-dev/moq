@@ -594,7 +594,7 @@ struct Cluster<B: Backend> {
 	tracks: Vec<track::Producer>,
 	/// One datagram track per broadcast, indexed like [`path`], for datagram shapes only.
 	datagrams: Vec<datagram::Producer>,
-	_broadcasts: Vec<origin::Publication>,
+	_broadcasts: Vec<origin::Route>,
 	_origins: Vec<origin::Producer>,
 	_pairs: Vec<Pair>,
 	next_hop: u64,
@@ -652,17 +652,21 @@ impl<B: Backend> Cluster<B> {
 			this.pools.push(pool);
 			for index in 0..shape.broadcasts {
 				let broadcast = origin
-					.publish(path(publisher * shape.broadcasts + index), Default::default())
+					.route(
+						path(publisher * shape.broadcasts + index),
+						origin::RouteOptions::default(),
+					)
 					.unwrap();
 				this.tracks.push(
 					broadcast
+						.broadcast()
 						.create_track(TRACK, timed().with_compress(shape.compress))
 						.unwrap(),
 				);
 				if shape.datagrams {
 					let info = datagram::Info::default().with_timescale(moq_net::Timescale::MILLI);
 					this.datagrams
-						.push(broadcast.create_datagrams(DATAGRAMS, info).unwrap());
+						.push(broadcast.broadcast().create_datagrams(DATAGRAMS, info).unwrap());
 				}
 				this._broadcasts.push(broadcast);
 			}
@@ -1484,7 +1488,7 @@ impl Dash {
 struct DashRoom<B: Backend> {
 	_cluster: Cluster<B>,
 	tracks: Vec<track::Producer>,
-	_broadcasts: Vec<origin::Publication>,
+	_broadcasts: Vec<origin::Route>,
 	dash: Viewer,
 	payload: Bytes,
 }
@@ -1512,10 +1516,10 @@ impl<B: Backend> DashRoom<B> {
 			for project in 0..shape.projects {
 				let path = format!(".stats/{project}/node/{node}");
 				let broadcast = B::origin(&cluster.relays[node])
-					.publish(path.as_str(), Default::default())
+					.route(path.as_str(), origin::RouteOptions::default())
 					.unwrap();
 				for name in &names {
-					tracks.push(broadcast.create_track(name.as_str(), timed()).unwrap());
+					tracks.push(broadcast.broadcast().create_track(name.as_str(), timed()).unwrap());
 				}
 				broadcasts.push(broadcast);
 				paths.push(path);
@@ -1667,7 +1671,7 @@ impl<B: Backend> ChurnRoom<B> {
 			false,
 		)
 		.await;
-		let published = &cluster._broadcasts[0];
+		let published = cluster._broadcasts[0].broadcast();
 		let held: Vec<_> = (0..shape.held).map(|i| format!("held{i}")).collect();
 		let tracks: Vec<_> = held
 			.iter()
@@ -1885,7 +1889,7 @@ pub(crate) fn withdrawal<B: Backend>(c: &mut Criterion) {
 							let live: Vec<_> = (0..broadcasts)
 								.map(|i| {
 									B::origin(&cluster.relays[i % (relays - 1)])
-										.publish(path(i), Default::default())
+										.route(path(i), origin::RouteOptions::default())
 										.unwrap()
 								})
 								.collect();

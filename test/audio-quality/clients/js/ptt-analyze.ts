@@ -129,6 +129,8 @@ const summary = {
 	captures: result.captures,
 	encoders: result.encoders,
 	subscriptions: result.subscriptions,
+	catalog: result.catalog,
+	playback: result.playback,
 	unencoded: result.submitted.filter((frame) => !encoded.has(frame.timestamp)).length,
 	unsent: result.encoded.filter((frame) => !sent.has(frame.timestamp)).length,
 	// An ideal path loses nothing, so every written frame must reach the listener.
@@ -137,8 +139,8 @@ const summary = {
 await Bun.write(join(directory, "summary.json"), JSON.stringify(summary, null, 2));
 // The report: the latency and its parts, and the completeness the run gates on. Per-press detail
 // stays in summary.json.
-const { latency, path, delay, unencoded, unsent, unreceived } = summary;
-console.log(JSON.stringify({ latency, path, delay, unencoded, unsent, unreceived }, null, 2));
+const { latency, path, delay, unencoded, unsent, unreceived, playback } = summary;
+console.log(JSON.stringify({ latency, path, delay, unencoded, unsent, unreceived, playback }, null, 2));
 
 const failures: string[] = [];
 if (presses.some((press, i) => (i === 0 || i >= 8) && press.audible === null)) {
@@ -147,6 +149,9 @@ if (presses.some((press, i) => (i === 0 || i >= 8) && press.audible === null)) {
 if (result.captures.length) failures.push("capture reopened");
 if (result.encoders.length) failures.push("an encoder was created again");
 if (result.subscriptions.length) failures.push("subscription reopened");
+if (result.catalog.length) failures.push("a mute disabled or dropped the rendition");
+// The silence between presses is declared, so it is neither an underrun nor a stall.
+if (result.playback.underruns || result.playback.stalls) failures.push("playback underran or stalled");
 if (presses.some((press) => !press.submitted || !press.firstEncoded)) failures.push("utterance head was not encoded");
 if (summary.unencoded || summary.unsent) failures.push("submitted audio was not encoded and sent completely");
 if (presses.some((press) => !press.firstReceived)) failures.push("utterance head was not received");

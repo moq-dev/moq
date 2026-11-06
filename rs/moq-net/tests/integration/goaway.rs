@@ -369,11 +369,19 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		// Server publishes a broadcast with one live track.
 		let pub_origin = produce_origin(Hop::random());
-		let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-		broadcast.announce(moq_net::origin::Route::default()).expect("announce");
-		let track = broadcast.create_track("video", timed()).expect("create track");
+		let broadcast = pub_origin
+			.route("test", moq_net::origin::RouteOptions::hidden())
+			.expect("create broadcast");
+		broadcast.announce().expect("announce");
+		let track = broadcast
+			.broadcast()
+			.create_track("video", timed())
+			.expect("create track");
 		// A second track with content ready for the subscribe opened after the GOAWAY.
-		let audio = broadcast.create_track("audio", timed()).expect("create track");
+		let audio = broadcast
+			.broadcast()
+			.create_track("audio", timed())
+			.expect("create track");
 		let mut audio_group = audio.append_group().expect("append group");
 		audio_group
 			.write_frame(moq_net::Timestamp::ZERO, b"audio".as_ref())
@@ -484,8 +492,10 @@ async fn goaway_keeps_new_subscribes_moq_transport_22() {
 async fn goaway_drains_routes(version: Version) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		let pub_origin = produce_origin(Hop::random());
-		let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-		broadcast.announce(moq_net::origin::Route::default()).expect("announce");
+		let broadcast = pub_origin
+			.route("test", moq_net::origin::RouteOptions::hidden())
+			.expect("create broadcast");
+		broadcast.announce().expect("announce");
 
 		let sub_origin = produce_origin(Hop::random());
 
@@ -497,7 +507,7 @@ async fn goaway_drains_routes(version: Version) {
 		let sub = sub_origin.consume();
 		let route = crate::support::announced(&sub, "test").await;
 		assert_ne!(
-			route.cost,
+			route.cost(),
 			moq_net::origin::Cost::DRAIN,
 			"a healthy route must not start out draining"
 		);
@@ -515,7 +525,7 @@ async fn goaway_drains_routes(version: Version) {
 			else {
 				continue;
 			};
-			if update.prefix.as_str() == "test" && update.route.cost == moq_net::origin::Cost::DRAIN {
+			if update.prefix.as_str() == "test" && update.route.cost() == moq_net::origin::Cost::DRAIN {
 				break;
 			}
 		}

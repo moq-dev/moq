@@ -309,9 +309,8 @@ for (const [alpn, version] of [
 		const pair = createMockTransportPair(alpn);
 		const fin = holdFins(pair.server, "uni");
 		const origin = new Producer();
-		const broadcastPublication = origin.createBroadcast(Path.from("room"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
+		const broadcastRoute = origin.route(Path.from("room"));
+		const broadcast = broadcastRoute.broadcast;
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		const url = new URL("https://localhost/test");
 		const client = new Connection({ url, quic: pair.client, version });
@@ -371,9 +370,8 @@ for (const [alpn, version] of [
 			deliverWhole(pair.client);
 			if (overtaken === "fin") finAfterClose(pair.client);
 			const origin = new Producer();
-			const broadcastPublication = origin.createBroadcast(Path.from("room"));
-			const broadcast = broadcastPublication.broadcast;
-			broadcastPublication.announce();
+			const broadcastRoute = origin.route(Path.from("room"));
+			const broadcast = broadcastRoute.broadcast;
 			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 			const url = new URL("https://localhost/test");
 			const client = new Connection({ url, quic: pair.client, version });
@@ -423,9 +421,8 @@ for (const [alpn, version] of [
 			const pair = createMockTransportPair(alpn);
 			finAfterClose(pair.client);
 			const origin = new Producer();
-			const broadcastPublication = origin.createBroadcast(Path.from("room"));
-			const broadcast = broadcastPublication.broadcast;
-			broadcastPublication.announce();
+			const broadcastRoute = origin.route(Path.from("room"));
+			const broadcast = broadcastRoute.broadcast;
 			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 			const url = new URL("https://localhost/test");
 			const client = new Connection({ url, quic: pair.client, version });
@@ -468,9 +465,8 @@ for (const [alpn, version] of [
 		test(`a peer close finishes a FIN'd track over qmux ${versionName(version)}`, async () => {
 			const pair = qmuxPair();
 			const origin = new Producer();
-			const broadcastPublication = origin.createBroadcast(Path.from("room"));
-			const broadcast = broadcastPublication.broadcast;
-			broadcastPublication.announce();
+			const broadcastRoute = origin.route(Path.from("room"));
+			const broadcast = broadcastRoute.broadcast;
 			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 			const url = new URL("https://localhost/test");
 			const client = new Connection({ url, quic: pair.client, version });
@@ -509,9 +505,8 @@ for (const [alpn, version] of [
 async function servedRawSubscription(alpn: string = ALPN_07_WIP, version: Version = Version.DRAFT_07) {
 	const pair = createMockTransportPair(alpn);
 	const origin = new Producer();
-	const broadcastPublication = origin.createBroadcast(Path.from("room"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("room"));
+	const broadcast = broadcastRoute.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const server = new Connection({
 		url: new URL("https://relay.example/"),
@@ -628,9 +623,8 @@ test("close waits for a served FETCH to be acknowledged", async () => {
 	const pair = createMockTransportPair(ALPN_05);
 	const fin = holdFins(pair.server, "incoming-bidi");
 	const origin = new Producer();
-	const broadcastPublication = origin.createBroadcast(Path.from("room"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("room"));
+	const broadcast = broadcastRoute.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = producer.appendGroup();
 	group.writeFrame(textFrame("last"));
@@ -681,9 +675,8 @@ test("close waits for a request served while withdrawals are in flight", async (
 	const fin = holdFins(pair.server, "incoming-bidi");
 	const source = new Producer();
 	const destination = new Producer();
-	const broadcastPublication = source.createBroadcast(Path.from("room"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = source.route(Path.from("room"));
+	const broadcast = broadcastRoute.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = producer.appendGroup();
 	group.writeFrame(textFrame("last"));
