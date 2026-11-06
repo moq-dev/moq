@@ -159,6 +159,7 @@ slow-group-bench:
 # Sweep a hang consumer's buffered groups, frames per group, publishers and players across arrival orders.
 buffered-bench:
     bun install --frozen-lockfile
+    bunx tsc --noEmit --project hang/bench/tsconfig.json
     bun hang/bench/buffered.ts
 
 # Sweep the audio jitter estimator's held history against in-order and reordered frames.
