@@ -11416,10 +11416,7 @@ mod tests {
 		let _nested = scoped
 			.forward("x", RouteInfo::default().with_via(origin(8)), None)
 			.unwrap();
-		assert_eq!(
-			announced.expect_next_active("room/x").await.source(),
-			Source::Peer(8)
-		);
+		assert_eq!(announced.expect_next_active("room/x").await.source(), Source::Peer(8));
 	}
 
 	/// A caller that only polls with `try_next` still gets a held update once its
@@ -11725,10 +11722,7 @@ mod tests {
 			.with_hops(hops(&[7]))
 			.with_via(origin(7));
 		let _forwarded = peer.forward("room", route.clone(), None).unwrap();
-		assert_eq!(
-			announced.expect_next_active("room").await.source(),
-			Source::Peer(7)
-		);
+		assert_eq!(announced.expect_next_active("room").await.source(), Source::Peer(7));
 
 		// The newest identical route wins, so the local twin takes over.
 		let local = producer.forward("room", route, None).unwrap();
@@ -11738,10 +11732,7 @@ mod tests {
 		}
 
 		drop(local);
-		assert_eq!(
-			announced.expect_next_active("room").await.source(),
-			Source::Peer(7)
-		);
+		assert_eq!(announced.expect_next_active("room").await.source(), Source::Peer(7));
 	}
 
 	#[kio::test]
@@ -11821,10 +11812,7 @@ mod tests {
 				None,
 			)
 			.unwrap();
-		assert_eq!(
-			everyone.expect_next_active("core").await.source(),
-			Source::Peer(7)
-		);
+		assert_eq!(everyone.expect_next_active("core").await.source(), Source::Peer(7));
 		toward_core.assert_next_wait();
 
 		let _mesh = peer
@@ -11834,10 +11822,7 @@ mod tests {
 				None,
 			)
 			.unwrap();
-		assert_eq!(
-			toward_core.expect_next_active("mesh").await.source(),
-			Source::Peer(8)
-		);
+		assert_eq!(toward_core.expect_next_active("mesh").await.source(), Source::Peer(8));
 
 		// A path both an upstream and a mesh peer reach: the upstream route is
 		// cheaper, yet the upstream view selects the mesh peer's.
@@ -11858,10 +11843,7 @@ mod tests {
 				None,
 			)
 			.unwrap();
-		assert_eq!(
-			toward_core.expect_next_active("both").await.source(),
-			Source::Peer(8)
-		);
+		assert_eq!(toward_core.expect_next_active("both").await.source(), Source::Peer(8));
 		drop(mesh);
 		toward_core.expect_next_ended("both").await;
 

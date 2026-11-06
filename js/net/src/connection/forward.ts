@@ -7,7 +7,7 @@
 import { Milli, Nano } from "@moq/clock";
 import { type Dispose, race } from "@moq/signals";
 import type * as Announce from "../announced.ts";
-import { type WireRoute, routesEqual } from "../hop.ts";
+import { routesEqual, type WireRoute } from "../hop.ts";
 import { coveringPrefixes } from "../internal.ts";
 import type { Producer as OriginProducer, Route } from "../origin.ts";
 import * as Path from "../path.ts";

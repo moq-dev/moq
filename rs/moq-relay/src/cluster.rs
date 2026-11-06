@@ -3938,7 +3938,10 @@ mod tests {
 				.expect("origin closed");
 			if update.prefix.as_str() == "from-fingerprint" {
 				// The acceptor marks a LAN peer the same way.
-				assert_eq!(update.route.source(), origin::Source::Peer(fingerprint.origin.hop().get()));
+				assert_eq!(
+					update.route.source(),
+					origin::Source::Peer(fingerprint.origin.hop().get())
+				);
 				break;
 			}
 		}

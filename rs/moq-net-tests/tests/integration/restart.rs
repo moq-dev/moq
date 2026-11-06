@@ -187,11 +187,7 @@ impl Worker {
 			moq_net::fuzz::requests_route(
 				&origin,
 				moq_net::Path::from_static("pool"),
-				moq_net::fuzz::route_info(
-					[],
-					0,
-					Some((format!("worker-{hop}").parse().unwrap(), 0)),
-				),
+				moq_net::fuzz::route_info([], 0, Some((format!("worker-{hop}").parse().unwrap(), 0))),
 			)
 			.unwrap(),
 		);

@@ -339,11 +339,7 @@ impl Launch {
 		// moq-transport threads concrete origins through the publisher/subscriber.
 		// An unset half gets an empty origin: an empty publish origin announces
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
-		let publish = publish.unwrap_or_else(|| {
-			origin::Producer::empty()
-				.consume()
-				.with_stats(stats.clone())
-		});
+		let publish = publish.unwrap_or_else(|| origin::Producer::empty().consume().with_stats(stats.clone()));
 		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty().with_stats(stats.clone()));
 		// Counted for the peak only: stream credit bounds them.
 		let subscriptions =

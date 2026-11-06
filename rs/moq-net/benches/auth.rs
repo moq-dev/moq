@@ -255,7 +255,8 @@ fn waiting(c: &mut Criterion) {
 						config.update_hold = Duration::ZERO;
 						let (publish, driver) = origin::Producer::new(config);
 						harness::spawn(driver);
-						let (receive, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
+						let (receive, driver) =
+							origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 						harness::spawn(driver);
 						let mut pair = runtime.block_on(pair(
 							version.parse().unwrap(),

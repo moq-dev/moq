@@ -296,11 +296,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	// An unset half gets an empty origin: an empty publish origin announces nothing
 	// (and answers the peer's announce-interest with an empty set), and an empty
 	// subscribe origin issues no ANNOUNCE_PLEASE.
-	let publish = publish.unwrap_or_else(|| {
-		origin::Producer::empty()
-			.consume()
-			.with_stats(stats.clone())
-	});
+	let publish = publish.unwrap_or_else(|| origin::Producer::empty().consume().with_stats(stats.clone()));
 	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty().with_stats(stats.clone()));
 	// Before lite-07 the peer can't ask for hidden routes, so a client publishes none of
 	// them unless its publish half opted in, and a socket endpoint behind it is

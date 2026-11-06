@@ -21,7 +21,7 @@ import {
 } from "../error.ts";
 import { type Fill, fillChanged, type Requests, wantedRuns } from "../fill.ts";
 import type * as netGroup from "../group.ts";
-import { Cost, type WireRoute, routesEqual, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import { finalSequence, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import type { Lister } from "../listing.ts";

@@ -155,7 +155,10 @@ async fn split_horizon(version: &str, [publisher_hop, subscriber_hop]: [NonZeroU
 	broadcast.announce().unwrap();
 
 	let publisher_hop = learned_hop(&dialer, "room").await;
-	assert_ne!(publisher_hop, 0, "an anonymous dial still needs a hop, or its routes echo");
+	assert_ne!(
+		publisher_hop, 0,
+		"an anonymous dial still needs a hop, or its routes echo"
+	);
 
 	// The other edge learns the namespace, attributed to a different hop, so the
 	// two dials are not one endpoint.

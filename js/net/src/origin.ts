@@ -16,7 +16,7 @@ import * as announce from "./announced.ts";
 import type { Credential } from "./auth.ts";
 import * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
-import { type Cost, WireRoute, routesEqual } from "./hop.ts";
+import { type Cost, routesEqual, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
 import {
 	compareRouteCandidates,

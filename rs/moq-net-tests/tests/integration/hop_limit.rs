@@ -52,9 +52,7 @@ async fn hop_limit_bounds_receive_and_send() {
 		let mut received = watch(relay.consume().routes());
 		let mut sent = watch(sink.consume().routes());
 		kio::clock::sim::idle().await;
-		let route = |count: u64| {
-			moq_net::fuzz::route_info(100..100 + count, 0, None)
-		};
+		let route = |count: u64| moq_net::fuzz::route_info(100..100 + count, 0, None);
 		let _long = forward(&source, "long", route(2));
 		let _boundary = forward(&source, "boundary", route(1));
 		let short = forward(&source, "short", route(0));
@@ -114,9 +112,7 @@ async fn hop_limit_falls_back_to_a_forwardable_route() {
 		let mut sent = watch(sink.consume().routes());
 		kio::clock::sim::idle().await;
 
-		let route = |first: u64, count: u64, cost: u64| {
-			moq_net::fuzz::route_info(first..first + count, cost, None)
-		};
+		let route = |first: u64, count: u64, cost: u64| moq_net::fuzz::route_info(first..first + count, cost, None);
 		// Three hops at the relay once the sender is appended: in the cap, but full.
 		let _cheap = forward(&far, "room", route(100, 2, 1));
 		// Two hops at the relay, so it has room for the relay's own.
