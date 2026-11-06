@@ -147,9 +147,10 @@ decision above and the PR's `## Waiting` item on out-of-order creation:
   replacement; merging with the stale report left in place.
 - ✅ **`append_group` is an implicit skip** (refinement, same session): it
   means "the next group", so the producer declares it won't go back, and it
-  skips every sequence below it, down to the lowest group created since the
-  last append, that it never produced, as if `skip_groups` were called on
-  them: a drop there becomes a skip, and they are then final. Today
+  skips every sequence below it that it never produced, from just past the
+  previous append (before the first append, from the lowest group created),
+  as if `skip_groups` were called on them: a drop there becomes a skip, and
+  they are then final. Today
   `append_group` leaves no gap of its own, so this only fires on holes earlier
   `create_group` calls left below the head; under time addressing it names
   the span between consecutive starts. `create_group` stays non-committal,

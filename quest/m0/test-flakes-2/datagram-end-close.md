@@ -47,8 +47,16 @@ between that evidence and `recv()`, so the case still covers the close that
 lands after the end. Raising the microtask count, adding a wall-clock wait, or
 retrying the test are not fixes.
 
-## Waiting
+## Related
 
-- moq-dev/moq: reproduce the case under load with the fix in place, then
-  remove the `test.skip` quarantine and show the repeated multi-file run
-  passing.
+- [moq-dev/moq#8000](https://github.com/moq-dev/moq/pull/8000), open, edits
+  this case where it still runs on `main`: it stubs `Budget.prototype.poll` so the
+  publisher's write budget never yields a host task, and raises the
+  microtask count to 10000. Stubbing the budget removes the suspected
+  outstanding `yieldNow`, so check whether it is the cause before choosing
+  this fix; the raised count alone is not one. Whichever lands second merges
+  the other's hunk.
+- [moq-dev/moq#7981](https://github.com/moq-dev/moq/pull/7981), a draft,
+  quarantines only the lite-06 case and adds its own quest at this same
+  path. Whichever lands second keeps one quest and this whole-case
+  quarantine, since lite-05 failed too.

@@ -1207,8 +1207,8 @@ impl TrackState {
 
 	/// Settle an append at `sequence`: skip every sequence below it that this track's own
 	/// publisher never produced, from just past its previous append (before the first, from
-	/// the lowest it produced), since appending says it will not go back. The skip replaces a drop given there, as
-	/// [`Self::skip_groups`] does.
+	/// the lowest it produced), since appending says it will not go back. The skip replaces a
+	/// drop given there, as [`Self::skip_groups`] does.
 	fn appended(&mut self, sequence: u64) {
 		if let Some(from) = self.appended.or(self.produced.iter().next().map(|run| run.start))
 			&& from < sequence
@@ -3647,8 +3647,8 @@ impl Producer {
 	/// Appending says the producer will not go back, so it skips every sequence below the new
 	/// group that it never produced, from just past its previous append (before the first,
 	/// from the lowest group it created), as [`Self::skip_groups`] would, replacing any drop
-	/// there. Those sequences are then final: creating one is refused. Appending alone never leaves such a gap; one left by out-of-order
-	/// [`Self::create_group`] calls is what it names.
+	/// there. Those sequences are then final: creating one is refused. Appending alone never
+	/// leaves such a gap; one left by out-of-order [`Self::create_group`] calls is what it names.
 	///
 	/// The broadcast remembers nothing of an earlier producer of the name, so a replacement
 	/// starts at 0. Since a name always means the same content, a replacement continues past
