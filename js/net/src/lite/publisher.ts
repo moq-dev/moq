@@ -543,12 +543,15 @@ export class Publisher {
 	#trackInfo = new WeakMap<broadcast.Consumer, Map<string, TrackInfoEntry>>();
 
 	// Lite-05/06: the datagram tracks this session's answered TRACKs hold, read from each
-	// answer on. The requester reads TRACK_INFO as the publisher accepting the name, but the
-	// datagrams flow on the SUBSCRIBE it sends alongside, which can arrive later. That
-	// SUBSCRIBE reads from a clone of the hold, keeping its position, rather than from its own
-	// arrival, which would lose what was written in between. The requester keeps its TRACK open
-	// until the SUBSCRIBE has a response, so the hold outlasts its arrival.
-	#heldDatagrams = new WeakMap<broadcast.Consumer, Map<string, Set<datagram.Consumer>>>();
+	// answer on, oldest first. The requester reads TRACK_INFO as the publisher accepting the
+	// name, but the datagrams flow on the SUBSCRIBE it sends alongside, which can arrive later.
+	// That SUBSCRIBE reads from a clone of the hold, keeping its position, rather than from its
+	// own arrival, which would lose what was written in between. The requester keeps its TRACK
+	// open until the SUBSCRIBE has a response, so the hold outlasts its arrival. A hold is
+	// matched by the track it reads, not by name, so one left on a replaced track never stands
+	// in for the current one. It sits at the lowest priority, keeping a position without
+	// outranking the subscriptions that read the track.
+	#heldDatagrams = new Set<datagram.Consumer>();
 
 	/**
 	 * Creates a new Publisher instance.
@@ -1093,7 +1096,8 @@ export class Publisher {
 			// Serve datagrams concurrently with groups whenever the transport carries them
 			// (the writer exists iff so). No group fallback: otherwise they simply aren't sent.
 			if (this.#datagramWriter && !hasDatagramTracks(this.version)) {
-				legacy = this.#held(front, msg.track)?.clone() ?? wireOf(front).liveDatagrams(msg.track);
+				const live = wireOf(front).liveDatagrams(msg.track);
+				legacy = live && this.#adopt(live);
 				if (legacy) {
 					legacy.setPriority(msg.priority);
 					datagrams = this.#runDatagrams(legacy, { sub: msg.id, stamp })
@@ -1846,7 +1850,7 @@ export class Publisher {
 			if (hasDatagrams(this.version) && !hasDatagramTracks(this.version)) {
 				datagrams ??= wireOf(front).liveDatagrams(msg.track);
 			}
-			if (datagrams) this.#holdDatagrams(front, datagrams, hold.signal);
+			if (datagrams) this.#holdDatagrams(datagrams, hold.signal);
 			if (watch.revoked()) throw unauthorized(msg.broadcast);
 			await info.encode(stream.writer, this.version);
 			console.debug(`track info: broadcast=${msg.broadcast} track=${msg.track}`);
@@ -1928,33 +1932,25 @@ export class Publisher {
 		}
 	}
 
-	// Hold `consumer` of `front` for the SUBSCRIBE alongside until `hold` aborts.
-	#holdDatagrams(front: broadcast.Consumer, consumer: datagram.Consumer, hold: AbortSignal) {
-		let names = this.#heldDatagrams.get(front);
-		if (!names) {
-			names = new Map();
-			this.#heldDatagrams.set(front, names);
-		}
-		let held = names.get(consumer.name);
-		if (!held) {
-			held = new Set();
-			names.set(consumer.name, held);
-		}
-		const set = held;
-		set.add(consumer);
+	// Hold `consumer` for the SUBSCRIBE alongside until `hold` aborts.
+	#holdDatagrams(consumer: datagram.Consumer, hold: AbortSignal) {
+		consumer.setPriority(-128);
+		this.#heldDatagrams.add(consumer);
 		const release = () => {
-			set.delete(consumer);
-			if (set.size === 0 && names.get(consumer.name) === set) names.delete(consumer.name);
+			this.#heldDatagrams.delete(consumer);
 			consumer.close();
 		};
 		if (hold.aborted) release();
 		else hold.addEventListener("abort", release, { once: true });
 	}
 
-	// The datagram track `name` of `front` an answered TRACK holds, if any.
-	#held(front: broadcast.Consumer, name: string): datagram.Consumer | undefined {
-		const held = this.#heldDatagrams.get(front)?.get(name);
-		return held?.values().next().value;
+	// `consumer`, or a clone of the newest hold of the same track, read from that hold's answer on.
+	#adopt(consumer: datagram.Consumer): datagram.Consumer {
+		let newest: datagram.Consumer | undefined;
+		for (const held of this.#heldDatagrams) if (hooks.datagramSameTrack(held, consumer)) newest = held;
+		if (!newest) return consumer;
+		consumer.close();
+		return newest.clone();
 	}
 
 	// Resolve (and cache) a track's immutable TRACK_INFO by asking the application.
@@ -2073,7 +2069,7 @@ export class Publisher {
 		stream: Stream,
 		signal: AbortSignal,
 	): Promise<void> {
-		const track = this.#held(front, msg.track)?.clone() ?? front.datagrams(msg.track);
+		const track = this.#adopt(front.datagrams(msg.track));
 		track.setPriority(msg.priority);
 		const updates = (async () => {
 			for (;;) {

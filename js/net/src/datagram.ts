@@ -244,6 +244,7 @@ export class Consumer {
 		consume = (name, state, cursor, priority) => new Consumer(name, state, cursor, priority);
 		hooks.datagramPriority = (consumer) => consumer.#priority;
 		hooks.datagramClosed = (consumer) => consumer.#closed;
+		hooks.datagramSameTrack = (a, b) => a.#state === b.#state;
 	}
 
 	/** The track's publisher properties, once accepted. */
