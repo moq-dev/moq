@@ -655,11 +655,6 @@ impl Schedule {
 		}
 	}
 
-	/// Change the send-ahead window while preserving the running clock and queued units.
-	pub fn set_window(&mut self, window: Duration) {
-		self.window = slot(window.as_nanos());
-	}
-
 	/// Open the timeline for a reader that has no program clock yet: no placed unit goes out
 	/// until a PCR interval has followed the first tables ([`OPENING`]), so the reader can
 	/// place every one. A timeline that continues a clock the reader already has needs none.

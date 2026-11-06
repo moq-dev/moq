@@ -12,7 +12,7 @@
 //! the instant it asserts. Video is carried as Annex-B, audio as ADTS AAC.
 //!
 //! Every frame is muxed a fixed delay after its release time, its decode time less its
-//! send-ahead ([`Export::with_delay`]), so tracks interleave in one order whatever the
+//! send-ahead ([`Export::new`]), so tracks interleave in one order whatever the
 //! arrival skew between them, and the output keeps the source's pace.
 //!
 //! Video flows through `ExportSource`, which normalizes every H.264/H.265
@@ -1607,10 +1607,42 @@ where
 	/// The caller chooses the catalog format and rendition selection on any [`Stream`].
 	/// The stream remains owned until the export is dropped or follows another broadcast;
 	/// concrete catalog consumers release their subscription and decoder when they end.
-	pub fn new(source: crate::Source, catalog: S) -> Self {
+	/// Mux each frame this long after its release time, like an SRT receiver's TSBPD: its
+	/// decode time less its send-ahead.
+	///
+	/// The send-ahead comes out of the same budget. A frame may go out up to the delay
+	/// ahead of its decode time, as far as its PID's decoder buffer holds and as early as the
+	/// receiver's buffers admit, so a heavy passage rides the slots before it. Its release
+	/// time is that far before its decode time, so it is muxed just as the first slot it may
+	/// ride is laid, and each slot goes out the delay after its own time on the source's
+	/// clock rather than a delay later still.
+	///
+	/// The clock is acquired before anything goes out: frames are held until every expected
+	/// track has delivered (two delays at most) and a track starts a new group, or for a delay
+	/// at most once all have. The track sent latest against its release time sets the clock,
+	/// so a joiner runs at the delay from its first output and every frame has the whole delay
+	/// to arrive in. A source that sends its video its send-ahead
+	/// early, as a TS mux does, is trailed by the delay; one that sends every track at its
+	/// decode time, by the delay and the video's send-ahead. The output then keeps the
+	/// source's pace and muxes every track in `(release time, PID)` order whatever the
+	/// arrival skew between them. A frame that arrives after its deadline is dropped, and a
+	/// video track that dropped one resumes at its next keyframe. A source whose clock runs
+	/// further off ours than 13818-1 lets the PCR follow fails the export once it has used half
+	/// the delay, where a brief network stall only drops what it made late. A stalled group is
+	/// skipped once it falls half the delay behind the newest content (see
+	/// [`Consumer`](crate::container::Consumer)), so the group after it still arrives with
+	/// the other half to spare.
+	///
+	/// With a multiplex rate, a frame that cannot arrive by its decode time fails the export,
+	/// as does video whose HRD declares a buffer delay past the delay. Use
+	/// [`Duration::ZERO`], which holds nothing and sends each frame by its decode time.
+	pub fn new(source: crate::Source, catalog: S, delay: Duration) -> Self {
+		let mut program = Program::new(source, catalog);
+		program.delay = delay;
+		program.schedule = Schedule::new(delay);
 		Self {
-			program: Program::new(source, catalog),
-			jitter: jitter::Buffer::new(Duration::ZERO),
+			program,
+			jitter: jitter::Buffer::new(delay),
 			held: None,
 			pending: None,
 			next_program: 1,
@@ -1646,47 +1678,11 @@ where
 		self
 	}
 
-	/// Mux each frame this long after its release time, like an SRT receiver's TSBPD: its
-	/// decode time less its send-ahead.
-	///
-	/// The send-ahead comes out of the same budget. A frame may go out up to the delay
-	/// ahead of its decode time, as far as its PID's decoder buffer holds and as early as the
-	/// receiver's buffers admit, so a heavy passage rides the slots before it. Its release
-	/// time is that far before its decode time, so it is muxed just as the first slot it may
-	/// ride is laid, and each slot goes out the delay after its own time on the source's
-	/// clock rather than a delay later still.
-	///
-	/// The clock is acquired before anything goes out: frames are held until every expected
-	/// track has delivered (two delays at most) and a track starts a new group, or for a delay
-	/// at most once all have. The track sent latest against its release time sets the clock,
-	/// so a joiner runs at the delay from its first output and every frame has the whole delay
-	/// to arrive in. A source that sends its video its send-ahead
-	/// early, as a TS mux does, is trailed by the delay; one that sends every track at its
-	/// decode time, by the delay and the video's send-ahead. The output then keeps the
-	/// source's pace and muxes every track in `(release time, PID)` order whatever the
-	/// arrival skew between them. A frame that arrives after its deadline is dropped, and a
-	/// video track that dropped one resumes at its next keyframe. A source whose clock runs
-	/// further off ours than 13818-1 lets the PCR follow fails the export once it has used half
-	/// the delay, where a brief network stall only drops what it made late. A stalled group is
-	/// skipped once it falls half the delay behind the newest content (see
-	/// [`Consumer`](crate::container::Consumer)), so the group after it still arrives with
-	/// the other half to spare.
-	///
-	/// With a multiplex rate, a frame that cannot arrive by its decode time fails the export,
-	/// as does video whose HRD declares a buffer delay past the delay. Defaults to
-	/// [`Duration::ZERO`], which holds nothing and sends each frame by its decode time.
-	pub fn with_delay(mut self, delay: Duration) -> Self {
-		self.program.delay = delay;
-		self.jitter.set_delay(delay);
-		self.program.schedule.set_window(delay);
-		self
-	}
-
 	/// Get the next muxed frame.
 	///
 	/// Each [`Frame`] carries one slice of the PCR grid in `payload`: the clock
 	/// packets that slice opens with, followed by the muxed bytes belonging to it.
-	/// With a [delay](Self::with_delay), each slice is handed over at its time on the
+	/// With a [delay](Self::new), each slice is handed over at its time on the
 	/// jitter buffer's clock, which follows the source's, so a sink writes it as it
 	/// comes. It is stamped with the media time that slice starts at, for a transport
 	/// that stamps its own delivery, and `keyframe` marks the slice a video keyframe

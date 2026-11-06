@@ -960,7 +960,9 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 
 	kio::clock::sleep_until(start + arm.join).await;
 	let source = crate::source::announced(&consumer).await;
-	let mut export = (open_ts(source, crate::catalog::CatalogFormat::Hang).await.unwrap()).with_delay(DELAY);
+	let mut export = open_ts(source, crate::catalog::CatalogFormat::Hang, DELAY)
+		.await
+		.unwrap();
 	let mut frames = Vec::new();
 	let mut samples = Vec::new();
 	while let Ok(next) = kio::clock::timeout(STALL, export.next()).await {
