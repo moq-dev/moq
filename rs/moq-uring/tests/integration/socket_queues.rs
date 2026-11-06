@@ -42,8 +42,10 @@
 //! just rs test -p moq-uring --release -E 'test(benchmark_socket_queues)' --run-ignored only --success-output immediate
 //! ```
 //!
-//! `SOCKET_QUEUES_RUNS` sets the rounds (3 by default); each round runs every
-//! cell once, so repeated cells interleave rather than run back to back.
+//! Each sweep axis is a separate, serial test so the full grid does not exceed
+//! nextest's per-test hang budget. `SOCKET_QUEUES_RUNS` sets the rounds (3 by
+//! default); each round runs every cell of that axis on both paths, so repeated
+//! cells interleave rather than run back to back.
 
 #![expect(
 	clippy::disallowed_methods,
@@ -232,9 +234,25 @@ fn cells() -> Vec<Cell> {
 	cells
 }
 
-#[test]
-#[ignore = "benchmark: run explicitly; prints a table"]
-fn benchmark_socket_queues() {
+mod benchmark_socket_queues {
+	macro_rules! axes {
+		($($axis:ident),+ $(,)?) => {
+			$(
+				#[test]
+				#[ignore = "benchmark: run explicitly; prints a table"]
+				fn $axis() {
+					super::benchmark(stringify!($axis));
+				}
+			)+
+		};
+	}
+
+	axes!(
+		default, queue, stall, pool, workers, flows, gso, contend, overload, path
+	);
+}
+
+fn benchmark(axis: &str) {
 	let runs = std::env::var("SOCKET_QUEUES_RUNS")
 		.ok()
 		.map(|runs| runs.parse::<usize>().expect("SOCKET_QUEUES_RUNS is a count"))
@@ -250,7 +268,7 @@ fn benchmark_socket_queues() {
 		 socket_drops,path_drops,unattributed,snmp_rcvbuf_errors,backlog_drops,enobufs,peak_queue_kib,p50_ms,p99_ms,max_ms,\
 		 goodput_mbps,rx_cpu_us_per_dgram"
 	);
-	let cells = cells();
+	let cells: Vec<_> = cells().into_iter().filter(|cell| cell.axis == axis).collect();
 	for run in 0..runs {
 		for path in &paths {
 			for cell in &cells {
