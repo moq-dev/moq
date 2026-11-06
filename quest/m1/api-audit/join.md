@@ -7,7 +7,8 @@ called `join`, after the catalog's `media.join` it feeds, in every language
 and for both media:
 
 - `@moq/publish`: `Video.Encoder`'s `keyframeInterval` and `Audio.Encoder`'s
-  `groupDuration` (and `el.audio.groupDuration`) become `join`.
+  `groupDuration` (and `el.audio.groupDuration`) become `join`, and
+  `Rendition.joinInterval` becomes `Rendition.join`.
 - `moq-video`: `encode::Config::gop: Gop` becomes `join: Duration`
   (default 2 s), and the `Gop` enum is deleted.
 - `moq-audio`: `encode::Options::group_duration` becomes `join`.
@@ -17,9 +18,14 @@ and for both media:
   the default), and the video and audio hints' `group_duration_us` /
   `has_group_duration` become `join_us` / `has_join`.
 
-Defaults and behavior stay the same: video still forces an earlier keyframe
-for a joiner, and audio still opens a group on the first frame at least
-`join` past the last one. Every rename is a breaking change on `main` with a
+`join` means the time between join points at every level of `@moq/publish`:
+an encoder's config `join` is the requested value, `Rendition.join` is the
+effective value the encoder holds to, and `Broadcast.join` stays the longest
+across renditions, published as `media.join.interval`.
+
+Defaults stay the same: video still forces an earlier keyframe for a joiner,
+and audio still opens a group on the first frame at least `join` past the
+last one. Zero changes: every language refuses a `join` of zero (below). Every rename is a breaking change on `main` with a
 MIGRATE note in each package. `release` keeps the old names.
 
 Non-goals: the catalog's own `media.join.interval` field, and
@@ -50,10 +56,33 @@ Decided 2026-11-06 (maintainer, /quest-complete while queueing
 - ✅ Milestone m1, in this epic, since it makes names mirror across Rust, JS,
   and the bindings.
 
-The video `Encoder::new` refuses a zero `join`, as `Gop::validate` refuses
-zero frames today; a positive `join` shorter than one frame rounds up to one
-frame, as `Gop::keyframe_every` does. Audio keeps zero meaning a group per
-frame.
+Decided 2026-11-06 (maintainer, /quest-complete, on Pullfrog's review of
+[moq-dev/moq#8036](https://github.com/moq-dev/moq/pull/8036)):
+
+- ✅ **One word at three levels**: `Rendition.joinInterval` becomes
+  `Rendition.join` too, so the requested, effective, and broadcast-wide
+  values share one name and meaning. Not chosen: keeping `joinInterval`;
+  a different name for the encoder knob.
+- ✅ **Zero is refused everywhere.** Today JS video keyframes every frame at
+  `keyframeInterval: 0`, audio opens a group per frame at zero, and Rust video
+  and FFI already refuse it. Each encoder now rejects a zero `join` at
+  configuration, which changes behavior for JS and audio callers passing 0;
+  each package's MIGRATE note says so. C's zero-initialized video config
+  keeps 0 as "the default", since C has no `Option`; the C hints already
+  require a nonzero `join_us` when `has_join` is set. Not chosen: zero means
+  every frame everywhere; leaving each language's zero as is.
+
+A positive `join` shorter than one frame rounds up to one frame, as
+`Gop::keyframe_every` does today.
+
+The catalog advertises the effective `join`, not the requested one, since
+`media.join.interval` promises an upper bound and sets the HLS/DASH segment
+grid. The video encoder keeps an internal effective duration after rounding
+to frames (what `Gop::duration` supplies today): the default 2 s at
+30000/1001 fps is 60 frames, or 2002 ms, and a 1 ms `join` at 30 fps is one
+frame, about 33.3 ms. That effective value is what `Rendition.join` and the
+Rust catalog read. Regression tests cover a fractional frame rate and a
+positive sub-frame `join`.
 
 Update `doc/lib/js/publish.md`, `doc/lib/c/index.md`, `doc/lib/rs/moq-audio.md`,
 `rs/moq-video/README.md`, and every caller (`moq-cli`, `moq-transcode`, the
