@@ -64,7 +64,7 @@ fn zero_rtt_packets_are_dropped() {
 			number: PacketNumber::U8(0),
 			version: 1,
 		}
-		.encode(&mut zero_rtt);
+		.encode(&mut zero_rtt, crate::INITIAL_MTU.into());
 		// Processing this ACK would be a PROTOCOL_VIOLATION: the server never sent packet 1000.
 		let ack = Frames::default().var(FrameType::ACK, &[1000, 0, 0, 0]);
 		zero_rtt.extend_from_slice(&ack.0);
