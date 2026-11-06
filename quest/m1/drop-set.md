@@ -252,6 +252,14 @@ fill for every unknown stale run instead:
   back. Not chosen: asking a fill for every unknown stale run without the
   multi-range verdict; reversing the fix and tracking the hang as a
   follow-up.
+- ✅ **28 (2026-11-06, maintainer, /quest-complete): keep the fill for
+  readers narrower than the verdict's ranges**, with no fill-handler gate. A
+  verdict judged on the union of readers' ranges is valid only for readers
+  that read every group it names above the run's start; a narrower reader
+  still needs groups the upstream already dropped, so only a fill can
+  deliver them. Not chosen: re-judging per reader (it would still need the
+  fill); separate upstream subscriptions per reader shape (they give up
+  aggregation); deferring the narrow case as a follow-up.
 
 Decided 2026-10-27 (maintainer): this runs after the range count cost work,
 which finished in [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542),
