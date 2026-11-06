@@ -25,8 +25,9 @@ across renditions, published as `media.join.interval`.
 
 Defaults stay the same: video still forces an earlier keyframe for a joiner,
 and audio still opens a group on the first frame at least `join` past the
-last one. Zero changes: every language refuses a `join` of zero (below). Every rename is a breaking change on `main` with a
-MIGRATE note in each package. `release` keeps the old names.
+last one. Zero changes: every language refuses a `join` of zero (below).
+Every rename is a breaking change on `main`, with a migration note per
+package in the PR's Impact section. `release` keeps the old names.
 
 Non-goals: the catalog's own `media.join.interval` field, and
 timestamp-driven video joins (the encoder still converts `join` to a frame
@@ -67,7 +68,7 @@ Decided 2026-11-06 (maintainer, /quest-complete, on Pullfrog's review of
   `keyframeInterval: 0`, audio opens a group per frame at zero, and Rust video
   and FFI already refuse it. Each encoder now rejects a zero `join` at
   configuration, which changes behavior for JS and audio callers passing 0;
-  each package's MIGRATE note says so. C's zero-initialized video config
+  the PR's Impact section says so. C's zero-initialized video config
   keeps 0 as "the default", since C has no `Option`; the C hints already
   require a nonzero `join_us` when `has_join` is set. Not chosen: zero means
   every frame everywhere; leaving each language's zero as is.
