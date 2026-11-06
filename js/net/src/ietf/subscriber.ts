@@ -1536,6 +1536,7 @@ export class Subscriber {
 		// that the stream is recorded, so settling this promise hands it back to be torn down.
 		if (cancelled.aborted) throw new Error("subscribe cancelled before it was sent");
 
+		const bounds = wireSpan(request.subscription.ranges ?? [{}]);
 		const msg = new Subscribe({
 			requestId,
 			trackNamespace: broadcast,
@@ -1545,10 +1546,10 @@ export class Subscriber {
 			maxAge: this.#maxAge ? maxDelayOf(request.subscription) : undefined,
 			// Fixed for the subscription's life: no REQUEST_UPDATE parameter carries it.
 			groupOrder: request.subscription.order,
-			// Joins at the current group, from its first object: the subscription delivers the
-			// objects after Largest, and the group's head before it comes on a fetch stream
-			// (see {@link Join}). Fixed for the subscription's life.
-			...joinFilter(version),
+			// A known start is absolute, except group 0, which joins live with no filter. A Next
+			// Object join recovers its head through a fetch stream (see {@link Join}). Fixed for
+			// the subscription's life.
+			...joinFilter(version, bounds.start),
 		});
 		if (msg.fill) {
 			// The fill names this request and can overtake SUBSCRIBE_OK, so it waits on it here.
@@ -1605,10 +1606,12 @@ export class Subscriber {
 		if (!known) state.requests = producer.requests();
 		const tail = new Tail();
 		const subscription: Subscription = { track: producer, tail, timescale: ok.properties.timescale, fetchIds: [] };
-		// The subscription starts after Largest, so the joining FETCH or the fill brings its
-		// group's head. With no Largest the track is empty and every group whole. A draft-22 fill
-		// is one of the subscription's own streams, so the Stream Count already waits for it.
-		if (ok.largest) {
+		// A live join starts at Largest's group: a filterless one from its first object, and Next
+		// Object after Largest, so the joining FETCH or the fill brings that group's head. With no
+		// Largest the track is empty and every group whole. A draft-22 fill is one of the
+		// subscription's own streams, so the Stream Count already waits for it.
+		const live = msg.filter.kind !== "absolute";
+		if (msg.filter.kind === "nextObject" && ok.largest) {
 			subscription.join = new Join(ok.largest.groupId, tail, { counted: msg.fill !== undefined });
 			const join = subscription.join;
 			this.#joins.set(producer, join);
@@ -1624,12 +1627,11 @@ export class Subscriber {
 			// no object, so a Next Object join served onward still starts at the group's first.
 			hooks.reportedGroup(producer, ok.largest.groupId);
 		}
-		// The live join starts at the publisher's edge, whatever floor the demand asked for.
-		// With no Largest it skips nothing, so every group is owed: a lower one's stream may
-		// still arrive after a higher one's.
+		// Absolute subscriptions keep their prefix even when the answer follows its first data. A
+		// live join's earlier start is left to the copy's fills, one range FETCH per run.
 		hooks.startTrack(producer, {
-			start: ok.largest ? ok.largest.groupId : 0n,
-			requested: wireSpan(request.subscription.ranges ?? [{}]).start,
+			start: live ? (ok.largest?.groupId ?? 0n) : (bounds.start ?? 0n),
+			requested: bounds.start,
 		});
 		staged?.commit();
 		state.fill?.(subscription);
@@ -1856,6 +1858,14 @@ export class Subscriber {
 			}
 			return producer;
 		};
+		// A group that will never arrive whole is dropped, so readers stop owing it.
+		const dropHeadless = () =>
+			hooks.dropTrackGroups(
+				track,
+				group.groupId,
+				group.groupId + 1n,
+				new StreamError(StreamCode.NotFound, { message: "the group's head was lost" }),
+			);
 		// After an END_OF_GROUP or END_OF_TRACK status only the stream's end may follow: an
 		// object past the group's final one makes the track malformed.
 		const last = async () => {
@@ -1919,6 +1929,7 @@ export class Subscriber {
 							console.debug(
 								`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId} start=${start}`,
 							);
+							dropHeadless();
 							stream.stop(new Error("no head to stitch a mid-group stream onto"));
 							return;
 						}
@@ -1932,6 +1943,7 @@ export class Subscriber {
 						console.debug(
 							`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`,
 						);
+						dropHeadless();
 						stream.stop(new Error("a group must start at object 0"));
 						return;
 					}
@@ -1992,6 +2004,7 @@ export class Subscriber {
 			// as the keyframe the group opens with.
 			if (producer === undefined && e instanceof ObjectIdGap && !group.flags.firstObject) {
 				console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
+				dropHeadless();
 				stream.stop(new Error("a group must start at object 0"));
 				return;
 			}

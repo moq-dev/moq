@@ -5,6 +5,12 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Socket sessions
+
+MoqSocketEndpoint, MoqSocketIncomingTcp, MoqSocketIncomingTrack, MoqSocketTcpStream, and MoqSocketTrackStream now expose TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change. Dropping an unfinished group producer now resets it with `Unroutable` instead of leaking Rust's programming-error `Dropped`; finished groups still end cleanly.
+
+`MoqGroupProducer::ready(size)` is a new async call that waits until a frame of `size` bytes fits a window ahead of the group's fastest reader. Await it before each `write_frame` so the writer waits for its fastest reader instead of evicting it, though not for slower readers; a TCP socket session needs it to behave like TCP. Existing writers are unchanged and still shed the group's front when they outpace their readers.
+
 ### Decoders refuse a disabled rendition ([#7942](https://github.com/moq-dev/moq/pull/7942))
 
 `MoqAudioConsumer::subscribe` and `MoqVideoConsumer::subscribe` fail with `MoqError::NotFound` when the rendition's `enabled` is false, instead of subscribing and waiting for a re-enable. Pick an enabled rendition from the latest catalog, and close a decoder whose rendition a newer catalog disables.

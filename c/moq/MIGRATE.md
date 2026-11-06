@@ -9,6 +9,10 @@ How to update your code for each breaking change, newest first.
 `moq_connection_stats` gains `datagrams_unrouted` and `datagrams_unrouted_valid` at its end, which changes its ABI: recompile against the new header.
 `datagrams_unrouted` counts the datagrams received for a subscription with no datagram track, and is valid on versions with datagrams (moq-lite 05 and newer).
 
+### Socket sessions
+
+The generated socket endpoint, incoming dial, and stream handles now expose TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
+
 ### Publishing goes through one `moq_route` handle
 
 `moq_origin_producer_create_broadcast(origin, path, &publication)` is `moq_origin_producer_route(origin, path, &options, &route)`, and `moq_origin_producer_requests(origin, prefix, &requests)` is `moq_origin_producer_route_prefix(origin, prefix, &options, &route)`; start `options` from `moq_route_options_default()`. A `moq_route` replaces `moq_publication`, `moq_origin_requests`, and `moq_broadcast_prepared`:

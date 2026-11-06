@@ -988,3 +988,12 @@ OOM kill does too, even inside a Quest scope: each worker watches `local.py`
 through a pidfd and stops once it exits. macOS has no pidfd, so there killing
 `local.py` with SIGKILL frees the lock while its workers keep measuring until
 their own gates exit, an accepted gap. Stop it with Ctrl-C or SIGTERM instead.
+
+### Python socket sessions
+
+The Python binding runner also sweeps both TCP and track sockets over 1, 4,
+and 16 accepting endpoints and 1, 4, and 16 concurrent sessions per endpoint.
+Each session sends a checked payload and finishes both halves. The
+`socket/<protocol>/endpoints=N/sessions=M` entries report complete sessions per
+second, including handshake, FFI calls, reads, and teardown. Run with
+`just py bench`; Nightly's binding lane runs the same sweep.

@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Absolute IETF subscriptions keep their prefix
+
+Explicit group ranges now keep their requested start when the subscription answer
+arrives after its first data. IETF publishers honor absolute starts on all
+supported drafts instead of silently joining at the live edge. A start of group 0
+is a filterless SUBSCRIBE on every draft, and the groups below the answer's Largest
+Object come from one range FETCH. A `Subscribe` with an unfiltered filter now omits
+LOCATION\_FILTER, and a SUBSCRIBE without one still joins live. There is no API
+change.
+
 ### WebSocket receive windows match Rust
 
 The fallback now grants 4 MiB per connection and 1 MiB per stream, up from
