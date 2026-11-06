@@ -38,7 +38,7 @@ fn floored(start: Option<u64>) -> Range {
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(moq_net::Hop::new(hop).unwrap()));
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
