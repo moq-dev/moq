@@ -1,10 +1,9 @@
-import { race } from "@moq/signals";
 import { fromTransport, StreamCode, toStreamCode, toTransport } from "./error.ts";
 import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
-import { Version } from "./ietf/version.ts";
 import { Version as Lite, type Version as LiteVersion } from "./lite/version.ts";
-import { TimeoutError, withTimeout } from "./util/timeout.ts";
+import { lines, type Rank } from "./open.ts";
+import { decodeError } from "./util/decode_error.ts";
 import { POW32, toBigInt, toNumber, U64 } from "./util/u64.ts";
 import { decodeUtf8 } from "./util/utf8.ts";
 import {
@@ -24,6 +23,12 @@ import { Budget } from "./util/yield.ts";
 // Sharing the slice across writers bounds concurrent groups and subscriber fanout too.
 const writeBudget = new Budget();
 
+/** Stream credit alone lets a peer keep thousands of streams ready, each accepted in a
+ * microtask, so accept loops share a slice that lets the host's other tasks run.
+ * @internal
+ */
+export const acceptBudget = new Budget();
+
 // Decode raw transport errors before mapping so they cannot bypass the negotiated
 // registry. Ordinary errors already send 0 and retain their local identity.
 function withCode(reason: unknown, stream: StreamVersion): unknown {
@@ -37,45 +42,13 @@ function withCode(reason: unknown, stream: StreamVersion): unknown {
 // withCode, which reads a number as a non-stream error and sends Internal.
 function stopReason(reason: unknown, stream: StreamVersion): unknown {
 	if (typeof reason !== "number") return withCode(reason, stream);
-	const version = asIetf(stream);
 	const code =
-		version === undefined || sharedStreamCode(reason, version) ? (reason as StreamCode) : StreamCode.Internal;
+		asIetf(stream) === undefined || sharedStreamCode(reason) ? (reason as StreamCode) : StreamCode.Internal;
 	return toTransport(code, "cancel");
 }
 
 const MAX_U31 = 2 ** 31 - 1;
 const MAX_READ_SIZE = 1024 * 1024 * 64; // don't allocate more than 64MB for a message
-
-/**
- * Options handed to the transport for one outgoing stream.
- *
- * `waitUntilAvailable` waits for the peer's concurrent stream limit to free a slot instead
- * of rejecting with a `QuotaExceededError`, which is what we want for the streams a session
- * opens occasionally. `@types/web` doesn't declare it yet, hence the intersection.
- */
-export function sendOptions(options?: OpenOptions): WebTransportSendStreamOptions & { waitUntilAvailable?: boolean } {
-	return { sendOrder: options?.sendOrder, waitUntilAvailable: options?.waitUntilAvailable ?? true };
-}
-
-// How long any open may wait for the peer to free a stream slot. Every open needs this,
-// whether or not it asked to wait: an implementation may park an over-limit open rather
-// than rejecting it, and a peer can advertise a stream limit of zero and never raise it.
-// Matches the subscribe budget.
-const OPEN_TIMEOUT_MS = 10_000;
-
-/**
- * Bound an open that would otherwise park until the peer grants stream credit, restoring
- * the pre-waitUntilAvailable failure after a grace period. A stream arriving after the
- * deadline is discarded, since nobody is waiting for it any more.
- */
-async function openWithin<T>(opening: Promise<T>, timeout: number, discard: (stream: T) => void): Promise<T> {
-	try {
-		return await withTimeout(opening, timeout, `stream open timed out after ${timeout}ms waiting for a slot`);
-	} catch (err: unknown) {
-		opening.then(discard).catch(() => void 0);
-		throw err;
-	}
-}
 
 /**
  * The version a stream's bytes follow: a moq-transport draft or a moq-lite draft. Required on
@@ -95,12 +68,12 @@ export function asIetf(version: StreamVersion): IetfVersion | undefined {
 	return isLite(version) ? undefined : version;
 }
 
-// Every draft newer than these counts leading ones, so a new version falls forward.
-function isLeadingOnes(version: StreamVersion): boolean {
+/**
+ * Whether `version` writes leading-ones varints, which carry the full u64; older versions use QUIC's, which stop at 2^62-1.
+ * Every draft newer than these counts leading ones, so a new version falls forward.
+ */
+export function isLeadingOnes(version: StreamVersion): boolean {
 	switch (version) {
-		case Version.DRAFT_14:
-		case Version.DRAFT_15:
-		case Version.DRAFT_16:
 		case Lite.DRAFT_01:
 		case Lite.DRAFT_02:
 		case Lite.DRAFT_03:
@@ -132,6 +105,17 @@ export function encodeVarint(v: number | bigint, version: StreamVersion): Uint8A
 	return encodeTo(new ArrayBuffer(9), parts.hi, lo, version);
 }
 
+/** The parts joined into one buffer, so they can go out in one write. */
+export function concat(parts: Uint8Array[]): Uint8Array {
+	const out = new Uint8Array(parts.reduce((n, p) => n + p.byteLength, 0));
+	let offset = 0;
+	for (const part of parts) {
+		out.set(part, offset);
+		offset += part.byteLength;
+	}
+	return out;
+}
+
 /**
  * The `WebTransportSendStream` that every outgoing stream is, narrowed to the one attribute
  * this package uses. The DOM types available here still describe them as plain
@@ -150,32 +134,21 @@ export interface OpenOptions {
 	version: StreamVersion;
 
 	/**
-	 * The transport send order, where HIGHER values are transmitted first.
-	 * Left to the transport's default when unset.
+	 * The transport send order, where HIGHER values are transmitted first: also where the open
+	 * waits for the peer's stream credit, ahead of every lower one. Defaults to 0, the
+	 * transport's default.
 	 */
 	sendOrder?: number;
-
-	/**
-	 * Reject if the peer hasn't freed a stream slot within this many milliseconds. Defaults
-	 * to 10s. There is no way to wait indefinitely: a peer can advertise a stream limit of
-	 * zero and never raise it, so every open needs a way out.
-	 */
-	timeout?: number;
-
-	/**
-	 * Ask the transport to wait for a stream slot rather than failing when the peer's
-	 * concurrent stream limit is exhausted. Defaults to true.
-	 *
-	 * Set it false on a path that opens streams faster than the peer can retire them. The
-	 * transport queues the opens it can't satisfy and serves them in order, with no way to
-	 * cancel one, so waiting there spends returning credit on whatever was requested first
-	 * rather than on what matters now.
-	 */
-	waitUntilAvailable?: boolean;
 }
 
 /** Options for {@link Writer.tryOpen}. */
-export interface TryOpenOptions extends OpenOptions {
+export interface TryOpenOptions extends Omit<OpenOptions, "sendOrder"> {
+	/**
+	 * The send order, as {@link OpenOptions.sendOrder}, or a function read again whenever the
+	 * line hands out a stream, for a rank that moves while the open waits.
+	 */
+	sendOrder?: Rank;
+
 	/** Give up once this resolves. */
 	cancel: Promise<void>;
 }
@@ -211,6 +184,8 @@ export class Stream {
 
 	static async accept(quic: WebTransport, version: StreamVersion): Promise<Stream | undefined> {
 		for (;;) {
+			const pause = acceptBudget.poll();
+			if (pause !== undefined) await pause;
 			const reader =
 				quic.incomingBidirectionalStreams.getReader() as ReadableStreamDefaultReader<WebTransportBidirectionalStream>;
 			const next = await reader.read();
@@ -228,16 +203,23 @@ export class Stream {
 	 * @param options - The version its varints encode with, and the send order ranking it
 	 *   against the session's other streams
 	 */
+	/** Open a stream, waiting its turn for the peer's stream credit. */
 	static async open(quic: WebTransport, options: OpenOptions): Promise<Stream> {
-		const { readable, writable } = await openWithin(
-			quic.createBidirectionalStream(sendOptions(options)),
-			options?.timeout ?? OPEN_TIMEOUT_MS,
-			(stream) => {
-				void stream.writable.abort().catch(() => void 0);
-				void stream.readable.cancel().catch(() => void 0);
-			},
-		);
-		return new Stream({ readable, writable, version: options.version });
+		const opened = await lines(quic).bi.open(options.sendOrder ?? 0);
+		return new Stream({ readable: opened.readable, writable: opened.writable, version: options.version });
+	}
+
+	/**
+	 * Like {@link Stream.open}, but leaves the line once `signal` aborts, returning undefined so
+	 * the caller can drop its request. The stream its create admits later goes to the next open
+	 * in line. A transport failure still throws.
+	 */
+	static async tryOpen(
+		quic: WebTransport,
+		options: OpenOptions & { signal: AbortSignal },
+	): Promise<Stream | undefined> {
+		const opened = await lines(quic).bi.open(options.sendOrder ?? 0, options.signal);
+		return opened && new Stream({ readable: opened.readable, writable: opened.writable, version: options.version });
 	}
 
 	close() {
@@ -262,7 +244,7 @@ export class Reader {
 	#buffer: Uint8Array;
 	#chunks: Uint8Array[] = [];
 	#chunked = 0; // bytes across #chunks
-	#stream?: ReadableStream<Uint8Array>; // if undefined, the buffer is consumed then EOF
+	// Undefined once the stream finishes, or without a stream: the buffer is consumed then EOF.
 	#reader?: ReadableStreamDefaultReader<Uint8Array>;
 	#closed?: Promise<void>;
 	// The decode that last ran short and how far, so a retry can wait for those bytes.
@@ -278,8 +260,7 @@ export class Reader {
 		version: StreamVersion,
 	) {
 		this.#buffer = buffer ?? new Uint8Array();
-		this.#stream = stream;
-		this.#reader = this.#stream?.getReader();
+		this.#reader = stream?.getReader();
 		this.version = version;
 	}
 
@@ -298,11 +279,9 @@ export class Reader {
 
 		if (result.done) {
 			// The transport already finished the stream. Drop the reader so a later stop
-			// neither builds a cancel error nor sends a reset the peer will ignore.
-			if (this.#reader === reader) {
-				this.#reader = undefined;
-				reader.releaseLock();
-			}
+			// neither builds a cancel error nor sends a reset the peer will ignore. Dropped,
+			// not released: releasing a closed stream's lock builds a TypeError per stream.
+			if (this.#reader === reader) this.#reader = undefined;
 			return false;
 		}
 
@@ -417,7 +396,7 @@ export class Reader {
 			this.#short = undefined;
 			return result;
 		} catch (err: unknown) {
-			if (!(err instanceof Short)) throw err;
+			if (!(err instanceof Short)) throw decodeError(err);
 			// Filling could never satisfy it, so retrying would spin.
 			if (err.need <= this.#buffer.byteLength) throw new Error("decode ran short of bytes it already had");
 			this.#short = { decode, err };
@@ -428,6 +407,26 @@ export class Reader {
 	async read(size: number): Promise<Uint8Array> {
 		if (size === 0) return new Uint8Array();
 		return this.decode((c) => c.read(size));
+	}
+
+	/**
+	 * Read between 1 and `max` bytes as they arrive, without joining them into one buffer, so
+	 * a payload of any size streams through. Throws {@link UnexpectedEnd} at a clean end.
+	 */
+	async readChunk(max: number): Promise<Uint8Array> {
+		if (this.#buffer.byteLength === 0 && this.#chunked === 0 && !(await this.#fill())) throw new UnexpectedEnd();
+		// What a decode ran short of is measured from bytes this consumes.
+		this.#short = undefined;
+		if (this.#buffer.byteLength > 0) return this.#slice(Math.min(max, this.#buffer.byteLength));
+		const chunk = this.#chunks[0];
+		if (chunk.byteLength <= max) {
+			this.#chunks.shift();
+			this.#chunked -= chunk.byteLength;
+			return chunk;
+		}
+		this.#chunks[0] = chunk.subarray(max);
+		this.#chunked -= max;
+		return chunk.subarray(0, max);
 	}
 
 	async readAll(): Promise<Uint8Array> {
@@ -669,10 +668,7 @@ export class Cursor {
 		let size: number;
 		if (this.#leadingOnes) {
 			size = peekLeadingOnes(b[o]);
-			// 1111110x is a 7-byte form. Draft-17 rejects it; draft-18+ allows it per #1595.
-			if (size === 7 && this.version === Version.DRAFT_17) {
-				throw new Error("invalid leading-ones varint: 1111110x prefix is reserved on draft-17");
-			}
+			// 1111110x is a 7-byte form, which draft-18+ allows per #1595.
 			this.#ensure(size);
 			this.#offset += size;
 			return readLeadingOnes(b, o, size);
@@ -803,55 +799,43 @@ export class Writer {
 		this.#writer.abort(withCode(reason, this.version)).catch(() => void 0);
 	}
 
+	/** Run `f` against a Writer that buffers in memory, returning everything it wrote as one chunk. */
+	static async collect(version: StreamVersion, f: (w: Writer) => Promise<void>): Promise<Uint8Array> {
+		const chunks: Uint8Array[] = [];
+		// Copied, since each primitive reuses the Writer's scratch buffer.
+		const w = new Writer(
+			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(chunk.slice()) }),
+			version,
+		);
+		try {
+			await f(w);
+		} finally {
+			w.close();
+		}
+		await w.closed;
+		return concat(chunks);
+	}
+
 	/**
 	 * Open an outgoing unidirectional stream.
 	 * @param quic - The session to open it on
 	 * @param options - The version its varints encode with, and the send order ranking it
 	 *   against the session's other streams
 	 */
+	/** Open a send-only stream, waiting its turn for the peer's stream credit. */
 	static async open(quic: WebTransport, options: OpenOptions): Promise<Writer> {
-		const writable = await openWithin(
-			quic.createUnidirectionalStream(sendOptions(options)) as Promise<WritableStream<Uint8Array>>,
-			options?.timeout ?? OPEN_TIMEOUT_MS,
-			(stream) => void stream.abort().catch(() => void 0),
-		);
-
+		const writable = await lines(quic).uni.open(options.sendOrder ?? 0);
 		return new Writer(writable, options.version);
 	}
 
 	/**
-	 * Like {@link Writer.open}, but gives up when `cancel` settles or `timeout` elapses,
-	 * returning undefined so the caller can drop whatever it meant to send. A stream that
-	 * opens after that is reset rather than leaked. A real transport failure still throws.
-	 *
-	 * Worth using even with `waitUntilAvailable: false`, since an implementation may park
-	 * an over-limit open instead of rejecting it.
+	 * Like {@link Writer.open}, but leaves the line once `cancel` settles, returning undefined
+	 * so the caller can drop whatever it meant to send. The stream its create admits later goes
+	 * to the next open in line. A transport failure, or a rejected `cancel`, still throws.
 	 */
 	static async tryOpen(quic: WebTransport, options: TryOpenOptions): Promise<Writer | undefined> {
-		// Raced ahead of the open, so an already-cancelled caller wins even against a slot
-		// that is free right now. `race` rather than `Promise.race`: the caller shares one
-		// `cancel` across every group of a subscription, which must not gain a reaction per call.
-		const open = Writer.open(quic, options);
-
-		// Resets a stream that opens after we gave up; a no-op if the open itself failed.
-		const abandon = () => {
-			const abandoned = new Error("abandoned waiting for a stream slot");
-			open.then((w) => w.reset(abandoned)).catch(() => void 0);
-		};
-
-		try {
-			const stream = await race([options.cancel, open]);
-			if (stream) return stream;
-		} catch (err: unknown) {
-			// open already discarded the late stream on its way out.
-			if (err instanceof TimeoutError) return undefined;
-			// A rejected `cancel` still leaves the open pending.
-			abandon();
-			throw err;
-		}
-
-		abandon();
-		return undefined;
+		const writable = await lines(quic).uni.open(options.sendOrder ?? 0, options.cancel);
+		return writable && new Writer(writable, options.version);
 	}
 }
 
@@ -886,6 +870,8 @@ export class Readers {
 	}
 
 	async next(): Promise<Reader | undefined> {
+		const pause = acceptBudget.poll();
+		if (pause !== undefined) await pause;
 		const next = await this.#reader.read();
 		if (next.done) return;
 		return new Reader(next.value, undefined, this.#version);

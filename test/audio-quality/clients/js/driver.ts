@@ -8,8 +8,8 @@
  * session is WebTransport through the shaper, or nothing.
  *
  *     bun driver.ts --url http://127.0.0.1:4501 --fingerprint http://127.0.0.1:4500/certificate.sha256 \
- *         --broadcast tone-opus.hang --page dist --ring plain --delay auto --duration 60 \
- *         --tag chromium-opus-48000-mild-plain --out <run dir>
+ *         --broadcast tone-opus.hang --page dist --delay auto --duration 60 \
+ *         --tag chromium-opus-48000-mild --out <run dir>
  *
  * Writes `<tag>.ndjson` (the samples, appended as they are drained) and `<tag>.page.json` (the
  * environment, console notes, and voids). `--capture` also writes `<tag>.arrivals.ndjson`, with
@@ -22,7 +22,7 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { Page } from "playwright";
 import { launch, sleep } from "../../../interop/clients/js/harness.ts";
-import type { Arrival, Environment, Ring, Void } from "./src/schema.ts";
+import type { Arrival, Environment, Void } from "./src/schema.ts";
 
 const { values } = parseArgs({
 	options: {
@@ -30,18 +30,17 @@ const { values } = parseArgs({
 		fingerprint: { type: "string" },
 		broadcast: { type: "string" },
 		page: { type: "string" },
-		ring: { type: "string" },
 		delay: { type: "string", default: "auto" },
 		duration: { type: "string", default: "60" },
 		tag: { type: "string" },
 		out: { type: "string" },
 		capture: { type: "boolean", default: false },
+		trace: { type: "boolean", default: false },
 	},
 });
 
 const { url, fingerprint, broadcast, page: pageDir, tag, out } = values;
 const durationMs = Number.parseFloat(values.duration) * 1000;
-const ring = values.ring as Ring;
 if (
 	!url ||
 	!fingerprint ||
@@ -51,10 +50,10 @@ if (
 	!out ||
 	!Number.isFinite(durationMs) ||
 	durationMs <= 0 ||
-	(ring !== "plain" && ring !== "isolated")
+	(values.trace && !values.capture)
 ) {
 	console.error(
-		"usage: driver.ts --url U --fingerprint F --broadcast B --page DIR --ring plain|isolated --tag T --out DIR [--delay auto] [--duration S>0] [--capture]",
+		"usage: driver.ts --url U --fingerprint F --broadcast B --page DIR --tag T --out DIR [--delay auto] [--duration S>0] [--capture] [--trace]",
 	);
 	process.exit(2);
 }
@@ -73,26 +72,20 @@ const hash = await fetch(fingerprint).then((r) => {
 	return r.text();
 });
 
-// Cross-origin isolation is a property of the document, not the bundle, so one build served under
-// two prefixes runs both rings. `/plain` is the production path: most viewers are not isolated, and
-// get the postMessage ring.
 const root = resolve(pageDir);
-const isolation = { "cross-origin-opener-policy": "same-origin", "cross-origin-embedder-policy": "require-corp" };
 const server = Bun.serve({
 	port: 0,
 	hostname: "127.0.0.1",
 	async fetch(req) {
-		const path = new URL(req.url).pathname;
-		const match = path.match(/^\/(isolated|plain)\/(.*)$/);
-		if (!match) return new Response("not found", { status: 404 });
-		const file = Bun.file(join(root, match[2] || "index.html"));
+		const path = new URL(req.url).pathname.slice(1);
+		const file = Bun.file(join(root, path || "index.html"));
 		if (!(await file.exists())) return new Response("not found", { status: 404 });
-		return new Response(file, { headers: match[1] === "isolated" ? isolation : undefined });
+		return new Response(file);
 	},
 });
 
 const query = new URLSearchParams({ url, broadcast, delay: values.delay, capture: String(values.capture) });
-const pageUrl = `http://127.0.0.1:${server.port}/${ring}/?${query}`;
+const pageUrl = `http://127.0.0.1:${server.port}/?${query}`;
 console.log(`page: ${pageUrl}`);
 
 const samplesFile = join(out, `${tag}.ndjson`);
@@ -129,8 +122,40 @@ const browser = await launch(["--autoplay-policy=no-user-gesture-required"]);
 let environment: Environment | undefined;
 let notes: string[] = [];
 let failed = false;
+let finishTrace: (() => Promise<void>) | undefined;
 try {
 	const page = await browser.newPage();
+	if (values.capture) {
+		await page.addInitScript(() => {
+			const tasks: { at: number; duration: number }[] = [];
+			Object.defineProperty(globalThis, "audioQualityLongTasks", { value: tasks });
+			new PerformanceObserver((entries) => {
+				for (const task of entries.getEntries()) tasks.push({ at: task.startTime, duration: task.duration });
+			}).observe({ type: "longtask", buffered: true });
+		});
+	}
+	if (values.trace) {
+		const session = await page.context().newCDPSession(page);
+		await session.send("Profiler.enable");
+		await session.send("Profiler.start");
+		const events: unknown[] = [];
+		session.on("Tracing.dataCollected", (event: { value: unknown[] }) => events.push(...event.value));
+		const complete = new Promise<void>((resolve) => session.once("Tracing.tracingComplete", () => resolve()));
+		await session.send("Tracing.start", {
+			categories: "disabled-by-default-v8.gc,blink.user_timing",
+			transferMode: "ReportEvents",
+		});
+		finishTrace = async () => {
+			finishTrace = undefined;
+			await session.send("Tracing.end");
+			await complete;
+			const { profile } = await session.send("Profiler.stop");
+			await Bun.write(join(out, `${tag}.profile.json`), JSON.stringify(profile));
+			await Bun.write(join(out, `${tag}.trace.json`), JSON.stringify({ traceEvents: events }));
+			await session.detach();
+		};
+	}
+
 	page.on("pageerror", (error) => console.error(`[page error] ${error.message}`));
 	await page.route(new URL("/certificate.sha256", url).href, (route) =>
 		route.fulfill({ body: hash, headers: { "access-control-allow-origin": "*" } }),
@@ -143,9 +168,6 @@ try {
 	});
 	if (environment.transport !== "webtransport") {
 		refuse("transport", `negotiated ${environment.transport}, which never crosses the UDP shaper`);
-	}
-	if (environment.crossOriginIsolated !== (ring === "isolated")) {
-		refuse("ring", `asked for ${ring}, but crossOriginIsolated is ${environment.crossOriginIsolated}`);
 	}
 
 	// The row's duration is audio played, not startup: the window starts once the ring does.
@@ -162,11 +184,26 @@ try {
 	// The context rate is only known once the graph exists, which is after the catalog.
 	environment = (await page.evaluate(() => globalThis.audioQuality.environment())) ?? environment;
 	notes = await page.evaluate(() => globalThis.audioQuality.notes());
+	if (values.capture) {
+		const tasks = await page.evaluate(
+			() =>
+				(globalThis as typeof globalThis & { audioQualityLongTasks: { at: number; duration: number }[] })
+					.audioQualityLongTasks,
+		);
+		await Bun.write(join(out, `${tag}.longtasks.json`), JSON.stringify(tasks));
+	}
+	await finishTrace?.();
 	await page.close();
 } catch (err) {
 	failed = true;
 	refuse("driver", err instanceof Error ? err.message : String(err));
 } finally {
+	try {
+		await finishTrace?.();
+	} catch (error) {
+		failed = true;
+		refuse("trace", error instanceof Error ? error.message : String(error));
+	}
 	await browser.close().catch(() => {});
 	server.stop(true);
 }

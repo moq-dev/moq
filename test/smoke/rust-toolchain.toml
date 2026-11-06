@@ -1,0 +1,4 @@
+# Overrides moq's pinned root toolchain: a user's `cargo install moq-relay` runs
+# on whatever stable they have, so the cargo channel tests the newest stable.
+[toolchain]
+channel = "stable"

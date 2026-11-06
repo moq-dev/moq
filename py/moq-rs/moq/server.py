@@ -7,9 +7,8 @@ from collections.abc import Sequence
 
 from moq_ffi import MoqQuicConfig, MoqRequest, MoqServer, MoqServerConfig, MoqServerTls, MoqTransport
 
-from ._records import _strs
-from .origin import OriginProducer
-from .publish import BroadcastProducer
+from ._records import _implementation, _strs
+from .origin import OriginProducer, Route
 from .session import Session
 
 # The network transport carrying an incoming session.
@@ -43,6 +42,14 @@ class Request:
     def query(self) -> str | None:
         """The encoded request query without `?`; it may contain credentials."""
         return self._inner.query()
+
+    @property
+    def peer_implementation(self) -> str | None:
+        """The implementation the client advertised, like ``moq-py/0.6.0 moq-ffi/0.4.12 ...``.
+
+        Peer-controlled: use it for logs and rollout counts, never to authorize.
+        """
+        return self._inner.peer_implementation()
 
     @property
     def transport(self) -> Transport:
@@ -87,8 +94,7 @@ class Server:
     In simple mode (no origin provided), creates an internal origin automatically::
 
         async with Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
-            broadcast = server.create_broadcast("live")
-            broadcast.announce()  # unannounced broadcasts are invisible
+            route = server.route("live")  # announced while held
             await server.serve()
 
     Or hand-roll the accept loop if you need per-request control::
@@ -114,6 +120,9 @@ class Server:
             publish=origin,
             consume=origin,
         )
+
+    ``keylog=True`` writes TLS session secrets to the file ``SSLKEYLOGFILE`` names, for
+    decrypting a capture; without ``SSLKEYLOGFILE`` entering the server fails.
     """
 
     def __init__(
@@ -125,6 +134,7 @@ class Server:
         tls_generate: Sequence[str] = (),
         versions: Sequence[str] = (),
         max_streams: int | None = None,
+        keylog: bool = False,
         publish: OriginProducer | None = None,
         consume: OriginProducer | None = None,
     ) -> None:
@@ -141,7 +151,8 @@ class Server:
                 key=_strs(tls_key, "tls_key"),
                 generate=_strs(tls_generate, "tls_generate"),
             ),
-            quic=MoqQuicConfig(max_streams=max_streams),
+            quic=MoqQuicConfig(max_streams=max_streams, keylog=keylog),
+            implementation=_implementation(),
             publish=None if publish is None else publish._inner,
             consume=None if consume is None else consume._inner,
         )
@@ -193,15 +204,18 @@ class Server:
             raise StopAsyncIteration
         return Request(request)
 
-    def create_broadcast(self, path: str) -> BroadcastProducer:
-        """Create a live broadcast at ``path``, served to incoming sessions.
+    def route(
+        self, path: str, *, hidden: bool = False, cost: int = 0, instance: str | None = None, epoch: int = 0
+    ) -> Route:
+        """Create a route at ``path`` owning a broadcast served to incoming sessions; hold it
+        to keep it announced.
 
-        See :meth:`OriginProducer.create_broadcast`.
+        See :meth:`OriginProducer.route`.
         """
         origin = self._publish_origin
         if origin is None:
             raise RuntimeError("no publish origin configured")
-        return origin.create_broadcast(path)
+        return origin.route(path, hidden=hidden, cost=cost, instance=instance, epoch=epoch)
 
     async def serve(self) -> None:
         """Accept every session in a loop, holding each one alive until it closes.

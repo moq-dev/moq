@@ -1,37 +1,179 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Runs every Criterion target plus two local relay workloads. With a base commit,
-# Criterion compares matching cases directly and the relay summary prints the
-# base/current delta. `--runtime` instead compares one multi-threaded Tokio
+# Runs every Criterion target plus the local relay workloads: video over QUIC, and
+# chat and fanout over each of BENCH_TRANSPORTS. With a base commit, Criterion
+# compares matching cases directly and the relay summary prints the base/current delta. `--runtime` instead compares one multi-threaded Tokio
 # runtime with the same number of independent Tokio/epoll and io_uring workers
 # on the current tree. The current load generator drives every relay so the
 # workloads stay identical. `--audio` isolates the audio grouping/load-shape matrix.
-# `--lock` records relay worker off-CPU stacks to attribute std mutex waits.
+# `--profile` captures relay profiles: std mutex waits by stack (lock), CPU stacks
+# (cpu), or jemalloc heap snapshots and allocation churn (heap).
+# `--shard` sweeps the QUIC shard count against the connection count.
+# `--fanout` counts the chat fan-out's instructions per delivered group on one thread,
+# for each BENCH_BASE revision and the current tree, independent of host load.
 
 MODE=${1:-}
-ROUNDS=${MOQ_BENCH_RUNTIME_ROUNDS:-3}
+ROUNDS=${BENCH_RUNTIME_ROUNDS:-3}
 if [[ ! $ROUNDS =~ ^[0-9]+$ ]] || ((10#$ROUNDS < 1)); then
-    printf 'MOQ_BENCH_RUNTIME_ROUNDS must be a positive integer, got %q\n' "$ROUNDS" >&2
+    printf 'BENCH_RUNTIME_ROUNDS must be a positive integer, got %q\n' "$ROUNDS" >&2
     exit 1
 fi
 ROUNDS=$((10#$ROUNDS))
+
+# One case measures far apart on performance and efficiency cores, so on a
+# hybrid CPU pin this shell, and with it every build and benchmark process, to
+# the performance cores it may already use. The kernel only lists them on Intel
+# hybrid parts.
+PINNED=
+# Builds don't affect what a benchmark measures, so instructions mode compiles on
+# every CPU this shell may use before it pins itself. Linux only, like that mode.
+ALLOWED_CPUS=
+if [[ $(uname -s) == Linux ]]; then
+    ALLOWED_CPUS=$(python3 -c 'import os; print(",".join(map(str, sorted(os.sched_getaffinity(0)))))')
+fi
+if [[ -r /sys/devices/cpu_core/cpus ]]; then
+    PINNED=$(
+        python3 - "$$" <<'EOF'
+import os, sys
+pid = int(sys.argv[1])
+cores = set()
+for part in open("/sys/devices/cpu_core/cpus").read().strip().split(","):
+    first, _, last = part.partition("-")
+    cores.update(range(int(first), int(last or first) + 1))
+allowed = cores & os.sched_getaffinity(pid)
+if not allowed:
+    sys.exit("cannot pin to the performance cores: none are in the allowed CPU set")
+os.sched_setaffinity(pid, allowed)
+print(",".join(map(str, sorted(allowed))))
+EOF
+    )
+fi
+
+# nproc counts the allowed CPUs, unless OpenMP variables override it.
+usable_cpus() {
+    env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc
+}
 case $MODE in
+    --criterion)
+        # BENCH_BASE pairs each selected target with the same target built at that revision.
+        BASE=
+        if [[ -n ${BENCH_BASE:-} ]]; then
+            BASE=$(git rev-parse --verify "$BENCH_BASE^{commit}")
+        fi
+        CRITERION_CARGO_ARGS=()
+        CRITERION_FILTER_ARGS=()
+        parsing_filters=false
+        for argument in "${@:2}"; do
+            if [[ $argument == -- && $parsing_filters == false ]]; then
+                parsing_filters=true
+            elif [[ $parsing_filters == true ]]; then
+                CRITERION_FILTER_ARGS+=("$argument")
+            else
+                CRITERION_CARGO_ARGS+=("$argument")
+            fi
+        done
+        ;;
     --audio)
         BASE=
         ;;
-    --lock)
-        BASE=
-        LOCK_WORKLOAD=${MOQ_BENCH_LOCK_WORKLOAD:-fanout}
-        LOCK_WORKERS=${MOQ_BENCH_LOCK_WORKERS:-1 4 16}
-        # Without frame pointers, perf's DWARF unwinder stops at the first relay frame.
+    --profile)
+        # Instructions mode accepts several space-separated bases, rotated with current in each round.
+        BASES=()
+        for value in ${BENCH_BASE:-}; do
+            BASES+=("$(git rev-parse --verify "$value^{commit}")")
+        done
+        BASE=${BASES[*]}
+        # A client revision held fixed across bisect runs, so a newer client's behavior
+        # doesn't move the historical relays it drives.
+        GENERATOR=
+        if [[ -n ${BENCH_GENERATOR:-} ]]; then
+            GENERATOR=$(git rev-parse --verify "$BENCH_GENERATOR^{commit}")
+        fi
+        PROFILE_RUNTIME=${BENCH_PROFILE_RUNTIME:-tokio-workers}
+        if [[ ! $PROFILE_RUNTIME =~ ^(tokio-workers|io-uring-workers)$ ]]; then
+            printf 'profile runtime must be tokio-workers or io-uring-workers, got %q\n' "$PROFILE_RUNTIME" >&2
+            exit 1
+        fi
+        PROFILE_MODES=${BENCH_PROFILE_MODES:-}
+        PROFILE_WORKLOAD=${BENCH_PROFILE_WORKLOAD:-fanout}
+        PROFILE_TRANSPORT=${BENCH_PROFILE_TRANSPORT:-quic}
+        if [[ ! $PROFILE_TRANSPORT =~ ^(quic|ws|wss|tcp|tls)$ ]]; then
+            printf 'profile transport must be quic, ws, wss, tcp, or tls, got %q\n' "$PROFILE_TRANSPORT" >&2
+            exit 1
+        fi
+        PROFILE_WORKERS=${BENCH_PROFILE_WORKERS:-1 4 16}
+        if [[ -z $PROFILE_MODES ]]; then
+            printf 'BENCH_PROFILE_MODES must name one or more of: lock cpu heap instructions\n' >&2
+            exit 1
+        fi
+        for value in $PROFILE_MODES; do
+            if [[ ! $value =~ ^(lock|cpu|heap|instructions)$ ]]; then
+                printf 'unknown profile mode %q; expected lock, cpu, heap, or instructions\n' "$value" >&2
+                exit 1
+            fi
+        done
+        # Instruction counts pair revisions in rotated rounds, so they run on their own.
+        if [[ " $PROFILE_MODES " == *' instructions '* && $PROFILE_MODES != instructions ]]; then
+            printf 'BENCH_PROFILE_MODES=instructions runs alone, not with %q\n' "$PROFILE_MODES" >&2
+            exit 1
+        fi
+        if { ((${#BASES[@]} > 1)) || [[ -n $GENERATOR ]]; } && [[ $PROFILE_MODES != instructions ]]; then
+            printf 'only BENCH_PROFILE_MODES=instructions accepts several BENCH_BASE revisions or BENCH_GENERATOR\n' >&2
+            exit 1
+        fi
+        for value in $PROFILE_WORKERS; do
+            if [[ ! $value =~ ^[1-9][0-9]{0,2}$ ]] || ((value > 256)); then
+                printf 'profile workers must be integers from 1 to 256, got %q\n' "$value" >&2
+                exit 1
+            fi
+        done
+        # Without frame pointers, perf's DWARF unwinder stops at the first relay frame,
+        # and CPU stacks unwind by frame pointer alone.
         export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C force-frame-pointers=yes"
+        ;;
+    --fanout)
+        # Several bases, each counted beside the current tree; see bench/fanout.py.
+        BASES=()
+        for value in ${BENCH_BASE:-}; do
+            BASES+=("$(git rev-parse --verify "$value^{commit}")")
+        done
+        BASE=${BASES[*]}
+        FANOUT_SCENARIOS=${BENCH_FANOUT_SCENARIOS:-model session}
+        FANOUT_SUBSCRIBERS=${BENCH_FANOUT_SUBSCRIBERS:-1 64 512}
+        for value in $FANOUT_SCENARIOS; do
+            if [[ ! $value =~ ^(model|session|group)$ ]]; then
+                printf 'unknown fan-out scenario %q; expected model, session, or group\n' "$value" >&2
+                exit 1
+            fi
+        done
+        for value in $FANOUT_SUBSCRIBERS; do
+            if [[ ! $value =~ ^[1-9][0-9]{0,4}$ ]]; then
+                printf 'fan-out subscribers must be integers from 1 to 99999, got %q\n' "$value" >&2
+                exit 1
+            fi
+        done
+        if [[ -n ${BENCH_FANOUT_CALLGRIND:-} ]] && ! command -v valgrind >/dev/null; then
+            printf 'BENCH_FANOUT_CALLGRIND needs valgrind on PATH\n' >&2
+            exit 1
+        fi
+        ;;
+    --shard)
+        BASE=
+        SHARD_COUNTS=${BENCH_SHARD_COUNTS:-0 1 4 16}
+        SHARD_CONNECTIONS=${BENCH_SHARD_CONNECTIONS:-16 64 256}
+        for value in $SHARD_COUNTS $SHARD_CONNECTIONS; do
+            if [[ ! $value =~ ^[0-9]+$ ]]; then
+                printf 'shard benchmark counts must be integers, got %q\n' "$value" >&2
+                exit 1
+            fi
+        done
         ;;
     --runtime)
         BASE=
-        RUNTIME_WORKERS=${MOQ_BENCH_RUNTIME_WORKERS:-}
+        RUNTIME_WORKERS=${BENCH_RUNTIME_WORKERS:-}
         if [[ -z $RUNTIME_WORKERS ]]; then
-            RUNTIME_WORKERS=$(getconf _NPROCESSORS_ONLN)
+            RUNTIME_WORKERS=$(usable_cpus)
             if ((RUNTIME_WORKERS > 256)); then
                 RUNTIME_WORKERS=256
             fi
@@ -44,29 +186,46 @@ case $MODE in
         ;;
     *)
         BASE=$MODE
+        # Video stays on QUIC; chat (per-message cost) and fanout (per-byte cost) sweep the transports.
+        RELAY_CASES=(quic/video)
+        for value in ${BENCH_TRANSPORTS:-quic ws wss tcp tls}; do
+            if [[ ! $value =~ ^(quic|ws|wss|tcp|tls)$ ]]; then
+                printf 'unknown transport %q; expected quic, ws, wss, tcp, or tls\n' "$value" >&2
+                exit 1
+            fi
+            RELAY_CASES+=("$value/chat" "$value/fanout")
+        done
         ;;
 esac
 ROOT=$(git rev-parse --show-toplevel)
+# shellcheck source=bench/lock.sh
+source "$ROOT/bench/lock.sh"
+bench_lock "$0" "$@"
 TARGET=${CARGO_TARGET_DIR:-$ROOT/target/bench}
 if [[ $TARGET != /* ]]; then
     TARGET=$ROOT/$TARGET
 fi
+# A build cache may evict the directory a `target` symlink points to: recreate it rather
+# than fail every build through a dangling link.
+mkdir -p "$(readlink -m "$TARGET")"
 BASE_TARGET=$TARGET/base
 CURRENT_TARGET=$TARGET/current
 
-ARTIFACTS=${MOQ_BENCH_ARTIFACTS:-$TARGET/runs}
+ARTIFACTS=${BENCH_ARTIFACTS:-$ROOT/.tmp/bench}
 mkdir -p "$ARTIFACTS"
 ARTIFACTS=$(cd "$ARTIFACTS" && pwd -P)
 # Each run copies bench/ and untracked sources, so it must land in neither.
 if [[ $ARTIFACTS/ == "$ROOT"/bench/* ]] ||
     { [[ $ARTIFACTS/ == "$ROOT"/* ]] && ! git -C "$ROOT" check-ignore -q "$ARTIFACTS"; }; then
-    printf 'MOQ_BENCH_ARTIFACTS must be outside the repository, or git-ignored and outside bench/: %s\n' \
+    printf 'BENCH_ARTIFACTS must be outside the repository, or git-ignored and outside bench/: %s\n' \
         "$ARTIFACTS" >&2
     exit 1
 fi
 RUN=$(mktemp -d "$ARTIFACTS/run.XXXXXX")
 printf 'Benchmark evidence: %s\n' "$RUN"
 WORKTREE=
+WORKTREES=()
+BUILD_PIDS=()
 RELAY_PID=
 HOST_PID=
 LOAD_PID=
@@ -92,9 +251,16 @@ cleanup() {
         kill "$RELAY_PID" 2>/dev/null || true
         wait "$RELAY_PID" 2>/dev/null || true
     fi
-    if [[ -n $WORKTREE ]]; then
-        git -C "$ROOT" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || true
-    fi
+    # Builds read the worktrees below, so stop them first. Each leads its own group.
+    local build worktree
+    for build in ${BUILD_PIDS[@]+"${BUILD_PIDS[@]}"}; do
+        kill -- -"$build" 2>/dev/null || true
+        wait "$build" 2>/dev/null || true
+    done
+    for worktree in ${WORKTREE:+"$WORKTREE"} ${WORKTREES[@]+"${WORKTREES[@]}"}; do
+        git -C "$ROOT" worktree remove --force "$worktree" >/dev/null 2>&1 || true
+        rmdir "$worktree" 2>/dev/null || true
+    done
     # Close both pipe writers before waiting for the owned log copiers.
     if [[ -n $STDOUT_PID ]]; then
         exec 1>&3 2>&4
@@ -103,6 +269,9 @@ cleanup() {
         exec 3>&- 4>&-
     fi
     printf 'Benchmark evidence retained: %s\n' "$RUN"
+    if [[ -n $PINNED ]]; then
+        printf 'Pinned to performance cores: %s\n' "$PINNED"
+    fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -118,6 +287,13 @@ cp -R "$ROOT/bench/workloads" "$RUN/workloads"
 cp -R "$ROOT/bench" "$RUN/harness"
 
 export CRITERION_HOME=$RUN/criterion
+
+checkout_base() {
+    # Cargo merges every ancestor's .cargo/config.toml. A nested worktree would
+    # inherit this checkout's settings instead of measuring the base in isolation.
+    WORKTREE=$(mktemp -d "${TMPDIR:-/tmp}/moq-bench-base.XXXXXX")
+    git worktree add --detach "$WORKTREE" "$1" >/dev/null
+}
 
 # Shorter than Criterion's defaults, but still enough samples for confidence
 # intervals and outlier detection. Comparisons run both revisions on one host.
@@ -137,11 +313,20 @@ criterion_targets() {
                 .packages[] as $package
                 | $package.targets[]
                 | select(any(.kind[]; . == "bench"))
-                | [($package.manifest_path | ltrimstr($root)), .name]
+                | [($package.manifest_path | ltrimstr($root)), .name, (.["required-features"] // [] | join(","))]
                 | @tsv
             ' |
             sort
     )
+}
+
+# The features a bench target requires, comma-separated; cargo refuses to build it without them.
+target_features() {
+    local checkout=$1
+    local manifest=$2
+    local target=$3
+    criterion_targets "$checkout" |
+        awk -F '\t' -v manifest="$manifest" -v target="$target" '$1 == manifest && $2 == target { print $3; exit }'
 }
 
 target_dir() {
@@ -165,7 +350,7 @@ run_criterion() {
         printf 'no Criterion benchmark targets found\n' >&2
         return 1
     fi
-    while IFS=$'\t' read -r manifest target; do
+    while IFS=$'\t' read -r manifest target _; do
         run_criterion_target "$checkout" "$manifest" "$target" "$@"
     done <"$target_list"
 }
@@ -174,20 +359,172 @@ run_criterion_target() {
     local checkout=$1
     local manifest=$2
     local target=$3
+    local features
     shift 3
+    features=$(target_features "$checkout" "$manifest" "$target") || return 1
     (
         cd "$checkout" || exit 1
         CARGO_TARGET_DIR=$(target_dir "$checkout") \
-            cargo bench --locked --manifest-path "$manifest" --bench "$target" -- \
+            cargo bench --locked --manifest-path "$manifest" --bench "$target" ${features:+--features "$features"} -- \
             "${CRITERION_ARGS[@]}" "$@"
     )
 }
 
+# The nightly trend's settings, which also screen every case of a paired run.
+CRITERION_QUICK=(--quick --warm-up-time 0.05 --measurement-time 0.2 --noplot)
+
+# Build the selected bench targets in a checkout, listing each in OUT as
+# "package-directory/target<TAB>package path<TAB>executable". OUT is written here rather
+# than by redirecting the call: an errexit inside a redirected function would leave the
+# shell's saved stdout open, and cleanup would wait forever on the log copier.
+criterion_build() {
+    local out=$1 checkout=$2
+    shift 2
+    (
+        cd "$checkout" || exit 1
+        CARGO_TARGET_DIR=$(target_dir "$checkout") \
+            cargo bench --locked --no-run --message-format=json-render-diagnostics "$@"
+    ) | jq -r 'select(.reason == "compiler-artifact" and .executable != null and any(.target.kind[]; . == "bench"))
+        | (.manifest_path | rtrimstr("/Cargo.toml")) as $package
+        | [($package | split("/") | last) + "/" + .target.name, $package, .executable] | @tsv' | sort >"$out"
+}
+
+# Build the base with the current cargo arguments, minus bench targets its selected packages
+# do not have yet: naming one would fail the whole build. Lists nothing in OUT when every
+# selected target is new.
+criterion_build_base() {
+    local out=$1 names name index selected=0 count=${#CRITERION_CARGO_ARGS[@]}
+    local args=() packages=()
+    : >"$out"
+    for ((index = 0; index + 1 < count; index++)); do
+        if [[ ${CRITERION_CARGO_ARGS[index]} == -p || ${CRITERION_CARGO_ARGS[index]} == --package ]]; then
+            packages+=("${CRITERION_CARGO_ARGS[index + 1]}")
+        fi
+    done
+    # Another package's target of the same name must not count, or cargo rejects the base build.
+    names=$(cd "$WORKTREE" && cargo metadata --locked --format-version 1 --no-deps |
+        jq -r '.packages[] | select(($ARGS.positional | length) == 0 or (.name as $name | any($ARGS.positional[]; . == $name)))
+            | .targets[] | select(any(.kind[]; . == "bench")) | .name' --args ${packages[@]+"${packages[@]}"}) || return 1
+    for ((index = 0; index < count; index++)); do
+        name=${CRITERION_CARGO_ARGS[index]}
+        if [[ $name == --bench ]] && ((index + 1 < count)); then
+            index=$((index + 1))
+            name=${CRITERION_CARGO_ARGS[index]}
+            selected=$((selected + 1))
+            # A glob selects whatever the base has.
+            if [[ $name == *[*?[]* ]] || grep -qxF -- "$name" <<<"$names"; then
+                args+=(--bench "$name")
+            fi
+        else
+            args+=("$name")
+        fi
+    done
+    if ((selected)) && [[ " ${args[*]} " != *" --bench "* ]]; then
+        return 0
+    fi
+    criterion_build "$out" "$WORKTREE" ${args[@]+"${args[@]}"}
+}
+
+# Run one built target as cargo bench would, from its package directory, with results under HOME/KEY.
+criterion_exec() {
+    local list=$1 home=$2 key=$3 package executable
+    shift 3
+    IFS=$'\t' read -r _ package executable < <(target_line "$list" "$key") || return 1
+    printf '\nCriterion %s: %s\n' "${home#"$RUN"/}" "$key"
+    (cd "$package" && CRITERION_HOME=$home/$key "$executable" --bench "$@" </dev/null)
+}
+
+target_line() {
+    MOQ_CASE_TARGET=$2 awk -F '\t' '$1 == ENVIRON["MOQ_CASE_TARGET"] { print; exit }' "$1"
+}
+
+# A comparison that cannot run fails the paired gate rather than the measurement.
+unavailable() {
+    printf '%s\t%s\n' "$1" "$2" >>"$RUN/paired-unavailable.tsv"
+    printf 'Paired comparison unavailable for %s: %s\n' "$1" "$2" >&2
+}
+
+# Measure the selected targets in quick mode. With a base, run each target's base build
+# beside it, alternating which goes first, then confirm the screen's worst slowdowns.
+# A failed current target fails the run; the base only marks its targets unavailable.
+measure_criterion() {
+    local current=$RUN/criterion-current.targets base=$RUN/criterion-base.targets
+    local key side targets index=0 status=0
+    local filters=(${CRITERION_FILTER_ARGS[@]+"${CRITERION_FILTER_ARGS[@]}"})
+    criterion_build "$current" "$ROOT" ${CRITERION_CARGO_ARGS[@]+"${CRITERION_CARGO_ARGS[@]}"}
+    mapfile -t targets < <(cut -f1 "$current")
+    if ((${#targets[@]} == 0)); then
+        printf 'no Criterion bench targets selected\n' >&2
+        return 1
+    fi
+    : >"$base"
+    if [[ -n $BASE ]]; then
+        checkout_base "$BASE"
+        mkdir -p "$RUN/base-context"
+        (cd "$WORKTREE" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE" comparison-base)
+        printf 'Criterion paired with base %s\n' "$BASE"
+        printf 'Base build log: %s/base-build.log\n' "$RUN"
+        local build_status=(0 0)
+        criterion_build_base "$base" 2>&1 | tee "$RUN/base-build.log" >&2 || build_status=("${PIPESTATUS[@]}")
+        if ((build_status[1] != 0)); then
+            printf 'Failed to write base build log: %s/base-build.log\n' "$RUN" >&2
+        fi
+        if ((build_status[0] != 0)); then
+            : >"$base"
+            for key in "${targets[@]}"; do unavailable "$key" "base build failed"; done
+        fi
+    fi
+    for key in "${targets[@]}"; do
+        local order=(current)
+        if [[ -n $(target_line "$base" "$key") ]]; then
+            if ((index++ % 2)); then order=(current base); else order=(base current); fi
+        fi
+        for side in "${order[@]}"; do
+            if [[ $side == current ]]; then
+                criterion_exec "$current" "$RUN/criterion" "$key" "${CRITERION_QUICK[@]}" \
+                    ${filters[@]+"${filters[@]}"} || status=1
+            else
+                criterion_exec "$base" "$RUN/criterion-base" "$key" "${CRITERION_QUICK[@]}" \
+                    ${filters[@]+"${filters[@]}"} || unavailable "$key" "base run failed"
+            fi
+        done
+    done
+    if [[ -n $BASE ]] && ((status == 0)); then
+        confirm_criterion || return 1
+    fi
+    return "$status"
+}
+
+# One quick run per side can land on noise, so each slowdown the screen flags is
+# re-measured in alternating rounds with the comparison settings before it can fail.
+confirm_criterion() {
+    local key benchmark round side index=0
+    python3 "$ROOT/bench/compare.py" --criterion-screen "$RUN" >"$RUN/confirm.tsv" || return 1
+    while IFS=$'\t' read -r key benchmark; do
+        index=$((index + 1))
+        for ((round = 1; round <= ROUNDS; round++)); do
+            local order=(base current)
+            if ((round % 2 == 0)); then order=(current base); fi
+            for side in "${order[@]}"; do
+                if ! criterion_exec "$RUN/criterion-$side.targets" "$RUN/confirm/$index/round-$round/$side" "$key" \
+                    "${CRITERION_ARGS[@]}" "$benchmark" --exact; then
+                    unavailable "$key" "confirmation failed"
+                    continue 3
+                fi
+            done
+        done
+    done <"$RUN/confirm.tsv"
+    python3 "$ROOT/bench/compare.py" --criterion-paired "$RUN"
+}
+
 criterion_cases() {
     local checkout=$1
-    local manifest target benchmark
-    local listing=$RUN/criterion-listing
+    local manifest target benchmark discovery
     local target_list=$RUN/criterion-targets
+    local label=base
+    if [[ $checkout == "$ROOT" ]]; then
+        label=current
+    fi
 
     if ! criterion_targets "$checkout" >"$target_list"; then
         return 1
@@ -196,21 +533,23 @@ criterion_cases() {
         printf 'no Criterion benchmark targets found\n' >&2
         return 1
     fi
-    while IFS=$'\t' read -r manifest target; do
-        if ! (
-            cd "$checkout" || exit 1
-            CARGO_TARGET_DIR=$(target_dir "$checkout") \
-                cargo bench --locked --manifest-path "$manifest" --bench "$target" -- --list
-        ) | sed -n 's/: benchmark$//p' >"$listing"; then
-            return 1
+    while IFS=$'\t' read -r manifest target _; do
+        discovery=$RUN/criterion-discovery/$label/$manifest/$target
+        # --list prints truncated display titles. A separate short measurement
+        # writes full IDs without polluting the actual comparison samples.
+        (
+            CRITERION_ARGS=(--warm-up-time 0.001 --measurement-time 0.001 --sample-size 10 --nresamples 1 --noplot)
+            CRITERION_HOME=$discovery run_criterion_target "$checkout" "$manifest" "$target" --save-baseline discovery
+        ) >&2 || return 1
+        # A harness = false target without Criterion, such as moq-cli's play_buffer, writes no samples.
+        if [[ -z $(find "$discovery" -name benchmark.json -print -quit 2>/dev/null) ]]; then
+            printf 'Not a Criterion target, skipped: %s %s\n' "$manifest" "$target" >&2
+            continue
         fi
-        if [[ ! -s $listing ]]; then
-            printf 'Criterion target has no benchmark cases: %s/%s\n' "$manifest" "$target" >&2
-            return 1
-        fi
+        python3 "$ROOT/bench/compare.py" --criterion-cases "$discovery" >"$RUN/criterion-listing" || return 1
         while IFS= read -r benchmark; do
             printf '%s\t%s\t%s\n' "$manifest" "$target" "$benchmark"
-        done <"$listing"
+        done <"$RUN/criterion-listing"
     done <"$target_list"
 }
 
@@ -220,49 +559,50 @@ compare_criterion() {
     local base_cases=$RUN/criterion-base.cases
     local current_cases=$RUN/criterion-current.cases
     local keys=$RUN/criterion-case.keys
-    local manifest target benchmark base_match current_match
+    local manifest target benchmark base_match current_match home
+    local index=0
 
     criterion_cases "$base_checkout" >"$base_cases"
     criterion_cases "$current_checkout" >"$current_cases"
     sort -u "$base_cases" "$current_cases" >"$keys"
 
     while IFS=$'\t' read -r manifest target benchmark; do
-        base_match=$(awk -F '\t' -v manifest="$manifest" -v target="$target" -v benchmark="$benchmark" \
-            '$1 == manifest && $2 == target && $3 == benchmark { print; exit }' "$base_cases")
-        current_match=$(awk -F '\t' -v manifest="$manifest" -v target="$target" -v benchmark="$benchmark" \
-            '$1 == manifest && $2 == target && $3 == benchmark { print; exit }' "$current_cases")
+        index=$((index + 1))
+        home=$RUN/criterion/$index
+        base_match=$(MOQ_CASE_MANIFEST=$manifest MOQ_CASE_TARGET=$target MOQ_CASE_ID=$benchmark awk -F '\t' \
+            '$1 == ENVIRON["MOQ_CASE_MANIFEST"] && $2 == ENVIRON["MOQ_CASE_TARGET"] && $3 == ENVIRON["MOQ_CASE_ID"] { print; exit }' "$base_cases")
+        current_match=$(MOQ_CASE_MANIFEST=$manifest MOQ_CASE_TARGET=$target MOQ_CASE_ID=$benchmark awk -F '\t' \
+            '$1 == ENVIRON["MOQ_CASE_MANIFEST"] && $2 == ENVIRON["MOQ_CASE_TARGET"] && $3 == ENVIRON["MOQ_CASE_ID"] { print; exit }' "$current_cases")
 
         if [[ -n $base_match ]]; then
             printf '\nCriterion baseline: %s\n' "$benchmark"
-            run_criterion_target "$base_checkout" "$manifest" "$target" \
+            CRITERION_HOME=$home run_criterion_target "$base_checkout" "$manifest" "$target" \
                 --save-baseline base "$benchmark" --exact
         fi
         if [[ -n $current_match ]]; then
             printf '\nCriterion current: %s\n' "$benchmark"
             if [[ -n $base_match ]]; then
-                run_criterion_target "$current_checkout" "$manifest" "$target" \
-                    --baseline-lenient base "$benchmark" --exact
+                # Truncated directory names can receive different uniqueness suffixes
+                # when cases are added or reordered between revisions.
+                python3 "$ROOT/bench/compare.py" --criterion-baseline \
+                    "$RUN/criterion-discovery/current/$manifest/$target" "$benchmark" "$home"
+                CRITERION_HOME=$home run_criterion_target "$current_checkout" "$manifest" "$target" \
+                    --baseline base "$benchmark" --exact
             else
-                run_criterion_target "$current_checkout" "$manifest" "$target" \
-                    --discard-baseline "$benchmark" --exact
+                CRITERION_HOME=$home run_criterion_target "$current_checkout" "$manifest" "$target" \
+                    --save-baseline current "$benchmark" --exact
             fi
         fi
     done <"$keys"
 }
 
-collect_ids() {
-    local sample=$1
-    while IFS= read -r -d '' benchmark; do
-        jq -r .full_id "$benchmark"
-    done < <(find "$CRITERION_HOME" -type f -path "*/$sample/benchmark.json" -print0) |
-        sort -u
-}
-
 report_set_changes() {
     local base_ids=$RUN/criterion-base.ids
     local current_ids=$RUN/criterion-current.ids
-    collect_ids base >"$base_ids"
-    collect_ids new >"$current_ids"
+    # Baseline measurements also write new/, so saved sample directories cannot
+    # distinguish a removed case from a case measured on the current revision.
+    cut -f3- "$RUN/criterion-base.cases" | sort -u >"$base_ids"
+    cut -f3- "$RUN/criterion-current.cases" | sort -u >"$current_ids"
 
     local new removed
     new=$(comm -13 "$base_ids" "$current_ids")
@@ -280,23 +620,26 @@ report_set_changes() {
 source "$ROOT/bench/relay.sh"
 
 print_current_relay() {
-    printf '\n%-10s %11s %11s %10s %10s %9s %9s %10s %10s\n' \
-        workload send-Mbps recv-Mbps send-fps recv-fps loss-% p99-ms CPU-cores RSS-MiB
-    for workload in video fanout; do
-        jq -r '[
-			.workload,
+    printf '\n%-12s %11s %11s %10s %10s %9s %9s %10s %11s %11s %10s\n' \
+        case send-Mbps recv-Mbps send-fps recv-fps loss-% p99-ms CPU-cores CPU-us/frame cores/Gbps RSS-MiB
+    for case in "${RELAY_CASES[@]}"; do
+        # Host CPU and RSS exist only where the sampler ran (Linux).
+        jq -r --arg case "$case" 'def fixed: if . == null then "n/a" else (. * 1000 | round / 1000 | tostring) end; [
+			$case,
 			(.send_mbps | tostring),
 			(.recv_mbps | tostring),
 			(.send_fps | tostring),
 			(.recv_fps | tostring),
 			(.loss_pct | tostring),
 			(.latency_p99_ms // "n/a" | tostring),
-			(.cpu_cores // "n/a" | tostring),
-			(if .rss_bytes then (.rss_bytes / 1048576 | tostring) else "n/a" end)
-		] | @tsv' "$RUN/relay/current/$workload/summary.json" |
-            while IFS=$'\t' read -r name send recv send_fps recv_fps loss p99 cpu rss; do
-                printf '%-10s %11.3f %11.3f %10.1f %10.1f %9.3f %9s %10s %10s\n' \
-                    "$name" "$send" "$recv" "$send_fps" "$recv_fps" "$loss" "$p99" "$cpu" "$rss"
+			(.cpu_cores | fixed),
+			(.cpu_us_per_frame | fixed),
+			(.cpu_cores_per_gbps | fixed),
+			(.rss_bytes | if . then . / 1048576 else null end | fixed)
+		] | @tsv' "$RUN/relay/current/$case/summary.json" |
+            while IFS=$'\t' read -r name send recv send_fps recv_fps loss p99 cpu per_frame per_gbps rss; do
+                printf '%-12s %11.3f %11.3f %10.1f %10.1f %9.3f %9s %10s %11s %11s %10s\n' \
+                    "$name" "$send" "$recv" "$send_fps" "$recv_fps" "$loss" "$p99" "$cpu" "$per_frame" "$per_gbps" "$rss"
             done
     done
 }
@@ -396,10 +739,11 @@ print_runtime_comparison() {
 }
 
 run_audio_comparison() {
+    generate_certificate
     printf 'Building relay and audio load generator...\n'
     CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release -p moq-relay -p moq-bench
     LOAD_BIN=$CURRENT_TARGET/release/moq-bench
-    HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
+    HOST_CMD=("$LOAD_BIN" host)
 
     printf '\nAudio grouping: 50 / 400 fps, 200-byte frames, per-packet / 20 / 100 / 200 ms groups\n'
     printf 'shape\trecv-fps\tp99-ms\tCPU\tRSS-MiB\n'
@@ -433,10 +777,10 @@ print_audio_sample() {
     ] | @tsv' "$RUN/relay/$label/$workload/summary.json"
 }
 
-# Worker runtimes read their certificate from disk instead of generating one.
+# Every relay reads its certificate from disk: worker runtimes and the wss listener need a file.
 generate_certificate() {
     if ! command -v openssl >/dev/null; then
-        printf 'worker runtimes need openssl to generate a temporary certificate\n' >&2
+        printf 'relay workloads need openssl to generate a temporary certificate\n' >&2
         return 1
     fi
 
@@ -452,6 +796,39 @@ generate_certificate() {
     fi
 }
 
+# The runtime matrix and profiling use identical feature selection and support checks.
+build_workers() {
+    local checkout=$1 target=$2 profile=$3 features=moq-relay/io-uring
+    if [[ ${4:-} == heap ]]; then
+        features+=,moq-relay/jemalloc
+    fi
+    printf 'Building worker runtimes: %s (%s)\n' "$checkout" "$profile"
+    (
+        # Read just this revision's configuration, even in a nested scratch worktree.
+        cd /
+        CARGO_TARGET_DIR=$target cargo --config "$checkout/.cargo/config.toml" build \
+            --manifest-path "$checkout/Cargo.toml" --locked --profile "$profile" \
+            -p moq-relay -p moq-bench --features "$features"
+    )
+}
+
+# Support is the host's, not a revision's, so the current tree's probe answers for
+# every revision. Takes the current tree's target directory and Cargo profile.
+check_uring() {
+    printf 'Checking io_uring support...\n'
+    (
+        # Read just this tree's configuration, as build_workers does, so the probe
+        # lands where its workers do.
+        cd /
+        CARGO_TARGET_DIR=$1 cargo --config "$ROOT/.cargo/config.toml" build --manifest-path "$ROOT/Cargo.toml" \
+            --locked --quiet --profile "$2" -p moq-uring --no-default-features --features _probe
+    )
+    if ! "$1/$2/moq-uring-probe"; then
+        printf 'worker benchmarks need Linux 6.12+ with io_uring permitted by the host\n' >&2
+        return 1
+    fi
+}
+
 run_runtime_comparison() {
     if [[ $(uname -s) != Linux ]]; then
         printf 'runtime comparison needs Linux for io_uring and /proc metrics\n' >&2
@@ -459,18 +836,10 @@ run_runtime_comparison() {
     fi
     generate_certificate
 
-    printf 'Building one relay binary with the Tokio and io_uring paths...\n'
-    CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release \
-        -p moq-relay -p moq-bench \
-        --features moq-relay/io-uring,moq-bench/uring
+    build_workers "$ROOT" "$CURRENT_TARGET" release
     LOAD_BIN=$CURRENT_TARGET/release/moq-bench
-    HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
-
-    printf 'Checking io_uring support...\n'
-    if ! "$CURRENT_TARGET/release/moq-bench-uring-check"; then
-        printf 'runtime comparison needs Linux 6.12+ with io_uring permitted by the host\n' >&2
-        return 1
-    fi
+    HOST_CMD=("$LOAD_BIN" host)
+    check_uring "$CURRENT_TARGET" release
 
     local -a runtimes=(tokio-shared tokio-workers io-uring-workers)
     local round workload offset index runtime
@@ -492,61 +861,419 @@ run_runtime_comparison() {
     print_runtime_comparison
 }
 
-run_lock_profile() {
+# Each workload's load axis is its connection count: every room connection
+# publishes and subscribes, while fanout adds subscribers to one publisher. A
+# cost that grows with the shard count or the load shows up as a slope across
+# the shard counts or the connection counts, which one default-versus-single-
+# socket run cannot show.
+run_shard_sweep() {
     if [[ $(uname -s) != Linux ]]; then
-        printf 'lock profiling needs Linux for perf and /proc schedstat\n' >&2
+        printf 'shard sweep needs Linux: only it steers a reuseport group\n' >&2
         return 1
     fi
-    # Refuse before the build when the kernel would refuse the capture.
-    python3 "$ROOT/bench/profile.py" check
     generate_certificate
 
-    printf 'Building the relay with the profiling profile and frame pointers...\n'
-    CARGO_TARGET_DIR=$TARGET/profile cargo build --locked --profile profiling -p moq-relay -p moq-bench
-    LOAD_BIN=$TARGET/profile/profiling/moq-bench
-    HOST_BIN=$TARGET/profile/profiling/moq-bench-host
-    local relay=$TARGET/profile/profiling/moq-relay
+    printf 'Building relay and load generator...\n'
+    CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release -p moq-relay -p moq-bench
+    LOAD_BIN=$CURRENT_TARGET/release/moq-bench
+    HOST_CMD=("$LOAD_BIN" host)
 
-    printf '\nLock wait: %s, tokio workers; each profiled run follows an unprofiled control\n' "$LOCK_WORKLOAD"
-    printf '%-8s %5s %8s %13s %13s %10s %10s %13s %9s\n' \
-        workers idle switches control-fps profiled-fps control-CPU profiled-CPU mutex-wait-ms wait/CPU
-    local workers
-    for workers in $LOCK_WORKERS; do
-        run_workload "control-$workers" "$relay" "$LOCK_WORKLOAD" tokio-workers "$workers"
-        PROFILE_LOCK=true
-        run_workload "lock-$workers" "$relay" "$LOCK_WORKLOAD" tokio-workers "$workers"
-        PROFILE_LOCK=
-        jq -r -s '[
-            .[0].recv_fps, .[1].recv_fps, .[0].cpu_cores, .[1].cpu_cores, (.[2].idle | length),
-            ([.[2].workers[].switches] | min),
-            ([.[2].workers[].mutex_wait_ns] | add / 1000000),
-            ([.[2].workers[].mutex_wait_ns] | add) / ([.[2].workers[].cpu_ns] | add)
-        ] | @tsv' "$RUN/relay/control-$workers/$LOCK_WORKLOAD/summary.json" \
-            "$RUN/relay/lock-$workers/$LOCK_WORKLOAD/summary.json" \
-            "$RUN/relay/lock-$workers/$LOCK_WORKLOAD/lock/lock.json" |
-            while IFS=$'\t' read -r control profiled control_cpu profiled_cpu idle switches wait share; do
-                printf '%-8s %5s %8s %13.1f %13.1f %10.3f %10.3f %13.1f %9.4f\n' \
-                    "$workers" "$idle" "$switches" "$control" "$profiled" "$control_cpu" "$profiled_cpu" "$wait" "$share"
+    local cpus workload connections shards label
+    cpus=$(usable_cpus)
+    for workload in video fanout; do
+        for connections in $SHARD_CONNECTIONS; do
+            for shards in $SHARD_COUNTS; do
+                label=shard-$shards-$connections
+                printf '  %s: %d connections, %d shards\n' "$workload" "$connections" "$shards"
+                # Zero shards is the shared runtime, given every CPU.
+                if ((shards == 0)); then
+                    run_workload "$label" "$CURRENT_TARGET/release/moq-relay" "$workload" tokio-shared "$cpus" \
+                        --connections "$connections"
+                else
+                    run_workload "$label" "$CURRENT_TARGET/release/moq-relay" "$workload" tokio-workers "$shards" \
+                        --connections "$connections"
+                fi
             done
+        done
     done
-    printf '\nMutex stacks (flamegraph folded format): %s/relay/lock-*/%s/lock/mutex.folded\n' "$RUN" "$LOCK_WORKLOAD"
+
+    printf '\nShard sweep (0 shards is the shared runtime on %d threads)\n' "$cpus"
+    # sock-drops: datagrams the kernel dropped at the relay's own UDP sockets
+    # (full receive queues), and gen-drops at the load generator's; see the README.
+    printf '%-8s %11s %7s %10s %10s %8s %7s %8s %9s %9s %10s %9s\n' \
+        workload connections shards recv-Mbps recv-fps p99-ms loss-% CPU CPU/conn RSS-MiB sock-drops gen-drops
+    for workload in video fanout; do
+        for connections in $SHARD_CONNECTIONS; do
+            for shards in $SHARD_COUNTS; do
+                jq -r --arg connections "$connections" --arg shards "$shards" '[
+                    .workload, $connections, $shards, .recv_mbps, .recv_fps, .latency_p99_ms, .loss_pct,
+                    .cpu_cores, (.cpu_cores / ($connections | tonumber)), (.rss_bytes / 1048576),
+                    (.udp_drops // "n/a"), (.generator.udp_drops // "n/a")
+                ] | @tsv' "$RUN/relay/shard-$shards-$connections/$workload/summary.json" |
+                    while IFS=$'\t' read -r name conns count recv fps p99 loss cpu per rss drops gen_drops; do
+                        printf '%-8s %11s %7s %10.3f %10.1f %8.1f %7.3f %8.3f %9.5f %9.1f %10s %9s\n' \
+                            "$name" "$conns" "$count" "$recv" "$fps" "$p99" "$loss" "$cpu" "$per" "$rss" "$drops" "$gen_drops"
+                    done
+            done
+        done
+    done
+}
+
+run_profiles() {
+    if [[ $(uname -s) != Linux ]]; then
+        printf 'relay profiling needs Linux for perf and /proc\n' >&2
+        return 1
+    fi
+    # Refuse before the build when the host would refuse a capture.
+    local mode
+    for mode in $PROFILE_MODES; do
+        python3 "$ROOT/bench/profile.py" check "$mode"
+        if [[ $mode == instructions ]]; then
+            python3 "$ROOT/bench/instructions.py" check "$PROFILE_WORKERS"
+        fi
+    done
+    generate_certificate
+
+    if [[ $PROFILE_MODES == instructions ]]; then
+        run_instructions
+        return
+    fi
+
+    if [[ -n $BASE ]]; then
+        checkout_base "$BASE"
+        mkdir -p "$RUN/base-context"
+        (cd "$WORKTREE" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE" --profile)
+    fi
+    local label checkout target
+    local -a revisions=(current)
+    if [[ -n $BASE ]]; then revisions=(base current); fi
+    if [[ $PROFILE_RUNTIME == io-uring-workers ]]; then
+        check_uring "$CURRENT_TARGET/profile" profiling
+    fi
+    for mode in $PROFILE_MODES; do
+        # The current generator and sampler drive both revisions, including old bases
+        # whose own harness cannot select the io_uring runtime.
+        build_workers "$ROOT" "$CURRENT_TARGET/profile" profiling "$mode"
+        LOAD_BIN=$CURRENT_TARGET/profile/profiling/moq-bench
+        HOST_CMD=("$LOAD_BIN" host)
+        for label in "${revisions[@]}"; do
+            checkout=$ROOT target=$CURRENT_TARGET/profile
+            if [[ $label == base ]]; then
+                checkout=$WORKTREE target=$BASE_TARGET/profile
+                build_workers "$checkout" "$target" profiling "$mode"
+            fi
+            run_profile "$mode" "$label" "$target/profiling/moq-relay"
+        done
+    done
+}
+
+# Run each QUEUED_BUILDS shell command with its output in the matching QUEUED_LOGS file, on
+# every allowed CPU and BENCH_BUILD_JOBS at a time: fat LTO links on one thread, but each
+# link takes gigabytes. Each runs as its own process group, so cleanup stops its rustc too.
+# Sets BUILD_STATUS to each command's exit status.
+run_queued_builds() {
+    local jobs=${BENCH_BUILD_JOBS:-4} first index launched
+    BUILD_STATUS=()
+    for ((first = 0; first < ${#QUEUED_BUILDS[@]}; first += jobs)); do
+        BUILD_PIDS=()
+        for ((index = first; index < first + jobs && index < ${#QUEUED_BUILDS[@]}; index++)); do
+            # setsid makes each build a group leader without forking.
+            setsid taskset -c "$ALLOWED_CPUS" bash -c "${QUEUED_BUILDS[$index]}" >"${QUEUED_LOGS[$index]}" 2>&1 &
+            BUILD_PIDS+=($!)
+        done
+        launched=${#BUILD_PIDS[@]}
+        for ((index = 0; index < launched; index++)); do
+            BUILD_STATUS[first + index]=0
+            wait "${BUILD_PIDS[$index]}" || BUILD_STATUS[first + index]=$?
+            # Reaped, so cleanup must not signal a group that ID may now name.
+            unset "BUILD_PIDS[$index]"
+        done
+    done
+}
+
+# Check out one revision in the checkout's ignored scratch space, where it loads
+# only its own Cargo configuration. Both the checkout and its target persist,
+# keyed by revision: a fresh checkout's new mtimes would rebuild every workspace
+# crate on a host without a compiler cache.
+revision_checkout() {
+    local sha=$1 label=$2 worktree=$ROOT/.tmp/bench-revisions/$1
+    if [[ ! -f $worktree/.git || $(git -C "$worktree" rev-parse HEAD 2>/dev/null) != "$sha" ]] ||
+        [[ -n $(git -C "$worktree" status --porcelain 2>/dev/null) ]]; then
+        git worktree remove --force "$worktree" >/dev/null 2>&1 || rm -rf "$worktree"
+        git worktree prune
+        mkdir -p "$ROOT/.tmp/bench-revisions"
+        git worktree add --detach "$worktree" "$sha" >/dev/null
+    fi
+    mkdir -p "$RUN/base-context/$label"
+    (cd "$worktree" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context/$label" "$sha" --profile)
+    REVISION_CHECKOUT=$worktree
+}
+
+# Count every base and the current tree in rotated order, so each round measures
+# all revisions back to back and no revision always runs first. One generator and
+# sampler drive every relay, including old bases whose own harness cannot select
+# the io_uring runtime: BENCH_GENERATOR's, or else the current tree's.
+run_instructions() {
+    local label sha round index next generator
+    # Measured revisions, then what gets built: those plus a generator measured nowhere.
+    local -a labels=() targets=() checkouts=()
+    for sha in ${BASES[@]+"${BASES[@]}"}; do
+        label=base
+        if ((${#BASES[@]} > 1)); then label=base-${sha:0:12}; fi
+        revision_checkout "$sha" "$label"
+        labels+=("$label")
+        checkouts+=("$REVISION_CHECKOUT")
+        targets+=("$TARGET/revisions/$sha/profile")
+    done
+    labels+=(current)
+    checkouts+=("$ROOT")
+    # The working tree changes under one target; Cargo's fingerprints track it.
+    targets+=("$TARGET/revisions/current/profile")
+    local -a build_labels=("${labels[@]}") build_checkouts=("${checkouts[@]}") build_targets=("${targets[@]}")
+    generator=${targets[-1]}
+    if [[ -n $GENERATOR ]]; then
+        generator=$TARGET/revisions/$GENERATOR/profile
+        if [[ " ${BASES[*]} " != *" $GENERATOR "* ]]; then
+            revision_checkout "$GENERATOR" generator
+            build_labels+=(generator)
+            build_checkouts+=("$REVISION_CHECKOUT")
+            build_targets+=("$generator")
+        fi
+    fi
+
+    mkdir -p "$RUN/build"
+    QUEUED_BUILDS=() QUEUED_LOGS=()
+    for ((index = 0; index < ${#build_labels[@]}; index++)); do
+        QUEUED_BUILDS+=("$(declare -f build_workers); build_workers $(printf '%q ' \
+            "${build_checkouts[$index]}" "${build_targets[$index]}" profiling instructions)")
+        QUEUED_LOGS+=("$RUN/build/${build_labels[$index]}.log")
+    done
+    run_queued_builds
+    for ((index = 0; index < ${#build_labels[@]}; index++)); do
+        if ((BUILD_STATUS[index] != 0)); then
+            printf 'build failed for %s:\n' "${build_labels[$index]}" >&2
+            tail -n 40 "$RUN/build/${build_labels[$index]}.log" >&2
+            return 1
+        fi
+        tail -n 1 "$RUN/build/${build_labels[$index]}.log"
+    done
+    LOAD_BIN=$generator/profiling/moq-bench
+    HOST_CMD=("$LOAD_BIN" host)
+    # A generator pinned before the sampler became `moq-bench host` built it as its
+    # own binary. Only a pinned generator's sha-keyed target is free of artifacts
+    # left by an older working tree.
+    if [[ -n $GENERATOR && -x $generator/profiling/moq-bench-host ]]; then
+        HOST_CMD=("$generator/profiling/moq-bench-host")
+    fi
+    if [[ $PROFILE_RUNTIME == io-uring-workers ]]; then
+        check_uring "${targets[-1]}" profiling
+    fi
+    for ((round = 1; round <= ROUNDS; round++)); do
+        for ((index = 0; index < ${#labels[@]}; index++)); do
+            next=$(((index + round - 1) % ${#labels[@]}))
+            run_profile instructions "${labels[$next]}/round-$round" "${targets[$next]}/profiling/moq-relay"
+        done
+    done
+    python3 "$ROOT/bench/instructions.py" summarize "$RUN" "${labels[@]}"
+}
+
+# Count the chat fan-out per delivered group on one thread, for every base and the current
+# tree: each `bench/fanout/<scenario>` harness builds against that revision's own crates and
+# lock, so a count is the code's alone, whatever else the host runs. A scenario whose API a
+# revision predates is reported unsupported rather than failing the run.
+run_fanout() {
+    if [[ $(uname -s) != Linux ]] || ! command -v perf >/dev/null; then
+        printf 'fan-out counts need Linux perf\n' >&2
+        return 1
+    fi
+    local cpu=${BENCH_FANOUT_CPU:-${ALLOWED_CPUS##*,}}
+    local label sha index scenario dir key binary status
+    local -a labels=() revisions=() checkouts=() keys=() build_dirs=() extra=()
+    for sha in ${BASES[@]+"${BASES[@]}"}; do
+        label=base
+        if ((${#BASES[@]} > 1)); then label=base-${sha:0:12}; fi
+        revision_checkout "$sha" "$label"
+        labels+=("$label")
+        revisions+=("$sha")
+        checkouts+=("$REVISION_CHECKOUT")
+        keys+=("$sha")
+    done
+    labels+=(current)
+    revisions+=("$(git rev-parse HEAD)")
+    checkouts+=("$ROOT")
+    # The working tree changes under one target; Cargo's fingerprints track it.
+    keys+=(current)
+
+    # A build cache that evicts the `target` directory under a long sweep fails every later
+    # build; BENCH_FANOUT_TARGET names a directory it doesn't manage.
+    local harnesses=${BENCH_FANOUT_TARGET:-$TARGET/fanout} target
+    QUEUED_BUILDS=() QUEUED_LOGS=()
+    for ((index = 0; index < ${#labels[@]}; index++)); do
+        for scenario in $FANOUT_SCENARIOS; do
+            dir=$RUN/fanout/${labels[$index]}/$scenario
+            mkdir -p "$dir"
+            cp -R "$ROOT/bench/fanout/$scenario/." "$dir/"
+            # This revision's crates, resolved by its own lock.
+            sed -i "s|path = \"../../../rs/|path = \"${checkouts[$index]}/rs/|" "$dir/Cargo.toml"
+            cp "${checkouts[$index]}/Cargo.lock" "$dir/Cargo.lock"
+            target=$harnesses/${keys[$index]}/$scenario
+            # shellcheck disable=SC2016 # expanded by the build's own shell
+            QUEUED_BUILDS+=("$(printf 'mkdir -p "$(readlink -m %q)" && cd %q && CARGO_TARGET_DIR=%q cargo build --release' \
+                "$target" "$dir" "$target")")
+            QUEUED_LOGS+=("$dir/build.log")
+            build_dirs+=("$dir")
+        done
+    done
+    run_queued_builds
+    for ((index = 0; index < ${#build_dirs[@]}; index++)); do
+        dir=${build_dirs[$index]}
+        if ((BUILD_STATUS[index] == 0)); then
+            continue
+        fi
+        if [[ $dir == "$RUN/fanout/current/"* ]]; then
+            printf 'the current tree'"'"'s fan-out harness failed to build:\n' >&2
+            tail -n 40 "$dir/build.log" >&2
+            return 1
+        fi
+        printf 'fan-out harness %s does not build; reported unsupported\n' "${dir#"$RUN"/fanout/}"
+        touch "$dir/unsupported"
+    done
+
+    if [[ -n ${BENCH_FANOUT_VERSION:-} ]]; then extra+=(--version "$BENCH_FANOUT_VERSION"); fi
+    if [[ -n ${BENCH_FANOUT_CALLGRIND:-} ]]; then extra+=(--callgrind); fi
+    printf 'Counting user instructions on CPU %s\n' "$cpu"
+    for scenario in $FANOUT_SCENARIOS; do
+        for ((index = 0; index < ${#labels[@]}; index++)); do
+            dir=$RUN/fanout/${labels[$index]}/$scenario
+            binary=$harnesses/${keys[$index]}/$scenario/release/fanout-$scenario
+            if [[ -f $dir/unsupported ]]; then binary=-; fi
+            # shellcheck disable=SC2086 # one argument per subscriber count
+            python3 "$ROOT/bench/fanout.py" measure "$RUN" "${labels[$index]}" "${revisions[$index]}" \
+                "$scenario" "$binary" "$cpu" $FANOUT_SUBSCRIBERS ${extra[@]+"${extra[@]}"}
+        done
+    done
+    python3 "$ROOT/bench/fanout.py" summarize "$RUN"
+}
+
+# Each profiled run follows an unprofiled control on the same binary, so the
+# throughput and CPU difference shows the profiler's overhead.
+run_profile() {
+    local mode=$1 label=$2 relay=$3
+    local workers control profiled
+    local INSTRUCTION_AFFINITY=false
+    if [[ $mode == instructions ]]; then INSTRUCTION_AFFINITY=true; fi
+    TRANSPORT=$PROFILE_TRANSPORT
+    case $mode in
+        lock)
+            printf '\nLock wait: %s over %s, %s, %s\n' "$PROFILE_WORKLOAD" "$TRANSPORT" "$PROFILE_RUNTIME" "$label"
+            printf '%-8s %5s %8s %13s %13s %10s %10s %13s %9s\n' \
+                workers idle switches control-fps profiled-fps control-CPU profiled-CPU mutex-wait-ms wait/CPU
+            ;;
+        cpu)
+            printf '\nCPU stacks: %s over %s, %s, %s, sampled at 999 Hz\n' "$PROFILE_WORKLOAD" "$TRANSPORT" "$PROFILE_RUNTIME" "$label"
+            printf '%-8s %13s %13s %10s %10s %9s %11s\n' \
+                workers control-fps profiled-fps control-CPU profiled-CPU samples sampled-CPU
+            ;;
+        heap)
+            printf '\nHeap: %s over %s, %s, %s, jemalloc retained MiB and churn over the steady window\n' "$PROFILE_WORKLOAD" "$TRANSPORT" "$PROFILE_RUNTIME" "$label"
+            printf '%-8s %13s %13s %10s %10s %10s %10s %9s %9s %9s %11s %10s\n' \
+                workers control-fps profiled-fps control-CPU profiled-CPU control-RSS profiled-RSS \
+                before steady teardown churn-MiB/s allocs/s
+            ;;
+        instructions)
+            printf '\nInstructions: %s over %s, %s, %s\n' "$PROFILE_WORKLOAD" "$TRANSPORT" "$PROFILE_RUNTIME" "$label"
+            ;;
+    esac
+    for workers in $PROFILE_WORKERS; do
+        # Instruction counts compare revisions under the same profiler, so the paired
+        # revisions are the control instead of an unprofiled run of each.
+        if [[ $mode != instructions ]]; then
+            run_workload "$label/control-$mode-$workers" "$relay" "$PROFILE_WORKLOAD" "$PROFILE_RUNTIME" "$workers"
+        fi
+        PROFILE=$mode
+        run_workload "$label/$mode-$workers" "$relay" "$PROFILE_WORKLOAD" "$PROFILE_RUNTIME" "$workers"
+        PROFILE=
+        control=$RUN/relay/$label/control-$mode-$workers/$PROFILE_WORKLOAD/summary.json
+        profiled=$RUN/relay/$label/$mode-$workers/$PROFILE_WORKLOAD
+        case $mode in
+            instructions)
+                jq -r '"\(.instructions_per_frame / 1000 | round) kinstr/frame at \(.recv_fps | round) fps"' \
+                    "$profiled/instructions/instructions.json"
+                ;;
+            lock)
+                jq -r -s '[
+                    .[0].recv_fps, .[1].recv_fps, .[0].cpu_cores, .[1].cpu_cores, (.[2].idle | length),
+                    ([.[2].workers[].switches] | min),
+                    ([.[2].workers[].mutex_wait_ns] | add / 1000000),
+                    ([.[2].workers[].mutex_wait_ns] | add) / ([.[2].workers[].cpu_ns] | add)
+                ] | @tsv' "$control" "$profiled/summary.json" "$profiled/lock/lock.json" |
+                    while IFS=$'\t' read -r control_fps profiled_fps control_cpu profiled_cpu idle switches wait share; do
+                        printf '%-8s %5s %8s %13.1f %13.1f %10.3f %10.3f %13.1f %9.4f\n' "$workers" "$idle" "$switches" \
+                            "$control_fps" "$profiled_fps" "$control_cpu" "$profiled_cpu" "$wait" "$share"
+                    done
+                ;;
+            cpu)
+                jq -r -s '[
+                    .[0].recv_fps, .[1].recv_fps, .[0].cpu_cores, .[1].cpu_cores, .[2].samples, .[2].sampled_cores
+                ] | @tsv' "$control" "$profiled/summary.json" "$profiled/cpu/cpu.json" |
+                    while IFS=$'\t' read -r control_fps profiled_fps control_cpu profiled_cpu samples sampled; do
+                        printf '%-8s %13.1f %13.1f %10.3f %10.3f %9s %11.3f\n' "$workers" \
+                            "$control_fps" "$profiled_fps" "$control_cpu" "$profiled_cpu" "$samples" "$sampled"
+                    done
+                ;;
+            heap)
+                jq -r -s '[
+                    .[0].recv_fps, .[1].recv_fps, .[0].cpu_cores, .[1].cpu_cores,
+                    (.[0].rss_bytes / 1048576), (.[1].rss_bytes / 1048576),
+                    (.[2].retained_bytes | .before, .["steady-end"], .teardown | . / 1048576),
+                    (.[2].churn_bytes_per_s / 1048576), .[2].churn_allocs_per_s
+                ] | @tsv' "$control" "$profiled/summary.json" "$profiled/heap/heap.json" |
+                    while IFS=$'\t' read -r control_fps profiled_fps control_cpu profiled_cpu control_rss profiled_rss \
+                        before steady teardown churn allocs; do
+                        printf '%-8s %13.1f %13.1f %10.3f %10.3f %10.1f %10.1f %9.1f %9.1f %9.1f %11.1f %10.0f\n' \
+                            "$workers" "$control_fps" "$profiled_fps" "$control_cpu" "$profiled_cpu" \
+                            "$control_rss" "$profiled_rss" "$before" "$steady" "$teardown" "$churn" "$allocs"
+                    done
+                ;;
+        esac
+    done
+    case $mode in
+        lock) printf '\nMutex stacks (flamegraph folded format): %s/relay/%s/lock-*/%s/lock/mutex.folded\n' "$RUN" "$label" "$PROFILE_WORKLOAD" ;;
+        cpu) printf '\nCPU stacks (flamegraph folded format): %s/relay/%s/cpu-*/%s/cpu/cpu.folded\n' "$RUN" "$label" "$PROFILE_WORKLOAD" ;;
+        heap) printf '\nHeap stacks (flamegraph folded format): %s/relay/%s/heap-*/%s/heap/{churn,retained,teardown}.folded\n' \
+            "$RUN" "$label" "$PROFILE_WORKLOAD" ;;
+    esac
 }
 
 cd "$ROOT"
 
-if [[ $MODE == --audio ]]; then
+if [[ $MODE == --criterion ]]; then
+    # Each invocation owns fresh results; previous runs cannot become new points.
+    python3 -c 'import json,sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))' \
+        "$RUN/criterion-command.json" "${@:2}"
+    if [[ -n ${BENCH_RUNS:-} ]]; then
+        printf '%s\n' "$RUN" >>"$BENCH_RUNS"
+    fi
+    measure_criterion
+    exit
+elif [[ $MODE == --audio ]]; then
     run_audio_comparison
     exit 0
 elif [[ $MODE == --runtime ]]; then
     run_runtime_comparison
     exit 0
-elif [[ $MODE == --lock ]]; then
-    run_lock_profile
+elif [[ $MODE == --profile ]]; then
+    run_profiles
+    exit 0
+elif [[ $MODE == --shard ]]; then
+    run_shard_sweep
+    exit 0
+elif [[ $MODE == --fanout ]]; then
+    run_fanout
     exit 0
 elif [[ -n $BASE ]]; then
     BASE_COMMIT=$(git rev-parse --verify "$BASE^{commit}")
-    WORKTREE=$RUN/base
-    git worktree add --detach "$WORKTREE" "$BASE_COMMIT" >/dev/null
+    checkout_base "$BASE_COMMIT"
     mkdir -p "$RUN/base-context"
     (
         cd "$WORKTREE"
@@ -569,20 +1296,21 @@ else
     run_criterion "$ROOT" --discard-baseline
     printf '\nBuilding relay binaries...\n'
 fi
+generate_certificate
 
 CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release -p moq-relay -p moq-bench
 LOAD_BIN=$CURRENT_TARGET/release/moq-bench
-HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
+HOST_CMD=("$LOAD_BIN" host)
 
 if [[ -n $BASE ]]; then
     printf '\nRelay workloads: paired base/current\n'
     for ((round = 1; round <= ROUNDS; round++)); do
         if ((round % 2)); then order=(base current); else order=(current base); fi
         printf '%s\t%s\n' "$round" "${order[*]}" >>"$RUN/execution-order.tsv"
-        for workload in video fanout; do
+        for case in "${RELAY_CASES[@]}"; do
             for label in "${order[@]}"; do
                 if [[ $label == base ]]; then relay=$RUN/moq-relay-base; else relay=$CURRENT_TARGET/release/moq-relay; fi
-                run_workload "$label/round-$round" "$relay" "$workload"
+                run_case "$label/round-$round" "$relay" "$case"
             done
         done
     done

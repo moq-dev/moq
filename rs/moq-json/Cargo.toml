@@ -12,10 +12,17 @@ rust-version.workspace = true
 keywords = ["quic", "http3", "webtransport", "json", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
+[package.metadata.docs.rs]
+features = ["async"]
+
+[features]
+default = []
+# Generated async wrappers for the poll methods. Enable where you `.await` them.
+async = ["kio/async"]
+
 [dependencies]
 bytes = { workspace = true }
 kio = { workspace = true }
-moq-flate = { workspace = true }
 moq-net = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -24,8 +31,14 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-criterion = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
+futures = { workspace = true }
 json-patch = "4"
+# Compile the generated wrappers used by the tests.
+moq-json = { path = ".", features = ["async"] }
+moq-net = { path = "../moq-net", features = ["async"] }
+proptest = { workspace = true, features = ["handle-panics"] }
+workspace-hack = { path = "../workspace-hack" }
 
 [[bench]]
 name = "codec"
@@ -42,3 +55,11 @@ harness = false
 [[bench]]
 name = "window"
 harness = false
+
+# Run the documented example's inline test in the normal nextest gate.
+[[example]]
+name = "teleop"
+test = true
+
+[lints]
+workspace = true

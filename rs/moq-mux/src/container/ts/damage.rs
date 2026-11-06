@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use web_async::time::Instant;
+use kio::clock::Instant;
 
 use super::stats;
 
@@ -28,7 +28,7 @@ impl Burst {
 
 impl Log {
 	pub fn record(&mut self, pid: u16, error: &anyhow::Error) {
-		let now = Instant::now();
+		let now = kio::clock::now();
 		self.flush(now);
 		let first = match self.bursts.entry(pid) {
 			std::collections::btree_map::Entry::Occupied(mut entry) => {
@@ -82,9 +82,14 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	#[ignore = "benchmark; runs in nightly"]
+	#[expect(
+		clippy::disallowed_methods,
+		clippy::disallowed_types,
+		reason = "the benchmark measures host CPU time"
+	)]
 	async fn benchmark_damage_pid_fanout() {
 		let error = anyhow::anyhow!("broken PES");
-		eprintln!("pids,damaged_units,ns_per_unit");
+		println!("pids,damaged_units,ns_per_unit");
 		for pids in [1_u16, 64, 8192] {
 			for units in [1, 16, 128] {
 				let mut log = Log::default();
@@ -103,7 +108,7 @@ mod tests {
 					}
 				}
 				let nanos = start.elapsed().as_nanos() as f64 / (10_000 * units) as f64;
-				eprintln!("{pids},{units},{nanos:.1}");
+				println!("{pids},{units},{nanos:.1}");
 			}
 		}
 	}
@@ -117,7 +122,7 @@ mod tests {
 		tokio::time::advance(stats::Log::INTERVAL / 2).await;
 		log.record(97, &error);
 		tokio::time::advance(stats::Log::INTERVAL / 2).await;
-		log.flush(Instant::now());
+		log.flush(kio::clock::now());
 		// This PID is quiet for a full interval before the next global summary tick.
 		tokio::time::advance(stats::Log::INTERVAL / 2).await;
 		log.record(97, &error);

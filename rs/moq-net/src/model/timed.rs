@@ -4,27 +4,25 @@ use crate::Timestamp;
 
 /// A value to publish, and optionally when it was captured.
 ///
-/// `T` is the clock the time is on: a raw [`Timestamp`] by default, or whatever a higher layer
-/// maps onto one. Converts from a bare payload (bytes, or a `&V` to serialize), so a producer
-/// taking one still accepts the plain value, stamped when written.
+/// Converts from a bare payload (bytes, or a `&V` to serialize), which stays untimed.
 #[derive(Debug, Clone, Copy)]
-pub struct Timed<P, T = Timestamp> {
+pub struct Timed<P> {
 	/// The value to publish.
 	pub value: P,
 
-	/// When the value was captured. `None` stamps it when written.
-	pub at: Option<T>,
+	/// When the value was captured. `None` leaves it untimed.
+	pub at: Option<Timestamp>,
 }
 
-impl<P, T> Timed<P, T> {
+impl<P> Timed<P> {
 	/// Set when the value was captured.
-	pub fn at(mut self, at: T) -> Self {
+	pub fn at(mut self, at: Timestamp) -> Self {
 		self.at = Some(at);
 		self
 	}
 }
 
-impl<B: Into<Bytes>, T> From<B> for Timed<Bytes, T> {
+impl<B: Into<Bytes>> From<B> for Timed<Bytes> {
 	fn from(value: B) -> Self {
 		Self {
 			value: value.into(),
@@ -33,8 +31,14 @@ impl<B: Into<Bytes>, T> From<B> for Timed<Bytes, T> {
 	}
 }
 
-impl<'a, V, T> From<&'a V> for Timed<&'a V, T> {
+impl<'a, V> From<&'a V> for Timed<&'a V> {
 	fn from(value: &'a V) -> Self {
+		Self { value, at: None }
+	}
+}
+
+impl From<u64> for Timed<u64> {
+	fn from(value: u64) -> Self {
 		Self { value, at: None }
 	}
 }
@@ -53,7 +57,7 @@ mod tests {
 		assert_eq!(stamped.at, Some(Timestamp::from_millis(5).unwrap()));
 
 		let value = 7u32;
-		let timed: Timed<&u32, std::time::Instant> = (&value).into();
+		let timed: Timed<&u32> = (&value).into();
 		assert_eq!(*timed.value, 7);
 	}
 }

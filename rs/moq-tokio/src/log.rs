@@ -10,7 +10,7 @@ use url::Url;
 
 /// Tracing log configuration.
 #[serde_with::serde_as]
-#[derive(Clone, usage::Args, Serialize, Deserialize, Debug)]
+#[derive(Clone, usage_rs::Args, Serialize, Deserialize, Debug)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -54,7 +54,8 @@ impl Log {
 			.with_default_directive(self.level().into()) // Default to our -q/-v args
 			.from_env_lossy() // Allow overriding with RUST_LOG
 			.add_directive("h2=warn".parse()?)
-			.add_directive("noq=info".parse()?)
+			.add_directive("moq_quic=info".parse()?)
+			.add_directive("moq_tokio::quic::driver=info".parse()?)
 			.add_directive("tungstenite=info".parse()?)
 			.add_directive("rustls=info".parse()?)
 			.add_directive("tracing::span=off".parse()?)

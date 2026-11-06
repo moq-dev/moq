@@ -1,0 +1,291 @@
+--- a/src/gen/functions.rs
++++ b/src/gen/functions.rs
+@@ -51,13 +51,14 @@
+         };
+ 
+         quote!(
+-            Future<$ret> $(DartCodeOracle::fn_name(func.name()))($args) {
++            UniffiRustFuture<$ret> $(DartCodeOracle::fn_name(func.name()))($args) {
+                 return uniffiRustCallAsync(
+                   () => $(func.ffi_func().name())(
+                     $(for arg in &func.arguments() => $(DartCodeOracle::lower_arg_with_callback_handling(arg)),)
+                   ),
+                   $(DartCodeOracle::async_poll(func, type_helper.get_ci())),
+                   $(DartCodeOracle::async_complete(func, type_helper.get_ci())),
++                  $(DartCodeOracle::async_cancel(func, type_helper.get_ci())),
+                   $(DartCodeOracle::async_free(func, type_helper.get_ci())),
+                   $async_lifter,
+                   $error_handler,
+--- a/src/gen/objects.rs
++++ b/src/gen/objects.rs
+@@ -171,13 +171,14 @@
+ 
+         if constructor.is_async() {
+             async_constructor_factories.push(quote! {
+-                static Future<$cls_name> $(DartCodeOracle::fn_name(constructor_name))($dart_params) {
++                static UniffiRustFuture<$cls_name> $(DartCodeOracle::fn_name(constructor_name))($dart_params) {
+                     return uniffiRustCallAsync(
+                       () => $ffi_func_name(
+                         $ffi_call_args
+                       ),
+                       $(DartCodeOracle::async_poll(constructor, type_helper.get_ci())),
+                       $(DartCodeOracle::async_complete(constructor, type_helper.get_ci())),
++                      $(DartCodeOracle::async_cancel(constructor, type_helper.get_ci())),
+                       $(DartCodeOracle::async_free(constructor, type_helper.get_ci())),
+                       (int handle) => $cls_name._(Pointer<Void>.fromAddress(handle)),
+                       $error_handler,
+@@ -439,7 +440,7 @@
+ 
+         quote! {
+             @override
+-            Future<$ret> $method_name($(for a in &dart_args => $a,)) {
++            UniffiRustFuture<$ret> $method_name($(for a in &dart_args => $a,)) {
+                 return uniffiRustCallAsync(
+                     () => $(method.ffi_func().name())(
+                         uniffiClonePointer(),
+@@ -447,6 +448,7 @@
+                     ),
+                     $(DartCodeOracle::async_poll(method, type_helper.get_ci())),
+                     $(DartCodeOracle::async_complete(method, type_helper.get_ci())),
++                    $(DartCodeOracle::async_cancel(method, type_helper.get_ci())),
+                     $(DartCodeOracle::async_free(method, type_helper.get_ci())),
+                     $async_lifter,
+                     $error_handler,
+@@ -528,7 +530,7 @@
+         };
+ 
+         quote!(
+-            Future<$ret> $(DartCodeOracle::fn_name(func.name()))($args) {
++            UniffiRustFuture<$ret> $(DartCodeOracle::fn_name(func.name()))($args) {
+                 return uniffiRustCallAsync(
+                   () => $(func.ffi_func().name())(
+                     uniffiClonePointer(),
+@@ -536,6 +538,7 @@
+                   ),
+                   $(DartCodeOracle::async_poll(func, type_helper.get_ci())),
+                   $(DartCodeOracle::async_complete(func, type_helper.get_ci())),
++                  $(DartCodeOracle::async_cancel(func, type_helper.get_ci())),
+                   $(DartCodeOracle::async_free(func, type_helper.get_ci())),
+                   $async_lifter,
+                   $error_handler,
+@@ -860,7 +863,7 @@
+     };
+ 
+     if method.is_async() {
+-        quote!(Future<$base>)
++        quote!(UniffiRustFuture<$base>)
+     } else {
+         base
+     }
+--- a/src/gen/oracle.rs
++++ b/src/gen/oracle.rs
+@@ -234,6 +234,12 @@
+     }
+ 
+     /// With @Native, async functions are called directly by name
++    pub fn async_cancel(callable: impl Callable, ci: &ComponentInterface) -> dart::Tokens {
++        let ffi_func = callable.ffi_rust_future_cancel(ci);
++        quote!($ffi_func)
++    }
++
++    /// With @Native, async functions are called directly by name
+     pub fn async_free(callable: impl Callable, ci: &ComponentInterface) -> dart::Tokens {
+         let ffi_func = callable.ffi_rust_future_free(ci);
+         quote!($ffi_func)
+--- a/src/gen/types.rs
++++ b/src/gen/types.rs
+@@ -307,6 +307,7 @@
+             const int CALL_SUCCESS = 0;
+             const int CALL_ERROR = 1;
+             const int CALL_UNEXPECTED_ERROR = 2;
++            const int CALL_CANCELLED = 3;
+ 
+             final class RustCallStatus extends Struct {
+                 @Int8()
+@@ -323,6 +324,8 @@
+                 return;
+                 } else if (status.ref.code == CALL_ERROR) {
+                 throw liftAndFree(status.ref.errorBuf, errorHandler.lift);
++                } else if (status.ref.code == CALL_CANCELLED) {
++                    throw const UniffiCancelledException();
+                 } else if (status.ref.code == CALL_UNEXPECTED_ERROR) {
+                 if (status.ref.errorBuf.len > 0) {
+                     throw UniffiInternalError.panicked(liftAndFree(status.ref.errorBuf, FfiConverterString.lift));
+@@ -547,78 +550,121 @@
+ 
+             final _uniffiRustFutureContinuationHandles = UniffiHandleMap<Completer<int>>();
+ 
+-            Future<T> uniffiRustCallAsync<T, F>(
++            $("/// A native call whose Future can cancel and release only its own operation.\n")
++            abstract interface class UniffiRustFuture<T> implements Future<T> {
++                $("/// Request cancellation and wait until native call cleanup finishes.\n")
++                Future<void> cancel();
++            }
++
++            $("/// The native operation was cancelled before producing a result.\n")
++            final class UniffiCancelledException implements Exception {
++                const UniffiCancelledException();
++
++                @override
++                String toString() => "Native operation cancelled";
++            }
++
++            final class _UniffiRustFuture<T> implements UniffiRustFuture<T> {
++                final Future<T> _future;
++                final void Function() _cancel;
++
++                _UniffiRustFuture(this._future, this._cancel);
++
++                @override
++                Future<void> cancel() {
++                    _cancel();
++                    return _future.then<void>((_) {}, onError: (Object error, StackTrace stack) {});
++                }
++
++                @override
++                Stream<T> asStream() => _future.asStream();
++
++                @override
++                Future<T> catchError(Function onError, {bool Function(Object)? test}) =>
++                    _future.catchError(onError, test: test);
++
++                @override
++                Future<R> then<R>(FutureOr<R> Function(T) onValue, {Function? onError}) =>
++                    _future.then(onValue, onError: onError);
++
++                @override
++                Future<T> timeout(Duration timeLimit, {FutureOr<T> Function()? onTimeout}) =>
++                    _future.timeout(timeLimit, onTimeout: onTimeout);
++
++                @override
++                Future<T> whenComplete(FutureOr<void> Function() action) =>
++                    _future.whenComplete(action);
++            }
++
++            UniffiRustFuture<T> uniffiRustCallAsync<T, F>(
+                 Pointer<Void> Function() rustFutureFunc,
+                 void Function(Pointer<Void>, Pointer<NativeFunction<UniffiRustFutureContinuationCallback>>, Pointer<Void>) pollFunc,
+                 F Function(Pointer<Void>, Pointer<RustCallStatus>) completeFunc,
++                void Function(Pointer<Void>) cancelFunc,
+                 void Function(Pointer<Void>) freeFunc,
+                 T Function(F) liftFunc, [
+                 UniffiRustCallStatusErrorHandler? errorHandler,
+-            ]) async {
+-                final rustFuture = rustFutureFunc();
+-                final completer = Completer<int>();
+-                final handle = _uniffiRustFutureContinuationHandles.insert(completer);
+-                final callbackData = Pointer<Void>.fromAddress(handle);
+-
+-                late final NativeCallable<UniffiRustFutureContinuationCallback> callback;
+-
+-                void repoll() {
+-                    pollFunc(
+-                        rustFuture,
+-                        callback.nativeFunction,
+-                        callbackData,
+-                    );
+-                }
+-
+-                void onResponse(int data, int pollResult) {
+-                    if (pollResult == UNIFFI_RUST_FUTURE_POLL_READY) {
+-                        final readyCompleter =
++            ]) {
++                Pointer<Void>? rustFuture;
++                var freed = false;
++                var cancelRequested = false;
++
++                Future<T> run() async {
++                    final nativeFuture = rustFutureFunc();
++                    rustFuture = nativeFuture;
++                    final completer = Completer<int>();
++                    final handle = _uniffiRustFutureContinuationHandles.insert(completer);
++                    final callbackData = Pointer<Void>.fromAddress(handle);
++                    late final NativeCallable<UniffiRustFutureContinuationCallback> callback;
++
++                    void repoll() {
++                        pollFunc(nativeFuture, callback.nativeFunction, callbackData);
++                    }
++
++                    void onResponse(int data, int pollResult) {
++                        if (freed || completer.isCompleted) return;
++                        if (pollResult == UNIFFI_RUST_FUTURE_POLL_READY) {
+                             _uniffiRustFutureContinuationHandles.maybeRemove(data);
+-                        if (readyCompleter != null && !readyCompleter.isCompleted) {
+-                            readyCompleter.complete(pollResult);
+-                        }
+-                    } else if (pollResult == UNIFFI_RUST_FUTURE_POLL_MAYBE_READY) {
+-                        repoll();
+-                    } else {
+-                        final errorCompleter =
++                            completer.complete(pollResult);
++                        } else if (pollResult == UNIFFI_RUST_FUTURE_POLL_MAYBE_READY) {
++                            repoll();
++                        } else {
+                             _uniffiRustFutureContinuationHandles.maybeRemove(data);
+-                        if (errorCompleter != null && !errorCompleter.isCompleted) {
+-                            errorCompleter.completeError(
+-                                UniffiInternalError.panicked(
+-                                    "Unexpected poll result from Rust future: $pollResult",
+-                                ),
++                            completer.completeError(
++                                UniffiInternalError.panicked("Unexpected native future poll result"),
+                             );
+                         }
+                     }
+-                }
+-
+-                callback = NativeCallable<UniffiRustFutureContinuationCallback>.listener(
+-                  onResponse,
+-                );
+ 
+-                try {
+-                    repoll();
+-                    await completer.future;
+-
+-                    final status = calloc<RustCallStatus>();
++                    callback = NativeCallable<UniffiRustFutureContinuationCallback>.listener(onResponse);
+                     try {
+-                        final result = completeFunc(rustFuture, status);
+-                        checkCallStatus(
+-                            errorHandler ?? NullRustCallStatusErrorHandler(),
+-                            status,
+-                        );
+-                        // Explicit type arguments: inferred from the async return
+-                        // context, T would widen to FutureOr<T> and trip
+-                        // unawaited_return_in_try_block.
+-                        return liftAndFree<T, F>(result, liftFunc);
++                        repoll();
++                        await completer.future;
++                        final status = calloc<RustCallStatus>();
++                        try {
++                            final result = completeFunc(nativeFuture, status);
++                            checkCallStatus(errorHandler ?? NullRustCallStatusErrorHandler(), status);
++                            return liftAndFree<T, F>(result, liftFunc);
++                        } finally {
++                            calloc.free(status);
++                        }
+                     } finally {
+-                        calloc.free(status);
++                        freed = true;
++                        _uniffiRustFutureContinuationHandles.maybeRemove(handle);
++                        try {
++                            freeFunc(nativeFuture);
++                        } finally {
++                            callback.close();
++                        }
+                     }
+-                } finally {
+-                    callback.close();
+-                    _uniffiRustFutureContinuationHandles.maybeRemove(handle);
+-                    freeFunc(rustFuture);
+                 }
++
++                return _UniffiRustFuture(run(), () {
++                    if (freed || cancelRequested) return;
++                    cancelRequested = true;
++                    final nativeFuture = rustFuture;
++                    if (nativeFuture != null) cancelFunc(nativeFuture);
++                });
+             }
+ 
+             typedef UniffiForeignFutureFree = Void Function(Uint64);

@@ -1,4 +1,4 @@
-use std::{io, string};
+use std::io;
 use thiserror::Error;
 
 /// Errors that can occur during the deserialization process
@@ -15,11 +15,6 @@ pub enum Amf0DeserializationError {
 	#[error("Encountered unknown marker: {marker}")]
 	UnknownMarker { marker: u8 },
 
-	/// Object properties consist of a name and value pair.  It is expected that every property
-	/// has a valid string name, and if the name is empty this error is raised.
-	#[error("Unexpected empty object property name")]
-	UnexpectedEmptyObjectPropertyName,
-
 	/// This occurs when we are expecting more data but hit the end of the buffer
 	/// (e.g. we are reading an object property but there was no property value).
 	#[error("Hit end of the byte buffer but was expecting more data")]
@@ -32,7 +27,7 @@ pub enum Amf0DeserializationError {
 	/// Strings in AMF0 are UTF-8 encoded, so if the bytes read are not valid
 	/// UTF-8 this error will be raised.
 	#[error("Failed to read a utf8 string from the byte buffer: {0}")]
-	StringParseError(#[from] string::FromUtf8Error),
+	StringParseError(#[from] std::str::Utf8Error),
 }
 
 /// Errors raised during to the serialization process

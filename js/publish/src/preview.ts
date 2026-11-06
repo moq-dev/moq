@@ -1,19 +1,21 @@
-import { Time } from "@moq/net";
+import { Micro, Milli, type Second } from "@moq/clock";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import * as Video from "@moq/video";
 import type { Fanout } from "./fanout";
 import type * as Encoder from "./video";
 
-export type { Backend, RendererError } from "@moq/video";
+export type { Backend } from "@moq/video";
 
-// What the canvas preview renders.
-// - `none`: nothing, an easy way to toggle the preview off without removing the element.
-// - `source`: the raw captured frames, drawn directly (cheap, no extra codec work).
-// - `encoded`: a decoded copy of the encoded video, so the preview shows the same codec
-//   artifacts a viewer would receive. This costs a full extra encode + decode pass.
+/**
+ * What the canvas preview renders.
+ * - `none`: nothing, an easy way to toggle the preview off without removing the element.
+ * - `source`: the raw captured frames, drawn directly (cheap, no extra codec work).
+ * - `encoded`: a decoded copy of the encoded video, so the preview shows the same codec
+ *   artifacts a viewer would receive. This costs a full extra encode + decode pass.
+ */
 export type Mode = "none" | "source" | "encoded";
 
-// Signals the preview reads.
+/** Signals the preview reads. */
 export type RendererInput = {
 	// The canvas to draw into. Undefined renders nothing.
 	canvas: Getter<HTMLCanvasElement | undefined>;
@@ -23,6 +25,8 @@ export type RendererInput = {
 	display: Getter<{ width: number; height: number } | undefined>;
 	// Whether to mirror the video horizontally.
 	flip: Getter<boolean>;
+	// Clockwise rotation needed to display the video upright.
+	rotation: Getter<number>;
 	// The encoder to re-encode through in `encoded` mode. Falls back to the raw frame when unset.
 	encoder: Getter<Encoder.Encoder | undefined>;
 	// What to render. Defaults to `source`.
@@ -38,11 +42,13 @@ export type RendererProps = Inputs<RendererInput>;
 
 /** Renders a `<canvas>` preview of the locally published video. */
 export class Renderer {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<RendererInput>;
 
+	/** The derived outputs, read-only. */
 	readonly out: Readonlys<{
-		// Why drawing stopped, or undefined while healthy. See {@link Video.RendererError}.
-		error: Getter<Video.RendererError | undefined>;
+		// Why drawing stopped, or undefined while healthy. See {@link Video.RendererOutput.error}.
+		error: Getter<Error | undefined>;
 	}>;
 
 	// Whether we've already warned about `encoded` mode without an encoder, so it fires at most once.
@@ -63,6 +69,7 @@ export class Renderer {
 			frames: getter(props?.frames),
 			display: getter(props?.display),
 			flip: getter(props?.flip ?? false),
+			rotation: getter(props?.rotation ?? 0),
 			encoder: getter(props?.encoder),
 			mode: getter(props?.mode ?? "source"),
 			enabled: getter(props?.enabled ?? true),
@@ -86,10 +93,15 @@ export class Renderer {
 			// until the first frame arrives.
 			display: this.#signals.computed((effect) => {
 				const current = effect.get(frame);
-				if (current) return { width: current.displayWidth, height: current.displayHeight };
-				return effect.get(this.in.display);
+				const display = current
+					? { width: current.displayWidth, height: current.displayHeight }
+					: effect.get(this.in.display);
+				return display ? Video.rotateVideoDimensions(display, effect.get(this.in.rotation)) : undefined;
 			}),
-			presentation: this.#signals.computed((effect) => ({ flip: effect.get(this.in.flip) })),
+			presentation: this.#signals.computed((effect) => ({
+				flip: effect.get(this.in.flip),
+				rotation: effect.get(this.in.rotation),
+			})),
 			backend: this.in.backend,
 		});
 		this.#signals.cleanup(() => video.close());
@@ -147,25 +159,33 @@ export class Renderer {
 			});
 		});
 
+		// Not raced against teardown, which would drop a frame whose read had already resolved.
 		effect.spawn(async () => {
 			for (;;) {
-				const next = await effect.race(reader.read());
-				if (!next?.value) break;
+				const { value: frame } = await reader.read();
+				if (!frame) break;
+
+				// The cleanup above already released the latest frame, so keep nothing past it.
+				if (effect.abort.aborted) {
+					frame.close();
+					break;
+				}
 
 				this.#latest.update((prev) => {
 					prev?.close();
-					return next.value;
+					return frame;
 				});
 			}
 		});
 	}
 
+	/** Stop and release everything this holds. */
 	close(): void {
 		this.#signals.close();
 	}
 }
 
-// Signals the transcoder reads.
+/** Signals the transcoder reads. */
 export type TranscodeInput = {
 	// The captured frames to re-encode. We subscribe for our own copies and close them.
 	source: Getter<Fanout<VideoFrame> | undefined>;
@@ -178,7 +198,8 @@ export type TranscodeInput = {
 /** Constructor options for {@link Transcode}. */
 export type TranscodeProps = Inputs<TranscodeInput>;
 
-type TranscodeOutput = {
+/** Signals the transcoder derives. */
+export type TranscodeOutput = {
 	// The decoded output frame. Owned here, closed on each update and on close().
 	frame: Signal<VideoFrame | undefined>;
 };
@@ -188,14 +209,23 @@ type TranscodeOutput = {
  * output frame is what a viewer would actually see after transmission.
  */
 export class Transcode {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<TranscodeInput>;
 
 	readonly #out: TranscodeOutput = {
 		frame: new Signal<VideoFrame | undefined>(undefined),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();
+	#active?: {
+		effect: Effect;
+		encoder: VideoEncoder;
+		codec: string;
+		width: number;
+		height: number;
+	};
 
 	constructor(props?: TranscodeProps) {
 		this.in = {
@@ -204,14 +234,58 @@ export class Transcode {
 			settings: getter(props?.settings),
 		};
 		this.#signals.run(this.#run.bind(this));
+		this.#signals.cleanup(() => {
+			this.#active?.effect.close();
+			this.#active = undefined;
+		});
 	}
 
 	#run(effect: Effect): void {
 		const config = effect.get(this.in.config);
-		if (!config) return;
+		const active = this.#active;
+		if (!config) {
+			active?.effect.close();
+			this.#active = undefined;
+			return;
+		}
 
+		if (
+			active &&
+			active.encoder.state !== "closed" &&
+			active.codec === config.codec &&
+			active.width === config.width &&
+			active.height === config.height
+		) {
+			try {
+				active.encoder.configure(config);
+			} catch (error) {
+				console.warn("preview: encode configuration error", error);
+				active.effect.close();
+			}
+			return;
+		}
+
+		active?.effect.close();
+		this.#active = undefined;
+		// Config notifications may reconfigure a healthy encoder; only codec/size changes or a
+		// previous failure replace the codec pair and its frame ownership scope.
+		const run = new Effect();
+		try {
+			const encoder = this.#start(run, config);
+			this.#active = { effect: run, encoder, codec: config.codec, width: config.width, height: config.height };
+		} catch (error) {
+			console.warn("preview: codec setup error", error);
+			run.close();
+		}
+	}
+
+	#start(effect: Effect, config: VideoEncoderConfig): VideoEncoder {
 		const decoder = new VideoDecoder({
 			output: (frame: VideoFrame) => {
+				if (effect.abort.aborted) {
+					frame.close();
+					return;
+				}
 				this.#out.frame.update((prev) => {
 					prev?.close();
 					return frame;
@@ -228,7 +302,13 @@ export class Transcode {
 
 		const encoder = new VideoEncoder({
 			output: (chunk: EncodedVideoChunk) => {
-				if (decoder.state === "configured") decoder.decode(chunk);
+				if (effect.abort.aborted || decoder.state !== "configured") return;
+				try {
+					decoder.decode(chunk);
+				} catch (error) {
+					console.warn("preview: decode error", error);
+					effect.close();
+				}
 			},
 			error: (err: Error) => {
 				console.warn("preview: encode error", err);
@@ -239,13 +319,19 @@ export class Transcode {
 			if (encoder.state !== "closed") encoder.close();
 		});
 
+		effect.cleanup(() => {
+			this.#out.frame.update((prev) => {
+				prev?.close();
+				return undefined;
+			});
+		});
 		encoder.configure(config);
 
 		// The encoder emits Annex B (inline SPS/PPS on keyframes), so the decoder needs no description.
 		decoder.configure({ codec: config.codec, optimizeForLatency: true });
 
 		// Re-key on the same cadence as the real encoder so the decoder can start and recover.
-		let lastKeyframe: Time.Micro | undefined;
+		let lastKeyframe: Micro | undefined;
 
 		effect.run((inner) => {
 			const fanout = inner.get(this.in.source);
@@ -257,26 +343,31 @@ export class Transcode {
 				reader.cancel().catch(() => {});
 			});
 
+			// Not raced against teardown, which would drop a frame whose read had already resolved.
 			inner.spawn(async () => {
 				for (;;) {
-					const next = await inner.race(reader.read());
-					if (!next?.value) break;
+					const { value: frame } = await reader.read();
+					if (!frame) break;
 
 					// Ours now, so close it once the encoder has taken what it needs.
-					const frame = next.value;
 					try {
+						if (inner.abort.aborted) break;
 						if (encoder.state !== "configured") continue;
 
 						// Mirror Encoder.serve: default to a 2s GOP unless the rendition overrides it.
 						const settings = this.in.settings.peek();
-						const interval = settings?.keyframeInterval ?? Time.Milli.fromSecond(2 as Time.Second);
+						const interval = settings?.keyframeInterval ?? Milli.fromSecond(2 as Second);
 
-						const timestamp = frame.timestamp as Time.Micro;
+						const timestamp = frame.timestamp as Micro;
 						const keyFrame =
-							lastKeyframe === undefined || lastKeyframe + Time.Micro.fromMilli(interval) <= timestamp;
+							lastKeyframe === undefined || lastKeyframe + Micro.fromMilli(interval) <= timestamp;
 						if (keyFrame) lastKeyframe = timestamp;
 
 						encoder.encode(frame, { keyFrame });
+					} catch (error) {
+						console.warn("preview: encode error", error);
+						effect.close();
+						break;
 					} finally {
 						frame.close();
 					}
@@ -284,12 +375,7 @@ export class Transcode {
 			});
 		});
 
-		effect.cleanup(() => {
-			this.#out.frame.update((prev) => {
-				prev?.close();
-				return undefined;
-			});
-		});
+		return encoder;
 	}
 
 	/** Stop transcoding and close the last output frame. */

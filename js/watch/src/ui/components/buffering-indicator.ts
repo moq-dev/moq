@@ -17,12 +17,15 @@ export function bufferingIndicator(parent: Effect, watch: MoqWatch): HTMLElement
 			effect.get(watch.audio.in.enabled) &&
 			effect.get(watch.audio.source.out.config) !== undefined &&
 			effect.get(watch.controls.delay) !== "instant";
-		const buffering = effect.get(watch.video.out.stalled) || (audio && effect.get(watch.audio.out.stalled));
+		const video = effect.get(watch.video.source.out.config) !== undefined;
+		const buffering =
+			(video && effect.get(watch.video.out.stalled)) || (audio && effect.get(watch.audio.out.stalled));
 		const status = effect.get(watch.broadcast.out.status);
 		const online = status === "loading" || status === "live";
-		const unsupported = effect.get(watch.video.source.out.error) === "unsupported";
+		const unsupported = effect.get(watch.video.source.out.error)?.name === "NotSupportedError";
 		const paused = effect.get(watch.controls.paused);
-		container.style.display = buffering && online && !unsupported && !paused ? "" : "none";
+		container.style.display =
+			(status === "loading" || buffering) && online && !unsupported && !paused ? "" : "none";
 	});
 
 	return container;

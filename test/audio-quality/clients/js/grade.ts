@@ -40,12 +40,7 @@ if (summaries.length === 0) {
 /** A budget applies to exactly one matrix cell, matched on the whole row. */
 const budgetFor = (row: Row) =>
 	budgets.rows.find(
-		(b) =>
-			b.runtime === row.runtime &&
-			b.codec === row.codec &&
-			b.rate === row.rate &&
-			b.profile === row.profile &&
-			b.ring === row.ring,
+		(b) => b.runtime === row.runtime && b.codec === row.codec && b.rate === row.rate && b.profile === row.profile,
 	);
 
 const failures: string[] = [];
@@ -69,6 +64,7 @@ for (const summary of summaries) {
 
 /** The columns a reader scans first: what the listener would have noticed, and the delay paid for it. */
 const COLUMNS: [string, string][] = [
+	["player underruns/min", "player_underruns_per_min"],
 	["underruns/min", "underruns_per_min"],
 	["short/min", "short_quanta_per_min"],
 	["episodes/min", "underrun_episodes_per_min"],

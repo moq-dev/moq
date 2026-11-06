@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { RefusedRedirect } from "../error.ts";
-import * as Time from "../time.ts";
 import { dialed, handover, isLocal, pinnedTransport, type Redirect, target } from "./goaway.ts";
 
 const current = new URL("https://relay.example/room?jwt=secret");
@@ -102,9 +102,9 @@ test("a certificate pin holds only the WebTransport session that used it", () =>
 });
 
 test("the handover is the cap, lowered only by a positive peer deadline", () => {
-	const cap = Time.Milli(10_000);
+	const cap = Milli(10_000);
 	expect(handover(cap)).toBe(cap);
-	expect(handover(cap, Time.Milli(0))).toBe(cap);
-	expect(handover(cap, Time.Milli(3_000))).toBe(Time.Milli(3_000));
-	expect(handover(cap, Time.Milli(3_600_000))).toBe(cap);
+	expect(handover(cap, Milli(0))).toBe(cap);
+	expect(handover(cap, Milli(3_000))).toBe(Milli(3_000));
+	expect(handover(cap, Milli(3_600_000))).toBe(cap);
 });

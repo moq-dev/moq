@@ -31,7 +31,7 @@ use super::{Capture, DEFAULT_FRAMERATE, Kind, Target, drm_format, err, linear_mo
 use crate::capture::mode::{self, Request};
 use crate::capture::v4l2::{DEFAULT_HEIGHT, DEFAULT_WIDTH, bounds};
 use crate::capture::{Camera, Config, Mode, PIPEWIRE, Stream};
-use crate::{Error, Rate, Size};
+use crate::{Error, FrameRate, Size};
 
 /// How long the PipeWire daemon may take to answer a query. A connected daemon
 /// answers in milliseconds, so running out means it is stuck.
@@ -49,6 +49,7 @@ pub(in crate::capture) async fn cameras(v4l2: &[Camera]) -> Result<Vec<Camera>, 
 	} else {
 		None
 	};
+	let v4l2 = v4l2.to_vec();
 	let nodes = crate::capture::blocking(move || {
 		pw::init();
 		let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|e| err("pipewire main loop", e))?;
@@ -64,24 +65,52 @@ pub(in crate::capture) async fn cameras(v4l2: &[Camera]) -> Result<Vec<Camera>, 
 			Err(error) => return Err(err("pipewire connect", error)),
 		};
 		let registry = core.get_registry_rc().map_err(|e| err("pipewire registry", e))?;
-		scan(&mainloop, &core, &registry)
+		let nodes = unlisted(scan(&mainloop, &core, &registry)?, &v4l2);
+		// Hide a node with no format we convert, as the V4L2 listing does: an IR
+		// camera that offers only GREY would list an id `open` refuses. A node
+		// whose formats cannot be read stays, since `open` reports why.
+		let formats = match formats_each(&mainloop, &core, &registry, &nodes) {
+			Ok(formats) => formats,
+			Err(error) => {
+				tracing::debug!(%error, "could not list PipeWire camera formats");
+				return Ok(nodes);
+			}
+		};
+		Ok(nodes
+			.into_iter()
+			.zip(formats)
+			.filter_map(|(node, formats)| match formats {
+				Ok(formats) if formats.is_empty() => {
+					tracing::debug!(node = %node.name, "PipeWire camera offers no format we convert");
+					None
+				}
+				Ok(_) => Some(node),
+				Err(error) => {
+					tracing::debug!(node = %node.name, %error, "could not list PipeWire camera formats");
+					Some(node)
+				}
+			})
+			.collect())
 	})
 	.await?;
 
-	Ok(camera_list(nodes, v4l2))
+	Ok(nodes
+		.into_iter()
+		.map(|node| Camera {
+			id: format!("{PIPEWIRE}:{}", node.name),
+			name: node.description,
+		})
+		.collect())
 }
 
-fn camera_list(nodes: Vec<Node>, v4l2: &[Camera]) -> Vec<Camera> {
+/// Drop the nodes the V4L2 listing already enumerated.
+fn unlisted(nodes: Vec<Node>, v4l2: &[Camera]) -> Vec<Node> {
 	nodes
 		.into_iter()
 		.filter(|node| {
 			!v4l2
 				.iter()
 				.any(|camera| node.v4l2_path.as_deref() == Some(camera.id.as_str()))
-		})
-		.map(|node| Camera {
-			id: format!("{PIPEWIRE}:{}", node.name),
-			name: node.description,
 		})
 		.collect()
 }
@@ -378,7 +407,7 @@ pub(super) struct Format {
 	/// The sizes on offer. A size range contributes its corners.
 	sizes: Vec<Size>,
 	/// The exact rates on offer, highest first. Empty for a rate range.
-	rates: Vec<Rate>,
+	rates: Vec<FrameRate>,
 	/// The size range, when the size is one, which also offers the grid size
 	/// nearest the request.
 	ranged: Option<Grid>,
@@ -436,8 +465,8 @@ impl Grid {
 }
 
 /// Whether the rate range `min..=max` holds `rate`, compared as cross products
-/// because a range may start at 0/1, which is no valid [`Rate`].
-fn holds(min: spa::utils::Fraction, max: spa::utils::Fraction, rate: Rate) -> bool {
+/// because a range may start at 0/1, which is no valid [`FrameRate`].
+fn holds(min: spa::utils::Fraction, max: spa::utils::Fraction, rate: FrameRate) -> bool {
 	let (num, denom) = (u64::from(rate.numerator()), u64::from(rate.denominator()));
 	u64::from(min.num) * denom <= num * u64::from(min.denom) && num * u64::from(max.denom) <= u64::from(max.num) * denom
 }
@@ -448,7 +477,7 @@ pub(super) struct Selected {
 	encoding: Encoding,
 	size: Size,
 	/// `None` when the camera reports a rate range and no rate in it was requested.
-	framerate: Option<Rate>,
+	framerate: Option<FrameRate>,
 }
 
 impl Selected {
@@ -522,7 +551,7 @@ impl Selected {
 	}
 }
 
-fn fraction(rate: Rate) -> spa::utils::Fraction {
+fn fraction(rate: FrameRate) -> spa::utils::Fraction {
 	spa::utils::Fraction {
 		num: rate.numerator(),
 		denom: rate.denominator(),
@@ -536,35 +565,95 @@ fn formats(
 	registry: &pw::registry::RegistryRc,
 	node: &Node,
 ) -> Result<Vec<Format>, Error> {
-	let proxy: pw::node::Node = registry
-		.bind(&pw::registry::GlobalObject {
-			id: node.id,
-			permissions: pw::permissions::PermissionFlags::empty(),
-			type_: pw::types::ObjectType::Node,
-			version: 0,
-			props: None::<&spa::utils::dict::DictRef>,
-		})
-		.map_err(|e| err("pipewire node", e))?;
-	let formats = Rc::new(RefCell::new(Vec::new()));
-	let _listener = proxy
-		.add_listener_local()
-		.param({
-			let formats = formats.clone();
-			move |_, id, _, _, param| {
-				if id != spa::param::ParamType::EnumFormat {
-					return;
+	let mut formats = formats_each(mainloop, core, registry, std::slice::from_ref(node))?;
+	formats.pop().expect("one result per node")
+}
+
+/// List the formats each of `nodes` offers that this backend converts, in one
+/// roundtrip so a stuck daemon costs one [`QUERY_TIMEOUT`] however many nodes
+/// there are.
+///
+/// The outer error is the daemon failing to answer. A node that answers with an
+/// error, or with only formats that cannot be read, gets an error of its own.
+fn formats_each(
+	mainloop: &pw::main_loop::MainLoopRc,
+	core: &pw::core::CoreRc,
+	registry: &pw::registry::RegistryRc,
+	nodes: &[Node],
+) -> Result<Vec<Result<Vec<Format>, Error>>, Error> {
+	#[derive(Default)]
+	struct Query {
+		formats: Vec<Format>,
+		failure: Option<String>,
+	}
+	let mut queries = Vec::with_capacity(nodes.len());
+	for node in nodes {
+		let proxy: pw::node::Node = registry
+			.bind(&pw::registry::GlobalObject {
+				id: node.id,
+				permissions: pw::permissions::PermissionFlags::empty(),
+				type_: pw::types::ObjectType::Node,
+				version: 0,
+				props: None::<&spa::utils::dict::DictRef>,
+			})
+			.map_err(|e| err("pipewire node", e))?;
+		let query = Rc::new(RefCell::new(Query {
+			formats: Vec::new(),
+			failure: None,
+		}));
+		let params = proxy
+			.add_listener_local()
+			.param({
+				let query = query.clone();
+				move |_, id, _, _, param| {
+					if id != spa::param::ParamType::EnumFormat {
+						return;
+					}
+					let Some(param) = param else { return };
+					let mut query = query.borrow_mut();
+					match spa::pod::deserialize::PodDeserializer::deserialize_any_from(param.as_bytes()) {
+						Ok((_, value)) => query.formats.extend(parse_format(&value)),
+						Err(e) => {
+							tracing::debug!(error = ?e, "unreadable PipeWire EnumFormat");
+							query
+								.failure
+								.get_or_insert_with(|| format!("unreadable EnumFormat: {e:?}"));
+						}
+					}
 				}
-				let Some(param) = param else { return };
-				match spa::pod::deserialize::PodDeserializer::deserialize_any_from(param.as_bytes()) {
-					Ok((_, value)) => formats.borrow_mut().extend(parse_format(&value)),
-					Err(e) => tracing::debug!(error = ?e, "unreadable PipeWire EnumFormat"),
+			})
+			.register();
+		// A node error (the device gone, or busy) arrives on the proxy, not the core.
+		let errors = pw::proxy::ProxyT::upcast_ref(&proxy)
+			.add_listener_local()
+			.error({
+				let query = query.clone();
+				move |_, _, message| {
+					query.borrow_mut().failure.get_or_insert_with(|| message.to_string());
 				}
+			})
+			.register();
+		proxy.enum_params(0, Some(spa::param::ParamType::EnumFormat), 0, u32::MAX);
+		// Tuple fields drop in order: unregister the listeners before destroying the
+		// proxy, whose `pw_proxy_destroy` frees their hook list when the server already
+		// removed the node.
+		queries.push((node, query, params, errors, proxy));
+	}
+	roundtrip(mainloop, core)?;
+	Ok(queries
+		.into_iter()
+		.map(|(node, query, ..)| {
+			let Query { formats, failure } = query.take();
+			match failure {
+				// Formats that were read still describe the node.
+				Some(failure) if formats.is_empty() => Err(Error::Codec(anyhow::anyhow!(
+					"PipeWire camera {} formats: {failure}",
+					node.name
+				))),
+				_ => Ok(formats),
 			}
 		})
-		.register();
-	proxy.enum_params(0, Some(spa::param::ParamType::EnumFormat), 0, u32::MAX);
-	roundtrip(mainloop, core)?;
-	Ok(formats.take())
+		.collect())
 }
 
 /// Read one `EnumFormat` or `Format` pod into the formats it offers that this
@@ -625,9 +714,9 @@ fn parse_format(value: &Value) -> Vec<Format> {
 		}
 		_ => (Vec::new(), None),
 	};
-	let rate = |fraction: &spa::utils::Fraction| Rate::new(fraction.num, fraction.denom).ok();
+	let rate = |fraction: &spa::utils::Fraction| FrameRate::new(fraction.num, fraction.denom).ok();
 	let framerate = property(FormatProperties::VideoFramerate);
-	let mut rates: Vec<Rate> = match framerate {
+	let mut rates: Vec<FrameRate> = match framerate {
 		Some(Value::Fraction(fraction)) => rate(fraction).into_iter().collect(),
 		Some(Value::Choice(ChoiceValue::Fraction(choice))) => listed(&choice.1).iter().filter_map(rate).collect(),
 		_ => Vec::new(),
@@ -685,7 +774,7 @@ fn select(formats: &[Format], want: Request) -> Option<Selected> {
 			.and_then(|grid| grid.nearest(want.size))
 			.into_iter()
 			.chain(format.sizes.iter().copied());
-		let rates: Vec<Option<Rate>> = if format.rates.is_empty() {
+		let rates: Vec<Option<FrameRate>> = if format.rates.is_empty() {
 			let held = want
 				.framerate
 				.filter(|&rate| format.rate_range.is_some_and(|(min, max)| holds(min, max, rate)));
@@ -759,20 +848,20 @@ mod tests {
 			id: "/dev/video0".into(),
 			name: webcam.description.clone(),
 		}];
-		assert!(camera_list(vec![webcam.clone()], &v4l2).is_empty());
-		assert_eq!(camera_list(vec![webcam.clone()], &[]).len(), 1);
+		assert!(unlisted(vec![webcam.clone()], &v4l2).is_empty());
+		assert_eq!(unlisted(vec![webcam.clone()], &[]).len(), 1);
 		// An identical label on another device must not hide it.
 		props.pop();
 		props.push(("api.v4l2.path", "/dev/video2"));
-		assert_eq!(camera_list(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		assert_eq!(unlisted(vec![node(&props).unwrap()], &v4l2).len(), 1);
 		// Missing paths and non-V4L2 backends are not proof of duplication.
 		props.pop();
-		assert_eq!(camera_list(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		assert_eq!(unlisted(vec![node(&props).unwrap()], &v4l2).len(), 1);
 		props.pop();
 		props.extend([("device.api", "libcamera"), ("api.v4l2.path", "/dev/video0")]);
-		assert_eq!(camera_list(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		assert_eq!(unlisted(vec![node(&props).unwrap()], &v4l2).len(), 1);
 		props.remove(props.len() - 2);
-		assert_eq!(camera_list(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		assert_eq!(unlisted(vec![node(&props).unwrap()], &v4l2).len(), 1);
 		// Listing never removes nodes from explicit or priority-based resolution.
 		assert_eq!(
 			resolve(std::slice::from_ref(&webcam), Some(&webcam.name)).unwrap(),
@@ -906,7 +995,7 @@ mod tests {
 		assert_eq!(formats.len(), 5);
 		assert_eq!(formats[0].encoding, Encoding::Mjpeg);
 		assert_eq!(formats[0].sizes, [Size::new(1280, 720)]);
-		assert_eq!(formats[0].rates, [Rate::new(30, 1).unwrap()]);
+		assert_eq!(formats[0].rates, [FrameRate::new(30, 1).unwrap()]);
 		assert_eq!(formats[3].encoding, Encoding::Raw(VideoFormat::YUY2));
 	}
 
@@ -979,7 +1068,7 @@ mod tests {
 	fn request(width: u32, height: u32, fps: Option<u32>) -> Request {
 		Request {
 			size: Size::new(width, height),
-			framerate: fps.map(|fps| Rate::new(fps, 1).unwrap()),
+			framerate: fps.map(|fps| FrameRate::new(fps, 1).unwrap()),
 		}
 	}
 
@@ -1084,7 +1173,7 @@ mod tests {
 			(selected.encoding, selected.framerate)
 		};
 		let nv12 = Encoding::Raw(VideoFormat::NV12);
-		let rate = |fps| Some(Rate::new(fps, 1).unwrap());
+		let rate = |fps| Some(FrameRate::new(fps, 1).unwrap());
 		assert_eq!(pick(Some(60)), (nv12, rate(60)));
 		assert_eq!(pick(Some(30)), (nv12, rate(30)));
 		// Out of the range, the exact rate elsewhere is the better answer.
@@ -1092,8 +1181,8 @@ mod tests {
 		// Nothing requested: the range stays open and the cheaper format wins.
 		assert_eq!(pick(None), (nv12, None));
 
-		assert!(holds(ratio(0, 1), ratio(30, 1), Rate::new(30000, 1001).unwrap()));
-		assert!(!holds(ratio(0, 1), ratio(30, 1), Rate::new(30001, 1000).unwrap()));
+		assert!(holds(ratio(0, 1), ratio(30, 1), FrameRate::new(30000, 1001).unwrap()));
+		assert!(!holds(ratio(0, 1), ratio(30, 1), FrameRate::new(30001, 1000).unwrap()));
 	}
 
 	/// The offer pins the chosen mode, and only NV12 gets a DMA-BUF offer.
@@ -1117,7 +1206,7 @@ mod tests {
 		let mjpeg = Selected {
 			encoding: Encoding::Mjpeg,
 			size: Size::new(1920, 1080),
-			framerate: Some(Rate::new(30, 1).unwrap()),
+			framerate: Some(FrameRate::new(30, 1).unwrap()),
 		};
 		let offers = mjpeg.offers();
 		assert_eq!(offers.len(), 1);

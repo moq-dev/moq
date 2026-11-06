@@ -1,9 +1,11 @@
-/** How a frame is oriented on screen: a clockwise rotation, then an optional horizontal mirror. */
+/** How a frame is shown: deinterlaced if needed, then rotated clockwise, then optionally mirrored. */
 export type Presentation = {
 	/** Clockwise rotation in degrees, rounded to the nearest quarter-turn. Defaults to 0. */
 	rotation?: number;
 	/** Mirror the rotated picture horizontally. Defaults to false. */
 	flip?: boolean;
+	/** The frame weaves two fields, so blend adjacent lines to hide the combing. Defaults to false. */
+	interlaced?: boolean;
 };
 
 /** A width and height in pixels. */

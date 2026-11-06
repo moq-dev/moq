@@ -7,8 +7,9 @@ pub struct SessionInfo {
 	pub bitrate: Option<u64>,
 }
 
-impl Message for SessionInfo {
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Message<'a> for SessionInfo {
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Session);
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {}
 			_ => {

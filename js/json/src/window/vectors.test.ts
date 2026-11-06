@@ -1,11 +1,16 @@
 import { expect, test } from "bun:test";
-import { Decoder } from "./decoder.ts";
+import { Decoder, type Event } from "./decoder.ts";
 import { Encoder } from "./encoder.ts";
 
-// Shared cross-impl fixture, owned by the reference Rust crate. This file is the wire contract
-// between the two implementations, so a change here is a format change and both suites move together.
+// Shared frame strings pin the wire contract; expected events pin decoder semantics.
+// The reference Rust crate owns the fixture and both suites assert it.
 const url = new URL("../../../../rs/moq-json/tests/window-vectors.json", import.meta.url);
-const vectors = (await Bun.file(url).json()) as Array<{ name: string; first: boolean; frame: string }>;
+const vectors = (await Bun.file(url).json()) as Array<{
+	name: string;
+	first: boolean;
+	frame: string;
+	events: Event<unknown>[];
+}>;
 
 const frames = new Map(vectors.map((v) => [v.name, v.frame]));
 const text = (payload: Uint8Array) => new TextDecoder().decode(payload);
@@ -35,14 +40,14 @@ test("the encoder emits the shared frame bytes", () => {
 });
 
 test("the encoder emits the shared group header bytes", () => {
-	// opRatio 0 forces every edit to restate the window in a new group.
-	const encoder = new Encoder<{ n: number }>({ opRatio: 0 });
+	// Without ops every edit restates the window in a new group.
+	const encoder = new Encoder<{ n: number }>({ ops: false });
 	commit(encoder.push({ n: 0 }));
 	expect(commit(encoder.push({ n: 1 }))).toBe(frame("group header from zero"));
 });
 
 test("the encoder emits the shared bounded checkpoint bytes", () => {
-	const encoder = new Encoder<{ n: number }>({ opRatio: 0, checkpointRecords: 1 });
+	const encoder = new Encoder<{ n: number }>({ ops: false, checkpointRecords: 1 });
 	commit(encoder.push({ n: 0 }));
 	expect(commit(encoder.push({ n: 1 }))).toBe(frame("group header with a bounded checkpoint"));
 });
@@ -57,6 +62,9 @@ for (const vector of vectors) {
 			while (decoder.next());
 		}
 
-		expect(() => group.decode(new TextEncoder().encode(vector.frame))).not.toThrow();
+		group.decode(new TextEncoder().encode(vector.frame));
+		const events: Event<unknown>[] = [];
+		for (let event = decoder.next(); event; event = decoder.next()) events.push(event);
+		expect(events).toEqual(vector.events);
 	});
 }

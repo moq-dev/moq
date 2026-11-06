@@ -1,18 +1,19 @@
 //! Settings registry for `moq-relay`.
 //!
-//! `usage::Cli` and `usage::Config` reject each other's attributes, so every
-//! merged flag is declared twice. [`usage::config::Registry::drift`] is the test
+//! `usage_rs::Cli` and `usage_rs::Config` reject each other's attributes, so every
+//! merged flag is declared twice. [`usage_rs::config::Registry::drift`] is the test
 //! that the two stay in step.
 
-#![allow(dead_code)]
+#![allow(
+	dead_code,
+	reason = "declares the settings for the usage registry; nothing reads the fields"
+)]
 
 /// Every setting `moq-relay` merges, flattened tokio groups included.
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 pub struct Settings {
 	#[usage(flatten)]
-	session: Session,
-	#[usage(flatten)]
-	peer: Peer,
+	limits: Limits,
 	#[usage(flatten)]
 	listen: moq_tokio::settings::Listen,
 
@@ -40,6 +41,10 @@ pub struct Settings {
 	#[usage(flatten)]
 	stats: Stats,
 
+	#[cfg(feature = "stun")]
+	#[usage(flatten)]
+	stun: Stun,
+
 	#[usage(flatten)]
 	cache: Cache,
 
@@ -48,13 +53,9 @@ pub struct Settings {
 
 	#[usage(env = "MOQ_DRAIN_TIMEOUT", cli("--drain-timeout"))]
 	drain_timeout: Option<String>,
-
-	#[cfg(feature = "iroh")]
-	#[usage(flatten)]
-	iroh: moq_tokio::settings::Iroh,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "runtime")]
 struct Runtime {
 	#[usage(env = "MOQ_RUNTIME_WORKERS", cli("--runtime-workers"))]
@@ -67,20 +68,23 @@ struct Runtime {
 	io_uring: Option<bool>,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "cluster")]
 struct Cluster {
 	#[usage(env = "MOQ_CLUSTER_ID", cli("--cluster-id"))]
 	id: Option<u64>,
 
+	#[usage(env = "MOQ_CLUSTER_ROUTE_KEY", cli("--cluster-route-key"))]
+	route_key: Option<String>,
+
+	#[usage(env = "MOQ_CLUSTER_MAX_HOPS", cli("--cluster-max-hops"))]
+	max_hops: Option<usize>,
+
 	#[usage(env = "MOQ_CLUSTER_CONNECT", cli("--cluster-connect"), parse = "list_by_comma")]
 	connect: Option<Vec<String>>,
 
-	#[usage(env = "MOQ_CLUSTER_CONNECT_API", cli("--cluster-connect-api"))]
-	connect_api: Option<String>,
-
-	#[usage(env = "MOQ_CLUSTER_CONNECT_API_TLS_ROOT", cli("--cluster-connect-api-tls-root"))]
-	connect_api_tls_root: Option<Vec<String>>,
+	#[usage(flatten)]
+	api: ClusterApi,
 
 	#[usage(env = "MOQ_CLUSTER_NODE", cli("--cluster-node"))]
 	node: Option<String>,
@@ -96,8 +100,24 @@ struct Cluster {
 	lan: ClusterLan,
 }
 
+#[derive(usage_rs::Config)]
+#[usage(prefix = "cluster.api")]
+struct ClusterApi {
+	#[usage(env = "MOQ_CLUSTER_API_URL", cli("--cluster-api-url"))]
+	url: Option<String>,
+	#[usage(flatten)]
+	tls: ClusterApiTls,
+}
+
+#[derive(usage_rs::Config)]
+#[usage(prefix = "cluster.api.tls")]
+struct ClusterApiTls {
+	#[usage(env = "MOQ_CLUSTER_API_TLS_ROOT", cli("--cluster-api-tls-root"))]
+	root: Option<Vec<String>>,
+}
+
 #[cfg(feature = "cluster-lan")]
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "cluster.lan")]
 struct ClusterLan {
 	#[usage(env = "MOQ_CLUSTER_LAN", cli("--cluster-lan"))]
@@ -110,11 +130,14 @@ struct ClusterLan {
 	app: Option<String>,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "auth")]
 struct Auth {
 	#[usage(env = "MOQ_AUTH_URL", cli("--auth-url"))]
 	url: Option<String>,
+
+	#[usage(env = "MOQ_AUTH_ROOT", cli("--auth-root"))]
+	root: Option<Vec<String>>,
 
 	#[usage(env = "MOQ_AUTH_PUBLIC", cli("--auth-public"), parse = "list_by_comma")]
 	public: Option<Vec<String>>,
@@ -134,7 +157,7 @@ struct Auth {
 	public_publish: Option<Vec<String>>,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "web")]
 struct Web {
 	#[usage(env = "MOQ_WEB_WS", cli("--web-ws"))]
@@ -147,14 +170,14 @@ struct Web {
 	https: WebHttps,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "web.http")]
 struct WebHttp {
 	#[usage(env = "MOQ_WEB_HTTP_LISTEN", cli("--web-http-listen"))]
 	listen: Option<String>,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "web.https")]
 struct WebHttps {
 	#[usage(env = "MOQ_WEB_HTTPS_LISTEN", cli("--web-https-listen"))]
@@ -170,7 +193,7 @@ struct WebHttps {
 	root: Option<Vec<String>>,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "stats")]
 struct Stats {
 	#[usage(env = "MOQ_STATS_ENABLED", cli("--stats-enabled"))]
@@ -180,7 +203,7 @@ struct Stats {
 	prefix: Option<String>,
 
 	#[usage(env = "MOQ_STATS_INTERVAL", cli("--stats-interval"))]
-	interval: Option<u64>,
+	interval: Option<String>,
 
 	#[usage(env = "MOQ_STATS_NODE", cli("--stats-node"))]
 	node: Option<String>,
@@ -192,7 +215,7 @@ struct Stats {
 	linger: Option<String>,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "cache")]
 struct Cache {
 	#[usage(env = "MOQ_CACHE_CAPACITY", cli("--cache-capacity"))]
@@ -205,27 +228,55 @@ struct Cache {
 	duration: Option<String>,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "internal")]
 struct Internal {
 	#[usage(env = "MOQ_INTERNAL_LISTEN", cli("--internal-listen"))]
 	listen: Option<String>,
 }
 
-#[derive(usage::Config)]
-#[usage(prefix = "session")]
-struct Session {
-	#[usage(env = "MOQ_SESSION_ANNOUNCES", cli("--session-announces"))]
-	announces: Option<usize>,
-	#[usage(env = "MOQ_SESSION_SUBSCRIPTIONS", cli("--session-subscriptions"))]
-	subscriptions: Option<usize>,
+#[derive(usage_rs::Config)]
+struct Limits {
+	#[usage(flatten)]
+	client: Client,
+	#[usage(flatten)]
+	peer: Peer,
 }
 
-#[derive(usage::Config)]
-#[usage(prefix = "peer")]
-struct Peer {
-	#[usage(env = "MOQ_PEER_ANNOUNCES", cli("--peer-announces"))]
+#[derive(usage_rs::Config)]
+#[usage(prefix = "limits.client")]
+struct Client {
+	#[usage(env = "MOQ_LIMITS_CLIENT_ANNOUNCES", cli("--limits-client-announces"))]
 	announces: Option<usize>,
-	#[usage(env = "MOQ_PEER_SUBSCRIPTIONS", cli("--peer-subscriptions"))]
-	subscriptions: Option<usize>,
+}
+
+#[derive(usage_rs::Config)]
+#[usage(prefix = "limits.peer")]
+struct Peer {
+	#[usage(env = "MOQ_LIMITS_PEER_ANNOUNCES", cli("--limits-peer-announces"))]
+	announces: Option<usize>,
+	#[usage(flatten)]
+	quic: PeerQuic,
+}
+
+#[derive(usage_rs::Config)]
+#[usage(prefix = "limits.peer.quic")]
+struct PeerQuic {
+	#[usage(env = "MOQ_LIMITS_PEER_QUIC_MAX_STREAMS", cli("--limits-peer-quic-max-streams"))]
+	max_streams: Option<u64>,
+	#[usage(
+		env = "MOQ_LIMITS_PEER_QUIC_RECEIVE_WINDOW",
+		cli("--limits-peer-quic-receive-window")
+	)]
+	receive_window: Option<u64>,
+	#[usage(env = "MOQ_LIMITS_PEER_QUIC_SEND_WINDOW", cli("--limits-peer-quic-send-window"))]
+	send_window: Option<u64>,
+}
+
+#[cfg(feature = "stun")]
+#[derive(usage_rs::Config)]
+#[usage(prefix = "stun")]
+struct Stun {
+	#[usage(env = "MOQ_STUN_BIND", cli("--stun-bind"))]
+	bind: Option<String>,
 }

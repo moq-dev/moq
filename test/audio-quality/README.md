@@ -1,23 +1,25 @@
 # Audio quality
 
-Plays a tone in headless Chromium over a seeded, impaired UDP path and grades what the listener
-would have heard: how often the ring ran dry, how much audio a re-anchor threw away, how much of the
-run was silent, and where the playout delay settled. A regression in any of them fails a row
-against [`budgets.json`](budgets.json) instead of arriving as a bug report.
+Plays a tone in headless Chromium and in the native `moq play` over a seeded, impaired UDP path and
+grades what the listener would have heard: how often the ring ran dry, how much audio a re-anchor
+threw away, how much of the run was silent, and where the playout delay settled. A regression in
+any of them fails a row against [`budgets.json`](budgets.json) instead of arriving as a bug report,
+and a divergence between the two players shows up as one failing where the other passes.
 
 ```bash
 just test audio-quality                                        # the whole matrix, 60s a row
 just test audio-quality --list                                 # what it would run
 just test audio-quality --profiles mild --codecs opus --duration 20
-just test audio-quality --rings plain                          # the production path only
+just test audio-quality --runtimes chromium                    # the browser player and the replays
+just test audio-quality --runtimes native                      # the native player only
 just test audio-quality --out ~/runs/after                     # keep the run directory
 just test audio-quality --enforce                              # fail on the budgets
 just test audio-quality --profiles bursty --capture --out ~/runs/burst # keep arrival evidence
 just test audio-quality --replays                              # the replays only, in seconds
 ```
 
-The matrix is codec x profile x ring: 24 browser rows, about 30 minutes, plus 8 [replay
-rows](#traces) of recorded arrivals. `--profiles`, `--rings`, and `--codecs` take comma-separated
+The matrix is runtime x codec x profile: 12 browser rows and 12 [native rows](#native-rows), about 30
+minutes, plus 5 [replay rows](#traces) of recorded arrivals. `--profiles`, `--runtimes`, and `--codecs` take comma-separated
 lists; `--seed` replays a given impairment. The table prints either way, and only `--enforce` (which
 the nightly job passes) turns a breach into a failed run.
 
@@ -25,13 +27,9 @@ the nightly job passes) turns a breach into a failed run.
 
 | Axis | Values |
 | --- | --- |
+| runtime | `chromium` for `@moq/watch`, `native` for `moq play`; the recorded traces replay through the browser player |
 | codec | `opus` at 48 kHz over fMP4, `aac` at 44.1 kHz over MPEG-TS |
 | profile | see below |
-| ring | `isolated` (SharedArrayBuffer, cross-origin isolated page) and `plain` (postMessage) |
-
-`plain` is the production path: most pages are not cross-origin isolated. One build is served under
-`/isolated/` with COOP and COEP and under `/plain/` without, and the page's `crossOriginIsolated`
-decides which ring ran.
 
 | Profile | Path | Delay |
 | --- | --- | --- |
@@ -57,8 +55,8 @@ quiet quantum at the output is always a gap or a stall and never the soundtrack.
 ## The path
 
 ```text
-  page  ──UDP──▶  moq-shaper  ──▶  moq-relay     WebTransport, the impaired path
-  moq (opus, aac)  ─────────────▶  moq-relay     the publishers, on the clean path
+  page or moq play  ──UDP──▶  moq-shaper  ──▶  moq-relay     WebTransport, the impaired path
+  moq (opus, aac)  ─────────────────────────▶  moq-relay     the publishers, on the clean path
 ```
 
 Every port is reserved for the run ([the harness contract](../README.md)), and the shaper is the
@@ -71,6 +69,31 @@ dials, so the driver answers that fetch with the relay's own hash (the certifica
 hash, so a different port needs nothing more). With nothing listening on TCP there, the WebSocket
 fallback cannot connect: the session is WebTransport through the shaper, or the row is void.
 
+## Native rows
+
+The `native` runtime is the shipped binary, `moq play --video off`, through the same shaper on the same
+profiles, writing [`--metrics`](../../doc/bin/cli.md#play) samples in the `Sample` shape below, which
+the same analyzer reduces and the same budget file grades. It plays through the production
+ALSA/cpal output into a private PulseAudio null sink ([`../lib/pulse.py`](../lib/pulse.py)), one per
+row, as [`native-play`](../native-play/README.md) does, so a real device callback is part of what is
+measured. The driver dials the shaper with the relay's certificate pinned by hash and voids the row
+unless the player's log names WebTransport.
+
+The counters come from the player's output callback rather than a tap on its output: it folds every
+buffer it plays into 128-frame quanta at the device rate and classifies each by what the ring
+supplied (`moq_audio::playback::Observer`). The meanings are the browser's, with three differences
+in what the native player does:
+
+- Its ring stretches received PCM toward the target. A ring that still runs dry
+  emits emergency silence while received PCM refills it; `silence` counts that padding.
+  Native `stalled` is only a sink with nothing written yet.
+- The playhead is projected from the player's last write at the wall rate and held at its end.
+- `device` is the host's reported output latency, with no `baseLatency`, and `render_load` is
+  unmeasured.
+
+These rows grade end-to-end budgets with real device noise in them. They do not compare the two
+players' target series, so a difference in totals alone says nothing about the estimator.
+
 ## Diagnosing live rows
 
 Every browser sample includes the current PROBE RTT, Sync's network buffer, and the selected
@@ -78,22 +101,81 @@ rendition's advertised jitter and delay. These distinguish a target increase cau
 transport from one declared by the publisher. The final page environment keeps the full audio
 configuration.
 
-`--capture` also writes `<tag>.arrivals.ndjson`: `[at, timestamp, group]` on the same viewer clock as
+`--capture` also writes `<tag>.arrivals.ndjson`: `[at, timestamp, group, duration]` on the same viewer clock as
 `<tag>.ndjson`, before the container orders or skips groups. The observer shares the player's
 connection and track, priority, and subscription max delay (at least 2 s at "auto", as the decoder
 asks, not the target), so it adds no upstream subscription demand and still sees a frame later than
 the target.
 Groups drain concurrently, so an earlier stalled group cannot hide a later arrival. Capture
 errors void the row. Capture adds local decoding and recording work; it is off by default and
-on in nightly so a run preserves the inputs for diagnosis.
+on in nightly so a run preserves the inputs for diagnosis. It also records native main-thread
+long tasks in `<tag>.longtasks.json`, on the same viewer clock. `--trace` implies capture and adds a
+Chromium GC timeline in `<tag>.trace.json` and sampled CPU profile in `<tag>.profile.json`.
+Tracing can perturb playback; compare it with a separate
+untraced control and never use traced rows to calibrate quality budgets.
 
-To replay a capture, put its arrivals and final environment configuration into the version 2
+To replay a capture, put its arrivals and final environment configuration into the version 3
 `Trace` below, subtract the first arrival's `at` from every arrival and from the last sample's
 `at` for the duration, and supply the observed minimum RTT as a diagnostic. Replay measures the
 target from the arrivals and holds the configuration constant; compare the raw samples when it
 changed during the live run. The observer only
 records frames delivered under the player's maximum age, so a replay cannot recover groups the
 transport already discarded.
+
+## Push-to-talk
+
+```bash
+just test push-to-talk
+```
+
+This separate, roughly nine-minute run drives the shipped publish and watch elements in one Chromium
+page. A constant tone loops through the fake microphone, encoded as 128 kbit/s Opus with 60 ms
+frames. A release mutes the publisher, which sends nothing until the next press while its rendition
+stays enabled, so the listener keeps its subscription and plays comfort noise in between. The
+listener holds a fixed 300 ms delay. After warmup and a mute, it measures 22 presses,
+alternating two and three seconds: the first after the warmup's five-second mute, seven with no
+intervening wait, seven after five seconds, and seven after sixty seconds. Both elements reach a
+local relay directly over WebTransport, with no shaping, loss, or queueing, so every millisecond
+measured belongs to the media pipeline rather than the path.
+
+`presses.json` records captured chunks at each press, WebCodecs encoder and decoder inputs and
+outputs, container writes, frame arrivals before reordering, and audible output onsets. Publisher,
+receiver, and worklet observations share the page's monotonic clock. A listening worklet detects
+each output onset above -40 dBFS, which clears the comfort noise (at most -60 dBFS RMS). Its render time is mapped through the context's render clock, read with
+the page clock when the port message lands, so a late message moves neither boundary; its projected
+output comes from `getOutputTimestamp`. This measures the browser's projected device output, not
+acoustic output from a physical speaker. Zero-gap presses can remain continuously audible, and a
+later onset can belong to the preceding utterance. Their audible latency is always null. Only
+separated presses have an identifiable onset.
+
+`summary.json` matches inputs, outputs, writes, and arrivals by media timestamp, so a late arrival
+is still attributed to its utterance. The command checks pipeline completeness, not the epic's
+latency verdict. It refuses missing encoder inputs, a head that never reaches the listener or never
+decodes, submitted frames that never encode or reach the container, written frames that never reach
+the listener, reopened capture, a new encoder (a probe or a rebuilt codec) or subscription, a mute
+that disables or drops the rendition, any underrun or stall across the presses, and separated
+utterances with no audible output. It also fails on a broken driver or invalid capture.
+
+The latency goal is at most 300 ms of playout added on top of one-way delivery. For each separated
+press, `delivery` is the slowest of the utterance's frames that arrived before its onset, measured
+from that frame's first sample (its media offset after the press). `playout` is what remains of the
+render onset after the press and that delivery, and `output` is the projected device output after
+that onset. `path` follows the head frame from the press to projected output in parts that sum to
+it: `capture` (worklet delivery and framing, after the media the frame still needed),
+`packetization` (that media, placed on the media clock by the newest chunk captured before the
+press), `encode` (codec and container write), `network` (write to arrival, through the relay),
+`decode` (arrival to decoded PCM), `jitter_buffer` (the head's PCM to the first PCM that fills the
+playout delay in effect as it lands, which each press reports as `delay`), `render` (that PCM to the render onset: the worklet hand-off and the context's
+render callback), and `device`, as the stages below name them. The onset is placed on the render
+clock, which a context rendering in large callbacks runs up to one callback ahead of the page, so
+there `render` can be negative and `device` larger by as much. `spread` is how far an utterance's frames
+stray from a steady arrival: the latest arrival relative to its media timestamp minus the earliest,
+which on this ideal path is the capture graph's cadence and what `"auto"`'s jitter estimate measures.
+`latency`, `path` and `delay` give each one's min, median and max.
+
+The command prints `latency`, `path`, `delay`, the completeness counts, and `playback`'s underruns and
+stalls, and keeps its run directory even when it passes (set `HARNESS_KEEP=0` to drop it). Nightly runs it and keeps the raw evidence
+alongside the audio quality rows.
 
 ## Traces
 
@@ -102,25 +184,29 @@ The shaper's profiles are synthetic. [`traces/`](traces) holds real arrivals, ea
 
 | Trace | Recorded from |
 | --- | --- |
-| `relay-bbb` | the public relay's `bbb.hang`: one AAC frame per group, flushed in bursts of about seven, the flush-span shape #3477 measured |
-| `local-aac` | this harness's AAC publisher through a local relay: the shallow control |
-| `relay-mic` | `<moq-publish>` in headless Chromium, publishing its fake capture device through the public relay |
-| `bursty-aac` | a nightly `bursty` AAC row's capture: each flush delivered newest first, which kept the player re-stalling until the estimator measured reordered frames |
+| `relay-bbb` | the public relay's `bbb.hang`: one AAC frame per group, flushed in bursts of about seven, the flush-span shape #3477 measured, from before `moq import ts` grouped each PES |
+| `local-aac` | this harness's AAC publisher through a local relay, from before it grouped each PES: the shallow control |
+| `relay-mic` | `<moq-publish>` through the public relay: a real microphone with `--mic-broadcast` (the checked-in one is Chrome on a MacBook Air, its built-in microphone), otherwise headless Chromium's fake capture device |
+| `bursty-aac` | a nightly `bursty` AAC row's capture, from when the publisher sent each frame as its own group: each flush delivered newest first, which kept the player re-stalling until the estimator measured reordered frames |
+| `relay-mic-rtt40` | a page playing a real microphone (Chrome on a MacBook Air) through the public relay with 40 ms of added round trip: the steady-state re-stalls time stretch must remove |
 
 A trace is a [`Trace`](clients/js/src/schema.ts): the catalog's audio rendition, the smallest
-PROBE round trip the session saw, how long it observed, and every frame's `[at, timestamp, group]`,
-with `at` on the viewer's clock. `record.ts` stamps a frame as it comes off its group's stream, the way
-`Container.Consumer` receives it, using only public `@moq/net` and `@moq/hang` in the same Chromium
-over WebTransport. It stamps before the consumer's in-order delivery, whose waits and skips depend
+PROBE round trip the session saw, how long it observed, and every frame's `[at, timestamp, group, duration]`,
+with `at` on the viewer's clock and `duration` in ms. Duration comes from the container's sample
+metadata, the Opus packet TOC, or the codec's fixed sample count. Capture refuses a frame whose
+duration cannot be determined; timestamp gaps never stand in for missing packet payloads.
+`record.ts` stamps a frame as it comes off its group's stream, the way `Container.Consumer`
+receives it, with the same transport, container, and codec-duration readers over WebTransport. It stamps before the consumer's in-order delivery, whose waits and skips depend
 on the delay, so the replay decides those again.
 
-`replay.ts` plays a trace through the player's own `Container.Consumer` and rings on a simulated
+`replay.ts` plays a trace through the player's own `Container.Consumer` and ring on a simulated
 clock ([`js/watch/src/audio/replay.ts`](../../js/watch/src/audio/replay.ts)), at the "auto" delay a
 real `Sync` resolves from the playout target that consumer measures, and reads each quantum through
 the tap's classifier. The consumer makes the player's group ordering, max delay skips, and
 discontinuity resets again at that delay, and the ring follows the delay as it moves; a group's stream is taken to finish with its last recorded frame. Every
-frame is the trace's median spacing long, so a frame that never arrived stays missing audio, and
-rendering runs to the end of the observation, so an outage after the last arrival is heard. It
+frame plays for its recorded encoded duration, so missing packets stay missing audio even when
+most frames never arrive. The target's codec term follows delivered packet durations, as the
+decoder's does. Rendering runs to the end of the observation, so an outage after the last arrival is heard. It
 writes the same samples a page does, so `analyze.ts` reduces both alike, and the shaper, transport,
 and clock checks have nothing to void. Decoding is taken as instant. A replay is deterministic, so
 its budgets are exactly what it measured.
@@ -128,7 +214,18 @@ its budgets are exactly what it measured.
 ```bash
 just test audio-quality-record                        # the three recorded lanes, 35 s each, needs the network
 just test audio-quality-record --lanes relay-bbb
+just test audio-quality-record --lanes relay-mic --mic-broadcast <name>
 ```
+
+`--mic-broadcast` records `relay-mic` from a broadcast already publishing audio on the public relay's
+`anon` path, such as the demo's publish page pointed at `https://cdn.moq.dev/anon` with a real
+microphone, instead of publishing Chromium's fake capture device. Name the browser and device in
+the trace's `source` before checking it in.
+
+Version 3 adds per-frame durations. The AAC-LC recordings made before that field existed retain
+their arrival clocks and use the codec's fixed 1024 samples per frame. The Opus `relay-mic` recording
+is a real microphone captured with `--mic-broadcast`, with its packet durations retained. The
+recorder's own path had a 2 ms round trip, so it carries no added RTT.
 
 Recording is by hand: the public relay and a browser publisher are not something a nightly run
 should depend on. Re-measure the replay budgets after re-recording. The recorder asks the relay for
@@ -140,8 +237,8 @@ capture converted by the recipe [above](#diagnosing-live-rows).
 
 [`clients/js/src/schema.ts`](clients/js/src/schema.ts) is the contract. The page emits `Sample`s,
 [`src/analyze.ts`](clients/js/src/analyze.ts) reduces a row to a `Summary`, and `grade.ts` reads that
-against the budgets. A native lane or the latency ledger that emits the same `Summary` is comparable
-by construction.
+against the budgets. `moq play --metrics` emits the same `Sample`s, so a native row is comparable by
+construction, as is any other lane that emits the same `Summary`.
 
 **Units.** Every duration is milliseconds as a float, every count an integer, every share a fraction
 of 1. Samples missing at the device rate are converted to ms before they reach a summary.
@@ -165,11 +262,14 @@ row: it is a throttled or stalled context, and everything counted on it would be
 samples), `max`, `share` (of the window), or `last`. So "underruns: 3" and "underruns: 3/min" are
 different keys and are never graded against each other.
 
-**Counters.** The player publishes no count of its own underruns, so the page fans a listening
-AudioWorklet out from the player's output node. The player's render worklet copies what the ring
-holds into the front of each 128-sample quantum and leaves the rest zero, so the tap reads every
-quantum's fill level from the output itself:
+**Counters.** The page fans a listening AudioWorklet out from the player's output node. The
+player's render worklet copies what the ring holds into the front of each 128-sample quantum and
+leaves the rest zero, so the tap reads every quantum's fill level from the output itself. The
+player's own count, which its stats panel shows, is read alongside:
 
+- `player_underruns`: `audio.out.stats.underruns`, each time the ring ran dry mid-playback and
+  re-stalled to refill, plus each quantum it filled only part-way. The tap files the quanta after a
+  run-dry as stalled time, so `underruns` leaves those out and this counts them. Unset natively.
 - `underruns`: quanta the ring filled only partly, or not at all, while playing.
 - `short_quanta`: the underruns that were partly filled: the ring ran dry part-way through.
 - `underrun_episodes`: maximal runs of consecutive underruns, one audible gap each.
@@ -205,32 +305,35 @@ replay row crosses no shaper, so the `shaper` void does not apply to it.
 
 | Void | Why |
 | --- | --- |
-| `shaper` | It exited nonzero (a configured impairment never acted), left no report, or forwarded nothing to the page. |
+| `shaper` | It exited nonzero (a configured impairment never acted), left no report, or forwarded nothing to the player. |
 | `transport` | The session negotiated something other than WebTransport. |
-| `ring` | `crossOriginIsolated` does not match the row's ring, so the other ring ran. |
-| `clock` | The AudioContext clock was unreadable or ran more than 1% off the viewer's. |
+| `clock` | The render clock (the AudioContext's, or the native device's) was unreadable or ran more than 1% off the viewer's from first audio on. |
 | `window` | No audio after the warmup. |
-| `driver` | The page never reached a session and first audio within 20 s, or the driver threw. |
+| `driver` | The player never reached a session and first audio within 20 s, failed mid-row, did not exit cleanly on Ctrl-C (which includes `--metrics` falling behind its device), or the driver threw. |
 
 ## Budgets
 
 `budgets.json` holds a ceiling per graded key per row, keyed by the whole row: runtime, codec, rate,
-profile, and ring. Under `--enforce` a run fails on a breach, a budgeted key the run left
+and profile. Under `--enforce` a run fails on a breach, a budgeted key the run left
 unmeasured, a void row, or a row with no budget. Tightening a ceiling is a visible diff; loosening
 one needs a reason in review. The file's `note` says how the current ceilings were measured: the
-browser rows come from several nightly runs, not a developer machine.
+browser rows come from several nightly runs, not a developer machine; the native rows are provisional,
+from a developer machine, until the nightly runner has measured them.
 
-The nightly `Audio quality` job runs the matrix under `--enforce` and keeps every run directory for a
-week as the `audio-quality-run` artifact: each process's log, the shaper's counters, every row's raw
+The nightly `Audio quality` job runs the browser rows under `--enforce` and the native rows reporting
+only, until an intermittent two-second device stall that voids about one AAC native row in seven is
+fixed. It keeps every run directory for a week as the `audio-quality-run` artifact: each process's log, the shaper's counters, every row's raw
 samples and summary. The
-replays also run under `--enforce` on every PR that touches the player's packages (`js/watch`,
-`js/hang`, `js/net`, `js/signals`) or the harness (`.github/workflows/audio-quality.yml`), so a
-change that moves them updates `budgets.json` in the same PR.
+replays also run under `--enforce` nightly on `main` and on every release PR that touches the
+player's packages (`js/watch`, `js/hang`, `js/net`, `js/signals`) or the harness
+(`.github/workflows/audio-quality.yml`). A change that moves them updates `budgets.json` in the
+same PR, so run `just test audio-quality --replays --enforce` before pushing one.
 
 ## Layout
 
 ```text
 run.sh                 builds, starts the relay and publishers, runs each row behind the shaper
+../lib/pulse.py        the native rows' private PulseAudio null sink
 record.sh              records traces/, by hand
 relay.toml             anonymous relay, self-signed cert
 budgets.json           a ceiling per metric per row
@@ -242,6 +345,7 @@ clients/js/
   src/schema.ts            the metric contract
   src/analyze.ts           samples to a summary, unit tested
   driver.ts                one row in headless Chromium, and its void checks
+  native.ts                one row of `moq play --metrics`, and its void checks
   recorder.html mic.html   the recorder and the microphone publisher (src/recorder.ts, src/mic.ts)
   record.ts                one trace in headless Chromium
   replay.ts                the replay rows, written as a page's samples
@@ -254,11 +358,11 @@ The harness is the reporter's, from #3477: fperex built it on their fork `fperex
 `debug/rt-audio` and `debug-findings-solution`), with the black-box probe, the analyzer's skip-ahead
 rule, the Playwright matrix over `moq-shaper`, the budget file graded under `--enforce`, and the
 nightly job. The harness and opt-in shaper features preserve that author's credit. The player and estimator
-changes remain separate: the underrun count comes from a tap on the output rather than a counter in the player, and
+changes remain separate: the underrun count comes from a tap on the output, read alongside the player's own counter, and
 the profiles now include the fork's batch, step, and order-preserving jitter treatments.
 
 ## Not covered
 
-Safari and Firefox, video, and perceptual scoring: the grade is glitches and latency, not an opinion
-about how it sounds. The `relay-mic` trace captures Chromium's fake device rather than a real
-microphone, so it carries a browser publisher's encode and send cadence but not a sound card's.
+Safari and Firefox, native playback on macOS and Windows, video, and perceptual scoring: the grade
+is glitches and latency, not an opinion about how it sounds. A real microphone is covered
+only by the hand-recorded `relay-mic` trace, not by any live row.

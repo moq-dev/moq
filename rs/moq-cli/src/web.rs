@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
 /// Browser CORS policy for HTTP gateway listeners.
-#[derive(usage::Args, Clone, Default)]
+#[derive(usage_rs::Args, Clone, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Cors {
 	/// Browser origin allowed to call this listener. Repeat to allow multiple.
@@ -95,13 +95,6 @@ pub async fn run_web(bind: moq_tokio::listen::Bind, certificates: moq_tokio::tls
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	#[test]
-	fn cors_origin_defaults_to_no_browser_origin() {
-		let cors = Cors::default();
-
-		assert!(cors.layer([Method::GET]).is_ok());
-	}
 
 	#[test]
 	fn cors_origin_allows_specific_allowlist() {

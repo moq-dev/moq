@@ -1,14 +1,14 @@
+import { Milli } from "@moq/clock";
 import type * as Container from "@moq/hang/container";
-import { Time } from "@moq/net";
 
 /** One received frame, or a gap where media will never arrive, in delivery order. */
 export type Arrival =
 	| {
 			kind: "frame";
 			/** Media presentation time in milliseconds. */
-			timestamp: Time.Milli;
+			timestamp: Milli;
 			/** Monotonic transport ingress time in milliseconds. */
-			arrival: Time.Milli;
+			arrival: Milli;
 			/** Whether ingress missed the playback deadline. */
 			late: boolean;
 	  }
@@ -19,17 +19,17 @@ export type Arrival =
 	| {
 			kind: "gap";
 			/** The furthest presentation point received before the gap, in milliseconds. */
-			timestamp: Time.Milli;
+			timestamp: Milli;
 			/** How long until media resumes, in milliseconds. */
-			duration: Time.Milli;
+			duration: Milli;
 	  };
 
 /** The arrival entry for a container read's gap. */
 export function gap(read: Extract<Container.Read, { kind: "gap" }>): Arrival {
 	return {
 		kind: "gap",
-		timestamp: Time.Milli.fromMicro(read.timestamp),
-		duration: Time.Milli.fromMicro(read.duration),
+		timestamp: Milli.fromMicro(read.timestamp),
+		duration: Milli.fromMicro(read.duration),
 	};
 }
 
@@ -41,21 +41,26 @@ interface State {
 	wake?: () => void;
 }
 
+let makeArrivals: (state: State, open: Set<State>) => Arrivals;
+
 /**
  * Every frame a decoder receives while this handle is open, and every gap between them, in delivery order.
  *
  * Unread entries queue until {@link next} takes them, so read continuously or close the handle;
- * closing releases the queue. Obtain one from a decoder's `arrivals()`.
+ * closing releases the queue. Obtain one from `Audio.Decoder.arrivals()`.
  */
 export class Arrivals implements AsyncIterable<Arrival> {
 	readonly #state: State;
 	readonly #open: Set<State>;
 	#reading = false;
 
-	/** @internal */
-	constructor(state: State, open: Set<State>) {
+	private constructor(state: State, open: Set<State>) {
 		this.#state = state;
 		this.#open = open;
+	}
+
+	static {
+		makeArrivals = (state, open) => new Arrivals(state, open);
 	}
 
 	/** Get the next frame or gap, or `undefined` once the handle or its decoder closes. */
@@ -118,7 +123,7 @@ export class Producer {
 	consume(): Arrivals {
 		const state: State = { queue: [], head: 0, closed: this.#closed };
 		if (!this.#closed) this.#open.add(state);
-		return new Arrivals(state, this.#open);
+		return makeArrivals(state, this.#open);
 	}
 
 	write(arrival: Arrival): void {

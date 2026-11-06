@@ -3,8 +3,8 @@
  *
  * One JSON value updated over time, for consumers that care about the state rather than every
  * record (a catalog, a status document). This mode is **lossy** by design: a new group supersedes
- * the older ones, which are dropped. {@link Consumer.next} yields every state it still receives,
- * in order, each with its frame's timestamp, for a caller that picks the state at a playhead.
+ * the older ones, which are dropped. {@link Consumer.next} yields each state in order, each with
+ * its frame's timestamp, skipping every group a newer one supersedes.
  * {@link Consumer.latest} jumps straight to the newest group and collapses any buffered backlog
  * into a single yield, for a caller that only wants the current value. For an ordered log where
  * every record is preserved, use the `Stream` module instead.
@@ -13,7 +13,10 @@
  * following frames are RFC 7396 JSON Merge Patch deltas applied in order. Interoperable with the
  * Rust `moq_json::snapshot`.
  *
- * The encoder rolls a group on its own budget, but a caller can roll one for its own reasons with
+ * A group of deltas runs until a joiner wants a fresh one: once the deltas outweigh the track's
+ * `refresh` ratio times the snapshot, a join asks for a group past the largest, and the
+ * {@link Producer} restates the value there. The encoder also rolls at its frame and byte caps.
+ * A caller can roll one for its own reasons with
  * {@link Producer.cut}: it closes the open group and leaves the next update to open the replacement
  * with a full snapshot, so the deltas already written stop being provisional without publishing an
  * empty group.

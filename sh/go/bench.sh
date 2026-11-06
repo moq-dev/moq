@@ -6,4 +6,4 @@ export MOQ_FFI_PROFILE=release
 staged=$(bash "$here/stage.sh" --output "$root/dist/runtime-bench")
 wrapper=$(printf '%s\n' "$staged" | sed -n 2p)
 cd "$wrapper"
-CGO_ENABLED=1 GOFLAGS=-mod=mod go test -run '^$' -bench '^BenchmarkPublisher$' "$@"
+CGO_ENABLED=1 GOFLAGS=-mod=mod go test -run '^$' -bench '^BenchmarkFFI$' "$@"

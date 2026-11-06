@@ -1,15 +1,36 @@
-//! Session bandwidth allocator and per-track reservation, mirroring
-//! [`moq_net::bandwidth`].
+//! Session bandwidth allocator and per-track reservation, and the receive-side
+//! viewers, mirroring [`moq_net::bandwidth`].
 
 use std::sync::Arc;
 
 use crate::{Error, Id, NonZeroSlab, State, ffi};
 
-/// Allocators minted from a session, plus the reservations taken against them.
+/// Allocators minted from a session, plus the reservations taken against them, and
+/// the same for the receive side's viewers.
 #[derive(Default)]
 pub(crate) struct Bandwidth {
 	allocators: NonZeroSlab<moq_net::bandwidth::Allocator>,
 	reservations: NonZeroSlab<Arc<moq_net::bandwidth::Reservation>>,
+	consumers: NonZeroSlab<Arc<Consumer>>,
+	viewers: NonZeroSlab<moq_net::bandwidth::Viewers>,
+	controls: NonZeroSlab<RateControl>,
+	viewer: NonZeroSlab<moq_net::bandwidth::Viewer>,
+}
+
+struct RateControl {
+	inner: moq_mux::rate::Control,
+	grant: moq_net::bandwidth::Consumer,
+}
+
+impl RateControl {
+	fn update(&mut self) -> Option<moq_mux::rate::Target> {
+		self.apply(self.grant.peek(), self.grant.probed())
+	}
+
+	fn apply(&mut self, grant: Option<moq_net::bandwidth::Rate>, probed: bool) -> Option<moq_mux::rate::Target> {
+		self.inner.set_probed(probed);
+		self.inner.update(grant, kio::clock::now())
+	}
 }
 
 impl Bandwidth {
@@ -44,28 +65,32 @@ impl Bandwidth {
 		self.reservations.remove(id).ok_or(Error::NotFound)?;
 		Ok(())
 	}
+
+	pub fn insert_viewers(&mut self, viewers: moq_net::bandwidth::Viewers) -> Result<Id, Error> {
+		self.viewers.insert(viewers)
+	}
 }
 
 /// The session's bandwidth allocator. Clones share one reservation registry.
 ///
 /// Returns a non-zero handle, or a negative error if the session is unknown.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_session_bandwidth(session: u32) -> i32 {
+pub extern "C" fn moq_session_allocator(session: u32) -> i32 {
 	ffi::enter(move || {
 		let session = ffi::parse_id(session)?;
 		let mut state = State::lock();
-		let allocator = state.session.bandwidth(session)?;
+		let allocator = state.session.allocator(session)?;
 		state.bandwidth.insert(allocator)
 	})
 }
 
-/// Release a bandwidth handle. Reservations taken against it stay until they
+/// Release an allocator handle. Reservations taken against it stay until they
 /// themselves are closed (or the session's allocator is gone).
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_bandwidth_close(bandwidth: u32) -> i32 {
+pub extern "C" fn moq_allocator_close(allocator: u32) -> i32 {
 	ffi::enter(move || {
-		let bandwidth = ffi::parse_id(bandwidth)?;
-		State::lock().bandwidth.close(bandwidth)
+		let allocator = ffi::parse_id(allocator)?;
+		State::lock().bandwidth.close(allocator)
 	})
 }
 
@@ -75,30 +100,31 @@ pub extern "C" fn moq_bandwidth_close(bandwidth: u32) -> i32 {
 /// ever send. Drop the reservation with [`moq_reservation_close`] to hand the
 /// room back.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_bandwidth_reserve(bandwidth: u32, track: u32, max_bps: u64) -> i32 {
+pub extern "C" fn moq_allocator_reserve(allocator: u32, track: u32, max_bps: u64) -> i32 {
 	ffi::enter(move || {
-		let bandwidth = ffi::parse_id(bandwidth)?;
+		let allocator = ffi::parse_id(allocator)?;
 		let track = ffi::parse_id(track)?;
 		let mut state = State::lock();
 		let demand = state.publish.track_demand(track)?;
-		state.bandwidth.reserve(bandwidth, &demand, max_bps)
+		state.bandwidth.reserve(allocator, &demand, max_bps)
 	})
 }
 
 /// This reservation's slice right now, in bits per second.
 ///
-/// `present` is false when there is no estimate or no demand: hold the current
-/// rate. `present` true and `bps` 0 is a real zero grant.
+/// `present` is false when there is no estimate: hold the current rate. `present`
+/// true and `bps` 0 is a real zero rate. While nothing subscribes to the track,
+/// `bps` is the slice it would get back, without claiming it from the others.
 ///
 /// # Safety
 /// - `bps` and `present` must be valid pointers.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_reservation_grant(reservation: u32, bps: *mut u64, present: *mut bool) -> i32 {
+pub unsafe extern "C" fn moq_reservation_rate(reservation: u32, bps: *mut u64, present: *mut bool) -> i32 {
 	ffi::enter(move || {
 		let reservation = ffi::parse_id(reservation)?;
 		let bps = unsafe { bps.as_mut() }.ok_or(Error::InvalidPointer)?;
 		let present = unsafe { present.as_mut() }.ok_or(Error::InvalidPointer)?;
-		match State::lock().bandwidth.reservation(reservation)?.peek() {
+		match State::lock().bandwidth.reservation(reservation)?.rate() {
 			Some(rate) => {
 				*bps = rate.as_bps();
 				*present = true;
@@ -135,4 +161,507 @@ pub extern "C" fn moq_reservation_close(reservation: u32) -> i32 {
 		let reservation = ffi::parse_id(reservation)?;
 		State::lock().bandwidth.reservation_close(reservation)
 	})
+}
+
+/// The session's viewers, dividing the receive estimate among watched broadcasts.
+///
+/// Clones share one registry, and the session sends the viewers' ceilings summed as its
+/// PROBE target. Returns a non-zero handle, or a negative error if the session is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_session_viewers(session: u32) -> i32 {
+	ffi::enter(move || {
+		let session = ffi::parse_id(session)?;
+		let mut state = State::lock();
+		let viewers = state.session.viewers(session)?;
+		state.bandwidth.insert_viewers(viewers)
+	})
+}
+
+/// Release a viewers handle. Viewers watched through it stay until each is closed (or
+/// the session's viewers are gone).
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_viewers_close(viewers: u32) -> i32 {
+	ffi::enter(move || {
+		let viewers = ffi::parse_id(viewers)?;
+		State::lock().bandwidth.viewers.remove(viewers).ok_or(Error::NotFound)?;
+		Ok(())
+	})
+}
+
+/// Watch a broadcast receiving at most `max_bps`, returning a viewer handle.
+///
+/// `max_bps` is a ceiling: what the largest rendition you would switch to needs, not
+/// what you are receiving. Holding the viewer requests the receive estimate, like a
+/// [`moq_session_recv_bandwidth`] consumer. Close it with [`moq_viewer_close`] once the
+/// broadcast stops being watched. Returns [`MOQ_ERROR_OUT_OF_RANGE`](crate::MOQ_ERROR_OUT_OF_RANGE),
+/// watching nothing, when the ceilings would sum above `2^53 - 1`.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_viewers_watch(viewers: u32, max_bps: u64) -> i32 {
+	ffi::enter(move || {
+		let viewers = ffi::parse_id(viewers)?;
+		let mut state = State::lock();
+		let viewer = state
+			.bandwidth
+			.viewers
+			.get(viewers)
+			.ok_or(Error::NotFound)?
+			.watch(moq_net::bandwidth::Rate::from_bps(max_bps))
+			.map_err(out_of_range)?;
+		state.bandwidth.viewer.insert(viewer)
+	})
+}
+
+/// Send `target_bps` as the PROBE target instead of the viewers' sum.
+///
+/// `present` false follows the viewers again. `present` true and `target_bps` 0 sends
+/// no target. Returns [`MOQ_ERROR_OUT_OF_RANGE`](crate::MOQ_ERROR_OUT_OF_RANGE), keeping the
+/// previous override, for a target above `2^53 - 1`.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_viewers_set_target(viewers: u32, target_bps: u64, present: bool) -> i32 {
+	ffi::enter(move || {
+		let viewers = ffi::parse_id(viewers)?;
+		State::lock()
+			.bandwidth
+			.viewers
+			.get(viewers)
+			.ok_or(Error::NotFound)?
+			.set_target(present.then(|| moq_net::bandwidth::Rate::from_bps(target_bps)))
+			.map_err(out_of_range)
+	})
+}
+
+/// This viewer's slice of the receive estimate right now, in bits per second.
+///
+/// `present` is false when there is no estimate: keep the current rendition. `present`
+/// true and `bps` 0 is a real zero rate.
+///
+/// # Safety
+/// - `bps` and `present` must be valid pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_viewer_rate(viewer: u32, bps: *mut u64, present: *mut bool) -> i32 {
+	ffi::enter(move || {
+		let viewer = ffi::parse_id(viewer)?;
+		let bps = unsafe { bps.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let present = unsafe { present.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let rate = State::lock()
+			.bandwidth
+			.viewer
+			.get(viewer)
+			.ok_or(Error::NotFound)?
+			.rate();
+		*bps = rate.map_or(0, moq_net::bandwidth::Rate::as_bps);
+		*present = rate.is_some();
+		Ok(())
+	})
+}
+
+/// Change the viewer's ceiling, keeping the same claim.
+///
+/// Returns [`MOQ_ERROR_OUT_OF_RANGE`](crate::MOQ_ERROR_OUT_OF_RANGE), keeping the previous
+/// ceiling, when the ceilings would sum above `2^53 - 1`.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_viewer_update(viewer: u32, max_bps: u64) -> i32 {
+	ffi::enter(move || {
+		let viewer = ffi::parse_id(viewer)?;
+		State::lock()
+			.bandwidth
+			.viewer
+			.get(viewer)
+			.ok_or(Error::NotFound)?
+			.update(moq_net::bandwidth::Rate::from_bps(max_bps))
+			.map_err(out_of_range)
+	})
+}
+
+/// A viewer ceiling or target refused for passing the PROBE target's limit.
+fn out_of_range(err: moq_net::Error) -> Error {
+	Error::OutOfRange(format!(
+		"{err}: viewer targets sum to at most {} bps",
+		moq_net::bandwidth::Viewers::MAX_TARGET.as_bps()
+	))
+}
+
+/// Release a viewer, handing its share back to the others and lowering the PROBE target.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_viewer_close(viewer: u32) -> i32 {
+	ffi::enter(move || {
+		let viewer = ffi::parse_id(viewer)?;
+		// Released outside the lock.
+		let viewer = State::lock().bandwidth.viewer.remove(viewer).ok_or(Error::NotFound)?;
+		drop(viewer);
+		Ok(())
+	})
+}
+
+/// One owned estimate and, optionally, its single outstanding changed call.
+struct Consumer {
+	inner: std::sync::Mutex<Option<moq_net::bandwidth::Consumer>>,
+	changed: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+/// Hold receive-estimate demand, returning zero if the version has no PROBE.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_session_recv_bandwidth(session: u32) -> i32 {
+	ffi::enter(move || {
+		let session = ffi::parse_id(session)?;
+		let mut state = State::lock();
+		let Some(inner) = state.session.recv_bandwidth(session)? else {
+			return Ok(0);
+		};
+		let id = state.bandwidth.consumers.insert(Arc::new(Consumer {
+			inner: std::sync::Mutex::new(Some(inner)),
+			changed: Default::default(),
+		}))?;
+		Ok::<_, Error>(i32::from(id))
+	})
+}
+
+/// Read this consumer's estimate in bits per second.
+///
+/// # Safety
+/// - `bps` and `present` must be valid pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_bandwidth_consumer_peek(consumer: u32, bps: *mut u64, present: *mut bool) -> i32 {
+	ffi::enter(move || {
+		let consumer = ffi::parse_id(consumer)?;
+		let bps = unsafe { bps.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let present = unsafe { present.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let consumer = State::lock()
+			.bandwidth
+			.consumers
+			.get(consumer)
+			.cloned()
+			.ok_or(Error::NotFound)?;
+		let rate = consumer
+			.inner
+			.lock()
+			.unwrap()
+			.as_ref()
+			.and_then(moq_net::bandwidth::Consumer::peek);
+		*bps = rate.map_or(0, moq_net::bandwidth::Rate::as_bps);
+		*present = rate.is_some();
+		Ok(())
+	})
+}
+
+/// Wait for a change, invoking `on_status` once with 1 or a negative error.
+///
+/// Read the value with `moq_bandwidth_consumer_peek` from the callback. Only one
+/// wait may be outstanding; a second returns InvalidConfig. Closing cancels the wait.
+///
+/// # Safety
+/// - `user_data` must remain valid until the callback returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_bandwidth_consumer_changed(
+	consumer: u32,
+	user_data: *mut std::ffi::c_void,
+	on_status: ffi::moq_status_callback,
+) -> i32 {
+	ffi::enter(move || {
+		let consumer = ffi::parse_id(consumer)?;
+		let callback = unsafe { ffi::OnStatus::new(user_data, on_status)? };
+		let consumer = State::lock()
+			.bandwidth
+			.consumers
+			.get(consumer)
+			.cloned()
+			.ok_or(Error::NotFound)?;
+		let (cancel, cancelled) = tokio::sync::oneshot::channel();
+		{
+			let mut pending = consumer.changed.lock().unwrap();
+			if pending.is_some() {
+				return Err(Error::InvalidConfig(
+					"a bandwidth change wait is already pending".into(),
+				));
+			}
+			*pending = Some(cancel);
+		}
+		tokio::spawn(async move {
+			// The cleanup runs inside `ffi::run` too, so a panic there still reaches the callback,
+			// and the wait has its own so the slot is cleared even when the wait panics.
+			let result = ffi::run(async {
+				let result = ffi::run(async {
+					tokio::select! {
+						_ = cancelled => Err(moq_net::Error::Cancel.into()),
+						result = kio::wait(|waiter| {
+							let mut inner = consumer.inner.lock().unwrap();
+							let Some(inner) = inner.as_mut() else { return std::task::Poll::Ready(Err(Error::NotFound)); };
+							inner.poll_changed(waiter).map(|result| result.map(|_| 1).map_err(Into::into))
+						}) => result,
+					}
+				})
+				.await;
+				consumer.changed.lock().unwrap().take();
+				result
+			})
+			.await;
+			callback.call(result);
+		});
+		Ok(())
+	})
+}
+
+/// Release this consumer's demand and cancel any outstanding wait.
+///
+/// The outstanding `moq_bandwidth_consumer_changed` callback still fires once.
+/// Release its `user_data` in that callback, not when this function returns.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_bandwidth_consumer_close(consumer: u32) -> i32 {
+	ffi::enter(move || {
+		let consumer = ffi::parse_id(consumer)?;
+		let consumer = State::lock()
+			.bandwidth
+			.consumers
+			.remove(consumer)
+			.ok_or(Error::NotFound)?;
+		consumer.inner.lock().unwrap().take();
+		consumer.changed.lock().unwrap().take();
+		Ok(())
+	})
+}
+
+/// Reserve up to `max_bps` for a pre-encoded media track, returning a reservation handle.
+/// Close it with `moq_reservation_close`; it does not own the media handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_allocator_reserve_media(allocator: u32, media: u32, max_bps: u64) -> i32 {
+	ffi::enter(move || {
+		let mut state = State::lock();
+		let demand = state.publish.media_demand(ffi::parse_id(media)?)?;
+		state.bandwidth.reserve(ffi::parse_id(allocator)?, &demand, max_bps)
+	})
+}
+
+/// How a rate control maps a reservation grant onto a sender's bitrate.
+#[repr(C)]
+pub struct moq_rate_policy {
+	/// Maximum bitrate the sender produces, in bits per second.
+	pub max_bps: u64,
+	/// Next lower rendition's maximum bitrate, when `has_lower` is true.
+	pub lower_bps: u64,
+	/// Whether this sender has a lower rendition; the lowest never disables.
+	pub has_lower: bool,
+}
+
+/// What the sender should produce until its rate control changes again.
+#[repr(C)]
+pub struct moq_rate_target {
+	/// Whether to produce frames and advertise the rendition as enabled.
+	pub enabled: bool,
+	/// Bitrate to produce in bits per second, or 0 when disabled.
+	pub bitrate_bps: u64,
+	/// Whether `moq_rate_control_update` changed the target; always false from `moq_rate_control_target`.
+	pub changed: bool,
+}
+
+impl From<moq_mux::rate::Target> for moq_rate_target {
+	fn from(target: moq_mux::rate::Target) -> Self {
+		match target {
+			moq_mux::rate::Target::Enabled(rate) => Self {
+				enabled: true,
+				bitrate_bps: rate.as_bps(),
+				changed: false,
+			},
+			moq_mux::rate::Target::Disabled => Self {
+				enabled: false,
+				bitrate_bps: 0,
+				changed: false,
+			},
+		}
+	}
+}
+
+/// Create a rate control following this reservation, starting at the policy's maximum bitrate.
+///
+/// A zero `max_bps` is rejected with `MOQ_ERROR_INVALID_CONFIG`.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_rate_control_create(reservation: u32, policy: moq_rate_policy) -> i32 {
+	ffi::enter(move || {
+		if policy.max_bps == 0 {
+			return Err(Error::InvalidConfig("max_bps must be nonzero".into()));
+		}
+		let mut native = moq_mux::rate::Policy::new(moq_net::bandwidth::Rate::from_bps(policy.max_bps));
+		native.lower = policy
+			.has_lower
+			.then(|| moq_net::bandwidth::Rate::from_bps(policy.lower_bps));
+		let mut state = State::lock();
+		let grant = state.bandwidth.reservation(ffi::parse_id(reservation)?)?.consume();
+		state.bandwidth.controls.insert(RateControl {
+			inner: moq_mux::rate::Control::new(native),
+			grant,
+		})
+	})
+}
+
+/// Read the current sender target, returning zero or a negative error.
+///
+/// # Safety
+/// - `target` must point to writable storage for one target.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_rate_control_target(control: u32, target: *mut moq_rate_target) -> i32 {
+	ffi::enter(move || {
+		let target = unsafe { target.as_mut() }.ok_or(Error::InvalidPointer)?;
+		*target = State::lock()
+			.bandwidth
+			.controls
+			.get(ffi::parse_id(control)?)
+			.ok_or(Error::NotFound)?
+			.inner
+			.target()
+			.into();
+		Ok(())
+	})
+}
+
+/// Follow the bound reservation's grant on every frame, returning zero or a negative error.
+///
+/// `target.changed` is true when the target changed and false to hold the last target.
+///
+/// Drops apply immediately; raises ramp and small moves are ignored. No estimate holds the
+/// target. Disabling requires a probing session so the grant can recover. Apply a changed
+/// target to your encoder and `moq_publish_media_set_enabled`. Closing the reservation holds
+/// the last target; the control owns neither the reservation nor media.
+///
+/// # Safety
+/// - `target` must point to writable storage; its other fields are written only when `changed` is true.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_rate_control_update(control: u32, target: *mut moq_rate_target) -> i32 {
+	ffi::enter(move || {
+		let target = unsafe { target.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let mut state = State::lock();
+		let control = state
+			.bandwidth
+			.controls
+			.get_mut(ffi::parse_id(control)?)
+			.ok_or(Error::NotFound)?;
+		match control.update() {
+			Some(next) => {
+				*target = next.into();
+				target.changed = true;
+			}
+			None => target.changed = false,
+		}
+		Ok(())
+	})
+}
+
+/// Release a rate control without closing its reservation or media.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_rate_control_close(control: u32) -> i32 {
+	ffi::enter(move || {
+		State::lock()
+			.bandwidth
+			.controls
+			.remove(ffi::parse_id(control)?)
+			.ok_or(Error::NotFound)?;
+		Ok(())
+	})
+}
+
+#[cfg(test)]
+mod consumer_tests {
+	#[tokio::test(start_paused = true)]
+	async fn rate_control_probing_disables_and_recovers() {
+		use moq_mux::rate::{Control, Policy, Target};
+		use moq_net::bandwidth::Rate;
+		let estimate = moq_net::bandwidth::Producer::new();
+		let mut policy = Policy::new(Rate::from_bps(6_000_000));
+		policy.lower = Some(Rate::from_bps(2_000_000));
+		let mut control = RateControl {
+			inner: Control::new(policy),
+			grant: estimate.consume(),
+		};
+		assert_eq!(
+			control.apply(Some(Rate::from_bps(3_000_000)), true),
+			Some(Target::Disabled)
+		);
+		assert_eq!(control.apply(None, true), None);
+		tokio::time::advance(std::time::Duration::from_secs(4)).await;
+		assert!(matches!(
+			control.apply(Some(Rate::from_bps(6_000_000)), true),
+			Some(Target::Enabled(_))
+		));
+		assert_eq!(
+			control.apply(Some(Rate::from_bps(3_000_000)), true),
+			Some(Target::Disabled)
+		);
+		assert!(matches!(
+			control.apply(Some(Rate::from_bps(3_000_000)), false),
+			Some(Target::Enabled(_))
+		));
+	}
+
+	use super::*;
+	use crate::ffi::ReturnCode;
+
+	extern "C" fn changed(user_data: *mut std::ffi::c_void, code: i32) {
+		let sender = unsafe { Box::from_raw(user_data as *mut tokio::sync::mpsc::UnboundedSender<i32>) };
+		sender.send(code).unwrap();
+	}
+
+	#[tokio::test]
+	async fn consumer_close_releases_demand_and_completes_pending_callback() {
+		tokio::time::pause();
+		let producer = moq_net::bandwidth::Producer::new();
+		let id = State::lock()
+			.bandwidth
+			.consumers
+			.insert(Arc::new(Consumer {
+				inner: std::sync::Mutex::new(Some(producer.consume())),
+				changed: Default::default(),
+			}))
+			.unwrap();
+		let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+		let user_data = || Box::into_raw(Box::new(sender.clone())) as *mut std::ffi::c_void;
+		assert!(producer.demand().wanted());
+		assert_eq!(
+			unsafe { moq_bandwidth_consumer_changed(id.into(), user_data(), Some(changed)) },
+			0
+		);
+		producer.set(Some(moq_net::bandwidth::Rate::from_bps(321))).unwrap();
+		assert_eq!(receiver.recv().await, Some(1));
+		let (mut bps, mut present) = (0, false);
+		assert_eq!(
+			unsafe { moq_bandwidth_consumer_peek(id.into(), &mut bps, &mut present) },
+			0
+		);
+		assert!(present);
+		assert_eq!(bps, 321);
+		assert_eq!(
+			unsafe { moq_bandwidth_consumer_changed(id.into(), user_data(), Some(changed)) },
+			0
+		);
+		assert_eq!(moq_bandwidth_consumer_close(id.into()), 0);
+		assert!(
+			!producer.demand().wanted(),
+			"closing releases demand before the callback runs"
+		);
+		assert!(receiver.recv().await.unwrap() < 0);
+	}
+
+	#[tokio::test]
+	async fn changed_cleanup_panic_still_delivers_callback() {
+		let producer = moq_net::bandwidth::Producer::new();
+		let consumer = Arc::new(Consumer {
+			inner: std::sync::Mutex::new(Some(producer.consume())),
+			changed: Default::default(),
+		});
+		let id = State::lock().bandwidth.consumers.insert(consumer.clone()).unwrap();
+		let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+		let user_data = Box::into_raw(Box::new(sender)) as *mut std::ffi::c_void;
+		assert_eq!(
+			unsafe { moq_bandwidth_consumer_changed(id.into(), user_data, Some(changed)) },
+			0
+		);
+		// Poison the slot the wait clears once it completes.
+		let poisoner = consumer.clone();
+		std::thread::spawn(move || {
+			let _pending = poisoner.changed.lock().unwrap();
+			panic!("poison the pending wait");
+		})
+		.join()
+		.unwrap_err();
+		producer.set(Some(moq_net::bandwidth::Rate::from_bps(321))).unwrap();
+		assert_eq!(receiver.recv().await, Some(Error::Panic.code()));
+		State::lock().bandwidth.consumers.remove(id);
+	}
 }

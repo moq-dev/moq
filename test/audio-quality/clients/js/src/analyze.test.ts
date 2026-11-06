@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { analyze, type Input, percentile, SKIP_MS, skipAheads } from "./analyze.ts";
 import type { Sample, Shaper } from "./schema.ts";
 
-const row = { runtime: "chromium", codec: "opus", rate: 48000, profile: "mild", ring: "plain" } as const;
+const row = { runtime: "chromium", codec: "opus", rate: 48000, profile: "mild" } as const;
 const counters = { packets: 100, lost: 0, overflowed: 0, throttled: 0, delayed: 100, reordered: 0 };
 const shaper: Shaper = { seed: 7, status: 0, up: counters, down: counters };
 
@@ -25,7 +25,7 @@ function clean(): Sample[] {
 const input = (samples: Sample[], extra: Partial<Input> = {}): Input => ({
 	row,
 	samples,
-	environment: { crossOriginIsolated: false, transport: "webtransport" },
+	environment: { transport: "webtransport" },
 	voids: [],
 	notes: [],
 	shaper,
@@ -73,6 +73,14 @@ describe("analyze", () => {
 		expect(summary.drift.find((d) => d.clock === "render")).toEqual({ clock: "render", rate: 0, offset: 1000 });
 	});
 
+	test("a render clock that only starts with the audio is not void", () => {
+		// A native device sits unpulled for the first two seconds of its stream, before first audio.
+		const startup = Array.from({ length: 8 }, (_, i) => ({ at: i * 125, render: 0, stalled: true }));
+		const summary = analyze(input([...startup, ...clean()]));
+		expect(summary.voids).toEqual([]);
+		expect(summary.drift.find((d) => d.clock === "render")).toEqual({ clock: "render", rate: 0, offset: 1000 });
+	});
+
 	test("a gap on the render clock is counted where it lands on the viewer's", () => {
 		const samples = clean();
 		// 20 s into the viewer clock is 19 s on the render clock.
@@ -87,6 +95,13 @@ describe("analyze", () => {
 			underrun_ms_total: 8,
 			underrun_ms_max: 8,
 		});
+	});
+
+	test("the player's own underruns are its counter's rise across the window", () => {
+		// Three counted by the end of the warmup, then three more inside the window.
+		const samples = clean().map((s, i) => ({ ...s, playerUnderruns: i < 100 ? 3 : 6 }));
+		expect(analyze(input(samples)).metrics).toMatchObject({ player_underruns_total: 3 });
+		expect(analyze(input(clean())).metrics.player_underruns_total).toBeNull();
 	});
 
 	test("a gap that is the ring stalling is not an underrun", () => {

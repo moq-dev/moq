@@ -1,0 +1,4 @@
+# Binary files allowed past sh/large-files.sh's 500 KiB cap, one per line:
+# the path, then a one-line reason it cannot shrink. Paths cannot hold spaces.
+rs/moq-mux/src/container/ts/test_data/kyrion_mpeg2av_ac3.ts Real ATSC encoder capture whose round-trip test needs its exact bytes.
+rs/moq-mux/src/container/ts/test_data/scte35/kyrion_dirtystart.ts Real encoder capture whose SCTE-35 and B-frame tests need its exact bytes.

@@ -75,6 +75,7 @@ describe("Renderer", () => {
 
 		const frame = {
 			timestamp: 1_000,
+			codedHeight: 360,
 			clone() {
 				return this;
 			},
@@ -85,6 +86,7 @@ describe("Renderer", () => {
 			out: {
 				display: new Signal({ width: 640, height: 360 }),
 				frame: new Signal<VideoFrame | undefined>(frame),
+				interlaced: new Signal(false),
 			},
 			source: { out: { catalog } },
 		} as unknown as Decoder;
@@ -102,6 +104,18 @@ describe("Renderer", () => {
 			expect(draws).toHaveLength(2);
 			expect(transforms.at(-1)).toEqual([0, 1, -1, 0, 640, 0]);
 			expect(draws.at(-1)?.slice(1)).toEqual([0, 0, 360, 640]);
+
+			// The rendition's interlacing rides the same presentation: the line above and below blend
+			// in, offset by one source line along the rotated picture's height.
+			(decoder.out.interlaced as Signal<boolean>).set(true);
+			await settle();
+
+			expect(paint()).toBe(1);
+			expect(draws.slice(2).map((draw) => draw.slice(1))).toEqual([
+				[0, 0, 360, 640],
+				[0, 640 / 360, 360, 640],
+				[0, -640 / 360, 360, 640],
+			]);
 		} finally {
 			renderer.close();
 		}

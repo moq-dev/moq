@@ -1,0 +1,886 @@
+//! The connection: shared state, the driver task, and the session handle.
+
+use kio::clock::Instant;
+use std::cell::{Cell, RefCell};
+use std::net::SocketAddr;
+use std::rc::{Rc, Weak};
+use std::task::{Poll, ready};
+
+use bytes::{Buf, Bytes};
+use moq_quic::endpoint::ConnectionHandle;
+use moq_quic::stream::Dir;
+
+use super::super::{Error, VarInt};
+use super::{endpoint, recv, send};
+use crate::udp;
+use crate::worker::Owner;
+
+/// The state shared by every handle and the driver, single-threaded behind
+/// `Rc<RefCell>`.
+pub(crate) type Shared = Rc<Inner>;
+
+/// One GSO train is at most 64 segments; stay a hair under the kernel cap.
+const TRAIN_SEGMENTS: usize = 63;
+
+/// The GSO trains a connection stages per worker turn before it yields to
+/// the next, so one connection's backlog shares the socket with the others
+/// and with the completions the next reap brings back. More than one, so a
+/// reply's lone train is followed by an empty flush rather than a yield and a
+/// turn of its own; four cut a bulk sender's enters by a quarter against one.
+const TRAINS_PER_TURN: usize = 4;
+
+/// Everything the handles and the driver share, single-threaded.
+///
+/// The connection and the bookkeeping live in separate `RefCell`s so a stream
+/// operation can mutate the connection, drop that borrow, and then read the
+/// terminal error without ever holding both. moq-quic owns every handle's wait
+/// and the driver's transmit wait; the bookkeeping is the driver's ingress wake
+/// and the close.
+pub(crate) struct Inner {
+	pub(crate) conn: RefCell<moq_quic::connection::Connection>,
+	/// Updated by packet ingress and egress, so readers never wake the worker to sample.
+	pub(crate) wire: moq_net::transport::Wire,
+	/// The session's probe target, read before every egress, or `None` when the congestion
+	/// controller cannot probe
+	pub(crate) probe: Option<moq_net::transport::Probe>,
+	pub(crate) state: RefCell<State>,
+	/// The worker driving this connection, which anything layered on it
+	/// (the WebTransport handshake, say) runs on too.
+	pub(crate) owner: Owner,
+	/// Live [`Connection`] and stream handles; the last one to drop closes the
+	/// connection, since nothing could use it again.
+	handles: Cell<usize>,
+}
+
+pub(crate) struct State {
+	pub(crate) active: Option<moq_net::server::Active>,
+	/// Wakes the driver when the endpoint fed the connection (a received
+	/// datagram, an unreachable peer) so it answers and re-arms its timers, or
+	/// failed it from outside. Handles need no wake of their own: whatever
+	/// they queue wakes the driver's `poll_transmit`.
+	driver: kio::WaiterList,
+
+	/// The terminal error as the handle's `poll_closed` reports it, set exactly
+	/// once: moq-quic's reason, published by the driver (a local close only once
+	/// staged, see `Driver::publish_close`), or the driver's own failure, which
+	/// moq-quic cannot take and so overrides its reason everywhere.
+	///
+	/// A latch of its own rather than moq-quic's `poll_closed`, which resolves a
+	/// local close as soon as it is asked for. Only the driver knows when the
+	/// CONNECTION_CLOSE is staged on the socket, which moq-quic cannot see, and
+	/// a caller may stop driving the worker the moment `poll_closed` resolves,
+	/// so publishing earlier would leave the packet unsent.
+	closed: Option<Error>,
+	closed_waiters: kio::WaiterList,
+
+	/// The socket died under us: the driver stops where it stands rather than
+	/// waiting out a drain it could never transmit.
+	dead: bool,
+
+	/// The close this side asked for, as moq-quic reported it, until the driver
+	/// has put it on the wire.
+	local_close: Option<Error>,
+}
+
+impl State {
+	fn new() -> Self {
+		Self {
+			active: None,
+			driver: kio::WaiterList::new(),
+			closed: None,
+			closed_waiters: kio::WaiterList::new(),
+			dead: false,
+			local_close: None,
+		}
+	}
+
+	/// Terminate with `err` (the first one wins) and wake the closed waiters and
+	/// the driver: an externally failed driver has to notice.
+	fn fail(&mut self, err: Error) {
+		self.active.take();
+		if self.closed.is_none() {
+			self.closed = Some(err);
+		}
+		self.driver.wake();
+		self.closed_waiters.wake();
+	}
+}
+
+impl Inner {
+	/// The terminal error, if the connection has one: the driver's own failure,
+	/// which wins, or why moq-quic lost it.
+	///
+	/// Unlike the handle's `poll_closed`, a local close counts from the moment it
+	/// was asked for, as moq-quic's stream waits already fail by then.
+	pub(crate) fn closed(&self) -> Option<Error> {
+		if let Some(err) = &self.state.borrow().closed {
+			return Some(err.clone());
+		}
+		self.conn.borrow().error().cloned().map(Error::from)
+	}
+
+	/// The terminal error, for a wait moq-quic failed with `ConnectionLost`.
+	pub(crate) fn lost(&self) -> Error {
+		self.closed().expect("moq-quic reported the connection lost")
+	}
+
+	/// Count a new connection or stream handle.
+	pub(crate) fn hold(&self) {
+		self.handles.set(self.handles.get() + 1);
+	}
+
+	/// Uncount a dropped handle, closing the connection after the last one
+	/// rather than leaving the driver to idle it out.
+	pub(crate) fn release(&self) {
+		let handles = self.handles.get() - 1;
+		self.handles.set(handles);
+		if handles == 0 && !self.conn.borrow().is_closed() {
+			self.close_code(0, "");
+		}
+	}
+
+	/// Wake the driver after the endpoint fed the connection, so it answers and
+	/// re-arms its timers.
+	pub(crate) fn kick(&self) {
+		self.state.borrow_mut().driver.wake();
+	}
+
+	/// Terminate from outside (the socket died): everything fails with `err`,
+	/// and the driver exits on its next poll.
+	///
+	/// moq-quic takes no foreign error, so it is closed as well, which wakes
+	/// every handle parked in it; they then report `err`, which wins.
+	pub(crate) fn fail(&self, err: Error) {
+		let reason = err.to_string();
+		{
+			let mut state = self.state.borrow_mut();
+			state.dead = true;
+			state.fail(err);
+		}
+		self.conn
+			.borrow_mut()
+			.close(self.owner.now(), VarInt::from_u32(0), reason);
+	}
+
+	/// Close the connection with a full-width application code.
+	///
+	/// The [`moq_net::transport::poll::Session::close`] surface narrows codes
+	/// to `u32`; the WebTransport layer maps its codes into HTTP/3's error
+	/// space, which needs the whole varint range.
+	pub(crate) fn close_code(&self, code: u64, reason: &str) {
+		// The close wakes the driver itself, through its `poll_closed` and
+		// `poll_transmit` waits, even one stalled on a full transmit pool.
+		self.conn.borrow_mut().close(
+			self.owner.now(),
+			VarInt::from_u64(code).unwrap_or(VarInt::MAX),
+			reason.to_string(),
+		);
+	}
+}
+
+/// A QUIC connection driven by a [`crate::Worker`], usable as a MoQ transport.
+///
+/// Created by [`Endpoint`](super::Endpoint) (or its
+/// [`client::connect`](crate::quic::client::connect) /
+/// [`server::accept`](crate::quic::server::accept) shorthands), already
+/// established. Clones share the connection. Dropping
+/// the last handle, streams included, closes the connection with code 0.
+///
+/// Once the connection ends, or the worker driving it is dropped, every
+/// operation fails with the terminal error instead of pending, except reads
+/// and accepts of what already arrived.
+///
+/// A close, implicit or by [`close`](Self::close), only records the code: the
+/// driver task is what frames the CONNECTION_CLOSE and hands it to the socket.
+/// Drive the worker until [`closed`](Self::closed) resolves before stopping
+/// it, or the packet is never built and the peer idles out instead.
+pub struct Connection {
+	shared: Shared,
+	/// The negotiated ALPN, cached at establishment so `protocol()` can
+	/// borrow from the handle.
+	alpn: Option<String>,
+	/// The SNI the client presented, cached likewise.
+	server_name: Option<String>,
+	handshake: crate::quic::handshake::Info,
+}
+
+impl Connection {
+	/// Close the connection with a full-width application code.
+	///
+	/// The [`moq_net::transport::poll::Session::close`] surface narrows codes
+	/// to `u32`; the WebTransport layer maps its codes into HTTP/3's error
+	/// space, which needs the whole varint range.
+	pub(crate) fn close_code(&self, code: u64, reason: &str) {
+		self.shared.close_code(code, reason);
+	}
+
+	/// The worker driving this connection.
+	pub(crate) fn owner(&self) -> &Owner {
+		&self.shared.owner
+	}
+
+	/// Open a send group at `priority`, for streams to join with
+	/// [`send::Stream::set_group`] and datagrams with [`send::Options`].
+	pub fn send_group(&self, priority: i64) -> send::Group {
+		send::Group::new(self.shared.clone(), priority)
+	}
+
+	/// Send a datagram scheduled by `options`, like one of its group's streams at its priority,
+	/// or among the ungrouped streams without a group.
+	///
+	/// Never blocks: a full buffer drops the oldest datagram of the lowest-priority group,
+	/// see [`moq_quic::Datagrams::send`]. A [`Bytes`] payload, or a chain of them, is queued
+	/// without copying.
+	///
+	/// # Panics
+	/// - when `options.group` belongs to another connection
+	pub fn send_datagram(&self, data: impl Buf, options: send::Options<'_>) -> Result<(), send::Error> {
+		if let Some(err) = self.shared.closed() {
+			return Err(send::Error::Connection(err));
+		}
+		let sent = self.shared.conn.borrow_mut().datagrams().send(data, options.to_quic());
+		match sent {
+			Ok(()) => {}
+			Err(moq_quic::send::Error::TooLarge) => return Err(send::Error::TooLarge),
+			Err(_) => return Err(send::Error::Unsupported),
+		}
+		Ok(())
+	}
+
+	/// The largest datagram [`Self::send_datagram`] takes, or `None` if datagrams are
+	/// unsupported by the peer or disabled locally.
+	pub fn max_datagram_size(&self) -> Option<usize> {
+		self.shared.conn.borrow_mut().datagrams().max_size()
+	}
+
+	/// The negotiated ALPN protocol, if any.
+	pub fn protocol(&self) -> Option<&str> {
+		self.alpn.as_deref()
+	}
+
+	/// Close the connection immediately with `error_code` and `reason`.
+	///
+	/// Only records the close: the driver task frames the CONNECTION_CLOSE, so keep the worker
+	/// running until [`Self::closed`] resolves.
+	pub fn close(&self, error_code: VarInt, reason: &str) {
+		self.shared.close_code(error_code.into_inner(), reason);
+	}
+
+	/// The connection's statistics.
+	pub fn stats(&self) -> moq_quic::connection::Stats {
+		self.shared.conn.borrow().stats()
+	}
+
+	/// The certificate chain the peer presented, end entity first, or `None`
+	/// if it presented none.
+	///
+	/// A server only sees one when it asked
+	/// ([`ClientAuth`](crate::quic::server::ClientAuth)), and TLS already
+	/// validated it against the configured roots by the time this connection
+	/// exists: an invalid chain fails the handshake instead. So a `Some` here
+	/// is an authenticated peer, and the chain is what names it.
+	pub fn peer_identity(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
+		self.shared.conn.borrow().peer_identity()
+	}
+
+	/// 32 bytes of keying material exported from the TLS session under `label` and `context`,
+	/// or `None` before the handshake completes.
+	pub(crate) fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+		self.shared.conn.borrow().export_keying_material(label, context)
+	}
+
+	/// The peer's current UDP address, following any migration.
+	pub fn remote_address(&self) -> SocketAddr {
+		self.shared.conn.borrow().remote_address()
+	}
+
+	/// The SNI the client presented, or `None` if it sent none. Always `None`
+	/// on a dialed connection.
+	pub fn server_name(&self) -> Option<&str> {
+		self.server_name.as_deref()
+	}
+
+	/// The handshake this connection went through, and when all of it must be
+	/// done.
+	pub fn handshake(&self) -> &crate::quic::handshake::Info {
+		&self.handshake
+	}
+
+	/// Change the flow-control limits `limits` sets; a raise reaches the peer
+	/// on the next packet.
+	///
+	/// Errors, changing nothing, on limits [`Limits::validate`](crate::quic::Limits::validate)
+	/// refuses.
+	pub fn set_limits(&self, limits: crate::quic::Limits) -> Result<(), crate::quic::LimitsError> {
+		self.shared.conn.borrow_mut().set_limits(limits)
+	}
+
+	/// The wire counters this connection updates as it sends and receives.
+	pub(crate) fn wire(&self) -> moq_net::transport::Wire {
+		self.shared.wire.clone()
+	}
+
+	/// The target this connection probes up to, or `None` when its congestion controller cannot probe.
+	pub(crate) fn probe(&self) -> Option<moq_net::transport::Probe> {
+		self.shared.probe.clone()
+	}
+
+	/// The receive windows now in force: the connection's, and the most one stream holds.
+	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
+		let conn = self.shared.conn.borrow();
+		moq_net::transport::ReceiveWindow::new(conn.receive_window(), conn.stream_receive_window())
+	}
+
+	/// The peer's stream credit in `dir`, as this connection last heard it.
+	pub(crate) fn stream_credit(&self, dir: moq_net::transport::Dir) -> moq_net::transport::StreamCredit {
+		let dir = match dir {
+			moq_net::transport::Dir::Uni => Dir::Uni,
+			moq_net::transport::Dir::Bi => Dir::Bi,
+		};
+		let mut conn = self.shared.conn.borrow_mut();
+		let streams = conn.streams();
+		moq_net::transport::StreamCredit::new(streams.credit(dir), streams.blocked(dir))
+	}
+}
+
+impl Clone for Connection {
+	fn clone(&self) -> Self {
+		self.shared.hold();
+		Self {
+			shared: self.shared.clone(),
+			alpn: self.alpn.clone(),
+			server_name: self.server_name.clone(),
+			handshake: self.handshake,
+		}
+	}
+}
+
+/// Build a connection's shared state and its driver.
+///
+/// The driver future does timers, the close, and egress; ingress arrives
+/// from the endpoint's demux task, which feeds moq-quic directly and
+/// [kicks](Inner::kick) the driver. The caller spawns the future and reclaims
+/// the connection's bookkeeping once it resolves.
+pub(crate) fn launch(
+	owner: &Owner,
+	socket: Rc<udp::Socket>,
+	endpoint: Weak<endpoint::Inner>,
+	key: ConnectionHandle,
+	conn: moq_quic::connection::Connection,
+) -> (Shared, impl Future<Output = ()> + use<>) {
+	// The handshake's first datagrams arrived before this driver existed.
+	let stats = conn.stats();
+	let wire = moq_net::transport::Wire::new();
+	wire.set_sent_bytes(stats.udp_tx.bytes);
+	wire.set_received_bytes(stats.udp_rx.bytes);
+	let probe = conn.congestion_state().probes().then(moq_net::transport::Probe::new);
+	let shared = Rc::new(Inner {
+		wire,
+		probe,
+		conn: RefCell::new(conn),
+		state: RefCell::new(State::new()),
+		owner: owner.clone(),
+		handles: Cell::new(0),
+	});
+
+	let mut driver = Driver {
+		shared: shared.clone(),
+		socket,
+		endpoint,
+		key,
+		deadline: owner.timer(),
+		close_staged: false,
+		turn: 0,
+		trains: 0,
+	};
+	let future = async move { kio::wait(|waiter| driver.poll(waiter)).await };
+	(shared, future)
+}
+
+/// Own a connection until its handshake is handed to a public handle.
+///
+/// The driver and endpoint keep their own references, so dropping a pending
+/// establishment future without closing it leaves both alive until timeout.
+struct EstablishGuard {
+	shared: Option<Shared>,
+}
+
+impl Drop for EstablishGuard {
+	fn drop(&mut self) {
+		if let Some(shared) = self.shared.take() {
+			shared.close_code(0, "QUIC handshake abandoned");
+		}
+	}
+}
+
+/// Wait out the handshake, yielding the connection's public handle, or close
+/// the connection if it is still handshaking at `deadline`.
+pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Result<Connection, Error> {
+	let mut guard = EstablishGuard {
+		shared: Some(shared.clone()),
+	};
+	let mut timer = deadline.map(|at| {
+		let mut timer = shared.owner.timer();
+		timer.set(Some(at));
+		timer
+	});
+	let mut expired = false;
+	let result = kio::wait(|waiter| {
+		// The deadline goes first, so a handshake that completed in the same
+		// turn it expired is still refused. The close resolves this wait once
+		// the driver has staged it.
+		if timer.as_mut().is_some_and(|timer| timer.poll(waiter).is_ready()) {
+			timer = None;
+			expired = true;
+			shared.close_code(0, "QUIC handshake timed out");
+		}
+		let connected = shared.conn.borrow_mut().poll_connected(waiter);
+		if !expired && matches!(connected, Poll::Ready(Ok(()))) {
+			return Poll::Ready(Ok(()));
+		}
+		// A failed or refused handshake resolves with the published close.
+		poll_closed(&shared, waiter).map(Err)
+	})
+	.await;
+	if result.is_err() {
+		// The driver already reached a terminal state.
+		guard.shared = None;
+	}
+	result?;
+
+	let (alpn, server_name) = {
+		let conn = shared.conn.borrow();
+		let (alpn, server_name) = match conn.handshake_data() {
+			Some(data) => (
+				data.alpn.map(|proto| String::from_utf8_lossy(&proto).into_owned()),
+				data.server_name,
+			),
+			None => (None, None),
+		};
+		(alpn, server_name)
+	};
+
+	shared.hold();
+	let conn = Connection {
+		shared,
+		alpn,
+		server_name,
+		handshake: crate::quic::handshake::Info { deadline },
+	};
+	guard.shared = None;
+	Ok(conn)
+}
+
+impl Connection {
+	/// Accept the next unidirectional stream the peer opens.
+	#[kio::wrapper]
+	pub fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<recv::Stream, Error>> {
+		accept_uni(&self.shared, waiter)
+	}
+
+	/// Accept the next bidirectional stream the peer opens.
+	#[kio::wrapper]
+	pub fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(send::Stream, recv::Stream), Error>> {
+		accept_bi(&self.shared, waiter)
+	}
+
+	/// Open a unidirectional stream scheduled by `options`, once the peer's stream credit
+	/// allows.
+	///
+	/// # Panics
+	/// - when `options.group` belongs to another connection
+	#[kio::wrapper]
+	pub fn poll_open_uni(&self, waiter: &kio::Waiter, options: send::Options<'_>) -> Poll<Result<send::Stream, Error>> {
+		open(&self.shared, Dir::Uni, options, waiter).map_ok(|(send, _)| send)
+	}
+
+	/// Open a bidirectional stream scheduled by `options`, once the peer's stream credit
+	/// allows.
+	///
+	/// # Panics
+	/// - when `options.group` belongs to another connection
+	#[kio::wrapper]
+	pub fn poll_open_bi(
+		&self,
+		waiter: &kio::Waiter,
+		options: send::Options<'_>,
+	) -> Poll<Result<(send::Stream, recv::Stream), Error>> {
+		open(&self.shared, Dir::Bi, options, waiter).map_ok(|(send, recv)| (send, recv.expect("bidirectional")))
+	}
+
+	/// Receive the next datagram.
+	#[kio::wrapper]
+	pub fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
+		recv_datagram(&self.shared, waiter)
+	}
+
+	/// Why the connection closed, once it has.
+	#[kio::wrapper]
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		poll_closed(&self.shared, waiter)
+	}
+
+	/// The connection's metrics for moq-net.
+	pub(crate) fn transport_stats(&self) -> impl moq_net::transport::Metrics + use<> {
+		let stats = self.stats();
+		Stats {
+			bytes_lost: stats.path.lost_bytes,
+			streams_evicted: stats.credit.evicted,
+			packets_sent: stats.udp_tx.datagrams,
+			packets_received: stats.udp_rx.datagrams,
+			packets_lost: stats.path.lost_packets,
+			rtt: stats.path.rtt,
+			bandwidth: stats.path.bandwidth_estimate,
+		}
+	}
+}
+
+impl Drop for Connection {
+	fn drop(&mut self) {
+		self.shared.release();
+	}
+}
+
+fn accept_uni(shared: &Shared, waiter: &kio::Waiter) -> Poll<Result<recv::Stream, Error>> {
+	let accepted = shared.conn.borrow_mut().streams().poll_accept(waiter, Dir::Uni);
+	match ready!(accepted) {
+		Ok(id) => Poll::Ready(Ok(recv::Stream::new(shared.clone(), id))),
+		Err(_) => Poll::Ready(Err(shared.lost())),
+	}
+}
+
+fn accept_bi(shared: &Shared, waiter: &kio::Waiter) -> Poll<Result<(send::Stream, recv::Stream), Error>> {
+	let accepted = shared.conn.borrow_mut().streams().poll_accept(waiter, Dir::Bi);
+	match ready!(accepted) {
+		Ok(id) => Poll::Ready(Ok((
+			send::Stream::new(shared.clone(), id),
+			recv::Stream::new(shared.clone(), id),
+		))),
+		Err(_) => Poll::Ready(Err(shared.lost())),
+	}
+}
+
+/// Open a stream in `dir`, with its receive half when bidirectional.
+fn open(
+	shared: &Shared,
+	dir: Dir,
+	options: send::Options<'_>,
+	waiter: &kio::Waiter,
+) -> Poll<Result<(send::Stream, Option<recv::Stream>), Error>> {
+	// The peer's MAX_STREAMS credit is what gates us, once the connection is not lost.
+	let opened = shared
+		.conn
+		.borrow_mut()
+		.streams()
+		.poll_open(waiter, dir, options.to_quic());
+	let id = match ready!(opened) {
+		Ok(id) => id,
+		Err(_) => return Poll::Ready(Err(shared.lost())),
+	};
+	let recv = (dir == Dir::Bi).then(|| recv::Stream::new(shared.clone(), id));
+	Poll::Ready(Ok((send::Stream::new(shared.clone(), id), recv)))
+}
+
+fn recv_datagram(shared: &Shared, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
+	let received = shared.conn.borrow_mut().datagrams().poll_recv(waiter);
+	match ready!(received) {
+		Ok(datagram) => Poll::Ready(Ok(datagram)),
+		Err(_) => Poll::Ready(Err(shared.lost())),
+	}
+}
+
+/// Wait for the published terminal error, which a local close reaches only once staged.
+fn poll_closed(shared: &Shared, waiter: &kio::Waiter) -> Poll<Error> {
+	let mut state = shared.state.borrow_mut();
+	if let Some(err) = &state.closed {
+		return Poll::Ready(err.clone());
+	}
+	waiter.register(&mut state.closed_waiters);
+	Poll::Pending
+}
+
+impl std::fmt::Debug for Connection {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Connection").field("alpn", &self.alpn).finish()
+	}
+}
+
+/// A snapshot of moq-quic's metrics for moq-net.
+struct Stats {
+	bytes_lost: u64,
+	streams_evicted: u64,
+	packets_sent: u64,
+	packets_received: u64,
+	packets_lost: u64,
+	rtt: std::time::Duration,
+	/// The congestion controller's bandwidth estimate in bytes per second.
+	bandwidth: Option<u64>,
+}
+
+impl moq_net::transport::Metrics for Stats {
+	fn streams_evicted(&self) -> Option<u64> {
+		Some(self.streams_evicted)
+	}
+	fn bytes_lost(&self) -> Option<u64> {
+		Some(self.bytes_lost)
+	}
+
+	fn packets_sent(&self) -> Option<u64> {
+		Some(self.packets_sent)
+	}
+
+	fn packets_received(&self) -> Option<u64> {
+		Some(self.packets_received)
+	}
+
+	fn packets_lost(&self) -> Option<u64> {
+		Some(self.packets_lost)
+	}
+
+	fn rtt(&self) -> Option<std::time::Duration> {
+		Some(self.rtt)
+	}
+
+	/// The congestion controller's bandwidth estimate, in bits per second.
+	///
+	/// BBR estimates the delivery rate; CUBIC offers none. The congestion
+	/// window over the RTT is not a stand-in: BBR deliberately holds about
+	/// twice the bandwidth-delay product, so that number is a multiple of what
+	/// the path will carry, and moq-net feeds this straight into its bandwidth
+	/// allocator and PROBE. A missing sample is a state the model already
+	/// handles; an inflated one is a rate an encoder will chase.
+	fn estimated_send_rate(&self) -> Option<u64> {
+		self.bandwidth.map(|bytes| bytes.saturating_mul(8))
+	}
+}
+
+/// The per-connection task: endpoint events, the connection's loss, timers,
+/// and packets out. Packets in come from the endpoint's demux task, which feeds
+/// moq-quic directly and kicks this driver; what the handles queue wakes it
+/// through `poll_transmit`.
+struct Driver {
+	shared: Shared,
+	socket: Rc<udp::Socket>,
+	/// The endpoint this connection belongs to, for the events the two of
+	/// them trade (fresh connection ids, retirements, and the drain that
+	/// frees the slot). Weak, because the endpoint owns us.
+	endpoint: Weak<endpoint::Inner>,
+	key: ConnectionHandle,
+	deadline: crate::Timer,
+	/// A CONNECTION_CLOSE has been handed to the socket. Not implied by a
+	/// flush that came back empty: moq-quic paces the close like any other packet,
+	/// so it can sit behind a pacing timer after the application asked for it.
+	close_staged: bool,
+	/// The worker turn `trains` counts in.
+	turn: u64,
+	/// Trains staged this turn.
+	trains: usize,
+}
+
+/// The worker dropped its tasks, this driver among them: nothing will ever
+/// drive the connection again, so every handle fails rather than pending.
+/// After a normal end the terminal error is already set, and this keeps it.
+///
+/// Failing from outside closes moq-quic too, which wakes every handle parked
+/// in its waits.
+impl Drop for Driver {
+	fn drop(&mut self) {
+		if self.shared.state.borrow().closed.is_none() {
+			self.shared
+				.fail(Error::Io(crate::shared::Shared::gone_error().to_string()));
+		}
+	}
+}
+
+impl Driver {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		{
+			let mut state = self.shared.state.borrow_mut();
+			// The endpoint fails the connection from outside when its socket
+			// dies; there is nothing left to drain it through.
+			if state.dead {
+				return Poll::Ready(());
+			}
+			// Register for ingress first: a datagram the endpoint feeds the
+			// connection after this turn's checks still re-polls us.
+			waiter.register(&mut state.driver);
+		}
+
+		loop {
+			self.endpoint_events();
+			// Handles wait on moq-quic itself, so its events go unread; drain them
+			// so the queue stays empty.
+			while self.shared.conn.borrow_mut().poll().is_some() {}
+			self.check_lost(waiter);
+
+			if self.shared.state.borrow().dead {
+				return Poll::Ready(());
+			}
+			// A closed connection still owes the peer its CONNECTION_CLOSE
+			// (and a retransmit for each packet that arrives after), so the
+			// driver runs until moq-quic says the drain is over.
+			if self.shared.conn.borrow().is_drained() {
+				// A close moq-quic never managed to send (the server's
+				// anti-amplification limit can withhold it) ends here too.
+				self.publish_close();
+				return Poll::Ready(());
+			}
+
+			if let Poll::Ready(err) = self.flush(waiter) {
+				self.shared.fail(err);
+				return Poll::Ready(());
+			}
+			if self.close_staged {
+				self.publish_close();
+			}
+
+			// Arm, *then* poll: the poll is what registers the waiter, so
+			// polling before the set would leave the firing to wake nobody
+			// (fatal on a dial nobody answers, where no ingress ever re-polls
+			// us).
+			self.deadline.set(self.shared.conn.borrow_mut().poll_timeout());
+			if self.deadline.poll(waiter).is_pending() {
+				return Poll::Pending;
+			}
+			self.shared.conn.borrow_mut().handle_timeout(self.shared.owner.now());
+		}
+	}
+
+	/// Trade events with the endpoint: connection ids to issue and retire, and
+	/// the drain that frees our slot in its table.
+	///
+	/// The endpoint's borrow is never held across the connection's, and the
+	/// demux task borrows them in the same order, so the two cannot deadlock.
+	fn endpoint_events(&mut self) {
+		let Some(endpoint) = self.endpoint.upgrade() else {
+			return;
+		};
+		loop {
+			let event = self.shared.conn.borrow_mut().poll_endpoint_events();
+			let Some(event) = event else {
+				return;
+			};
+			if let Some(event) = endpoint.on_connection_event(self.key, event) {
+				self.shared.conn.borrow_mut().handle_event(event);
+			}
+		}
+	}
+
+	/// Learn whether moq-quic lost the connection, and publish why.
+	///
+	/// The driver publishes a local close once it has staged the
+	/// CONNECTION_CLOSE, so a caller that stops driving the worker the moment
+	/// `poll_closed` resolves has at least handed the packet over.
+	fn check_lost(&mut self, waiter: &kio::Waiter) {
+		let lost = self.shared.conn.borrow_mut().poll_closed(waiter);
+		let Poll::Ready(reason) = lost else {
+			return;
+		};
+		let mut state = self.shared.state.borrow_mut();
+		if state.closed.is_some() || state.local_close.is_some() {
+			return;
+		}
+		match reason {
+			reason @ moq_quic::connection::Error::LocallyClosed { .. } => state.local_close = Some(reason.into()),
+			reason => state.fail(reason.into()),
+		}
+	}
+
+	/// Publish the terminal error for a close this side asked for.
+	///
+	/// Only once the CONNECTION_CLOSE is staged (or the drain is over), since
+	/// an application is free to stop driving the worker the moment
+	/// `poll_closed` resolves. Staged is not delivered: the send is
+	/// fire-and-forget, so a worker torn down in the same breath can still
+	/// take the packet with it and leave the peer to idle out.
+	fn publish_close(&mut self) {
+		let mut state = self.shared.state.borrow_mut();
+		if let Some(err) = state.local_close.take() {
+			state.fail(err);
+		}
+	}
+
+	/// Stage up to [`TRAINS_PER_TURN`] GSO trains this turn, then yield the
+	/// rest to the next turn, so other connections sharing the socket get a
+	/// chance at the transmit pool and the ring is reaped in between.
+	fn flush(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		let turn = self.shared.owner.turn();
+		if self.turn != turn {
+			self.turn = turn;
+			self.trains = 0;
+		}
+		while self.trains < TRAINS_PER_TURN {
+			match std::task::ready!(self.flush_one(waiter)) {
+				Ok(()) => self.trains += 1,
+				Err(err) => return Poll::Ready(err),
+			}
+			// The budget is spent: requeue behind the next reap, once per turn.
+			// If moq-quic is drained by then, that poll costs one empty acquire
+			// and then parks normally.
+			if self.trains == TRAINS_PER_TURN {
+				self.shared.owner.yield_turn(waiter.waker());
+			}
+		}
+		Poll::Pending
+	}
+
+	/// Fill one transmit buffer and stage it.
+	///
+	/// `poll_transmit` is the driver's wait for egress: with nothing to send it
+	/// registers `waiter`, which whatever a handle queues wakes. Pacing happens
+	/// inside it too: a paced path returns `Pending` and arms a timer that
+	/// `poll_timeout` reports, and the driver loop flushes again once it fires.
+	fn flush_one(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let mut tx = match self.socket.poll_acquire(waiter) {
+			Poll::Ready(Ok(tx)) => tx,
+			Poll::Ready(Err(err)) => return Poll::Ready(Err(Error::Io(err.to_string()))),
+			// Backpressure: a completed send re-polls us.
+			Poll::Pending => return Poll::Pending,
+		};
+
+		let (transmit, closing) = {
+			let mut conn = self.shared.conn.borrow_mut();
+			// moq-quic packs every full datagram at the current MTU, which
+			// discovery can raise, so a train sized for any smaller one would
+			// outgrow the buffer.
+			let mtu = usize::from(conn.current_mtu());
+			let segments = (tx.capacity() / mtu).min(TRAIN_SEGMENTS);
+			if segments == 0 {
+				return Poll::Ready(Err(Error::Io(format!(
+					"transmit buffer of {} bytes holds no {mtu} byte datagram",
+					tx.capacity()
+				))));
+			}
+			// A new target waits for the next egress: probing only resends data in flight, so it
+			// has nothing to send until a write or an ACK wakes the driver anyway.
+			if let Some(probe) = &self.shared.probe {
+				conn.set_probe_target(probe.target().as_bps() / 8);
+			}
+			// moq-quic encrypts the train straight into the socket's buffer.
+			// Nothing to send registers us until the application queues
+			// something; paced, the timer re-polls us. Either way the buffer
+			// returns to the pool on drop.
+			let Poll::Ready(transmit) = conn.poll_transmit(waiter, self.shared.owner.now(), segments, &mut tx) else {
+				return Poll::Pending;
+			};
+			self.shared.wire.set_sent_bytes(conn.stats().udp_tx.bytes);
+			// Once closed, moq-quic transmits nothing but the CONNECTION_CLOSE.
+			(transmit, conn.is_closed())
+		};
+		debug_assert_eq!(transmit.size, tx.len());
+
+		// A lone datagram is its own segment size, and the socket's GSO
+		// stride has to match what moq-quic actually packed.
+		let transmit = udp::Transmit {
+			to: transmit.remote,
+			segment: transmit.segment_size.unwrap_or(transmit.size),
+			ecn: transmit.ecn.map(super::ecn_from_quic),
+			src_ip: transmit.local_ip,
+		};
+		if let Err(err) = tx.send(transmit) {
+			return Poll::Ready(Err(Error::Io(err.to_string())));
+		}
+		self.close_staged |= closing;
+		Poll::Ready(Ok(()))
+	}
+}

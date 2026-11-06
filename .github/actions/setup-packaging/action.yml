@@ -4,12 +4,10 @@ description: Install Nix and prepend the .#packaging output bin/ to $PATH.
 runs:
   using: composite
   steps:
-    - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
-      with:
-        determinate: false
+    - uses: ./.github/actions/nix
 
     - name: Build packaging tools from flake
       shell: bash
-      run: |
+      run: | # zizmor: ignore[github-env] the path is a Nix store build of the checkout this job already runs.
         out=$(nix build --no-link --print-out-paths .#packaging)
         echo "$out/bin" >> "$GITHUB_PATH"

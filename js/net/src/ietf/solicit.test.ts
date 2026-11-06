@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { SetupOption, SetupOptions } from "./parameters.ts";
+import { SetupOption, SetupOptions } from "./setup_options.ts";
 import { solicitFromSetup, solicitIntoSetup } from "./solicit.ts";
 
 /**

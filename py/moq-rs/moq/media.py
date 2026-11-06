@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import json
-from dataclasses import dataclass
-from datetime import timedelta
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 from moq_ffi import MoqAudio as Audio
@@ -22,24 +22,26 @@ from moq_ffi import (
     MoqContainerFormat as ContainerFormat,
 )
 from moq_ffi import (
-    MoqContainerInit as ContainerInit,
-)
-from moq_ffi import MoqDimensions as Dimensions
-from moq_ffi import (
+    MoqContainerInit,
     MoqError,
     MoqMediaCatalogConsumer,
     MoqMediaCatalogProducer,
     MoqMediaContainerProducer,
-    MoqMediaContainerStreamProducer,
     MoqMediaFrame,
     MoqMediaGroupConfig,
     MoqMediaGroupConsumer,
+    MoqMediaProducer,
+    MoqMediaRead,
     MoqMediaTarget,
+    MoqMediaTimebase,
     MoqMediaTrackConfig,
     MoqMediaTrackConsumer,
     MoqMediaTrackProducer,
     MoqMediaTrackStreamProducer,
+    MoqRendition,
 )
+from moq_ffi import MoqDecodeStart as DecodeStart
+from moq_ffi import MoqDimensions as Dimensions
 from moq_ffi import MoqVideo as Video
 from moq_ffi import MoqVideoFormat as VideoFormat
 from moq_ffi import MoqVideoHint as VideoHint
@@ -51,10 +53,33 @@ from moq_ffi import (
 )
 
 from . import subscribe as _subscribe
-from ._records import Frame, Subscription, _from_us, _subscription, _to_us
+from ._read import End, Gap, _end, _gap
+from ._records import Frame, Subscription, Timestamp, _subscription
+from ._stream import _Stream
 from .publish import BroadcastProducer, TrackDemand, TrackRequest
 from .subscribe import BroadcastConsumer
 from .types import FetchGroupOptions
+
+
+class Timebase:
+    """Share one source's timestamp offset without keeping its broadcast open."""
+
+    def __init__(self, broadcast: BroadcastProducer) -> None:
+        self._inner = MoqMediaTimebase(broadcast._inner)
+
+
+@dataclass(frozen=True)
+class ContainerInit:
+    """A container format, its leading bytes, and an optional shared source timebase."""
+
+    format: ContainerFormat
+    data: bytes
+    timebase: Timebase | None = field(default=None, kw_only=True)
+
+    def _ffi(self) -> MoqContainerInit:
+        return MoqContainerInit(
+            format=self.format, data=self.data, timebase=self.timebase._inner if self.timebase else None
+        )
 
 
 @dataclass(frozen=True)
@@ -86,12 +111,16 @@ class MediaFrame:
     """A container-decoded payload, presentation timestamp, and keyframe flag."""
 
     payload: bytes
-    timestamp: timedelta
+    timestamp: Timestamp
     keyframe: bool
 
     @staticmethod
     def _from_ffi(frame: MoqMediaFrame) -> MediaFrame:
-        return MediaFrame(frame.payload, _from_us(frame.timestamp_us), frame.keyframe)
+        return MediaFrame(frame.payload, Timestamp._from_ffi(frame.timestamp), frame.keyframe)
+
+
+Read = MediaFrame | Gap | End
+"""One encoded frame, a lost span, or an encoder end, in delivery order."""
 
 
 class CatalogProducer:
@@ -99,6 +128,10 @@ class CatalogProducer:
 
     def __init__(self, broadcast: BroadcastProducer) -> None:
         self._inner = MoqMediaCatalogProducer(broadcast._inner)
+
+    def now(self) -> Timestamp:
+        """Read the broadcast clock, fixing it for subsequent media producers."""
+        return Timestamp._from_ffi(self._inner.now())
 
     def set_video_properties(self, properties: VideoProperties) -> None:
         """Replace the video properties shared by every rendition."""
@@ -111,6 +144,15 @@ class CatalogProducer:
     def remove_section(self, name: str) -> None:
         """Remove an application catalog section if present."""
         self._inner.remove_section(name)
+
+    def finish(self) -> None:
+        """Finish the catalog, which ends the broadcast's content.
+
+        Finish every track first. The broadcast stays announced and keeps serving its
+        finished tracks to late subscribers until its ``close`` takes it offline; how long
+        to keep it up is yours to decide.
+        """
+        self._inner.finish()
 
 
 class TrackProducer:
@@ -126,9 +168,21 @@ class TrackProducer:
         return cls(MoqMediaTrackProducer.audio(broadcast._inner, target._ffi(), init))
 
     @classmethod
-    def video(cls, broadcast: BroadcastProducer, init: VideoInit, *, target: Target = Named()) -> TrackProducer:
-        """Import complete encoded video frames on a named or requested track."""
-        return cls(MoqMediaTrackProducer.video(broadcast._inner, target._ffi(), init))
+    def video(
+        cls,
+        broadcast: BroadcastProducer,
+        init: VideoInit,
+        *,
+        target: Target = Named(),
+        lower: TrackProducer | TrackStreamProducer | None = None,
+    ) -> TrackProducer:
+        """Import complete encoded video frames on a named or requested track.
+
+        Pass ``lower``, the next lower rendition of the same source and of either
+        producer kind, to publish this track one priority below it, so a bandwidth
+        allocator funds that one first.
+        """
+        return cls(MoqMediaTrackProducer.video(broadcast._inner, target._ffi(), _lower(init, lower)))
 
     def __init__(self, inner: MoqMediaTrackProducer) -> None:
         self._inner = inner
@@ -137,21 +191,22 @@ class TrackProducer:
         """A watch-only handle to whether this media track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def write_frame(self, payload: bytes, timestamp: timedelta = timedelta(0)) -> None:
+    def write_frame(self, payload: bytes, timestamp: Timestamp) -> None:
         """Write one encoded frame with a presentation timestamp."""
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
-    def flush(self, timestamp: timedelta) -> None:
-        """Record a local encoder's frame handoff on the broadcast media clock.
-
-        Call this after ``write_frame`` only for encoded live output. File, pipe,
-        and network imports should leave their jitter estimate clock free.
-        """
-        self._inner.flush(_to_us(timestamp, "timestamp"))
-
     def discontinuity(self) -> None:
-        """Mark a timeline break and restart handoff measurement, preserving advertised jitter."""
+        """Mark a timeline break, preserving the advertised jitter and delay."""
         self._inner.discontinuity()
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Advertise whether this video rendition is being produced, as its catalog ``enabled``.
+
+        Disable it when its sender stops for lack of bandwidth and mark a
+        :meth:`discontinuity`; enable it again just before the keyframe that
+        resumes it. An audio track refuses.
+        """
+        self._inner.set_enabled(enabled)
 
     def cut(self) -> None:
         """Draw a group boundary here.
@@ -186,10 +241,10 @@ class ContainerProducer:
     """
 
     def __init__(self, broadcast: BroadcastProducer, init: ContainerInit) -> None:
-        self._inner = MoqMediaContainerProducer(broadcast._inner, init)
+        self._inner = MoqMediaContainerProducer(broadcast._inner, init._ffi())
 
     def write(self, payload: bytes) -> None:
-        """Write a whole chunk of container bytes."""
+        """Write container bytes; the container recovers its own framing, so chunks may split anywhere."""
         self._inner.write(payload)
 
     def cut(self) -> None:
@@ -210,21 +265,6 @@ class ContainerProducer:
         self._inner.finish()
 
 
-class ContainerStreamProducer:
-    """Publish a container fed by a raw byte stream, which recovers its own framing."""
-
-    def __init__(self, broadcast: BroadcastProducer, format: ContainerFormat) -> None:
-        self._inner = MoqMediaContainerStreamProducer(broadcast._inner, format)
-
-    def write(self, payload: bytes) -> None:
-        """Push raw container bytes; chunk boundaries don't matter."""
-        self._inner.write(payload)
-
-    def finish(self) -> None:
-        """Finish every track this container publishes."""
-        self._inner.finish()
-
-
 class TrackStreamProducer:
     """Wraps MoqMediaTrackStreamProducer: feed a raw byte stream (e.g. Annex-B
     H.264) and let the importer infer frame boundaries.
@@ -235,9 +275,19 @@ class TrackStreamProducer:
     """
 
     @classmethod
-    def video(cls, broadcast: BroadcastProducer, init: VideoInit, *, target: Target = Named()) -> TrackStreamProducer:
-        """Import a video byte stream, inferring frame boundaries."""
-        return cls(MoqMediaTrackStreamProducer.video(broadcast._inner, target._ffi(), init))
+    def video(
+        cls,
+        broadcast: BroadcastProducer,
+        init: VideoInit,
+        *,
+        target: Target = Named(),
+        lower: TrackProducer | TrackStreamProducer | None = None,
+    ) -> TrackStreamProducer:
+        """Import a video byte stream, inferring frame boundaries.
+
+        ``lower`` is as for :meth:`TrackProducer.video`.
+        """
+        return cls(MoqMediaTrackStreamProducer.video(broadcast._inner, target._ffi(), _lower(init, lower)))
 
     def __init__(self, inner: MoqMediaTrackStreamProducer) -> None:
         self._inner = inner
@@ -250,13 +300,42 @@ class TrackStreamProducer:
         """Push raw stream bytes; whole frames are emitted as they complete."""
         self._inner.write(payload)
 
+    def set_enabled(self, enabled: bool) -> None:
+        """Stop or resume publishing this rendition, advertised as its catalog ``enabled``.
+
+        Disable it when its sender stops for lack of bandwidth: this marks a
+        discontinuity and drops everything written until it is enabled again, so
+        the stream may keep flowing. Enabled again, it resumes, and advertises
+        itself enabled, at the next keyframe in the stream.
+        """
+        self._inner.set_enabled(enabled)
+
     def finish(self) -> None:
         """Finish publishing and flush a clean end to subscribers."""
         self._inner.finish()
 
 
-class TrackConsumer:
-    """Async-iterable stream of decoded :class:`MediaFrame` in decode order.
+def _lower(init: VideoInit, lower: TrackProducer | TrackStreamProducer | None) -> VideoInit:
+    if lower is None:
+        return init
+    init = copy.copy(init)
+    if isinstance(lower, TrackProducer):
+        init.lower = cast(MoqMediaProducer, MoqMediaProducer.TRACK(producer=lower._inner))
+    else:
+        init.lower = cast(MoqMediaProducer, MoqMediaProducer.STREAM(producer=lower._inner))
+    return init
+
+
+def _rendition(id: str, rendition: Video | Audio) -> MoqRendition:
+    if isinstance(rendition, Video):
+        return cast(MoqRendition, MoqRendition.VIDEO(id=id, config=rendition))
+    if isinstance(rendition, Audio):
+        return cast(MoqRendition, MoqRendition.AUDIO(id=id, config=rendition))
+    raise TypeError(f"expected a catalog Video or Audio rendition, got {type(rendition).__name__}")
+
+
+class TrackConsumer(_Stream[Read]):
+    """Async-iterable encoded frames and the :class:`Gap` and :class:`End` breaks between them.
 
     Construct with :meth:`subscribe`. Iterate with ``async for``;
     usable as an async context manager that cancels on exit.
@@ -264,36 +343,38 @@ class TrackConsumer:
 
     @classmethod
     async def subscribe(
-        cls, broadcast: BroadcastConsumer, name: str, container: Container, *, subscription: Subscription | None = None
+        cls,
+        broadcast: BroadcastConsumer,
+        id: str,
+        rendition: Video | Audio,
+        *,
+        subscription: Subscription | None = None,
     ) -> TrackConsumer:
-        """Subscribe to a media track and decode its container."""
-        config = MoqMediaTrackConfig(name=name, container=container, subscription=_subscription(subscription))
+        """Subscribe to the catalog rendition ``id`` and decode its container, following its broadcast and track."""
+        config = MoqMediaTrackConfig(rendition=_rendition(id, rendition), subscription=_subscription(subscription))
         return cls(await MoqMediaTrackConsumer.subscribe(broadcast._inner, config))
 
     def __init__(self, inner: MoqMediaTrackConsumer) -> None:
         self._inner = inner
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> MediaFrame:
-        frame = await self._inner.next()
-        if frame is None:
-            raise StopAsyncIteration
-        return MediaFrame._from_ffi(frame)
+    async def _next(self) -> Read | None:
+        value = await self._inner.next()
+        if value is None:
+            return None
+        if isinstance(value, MoqMediaRead.FRAME):
+            return MediaFrame._from_ffi(value.frame)
+        if isinstance(value, MoqMediaRead.GAP):
+            return _gap(value.timestamp, value.duration)
+        if isinstance(value, MoqMediaRead.END):
+            return _end(value.end)
+        raise TypeError(f"unknown media read: {value!r}")
 
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering frames."""
         self._inner.cancel()
 
 
-class GroupConsumer:
+class GroupConsumer(_Stream[MediaFrame]):
     """Async iterator of decoded :class:`MediaFrame` within a single group.
 
     Construct with :meth:`fetch`, or decode a raw :class:`~moq.GroupConsumer`,
@@ -307,7 +388,7 @@ class GroupConsumer:
 
         Frame timestamps are container media time, not the transport's. Which
         groups arrive, and how long a stalled one stays readable, is the
-        subscription's ``max_delay``. Takes over ``group``, whose handle is
+        subscription's ``delay.max``. Takes over ``group``, whose handle is
         closed afterward; raises ``Error.AlreadyCommitted`` if it has already
         read a frame.
         """
@@ -323,14 +404,14 @@ class GroupConsumer:
     async def fetch(
         cls,
         broadcast: BroadcastConsumer,
-        name: str,
+        id: str,
+        rendition: Video | Audio,
         sequence: int,
-        container: Container,
         *,
         options: FetchGroupOptions | None = None,
     ) -> GroupConsumer:
-        """Fetch and decode exactly one media group."""
-        config = MoqMediaGroupConfig(name=name, sequence=sequence, container=container, options=options)
+        """Fetch and decode one group of the catalog rendition ``id``, following its broadcast and track."""
+        config = MoqMediaGroupConfig(rendition=_rendition(id, rendition), sequence=sequence, options=options)
         return cls._from_inner(await MoqMediaGroupConsumer.fetch(broadcast._inner, config))
 
     @property
@@ -338,27 +419,16 @@ class GroupConsumer:
         """The sequence number of this group within the track."""
         return self._inner.sequence()
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> MediaFrame:
+    async def _next(self) -> MediaFrame | None:
         frame = await self._inner.next()
-        if frame is None:
-            raise StopAsyncIteration
-        return MediaFrame._from_ffi(frame)
+        return None if frame is None else MediaFrame._from_ffi(frame)
 
     def cancel(self) -> None:
         """Cancel reading this group and stop delivering frames."""
         self._inner.cancel()
 
 
-class CatalogConsumer:
+class CatalogConsumer(_Stream[Catalog]):
     """Async-iterable stream of :class:`Catalog` snapshots as the broadcast updates.
 
     Construct with :meth:`subscribe`. Each item is the latest
@@ -373,20 +443,8 @@ class CatalogConsumer:
     def __init__(self, inner: MoqMediaCatalogConsumer) -> None:
         self._inner = inner
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> Catalog:
-        catalog = await self._inner.next()
-        if catalog is None:
-            raise StopAsyncIteration
-        return catalog
+    async def _next(self) -> Catalog | None:
+        return await self._inner.next()
 
     def cancel(self) -> None:
         """Cancel the catalog subscription and stop delivering updates."""
@@ -409,12 +467,14 @@ __all__ = [
     "Requested",
     "Target",
     "MediaFrame",
+    "Read",
+    "Gap",
+    "End",
     "CatalogProducer",
     "CatalogConsumer",
     "TrackProducer",
     "TrackStreamProducer",
     "ContainerProducer",
-    "ContainerStreamProducer",
     "TrackConsumer",
     "GroupConsumer",
     "Audio",
@@ -422,6 +482,7 @@ __all__ = [
     "Catalog",
     "Container",
     "Dimensions",
+    "DecodeStart",
     "AudioFormat",
     "VideoFormat",
     "ContainerFormat",
@@ -430,5 +491,6 @@ __all__ = [
     "AudioInit",
     "VideoInit",
     "ContainerInit",
+    "Timebase",
     "catalog",
 ]

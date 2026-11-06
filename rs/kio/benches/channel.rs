@@ -127,5 +127,30 @@ fn bench_notify(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench_create_parallel, bench_notify);
+/// Measure writes nobody waits on after a burst of readers parked and left, swept over
+/// the burst size. A write must not keep paying for waiters that are already gone.
+fn bench_write_abandoned(c: &mut Criterion) {
+	let mut group = c.benchmark_group("channel_write_abandoned");
+	for abandoned in [0, 128, 4_096] {
+		group.bench_with_input(BenchmarkId::from_parameter(abandoned), &abandoned, |b, &abandoned| {
+			let producer = Producer::new(0u64);
+			let consumer = producer.consume();
+			let waiters: Vec<_> = (0..abandoned).map(|_| Waiter::new(Waker::noop().clone())).collect();
+			for waiter in &waiters {
+				assert!(consumer.poll(waiter, |_| Poll::<()>::Pending).is_pending());
+			}
+			drop(waiters);
+
+			b.iter(|| {
+				let Ok(mut state) = producer.write() else {
+					panic!("benchmark channel is open");
+				};
+				*state += 1;
+			});
+		});
+	}
+	group.finish();
+}
+
+criterion_group!(benches, bench_create_parallel, bench_notify, bench_write_abandoned);
 criterion_main!(benches);

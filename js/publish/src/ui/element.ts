@@ -5,6 +5,8 @@
  *
  * @module
  */
+
+import { Milli, Nano } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqPublish from "../element";
@@ -15,8 +17,9 @@ import type { Tab, UiState } from "./state";
 import styles from "./styles/index.css?inline";
 
 // How long the chrome lingers after the pointer stops moving while previewing.
-const HIDE_MS = 2800;
+const HIDE = Nano.fromMilli(Milli(2800));
 
+/** The `<moq-publish-ui>` element: capture controls around the `<moq-publish>` it wraps. */
 export default class MoqPublishUi extends HTMLElement {
 	#signals?: Effect;
 	#root: ShadowRoot;
@@ -35,6 +38,7 @@ export default class MoqPublishUi extends HTMLElement {
 		this.#observer = new MutationObserver(() => this.#updatePublish());
 	}
 
+	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
 		this.#updatePublish();
 		this.#observer.observe(this, { childList: true });
@@ -44,6 +48,7 @@ export default class MoqPublishUi extends HTMLElement {
 		signals.run(this.#render.bind(this));
 	}
 
+	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
 		this.#observer.disconnect();
 		this.#signals?.close();
@@ -95,25 +100,24 @@ export default class MoqPublishUi extends HTMLElement {
 		player.append(scrimTop, center(effect, publish), chrome, panel);
 		DOM.render(effect, this.#root, player);
 
-		// Keep the player box from jumping when video toggles off: reserve the
-		// last live preview's aspect ratio (defaults to 16:9) instead of snapping.
+		// Capture can be live without a preview, so size the box by what the slotted content renders,
+		// not by the capture alone. With nothing shown, reserve the last shown aspect ratio (initially
+		// 16:9) instead of snapping. Empty previews hide themselves and contribute no layout size.
 		let lastAspect = 16 / 9;
+		const rendered = new Signal<number | undefined>(undefined);
+		const resize = new ResizeObserver(([entry]) => {
+			const { width, height } = entry.contentRect;
+			rendered.set(width > 0 && height > 0 ? width / height : undefined);
+		});
+		resize.observe(publish);
+		effect.cleanup(() => resize.disconnect());
+
 		effect.run((e) => {
-			const capture = e.get(publish.video.in.capture);
-			const src = capture ? e.get(capture.in.source) : undefined;
-			if (src) {
+			const aspect = e.get(rendered);
+			if (aspect) {
+				lastAspect = aspect;
 				player.classList.remove("player--empty");
 				player.style.aspectRatio = "";
-				const video = this.querySelector("video") as HTMLVideoElement | null;
-				if (video) {
-					const measure = () => {
-						if (video.videoWidth > 0 && video.videoHeight > 0)
-							lastAspect = video.videoWidth / video.videoHeight;
-					};
-					measure();
-					e.event(video, "loadedmetadata", measure);
-					e.event(video, "resize", measure);
-				}
 			} else {
 				player.style.aspectRatio = String(lastAspect);
 				player.classList.add("player--empty");
@@ -143,7 +147,7 @@ export default class MoqPublishUi extends HTMLElement {
 			e.get(activity);
 			state.chrome.set(true);
 			if (isPinned) return;
-			e.timer(() => state.chrome.set(false), HIDE_MS);
+			e.timer(() => state.chrome.set(false), HIDE);
 		});
 
 		effect.event(this, "pointerleave", () => {

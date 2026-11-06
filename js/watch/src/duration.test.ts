@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import type { Time } from "@moq/net";
+import type { Milli } from "@moq/clock";
 import { formatDuration, parseDuration } from "./duration";
 
-const ms = (value: number) => value as Time.Milli;
+const ms = (value: number) => value as Milli;
 
 describe("parseDuration", () => {
 	it("parses milliseconds", () => {

@@ -39,12 +39,13 @@ mod test {
 		name: String,
 		first: bool,
 		frame: String,
+		events: Vec<Value>,
 	}
 
-	/// The exact frame bytes for each op, shared with the TypeScript suite.
+	/// The exact frame bytes and decoded events, shared with the TypeScript suite.
 	///
-	/// This file is the wire contract between the two implementations. A change here is a format
-	/// change, so both suites have to move together.
+	/// Frame strings are the wire contract between the two implementations. Changes to those
+	/// strings are format changes, while expected events pin decoder semantics.
 	#[test]
 	fn vectors_round_trip() {
 		let vectors: Vec<Vector> = serde_json::from_str(include_str!("../../tests/window-vectors.json")).unwrap();
@@ -63,6 +64,27 @@ mod test {
 				}
 			};
 			assert_eq!(encoded, vector.frame, "{}", vector.name);
+
+			let mut decoder = super::super::Decoder::<Value>::new(Default::default());
+			let mut group = decoder.group();
+			if !vector.first {
+				group
+					.decode(br#"{"offset":0,"records":[{"n":0},{"n":1},{"n":2}]}"#)
+					.unwrap();
+				while group.next_event().is_some() {}
+			}
+			group.decode(vector.frame.as_bytes()).unwrap();
+			let events: Vec<_> = std::iter::from_fn(|| group.next_event())
+				.map(|event| {
+					use super::super::Event;
+					match event {
+						Event::Push { index, value } => json!({"push": {"index": index, "value": value}}),
+						Event::Pop(range) => json!({"pop": {"start": range.start, "end": range.end}}),
+						Event::Skip(range) => json!({"skip": {"start": range.start, "end": range.end}}),
+					}
+				})
+				.collect();
+			assert_eq!(events, vector.events, "{}", vector.name);
 		}
 	}
 

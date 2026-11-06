@@ -1,5 +1,5 @@
 # The generated bindings ship as source: compile `pkg-config --variable=sources moq-cpp` with the
-# same standard and flags as the code that includes <moq/moq.hpp>.
+# same flags as the code that includes <moq/moq.hpp>.
 prefix=${pcfiledir}/../..
 libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
 includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@

@@ -1,7 +1,7 @@
 import MoqFFI
 
-/// The publish side of an origin: create broadcasts, serve them on demand,
-/// and announce them so subscribers can discover them.
+/// The publish side of an origin: create routes that own broadcasts or serve
+/// them on demand, so subscribers can discover them.
 public final class OriginProducer: Sendable {
     let ffi: MoqOriginProducer
 
@@ -20,28 +20,40 @@ public final class OriginProducer: Sendable {
         OriginConsumer(ffi.consume())
     }
 
-    /// Advertise `prefix` and serve the requests beneath it.
+    /// Create a route at exactly `path`, owning a new broadcast to fill.
+    ///
+    /// Visible at once unless `hidden`: a hidden route is invisible and unroutable, for this
+    /// origin's consumers and peers alike, until `Route.announce()`, so create it hidden to
+    /// fill the catalog first. It serves a fresh instance, kept across `withdraw` and
+    /// `announce`, unless `instance` names one, with `epoch` ordering its runs; `cost` prices
+    /// it, lower wins. Hold the route: releasing or cancelling it retracts it, and
+    /// `BroadcastProducer.close()` ends both.
+    public func route(
+        path: String, hidden: Bool = false, cost: UInt64 = 0, instance: String? = nil, epoch: UInt64 = 0
+    ) throws -> Route {
+        Route(
+            try ffi.route(
+                path: path,
+                options: MoqRouteOptions(hidden: hidden, cost: cost, instance: instance, epoch: epoch)))
+    }
+
+    /// Create a route over `prefix` that serves the requests beneath it.
     ///
     /// A route claims `prefix` and every path beneath it (`""` claims every path).
     /// A service that only serves some of them rejects the rest as they are
-    /// requested. Create, `dynamic` if tracks are served on demand, populate,
-    /// then `BroadcastProducer.announce`.
-    public func dynamic(prefix: String, route: Route = Route()) throws -> OriginDynamic {
-        OriginDynamic(try ffi.dynamic(prefix: prefix, route: route))
-    }
-
-    /// Create a broadcast at `path`, returning the producer that feeds it.
-    ///
-    /// The broadcast is invisible and unroutable, for this origin's consumers
-    /// and peers alike, until `BroadcastProducer.announce(route:)`. Announce it
-    /// after populating tracks. `BroadcastProducer.close()` ends it for good;
-    /// releasing the last handle does the same.
-    public func createBroadcast(path: String) throws -> BroadcastProducer {
-        BroadcastProducer(try ffi.createBroadcast(path: path))
+    /// requested. Iterate the route, or call `requested()`, to answer each request; hold
+    /// it while it should stay advertised.
+    public func routePrefix(
+        prefix: String, hidden: Bool = false, cost: UInt64 = 0, instance: String? = nil, epoch: UInt64 = 0
+    ) throws -> Route {
+        Route(
+            try ffi.routePrefix(
+                prefix: prefix,
+                options: MoqRouteOptions(hidden: hidden, cost: cost, instance: instance, epoch: epoch)))
     }
 }
 
-/// A requested broadcast that has not been accepted yet.
+/// A requested broadcast that has not been answered yet.
 public final class BroadcastRequest: Sendable {
     let ffi: MoqBroadcastRequest
 
@@ -54,9 +66,21 @@ public final class BroadcastRequest: Sendable {
         get throws { try ffi.path() }
     }
 
-    /// Serve the request with an unannounced broadcast.
-    public func accept(broadcast: BroadcastProducer) throws {
-        try ffi.accept(broadcast: broadcast.ffi)
+    /// Answer with the path's own exact route, owning a new broadcast.
+    ///
+    /// It serves a fresh instance unless `instance` names one. Created visible, it announces
+    /// now and answers the waiting requesters; created `hidden`, they wait until
+    /// `Route.announce()`, so the job can fill its catalog first.
+    public func route(
+        hidden: Bool = false, cost: UInt64 = 0, instance: String? = nil, epoch: UInt64 = 0
+    ) throws -> Route {
+        Route(
+            try ffi.route(options: MoqRouteOptions(hidden: hidden, cost: cost, instance: instance, epoch: epoch)))
+    }
+
+    /// Serve held content under the prefix route's continuous sequence space, without an exact route.
+    public func serve(broadcast: BroadcastConsumer) throws {
+        try ffi.serve(broadcast: broadcast.ffi)
     }
 
     /// Reject the request with an application error code.
@@ -65,39 +89,68 @@ public final class BroadcastRequest: Sendable {
     }
 }
 
-/// A stream of broadcasts requested by consumers. Iterate directly:
-/// `for try await request in dynamic { ... }`. Hold this while missing
-/// broadcasts should be served; cancelling the consuming task stops serving.
-public final class OriginDynamic: AsyncSequence, Sendable {
+/// A route on an origin: an exact route owning one broadcast, or a prefix route yielding
+/// the requests beneath it. Iterate a prefix route directly:
+/// `for try await request in route { ... }`; cancelling the consuming task cancels the route.
+///
+/// Releasing or cancelling it retracts the route, as does closing an exact route's
+/// broadcast; a `BroadcastProducer` alone does not keep it announced.
+public final class Route: AsyncSequence, Sendable {
     /// The broadcast request emitted by this sequence.
     public typealias Element = BroadcastRequest
 
-    let ffi: MoqOriginDynamic
+    let ffi: MoqRoute
+    private let owned: BroadcastProducer?
 
-    init(_ ffi: MoqOriginDynamic) {
+    init(_ ffi: MoqRoute) {
         self.ffi = ffi
+        // A prefix route owns no broadcast.
+        owned = (try? ffi.broadcast()).map { BroadcastProducer($0) }
     }
 
-    /// The next requested broadcast. Throws `Closed` once the origin closes.
-    public func requestedBroadcast() async throws -> BroadcastRequest {
-        BroadcastRequest(try await ffi.requestedBroadcast())
+    /// The broadcast this exact route owns, the same one on every read. Throws on a prefix
+    /// route, which owns none.
+    public var broadcast: BroadcastProducer {
+        get throws {
+            if let owned { return owned }
+            return BroadcastProducer(try ffi.broadcast())
+        }
     }
 
-    /// Re-price the route in place: replace its hops and costs.
-    public func update(route: Route) throws {
-        try ffi.update(route: route)
+    /// The stream this route serves, minted at creation unless `instance` named one.
+    public var instance: String { ffi.instanceId() }
+
+    /// Make the route visible, or keep it so; throws `Closed` once its broadcast closed.
+    public func announce() throws {
+        try ffi.announce()
     }
 
-    /// Cancel all current and future `requestedBroadcast()` calls and retract
-    /// the route.
+    /// Hide the route, keeping its broadcast and instance: `announce()` brings the same stream back.
+    public func withdraw() throws {
+        try ffi.withdraw()
+    }
+
+    /// Re-price the route in place: lower wins among routes covering the same prefix.
+    public func setCost(_ cost: UInt64) throws {
+        try ffi.setCost(cost: cost)
+    }
+
+    /// The next broadcast requested beneath this prefix route, or `nil` once the origin
+    /// closes, and at once on an exact route.
+    public func requested() async throws -> BroadcastRequest? {
+        try await ffi.requested().map { BroadcastRequest($0) }
+    }
+
+    /// Retract the route now: pending requests are rejected and later calls throw
+    /// `Cancelled`. An exact route's broadcast lives on until closed.
     public func cancel() {
         ffi.cancel()
     }
 
-    /// Create an iterator that cancels native waits when iteration ends.
+    /// Create an iterator that cancels the route when iteration is cancelled.
     public func makeAsyncIterator() -> AsyncThrowingStream<BroadcastRequest, Swift.Error>.Iterator {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
-            BroadcastRequest(try await ffi.requestedBroadcast())
+            try await ffi.requested().map { BroadcastRequest($0) }
         }.makeAsyncIterator()
     }
 }
@@ -110,28 +163,31 @@ public final class OriginConsumer: Sendable {
         self.ffi = ffi
     }
 
-    /// Stream routes under a literal prefix matching an optional pattern filter.
-    /// Paths with a segment starting with `.` below the prefix are left out unless `hidden`.
+    /// List the paths under a literal prefix matching an optional pattern filter, as each
+    /// becomes present or absent. A new publisher instance keeps its path present, so use
+    /// `follow` to see it. Paths with a segment starting with `.` below the prefix are left
+    /// out unless `hidden`.
     public func announced(prefix: String = "", filter: String? = nil, hidden: Bool = false) throws -> AnnounceConsumer {
         AnnounceConsumer(try ffi.announced(config: MoqAnnounceConfig(prefix: prefix, filter: filter, hidden: hidden)))
     }
 
-    /// Wait for a route covering an exact path, then resolve the broadcast there.
-    public func announcedBroadcast(path: String) throws -> AnnouncedBroadcast {
-        AnnouncedBroadcast(try ffi.announcedBroadcast(path: path))
+    /// Follow an exact path, resolving each stream that serves it.
+    /// Pass an `instance` to follow only that stream.
+    public func follow(path: String, instance: String? = nil) throws -> Following {
+        Following(try ffi.follow(path: path, instance: instance))
     }
 
-    /// Request a broadcast by path, resolving as soon as it can be served through the
-    /// best announced route covering it: an announced broadcast on this origin, a route
-    /// a session announced (served on demand by that session), or a dynamic handler on
-    /// the origin, or an error if nothing can serve it. Unlike `announcedBroadcast`,
-    /// this does not wait for a future announcement.
-    public func requestBroadcast(path: String) async throws -> BroadcastConsumer {
-        BroadcastConsumer(try await ffi.requestBroadcast(path: path))
+    /// Request a broadcast by path, resolving one stream as soon as it can be
+    /// served through the best announced route covering it: an announced broadcast on this
+    /// origin, a route a session announced (served on demand by that session), or a dynamic
+    /// handler on the origin, or an error if nothing can serve it. Unlike `follow`, this
+    /// does not wait for a future announcement. Pass an `instance` to refuse any other stream.
+    public func request(path: String, instance: String? = nil) async throws -> BroadcastConsumer {
+        BroadcastConsumer(try await ffi.request(path: path, instance: instance))
     }
 }
 
-/// A stream of announce events. Iterate directly:
+/// A listing of paths as each becomes present or absent. Iterate directly:
 /// `for try await event in announced { ... }`.
 /// The sequence ends when the origin closes; cancelling the consuming task
 /// cancels the subscription.
@@ -163,21 +219,26 @@ public final class AnnounceConsumer: AsyncSequence, Sendable {
     }
 }
 
-/// A pending wait for a specific broadcast path.
-public final class AnnouncedBroadcast: Sendable {
-    let ffi: MoqAnnouncedBroadcast
+/// Follows a specific broadcast path across the publisher instances that serve it.
+public final class Following: Sendable {
+    let ffi: MoqFollowing
 
-    init(_ ffi: MoqAnnouncedBroadcast) {
+    init(_ ffi: MoqFollowing) {
         self.ffi = ffi
     }
 
-    /// Suspend until a route covers the path, then resolve the broadcast there.
-    /// Throws `Closed` if cancelled or the origin closes first.
-    public func available() async throws -> BroadcastConsumer {
-        BroadcastConsumer(try await ffi.available())
+    /// Suspend until the publisher instance serving the path changes.
+    /// The first call resolves the instance serving the path once one is announced, and
+    /// never returns nil. Each later call returns another instance taking over (a
+    /// restarted publisher, or a replacement session), or nil once the path goes offline
+    /// (or, with an `instance`, another one takes it over), then whatever serves it next.
+    /// Drop what was read from the previous instance then: its tracks end when its
+    /// session does. Throws `Closed` if cancelled or the origin closes first.
+    public func available() async throws -> BroadcastConsumer? {
+        (try await ffi.available()).map(BroadcastConsumer.init)
     }
 
-    /// Cancel the pending `available()` call.
+    /// Cancel all current and future `available()` calls.
     public func cancel() {
         ffi.cancel()
     }

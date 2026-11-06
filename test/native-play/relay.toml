@@ -4,6 +4,7 @@ level = "info"
 
 [listen]
 bind = "127.0.0.1:4443"
+version = ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22"]
 tls.generate = ["localhost", "127.0.0.1"]
 
 [web.http]

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"time"
 
 	"moq.dev/moq"
 	moqmedia "moq.dev/moq/media"
@@ -15,7 +14,7 @@ import (
 func ExampleClient_Announced() {
 	ctx := context.Background()
 
-	client, err := moq.Dial(ctx, "https://relay.example.com")
+	client, err := moq.Dial(ctx, "https://relay.example.com", moq.ClientConfig{})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -34,23 +33,65 @@ func ExampleClient_Announced() {
 			}
 			log.Fatal(err)
 		}
-		if event, ok := event.(moq.AnnounceEventStart); ok {
+		if event, ok := event.(moq.AnnounceEventPresent); ok {
 			fmt.Println("broadcast:", event.Announce.Prefix)
 		}
 	}
 }
 
-// Publish a media track to a relay.
-func ExampleClient_CreateBroadcast() {
+// Read a broadcast across publisher restarts, noticing when it goes offline.
+func ExampleClient_Follow() {
 	ctx := context.Background()
 
-	client, err := moq.Dial(ctx, "https://relay.example.com")
+	client, err := moq.Dial(ctx, "https://relay.example.com", moq.ClientConfig{})
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer client.Close()
 
-	broadcast, err := client.CreateBroadcast("me/mic")
+	following, err := client.Follow("demos/bbb", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer following.Cancel()
+
+	for {
+		broadcast, err := following.Available(ctx)
+		if err != nil {
+			if moq.IsShutdown(err) {
+				break
+			}
+			log.Fatal(err)
+		}
+		if broadcast == nil {
+			fmt.Println("offline")
+			continue
+		}
+		catalog, err := moqmedia.CatalogSnapshot(ctx, broadcast)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("online: %+v\n", catalog)
+	}
+}
+
+// Publish a media track to a relay.
+func ExampleClient_Route() {
+	ctx := context.Background()
+
+	client, err := moq.Dial(ctx, "https://relay.example.com", moq.ClientConfig{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer client.Close()
+
+	// Hidden until the catalog is filled; hold the route while it should stay announced.
+	route, err := client.Route("me/mic", moq.RouteOptions{Hidden: true})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer route.Cancel()
+	broadcast, err := route.Broadcast()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -59,9 +100,10 @@ func ExampleClient_CreateBroadcast() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	_ = broadcast.Announce(moq.Route{})
+	_ = route.Announce()
 
-	pts := 20 * time.Millisecond
+	// 20 ms in, counted on the Opus 48 kHz sample clock.
+	pts := moq.Timestamp{Value: 960, Scale: 48_000}
 	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame"), Timestamp: &pts}); err != nil {
 		log.Fatal(err)
 	}
@@ -76,11 +118,14 @@ func ExampleClient_CreateBroadcast() {
 func ExampleClient_Session_stats() {
 	ctx := context.Background()
 
-	client, err := moq.Dial(ctx, "https://relay.example.com",
-		moq.WithTLSRoots("/etc/ssl/custom-ca.pem"),
-		moq.WithTLSSystemRoots(true),
-		moq.WithTLSFingerprints("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
-	)
+	systemRoots := true
+	client, err := moq.Dial(ctx, "https://relay.example.com", moq.ClientConfig{
+		TLS: moq.ClientTLS{
+			Roots:        []string{"/etc/ssl/custom-ca.pem"},
+			SystemRoots:  &systemRoots,
+			Fingerprints: []string{"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+		},
+	})
 	if err != nil {
 		log.Fatal(err)
 	}

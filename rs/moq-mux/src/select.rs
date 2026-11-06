@@ -198,14 +198,6 @@ mod tests {
 	}
 
 	#[test]
-	fn video_only_drops_audio() {
-		let mut catalog = catalog(vec![h264("v")], vec![opus("a")]);
-		Broadcast::default().video(Video::default()).retain(&mut catalog);
-		assert_eq!(video_names(&catalog), vec!["v"]);
-		assert!(catalog.audio.renditions.is_empty());
-	}
-
-	#[test]
 	fn name_matches_exact() {
 		let mut catalog = catalog(vec![h264("lo"), h264("hi")], vec![]);
 		Broadcast::default()

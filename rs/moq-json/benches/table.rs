@@ -3,14 +3,15 @@
 //! (100 rows at 100%, 10k at 1%) separate a cost that grows with the table from one that grows with
 //! the changed rows.
 //!
-//! Each iteration is one tick against a long-lived encoder, so the periodic snapshots the delta
-//! budget forces are amortized in, as they are in production.
+//! Deltas, explicitly forced snapshots with deltas enabled, and delta-free snapshots are separate
+//! cases. Before each timed delta, restate the baseline outside the timer to reset the group caps
+//! while retaining the warm memo. Every iteration measures one tick and one update of its kind.
 //!
 //! Run with `cargo bench -p moq-json --bench table`.
-
+use std::cell::RefCell;
 use std::hint::black_box;
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_json::snapshot::{Config, Encoder};
 use moq_net::stats::Traffic;
 use serde::Serialize;
@@ -65,31 +66,55 @@ impl Table {
 	}
 }
 
-/// The two encoders the stats producer runs per track: `.json.z` and the plain `.json` sibling.
-fn configs() -> [(&'static str, Config); 2] {
-	let mut compressed = Config::default();
-	compressed.compression = moq_json::Compression::Deflate;
-	[("json.z", compressed), ("json", Config::default().with_delta_ratio(0))]
+/// A stats track's encoder modes and whether to force a snapshot before each timed update.
+fn configs() -> [(&'static str, Config, bool); 3] {
+	[
+		("deltas", Config::default(), false),
+		("forced-snapshots", Config::default(), true),
+		("snapshots", Config::default().with_deltas(false), false),
+	]
 }
 
 fn table(c: &mut Criterion) {
-	for (name, config) in configs() {
+	for (name, config, force_snapshot) in configs() {
 		let mut group = c.benchmark_group(format!("table/{name}"));
 		group.sample_size(10);
 		group.warm_up_time(std::time::Duration::from_secs(1));
 		group.measurement_time(std::time::Duration::from_secs(2));
 		for rows in [100, 1_000, 10_000, 20_000] {
 			for changed in [1, 10, 100] {
-				let mut table = Table::new(rows, changed);
+				let table = Table::new(rows, changed);
 				let mut encoder = Encoder::<Table>::new(config.clone());
+				encoder.update(&table).unwrap().expect("an initial snapshot").commit();
+				if config.deltas && !force_snapshot {
+					// Populate the memo so every timed delta has the steady-state fast path.
+					assert!(encoder.update(&table).unwrap().is_none());
+				}
+				let state = RefCell::new((table, encoder));
 				group.throughput(Throughput::Elements(rows as u64));
 				group.bench_function(BenchmarkId::new(format!("{changed}%"), rows), |b| {
-					b.iter(|| {
-						table.tick();
-						let frame = encoder.update(&table).unwrap().expect("a changed tick");
-						black_box(&frame.payload);
-						frame.commit();
-					});
+					b.iter_batched(
+						|| {
+							let mut state = state.borrow_mut();
+							let (_, encoder) = &mut *state;
+							if force_snapshot {
+								encoder.reset();
+							} else if config.deltas {
+								// Restating resets both caps without discarding the parsed baseline or memo.
+								encoder.snapshot().unwrap().expect("a seeded baseline").commit();
+							}
+						},
+						|()| {
+							let mut state = state.borrow_mut();
+							let (table, encoder) = &mut *state;
+							table.tick();
+							let frame = encoder.update(table).unwrap().expect("a changed tick");
+							assert_eq!(frame.keyframe, force_snapshot || !config.deltas);
+							black_box(&frame.payload);
+							frame.commit();
+						},
+						BatchSize::PerIteration,
+					);
 				});
 			}
 		}

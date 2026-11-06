@@ -38,15 +38,16 @@ def is_shutdown(err: BaseException) -> bool:
 
 
 def is_auth(err: BaseException) -> bool:
-    """True for HTTP 401/403 and a protocol Unauthorized session close.
+    """True for HTTP 401/403, an expired token, a protocol Unauthorized or Expired
+    session close, and a track revocation.
 
     Unlike a transport failure, retrying without new credentials won't help, so
     callers should surface these rather than reconnect.
     """
-    if isinstance(err, (MoqError.Unauthorized, MoqError.Forbidden)):
+    if isinstance(err, (MoqError.Unauthorized, MoqError.Forbidden, MoqError.Expired)):
         return True
     protocol = protocol_error(err)
-    return protocol is not None and protocol.kind == MoqProtocolKind.UNAUTHORIZED
+    return protocol is not None and protocol.kind in (MoqProtocolKind.UNAUTHORIZED, MoqProtocolKind.EXPIRED)
 
 
 def protocol_error(err: BaseException) -> ProtocolError | None:

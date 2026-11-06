@@ -9,7 +9,7 @@ A public relay needs a reachable UDP port, a trusted certificate, and an
 explicit access policy. Start from the local config and change these:
 
 1. Give the relay a stable hostname and forward its UDP port (QUIC and WebTransport). Forward TCP too if you enable HTTPS or the WebSocket fallback.
-2. Install a publicly trusted certificate. Generated certificates and disabled verification are for development.
+2. Get a publicly trusted certificate from an external client or certificate manager, such as certbot or cert-manager. Generated certificates and disabled verification are for development.
 3. Configure [authentication](/bin/relay/auth). Leave nothing anonymous unless you mean to.
 4. Keep the operational endpoints (`/metrics`, `/nodes`) on the `[internal]` listener, bound to loopback or a private network.
 5. Raise Linux UDP socket buffers (below).
@@ -22,19 +22,30 @@ bind = "[::]:443"
 cert = "/etc/letsencrypt/live/relay.example.com/fullchain.pem"
 key = "/etc/letsencrypt/live/relay.example.com/privkey.pem"
 
-# HTTPS and WebSocket fallback on TCP. The same certificate works.
+# HTTPS and WebSocket fallback on TCP, using the same certificate as QUIC.
 [web.https]
 listen = "[::]:443"
 cert = "/etc/letsencrypt/live/relay.example.com/fullchain.pem"
 key = "/etc/letsencrypt/live/relay.example.com/privkey.pem"
 
 [auth]
-key = "/etc/moq/public.jwk"
+url = "http://127.0.0.1:4440/"
 
 [internal]
 listen = "127.0.0.1:9101"
 ```
 
+Run the auth server on the same host and supervise it alongside the relay:
+
+```bash
+moq auth serve --key /etc/moq/public.jwk
+```
+
+It verifies each session's JWT; a session without one is refused. See
+[Authentication](/bin/relay/auth) to define another access policy.
+
+The certificate manager owns issuance and renewal. Give the relay read access
+to the certificate chain and private key files.
 Certificate files are watched and reloaded for new connections. See the
 [configuration reference](/bin/relay/config) for every section.
 

@@ -24,8 +24,8 @@ export const FORGET = 0.983;
 /** Milliseconds of arrival time per resampled observation. */
 export const RESAMPLE = 500;
 
-/** Weight of the cold-start ramp, which holds the forget factor below FORGET early on. */
-export const RAMP = 2;
+/** The most weight one observation takes, which only the prior's weight can lift it toward. */
+export const FRESH_MAX = 0.1;
 
 /** Idle intervals folded at once, purely to bound the work. */
 export const IDLE_MAX = 1024;
@@ -38,6 +38,8 @@ export function prior(): Float64Array {
 	}
 	return out;
 }
+
+const PRIOR = prior();
 
 /** One frame as the receiver saw it, in milliseconds. */
 export interface Arrival {
@@ -71,10 +73,12 @@ export class Estimator {
 	#interval = 0;
 	/** The largest delay seen in that interval. */
 	#peak = 0;
+	/** A declared end precedes the next measured observation, so the silence before it is not idle. */
+	#ended = false;
 
 	#histogram = prior();
-	/** Observations folded in, which drives the cold-start ramp. */
-	#count = 0;
+	/** How much of the histogram is still the prior's rather than evidence. */
+	#prior = 1;
 
 	constructor(config: Config) {
 		this.#frame = config.frame;
@@ -117,6 +121,8 @@ export class Estimator {
 		}
 
 		const interval = Math.floor((arrival - this.#origin) / RESAMPLE);
+		const resumed = this.#ended;
+		this.#ended = false;
 		if (interval <= this.#interval) {
 			this.#peak = Math.max(this.#peak, delay);
 			return;
@@ -124,13 +130,25 @@ export class Estimator {
 
 		this.#fold(Math.min(BUCKETS - 1, Math.floor(this.#peak / BUCKET)));
 
-		const idle = Math.min(interval - this.#interval - 1, IDLE_MAX);
-		for (let i = 0; i < idle; i++) {
-			this.#fold(undefined);
+		if (resumed) {
+			// The publisher declared the silence, so it is not evidence of anything: the
+			// estimate keeps what it had and a fresh interval starts at this arrival.
+			this.#origin = arrival;
+			this.#interval = 0;
+		} else {
+			const idle = Math.min(interval - this.#interval - 1, IDLE_MAX);
+			for (let i = 0; i < idle; i++) {
+				this.#fold(undefined);
+			}
+			this.#interval = interval;
 		}
-
-		this.#interval = interval;
 		this.#peak = delay;
+	}
+
+	/** A declared end lies between the previous observation and the next. */
+	end(): void {
+		// Before any observation there is no interval for the silence to stretch.
+		if (this.#origin !== undefined) this.#ended = true;
 	}
 
 	/** The target the receiver holds, in milliseconds. */
@@ -148,20 +166,20 @@ export class Estimator {
 		return Math.max(measured, this.#advertised) + this.#frame;
 	}
 
-	// One observation is `h = f*h + (1-f)*x`, where x is the bucket that was observed,
-	// or the prior when the interval held no arrival at all. An idle interval therefore
-	// relaxes the estimate back toward cold start at the same time constant, rather than
-	// freezing it or renormalizing the decay away.
+	// Evidence decays by FORGET and the prior holds the rest, of which an observation
+	// takes up to FRESH_MAX. Once the prior is gone that is `h = f*h + (1-f)*x`. An
+	// interval that held no arrival takes nothing, so its share returns to the prior and
+	// the estimate relaxes toward cold start at the same time constant.
 	#fold(bucket: number | undefined): void {
-		this.#count += 1;
-		const forget = Math.min(FORGET, this.#count / (this.#count + RAMP));
-		const fresh = 1 - forget;
-		const seed = bucket === undefined ? prior() : undefined;
+		const rest = 1 - FORGET * (1 - this.#prior);
+		const fresh = bucket === undefined ? 0 : Math.min(FRESH_MAX, rest);
+		const left = rest - fresh;
+		const seed = left - FORGET * this.#prior;
 
 		for (let i = 0; i < BUCKETS; i++) {
-			this.#histogram[i] *= forget;
-			if (seed) this.#histogram[i] += fresh * seed[i];
+			this.#histogram[i] = FORGET * this.#histogram[i] + seed * PRIOR[i];
 		}
 		if (bucket !== undefined) this.#histogram[bucket] += fresh;
+		this.#prior = left;
 	}
 }

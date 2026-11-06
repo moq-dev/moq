@@ -8,8 +8,10 @@
 
 pub mod aac;
 pub(crate) mod ac3;
+/// Annex B NAL unit framing and conversion.
 pub mod annexb;
 pub mod av1;
+pub(crate) mod color;
 pub(crate) mod eac3;
 pub mod flac;
 pub mod h264;
@@ -18,6 +20,7 @@ pub(crate) mod legacy;
 pub(crate) mod mp2;
 pub mod mp3;
 pub mod opus;
+pub(crate) mod spatial;
 pub(crate) mod video;
 pub mod vp8;
 pub mod vp9;

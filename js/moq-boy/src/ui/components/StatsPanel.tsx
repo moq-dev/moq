@@ -1,3 +1,4 @@
+import { Milli } from "@moq/clock";
 import { createAccessor } from "@moq/signals/solid";
 import { For, Show } from "solid-js";
 import { useGameUI } from "../hooks/use-boy-ui";
@@ -7,23 +8,19 @@ export default function StatsPanel() {
 	const ctx = useGameUI();
 	const game = ctx.game;
 
-	const jitter = createAccessor(game.sync.out.jitter);
+	const delay = createAccessor(game.sync.out.delay);
 
-	const onJitterInput = (e: Event) => {
+	const onDelayInput = (e: Event) => {
 		const el = e.currentTarget as HTMLInputElement;
-		game.delay.set(Number.parseInt(el.value, 10) as import("@moq/net").Time.Milli);
+		game.delay.set(Milli(Number.parseInt(el.value, 10)));
 	};
 
 	const location = () => ctx.status()?.location;
 	const stats = () => ctx.status()?.stats;
 
-	const playerCount = () => Object.keys(ctx.status()?.latency ?? {}).length;
+	const playerCount = () => ctx.status()?.players ?? 0;
 
-	const latencyEntries = () => {
-		const id = ctx.viewerId();
-		if (!id) return [];
-		return ctx.status()?.latency?.[id] ?? [];
-	};
+	const latencyEntries = () => ctx.latency() ?? [];
 
 	const pct = (value: number) => {
 		const wall = stats()?.wall_secs ?? 0;
@@ -50,14 +47,14 @@ export default function StatsPanel() {
 			</Show>
 
 			<label class="boy__jitter">
-				<span class="boy__jitter-label">Buffer: {jitter()}ms</span>
+				<span class="boy__jitter-label">Buffer: {delay()}ms</span>
 				<input
 					type="range"
 					class="boy__jitter-slider"
 					min="0"
 					max="500"
-					value={jitter()}
-					onInput={onJitterInput}
+					value={delay()}
+					onInput={onDelayInput}
 					onClick={(e) => e.stopPropagation()}
 				/>
 			</label>

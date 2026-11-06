@@ -6,6 +6,20 @@
 # This is the default port for WebTransport
 bind = "[::]:443"
 
+# Every version, plus the opt-in moq-lite-07-wip that sockets (such as MoQ Boy's) need.
+version = [
+    "moq-lite-07-wip",
+    "moq-lite-06",
+    "moq-lite-05",
+    "moq-lite-04",
+    "moq-lite-03",
+    "moq-lite-02",
+    "moq-lite-01",
+    "moq-transport-22",
+    "moq-transport-20",
+    "moq-transport-18",
+]
+
 [listen.tls]
 # You'll need to provide a real certificate and key in production.
 # You can get this via a service like Let's Encrypt.
@@ -32,7 +46,12 @@ key = "key.pem"
 #   moq auth serve --listen 127.0.0.1:4440 --key root.jwk \
 #     --public-subscribe 'anon/**' --public-subscribe 'demo/**' \
 #     --public-publish 'anon/**' --public-publish 'demo/viewer/**' \
-#     --mtls-publish '**' --mtls-subscribe '**' --mtls-peer
+#     --public-publish 'demo/boy/.socket/viewer-*' \
+#     --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer
+#
+# Anonymous MoQ Boy viewers share one grant, so it covers only `viewer-*` endpoint ids:
+# a game's endpoint, `demo/boy/.socket/<game>`, stays the emulator's, which signs in
+# with a token. Each viewer's id is 128 random bits, so no viewer can guess another's.
 #
 # For multiple keys with rotation, give it `--key-dir /path/to/keys/` instead:
 # keys are named {kid}.jwk and resolved by the kid in the JWT header.

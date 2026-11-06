@@ -1,5 +1,5 @@
 /**
- * Shared Playwright plumbing for the browser clients: serve the built page, launch Chromium, and
+ * Shared Playwright plumbing for the browser clients: serve the built page, launch an engine, and
  * read back the state each role mirrors onto the DOM.
  *
  * Used by `driver.ts` (the interop matrix) and `media.ts` (the media-output and lifecycle checks).
@@ -12,11 +12,22 @@ import {
 	type Browser,
 	type BrowserContext,
 	type BrowserContextOptions,
-	type CDPSession,
 	chromium,
+	firefox,
 	type Page,
+	webkit,
 } from "playwright";
-import { CONTROL, type FixtureState, type InteropControl, type Resources, type Sample } from "./src/contract";
+import {
+	CAPTURE_EVENT,
+	type CaptureState,
+	CONTROL,
+	FIXTURE_EVENT,
+	type FixtureState,
+	type InteropControl,
+	type Resources,
+	SAMPLE_EVENT,
+	type Sample,
+} from "./src/contract";
 
 /**
  * A failed check, named after the property it was measuring.
@@ -39,28 +50,20 @@ export function check(ok: boolean, assertion: string, detail: () => string): voi
 	if (!ok) throw new Failure(assertion, detail());
 }
 
-/** The page's own measurements plus the player chrome, which lives in a shadow root. */
-export type PlayerState = Sample & {
-	/** `aria-label` of the primary control button: "Pause" while playing, "Play" while paused. */
-	controlLabel?: string;
-	/** Whether the big center play button is showing. */
-	centerPlayVisible: boolean;
-};
-
 /** Errors the page reported, collected so any wait can fail on them instead of timing out. */
 export type BrowserErrors = {
 	page: string[];
 	console: string[];
+	/** Console warnings, which fail nothing but can show which path the page took. */
+	warnings: string[];
 };
 
 /** Keep the UI contract in one place so player markup changes fail clearly. */
 export const SELECTORS = {
 	watch: "moq-watch",
 	ui: "moq-watch-ui",
-	control: "button.control[aria-label]",
 	pauseControl: 'button.control[aria-label="Pause"]',
 	centerPlay: "button.center-play",
-	fixture: "#fixture",
 } as const;
 
 /** Activate the player's pause button without depending on pointer hit testing. */
@@ -79,17 +82,18 @@ export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve
  * Serve the prebuilt page on localhost, a secure context so WebTransport and WebCodecs are enabled.
  *
  * `interop.sh` builds the page into its run directory, so a concurrent run's rebuild cannot empty
- * it mid-load; outside a harness run, it is vite's default `dist/`.
+ * it mid-load; outside a harness run, it is vite's default `dist/`. `files` serves each path from a
+ * file of its own.
  */
-export function serve(): { origin: string; stop: () => void } {
-	const run = process.env.MOQ_TEST_RUN;
+export function serve(files: Record<string, string> = {}): { origin: string; stop: () => void } {
+	const run = process.env.HARNESS_RUN_DIR;
 	const root = run ? join(run, "js-dist") : join(new URL(".", import.meta.url).pathname, "dist");
 	const server = Bun.serve({
 		port: 0,
 		async fetch(req) {
 			let path = new URL(req.url).pathname;
 			if (path === "/") path = "/index.html";
-			const file = Bun.file(join(root, path));
+			const file = Bun.file(files[path] ?? join(root, path));
 			if (await file.exists()) return new Response(file);
 			return new Response(Bun.file(join(root, "index.html"))); // SPA fallback
 		},
@@ -103,17 +107,55 @@ export function pageUrl(origin: string, role: string, params: Record<string, str
 	return `${origin}/?${query}`;
 }
 
-/**
- * Launch headless Chromium.
- *
- * The "chromium" channel is full Chromium (new headless); the headless shell lacks WebTransport and
- * WebCodecs. `args` is empty by default: the media checks deliberately run without the fake-device
- * and autoplay overrides, so those belong to the caller that needs them.
- */
-export function launch(args: string[] = []): Promise<Browser> {
+/** Browser engines the media harness can launch. */
+export const ENGINES = ["chromium", "firefox", "webkit"] as const;
+/** One of the pinned Playwright engines. */
+export type Engine = (typeof ENGINES)[number];
+
+/** Launch an engine with its normal gesture gate and caller-supplied Chromium arguments. */
+export function launch(args: string[] = [], engine: Engine = "chromium"): Promise<Browser> {
 	// Playwright closes the browser on SIGTERM by default, which ends its sessions without a
 	// close. The drivers close it themselves; the harness reaps whatever a signal leaves behind.
-	return chromium.launch({ channel: "chromium", headless: true, args, handleSIGTERM: false });
+	// Full Chromium includes WebTransport and WebCodecs; the headless shell does not.
+	if (engine === "chromium")
+		return chromium.launch({ channel: "chromium", headless: true, args, handleSIGTERM: false });
+	if (engine === "firefox")
+		return firefox.launch({
+			headless: true,
+			handleSIGTERM: false,
+			// Firefox dlopens its media libraries. Keep the Nix paths on this child, so other
+			// browsers and native tools retain their own library search paths.
+			env: {
+				...process.env,
+				LD_LIBRARY_PATH: [process.env.PLAYWRIGHT_FIREFOX_LIBRARY_PATH, process.env.LD_LIBRARY_PATH]
+					.filter(Boolean)
+					.join(":"),
+			},
+			firefoxUserPrefs: { "media.autoplay.default": 1, "media.autoplay.block-webaudio": true },
+		});
+	// WebKit's WebCodecs decode through the system GStreamer. The Nix dev shell points GStreamer at
+	// its own newer plugins, which the system core refuses, leaving WebKit with no decoders at all.
+	const env = Object.fromEntries(
+		Object.entries(process.env).filter(
+			(entry): entry is [string, string] => entry[1] !== undefined && !entry[0].startsWith("GST_PLUGIN"),
+		),
+	);
+	return webkit.launch({ headless: true, handleSIGTERM: false, env });
+}
+
+// The console lines that carry a page's state instead of a log message. Pages report rather than
+// being read, since Playwright's page reads grant user activation and would unlock Web Audio before
+// the deliberate click the gesture checks make.
+const REPORTS = [SAMPLE_EVENT, FIXTURE_EVENT, CAPTURE_EVENT];
+
+// The latest report of each kind every page logged, unparsed. Cleared on navigation so a reload
+// cannot read the previous document's state.
+const reports = new WeakMap<Page, Map<string, string>>();
+
+/** The page's latest report with `prefix`, or undefined when it has reported none (or `null`). */
+function report<T>(page: Page, prefix: string): T | undefined {
+	const latest = reports.get(page)?.get(prefix);
+	return latest === undefined ? undefined : ((JSON.parse(latest) as T | null) ?? undefined);
 }
 
 /** Contexts tracing this process, saved by {@link finishTraces} when the run fails. */
@@ -122,18 +164,18 @@ const traces: Array<{ context: BrowserContext; name: string }> = [];
 /**
  * Start a Playwright trace on the page's context, before it navigates.
  *
- * A no-op outside a harness run: without `MOQ_TEST_RUN` there is no directory to write to, and a
+ * A no-op outside a harness run: without `HARNESS_RUN_DIR` there is no directory to write to, and a
  * trace only survives a failure anyway. See {@link finishTraces}.
  */
 export async function startTrace(page: Page, name: string): Promise<void> {
-	if (!process.env.MOQ_TEST_RUN) return;
+	if (!process.env.HARNESS_RUN_DIR) return;
 	await page.context().tracing.start({ screenshots: true, snapshots: true });
 	traces.push({ context: page.context(), name: `${name}-${randomUUID()}` });
 }
 
 /** Save a trace per started context into the run directory when `failed`, and discard it otherwise. */
 export async function finishTraces(failed: boolean): Promise<void> {
-	const run = process.env.MOQ_TEST_RUN;
+	const run = process.env.HARNESS_RUN_DIR;
 	for (const { context, name } of traces) {
 		try {
 			// `path` is what writes the trace; without it, stop only frees the buffers.
@@ -160,14 +202,32 @@ export async function open(
 	options?: BrowserContextOptions,
 ): Promise<[Page, BrowserErrors]> {
 	const page = await browser.newPage(options);
-	const errors: BrowserErrors = { page: [], console: [] };
+	const errors: BrowserErrors = { page: [], console: [], warnings: [] };
+	const latest = new Map<string, string>();
+	reports.set(page, latest);
+	page.on("framenavigated", (frame) => {
+		if (frame === page.mainFrame()) latest.clear();
+	});
 	page.on("console", (message) => {
-		console.error(`[${label}] ${message.text()}`);
-		if (message.type() === "error") errors.console.push(message.text());
+		const text = message.text();
+		const prefix = REPORTS.find((prefix) => text.startsWith(prefix));
+		if (prefix) {
+			latest.set(prefix, text.slice(prefix.length));
+			return;
+		}
+		console.error(`[${label}] ${text}`);
+		if (message.type() === "error") errors.console.push(text);
+		if (message.type() === "warning") errors.warnings.push(text);
 	});
 	page.on("pageerror", (error) => {
 		console.error(`[${label} error] ${error.message}`);
 		errors.page.push(error.message);
+	});
+	// A crashed WebKit page never settles a pending call, so close it: that rejects them.
+	page.on("crash", () => {
+		console.error(`[${label} error] page crashed`);
+		errors.page.push("page crashed");
+		void page.close().catch(() => {});
 	});
 	if (trace) await startTrace(page, label);
 	await page.goto(url, { waitUntil: "load" });
@@ -183,78 +243,35 @@ export function throwPageErrors(errors: BrowserErrors): void {
 	if (messages.length > 0) throw new Error(messages.join("\n"));
 }
 
-// Playwright's page.evaluate and locator reads grant user activation in Chromium. A state probe
-// before the deliberate click would therefore unlock Web Audio and invalidate the gesture test.
-const sessions = new WeakMap<Page, CDPSession>();
-
-/** Inspect page state without granting user activation to the document. */
-export async function inspect<A, T>(page: Page, fn: (arg: A) => T, arg: A): Promise<Awaited<T>> {
-	let session = sessions.get(page);
-	if (!session) {
-		session = await page.context().newCDPSession(page);
-		sessions.set(page, session);
-	}
-	const result = await session.send("Runtime.evaluate", {
-		expression: `(${fn.toString()})(${JSON.stringify(arg) ?? "undefined"})`,
-		returnByValue: true,
-		awaitPromise: true,
-		userGesture: false,
-	});
-	if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
-	return result.result.value as Awaited<T>;
-}
-
 /** Wait until the player element exists and has published its first sample. */
 export async function waitForWatch(page: Page): Promise<void> {
 	const deadline = Date.now() + 30_000;
 	while (Date.now() < deadline) {
-		const ready = await inspect(
-			page,
-			(tag) => document.querySelector(`${tag}[data-interop-ready]`) !== null,
-			SELECTORS.watch,
-		);
-		if (ready) return;
+		if (report(page, SAMPLE_EVENT)) return;
 		await sleep(POLL_INTERVAL_MS);
 	}
 	throw new Error("the player did not publish its first sample");
 }
 
-/** Read one sample plus the player chrome. Throws until the page has sampled at least once. */
-export async function readPlayerState(page: Page): Promise<PlayerState> {
-	const state = await inspect(
-		page,
-		(selectors) => {
-			const watch = document.querySelector<HTMLElement>(selectors.watch);
-			const ui = document.querySelector(selectors.ui);
-			const control = ui?.shadowRoot?.querySelector<HTMLButtonElement>(selectors.control);
-			const centerPlay = ui?.shadowRoot?.querySelector<HTMLButtonElement>(selectors.centerPlay);
-
-			return {
-				sample: watch?.dataset.interopState,
-				controlLabel: control?.getAttribute("aria-label") ?? undefined,
-				centerPlayVisible: centerPlay ? getComputedStyle(centerPlay).display !== "none" : false,
-			};
-		},
-		SELECTORS,
-	);
-
-	if (!state.sample) throw new Error("the player has not published a sample");
-	return {
-		...(JSON.parse(state.sample) as Sample),
-		controlLabel: state.controlLabel,
-		centerPlayVisible: state.centerPlayVisible,
-	};
+/** Read the latest player sample. Throws until the page has sampled at least once. */
+export async function readPlayerState(page: Page): Promise<Sample> {
+	const sample = report<Sample>(page, SAMPLE_EVENT);
+	if (!sample) throw new Error("the player has not published a sample");
+	return sample;
 }
 
 /** Read what the fixture publisher says about itself. Throws until it has published anything. */
 export async function readFixtureState(page: Page): Promise<FixtureState> {
-	const state = await inspect(
-		page,
-		(selector) => document.querySelector<HTMLElement>(selector)?.dataset.interopFixture,
-		SELECTORS.fixture,
-	);
+	const state = report<FixtureState>(page, FIXTURE_EVENT);
 	if (!state) throw new Error("the fixture publisher has not published its state");
-	return JSON.parse(state) as FixtureState;
+	return state;
+}
+
+/** Read the capture publisher's source state. Throws until it has published any. */
+export async function readCaptureState(page: Page): Promise<CaptureState> {
+	const state = report<CaptureState>(page, CAPTURE_EVENT);
+	if (!state) throw new Error("the publisher has not published its capture state");
+	return state;
 }
 
 /** Invoke one of the page's {@link InteropControl} commands. */
@@ -309,7 +326,7 @@ export async function waitFor<T>(
 }
 
 /** Poll the player until `predicate` holds. See {@link waitFor}. */
-export function waitForState(page: Page, errors: BrowserErrors, props: WaitProps<PlayerState>): Promise<PlayerState> {
+export function waitForState(page: Page, errors: BrowserErrors, props: WaitProps<Sample>): Promise<Sample> {
 	return waitFor(page, errors, readPlayerState, props);
 }
 

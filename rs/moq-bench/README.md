@@ -1,6 +1,11 @@
 # moq-bench
 
-A load generator for benchmarking a remote MoQ relay.
+A load generator for benchmarking a remote MoQ relay, plus `moq-bench host`, a
+sampler that records what that load costs on the relay's host.
+
+```bash
+cargo install moq-bench
+```
 
 `moq-bench` opens many QUIC connections to a server and drives synthetic media
 through them. Every knob is a `[min, max]` range that is rolled once per
@@ -41,9 +46,12 @@ Every `--report` interval, `moq-bench` logs throughput (`send_mbps`/`recv_mbps`
 and `send_fps`/`recv_fps`) plus delivery accounting for the subscribe side:
 
 - `recv_groups`: cumulative groups read end to end across all subscriptions.
-- `lost_groups`: cumulative groups that were skipped or that the relay gave up
-  on part-way. It never decreases: a group that lands after being counted
-  lost stays lost.
+- `history_groups`: the part of `recv_groups` older than its subscription's
+  first group, such as cached history a relay fills in after the subscribe.
+  These are never counted as lost.
+- `lost_groups`: cumulative groups that were skipped at or after a
+  subscription's first group, or that the relay gave up on part-way. It never
+  decreases: a group that lands after being counted lost stays lost.
 - `loss`: `lost_groups` as a percentage.
 - `latency_p50_ms` / `latency_p90_ms` / `latency_p99_ms` / `latency_max_ms`:
   cumulative one-way delivery latency from each group's keyframe timestamp.
@@ -60,7 +68,10 @@ subscription's sequence span. A span wider than the count received means groups
 in between were skipped, so loss reflects dropped groups rather than QUIC packet
 loss (which the transport already repairs). The newest group is the live frontier
 and is excluded from the count: groups just behind it may still be in flight, so a
-gap is only blamed once a higher group confirms it was truly skipped. A group the
+gap is only blamed once a higher group confirms it was truly skipped. The span
+starts at the first group a subscription receives: an older group that arrives
+later is history, counted in `history_groups` rather than widening the span, so
+a join that over-fetches history never reads as loss. A group the
 relay fails part-way (it gives up on a subscriber that fell behind) ends that
 group alone and lands in the same accounting; the subscription stays for the next
 one, so the offered load holds at the configured count. Subscribers use
@@ -121,6 +132,41 @@ The `config/` directory has a few starting points:
 
 ## Machine-readable output
 
+Every line groups load counts by resource:
+
+```json
+{
+  "connections": { "target": 2, "established": 2 },
+  "broadcasts": { "target": 2, "active": 2, "established": 2 },
+  "subscriptions": { "target": 2, "active": 2, "established": 2 },
+  "ready": true
+}
+```
+
+Targets are fixed sums over all startup rolls, including fan-out roles.
+Established counts are live: connections have connected, broadcasts have connected
+or completed their first group, and subscriptions have read a complete group end
+to end. Broadcast `active` counts producers before establishment; subscription
+`active` includes drains still waiting to subscribe or finish their first group.
+
+`ready` first becomes true on a line whose `established` counts all reach their
+targets at once. Start a measurement window on the first `ready` line. It stays
+true after a later loss; use each resource's `established` count to see
+established work ending.
+
+This changes the previous numeric JSONL fields into objects. Migrate reads of
+`connections` to `connections.established`, `broadcasts` to `broadcasts.active`,
+and `subscriptions` to `subscriptions.active`; those gauges retain their meanings.
+Frame, byte, group and latency fields are unchanged. The human-readable stats log
+also keeps its existing numeric fields.
+
+A mesh publishing run refuses a subscription range larger than the smallest
+possible peer broadcast count: `(max(connections.min, 1) - 1) * broadcasts.min`,
+with inverted range ends normalized first. A publishing run with subscribers,
+including fan-out, refuses an fps range containing zero. Subscribe-only runs may
+use local fps zero and request any subscription count: their external publishers
+determine when the requested target is reached. Targets are never clamped.
+
 Each line includes `interval_start_ms` and `interval_end_ms` (Unix milliseconds),
 and `latency_interval_histogram`: `{ "version": 1, "unit": "ms", "buckets": [[index, count], ...] }`.
 Version 1 is a sparse encoding of 60,001 dense one-millisecond buckets: omitted
@@ -146,14 +192,14 @@ independent atomic samples.
 `--output stats.jsonl` mirrors every report interval to a file as one JSON
 line, each stamped with `timestamp_ms`. The frame, byte, and group counters are
 cumulative and monotonic, so a consumer diffs successive lines to compute
-rates, the same convention as `moq-stats` frames. `connections`, `broadcasts`,
-and `subscriptions` are live gauges that fall as work ends; diff only the
-counters.
+rates, the same convention as `moq-stats` frames. Resource `active` and
+`established` counts are live gauges that fall as work ends; diff only the counters.
 
 `groups_lost` is the logged `lost_groups`, so its increase over a window is the
 groups lost inside it. `groups_expected - groups_present` is the gaps still
 outstanding, which a late arrival closes; it is not monotonic, so do not diff
-it to count loss.
+it to count loss. `groups_history` is the logged `history_groups`: late history
+included in `groups_recv` but outside `groups_expected`.
 
 Latency is measured from wall-clock milliseconds embedded by the publisher.
 Run each publisher and its subscribers on the same host so a latency sample closes
@@ -178,9 +224,9 @@ window is not the combination of these numbers. `latency_interval_max_ms` is
 the highest bucket that gained a sample, so below 60 seconds it is the exact
 millisecond maximum, and 60000 means at least 60 seconds.
 
-## Host-side sampling: moq-bench-host
+## Host-side sampling: moq-bench host
 
-`moq-bench` measures the load it generates; `moq-bench-host` measures what that
+`moq-bench` measures the load it generates; `moq-bench host` measures what that
 load costs. It runs on the host of the process under test, production included:
 it only reads `/proc` (Linux-only), needs no privileges beyond visibility of the
 target process, and never touches the process itself (no ptrace, no perf, no
@@ -188,10 +234,10 @@ signals).
 
 ```bash
 # On the relay host: sample the relay once per second, forever, to stdout.
-moq-bench-host --name moq-relay
+moq-bench host --name moq-relay
 
 # Bounded run to a file, with the per-thread breakdown.
-moq-bench-host --name moq-relay --interval 1s --duration 5m \
+moq-bench host --name moq-relay --interval 1s --duration 5m \
   --threads --output host.jsonl
 ```
 
@@ -202,6 +248,23 @@ plus the host's total busy CPU seconds (`host_cpu_busy`) and core count so the
 process's share of the machine is computable. `--threads` adds a per-thread
 breakdown including the core each thread last ran on, which is how to verify
 pinning once the relay grows a thread-per-core mode.
+
+The `udp_*` fields come from the kernel's own socket accounting (a `sock_diag`
+dump, what `ss -uam` reads) for the process's UDP sockets: how many it holds
+(`udp_sockets`), the smallest receive and send buffer the kernel granted
+(`udp_rcvbuf_min`, `udp_sndbuf_min`, in kernel units, which on Linux are twice
+the honored `SO_RCVBUF` request), the bytes queued for receive right now
+(`udp_rx_queue_bytes`), and `udp_drops`, the datagrams dropped at those sockets
+because a receive queue was full. `udp_drops` is cumulative across every socket
+the sampler saw, closed ones included. One drop is one queued skb, so a
+coalesced GRO train counts once however many datagrams it carried. A drop here
+is local: the process was too slow to read. Loss on the path never reaches the
+socket and needs the transport's own counters. `udp_rcvbuf_errors`,
+`udp_sndbuf_errors` and `udp_in_errors` are the namespace's `/proc/net/snmp`
+counters, IPv4 and IPv6 summed, and count every socket in the namespace. The
+dump sees the sampler's network namespace, so run it in the target's. The
+fields are absent when the host refuses the dump, or for another user's process,
+whose `/proc/<pid>/fd` the sampler may not list; the other fields still sample.
 
 ## Measuring CPU cost
 
@@ -234,4 +297,5 @@ to the results.
 
 `just rs bench-latency` measures latency recording with 1, 4 and 16 concurrent
 writers and 0, 10 and 100 snapshots per run. It checks final sample conservation
-and prints throughput for each case. The nightly workflow runs the same matrix.
+and prints the cost per sample for each case. The nightly workflow runs the same
+matrix and records it on the benchmark table.

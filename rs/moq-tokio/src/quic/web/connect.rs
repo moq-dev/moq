@@ -1,0 +1,171 @@
+use std::ops::Deref;
+
+use web_transport_proto::{ConnectRequest, ConnectResponse, VarInt};
+
+use thiserror::Error;
+
+/// CONNECT headers can carry credentials under any name, so log only routing metadata.
+struct Request<'a>(&'a ConnectRequest);
+
+impl std::fmt::Debug for Request<'_> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("ConnectRequest")
+			.field("url", &crate::RedactedUrl::new(&self.0.url))
+			.field("protocols", &self.0.protocols)
+			.finish()
+	}
+}
+
+#[derive(Error, Debug, Clone)]
+#[non_exhaustive]
+/// An error exchanging HTTP/3 CONNECT headers.
+pub enum ConnectError {
+	/// The HTTP/3 handshake failed at this step.
+	#[error("quic stream was closed early")]
+	UnexpectedEnd,
+
+	/// The HTTP/3 handshake failed at this step.
+	#[error("protocol error: {0}")]
+	ProtoError(#[from] web_transport_proto::ConnectError),
+
+	/// The QUIC connection failed.
+	#[error("connection error")]
+	ConnectionError(#[from] crate::quic::driver::connection::Error),
+
+	/// The QUIC receive stream failed.
+	#[error("read error")]
+	ReadError(#[from] crate::quic::driver::recv::Error),
+
+	/// The QUIC send stream failed.
+	#[error("write error")]
+	WriteError(#[from] crate::quic::driver::send::Error),
+
+	/// The HTTP/3 handshake failed at this step.
+	#[error("http error status: {0}")]
+	ErrorStatus(http::StatusCode),
+
+	/// The HTTP/3 handshake failed at this step.
+	#[error("server returned protocol not in request: {0}")]
+	ProtocolMismatch(String),
+}
+
+/// An HTTP/3 CONNECT request/response for establishing a WebTransport session.
+pub struct Connecting {
+	// The request that was sent by the client.
+	pub request: ConnectRequest,
+
+	// A reference to the send/recv stream, so we don't close it until dropped.
+	pub(crate) send: crate::quic::driver::send::Stream,
+	pub(crate) recv: crate::quic::driver::recv::Stream,
+}
+
+impl Connecting {
+	pub async fn accept(conn: &crate::quic::driver::connection::Connection) -> Result<Self, ConnectError> {
+		// Accept the stream that will be used to send the HTTP CONNECT request.
+		// If they try to send any other type of HTTP request, we will error out.
+		let (send, mut recv) = conn.accept_bi().await?;
+
+		let request = web_transport_proto::ConnectRequest::read(&mut recv).await?;
+		tracing::debug!(request = ?Request(&request), "received CONNECT request");
+
+		// The request was successfully decoded, so we can send a response.
+		Ok(Self { request, send, recv })
+	}
+
+	// Called by the server to send a response to the client and establish the session.
+	pub async fn respond(mut self, response: impl Into<ConnectResponse>) -> Result<Connected, ConnectError> {
+		let response = response.into();
+
+		// Validate that our protocol was in the client's request.
+		if let Some(protocol) = &response.protocol
+			&& !self.request.protocols.contains(protocol)
+		{
+			return Err(ConnectError::ProtocolMismatch(protocol.clone()));
+		}
+
+		tracing::debug!(?response, "sending CONNECT response");
+		response.write(&mut self.send).await?;
+
+		Ok(Connected {
+			request: self.request,
+			response,
+			send: self.send,
+			recv: self.recv,
+		})
+	}
+
+	pub async fn reject(self, status: http::StatusCode) -> Result<(), ConnectError> {
+		let connect = self.respond(status).await?;
+		connect.send.finish();
+		Ok(())
+	}
+}
+
+impl Deref for Connecting {
+	type Target = ConnectRequest;
+
+	fn deref(&self) -> &Self::Target {
+		&self.request
+	}
+}
+
+pub struct Connected {
+	// The request that was sent by the client.
+	pub request: ConnectRequest,
+
+	// The response sent by the server.
+	pub response: ConnectResponse,
+
+	// A reference to the send/recv stream, so we don't close it until dropped.
+	pub(crate) send: crate::quic::driver::send::Stream,
+	pub(crate) recv: crate::quic::driver::recv::Stream,
+}
+
+impl Connected {
+	/// Open a new WebTransport session on the given connection for the given URL.
+	///
+	/// You may add any number of subprotocols allowing the server to select from.
+	/// If the list is empty the field will be omitted in the request header.
+	pub async fn open(
+		conn: &crate::quic::driver::connection::Connection,
+		request: impl Into<ConnectRequest>,
+	) -> Result<Self, ConnectError> {
+		let request = request.into();
+
+		// Create a new stream that will be used to send the CONNECT frame.
+		let (mut send, mut recv) = conn.open_bi(Default::default()).await?;
+
+		tracing::debug!(request = ?Request(&request), "sending CONNECT request");
+		request.write(&mut send).await?;
+
+		let response = web_transport_proto::ConnectResponse::read(&mut recv).await?;
+		tracing::debug!(?response, "received CONNECT response");
+
+		// Throw an error if we didn't get a 200 OK.
+		if response.status != http::StatusCode::OK {
+			return Err(ConnectError::ErrorStatus(response.status));
+		}
+
+		// Validate that the server's protocol was in our request.
+		if let Some(protocol) = &response.protocol
+			&& !request.protocols.contains(protocol)
+		{
+			return Err(ConnectError::ProtocolMismatch(protocol.clone()));
+		}
+
+		Ok(Self {
+			request,
+			response,
+			send,
+			recv,
+		})
+	}
+
+	// The session ID is the stream ID of the CONNECT request.
+	pub fn session_id(&self) -> VarInt {
+		// Convert from the QUIC VarInt to the WebTransport VarInt, since web-transport-proto
+		// doesn't depend on moq-quic.
+		let stream_id = crate::quic::driver::VarInt::from(self.send.id());
+		VarInt::try_from(stream_id.into_inner()).unwrap()
+	}
+}

@@ -14,7 +14,7 @@ use crate::container::Frame;
 /// keyframe (the rest extend it): frames accumulate into the current group until the caller
 /// [`cut`](Self::cut)s or [`seek`](Self::seek)s. The [`import::Track`](crate::import::Track) facade
 /// passes that through, so boundaries are the caller's either way: cut per frame for one group per
-/// frame, or at a segment cadence to align with video.
+/// frame, or less often to batch frames into fewer groups.
 pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::AudioConfig>,
 }
@@ -45,11 +45,6 @@ impl Import {
 		self.track.track().demand()
 	}
 
-	/// Record a locally encoded frame's transport handoff for catalog jitter measurement.
-	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: std::time::Instant) -> crate::Result<()> {
-		self.track.flush(timestamp, now)
-	}
-
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
 		self.track.finish()?;
@@ -62,8 +57,6 @@ impl Import {
 		self.track.abort(err);
 	}
 
-	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
-	/// the fields its config didn't supply.
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		self.track.cut(end)?;

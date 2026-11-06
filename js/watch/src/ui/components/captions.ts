@@ -47,7 +47,7 @@ export function captionsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 
 	parent.run((effect) => {
 		const available = effect.get(watch.text.out.available);
-		const selected = effect.get(watch.controls.captions);
+		const selected = effect.get(watch.controls.text.target);
 		const entries = Object.entries(available);
 
 		container.replaceChildren();
@@ -55,7 +55,7 @@ export function captionsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 		// Off row: always present so captions can be dismissed.
 		container.appendChild(
 			captionRow(effect, "Off", "no captions", selected === undefined, () => {
-				watch.controls.captions.set(undefined);
+				watch.controls.text.target.set(undefined);
 			}),
 		);
 
@@ -67,7 +67,7 @@ export function captionsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 		for (const [name, config] of entries) {
 			container.appendChild(
 				captionRow(effect, label(name, config), detail(config), selected === name, () => {
-					watch.controls.captions.set(name);
+					watch.controls.text.target.set(name);
 				}),
 			);
 		}

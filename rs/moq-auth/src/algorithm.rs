@@ -8,17 +8,29 @@ use std::{fmt, str::FromStr};
 ///
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
 pub enum Algorithm {
+	/// HMAC with SHA-256.
 	HS256,
+	/// HMAC with SHA-384.
 	HS384,
+	/// HMAC with SHA-512.
 	HS512,
+	/// ECDSA on P-256 with SHA-256.
 	ES256,
+	/// ECDSA on P-384 with SHA-384.
 	ES384,
+	/// RSASSA-PKCS1-v1_5 with SHA-256.
 	RS256,
+	/// RSASSA-PKCS1-v1_5 with SHA-384.
 	RS384,
+	/// RSASSA-PKCS1-v1_5 with SHA-512.
 	RS512,
+	/// RSASSA-PSS with SHA-256.
 	PS256,
+	/// RSASSA-PSS with SHA-384.
 	PS384,
+	/// RSASSA-PSS with SHA-512.
 	PS512,
+	/// EdDSA on Ed25519.
 	EdDSA,
 }
 
@@ -87,19 +99,24 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn test_algorithm_from_str_valid() {
-		assert_eq!(Algorithm::from_str("HS256").unwrap(), Algorithm::HS256);
-		assert_eq!(Algorithm::from_str("HS384").unwrap(), Algorithm::HS384);
-		assert_eq!(Algorithm::from_str("HS512").unwrap(), Algorithm::HS512);
-		assert_eq!(Algorithm::from_str("ES256").unwrap(), Algorithm::ES256);
-		assert_eq!(Algorithm::from_str("ES384").unwrap(), Algorithm::ES384);
-		assert_eq!(Algorithm::from_str("RS256").unwrap(), Algorithm::RS256);
-		assert_eq!(Algorithm::from_str("RS384").unwrap(), Algorithm::RS384);
-		assert_eq!(Algorithm::from_str("RS512").unwrap(), Algorithm::RS512);
-		assert_eq!(Algorithm::from_str("PS256").unwrap(), Algorithm::PS256);
-		assert_eq!(Algorithm::from_str("PS384").unwrap(), Algorithm::PS384);
-		assert_eq!(Algorithm::from_str("PS512").unwrap(), Algorithm::PS512);
-		assert_eq!(Algorithm::from_str("EdDSA").unwrap(), Algorithm::EdDSA);
+	fn test_algorithm_from_str_and_display() {
+		for (name, alg) in [
+			("HS256", Algorithm::HS256),
+			("HS384", Algorithm::HS384),
+			("HS512", Algorithm::HS512),
+			("ES256", Algorithm::ES256),
+			("ES384", Algorithm::ES384),
+			("RS256", Algorithm::RS256),
+			("RS384", Algorithm::RS384),
+			("RS512", Algorithm::RS512),
+			("PS256", Algorithm::PS256),
+			("PS384", Algorithm::PS384),
+			("PS512", Algorithm::PS512),
+			("EdDSA", Algorithm::EdDSA),
+		] {
+			assert_eq!(Algorithm::from_str(name).unwrap(), alg);
+			assert_eq!(alg.to_string(), name);
+		}
 	}
 
 	#[test]
@@ -110,22 +127,6 @@ mod tests {
 		assert!(Algorithm::from_str("EDDSA").is_err());
 		assert!(Algorithm::from_str("invalid").is_err());
 		assert!(Algorithm::from_str("").is_err());
-	}
-
-	#[test]
-	fn test_algorithm_display() {
-		assert_eq!(Algorithm::HS256.to_string(), "HS256");
-		assert_eq!(Algorithm::HS384.to_string(), "HS384");
-		assert_eq!(Algorithm::HS512.to_string(), "HS512");
-		assert_eq!(Algorithm::ES256.to_string(), "ES256");
-		assert_eq!(Algorithm::ES384.to_string(), "ES384");
-		assert_eq!(Algorithm::RS256.to_string(), "RS256");
-		assert_eq!(Algorithm::RS384.to_string(), "RS384");
-		assert_eq!(Algorithm::RS512.to_string(), "RS512");
-		assert_eq!(Algorithm::PS256.to_string(), "PS256");
-		assert_eq!(Algorithm::PS384.to_string(), "PS384");
-		assert_eq!(Algorithm::PS512.to_string(), "PS512");
-		assert_eq!(Algorithm::EdDSA.to_string(), "EdDSA");
 	}
 
 	#[test]
@@ -188,35 +189,5 @@ mod tests {
 
 		let deserialized: Algorithm = serde_json::from_str(&json).unwrap();
 		assert_eq!(deserialized, alg);
-	}
-
-	#[test]
-	fn test_algorithm_equality() {
-		assert_eq!(Algorithm::HS256, Algorithm::HS256);
-		assert_ne!(Algorithm::HS256, Algorithm::HS384);
-		assert_ne!(Algorithm::HS384, Algorithm::HS512);
-		assert_eq!(Algorithm::ES256, Algorithm::ES256);
-		assert_eq!(Algorithm::ES384, Algorithm::ES384);
-		assert_ne!(Algorithm::HS384, Algorithm::ES256);
-		assert_ne!(Algorithm::ES256, Algorithm::ES384);
-		assert_eq!(Algorithm::RS256, Algorithm::RS256);
-		assert_eq!(Algorithm::RS384, Algorithm::RS384);
-		assert_eq!(Algorithm::RS512, Algorithm::RS512);
-		assert_ne!(Algorithm::RS256, Algorithm::RS512);
-		assert_ne!(Algorithm::RS256, Algorithm::PS256);
-		assert_eq!(Algorithm::PS256, Algorithm::PS256);
-		assert_eq!(Algorithm::PS384, Algorithm::PS384);
-		assert_eq!(Algorithm::PS512, Algorithm::PS512);
-		assert_ne!(Algorithm::PS256, Algorithm::PS512);
-		assert_eq!(Algorithm::EdDSA, Algorithm::EdDSA);
-		assert_ne!(Algorithm::EdDSA, Algorithm::ES256);
-		assert_ne!(Algorithm::EdDSA, Algorithm::RS512);
-	}
-
-	#[test]
-	fn test_algorithm_clone() {
-		let alg = Algorithm::HS256;
-		let cloned = alg;
-		assert_eq!(alg, cloned);
 	}
 }

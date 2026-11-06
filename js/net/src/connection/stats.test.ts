@@ -1,11 +1,13 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import QmuxSession from "@moq/qmux";
+import { Effect } from "@moq/signals";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
-import { createMockTransportPair } from "../mock.ts";
-import * as Time from "../time.ts";
+import { createMockTransportPair, MockTransport } from "../mock.ts";
 import { type AcceptProps, accept as acceptSession, type ConnectProps, connect as connectSession } from "./index.ts";
 import { Reload } from "./reload.ts";
-import { type TransportStats, transportStats } from "./stats.ts";
+import { canEstimate, estimates, type TransportStats, transportStats } from "./stats.ts";
 
 function connect(url: URL, props: Omit<ConnectProps, "url"> = {}) {
 	return connectSession({ url, ...props });
@@ -32,7 +34,7 @@ test("transportStats maps the W3C dictionary and normalizes a null send rate", a
 			packetsLost: 6,
 		}),
 	);
-	expect(stats.rtt).toBe(Time.Milli(25));
+	expect(stats.rtt).toBe(Milli(25));
 	expect(stats.estimatedSendRate).toBeUndefined();
 	expect(stats.bytesSent).toBe(1);
 	expect(stats.bytesReceived).toBe(2);
@@ -74,14 +76,15 @@ test("stats() snapshots the transport on demand", async () => {
 	}
 });
 
-test("stats() is empty on a transport without getStats", async () => {
+test("stats() has no transport counters on a transport without getStats", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	// Shadow the mock's getStats to imitate the qmux/WebSocket fallback.
 	(pair.client as unknown as { getStats?: unknown }).getStats = undefined;
 	const url = new URL("https://example.com/");
 	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
 	try {
-		expect(await client.stats()).toEqual({});
+		// Only the session's own counter, which needs nothing from the transport.
+		expect(await client.stats()).toEqual({ datagramsUnrouted: 0 });
 	} finally {
 		client.abort();
 		server.abort();
@@ -102,7 +105,59 @@ test("probe starts empty and stays empty without PROBE support", async () => {
 	}
 });
 
-test("Reload reports stats and probe only while connected", async () => {
+// Each wire transport, imitated on a mock so only what it can report differs.
+const kinds: { name: string; estimates: boolean; shape: (quic: MockTransport) => void }[] = [
+	{ name: "WebTransport with getStats", estimates: true, shape: () => {} },
+	{
+		name: "WebTransport without getStats",
+		estimates: false,
+		// Shipping Chromium and Safari implement no getStats().
+		shape: (quic) => {
+			(quic as unknown as { getStats?: unknown }).getStats = undefined;
+		},
+	},
+	{
+		name: "the WebSocket fallback",
+		estimates: false,
+		// A qmux session is what marks the fallback; the mock keeps its own behavior.
+		shape: (quic) => {
+			const proto = Object.create(QmuxSession.prototype);
+			Object.defineProperties(proto, Object.getOwnPropertyDescriptors(MockTransport.prototype));
+			Object.setPrototypeOf(quic, proto);
+		},
+	},
+	{
+		name: "WebRTC",
+		estimates: false,
+		shape: (quic) => {
+			Object.assign(quic, { transport: "webrtc" });
+		},
+	},
+];
+
+for (const kind of kinds) {
+	for (const alpn of [Lite.ALPN_06, Ietf.ALPN.DRAFT_18]) {
+		test(`a ${alpn} session over ${kind.name} ${kind.estimates ? "can" : "cannot"} report a send-rate estimate`, async () => {
+			const pair = createMockTransportPair(alpn, { stats: { estimatedSendRate: 2_000_000 } });
+			kind.shape(pair.client);
+			expect(canEstimate(pair.client)).toBe(kind.estimates);
+			const url = new URL("https://example.com/");
+			const [client, server] = await Promise.all([
+				connect(url, { transport: pair.client }),
+				accept(pair.server, url),
+			]);
+			try {
+				expect(estimates(client)).toBe(kind.estimates);
+				expect(estimates(server)).toBe(true);
+			} finally {
+				client.abort();
+				server.abort();
+			}
+		});
+	}
+}
+
+test("Reload exposes its established session stats and probe only while connected", async () => {
 	const original = globalThis.WebTransport;
 	const pair = createMockTransportPair(Lite.ALPN_06, { stats: { bytesSent: 99 } });
 	// `new` on a function returning an object yields that object, handing connect() the mock.
@@ -115,21 +170,84 @@ test("Reload reports stats and probe only while connected", async () => {
 	try {
 		const server = await accept(pair.server, url);
 		while (!reload.established.peek()) {
-			await new Promise((resolve) => setTimeout(resolve, 0));
+			await yieldNow();
 		}
-		expect((await reload.stats())?.bytesSent).toBe(99);
+		expect((await reload.established.peek()?.stats())?.bytesSent).toBe(99);
 		expect(reload.probe.peek()).toEqual({});
 
 		server.abort();
 		while (reload.established.peek()) {
-			await new Promise((resolve) => setTimeout(resolve, 0));
+			await yieldNow();
 		}
 		expect(reload.status.peek()).toBe("disconnected");
-		expect(await reload.stats()).toBeUndefined();
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(await reload.established.peek()?.stats()).toBeUndefined();
+		await yieldNow();
 		expect(reload.probe.peek()).toBeUndefined();
 	} finally {
 		reload.close();
 		globalThis.WebTransport = original;
+	}
+});
+
+test("a lite connection probes only while its estimate is observed", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const drain = () => clock.advance(Nano.zero);
+	const pair = createMockTransportPair(Lite.ALPN_06, { stats: { estimatedSendRate: 1_000_000 } });
+	const open = pair.client.createBidirectionalStream.bind(pair.client);
+	let finished = 0;
+	const opening = spyOn(pair.client, "createBidirectionalStream").mockImplementation(async (options) => {
+		const stream = await open(options);
+		const writer = stream.writable.getWriter();
+		return {
+			readable: stream.readable,
+			writable: new WritableStream<Uint8Array>({
+				write: (chunk) => writer.write(chunk),
+				close: () => {
+					finished++;
+					return writer.close();
+				},
+				abort: (reason) => writer.abort(reason),
+			}),
+		};
+	});
+	const url = new URL("https://example.com/");
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+	let stop = () => {};
+	let effect: Effect | undefined;
+	try {
+		await drain();
+		expect(client.probe.peek()).toEqual({});
+		expect(pair.client.sendStreams.bidi).toHaveLength(0);
+		stop = client.probe.subscribe(() => {});
+		await drain();
+		expect(pair.client.sendStreams.bidi).toHaveLength(1);
+		const values: unknown[] = [];
+		effect = new Effect((effect) => {
+			values.push(effect.get(client.probe));
+		});
+		await drain();
+		await clock.advance(Nano.fromMilli(Milli(100)));
+		expect(values.at(-1)).toMatchObject({ estimatedRecvRate: 1_000_000 });
+		// A reactive one-shot listener reattaches without dropping demand between updates.
+		expect(pair.client.sendStreams.bidi).toHaveLength(1);
+		stop();
+		await drain();
+		expect(finished).toBe(0);
+		effect.close();
+		await drain();
+		expect(finished).toBe(1);
+		expect(client.probe.peek()).toEqual({});
+		stop = client.probe.subscribe(() => {});
+		await drain();
+		expect(pair.client.sendStreams.bidi).toHaveLength(2);
+	} finally {
+		stop();
+		effect?.close();
+		await drain();
+		client.abort();
+		server.abort();
+		opening.mockRestore();
+		installed.close();
 	}
 });

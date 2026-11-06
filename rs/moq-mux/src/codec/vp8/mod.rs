@@ -15,15 +15,19 @@ pub use import::*;
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The frame is shorter than its required header.
 	#[error("VP8 frame too short for tag")]
 	FrameTooShort,
 
+	/// The keyframe is shorter than its required header.
 	#[error("VP8 key frame too short for header")]
 	KeyframeHeaderTooShort,
 
+	/// The keyframe header has an invalid start code.
 	#[error("VP8 key frame start code mismatch")]
 	StartCodeMismatch,
 
+	/// The frame contains no bytes.
 	#[error("empty VP8 frame")]
 	EmptyFrame,
 }
@@ -85,12 +89,16 @@ impl FrameHeader {
 ///
 /// VP8 is always 8-bit 4:2:0 with no out-of-band parameters, so the box carries
 /// fixed placeholders. Profile 0 / level 0 are the standard "unspecified"
-/// values. See https://www.webmproject.org/vp9/mp4/.
+/// values. See https://www.webmproject.org/vp9/mp4/. The colour fields are
+/// unspecified (2) rather than mp4-atom's BT.709 default.
 pub(crate) fn vpcc() -> mp4_atom::VpcC {
 	mp4_atom::VpcC {
 		profile: 0,
 		level: 0,
 		bit_depth: 8,
+		color_primaries: 2,
+		transfer_characteristics: 2,
+		matrix_coefficients: 2,
 		..Default::default()
 	}
 }

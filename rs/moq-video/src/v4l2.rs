@@ -32,15 +32,18 @@ use moq_v4l::sys::{
 	V4L2_BUF_FLAG_ERROR, V4L2_BUF_FLAG_LAST, V4L2_CAP_DEVICE_CAPS, V4L2_CAP_STREAMING, V4L2_CAP_VIDEO_M2M,
 	V4L2_CAP_VIDEO_M2M_MPLANE, V4L2_CTRL_FLAG_DISABLED, V4L2_EVENT_SOURCE_CHANGE, V4L2_SEL_TGT_COMPOSE, timeval,
 	v4l2_buf_type_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, v4l2_buf_type_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, v4l2_buffer,
-	v4l2_capability, v4l2_colorspace_V4L2_COLORSPACE_REC709, v4l2_colorspace_V4L2_COLORSPACE_SMPTE170M, v4l2_control,
-	v4l2_decoder_cmd, v4l2_encoder_cmd, v4l2_event, v4l2_event_subscription, v4l2_field_V4L2_FIELD_NONE, v4l2_fmtdesc,
-	v4l2_format, v4l2_memory_V4L2_MEMORY_MMAP, v4l2_plane, v4l2_quantization_V4L2_QUANTIZATION_FULL_RANGE,
+	v4l2_capability, v4l2_colorspace_V4L2_COLORSPACE_470_SYSTEM_BG, v4l2_colorspace_V4L2_COLORSPACE_BT2020,
+	v4l2_colorspace_V4L2_COLORSPACE_REC709, v4l2_colorspace_V4L2_COLORSPACE_SMPTE170M, v4l2_control, v4l2_decoder_cmd,
+	v4l2_encoder_cmd, v4l2_event, v4l2_event_subscription, v4l2_field_V4L2_FIELD_NONE, v4l2_fmtdesc, v4l2_format,
+	v4l2_memory_V4L2_MEMORY_MMAP, v4l2_plane, v4l2_quantization_V4L2_QUANTIZATION_FULL_RANGE,
 	v4l2_quantization_V4L2_QUANTIZATION_LIM_RANGE, v4l2_queryctrl, v4l2_requestbuffers, v4l2_selection,
-	v4l2_streamparm, v4l2_xfer_func_V4L2_XFER_FUNC_709, v4l2_ycbcr_encoding_V4L2_YCBCR_ENC_601,
-	v4l2_ycbcr_encoding_V4L2_YCBCR_ENC_709,
+	v4l2_streamparm, v4l2_xfer_func_V4L2_XFER_FUNC_709, v4l2_xfer_func_V4L2_XFER_FUNC_SMPTE2084,
+	v4l2_ycbcr_encoding_V4L2_YCBCR_ENC_601, v4l2_ycbcr_encoding_V4L2_YCBCR_ENC_709,
+	v4l2_ycbcr_encoding_V4L2_YCBCR_ENC_BT2020,
 };
 use moq_v4l::v4l2::vidioc;
 
+use crate::color::{Matrix, Primaries, Range, Transfer};
 use crate::frame::I420;
 use crate::{Color, Error, Size};
 
@@ -375,25 +378,27 @@ impl Device {
 				pix.plane_fmt[0].sizeimage = sizeimage;
 			}
 			if let Some(color) = request.color {
-				let (colorspace, ycbcr) = match color {
-					// SMPTE 170M primaries and matrix with the BT.709 transfer curve,
-					// the same triple the other backends emit: the two curves are
-					// defined identically and only 709 has a name everywhere.
-					Color::Bt601Limited | Color::Bt601Full => (
-						v4l2_colorspace_V4L2_COLORSPACE_SMPTE170M,
-						v4l2_ycbcr_encoding_V4L2_YCBCR_ENC_601,
-					),
-					Color::Bt709Limited | Color::Bt709Full => (
-						v4l2_colorspace_V4L2_COLORSPACE_REC709,
-						v4l2_ycbcr_encoding_V4L2_YCBCR_ENC_709,
-					),
+				// V4L2 names the primaries by colorspace and has no HLG curve.
+				pix.colorspace = match color.primaries {
+					Primaries::Smpte170m => v4l2_colorspace_V4L2_COLORSPACE_SMPTE170M,
+					Primaries::Bt470bg => v4l2_colorspace_V4L2_COLORSPACE_470_SYSTEM_BG,
+					Primaries::Bt709 => v4l2_colorspace_V4L2_COLORSPACE_REC709,
+					Primaries::Bt2020 => v4l2_colorspace_V4L2_COLORSPACE_BT2020,
 				};
-				pix.colorspace = colorspace;
+				let ycbcr = match color.matrix {
+					Matrix::Bt601 => v4l2_ycbcr_encoding_V4L2_YCBCR_ENC_601,
+					Matrix::Bt709 => v4l2_ycbcr_encoding_V4L2_YCBCR_ENC_709,
+					Matrix::Bt2020 => v4l2_ycbcr_encoding_V4L2_YCBCR_ENC_BT2020,
+				};
 				pix.__bindgen_anon_1.ycbcr_enc = ycbcr as u8;
-				pix.xfer_func = v4l2_xfer_func_V4L2_XFER_FUNC_709 as u8;
-				pix.quantization = match color.limited() {
-					true => v4l2_quantization_V4L2_QUANTIZATION_LIM_RANGE as u8,
-					false => v4l2_quantization_V4L2_QUANTIZATION_FULL_RANGE as u8,
+				pix.xfer_func = match color.transfer {
+					Transfer::Bt709 => v4l2_xfer_func_V4L2_XFER_FUNC_709,
+					Transfer::Pq => v4l2_xfer_func_V4L2_XFER_FUNC_SMPTE2084,
+					Transfer::Hlg => return Err(Error::Unsupported("V4L2 cannot signal the HLG transfer".into())),
+				} as u8;
+				pix.quantization = match color.range {
+					Range::Limited => v4l2_quantization_V4L2_QUANTIZATION_LIM_RANGE as u8,
+					Range::Full => v4l2_quantization_V4L2_QUANTIZATION_FULL_RANGE as u8,
 				};
 			}
 		}
@@ -493,7 +498,7 @@ impl Device {
 	}
 
 	/// Declare the input framerate, which rate control uses to spend the bitrate.
-	pub(crate) fn set_framerate(&self, dir: Dir, framerate: crate::Rate) -> Result<(), Error> {
+	pub(crate) fn set_framerate(&self, dir: Dir, framerate: crate::FrameRate) -> Result<(), Error> {
 		let mut parm = v4l2_streamparm::zeroed();
 		parm.type_ = dir.buf_type();
 		// SAFETY: the buffer type just written picks the arm the driver reads, so
@@ -638,6 +643,10 @@ impl Device {
 		// A negative return is `EINTR` or `ENOMEM` and leaves `revents` untouched,
 		// so there is nothing to read and the caller's own deadline still bounds it.
 		if ready > 0 && event.revents & (libc::POLLIN | libc::POLLOUT | libc::POLLPRI) == 0 {
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "the device thread runs outside any runtime, so it blocks on the host clock"
+			)]
 			std::thread::sleep(timeout);
 		}
 	}

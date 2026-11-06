@@ -3,23 +3,28 @@
  *
  * @module
  */
+
 import { Connection } from "@moq/net";
 
 // https://bugzilla.mozilla.org/show_bug.cgi?id=1967793
 const isFirefox = navigator.userAgent.toLowerCase().includes("firefox");
 
+/** How well a feature works: natively, through a fallback, or not at all. */
 export type Level = "full" | "partial" | "none";
 
+/** Whether a codec decodes in hardware and in software. */
 export type Codec = {
 	hardware?: boolean; // undefined when we can't detect hardware acceleration
 	software: boolean;
 };
 
+/** Which audio codecs decode. */
 export type Audio = {
-	aac: boolean;
+	aac: Level;
 	opus: Level;
 };
 
+/** Which video codecs decode. */
 export type Video = {
 	h264: Codec;
 	h265: Codec;
@@ -28,6 +33,7 @@ export type Video = {
 	av1: Codec;
 };
 
+/** The full playback support report. */
 export type Full = {
 	webtransport: Level;
 	audio: {
@@ -84,13 +90,15 @@ async function videoDecoderSupported(codec: keyof typeof CODECS): Promise<Codec>
 	};
 }
 
+/** Detect what this browser supports for playback. */
 export async function isSupported(): Promise<Full> {
 	return {
 		// Report "partial" when @moq/net forces the WebSocket fallback.
 		webtransport: Connection.isWebTransportSupported() ? "full" : "partial",
 		audio: {
 			decoding: {
-				aac: await audioDecoderSupported("aac"),
+				// The libav fallback decodes AAC only where it installs, which is wherever AudioDecoder is missing.
+				aac: (await audioDecoderSupported("aac")) ? "full" : globalThis.AudioDecoder ? "none" : "partial",
 				opus: (await audioDecoderSupported("opus")) ? "full" : "partial",
 			},
 			render: typeof AudioContext !== "undefined" && typeof AudioBufferSourceNode !== "undefined",

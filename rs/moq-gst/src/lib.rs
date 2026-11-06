@@ -1,6 +1,10 @@
+//! GStreamer plugin with a `moqsink` element that publishes a pipeline to a MoQ relay
+//! and a `moqsrc` element that subscribes to a broadcast, one source pad per rendition.
+
 use gst::glib;
 
 mod block;
+mod connection;
 mod sink;
 mod source;
 
@@ -14,6 +18,8 @@ pub use sink::MediaContainer;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 
+/// Registers `moqsink` and `moqsrc` with `plugin` and installs a stderr tracing subscriber
+/// filtered by `RUST_LOG`, unless the host process already installed one.
 pub fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
 	sink::register(plugin)?;
 	source::register(plugin)?;
@@ -22,7 +28,7 @@ pub fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
 		.with_default_directive(LevelFilter::INFO.into())
 		.from_env_lossy() // Allow overriding with RUST_LOG
 		.add_directive("h2=warn".parse().unwrap())
-		.add_directive("noq=info".parse().unwrap())
+		.add_directive("moq_tokio::quic::driver=info".parse().unwrap())
 		.add_directive("tracing::span=off".parse().unwrap())
 		.add_directive("tracing::span::active=off".parse().unwrap());
 
@@ -31,7 +37,8 @@ pub fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
 		.with_env_filter(filter)
 		.finish();
 
-	tracing::subscriber::set_global_default(logger).unwrap();
+	// An embedding application that installed its own subscriber keeps it.
+	let _ = tracing::subscriber::set_global_default(logger);
 	Ok(())
 }
 

@@ -1,12 +1,14 @@
 import * as z from "zod/mini";
 import { ContainerSchema } from "./container";
 import { u53Schema } from "./integers";
-import { RelativeBroadcastSchema } from "./path";
+import { InstanceSchema, RelativeBroadcastSchema } from "./path";
+import { renditions } from "./section";
 
 /**
  * The cue serialization format of a text track, mirroring the Rust `TextFormat`.
  *
- * Known values are `"vtt"` (WebVTT), `"ttml"` (TTML/IMSC1), and `"utf8"` (raw text). Any other
+ * Known values are `"vtt"` (WebVTT), `"ttml"` (one complete TTML/IMSC1 document per frame, clipped
+ * to the frame, whose `body` begins at the frame timestamp), and `"utf8"` (raw text). Any other
  * string is an unrecognized format the consumer should ignore. The frame timestamp always carries
  * the cue's start time, so a relay never parses the payload.
  */
@@ -34,6 +36,11 @@ export const TextConfigSchema = z.object({
 	// broadcast that served this catalog (e.g. "../source"). If unset, the track lives in the same
 	// broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
+	// The instance of the stream the reference names, when known. Absent accepts whichever stream
+	// resolves first. A route of another instance fails the entry; a route over a wire that
+	// carries no instance has one its session minted, which proves nothing, so there it is best
+	// effort. Without `broadcast`, it names the catalog's own stream.
+	instance: z.optional(InstanceSchema),
 	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
 	// catalog). Absent means the ID is the track name. Resolve it with `track`.
 	track: z.optional(z.string()),
@@ -78,7 +85,7 @@ export const TextConfigSchema = z.object({
 export const TextSchema = z.object({
 	// A map of track name to rendition configuration.
 	// This is not an array so it will work with JSON Merge Patch.
-	renditions: z.record(z.string(), TextConfigSchema),
+	renditions: renditions(TextConfigSchema),
 });
 
 /** The catalog text section: renditions keyed by track name. */

@@ -32,14 +32,15 @@
 //! sequence follows the kernel's stateful decoder documentation and an
 //! implementation that also ran on a Pi Zero 2 W and a Pi 3.
 
+use kio::clock::Instant;
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use moq_net::Timestamp;
 use moq_v4l::sys::{V4L2_CID_MIN_BUFFERS_FOR_CAPTURE, V4L2_DEC_CMD_START, V4L2_DEC_CMD_STOP};
 
-use super::{Backend, Codec, Config};
+use super::{Backend, Codec, Config, Stream};
 use crate::v4l2::{self, Dequeue, Device, Dir, Format, Planes, Queue, Rect, Request, Role};
 use crate::{Error, Frame, Size, Surface};
 
@@ -125,7 +126,8 @@ struct Pictures {
 }
 
 impl V4l2 {
-	pub(crate) fn open(codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+		let codec = stream.codec;
 		if codec != Codec::H264 {
 			return Err(Error::UnsupportedCodec(format!("{NAME} decodes H.264 only")));
 		}

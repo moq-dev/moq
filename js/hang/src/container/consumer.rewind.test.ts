@@ -1,23 +1,24 @@
-import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { type Installed, Manual, Micro, Milli, Nano } from "@moq/clock";
 import { Time, Track } from "@moq/net";
 import { Consumer } from "./consumer";
 import { encodeFrame, Format, Producer } from "./legacy";
 
-let clock: ReturnType<typeof spyOn>;
+// Frozen at 200ms: nothing in these tests waits on time.
+let installed: Installed;
 beforeEach(() => {
-	clock = spyOn(performance, "now").mockReturnValue(200);
+	const clock = new Manual();
+	clock.jump(Nano.fromMilli(Milli(200)));
+	installed = clock.install();
 });
-afterEach(() => clock.mockRestore());
+afterEach(() => installed.close());
 
 function setup() {
 	const track = new Track.Producer("rewind");
-	const consumer = new Consumer(
-		track.subscribe({ maxDelay: Time.Milli(30_000), groups: { start: { included: 0 } } }),
-		{
-			format: new Format("video"),
-			maxDelay: Time.Milli(30_000),
-		},
-	);
+	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) } }), {
+		format: new Format("video"),
+		delay: { max: Milli(30_000) },
+	});
 	return { track, consumer };
 }
 
@@ -25,17 +26,17 @@ function group(track: Track.Producer, timestamps: number[], end?: number) {
 	const group = track.appendGroup();
 	for (const timestamp of timestamps) {
 		group.writeFrame({
-			timestamp: Time.Timestamp.fromMicros(Time.Micro(timestamp)),
-			payload: encodeFrame(new Uint8Array([1]), Time.Micro(timestamp)),
+			timestamp: Time.Timestamp.fromMicros(Micro(timestamp)),
+			payload: encodeFrame(new Uint8Array([1]), Micro(timestamp)),
 		});
 	}
 	if (end !== undefined) {
 		group.writeFrame({
-			timestamp: Time.Timestamp.fromMicros(Time.Micro(end)),
-			payload: encodeFrame(new Uint8Array(), Time.Micro(end)),
+			timestamp: Time.Timestamp.fromMicros(Micro(end)),
+			payload: encodeFrame(new Uint8Array(), Micro(end)),
 		});
 	}
-	group.close();
+	group.finish();
 }
 
 async function frame(consumer: Consumer) {
@@ -51,12 +52,13 @@ test("Consumer accepts a resuming keyframe before the estimated group end", asyn
 		// A cut estimates the final 33ms frame's end at 66ms. Playback consumes that
 		// marker before the encoder resumes at 50ms, so the end cannot be a floor.
 		group(track, [0, 33_000], 66_000);
-		expect((await frame(consumer))?.frame?.timestamp).toBe(Time.Micro(0));
-		expect((await frame(consumer))?.frame?.timestamp).toBe(Time.Micro(33_000));
+		expect((await frame(consumer))?.frame?.timestamp).toBe(Micro(0));
+		expect((await frame(consumer))?.frame?.timestamp).toBe(Micro(33_000));
 		group(track, [50_000]);
-		expect((await frame(consumer))?.frame?.timestamp).toBe(Time.Micro(50_000));
+		expect((await frame(consumer))?.frame?.timestamp).toBe(Micro(50_000));
 	} finally {
 		consumer.close();
+		track.finish();
 		track.close();
 	}
 });
@@ -66,12 +68,12 @@ for (const start of [16_000, 0]) {
 		const { track, consumer } = setup();
 		const producer = new Producer(track, new Format("video"));
 		try {
-			producer.encode(new Uint8Array([1]), Time.Micro(0), true);
-			producer.encode(new Uint8Array([1]), Time.Micro(33_000), false);
-			expect((await frame(consumer))?.group).toBe(0);
+			producer.encode(new Uint8Array([1]), Micro(0), true);
+			producer.encode(new Uint8Array([1]), Micro(33_000), false);
+			expect((await frame(consumer))?.group).toBe(0n);
 			await frame(consumer);
-			producer.encode(new Uint8Array([1]), Time.Micro(start), true);
-			expect((await frame(consumer))?.group).toBe(1);
+			producer.encode(new Uint8Array([1]), Micro(start), true);
+			expect((await frame(consumer))?.group).toBe(1n);
 		} finally {
 			consumer.close();
 			producer.close();
@@ -86,10 +88,11 @@ test("Consumer accepts leading pictures below the previous group's content", asy
 		await frame(consumer);
 		await frame(consumer);
 		group(track, [200_000, 150_000]);
-		expect((await frame(consumer))?.frame?.timestamp).toBe(Time.Micro(200_000));
-		expect((await frame(consumer))?.frame?.timestamp).toBe(Time.Micro(150_000));
+		expect((await frame(consumer))?.frame?.timestamp).toBe(Micro(200_000));
+		expect((await frame(consumer))?.frame?.timestamp).toBe(Micro(150_000));
 	} finally {
 		consumer.close();
+		track.finish();
 		track.close();
 	}
 });
@@ -101,17 +104,18 @@ test("Consumer rejects a later frame below the previous group start", async () =
 		await frame(consumer);
 		const current = track.appendGroup();
 		current.writeFrame({
-			timestamp: Time.Timestamp.fromMicros(Time.Micro(200_000)),
-			payload: encodeFrame(new Uint8Array([1]), Time.Micro(200_000)),
+			timestamp: Time.Timestamp.fromMicros(Micro(200_000)),
+			payload: encodeFrame(new Uint8Array([1]), Micro(200_000)),
 		});
 		await frame(consumer);
 		current.writeFrame({
-			timestamp: Time.Timestamp.fromMicros(Time.Micro(99_000)),
-			payload: encodeFrame(new Uint8Array([1]), Time.Micro(99_000)),
+			timestamp: Time.Timestamp.fromMicros(Micro(99_000)),
+			payload: encodeFrame(new Uint8Array([1]), Micro(99_000)),
 		});
 		await expect(frame(consumer)).rejects.toThrow("below");
 	} finally {
 		consumer.close();
+		track.finish();
 		track.close();
 	}
 });
@@ -120,13 +124,13 @@ test("Producer refuses a rewind before closing the current group", () => {
 	const track = new Track.Producer("rewind");
 	const producer = new Producer(track, new Format("video"));
 	try {
-		producer.encode(new Uint8Array([1]), Time.Micro(100_000), true);
-		expect(() => producer.encode(new Uint8Array([1]), Time.Micro(99_000), true)).toThrow("below");
+		producer.encode(new Uint8Array([1]), Micro(100_000), true);
+		expect(() => producer.encode(new Uint8Array([1]), Micro(99_000), true)).toThrow("below");
 		// The refused keyframe must not close the group and strand its delta frames.
-		producer.encode(new Uint8Array([1]), Time.Micro(110_000), false);
-		producer.encode(new Uint8Array([1]), Time.Micro(200_000), true);
-		producer.encode(new Uint8Array([1]), Time.Micro(150_000), false);
-		expect(() => producer.encode(new Uint8Array([1]), Time.Micro(99_000), false)).toThrow("below");
+		producer.encode(new Uint8Array([1]), Micro(110_000), false);
+		producer.encode(new Uint8Array([1]), Micro(200_000), true);
+		producer.encode(new Uint8Array([1]), Micro(150_000), false);
+		expect(() => producer.encode(new Uint8Array([1]), Micro(99_000), false)).toThrow("below");
 	} finally {
 		producer.close();
 	}

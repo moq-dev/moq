@@ -24,6 +24,8 @@ export interface Case {
 	arrival: number[];
 	/** Each frame's container timestamp in milliseconds, in the same order. */
 	media: number[];
+	/** Indices of the frames observed right after a declared end, in ascending order. */
+	ends?: number[];
 	/** `[frame index, target]` wherever the target differs from the previous frame's. */
 	target: [number, number][];
 }
@@ -87,14 +89,19 @@ function paced(frames: number, frame: number, base: number): Trace {
 }
 
 /** Replay a trace through the reference and keep only the frames where the target moved. */
-function run(trace: Trace, config: { frame: number; advertised?: number; delay?: number }): [number, number][] {
+function run(
+	trace: Trace & { ends?: number[] },
+	config: { frame: number; advertised?: number; delay?: number },
+): [number, number][] {
 	if (config.delay !== undefined) return [[0, config.delay]];
 
 	const estimator = new Estimator({ frame: config.frame, advertised: config.advertised });
 	const target: [number, number][] = [];
 	let previous: number | undefined;
 
+	const ends = new Set(trace.ends);
 	for (let i = 0; i < trace.arrival.length; i++) {
+		if (ends.has(i)) estimator.end();
 		estimator.observe({ arrival: trace.arrival[i], media: trace.media[i] });
 		const value = estimator.target;
 		if (value !== previous) target.push([i, value]);
@@ -172,6 +179,13 @@ const traces: Omit<Case, "target">[] = [
 		...gap(paced(1000, FRAME, 50), 500, 30_000),
 	},
 	{
+		name: "silence",
+		about: "Even audio, a declared end and 60 s of silence, 5 s more, a declared 100 ms pause inside one interval, 5 s more, then an undeclared 30 s gap. Unlike `idle`, a declared silence is not evidence, so the target holds through both; the undeclared gap still relaxes it, since an end covers only the silence it declares.",
+		frame: FRAME,
+		...gap(gap(gap(paced(1500, FRAME, 50), 500, 60_000), 760, 100), 1000, 30_000),
+		ends: [500, 760],
+	},
+	{
 		name: "tunein",
 		about: "One frame from a stale group, then the live edge 14.5 s later, then 30 s of even audio. The #3517 branch reported 14.56 s here; the target must stay near the frame duration.",
 		frame: FRAME,
@@ -200,6 +214,17 @@ const traces: Omit<Case, "target">[] = [
 			for (let start = 250; start <= 500; start += 250) {
 				for (let i = start; i < start + 15; i++) arrival[i] = arrival[start + 14];
 			}
+			return { arrival, media: trace.media };
+		})(),
+	},
+	{
+		name: "straggler",
+		about: "Even audio with a single 300 ms stall 8 s in, once the prior is spent. One interval of evidence is not enough to move the target, so the stall costs that one refill instead of raising the target and then dropping it, which skips buffered audio.",
+		frame: FRAME,
+		...(() => {
+			const trace = paced(1500, FRAME, 50);
+			const arrival = [...trace.arrival];
+			for (let i = 400; i < 415; i++) arrival[i] = arrival[414];
 			return { arrival, media: trace.media };
 		})(),
 	},

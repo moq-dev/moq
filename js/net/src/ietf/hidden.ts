@@ -1,4 +1,4 @@
-import { SetupOption, type SetupOptions } from "./parameters.ts";
+import { SetupOption, type SetupOptions } from "./setup_options.ts";
 
 /**
  * The MoQ Hidden extension (draft-lcurley-moq-hidden-00).

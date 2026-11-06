@@ -14,9 +14,34 @@ pub async fn fetch_group(
 		return track.fetch_group(sequence, None).await;
 	}
 
+	// The largest names the newest group, even an empty one, possibly before it arrives.
 	let mut subscriber = track.subscribe(None).await?;
-	match subscriber.latest() {
-		Some(sequence) => track.fetch_group(sequence, None).await,
-		None => subscriber.recv_group().await?.ok_or(moq_net::Error::NotFound),
+	match subscriber.largest().await {
+		Some(largest) => track.fetch_group(largest.group, None).await,
+		None => Err(moq_net::Error::NotFound),
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+	use futures::FutureExt;
+
+	/// An empty newest group is still the newest group.
+	#[test]
+	fn the_newest_group_can_be_empty() {
+		let broadcast = moq_net::broadcast::Info::default().produce();
+		let track = broadcast.create_track("t", moq_net::track::Info::default()).unwrap();
+		let mut first = track.append_group().unwrap();
+		first.write_frame(None, &b"a"[..]).unwrap();
+		first.finish().unwrap();
+		let _open = track.append_group().unwrap();
+
+		let handle = broadcast.consume().track("t").unwrap();
+		let group = fetch_group(&handle, None)
+			.now_or_never()
+			.expect("the newest group is cached")
+			.unwrap();
+		assert_eq!(group.sequence, 1);
 	}
 }

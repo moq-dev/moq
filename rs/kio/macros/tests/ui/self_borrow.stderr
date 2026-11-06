@@ -1,0 +1,5 @@
+error: `label` lives across `wait!(B => ..)`, so it is stored in `MState::B`, which cannot hold a borrow: store an owned value, or borrow again inside the wait
+  --> tests/ui/self_borrow.rs:17:14
+   |
+17 |         let label: &kio::Queue<u64> = &self.values;
+   |                    ^

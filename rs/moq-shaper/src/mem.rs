@@ -18,14 +18,17 @@ use tokio::sync::mpsc;
 
 type Datagram = (SocketAddr, Vec<u8>);
 
+/// What a receive returns next: a datagram, or the error an earlier send drew.
+type Arrival = io::Result<Datagram>;
+
 /// Every bound socket by port, which is the whole address on this network.
-static PORTS: LazyLock<Mutex<HashMap<u16, mpsc::UnboundedSender<Datagram>>>> = LazyLock::new(Default::default);
+static PORTS: LazyLock<Mutex<HashMap<u16, mpsc::UnboundedSender<Arrival>>>> = LazyLock::new(Default::default);
 static NEXT_PORT: AtomicU16 = AtomicU16::new(1);
 
 pub struct UdpSocket {
 	addr: SocketAddr,
 	peer: OnceLock<SocketAddr>,
-	queue: tokio::sync::Mutex<mpsc::UnboundedReceiver<Datagram>>,
+	queue: tokio::sync::Mutex<mpsc::UnboundedReceiver<Arrival>>,
 }
 
 impl UdpSocket {
@@ -54,17 +57,25 @@ impl UdpSocket {
 		self.peer.set(peer).map_err(|_| io::ErrorKind::AlreadyExists.into())
 	}
 
-	/// Like UDP, a datagram to a port nobody bound is lost without an error.
+	/// A datagram to a port nobody bound is lost, and the sender's next receive
+	/// fails with `ConnectionReset`: Windows reports the port unreachable that
+	/// way even on an unconnected socket, where Linux and macOS stay silent.
 	pub async fn send_to(&self, buf: &[u8], dest: SocketAddr) -> io::Result<usize> {
-		if let Some(port) = PORTS.lock().unwrap().get(&dest.port()) {
-			let _ = port.send((self.addr, buf.to_vec()));
+		let ports = PORTS.lock().unwrap();
+		match ports.get(&dest.port()) {
+			Some(port) => {
+				let _ = port.send(Ok((self.addr, buf.to_vec())));
+			}
+			None => {
+				let _ = ports[&self.addr.port()].send(Err(io::ErrorKind::ConnectionReset.into()));
+			}
 		}
 		Ok(buf.len())
 	}
 
 	pub async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
 		// The port's sender lives until this socket drops, so the queue never ends.
-		let (from, datagram) = self.queue.lock().await.recv().await.expect("bound port");
+		let (from, datagram) = self.queue.lock().await.recv().await.expect("bound port")?;
 		let size = datagram.len().min(buf.len());
 		buf[..size].copy_from_slice(&datagram[..size]);
 		Ok((size, from))

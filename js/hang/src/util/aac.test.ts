@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { audioSpecificConfig, pickRate, SAMPLE_RATES, supportsRate } from "./aac";
+import { audioSpecificConfig, objectType, pickRate, SAMPLE_RATES, supportsRate } from "./aac";
 
 describe("pickRate", () => {
 	// 44.1kHz is in the AAC table, unlike Opus, so it must survive untouched.
@@ -64,5 +64,25 @@ describe("audioSpecificConfig", () => {
 		// Round-trip the 24-bit sample rate packed at bits 30..7 of the trailing 4 bytes.
 		const tail = (asc[1] << 24) | (asc[2] << 16) | (asc[3] << 8) | asc[4];
 		expect((tail >>> 7) & 0xffffff).toBe(64001);
+	});
+});
+
+describe("objectType", () => {
+	// Every spelling the WebCodecs AAC registration lists.
+	it("classifies every registered alias", () => {
+		expect(objectType("mp4a.40.2")).toBe(2);
+		expect(objectType("mp4a.40.02")).toBe(2);
+		expect(objectType("mp4a.67")).toBe(2);
+		expect(objectType("mp4a.40.5")).toBe(5);
+		expect(objectType("mp4a.40.05")).toBe(5);
+		expect(objectType("mp4a.40.29")).toBe(29);
+	});
+
+	it("rejects anything the registration does not name", () => {
+		// AAC Main, MP3-in-MP4, xHE-AAC, and strings that only resemble a registered spelling.
+		const codecs = ["mp4a.40.1", "mp4a.40.34", "mp4a.40.42", "mp4a.40.0005", "mp4a.40.5 ", "mp4a.6B", "opus"];
+		for (const codec of codecs) {
+			expect(objectType(codec)).toBeUndefined();
+		}
 	});
 });

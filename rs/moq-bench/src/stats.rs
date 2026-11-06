@@ -1,7 +1,8 @@
+use kio::clock::Wall;
 use std::io::Write;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use anyhow::Context;
 use serde::Serialize;
@@ -10,8 +11,23 @@ use serde::Serialize;
 /// collecting larger values. Chat delivery should stay far below this ceiling.
 const LATENCY_BUCKETS: usize = 60_001;
 
+/// Fixed sums over every connection's startup roll.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Targets {
+	pub connections: u64,
+	pub broadcasts: u64,
+	pub subscriptions: u64,
+}
+
 /// Shared counters bumped by the connection tasks and drained by the reporter.
 pub struct Stats {
+	targets: Targets,
+	/// Latched once the live established gauges all meet their targets together.
+	ready: AtomicBool,
+	/// Active subscriptions that have read a complete group.
+	pub(crate) subscriptions_established: AtomicU64,
+	/// Active broadcasts that connected or completed their first group.
+	pub(crate) broadcasts_established: AtomicU64,
 	pub connections: AtomicU64,
 	pub broadcasts: AtomicU64,
 	pub subscriptions: AtomicU64,
@@ -22,6 +38,10 @@ pub struct Stats {
 	/// Completed group deliveries across all subscriptions (the displayed total).
 	/// A group the relay failed part-way is omitted and counted as lost.
 	pub groups_recv: AtomicU64,
+	/// Completed deliveries older than their subscription's first group, such as
+	/// cached history filled in after the subscribe. Included in `groups_recv`,
+	/// excluded from `groups_expected`, and never counted as loss.
+	pub groups_history: AtomicU64,
 	/// Settled sequence spans plus any failed live-frontier groups.
 	pub groups_expected: AtomicU64,
 	/// Completed deliveries within `groups_expected`. The shortfall is the gaps
@@ -34,7 +54,17 @@ pub struct Stats {
 
 impl Default for Stats {
 	fn default() -> Self {
+		Self::new(Targets::default())
+	}
+}
+
+impl Stats {
+	pub(crate) fn new(targets: Targets) -> Self {
 		Self {
+			targets,
+			ready: AtomicBool::new(false),
+			subscriptions_established: AtomicU64::new(0),
+			broadcasts_established: AtomicU64::new(0),
 			connections: AtomicU64::new(0),
 			broadcasts: AtomicU64::new(0),
 			subscriptions: AtomicU64::new(0),
@@ -43,15 +73,26 @@ impl Default for Stats {
 			frames_recv: AtomicU64::new(0),
 			bytes_recv: AtomicU64::new(0),
 			groups_recv: AtomicU64::new(0),
+			groups_history: AtomicU64::new(0),
 			groups_expected: AtomicU64::new(0),
 			groups_present: AtomicU64::new(0),
 			groups_lost: AtomicU64::new(0),
 			latency: Latency::default(),
 		}
 	}
-}
 
-impl Stats {
+	/// Whether the full rolled load has been live at once; a later loss only lowers the gauges.
+	pub(crate) fn ready(&self) -> bool {
+		if !self.ready.load(Ordering::Relaxed)
+			&& self.connections.load(Ordering::Relaxed) >= self.targets.connections
+			&& self.broadcasts_established.load(Ordering::Relaxed) >= self.targets.broadcasts
+			&& self.subscriptions_established.load(Ordering::Relaxed) >= self.targets.subscriptions
+		{
+			self.ready.store(true, Ordering::Relaxed);
+		}
+		self.ready.load(Ordering::Relaxed)
+	}
+
 	pub fn frame_sent(&self, bytes: usize) {
 		self.frames_sent.fetch_add(1, Ordering::Relaxed);
 		self.bytes_sent.fetch_add(bytes as u64, Ordering::Relaxed);
@@ -65,9 +106,8 @@ impl Stats {
 	/// Record one group keyframe's wall-clock delivery latency.
 	pub fn latency(&self, sent_ms: u128) {
 		// Read the clock before locking so contention is not measured as latency.
-		let now_ms = SystemTime::now()
-			.duration_since(UNIX_EPOCH)
-			.unwrap_or_default()
+		let now_ms = kio::clock::wall()
+			.saturating_duration_since(Wall::UNIX_EPOCH)
 			.as_millis();
 		self.latency.observe(sent_ms, now_ms);
 	}
@@ -86,11 +126,11 @@ impl Stats {
 	/// With an `output` file, each report also appends one JSON line of the
 	/// cumulative counters and this interval's latency distribution, timestamped
 	/// so it can be joined against the host sampler's records (see
-	/// `moq-bench-host`). Returns only on a failed write: a benchmark whose
+	/// `moq-bench host`). Returns only on a failed write: a benchmark whose
 	/// recorded stats are partial is invalid, so the caller must fail the run
 	/// rather than exit green.
 	pub async fn report(&self, interval: Duration, mut output: Option<std::fs::File>) -> anyhow::Result<()> {
-		let mut ticker = tokio::time::interval(interval);
+		let mut ticker = kio::clock::interval(interval);
 		// Skip the immediate first tick so the first report covers a full interval.
 		ticker.tick().await;
 
@@ -125,14 +165,15 @@ impl Stats {
 			};
 
 			tracing::info!(
-				connections = now.connections,
-				broadcasts = now.broadcasts,
-				subscriptions = now.subscriptions,
+				connections = now.connections.established,
+				broadcasts = now.broadcasts.active,
+				subscriptions = now.subscriptions.active,
 				send_mbps = format_args!("{send_mbps:.1}"),
 				send_fps = format_args!("{send_fps:.0}"),
 				recv_mbps = format_args!("{recv_mbps:.1}"),
 				recv_fps = format_args!("{recv_fps:.0}"),
 				recv_groups = now.groups_recv,
+				history_groups = now.groups_history,
 				lost_groups = now.groups_lost,
 				loss = format_args!("{loss:.2}%"),
 				latency_samples = now.latency_samples,
@@ -175,8 +216,16 @@ struct Record<'a> {
 
 impl<'a> Record<'a> {
 	fn new(previous: &Snapshot, snapshot: &'a Snapshot, interval: &'a IntervalLatency) -> anyhow::Result<Self> {
-		let interval_start_ms = previous.captured_at.duration_since(UNIX_EPOCH)?.as_millis();
-		let interval_end_ms = snapshot.captured_at.duration_since(UNIX_EPOCH)?.as_millis();
+		let interval_start_ms = previous
+			.captured_at
+			.checked_duration_since(Wall::UNIX_EPOCH)
+			.expect("Wall is after the Unix epoch")
+			.as_millis();
+		let interval_end_ms = snapshot
+			.captured_at
+			.checked_duration_since(Wall::UNIX_EPOCH)
+			.expect("Wall is after the Unix epoch")
+			.as_millis();
 		Ok(Self {
 			timestamp_ms: interval_end_ms,
 			interval_start_ms,
@@ -188,17 +237,32 @@ impl<'a> Record<'a> {
 }
 
 #[derive(Serialize)]
+struct Connections {
+	target: u64,
+	established: u64,
+}
+
+#[derive(Serialize)]
+struct Activity {
+	target: u64,
+	active: u64,
+	established: u64,
+}
+
+#[derive(Serialize)]
 struct Snapshot {
+	ready: bool,
 	#[serde(skip)]
-	captured_at: SystemTime,
-	connections: u64,
-	broadcasts: u64,
-	subscriptions: u64,
+	captured_at: Wall,
+	connections: Connections,
+	broadcasts: Activity,
+	subscriptions: Activity,
 	frames_sent: u64,
 	bytes_sent: u64,
 	frames_recv: u64,
 	bytes_recv: u64,
 	groups_recv: u64,
+	groups_history: u64,
 	groups_expected: u64,
 	groups_present: u64,
 	groups_lost: u64,
@@ -284,15 +348,28 @@ impl Snapshot {
 		let groups_lost = stats.groups_lost.load(Ordering::Acquire);
 		let groups_present = stats.groups_present.load(Ordering::Acquire);
 		Self {
+			ready: stats.ready(),
 			captured_at: latency.captured_at,
-			connections: stats.connections.load(Ordering::Relaxed),
-			broadcasts: stats.broadcasts.load(Ordering::Relaxed),
-			subscriptions: stats.subscriptions.load(Ordering::Relaxed),
+			connections: Connections {
+				target: stats.targets.connections,
+				established: stats.connections.load(Ordering::Relaxed),
+			},
+			broadcasts: Activity {
+				target: stats.targets.broadcasts,
+				active: stats.broadcasts.load(Ordering::Relaxed),
+				established: stats.broadcasts_established.load(Ordering::Relaxed),
+			},
+			subscriptions: Activity {
+				target: stats.targets.subscriptions,
+				active: stats.subscriptions.load(Ordering::Relaxed),
+				established: stats.subscriptions_established.load(Ordering::Relaxed),
+			},
 			frames_sent: stats.frames_sent.load(Ordering::Relaxed),
 			bytes_sent: stats.bytes_sent.load(Ordering::Relaxed),
 			frames_recv: stats.frames_recv.load(Ordering::Relaxed),
 			bytes_recv: stats.bytes_recv.load(Ordering::Relaxed),
 			groups_recv: stats.groups_recv.load(Ordering::Relaxed),
+			groups_history: stats.groups_history.load(Ordering::Relaxed),
 			groups_expected: stats.groups_expected.load(Ordering::Relaxed),
 			groups_present,
 			groups_lost,
@@ -358,7 +435,7 @@ impl Latency {
 		// include only part of an observation. One that reads the clock before the
 		// boundary but locks after it counts in the next interval, unaltered.
 		let state = self.state.lock().expect("latency lock poisoned");
-		let captured_at = SystemTime::now();
+		let captured_at = kio::clock::wall();
 		let LatencyState {
 			buckets,
 			max_ms,
@@ -382,7 +459,7 @@ impl Latency {
 }
 
 struct LatencySnapshot {
-	captured_at: SystemTime,
+	captured_at: Wall,
 	samples: u64,
 	p50_ms: Option<u64>,
 	p90_ms: Option<u64>,
@@ -425,6 +502,70 @@ mod tests {
 
 	use super::*;
 
+	#[test]
+	fn readiness_requires_the_targets_live_at_once() {
+		let stats = Stats::new(Targets {
+			connections: 2,
+			..Default::default()
+		});
+		// One connection ends before the other connects: two established, never together.
+		stats.connections.store(1, Ordering::Relaxed);
+		assert!(!stats.ready());
+		stats.connections.store(0, Ordering::Relaxed);
+		stats.connections.store(1, Ordering::Relaxed);
+		assert!(!stats.ready());
+		stats.connections.store(2, Ordering::Relaxed);
+		assert!(stats.ready());
+	}
+
+	#[test]
+	fn json_readiness_waits_for_each_target_and_survives_later_loss() {
+		let stats = Stats::new(Targets {
+			connections: 1,
+			broadcasts: 1,
+			subscriptions: 2,
+		});
+		let line = |stats: &Stats| {
+			let previous = Snapshot::take(stats);
+			let now = Snapshot::take(stats);
+			let interval = IntervalLatency::from_delta(&previous.latency_buckets, &now.latency_buckets);
+			serde_json::to_value(Record::new(&previous, &now, &interval).unwrap()).unwrap()
+		};
+		assert_eq!(line(&stats)["ready"], false);
+		stats.connections.store(1, Ordering::Relaxed);
+		stats.broadcasts.store(1, Ordering::Relaxed);
+		stats.broadcasts_established.store(1, Ordering::Relaxed);
+		stats.subscriptions.store(2, Ordering::Relaxed);
+		stats.subscriptions_established.store(1, Ordering::Relaxed);
+		assert_eq!(line(&stats)["ready"], false);
+		stats.subscriptions_established.store(2, Ordering::Relaxed);
+		let ready = line(&stats);
+		assert_eq!(ready["ready"], true);
+		assert_eq!(ready["connections"], serde_json::json!({"target": 1, "established": 1}));
+		assert_eq!(
+			ready["broadcasts"],
+			serde_json::json!({"target": 1, "active": 1, "established": 1})
+		);
+		assert_eq!(
+			ready["subscriptions"],
+			serde_json::json!({"target": 2, "active": 2, "established": 2})
+		);
+		for removed in ["targets", "established", "subscriptions_established"] {
+			assert!(ready.get(removed).is_none(), "{removed}");
+		}
+		// Gauges can fall all the way to zero after establishment without resetting readiness.
+		stats.connections.store(0, Ordering::Relaxed);
+		stats.broadcasts.store(0, Ordering::Relaxed);
+		stats.broadcasts_established.store(0, Ordering::Relaxed);
+		stats.subscriptions.store(0, Ordering::Relaxed);
+		stats.subscriptions_established.store(0, Ordering::Relaxed);
+		let lost = line(&stats);
+		assert_eq!(lost["connections"]["established"], 0);
+		assert_eq!(lost["broadcasts"]["established"], 0);
+		assert_eq!(lost["subscriptions"]["established"], 0);
+		assert_eq!(lost["ready"], true);
+	}
+
 	/// A failed stats write must surface as an error so the run dies loudly.
 	/// Silently dropping output leaves a partial JSONL file behind a green exit,
 	/// which reads as a valid benchmark that quietly lost data.
@@ -432,9 +573,8 @@ mod tests {
 	async fn report_fails_on_output_error() {
 		tokio::time::pause();
 
-		let dir = std::env::temp_dir().join("moq-bench-stats-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("out.jsonl");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("out.jsonl");
 		std::fs::write(&path, b"").unwrap();
 		// A read-only handle: the first write fails.
 		let file = std::fs::File::open(&path).unwrap();
@@ -594,10 +734,10 @@ mod tests {
 	fn report_bounds_belong_to_captured_samples() {
 		let stats = Stats::default();
 		let mut previous = Snapshot::take(&stats);
-		previous.captured_at = UNIX_EPOCH + Duration::from_millis(1_000);
+		previous.captured_at = Wall::UNIX_EPOCH + Duration::from_millis(1_000);
 		stats.latency.observe(1_000, 1_050);
 		let mut snapshot = Snapshot::take(&stats);
-		snapshot.captured_at = UNIX_EPOCH + Duration::from_millis(2_000);
+		snapshot.captured_at = Wall::UNIX_EPOCH + Duration::from_millis(2_000);
 
 		// This delivery belongs to the next capture, even if report construction is delayed.
 		stats.latency.observe(2_000, 2_050);
@@ -620,7 +760,11 @@ mod tests {
 	fn observation_racing_a_capture_keeps_its_latency() {
 		let latency = Latency::default();
 		let first = latency.snapshot();
-		let captured_ms = first.captured_at.duration_since(UNIX_EPOCH).unwrap().as_millis();
+		let captured_ms = first
+			.captured_at
+			.checked_duration_since(Wall::UNIX_EPOCH)
+			.unwrap()
+			.as_millis();
 
 		latency.observe(captured_ms - 100, captured_ms - 50);
 		latency.observe(captured_ms - 50, captured_ms - 100);
@@ -635,10 +779,16 @@ mod tests {
 	/// Sweep observation concurrency and report density without a network bottleneck.
 	#[test]
 	#[ignore = "performance measurement; run by the nightly stats benchmark"]
+	#[expect(
+		clippy::disallowed_methods,
+		clippy::disallowed_types,
+		reason = "the benchmark measures real observation throughput"
+	)]
 	fn benchmark_observation_contention() {
 		use std::sync::Barrier;
 		use std::time::Instant;
 
+		println!("writers,snapshots,ns_per_sample");
 		for writers in [1, 4, 16] {
 			for snapshots in [0, 10, 100] {
 				let stats = Stats::default();
@@ -672,10 +822,8 @@ mod tests {
 				let elapsed = elapsed.elapsed();
 				assert_eq!(Snapshot::take(&stats).latency_samples, (writers * samples) as u64);
 				println!(
-					"writers={writers} snapshots={snapshots} samples={} elapsed_ns={} samples_per_second={:.0}",
-					writers * samples,
-					elapsed.as_nanos(),
-					(writers * samples) as f64 / elapsed.as_secs_f64()
+					"{writers},{snapshots},{:.2}",
+					elapsed.as_nanos() as f64 / (writers * samples) as f64
 				);
 			}
 		}

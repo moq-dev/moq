@@ -16,12 +16,21 @@
 	},
 	"files": {
 		// The project scanner (enabled by noImportCycles) tries to parse every file it
-		// indexes. Exclude two kinds it can't handle:
+		// indexes. Exclude binary assets and generated fixtures:
 		//   - MPEG transport-stream fixtures whose `.ts` extension collides with TypeScript.
 		//   - SVG assets, which Biome routes to its HTML parser and rejects.
 		//   - The audio jitter corpus, which is generated and byte-compared by its own test,
 		//     so a formatter rewriting it would fight the generator on every `just fix`.
-		"includes": ["**", "!rs/moq-mux/src/container/ts/test_data", "!**/*.svg", "!doc/concept/audio-jitter/*.json"]
+		//   - Recorded audio traces, which record.ts writes one arrival per line so a
+		//     re-recording diffs cleanly; the formatter would undo that.
+		"includes": [
+			"**",
+			"!rs/moq-mux/src/container/ts/test_data",
+			"!rs/moq-audio/src/decode/test_data/*.ts",
+			"!**/*.svg",
+			"!doc/concept/audio-jitter/*.json",
+			"!test/audio-quality/traces/*.json"
+		]
 	},
 	"linter": {
 		"rules": {
@@ -53,6 +62,10 @@
 			}
 		}
 	},
+	"html": {
+		// Vue template reads count as uses of script variables.
+		"experimentalFullSupportEnabled": true
+	},
 	"css": {
 		"parser": {
 			"cssModules": false,
@@ -61,6 +74,27 @@
 		}
 	},
 	"overrides": [
+		{
+			// Code and tests read time through @moq/clock, so a Manual clock drives them.
+			"includes": ["js/*/src/**", "demo/web/src/**", "!js/clock/src/host.ts"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedGlobals": {
+							"level": "error",
+							"options": {
+								"deniedGlobals": {
+									"performance": "Use the installed clock",
+									"Date": "Use wall()",
+									"setTimeout": "Use sleep() or timeout()",
+									"setInterval": "Use interval()"
+								}
+							}
+						}
+					}
+				}
+			}
+		},
 		{
 			// The audio jitter reference is the corpus generator, not a library: an
 			// implementation that calls it proves nothing about the normative document.
@@ -100,6 +134,18 @@
 	"javascript": {
 		"formatter": {
 			"quoteStyle": "double"
+		}
+	},
+	// Biome 2.6 formats YAML and Markdown by default. Keep both off until a
+	// deliberate, repo-wide reformat turns them on.
+	"yaml": {
+		"formatter": {
+			"enabled": false
+		}
+	},
+	"markdown": {
+		"formatter": {
+			"enabled": false
 		}
 	}
 }

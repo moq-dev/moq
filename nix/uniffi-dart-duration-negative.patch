@@ -1,0 +1,12 @@
+--- a/src/gen/primitives/duration.rs
++++ b/src/gen/primitives/duration.rs
+@@ -32,6 +32,9 @@
+                 }
+ 
+                 static int write( Duration value, Uint8List buf) {
++                    if (value.isNegative) {
++                        throw ArgumentError.value(value, "value", "Duration must not be negative");
++                    }
+                     final bytes = buf.buffer.asByteData(buf.offsetInBytes, 12);
+                     bytes.setUint64(0, value.inSeconds);
+                     final ms = (value.inMicroseconds - (value.inSeconds * 1000000)) * 1000;

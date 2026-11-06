@@ -1,106 +1,581 @@
 import importlib.util
+import json
+import os
+import signal
+import struct
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-spec = importlib.util.spec_from_file_location('profile', Path(__file__).with_name('profile.py'))
+spec = importlib.util.spec_from_file_location("profile", Path(__file__).with_name("profile.py"))
 profile = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(profile)
 
-FIXTURE = Path(__file__).with_name('profile.test.txt').read_text()
-IDLE, MUTEX, ALLOCATOR = '2152705', '2152709', '2152707'
+spec = importlib.util.spec_from_file_location("runtime", Path(__file__).with_name("runtime.py"))
+runtime = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runtime)
+
+spec = importlib.util.spec_from_file_location("instructions", Path(__file__).with_name("instructions.py"))
+instructions = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(instructions)
+
+
+class Instructions(unittest.TestCase):
+    def setUp(self):
+        self.window = dict(start_ms=[1250, 1252], end_ms=[2250, 2252], events=["instructions", "cycles"])
+        self.stats = [
+            {"event": event, "counter-value": count, "pcnt-running": 100}
+            for event, count in [("instructions", 20000), ("cycles", 10000), ("task-clock", 10)]
+        ]
+        self.load = [dict(timestamp_ms=t, frames_recv=t * 2) for t in [1000, 1500, 2000, 2500]]
+
+    def test_frames_match_the_acknowledged_counter_window(self):
+        result = instructions.reduce(self.window, self.stats, self.load)
+        self.assertEqual(result["delivered_frames"], 2000)
+        self.assertEqual(result["instructions_per_frame"], 10)
+        self.assertEqual(result["window_start_ms"], 1251)
+        self.assertEqual(result["boundary_uncertainty_ms"], [2, 2])
+        with self.assertRaisesRegex(ValueError, "bracket"):
+            instructions.reduce(self.window, self.stats, self.load[:-1])
+        self.load[2]["frames_recv"] = 0
+        with self.assertRaisesRegex(ValueError, "backwards"):
+            instructions.reduce(self.window, self.stats, self.load)
+
+    def test_partial_or_multiplexed_counts_are_refused(self):
+        for value in ["<not counted>", "nan", "0"]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                instructions.reduce(
+                    self.window, [dict(self.stats[0], **{"counter-value": value}), *self.stats[1:]], self.load
+                )
+        with self.assertRaisesRegex(ValueError, "multiplexed"):
+            instructions.reduce(self.window, [dict(self.stats[0], **{"pcnt-running": 99}), *self.stats[1:]], self.load)
+        with self.assertRaisesRegex(ValueError, "missing"):
+            instructions.reduce(self.window, self.stats[1:], self.load)
+
+    def test_identical_cumulative_snapshots_remain_interpolatable(self):
+        self.load.insert(2, dict(self.load[1]))
+        result = instructions.reduce(self.window, self.stats, self.load)
+        self.assertEqual(result["delivered_frames"], 2000)
+        self.load[2]["frames_recv"] += 1
+        with self.assertRaisesRegex(ValueError, "same timestamp"):
+            instructions.reduce(self.window, self.stats, self.load)
+
+    def test_cpu_sets_cannot_overlap_or_escape_the_allowed_set(self):
+        with patch.object(os, "sched_getaffinity", return_value={0, 1, 2, 3}, create=True):
+            for relay, generator in [("0-1", "1-2"), ("4", "0"), ("0", ""), ("0-1", "3-2")]:
+                with (
+                    self.subTest(relay=relay, generator=generator),
+                    patch.dict(os.environ, BENCH_RELAY_CPUS=relay, BENCH_GENERATOR_CPUS=generator),
+                    self.assertRaises(ValueError),
+                ):
+                    instructions.settings("1")
+
+    def test_summary_reports_each_revision_across_rounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            for label, workers, values in [
+                ("base-0123", 4, [12, 10, 11]),
+                ("base-0123", 16, [40]),
+                ("current", 4, [20, 21]),
+            ]:
+                for round, value in enumerate(values, 1):
+                    cell = run / "relay" / label / f"round-{round}" / f"instructions-{workers}" / "chat"
+                    (cell / "instructions").mkdir(parents=True)
+                    (cell / "instructions" / "instructions.json").write_text(
+                        json.dumps(
+                            dict(
+                                instructions_per_frame=value,
+                                cycles_per_frame=value * 2,
+                                recv_fps=1000,
+                                window_start_ms=1250,
+                                window_end_ms=2250,
+                                host_load_1m=[round, 0.5],
+                            )
+                        )
+                    )
+                    rows = [dict(timestamp_ms=t, groups_lost=lost) for t, lost in [(1000, 1), (1500, 2), (2500, round)]]
+                    (cell / "load.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+            with patch("builtins.print"):
+                instructions.summarize(run, ["base-0123", "current"])
+            summary = json.loads((run / "instructions-summary.json").read_text())
+            # Each worker count is its own configuration, not part of one revision-wide range.
+            self.assertEqual(list(summary["base-0123"]), ["4", "16"])
+            self.assertEqual(summary["base-0123"]["4"]["instructions_per_frame"], dict(median=11, min=10, max=12))
+            self.assertEqual(summary["base-0123"]["16"]["instructions_per_frame"], dict(median=40, min=40, max=40))
+            self.assertEqual(summary["current"]["4"]["instructions_per_frame"]["median"], 20.5)
+            # Loss counts between the reports bracketing the window, not over the lifetime.
+            self.assertEqual([cell["groups_lost"] for cell in summary["base-0123"]["4"]["cells"]], [0, 1, 2])
+            self.assertEqual(summary["base-0123"]["4"]["host_load_1m"], dict(median=2, min=1, max=3))
+            with self.assertRaisesRegex(ValueError, "no instruction cells"):
+                instructions.summarize(run, ["missing"])
+
+    def test_lost_or_throttled_samples_refuse_attribution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "perf.data"
+            for kind in [2, 5, 13, 9]:
+                header = bytearray(56)
+                header[:8] = b"PERFILE2"
+                struct.pack_into("<QQ", header, 40, 56, 8)
+                path.write_bytes(header + struct.pack("<IHH", kind, 0, 8))
+                if kind == 9:
+                    instructions.validate_data(path)
+                else:
+                    with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "lost or throttled"):
+                        instructions.validate_data(path)
+            path.write_bytes(header)
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                instructions.validate_data(path)
+
+
+class Runtime(unittest.TestCase):
+    def test_workers_must_match_the_backend_and_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tasks = Path(directory)
+            for backend, prefix in [("tokio-workers", "moq-quic"), ("io-uring-workers", "moq-uring")]:
+                with self.subTest(backend=backend):
+                    for path in tasks.glob("*/comm"):
+                        path.unlink()
+                    names = [f"{prefix}-0", f"{prefix}-1", "tokio-runtime-w", "moq-relay"]
+                    for index, name in enumerate(names):
+                        task = tasks / str(index)
+                        task.mkdir(exist_ok=True)
+                        (task / "comm").write_text(name + "\n")
+                    self.assertEqual(runtime.verify(tasks, backend, 2)["workers"], names[:2])
+                    other = "io-uring-workers" if backend == "tokio-workers" else "tokio-workers"
+                    for selected, count in [(other, 2), (backend, 1), (backend, 3)]:
+                        with self.assertRaises(ValueError):
+                            runtime.verify(tasks, selected, count)
+                    (tasks / "2/comm").write_text("moq-quic-2" if prefix == "moq-uring" else "moq-uring-2")
+                    with self.assertRaises(ValueError):
+                        runtime.verify(tasks, backend, 2)
+
+    def test_profile_rejects_invalid_selection_before_building(self):
+        root = Path(__file__).resolve().parent.parent
+        for environment, diagnostic in [
+            ({"BENCH_PROFILE_RUNTIME": "tokio-shared"}, "profile runtime"),
+            ({"BENCH_PROFILE_WORKERS": "0"}, "profile workers"),
+            ({"BENCH_PROFILE_WORKERS": "1 257"}, "profile workers"),
+            ({"BENCH_PROFILE_WORKERS": "1 nope"}, "profile workers"),
+            ({"BENCH_PROFILE_WORKERS": "01"}, "profile workers"),
+            ({"BENCH_PROFILE_WORKERS": "999999999999999999999999"}, "profile workers"),
+        ]:
+            with self.subTest(environment=environment):
+                result = subprocess.run(
+                    ["bash", str(root / "bench/run.sh"), "--profile"],
+                    env=dict(os.environ, BENCH_PROFILE_MODES="cpu", **environment),
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(diagnostic, result.stderr)
+
+
+FIXTURE = Path(__file__).with_name("profile.test.txt").read_text()
+IDLE, MUTEX, ALLOCATOR = "2152705", "2152709", "2152707"
 # Every fixture wait closes, so the window end only has to follow the last event.
 END = 271707 * 1_000_000_000
+
+
+class Orchestration(unittest.TestCase):
+    def harness(self, directory, sampler_binary):
+        """A checkout whose committed revision has the old harness and, when
+        `sampler_binary`, the standalone `moq-bench-host`; the working tree is current."""
+        root = Path(__file__).resolve().parent.parent
+        checkout = Path(directory) / "repo"
+        bench = checkout / "bench"
+        bench.mkdir(parents=True)
+        (bench / "workloads").mkdir()
+        (bench / "run.sh").write_text("exit 87\n")
+        manifest = checkout / "rs/moq-bench/Cargo.toml"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text('[[bin]]\nname = "moq-bench-host"\n' if sampler_binary else "")
+        environment = dict(
+            os.environ,
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_CONFIG_GLOBAL="/dev/null",
+            GIT_AUTHOR_NAME="Test",
+            GIT_AUTHOR_EMAIL="test@example.com",
+            GIT_COMMITTER_NAME="Test",
+            GIT_COMMITTER_EMAIL="test@example.com",
+        )
+        for command in [["init", "-q"], ["add", "."], ["commit", "-qm", "old harness"]]:
+            subprocess.run(["git", *command], cwd=checkout, env=environment, check=True, capture_output=True)
+        manifest.write_text("")
+        (bench / "run.sh").write_text((root / "bench/run.sh").read_text())
+        for name in ["metadata.py", "profile.py", "instructions.py"]:
+            (bench / name).write_text("")
+        (bench / "lock.sh").write_text("bench_lock() { :; }\n")
+        (bench / "relay.sh").write_text("""PROFILE=
+run_workload() {
+    printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "$1" "$4" "$5" "$LOAD_BIN" "${HOST_CMD[*]}" >> "$RUN/calls.tsv"
+    local directory=$RUN/relay/$1/$3
+    mkdir -p "$directory/cpu" "$directory/instructions"
+    printf '{"recv_fps":100,"cpu_cores":1}\\n' > "$directory/summary.json"
+    printf '{"samples":999,"sampled_cores":1}\\n' > "$directory/cpu/cpu.json"
+    printf '{"instructions_per_frame":1000,"recv_fps":100}\\n' > "$directory/instructions/instructions.json"
+}
+""")
+        commands = Path(directory) / "bin"
+        commands.mkdir()
+        cargo = commands / "cargo"
+        # Builds what each revision's manifest names: the workers, or the probe.
+        cargo.write_text("""#!/usr/bin/env python3
+import os, sys
+from pathlib import Path
+args = sys.argv[1:]
+profile = args[args.index('--profile') + 1]
+output = Path(os.environ['CARGO_TARGET_DIR']) / profile
+output.mkdir(parents=True, exist_ok=True)
+checkout = Path(args[args.index('--manifest-path') + 1]).parent
+if 'moq-uring' in args:
+    names = ['moq-uring-probe']
+else:
+    names = ['moq-relay', 'moq-bench']
+    if 'moq-bench-host' in (checkout / 'rs/moq-bench/Cargo.toml').read_text():
+        names.append('moq-bench-host')
+for name in names:
+    (output / name).write_text('#!/bin/sh\\nexit 0\\n')
+    (output / name).chmod(0o755)
+""")
+        cargo.chmod(0o755)
+        environment.update(
+            PATH=str(commands) + os.pathsep + os.environ["PATH"],
+            BENCH_ARTIFACTS=str(Path(directory) / "evidence"),
+            BENCH_PROFILE_WORKLOAD="fixture",
+            BENCH_PROFILE_WORKERS="2",
+            BENCH_PROFILE_RUNTIME="io-uring-workers",
+            CARGO_TARGET_DIR=str(Path(directory) / "target"),
+        )
+        return checkout, environment
+
+    def calls(self, checkout, environment):
+        result = subprocess.run(
+            ["bash", "bench/run.sh", "--profile"], cwd=checkout, env=environment, capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (run,) = Path(environment["BENCH_ARTIFACTS"]).glob("run.*")
+        return run, [line.split("\t") for line in (run / "calls.tsv").read_text().splitlines()]
+
+    def test_old_base_uses_current_harness_and_generator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, environment = self.harness(directory, sampler_binary=False)
+            environment.update(BENCH_PROFILE_MODES="cpu", BENCH_BASE="HEAD")
+            run, calls = self.calls(checkout, environment)
+            self.assertEqual(
+                [call[0] for call in calls],
+                ["base/control-cpu-2", "base/cpu-2", "current/control-cpu-2", "current/cpu-2"],
+            )
+            for _, backend, count, generator, sampler in calls:
+                self.assertEqual((backend, count), ("io-uring-workers", "2"))
+                self.assertIn("/current/profile/profiling/", generator)
+                self.assertEqual(sampler, generator + " host")
+            self.assertFalse((run / "base").exists(), "temporary base worktree must be removed")
+
+    def test_pinned_generator_keeps_its_own_sampler(self):
+        for sampler_binary in [True, False]:
+            with self.subTest(sampler_binary=sampler_binary), tempfile.TemporaryDirectory() as directory:
+                checkout, environment = self.harness(directory, sampler_binary)
+                generator = subprocess.run(
+                    ["git", "rev-parse", "HEAD"], cwd=checkout, check=True, capture_output=True, text=True
+                ).stdout.strip()
+                environment.update(
+                    BENCH_PROFILE_MODES="instructions", BENCH_GENERATOR=generator, BENCH_RUNTIME_ROUNDS="1"
+                )
+                _, calls = self.calls(checkout, environment)
+                self.assertEqual([call[0] for call in calls], ["current/round-1/instructions-2"])
+                ((_, _, _, load, sampler),) = calls
+                self.assertIn(f"/revisions/{generator}/profile/profiling/", load)
+                expected = load + "-host" if sampler_binary else load + " host"
+                self.assertEqual(sampler, expected)
+
+    def test_current_tree_ignores_a_stale_standalone_sampler(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, environment = self.harness(directory, sampler_binary=False)
+            # Cargo keeps a binary after its `[[bin]]` leaves the manifest.
+            stale = Path(environment["CARGO_TARGET_DIR"]) / "revisions/current/profile/profiling/moq-bench-host"
+            stale.parent.mkdir(parents=True)
+            stale.write_text("#!/bin/sh\nexit 0\n")
+            stale.chmod(0o755)
+            environment.update(BENCH_PROFILE_MODES="instructions", BENCH_RUNTIME_ROUNDS="1")
+            _, calls = self.calls(checkout, environment)
+            ((_, _, _, load, sampler),) = calls
+            self.assertEqual(sampler, load + " host")
 
 
 class Parse(unittest.TestCase):
     def test_recorded_switches_pair_into_exact_waits(self):
         records = profile.parse(FIXTURE)
-        self.assertEqual([event for _, _, event, _ in records], ['context-switches', 'PERF_RECORD_SWITCH IN'] * 3)
+        self.assertEqual([event for _, _, event, _ in records], ["context-switches", "PERF_RECORD_SWITCH IN"] * 3)
         # Kernel frames are dropped; inlined user frames are kept innermost first.
-        self.assertFalse(any('__schedule' in frame for _, _, _, frames in records for frame in frames))
+        self.assertFalse(any("__schedule" in frame for _, _, _, frames in records for frame in frames))
         stacks = {tid: (wait, stack) for tid, wait, stack in profile.waits(records, END)}
         self.assertEqual(stacks[IDLE][0], 21661)
         self.assertEqual(stacks[MUTEX][0], 6315)
         self.assertEqual(stacks[ALLOCATOR][0], 13709)
         # DWARF unwinding keeps the caller of glibc's frameless syscall wrapper.
-        self.assertEqual(stacks[MUTEX][1][:3], ['syscall', 'std::sys::pal::unix::futex::futex_wait',
-                                                '<std::sys::sync::mutex::futex::Mutex>::lock_contended'])
+        self.assertEqual(
+            stacks[MUTEX][1][:3],
+            [
+                "syscall",
+                "std::sys::pal::unix::futex::futex_wait",
+                "<std::sys::sync::mutex::futex::Mutex>::lock_contended",
+            ],
+        )
 
     def test_open_wait_runs_to_the_window_end(self):
         # Even when the switch-out is the last recorded event.
-        records = [('2', 5, 'PERF_RECORD_SWITCH IN', []), ('1', 10, 'context-switches', ['a'])]
-        self.assertEqual(profile.waits(records, 50), [('1', 40, ['a'])])
+        records = [("2", 5, "PERF_RECORD_SWITCH IN", []), ("1", 10, "context-switches", ["a"])]
+        self.assertEqual(profile.waits(records, 50), [("1", 40, ["a"])])
 
     def test_lost_events_refused(self):
         with self.assertRaises(ValueError):
-            profile.parse(FIXTURE + '2152705 271706.914950000: PERF_RECORD_LOST lost 3\n')
+            profile.parse(FIXTURE + "2152705 271706.914950000: PERF_RECORD_LOST lost 3\n")
 
 
 class Classify(unittest.TestCase):
     def test_recorded_stacks(self):
         stacks = {tid: stack for tid, _, stack in profile.waits(profile.parse(FIXTURE), END)}
-        self.assertEqual(profile.classify(stacks[MUTEX]), 'mutex')
-        self.assertEqual(profile.classify(stacks[ALLOCATOR]), 'futex')
-        self.assertEqual(profile.classify(stacks[IDLE]), 'other')
+        self.assertEqual(profile.classify(stacks[MUTEX]), "mutex")
+        self.assertEqual(profile.classify(stacks[ALLOCATOR]), "futex")
+        self.assertEqual(profile.classify(stacks[IDLE]), "other")
 
     def test_spinning_is_not_a_wait(self):
-        self.assertEqual(profile.classify(['<std::sys::sync::mutex::futex::Mutex>::lock_contended', 'moq_net::serve']), 'other')
+        self.assertEqual(
+            profile.classify(["<std::sys::sync::mutex::futex::Mutex>::lock_contended", "moq_net::serve"]), "other"
+        )
 
 
 class Reduce(unittest.TestCase):
+    @staticmethod
+    def records(tid="1", stack=None):
+        return [
+            (tid, 10, "PERF_RECORD_SWITCH IN", []),
+            (tid, 20, "context-switches", stack or ["moq_net::serve"]),
+            (tid, 21, "PERF_RECORD_SWITCH OUT", []),
+            (tid, 40, "PERF_RECORD_SWITCH IN", []),
+        ]
+
+    def test_recorded_cpu_ignores_outer_schedstat_window(self):
+        result, _ = profile.reduce({"1": "moq-quic-0"}, self.records(), {"1": 0}, {"1": 999})
+        self.assertEqual(result["version"], 3)
+        self.assertEqual(result["window_ns"], 30)
+        # CPU ends at the sampled switch-out, where the wait begins, so the two tile the window.
+        self.assertEqual(result["workers"]["1"]["cpu_ns"], 10)
+        self.assertEqual(result["workers"]["1"]["other_off_cpu_ns"], 20)
+        # A worker with recorded switches never uses schedstat, even if it did not advance.
+        unchanged, _ = profile.reduce({"1": "moq-quic-0"}, self.records(), {"1": 7}, {"1": 7})
+        self.assertEqual(result, unchanged)
+
+    def test_first_out_and_last_in_clip_to_shared_window(self):
+        records = self.records("2") + [
+            ("1", 15, "context-switches", ["moq_net::serve"]),
+            ("1", 16, "PERF_RECORD_SWITCH OUT preempt", []),
+            ("1", 30, "PERF_RECORD_SWITCH IN", []),
+        ]
+        result, _ = profile.reduce({"1": "moq-quic-0"}, records, {"1": 0}, {"1": 500})
+        self.assertEqual(result["workers"]["1"]["cpu_ns"], 15)  # [10,15] + [30,40]
+        self.assertEqual(result["workers"]["1"]["other_off_cpu_ns"], 15)
+
+    def test_worker_running_only_before_first_sample(self):
+        # Switch records begin before sampled stacks. The worker then sleeps to the end.
+        records = [
+            ("1", 10, "PERF_RECORD_SWITCH IN", []),
+            ("1", 20, "context-switches", ["moq_net::serve"]),
+            ("1", 21, "PERF_RECORD_SWITCH OUT", []),
+            ("2", 50, "PERF_RECORD_SWITCH IN", []),
+        ]
+        result, _ = profile.reduce({"1": "moq-quic-0"}, records, {"1": 0}, {"1": 1000})
+        self.assertEqual(result["workers"]["1"]["cpu_ns"], 10)
+        self.assertEqual(result["workers"]["1"]["other_off_cpu_ns"], 30)
+
     def test_recorded_waits_by_class_over_cpu(self):
-        intervals = profile.waits(profile.parse(FIXTURE), END)
-        names = {IDLE: 'moq-quic-0', MUTEX: 'moq-quic-1', ALLOCATOR: 'moq-quic-2'}
-        before = dict.fromkeys(names, 0)
-        result, folded = profile.reduce(names, intervals, before, dict.fromkeys(names, 3000), 1)
-        rows = result['workers']
-        self.assertEqual(rows[MUTEX]['mutex_wait_ns'], 6315)
-        self.assertAlmostEqual(rows[MUTEX]['mutex_wait_per_cpu'], 6315 / 3000)
-        self.assertEqual(rows[ALLOCATOR]['other_futex_wait_ns'], 13709)
-        self.assertEqual(rows[IDLE]['other_off_cpu_ns'], 21661)
+        records = profile.parse(FIXTURE)
+        start = min(row[1] for row in records) - 3000
+        end = max(row[1] for row in records) + 3000
+        names = {IDLE: "moq-quic-0", MUTEX: "moq-quic-1", ALLOCATOR: "moq-quic-2"}
+        # The historical stack fixture omits OUT sideband records; restore them beside samples.
+        records += [(tid, at, "PERF_RECORD_SWITCH OUT", []) for tid, at, event, _ in records if event == profile.EVENT]
+        records += [("outside", start, "PERF_RECORD_SWITCH IN", []), ("outside", end, "PERF_RECORD_SWITCH OUT", [])]
+        result, folded = profile.reduce(names, records, dict.fromkeys(names, 0), dict.fromkeys(names, 999))
+        rows = result["workers"]
+        self.assertEqual(rows[MUTEX]["mutex_wait_ns"], 6315)
+        self.assertAlmostEqual(rows[MUTEX]["mutex_wait_per_cpu"], 6315 / rows[MUTEX]["cpu_ns"])
+        self.assertEqual(rows[ALLOCATOR]["other_futex_wait_ns"], 13709)
+        self.assertEqual(rows[IDLE]["other_off_cpu_ns"], 21661)
         [(stack, weight)] = folded.items()
-        self.assertTrue(stack.endswith('lock_contended;std::sys::pal::unix::futex::futex_wait;syscall'))
+        self.assertTrue(stack.endswith("lock_contended;std::sys::pal::unix::futex::futex_wait;syscall"))
         self.assertEqual(weight, 6)
 
     def test_silent_worker_refused(self):
-        intervals = [('1', 5, ['moq_net::serve'])]
-        # Worker 2 ran but recorded no switch-out, so the capture missed it.
-        with self.assertRaises(ValueError):
-            profile.reduce({'1': 'moq-quic-0', '2': 'moq-quic-1'}, intervals, {'1': 0, '2': 0}, {'1': 1, '2': 1}, 1)
-        # Switched out without a CPU advance: the counter is broken.
-        with self.assertRaises(ValueError):
-            profile.reduce({'1': 'moq-quic-0'}, intervals, {'1': 5}, {'1': 5}, 1)
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            profile.reduce({"1": "moq-quic-0", "2": "moq-quic-1"}, self.records(), {"1": 0, "2": 0}, {"1": 1, "2": 1})
+
+    def test_switches_without_samples_refused(self):
+        records = [row for row in self.records() if row[2] != profile.EVENT]
+        with self.assertRaisesRegex(ValueError, "no sampled switch-out"):
+            profile.reduce({"1": "moq-quic-0"}, records, {"1": 0}, {"1": 1})
 
     def test_sleeping_worker_reported_idle(self):
-        # Light load at 16 workers leaves some without connections, asleep for the whole window.
-        intervals = [('1', 5, ['moq_net::serve'])]
-        result, _ = profile.reduce({'1': 'moq-quic-0', '2': 'moq-quic-1'}, intervals, {'1': 0, '2': 7}, {'1': 1, '2': 7}, 1)
-        self.assertEqual(list(result['workers']), ['1'])
-        self.assertEqual(result['idle'], ['moq-quic-1'])
-        with self.assertRaises(ValueError):
-            profile.reduce({'2': 'moq-quic-1'}, [], {'2': 7}, {'2': 7}, 1)
+        result, _ = profile.reduce(
+            {"1": "moq-quic-0", "2": "moq-quic-1"}, self.records(), {"1": 0, "2": 7}, {"1": 1, "2": 7}
+        )
+        self.assertEqual(list(result["workers"]), ["1"])
+        self.assertEqual(result["idle"], ["moq-quic-1"])
+        with self.assertRaisesRegex(ValueError, "no worker ran"):
+            profile.reduce({"2": "moq-quic-1"}, self.records(), {"2": 7}, {"2": 7})
 
     def test_unresolved_stacks_refused_per_worker(self):
-        # One resolved worker must not vouch for another whose unwinding failed.
-        intervals = [('1', 5, ['moq_net::serve']), ('2', 5, ['[unknown]', 'syscall'])]
+        records = self.records() + self.records("2", ["[unknown]", "syscall"])
+        with self.assertRaisesRegex(ValueError, "no resolved MoQ frames"):
+            profile.reduce({"1": "moq-quic-0", "2": "moq-quic-1"}, records, {"1": 0, "2": 0}, {"1": 1, "2": 1})
+
+    def test_duplicate_same_switch_is_idempotent(self):
+        records = self.records()
+        expected, _ = profile.reduce({"1": "moq-quic-0"}, records, {"1": 0}, {"1": 1})
+        # Repeating either state at the same instant adds no interval.
+        duplicate = records + [row for row in records if row[2].startswith("PERF_RECORD_SWITCH ")]
+        result, _ = profile.reduce({"1": "moq-quic-0"}, duplicate, {"1": 0}, {"1": 1})
+        self.assertEqual(result, expected)
+
+    def test_invalid_switch_stream_refused(self):
+        records = self.records() + [("1", 15, "PERF_RECORD_SWITCH IN", [])]
+        with self.assertRaisesRegex(ValueError, "nonalternating"):
+            profile.reduce({"1": "moq-quic-0"}, records, {"1": 0}, {"1": 1})
+        for records in [[], [("1", 10, "PERF_RECORD_SWITCH IN", [])]]:
+            with self.assertRaisesRegex(ValueError, "no recorded switch window"):
+                profile.reduce({"1": "moq-quic-0"}, records, {"1": 0}, {"1": 1})
+
+
+CPU_FIXTURE = """\
+11 100.000000001: cpu-clock:
+\t    ffffffff81000000 [unknown] ([kernel.kallsyms])
+\t    ffffffff81000100 [unknown] ([kernel.kallsyms])
+\t    7ffff7d2c07a sendmsg (/nix/store/glibc/lib/libc.so.6)
+\t    5555569d8ae4 <moq_quic::Endpoint>::send (/moq/moq-relay)
+\t    5555569d8608 std::thread::run (/moq/moq-relay)
+12 100.001000001: cpu-clock:
+\t    5555569d8ae4 <moq_net::Session>::poll (/moq/moq-relay)
+\t    5555569d8608 std::thread::run (/moq/moq-relay)
+13 100.002000001: cpu-clock:
+\t    5555569d8608 std::thread::run (/moq/moq-relay)
+"""
+
+
+class Cpu(unittest.TestCase):
+    def test_kernel_time_is_a_leaf_under_its_user_stack(self):
+        [(_, _, event, frames), *_] = profile.parse(CPU_FIXTURE, kernel=True)
+        self.assertEqual(event, "cpu-clock")
+        self.assertEqual(frames[:2], ["[kernel]", "sendmsg"])
+        # Lock waits keep dropping kernel frames outright.
+        self.assertEqual(profile.parse(CPU_FIXTURE)[0][3][0], "sendmsg")
+
+    def test_workers_fold_into_their_role(self):
+        names = {"11": "moq-quic-0", "12": "moq-quic-1"}
+        result, folded = profile.fold(names, profile.parse(CPU_FIXTURE, kernel=True), 0.5)
+        self.assertEqual(result["samples"], 3)
+        self.assertEqual(result["threads"], {"moq-quic-0": 1, "moq-quic-1": 1, "tid-13": 1})
+        self.assertAlmostEqual(result["sampled_cores"], 3 / 999 / 0.5)
+        self.assertEqual(folded["moq-quic;std::thread::run;<moq_quic::Endpoint>::send;sendmsg;[kernel]"], 1)
+        self.assertEqual(folded["moq-quic;std::thread::run;<moq_net::Session>::poll"], 1)
+
+    def test_empty_or_unresolved_refused(self):
+        with self.assertRaisesRegex(ValueError, "no CPU samples"):
+            profile.fold({}, [], 1)
+        unresolved = [("1", 0, "cpu-clock", ["[kernel]", "syscall"])]
+        with self.assertRaisesRegex(ValueError, "no CPU sample has resolved MoQ frames"):
+            profile.fold({}, unresolved, 1)
+
+    def test_lost_samples_refused(self):
         with self.assertRaises(ValueError):
-            profile.reduce({'1': 'moq-quic-0', '2': 'moq-quic-1'}, intervals, {'1': 0, '2': 0}, {'1': 1, '2': 1}, 1)
+            profile.parse(CPU_FIXTURE + "11 100.003000000: PERF_RECORD_LOST_SAMPLES lost 3\n", kernel=True)
+
+
+class Heap(unittest.TestCase):
+    def test_usr1_handler_detected(self):
+        previous = signal.signal(signal.SIGUSR1, signal.SIG_DFL)
+        try:
+            self.assertFalse(profile.catches_usr1(os.getpid()))
+            signal.signal(signal.SIGUSR1, lambda *_: None)
+            self.assertTrue(profile.catches_usr1(os.getpid()))
+        finally:
+            signal.signal(signal.SIGUSR1, previous)
+
+    def test_report_scales_churn_by_the_steady_window(self):
+        def jeprof(binary, dump, *args):
+            if "--collapsed" in args:
+                return "moq_relay::main;<moq_net::Session>::run;alloc 4096\nmoq_relay::main;freed 0\n"
+            totals = {
+                "--inuse_space": {"before.heap": 1 << 20, "steady-end.heap": 3 << 20},
+                "--alloc_space": {"steady-end.heap": 20 << 20},
+                "--alloc_objects": {"steady-end.heap": 1000},
+            }
+            kind = next(arg for arg in args if arg in totals)
+            return f"Total: {totals[kind].get(dump.name, 2 << 20)} B\n"
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            (directory / "snapshots.tsv").write_text(
+                "before\t0\nsteady-start\t1000000000\nsteady-end\t6000000000\nteardown\t8000000000\n"
+            )
+            with patch.object(profile, "jeprof", side_effect=jeprof) as calls:
+                profile.heap(Path("relay"), directory)
+            result = json.loads((directory / "heap.json").read_text())
+            self.assertEqual(result["window_s"], 5)
+            self.assertEqual(
+                result["retained_bytes"],
+                {"before": 1 << 20, "steady-start": 2 << 20, "steady-end": 3 << 20, "teardown": 2 << 20},
+            )
+            self.assertEqual(result["churn_bytes_per_s"], 4 << 20)
+            self.assertEqual(result["churn_allocs_per_s"], 200)
+            # Churn is the steady-end accumulation net of steady-start's.
+            churn = [call.args for call in calls.call_args_list if "--alloc_space" in call.args]
+            self.assertTrue(all(f"--base={directory / 'steady-start.heap'}" in args for args in churn))
+            # A stack the base cancelled out is dropped from the flame graph.
+            self.assertEqual(
+                (directory / "churn.folded").read_text(), "moq_relay::main;<moq_net::Session>::run;alloc 4096\n"
+            )
+
+    def test_teardown_waits_for_the_relay_to_drop_every_session(self):
+        clock = iter(range(0, 100, 1))
+        with (
+            patch.object(profile.time, "monotonic", side_effect=lambda: next(clock)),
+            patch.object(profile.time, "sleep"),
+            patch.object(profile, "sessions", return_value=1),
+            patch.object(profile.os, "kill") as kill,
+        ):
+            with self.assertRaisesRegex(ValueError, "still holds sessions"):
+                profile.snapshot(1, Path("."), ["teardown"], 0, 0, settled="http://relay/sessions")
+            # A teardown snapshot of live sessions would read as a leak; none is taken.
+            kill.assert_not_called()
+
+    def test_missing_snapshot_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "snapshots.tsv").write_text("before\t0\n")
+            with self.assertRaisesRegex(ValueError, "missing heap snapshots: steady-start, steady-end, teardown"):
+                profile.heap(Path("relay"), Path(directory))
 
 
 class Require(unittest.TestCase):
-    def check(self, paranoid):
-        with patch.object(profile.Path, 'read_text', return_value=paranoid + '\n'):
-            profile.require()
+    def check(self, mode, paranoid):
+        with patch.object(profile.Path, "read_text", return_value=paranoid + "\n"):
+            profile.require(mode)
 
     def test_refusal_names_the_command(self):
         # Ubuntu's default is 4; 2 forbids kernel samples; 1 and 0 cap the locked buffer.
-        for paranoid in ['4', '2', '1', '0']:
-            with self.assertRaises(ValueError) as refused:
-                self.check(paranoid)
-            self.assertIn('sudo sysctl -w kernel.perf_event_paranoid=-1', str(refused.exception))
-        self.check('-1')
+        for mode in ["lock", "cpu"]:
+            for paranoid in ["4", "2", "1", "0"]:
+                with self.assertRaises(ValueError) as refused:
+                    self.check(mode, paranoid)
+                self.assertIn("sudo sysctl -w kernel.perf_event_paranoid=-1", str(refused.exception))
+            self.check(mode, "-1")
+
+    def test_heap_needs_jeprof(self):
+        with patch.object(profile.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(ValueError, "jeprof"):
+                profile.require("heap")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

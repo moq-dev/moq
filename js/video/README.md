@@ -33,8 +33,8 @@ frame.set(decoded);
 ```
 
 `backend: "auto"` probes WebGPU once per canvas, before touching it, and logs which API it
-picked. A lost GPU device is replaced; with no replacement, drawing stops and `out.error` is
-`"surface-lost"` until the `canvas` input gets a fresh canvas. An explicit `"webgpu"` where it is
-missing reports `"unsupported"`.
+picked. A lost GPU device is replaced; with no replacement, drawing stops and `out.error` is an
+`InvalidStateError` until the `canvas` input gets a fresh canvas. An explicit `"webgpu"` where it
+is missing reports a `NotSupportedError`.
 
 The Rust twin is [`moq-video`](https://crates.io/crates/moq-video).

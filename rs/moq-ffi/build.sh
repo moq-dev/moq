@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Build and package moq-ffi native libraries for release.
-# Usage: ./build.sh [--target TARGET] [--version VERSION] [--output DIR] [--bindings-only] [--no-default-features]
+# Usage: ./build.sh [--target TARGET] [--version VERSION] [--output DIR] [--bindings-only [--library PATH]] [--no-default-features]
 #
 # Examples:
 #   ./build.sh                                    # Build for host, detect version from Cargo.toml
@@ -15,15 +15,15 @@ RS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORKSPACE_DIR="$(cd "$RS_DIR/.." && pwd)"
 
 # Resolve cargo target directory (respects CARGO_TARGET_DIR, .cargo/config, etc.)
-TARGET_BASE_DIR=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps 2>/dev/null |
-    sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' ||
-    echo "$WORKSPACE_DIR/target")
+TARGET_BASE_DIR=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps |
+    jq -er .target_directory)
 
 # Defaults
 TARGET=""
 VERSION=""
 OUTPUT_DIR="dist"
 BINDINGS_ONLY=false
+LIBRARY=""
 ARCHIVE=false
 NO_DEFAULT_FEATURES=false
 
@@ -46,6 +46,10 @@ while [[ $# -gt 0 ]]; do
             BINDINGS_ONLY=true
             shift
             ;;
+        --library)
+            LIBRARY="$2"
+            shift 2
+            ;;
         --archive)
             # Default leaves the staging dir alone for upload-artifact;
             # --archive recreates the legacy tar.gz/zip behavior.
@@ -57,7 +61,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h | --help)
-            echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR] [--bindings-only] [--archive] [--no-default-features]"
+            echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR] [--bindings-only [--library PATH]] [--archive] [--no-default-features]"
             exit 0
             ;;
         *)
@@ -66,6 +70,19 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -n "$LIBRARY" ]]; then
+    if [[ "$BINDINGS_ONLY" != true || ! -f "$LIBRARY" ]]; then
+        echo "Error: --library requires --bindings-only and an existing library" >&2
+        exit 1
+    fi
+fi
+
+# A cdylib's file name carries no feature hash, so the minimal library gets a
+# target directory of its own rather than replacing the default build's.
+if [[ "$NO_DEFAULT_FEATURES" == true ]]; then
+    TARGET_BASE_DIR="$TARGET_BASE_DIR/minimal"
+fi
 
 # Get version from Cargo.toml if not specified
 if [[ -z "$VERSION" ]]; then
@@ -101,7 +118,10 @@ can_run_on_host() {
 # Build the library for a single target
 build_target() {
     local target="$1"
-    local cargo_args=(build --locked --release --package moq-ffi)
+    # The shared default build (.cargo/config.toml): releases carry the OpenH264
+    # software fallback, the only encoder on API-24 Android and the Apple
+    # simulators. It is a no-op under --no-default-features.
+    local cargo_args=(build-ffi --release --message-format=json-render-diagnostics --target-dir "$TARGET_BASE_DIR" --manifest-path "$WORKSPACE_DIR/Cargo.toml")
     if [[ "$NO_DEFAULT_FEATURES" == true ]]; then
         cargo_args+=(--no-default-features)
     fi
@@ -115,32 +135,34 @@ build_target() {
         rustup target add "$target"
     fi
 
+    local messages
     if is_android "$target"; then
-        # Android targets use cargo-ndk
-        cargo ndk --target "$target" --platform 24 -- \
-            "${cargo_args[@]}" --manifest-path "$WORKSPACE_DIR/Cargo.toml"
+        # cargo-ndk consumes Cargo's artifact messages. It always passes an
+        # explicit target, so its output directory is unambiguous.
+        (cd "$WORKSPACE_DIR" && cargo ndk --target "$target" --platform 24 -- "${cargo_args[@]}")
+        BUILT_LIBRARY="$TARGET_BASE_DIR/$target/release/libmoq_ffi.so"
+        return
     else
         # Set up cross-compilation for Linux ARM64
-        if [[ "$target" == "aarch64-unknown-linux-gnu" ]]; then
+        if [[ "$target" == "aarch64-unknown-linux-gnu" && "$target" != "$HOST_TARGET" ]]; then
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
         fi
 
-        cargo "${cargo_args[@]}" --target "$target" --manifest-path "$WORKSPACE_DIR/Cargo.toml"
+        # An explicit host --target changes dependency cache identities too.
+        if [[ "$target" != "$HOST_TARGET" ]]; then
+            cargo_args+=(--target "$target")
+        fi
+        messages=$(cd "$WORKSPACE_DIR" && cargo "${cargo_args[@]}")
     fi
-}
-
-# Find the cdylib for binding generation
-find_cdylib() {
-    local target="$1"
-    local target_dir="$TARGET_BASE_DIR/$target/release"
-
-    if [[ "$target" == *"-apple-"* ]]; then
-        echo "$target_dir/libmoq_ffi.dylib"
-    elif [[ "$target" == *"-windows-"* ]]; then
-        echo "$target_dir/moq_ffi.dll"
-    else
-        echo "$target_dir/libmoq_ffi.so"
-    fi
+    local library
+    case "$target" in
+        *-apple-*) library=libmoq_ffi.dylib ;;
+        *-windows-*) library=moq_ffi.dll ;;
+        *) library=libmoq_ffi.so ;;
+    esac
+    BUILT_LIBRARY=$(jq -ers --arg root "$TARGET_BASE_DIR" --arg target "$target" \
+        --arg host "$HOST_TARGET" --arg profile release --arg library "$library" \
+        -f "$WORKSPACE_DIR/sh/rs/ffi-artifact.jq" <<<"$messages")
 }
 
 # Generate language bindings into $OUTPUT_DIR/bindings/<lang>/. Tarring is
@@ -152,14 +174,14 @@ generate_bindings() {
 
     for lang in kotlin swift python; do
         echo "  Generating $lang bindings..."
-        cargo run --locked --release --package uniffi-bindgen --manifest-path "$WORKSPACE_DIR/Cargo.toml" -- \
+        cargo run --locked --release --package uniffi-bindgen --features cli --manifest-path "$WORKSPACE_DIR/Cargo.toml" -- \
             generate --library "$lib_path" \
             --language "$lang" --out-dir "$OUTPUT_DIR/bindings/$lang"
     done
 
     # Go uses a separate, third-party bindgen. Upstream has no uniffi 0.32
     # release yet, so install the compatible generator fork with:
-    # cargo install --locked uniffi-bindgen-go --git https://github.com/kixelated/uniffi-bindgen-go --rev v0.10.0-kixelated.1+v0.32.0
+    # cargo install --locked uniffi-bindgen-go --git https://github.com/kixelated/uniffi-bindgen-go --rev v0.10.0-kixelated.2+v0.32.0
     if command -v uniffi-bindgen-go >/dev/null 2>&1; then
         echo "  Generating go bindings..."
         uniffi-bindgen-go --library "$lib_path" --out-dir "$OUTPUT_DIR/bindings/go"
@@ -178,7 +200,7 @@ generate_bindings() {
 
     # C++ uses a third-party bindgen too: a fork carrying LiveKit's async support
     # ported to uniffi 0.32, which upstream has not released. Install it with:
-    # cargo install --locked uniffi-bindgen-cpp --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.4+v0.32.2
+    # cargo install --locked uniffi-bindgen-cpp --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.7+v0.32.2
     if command -v uniffi-bindgen-cpp >/dev/null 2>&1; then
         echo "  Generating cpp bindings..."
         uniffi-bindgen-cpp --library "$lib_path" \
@@ -204,8 +226,12 @@ mkdir -p "$OUTPUT_DIR"
 
 # --- Bindings-only mode ---
 if [[ "$BINDINGS_ONLY" == true ]]; then
-    build_target "$HOST_TARGET"
-    cdylib=$(find_cdylib "$HOST_TARGET")
+    if [[ -n "$LIBRARY" ]]; then
+        cdylib="$LIBRARY"
+    else
+        build_target "$HOST_TARGET"
+        cdylib="$BUILT_LIBRARY"
+    fi
     if [[ ! -f "$cdylib" ]]; then
         echo "Error: cdylib not found at $cdylib" >&2
         exit 1
@@ -227,9 +253,9 @@ echo "Packaging $NAME..."
 
 rm -rf "$PACKAGE_DIR"
 mkdir -p "$PACKAGE_DIR/lib"
+TARGET_DIR=$(dirname "$BUILT_LIBRARY")
 
 if [[ "$TARGET" == *"-windows-"* ]]; then
-    TARGET_DIR="$TARGET_BASE_DIR/$TARGET/release"
     cp "$TARGET_DIR/moq_ffi.dll" "$PACKAGE_DIR/lib/"
     cp "$TARGET_DIR/moq_ffi.dll.lib" "$PACKAGE_DIR/lib/" 2>/dev/null || true
     cp "$TARGET_DIR/moq_ffi.lib" "$PACKAGE_DIR/lib/" 2>/dev/null || true
@@ -239,24 +265,20 @@ elif is_ios "$TARGET"; then
     # Assets hook bundles the cdylib (the SDK does not implement static
     # linking). rustc emits a PLATFORM_IOS dylib for device and simulator
     # alike, so this is a packaging choice rather than a platform limit.
-    TARGET_DIR="$TARGET_BASE_DIR/$TARGET/release"
     cp "$TARGET_DIR/libmoq_ffi.a" "$PACKAGE_DIR/lib/"
     cp "$TARGET_DIR/libmoq_ffi.dylib" "$PACKAGE_DIR/lib/"
 
 elif is_android "$TARGET"; then
     # Android: shared library only
-    TARGET_DIR="$TARGET_BASE_DIR/$TARGET/release"
     cp "$TARGET_DIR/libmoq_ffi.so" "$PACKAGE_DIR/lib/"
 
 elif [[ "$TARGET" == *"-apple-"* ]]; then
-    TARGET_DIR="$TARGET_BASE_DIR/$TARGET/release"
     cp "$TARGET_DIR/libmoq_ffi.a" "$PACKAGE_DIR/lib/"
     cp "$TARGET_DIR/libmoq_ffi.dylib" "$PACKAGE_DIR/lib/"
 
 else
     # Linux: ship both the cdylib (.so, consumed by JNA/Kotlin and
     # maturin/Python) and the staticlib (.a, linked by the Go module's cgo).
-    TARGET_DIR="$TARGET_BASE_DIR/$TARGET/release"
     cp "$TARGET_DIR/libmoq_ffi.so" "$PACKAGE_DIR/lib/"
     cp "$TARGET_DIR/libmoq_ffi.a" "$PACKAGE_DIR/lib/"
 fi
@@ -289,7 +311,7 @@ fi
 # Generate bindings if we can run the library on this host
 cd "$WORKSPACE_DIR"
 if can_run_on_host "$TARGET"; then
-    cdylib=$(find_cdylib "$TARGET")
+    cdylib="$BUILT_LIBRARY"
 
     if [[ -f "$cdylib" ]]; then
         generate_bindings "$cdylib"

@@ -5,7 +5,10 @@
 
 import "@moq/publish/support/element";
 import "@moq/watch/support/element";
-import { Local, type Member, Net, Publish, Room, Signals } from "@moq/room";
+import * as Net from "@moq/net";
+import * as Publish from "@moq/publish";
+import { Local, type Member, Room } from "@moq/room";
+import * as Signals from "@moq/signals";
 
 const RELAY_URL = import.meta.env.VITE_RELAY_URL ?? "http://localhost:4443";
 
@@ -143,6 +146,7 @@ function join(): void {
 		frames: local.cameraCapture.out.frames,
 		display: local.cameraCapture.out.display,
 		flip: true,
+		rotation: local.cameraCapture.out.rotation,
 	});
 
 	$("controls").hidden = false;

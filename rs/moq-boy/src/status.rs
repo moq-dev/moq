@@ -1,11 +1,10 @@
 //! Status track: JSON state published to viewers each frame.
 //!
-//! Contains which buttons are held, per-viewer latency measurements,
-//! encoding stats, and an optional location label. Published through
+//! Contains which buttons are held, how many viewers are playing, encoding
+//! stats, and an optional location label. Each viewer's latency travels on its
+//! own session instead (see [`crate::input`]). Published through
 //! [`moq_json`], which skips unchanged values and emits merge-patch
 //! deltas between snapshots so frequent small changes stay cheap.
-
-use std::collections::BTreeMap;
 
 use serde::Serialize;
 
@@ -13,7 +12,7 @@ use crate::emulator::Button;
 use crate::stats::StatsReport;
 
 /// A single latency component measurement.
-#[derive(Serialize, Clone)]
+#[derive(Serialize)]
 pub struct LatencyEntry {
 	pub label: String,
 	pub ms: u32,
@@ -24,8 +23,8 @@ pub struct LatencyEntry {
 pub struct Status {
 	/// Currently pressed buttons (union across all viewers).
 	pub buttons: Vec<Button>,
-	/// Per-viewer latency breakdown: viewer_id → ordered list of components.
-	pub latency: BTreeMap<String, Vec<LatencyEntry>>,
+	/// How many viewers have a session open.
+	pub players: usize,
 	/// Encoding and emulation performance stats.
 	pub stats: StatsReport,
 	/// Optional server location label (e.g. "Dallas, TX").
@@ -42,7 +41,10 @@ impl StatusPublisher {
 	pub fn new(broadcast: &mut moq_net::broadcast::Producer) -> anyhow::Result<Self> {
 		let producer = broadcast.create_track(
 			"status",
-			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			moq_net::track::Info::default()
+				.with_timescale(moq_net::Timescale::MILLI)
+				// A joiner asks for a fresh snapshot once the deltas outweigh eight of them.
+				.with_refresh(8),
 		)?;
 
 		Ok(Self {
@@ -51,8 +53,17 @@ impl StatusPublisher {
 	}
 
 	/// Publish status, a no-op if unchanged since the last call.
+	///
+	/// Also restates the status in a fresh group when a joiner wants one. Status is published every
+	/// frame, so checking here answers a joiner within a frame without a task of its own.
 	pub fn publish(&mut self, status: &Status) {
-		if let Err(err) = self.producer.update(status) {
+		if let std::task::Poll::Ready(Err(err)) = self.producer.poll_refresh(&moq_net::kio::Waiter::noop()) {
+			tracing::warn!(%err, "failed to refresh status");
+		}
+		if let Err(err) = self
+			.producer
+			.update(moq_net::Timed::from(status).at(moq_net::Timestamp::now()))
+		{
 			tracing::warn!(%err, "failed to publish status");
 		}
 	}

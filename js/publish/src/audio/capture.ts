@@ -1,5 +1,5 @@
+import { type Micro, Nano, now } from "@moq/clock";
 import * as Util from "@moq/hang/util";
-import type { Time } from "@moq/net";
 import {
 	type Computed,
 	Effect,
@@ -19,7 +19,7 @@ import { isSampleSource, normalizeSource, type SampleSource, type Source, type S
 /** A chunk of planar PCM, timestamped against the shared wall clock. */
 export interface AudioFrame {
 	/** When the first sample was captured. */
-	timestamp: Time.Micro;
+	timestamp: Micro;
 
 	/** One buffer per channel, all the same length. */
 	channels: Float32Array[];
@@ -45,7 +45,7 @@ const QUEUE = 32;
 // conversion at all, and Web Audio resamples the device to it far better than we could.
 const DEFAULT_SAMPLE_RATE = 48_000;
 
-// Signals the capture reads.
+/** Signals the capture reads. */
 export type CaptureInput = {
 	// The track or decoded samples to pump PCM off.
 	source: Getter<Source | undefined>;
@@ -62,7 +62,8 @@ export type CaptureProps = Inputs<CaptureInput> & {
 	channelCount?: number | Signal<number | undefined>;
 };
 
-type CaptureOutput = {
+/** Signals the capture derives. */
+export type CaptureOutput = {
 	// The PCM to encode, replaced whenever the source changes. Subscribe for a stream of your own:
 	// several renditions share one capture, and each needs every frame rather than the newest.
 	frames: Signal<Fanout<AudioFrame> | undefined>;
@@ -71,7 +72,8 @@ type CaptureOutput = {
 	format: Signal<Format | undefined>;
 
 	// The head of the Web Audio graph, when there is one, so callers can tap the raw capture.
-	// Undefined for decoded samples, which never touch Web Audio.
+	// Its context renders to no device where the browser supports `sinkId`, so nothing connected to
+	// its destination is heard. Undefined for decoded samples, which never touch Web Audio.
 	root: Signal<AudioNode | undefined>;
 };
 
@@ -84,6 +86,7 @@ type CaptureOutput = {
  * resample and restamp them, which is the whole thing publishing a file has to avoid.
  */
 export class Capture {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<CaptureInput>;
 
 	/** Override the capture rate in Hz. Defaults to the device's, snapped to one every codec takes. */
@@ -97,6 +100,7 @@ export class Capture {
 		format: new Signal<Format | undefined>(undefined),
 		root: new Signal<AudioNode | undefined>(undefined),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	// Whether the track's context is suspended until the page's first click or keypress.
@@ -157,7 +161,7 @@ export class Capture {
 	}
 
 	// Decoded samples need no graph and declare their own format, so this only converts them to the
-	// planar shape the framer wants. Note it never reads `enabled`: muting must not tear the stream
+	// planar shape the framer wants. Note it never reads `enabled`: disabling must not tear the stream
 	// down, because a one-shot stream can't be read again.
 	#runSamples(source: SampleSource, effect: Effect): void {
 		const { sampleRate, channelCount } = source;
@@ -170,7 +174,7 @@ export class Capture {
 	}
 
 	#runTrack(source: SourceConfig, effect: Effect): void {
-		// Releasing the capture device while muted is the whole point of gating on `enabled`.
+		// Releasing the capture device while disabled is the whole point of gating on `enabled`.
 		if (!effect.get(this.in.enabled)) return;
 
 		const settings = source.track.getSettings();
@@ -182,10 +186,19 @@ export class Capture {
 		// the prop or the track's applied getUserMedia constraint, and force the worklet to mix to it.
 		const requestedChannels = effect.get(this.channelCount) ?? requestedChannelCount(source.track);
 
-		const context = new AudioContext({
+		// The worklet delivers samples one render callback at a time, and a device's callback can be long:
+		// Chromium on PipeWire renders 2048 samples (43 ms) per callback even at "interactive", so 60 ms
+		// frames left 36-94 ms apart. Nothing here is audible, so render to no device, which Chromium 155+
+		// paces every 10 ms. Older Chromium paces it at the default device's callback size, as before, and
+		// a browser without `sinkId` ignores it and keeps the default device.
+		// Don't lower latencyHint instead: at 128 samples, a busy host misses callbacks and the capture
+		// clock falls behind.
+		const options: AudioContextOptions & { sinkId: { type: "none" } } = {
 			latencyHint: "interactive",
 			sampleRate,
-		});
+			sinkId: { type: "none" },
+		};
+		const context = new AudioContext(options);
 		effect.cleanup(() => context.close());
 
 		// Nothing guarantees a gesture has happened yet: a pre-granted microphone reaches here on page
@@ -245,7 +258,7 @@ export class Capture {
 					channelCountMode: requestedChannels !== undefined ? "explicit" : "max",
 					// Stamp audio against the same wall clock as video (see video/processor.ts), so both
 					// tracks share an epoch and stay in sync.
-					processorOptions: { zero: performance.now() * 1000 },
+					processorOptions: { zero: Nano.toMicro(Nano(now())) },
 				});
 				// The edge originates at root, so only root can remove it; the worklet has no outputs.
 				root.connect(worklet);
@@ -307,7 +320,7 @@ function planar(): TransformStream<AudioData, AudioFrame> {
 				channels.push(plane);
 			}
 
-			controller.enqueue({ timestamp: data.timestamp as Time.Micro, channels });
+			controller.enqueue({ timestamp: data.timestamp as Micro, channels });
 			data.close();
 		},
 	});

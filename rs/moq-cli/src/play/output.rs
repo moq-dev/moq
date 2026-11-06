@@ -18,6 +18,9 @@ pub(super) trait Output: Clone + Send + Sync + 'static {
 
 	/// Tell the window something changed. Dropped if the window is gone.
 	fn send(&self, event: Event);
+
+	/// What to decode video as for the window's renderer, once its device is open.
+	fn render(&self) -> impl Future<Output = moq_video::Output> + Send;
 }
 
 /// An open speaker, closed once it and every sink from it are dropped.
@@ -31,13 +34,22 @@ pub(super) trait Speaker: Clone + Send + Sync + 'static {
 /// One stream of PCM on its way to the speaker, cut off when dropped.
 pub(super) trait Sink: Send + Sync + 'static {
 	/// Queue samples behind what is already buffered.
-	fn write(&mut self, samples: &[u8]) -> anyhow::Result<()>;
+	fn write(&mut self, samples: &[u8]) -> anyhow::Result<moq_audio::playback::Write>;
+
+	/// Update the callback's playout target without replacing the sink.
+	fn set_latency(&mut self, latency: Duration) -> anyhow::Result<()>;
 
 	/// How much audio is queued ahead of the speaker.
 	fn buffered(&self) -> Duration;
 
 	/// Play every queued sample before releasing the sink.
 	fn finish(self) -> impl Future<Output = ()> + Send;
+
+	/// The audio written so far is followed by a declared silence.
+	fn end(&mut self);
+
+	/// The next write starts the next utterance after a declared silence.
+	fn next(&mut self);
 }
 
 impl Speaker for moq_audio::playback::Engine {
@@ -49,11 +61,12 @@ impl Speaker for moq_audio::playback::Engine {
 }
 
 impl Sink for moq_audio::playback::Sink {
-	fn write(&mut self, samples: &[u8]) -> anyhow::Result<()> {
-		// Playback drops stay on the live timeline; retrying them would add
-		// latency, and the sink already reports them in its logs.
-		let _ = moq_audio::playback::Sink::write(self, samples)?;
-		Ok(())
+	fn set_latency(&mut self, latency: Duration) -> anyhow::Result<()> {
+		Ok(moq_audio::playback::Sink::set_latency(self, latency)?)
+	}
+
+	fn write(&mut self, samples: &[u8]) -> anyhow::Result<moq_audio::playback::Write> {
+		Ok(moq_audio::playback::Sink::write(self, samples)?)
 	}
 
 	fn finish(self) -> impl Future<Output = ()> + Send {
@@ -62,5 +75,13 @@ impl Sink for moq_audio::playback::Sink {
 
 	fn buffered(&self) -> Duration {
 		moq_audio::playback::Sink::buffered(self)
+	}
+
+	fn end(&mut self) {
+		moq_audio::playback::Sink::end(self);
+	}
+
+	fn next(&mut self) {
+		moq_audio::playback::Sink::next(self);
 	}
 }

@@ -5,9 +5,16 @@
 //! At session setup it negotiates one of two wire protocols: the simplified `moq-lite`
 //! protocol (the default) or the full IETF `moq-transport` protocol.
 //!
+//! ## Features
+//! The `async` feature, off by default, enables the generated async wrappers for the `poll_*`
+//! methods, the announcement `Stream` adapter, `time::run`, and the Lite/IETF sessions
+//! (`Client`, `Server`, `Session`, and the session `Driver`). Without it, use the model's
+//! `poll_*` methods and [`origin::Driver`] with explicit time. Origin serving stays available
+//! without a native runtime; no executor or clock is chosen by the model.
+//!
 //! ## API
 //! The API is built around Producer/Consumer pairs, with the hierarchy:
-//! - [origin::Consumer]: A collection of [broadcast::Consumer]s, produced by one or more [Session]s.
+//! - [origin::Consumer]: A collection of [broadcast::Consumer]s, produced by one or more sessions.
 //! - [broadcast::Consumer]: A collection of [track::Consumer]s, produced by a single publisher.
 //! - [track::Consumer]: A collection of [group::Info]s, delivered out-of-order until expired.
 //! - [group::Info]: A collection of [frame::Info]s, delivered in order until cancelled.
@@ -17,8 +24,8 @@
 //! `announce`) that owns the short `Producer` / `Consumer` / `Info` names.
 //!
 //! Traffic counters for the levels above live in [`stats`]: build a [`stats::Registry`]
-//! and hand each session a [`stats::Session`] via [`Client::with_stats`] /
-//! [`Server::with_stats`]. Publishing the counters as MoQ broadcasts lives in the
+//! and hand each session a [`stats::Session`] via `Client::with_stats` /
+//! `Server::with_stats`. Publishing the counters as MoQ broadcasts lives in the
 //! `moq-stats` crate.
 //!
 //! ## Compatibility
@@ -26,7 +33,7 @@
 //! keeping it small rather than polluting it with half-baked features.
 //!
 //! The library is forwards-compatible with the full IETF specification and supports
-//! moq-transport drafts 14+ via version negotiation. Everything will work perfectly,
+//! moq-transport drafts 18+ via version negotiation. Everything will work perfectly,
 //! so long as your application uses the API as defined above.
 //!
 //! For example, there's no concept of "sub-group". When connecting to a moq-transport
@@ -48,74 +55,115 @@
 //!
 //! ## Driving and time
 //! Session and origin drivers never spawn tasks or read the clock.
-//! Explicitly minting an [`Epoch`] uses the wall clock and secure randomness. [`Client::connect`] and
-//! [`Server::accept`] take an initial [`time::Instant`] and return
-//! `(Session, Driver)`. Poll the [`Driver`] with the current instant and a
+//! Minting an [`Instance`] uses secure randomness. `Client::connect` and
+//! `Server::accept` take an initial [`time::Instant`] and return
+//! `(Session, Driver)`. Poll the `Driver` with the current instant and a
 //! [`kio::Waiter`], then wake on external activity or at the deadline it
-//! returns; [`time::run`] does exactly that on tokio or the browser. The last
-//! [`Session`] drop requests closure; dropping the driver cancels it.
+//! returns; `time::run` does exactly that on tokio or the browser. The last
+//! `Session` drop requests closure; dropping the driver cancels it.
 //!
 //! [`origin::Producer::new`] also returns a producer and driver. Its driver runs
 //! route changes, serving, linger, teardown, and the origin's cache expiration.
-//! Standalone caches expose [`cache::Pool::gc`]. Frame read/write methods
-//! clear their expiration timestamp for the next cleanup pass. Datagrams use a bounded
-//! FIFO; model read/write APIs take no wall-clock time.
+//! Standalone caches expose [`cache::Pool::poll`]. Frame read/write methods
+//! clear their expiration timestamp for the next cleanup pass. Datagram tracks keep a
+//! short buffer and no cache; model read/write APIs take no time argument, though a frame write stamps
+//! its arrival from the ambient clock ([`frame::Frame::arrived`]).
 //!
 //! Both drivers implement [`time::Driver`]. `moq-uring` drives thread-local
 //! transports on its own timer heap. Tests advance time by supplying a later
 //! instant.
 
 #![warn(missing_docs)]
-// Proving receive futures are Send traverses the shared origin/broadcast/track types.
-#![recursion_limit = "256"]
-// The browser transport is `!Send`, so on wasm the shared state behind these `Arc`s is
-// too and clippy suggests `Rc`. The same code is genuinely cross-thread on native, so
-// `Arc` stays and the lint is unactionable here.
-#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+#![cfg_attr(
+	test,
+	allow(
+		clippy::redundant_closure,
+		reason = "`Decode`'s buffer lifetime is a trait parameter, so `T::decode` names one lifetime, and only a closure passes where a test helper takes any"
+	)
+)]
 
+// Sessions hand out the auth, GOAWAY, and SETUP handles, so without `async` they are
+// unobtainable and stay private to the model and wire code that still uses them.
+#[cfg(feature = "async")]
 pub mod auth;
+#[cfg(not(feature = "async"))]
+#[allow(dead_code, unused_imports, reason = "async-only")]
+mod auth;
+#[cfg(feature = "async")]
 mod client;
 mod coding;
+#[cfg(feature = "async")]
+mod discovery;
+#[cfg(feature = "async")]
 mod driver;
-mod epoch;
 mod error;
+#[cfg(feature = "async")]
 pub mod goaway;
+#[cfg(not(feature = "async"))]
+#[allow(dead_code, unused_imports, reason = "async-only")]
+mod goaway;
+#[cfg(test)]
+mod test_tracing;
 // Not part of the public API: compiled only for the crate's own tests and for the
 // `fuzz/` harness.
-#[cfg(any(test, feature = "fuzz"))]
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 #[doc(hidden)]
 pub mod fuzz;
 mod ietf;
+mod instance;
+mod ledger;
 mod lite;
 mod model;
 pub mod path;
+#[cfg(feature = "async")]
 mod priority;
+#[cfg(feature = "async")]
 mod recv;
+mod route;
+#[cfg(feature = "async")]
 pub mod setup;
+#[cfg(not(feature = "async"))]
+#[allow(dead_code, unused_imports, reason = "async-only")]
+mod setup;
+#[cfg(feature = "async")]
 mod tail;
-#[cfg(test)]
+#[cfg(all(test, feature = "async"))]
 mod test_interop;
 mod util;
 mod version;
 
+#[cfg(feature = "async")]
+pub mod reconnect;
+#[cfg(feature = "async")]
 pub mod server;
+#[cfg(feature = "async")]
 pub mod session;
 pub mod stats;
 pub mod time;
 pub mod transport;
 
+#[cfg(feature = "async")]
 pub use client::*;
 pub use coding::{BoundsExceeded, DecodeError, EncodeError, varint};
+#[cfg(feature = "async")]
 pub use driver::Driver;
-pub use epoch::{Epoch, InvalidEpoch};
 pub use error::*;
-/// The session direction a client advertises in its SETUP (moq-lite-05+).
-pub use lite::Role;
+pub use instance::{Instance, InvalidInstance};
 pub use model::*;
-pub use path::{AsPath, InvalidPattern, Path, PathOwned, Pattern, Patterns};
+pub use path::{InvalidPattern, Path, Pattern, Patterns};
+#[cfg(feature = "async")]
+pub use reconnect::Reconnect;
+#[cfg(feature = "async")]
 pub use server::Server;
+#[cfg(feature = "async")]
 pub use session::Session;
 pub use version::*;
+
+/// This crate's product token, `moq-net-rs/<version>`, which SETUP advertises by default.
+///
+/// A wrapper prepends its own token, space-separated, outermost first:
+/// `format!("moq-ffi/{v} {}", moq_net::IMPLEMENTATION)`.
+pub const IMPLEMENTATION: &str = concat!("moq-net-rs/", env!("CARGO_PKG_VERSION"));
 
 // Re-export the bytes crate
 pub use bytes;

@@ -1,4 +1,4 @@
-import { Time } from "@moq/net";
+import { type Micro, Milli } from "@moq/clock";
 import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import * as Video from "@moq/video";
 import type { Decoder } from "./decoder";
@@ -18,6 +18,7 @@ const INTERSECTION_THRESHOLD = 0.01;
  */
 export type Visible = "never" | "always" | (string & {});
 
+/** Signals the renderer reads. */
 export type RendererInput = {
 	canvas: Getter<HTMLCanvasElement | undefined>;
 
@@ -34,10 +35,12 @@ export type RendererProps = Inputs<RendererInput> & {
 	decoder: Decoder;
 };
 
-// An component to render a video to a canvas.
+/** Renders decoded video to a canvas. */
 export class Renderer {
+	/** The decoder supplying frames. */
 	readonly decoder: Decoder;
 
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<RendererInput>;
 
 	// Whether the canvas should currently download per the configured distance and tab focus.
@@ -46,15 +49,16 @@ export class Renderer {
 
 	#video: Video.Renderer;
 
+	/** The derived outputs, read-only. */
 	readonly out: Readonlys<{
 		// The most recently rendered frame, updated after each rAF paint.
 		frame: Getter<VideoFrame | undefined>;
 		// The media timestamp of the most recently rendered frame.
-		timestamp: Getter<Time.Milli | undefined>;
+		timestamp: Getter<Milli | undefined>;
 		// Whether the canvas should currently download per the configured distance and tab focus.
 		visible: Getter<boolean>;
-		// Why drawing stopped, or undefined while healthy. See {@link Video.RendererError}.
-		error: Getter<Video.RendererError | undefined>;
+		// Why drawing stopped, or undefined while healthy. See {@link Video.RendererOutput.error}.
+		error: Getter<Error | undefined>;
 	}>;
 
 	#signals = new Effect();
@@ -71,7 +75,10 @@ export class Renderer {
 			canvas: this.in.canvas,
 			frame: this.decoder.out.frame,
 			display: this.decoder.out.display,
-			presentation: this.decoder.source.out.catalog,
+			presentation: new Derived(
+				[this.decoder.source.out.catalog, this.decoder.out.interlaced],
+				(catalog, interlaced) => ({ rotation: catalog?.rotation, flip: catalog?.flip, interlaced }),
+			),
 			backend: this.in.backend,
 		});
 		this.#signals.cleanup(() => this.#video.close());
@@ -79,9 +86,7 @@ export class Renderer {
 		const frame = this.#video.out.frame;
 		this.out = readonlys({
 			frame,
-			timestamp: new Derived([frame], (frame) =>
-				frame ? Time.Milli.fromMicro(frame.timestamp as Time.Micro) : undefined,
-			),
+			timestamp: new Derived([frame], (frame) => (frame ? Milli.fromMicro(frame.timestamp as Micro) : undefined)),
 			visible: this.#visible,
 			error: this.#video.out.error,
 		});
@@ -141,7 +146,7 @@ export class Renderer {
 		effect.cleanup(() => this.#visible.set(false));
 	}
 
-	// Close the track and all associated resources.
+	/** Close the track and all associated resources. */
 	close() {
 		this.#signals.close();
 	}

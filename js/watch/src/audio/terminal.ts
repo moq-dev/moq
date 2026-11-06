@@ -1,4 +1,4 @@
-import type { Time } from "@moq/net";
+import type { Micro } from "@moq/clock";
 
 interface SampleSpan {
 	readonly timestamp: number;
@@ -8,14 +8,14 @@ interface SampleSpan {
 
 /** The parts of a container read the terminal tracks. */
 type Update =
-	| { readonly kind: "frame"; readonly group: number; readonly frame: { readonly timestamp: Time.Micro } }
+	| { readonly kind: "frame"; readonly group: bigint; readonly frame: { readonly timestamp: Micro } }
 	| { readonly kind: "gap" }
-	| { readonly kind: "end"; readonly group: number; readonly end: Time.Micro };
+	| { readonly kind: "end"; readonly group: bigint; readonly end: Micro };
 
 /** The portion of decoded audio that belongs to the source timeline. */
 export interface DecodedSpan {
 	/** Source timestamp of the first retained frame. */
-	readonly timestamp: Time.Micro;
+	readonly timestamp: Micro;
 	/** Decoded frames to skip before copying. */
 	readonly frameOffset: number;
 	/** Decoded frames to retain after the offset. */
@@ -24,32 +24,48 @@ export interface DecodedSpan {
 
 /** Track codec epochs and map decoded output onto the source timeline. */
 export class Terminal {
-	// Whether a frame arrived since the last reset, so there is an epoch to end.
+	// Whether media has started on this timeline.
 	#started = false;
-	#end?: Time.Micro;
+	#end?: Micro;
 	// The group that carried `#end`. It bounds only the terminal packets that follow it there.
-	#endGroup?: number;
-	#epoch?: Time.Micro;
+	#endGroup?: bigint;
+	#epoch?: Micro;
 	#preSkip = 0;
 	#preSkipRemaining?: number;
+	#warmup = 0 as Micro;
+	#prime = true;
+	#before?: Micro;
+
+	/** How far decoded output lands before its frame timestamp: the Opus pre-skip, or zero. */
+	get delay(): Micro {
+		return Math.round((this.#preSkip * 1_000_000) / 48_000) as Micro;
+	}
 
 	/** The exclusive source endpoint most recently received. */
-	get end(): Time.Micro | undefined {
+	get end(): Micro | undefined {
 		return this.#end;
 	}
 
-	/** Reset state for a new container consumer with Opus pre-skip in 48 kHz frames. */
-	clear(preSkip = 0): void {
+	/** Reset with Opus pre-skip in 48 kHz frames and warmup in microseconds. */
+	clear(preSkip = 0, warmup = 0 as Micro): void {
 		this.#started = false;
 		this.#end = undefined;
 		this.#endGroup = undefined;
 		this.#preSkip = preSkip;
+		this.#warmup = warmup;
+		this.#prime = true;
+		this.#before = undefined;
 		this.#resetEpoch();
 	}
 
 	/** Apply one ordered consumer read and report whether a codec epoch ended before it. */
 	update(read: Update): boolean {
-		if (read.kind === "gap") return this.#restart();
+		if (read.kind === "gap") {
+			this.#prime = true;
+			this.#before = undefined;
+			this.#resetEpoch();
+			return this.#started;
+		}
 		if (read.kind === "end") {
 			this.#end = read.end;
 			this.#endGroup = read.group;
@@ -57,35 +73,45 @@ export class Terminal {
 		}
 		// A later group after a declared end comes from a fresh encoder; the end's own group carries
 		// the stopped encoder's final packets.
-		const reset = this.#end !== undefined && read.group !== this.#endGroup && this.#restart();
+		const reset = this.#endGroup !== undefined && read.group > this.#endGroup;
+		if (reset) this.#restart();
 		this.#started = true;
 		this.#epoch ??= read.frame.timestamp;
+		if (this.#prime) {
+			this.#before = (read.frame.timestamp + this.#warmup) as Micro;
+			this.#prime = false;
+		}
 		return reset;
 	}
 
-	// Start a new epoch, reporting whether one was running.
-	#restart(): boolean {
-		const started = this.#started;
+	// Start a fresh codec epoch after its declared end, on the same timeline.
+	#restart(): void {
 		this.#started = false;
 		this.#end = undefined;
 		this.#endGroup = undefined;
+		this.#before = undefined;
 		this.#resetEpoch();
-		return started;
 	}
 
 	/** Remove codec pre-skip and terminal padding from one decoded sample. */
 	span(sample: SampleSpan): DecodedSpan {
-		const epoch = this.#epoch ?? (sample.timestamp as Time.Micro);
+		const epoch = this.#epoch ?? (sample.timestamp as Micro);
 		this.#epoch = epoch;
 
 		const delayFrames = Math.floor((this.#preSkip * sample.sampleRate) / 48_000);
 		const remaining = this.#preSkipRemaining ?? delayFrames;
-		const frameOffset = Math.min(remaining, sample.numberOfFrames);
+		let frameOffset = Math.min(remaining, sample.numberOfFrames);
 		this.#preSkipRemaining = remaining - frameOffset;
 
 		const delay = Math.round((delayFrames * 1_000_000) / sample.sampleRate);
-		const timestamp = Math.max(epoch, sample.timestamp - delay) as Time.Micro;
+		let timestamp = Math.max(epoch, sample.timestamp - delay) as Micro;
 		let frames = sample.numberOfFrames - frameOffset;
+		if (this.#before !== undefined && timestamp < this.#before) {
+			const trim = Math.min(frames, Math.ceil(((this.#before - timestamp) * sample.sampleRate) / 1_000_000));
+			frameOffset += trim;
+			frames -= trim;
+			timestamp = (timestamp + Math.round((trim * 1_000_000) / sample.sampleRate)) as Micro;
+		}
 		if (this.#end !== undefined) {
 			if (this.#end <= timestamp) {
 				frames = 0;

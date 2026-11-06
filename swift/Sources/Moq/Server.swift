@@ -25,14 +25,16 @@ public final class Server: Sendable {
         publish: OriginProducer? = nil,
         consume: OriginProducer? = nil
     ) throws {
-        ffi = try MoqServer(config: MoqServerConfig(
-            bind: bind,
-            versions: versions,
-            tls: tls,
-            quic: quic,
-            publish: publish?.ffi,
-            consume: consume?.ffi
-        ))
+        ffi = try MoqServer(
+            config: MoqServerConfig(
+                bind: bind,
+                versions: versions,
+                tls: tls,
+                quic: quic,
+                implementation: implementation,
+                publish: publish?.ffi,
+                consume: consume?.ffi
+            ))
     }
 
     /// Bind the listening socket. Returns the bound local address, useful when
@@ -83,6 +85,12 @@ public final class Request: Sendable {
     /// The encoded request query without `?`; it may contain credentials.
     public var query: String? {
         ffi.query()
+    }
+
+    /// The implementation the client advertised, like `moq-swift/0.5.1 moq-ffi/0.4.12 ...`.
+    /// Peer-controlled: use it for logs and rollout counts, never to authorize.
+    public var peerImplementation: String? {
+        ffi.peerImplementation()
     }
 
     /// The network transport carrying this session.

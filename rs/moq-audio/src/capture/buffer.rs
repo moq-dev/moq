@@ -2,8 +2,9 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use moq_net::time::Instant;
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::{CachingCons, CachingProd, HeapCons, HeapProd, HeapRb};
 use tokio::sync::mpsc;
@@ -88,6 +89,10 @@ fn relay(mut pending: HeapCons<Filled>, tx: mpsc::Sender<Filled>) {
 		if !pending.write_is_held() {
 			return;
 		}
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "the device thread runs outside any runtime, so it blocks on the host clock"
+		)]
 		std::thread::sleep(RELAY_POLL_INTERVAL);
 	}
 }
@@ -303,46 +308,10 @@ impl Reader {
 
 #[cfg(test)]
 mod tests {
-	use std::alloc::{GlobalAlloc, Layout, System};
-	use std::cell::Cell;
 	use std::sync::mpsc::sync_channel;
 
 	use super::*;
-
-	struct TrackingAllocator;
-
-	thread_local! {
-		static ACTIVITY: Cell<Option<usize>> = const { Cell::new(None) };
-	}
-
-	unsafe impl GlobalAlloc for TrackingAllocator {
-		unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-			ACTIVITY.with(|activity| {
-				if let Some(count) = activity.get() {
-					activity.set(Some(count + 1));
-				}
-			});
-			unsafe { System.alloc(layout) }
-		}
-
-		unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-			ACTIVITY.with(|activity| {
-				if let Some(count) = activity.get() {
-					activity.set(Some(count + 1));
-				}
-			});
-			unsafe { System.dealloc(ptr, layout) };
-		}
-	}
-
-	#[global_allocator]
-	static ALLOCATOR: TrackingAllocator = TrackingAllocator;
-
-	fn activity(f: impl FnOnce()) -> usize {
-		ACTIVITY.with(|activity| activity.set(Some(0)));
-		f();
-		ACTIVITY.with(|activity| activity.replace(None).unwrap())
-	}
+	use crate::allocation::activity;
 
 	fn create(channels: usize) -> (Writer, Reader) {
 		channel(

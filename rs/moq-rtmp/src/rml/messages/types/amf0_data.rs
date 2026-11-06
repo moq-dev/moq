@@ -12,6 +12,7 @@ pub fn serialize(values: Vec<Amf0Value>) -> Result<Bytes, MessageSerializationEr
 	Ok(Bytes::from(bytes))
 }
 
+#[cfg(test)]
 pub fn deserialize(data: Bytes) -> Result<RtmpMessage, MessageDeserializationError> {
 	let mut cursor = Cursor::new(data);
 	let values = amf0::deserialize(&mut cursor)?;

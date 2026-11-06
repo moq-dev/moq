@@ -16,11 +16,74 @@
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench announce`.
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_net::{
-	Hop, Hops, PathOwned,
+	Hop, Hops, Path, announce,
 	fuzz::{AnnounceWriter, Announced, decode_announces, encode_announces},
+	origin,
 };
+
+// Compile the actual private replay code, as the priority bench does for its queue.
+#[path = "../src/lite/replay.rs"]
+mod replay;
+
+/// The previous replay, retained here as a scaling reference.
+fn scanned(events: Vec<origin::RouteEvent>) -> Vec<announce::Announce> {
+	let mut initial: Vec<announce::Announce> = Vec::new();
+	for event in events {
+		let (update, active) = match event {
+			origin::RouteEvent::Start(update)
+			| origin::RouteEvent::Update(update)
+			| origin::RouteEvent::Restart(update)
+			| origin::RouteEvent::Takeover { announce: update, .. } => (update, true),
+			origin::RouteEvent::End(update) => (update, false),
+		};
+		initial.retain(|held| held.prefix != update.prefix);
+		if active {
+			initial.push(update);
+		}
+	}
+	initial
+}
+
+fn initial(c: &mut Criterion) {
+	let mut group = c.benchmark_group("announce_replay");
+	for routes in [1, 64, 1024] {
+		for updates in [1, 8, 32] {
+			let events: Vec<_> = (0..updates)
+				.flat_map(|cost| {
+					(0..routes).map(move |route| {
+						origin::RouteEvent::Update(announce::Announce {
+							prefix: moq_net::Path::new(&format!("route/{route}")).unwrap(),
+							captures: None,
+							route: moq_net::fuzz::route_info(moq_net::Hops::new(), cost, None),
+						})
+					})
+				})
+				.collect();
+			group.throughput(Throughput::Elements(events.len() as u64));
+			for indexed in [false, true] {
+				let name = if indexed { "indexed" } else { "scan" };
+				group.bench_function(format!("{name}/{routes}r_{updates}u"), |b| {
+					b.iter_batched(
+						|| events.clone(),
+						|events| {
+							let initial = if indexed {
+								replay::initial(events)
+							} else {
+								scanned(events)
+							};
+							assert_eq!(initial.len(), routes);
+							std::hint::black_box(initial);
+						},
+						BatchSize::PerIteration,
+					);
+				});
+			}
+		}
+	}
+	group.finish();
+}
 
 /// `(routes, churn)` shapes for the whole-stream measurements.
 const SHAPES: [(u64, u64); 4] = [(100, 0), (1_000, 0), (1_000, 1_000), (10_000, 1_000)];
@@ -45,7 +108,7 @@ fn hops(ids: &[u64]) -> Hops {
 }
 
 /// Announce `routes` routes, then replace `churn` of them, oldest first.
-fn stream(routes: u64, churn: u64, route: impl Fn(u64) -> (PathOwned, Hops)) -> Vec<Announced> {
+fn stream(routes: u64, churn: u64, route: impl Fn(u64) -> (Path, Hops)) -> Vec<Announced> {
 	let mut announced: Vec<_> = (0..routes)
 		.map(|n| {
 			let (path, hops) = route(n);
@@ -60,7 +123,7 @@ fn stream(routes: u64, churn: u64, route: impl Fn(u64) -> (PathOwned, Hops)) -> 
 	announced
 }
 
-fn health(n: u64) -> (PathOwned, Hops) {
+fn health(n: u64) -> (Path, Hops) {
 	let origin = n % ORIGINS;
 	let path = format!(
 		"{:x}/private/channel_{}/stream-health-{}",
@@ -68,17 +131,17 @@ fn health(n: u64) -> (PathOwned, Hops) {
 		n % 16,
 		1_700_000_000 + n
 	);
-	(path.into(), hops(&[id(origin), id(100), id(101)]))
+	(Path::new(&path).unwrap(), hops(&[id(origin), id(100), id(101)]))
 }
 
-fn unique(n: u64) -> (PathOwned, Hops) {
+fn unique(n: u64) -> (Path, Hops) {
 	(
-		format!("{:x}", id(n)).into(),
+		moq_net::Path::new(&format!("{:x}", id(n))).unwrap(),
 		hops(&[id(n + 1_000_000), id(n + 2_000_000)]),
 	)
 }
 
-type Workload = (&'static str, fn(u64) -> (PathOwned, Hops));
+type Workload = (&'static str, fn(u64) -> (Path, Hops));
 const WORKLOADS: [Workload; 2] = [("health", health), ("unique", unique)];
 
 fn report() {
@@ -152,5 +215,5 @@ fn bench(c: &mut Criterion) {
 	}
 }
 
-criterion_group!(benches, bench);
+criterion_group!(benches, bench, initial);
 criterion_main!(benches);

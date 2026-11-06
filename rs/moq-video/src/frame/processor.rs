@@ -1,8 +1,7 @@
 //! D3D11 processor configuration, testable without a GPU or Windows host.
 
-#[cfg(any(feature = "capture", test))]
-use crate::Error;
-use crate::{Color, Size};
+use crate::color::{Matrix, Range};
+use crate::{Color, Error, Size};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Plan {
@@ -14,17 +13,17 @@ pub(super) struct Plan {
 }
 
 impl Plan {
-	pub fn resize(source: Size, target: Size, color: Option<Color>) -> Self {
-		Self {
+	pub fn resize(source: Size, target: Size, color: Option<Color>) -> Result<Self, Error> {
+		Ok(Self {
 			source,
 			picture: source,
 			target,
 			bgra: false,
-			space: color.map(space).unwrap_or(0),
-		}
+			space: color.map(space).transpose()?.unwrap_or(0),
+		})
 	}
 
-	#[cfg(any(feature = "capture", test))]
+	#[cfg(any(feature = "capture", all(target_os = "windows", feature = "render"), test))]
 	pub fn capture(source: Size) -> Result<Self, Error> {
 		let target = Size::new(source.width & !1, source.height & !1);
 		if target.width == 0 || target.height == 0 || source.width > i32::MAX as u32 || source.height > i32::MAX as u32
@@ -36,7 +35,7 @@ impl Plan {
 			picture: target,
 			target,
 			bgra: true,
-			space: space(Color::infer(target)),
+			space: space(Color::infer(target))?,
 		})
 	}
 
@@ -49,10 +48,19 @@ impl Plan {
 // YCbCr_Matrix bit 2 (1 = 709), Nominal_Range bits 4..6 (1 = limited, 2 = full).
 const RGB_FULL: u32 = 2 << 4;
 
-fn space(color: Color) -> u32 {
-	let matrix = u32::from(matches!(color, Color::Bt709Limited | Color::Bt709Full));
-	let range = if color.limited() { 1 } else { 2 };
-	(matrix << 2) | (range << 4)
+/// The D3D11 color space of `color`, which names only the BT.601 and BT.709
+/// matrices.
+fn space(color: Color) -> Result<u32, Error> {
+	let matrix = match color.matrix {
+		Matrix::Bt601 => 0,
+		Matrix::Bt709 => 1,
+		Matrix::Bt2020 => return Err(Error::Unsupported(format!("D3D11 cannot process {color:?}"))),
+	};
+	let range = match color.range {
+		Range::Limited => 1,
+		Range::Full => 2,
+	};
+	Ok((matrix << 2) | (range << 4))
 }
 
 #[cfg(test)]
@@ -85,26 +93,33 @@ mod tests {
 
 	#[test]
 	fn resizing_preserves_color_across_the_sd_boundary() {
-		for color in [
-			Color::Bt601Limited,
-			Color::Bt601Full,
-			Color::Bt709Limited,
-			Color::Bt709Full,
-		] {
-			let plan = Plan::resize(Size::new(1920, 1080), Size::new(640, 360), Some(color));
-			assert_eq!(plan.input_space(), space(color));
-			assert_eq!(plan.space, space(color));
+		for color in [Color::BT601, Color::BT709] {
+			for color in [color, color.with_range(Range::Full)] {
+				let plan = Plan::resize(Size::new(1920, 1080), Size::new(640, 360), Some(color)).unwrap();
+				assert_eq!(plan.input_space(), space(color).unwrap());
+				assert_eq!(plan.space, space(color).unwrap());
+			}
 		}
-		assert_eq!(Plan::resize(Size::new(640, 480), Size::new(320, 240), None).space, 0);
+		assert_eq!(
+			Plan::resize(Size::new(640, 480), Size::new(320, 240), None)
+				.unwrap()
+				.space,
+			0
+		);
+		let hdr = Color {
+			matrix: Matrix::Bt2020,
+			..Color::BT709
+		};
+		assert!(Plan::resize(Size::new(640, 480), Size::new(320, 240), Some(hdr)).is_err());
 	}
 
 	#[test]
 	fn the_cache_distinguishes_conversion_resize_and_color() {
 		let size = Size::new(1280, 720);
 		let capture = Plan::capture(size).unwrap();
-		let resize = Plan::resize(size, size, Some(Color::Bt709Limited));
-		let full = Plan::resize(size, size, Some(Color::Bt709Full));
-		let unknown = Plan::resize(size, size, None);
+		let resize = Plan::resize(size, size, Some(Color::BT709)).unwrap();
+		let full = Plan::resize(size, size, Some(Color::BT709.with_range(Range::Full))).unwrap();
+		let unknown = Plan::resize(size, size, None).unwrap();
 		let keys = std::collections::HashSet::from([capture, resize, full, unknown]);
 		assert_eq!(keys.len(), 4);
 	}

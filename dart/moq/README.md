@@ -10,14 +10,15 @@ final announced = connection.announced(
   options: const AnnounceOptions(prefix: 'live/', filter: '*/camera'),
 );
 await for (final event in announced.updates()) {
-  // A restart is a new publisher run at the same path: request it again.
+  // The listing reports each path once while it stays present, even as its
+  // publisher restarts; `connection.follow(path)` hands out each new run, or
+  // null once it goes offline.
   switch (event) {
-    case AnnounceEventStart(:final announce) ||
-        AnnounceEventRestart(:final announce):
+    case AnnounceEventPresent(:final announce):
       // Prefix stays origin-relative; captures reports wildcard matches.
       print(announce.prefix);
       print(announce.captures);
-    default:
+    case AnnounceEventAbsent():
   }
 }
 ```
@@ -32,19 +33,19 @@ final server = await Server.listen(
     tlsGenerate: ['localhost'],
   ),
 );
-final broadcast = server.createBroadcast('live');
-broadcast.announce(route: MoqRoute()); // unannounced broadcasts are invisible
+final route = server.route('live'); // hold it: disposing the route retracts it
 await for (final request in server.requests()) {
   final session = await request.accept();
-  print(session.connects());
+  print(session.state().connects);
 }
+route.dispose(); // retracts the route
 ```
 
 The package uses `Future` for asynchronous operations and `Stream` for
 announcements, and `connect` / `listen` take an options struct like Rust does.
 Types are spelled without the `Moq` prefix (`Session`, `BroadcastProducer`,
-`Backoff`), and microsecond fields read back as a `Duration` (`stats.rtt`,
-`frame.timestamp`). The lower-level generated API
+`Backoff`). Spans cross as a `Duration` (`stats.rtt`), and media times as an
+exact `Timestamp` with `toDuration()`. The lower-level generated API
 remains available through the re-exported `moq_ffi` package.
 
 Flutter Web is not supported. Browser applications should use the TypeScript

@@ -1,0 +1,113 @@
+"""Lightweight stand-ins for runtime-only modules used during unit collection."""
+
+import sys
+from types import ModuleType, SimpleNamespace
+
+import pytest
+
+
+class MoqError(Exception):
+    pass
+
+
+class AnnounceEvent:
+    """One announcement event; the subclass names which kind, as in moq's."""
+
+    def __init__(self, announce: SimpleNamespace) -> None:
+        self.announce = announce
+
+
+class AnnounceEventPresent(AnnounceEvent):
+    pass
+
+
+class AnnounceEventAbsent(AnnounceEvent):
+    pass
+
+
+class SnapshotProducer:
+    """Records every published value; demand comes from the wrapped track."""
+
+    def __init__(self, broadcast: object, track: SimpleNamespace) -> None:
+        self.track = track
+        self.values: list[object] = []
+
+    def demand(self) -> object:
+        return self.track.demand()
+
+    def update(self, value: object, timestamp: object) -> None:
+        self.values.append(value)
+
+
+class SnapshotConsumer:
+    """Reads the named fake track of a broadcast, wrapping its parsed values in timed records,
+    like the runtime consumer."""
+
+    def __init__(self, broadcast: object, name: str, *, priority: int = 0) -> None:
+        self._track = broadcast.tracks[name]
+
+    async def __aiter__(self):
+        async for value in self._track:
+            yield SimpleNamespace(value=value, at=None)
+
+
+moq = ModuleType("moq")
+moq.Error = MoqError
+# The stub has no shutdown errors: every `MoqError` it raises is a failure.
+moq.is_shutdown = lambda err: False
+moq.AnnounceEventPresent = AnnounceEventPresent
+moq.AnnounceEventAbsent = AnnounceEventAbsent
+moq.Timestamp = lambda value, scale: SimpleNamespace(value=value, scale=scale)
+moq.TrackInfo = lambda **kwargs: SimpleNamespace(**kwargs)
+
+moq_json = ModuleType("moq.json")
+moq_json.SnapshotProducer = SnapshotProducer
+moq_json.SnapshotConsumer = SnapshotConsumer
+moq.json = moq_json
+
+moq_media = ModuleType("moq.media")
+
+
+class CatalogProducer:
+    """A broadcast clock fixed at zero, like the runtime's shared epoch."""
+
+    def __init__(self, broadcast: object) -> None:
+        pass
+
+    def now(self) -> SimpleNamespace:
+        return SimpleNamespace(value=0, scale=1_000)
+
+
+moq_media.CatalogProducer = CatalogProducer
+moq_media.VideoFormat = SimpleNamespace(AVC3="avc3")
+moq_media.VideoInit = lambda **kwargs: SimpleNamespace(**kwargs)
+moq_media.VideoHint = lambda **kwargs: SimpleNamespace(**kwargs)
+moq_media.Dimensions = lambda **kwargs: SimpleNamespace(**kwargs)
+moq_media.Named = lambda name=None: SimpleNamespace(name=name)
+moq.media = moq_media
+
+sys.modules["moq"] = moq
+sys.modules["moq.json"] = moq_json
+sys.modules["moq.media"] = moq_media
+
+carla = ModuleType("carla")
+carla.Location = lambda **kwargs: SimpleNamespace(**kwargs)
+# `carla.Transform()` with no arguments is the identity transform, which is how
+# a sensor is attached at its parent actor's origin.
+carla.Transform = lambda location=None, rotation=None, **_kwargs: SimpleNamespace(location=location, rotation=rotation)
+carla.Vector3D = lambda **kwargs: SimpleNamespace(**kwargs)
+carla.VehicleControl = lambda **kwargs: SimpleNamespace(**kwargs)
+carla.LaneType = SimpleNamespace(Driving="driving")
+sys.modules["carla"] = carla
+
+
+@pytest.fixture(params=[False, True], ids=["ordinary", "deep-temp-root"])
+def bridge_socket(tmp_path, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    # AF_UNIX bounds the path passed to bind/connect, not the resolved location.
+    # A relative filename works even under a deep devshell/pytest temporary root.
+    root = tmp_path
+    if request.param:
+        root = tmp_path / ("nested" * 20)  # The component alone exceeds AF_UNIX's 108-byte Linux limit.
+        root.mkdir()
+    monkeypatch.chdir(root)
+    return "bridge.sock"

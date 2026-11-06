@@ -1,6 +1,8 @@
 import type * as Catalog from "@moq/hang/catalog";
 import { u53 } from "@moq/hang/catalog";
+import * as Util from "@moq/hang/util";
 import type * as Msf from "@moq/msf";
+import { Path } from "@moq/net";
 import { base64ToBytes } from "./base64";
 
 const DEFAULT_SAMPLE_RATE = 48000;
@@ -47,10 +49,17 @@ function toContainer(track: Msf.Track): ContainerInfo | undefined {
 }
 
 // Hang stores delay as whole milliseconds rounded up, and zero means the rendition is not behind.
-// MSF writes a fractional millisecond, which u53 rejects.
+// MSF writes a fractional millisecond, which u53 rejects. A negative value goes to u53 unrounded, so
+// it is rejected like a negative jitter rather than read as absent.
 function delayMillis(value: number): ReturnType<typeof u53> | undefined {
-	if (value <= 0) return undefined;
-	return u53(Math.ceil(value));
+	if (value === 0) return undefined;
+	return u53(value < 0 ? value : Math.ceil(value));
+}
+
+// Hang stores jitter as whole milliseconds; round MSF's fractional value up. A negative value goes
+// to u53 unrounded, so it is rejected even between -1 and 0, where rounding up would give -0.
+function jitterMillis(value: number): ReturnType<typeof u53> {
+	return u53(value < 0 ? value : Math.ceil(value));
 }
 
 function toVideoConfig(track: Msf.Track): Catalog.VideoConfig | undefined {
@@ -67,7 +76,7 @@ function toVideoConfig(track: Msf.Track): Catalog.VideoConfig | undefined {
 		codedHeight: track.height != null ? u53(track.height) : undefined,
 		framerate: track.framerate,
 		bitrate: track.bitrate != null ? u53(track.bitrate) : undefined,
-		jitter: track.jitter != null ? u53(track.jitter) : undefined,
+		jitter: track.jitter != null ? jitterMillis(track.jitter) : undefined,
 		delay: track.delay != null ? delayMillis(track.delay) : undefined,
 	};
 }
@@ -91,25 +100,62 @@ function toAudioConfig(track: Msf.Track): Catalog.AudioConfig | undefined {
 		sampleRate: u53(track.samplerate ?? DEFAULT_SAMPLE_RATE),
 		numberOfChannels: u53(channels),
 		bitrate: track.bitrate != null ? u53(track.bitrate) : undefined,
-		jitter: track.jitter != null ? u53(track.jitter) : undefined,
+		// MSF cannot advertise decoder warmup, so derive Opus's seek pre-roll.
+		warmup: track.codec === "opus" ? u53(Util.Opus.WARMUP) : undefined,
+		jitter: track.jitter != null ? jitterMillis(track.jitter) : undefined,
 		delay: track.delay != null ? delayMillis(track.delay) : undefined,
 	};
 }
 
+// MSF namespaces are absolute, but each side sees paths under its own connection root. Draft
+// catalogs repeat the publisher's full namespace on every track, so a namespace matching the
+// catalog's path on whole trailing segments is the catalog seen from a different root.
+function namesCatalog(namespace: Path.Valid, base: Path.Valid): boolean {
+	if (namespace === base) return true;
+	const a = Path.parts(namespace);
+	const b = Path.parts(base);
+	if (a.length === 0 || b.length === 0) return false;
+	const endsWith = (long: string[], short: string[]) =>
+		short.length <= long.length && short.every((part, i) => part === long[long.length - short.length + i]);
+	return endsWith(a, b) || endsWith(b, a);
+}
+
 /** Convert an MSF catalog to a hang catalog Root. */
-export function toHang(msf: Msf.Catalog): Catalog.Root {
+export function toHang(msf: Msf.Catalog, base?: Path.Valid): Catalog.Root {
 	// Track names are untrusted keys; a null prototype keeps `__proto__` an ordinary rendition.
 	const videoRenditions: Record<string, Catalog.VideoConfig> = Object.create(null);
 	const audioRenditions: Record<string, Catalog.AudioConfig> = Object.create(null);
 	const textRenditions: Record<string, Catalog.TextConfig> = Object.create(null);
 
 	for (const track of msf.tracks) {
+		// The track name is the rendition ID, so a later track with the name replaces the earlier
+		// one, whatever namespace or role either has.
+		delete videoRenditions[track.name];
+		delete audioRenditions[track.name];
+		delete textRenditions[track.name];
+		let broadcast: Path.Relative | undefined;
+		if (track.namespace !== undefined) {
+			if (base === undefined)
+				throw new Error(`MSF track ${track.name} namespace requires the catalog broadcast path`);
+			let target: Path.Valid;
+			try {
+				target = Path.from(track.namespace);
+			} catch {
+				throw new Error(`MSF track ${track.name} namespace cannot be referenced from the catalog`);
+			}
+			if (!namesCatalog(target, base)) {
+				const relative = Path.relative(target, base);
+				if (relative === undefined)
+					throw new Error(`MSF track ${track.name} namespace cannot be referenced from the catalog`);
+				broadcast = relative;
+			}
+		}
 		if (track.role === "video") {
 			const config = toVideoConfig(track);
-			if (config) videoRenditions[track.name] = config;
+			if (config) videoRenditions[track.name] = { ...config, broadcast };
 		} else if (track.role === "audio") {
 			const config = toAudioConfig(track);
-			if (config) audioRenditions[track.name] = config;
+			if (config) audioRenditions[track.name] = { ...config, broadcast };
 		} else if (
 			track.role === "caption" ||
 			track.role === "subtitle" ||
@@ -123,6 +169,7 @@ export function toHang(msf: Msf.Catalog): Catalog.Root {
 			if (!info) continue;
 			if (!track.codec) throw new Error(`MSF text track ${track.name} missing codec`);
 			textRenditions[track.name] = {
+				broadcast,
 				format: track.codec,
 				role: track.role,
 				lang: track.lang,

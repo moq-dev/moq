@@ -33,7 +33,16 @@ const { values } = parseArgs({
 
 const { page: pageDir, url, broadcast, source, description, out } = values;
 const durationMs = Number(values.duration) * 1000;
-if (!pageDir || !url || !broadcast || !source || !description || !out || !Number.isFinite(durationMs) || durationMs <= 0) {
+if (
+	!pageDir ||
+	!url ||
+	!broadcast ||
+	!source ||
+	!description ||
+	!out ||
+	!Number.isFinite(durationMs) ||
+	durationMs <= 0
+) {
 	console.error(
 		"usage: record.ts --page DIR --url U --broadcast B --source S --description D --out FILE [--duration S] [--mic]",
 	);
@@ -118,19 +127,27 @@ try {
 	const trimmed = arrivals.filter(([at]) => at - start <= durationMs);
 	const round = (x: number, places: number) => Math.round(x * 10 ** places) / 10 ** places;
 	const trace: Trace = {
-		version: 2,
+		version: 3,
 		source,
 		description,
 		transport: info.transport,
 		rtt: rtt === null ? null : round(rtt, 1),
 		config: info.config as Trace["config"],
 		duration: durationMs,
-		arrivals: trimmed.map(([at, timestamp, group]) => [round(at - start, 2), round(timestamp, 3), group]),
+		arrivals: trimmed.map(([at, timestamp, group, duration]) => [
+			round(at - start, 2),
+			round(timestamp, 3),
+			group,
+			duration,
+		]),
 	};
 	// One arrival per line, so the file reads as a table.
 	const { arrivals: rows, ...header } = trace;
 	const head = JSON.stringify(header, null, "\t").slice(0, -2);
-	await Bun.write(out, `${head},\n\t"arrivals": [\n${rows.map((r) => `\t\t${JSON.stringify(r)}`).join(",\n")}\n\t]\n}\n`);
+	await Bun.write(
+		out,
+		`${head},\n\t"arrivals": [\n${rows.map((r) => `\t\t${JSON.stringify(r)}`).join(",\n")}\n\t]\n}\n`,
+	);
 	console.log(
 		`${out}: ${trace.arrivals.length} arrivals over ${round(durationMs / 1000, 1)} s, ${trace.config.codec} at ${trace.config.sampleRate} Hz, ${trace.transport}, rtt ${trace.rtt} ms`,
 	);

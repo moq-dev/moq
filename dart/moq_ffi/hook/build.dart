@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:code_assets/code_assets.dart';
@@ -81,38 +82,88 @@ Future<_Resolved> _resolveLibrary(
   );
 }
 
-/// Build moq-ffi from this checkout.
+/// Build moq-ffi from this checkout in the dev profile.
 ///
 /// Always shells out to Cargo rather than reusing whatever is already in
 /// target/: an existing artifact may predate a Rust edit, or have been built by
 /// another recipe with different features. Cargo's own timestamp check makes
 /// the no-op case cheap.
 Future<_Resolved> _build(Uri workspace, String target, String library) async {
+  // Keep the leak-test allocator out of the shared cdylib. A separate output
+  // directory preserves Cargo's native compilation mode and dependency cache
+  // identities; passing the host as --target would split them.
+  final targetDir = workspace.resolve('target/dart/');
   final cargoArgs = [
-    'build',
-    '--locked',
-    '--release',
-    '--package',
-    'moq-ffi',
-    '--no-default-features',
-    '--manifest-path',
-    workspace.resolve('Cargo.toml').toFilePath(),
+    'build-ffi',
+    '--message-format=json-render-diagnostics',
+    '--features',
+    'testing',
+    '--target-dir',
+    targetDir.toFilePath(),
   ];
+  final rustc = await Process.run('rustc', [
+    '-vV',
+  ], workingDirectory: workspace.toFilePath());
+  if (rustc.exitCode != 0) {
+    throw StateError('rustc -vV failed: ${rustc.stderr}');
+  }
+  final host = LineSplitter.split(
+    rustc.stdout as String,
+  ).firstWhere((line) => line.startsWith('host: ')).substring('host: '.length);
+  final native = target == host;
+  final android = target.contains('-android');
 
   // Android needs the NDK's linker and sysroot, which only cargo-ndk sets up.
   // This mirrors rs/moq-ffi/build.sh.
-  final args = target.contains('-android')
+  final args = android
       ? ['ndk', '--target', target, '--platform', '24', '--', ...cargoArgs]
-      : [...cargoArgs, '--target', target];
+      : [
+          ...cargoArgs,
+          if (!native) ...['--target', target],
+        ];
 
-  final result = await Process.run('cargo', args);
+  // The iOS floor release-ffi.yml builds with, which also avoids its
+  // ___chkstk_darwin linker errors. The hook's filtered environment drops it.
+  final result = await Process.run(
+    'cargo',
+    args,
+    workingDirectory: workspace.toFilePath(),
+    environment: target.contains('-apple-ios')
+        ? const {'IPHONEOS_DEPLOYMENT_TARGET': '16.0'}
+        : null,
+  );
   if (result.exitCode != 0) {
     throw StateError(
       'cargo ${args.join(' ')} failed:\n${result.stdout}\n${result.stderr}',
     );
   }
 
-  final built = workspace.resolve('target/$target/release/$library');
+  final scoped = targetDir.resolve('$target/debug/$library');
+  final Uri built;
+  if (android) {
+    // cargo-ndk consumes Cargo's artifact messages and always sets --target.
+    built = scoped;
+  } else {
+    final artifacts = LineSplitter.split(result.stdout as String)
+        .map((line) => jsonDecode(line) as Map<String, dynamic>)
+        .where(
+          (message) =>
+              message['reason'] == 'compiler-artifact' &&
+              (message['target'] as Map<String, dynamic>)['name'] == 'moq_ffi',
+        )
+        .expand((message) => (message['filenames'] as List).cast<String>())
+        .map((path) => File(path).uri)
+        .where((uri) => uri.pathSegments.last == library)
+        .toSet();
+    if (artifacts.length != 1) {
+      throw StateError('expected one moq-ffi cdylib from Cargo: $artifacts');
+    }
+    built = artifacts.single;
+    final unscoped = targetDir.resolve('debug/$library');
+    if (built != scoped && !(native && built == unscoped)) {
+      throw StateError('Cargo artifact does not match target $target: $built');
+    }
+  }
   if (!await File.fromUri(built).exists()) {
     throw StateError('cargo did not produce ${built.toFilePath()}');
   }

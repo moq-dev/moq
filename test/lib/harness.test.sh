@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Independent shells must reserve different ports even with private temp roots.
+# Independent shells must reserve different ports even with private temp roots,
+# and a relative HARNESS_RUNS must survive a harness changing directory.
 set -euo pipefail
 
 lib=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -8,8 +9,8 @@ owner=""
 trap '[[ -z "$owner" ]] || { kill "$owner" 2>/dev/null || true; wait "$owner" 2>/dev/null || true; }; rm -rf "$scratch"' EXIT
 mkdir "$scratch/one" "$scratch/two"
 mkfifo "$scratch/ready" "$scratch/release"
-export MOQ_TEST_RUNS="$scratch/runs"
-unset MOQ_TEST_PORTS
+export HARNESS_RUNS="$scratch/runs"
+unset HARNESS_PORT_ROOT
 
 TMPDIR="$scratch/one" bash -euo pipefail -c '
     source "$1/harness.sh"
@@ -38,7 +39,7 @@ wait "$owner"
 owner=""
 # Refuse an unexpected owner-controlled target under the predictable root.
 ln -s "$scratch/one" "$scratch/ports-link"
-MOQ_TEST_PORTS="$scratch/ports-link" bash -euo pipefail -c '
+HARNESS_PORT_ROOT="$scratch/ports-link" bash -euo pipefail -c '
     source "$1/harness.sh"
     harness_begin ports >&2
     if harness_port symlink; then
@@ -49,4 +50,13 @@ MOQ_TEST_PORTS="$scratch/ports-link" bash -euo pipefail -c '
         [[ "$status" == 2 ]]
     fi
 ' bash "$lib"
+# A relative root must still name the same directory after the harness changes directory.
+(cd "$scratch" && HARNESS_RUNS=relative bash -euo pipefail -c '
+    source "$1/harness.sh"
+    harness_begin relative >&2
+    [[ "$HARNESS_RUN" == "$2"/relative/relative-* ]] || {
+        echo "FAIL: relative HARNESS_RUNS gave run directory $HARNESS_RUN" >&2
+        exit 1
+    }
+' bash "$lib" "$(cd "$scratch" && pwd)")
 echo "cross-shell port reservations passed"

@@ -1,0 +1,21 @@
+# Relay config for the browser benchmark.
+# Anonymous access, self-signed localhost cert, QUIC + HTTP on 127.0.0.1.
+#
+# run.sh overrides the port on the command line (`--listen` / `--web-http-listen`).
+
+[log]
+level = "warn"
+
+[listen]
+# QUIC on UDP. 127.0.0.1 avoids IPv6 flakiness on CI runners.
+bind = "127.0.0.1:4460"
+tls.generate = ["localhost", "127.0.0.1"]
+
+[web.http]
+# HTTP on TCP, serving /certificate.sha256 so the browser can pin the
+# self-signed cert via WebTransport's serverCertificateHashes.
+listen = "127.0.0.1:4460"
+
+[auth]
+# Allow anonymous access to everything.
+public = "**"

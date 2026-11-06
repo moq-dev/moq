@@ -1,7 +1,7 @@
 //! The assembled relay: every startup step, in one place, in the right order.
 //!
-//! [`Relay::load`] turns a [`Config`] into the running pieces (server, client,
-//! auth, cluster, stats, internal + web listeners), and [`Relay::run`] drives
+//! [`Relay::load`] turns a [`Config`] into the running pieces (server, auth,
+//! cluster, stats, internal + web listeners), and [`Relay::run`] drives
 //! them. `main.rs` is a thin wrapper over the two.
 //!
 //! # Why this is a type and not just `main`
@@ -20,6 +20,8 @@
 //! Calling `load` means a new step arrives with the update, and a reshaped API
 //! is a compile error.
 
+use std::task::Poll;
+
 use anyhow::Context;
 use axum::Router;
 
@@ -28,29 +30,38 @@ use crate::{Config, Connection, auth, auth::Admissions, cluster, internal, shutd
 /// A handle that waits until a relay has finished startup.
 #[derive(Clone)]
 pub struct Ready {
-	receiver: tokio::sync::watch::Receiver<bool>,
+	receiver: tokio::sync::watch::Receiver<Startup>,
 }
 
 impl Ready {
-	/// Wait until `Relay::run` starts serving, or fail if it exits first.
+	/// Wait until `Relay::run` starts serving, or fail with its error if it exits first.
 	pub async fn wait(mut self) -> anyhow::Result<()> {
-		loop {
-			if *self.receiver.borrow() {
-				return Ok(());
-			}
-			self.receiver
-				.changed()
-				.await
-				.context("relay stopped before becoming ready")?;
+		let startup = self
+			.receiver
+			.wait_for(|startup| !matches!(startup, Startup::Starting))
+			.await
+			.context("relay stopped before becoming ready")?;
+		if let Startup::Failed(err) = &*startup {
+			return Err(anyhow::anyhow!("{err}").context("relay stopped before becoming ready"));
 		}
+		Ok(())
 	}
+}
+
+/// How far [`Relay::run`] got through startup.
+#[derive(Clone)]
+enum Startup {
+	Starting,
+	Serving,
+	// The error's whole chain, since `run` returns the error itself.
+	Failed(std::sync::Arc<str>),
 }
 
 /// A fully assembled relay: the owner of every listener, worker group, and
 /// shutdown join.
 ///
 /// The accessors borrow, and [`Self::run`] consumes the relay, so clone the
-/// application handles ([`Self::cluster`], [`Self::auth`], [`Self::client`],
+/// application handles ([`Self::cluster`], [`Self::auth`],
 /// [`Self::stats`], [`Self::shutdown`], [`Self::shutdown_trigger`]) first,
 /// then mount extra routes with [`Self::with_web`] / [`Self::with_internal`].
 /// An application that decides admissions itself leaves `[auth]` empty and
@@ -69,18 +80,22 @@ impl Ready {
 /// running.await??;
 /// ```
 pub struct Relay {
-	ready: tokio::sync::watch::Sender<bool>,
-	config: Config,
+	ready: tokio::sync::watch::Sender<Startup>,
+	// Keep the inspection snapshot out of every future that moves a Relay.
+	config: Box<Config>,
 	server: moq_tokio::Listener,
-	client: moq_tokio::Client,
 	auth: auth::Auth,
 	/// The sessions the embedder decides, until it takes them. `None` when the
 	/// config named a source; `run` refuses to start while this is still held.
 	admissions: Option<Admissions>,
 	cluster: cluster::Cluster,
-	stats: moq_stats::Producer,
+	/// The cluster's origin, cache, and stats work, polled for as long as [`Self::run`]
+	/// runs. `None` only once `run` took it.
+	driver: Option<cluster::Driver>,
 	internal: internal::Internal,
 	web: web::Web,
+	#[cfg(feature = "stun")]
+	stun: Option<crate::stun::Server>,
 	addr: Option<std::net::SocketAddr>,
 	shutdown: shutdown::Observer,
 	shutdown_trigger: shutdown::Trigger,
@@ -99,11 +114,15 @@ pub struct Relay {
 	#[cfg(feature = "_quic")]
 	workers: Option<moq_tokio::worker::Workers>,
 	/// The io_uring QUIC workers, already bound and waiting for
-	/// [`serve`](crate::uring::Workers::serve). `None` unless both
+	/// [`serve`](crate::uring::Spawned::serve). `None` unless both
 	/// `runtime.workers` and `runtime.io_uring` are configured, in which case
 	/// they own the QUIC listen address instead of `workers`.
 	#[cfg(all(target_os = "linux", feature = "_uring"))]
 	uring: Option<crate::uring::Workers>,
+	/// The tokio QUIC listener's demux, which every worker shares. `None` when
+	/// nothing on tokio serves QUIC: a stream-only relay, or the io_uring workers.
+	#[cfg(feature = "_quic")]
+	demux: Option<moq_tokio::quic::demux::Demux>,
 }
 
 impl Relay {
@@ -111,12 +130,32 @@ impl Relay {
 	/// auth, and build the cluster with its cache and stats attached.
 	///
 	/// This performs the side effects of starting up (binding every socket,
-	/// reading key material, spawning the cache governor), so a returned `Relay`
-	/// reports its ephemeral ports and a taken port fails here; no session is
-	/// admitted until [`Self::run`] drives it.
-	pub async fn load(mut config: Config) -> anyhow::Result<Self> {
+	/// reading key material), so a returned `Relay` reports its ephemeral ports and
+	/// a taken port fails here. Nothing runs yet: the cluster's
+	/// [`Driver`](crate::cluster::Driver), which holds the origin's lifecycle work and
+	/// the cache governor and stats publisher, is only stored, and no session is admitted until
+	/// [`Self::run`] drives both.
+	pub async fn load(config: Config) -> anyhow::Result<Self> {
+		moq_tokio::crypto::check()?;
+		// Keep the large debug state machine off the embedder's main-thread stack.
+		Box::pin(Self::load_inner(config)).await
+	}
+
+	async fn load_inner(mut config: Config) -> anyhow::Result<Self> {
 		config.resolve()?;
-		let resolved_config = config.clone();
+		// A relay keeps the moq-transport object state it forwards across a moq-lite hop to
+		// another relay. Only negotiated when both sides offer it, so other peers never see it.
+		config.listen.extensions.ietf = true;
+		config.connect.extensions.ietf = true;
+		// Name the relay ahead of its core unless the operator overrides it (empty omits it),
+		// and dial cluster peers under the same name.
+		let implementation = config
+			.listen
+			.implementation
+			.get_or_insert_with(|| format!("moq-relay/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION))
+			.clone();
+		config.connect.implementation = Some(implementation.clone());
+		let resolved_config = Box::new(config.clone());
 		let drain_timeout = config.drain_timeout();
 		// The name this relay reports in every auth request: the stats node label,
 		// else the cluster node URL, else nothing.
@@ -170,7 +209,7 @@ impl Relay {
 		#[cfg(not(feature = "_quic"))]
 		anyhow::ensure!(
 			io_uring || config.runtime.workers().is_none(),
-			"runtime.workers needs moq-relay built with the `noq` feature"
+			"runtime.workers needs moq-relay built with the `quic` feature"
 		);
 
 		// Workers and the stream server split one relay across listeners, so they share
@@ -181,6 +220,11 @@ impl Relay {
 			listen.tls = Default::default();
 		}
 
+		// Shared by whichever tokio listener serves QUIC, so one feed and one set of
+		// counters covers every worker.
+		#[cfg(feature = "_quic")]
+		let demux = moq_tokio::quic::demux::Demux::default();
+
 		#[cfg(feature = "_quic")]
 		let workers = match config.runtime.workers() {
 			Some(worker) if !io_uring => {
@@ -189,6 +233,7 @@ impl Relay {
 				server.tls = served.clone();
 				server.quic = config.quic.clone();
 				server.activity = shutdown.activity.clone();
+				server.demux = demux.clone();
 				Some(moq_tokio::worker::Workers::bind(server, worker).context("failed to start the QUIC workers")?)
 			}
 			_ => None,
@@ -222,24 +267,19 @@ impl Relay {
 		#[cfg(not(all(target_os = "linux", feature = "_uring")))]
 		let quic_owned_elsewhere = workers_addr.is_some();
 
-		#[cfg(feature = "iroh")]
-		let iroh = config.iroh.bind(&config.quic).await?;
-
-		#[allow(unused_mut)]
 		let mut server_config = moq_tokio::server::Config::default();
 		server_config.listen = listen;
 		server_config.tls = served;
 		server_config.quic = config.quic.clone();
 		server_config.activity = shutdown.activity.clone();
-		#[cfg(feature = "iroh")]
+		#[cfg(feature = "_quic")]
 		{
-			server_config.iroh = iroh.clone();
+			server_config.demux = demux.clone();
 		}
 		let server = match quic_owned_elsewhere {
 			true => server_config.init_streams()?,
 			false => server_config.init()?,
 		};
-		let client = config.connect.clone().init(config.quic.clone())?;
 
 		// `None` for a stream-only server (no QUIC); any other error is real.
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
@@ -256,11 +296,12 @@ impl Relay {
 			},
 		};
 
-		#[cfg(feature = "iroh")]
-		let client = match iroh {
-			Some(iroh) => client.with_iroh(iroh),
-			None => client,
-		};
+		// The io_uring workers serve QUIC without the demux, and a stream-only relay
+		// has no UDP port at all.
+		#[cfg(all(feature = "_quic", target_os = "linux", feature = "_uring"))]
+		let demux = (addr.is_some() && uring.is_none()).then_some(demux);
+		#[cfg(all(feature = "_quic", not(all(target_os = "linux", feature = "_uring"))))]
+		let demux = addr.is_some().then_some(demux);
 
 		let cache = config.cache.init()?;
 		// Whichever worker group owns QUIC holds the certificates; the shared
@@ -279,32 +320,35 @@ impl Relay {
 		if generated && let Some(fingerprint) = certificates.fingerprints().into_iter().next() {
 			advertise = advertise.with_fingerprint(fingerprint);
 		}
-		let mut cluster_options = cluster::Options::new(config.cluster).with_cache(cache);
-		cluster_options.session = config.session;
-		cluster_options.peer = config.peer;
-		let cluster = cluster::Cluster::new(cluster_options)?
-			.with_client(client.clone())
-			.with_client_tls(config.connect.tls.build()?)
+		let mut cluster_options = cluster::Options::new(config.cluster)
+			.with_cache(cache)
+			.with_stats(config.stats);
+		cluster_options.session = config.limits.client;
+		cluster_options.peer = config.limits.peer;
+		let (cluster, driver) = cluster::Cluster::new(cluster_options)?;
+		let cluster = cluster
 			.with_connect(config.connect.clone(), config.quic.clone())
 			.with_advertise(advertise);
-		let stats = config.stats.build(cluster.origin.clone());
-		// The cluster takes over keeping the publish task alive, so an embedder that
-		// drops the producer keeps publishing for as long as it serves.
-		let cluster = cluster.with_stats(stats.clone());
 
 		let sessions = crate::session::Registry::new();
-		let (ready, _) = tokio::sync::watch::channel(false);
+		let (ready, _) = tokio::sync::watch::channel(Startup::Starting);
 		let web = web::Web::new(auth.clone(), cluster.clone(), certificates, config.web)
 			.with_shutdown(shutdown.clone())
 			.with_versions(server_versions)
 			.with_extensions(server_extensions)
+			.with_implementation(implementation)
 			.with_timeout(handshake_timeout)
+			.with_quic(&config.quic)
 			.with_sessions(sessions.clone())
-			.bind()?;
+			.with_tls_acceptor(server.tls_acceptor());
+		let web = web.bind()?;
 		// `bind`, not `listen`: the TCP/Unix accept loops handshake as soon as
 		// they run, and `load` is not yet willing to take a session. `run`
 		// starts them on its first accept.
 		let server = server.bind().await.context("failed to bind listeners")?;
+
+		#[cfg(feature = "stun")]
+		let stun = crate::stun::Server::bind(config.stun).await?;
 
 		// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
 		// /metrics + /health + /nodes, separate from the customer-facing web server. No-op
@@ -319,6 +363,10 @@ impl Relay {
 			.with_listeners(web.accept_health())
 			.with_listeners(server.accept_health())
 			.bind()?;
+		#[cfg(feature = "stun")]
+		let internal = internal.with_stun(stun.as_ref().map(|stun| stun.counters.clone()));
+		#[cfg(feature = "_quic")]
+		let internal = internal.with_demux(demux.as_ref().map(|demux| demux.counters().clone()));
 		// Bound but not yet serving: registering here (rather than after the
 		// threads start) is what gives every worker a series from the first
 		// scrape, including one that is about to fail setup.
@@ -339,13 +387,14 @@ impl Relay {
 			ready,
 			config: resolved_config,
 			server,
-			client,
 			auth,
 			admissions,
 			cluster,
-			stats,
+			driver: Some(driver),
 			internal,
 			web,
+			#[cfg(feature = "stun")]
+			stun,
 			addr,
 			shutdown,
 			shutdown_trigger,
@@ -357,6 +406,8 @@ impl Relay {
 			workers,
 			#[cfg(all(target_os = "linux", feature = "_uring"))]
 			uring,
+			#[cfg(feature = "_quic")]
+			demux,
 		})
 	}
 
@@ -392,12 +443,6 @@ impl Relay {
 		self.server.tcp_local_addr()
 	}
 
-	/// The client used to dial cluster peers. Already handed to [`Self::cluster`];
-	/// clone it for your own outbound dials so they share the connection config.
-	pub fn client(&self) -> &moq_tokio::Client {
-		&self.client
-	}
-
 	/// Where every session's grant comes from: the auth server, the static public
 	/// grant, or the embedder answering [`Self::admissions`]. Clone it to admit
 	/// your own listeners' sessions the same way.
@@ -412,16 +457,37 @@ impl Relay {
 		self.admissions.take()
 	}
 
+	/// The WebRTC media path (ICE, DTLS, and RTP) arriving on the QUIC port,
+	/// for an embedder's WebRTC stack to serve and answer through the same port.
+	///
+	/// Until a feed is taken, and once every feed is dropped, that traffic is
+	/// dropped and counted. Fails when no tokio listener serves QUIC: a stream-only
+	/// relay, or one on the io_uring workers, which do not split the port yet.
+	#[cfg(feature = "_quic")]
+	pub fn webrtc(&self) -> anyhow::Result<moq_tokio::quic::demux::WebRtc> {
+		let demux = self
+			.demux
+			.as_ref()
+			.context("the WebRTC media path needs QUIC served by the tokio runtime")?;
+		Ok(demux.webrtc())
+	}
+
+	/// The RTMP and RTMPS connections the public web listeners classify, for the
+	/// embedder to serve; see [`web::Web::rtmp`]. Untaken, they are logged and closed.
+	pub fn rtmp(&mut self) -> web::rtmp::Incoming {
+		self.web.rtmp()
+	}
+
 	/// The shared cluster: the origin every session and peer publishes into.
 	pub fn cluster(&self) -> &cluster::Cluster {
 		&self.cluster
 	}
 
-	/// The stats producer, for publishing extra counters through the same
-	/// registry. [`Self::cluster`] holds a clone, so the publish task lives as
-	/// long as the cluster whether or not this handle is kept.
+	/// The stats producer, for publishing extra counters through the same registry.
+	/// The cluster holds it, so publishing lasts as long as the cluster and its
+	/// driver do, whether or not this handle is cloned.
 	pub fn stats(&self) -> &moq_stats::Producer {
-		&self.stats
+		&self.cluster.stats_producer
 	}
 
 	/// Graceful-shutdown signal shared by every accepted session and web handler.
@@ -491,6 +557,11 @@ impl Relay {
 	/// Whether [`Self::run`] starts the drain on SIGINT/SIGTERM. Defaults to
 	/// `true`; pass `false` when the application owns the signals and fires
 	/// [`Self::shutdown_trigger`] itself, e.g. after withdrawing the node from DNS.
+	///
+	/// `run` installs the handlers just before it serves, once its startup can no
+	/// longer fail, so a signal before that takes its default action.
+	/// They stay installed for the life of the process,
+	/// since tokio never removes one, even after `run` fails.
 	#[must_use = "the relay with the signal choice is returned"]
 	pub fn with_signals(mut self, signals: bool) -> Self {
 		self.signals = signals;
@@ -506,7 +577,39 @@ impl Relay {
 	///
 	/// This is also the embedding loop. Extra routes go on via [`Self::with_web`]
 	/// / [`Self::with_internal`] before calling this; cloned handles outlive it.
-	pub async fn run(self) -> anyhow::Result<()> {
+	pub async fn run(mut self) -> anyhow::Result<()> {
+		// Held past `run_inner`, so a waiter sees the failure before the close.
+		let ready = self.ready.clone();
+		// Polled beside everything `run_inner` does, startup and teardown included. A
+		// panic is reported like any critical task's, so the cluster's `run` returns
+		// it and `run_inner` still tears down on the way out.
+		let mut driver = self.driver.take().expect("only run takes the driver");
+		let critical = self.cluster.critical.clone();
+		let driving = kio::wait(move |waiter| {
+			if let Poll::Ready(Err(err)) = driver.poll(waiter) {
+				critical.fail(err);
+			}
+			Poll::<std::convert::Infallible>::Pending
+		});
+		// Serving branches must not inflate the caller's stack frame.
+		let result = tokio::select! {
+			biased;
+			result = Box::pin(self.run_inner()) => result,
+			never = driving => match never {},
+		};
+		if let Err(err) = &result {
+			ready.send_if_modified(|startup| {
+				let starting = matches!(startup, Startup::Starting);
+				if starting {
+					*startup = Startup::Failed(format!("{err:#}").into());
+				}
+				starting
+			});
+		}
+		result
+	}
+
+	async fn run_inner(self) -> anyhow::Result<()> {
 		let Relay {
 			ready,
 			mut server,
@@ -515,6 +618,8 @@ impl Relay {
 			cluster,
 			internal,
 			web,
+			#[cfg(feature = "stun")]
+			stun,
 			shutdown,
 			shutdown_trigger,
 			signals,
@@ -546,22 +651,37 @@ impl Relay {
 
 		// Before the readiness notify, for the same reason the cluster starts
 		// before it: an unsupported kernel, a refused ring, or a certificate
-		// certificate identity noq will not load fails here, and reporting ready first would
+		// identity rustls will not load fails here, and reporting ready first would
 		// release the units depending on a relay that is about to exit.
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
-		let mut uring = uring;
+		let mut uring = uring
+			.map(|uring| {
+				uring
+					.spawn(cluster.clone(), auth.clone(), shutdown.clone(), sessions.clone())
+					.context("failed to start the io_uring QUIC workers")
+			})
+			.transpose()?;
+
+		// After the last step that can fail, since a handler outlives a
+		// failed `run`, and before anything accepts a session a signal would kill
+		// without a GOAWAY.
+		// Nothing awaits from here to the drain below, so a signal caught in between
+		// starts the drain at its first poll, as one just after READY would.
+		let mut handlers = signals.then(shutdown::Signals::new).transpose()?;
+
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
 		if let Some(uring) = uring.as_mut() {
-			uring
-				.serve(cluster.clone(), auth.clone(), shutdown.clone(), sessions.clone())
-				.context("failed to start the io_uring QUIC workers")?;
+			uring.serve();
 		}
 
-		ready.send_replace(true);
+		// An embedder that already stopped the relay gets a drain, not a READY.
+		if shutdown.deadline().is_none() {
+			ready.send_replace(Startup::Serving);
 
-		#[cfg(unix)]
-		// Notify systemd that we're ready after all initialization is complete
-		let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
+			#[cfg(unix)]
+			// Notify systemd that we're ready after all initialization is complete
+			let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
+		}
 
 		#[cfg(feature = "jemalloc")]
 		let jemalloc = moq_tokio::jemalloc::run();
@@ -633,46 +753,55 @@ impl Relay {
 
 		// With the QUIC listener owned by a worker group, the shared server has
 		// only the `tcp`/`unix` stream listeners left, and a config with none
-		// of those has nothing to accept: its loop would report "stopped
-		// accepting" immediately and take the healthy relay down. Pend instead;
+		// of those has nothing to accept: its loop would fail with
+		// `NoBackend` immediately and take the healthy relay down. Pend instead;
 		// the workers are what serve.
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
 		let quic_on_workers = has_workers || uring_serving;
 		#[cfg(not(all(target_os = "linux", feature = "_uring")))]
 		let quic_on_workers = has_workers;
-		// Iroh is not an `accept(2)` listener, so it never shows up in the
-		// health list; pending on the shared loop would leave its endpoint
-		// unpolled and every inbound `iroh://` connection hanging.
-		#[cfg(feature = "iroh")]
-		let has_iroh = server.iroh_endpoint().is_some();
-		#[cfg(not(feature = "iroh"))]
-		let has_iroh = false;
 		let serve_shared = {
-			let idle = quic_on_workers && server.accept_health().is_empty() && !has_iroh;
+			let idle = quic_on_workers && server.accept_health().is_empty();
 			let server = &mut server;
 			let cluster = cluster.clone();
 			let auth = auth.clone();
 			let shutdown = shutdown.clone();
 			let sessions = sessions.clone();
-			async move {
+			// Boxed like the serving futures in the `select!` below.
+			Box::pin(async move {
 				match idle {
 					true => std::future::pending().await,
 					false => serve_listening(server, cluster, auth, shutdown, sessions).await,
 				}
-			}
+			})
 		};
 
+		let stun = async move {
+			#[cfg(feature = "stun")]
+			match stun {
+				Some(stun) => stun.run().await,
+				None => std::future::pending().await,
+			}
+			#[cfg(not(feature = "stun"))]
+			std::future::pending::<anyhow::Result<()>>().await
+		};
+		// Box the large serving futures: a debug build copies each one into this poll's
+		// stack frame several times, and an embedder's main thread pays for that frame.
 		let result = tokio::select! {
-			Err(err) = started.run() => Err(err).context("cluster failed"),
-			Err(err) = web.serve(web_routes) => Err(err).context("web server failed"),
+			Err(err) = Box::pin(started.run()) => Err(err).context("cluster failed"),
+			Err(err) = Box::pin(web.serve(web_routes)) => Err(err).context("web server failed"),
+			Err(err) = stun => Err(err).context("STUN server failed"),
 			Err(err) = internal.serve(internal_routes) => Err(err).context("internal server failed"),
 			Err(err) = serve_shared => Err(err).context("server failed"),
 			Err(err) = quic_workers => Err(err).context("QUIC workers failed"),
 			err = uring_failed => Err(err).context("io_uring QUIC workers failed"),
 			Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
-			res = drain(shutdown_trigger, shutdown.clone(), signals) => res,
+			() = drain(shutdown_trigger, shutdown.clone(), handlers.as_mut()) => Ok(()),
 			else => Ok(()),
 		};
+
+		// Before the runtime goes, so each dialed peer drops our routes at once.
+		cluster.close().await;
 
 		// Dropping the listener would leave its QUIC socket open until the
 		// endpoint's closing connections finish in the background, past `run`.
@@ -696,80 +825,38 @@ impl Relay {
 /// Two-stage shutdown: the first signal, or an embedder firing
 /// [`shutdown::Trigger::start`], starts the drain broadcast (every session sends
 /// GOAWAY and waits for its peer to leave). Returns from [`Relay::run`] once
-/// every session has left, which the drain deadline forces, or on a second
-/// signal, logging which ended it.
+/// [`shutdown::Observer::drained`] does, or on a second signal.
 /// Without `signals` only the trigger and the sessions count.
-async fn drain(trigger: shutdown::Trigger, mut shutdown: shutdown::Observer, signals: bool) -> anyhow::Result<()> {
+async fn drain(
+	trigger: shutdown::Trigger,
+	mut shutdown: shutdown::Observer,
+	mut signals: Option<&mut shutdown::Signals>,
+) {
 	let window = shutdown.drain_timeout;
-	let signal = || async move {
-		match signals {
-			true => shutdown_signal().await,
-			false => std::future::pending().await,
-		}
+	let mut signal = async || match signals.as_mut() {
+		Some(signals) => signals.recv().await,
+		None => std::future::pending().await,
 	};
 	tokio::select! {
-		res = signal() => {
-			res?;
+		// A drain the embedder already started leaves a queued signal to be the
+		// second request, not another first one.
+		biased;
+		() = shutdown.started() => tracing::info!(?window, "shutdown requested; draining sessions"),
+		() = signal() => {
 			tracing::info!(
 				?window,
 				"shutdown signal received; draining sessions (signal again to exit immediately)"
 			);
 			trigger.start();
 		}
-		_ = shutdown.started() => tracing::info!(?window, "shutdown requested; draining sessions"),
 	}
 
-	// The deadline fixed when the trigger fired, which may be earlier than this
-	// future was polled (the embedder can start the drain during startup).
-	// Handshakes may never finish, so the same absolute deadline bounds them
-	// without waiting for an established session to force-close.
-	let deadline = shutdown.deadline().context("drain started without a deadline")?;
 	tokio::select! {
-		res = signal() => {
-			res?;
-			tracing::warn!(open = shutdown.tally().live, "second shutdown signal; exiting immediately");
-			return Ok(());
+		() = signal() => {
+			let tally = shutdown.tally();
+			tracing::warn!(open = tally.open, ending = tally.ending, "second shutdown signal; exiting immediately");
 		}
 		_ = shutdown.drained() => {}
-		_ = tokio::time::sleep_until(deadline) => {}
-	}
-
-	let elapsed = tokio::time::Instant::now().saturating_duration_since(deadline - window);
-	match shutdown.tally() {
-		shutdown::Tally { live: 0, forced: 0, .. } => {
-			tracing::info!(?elapsed, "drain ended with no established sessions; exiting")
-		}
-		shutdown::Tally { live: 0, forced, .. } => {
-			tracing::warn!(?elapsed, forced, "drain deadline force-closed sessions; exiting")
-		}
-		shutdown::Tally { live, forced, .. } => {
-			tracing::warn!(
-				?elapsed,
-				forced,
-				open = live,
-				"drain deadline passed with sessions still open; exiting"
-			)
-		}
-	}
-	Ok(())
-}
-
-/// Resolve on a shutdown request: SIGINT (ctrl-c) or, on unix, SIGTERM (what
-/// systemd and most process supervisors send on stop).
-async fn shutdown_signal() -> anyhow::Result<()> {
-	#[cfg(unix)]
-	{
-		let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-			.context("failed to listen for SIGTERM")?;
-		tokio::select! {
-			res = tokio::signal::ctrl_c() => res.context("failed to listen for SIGINT")?,
-			_ = term.recv() => {}
-		}
-		Ok(())
-	}
-	#[cfg(not(unix))]
-	{
-		tokio::signal::ctrl_c().await.context("failed to listen for shutdown")
 	}
 }
 
@@ -799,28 +886,61 @@ async fn serve_listening(
 	shutdown: shutdown::Observer,
 	sessions: crate::session::Registry,
 ) -> anyhow::Result<()> {
-	while let Some(request) = listener.accept().await {
-		let id = cluster.next_connection_id();
-		let conn = Connection::new(request, cluster.clone(), auth.clone())
-			.with_id(id)
-			.with_shutdown(shutdown.clone())
-			.with_sessions(sessions.clone());
-
-		tokio::spawn(async move {
-			match conn.run().await {
-				// A lease or shutdown ending the session closes it too: logged, so every
-				// accepted connection pairs with its end.
-				Ok(()) => tracing::info!(id, "connection closed"),
-				Err(err) => tracing::warn!(id, %err, "connection closed"),
-			}
-		});
+	loop {
+		let request = listener.accept().await?;
+		spawn_connection(request, &cluster, &auth, &shutdown, &sessions);
 	}
+}
 
-	anyhow::bail!("stopped accepting connections")
+/// Spawn the [`Connection`] task for one accepted `request`.
+///
+/// Its own frame, so the session future built on the stack before `spawn` moves it
+/// to the heap stays out of the accept loop's frame, which every accept stacks on.
+fn spawn_connection(
+	request: moq_tokio::server::Request,
+	cluster: &cluster::Cluster,
+	auth: &auth::Auth,
+	shutdown: &shutdown::Observer,
+	sessions: &crate::session::Registry,
+) {
+	let conn = Connection::new(request, cluster.clone(), auth.clone())
+		.with_id(cluster.next_connection_id())
+		.with_shutdown(shutdown.clone())
+		.with_sessions(sessions.clone());
+	tokio::spawn(conn.run());
 }
 
 #[cfg(test)]
 mod tests {
+	#[cfg(feature = "stun")]
+	#[tokio::test]
+	async fn stun_listener_runs_with_the_relay_and_stops_with_it() {
+		use stun_types::message::{BINDING, Message, MessageWriteVec};
+		use stun_types::prelude::*;
+		let mut config = crate::Config::default();
+		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.stun.bind = Some("127.0.0.1:0".parse().unwrap());
+		let mut relay = super::Relay::load(config).await.unwrap().with_signals(false);
+		let _admissions = relay.admissions().unwrap();
+		let addr = relay.stun.as_ref().unwrap().addr();
+		let ready = relay.ready();
+		let shutdown = relay.shutdown_trigger().clone();
+		let running = tokio::spawn(relay.run());
+		ready.wait().await.unwrap();
+		let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let request = Message::builder_request(BINDING, MessageWriteVec::new()).finish();
+		client.send_to(&request, addr).await.unwrap();
+		let mut reply = [0; 44];
+		let (len, sender) = kio::clock::timeout(std::time::Duration::from_secs(5), client.recv_from(&mut reply))
+			.await
+			.unwrap()
+			.unwrap();
+		assert_eq!(sender, addr);
+		assert_eq!(len, 32);
+		shutdown.start();
+		running.await.unwrap().unwrap();
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn pending_handshake_cannot_extend_the_drain_deadline() {
 		use futures::FutureExt;
@@ -828,14 +948,59 @@ mod tests {
 		let (trigger, shutdown) = crate::shutdown::Observer::new(window);
 		let _pending = shutdown.activity.enter();
 		trigger.start();
-		let draining = super::drain(trigger, shutdown, false);
+		let draining = super::drain(trigger, shutdown, None);
 		tokio::pin!(draining);
 		assert!(draining.as_mut().now_or_never().is_none());
 		tokio::time::advance(window).await;
 		assert!(
-			matches!(draining.as_mut().now_or_never(), Some(Ok(()))),
+			draining.as_mut().now_or_never().is_some(),
 			"pending handshake extended the fixed deadline"
 		);
+	}
+
+	/// A signal queued behind an embedder's trigger is the second request, so it
+	/// exits at once rather than starting the drain again.
+	#[cfg(unix)]
+	#[tokio::test(start_paused = true)]
+	async fn a_signal_after_an_early_trigger_exits_at_once() {
+		let _signals = crate::shutdown::SIGNALS.lock().await;
+		// Either arm is ready, so an unbiased wait would pass some runs.
+		for _ in 0..32 {
+			let (trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(10));
+			let _active = shutdown.activity.enter();
+			trigger.start();
+			let mut signals = crate::shutdown::Signals::new().unwrap();
+			crate::shutdown::raise(libc::SIGTERM).await;
+			let started = kio::clock::now();
+			super::drain(trigger, shutdown, Some(&mut signals)).await;
+			assert_eq!(started.elapsed(), std::time::Duration::ZERO, "waited out the drain");
+		}
+	}
+
+	/// A relay stopped before it finished starting drains without reporting ready.
+	#[tokio::test]
+	async fn a_stop_during_startup_skips_readiness() {
+		let mut config = crate::Config::default();
+		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		let mut relay = super::Relay::load(config).await.unwrap().with_signals(false);
+		let _admissions = relay.admissions().unwrap();
+		let ready = relay.ready();
+		relay.shutdown_trigger().start();
+		relay.run().await.unwrap();
+		assert!(ready.wait().await.is_err(), "reported ready after the stop");
+	}
+
+	/// A waiter learns why startup failed, not only that it ended.
+	#[tokio::test]
+	async fn a_startup_failure_reaches_the_waiter() {
+		let mut config = crate::Config::default();
+		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		let relay = super::Relay::load(config).await.unwrap().with_signals(false);
+		let ready = relay.ready();
+		let running = tokio::spawn(relay.run());
+		let error = format!("{:#}", ready.wait().await.expect_err("no auth refuses startup"));
+		assert!(error.contains("nobody can authenticate"), "{error}");
+		running.await.unwrap().expect_err("run fails with the waiter");
 	}
 
 	/// A connection arriving as the last admitted one leaves is either counted
@@ -848,13 +1013,13 @@ mod tests {
 		let activity = shutdown.activity.clone();
 		let last = activity.enter().expect("admission open before the drain");
 		trigger.start();
-		let draining = super::drain(trigger, shutdown, false);
+		let draining = super::drain(trigger, shutdown, None);
 		tokio::pin!(draining);
 		assert!(draining.as_mut().now_or_never().is_none());
 
-		// Arrives before the drain observes the count reach zero: it is counted.
-		drop(last);
+		// Arrives before the last connection leaves: it is counted.
 		let arrival = activity.enter().expect("admitted before the drain committed");
+		drop(last);
 		assert!(
 			draining.as_mut().now_or_never().is_none(),
 			"drain exited under an admitted arrival"
@@ -862,28 +1027,39 @@ mod tests {
 
 		// Arrives just after the count reaches zero: refused at accept.
 		drop(arrival);
-		assert!(matches!(draining.as_mut().now_or_never(), Some(Ok(()))));
+		assert!(draining.as_mut().now_or_never().is_some());
 		assert!(
 			activity.enter().is_none(),
 			"admitted a connection after the drain committed to exit"
 		);
 	}
 
-	/// A long-lived task's panic ends `run` with that panic, instead of leaving a
-	/// relay that accepts sessions it can no longer serve.
+	/// A long-lived task's failure ends `run` with it, instead of leaving a relay
+	/// that accepts sessions it can no longer serve.
 	#[tokio::test]
-	async fn a_critical_panic_stops_the_relay() {
+	async fn a_critical_failure_stops_the_relay() {
 		let mut config = crate::Config::default();
 		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 		let mut relay = super::Relay::load(config).await.unwrap().with_signals(false);
 		let _admissions = relay.admissions().unwrap();
-		relay
-			.cluster()
-			.critical
-			.spawn("injected task", async { panic!("injected") });
+		relay.cluster().critical.fail(anyhow::anyhow!("injected"));
 
 		let err = relay.run().await.expect_err("the relay kept running");
-		assert_eq!(err.root_cause().to_string(), "injected task panicked: injected");
+		assert_eq!(err.root_cause().to_string(), "injected");
+	}
+
+	/// A panic in the cluster's driver, which `run` polls rather than spawns, ends
+	/// `run` with that panic the same way.
+	#[tokio::test]
+	async fn a_cluster_driver_panic_stops_the_relay() {
+		let mut config = crate::Config::default();
+		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		let mut relay = super::Relay::load(config).await.unwrap().with_signals(false);
+		let _admissions = relay.admissions().unwrap();
+		relay.driver.as_mut().expect("driver").inject_panic("origin driver");
+
+		let err = relay.run().await.expect_err("the relay kept running");
+		assert_eq!(err.root_cause().to_string(), "origin driver panicked: injected");
 	}
 
 	#[cfg(not(feature = "_quic"))]
@@ -897,7 +1073,7 @@ mod tests {
 		};
 		assert_eq!(
 			error.to_string(),
-			"runtime.workers needs moq-relay built with the `noq` feature"
+			"runtime.workers needs moq-relay built with the `quic` feature"
 		);
 	}
 }

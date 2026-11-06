@@ -2,7 +2,7 @@ import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { supportCacheKey } from "./config";
+import { SupportProbe } from "../support-probe";
 
 /**
  * A function that checks if a video configuration can be played.
@@ -11,13 +11,7 @@ import { supportCacheKey } from "./config";
  */
 export type Supported = (config: Catalog.VideoConfig) => Promise<boolean>;
 
-type CacheableSupported = Supported & {
-	[supportCacheKey]?: (config: Catalog.VideoConfig) => string;
-};
-
-/** A video source error that prevents choosing a usable rendition. */
-export type SourceError = "unsupported";
-
+/** What the viewer wants from the video rendition; the source picks the best one within it. */
 export type Target = {
 	// Optional manual override for the selected rendition name.
 	name?: string;
@@ -31,10 +25,13 @@ export type Target = {
 	// Maximum desired coded height in pixels.
 	height?: number;
 
-	// Maximum desired bitrate in bits per second.
+	// Maximum desired bitrate in bits per second, a cap rather than a hint: selection picks the
+	// best rendition within it, and `0` picks the lowest rendition with a known bitrate.
+	// Omit it to select from the connection's PROBE estimate instead.
 	bitrate?: number;
 };
 
+/** Signals the source reads. */
 export type SourceInput = {
 	broadcast: Getter<Broadcast | undefined>;
 	target: Getter<Target | undefined>;
@@ -45,21 +42,31 @@ export type SourceInput = {
 
 	// The connection's PROBE estimates, used to auto-select a rendition when the target has no
 	// explicit bitrate. Usually wired from a `Connection`'s `probe`.
-	// Optional: without it auto-selection falls back to the preference order alone.
+	// Optional: without it auto-selection falls back to the rank order alone.
 	probe: Getter<Moq.Connection.Probe | undefined>;
 };
 
-type SourceOutput = {
+/** Signals the source derives. */
+export type SourceOutput = {
 	catalog: Signal<Catalog.Video | undefined>;
 	available: Signal<Record<string, Catalog.VideoConfig>>;
 
-	// The current source error, or undefined while healthy or still probing.
-	error: Signal<SourceError | undefined>;
+	// Why no rendition can be chosen, or undefined while healthy or still probing. A
+	// `NotSupportedError` means the browser can decode none of the catalog's renditions.
+	error: Signal<Error | undefined>;
 
 	// The name of the active rendition.
 	track: Signal<string | undefined>;
 	config: Signal<Catalog.VideoConfig | undefined>;
+
+	// The receive rate, in bits per second, at which selection settles on the best rendition
+	// the target allows, or undefined when no candidate has a catalog bitrate. A player claims it
+	// as its viewer ceiling, so a probe that reaches it makes that rendition selectable.
+	ceiling: Signal<number | undefined>;
 };
+
+// Automatic selection spends at most this share of the receive estimate, to avoid oscillation.
+const MARGIN = 0.8;
 
 /**
  * A filter that returns matching renditions sorted by preference (most preferred first).
@@ -190,24 +197,44 @@ function enabledRenditions(renditions: Record<string, Catalog.VideoConfig>): Rec
 	return Object.fromEntries(Object.entries(renditions).filter(([, config]) => config.enabled !== false));
 }
 
+/** Keep only the highest preference: a lower one is a fallback for players that can't decode it. */
+function preferredRenditions(renditions: Record<string, Catalog.VideoConfig>): Record<string, Catalog.VideoConfig> {
+	const entries = Object.entries(renditions);
+	// A loop, not `Math.max(...)`: a catalog's rendition count can exceed the argument limit.
+	const top = entries.reduce((top, [, config]) => Math.max(top, config.preference ?? 0), Number.NEGATIVE_INFINITY);
+	return Object.fromEntries(entries.filter(([, config]) => (config.preference ?? 0) === top));
+}
+
+/** Whether the receive estimate steers selection: not with nothing to select, or a pinned rendition or bitrate. */
+function steers(available: Record<string, Catalog.VideoConfig>, target: Target | undefined): boolean {
+	if (Object.keys(available).length === 0) return false;
+	return !(target?.name && target.name in available) && target?.bitrate === undefined;
+}
+
 /**
  * Source handles catalog extraction, support checking, and rendition selection
  * for video playback. The Decoder consumes whichever rendition it picks.
  */
 export class Source {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<SourceInput>;
+
+	#probe = new SupportProbe<Catalog.VideoConfig>("video");
 
 	readonly #out: SourceOutput = {
 		catalog: new Signal<Catalog.Video | undefined>(undefined),
 		available: new Signal<Record<string, Catalog.VideoConfig>>({}),
-		error: new Signal<SourceError | undefined>(undefined),
+		error: this.#probe.error,
 		track: new Signal<string | undefined>(undefined),
 		config: new Signal<Catalog.VideoConfig | undefined>(undefined),
+		ceiling: new Signal<number | undefined>(undefined),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
+	/** Whether rendition support is still being resolved. @internal */
+	readonly pending: Getter<boolean> = this.#probe.pending;
 
 	#signals = new Effect();
-	#supportCache = new WeakMap<Supported, Map<string, { key: string; supported: boolean }>>();
 
 	constructor(props?: Inputs<SourceInput>) {
 		this.in = {
@@ -220,6 +247,7 @@ export class Source {
 		this.#signals.run(this.#runCatalog.bind(this));
 		this.#signals.run(this.#runSupported.bind(this));
 		this.#signals.run(this.#runSelected.bind(this));
+		this.#signals.run(this.#runCeiling.bind(this));
 	}
 
 	#runCatalog(effect: Effect): void {
@@ -234,102 +262,50 @@ export class Source {
 
 	#runSupported(effect: Effect): void {
 		const supported = effect.get(this.in.supported);
-		if (!supported) {
-			this.#out.error.set(undefined);
-			return;
-		}
-
-		const renditions = effect.get(this.#out.catalog)?.renditions ?? {};
-		this.#out.error.set(undefined);
-		let cache = this.#supportCache.get(supported);
-		if (!cache) {
-			cache = new Map();
-			this.#supportCache.set(supported, cache);
-		}
-		const names = new Set(Object.keys(renditions));
-		for (const name of cache.keys()) {
-			if (!names.has(name)) cache.delete(name);
-		}
-
-		effect.spawn(async () => {
-			const available: Record<string, Catalog.VideoConfig> = {};
-
-			for (const [name, config] of Object.entries(renditions)) {
-				const cacheKey = (supported as CacheableSupported)[supportCacheKey];
-				const key = cacheKey ? cacheKey(config) : JSON.stringify(config);
-				const cached = cache.get(name);
-				let isSupported: boolean | undefined = false;
-				if (cached?.key === key) {
-					isSupported = cached.supported;
-				} else {
-					let failed = false;
-					try {
-						// `supported` comes from the consumer, so we cannot assume it ever settles. A
-						// rerun waits for the tasks it spawned, so an unraced probe would hold it shut.
-						isSupported = await effect.race(supported(config));
-					} catch (err) {
-						failed = true;
-						console.warn(
-							`[Source] video rendition ${name} (${config.codec}) support probe failed; treating as unsupported`,
-							err,
-						);
-					}
-					if (!failed && isSupported !== undefined) {
-						cache.set(name, {
-							key: cacheKey ? cacheKey(config) : JSON.stringify(config),
-							supported: isSupported,
-						});
-					}
-				}
-
-				// Torn down: stop probing and publish nothing, since the rerun redoes this.
-				if (effect.abort.aborted) return;
-
-				if (isSupported) available[name] = config;
-			}
-
-			const error =
-				Object.keys(available).length === 0 && Object.keys(renditions).length > 0 ? "unsupported" : undefined;
-			if (error === "unsupported") {
-				console.warn("[Source] No supported video renditions found:", renditions);
-			}
-
-			this.#out.error.set(error);
-			this.#out.available.set(available);
-		});
+		// Read the catalog from the broadcast itself, so the probe result is tagged with the right one.
+		const broadcast = effect.get(this.in.broadcast);
+		const renditions = (broadcast && effect.get(broadcast.out.catalog)?.video?.renditions) ?? {};
+		this.#probe.run(effect, supported, renditions, (available) => this.#out.available.set(available));
 	}
 
 	#runSelected(effect: Effect): void {
 		const available = enabledRenditions(effect.get(this.#out.available));
 		const target = effect.get(this.in.target);
-
-		if (target?.name && target.name in available) {
-			const config = available[target.name];
-			effect.set(this.#out.track, target.name);
-			effect.set(this.#out.config, config);
-			return;
-		}
-
-		if (Object.keys(available).length === 0) return;
-
-		// Auto-select: use recv bandwidth if no explicit bitrate target.
-		let effectiveTarget = target;
-		if (!target?.bitrate) {
-			const estimate = effect.get(this.in.probe)?.estimatedRecvRate;
-			if (estimate != null) {
-				// Apply a safety margin (80%) to avoid oscillation.
-				const safeBitrate = Math.round(estimate * 0.8);
-				effectiveTarget = { ...target, bitrate: safeBitrate };
-			}
-		}
-
-		const selected = this.#select(available, effectiveTarget);
+		// Read the estimate only when it steers selection: observing it requests PROBE.
+		const estimate = steers(available, target) ? effect.get(this.in.probe)?.estimatedRecvRate : undefined;
+		const selected = this.#choose(available, target, estimate);
 		if (!selected) return;
 
-		const config = available[selected];
-
 		effect.set(this.#out.track, selected);
-		effect.set(this.#out.config, config);
+		effect.set(this.#out.config, available[selected]);
+	}
+
+	#runCeiling(effect: Effect): void {
+		const available = enabledRenditions(effect.get(this.#out.available));
+		const target = effect.get(this.in.target);
+		// An unlimited estimate picks the best rendition bandwidth could ever buy.
+		const best = this.#choose(available, target, Number.POSITIVE_INFINITY);
+		const bitrate = best === undefined ? undefined : available[best].bitrate;
+		if (bitrate === undefined) return;
+		// Only the estimate's discounted share counts, so it must reach the bitrate over the margin.
+		const ceiling = steers(available, target) ? Math.ceil(bitrate / MARGIN) : bitrate;
+		effect.set(this.#out.ceiling, ceiling, undefined);
+	}
+
+	// Pick among the enabled renditions, given the receive estimate if known.
+	#choose(
+		available: Record<string, Catalog.VideoConfig>,
+		target: Target | undefined,
+		estimate: number | undefined,
+	): string | undefined {
+		if (target?.name && target.name in available) return target.name;
+		if (Object.keys(available).length === 0) return undefined;
+
+		if (estimate != null && steers(available, target)) {
+			target = { ...target, bitrate: Math.round(estimate * MARGIN) };
+		}
+
+		return this.#select(preferredRenditions(available), target);
 	}
 
 	/**
@@ -337,7 +313,7 @@ export class Source {
 	 *
 	 * Each enabled filter returns matching renditions sorted by preference.
 	 * The first rendition present in every filter's output is selected.
-	 * If no rendition satisfies all filters, a warning is logged.
+	 * If the rankings conflict, the first ranking's best rendition is selected.
 	 */
 	#select(renditions: Record<string, Catalog.VideoConfig>, target?: Target): string | undefined {
 		const entries = Object.entries(renditions);
@@ -359,7 +335,7 @@ export class Source {
 
 		// No cap: the same rank as Rust's single-rendition egresses.
 		if (filters.length === 0) {
-			return Catalog.ranked(renditions)[0][0];
+			return Catalog.Video.ranked(renditions)[0][0];
 		}
 
 		// Run each filter to get ranked preference lists.
@@ -374,10 +350,11 @@ export class Source {
 			}
 		}
 
-		console.warn("conflicting rendition filters, no rendition satisfies all criteria");
-		return undefined;
+		console.warn("conflicting rendition filters, using the first ranking's preferred rendition");
+		return rankings[0][0];
 	}
 
+	/** Stop and release everything this holds. */
 	close(): void {
 		this.#signals.close();
 	}

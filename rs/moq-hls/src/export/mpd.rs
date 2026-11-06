@@ -1,22 +1,24 @@
 //! Hand-written MPEG-DASH manifest (MPD) generation.
 //!
-//! Rendered purely from timeline records, exactly like the HLS playlists: each record is one
-//! complete aligned segment carrying its own `pts` and `duration` in the timeline's timescale,
-//! which map 1:1 onto a `SegmentTimeline`'s `S@t`/`S@d`. Segments are addressed by `$Time$`
+//! Rendered purely from HLS records, exactly like the HLS playlists: each record is one complete
+//! segment carrying its own `pts` and `duration` in milliseconds, which map 1:1 onto a
+//! `SegmentTimeline`'s `S@t`/`S@d`. Segments are addressed by `$Time$`
 //! (the record's `pts`) rather than `$Number$`: with explicit `t` on every `S`, a rendition
 //! that skips a span (a gap) or a client that joins mid-window never mis-addresses a segment
 //! the way positional numbering would.
 //!
-//! URIs are relative to the manifest (`/<broadcast>/manifest.mpd`). The rendition name is
-//! one percent-encoded path segment, using the HLS master's set, and the finished URL is
-//! then XML-escaped, so a name containing `/` still resolves under the broadcast. The
+//! URIs are relative to the manifest (`/<broadcast>/manifest.mpd`), under the publisher instance
+//! it lists (`@<instance>/<kind>/<rendition>/...`). The instance and rendition name are
+//! each percent-encoded as one path segment, using the HLS master's set, and the finished URL
+//! is then XML-escaped, so a name containing `/` still resolves under the broadcast. The
 //! `Representation` id keeps the raw name. The resources are shared byte-for-byte with the
 //! HLS routes; only the time-addressed segment alias `seg/t<pts>.m4s` is DASH's own.
 
+use kio::clock::Wall;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use percent_encoding::utf8_percent_encode;
 
@@ -43,7 +45,7 @@ pub(crate) struct Representation {
 	pub sample_rate: Option<u32>,
 	/// Channel count for `AudioChannelConfiguration` (audio only).
 	pub channel_count: Option<u32>,
-	/// The timeline's timescale (units per second), for `SegmentTemplate@timescale`.
+	/// The records' timescale (units per second), for `SegmentTemplate@timescale`.
 	pub timescale: u32,
 	/// `(t, d)` per listed segment in `timescale` units, oldest first: the record's `pts` and
 	/// `duration` verbatim. Gap segments (no content for this rendition) and zero-duration
@@ -55,7 +57,7 @@ pub(crate) struct Representation {
 	pub ended: bool,
 	/// The init segment's content hash (`init.{init}.mp4`).
 	pub init: String,
-	/// The [`tag`](super::segments::tag) of the reference numbering the segments.
+	/// The [`tag`](super::segments::tag) of the record track numbering the segments.
 	pub tag: String,
 	/// The publisher run every segment URL carries (`seg/{generation}.{tag}.t$Time$.m4s`).
 	pub generation: Option<Arc<str>>,
@@ -63,14 +65,15 @@ pub(crate) struct Representation {
 
 /// Everything a manifest render needs; built by `Broadcaster::manifest`.
 pub(crate) struct Manifest {
+	/// The publisher instance every representation's URLs are under.
+	pub instance: Arc<str>,
 	/// The wall-clock time of timeline `pts` 0 (`MPD@availabilityStartTime`). Required while
 	/// live (`type="dynamic"`); ignored once [`finished`](Self::finished).
-	pub availability_start: Option<SystemTime>,
+	pub availability_start: Option<Wall>,
 	/// When this render happened (`MPD@publishTime`, dynamic only).
-	pub publish: SystemTime,
-	/// The playlist window (`MPD@timeShiftBufferDepth`, dynamic only), or `None` when the
-	/// timeline bounds itself and the depth is the span it lists.
-	pub window: Option<Duration>,
+	pub publish: Wall,
+	/// The playlist window (`MPD@timeShiftBufferDepth`, dynamic only).
+	pub window: Duration,
 	/// The broadcast ended: render a `static` presentation instead of a `dynamic` one.
 	pub finished: bool,
 	/// Video representations, in catalog order.
@@ -95,9 +98,11 @@ fn escape(value: &str) -> String {
 	out
 }
 
-/// An `xs:duration` with millisecond precision (`PT2.000S`).
+/// An exact `xs:duration` with at least millisecond precision (`PT2.000S`).
 fn xs_duration(duration: Duration) -> String {
-	format!("PT{:.3}S", duration.as_secs_f64())
+	let nanos = format!("{:09}", duration.subsec_nanos());
+	let fraction = nanos.trim_end_matches('0');
+	format!("PT{}.{:0<3}S", duration.as_secs(), fraction)
 }
 
 /// `@frameRate` must be an integer or a fraction; approximate a fractional rate over 1000
@@ -118,18 +123,6 @@ fn duration(units: u64, timescale: u32) -> Duration {
 	Duration::from_nanos((u128::from(units) * 1_000_000_000 / u128::from(timescale.max(1))) as u64)
 }
 
-/// The longest span any representation lists, oldest segment start to newest segment end.
-fn listed_span<'a>(representations: impl Iterator<Item = &'a Representation>) -> Duration {
-	representations
-		.filter_map(|rep| {
-			let (first, _) = rep.segments.first()?;
-			let (last, d) = rep.segments.last()?;
-			Some(duration(last + d - first, rep.timescale))
-		})
-		.max()
-		.unwrap_or_default()
-}
-
 /// The largest listed segment duration in whole seconds, for `MPD@maxSegmentDuration` (and the
 /// update cadence). Like HLS's target duration, derived from the segments when the publisher
 /// declared no bound.
@@ -144,12 +137,13 @@ fn max_segment_duration<'a>(representations: impl Iterator<Item = &'a Representa
 		.max(1)
 }
 
-fn render_representation(out: &mut String, rep: &Representation, query: Option<&str>) {
+fn render_representation(out: &mut String, instance: &str, rep: &Representation, query: Option<&str>) {
 	let kind = rep.kind.as_str();
 	// The id is the raw name. The URL encodes it first, as one path segment: a slash left
 	// raw would name a different broadcast, and XML-escaping before encoding would turn `&`
-	// into `&amp;` inside that segment. `$Time$` stays literal because only the name is encoded.
+	// into `&amp;` inside that segment. Only the instance and name are encoded, leaving `$Time$` literal.
 	let id = escape(&rep.name);
+	let instance = utf8_percent_encode(instance, PATH_SEGMENT);
 	let segment = utf8_percent_encode(&rep.name, PATH_SEGMENT);
 	let generation = rep
 		.generation
@@ -157,9 +151,9 @@ fn render_representation(out: &mut String, rep: &Representation, query: Option<&
 		.map(|generation| format!("{generation}."))
 		.unwrap_or_default();
 	let suffix = query.map(|query| format!("?{query}")).unwrap_or_default();
-	let initialization = escape(&format!("{kind}/{segment}/init.{}.mp4{suffix}", rep.init));
+	let initialization = escape(&format!("@{instance}/{kind}/{segment}/init.{}.mp4{suffix}", rep.init));
 	let media = escape(&format!(
-		"{kind}/{segment}/seg/{generation}{}.t$Time$.m4s{suffix}",
+		"@{instance}/{kind}/{segment}/seg/{generation}{}.t$Time$.m4s{suffix}",
 		rep.tag
 	));
 
@@ -202,7 +196,13 @@ fn render_representation(out: &mut String, rep: &Representation, query: Option<&
 	let _ = writeln!(out, "      </Representation>");
 }
 
-fn render_adaptation_sets(out: &mut String, kind: Kind, representations: &[Representation], query: Option<&str>) {
+fn render_adaptation_sets<'a>(
+	out: &mut String,
+	instance: &str,
+	kind: Kind,
+	representations: impl Iterator<Item = &'a Representation>,
+	query: Option<&str>,
+) {
 	// Representations in one AdaptationSet must be seamlessly switchable, so group by codec
 	// (mirroring the HLS master's audio groups).
 	let mut codecs = BTreeMap::<&str, Vec<&Representation>>::new();
@@ -220,14 +220,14 @@ fn render_adaptation_sets(out: &mut String, kind: Kind, representations: &[Repre
 		Kind::Audio => ("audio", "audio/mp4"),
 	};
 	for representations in codecs.values() {
-		// Segment boundaries come from the broadcast's single timeline, so alignment across
-		// renditions is guaranteed by construction; groups open on keyframes.
+		// Groups open on keyframes. `segmentAlignment` is left out (false): each rendition lists
+		// its own records, which line up only where the publisher's keyframes do.
 		let _ = writeln!(
 			out,
-			"    <AdaptationSet contentType=\"{content}\" mimeType=\"{mime}\" segmentAlignment=\"true\" startWithSAP=\"1\">"
+			"    <AdaptationSet contentType=\"{content}\" mimeType=\"{mime}\" startWithSAP=\"1\">"
 		);
 		for rep in representations {
-			render_representation(out, rep, query);
+			render_representation(out, instance, rep, query);
 		}
 		let _ = writeln!(out, "    </AdaptationSet>");
 	}
@@ -249,8 +249,7 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 		"<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" profiles=\"urn:mpeg:dash:profile:isoff-live:2011\""
 	);
 	if manifest.finished {
-		// Presentation time stays anchored at pts 0 in both states (no
-		// presentationTimeOffset), so a player that followed the live presentation keeps the
+		// Segment times stay absolute content time in both states, so a player that followed the live presentation keeps the
 		// same segment-to-time mapping when the manifest turns static; DASH forbids shifting
 		// representation timing across MPD updates. The duration therefore spans from pts 0,
 		// and a fresh static viewer starts at the earliest listed S@t (players seek to the
@@ -268,17 +267,17 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 			xs_duration(duration)
 		);
 	} else {
-		let availability = manifest.availability_start.unwrap_or(SystemTime::UNIX_EPOCH);
+		let availability = manifest.availability_start.unwrap_or(Wall::UNIX_EPOCH);
 		// Reload cadence and live delay follow HLS conventions: players refresh about once
 		// per segment and sit a few segments behind the live edge (bounded by the window).
 		let update = Duration::from_secs(target);
-		let window = manifest.window.unwrap_or_else(|| listed_span(representations()));
+		let window = manifest.window;
 		let delay = Duration::from_secs(3 * target).min(window.max(update));
 		let _ = write!(
 			out,
 			" type=\"dynamic\" availabilityStartTime=\"{}\" publishTime=\"{}\" minimumUpdatePeriod=\"{}\" timeShiftBufferDepth=\"{}\" suggestedPresentationDelay=\"{}\"",
-			humantime::format_rfc3339_millis(availability),
-			humantime::format_rfc3339_millis(manifest.publish),
+			humantime::format_rfc3339_millis(availability.into()),
+			humantime::format_rfc3339_millis(manifest.publish.into()),
 			xs_duration(update),
 			xs_duration(window),
 			xs_duration(delay),
@@ -291,9 +290,10 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 		xs_duration(Duration::from_secs(target)),
 	);
 
-	let _ = writeln!(out, "  <Period id=\"0\" start=\"PT0.000S\">");
-	render_adaptation_sets(&mut out, Kind::Video, &manifest.video, query);
-	render_adaptation_sets(&mut out, Kind::Audio, &manifest.audio, query);
+	// Every segment carries its absolute content time, so one period starting at pts 0 holds them.
+	let _ = writeln!(out, "  <Period id=\"0\" start=\"{}\">", xs_duration(Duration::ZERO));
+	render_adaptation_sets(&mut out, &manifest.instance, Kind::Video, manifest.video.iter(), query);
+	render_adaptation_sets(&mut out, &manifest.instance, Kind::Audio, manifest.audio.iter(), query);
 	let _ = writeln!(out, "  </Period>");
 	let _ = writeln!(out, "</MPD>");
 	out
@@ -323,6 +323,12 @@ mod tests {
 		}
 	}
 
+	#[test]
+	fn durations_render_exactly() {
+		assert_eq!(xs_duration(Duration::from_nanos(6_000_000_001)), "PT6.000000001S");
+		assert_eq!(xs_duration(Duration::from_secs(6)), "PT6.000S");
+	}
+
 	fn audio(segments: Vec<(u64, u64)>, ended: bool) -> Representation {
 		Representation {
 			name: "audio0".into(),
@@ -346,9 +352,10 @@ mod tests {
 	#[test]
 	fn renders_dynamic_manifest() {
 		let manifest = Manifest {
-			availability_start: Some(SystemTime::UNIX_EPOCH + Duration::from_millis(1_751_846_400_123)),
-			publish: SystemTime::UNIX_EPOCH + Duration::from_millis(1_751_846_410_000),
-			window: Some(Duration::from_secs(16)),
+			instance: "run".into(),
+			availability_start: Some(Wall::UNIX_EPOCH + Duration::from_millis(1_751_846_400_123)),
+			publish: Wall::UNIX_EPOCH + Duration::from_millis(1_751_846_410_000),
+			window: Duration::from_secs(16),
 			finished: false,
 			video: vec![video(vec![(0, 2_000), (2_000, 2_000)], false)],
 			audio: vec![audio(vec![(0, 2_000), (2_000, 2_000)], false)],
@@ -363,9 +370,7 @@ mod tests {
 		assert!(out.contains(" minimumUpdatePeriod=\"PT2.000S\""));
 		assert!(out.contains(" suggestedPresentationDelay=\"PT6.000S\""));
 		assert!(out.contains(" maxSegmentDuration=\"PT2.000S\""));
-		assert!(out.contains(
-			"<AdaptationSet contentType=\"video\" mimeType=\"video/mp4\" segmentAlignment=\"true\" startWithSAP=\"1\">"
-		));
+		assert!(out.contains("<AdaptationSet contentType=\"video\" mimeType=\"video/mp4\" startWithSAP=\"1\">"));
 		assert!(out.contains(
 			"<Representation id=\"video/video0\" bandwidth=\"2500000\" codecs=\"avc1.42c01f\" width=\"1280\" height=\"720\" frameRate=\"30\">"
 		));
@@ -376,7 +381,7 @@ mod tests {
 			"<AudioChannelConfiguration schemeIdUri=\"urn:mpeg:dash:23003:3:audio_channel_configuration:2011\" value=\"2\"/>"
 		));
 		assert!(out.contains(
-			"<SegmentTemplate timescale=\"1000\" initialization=\"video/video0/init.0123abcd.mp4\" media=\"video/video0/seg/ab12cd34.t$Time$.m4s\">"
+			"<SegmentTemplate timescale=\"1000\" initialization=\"@run/video/video0/init.0123abcd.mp4\" media=\"@run/video/video0/seg/ab12cd34.t$Time$.m4s\">"
 		));
 		assert!(out.contains("<S t=\"0\" d=\"2000\"/>"));
 		assert!(out.contains("<S t=\"2000\" d=\"2000\"/>"));
@@ -386,9 +391,10 @@ mod tests {
 	#[test]
 	fn renders_static_manifest_when_finished() {
 		let manifest = Manifest {
+			instance: "run".into(),
 			availability_start: None,
-			publish: SystemTime::UNIX_EPOCH,
-			window: Some(Duration::from_secs(16)),
+			publish: Wall::UNIX_EPOCH,
+			window: Duration::from_secs(16),
 			finished: true,
 			// The window starts mid-broadcast: presentation time stays anchored at pts 0 (no
 			// presentationTimeOffset), so the duration spans the lead-in and a live session
@@ -410,17 +416,18 @@ mod tests {
 	#[test]
 	fn query_rides_child_urls_escaped() {
 		let manifest = Manifest {
-			availability_start: Some(SystemTime::UNIX_EPOCH),
-			publish: SystemTime::UNIX_EPOCH,
-			window: Some(Duration::from_secs(16)),
+			instance: "run".into(),
+			availability_start: Some(Wall::UNIX_EPOCH),
+			publish: Wall::UNIX_EPOCH,
+			window: Duration::from_secs(16),
 			finished: false,
 			video: vec![video(vec![(0, 2_000)], false)],
 			audio: Vec::new(),
 		};
 
 		let out = render_manifest(&manifest, Some("jwt=abc.def&x=1"));
-		assert!(out.contains("initialization=\"video/video0/init.0123abcd.mp4?jwt=abc.def&amp;x=1\""));
-		assert!(out.contains("media=\"video/video0/seg/ab12cd34.t$Time$.m4s?jwt=abc.def&amp;x=1\""));
+		assert!(out.contains("initialization=\"@run/video/video0/init.0123abcd.mp4?jwt=abc.def&amp;x=1\""));
+		assert!(out.contains("media=\"@run/video/video0/seg/ab12cd34.t$Time$.m4s?jwt=abc.def&amp;x=1\""));
 	}
 
 	#[test]
@@ -428,17 +435,18 @@ mod tests {
 		let mut rep = video(vec![(0, 2_000)], false);
 		rep.generation = Some("run-7".into());
 		let manifest = Manifest {
-			availability_start: Some(SystemTime::UNIX_EPOCH),
-			publish: SystemTime::UNIX_EPOCH,
-			window: Some(Duration::from_secs(16)),
+			instance: "run".into(),
+			availability_start: Some(Wall::UNIX_EPOCH),
+			publish: Wall::UNIX_EPOCH,
+			window: Duration::from_secs(16),
 			finished: false,
 			video: vec![rep],
 			audio: Vec::new(),
 		};
 
 		let out = render_manifest(&manifest, None);
-		assert!(out.contains("initialization=\"video/video0/init.0123abcd.mp4\""));
-		assert!(out.contains("media=\"video/video0/seg/run-7.ab12cd34.t$Time$.m4s\""));
+		assert!(out.contains("initialization=\"@run/video/video0/init.0123abcd.mp4\""));
+		assert!(out.contains("media=\"@run/video/video0/seg/run-7.ab12cd34.t$Time$.m4s\""));
 	}
 
 	#[test]
@@ -451,9 +459,10 @@ mod tests {
 	#[test]
 	fn empty_and_gap_only_representations_are_omitted() {
 		let manifest = Manifest {
-			availability_start: Some(SystemTime::UNIX_EPOCH),
-			publish: SystemTime::UNIX_EPOCH,
-			window: Some(Duration::from_secs(16)),
+			instance: "run".into(),
+			availability_start: Some(Wall::UNIX_EPOCH),
+			publish: Wall::UNIX_EPOCH,
+			window: Duration::from_secs(16),
 			finished: false,
 			video: vec![video(vec![(0, 2_000)], false)],
 			audio: vec![audio(Vec::new(), false)],
@@ -469,9 +478,10 @@ mod tests {
 		rep.name = name.into();
 		render_manifest(
 			&Manifest {
-				availability_start: Some(SystemTime::UNIX_EPOCH),
-				publish: SystemTime::UNIX_EPOCH,
-				window: Some(Duration::from_secs(16)),
+				instance: "run".into(),
+				availability_start: Some(Wall::UNIX_EPOCH),
+				publish: Wall::UNIX_EPOCH,
+				window: Duration::from_secs(16),
 				finished: false,
 				video: vec![rep],
 				audio: Vec::new(),
@@ -487,14 +497,14 @@ mod tests {
 		let out = render_named("video/1080p", Some("jwt=abc.def&x=1"));
 		assert!(out.contains("id=\"video/video/1080p\""), "{out}");
 		assert!(
-			out.contains("initialization=\"video/video%2F1080p/init.0123abcd.mp4?jwt=abc.def&amp;x=1\""),
+			out.contains("initialization=\"@run/video/video%2F1080p/init.0123abcd.mp4?jwt=abc.def&amp;x=1\""),
 			"{out}"
 		);
 		assert!(
-			out.contains("media=\"video/video%2F1080p/seg/ab12cd34.t$Time$.m4s?jwt=abc.def&amp;x=1\""),
+			out.contains("media=\"@run/video/video%2F1080p/seg/ab12cd34.t$Time$.m4s?jwt=abc.def&amp;x=1\""),
 			"{out}"
 		);
-		assert!(!out.contains("initialization=\"video/video/1080p/"), "{out}");
+		assert!(!out.contains("initialization=\"@run/video/video/1080p/"), "{out}");
 
 		let cases = [
 			("cam?1", "cam%3F1"),
@@ -509,13 +519,60 @@ mod tests {
 				"id stays raw for {name}: {out}"
 			);
 			assert!(
-				out.contains(&format!("initialization=\"video/{segment}/init.0123abcd.mp4\"")),
+				out.contains(&format!("initialization=\"@run/video/{segment}/init.0123abcd.mp4\"")),
 				"init for {name}: {out}"
 			);
 			assert!(
-				out.contains(&format!("media=\"video/{segment}/seg/ab12cd34.t$Time$.m4s\"")),
+				out.contains(&format!("media=\"@run/video/{segment}/seg/ab12cd34.t$Time$.m4s\"")),
 				"media for {name}: {out}"
 			);
+		}
+	}
+
+	#[test]
+	fn instances_round_trip_through_manifest_urls() {
+		use crate::export::{Resource, Route};
+
+		let instance = "a/b?%23#音声\"\n&";
+		let manifest = Manifest {
+			instance: instance.into(),
+			availability_start: Some(Wall::UNIX_EPOCH),
+			publish: Wall::UNIX_EPOCH,
+			window: Duration::from_secs(16),
+			finished: false,
+			video: vec![video(vec![(0, 2_000)], false)],
+			audio: Vec::new(),
+		};
+		let out = render_manifest(&manifest, Some("jwt=abc"));
+		let base = url::Url::parse("https://example.com/live/manifest.mpd").unwrap();
+		for attribute in ["initialization", "media"] {
+			let marker = format!("{attribute}=\"");
+			let uri = out.split_once(&marker).unwrap().1.split('"').next().unwrap();
+			assert!(
+				uri.starts_with("@a%2Fb%3F%2523%23%E9%9F%B3%E5%A3%B0%22%0A%26/"),
+				"{uri}"
+			);
+			let url = base.join(&uri.replace("$Time$", "0")).unwrap();
+			assert_eq!(url.query(), Some("jwt=abc"));
+			assert_eq!(url.fragment(), None);
+			let route = Route::parse(url.path()).unwrap();
+			assert_eq!(route.broadcast, "live");
+			match route.resource {
+				Resource::Init {
+					instance: actual,
+					rendition,
+					..
+				}
+				| Resource::Segment {
+					instance: actual,
+					rendition,
+					..
+				} => {
+					assert_eq!(actual, instance);
+					assert_eq!(rendition, "video0");
+				}
+				other => panic!("unexpected resource: {other:?}"),
+			}
 		}
 	}
 
@@ -524,11 +581,11 @@ mod tests {
 		let out = render_named("a&b\"c", Some("x=1&y=2"));
 		assert!(out.contains("id=\"video/a&amp;b&quot;c\""), "{out}");
 		assert!(
-			out.contains("initialization=\"video/a%26b%22c/init.0123abcd.mp4?x=1&amp;y=2\""),
+			out.contains("initialization=\"@run/video/a%26b%22c/init.0123abcd.mp4?x=1&amp;y=2\""),
 			"{out}"
 		);
 		assert!(
-			out.contains("media=\"video/a%26b%22c/seg/ab12cd34.t$Time$.m4s?x=1&amp;y=2\""),
+			out.contains("media=\"@run/video/a%26b%22c/seg/ab12cd34.t$Time$.m4s?x=1&amp;y=2\""),
 			"{out}"
 		);
 		assert!(!out.contains("&amp;amp;"), "{out}");

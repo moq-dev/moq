@@ -18,6 +18,8 @@
 //! model that keeps the order, one link shared by every client, batches, steps,
 //! and named profiles loaded as a [`Preset`]. The README says why each exists.
 
+#![warn(missing_docs)]
+
 use std::{
 	cmp::Reverse,
 	collections::{BTreeMap, BinaryHeap, HashMap, hash_map},
@@ -40,13 +42,14 @@ mod preset;
 pub use preset::Preset;
 
 use anyhow::Context;
+use kio::clock::Instant;
 #[cfg(test)]
 use mem::UdpSocket;
 use rand::{RngExt, SeedableRng, rngs::Xoshiro256PlusPlus};
 use serde::{Deserialize, Serialize};
 #[cfg(not(test))]
 use tokio::net::UdpSocket;
-use tokio::{sync::mpsc, task::JoinSet, time::Instant};
+use tokio::{sync::mpsc, task::JoinSet};
 
 /// How one direction of the path treats each datagram.
 ///
@@ -141,9 +144,9 @@ pub struct Batch {
 /// A change to one direction's profile once the run reaches `at`.
 ///
 /// A step changes only what it names, so a later step puts one knob back
-/// without restating the rest. The rate limit never steps: datagrams already
-/// queued behind it keep the old rate's departures, so a new rate would
-/// reorder them.
+/// without restating the rest. A rate step keeps the order: datagrams already
+/// queued keep their departures, and those after the step queue behind them at
+/// the new rate.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
@@ -162,6 +165,9 @@ pub struct Step {
 	/// The reorder from then on.
 	#[serde(default)]
 	pub reorder: Option<f64>,
+	/// The rate limit's sustained rate from then on, which needs a rate limit to change.
+	#[serde(default)]
+	pub bits_per_second: Option<u64>,
 }
 
 impl Step {
@@ -178,6 +184,9 @@ impl Step {
 		}
 		if let Some(reorder) = self.reorder {
 			profile.reorder = reorder;
+		}
+		if let (Some(bits_per_second), Some(rate)) = (self.bits_per_second, &mut profile.rate) {
+			rate.bits_per_second = bits_per_second;
 		}
 	}
 }
@@ -217,6 +226,11 @@ impl Options {
 			anyhow::ensure!(
 				previous.is_none_or(|previous| step.at > previous),
 				"the step at {:?} comes after the one at {previous:?}; steps go in order",
+				step.at
+			);
+			anyhow::ensure!(
+				step.bits_per_second.is_none() || profile.rate.is_some(),
+				"the step at {:?} changes a rate limit the direction does not have",
 				step.at
 			);
 			// A step that leaves the profile as it was thinks it changes and does not.
@@ -274,13 +288,28 @@ fn unapplied(phases: &[(Profile, u64)], stats: &Stats) -> Vec<&'static str> {
 
 /// `profile` as the run opens and as each of `steps` leaves it, paired with the
 /// datagrams `counts` says that phase treated.
-fn phased(profile: &Profile, steps: &[Step], counts: &BTreeMap<usize, u64>) -> Vec<(Profile, u64)> {
-	let count = |phase: usize| counts.get(&phase).copied().unwrap_or(0);
+///
+/// Loss is charged only exposed datagrams, while delay and reorder are charged
+/// only survivors of loss and queue overflow, since neither can act on a drop.
+fn phased(profile: &Profile, steps: &[Step], counts: &BTreeMap<usize, Treated>) -> Vec<(Profile, u64)> {
 	let mut profile = profile.clone();
-	let mut phases = vec![(profile.clone(), count(0))];
-	for (index, step) in steps.iter().enumerate() {
-		step.apply(&mut profile);
-		phases.push((profile.clone(), count(index + 1)));
+	let mut phases = Vec::new();
+	for index in 0..=steps.len() {
+		if index > 0 {
+			steps[index - 1].apply(&mut profile);
+		}
+		let treated = counts.get(&index).copied().unwrap_or_default();
+		let loss = Profile {
+			delay: Duration::ZERO,
+			reorder: 0.0,
+			..profile.clone()
+		};
+		let scheduled = Profile {
+			loss: 0.0,
+			..profile.clone()
+		};
+		phases.push((loss, treated.exposed));
+		phases.push((scheduled, treated.scheduled));
 	}
 	phases
 }
@@ -315,6 +344,21 @@ impl Rate {
 	/// How long `bytes` takes at this rate.
 	fn cost(&self, bytes: u64) -> Duration {
 		Duration::from_secs_f64(bytes as f64 * 8.0 / self.bits_per_second as f64)
+	}
+
+	/// When a bucket that would be full at `full_at` is full again once its rate
+	/// changes to `new`'s at `at`.
+	///
+	/// The bucket keeps its level in bytes, taken once the datagrams queued at
+	/// the old rate have left, or at the step if that is later, and refills the
+	/// rest at the new rate. A throttled datagram leaves with the bucket empty, so
+	/// the next one, at any rate, cannot leave before it.
+	fn rerate(&self, full_at: Instant, at: Instant, new: &Rate) -> Instant {
+		let drained = full_at
+			.checked_sub(self.cost(self.burst))
+			.map_or(at, |drained| drained.max(at));
+		let owed = full_at.saturating_duration_since(drained);
+		drained + owed.mul_f64(self.bits_per_second as f64 / new.bits_per_second as f64)
 	}
 }
 
@@ -480,13 +524,16 @@ impl Shaper {
 		})
 	}
 
-	/// Collect the next active link's surviving ingress until its rate bucket must overflow.
+	/// Collect the next active link's ingress until its rate bucket must overflow.
 	///
 	/// Armed after a handshake, this accounts the collected datagrams at one instant,
-	/// regardless of scheduling gaps. The chosen direction needs a fixed rate profile;
-	/// other flows and the opposite direction keep forwarding. A shared link collects
-	/// all its clients together. Holding enough bytes
-	/// requires transport credit beyond the bucket's burst plus queue allowance.
+	/// regardless of scheduling gaps. Collected datagrams are never lost, so the
+	/// gate opens on what the sender offers, not on the loss draws, and
+	/// [`Shaper::verify`] never counts them as chances for loss. The chosen
+	/// direction needs a fixed rate profile; other flows and the opposite direction
+	/// keep forwarding. A shared link collects all its clients together. Holding
+	/// enough bytes requires transport credit beyond the bucket's burst plus queue
+	/// allowance.
 	#[cfg(any(test, feature = "test"))]
 	pub fn burst(&self, direction: ingress::Direction) -> anyhow::Result<ingress::Burst> {
 		let (index, profile, options) = match direction {
@@ -641,9 +688,18 @@ struct Tally {
 	delayed: AtomicU64,
 	reordered: AtomicU64,
 	/// Datagrams treated in each phase: 0 before the first step, n after the nth.
-	phases: Mutex<BTreeMap<usize, u64>>,
+	phases: Mutex<BTreeMap<usize, Treated>>,
 	/// Datagrams a batch held past when they would otherwise have left.
 	batched: AtomicU64,
+}
+
+/// The datagrams one phase treated.
+#[derive(Clone, Copy, Debug, Default)]
+struct Treated {
+	/// Those loss could drop.
+	exposed: u64,
+	/// Those that survived loss and queue overflow, so delay or reorder could act.
+	scheduled: u64,
 }
 
 impl Tally {
@@ -701,7 +757,7 @@ async fn run(
 
 	loop {
 		let (size, from) = tokio::select! {
-			res = listen.recv_from(&mut buf) => res.context("receive from a client")?,
+			res = recv(&listen, &mut buf) => res.context("receive from a client")?,
 			Some(res) = tasks.join_next() => {
 				res.context("flow task panicked")??;
 				continue;
@@ -817,7 +873,7 @@ async fn reply(
 ) -> anyhow::Result<()> {
 	let mut buf = vec![0u8; u16::MAX as usize];
 	loop {
-		let (size, from) = socket.recv_from(&mut buf).await.context("receive from the target")?;
+		let (size, from) = recv(&socket, &mut buf).await.context("receive from the target")?;
 		// Anything else reaching this ephemeral port is not part of the path.
 		if from != *target.lock().expect("target poisoned") || is_cut(&cuts) {
 			continue;
@@ -825,6 +881,19 @@ async fn reply(
 		let datagram = buf[..size].to_vec();
 		let mut down = link.lock().expect("link poisoned");
 		down.push(Instant::now(), datagram, &listen, client, &tally[DOWN]);
+	}
+}
+
+/// Receive the next datagram, skipping the port unreachable an earlier send
+/// drew. Windows reports one as `ConnectionReset` even on an unconnected
+/// socket, but a peer that went away (a killed relay, a closed client) is the
+/// path losing datagrams, not the shaper failing.
+async fn recv(socket: &UdpSocket, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+	loop {
+		match socket.recv_from(buf).await {
+			Err(err) if err.kind() == std::io::ErrorKind::ConnectionReset => continue,
+			res => return res,
+		}
 	}
 }
 
@@ -855,7 +924,7 @@ async fn deliver(
 					None => ready.push(parcel),
 				}
 			}
-			_ = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {
+			_ = kio::clock::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {
 				// The window closes a batch that never filled.
 				if let Some(closes) = held.closes.filter(|&closes| closes <= Instant::now()) {
 					held.release(closes, &mut ready, &tally[direction]);
@@ -942,13 +1011,17 @@ struct Parcel {
 	dest: SocketAddr,
 }
 
-/// One direction of one flow, or of every flow on a shared path: the decisions
-/// and the state they depend on.
+/// The seeded decisions for one datagram.
 struct Draw {
+	/// The phase whose profile made these decisions.
+	phase: usize,
+	lose: bool,
 	skip: bool,
 	spread: f64,
 }
 
+/// One direction of one flow, or of every flow on a shared path: the decisions
+/// and the state they depend on.
 struct Link {
 	#[cfg(any(test, feature = "test"))]
 	stream: u64,
@@ -1004,57 +1077,40 @@ impl Link {
 	}
 
 	/// Apply every step the run has reached by `now`, in order, and record the
-	/// phase a datagram arriving then sees.
-	fn step(&mut self, now: Instant, tally: &Tally) {
+	/// phase a datagram arriving then sees, and whether loss can drop it.
+	fn step(&mut self, now: Instant, tally: &Tally, exempt: bool) {
 		while let Some(step) = self.steps.get(self.stepped) {
 			// A step past what the clock can hold is one the run never reaches.
-			if self.start.checked_add(step.at).is_none_or(|at| at > now) {
+			let Some(at) = self.start.checked_add(step.at).filter(|&at| at <= now) else {
 				break;
-			}
+			};
+			let old = self.profile.rate.clone();
 			step.apply(&mut self.profile);
+			if let (Some(old), Some(new)) = (old, &self.profile.rate)
+				&& old != *new
+			{
+				self.full_at = old.rerate(self.full_at, at, new);
+			}
 			self.stepped += 1;
 		}
 		// Applying a step is no evidence it acted, so count the datagrams each phase treated.
-		*tally.phases.lock().unwrap().entry(self.stepped).or_default() += 1;
+		let mut phases = tally.phases.lock().unwrap();
+		let treated = phases.entry(self.stepped).or_default();
+		if !exempt {
+			treated.exposed += 1;
+		}
 	}
 
 	/// Treat a datagram and queue it to leave by `socket` for `dest`.
 	fn push(&mut self, now: Instant, datagram: Vec<u8>, socket: &Arc<UdpSocket>, dest: SocketAddr, tally: &Tally) {
 		#[cfg(any(test, feature = "test"))]
 		if let Some(state) = self.ingress.selected(self.stream) {
-			let Some(draw) = self.draw(now, tally) else {
-				return;
-			};
-			let packet = ingress::Held {
-				datagram,
-				socket: socket.clone(),
-				dest,
-				draw,
-			};
-			let released = state
-				.lock()
-				.expect("ingress poisoned")
-				.hold(self.profile.rate.as_ref().expect("validated rate"), packet);
-			if let Some(released) = released {
-				for packet in released.packets {
-					if let Some((at, delayed)) = self.schedule(now, packet.datagram.len(), packet.draw, tally) {
-						let _ = self.queue.send(Parcel {
-							arrived: now,
-							at,
-							delayed,
-							datagram: packet.datagram,
-							socket: packet.socket,
-							dest: packet.dest,
-						});
-					}
-				}
-				state.lock().expect("ingress poisoned").finished = true;
-				if let Some(done) = released.done {
-					let _ = done.send(());
-				}
-			}
-			return;
+			return self.gate(&state, now, datagram, socket, dest, tally);
 		}
+		self.forward(now, datagram, socket, dest, tally);
+	}
+
+	fn forward(&mut self, now: Instant, datagram: Vec<u8>, socket: &Arc<UdpSocket>, dest: SocketAddr, tally: &Tally) {
 		let Some((at, delayed)) = self.treat(now, datagram.len(), tally) else {
 			return;
 		};
@@ -1069,15 +1125,69 @@ impl Link {
 		});
 	}
 
+	/// Hold a datagram at the ingress burst that selected this link.
+	#[cfg(any(test, feature = "test"))]
+	fn gate(
+		&mut self,
+		state: &Mutex<ingress::State>,
+		now: Instant,
+		datagram: Vec<u8>,
+		socket: &Arc<UdpSocket>,
+		dest: SocketAddr,
+		tally: &Tally,
+	) {
+		// Held across the draw, so a burst dropped since it selected this link
+		// cannot exempt a datagram it never holds.
+		let mut burst = state.lock().expect("ingress poisoned");
+		if burst.cancelled {
+			drop(burst);
+			return self.forward(now, datagram, socket, dest, tally);
+		}
+		// Draw as usual so later datagrams see the same seeded stream, but keep
+		// a lost one: the gate holds the acknowledgments a sender needs to replace
+		// it, so a gate waiting on surviving bytes could wait out the connection.
+		let draw = self.draw(now, tally, true);
+		let packet = ingress::Held {
+			datagram,
+			socket: socket.clone(),
+			dest,
+			draw,
+		};
+		let Some(released) = burst.hold(self.profile.rate.as_ref().expect("validated rate"), packet) else {
+			return;
+		};
+		burst.finished = true;
+		drop(burst);
+		for packet in released.packets {
+			if let Some((at, delayed)) = self.schedule(now, packet.datagram.len(), packet.draw, tally) {
+				let _ = self.queue.send(Parcel {
+					arrived: now,
+					at,
+					delayed,
+					datagram: packet.datagram,
+					socket: packet.socket,
+					dest: packet.dest,
+				});
+			}
+		}
+		if let Some(done) = released.done {
+			let _ = done.send(());
+		}
+	}
+
 	/// When a datagram of `size` bytes arriving `now` leaves, and whether it was
 	/// counted as delayed, or `None` when it is dropped.
 	fn treat(&mut self, now: Instant, size: usize, tally: &Tally) -> Option<(Instant, bool)> {
-		let draw = self.draw(now, tally)?;
+		let draw = self.draw(now, tally, false);
+		if draw.lose {
+			bump(&tally.lost);
+			return None;
+		}
 		self.schedule(now, size, draw, tally)
 	}
 
-	fn draw(&mut self, now: Instant, tally: &Tally) -> Option<Draw> {
-		self.step(now, tally);
+	fn draw(&mut self, now: Instant, tally: &Tally, exempt: bool) -> Draw {
+		self.step(now, tally, exempt);
 		bump(&tally.packets);
 
 		// Every draw happens for every datagram, whatever the profile, so one
@@ -1089,19 +1199,21 @@ impl Link {
 			Jitter::Gaussian => gaussian(&mut self.rng),
 		};
 
-		if lose {
-			bump(&tally.lost);
-			return None;
+		Draw {
+			phase: self.stepped,
+			lose,
+			skip,
+			spread,
 		}
-
-		Some(Draw { skip, spread })
 	}
 
 	fn schedule(
 		&mut self,
 		now: Instant,
 		size: usize,
-		Draw { skip, spread }: Draw,
+		Draw {
+			phase, skip, spread, ..
+		}: Draw,
 		tally: &Tally,
 	) -> Option<(Instant, bool)> {
 		let mut depart = now;
@@ -1123,6 +1235,7 @@ impl Link {
 			depart = start;
 		}
 
+		tally.phases.lock().unwrap().entry(phase).or_default().scheduled += 1;
 		let mut delayed = false;
 		if skip {
 			bump(&tally.reordered);
@@ -1199,8 +1312,95 @@ mod tests {
 		assert!(received.try_recv().is_err());
 	}
 
+	/// A burst dropped after it selected a datagram, before the gate held it,
+	/// forwarded a datagram drawn for loss as if the gate had kept it.
 	#[tokio::test(start_paused = true)]
-	async fn ingress_preserves_loss_draws_and_cancellation_releases_held_packets() {
+	async fn an_ingress_burst_cancelled_mid_selection_leaves_loss_acting() {
+		let profile = Profile {
+			loss: 1.0,
+			rate: Some(Rate {
+				bits_per_second: 8000,
+				burst: 1000,
+				queue: Duration::from_secs(1),
+			}),
+			..Default::default()
+		};
+		let (send, mut received) = mpsc::unbounded_channel();
+		let start = Instant::now();
+		let mut link = Link::new(&profile, &Options::default(), 42, 0, start, send);
+		let burst = link.ingress.arm().unwrap();
+		let socket = Arc::new(UdpSocket::bind(LOCALHOST).await.unwrap());
+		let tally = Tally::default();
+		let state = link.ingress.selected(link.stream).unwrap();
+		drop(burst);
+		link.gate(&state, start, vec![0; 1000], &socket, LOCALHOST, &tally);
+		assert_eq!(tally.lost.load(Ordering::Relaxed), 1);
+		assert!(received.try_recv().is_err(), "a datagram drawn for loss was forwarded");
+	}
+
+	/// A gate that waited on surviving bytes never opened when loss took what a
+	/// sender could offer without the acknowledgments the gate holds back.
+	#[tokio::test(start_paused = true)]
+	async fn an_ingress_burst_opens_on_what_the_sender_offers_despite_loss() {
+		let profile = Profile {
+			loss: 1.0,
+			rate: Some(Rate {
+				bits_per_second: 8000,
+				burst: 1000,
+				queue: Duration::from_secs(1),
+			}),
+			..Default::default()
+		};
+		let (send, mut received) = mpsc::unbounded_channel();
+		let start = Instant::now();
+		let mut link = Link::new(&profile, &Options::default(), 42, 0, start, send);
+		let burst = link.ingress.arm().unwrap();
+		let socket = Arc::new(UdpSocket::bind(LOCALHOST).await.unwrap());
+		let tally = Tally::default();
+		for _ in 0..3 {
+			link.push(start, vec![0; 1000], &socket, LOCALHOST, &tally);
+		}
+		kio::clock::timeout(Duration::from_secs(1), burst.completed())
+			.await
+			.expect("the gate never opened")
+			.unwrap();
+		assert_eq!(tally.lost.load(Ordering::Relaxed), 0);
+		assert_eq!(tally.overflowed.load(Ordering::Relaxed), 1);
+		for _ in 0..2 {
+			assert!(received.try_recv().is_ok());
+		}
+
+		// Past the gate, loss acts again.
+		link.push(start, vec![0; 1000], &socket, LOCALHOST, &tally);
+		assert_eq!(tally.lost.load(Ordering::Relaxed), 1);
+		assert!(received.try_recv().is_err());
+	}
+
+	/// Datagrams a gate kept from loss were never a chance for loss to act, so a
+	/// run whose lossy traffic all went through the gate still verifies.
+	#[tokio::test(start_paused = true)]
+	async fn an_ingress_burst_is_no_chance_for_loss_to_act() {
+		let profile = Profile {
+			loss: 1.0,
+			rate: Some(Rate {
+				bits_per_second: 8000,
+				burst: 1000,
+				queue: Duration::from_secs(1),
+			}),
+			..Default::default()
+		};
+		let (shaper, client) = setup(42, profile, Profile::default()).await;
+		let burst = shaper.burst(ingress::Direction::Up).unwrap();
+		for _ in 0..3 {
+			client.send(&[0; 1000]).await.unwrap();
+		}
+		burst.completed().await.unwrap();
+		let stats = shaper.verify().unwrap();
+		assert_eq!((stats.up.packets, stats.up.lost), (3, 0));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn ingress_preserves_draws_and_cancellation_releases_held_packets() {
 		let profile = Profile {
 			loss: 0.25,
 			rate: Some(Rate {
@@ -1226,7 +1426,7 @@ mod tests {
 			plain.push(now, vec![0; 1000], &socket, LOCALHOST, &b);
 		}
 		burst.completed().await.unwrap();
-		assert_eq!(a.lost.load(Ordering::Relaxed), b.lost.load(Ordering::Relaxed));
+		assert!(a.lost.load(Ordering::Relaxed) <= b.lost.load(Ordering::Relaxed));
 		assert_eq!(gated.rng.random::<u64>(), plain.rng.random::<u64>());
 		assert!(a.overflowed.load(Ordering::Relaxed) > 0);
 
@@ -1309,7 +1509,7 @@ mod tests {
 		}
 		let mut got = Vec::new();
 		let mut buf = [0u8; 4];
-		while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(200), client.recv(&mut buf)).await {
+		while let Ok(Ok(_)) = kio::clock::timeout(Duration::from_millis(200), client.recv(&mut buf)).await {
 			got.push(u32::from_be_bytes(buf));
 		}
 		got
@@ -1337,7 +1537,7 @@ mod tests {
 		let (shaper, client) = setup(1, delayed, Profile::default()).await;
 		client.send(b"held").await.unwrap();
 		while shaper.stats().up.packets == 0 {
-			tokio::time::sleep(Duration::from_millis(1)).await;
+			kio::clock::sleep(Duration::from_millis(1)).await;
 		}
 
 		let outage = shaper.cut();
@@ -1386,6 +1586,67 @@ mod tests {
 
 		let ipv6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 1);
 		assert!(shaper.retarget(ipv6).is_err(), "retargeted where no flow can reach");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_closed_target_loses_datagrams_until_a_retarget() {
+		let dead = UdpSocket::bind(LOCALHOST).await.unwrap();
+		let next = UdpSocket::bind(LOCALHOST).await.unwrap();
+		let shaper = Shaper::bind(Config {
+			bind: LOCALHOST,
+			target: dead.local_addr().unwrap(),
+			seed: 1,
+			up: Profile::default(),
+			down: Profile::default(),
+		})
+		.await
+		.unwrap();
+		let client = UdpSocket::bind(LOCALHOST).await.unwrap();
+		client.connect(shaper.addr()).await.unwrap();
+		let mut buf = [0u8; 8];
+
+		client.send(b"before").await.unwrap();
+		dead.recv_from(&mut buf).await.unwrap();
+
+		// The flow sends to the closed port, drawing an error on its next receive.
+		drop(dead);
+		client.send(b"lost").await.unwrap();
+		while shaper.stats().up.packets < 2 {
+			kio::clock::sleep(Duration::from_millis(1)).await;
+		}
+
+		shaper.retarget(next.local_addr().unwrap()).unwrap();
+		client.send(b"after").await.unwrap();
+		let (size, flow) = kio::clock::timeout(Duration::from_secs(1), next.recv_from(&mut buf))
+			.await
+			.expect("the retarget never forwarded")
+			.unwrap();
+		assert_eq!(&buf[..size], b"after");
+		next.send_to(b"reply", flow).await.unwrap();
+		let size = kio::clock::timeout(Duration::from_secs(1), client.recv(&mut buf))
+			.await
+			.expect("the reply never arrived")
+			.unwrap();
+		assert_eq!(&buf[..size], b"reply");
+		shaper.verify().unwrap();
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_closed_client_leaves_the_others_forwarding() {
+		let (shaper, client) = setup(1, Profile::default(), Profile::default()).await;
+
+		// The echo returns to the closed port, drawing an error on the listening socket.
+		let gone = UdpSocket::bind(LOCALHOST).await.unwrap();
+		gone.connect(shaper.addr()).await.unwrap();
+		gone.send(b"gone").await.unwrap();
+		drop(gone);
+		while shaper.stats().down.packets < 1 {
+			kio::clock::sleep(Duration::from_millis(1)).await;
+		}
+
+		let got = round_trip(&client, 10).await;
+		assert_eq!(got, (0..10).collect::<Vec<_>>());
+		shaper.verify().unwrap();
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1539,8 +1800,83 @@ mod tests {
 	}
 
 	#[test]
+	fn dropped_datagrams_are_not_chances_to_reorder() {
+		let profile = Profile {
+			delay: Duration::from_millis(20),
+			loss: 0.05,
+			reorder: 0.02,
+			..Default::default()
+		};
+		let counts = |exposed, scheduled| [(0, Treated { exposed, scheduled })].into();
+		let mut phases = phased(&profile, &[], &counts(258, 209));
+		phases.extend(phased(&profile, &[], &counts(241, 227)));
+		let stats = Stats {
+			up: Counters {
+				packets: 258,
+				lost: 10,
+				overflowed: 39,
+				delayed: 209,
+				..Default::default()
+			},
+			down: Counters {
+				packets: 241,
+				lost: 12,
+				overflowed: 2,
+				delayed: 227,
+				..Default::default()
+			},
+		};
+
+		// Only the 436 survivors can skip delay: 0.98^436 is above 1e-4.
+		assert!(unapplied(&phases, &stats).is_empty());
+	}
+
+	#[test]
+	fn only_survivors_reach_delay_and_reorder_accounting() {
+		for loss in [0.0, 1.0] {
+			let profile = Profile {
+				delay: Duration::from_millis(20),
+				loss,
+				reorder: 0.02,
+				rate: Some(Rate {
+					bits_per_second: 8_000,
+					burst: 1,
+					queue: Duration::ZERO,
+				}),
+				..Default::default()
+			};
+			let now = Instant::now();
+			let (queue, _) = mpsc::unbounded_channel();
+			let mut link = Link::new(&profile, &Options::default(), 7, 0, now, queue);
+			let tally = Tally::default();
+			let survivors = (0..1000).filter(|_| link.treat(now, 1, &tally).is_some()).count();
+			assert_eq!(survivors, usize::from(loss == 0.0));
+			let counts = tally.phases.lock().unwrap();
+			assert_eq!(counts[&0].scheduled, survivors as u64);
+			let stats = Stats {
+				up: tally.snapshot(),
+				down: Counters::default(),
+			};
+			assert!(unapplied(&phased(&profile, &[], &counts), &stats).is_empty());
+		}
+	}
+
+	#[test]
 	fn a_phase_is_charged_only_its_own_traffic() {
 		let ms = Duration::from_millis;
+		let exposed = |counts: [(usize, u64); 2]| {
+			counts
+				.map(|(phase, exposed)| {
+					(
+						phase,
+						Treated {
+							exposed,
+							scheduled: exposed,
+						},
+					)
+				})
+				.into()
+		};
 		let lossy = Profile {
 			loss: 0.02,
 			..Default::default()
@@ -1551,7 +1887,7 @@ mod tests {
 			..Default::default()
 		}];
 		// One datagram survived the 2% loss, then the loss stepped off for a thousand.
-		let phases = phased(&lossy, &steps, &BTreeMap::from([(0, 1), (1, 1000)]));
+		let phases = phased(&lossy, &steps, &exposed([(0, 1), (1, 1000)]));
 		let stats = Stats {
 			up: Counters {
 				packets: 1001,
@@ -1562,7 +1898,7 @@ mod tests {
 		assert!(unapplied(&phases, &stats).is_empty());
 
 		// The same thousand under the loss still fail.
-		let phases = phased(&lossy, &steps, &BTreeMap::from([(0, 1000), (1, 1)]));
+		let phases = phased(&lossy, &steps, &exposed([(0, 1000), (1, 1)]));
 		assert_eq!(unapplied(&phases, &stats), ["loss"]);
 	}
 
@@ -1833,7 +2169,7 @@ mod tests {
 
 		let mut got = Vec::new();
 		let mut buf = [0u8; 4];
-		while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(500), target.recv_from(&mut buf)).await {
+		while let Ok(Ok(_)) = kio::clock::timeout(Duration::from_millis(500), target.recv_from(&mut buf)).await {
 			got.push((u32::from_be_bytes(buf), start.elapsed()));
 		}
 		got
@@ -1890,14 +2226,14 @@ mod tests {
 			for id in 0..count {
 				sent.push(Instant::now());
 				client.send(&id.to_be_bytes()).await.unwrap();
-				tokio::time::sleep(spacing).await;
+				kio::clock::sleep(spacing).await;
 			}
 			sent
 		};
 		let receive = async {
 			let mut got = Vec::new();
 			let mut buf = [0u8; 4];
-			while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(500), client.recv(&mut buf)).await {
+			while let Ok(Ok(_)) = kio::clock::timeout(Duration::from_millis(500), client.recv(&mut buf)).await {
 				got.push((u32::from_be_bytes(buf), Instant::now()));
 			}
 			got
@@ -2280,7 +2616,7 @@ mod tests {
 		let mut buf = [0u8; 4];
 		client.send(&0u32.to_be_bytes()).await.unwrap();
 		client.recv(&mut buf).await.unwrap();
-		tokio::time::sleep(ms(250)).await;
+		kio::clock::sleep(ms(250)).await;
 		client.send(&1u32.to_be_bytes()).await.unwrap();
 		client.recv(&mut buf).await.unwrap();
 
@@ -2311,7 +2647,7 @@ mod tests {
 		.await;
 
 		// The first datagram comes after the step, so the 5ms phase passes with nothing in it.
-		tokio::time::sleep(ms(250)).await;
+		kio::clock::sleep(ms(250)).await;
 		let mut buf = [0u8; 4];
 		client.send(&0u32.to_be_bytes()).await.unwrap();
 		client.recv(&mut buf).await.unwrap();
@@ -2320,6 +2656,70 @@ mod tests {
 		let err = format!("{err:#}");
 		assert!(err.contains("the up profile before its step at 100ms"), "{err}");
 		assert!(!err.contains("the up step at"), "{err}");
+	}
+
+	#[test]
+	fn a_rate_step_keeps_the_order_and_serves_the_new_rate() {
+		let ms = Duration::from_millis;
+		let secs = Duration::from_secs;
+		// 1000 bytes take a second at the start and two after the step, and the
+		// burst lets three out at once.
+		let profile = Profile {
+			rate: Some(Rate {
+				bits_per_second: 8000,
+				burst: 3000,
+				queue: secs(6),
+			}),
+			..Default::default()
+		};
+		let options = stepped(vec![Step {
+			at: ms(500),
+			bits_per_second: Some(4000),
+			..Default::default()
+		}]);
+		let (queue, _) = mpsc::unbounded_channel();
+		let start = Instant::now();
+		let mut link = Link::new(&profile, &options, 7, 0, start, queue);
+		let tally = Tally::default();
+		let mut leave = |at: Duration| link.treat(start + at, 1000, &tally).map(|(at, _)| at - start);
+
+		let queued: Vec<_> = (0..6).map(|_| leave(Duration::ZERO).unwrap()).collect();
+		assert_eq!(queued, [secs(0), secs(0), secs(0), secs(1), secs(2), secs(3)]);
+
+		// The bucket is empty once the last queued datagram leaves at 3s, so the
+		// next refills at the new rate behind it rather than inside the old burst.
+		assert_eq!(leave(ms(500)), Some(secs(5)));
+		assert_eq!(leave(ms(500)), None, "a 6.5s wait fit the 6s queue");
+		assert_eq!(leave(secs(2)), Some(secs(7)));
+		assert_eq!(tally.overflowed.load(Ordering::Relaxed), 1);
+	}
+
+	#[test]
+	fn a_rate_step_up_never_overtakes_the_queue() {
+		let ms = Duration::from_millis;
+		let secs = Duration::from_secs;
+		let profile = Profile {
+			rate: Some(Rate {
+				bits_per_second: 8000,
+				burst: 1000,
+				queue: secs(10),
+			}),
+			..Default::default()
+		};
+		let options = stepped(vec![Step {
+			at: ms(500),
+			bits_per_second: Some(16000),
+			..Default::default()
+		}]);
+		let (queue, _) = mpsc::unbounded_channel();
+		let start = Instant::now();
+		let mut link = Link::new(&profile, &options, 7, 0, start, queue);
+
+		assert_eq!(owed(&mut link, start, &[1000; 3]), [secs(0), secs(1), secs(2)]);
+		// Behind the one leaving at 2s, then half a second apart at the new rate.
+		let after = start + ms(500);
+		let owed = owed(&mut link, after, &[1000; 2]);
+		assert_eq!(owed, [ms(2000), ms(2500)]);
 	}
 
 	#[test]
@@ -2384,6 +2784,16 @@ mod tests {
 				},
 			],
 			"the step at 60s changes nothing",
+		)
+		.await;
+		// The down direction has no rate limit for a step to change.
+		refused(
+			vec![Step {
+				at: Duration::from_secs(30),
+				bits_per_second: Some(1_000_000),
+				..Default::default()
+			}],
+			"a rate limit the direction does not have",
 		)
 		.await;
 		// Uniform jitter past the delay, reached by a step rather than at the start.

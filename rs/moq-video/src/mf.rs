@@ -35,7 +35,7 @@ pub(crate) fn unpack_2x32(v: u64) -> (u32, u32) {
 /// shared [`d3d11::create_device`] (multithread-protected); this adds the Media
 /// Foundation manager on top.
 pub(crate) fn create_d3d_device() -> Result<(ID3D11Device, IMFDXGIDeviceManager), Error> {
-	let device = d3d11::create_device()?;
+	let device = d3d11::create_device(None)?;
 
 	let mut token: u32 = 0;
 	let mut manager: Option<IMFDXGIDeviceManager> = None;

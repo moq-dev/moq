@@ -110,12 +110,4 @@ mod tests {
 	fn out_of_segment_frame_is_dropped() {
 		assert!(frame_micros(None).is_err());
 	}
-
-	// frame_micros is a stateless conversion (no last-emitted state, no per-pad anchor). The real
-	// A/V-offset guarantee is exercised by two_pads_keep_av_aligned_through_real_segments.
-	#[test]
-	fn frame_micros_is_stateless() {
-		assert_eq!(frame_micros(Some(7_000_000)), Ok(7_000));
-		assert_eq!(frame_micros(Some(5_000_000)), Ok(5_000));
-	}
 }

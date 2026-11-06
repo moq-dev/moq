@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 # Publish a coded portrait, transcode a short-side rung, and paint it in Chromium.
 set -euo pipefail
+
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../../sh/local.sh" bash "$0" "$@"
+fi
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$DIR/../.." && pwd)
 # shellcheck source-path=SCRIPTDIR source=../lib/harness.sh
 source "$DIR/../lib/harness.sh"
 harness_begin portrait 'just test portrait'
 cd "$WORKSPACE"
-cargo build --locked -p moq-relay -p moq-cli --features moq-cli/transcode
+cargo build --locked -p moq-relay -p moq-cli --features moq-cli/transcode,moq-cli/openh264
 bun install --frozen-lockfile
-(cd test/interop/clients/js && bunx vite build --outDir "$HARNESS_RUN/js-dist" && bunx playwright install chromium)
+(cd test/interop/clients/js && bunx vite build --outDir "$HARNESS_RUN/js-dist")
 harness_port relay
 URL="http://127.0.0.1:$HARNESS_PORT"
 sed "s/4443/$HARNESS_PORT/g" "$DIR/relay.toml" >"$HARNESS_RUN/relay.toml"

@@ -7,6 +7,8 @@ const SHADER = /* wgsl */ `
 struct Params {
 	x: vec4<f32>,
 	y: vec4<f32>,
+	// Nonzero when the frame weaves two fields.
+	interlaced: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -30,7 +32,17 @@ fn vertex(@builtin(vertex_index) index: u32) -> Vertex {
 
 @fragment
 fn fragment(in: Vertex) -> @location(0) vec4<f32> {
-	return vec4<f32>(textureSampleBaseClampToEdge(frame, samp, in.uv).rgb, 1.0);
+	let center = textureSampleBaseClampToEdge(frame, samp, in.uv).rgb;
+	if (params.interlaced == 0.0) {
+		return vec4<f32>(center, 1.0);
+	}
+
+	// Adjacent lines come from different fields, so anything that moved between them combs. A
+	// [1 2 1] vertical blend hides it at the cost of some vertical detail.
+	let line = vec2<f32>(0.0, 1.0 / f32(textureDimensions(frame).y));
+	let above = textureSampleBaseClampToEdge(frame, samp, in.uv - line).rgb;
+	let below = textureSampleBaseClampToEdge(frame, samp, in.uv + line).rgb;
+	return vec4<f32>((above + 2.0 * center + below) * 0.25, 1.0);
 }
 `;
 
@@ -107,7 +119,7 @@ export class Gpu {
 			primitive: { topology: "triangle-list" },
 		});
 		this.#sampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
-		this.#params = device.createBuffer({ size: 32, usage: UNIFORM | COPY_DST });
+		this.#params = device.createBuffer({ size: 48, usage: UNIFORM | COPY_DST });
 
 		this.#configure("srgb");
 	}
@@ -147,7 +159,8 @@ export class Gpu {
 		if (frame) {
 			const canvas = this.#context.canvas;
 			const { x, y } = texturePresentationTransform({ width: canvas.width, height: canvas.height }, presentation);
-			this.#device.queue.writeBuffer(this.#params, 0, new Float32Array([...x, 0, ...y, 0]));
+			const interlaced = presentation?.interlaced ? 1 : 0;
+			this.#device.queue.writeBuffer(this.#params, 0, new Float32Array([...x, 0, ...y, 0, interlaced, 0, 0, 0]));
 
 			const texture = this.#device.importExternalTexture({ source: frame, colorSpace: this.#colorSpace });
 			const group = this.#device.createBindGroup({

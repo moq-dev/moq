@@ -15,3 +15,9 @@ categories = ["multimedia::video", "os::linux-apis"]
 [dependencies]
 bitflags = { workspace = true }
 libc = { workspace = true }
+
+[dev-dependencies]
+workspace-hack = { path = "../workspace-hack" }
+
+[lints]
+workspace = true

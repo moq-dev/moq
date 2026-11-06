@@ -17,8 +17,8 @@ pub struct Group {
 	pub frame_start: u64,
 }
 
-impl Message for Group {
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Message<'a> for Group {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let subscribe = r.varint()?;
 		let sequence = r.varint()?;
 		let frame_start = match version.has_frame_bounds() {
@@ -63,7 +63,8 @@ mod test {
 		let mut buf = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Lite06.into()), Version::Lite06)
 			.unwrap();
-		let got = crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite06, Group::decode_msg).unwrap();
+		let got =
+			crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite06, |r, v| Group::decode_msg(r, v)).unwrap();
 		assert_eq!((got.sequence, got.frame_start), (7, 4));
 	}
 
@@ -86,7 +87,8 @@ mod test {
 		whole
 			.encode_msg(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 			.unwrap();
-		let got = crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite05, Group::decode_msg).unwrap();
+		let got =
+			crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite05, |r, v| Group::decode_msg(r, v)).unwrap();
 		assert_eq!(got.frame_start, 0);
 	}
 }

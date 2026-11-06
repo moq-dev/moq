@@ -1,0 +1,72 @@
+# Migrating moq-json
+
+How to update your code for each breaking change, newest first.
+
+## Unreleased
+
+### Async wrappers are opt-in
+
+Enable the `async` Cargo feature to keep awaiting consumer `next`/`latest` and producer
+`refresh`: `moq-json = { version = "...", features = ["async"] }`. This also applies
+with `default-features = false`. The feature is off by default; `poll_next`,
+`poll_latest`, and `poll_refresh` stay available without it.
+The generated consumer wrappers no longer require `T: Unpin`.
+The JSON framing and JS and binding APIs are unchanged.
+
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`snapshot::Consumer::new` takes the track, a `moq_net::track::Consumer`, instead of a `track::Subscriber`, and subscribes to it itself at a zero `delay.max` and default preferences otherwise; the new `Config::priority` sets the subscription's priority.
+Pass `broadcast.track(name)?` rather than `broadcast.track(name)?.subscribe(..).await?`, or `producer.consume()` for an in-process `track::Producer`.
+A refused or failed subscription now surfaces from the first read instead of before construction.
+No handle to that subscription leaves the consumer, so ranges, order, and `delay.max` can no longer be set on a snapshot reader.
+
+`next()` skips every group a newer one supersedes, and `latest()` no longer waits for a lower group a received track still owes, whatever another reader of the track asks for.
+A reader that set `delay.max` to replay a snapshot track's history or trail a playhead gets only the newest group: read the track's groups yourself and feed them to a `snapshot::Decoder`, or publish a `stream` track when every state must survive, or a `window` track for a bounded recent history.
+
+### Compression moves to the track
+
+`Compression`, every `Config::compression` field, the `with_compression` setters, `Error::Flate`, `Error::Desync`, and `stream::Decoder::reset` are gone, along with the moq-flate dependency.
+Frames are plain JSON; set `compress: true` on the `moq_net::track::Info` you create the track with, and moq-net compresses each group on the wire and hands every reader plain frames.
+Drop the `compression` field from your producer and consumer configs: a consumer reads a compressed track with no setting of its own.
+The stream and window consumer configs are now empty, kept for options to come.
+Every frame is charged its JSON size against `moq_net::group::MAX_CACHE_BYTES`, as a compressed one already was.
+
+### Groups roll on joiner demand
+
+`snapshot::Config::delta_ratio` and `window::ProducerConfig::op_ratio`, with `with_delta_ratio` and `with_op_ratio`, are replaced by `deltas: bool` and `ops: bool` (both default `true`).
+Set `deltas: false` where you set `delta_ratio = 0`, and `ops: false` where you set `op_ratio = 0`.
+A group no longer rolls on a byte budget: create the track with `Info::refresh` (`Some(8)` matches the old default) and drive `Producer::refresh` (or `poll_refresh`) beside your edits, so a joiner past the ratio gets the value or window restated in a new group.
+Without a ratio a group rolls only at its frame and byte caps.
+An `Encoder` user restates with `Encoder::snapshot()` once `Demand::wanted` passes the largest group it wrote.
+
+`Encoder::value` (and so `Producer::modify`/`mutate`) now holds the last committed value: a rejected publish no longer carries into the next edit, so retry the edit yourself if you still want it.
+
+### Consumers return `Timed<T>` (#5677)
+
+Snapshot, stream, and window `next` / `poll_next` return `moq_net::Timed<T>`: read `.value` for the value and `.at` for the frame's exact timestamp, `None` when untimed.
+A window event's `.value` is the `Event` that `next` used to return; a record restated by a group header carries the header frame's time.
+Snapshot `next` now yields each state in order, skipping every group a newer one supersedes (see the zero-delay entry above); call `latest` / `poll_latest` for the old collapse-to-newest read.
+
+### Duplicate keys are refused
+
+Every decoder refuses a frame in which a JSON object repeats a key with `Error::DuplicateKey`, where stream and window decoders used to keep the last copy and snapshots returned `Error::Json`.
+Match `DuplicateKey` wherever you handle `Error::Json` for a malformed frame, and fix any publisher that writes a repeated key.
+
+### Demand is read through `demand()`
+
+Call `producer.demand().is_used()` instead of `producer.is_used()`.
+
+### Timestamps are explicit
+
+`moq_net::Timed<P>` drops its clock type parameter.
+Snapshot, stream, and window producers publish `at: None` untimed, so their track must be untimed; pass a timestamp on a timed track.
+Snapshot `modify(at)` and `mutate(at, f)` carry the caller's optional time through the edit guard.
+Wrap each update as `Timed::from(&value).at(timestamp)`, and pass `Some(timestamp)` to `modify`.
+
+## 0.3 -> 0.4
+
+### Configs split by role (#3718)
+
+`compression: bool` is a `Compression` enum, and options that own a track live in each mode's `producer::Config` and `consumer::Config`.
+`lock()` is `modify()?`, and a guard that fails to publish on drop aborts the track (#3644).
+Set `Compression::Deflate` where you set `true`.

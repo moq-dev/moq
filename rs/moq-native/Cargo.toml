@@ -26,3 +26,9 @@ tcp = []
 uds = []
 ring = []
 android-logcat = []
+
+[dev-dependencies]
+workspace-hack = { path = "../workspace-hack" }
+
+[lints]
+workspace = true

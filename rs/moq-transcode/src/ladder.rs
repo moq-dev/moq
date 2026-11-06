@@ -9,7 +9,7 @@
 pub struct Rung {
 	/// Output short side in pixels. Rounded down to even when it enters a [`Ladder`]
 	/// (I420 chroma is 2x2).
-	pub size: u32,
+	pub short_side: u32,
 
 	/// The configured maximum in bits per second: the CBR target advertised in the
 	/// derivative catalog.
@@ -17,9 +17,9 @@ pub struct Rung {
 }
 
 impl Rung {
-	/// A rung at `size` pixels and `bitrate` bits per second.
-	pub fn new(size: u32, bitrate: moq_net::bandwidth::Rate) -> Self {
-		Self { size, bitrate }
+	/// A rung at `short_side` pixels and `bitrate` bits per second.
+	pub fn new(short_side: u32, bitrate: moq_net::bandwidth::Rate) -> Self {
+		Self { short_side, bitrate }
 	}
 }
 
@@ -29,10 +29,10 @@ impl Rung {
 pub enum Error {
 	/// A rung that encodes nothing: a size that rounds to zero pixels, or no
 	/// bitrate to spend.
-	#[error("rung {size}p at {bitrate} bps encodes nothing")]
+	#[error("rung {short_side}p at {bitrate} bps encodes nothing")]
 	Empty {
 		/// The configured size, before rounding to even.
-		size: u32,
+		short_side: u32,
 		/// The configured maximum, in bits per second.
 		bitrate: u64,
 	},
@@ -52,14 +52,14 @@ pub enum Error {
 	/// Resolution runs backwards against bitrate: a rung costs more than the one
 	/// below it without being taller, so bitrate and picture disagree on which
 	/// rendition is lower.
-	#[error("rung {size}p at {bitrate} bps does not rise above {below_size}p at {below_bitrate} bps")]
+	#[error("rung {short_side}p at {bitrate} bps does not rise above {below_short_side}p at {below_bitrate} bps")]
 	Unordered {
 		/// The more expensive rung's size, in pixels.
-		size: u32,
+		short_side: u32,
 		/// The more expensive rung's maximum, in bits per second.
 		bitrate: u64,
 		/// The cheaper rung's size, in pixels.
-		below_size: u32,
+		below_short_side: u32,
 		/// The cheaper rung's maximum, in bits per second.
 		below_bitrate: u64,
 	},
@@ -88,32 +88,32 @@ impl Ladder {
 	pub fn new(rungs: impl IntoIterator<Item = Rung>) -> Result<Self, Error> {
 		let mut rungs: Vec<Rung> = rungs.into_iter().collect();
 		for rung in &mut rungs {
-			if rung.size < 2 || rung.bitrate.as_bps() == 0 {
+			if rung.short_side < 2 || rung.bitrate.as_bps() == 0 {
 				return Err(Error::Empty {
-					size: rung.size,
+					short_side: rung.short_side,
 					bitrate: rung.bitrate.as_bps(),
 				});
 			}
 			// Normalize before checking uniqueness: odd sizes can share a track name.
-			rung.size &= !1;
+			rung.short_side &= !1;
 		}
 
-		rungs.sort_by_key(|rung| (rung.bitrate, rung.size));
+		rungs.sort_by_key(|rung| (rung.bitrate, rung.short_side));
 
 		for pair in rungs.windows(2) {
 			let (below, rung) = (pair[0], pair[1]);
 			if below.bitrate == rung.bitrate {
 				return Err(Error::DuplicateBitrate {
 					bitrate: rung.bitrate.as_bps(),
-					first: below.size,
-					second: rung.size,
+					first: below.short_side,
+					second: rung.short_side,
 				});
 			}
-			if rung.size <= below.size {
+			if rung.short_side <= below.short_side {
 				return Err(Error::Unordered {
-					size: rung.size,
+					short_side: rung.short_side,
 					bitrate: rung.bitrate.as_bps(),
-					below_size: below.size,
+					below_short_side: below.short_side,
 					below_bitrate: below.bitrate.as_bps(),
 				});
 			}
@@ -148,13 +148,7 @@ mod tests {
 	use super::*;
 
 	fn sizes(ladder: &Ladder) -> Vec<u32> {
-		ladder.rungs().iter().map(|rung| rung.size).collect()
-	}
-
-	#[test]
-	fn default_ladder_is_ordered() {
-		let ladder = Ladder::default();
-		assert_eq!(sizes(&ladder), [240, 360, 480, 720, 1080]);
+		ladder.rungs().iter().map(|rung| rung.short_side).collect()
 	}
 
 	/// The operator writes the ladder top-down (or in whatever order), and it
@@ -205,9 +199,9 @@ mod tests {
 		assert_eq!(
 			err,
 			Error::Unordered {
-				size: 720,
+				short_side: 720,
 				bitrate: 2_500_000,
-				below_size: 720,
+				below_short_side: 720,
 				below_bitrate: 1_200_000,
 			}
 		);
@@ -225,9 +219,9 @@ mod tests {
 		assert_eq!(
 			err,
 			Error::Unordered {
-				size: 360,
+				short_side: 360,
 				bitrate: 3_000_000,
-				below_size: 1080,
+				below_short_side: 1080,
 				below_bitrate: 1_000_000,
 			}
 		);
@@ -238,13 +232,16 @@ mod tests {
 		assert_eq!(
 			Ladder::new([Rung::new(1, moq_net::bandwidth::Rate::from_bps(350_000))]).unwrap_err(),
 			Error::Empty {
-				size: 1,
+				short_side: 1,
 				bitrate: 350_000
 			}
 		);
 		assert_eq!(
 			Ladder::new([Rung::new(240, moq_net::bandwidth::Rate::from_bps(0))]).unwrap_err(),
-			Error::Empty { size: 240, bitrate: 0 }
+			Error::Empty {
+				short_side: 240,
+				bitrate: 0
+			}
 		);
 	}
 

@@ -6,8 +6,10 @@
 // streams stay in flight and ranked against each other.
 
 import { expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { accept, connect, type Established } from "./connection/index.ts";
 import type { Producer as GroupProducer } from "./group.ts";
+import { FetchHeader } from "./ietf/fetch.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair, type MockTransport, textFrame } from "./mock.ts";
@@ -15,7 +17,7 @@ import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { sendOrder } from "./priority.ts";
 import type { SendStream } from "./stream.ts";
-import { Milli, Timescale } from "./time.ts";
+import { Timescale } from "./time.ts";
 import type { Order, Producer as TrackProducer, Subscriber as TrackSubscriber } from "./track.ts";
 import { wireOf } from "./wire.ts";
 
@@ -32,10 +34,63 @@ function expected(order: Order, count: number): number[] {
 	);
 }
 
+// The positions in `sendStreams.uni` of each transport's fetch streams.
+const fetchStreams = new WeakMap<MockTransport, Set<number>>();
+// The leading bytes each of a transport's uni streams wrote, by position in `sendStreams.uni`.
+const headers = new WeakMap<MockTransport, Map<number, number[]>>();
+
+// Note which uni streams open with a fetch header. A draft-18 subscriber that joins after
+// Largest fetches the group's head on one, ranked with that group, beside its group streams.
+function noteFetchStreams(transport: MockTransport): void {
+	const fetches = new Set<number>();
+	fetchStreams.set(transport, fetches);
+	const written = new Map<number, number[]>();
+	headers.set(transport, written);
+	const create = transport.createUnidirectionalStream.bind(transport);
+	transport.createUnidirectionalStream = async (options) => {
+		const stream = await create(options);
+		// Kept by position, since a wrapper such as holdFins replaces the logged stream.
+		const index = transport.sendStreams.uni.indexOf(stream as SendStream);
+		const getWriter = stream.getWriter.bind(stream);
+		stream.getWriter = () => {
+			const writer = getWriter();
+			const write = writer.write.bind(writer);
+			let first = true;
+			writer.write = (chunk) => {
+				if (first && chunk?.[0] === FetchHeader.type) fetches.add(index);
+				first = false;
+				const bytes = written.get(index) ?? [];
+				if (chunk && bytes.length < 8) written.set(index, [...bytes, ...chunk].slice(0, 8));
+				return write(chunk);
+			};
+			return writer;
+		};
+		return stream;
+	};
+}
+
 // The send orders of a transport's group streams. Protocol streams, such as the setup stream,
-// open without one.
+// open without one, and fetch streams are left out.
+// The send orders of a moq-lite transport's group streams by group sequence: the opens of a
+// backlog wait together, so which stream carries which group is the line's choice. A lite
+// group stream starts with its type, the header's size, the subscription, then the sequence,
+// each a single byte at these values.
+function liteSendOrders(transport: MockTransport): number[] {
+	const written = headers.get(transport);
+	return transport.sendStreams.uni
+		.flatMap((stream, index) => {
+			const sequence = written?.get(index)?.[3];
+			return stream.sendOrder === undefined || sequence === undefined ? [] : [[sequence, stream.sendOrder]];
+		})
+		.sort(([a], [b]) => a - b)
+		.map(([, order]) => order);
+}
+
 function sendOrders(transport: MockTransport): number[] {
-	return transport.sendStreams.uni.flatMap((stream) => (stream.sendOrder === undefined ? [] : [stream.sendOrder]));
+	const fetches = fetchStreams.get(transport);
+	return transport.sendStreams.uni.flatMap((stream, index) =>
+		stream.sendOrder === undefined || fetches?.has(index) ? [] : [stream.sendOrder],
+	);
 }
 
 // A group with one frame, left open.
@@ -47,8 +102,8 @@ function writeGroup(track: TrackProducer): GroupProducer {
 
 // Receiving a group means its stream header was written, which the publisher does only after
 // ranking the stream.
-async function receive(subscriber: TrackSubscriber, count: number): Promise<number[]> {
-	const sequences: number[] = [];
+async function receive(subscriber: TrackSubscriber, count: number): Promise<bigint[]> {
+	const sequences: bigint[] = [];
 	for (let i = 0; i < count; i++) {
 		const group = await subscriber.recvGroup();
 		if (!group) throw new Error("track ended early");
@@ -74,37 +129,37 @@ async function session(protocol: string, origin: OriginProducer): Promise<Sessio
 		connect({ url, transport: pair.client }),
 		accept({ transport: pair.server, url, publish: origin.consume() }),
 	]);
+	noteFetchStreams(pair.server);
 	return { client, server, transport: pair.server };
 }
 
-// A backlog already cached when the subscription arrives. The publisher's own reader hands a
-// buffered backlog out lowest first, so stream `i` carries group `i`. With `update`, the
-// subscriber switches to that order once every group is in flight.
+// A backlog already cached when the subscription arrives, its send orders listed by group.
+// With `update`, the subscriber switches to that order once every group is in flight.
 async function backlog(protocol: string, order: Order, update?: Order) {
 	const origin = new OriginProducer();
 	const { client, server, transport } = await session(protocol, origin);
 
-	const broadcast = origin.createBroadcast(Path.from("test"));
-	broadcast.announce();
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const broadcastRoute = origin.route(Path.from("test"));
+	const broadcast = broadcastRoute.broadcast;
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const groups = [0, 1, 2].map(() => writeGroup(video));
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const subscriber = remote.track("video").subscribe({
-		maxDelay: MAX_DELAY,
+		delay: { max: MAX_DELAY },
 		order,
-		groups: { start: { included: 0 } },
+		ranges: [{ start: { absolute: 0n } }],
 	});
 	await receive(subscriber, groups.length);
 
 	if (update !== undefined) {
-		subscriber.update({ maxDelay: MAX_DELAY, order: update, groups: { start: { included: 0 } } });
+		subscriber.update({ delay: { max: MAX_DELAY }, order: update, ranges: [{ start: { absolute: 0n } }] });
 		await aggregate(video, (upstream) => upstream === update);
 	}
 
-	const result = { upstream: video.subscription.peek()?.order, orders: sendOrders(transport) };
+	const result = { upstream: video.subscription.peek()?.order, orders: liteSendOrders(transport) };
 
-	for (const group of groups) group.close();
+	for (const group of groups) group.finish();
 	subscriber.close();
 	remote.close();
 	broadcast.close();
@@ -135,14 +190,14 @@ test("lite-06 serves an ascending subscription newest first", async () => {
 // moq-transport joins at the live edge, so the groups arrive live, one at a time.
 test.each(["ascending", "descending"] as const)("ietf serves GROUP_ORDER %s", async (order) => {
 	const origin = new OriginProducer();
-	const { client, server, transport } = await session(Ietf.ALPN.DRAFT_17, origin);
+	const { client, server, transport } = await session(Ietf.ALPN.DRAFT_18, origin);
 
-	const broadcast = origin.createBroadcast(Path.from("test"));
-	broadcast.announce();
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const broadcastRoute = origin.route(Path.from("test"));
+	const broadcast = broadcastRoute.broadcast;
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscriber = remote.track("video").subscribe({ maxDelay: MAX_DELAY, order });
+	const subscriber = remote.track("video").subscribe({ delay: { max: MAX_DELAY }, order });
 	await aggregate(video, (upstream) => upstream === order);
 
 	const groups: GroupProducer[] = [];
@@ -152,7 +207,7 @@ test.each(["ascending", "descending"] as const)("ietf serves GROUP_ORDER %s", as
 	}
 	expect(sendOrders(transport)).toEqual(expected(order, 3));
 
-	for (const group of groups) group.close();
+	for (const group of groups) group.finish();
 	subscriber.close();
 	remote.close();
 	broadcast.close();
@@ -160,7 +215,7 @@ test.each(["ascending", "descending"] as const)("ietf serves GROUP_ORDER %s", as
 	server.abort();
 });
 
-// Holds the FIN of every uni stream `transport` opens from here on, while their data still
+// Holds the FIN of every group stream `transport` opens from here on, while their data still
 // flows, until `release`. `closing` resolves once a stream has asked to close.
 function holdFins(transport: MockTransport): { closing: Promise<void>; release: () => void } {
 	let release!: () => void;
@@ -175,10 +230,13 @@ function holdFins(transport: MockTransport): { closing: Promise<void>; release: 
 	const create = transport.createUnidirectionalStream.bind(transport);
 	transport.createUnidirectionalStream = async (options) => {
 		const inner = await create(options);
+		const index = transport.sendStreams.uni.indexOf(inner as SendStream);
 		const writer = inner.getWriter();
 		const outer: SendStream = new WritableStream<Uint8Array>({
 			write: (chunk) => writer.write(chunk),
 			close: async () => {
+				// A join's fetch stream closes as usual; only group streams are held.
+				if (fetchStreams.get(transport)?.has(index)) return writer.close();
 				closed();
 				await released;
 				await writer.close();
@@ -188,7 +246,7 @@ function holdFins(transport: MockTransport): { closing: Promise<void>; release: 
 		outer.sendOrder = options?.sendOrder;
 		// Record the stream the publisher re-ranks.
 		const log = transport.sendStreams.uni;
-		log[log.indexOf(inner)] = outer;
+		log[index] = outer;
 		return outer;
 	};
 	return { closing, release };
@@ -198,15 +256,15 @@ function holdFins(transport: MockTransport): { closing: Promise<void>; release: 
 // the groups behind it are promoted to tie with it.
 test("ietf keeps a closing group stream ranked until it settles", async () => {
 	const origin = new OriginProducer();
-	const { client, server, transport } = await session(Ietf.ALPN.DRAFT_17, origin);
+	const { client, server, transport } = await session(Ietf.ALPN.DRAFT_18, origin);
 	const fins = holdFins(transport);
 
-	const broadcast = origin.createBroadcast(Path.from("test"));
-	broadcast.announce();
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const broadcastRoute = origin.route(Path.from("test"));
+	const broadcast = broadcastRoute.broadcast;
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscriber = remote.track("video").subscribe({ maxDelay: MAX_DELAY, order: "descending" });
+	const subscriber = remote.track("video").subscribe({ delay: { max: MAX_DELAY }, order: "descending" });
 	await aggregate(video, (upstream) => upstream === "descending");
 
 	const groups: GroupProducer[] = [];
@@ -216,12 +274,12 @@ test("ietf keeps a closing group stream ranked until it settles", async () => {
 	}
 
 	// The newest group, ranked first, finishes while its FIN is held.
-	groups[2]?.close();
+	groups[2]?.finish();
 	await fins.closing;
 	expect(sendOrders(transport)).toEqual(expected("descending", 3));
 
 	fins.release();
-	for (const group of groups) group.close();
+	for (const group of groups) group.finish();
 	subscriber.close();
 	remote.close();
 	broadcast.close();
@@ -230,7 +288,7 @@ test("ietf keeps a closing group stream ranked until it settles", async () => {
 });
 
 // One track fanned out to an ascending and a descending subscriber, the shape a relay serves
-// from one upstream request (a JS app does not proxy, so the track is local here). The
+// from one upstream request (the track is local here). The
 // aggregate a wire would request upstream turns descending once the descending subscriber
 // joins, so it is never held behind the other's backlog, and each session still serves its
 // own subscriber in its own order.
@@ -241,16 +299,18 @@ test("a shared track aggregates descending and serves each subscriber in its own
 		session(Lite.ALPN_07_WIP, origin),
 	]);
 
-	const broadcast = origin.createBroadcast(Path.from("test"));
-	broadcast.announce();
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const broadcastRoute = origin.route(Path.from("test"));
+	const broadcast = broadcastRoute.broadcast;
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 
 	const ascendingRemote = wireOf(ascending.client).consume(Path.from("test"));
-	const ascendingTrack = ascendingRemote.track("video").subscribe({ maxDelay: MAX_DELAY, order: "ascending" });
+	const ascendingTrack = ascendingRemote.track("video").subscribe({ delay: { max: MAX_DELAY }, order: "ascending" });
 	await aggregate(video, (order) => order === "ascending");
 
 	const descendingRemote = wireOf(descending.client).consume(Path.from("test"));
-	const descendingTrack = descendingRemote.track("video").subscribe({ maxDelay: MAX_DELAY, order: "descending" });
+	const descendingTrack = descendingRemote
+		.track("video")
+		.subscribe({ delay: { max: MAX_DELAY }, order: "descending" });
 	await aggregate(video, (order) => order === "descending");
 
 	// One at a time, so each session opens its streams in sequence order.
@@ -263,7 +323,7 @@ test("a shared track aggregates descending and serves each subscriber in its own
 	expect(sendOrders(ascending.transport)).toEqual(expected("ascending", 3));
 	expect(sendOrders(descending.transport)).toEqual(expected("descending", 3));
 
-	for (const group of groups) group.close();
+	for (const group of groups) group.finish();
 	ascendingTrack.close();
 	descendingTrack.close();
 	ascendingRemote.close();

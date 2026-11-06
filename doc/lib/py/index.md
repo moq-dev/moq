@@ -17,7 +17,22 @@ x64.
 Use `Named(name)` or `Requested(request)` as the target for `TrackProducer.audio` / `.video`.
 `CatalogProducer(broadcast)` holds the broadcast weakly and owns catalog properties and sections;
 its writes fail with `Error.Closed` after the broadcast closes or is released.
-`MediaFrame.timestamp`, media writes, and `flush` use `datetime.timedelta`.
+Share `media.Timebase(broadcast)` through `ContainerInit` when several imports use one
+source timeline; omitting it keeps an independent offset. A timebase belongs to its
+broadcast and does not keep it open. `ContainerProducer` takes chunks split anywhere,
+so a raw byte stream needs no other importer.
+`ContainerFormat.FMP4` splits each fragment into one frame per sample.
+Media timestamps are exact `moq.Timestamp(value, scale)` records, so a 90 kHz tick survives a read and republish.
+`Timestamp.from_timedelta` is exact; `.to_timedelta()` rounds down to a whole microsecond.
+A raw frame without a timestamp stays untimed, which only an untimed track accepts; JSON writes always take one. The library never substitutes zero or now.
+JSON consumers yield `moq.json.Timed(value, timestamp)`; a snapshot consumer yields each state in order,
+and `await consumer.latest()` skips to the newest. A window consumer's value is a `WindowPush`, `WindowPop`, or `WindowSkip`.
+Raw tracks with a `None` timescale are untimed on both publish and receive.
+`TrackInfo(compress=True)` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
+The JSON producers' `update`, `append`, `push`, and `pop` require a `timestamp` on the broadcast clock, the epoch every track in the broadcast shares, so their track needs a timescale.
+Whole-frame media writes require caller time; container imports keep their own timeline handling.
+Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
+created event on the broadcast clock; reading it fixes that clock for later media producers.
 For arrival-order reads, decode each group from `TrackConsumer.recv_group()` with
 `media.GroupConsumer(group, container)`; frames carry container media time as they land.
 
@@ -32,18 +47,20 @@ async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
         # The filter is relative to the literal prefix; prefixes stay origin-relative.
         async for event in client.announced("live/", filter="*/camera"):
-            # A restart is a new publisher run at the same path: request it again.
-            if not isinstance(event, (moq.AnnounceEventStart, moq.AnnounceEventRestart)):
-                continue  # AnnounceEventUpdate or AnnounceEventEnd
+            # A path stays present across publisher restarts: hold client.follow(path) to
+            # be handed each new run, or None once it goes offline.
+            if not isinstance(event, moq.AnnounceEventPresent):
+                continue  # AnnounceEventAbsent
             announcement = event.announce
-            print(announcement.captures)  # what * matched, or None for a partial overlap
-            broadcast = await client.request_broadcast(announcement.prefix)
+            print(announcement.captures)  # list of wildcard matches, empty without wildcards
+            broadcast = await client.request(announcement.prefix)
             catalog = await moq.media.catalog(broadcast)
-            name, audio = next(iter(catalog.audio.items()))
-            # The track is the rendition's `track` when set, otherwise its catalog key.
-            track = audio.track if audio.track is not None else name
-            async for frame in await moq.media.TrackConsumer.subscribe(broadcast, track, audio.container):
-                print(frame.timestamp, len(frame.payload))
+            id, audio = next(iter(catalog.audio.items()))
+            async for frame in await moq.media.TrackConsumer.subscribe(broadcast, id, audio):
+                if isinstance(frame, moq.media.MediaFrame):
+                    print(frame.timestamp, len(frame.payload))
+                else:
+                    print("media break", frame)
 
 asyncio.run(main())
 ```
@@ -54,31 +71,36 @@ import asyncio, moq
 async def main():
     # opus_init_bytes, payload, pts, and rgba come from your encoder or capture source.
     async with moq.Client("https://cdn.moq.dev/anon") as client:
-        broadcast = client.create_broadcast("my-stream.hang")
+        # Hidden until announced, so viewers find a filled catalog. Hold the route: dropping it retracts it.
+        route = client.route("my-stream.hang", hidden=True)
+        broadcast = route.broadcast
 
         # Already-encoded frames: the catalog is filled from the bitstream
         audio = moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_init_bytes))
-        audio.write_frame(payload)
+        audio.write_frame(payload, moq.media.CatalogProducer(broadcast).now())
         audio.cut()   # audio has no keyframes, so this is what gives it groups
 
         # Or raw pixels, encoded inside the binding (VideoToolbox, Media Foundation, NVENC, openh264)
-        video = broadcast.encode_video(
-            moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=1280, height=720, framerate=30),
+        catalog_producer = moq.media.CatalogProducer(broadcast)
+        video = moq.video.Producer(
+            catalog_producer,
+            moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=1280, height=720, framerate=moq.video.FrameRate(numerator=30000, denominator=1001)),
             moq.VideoEncoderOutput(
                 codec=moq.VideoCodec.H264,
-                track="camera",
                 kind=moq.VideoEncoderKind.AUTO(),  # pyright: ignore[reportArgumentType]
             ),
+            track="camera",
         )
-        video.write(moq.VideoFrame(timestamp_us=pts, data=rgba))
+        video.write(moq.video.Frame(timestamp=catalog_producer.now(), data=rgba))
 
         # Raw bytes and JSON
         events = broadcast.publish_track("events")
         events.write_frame(b'{"cmd": "ready"}')
-        status = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status"), compression=True)
-        status.update({"state": "live", "viewers": 42})
+        status_track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000, compress=True))
+        status = moq.json.SnapshotProducer(broadcast, status_track)
+        status.update({"state": "live", "viewers": 42}, catalog_producer.now())
 
-        broadcast.announce(moq.Route(epoch=moq.mint_epoch()))  # a fresh epoch per run
+        route.announce()  # each route mints a fresh instance, route.instance
         audio.finish()
         video.finish()
         events.finish()
@@ -88,20 +110,29 @@ async def main():
 asyncio.run(main())
 ```
 
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Pass the publication track name to the producer, alongside its input and codec settings. For simulcast, give each rendition the next one down as `lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3. A pre-encoded `media.TrackProducer.video` or `media.TrackStreamProducer.video` takes `lower` too, of either kind, which only places it one priority below; follow its reservation with `RateControl`, and while it reports disabled, drop the frames, call `set_enabled(False)` after a `discontinuity()`, and `set_enabled(True)` on the keyframe that resumes it. A `TrackStreamProducer` finds its own frames: `set_enabled(False)` drops what is written to it, and after `set_enabled(True)` it resumes at the stream's next keyframe.
+
 ## Things to know
 
 The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
-one to one; the API reference has the names.
+one to one; the API reference has the names, and [Layers](/lib/layers)
+shows which module holds each.
 
 - **Context managers.** `async with` on a client or session awaits a graceful shutdown when the body exits cleanly, and cancels at once when it raises, so your exception survives.
-- **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
-- **Live encoder timing.** After writing a frame you encoded yourself, call `flush(timestamp)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
-- **Decoded frames hold decoder buffers.** Drop each frame from `decode_video` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
-- **Closing.** `await session.shutdown()` gives finished tracks up to one second to deliver and raises if they did not. `cancel(code)` closes at once. Finish or abort live tracks first.
-- **Stats.** `session.stats()` reports `rtt`, `estimated_send_rate_bps`, `estimated_recv_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`). A field is `None` when the transport does not report it, which is not the same as zero.
+- **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or less often to batch frames into fewer groups.
+- **Timeline breaks.** On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
+- **Media reads.** `media.TrackConsumer`, `moq.audio.Consumer`, and `moq.video.Consumer` yield, in order, frames, a `Gap` where media was lost, and an `End` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh. A decoder reads everything the track still holds unless a live player sets `start=moq.media.DecodeStart.LATEST` in its decoder output, which joins at the newest group and skips the cached backlog.
+- **Decoded frames hold decoder buffers.** Drop each frame from a `moq.video.Consumer` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
+- **Closing.** `session.shutdown()` requests a drain immediately; `await session.closed()` waits up to one second and reports its result. `cancel(code)` closes at once. Finish or abort live tracks first. moq-lite-05 and newer wait for the peer to receive finished tails; older Lite versions and IETF wait only for transport ACKs.
+- **Ending cleanly.** When the input ends, finish every track, then call `finish()` on its `moq.media.CatalogProducer` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `broadcast.close()` takes it offline. How long to keep it up is yours to decide. A track still open at the close, or released without a finish, ends with `Unroutable` (`Internal` over moq-transport, which has no such code). Readers follow a publisher's runs by announcement, not by that error: see [identity and recovery](/concept/identity).
+- **Stats.** `session.stats()` reports `rtt`, `estimated_send_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`), and `datagrams_unrouted`, the datagrams received for a subscription with no datagram track, reported only on moq-lite 05 and later, which carry datagrams. A field is `None` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol. Connect returns a connecting session; read its coherent `state()` snapshot and wait with that snapshot's revision to observe first-dial failures and reconnects. Each watcher keeps its own revision. Hold the owned `BandwidthConsumer` returned by `session.recv_bandwidth()` to receive bandwidth estimates. `rate()` reads the current estimate in bits per second and `rate_changed()` waits for a new one. Release the consumer or call `cancel()` when finished; releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
+- **Viewers.** `session.viewers()` divides the receive estimate among the broadcasts you watch. `watch(max_bps)` returns a `Viewer` claiming up to a ceiling, the bitrate of the largest rendition you would switch to; its `rate()` reads that viewer's fair share in bits per second, `None` while there is no estimate (keep the current rendition), and `update(max_bps)` changes the ceiling. Holding a viewer requests the estimate like `recv_bandwidth()`, and dropping it releases the claim. The session sends the summed ceilings as its PROBE target; `set_target(bps)` overrides that, `0` sends none, and `None` follows the viewers again. Ceilings or a target past 2^53 - 1 bps, the most a PROBE target carries, raise `moq.Error.OutOfRange`.
+- **Authorization.** On `moq-lite-07-wip` (opt in with `versions=`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), `async for grant in session.grants()` yields the `Grant` the relay sent back and each change, `None` until it answers and while a client session reconnects. `grants().grant()` reads it once; cancelling or leaving an `async with` releases the wait.
+- **Tokens.** Pass `tokens=[...]` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `session.tokens().set([...])` replaces a client session's tokens before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. `await tokens.answered()` returns once the relay accepts them and raises its refusal with the relay's code. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
-- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
-- **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
+- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode. Audio and video subscribe setup returns `moq.Error.UnsupportedConfig` when the decoder refuses the codec, layout, or description; a player can then try its next ranked rendition. Decoder faults and later peer or decode failures do not report that setup refusal.
+- **Subscription defaults.** A bare `moq.Subscription()`, passing no subscription, and `moq.Subscription.default()` all mean moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded one at once. Pass `delay=moq.Delay(max=None)` for no subscriber limit, or `min=None` to leave the target latency unstated. Decoders take the same `moq.Delay`.
+- **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one.
 
 ## Runtime
 
@@ -109,15 +140,59 @@ Native I/O and background tasks run on a Tokio worker pool. Calls awaited by the
 host still poll in place; independent native wake callbacks can run concurrently.
 The generated bindings wake Python futures through the asyncio event loop. The
 package exit hook joins native workers before interpreter finalization.
+A panic in a native background task reaches the pending and later fallible calls
+of every object that depends on it as a task error; other objects keep running.
 
 A session closed for exceeding the relay's request caps reports the protocol
 kind `ProtocolKind.TOO_MANY_REQUESTS`. Reduce
 the simultaneous announcements or subscriptions, or ask the relay operator
 to adjust the [session limits](/bin/relay/config#session-and-peer), before
 reconnecting with the same workload.
+A session closed because its credential expired reports `ProtocolKind.EXPIRED`, and a request refused for an expired token raises `Error.Expired`; refresh the token before retrying. Malformed credentials report `ProtocolKind.MALFORMED_AUTH_TOKEN`; correct the token before reconnecting with it.
+A catalog that needs a newer moq-hang draft than this build reads raises `Error.UnsupportedCatalog`; upgrade the library to read it.
 
 ## Reference
 
-- API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)
+- API source: [py/moq-rs/moq](https://github.com/moq-dev/moq/tree/main/py/moq-rs/moq)
 - Source and examples: [`py/moq-rs`](https://github.com/moq-dev/moq/tree/main/py/moq-rs)
 - Raw bindings: [`moq-ffi`](https://pypi.org/project/moq-ffi/) on PyPI, for the unwrapped API
+
+## Socket sessions
+
+`moq.socket` connects endpoints through relays in either direction. Wire one
+origin to both session directions, then hold an endpoint while its sessions run:
+
+```python
+import asyncio, moq
+
+async def socket_client():
+    origin = moq.OriginProducer()
+    versions = ["moq-lite-07-wip"]
+    async with moq.Client("https://cdn.moq.dev/anon", versions=versions, publish=origin, consume=origin):
+        async with moq.socket.Endpoint(origin, "room", "client") as endpoint:
+            stream = await endpoint.dial_tcp("server")
+            stream.producer.write_frame(b"command")
+            stream.producer.finish()  # FIN; abort(error_code) sends RST instead.
+            async for frame in stream.consumer:
+                print(frame.payload)
+
+asyncio.run(socket_client())
+```
+
+Sockets need lite-07 or moq-transport on every hop, so the example opts into
+`moq-lite-07-wip`. No client offers it by default while its wire format is a
+work in progress, and the relay must accept it too.
+
+A server awaits `endpoint.accept_tcp()`, then calls `await incoming.accept()`
+or `incoming.reject()`. Accepting verifies that the claimed peer really dialed.
+`TcpStream` exposes group `producer` and `consumer` handles, plus `peer` and
+`session`. Keep the session id private. Its bounded cache reports eviction if a
+reader falls behind; it never skips bytes.
+
+Use `dial_track(peer, info=None)` and `accept_track()` for independent groups of
+messages. `TrackStream` exposes a track producer and a reliably subscribed,
+ascending consumer. Omitted `info` keeps messages without a publisher age limit;
+update the consumer's subscription to change delivery. The protocols have
+separate accept queues. Cancelling a dial or acceptance resets that dial;
+closing the endpoint resets all its sessions. See [Sockets](/concept/socket)
+for routing and authorization.

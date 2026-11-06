@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Run the published moqdev/moq Docker image as the moq-under-test (the
+# publisher and the rust subscriber), the moq half of the Docker channel.
+#
+# Host networking so it reaches the relay on 127.0.0.1; -i so the publisher can
+# pipe ffmpeg's Annex-B stream to `moq publish` over the container's stdin.
+# Linux-only for the same reason as the moq-relay wrapper. Override with
+# SMOKE_DOCKER=podman / SMOKE_CLI_IMAGE.
+set -euo pipefail
+
+runtime="${SMOKE_DOCKER:-docker}"
+image="${SMOKE_CLI_IMAGE:-moqdev/moq}"
+
+exec "$runtime" run --rm -i --network host "$image" "$@"

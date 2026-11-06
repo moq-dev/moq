@@ -1,20 +1,20 @@
-import { afterEach, beforeEach, expect, jest, test } from "bun:test";
-import type { Producer as BroadcastProducer } from "../broadcast.ts";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { type Installed, Manual, Milli, Nano } from "@moq/clock";
+import { Signal } from "@moq/signals";
 import { SessionCode, SessionError } from "../error.ts";
 import * as Lite from "../lite/index.ts";
-import { createMockTransportPair } from "../mock.ts";
-import { Producer as OriginProducer } from "../origin.ts";
+import { createMockTransportPair, type MockTransport } from "../mock.ts";
+import { Producer as OriginProducer, type Table } from "../origin.ts";
 import * as Path from "../path.ts";
+import { Stream, Writer } from "../stream.ts";
 import * as Time from "../time.ts";
 import { connect } from "./connect.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
 import { Reload } from "./reload.ts";
 
-function publish(origin: { createBroadcast(path: Path.Valid): BroadcastProducer }, path: Path.Valid) {
-	const broadcast = origin.createBroadcast(path);
-	broadcast.announce();
-	return broadcast;
+function publish(origin: Pick<Table, "route">, path: Path.Valid) {
+	return origin.route(path).broadcast;
 }
 
 const url = new URL("https://example.com/pool");
@@ -23,23 +23,22 @@ function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "tra
 	return acceptSession({ transport, url, ...props });
 }
 
-// Drain the mock handshake and reactive tasks before moving to the next timer slice.
-async function advance(ms = 0) {
-	for (let elapsed = 0; ; ) {
-		for (let i = 0; i < 64; i++) await Promise.resolve();
-		if (elapsed === ms) return;
-		const step = Math.min(100, ms - elapsed);
-		jest.advanceTimersByTime(step);
-		elapsed += step;
-	}
+let clock: Manual;
+let installed: Installed;
+
+function advance(ms = 0): Promise<void> {
+	return clock.advance(Nano.fromMilli(Milli(ms)));
 }
 
-const linger = Time.Milli(20);
+const linger = Milli(2000);
 
 const original = globalThis.WebTransport;
 const originalWebSocket = globalThis.WebSocket;
 
-beforeEach(() => jest.useFakeTimers());
+beforeEach(() => {
+	clock = new Manual();
+	installed = clock.install();
+});
 
 afterEach(async () => {
 	resetShared();
@@ -47,7 +46,7 @@ afterEach(async () => {
 	await advance(linger);
 	globalThis.WebTransport = original;
 	globalThis.WebSocket = originalWebSocket;
-	jest.useRealTimers();
+	installed.close();
 });
 
 /** Hand out a live mock transport per dial, counting how many were opened. */
@@ -66,7 +65,7 @@ function stubTransports(): { count: () => number } {
 test("two handles on one URL share a connection and an origin", async () => {
 	const dials = stubTransports();
 
-	const first = new Connection({ url, linger });
+	const first = new Connection({ url });
 	const second = new Connection({ url });
 
 	await advance();
@@ -86,7 +85,7 @@ test("two handles on one URL share a connection and an origin", async () => {
 test("the connection closes after the last handle and the linger window", async () => {
 	const dials = stubTransports();
 
-	const handle = new Connection({ url, linger });
+	const handle = new Connection({ url });
 	await advance();
 	expect(handle.status.peek()).toBe("connected");
 	const origin = handle.origin.peek();
@@ -99,7 +98,7 @@ test("the connection closes after the last handle and the linger window", async 
 	expect(origin?.closed.peek()).not.toBeUndefined();
 
 	// The next handle dials fresh.
-	const next = new Connection({ url, linger });
+	const next = new Connection({ url });
 	await advance();
 	expect(next.status.peek()).toBe("connected");
 	expect(dials.count()).toBe(2);
@@ -109,7 +108,7 @@ test("the connection closes after the last handle and the linger window", async 
 test("a handle taken within the linger window reuses the warm connection", async () => {
 	const dials = stubTransports();
 
-	const first = new Connection({ url, linger: Time.Milli(10_000) });
+	const first = new Connection({ url });
 	await advance();
 	expect(first.status.peek()).toBe("connected");
 	const origin = first.origin.peek();
@@ -123,19 +122,24 @@ test("a handle taken within the linger window reuses the warm connection", async
 	second.close();
 });
 
-test("the longest requested linger keeps the shared connection warm", async () => {
+test("rejoining cancels expiry and the last release starts a fresh two-second window", async () => {
 	stubTransports();
 
-	const first = new Connection({ url, linger: Time.Milli(1) });
-	const second = new Connection({ url, linger: Time.Milli(500) });
+	const first = new Connection({ url });
 	await advance();
-	expect(second.status.peek()).toBe("connected");
 	const origin = first.origin.peek();
-
 	first.close();
-	second.close();
-	await advance(499);
+	await advance(1999);
+	expect(origin?.closed.peek()).toBeUndefined();
 
+	const second = new Connection({ url });
+	await advance();
+	expect(second.origin.peek()).toBe(origin);
+	await advance(1);
+	expect(origin?.closed.peek()).toBeUndefined();
+
+	second.close();
+	await advance(1999);
 	expect(origin?.closed.peek()).toBeUndefined();
 	await advance(1);
 	expect(origin?.closed.peek()).not.toBeUndefined();
@@ -144,7 +148,7 @@ test("the longest requested linger keeps the shared connection warm", async () =
 test("disabling a handle releases its share", async () => {
 	stubTransports();
 
-	const toggled = new Connection({ url, linger });
+	const toggled = new Connection({ url });
 	const steady = new Connection({ url });
 	await advance();
 	expect(toggled.status.peek()).toBe("connected");
@@ -171,7 +175,7 @@ test("disabling a handle releases its share", async () => {
 test("switching URLs switches origins", async () => {
 	const dials = stubTransports();
 
-	const handle = new Connection({ url, linger });
+	const handle = new Connection({ url });
 	await advance();
 	expect(handle.origin.peek()).toBeDefined();
 	const before = handle.origin.peek();
@@ -200,7 +204,7 @@ test("a shared connection outlasts an outage longer than a finite retry window",
 		throw new Error("relay is down");
 	} as unknown as typeof WebSocket;
 
-	const handle = new Connection({ url, linger });
+	const handle = new Connection({ url });
 	try {
 		await advance(500);
 		expect(handle.status.peek()).toBe("disconnected");
@@ -220,7 +224,7 @@ test("a shared connection outlasts an outage longer than a finite retry window",
 test("a publish through one handle resolves locally for another", async () => {
 	stubTransports();
 
-	const publisher = new Connection({ url, linger });
+	const publisher = new Connection({ url });
 	const watcher = new Connection({ url });
 	await advance();
 	expect(publisher.origin.peek()).toBeDefined();
@@ -243,7 +247,7 @@ test("a publish through one handle resolves locally for another", async () => {
 
 test("a borrowed connection origin exposes live routes and dynamic serving", async () => {
 	stubTransports();
-	const handle = new Connection({ url, linger });
+	const handle = new Connection({ url });
 	try {
 		await advance();
 		expect(handle.origin.peek()).toBeDefined();
@@ -255,16 +259,16 @@ test("a borrowed connection origin exposes live routes and dynamic serving", asy
 			announcement = event;
 		});
 		const prefix = Path.from("on-demand");
-		const route = table.dynamic(prefix);
+		const route = table.routePrefix(prefix);
 		await advance();
-		expect(announcement).toMatchObject({ kind: "start", prefix });
+		expect(announcement).toMatchObject({ kind: "present", prefix });
 		let withdrawal: unknown;
 		void live.next().then((event) => {
 			withdrawal = event;
 		});
 		route.close();
 		await advance();
-		expect(withdrawal).toMatchObject({ kind: "end", prefix });
+		expect(withdrawal).toMatchObject({ kind: "absent", prefix });
 		live.close();
 	} finally {
 		handle.close();
@@ -274,8 +278,8 @@ test("a borrowed connection origin exposes live routes and dynamic serving", asy
 test("share: false keeps a private loop and origin", async () => {
 	const dials = stubTransports();
 
-	const shared = new Connection({ url, linger });
-	const privateLoop = new Connection({ url, linger, share: false });
+	const shared = new Connection({ url });
+	const privateLoop = new Connection({ url, share: false });
 
 	await advance();
 	expect(shared.status.peek()).toBe("connected");
@@ -290,14 +294,15 @@ test("share: false keeps a private loop and origin", async () => {
 test("connection-specific options infer a private loop and origin", async () => {
 	const dials = stubTransports();
 	const origin = new OriginProducer();
-	const shared = new Connection({ url, linger });
+	const shared = new Connection({ url });
 	try {
 		await advance();
 		expect(shared.status.peek()).toBe("connected");
 		const options = [
 			{ webtransport: { congestionControl: "throughput" as const } },
 			{ websocket: { enabled: false } },
-			{ delay: { timeout: Time.Milli(0) } },
+			{ delay: { timeout: Milli(0) } },
+			{ timeout: Milli(10_000) },
 			{ publish: origin.consume() },
 			{ consume: origin },
 		];
@@ -331,7 +336,8 @@ test("explicit share: true refuses connection-specific options", () => {
 			/share: false/,
 		);
 		expect(() => new Connection({ share: true, websocket: { enabled: false } })).toThrow(/share: false/);
-		expect(() => new Connection({ share: true, delay: { timeout: Time.Milli(0) } })).toThrow(/share: false/);
+		expect(() => new Connection({ share: true, delay: { timeout: Milli(0) } })).toThrow(/share: false/);
+		expect(() => new Connection({ share: true, timeout: Milli(10_000) })).toThrow(/share: false/);
 	} finally {
 		origin.close();
 	}
@@ -369,7 +375,7 @@ function stubUnauthorized(stale: URL): { count: () => number } {
 }
 
 for (const share of [true, false] as const) {
-	const opts = share ? { linger } : { linger, share: false as const, websocket: { enabled: false } };
+	const opts = share ? {} : { share: false as const, websocket: { enabled: false } };
 
 	test(`auth failure then a new URL recovers a ${share ? "shared" : "private"} handle`, async () => {
 		const stale = new URL("https://example.com/pool?jwt=stale");
@@ -432,7 +438,7 @@ test("exhausted retries then a new URL recovers a private handle", async () => {
 		url,
 		share: false,
 		websocket: { enabled: false },
-		delay: { initial: Time.Milli(1), multiplier: 1, max: Time.Milli(1), timeout: Time.Milli(1) },
+		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: Milli(1) },
 	});
 	try {
 		await advance(2);
@@ -461,7 +467,7 @@ test("a private partial delay keeps the unlimited retry timeout", async () => {
 		url,
 		share: false,
 		websocket: { enabled: false },
-		delay: { initial: Time.Milli(1000), multiplier: 1, max: Time.Milli(1000) },
+		delay: { initial: Milli(1000), multiplier: 1, max: Milli(1000) },
 	});
 	try {
 		await advance(60_000);
@@ -504,7 +510,7 @@ test("a private handle with an explicitly undefined timeout outlasts the outage"
 test("a closed handle cannot reconnect", async () => {
 	const dials = stubTransports();
 
-	const handle = new Connection({ url, linger });
+	const handle = new Connection({ url });
 	await advance();
 	expect(handle.status.peek()).toBe("connected");
 	const abort = new Error("done");
@@ -523,14 +529,14 @@ test("auth eviction lets a later handle dial fresh and the old lease still clean
 	const stale = new URL("https://example.com/pool?jwt=evict");
 	const dials = stubUnauthorized(stale);
 
-	const first = new Connection({ url: stale, linger });
+	const first = new Connection({ url: stale });
 	await advance();
 	expect(first.error.peek()).toBeDefined();
 	const origin = first.origin.peek();
 	expect(origin).toBeDefined();
 	expect(first.closed.peek()).toBeUndefined();
 
-	const second = new Connection({ url: stale, linger });
+	const second = new Connection({ url: stale });
 	await advance();
 	expect(dials.count()).toBeGreaterThanOrEqual(2);
 	expect(second.origin.peek()).not.toBe(origin);
@@ -541,4 +547,317 @@ test("auth eviction lets a later handle dial fresh and the old lease still clean
 	expect(second.closed.peek()).toBeUndefined();
 
 	second.close();
+});
+
+test("pooled probe readers share demand and carry it through reconnects", async () => {
+	const pairs: ReturnType<typeof createMockTransportPair>[] = [];
+	const statsCalls: number[] = [];
+	const stub = function StubWebTransport() {
+		const pair = createMockTransportPair(Lite.ALPN_06, { stats: { estimatedSendRate: 1_000_000 } });
+		const index = pairs.length;
+		statsCalls.push(0);
+		const stats = pair.server.getStats.bind(pair.server);
+		pair.server.getStats = () => {
+			statsCalls[index]++;
+			return stats();
+		};
+		pairs.push(pair);
+		void accept(pair.server, url);
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+	const first = new Connection({ url });
+	const second = new Connection({ url });
+	let stopFirst = () => {};
+	let stopSecond = () => {};
+	try {
+		await advance();
+		expect(pairs[0].client.sendStreams.bidi).toHaveLength(0);
+		stopFirst = first.probe.subscribe(() => {});
+		stopSecond = second.probe.subscribe(() => {});
+		await advance();
+		expect(pairs[0].client.sendStreams.bidi).toHaveLength(1);
+		stopFirst();
+		await advance(100);
+		expect(pairs[0].client.sendStreams.bidi).toHaveLength(1);
+		pairs[0].server.close({ closeCode: SessionCode.Internal, reason: "reconnect" });
+		await advance(2_000);
+		expect(pairs).toHaveLength(2);
+		expect(pairs[1].client.sendStreams.bidi).toHaveLength(1);
+		stopSecond();
+		await advance();
+		const before = statsCalls[1];
+		await advance(500);
+		expect(statsCalls[1]).toBe(before);
+	} finally {
+		stopFirst();
+		stopSecond();
+		first.close();
+		second.close();
+		await advance(linger);
+	}
+});
+
+/**
+ * Play a lite-06 peer on `server` that advertises PROBE `Increase`, returning each PROBE
+ * target it reads, with 0 for a retraction.
+ */
+function increasePeer(server: MockTransport): number[] {
+	const version = Lite.Version.DRAFT_06;
+	const targets: number[] = [];
+	const readProbe = async (stream: Stream) => {
+		if ((await stream.reader.u53()) !== Lite.StreamId.Probe) return;
+		for (;;) {
+			const probe = await Lite.Probe.decodeMaybe(stream.reader, version);
+			if (!probe) return;
+			targets.push(probe.bitrate ?? 0);
+		}
+	};
+	const run = async () => {
+		const setup = await Writer.open(server, { version });
+		await setup.u53(Lite.DataType.Setup);
+		await new Lite.Setup({ probe: Lite.ProbeLevel.Increase }).encode(setup, version);
+		setup.close();
+		for (;;) {
+			const stream = await Stream.accept(server, version);
+			if (!stream) return;
+			// The session's end ends every read.
+			void readProbe(stream).catch(() => {});
+		}
+	};
+	void run().catch(() => {});
+	return targets;
+}
+
+test("pooled viewers send their summed target to an Increase peer across a reconnect", async () => {
+	const peers: { server: MockTransport; targets: number[] }[] = [];
+	const stub = function StubWebTransport() {
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		peers.push({ server: pair.server, targets: increasePeer(pair.server) });
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+	const first = new Connection({ url });
+	const second = new Connection({ url });
+	try {
+		await advance();
+		const one = first.viewers.peek()?.watch(3_000_000);
+		const two = second.viewers.peek()?.watch(2_000_000);
+		await advance();
+		expect(peers).toHaveLength(1);
+		expect(peers[0].targets.at(-1)).toBe(5_000_000);
+
+		peers[0].server.close({ closeCode: SessionCode.Internal, reason: "reconnect" });
+		await advance(2_000);
+		expect(peers).toHaveLength(2);
+		expect(peers[1].targets).toEqual([5_000_000]);
+
+		// The new session follows the live handles, not a snapshot of them.
+		one?.close();
+		await advance();
+		expect(peers[1].targets).toEqual([5_000_000, 2_000_000]);
+		two?.close();
+	} finally {
+		first.close();
+		second.close();
+		await advance(linger);
+	}
+});
+
+test("a handle's announcements sync with the shared origin", async () => {
+	stubTransports();
+
+	const handle = new Connection({ url });
+	const watch = handle.routes();
+	expect(watch.synced.peek()).toBe(false);
+
+	await advance();
+	expect(handle.status.peek()).toBe("connected");
+	// The session's announce request answers after it establishes.
+	await advance();
+	expect(watch.synced.peek()).toBe(true);
+
+	watch.close();
+	handle.close();
+});
+
+test("shared connections distinguish ordered versions", async () => {
+	const dials = stubTransports();
+	const versions = ["moq-lite-07-wip", "moq-lite-06", "moq-lite-05"];
+	const first = new Connection({ url, versions, share: true });
+	const same = new Connection({ url, versions: [...versions], share: true });
+	const reversed = new Connection({ url, versions: [...versions].reverse(), share: true });
+	const defaults = new Connection({ url });
+	try {
+		await advance();
+		expect(first.status.peek()).toBe("connected");
+		expect(same.origin.peek()).toBe(first.origin.peek());
+		expect(reversed.origin.peek()).not.toBe(first.origin.peek());
+		expect(defaults.origin.peek()).not.toBe(first.origin.peek());
+		expect(dials.count()).toBe(3);
+	} finally {
+		first.close();
+		same.close();
+		reversed.close();
+		defaults.close();
+	}
+});
+
+test("a caller cannot mutate acquired versions", async () => {
+	const dials = stubTransports();
+	const versions = ["moq-lite-07-wip", "moq-lite-05"];
+	const first = new Connection({ url, versions });
+	versions.reverse();
+	const original = new Connection({ url, versions: ["moq-lite-07-wip", "moq-lite-05"] });
+	const changed = new Connection({ url, versions });
+	try {
+		await advance();
+		expect(first.origin.peek()).toBe(original.origin.peek());
+		expect(changed.origin.peek()).not.toBe(first.origin.peek());
+		expect(dials.count()).toBe(2);
+	} finally {
+		first.close();
+		original.close();
+		changed.close();
+	}
+});
+
+/** Answer each dial with the first ALPN it offers, recording every offer. */
+function stubOffers(): string[][] {
+	const offers: string[][] = [];
+	globalThis.WebTransport = function OfferTransport(_address: string | URL, options?: WebTransportOptions) {
+		const protocols = [...(options?.protocols ?? [])];
+		offers.push(protocols);
+		const pair = createMockTransportPair(protocols[0]);
+		void accept(pair.server, url);
+		return pair.client;
+	} as unknown as typeof WebTransport;
+	return offers;
+}
+
+for (const share of [true, false]) {
+	test(`updating versions redials with the new list (share: ${share})`, async () => {
+		const offers = stubOffers();
+		const versions = new Signal<readonly string[] | undefined>(["moq-lite-05"]);
+		const handle = new Connection({
+			url,
+			versions,
+			share,
+			websocket: share ? undefined : { enabled: false },
+		});
+		try {
+			await advance();
+			expect(handle.status.peek()).toBe("connected");
+			const origin = handle.origin.peek();
+
+			// An equal list is not a change.
+			versions.set(["moq-lite-05"]);
+			await advance();
+			expect(offers).toEqual([[Lite.ALPN_05]]);
+
+			versions.set(["moq-lite-06"]);
+			await advance();
+			expect(handle.status.peek()).toBe("connected");
+			expect(offers).toEqual([[Lite.ALPN_05], [Lite.ALPN_06]]);
+			// A shared handle moves to another pool entry; a private one keeps its own origin.
+			if (share) expect(handle.origin.peek()).not.toBe(origin);
+			else expect(handle.origin.peek()).toBe(origin);
+		} finally {
+			handle.close();
+		}
+	});
+}
+
+test("a live version list naming an unknown version fails on error without dialing", async () => {
+	const offers = stubOffers();
+	const versions = new Signal<readonly string[] | undefined>(["moq-lite-99"]);
+	const handle = new Connection({ url, versions });
+	try {
+		await advance();
+		expect(handle.error.peek()).toBeInstanceOf(TypeError);
+		expect(handle.origin.peek()).toBeUndefined();
+		expect(offers).toHaveLength(0);
+
+		versions.set(["moq-lite-06"]);
+		await advance();
+		expect(handle.error.peek()).toBeUndefined();
+		expect(handle.status.peek()).toBe("connected");
+		expect(offers).toEqual([[Lite.ALPN_06]]);
+	} finally {
+		handle.close();
+	}
+});
+
+test("GOAWAY keeps version pools distinct at the redirected URL", async () => {
+	const moved = new URL("https://example.com:5443/pool");
+	const peers: WebTransport[] = [];
+	globalThis.WebTransport = function RedirectTransport(address: string | URL) {
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		peers.push(pair.server);
+		void accept(pair.server, new URL(address));
+		return pair.client;
+	} as unknown as typeof WebTransport;
+	const versions = ["moq-lite-07-wip", "moq-lite-06"];
+	const first = new Connection({ url, versions });
+	const resident = new Connection({ url: moved });
+	let joined: Connection | undefined;
+	let defaults: Connection | undefined;
+	try {
+		await advance();
+		const origin = first.origin.peek();
+		// Exercise a healthy migration after the immediate-redirect backoff guard.
+		await advance(2_000);
+		const peer = peers[0];
+		if (!peer) throw new Error("missing initial peer");
+		const stream = await Stream.open(peer, { version: Lite.Version.DRAFT_06 });
+		await stream.writer.u53(Lite.StreamId.Goaway);
+		await new Lite.Goaway(moved.href).encode(stream.writer, Lite.Version.DRAFT_06);
+		await advance();
+		joined = new Connection({ url: moved, versions });
+		defaults = new Connection({ url: moved });
+		await advance();
+		expect(joined.status.peek()).toBe("connected");
+		expect(joined.origin.peek()).toBe(origin);
+		expect(defaults.origin.peek()).toBe(resident.origin.peek());
+		expect(defaults.origin.peek()).not.toBe(origin);
+		expect(peers).toHaveLength(3);
+	} finally {
+		first.close();
+		resident.close();
+		joined?.close();
+		defaults?.close();
+	}
+});
+
+test("a private handle's timeout bounds each attempt", async () => {
+	let attempts = 0;
+	class Hung {
+		ready = new Promise<void>(() => {});
+		closed = new Promise<void>(() => {});
+		close() {}
+	}
+	globalThis.WebTransport = function StubWebTransport() {
+		attempts++;
+		return new Hung();
+	} as unknown as typeof WebTransport;
+
+	const handle = new Connection({
+		url,
+		share: false,
+		websocket: { enabled: false },
+		timeout: Milli(50),
+		delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
+	});
+	try {
+		// Each hung dial is cut at 50 ms and redialed after the backoff; the default 30 s
+		// timeout would still be holding the first.
+		await advance(1_000);
+		expect(attempts).toBeGreaterThanOrEqual(3);
+	} finally {
+		handle.close();
+	}
+});
+
+test("an invalid timeout is refused when a private handle is built", () => {
+	expect(() => new Connection({ url, share: false, timeout: Number.NaN as Milli })).toThrow(RangeError);
 });

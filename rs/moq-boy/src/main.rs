@@ -7,8 +7,9 @@
 //! - **Audio encoder** (on emulator thread): resamples and encodes to Opus.
 //! - **Monitor tasks** (async): watch video/audio track subscriptions to
 //!   pause/resume the emulator when no viewers are watching.
-//! - **Viewer handler** (async): discovers viewer broadcasts, relays button
-//!   commands to the emulator.
+//! - **Viewer handler** (async): accepts each viewer's socket session on the
+//!   game's endpoint, relays its button commands to the emulator, and carries
+//!   its latency back.
 //!
 //! Pause/resume state machine:
 //! ```text
@@ -25,11 +26,12 @@
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use std::collections::{BTreeMap, HashMap};
+use kio::clock::Instant;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
@@ -42,30 +44,31 @@ mod stats;
 mod status;
 mod video;
 
-#[derive(usage::Cli, Clone)]
+#[derive(usage_rs::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq-boy")]
 #[usage(completion, settings)]
 pub struct Config {
 	/// Path to the Game Boy ROM file.
-	#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("gb", "gbc"))]
+	#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("gb", "gbc"))]
 	pub rom: PathBuf,
 
 	/// Session name (used in broadcast path). Defaults to ROM filename.
 	#[usage(long)]
 	pub name: Option<String>,
 
-	/// Base path prefix. Used to derive --prefix-game and --prefix-viewer defaults.
+	/// Base path prefix. Used to derive the --prefix-game default.
 	#[usage(long, default = "boy")]
 	pub prefix: String,
 
-	/// Path prefix for game broadcasts ("{prefix-game}/{name}"). Defaults to "{prefix}/game".
+	/// Path prefix for game broadcasts ("{prefix-game}/{name}") and the game's socket endpoint
+	/// ("{prefix-game}/.socket/{name}"), which viewers dial. Defaults to "{prefix}/game".
 	#[usage(long)]
 	pub prefix_game: Option<String>,
 
-	/// Path prefix for viewer broadcasts ("{prefix-viewer}/{name}"). Defaults to "{prefix}/viewer".
-	#[usage(long)]
-	pub prefix_viewer: Option<String>,
+	/// Released spelling of the viewer prefix, refused at startup.
+	#[usage(long, env = "MOQ_PREFIX_VIEWER", hide = true)]
+	prefix_viewer: Option<String>,
 
 	/// Location label shown in viewer stats (e.g. "Dallas, TX").
 	#[usage(long)]
@@ -93,14 +96,62 @@ impl Config {
 	fn check_deprecated(&self) -> Result<()> {
 		let mut deprecated = self.client.deprecated();
 		deprecated.extend(self.quic.deprecated());
+		if self.prefix_viewer.is_some() {
+			deprecated.removed(
+				"--prefix-viewer",
+				Some("MOQ_PREFIX_VIEWER"),
+				"viewers dial the game's socket endpoint under --prefix-game",
+			);
+		}
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 		Ok(())
 	}
+
+	/// The game prefix, which holds both the game broadcast and the sockets of the game and
+	/// its viewers.
+	///
+	/// Each piece is parsed on its own and joined, so an empty (root) prefix adds no segment.
+	fn game_prefix(&self) -> Result<moq_net::Path> {
+		Ok(match &self.prefix_game {
+			Some(game) => moq_net::Path::new(game).context("invalid --prefix-game")?,
+			None => moq_net::Path::new(&self.prefix)
+				.context("invalid --prefix")?
+				.join(&moq_net::Path::from_static("game"))?,
+		})
+	}
+
+	/// Sockets need moq-lite-07 or moq-transport on every hop, so offer moq-lite-07 unless
+	/// the command line picks versions.
+	fn client(&self) -> moq_tokio::connect::Config {
+		let mut client = self.client.clone();
+		if client.version.is_empty() {
+			client.version = vec!["moq-lite-07-wip".parse().expect("a known version")];
+		}
+		client
+	}
+}
+
+/// Viewer endpoints take ids under this prefix, which the relay lets anonymous sessions
+/// publish, so no viewer can announce a game's endpoint.
+const VIEWER_ID_PREFIX: &str = "viewer-";
+
+/// Refuse a name that can't be the game's endpoint id: one path segment, outside the ids
+/// viewers may announce.
+fn check_name(name: &str) -> Result<()> {
+	anyhow::ensure!(
+		!name.is_empty() && !name.contains(['/', '\\']),
+		"invalid --name {name:?}: a name is one path segment"
+	);
+	anyhow::ensure!(
+		!name.starts_with(VIEWER_ID_PREFIX),
+		"invalid --name {name:?}: {VIEWER_ID_PREFIX}* ids belong to viewers"
+	);
+	Ok(())
 }
 
 /// Shared state for a game session, accessible from multiple threads/tasks.
 ///
-/// Everything here is either atomic, behind a mutex, or immutable —
+/// Everything here is either atomic, behind a mutex, or immutable -
 /// safe to share via `Arc<Session>` between the emulator thread,
 /// track monitors, and async tasks.
 struct Session {
@@ -121,12 +172,19 @@ struct Session {
 	location: Option<String>,
 }
 
+/// Wait until some viewer wants the track, or none does.
+async fn until_wanted(demand: &moq_net::track::Demand, wanted: bool) -> moq_net::Result<()> {
+	let mut demand = demand.clone();
+	while demand.wanted_changed().await?.is_some() != wanted {}
+	Ok(())
+}
+
 impl Session {
 	/// Monitor a single track's subscription state.
 	/// Sets the flag when a viewer subscribes, clears it when all unsubscribe.
 	async fn run_track_monitor(&self, name: &str, track: &moq_net::track::Demand, flag: &AtomicBool) {
 		loop {
-			if track.used().await.is_err() {
+			if until_wanted(track, true).await.is_err() {
 				break;
 			}
 			tracing::info!("resuming {name}: viewer subscribed");
@@ -134,7 +192,7 @@ impl Session {
 			self.paused.store(false, Ordering::Release);
 			self.resume.1.notify_all();
 
-			if track.unused().await.is_err() {
+			if until_wanted(track, false).await.is_err() {
 				break;
 			}
 			tracing::info!("pausing {name}: no viewers");
@@ -147,7 +205,10 @@ impl Session {
 	async fn run_pause_monitor(&self) {
 		loop {
 			// Wait for BOTH tracks to become unused.
-			let (v, a) = tokio::join!(self.video_track.unused(), self.audio_track.unused());
+			let (v, a) = tokio::join!(
+				until_wanted(&self.video_track, false),
+				until_wanted(&self.audio_track, false)
+			);
 			if v.is_err() || a.is_err() {
 				break;
 			}
@@ -156,8 +217,8 @@ impl Session {
 
 			// Wait for EITHER track to become used.
 			tokio::select! {
-				Err(_) = self.video_track.used() => break,
-				Err(_) = self.audio_track.used() => break,
+				Err(_) = until_wanted(&self.video_track, true) => break,
+				Err(_) = until_wanted(&self.audio_track, true) => break,
 				else => {},
 			}
 			tracing::info!("resuming emulation: viewer connected");
@@ -187,17 +248,15 @@ impl Session {
 	fn publish_status(
 		&self,
 		emu: &emulator::Emulator,
-		viewer_latency: &HashMap<String, Vec<status::LatencyEntry>>,
+		players: usize,
 		game_stats: &stats::Stats,
 		publisher: &mut status::StatusPublisher,
 	) {
 		let held: Vec<_> = emu.pressed_buttons().iter().copied().collect();
-		let latency_map: BTreeMap<String, Vec<status::LatencyEntry>> =
-			viewer_latency.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
 		let status = status::Status {
 			buttons: held,
-			latency: latency_map,
+			players,
 			stats: game_stats.report(),
 			location: self.location.clone(),
 		};
@@ -219,55 +278,41 @@ async fn run(config: &Config) -> Result<()> {
 	});
 
 	tracing::info!(rom = %rom_path.display(), %name, "starting Game Boy emulator");
+	check_name(&name)?;
 
 	let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<input::Command>(64);
 	let url = config.client.url.clone().context("--connect is required")?;
-	let client = config.client.clone().init(config.quic.clone())?;
+	let client = config.client().init(config.quic.clone())?;
 
-	// Publish origin: the game session broadcast.
-	let publish_origin = moq_tokio::origin::spawn();
-	let default_game_prefix = format!("{}/game", config.prefix);
-	let default_viewer_prefix = format!("{}/viewer", config.prefix);
-	let game_prefix = config.prefix_game.as_deref().unwrap_or(&default_game_prefix);
-	let viewer_prefix = config.prefix_viewer.as_deref().unwrap_or(&default_viewer_prefix);
+	// One origin, both directions: the game broadcast and the game's endpoint are published
+	// from it, and the viewers' endpoints arrive in it.
+	let origin = moq_tokio::origin::spawn();
+	let game_prefix = config.game_prefix()?;
+	let broadcast_path = game_prefix.join(&moq_net::Path::new(&name).context("invalid --name")?)?;
 
-	// Create the broadcast on the publish origin and announce its path.
-	let broadcast_path = format!("{game_prefix}/{name}");
-	let mut broadcast = publish_origin
-		.create_broadcast(&broadcast_path)
-		.context("failed to create broadcast")?;
-	let epoch = moq_net::Epoch::mint();
-	broadcast
-		.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
+	// Announce the game session's route; it owns the broadcast.
+	let route = origin
+		.route(&broadcast_path, moq_net::origin::RouteOptions::default())
 		.context("failed to announce broadcast")?;
-	tracing::info!(broadcast = %broadcast_path, %epoch, "announced");
+	tracing::info!(broadcast = %broadcast_path, instance = %route.instance(), "announced");
 
-	// Consume origin: viewer broadcasts under the viewer prefix.
-	// JS publishes viewer feedback at "{viewer_prefix}/{name}/{viewerId}"
-	let viewer_path = format!("{viewer_prefix}/{name}");
-	let consume_origin = moq_tokio::origin::spawn();
-	let viewer_consumer = consume_origin
-		.scope(&viewer_path, &moq_net::Patterns::from(moq_net::Pattern::all()))
-		.expect("viewer prefix should be valid")
-		.consume();
+	// The endpoint viewers dial, at "{prefix-game}/.socket/{name}".
+	let endpoint = moq_net::socket::Endpoint::new(&origin, game_prefix, &name).context("failed to open endpoint")?;
 
 	tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), %name, broadcast = %broadcast_path, "connecting to relay");
 
-	let reconnect = client
-		.with_publisher(&publish_origin)
-		.with_subscriber(consume_origin)
-		.connect(url);
+	let reconnect = client.with_origin(origin).connect(url);
 
 	// Set up catalog and encoders.
-	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default())?;
-	let video_encoder = video::VideoEncoder::spawn(broadcast.clone(), catalog.clone()).await;
+	let catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), moq_mux::catalog::Config::default())?;
+	let video_encoder = video::VideoEncoder::spawn(route.broadcast().clone(), catalog.clone()).await;
 
-	let audio_encoder = audio::AudioEncoder::new(broadcast.clone(), catalog.clone(), 44100)?;
+	let audio_encoder = audio::AudioEncoder::new(route.broadcast().clone(), catalog.clone(), 44100)?;
 
 	let video_track = video_encoder.demand.clone();
 	let audio_track = audio_encoder.demand();
 
-	let status_publisher = status::StatusPublisher::new(&mut broadcast)?;
+	let status_publisher = status::StatusPublisher::new(&mut route.broadcast().clone())?;
 
 	let session = Arc::new(Session {
 		video_encoder,
@@ -304,11 +349,12 @@ async fn run(config: &Config) -> Result<()> {
 			Err(join) => Err(join.into()),
 		},
 		res = reconnect.closed() => res.map_err(Into::into),
-		res = input::handle_viewers(&viewer_consumer, &cmd_tx) => res,
+		res = input::handle_viewers(&endpoint, &cmd_tx) => res.context("viewer endpoint failed"),
 	};
 
 	// Close the broadcast now, even if the emulator thread still holds a clone.
-	broadcast.close();
+	route.broadcast().close();
+	endpoint.close();
 	result
 }
 
@@ -330,7 +376,8 @@ fn run_emulator(
 	// 1/59.727 ≈ 16742 microseconds per frame.
 	let frame_duration = Duration::from_micros(16_742);
 	let mut next_frame = Instant::now();
-	let mut viewer_latency: HashMap<String, Vec<status::LatencyEntry>> = HashMap::new();
+	// Where each viewer with an open session gets its replies.
+	let mut viewers: HashMap<input::ViewerId, input::Replies> = HashMap::new();
 	let mut game_stats = stats::Stats::new();
 	let mut was_audio_active = false;
 
@@ -366,12 +413,15 @@ fn run_emulator(
 
 			while let Ok(cmd) = cmd_rx.try_recv() {
 				match cmd {
+					input::Command::Joined { viewer, replies } => {
+						viewers.insert(viewer, replies);
+					}
 					input::Command::Buttons {
 						buttons,
-						viewer_id,
+						viewer,
 						timestamps,
 					} => {
-						emu.set_buttons(&viewer_id, buttons.into_iter().collect());
+						emu.set_buttons(viewer, buttons.into_iter().collect());
 
 						let mut breakdown = Vec::new();
 						let entry = |label: &str, ms: u32| status::LatencyEntry {
@@ -397,11 +447,13 @@ fn run_emulator(
 							breakdown.push(entry("input", ms_saturating(latency)));
 						}
 
-						viewer_latency.insert(viewer_id, breakdown);
+						if let Some(replies) = viewers.get_mut(&viewer) {
+							replies.latency(&breakdown);
+						}
 					}
-					input::Command::ViewerLeft { viewer_id } => {
-						emu.viewer_left(&viewer_id);
-						viewer_latency.remove(&viewer_id);
+					input::Command::Left { viewer } => {
+						emu.viewer_left(viewer);
+						viewers.remove(&viewer);
 					}
 					input::Command::Reset => {
 						tracing::info!("resetting emulator (viewer request)");
@@ -415,6 +467,10 @@ fn run_emulator(
 		// Wait for next frame.
 		let now = Instant::now();
 		if now < next_frame {
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "the emulator thread runs outside any runtime, so it blocks on the host clock"
+			)]
 			std::thread::sleep(next_frame - now);
 		}
 		next_frame += frame_duration;
@@ -432,7 +488,7 @@ fn run_emulator(
 		emu.tick();
 
 		// Publish status (only if changed).
-		session.publish_status(&emu, &viewer_latency, &game_stats, &mut status_publisher);
+		session.publish_status(&emu, viewers.len(), &game_stats, &mut status_publisher);
 
 		// Encode and publish video frame.
 		if is_video {
@@ -467,6 +523,7 @@ async fn main() -> Result<()> {
 	let config = Config::parse();
 	config.log.init()?;
 	config.check_deprecated()?;
+	moq_tokio::cli::check_env(&[Config::spec()], &[])?;
 
 	#[cfg(feature = "jemalloc")]
 	let jemalloc = moq_tokio::jemalloc::run();
@@ -523,6 +580,55 @@ mod tests {
 		assert_eq!(connect.port(), Some(4443));
 	}
 
+	/// An empty prefix is the root, so it adds no segment to the paths built under it.
+	#[test]
+	fn empty_prefixes_are_the_root() {
+		let parse = |args: &[&str]| {
+			let mut argv = vec!["--rom", "rom/big2small.gb"];
+			argv.extend_from_slice(args);
+			Config::parse_from(&argv.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>()).unwrap()
+		};
+		let prefix = |config: Config| config.game_prefix().unwrap().to_string();
+
+		assert_eq!(prefix(parse(&[])), "boy/game");
+		assert_eq!(prefix(parse(&["--prefix", ""])), "game");
+		assert_eq!(prefix(parse(&["--prefix-game", ""])), "");
+		assert!(parse(&["--prefix", "/boy"]).game_prefix().is_err());
+	}
+
+	/// A game's endpoint id is its name, so a name is one segment outside the ids viewers
+	/// may announce.
+	#[test]
+	fn names_are_game_endpoint_ids() {
+		check_name("tetris").unwrap();
+		for name in ["viewer-1", "", "a/b", "a\\b"] {
+			check_name(name).expect_err(name);
+		}
+	}
+
+	/// Sockets need moq-lite-07, so it is offered unless the command line picks versions.
+	#[test]
+	fn offers_lite_07_by_default() {
+		let parse = |args: &[&str]| {
+			let mut argv = vec!["--rom", "rom/big2small.gb"];
+			argv.extend_from_slice(args);
+			Config::parse_from(&argv.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>()).unwrap()
+		};
+		let versions = |config: Config| {
+			config
+				.client()
+				.version
+				.iter()
+				.map(|v| v.to_string())
+				.collect::<Vec<_>>()
+		};
+		assert_eq!(versions(parse(&[])), ["moq-lite-07-wip"]);
+		assert_eq!(
+			versions(parse(&["--connect-version", "moq-transport-22"])),
+			["moq-transport-22"]
+		);
+	}
+
 	/// The spelling the demo used to pass. It still parses, so the process can name
 	/// `--connect` rather than leave the parser reporting an unexpected argument, but it
 	/// configures nothing and must stop the run.
@@ -542,5 +648,20 @@ mod tests {
 			err.contains("--client-connect / MOQ_CLIENT_CONNECT -> --connect / MOQ_CONNECT"),
 			"{err}"
 		);
+	}
+
+	/// The removed viewer prefix still parses, so startup can say what replaced it.
+	#[test]
+	fn the_removed_viewer_prefix_is_refused() {
+		let config = Config::parse_from(&[
+			std::ffi::OsStr::new("--prefix-viewer"),
+			std::ffi::OsStr::new("boy/viewer"),
+			std::ffi::OsStr::new("--rom"),
+			std::ffi::OsStr::new("rom/big2small.gb"),
+		])
+		.expect("the released spelling still parses");
+
+		let err = config.check_deprecated().expect_err("must refuse").to_string();
+		assert!(err.contains("--prefix-viewer / MOQ_PREFIX_VIEWER -> removed"), "{err}");
 	}
 }

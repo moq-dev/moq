@@ -1,11 +1,13 @@
 import 'package:moq_ffi/moq_ffi.dart';
 
 import 'aliases.dart';
+import 'stream.dart';
+import 'version.dart';
 
 /// Everything [Server.listen] can be told.
 ///
 /// A value the native side cannot use fails [Server.listen] with
-/// `MoqException.Config`.
+/// `ConfigMoqException`.
 final class ListenOptions {
   /// Local socket address to listen on, e.g. `127.0.0.1:4443` or `[::]:443`.
   final String bind;
@@ -26,6 +28,10 @@ final class ListenOptions {
   /// Cap on the concurrent QUIC streams each peer may open toward this server.
   final int? maxStreams;
 
+  /// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names, for
+  /// decrypting a capture. Off by default; on without `SSLKEYLOGFILE` fails.
+  final bool keylog;
+
   /// Origin whose broadcasts are served to incoming sessions; auto-created when null.
   final OriginProducer? publish;
 
@@ -39,6 +45,7 @@ final class ListenOptions {
     this.tlsGenerate,
     this.versions,
     this.maxStreams,
+    this.keylog = false,
     this.publish,
     this.consume,
   });
@@ -46,7 +53,7 @@ final class ListenOptions {
 
 /// A listening MoQ server with publishing and subscription conveniences.
 ///
-/// Build one with [Server.listen]. Broadcasts created via [createBroadcast] are
+/// Build one with [Server.listen]. Broadcasts of routes created via [route] are
 /// served to incoming sessions, and [requests] streams each incoming [Request]
 /// for the caller to accept or reject. [close] stops accepting new sessions and
 /// releases the listening socket before it returns; in-flight sessions stay
@@ -85,7 +92,11 @@ final class Server {
           key: options.tlsKey ?? const [],
           generate: options.tlsGenerate ?? const [],
         ),
-        quic: MoqQuicConfig(maxStreams: options.maxStreams),
+        quic: MoqQuicConfig(
+          maxStreams: options.maxStreams,
+          keylog: options.keylog,
+        ),
+        implementation: implementation,
         publish: publishOrigin,
         consume: options.consume ?? shared,
       ),
@@ -100,15 +111,16 @@ final class Server {
     }
   }
 
-  /// Create a broadcast at [path], served to incoming sessions.
+  /// Create a route at exactly [path], owning a broadcast served to incoming sessions.
   ///
-  /// Advertise it with `announce` after populating tracks. Throws when [listen]
-  /// was given a [ListenOptions.consume] origin but no
-  /// [ListenOptions.publish] one, since there is then nothing to serve from.
-  BroadcastProducer createBroadcast(String path) {
+  /// Visible at once unless [options] is hidden; hold the route, since
+  /// cancelling or disposing it retracts it. Throws when [listen] was given a
+  /// [ListenOptions.consume] origin but no [ListenOptions.publish] one, since
+  /// there is then nothing to serve from.
+  MoqRoute route(String path, {RouteOptions? options}) {
     final origin = _publishOrigin;
     if (origin == null) throw StateError('no publish origin configured');
-    return origin.createBroadcast(path: path);
+    return origin.route(path: path, options: options ?? RouteOptions());
   }
 
   /// SHA-256 fingerprints of the configured TLS certificates, hex-encoded.
@@ -122,18 +134,34 @@ final class Server {
   /// Each [Request] must be answered with `accept()` to complete the handshake
   /// or `reject(code:)` to refuse it; the returned session must be held to keep
   /// the connection alive. The stream ends when the server stops accepting.
-  Stream<Request> requests() async* {
-    while (true) {
-      final request = await server.accept();
-      if (request == null) return;
-      yield request;
-    }
-  }
+  /// Cancelling releases only its pending accept; the server keeps listening.
+  Stream<Request> requests() => _Requests(server).cast<Request>();
 
   /// Stop accepting new sessions and release the native server handle, closing
   /// the listening socket before it returns so the address can be bound again
   /// immediately.
   void close() {
     server.cancel();
+  }
+}
+
+final class _Requests extends NativeStream<Request?> {
+  final MoqServer server;
+  _Requests(this.server);
+
+  @override
+  UniffiRustFuture<Request?> read() => server.accept();
+
+  @override
+  bool finished(Request? value) => value == null;
+
+  @override
+  void discard(Request? value) {
+    if (value == null) return;
+    try {
+      value.cancel();
+    } finally {
+      value.dispose();
+    }
   }
 }

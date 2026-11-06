@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A V4L2 camera that opens and never delivers a frame no longer blocks its capture thread forever: reads time out after a second, so dropping the `capture::Stream` stops the thread and closes the device promptly.
+- The PipeWire camera listing hides nodes that offer no format the backend converts, such as an IR camera with only GREY, as the V4L2 listing already does.
+
+### Added
+
+- `encode::Config::resize` scales a frame at another size inside the encoder, so a `Sink` does it on its own thread rather than the caller's.
+
+### Changed
+
+- [**breaking**] `encode::Producer::new` and `with_track` take a `moq_mux::catalog::Reserved` instead of the catalog, so a caller declares the encoder's GOP with `reserve().with_timeline_hint(gop)`.
+
 ## [0.1.10](https://github.com/moq-dev/moq/compare/moq-video-v0.1.9...moq-video-v0.1.10) - 2026-10-05
 
 ### Other

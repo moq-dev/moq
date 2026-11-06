@@ -1,6 +1,7 @@
 /**
- * Proves a relay's rejection reaches the page: headless Chromium dials the relay with a token its
- * public rules refuse, and `WebTransport.closed` has to resolve with the relay's code and reason.
+ * Proves a relay's rejection reaches the page over WebTransport and WebSocket.
+ * WebTransport.closed has to carry the relay's code; a WebSocket Connection has
+ * to publish its MalformedAuthToken session error and stop reconnecting.
  *
  * Chromium treats the server's HTTP/3 control stream ending as fatal, so a server that ends it
  * alongside the CLOSE_WEBTRANSPORT_SESSION capsule turns the close into a bare connection error.
@@ -30,8 +31,8 @@ if (!url || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
 	process.exit(2);
 }
 
-/** What the relay sends when its auth refuses a session: moq-net's Unauthorized and its message. */
-const EXPECTED = { closeCode: SessionCode.Unauthorized, reason: "unauthorized" };
+/** What the relay sends when its auth refuses a token that is not a JWT: moq-net's code and message. */
+const EXPECTED = { closeCode: SessionCode.MalformedAuthToken, reason: "malformed auth token" };
 
 async function readClose(page: Page): Promise<CloseState | undefined> {
 	const state = await page.evaluate(() => document.body.dataset.interopClose);
@@ -43,22 +44,30 @@ const browser = await launch();
 
 let code = 1;
 try {
-	const [page, errors] = await open(browser, pageUrl(server.origin, "close", { url }), "close", true);
-	const state = await waitFor(page, errors, readClose, {
-		deadline: Date.now() + timeoutMs,
-		description: "the refused session to close",
-		predicate: (state) => state !== undefined,
-		assertion: "close code",
-	});
-	check(
-		state !== undefined &&
-			"closeCode" in state &&
-			state.closeCode === EXPECTED.closeCode &&
-			state.reason === EXPECTED.reason,
-		"close code",
-		() => `expected ${JSON.stringify(EXPECTED)}, got ${JSON.stringify(state)}`,
-	);
-	console.error(`refused session closed with ${JSON.stringify(state)}`);
+	for (const transport of ["webtransport", "websocket"]) {
+		const [page, errors] = await open(
+			browser,
+			pageUrl(server.origin, "close", { url, transport }),
+			`close-${transport}`,
+			true,
+		);
+		const state = await waitFor(page, errors, readClose, {
+			deadline: Date.now() + timeoutMs,
+			description: `the refused ${transport} session to close`,
+			predicate: (state) => state !== undefined,
+			assertion: "close code",
+		});
+		check(
+			state !== undefined &&
+				"closeCode" in state &&
+				state.closeCode === EXPECTED.closeCode &&
+				(transport === "websocket" ? state.reason.includes(EXPECTED.reason) : state.reason === EXPECTED.reason),
+			"close code",
+			() => `expected ${JSON.stringify(EXPECTED)}, got ${JSON.stringify(state)}`,
+		);
+		console.error(`refused ${transport} session closed with ${JSON.stringify(state)}`);
+		await page.close();
+	}
 	code = 0;
 } finally {
 	await finishTraces(code !== 0);

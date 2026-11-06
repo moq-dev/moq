@@ -4,15 +4,14 @@ use super::{Estimator, Rendition, RenditionConfig};
 /// The config a data producer ([`Producer::json_stream`](super::Producer::json_stream) and the
 /// like) publishes as its catalog entry.
 ///
-/// Implemented for the [`json::Config`](crate::json::Config) and
-/// [`binary::Config`](crate::binary::Config) builders, which list the track in the `json` or
-/// `binary` section. Also implemented for any [`RenditionConfig`] that embeds the data config `D`
-/// ([`JsonConfig`](hang::catalog::JsonConfig) or [`BinaryConfig`](hang::catalog::BinaryConfig))
-/// through [`AsMut`], which is how an application lists a data track in its own section beside its
-/// own per-track fields; see the [`RenditionConfig`] example.
+/// Implemented for the [`json::Config`](crate::json::Config) builder, which lists the track in the
+/// `json` section. Also implemented for any [`RenditionConfig`] that embeds the data config `D`
+/// ([`JsonConfig`](hang::catalog::JsonConfig)) through [`AsMut`], which is how an application lists
+/// a data track in its own section beside its own per-track fields; see the [`RenditionConfig`]
+/// example.
 ///
-/// The producer sets the embedded config's `mode`, encodes the track with its `compression`, and
-/// owns the entry: it is written when the producer is created and removed when it drops.
+/// The producer sets the embedded config's `mode` and owns the entry: it is written when the
+/// producer is created and removed when it drops.
 pub trait IntoRendition<E: CatalogExt, D> {
 	/// The catalog entry, embedding `D`.
 	type Config: RenditionConfig<E> + AsMut<D>;
@@ -30,7 +29,7 @@ impl<E: CatalogExt, D, C: RenditionConfig<E> + AsMut<D>> IntoRendition<E, D> for
 }
 
 /// A data track's catalog entry, owned for the life of its producer and kept current with the
-/// bitrate, jitter, and delay its writes measure.
+/// bitrate and delay its writes measure.
 ///
 /// Erases the entry's type, so a data producer's own type doesn't depend on which section lists it.
 pub(crate) struct Listing {
@@ -46,7 +45,7 @@ pub(crate) struct Listing {
 trait Owned: Send + Sync {
 	fn name(&self) -> &str;
 	fn clock(&self) -> crate::Clock;
-	fn estimate(&mut self, estimate: super::Estimate) -> crate::Result<()>;
+	fn estimate(&mut self, reading: super::Reading) -> crate::Result<()>;
 }
 
 impl<E: CatalogExt, C: RenditionConfig<E>> Owned for Rendition<E, C> {
@@ -56,8 +55,8 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Owned for Rendition<E, C> {
 	fn clock(&self) -> crate::Clock {
 		Rendition::clock(self)
 	}
-	fn estimate(&mut self, estimate: super::Estimate) -> crate::Result<()> {
-		Rendition::estimate(self, estimate)
+	fn estimate(&mut self, reading: super::Reading) -> crate::Result<()> {
+		Rendition::estimate(self, reading)
 	}
 }
 
@@ -80,49 +79,39 @@ impl Listing {
 		self.rendition.name()
 	}
 
-	/// Stamp an untimed payload with the catalog's current clock reading, keeping a timed one as
-	/// given. Also returns the given time, if there was one.
-	pub(crate) fn stamp<P>(&mut self, timed: moq_net::Timed<P>) -> (moq_net::Timed<P>, Option<moq_net::Timestamp>) {
-		let clock = self.rendition.clock();
-		// A re-anchor moves this track's timeline, which measured across would read as jitter. The
-		// whole clock is compared: on a host with an unset wall clock, every clock has no mapping.
-		if clock != self.clock {
-			self.estimator.discontinuity();
-		}
-		self.clock = clock;
-		let given = timed.at;
-		(timed.at(given.unwrap_or_else(|| clock.now())), given)
-	}
-
 	/// Measure a frame of `bytes` encoded bytes, just written, captured at `captured` on the
 	/// broadcast clock if known.
 	pub(crate) fn record(&mut self, bytes: usize, captured: Option<moq_net::Timestamp>) -> crate::Result<()> {
-		let now = self.clock.now();
-		let flush = captured.map(|captured| (captured, std::time::Instant::now()));
-		self.record_at(now, bytes, flush)
+		let clock = self.rendition.clock();
+		// A re-anchor moves this track's timeline, which measured across would read as jitter.
+		// Compare the whole clock, since an unset host wall clock has no mapping to compare.
+		if clock != self.clock {
+			self.estimator.discontinuity();
+		}
+		let now = clock.now();
+		self.clock = clock;
+		self.record_at(now, bytes, captured)
 	}
 
 	/// [`record`](Self::record) at a chosen time, which a test needs since the broadcast clock only
-	/// moves in real time. `flush` is the capture time and the instant the frame was written.
+	/// moves in real time.
 	pub(crate) fn record_at(
 		&mut self,
 		now: moq_net::Timestamp,
 		bytes: usize,
-		flush: Option<(moq_net::Timestamp, std::time::Instant)>,
+		captured: Option<moq_net::Timestamp>,
 	) -> crate::Result<()> {
 		// Each write is its own span, closed by the next one.
 		self.estimator.cut(Some(now));
-		self.estimator.write(now, bytes);
+		self.estimator.rate(now, bytes);
 
-		// The spacing between writes is the application's cadence, not a flush delay, so only a
-		// capture time measures jitter and delay. Without one neither is advertised.
-		if let Some((captured, written)) = flush {
-			// A source clock running slightly fast stamps ahead of now. Measured as given, its
-			// lateness would undercut every real flush and drag the broadcast's minimum down,
-			// inflating the delay of every other track. It was flushed no later than now, so it
-			// counts as zero delay.
-			self.estimator.flush(captured.min(now), written);
+		// The write time is the application's cadence, not media time, so only a capture time takes
+		// a place in the broadcast's write order. Without one no delay is advertised.
+		if let Some(captured) = captured {
+			// A source clock running fast stamps ahead of now. Ordered as given, it would put every
+			// media track behind it by however fast it runs. It was written no later than now.
+			self.estimator.order(captured.min(now));
 		}
-		self.rendition.estimate(self.estimator.estimate())
+		self.rendition.estimate(self.estimator.reading())
 	}
 }

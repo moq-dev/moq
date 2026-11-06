@@ -7,7 +7,7 @@ default:
 # Run the web server targeting the specified relay.
 # The vite config opens the watch, publish, and stats demos in separate tabs;
 
-# set MOQ_NO_OPEN=1 to skip opening a browser.
+# set DEMO_NO_OPEN=1 to skip opening a browser.
 serve url='http://localhost:4443': install
     VITE_RELAY_URL="{{ url }}" bun --bun vite
 

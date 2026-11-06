@@ -5,12 +5,13 @@ name: Release Kotlin FFI
 # `dev.moq:moq` wrapper is published separately by release-kt-lib.yml.
 
 on:
-  push:
-    tags:
-      - "moq-ffi-v*"
-  # Dry-run: build everything, publish nothing. Nightly calls every release
-  # workflow this way so a broken build surfaces before the tag is cut.
+  # The tag coordinator supplies shared default-feature artifacts. Manual
+  # calls and Go PR dry-runs still build their own target subset.
   workflow_call:
+    inputs:
+      reuse-native:
+        type: boolean
+        default: false
   workflow_dispatch:
 
 permissions:
@@ -26,6 +27,7 @@ jobs:
     uses: ./.github/workflows/release-ffi.yml
     with:
       language: kotlin
+      reuse-native: ${{ inputs.reuse-native || false }}
       # Android, then the desktop JVM.
       targets: >-
         [
@@ -42,6 +44,10 @@ jobs:
     name: Package and publish
     needs: [ffi]
     runs-on: ubuntu-latest
+    # Maven and signing credentials live in the `publish` Environment, which
+    # only protected refs can deploy to. Only a tag publishes; a dry-run needs
+    # no secrets, so it can run from any branch.
+    environment: ${{ github.ref_type == 'tag' && 'publish' || '' }}
     env:
       # Picked up by com.vanniktech.maven.publish via Gradle project properties.
       ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
@@ -58,7 +64,7 @@ jobs:
 
       - uses: ./.github/actions/just
 
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: "17"
@@ -70,25 +76,29 @@ jobs:
           # dropped from the SDK repository. Gradle fetches the rest itself.
           packages: platform-tools
 
-      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+
+      - name: Select native artifacts
+        id: native
+        env:
+          LIB_PREFIX: ${{ inputs.reuse-native && 'default' || 'kotlin' }}
+          BUILD_TARGETS: ${{ needs.ffi.outputs.targets }}
+        run: just gh ffi pattern
 
       - name: Download per-target libs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: libs-raw
-          pattern: kotlin-lib-*
+          pattern: ${{ steps.native.outputs.pattern }}
 
       - name: Flatten lib layout
-        run: |
-          mkdir -p libs
-          for dir in libs-raw/kotlin-lib-*; do
-            target="${dir#libs-raw/kotlin-lib-}"
-            mv "$dir" "libs/$target"
-          done
-          ls -la libs
+        env:
+          LIB_PREFIX: ${{ inputs.reuse-native && 'default' || 'kotlin' }}
+          BUILD_TARGETS: ${{ needs.ffi.outputs.targets }}
+        run: just gh ffi stage
 
       - name: Download bindings
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: kotlin-bindings
           path: bindings
@@ -116,7 +126,7 @@ jobs:
             :moq-ffi:publishAndReleaseToMavenCentral --no-configuration-cache
 
       - name: Upload local maven layout
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: kotlin-package
           path: release-out/*

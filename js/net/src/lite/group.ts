@@ -1,13 +1,18 @@
 import { race } from "@moq/signals";
+import { FrameTooLarge } from "../error.ts";
 import type * as netGroup from "../group.ts";
+import { hooks } from "../internal.ts";
+import { decodePayload, receiveFrame, type WirePayload } from "../payload.ts";
 import type { Cursor, Reader, Writer } from "../stream.ts";
 import * as Time from "../time.ts";
+import { toNumber } from "../util/bigint.ts";
+import { MAX_FRAME_BYTES } from "../util/limits.ts";
 import * as Message from "./message.ts";
 import { hasFrameBounds, type Version } from "./version.ts";
 
 export class Group {
 	subscribe: bigint;
-	sequence: number;
+	sequence: bigint;
 
 	/**
 	 * The index of the first frame on this stream within the group.
@@ -25,7 +30,7 @@ export class Group {
 		frameStart = 0,
 	}: {
 		subscribe: bigint;
-		sequence: number;
+		sequence: bigint;
 		frameStart?: number;
 	}) {
 		this.subscribe = subscribe;
@@ -35,7 +40,7 @@ export class Group {
 
 	async #encode(w: Writer, version: Version) {
 		await w.u62(this.subscribe);
-		await w.u53(this.sequence);
+		await w.u62(this.sequence);
 		if (hasFrameBounds(version)) {
 			await w.u53(this.frameStart);
 		} else if (this.frameStart !== 0) {
@@ -46,7 +51,7 @@ export class Group {
 
 	static async #decode(r: Reader, version: Version): Promise<Group> {
 		const subscribe = await r.u62();
-		const sequence = await r.u53();
+		const sequence = await r.u62();
 		const frameStart = hasFrameBounds(version) ? await r.u53() : 0;
 		return new Group({ subscribe, sequence, frameStart });
 	}
@@ -69,32 +74,41 @@ function unzigzag(v: bigint): bigint {
 	return (v >> 1n) ^ -(v & 1n);
 }
 
-/**
- * A synchronous decode for one frame of a group or FETCH response stream.
- *
- * A non-zero `scale` means every frame is prefixed with a zigzag-delta timestamp (the lite-05
- * FRAME format), decoded into a Timestamp at that scale. Scale 0 (pre-lite-05) carries no
- * timestamp, so frames arrive untimed.
- */
-export function frameDecoder(scale: number): (c: Cursor) => netGroup.Frame {
-	if (scale === 0) {
-		return (c) => ({ payload: c.read(c.u53()) });
-	}
+/** A decoded frame, whose payload may still be a stored slice or follow on the stream. */
+export interface WireFrame extends WirePayload {
+	/** The declared plain size on a compressed track. */
+	inflated?: number;
+}
 
-	const timescale = Time.Timescale(scale);
+/** How {@link frameDecoder} reads each frame's optional fields. */
+export interface FrameFormat {
+	/** The wire timescale; non-zero means every frame carries a zigzag-delta timestamp. */
+	scale: number;
+	/** Whether every frame declares its plain size ahead of a stored slice. */
+	compress?: boolean;
+}
+
+/** Decode one frame, with timestamp deltas when scaled and declared plain sizes when compressed. */
+export function frameDecoder({ scale, compress = false }: FrameFormat): (c: Cursor) => WireFrame {
+	const timescale = scale === 0 ? undefined : Time.Timescale(scale);
 	let prevTs = 0n;
 	return (c) => {
-		const delta = unzigzag(c.u62());
-		const payload = c.read(c.u53());
-		// After the last read, so a decode that ran short and gets retried adds the delta once.
+		const delta = timescale === undefined ? 0n : unzigzag(c.u62());
+		const inflated = compress ? c.u53() : undefined;
+		const size = c.u53();
+		// A compressed frame is stored whole; a plain one past a segment streams in after this.
+		if (compress && (size > MAX_FRAME_BYTES || (inflated ?? 0) > MAX_FRAME_BYTES)) throw new FrameTooLarge();
+		const payload = compress ? c.read(size) : decodePayload(c, size);
+		// Commit the delta only after the last read: an incomplete decode gets retried.
 		prevTs += delta;
-		return { payload, timestamp: new Time.Timestamp(Number(prevTs), timescale) };
+		const timestamp = timescale === undefined ? undefined : new Time.Timestamp(toNumber(prevTs), timescale);
+		return { size, payload, inflated, timestamp };
 	};
 }
 
 /** Write a group stream's frames into `producer` until the stream ends or the producer closes. */
-export async function readFrames(stream: Reader, producer: netGroup.Producer, scale: number): Promise<void> {
-	const decode = frameDecoder(scale);
+export async function readFrames(stream: Reader, producer: netGroup.Producer, format: FrameFormat): Promise<void> {
+	const decode = frameDecoder(format);
 
 	for (;;) {
 		// Every frame already buffered is written without an await, so the reader wakes once
@@ -102,6 +116,7 @@ export async function readFrames(stream: Reader, producer: netGroup.Producer, sc
 		// that closes first has already closed (or aborted) this group through its cache.
 		const frame = stream.tryDecode(decode) ?? (await race([stream.decodeMaybe(decode), producer.closed]));
 		if (!frame || frame instanceof Error) return;
-		producer.writeFrame(frame);
+		if (frame.payload) hooks.writeGroupFrame(producer, frame as netGroup.Frame, frame.inflated);
+		else if (!(await receiveFrame(stream, producer, frame))) return;
 	}
 }

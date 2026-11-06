@@ -9,20 +9,32 @@
 //! `Hardware` / `Software`, so it can't be picked by accident.
 
 use std::sync::Mutex;
-#[cfg(not(apple))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::ThreadId;
 
 use bytes::Bytes;
 use moq_net::Timestamp;
 
-use super::{Backend, Codec, Config};
+use super::{Backend, Config, Stream};
 use crate::{Error, Frame, I420, Size, Surface};
 
 pub(crate) const NAME: &str = "probe";
 
 /// A test decoder that holds one picture until the next call or a flush.
 pub(crate) const BUFFERED_NAME: &str = "probe-buffered";
+
+/// A test decoder that hands each picture straight back and records nothing,
+/// for tests that run more than one decoder at a time. It refuses [`CORRUPT`].
+pub(crate) const IMMEDIATE_NAME: &str = "probe-immediate";
+
+/// An access unit the immediate probe fails to decode.
+pub(crate) const CORRUPT: &[u8] = b"corrupt";
+
+/// A test decoder standing in for hardware with a single session: opening a
+/// second while one is alive fails.
+pub(crate) const SINGLE_NAME: &str = "probe-single";
+
+static SINGLE_OPEN: AtomicBool = AtomicBool::new(false);
 
 /// A test decoder whose flush waits until the test releases it.
 #[cfg(not(apple))]
@@ -33,6 +45,10 @@ pub(crate) const BLOCKING_FLUSH_NAME: &str = "probe-blocking-flush";
 /// a platform-native surface where one can be built without a device (a
 /// `CVPixelBuffer` on macOS and iOS), CPU pixels elsewhere.
 pub(crate) const NATIVE_NAME: &str = "probe-native";
+
+/// A test decoder standing in for hardware whose device answers that it cannot
+/// decode the stream, so it never opens.
+pub(crate) const REFUSING_NAME: &str = "probe-refusing";
 
 /// What happened to the codec, and where. `open` and `drop` are the pair that
 /// matters: the Windows backend opens a COM apartment in one and closes it in
@@ -118,26 +134,84 @@ pub(crate) struct Probe;
 
 pub(crate) struct Buffered(Option<Frame>);
 
+pub(crate) struct Immediate;
+
+pub(crate) struct Single;
+
 pub(crate) struct Native;
+
+pub(crate) struct Refusing;
 
 #[cfg(not(apple))]
 pub(crate) struct BlockingFlush;
 
 impl Probe {
-	pub(crate) fn open(_codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(_stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
 		record("open");
 		Ok(Box::new(Self))
 	}
 }
 
 impl Buffered {
-	pub(crate) fn open(_codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(_stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
 		Ok(Box::new(Self(None)))
 	}
 }
 
+impl Immediate {
+	pub(crate) fn open(_stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+		Ok(Box::new(Self))
+	}
+}
+
+impl Backend for Immediate {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
+		if access_unit == CORRUPT {
+			return Err(anyhow::anyhow!("probe: corrupt access unit").into());
+		}
+		Ok(vec![frame(timestamp)?])
+	}
+
+	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+		Ok(Vec::new())
+	}
+
+	fn name(&self) -> &str {
+		IMMEDIATE_NAME
+	}
+}
+
+impl Single {
+	pub(crate) fn open(_stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+		if SINGLE_OPEN.swap(true, Ordering::SeqCst) {
+			return Err(anyhow::anyhow!("probe: out of decoder sessions").into());
+		}
+		Ok(Box::new(Self))
+	}
+}
+
+impl Backend for Single {
+	fn decode(&mut self, _access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
+		Ok(vec![frame(timestamp)?])
+	}
+
+	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+		Ok(Vec::new())
+	}
+
+	fn name(&self) -> &str {
+		SINGLE_NAME
+	}
+}
+
+impl Drop for Single {
+	fn drop(&mut self) {
+		SINGLE_OPEN.store(false, Ordering::SeqCst);
+	}
+}
+
 impl Native {
-	pub(crate) fn open(_codec: Codec, config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(_stream: &Stream, config: &Config) -> Result<Box<dyn Backend>, Error> {
 		*NATIVE_OPENED.lock().unwrap() = Some(config.clone());
 		Ok(Box::new(Self))
 	}
@@ -174,9 +248,18 @@ impl Backend for Native {
 	}
 }
 
+impl Refusing {
+	pub(crate) fn open(stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+		Err(Error::UnsupportedCodec(format!(
+			"probe: this device cannot decode {}",
+			stream.codec.label()
+		)))
+	}
+}
+
 #[cfg(not(apple))]
 impl BlockingFlush {
-	pub(crate) fn open(_codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(_stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
 		Ok(Box::new(Self))
 	}
 }

@@ -5,10 +5,10 @@
 //! shuttles packets between the socket and the connection (GSO trains out,
 //! GRO coalesces in), arms the worker's userspace timers from the
 //! connection's timeout, and wakes stream waiters. The returned
-//! [`Connection`] implements [`web_transport_trait::poll`], so
-//! wrapping it with `crate::transport::Session::new` lets
-//! `moq_net::Client::connect_lite` / `Server::accept_lite` run real moq-lite
-//! sessions on the worker; everything is `Rc`-shared and `!Send` by design.
+//! [`web::Session`] implements [`moq_net::transport::poll`], so wrapping
+//! [`web::Session::raw`] in [`crate::transport::Local`] lets
+//! `moq_net::Client::connect` / `Server::accept` run real MoQ sessions on the
+//! worker; everything is `Rc`-shared and `!Send` by design.
 //!
 //! An [`Endpoint`] serves many connections on one socket, demuxed by
 //! connection id; [`client::connect`] and [`server::accept`] are its
@@ -17,7 +17,11 @@
 //! [`web`] layer's HTTP/3 CONNECT handshake on top of the same adapter, with
 //! [`web::Session`] as the one transport type covering both.
 //!
-//! Noq is the sans-IO QUIC stack underneath the worker.
+//! moq-quic is the sans-IO QUIC stack underneath the worker.
+//!
+//! Session waits take `&self` and a caller-owned `&kio::Waiter`; stream reads and writes
+//! take `&mut self`. Dropping the waiter cancels its registrations. Async helpers own their
+//! waiter, while `Future` and runtime I/O traits bridge their `Context` through `kio::Park`.
 
 pub mod client;
 pub mod endpoint;
@@ -25,16 +29,18 @@ pub mod handshake;
 #[cfg(feature = "qlog")]
 pub mod qlog;
 pub mod server;
+pub mod transport;
 pub mod web;
 
-mod noq;
+mod driver;
 
+pub use driver::{Connection, recv, send};
 pub use endpoint::Endpoint;
-pub use noq::{Connection, RecvStream, SendStream};
-
-/// The QUIC payload size every full datagram in a GSO train uses, and the
-/// stride GRO coalesces with.
-pub(crate) const SEGMENT: usize = 1350;
+/// The flow-control limits and bitrate caps a live connection can change; see
+/// [`Connection::set_limits`].
+pub use moq_quic::{Limits, LimitsError, Rate};
+/// Stream identity, and the varint every QUIC code is.
+pub use moq_quic::{VarInt, stream};
 
 /// A TLS certificate chain and the private key that signs for it, as PEM.
 /// One value, so neither half can be configured alone.
@@ -76,7 +82,7 @@ impl Identity {
 		client_auth: server::ClientAuth,
 	) -> Result<std::sync::Arc<rustls::ServerConfig>, Error> {
 		let alpn = alpn.iter().map(|proto| proto.as_ref().as_bytes().to_vec()).collect();
-		noq::identity_server_config(self, alpn, &client_auth)
+		driver::identity_server_config(self, alpn, &client_auth)
 	}
 
 	/// The PEM certificate chain being presented, for a caller that publishes
@@ -100,70 +106,11 @@ impl std::fmt::Debug for Identity {
 	}
 }
 
-/// The per-connection transport knobs, the same for either role.
-///
-/// Separate from the role configs so a caller that already has these
-/// settings (a relay applying its `--quic-*` section, say) sets them once and
-/// hands the same value to a dial and a listener.
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub struct Transport {
-	/// Close the connection after this long without activity.
-	pub idle_timeout: std::time::Duration,
-	/// The most streams of each kind (bidirectional and unidirectional) a peer
-	/// may have open at once. MoQ opens a stream per group, so busy endpoints
-	/// want this high.
-	pub max_streams: u64,
-	/// How much unread data one peer may have in flight across every stream,
-	/// in bytes. `None` leaves the 16 MiB default.
-	pub receive_window: Option<u64>,
-	/// How much unread data one peer may have in flight on a single stream,
-	/// in bytes. `None` leaves the 4 MiB default.
-	///
-	/// Keep it under [`receive_window`](Self::receive_window) so one stream
-	/// cannot fill the connection.
-	pub stream_receive_window: Option<u64>,
-	/// How much unacknowledged outgoing data to buffer, in bytes, whatever
-	/// the peer allows. `None` leaves the 16 MiB default.
-	pub send_window: Option<u64>,
-	/// Which congestion controller to run.
-	pub congestion: Congestion,
-	/// How often to send an ack-eliciting packet on an otherwise idle
-	/// connection, or `None` (the default) to send none and let the idle
-	/// timeout decide.
-	pub keep_alive: Option<std::time::Duration>,
-	/// Where to write qlog traces, or `None` (the default) to write none.
-	///
-	/// Noq takes one sink per configuration and writes one file per connection,
-	/// named from that connection's Initial destination connection ID.
-	///
-	/// Only compiled with the `qlog` feature, so a build without it cannot ask
-	/// for traces the backends would not produce.
-	#[cfg(feature = "qlog")]
-	pub qlog: Option<qlog::Sink>,
-}
-
-impl Default for Transport {
-	fn default() -> Self {
-		Self {
-			idle_timeout: std::time::Duration::from_secs(10),
-			max_streams: 1024,
-			receive_window: None,
-			stream_receive_window: None,
-			send_window: None,
-			congestion: Congestion::default(),
-			keep_alive: None,
-			#[cfg(feature = "qlog")]
-			qlog: None,
-		}
-	}
-}
-
 /// The congestion control family a connection runs.
 ///
-/// Noq uses CUBIC for loss-based control and BBRv3 for delay-based control.
+/// CUBIC is used for loss-based control and BBRv3 for delay-based control.
 ///
-/// The default is [`Loss`](Self::Loss), which is what noq runs
+/// The default is [`Loss`](Self::Loss), which is what moq-quic runs
 /// unasked. An application carrying live media wants [`Delay`](Self::Delay)
 /// and should say so; the relay does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -176,12 +123,14 @@ pub enum Congestion {
 	/// waiting for loss, which keeps queues short and the send rate steady
 	/// enough for an encoder to track.
 	Delay,
+	/// No congestion control and no pacing, for tests and controlled links.
+	None,
 }
 
 /// Why a connection could not be set up or has ended.
 ///
 /// One error type for the whole module: it is also what every
-/// [`web_transport_trait::poll`] operation on a [`Connection`] reports, which
+/// [`moq_net::transport::poll`] session operation reports, which
 /// is how the close reason reaches `moq_net::Error::from_transport`.
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -211,9 +160,21 @@ pub enum Error {
 	/// The peer told us to stop sending with this code.
 	#[error("stream stopped: {0}")]
 	Stop(u64),
+	/// The connection window was stuck and this stream was discarded to free
+	/// it. See [`recv::Stream::poll_lease`]. The peer hears of it once the
+	/// stream is stopped, so call `stop` with your own code: dropping the
+	/// stream sends code 0.
+	#[error("stream evicted")]
+	Evicted,
+	/// A lease wanted more than the connection receive window can hold.
+	#[error("want exceeds the receive window")]
+	TooLarge,
 	/// The TLS material a connection needs could not be loaded.
 	#[error("tls error: {0}")]
 	Tls(String),
+	/// This CPU lacks a feature that rind, MoQ's cryptography, requires.
+	#[error(transparent)]
+	UnsupportedCpu(#[from] moq_crypto::provider::UnsupportedCpu),
 	/// The socket died underneath the connection.
 	#[error("socket error: {0}")]
 	Io(String),
@@ -243,20 +204,56 @@ pub enum Error {
 	/// missing or unwritable, or the writer thread could not be started.
 	#[error("qlog error: {0}")]
 	Qlog(String),
+	/// This endpoint closed the connection locally.
+	#[error("locally closed")]
+	Closed,
+	/// The transport settings are ones the QUIC stack refuses.
+	#[error("invalid quic config: {0}")]
+	Config(#[from] moq_quic::ConfigError),
 }
 
-impl web_transport_trait::Error for Error {
+impl moq_net::transport::Error for Error {
+	fn close_kind(&self) -> moq_net::transport::CloseKind {
+		match self {
+			Self::TimedOut => moq_net::transport::CloseKind::IdleTimeout,
+			Self::Closed => moq_net::transport::CloseKind::Closed,
+			Self::Evicted => moq_net::transport::CloseKind::Evicted,
+			_ => moq_net::transport::CloseKind::Transport,
+		}
+	}
 	fn session_error(&self) -> Option<(u32, String)> {
 		match self {
-			Self::App { code, reason } => Some((u32::try_from(*code).unwrap_or(u32::MAX), reason.clone())),
+			Self::App { code, reason } => u32::try_from(*code).ok().map(|code| (code, reason.clone())),
 			_ => None,
 		}
 	}
 
 	fn stream_error(&self) -> Option<u32> {
 		match self {
-			Self::Reset(code) | Self::Stop(code) => Some(u32::try_from(*code).unwrap_or(u32::MAX)),
+			Self::Reset(code) | Self::Stop(code) => u32::try_from(*code).ok(),
 			_ => None,
 		}
+	}
+}
+
+#[cfg(test)]
+mod outcome_tests {
+	use super::*;
+	use moq_net::transport::{CloseKind, Error as _};
+	#[test]
+	fn transport_kinds_and_out_of_registry_codes_stay_typed() {
+		assert_eq!(Error::TimedOut.close_kind(), CloseKind::IdleTimeout);
+		assert_eq!(Error::Closed.close_kind(), CloseKind::Closed);
+		assert_eq!(web::recv::Error::Evicted.close_kind(), CloseKind::Evicted);
+		assert_eq!(
+			web::send::Error::SessionError(Error::TimedOut).close_kind(),
+			CloseKind::IdleTimeout
+		);
+		let outside = Error::App {
+			code: u64::MAX,
+			reason: "unknown registry".into(),
+		};
+		assert_eq!(outside.session_error(), None);
+		assert_eq!(Error::Reset(u64::MAX).stream_error(), None);
 	}
 }

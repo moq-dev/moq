@@ -1,7 +1,7 @@
 //! The PR-4 ablation matrix at session level: a full moq-lite session pair on
 //! one worker, publisher to subscriber over loopback QUIC, toggling receive
 //! batching, GRO, and GSO exactly like the raw echo. Each iteration delivers
-//! one group of 32 x 32 KiB frames (1 MiB, matching `echo_noq`'s unit), so
+//! one group of 32 x 32 KiB frames (1 MiB, matching `echo_quic`'s unit), so
 //! the two matrices are directly comparable: the difference is the moq-net
 //! machine and container framing on top of the same wire path.
 //!
@@ -9,11 +9,16 @@
 
 use criterion::{criterion_group, criterion_main};
 
-#[cfg(all(target_os = "linux", feature = "noq"))]
-#[path = "../tests/support.rs"]
+#[cfg(all(target_os = "linux", feature = "quic"))]
+#[path = "../tests/integration/support.rs"]
 mod support;
 
-#[cfg(all(target_os = "linux", feature = "noq"))]
+#[cfg(all(target_os = "linux", feature = "quic"))]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "benchmarks measure themselves on the host clock"
+)]
 mod linux {
 	use std::net::UdpSocket;
 	use std::time::Instant;
@@ -33,7 +38,9 @@ mod linux {
 
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+		moq_net::track::Info::default()
+			.with_max_age(None)
+			.with_timescale(moq_net::Timescale::MILLI)
 	}
 
 	struct Ablation {
@@ -108,9 +115,13 @@ mod linux {
 				});
 			});
 
-			let broadcast = pub_origin.create_broadcast("bench").expect("create broadcast");
-			broadcast.announce(Default::default()).expect("create broadcast");
-			let track = broadcast.create_track("data", timed()).expect("create track");
+			let broadcast = pub_origin
+				.route("bench", moq_net::origin::RouteOptions::default())
+				.expect("create broadcast");
+			let track = broadcast
+				.broadcast()
+				.create_track("data", timed())
+				.expect("create track");
 
 			let certs = support::certs().expect("certificates");
 			let server_config = quic::server::Config::new(
@@ -127,7 +138,7 @@ mod linux {
 			let client_sock = handle
 				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), ablation.config.clone())
 				.expect("client socket");
-			let mut dial = quic::client::Config::new(server_addr, "localhost");
+			let mut dial = quic::client::Config::default();
 			dial.alpn = vec![ALPN.to_string()];
 			dial.verify = false;
 
@@ -138,12 +149,12 @@ mod linux {
 					.expect("quic accept");
 				let (session, driver) = moq_net::Server::new()
 					.with_publisher(&pub_origin)
-					.accept_lite(
-						std::time::Instant::now(),
-						moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+					.accept(
+						moq_net::time::Instant::now(),
+						moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 					)
 					.await
-					.expect("accept_lite");
+					.expect("accept");
 				let _ = server_handle.run(driver).await;
 				session.closed().await;
 			});
@@ -151,26 +162,30 @@ mod linux {
 			// Establish and subscribe once; iterations measure steady state.
 			let (_session, mut sub) = worker
 				.block_on(async {
-					let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
+					let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
+						.await
+						.expect("quic connect");
 					let (session, driver) = moq_net::Client::new()
 						.with_subscriber(sub_origin.clone())
-						.connect_lite(
-							std::time::Instant::now(),
-							moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+						.connect(
+							moq_net::time::Instant::now(),
+							moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 						)
 						.await
-						.expect("connect_lite");
+						.expect("connect");
 					let task_handle = handle.clone();
 					handle.spawn(async move {
 						let _ = task_handle.run(driver).await;
 					});
 					let bc = {
 						let consumer = sub_origin.consume();
-						consumer.routed("bench").await.expect("broadcast announced");
 						consumer
-							.request_broadcast("bench", None)
+							.follow("bench", None)
+							.unwrap()
+							.available()
 							.await
 							.expect("broadcast resolves")
+							.unwrap()
 					};
 					let sub = bc
 						.track("data")
@@ -229,10 +244,10 @@ mod linux {
 	}
 }
 
-#[cfg(all(target_os = "linux", feature = "noq"))]
+#[cfg(all(target_os = "linux", feature = "quic"))]
 use linux::benchmark;
 
-#[cfg(not(all(target_os = "linux", feature = "noq")))]
+#[cfg(not(all(target_os = "linux", feature = "quic")))]
 fn benchmark(_: &mut criterion::Criterion) {}
 
 criterion_group!(benches, benchmark);

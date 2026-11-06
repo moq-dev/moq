@@ -1,4 +1,7 @@
-#![cfg_attr(not(feature = "openh264"), allow(dead_code))]
+#![cfg_attr(
+	not(feature = "openh264"),
+	allow(dead_code, reason = "only the `openh264` feature uses it")
+)]
 
 //! H.264 conformance decode: bitstreams nothing in this crate produced.
 //!
@@ -154,7 +157,7 @@ fn open(name: &str) -> Option<Box<dyn Backend>> {
 		kind: Kind::Named(name.to_owned()),
 		..Config::new()
 	};
-	backend::open(Codec::H264, &config).ok()
+	backend::open(&Codec::H264.into(), &config).ok()
 }
 
 /// The backends that opened on this host.

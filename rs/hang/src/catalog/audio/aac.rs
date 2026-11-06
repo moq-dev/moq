@@ -27,7 +27,7 @@ impl std::str::FromStr for AAC {
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		let remain = s.strip_prefix("mp4a.40.").ok_or(Error::InvalidCodec)?;
 		Ok(Self {
-			profile: u8::from_str(remain)?,
+			profile: crate::catalog::codec_number(remain, 10)?,
 		})
 	}
 }
@@ -48,5 +48,9 @@ mod test {
 
 		let output = decoded.to_string();
 		assert_eq!(output, encoded);
+
+		// The WebCodecs AAC registration spells each object type with and without a leading zero.
+		assert_eq!(AAC::from_str("mp4a.40.05").unwrap(), AAC { profile: 5 });
+		assert_eq!(AAC::from_str("mp4a.40.02").unwrap(), AAC { profile: 2 });
 	}
 }

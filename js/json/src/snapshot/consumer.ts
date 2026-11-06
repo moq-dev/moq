@@ -1,3 +1,4 @@
+import { Milli } from "@moq/clock";
 import type { Timed } from "@moq/net";
 import * as Moq from "@moq/net";
 
@@ -16,10 +17,16 @@ const GAPS: Moq.StreamCode[] = [
  *
  * A {@link Decoder} that owns its track: it reads groups, routes each frame by its position, and
  * yields each reconstructed value with the timestamp of the frame that produced it. Two reads:
- * {@link next} yields every state in order, for a caller that picks the state matching a playhead,
+ * {@link next} yields each state in order, skipping every group a newer one supersedes,
  * and {@link latest} skips to the newest state, for a caller that only wants the current value.
- * What {@link latest} skips is gone, so a later {@link next} resumes after it.
+ * What {@link latest} skips is gone, so a later {@link next} resumes after it. Overlapping reads
+ * take turns in call order.
  * When something else already owns the track, use the {@link Decoder} directly.
+ *
+ * A snapshot is superseded the moment a newer one exists, so the consumer subscribes itself at a
+ * zero `delay.max` and keeps that subscription to itself: a group is skipped once a newer one
+ * arrives, and a lower group the subscription still owes never holds up a newer one.
+ * {@link close} ends the subscription.
  */
 export class Consumer<T> {
 	#track: Moq.Track.Ordered;
@@ -27,24 +34,38 @@ export class Consumer<T> {
 
 	#group?: Moq.Group.Consumer;
 	#framesRead = 0;
+	#closed = false;
+	// The read in flight: reads share the group and decoder, so each starts once the last settles.
+	#reading: Promise<unknown> = Promise.resolve();
 
 	constructor(config: Consumer.Config<T>) {
-		this.#track = config.track.ordered();
+		this.#track = config.track
+			.subscribe({
+				...Moq.Track.Subscription.default(),
+				priority: config.priority ?? 0,
+				delay: { max: Milli.zero },
+			})
+			.ordered();
 		this.#decoder = new Decoder(config);
+	}
+
+	/** End the consumer's subscription; a pending or later read returns `undefined`. Idempotent. */
+	close(): void {
+		if (this.#closed) return;
+		this.#closed = true;
+		this.#group?.close();
+		this.#track.close();
 	}
 
 	/**
 	 * Get the next state in order, or `undefined` once the track ends.
 	 *
-	 * Yields one state per frame and finishes a group before starting the next, buffering every
-	 * state the reader has not reached yet. On a timed track, a group the subscription's `maxDelay`
-	 * proves too old is skipped: the default of zero keeps only the newest group, so a playhead
-	 * reader sets `maxDelay` to how far it trails the live edge. An untimed track never proves a
-	 * group stale, so a reader that falls behind replays the whole backlog; use {@link latest} to
-	 * skip it. A group lost to a gap resyncs from the next one.
+	 * Yields one state per frame from the group it is reading, and skips every group a newer one
+	 * supersedes. Use {@link latest} to skip straight to the head. A group lost to a gap resyncs
+	 * from the next one.
 	 */
 	next(): Promise<Timed<T> | undefined> {
-		return this.#read(false);
+		return this.#queue(false);
 	}
 
 	/**
@@ -53,46 +74,62 @@ export class Consumer<T> {
 	 * Skips to the newest group and applies every frame already buffered in it, yielding only the
 	 * last: a late joiner (or any consumer that has fallen behind) catches up to the head in one
 	 * step instead of replaying every superseded state. Frames are still decoded in order (the
-	 * DEFLATE window and merge patches are sequential); only the per-frame yield is skipped. Blocks
+	 * merge patches are sequential); only the per-frame yield is skipped. Blocks
 	 * when nothing newer than the last yield has arrived.
 	 */
 	latest(): Promise<Timed<T> | undefined> {
-		return this.#read(true);
+		return this.#queue(true);
+	}
+
+	#queue(skip: boolean): Promise<Timed<T> | undefined> {
+		const read = this.#reading.then(() => this.#read(skip));
+		this.#reading = read.catch(() => undefined);
+		return read;
 	}
 
 	async #read(skip: boolean): Promise<Timed<T> | undefined> {
 		for (;;) {
+			// Checked again after every wait: a read that resumes after close ends, not reads on.
+			if (this.#closed) return undefined;
 			if (skip) {
-				// A newer group supersedes everything the current one still holds: it restarts from a
-				// full snapshot, so switching mid-group loses nothing but stale state (mirrors the Rust
-				// consumer). Older groups only hold superseded state too, so raise the floor to the
-				// newest instead of replaying each one.
-				const latest = this.#track.latest();
-				if (this.#group !== undefined && latest !== undefined && latest > this.#group.sequence) {
-					this.#group.close();
-					this.#group = undefined;
+				// Jump to the newest group the reader already has; a newer one supersedes the rest.
+				// Taking groups, not the track's largest position, ignores datagrams (which share
+				// the sequence space).
+				// Mirrors the Rust consumer. A newer group restarts from a full snapshot, so switching mid-group loses
+				// nothing but stale state.
+				for (let group = this.#track.tryNextGroup(); group; group = this.#track.tryNextGroup()) {
+					this.#group?.close();
+					this.#group = group;
+					this.#framesRead = 0;
 				}
-				if (!this.#group && latest !== undefined) this.#track.setGroups({ start: { included: latest } });
 			}
 
 			if (!this.#group) {
 				// Advance to the next group with a higher sequence number (skipping late arrivals).
-				this.#group = await this.#track.nextGroup();
-				if (!this.#group) return undefined;
+				const next = await this.#track.nextGroup();
+				if (this.#closed) {
+					next?.close();
+					return undefined;
+				}
+				if (!next) return undefined;
+				this.#group = next;
 				// The next frame is the new group's snapshot, which also restarts the decoder's window.
 				this.#framesRead = 0;
 			}
 
+			const group = this.#group;
 			let frame: Moq.Group.Frame | undefined;
 			try {
-				frame = await this.#group.readFrame();
+				frame = await group.readFrame();
 			} catch (err) {
+				if (this.#closed) return undefined;
 				if (!(err instanceof Moq.Error.Stream && GAPS.includes(err.code))) throw err;
 				// The group was reset or we fell behind its eviction window. Resync from the next
 				// group, which begins with a fresh snapshot (frame 0), so no partial state is presented.
 				this.#group = undefined;
 				continue;
 			}
+			if (this.#closed) return undefined;
 
 			if (!frame) {
 				// The group is exhausted; advance to the next one.
@@ -103,7 +140,7 @@ export class Consumer<T> {
 			this.#apply(frame.payload);
 			if (skip) {
 				// Apply the rest of the backlog but yield only the head.
-				for (let more = this.#group.tryReadFrame(); more; more = this.#group.tryReadFrame()) {
+				for (let more = group.tryReadFrame(); more; more = group.tryReadFrame()) {
 					this.#apply(more.payload);
 					frame = more;
 				}
@@ -134,9 +171,17 @@ export class Consumer<T> {
 	}
 }
 
+/** Types for {@link Consumer}. */
 export namespace Consumer {
 	/** Snapshot consumer options, including the source track. */
-	export type Config<T> = Pick<CodecConfig<T>, "schema" | "compression"> & {
-		track: Moq.Track.Subscriber;
+	export type Config<T> = Pick<CodecConfig<T>, "schema"> & {
+		/**
+		 * The track to read: a {@link Moq.Track.Consumer}, or a {@link Moq.Track.Producer} to read
+		 * in-process. The consumer subscribes to it at a zero `delay.max`, with default options
+		 * otherwise.
+		 */
+		track: Pick<Moq.Track.Consumer, "subscribe">;
+		/** Delivery priority of the consumer's subscription, higher first; defaults to 0. */
+		priority?: number;
 	};
 }

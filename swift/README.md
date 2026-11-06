@@ -35,36 +35,34 @@ let session = try await client.connect(to: "https://relay.example.com")
 // origin between both sides.
 let announced = try session.consume.announced(prefix: "demos/", filter: "*/camera")
 for try await event in announced {
-    // `.update` reprices a route and `.end` retracts it. A `.restart` is a new
-    // publisher run at the same path: request it again.
-    let announcement: Announce
-    switch event {
-    case .start(let started), .restart(let started): announcement = started
-    default: continue
-    }
+    // The listing reports each path once while it stays present, even as its publisher
+    // restarts; `session.consume.follow(path:)` hands out each new run, or nil once it
+    // goes offline.
+    guard case .present(let announcement) = event else { continue }
     // Prefix stays origin-relative; captures reports what * matched.
     print("got broadcast \(announcement.prefix)")
-    print("captures \(announcement.captures ?? [])")
+    print("captures \(announcement.captures)")
 
-    let broadcast = try await session.consume.requestBroadcast(path: announcement.prefix)
+    let broadcast = try await session.consume.request(path: announcement.prefix)
     let catalog = try await Media.CatalogConsumer.subscribe(broadcast: broadcast)
     for try await update in catalog {
         print("catalog: \(update)")
     }
 }
 
-try await session.shutdown()
+session.shutdown()
+try await session.closed()
 ```
 
 To publish through the auto-created origin:
 
 ```swift
-let broadcast = try session.publish.createBroadcast(path: "my-stream")
-// ... configure tracks on broadcast ...
-try broadcast.announce() // unannounced broadcasts are invisible
+let route = try session.publish.route(path: "my-stream", hidden: true)
+// ... configure tracks on route.broadcast ...
+try route.announce() // hidden routes are invisible; hold the route while it should stay announced
 ```
 
-Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `try await session.shutdown()` drains finished tracks within one second and throws on delivery failure. `cancel(code: 0)` remains immediate.
+Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `session.shutdown()` requests a drain immediately; `try await session.closed()` waits for it and throws on delivery failure. `cancel(code: 0)` remains immediate.
 
 A note on enum casing: `MoqError` keeps Rust's PascalCase variants, each carrying `message: String` (e.g. `MoqError.Closed(message: "...")`); plain enums round-trip to lowerCamelCase (`AudioSampleFormat.s16`). Audio codecs are objects with constructors (`AudioCodec.opus()`).
 
@@ -76,20 +74,31 @@ Every consumer conforms to `AsyncSequence`, so `for try await x in consumer` wor
 
 Incoming server `Request` values expose the query-free `path` before acceptance. It is consistent across transports and is empty for the root or missing path. The encoded `query` may contain credentials.
 
-Raw tracks also expose best-effort datagrams: `TrackProducer.appendDatagram(_:timestampUs:)`
-returns the assigned sequence number, `TrackConsumer.recvDatagram()` receives one datagram,
-and `TrackConsumer.datagrams` streams them in arrival order. Payloads are capped at 1200 bytes.
-Datagrams require a datagram-capable transport and lite-05 or newer moq-lite, or moq-transport;
-pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
+Create a separate live track with `BroadcastProducer.createDatagrams(name:info:)` and
+subscribe with `BroadcastConsumer.datagrams(name:)`. `DatagramProducer.append(_:timestamp:)`
+assigns a sequence, `insert(_:)` preserves one, and `DatagramConsumer.recv()` or its
+`AsyncSequence` reads in arrival order. Demand is aggregate subscriber `priority()` /
+`priorityChanged(last:)`; `BroadcastRequests.datagrams()` handles on-demand tracks.
+Keep payloads below the path MTU. Delivery needs a datagram-capable transport and lite-05
+or newer, with no stream fallback. A stream track of the same name is independent.
+
+On lite-05/06, a local datagram handler is asked for an on-demand name without waiting
+for the stream handler, and answers it unless a stream track of that name is published. A
+relayed broadcast asks its upstream for the datagram track only once the stream track is
+not found. lite-07 uses independent requests.
 
 JSON tracks live under the `Json` namespace, mirroring the `moq-json` crate, and carry your own
 `Codable` types with the framing handled for you. Each type wraps a track: a producer takes over a
 `TrackProducer` and advertises it in the broadcast's catalog, and a consumer takes over a
-`TrackConsumer`. You opt into one of two distinct modes: `Json.SnapshotProducer`/`Json.SnapshotConsumer`
-(lossy latest-value, a subscriber only sees the newest value) or `Json.StreamProducer`/`Json.StreamConsumer`
-(lossless append-log, every record preserved in order). Values encode/decode at the boundary with
-`JSONEncoder`/`JSONDecoder`; the consumer is an `AsyncSequence` of the decoded type. Pass matching
-`compression` on both sides.
+`TrackConsumer`, except `Json.SnapshotConsumer(broadcast:name:priority:)`, which subscribes itself at a
+zero `delay.max`. You opt into one of three distinct modes: `Json.SnapshotProducer`/`Json.SnapshotConsumer`
+(lossy latest-value, a subscriber only sees the newest value), `Json.StreamProducer`/`Json.StreamConsumer`
+(lossless append-log, every record preserved in order), or `Json.WindowProducer`/`Json.WindowConsumer`
+(a sliding window of records a reader can join at any point, not advertised in the catalog). Values encode/decode at the boundary with
+`JSONEncoder`/`JSONDecoder`; the consumer is an `AsyncSequence` of the decoded type. Publish the
+track with `TrackInfo(compress: true)`; consumers read it the same either way. Every JSON write
+(snapshot update, stream append, window push or pop) takes a timestamp on the broadcast clock (`Media.CatalogProducer.now()`), so the
+track needs a timescale.
 
 ## Local development
 
@@ -117,7 +126,7 @@ Edit the templates when changing a released manifest; never copy the monolithic 
 
 Two workflows, mirroring the two packages:
 
-- **`release-swift-ffi.yml`** fires on each `moq-ffi-v*` tag (pushed by release-plz). It builds the per-target libs + bindings, assembles the `MoqFFI` package via `package-ffi.sh`, attaches `MoqFFI.xcframework.zip` to the `moq-ffi-v*` GitHub Release, verifies the staged package resolves (`verify-ffi.sh`), and mirrors it to [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi) on a bare-semver tag (`publish-ffi.sh`).
+- **`release-shared-ffi.yml`** fires on each `moq-ffi-v*` tag (pushed by release-plz) and builds the default-feature libraries once for Go, Kotlin, and Swift. It generates bindings from the built Linux library, then calls **`release-swift-ffi.yml`**, which assembles the `MoqFFI` package via `package-ffi.sh`, attaches `MoqFFI.xcframework.zip` to the `moq-ffi-v*` GitHub Release, verifies the staged package resolves (`verify-ffi.sh`), and mirrors it to [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi) on a bare-semver tag (`publish-ffi.sh`).
 - **`release-swift-lib.yml`** fires on push to `release` when `swift/VERSION` (or the wrapper sources) change. It reads `swift/VERSION`, checks whether that tag already exists on the mirror (the release gate, the same model release-plz uses for crates), assembles the wrapper via `package.sh` (substituting the `moq-ffi` pin from `rs/moq-ffi/Cargo.toml`), verifies it resolves against the published `MoqFFI` (`verify.sh`), and publishes to [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift) only when the version is new (`publish.sh`).
 
 Both `verify` jobs build a throwaway SPM consumer against the staged package before any mirror push, so a manifest SPM cannot resolve never reaches consumers. The `moq-bot` GitHub App mints a fresh installation token per run, scoped to the relevant mirror.

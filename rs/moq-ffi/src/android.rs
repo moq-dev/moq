@@ -14,7 +14,7 @@ use moq_tokio::jni::{Env, JavaVM, jni_sig, jni_str};
 /// Called by the JVM on `System.loadLibrary("moq_ffi")`. The name is fixed by
 /// the JNI spec, so it can't follow Rust's snake_case convention.
 #[unsafe(no_mangle)]
-#[allow(non_snake_case)]
+#[expect(non_snake_case, reason = "the JNI spec names this symbol")]
 pub extern "system" fn JNI_OnLoad(vm: *mut sys::JavaVM, _reserved: *mut c_void) -> jint {
 	// SAFETY: per the JNI spec the JVM hands `JNI_OnLoad` a valid `JavaVM` pointer.
 	let vm = unsafe { JavaVM::from_raw(vm) };

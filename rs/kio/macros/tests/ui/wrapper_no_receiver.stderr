@@ -1,0 +1,5 @@
+error: #[kio::wrapper] needs a borrowed receiver, `&self` or `&mut self`
+ --> tests/ui/wrapper_no_receiver.rs:8:15
+  |
+8 |     fn poll_ready(_waiter: &kio::Waiter) -> Poll<()> {
+  |                  ^^^^^^^^^^^^^^^^^^^^^^^

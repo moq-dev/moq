@@ -1,0 +1,59 @@
+#![cfg(feature = "async")]
+
+//! A relay reading a broadcast that its publisher unannounced still cancels its upstream
+//! subscription once its last reader leaves, so the publisher's demand goes unused.
+
+use crate::support;
+
+use std::time::Duration;
+
+use moq_net::{Hop, Version};
+use support::harness::{MockConnectOptions, connect_mock};
+
+fn produce_origin(hop: u64) -> moq_net::origin::Producer {
+	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	support::harness::spawn(driver);
+	producer
+}
+
+async fn release(version: Version) {
+	let publisher = produce_origin(1);
+	let relay = produce_origin(2);
+	let mut options = MockConnectOptions::new(version);
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(relay.clone());
+	let _pair = connect_mock(options).await;
+
+	let broadcast = publisher
+		.route("a/b", moq_net::origin::RouteOptions::default())
+		.unwrap();
+	let track = broadcast.broadcast().create_track("t", None).unwrap();
+
+	let consumer = relay.consume();
+	let remote = consumer
+		.follow("a/b", None)
+		.unwrap()
+		.available()
+		.await
+		.expect("resolves")
+		.unwrap();
+	let sub = remote.track("t").unwrap().subscribe(None).await.expect("subscribes");
+	crate::support::wanted(track.demand()).await.unwrap();
+
+	broadcast.withdraw();
+	kio::clock::sleep(Duration::from_secs(1)).await;
+
+	drop(sub);
+	drop(remote);
+	kio::clock::timeout(Duration::from_secs(600), crate::support::unwanted(track.demand()))
+		.await
+		.unwrap_or_else(|_| panic!("{version}: the relay kept its upstream subscription"))
+		.unwrap();
+}
+
+#[kio::test]
+async fn unannounced_remote_track_releases_demand() {
+	for version in support::every_version() {
+		release(version).await;
+	}
+}

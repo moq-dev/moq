@@ -2,13 +2,21 @@
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// A [`decode::Consumer`](crate::decode::Consumer) refused the rendition before
+	/// subscribing: its codec, codec parameters, or description is
+	/// [unsupported](Self::UnsupportedCodec). Backend faults keep their own variants.
+	#[error("unsupported video configuration: {0}")]
+	UnsupportedConfig(String),
+
 	/// No encoder matching the requested codec / hardware preference could be
 	/// opened (none compiled in, or none available on this machine).
 	#[error("no usable video encoder found (tried: {0})")]
 	NoEncoder(String),
 
-	/// No decoder matching the requested codec / hardware preference could be
-	/// opened (none compiled in, or none available on this machine).
+	/// Every decoder this build has for the requested codec and hardware preference
+	/// failed to open on this machine, at least one with a fault: missing drivers,
+	/// no device, or a library error. A codec this build has no decoder for, or a
+	/// stream every decoder's device refused, is [`UnsupportedCodec`](Self::UnsupportedCodec).
 	#[error("no usable video decoder found (tried: {0})")]
 	NoDecoder(String),
 
@@ -38,7 +46,8 @@ pub enum Error {
 		available: String,
 	},
 
-	/// A track's codec is not supported by the native decoders.
+	/// A track's codec, codec parameters, or description is not supported by the
+	/// native decoders this build has, or by the devices they run on here.
 	#[error("unsupported codec for native decode: {0}")]
 	UnsupportedCodec(String),
 
@@ -78,6 +87,18 @@ pub enum Error {
 	/// than queued. Groups keep falling where its configured GOP puts them.
 	#[error("encoder {0} cannot cut a group on request")]
 	CutUnsupported(&'static str),
+
+	/// A frame's samples are in a different color space than the one the
+	/// encoder writes into the bitstream, so encoding it would mislabel it.
+	/// Open the encoder with [`encode::Config::color`](crate::encode::Config::color)
+	/// set to the frame's [`Surface::color`](crate::Surface::color).
+	#[error("frame is {frame:?} but the encoder signals {encoder:?}")]
+	ColorMismatch {
+		/// The space the frame's samples are in.
+		frame: crate::Color,
+		/// The space the encoder was opened with.
+		encoder: crate::Color,
+	},
 
 	/// The group configuration can't be honored by any backend (the message
 	/// says why).

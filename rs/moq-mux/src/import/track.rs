@@ -8,6 +8,7 @@
 use crate::Result;
 use crate::catalog::VideoHint;
 use crate::catalog::hang::CatalogExt;
+use crate::container::Frame;
 
 use super::{AudioFormat, VideoFormat};
 pub use super::{AudioInit, VideoInit};
@@ -27,7 +28,7 @@ fn video_hint(init: &VideoInit, default_codec: Option<hang::catalog::VideoCodec>
 /// as the moq-hang draft requires, so each frame timestamp lands on a media tick.
 fn track_info<E: CatalogExt>(
 	reserved: &crate::catalog::Reserved<E>,
-	priority: u8,
+	priority: i8,
 	container: &hang::catalog::Container,
 ) -> Result<moq_net::track::Info> {
 	let info = reserved.track_info(priority);
@@ -40,11 +41,15 @@ fn track_info<E: CatalogExt>(
 	}
 }
 
-/// The codec parser fills everything from the init bytes, so the label and container are all the
-/// caller adds.
+/// The codec parser fills the decoder fields from the init bytes; the caller adds the label, the
+/// container, and the bitrate when it knows it, which then counts as supplied and replaces any the
+/// init bytes give.
 fn with_init(init: &AudioInit, mut config: hang::catalog::AudioConfig) -> hang::catalog::AudioConfig {
 	config.label = init.label.clone();
 	config.container = init.container.clone();
+	if init.bitrate.is_some() {
+		config.bitrate = init.bitrate;
+	}
 	config
 }
 
@@ -52,7 +57,7 @@ fn with_init(init: &AudioInit, mut config: hang::catalog::AudioConfig) -> hang::
 ///
 /// The import reads `init` for the codec config (or publishes from `hint` up front); the split then
 /// reads it as the leading bytes of the stream (caching any inline SPS/PPS). Any frames in the init
-/// buffer are published.
+/// buffer are published: a final picture with the next decode's timestamp, or at finish.
 fn build_h264_avc3<E: CatalogExt>(
 	track: moq_net::track::Producer,
 	reserved: crate::catalog::Reserved<E>,
@@ -62,7 +67,7 @@ fn build_h264_avc3<E: CatalogExt>(
 	let mut import = crate::codec::h264::Import::new(track, reserved, hint)?;
 	import.initialize(init)?;
 	let mut split = crate::codec::h264::Split::new();
-	let frames = split.decode(init, None)?;
+	let frames = split.initialize(init)?;
 	import.decode(frames)?;
 	Ok((split, import))
 }
@@ -92,7 +97,7 @@ fn build_h265<E: CatalogExt>(
 	let mut import = crate::codec::h265::Import::new(track, reserved, hint)?;
 	import.initialize(init)?;
 	let mut split = crate::codec::h265::Split::new();
-	let frames = split.decode(init, None)?;
+	let frames = split.initialize(init)?;
 	import.decode(frames)?;
 	Ok((split, import))
 }
@@ -134,6 +139,15 @@ fn build_av1<E: CatalogExt>(
 	Ok((split, import))
 }
 
+/// An audio format handed to a video-only operation.
+fn not_video(format: AudioFormat) -> crate::Error {
+	crate::Error::WrongKind {
+		format: format.to_string(),
+		actual: "audio",
+		wanted: "video",
+	}
+}
+
 enum TrackKind {
 	/// H.264 avc3 (Annex-B, inline SPS/PPS). The split owns byte parsing; the
 	/// import publishes.
@@ -171,6 +185,23 @@ enum TrackKind {
 	Flac(crate::codec::flac::Import),
 }
 
+/// Forward a call to whichever codec importer a [`Track`] holds.
+macro_rules! import {
+	($kind:expr, $import:ident => $body:expr) => {
+		match $kind {
+			TrackKind::Avc3 { $import, .. } | TrackKind::Avc1 { $import, .. } => $body,
+			TrackKind::Hev1 { $import, .. } | TrackKind::Hvc1 { $import, .. } => $body,
+			TrackKind::Av01 { $import, .. } => $body,
+			TrackKind::Vp8($import) => $body,
+			TrackKind::Vp9($import) => $body,
+			TrackKind::Aac($import) => $body,
+			TrackKind::Opus($import) => $body,
+			TrackKind::Mp3($import) => $body,
+			TrackKind::Flac($import) => $body,
+		}
+	};
+}
+
 /// A single-codec importer for whole frames.
 ///
 /// Use this when the caller already has whole frames (the typical case for files
@@ -180,9 +211,9 @@ enum TrackKind {
 /// Video groups by its own keyframes. Audio is independently decodable per frame, so it has no
 /// boundary of its own and accumulates into the current group until the caller draws one with
 /// [`cut`](Self::cut) or [`seek`](Self::seek). Cut per frame for the lowest latency (one group,
-/// one QUIC stream, forwarded without waiting), or at a segment cadence to align with video for
-/// HLS/DASH. An audio track that is never cut is one unbounded group, which strands late
-/// subscribers and the timeline alike, so this warns once when it sees that.
+/// one QUIC stream, forwarded without waiting), or less often to batch frames into fewer groups. An
+/// audio track that is never cut is one unbounded group, which strands late subscribers and the
+/// timeline alike, so this warns once when it sees that.
 pub struct Track {
 	kind: TrackKind,
 
@@ -251,11 +282,7 @@ impl Track {
 	) -> Result<Self> {
 		use hang::catalog::VideoCodec;
 
-		let track = request.accept(track_info(
-			&reserved,
-			hang::catalog::PRIORITY.video,
-			&init.hint.container,
-		)?);
+		let track = request.accept(track_info(&reserved, init.priority, &init.hint.container)?);
 		let data = init.data.as_ref();
 		let kind = match init.format {
 			VideoFormat::Avc1 => {
@@ -403,80 +430,33 @@ impl Track {
 		Ok(())
 	}
 
-	/// Record a locally encoded frame's transport handoff. Call this only for an original
-	/// encoder; file, pipe, and network imports must leave the clock out of the estimate.
-	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: std::time::Instant) -> Result<()> {
-		match self.kind {
-			TrackKind::Avc3 { ref mut import, .. } | TrackKind::Avc1 { ref mut import, .. } => {
-				import.flush(timestamp, now)
-			}
-			TrackKind::Hev1 { ref mut import, .. } | TrackKind::Hvc1 { ref mut import, .. } => {
-				import.flush(timestamp, now)
-			}
-			TrackKind::Av01 { ref mut import, .. } => import.flush(timestamp, now),
-			TrackKind::Vp8(ref mut import) => import.flush(timestamp, now),
-			TrackKind::Vp9(ref mut import) => import.flush(timestamp, now),
-			TrackKind::Aac(ref mut import) => import.flush(timestamp, now),
-			TrackKind::Opus(ref mut import) => import.flush(timestamp, now),
-			TrackKind::Mp3(ref mut import) => import.flush(timestamp, now),
-			TrackKind::Flac(ref mut import) => import.flush(timestamp, now),
-		}
-	}
-
 	/// Finish the importer, flushing any buffered data.
 	pub fn finish(&mut self) -> Result<()> {
-		match self.kind {
-			TrackKind::Avc3 { ref mut import, .. } => import.finish(),
-			TrackKind::Avc1 { ref mut import, .. } => import.finish(),
-			TrackKind::Hev1 { ref mut import, .. } => import.finish(),
-			TrackKind::Hvc1 { ref mut import, .. } => import.finish(),
-			TrackKind::Av01 { ref mut import, .. } => import.finish(),
-			TrackKind::Vp8(ref mut import) => import.finish(),
-			TrackKind::Vp9(ref mut import) => import.finish(),
-			TrackKind::Aac(ref mut import) => import.finish(),
-			TrackKind::Opus(ref mut import) => import.finish(),
-			TrackKind::Mp3(ref mut import) => import.finish(),
-			TrackKind::Flac(ref mut import) => import.finish(),
+		// Each decode flushed its whole frame, so a splitter holds at most a picture its init
+		// carried. It is taken out to flush, so its input storage ends with the input. The import
+		// stays, keeping the finished track and its rendition published.
+		match &mut self.kind {
+			TrackKind::Avc3 { split, import } => import.decode(std::mem::take(split).flush(None)?)?,
+			TrackKind::Hev1 { split, import } => import.decode(std::mem::take(split).flush(None)?)?,
+			TrackKind::Av01 { split, import } => import.decode(std::mem::take(split).flush(None)?)?,
+			_ => {}
 		}
+		import!(&mut self.kind, import => import.finish())
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
 	/// see the real cause rather than [`moq_net::Error::Dropped`]. Consumes the importer.
 	pub fn abort(self, err: moq_net::Error) {
-		match self.kind {
-			TrackKind::Avc3 { import, .. } => import.abort(err),
-			TrackKind::Avc1 { import, .. } => import.abort(err),
-			TrackKind::Hev1 { import, .. } => import.abort(err),
-			TrackKind::Hvc1 { import, .. } => import.abort(err),
-			TrackKind::Av01 { import, .. } => import.abort(err),
-			TrackKind::Vp8(import) => import.abort(err),
-			TrackKind::Vp9(import) => import.abort(err),
-			TrackKind::Aac(import) => import.abort(err),
-			TrackKind::Opus(import) => import.abort(err),
-			TrackKind::Mp3(import) => import.abort(err),
-			TrackKind::Flac(import) => import.abort(err),
-		}
+		import!(self.kind, import => import.abort(err))
 	}
 
 	/// Cut the current group at `end` without finishing the track.
 	///
 	/// This is how an audio track gets group boundaries at all: call it per frame for one group
-	/// per packet (the lowest latency), or at a segment cadence to align with video.
+	/// per packet (the lowest latency), or less often to batch frames into fewer groups.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
 		self.group_start = None;
-		match self.kind {
-			TrackKind::Avc3 { ref mut import, .. } => import.cut(end),
-			TrackKind::Avc1 { ref mut import, .. } => import.cut(end),
-			TrackKind::Hev1 { ref mut import, .. } => import.cut(end),
-			TrackKind::Hvc1 { ref mut import, .. } => import.cut(end),
-			TrackKind::Av01 { ref mut import, .. } => import.cut(end),
-			TrackKind::Vp8(ref mut import) => import.cut(end),
-			TrackKind::Vp9(ref mut import) => import.cut(end),
-			TrackKind::Aac(ref mut import) => import.cut(end),
-			TrackKind::Opus(ref mut import) => import.cut(end),
-			TrackKind::Mp3(ref mut import) => import.cut(end),
-			TrackKind::Flac(ref mut import) => import.cut(end),
-		}
+		import!(&mut self.kind, import => import.cut(end))
 	}
 
 	/// Mark a timeline break, clearing partial frames and restarting handoff measurement.
@@ -484,92 +464,62 @@ impl Track {
 	/// Publishes a marker without lowering advertised values; resumed timestamps must continue forward.
 	pub fn discontinuity(&mut self) -> Result<()> {
 		self.group_start = None;
-		match self.kind {
-			TrackKind::Avc3 {
-				ref mut split,
-				ref mut import,
-			} => {
-				split.reset();
-				import.discontinuity()
-			}
-			TrackKind::Avc1 { ref mut import, .. } => import.discontinuity(),
-			TrackKind::Hev1 {
-				ref mut split,
-				ref mut import,
-			} => {
-				split.reset();
-				import.discontinuity()
-			}
-			TrackKind::Hvc1 { ref mut import, .. } => import.discontinuity(),
-			TrackKind::Av01 {
-				ref mut split,
-				ref mut import,
-			} => {
-				split.reset();
-				import.discontinuity()
-			}
-			TrackKind::Vp8(ref mut import) => import.discontinuity(),
-			TrackKind::Vp9(ref mut import) => import.discontinuity(),
-			TrackKind::Aac(ref mut import) => import.discontinuity(),
-			TrackKind::Opus(ref mut import) => import.discontinuity(),
-			TrackKind::Mp3(ref mut import) => import.discontinuity(),
-			TrackKind::Flac(ref mut import) => import.discontinuity(),
+		self.reset_split();
+		import!(&mut self.kind, import => import.discontinuity())
+	}
+
+	/// Advertise whether this video rendition is being produced, as the catalog's
+	/// [`enabled`](hang::catalog::VideoConfig::enabled).
+	///
+	/// Disable it when the sender stops for lack of bandwidth (a
+	/// [`rate::Target::Disabled`](crate::rate::Target::Disabled)) and mark the
+	/// [`discontinuity`](Self::discontinuity), so viewers select a lower rendition instead
+	/// of waiting for frames. Enable it again with the keyframe that resumes it. Audio has
+	/// no lower rendition to fall back to, so an audio track refuses with
+	/// [`Error::WrongKind`](crate::Error::WrongKind).
+	pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
+		match &mut self.kind {
+			TrackKind::Avc3 { import, .. } | TrackKind::Avc1 { import, .. } => import.set_enabled(enabled)?,
+			TrackKind::Hev1 { import, .. } | TrackKind::Hvc1 { import, .. } => import.set_enabled(enabled)?,
+			TrackKind::Av01 { import, .. } => import.set_enabled(enabled)?,
+			TrackKind::Vp8(import) => import.set_enabled(enabled)?,
+			TrackKind::Vp9(import) => import.set_enabled(enabled)?,
+			TrackKind::Aac(_) => return Err(not_video(AudioFormat::Aac)),
+			TrackKind::Opus(_) => return Err(not_video(AudioFormat::Opus)),
+			TrackKind::Mp3(_) => return Err(not_video(AudioFormat::Mp3)),
+			TrackKind::Flac(_) => return Err(not_video(AudioFormat::Flac)),
 		}
+		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.group_start = None;
-		match self.kind {
-			TrackKind::Avc3 {
-				ref mut split,
-				ref mut import,
-			} => {
-				split.reset();
-				import.seek(sequence)
-			}
-			TrackKind::Avc1 { ref mut import, .. } => import.seek(sequence),
-			TrackKind::Hev1 {
-				ref mut split,
-				ref mut import,
-			} => {
-				split.reset();
-				import.seek(sequence)
-			}
-			TrackKind::Hvc1 { ref mut import, .. } => import.seek(sequence),
-			TrackKind::Av01 {
-				ref mut split,
-				ref mut import,
-			} => {
-				split.reset();
-				import.seek(sequence)
-			}
-			TrackKind::Vp8(ref mut import) => import.seek(sequence),
-			TrackKind::Vp9(ref mut import) => import.seek(sequence),
-			TrackKind::Aac(ref mut import) => import.seek(sequence),
-			TrackKind::Opus(ref mut import) => import.seek(sequence),
-			TrackKind::Mp3(ref mut import) => import.seek(sequence),
-			TrackKind::Flac(ref mut import) => import.seek(sequence),
+		self.reset_split();
+		import!(&mut self.kind, import => import.seek(sequence))
+	}
+
+	/// Drop the partial access unit of a format split from a byte stream.
+	fn reset_split(&mut self) {
+		match &mut self.kind {
+			TrackKind::Avc3 { split, .. } => split.reset(),
+			TrackKind::Hev1 { split, .. } => split.reset(),
+			TrackKind::Av01 { split, .. } => split.reset(),
+			TrackKind::Avc1 { .. }
+			| TrackKind::Hvc1 { .. }
+			| TrackKind::Vp8(_)
+			| TrackKind::Vp9(_)
+			| TrackKind::Aac(_)
+			| TrackKind::Opus(_)
+			| TrackKind::Mp3(_)
+			| TrackKind::Flac(_) => {}
 		}
 	}
 
 	/// A watch-only handle to the track's subscriber demand.
 	pub fn demand(&self) -> moq_net::track::Demand {
-		match self.kind {
-			TrackKind::Avc3 { ref import, .. } => import.demand(),
-			TrackKind::Avc1 { ref import, .. } => import.demand(),
-			TrackKind::Hev1 { ref import, .. } => import.demand(),
-			TrackKind::Hvc1 { ref import, .. } => import.demand(),
-			TrackKind::Av01 { ref import, .. } => import.demand(),
-			TrackKind::Vp8(ref import) => import.demand(),
-			TrackKind::Vp9(ref import) => import.demand(),
-			TrackKind::Aac(ref import) => import.demand(),
-			TrackKind::Opus(ref import) => import.demand(),
-			TrackKind::Mp3(ref import) => import.demand(),
-			TrackKind::Flac(ref import) => import.demand(),
-		}
+		import!(&self.kind, import => import.demand())
 	}
-
 	/// The name of the track this importer publishes.
 	pub fn name(&self) -> String {
 		self.demand().name().to_string()
@@ -617,12 +567,92 @@ enum TrackStreamKind {
 	},
 }
 
+/// Forward a call to the splitter and importer a [`TrackStream`] holds.
+macro_rules! stream {
+	($kind:expr, $split:pat, $import:pat => $body:expr) => {
+		match $kind {
+			TrackStreamKind::Avc3 {
+				split: $split,
+				import: $import,
+			} => $body,
+			TrackStreamKind::Hev1 {
+				split: $split,
+				import: $import,
+			} => $body,
+			TrackStreamKind::Av01 {
+				split: $split,
+				import: $import,
+			} => $body,
+		}
+	};
+}
+
 /// A single-codec importer for a raw byte stream with unknown frame boundaries.
 ///
 /// Use this when the caller does not know the frame boundaries (piped Annex-B
 /// H.264, an fMP4 reader, …); the importer infers them.
 pub struct TrackStream {
 	kind: TrackStreamKind,
+	gate: Gate,
+}
+
+/// Which of the access units a [`TrackStream`] splits it publishes.
+///
+/// The stream's caller cannot see frame boundaries, so the importer, not the caller, drops a
+/// disabled rendition's access units and finds the keyframe that resumes it.
+#[derive(Default)]
+struct Gate {
+	state: GateState,
+	/// Whether an access unit went out, so a disable has a timeline to break.
+	published: bool,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum GateState {
+	#[default]
+	Open,
+	/// Disabled: every access unit is dropped.
+	Closed,
+	/// Enabled again, but still disabled in the catalog until the next keyframe.
+	Resuming,
+}
+
+impl Gate {
+	/// Split `frames` into the access units dropped and those to publish, and report whether
+	/// the first published one resumes the rendition, so the catalog enables it again.
+	fn admit(&mut self, mut frames: Vec<Frame>) -> (Vec<Frame>, Vec<Frame>, bool) {
+		let (kept, resumed) = match self.state {
+			GateState::Open => (0, false),
+			GateState::Closed => (frames.len(), false),
+			GateState::Resuming => match frames.iter().position(|frame| frame.keyframe) {
+				Some(keyframe) => {
+					self.state = GateState::Open;
+					(keyframe, true)
+				}
+				None => (frames.len(), false),
+			},
+		};
+		let publish = frames.split_off(kept);
+		self.published |= !publish.is_empty();
+		(frames, publish, resumed)
+	}
+}
+
+/// Publish split `frames` through a [`TrackStream`]'s gate.
+///
+/// The importer still sees what the gate drops: a stream may carry its config only in band (an
+/// AV1 sequence header), and the keyframe that resumes need not repeat it.
+macro_rules! publish {
+	($gate:expr, $import:expr, $frames:expr) => {{
+		let (dropped, frames, resumed) = $gate.admit($frames);
+		for frame in &dropped {
+			$import.dropped(frame)?;
+		}
+		if resumed {
+			$import.set_enabled(true)?;
+		}
+		$import.decode(frames)
+	}};
 }
 
 impl TrackStream {
@@ -637,11 +667,7 @@ impl TrackStream {
 		reserved: crate::catalog::Reserved<E>,
 		init: VideoInit,
 	) -> Result<Self> {
-		let track = request.accept(track_info(
-			&reserved,
-			hang::catalog::PRIORITY.video,
-			&init.hint.container,
-		)?);
+		let track = request.accept(track_info(&reserved, init.priority, &init.hint.container)?);
 		let hint = video_hint(&init, None);
 		// Only the self-delimiting codecs can be recovered from a raw byte stream.
 		let kind = match init.format {
@@ -662,7 +688,10 @@ impl TrackStream {
 			format => return Err(crate::Error::NotSelfDescribing(format.to_string())),
 		};
 
-		let mut stream = Self { kind };
+		let mut stream = Self {
+			kind,
+			gate: Gate::default(),
+		};
 		if !init.data.is_empty() {
 			stream.initialize(&init.data)?;
 		}
@@ -679,16 +708,14 @@ impl TrackStream {
 				ref mut import,
 			} => {
 				import.initialize(data)?;
-				let frames = split.decode(data, None)?;
-				import.decode(frames)?;
+				publish!(self.gate, import, split.initialize(data)?)?;
 			}
 			TrackStreamKind::Hev1 {
 				ref mut split,
 				ref mut import,
 			} => {
 				import.initialize(data)?;
-				let frames = split.decode(data, None)?;
-				import.decode(frames)?;
+				publish!(self.gate, import, split.initialize(data)?)?;
 			}
 			TrackStreamKind::Av01 {
 				ref mut split,
@@ -702,7 +729,7 @@ impl TrackStream {
 				} else {
 					split.decode(data, None)?
 				};
-				import.decode(frames)?;
+				publish!(self.gate, import, frames)?;
 			}
 		}
 
@@ -711,116 +738,76 @@ impl TrackStream {
 
 	/// Decode a chunk of the byte stream.
 	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
-		match self.kind {
-			TrackStreamKind::Avc3 {
-				ref mut split,
-				ref mut import,
-			} => {
-				let frames = split.decode(data, None)?;
-				import.decode(frames)
-			}
-			TrackStreamKind::Hev1 {
-				ref mut split,
-				ref mut import,
-			} => {
-				let frames = split.decode(data, None)?;
-				import.decode(frames)
-			}
-			TrackStreamKind::Av01 {
-				ref mut split,
-				ref mut import,
-			} => {
-				let frames = split.decode(data, None)?;
-				import.decode(frames)
-			}
-		}
+		stream!(&mut self.kind, split, import => {
+			publish!(self.gate, import, split.decode(data, None)?)
+		})
 	}
 
 	/// Finish the importer, flushing any buffered data.
 	pub fn finish(&mut self) -> Result<()> {
-		match self.kind {
-			TrackStreamKind::Avc3 {
-				ref mut split,
-				ref mut import,
-			} => {
-				let tail = split.flush(None)?;
-				import.decode(tail)?;
-				import.finish()
+		// The splitter is taken out to flush, so its input storage ends with the input. The import
+		// stays, keeping the finished track and its rendition published.
+		stream!(&mut self.kind, split, import => {
+			publish!(self.gate, import, std::mem::take(split).flush(None)?)?;
+			import.finish()
+		})
+	}
+
+	/// Stop or resume publishing this rendition, advertised as the catalog's
+	/// [`enabled`](hang::catalog::VideoConfig::enabled).
+	///
+	/// Disable it when its sender cannot be funded (a
+	/// [`rate::Target::Disabled`](crate::rate::Target::Disabled)). Once anything was published,
+	/// that marks a [`discontinuity`](crate::container::Producer::discontinuity). Every access
+	/// unit decoded until it is enabled again is dropped, so the caller may keep writing the
+	/// stream, though a dropped keyframe still updates the codec config. Enabled again, it
+	/// drops access units until the next keyframe and advertises itself enabled with that
+	/// keyframe.
+	pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
+		match (enabled, self.gate.state) {
+			(false, GateState::Open) => {
+				let published = self.gate.published;
+				// The splitter keeps its partial NAL, since the next chunk may continue it. The
+				// access unit in flight completes behind the gate, which drops it unless it is
+				// a keyframe that resumes the rendition.
+				stream!(&mut self.kind, _, import => {
+					import.set_enabled(false)?;
+					if published {
+						import.discontinuity()?;
+					}
+				});
+				self.gate.state = GateState::Closed;
 			}
-			TrackStreamKind::Hev1 {
-				ref mut split,
-				ref mut import,
-			} => {
-				let tail = split.flush(None)?;
-				import.decode(tail)?;
-				import.finish()
-			}
-			TrackStreamKind::Av01 {
-				ref mut split,
-				ref mut import,
-			} => {
-				let tail = split.flush(None)?;
-				import.decode(tail)?;
-				import.finish()
-			}
+			(false, GateState::Resuming) => self.gate.state = GateState::Closed,
+			(true, GateState::Closed) => self.gate.state = GateState::Resuming,
+			(false, GateState::Closed) | (true, GateState::Open | GateState::Resuming) => {}
 		}
+		Ok(())
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
 	/// see the real cause rather than [`moq_net::Error::Dropped`]. Consumes the importer.
 	pub fn abort(self, err: moq_net::Error) {
-		match self.kind {
-			TrackStreamKind::Avc3 { import, .. } => import.abort(err),
-			TrackStreamKind::Hev1 { import, .. } => import.abort(err),
-			TrackStreamKind::Av01 { import, .. } => import.abort(err),
-		}
+		stream!(self.kind, _, import => import.abort(err))
 	}
 
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
-		match self.kind {
-			TrackStreamKind::Avc3 { ref mut import, .. } => import.cut(end),
-			TrackStreamKind::Hev1 { ref mut import, .. } => import.cut(end),
-			TrackStreamKind::Av01 { ref mut import, .. } => import.cut(end),
-		}
+		stream!(&mut self.kind, _, import => import.cut(end))
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
-		match self.kind {
-			TrackStreamKind::Avc3 {
-				ref mut split,
-				ref mut import,
-			} => {
-				split.reset();
-				import.seek(sequence)
-			}
-			TrackStreamKind::Hev1 {
-				ref mut split,
-				ref mut import,
-			} => {
-				split.reset();
-				import.seek(sequence)
-			}
-			TrackStreamKind::Av01 {
-				ref mut split,
-				ref mut import,
-			} => {
-				split.reset();
-				import.seek(sequence)
-			}
-		}
+		stream!(&mut self.kind, split, import => {
+			split.reset();
+			import.seek(sequence)
+		})
 	}
 
 	/// A watch-only handle to the track's subscriber demand.
 	pub fn demand(&self) -> moq_net::track::Demand {
-		match self.kind {
-			TrackStreamKind::Avc3 { ref import, .. } => import.demand(),
-			TrackStreamKind::Hev1 { ref import, .. } => import.demand(),
-			TrackStreamKind::Av01 { ref import, .. } => import.demand(),
-		}
+		stream!(&self.kind, _, import => import.demand())
 	}
-
 	/// The name of the track this importer publishes.
 	pub fn name(&self) -> String {
 		self.demand().name().to_string()
@@ -1050,7 +1037,7 @@ mod tests {
 			.decode(&payload, Some(Timestamp::from_micros(1_000).unwrap()))
 			.unwrap();
 
-		let frame = tokio::time::timeout(Duration::from_secs(1), media.read_frame())
+		let frame = kio::clock::timeout(Duration::from_secs(1), media.read_frame())
 			.await
 			.unwrap()
 			.unwrap()
@@ -1083,8 +1070,10 @@ mod tests {
 			.unwrap();
 		// Every group is written before anything reads, which the default
 		// REAL_TIME budget would collapse to the live edge.
-		let subscriber =
-			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(30)));
+		let subscriber = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30))),
+		);
 		let config = crate::codec::opus::Config::new(48_000, 2);
 		let import = crate::codec::opus::Import::new(track, catalog.reserve(), config.into()).unwrap();
 		(import, subscriber)
@@ -1112,29 +1101,21 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn discontinuity_resets_audio_measurement_and_separates_groups() {
+	async fn discontinuity_separates_audio_groups() {
 		let (mut broadcast, catalog) = new_broadcast();
 		let (import, subscriber) = opus_import(&mut broadcast, &catalog);
 		let mut import: Track = import.into();
-		let anchor = std::time::Instant::now();
-		for (pts, arrival) in [(0, 0), (20, 120)] {
-			let timestamp = Timestamp::from_micros(pts * 1_000).unwrap();
-			import.decode(b"a", Some(timestamp)).unwrap();
+		for pts in [0, 20] {
 			import
-				.flush(timestamp, anchor + Duration::from_millis(arrival))
+				.decode(b"a", Some(Timestamp::from_micros(pts * 1_000).unwrap()))
 				.unwrap();
 		}
-		let before = catalog.snapshot().audio.renditions["audio"].jitter;
-		assert_eq!(before, Some(Duration::from_millis(100)));
 		import.discontinuity().unwrap();
-		for (pts, arrival) in [(100, 6_000), (120, 6_020)] {
-			let timestamp = Timestamp::from_micros(pts * 1_000).unwrap();
-			import.decode(b"b", Some(timestamp)).unwrap();
+		for pts in [100, 120] {
 			import
-				.flush(timestamp, anchor + Duration::from_millis(arrival))
+				.decode(b"b", Some(Timestamp::from_micros(pts * 1_000).unwrap()))
 				.unwrap();
 		}
-		assert_eq!(catalog.snapshot().audio.renditions["audio"].jitter, before);
 		import.finish().unwrap();
 		// The middle group is the established empty-payload discontinuity marker.
 		assert_eq!(collect_groups(subscriber).await, vec![2, 1, 2]);
@@ -1288,11 +1269,54 @@ mod tests {
 		let request = broadcast.reserve_track("video").unwrap();
 		let _video = Track::video(request, catalog.reserve(), VideoInit::new(VideoFormat::Vp8, Vec::new())).unwrap();
 
-		let audio = consumer.track("audio").unwrap().query().await.unwrap();
+		let audio = consumer.track("audio").unwrap().info().await.unwrap();
 		assert_eq!(audio.priority, PRIORITY.audio);
 
-		let video = consumer.track("video").unwrap().query().await.unwrap();
+		let video = consumer.track("video").unwrap().info().await.unwrap();
 		assert_eq!(video.priority, PRIORITY.video);
+
+		// A higher rung asks for its own priority, below the rendition it sits above.
+		let request = broadcast.reserve_track("top").unwrap();
+		let _top = Track::video(
+			request,
+			catalog.reserve(),
+			VideoInit {
+				priority: PRIORITY.video - 1,
+				..VideoInit::new(VideoFormat::Vp8, Vec::new())
+			},
+		)
+		.unwrap();
+		let top = consumer.track("top").unwrap().info().await.unwrap();
+		assert_eq!(top.priority, PRIORITY.video - 1);
+	}
+
+	/// Disabling a video rendition flips its catalog `enabled` and keeps the rest of it;
+	/// audio has no lower rendition to fall back to, so it refuses.
+	#[tokio::test(start_paused = true)]
+	async fn video_disables_and_audio_refuses() {
+		let (broadcast, catalog) = new_broadcast();
+		let request = broadcast.reserve_track("video").unwrap();
+		let mut video = Track::video(request, catalog.reserve(), VideoInit::new(VideoFormat::Vp8, Vec::new())).unwrap();
+
+		video.set_enabled(false).unwrap();
+		let rendition = catalog.snapshot().video.renditions.get("video").cloned().unwrap();
+		assert!(!rendition.enabled);
+		assert_eq!(rendition.codec.to_string(), "vp8");
+
+		video.set_enabled(true).unwrap();
+		assert!(catalog.snapshot().video.renditions["video"].enabled);
+
+		let request = broadcast.reserve_track("audio").unwrap();
+		let mut audio = Track::audio(
+			request,
+			catalog.reserve(),
+			AudioInit::new(AudioFormat::Opus, opus_head()),
+		)
+		.unwrap();
+		assert!(matches!(
+			audio.set_enabled(false),
+			Err(crate::Error::WrongKind { actual: "audio", .. })
+		));
 	}
 
 	/// An audio format with no init bytes errors up front (audio can't resolve its config from frames),
@@ -1378,7 +1402,7 @@ mod tests {
 			.decode(&au, Some(Timestamp::from_micros(1_000).unwrap()))
 			.unwrap();
 
-		let frame = tokio::time::timeout(Duration::from_secs(1), media.read_frame())
+		let frame = kio::clock::timeout(Duration::from_secs(1), media.read_frame())
 			.await
 			.unwrap()
 			.unwrap()
@@ -1388,5 +1412,433 @@ mod tests {
 		assert_eq!(frame.timestamp, Timestamp::from_micros(1_000).unwrap());
 
 		import.finish().unwrap();
+	}
+
+	const H264_IDR: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+	const H265_IDR: &[u8] = &[0x26, 0x01, 0x80, 0xaa];
+
+	fn annexb(nals: &[&[u8]]) -> Vec<u8> {
+		nals.iter().flat_map(|nal| [&[0, 0, 0, 1], *nal].concat()).collect()
+	}
+
+	fn length_prefixed(nal: &[u8]) -> Vec<u8> {
+		[&(nal.len() as u32).to_be_bytes()[..], nal].concat()
+	}
+
+	/// `av1.mp4`'s av1C, and a temporal unit of its sequence header and a key frame.
+	fn av1_init_and_keyframe() -> (Vec<u8>, Vec<u8>) {
+		let mp4 = include_bytes!("../container/fmp4/test_data/av1.mp4");
+		let mut cursor = std::io::Cursor::new(&mp4[..]);
+		let moov = loop {
+			if let mp4_atom::Any::Moov(moov) = <mp4_atom::Any as mp4_atom::Decode>::decode(&mut cursor).unwrap() {
+				break moov;
+			}
+		};
+		let mp4_atom::Codec::Av01(av01) = &moov.trak[0].mdia.minf.stbl.stsd.codecs[0] else {
+			panic!("expected av01");
+		};
+		let mut av1c = Vec::new();
+		mp4_atom::Encode::encode(&av01.av1c, &mut av1c).unwrap();
+		// Skip the box header: the importer takes the record itself.
+		let av1c = av1c[8..].to_vec();
+
+		let mut tu = vec![0x12, 0x00];
+		tu.extend_from_slice(&av01.av1c.config_obus);
+		tu.extend_from_slice(&[0x32, 0x01, 0x10]);
+		(av1c, tu)
+	}
+
+	/// Subscribe to `name` and read its first frame.
+	async fn first_frame(consumer: &moq_net::broadcast::Consumer, name: &str) -> crate::container::Frame {
+		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+		let mut media = crate::container::Consumer::new(
+			track,
+			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+		);
+		kio::clock::timeout(Duration::from_secs(1), media.read_frame())
+			.await
+			.expect("a frame")
+			.unwrap()
+			.expect("the track ended without a frame")
+	}
+
+	async fn headers_survive_reset(format: VideoFormat, init: Vec<u8>, keyframe: Vec<u8>) {
+		for seek in [false, true] {
+			let (broadcast, catalog) = new_broadcast();
+			let consumer = broadcast.consume();
+			let mut import = Track::video(
+				broadcast.reserve_track("video").unwrap(),
+				catalog.reserve(),
+				VideoInit::new(format, init.clone()),
+			)
+			.unwrap();
+			// Repeated timeline breaks must retain the init until a picture uses it.
+			for _ in 0..2 {
+				if seek {
+					import.seek(7).unwrap();
+				} else {
+					import.discontinuity().unwrap();
+				}
+			}
+			let timestamp = Timestamp::from_micros(1_000).unwrap();
+			import.decode(&keyframe, Some(timestamp)).unwrap();
+			import.finish().unwrap();
+			let frame = first_frame(&consumer, "video").await;
+			assert!(frame.keyframe, "{format}, seek={seek}");
+			assert_eq!(frame.timestamp, timestamp, "{format}, seek={seek}");
+			assert_eq!(
+				frame.payload.as_ref(),
+				[init.as_slice(), &keyframe].concat(),
+				"{format}, seek={seek}"
+			);
+		}
+
+		for buffered in [false, true] {
+			let (broadcast, catalog) = new_broadcast();
+			let consumer = broadcast.consume();
+			let mut stream = TrackStream::video(
+				broadcast.reserve_track("video").unwrap(),
+				catalog.reserve(),
+				VideoInit::new(format, init.clone()),
+			)
+			.unwrap();
+			if buffered {
+				stream.decode(&keyframe).unwrap();
+			}
+			for _ in 0..2 {
+				stream.seek(7).unwrap();
+			}
+			stream.decode(&keyframe).unwrap();
+			stream.finish().unwrap();
+			let frame = first_frame(&consumer, "video").await;
+			assert!(frame.keyframe, "{format}: streaming seek");
+			assert_eq!(
+				frame.payload.as_ref(),
+				[init.as_slice(), &keyframe].concat(),
+				"{format}: streaming seek"
+			);
+		}
+	}
+
+	/// A picture an init carries is published at finish when no decode follows it.
+	async fn init_picture_published_at_finish(format: VideoFormat, init: Vec<u8>) {
+		let (broadcast, catalog) = new_broadcast();
+		let consumer = broadcast.consume();
+		let mut import = Track::video(
+			broadcast.reserve_track("video").unwrap(),
+			catalog.reserve(),
+			VideoInit::new(format, init.clone()),
+		)
+		.unwrap();
+		import.finish().unwrap();
+		let frame = first_frame(&consumer, "video").await;
+		assert!(frame.keyframe, "{format}");
+		assert_eq!(frame.payload.as_ref(), init.as_slice(), "{format}");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn avc3_init_picture_published_at_finish() {
+		let mut init = h264_init();
+		init.extend_from_slice(&annexb(&[H264_IDR]));
+		init_picture_published_at_finish(VideoFormat::Avc3, init).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn hev1_init_picture_published_at_finish() {
+		use crate::codec::h265::fixtures::{PPS, SPS, VPS};
+		init_picture_published_at_finish(VideoFormat::Hev1, annexb(&[VPS, SPS, PPS, H265_IDR])).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn avc3_init_headers_survive_reset() {
+		headers_survive_reset(VideoFormat::Avc3, h264_init(), annexb(&[H264_IDR])).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn hev1_init_headers_survive_reset() {
+		use crate::codec::h265::fixtures::{PPS, SPS, VPS};
+		headers_survive_reset(VideoFormat::Hev1, annexb(&[VPS, SPS, PPS]), annexb(&[H265_IDR])).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn av01_init_headers_survive_reset() {
+		let (av1c, _) = av1_init_and_keyframe();
+		headers_survive_reset(VideoFormat::Av01, av1c[4..].to_vec(), vec![0x32, 0x01, 0x10]).await;
+	}
+
+	/// A keyframe after a pre-picture seek carries the retained init header ahead of its own. The
+	/// keyframe's own, which the decoder applies, configures the catalog.
+	#[tokio::test(start_paused = true)]
+	async fn av01_keyframe_header_supersedes_retained_init() {
+		let (av1c, keyframe) = av1_init_and_keyframe();
+		let mut stale = av1c[4..].to_vec();
+		// seq_level_idx 9 (the fixture's level) becomes 8, in the fourth payload byte.
+		assert_eq!(stale[5], 0x4a);
+		stale[5] = 0x42;
+		let (broadcast, catalog) = new_broadcast();
+		let mut import = Track::video(
+			broadcast.reserve_track("video").unwrap(),
+			catalog.reserve(),
+			VideoInit::new(VideoFormat::Av01, stale.clone()),
+		)
+		.unwrap();
+		let codecs = |catalog: &crate::catalog::Producer| {
+			let snapshot = catalog.snapshot();
+			snapshot
+				.video
+				.renditions
+				.values()
+				.map(|rendition| rendition.codec.to_string()[..10].to_string())
+				.collect::<Vec<_>>()
+		};
+		assert_eq!(codecs(&catalog), ["av01.0.08M"]);
+		import.seek(7).unwrap();
+		import
+			.decode(&keyframe, Some(Timestamp::from_micros(1_000).unwrap()))
+			.unwrap();
+		assert_eq!(codecs(&catalog), ["av01.0.09M"]);
+	}
+
+	/// Every video format a binding can hand [`Track::video`] lands a keyframe on
+	/// its track. The facade dispatches per codec, and before this only Avc3,
+	/// Hvc1, and VP8 had ever decoded through it.
+	#[tokio::test(start_paused = true)]
+	async fn every_video_format_delivers_a_keyframe() {
+		use crate::codec::{h264, h265};
+
+		let sps = &h264_init()[4..29];
+		let avcc = [
+			&[1, sps[1], sps[2], sps[3], 0xff, 0xe1][..],
+			&(sps.len() as u16).to_be_bytes(),
+			sps,
+			&[1],
+			&(h264::fixtures::PPS.len() as u16).to_be_bytes(),
+			h264::fixtures::PPS,
+		]
+		.concat();
+		let (av1c, av1_keyframe) = av1_init_and_keyframe();
+		let vp9_keyframe = vec![0x82, 0x49, 0x83, 0x42, 0x20, 0x13, 0xf0, 0x0e, 0xf0, 0x00];
+
+		let cases = [
+			(VideoFormat::Avc1, avcc, length_prefixed(H264_IDR)),
+			(
+				VideoFormat::Hev1,
+				Vec::new(),
+				annexb(&[h265::fixtures::VPS, h265::fixtures::SPS, h265::fixtures::PPS, H265_IDR]),
+			),
+			(VideoFormat::Av01, av1c, av1_keyframe),
+			(VideoFormat::Vp9, Vec::new(), vp9_keyframe),
+		];
+		for (format, init, keyframe) in cases {
+			let (broadcast, catalog) = new_broadcast();
+			let consumer = broadcast.consume();
+			let request = broadcast.reserve_track("video").unwrap();
+			let mut import = Track::video(request, catalog.reserve(), VideoInit::new(format, init)).unwrap();
+
+			import
+				.decode(keyframe, Some(Timestamp::from_micros(1_000).unwrap()))
+				.unwrap();
+			let frame = first_frame(&consumer, "video").await;
+			assert!(frame.keyframe, "{format}: the first frame opens a group");
+			assert_eq!(frame.timestamp, Timestamp::from_micros(1_000).unwrap(), "{format}");
+			assert!(
+				catalog.snapshot().video.renditions.contains_key("video"),
+				"{format}: no rendition"
+			);
+			import.finish().unwrap();
+		}
+	}
+
+	/// MP3 through [`Track::audio`]: the catalog comes from the frame header, and
+	/// a group spans frames until the caller cuts it. No test had published MP3.
+	#[tokio::test(start_paused = true)]
+	async fn mp3_groups_span_frames_until_a_cut() {
+		// MPEG-1 Layer III, 128 kbps, 44.1 kHz, joint stereo.
+		let header = [0xFF, 0xFB, 0x90, 0x44];
+		let (broadcast, catalog) = new_broadcast();
+		let consumer = broadcast.consume();
+		let request = broadcast.reserve_track("audio").unwrap();
+		let mut import = Track::audio(
+			request,
+			catalog.reserve(),
+			AudioInit::new(AudioFormat::Mp3, header.to_vec()),
+		)
+		.unwrap();
+
+		let audio = catalog.snapshot().audio.renditions["audio"].clone();
+		assert_eq!((audio.sample_rate, audio.channel_count), (44_100, 2));
+
+		// Delay-tolerant, so the first group is still delivered once the second exists.
+		let replay = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30)));
+		let mut track = consumer.track("audio").unwrap().subscribe(Some(replay)).await.unwrap();
+		for i in 0..4u64 {
+			if i == 2 {
+				import.cut(None).unwrap();
+			}
+			let frame = [&header[..], &[i as u8; 8]].concat();
+			import
+				.decode(frame, Some(Timestamp::from_micros(i * 26_122).unwrap()))
+				.unwrap();
+		}
+		import.finish().unwrap();
+
+		// Frames carrying audio per group, ignoring any empty end-of-group marker.
+		let mut groups = Vec::new();
+		while let Some(mut group) = track.recv_group().await.unwrap() {
+			let mut frames = 0;
+			while let Some(frame) = group.read_frame().await.unwrap() {
+				frames += usize::from(
+					!hang::container::Frame::decode(frame.payload)
+						.unwrap()
+						.payload
+						.is_empty(),
+				);
+			}
+			groups.push(frames);
+		}
+		assert_eq!(groups, [2, 2]);
+	}
+
+	/// [`TrackStream`] finds the frames in a raw byte stream however it is chunked,
+	/// and `finish` flushes the last one. Nothing had decoded through it before.
+	#[tokio::test(start_paused = true)]
+	async fn track_stream_splits_a_chunked_byte_stream() {
+		use crate::codec::h265;
+
+		let (_, av1_keyframe) = av1_init_and_keyframe();
+		let cases = [
+			(VideoFormat::Avc3, [h264_init(), annexb(&[H264_IDR])].concat(), H264_IDR),
+			(
+				VideoFormat::Hev1,
+				annexb(&[h265::fixtures::VPS, h265::fixtures::SPS, h265::fixtures::PPS, H265_IDR]),
+				H265_IDR,
+			),
+			(
+				VideoFormat::Av01,
+				av1_keyframe.clone(),
+				&av1_keyframe[av1_keyframe.len() - 3..],
+			),
+		];
+		for (format, stream, last) in cases {
+			let (broadcast, catalog) = new_broadcast();
+			let consumer = broadcast.consume();
+			let request = broadcast.reserve_track("video").unwrap();
+			let mut import =
+				TrackStream::video(request, catalog.reserve(), VideoInit::new(format, Vec::new())).unwrap();
+
+			for chunk in stream.chunks(3) {
+				import.decode(chunk).unwrap();
+			}
+			import.finish().unwrap();
+
+			let frame = first_frame(&consumer, "video").await;
+			assert!(frame.keyframe, "{format}: the first frame opens a group");
+			assert!(
+				frame.payload.ends_with(last),
+				"{format}: the frame ends with its picture"
+			);
+		}
+	}
+
+	/// A disabled [`TrackStream`] drops what it splits and marks the break, so a caller that
+	/// keeps writing sends nothing. Enabled again, it resumes, and advertises itself enabled,
+	/// only at the next keyframe.
+	#[tokio::test(start_paused = true)]
+	async fn track_stream_disables_and_resumes_at_a_keyframe() {
+		const H264_P: &[u8] = &[0x41, 0x9a, 0x21, 0x22];
+
+		let (broadcast, catalog) = new_broadcast();
+		let consumer = broadcast.consume();
+		let request = broadcast.reserve_track("video").unwrap();
+		let mut import = TrackStream::video(
+			request,
+			catalog.reserve(),
+			VideoInit::new(VideoFormat::Avc3, Vec::new()),
+		)
+		.unwrap();
+		// Every group is written before anything reads, which the default
+		// REAL_TIME budget would collapse to the live edge.
+		let subscriber = consumer
+			.track("video")
+			.unwrap()
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30))),
+			)
+			.await
+			.unwrap();
+		let enabled = || catalog.snapshot().video.renditions["video"].enabled;
+
+		let keyframe = [h264_init(), annexb(&[H264_IDR])].concat();
+		let delta = annexb(&[H264_P]);
+		// One access unit per frame interval. The splitter holds the last NAL until the next
+		// start code, so an access unit goes out one write after its last NAL arrives.
+		async fn write(import: &mut TrackStream, bytes: &[u8]) {
+			import.decode(bytes).unwrap();
+			kio::clock::sleep(Duration::from_millis(33)).await;
+		}
+		for bytes in [&keyframe, &delta, &delta] {
+			write(&mut import, bytes).await;
+		}
+		// A chunk may end mid-NAL, and the next one continue it across the disable.
+		let (head, tail) = delta.split_at(6);
+		write(&mut import, head).await;
+
+		import.set_enabled(false).unwrap();
+		assert!(!enabled());
+		for bytes in [tail, &keyframe, &delta, &delta] {
+			write(&mut import, bytes).await;
+		}
+
+		import.set_enabled(true).unwrap();
+		for bytes in [&delta, &keyframe, &delta] {
+			write(&mut import, bytes).await;
+		}
+		assert!(!enabled(), "enabled before the keyframe that resumes it");
+		write(&mut import, &delta).await;
+		assert!(enabled());
+		import.finish().unwrap();
+
+		// The first group loses the access units still in the splitter at the disable, the
+		// marker breaks the timeline, and the resumed group opens on the keyframe: three
+		// access units and the end marker `finish` bounds the last one with.
+		assert_eq!(collect_groups(subscriber).await, vec![2, 1, 4]);
+	}
+
+	/// A keyframe dropped while disabled still configures the importer: an AV1 stream may send
+	/// its sequence header once, and the keyframe that resumes need not repeat it.
+	#[tokio::test(start_paused = true)]
+	async fn track_stream_configures_from_a_dropped_keyframe() {
+		let (_, with_header) = av1_init_and_keyframe();
+		// A temporal delimiter and a key frame, with no sequence header.
+		let bare = [0x12, 0x00, 0x32, 0x01, 0x10];
+
+		let (broadcast, catalog) = new_broadcast();
+		let consumer = broadcast.consume();
+		let request = broadcast.reserve_track("video").unwrap();
+		let mut import = TrackStream::video(
+			request,
+			catalog.reserve(),
+			VideoInit::new(VideoFormat::Av01, Vec::new()),
+		)
+		.unwrap();
+
+		import.set_enabled(false).unwrap();
+		// The next temporal delimiter completes the one carrying the sequence header.
+		import.decode(&with_header).unwrap();
+		kio::clock::sleep(Duration::from_millis(33)).await;
+		import.decode(&bare).unwrap();
+		kio::clock::sleep(Duration::from_millis(33)).await;
+
+		// Finish flushes the last temporal unit, the keyframe that resumes.
+		import.set_enabled(true).unwrap();
+		import.finish().unwrap();
+
+		assert!(catalog.snapshot().video.renditions["video"].enabled);
+		let frame = first_frame(&consumer, "video").await;
+		assert!(frame.keyframe, "the resumed group opens on a keyframe");
+		// The dropped sequence header goes out with it, after its temporal delimiter.
+		assert_eq!(frame.payload.as_ref(), with_header.as_slice());
 	}
 }

@@ -1,16 +1,17 @@
 ---
 title: Demos
-description: The web demo and MoQ Boy
+description: The web demo, MoQ Boy, and CARLA
 ---
 
 # Demos
 
-Both run locally from a checkout and live at [moq.dev](https://moq.dev).
+Each runs locally from a checkout. The web demo and MoQ Boy also live at
+[moq.dev](https://moq.dev); CARLA's simulator needs a Linux host with an NVIDIA GPU.
 
 ## Web demo
 
 ```bash
-just            # relay + Big Buck Bunny + the web UI at http://localhost:5173
+just            # relay + Big Buck Bunny + the web UI at http://localhost:5173/watch.html
 ```
 
 A Vite app in [`demo/web/`](https://github.com/moq-dev/moq/tree/main/demo/web)
@@ -39,12 +40,33 @@ just boy start path/to/game.gb        # your own ROM; run several for a grid
 What it demonstrates:
 
 - **On-demand encoding.** Emulation and encoding pause when the last viewer leaves and resume with a keyframe when one arrives. No timers, just subscription state.
-- **Discovery by prefix.** Game sessions appear under `boy/game/`; viewers each publish a tiny broadcast under `boy/viewer/`. No control plane.
-- **Bidirectional data.** Button presses go up on a raw JSON `command` track; a `status` track comes down with everyone's held buttons and latency. Same relay, same protocol as the media.
-- **Split trust.** In production the game prefix is authenticated (only the server publishes games) while the viewer prefix is anonymous.
+- **Discovery by prefix.** Game sessions appear under `boy/game/`. No control plane.
+- **Sockets.** Each emulator runs a [socket](/concept/socket) endpoint named for its game, and each viewer dials it from an endpoint with a random id. Button presses go up as messages on the viewer's own session, and the emulator answers each with that viewer's latency. A `status` track comes down to everyone with the held buttons and player count. Same relay, same protocol as the media. Sockets need `moq-lite-07-wip`, which is opt-in, on every hop, so the local relay enables it.
+- **Split trust.** In production only the server publishes games and their endpoints, while anonymous viewers may publish only `viewer-*` endpoints.
 
 Code: [`rs/moq-boy`](https://github.com/moq-dev/moq/tree/main/rs/moq-boy) (emulator
 and publisher), [`js/moq-boy`](https://github.com/moq-dev/moq/tree/main/js/moq-boy)
 (the `<moq-boy>` element, published as `@moq/boy`), and
 [`demo/boy`](https://github.com/moq-dev/moq/tree/main/demo/boy). The same
 shape covers teleoperation: swap the emulator for a robot.
+
+## CARLA
+
+Teleoperation over MoQ: simulated trucks drive themselves through one
+[CARLA](https://carla.org) world until you take one over from the browser.
+The simulator needs a Linux host with an NVIDIA GPU and an image built by
+[moq-dev/carla](https://github.com/moq-dev/carla); the player runs anywhere.
+
+```bash
+just carla venv                       # once: the worker
+CARLA_IMAGE=<tag> just carla server   # leave the simulator running
+just carla                            # relay + trucks + player
+```
+
+What it demonstrates:
+
+- **GPU to wire.** Camera images never leave the GPU: `moq-video` encodes them on the device that rendered them, and a camera renders only while someone subscribes.
+- **Control with a lease.** A driver publishes a JSON `control` track under `viewer/carla/{truck}/`; the truck accepts one driver at a time, bound to the instance it announced with, and returns to autonomy when the lease lapses.
+- **Measured feedback.** Each truck's `status` track carries what the gate accepted and what the vehicle did, so the player draws requested against measured steering.
+
+Code: [`demo/carla`](https://github.com/moq-dev/moq/tree/main/demo/carla).

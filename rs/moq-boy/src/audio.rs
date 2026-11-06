@@ -29,8 +29,8 @@ impl AudioEncoder {
 		input.format = moq_audio::Format::S16;
 		let mut options = moq_audio::encode::Options::default();
 		options.track = Some("audio".to_string());
-		options.settings = moq_audio::encode::Settings::from_input(moq_audio::encode::Codec::Opus, &input);
-		options.settings.bitrate = Some(OPUS_BITRATE);
+		options.config = moq_audio::encode::Config::from_input(moq_audio::encode::Codec::Opus, &input);
+		options.config.bitrate = Some(OPUS_BITRATE);
 
 		let producer = moq_audio::encode::Producer::new(&mut broadcast, catalog, input, &options)?;
 		Ok(Self { producer })

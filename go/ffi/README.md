@@ -29,13 +29,13 @@ The dev shell provides both `go` and `uniffi-bindgen-go`, so `nix develop --comm
 ```bash
 cargo install uniffi-bindgen-go \
     --git https://github.com/kixelated/uniffi-bindgen-go \
-    --rev v0.10.0-kixelated.1+v0.32.0 \
+    --rev v0.10.0-kixelated.2+v0.32.0 \
     --locked
 ```
 
 `--locked` matters: `uniffi_bindgen` depends on `toml` across a `>=0.9, <2` range, so a fresh resolve can pick a different `toml` than the generator was built against.
 
-The revision is `v0.10.0-kixelated.1+v0.32.0`, matching the `uniffi` version `rs/moq-ffi` depends on; `flake.nix` pins the same source. It points at a fork because upstream has no uniffi 0.32 release yet; `flake.nix` carries the details. Generated async calls take `context.Context` as the first argument.
+The revision is `v0.10.0-kixelated.2+v0.32.0`, matching the `uniffi` version `rs/moq-ffi` depends on; `flake.nix` pins the same source. It points at a fork because upstream has no uniffi 0.32 release yet; `flake.nix` carries the details. Generated async calls take `context.Context` as the first argument.
 
 ## Layout
 
@@ -53,4 +53,4 @@ Compiled binaries never live in the source tree. `sh/go/check.sh` stages into th
 
 ## Release
 
-The `release-go-ffi.yml` workflow fires on every `moq-ffi-v*` tag, builds per-target static libraries, runs `uniffi-bindgen-go`, calls `just go package-ffi` to assemble the module, and `just go publish-ffi` to push the result to `moq-dev/moq-go-ffi` with a bare-semver tag (e.g. `v0.2.18`) lockstep with the crate. Go's module proxy picks up the new tag automatically.
+The `release-shared-ffi.yml` coordinator fires on every `moq-ffi-v*` tag and builds the default-feature native libraries once for Go, Kotlin, and Swift. It generates bindings from the built Linux library and calls `release-go-ffi.yml`, which calls `just go package-ffi` to assemble the module, and `just go publish-ffi` to push the result to `moq-dev/moq-go-ffi` with a bare-semver tag (e.g. `v0.2.18`) lockstep with the crate. Go's module proxy picks up the new tag automatically.

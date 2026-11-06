@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "moq-room"
 description = "Headless multi-participant rooms over MoQ: announce-derived roster, token claims, and a chat track."
 authors = ["Luke Curley <kixelated@gmail.com>"]
@@ -12,14 +13,28 @@ rust-version.workspace = true
 keywords = ["quic", "webtransport", "conferencing", "live"]
 categories = ["multimedia", "network-programming"]
 
+# The self dev-dependency only turns on `async` for the tests.
+[package.metadata.cargo-shear]
+ignored = ["moq-room"]
+
+[features]
+default = []
+# Generated async wrappers for the poll methods, and `chat::Subscriber::subscribe`. Enable where you `.await` them.
+async = ["kio/async"]
+
 [dependencies]
-kio = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 moq-auth = { workspace = true }
 moq-json = { workspace = true }
 moq-net = { workspace = true }
 thiserror = { workspace = true }
-web-async = { workspace = true }
 
 [dev-dependencies]
-moq-tokio = { path = "../moq-tokio", default-features = false }
+# Compile the generated wrappers used by the tests.
+moq-room = { path = ".", features = ["async"] }
+moq-tokio = { path = "../moq-tokio", default-features = false, features = ["net"] }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+workspace-hack = { path = "../workspace-hack" }
+
+[lints]
+workspace = true

@@ -1,4 +1,5 @@
-import { Time } from "@moq/net";
+import { Micro, type Milli, Second } from "@moq/clock";
+import { ringCapacity } from "./latency";
 
 export class AudioRingBuffer {
 	#buffer: Float32Array[];
@@ -8,7 +9,29 @@ export class AudioRingBuffer {
 	readonly rate: number;
 	readonly channels: number;
 	#stalled = true;
+	// Held stalled for the part of the target above the floor, until the next floor update.
+	#parked = false;
 	#underruns = 0;
+
+	// Where the publisher declared its audio ends, as a sample index, until the next reset.
+	#end?: number;
+	// That end once the next utterance follows it while its audio still plays, until the next
+	// utterance's first write lands: running dry there before it does is still declared silence.
+	#previous?: number;
+	// Set by `next` until that first write, which marks where the previous utterance's audio stops.
+	#next = false;
+	// Where the audio before the latest declared silence stops. The silence is declared, so it must not
+	// count toward the live band and push the unplayed tail out.
+	#tail?: number;
+	// Declared silences still ahead of the playhead, oldest first, as [start, end) sample indices. The
+	// ring holds them as zeros; the reader fills them with comfort noise. Each one follows a distinct
+	// write, and every move of the playhead drops those behind it, so the ring's capacity bounds them.
+	#pauses: Array<{ start: number; end: number }> = [];
+	// The part of the last read inside a declared silence, as output indices.
+	#quiet?: [number, number];
+	// Whether the playhead ran out at a declared end and nothing has played since: intentional
+	// silence, which is no underrun and survives the reset that re-anchors the next utterance.
+	#silent = false;
 
 	// Samples in the most recent write, i.e. one decoded chunk. The overflow band tolerates this
 	// much above the target before dropping, so a ring sitting exactly on the target doesn't drop
@@ -26,35 +49,31 @@ export class AudioRingBuffer {
 	constructor(props: {
 		rate: number;
 		channels: number;
-		latency: Time.Milli;
+		latency: Milli;
 		buffered?: boolean;
 	}) {
 		if (props.channels <= 0) throw new Error("invalid channels");
 		if (props.rate <= 0) throw new Error("invalid sample rate");
 		if (props.latency <= 0) throw new Error("invalid latency");
 
-		this.#latencySamples = Math.ceil(props.rate * Time.Second.fromMilli(props.latency));
+		this.#latencySamples = Math.ceil(props.rate * Second.fromMilli(props.latency));
 		if (this.#latencySamples === 0) throw new Error("empty buffer");
 
 		this.rate = props.rate;
 		this.channels = props.channels;
 		this.#buffered = props.buffered ?? false;
 
-		// The ring holds the latency floor as PCM, with headroom above it. Sizing capacity to the
-		// floor exactly makes the ring physically incapable of holding the slack the overflow band
-		// wants, so every chunk that arrives while the ring is on target drops the oldest samples.
-		// In buffered mode the headroom is also what keeps the backpressure-paced decode loop (on
-		// the main thread) from overflow-dropping; the rest of the lookahead stays encoded upstream.
-		const capacity = this.#capacityFor(this.#latencySamples);
+		// The ring holds the latency floor as PCM, with headroom above it, at a capacity the receiver
+		// fixes rather than the target: whatever of the target is above the floor stays encoded
+		// upstream (the main thread holds it back). The headroom tolerates a chunk above the floor in
+		// live mode, and in buffered mode keeps the paced decode loop from overflow-dropping.
+		const capacity = ringCapacity(this.rate);
+		if (this.#latencySamples > capacity) throw new Error("latency exceeds capacity");
 
 		this.#buffer = [];
 		for (let i = 0; i < this.channels; i++) {
 			this.#buffer[i] = new Float32Array(capacity);
 		}
-	}
-
-	#capacityFor(latencySamples: number): number {
-		return latencySamples * 2;
 	}
 
 	get stalled(): boolean {
@@ -66,8 +85,26 @@ export class AudioRingBuffer {
 		return this.#underruns;
 	}
 
-	get timestamp(): Time.Micro {
-		return Time.Micro.fromSecond((this.#readIndex / this.rate) as Time.Second);
+	/** Whether playback is at a declared end, reached or announced before any audio, and nothing has played since. */
+	get silent(): boolean {
+		return this.#silent;
+	}
+
+	/**
+	 * The part of the last read that lies in a declared silence between two utterances, as
+	 * `[from, to)` output indices. Those samples are zeros for the reader to fill with comfort noise.
+	 */
+	get quiet(): readonly [number, number] | undefined {
+		return this.#quiet;
+	}
+
+	get timestamp(): Micro {
+		return Micro.fromSecond((this.#readIndex / this.rate) as Second);
+	}
+
+	/** Whether an insert has anchored the indices since creation or the last reset. */
+	get anchored(): boolean {
+		return this.#anchored;
 	}
 
 	get length(): number {
@@ -78,8 +115,11 @@ export class AudioRingBuffer {
 		return this.#buffer[0]?.length;
 	}
 
-	resize(latency: Time.Milli): void {
-		const latencySamples = Math.ceil(this.rate * Time.Second.fromMilli(latency));
+	/** Move the floor, which never exceeds the fixed capacity, and end a park. */
+	setLatency(latency: Milli): void {
+		const latencySamples = Math.ceil(this.rate * Second.fromMilli(latency));
+		if (latencySamples <= 0) throw new Error("empty buffer");
+		if (latencySamples > this.capacity) throw new Error("latency exceeds capacity");
 
 		// A deeper floor parks playback until it refills. Video holds the extra delay on its own, so
 		// audio that kept draining at the old depth would run ahead by the difference. Parking keeps
@@ -87,49 +127,29 @@ export class AudioRingBuffer {
 		// already covers the new floor.
 		if (latencySamples > this.#latencySamples) this.#stalled = true;
 		this.#latencySamples = latencySamples;
-
-		const newCapacity = this.#capacityFor(this.#latencySamples);
-		if (newCapacity !== this.capacity) this.#reallocate(newCapacity);
+		this.#parked = false;
 
 		// Resume a refill that the buffer already covers, which `write` would only notice on the
 		// next frame, never for a source that has stopped.
-		if (latencySamples > 0 && this.length >= latencySamples) this.#stalled = false;
+		if (this.length >= latencySamples) this.#stalled = false;
 	}
 
-	#reallocate(newCapacity: number): void {
-		if (newCapacity === 0) throw new Error("empty buffer");
-
-		const newBuffer: Float32Array[] = [];
-		for (let i = 0; i < this.channels; i++) {
-			newBuffer[i] = new Float32Array(newCapacity);
-		}
-
-		// Copy existing data, preserving the most recent samples
-		const samplesToKeep = Math.min(this.length, newCapacity);
-		if (samplesToKeep > 0) {
-			// Copy the most recent samples (closest to writeIndex)
-			const copyStart = this.#writeIndex - samplesToKeep;
-			for (let channel = 0; channel < this.channels; channel++) {
-				const src = this.#buffer[channel];
-				const dst = newBuffer[channel];
-				for (let i = 0; i < samplesToKeep; i++) {
-					const srcPos = (copyStart + i) % src.length;
-					const dstPos = (copyStart + i) % dst.length;
-					dst[dstPos] = src[srcPos];
-				}
-			}
-		}
-
-		// Update state for the new buffer, only stall if empty.
-		this.#buffer = newBuffer;
-		this.#readIndex = this.#writeIndex - samplesToKeep;
-		if (samplesToKeep === 0) this.#stalled = true;
+	/**
+	 * Hold playback until the next floor update, keeping what is buffered.
+	 *
+	 * For a rise in the part of the target held encoded upstream: the ring already covers its floor,
+	 * so only the main thread knows when the received media covers the rest. A write does not resume
+	 * it, since output decoded before the park may still land.
+	 */
+	park(): void {
+		this.#stalled = true;
+		this.#parked = true;
 	}
 
-	write(timestamp: Time.Micro, data: Float32Array[]): void {
+	write(timestamp: Micro, data: Float32Array[]): void {
 		if (data.length !== this.channels) throw new Error("wrong number of channels");
 
-		let start = Math.round(Time.Second.fromMicro(timestamp) * this.rate);
+		let start = Math.round(Second.fromMicro(timestamp) * this.rate);
 		let samples = data[0].length;
 
 		// Anchor both indices to the first sample so we play from its timestamp instead of
@@ -157,6 +177,15 @@ export class AudioRingBuffer {
 		const end = start + samples;
 		this.#chunk = data[0].length;
 
+		// The next utterance's first audio: whatever lies between it and the previous utterance's audio
+		// is declared silence.
+		if (this.#next) {
+			this.#next = false;
+			this.#previous = undefined;
+			this.#tail = this.#writeIndex;
+			if (start > this.#writeIndex) this.#pauses.push({ start: this.#writeIndex, end: start });
+		}
+
 		// Bound the ring. While playing, drop the oldest once it holds a whole chunk more than the
 		// target and land back on the target: frames arrive one chunk at a time, so a ring sitting
 		// exactly on the target is a chunk above it the moment the next one lands, and dropping on
@@ -164,9 +193,13 @@ export class AudioRingBuffer {
 		// consuming, so only the hard capacity applies; the band would throw away the very audio the
 		// refill is accumulating. Buffered mode plays through everything, so it is capacity-bound too.
 		const playing = !this.#stalled && !this.#buffered;
-		const limit = playing ? Math.min(this.#latencySamples + this.#chunk, this.capacity) : this.capacity;
+		// Until the tail before a declared silence has played, only the capacity bounds the ring; the
+		// band then catches up by skipping the silence.
+		const band = playing && (this.#tail === undefined || this.#readIndex >= this.#tail);
+		const limit = band ? Math.min(this.#latencySamples + this.#chunk, this.capacity) : this.capacity;
 		if (end - this.#readIndex > limit) {
-			this.#readIndex = end - (playing ? Math.min(this.#latencySamples, this.capacity) : this.capacity);
+			this.#readIndex = end - (band ? Math.min(this.#latencySamples, this.capacity) : this.capacity);
+			this.#prune();
 		}
 
 		// Fill gaps with zeros if there's a discontinuity
@@ -205,9 +238,9 @@ export class AudioRingBuffer {
 		}
 
 		// Start playback once we've buffered the latency target. This is the only way out of a
-		// stall, so an underrun mid-playback refills to the target before resuming rather than
-		// playing the next chunk on an empty cushion.
-		if (this.length >= this.#latencySamples) {
+		// stall but a park, so an underrun mid-playback refills to the target before resuming rather
+		// than playing the next chunk on an empty cushion.
+		if (!this.#parked && this.length >= this.#latencySamples) {
 			this.#stalled = false;
 		}
 	}
@@ -218,30 +251,86 @@ export class AudioRingBuffer {
 	 * A successor track overwrites the slots its own samples land on, but anything the previous
 	 * track wrote beyond them would otherwise still play once the successor runs out.
 	 */
-	truncate(timestamp: Time.Micro): void {
-		const target = Math.round(Time.Second.fromMicro(timestamp) * this.rate);
+	truncate(timestamp: Micro): void {
+		const target = Math.round(Second.fromMicro(timestamp) * this.rate);
 		if (target >= this.#writeIndex) return;
 		// Never retreat past the playhead: those samples are already due.
 		this.#writeIndex = Math.max(target, this.#readIndex);
+		this.#pauses = this.#pauses.filter((pause) => pause.start < this.#writeIndex);
+		const last = this.#pauses.at(-1);
+		if (last) last.end = Math.min(last.end, this.#writeIndex);
+	}
+
+	/**
+	 * Note that the publisher declared its audio ends at `timestamp`, so running dry there is silence
+	 * rather than an underrun. Pass the end less any codec delay that leaves the decoded audio short
+	 * of it.
+	 */
+	end(timestamp: Micro): void {
+		this.#end = Math.round(Second.fromMicro(timestamp) * this.rate);
+		// The end can arrive after the playhead already ran out at it, or before any audio, as for a
+		// listener that joins during a mute.
+		if (!this.#anchored || (this.#stalled && this.length <= 0 && this.#ended())) this.#silent = true;
+	}
+
+	// Forget the declared silences the playhead has passed.
+	#prune(): void {
+		const pauses = this.#pauses;
+		let passed = 0;
+		while (passed < pauses.length && pauses[passed].end <= this.#readIndex) passed++;
+		if (passed > 0) pauses.splice(0, passed);
+	}
+
+	// Whether the playhead has reached the declared end.
+	#ended(): boolean {
+		const end = this.#previous ?? this.#end;
+		return end !== undefined && this.#readIndex >= end;
+	}
+
+	/**
+	 * The publisher's next utterance follows its declared end. Once nothing is left to play, flush
+	 * and re-anchor on it like {@link reset}; while the end's audio is still buffered, play straight
+	 * into the next utterance on the same timeline, dropping nothing, with the silence between them
+	 * reported through {@link quiet}.
+	 */
+	next(): void {
+		if (!this.#anchored || this.length <= 0) {
+			const silent = this.#silent;
+			this.reset();
+			this.#silent = silent;
+			return;
+		}
+		this.#previous = this.#end ?? this.#previous;
+		this.#end = undefined;
+		this.#next = true;
 	}
 
 	// Flush all buffered samples and re-stall, ready to anchor the next utterance.
 	reset(): void {
+		this.#silent = false;
 		this.#readIndex = 0;
 		this.#writeIndex = 0;
 		this.#stalled = true;
+		this.#parked = false;
 		this.#anchored = false;
+		this.#end = undefined;
+		this.#previous = undefined;
+		this.#next = false;
+		this.#tail = undefined;
+		this.#pauses = [];
 	}
 
 	read(output: Float32Array[]): number {
 		if (output.length !== this.channels) throw new Error("wrong number of channels");
+		this.#quiet = undefined;
 		if (this.#stalled) return 0;
 
 		const samples = Math.min(this.#writeIndex - this.#readIndex, output[0].length);
 		if (samples <= 0) {
 			// Ran dry mid-playback: re-stall so write() refills to the target before resuming.
 			this.#stalled = true;
-			this.#underruns++;
+			if (this.#ended()) this.#silent = true;
+			else this.#underruns++;
 			return 0;
 		}
 
@@ -257,12 +346,33 @@ export class AudioRingBuffer {
 			}
 		}
 
+		// A quantum overlaps at most one declared silence unless an utterance is shorter than it, which
+		// no codec frame is; the span then covers both silences and the sliver between them.
+		this.#prune();
+		const pauses = this.#pauses;
+		const after = this.#readIndex + samples;
+		const first = pauses[0];
+		if (first && first.start < after) {
+			let last = first;
+			for (const pause of pauses) if (pause.start < after) last = pause;
+			this.#quiet = [Math.max(0, first.start - this.#readIndex), Math.min(samples, last.end - this.#readIndex)];
+		}
+
 		this.#readIndex += samples;
+		this.#silent = false;
 
 		// A short quantum ends in silence, so it counts as an underrun even if a chunk lands before
 		// the next read. It does not park playback: the shortfall is under one quantum, and a
-		// refill would spend the whole target as silence to cover it.
-		if (samples < output[0].length) this.#underruns++;
+		// refill would spend the whole target as silence to cover it. At a declared end it is the
+		// silence the publisher announced, and the ring waits for the next utterance.
+		if (samples < output[0].length) {
+			if (this.#ended()) {
+				this.#silent = true;
+				this.#stalled = true;
+			} else {
+				this.#underruns++;
+			}
+		}
 
 		return samples;
 	}

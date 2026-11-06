@@ -1,6 +1,6 @@
 /**
  * MoQ networking layer for browsers: connect to a relay, then publish and consume
- * broadcasts, tracks, groups, and frames over WebTransport (or a WebSocket fallback).
+ * broadcasts, tracks, groups, and frames over WebTransport, its WebSocket fallback, or a supplied transport.
  *
  * @module
  */
@@ -17,19 +17,26 @@ export * as Bandwidth from "./bandwidth_api.ts";
 export * as Broadcast from "./broadcast.ts";
 /** A reconnecting, shareable handle on a MoQ session. */
 export { Connection } from "./connection/index.ts";
-/** Publisher instance identities, carried in broadcast paths as UUIDv7 epochs. */
-export * as Epoch from "./epoch.ts";
+/** Live datagram track producers, consumers, and payloads. */
+export * as Datagram from "./datagram.ts";
+/** The codes a session closes with and a stream resets with. */
 export { SessionCode, StreamCode } from "./error.ts";
-/** Session and stream errors, each carrying a code from its own registry. */
+/** Session, stream, and local request errors. */
 export * as Error from "./errors.ts";
 /** Group role handles and frame helpers. */
 export * as Group from "./group.ts";
+export { IMPLEMENTATION } from "./implementation.ts";
+/** Stream instances: one continuous stream at a path, carried on every route. */
+export * as Instance from "./instance.ts";
 /** Broadcast routing tables, independent of any connection. */
 export * as Origin from "./origin.ts";
 /** Broadcast path utilities with delimiter-aware prefix matching. Path patterns are re-exported from `@moq/pattern`. */
 export * as Path from "./path.ts";
-/** Branded time types (nanoseconds, microseconds, milliseconds, seconds) with conversions. */
+/** Point-to-point TCP and track sessions through an origin. */
+export * as socket from "./socket.ts";
+/** Presentation timestamps and their timescales; duration units live in `@moq/clock`. */
 export * as Time from "./time.ts";
+/** A value paired with the timestamp it was captured at, absent when untimed. */
 export type { Timed } from "./timed.ts";
 /** Track role handles. */
 export * as Track from "./track.ts";

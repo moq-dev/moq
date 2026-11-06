@@ -1,16 +1,18 @@
 //! Answering a Usage parse result when the generated `parse()` cannot own the process.
 //!
-//! [`usage::render_failure`] renders [`usage::Error::Help`], `HelpAll` and `Version`
+//! [`usage_rs::render_failure`] renders [`usage_rs::Error::Help`], `HelpAll` and `Version`
 //! as an empty string: they are questions rather than failures, and the generated
 //! `parse()` is expected to take them first. A binary that parses more than once
 //! never reaches that code, so it has to answer them itself. Both shapes exist here:
 //! a TOML merge that layers CLI, env, and file with recorded provenance, and
-//! moq-cli's repeated `--` stage grammar. A private duration adapter parses the
-//! human-readable values used by those flags and TOML keys.
+//! moq-cli's repeated `--` stage grammar. [`Duration`] parses the human-readable
+//! values used by those flags and TOML keys, and [`check_env`] refuses `MOQ_*`
+//! variables a binary does not read.
 
 #[path = "deprecated.rs"]
 mod deprecated;
 pub(crate) mod duration;
+mod env;
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -18,16 +20,17 @@ use std::path::Path;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use usage::config::{
+use usage_rs::config::{
 	CliLayer, EnvLayer, FileScope, Layer, LayerCtx, LayerError, LayerOutput, Layers, Origin, Registry, Resolved,
 	SourceKind, Value, resolve,
 };
 
 pub use deprecated::Deprecated;
-pub(crate) use duration::Duration;
+pub use duration::Duration;
+pub use env::{UnknownEnv, check_env};
 
 /// Re-exported because [`Merge`] and [`answer`] use Usage types in their APIs.
-pub use usage;
+pub use usage_rs;
 
 /// What a Usage parse result asks the process to do.
 #[non_exhaustive]
@@ -71,25 +74,25 @@ impl Answer {
 /// `root` is the command the spec is rooted at, which a help request needs in order
 /// to render the page for the route the words actually took.
 pub fn answer(
-	spec: &usage::argv::spec::Spec<'_>,
-	root: &usage::Command<'_>,
+	spec: &usage_rs::argv::spec::Spec<'_>,
+	root: &usage_rs::Command<'_>,
 	argv: &[&OsStr],
-	err: usage::Error<'_, '_>,
+	err: usage_rs::Error<'_, '_>,
 ) -> Answer {
-	use usage::help::{Page, Style};
+	use usage_rs::help::{Page, Style};
 
-	let page = |cmd, want, style| usage::help::page(spec, root, argv, cmd, want, style).unwrap_or_default();
+	let page = |cmd, want, style| usage_rs::help::page(spec, root, argv, cmd, want, style).unwrap_or_default();
 
 	match err {
-		usage::Error::Help { cmd, long } => {
+		usage_rs::Error::Help { cmd, long } => {
 			let want = if long { Page::Long } else { Page::Short };
 			Answer::Question(page(cmd, want, Style::auto()))
 		}
-		usage::Error::HelpAll { cmd } => Answer::Question(page(cmd, Page::All, Style::auto())),
+		usage_rs::Error::HelpAll { cmd } => Answer::Question(page(cmd, Page::All, Style::auto())),
 		// Not a request: `arg_required_else_help` found nothing to do. clap prints the
 		// short page to stderr and exits 2, and so does this.
-		usage::Error::MissingArgsHelp { cmd } => Answer::Failure(page(cmd, Page::Short, Style::auto_stderr())),
-		usage::Error::Version { long } => {
+		usage_rs::Error::MissingArgsHelp { cmd } => Answer::Failure(page(cmd, Page::Short, Style::auto_stderr())),
+		usage_rs::Error::Version { long } => {
 			let bin = spec.bin.unwrap_or(spec.name);
 			let version = if long {
 				spec.long_version.or(spec.version)
@@ -99,7 +102,7 @@ pub fn answer(
 			.unwrap_or_default();
 			Answer::Question(format!("{bin} {version}\n"))
 		}
-		err => Answer::Failure(usage::render_failure(spec, argv, &err)),
+		err => Answer::Failure(usage_rs::render_failure(spec, argv, &err)),
 	}
 }
 
@@ -114,10 +117,11 @@ pub fn answer(
 /// `parsed` is the struct Usage filled from argv+env+defaults. File keys that
 /// neither the command line nor the environment set replace those defaults.
 ///
-/// The merge is a TOML round-trip, so a `#[serde(skip)]` field comes back as its
-/// default. The released CLI spellings live on such fields: collect
-/// [`Deprecated`] from `parsed` before calling this, and from
-/// the result for the file's own released keys.
+/// With a file, the merge is a TOML round-trip, so a `#[serde(skip)]` field comes
+/// back as its default; without one, `parsed` is returned unchanged. The released
+/// CLI spellings live on such fields: collect [`Deprecated`] from `parsed` before
+/// calling this, and from the result for the file's own released keys
+/// ([`Deprecated::extend`] drops the repeats when no file was given).
 pub struct Merge<'a> {
 	/// The settings declared by the root CLI.
 	pub registry: Registry,
@@ -145,11 +149,13 @@ impl Merge<'_> {
 		}
 		let resolved = resolve(self.registry, layers).map_err(|err| err.to_string())?;
 
+		// Only a file needs the TOML round trip, which refuses non-UTF-8 paths.
+		let Some(source) = self.file else {
+			return Ok((parsed, resolved));
+		};
 		let occupied = occupied_keys(self.registry, &resolved);
 		let mut merged = toml::Value::try_from(&parsed).map_err(|err| err.to_string())?;
-		if let Some(source) = self.file {
-			overlay_unoccupied(&mut merged, source.value, "", &occupied);
-		}
+		overlay_unoccupied(&mut merged, source.value, "", &occupied);
 		let config: T = merged.try_into().map_err(|err: toml::de::Error| err.to_string())?;
 		Ok((config, resolved))
 	}
@@ -216,9 +222,6 @@ fn overlay_unoccupied(base: &mut toml::Value, overlay: &toml::Value, path: &str,
 				} else {
 					format!("{path}.{key}")
 				};
-				if !occupied.contains(child.as_str()) {
-					base.remove(&format!("__cli_{key}"));
-				}
 				match base.get_mut(key) {
 					Some(existing) => overlay_unoccupied(existing, value, &child, occupied),
 					None if occupied.contains(child.as_str()) => {}
@@ -237,7 +240,7 @@ fn overlay_unoccupied(base: &mut toml::Value, overlay: &toml::Value, path: &str,
 	}
 }
 
-/// A TOML document as a [`usage::config`] layer: every key present in the file,
+/// A TOML document as a [`usage_rs::config`] layer: every key present in the file,
 /// including empty lists and `false` booleans.
 struct TomlLayer<'a> {
 	path: &'a Path,

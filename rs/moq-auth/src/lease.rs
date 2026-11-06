@@ -7,10 +7,8 @@
 //! by any in-process logic when the embedder decides itself. No trait, no callbacks.
 
 use std::sync::Arc;
-#[cfg(feature = "tokio")]
-use std::sync::Mutex;
 use std::task::Poll;
-#[cfg(feature = "tokio")]
+#[cfg(feature = "client")]
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -106,36 +104,68 @@ struct State {
 }
 
 /// What the grant's clock requires next.
+#[cfg(feature = "client")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Due {
+pub(crate) enum Due {
 	/// Ask the decider for a fresh grant.
 	Revalidate,
 	/// The grant expired before it could be renewed.
 	Expired,
 }
 
-#[cfg(feature = "tokio")]
+#[cfg(feature = "client")]
 #[derive(Debug)]
 struct Clock {
-	next: Option<tokio::time::Instant>,
-	expires: Option<tokio::time::Instant>,
+	next: Option<kio::clock::Instant>,
+	expires: Option<kio::clock::Instant>,
 	cadence: Option<Duration>,
 	failures: u32,
-	revision: u64,
 }
 
-#[cfg(feature = "tokio")]
+/// The timers a [`Producer::poll_due`] waits on, kept by its caller between polls.
+#[cfg(feature = "client")]
+#[derive(Default)]
+pub(crate) struct DueTimers {
+	revalidate: Option<kio::clock::Sleep>,
+	expire: Option<kio::clock::Sleep>,
+}
+
+#[cfg(feature = "client")]
+impl DueTimers {
+	/// Ready once the clock reaches `at`; never for no instant. Re-arms when `at` moves.
+	fn poll_at(
+		timer: &mut Option<kio::clock::Sleep>,
+		waiter: &kio::Waiter,
+		at: Option<kio::clock::Instant>,
+	) -> Poll<()> {
+		let Some(at) = at else {
+			*timer = None;
+			return Poll::Pending;
+		};
+		let sleep = match timer {
+			Some(sleep) => {
+				if sleep.deadline() != at {
+					sleep.reset(at);
+				}
+				sleep
+			}
+			None => timer.insert(kio::clock::sleep_until(at)),
+		};
+		waiter.poll_future(std::pin::Pin::new(sleep))
+	}
+}
+
+#[cfg(feature = "client")]
 impl Clock {
 	fn new(grant: &Grant) -> Self {
 		Self {
 			// A cadence too far out to schedule is no scheduled re-check; `expires` still bounds the grant.
 			next: grant
 				.revalidate
-				.and_then(|cadence| tokio::time::Instant::now().checked_add(cadence)),
+				.and_then(|cadence| kio::clock::now().checked_add(cadence)),
 			expires: grant.deadline(),
 			cadence: grant.revalidate,
 			failures: 0,
-			revision: 0,
 		}
 	}
 }
@@ -146,17 +176,16 @@ impl Clock {
 #[derive(Debug)]
 pub struct Producer {
 	state: kio::Shared<State>,
-	#[cfg(feature = "tokio")]
-	clock: Mutex<Clock>,
-	#[cfg(feature = "tokio")]
-	clock_changed: tokio::sync::Notify,
+	// Its changes wake a parked `poll_due`, which re-arms on the new deadlines.
+	#[cfg(feature = "client")]
+	clock: kio::Shared<Clock>,
 }
 
 impl Producer {
 	/// Start a lease on `grant`, returning both handles.
 	pub fn new(grant: Grant) -> (Self, Consumer) {
-		#[cfg(feature = "tokio")]
-		let clock = Mutex::new(Clock::new(&grant));
+		#[cfg(feature = "client")]
+		let clock = kio::Shared::new(Clock::new(&grant));
 		let state = kio::Shared::new(State {
 			grant,
 			epoch: 0,
@@ -166,10 +195,8 @@ impl Producer {
 		(
 			Self {
 				state: state.clone(),
-				#[cfg(feature = "tokio")]
+				#[cfg(feature = "client")]
 				clock,
-				#[cfg(feature = "tokio")]
-				clock_changed: tokio::sync::Notify::new(),
 			},
 			Consumer::new(state),
 		)
@@ -181,92 +208,59 @@ impl Producer {
 		if state.closed.is_some() {
 			return;
 		}
-		#[cfg(feature = "tokio")]
+		#[cfg(feature = "client")]
 		{
-			let mut clock = self.clock.lock().expect("lease clock");
-			let revision = clock.revision.wrapping_add(1);
-			*clock = Clock::new(&grant);
-			clock.revision = revision;
+			*self.clock.lock() = Clock::new(&grant);
 		}
 		state.grant = grant;
 		state.epoch += 1;
-		drop(state);
-		#[cfg(feature = "tokio")]
-		self.clock_changed.notify_waiters();
 	}
 
-	/// Wait until the grant needs a re-check or expires. A session may request an
-	/// earlier re-check through [`Consumer::revalidate`].
-	#[cfg(feature = "tokio")]
-	pub async fn due(&self) -> Due {
-		loop {
-			let changed = self.clock_changed.notified();
-			tokio::pin!(changed);
-			changed.as_mut().enable();
-			let (next, expires, revision) = {
-				let clock = self.clock.lock().expect("lease clock");
-				(clock.next, clock.expires, clock.revision)
-			};
-			let revalidate = async {
-				match next {
-					Some(at) => tokio::time::sleep_until(at).await,
-					None => std::future::pending().await,
-				}
-			};
-			let expire = async {
-				match expires {
-					Some(at) => tokio::time::sleep_until(at).await,
-					None => std::future::pending().await,
-				}
-			};
-			tokio::select! {
-				biased;
-				() = expire => {
-					if self.clock.lock().expect("lease clock").revision == revision {
-						return Due::Expired;
-					}
-				},
-				() = changed => continue,
-				() = revalidate => {
-					let mut clock = self.clock.lock().expect("lease clock");
-					if clock.revision == revision {
-						clock.next = None;
-						return Due::Revalidate;
-					}
-				},
-				() = self.revalidate_requested() => {
-					self.clock.lock().expect("lease clock").next = None;
-					return Due::Revalidate;
-				},
+	/// What the grant's clock requires next: a re-check, or its expiry. A session may
+	/// request an earlier re-check through [`Consumer::revalidate`].
+	#[cfg(feature = "client")]
+	#[cfg_attr(test, kio::wrapper)]
+	pub(crate) fn poll_due(&self, waiter: &kio::Waiter, timers: &mut DueTimers) -> Poll<Due> {
+		// Judged under the clock's lock, so a change after it parks this poll on the new deadlines.
+		let mut due = None;
+		let clock = self.clock.poll(waiter, |clock| {
+			if DueTimers::poll_at(&mut timers.expire, waiter, clock.expires).is_ready() {
+				due = Some(Due::Expired);
+			} else if DueTimers::poll_at(&mut timers.revalidate, waiter, clock.next).is_ready() {
+				due = Some(Due::Revalidate);
 			}
+			if due.is_some() { Poll::Ready(()) } else { Poll::Pending }
+		});
+		if let Poll::Ready(mut clock) = clock {
+			let due = due.expect("ready with a due");
+			if due == Due::Revalidate {
+				clock.next = None;
+			}
+			return Poll::Ready(due);
 		}
+		std::task::ready!(self.poll_revalidate_requested(waiter));
+		self.clock.lock().next = None;
+		Poll::Ready(Due::Revalidate)
 	}
 
 	/// Keep the current grant after a failed re-check and schedule a jittered retry.
-	#[cfg(feature = "tokio")]
-	pub fn failed(&self) -> Duration {
+	#[cfg(feature = "client")]
+	pub(crate) fn failed(&self) -> Duration {
 		use rand::RngExt;
 		const BACKOFF_MAX: Duration = Duration::from_secs(60);
-		let mut clock = self.clock.lock().expect("lease clock");
+		let mut clock = self.clock.lock();
 		clock.failures = clock.failures.saturating_add(1);
 		let base = Duration::from_secs(1) * 2u32.saturating_pow(clock.failures.saturating_sub(1).min(16));
 		let base = base.min(clock.cadence.unwrap_or(BACKOFF_MAX)).min(BACKOFF_MAX);
-		let delay = base.mul_f64(rand::rng().random_range(0.75..=1.25));
-		clock.next = Some(tokio::time::Instant::now() + delay);
-		clock.revision = clock.revision.wrapping_add(1);
-		drop(clock);
-		self.clock_changed.notify_waiters();
+		let delay = base.mul_f64(kio::clock::rng().random_range(0.75..=1.25));
+		clock.next = Some(kio::clock::now() + delay);
 		delay
 	}
 
 	/// Consume an already-asked re-check after an in-flight response.
 	#[cfg(feature = "client")]
 	pub(crate) fn immediate(&self) {
-		let mut clock = self.clock.lock().expect("lease clock");
-		clock.next = None;
-		clock.revision = clock.revision.wrapping_add(1);
-		drop(clock);
-		self.clock_changed.notify_waiters();
+		self.clock.lock().next = None;
 	}
 
 	/// End the lease with `reason`, consuming the handle, and return the reason
@@ -275,29 +269,21 @@ impl Producer {
 		self.finish(reason, Bytes::default()).0
 	}
 
-	/// Poll for the lease ending, from either side: why it ended, and the totals
-	/// the session reported. A producer-side revoke, or a drop, reports zero bytes.
+	/// The lease's end, from either side: why it ended, and the totals the session reported.
+	/// A producer-side revoke, or a drop, reports zero bytes.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<(Reason, Bytes)> {
 		let state = std::task::ready!(self.state.poll(waiter, |state| ready_if(state.closed.is_some())));
 		Poll::Ready(state.closed.clone().expect("waited for a close"))
 	}
 
-	/// Wait for the lease to end, from either side.
-	pub async fn closed(&self) -> (Reason, Bytes) {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
-	}
-
-	/// Poll until at least one re-check has been asked since the last observation.
+	/// Resolves once at least one re-check has been asked since the last observation.
 	/// A burst of asks resolves once.
-	pub fn poll_revalidate(&self, waiter: &kio::Waiter) -> Poll<()> {
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_revalidate_requested(&self, waiter: &kio::Waiter) -> Poll<()> {
 		let mut state = std::task::ready!(self.state.poll(waiter, |state| ready_if(state.revalidate > 0)));
 		state.revalidate = 0;
 		Poll::Ready(())
-	}
-
-	/// Wait until a re-check has been asked since the last observation.
-	pub async fn revalidate_requested(&self) {
-		kio::wait(|waiter| self.poll_revalidate(waiter)).await
 	}
 
 	pub(crate) fn finish(&self, reason: Reason, bytes: Bytes) -> (Reason, Bytes) {
@@ -366,7 +352,8 @@ impl Consumer {
 		self.hold.state.read().grant.clone()
 	}
 
-	/// Poll for the next update: the new grant, or the reason the lease ended.
+	/// The next update: the new grant, or the reason the lease ended.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Grant, Reason>> {
 		let seen = self.seen;
 		let state = std::task::ready!(
@@ -381,26 +368,32 @@ impl Consumer {
 		Poll::Ready(Ok(state.grant.clone()))
 	}
 
-	/// Wait for the next update: the new grant, or the reason the lease ended.
-	pub async fn changed(&mut self) -> Result<Grant, Reason> {
-		kio::wait(|waiter| self.poll_changed(waiter)).await
-	}
-
-	/// Poll for the lease ending.
+	/// The reason the lease ended, once it does.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Reason> {
 		let state = std::task::ready!(self.hold.state.poll(waiter, |state| ready_if(state.closed.is_some())));
 		Poll::Ready(state.closed.as_ref().expect("waited for a close").0.clone())
-	}
-
-	/// Wait for the lease to end.
-	pub async fn closed(&self) -> Reason {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
 	/// Ask the producer to re-check now. A no-op on a [`fixed`](Self::fixed)
 	/// lease, which has nobody to ask.
 	pub fn revalidate(&self) {
 		self.hold.state.lock().revalidate += 1;
+	}
+
+	/// Resolve once the lease has ended and the decider heard: after an auth server's
+	/// `end` POST returns or fails, so its request timeout bounds the wait, and as soon
+	/// as the lease ends when nobody needs telling. Take it before [`close`](Self::close)
+	/// to learn when that close was reported.
+	#[cfg(feature = "async")]
+	pub fn reported(&self) -> impl Future<Output = ()> + Send + 'static {
+		// Holds the state, not the lease, so dropping every consumer still ends it.
+		let reported = Reported {
+			state: self.hold.state.clone(),
+			#[cfg(feature = "client")]
+			context: self.hold.context.clone(),
+		};
+		kio::wait(move |waiter| reported.poll(waiter))
 	}
 
 	/// End the lease with the session's own close classification and the totals it
@@ -429,6 +422,28 @@ impl Drop for Held {
 	}
 }
 
+/// What [`Consumer::reported`] waits on.
+#[cfg(feature = "async")]
+struct Reported {
+	state: kio::Shared<State>,
+	#[cfg(feature = "client")]
+	context: Option<crate::client::Context>,
+}
+
+#[cfg(feature = "async")]
+impl Reported {
+	fn poll(&self, waiter: &kio::Waiter) -> Poll<()> {
+		drop(std::task::ready!(
+			self.state.poll(waiter, |state| ready_if(state.closed.is_some()))
+		));
+		#[cfg(feature = "client")]
+		if let Some(context) = &self.context {
+			std::task::ready!(context.poll_reported(waiter));
+		}
+		Poll::Ready(())
+	}
+}
+
 fn ready_if(condition: bool) -> Poll<()> {
 	if condition { Poll::Ready(()) } else { Poll::Pending }
 }
@@ -439,10 +454,12 @@ mod tests {
 	use std::future::Future;
 	use std::pin::pin;
 	use std::task::{Context, Waker};
-	use std::time::SystemTime;
 
 	fn grant(publish: &str) -> Grant {
-		Grant::new([publish.parse().unwrap()].into_iter().collect(), Default::default())
+		Grant::new(
+			publish.parse::<moq_pattern::Pattern>().unwrap(),
+			moq_pattern::Patterns::new(),
+		)
 	}
 
 	fn poll<F: Future>(future: F) -> Poll<F::Output> {
@@ -567,43 +584,55 @@ mod tests {
 		assert_eq!(poll(producer.revalidate_requested()), Poll::Ready(()));
 	}
 
-	#[cfg(feature = "tokio")]
+	#[cfg(feature = "client")]
 	#[tokio::test]
 	async fn due_follows_cadence_nudges_and_backoff() {
 		tokio::time::pause();
 		let mut grant = grant("a/**");
 		grant.revalidate = Some(Duration::from_secs(10));
-		grant.expires = Some(SystemTime::now() + Duration::from_secs(60));
+		grant.expires = Some(kio::clock::wall() + Duration::from_secs(60));
 		let (producer, consumer) = Producer::new(grant.clone());
-		assert!(tokio::time::timeout(Duration::ZERO, producer.due()).await.is_err());
+		assert!(
+			kio::clock::timeout(Duration::ZERO, producer.due(&mut DueTimers::default()))
+				.await
+				.is_err()
+		);
 		tokio::time::advance(Duration::from_secs(10)).await;
-		assert_eq!(producer.due().await, Due::Revalidate);
-		assert!(tokio::time::timeout(Duration::ZERO, producer.due()).await.is_err());
+		assert_eq!(producer.due(&mut DueTimers::default()).await, Due::Revalidate);
+		assert!(
+			kio::clock::timeout(Duration::ZERO, producer.due(&mut DueTimers::default()))
+				.await
+				.is_err()
+		);
 
 		let delay = producer.failed();
 		assert!(delay >= Duration::from_millis(750) && delay <= Duration::from_millis(1250));
 		tokio::time::advance(Duration::from_secs(2)).await;
-		assert_eq!(producer.due().await, Due::Revalidate);
+		assert_eq!(producer.due(&mut DueTimers::default()).await, Due::Revalidate);
 
 		grant.revalidate = Some(Duration::from_secs(5));
 		producer.update(grant);
 		consumer.revalidate();
-		assert_eq!(producer.due().await, Due::Revalidate);
-		assert!(tokio::time::timeout(Duration::ZERO, producer.due()).await.is_err());
+		assert_eq!(producer.due(&mut DueTimers::default()).await, Due::Revalidate);
+		assert!(
+			kio::clock::timeout(Duration::ZERO, producer.due(&mut DueTimers::default()))
+				.await
+				.is_err()
+		);
 	}
 
-	#[cfg(feature = "tokio")]
+	#[cfg(feature = "client")]
 	#[tokio::test]
 	async fn due_reschedules_an_outstanding_wait_after_update() {
 		tokio::time::pause();
 		let mut grant = grant("a/**");
 		grant.revalidate = Some(Duration::from_secs(30));
-		grant.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+		grant.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 		let (producer, _consumer) = Producer::new(grant.clone());
 		let producer = std::sync::Arc::new(producer);
 		let waiter = tokio::spawn({
 			let producer = producer.clone();
-			async move { producer.due().await }
+			async move { producer.due(&mut DueTimers::default()).await }
 		});
 		tokio::task::yield_now().await;
 		grant.revalidate = Some(Duration::from_secs(5));
@@ -612,13 +641,13 @@ mod tests {
 		assert_eq!(waiter.await.unwrap(), Due::Revalidate);
 	}
 
-	#[cfg(feature = "tokio")]
+	#[cfg(feature = "client")]
 	#[tokio::test]
 	async fn backoff_grows_and_stays_bounded() {
 		tokio::time::pause();
 		let mut grant = grant("a/**");
 		grant.revalidate = Some(Duration::from_secs(30));
-		grant.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+		grant.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 		let (producer, _consumer) = Producer::new(grant);
 		let first = producer.failed();
 		assert!(first >= Duration::from_millis(750) && first <= Duration::from_millis(1250));
@@ -629,7 +658,7 @@ mod tests {
 		assert!(later <= Duration::from_secs(30).mul_f64(1.25));
 	}
 
-	#[cfg(feature = "tokio")]
+	#[cfg(feature = "client")]
 	#[tokio::test]
 	async fn an_unschedulable_cadence_never_rechecks() {
 		tokio::time::pause();
@@ -637,17 +666,21 @@ mod tests {
 		grant.revalidate = Some(Duration::MAX);
 		let (producer, _consumer) = Producer::new(grant);
 		tokio::time::advance(Duration::from_secs(3600)).await;
-		assert!(tokio::time::timeout(Duration::ZERO, producer.due()).await.is_err());
+		assert!(
+			kio::clock::timeout(Duration::ZERO, producer.due(&mut DueTimers::default()))
+				.await
+				.is_err()
+		);
 	}
 
-	#[cfg(feature = "tokio")]
+	#[cfg(feature = "client")]
 	#[tokio::test]
 	async fn due_expires_even_without_a_recheck() {
 		tokio::time::pause();
 		let mut grant = grant("a/**");
-		grant.expires = Some(SystemTime::now() - Duration::from_secs(4));
+		grant.expires = Some(kio::clock::wall() - Duration::from_secs(4));
 		let (producer, _consumer) = Producer::new(grant);
-		let task = tokio::spawn(async move { producer.due().await });
+		let task = tokio::spawn(async move { producer.due(&mut DueTimers::default()).await });
 		tokio::task::yield_now().await;
 		tokio::time::advance(Duration::from_secs(2)).await;
 		assert_eq!(task.await.unwrap(), Due::Expired);

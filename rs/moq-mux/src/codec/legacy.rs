@@ -115,9 +115,9 @@ pub(crate) struct Config {
 
 /// Legacy audio importer.
 ///
-/// Publishes each whole frame as one hang frame in its own group, so the relay
-/// forwards it immediately. The audio is never decoded; the catalog carries the
-/// codec, sample rate and channel count read from the frame header.
+/// Publishes each whole frame as one hang frame, into the current group until the
+/// caller cuts it. The audio is never decoded; the catalog carries the codec,
+/// sample rate and channel count read from the frame header.
 pub(crate) struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::AudioConfig>,
 }
@@ -169,8 +169,6 @@ impl Import {
 		self.track.abort(err);
 	}
 
-	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
-	/// the fields its config didn't supply.
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		self.track.cut(end)?;

@@ -1,21 +1,10 @@
 {
 	"moq-lite-07-wip": {
-		"reason": "Re-accepted by the maintainer (2026-10-13): this draft is unpublished and its wire is still changing. Remeasured 2026-10-13 against these releases: every lite-07-wip cell fails, since released moq-cli, moq-relay, and @moq/net reject current lite-07-wip sessions (long buffer, invalid value, hop count exceeds maximum). Compare stable lite drafts; reassess when any affected release changes.",
+		"reason": "Re-accepted by the maintainer (2026-10-13): this draft is unpublished and its wire is still changing. Remeasured 2026-11-03 against these releases, with the media lanes checking the audio tone: all 16 cross-version lite-07-wip media, publication, and FETCH cells fail, while its FETCH capability check and the stable lite-01 through lite-06 cells pass, including the Opus phase check (moq-cli keeps the Opus edit list since 0.14.10). Current and released lite-07-wip framing differs (long buffer, invalid value, protocol violation). Reassess when any affected release changes.",
 		"releases": {
-			"moq-cli": "0.14.4",
-			"moq-relay": "0.17.4",
-			"@moq/net": "0.4.3"
-		}
-	},
-	"catalog-archive": {
-		"reason": "Re-accepted by the maintainer (2026-10-13), until a release carries #4034: #4034 reshaped the catalog `archive` entry in place (`timelines` replaced the required `track`), so released and current hang/@moq/hang reject each other's live catalogs. Remeasured 2026-10-13 against these releases: all 24 media cells fail, Rust and JS readers alike (missing field `track` / `timelines`).",
-		"releases": {
-			"moq-cli": "0.14.4",
-			"hang": "0.21.13",
-			"@moq/hang": "0.5.2"
-		},
-		"cells": {
-			"lanes": ["media"]
+			"moq-cli": "0.14.12",
+			"moq-relay": "0.17.12",
+			"@moq/net": "0.4.7"
 		}
 	}
 }

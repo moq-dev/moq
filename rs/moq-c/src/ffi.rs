@@ -9,8 +9,26 @@ use url::Url;
 use crate::{Error, Id, moq_protocol_error};
 
 /// A callback receiving a positive handle/value, zero on clean completion, or a negative error.
-#[allow(non_camel_case_types)]
+///
+/// Runs on moq-c's runtime thread. The callback and `user_data` must be safe to use on that thread.
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 pub type moq_status_callback = Option<extern "C" fn(user_data: *mut c_void, code: i32)>;
+
+/// A callback receiving each session lifecycle change; the `MOQ_CONNECTION_PHASE_CLOSED` one is terminal.
+///
+/// Runs on moq-c's runtime thread. The callback and `user_data` must be safe to use on that thread.
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
+pub type moq_state_callback = Option<extern "C" fn(user_data: *mut c_void, state: *const crate::moq_connection_state)>;
+
+/// Callback for [crate::moq_origin_follow]: each [crate::moq_follow_event] and its code.
+///
+/// `code` is the broadcast handle for `MOQ_FOLLOW_EVENT_ONLINE`, `0` for
+/// `MOQ_FOLLOW_EVENT_OFFLINE`, and the terminal status for `MOQ_FOLLOW_EVENT_END`: `0`, or a
+/// negative error whose reason [crate::moq_error] reports inside the callback.
+///
+/// Runs on moq-c's runtime thread. The callback and `user_data` must be safe to use on that thread.
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
+pub type moq_follow_callback = Option<extern "C" fn(user_data: *mut c_void, event: crate::moq_follow_event, code: i32)>;
 
 pub static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
 	let runtime = tokio::runtime::Builder::new_current_thread()
@@ -51,6 +69,141 @@ pub fn enter<C: ReturnCode, F: FnOnce() -> C>(f: F) -> i32 {
 	}
 }
 
+/// Run a background operation before its terminal callback and resource cleanup.
+pub async fn run<T>(future: impl std::future::Future<Output = Result<T, Error>>) -> Result<T, Error> {
+	moq_tokio::panic::isolate(future).await.unwrap_or(Err(Error::Panic))
+}
+
+/// Completion of an owned background task, shared by the object's host operations.
+#[derive(Clone, Default)]
+pub struct Background {
+	result: Option<kio::Consumer<Option<Result<(), Error>>>>,
+}
+
+impl Background {
+	/// Spawn an owned operation and retain its completion.
+	pub fn new(future: impl std::future::Future<Output = Result<(), Error>> + Send + 'static) -> Self {
+		let result = kio::Producer::new(None);
+		let receiver = result.consume();
+		RUNTIME.spawn(async move {
+			let completed = run(future).await;
+			*result
+				.write()
+				.unwrap_or_else(|_| unreachable!("only the background task closes its completion")) = Some(completed);
+		});
+		Self { result: Some(receiver) }
+	}
+
+	/// Own a model driver until its completion has been reported.
+	pub fn driver(mut driver: impl moq_net::time::Driver + Send + 'static) -> Self {
+		let result = kio::Producer::new(None);
+		let receiver = result.consume();
+		RUNTIME.spawn(async move {
+			// Keep the driver outside the unwind, so its channels close after panic publication.
+			let completed = run(async {
+				match moq_net::time::run(Borrowed(&mut driver)).await {
+					moq_net::Error::Closed => Ok(()),
+					error => Err(error.into()),
+				}
+			})
+			.await;
+			if matches!(&completed, Err(Error::Panic)) {
+				*result
+					.write()
+					.unwrap_or_else(|_| unreachable!("only the task closes its completion")) = Some(completed.clone());
+			}
+			let completed = run(async move {
+				drop(driver);
+				completed
+			})
+			.await;
+			*result
+				.write()
+				.unwrap_or_else(|_| unreachable!("only the background task closes its completion")) = Some(completed);
+		});
+		Self { result: Some(receiver) }
+	}
+
+	/// Return a completed background failure, if any.
+	pub fn check(&self) -> Result<(), Error> {
+		self.result
+			.as_ref()
+			.map(|result| result.read().clone().unwrap_or(Ok(())))
+			.unwrap_or(Ok(()))
+	}
+
+	/// The background operation's result, once it finishes.
+	#[kio::wrapper]
+	pub fn poll_finished(&self, waiter: &kio::Waiter) -> std::task::Poll<Result<(), Error>> {
+		let Some(result) = &self.result else {
+			return std::task::Poll::Ready(Ok(()));
+		};
+		match std::task::ready!(result.poll(waiter, |state| match &**state {
+			Some(result) => std::task::Poll::Ready(result.clone()),
+			None => std::task::Poll::Pending,
+		})) {
+			Ok(result) => std::task::Poll::Ready(result),
+			Err(_) => std::task::Poll::Ready(Err(Error::Panic)),
+		}
+	}
+
+	/// Fail an operation when its owned background task fails.
+	pub async fn watch<T>(&self, future: impl std::future::Future<Output = Result<T, Error>>) -> Result<T, Error> {
+		self.check()?;
+		if self.result.is_none() {
+			return future.await;
+		}
+		tokio::pin!(future);
+		let result = tokio::select! {
+			biased;
+			result = self.finished() => { result?; future.await }
+			result = &mut future => result,
+		};
+		self.check()?;
+		result
+	}
+}
+
+#[cfg(test)]
+pub(crate) fn panicking_origin() -> (moq_net::origin::Producer, Background, kio::Producer<bool>) {
+	struct Driver {
+		inner: moq_net::origin::Driver,
+		failed: kio::Consumer<bool>,
+	}
+	impl moq_net::time::Driver for Driver {
+		fn poll(
+			&mut self,
+			now: moq_net::time::Instant,
+			waiter: &kio::Waiter,
+		) -> Result<Option<moq_net::time::Instant>, moq_net::Error> {
+			let _ = self.failed.poll(waiter, |state| {
+				assert!(!**state, "injected origin driver panic");
+				std::task::Poll::<()>::Pending
+			});
+			self.inner.poll(now, waiter)
+		}
+	}
+	let (origin, inner) = moq_net::origin::Producer::new(Default::default());
+	let failed = kio::Producer::new(false);
+	let driver = Background::driver(Driver {
+		inner,
+		failed: failed.consume(),
+	});
+	(origin, driver, failed)
+}
+
+struct Borrowed<'a, D>(&'a mut D);
+
+impl<D: moq_net::time::Driver> moq_net::time::Driver for Borrowed<'_, D> {
+	fn poll(
+		&mut self,
+		now: moq_net::time::Instant,
+		waiter: &kio::Waiter,
+	) -> Result<Option<moq_net::time::Instant>, moq_net::Error> {
+		self.0.poll(now, waiter)
+	}
+}
+
 /// Wrapper for C callback functions with user data.
 ///
 /// Stores a function pointer and user data pointer to call C callbacks
@@ -67,6 +220,7 @@ impl OnStatus {
 	/// # Safety
 	/// - The caller must ensure user_data remains valid for the callback's lifetime.
 	/// - The callback function pointer must be valid if provided.
+	/// - The callback and `user_data` must be safe to use on moq-c's runtime thread.
 	pub unsafe fn new(user_data: *mut c_void, on_status: moq_status_callback) -> Result<Self, Error> {
 		Ok(Self {
 			user_data,
@@ -85,7 +239,95 @@ impl OnStatus {
 	}
 }
 
+// SAFETY: The constructor requires the callback and user_data to remain valid and
+// safe to use on moq-c's runtime thread for the callback's lifetime.
 unsafe impl Send for OnStatus {}
+
+/// A [moq_state_callback] and its user data.
+#[derive(Clone, Copy)]
+pub struct OnState {
+	user_data: *mut c_void,
+	on_state: extern "C" fn(user_data: *mut c_void, state: *const crate::moq_connection_state),
+}
+
+impl OnState {
+	/// Wrap a C state callback.
+	///
+	/// # Safety
+	/// - The caller must keep `user_data` valid until the terminal callback.
+	/// - The callback and `user_data` must be safe to use on moq-c's runtime thread.
+	pub unsafe fn new(user_data: *mut c_void, on_state: moq_state_callback) -> Result<Self, Error> {
+		Ok(Self {
+			user_data,
+			on_state: on_state.ok_or(Error::InvalidPointer)?,
+		})
+	}
+
+	/// Deliver one snapshot, recording its failure first so the callback can read `moq_error()`.
+	pub fn call(&self, state: &crate::session::Lifecycle) {
+		if let Some(failure) = &state.failure {
+			record(failure);
+		}
+		let state = state.to_c();
+		(self.on_state)(self.user_data, &state);
+	}
+}
+
+// SAFETY: The constructor requires the callback and user_data to remain valid and
+// safe to use on moq-c's runtime thread until the terminal callback.
+unsafe impl Send for OnState {}
+
+/// A [moq_follow_callback] and its user data.
+#[derive(Clone, Copy)]
+pub struct OnFollow {
+	user_data: *mut c_void,
+	on_follow: extern "C" fn(user_data: *mut c_void, event: crate::moq_follow_event, code: i32),
+}
+
+impl OnFollow {
+	/// Wrap a C follow callback.
+	///
+	/// # Safety
+	/// - The caller must keep `user_data` valid until the `MOQ_FOLLOW_EVENT_END` callback.
+	/// - The callback and `user_data` must be safe to use on moq-c's runtime thread.
+	pub unsafe fn new(user_data: *mut c_void, on_follow: moq_follow_callback) -> Result<Self, Error> {
+		Ok(Self {
+			user_data,
+			on_follow: on_follow.ok_or(Error::InvalidPointer)?,
+		})
+	}
+
+	/// Deliver a broadcast handle for an instance now serving the path.
+	pub fn online(&self, broadcast: crate::Id) {
+		(self.on_follow)(
+			self.user_data,
+			crate::moq_follow_event::MOQ_FOLLOW_EVENT_ONLINE,
+			i32::from(broadcast),
+		);
+	}
+
+	/// Report that the path went offline.
+	pub fn offline(&self) {
+		(self.on_follow)(self.user_data, crate::moq_follow_event::MOQ_FOLLOW_EVENT_OFFLINE, 0);
+	}
+}
+
+impl crate::task::Terminal for OnFollow {
+	/// Deliver the terminal status, recording its failure first so the callback can read
+	/// `moq_error()`.
+	fn terminal(&self, res: Result<(), Error>) {
+		record_error(&res);
+		(self.on_follow)(
+			self.user_data,
+			crate::moq_follow_event::MOQ_FOLLOW_EVENT_END,
+			res.code(),
+		);
+	}
+}
+
+// SAFETY: The constructor requires the callback and user_data to remain valid and
+// safe to use on moq-c's runtime thread until the terminal callback.
+unsafe impl Send for OnFollow {}
 
 /// Types that can be converted to C-compatible return codes.
 pub trait ReturnCode {
@@ -194,7 +436,12 @@ thread_local! {
 /// Called at the FFI boundary (sync return and callback dispatch) right before
 /// the numeric code is produced, so the conversion in `code()` stays pure.
 fn record_error<C: ReturnCode>(ret: &C) {
-	let Some(err) = ret.error() else { return };
+	if let Some(err) = ret.error() {
+		record(err);
+	}
+}
+
+fn record(err: &Error) {
 	// CString::new fails only on an interior NUL, which our messages never
 	// contain; skip storing rather than truncating if it ever happens.
 	if let Ok(msg) = CString::new(err.to_string()) {
@@ -318,4 +565,100 @@ pub unsafe fn parse_slice<'a>(data: *const u8, size: usize) -> Result<&'a [u8], 
 
 	let data = unsafe { std::slice::from_raw_parts(data, size) };
 	Ok(data)
+}
+
+/// Parse an optional timestamp, NULL meaning untimed.
+///
+/// # Safety
+/// `timestamp` must be NULL or a valid pointer to a [crate::moq_timestamp].
+pub unsafe fn parse_timestamp(timestamp: *const crate::moq_timestamp) -> Result<Option<moq_net::Timestamp>, Error> {
+	Ok(unsafe { timestamp.as_ref() }
+		.map(|&timestamp| timestamp.try_into())
+		.transpose()?)
+}
+
+#[cfg(test)]
+mod tests {
+
+	#[tokio::test]
+	async fn a_driver_teardown_panic_reaches_its_owner() {
+		struct Driver;
+		impl moq_net::time::Driver for Driver {
+			fn poll(
+				&mut self,
+				_: moq_net::time::Instant,
+				_: &kio::Waiter,
+			) -> Result<Option<moq_net::time::Instant>, moq_net::Error> {
+				Err(moq_net::Error::Closed)
+			}
+		}
+		impl Drop for Driver {
+			fn drop(&mut self) {
+				panic!("injected driver teardown panic");
+			}
+		}
+		let driver = crate::ffi::Background::driver(Driver);
+		assert!(matches!(driver.finished().await, Err(Error::Panic)));
+	}
+	use super::*;
+
+	#[tokio::test]
+	async fn an_owned_driver_panic_wins_over_its_dropped_channels() {
+		let driver = Background::new(async { panic!("injected origin driver panic") });
+		assert!(matches!(
+			driver.watch(std::future::pending::<Result<(), Error>>()).await,
+			Err(Error::Panic)
+		));
+		assert!(matches!(
+			driver
+				.watch(async { Err::<(), _>(moq_net::Error::Cancel.into()) })
+				.await,
+			Err(Error::Panic)
+		));
+	}
+
+	struct PanickingDriver {
+		dropped: Option<tokio::sync::oneshot::Sender<()>>,
+		observed: std::sync::mpsc::Receiver<()>,
+	}
+
+	impl moq_net::time::Driver for PanickingDriver {
+		fn poll(
+			&mut self,
+			_: moq_net::time::Instant,
+			_: &kio::Waiter,
+		) -> Result<Option<moq_net::time::Instant>, moq_net::Error> {
+			panic!("injected driver poll panic");
+		}
+	}
+
+	impl Drop for PanickingDriver {
+		fn drop(&mut self) {
+			let _ = self.dropped.take().unwrap().send(());
+			// Hold teardown until the foreign host has classified the dropped channel.
+			let _ = self.observed.recv();
+		}
+	}
+
+	#[tokio::test]
+	async fn a_driver_panic_is_recorded_before_teardown_wakes_the_host() {
+		let (dropped, closed) = tokio::sync::oneshot::channel();
+		let (observed, ack) = std::sync::mpsc::channel();
+		let driver = Background::driver(PanickingDriver {
+			dropped: Some(dropped),
+			observed: ack,
+		});
+		let result = driver
+			.watch(async {
+				let _ = closed.await;
+				Err::<(), _>(moq_net::Error::Cancel.into())
+			})
+			.await;
+		let _ = observed.send(());
+		assert!(matches!(driver.finished().await, Err(Error::Panic)));
+		assert!(
+			matches!(result, Err(Error::Panic)),
+			"host saw teardown before panic: {result:?}"
+		);
+	}
 }

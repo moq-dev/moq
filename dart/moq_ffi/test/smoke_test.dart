@@ -4,6 +4,16 @@ import 'package:moq_ffi/moq_ffi.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('destroyed object arguments are refused before native calls', () {
+    final broadcast = MoqBroadcastProducer();
+    broadcast.dispose();
+
+    expect(
+      () => MoqMediaCatalogProducer(broadcast: broadcast),
+      throwsStateError,
+    );
+  });
+
   test('stream abort preserves the structured protocol record', () async {
     final track = MoqBroadcastProducer().publishTrack(
       name: 'errors',
@@ -35,13 +45,19 @@ void main() {
 
   test('raw track round trips a frame', () async {
     final broadcast = MoqBroadcastProducer();
-    final track = broadcast.publishTrack(name: 'events', info: null);
+    final track = broadcast.publishTrack(
+      name: 'events',
+      info: MoqTrackInfo(timescale: 1000000),
+    );
     final consumer = track.consume(subscription: null);
     final nextGroup = consumer.nextGroup();
 
     final producer = track.appendGroup();
     producer.writeFrame(
-      frame: MoqFrame(payload: utf8.encode('dart'), timestampUs: 0),
+      frame: MoqFrame(
+        payload: utf8.encode('dart'),
+        timestamp: MoqTimestamp(value: 0, scale: 1000000),
+      ),
     );
     producer.finish();
 

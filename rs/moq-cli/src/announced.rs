@@ -11,7 +11,7 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use crate::args::MoqSide;
 
 /// Follow the broadcasts announced on a relay as they start and end.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {
 	/// Only follow paths under this prefix.
@@ -91,11 +91,8 @@ async fn follow(
 		};
 
 		let (announce, active) = match event {
-			Event::Start(announce) => (announce, true),
-			Event::End(announce) => (announce, false),
-			// A new route or a new instance for a path already announced, which changes
-			// nothing shown.
-			Event::Update(_) | Event::Restart(_) => continue,
+			Event::Present(announce) => (announce, true),
+			Event::Absent(announce) => (announce, false),
 		};
 
 		let path = announce.prefix.as_str();
@@ -171,12 +168,11 @@ impl View {
 mod tests {
 	use super::*;
 	use crate::args::{Command, Invocation};
-	use crate::test_env::EnvGuard;
 	use std::time::Duration;
 	use tokio::io::{AsyncBufReadExt, BufReader, DuplexStream, Lines};
 
 	const TIMEOUT: Duration = Duration::from_secs(10);
-	const ENV: &[&str] = &["MOQ_CONNECT", "MOQ_EPOCH", "MOQ_BROADCAST"];
+	const ENV: &[&str] = &["MOQ_CONNECT", "MOQ_BROADCAST"];
 
 	/// A running relay holding `demo/a`, `demo/b`, and `other/c` from one publisher.
 	struct Fixture {
@@ -185,13 +181,13 @@ mod tests {
 		/// Stops the relay, which ends every session on it.
 		shutdown: moq_relay::shutdown::Trigger,
 		/// The published broadcasts by path; dropping one retracts it.
-		broadcasts: Vec<(&'static str, moq_net::broadcast::Producer)>,
+		broadcasts: Vec<(&'static str, moq_net::origin::Route)>,
 		_publisher: moq_tokio::Connection,
 	}
 
 	impl Fixture {
 		async fn new() -> Self {
-			let _ = moq_tokio::crypto::install_default();
+			moq_tokio::crypto::install_default().unwrap();
 			let fixture = moq_relay::test_relay().await.expect("test relay");
 			let ready = fixture.relay.ready();
 			let shutdown = fixture.relay.shutdown_trigger().clone();
@@ -210,8 +206,9 @@ mod tests {
 			let broadcasts = ["demo/a", "demo/b", "other/c"]
 				.into_iter()
 				.map(|path| {
-					let broadcast = origin.create_broadcast(path).expect("broadcast");
-					broadcast.announce(Default::default()).expect("announce");
+					let broadcast = origin
+						.route(path, moq_net::origin::RouteOptions::default())
+						.expect("broadcast");
 					(path, broadcast)
 				})
 				.collect::<Vec<_>>();
@@ -229,10 +226,11 @@ mod tests {
 
 			// Every broadcast is on the relay before anything follows it.
 			for (path, _) in &broadcasts {
-				tokio::time::timeout(TIMEOUT, relay.routed_broadcast(*path))
+				kio::clock::timeout(TIMEOUT, relay.follow(*path, None).unwrap().available())
 					.await
 					.expect("relay routes the broadcast")
-					.expect("broadcast");
+					.expect("broadcast")
+					.unwrap();
 			}
 
 			Self {
@@ -271,7 +269,7 @@ mod tests {
 
 	/// The next line printed.
 	async fn next(lines: &mut Lines<BufReader<DuplexStream>>) -> String {
-		tokio::time::timeout(TIMEOUT, lines.next_line())
+		kio::clock::timeout(TIMEOUT, lines.next_line())
 			.await
 			.expect("a line in time")
 			.expect("read")
@@ -296,15 +294,15 @@ mod tests {
 	fn net() -> crate::Net {
 		crate::Net {
 			quic: Default::default(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
 		}
 	}
 
 	/// What is already announced as `+` lines, then a `-` when a publisher leaves.
 	#[tokio::test]
 	async fn prints_the_replay_then_changes() {
-		let _env = EnvGuard::clear(ENV);
+		if !test_env::Env::without(ENV).isolate() {
+			return;
+		}
 		let mut fixture = Fixture::new().await;
 
 		let (mut lines, task) = fixture.follow(&["demo"]);
@@ -321,7 +319,9 @@ mod tests {
 	/// Each `--json` line is `{"path", "active"}`.
 	#[tokio::test]
 	async fn json_lines_parse() {
-		let _env = EnvGuard::clear(ENV);
+		if !test_env::Env::without(ENV).isolate() {
+			return;
+		}
 		let mut fixture = Fixture::new().await;
 
 		let (mut lines, task) = fixture.follow(&["other", "--json"]);
@@ -336,14 +336,16 @@ mod tests {
 	/// It fails once the relay goes away rather than waiting forever.
 	#[tokio::test]
 	async fn fails_when_the_session_ends() {
-		let _env = EnvGuard::clear(ENV);
+		if !test_env::Env::without(ENV).isolate() {
+			return;
+		}
 		let fixture = Fixture::new().await;
 
 		let (mut lines, task) = fixture.follow(&["other"]);
 		assert_eq!(next(&mut lines).await, "+ other/c");
 
 		fixture.shutdown.start();
-		let result = tokio::time::timeout(TIMEOUT, task)
+		let result = kio::clock::timeout(TIMEOUT, task)
 			.await
 			.expect("exits once the session ends")
 			.expect("task");
@@ -370,7 +372,8 @@ mod tests {
 	/// screen through changes and a shrink rather than scrolling away.
 	#[test]
 	fn the_view_fits_the_terminal() {
-		let mut term = vt100::Parser::new(4, 20, 0);
+		let size = |n: u16| std::num::NonZeroU16::new(n).unwrap();
+		let mut term = vt100::Parser::new(size(4), size(20), 0);
 		let mut view = View::default();
 		// What a tty does to each `\n` on its way to the screen.
 		let draw = |term: &mut vt100::Parser, frame: String| term.process(frame.replace('\n', "\r\n").as_bytes());
@@ -383,7 +386,7 @@ mod tests {
 		draw(&mut term, view.apply("a", false, 4).unwrap());
 		assert_eq!(term.screen().contents(), "b\nc\n(3 more)");
 
-		term.screen_mut().set_size(3, 20);
+		term.screen_mut().set_size(size(3), size(20));
 		draw(&mut term, view.apply("b", false, 3).unwrap());
 		assert_eq!(term.screen().contents(), "c\n(3 more)");
 
@@ -396,7 +399,9 @@ mod tests {
 	/// `announced` follows a prefix, so a `--broadcast` is refused rather than ignored.
 	#[test]
 	fn only_connect_is_accepted() {
-		let _env = EnvGuard::clear(ENV);
+		if !test_env::Env::without(ENV).isolate() {
+			return;
+		}
 		let cli = Invocation::try_parse_from(["moq", "--connect", "http://relay", "--broadcast", "demo", "announced"])
 			.expect("parse");
 		let err = cli.dial_only("announced", &[]).unwrap_err().to_string();
@@ -406,7 +411,9 @@ mod tests {
 	/// The one-shot listing is gone, with no alias or flag left behind for it.
 	#[test]
 	fn ls_and_follow_are_unknown() {
-		let _env = EnvGuard::clear(ENV);
+		if !test_env::Env::without(ENV).isolate() {
+			return;
+		}
 		assert!(Invocation::try_parse_from(["moq", "--connect", "http://relay", "ls"]).is_err());
 		assert!(Invocation::try_parse_from(["moq", "--connect", "http://relay", "announced", "--follow"]).is_err());
 	}

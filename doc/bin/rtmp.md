@@ -7,8 +7,8 @@ description: RTMP and enhanced RTMP ingest and playback
 
 `moq import rtmp` accepts pushes from OBS, FFmpeg, and hardware encoders;
 `moq export rtmp` serves plays to VLC, ffplay, and mpv, or pushes to a remote
-RTMP server such as Twitch. Both legacy RTMP (H.264 + AAC) and enhanced RTMP
-(HEVC, AV1, VP9, Opus, AC-3, multitrack) work in each direction.
+RTMP server such as Twitch. Both legacy RTMP (H.264, AAC, MP3) and enhanced
+RTMP (HEVC, AV1, VP9, Opus, AC-3, E-AC-3, multitrack) work in each direction.
 
 ```bash
 # Accept an OBS push and publish it to a relay.
@@ -30,15 +30,18 @@ publish or play request to accept, map to a path, or reject. The CLI listener
 is unauthenticated; firewall it.
 
 Each push or pull is its own broadcast, under a fresh
-[epoch](/concept/moq-lite#publisher-epochs): an encoder that reconnects while
+[instance](/concept/moq-lite#publisher-instances): an encoder that reconnects while
 its stale connection is still open replaces it at once. Viewers see the
 broadcast restart and their next subscribe reaches the new push, while what
 they already read from the stale push stays until they drop it or it closes. Import publishes the encoder's own timestamps
 and anchors the catalog clock on the first frame, so it names the wall time the
 push arrived. A group starting before the previous group's start, such as an
 encoder restarting its timestamps mid-push, ends that push with an error.
+Each RTMP connection carries one publish or play; start a new connection to
+start another. Handshakes have a five-second budget, requests have fifteen
+seconds, and an ingest with no audio or video packets for thirty seconds ends.
 
-Egress uses `--max-delay` (default 500 ms) for both the FLV release delay and
+Egress uses `--delay` (default 500 ms) for both the FLV release delay and
 the stalled-group budget. Frames go out in decode order; a late video frame
 is dropped and video resumes at the next keyframe. Zero releases available
 frames immediately without deadline drops.
@@ -53,5 +56,5 @@ carries the best of each.
 Implemented in pure Rust (no librtmp). The CLI speaks plaintext `rtmp://`
 only, so stream keys cross the network unencrypted. The library adds RTMPS on
 the same port when the embedder supplies a TLS config, and can refuse plaintext
-there. FLAC and MP3 enhanced-audio payloads are dropped because hang has no
-catalog codec for them.
+there. FLAC enhanced-audio payloads are dropped because the FLV import does not
+map them. MP3 works in both legacy and enhanced audio tags.

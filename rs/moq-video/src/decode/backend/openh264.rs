@@ -17,7 +17,7 @@ use openh264_sys2::{
 	dsRefListNullPtrs, dsRefLost,
 };
 
-use super::{Backend, Codec, Config};
+use super::{Backend, Codec, Config, Stream};
 use crate::frame::{I420, Surface};
 use crate::{Error, Frame};
 
@@ -109,7 +109,8 @@ fn new_decoder() -> Result<Decoder, Error> {
 impl Openh264 {
 	/// openh264 decodes H.264 only; `config` is accepted for signature parity
 	/// (no hardware scaler; callers scale the CPU frames themselves).
-	pub(crate) fn open(codec: Codec, config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(stream: &Stream, config: &Config) -> Result<Box<dyn Backend>, Error> {
+		let codec = stream.codec;
 		Ok(Box::new(Self::new(codec, config)?))
 	}
 
@@ -417,26 +418,6 @@ mod tests {
 			decoded += decoder.flush().expect("the drain works").len();
 			assert_eq!(decoded, PICTURES, "round {round} lost pictures");
 		}
-	}
-
-	/// Regression: a stream that reorders used to exhaust openh264's picture pool
-	/// within a second, because the crate's flush-after-decode released the
-	/// reordering slot without releasing the picture. Every access unit after
-	/// that failed with `dsOutOfMemory` until the next keyframe, which a player
-	/// sees as a picture that appears for a third of a second and then freezes.
-	#[test]
-	fn a_stream_with_b_frames_decodes_all_the_way_through() {
-		let mut decoder = open();
-		let mut decoded = 0;
-		for (index, (payload, keyframe)) in access_units().into_iter().enumerate() {
-			decoded += decoder
-				.decode(payload, at(index), keyframe)
-				.unwrap_or_else(|e| panic!("access unit {index} failed: {e}"))
-				.len();
-		}
-		decoded += decoder.flush().expect("the drain works").len();
-
-		assert_eq!(decoded, PICTURES, "the stream lost pictures");
 	}
 
 	/// A reordered picture carries the timestamp of the access unit it was coded

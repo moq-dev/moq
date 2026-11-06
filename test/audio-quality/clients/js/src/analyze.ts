@@ -43,8 +43,8 @@ export type Input = {
 /**
  * A gap that starts this close to a stall is the stall, not an underrun.
  *
- * The page learns of a stall after the ring does: up to five quanta late on the postMessage ring,
- * one poll late on the isolated one.
+ * The page learns of a stall after the ring does: up to five quanta late, in the worklet's next
+ * state message.
  */
 export const STALL_SLACK_MS = 60;
 
@@ -166,7 +166,9 @@ export function analyze(input: Input): Summary {
 
 	// ── the render clock, reduced to the viewer's ───────────────────────────
 	// Each sample reads both clocks back to back, so the pairs fit the render clock's rate and offset.
-	const paired = samples.filter((s) => s.render !== undefined);
+	// Fitted from first audio, which is where anything counted on it starts: a native device can sit
+	// unpulled for a second while its stream starts, which says nothing about the run after.
+	const paired = samples.filter((s) => s.render !== undefined && first !== undefined && s.at >= first.at);
 	const renderRate = slope(
 		paired.map((s) => s.at),
 		paired.map((s) => s.render as Ms),
@@ -199,6 +201,11 @@ export function analyze(input: Input): Summary {
 	const quanta = (lastTap?.quanta ?? 0) - (firstTap?.quanta ?? 0);
 	const silence = quanta > 0 ? ((lastTap?.quiet ?? 0) - (firstTap?.quiet ?? 0)) / quanta : null;
 	if (!lastTap) notes.push("tap: never reported, so underruns and silence are unmeasured");
+
+	// The player's own counter is cumulative, so the window's count is its rise across the window.
+	const counted = window.filter((s) => s.playerUnderruns !== undefined);
+	const playerUnderruns =
+		counted.length > 0 ? (counted.at(-1)?.playerUnderruns ?? 0) - (counted[0]?.playerUnderruns ?? 0) : null;
 
 	// ── the playhead ────────────────────────────────────────────────────────
 	// The lag drifts when the media timeline does not run at wall rate, a property of the source
@@ -249,6 +256,8 @@ export function analyze(input: Input): Summary {
 		underrun_ms_total: lastTap ? round(underrunMs) : null,
 		underrun_ms_per_min: lastTap ? perMin(underrunMs) : null,
 		underrun_ms_max: lastTap ? round(Math.max(0, ...gaps.map((g) => g.ms))) : null,
+		player_underruns_total: playerUnderruns,
+		player_underruns_per_min: playerUnderruns === null ? null : perMin(playerUnderruns),
 		skip_aheads_total: skips.count,
 		skip_aheads_per_min: perMin(skips.count),
 		discarded_ms_total: round(skips.ms),

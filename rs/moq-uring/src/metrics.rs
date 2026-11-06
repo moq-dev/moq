@@ -1,12 +1,13 @@
-//! Per-worker counters: buffer-pool health, batch effectiveness, ring traffic,
-//! and scheduling.
+//! Per-worker counters and gauges: buffer-pool health and size, batch
+//! effectiveness, ring traffic, and scheduling.
 //!
 //! A worker is a thread that never yields to anything an ops surface can see,
 //! so these are how its health leaves the thread. Every write is a relaxed
-//! atomic add on the worker's own thread and every read is a relaxed load from
-//! whichever thread scrapes, which makes a [`Snapshot`] a cheap, slightly
-//! skewed reading rather than a consistent instant. Rates and ratios are what
-//! these are for; two counters in one snapshot may be a few operations apart.
+//! atomic add or subtract on the worker's own thread and every read is a
+//! relaxed load from whichever thread scrapes, which makes a [`Snapshot`] a
+//! cheap, slightly skewed reading rather than a consistent instant. Rates and
+//! ratios are what these are for; two fields in one snapshot may be a few
+//! operations apart.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,8 +28,89 @@ impl Counter {
 	}
 }
 
-/// The counters themselves, shared by the worker, its sockets, its timer heap,
-/// and its park word.
+/// One level that rises and falls, such as the bytes a pool holds.
+#[derive(Default)]
+pub(crate) struct Gauge(AtomicU64);
+
+impl Gauge {
+	pub(crate) fn add(&self, count: u64) {
+		self.0.fetch_add(count, Ordering::Relaxed);
+	}
+
+	pub(crate) fn sub(&self, count: u64) {
+		self.0.fetch_sub(count, Ordering::Relaxed);
+	}
+
+	fn get(&self) -> u64 {
+		self.0.load(Ordering::Relaxed)
+	}
+}
+
+/// One fixed distribution, updating one bucket per observation.
+#[derive(Default)]
+struct Distribution {
+	buckets: [Counter; 11],
+	sum: Counter,
+}
+
+impl Distribution {
+	fn record(&self, value: u64) {
+		let bucket = Histogram::BOUNDS
+			.iter()
+			.position(|bound| bound.is_none_or(|bound| value <= bound))
+			.unwrap();
+		self.buckets[bucket].add(1);
+		self.sum.add(value);
+	}
+
+	fn snapshot(&self) -> Histogram {
+		let mut count = 0;
+		Histogram {
+			buckets: std::array::from_fn(|index| {
+				count += self.buckets[index].get();
+				count
+			}),
+			sum: self.sum.get(),
+		}
+	}
+}
+
+/// Cumulative observations of queue entries per ring enter.
+///
+/// Like the counters, bucket and sum reads may be a few operations apart.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Histogram {
+	/// Cumulative counts at each boundary in [`Self::BOUNDS`].
+	pub buckets: [u64; 11],
+	/// Queue entries across all observations.
+	pub sum: u64,
+}
+
+impl Histogram {
+	/// Inclusive bucket bounds, with `None` representing infinity.
+	pub const BOUNDS: [Option<u64>; 11] = [
+		Some(0),
+		Some(1),
+		Some(2),
+		Some(4),
+		Some(8),
+		Some(16),
+		Some(32),
+		Some(64),
+		Some(128),
+		Some(256),
+		None,
+	];
+
+	/// The number of enters observed, including those with no entries.
+	pub fn count(&self) -> u64 {
+		self.buckets[10]
+	}
+}
+
+/// The counters and gauges themselves, shared by the worker, its sockets, its
+/// timers, and its park word. Each socket adds its pools to the gauges as they
+/// grow and subtracts them when it drops, so the gauges sum every live socket.
 #[derive(Default)]
 pub(crate) struct Counters {
 	pub rx_datagrams: Counter,
@@ -41,19 +123,38 @@ pub(crate) struct Counters {
 	pub submissions: Counter,
 	pub completions: Counter,
 	pub enters: Counter,
+	pub turns: Counter,
+	pub passes: Counter,
+	pub sq_full_enters: Counter,
+	sqes: Distribution,
+	cqes: Distribution,
 	pub parks: Counter,
 	pub wakes: Counter,
 	pub timers_armed: Counter,
 	pub timers_fired: Counter,
 	pub timers_cancelled: Counter,
+	pub rx_pool_bytes: Gauge,
+	pub rx_pool_in_use_bytes: Gauge,
+	pub tx_pool_bytes: Gauge,
+	pub tx_pool_in_use_bytes: Gauge,
 }
 
-/// A worker's counters, readable from any thread.
+impl Counters {
+	/// Account for one enter and the entries it accepted or made visible.
+	pub(crate) fn entered(&self, submitted: usize, completed: usize) {
+		self.enters.add(1);
+		self.submissions.add(submitted as u64);
+		self.sqes.record(submitted as u64);
+		self.cqes.record(completed as u64);
+	}
+}
+
+/// A worker's counters and gauges, readable from any thread.
 ///
 /// Hand one to [`crate::Config::metrics`] to keep a copy the process can scrape
 /// while the worker runs, or take the worker's own through
-/// [`crate::Handle::metrics`]. Clones share one set of counters, so give each
-/// worker its own.
+/// [`crate::Handle::metrics`]. Clones share one set, so give each worker its
+/// own.
 #[derive(Clone, Default)]
 pub struct Metrics(Arc<Counters>);
 
@@ -66,7 +167,7 @@ impl Metrics {
 		Self(counters)
 	}
 
-	/// Read every counter.
+	/// Read every counter and gauge.
 	pub fn snapshot(&self) -> Snapshot {
 		Snapshot {
 			rx_datagrams: self.0.rx_datagrams.get(),
@@ -79,11 +180,20 @@ impl Metrics {
 			submissions: self.0.submissions.get(),
 			completions: self.0.completions.get(),
 			enters: self.0.enters.get(),
+			turns: self.0.turns.get(),
+			passes: self.0.passes.get(),
+			sq_full_enters: self.0.sq_full_enters.get(),
+			sqes: self.0.sqes.snapshot(),
+			cqes: self.0.cqes.snapshot(),
 			parks: self.0.parks.get(),
 			wakes: self.0.wakes.get(),
 			timers_armed: self.0.timers_armed.get(),
 			timers_fired: self.0.timers_fired.get(),
 			timers_cancelled: self.0.timers_cancelled.get(),
+			rx_pool_bytes: self.0.rx_pool_bytes.get(),
+			rx_pool_in_use_bytes: self.0.rx_pool_in_use_bytes.get(),
+			tx_pool_bytes: self.0.tx_pool_bytes.get(),
+			tx_pool_in_use_bytes: self.0.tx_pool_in_use_bytes.get(),
 		}
 	}
 }
@@ -94,7 +204,8 @@ impl std::fmt::Debug for Metrics {
 	}
 }
 
-/// A reading of one worker's counters, all cumulative since it started.
+/// A reading of one worker's counters, cumulative since it started, and its
+/// gauges, each the level at the moment it was read.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Snapshot {
@@ -129,6 +240,18 @@ pub struct Snapshot {
 	/// `io_uring_enter` calls. Datagrams over this is the syscall amortization
 	/// the runtime exists for.
 	pub enters: u64,
+	/// Drive-loop turns, including the final poll that completes the root future.
+	pub turns: u64,
+	/// Passes over the woken tasks. A turn runs passes until one wakes nothing
+	/// or [`crate::Config::passes`] have run, so this over `turns` is the
+	/// passes a turn takes, and how close the budget is to binding.
+	pub passes: u64,
+	/// Enters forced by a full submission queue.
+	pub sq_full_enters: u64,
+	/// Submission entries accepted by each enter, including zero.
+	pub sqes: Histogram,
+	/// Completion entries made visible by each enter, including zero.
+	pub cqes: Histogram,
 	/// Times the worker parked in `io_uring_enter` with nothing left to poll.
 	pub parks: u64,
 	/// `futex` wakes another thread had to issue because the worker was parked.
@@ -139,6 +262,21 @@ pub struct Snapshot {
 	pub timers_fired: u64,
 	/// Timers dropped or re-armed before their deadline.
 	pub timers_cancelled: u64,
+	/// Gauge: receive buffer bytes allocated across the worker's live
+	/// sockets. Pools grow under load and never shrink, so this holds the
+	/// high-water mark. Mostly reserved rather than resident: RSS grows by
+	/// the pages receives have written.
+	pub rx_pool_bytes: u64,
+	/// Gauge: the part of `rx_pool_bytes` in buffers holding a packet the
+	/// application has not dropped yet, unavailable to the kernel.
+	pub rx_pool_in_use_bytes: u64,
+	/// Gauge: send buffer bytes allocated across the worker's live sockets,
+	/// growing like `rx_pool_bytes`. Mostly reserved rather than resident:
+	/// RSS grows by the pages sends have written.
+	pub tx_pool_bytes: u64,
+	/// Gauge: the part of `tx_pool_bytes` in buffers being filled or in
+	/// flight to the kernel.
+	pub tx_pool_in_use_bytes: u64,
 }
 
 impl Snapshot {
@@ -147,5 +285,25 @@ impl Snapshot {
 		self.timers_armed
 			.saturating_sub(self.timers_fired)
 			.saturating_sub(self.timers_cancelled)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn enter_distributions_include_empty_and_overflow_buckets() {
+		let metrics = Metrics::default();
+		for count in [0, 1, 2, 3, 4, 255, 256, 257, 2048] {
+			metrics.0.entered(count, 2048 - count);
+		}
+		let snapshot = metrics.snapshot();
+		assert_eq!(snapshot.enters, 9);
+		assert_eq!(snapshot.sqes.buckets, [1, 2, 3, 5, 5, 5, 5, 5, 5, 7, 9]);
+		assert_eq!(snapshot.sqes.count(), snapshot.enters);
+		assert_eq!(snapshot.cqes.count(), snapshot.enters);
+		assert_eq!(snapshot.sqes.sum, snapshot.submissions);
+		assert_eq!(snapshot.cqes.sum + snapshot.sqes.sum, 9 * 2048);
 	}
 }

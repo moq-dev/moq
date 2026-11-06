@@ -17,6 +17,24 @@ slices for iOS 16+, the iOS Simulator, and macOS 12.3+.
 `.named(name:)` or `.requested(request)` target. `Media.CatalogProducer(broadcast:)`
 updates catalog properties and sections without keeping the broadcast open.
 Its writes fail after closing or releasing the broadcast.
+Media timestamps are exact `Timestamp` records, `value` units at `scale` units per second, carried at the track's timescale
+(a write at another scale rounds down to it). On macOS 13+ and iOS, `try Timestamp(duration)` converts a `Duration` exactly,
+and `try timestamp.duration` rounds down to a whole attosecond.
+Publish JSON tracks with `TrackInfo(compress: true)`; a `Json` consumer reads one with no option of its own.
+A raw frame without a timestamp stays untimed, which only an untimed track accepts; JSON writes always take one. The library never substitutes zero or now.
+`Json.SnapshotProducer.update`, `Json.StreamProducer.append`, and `Json.WindowProducer.push` and `pop` require a timestamp on the broadcast clock (`Media.CatalogProducer.now()`), the epoch every track in the broadcast shares, so their track needs a timescale.
+`Json` consumers yield `Json.Timed` (`value`, `timestamp`); a snapshot consumer yields each state in order,
+and `latest()` skips to the newest.
+Raw tracks with a `nil` timescale are untimed on both publish and receive.
+`MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
+Whole-frame media writes require caller time; container imports keep their own timeline handling.
+Timed raw/data tracks require caller-supplied timestamps. Use `Media.CatalogProducer.now()` to stamp a locally
+created event on the broadcast clock; reading it fixes that clock for later media producers.
+Share `Media.Timebase(broadcast:)` through `ContainerInit` when several imports use one
+source timeline; omitting it keeps an independent offset. A timebase belongs to its
+broadcast and does not keep it open. `ContainerProducer` takes chunks split anywhere,
+so a raw byte stream needs no other importer.
+`.fmp4` splits each fragment into one frame per sample.
 For arrival-order reads, decode each group from `TrackConsumer.recvGroup()` with
 `Media.GroupConsumer(group:container:)`; frames carry container media time as they land.
 
@@ -37,15 +55,12 @@ let client = try Client()
 let session = try await client.connect(to: "https://relay.example.com")
 
 for try await event in try session.consume.announced(prefix: "live/", filter: "*/camera") {
-    // A restart is a new publisher run at the same path: request it again.
-    let announcement: Announce
-    switch event {
-    case .start(let started), .restart(let started): announcement = started
-    default: continue // .update or .end
-    }
-    // Prefixes stay origin-relative; captures reports what each wildcard matched.
-    print(announcement.captures ?? [])
-    let broadcast = try await session.consume.requestBroadcast(path: announcement.prefix)
+    // A path stays present across publisher restarts: hold follow(path:) to be handed each
+    // new run, or nil once it goes offline.
+    guard case .present(let announcement) = event else { continue }
+    // Prefixes stay origin-relative; captures is a list of wildcard matches, empty without wildcards.
+    print(announcement.captures)
+    let broadcast = try await session.consume.request(path: announcement.prefix)
     for try await catalog in try await Media.CatalogConsumer.subscribe(broadcast: broadcast) {
         print(catalog)
     }
@@ -55,37 +70,51 @@ for try await event in try session.consume.announced(prefix: "live/", filter: "*
 ```swift
 // Publish encoded frames, or raw pixels with the codec inside the binding (VideoToolbox).
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
-let broadcast = try session.publish.createBroadcast(path: "my-stream.hang")
+// Hidden until the catalog is filled; hold the route while it should stay announced.
+let route = try session.publish.route(path: "my-stream.hang", hidden: true)
+let broadcast = try route.broadcast
 let audio = try Media.TrackProducer.audio(broadcast: broadcast, initData: Media.AudioInit(format: .opus, data: opusInit))
-try audio.writeFrame(packet, timestampUs: 20_000)
+try audio.writeFrame(packet, timestamp: Timestamp(value: 20, scale: 1_000))
 try audio.cut() // audio has no keyframes, so this is what gives it groups
 
-let video = try broadcast.encodeVideo(
-    input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: 30),
-    output: VideoEncoderOutput(codec: .h264, track: "camera", kind: .auto)
+let video = try Video.Producer(
+    catalog: Media.CatalogProducer(broadcast: broadcast),
+    input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
+    output: VideoEncoderOutput(codec: .h264, kind: .auto),
+    track: "camera"
 )
-try video.write(VideoFrame(timestampUs: pts, data: rgba))
-try broadcast.announce(route: Route(epoch: mintEpoch())) // a fresh epoch per run
+try video.write(VideoFrame(timestamp: pts, data: rgba))
+try route.announce() // the route mints its own instance: route.instance
 try audio.finish()
 try video.finish()
 try broadcast.close()
 
-try await session.shutdown()
+session.shutdown()
+try await session.closed()
 ```
+
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Pass the publication track name to the producer, alongside its input and codec settings. For simulcast, give each rendition the next one down as `lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3. A pre-encoded `Media.TrackProducer.video` or `Media.TrackStreamProducer.video` takes `lower` too, as a `Media.Producer` of either kind, which only places it one priority below; follow its reservation with `RateControl`, and while it reports disabled, drop the frames, call `setEnabled(false)` after a `discontinuity()`, and `setEnabled(true)` on the keyframe that resumes it. A `TrackStreamProducer` finds its own frames: `setEnabled(false)` drops what is written to it, and after `setEnabled(true)` it resumes at the stream's next keyframe.
 
 ## Things to know
 
 The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
-one to one; the API reference has the names.
+one to one; the API reference has the names, and [Layers](/lib/layers)
+shows which module holds each.
 
-- **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
-- **Live encoder timing.** After writing a frame you encoded yourself, call `flush(timestampUs:)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
-- **Decoded frames hold decoder buffers.** Release each frame from `decodeVideo` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
-- **Closing.** `try await session.shutdown()` gives finished tracks up to one second to deliver and throws if they did not. `session.cancel(code:)` closes at once. Finish or abort live tracks first.
-- **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, `estimatedRecvRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `nil` when the transport does not report it, which is not the same as zero.
+- **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or less often to batch frames into fewer groups.
+- **Timeline breaks.** On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
+- **Media reads.** `Media.TrackConsumer`, `Audio.Consumer`, and `Video.Consumer` yield `Read` cases in order: `.frame`, a `.gap` where media was lost, or an `.end` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh. A decoder reads everything the track still holds unless a live player sets `start: .latest` in its decoder output, which joins at the newest group and skips the cached backlog.
+- **Decoded frames hold decoder buffers.** Release each frame from a `Video.Consumer` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
+- **Closing.** `session.shutdown()` requests a drain immediately; `try await session.closed()` waits up to one second and reports its result. `session.cancel(code:)` closes at once. Finish or abort live tracks first. moq-lite-05 and newer wait for the peer to receive finished tails; older Lite versions and IETF wait only for transport ACKs.
+- **Ending cleanly.** When the input ends, finish every track, then call `try finish()` on its `Media.CatalogProducer` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `broadcast.close()`, or releasing its route, takes it offline. How long to keep it up is yours to decide. A track still open at the close, or released without a finish, ends with `Unroutable` (`Internal` over moq-transport, which has no such code). Readers follow a publisher's runs by announcement, not by that error: see [identity and recovery](/concept/identity).
+- **Stats.** `session.stats()` reports `rtt`, `estimatedSendRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`), and `datagramsUnrouted`, the datagrams received for a subscription with no datagram track, reported only on moq-lite 05 and later, which carry datagrams. A field is `nil` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol. Connect returns a connecting session; read its coherent `state()` snapshot and wait with that snapshot's revision to observe first-dial failures and reconnects. Each watcher keeps its own revision. Hold the owned `BandwidthConsumer` returned by `session.recvBandwidth()` to receive bandwidth estimates. `rate()` reads the current estimate in bits per second and `rateChanged()` waits for a new one. Release the consumer or call `cancel()` when finished; releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
+- **Viewers.** `session.viewers()` divides the receive estimate among the broadcasts you watch. `watch(maxBps:)` returns a `Viewer` claiming up to a ceiling, the bitrate of the largest rendition you would switch to; its `rate()` reads that viewer's fair share in bits per second, `nil` while there is no estimate (keep the current rendition), and `update(maxBps:)` changes the ceiling. Holding a viewer requests the estimate like `recvBandwidth()`, and releasing it releases the claim. The session sends the summed ceilings as its PROBE target; `setTarget(targetBps:)` overrides that, `0` sends none, and `nil` follows the viewers again. `watch`, `update`, and `setTarget` throw `MoqError.OutOfRange` when the ceilings or the target would pass 2^53 - 1 bps, the most a PROBE target carries.
+- **Authorization.** On `moq-lite-07-wip` (opt in with `Client(versions:)`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), `for try await grant in session.grants()` yields the `Grant` the relay sent back and each change, `nil` until it answers and while a client session reconnects. Cancelling the iterating task cancels the native wait.
+- **Tokens.** Pass `Client(tokens: [...])` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `try session.tokens()?.set([...])` replaces them before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. `try await tokens.answered()` returns once the relay accepts them and throws its refusal with the relay's code. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release.
 - **Errors.** Diagnostic cases use the `reason:` argument label; match their associated value to inspect it. Protocol errors carry `details`.
-- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
-- **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
+- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode. Audio and video subscribe setup returns `MoqError.UnsupportedConfig` when the decoder refuses the codec, layout, or description; a player can then try its next ranked rendition. Decoder faults and later peer or decode failures do not report that setup refusal.
+- **Subscription defaults.** `Subscription.default` holds moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded one at once; passing no subscription means the same. Copy it to change a field; building a `Subscription(...)` must name its `Delay(min:max:)`, where a `nil` `max` sets no subscriber limit and a `nil` `min` leaves the target latency unstated. Decoders take the same `Delay`.
+- **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one.
 
 ## Runtime
 
@@ -93,15 +122,19 @@ Native I/O and background tasks run on a Tokio worker pool. Calls awaited by the
 host still poll in place; independent native wake callbacks can run concurrently.
 The generated bindings resume Swift continuations. Use the appropriate actor
 when updating UI state.
+A panic in a native background task reaches the pending and later fallible calls
+of every object that depends on it as a task error; other objects keep running.
 
 A session closed for exceeding the relay's request caps reports the protocol
 kind `ProtocolKind.tooManyRequests`. Reduce
 the simultaneous announcements or subscriptions, or ask the relay operator
 to adjust the [session limits](/bin/relay/config#session-and-peer), before
 reconnecting with the same workload.
+A session closed because its credential expired reports `ProtocolKind.expired`, and a request refused for an expired token raises `MoqError.Expired`; refresh the token before retrying. Malformed credentials report `ProtocolKind.malformedAuthToken`; correct the token before reconnecting with it.
+A catalog that needs a newer moq-hang draft than this build reads raises `MoqError.UnsupportedCatalog`; upgrade the library to read it.
 
 ## Reference
 
-- API reference: [Swift Package Index (DocC)](https://swiftpackageindex.com/moq-dev/moq-swift/documentation/moq)
+- API source: [swift/Sources/Moq](https://github.com/moq-dev/moq/tree/main/swift/Sources/Moq)
 - Source: [`swift/`](https://github.com/moq-dev/moq/tree/main/swift); `just swift check` builds and tests on a Mac
 - Packages SPM resolves: [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift), [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi)

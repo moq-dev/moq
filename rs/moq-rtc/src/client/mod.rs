@@ -14,15 +14,15 @@ use std::time::Duration;
 use url::Url;
 
 /// Configuration shared by both `client publish` and `client subscribe`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Config {
 	/// Public UDP socket addresses to advertise as ICE host candidates in
 	/// our outbound offer. Same semantics as [`crate::server::Config::ice_candidates`].
 	pub ice_candidates: Vec<SocketAddr>,
 
-	/// How long relays keep a non-latest group of an ingested media track fetchable.
-	/// Same semantics as [`crate::server::Config::max_age`].
+	/// How long a superseded group of an ingested media track stays fresh, or `None` for
+	/// no publisher limit. Same semantics as [`crate::server::Config::max_age`].
 	///
 	/// Ingest only ([`subscribe`](Client::subscribe) / WHEP): a WHIP
 	/// [`publish`](Client::publish) reads a broadcast someone else declared, so it
@@ -33,6 +33,16 @@ pub struct Config {
 	/// Ingest only ([`subscribe`](Client::subscribe) / WHEP); a WHIP
 	/// [`publish`](Client::publish) ignores this.
 	pub bandwidth: moq_net::bandwidth::Allocator,
+}
+
+impl Default for Config {
+	fn default() -> Self {
+		Self {
+			ice_candidates: Vec::new(),
+			max_age: Some(hang::container::MAX_AGE),
+			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+		}
+	}
 }
 
 /// Outbound WHIP/WHEP dialer.
@@ -66,25 +76,19 @@ impl Client {
 	}
 
 	/// `client subscribe`: pull a remote WHEP feed and publish it as
-	/// `broadcast` on the local origin. Returns once the session is
-	/// running in the background.
+	/// `broadcast` on the local origin, until the session ends.
 	pub async fn subscribe(&self, url: Url, broadcast: moq_net::broadcast::Producer) -> crate::Result<()> {
 		whep::dial(self, url, broadcast).await
 	}
 
-	/// `client publish`: pull the broadcast at `path` from `origin` and push it to a
-	/// remote WHIP endpoint. Gated on the per-codec re-packetizer.
+	/// `client publish`: push the broadcast `source` resolved to a remote WHIP endpoint,
+	/// until the session ends.
 	///
-	/// Taking the origin plus path (rather than a resolved [`moq_net::broadcast::Consumer`])
-	/// lets the egress resolve a rendition whose catalog `broadcast` field references a
-	/// sibling broadcast, against the same origin.
-	pub async fn publish(
-		&self,
-		url: Url,
-		origin: moq_net::origin::Consumer,
-		path: impl moq_net::AsPath,
-	) -> crate::Result<()> {
-		whip::dial(self, url, origin, path).await
+	/// It stays on that publisher instance, and fails once the instance's route dies.
+	/// The source's origin resolves a rendition whose catalog `broadcast` field references
+	/// a sibling broadcast.
+	pub async fn publish(&self, url: Url, source: moq_mux::Source) -> crate::Result<()> {
+		whip::dial(self, url, source).await
 	}
 }
 
@@ -100,12 +104,14 @@ mod tests {
 		drop(listener);
 
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("test").expect("create broadcast");
+		let broadcast = origin
+			.route("test", moq_net::origin::RouteOptions::hidden())
+			.expect("create broadcast");
 		let url = format!("http://user:pass@{address}/whep/test?jwt=secret")
 			.parse()
 			.expect("WHEP URL");
 		let err = Client::new(Config::default())
-			.subscribe(url, broadcast)
+			.subscribe(url, broadcast.broadcast().clone())
 			.await
 			.expect_err("dial a closed port");
 

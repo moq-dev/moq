@@ -1,0 +1,1419 @@
+//! The QUIC backend, used for both WebTransport (`https://`) and raw QUIC (`moqt://`, `moql://`).
+
+use super::{driver, web};
+use crate::RedactedUrl;
+use crate::connect;
+use crate::listen;
+use crate::quic::CongestionControl;
+use crate::quic::Resolved;
+use crate::quic::ServerId;
+use crate::tls::FingerprintVerifier;
+use std::net;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+/// The transport config the resolved quic knobs describe, for either role.
+fn transport(quic: &Resolved, role: &str) -> Result<driver::transport::Config> {
+	let mut transport = driver::transport::Config::default();
+	transport.idle_timeout = Some(quic.idle_timeout);
+	transport.keep_alive = quic.keep_alive;
+	// MTU discovery is enabled by default; disable it unless asked.
+	if !quic.mtu_discovery {
+		transport.mtu = None;
+	}
+	// The windows replace moq-quic's own defaults, so every runtime honors the same section.
+	transport.limits = quic.limits();
+	if let Some(gso) = quic.gso {
+		transport.segmentation_offload = gso;
+	}
+	transport.congestion = match &quic.controller {
+		Some(controller) => controller.0.clone(),
+		None => congestion_factory(quic.congestion()),
+	};
+	transport.validate()?;
+	apply_qlog(&mut transport, quic, role)?;
+	Ok(transport)
+}
+
+/// Attach a qlog stream writing into the configured directory, if any.
+///
+/// A [`driver::transport::qlog::Stream`] is a shared handle: every connection on the endpoint
+/// writes into it, tagged with its own qlog `group_id`, so this is one file per endpoint.
+fn apply_qlog(transport: &mut driver::transport::Config, quic: &Resolved, role: &str) -> Result<()> {
+	// `Client::validate` already rejected a directory this build can't honor, so the
+	// block below is only reached where capture actually works.
+	let Some(dir) = quic.qlog_dir() else {
+		return Ok(());
+	};
+
+	#[cfg(feature = "qlog")]
+	{
+		// The pid and sequence keep endpoints sharing a directory from clobbering each other.
+		static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+		let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+		let path = dir.join(format!("moq-{role}-{}-{seq}.sqlog", std::process::id()));
+		let file = std::fs::File::create(&path).map_err(Error::CreateQlog)?;
+
+		// Deliberately unbuffered: qlog's streamer only flushes on `finish_log`, which is
+		// never called per event, so a BufWriter would hold every trace in memory until the
+		// endpoint drops and lose the lot if the process is killed. Killing a stuck process
+		// is exactly when these traces are worth having.
+		let mut config = driver::transport::qlog::Config::default();
+		config.writer = Some(Box::new(file));
+		config.title = Some(format!("moq-tokio {role}"));
+
+		transport.qlog = config.into_stream();
+		tracing::info!(path = %path.display(), "writing qlog");
+	}
+
+	#[cfg(not(feature = "qlog"))]
+	let _ = (transport, dir, role);
+
+	Ok(())
+}
+
+/// The controller factory for a congestion control family. moq-quic's BBR is v3.
+fn congestion_factory(family: CongestionControl) -> Arc<dyn moq_congestion::Factory + Send + Sync> {
+	match family {
+		CongestionControl::Loss => Arc::new(moq_congestion::cubic::Config::default()),
+		CongestionControl::Delay => Arc::new(moq_congestion::bbr3::Config::default()),
+		CongestionControl::None => Arc::new(moq_congestion::Unlimited),
+	}
+}
+
+/// Errors specific to the QUIC backend.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	/// The UDP socket failed to bind, usually because the address is in use.
+	#[error("failed to bind UDP socket")]
+	BindSocket(#[source] std::io::Error),
+
+	/// The QUIC endpoint could not be created around the bound socket.
+	#[error("failed to create QUIC endpoint")]
+	CreateEndpoint(#[source] driver::endpoint::Error),
+
+	/// The resolved transport settings are ones the QUIC stack refuses.
+	#[error("invalid quic config: {0}")]
+	Config(#[from] driver::ConfigError),
+
+	/// This CPU lacks a feature that rind, MoQ's cryptography, requires.
+	#[error(transparent)]
+	UnsupportedCpu(#[from] crate::crypto::UnsupportedCpu),
+
+	/// The qlog trace file couldn't be created, usually a missing directory.
+	#[cfg(feature = "qlog")]
+	#[error("failed to create qlog file")]
+	CreateQlog(#[source] std::io::Error),
+
+	/// The configured bind address could not be resolved.
+	#[error("failed to resolve bind address")]
+	ResolveBind(#[source] std::io::Error),
+
+	/// The URL has no host to connect to.
+	#[error("invalid DNS name")]
+	InvalidDnsName,
+
+	/// The URL host could not be resolved.
+	#[error("failed DNS lookup")]
+	DnsLookup(#[source] std::io::Error),
+
+	/// DNS resolved the host to no addresses at all.
+	#[error("no DNS entries")]
+	NoDnsEntries,
+
+	/// The insecure `http://` fingerprint fetch failed to reach the server.
+	#[error("failed to fetch fingerprint: {0}")]
+	FetchFingerprint(String),
+
+	/// The server returned a non-success status for the fingerprint request.
+	#[error("fingerprint request failed with status {0}")]
+	FingerprintStatus(u16),
+
+	/// The fingerprint response body could not be read.
+	#[error("failed to read fingerprint: {0}")]
+	ReadFingerprint(String),
+
+	/// The fetched fingerprint was not valid hex.
+	#[error("invalid fingerprint: {0}")]
+	InvalidFingerprint(String),
+
+	/// The URL scheme is not one this backend can dial.
+	#[error("url scheme must be 'https', 'moqt', or 'moql'")]
+	InvalidScheme,
+
+	/// The URL scheme survived ALPN selection but has no session type.
+	#[error("unsupported URL scheme: {0}")]
+	UnsupportedScheme(String),
+
+	/// The connection came up without TLS handshake data, so the ALPN is unknown.
+	#[error("missing handshake data")]
+	MissingHandshake,
+
+	/// The peer negotiated no ALPN, so there's no protocol to speak.
+	#[error("missing ALPN")]
+	MissingAlpn,
+
+	/// The negotiated ALPN was not valid UTF-8.
+	#[error("failed to decode ALPN")]
+	DecodeAlpn(#[from] std::string::FromUtf8Error),
+
+	/// The peer negotiated an ALPN this endpoint doesn't serve.
+	#[error("unsupported ALPN: {0}")]
+	UnsupportedAlpn(String),
+
+	/// A raw QUIC client connected without SNI, so there's no host to build a URL from.
+	#[error("missing server name for raw QUIC connection")]
+	MissingServerName,
+
+	/// The client's SNI host could not be parsed as a URL.
+	#[error("failed to construct URL from server name: {0}")]
+	BuildUrl(String),
+
+	/// The configured QUIC-LB nonce is too short to be unique.
+	#[error("quic_lb_nonce must be at least 4")]
+	QuicLbNonceTooSmall,
+
+	/// The server ID plus nonce don't fit in a QUIC connection ID. Shorten either.
+	#[error("connection ID length ({0}) exceeds maximum of 20")]
+	QuicLbCidTooLong(usize),
+
+	/// Both QUIC-LB and reuseport steering want to own the connection ID, and
+	/// each reads back only its own encoding.
+	#[error("QUIC-LB connection IDs cannot be combined with per-core workers")]
+	ShardWithQuicLb,
+
+	/// The stateless reset secret file could not be read or does not hold 64 hexadecimal characters.
+	#[error("invalid stateless reset secret")]
+	ResetSecret(#[source] crate::secret::Error),
+
+	/// The mTLS client verifier could not be built from the configured roots.
+	#[error("failed to build client certificate verifier")]
+	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
+
+	/// The connection could not be started, usually a bad config or address.
+	#[error("{0}")]
+	Connect(String),
+
+	/// The QUIC connection failed or was closed.
+	#[error("{0}")]
+	Connection(String),
+
+	/// The WebTransport CONNECT request failed.
+	#[error("{message}")]
+	Client {
+		/// What the handshake reported.
+		message: String,
+		/// The HTTP status the server answered the CONNECT with, when it answered with one.
+		///
+		/// Read at conversion time rather than kept as a [`web`] error, so the
+		/// classification survives without that crate appearing in this crate's public API.
+		status: Option<u16>,
+	},
+
+	/// The server rejected the connection with a status we understand (auth, not found, etc).
+	#[error(transparent)]
+	ConnectRejected(#[from] crate::ConnectError),
+
+	/// The WebTransport server failed to respond to a request.
+	#[error("{0}")]
+	Server(String),
+
+	/// The QUIC handshake never completed for an incoming connection.
+	#[error("failed to establish QUIC connection: {0}")]
+	Establish(String),
+
+	/// The client connected but never sent a valid WebTransport CONNECT request.
+	#[error("failed to receive WebTransport request: {0}")]
+	RecvRequest(String),
+
+	/// The certificates or roots could not be loaded.
+	#[error(transparent)]
+	Tls(#[from] crate::tls::Error),
+
+	/// Two or more addresses were raced and every attempt failed, each paired
+	/// with its own error in dial order. All of them are kept: picking one to
+	/// report would bury a rejected certificate or a refused port behind
+	/// whichever address happened to be unroutable or to blackhole until its
+	/// timeout. A host with a single address reports that error directly instead.
+	#[error("all {} connection attempts failed: {}", .0.len(), crate::failover::describe(.0))]
+	Failover(Vec<crate::failover::Attempt<Error>>),
+
+	/// The flow-control limits are ones a peer would refuse, so none were applied.
+	#[error("invalid quic limits: {0}")]
+	Limits(#[from] moq_quic::LimitsError),
+
+	/// The QUIC-LB forward socket failed to bind.
+	#[error("failed to bind the QUIC-LB forward socket")]
+	BindForward(#[source] std::io::Error),
+
+	/// The QUIC-LB forward key file could not be read or does not hold 64 hexadecimal characters.
+	#[error("invalid QUIC-LB forward key")]
+	ForwardKey(#[source] crate::secret::Error),
+
+	/// The QUIC-LB peers file could not be read, or names a peer this server cannot forward to.
+	#[error("invalid QUIC-LB peers file {}: {reason}", path.display())]
+	ForwardPeers {
+		/// The peers file.
+		path: std::path::PathBuf,
+		/// What is wrong with it.
+		reason: String,
+	},
+
+	/// The QUIC-LB peers file could not be watched for changes.
+	#[error("failed to watch the QUIC-LB peers file: {0}")]
+	WatchPeers(String),
+}
+
+impl crate::failover::Aggregate for Error {
+	fn aggregate(failures: Vec<crate::failover::Attempt<Self>>) -> Self {
+		Self::Failover(failures)
+	}
+
+	fn resolve(error: Option<std::io::Error>) -> Self {
+		match error {
+			Some(error) => Self::DnsLookup(error),
+			None => Self::NoDnsEntries,
+		}
+	}
+}
+
+crate::error::from_message! {
+	driver::endpoint::ConnectError => Connect,
+	driver::connection::Error => Connection,
+	web::ServerError => Server,
+	hex::FromHexError => InvalidFingerprint,
+}
+
+impl From<web::ClientError> for Error {
+	fn from(err: web::ClientError) -> Self {
+		Self::Client {
+			status: client_status(&err),
+			message: crate::error::message(err),
+		}
+	}
+}
+
+type Result<T> = std::result::Result<T, Error>;
+
+// ── Client ──────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+pub(crate) struct Client {
+	pub quic: driver::endpoint::Endpoint,
+	/// Each reconnect loop may replace its endpoint without moving other sessions.
+	/// Weak handles let close reach all of them without retaining abandoned sockets.
+	endpoints: Arc<Mutex<Endpoints>>,
+	bind: net::SocketAddr,
+	pub transport: driver::transport::Config,
+	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Connect::allows_http_bootstrap]).
+	pub http_bootstrap: bool,
+	/// Optional TLS SNI / verification hostname override (from config).
+	pub host_name: Option<String>,
+	/// Stagger between Happy Eyeballs connection attempts (see [`crate::failover`]).
+	pub failover_delay: Duration,
+	/// How long the first candidate waits for the full DNS answer, RFC 8305's
+	/// Resolution Delay (see [`crate::connect::Config::resolution_delay`]).
+	pub resolution_delay: Duration,
+	/// Whether the bound socket really came back dual-stack, which decides
+	/// whether an IPv4 destination is reachable at all. Captured here because the
+	/// endpoint owns the socket from here on and `local_addr` can't tell us.
+	dual_stack: bool,
+	/// A private log opened before this client can start a handshake.
+	keylog: Option<Arc<crate::tls::KeyLog>>,
+}
+
+struct Endpoints {
+	closed: bool,
+	all: Vec<driver::endpoint::WeakEndpoint>,
+}
+
+impl Client {
+	pub fn is_closed(&self) -> bool {
+		self.endpoints.lock().unwrap().closed
+	}
+
+	pub fn new(config: &connect::Config, quic: &crate::quic::Config) -> Result<Self> {
+		let resolved = config.resolve();
+		let socket = crate::bind::udp(crate::bind::Udp::new(resolved.bind)).map_err(Error::BindSocket)?;
+		let dual_stack = crate::bind::udp_is_dual_stack(&socket);
+
+		let quic = quic.resolve();
+		let transport = transport(&quic, "client")?;
+		let keylog = quic
+			.keylog
+			.as_deref()
+			.map(crate::tls::KeyLog::open)
+			.transpose()?
+			.map(Arc::new);
+
+		let quic = driver::endpoint::Endpoint::new(driver::endpoint::Config::default(), socket)
+			.map_err(Error::CreateEndpoint)?;
+		let endpoints = Arc::new(Mutex::new(Endpoints {
+			closed: false,
+			all: vec![quic.downgrade()],
+		}));
+
+		Ok(Self {
+			quic,
+			endpoints,
+			bind: resolved.bind,
+			transport,
+			http_bootstrap: config.tls.allows_http_bootstrap(),
+			host_name: config.tls.host_name.clone(),
+			failover_delay: resolved.race,
+			resolution_delay: resolved.resolution_delay,
+			dual_stack,
+			keylog,
+		})
+	}
+
+	/// Give only this clone a fresh ephemeral socket; fixed bind ports never move.
+	pub fn fresh_port(&mut self) -> Result<()> {
+		if self.bind.port() != 0 {
+			return Ok(());
+		}
+		let mut endpoints = self.endpoints.lock().unwrap();
+		if endpoints.closed {
+			return Ok(());
+		}
+		// Bind before dropping the old endpoint so the kernel cannot reuse its port.
+		let socket = crate::bind::udp(crate::bind::Udp::new(self.bind)).map_err(Error::BindSocket)?;
+		let dual_stack = crate::bind::udp_is_dual_stack(&socket);
+		let quic = driver::endpoint::Endpoint::new(driver::endpoint::Config::default(), socket)
+			.map_err(Error::CreateEndpoint)?;
+		endpoints.all.retain(|endpoint| endpoint.upgrade().is_some());
+		endpoints.all.push(quic.downgrade());
+		tracing::info!(old = %self.quic.local_addr(), new = %quic.local_addr(), "redialing from a fresh UDP port");
+		self.quic = quic;
+		self.dual_stack = dual_stack;
+		Ok(())
+	}
+
+	/// Close every connection, including endpoints replaced by reconnect loops.
+	pub async fn close(self) {
+		let closes: Vec<_> = {
+			let mut endpoints = self.endpoints.lock().unwrap();
+			endpoints.closed = true;
+			endpoints
+				.all
+				.iter()
+				.filter_map(|endpoint| endpoint.upgrade())
+				.map(|endpoint| async move {
+					endpoint.close(driver::VarInt::from_u32(0), "client shutdown").await;
+				})
+				.collect()
+		};
+		futures::future::join_all(closes).await;
+	}
+
+	pub async fn connect(
+		&self,
+		tls: &rustls::ClientConfig,
+		addr: crate::connect::Addr,
+		versions: &moq_net::Versions,
+	) -> Result<web::Session> {
+		let mut url = addr.url().clone();
+		let mut config = tls.clone();
+
+		let target = url.host().ok_or(Error::InvalidDnsName)?;
+		// URL brackets delimit IPv6 literals, but aren't part of the TLS server name.
+		let host = match &target {
+			url::Host::Ipv6(ip) => ip.to_string(),
+			_ => target.to_string(),
+		};
+		let port = url.port().unwrap_or(443);
+
+		// Use the configured host_name override for SNI + cert verification, else the URL host.
+		let host_name = self.host_name.clone().unwrap_or(host);
+		crate::tls::server_name(&host_name)?;
+
+		// Resolve, adapted to the local socket's family; the dial below races the
+		// answers Happy Eyeballs style as they land, so neither a broken family nor a
+		// lookup still waiting on its AAAA record can stall the connect.
+		let local = self.quic.local_addr();
+		let candidates = match addr.addresses() {
+			Some(addrs) => crate::resolve::Candidates::fixed(addrs.iter().copied()),
+			None => crate::resolve::Candidates::resolve(target, port, self.resolution_delay),
+		}
+		.with_local(local, self.dual_stack);
+
+		if url.scheme() == "http" {
+			// Insecure per-connection bootstrap: only honored when no stronger
+			// verification is configured, so an attacker controlling the plaintext
+			// fetch can't weaken an explicit pin or re-enable disabled verification.
+			if self.http_bootstrap {
+				// Perform a HTTP request to fetch the certificate fingerprint.
+				let mut fingerprint = url.clone();
+				fingerprint.set_path("/certificate.sha256");
+				fingerprint.set_query(None);
+				fingerprint.set_fragment(None);
+
+				tracing::warn!(url = %RedactedUrl::new(&fingerprint), "performing insecure HTTP request for certificate");
+
+				// Even a plaintext fetch builds reqwest's TLS stack, which panics without a
+				// process default when another crate in the graph builds it as `rustls-no-provider`.
+				crate::crypto::install_default()?;
+
+				let resp = reqwest::get(fingerprint.as_str())
+					.await
+					.map_err(|err| Error::FetchFingerprint(crate::error::message(err)))?;
+				let status = resp.status().as_u16();
+				let resp = resp.error_for_status().map_err(|_| Error::FingerprintStatus(status))?;
+
+				let fingerprint = resp
+					.text()
+					.await
+					.map_err(|err| Error::ReadFingerprint(crate::error::message(err)))?;
+				let fingerprint = hex::decode(fingerprint.trim())?;
+
+				let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), vec![fingerprint]);
+				config.dangerous().set_certificate_verifier(Arc::new(verifier));
+			} else {
+				tracing::warn!(
+					"ignoring insecure http:// fingerprint bootstrap; using the configured TLS verification"
+				);
+			}
+
+			url.set_scheme("https").expect("failed to set scheme");
+		}
+
+		let alpns: Vec<Vec<u8>> = match url.scheme() {
+			"https" => vec![web::ALPN.as_bytes().to_vec()],
+			"moqt" | "moql" => versions.alpns().iter().map(|alpn| alpn.as_bytes().to_vec()).collect(),
+			_ => return Err(Error::InvalidScheme),
+		};
+
+		config.alpn_protocols = alpns;
+		if let Some(keylog) = &self.keylog {
+			config.key_log = keylog.clone();
+		}
+
+		let mut config = driver::client::Config::new(Arc::new(config));
+		config.transport = self.transport.clone();
+
+		tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting");
+
+		// Race only the QUIC handshake: the winner alone performs the WebTransport
+		// CONNECT below, so the server sees a single request no matter how many
+		// addresses were dialed.
+		let connection = crate::failover::race(candidates, self.failover_delay, |addr| {
+			let connecting = self.quic.connect(&config, addr, &host_name);
+			async move { Ok::<_, Error>(connecting?.await?) }
+		})
+		.await?;
+		tracing::Span::current().record("id", connection.stable_id());
+
+		let session = match url.scheme() {
+			"https" => {
+				let mut request = web::proto::ConnectRequest::new(url.clone());
+				for protocol in versions.alpns() {
+					request = request.with_protocol(protocol.to_string());
+				}
+				web::Session::connect(connection, request)
+					.await
+					.map_err(map_client_error)?
+			}
+			"moqt" | "moql" => web::Session::raw(connection),
+			_ => return Err(Error::UnsupportedScheme(url.scheme().to_string())),
+		};
+
+		Ok(session)
+	}
+}
+
+impl Error {
+	pub(crate) fn connect_error(&self) -> Option<crate::ConnectError> {
+		match self {
+			Self::ConnectRejected(err) => Some(*err),
+			Self::Client {
+				status: Some(status), ..
+			} => crate::ConnectError::from_status_u16(*status),
+			Self::Failover(failures) => failures.iter().find_map(|failure| failure.error.connect_error()),
+			_ => None,
+		}
+	}
+
+	/// A fixed local error or settled rejection that another dial cannot repair.
+	pub(crate) fn is_terminal(&self) -> bool {
+		match self {
+			Self::InvalidScheme
+			| Self::UnsupportedScheme(_)
+			| Self::InvalidDnsName
+			| Self::Config(_)
+			| Self::ConnectRejected(_)
+			| Self::Limits(_) => true,
+			Self::Tls(err) => err.is_terminal(),
+			Self::Failover(failures) => {
+				!failures.is_empty() && failures.iter().all(|failure| failure.error.is_terminal())
+			}
+			_ => self
+				.status()
+				.is_some_and(|status| !crate::error::status_retryable(status)),
+		}
+	}
+
+	/// The HTTP status a server answered with, if it answered with one at all.
+	///
+	/// Two places see a real status: the insecure `http://` fingerprint bootstrap, and the
+	/// WebTransport CONNECT response. See [`crate::Error::status`].
+	pub(crate) fn status(&self) -> Option<u16> {
+		match self {
+			Self::FingerprintStatus(status) => Some(*status),
+			Self::Client { status, .. } => *status,
+			// Every raced address has to have answered, and answered with something not worth
+			// repeating, before the set counts as settled: one address refusing says nothing about
+			// the others, which may simply have been unroutable.
+			Self::Failover(failures) => {
+				let mut settled = None;
+				for failure in failures {
+					match failure.error.status() {
+						Some(status) if !crate::error::status_retryable(status) => settled = Some(status),
+						_ => return None,
+					}
+				}
+				settled
+			}
+			_ => None,
+		}
+	}
+}
+
+fn map_client_error(err: web::ClientError) -> Error {
+	match client_status(&err).and_then(crate::ConnectError::from_status_u16) {
+		Some(rejected) => rejected.into(),
+		None => err.into(),
+	}
+}
+
+/// The HTTP status the server answered the WebTransport CONNECT with, when it answered with one at
+/// all (as opposed to the connection failing underneath the request).
+///
+/// Both classifications read this: [`classify_client_error`] turns an auth status into a
+/// [`crate::ConnectError`], and [`Error::status`] hands it to the caller, whose backoff consults
+/// the status. A `404` or `405` is the server's settled answer, so retrying
+/// it just burns the reconnect budget on a URL that will never work.
+fn client_status(err: &web::ClientError) -> Option<u16> {
+	match err {
+		web::ClientError::HttpError(err) => connect_status(err),
+		_ => None,
+	}
+}
+
+fn connect_status(err: &web::ConnectError) -> Option<u16> {
+	match err {
+		web::ConnectError::ErrorStatus(status) => Some(status.as_u16()),
+		web::ConnectError::ProtoError(err) => proto_status(err),
+		_ => None,
+	}
+}
+
+fn proto_status(err: &web::proto::ConnectError) -> Option<u16> {
+	match err {
+		web::proto::ConnectError::ErrorStatus(status) | web::proto::ConnectError::WrongStatus(Some(status)) => {
+			Some(status.as_u16())
+		}
+		_ => None,
+	}
+}
+
+// ── Server ──────────────────────────────────────────────────────────
+
+pub(crate) struct Server {
+	pub quic: driver::endpoint::Endpoint,
+	/// The configured receive window, opened once a session is admitted: until then a
+	/// connection holds [`moq_net::transport::SETUP_RECEIVE_WINDOW`].
+	pub window: Option<std::num::NonZeroU64>,
+	/// Builds each accepted client's identity against the listener's current roots.
+	pub(crate) tls: crate::tls::Serve,
+	/// Reloads the QUIC-LB peers for as long as the server runs.
+	_peers: Option<notify::RecommendedWatcher>,
+}
+
+pub(crate) struct Options {
+	pub config: listen::Config,
+	pub quic: crate::quic::Config,
+	pub member: Option<listen::Socket>,
+	pub tls: crate::tls::Serve,
+	pub demux: super::demux::Demux,
+}
+
+impl Server {
+	pub fn new(options: Options) -> Result<Self> {
+		let Options {
+			config,
+			quic,
+			member,
+			tls: served,
+			demux,
+		} = options;
+		let quic = quic.resolve();
+		let mut transport = transport(&quic, "server")?;
+		let window = transport.limits.receive_window;
+		transport.limits.receive_window = std::num::NonZeroU64::new(moq_net::transport::SETUP_RECEIVE_WINDOW);
+		let keylog = quic
+			.keylog
+			.as_deref()
+			.map(crate::tls::KeyLog::open)
+			.transpose()?
+			.map(Arc::new);
+
+		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
+		let mut alpns: Vec<Vec<u8>> = config
+			.versions()
+			.alpns()
+			.iter()
+			.map(|alpn| alpn.as_bytes().to_vec())
+			.collect();
+		alpns.push(web::ALPN.as_bytes().to_vec());
+
+		let mut tls = (*served.config(alpns)?).clone();
+		if let Some(keylog) = keylog {
+			tls.key_log = keylog;
+		}
+
+		let mut server = driver::server::Config::new(Arc::new(tls));
+		server.transport = transport;
+		// Advertise the preferred_address transport parameter (RFC 9000 §9.6).
+		// The driver allocates a fresh CID + reset token for the address during the handshake.
+		server.preferred_address_v4 = config.preferred_v4;
+		server.preferred_address_v6 = config.preferred_v6;
+
+		let listen = config
+			.bind
+			.as_ref()
+			.map(crate::listen::Bind::resolve)
+			.transpose()
+			.map_err(Error::ResolveBind)?
+			.unwrap_or(crate::server::DEFAULT_BIND);
+		let load_balancer = config.load_balancer();
+
+		let mut endpoint_config = driver::endpoint::Config::default().with_server(server);
+		// The demux, and the shard steering filter, tell QUIC from the WebRTC media
+		// path by the fixed bit, so peers must never be invited to clear it.
+		endpoint_config.grease_quic_bit = false;
+		// It also keys the default connection ID generator. The ones below validate a
+		// predecessor's IDs without it.
+		if let Some(secret) = &config.reset.secret {
+			let secret = crate::secret::Secret::read(secret).map_err(Error::ResetSecret)?;
+			endpoint_config.reset_secret = Some(*secret.as_bytes());
+		}
+
+		let mut forward = None;
+		// Configure connection ID generator with server ID if provided
+		if let Some(shard) = member.as_ref().map(listen::Socket::shard) {
+			if load_balancer.is_some() {
+				return Err(Error::ShardWithQuicLb);
+			}
+			tracing::debug!(
+				index = shard.index(),
+				count = shard.count(),
+				"encoding the shard in connection IDs"
+			);
+			endpoint_config.cid_generator = Some(Arc::new(move || {
+				let mut cids = moq_quic::RandomConnectionIdGenerator::default();
+				cids.set_shard(shard.index(), shard.count());
+				Box::new(cids)
+			}));
+		} else if let Some(load_balancer) = load_balancer {
+			let server_id = load_balancer.id;
+			let nonce_len = load_balancer.nonce;
+			if nonce_len < 4 {
+				return Err(Error::QuicLbNonceTooSmall);
+			}
+
+			let cid_len = 1 + server_id.len() + nonce_len;
+			if cid_len > 20 {
+				return Err(Error::QuicLbCidTooLong(cid_len));
+			}
+
+			tracing::info!(
+				?server_id,
+				nonce_len,
+				"using QUIC-LB compatible connection ID generation"
+			);
+			if let Some(config) = &load_balancer.forward {
+				forward = Some(Forwarding::start(
+					config,
+					&server_id,
+					endpoint_config.max_udp_payload_size,
+				)?);
+			}
+			endpoint_config.cid_generator = Some(Arc::new(move || {
+				Box::new(driver::forward::ServerIdGenerator::new(&server_id.0, nonce_len))
+			}));
+		}
+
+		// A group socket was released only after every member bound and the
+		// steering filter covered the final array.
+		let socket = match member {
+			Some(member) => member.into_inner(),
+			None => crate::bind::udp(crate::bind::Udp::new(listen)).map_err(Error::BindSocket)?,
+		};
+
+		let socket = driver::wrap_udp_socket(socket).map_err(|err| Error::CreateEndpoint(err.into()))?;
+		let socket = demux.wrap(socket);
+		let (quic, peers) = match forward {
+			Some(Forwarding { forward, watcher }) => (
+				driver::endpoint::Endpoint::forwarding(endpoint_config, socket, forward),
+				Some(watcher),
+			),
+			None => (driver::endpoint::Endpoint::new(endpoint_config, socket), None),
+		};
+		let quic = quic.map_err(Error::CreateEndpoint)?;
+		demux.attach(&quic);
+
+		Ok(Self {
+			quic,
+			window,
+			tls: served,
+			_peers: peers,
+		})
+	}
+
+	pub fn accept(&self) -> impl std::future::Future<Output = Option<driver::endpoint::Incoming>> + '_ {
+		self.quic.accept()
+	}
+
+	pub fn certificates(&self) -> crate::tls::Certificates {
+		self.tls.certificates()
+	}
+
+	pub fn local_addr(&self) -> net::SocketAddr {
+		self.quic.local_addr()
+	}
+
+	/// Close every connection without waiting for the closes to go out, as a drop must.
+	pub fn close(&self) {
+		drop(self.quic.close(driver::VarInt::from_u32(0), "server shutdown"));
+	}
+
+	/// Close every connection, wait until each has sent its close to the peer,
+	/// then release the socket.
+	pub async fn shutdown(self) {
+		self.closer().close().await;
+	}
+
+	/// A handle that closes this server's connections from wherever its owner
+	/// went, for a worker that has to flush them before its runtime is dropped.
+	pub fn closer(&self) -> Closer {
+		Closer(self.quic.clone())
+	}
+}
+
+/// Closes a [`Server`]'s connections without owning it; see [`Server::closer`].
+pub(crate) struct Closer(driver::endpoint::Endpoint);
+
+impl Closer {
+	/// Close every connection, wait until each has sent its close to the peer, then release
+	/// the socket.
+	pub async fn close(self) {
+		self.0.close(driver::VarInt::from_u32(0), "server shutdown").await;
+	}
+}
+
+// ── QuicRequest ─────────────────────────────────────────────────────
+
+/// A raw QUIC connection request without WebTransport framing (QUIC backend).
+/// Accept a QUIC connection, negotiate WebTransport or raw moq, and complete the
+/// handshake (a `200 OK` for WebTransport). Returns the established session, the request
+/// URL and validated mTLS identity (both captured before the response consumes the
+/// request), and the dialed authority (the CONNECT authority on WebTransport, the TLS
+/// SNI on raw QUIC). Raw QUIC carries no request URL (the path rides the SETUP instead).
+pub(crate) async fn accept(
+	conn: driver::endpoint::Incoming,
+	alpns: Vec<&'static str>,
+	tls: crate::tls::Serve,
+) -> Result<crate::server::Accepted<web::Session>> {
+	let mut conn = conn.accept()?;
+
+	let handshake = conn.handshake_data().await?;
+	let alpn = handshake.alpn.ok_or(Error::MissingAlpn)?;
+	let alpn = String::from_utf8(alpn)?;
+	let host = handshake.server_name.unwrap_or_default();
+
+	let remote = conn.remote_address();
+	tracing::debug!(%host, ip = %remote, %alpn, "accepting");
+
+	// Wait for the QUIC connection to be established.
+	let conn = conn.await.map_err(|err| Error::Establish(crate::error::message(err)))?;
+
+	let span = tracing::Span::current();
+	span.record("id", conn.stable_id());
+	tracing::debug!(%host, ip = %remote, %alpn, "accepted");
+
+	let link = crate::server::Link {
+		remote: Some(remote),
+		local: None,
+		server_name: (!host.is_empty()).then(|| host.clone()),
+		alpn: None,
+	};
+
+	match alpn.as_str() {
+		web::ALPN => {
+			// Wait for the CONNECT request, then capture its URL and mTLS identity before
+			// the response consumes it.
+			let request = web::Request::accept(conn)
+				.await
+				.map_err(|err| Error::RecvRequest(crate::error::message(err)))?;
+			let url = Some(request.url.clone());
+			let identity = request.connection().peer_identity().map(|chain| tls.peer(chain));
+			// The authority the client put in its CONNECT URL.
+			let authority = request.url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
+
+			let mut response = web::proto::ConnectResponse::OK;
+			let mut link = link;
+			if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
+				response = response.with_protocol(protocol);
+				link.alpn = Some(protocol.clone());
+			}
+			let session = request
+				.respond(response)
+				.await
+				.map_err(|err| Error::Server(crate::error::message(err)))?;
+			Ok(crate::server::Accepted {
+				session,
+				url,
+				identity,
+				authority,
+				link,
+			})
+		}
+		// Recognize any moq ALPN this server actually offered (its configured versions),
+		// not the global default set. rustls only negotiates an ALPN the server offered, so
+		// this also covers versions omitted from `moq_net::ALPNS` but enabled
+		// in this server's configuration.
+		alpn if alpns.contains(&alpn) => {
+			let identity = conn.peer_identity().map(|chain| tls.peer(chain));
+			// Raw QUIC carries no request URL; the path rides the SETUP. The TLS SNI is the
+			// only authority the client can offer here, and it is optional.
+			let authority = (!host.is_empty()).then_some(host);
+			let session = web::Session::raw(conn);
+			Ok(crate::server::Accepted {
+				session,
+				url: None,
+				identity,
+				authority,
+				link: crate::server::Link {
+					alpn: Some(alpn.to_string()),
+					..link
+				},
+			})
+		}
+		_ => Err(Error::UnsupportedAlpn(alpn)),
+	}
+}
+
+// ── Forwarding ──────────────────────────────────────────────────────
+
+/// A forward socket, and the watcher that keeps its peers current.
+struct Forwarding {
+	forward: driver::forward::Forward,
+	watcher: notify::RecommendedWatcher,
+}
+
+impl Forwarding {
+	fn start(config: &crate::quic::Forward, id: &ServerId, max_udp_payload_size: u16) -> Result<Self> {
+		let key = crate::secret::Secret::read(&config.key).map_err(Error::ForwardKey)?;
+		let peers = driver::forward::Peers::default();
+		peers.set(read_peers(&config.peers, id, config.bind)?);
+
+		let reload = peers.clone();
+		let (path, own, bind) = (config.peers.clone(), id.clone(), config.bind);
+		let watcher = crate::watch::callback(std::slice::from_ref(&config.peers), move || {
+			match read_peers(&path, &own, bind) {
+				Ok(map) => {
+					reload.set(map);
+					tracing::info!(path = %path.display(), "reloaded QUIC-LB peers");
+				}
+				Err(err) => tracing::warn!(%err, "failed to reload QUIC-LB peers; retaining the previous ones"),
+			}
+		})
+		.map_err(|err| Error::WatchPeers(err.to_string()))?;
+
+		let socket = std::net::UdpSocket::bind(config.bind).map_err(Error::BindForward)?;
+		let forward = driver::forward::Forward::new(socket, &id.0, peers, key.as_bytes(), max_udp_payload_size)
+			.map_err(Error::BindForward)?;
+		tracing::info!(bind = %config.bind, "forwarding QUIC-LB packets");
+		Ok(Self { forward, watcher })
+	}
+}
+
+/// Read the peers file, skipping this server's own entry.
+///
+/// Refuses the whole file for one bad entry, so a typo cannot quietly strand that server's
+/// clients: a server ID of another length, which this server's connection IDs could not carry,
+/// or an address it cannot send to or accept from.
+fn read_peers(path: &std::path::Path, own: &ServerId, bind: net::SocketAddr) -> Result<driver::forward::Map> {
+	let invalid = |reason: String| Error::ForwardPeers {
+		path: path.to_owned(),
+		reason,
+	};
+	let text = std::fs::read_to_string(path).map_err(|err| invalid(err.to_string()))?;
+	let peers: std::collections::HashMap<ServerId, net::SocketAddr> =
+		toml::from_str(&text).map_err(|err| invalid(err.to_string()))?;
+
+	let mut map = driver::forward::Map::default();
+	for (id, addr) in peers {
+		if id.len() != own.len() {
+			return Err(invalid(format!(
+				"{id:?} is not {} bytes like this server's ID",
+				own.len()
+			)));
+		}
+		if addr.ip().is_unspecified() || addr.is_ipv4() != bind.is_ipv4() {
+			return Err(invalid(format!(
+				"{id:?} has an address {bind} cannot forward to: {addr}"
+			)));
+		}
+		if id != *own {
+			map.insert(&id.0, addr);
+		}
+	}
+	Ok(map)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use url::Url;
+
+	#[tokio::test]
+	async fn pinned_ipv6_connection() {
+		pinned_connection("[::1]:0", None).await;
+	}
+
+	#[tokio::test]
+	async fn pinned_ipv4_connection() {
+		pinned_connection("127.0.0.1:0", None).await;
+	}
+
+	#[tokio::test]
+	async fn pinned_ipv6_connection_with_host_override() {
+		pinned_connection("[::1]:0", Some("localhost")).await;
+	}
+
+	/// The certificate fetch goes out without a process-default crypto provider installed,
+	/// even when reqwest is built with rustls but no provider.
+	#[tokio::test]
+	async fn http_dial_needs_no_installed_provider() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let port = listener.local_addr().unwrap().port();
+		tokio::spawn(async move {
+			let (mut socket, _) = listener.accept().await.unwrap();
+			let mut buf = [0; 1024];
+			let _ = socket.read(&mut buf).await;
+			let _ = socket
+				.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+				.await;
+		});
+
+		let config = connect::Config {
+			bind: Some("127.0.0.1:0".parse().unwrap()),
+			..Default::default()
+		};
+		let tls = config.tls.build().expect("tls config");
+		let client = Client::new(&config, &crate::quic::Config::default()).expect("client init");
+		let url: Url = format!("http://127.0.0.1:{port}/").parse().unwrap();
+		let versions = moq_net::Versions::default();
+		let result = kio::clock::timeout(Duration::from_secs(5), client.connect(&tls, url.into(), &versions))
+			.await
+			.expect("dial timed out");
+		assert!(
+			matches!(result, Err(Error::FingerprintStatus(404))),
+			"the fetch should reach the server"
+		);
+	}
+
+	/// QUIC and the WebRTC media path share the listening port: a QUIC session
+	/// connects while a WebRTC peer's ICE check, DTLS, and RTP reach the feed and
+	/// its reply leaves from the same port, and a public STUN query is dropped.
+	/// The feed lives as long as the listener, without a clone of its demux kept.
+	#[tokio::test]
+	async fn one_port_serves_quic_and_webrtc() {
+		let demux = crate::quic::demux::Demux::default();
+		let feed = demux.webrtc();
+		let counters = demux.counters().clone();
+		let quic = crate::quic::Config::default();
+		let config = listen::Config {
+			bind: Some("[::]:0".parse().unwrap()),
+			tls: crate::tls::Listen {
+				generate: vec!["localhost".into()],
+				..Default::default()
+			},
+			..Default::default()
+		};
+		let tls = config.tls.load().unwrap();
+		let server = Server::new(Options {
+			config,
+			quic: quic.clone(),
+			member: None,
+			tls,
+			demux,
+		})
+		.expect("server init");
+		let port = server.local_addr().port();
+		let addr = net::SocketAddr::from((net::Ipv4Addr::LOCALHOST, port));
+
+		let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let check: &[u8] = &[
+			0x00, 0x01, 0x00, 0x08, 0x21, 0x12, 0xa4, 0x42, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0x00, 0x06, 0x00,
+			0x03, b'a', b':', b'b', 0,
+		];
+		let query = &check[..20];
+		let query = [&[0x00, 0x01, 0x00, 0x00][..], &query[4..]].concat();
+		let sent: [&[u8]; 3] = [check, &[0x16, 0xfe, 0xfd, 1], &[0x80, 0x00, 0, 1]];
+		peer.send_to(&query, addr).await.unwrap();
+		for datagram in sent {
+			peer.send_to(datagram, addr).await.unwrap();
+		}
+
+		let mut tls_config = crate::tls::Connect::default();
+		tls_config.fingerprint = server.certificates().fingerprints();
+		let config = connect::Config {
+			bind: Some("127.0.0.1:0".parse().unwrap()),
+			tls: tls_config,
+			..Default::default()
+		};
+		let tls = config.tls.build().expect("tls config");
+		let client = Client::new(&config, &quic).expect("client init");
+		let url: Url = format!("moqt://localhost:{port}/test").parse().unwrap();
+		let versions = moq_net::Versions::default();
+		let dial = client.connect(&tls, url.into(), &versions);
+		let accept = async {
+			let incoming = server.accept().await.expect("incoming connection");
+			super::accept(incoming, versions.alpns(), server.tls.clone()).await
+		};
+		let webrtc = async {
+			let mut received = Vec::new();
+			for _ in sent {
+				let datagram = feed.recv().await.expect("feed open");
+				assert_eq!(datagram.remote, peer.local_addr().unwrap());
+				received.push(datagram.data.to_vec());
+			}
+			feed.send(&moq_sock::udp::Transmit {
+				destination: peer.local_addr().unwrap(),
+				ecn: None,
+				contents: b"reply",
+				segment_size: None,
+				src_ip: None,
+			})
+			.await
+			.unwrap();
+			let mut buf = [0; 16];
+			let (len, from) = peer.recv_from(&mut buf).await.unwrap();
+			(received, buf[..len].to_vec(), from.port())
+		};
+		let (session, received) = kio::clock::timeout(Duration::from_secs(5), async {
+			let (session, received) = tokio::join!(async { tokio::try_join!(dial, accept) }, webrtc);
+			(session, received)
+		})
+		.await
+		.expect("timed out");
+		session.expect("QUIC beside WebRTC");
+
+		let (received, reply, from) = received;
+		assert_eq!(received, sent.map(<[u8]>::to_vec));
+		assert_eq!(reply, b"reply");
+		assert_eq!(from, port);
+		assert_eq!(counters.get(crate::quic::demux::Discard::Stun), 1);
+
+		server.shutdown().await;
+		let end = kio::clock::timeout(Duration::from_secs(5), feed.recv()).await;
+		assert!(end.expect("the feed outlived the listener").is_none());
+	}
+
+	async fn pinned_connection(bind: &str, host_name: Option<&str>) {
+		let quic = crate::quic::Config::default();
+		let config = listen::Config {
+			bind: Some(bind.parse().unwrap()),
+			tls: crate::tls::Listen {
+				generate: vec!["localhost".into()],
+				..Default::default()
+			},
+			..Default::default()
+		};
+		let tls = config.tls.load().unwrap();
+		let server = Server::new(Options {
+			config,
+			quic: quic.clone(),
+			member: None,
+			tls,
+			demux: Default::default(),
+		})
+		.expect("server init");
+		let addr = server.local_addr();
+		let mut tls_config = crate::tls::Connect::default();
+		tls_config.fingerprint = server.certificates().fingerprints();
+		assert!(!tls_config.fingerprint.is_empty());
+		tls_config.host_name = host_name.map(str::to_owned);
+		let config = connect::Config {
+			bind: Some(bind.parse().unwrap()),
+			tls: tls_config,
+			..Default::default()
+		};
+		let tls = config.tls.build().expect("tls config");
+		let client = Client::new(&config, &quic).expect("client init");
+		let url: Url = format!("moqt://{addr}/.cluster/test").parse().unwrap();
+		let versions = moq_net::Versions::default();
+		let dial = client.connect(&tls, url.into(), &versions);
+		let accept = async {
+			let incoming = server.accept().await.expect("incoming connection");
+			super::accept(incoming, versions.alpns(), server.tls.clone()).await
+		};
+		let result = kio::clock::timeout(Duration::from_secs(5), async { tokio::try_join!(dial, accept) })
+			.await
+			.expect("handshake timed out");
+		let (_client, _server) = result.expect("pinned connection failed");
+	}
+
+	/// Every window reaches the transport config, and unset windows get our defaults instead
+	/// of moq-quic's.
+	#[test]
+	fn transport_writes_each_window() {
+		let quic = crate::quic::Config {
+			receive_window: Some(128 << 20),
+			stream_receive_window: Some(8 << 20),
+			send_window: Some(32 << 20),
+			..Default::default()
+		};
+		let limits = transport(&quic.resolve(), "client").unwrap().limits;
+		assert_eq!(limits.receive_window.unwrap().get(), 128 << 20);
+		assert_eq!(limits.stream_receive_window.unwrap().get(), 8 << 20);
+		assert_eq!(limits.send_window.unwrap().get(), 32 << 20);
+
+		let limits = transport(&crate::quic::Config::default().resolve(), "client")
+			.unwrap()
+			.limits;
+		assert_eq!(
+			limits.receive_window.unwrap().get(),
+			crate::quic::DEFAULT_RECEIVE_WINDOW
+		);
+		assert_eq!(
+			limits.stream_receive_window.unwrap().get(),
+			crate::quic::DEFAULT_STREAM_RECEIVE_WINDOW
+		);
+		assert_eq!(limits.send_window.unwrap().get(), crate::quic::DEFAULT_SEND_WINDOW);
+	}
+
+	/// Each family supplies its advertised congestion behavior.
+	#[test]
+	fn congestion_factory_maps_each_family() {
+		let init = moq_congestion::Init {
+			now: kio::clock::Instant::now(),
+			mtu: 1200,
+			rtt: std::time::Duration::from_millis(333),
+			max_pacing_rate: None,
+			seed: 0,
+		};
+
+		let loss = congestion_factory(CongestionControl::Loss).build(init);
+		assert!(loss.metrics().ssthresh.is_some());
+		assert!(!loss.probes());
+
+		let delay = congestion_factory(CongestionControl::Delay).build(init);
+		assert!(delay.probes());
+		assert!(delay.metrics().pacing_rate.is_some());
+
+		let none = congestion_factory(CongestionControl::None).build(init);
+		assert_eq!(none.window(), u64::MAX);
+		assert!(!none.probes());
+	}
+
+	/// Loopback regression test: with the knob unset, live QUIC connections must run
+	/// BBRv3 on both ends.
+	#[tokio::test]
+	async fn default_reaches_the_live_connection() {
+		let server_config = listen::Config {
+			bind: Some("127.0.0.1:0".parse().unwrap()),
+			tls: crate::tls::Listen {
+				generate: vec!["localhost".into()],
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		// The knob left unset, the way a binary that never mentions it runs.
+		let quic = crate::quic::Config::default();
+
+		let tls = server_config.tls.load().unwrap();
+		let server = Server::new(Options {
+			config: server_config,
+			quic: quic.clone(),
+			member: None,
+			tls,
+			demux: Default::default(),
+		})
+		.expect("server init");
+		let addr = server.local_addr();
+
+		let accepted = tokio::spawn(async move {
+			let incoming = server.accept().await.expect("no incoming connection");
+			let conn = incoming.accept().expect("accept").await.expect("handshake");
+			conn.congestion_state().probes()
+		});
+
+		// tls::Connect has a private field, so it can't be built with a struct literal.
+		let mut tls_config = crate::tls::Connect::default();
+		tls_config.insecure = Some(true);
+
+		let client_config = connect::Config {
+			bind: Some("127.0.0.1:0".parse().unwrap()),
+			tls: tls_config,
+			..Default::default()
+		};
+
+		let tls = client_config.tls.build().expect("tls config");
+		let client = Client::new(&client_config, &quic).expect("client init");
+		// Dial the loopback IP directly so the system resolver is never involved.
+		let url: Url = format!("moqt://127.0.0.1:{}", addr.port()).parse().unwrap();
+
+		// Bound the whole connect + accept + assert flow so a handshake
+		// regression fails fast instead of stalling CI.
+		kio::clock::timeout(Duration::from_secs(5), async move {
+			let session = client
+				.connect(&tls, url.into(), &moq_net::Versions::default())
+				.await
+				.expect("connect failed");
+
+			// Inspect the driver through the explicit connection accessor.
+			assert!(
+				session.connection().congestion_state().probes(),
+				"client controller cannot probe"
+			);
+			// BBRv3 can probe, so moq-net gets a target to write.
+			#[cfg(feature = "net")]
+			assert!(
+				session.connection().probe().is_some(),
+				"BBRv3 connection has no probe target"
+			);
+			assert!(
+				accepted.await.expect("server task panicked"),
+				"server controller cannot probe"
+			);
+		})
+		.await
+		.expect("test timed out");
+	}
+
+	/// A factory that counts the controllers it builds, each a BBRv3.
+	#[derive(Default)]
+	struct Counted(std::sync::atomic::AtomicUsize);
+
+	impl moq_congestion::Factory for Counted {
+		fn build(self: Arc<Self>, init: moq_congestion::Init) -> Box<dyn moq_congestion::Controller> {
+			self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+			Arc::new(moq_congestion::bbr3::Config::default()).build(init)
+		}
+	}
+
+	/// Loopback test: an application's controller runs both ends' live connections in
+	/// place of the configured family, here CUBIC. CUBIC cannot probe and BBRv3 can, so a
+	/// probing connection is running the factory's controller.
+	#[tokio::test]
+	async fn a_custom_controller_reaches_the_live_connection() {
+		let server_config = listen::Config {
+			bind: Some("127.0.0.1:0".parse().unwrap()),
+			tls: crate::tls::Listen {
+				generate: vec!["localhost".into()],
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		let server_factory = Arc::new(Counted::default());
+		let server_quic = crate::quic::Config {
+			congestion_control: Some(CongestionControl::Loss),
+			controller: Some(crate::quic::Controller(server_factory.clone())),
+			..Default::default()
+		};
+
+		let tls = server_config.tls.load().unwrap();
+		let server = Server::new(Options {
+			config: server_config,
+			quic: server_quic,
+			member: None,
+			tls,
+			demux: Default::default(),
+		})
+		.expect("server init");
+		let addr = server.local_addr();
+
+		let accepted = tokio::spawn(async move {
+			let incoming = server.accept().await.expect("no incoming connection");
+			let conn = incoming.accept().expect("accept").await.expect("handshake");
+			conn.congestion_state().probes()
+		});
+
+		let mut tls_config = crate::tls::Connect::default();
+		tls_config.insecure = Some(true);
+		let client_config = connect::Config {
+			bind: Some("127.0.0.1:0".parse().unwrap()),
+			tls: tls_config,
+			..Default::default()
+		};
+
+		let client_factory = Arc::new(Counted::default());
+		let client_quic = crate::quic::Config {
+			congestion_control: Some(CongestionControl::Loss),
+			controller: Some(crate::quic::Controller(client_factory.clone())),
+			..Default::default()
+		};
+
+		let tls = client_config.tls.build().expect("tls config");
+		let client = Client::new(&client_config, &client_quic).expect("client init");
+		let url: Url = format!("moqt://127.0.0.1:{}", addr.port()).parse().unwrap();
+
+		kio::clock::timeout(Duration::from_secs(5), async move {
+			let session = client
+				.connect(&tls, url.into(), &moq_net::Versions::default())
+				.await
+				.expect("connect failed");
+
+			assert!(
+				session.connection().congestion_state().probes(),
+				"client connection is not running its own controller"
+			);
+			assert!(
+				accepted.await.expect("server task panicked"),
+				"server connection is not running its own controller"
+			);
+		})
+		.await
+		.expect("test timed out");
+
+		assert!(client_factory.0.load(std::sync::atomic::Ordering::Relaxed) > 0);
+		assert!(server_factory.0.load(std::sync::atomic::Ordering::Relaxed) > 0);
+	}
+
+	/// The peers file skips this server's own entry, so every server can share it, and refuses
+	/// the whole file for one entry this server could not forward to.
+	#[test]
+	fn peers_file_is_shared_and_refused_whole() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("peers.toml");
+		let own: ServerId = "01".parse().unwrap();
+		let bind: net::SocketAddr = "10.0.0.1:4443".parse().unwrap();
+		let read = |body: &str| {
+			std::fs::write(&path, body).unwrap();
+			read_peers(&path, &own, bind)
+		};
+
+		let map = read("\"01\" = \"10.0.0.1:4443\"\n\"02\" = \"10.0.0.2:4443\"\n").unwrap();
+		let expected: std::collections::HashMap<Box<[u8]>, net::SocketAddr> =
+			[(Box::from(&[2u8][..]), "10.0.0.2:4443".parse().unwrap())].into();
+		assert_eq!(map.peers(), &expected);
+
+		for (body, needle) in [
+			("\"0203\" = \"10.0.0.2:4443\"\n", "not 1 bytes"),
+			("\"02\" = \"[2001:db8::2]:4443\"\n", "cannot forward to"),
+			("\"02\" = \"0.0.0.0:4443\"\n", "cannot forward to"),
+			("\"zz\" = \"10.0.0.2:4443\"\n", "Invalid character"),
+		] {
+			let err = read(body).expect_err(body).to_string();
+			assert!(err.contains(needle), "{body}: {err}");
+		}
+	}
+}

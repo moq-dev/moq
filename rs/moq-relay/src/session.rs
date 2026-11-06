@@ -5,17 +5,17 @@
 //! a push asks the lease to re-check now, and the server's reply is the verdict.
 //! One-shot HTTP and LAN peers are not sessions and stay out.
 
+use kio::clock::Wall;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::SystemTime;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use moq_auth::{Pattern, Peer, Request, Role, Transport};
 use serde::{Deserialize, Serialize};
-use serde_with::{TimestampSeconds, serde_as};
+use serde_with::serde_as;
 
 /// The live sessions on this node, cloned into every connection and the
 /// internal listener.
@@ -26,7 +26,8 @@ pub struct Registry {
 
 struct Entry {
 	request: Request,
-	started: SystemTime,
+	started: Wall,
+	closed: Arc<OnceLock<Wall>>,
 	handle: Handle,
 }
 
@@ -63,9 +64,14 @@ pub struct Registration {
 	id: String,
 	handle: Handle,
 	seen: AtomicU64,
+	closed: Arc<OnceLock<Wall>>,
 }
 
 impl Registration {
+	pub(crate) fn closed(&self) {
+		self.closed.get_or_init(kio::clock::wall);
+	}
+
 	/// Wait until a push has asked this session to re-check since the last observation.
 	pub async fn nudged(&self) {
 		let seen = self.seen.load(Ordering::Relaxed);
@@ -94,11 +100,13 @@ impl Registry {
 	pub fn register(&self, request: Request) -> Registration {
 		let handle = Handle::default();
 		let id = request.id.clone();
+		let closed = Arc::new(OnceLock::new());
 		self.inner.lock().unwrap_or_else(PoisonError::into_inner).insert(
 			id.clone(),
 			Entry {
 				request,
-				started: SystemTime::now(),
+				started: kio::clock::wall(),
+				closed: closed.clone(),
 				handle: handle.clone(),
 			},
 		);
@@ -107,6 +115,7 @@ impl Registry {
 			id,
 			handle,
 			seen: AtomicU64::new(0),
+			closed,
 		}
 	}
 
@@ -117,7 +126,7 @@ impl Registry {
 			.unwrap_or_else(PoisonError::into_inner)
 			.values()
 			.filter(|entry| filter.matches(&entry.request))
-			.map(|entry| View::from_session(&entry.request, entry.started))
+			.map(|entry| View::from_session(&entry.request, entry.started, entry.closed.get().copied()))
 			.collect()
 	}
 
@@ -153,7 +162,7 @@ pub struct Filter {
 	pub remote: Option<Remote>,
 	/// The relay's local socket, exact including port.
 	pub local: Option<SocketAddr>,
-	/// SNI or the host the client addressed.
+	/// The SNI that selected the relay's certificate; sessions without one never match.
 	pub server_name: Option<String>,
 	/// Negotiated application protocol.
 	pub alpn: Option<String>,
@@ -175,7 +184,12 @@ pub enum Remote {
 	/// A single address; IPv4-mapped IPv6 folds to IPv4.
 	Ip(IpAddr),
 	/// A network; the session IP is folded the same way, then prefix-matched.
-	Cidr { addr: IpAddr, prefix: u8 },
+	Cidr {
+		/// The network address.
+		addr: IpAddr,
+		/// The prefix length in bits.
+		prefix: u8,
+	},
 }
 
 impl std::str::FromStr for Remote {
@@ -382,7 +396,12 @@ pub enum Error {
 	/// A field the routes do not filter on, including `query`.
 	Unknown(String),
 	/// A known field whose value did not parse.
-	Invalid { field: &'static str, value: String },
+	Invalid {
+		/// The field name.
+		field: &'static str,
+		/// The value that did not parse.
+		value: String,
+	},
 }
 
 impl std::fmt::Display for Error {
@@ -403,7 +422,7 @@ impl IntoResponse for Error {
 }
 
 /// One live session as the list route returns it: the request the server saw,
-/// minus its credentials (`query` and `token`), plus when it was admitted.
+/// minus its credentials (`query` and `token`), plus its admission and close times.
 #[serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -418,7 +437,7 @@ pub struct View {
 	pub remote: Option<SocketAddr>,
 	/// The relay's socket address the session arrived on.
 	pub local: Option<SocketAddr>,
-	/// The SNI the client presented.
+	/// The SNI that selected the relay's certificate.
 	pub server_name: Option<String>,
 	/// The negotiated application protocol.
 	pub alpn: Option<String>,
@@ -429,12 +448,15 @@ pub struct View {
 	/// The verified client certificate, when one was presented.
 	pub tls: Option<Peer>,
 	/// When the session was admitted, as unix seconds.
-	#[serde_as(as = "TimestampSeconds<i64>")]
-	pub started: SystemTime,
+	#[serde_as(as = "kio::clock::serde::UnixSeconds")]
+	pub started: Wall,
+	/// When supervision observed the session closed, as unix seconds, absent while open.
+	#[serde_as(as = "Option<kio::clock::serde::UnixSeconds>")]
+	pub closed: Option<Wall>,
 }
 
 impl View {
-	fn from_session(request: &Request, started: SystemTime) -> Self {
+	fn from_session(request: &Request, started: Wall, closed: Option<Wall>) -> Self {
 		Self {
 			id: request.id.clone(),
 			node: request.node.clone(),
@@ -447,6 +469,7 @@ impl View {
 			role: request.role,
 			tls: request.tls.clone(),
 			started,
+			closed,
 		}
 	}
 }
@@ -572,11 +595,11 @@ mod tests {
 		let reg = registry.register(request);
 		let ids = registry.revalidate(&Filter::from_query(Some("id=abc")).unwrap());
 		assert_eq!(ids, ["abc"]);
-		tokio::time::timeout(Duration::from_secs(1), reg.nudged())
+		kio::clock::timeout(Duration::from_secs(1), reg.nudged())
 			.await
 			.expect("the registration woke");
 		assert!(
-			tokio::time::timeout(std::time::Duration::from_millis(20), reg.nudged())
+			kio::clock::timeout(std::time::Duration::from_millis(20), reg.nudged())
 				.await
 				.is_err(),
 			"a single push wakes once"

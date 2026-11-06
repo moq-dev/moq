@@ -58,7 +58,7 @@ impl<P: Task + Unpin> Future for Pending<P> {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod test {
 	use super::*;
 	use crate::{Producer, Waiter};

@@ -1,5 +1,4 @@
-import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { Time } from "@moq/net";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Decoder } from "./decoder";
 import { Emitter } from "./emitter";
@@ -38,21 +37,22 @@ afterEach(() => {
 	else Reflect.deleteProperty(globalThis, "GainNode");
 });
 
-async function setup(fade?: Time.Milli) {
+async function setup(level = 0.5, silenced = false) {
 	const context = { currentTime: 10, destination: {} };
 	const source = { out: { root: new Signal({ context, connect: () => {} }) } } as unknown as Decoder;
-	const volume = new Signal(0.5);
-	const emitter = new Emitter({ source, volume, fade });
+	const volume = new Signal(level);
+	const muted = new Signal(silenced);
+	const emitter = new Emitter({ source, volume, muted });
 	await settle();
-	return { emitter, volume, node: nodes[0] };
+	return { emitter, volume, muted, node: nodes[0] };
 }
 
 async function settle(): Promise<void> {
 	for (let i = 0; i < 5; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
 }
 
-test("ramps a volume change over the fade", async () => {
-	const { emitter, volume, node } = await setup(Time.Milli(50));
+test("ramps a volume change from wherever the last ramp reached", async () => {
+	const { emitter, volume, node } = await setup();
 	try {
 		node.calls.length = 0;
 		volume.set(0);
@@ -60,46 +60,45 @@ test("ramps a volume change over the fade", async () => {
 		expect(node.calls).toEqual([
 			["cancel", 0, 10],
 			["set", 0.5, 10],
-			["ramp", 0, 10.05],
+			["ramp", 0, 10.2],
 		]);
 	} finally {
 		emitter.close();
 	}
 });
 
-test("steps at once with no fade", async () => {
-	const { emitter, volume, node } = await setup(Time.Milli(0));
+test("a root arriving muted starts at zero gain and preserves the selected level", async () => {
+	const { emitter, volume, node } = await setup(0.8, true);
 	try {
-		node.calls.length = 0;
+		expect(node.gain.value).toBe(0);
+		expect(node.calls.at(-1)).toEqual(["ramp", 0, 10.2]);
+		expect(volume.peek()).toBe(0.8);
+		expect(emitter.out.enabled.peek()).toBe(false);
+	} finally {
+		emitter.close();
+	}
+});
+
+test("mute gates gain while level edits and zero volume stay independent", async () => {
+	const { emitter, volume, muted, node } = await setup(0.8);
+	try {
+		muted.set(true);
+		await settle();
+		expect(node.calls.at(-1)).toEqual(["ramp", 0, 10.2]);
+		expect(volume.peek()).toBe(0.8);
+		volume.set(0.3);
+		await settle();
+		expect(node.calls.at(-1)).toEqual(["ramp", 0, 10.2]);
+		expect(muted.peek()).toBe(true);
+		muted.set(false);
+		await settle();
+		expect(node.calls.at(-1)).toEqual(["ramp", 0.3, 10.2]);
 		volume.set(0);
 		await settle();
-		expect(node.calls).toEqual([
-			["cancel", 0, 10],
-			["set", 0.5, 10],
-			["set", 0, 10],
-		]);
+		expect(muted.peek()).toBe(false);
+		expect(emitter.out.enabled.peek()).toBe(true);
+		expect(node.calls.at(-1)).toEqual(["ramp", 0, 10.2]);
 	} finally {
 		emitter.close();
-	}
-});
-
-test("refuses an invalid fade", async () => {
-	const error = spyOn(console, "error").mockImplementation(() => {});
-	const { emitter, node } = await setup();
-	try {
-		node.calls.length = 0;
-		emitter.fade.set(Time.Milli(-1));
-		await settle();
-		expect(node.calls.filter(([method]) => method === "ramp")).toEqual([]);
-		expect(error).toHaveBeenCalled();
-
-		error.mockClear();
-		emitter.fade.set(Time.Milli(Number.POSITIVE_INFINITY));
-		await settle();
-		expect(node.calls.filter(([method]) => method === "ramp")).toEqual([]);
-		expect(error).toHaveBeenCalled();
-	} finally {
-		emitter.close();
-		error.mockRestore();
 	}
 });

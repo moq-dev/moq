@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
-use moq_net::{Role, SessionError, auth};
+use moq_net::{SessionError, auth, setup::Role};
 
-use super::{Grant, Source, Token, lease};
+use super::{Caps, Grant, Pacer, Source, Token, caps, lease};
 
 /// A connection owns its lifecycle while each credential owns only its grant.
 pub(super) struct Refresh {
@@ -16,22 +16,49 @@ pub(super) struct Refresh {
 	stats: moq_net::stats::Session,
 	role: Option<Role>,
 	credentials: BTreeMap<u64, Credential>,
-	/// At most 128 tokens being verified, counting `settling`; more are refused with
-	/// `TooManyRequests`. A withdrawn token keeps its slot until the decider answers.
+	/// Tokens the decider is verifying, at most `Auth::verifications` counting
+	/// `settling`. A sent check runs to completion, even once its token is withdrawn,
+	/// so the connection's `end` stays its last request.
 	pending: FuturesUnordered<BoxFuture<'static, (Option<Verified>, Option<Settling>)>>,
 	/// Decisions that outlived the admission timeout: the token was already refused,
 	/// but the decider is still working, so its slot stays held until it answers.
 	settling: FuturesUnordered<Settling>,
+	/// Tokens waiting for a slot, oldest first. The peer's credit bounds them: each
+	/// holds its request until answered or withdrawn, and a withdrawn one never
+	/// reaches the decider.
+	waiting: VecDeque<Waiting>,
+	/// How many waiting tokens survived the last prune: pruning again only once the
+	/// queue doubles keeps a push amortized O(1).
+	survivors: usize,
 	next: u64,
+	/// What holds the connection to the union's caps, or `None` on a transport that
+	/// cannot, where every capped credential is refused.
+	pacer: Option<Pacer>,
+	/// The caps of the union of every live credential, which the connection holds.
+	caps: Caps,
 }
 
 type Verified = (auth::Request, Result<lease::Consumer, super::Error>);
 type Settling = BoxFuture<'static, ()>;
 
+/// A token waiting for a verification slot.
+struct Waiting {
+	request: auth::Request,
+	facts: moq_auth::Request,
+	/// When its admission times out, counted from its arrival.
+	deadline: kio::clock::Instant,
+}
+
+impl Waiting {
+	fn withdrawn(&self) -> bool {
+		self.request.closed().now_or_never().is_some()
+	}
+}
+
 struct Credential {
 	consumer: lease::Consumer,
 	grant: Grant,
-	expires: Option<tokio::time::Instant>,
+	expires: Option<kio::clock::Instant>,
 	issued: Option<auth::Issued>,
 	initial: bool,
 }
@@ -54,32 +81,6 @@ impl Credential {
 		}
 	}
 
-	async fn changed(&mut self) -> Change {
-		let expire = async {
-			match self.expires {
-				Some(at) => tokio::time::sleep_until(at).await,
-				None => std::future::pending().await,
-			}
-		};
-		let withdrawn = async {
-			match &self.issued {
-				Some(issued) => {
-					issued.closed().await;
-				}
-				None => std::future::pending().await,
-			}
-		};
-		tokio::select! {
-			biased;
-			() = withdrawn => Change::Withdrawn,
-			() = expire => Change::Ended(lease::Reason::Expired),
-			changed = self.consumer.changed() => match changed {
-				Ok(grant) => Change::Grant(grant),
-				Err(reason) => Change::Ended(reason),
-			},
-		}
-	}
-
 	fn wire(&self, role: Option<Role>) -> auth::Grant {
 		auth::Grant {
 			publish: if role == Some(Role::Subscriber) {
@@ -92,7 +93,7 @@ impl Credential {
 			} else {
 				self.grant.subscribe.clone()
 			},
-			expires: self.expires.map(tokio::time::Instant::into_std),
+			expires: self.expires,
 		}
 	}
 }
@@ -101,12 +102,24 @@ impl Refresh {
 	pub(super) fn new(
 		lease: &mut super::Lease,
 		handle: auth::Handle,
+		requests: auth::Requests,
 		role: Option<Role>,
 	) -> Result<Self, moq_net::Error> {
-		let requests = handle.requests()?;
 		let mut initial = Credential::new(lease.consumer.clone());
+		// Admission and protocol setup can observe different live grant versions, so
+		// hold this one to the admission's checks too.
+		match super::still_valid(&initial.grant) {
+			Ok(()) => {}
+			Err(lease::Reason::Expired) => return Err(moq_net::Error::Expired),
+			Err(_) => return Err(moq_net::Error::Unauthorized),
+		}
+		if lease.pacer.is_none() && Caps::of(&initial.grant).is_capped() {
+			return Err(moq_net::Error::Unauthorized);
+		}
 		initial.initial = true;
-		let this = Self {
+		// The connection applies the first caps itself, with the window it opens.
+		let caps = Caps::of(&initial.grant);
+		let mut this = Self {
 			handle,
 			requests,
 			requests_open: true,
@@ -118,15 +131,47 @@ impl Refresh {
 			credentials: [(0, initial)].into(),
 			pending: FuturesUnordered::new(),
 			settling: FuturesUnordered::new(),
+			waiting: VecDeque::new(),
+			survivors: 0,
 			next: 1,
+			pacer: lease.pacer.clone(),
+			caps,
 		};
 		this.authorize();
 		Ok(this)
 	}
 
+	/// The caps the connection is held to.
+	pub(super) fn caps(&self) -> Caps {
+		self.caps
+	}
+
+	/// Why `grant` cannot join this session, if it cannot: a cap the transport cannot
+	/// enforce, or a grant that does not keep the session's root, routing, and role.
+	fn refusal(&self, grant: &Grant) -> Option<String> {
+		if self.unenforced(grant) {
+			return Some(caps::UNENFORCED.to_string());
+		}
+		(!self.valid(grant)).then(|| {
+			format!(
+				"token must retain root {}, connection routing, and usable SETUP role permissions",
+				self.admitted.root
+			)
+		})
+	}
+
+	/// Whether `grant` caps a bitrate this connection cannot be held to.
+	fn unenforced(&self, grant: &Grant) -> bool {
+		self.pacer.is_none() && Caps::of(grant).is_capped()
+	}
+
 	fn valid(&self, grant: &Grant) -> bool {
-		let fresh = self.admitted.recheck(grant);
-		fresh.root == self.admitted.root
+		let Ok(fresh) = self.admitted.recheck(grant) else {
+			return false;
+		};
+		!self.unenforced(grant)
+			&& super::still_valid(grant).is_ok()
+			&& fresh.root == self.admitted.root
 			&& fresh.mounts == self.admitted.mounts
 			&& fresh.peer == self.admitted.peer
 			&& fresh.upstream == self.admitted.upstream
@@ -138,9 +183,14 @@ impl Refresh {
 			}
 	}
 
-	fn authorize(&self) {
+	/// The connection credential's grant. moq-net adds every grant issued to an AUTH token
+	/// itself, and keeps a request token's grant to that request alone.
+	///
+	/// The caps cover every live credential, request tokens included: each is a grant the
+	/// decider issued to this connection.
+	fn authorize(&mut self) {
 		let mut union = auth::Grant::default();
-		for credential in self.credentials.values() {
+		for credential in self.credentials.values().filter(|credential| credential.initial) {
 			let grant = credential.wire(self.role);
 			union.publish.extend(grant.publish.iter().cloned());
 			union.subscribe.extend(grant.subscribe.iter().cloned());
@@ -148,14 +198,31 @@ impl Refresh {
 		// Credential timers remove one grant at a time; no single deadline may
 		// expire a union that another credential still covers.
 		self.handle.authorize(&union);
+
+		// The last credential leaving ends the session, which needs no caps.
+		if self.credentials.is_empty() {
+			return;
+		}
+		let caps = Caps::union(self.credentials.values().map(|credential| &credential.grant));
+		if caps != self.caps
+			&& let Some(pacer) = &self.pacer
+		{
+			tracing::info!(%caps, "bitrate caps changed");
+			pacer.pace(caps);
+			self.caps = caps;
+		}
 	}
 
 	fn request(&mut self, request: auth::Request) {
 		if request.token().is_empty() {
 			// The connection's own lease answers an empty token while it lives, even
 			// after an earlier empty-token stream was withdrawn.
-			if self.owner.closed().now_or_never().is_some() {
-				request.reject(SessionError::Unauthorized, "connection credential ended");
+			if let Some(reason) = self.owner.closed().now_or_never() {
+				let code = match reason {
+					lease::Reason::Expired => SessionError::Expired,
+					_ => SessionError::Unauthorized,
+				};
+				request.reject(code, "connection credential ended");
 				return;
 			}
 			let unissued = self
@@ -171,7 +238,11 @@ impl Refresh {
 			// exact snapshot that would be issued.
 			let mut credential = Credential::new(self.owner.clone());
 			if !self.valid(&credential.grant) {
-				request.reject(SessionError::Unauthorized, "connection credential no longer valid");
+				let reason = match self.unenforced(&credential.grant) {
+					true => caps::UNENFORCED,
+					false => "connection credential no longer valid",
+				};
+				request.reject(SessionError::Unauthorized, reason);
 				return;
 			}
 			credential.initial = true;
@@ -189,36 +260,88 @@ impl Refresh {
 			request.reject(SessionError::Unsupported, "a certificate cannot be renewed in band");
 			return;
 		}
-		if self.pending.len() + self.settling.len() >= 128 {
-			request.reject(SessionError::TooManyRequests, "too many tokens being verified");
-			return;
-		}
 		let Ok(token) = std::str::from_utf8(request.token()) else {
-			request.reject(SessionError::Unauthorized, "token is not UTF-8");
+			request.reject(SessionError::MalformedAuthToken, "token is not UTF-8");
 			return;
 		};
 		let mut facts = source.request.clone();
 		facts.query = Some(with_jwt(facts.query.as_deref(), token));
 		facts.token = None;
-		let mut answer = match source.auth.submit(facts, Some(self.owner.clone())) {
-			Ok(answer) => answer,
-			Err(err) => return refuse(request, err),
+		if self.waiting.len() >= 2 * self.survivors.max(1) {
+			self.waiting.retain(|waiting| !waiting.withdrawn());
+			self.survivors = self.waiting.len();
+		}
+		self.waiting.push_back(Waiting {
+			request,
+			facts,
+			deadline: kio::clock::now() + super::ATTACH_TIMEOUT,
+		});
+		self.dispatch();
+	}
+
+	/// Send waiting tokens to the decider while slots are free, dropping any the peer
+	/// withdrew or whose admission timed out while it waited.
+	fn dispatch(&mut self) {
+		let Some(source) = self.source.as_ref() else {
+			return;
 		};
-		self.pending.push(Box::pin(async move {
-			// Withdrawing the stream cannot cancel the decider's work. Keep its slot
-			// until the decider answers so churn cannot bypass the bound.
-			let (result, settling) = match tokio::time::timeout(super::ADMIT_TIMEOUT, &mut answer).await {
-				Ok(answered) => (super::answered_with(answered), None),
-				Err(_) => {
-					let settling: Settling = Box::pin(async move {
-						let _ = answer.await;
-					});
-					(Err(super::timed_out()), Some(settling))
+		while self.pending.len() + self.settling.len() < source.auth.verifications() {
+			let Some(waiting) = self.waiting.pop_front() else {
+				return;
+			};
+			if waiting.withdrawn() {
+				continue;
+			}
+			let Waiting {
+				request,
+				facts,
+				deadline,
+			} = waiting;
+			if deadline <= kio::clock::now() {
+				refuse(request, super::timed_out());
+				continue;
+			}
+			let mut answer = match source.auth.submit(facts, Some(self.owner.clone())) {
+				Ok(answer) => answer,
+				Err(err) => {
+					refuse(request, err);
+					continue;
 				}
 			};
-			let verdict = request.closed().now_or_never().is_none().then_some((request, result));
-			(verdict, settling)
-		}));
+			self.pending.push(Box::pin(async move {
+				// Withdrawing the stream cannot cancel the decider's work. Keep its slot
+				// until the decider answers so churn cannot bypass the bound.
+				let answered = tokio::select! {
+					biased;
+					answered = &mut answer => Some(answered),
+					() = kio::clock::sleep_until(deadline) => None,
+				};
+				let (result, settling) = match answered {
+					Some(answered) => (super::answered_with(answered).map(|(consumer, _)| consumer), None),
+					None => {
+						let settling: Settling = Box::pin(async move {
+							let _ = answer.await;
+						});
+						(Err(super::timed_out()), Some(settling))
+					}
+				};
+				let verdict = request.closed().now_or_never().is_none().then_some((request, result));
+				(verdict, settling)
+			}));
+		}
+	}
+
+	/// Refuse the waiting tokens whose admission timed out before a slot freed.
+	fn expire(&mut self) {
+		let now = kio::clock::now();
+		while let Some(waiting) = self.waiting.front()
+			&& (waiting.deadline <= now || waiting.withdrawn())
+		{
+			let waiting = self.waiting.pop_front().expect("peeked");
+			if !waiting.withdrawn() {
+				refuse(waiting.request, super::timed_out());
+			}
+		}
 	}
 
 	pub(super) fn revalidate(&self) {
@@ -233,55 +356,81 @@ impl Refresh {
 				Request(Option<auth::Request>),
 				Verified(Option<Verified>, Option<Settling>),
 				Settled,
+				Expired,
 				Changed(u64, Change),
 			}
 			let event = {
-				let mut changes: FuturesUnordered<_> = self
-					.credentials
-					.iter_mut()
-					.map(|(id, credential)| async move { (*id, credential.changed().await) })
-					.collect();
+				// The oldest waiting token's deadline is the earliest, as they all wait the
+				// same timeout from their arrival.
+				let expiry = self.waiting.front().map(|waiting| waiting.deadline);
+				let expired = async {
+					match expiry {
+						Some(at) => kio::clock::sleep_until(at).await,
+						None => std::future::pending().await,
+					}
+				};
+				let mut changes = FuturesUnordered::new();
+				let mut withdrawals = FuturesUnordered::new();
+				for (&id, credential) in &mut self.credentials {
+					let Credential {
+						consumer,
+						expires,
+						issued,
+						..
+					} = credential;
+					changes.push(async move { (id, changed(consumer, *expires).await) });
+					if let Some(issued) = issued {
+						withdrawals.push(async move {
+							issued.closed().await;
+							id
+						});
+					}
+				}
 				tokio::select! {
 					biased;
 					Some((id, change)) = changes.next(), if !changes.is_empty() => Event::Changed(id, change),
+					// A session's close withdraws every credential at once. A verdict the decider
+					// already gave outranks it, while a credential the close alone took leaves
+					// the close as the end.
+					Some(id) = withdrawals.next(), if !withdrawals.is_empty() => Event::Changed(id, Change::Withdrawn),
 					Some((verdict, settling)) = self.pending.next(), if !self.pending.is_empty() => Event::Verified(verdict, settling),
 					Some(()) = self.settling.next(), if !self.settling.is_empty() => Event::Settled,
+					() = expired => Event::Expired,
 					request = self.requests.next(), if self.requests_open => Event::Request(request),
 				}
 			};
 			match event {
 				Event::Request(Some(request)) => self.request(request),
 				Event::Request(None) => self.requests_open = false,
-				Event::Settled => {}
+				Event::Settled => self.dispatch(),
+				Event::Expired => self.expire(),
 				Event::Verified(verdict, settling) => {
 					self.settling.extend(settling);
+					self.dispatch();
 					let Some((request, result)) = verdict else {
 						continue;
 					};
 					// Validate the exact snapshot that is issued, not a later read.
 					let credential = result.map(Credential::new);
 					match credential {
-						Ok(mut credential) if self.valid(&credential.grant) => {
-							credential.issued = Some(request.accept(credential.wire(self.role)));
-							self.credentials.insert(self.next, credential);
-							self.next += 1;
-							self.authorize();
-						}
-						Ok(_) => request.reject(
-							SessionError::Unauthorized,
-							format!(
-								"token must retain root {}, connection routing, and usable SETUP role permissions",
-								self.admitted.root
-							),
-						),
+						Ok(mut credential) => match self.refusal(&credential.grant) {
+							None => {
+								credential.issued = Some(request.accept(credential.wire(self.role)));
+								self.credentials.insert(self.next, credential);
+								self.next += 1;
+								self.authorize();
+							}
+							Some(refusal) => request.reject(SessionError::Unauthorized, refusal),
+						},
 						Err(err) => refuse(request, err),
 					}
 				}
 				Event::Changed(id, Change::Grant(grant)) if self.valid(&grant) => {
+					let fresh = self.admitted.recheck(&grant).expect("checked by valid");
 					let credential = self.credentials.get_mut(&id).expect("observed credential");
 					credential.expires = grant.deadline();
 					if credential.initial {
-						self.stats.set_tier(crate::configured_tier(grant.tier.clone()));
+						self.stats.retag(fresh.tier, &fresh.label);
 					}
 					credential.grant = grant;
 					if let Some(issued) = &credential.issued {
@@ -295,10 +444,18 @@ impl Refresh {
 					let reason = match change {
 						Change::Ended(reason) => reason,
 						Change::Withdrawn => lease::Reason::Dropped,
-						Change::Grant(_) => lease::Reason::Narrowed,
+						Change::Grant(grant) => match super::still_valid(&grant) {
+							Err(reason) => reason,
+							Ok(()) if self.unenforced(&grant) => caps::UNENFORCED.into(),
+							Ok(()) => lease::Reason::Narrowed,
+						},
 					};
 					if !withdrawn && let Some(issued) = credential.issued {
-						issued.revoke(SessionError::Unauthorized, reason.to_string());
+						let code = match &reason {
+							lease::Reason::Expired => SessionError::Expired,
+							_ => SessionError::Unauthorized,
+						};
+						issued.revoke(code, reason.to_string());
 					}
 					self.authorize();
 					if self.credentials.is_empty() {
@@ -310,6 +467,24 @@ impl Refresh {
 	}
 }
 
+/// A credential's grant changed, expired, or was revoked by the decider.
+async fn changed(consumer: &mut lease::Consumer, expires: Option<kio::clock::Instant>) -> Change {
+	let expire = async {
+		match expires {
+			Some(at) => kio::clock::sleep_until(at).await,
+			None => std::future::pending().await,
+		}
+	};
+	tokio::select! {
+		biased;
+		() = expire => Change::Ended(lease::Reason::Expired),
+		changed = consumer.changed() => match changed {
+			Ok(grant) => Change::Grant(grant),
+			Err(reason) => Change::Ended(reason),
+		},
+	}
+}
+
 /// Refuse a token the decider did not admit. An auth server that could not decide
 /// is no verdict on the token, so the presenter may present it again.
 fn refuse(request: auth::Request, err: super::Error) {
@@ -318,7 +493,8 @@ fn refuse(request: auth::Request, err: super::Error) {
 			tracing::debug!(%reason, "in-band token not verified; auth server unavailable");
 			request.reject(SessionError::Internal, "auth server unavailable");
 		}
-		_ => request.reject(SessionError::Unauthorized, "token refused"),
+		super::Error::Forbidden(reason) => request.reject(SessionError::Unauthorized, reason),
+		err => request.reject(SessionError::from(&err), "token refused"),
 	}
 }
 
@@ -354,16 +530,31 @@ fn with_jwt(query: Option<&str>, token: &str) -> String {
 mod tests {
 	use super::*;
 	use futures::FutureExt;
-	use std::time::{Duration, SystemTime};
+	use std::time::Duration;
 
 	fn grant(prefix: &str, seconds: u64) -> Grant {
-		let patterns = [prefix.parse().unwrap()].into_iter().collect();
-		let mut grant = Grant::new(patterns, Default::default());
-		grant.expires = Some(SystemTime::now() + Duration::from_secs(seconds));
+		let mut grant = Grant::new(prefix.parse::<moq_auth::Pattern>().unwrap(), moq_auth::Patterns::new());
+		grant.expires = Some(kio::clock::wall() + Duration::from_secs(seconds));
 		grant
 	}
 
-	async fn sessions(lease: super::super::Lease) -> (moq_net::Session, tokio::task::JoinHandle<lease::Reason>) {
+	/// Make the test runtime's clock one that only the test moves, wall time included,
+	/// so a grant's life is measured exactly. Call it before anything reads the clock.
+	fn manual() -> kio::clock::Installed {
+		kio::clock::Manual::new().install(&tokio::runtime::Handle::current())
+	}
+
+	/// Whether `future` is still pending once every task has settled. Paused tokio
+	/// only fires the watchdog when nothing else can run, and never moves the manual clock.
+	async fn settles_pending(future: impl std::future::Future) -> bool {
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "the watchdog runs on paused tokio, beside the installed manual clock"
+		)]
+		tokio::time::timeout(Duration::from_secs(1), future).await.is_err()
+	}
+
+	async fn transports() -> (qmux::Session, qmux::Session) {
 		let config = || {
 			let mut config = qmux::Config::new(qmux::Version::QMux01);
 			config.protocol = qmux::Protocol::Negotiate(
@@ -375,20 +566,28 @@ mod tests {
 			);
 			config
 		};
-		let stream = |io| qmux::transport::Stream::new(io, qmux::Version::QMux01, config().max_record_size);
+		let stream = |io| qmux::transport::Stream::new(io);
 		let (client, server) = tokio::io::duplex(64 * 1024);
-		let (client, server) = tokio::try_join!(
+		let ((client, client_driver), (server, server_driver)) = tokio::try_join!(
 			qmux::Session::connect(stream(client), config()),
 			qmux::Session::accept(stream(server), config())
 		)
 		.unwrap();
-		let now = tokio::time::Instant::now().into_std();
+		tokio::spawn(client_driver);
+		tokio::spawn(server_driver);
+		(client, server)
+	}
+
+	/// A client session and the server session `lease` was prepared for, before supervision.
+	async fn connect(lease: super::super::Lease) -> (moq_net::Session, moq_net::Session, super::super::Lease) {
+		let (client, server) = transports().await;
+		let now = moq_net::time::Instant::now();
 		let client = async {
 			let origin = moq_tokio::origin::spawn();
 			let (session, driver) = moq_net::Client::new()
 				.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
 				.with_publisher(origin.consume())
-				.connect(now, moq_tokio::transport::Session::new(client))
+				.connect(now, client)
 				.await
 				.unwrap();
 			tokio::spawn(moq_net::time::run(driver));
@@ -396,28 +595,43 @@ mod tests {
 		};
 		let server = async {
 			let origin = moq_tokio::origin::spawn();
-			let request = moq_net::Server::new()
+			let mut request = moq_net::Server::new()
 				.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
 				.with_subscriber(origin)
-				.accept_request(now, moq_tokio::transport::Session::new(server))
+				.with_stats(lease.stats.clone())
+				.accept_request(now, server)
 				.await
 				.unwrap();
-			let mut lease = lease.preparing(request.auth(), request.role()).unwrap();
+			let lease = lease
+				.preparing(request.auth(), request.requests(), request.role())
+				.unwrap();
 			let (session, driver) = request.ok().await.unwrap();
 			tokio::spawn(moq_net::time::run(driver));
-			(tokio::spawn(async move {
-				let reason = lease.ended().await;
-				session.abort(moq_net::Error::Unauthorized);
-				lease.close(reason.clone(), Default::default());
-				reason
-			}),)
+			(session, lease)
 		};
-		let (client, (server,)) = tokio::join!(client, server);
+		let (client, (session, lease)) = tokio::join!(client, server);
+		(client, session, lease)
+	}
+
+	async fn sessions(lease: super::super::Lease) -> (moq_net::Session, tokio::task::JoinHandle<lease::Reason>) {
+		let (client, session, mut lease) = connect(lease).await;
+		let server = tokio::spawn(async move {
+			let reason = lease.ended().await;
+			session.abort(super::super::error(&reason));
+			lease.close(reason.clone(), Default::default());
+			reason
+		});
 		(client, server)
 	}
 
 	async fn admission(initial: Grant) -> (super::super::Lease, super::super::Admissions) {
+		admission_with(initial, super::super::VERIFICATIONS).await
+	}
+
+	/// A session admitted on `initial` whose in-band tokens verify `verifications` at a time.
+	async fn admission_with(initial: Grant, verifications: usize) -> (super::super::Lease, super::super::Admissions) {
 		let (auth, mut admissions) = super::super::Auth::embedded("test");
+		let auth = auth.with_verifications(verifications);
 		let request = auth.request(moq_auth::Transport::Quic, "/room");
 		let (lease, ()) = tokio::join!(auth.admit(request), async {
 			let admission = admissions.next().await.unwrap();
@@ -425,6 +639,139 @@ mod tests {
 			admission.grant(lease::Consumer::fixed(initial));
 		});
 		(lease.unwrap(), admissions)
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn an_in_band_recheck_cannot_apply_an_invalid_label() {
+		let (auth, mut admissions) = super::super::Auth::embedded("test");
+		let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
+		let request = auth.request(moq_auth::Transport::Quic, "/room");
+		let (lease, ()) = tokio::join!(auth.admit(request), async {
+			admissions.next().await.unwrap().grant(consumer);
+		});
+		let (client, supervising) = sessions(lease.unwrap()).await;
+		let mut invalid = grant("a/**", 3000);
+		invalid.label = Some("project/*".into());
+		producer.update(invalid);
+		assert!(supervising.await.unwrap().to_string().contains("invalid stats label"));
+		client.abort(moq_net::Error::Cancel);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn an_invalid_label_added_before_protocol_setup_is_refused() {
+		let _clock = manual();
+		refused_before_setup(
+			|grant| grant.label = Some("project/*".into()),
+			SessionError::Unauthorized,
+		)
+		.await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_grant_expiring_before_protocol_setup_is_refused_as_expired() {
+		let clock = manual();
+		refused_before_setup(
+			|_| {
+				// Expire the grant before the client's independent SETUP deadline.
+				clock.advance(Duration::from_secs(2));
+			},
+			SessionError::Expired,
+		)
+		.await;
+	}
+
+	/// Admit a session, apply `change` to its grant before protocol setup, and check
+	/// that setup refuses it as a failure.
+	async fn refused_before_setup(change: impl FnOnce(&mut moq_auth::Grant), expected: SessionError) {
+		let initial = grant("a/**", 1);
+		let (producer, consumer) = lease::Producer::new(initial.clone());
+		let registry = moq_net::stats::Registry::new(Default::default());
+		let stats = registry
+			.tier(moq_net::stats::Tier::default())
+			.session(moq_net::Path::from_static("room"));
+		let lease = super::super::Lease::new("/room", consumer)
+			.unwrap()
+			.with_stats(stats.clone());
+		let (client_transport, server) = transports().await;
+		let now = moq_net::time::Instant::now();
+		let origin = moq_tokio::origin::spawn();
+		let client = moq_net::Client::new()
+			.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
+			.with_publisher(origin.consume());
+		let connecting = async {
+			let (session, driver) = client.connect(now, client_transport).await.unwrap();
+			(session, tokio::spawn(moq_net::time::run(driver)))
+		};
+		let refusing = async {
+			let mut request = moq_net::Server::new()
+				.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
+				.with_subscriber(origin)
+				.with_stats(stats.clone())
+				.accept_request(now, server)
+				.await
+				.unwrap();
+			let mut changed = initial;
+			change(&mut changed);
+			producer.update(changed);
+			let error = lease
+				.preparing(request.auth(), request.requests(), request.role())
+				.err()
+				.expect("setup must refuse the grant");
+			assert_eq!(SessionError::from(&error), expected);
+			request.close(error);
+		};
+		let ((session, driver), ()) = tokio::join!(connecting, refusing);
+		let error = driver.await.unwrap();
+		assert_eq!(error.session(), Some(&expected), "{error:?}");
+		drop(session);
+		drop(stats);
+		let presence = registry.snapshot().sessions()[0].1;
+		assert_eq!(presence.sessions_ended, 1);
+		let failure = if expected == SessionError::Expired {
+			moq_net::stats::Failure::Expired
+		} else {
+			moq_net::stats::Failure::Application
+		};
+		assert_eq!(
+			presence.sessions_failed.count(failure),
+			1,
+			"an admitted session refused before SETUP is a failure"
+		);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn an_invalid_attachment_is_refused_without_losing_the_existing_grant() {
+		let (lease, mut admissions) = admission(grant("a/**", 3000)).await;
+		let (client, supervising) = sessions(lease).await;
+		let invalid = present(&client, "invalid");
+		let mut label = grant("a/**", 3000);
+		label.label = Some("project/*".into());
+		admissions.next().await.unwrap().grant(lease::Consumer::fixed(label));
+		// Refused as an auth server fault, which may pass, so the client presents it again.
+		let retried = admissions.next().await.unwrap();
+		assert_eq!(retried.request.query.as_deref(), Some("jwt=invalid"));
+		assert!(
+			!invalid.is_finished(),
+			"the invalid label was accepted or ended the token"
+		);
+		assert!(
+			!supervising.is_finished(),
+			"a refused attachment ended the initial grant"
+		);
+		// Withdrawn, the retried token leaves the queue.
+		invalid.abort();
+		let _ = invalid.await;
+		drop(retried);
+		let auth = client.auth();
+		let (result, ()) = tokio::join!(auth.add("valid"), async {
+			let admission = admissions.next().await.unwrap();
+			assert_eq!(admission.request.query.as_deref(), Some("jwt=valid"));
+			admission.grant(lease::Consumer::fixed(grant("a/**", 3000)));
+		});
+		result.unwrap();
+		client.abort(moq_net::Error::Cancel);
+		supervising.abort();
+		let _ = supervising.await;
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -443,57 +790,283 @@ mod tests {
 		let _ = supervising.await;
 	}
 
+	fn capped(prefix: &str, publish: Option<u64>, subscribe: Option<u64>) -> Grant {
+		let mut grant = grant(prefix, 3000);
+		grant.publish_rate = publish.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
+		grant.subscribe_rate = subscribe.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
+		grant
+	}
+
+	fn rate(bps: u64) -> Option<moq_auth::Rate> {
+		Some(moq_auth::Rate::from_bps(bps).unwrap())
+	}
+
+	/// A pacer that records every set of caps it applies.
+	fn recorder() -> (Pacer, std::sync::Arc<std::sync::Mutex<Vec<Caps>>>) {
+		let applied = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let record = applied.clone();
+		(Pacer::new(move |caps| record.lock().unwrap().push(caps)), applied)
+	}
+
+	/// A session admitted on `initial`, held to its caps by `pacer`.
+	async fn paced(initial: lease::Consumer, pacer: Option<Pacer>) -> (super::super::Lease, super::super::Admissions) {
+		let (auth, mut admissions) = super::super::Auth::embedded("test");
+		let request = auth.request(moq_auth::Transport::Quic, "/room");
+		let (lease, ()) = tokio::join!(auth.admit_paced(request, pacer), async {
+			admissions.next().await.unwrap().grant(initial);
+		});
+		(lease.unwrap(), admissions)
+	}
+
+	/// In-band tokens join the caps: the highest holds, an uncapped grant lifts it, and a
+	/// re-check that caps that grant restores the highest. Each change reaches the
+	/// live connection.
 	#[tokio::test(start_paused = true)]
-	async fn an_outage_refuses_transiently_and_never_extends_the_expiry() {
-		let (lease, mut admissions) = admission(grant("a/**", 30)).await;
-		let (client, supervising) = sessions(lease).await;
-		let start = tokio::time::Instant::now();
-		for _ in 0..3 {
-			let auth = client.auth();
-			let (result, ()) = tokio::join!(auth.add("replacement"), async {
-				admissions
-					.next()
-					.await
-					.unwrap()
-					.refuse(super::super::Error::Unavailable("auth server down".into()));
-			});
-			assert!(matches!(result, Err(moq_net::Error::Session(SessionError::Internal))));
-			tokio::time::advance(Duration::from_secs(5)).await;
-		}
-		assert_eq!(supervising.await.unwrap(), lease::Reason::Expired);
-		let lived = start.elapsed();
-		assert!(
-			lived >= Duration::from_secs(29) && lived <= Duration::from_secs(31),
-			"the session outlived its only accepted grant: {lived:?}"
+	async fn the_union_of_credentials_paces_the_connection() {
+		let (pacer, applied) = recorder();
+		let initial = lease::Consumer::fixed(capped("a/**", Some(1_000), None));
+		let (lease, mut admissions) = paced(initial, Some(pacer)).await;
+		assert_eq!(
+			lease.caps(),
+			Caps {
+				publish: rate(1_000),
+				subscribe: None
+			}
 		);
+		let (client, supervising) = sessions(lease).await;
+		let auth = client.auth();
+
+		let (higher, ()) = tokio::join!(auth.add("higher"), async {
+			let higher = capped("a/**", Some(4_000), None);
+			admissions.next().await.unwrap().grant(lease::Consumer::fixed(higher));
+		});
+		// Held, since dropping a token withdraws its credential.
+		let _higher = higher.unwrap();
+		let (producer, uncapped) = lease::Producer::new(capped("a/**", None, None));
+		let (lifted, ()) = tokio::join!(auth.add("uncapped"), async {
+			admissions.next().await.unwrap().grant(uncapped);
+		});
+		let _lifted = lifted.unwrap();
+		// The auth server caps the grant it had left uncapped.
+		producer.update(capped("a/**", Some(2_000), None));
+		while applied.lock().unwrap().len() < 3 {
+			kio::clock::sleep(Duration::from_millis(1)).await;
+		}
+		let highest = Caps {
+			publish: rate(4_000),
+			subscribe: None,
+		};
+		assert_eq!(*applied.lock().unwrap(), [highest, Caps::default(), highest]);
+		client.abort(moq_net::Error::Cancel);
+		supervising.abort();
+		let _ = supervising.await;
+	}
+
+	/// Without a pacer, a capped in-band token is refused, and the session keeps its grant.
+	#[tokio::test(start_paused = true)]
+	async fn an_unpaced_session_refuses_a_capped_token() {
+		let (lease, mut admissions) = admission(grant("a/**", 3000)).await;
+		let (client, supervising) = sessions(lease).await;
+		let auth = client.auth();
+		let (result, ()) = tokio::join!(auth.add("capped"), async {
+			let capped = capped("a/**", None, Some(8_000));
+			admissions.next().await.unwrap().grant(lease::Consumer::fixed(capped));
+		});
+		assert!(result.is_err(), "the cap was discarded");
+		assert!(!supervising.is_finished(), "a refused token ended the session");
+		client.abort(moq_net::Error::Cancel);
+		supervising.abort();
+		let _ = supervising.await;
+	}
+
+	/// Without a pacer, a re-check that adds a cap ends the session rather than drop it.
+	#[tokio::test(start_paused = true)]
+	async fn an_unpaced_session_ends_when_rechecked_into_a_cap() {
+		let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
+		let (lease, _admissions) = paced(consumer, None).await;
+		let (client, supervising) = sessions(lease).await;
+		producer.update(capped("a/**", Some(8_000), None));
+		let reason = supervising.await.unwrap();
+		assert_eq!(reason.to_string(), caps::UNENFORCED);
+		client.abort(moq_net::Error::Cancel);
+	}
+
+	/// How a lease ends decides how its session's stats count the end: an expired grant as
+	/// `expired`, a shutdown as clean, and any other reason as `application`.
+	#[tokio::test(start_paused = true)]
+	async fn a_lease_end_counts_by_its_reason() {
+		use moq_net::stats::Failure;
+		for (reason, failed) in [
+			(lease::Reason::Expired, Some(Failure::Expired)),
+			(lease::Reason::Shutdown, None),
+			(lease::Reason::Refused, Some(Failure::Application)),
+		] {
+			let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
+			let registry = moq_net::stats::Registry::new(Default::default());
+			let stats = registry
+				.tier(moq_net::stats::Tier::default())
+				.session(moq_net::Path::from_static("room"));
+			let lease = super::super::Lease::new("/room", consumer).unwrap().with_stats(stats);
+			let (client, supervising) = sessions(lease).await;
+			producer.revoke(reason.clone());
+			supervising.await.unwrap();
+			client.closed().await;
+			drop(client);
+			// The server's driver releases the stats once its transport has closed.
+			kio::clock::sleep(Duration::from_secs(1)).await;
+			let presence = registry.snapshot().sessions()[0].1;
+			assert_eq!(presence.sessions_ended, 1, "{reason}");
+			for kind in Failure::ALL {
+				let expected = u64::from(failed == Some(*kind));
+				assert_eq!(presence.sessions_failed.count(*kind), expected, "{reason}: {kind:?}");
+			}
+		}
+	}
+
+	/// A replacement keeps the session alive past the first credential's expiry.
+	#[tokio::test(start_paused = true)]
+	async fn a_superseded_expiry_does_not_end_the_session() {
+		let (auth, mut admissions) = super::super::Auth::embedded("test");
+		let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
+		let request = auth.request(moq_auth::Transport::Quic, "/room");
+		let (lease, ()) = tokio::join!(auth.admit(request), async {
+			admissions.next().await.unwrap().grant(consumer);
+		});
+		let (client, session, mut lease) = connect(lease.unwrap()).await;
+		let (close, closing) = tokio::sync::oneshot::channel::<()>();
+		let server = tokio::spawn(async move {
+			tokio::select! {
+				reason = lease.ended() => panic!("the replacement did not keep the session: {reason}"),
+				_ = closing => lease.close_session(&moq_net::Error::Cancel, Default::default()),
+			}
+		});
+
+		let auth = client.auth();
+		let (token, ()) = tokio::join!(auth.add("replacement"), async {
+			admissions
+				.next()
+				.await
+				.unwrap()
+				.grant(lease::Consumer::fixed(grant("a/**", 3000)));
+		});
+		// Held, since dropping the handle withdraws the replacement.
+		let _token = token.unwrap();
+		producer.revoke(lease::Reason::Expired);
+		tokio::time::advance(Duration::from_secs(1)).await;
+		assert!(!server.is_finished(), "the first credential's expiry ended the session");
+
+		close.send(()).unwrap();
+		server.await.unwrap();
+		drop(session);
 		client.abort(moq_net::Error::Cancel);
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn a_decider_past_the_admission_timeout_keeps_its_slot() {
-		let (lease, mut admissions) = admission(grant("a/**", 3000)).await;
+	async fn an_outage_refuses_transiently_and_never_extends_the_expiry() {
+		let clock = manual();
+		let (lease, mut admissions) = admission(grant("a/**", 30)).await;
+		let (client, mut supervising) = sessions(lease).await;
+		let mut adding = present(&client, "replacement");
+		for attempt in 0..3 {
+			let admission = admissions.next().await.unwrap();
+			assert_eq!(
+				admission.request.query.as_deref(),
+				Some("jwt=replacement"),
+				"attempt {attempt}"
+			);
+			admission.refuse(super::super::Error::Unavailable("auth server down".into()));
+			// The refusal may pass, so the client presents the token again after a backoff
+			// shorter than each step below, rather than ending it.
+			assert!(
+				settles_pending(&mut adding).await,
+				"a transient refusal ended the token"
+			);
+			clock.advance(Duration::from_secs(5));
+		}
+		clock.advance(Duration::from_secs(15) - Duration::from_nanos(1));
+		assert!(
+			settles_pending(&mut supervising).await,
+			"the session ended before its only accepted grant expired"
+		);
+		clock.advance(Duration::from_nanos(1));
+		assert_eq!(supervising.await.unwrap(), lease::Reason::Expired);
+		// Not asserted as `Expired`: moq-net's own AUTH deadline lapses at this same
+		// instant, and the client's transport can break before the close code lands.
+		client.closed().await;
+		client.abort(moq_net::Error::Cancel);
+		adding.abort();
+	}
+
+	/// Present `token` in the background, as a peer whose credit allows it.
+	fn present(client: &moq_net::Session, token: &'static str) -> tokio::task::JoinHandle<Result<(), moq_net::Error>> {
+		let auth = client.auth();
+		tokio::spawn(async move { auth.add(token).await.map(drop) })
+	}
+
+	/// A token past the verification limit waits for a slot rather than being refused,
+	/// and reaches the decider once one frees.
+	#[tokio::test(start_paused = true)]
+	async fn a_token_over_the_limit_waits_for_a_slot() {
+		let (lease, mut admissions) = admission_with(grant("a/**", 3000), 2).await;
 		let (client, supervising) = sessions(lease).await;
-		let mut held = Vec::new();
-		for _ in 0..128 {
-			let auth = client.auth();
-			let (result, admission) = tokio::join!(auth.add("slow"), async { admissions.next().await.unwrap() });
-			// Refused at the timeout, while the decider still holds the admission.
-			assert!(matches!(result, Err(moq_net::Error::Session(SessionError::Internal))));
-			held.push(admission);
-		}
-		let auth = client.auth();
-		tokio::select! {
-			biased;
-			_ = admissions.next() => panic!("a timed-out decision released its slot"),
-			result = auth.add("overflow") => assert!(matches!(
-				result,
-				Err(moq_net::Error::Session(SessionError::TooManyRequests))
-			)),
-		}
-		// The decider giving up frees the slot.
-		drop(held.pop());
-		let auth = client.auth();
-		let (_, admission) = tokio::join!(auth.add("next"), async { admissions.next().await.unwrap() });
+		let first = present(&client, "first");
+		let mut held = vec![admissions.next().await.unwrap()];
+		let _second = present(&client, "second");
+		held.push(admissions.next().await.unwrap());
+
+		let third = present(&client, "third");
+		assert!(
+			kio::clock::timeout(Duration::from_secs(5), admissions.next())
+				.await
+				.is_err(),
+			"a token past the limit reached the decider"
+		);
+		assert!(
+			!third.is_finished(),
+			"a token past the limit was answered without a slot"
+		);
+
+		held.remove(0).grant(lease::Consumer::fixed(grant("a/**", 3000)));
+		first.await.unwrap().unwrap();
+		let admission = admissions.next().await.unwrap();
+		assert_eq!(admission.request.query.as_deref(), Some("jwt=third"));
+		admission.grant(lease::Consumer::fixed(grant("a/**", 3000)));
+		third.await.unwrap().unwrap();
+		client.abort(moq_net::Error::Cancel);
+		supervising.abort();
+		let _ = supervising.await;
+	}
+
+	/// A waiting token whose admission times out is refused without reaching the
+	/// decider, while the check it waited behind keeps its slot past the timeout. The
+	/// refusal may pass, so the client keeps presenting both tokens.
+	#[tokio::test(start_paused = true)]
+	async fn a_waiting_token_times_out_without_reaching_the_decider() {
+		let (lease, mut admissions) = admission_with(grant("a/**", 3000), 1).await;
+		let (client, supervising) = sessions(lease).await;
+		let slow = present(&client, "slow");
+		let held = admissions.next().await.unwrap();
+		let waiting = present(&client, "waiting");
+		// Past the ten-second admission timeout, and the retries that follow it.
+		kio::clock::sleep(Duration::from_secs(30)).await;
+		assert!(
+			!waiting.is_finished() && !slow.is_finished(),
+			"a transient refusal ended a token"
+		);
+		assert!(
+			admissions.next().now_or_never().is_none(),
+			"a timed-out check released its slot"
+		);
+
+		// Withdrawn, the retried tokens leave the queue. The decider giving up frees the
+		// slot for the next token, not the expired one.
+		slow.abort();
+		waiting.abort();
+		let _ = slow.await;
+		let _ = waiting.await;
+		drop(held);
+		let _next = present(&client, "next");
+		let admission = admissions.next().await.unwrap();
 		assert_eq!(admission.request.query.as_deref(), Some("jwt=next"));
 		client.abort(moq_net::Error::Cancel);
 		supervising.abort();
@@ -502,6 +1075,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn renewal_outlives_the_initial_credential_and_withdrawal_ends_only_its_grant() {
+		let clock = manual();
 		let (lease, mut admissions) = admission(grant("a/**", 3)).await;
 		let (client, mut supervising) = sessions(lease).await;
 		let auth = client.auth();
@@ -510,16 +1084,110 @@ mod tests {
 			assert_eq!(admission.request.query.as_deref(), Some("jwt=replacement"));
 			admission.grant(lease::Consumer::fixed(grant("a/**", 20)));
 		});
-		let token = token.unwrap();
-		tokio::time::advance(Duration::from_secs(4)).await;
-		tokio::task::yield_now().await;
+		let (token, _) = token.unwrap();
+		clock.advance(Duration::from_secs(4));
 		assert!(
-			(&mut supervising).now_or_never().is_none(),
+			settles_pending(&mut supervising).await,
 			"renewed connection ended with its first credential"
 		);
 		assert!(token.closed().now_or_never().is_none());
 		drop(token);
 		assert_eq!(supervising.await.unwrap(), lease::Reason::Dropped);
+	}
+
+	/// A session whose owner lease expires in three seconds, recording its stats, with a
+	/// replacement token granted on `replacement` and its owner's grant expired, so only
+	/// the in-band credential holds it. Returns the owner, which hears how the lease ended.
+	async fn renewed(
+		clock: &kio::clock::Installed,
+		replacement: lease::Consumer,
+	) -> (
+		lease::Producer,
+		moq_net::stats::Registry,
+		moq_net::Session,
+		moq_net::Session,
+		super::super::Lease,
+		moq_net::auth::Credential,
+	) {
+		let (auth, mut admissions) = super::super::Auth::embedded("test");
+		let (owner, consumer) = lease::Producer::new(grant("a/**", 3));
+		let request = auth.request(moq_auth::Transport::Quic, "/room");
+		let (lease, ()) = tokio::join!(auth.admit(request), async {
+			admissions.next().await.unwrap().grant(consumer);
+		});
+		let registry = moq_net::stats::Registry::new(Default::default());
+		let stats = registry
+			.tier(moq_net::stats::Tier::default())
+			.session(moq_net::Path::from_static("room"));
+		let (client, session, mut lease) = connect(lease.unwrap().with_stats(stats)).await;
+		let auth = client.auth();
+		let (token, ()) = tokio::join!(
+			async {
+				tokio::select! {
+					reason = lease.ended() => panic!("the lease ended while renewing: {reason}"),
+					token = auth.add("replacement") => token.unwrap().0,
+				}
+			},
+			async { admissions.next().await.unwrap().grant(replacement) },
+		);
+		clock.advance(Duration::from_secs(4));
+		assert!(
+			settles_pending(lease.ended()).await,
+			"the replacement did not outlive the owner's grant"
+		);
+		(owner, registry, client, session, lease, token)
+	}
+
+	/// A peer that closes a session held only by in-band credentials closes it cleanly:
+	/// the close withdraws those credentials, which is its effect, not a verdict.
+	#[tokio::test(start_paused = true)]
+	async fn a_clean_close_is_not_a_revocation() {
+		let clock = manual();
+		// The close and the withdrawals it causes wake the supervisor together, and an
+		// unbiased select picks between them at random, so repeat until the order is hit.
+		for _ in 0..16 {
+			let (owner, registry, client, session, lease, _token) =
+				renewed(&clock, lease::Consumer::fixed(grant("a/**", 3000))).await;
+			let supervising = tokio::spawn(crate::connection::supervise(
+				session,
+				lease,
+				crate::shutdown::Observer::disabled().serve(),
+				None,
+			));
+			tokio::task::yield_now().await;
+			client.abort(moq_net::Error::Cancel);
+			assert!(
+				supervising.await.unwrap().is_err(),
+				"the supervisor ended the session as a revocation"
+			);
+			assert_eq!(owner.closed().await.0, lease::Reason::from("closed"));
+			drop(client);
+			// The server's driver releases the stats once its transport has closed.
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "paused tokio settles the driver, beside the installed manual clock"
+			)]
+			tokio::time::sleep(Duration::from_secs(1)).await;
+			let presence = registry.snapshot().sessions()[0].1;
+			assert_eq!(presence.sessions_ended, 1);
+			assert_eq!(presence.sessions_failed, Default::default());
+		}
+	}
+
+	/// A verdict the decider gave before the transport closed outranks the close that
+	/// withdrew its credential.
+	#[tokio::test(start_paused = true)]
+	async fn a_revocation_pending_at_the_close_is_still_reported() {
+		let clock = manual();
+		let (replacement, consumer) = lease::Producer::new(grant("a/**", 3000));
+		let (owner, _registry, client, session, lease, _token) = renewed(&clock, consumer).await;
+		replacement.revoke(lease::Reason::Refused);
+		client.abort(moq_net::Error::Cancel);
+		session.closed().await;
+		let supervised =
+			crate::connection::supervise(session, lease, crate::shutdown::Observer::disabled().serve(), None).await;
+		assert!(supervised.is_err());
+		assert_eq!(owner.closed().await.0, lease::Reason::Refused);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -540,7 +1208,7 @@ mod tests {
 					other.publish = Default::default();
 					admission.grant(lease::Consumer::fixed(other));
 				} else {
-					admission.refuse(super::super::Error::Refused);
+					admission.refuse(super::super::Error::Refused(Default::default()));
 				}
 			});
 			assert!(result.is_err());
@@ -561,7 +1229,7 @@ mod tests {
 		let (token, ()) = tokio::join!(auth.add("replacement"), async {
 			admissions.next().await.unwrap().grant(consumer);
 		});
-		let token = token.unwrap();
+		let (token, _) = token.unwrap();
 		assert!(
 			token.grant().peek().unwrap().subscribe.is_empty(),
 			"publisher SETUP role widened"
@@ -610,7 +1278,7 @@ mod tests {
 		assert!(
 			matches!(result, Err(moq_net::Error::Session(SessionError::Unauthorized))),
 			"an empty token reissued a credential the relay removed: {:?}",
-			result.map(|token| token.grant().peek())
+			result.map(|(token, _)| token.grant().peek())
 		);
 		assert!(!supervising.is_finished());
 		client.abort(moq_net::Error::Cancel);
@@ -618,27 +1286,34 @@ mod tests {
 		let _ = supervising.await;
 	}
 
+	/// A token the peer withdraws while it waits for a slot never reaches the decider,
+	/// while a sent check keeps its slot after its token is withdrawn.
 	#[tokio::test(start_paused = true)]
-	async fn withdrawn_tokens_keep_their_pending_verification_slots() {
-		let (lease, mut admissions) = admission(grant("a/**", 3000)).await;
+	async fn a_withdrawn_waiting_token_never_reaches_the_decider() {
+		let (lease, mut admissions) = admission_with(grant("a/**", 3000), 1).await;
 		let (client, supervising) = sessions(lease).await;
-		let mut held = Vec::new();
-		for _ in 0..128 {
-			let auth = client.auth();
-			let adding = tokio::spawn(async move { auth.add("withdrawn").await });
-			held.push(admissions.next().await.unwrap());
-			adding.abort();
-			let _ = adding.await;
-		}
-		let auth = client.auth();
-		tokio::select! {
-			biased;
-			_ = admissions.next() => panic!("withdrawal released an in-flight verification slot"),
-			result = auth.add("overflow") => assert!(matches!(
-				result,
-				Err(moq_net::Error::Session(SessionError::TooManyRequests))
-			)),
-		}
+		let sent = present(&client, "sent");
+		let held = admissions.next().await.unwrap();
+		sent.abort();
+		let _ = sent.await;
+
+		let withdrawn = present(&client, "withdrawn");
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		withdrawn.abort();
+		let _ = withdrawn.await;
+		let next = present(&client, "next");
+		assert!(
+			kio::clock::timeout(Duration::from_secs(1), admissions.next())
+				.await
+				.is_err(),
+			"withdrawing a sent check released its slot"
+		);
+
+		held.grant(lease::Consumer::fixed(grant("a/**", 3000)));
+		let admission = admissions.next().await.unwrap();
+		assert_eq!(admission.request.query.as_deref(), Some("jwt=next"));
+		admission.grant(lease::Consumer::fixed(grant("a/**", 3000)));
+		next.await.unwrap().unwrap();
 		client.abort(moq_net::Error::Cancel);
 		supervising.abort();
 		let _ = supervising.await;
@@ -685,6 +1360,7 @@ mod tests {
 		request.tls = Some(moq_auth::Peer {
 			name: "edge".into(),
 			fingerprint: "ab".repeat(32),
+			chain: vec!["ab".repeat(32)],
 			expires: None,
 			issuer: "test".into(),
 		});

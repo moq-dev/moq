@@ -35,7 +35,7 @@ impl KeyId {
 	/// Generate a random key ID using cryptographically secure randomness.
 	pub fn random() -> Self {
 		let mut bytes = [0u8; 8];
-		aws_lc_rs::rand::fill(&mut bytes).expect("failed to generate random bytes");
+		rind::rand::fill(&mut bytes).expect("failed to generate random bytes");
 		let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
 		Self(hex)
 	}
@@ -75,15 +75,19 @@ impl TryFrom<String> for KeyId {
 	}
 }
 
+/// Why a string is not a valid key ID.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum KeyIdError {
+	/// The key ID is empty.
 	#[error("key ID must not be empty")]
 	Empty,
 
+	/// The key ID is longer than 128 characters.
 	#[error("key ID exceeds maximum length of 128 characters")]
 	TooLong,
 
+	/// The key ID has a character other than an ASCII letter, digit, hyphen, or underscore.
 	#[error("key ID contains invalid characters (only alphanumeric, hyphens, underscores allowed)")]
 	Invalid,
 }

@@ -2,8 +2,8 @@
 
 Experimental Linux io\_uring support for the native MoQ stack: a
 thread-per-core `Worker` that owns a `SINGLE_ISSUER | DEFER_TASKRUN |
-COOP_TASKRUN` ring, a userspace timer heap, a local (`!Send`) task set, and
-the UDP sockets bound through it.
+COOP_TASKRUN | TASKRUN_FLAG` ring, a userspace timer queue on `kio::clock`, a
+local (`!Send`) task set, and the UDP sockets bound through it.
 
 - **Receive**: one persistent multishot `recvmsg` per socket, fed from a
   registered provided-buffer ring of worst-case-sized buffers (one per
@@ -15,9 +15,16 @@ the UDP sockets bound through it.
 - **Send**: `sendmsg` with an explicit `UDP_SEGMENT` control message per call,
   staged in a fixed pool of buffers owned by id and released on completion
   (the shape a later `SENDMSG_ZC` needs).
-- **Timers**: a heap the worker sweeps; the earliest deadline rides
-  `io_uring_enter` as an absolute timeout. Zero timeout SQEs. The worker's
-  `Handle::run` drives MoQ with the worker clock and a single timer.
+- **Timers**: a `kio::clock::Deadlines` queue the worker advances once per
+  turn, from its one clock read; the earliest deadline rides `io_uring_enter`
+  as an absolute timeout. Zero timeout SQEs. The queue is the worker's ambient
+  clock, and `Handle::run` drives MoQ with it and a single timer.
+- **Turns**: each turn reaps and dispatches completions first, then polls the
+  root future and runs passes over the woken tasks until a pass wakes nothing
+  or `Config::passes` have run, then parks or submits. So a received
+  datagram's routing, its connection's processing, and the reply that stages
+  are carried by the one enter that follows. A connection stages a bounded
+  number of GSO trains per turn, then yields its backlog to the next turn.
 - **Parking**: a futex word per worker. Remote wakes are an atomic store, plus
   one `futex(2)` wake only while the worker is actually parked (a `FUTEX_WAIT`
   SQE armed on the word).
@@ -28,11 +35,13 @@ the UDP sockets bound through it.
   the application protocol.
 - **WebTransport**: browsers negotiate `h3` and `quic::web::Request` runs the
   HTTP/3 CONNECT handshake (SETTINGS, subprotocol selection, capsule close)
-  over the same adapter via `web-transport-proto`. `quic::web::Session` is
-  a raw or web transport (`Session::raw`). Wrap it with
-  `transport::Session::new` before `connect_lite`/`accept_lite`, which return
-  the session and its driver; poll the driver or await it inside a
-  `Handle::spawn` task to run it on the worker. Web mode maps stream and close codes through the
+  over the same driver via `web-transport-proto`. `quic::web::Session` is
+  a raw or web transport (`Session::raw`) implementing moq-net's poll traits directly.
+  moq-net boxes the transport with a native `Send` bound, so wrap the session in
+  `transport::Local::new(session)`, which checks the thread on every use, before
+  `connect`/`accept`. They return the
+  session and its driver; poll the driver or await it inside a `Handle::spawn`
+  task to run it on the worker. Web mode maps stream and close codes through the
   HTTP/3 error space.
 - **qlog**: `quic::qlog::Sink` points a group of workers at a directory and
   `quic::Transport::qlog` turns capture on. The pinned worker never writes to
@@ -44,9 +53,14 @@ the UDP sockets bound through it.
   thread through `metrics::Metrics::snapshot`. Buffer-pool health (`ENOBUFS`,
   provided-buffer exhaustion, TX-pool stalls), batch effectiveness (datagrams
   per receive and per send), ring traffic (submissions, completions,
-  `io_uring_enter` calls), and scheduling (parks, remote futex wakes, timer
-  churn). Pass a `metrics::Metrics` to `Config::metrics` to hold a copy on the
-  thread that spawned the worker, or read the worker's own with
+  `io_uring_enter` calls), and scheduling (turns, task passes, parks, remote
+  futex wakes, timer churn). A turn that parks carries its staged SQEs in that enter;
+  notified turns enter only for staged SQEs, deferred completion work, or CQ
+  overflow. `sq_full_enters` counts queue-pressure enters. `sqes` and `cqes`
+  are fixed histograms of submissions accepted and completions made visible
+  by each enter, including zero, with boundaries at 0, 1, powers of two
+  through 256, and infinity. Pass a `metrics::Metrics` to `Config::metrics` to
+  hold a copy on the thread that spawned the worker, or read the worker's own with
   `Handle::metrics`. `moq-relay` publishes them at `/metrics` on its internal
   listener.
 - **Identity**: the socket names its worker. `Handle::udp` adopts a lone
@@ -65,51 +79,71 @@ the tokio stack.
 
 ## Backends
 
-The `quic` module uses the sans-IO [moq-noq-proto](https://github.com/moq-dev/noq)
-stack with rustls. The `noq` feature is enabled by default and remains optional
-so the worker, timers, and UDP socket can be built without QUIC.
+The `quic` module uses the sans-IO [moq-quic](../moq-quic) stack with rustls.
+The `quic` feature is enabled by default and remains optional so the worker,
+timers, and UDP socket can be built without QUIC.
 
 | Feature | Stack | TLS |
 |---|---|---|
-| `noq` (default) | [moq-noq-proto](https://github.com/moq-dev/noq) | rustls |
+| `quic` (default) | [moq-quic](../moq-quic) | rustls |
 
 Building without default features leaves the `quic` module out entirely.
 
 ```bash
-cargo test -p moq-uring --features noq
+just rs uring
 ```
 
 `moq-relay` enables it with `--features io-uring`.
 
-The `qlog` feature turns on noq's capture support. It writes one file per
-connection.
+The `qlog` feature turns on moq-quic's capture support. It writes one file per
+endpoint on the accept side and per dial on the connect side.
 
 ## Validation
 
-`tests/echo.rs` runs an echo against a tokio noq peer over the worker:
-handshake, half a megabyte each way, and timers driven by noq's timeout.
-`tests/session.rs` runs full moq-lite sessions through
+`tests/integration/echo.rs` runs an echo against a tokio QUIC peer over the worker:
+handshake, half a megabyte each way, and timers driven by moq-quic's timeout.
+`tests/integration/session.rs` runs full moq-lite sessions through
 `quic::Endpoint` (including two clients demuxed on one server socket), and
-`tests/endpoint.rs` covers the endpoint mechanics (dial+accept on one socket,
-version negotiation, the dial-only refusal), `tests/workers.rs` runs a
+`tests/integration/endpoint.rs` covers the endpoint mechanics (dial+accept on one socket,
+version negotiation, the dial-only refusal), `tests/integration/workers.rs` runs a
 steered two-worker reuseport group serving one port across threads, and
-`tests/web.rs` is WebTransport interop against `web-transport-moq`: stream and
+`tests/integration/web.rs` is WebTransport interop against moq-tokio's: stream and
 datagram echo through the H3 framing,
 close codes through the capsule, and a full moq-lite session over
-WebTransport. All of them skip (loudly) below the kernel floor, which
-includes GitHub-hosted CI runners.
+WebTransport. All of them skip (loudly) below the kernel floor. CI runs them
+on `ubuntu-24.04-arm`, whose kernel clears it, with `CI_STRICT=1` refusing a
+skip: in the `uring.yml` release gate and the nightly `rs uring` job.
 
 ## Benchmarks
 
 `udp_tokio` and `udp_uring` are the disposable syscall-level matrices from the
 first spike (recv batching x GRO x GSO, epoll vs io\_uring); see git history
-for their methodology. `echo_noq` is the ablation matrix over the real
-worker: the same noq echo with receive batching, GRO, and GSO toggled one
-at a time.
+for their methodology. `echo_quic` is the ablation matrix over the real
+worker: the same QUIC echo with receive batching, GRO, and GSO toggled one
+at a time. `worker_turns` sweeps sockets against datagrams per burst for UDP,
+and connections against reply bytes and task passes for QUIC request/reply.
+The QUIC client and server run as worker tasks; the root only waits for a
+measurement to finish. Counter deltas stay in the run's log beside the timing
+series in the nightly `rust-shared` group.
 
 ```bash
 just rs bench-udp --sample-size 20 --measurement-time 2 --warm-up-time 1
 just rs bench-echo
+```
+
+`benchmark_socket_queues` (an ignored integration test, run nightly) attributes
+UDP loss between a sender and a steered worker group, on this ring and on
+moq-sock's `recvmmsg` under Tokio. It sweeps the kernel queue, the receive pool
+depth, workers, flows and GSO one at a time across worker stalls, CPU
+contention, sustained overload, and a rate-limited path with a deep finite
+queue (moq-shaper). Each row accounts for every datagram: delivered, dropped
+at a socket (`sk_drops` via `SO_MEMINFO`), dropped on the path, or
+unattributed, beside `rx_enobufs`, peak queued bytes, delay and receive CPU.
+`rx_enobufs` is pool starvation, which leaves datagrams queued in the socket:
+with a 16-buffer pool it fired hundreds of times and dropped nothing.
+
+```bash
+just rs test -p moq-uring --release -E 'test(benchmark_socket_queues)' --run-ignored only --success-output immediate
 ```
 
 ## Parallel test runs

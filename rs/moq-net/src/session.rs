@@ -1,8 +1,16 @@
 //! A MoQ session handle and a snapshot of its connection statistics.
 
-use std::{sync::Arc, task::Poll, time::Duration};
+use std::{
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering},
+	},
+	task::{Poll, ready},
+	time::Duration,
+};
 
-use crate::transport::Stats as _;
+use crate::transport::poll::Session as _;
+use crate::transport::{Error as _, Metrics as _};
 
 use crate::{Error, SessionError, Version, auth, bandwidth, coding::StreamCodes, goaway};
 
@@ -12,8 +20,8 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 /// A close requested by a session handle, executed by the driver.
 #[derive(Clone)]
 enum Close {
-	/// Close now with this code.
-	Abort { code: u32, reason: String },
+	/// Close now with this error's code.
+	Abort(Error),
 	/// Close once the protocol owes the peer nothing, or at [`CLOSE_TIMEOUT`].
 	Drain,
 }
@@ -21,10 +29,61 @@ enum Close {
 /// How the session ended, published by the driver.
 #[derive(Clone)]
 struct Ended {
-	/// The transport's terminal error.
+	/// The transport's terminal error, or this side's reason when it closed first.
 	err: Error,
 	/// The drain's outcome, when a drain is what closed the transport.
 	drain: Option<Result<(), Error>>,
+}
+
+/// Resolve with `read` of how the session ended, or [`kio::Closed`] once the driver dropped
+/// without publishing it.
+fn poll_ended<R>(
+	closed: &kio::Consumer<Option<Ended>>,
+	waiter: &kio::Waiter,
+	read: impl FnOnce(&Ended) -> R,
+) -> Poll<Result<R, kio::Closed>> {
+	let ended = closed.poll(waiter, |state| match &**state {
+		Some(ended) => Poll::Ready(read(ended)),
+		None => Poll::Pending,
+	});
+	ended.map(|ended| ended.map_err(|_| kio::Closed))
+}
+
+/// How this side closed the transport, shared by every clone of it.
+///
+/// Every close goes through the boxed transport, so the first one is recorded whichever
+/// task sent it, including one ending the session from inside a single request.
+#[derive(Default)]
+pub(crate) struct Closing {
+	/// The handles closed it by dropping or draining: a clean close, whatever the protocol reports.
+	local: std::sync::atomic::AtomicBool,
+	/// The first close this side sent: its code, and the error behind it when the closer had one.
+	sent: std::sync::Mutex<Option<(u32, Option<Error>)>>,
+}
+
+impl Closing {
+	/// Remember that this side closed the transport with `code`, over `cause` when known,
+	/// unless it already closed it.
+	pub(crate) fn sent(&self, code: u32, cause: Option<&Error>) {
+		let mut sent = self.sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		sent.get_or_insert_with(|| (code, cause.cloned()));
+	}
+
+	/// Whether the handles closed the transport by dropping or draining.
+	pub(crate) fn is_local(&self) -> bool {
+		self.local.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
+	/// Why this side closed the transport, reading a bare code with `version`'s registry.
+	fn cause(&self, version: Version) -> Option<Error> {
+		let sent = self.sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		let (code, cause) = sent.as_ref()?;
+		Some(
+			cause
+				.clone()
+				.unwrap_or_else(|| version.decode_session_code(*code).into()),
+		)
+	}
 }
 
 /// The stats cell shared between the driver's sampler and the handles.
@@ -50,11 +109,6 @@ pub struct Stats {
 	/// Estimated send bandwidth from the congestion controller.
 	pub estimated_send_rate: Option<bandwidth::Rate>,
 
-	/// Estimated receive bandwidth from MoQ PROBE.
-	///
-	/// `None` unless the negotiated version supports PROBE (moq-lite-03+).
-	pub estimated_recv_rate: Option<bandwidth::Rate>,
-
 	/// Total bytes sent over the connection, including retransmissions and overhead.
 	pub bytes_sent: Option<u64>,
 
@@ -72,6 +126,15 @@ pub struct Stats {
 
 	/// Total datagrams detected as lost.
 	pub packets_lost: Option<u64>,
+
+	/// Total receive streams evicted because incomplete messages exhausted the receive window.
+	/// A count above zero means the receive window is too small for what the peer sends.
+	pub streams_evicted: Option<u64>,
+
+	/// Total datagrams received for a subscription with no datagram track: one this session
+	/// doesn't know, has ended, or whose answer it hasn't received. `None` on a version without
+	/// datagrams: moq-transport and moq-lite before 05.
+	pub datagrams_unrouted: Option<u64>,
 }
 
 /// The congestion controller's view of the connection, as PROBE reports it.
@@ -123,11 +186,24 @@ pub struct Session {
 	closed: kio::Consumer<Option<Ended>>,
 	stats: kio::Shared<StatsState>,
 	version: Version,
+	/// What the peer's SETUP advertised, once it arrives.
+	peer_implementation: kio::Consumer<Option<Option<String>>>,
 	// Weak, so the sampler runs only while a caller holds a consumer.
 	send_bandwidth: Option<bandwidth::Weak>,
-	recv_bandwidth: Option<bandwidth::Consumer>,
+	recv_bandwidth: Option<bandwidth::Weak>,
+	/// The registry whose reservations this session probes for. Its estimate is
+	/// unused: [`bandwidth`](Self::bandwidth) mints one per call, so holding the
+	/// session doesn't keep the sampler running.
+	bandwidth: bandwidth::Allocator,
+	/// The registry whose viewers this session sends its peer as the PROBE target.
+	viewers: bandwidth::Viewers,
 	goaway: Arc<goaway::Handle>,
 	auth: auth::Handle,
+	credential: Option<auth::Credential>,
+	/// The subscriptions and fetches the protocol tasks carry.
+	work: Work,
+	/// What [`Stats::datagrams_unrouted`] reads.
+	datagrams_unrouted: Option<Arc<AtomicU64>>,
 }
 
 impl Session {
@@ -136,38 +212,95 @@ impl Session {
 		self.version
 	}
 
+	/// The implementation the peer advertised in its SETUP, such as `moq-net-rs/0.3.10`.
+	///
+	/// Waits for the peer's SETUP, which a dialing client may not have read yet.
+	/// `None` when the peer advertised none, its version carries no SETUP (moq-lite
+	/// 01-04), or the session ended first. Peer-controlled: use it for logs and
+	/// rollout counts, never to authorize.
+	pub async fn peer_implementation(&self) -> Option<String> {
+		kio::wait(|waiter| self.poll_peer_implementation(waiter)).await
+	}
+
+	/// See [`Self::peer_implementation`].
+	fn poll_peer_implementation(&self, waiter: &kio::Waiter) -> Poll<Option<String>> {
+		// The slot closes only when the driver drops, which a caller holding a finished
+		// one never does, so the transport's end is watched too.
+		let slot = self.peer_implementation.poll(waiter, |slot| match &**slot {
+			Some(value) => Poll::Ready(value.clone()),
+			None => Poll::Pending,
+		});
+		match slot {
+			Poll::Ready(Ok(value)) => return Poll::Ready(value),
+			Poll::Ready(Err(_)) => return Poll::Ready(None),
+			Poll::Pending => {}
+		}
+		poll_ended(&self.closed, waiter, |_| ()).map(|_| None)
+	}
+
 	/// Returns a consumer for the estimated send bitrate (from the congestion controller).
 	///
 	/// Returns `None` if the QUIC backend doesn't support bandwidth estimation.
+	/// Otherwise it holds an estimate from the start, the session's first sample.
 	pub fn send_bandwidth(&self) -> Option<bandwidth::Consumer> {
 		self.send_bandwidth.as_ref().map(bandwidth::Weak::consume)
 	}
 
+	/// Divides [`send_bandwidth`](Self::send_bandwidth) among this session's senders.
+	///
+	/// The session probes up to what the reservations add up to, through its
+	/// transport's [`Probe`](crate::transport::Probe) when it has one, so reserve
+	/// here rather than on an allocator of your own. Clones share one registry: a
+	/// [`Client::with_allocator`](crate::Client::with_allocator) allocator's when the
+	/// session was dialed with one, so reservations outlive a reconnect. Reservations
+	/// report `None` when the transport has no estimate.
+	pub fn allocator(&self) -> bandwidth::Allocator {
+		self.bandwidth.with_estimate(self.send_bandwidth())
+	}
+
 	/// Returns a consumer for the estimated receive bitrate (from PROBE).
 	///
+	/// Holding the consumer requests PROBE; dropping the last one stops it.
 	/// Returns `None` if the MoQ version doesn't support PROBE (requires moq-lite-03+).
 	pub fn recv_bandwidth(&self) -> Option<bandwidth::Consumer> {
-		self.recv_bandwidth.clone()
+		self.recv_bandwidth.as_ref().map(bandwidth::Weak::consume)
+	}
+
+	/// Divides [`recv_bandwidth`](Self::recv_bandwidth) among the broadcasts watched over this session.
+	///
+	/// The session sends what the viewers add up to as its PROBE target, so a peer that
+	/// advertised `Increase` probes the connection up to it. Holding a viewer requests
+	/// PROBE. Clones share one registry: a
+	/// [`Client::with_viewers`](crate::Client::with_viewers) registry's when the session
+	/// was dialed with one, so their claims outlive a reconnect, like
+	/// [`allocator`](Self::allocator)'s. Viewers taken here read this session's
+	/// estimate, and report `None` once it ends or when the version has no PROBE; take
+	/// them from the reconnecting handle (`moq_tokio::Connection::viewers`) to read
+	/// each new session's.
+	pub fn viewers(&self) -> bandwidth::Viewers {
+		self.viewers.with_estimate(self.recv_bandwidth.clone())
 	}
 
 	/// Returns a snapshot of the current connection statistics.
 	///
 	/// Cheap and non-blocking: this reads the latest sample the session's
 	/// driver took, and schedules a refresh, so periodic polling observes
-	/// fresh counters (100ms cadence). See [`Stats`] for which
-	/// metrics each backend reports.
+	/// fresh counters (100ms cadence), and reads the session's own counters
+	/// live. See [`Stats`] for which metrics each backend reports.
 	pub fn stats(&self) -> Stats {
-		let mut stats = {
-			let mut state = self.stats.lock();
-			// A read is demand: wake the sampler, but only mutate (and so wake)
-			// when the flag actually flips.
-			if !state.demanded {
-				state.demanded = true;
-			}
-			state.sample
-		};
-		stats.estimated_recv_rate = self.recv_bandwidth.as_ref().and_then(bandwidth::Consumer::peek);
-		stats
+		let mut state = self.stats.lock();
+		// A read is demand: wake the sampler, but only mutate (and so wake)
+		// when the flag actually flips.
+		if !state.demanded {
+			state.demanded = true;
+		}
+		Stats {
+			datagrams_unrouted: self
+				.datagrams_unrouted
+				.as_ref()
+				.map(|count| count.load(Ordering::Relaxed)),
+			..state.sample
+		}
 	}
 
 	/// Close the transport with an explicit error, instead of waiting for the last
@@ -178,68 +311,76 @@ impl Session {
 	/// once the runtime polls it (immediately on a live runtime).
 	pub fn abort(&self, err: Error) {
 		if let Ok(mut close) = self.close.write()
-			&& !matches!(*close, Some(Close::Abort { .. }))
+			&& !matches!(*close, Some(Close::Abort(_)))
 		{
-			*close = Some(Close::Abort {
-				code: self.version.session_code(&SessionError::from(&err)),
-				reason: err.to_string(),
-			});
+			*close = Some(Close::Abort(err));
 		}
 	}
 
-	/// Close the session once the data it queued has been delivered.
+	/// Close the session after draining its queued data.
 	///
 	/// Waits until every stream still serving the peer (a subscription whose track
 	/// finished, a fetch, a track info reply) has written its data and FIN and the
-	/// peer acknowledged them, then closes the transport. Returns
+	/// transport acknowledged them, then closes the transport. Lite-05 and newer, including
+	/// the default lite-06, also wait for the subscriber to receive a subscription's tail.
+	/// Older Lite versions and IETF wait only for transport ACKs. Returns
 	/// [`Error::Timeout`] if that takes longer than one second, closing anyway, or
 	/// the session's terminal error if it ended some other way first. A track that
 	/// is still live never finishes, so finish or abort tracks before closing.
 	///
 	/// Both protocols withdraw this session's announcements and wait for their
-	/// delivery. IETF drafts 14 through 16 send withdrawals without waiting.
+	/// delivery.
 	pub async fn close(self) -> Result<(), Error> {
-		if let Ok(mut close) = self.close.write()
-			&& close.is_none()
-		{
-			*close = Some(Close::Drain);
-		}
+		self.start_close();
 		// The drain outlives this handle, so dropping it cannot cut the drain short.
 		let closed = self.closed.clone();
 		drop(self);
 
-		match closed
-			.wait(|state| match &**state {
-				Some(ended) => Poll::Ready(ended.clone()),
-				None => Poll::Pending,
+		kio::wait(|waiter| {
+			Poll::Ready(match ready!(poll_ended(&closed, waiter, Ended::clone)) {
+				Ok(ended) => ended.drain.unwrap_or(Err(ended.err)),
+				Err(kio::Closed) => Err(Error::Cancel),
 			})
-			.await
-		{
-			Ok(ended) => ended.drain.unwrap_or(Err(ended.err)),
-			Err(kio::Closed) => Err(Error::Cancel),
-		}
+		})
+		.await
 	}
 
 	/// Block until the transport session is closed, returning the reason.
 	///
-	/// A close code the peer sent is decoded through the session registry (so an auth
-	/// rejection arrives as `Error::Session(SessionError::Unauthorized)`); every peer code is
-	/// preserved as [`Error::Session`], and a close carrying no application code surfaces as
-	/// [`Error::Transport`]. See [`Error::from_transport`]. If the runtime drops
-	/// the driver instead of running it to completion, this resolves with
-	/// [`Error::Cancel`].
+	/// The driver keeps draining group streams already delivered to the transport
+	/// after this resolves, so keep driving it until it completes.
+	///
+	/// A clean close is [`Error::Cancel`], whichever side closed. A close code the peer
+	/// sent is otherwise decoded through the session registry (so an auth rejection arrives
+	/// as `Error::Session(SessionError::Unauthorized)`) and preserved as [`Error::Session`].
+	/// When the transport reports that this side closed it, this is this side's reason:
+	/// the [`abort`](Self::abort) error, or the protocol failure that ended the session.
+	/// A close carrying no application code is otherwise [`Error::IdleTimeout`] for an
+	/// idle timeout and [`Error::Transport`] for anything else. See
+	/// [`Error::from_transport`]. If the runtime drops the driver instead of running it to
+	/// completion, this resolves with [`Error::Cancel`]. A panic while polling the driver is
+	/// a transport failure instead.
 	pub async fn closed(&self) -> Error {
-		match self
-			.closed
-			.wait(|state| match &**state {
-				Some(ended) => Poll::Ready(ended.err.clone()),
-				None => Poll::Pending,
-			})
-			.await
+		kio::wait(|waiter| self.poll_closed(waiter)).await
+	}
+
+	/// Poll form of [`closed`](Self::closed).
+	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		Poll::Ready(
+			match ready!(poll_ended(&self.closed, waiter, |ended| ended.err.clone())) {
+				Ok(err) => err,
+				// The driver was dropped before it could observe the close.
+				Err(kio::Closed) => Error::Cancel,
+			},
+		)
+	}
+
+	/// Start the drain [`close`](Self::close) runs, without waiting for it or giving up this handle.
+	pub(crate) fn start_close(&self) {
+		if let Ok(mut close) = self.close.write()
+			&& close.is_none()
 		{
-			Ok(err) => err,
-			// The driver was dropped before it could observe the close.
-			Err(kio::Closed) => Error::Cancel,
+			*close = Some(Close::Drain);
 		}
 	}
 
@@ -264,8 +405,8 @@ impl Session {
 
 	/// Observe a GOAWAY from the peer, telling us to migrate elsewhere.
 	///
-	/// [`peek`](goaway::Consumer::peek) is the cheap synchronous check;
-	/// [`recv`](goaway::Consumer::recv) waits for one. Once a GOAWAY arrives, this
+	/// [`poll`](goaway::Consumer::poll) it with a no-op waiter for a synchronous check, or
+	/// wait on it for one. Once a GOAWAY arrives, this
 	/// session's routes cost [`Cost::DRAIN`](crate::origin::Cost::DRAIN): requests
 	/// keep opening on it until a replacement session's route outranks it, and
 	/// existing subscriptions keep flowing until the session closes.
@@ -273,39 +414,82 @@ impl Session {
 		self.goaway.consumer()
 	}
 
+	/// Resolves once the session carries no subscription or fetch, in either direction.
+	///
+	/// Ready at once while it carries none. A track request still being set up, waiting
+	/// on authorization or the track's info, counts too. Announcements and the other
+	/// control streams don't, so a session can be idle while it still serves discovery.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.work.poll_idle(waiter)
+	}
+
 	/// The tokens this side presented and the grant they earned, plus the tokens
 	/// the peer presents. See [`auth`].
 	///
-	/// On moq-lite-07-wip, and on moq-transport draft-17+ when both sides negotiate the
-	/// MoQ Auth extension, each side presents its connection's credential right after
-	/// setup. Older versions, and peers that do not negotiate it, leave the grant `None`.
+	/// The handle passed to [`Client::with_auth`](crate::Client::with_auth), or else one
+	/// this session created for itself, which ends with it.
+	///
+	/// On moq-lite-07-wip, and on moq-transport when both sides negotiate the MoQ Auth
+	/// extension, each side presents its connection's credential right after setup.
+	/// Older versions, and peers that do not negotiate it, leave the grant `None`.
 	pub fn auth(&self) -> auth::Handle {
 		self.auth.clone()
+	}
+
+	/// The connection credential this side presents on AUTH, or `None` when this session offers no AUTH.
+	pub(crate) fn credential(&self) -> Option<&auth::Credential> {
+		self.credential.as_ref()
 	}
 }
 
 /// The handles a protocol driver shares with its [`Session`].
 pub(super) struct Handles {
+	pub stats: crate::stats::Session,
 	pub goaway: goaway::Handle,
-	pub auth: auth::Handle,
+	pub auth: auth::Link,
+	/// The connection credential the driver presented on `auth`, when its version has AUTH.
+	pub credential: Option<auth::Credential>,
 	/// Where the driver publishes [`Estimate`] changes, for a protocol that reports
 	/// them to the peer (moq-lite PROBE). Sampled only while a consumer exists.
 	pub estimate: Option<kio::Producer<Estimate>>,
+	/// The reservations the session probes for.
+	pub bandwidth: bandwidth::Allocator,
+	/// The viewers whose sum the session sends as its PROBE target.
+	pub viewers: bandwidth::Viewers,
+	/// The peer's PROBE target, for a protocol that carries one (moq-lite PROBE).
+	pub peer_target: Option<kio::Consumer<bandwidth::Rate>>,
+	/// What the peer's SETUP advertised as its implementation.
+	pub peer_implementation: crate::setup::PeerImplementation,
+	/// The driver's count of datagrams it routed to no datagram track, for a version that
+	/// carries datagrams.
+	pub datagrams_unrouted: Option<Arc<AtomicU64>>,
 }
 
 impl Session {
-	pub(super) fn new<S>(
-		runtime: crate::time::Clock,
-		session: S,
+	pub(super) fn new(
+		runtime: crate::time::Deadlines,
+		session: crate::driver::Transport,
 		version: Version,
-		recv_bandwidth: Option<bandwidth::Consumer>,
-		protocol: crate::driver::Protocol<S>,
+		recv_bandwidth: Option<bandwidth::Weak>,
+		protocol: crate::driver::Protocol,
 		handles: Handles,
-	) -> (Self, crate::Driver<S>)
-	where
-		S: crate::transport::poll::Session,
-	{
-		let Handles { goaway, auth, estimate } = handles;
+	) -> (Self, crate::Driver) {
+		let Handles {
+			goaway,
+			auth,
+			credential,
+			estimate,
+			stats: context,
+			bandwidth,
+			viewers,
+			peer_target,
+			peer_implementation,
+			datagrams_unrouted,
+		} = handles;
+		let goaway = Arc::new(goaway);
+		auth.drain_with(goaway.clone());
+		let wire = session.wire().map(|counters| context.wire(counters));
 		let sample = snapshot(&session);
 		if let Some(estimate) = &estimate
 			&& let Ok(mut current) = estimate.write()
@@ -314,12 +498,23 @@ impl Session {
 		}
 
 		// Send bandwidth is version-agnostic: it depends on QUIC backend support.
+		// Seeded with the first sample, so a consumer taken before the sampler
+		// first runs reads the estimate instead of `None`.
 		let (send_bandwidth, send_producer) = if sample.estimated_send_rate.is_some() {
 			let producer = bandwidth::Producer::new();
+			let _ = producer.set(sample.estimated_send_rate);
 			(Some(producer.weak()), Some(producer))
 		} else {
 			(None, None)
 		};
+
+		// Without a sender there is nothing to hand the target to, so don't follow it.
+		let probe = session.probe().map(|sender| Probing {
+			sender,
+			local: bandwidth.target(),
+			peer: peer_target,
+			targets: (bandwidth::Rate::ZERO, bandwidth::Rate::ZERO),
+		});
 
 		let close = kio::Producer::new(None);
 		let closed = kio::Producer::new(None);
@@ -328,21 +523,26 @@ impl Session {
 			sample,
 			demanded: false,
 		});
+		let work = session.work().clone();
 
 		let supervisor = Supervisor {
+			goaway: Some(goaway.deadline(&runtime)),
 			version,
-			local_close: protocol.local_close(),
+			context: context.clone(),
 			runtime: runtime.clone(),
 			closed_watch: session.clone(),
 			session,
 			close: Some(close.consume()),
 			closed,
 			stats: stats.clone(),
+			wire,
 			send_bandwidth: send_producer,
 			estimate,
+			probe,
 			sampled: None,
 			mode: SamplerMode::Idle,
 			drain: Drain::Idle,
+			auth: auth.clone(),
 		};
 
 		let session = Self {
@@ -350,10 +550,16 @@ impl Session {
 			closed: closed_consumer,
 			stats,
 			version,
+			peer_implementation: peer_implementation.consume(),
 			send_bandwidth,
 			recv_bandwidth,
-			goaway: Arc::new(goaway),
-			auth,
+			bandwidth,
+			viewers,
+			goaway,
+			auth: auth.handle().clone(),
+			credential,
+			work,
+			datagrams_unrouted,
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),
@@ -371,17 +577,19 @@ impl Session {
 /// The driver's transport-facing half of a [`Session`]: it executes the
 /// handles' close requests, publishes the transport's terminal error, and
 /// samples the connection stats (including the send-bandwidth estimate) while
-/// anyone is consuming them.
+/// anyone is consuming them, and enforces GOAWAY deadlines independently of writes.
 ///
 /// Finishes once the transport reports closed; everything else is moot then.
-pub(crate) struct Supervisor<S> {
+pub(crate) struct Supervisor {
+	goaway: Option<goaway::Deadline>,
 	version: Version,
-	local_close: Arc<std::sync::atomic::AtomicBool>,
-	runtime: crate::time::Clock,
-	session: S,
+	/// Where the session's outcome is recorded.
+	context: crate::stats::Session,
+	runtime: crate::time::Deadlines,
+	session: crate::driver::Transport,
 	// A dedicated clone for the close watch, since each pending poll operation
 	// needs its own handle.
-	closed_watch: S,
+	closed_watch: crate::driver::Transport,
 	/// Handle-side close requests; `None` once one was executed (only the
 	/// first close matters, and the channel closing is the last handle
 	/// dropping).
@@ -394,10 +602,63 @@ pub(crate) struct Supervisor<S> {
 	send_bandwidth: Option<bandwidth::Producer>,
 	/// Published on change while a consumer exists; see [`Self::poll_sampler`].
 	estimate: Option<kio::Producer<Estimate>>,
+	/// The transport's sender and the targets it probes up to, when it has one.
+	probe: Option<Probing>,
 	/// When the last sample was taken.
 	sampled: Option<crate::time::Instant>,
 	mode: SamplerMode,
 	drain: Drain,
+	/// The transport's wire counters, registered under the session's root; dropping records the last reading.
+	wire: Option<crate::stats::Wire>,
+	/// This session's side of its auth handle, closed before the end is published so a
+	/// replacement session built on the same handle never finds this one still active.
+	auth: auth::Link,
+}
+
+/// A transport's sender and the two targets it probes up to, whichever is larger.
+///
+/// The directions never mix: these are both rates this side sends at, its own
+/// reservations' and what the peer asks to receive. What this side wants to receive
+/// goes to the peer instead, as its PROBE target.
+struct Probing {
+	sender: crate::transport::Probe,
+	/// This side's reservations.
+	local: bandwidth::Target,
+	/// The peer's PROBE target, when the protocol carries one. `None` once it is gone.
+	peer: Option<kio::Consumer<bandwidth::Rate>>,
+	/// The last local and peer targets read.
+	targets: (bandwidth::Rate, bandwidth::Rate),
+}
+
+impl Probing {
+	fn poll(&mut self, waiter: &kio::Waiter) {
+		while let Poll::Ready(local) = self.local.poll_changed(waiter) {
+			self.targets.0 = local;
+		}
+		// Loop until pending, so the waiter stays armed for the next change.
+		while let Some(peer) = &self.peer {
+			let last = self.targets.1;
+			let polled = peer.poll(waiter, |rate| match **rate != last {
+				true => Poll::Ready(**rate),
+				false => Poll::Pending,
+			});
+			match polled.map(|res| res.ok()) {
+				Poll::Ready(Some(rate)) => self.targets.1 = rate,
+				// The protocol stopped reading the peer; nothing it asked for still holds.
+				Poll::Ready(None) => {
+					self.targets.1 = bandwidth::Rate::ZERO;
+					self.peer = None;
+				}
+				Poll::Pending => break,
+			}
+		}
+		// The peer's target is untrusted, but only sets how high to probe: each probe
+		// scales the current estimate and stays under congestion control.
+		let target = self.targets.0.max(self.targets.1);
+		if self.sender.target() != target {
+			self.sender.set_target(target);
+		}
+	}
 }
 
 /// A [`Session::close`] waiting for the protocol to deliver what it queued.
@@ -414,32 +675,71 @@ enum SamplerMode {
 	/// Nobody wants stats; sampling is paused.
 	Idle,
 	/// Someone does; sample when the deadline elapses.
-	Polling { deadline: crate::time::Deadline },
+	// Keep the deadline under a task bit: advancing this driver's clock then
+	// queues the sample without waking the already-running driver again.
+	Polling {
+		deadline: Box<kio::Tasks<crate::time::Deadline>>,
+	},
 }
 
-impl<S: crate::transport::poll::Session> Supervisor<S> {
+impl Supervisor {
+	pub(crate) fn panicked(&mut self, error: Error) {
+		self.session
+			.closing()
+			.local
+			.store(true, std::sync::atomic::Ordering::Relaxed);
+		if let Ok(mut closed) = self.closed.write() {
+			*closed = Some(Ended {
+				err: error.clone(),
+				drain: Some(Err(error.clone())),
+			});
+		}
+		let code = self.version.session_code(&SessionError::Internal);
+		self.session.abort(&error, code, "session driver panicked");
+	}
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let mut cx = waiter.context();
-
 		// The transport's terminal error ends the supervisor.
-		if let Poll::Ready(err) = self.closed_watch.poll_closed(&mut cx) {
+		if let Poll::Ready(err) = self.closed_watch.poll_closed(waiter) {
 			// Nothing samples once this returns, but `stats()` keeps serving
 			// this cell, so leave it holding the session's final counters
 			// rather than whichever sample the last demand happened to catch.
 			self.stats.lock().sample = snapshot(&self.session);
+			self.wire.take();
 			let drain = match std::mem::replace(&mut self.drain, Drain::Idle) {
 				Drain::Done(res) => Some(res),
 				_ => None,
 			};
+			let err = match err.close_kind() {
+				// The transport only knows this side closed it, so the reason is ours.
+				crate::transport::CloseKind::Closed if err.session_error().is_none() => {
+					self.session.closing().cause(self.version).unwrap_or(Error::Cancel)
+				}
+				_ => self.version.transport_error(err),
+			};
+			// Anything the peer is told is "no error" ended the session cleanly, by
+			// either side: one spelling for the handles and the stats.
+			let err = match SessionError::from(&err) {
+				SessionError::Cancel => Error::Cancel,
+				_ => err,
+			};
+			self.auth.close(err.clone());
+			self.context.end(&err);
 			if let Ok(mut closed) = self.closed.write() {
-				*closed = Some(Ended {
-					err: self.version.transport_error(err),
-					drain,
-				});
+				*closed = Some(Ended { err, drain });
 			}
 			return Poll::Ready(());
+		}
+
+		if let Some(goaway) = &mut self.goaway
+			&& let Poll::Ready(timeout) = goaway.poll(waiter)
+		{
+			self.goaway = None;
+			if let Some(timeout) = timeout {
+				tracing::warn!(?timeout, "peer did not leave before the GOAWAY deadline; closing");
+				self.close(Error::GoawayTimeout, &Error::GoawayTimeout.to_string());
+			}
 		}
 
 		// Execute the handle-side close requests. The channel closing is the
@@ -453,26 +753,27 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 				Some(request) => Poll::Ready(request.clone()),
 				None => Poll::Pending,
 			}) {
-				Poll::Ready(Ok(request)) => (request, false),
-				Poll::Ready(Err(last)) => (
-					last.clone().unwrap_or_else(|| {
-						self.local_close.store(true, std::sync::atomic::Ordering::Relaxed);
-						Close::Abort {
-							code: SessionError::Cancel.to_code(),
-							reason: "dropped".to_string(),
-						}
-					}),
-					true,
-				),
+				Poll::Ready(Ok(request)) => (Some(request), false),
+				Poll::Ready(Err(last)) => (last.clone(), true),
 				Poll::Pending => break,
 			};
 			match request {
-				Close::Abort { code, reason } => {
-					self.session.close(code, &reason);
+				// The last handle dropped without asking for anything: the implicit cancel.
+				None => {
+					self.session
+						.closing()
+						.local
+						.store(true, std::sync::atomic::Ordering::Relaxed);
+					self.close(Error::Cancel, "dropped");
 					self.drain = Drain::Idle;
 					self.close = None;
 				}
-				Close::Drain => {
+				Some(Close::Abort(err)) => {
+					self.close(err.clone(), &err.to_string());
+					self.drain = Drain::Idle;
+					self.close = None;
+				}
+				Some(Close::Drain) => {
 					if !draining {
 						self.drain = Drain::Waiting(crate::time::Deadline::after(&self.runtime, CLOSE_TIMEOUT));
 					}
@@ -485,11 +786,22 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 		}
 
 		self.poll_sampler(waiter);
+
+		if let Some(probe) = &mut self.probe {
+			probe.poll(waiter);
+		}
+
 		Poll::Pending
 	}
 
 	pub(crate) fn draining(&self) -> bool {
 		matches!(self.drain, Drain::Waiting(_))
+	}
+
+	/// Close the transport over `cause`, this side's reason for ending the session.
+	fn close(&mut self, cause: Error, reason: &str) {
+		let code = self.version.session_code(&SessionError::from(&cause));
+		self.session.abort(&cause, code, reason);
 	}
 
 	/// Finish a requested drain once the protocol owes the peer nothing, or at
@@ -506,8 +818,11 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 			false if deadline.poll(waiter).is_ready() => Err(Error::Timeout),
 			false => return false,
 		};
-		self.local_close.store(true, std::sync::atomic::Ordering::Relaxed);
-		self.session.close(SessionError::Cancel.to_code(), "");
+		self.session
+			.closing()
+			.local
+			.store(true, std::sync::atomic::Ordering::Relaxed);
+		self.close(Error::Cancel, "");
 		self.drain = Drain::Done(res);
 		// The transport is closed, so no later request can change anything.
 		self.close = None;
@@ -544,9 +859,17 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 		stats.sample = sample;
 		stats.demanded = false;
 		drop(stats);
-		self.mode = SamplerMode::Polling {
-			deadline: crate::time::Deadline::after(&self.runtime, Self::POLL_INTERVAL),
-		};
+		let next = crate::time::Deadline::after(&self.runtime, Self::POLL_INTERVAL);
+		match &mut self.mode {
+			SamplerMode::Polling { deadline } => deadline.push(next),
+			SamplerMode::Idle => {
+				let mut deadline = kio::Tasks::new();
+				deadline.push(next);
+				self.mode = SamplerMode::Polling {
+					deadline: Box::new(deadline),
+				};
+			}
+		}
 	}
 
 	fn poll_sampler(&mut self, waiter: &kio::Waiter) {
@@ -558,7 +881,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 		// before the protocol, so the estimate a consumer reads is at most one
 		// interval old.
 		let Some(estimate) = &self.estimate else { return };
-		if estimate.poll_used(waiter).is_pending() {
+		if estimate.poll_wanted_changed(waiter, false).is_pending() {
 			return;
 		}
 		let now = self.runtime.now();
@@ -579,8 +902,8 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 				SamplerMode::Idle => {
 					// Demand is a bandwidth consumer appearing or a stats read.
 					let mut demanded = match &self.send_bandwidth {
-						Some(producer) => match producer.poll_used(waiter) {
-							Poll::Ready(Ok(())) => true,
+						Some(producer) => match producer.poll_wanted_changed(waiter, false) {
+							Poll::Ready(Ok(_)) => true,
 							Poll::Ready(Err(_)) => {
 								self.send_bandwidth = None;
 								false
@@ -606,8 +929,11 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 						return;
 					}
 					// The interval elapsed: pause unless someone still cares.
-					let used = self.send_bandwidth.as_ref().is_some_and(bandwidth::Producer::is_used);
-					if !used && !self.stats.read().demanded {
+					let wanted = self
+						.send_bandwidth
+						.as_ref()
+						.is_some_and(|producer| producer.demand().wanted());
+					if !wanted && !self.stats.read().demanded {
 						self.mode = SamplerMode::Idle;
 						continue;
 					}
@@ -619,22 +945,23 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 	}
 }
 
-/// A [`Stats`] snapshot of the transport's counters.
-///
-/// `estimated_recv_rate` is filled in at the [`Session`] level (it comes from
-/// MoQ PROBE, not the transport), so it stays `None` here.
+/// A [`Stats`] snapshot of the transport's metrics and wire counters.
 fn snapshot<S: crate::transport::poll::Session>(session: &S) -> Stats {
-	let stats = session.stats();
+	// Metrics first: a transport that polls its byte counts refreshes its wire while reading them.
+	let metrics = session.metrics();
+	let wire = session.wire();
 	Stats {
-		rtt: stats.rtt(),
-		estimated_send_rate: stats.estimated_send_rate().map(bandwidth::Rate::from_bps),
-		bytes_sent: stats.bytes_sent(),
-		bytes_received: stats.bytes_received(),
-		bytes_lost: stats.bytes_lost(),
-		packets_sent: stats.packets_sent(),
-		packets_received: stats.packets_received(),
-		packets_lost: stats.packets_lost(),
-		..Default::default()
+		rtt: metrics.rtt(),
+		estimated_send_rate: metrics.estimated_send_rate().map(bandwidth::Rate::from_bps),
+		bytes_sent: wire.as_ref().map(crate::transport::Wire::sent_bytes),
+		bytes_received: wire.as_ref().map(crate::transport::Wire::received_bytes),
+		bytes_lost: metrics.bytes_lost(),
+		packets_sent: metrics.packets_sent(),
+		packets_received: metrics.packets_received(),
+		packets_lost: metrics.packets_lost(),
+		streams_evicted: metrics.streams_evicted(),
+		// Counted by the protocol, not the transport: filled in by `Session::stats`.
+		datagrams_unrouted: None,
 	}
 }
 
@@ -688,45 +1015,59 @@ impl Drop for Withdrawing {
 	}
 }
 
-/// Caps on what one peer can make a session hold at once.
+/// The subscriptions and fetches a session carries in either direction, which
+/// [`Session::idle`] waits to reach zero.
+#[derive(Clone, Default)]
+pub(crate) struct Work(kio::Shared<usize>);
+
+impl Work {
+	/// Count one subscription or fetch until the returned guard drops.
+	pub(crate) fn start(&self) -> Working {
+		*self.0.lock() += 1;
+		Working(self.clone())
+	}
+
+	fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.0
+			.poll(
+				waiter,
+				|count| if **count == 0 { Poll::Ready(()) } else { Poll::Pending },
+			)
+			.map(|_| ())
+	}
+}
+
+/// One subscription or fetch counted in [`Work`], released on drop.
+pub(crate) struct Working(Work);
+
+impl Drop for Working {
+	fn drop(&mut self) {
+		*self.0.0.lock() -= 1;
+	}
+}
+
+/// Bounds on what one peer can make a session hold, where its transport does not already.
 ///
-/// A peer that goes past a cap loses the session, closed with `TOO_MANY_REQUESTS`. The
-/// stats sessions rows report each root's peaks, so an operator sees how close sessions
-/// come before one is closed.
+/// Each request holds a stream of its own, so the transport's stream credit bounds those.
+/// A peer that announces past `announces` loses the session, closed with
+/// `TOO_MANY_REQUESTS`. The stats sessions rows report announcement and subscription peaks.
 ///
-/// On moq-transport drafts 14 to 16 the caps also size the request window, which counts
-/// every request (FETCH, TRACK_STATUS and SUBSCRIBE_UPDATE included), so very low caps
-/// can starve it. Later drafts have no window but still refuse a reused request ID, so a
-/// peer may leave at most twice the sum of these caps runs of skipped IDs; one more closes
-/// the session with `INTERNAL_ERROR` rather than forgetting any.
+/// ```
+/// let mut limits = moq_net::session::Limits::default();
+/// limits.announces = 1_000;
+/// let client = moq_net::Client::new().with_limits(limits);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
 	/// Broadcasts (moq-lite) or namespaces (moq-transport) the peer may have announced to us.
 	pub announces: usize,
-	/// Subscriptions the peer may hold on our broadcasts. On moq-lite 05 and later an open
-	/// TRACK stream holds one too, sharing it with a SUBSCRIBE for the same track.
-	pub subscriptions: usize,
 }
 
 impl Default for Limits {
-	/// Generous enough for a relay mesh carrying a large origin; lower them for untrusted peers.
+	/// Generous enough for a relay mesh carrying a large origin; lower it for untrusted peers.
 	fn default() -> Self {
-		Self {
-			announces: 100_000,
-			subscriptions: 10_000,
-		}
-	}
-}
-
-impl Limits {
-	/// How many requests a moq-transport peer may hold open at once (drafts 14 to 16).
-	///
-	/// Twice what the caps admit, so a peer within them is never blocked by request IDs
-	/// still waiting to be granted back.
-	pub(crate) fn requests(&self) -> u64 {
-		let caps = self.announces.saturating_add(self.subscriptions) as u64;
-		caps.saturating_mul(2)
+		Self { announces: 100_000 }
 	}
 }
 
@@ -755,9 +1096,15 @@ impl Slots {
 		self
 	}
 
+	/// How many more slots may be taken right now.
+	pub(crate) fn available(&self) -> usize {
+		self.max
+			.saturating_sub(self.live.load(std::sync::atomic::Ordering::Acquire))
+	}
+
 	/// Take one slot until the returned guard drops, or [`Error::TooManyRequests`] at the cap.
 	///
-	/// The caller closes the session on that error: a peer past its limits loses the session.
+	/// A peer whose own request runs past its limits loses the session.
 	pub(crate) fn acquire(&self) -> Result<Slot, Error> {
 		use std::sync::atomic::Ordering;
 		let held = self
@@ -767,10 +1114,21 @@ impl Slots {
 			})
 			.map_err(|_| Error::TooManyRequests)?
 			+ 1;
+		Ok(self.held(held))
+	}
+
+	/// Count one entry the transport already bounds until the returned guard drops, past the
+	/// cap too, so entries taken with [`Self::acquire`] see it.
+	pub(crate) fn hold(&self) -> Slot {
+		let held = self.live.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+		self.held(held)
+	}
+
+	fn held(&self, held: usize) -> Slot {
 		if let Some((stats, cap)) = &self.stats {
 			stats.hold(*cap, held as u64);
 		}
-		Ok(Slot(self.live.clone()))
+		Slot(self.live.clone())
 	}
 }
 

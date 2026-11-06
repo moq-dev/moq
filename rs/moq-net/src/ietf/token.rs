@@ -1,17 +1,22 @@
-//! The `AUTHORIZATION TOKEN` Setup Option (draft-ietf-moq-transport-21 section 9.1.4) and
+//! The `AUTHORIZATION TOKEN` Setup Option (draft-ietf-moq-transport-22 section 9.1.4) and
 //! Message Parameter.
 //!
 //! The value is the Token structure of section 8.9: an Alias Type, then fields that
 //! type selects. We advertise no `MAX_AUTH_TOKEN_CACHE_SIZE`, so its default of 0 means
 //! no alias is ever registered and every token arrives by value.
 
+#[cfg(feature = "async")]
+use crate::coding::Stream;
+#[cfg(feature = "async")]
+use crate::driver::Transport;
+
 use crate::{
 	DecodeError, Error, SessionError,
-	coding::{Decode as _, Decoder, EncodeError, Encoder, Stream},
+	coding::{Decoder, EncodeError, Encoder},
 	setup::Token,
 };
 
-use super::{Message as _, Param, ParameterBytes, Parameters, RequestId, Version, error::request};
+use super::{Param, ParameterBytes, Parameters, Version, error::request};
 
 /// Retire a registered alias.
 const DELETE: u64 = 0x0;
@@ -34,7 +39,6 @@ pub fn from_setup(params: &Parameters, version: Version) -> Result<Option<Token>
 }
 
 /// Present `token` in our SETUP, by value.
-#[cfg_attr(not(test), expect(dead_code))]
 pub fn into_setup(params: &mut Parameters, token: &Token, version: Version) -> Result<(), EncodeError> {
 	params.set_bytes(ParameterBytes::AuthorizationToken, encode(token, version)?);
 	Ok(())
@@ -44,8 +48,15 @@ pub fn into_setup(params: &mut Parameters, token: &Token, version: Version) -> R
 /// rules except that a registration overflows the cache instead of falling back to a value.
 ///
 /// The parameter may repeat, so a request decodes it as a `Vec` and every instance is checked.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RequestToken(pub Token);
+
+// A request message is logged with `Debug`, so the credential shows only its type and length.
+impl std::fmt::Debug for RequestToken {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "RequestToken(kind={}, <{} bytes>)", self.0.kind, self.0.value.len())
+	}
+}
 
 impl Param for RequestToken {
 	fn param_encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -58,55 +69,54 @@ impl Param for RequestToken {
 	}
 }
 
-/// Refuse a request whose tokens repeat one another.
+/// The one token a request carries, if any.
 ///
 /// Section 8.9 lets a token repeat only with a different type or value, after resolving
-/// aliases, of which we accept none. Checked once every parameter decoded, so a token that
-/// closes the session wins over a repeat.
-pub fn unique(tokens: &[RequestToken]) -> Result<(), DecodeError> {
+/// aliases, of which we accept none, so a repeat is [`DecodeError::MalformedAuthToken`].
+/// Distinct tokens are legal, but authorizing on one would silently ignore the rest, so more
+/// than one is refused as [`DecodeError::MultipleAuthTokens`]. Checked once every parameter
+/// decoded, so a token that closes the session wins over either.
+pub fn single(tokens: Vec<RequestToken>) -> Result<Option<RequestToken>, DecodeError> {
 	for (i, token) in tokens.iter().enumerate() {
 		if tokens[..i].contains(token) {
 			return Err(DecodeError::MalformedAuthToken);
 		}
 	}
-	Ok(())
+	let mut tokens = tokens.into_iter();
+	match (tokens.next(), tokens.next()) {
+		(token, None) => Ok(token),
+		_ => Err(DecodeError::MultipleAuthTokens),
+	}
 }
 
-/// Refuse a request that decoded to [`DecodeError::MalformedAuthToken`], ending its stream.
+/// Whether a decode error refuses only the request whose tokens caused it, leaving the
+/// session alone: a repeat (section 8.9), or more than one token.
+pub(super) fn refuses_request(err: &DecodeError) -> bool {
+	matches!(err, DecodeError::MalformedAuthToken | DecodeError::MultipleAuthTokens)
+}
+
+/// The reason phrase for a refusal [`refuses_request`] accepts.
+pub(super) fn reason(err: &DecodeError) -> &'static str {
+	match err {
+		DecodeError::MultipleAuthTokens => "more than one AUTHORIZATION TOKEN",
+		_ => "repeated AUTHORIZATION TOKEN",
+	}
+}
+
+/// Refuse a request whose tokens decoded to `err`, one [`refuses_request`] accepts, ending
+/// its stream.
 ///
-/// Section 8.9 rejects the message rather than the session. Every request starts with its
-/// Request ID, so it is read from the undecoded `body`.
-pub(super) async fn reject<S: crate::transport::poll::Session>(
-	mut stream: Stream<S, Version>,
+/// Section 8.9 rejects the message rather than the session.
+#[cfg(feature = "async")]
+pub(super) fn rejection(
+	mut stream: Stream<Transport, Version>,
 	kind: request::Kind,
-	body: super::Body,
+	err: DecodeError,
 	version: Version,
-) -> Result<(), Error> {
-	let request_id = RequestId::decode(&mut body.decoder(version), version)?;
-	// Each draft-14 error message has the REQUEST_ERROR body that draft-15 folded them into.
-	let id = match (version, kind) {
-		(Version::Draft14, request::Kind::Subscribe) => super::SubscribeError::ID,
-		(Version::Draft14, request::Kind::Fetch) => super::FetchError::ID,
-		(Version::Draft14, request::Kind::Publish) => super::PublishError::ID,
-		(Version::Draft14, request::Kind::PublishNamespace) => super::PublishNamespaceError::ID,
-		(Version::Draft14, request::Kind::SubscribeNamespace) => super::SubscribeNamespaceError::ID,
-		(Version::Draft14, request::Kind::TrackStatus) => super::TRACK_STATUS_ERROR_14,
-		_ => super::RequestError::ID,
-	};
-	let err = Error::Decode(DecodeError::MalformedAuthToken);
-	stream.writer.varint(id).await?;
-	stream
-		.writer
-		.encode(&super::RequestError {
-			request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16).then_some(request_id),
-			error_code: request::to_code(&err, kind, version),
-			reason_phrase: "repeated AUTHORIZATION TOKEN".into(),
-			retry_interval: 0,
-		})
-		.await?;
-	// The peer dropping the stream once it has the rejection is a normal end.
-	let _ = stream.writer.close().await;
-	Ok(())
+) -> super::request_stream::Reject {
+	let reason = reason(&err);
+	let buffered = super::request_stream::buffer_error(&mut stream.writer, kind, &Error::Decode(err), reason, version);
+	super::request_stream::Reject::buffered(stream, buffered)
 }
 
 /// Encode `token` by value.
@@ -167,33 +177,29 @@ mod tests {
 	use super::*;
 	use crate::coding::{Decode, Encode};
 
-	/// Section 8.9: tokens may repeat only with a different type or value.
+	/// Section 8.9: tokens may repeat only with a different type or value, which is malformed
+	/// over any other refusal. Distinct tokens are legal but refused: a request carries one.
 	#[test]
-	fn a_repeated_token_is_malformed() {
+	fn a_request_carries_at_most_one_token() {
 		let token = |kind, value: &[u8]| {
 			RequestToken(Token {
 				kind,
 				value: value.to_vec(),
 			})
 		};
-		assert!(unique(&[token(0, b"a"), token(1, b"a"), token(0, b"b")]).is_ok());
+		assert_eq!(single(Vec::new()).unwrap(), None);
+		assert_eq!(single(vec![token(0, b"a")]).unwrap(), Some(token(0, b"a")));
 		assert!(matches!(
-			unique(&[token(0, b"a"), token(1, b"a"), token(0, b"a")]),
+			single(vec![token(0, b"a"), token(1, b"a"), token(0, b"b")]),
+			Err(DecodeError::MultipleAuthTokens)
+		));
+		assert!(matches!(
+			single(vec![token(0, b"a"), token(1, b"a"), token(0, b"a")]),
 			Err(DecodeError::MalformedAuthToken)
 		));
 	}
 
-	const VERSIONS: [Version; 9] = [
-		Version::Draft14,
-		Version::Draft15,
-		Version::Draft16,
-		Version::Draft17,
-		Version::Draft18,
-		Version::Draft19,
-		Version::Draft20,
-		Version::Draft21,
-		Version::Draft22,
-	];
+	const VERSIONS: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
 
 	fn token() -> Token {
 		// A kind past one varint byte and a value that is not text, so neither is mistaken
@@ -240,18 +246,14 @@ mod tests {
 			kind: 300,
 			value: vec![0x00, 0xff],
 		};
-		for (version, expected) in [
-			(Version::Draft14, [0x03, 0x41, 0x2c, 0x00, 0xff]),
-			(Version::Draft17, [0x03, 0x81, 0x2c, 0x00, 0xff]),
-		] {
-			let mut params = Parameters::default();
-			into_setup(&mut params, &token, version).unwrap();
-			assert_eq!(
-				params.get_bytes(ParameterBytes::AuthorizationToken),
-				Some(&expected[..]),
-				"{version:?}"
-			);
-		}
+		let (version, expected) = (Version::Draft18, [0x03, 0x81, 0x2c, 0x00, 0xff]);
+		let mut params = Parameters::default();
+		into_setup(&mut params, &token, version).unwrap();
+		assert_eq!(
+			params.get_bytes(ParameterBytes::AuthorizationToken),
+			Some(&expected[..]),
+			"{version:?}"
+		);
 	}
 
 	#[test]
@@ -264,6 +266,21 @@ mod tests {
 			};
 			assert_eq!(from_setup(&params, version).unwrap(), Some(expected), "{version:?}");
 		}
+	}
+
+	/// A request's credential shows only its type and length in a message's `Debug`.
+	#[test]
+	fn a_request_token_debug_hides_the_value() {
+		let debug = format!(
+			"{:?}",
+			RequestToken(Token {
+				kind: 0,
+				value: b"s3cr3t-jwt".to_vec(),
+			})
+		);
+		assert!(!debug.contains("s3cr3t"), "{debug}");
+		assert!(!debug.contains("115"), "{debug}");
+		assert!(debug.contains("<10 bytes>"), "{debug}");
 	}
 
 	#[test]
@@ -293,17 +310,9 @@ mod tests {
 				.unwrap();
 
 			let key = u64::from(ParameterBytes::AuthorizationToken);
-			let (count, keys): (Option<u64>, [u64; 2]) = match version {
-				Version::Draft14 | Version::Draft15 => (Some(2), [key, key]),
-				// Delta-encoded from draft-16, so the repeat is a delta of zero.
-				Version::Draft16 => (Some(2), [key, 0]),
-				_ => (None, [key, 0]),
-			};
 			let mut raw = Vec::new();
-			if let Some(count) = count {
-				Encoder::new(&mut raw, version.into()).varint(count).unwrap();
-			}
-			for key in keys {
+			// Delta-encoded, so the repeat is a delta of zero.
+			for key in [key, 0] {
 				Encoder::new(&mut raw, version.into()).varint(key).unwrap();
 				Encoder::new(&mut raw, version.into()).bytes(&value).unwrap();
 			}

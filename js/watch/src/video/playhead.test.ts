@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import type { Milli } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
-import type { Time } from "@moq/net";
 import { caughtUp, renditionJitter, switchJitter } from "./playhead";
 
 // `jitter` is a branded u53 in the catalog schema, so build the config through a cast.
@@ -8,7 +8,7 @@ function config(props: { jitter?: number; delay?: number; framerate?: number }):
 	return { codec: "avc1.640028", container: { kind: "legacy" }, ...props } as Catalog.VideoConfig;
 }
 
-const ms = (value: number) => value as Time.Milli;
+const ms = (value: number) => value as Milli;
 
 describe("renditionJitter", () => {
 	it("prefers the catalog value", () => {

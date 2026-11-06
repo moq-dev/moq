@@ -4,16 +4,17 @@
  * @module
  */
 
+import { Instant, Nano, now, Second } from "@moq/clock";
 import * as Json from "@moq/json";
-import { type Broadcast, Time, type Track } from "@moq/net";
+import { type Broadcast, Time, type Timed, type Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 
 /** Name of the track carrying the chat window. */
 export const TRACK = "chat";
 /** Delivery priority, below audio and video. */
 export const PRIORITY = 10;
-/** Milliseconds a published message stays in the window. */
-export const HISTORY = 10_000;
+/** How long a published message stays in the window. */
+export const HISTORY = Nano.fromSecond(Second(10));
 /** A message entering, leaving, or missed from the window. */
 export type Event = Json.Window.Event<string>;
 
@@ -25,7 +26,7 @@ export function info(): Pick<Track.Info, "priority" | "timescale"> {
 /** Publishes chat messages and retires them after ten seconds, including while idle. */
 export class Publisher {
 	#producer: Json.Window.Producer<string>;
-	#expires = new Signal<number[]>([]);
+	#expires = new Signal<Instant[]>([]);
 	#signals = new Effect();
 
 	/** Create the chat track on a broadcast. */
@@ -36,11 +37,11 @@ export class Publisher {
 	/** Publish a chat window over an existing track. */
 	constructor(track: Track.Producer) {
 		// Every edit restates the retained window, so a late reader never replays expired records.
-		this.#producer = new Json.Window.Producer({ track, opRatio: 0 });
+		this.#producer = new Json.Window.Producer({ track, ops: false });
 		this.#signals.run((effect) => {
 			const next = effect.get(this.#expires)[0];
 			if (next === undefined) return;
-			effect.timer(() => this.expire(), Math.max(0, next - performance.now()));
+			effect.timer(() => this.expire(), Instant.durationSince(next, now()));
 		});
 	}
 
@@ -49,15 +50,15 @@ export class Publisher {
 		if (!text) return;
 		this.expire();
 		this.#producer.push({ value: text, at: Time.Timestamp.now() });
-		this.#expires.update((expires) => [...expires, performance.now() + HISTORY]);
+		this.#expires.update((expires) => [...expires, Instant.add(now(), HISTORY)]);
 	}
 
 	/** Retire elapsed messages now; the publisher also schedules this automatically. */
 	expire(): void {
-		const now = performance.now();
+		const at = now();
 		const expires = this.#expires.peek();
 		let count = 0;
-		while (count < expires.length && expires[count] <= now) count++;
+		while (count < expires.length && expires[count] <= at) count++;
 		if (!count) return;
 		this.#producer.pop(count, Time.Timestamp.now());
 		this.#expires.set(expires.slice(count));
@@ -74,6 +75,8 @@ export class Publisher {
 export class Subscriber {
 	#track: Track.Subscriber;
 	#consumer: Json.Window.Consumer<unknown>;
+	// Resolves once the reader starts at the newest window, instead of replaying older ones.
+	#positioned: Promise<void>;
 
 	/** Subscribe to the newest retained window on a broadcast. */
 	static subscribe(broadcast: Broadcast.Consumer): Subscriber {
@@ -82,21 +85,27 @@ export class Subscriber {
 
 	/** Read window changes from an existing subscription. */
 	constructor(track: Track.Subscriber) {
-		const latest = track.latest();
-		if (latest !== undefined) track.setGroups({ start: { included: latest } });
 		this.#track = track;
 		this.#consumer = new Json.Window.Consumer({ track });
+		this.#positioned = track.largest().then((largest) => {
+			if (largest) track.withRange({ start: { included: largest.group } });
+		});
 	}
 
-	/** Return the next window change, or undefined on clean completion; failures throw. */
-	async recv(): Promise<Event | undefined> {
-		const event = await this.#consumer.next();
-		if (!event) return undefined;
+	/**
+	 * Return the next window change and when its frame was sent, or undefined on clean completion;
+	 * failures throw. A message first seen in a later window's header carries that header's time.
+	 */
+	async recv(): Promise<Timed<Event> | undefined> {
+		await this.#positioned;
+		const next = await this.#consumer.next();
+		if (!next) return undefined;
+		const { value: event, at } = next;
 		if ("push" in event) {
 			if (typeof event.push.value !== "string") throw new Error("chat record must be a string");
-			return { push: { index: event.push.index, value: event.push.value } };
+			return { value: { push: { index: event.push.index, value: event.push.value } }, at };
 		}
-		return event;
+		return { value: event, at };
 	}
 
 	/** Cancel the subscription and release buffered records. */

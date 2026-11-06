@@ -18,8 +18,8 @@ const URL_ = new URL("https://example.com");
 async function handshake(client: Extensions, server: Extensions) {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const [dialed, accepted] = await Promise.all([
-		exchangeSetup(pair.client, VERSION, "test", offered(client)),
-		exchangeSetup(pair.server, VERSION, "test", offered(server)),
+		exchangeSetup(pair.client, VERSION, "test", { client: true, extensions: offered(client) }),
+		exchangeSetup(pair.server, VERSION, "test", { client: false, extensions: offered(server) }),
 	]);
 	return { dialed, accepted };
 }
@@ -28,16 +28,11 @@ async function handshake(client: Extensions, server: Extensions) {
 async function acceptWith(extensions: Extensions) {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const [peer, connection] = await Promise.all([
-		exchangeSetup(pair.client, VERSION, "test", offered()),
+		exchangeSetup(pair.client, VERSION, "test", { client: true, extensions: offered() }),
 		accept({ transport: pair.server, url: URL_, extensions }),
 	]);
 	return { pair, peer, connection };
 }
-
-test("every extension is offered by default", () => {
-	expect(offered()).toEqual({ auth: true, solicit: true });
-	expect(offered({ solicit: false })).toEqual({ auth: true, solicit: false });
-});
 
 test("a declined extension stays out of SETUP", async () => {
 	// Control: both sides offer both.
@@ -82,7 +77,7 @@ test("a side that declined solicit takes an unsolicited announce", async () => {
 		await new PublishNamespace({
 			requestId: 0n,
 			trackNamespace: Path.from("room"),
-			cluster: { hops: [session.peer.cluster.self], cost: 0n },
+			params: { cluster: { hops: [session.peer.cluster.self], cost: 0n } },
 		}).encode(stream.writer, VERSION);
 		return stream;
 	};

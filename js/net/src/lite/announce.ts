@@ -1,18 +1,20 @@
-import type * as Epoch from "../epoch.ts";
 import { ProtocolViolation } from "../error.ts";
-import { type Cost, type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP } from "../hop.ts";
+import { type Cost, type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP, wireHop } from "../hop.ts";
+import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import { decodeEpoch, encodeEpoch } from "./epoch.ts";
+import { decodeRoute, encodeRoute } from "./instance.ts";
 import * as Message from "./message.ts";
 import {
 	hasAnnounceCompression,
 	hasAnnounceId,
 	hasAnnounceOk,
 	hasAnnounceRestart,
+	hasAnnounceTakeover,
 	hasExcludeHop,
 	hasHidden,
 	hasRouteCost,
+	hasSynced,
 	Version,
 } from "./version.ts";
 
@@ -30,8 +32,9 @@ const ANNOUNCE_END = 1;
 const ANNOUNCE_UPDATE = 2;
 // lite-07: another publisher instance replaces the advertisement.
 const ANNOUNCE_RESTART = 3;
-
-export type { Cost };
+const SYNCED = 4;
+// lite-07: a new advertisement continues what a live one served beneath its path.
+const ANNOUNCE_TAKEOVER = 5;
 
 /**
  * Lite-07: copy `keep` path segments (from the head) or hops (from the tail) of the
@@ -44,9 +47,9 @@ export type Base = { distance: bigint; keep: number };
  * An announcement on the Announce Stream, advertising or retracting a broadcast.
  *
  * On lite-06+ these are independently-typed messages (`ANNOUNCE_START`, `ANNOUNCE_END`,
- * `ANNOUNCE_UPDATE`, and on lite-07 `ANNOUNCE_RESTART`), each framed as
- * `Type | Length | Body` like the subscribe stream's responses. Each `active`
- * (ANNOUNCE_START) implicitly assigns the next announce id (a per-stream ordinal starting
+ * `ANNOUNCE_UPDATE`, and on lite-07 `ANNOUNCE_RESTART` and `ANNOUNCE_TAKEOVER`), each
+ * framed as `Type | Length | Body` like the subscribe stream's responses. Each `active`
+ * (ANNOUNCE_START) or `takeover` implicitly assigns the next announce id (a per-stream ordinal starting
  * at 0); the others reference that id instead of repeating the path. Older versions send
  * a single ANNOUNCE_BROADCAST message that retracts by path (`ended`).
  */
@@ -54,12 +57,13 @@ export type AnnounceBroadcast =
 	/** A broadcast is now available, carrying the path suffix, the hop chain, and
 	 * (lite-06+) the route cost. An absent cost encodes as zero; it decodes as
 	 * `undefined` on a wire with no room for one. On lite-07, `suffix` follows the
-	 * segments `pathBase` copies and `hops` precede the ones `hopBase` copies. The epoch
-	 * (lite-07+) changes only with a `restart`. */
+	 * segments `pathBase` copies and `hops` precede the ones `hopBase` copies. The instance
+	 * and epoch (lite-07+) change only with a `restart`. */
 	| {
 			status: "active";
 			suffix: Path.Valid;
-			epoch?: Epoch.Valid;
+			instance?: Instance.Valid;
+			epoch?: bigint;
 			hops: Hop[];
 			cost?: Cost;
 			pathBase?: Base;
@@ -73,12 +77,36 @@ export type AnnounceBroadcast =
 	/** Lite06+: atomically replace the metadata of the announcement with this id (e.g. a
 	 * new hop chain after a relay failover, or a route whose cost moved). The id stays live. */
 	| { status: "update"; id: bigint; hops: Hop[]; cost?: Cost; hopBase?: Base }
-	/** Lite07+: another publisher instance replaces the announcement with this id, under
-	 * the epoch given (or none). What the receiver resolved under its prefix is the old
-	 * instance. The id stays live. */
-	| { status: "restart"; id: bigint; epoch?: Epoch.Valid; hops: Hop[]; cost?: Cost; hopBase?: Base }
+	/** Lite07+: the announcement with this id now serves the instance and epoch given. Another
+	 * instance is another stream, so what the receiver resolved under its prefix is stale; a
+	 * higher epoch of the same one continues it. The id stays live. */
+	| {
+			status: "restart";
+			id: bigint;
+			instance?: Instance.Valid;
+			epoch?: bigint;
+			hops: Hop[];
+			cost?: Cost;
+			hopBase?: Base;
+	  }
+	/** Lite07+: an `active` that continues what the live announcement `predecessor` served
+	 * beneath this one's path. It assigns the next id; one at the predecessor's own path
+	 * retires the predecessor. */
+	| {
+			status: "takeover";
+			predecessor: bigint;
+			suffix: Path.Valid;
+			instance?: Instance.Valid;
+			epoch?: bigint;
+			hops: Hop[];
+			cost?: Cost;
+			pathBase?: Base;
+			hopBase?: Base;
+	  }
 	/** An unknown lite-06+ announce type, skipped by length. Does not assign an id. */
-	| { status: "skipped" };
+	| { status: "skipped" }
+	/** Lite07+: the initial set has been delivered. */
+	| { status: "synced" };
 
 // Both wire rules on a hop chain, applied to what we send and to what we receive: a
 // chain that revisits a hop looped, so neither forwarding it nor subscribing through it
@@ -115,7 +143,7 @@ async function encodeHops(w: Writer, version: Version, hops: Hop[]) {
 			// Lite04+: hop count + individual Hop varints.
 			await w.u53(hops.length);
 			for (const origin of hops) {
-				await w.u62(origin);
+				await w.u62(wireHop(origin, version));
 			}
 			break;
 	}
@@ -218,7 +246,7 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 	switch (msg.status) {
 		case "active":
 			await encodePath(w, version, msg.suffix, msg.pathBase);
-			await encodeEpoch(w, version, msg.epoch);
+			await encodeRoute(w, version, msg.instance, msg.epoch);
 			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
 			await encodeRouteCost(w, version, msg.cost);
 			break;
@@ -232,9 +260,18 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 			break;
 		case "restart":
 			await w.u62(msg.id);
-			await encodeEpoch(w, version, msg.epoch);
+			await encodeRoute(w, version, msg.instance, msg.epoch);
 			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
 			await encodeRouteCost(w, version, msg.cost);
+			break;
+		case "takeover":
+			await w.u62(msg.predecessor);
+			await encodePath(w, version, msg.suffix, msg.pathBase);
+			await encodeRoute(w, version, msg.instance, msg.epoch);
+			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
+			await encodeRouteCost(w, version, msg.cost);
+			break;
+		case "synced":
 			break;
 		case "ended":
 			// The pre-lite-06 path-form retraction has no place on lite-06.
@@ -257,6 +294,13 @@ function announce06Type(msg: AnnounceBroadcast, version: Version): number {
 			// Older versions send an end and a start instead.
 			if (!hasAnnounceRestart(version)) throw new Error("announce restart not supported for this version");
 			return ANNOUNCE_RESTART;
+		case "takeover":
+			// Older versions send a start instead.
+			if (!hasAnnounceTakeover(version)) throw new Error("announce takeover not supported for this version");
+			return ANNOUNCE_TAKEOVER;
+		case "synced":
+			if (!hasSynced(version)) throw new Error("synced not supported for this version");
+			return SYNCED;
 		case "ended":
 			throw new Error("ended-by-path not supported for this version");
 		case "skipped":
@@ -268,10 +312,13 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 	switch (typ) {
 		case ANNOUNCE_START: {
 			const path = await decodePath(r, version);
-			const epoch = await decodeEpoch(r, version);
+			const served = await decodeRoute(r, version);
 			const hops = await decodeHopsBlock(r, version);
-			return { status: "active", ...path, epoch, ...hops, cost: await decodeRouteCost(r, version) };
+			return { status: "active", ...path, ...served, ...hops, cost: await decodeRouteCost(r, version) };
 		}
+		case SYNCED:
+			if (!hasSynced(version)) break;
+			return { status: "synced" };
 		case ANNOUNCE_END:
 			return { status: "endedId", id: await r.u62() };
 		case ANNOUNCE_UPDATE: {
@@ -283,9 +330,25 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 			// Unknown before lite-07: skipped below like any other.
 			if (!hasAnnounceRestart(version)) break;
 			const id = await r.u62();
-			const epoch = await decodeEpoch(r, version);
+			const served = await decodeRoute(r, version);
 			const hops = await decodeHopsBlock(r, version);
-			return { status: "restart", id, epoch, ...hops, cost: await decodeRouteCost(r, version) };
+			return { status: "restart", id, ...served, ...hops, cost: await decodeRouteCost(r, version) };
+		}
+		case ANNOUNCE_TAKEOVER: {
+			// Unknown before lite-07: skipped below like any other.
+			if (!hasAnnounceTakeover(version)) break;
+			const predecessor = await r.u62();
+			const path = await decodePath(r, version);
+			const served = await decodeRoute(r, version);
+			const hops = await decodeHopsBlock(r, version);
+			return {
+				status: "takeover",
+				predecessor,
+				...path,
+				...served,
+				...hops,
+				cost: await decodeRouteCost(r, version),
+			};
 		}
 	}
 	// Skip the length-prefixed body so an earlier Lite06 build negotiating
@@ -308,9 +371,11 @@ async function encodeLegacyBody(w: Writer, msg: AnnounceBroadcast, version: Vers
 			await w.string(Path.encode(msg.suffix));
 			await encodeHops(w, version, []);
 			break;
+		case "synced":
 		case "endedId":
 		case "update":
 		case "restart":
+		case "takeover":
 		case "skipped":
 			// The id-referencing forms only exist on lite-06+.
 			throw new Error("announce ids not supported for this version");
@@ -395,14 +460,37 @@ export class AnnounceHistory {
 			const head = Path.parts(this.#base(msg.pathBase).suffix);
 			const keep = msg.pathBase.keep;
 			if (keep > head.length) throw new ProtocolViolation(`announce keeps ${keep} of ${head.length} segments`);
-			suffix = Path.join(Path.from(...head.slice(0, keep)), suffix);
-			if (Path.parts(suffix).length > Path.MAX_PARTS) {
-				throw new ProtocolViolation(`path exceeds ${Path.MAX_PARTS} parts`);
+			// Joined as text before parsing: a kept segment may end in the `\` of an escaped `/`.
+			const kept = head.slice(0, keep);
+			if (suffix !== Path.empty()) kept.push(suffix);
+			try {
+				suffix = Path.from(kept.join("/"));
+			} catch (cause) {
+				throw new ProtocolViolation("announce keeps half an escape", { cause });
 			}
+			const error = Path.check(suffix);
+			if (error) throw new ProtocolViolation(error);
 		}
 		const hops = this.#hops(msg.hops, msg.hopBase);
 		this.#live.set(this.#next++, { suffix, hops });
 		return { suffix, hops };
+	}
+
+	/** An ANNOUNCE_TAKEOVER: resolve it like a start against the live `predecessor`,
+	 * returning the predecessor's suffix too. One at the predecessor's own suffix retires the
+	 * predecessor, since a suffix holds one advertisement. */
+	takeover(msg: {
+		predecessor: bigint;
+		suffix: Path.Valid;
+		hops: Hop[];
+		pathBase?: Base;
+		hopBase?: Base;
+	}): Advertised & { previous: Path.Valid } {
+		const live = this.#live.get(msg.predecessor);
+		if (!live) throw new ProtocolViolation(`unknown announce id: ${msg.predecessor}`);
+		const resolved = this.start(msg);
+		if (resolved.suffix === live.suffix) this.#live.delete(msg.predecessor);
+		return { ...resolved, previous: live.suffix };
 	}
 
 	/** An ANNOUNCE_UPDATE: resolve its chain before replacing the old one, which it may be based on. */
@@ -429,19 +517,17 @@ export class AnnounceHistory {
  */
 export class AnnounceRequest {
 	prefix: Path.Valid;
-	/** Lite04/05 only: the 62-bit Hop id of the peer asking for announces, which the
-	 * publisher uses to skip announces that already passed through it. Zero means "no
-	 * exclusion". Not on the wire elsewhere, so a value set here is ignored when encoding
-	 * for another version and decodes as zero.
-	 *
-	 * Must be a bigint: peer origins are up to 62 bits and overflow u53. */
-	excludeHop: bigint;
+	/** Lite04/05 only: the Hop id of the peer asking for announces, which the publisher
+	 * uses to skip announces that already passed through it. {@link UNKNOWN_HOP} means
+	 * "no exclusion". Not on the wire elsewhere, so a value set here is ignored when
+	 * encoding for another version and decodes as unknown. */
+	excludeHop: Hop;
 	/** Lite07+: also announce routes with a `.`-prefixed segment below the prefix. Not on
 	 * the wire earlier, so a value set here is ignored when encoding for an older version
 	 * and decodes as false. */
 	hidden: boolean;
 
-	constructor(prefix: Path.Valid, excludeHop: bigint = 0n, hidden = false) {
+	constructor(prefix: Path.Valid, excludeHop: Hop = UNKNOWN_HOP, hidden = false) {
 		this.prefix = prefix;
 		this.excludeHop = excludeHop;
 		this.hidden = hidden;
@@ -450,7 +536,7 @@ export class AnnounceRequest {
 	async #encode(w: Writer, version: Version) {
 		await w.string(Path.encode(this.prefix));
 		if (hasExcludeHop(version)) {
-			await w.u62(this.excludeHop);
+			await w.u62(wireHop(this.excludeHop, version));
 		}
 		if (hasHidden(version)) {
 			await w.bool(this.hidden);
@@ -459,7 +545,7 @@ export class AnnounceRequest {
 
 	static async #decode(r: Reader, version: Version): Promise<AnnounceRequest> {
 		const prefix = Path.decode(await r.string());
-		const excludeHop = hasExcludeHop(version) ? await r.u62() : 0n;
+		const excludeHop = hasExcludeHop(version) ? HopSchema.parse(await r.u62()) : UNKNOWN_HOP;
 		const hidden = hasHidden(version) ? await r.bool() : false;
 		return new AnnounceRequest(prefix, excludeHop, hidden);
 	}
@@ -528,8 +614,8 @@ export class AnnounceInit {
 ///
 /// `origin` is the responder's Hop ID, which the subscriber stamps onto each
 /// announce's hop chain (the publisher no longer stamps itself), or the reserved
-/// {@link UNKNOWN_HOP} when the responder has no identity to give. `active` is
-/// the number of initial Announce messages that follow immediately.
+/// {@link UNKNOWN_HOP} when the responder has no identity to give. Lite05/06
+/// carry `active`, the initial start count; lite07 uses SYNCED instead.
 export class AnnounceOk {
 	hop: Hop;
 	active: number;
@@ -545,27 +631,27 @@ export class AnnounceOk {
 		}
 	}
 
-	async #encode(w: Writer) {
-		await w.u62(this.hop);
-		await w.u53(this.active);
+	async #encode(w: Writer, version: Version) {
+		await w.u62(wireHop(this.hop, version));
+		if (!hasSynced(version)) await w.u53(this.active);
 	}
 
-	static async #decode(r: Reader): Promise<AnnounceOk> {
+	static async #decode(r: Reader, version: Version): Promise<AnnounceOk> {
 		// The draft reserves 0 for "unknown": the responder was never assigned an id, or
 		// withholds it to obscure its routing. It names nobody, so callers must not stamp
 		// it onto a hop chain, but it is a legal message and not grounds to drop the stream.
 		const origin = HopSchema.parse(await r.u62());
-		const active = await r.u53();
+		const active = hasSynced(version) ? 0 : await r.u53();
 		return new AnnounceOk(origin, active);
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		AnnounceOk.#guard(version);
-		return Message.encode(w, this.#encode.bind(this));
+		return Message.encode(w, (w) => this.#encode(w, version));
 	}
 
 	static async decode(r: Reader, version: Version): Promise<AnnounceOk> {
 		AnnounceOk.#guard(version);
-		return Message.decode(r, AnnounceOk.#decode);
+		return Message.decode(r, (r) => AnnounceOk.#decode(r, version));
 	}
 }

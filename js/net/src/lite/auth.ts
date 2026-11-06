@@ -1,9 +1,10 @@
 import { Unsupported } from "../auth.ts";
-import type { AuthWire, WireGrant, WireReply } from "../auth_session.ts";
-import { closeReason, ProtocolViolation, SessionCode, SessionError } from "../error.ts";
-import * as Path from "../path.ts";
+import { type AuthWire, decodePatterns, encodePatterns, type WireGrant, type WireReply } from "../auth_session.ts";
+import { ProtocolViolation, SessionCode, SessionError } from "../error.ts";
+import type * as Path from "../path.ts";
 import { type Reader, Stream, type Writer } from "../stream.ts";
 import { decodeUtf8 } from "../util/utf8.ts";
+import { closeViolation } from "./error.ts";
 import * as Message from "./message.ts";
 import { StreamId } from "./stream.ts";
 import { hasAuth, type Version } from "./version.ts";
@@ -42,25 +43,6 @@ export class AuthMessage {
 		guardAuth(version);
 		return Message.decode(r, AuthMessage.#decode);
 	}
-}
-
-// Each pattern travels as its canonical text.
-async function encodePatterns(w: Writer, patterns: Path.Patterns) {
-	await w.u53(patterns.size);
-	for (const pattern of patterns) await w.string(pattern.text);
-}
-
-async function decodePatterns(r: Reader): Promise<Path.Patterns> {
-	const count = await r.u53();
-	const patterns = new Path.Patterns();
-	for (let i = 0; i < count; i++) {
-		const text = await r.string();
-		const pattern = Path.Pattern.parse(text);
-		// Only the canonical spelling is valid, so each pattern has one encoding.
-		if (pattern.text !== text) throw new Error(`non-canonical pattern: ${text}`);
-		patterns.insert(pattern);
-	}
-	return patterns;
 }
 
 /** The grant a token earns, as the acceptor writes it. Encodes its own type. */
@@ -198,9 +180,7 @@ export class LiteAuthWire implements AuthWire {
 		try {
 			reply = await decodeAuthReplyMaybe(stream.reader, this.#version);
 		} catch (err) {
-			if (err instanceof ProtocolViolation) {
-				this.#quic.close({ closeCode: SessionCode.ProtocolViolation, reason: closeReason(err.message) });
-			}
+			closeViolation(this.#quic, err);
 			throw err;
 		}
 		if (!reply) return undefined;
@@ -219,6 +199,10 @@ export class LiteAuthWire implements AuthWire {
 	async accept(stream: Stream): Promise<Uint8Array> {
 		const msg = await AuthMessage.decode(stream.reader, this.#version);
 		return msg.token;
+	}
+
+	async withdrawn(stream: Stream): Promise<void> {
+		if (!(await stream.reader.done())) throw new ProtocolViolation("additional message on an AUTH stream");
 	}
 
 	async grant(stream: Stream, grant: WireGrant): Promise<void> {

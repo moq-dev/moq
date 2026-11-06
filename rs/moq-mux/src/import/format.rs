@@ -48,6 +48,11 @@ pub enum VideoFormat {
 }
 
 /// A container an importer can demux, which may publish more than one track.
+///
+/// Names only the input the importer parses. Every container is demuxed into its tracks' frames;
+/// republishing the input whole is a choice made on the concrete importer
+/// ([`fmp4::Import::with_passthrough`](crate::container::fmp4::Import::with_passthrough),
+/// [`ts::Passthrough`](crate::container::ts::Passthrough)), never by the format name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ContainerFormat {
@@ -131,7 +136,9 @@ impl FromStr for Format {
 
 			"fmp4" | "cmaf" => Format::Container(ContainerFormat::Fmp4),
 			"mkv" | "webm" | "matroska" => Format::Container(ContainerFormat::Mkv),
-			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => Format::Container(ContainerFormat::Ts),
+			// Not `m2ts`: that names the catalog section carrying a multiplex whole, and BDAV's
+			// 192-byte packets besides.
+			"ts" | "mpegts" | "mpeg2ts" => Format::Container(ContainerFormat::Ts),
 			"flv" => Format::Container(ContainerFormat::Flv),
 
 			_ => return Err(crate::Error::UnknownFormat(s.to_string())),
@@ -218,7 +225,7 @@ mod tests {
 			(vec!["vp9", "vp09"], "vp9"),
 			(vec!["fmp4", "cmaf"], "fmp4"),
 			(vec!["mkv", "webm", "matroska"], "mkv"),
-			(vec!["ts", "mpegts", "mpeg2ts", "m2ts"], "ts"),
+			(vec!["ts", "mpegts", "mpeg2ts"], "ts"),
 			(vec!["opus"], "opus"),
 		] {
 			for alias in aliases {

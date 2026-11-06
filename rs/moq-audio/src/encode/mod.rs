@@ -5,19 +5,20 @@
 //! AAC has no software encoder, so a host without a platform one refuses it.
 //!
 //! Entry points, high to low level:
-//! - `publish_capture` captures a microphone (or system audio) and publishes
-//!   it (turnkey). Requires the `capture` feature.
+//! - `publish_capture` publishes an independent capture consumer.
+//!   Requires the `capture` feature.
 //! - [`Encoder`] encodes raw PCM you supply into [`Encoded`] packets, and
 //!   [`Producer`] publishes them (bring your own PCM).
 //! - [`Producer`] alone publishes PCM you hand it, encoding as it goes.
 //!
-//! [`Input`] declares the source PCM while [`Settings`] describes exactly what
-//! the codec accepts. [`Options`] combines those settings with publication policy.
+//! [`Input`] declares the source PCM while [`Config`] describes exactly what
+//! the codec accepts. [`Options`] combines that config with publication policy.
 //!
 //! `publish_capture` is unlinked above because it only exists with the `capture`
 //! feature, so a default-feature rustdoc build has nothing to link to.
 
 mod backend;
+mod backlog;
 mod encoded;
 mod encoder;
 mod producer;
@@ -26,8 +27,8 @@ mod producer;
 mod capture;
 
 pub use encoded::Encoded;
-pub use encoder::{Applied, Codec, Encoder, Finish, Input, Kind, Preset, Settings};
+pub use encoder::{Codec, Config, Encoder, Finish, Input, Kind};
 pub use producer::{Options, Producer};
 
 #[cfg(feature = "capture")]
-pub use capture::{Capture, Control, Driver, Level, State, Status, publish_capture};
+pub use capture::{Capture, Control, Driver, State, Status, publish_capture};

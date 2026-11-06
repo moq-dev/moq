@@ -28,6 +28,12 @@ pub(crate) type Event = (&'static str, ThreadId);
 
 static LOG: Mutex<Vec<Event>> = Mutex::new(Vec::new());
 
+/// Every bitrate the probe accepted, in order.
+static BITRATES: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// A bitrate the probe refuses once, standing in for a transient codec failure.
+static REFUSE: Mutex<Option<u64>> = Mutex::new(None);
+
 /// Serializes the tests that read [`LOG`], which is process-wide. nextest gives
 /// each test its own process, but `cargo test` does not, and a shared log that
 /// only holds up under one runner is a trap for whoever adds the next test.
@@ -37,6 +43,8 @@ static EXCLUSIVE: Mutex<()> = Mutex::new(());
 pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
 	let guard = EXCLUSIVE.lock().unwrap_or_else(|err| err.into_inner());
 	let _ = take();
+	BITRATES.lock().unwrap().clear();
+	REFUSE.lock().unwrap().take();
 	guard
 }
 
@@ -59,6 +67,18 @@ fn record(what: &'static str) {
 /// Empty the log and hand back what was in it.
 pub(crate) fn take() -> Vec<Event> {
 	std::mem::take(&mut LOG.lock().unwrap())
+}
+
+/// Empty the accepted bitrates and hand them back.
+#[cfg(feature = "capture")]
+pub(crate) fn bitrates() -> Vec<u64> {
+	std::mem::take(&mut BITRATES.lock().unwrap())
+}
+
+/// Fail the first `set_bitrate` asking for `bitrate`, then accept it again.
+#[cfg(feature = "capture")]
+pub(crate) fn refuse_once(bitrate: u64) {
+	*REFUSE.lock().unwrap() = Some(bitrate);
 }
 
 pub(crate) struct Probe {
@@ -111,8 +131,14 @@ impl Backend for Probe {
 		Ok(self.pending.take().into_iter().collect())
 	}
 
-	fn set_bitrate(&mut self, _bitrate: u64) -> Result<(), Error> {
+	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
 		record("set_bitrate");
+		let mut refuse = REFUSE.lock().unwrap();
+		if *refuse == Some(bitrate) {
+			*refuse = None;
+			return Err(Error::Codec(anyhow::anyhow!("probe refused {bitrate} bps")));
+		}
+		BITRATES.lock().unwrap().push(bitrate);
 		Ok(())
 	}
 

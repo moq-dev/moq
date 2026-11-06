@@ -3,21 +3,21 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Mode, Rate};
+use super::{FrameRate, Mode};
 use crate::Size;
 
 /// What the caller asked the camera for.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Request {
 	pub size: Size,
-	pub framerate: Option<Rate>,
+	pub framerate: Option<FrameRate>,
 }
 
 /// One mode a camera can stream, as the selection weighs it.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Candidate {
 	pub size: Size,
-	pub framerate: Option<Rate>,
+	pub framerate: Option<FrameRate>,
 	/// What converting the format to I420 costs: lower is cheaper.
 	pub cost: u8,
 }
@@ -42,7 +42,7 @@ pub(super) fn nearest<T>(
 		})
 }
 
-fn rate_distance(left: Option<Rate>, right: Option<Rate>, want: Option<Rate>) -> std::cmp::Ordering {
+fn rate_distance(left: Option<FrameRate>, right: Option<FrameRate>, want: Option<FrameRate>) -> std::cmp::Ordering {
 	let Some(want) = want else {
 		return std::cmp::Ordering::Equal;
 	};
@@ -65,8 +65,8 @@ fn distance(size: Size, want: Size) -> u64 {
 /// Merge the sizes and rates a camera reports into [`Mode`]s, largest first
 /// with each mode's rates highest first. The encoder sees I420 whatever format
 /// carried a mode, so the format is not something a caller can act on.
-pub(super) fn modes(reported: impl IntoIterator<Item = (Size, Vec<Rate>)>) -> Vec<Mode> {
-	let mut sizes: BTreeMap<(u32, u32), BTreeSet<Rate>> = BTreeMap::new();
+pub(super) fn modes(reported: impl IntoIterator<Item = (Size, Vec<FrameRate>)>) -> Vec<Mode> {
+	let mut sizes: BTreeMap<(u32, u32), BTreeSet<FrameRate>> = BTreeMap::new();
 	for (size, rates) in reported {
 		sizes.entry((size.width, size.height)).or_default().extend(rates);
 	}
@@ -88,13 +88,13 @@ pub(super) fn modes(reported: impl IntoIterator<Item = (Size, Vec<Rate>)>) -> Ve
 mod tests {
 	use super::*;
 
-	fn rate(fps: u32) -> Rate {
-		Rate::new(fps, 1).unwrap()
+	fn rate(fps: u32) -> FrameRate {
+		FrameRate::new(fps, 1).unwrap()
 	}
 
 	#[test]
 	fn rate_scoring_preserves_fractional_precision_and_handles_unknown_rates() {
-		let ntsc = Some(Rate::new(60000, 1001).unwrap());
+		let ntsc = Some(FrameRate::new(60000, 1001).unwrap());
 		let thirty = Some(rate(30));
 		assert!(rate_distance(ntsc, thirty, Some(rate(60))).is_lt());
 		assert!(rate_distance(thirty, ntsc, Some(rate(30))).is_lt());

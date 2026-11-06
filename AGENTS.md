@@ -1,118 +1,56 @@
 MoQ (Media over QUIC) is a live media delivery protocol providing real-time latency at massive scale.
-This is a polyglot monorepo with Rust (server/native) and TypeScript (browser) implementations.
 
 # Context
 
-This file is split into nested `AGENTS.md` files based on the language/situation.
-
-- Read `CONTRIBUTING.md` when dealing with PRs.
-- Read `PROMPTING.md` before instructing other agents via context, memory, plans, or reviews.
-- Read `*/AGENTS.md` if the file exists before touching a root directory.
-- `doc/` is the feature entry point, not a reference. Update it only when a change alters what a user would do; see `doc/AGENTS.md`.
+Start with [doc/setup/repository.md](doc/setup/repository.md) to locate a feature, its examples, and its tests.
+Trust this checkout's source over published API references, which may describe another version.
+`doc/` is for end-users and advertising the available features.
 
 # Required
 
-- Pull the latest origin changes before working.
-- Dig into the root cause and fix it at the source. Never work around a fixable bug with a retry, sleep, or timeout.
-- Fail loud and early. Error on unsupported or malformed input rather than warn and continue: supported or refused.
-- Reproduce bugs before fixing them. Land each fix with a regression test that fails without it, when one is easy.
-- Unit tests mock time instead of depending on wall-clock timing or sleeps.
-- Keep the PR focused. No unrelated refactors, formatting churn, or drive-by changes; split when in doubt.
-- Refactor aggressively for long-term maintainability, but re-evaluate the direction as you learn.
-- Propose a course change, even suggest abandoning a PR, rather than finish a half-solution.
-- Be adversarial: attack your own approach, reports, reviews, and other PRs as hard as anyone else's, and argue for the best approach over the first one that works.
-- When a decision is the maintainer's (API shape, naming, scope), ask with 2-3 options and a recommendation.
-- All tests need to be wired into CI, at least a nightly.
-- Never edit an `AGENTS.md`, `CONTRIBUTING.md`, or skill without being prompted, and read `PROMPTING.md` first.
-- No em dashes.
-- Match the existing conventions, patterns, and naming when possible.
-- Fix any outdated docs and comments inline; don't add a separate PR for it.
-- Add the AI marker `(Written by <model>)` to any posts on GitHub, excluding commit messages that contain `Co-Authored-By:` trailers.
-- Any AI comments may be challenged, and not confused with human maintainers.
-- This repo is public: never mention customers, partners, or prospects (names, volumes, terms) or link to private repos. Justify work on its merits.
-- Prompt the user to decide when unsure, but always provide recommendations.
+- Immediately disable a flaky test and plan a follow-up to investigate.
+- The same identity (ex. broadcast+track+group+frame) always has the same content. Use a new identity for new content.
+- Never match on errors; it's brittle.
+- moq-lite and moq-net take priority over moq-transport and other IETF drafts, which are a low-effort compatibility layer. Ignore their requirements (even MUSTs) that add cost without a clear behavioral benefit, and never add API for functionality only they have.
 
 # Guidelines
 
-- Prefer a maintained crate over hand-rolling non-core functionality.
-- Anything that fans out (N publishers, M subscribers, routes, sessions) gets a benchmark swept over both axes, so a cost that grows with the table instead of the touched path shows up as a slope.
-- New dependencies should use the newest, stable version.
-- Do not bump package versions unless asked. Releases are cut separately.
-- Comments should explain the non-obvious why, and never the history.
-- Inline simple helpers.
-- Question whether functionality is needed at all before adding it.
-- Deleting code is better than adding code.
-- Suggest follow up sessions and quests when finished, interactively prompting the user.
-- Prefer the simple solution.
-- Say it once, in the fewest words that hold up.
-- Prefer a quest over a GitHub issue for work needing durable scope.
-- Use interactive prompts when possible.
-- Try to do stuff asynchronously. ex. ask about follow-ups while tests run.
-- Try to recognize when you're stuck, or making minimal progress, and stop early.
-- If the core problem is addressed, ship it instead of spinning your wheels on meaningless revisions.
-- Add or extend a benchmark for any performance-sensitive change so later regressions show up, and measure optimizations instead of relying on intuition.
+- Impair networks with bufferbloat, queuing until packets drop, instead of random loss.
+- Anything that fans out gets a benchmark swept over both axes.
 
 # Public API
 
-The API is the most important thing to get right.
-A bad shape costs a breaking change in every language, and the surface is huge.
+The API is the most important thing to get right: a bad shape costs a breaking change in every language.
 
-- Report the public API and wire impact of every change, in the PR description and whenever asked.
-- Keep things private until a consumer needs them. Scrutinize every new exported item.
-- Never add `foo_with_x`, `foo_checked`, or a compatibility shim. Make the breaking change to `foo` instead.
-- Let the type system make misuse unrepresentable
-- A broadcast, track, or group name always means the same content. MoQ has no ETag-style invalidation, so a publisher that reuses a name for different content (such as restarting group numbers) is a bug; publish a new broadcast instead of working around it.
-- Avoid callback parameters. Return a handle, an event, or a Producer/Consumer split.
-- Avoid 4+ args; use a struct or object.
-- Name by role, not today's implementation.
-- When a name or shape feels awkward, propose alternatives with a recommendation instead of shipping it.
-- Short names under a module namespace (`encode::Config`, not `EncoderConfig`). Mirror names across Rust, JS, and the bindings.
-- Document every exported symbol in one plain line, the way you'd say it out loud.
-- Prefer refactoring and simplification; many APIs have not been published yet.
-
-MoQ is split into many layers as part of the public API.
-The boundary between packages is extremely important to keep things modular and reusable.
+- Only the release cut edits `MIGRATE.md`: a breaking PR puts its migration note in its Impact section, and the cut writes it into the package's guide.
+- Replace a callback parameter with a handle, an event, or a Producer/Consumer split.
+- Nest related API, configuration, and output fields under their shared role.
+- Propose alternatives when a name or shape feels awkward.
+- Short names under a module namespace (`encode::Config`, not `EncoderConfig`), mirrored across Rust, JS, and the bindings.
+- Keep package boundaries modular and reusable; prefer a module in an existing package over a one-off package.
+- Never use a huge value like `u64::MAX` as a marker (it is the longest varint); use 0, a separate message or type, or a boolean.
 
 # Development
 
-PRs target `main`, the trunk, where breaking API changes are allowed.
-`release` is what ships; touch it only to cut a release or backport a fix (see `CONTRIBUTING.md`).
-Wire changes should be backwards compatible for any *published* drafts/versions.
+PRs target `main`, where breaking API changes are allowed.
+`release` is what ships; touch it only to cut a release or backport a fix or benchmark (see `CONTRIBUTING.md`).
+Wire changes stay backwards compatible with *published* drafts/versions; an unpublished `-wip` version changes freely.
+Our libraries prefer moq-lite, so moq-transport compatibility only matters against third-party implementations.
 
-Before starting, `git fetch origin` and set the upstream to the base branch.
-Pass PR bodies to `gh` on stdin (`--body-file -`); never write to a directory other agents share.
-
-Use the Nix dev shell so tooling matches CI.
-direnv loads it automatically, but if not: `nix develop --command ...`.
+Build output may live outside the checkout and gets wiped, so scratch never goes in `target/`.
 
 ```bash
-just check        # Lint, compile, and test what the branch changed
-just fix          # Auto-fix lint/formatting, same scope
+just check   # Lint, compile, and test what the branch changed
+just fix     # Auto-fix lint/formatting, same scope
 ```
 
-These diff the branch against its base and only run the affected packages.
-
-Quests: when work mentions a quest, run `quest guide` and follow it.
-The `quest` binary comes from the kixelated/quest flake input and serves the quest skills; change them upstream and bump the input.
+Quests: before any work, run `quest context` and follow it.
+The `quest` binary and its skills come from the moq-dev/quest flake input; change them upstream and bump the input.
+`quest init` refuses Claude Code's worktree hooks: drop them from `.claude/settings.json` for its run, then restore them.
 
 # Cross-Package Sync
 
-| Change in | Also update |
-|---|---|
-| `rs/moq-ffi` | `rs/moq-c`, `{py,swift,kt,dart}/`, `go/wrapper/moq/*.go` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `cpp/moq`, `cpp/obs/src`, `doc/lib/{py,swift,kt,go,dart,c,cpp}`, `doc/bin/obs.md` |
-| `rs/moq-net` wire/API | `js/net`, `doc/concept`, `drafts/draft-lcurley-moq-lite.md` (if the wire spec changes) |
-| `rs/hang` catalog/container | `js/hang`, `doc/concept`, `drafts/draft-lcurley-moq-hang.md` (if the format spec changes) |
-| `rs/moq-auth` | `js/auth`, `doc/bin/relay/auth.md` |
-| `rs/moq-stats` wire (track names, frame shapes) | `doc/concept/stats.md` |
-| `rs/moq-relay` config/behavior | `doc/bin/relay/` |
-| `rs/moq-cli` | `doc/bin/cli.md` |
-| `rs/moq-gst` | `doc/bin/gstreamer.md` |
-| `rs/moq-c` C ABI (`moq.h`) | `doc/lib/c` |
-| `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
-| a kramdown-rfc construct new to `drafts/` | `doc/.vitepress/drafts.ts`, which translates the drafts into `/draft/` site pages |
-
-Any wire-format change updates its matching IETF draft in the same PR, including framing, message fields, enum values, and version negotiation. Use the feature-specific draft for extensions and validate with `just drafts check`. See `drafts/AGENTS.md`.
-
-For wire, `moq-ffi`, or gateway changes, also run `just test interop --all` for cross-language interop; plain `interop` is Rust-only.
-
-When a CLI interface changes, search the whole repo for the binary name and update every example invocation, including docs and demo recipes. Check examples against `--help`.
+`moq-ffi` powers every SDK except Rust and JS. Keep all languages and wrappers at the same functionality.
+A Rust change with a JS counterpart updates both in the same PR: `moq-net` and `js/net`, `hang` and `js/hang`, `moq-auth` and `js/auth`.
+A wire-format change updates its matching draft in the same PR: framing, fields, enum values, and version negotiation.
+Wire, `moq-ffi`, or gateway changes also run `just test interop --all`; plain `interop` is Rust-only.

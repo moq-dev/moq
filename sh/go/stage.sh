@@ -57,14 +57,13 @@ command -v cargo >/dev/null 2>&1 || {
 }
 command -v uniffi-bindgen-go >/dev/null 2>&1 || {
     echo "go stage: uniffi-bindgen-go not on PATH" >&2
-    echo "  install: cargo install uniffi-bindgen-go --git https://github.com/kixelated/uniffi-bindgen-go --rev v0.10.0-kixelated.1+v0.32.0 --locked" >&2
+    echo "  install: cargo install uniffi-bindgen-go --git https://github.com/kixelated/uniffi-bindgen-go --rev v0.10.0-kixelated.2+v0.32.0 --locked" >&2
     exit 1
 }
 
 HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
 # Debug by default. This is a compile-and-test gate, not a benchmark, and a
-# release build of moq-ffi shares no artifacts with the debug ones `just ci check`
-# and `just ci test` already produce, so it was a third full compile of the
+# release build of moq-ffi shares no artifacts with the debug ones `just ci` already produces, so it was a third full compile of the
 # dependency tree (~5 min of CI on its own, plus a whole target/release tree on
 # a runner that was already tight on disk). Set MOQ_FFI_PROFILE=release for an
 # optimized cdylib; the shipped artifacts are built by rs/moq-ffi/build.sh,
@@ -76,8 +75,11 @@ CARGO_PROFILE=()
 [[ "$PROFILE" == "release" ]] && CARGO_PROFILE=(--release)
 
 echo "go stage: building moq-ffi for $HOST_TARGET..." >&2
-cargo build --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi \
-    --manifest-path "$WORKSPACE_DIR/Cargo.toml" >&2
+# The shared default build (.cargo/config.toml), whose `openh264` the tests rely on.
+# Cargo resolves the alias, and a relative CARGO_TARGET_DIR, from the working
+# directory, so the build and the metadata below both run in the workspace.
+cd "$WORKSPACE_DIR"
+cargo build-ffi ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} >&2
 
 TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps |
     sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')

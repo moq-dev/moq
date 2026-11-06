@@ -36,12 +36,6 @@ function sizeOf(buf: Uint8Array, size: (first: number) => number): number {
 	return n;
 }
 
-/** Number of bytes needed to encode a value in the leading-ones varint format. */
-export function sizeLeadingOnes(v: number | bigint): number {
-	const lo = split(v);
-	return lengthLeadingOnes(parts.hi, lo);
-}
-
 /** Encode a value in leading-ones varint format into the provided buffer, returning the written subarray. */
 export function encodeLeadingOnesTo(dst: ArrayBuffer, v: number | bigint): Uint8Array {
 	const lo = split(v);

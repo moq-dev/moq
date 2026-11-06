@@ -7,8 +7,7 @@
 /// The deprecated spellings a config was parsed from, each paired with its
 /// replacement.
 ///
-/// Collect one per config section ([`crate::connect::Config::deprecated`] and its
-/// siblings), and refuse to start when it is non-empty: the [`std::fmt::Display`]
+/// Collect one per config section and refuse to start when it is non-empty: the [`std::fmt::Display`]
 /// is the migration to print. Honoring the old spelling instead is what this
 /// replaced, because a warning that scrolls past leaves a process running on
 /// settings it silently dropped.
@@ -23,8 +22,16 @@ impl Deprecated {
 	}
 
 	/// Fold another section's findings in, so one message covers the whole config.
+	///
+	/// A finding already present is kept once: without a file, [`crate::cli::Merge`]
+	/// hands back `parsed` as-is, so collecting from both it and the result sees
+	/// the same hidden fields twice.
 	pub fn extend(&mut self, other: Deprecated) {
-		self.0.extend(other.0);
+		for item in other.0 {
+			if !self.0.contains(&item) {
+				self.0.push(item);
+			}
+		}
 	}
 
 	/// Record one released flag and the flag that replaced it.
@@ -44,6 +51,12 @@ impl Deprecated {
 	/// a note saying how it differs.
 	pub fn changed(&mut self, old: &str, env: Option<&str>, new: &str, note: &str) {
 		self.entry(&Self::spelling(old, env), new, Some(note));
+	}
+
+	/// Record a released flag that was removed without a replacement, with a note saying
+	/// what covers it now.
+	pub fn removed(&mut self, old: &str, env: Option<&str>, note: &str) {
+		self.entry(&Self::spelling(old, env), "removed", Some(note));
 	}
 
 	/// Record a released config-file key or table, which has no environment variable.
@@ -70,7 +83,7 @@ impl std::fmt::Display for Deprecated {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		write!(
 			f,
-			"these settings were renamed and are no longer applied; update them and try again:"
+			"these settings were renamed or removed and are no longer applied; update them and try again:"
 		)?;
 		for entry in &self.0 {
 			write!(f, "\n  {entry}")?;

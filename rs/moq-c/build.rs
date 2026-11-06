@@ -17,6 +17,7 @@ const ENUMS: &[&str] = &[
 	"moq_error_scope",
 	"moq_protocol_kind",
 	"moq_demand",
+	"moq_decode_start",
 ];
 
 fn main() {
