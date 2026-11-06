@@ -1154,7 +1154,9 @@ mod tests {
 	}
 
 	/// Clock fixtures: the real capture loop, fed by a synthetic camera against a pinned
-	/// broadcast clock, graded on the timestamps a subscriber reads back.
+	/// broadcast clock, graded on the timestamps a subscriber reads back. The fixture installs a
+	/// manual clock, since paused tokio time would skip ahead while the encoder thread works:
+	/// time passes only where a test advances it, so a slow runner moves nothing.
 	///
 	/// Each expectation is the acquisition instant measured on the broadcast clock. The loop
 	/// samples the broadcast clock and then the camera's timeline when it opens a camera, so a
@@ -1189,6 +1191,7 @@ mod tests {
 		}
 
 		struct Fixture {
+			time: kio::clock::Installed,
 			epoch: Instant,
 			clock: moq_mux::Clock,
 			catalog: moq_mux::catalog::Producer,
@@ -1202,6 +1205,8 @@ mod tests {
 		impl Fixture {
 			/// Start the capture loop on a broadcast whose clock began `behind` ago, at `wall`.
 			async fn start(behind: Duration, wall: Wall) -> Self {
+				let time = kio::clock::Manual::new().install(&tokio::runtime::Handle::current());
+				time.advance(behind).unwrap();
 				let epoch = kio::clock::now()
 					.checked_sub(behind)
 					.expect("a monotonic clock that far back");
@@ -1248,6 +1253,7 @@ mod tests {
 				});
 
 				Self {
+					time,
 					epoch,
 					clock,
 					catalog,
@@ -1364,7 +1370,7 @@ mod tests {
 
 					let captured = Instant::now();
 					// Delivered well after acquisition: dequeue time must not leak into the timestamp.
-					kio::clock::sleep(Duration::from_millis(50)).await;
+					fixture.time.advance(Duration::from_millis(50)).unwrap();
 					camera.push_at(surface(), captured);
 					let published = read(&mut track).await;
 
@@ -1440,19 +1446,20 @@ mod tests {
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
 
-					// The device numbers from zero, and real time keeps pace with it.
+					// The device numbers from zero, and the clock keeps pace with it.
 					camera.push_native(surface(), us(0));
 					let first = read(&mut track).await;
-					kio::clock::sleep(Duration::from_millis(40)).await;
+					fixture.time.advance(Duration::from_millis(40)).unwrap();
 					camera.push_native(surface(), us(40_000));
 					let second = read(&mut track).await;
 					assert_eq!(second - first, 40_000, "the device's spacing survives");
 
-					// The device restarts its clock without the stream ending.
+					// A period later, the device restarts its clock without the stream ending.
+					fixture.time.advance(Duration::from_millis(40)).unwrap();
 					camera.push_native(surface(), us(0));
 					let restarted = read(&mut track).await;
 					assert!(restarted >= second, "{restarted}us rewound behind {second}us");
-					kio::clock::sleep(Duration::from_millis(40)).await;
+					fixture.time.advance(Duration::from_millis(40)).unwrap();
 					camera.push_native(surface(), us(40_000));
 					let resumed = read(&mut track).await;
 					assert_eq!(resumed - restarted, 40_000, "the device's spacing resumes");
@@ -1473,7 +1480,7 @@ mod tests {
 		}
 
 		/// Releasing the camera while nobody watches keeps the broadcast clock running: the
-		/// frame after a resume lands after the real idle gap, at its own acquisition.
+		/// frame after a resume lands after the idle gap, at its own acquisition.
 		#[tokio::test]
 		async fn a_restart_after_idle_keeps_the_gap() {
 			tokio::task::LocalSet::new()
@@ -1488,9 +1495,13 @@ mod tests {
 					let before = read(&mut track).await;
 					fixture.assert_acquired(before, captured);
 					drop(track);
+					// The loop releases the camera before the idle gap starts.
+					while !camera.released() {
+						tokio::task::yield_now().await;
+					}
 					drop(camera);
 
-					kio::clock::sleep(idle).await;
+					fixture.time.advance(idle).unwrap();
 
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
@@ -1532,6 +1543,8 @@ mod tests {
 
 					// The device goes away and comes back in a mode four times the size.
 					camera.close();
+					// Reopening takes the device a while, so its first frame is newer than the last.
+					fixture.time.advance(Duration::from_millis(40)).unwrap();
 					let camera = fixture.camera_sized(640, 480);
 					camera.push_native(surface_sized(640, 480), us(40_000));
 					// The probed track ends without the reopened camera's frames.
@@ -1553,6 +1566,8 @@ mod tests {
 						.unwrap()
 						.clone();
 					assert_eq!(name, format!("{probed}/1"));
+					// Another reopen, another while.
+					fixture.time.advance(Duration::from_millis(40)).unwrap();
 					let camera = fixture.camera_sized(640, 480);
 					camera.push_native(surface_sized(640, 480), us(80_000));
 					let first = read(&mut moved).await;

@@ -283,6 +283,8 @@ futures = { workspace = true }
 libc = { workspace = true }
 # Driving `encode::Sink` from a plain test thread, the way an FFI caller does.
 pollster = { workspace = true }
+# `Manual::install`, a clock the capture-loop tests move while the encoder thread works.
+kio = { path = "../kio", features = ["manual"] }
 # `start_paused`, so the capture driver tests run on mocked time.
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }
