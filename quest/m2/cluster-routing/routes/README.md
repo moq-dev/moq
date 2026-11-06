@@ -534,6 +534,7 @@ benchmarks.
 - [Route session integration](/quest/m2/cluster-routing/routes/session.md) - one router per origin node drives the origin and every lite-07 announce stream
 - [Announcement availability](/quest/m2/cluster-routing/routes/availability.md) - announcements report availability, and a let-go is offline rather than END, in Rust and JS
 - [js/net route layer](/quest/m2/cluster-routing/routes/js.md) - `js/net` encodes, decodes, and resolves the route layer
+- [Browser tabs prove their route key](/quest/m2/cluster-routing/routes/browser-proof.md) - current Firefox and Chromium tabs open lite-07 sessions with a route-key proof the relay verifies, checked nightly
 - [Route layer acceptance](/quest/m2/cluster-routing/routes/acceptance.md) - forwarding fixtures ported and the model deleted, incident fixtures, end-to-end checks, and benchmarks
 
 ## Related
