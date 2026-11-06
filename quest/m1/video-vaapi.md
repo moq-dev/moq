@@ -1,4 +1,4 @@
-# [L] VAAPI encode and decode
+# [S] VAAPI encode and decode
 
 ## Goal
 
@@ -9,56 +9,28 @@ surfaces.
 
 ## Plan
 
-Decided in the 2026-09-30 audit: moved from m4, and the "gated on a
-`moq-dev/vaapi` release" blocker is gone. That crate is our own repo (last
-release 0.1.1 on 2026-11-04), so this quest includes the crate work (HEVC
-encode, H.265 decode, pre-generated bindings, the resize pool) and cutting the
-release, then bumping the workspace requirement here. The resize-pool quest
-folds in for the same reason.
+The crate work is in four moq-dev/vaapi PRs:
 
-**Decode.** The H.264 decoder landed (`decode/backend/vaapi.rs`; the workspace pins moq-vaapi 0.1.1),
-with the default `decode::Config::output` of `Output::Native` handing out
-DMA-BUF surfaces the renderer imports without a download. H.265 decode is still missing, so a Linux box
-without NVDEC has no hardware path for it.
+- [moq-dev/vaapi#8](https://github.com/moq-dev/vaapi/pull/8): checked-in libva bindings, so no build script and no libclang.
+- [moq-dev/vaapi#9](https://github.com/moq-dev/vaapi/pull/9): `Processor::resize` into output surfaces pooled per size.
+- [moq-dev/vaapi#10](https://github.com/moq-dev/vaapi/pull/10): H.265 Main encode beside H.264.
+- [moq-dev/vaapi#11](https://github.com/moq-dev/vaapi/pull/11): H.265 Main decode beside H.264, stacked on #9.
 
-**The encoder.** H.264 is done. `moq-vaapi` imports DMA-BUFs and scales and
-converts them through VPP (`dmabuf`, `vpp`, `Encoder::encode_dmabuf`,
-`Encoder::set_bitrate`); `encode/backend/vaapi.rs` encodes a `Surface::DmaBuf`
-without a download, and `Surface::resize` scales one through VPP. Validated on
-Intel Meteor Lake. `just rs gpu` also runs the ignored
-`vaapi_1080p_ladder_stays_on_the_gpu` proof on Intel: 1080p decode to DMA-BUFs,
-VPP to 720p/480p/360p, GPU encode of every frame, and decoded output sizes and
-counts. What is left is H.265, below.
+The moq side is on this quest's branch: `vaapi` on by default in moq-video,
+moq-transcode, and moq-cli, H.265 encode and decode in moq-video's VAAPI
+backends, `Surface::resize` through the pool, and no bindgen hook in moq-c's
+Nix build.
 
-**H.265.** The VAAPI backend advertises H.264 only. `moq-vaapi` 0.1.1 vendors
-the HEVC buffer types (`src/buffer/hevc.rs`) but its `Encoder` is hardcoded to
-`VAProfileH264Main` (with `VAEntrypointEncSlice`, or the low-power entrypoint
-where that is all a device has), so exposing an HEVC encoder is a
-change to that crate, not a flag here.
+What remains is the release and the bump. The four PRs together break the
+crate's API (`encode::probe` and `decode::probe` take a codec, both `Config`s
+gain a `codec` field, and `Processor::process` goes private), so the release is
+0.2.0. Then bump `moq-vaapi` in the workspace `Cargo.toml` and `Cargo.lock` on
+this quest's branch and rerun its checks; until then the branch does not build
+against 0.1.1.
 
-**Build cost.** `moq-vaapi` dlopens libva (no `DT_NEEDED`), so a
-libva-less host starts and `backend::open` falls through to the next encoder.
-What remains is the build side: its build script runs bindgen over the
-vendored libva headers, so every consumer needs libclang on the build host.
-That is why `vaapi` is off by default while `nvidia` is on. Commit the
-generated bindings to the crate and drop the build script and the bindgen
-dependency, as `moq-nvenc` does: the output is portable (layout tests off,
-fixed-width types, `c_char` left symbolic), so one checked-in file serves
-every Linux target, as `moq-v4l` already does for `videodev2.h`. Then the
-feature can return to default-on here.
+## Waiting
 
-**Resize pool.** moq-vaapi's `Processor` allocates the blit output with
-`ExportedFrame::from_surface` on every resize. Keep one surface per output
-size; when the exported frame drops, the surface returns for the next blit of
-that size. A frame the consumer still holds is not overwritten; the processor
-allocates another. Keep at most one free surface per size and destroy any
-returned past that, the decoder pool's rule. `Surface::resize` stays the same
-call. The reuse test belongs in moq-vaapi; here, confirm a resize still returns
-an NV12 DMA-BUF.
-
-Note what is already fine: a host with libva present but no usable VA driver
-already falls back cleanly, since `Encoder::new` returns `Err` and
-`backend::open` drops to openh264.
+- Maintainer: merge moq-dev/vaapi#8 through #11 and publish the moq-vaapi release, since agents do not cut releases. Check with `cargo search moq-vaapi`.
 
 ## Related
 

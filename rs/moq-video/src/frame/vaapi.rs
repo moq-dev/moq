@@ -13,7 +13,8 @@
 //! surface is exported as a new DMA-BUF, which the VAAPI encoder then imports
 //! in turn. A simulcast publisher resizing one captured frame into several
 //! renditions pays one blit per rendition instead of a download and a CPU
-//! scale each.
+//! scale each, and no allocation once the first frame of each size has been
+//! let go: its surface is the next one written at that size.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -24,7 +25,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use moq_vaapi::decode::ExportedFrame;
 use moq_vaapi::dmabuf::{DmaBuf as VaapiDmaBuf, Plane};
 use moq_vaapi::vpp::Processor;
-use moq_vaapi::{Matrix, VA_FOURCC_NV12};
+use moq_vaapi::{Codec, Matrix};
 
 use super::{DmaBuf, DmaBufExport, DmaBufFrame, DmaBufLayout, DmaBufPlane, DrmFormat, I420};
 use crate::color::{self, Color};
@@ -55,8 +56,8 @@ pub(crate) fn device() -> Option<&'static Path> {
 			}
 			let node = moq_vaapi::DrmDeviceIterator::default().find(|node| {
 				moq_vaapi::Display::open_drm_display(node).is_ok_and(|display| {
-					moq_vaapi::encode::probe(&display).is_ok()
-						&& moq_vaapi::decode::probe(&display).is_ok()
+					moq_vaapi::encode::probe(&display, Codec::H264).is_ok()
+						&& moq_vaapi::decode::probe(&display, Codec::H264).is_ok()
 						&& moq_vaapi::vpp::probe(&display).is_ok()
 				})
 			});
@@ -188,22 +189,16 @@ pub(crate) fn resize(buffer: &DmaBuf, size: Size) -> Result<DmaBuf, Error> {
 			.as_ref()
 			.map_err(|e| Error::Unsupported(format!("no VA-API video processor: {e}")))?;
 		let (descriptor, lease) = import(buffer)?;
-		let processed = processor.import(descriptor).and_then(|input| {
-			processor.process(
-				&input,
-				VA_FOURCC_NV12,
-				(size.width, size.height),
-				input_space,
-				output_space,
-			)
-		});
+		// Into a surface the processor recycles once the frame drops.
+		let resized = processor
+			.import(descriptor)
+			.and_then(|input| processor.resize(&input, (size.width, size.height), input_space, output_space));
 		// The blit has synced, so the producer's buffer is free to go back.
 		drop(lease);
-		let output = processed.map_err(|e| {
+		resized.map_err(|e| {
 			REFUSED.with(|refused| refused.borrow_mut().insert(key));
 			Error::Codec(e.context("scale a DMA-BUF with the VA-API video processor"))
-		})?;
-		ExportedFrame::from_surface(output, 0).map_err(Error::Codec)
+		})
 	})?;
 	adopt(exported, label).map_err(Error::Codec)
 }
@@ -337,8 +332,8 @@ mod tests {
 			return;
 		};
 		let display = moq_vaapi::Display::open_drm_display(node).expect("reopen the shared node");
-		moq_vaapi::encode::probe(&display).expect("the shared node encodes H.264");
-		moq_vaapi::decode::probe(&display).expect("the shared node decodes H.264");
+		moq_vaapi::encode::probe(&display, Codec::H264).expect("the shared node encodes H.264");
+		moq_vaapi::decode::probe(&display, Codec::H264).expect("the shared node decodes H.264");
 		moq_vaapi::vpp::probe(&display).expect("the shared node scales");
 	}
 }

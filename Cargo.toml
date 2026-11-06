@@ -155,8 +155,8 @@ moq-tokio = { version = "0.19.23", path = "rs/moq-tokio", default-features = fal
 # Default features off on moq-transcode and moq-video so each workspace consumer
 # chooses native codecs and rendering explicitly. OpenH264 is opt-in everywhere:
 # each consumer forwards an `openh264` feature that release builds turn on.
-# VAAPI is opt-in everywhere; its decoder is hardware-validated, while its
-# encoder is not yet.
+# NVIDIA and VAAPI dlopen their drivers and need nothing on the build host, so
+# the consumers that build video turn both on.
 moq-transcode = { version = "0.1.10", path = "rs/moq-transcode", default-features = false }
 # default-features off (the `quic` backend) so the consumer opts into the QUIC
 # stack the io_uring path compiles; cargo features are additive, so a default-on
