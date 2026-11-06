@@ -334,6 +334,25 @@ def test_a_new_session_of_the_same_driver_is_a_new_driver(monkeypatch: pytest.Mo
     asyncio.run(serving(scenario, monkeypatch))
 
 
+def test_a_second_session_under_an_open_driver_and_session_id_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario(endpoint: Endpoint, drivers, commands: asyncio.Queue, gate: Drive) -> None:
+        first = endpoint.dial("driver-abc", "s1")
+        first.send(DRIVE)
+        await next_command(commands, gate)
+
+        copy = endpoint.dial("driver-abc", "s1")
+        copy.send({**DRIVE, "throttle": 1.0})
+        first.send({**DRIVE, "sequence": 2})
+        command = await next_command(commands, gate)
+        assert command.sequence == 2
+        assert copy.finished
+        assert commands.empty()
+        drivers.reply(command, {"sequence": 2})
+        assert first.replies == [{"sequence": 2}]
+
+    asyncio.run(serving(scenario, monkeypatch))
+
+
 def test_a_forged_dial_never_reaches_the_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario(endpoint: Endpoint, drivers, commands: asyncio.Queue, gate: Drive) -> None:
         endpoint.dial("driver-forged", None)
@@ -381,14 +400,18 @@ def test_replies_reach_only_their_own_open_session(monkeypatch: pytest.MonkeyPat
         await next_command(commands, gate)
         await next_command(commands, gate)
 
-        drivers.reply("s1", {"sequence": 1})
+        drivers.reply(Command(kind="drive", driver_id="driver-abc", session="s1"), {"sequence": 1})
+        assert first.replies == [{"sequence": 1}]
+        assert second.replies == []
+        # A session id is the dialer's pick, so only the pair names a session.
+        drivers.reply(Command(kind="drive", driver_id="driver-def", session="s1"), {"sequence": 9})
         assert first.replies == [{"sequence": 1}]
         assert second.replies == []
 
         first.end()
         await next_command(commands, gate)
         # The pump releasing the lease may race a reply to the gone session.
-        drivers.reply("s1", {"sequence": 2})
+        drivers.reply(Command(kind="drive", driver_id="driver-abc", session="s1"), {"sequence": 2})
         assert first.replies == [{"sequence": 1}]
 
     asyncio.run(serving(scenario, monkeypatch))

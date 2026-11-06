@@ -315,20 +315,23 @@ class Drivers:
     def __init__(self, truck: str, commands: asyncio.Queue[Command]) -> None:
         self._truck = truck
         self._commands = commands
-        self._replies: dict[str, moq.TrackProducer] = {}
+        # Keyed like the lease, by driver and session, since a dialer picks its own session id.
+        self._replies: dict[tuple[str, str], moq.TrackProducer] = {}
 
     @property
     def path(self) -> str:
         """Where the truck's endpoint is announced."""
         return f"{SOCKET_PREFIX}/.socket/{self._truck}"
 
-    def reply(self, session: str, message: dict[str, Any]) -> None:
-        """Send `message` on `session`, if it is still open.
+    def reply(self, command: Command, message: dict[str, Any]) -> None:
+        """Send `message` on the session that carried `command`, if it is still open.
 
         A session that has just ended is not an error: its pump is already on
         its way to releasing the lease.
         """
-        producer = self._replies.get(session)
+        if command.session is None:
+            return
+        producer = self._replies.get((command.driver_id, command.session))
         if producer is None:
             return
         try:
@@ -369,8 +372,14 @@ class Drivers:
             return
 
         session = stream.session
+        key = (driver, session)
+        if key in self._replies:
+            # It would share the open session's lease and replies; refuse it.
+            log.info("driver %s dialed a session id it already has open", driver)
+            stream.producer.finish()
+            return
         stream.consumer.update(moq.Subscription(delay=moq.Delay(max=CONTROL_DELAY), order=moq.Order.ASCENDING))
-        self._replies[session] = stream.producer
+        self._replies[key] = stream.producer
         log.info("driver %s connected", driver)
         try:
             while (frame := await stream.consumer.read_frame()) is not None:
@@ -380,7 +389,7 @@ class Drivers:
         except moq.Error as err:  # pyright: ignore[reportGeneralTypeIssues]
             log.info("driver %s session ended: %s", driver, err)
         finally:
-            del self._replies[session]
+            del self._replies[key]
             # Closes this side too; a session the peer reset has nothing left to close.
             with contextlib.suppress(moq.Error):  # pyright: ignore[reportGeneralTypeIssues]
                 stream.producer.finish()

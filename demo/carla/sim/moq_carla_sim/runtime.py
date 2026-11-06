@@ -198,10 +198,9 @@ class TruckSession:
             # never disagree about what was accepted.
             self._actuate()
             self._publish()
-            if acknowledged and command.session is not None:
+            if acknowledged:
                 self._drivers.reply(
-                    command.session,
-                    {"sequence": command.sequence, "media_pipeline": latency_breakdown(command.timestamps)},
+                    command, {"sequence": command.sequence, "media_pipeline": latency_breakdown(command.timestamps)}
                 )
 
     async def _report_video(self) -> None:

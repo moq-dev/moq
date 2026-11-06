@@ -31,8 +31,8 @@ class Replies:
     def __init__(self) -> None:
         self.sent: list[tuple[str, dict]] = []
 
-    def reply(self, session: str, message: dict) -> None:
-        self.sent.append((session, message))
+    def reply(self, command: Command, message: dict) -> None:
+        self.sent.append((command.session, message))
 
 
 class DemandPublisher:
