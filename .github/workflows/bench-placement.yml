@@ -2,7 +2,7 @@ name: Bench placement
 
 # Temporary experiment for quest/m1/bench-ci.md, removed before the PR is ready:
 # A/A runs of paired Nightly groups on the Nightly's hosted ARM runner, without
-# dispatching Nightly, recording whether each target's two builds are byte-identical.
+# dispatching Nightly, against main before this PR, recording which targets build byte-identical.
 
 permissions:
   contents: read
@@ -43,7 +43,7 @@ jobs:
         id: workload
         run: nix develop --command just gh nightly ${{ matrix.group }}
         env:
-          BENCH_BASE: HEAD
+          BENCH_BASE: 0672ad56ce
 
       - name: Compare builds
         if: ${{ !cancelled() }}

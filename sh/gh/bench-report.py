@@ -379,6 +379,7 @@ PAIRED_SECTIONS = [
     ({"unconfirmed", "noise"}, "Slower in the screen, not confirmed", False),
     ({"new", "removed"}, "Measured on one side only", False),
     ({"unchanged"}, "Unchanged", False),
+    ({"identical"}, "Same build on both sides, not compared", False),
 ]
 
 
