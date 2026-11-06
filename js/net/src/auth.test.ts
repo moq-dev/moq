@@ -1,5 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import type { Getter } from "@moq/signals";
 import { Duplicate, type Grant, Handle, type Issued, type Request, type Requests, Unsupported } from "./auth.ts";
 import { accept as acceptSession, connect as connectSession, type Established } from "./connection/index.ts";
@@ -17,7 +18,6 @@ import { Stream, Writer } from "./stream.ts";
 import { abandoned } from "./util/demand.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
-import { hostTime } from "@moq/clock/test";
 
 const url = new URL("https://localhost:4443/test");
 

@@ -1,5 +1,6 @@
 import { afterEach, expect, mock, onTestFinished, spyOn, test } from "bun:test";
 import { Instant, Manual, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import type { Getter } from "@moq/signals";
 import type * as Announce from "./announced.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
@@ -31,7 +32,6 @@ import type { Position, Producer as TrackProducer } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
-import { hostTime } from "@moq/clock/test";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
 	const broadcastRoute = origin.route(path);

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { Milli, Nano, sleep } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { SessionCode, StreamCode, StreamError } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -13,7 +14,6 @@ import { RequestOk } from "./request.ts";
 import { NativeSession } from "./session.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry } from "./subscribe_namespace.ts";
 import { ALPN, Version } from "./version.ts";
-import { hostTime } from "@moq/clock/test";
 
 // GOAWAY rides the setup stream, with the peer's deadline, and on draft-18 a Request ID. The
 // session keeps serving afterwards so its groups in flight finish while the caller migrates.

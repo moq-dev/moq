@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import Qmux from "@moq/qmux";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
@@ -37,7 +38,6 @@ import {
 	Version,
 	versionName,
 } from "./version.ts";
-import { hostTime } from "@moq/clock/test";
 
 /** A transport whose `getStats` behaves as described, or is absent entirely. */
 function transport(getStats?: () => Promise<unknown>): WebTransport {

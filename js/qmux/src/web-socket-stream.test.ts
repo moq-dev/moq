@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { Instant, Milli, Nano, now, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import {
 	openWebSocketStream,
 	type WebSocketConstructor,
 	type WebSocketLike,
 	WebSocketStream,
 } from "./web-socket-stream.ts";
-import { hostTime } from "@moq/clock/test";
 
 /** A scriptable WebSocket stand-in implementing the bits the ponyfill uses. */
 class FakeWebSocket implements WebSocketLike {

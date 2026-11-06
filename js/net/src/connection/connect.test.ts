@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import Qmux, { selectSubprotocol, type WebSocketLike } from "@moq/qmux";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
@@ -9,7 +10,6 @@ import { createMockTransportPair } from "../mock.ts";
 import { Stream } from "../stream.ts";
 import { accept } from "./accept.ts";
 import { type ConnectProps, connect as connectSession } from "./connect.ts";
-import { hostTime } from "@moq/clock/test";
 
 const url = new URL("https://example.com/test");
 
@@ -228,7 +228,7 @@ test("an http:// fingerprint of the wrong length or status is refused", async ()
 });
 
 test("aborting connect aborts a pending http:// fingerprint fetch", async () => {
-	hostTime();
+	hostTime(); // a real HTTP server
 	// Answer nothing, so only the abort ends the request.
 	const server = fingerprintServer(() => new Promise<Response>(() => {}));
 	const original = globalThis.WebTransport;

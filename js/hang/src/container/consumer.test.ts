@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { Manual, type Micro, Milli, Nano, sleep } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Format as LocFormat } from "@moq/loc";
 import { type Group, Error as NetError, SessionCode, StreamCode, Time, Track, Varint } from "@moq/net";
 import { decodeInitSegment, type InitSegment } from "../cmaf/decode.ts";
@@ -9,7 +10,6 @@ import { Consumer, type Read } from "./consumer.ts";
 import type { Format as ContainerFormat } from "./format.ts";
 import { Format as LegacyFormat, Producer as LegacyProducer } from "./legacy.ts";
 import type { Frame } from "./types.ts";
-import { hostTime } from "@moq/clock/test";
 
 const FIXTURES = JSON.parse(readFileSync(new URL("../cmaf/fixtures.json", import.meta.url), "utf8"));
 function fragment(name: string): Uint8Array {

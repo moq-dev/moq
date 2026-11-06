@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Milli, Nano, sleep, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { accept, connect } from "../connection/index.ts";
 import { ProtocolViolation, SessionCode } from "../error.ts";
 import { createMockTransportPair, type MockTransport } from "../mock.ts";
@@ -12,7 +13,6 @@ import { wireOf } from "../wire.ts";
 import { Connection } from "./connection.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
-import { hostTime } from "@moq/clock/test";
 
 const ALL: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22];
 

@@ -3,6 +3,7 @@
 
 import { describe, expect, spyOn, test } from "bun:test";
 import { Elapsed, Milli, Nano, timeout } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { SessionCode } from "../error.ts";
 import { randomHop } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -19,7 +20,6 @@ import { encodeSubscribeResponse, Subscribe, SubscribeStart } from "./subscribe.
 import { Subscriber } from "./subscriber.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { ALPN_05, Version } from "./version.ts";
-import { hostTime } from "@moq/clock/test";
 
 /** Whether `promise` settles within `ms`. */
 async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {

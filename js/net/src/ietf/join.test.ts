@@ -1,5 +1,6 @@
 import { expect, jest, onTestFinished, test } from "bun:test";
 import { Elapsed, Instant, Manual, Milli, Nano, now, timeout } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import * as Connection from "../connection/index.ts";
 import { StreamCode } from "../error.ts";
 import { hooks } from "../internal.ts";
@@ -22,7 +23,6 @@ import { NativeSession } from "./session.ts";
 import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { ALPN, type IetfVersion, Version, versionName } from "./version.ts";
-import { hostTime } from "@moq/clock/test";
 
 const VERSIONS = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const;
 const VERSION = Version.DRAFT_18;

@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep, Wall, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { race } from "@moq/signals";
 import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
@@ -9,7 +10,6 @@ import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import { authoredInfo, infoDefaults, rescale, Subscription, Producer as TrackProducer } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
-import { hostTime } from "@moq/clock/test";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();

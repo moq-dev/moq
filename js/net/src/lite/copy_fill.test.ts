@@ -3,6 +3,7 @@
 // rule, and inside the copy, once it evicted what it received.
 import { expect, test } from "bun:test";
 import { Elapsed, Manual, Milli, Nano, sleep, timeout } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { hooks } from "../internal.ts";
@@ -14,7 +15,6 @@ import { Timescale, Timestamp } from "../time.ts";
 import type { Fill, Producer, Subscriber, Subscription } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import * as Lite from "./index.ts";
-import { hostTime } from "@moq/clock/test";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();

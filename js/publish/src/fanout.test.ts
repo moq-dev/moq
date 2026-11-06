@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { Milli, Nano, sleep } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Effect } from "@moq/signals";
 import { Fanout } from "./fanout";
-import { hostTime } from "@moq/clock/test";
 
 // A stream we can feed by hand, so a test controls exactly when values arrive.
 function pushable<T>(): { stream: ReadableStream<T>; push: (value: T) => void; close: () => void } {

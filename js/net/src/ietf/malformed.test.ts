@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Milli, Nano, sleep } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { offered } from "../connection/extensions.ts";
 import { exchangeSetup } from "../connection/handshake.ts";
 import { ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
@@ -16,7 +17,6 @@ import { SetupOption, SetupOptions } from "./setup_options.ts";
 import { SubscribeOk } from "./subscribe.ts";
 import { SUBSCRIBE_TRACKS_ID, SubscribeNamespace } from "./subscribe_namespace.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
-import { hostTime } from "@moq/clock/test";
 
 // Malformed control input the draft says ends the session must end it, with the draft's code.
 

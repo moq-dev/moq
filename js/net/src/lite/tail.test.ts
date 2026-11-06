@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Elapsed, Manual, Milli, Nano, sleep, timeout } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { randomHop } from "../hop.ts";
@@ -24,7 +25,6 @@ import {
 import { Subscriber } from "./subscriber.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { ALPN_05, hasRanges, resolvesStart, Version } from "./version.ts";
-import { hostTime } from "@moq/clock/test";
 
 // The subscription's max delay, which is also how long it waits for a group that never arrives.
 const GRACE = Milli(100);

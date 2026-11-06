@@ -1,5 +1,6 @@
 import { expect, mock, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { Reader, Stream } from "../stream.ts";
 import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
@@ -8,7 +9,6 @@ import { RequestError } from "./request.ts";
 import { namespaceUpdate, nextMessage, RequestStream, refuse } from "./request_stream.ts";
 import type { Session } from "./session.ts";
 import { type IetfVersion, Version, versionName } from "./version.ts";
-import { hostTime } from "@moq/clock/test";
 
 /**
  * A request stream the peer wrote `bytes` on, then optionally ended once they were read,

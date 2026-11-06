@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { Milli, Nano, sleep } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { hooks } from "../../../net/src/internal.ts";
 import { Consumer } from "./consumer.ts";
 import { Encoder } from "./encoder.ts";
 import { Producer } from "./producer.ts";
-import { hostTime } from "@moq/clock/test";
 
 type Value = Record<string, unknown>;
 

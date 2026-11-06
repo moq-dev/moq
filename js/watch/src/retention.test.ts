@@ -1,12 +1,12 @@
 import { expect, spyOn, test } from "bun:test";
 import { type Micro, Milli, Nano, now, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Container } from "@moq/hang";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Derived, Effect, Signal } from "@moq/signals";
 import { nextMedia, subscribeMedia } from "./media";
 import { Sync } from "./sync";
-import { hostTime } from "@moq/clock/test";
 
 // These count what is still attached rather than the heap: `Bun.gc` scans the stack conservatively,
 // so a stale pointer can pin thousands of dead cells and fail a heap count under load.

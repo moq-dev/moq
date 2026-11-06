@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
 import { accept, connect } from "../connection/index.ts";
 import { createMockTransportPair, type MockTransport } from "../mock.ts";
@@ -10,7 +11,6 @@ import { Timescale, Timestamp } from "../time.ts";
 import { Budget } from "../util/yield.ts";
 import { wireOf } from "../wire.ts";
 import { ALPN_04, ALPN_05, ALPN_06, ALPN_07_WIP } from "./version.ts";
-import { hostTime } from "@moq/clock/test";
 
 const url = new URL("https://localhost/datagrams");
 const path = Path.from("live");

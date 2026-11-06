@@ -25,8 +25,13 @@ one each in `auth`, `connection/connect`, `connection/reload`,
 [test-flakes-2](/quest/m0/test-flakes-2/copy-fill-idle.md); this quest
 converts the file's other cases.
 
+The guard's bare `hostTime();` opt-outs are the tests it saw a real timer
+fire in, by file: `lite/publisher` 26, `integration` 15, `ietf/publisher` 9,
+`connection/reload` 8, `lite/track_stream` 6, `ietf/malformed` 5,
+`lite/datagram-tracks` 4, `ietf/join` 4, `ietf/datagram` 4, `lite/tail` 3,
+`ietf/goaway` 3, `connection/connect` 2, `ietf/subscriber` 2, and one each in
+`track`, `lite/copy_fill`, `lite/connection`, `ietf/request_stream`, and
+`auth`. The scan above also counts waits whose timer rarely fires, so convert
+both; `git grep -n "hostTime();$" -- js/net` lists what remains.
+
 Public API: none. Wire: none.
-
-## Required
-
-- [JS tests fail when a real timer fires](/quest/m0/clock-guard/js.md) - `@moq/clock` fails a test whose real-clock timer fires, with today's offenders opted out

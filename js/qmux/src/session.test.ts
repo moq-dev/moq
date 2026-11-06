@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { type Installed, Instant, Manual, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { SessionError, StreamError } from "./error.ts";
 import * as Frame from "./frame.ts";
 import { DEFAULT_MAX_RECORD_SIZE, type TransportParams } from "./frame.ts";
@@ -8,7 +9,6 @@ import Session, { type Config } from "./session.ts";
 import * as Stream from "./stream.ts";
 import { VarInt } from "./varint.ts";
 import type { WebSocketLike, WebSocketStreamLike } from "./web-socket-stream.ts";
-import { hostTime } from "@moq/clock/test";
 
 // A scripted peer standing in for the `WebSocketStream` transport. The test
 // plays the remote end: it injects frames into the Session's readable and

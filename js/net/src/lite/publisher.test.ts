@@ -1,5 +1,6 @@
 import { expect, mock, spyOn, test } from "bun:test";
 import { Elapsed, Manual, Milli, Nano, sleep, timeout, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
@@ -30,7 +31,6 @@ import {
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { ALPN_05, ALPN_06, ALPN_07_WIP, hasRanges, keepsSubscribeOpen, Version } from "./version.ts";
-import { hostTime } from "@moq/clock/test";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
 	const broadcastRoute = origin.route(path);

@@ -26,7 +26,7 @@ test("a sleep already due", async () => {
 	await sleep(Nano(0));
 });
 test("opted out with hostTime", async () => {
-	hostTime();
+	hostTime(); // the case under test
 	await sleep(ms(5));
 });
 test("leaks a timer past its end", () => {

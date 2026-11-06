@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Instant, Manual, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Effect, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { Viewers } from "../bandwidth.ts";
@@ -19,7 +20,6 @@ import type { Established } from "./established.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
 import { pumpAnnounced, Redirects, Reload, type ReloadDelay, type ReloadProps } from "./reload.ts";
-import { hostTime } from "@moq/clock/test";
 
 function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
 	return acceptSession({ transport, url, ...props });
@@ -129,6 +129,7 @@ test("closing mid-connect aborts the pending attempt", async () => {
 });
 
 test("a peer that severs immediately keeps escalating the backoff", async () => {
+	hostTime();
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 	let attempts = 0;

@@ -1,5 +1,6 @@
 import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
 import { Elapsed, Manual, Milli, Nano, sleep, timeout, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Once } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
@@ -26,7 +27,6 @@ import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDon
 import { Subscriber } from "./subscriber.ts";
 import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
-import { hostTime } from "@moq/clock/test";
 
 const VERSION = Version.DRAFT_18;
 
