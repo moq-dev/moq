@@ -2,19 +2,19 @@
 # expect: subscriber: reconnect loop gave up
 #
 # Removes redialing after an established session is lost. The reconnect loop
-# treats a healthy session's end the way one-shot mode does and stops, so a
+# treats a healthy session's end the way connecting once does and stops, so a
 # relay restart becomes a permanent outage instead of a bounded gap the same
 # handles resume across.
-diff --git a/rs/moq-tokio/src/connection.rs b/rs/moq-tokio/src/connection.rs
---- a/rs/moq-tokio/src/connection.rs
-+++ b/rs/moq-tokio/src/connection.rs
-@@ -1289,7 +1289,8 @@
- 					// One-shot mode: the session ending ends the connection. Its close
- 					// reason is the terminal error, mirroring `moq_net::Session::closed`.
- 					// A GOAWAY already returned above.
--					if !client.reconnect {
-+					// MUTATION: losing an established session ends the loop instead of redialing.
-+					if !client.reconnect || healthy {
- 						return match ended {
- 							Ended::Closed(res) => res,
- 							Ended::Goaway(_) => unreachable!("handled before the migration branch"),
+diff --git a/rs/moq-net/src/reconnect.rs b/rs/moq-net/src/reconnect.rs
+--- a/rs/moq-net/src/reconnect.rs
++++ b/rs/moq-net/src/reconnect.rs
+@@ -772,7 +772,8 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
+ 		};
+ 		let err = E::from(err);
+ 		// Connecting once, the session ending ends the policy with its close reason.
+-		if terminal || self.config.once {
++		// MUTATION: losing an established session ends the policy instead of redialing.
++		if terminal || self.config.once || healthy {
+ 			return self.done(Err(err));
+ 		}
+ 

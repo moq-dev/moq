@@ -23,10 +23,10 @@ link-cost policy outside the basic setup.
 
 Use generic public examples and validate CLI/config examples against the
 implemented help. Cross-link `doc/bin/relay/cluster.md` and identity guidance
-without duplicating reference material. Route health adds its section in m2.
+without duplicating reference material. Route health adds its section in m5.
 
 Public API/wire: documentation only, reflecting completed implementations.
 
 ## Required
 
-- [Outbound federation](/quest/m1/cluster-routing/federation.md) - tested operator configuration
+- [Outbound federation](/quest/m2/cluster-routing/federation.md) - tested operator configuration

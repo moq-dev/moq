@@ -96,6 +96,8 @@ struct Shared {
 	peer_targets: Mutex<PeerTargets>,
 	/// Numbers each PROBE stream for `peer_targets`.
 	probe_streams: AtomicU64,
+	/// Lite-05/06: the datagram tracks answered TRACKs hold for their SUBSCRIBEs.
+	held_datagrams: HeldDatagrams,
 }
 
 /// The latest target each open PROBE stream sent, so the peer's target is the newest
@@ -234,7 +236,7 @@ impl Publisher {
 		// Identity stamped onto outbound announce hops. Derived from the
 		// origin we're consuming so it matches the local relay identity
 		// across every session, required for cross-session loop detection.
-		let self_origin = config.origin.hop();
+		let self_origin = crate::Hop::from(config.origin.hop());
 		let accept = config.session.clone();
 		let enforce = (config.client && config.version.has_auth()).then(Enforce::default);
 		Self {
@@ -262,6 +264,7 @@ impl Publisher {
 				peer_target: kio::Producer::new(crate::bandwidth::Rate::ZERO),
 				peer_targets: Default::default(),
 				probe_streams: AtomicU64::new(0),
+				held_datagrams: Default::default(),
 			}),
 			runtime: config.runtime,
 			accept,
@@ -1090,7 +1093,7 @@ struct Advertised {
 type Served = (Option<crate::Instance>, u64);
 
 /// What `route` serves; see [`Served`].
-fn served(route: &crate::origin::Route) -> Served {
+fn served(route: &crate::origin::RouteInfo) -> Served {
 	(route.instance.clone(), route.epoch)
 }
 
@@ -1171,7 +1174,7 @@ impl AnnounceRun {
 		// whatever it has pending for the routes the peer holds (an update, a restart, an end
 		// still waiting out its hold) arrives through the loop as usual.
 		let mut snapshot = origin.routes();
-		let mut current: HashMap<crate::Path, crate::origin::Route> = HashMap::new();
+		let mut current: HashMap<crate::Path, crate::origin::RouteInfo> = HashMap::new();
 		while let Some(event) = snapshot.try_next() {
 			match event {
 				origin::RouteEvent::Start(update)
@@ -1253,7 +1256,11 @@ impl AnnounceRun {
 
 	/// The chain and cost to put on the wire for `route`, or `None` when it must
 	/// not be forwarded.
-	fn outgoing(&self, route: &crate::origin::Route, absolute: &crate::Path) -> Option<(Hops, crate::origin::Cost)> {
+	fn outgoing(
+		&self,
+		route: &crate::origin::RouteInfo,
+		absolute: &crate::Path,
+	) -> Option<(Hops, crate::origin::Cost)> {
 		let mut hops = route.hops.clone();
 
 		// A route that already passed through us is a reflection. The origin
@@ -1949,7 +1956,7 @@ impl<R: Request> RequestServe<R> {
 					if requesting.is_none() {
 						// The peer requested this exact path, so it has already seen an
 						// announcement for it. The immediate lookup resolves it at once, is
-						// served on demand by the route covering it (an `origin::Requests`), or
+						// served on demand by the route covering it (an `origin::Route`), or
 						// errors when there is none.
 						let origin = ready!(self.shared.poll_serving_origin(waiter));
 						let path = R::target(msg).0.clone();
@@ -2082,9 +2089,17 @@ impl<R: Request> Drop for RequestServe<R> {
 /// The open stream is interest in the track: the query that answered it stays until the
 /// requester closes its side, so demand holds while the requester moves on to SUBSCRIBE.
 enum TrackInfoServe {
-	Track(track::Resolving, Option<Box<Legacy>>),
+	/// The stream track's query, its Lite-05/06 fallback, and once answered, the name's
+	/// datagram track held for the SUBSCRIBE alongside.
+	Track(track::Resolving, Option<Box<Legacy>>, Option<DatagramHold>),
 	/// Lite-05/06: a name no stream track has, answered for its datagram track.
 	Datagrams(datagram::Consumer),
+	/// Answered from the datagram track, which stays asked for while held for the SUBSCRIBE
+	/// alongside.
+	Held(
+		#[expect(dead_code, reason = "held for its drop")] datagram::Consumer,
+		#[expect(dead_code, reason = "held for its drop")] DatagramHold,
+	),
 }
 
 impl Request for TrackInfoServe {
@@ -2118,7 +2133,7 @@ impl Request for TrackInfoServe {
 	) -> Result<Self, Error> {
 		let legacy = Legacy::new(shared.version, &broadcast, track);
 		match broadcast.track(track) {
-			Ok(track) => Ok(Self::Track(track.info().into_inner(), legacy)),
+			Ok(track) => Ok(Self::Track(track.info().into_inner(), legacy, None)),
 			Err(err) => Ok(Self::Datagrams(Legacy::datagrams(legacy, err)?)),
 		}
 	}
@@ -2134,12 +2149,10 @@ impl Request for TrackInfoServe {
 		waiter: &kio::Waiter,
 	) -> Poll<Result<ControlFlow<()>, Error>> {
 		let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
-		if let Self::Track(querying, legacy) = self {
+		if let Self::Track(querying, legacy, _) = self {
 			match querying.poll_ok(waiter) {
 				Poll::Ready(Err(err)) => *self = Self::Datagrams(Legacy::datagrams(legacy.take(), err)?),
-				// The stream track answers: let a pending datagram ask go, rather than hold it
-				// as long as the requester keeps the stream open.
-				Poll::Ready(Ok(_)) => drop(legacy.take()),
+				Poll::Ready(Ok(_)) => {}
 				Poll::Pending => {
 					if let Poll::Ready(consumer) = Legacy::poll_datagrams(legacy, waiter) {
 						*self = Self::Datagrams(consumer);
@@ -2147,8 +2160,8 @@ impl Request for TrackInfoServe {
 				}
 			}
 		}
-		let querying = match self {
-			Self::Track(querying, _) => querying,
+		let (querying, legacy, held) = match self {
+			Self::Track(querying, legacy, held) => (querying, legacy, held),
 			Self::Datagrams(consumer) => {
 				let info = ready!(consumer.poll_info(waiter))?;
 				writer.set_priority(crate::coding::TRACK_INFO_SEND_ORDER);
@@ -2164,11 +2177,20 @@ impl Request for TrackInfoServe {
 				if ietf {
 					writer.buffer(&lite::ietf::TrackProperties(Default::default()))?;
 				}
+				let hold = shared.held_datagrams.hold(consumer);
+				*self = Self::Held(consumer.clone(), hold);
 				return Poll::Ready(Ok(ControlFlow::Break(())));
 			}
+			Self::Held(..) => unreachable!("answered once"),
 		};
 		let info = ready!(querying.poll_ok(waiter))?;
 		crate::ietf::flate::egress(&info, shared.version.has_compression())?;
+		// The datagrams beside the stream track, read from this answer on. A pending ask goes,
+		// rather than held as long as the requester keeps the stream open.
+		*held = legacy
+			.take()
+			.and_then(|legacy| legacy.live())
+			.map(|consumer| shared.held_datagrams.hold(&consumer));
 
 		// Ahead of the track's groups, which a subscriber holds unread until it lands.
 		writer.set_priority(crate::coding::TRACK_INFO_SEND_ORDER);
@@ -2335,7 +2357,8 @@ impl Request for SubscribeServe {
 		track: &str,
 		broadcast: crate::broadcast::Consumer,
 	) -> Result<Self, Error> {
-		let legacy = Legacy::new(shared.version, &broadcast, track);
+		let legacy =
+			Legacy::new(shared.version, &broadcast, track).map(|legacy| legacy.adopting(&shared.held_datagrams));
 		let track = match broadcast.track(track) {
 			Ok(track) => track,
 			Err(err) => return Ok(Self::datagrams(Legacy::datagrams(legacy, err)?, &msg, None)),
@@ -2636,6 +2659,8 @@ struct Legacy {
 	/// The name's datagram track, asked for beside the stream track: `None` until asked, as
 	/// a relayed broadcast's stays, and `Some(None)` once a handler refused it.
 	datagrams: Option<Option<datagram::Consumer>>,
+	/// A SUBSCRIBE's: the holds its datagram track is read from (see [`HeldDatagrams`]).
+	held: Option<HeldDatagrams>,
 }
 
 impl Legacy {
@@ -2646,8 +2671,38 @@ impl Legacy {
 				broadcast: broadcast.clone(),
 				name: name.to_string(),
 				datagrams: None,
+				held: None,
 			})
 		})
+	}
+
+	/// Serve a SUBSCRIBE: the datagram track it picks is read from the position of a hold of
+	/// that same track, if any. Checked as it picks, since a pipelined SUBSCRIBE can wait on
+	/// its stream track while the TRACK beside it is answered.
+	fn adopting(mut self: Box<Self>, held: &HeldDatagrams) -> Box<Self> {
+		self.held = Some(held.clone());
+		self
+	}
+
+	/// `consumer`, or a hold's clone of the same track, read from that hold's answer on.
+	fn adopt(&self, consumer: datagram::Consumer) -> datagram::Consumer {
+		self.held
+			.as_ref()
+			.and_then(|held| held.find(&consumer))
+			.unwrap_or(consumer)
+	}
+
+	/// The name's live datagram track, asking no handler: the request's own ask once
+	/// answered, or one published or already asked for. An unanswered ask is dropped,
+	/// which withdraws it.
+	fn live(mut self) -> Option<datagram::Consumer> {
+		let answered = self
+			.datagrams
+			.take()
+			.flatten()
+			.filter(|asked| matches!(asked.poll_info(&kio::Waiter::noop()), Poll::Ready(Ok(_))));
+		let consumer = answered.or_else(|| self.broadcast.datagrams_live(&self.name))?;
+		Some(self.adopt(consumer))
 	}
 
 	/// The datagram track to serve before the stream track answers: one a local handler or
@@ -2675,7 +2730,10 @@ impl Legacy {
 		};
 		match ready!(consumer.poll_info(waiter)) {
 			Ok(_) if this.broadcast.publishes_track(&this.name) => Poll::Pending,
-			Ok(_) => Poll::Ready(asked.take().expect("checked above")),
+			Ok(_) => {
+				let consumer = asked.take().expect("checked above");
+				Poll::Ready(this.adopt(consumer))
+			}
 			Err(_) => {
 				*asked = None;
 				Poll::Pending
@@ -2686,22 +2744,85 @@ impl Legacy {
 	/// The datagram track to serve instead when the stream track's lookup failed with `err`,
 	/// or `err` itself.
 	fn datagrams(legacy: Option<Box<Self>>, err: Error) -> Result<datagram::Consumer, Error> {
-		let Some(legacy) = legacy else {
+		let Some(mut legacy) = legacy else {
 			return Err(err);
 		};
 		if !matches!(err, Error::NotFound | Error::Stream(StreamError::NotFound)) {
 			return Err(err);
 		}
-		let asked = legacy
-			.datagrams
-			.unwrap_or_else(|| legacy.broadcast.datagrams(&legacy.name).ok());
-		asked.ok_or(err)
+		let asked = match legacy.datagrams.take() {
+			Some(asked) => asked,
+			None => legacy.broadcast.datagrams(&legacy.name).ok(),
+		};
+		Ok(legacy.adopt(asked.ok_or(err)?))
+	}
+}
+
+/// Lite-05/06: the datagram tracks this session's answered TRACKs hold, read from each
+/// answer on. The requester reads TRACK_INFO as the publisher accepting the name, but the
+/// datagrams flow on the SUBSCRIBE it sends alongside, a separate stream that can arrive
+/// later. That SUBSCRIBE reads from a clone of the hold, keeping its position, rather than
+/// from its own arrival, which would lose what was written in between. The requester keeps
+/// its TRACK open until the SUBSCRIBE has a response, so the hold outlasts its arrival.
+///
+/// A hold is matched by the track it reads, not by name, so one left on a track a route
+/// change replaced never stands in for the current one. It is a passive observer: it keeps
+/// a position without adding demand, which the SUBSCRIBE adds when it reads the track.
+#[derive(Clone, Default)]
+struct HeldDatagrams(Arc<Mutex<HeldState>>);
+
+#[derive(Default)]
+struct HeldState {
+	next: u64,
+	/// Oldest first, by key.
+	holds: Vec<(u64, datagram::Consumer)>,
+}
+
+impl HeldDatagrams {
+	/// Hold `consumer`'s track from its position until the returned hold drops.
+	fn hold(&self, consumer: &datagram::Consumer) -> DatagramHold {
+		let consumer = consumer.observe();
+		let mut state = self.0.lock().unwrap();
+		let key = state.next;
+		state.next += 1;
+		state.holds.push((key, consumer));
+		DatagramHold {
+			held: self.clone(),
+			key,
+		}
+	}
+
+	/// A clone of the oldest hold reading the same track as `consumer`, if any. Several
+	/// TRACKs of one track may be open, and the SUBSCRIBE could follow any of them, so it
+	/// reads from the earliest answer: a replay only duplicates, a later one would lose.
+	fn find(&self, consumer: &datagram::Consumer) -> Option<datagram::Consumer> {
+		let state = self.0.lock().unwrap();
+		let (_, held) = state.holds.iter().find(|(_, held)| held.is_clone(consumer))?;
+		Some(held.clone())
+	}
+}
+
+/// One answered TRACK's entry in [`HeldDatagrams`].
+struct DatagramHold {
+	held: HeldDatagrams,
+	key: u64,
+}
+
+impl Drop for DatagramHold {
+	fn drop(&mut self) {
+		let mut state = self.held.0.lock().unwrap();
+		let index = state.holds.iter().position(|(key, _)| *key == self.key);
+		let consumer = index.map(|index| state.holds.remove(index));
+		// Dropped outside the lock.
+		drop(state);
+		drop(consumer);
 	}
 }
 
 /// Lite-05/06: a name's datagram track carried on the subscription of its stream track, as
 /// one subscription carries both kinds there. A subscriber keeps the kind it asked for.
 struct LegacyDatagrams {
+	demand: bool,
 	consumer: datagram::Consumer,
 	id: u64,
 	priority: i8,
@@ -2719,18 +2840,14 @@ impl LegacyDatagrams {
 	/// subscribes to, so this asks no handler: a request would subscribe to the name again.
 	/// The request's own ask joins only once answered, the track then being live.
 	fn join(legacy: Option<Box<Legacy>>, id: u64, priority: i8, timescale: Option<crate::Timescale>) -> Option<Self> {
-		let Legacy {
-			broadcast,
-			name,
-			datagrams,
-		} = *legacy?;
-		// An unanswered ask is dropped, which withdraws it.
-		let answered = datagrams
-			.flatten()
-			.filter(|asked| matches!(asked.poll_info(&kio::Waiter::noop()), Poll::Ready(Ok(_))));
-		let mut consumer = answered.or_else(|| broadcast.datagrams_live(&name))?;
-		consumer.set_priority(priority);
+		let legacy = legacy?;
+		let demand = legacy.broadcast.has_local_datagrams();
+		let mut consumer = legacy.live()?;
+		if demand {
+			consumer.set_priority(priority);
+		}
 		Some(Self {
+			demand,
 			consumer,
 			id,
 			priority,
@@ -2742,7 +2859,9 @@ impl LegacyDatagrams {
 	/// Move the datagrams to the subscriber's new `priority`.
 	fn steer(&mut self, priority: i8) {
 		self.priority = priority;
-		self.consumer.set_priority(priority);
+		if self.demand {
+			self.consumer.set_priority(priority);
+		}
 		if let Some(send) = &mut self.send {
 			send.steer(priority);
 		}
@@ -3468,7 +3587,7 @@ mod announce_test {
 		let update = |prefix: &'static str, cost| crate::announce::Announce {
 			prefix: crate::Path::try_from(prefix).unwrap(),
 			captures: None,
-			route: origin::Route::default().with_cost(cost),
+			route: origin::RouteInfo::default().with_cost(cost),
 		};
 		let events = [
 			origin::RouteEvent::Start(update("a", 1)),
@@ -3496,8 +3615,8 @@ mod announce_test {
 	#[test]
 	fn synced_survives_a_removed_initial_route_and_live_churn() {
 		let origin = Hop::new(1).unwrap().produce();
-		let removed = origin.announce("z/removed", origin::Route::default()).unwrap();
-		let _initial = origin.announce("z/retained", origin::Route::default()).unwrap();
+		let removed = origin.announce("z/removed", origin::RouteInfo::default()).unwrap();
+		let _initial = origin.announce("z/retained", origin::RouteInfo::default()).unwrap();
 		let consumer = origin.consume();
 		let mut announced = consumer.routes();
 		let budget = kio::Producer::new(0usize);
@@ -3514,13 +3633,21 @@ mod announce_test {
 			),
 			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
 		};
-		let mut run = AnnounceRun::new(crate::Path::from_static(""), consumer.hop(), Version::Lite07);
+		let mut run = AnnounceRun::new(
+			crate::Path::from_static(""),
+			crate::Hop::from(consumer.hop()),
+			Version::Lite07,
+		);
 		let waiter = kio::Waiter::noop();
 		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
 		drop(removed);
 		let mut churn = Vec::new();
 		for limit in 1..=4 {
-			churn.push(origin.announce(format!("a/{limit}"), origin::Route::default()).unwrap());
+			churn.push(
+				origin
+					.announce(format!("a/{limit}"), origin::RouteInfo::default())
+					.unwrap(),
+			);
 			*budget.write().ok().unwrap() = limit;
 			assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
 		}
@@ -3538,8 +3665,8 @@ mod announce_test {
 	#[test]
 	fn a_partial_regrant_cannot_overtake_an_initial_route() {
 		let origin = Hop::new(1).unwrap().produce();
-		let _a = origin.announce("a", origin::Route::default()).unwrap();
-		let _b = origin.announce("b", origin::Route::default()).unwrap();
+		let _a = origin.announce("a", origin::RouteInfo::default()).unwrap();
+		let _b = origin.announce("b", origin::RouteInfo::default()).unwrap();
 		let consumer = origin.consume();
 		let mut announced = consumer.routes();
 		let budget = kio::Producer::new(1usize);
@@ -3556,7 +3683,11 @@ mod announce_test {
 			),
 			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
 		};
-		let mut run = AnnounceRun::new(crate::Path::from_static(""), consumer.hop(), Version::Lite07);
+		let mut run = AnnounceRun::new(
+			crate::Path::from_static(""),
+			crate::Hop::from(consumer.hop()),
+			Version::Lite07,
+		);
 		let waiter = kio::Waiter::noop();
 		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
 		let auth = crate::auth::Link::new(false);
@@ -3580,8 +3711,8 @@ mod announce_test {
 	#[test]
 	fn synced_cuts_a_regrant_burst_at_the_initial_bound() {
 		let origin = Hop::new(1).unwrap().produce();
-		let _a = origin.announce("a", origin::Route::default()).unwrap();
-		let _b = origin.announce("b", origin::Route::default()).unwrap();
+		let _a = origin.announce("a", origin::RouteInfo::default()).unwrap();
+		let _b = origin.announce("b", origin::RouteInfo::default()).unwrap();
 		let consumer = origin.consume();
 		let mut announced = consumer.routes();
 		let budget = kio::Producer::new(0usize);
@@ -3598,7 +3729,11 @@ mod announce_test {
 			),
 			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
 		};
-		let mut run = AnnounceRun::new(crate::Path::from_static(""), consumer.hop(), Version::Lite07);
+		let mut run = AnnounceRun::new(
+			crate::Path::from_static(""),
+			crate::Hop::from(consumer.hop()),
+			Version::Lite07,
+		);
 		let waiter = kio::Waiter::noop();
 		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
 		let auth = crate::auth::Link::new(false);
@@ -3607,7 +3742,7 @@ mod announce_test {
 			panic!("the changed grant is ready");
 		};
 		run.regrant(&mut stream, &consumer, restricted).unwrap();
-		let _live = origin.announce("c", origin::Route::default()).unwrap();
+		let _live = origin.announce("c", origin::RouteInfo::default()).unwrap();
 		run.regrant(&mut stream, &consumer, crate::auth::Permit::default())
 			.unwrap();
 		*budget.write().ok().unwrap() = 4;
@@ -3636,8 +3771,8 @@ mod announce_test {
 	#[test]
 	fn a_seen_retraction_can_precede_synced() {
 		let origin = Hop::new(1).unwrap().produce();
-		let first = origin.announce("a", origin::Route::default()).unwrap();
-		let unseen = origin.announce("b", origin::Route::default()).unwrap();
+		let first = origin.announce("a", origin::RouteInfo::default()).unwrap();
+		let unseen = origin.announce("b", origin::RouteInfo::default()).unwrap();
 		let consumer = origin.consume();
 		let mut announced = consumer.routes();
 		let budget = kio::Producer::new(1usize);
@@ -3654,7 +3789,11 @@ mod announce_test {
 			),
 			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
 		};
-		let mut run = AnnounceRun::new(crate::Path::from_static(""), consumer.hop(), Version::Lite07);
+		let mut run = AnnounceRun::new(
+			crate::Path::from_static(""),
+			crate::Hop::from(consumer.hop()),
+			Version::Lite07,
+		);
 		let waiter = kio::Waiter::noop();
 		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
 		drop(unseen);
@@ -3694,7 +3833,11 @@ mod announce_test {
 			),
 			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
 		};
-		let mut run = AnnounceRun::new(crate::Path::from_static(""), consumer.hop(), Version::Lite07);
+		let mut run = AnnounceRun::new(
+			crate::Path::from_static(""),
+			crate::Hop::from(consumer.hop()),
+			Version::Lite07,
+		);
 		assert!(
 			run.poll(&mut stream, &consumer, &mut announced, &kio::Waiter::noop())
 				.is_pending()
@@ -3792,7 +3935,7 @@ mod announce_test {
 	#[kio::test]
 	async fn a_silent_upstream_never_delays_the_answer() {
 		let origin = Hop::new(1).unwrap().produce();
-		let _route = origin.announce("cam", crate::origin::Route::default()).unwrap();
+		let _route = origin.announce("cam", crate::origin::RouteInfo::default()).unwrap();
 		// An upstream that never answers its announce request.
 		let _silent = origin.clone().with_link(crate::origin::Link::Upstream).snapshot("");
 
@@ -3806,7 +3949,7 @@ mod announce_test {
 		};
 		let _task = kio::clock::sim::spawn(async move {
 			let mut announced = consumer.routes();
-			let self_origin = consumer.hop();
+			let self_origin = crate::Hop::from(consumer.hop());
 			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, VERSION, None).await
 		});
 		settle().await;
@@ -3826,7 +3969,7 @@ mod announce_test {
 		let announcement = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default().with_hops(pub_hops()).with_cost(7),
+				crate::origin::RouteInfo::default().with_hops(pub_hops()).with_cost(7),
 			)
 			.unwrap();
 
@@ -3839,7 +3982,7 @@ mod announce_test {
 		};
 		let task = kio::clock::sim::spawn(async move {
 			let mut announced = consumer.routes();
-			let self_origin = consumer.hop();
+			let self_origin = crate::Hop::from(consumer.hop());
 			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, version, auth).await
 		});
 		settle().await;
@@ -3883,7 +4026,7 @@ mod announce_test {
 
 		let late = h
 			.origin
-			.announce("mic", crate::origin::Route::default().with_hops(pub_hops()))
+			.announce("mic", crate::origin::RouteInfo::default().with_hops(pub_hops()))
 			.unwrap();
 		settle().await;
 		match h.wire.take_announces().as_slice() {
@@ -3907,7 +4050,7 @@ mod announce_test {
 		let mut h = harness().await;
 
 		h.announcement
-			.update(crate::origin::Route::default().with_hops(pub_hops()).with_cost(3))
+			.update(crate::origin::RouteInfo::default().with_hops(pub_hops()).with_cost(3))
 			.unwrap();
 		kio::clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
@@ -3926,7 +4069,7 @@ mod announce_test {
 	async fn identical_update_is_quiet() {
 		let h = harness().await;
 		h.announcement
-			.update(crate::origin::Route::default().with_hops(pub_hops()).with_cost(7))
+			.update(crate::origin::RouteInfo::default().with_hops(pub_hops()).with_cost(7))
 			.unwrap();
 		settle().await;
 		h.assert_idle();
@@ -3940,7 +4083,7 @@ mod announce_test {
 	async fn source_flip_restarts() {
 		for version in [Version::Lite06, Version::Lite07] {
 			let mut h = harness_on(version).await;
-			let route = crate::origin::Route::default().with_hops(pub_hops()).with_cost(7);
+			let route = crate::origin::RouteInfo::default().with_hops(pub_hops()).with_cost(7);
 			let newer = h.origin.announce("cam", route.clone()).unwrap();
 			// A restart waits out the update hold like an update.
 			kio::clock::sleep(crate::origin::Config::default().update_hold).await;
@@ -3987,7 +4130,7 @@ mod announce_test {
 		let mut h = harness_on(Version::Lite07).await;
 		let instance = crate::Instance::random();
 		let route = |epoch| {
-			crate::origin::Route::default()
+			crate::origin::RouteInfo::default()
 				.with_instance(instance.clone(), epoch)
 				.with_hops(pub_hops())
 				.with_cost(7)
@@ -4030,7 +4173,7 @@ mod announce_test {
 			let mut h = harness_with(Version::Lite07, Some(auth.clone())).await;
 
 			// Same chain and cost, so only the instance changed. Both land before the loop polls.
-			let route = crate::origin::Route::default().with_hops(pub_hops()).with_cost(7);
+			let route = crate::origin::RouteInfo::default().with_hops(pub_hops()).with_cost(7);
 			let named = (!anonymous).then(crate::Instance::random);
 			let route = match &named {
 				Some(instance) => route.with_instance(instance.clone(), 0),
@@ -4060,7 +4203,11 @@ mod announce_test {
 	#[kio::test]
 	async fn clamped_cost_change_is_quiet() {
 		let mut h = harness().await;
-		let route = |cost| crate::origin::Route::default().with_hops(pub_hops()).with_cost(cost);
+		let route = |cost| {
+			crate::origin::RouteInfo::default()
+				.with_hops(pub_hops())
+				.with_cost(cost)
+		};
 		h.announcement.update(route(u64::MAX)).unwrap();
 		kio::clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
@@ -4081,10 +4228,10 @@ mod announce_test {
 
 		let tainted = Hops::try_from(vec![peer]).unwrap();
 		let _tainted = origin
-			.announce("echoed", crate::origin::Route::default().with_hops(tainted))
+			.announce("echoed", crate::origin::RouteInfo::default().with_hops(tainted))
 			.unwrap();
 		let _clean = origin
-			.announce("local", crate::origin::Route::default().with_hops(pub_hops()))
+			.announce("local", crate::origin::RouteInfo::default().with_hops(pub_hops()))
 			.unwrap();
 
 		let log = Log::default();
@@ -4096,7 +4243,7 @@ mod announce_test {
 		};
 		let task = kio::clock::sim::spawn(async move {
 			let mut announced = consumer.routes();
-			let self_origin = consumer.hop();
+			let self_origin = crate::Hop::from(consumer.hop());
 			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, VERSION, None).await
 		});
 		settle().await;
@@ -4120,7 +4267,7 @@ mod announce_test {
 		let mut h = harness().await;
 		let _late = h
 			.origin
-			.announce("mic", crate::origin::Route::default().with_hops(pub_hops()))
+			.announce("mic", crate::origin::RouteInfo::default().with_hops(pub_hops()))
 			.unwrap();
 		settle().await;
 		match h.wire.take_announces().as_slice() {
@@ -4136,7 +4283,7 @@ mod announce_test {
 		let mut h = harness().await;
 		h.announcement
 			.update(
-				crate::origin::Route::default()
+				crate::origin::RouteInfo::default()
 					.with_hops(pub_hops())
 					.with_cost(u64::MAX),
 			)
@@ -7722,7 +7869,7 @@ mod serve_group_test {
 		}
 
 		fn origin(hop: u64) -> origin::Producer {
-			let (origin, driver) = origin::Producer::new(origin::Config::new(crate::Hop::new(hop).unwrap()));
+			let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 			drive(driver);
 			origin
 		}
@@ -7762,10 +7909,13 @@ mod serve_group_test {
 			let mut starts = Vec::new();
 			for warm in [false, true] {
 				let publisher = origin(1);
-				let broadcast = publisher.create_broadcast("room").unwrap();
-				let mut track = broadcast.create_track("test", crate::track::Info::timed()).unwrap();
+				let broadcast = publisher.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+				let mut track = broadcast
+					.broadcast()
+					.create_track("test", crate::track::Info::timed())
+					.unwrap();
 				track.start_at(0).unwrap();
-				broadcast.announce(Default::default()).unwrap();
+				broadcast.announce().unwrap();
 				let relay = origin(2);
 				let _upstream = connect(version, &publisher, &relay).await;
 				let remote = relay
@@ -8542,14 +8692,14 @@ mod tests {
 	async fn serving_origin_falls_back_to_the_assigned_identity() {
 		let assigned = crate::Hop::new(777).unwrap();
 		let upstream = crate::Hop::new(778).unwrap();
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 
 		let mut echoed_hops = Hops::new();
 		echoed_hops.push(crate::Hop::UNKNOWN).unwrap();
 		let _echoed = origin
-			.requests_route(
+			.forward(
 				"echoed",
-				crate::origin::Route::default()
+				crate::origin::RouteInfo::default()
 					.with_hops(echoed_hops)
 					.with_via(assigned),
 				None,
@@ -8559,12 +8709,12 @@ mod tests {
 		let mut local_hops = Hops::new();
 		local_hops.push(upstream).unwrap();
 		let _local = origin
-			.requests_route("local", crate::origin::Route::default().with_hops(local_hops), None)
+			.forward("local", crate::origin::RouteInfo::default().with_hops(local_hops), None)
 			.unwrap();
 
 		// A SETUP that declares no origin of its own, so only the assigned one applies.
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-		peer_setup.set(crate::lite::Setup::default());
+		peer_setup.set(crate::lite::Setup::default()).unwrap();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 
 		let publisher = Publisher::new(PublisherConfig {
@@ -8603,14 +8753,14 @@ mod tests {
 		let assigned = crate::Hop::new(777).unwrap();
 		let clean_publisher = crate::Hop::new(778).unwrap();
 		let self_origin = crate::Hop::new(1).unwrap();
-		let origin = crate::origin::Config::new(self_origin).produce();
+		let origin = crate::origin::Config::from(self_origin).produce();
 
 		let mut tainted_hops = Hops::new();
 		tainted_hops.push(crate::Hop::UNKNOWN).unwrap();
 		let _tainted = origin
 			.announce(
 				"echoed",
-				crate::origin::Route::default()
+				crate::origin::RouteInfo::default()
 					.with_hops(tainted_hops)
 					.with_via(assigned),
 			)
@@ -8619,7 +8769,7 @@ mod tests {
 		let mut clean_hops = Hops::new();
 		clean_hops.push(clean_publisher).unwrap();
 		let _clean = origin
-			.announce("local", crate::origin::Route::default().with_hops(clean_hops))
+			.announce("local", crate::origin::RouteInfo::default().with_hops(clean_hops))
 			.unwrap();
 
 		let gate = kio::Producer::new(true);
@@ -8657,14 +8807,14 @@ mod tests {
 	#[kio::test]
 	async fn announce_init_past_the_cap_fails() {
 		let self_origin = crate::Hop::new(1).unwrap();
-		let origin = crate::origin::Config::new(self_origin).produce();
+		let origin = crate::origin::Config::from(self_origin).produce();
 		let max = <lite::AnnounceInit as lite::Message>::MAX_SIZE;
 		// Each suffix costs its length plus a varint prefix, so these overflow the cap.
 		let name = "x".repeat(500);
 		let _broadcasts: Vec<_> = (0..max / 500 + 1)
 			.map(|i| {
 				origin
-					.announce(format!("{name}{i}"), crate::origin::Route::default())
+					.announce(format!("{name}{i}"), crate::origin::RouteInfo::default())
 					.unwrap()
 			})
 			.collect();
@@ -8694,8 +8844,8 @@ mod tests {
 	#[kio::test]
 	async fn announce_init_broadcast_ends() {
 		let self_origin = crate::Hop::new(1).unwrap();
-		let origin = crate::origin::Config::new(self_origin).produce();
-		let cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+		let origin = crate::origin::Config::from(self_origin).produce();
+		let cam = origin.announce("cam", crate::origin::RouteInfo::default()).unwrap();
 
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume());
@@ -8730,8 +8880,8 @@ mod tests {
 	#[kio::test]
 	async fn withdraw_before_init_sends_the_initial_burst() {
 		let self_origin = crate::Hop::new(1).unwrap();
-		let origin = crate::origin::Config::new(self_origin).produce();
-		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+		let origin = crate::origin::Config::from(self_origin).produce();
+		let _cam = origin.announce("cam", crate::origin::RouteInfo::default()).unwrap();
 
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume());
@@ -9128,7 +9278,7 @@ mod tests {
 	/// requester close its send side.
 	async fn leave_request<R: Request>(version: Version, request: &impl Encode<Version>, wait: Wait, close: Close) {
 		let case = format!("{} over {version:?}, waiting on the {wait:?}, {close:?}", R::KIND);
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		// Held, never answered.
 		let mut _route = None;
 		let mut held = None;
@@ -9136,20 +9286,20 @@ mod tests {
 			Wait::Broadcast => {
 				_route = Some(
 					origin
-						.requests_route("room", crate::origin::Route::default(), None)
+						.forward("room", crate::origin::RouteInfo::default(), None)
 						.unwrap(),
 				)
 			}
 			Wait::Track => {
-				let broadcast = origin.create_broadcast("room").unwrap();
-				let dynamic = broadcast.requests();
-				broadcast.announce(Default::default()).unwrap();
+				let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+				let dynamic = broadcast.broadcast().requests();
+				broadcast.announce().unwrap();
 				held = Some((broadcast, dynamic));
 			}
 		}
 
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-		peer_setup.set(crate::lite::Setup::default());
+		peer_setup.set(crate::lite::Setup::default()).unwrap();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let publisher = Publisher::new(PublisherConfig {
 			runtime: crate::time::sim(),
@@ -9268,7 +9418,7 @@ mod tests {
 	#[kio::test]
 	async fn a_broadcast_too_long_under_the_root_is_refused_per_request() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let root = "r".repeat(crate::Path::MAX_BYTES - 2);
 			let scoped = origin
 				.consume()
@@ -9276,7 +9426,7 @@ mod tests {
 				.unwrap();
 
 			let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-			peer_setup.set(crate::lite::Setup::default());
+			peer_setup.set(crate::lite::Setup::default()).unwrap();
 			let (_, goaway) = crate::goaway::Handle::new(true);
 			let publisher = Publisher::new(PublisherConfig {
 				estimate: kio::Producer::default().weak(),
@@ -9334,12 +9484,15 @@ mod tests {
 	#[kio::test]
 	async fn track_info_outranks_the_track_groups() {
 		let version = Version::Lite07;
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let broadcast = origin.create_broadcast("room").unwrap();
-		let _track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+		let _track = broadcast
+			.broadcast()
+			.create_track("video", crate::track::Info::timed())
+			.unwrap();
+		broadcast.announce().unwrap();
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-		peer_setup.set(crate::lite::Setup::default());
+		peer_setup.set(crate::lite::Setup::default()).unwrap();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let publisher = Publisher::new(PublisherConfig {
 			estimate: kio::Producer::default().weak(),
@@ -9382,6 +9535,212 @@ mod tests {
 		assert!(crate::coding::TRACK_INFO_SEND_ORDER > top);
 	}
 
+	/// A lite-05/06 publisher serving `origin`, with the log of the datagrams it sends.
+	fn legacy_publisher(
+		version: Version,
+		origin: &crate::origin::Producer,
+	) -> (Publisher, Arc<Mutex<Vec<bytes::Bytes>>>) {
+		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
+		peer_setup.set(crate::lite::Setup::default()).unwrap();
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let sink = SinkSession::new(crate::lite::test_transport::Log::default()).with_datagrams(1200);
+		let log = sink.log.datagrams.clone();
+		let publisher = Publisher::new(PublisherConfig {
+			estimate: kio::Producer::default().weak(),
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(sink),
+			origin: origin.consume(),
+			version,
+			peer_setup,
+			goaway,
+			peer_hop: None,
+			subscriptions: Default::default(),
+			auth: crate::auth::Link::new(false),
+			peer_grant: Default::default(),
+			client: false,
+		});
+		(publisher, log)
+	}
+
+	/// Serve `msg` as the first message of a request stream on `publisher`.
+	async fn legacy_request<R: Request>(
+		publisher: &Publisher,
+		version: Version,
+		msg: &impl Encode<Version>,
+	) -> RequestServe<R> {
+		let mut script = Vec::new();
+		msg.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
+			.unwrap();
+		let session = ScriptedSession::new(script);
+		let (send, recv) = kio::wait(|waiter| {
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&session, waiter, Default::default())
+		})
+		.await
+		.unwrap();
+		let stream = Stream::<Transport, Version> {
+			writer: Writer::new(crate::transport::boxed::SendStream::new(send), version),
+			reader: crate::coding::Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+		};
+		RequestServe::new(publisher.shared.clone(), stream)
+	}
+
+	fn legacy_track() -> lite::Track<'static> {
+		lite::Track {
+			instance: None,
+			broadcast: crate::Path::from_static("room"),
+			track: "events".into(),
+		}
+	}
+
+	fn legacy_subscribe(priority: i8) -> lite::Subscribe<'static> {
+		lite::Subscribe {
+			order: crate::track::Order::Descending,
+			instance: None,
+			id: 0,
+			broadcast: crate::Path::from_static("room"),
+			track: "events".into(),
+			priority,
+			max_delay: Duration::ZERO,
+			min_delay: None,
+			ranges: vec![lite::Range::span(None, 0, None, None)],
+		}
+	}
+
+	/// Lite-05/06: a requester reads TRACK_INFO as the name being accepted, and its SUBSCRIBE,
+	/// on a stream of its own, can arrive after a datagram written meanwhile. That SUBSCRIBE
+	/// still sends it, whether the datagram track answered the TRACK or rides beside a stream
+	/// track of the same name.
+	#[kio::test]
+	async fn a_subscribe_sends_the_datagrams_written_since_its_track_info() {
+		for version in [Version::Lite05, Version::Lite06] {
+			for stream in [false, true] {
+				let case = format!("{version:?}, stream track {stream}");
+				let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+				let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+				let mut datagrams = broadcast
+					.broadcast()
+					.create_datagrams("events", datagram::Info::default())
+					.unwrap();
+				let _track = stream.then(|| {
+					broadcast
+						.broadcast()
+						.create_track("events", crate::track::Info::timed())
+						.unwrap()
+				});
+				broadcast.announce().unwrap();
+				let (publisher, log) = legacy_publisher(version, &origin);
+
+				let mut track_info = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
+				assert!(!drive(&mut track_info).await, "{case}: the TRACK stream is held");
+
+				datagrams.append(None, b"between".as_slice()).unwrap();
+
+				let mut subscribe = legacy_request::<SubscribeServe>(&publisher, version, &legacy_subscribe(-5)).await;
+				assert!(!drive(&mut subscribe).await, "{case}: the subscription is live");
+				assert_eq!(log.lock().unwrap().len(), 1, "{case}");
+				// Beside a stream track, only the SUBSCRIBE asks for the datagrams.
+				if stream {
+					assert_eq!(
+						datagrams.priority(),
+						Some(-5),
+						"{case}: the SUBSCRIBE's priority stands"
+					);
+				}
+			}
+		}
+	}
+
+	/// Lite-05/06: a SUBSCRIBE sent alongside its TRACK can arrive first and wait on a
+	/// relayed stream track's info. Once the TRACK is answered and a datagram written, the
+	/// waiting SUBSCRIBE still sends that datagram.
+	#[kio::test]
+	async fn a_waiting_subscribe_sends_the_datagrams_written_since_its_track_info() {
+		for version in [Version::Lite05, Version::Lite06] {
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+			let _relayed = crate::model::broadcast::SourceGuard::new(broadcast.broadcast().clone());
+			let mut datagrams = broadcast
+				.broadcast()
+				.create_datagrams("events", datagram::Info::default())
+				.unwrap();
+			let reserved = broadcast.broadcast().reserve_track("events").unwrap();
+			broadcast.announce().unwrap();
+			let (publisher, log) = legacy_publisher(version, &origin);
+
+			let mut subscribe = legacy_request::<SubscribeServe>(&publisher, version, &legacy_subscribe(0)).await;
+			assert!(!drive(&mut subscribe).await, "{version:?}: waits on the track's info");
+			let mut track_info = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
+			assert!(!drive(&mut track_info).await, "{version:?}: waits on the track's info");
+
+			let _track = reserved.accept(crate::track::Info::timed());
+			assert!(!drive(&mut track_info).await, "{version:?}: the TRACK stream is held");
+			datagrams.append(None, b"between".as_slice()).unwrap();
+			assert!(!drive(&mut subscribe).await, "{version:?}: the subscription is live");
+			assert_eq!(log.lock().unwrap().len(), 1, "{version:?}");
+		}
+	}
+
+	/// Lite-05/06: with two TRACKs of one name open, a SUBSCRIBE reads from the older answer,
+	/// so a datagram written between the two still reaches the SUBSCRIBE of the first.
+	#[kio::test]
+	async fn a_subscribe_reads_from_the_oldest_hold() {
+		for version in [Version::Lite05, Version::Lite06] {
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+			let mut datagrams = broadcast
+				.broadcast()
+				.create_datagrams("events", datagram::Info::default())
+				.unwrap();
+			broadcast.announce().unwrap();
+			let (publisher, log) = legacy_publisher(version, &origin);
+
+			let mut older = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
+			assert!(!drive(&mut older).await, "{version:?}: the older TRACK stream is held");
+			datagrams.append(None, b"between".as_slice()).unwrap();
+			let mut newer = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
+			assert!(!drive(&mut newer).await, "{version:?}: the newer TRACK stream is held");
+
+			let mut subscribe = legacy_request::<SubscribeServe>(&publisher, version, &legacy_subscribe(0)).await;
+			assert!(!drive(&mut subscribe).await, "{version:?}: the subscription is live");
+			assert_eq!(log.lock().unwrap().len(), 1, "{version:?}");
+		}
+	}
+
+	/// Lite-05/06: a hold reads the datagram track that answered its TRACK. Once that track
+	/// is replaced, a SUBSCRIBE reads the replacement, even while the older TRACK stays open.
+	#[kio::test]
+	async fn a_subscribe_reads_the_current_datagram_track_past_an_older_hold() {
+		for version in [Version::Lite05, Version::Lite06] {
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+			let mut first = broadcast
+				.broadcast()
+				.create_datagrams("events", datagram::Info::default())
+				.unwrap();
+			broadcast.announce().unwrap();
+			let (publisher, log) = legacy_publisher(version, &origin);
+
+			let mut older = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
+			assert!(!drive(&mut older).await, "{version:?}: the older TRACK stream is held");
+			first.append(None, b"first".as_slice()).unwrap();
+			first.finish();
+
+			let mut current = broadcast
+				.broadcast()
+				.create_datagrams("events", datagram::Info::default())
+				.unwrap();
+			let mut track_info = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
+			assert!(!drive(&mut track_info).await, "{version:?}: the TRACK stream is held");
+			current.append(None, b"current".as_slice()).unwrap();
+
+			let mut subscribe = legacy_request::<SubscribeServe>(&publisher, version, &legacy_subscribe(0)).await;
+			assert!(!drive(&mut subscribe).await, "{version:?}: the subscription is live");
+			let sent = log.lock().unwrap().clone();
+			assert_eq!(sent.len(), 1, "{version:?}");
+			assert!(sent[0].ends_with(b"current"), "{version:?}: {sent:?}");
+		}
+	}
+
 	/// An answered TRACK stream holds its track until the requester closes its side, by
 	/// FIN or reset, and the hold owes nothing a draining close would wait for. A requester
 	/// that leaves while the reply is still blocked on flow control lets the track go too.
@@ -9391,13 +9750,16 @@ mod tests {
 			for close in [Close::Fin, Close::Reset] {
 				for blocked in [false, true] {
 					let case = format!("{version:?}, {close:?}, blocked {blocked}");
-					let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-					let broadcast = origin.create_broadcast("room").unwrap();
-					let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
-					broadcast.announce(Default::default()).unwrap();
+					let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+					let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+					let track = broadcast
+						.broadcast()
+						.create_track("video", crate::track::Info::timed())
+						.unwrap();
+					broadcast.announce().unwrap();
 
 					let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-					peer_setup.set(crate::lite::Setup::default());
+					peer_setup.set(crate::lite::Setup::default()).unwrap();
 					let (_, goaway) = crate::goaway::Handle::new(true);
 					let publisher = Publisher::new(PublisherConfig {
 						estimate: kio::Producer::default().weak(),
@@ -9523,11 +9885,11 @@ mod tests {
 				Answer::Empty,
 			] {
 				for start in [None, Some(0)] {
-					let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-					let broadcast = origin.create_broadcast("room").unwrap();
-					let mut dynamic = broadcast.requests();
-					broadcast.announce(Default::default()).unwrap();
-					let copy = broadcast.consume().track("video").unwrap();
+					let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+					let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+					let mut dynamic = broadcast.broadcast().requests();
+					broadcast.announce().unwrap();
+					let copy = broadcast.broadcast().consume().track("video").unwrap();
 					let held = copy.info().into_inner();
 					assert!(held.poll_ok(&kio::Waiter::noop()).is_pending());
 					let request = dynamic.requested_track().await.unwrap();
@@ -9544,7 +9906,7 @@ mod tests {
 					}
 
 					let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-					peer_setup.set(crate::lite::Setup::default());
+					let _ = peer_setup.set(crate::lite::Setup::default());
 					let (_, goaway) = crate::goaway::Handle::new(true);
 					let log = Log::default();
 					let publisher = Publisher::new(PublisherConfig {
@@ -9573,7 +9935,8 @@ mod tests {
 						ranges: vec![lite::Range::span(start, 0, None, None)],
 					};
 					let mut serve =
-						SubscribeServe::start(&publisher.shared, msg, "video", broadcast.consume()).unwrap();
+						SubscribeServe::start(&publisher.shared, msg, "video", broadcast.broadcast().consume())
+							.unwrap();
 					let mut writer = Writer::new(
 						crate::transport::boxed::SendStream::new(SinkSend::new(Log::default())),
 						version,
@@ -9668,13 +10031,13 @@ mod tests {
 	/// exists the same value asks for nothing more.
 	#[kio::test]
 	async fn a_subscribe_update_is_not_a_close() {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let broadcast = origin.create_broadcast("room").unwrap();
-		let mut dynamic = broadcast.requests();
-		broadcast.announce(Default::default()).unwrap();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+		let mut dynamic = broadcast.broadcast().requests();
+		broadcast.announce().unwrap();
 
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-		peer_setup.set(crate::lite::Setup::default());
+		peer_setup.set(crate::lite::Setup::default()).unwrap();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let version = Version::Lite07;
 		let publisher = Publisher::new(PublisherConfig {
@@ -9777,7 +10140,7 @@ mod tests {
 		serve: RequestServe<SubscribeServe>,
 		session: ScriptedSession,
 		track: track::Producer,
-		_broadcast: crate::origin::Publication,
+		_broadcast: crate::origin::Route,
 		_origin: crate::origin::Producer,
 	}
 
@@ -9797,13 +10160,13 @@ mod tests {
 	}
 
 	async fn running() -> Running {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let broadcast = origin.create_broadcast("room").unwrap();
-		let mut dynamic = broadcast.requests();
-		broadcast.announce(Default::default()).unwrap();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+		let mut dynamic = broadcast.broadcast().requests();
+		broadcast.announce().unwrap();
 
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-		peer_setup.set(crate::lite::Setup::default());
+		peer_setup.set(crate::lite::Setup::default()).unwrap();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let version = Version::Lite07;
 		let publisher = Publisher::new(PublisherConfig {
@@ -10050,12 +10413,15 @@ mod tests {
 	/// store an undecodable tail merely because that was the downstream reader's floor.
 	#[kio::test]
 	async fn a_cold_bounded_fetch_requests_the_prefix() {
-		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
-		let broadcast = origin.create_broadcast("room").unwrap();
-		let track = broadcast.create_track("video", track::Info::timed()).unwrap();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+		let track = broadcast
+			.broadcast()
+			.create_track("video", track::Info::timed())
+			.unwrap();
 		let dynamic = track.requests();
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-		peer_setup.set(crate::lite::Setup::default());
+		peer_setup.set(crate::lite::Setup::default()).unwrap();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let publisher = Publisher::new(PublisherConfig {
 			runtime: crate::time::sim(),
@@ -10084,7 +10450,7 @@ mod tests {
 				end_frame: Some(3),
 			},
 			"video",
-			broadcast.consume(),
+			broadcast.broadcast().consume(),
 		)
 		.unwrap();
 		let request = dynamic.requested_fill_group().await.unwrap();
@@ -10097,15 +10463,18 @@ mod tests {
 	#[kio::test]
 	async fn an_expired_fetch_resets_rather_than_finishing() {
 		const VERSION: Version = Version::Lite07;
-		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
-		let broadcast = origin.create_broadcast("room").unwrap();
-		let track = broadcast.create_track("video", track::Info::timed()).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+		let track = broadcast
+			.broadcast()
+			.create_track("video", track::Info::timed())
+			.unwrap();
+		broadcast.announce().unwrap();
 		let mut open = track.append_group().unwrap();
 		open.write_frame(crate::Timestamp::ZERO, b"a".to_vec()).unwrap();
 
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-		peer_setup.set(crate::lite::Setup::default());
+		peer_setup.set(crate::lite::Setup::default()).unwrap();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let publisher = Publisher::new(PublisherConfig {
 			runtime: crate::time::sim(),
@@ -10240,10 +10609,10 @@ mod tests {
 	async fn malformed_subscribe_update_closes_after_request_setup() {
 		use kio::Task;
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
-			let origin = crate::origin::Config::new(Hop::random()).produce();
-			let broadcast = origin.create_broadcast("room").unwrap();
-			let _dynamic = broadcast.requests();
-			broadcast.announce(Default::default()).unwrap();
+			let origin = crate::origin::Config::default().produce();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+			let _dynamic = broadcast.broadcast().requests();
+			broadcast.announce().unwrap();
 			let request = lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
@@ -10267,7 +10636,7 @@ mod tests {
 				version,
 				&estimate,
 			);
-			probe.shared.peer_setup.set(lite::Setup::default());
+			probe.shared.peer_setup.set(lite::Setup::default()).unwrap();
 			let mut shared = probe.shared;
 			Arc::get_mut(&mut shared).expect("one owner").origin = origin.consume();
 			let mut control = Control {
@@ -10299,9 +10668,9 @@ mod tests {
 	async fn a_newer_listing_of_a_broadcast_replaces_the_older() {
 		use kio::Task;
 		let version = Version::Lite07;
-		let origin = crate::origin::Config::new(Hop::random()).produce();
-		let broadcast = origin.create_broadcast("room").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let origin = crate::origin::Config::default().produce();
+		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+		broadcast.announce().unwrap();
 		let request = lite::Tracks {
 			broadcast: crate::Path::from_static("room"),
 			instance: None,
@@ -10322,7 +10691,7 @@ mod tests {
 			version,
 			&estimate,
 		);
-		probe.shared.peer_setup.set(lite::Setup::default());
+		probe.shared.peer_setup.set(lite::Setup::default()).unwrap();
 		let mut shared = probe.shared;
 		Arc::get_mut(&mut shared).expect("one owner").origin = origin.consume();
 		let control = |stream| Control {
@@ -10352,10 +10721,10 @@ mod tests {
 	async fn a_producer_decode_error_stays_on_its_request() {
 		use kio::Task;
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
-			let origin = crate::origin::Config::new(Hop::random()).produce();
-			let broadcast = origin.create_broadcast("room").unwrap();
-			let mut dynamic = broadcast.requests();
-			broadcast.announce(Default::default()).unwrap();
+			let origin = crate::origin::Config::default().produce();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+			let mut dynamic = broadcast.broadcast().requests();
+			broadcast.announce().unwrap();
 			let request = lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
@@ -10379,7 +10748,7 @@ mod tests {
 				version,
 				&estimate,
 			);
-			probe.shared.peer_setup.set(lite::Setup::default());
+			probe.shared.peer_setup.set(lite::Setup::default()).unwrap();
 			let mut shared = probe.shared;
 			Arc::get_mut(&mut shared).expect("one owner").origin = origin.consume();
 			let mut control = Control {
@@ -10462,7 +10831,7 @@ mod tests {
 	/// A publisher on a session with send groups.
 	fn grouped_publisher(origin: origin::Consumer) -> (Publisher, crate::lite::test_transport::Log) {
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
-		peer_setup.set(crate::lite::Setup::default());
+		peer_setup.set(crate::lite::Setup::default()).unwrap();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let session = ScriptedSession::new(Vec::new()).with_groups();
 		let log = session.log.clone();
@@ -10538,10 +10907,10 @@ mod tests {
 	/// publisher's track priority breaks a tie between two at one subscriber priority.
 	#[kio::test]
 	async fn send_group_ranks_by_the_subscriber_then_the_publisher() {
-		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
-		let broadcast = origin.create_broadcast("a").unwrap();
-		let mut dynamic = broadcast.requests();
-		broadcast.announce(Default::default()).unwrap();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+		let broadcast = origin.route("a", crate::origin::RouteOptions::hidden()).unwrap();
+		let mut dynamic = broadcast.broadcast().requests();
+		broadcast.announce().unwrap();
 		let (publisher, log) = grouped_publisher(origin.consume());
 
 		let video = track::Info::timed().with_priority(60);

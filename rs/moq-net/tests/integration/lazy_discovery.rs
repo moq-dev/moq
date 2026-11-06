@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use moq_net::{Error, Hop, Pattern, Patterns, Version, origin};
+use moq_net::{Error, Pattern, Patterns, Version, origin};
 
 use crate::support;
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
@@ -24,7 +24,7 @@ const LINGERED: Duration = Duration::from_secs(3);
 const ANNOUNCE: u8 = 1;
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -34,7 +34,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 struct Lazy {
 	subscriber: origin::Producer,
 	pair: MockPair,
-	_broadcasts: Vec<moq_net::origin::Publication>,
+	_broadcasts: Vec<moq_net::origin::Route>,
 }
 
 impl Lazy {
@@ -47,8 +47,8 @@ impl Lazy {
 		let broadcasts = ["a/x", "b/y"]
 			.into_iter()
 			.map(|path| {
-				let broadcast = publisher.create_broadcast(path).unwrap();
-				broadcast.announce(Default::default()).unwrap();
+				let broadcast = publisher.route(path, moq_net::origin::RouteOptions::hidden()).unwrap();
+				broadcast.announce().unwrap();
 				broadcast
 			})
 			.collect();
@@ -321,8 +321,8 @@ async fn a_relay_link_asks_for_everything() {
 async fn a_server_asks_for_everything() {
 	for version in VERSIONS {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast("a/x").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = publisher.route("a/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		broadcast.announce().unwrap();
 		let relay = produce_origin(2);
 		let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 		options.client_publish = Some(publisher.consume());
@@ -340,8 +340,8 @@ async fn serving_the_peer_asks_nothing() {
 	for version in VERSIONS {
 		let local = produce_origin(2);
 		let remote = produce_origin(1);
-		let broadcast = remote.create_broadcast("a/x").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = remote.route("a/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 		options.client_publish = Some(local.consume());

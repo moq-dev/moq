@@ -70,6 +70,13 @@ impl Target {
 		}
 	}
 
+	/// Mark a declared end between the previous observation and the next. A fixed target ignores it.
+	pub(crate) fn end(&mut self) {
+		if let Self::Auto(estimator) = self {
+			estimator.end();
+		}
+	}
+
 	/// Set the codec's frame duration, the term added on top of the measurement.
 	pub(crate) fn set_frame(&mut self, frame: f64) {
 		if let Self::Auto(estimator) = self {
@@ -260,6 +267,8 @@ pub(crate) struct Estimator {
 	interval: f64,
 	/// The largest delay seen in that interval.
 	peak: f64,
+	/// A declared end precedes the next measured observation, so the silence before it is not idle.
+	ended: bool,
 
 	histogram: [f64; BUCKETS],
 	/// How much of the histogram is still the prior's rather than evidence.
@@ -276,6 +285,7 @@ impl Estimator {
 			origin: None,
 			interval: 0.0,
 			peak: 0.0,
+			ended: false,
 			histogram: std::array::from_fn(prior),
 			prior: 1.0,
 		}
@@ -309,6 +319,7 @@ impl Estimator {
 		};
 
 		let interval = ((arrival - origin) / RESAMPLE).floor();
+		let resumed = std::mem::take(&mut self.ended);
 		if interval <= self.interval {
 			self.peak = self.peak.max(delay);
 			return;
@@ -316,13 +327,31 @@ impl Estimator {
 
 		self.fold(Some(((self.peak / BUCKET).floor() as usize).min(BUCKETS - 1)));
 
-		let idle = f64::min(interval - self.interval - 1.0, IDLE_MAX);
-		for _ in 0..idle as u32 {
-			self.fold(None);
+		if resumed {
+			// A silence the publisher declared says nothing about the path, so the
+			// estimate keeps what it had and a fresh interval starts here.
+			self.origin = Some(arrival);
+			self.interval = 0.0;
+		} else {
+			// An interval with no arrival relaxes the estimate toward the prior.
+			let idle = f64::min(interval - self.interval - 1.0, IDLE_MAX);
+			for _ in 0..idle as u32 {
+				self.fold(None);
+			}
+			self.interval = interval;
 		}
-
-		self.interval = interval;
 		self.peak = delay;
+	}
+
+	/// A declared end lies between the previous observation and the next, so the
+	/// silence it declares does not relax the estimate the way an unexplained gap
+	/// does. Called before observing the first frame after the end, not at the
+	/// marker, since the stopped encoder's final packets may still follow it.
+	fn end(&mut self) {
+		// Before any observation there is no interval for the silence to stretch.
+		if self.origin.is_some() {
+			self.ended = true;
+		}
 	}
 
 	fn target(&self) -> f64 {
@@ -376,6 +405,9 @@ pub(crate) mod tests {
 		pub delay: Option<f64>,
 		pub arrival: Vec<f64>,
 		pub media: Vec<f64>,
+		/// Indices of the frames observed right after a declared end.
+		#[serde(default)]
+		pub ends: Vec<usize>,
 		pub target: Vec<(usize, f64)>,
 	}
 
@@ -414,7 +446,7 @@ pub(crate) mod tests {
 
 	/// Every case the document lists. Named rather than globbed, so a case that
 	/// goes missing fails here instead of silently shrinking the suite.
-	const CORPUS: [&str; 11] = [
+	const CORPUS: [&str; 12] = [
 		"advertised",
 		"backlog",
 		"buildup",
@@ -423,6 +455,7 @@ pub(crate) mod tests {
 		"idle",
 		"paced",
 		"reorder",
+		"silence",
 		"spike",
 		"straggler",
 		"tunein",
@@ -441,6 +474,9 @@ pub(crate) mod tests {
 
 			let series = case.series();
 			for (index, (&arrival, &media)) in case.arrival.iter().zip(&case.media).enumerate() {
+				if case.ends.contains(&index) {
+					target.end();
+				}
 				target.observe(arrival, media);
 				let actual = target.millis();
 				assert!(
@@ -463,6 +499,21 @@ pub(crate) mod tests {
 			target.observe(10.0 + i as f64 * 20.0, 14_500.0 + i as f64 * 20.0);
 		}
 		assert_eq!(target.millis(), 40.0);
+	}
+
+	/// A cold estimator has no interval for a silence to stretch, so an end before
+	/// the first observation must not linger and excuse the first unexplained gap.
+	#[test]
+	fn an_end_before_any_observation_is_ignored() {
+		let mut target = Target::new(Duration::ZERO, true, None);
+		target.set_frame(20.0);
+		target.end();
+		for i in 0..500 {
+			target.observe(50.0 + i as f64 * 20.0, i as f64 * 20.0);
+		}
+		let settled = target.millis();
+		target.observe(50.0 + 500.0 * 20.0 + 30_000.0, 500.0 * 20.0 + 30_000.0);
+		assert!(target.millis() > settled);
 	}
 
 	#[test]

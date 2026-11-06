@@ -17,7 +17,7 @@ use futures::channel::mpsc::TryRecvError;
 use futures::{SinkExt, StreamExt};
 
 use moq_net::track::Subscription;
-use moq_net::{Hop, Timestamp, Version};
+use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,
@@ -42,7 +42,8 @@ const VERSIONS: &[&str] = &[
 ];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -63,9 +64,11 @@ enum Arrival {
 async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::Error>) {
 	let version: Version = name.parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let mut track = broadcast.create_track("tail", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let mut track = broadcast.broadcast().create_track("tail", timed()).unwrap();
+	broadcast.announce().unwrap();
 
 	let relay = produce_origin(2);
 	let mut options = MockConnectOptions::new(version);

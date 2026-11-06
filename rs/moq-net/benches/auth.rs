@@ -16,7 +16,7 @@ mod support;
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::future::join_all;
-use moq_net::{Hop, Session, Version, auth, origin};
+use moq_net::{Session, Version, auth, origin};
 use std::time::Duration;
 use support::{harness, mock::create_mock_session_pair};
 
@@ -126,7 +126,7 @@ async fn publisher(origin: &origin::Producer) -> (Session, Session, auth::Reques
 	client_extensions.auth = false;
 	let mut server_extensions = moq_net::setup::Extensions::default();
 	server_extensions.solicit = false;
-	let (subscribe, driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+	let (subscribe, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 	harness::spawn(driver);
 	let client = async {
 		let (session, driver) = moq_net::Client::new()
@@ -176,7 +176,7 @@ fn renewal(c: &mut Criterion) {
 					|b, &(sessions, routes)| {
 						let _guard = runtime.enter();
 						// No hold, so an iteration times the renewal rather than the origin batching it.
-						let mut config = origin::Config::new(Hop::new(2).unwrap());
+						let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
 						config.update_hold = Duration::ZERO;
 						let (origin, driver) = origin::Producer::new(config);
 						harness::spawn(driver);
@@ -193,29 +193,34 @@ fn renewal(c: &mut Criterion) {
 							}
 							auths
 						});
-						let broadcasts: Vec<_> = (0..routes)
-							.map(|route| origin.create_broadcast(format!("room/{route}").as_str()).unwrap())
-							.collect();
-						let mut swap = |next: usize, touched: usize| {
-							for (index, broadcast) in broadcasts.iter().take(touched).enumerate() {
-								broadcast
-									.announce(origin::Route::default().with_auth(auths[index][next].clone()))
-									.unwrap();
-							}
+						let mut accept = |count: usize| {
 							runtime.block_on(async {
-								let mut issued = Vec::with_capacity(touched);
-								for _ in 0..touched {
+								let mut issued = Vec::with_capacity(count);
+								for _ in 0..count {
 									issued.push(requests.next().await.unwrap().accept(auth::Grant::all()));
 								}
 								issued
 							})
 						};
+						let broadcasts: Vec<_> = (0..routes)
+							.map(|route| {
+								origin
+									.route(
+										format!("room/{route}").as_str(),
+										origin::RouteOptions::default().with_auth(auths[route][0].clone()),
+									)
+									.unwrap()
+							})
+							.collect();
 						// Each round's grants replace the last round's, which drop once their
 						// renewals are accepted.
-						let mut held = swap(0, routes);
+						let mut held = accept(routes);
 						let mut next = 1;
 						b.iter(|| {
-							let replacements = swap(next, touched);
+							for (index, broadcast) in broadcasts.iter().take(touched).enumerate() {
+								broadcast.set_auth(Some(auths[index][next].clone())).unwrap();
+							}
+							let replacements = accept(touched);
 							drop(held.splice(..touched, replacements));
 							next ^= 1;
 						});
@@ -246,11 +251,12 @@ fn waiting(c: &mut Criterion) {
 					&(tokens, paths),
 					|b, &(tokens, paths)| {
 						let _guard = runtime.enter();
-						let mut config = origin::Config::new(Hop::new(2).unwrap());
+						let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
 						config.update_hold = Duration::ZERO;
 						let (publish, driver) = origin::Producer::new(config);
 						harness::spawn(driver);
-						let (receive, driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+						let (receive, driver) =
+							origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 						harness::spawn(driver);
 						let mut pair = runtime.block_on(pair(
 							version.parse().unwrap(),
@@ -274,9 +280,13 @@ fn waiting(c: &mut Criterion) {
 								generation += 1;
 								let broadcasts: Vec<_> = (0..paths)
 									.map(|path| {
-										let broadcast =
-											publish.create_broadcast(format!("{prefix}{path}").as_str()).unwrap();
-										broadcast.announce(Default::default()).unwrap();
+										let broadcast = publish
+											.route(
+												format!("{prefix}{path}").as_str(),
+												moq_net::origin::RouteOptions::hidden(),
+											)
+											.unwrap();
+										broadcast.announce().unwrap();
 										broadcast
 									})
 									.collect();
@@ -337,7 +347,7 @@ fn shared_requests(c: &mut Criterion) {
 				&(tokens, requests),
 				|b, &(tokens, requests)| {
 					let _guard = runtime.enter();
-					let mut config = origin::Config::new(Hop::new(2).unwrap());
+					let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
 					config.update_hold = Duration::ZERO;
 					let (origin, driver) = origin::Producer::new(config);
 					harness::spawn(driver);
@@ -360,9 +370,9 @@ fn shared_requests(c: &mut Criterion) {
 								for request in 0..requests {
 									broadcasts.push(
 										origin
-											.publish(
+											.route(
 												format!("{prefix}/{token}/{request}").as_str(),
-												origin::Route::default().with_auth(auth.clone()),
+												moq_net::origin::RouteOptions::default().with_auth(auth.clone()),
 											)
 											.unwrap(),
 									);

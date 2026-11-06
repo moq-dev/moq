@@ -10,7 +10,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Error, Hop, StreamError, Timestamp, Version};
+use moq_net::{Error, StreamError, Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const VERSIONS: [&str; 3] = ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
@@ -22,7 +22,8 @@ fn timed() -> moq_net::track::Info {
 }
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -31,7 +32,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 /// to the relay, with `bcast` resolved at the relay and the far end.
 struct Relayed {
 	_publisher: moq_net::origin::Producer,
-	broadcast: moq_net::origin::Publication,
+	broadcast: moq_net::origin::Route,
 	upstream: MockPair,
 	_downstream: MockPair,
 	relayed: moq_net::broadcast::Consumer,
@@ -52,8 +53,10 @@ async fn relayed(version: &str) -> Relayed {
 	let publisher = produce_origin(1);
 	let relay = produce_origin(2);
 	let far = produce_origin(3);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	broadcast.announce().unwrap();
 
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(publisher.consume());
@@ -106,7 +109,7 @@ fn assert_ended(result: Result<(), Error>, expected: StreamError, version: &str)
 async fn request_in_flight_to_a_dead_upstream_is_unroutable() {
 	for version in VERSIONS {
 		let setup = relayed(version).await;
-		let _track = setup.broadcast.create_track("catalog", timed()).unwrap();
+		let _track = setup.broadcast.broadcast().create_track("catalog", timed()).unwrap();
 		// The relay's requests never reach the publisher.
 		setup.upstream.client_transport.hold_bidis();
 		let relayed = kio::clock::sim::spawn(read_to_end(setup.relayed.clone(), "catalog"));
@@ -130,7 +133,7 @@ async fn request_in_flight_to_a_dead_upstream_is_unroutable() {
 async fn track_in_flight_through_a_dead_upstream_is_unroutable() {
 	for version in VERSIONS {
 		let setup = relayed(version).await;
-		let track = setup.broadcast.create_track("video", timed()).unwrap();
+		let track = setup.broadcast.broadcast().create_track("video", timed()).unwrap();
 		let mut sub = setup.remote.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, b"head".as_ref()).unwrap();
@@ -158,7 +161,7 @@ async fn track_in_flight_through_a_dead_upstream_is_unroutable() {
 async fn withdrawn_broadcast_keeps_the_source_error() {
 	for version in VERSIONS {
 		let setup = relayed(version).await;
-		let track = setup.broadcast.create_track("video", timed()).unwrap();
+		let track = setup.broadcast.broadcast().create_track("video", timed()).unwrap();
 		let mut sub = setup.remote.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, b"head".as_ref()).unwrap();
@@ -168,7 +171,7 @@ async fn withdrawn_broadcast_keeps_the_source_error() {
 			.expect("group timeout")
 			.unwrap()
 			.unwrap();
-		setup.broadcast.unannounce();
+		setup.broadcast.withdraw();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		track.abort(Error::App(7)).unwrap();
 		let result = kio::clock::timeout(TIMEOUT, async {
@@ -186,8 +189,8 @@ async fn withdrawn_broadcast_keeps_the_source_error() {
 async fn subscribe_after_withdrawal_is_unroutable() {
 	for version in VERSIONS {
 		let setup = relayed(version).await;
-		let _track = setup.broadcast.create_track("video", timed()).unwrap();
-		setup.broadcast.unannounce();
+		let _track = setup.broadcast.broadcast().create_track("video", timed()).unwrap();
+		setup.broadcast.withdraw();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		for broadcast in [setup.relayed.clone(), setup.remote.clone()] {
 			let result = kio::clock::timeout(TIMEOUT, read_to_end(broadcast, "video"))

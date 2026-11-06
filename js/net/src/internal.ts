@@ -12,8 +12,9 @@ import type * as datagram from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
 import { toStreamCode } from "./error.ts";
 import type { Frame, FrameConsumer, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
-import { isAnonymous, type Route } from "./hop.ts";
+import { isAnonymous, type WireRoute } from "./hop.ts";
 import type * as Instance from "./instance.ts";
+import type { Consumer as OriginConsumer, Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type {
@@ -32,6 +33,9 @@ import { max, min } from "./util/sequence.ts";
 import * as Varint from "./varint.ts";
 import type { Resolved, Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
+
+/** The hidden broadcast segment reserved for socket endpoints. */
+export const SOCKET = ".socket";
 
 /** What a null {@link Delay.max} goes out as: the largest value every peer can read, as Rust sends for `None`. */
 export const NO_MAX_DELAY = Milli(Varint.MAX_U53);
@@ -132,12 +136,12 @@ export function presented(
  * candidate supersedes. Supersession is decided among what the reader may see, so a higher epoch
  * it cannot see never hides a route it can.
  */
-export function firstEligible<T extends { readonly route: Route; readonly prefix?: Path.Valid }>(
+export function firstEligible<T extends { readonly route: WireRoute; readonly prefix?: Path.Valid }>(
 	candidates: readonly T[],
 	admits: (candidate: T) => boolean = () => true,
 ): T | undefined {
 	const admitted = candidates.filter(admits);
-	const byPrefix = new Map<Path.Valid | undefined, Route[]>();
+	const byPrefix = new Map<Path.Valid | undefined, WireRoute[]>();
 	for (const candidate of admitted) {
 		const routes = byPrefix.get(candidate.prefix);
 		if (routes) routes.push(candidate.route);
@@ -336,6 +340,8 @@ export interface Land {
  * buffer of its own. Implemented by `resume.ts`, the counterpart of the Rust `Inner::Resume`.
  */
 export interface ResumeSource {
+	/** Observe a serving copy's abort, including delivery failures a resumable reader waits past. */
+	watchError(fn: (error: Error) => void): Dispose;
 	/** Re-evaluate a live-edge join at the serving copy. */
 	join(): void;
 	/**
@@ -403,6 +409,8 @@ export interface TrackRequestOptions {
 	producer: Producer;
 	/** Requests not yet accepted or rejected by the publisher. */
 	pending: Set<Request>;
+	/** Metadata-only readers holding this request, if its broadcast supports them. */
+	lookups?: { pending: Getter<number>; opened: boolean };
 }
 
 /**
@@ -447,8 +455,14 @@ export const hooks: {
 	closeUnusedDatagrams: (producer: datagram.Producer) => boolean;
 	/** Follow this consumer's subscriber priority for transport scheduling. */
 	datagramPriority: (consumer: datagram.Consumer) => Getter<number>;
+	/** Forward data carried by an existing stream without contributing another subscription's demand. */
+	observeDatagrams: (producer: datagram.Producer) => datagram.Consumer;
 	/** Settles once this consumer is closed, the end of whatever request it serves. */
 	datagramClosed: (consumer: datagram.Consumer) => GetPromise<Error | null>;
+	/** Whether two consumers read the same datagram track. */
+	datagramSameTrack: (a: datagram.Consumer, b: datagram.Consumer) => boolean;
+	/** Another consumer at the same position that adds no demand, until its priority is set. */
+	observeDatagramConsumer: (consumer: datagram.Consumer) => datagram.Consumer;
 	/**
 	 * Declare the end a wire subscription received: repeating it is a no-op, and a mid-group
 	 * end may refine the group boundary it falls just before. Throws `ProtocolViolation` on
@@ -596,6 +610,8 @@ export const hooks: {
 	 * Whether a subscriber's track ended and it holds nothing left to read: no group in `[start, end)` that `delivered` lacks.
 	 */
 	spent: (subscriber: Subscriber, start: bigint, end: bigint | undefined, delivered: Delivered) => boolean;
+	/** Whether a subscriber's last read waits on a fill that still owes it a group. Mirrors the Rust `awaits_fill`. */
+	awaitsFill: (subscriber: Subscriber) => boolean;
 	/**
 	 * Mark a wire publisher's reader to park past the end of a bounded window rather than end the
 	 * read there, since its peer reads the end of a stream as the track's. Mirrors the Rust
@@ -644,6 +660,8 @@ export const hooks: {
 	fetchBudget: (subscriber: Subscriber, maxDelay: Milli | undefined) => void;
 	/** Whether a reader beyond one-shot fetches subscribes to this copy. */
 	subscribing: (producer: Producer) => Getter<boolean>;
+	/** The aggregate across every reader, one-shot fetches included: what the wire asks for. */
+	requested: (producer: Producer) => Getter<Subscription | undefined>;
 	/** Leave a wire copy serving its cache and fills without a live feed. */
 	cacheTrack: (producer: Producer) => void;
 	/** Fail subscriptions reaching beyond `edge`, keeping history readers and one-shot fetches. */
@@ -728,14 +746,23 @@ export const hooks: {
 	 * mirror is released too: not when its group reads on, or may yet, from another copy.
 	 */
 	evictGroup: (group: GroupConsumer) => boolean;
-	/** Attach the origin advertisement of a created broadcast. */
-	attachAnnouncer: (
-		producer: BroadcastProducer,
-		announcer: { announce(route: Route): void; unannounce(): void; route(): Route | undefined },
-	) => void;
-
 	/** Call `fn` synchronously when an open broadcast closes, from any handle. */
 	onClosed: (producer: BroadcastProducer, fn: () => void) => Dispose;
+	/** Reserve an on-demand track without listing it or enabling a request handler. */
+	reserveUnlistedTrack: (producer: BroadcastProducer, name: string) => Request;
+	/** Whether a subscriber or a metadata lookup still holds a requested track. */
+	requestWanted: (request: Request) => Getter<boolean>;
+	/** Transfer a metadata-opened request to its session's producer lifetime. */
+	keepRequest: (request: Request) => void;
+	/** Observe the peer's reset without waiting for routed delivery recovery. */
+	watchSubscriberError: (subscriber: Subscriber, fn: (error: Error) => void) => Dispose;
+	/**
+	 * Count a session withholding the origin's hidden broadcasts from its peer, such as a
+	 * moq-lite client before 07, whose peer can't ask for them, until disposed.
+	 */
+	withholdHidden: (origin: OriginConsumer) => Dispose;
+	/** How many sessions withhold the origin's hidden broadcasts from their peer. */
+	hiddenWithheld: (origin: OriginProducer) => Getter<number>;
 	/** Name a broadcast handle by the path an origin created or resolved it at. */
 	stampPath: (target: BroadcastProducer | BroadcastConsumer, path: Path.Valid) => void;
 	/** Name the instance of the route an origin resolved a broadcast handle through. */
@@ -751,10 +778,19 @@ export const hooks: {
 	closeUnusedDatagrams: () => {
 		throw new Error("datagram module not loaded");
 	},
+	observeDatagrams: () => {
+		throw new Error("datagram module not loaded");
+	},
 	datagramPriority: () => {
 		throw new Error("datagram module not loaded");
 	},
 	datagramClosed: () => {
+		throw new Error("datagram module not loaded");
+	},
+	datagramSameTrack: () => {
+		throw new Error("datagram module not loaded");
+	},
+	observeDatagramConsumer: () => {
 		throw new Error("datagram module not loaded");
 	},
 	endTrack: () => {
@@ -874,6 +910,9 @@ export const hooks: {
 	spent: () => {
 		throw new Error("track.ts not loaded");
 	},
+	awaitsFill: () => {
+		throw new Error("track.ts not loaded");
+	},
 	parked: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -915,6 +954,9 @@ export const hooks: {
 	},
 	subscribing: () => {
 		throw new Error("track module not loaded");
+	},
+	requested: () => {
+		throw new Error("track.ts not loaded");
 	},
 	fetchBudget: () => {
 		throw new Error("track.ts not loaded");
@@ -1012,12 +1054,26 @@ export const hooks: {
 	evictGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
-	attachAnnouncer: () => {
-		throw new Error("broadcast.ts not loaded");
-	},
-
 	onClosed: () => {
 		throw new Error("broadcast.ts not loaded");
+	},
+	reserveUnlistedTrack: () => {
+		throw new Error("broadcast.ts not loaded");
+	},
+	requestWanted: () => {
+		throw new Error("track.ts not loaded");
+	},
+	keepRequest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	watchSubscriberError: () => {
+		throw new Error("track.ts not loaded");
+	},
+	withholdHidden: () => {
+		throw new Error("origin.ts not loaded");
+	},
+	hiddenWithheld: () => {
+		throw new Error("origin.ts not loaded");
 	},
 	stampPath: () => {
 		throw new Error("broadcast.ts not loaded");
@@ -1083,7 +1139,7 @@ export function* coveringPrefixes(path: Path.Valid): Generator<Path.Valid> {
  * a higher epoch at the same prefix. An older incarnation of an instance is never eligible,
  * however cheap, since its publisher was replaced.
  */
-export function superseded(route: Route, others: Iterable<Route>): boolean {
+export function superseded(route: WireRoute, others: Iterable<WireRoute>): boolean {
 	return new Epochs(others).supersedes(route);
 }
 
@@ -1095,7 +1151,7 @@ export function superseded(route: Route, others: Iterable<Route>): boolean {
 export class Epochs {
 	readonly #highest = new Map<Instance.Valid | undefined, bigint>();
 
-	constructor(routes: Iterable<Route>) {
+	constructor(routes: Iterable<WireRoute>) {
 		for (const route of routes) {
 			const epoch = route.epoch ?? 0n;
 			if (epoch === 0n) continue;
@@ -1105,14 +1161,14 @@ export class Epochs {
 	}
 
 	/** Whether a route carries `route`'s instance at a higher epoch. */
-	supersedes(route: Route): boolean {
+	supersedes(route: WireRoute): boolean {
 		const highest = this.#highest.get(route.instance);
 		return highest !== undefined && highest > (route.epoch ?? 0n);
 	}
 }
 
 /** Prefer identified publishers, then lower static cost. */
-export function compareRoutes(a: Route, b: Route): number {
+export function compareRoutes(a: WireRoute, b: WireRoute): number {
 	return Number(isAnonymous(a)) - Number(isAnonymous(b)) || (a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0);
 }
 
@@ -1124,7 +1180,7 @@ export function compareRoutes(a: Route, b: Route): number {
  * matching `route_order` in rs/moq-net for routes a node did not get from a cluster peer, which
  * is every route here.
  */
-export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: Route, b: Route): number {
+export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): number {
 	const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
 	if (order !== 0 || path === prefix) return order;
 	const ha = spreadHash(path, a.instance ?? "");

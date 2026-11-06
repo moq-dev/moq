@@ -8,21 +8,22 @@ handoffs for transports established elsewhere: `accept_with(transport, link)`
 on the listener and `connect_with(transport)` on the client, which run the
 moq-net accept or connect policy over an already-connected session and return
 the usual request or session. moq-tokio's own `webrtc` module goes through
-them, so the [WebRTC rename](/quest/m1/webrtc-rename.md) moves it into
+them, so the [WebRTC rename](/quest/m2/webrtc-rename.md) moves it into
 moq-webrtc without reaching into moq-tokio's internals.
 
 ## Plan
 
 Part of [Session policy lives in moq-net](/quest/m1/session-policy/README.md);
-see it for the decisions and research. This is what
-[moq-dev/moq#7804](https://github.com/moq-dev/moq/pull/7804) and the
-[WebRTC rename](/quest/m1/webrtc-rename.md) wait on: the maintainer decided on
+see it for the decisions and research. This is what the
+[WebRTC rename](/quest/m2/webrtc-rename.md) waits on
+([moq-dev/moq#7804](https://github.com/moq-dev/moq/pull/7804), which first
+asked, closed unmerged): the maintainer decided on
 2026-11-04 to move the policy first, so the handoff is a few lines over
 moq-net rather than a copy of the policy.
 
 - The handoff's signature (transport plus link metadata in, request or session
   out) is fixed by this quest and does not change if policy moves further.
-- Delete moq-tokio's now-unused `Deadline`, `Backoff` and the like, and its
+- Delete moq-tokio's now-unused `Backoff` and the like (the accept `Deadline` already went), and its
   per-transport `Request` construction that moq-net now owns. Bounding the
   transport handshake (`within`) stays here, since moq-net has no session yet
   at that point.
@@ -33,8 +34,3 @@ moq-net rather than a copy of the policy.
 
 Public API: moq-tokio adds `accept_with` and `connect_with` and drops internals
 it re-exported, with MIGRATE notes. Wire: none.
-
-## Required
-
-- [Accept policy in moq-net](/quest/m1/session-policy/accept.md) - the accept policy the handoff runs
-- [Connect policy in moq-net](/quest/m1/session-policy/connect.md) - the connect policy the handoff runs

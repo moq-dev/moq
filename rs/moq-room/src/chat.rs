@@ -226,7 +226,7 @@ mod tests {
 
 	/// An origin at `hop`, its driver spawned.
 	fn origin(hop: u64) -> moq_net::origin::Producer {
-		let config = moq_net::origin::Config::new(moq_net::Hop::new(hop).unwrap());
+		let config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 		let (producer, driver) = moq_net::origin::Producer::new(config);
 		tokio::spawn(moq_net::time::run(driver));
 		producer
@@ -275,9 +275,11 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_warm_copy_starts_at_the_newest_window() {
 		let publisher = origin(1);
-		let broadcast = publisher.create_broadcast("room").unwrap();
-		let track = broadcast.create_track(TRACK, info()).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = publisher
+			.route("room", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let track = broadcast.broadcast().create_track(TRACK, info()).unwrap();
+		broadcast.announce().unwrap();
 		let mut demand = track.demand();
 		let mut chat = moq_json::window::Producer::<String>::new(
 			track,

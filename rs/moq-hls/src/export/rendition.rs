@@ -2308,6 +2308,9 @@ impl WatchMedia {
 					};
 					let subscription = moq_net::track::Subscription::default()
 						.with_delay(moq_net::track::Delay::default().with_max(FEED_MAX_DELAY));
+					// The index is the export's own bookkeeping, not delivery to a client, so a
+					// metered source counts only the segments and inits clients fetch.
+					let track = track.unmetered();
 					let subscribing = track.subscribe(subscription).into_inner();
 					self.step = Step::Subscribing {
 						_track: track,
@@ -2792,16 +2795,20 @@ mod tests {
 	#[tokio::test]
 	async fn pending_reads_preserve_a_later_authorization_refusal() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("room/live").unwrap();
-		let dynamic = origin.requests("room/secret").unwrap();
-		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
+		let broadcast = origin
+			.route("room/live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let dynamic = origin
+			.route_prefix("room/secret", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		let source = moq_mux::Source::new(origin.consume(), broadcast.broadcast().consume());
 		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.broadcast = Some(moq_net::path::Relative::new("./secret").unwrap());
 		let renditions = renditions::Producer::spawned(Duration::from_secs(30));
 		let rendition = Arc::new(
 			Rendition::video("video".into(), &config, &source, interval(), None, renditions.fanout()).unwrap(),
 		);
-		let request = dynamic.requested_broadcast().await.unwrap();
+		let request = dynamic.requested().await.unwrap();
 		let row = segments::Row {
 			index: 0,
 			segment: 0,
@@ -2939,8 +2946,10 @@ mod tests {
 	#[test]
 	fn a_gone_publisher_is_unservable_and_an_ietf_miss_is_not() {
 		let origin = produce_origin();
-		let producer = origin.create_broadcast("live").expect("publish allowed");
-		let live = producer.consume();
+		let producer = origin
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.expect("publish allowed");
+		let live = producer.broadcast().consume();
 		let ietf_miss = over_ietf_miss();
 		assert!(
 			!is_gone_publisher(&ietf_miss, &live),
@@ -2963,8 +2972,8 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_refusal_wait_wakes_on_a_media_failure() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("live").unwrap();
-		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
+		let broadcast = origin.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let source = moq_mux::Source::new(origin.consume(), broadcast.broadcast().consume());
 		let config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		let renditions = renditions::Producer::spawned(Duration::from_secs(30));
 		let rendition = Arc::new(

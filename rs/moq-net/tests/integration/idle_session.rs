@@ -14,7 +14,7 @@ use std::{
 	time::Duration,
 };
 
-use moq_net::{Hop, Version, bandwidth::Rate, origin};
+use moq_net::{Version, bandwidth::Rate, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 use support::mock::MockStats;
 
@@ -41,7 +41,7 @@ async fn viewer(
 	options.server_publish = Some(origin.consume());
 	// Driven, so its readers' interests reach the session and the viewer asks for what
 	// the server publishes.
-	let (subscribe, driver) = origin::Producer::new(origin::Config::new(Hop::new(2).unwrap()));
+	let (subscribe, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(2).unwrap()));
 	support::harness::spawn(driver);
 	options.client_subscribe = Some(subscribe);
 	options.stats = STATS;
@@ -55,7 +55,7 @@ async fn viewer(
 }
 
 fn origin() -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 	support::harness::spawn(driver);
 	origin
 }
@@ -95,8 +95,8 @@ async fn busy_viewer_sees_the_estimate_move() {
 			..STATS
 		});
 		// Server work for this session: announcing a broadcast to the viewer.
-		let broadcast = origin.create_broadcast("live").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+		broadcast.announce().unwrap();
 
 		let moved = kio::clock::timeout(Duration::from_millis(1), probe.changed()).await;
 		assert_eq!(

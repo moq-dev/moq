@@ -5,11 +5,11 @@
 
 use crate::support;
 
-use moq_net::{Hop, Version, cache, origin};
+use moq_net::{Version, cache, origin};
 use support::harness::peer;
 
 fn produce(hop: u64) -> origin::Producer {
-	let mut config = origin::Config::new(Hop::new(hop).unwrap());
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	config.pool = cache::Pool::unbounded();
 	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
@@ -21,17 +21,19 @@ fn produce(hop: u64) -> origin::Producer {
 /// lite-06's QUIC varint, while the relay's own hop still follows it.
 #[kio::test]
 async fn widest_hop_crosses_each_varint_form() {
-	for (downstream, forwarded) in [("moq-lite-06", Hop::UNKNOWN.id()), ("moq-lite-07-wip", u64::MAX)] {
+	for (downstream, forwarded) in [("moq-lite-06", 0), ("moq-lite-07-wip", u64::MAX)] {
 		let source = produce(u64::MAX);
 		let relay = produce(2);
 		let sink = produce(3);
 		let upstream: Version = "moq-transport-18".parse().unwrap();
 		let _upstream = peer(upstream, &source, &relay).await;
 		let _downstream = peer(downstream.parse().unwrap(), &relay, &sink).await;
-		let _route = source.requests("room").unwrap();
+		let _route = source
+			.route_prefix("room", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		kio::clock::sim::idle().await;
 
-		let ids = |route: origin::Route| route.hops.iter().map(|hop| hop.id()).collect::<Vec<_>>();
+		let ids = |route: origin::RouteInfo| route.hops().collect::<Vec<_>>();
 		let at_relay = crate::support::announced(&relay.consume(), "room").await;
 		assert_eq!(ids(at_relay), [u64::MAX], "{downstream}");
 		let at_sink = crate::support::announced(&sink.consume(), "room").await;

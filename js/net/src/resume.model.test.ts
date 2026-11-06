@@ -17,7 +17,7 @@ import fc from "fast-check";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { NotFound, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
-import { HopSchema, Route } from "./hop.ts";
+import { HopSchema, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import { type Consumer as OriginConsumer, Producer as OriginProducer, type Requesting } from "./origin.ts";
@@ -447,7 +447,7 @@ class Model {
 	up(instance: number, slot: number): void {
 		const publisher = this.instances[instance];
 		if (publisher.routes[slot]) return;
-		const route = Route.normalize({
+		const route = WireRoute.normalize({
 			instance: INSTANCES[instance],
 			hops: [HopSchema.parse(BigInt(10 * (instance + 1) + slot))],
 			// The second instance's routes all undercut the first's.
@@ -1046,6 +1046,19 @@ test("regressions", async () => {
 				{ kind: "ranges", reader: 0, range: [1, 2] },
 				{ kind: "write", instance: 1, slot: 0, group: 0, frames: 1 },
 				{ kind: "ranges", reader: 0, range: [0, 1] },
+			],
+			finish: false,
+		},
+		// A switch's backfill of a group the finished route never had lets the track end.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "up", instance: 1, slot: 2 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "write", instance: 1, slot: 1, group: 11, frames: 1 },
+				{ kind: "write", instance: 1, slot: 2, group: 1, frames: 1 },
+				{ kind: "down", instance: 1, slot: 2 },
+				{ kind: "end", instance: 1, slot: 1 },
 			],
 			finish: false,
 		},

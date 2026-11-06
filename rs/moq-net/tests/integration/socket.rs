@@ -11,7 +11,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use moq_net::broadcast::TracksEvent;
 use moq_net::socket::{Endpoint, TcpStream, TrackStream};
-use moq_net::{Error, Hop, Version, frame, group, origin, track};
+use moq_net::{Error, Version, frame, group, origin, track};
 
 use crate::support::harness::{MockConnectOptions, MockPair, connect_mock, spawn};
 
@@ -24,7 +24,7 @@ const LITE: &str = "moq-lite-07-wip";
 const IETF: &str = "moq-transport-18";
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	origin
 }
@@ -284,16 +284,18 @@ struct ByHand {
 	/// Carol's half, which she writes groups to as she likes.
 	half: track::Producer,
 	_dialed: track::Subscriber,
-	_endpoint: origin::Publication,
+	_endpoint: origin::Route,
 	_carol: origin::Producer,
 }
 
 /// Dial bob by hand from carol in a `tcp` session.
 async fn dial_by_hand(fixture: &mut Fixture, bob: &Endpoint) -> ByHand {
 	let carol = fixture.client(LITE).await;
-	let endpoint = carol.create_broadcast("room/.socket/carol").unwrap();
-	endpoint.announce(Default::default()).unwrap();
-	let mut requests = endpoint.requests();
+	let endpoint = carol
+		.route("room/.socket/carol", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	endpoint.announce().unwrap();
+	let mut requests = endpoint.broadcast().requests();
 	let name = "tcp/carol/bob/0123456789abcdef0123456789abcdef";
 	let broadcast = kio::clock::timeout(TIMEOUT, carol.consume().request("room/.socket/bob", None))
 		.await
@@ -605,9 +607,11 @@ async fn an_accept_waits_for_its_dialer() {
 		"bob's accept ended before carol announced"
 	);
 
-	let endpoint = carol.create_broadcast("room/.socket/carol").unwrap();
-	let mut requests = endpoint.requests();
-	endpoint.announce(Default::default()).unwrap();
+	let endpoint = carol
+		.route("room/.socket/carol", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let mut requests = endpoint.broadcast().requests();
+	endpoint.announce().unwrap();
 	let answer = async {
 		let request = kio::wait(|waiter| requests.poll_requested_track(waiter)).await.unwrap();
 		assert_eq!(request.name(), name);
@@ -858,6 +862,64 @@ async fn an_endpoint_not_accepting_resets_dials() {
 		.await
 		.expect("dial timeout");
 	assert!(dialed.is_err(), "a dial to an endpoint not accepting connected");
+}
+
+/// An acceptor can finish its initial burst before the dialer gets the answer.
+///
+/// Over moq-lite only: moq-net endpoints never speak moq-transport to each other, and
+/// over it the groups below the answer's Largest come from one range FETCH, which our
+/// own publishers refuse past a single group.
+#[kio::test]
+async fn the_first_burst_survives_a_late_subscribe_answer() {
+	let mut fixture = Fixture::new();
+	let alice = fixture.endpoint(LITE, "alice").await;
+	let bob = fixture.endpoint(LITE, "bob").await;
+	let dial = alice.dial_track("bob", None).unwrap();
+	let accept = async {
+		let stream = bob.accept_track().await.unwrap().accept(None).await.unwrap();
+		for payload in [b"one", b"two", b"six"] {
+			send(&stream.producer, payload);
+		}
+		stream.producer.finish().unwrap();
+		stream
+	};
+	let (dialed, accepted) = futures::join!(dial, accept);
+	let dialed = dialed.unwrap();
+	dialed.producer.finish().unwrap();
+	let mut reader = dialed.consumer.ordered();
+	for payload in [b"one", b"two", b"six"] {
+		assert_eq!(recv(&mut reader).await.unwrap().unwrap(), payload);
+	}
+	assert_eq!(recv(&mut reader).await.unwrap(), None);
+	assert_eq!(recv(&mut accepted.consumer.ordered()).await.unwrap(), None);
+}
+
+/// TCP must also recover every frame when FIN overtakes the subscription answer.
+#[kio::test]
+async fn the_first_tcp_writes_survive_a_late_subscribe_answer() {
+	for version in [LITE, IETF, "moq-transport-20", "moq-transport-22"] {
+		let mut fixture = Fixture::new();
+		let alice = fixture.endpoint(version, "alice").await;
+		let bob = fixture.endpoint(version, "bob").await;
+		let dial = alice.dial_tcp("bob").unwrap();
+		let accept = async {
+			let mut stream = bob.accept_tcp().await.unwrap().accept().await.unwrap();
+			for payload in [b"first".as_slice(), b"", b"last"] {
+				stream.producer.write_frame(None, payload).unwrap();
+			}
+			stream.producer.finish().unwrap();
+			stream
+		};
+		let (dialed, accepted) = futures::join!(dial, accept);
+		let mut dialed = dialed.unwrap();
+		let mut accepted = accepted;
+		for payload in [b"first".as_slice(), b"", b"last"] {
+			assert_eq!(read(&mut dialed.consumer).await.unwrap().unwrap(), payload, "{version}");
+		}
+		assert_eq!(read(&mut dialed.consumer).await.unwrap(), None);
+		dialed.producer.finish().unwrap();
+		assert_eq!(read(&mut accepted.consumer).await.unwrap(), None);
+	}
 }
 
 /// The moq-lite versions before hidden broadcasts.

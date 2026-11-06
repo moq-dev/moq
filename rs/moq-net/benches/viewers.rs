@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Hop, Timestamp, kio, origin};
+use moq_net::{Timestamp, kio, origin};
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
@@ -69,7 +69,7 @@ struct Room {
 	producer: origin::Producer,
 	driver: origin::Driver,
 	broadcasts: usize,
-	_sources: Vec<(origin::Publication, moq_net::track::Producer)>,
+	_sources: Vec<(origin::Route, moq_net::track::Producer)>,
 }
 
 impl Room {
@@ -77,8 +77,10 @@ impl Room {
 		let (producer, driver) = origin::Producer::new(origin::Config::default());
 		let _sources = (0..broadcasts)
 			.map(|i| {
-				let broadcast = producer.publish(format!("room/{i}"), origin::Route::default()).unwrap();
-				let track = broadcast.create_track("video", timed()).unwrap();
+				let broadcast = producer
+					.route(format!("room/{i}"), moq_net::origin::RouteOptions::default())
+					.unwrap();
+				let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 				let mut group = track.append_group().unwrap();
 				group.write_frame(Timestamp::ZERO, b"frame".as_ref()).unwrap();
 				group.finish().unwrap();
@@ -112,7 +114,8 @@ impl Room {
 
 	/// Viewer `n` joins and reads the latest group of its broadcast.
 	fn join(&mut self, n: usize) -> moq_net::track::Subscriber {
-		let session = moq_net::fuzz::excluding(self.producer.consume(), Hop::random());
+		// Each viewer's own peer id, clear of the origin's random one below 2^53.
+		let session = moq_net::fuzz::excluding(self.producer.consume(), (1 << 60) + n as u64);
 		let path = format!("room/{}", n % self.broadcasts);
 		let resolved = self.drive(session.request(path, None)).unwrap();
 		let mut subscription = self.drive(resolved.track("video").unwrap().subscribe(None)).unwrap();
@@ -183,7 +186,10 @@ fn bench_churn(c: &mut Criterion) {
 				room.leave(subscription);
 			}
 			b.iter(|| {
-				let covering = room.producer.requests("room").unwrap();
+				let covering = room
+					.producer
+					.route_prefix("room", moq_net::origin::RouteOptions::default())
+					.unwrap();
 				room.poll();
 				drop(covering);
 				room.poll();

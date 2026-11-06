@@ -28,13 +28,12 @@ import {
 	type SubscribeFinish,
 	SubscribeUpdate,
 } from "./subscribe.ts";
-import { Track as TrackMessage } from "./track.ts";
+import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { ALPN_05, ALPN_06, ALPN_07_WIP, hasRanges, keepsSubscribeOpen, Version } from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
-	const broadcastPublication = origin.createBroadcast(path);
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(path);
+	const broadcast = broadcastRoute.broadcast;
 	return broadcast;
 }
 
@@ -116,9 +115,8 @@ test.each([
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-	const broadcastPublication = origin.createBroadcast(Path.from("cam"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce({ cost: 7n });
+	const broadcastRoute = origin.route(Path.from("cam"), { cost: 7n });
+	const broadcast = broadcastRoute.broadcast;
 
 	const written: Uint8Array[] = [];
 	const stream = new Stream({
@@ -136,7 +134,7 @@ test.each([
 	const initial = written.length;
 	expect(initial).toBeGreaterThan(0);
 
-	broadcastPublication.announce({ cost: 9n });
+	broadcastRoute.setCost(9n);
 	await settle();
 	expect(written.length > initial).toBe(sent);
 
@@ -734,7 +732,7 @@ async function servedSubscription(
 		broadcast = new BroadcastProducer();
 		const front = new Front();
 		front.serve(broadcast.consume());
-		const dynamic = origin.requestsRoute(Path.from("test"));
+		const dynamic = origin.routePrefix(Path.from("test"));
 		void (async () => {
 			for await (const request of dynamic.requested()) request.serve(front.consumer);
 		})();
@@ -2831,9 +2829,8 @@ test("lite draft-06: announces wait for the setup grant", async () => {
 		answered = resolve;
 	});
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), { grant, ready });
-	const broadcastPublication = origin.createBroadcast(Path.from("foo/bar"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("foo/bar"));
+	const broadcast = broadcastRoute.broadcast;
 
 	const written: Uint8Array[] = [];
 	const stream = new Stream({
@@ -2909,7 +2906,7 @@ test("lite draft-06: closing while announces wait for the setup grant does not h
 test("lite draft-06: a grant that shrinks while a TRACK resolves refuses it", async () => {
 	const pair = createMockTransportPair(ALPN_06);
 	const origin = new OriginProducer();
-	const handle = origin.requestsRoute(Path.from("live"));
+	const handle = origin.routePrefix(Path.from("live"));
 	const requests = handle.requested();
 	const grant = new Signal<Grant | undefined>(grantOf("live"));
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), {
@@ -2950,7 +2947,7 @@ test("lite draft-06: a grant that shrinks while a TRACK resolves refuses it", as
 test("lite draft-06: a grant that shrinks while TRACK_INFO is blocked resets it", async () => {
 	const pair = createMockTransportPair(ALPN_06);
 	const origin = new OriginProducer();
-	const handle = origin.requestsRoute(Path.from("live"));
+	const handle = origin.routePrefix(Path.from("live"));
 	const requests = handle.requested();
 	const grant = new Signal<Grant | undefined>(grantOf("live"));
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), {
@@ -3013,7 +3010,7 @@ test("lite draft-06: a grant that shrinks while TRACK_INFO is blocked resets it"
 test("lite draft-06: a grant that shrinks while the broadcast resolves resets the subscription", async () => {
 	const pair = createMockTransportPair(ALPN_06);
 	const origin = new OriginProducer();
-	const handle = origin.requestsRoute(Path.from("live"));
+	const handle = origin.routePrefix(Path.from("live"));
 	const requests = handle.requested();
 	const grant = new Signal<Grant | undefined>(grantOf("live"));
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), {
@@ -3407,3 +3404,113 @@ test("lite-06: a datagram request failing behind the shared writer resets rather
 		pair.server.close();
 	}
 });
+
+// A lite-05/06 publisher of broadcast "test", recording the datagrams it sends.
+function legacyPublisher(version: Version) {
+	const pair = createMockTransportPair(version === Version.DRAFT_06 ? ALPN_06 : ALPN_05);
+	const sent: Uint8Array[] = [];
+	Object.defineProperty(pair.server.datagrams, "writable", {
+		value: new WritableStream<Uint8Array>({
+			write(chunk) {
+				sent.push(chunk);
+			},
+		}),
+	});
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("test"));
+	const streams: Stream[] = [];
+	return {
+		sent,
+		broadcast,
+		// Send a TRACK for "events" and read its TRACK_INFO.
+		async track() {
+			const track = await Stream.open(pair.client, { version });
+			streams.push(track);
+			const server = await Stream.accept(pair.server, version);
+			if (!server) throw new Error("publisher never accepted the track stream");
+			void publisher.runTrackInfo(new TrackMessage(Path.from("test"), "events"), server);
+			await TrackInfo.decode(track.reader, version);
+		},
+		// SUBSCRIBE to "events" and wait for its first datagram.
+		async subscribe(priority: number) {
+			const subscribe = await Stream.open(pair.client, { version });
+			streams.push(subscribe);
+			const server = await Stream.accept(pair.server, version);
+			if (!server) throw new Error("publisher never accepted the subscribe stream");
+			void publisher.runSubscribe(
+				new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "events", priority }),
+				server,
+			);
+			for (let i = 0; i < 20 && sent.length === 0; i++) await new Promise((resolve) => setImmediate(resolve));
+		},
+		close() {
+			for (const stream of streams) stream.close();
+			publisher.close();
+			origin.close();
+			pair.client.close();
+			pair.server.close();
+		},
+	};
+}
+
+// Lite-05/06: a requester reads TRACK_INFO as the name being accepted, and its SUBSCRIBE, on a
+// stream of its own, can arrive after a datagram written meanwhile. That SUBSCRIBE still sends
+// it, whether the datagram track answered the TRACK or rides beside a stream track of the name,
+// and the hold adds no demand of its own.
+for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
+	const label = version === Version.DRAFT_06 ? "lite-06" : "lite-05";
+	for (const stream of [false, true]) {
+		test(`${label}, stream track ${stream}: a SUBSCRIBE sends the datagrams written since its TRACK_INFO`, async () => {
+			const legacy = legacyPublisher(version);
+			try {
+				const datagrams = legacy.broadcast.createDatagrams("events");
+				if (stream) legacy.broadcast.createTrack("events", { timescale: Timescale.MILLI });
+				await legacy.track();
+				datagrams.append(undefined, Uint8Array.of(0xaa));
+				await legacy.subscribe(-5);
+				expect(legacy.sent.length).toBe(1);
+				// Beside a stream track, only the SUBSCRIBE asks for the datagrams.
+				if (stream) expect(datagrams.priority.peek()).toBe(-5);
+			} finally {
+				legacy.close();
+			}
+		});
+	}
+
+	// With two TRACKs of one name open, a SUBSCRIBE reads from the older answer, so a datagram
+	// written between the two still reaches the SUBSCRIBE of the first.
+	test(`${label}: a SUBSCRIBE reads from the oldest hold`, async () => {
+		const legacy = legacyPublisher(version);
+		try {
+			const datagrams = legacy.broadcast.createDatagrams("events");
+			await legacy.track();
+			datagrams.append(undefined, Uint8Array.of(0xaa));
+			await legacy.track();
+			await legacy.subscribe(0);
+			expect(legacy.sent.length).toBe(1);
+		} finally {
+			legacy.close();
+		}
+	});
+
+	// A hold reads the datagram track that answered its TRACK. Once that track is replaced, a
+	// SUBSCRIBE reads the replacement, even while the older TRACK stays open.
+	test(`${label}: a SUBSCRIBE reads the current datagram track past an older hold`, async () => {
+		const legacy = legacyPublisher(version);
+		try {
+			const first = legacy.broadcast.createDatagrams("events");
+			await legacy.track();
+			first.append(undefined, Uint8Array.of(0xaa));
+			first.finish();
+			const current = legacy.broadcast.createDatagrams("events");
+			await legacy.track();
+			current.append(undefined, Uint8Array.of(0xbb));
+			await legacy.subscribe(0);
+			expect(legacy.sent.length).toBe(1);
+			expect(legacy.sent[0]?.at(-1)).toBe(0xbb);
+		} finally {
+			legacy.close();
+		}
+	});
+}

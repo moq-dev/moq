@@ -195,6 +195,27 @@ impl StreamCredit {
 	}
 }
 
+/// Limits to change on a live session with [`poll::Session::set_limits`]. Each `None` leaves
+/// its limit as it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Limits {
+	/// The connection-wide receive window, in bytes.
+	pub receive_window: Option<std::num::NonZeroU64>,
+}
+
+/// Why a transport did not apply [`Limits`].
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum LimitsError {
+	/// The transport cannot change these limits on a live session.
+	#[error("the transport cannot change these limits")]
+	Unsupported,
+	/// The transport refused the values, with its reason.
+	#[error("limits refused: {0}")]
+	Refused(String),
+}
+
 /// The smallest connection receive window a transport that leases may offer: one 1 MiB
 /// storage segment.
 ///
@@ -397,6 +418,17 @@ pub mod poll {
 			None
 		}
 
+		/// Apply `limits` to the live session, such as to open the receive window a server held
+		/// back until it admitted the peer.
+		///
+		/// Errors with [`LimitsError::Unsupported`](super::LimitsError::Unsupported) when the
+		/// transport cannot change them, which is the default: such a transport holds nothing
+		/// back to open.
+		fn set_limits(&self, limits: super::Limits) -> Result<(), super::LimitsError> {
+			let _ = limits;
+			Err(super::LimitsError::Unsupported)
+		}
+
 		/// Return the peer's stream credit in `dir`, or `None` when the transport cannot say,
 		/// as a browser's WebTransport cannot.
 		///
@@ -404,6 +436,17 @@ pub mod poll {
 		/// it waits for.
 		fn stream_credit(&self, dir: super::Dir) -> Option<super::StreamCredit> {
 			let _ = dir;
+			None
+		}
+
+		/// Export 32 bytes of keying material from this session's handshake under `label` and
+		/// `context` (RFC 8446 section 7.5), or `None` when the transport has no exporter.
+		///
+		/// Both ends of one session export the same bytes, and no other session does.
+		/// WebTransport derives them per session as its draft specifies, since other sessions
+		/// may share the connection.
+		fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+			let _ = (label, context);
 			None
 		}
 
@@ -612,8 +655,16 @@ pub mod poll {
 			(**self).receive_window()
 		}
 
+		fn set_limits(&self, limits: super::Limits) -> Result<(), super::LimitsError> {
+			(**self).set_limits(limits)
+		}
+
 		fn stream_credit(&self, dir: super::Dir) -> Option<super::StreamCredit> {
 			(**self).stream_credit(dir)
+		}
+
+		fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+			(**self).export_keying_material(label, context)
 		}
 	}
 

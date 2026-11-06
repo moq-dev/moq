@@ -6,9 +6,11 @@
  * it must read a contiguous run of groups through the last one. `compress` publishes a compressed
  * track with several frames, one empty, in each group. `cached` publishes every group before
  * announcing, for a FETCH of a past group. `history` writes only the last group live and serves the
- * ones below it, never cached, from an in-memory responder on `track.requests()`. `late` writes the head of group 0 before announcing and
- * the rest only once the harness relays that the subscriber read it, so a join that skips the head
- * stalls rather than racing the publisher.
+ * ones below it, never cached, from an in-memory responder on `track.requests()`. `datagram` publishes
+ * an untimed datagram track and sends each 900-byte datagram only after the harness says the subscriber
+ * read the last one. `late` writes the head of group 0 before announcing and the rest only once the
+ * harness relays that the subscriber read it, so a join that skips the head stalls rather than racing
+ * the publisher.
  *
  * @module
  */
@@ -30,6 +32,7 @@ const compress = mode === "compress";
 console.debug = console.error;
 console.info = console.error;
 const join = mode === "join" || mode === "status";
+const datagram = mode === "datagram";
 const status = mode === "status";
 const cached = mode === "cached";
 const history = mode === "history";
@@ -39,10 +42,10 @@ if (
 	!url ||
 	!path ||
 	!["publish", "subscribe"].includes(role) ||
-	![undefined, "drop", "join", "compress", "status", "cached", "history", "late", "fetch"].includes(mode)
+	![undefined, "drop", "join", "compress", "datagram", "status", "cached", "history", "late", "fetch"].includes(mode)
 ) {
 	throw new Error(
-		"usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|compress|status|cached|history|late|fetch]]",
+		"usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|compress|datagram|status|cached|history|late|fetch]]",
 	);
 }
 
@@ -117,46 +120,99 @@ const connection = await Moq.Connection.connect({
 });
 try {
 	if (role === "publish") {
-		const broadcastPublication = origin.createBroadcast(Moq.Path.from(path));
+		const broadcastPublication = origin.route(Moq.Path.from(path), { hidden: true });
 		const broadcast = broadcastPublication.broadcast;
-		// `cached` and `late` read groups a newer one supersedes, which the default zero max age
-		// would leave stale.
-		const track = broadcast.createTrack("tail", { compress, maxAge: null, ...(status ? { priority: 2 } : {}) });
-		if (cached) write(track);
-		if (history) serveHistory(track);
-		let head: Moq.Group.Producer | undefined;
-		if (late) {
-			head = track.appendGroup();
-			for (const payload of frames(0).slice(0, LATE_HEAD)) head.writeFrame({ payload });
-		}
-		broadcastPublication.announce();
-		const lines = createInterface({ input: process.stdin });
-		const commands = lines[Symbol.asyncIterator]();
-		if (head) {
-			assert.equal((await commands.next()).value, "late tail", "subscriber did not read the head");
-			for (const payload of frames(0).slice(LATE_HEAD)) head.writeFrame({ payload });
-			head.finish();
-			for (let sequence = 1; sequence < LATE_GROUPS; sequence++) {
-				const group = track.appendGroup();
-				for (const payload of frames(sequence)) group.writeFrame({ payload });
-				group.finish();
+		if (datagram) {
+			// Untimed: the OBJECT_DATAGRAM carries no timestamp, so the subscriber checks the payload alone.
+			const track = broadcast.createDatagrams("tail");
+			broadcastPublication.announce();
+			const lines = createInterface({ input: process.stdin });
+			const commands = lines[Symbol.asyncIterator]();
+			try {
+				while (track.priority.peek() === undefined) await track.priority.changed();
+				for (let sequence = 0; sequence < GROUPS; sequence++) {
+					assert.equal((await commands.next()).value, `datagram ${sequence}`, "missing datagram command");
+					track.append(undefined, new Uint8Array(900).fill(sequence));
+				}
+				const ack = await commands.next();
+				assert.equal(ack.value, "clean end", "reader did not acknowledge a clean end");
+			} finally {
+				lines.close();
 			}
 			track.finish();
-			track.close();
-		} else if (!status && !cached && !history) {
-			const demand = track.demand();
-			while (demand.wanted.peek() === undefined) await demand.wanted.changed();
-			write(track);
-			track.close();
+			broadcast.close();
+			console.error("tail acknowledged");
+		} else {
+			// `cached` and `late` read groups a newer one supersedes, which the default zero max age
+			// would leave stale.
+			const track = broadcast.createTrack("tail", { compress, maxAge: null, ...(status ? { priority: 2 } : {}) });
+			if (cached) write(track);
+			if (history) serveHistory(track);
+			let head: Moq.Group.Producer | undefined;
+			if (late) {
+				head = track.appendGroup();
+				for (const payload of frames(0).slice(0, LATE_HEAD)) head.writeFrame({ payload });
+			}
+			broadcastPublication.announce();
+			const lines = createInterface({ input: process.stdin });
+			const commands = lines[Symbol.asyncIterator]();
+			if (head) {
+				assert.equal((await commands.next()).value, "late tail", "subscriber did not read the head");
+				for (const payload of frames(0).slice(LATE_HEAD)) head.writeFrame({ payload });
+				head.finish();
+				for (let sequence = 1; sequence < LATE_GROUPS; sequence++) {
+					const group = track.appendGroup();
+					for (const payload of frames(sequence)) group.writeFrame({ payload });
+					group.finish();
+				}
+				track.finish();
+				track.close();
+			} else if (!status && !cached && !history) {
+				const demand = track.demand();
+				while (demand.wanted.peek() === undefined) await demand.wanted.changed();
+				write(track);
+				track.close();
+			}
+			try {
+				const ack = await commands.next();
+				assert.equal(ack.value, "clean end", "reader did not acknowledge a clean end");
+			} finally {
+				lines.close();
+			}
+			broadcast.close();
+			console.error("tail acknowledged");
 		}
+	} else if (datagram) {
+		const request = origin.follow(Moq.Path.from(path));
 		try {
-			const ack = await commands.next();
-			assert.equal(ack.value, "clean end", "reader did not acknowledge a clean end");
+			let broadcast = request.active.peek();
+			while (!broadcast) {
+				await request.active.changed();
+				broadcast = request.active.peek();
+			}
+			const track = broadcast.datagrams("tail");
+			try {
+				await track.info();
+				process.stdout.write("datagram ready\n");
+				for (let sequence = 0; sequence < GROUPS; sequence++) {
+					const frame = await track.recv();
+					assert(frame, "missing datagram");
+					assert.equal(frame.sequence, BigInt(sequence), "wrong datagram sequence");
+					assert.equal(frame.payload.byteLength, 900, "truncated datagram");
+					assert(
+						frame.payload.every((byte) => byte === sequence),
+						"corrupt datagram",
+					);
+					assert.equal(frame.timestamp, undefined, "unexpected IETF timestamp");
+					process.stdout.write(`datagram ${sequence}\n`);
+				}
+				console.error("datagram clean groups=0,1,2,3 bytes=3600");
+			} finally {
+				track.close();
+			}
 		} finally {
-			lines.close();
+			request.close();
 		}
-		broadcast.close();
-		console.error("tail acknowledged");
 	} else {
 		const request = origin.follow(Moq.Path.from(path));
 		try {

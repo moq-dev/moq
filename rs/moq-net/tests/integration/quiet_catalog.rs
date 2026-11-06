@@ -9,7 +9,7 @@ use crate::support;
 
 use std::{future::Future, time::Duration};
 
-use moq_net::{Error, Hop, Timestamp, Version, broadcast, origin, track};
+use moq_net::{Error, Timestamp, Version, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -25,7 +25,7 @@ const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"
 const LITE: &[&str] = &["moq-lite-06", "moq-lite-07-wip"];
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -47,10 +47,10 @@ async fn settle() {
 }
 
 /// Announce `live/catalog.json` holding one finished snapshot group.
-fn publish(origin: &origin::Producer) -> (moq_net::origin::Publication, track::Producer) {
-	let broadcast = origin.create_broadcast("live").unwrap();
-	let track = broadcast.create_track("catalog.json", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+fn publish(origin: &origin::Producer) -> (moq_net::origin::Route, track::Producer) {
+	let broadcast = origin.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let track = broadcast.broadcast().create_track("catalog.json", timed()).unwrap();
+	broadcast.announce().unwrap();
 	let mut group = track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, b"snapshot").unwrap();
 	group.finish().unwrap();

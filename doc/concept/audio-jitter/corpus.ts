@@ -24,6 +24,8 @@ export interface Case {
 	arrival: number[];
 	/** Each frame's container timestamp in milliseconds, in the same order. */
 	media: number[];
+	/** Indices of the frames observed right after a declared end, in ascending order. */
+	ends?: number[];
 	/** `[frame index, target]` wherever the target differs from the previous frame's. */
 	target: [number, number][];
 }
@@ -87,14 +89,19 @@ function paced(frames: number, frame: number, base: number): Trace {
 }
 
 /** Replay a trace through the reference and keep only the frames where the target moved. */
-function run(trace: Trace, config: { frame: number; advertised?: number; delay?: number }): [number, number][] {
+function run(
+	trace: Trace & { ends?: number[] },
+	config: { frame: number; advertised?: number; delay?: number },
+): [number, number][] {
 	if (config.delay !== undefined) return [[0, config.delay]];
 
 	const estimator = new Estimator({ frame: config.frame, advertised: config.advertised });
 	const target: [number, number][] = [];
 	let previous: number | undefined;
 
+	const ends = new Set(trace.ends);
 	for (let i = 0; i < trace.arrival.length; i++) {
+		if (ends.has(i)) estimator.end();
 		estimator.observe({ arrival: trace.arrival[i], media: trace.media[i] });
 		const value = estimator.target;
 		if (value !== previous) target.push([i, value]);
@@ -170,6 +177,13 @@ const traces: Omit<Case, "target">[] = [
 		about: "A 30 s gap in both clocks, as a suspended tab produces. The idle intervals relax the histogram back toward the prior rather than freezing it.",
 		frame: FRAME,
 		...gap(paced(1000, FRAME, 50), 500, 30_000),
+	},
+	{
+		name: "silence",
+		about: "Even audio, a declared end and 60 s of silence, 5 s more, a declared 100 ms pause inside one interval, 5 s more, then an undeclared 30 s gap. Unlike `idle`, a declared silence is not evidence, so the target holds through both; the undeclared gap still relaxes it, since an end covers only the silence it declares.",
+		frame: FRAME,
+		...gap(gap(gap(paced(1500, FRAME, 50), 500, 60_000), 760, 100), 1000, 30_000),
+		ends: [500, 760],
 	},
 	{
 		name: "tunein",

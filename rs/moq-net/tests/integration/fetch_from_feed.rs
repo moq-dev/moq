@@ -8,7 +8,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Version};
+use moq_net::Version;
 use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -16,7 +16,8 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 const VERSIONS: &[&str] = &["moq-lite-01", "moq-lite-02", "moq-lite-03", "moq-lite-04"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -24,7 +25,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 struct Relay {
 	track: moq_net::track::Producer,
 	remote: moq_net::broadcast::Consumer,
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 	_pair: support::harness::MockPair,
 	_origins: (moq_net::origin::Producer, moq_net::origin::Producer),
 }
@@ -32,11 +33,14 @@ struct Relay {
 /// A publisher on `version` with group 0 of an untimed track written, and the relay's view of it.
 async fn relay(version: &str) -> Relay {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let mut track = broadcast
+		.broadcast()
 		.create_track("video", moq_net::track::Info::default().with_timescale(None))
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 	track.write_frame(None, &b"0"[..]).unwrap();
 
 	let client = produce_origin(2);

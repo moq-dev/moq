@@ -13,7 +13,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_net::{Hop, Version, cache, frame, group, origin, track};
+use moq_net::{Version, cache, frame, group, origin, track};
 
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 
@@ -41,7 +41,7 @@ fn info(payload: &Bytes) -> frame::Info {
 }
 
 fn origin(hop: u64, pool: &cache::Pool) -> origin::Producer {
-	let mut config = origin::Config::new(Hop::new(hop).unwrap());
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	config.pool = pool.clone();
 	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
@@ -153,9 +153,9 @@ async fn moq_transport_relays_a_cold_finished_group() {
 	let upper = origin(2, &pools[1]);
 	let lower = origin(3, &pools[2]);
 
-	let broadcast = publisher.create_broadcast("live").unwrap();
-	let track = broadcast.create_track("data", track::Info::default()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let route = publisher.route("live", origin::RouteOptions::hidden()).unwrap();
+	let track = route.broadcast().create_track("data", track::Info::default()).unwrap();
+	route.announce().unwrap();
 	let (written, ended) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
 	serve(track.requests(), written, ended, true);
 	let mut group = track.append_group().unwrap();
@@ -210,9 +210,9 @@ async fn chain(version: &str, replay: Replay) {
 	let upper = origin(2, &pools[1]);
 	let lower = origin(3, &pools[2]);
 
-	let broadcast = publisher.create_broadcast("live").unwrap();
-	let track = broadcast.create_track("data", track::Info::default()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let route = publisher.route("live", origin::RouteOptions::hidden()).unwrap();
+	let track = route.broadcast().create_track("data", track::Info::default()).unwrap();
+	route.announce().unwrap();
 	let (written, ended) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
 	serve(
 		track.requests(),

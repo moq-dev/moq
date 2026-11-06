@@ -15,7 +15,7 @@ use crate::support;
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
-use moq_net::{Error, Hop, Timestamp, Version, origin, track};
+use moq_net::{Error, Timestamp, Version, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -32,7 +32,7 @@ const FRAMES: u64 = 4;
 const A: u64 = 2;
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -135,7 +135,7 @@ fn via_a(announce: &origin::RouteEvent) -> bool {
 		| origin::RouteEvent::Takeover { announce: a, .. } => &a.route,
 		origin::RouteEvent::End(_) => return false,
 	};
-	route.hops.iter().any(|hop| *hop == Hop::new(A).unwrap())
+	route.hops().any(|hop| hop == A)
 }
 
 struct Topology {
@@ -144,7 +144,7 @@ struct Topology {
 	cdn_b: origin::Producer,
 	subscriber: origin::Producer,
 	track: track::Producer,
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 	_pushes: Vec<MockPair>,
 	s_to_a: Option<MockPair>,
 	s_to_b: MockPair,
@@ -161,11 +161,11 @@ impl Topology {
 		let cdn_b = produce_origin(3);
 		let subscriber = produce_origin(4);
 
-		let broadcast = publisher.create_broadcast("live").unwrap();
-		let track = broadcast.create_track("video", timed()).unwrap();
-		broadcast
-			.announce(origin::Route::default().with_instance(moq_net::Instance::random(), 0))
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
+		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+		broadcast.announce().unwrap();
 
 		let pushes = vec![
 			push(lite, &publisher, &cdn_a).await,

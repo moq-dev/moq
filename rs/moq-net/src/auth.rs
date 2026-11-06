@@ -6,7 +6,7 @@
 //! returns the [`Handle`]: [`grant`](Handle::grant) is the union of every token
 //! this side presented, and `add` presents another without
 //! reconnecting. The returned [`Credential`] is cloneable; dropping its last clone withdraws it.
-//! A [`Route`](crate::origin::Route) can name it, so the request advertising the route
+//! A [`Route`](crate::origin::RouteInfo) can name it, so the request advertising the route
 //! carries it too, and swapping it renews that request in place.
 //!
 //! A handle passed to `Client::with_auth` outlives its sessions: each session built on it
@@ -150,8 +150,9 @@ fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 }
 
 /// How long a token refused for a reason that may pass waits before its session presents it
-/// again, doubling on each refusal up to [`RETRY_MAX`].
-const RETRY_INITIAL: Duration = Duration::from_secs(1);
+/// again, doubling on each refusal up to [`RETRY_MAX`]. A moq-transport refusal that may pass
+/// asks its peer to wait as long.
+pub(crate) const RETRY_INITIAL: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 
 /// Whether a refusal is the acceptor failing to decide rather than its verdict on the
@@ -1385,7 +1386,7 @@ fn attached(links: &mut BTreeMap<u64, Attached>, id: u64) -> &mut Attached {
 ///
 /// Cheap to clone, and every clone names the same credential. It stays presented on
 /// every session of its handle until the last clone drops, which closes its streams and
-/// removes its grant from the union. A [`Route`](crate::origin::Route) holding one keeps
+/// removes its grant from the union. A [`Route`](crate::origin::RouteInfo) holding one keeps
 /// it presented while the route stands, across the handle's sessions.
 #[derive(Clone)]
 pub struct Credential {

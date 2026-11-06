@@ -151,6 +151,12 @@ transports, for example to compare only WebSocket against a base:
 nix develop --command just bench origin/main ws
 ```
 
+To repeat only the relay measurements, using the same builds, alternating rounds,
+sampler and comparison report, run `just bench-relay origin/release quic`.
+Linux suites retain one `/proc/loadavg` snapshot before builds and measurements;
+this is host context, not a claim that every measurement window was quiet.
+This omits all Criterion measurements.
+
 Every relay serves QUIC and plain WebSocket on its port; `wss://`, `tcp://`, and
 `tls://` get their own listener on the port two above it. A base revision must
 accept the listener a case needs, so pass the transports it has: a relay without
@@ -203,7 +209,7 @@ also run during timing. Every timed round reads and checks all payload bytes,
 returns lease credit, and fills each stream again. Throughput counts delivered
 payload once. Nightly's supplemental Rust benchmark leg records the series and
 keeps the memory output with its raw results. The broader MoQ session transport
-and version sweep remains in [its quest](/quest/m2/bench-transport-sweep.md).
+and version sweep remains in [its quest](/quest/m4/bench-transport-sweep.md).
 
 Compare one multi-threaded Tokio runtime with the same number of independent
 Tokio/epoll and io\_uring workers:
@@ -890,25 +896,46 @@ the table requires no new renderer or data branch. A source's `paired.json`, as
 
 ### Paired comparison
 
-Each Nightly's Rust bench groups (`rust-bench`, `rust-shared`, `rust-extra` and
-`rust-uring`) also build the previous scheduled Nightly's commit beside their
+Each Nightly's Rust bench groups (`rust-bench`, `rust-shared`, `rust-relay`,
+`rust-extra` and `rust-uring`) also build the previous scheduled Nightly's commit beside their
 own, on the same runner, so night-to-night runner variance drops out. Each
 built target runs once per side in the trend's quick mode, alternating which
-side goes first; the current side is the trend point. A case more than 10%
-slower in that screen reruns, worst first and at most 20 per group, in three
-alternating rounds with the BASE comparison's settings (1 s warmup, 2 s
-measurement, 30 samples). A case whose rounds are all slower with a median
-beyond 10% is a confirmed regression and fails its job after the upload, so the
-Alert workflow posts the failed Nightly. A target the base cannot build or run
-fails the job too, rather than passing uncompared; a bench target the base does
-not have yet is only reported as new. The threshold is a starting point until
-A/A runs on the hosted runner measure its noise floor.
+side goes first; the current side is the trend point. A target whose base
+executable is byte-identical to the current one is not compared: it is listed
+as the same build, since only noise could tell them apart. A case more than 10%
+slower in that screen reruns, worst first, at most 20 per run and none started
+after five minutes of rounds, in three alternating rounds with the BASE
+comparison's settings (1 s warmup, 2 s measurement, 30 samples). A case whose
+rounds are all slower with a median beyond 10% is a confirmed regression and
+fails its job after the upload, so the Alert workflow posts the failed Nightly.
+A target the base cannot build or run fails the job too, rather than passing
+uncompared; a bench target the base does not have yet is only reported as new.
+
+Runs on the hosted runner set these numbers. In four A/A runs of the
+`rust-shared`, `rust-extra` and `rust-uring` groups, two of `rust-relay` and
+one of `rust-bench`, 1 to 9% of cases crossed 10% either way in the screen, at
+most 21 of them slower in one group. The rounds rejected all but one:
+`wire_decode/padded/packets_64` at +12%, which read +2% in the next A/A run.
+Both sides of an A/A run build byte-identical executables, so that +12% was
+the runner drifting under one side's processes: its base read 51.4 µs in every
+sample, while its current side read 51 µs in its first sample and 56 to 63 µs
+after, in each of the three rounds. Byte-identical copies of one executable,
+and padding the strings each process reads, moved no case more than 2% on the
+same runner, so neither the build nor the file's placement explains it, and
+such targets are not compared. A run whose base cut one case's work by a
+quarter failed with that case alone at +35%; its rounds also agreed, at
+medians of +9.3 to +9.7%, on `stats/tick` cases whose source was identical
+on both sides. Unlike the A/A drift, both sides held steady there, each
+sample of one side the same shape as the other's. Whether those executables
+differed went unrecorded; a run that compares a target confirms they did.
+Drift that size keeps the threshold at 10%.
 
 The table page shows tonight's comparison above the trend: confirmed
 regressions, targets not compared, cases faster in the screen, slowdowns the
 rounds rejected or the budget skipped, and the rest. `bench/paired.json` on the
 site holds every case. A dispatched Nightly's `bench-base` input compares
-against another revision; its own commit gives an A/A run.
+against another revision. Its own commit gives an A/A run, which shows only
+that both sides build the same executables, since those are not compared.
 
 Reproduce a paired group locally against any revision; `previous-nightly`
 resolves the last scheduled Nightly's commit through `gh`:
@@ -922,6 +949,11 @@ Each run's evidence directory keeps both builds' estimates (`criterion` and
 `criterion-base`), the confirmation rounds under `confirm/`, and the run's
 `paired.json`. The base build streams its diagnostics and retains them in
 `base-build.log`, including when it fails.
+
+Each revision builds in its own Cargo target directory (`base` and `current`
+under `CARGO_TARGET_DIR`, default `target/bench`). For an A/B comparison, use
+`run.sh`'s `BENCH_BASE` mode or a target directory per source tree: two trees
+sharing one can leave a bench linked against the other tree's library.
 
 ### CodSpeed
 
@@ -970,3 +1002,12 @@ OOM kill does too, even inside a Quest scope: each worker watches `local.py`
 through a pidfd and stops once it exits. macOS has no pidfd, so there killing
 `local.py` with SIGKILL frees the lock while its workers keep measuring until
 their own gates exit, an accepted gap. Stop it with Ctrl-C or SIGTERM instead.
+
+### Python socket sessions
+
+The Python binding runner also sweeps both TCP and track sockets over 1, 4,
+and 16 accepting endpoints and 1, 4, and 16 concurrent sessions per endpoint.
+Each session sends a checked payload and finishes both halves. The
+`socket/<protocol>/endpoints=N/sessions=M` entries report complete sessions per
+second, including handshake, FFI calls, reads, and teardown. Run with
+`just py bench`; Nightly's binding lane runs the same sweep.

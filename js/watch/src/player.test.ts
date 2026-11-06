@@ -1,5 +1,5 @@
 import { expect, mock, test } from "bun:test";
-import { Origin, Path } from "@moq/net";
+import { Bandwidth, Origin, Path } from "@moq/net";
 import { Signal } from "@moq/signals";
 
 // Bun does not run Vite's worklet loader; these tests never create an AudioContext.
@@ -35,8 +35,7 @@ test.each(["table", "consumer", "structural"] as const)("Player borrows a %s ori
 	const player = new Player({ origin: origins[role], name, catalogFormat: "manual", catalog: {} });
 	try {
 		const active = player.broadcast.out.active.changed();
-		const publication = producer.createBroadcast(name);
-		publication.announce();
+		const publication = producer.route(name);
 		expect((await active)?.path).toBe(name);
 		expect(player.in.origin.peek()).toBe(origins[role]);
 		expect(player.broadcast.in.origin.peek()).toBe(origins[role]);
@@ -89,4 +88,47 @@ test("Player owns the shared pipeline and feeds output policy into decoders", as
 	} finally {
 		player.close();
 	}
+});
+
+test("Player claims its viewer only while it downloads, and an override replaces the catalog's ceiling", async () => {
+	const viewers = new Bandwidth.Viewers();
+	const enabled = new Signal(true);
+	const muted = new Signal(false);
+	const max = new Signal<number | undefined>(1_500_000);
+	const player = new Player({ enabled, audio: { muted }, video: { visible: "never" }, viewer: { viewers, max } });
+	try {
+		await flush();
+		expect(viewers.target.peek()).toBe(1_500_000);
+
+		// The override, too, claims only while something downloads.
+		muted.set(true);
+		await flush();
+		expect(viewers.target.peek()).toBe(0);
+		muted.set(false);
+		await flush();
+		expect(viewers.target.peek()).toBe(1_500_000);
+
+		enabled.set(false);
+		await flush();
+		expect(viewers.target.peek()).toBe(0);
+
+		enabled.set(true);
+		max.set(0);
+		await flush();
+		expect(viewers.target.peek()).toBe(0);
+
+		// Without an override, a player with no catalog yet claims nothing.
+		max.set(undefined);
+		await flush();
+		expect(viewers.target.peek()).toBe(0);
+
+		max.set(2_000_000);
+		await flush();
+		expect(viewers.target.peek()).toBe(2_000_000);
+	} finally {
+		player.close();
+	}
+	await flush();
+	expect(viewers.target.peek()).toBe(0);
+	viewers.close();
 });

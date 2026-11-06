@@ -13,7 +13,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Timestamp, Version, origin};
+use moq_net::{Timestamp, Version, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -39,7 +39,7 @@ enum Arrival {
 }
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -66,8 +66,9 @@ async fn first_frame(version: &str, relays: usize, arrival: Arrival) -> Duration
 	}
 	let reader = &links.last().unwrap().client_transport;
 
-	let broadcast = nodes[0].create_broadcast("room").unwrap();
+	let broadcast = nodes[0].route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast
+		.broadcast()
 		.create_track(
 			"video",
 			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
@@ -76,7 +77,7 @@ async fn first_frame(version: &str, relays: usize, arrival: Arrival) -> Duration
 	let mut cached = track.append_group().unwrap();
 	cached.write_frame(Timestamp::ZERO, b"cached".as_ref()).unwrap();
 	cached.finish().unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let consumer = nodes.last().unwrap().consume();
 	let remote = consumer

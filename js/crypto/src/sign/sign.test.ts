@@ -46,15 +46,14 @@ async function active(origin: Origin.Producer, path: Path.Valid): Promise<Broadc
 /** A signed broadcast at `path` on a fresh session, and the raw net broadcast under it. */
 async function publish(key: SecretKey, path: Path.Valid) {
 	const net = await session();
-	const publication = net.publisher.createBroadcast(path);
-	const signed = new Signed.Producer(publication.broadcast, key, path);
-	publication.announce({ instance: signed.instance });
+	const route = net.publisher.route(path);
+	const signed = new Signed.Producer(route.broadcast, key, { path, instance: route.instance });
 	return {
 		...net,
 		signed,
 		/** A signed track over a net track the test can also write forged frames to. */
 		track(name: string) {
-			const raw = publication.broadcast.createTrack(name);
+			const raw = route.broadcast.createTrack(name);
 			const scope = new Scope(path, signed.instance, name);
 			return { signed: Track.Producer.make(raw, key, scope, { next: 0n }, {}), raw };
 		},

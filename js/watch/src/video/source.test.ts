@@ -6,7 +6,7 @@ import { Signal } from "@moq/signals";
 import { Broadcast } from "../broadcast";
 import { supportCacheKey } from "../support-probe";
 import { decoderConfigKey } from "./config";
-import { Source } from "./source";
+import { Source, type Target } from "./source";
 
 const flush = () => yieldNow();
 
@@ -243,99 +243,19 @@ describe("Source disabled rendition selection", () => {
 		source.close();
 	});
 
-	it("holds the selected rendition while every rendition is disabled", async () => {
-		const state = mutableBroadcast({
-			low: config("avc1.64001e", { bitrate: 1_000_000 }),
-			high: config("avc1.640028", { bitrate: 2_000_000 }),
-		});
-		const source = new Source({ broadcast: state.broadcast, supported: async () => true });
-
-		await settle();
-		expect(source.out.track.peek()).toBe("high");
-
-		state.catalog.set({
-			video: {
-				renditions: {
-					low: config("avc1.64001e", { bitrate: 1_000_000, enabled: false }),
-					high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }),
-				},
-			},
-		});
-		await settle();
-		expect(source.out.track.peek()).toBe("high");
-		expect(source.out.config.peek()?.enabled).toBe(false);
-
-		// An enabled alternative takes over from the held rendition.
-		state.catalog.set({
-			video: {
-				renditions: {
-					low: config("avc1.64001e", { bitrate: 1_000_000 }),
-					high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }),
-				},
-			},
-		});
-		await settle();
-		expect(source.out.track.peek()).toBe("low");
-		source.close();
-	});
-
-	it("drops a held rendition once it is removed", async () => {
+	it("deselects the selected rendition once every rendition is disabled", async () => {
 		const state = mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000 }) });
 		const source = new Source({ broadcast: state.broadcast, supported: async () => true });
 
 		await settle();
+		expect(source.out.track.peek()).toBe("high");
+
 		state.catalog.set({
 			video: { renditions: { high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }) } },
 		});
 		await settle();
-		expect(source.out.track.peek()).toBe("high");
-
-		state.catalog.set({
-			video: { renditions: { low: config("avc1.64001e", { bitrate: 1_000_000, enabled: false }) } },
-		});
-		await settle();
 		expect(source.out.track.peek()).toBeUndefined();
 		expect(source.out.config.peek()).toBeUndefined();
-		source.close();
-	});
-
-	it("does not hold an enabled selection into another broadcast's disabled rendition", async () => {
-		const current = new Signal<Broadcast | undefined>(
-			mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000 }) }).broadcast,
-		);
-		const source = new Source({ broadcast: current, supported: async () => true });
-
-		await settle();
-		expect(source.out.track.peek()).toBe("high");
-
-		current.set(
-			mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }) }).broadcast,
-		);
-		await settle();
-		expect(source.out.track.peek()).toBeUndefined();
-		expect(source.out.config.peek()).toBeUndefined();
-		source.close();
-	});
-
-	it("holds on a broadcast whose renditions match the previous one", async () => {
-		const current = new Signal<Broadcast | undefined>(
-			mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000 }) }).broadcast,
-		);
-		const source = new Source({ broadcast: current, supported: async () => true });
-		await settle();
-
-		// The new probe publishes an equal `available`, so only its broadcast tag changes.
-		const next = mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000 }) });
-		current.set(next.broadcast);
-		await settle();
-		expect(source.out.track.peek()).toBe("high");
-
-		next.catalog.set({
-			video: { renditions: { high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }) } },
-		});
-		await settle();
-		expect(source.out.track.peek()).toBe("high");
-		expect(source.out.config.peek()?.enabled).toBe(false);
 		source.close();
 	});
 
@@ -567,6 +487,132 @@ describe("conflicting rendition metadata", () => {
 			if (!source.pending.peek()) await source.pending.changed();
 			while (source.pending.peek()) await source.pending.changed();
 			expect(source.out.track.peek()).toBe("picture");
+		} finally {
+			source.close();
+		}
+	});
+});
+
+describe("Source viewer ceiling", () => {
+	const ladder = () => ({
+		"360p": config("avc1.640028", { codedWidth: 640, codedHeight: 360, bitrate: 800_000 }),
+		"720p": config("avc1.640028", { codedWidth: 1280, codedHeight: 720, bitrate: 2_400_000 }),
+		"1080p": config("avc1.640028", { codedWidth: 1920, codedHeight: 1080, bitrate: 4_000_000 }),
+	});
+
+	it("follows the highest enabled rendition through enable and disable flips", async () => {
+		const renditions = ladder();
+		const { broadcast, catalog } = mutableBroadcast(renditions);
+		const source = new Source({ broadcast, supported: async () => true });
+		try {
+			await settle();
+			// Over the selection margin, so an estimate that reaches it selects 1080p.
+			expect(source.out.ceiling.peek()).toBe(5_000_000);
+
+			catalog.set({
+				video: { renditions: { ...renditions, "1080p": { ...renditions["1080p"], enabled: false } } },
+			});
+			await settle();
+			expect(source.out.ceiling.peek()).toBe(3_000_000);
+
+			catalog.set({ video: { renditions } });
+			await settle();
+			expect(source.out.ceiling.peek()).toBe(5_000_000);
+		} finally {
+			source.close();
+		}
+	});
+
+	it("is an estimate that selects that rendition", async () => {
+		const probe = new Signal<{ estimatedRecvRate: number } | undefined>(undefined);
+		const source = new Source({
+			broadcast: mockBroadcast(ladder()),
+			supported: async () => true,
+			probe: probe as never,
+		});
+		try {
+			await settle();
+			const ceiling = source.out.ceiling.peek() ?? 0;
+			probe.set({ estimatedRecvRate: ceiling });
+			await settle();
+			expect(source.out.track.peek()).toBe("1080p");
+			probe.set({ estimatedRecvRate: ceiling - 1 });
+			await settle();
+			expect(source.out.track.peek()).toBe("720p");
+		} finally {
+			source.close();
+		}
+	});
+
+	it("skips renditions without a catalog bitrate, and is unset when none has one", async () => {
+		const { broadcast, catalog } = mutableBroadcast({
+			"360p": config("avc1.640028", { codedWidth: 640, codedHeight: 360, bitrate: 800_000 }),
+			"4k": config("avc1.640028", { codedWidth: 3840, codedHeight: 2160 }),
+		});
+		const source = new Source({ broadcast, supported: async () => true });
+		try {
+			await settle();
+			expect(source.out.ceiling.peek()).toBe(1_000_000);
+
+			catalog.set({
+				video: { renditions: { "4k": config("avc1.640028", { codedWidth: 3840, codedHeight: 2160 }) } },
+			});
+			await settle();
+			expect(source.out.ceiling.peek()).toBeUndefined();
+		} finally {
+			source.close();
+		}
+	});
+
+	it("stays within the target's caps, without margin when the estimate cannot steer", async () => {
+		const target = new Signal<Target | undefined>({ height: 720 });
+		const source = new Source({ broadcast: mockBroadcast(ladder()), target, supported: async () => true });
+		try {
+			await settle();
+			expect(source.out.ceiling.peek()).toBe(3_000_000);
+
+			target.set({ name: "360p" });
+			await settle();
+			expect(source.out.ceiling.peek()).toBe(800_000);
+
+			target.set({ bitrate: 3_000_000 });
+			await settle();
+			expect(source.out.ceiling.peek()).toBe(2_400_000);
+
+			// A zero bitrate is explicit too: the lowest rendition, not the estimate's pick.
+			target.set({ bitrate: 0 });
+			await settle();
+			expect(source.out.ceiling.peek()).toBe(800_000);
+		} finally {
+			source.close();
+		}
+	});
+});
+
+describe("Source probe observation", () => {
+	it("does not observe the probe without a selectable rendition", async () => {
+		let reads = 0;
+		const probe = new Signal(undefined);
+		const counted = {
+			peek: () => {
+				reads++;
+				return probe.peek();
+			},
+			subscribe: (fn: () => void) => {
+				reads++;
+				return probe.subscribe(fn);
+			},
+			changed: () => probe.changed(),
+		};
+		const source = new Source({
+			broadcast: mockBroadcast({ hd: config("avc1.640028", { bitrate: 1_000_000, enabled: false }) }),
+			supported: async () => true,
+			probe: counted as never,
+		});
+		try {
+			await settle();
+			expect(source.out.track.peek()).toBeUndefined();
+			expect(reads).toBe(0);
 		} finally {
 			source.close();
 		}

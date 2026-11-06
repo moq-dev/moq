@@ -11,8 +11,8 @@ use crate::support;
 
 use std::time::Duration;
 
+use moq_net::Version;
 use moq_net::broadcast::TracksEvent;
-use moq_net::{Hop, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -27,7 +27,8 @@ const SUBSCRIBE: u8 = 0x03;
 const SUBSCRIBE_TRACKS: u8 = 0x51;
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -99,9 +100,11 @@ async fn read(sub: &mut moq_net::track::Subscriber) -> Option<(u64, Vec<u8>)> {
 async fn a_listing_of_our_own_peer_fails_alone() {
 	for version in DRAFTS {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast("bcast").unwrap();
-		let video = broadcast.create_track("video", None).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let video = broadcast.broadcast().create_track("video", None).unwrap();
+		broadcast.announce().unwrap();
 
 		let (subscriber, pair) = connect(&publisher, version).await;
 		let remote = resolve(&subscriber, "bcast").await;

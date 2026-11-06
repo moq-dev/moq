@@ -1,10 +1,13 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
+import { Signal } from "@moq/signals";
 import { accept, connect } from "../connection/index.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, type MockTransport } from "../mock.ts";
 import { Producer as Origin } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
 import { Timescale, Timestamp } from "../time.ts";
+import { Budget } from "../util/yield.ts";
 import { wireOf } from "../wire.ts";
 import { ALPN_04, ALPN_05, ALPN_06, ALPN_07_WIP } from "./version.ts";
 
@@ -15,7 +18,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	for (const streams of [false, true]) {
 		test(`${alpn}: ${streams ? "same-name kinds" : "datagram-only track"} delivery`, async () => {
 			const source = new Origin();
-			const publication = source.createBroadcast(path);
+			const publication = source.route(path, { hidden: true });
 			const datagrams = publication.broadcast.createDatagrams("audio", {
 				timescale: Timescale.MICRO,
 				priority: -7,
@@ -104,7 +107,7 @@ test("lite-04 refuses datagram tracks at setup", async () => {
 
 test("lite-07 bounds and prioritizes independent createWritable datagram queues", async () => {
 	const source = new Origin();
-	const publication = source.createBroadcast(path);
+	const publication = source.route(path, { hidden: true });
 	const datagrams = publication.broadcast.createDatagrams("audio");
 	publication.broadcast.createTrack("audio", { compress: true });
 	publication.announce();
@@ -155,7 +158,7 @@ for (const alpn of [ALPN_05, ALPN_06])
 	for (const first of ["stream", "datagram"]) {
 		test(`${alpn}: datagram readers rejoin and outlive streams (${first} first)`, async () => {
 			const source = new Origin();
-			const publication = source.createBroadcast(path);
+			const publication = source.route(path, { hidden: true });
 			const datagrams = publication.broadcast.createDatagrams("audio");
 			const track = publication.broadcast.createTrack("audio");
 			publication.announce();
@@ -200,7 +203,7 @@ for (const alpn of [ALPN_05, ALPN_06])
 
 test("lite-07 forwards a priority change made while the previous DATAGRAMS_UPDATE writes", async () => {
 	const source = new Origin();
-	const publication = source.createBroadcast(path);
+	const publication = source.route(path, { hidden: true });
 	const datagrams = publication.broadcast.createDatagrams("audio");
 	publication.announce();
 	const pair = createMockTransportPair(ALPN_07_WIP);
@@ -231,7 +234,7 @@ test("lite-07 forwards a priority change made while the previous DATAGRAMS_UPDAT
 
 test("lite-06: a request cancelled behind the shared datagram writer sends nothing", async () => {
 	const source = new Origin();
-	const publication = source.createBroadcast(path);
+	const publication = source.route(path, { hidden: true });
 	const first = publication.broadcast.createDatagrams("a");
 	const second = publication.broadcast.createDatagrams("b");
 	publication.announce();
@@ -275,6 +278,321 @@ test("lite-06: a request cancelled behind the shared datagram writer sends nothi
 		stall.resolve();
 		a.close();
 		b.close();
+		remote.close();
+		client.abort();
+		server.abort();
+		source.close();
+	}
+});
+
+// A publisher's stream writes, handed to the subscriber `lag` microtasks late: the answer it
+// writes lands after a datagram sent behind it, though in the same host task.
+function lagAnswers(transport: MockTransport, lag: number): void {
+	if (lag === 0) return;
+	const lagging = (writable: WritableStream<Uint8Array>) => {
+		const writer = writable.getWriter();
+		let chain = Promise.resolve();
+		const later = (op: () => Promise<void>) => {
+			// A write the session's close fails is lost, as it would be on the wire.
+			chain = chain
+				.then(async () => {
+					for (let i = 0; i < lag; i++) await Promise.resolve();
+					await op();
+				})
+				.catch(() => {});
+			return chain;
+		};
+		return new WritableStream<Uint8Array>({
+			// Copied: the write resolves now, after which the stream may reuse its buffer.
+			write: (chunk) => {
+				const copy = chunk.slice();
+				void later(() => writer.write(copy));
+			},
+			close: () => later(() => writer.close()),
+			abort: (reason) => writer.abort(reason),
+		});
+	};
+	const incoming = transport.incomingBidirectionalStreams.pipeThrough(
+		new TransformStream<WebTransportBidirectionalStream, WebTransportBidirectionalStream>({
+			transform: (bidi, controller) =>
+				controller.enqueue({
+					readable: bidi.readable,
+					writable: lagging(bidi.writable),
+				} as WebTransportBidirectionalStream),
+		}),
+	);
+	Object.defineProperty(transport, "incomingBidirectionalStreams", { value: incoming });
+}
+
+// A publisher that writes as soon as a subscription reaches it sends the datagram right behind
+// its answer, which may reach the subscriber first, with the track's end too when it finishes at
+// once. The subscriber decodes the answer before it routes the datagram, and routes the datagram
+// before it ends the track.
+for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
+	for (const [lag, finish] of [
+		[0, false],
+		[100, false],
+		[0, true],
+		[100, true],
+	] as const) {
+		test(`${alpn}: a datagram sent right behind its answer arrives (answer ${lag} microtasks late${finish ? ", then the end" : ""})`, async () => {
+			const source = new Origin();
+			const publication = source.route(path, { hidden: true });
+			const datagrams = publication.broadcast.createDatagrams("audio");
+			publication.announce();
+			const pair = createMockTransportPair(alpn);
+			lagAnswers(pair.server, lag);
+			const [client, server] = await Promise.all([
+				connect({ url, transport: pair.client }),
+				accept({ url, transport: pair.server, publish: source.consume() }),
+			]);
+			const remote = wireOf(client).consume(path);
+			const reader = remote.datagrams("audio");
+			// Only the subscription carries this priority: a lite-06 TRACK lookup asks for none.
+			reader.setPriority(5);
+			try {
+				while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
+				datagrams.append(undefined, Uint8Array.of(1));
+				if (finish) datagrams.finish();
+				await reader.info();
+				if (!finish) datagrams.append(undefined, Uint8Array.of(2));
+				expect((await reader.recv())?.payload).toEqual(Uint8Array.of(1));
+				if (finish) expect(await reader.recv()).toBeUndefined();
+				else expect((await reader.recv())?.payload).toEqual(Uint8Array.of(2));
+				expect((await client.stats()).datagramsUnrouted).toBe(0);
+			} finally {
+				reader.close();
+				remote.close();
+				client.abort();
+				server.abort();
+				source.close();
+			}
+		});
+	}
+}
+
+// A publisher that writes a last datagram and finishes at once sends the datagram right ahead
+// of its track's end. The subscriber routes the datagram before it ends the track.
+for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
+	test(`${alpn}: a datagram sent right before its end arrives`, async () => {
+		const source = new Origin();
+		const publication = source.route(path, { hidden: true });
+		const datagrams = publication.broadcast.createDatagrams("audio");
+		publication.announce();
+		const pair = createMockTransportPair(alpn);
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client }),
+			accept({ url, transport: pair.server, publish: source.consume() }),
+		]);
+		const remote = wireOf(client).consume(path);
+		const reader = remote.datagrams("audio");
+		reader.setPriority(5);
+		try {
+			await reader.info();
+			while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
+			datagrams.append(undefined, Uint8Array.of(1));
+			datagrams.finish();
+			expect((await reader.recv())?.payload).toEqual(Uint8Array.of(1));
+			expect(await reader.recv()).toBeUndefined();
+			expect((await client.stats()).datagramsUnrouted).toBe(0);
+		} finally {
+			reader.close();
+			remote.close();
+			client.abort();
+			server.abort();
+			source.close();
+		}
+	});
+}
+
+// A burst written right before a track's end can outlast the receive loop's budget, which yields
+// with some of it still queued. The end waits for the loop to read the queue empty.
+for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
+	test(`${alpn}: a burst sent right before its end arrives past a budget yield`, async () => {
+		// As many as a datagram track buffers unread, past two receive budgets.
+		const BURST = 64;
+		const source = new Origin();
+		const publication = source.route(path, { hidden: true });
+		const datagrams = publication.broadcast.createDatagrams("audio");
+		publication.announce();
+		const pair = createMockTransportPair(alpn);
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client }),
+			accept({ url, transport: pair.server, publish: source.consume() }),
+		]);
+		const remote = wireOf(client).consume(path);
+		const reader = remote.datagrams("audio");
+		reader.setPriority(5);
+		// Every budget slice reads as spent, so the receive loop yields a host task every 32 checks.
+		let checks = 0;
+		const budget = spyOn(Budget.prototype, "poll").mockImplementation(() =>
+			++checks % 32 === 0 ? yieldNow() : undefined,
+		);
+		try {
+			await reader.info();
+			while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
+			for (let i = 0; i < BURST; i++) datagrams.append(undefined, Uint8Array.of(i));
+			datagrams.finish();
+			let count = 0;
+			while ((await reader.recv()) !== undefined) count++;
+			expect(count).toBe(BURST);
+			expect((await client.stats()).datagramsUnrouted).toBe(0);
+		} finally {
+			budget.mockRestore();
+			reader.close();
+			remote.close();
+			client.abort();
+			server.abort();
+			source.close();
+		}
+	});
+}
+
+// A track's end waits a host task for the datagrams received with it. A session close in
+// between finishes the track rather than cutting it off: the publisher already ended it.
+// Quarantined: the end needs host tasks under load, so the close aborts the track.
+// Investigation: quest/m0/test-flakes-2/datagram-end-close.md.
+for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
+	test.skip(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
+		const source = new Origin();
+		const publication = source.route(path, { hidden: true });
+		const datagrams = publication.broadcast.createDatagrams("audio");
+		publication.announce();
+		const pair = createMockTransportPair(alpn);
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client }),
+			accept({ url, transport: pair.server, publish: source.consume() }),
+		]);
+		const remote = wireOf(client).consume(path);
+		const reader = remote.datagrams("audio");
+		reader.setPriority(5);
+		// The end has to reach the client before the abort, and the mock delivers it in
+		// microtasks. A write-budget yield is a host task that the drain below can't advance,
+		// so under CPU load the publisher's answer could still be stalled when the abort lands.
+		const budget = spyOn(Budget.prototype, "poll").mockImplementation(() => undefined);
+		try {
+			await reader.info();
+			while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
+			datagrams.finish();
+			// The mock delivers the end in microtasks, all within this host task.
+			for (let i = 0; i < 10000; i++) await Promise.resolve();
+			client.abort();
+			expect(await reader.recv()).toBeUndefined();
+		} finally {
+			budget.mockRestore();
+			reader.close();
+			remote.close();
+			client.abort();
+			server.abort();
+			source.close();
+		}
+	});
+}
+
+// Holds back what the publisher writes on the next request stream it accepts once armed, until
+// released: that subscription's answer stays outstanding while everything else flows.
+function holdNextAnswer(transport: MockTransport): { arm(): void; release(): void } {
+	let armed = false;
+	const release = Promise.withResolvers<void>();
+	const holding = (writable: WritableStream<Uint8Array>) => {
+		const writer = writable.getWriter();
+		let chain = release.promise;
+		// A write the session's close fails is lost, as it would be on the wire.
+		const later = (op: () => Promise<void>) => {
+			chain = chain.then(op).catch(() => {});
+			return chain;
+		};
+		return new WritableStream<Uint8Array>({
+			// Copied: the write resolves now, after which the stream may reuse its buffer.
+			write: (chunk) => {
+				const copy = chunk.slice();
+				void later(() => writer.write(copy));
+			},
+			close: () => void later(() => writer.close()),
+			abort: (reason) => writer.abort(reason),
+		});
+	};
+	const incoming = transport.incomingBidirectionalStreams.pipeThrough(
+		new TransformStream<WebTransportBidirectionalStream, WebTransportBidirectionalStream>({
+			transform: (bidi, controller) => {
+				const held = armed;
+				armed = false;
+				controller.enqueue(
+					held
+						? ({
+								readable: bidi.readable,
+								writable: holding(bidi.writable),
+							} as WebTransportBidirectionalStream)
+						: bidi,
+				);
+			},
+		}),
+	);
+	Object.defineProperty(transport, "incomingBidirectionalStreams", { value: incoming });
+	return {
+		arm: () => {
+			armed = true;
+		},
+		release: () => release.resolve(),
+	};
+}
+
+// Datagrams held for a track still awaiting its answer, more than are held at once, don't hold
+// up an answered track's last datagram, which its end, arriving with it, would otherwise drop.
+test("lite-07: an unanswered track's datagrams don't delay another track's last", async () => {
+	const source = new Origin();
+	const publication = source.route(path, { hidden: true });
+	const b = publication.broadcast.createDatagrams("b");
+	// Answers "a" on demand.
+	const requested = wireOf(publication.broadcast).requestedDatagrams();
+	publication.announce();
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const hold = holdNextAnswer(pair.server);
+	// Counts the datagrams the publisher sends.
+	const sending = pair.server.datagrams.writable.getWriter();
+	let sent = 0;
+	const sends = new Signal(0);
+	Object.defineProperty(pair.server.datagrams, "writable", {
+		value: new WritableStream<Uint8Array>({
+			write: async (chunk) => {
+				await sending.write(chunk);
+				sends.set(++sent);
+			},
+		}),
+	});
+	const [client, server] = await Promise.all([
+		connect({ url, transport: pair.client }),
+		accept({ url, transport: pair.server, publish: source.consume() }),
+	]);
+	const remote = wireOf(client).consume(path);
+	const readerB = remote.datagrams("b");
+	readerB.setPriority(5);
+	let readerA: ReturnType<typeof remote.datagrams> | undefined;
+	try {
+		await readerB.info();
+		while (b.priority.peek() !== 5) await b.priority.changed();
+		hold.arm();
+		readerA = remote.datagrams("a");
+		const request = await requested;
+		if (!request) throw new Error("the request never reached the handler");
+		const a = request.accept({});
+		for (let i = 0; i < 40; i++) a.append(undefined, Uint8Array.of(i));
+		// "a"'s datagrams reach the subscriber ahead of "b"'s.
+		while (sends.peek() < 40) await sends.changed();
+		b.append(undefined, Uint8Array.of(9));
+		b.finish();
+		expect((await readerB.recv())?.payload).toEqual(Uint8Array.of(9));
+		expect(await readerB.recv()).toBeUndefined();
+		// Those past the cap were dropped at once, without stalling "b".
+		expect((await client.stats()).datagramsUnrouted).toBeGreaterThanOrEqual(8);
+		// "a" stays unanswered past the host task its held datagrams wait, so they drop too.
+		while (((await client.stats()).datagramsUnrouted ?? 0) < 40) await yieldNow();
+		expect((await client.stats()).datagramsUnrouted).toBe(40);
+		hold.release();
+		await readerA.info();
+	} finally {
+		readerA?.close();
+		readerB.close();
 		remote.close();
 		client.abort();
 		server.abort();

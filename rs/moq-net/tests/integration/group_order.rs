@@ -13,7 +13,7 @@ use moq_net::track::Delay;
 use std::time::Duration;
 
 use moq_net::track::{Info, Order, Subscription};
-use moq_net::{Hop, Timescale, Timestamp, Version};
+use moq_net::{Timescale, Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -25,7 +25,8 @@ const FOREVER: Duration = Duration::from_millis((1 << 53) - 1);
 const BACKLOG: [u64; 4] = [0, 1, 2, 3];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -114,14 +115,17 @@ fn carries_order(version: &str) -> bool {
 async fn round(version: &str, relay: bool, order: Order) -> Vec<u64> {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
+		.broadcast()
 		.create_track(
 			"ordered",
 			Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
 		)
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let upstream = match relay {
 		true => Some(connect(version, publisher.consume(), 2).await),
@@ -188,14 +192,17 @@ async fn merged_subscribers_keep_their_own_order() {
 	for version in ["moq-lite-07-wip", "moq-transport-18"] {
 		let version: Version = version.parse().unwrap();
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				"ordered",
 				Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
 			)
 			.unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 
 		let (upstream, relay) = connect(version, publisher.consume(), 2).await;
 		let (descending_pair, descending_origin) = connect(version, relay.consume(), 3).await;

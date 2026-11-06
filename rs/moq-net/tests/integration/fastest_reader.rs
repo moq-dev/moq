@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_net::{Hop, Timestamp, Version, origin, track, transport::ReceiveWindow};
+use moq_net::{Timestamp, Version, origin, track, transport::ReceiveWindow};
 
 use crate::support::harness::{MockPair, peer, spawn};
 
@@ -24,7 +24,7 @@ fn uncapped() -> ReceiveWindow {
 }
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	origin
 }
@@ -33,7 +33,7 @@ fn origin(hop: u64) -> origin::Producer {
 struct Relay {
 	track: track::Producer,
 	subscriber: track::Subscriber,
-	_broadcast: origin::Publication,
+	_broadcast: origin::Route,
 	pair: MockPair,
 	_origins: [origin::Producer; 2],
 }
@@ -43,11 +43,14 @@ async fn relay(version: &str) -> Relay {
 	let relay = origin(2);
 	let pair = peer(version.parse::<Version>().unwrap(), &publisher, &relay).await;
 
-	let broadcast = publisher.create_broadcast("live").unwrap();
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
+		.broadcast()
 		.create_track("data", track::Info::default().with_timescale(moq_net::Timescale::MILLI))
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let remote = kio::clock::timeout(TIMEOUT, relay.consume().follow("live", None).unwrap().available())
 		.await
@@ -295,11 +298,14 @@ async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
 			pair.server_transport
 				.set_receive_window(Some(ReceiveWindow::new(4 * MB as u64, MB as u64)));
 		}
-		let broadcast = publisher.create_broadcast("chain").unwrap();
+		let broadcast = publisher
+			.route("chain", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track("data", track::Info::default().with_timescale(moq_net::Timescale::MILLI))
 			.unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 		let remote = second
 			.consume()
 			.follow("chain", None)

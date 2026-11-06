@@ -6,7 +6,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Timestamp, Version, group, origin, track};
+use moq_net::{Timestamp, Version, group, origin, track};
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,
@@ -22,7 +22,8 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Build an origin producer, spawning its driver on the ambient runtime.
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -48,9 +49,11 @@ async fn rejoin_recovers_the_group_reset_on_leave() {
 				let publisher = produce_origin(1);
 				let relay = produce_origin(2);
 
-				let broadcast = publisher.create_broadcast("bench").unwrap();
-				let track = broadcast.create_track("video", timed()).unwrap();
-				broadcast.announce(Default::default()).unwrap();
+				let broadcast = publisher
+					.route("bench", moq_net::origin::RouteOptions::hidden())
+					.unwrap();
+				let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+				broadcast.announce().unwrap();
 
 				let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 				options.server_publish = Some(publisher.consume());
@@ -148,9 +151,11 @@ async fn rejoin_skips_a_cache_kept_by_another_handle() {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);
 
-			let broadcast = publisher.create_broadcast("bench").unwrap();
-			let track = broadcast.create_track("video", timed()).unwrap();
-			broadcast.announce(Default::default()).unwrap();
+			let broadcast = publisher
+				.route("bench", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
+			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+			broadcast.announce().unwrap();
 
 			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 			options.server_publish = Some(publisher.consume());
@@ -212,9 +217,11 @@ async fn rejoin_keeps_the_cache_when_the_backlog_lands_newest_first() {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);
 
-			let broadcast = publisher.create_broadcast("bench").unwrap();
-			let track = broadcast.create_track("video", timed()).unwrap();
-			broadcast.announce(Default::default()).unwrap();
+			let broadcast = publisher
+				.route("bench", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
+			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+			broadcast.announce().unwrap();
 
 			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 			options.server_publish = Some(publisher.consume());
@@ -292,9 +299,11 @@ async fn rejoin_mid_group_keeps_the_head_for_later_readers() {
 			let relay = produce_origin(2);
 			let client = produce_origin(3);
 
-			let broadcast = publisher.create_broadcast("bench").unwrap();
-			let track = broadcast.create_track("video", timed()).unwrap();
-			broadcast.announce(Default::default()).unwrap();
+			let broadcast = publisher
+				.route("bench", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
+			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+			broadcast.announce().unwrap();
 			// Left open, as a JSON snapshot group stays open for its deltas.
 			let mut open = track.append_group().unwrap();
 			open.write_frame(Timestamp::ZERO, b"a0".as_ref()).unwrap();
@@ -370,9 +379,11 @@ async fn rejoin_goes_live_without_the_join_head() {
 			let relay = produce_origin(2);
 			let client = produce_origin(3);
 
-			let broadcast = publisher.create_broadcast("bench").unwrap();
-			let track = broadcast.create_track("video", timed()).unwrap();
-			broadcast.announce(Default::default()).unwrap();
+			let broadcast = publisher
+				.route("bench", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
+			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+			broadcast.announce().unwrap();
 			let mut open = track.append_group().unwrap();
 			open.write_frame(Timestamp::ZERO, b"a0".as_ref()).unwrap();
 
@@ -445,9 +456,11 @@ async fn rejoin_during_the_cancel_skips_the_cache() {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);
 
-			let broadcast = publisher.create_broadcast("bench").unwrap();
-			let track = broadcast.create_track("video", timed()).unwrap();
-			broadcast.announce(Default::default()).unwrap();
+			let broadcast = publisher
+				.route("bench", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
+			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+			broadcast.announce().unwrap();
 
 			let mut options = MockConnectOptions::new(version);
 			options.server_publish = Some(publisher.consume());
@@ -514,9 +527,11 @@ async fn rejoin_waits_for_the_answers_first_frame() {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);
 
-			let broadcast = publisher.create_broadcast("bench").unwrap();
-			let track = broadcast.create_track("video", timed()).unwrap();
-			broadcast.announce(Default::default()).unwrap();
+			let broadcast = publisher
+				.route("bench", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
+			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+			broadcast.announce().unwrap();
 
 			let mut options = MockConnectOptions::new(version);
 			options.server_publish = Some(publisher.consume());
@@ -592,9 +607,11 @@ async fn leaving_after_the_cache_window_keeps_the_latest_group() {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);
 
-			let broadcast = publisher.create_broadcast("bench").unwrap();
-			let track = broadcast.create_track("catalog", timed()).unwrap();
-			broadcast.announce(Default::default()).unwrap();
+			let broadcast = publisher
+				.route("bench", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
+			let track = broadcast.broadcast().create_track("catalog", timed()).unwrap();
+			broadcast.announce().unwrap();
 			let mut group = track.append_group().unwrap();
 			group.write_frame(Timestamp::ZERO, b"c0".as_ref()).unwrap();
 			group.finish().unwrap();
@@ -672,9 +689,11 @@ async fn rejoin_keeps_source_timestamps() {
 			let publisher = produce_origin(1);
 			let client = produce_origin(2);
 
-			let broadcast = publisher.create_broadcast("bench").unwrap();
-			let track = broadcast.create_track("video", timed()).unwrap();
-			broadcast.announce(Default::default()).unwrap();
+			let broadcast = publisher
+				.route("bench", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
+			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+			broadcast.announce().unwrap();
 
 			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 			options.server_publish = Some(publisher.consume());
@@ -762,11 +781,11 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 	kio::clock::timeout(TEST_TIMEOUT + moq_net::cache::DEFAULT_EXPIRY * 5, async {
 		let publisher = produce_origin(1);
 		let relay = produce_origin(2);
-		let broadcast = publisher.create_broadcast("bench").unwrap();
-		let track = broadcast.create_track("catalog", timed()).unwrap();
-		broadcast
-			.announce(moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0))
+		let broadcast = publisher
+			.route("bench", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
+		let track = broadcast.broadcast().create_track("catalog", timed()).unwrap();
+		broadcast.announce().unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, b"catalog".as_ref()).unwrap();
 		group.finish().unwrap();

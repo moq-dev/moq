@@ -34,7 +34,7 @@ use std::task::{Poll, ready};
 use crate::{Error, Path};
 
 use super::WeakEntry;
-use super::origin::{self, Route};
+use super::origin::{self, RouteOptions};
 use super::track::{self, Delay, Order, Subscription};
 use super::{frame, group};
 
@@ -100,13 +100,6 @@ fn messages() -> track::Info {
 	track::Info::default().with_max_age(None)
 }
 
-/// What a session's reader asks for: every group, oldest first, however late it is.
-fn reliable() -> Subscription {
-	Subscription::default()
-		.with_order(Order::Ascending)
-		.with_delay(Delay::default().with_max(None))
-}
-
 mod sealed {
 	use super::*;
 
@@ -125,8 +118,8 @@ mod sealed {
 		pub(super) origin: origin::Consumer,
 		/// Where the `tcp` sessions' pumps run: the origin's driver.
 		pub(super) tasks: crate::util::TasksWeak,
-		/// This endpoint's broadcast.
-		pub(super) publication: origin::Publication,
+		/// This endpoint's route, which owns its broadcast.
+		pub(super) route: origin::Route,
 		/// The sessions withholding the broadcast from their peer.
 		pub(super) withheld: origin::HiddenWithheld,
 		pub(super) state: kio::Lock<State>,
@@ -168,6 +161,21 @@ impl Protocol {
 			"tcp" => Some(Self::Tcp),
 			"track" => Some(Self::Track),
 			_ => None,
+		}
+	}
+
+	/// What a session's reader asks for: every message, oldest first, however late it is.
+	fn subscription(self) -> Subscription {
+		let reliable = Subscription::default()
+			.with_order(Order::Ascending)
+			.with_delay(Delay::default().with_max(None));
+		match self {
+			// The half's only group is the live one, so a live join reads it from its first
+			// frame, even one written before the answer: over moq-transport, a SUBSCRIBE
+			// plus a joining FETCH or fill for that group's head.
+			Self::Tcp => reliable,
+			// Starts at group 0, so a burst written before the answer is kept.
+			Self::Track => reliable.with_range(0..),
 		}
 	}
 }
@@ -271,6 +279,8 @@ impl sealed::Open for TcpStream {
 /// delay budget, so a late group is waited for rather than skipped. Each hop's cache
 /// still reclaims a group nobody read within its idle window (30 s by default), or under
 /// memory pressure, except the newest, so a reader that stalls longer can miss groups.
+/// Any group the track reports it will never deliver, such as one a moq-transport
+/// publisher refused to fetch, is skipped the same way rather than ending the session.
 /// Update its subscription, such as with a finite
 /// [`Delay`] or [`Order::Descending`], to make it lossy or newest first, and read it in
 /// group order with [`track::Subscriber::ordered`]. Groups are written with
@@ -393,7 +403,7 @@ impl Shared {
 			} else {
 				match std::mem::replace(&mut state.handler, Handler::Taken(kio::WaiterList::new())) {
 					Handler::Idle(requests) => Some(requests),
-					Handler::None => Some(self.publication.requests()),
+					Handler::None => Some(self.route.broadcast().requests()),
 					Handler::Taken(_) => unreachable!("checked above"),
 				}
 			}
@@ -485,7 +495,7 @@ impl Shared {
 		if let Some(retired) = retired {
 			// Closed first, as `close` may not have yet: dropping the last handler rejects
 			// the dials still queued with `Dropped`, rather than the close's `Unroutable`.
-			self.publication.close();
+			self.route.broadcast().close();
 			drop(retired);
 		}
 		for mut wake in wakes {
@@ -514,7 +524,7 @@ impl Shared {
 		if let Some(err) = &self.state.lock().end {
 			return Err(err.clone());
 		}
-		match self.publication.poll_closed(waiter) {
+		match self.route.broadcast().poll_closed(waiter) {
 			Poll::Ready(()) => Err(Error::Closed),
 			Poll::Pending => Ok(()),
 		}
@@ -542,7 +552,7 @@ impl Shared {
 		let streams = std::mem::take(&mut state.streams);
 		drop(guard);
 
-		self.publication.close();
+		self.route.broadcast().close();
 		// Reset outside the lock.
 		for stream in streams {
 			stream.abort(Error::Cancel);
@@ -589,7 +599,7 @@ impl Endpoint {
 	///
 	/// `id` names the endpoint: a well-known name for a server, or a random one for a
 	/// client. It must be one path segment. Fails like
-	/// [`origin::Producer::create_broadcast`] when `origin` may not publish
+	/// [`origin::Producer::route`] when `origin` may not publish
 	/// `<prefix>/.socket/<id>`.
 	pub fn new(
 		origin: &origin::Producer,
@@ -597,8 +607,7 @@ impl Endpoint {
 		id: &str,
 	) -> Result<Self, Error> {
 		let prefix = crate::path::convert(prefix)?;
-		let publication = origin.create_broadcast(endpoint_path(&prefix, id)?)?;
-		publication.announce(Route::default())?;
+		let route = origin.route(endpoint_path(&prefix, id)?, RouteOptions::default())?;
 		let consumer = origin.consume();
 		Ok(Self {
 			shared: Arc::new(Shared {
@@ -607,7 +616,7 @@ impl Endpoint {
 				withheld: consumer.hidden_withheld(),
 				origin: consumer,
 				tasks: origin.tasks(),
-				publication,
+				route,
 				state: kio::Lock::new(State {
 					handler: Handler::None,
 					tcp: Queue::default(),
@@ -665,7 +674,7 @@ impl Endpoint {
 		let name = track_name(S::PROTOCOL.as_str(), &shared.id, peer, &session);
 		// This side's half, waiting for the peer to ask for it, which only the peer can:
 		// nobody else knows the session.
-		let answer = shared.publication.reserve_unlisted_track(name.clone())?;
+		let answer = shared.route.broadcast().reserve_unlisted_track(name.clone())?;
 		// Followed rather than requested, so a peer not announced yet is waited for.
 		let resolving = Box::new(shared.origin.follow(path, None)?);
 		Ok(kio::Pending::new(Dialing {
@@ -826,13 +835,13 @@ enum Step {
 
 impl Step {
 	/// Advance until the peer serves its half, subscribing to `track` in its endpoint.
-	fn poll(&mut self, waiter: &kio::Waiter, track: &str) -> Poll<Result<(), Error>> {
+	fn poll(&mut self, waiter: &kio::Waiter, protocol: Protocol, track: &str) -> Poll<Result<(), Error>> {
 		loop {
 			match self {
 				Self::Resolving(following) => {
 					// Only the first call is made here, and it never reports the path offline.
 					let broadcast = ready!(following.poll_available(waiter))?.expect("the first call is never offline");
-					let subscribing = broadcast.track(track)?.subscribe(reliable()).into_inner();
+					let subscribing = broadcast.track(track)?.subscribe(protocol.subscription()).into_inner();
 					*self = Self::Subscribing(subscribing);
 				}
 				Self::Subscribing(subscribing) => {
@@ -955,7 +964,7 @@ impl<S: Stream> Dialing<S> {
 			}
 		}
 
-		ready!(self.step.poll(waiter, &self.name))?;
+		ready!(self.step.poll(waiter, S::PROTOCOL, &self.name))?;
 		// The peer serves its half only after asking for this side's, so a conforming peer
 		// asked already; wait for its request regardless.
 		let Some(Answer::Served(_)) = &self.answer else {
@@ -1027,7 +1036,7 @@ impl<S: Stream> Accepting<S> {
 		if self.demand.poll_state(waiter) != track::DemandState::Active {
 			return Poll::Ready(Err(Error::Cancel));
 		}
-		ready!(self.step.poll(waiter, &self.name))?;
+		ready!(self.step.poll(waiter, S::PROTOCOL, &self.name))?;
 
 		// Accepted outside the lock, since it wakes the dialer.
 		let request = self.request.take().ok_or(Error::Closed)?;
@@ -1292,13 +1301,13 @@ mod tests {
 
 		let (done, finished) = std::sync::mpsc::channel();
 		let thread = std::thread::spawn(move || {
-			let (origin, _driver) = origin::Producer::new(origin::Config::new(crate::Hop::new(1).unwrap()));
+			let (origin, _driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 			let endpoint = Endpoint::new(&origin, "room", "bob").unwrap();
 			let noop = kio::Waiter::noop();
 			// Listening, so the dial queues for the handler.
 			assert!(endpoint.poll_accept_tcp(&noop).is_pending());
 
-			let broadcast = endpoint.shared.publication.broadcast().consume();
+			let broadcast = endpoint.shared.route.broadcast().consume();
 			let dial = broadcast
 				.track("tcp/alice/bob/0123456789abcdef0123456789abcdef")
 				.unwrap()
@@ -1331,14 +1340,14 @@ mod tests {
 	/// its dialer gives up, so dialing and giving up again never piles up requests.
 	#[test]
 	fn abandoned_dials_leave_the_queue() {
-		let (origin, _driver) = origin::Producer::new(origin::Config::new(crate::Hop::new(1).unwrap()));
+		let (origin, _driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 		let endpoint = Endpoint::new(&origin, "room", "bob").unwrap();
 		let noop = kio::Waiter::noop();
 		// Accepting both protocols, then only `tcp`.
 		assert!(endpoint.poll_accept_track(&noop).is_pending());
 		assert!(endpoint.poll_accept_tcp(&noop).is_pending());
 
-		let broadcast = endpoint.shared.publication.broadcast().consume();
+		let broadcast = endpoint.shared.route.broadcast().consume();
 		let queued = || endpoint.shared.state.lock().track.dials.len();
 		let dial = |session: u32| {
 			let dial = broadcast

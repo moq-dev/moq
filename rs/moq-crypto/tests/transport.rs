@@ -1,4 +1,4 @@
-//! Grouped tracks on moq-lite and MoQ Transport, and datagram tracks on moq-lite.
+//! Grouped tracks and datagrams on moq-lite and MoQ Transport.
 
 mod support;
 
@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use moq_crypto::e2ee::Credential;
 use moq_crypto::e2ee::credential::Config;
-use moq_net::{Hop, Timestamp, Version};
+use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -17,7 +17,8 @@ fn timed() -> moq_net::track::Info {
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	tokio::spawn(support::harness::run(driver));
 	producer
 }
@@ -31,7 +32,7 @@ fn timed_datagrams() -> moq_net::datagram::Info {
 struct Fixture {
 	producer: moq_crypto::e2ee::broadcast::Producer,
 	consumer: moq_crypto::e2ee::broadcast::Consumer,
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 	_pair: MockPair,
 }
 
@@ -48,11 +49,10 @@ async fn connect_protected(version: Version, label: &str) -> Fixture {
 	let publisher = produce_origin(1);
 	let consumer_origin = produce_origin(2);
 
-	let broadcast = publisher.create_broadcast(&path).unwrap();
+	let options = moq_net::origin::RouteOptions::hidden().with_instance(generation.epoch().instance(), 0);
+	let broadcast = publisher.route(&path, options).unwrap();
 	let producer = moq_crypto::e2ee::broadcast::Producer::new(broadcast.broadcast().clone(), generation.clone());
-	broadcast
-		.announce(moq_net::origin::Route::default().with_instance(generation.epoch().instance(), 0))
-		.unwrap();
+	broadcast.announce().unwrap();
 
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(publisher);
@@ -156,4 +156,9 @@ async fn datagrams_over_lite_05() {
 #[tokio::test]
 async fn max_datagram_over_lite_07() {
 	datagram_roundtrip("moq-lite-07-wip", &[7; moq_crypto::e2ee::MAX_DATAGRAM_PLAINTEXT]).await;
+}
+
+#[tokio::test]
+async fn datagrams_over_ietf() {
+	datagram_roundtrip("moq-transport-22", b"opus").await;
 }

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::{Client, Hop, Server, Timestamp, Version, cache, origin, track, transport::memory};
+use moq_net::{Client, Server, Timestamp, Version, cache, origin, track, transport::memory};
 
 const VERSION: &str = "moq-lite-06";
 
@@ -105,7 +105,7 @@ struct Link {
 	tracks: Vec<track::Producer>,
 	subscribers: Vec<track::Subscriber>,
 	payload: Bytes,
-	_broadcast: origin::Publication,
+	_broadcast: origin::Route,
 	_sessions: (moq_net::Session, moq_net::Session),
 	_origins: (origin::Producer, origin::Producer),
 }
@@ -115,7 +115,7 @@ impl Link {
 		let mut pools = Vec::new();
 		let version: Version = VERSION.parse().unwrap();
 		let mut origin = |hop: u64| {
-			let mut config = origin::Config::new(Hop::new(hop).unwrap());
+			let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 			config.pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
 			pools.push(config.pool.clone());
 			let (producer, driver) = origin::Producer::new(config);
@@ -149,14 +149,21 @@ impl Link {
 			}
 		);
 
-		let broadcast = publisher.create_broadcast("bench").unwrap();
+		let broadcast = publisher
+			.route("bench", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let info = track::Info::default()
 			.with_max_age(None)
 			.with_timescale(moq_net::Timescale::MILLI);
 		let tracks: Vec<_> = (0..streams)
-			.map(|index| broadcast.create_track(format!("{index}"), info.clone()).unwrap())
+			.map(|index| {
+				broadcast
+					.broadcast()
+					.create_track(format!("{index}"), info.clone())
+					.unwrap()
+			})
 			.collect();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 
 		let consumer = subscriber.consume();
 		let remote = consumer

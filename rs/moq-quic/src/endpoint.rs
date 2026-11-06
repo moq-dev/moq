@@ -190,7 +190,8 @@ impl Endpoint {
 					src_cid: dst_cid,
 					dst_cid: src_cid,
 				}
-				.encode(buf);
+				// Version Negotiation has no Length field
+				.encode(buf, 0);
 				// Grease with a reserved version
 				buf.write::<u32>(match version {
 					0x0a1a_2a3a => 0x0a1a_2a4a,
@@ -818,7 +819,8 @@ impl Endpoint {
 			version: incoming.packet.header.version,
 		};
 
-		let encode = header.encode(buf);
+		// A Retry has no Length field
+		let encode = header.encode(buf, 0);
 		buf.put_slice(&token);
 		buf.extend_from_slice(
 			&server_config
@@ -979,7 +981,7 @@ impl Endpoint {
 			version: version.wire(),
 		});
 
-		let partial_encode = header.encode(buf);
+		let partial_encode = header.encode(buf, INITIAL_MTU.into());
 		let max_len = INITIAL_MTU as usize - partial_encode.header_len - crypto.packet.local.tag_len();
 		frame::Close::from(reason).encode(buf, max_len);
 		buf.resize(buf.len() + crypto.packet.local.tag_len(), 0);

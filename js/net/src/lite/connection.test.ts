@@ -3,6 +3,7 @@ import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
 import Qmux from "@moq/qmux";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
+import { inspect } from "../connection/stats.ts";
 import { SessionCode, SessionError } from "../error.ts";
 import { createMockTransportPair, type MockTransport, textFrame } from "../mock.ts";
 import { Producer } from "../origin.ts";
@@ -78,6 +79,18 @@ test("a throwing getStats advertises None rather than propagating", async () => 
 		throw new Error("no stats for you");
 	});
 	expect(await probeLevel(quic, Version.DRAFT_05)).toBe(ProbeLevel.None);
+});
+
+// Safari's stub reports a 0 RTT and no rate; once inspect() flags it, the wire says None.
+test("a stub getStats found at setup advertises None", async () => {
+	const stub = transport(async () => ({ smoothedRtt: 0, estimatedSendRate: null }));
+	await inspect(stub);
+	expect(await probeLevel(stub, Version.DRAFT_05)).toBe(ProbeLevel.None);
+
+	// A 0 RTT alongside a rate is not a stub.
+	const rate = transport(async () => ({ smoothedRtt: 0, estimatedSendRate: 1_000_000 }));
+	await inspect(rate);
+	expect(await probeLevel(rate, Version.DRAFT_05)).toBe(ProbeLevel.Report);
 });
 
 async function sendGoaway(server: WebTransport, uri: string): Promise<void> {
@@ -309,9 +322,8 @@ for (const [alpn, version] of [
 		const pair = createMockTransportPair(alpn);
 		const fin = holdFins(pair.server, "uni");
 		const origin = new Producer();
-		const broadcastPublication = origin.createBroadcast(Path.from("room"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
+		const broadcastRoute = origin.route(Path.from("room"));
+		const broadcast = broadcastRoute.broadcast;
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		const url = new URL("https://localhost/test");
 		const client = new Connection({ url, quic: pair.client, version });
@@ -371,9 +383,8 @@ for (const [alpn, version] of [
 			deliverWhole(pair.client);
 			if (overtaken === "fin") finAfterClose(pair.client);
 			const origin = new Producer();
-			const broadcastPublication = origin.createBroadcast(Path.from("room"));
-			const broadcast = broadcastPublication.broadcast;
-			broadcastPublication.announce();
+			const broadcastRoute = origin.route(Path.from("room"));
+			const broadcast = broadcastRoute.broadcast;
 			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 			const url = new URL("https://localhost/test");
 			const client = new Connection({ url, quic: pair.client, version });
@@ -423,9 +434,8 @@ for (const [alpn, version] of [
 			const pair = createMockTransportPair(alpn);
 			finAfterClose(pair.client);
 			const origin = new Producer();
-			const broadcastPublication = origin.createBroadcast(Path.from("room"));
-			const broadcast = broadcastPublication.broadcast;
-			broadcastPublication.announce();
+			const broadcastRoute = origin.route(Path.from("room"));
+			const broadcast = broadcastRoute.broadcast;
 			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 			const url = new URL("https://localhost/test");
 			const client = new Connection({ url, quic: pair.client, version });
@@ -468,9 +478,8 @@ for (const [alpn, version] of [
 		test(`a peer close finishes a FIN'd track over qmux ${versionName(version)}`, async () => {
 			const pair = qmuxPair();
 			const origin = new Producer();
-			const broadcastPublication = origin.createBroadcast(Path.from("room"));
-			const broadcast = broadcastPublication.broadcast;
-			broadcastPublication.announce();
+			const broadcastRoute = origin.route(Path.from("room"));
+			const broadcast = broadcastRoute.broadcast;
 			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 			const url = new URL("https://localhost/test");
 			const client = new Connection({ url, quic: pair.client, version });
@@ -509,9 +518,8 @@ for (const [alpn, version] of [
 async function servedRawSubscription(alpn: string = ALPN_07_WIP, version: Version = Version.DRAFT_07) {
 	const pair = createMockTransportPair(alpn);
 	const origin = new Producer();
-	const broadcastPublication = origin.createBroadcast(Path.from("room"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("room"));
+	const broadcast = broadcastRoute.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const server = new Connection({
 		url: new URL("https://relay.example/"),
@@ -628,9 +636,8 @@ test("close waits for a served FETCH to be acknowledged", async () => {
 	const pair = createMockTransportPair(ALPN_05);
 	const fin = holdFins(pair.server, "incoming-bidi");
 	const origin = new Producer();
-	const broadcastPublication = origin.createBroadcast(Path.from("room"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("room"));
+	const broadcast = broadcastRoute.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = producer.appendGroup();
 	group.writeFrame(textFrame("last"));
@@ -681,9 +688,8 @@ test("close waits for a request served while withdrawals are in flight", async (
 	const fin = holdFins(pair.server, "incoming-bidi");
 	const source = new Producer();
 	const destination = new Producer();
-	const broadcastPublication = source.createBroadcast(Path.from("room"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = source.route(Path.from("room"));
+	const broadcast = broadcastRoute.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = producer.appendGroup();
 	group.writeFrame(textFrame("last"));

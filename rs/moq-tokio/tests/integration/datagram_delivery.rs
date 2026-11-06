@@ -199,9 +199,11 @@ async fn measure(version: &str, cell: Cell) {
 	let version: moq_net::Version = version.parse().expect("version");
 
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast("room").expect("broadcast");
-	let mut datagrams = broadcast.create_datagrams("audio", timed()).unwrap();
-	broadcast.announce(Default::default()).expect("announce");
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::hidden())
+		.expect("broadcast");
+	let mut datagrams = broadcast.broadcast().create_datagrams("audio", timed()).unwrap();
+	broadcast.announce().expect("announce");
 
 	let mut config = moq_tokio::listen::Config::default();
 	config.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -320,8 +322,7 @@ async fn benchmark_datagram_delivery() {
 	println!(
 		"version,cell,viewer,offered,lost_packets,overflowed_packets,undelivered_frame_packets,reordered_packets,p50_ms,p99_ms,max_ms"
 	);
-	// moq-transport has no datagram tracks.
-	for version in ["moq-lite-06", "moq-lite-07-wip"] {
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
 		for cell in cells {
 			measure(version, cell).await;
 		}

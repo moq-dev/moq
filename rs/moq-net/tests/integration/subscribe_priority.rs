@@ -8,7 +8,7 @@ use crate::support;
 use std::time::Duration;
 
 use moq_net::track::{Info, Subscription};
-use moq_net::{Hop, Timescale, Version, origin};
+use moq_net::{Timescale, Version, origin};
 use support::harness::peer;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -19,7 +19,7 @@ const LOW: i8 = -100;
 const HIGH: i8 = 100;
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -48,11 +48,14 @@ async fn priority(track: &moq_net::track::Producer, want: i8) -> Result<(), Stri
 /// publisher sees the priority rise and fall back.
 async fn follows(version: Version, relay: bool) -> Result<(), String> {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
+		.broadcast()
 		.create_track("video", Info::default().with_timescale(Timescale::MILLI))
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let relay_origin = produce_origin(2);
 	let subscriber = produce_origin(3);

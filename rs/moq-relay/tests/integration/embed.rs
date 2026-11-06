@@ -172,7 +172,7 @@ async fn embed_and_stop(mut config: Config) {
 		relay.config().quic.max_streams,
 		Some(moq_tokio::quic::DEFAULT_MAX_STREAMS)
 	);
-	assert_eq!(relay.cluster().id(), relay.cluster().origin.hop().id());
+	assert_eq!(relay.cluster().id(), relay.cluster().origin.hop().get());
 
 	// The application handles: in-process workers publish into the origin the
 	// QUIC sessions see, and the trigger stops the owner from any task. Both
@@ -273,9 +273,13 @@ async fn embed_and_stop(mut config: Config) {
 		"authorization"
 	);
 
-	let broadcast = origin.create_broadcast("test").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = origin
+		.route("test", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())

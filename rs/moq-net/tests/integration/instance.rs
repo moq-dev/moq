@@ -7,11 +7,11 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Instance, Version, origin};
+use moq_net::{Instance, Version, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -30,7 +30,7 @@ async fn started(announced: &mut origin::Routes) -> Instance {
 		.expect("announce hung")
 		.expect("announce ended")
 	{
-		origin::RouteEvent::Start(announce) => announce.route.instance.expect("a delivered route has an instance"),
+		origin::RouteEvent::Start(announce) => announce.route.instance().clone(),
 		other => panic!("expected a start, got {other:?}"),
 	}
 }
@@ -56,15 +56,18 @@ async fn job_reannounced(version: &str) {
 	let relay = produce_origin(2);
 	let instance: Instance = "job".parse().unwrap();
 	let job = publisher
-		.publish("job", origin::Route::default().with_instance(instance.clone(), 0))
+		.route(
+			"job",
+			moq_net::origin::RouteOptions::default().with_instance(instance.clone(), 0),
+		)
 		.unwrap();
 	let _session = link(version, &publisher, &relay).await;
 	let mut announced = relay.consume().routes();
 
 	let first = started(&mut announced).await;
-	job.unannounce();
+	job.withdraw();
 	ended(&mut announced).await;
-	job.announce(origin::Route::default()).unwrap();
+	job.announce().unwrap();
 	let second = started(&mut announced).await;
 
 	match version.to_string().as_str() {

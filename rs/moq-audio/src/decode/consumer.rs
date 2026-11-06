@@ -335,7 +335,10 @@ impl Consumer {
 					let first = !std::mem::replace(&mut self.started, true);
 					// A later group after a declared end comes from a fresh encoder; the end's
 					// own group carries the stopped encoder's final packets, trimmed below.
+					// Those packets end the speech before the silence, so only this frame
+					// tells the estimator the silence it measures across was declared.
 					if self.end.is_some() && group != self.end_group {
+						self.target.end();
 						self.restart()?;
 					}
 					// Nothing precedes group 0, and a group delivers from its frame 0 or not at
@@ -346,6 +349,10 @@ impl Consumer {
 				// Behind whatever the resampler held from before the loss.
 				Some(Encoded::Gap { timestamp, duration }) => {
 					self.started = true;
+					// The restart forgets the end, but the silence across it stays declared.
+					if self.end.is_some() {
+						self.target.end();
+					}
 					self.restart()?;
 					self.warmup_pending = !self.warmup.is_zero();
 					self.ready.push_back(Read::Gap { timestamp, duration });
@@ -919,7 +926,7 @@ mod tests {
 
 	/// An origin at `hop`, its driver spawned.
 	fn origin(hop: u64) -> moq_net::origin::Producer {
-		let config = moq_net::origin::Config::new(moq_net::Hop::new(hop).unwrap());
+		let config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 		let (producer, driver) = moq_net::origin::Producer::new(config);
 		tokio::spawn(moq_net::time::run(driver));
 		producer
@@ -968,11 +975,14 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn latest_skips_a_warm_copys_backlog() {
 		let publisher = origin(1);
-		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 		let mut demand = track.demand();
 		let mut producer = moq_mux::container::Producer::new(
 			track,
@@ -1046,11 +1056,14 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn latest_loses_no_group_the_publisher_bursts_before_its_first_frame() {
 		let publisher = origin(1);
-		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 		let mut producer = moq_mux::container::Producer::new(
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
@@ -2198,7 +2211,9 @@ mod tests {
 	/// sample count either way, and an unoptimized Opus codec takes minutes over
 	/// the whole corpus. [`opus_states_its_own_frame_duration`] covers Opus. The
 	/// lowest common rate keeps each packet small, since only its duration counts.
-	async fn replay(case: &crate::jitter::tests::Case) -> Vec<f64> {
+	/// With `hole`, the group after each end marker never arrives, so the consumer reads a
+	/// gap between the marker and what resumes.
+	async fn replay(case: &crate::jitter::tests::Case, hole: bool) -> Vec<f64> {
 		use crate::jitter::tests::duration;
 
 		let rate = 8_000;
@@ -2236,7 +2251,24 @@ mod tests {
 
 		let payload: Bytes = vec![0u8; samples * size_of::<f32>()].into();
 		let mut series = Vec::with_capacity(case.arrival.len());
-		for (&arrival, &media) in case.arrival.iter().zip(&case.media) {
+		// The sequence of the next group, one per packet and one per marker.
+		let mut sequence = 0;
+		for (index, (&arrival, &media)) in case.arrival.iter().zip(&case.media).enumerate() {
+			// The marker goes out as the utterance stops, so it is read during the silence
+			// rather than alongside what resumes it.
+			if case.ends.contains(&index) {
+				producer.discontinuity().unwrap();
+				sequence += 1;
+				match consumer.read().await.unwrap() {
+					Some(Read::End { .. }) => {}
+					other => panic!("packet {index} is preceded by {other:?}, not its end"),
+				}
+				if hole {
+					sequence += 1;
+					producer.seek(sequence).unwrap();
+				}
+			}
+			sequence += 1;
 			CLOCK.set(Some(origin + duration(arrival)));
 			producer
 				.write(moq_mux::container::Frame {
@@ -2262,7 +2294,8 @@ mod tests {
 	/// container hands a packet over, media from its timestamp, and the frame term
 	/// from what the codec decoded. `reorder` and `backlog` are left to the
 	/// estimator's own test, since the container refuses a timestamp that runs
-	/// backwards.
+	/// backwards. `silence` publishes a discontinuity marker ahead of each frame its
+	/// `ends` lists, so the consumer has to find the declared end on its own.
 	#[tokio::test]
 	async fn the_decode_path_conforms_to_the_corpus() {
 		for name in [
@@ -2272,12 +2305,13 @@ mod tests {
 			"flush",
 			"idle",
 			"paced",
+			"silence",
 			"spike",
 			"tunein",
 		] {
 			let case = crate::jitter::tests::case(name);
 			let expected = case.series();
-			for (index, actual) in replay(&case).await.into_iter().enumerate() {
+			for (index, actual) in replay(&case, false).await.into_iter().enumerate() {
 				// A Duration is whole nanoseconds, so the round trip through one costs up
 				// to a nanosecond on top of the corpus tolerance.
 				assert!(
@@ -2287,6 +2321,15 @@ mod tests {
 				);
 			}
 		}
+	}
+
+	/// A group lost between a declared end and what resumes leaves the end declared, as the
+	/// browser's consumer does: the estimator measures the same as when nothing was lost.
+	#[tokio::test]
+	async fn a_declared_end_survives_a_lost_group() {
+		let case = crate::jitter::tests::case("silence");
+		assert!(!case.ends.is_empty());
+		assert_eq!(replay(&case, true).await, replay(&case, false).await);
 	}
 
 	/// The frame term is the packet's full duration, pre-skip included: Opus trims

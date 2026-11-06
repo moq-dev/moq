@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Fill.WantedChanged` waits for a reader to pick up the group served before
+
+`Fill.WantedChanged(ctx)` now returns the next group only once every group the fill accepted reached a reader, which picks it up when it next reads, so a handler writes a batch one group at a time at its fastest reader's pace. Serve a fill by looping on `WantedChanged` until it returns nil, accepting one group per call, rather than looping over `Wanted`, which still returns at once: a batch written ahead of its readers lets a bounded cache evict its earlier groups before they are read. Serve the fills you take in their own goroutines, since each now waits on its own readers.
+
+### Socket sessions
+
+moq.dev/moq/socket now exposes TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
+
+`GroupProducer.Ready(ctx, size)` is new: it blocks until a frame of `size` bytes fits a window ahead of the fastest reader. Call it before each `WriteFrame` so the writer waits for its fastest reader instead of evicting it, though not for slower readers; a TCP socket stream's producer needs it to behave like TCP. Existing writers are unchanged.
+
 ### `Following.Available` reports the path going offline
 
 After the first call, `Available` returns `(nil, nil)` once the followed path goes offline, or, for a `Follow` pinned to an instance, once another instance takes it over.
@@ -34,6 +44,22 @@ for {
 	play(broadcast)
 }
 ```
+
+### Publishing goes through one `Route`
+
+`OriginProducer.CreateBroadcast(path)`, `Client.CreateBroadcast`, and `Server.CreateBroadcast` are `Route(path, moq.RouteOptions{})`, and `OriginProducer.Requests(prefix)` is `RoutePrefix(prefix, moq.RouteOptions{})`. Both return a `*Route`, which replaces `*Publication`, `*OriginRequests`, and `*BroadcastPrepared`:
+
+- `Publication.Broadcast()` is `Route.Broadcast()`, which now also returns an error, on a prefix route.
+- `Publication.Announce(moq.AnnounceRoute{...})` is `Announce()`, and re-pricing is `SetCost(cost)`. `Unannounce()` is `Withdraw()`.
+- `OriginRequests.RequestedBroadcast(ctx)` is `Route.Requested(ctx)`, which returns `(nil, nil)` once the origin closes; `All(ctx)` and `Cancel()` keep their names. Cancelling ctx no longer retracts the route, only the wait.
+- `BroadcastRequest.Prepare()` then `BroadcastPrepared.Publish()` is `BroadcastRequest.Route(options)`: create it hidden to fill it first, then `Announce()`. `BroadcastPrepared.Close()` is `Route.Cancel()`.
+- `Route.Instance()` is the stream's instance, minted at creation and kept across `Withdraw` and `Announce`.
+
+`moq.AnnounceRoute` is `moq.RouteOptions{Hidden, Cost, Instance, Epoch}`, given once at creation. A route is visible at once unless `Hidden`; set it and call `Announce()` after filling the catalog to keep the old create-then-announce order. A stable `Instance` is fixed for the route's lifetime: announcing another one is a new route.
+
+Keep the `*Route` reachable for as long as the broadcast should stay announced: the collector reclaiming it, or `Cancel()`, retracts it, while `BroadcastProducer.Close()` still ends both. A `*BroadcastProducer` alone no longer keeps it announced.
+
+`moq.Route`, the received facts in `Announce.Route`, is renamed `moq.RouteInfo`; its fields are unchanged.
 
 ### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
 

@@ -74,7 +74,7 @@ import { clamped, type Resolved, type Window } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
 // Stream codes that report the route failing to deliver rather than judging what it carried:
-// another copy may still deliver what it failed. Mirrors the Rust `route_failed`.
+// another copy may still deliver what it failed. Mirrors the Rust `Error::retryable`.
 const ROUTE_FAILURES: ReadonlySet<number> = new Set([
 	StreamCode.Internal,
 	StreamCode.Cancel,
@@ -113,7 +113,7 @@ function closing(err: Error): boolean {
 
 // A source losing its route to the content: only another route continues it, since asking the
 // same one again could only replace the withdrawal's cause with a refusal. Mirrors the Rust
-// `unroutable`.
+// `Error::unroutable`.
 function unroutable(err: Error): boolean {
 	return err instanceof StreamError && err.code === StreamCode.Unroutable;
 }
@@ -203,6 +203,12 @@ class Route {
 	concluded = false;
 	/** The front refused the replacement: the track ends with this once the serving copy runs out. */
 	refusal?: Error;
+	/**
+	 * The source serving before the replacements that have yet to deliver, held until a copy of
+	 * `source` delivers: a reader arriving meanwhile reads it too, as the readers before it do, so
+	 * a replacement failing first leaves it serving. The Rust front only swaps once one delivers.
+	 */
+	incumbent?: Source;
 	/** Bumped on every change above, waking parked reads. */
 	readonly changed = new Signal(0);
 	readonly readers = new Set<Reader>();
@@ -222,16 +228,36 @@ class Route {
 		// A refusal ends the track: no later source continues it, compatible or not.
 		if (this.concluded || this.refusal || this.source === source) return;
 		this.generation++;
+		// An undelivered source hands over the incumbent it held, not itself.
+		if (!this.incumbent) this.#hold(this.source);
 		this.source = source;
 		this.served = source;
 		this.#bump();
 		for (const reader of [...this.readers]) reader.sync();
 	}
 
+	/**
+	 * Serve `to` again in place of `from`, a replacement whose copy failed before delivering, even
+	 * past a refusal or a conclusion: `to` served before it, and concluding only stops a future
+	 * source taking over. Returns whether `to` serves again.
+	 */
+	revert(from: Source, to: Source): boolean {
+		// A concluded route serves nothing new, but the failed replacement was still its last.
+		if (this.source !== from && !(this.concluded && this.source === undefined)) return false;
+		this.generation++;
+		this.#hold(undefined);
+		this.source = to;
+		this.served = to;
+		this.#bump();
+		for (const reader of [...this.readers]) reader.sync();
+		return true;
+	}
+
 	/** Between routes: readers wait for the next one, keeping what they have. */
 	park(): void {
 		if (!this.source) return;
 		this.generation++;
+		this.#hold(undefined);
 		this.source = undefined;
 		this.#bump();
 	}
@@ -257,12 +283,27 @@ class Route {
 	conclude(): void {
 		if (this.concluded) return;
 		this.concluded = true;
+		this.#hold(undefined);
 		this.source = undefined;
 		this.#bump();
 	}
 
+	/** A copy of `source` delivered: it no longer needs the source it replaced. */
+	delivered(source: Source): void {
+		if (source === this.source) this.#hold(undefined);
+	}
+
+	#hold(incumbent: Source | undefined): void {
+		incumbent?.retain();
+		this.incumbent?.release();
+		this.incumbent = incumbent;
+	}
+
 	leave(reader: Reader): void {
-		if (this.readers.delete(reader) && this.readers.size === 0) this.idle();
+		if (!this.readers.delete(reader) || this.readers.size > 0) return;
+		// Nobody reads the track, so nothing is left to protect from the replacement.
+		this.#hold(undefined);
+		this.idle();
 	}
 }
 
@@ -361,6 +402,8 @@ class Reader implements ResumeSource {
 	#delivered = new Delivered();
 	/** Runs the serving copy gave up and the reader has yet to report; see {@link #tryDrop}. */
 	#drops: DropRun[] = [];
+	/** A copy that declared the track's end ran out cleanly at it, even if since let go. */
+	#settled = false;
 	/** Whether groups were ever asked for; until then the reader keeps no replaced copy. */
 	#groupsRead = false;
 	/** The groups handed out and still read, which other copies may back; see {@link #backs}. */
@@ -389,13 +432,15 @@ class Reader implements ResumeSource {
 		// concluded.
 		if (parent) {
 			this.#generation = parent.generation;
-			this.#add({
+			const copy: Copy = {
 				generation: parent.generation,
 				source: parent.source,
 				sub: parent.sub.fork(this.#wire({})),
 				replaced: false,
 				lease: 0,
-			});
+			};
+			this.#add(copy);
+			this.#joinIncumbent(copy);
 		}
 		// Subscribed to the serving copy at once, so groups it has now are the reader's even if
 		// the route changes before the first read, and to each copy after.
@@ -450,7 +495,7 @@ class Reader implements ResumeSource {
 			return;
 		}
 		const floor = this.#newest;
-		this.#add({
+		const serving: Copy = {
 			generation: route.generation,
 			source,
 			// The wire request carries the floor from the first message: some sessions read the
@@ -459,7 +504,36 @@ class Reader implements ResumeSource {
 			floor,
 			replaced: false,
 			lease: 0,
-		});
+		};
+		this.#add(serving);
+		this.#joinIncumbent(serving);
+	}
+
+	/**
+	 * Arriving before the serving copy delivered, read the source it replaced too, as the readers
+	 * before this one still do.
+	 */
+	#joinIncumbent(serving: Copy): void {
+		const route = this.route;
+		const incumbent = route.incumbent;
+		if (!incumbent || serving.source !== route.source) return;
+		if (hooks.latestSequence(serving.sub) !== undefined) {
+			route.delivered(serving.source);
+			return;
+		}
+		if (this.#copies.some((copy) => copy.source.from.closed === incumbent.from.closed)) return;
+		const floor = serving.floor;
+		this.#add(
+			{
+				generation: serving.generation - 1,
+				source: incumbent,
+				sub: subscribe(incumbent.wire, route.name, this.#wire({ floor })),
+				floor,
+				replaced: true,
+				lease: 0,
+			},
+			this.#copies.indexOf(serving),
+		);
 	}
 
 	/** Read `copy` as the newest one, or at `index`, recording the properties it commits. */
@@ -475,7 +549,11 @@ class Reader implements ResumeSource {
 				record(info, source);
 				shell.commit(info);
 			},
-			() => {},
+			() => {
+				// A terminal refusal before metadata is the subscription's answer too. An info
+				// reader never polls the group cursor that would otherwise propagate it.
+				if (this.#shell.info() === undefined) this.#end((copy) => copy.sub.closed.peek());
+			},
 		);
 		copy.sub.finished().then(
 			// A copy already let go says nothing more about the track.
@@ -654,6 +732,7 @@ class Reader implements ResumeSource {
 	#observe(copy: Copy, sequence: bigint): void {
 		copy.delivered = true;
 		if (copy.replaced || copy.generation !== this.#generation) return;
+		this.route.delivered(copy.source);
 		const bound = max(this.#newest ?? -1n, sequence - 1n);
 		for (const replaced of this.#copies) {
 			if (replaced === copy || !replaced.replaced || replaced.until !== undefined) continue;
@@ -711,8 +790,11 @@ class Reader implements ResumeSource {
 				}
 				// Drained: the track ended as the copy did, which is not cleanly when its
 				// session went away short of the declared end.
-				if (recv.kind === "done") copy.done = copy.sub.closed.peek() ?? null;
-				else if (recv.kind === "error") copy.done = recv.error;
+				if (recv.kind === "done") {
+					copy.done = copy.sub.closed.peek() ?? null;
+					if (copy.done === null && hooks.subscriberEnd(copy.sub)) this.#settled = true;
+				} else if (recv.kind === "error") copy.done = recv.error;
+				else if (this.#drained(copy, delivered)) copy.done = null;
 				break;
 			}
 		}
@@ -800,6 +882,18 @@ class Reader implements ResumeSource {
 		return undefined;
 	}
 
+	// Whether `copy`, bounded where it was replaced, ran out under that bound: its track ended, no
+	// fill still owes it a group, and it holds nothing there unread. Its subscriber would park on a
+	// group past the bound instead, as one past a local cap waits for it to rise, but the reader
+	// moves this bound itself by asking again. Mirrors the Rust arrival cursor ending on a complete
+	// track. Judged right after a read, which records whether it waits on a fill.
+	#drained(copy: Copy, delivered: Delivered): boolean {
+		const end = copyEnd(copy);
+		if (end === undefined || hooks.awaitsFill(copy.sub)) return false;
+		const start = max(this.#shell.cursor.peek().start, copy.floor ?? 0n);
+		return hooks.spent(copy.sub, start, end, delivered);
+	}
+
 	// Whether `copy` may still feed groups: its channel has not run out, and what it holds is
 	// within the reader's budget, which ends a full budget after a newer group superseded it.
 	#feeds(copy: Copy): boolean {
@@ -846,6 +940,23 @@ class Reader implements ResumeSource {
 		// serve it next. Once the track ended, a copy let go held nothing more.
 		if (serving ? ended === null : this.#ended) return this.#conclude() ? { kind: "done" } : { kind: "idle" };
 		if (ended instanceof Error) {
+			// A copy it replaced finished the track and the reader owes nothing below that end:
+			// the track ended cleanly whoever serves it now. Mirrors the Rust front. The failing
+			// copy's own end, or one whose copy failed short of it, never settled.
+			const end = this.#learnEnd();
+			const owed = max(this.#shell.cursor.peek().start, (this.#newest ?? -1n) + 1n);
+			const settled =
+				this.#settled ||
+				this.#copies.some(
+					(copy) =>
+						copy !== serving &&
+						hooks.subscriberEnd(copy.sub) !== undefined &&
+						hooks.peekLargest(copy.sub).ended &&
+						!(copy.sub.closed.peek() instanceof Error),
+				);
+			if (end && settled && !this.#declaredError && finalSequence(end) <= owed)
+				return this.#conclude() ? { kind: "done" } : { kind: "idle" };
+			if (serving && this.#revert(serving, ended)) return { kind: "idle" };
 			// A refusal from a route that still serves is the track's answer.
 			if (!routeFailed(ended)) return this.#fail(ended);
 			if (route.refusal) return this.#fail(route.refusal);
@@ -870,6 +981,26 @@ class Reader implements ResumeSource {
 			if (ended instanceof Error) return this.#fail(ended);
 		}
 		return { kind: "idle" };
+	}
+
+	/**
+	 * A replacement that failed before its copy held a group never ends the track while a copy it
+	 * replaced still feeds it: that copy serves again, and the failure is the replacement refusing
+	 * the track unless its route is going away. Judged by the copy, whatever this reader's window
+	 * took from it, as the Rust front does.
+	 */
+	#revert(serving: Copy, failed: Error): boolean {
+		if (hooks.latestSequence(serving.sub) !== undefined) return false;
+		const incumbent = this.#copies.findLast(
+			(copy) =>
+				copy.replaced &&
+				copy.source !== serving.source &&
+				copy.done === undefined &&
+				copy.sub.closed.peek() === undefined,
+		);
+		if (!incumbent || !this.route.revert(serving.source, incumbent.source)) return false;
+		if (!closing(failed)) this.route.refuse(failed);
+		return true;
 	}
 
 	#fail(error: Error): Recv & { kind: "error" } {
@@ -1213,7 +1344,8 @@ class Reader implements ResumeSource {
 			const failed = serving?.sub.closed.peek();
 			// A copy that failed is only the end of the track if no front replaces it, and a
 			// refused replacement leaves the refusal as the answer.
-			if (failed instanceof Error) {
+			if (serving && failed instanceof Error) {
+				if (this.#revert(serving, failed)) continue;
 				if (!routeFailed(failed)) throw failed;
 				if (this.route.refusal) throw this.route.refusal;
 				if (this.route.concluded) throw failed;
@@ -1229,6 +1361,25 @@ class Reader implements ResumeSource {
 				});
 			});
 		}
+	}
+
+	watchError(fn: (error: Error) => void): Dispose {
+		let stop: Dispose = () => {};
+		const check = () => {
+			stop();
+			stop = () => {};
+			this.sync();
+			const copy = this.#serving();
+			if (copy) stop = hooks.watchSubscriberError(copy.sub, fn);
+			const changed = this.route.changed.changed(check);
+			const previous = stop;
+			stop = () => {
+				previous();
+				changed();
+			};
+		};
+		check();
+		return () => stop();
 	}
 
 	bufferedLargest(): track.Position | undefined {

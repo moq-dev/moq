@@ -42,7 +42,7 @@ which can update an existing worker but not create one or change its route.
 So the first deploy, and any change to the custom domain, runs by hand under a
 maintainer's `wrangler login`. Whether Editor alone passes wrangler's
 custom-domain check on every deploy is unproven until the first `release`
-run; [the deploy quest](../quest/m2/release/moq-sh-deploy.md) tracks it.
+run; [the deploy quest](../quest/m3/release/moq-sh-deploy.md) tracks it.
 
 ## Write credentials
 
@@ -270,7 +270,14 @@ expires. `nix-ci-moq-dev` holds the dev shells `cache.yml` pushes after every
 merge to `main`, for x86 Linux, ARM Linux, and ARM macOS. It publishes the full
 build closure from `nix develop --profile`, uploading only missing paths, plus
 `moq-libav`, its wasm build, and its downloaded sources, which `bun install`
-builds outside the dev shell.
+builds outside the dev shell. An independent x86 Linux job builds and pushes
+the `moq-relay` and `moq` runtime closures for Smoke's nix channel, which
+reads them without write keys. Their existing Crane `cargoArtifacts` outputs
+are published first so later builds can substitute them when their inputs
+are unchanged; those inputs include the patched `kio` sources. The other
+platforms have no Smoke nix lane. Runtime warms serialize: the active run
+finishes and new pushes replace only the pending run, avoiding duplicate
+builds without starving publication or delaying the dev-shell matrix.
 Its lifecycle rule (`infra/nix/lifecycle.json`) deletes each object 30 days
 after upload; the next warm re-uploads what it still needs. `flake.nix`
 sets `fallback = true` because that expiry can remove a path before one that

@@ -33,9 +33,8 @@ import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
-	const broadcastPublication = origin.createBroadcast(path);
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(path);
+	const broadcast = broadcastRoute.broadcast;
 	return broadcast;
 }
 
@@ -891,10 +890,9 @@ test("integration: a peer is served the cheaper route it was offered, not the lo
 	const path = Path.from("test");
 	// One publisher instance, so the two compete on cost alone.
 	const instance = Instance.random();
-	const localPublication = origin.createBroadcast(path);
-	const local = localPublication.broadcast;
-	localPublication.announce({ instance, cost: 5n });
-	const dynamic = origin.requestsRoute(path, { instance, cost: 1n });
+	const localRoute = origin.route(path, { instance, cost: 5n });
+	const local = localRoute.broadcast;
+	const dynamic = origin.routePrefix(path, { instance, cost: 1n });
 
 	const [client, server] = await Promise.all([
 		connect(url, { transport: pair.client }),
@@ -1264,8 +1262,7 @@ test("integration: ietf fetches a past group of a finished track", async () => {
 	for (const protocol of [Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ietf.ALPN.DRAFT_22]) {
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
-		const publication = origin.createBroadcast(Path.from("test"));
-		publication.announce();
+		const publication = origin.route(Path.from("test"));
 		// No publisher limit, so the superseded group stays fresh to fetch, and no MAX_CACHE_DURATION.
 		const published = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 		for (let sequence = 0; sequence < 3; sequence++) {
@@ -2617,12 +2614,12 @@ test("create then announce is discoverable on the wire", async () => {
 	]);
 
 	const announced = client.routes();
-	const broadcastPublication = origin.createBroadcast(Path.from("later"));
-	const broadcast = broadcastPublication.broadcast;
+	const broadcastRoute = origin.route(Path.from("later"), { hidden: true });
+	const broadcast = broadcastRoute.broadcast;
 	broadcast.createTrack("chat", { timescale: Timescale.MILLI });
 
 	const pending = announced.next();
-	broadcastPublication.announce();
+	broadcastRoute.announce();
 	const entry = await pending;
 	expect(entry?.prefix).toBe("later" as Path.Valid);
 	expect(entry?.kind).toBe("start");
@@ -2640,7 +2637,7 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_2
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
 		const consumer = new OriginProducer();
-		const handle = origin.requests(Path.empty());
+		const handle = origin.routePrefix(Path.empty());
 		const held = new BroadcastProducer();
 		held.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
 		const serving = (async () => {
@@ -2674,14 +2671,15 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_2
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
 		const consumer = new OriginProducer();
-		const handle = origin.requests(Path.empty());
+		const handle = origin.routePrefix(Path.empty());
 		const serving = (async () => {
 			const requests = handle.requested();
 			const request = (await requests.next()).value;
 			if (!request) throw new Error("missing job request");
-			const prepared = request.prepare();
-			prepared.broadcast.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("job"));
-			return prepared.publish();
+			const job = request.route({ hidden: true });
+			job.broadcast.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("job"));
+			job.announce();
+			return job;
 		})();
 		const [client, server] = await Promise.all([
 			connect(url, { transport: pair.client, consume: consumer }),
@@ -2692,11 +2690,11 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_2
 		if (!remote) throw new Error("request did not resolve");
 		const track = remote.track("chat").subscribe().ordered();
 		await expect(track.readString()).rejects.toBeInstanceOf(Error);
-		const publication = await serving;
+		const job = await serving;
 		track.close();
 		requested.close();
 		handle.close();
-		publication.broadcast.close();
+		job.close();
 		client.abort();
 		server.abort();
 		origin.close();

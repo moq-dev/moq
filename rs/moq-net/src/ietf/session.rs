@@ -339,12 +339,8 @@ impl Launch {
 		// moq-transport threads concrete origins through the publisher/subscriber.
 		// An unset half gets an empty origin: an empty publish origin announces
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
-		let publish = publish.unwrap_or_else(|| {
-			origin::Producer::empty(Hop::random())
-				.consume()
-				.with_stats(stats.clone())
-		});
-		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()).with_stats(stats.clone()));
+		let publish = publish.unwrap_or_else(|| origin::Producer::empty().consume().with_stats(stats.clone()));
+		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty().with_stats(stats.clone()));
 		// Counted for the peak only: stream credit bounds them.
 		let subscriptions =
 			crate::session::Slots::default().with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
@@ -462,8 +458,8 @@ impl Launch {
 		let datagrams = (session.max_datagram_size() != 0).then(|| Datagrams {
 			session: session.clone(),
 			subscriber: subscriber.clone(),
-			budget: kio::coop::Budget::new(32),
-			charged: false,
+			held: Vec::new(),
+			caught_up: true,
 		});
 		// Keep the session's SUBSCRIBE_NAMESPACE requests open as discovery decides, each on
 		// its own stream; with no subscribe half, ask nothing.
@@ -518,6 +514,15 @@ impl Running {
 		}
 		// Whichever side closed it, read what already arrived.
 		ready!(self.race.unis.poll_drain(waiter));
+		let _ = self.race.tasks.poll(waiter);
+		if let Some(datagrams) = &mut self.race.datagrams {
+			let _ = datagrams.poll(waiter, false);
+			if !datagrams.caught_up {
+				return Poll::Pending;
+			}
+		}
+		self.race.subscriber.datagrams_routed();
+		let _ = self.race.tasks.poll(waiter);
 		let res = self.ending.take().expect("draining an ended session");
 		// Closed cleanly by dropping or draining: readers see what the peer's clean
 		// close would have shown them.
@@ -581,7 +586,7 @@ impl Race {
 		if let Poll::Ready(err) = poll_failed(&mut self.dispatch, |dispatch| dispatch.poll(waiter).map(Err)) {
 			return Poll::Ready(Err(err));
 		}
-		if let Poll::Ready(err) = poll_failed(&mut self.datagrams, |datagrams| datagrams.poll(waiter)) {
+		if let Poll::Ready(err) = poll_failed(&mut self.datagrams, |datagrams| datagrams.poll(waiter, true)) {
 			return Poll::Ready(Err(err));
 		}
 		if let Poll::Ready(err) = poll_failed(&mut self.goaway, |goaway| {
@@ -607,6 +612,12 @@ impl Race {
 		}
 		if let Poll::Ready(err) = poll_failed(&mut self.publish_namespaces, |publish| publish.poll(waiter)) {
 			return Poll::Ready(Err(err));
+		}
+		if let Poll::Ready(err) = poll_failed(&mut self.datagrams, |datagrams| datagrams.poll(waiter, false)) {
+			return Poll::Ready(Err(err));
+		}
+		if self.datagrams.as_ref().is_none_or(|datagrams| datagrams.caught_up) {
+			self.subscriber.datagrams_routed();
 		}
 		Poll::Pending
 	}
@@ -677,7 +688,7 @@ fn self_origin(publish: Option<&origin::Consumer>, subscribe: Option<&origin::Pr
 	publish
 		.map(|origin| origin.hop())
 		.or_else(|| subscribe.map(|origin| origin.hop()))
-		.unwrap_or_else(Hop::random)
+		.map_or_else(Hop::random, Hop::from)
 }
 
 /// Server: reads the peer's SETUP off its uni stream before starting the
@@ -1358,23 +1369,46 @@ fn died_before_header(err: &Error) -> bool {
 struct Datagrams {
 	session: Transport,
 	subscriber: Subscriber,
-	/// A peer keeping datagrams ready must not hold the session's other tasks.
-	budget: kio::coop::Budget,
-	/// This pass of the budget is spent, waiting for the next datagram.
-	charged: bool,
+	/// Unknown aliases held before the source machines run: at most one receive budget.
+	held: Vec<bytes::Bytes>,
+	/// Whether the receive pass read the queue empty rather than yielding to its budget.
+	caught_up: bool,
 }
 
 impl Datagrams {
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		loop {
-			if !self.charged {
-				ready!(self.budget.poll_yield(waiter));
-				self.charged = true;
+	fn poll(&mut self, waiter: &kio::Waiter, hold: bool) -> Poll<Result<(), Error>> {
+		if !hold {
+			for payload in std::mem::take(&mut self.held) {
+				self.route(payload, false)?;
 			}
-			let payload = ready!(self.session.poll_recv_datagram(waiter)).map_err(Error::from_transport)?;
-			self.charged = false;
-			self.subscriber.recv_datagram(payload)?;
 		}
+		let mut budget = kio::coop::Budget::new(32);
+		loop {
+			self.caught_up = false;
+			ready!(budget.poll_yield(waiter));
+			self.caught_up = true;
+			let payload = match ready!(self.session.poll_recv_datagram(waiter)) {
+				Ok(payload) => payload,
+				Err(err) => {
+					for payload in std::mem::take(&mut self.held) {
+						self.route(payload, false)?;
+					}
+					return Poll::Ready(Err(Error::from_transport(err)));
+				}
+			};
+			self.route(payload, hold)?;
+		}
+	}
+
+	fn route(&mut self, payload: bytes::Bytes, hold: bool) -> Result<(), Error> {
+		if let Some(alias) = self.subscriber.recv_datagram(payload.clone())? {
+			if hold {
+				self.held.push(payload);
+			} else {
+				tracing::debug!(alias, "dropping a datagram for an unknown alias");
+			}
+		}
+		Ok(())
 	}
 }
 
@@ -1711,17 +1745,10 @@ fn refuse_going_away(stream: Stream<Transport, Version>, id: u64, version: Versi
 	if id == auth::Auth::ID {
 		return auth::going_away(stream);
 	}
+	let kind = super::error::request::Kind::Subscribe;
 	Reject::new(
 		stream,
-		ietf::RequestError {
-			error_code: super::error::request::to_code(
-				&Error::GoingAway,
-				super::error::request::Kind::Subscribe,
-				version,
-			),
-			reason_phrase: "going away".into(),
-			retry_interval: 0,
-		},
+		ietf::RequestError::refuse(&Error::GoingAway, kind, "going away", version),
 	)
 }
 
@@ -1900,7 +1927,7 @@ mod tests {
 	#[kio::test]
 	async fn announce_interest_waits_for_credit() {
 		for version in [Version::Draft18] {
-			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let _interest = origin.consume().routes();
 			let scripted = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
 			let log = scripted.log.clone();
@@ -2297,7 +2324,7 @@ mod tests {
 		// A driver that swallows the violation parks forever instead of failing, so
 		// bound it: paused time makes the deadline fire the moment nothing else can run.
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		// A client asks only about what is watched.
 		let _watch = origin.consume().routes();
 		let session = crate::lite::test_transport::ScriptedSession::new(namespace_without_hop_path(VERSION).await);
@@ -2355,7 +2382,7 @@ mod tests {
 	/// called `run_subscribe_namespace` itself.
 	#[kio::test]
 	async fn every_permitted_prefix_gets_its_own_subscribe_namespace() {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let scope: crate::Patterns = ["cam", "mic"]
 			.into_iter()
 			.map(|prefix| crate::Pattern::subtree(prefix).unwrap())
@@ -2507,7 +2534,7 @@ mod tests {
 	#[kio::test]
 	async fn a_client_asks_only_about_what_is_watched() {
 		for version in [Version::Draft18] {
-			let subscribe = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let subscribe = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let (log, _driver) = client(version, subscribe.clone(), Some(true)).await;
 			let first = subscribe_namespace(version, "cam", RequestId(0)).await;
 			assert!(
@@ -2531,7 +2558,7 @@ mod tests {
 	#[kio::test]
 	async fn a_broader_watch_waits_for_the_narrower_to_leave_the_wire() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
-			let subscribe = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let subscribe = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let _front = watch(&subscribe, "cam/front");
 			let (log, _driver) = client(version, subscribe.clone(), None).await;
 			assert!(sent(&log, b"front").await, "{version:?}");
@@ -2556,7 +2583,7 @@ mod tests {
 	#[kio::test]
 	async fn a_request_ended_before_it_opened_does_not_block_the_broader_one() {
 		for version in [Version::Draft22] {
-			let subscribe = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let subscribe = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let gate = kio::Producer::new(true);
 			let credit = kio::Producer::new(true);
 			let session =
@@ -2586,7 +2613,7 @@ mod tests {
 	#[kio::test]
 	async fn a_broader_watch_keeps_the_narrower_open_at_our_peer() {
 		for version in [Version::Draft18] {
-			let subscribe = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let subscribe = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let _front = watch(&subscribe, "cam/front");
 			let (log, _driver) = client(version, subscribe.clone(), Some(true)).await;
 			let asked = subscribe_namespace(version, "cam/front", RequestId(0)).await;
@@ -2614,8 +2641,10 @@ mod tests {
 	/// The scripted peer answers nothing, so an advertisement parks after writing. That is
 	/// enough: the question is only whether the bytes went out unasked.
 	async fn announce_occurrences(peer_declared: Option<peer::Peer>) -> usize {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+		let _cam = origin
+			.announce("solo-cam", crate::origin::RouteInfo::default())
+			.unwrap();
 
 		// An open gate: an unsolicited PUBLISH_NAMESPACE can reach the wire.
 		let gate = kio::Producer::new(true);
@@ -2719,8 +2748,10 @@ mod tests {
 	}
 
 	fn auth_session(auth: bool) -> AuthSession {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+		let cam = origin
+			.announce("solo-cam", crate::origin::RouteInfo::default())
+			.unwrap();
 
 		let gate = kio::Producer::new(true);
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
@@ -2975,14 +3006,14 @@ mod tests {
 	fn the_hop_id_comes_from_whichever_origin_the_caller_set() {
 		let ours = crate::Hop::new(42).unwrap();
 
-		let publish = crate::origin::Config::new(ours).produce();
+		let publish = crate::origin::Config::from(ours).produce();
 		assert_eq!(self_origin(Some(&publish.consume()), None), ours, "the publish half");
 
-		let subscribe = crate::origin::Config::new(ours).produce();
+		let subscribe = crate::origin::Config::from(ours).produce();
 		assert_eq!(self_origin(None, Some(&subscribe)), ours, "the subscribe half alone");
 
 		// Neither half: nothing to route, so any id will do as long as it is ours.
-		let publish = crate::origin::Config::new(ours).produce();
+		let publish = crate::origin::Config::from(ours).produce();
 		assert_eq!(self_origin(Some(&publish.consume()), Some(&subscribe)), ours);
 	}
 
@@ -3000,7 +3031,7 @@ mod tests {
 		// A driver that survives parks forever, so bound it: paused time makes the
 		// deadline fire the moment nothing else can run.
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let log = session.log.clone();
 
 		let (driver, _goaway, _) = start(Config {
@@ -3165,7 +3196,7 @@ mod tests {
 		accepted: Option<PeerSetup>,
 		retired_alias: Option<u64>,
 	) -> (crate::lite::test_transport::Log, Option<Result<(), Error>>) {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let log = session.log.clone();
 
 		let (tasks, _task_set) = TaskSet::new();
@@ -3230,7 +3261,7 @@ mod tests {
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(local.clone()),
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			Control::new(true),
 			None,
 			peer_setup.clone(),
@@ -3272,7 +3303,7 @@ mod tests {
 	async fn a_flood_of_request_streams_yields() {
 		const VERSION: Version = Version::Draft18;
 		let (local, peer) = crate::transport::memory::pair(Default::default());
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let (tasks, _task_set) = TaskSet::new();
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer::default());
@@ -3377,9 +3408,9 @@ mod tests {
 
 		// Stall before the type, then after it while the body has not arrived.
 		for stalled in [Vec::new(), vec![ietf::Subscribe::ID as u8]] {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-			let mut track = broadcast.create_track("video", None).unwrap();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
+			let mut track = broadcast.broadcast().create_track("video", None).unwrap();
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
 				.with_incoming_bidis(vec![stalled, subscribe.clone()]);
 			let driver = bidi_driver(session, Some(origin.consume()));
@@ -3704,7 +3735,7 @@ mod tests {
 					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload]);
 				let log = session.log.clone();
 				let session = crate::driver::Transport::new(session.clone());
-				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+				let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 				let (driver, _goaway, _) = start(Config {
 					runtime: crate::time::sim(),
 					stats: Default::default(),
@@ -4050,7 +4081,7 @@ mod tests {
 	/// Read off the transport, since a request task closes the session itself and the
 	/// scripted transport does not end the driver for it.
 	async fn serve_bidis(version: Version, client: bool, payloads: Vec<Vec<u8>>) -> Option<SessionError> {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(payloads);
 		// The peer FINs each stream after its script, so a message it cuts short is malformed.
 		session.close(crate::lite::test_transport::Close::Fin);
@@ -4091,7 +4122,7 @@ mod tests {
 
 	/// A request past our GOAWAY cutoff is refused in the answer its kind reads: an AUTH
 	/// with AUTH_ERROR carrying GOING_AWAY, since its presenter takes anything else as a
-	/// violation, and the rest with REQUEST_ERROR.
+	/// violation, and the rest with REQUEST_ERROR, inviting a retry on the next session.
 	#[kio::test]
 	async fn a_request_past_our_goaway_is_refused_in_its_own_answer() {
 		const VERSION: Version = Version::Draft18;
@@ -4101,7 +4132,12 @@ mod tests {
 			(auth::Auth::ID, frame(VERSION, auth::AuthError::ID, &body)),
 			(
 				ietf::Subscribe::ID,
-				frame(VERSION, ietf::RequestError::ID, &[&[0x6, 0][..], &body[1..]].concat()),
+				// A Retry Interval of 1000ms, as a draft-18 varint.
+				frame(
+					VERSION,
+					ietf::RequestError::ID,
+					&[&[0x6, 0x83, 0xe8][..], &body[1..]].concat(),
+				),
 			),
 		] {
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());

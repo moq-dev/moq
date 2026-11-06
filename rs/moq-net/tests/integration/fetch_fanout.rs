@@ -4,12 +4,12 @@
 //! viewers ask for it, and keeps serving the cached copy after a reader leaves.
 
 use crate::support;
-use moq_net::{Hop, Version, origin, track};
+use moq_net::{Version, origin, track};
 use std::time::Duration;
 use support::harness::{MockConnectOptions, connect_mock};
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	origin
 }
@@ -19,8 +19,9 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
-		let broadcast = publisher.publish("room", Default::default()).unwrap();
+		let broadcast = publisher.route("room", origin::RouteOptions::default()).unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				"video",
 				track::Info::default().with_timescale(moq_net::Timescale::MILLI),

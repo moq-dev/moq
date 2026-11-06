@@ -1571,16 +1571,12 @@ impl Connection {
 		self.crypto.peer_identity()
 	}
 
-	/// Fill `output` with keying material exported from the TLS session (RFC 5705), using
-	/// `label` and `context` for domain separation
-	#[cfg(test)]
-	pub(crate) fn export_keying_material(
-		&self,
-		output: &mut [u8],
-		label: &[u8],
-		context: &[u8],
-	) -> Result<(), crypto::ExportKeyingMaterialError> {
-		self.crypto.export_keying_material(output, label, context)
+	/// 32 bytes of keying material exported from the TLS session (RFC 8446 section 7.5) under
+	/// `label` and `context`, or `None` before the handshake completes.
+	pub fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+		let mut output = [0; 32];
+		self.crypto.export_keying_material(&mut output, label, context).ok()?;
+		Some(output)
 	}
 
 	/// Whether the connection is in the process of being established

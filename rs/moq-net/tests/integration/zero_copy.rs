@@ -10,7 +10,7 @@ use crate::support;
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_net::{Client, Hop, Server, Timestamp, Version, origin, transport::memory};
+use moq_net::{Client, Server, Timestamp, Version, origin, transport::memory};
 use support::harness::{now, spawn, subscribed};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -18,7 +18,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const VERSIONS: &[&str] = &["moq-lite-03", "moq-lite-06", "moq-lite-07-wip", "moq-transport-22"];
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	producer
 }
@@ -54,10 +54,12 @@ async fn frames_cross_without_a_copy() {
 			}
 		);
 
-		let broadcast = publisher.create_broadcast("room").unwrap();
+		let broadcast = publisher
+			.route("room", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
-		let track = broadcast.create_track("video", info).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let track = broadcast.broadcast().create_track("video", info).unwrap();
+		broadcast.announce().unwrap();
 
 		let consumer = subscriber.consume();
 		let remote = kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())

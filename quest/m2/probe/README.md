@@ -45,7 +45,10 @@ publisher-local padding handle:
   resends in-flight data during BBR3's Startup and one ProbeBW_UP per probe
   wait ([moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)). A browser over WebTransport can't
   reach its controller, so a lowest-priority padding stream on an ALR probe
-  schedule does ([padding](/quest/m2/probe/padding.md)).
+  schedule does ([padding](/quest/m3/probe-padding.md)). Parked 2026-11-06
+  (maintainer, /quest-unblock): the maintainer doubts padding is the right
+  approach, so padding and the [JS rung disable](/quest/m3/probe-rung-disable-js.md),
+  which recovers through it, moved to m3 for a rethink.
 
 Decided with the maintainer on 2026-10-20:
 
@@ -66,7 +69,7 @@ Decided with the maintainer on 2026-10-20:
   native rung recovery needs, and viewer handles, viewer grants, the peer's
   PROBE target, and `Increase` came back here as viewer targets, beside their
   consumers, and landed in [moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090).
-  The `js/net` send target moved to [padding](/quest/m2/probe/padding.md), its
+  The `js/net` send target moved to [padding](/quest/m3/probe-padding.md), its
   only sender.
 
 Decided with the maintainer on 2026-11-03, in review of
@@ -96,15 +99,11 @@ This README's own work, once the children land:
 
 ## Required
 
-- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - shipping Chrome and Safari publishers adapt to the relay's PROBE estimate, since they have no `getStats()`
+- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - browser publishers adapt to `getStats()`'s send estimate once Chrome and Safari report one
 - [One page-wide getStats sampling ticker](/quest/m2/probe/stats-ticker.md) - a page's connections share one sampling ticker
-- [Padding probes](/quest/m2/probe/padding.md) - a browser probes with a lowest-priority padding stream on an ALR schedule
-- [JS rung disable](/quest/m2/probe/rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding
-- [Players set viewer targets](/quest/m2/probe/players.md) - players hold a viewer handle per watched broadcast at its highest enabled rendition's bitrate
 - [Viewer up-switch](/quest/m2/probe/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
-- [Viewer targets are tested end to end and documented in Python](/quest/m2/probe/viewer-followups.md) - three gaps moq-dev/moq#7090 left are closed
 
 ## Related
 
-- [BBR media study](/quest/m2/quic-bbr-study.md) - preserving an estimate and discovering spare capacity are separate problems
-- [Realtime uplink congestion control](/quest/m2/quic-realtime/README.md) - a delay-based alternative to BBR3 on native uplinks; it must implement native probing to ship (decided 2026-10-25)
+- [BBR media study](/quest/m5/quic-bbr-study.md) - preserving an estimate and discovering spare capacity are separate problems
+- [Realtime uplink congestion control](/quest/m3/quic-realtime/README.md) - a delay-based alternative to BBR3 on native uplinks; it must implement native probing to ship (decided 2026-10-25)

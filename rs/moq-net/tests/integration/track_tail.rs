@@ -15,7 +15,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Timestamp, Version};
+use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,
@@ -57,7 +57,8 @@ enum Late {
 const DEATH: moq_net::SessionError = moq_net::SessionError::App(7);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -75,7 +76,7 @@ struct Pair {
 	track: moq_net::track::Producer,
 	remote: moq_net::broadcast::Consumer,
 	_keep: (
-		moq_net::origin::Publication,
+		moq_net::origin::Route,
 		moq_net::origin::Producer,
 		moq_net::origin::Producer,
 	),
@@ -83,9 +84,11 @@ struct Pair {
 
 async fn connect(version: &str) -> Pair {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("video", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	broadcast.announce().unwrap();
 
 	let subscriber = produce_origin(2);
 	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());

@@ -7,13 +7,14 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Version};
+use moq_net::Version;
 use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -21,14 +22,17 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 #[kio::test]
 async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
+		.broadcast()
 		.create_track(
 			"audio",
 			moq_net::track::Info::default().with_timescale(None).with_max_age(None),
 		)
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let mut g0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 	g0.write_frame(None, &b"0a"[..]).unwrap();

@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::FutureExt;
 use moq_net::{
-	Hop, Hops, Path, Pattern, Patterns,
+	Path, Pattern, Patterns,
 	fuzz::{Announced, Messages, decode_announces, decode_namespaces, encode_announces, encode_namespaces},
 	kio, origin,
 };
@@ -64,10 +64,6 @@ const SHORT: &str = "room/alice";
 const MEDIUM: &str = "anon/7f3a9c2e1b/camera";
 const LONG: &str = "1234/private/channel_7/stream-health-1700000000";
 
-fn hops(ids: &[u64]) -> Hops {
-	Hops::try_from(ids.iter().map(|id| Hop::new(*id).unwrap()).collect::<Vec<_>>()).unwrap()
-}
-
 fn paths() {
 	for (name, s) in [("short", SHORT), ("medium", MEDIUM), ("long", LONG)] {
 		let path = Path::new(s).unwrap();
@@ -109,7 +105,7 @@ fn decode() {
 		let stream: Vec<Announced> = paths
 			.iter()
 			.enumerate()
-			.map(|(i, path)| Announced::Start(path.clone(), hops(&[0x1111 + i as u64, 0x2222])))
+			.map(|(i, path)| Announced::Start(path.clone(), vec![0x1111 + i as u64, 0x2222]))
 			.collect();
 		for compress in [false, true] {
 			let data = encode_announces(&stream, compress);
@@ -130,9 +126,13 @@ fn requests() {
 		let (producer, mut driver) = origin::Producer::new(origin::Config::default());
 		let consumer = producer.consume();
 		let _pubs: Vec<_> = (0..1000)
-			.map(|i| producer.publish(format!("{s}/{i}"), origin::Route::default()).unwrap())
+			.map(|i| {
+				producer
+					.route(format!("{s}/{i}"), moq_net::origin::RouteOptions::default())
+					.unwrap()
+			})
 			.collect();
-		let _covering = producer.publish(s, origin::Route::default()).unwrap();
+		let _covering = producer.route(s, moq_net::origin::RouteOptions::default()).unwrap();
 		let waiter = kio::Waiter::noop();
 
 		let mut local = |request: &dyn Fn() -> kio::Pending<origin::Requesting>| {
@@ -171,7 +171,11 @@ fn fanout() {
 		let (producer, _driver) = origin::Producer::new(origin::Config::default());
 		let consumer = producer.consume();
 		let _pubs: Vec<_> = (0..100)
-			.map(|i| producer.publish(format!("room/{i}"), origin::Route::default()).unwrap())
+			.map(|i| {
+				producer
+					.route(format!("room/{i}"), moq_net::origin::RouteOptions::default())
+					.unwrap()
+			})
 			.collect();
 		let mut cursors: Vec<origin::Routes> = (0..100).map(|_| consumer.routes()).collect();
 		for cursor in &mut cursors {
@@ -180,7 +184,7 @@ fn fanout() {
 
 		// Per cursor, per publish and retract.
 		allocs(&format!("origin/announce_fanout/{name}"), 500, 100, || {
-			let publication = producer.publish(s, origin::Route::default()).unwrap();
+			let publication = producer.route(s, moq_net::origin::RouteOptions::default()).unwrap();
 			for cursor in &mut cursors {
 				cursor.next().now_or_never().flatten().expect("announce delivered");
 			}

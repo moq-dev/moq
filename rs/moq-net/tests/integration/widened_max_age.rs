@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use moq_net::track::Delay;
 use moq_net::track::{Info, Range, Subscription};
-use moq_net::{Hop, Timescale, Timestamp, Version, kio, origin, track};
+use moq_net::{Timescale, Timestamp, Version, kio, origin, track};
 
 use crate::support::harness::{MockConnectOptions, MockPair, connect_mock, peer, spawn};
 
@@ -36,7 +36,7 @@ const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip"];
 const VERSION: &str = "moq-lite-07-wip";
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	origin
 }
@@ -78,9 +78,11 @@ impl Chain {
 		if let Some(relay) = &relay {
 			links.push(peer(version, relay, &viewer).await);
 		}
-		let broadcast = publisher.create_broadcast("live").unwrap();
-		let source = broadcast.create_track("video", timed()).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let source = broadcast.broadcast().create_track("video", timed()).unwrap();
+		broadcast.announce().unwrap();
 		Self {
 			source,
 			viewer,
@@ -307,8 +309,10 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 		.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("upstream")))
 		.session(moq_net::Path::from_static(""));
 	let _upstream = connect_mock(options).await;
-	let broadcast = publisher.create_broadcast("live").unwrap();
-	let source = broadcast.create_track("video", timed()).unwrap();
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let source = broadcast.broadcast().create_track("video", timed()).unwrap();
 	for sequence in 0..GROUPS {
 		let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
 		group
@@ -316,7 +320,7 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 			.unwrap();
 		group.finish().unwrap();
 	}
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let mut links = Vec::new();
 	let mut readers = Vec::new();
@@ -365,9 +369,11 @@ async fn a_legacy_viewer_beating_a_relay_copy_joins_at_the_live_edge() {
 		options.client_subscribe = Some(relay.clone());
 		let upstream = connect_mock(options).await;
 		let _downstream = peer(legacy.parse().unwrap(), &relay, &viewer).await;
-		let broadcast = publisher.create_broadcast("live").unwrap();
-		let source = broadcast.create_track("video", timed()).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let route = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let source = route.broadcast().create_track("video", timed()).unwrap();
+		route.announce().unwrap();
 		for sequence in 0..GROUPS {
 			let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
 			group

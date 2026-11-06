@@ -62,7 +62,7 @@
 //! ```
 
 #[cfg(test)]
-mod contributions_tests;
+mod include_tests;
 mod routes;
 
 use std::collections::HashMap;
@@ -185,7 +185,7 @@ impl Server {
 	/// cryptography cannot run on.
 	pub fn new(origin: moq_net::origin::Consumer, config: Config) -> crate::Result<Self> {
 		// Checked once here, so each broadcaster it serves starts without failing.
-		rind::cpu::check().map_err(crate::Error::unsupported_cpu)?;
+		moq_crypto::cpu::check()?;
 		Ok(Self {
 			inner: Arc::new(Inner {
 				_watch: origin.clone().with_hidden(true).announced(),
@@ -470,12 +470,13 @@ mod tests {
 
 	async fn closed_broadcaster() -> Broadcaster {
 		let origin = produce_origin();
-		let producer = origin.create_broadcast("gone").expect("publish allowed");
-		producer.announce(Default::default()).expect("publish allowed");
+		let producer = origin
+			.route("gone", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "gone").await, Config::default());
 		// Close the publisher so the resolved broadcast (and the broadcaster) reports closed.
-		producer.close();
+		producer.broadcast().close();
 		settle().await;
 		broadcaster
 	}
@@ -492,8 +493,9 @@ mod tests {
 			.lock()
 			.unwrap()
 			.insert("live".to_string(), Arc::new(Followed::new(stale.clone())));
-		let _producer = origin.create_broadcast("live").expect("publish allowed");
-		_producer.announce(Default::default()).expect("publish allowed");
+		let _producer = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 
 		let fresh = server.broadcaster("live").await.expect("broadcast announced");
@@ -508,8 +510,9 @@ mod tests {
 	#[tokio::test]
 	async fn dropping_the_server_releases_its_broadcasters() {
 		let origin = produce_origin();
-		let producer = origin.create_broadcast("live").expect("publish allowed");
-		producer.announce(Default::default()).expect("publish allowed");
+		let producer = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
 		settle().await;
 
 		for _ in 0..4 {
@@ -528,7 +531,7 @@ mod tests {
 		settle().await;
 		assert_eq!(held.clones(), 1, "only the response holds it now");
 		assert!(!held.is_closed(), "a held broadcaster keeps serving");
-		producer.close();
+		producer.broadcast().close();
 	}
 
 	/// Wait out the origin's update hold until `ready` holds.
@@ -549,15 +552,18 @@ mod tests {
 	async fn a_replaced_instance_serves_until_it_closes() {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default()).unwrap();
-		let (old_instance, new_instance) = (moq_net::Instance::random(), moq_net::Instance::random());
-		let route = |instance: &moq_net::Instance| moq_net::origin::Route::default().with_instance(instance.clone(), 0);
-
-		let old = origin.publish("live", route(&old_instance)).expect("publish allowed");
+		let old = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
+		let old_instance = old.instance();
 		settle().await;
 		let first = server.broadcaster("live").await.expect("broadcast announced");
 		assert_eq!(first.instance().as_ref(), old_instance.as_str());
 
-		let new = origin.publish("live", route(&new_instance)).expect("publish allowed");
+		let new = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
+		let new_instance = new.instance();
 		eventually(async || {
 			let current = server.broadcaster("live").await.expect("broadcast announced");
 			current.instance().as_ref() == new_instance.as_str()
@@ -584,7 +590,7 @@ mod tests {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default()).unwrap();
 		let publication = origin
-			.publish("live", moq_net::origin::Route::default())
+			.route("live", moq_net::origin::RouteOptions::default())
 			.expect("publish allowed");
 		settle().await;
 
@@ -603,7 +609,7 @@ mod tests {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default()).unwrap();
 		let _old = origin
-			.publish("live", moq_net::origin::Route::default())
+			.route("live", moq_net::origin::RouteOptions::default())
 			.expect("publish allowed");
 		settle().await;
 		let open = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());

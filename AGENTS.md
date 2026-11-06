@@ -22,12 +22,13 @@ Trust this checkout's source over published API references, which may describe a
 
 The API is the most important thing to get right: a bad shape costs a breaking change in every language.
 
-- Feature PRs add migration notes under `## Unreleased` in the package's `MIGRATE.md`; only the release cut writes version sections.
+- Only the release cut edits `MIGRATE.md`: a breaking PR puts its migration note in its Impact section, and the cut writes it into the package's guide.
 - Replace a callback parameter with a handle, an event, or a Producer/Consumer split.
 - Nest related API, configuration, and output fields under their shared role.
 - Propose alternatives when a name or shape feels awkward.
 - Short names under a module namespace (`encode::Config`, not `EncoderConfig`), mirrored across Rust, JS, and the bindings.
 - Keep package boundaries modular and reusable; prefer a module in an existing package over a one-off package.
+- Never use a huge value like `u64::MAX` as a marker (it is the longest varint); use 0, a separate message or type, or a boolean.
 
 # Development
 

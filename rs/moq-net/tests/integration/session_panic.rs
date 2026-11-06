@@ -13,14 +13,14 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Client, Hop, Server, Session, Version, origin};
+use moq_net::{Client, Server, Session, Version, origin};
 use support::harness::{now, spawn};
 use support::mock::{MockSession, create_mock_session_pair};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	producer
 }
@@ -34,13 +34,13 @@ struct Publisher {
 	server_driver: kio::clock::sim::JoinHandle<moq_net::Error>,
 	/// The client's origin, which it publishes from.
 	origin: origin::Producer,
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 }
 
 async fn publish(version: Version, relay: &origin::Producer, hop: u64, name: &str) -> Publisher {
 	let origin = produce_origin(hop);
-	let broadcast = origin.create_broadcast(name).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = origin.route(name, moq_net::origin::RouteOptions::hidden()).unwrap();
+	broadcast.announce().unwrap();
 
 	let mut mock = moq_net::transport::memory::Config::default();
 	mock.protocol = Some(version.alpn().to_string());
@@ -125,8 +125,11 @@ async fn a_panicking_session_leaves_the_others_serving() {
 			.unwrap_or_else(|_| panic!("{version}: the panicked session never closed"));
 
 		// The other session still serves: a fresh announcement reaches the relay.
-		let later = healthy.origin.create_broadcast("later").unwrap();
-		later.announce(Default::default()).unwrap();
+		let later = healthy
+			.origin
+			.route("later", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		later.announce().unwrap();
 		until(&mut announced, "later", true).await;
 		crate::support::announced(&relay.consume(), "healthy").await;
 		drop((healthy, broken.client, later));

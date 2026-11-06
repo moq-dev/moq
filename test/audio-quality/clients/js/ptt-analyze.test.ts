@@ -21,9 +21,11 @@ function trace() {
 		presses: [] as { at: number; on: boolean; capture?: { at: number; end: number } }[],
 		captures: [] as unknown[],
 		encoders: [] as number[],
+		catalog: [] as { at: number; selectable: boolean }[],
+		playback: { underruns: 0, stalls: 0 },
 		errors: [] as string[],
 		arrivals: [] as [number, number, number, number][],
-		state: { delay: 300 },
+		delays: [{ at: 0, delay: 300 }],
 	};
 	for (let i = 0; i < 22; i++) {
 		const press = 10_000 + i * 10_000;
@@ -83,6 +85,20 @@ test("a complete run passes, reports its latency, and splits each press exactly"
 	});
 	const parts = Object.values(press.path as Record<string, number>).reduce((sum, part) => sum + part, 0);
 	expect(parts).toBe(press.audible);
+	expect(summary.delay).toEqual({ min: 300, median: 300, max: 300 });
+});
+
+test("a target that rises before the delay fills is filled by the frame that reaches it", async () => {
+	// "auto" raises the target a frame as the press starts, so the sixth frame fills it.
+	const result = trace();
+	result.delays.push({ at: result.presses[0].at, delay: 300 + FRAME });
+	result.audible[0].rendered += FRAME;
+	result.audible[0].at += FRAME;
+	const { exitCode, summary } = await analyze(result);
+	expect(exitCode).toBe(0);
+	expect(summary.presses[0].delay).toBe(300 + FRAME);
+	expect(summary.presses[0].path.jitter_buffer).toBe(5 * FRAME);
+	expect(summary.presses[0].path.render).toBe(10);
 });
 
 test("a frame held back by a capture burst widens its press's spread", async () => {
@@ -130,11 +146,32 @@ test("a head that arrives but never reaches the decoder fails the run", async ()
 	expect(stderr).toContain("utterance head was not decoded");
 });
 
-test("a new encoder fails as a probe, but the live encoder's release flush does not", async () => {
-	// A flush leaves no trace in the page's records, so the passing run above is the release flush.
+test("a new encoder fails the run", async () => {
 	const result = trace();
 	result.encoders.push(result.presses[2].at + 1);
 	const { exitCode, stderr } = await analyze(result);
 	expect(exitCode).toBe(1);
 	expect(stderr).toContain("an encoder was created again");
+});
+
+test("a mute that disables the rendition fails the run", async () => {
+	const result = trace();
+	result.catalog.push({ at: result.presses[3].at, selectable: false });
+	const { exitCode, stderr } = await analyze(result);
+	expect(exitCode).toBe(1);
+	expect(stderr).toContain("a mute disabled or dropped the rendition");
+});
+
+// The silence between presses is declared, so playback must cross it without counting it.
+test("an underrun or stall across the presses fails the run", async () => {
+	for (const playback of [
+		{ underruns: 1, stalls: 0 },
+		{ underruns: 0, stalls: 1 },
+	]) {
+		const result = trace();
+		result.playback = playback;
+		const { exitCode, stderr } = await analyze(result);
+		expect(exitCode).toBe(1);
+		expect(stderr).toContain("playback underran or stalled");
+	}
 });

@@ -29,6 +29,9 @@ pub(crate) struct SessionStart {
 	pub credential: Option<crate::auth::Credential>,
 	/// The implementation the peer's SETUP advertised, stored on the public [`crate::Session`].
 	pub peer_implementation: crate::setup::PeerImplementation,
+	/// Counts the datagrams the subscriber could route to no datagram track, on a version
+	/// with datagrams.
+	pub datagrams_unrouted: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 /// Server: reads the peer's single SETUP message off its Setup Stream before starting
@@ -260,7 +263,23 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 			.as_ref()
 			.map(|origin| origin.hop())
 			.or_else(|| subscribe.as_ref().map(|origin| origin.hop()))
-			.filter(|hop| hop.id() != 0);
+			.map(Hop::from);
+	}
+
+	// Prove our origin's route key, bound to this session, so a peer that scopes us files
+	// our routes under it. A transport without an exporter cannot bind a proof, so neither
+	// side proves anything there.
+	let transcript = version
+		.has_route_key()
+		.then(|| session.export_keying_material(crate::route::EXPORTER_LABEL, &[]))
+		.flatten()
+		.map(crate::route::Transcript::new);
+	let route_key = publish
+		.as_ref()
+		.and_then(|origin| origin.route_key())
+		.or_else(|| subscribe.as_ref().and_then(|origin| origin.route_key()));
+	if let (Some(transcript), Some(key)) = (&transcript, route_key) {
+		our_setup.route_key = Some(transcript.prove(&key, client));
 	}
 
 	// What the peer's connection credential earns by default: publishing what our
@@ -277,12 +296,8 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	// An unset half gets an empty origin: an empty publish origin announces nothing
 	// (and answers the peer's announce-interest with an empty set), and an empty
 	// subscribe origin issues no ANNOUNCE_PLEASE.
-	let publish = publish.unwrap_or_else(|| {
-		origin::Producer::empty(Hop::random())
-			.consume()
-			.with_stats(stats.clone())
-	});
-	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()).with_stats(stats.clone()));
+	let publish = publish.unwrap_or_else(|| origin::Producer::empty().consume().with_stats(stats.clone()));
+	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty().with_stats(stats.clone()));
 	// Before lite-07 the peer can't ask for hidden routes, so a client publishes none of
 	// them unless its publish half opted in, and a socket endpoint behind it is
 	// unreachable. A server leaves it to the client, whose origin holds that endpoint.
@@ -303,6 +318,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	// Setup stream isn't expected on the wire again.
 	let peer_implementation = crate::setup::PeerImplementation::default();
 	let mut peer_setup_slot = PeerSetup::new(client, session.address())
+		.with_transcript(transcript)
 		.offer_ietf(our_setup.ietf)
 		.with_implementation(peer_implementation.clone());
 	// Without AUTH, the server checks a client's credential before its SETUP, which the
@@ -315,7 +331,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		peer_implementation.set(None);
 	}
 	let early = if let Some(accepted) = peer_setup {
-		peer_setup_slot.set(accepted.setup);
+		peer_setup_slot.set(accepted.setup)?;
 		accepted.early
 	} else {
 		Vec::new()
@@ -370,6 +386,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	});
 	subscriber.announces = announces;
 	subscriber.viewers = viewers;
+	let datagrams_unrouted = version.has_datagrams().then(|| subscriber.datagrams_unrouted.clone());
 
 	// SendSetup only logs a failure, so refuse a SETUP that cannot encode (one past the
 	// size bound, such as a long implementation or path) here rather than leave the peer waiting.
@@ -414,6 +431,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		auth,
 		credential: setup_token,
 		peer_implementation,
+		datagrams_unrouted,
 	})
 }
 

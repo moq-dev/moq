@@ -126,7 +126,7 @@ impl Stats {
 	/// With an `output` file, each report also appends one JSON line of the
 	/// cumulative counters and this interval's latency distribution, timestamped
 	/// so it can be joined against the host sampler's records (see
-	/// `moq-bench-host`). Returns only on a failed write: a benchmark whose
+	/// `moq-bench host`). Returns only on a failed write: a benchmark whose
 	/// recorded stats are partial is invalid, so the caller must fail the run
 	/// rather than exit green.
 	pub async fn report(&self, interval: Duration, mut output: Option<std::fs::File>) -> anyhow::Result<()> {

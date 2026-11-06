@@ -18,6 +18,7 @@ import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
+import { inspect } from "./stats.ts";
 import { credential, fallback, hold, type Presentation } from "./tokens.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
@@ -39,6 +40,10 @@ const WEBSOCKET_REDIAL = Milli(10_000);
 // 100 each way, where the peer's opens are refused or wait on credit forever. Matches
 // `moq-tokio`'s `quic.max_streams`, the limit of Rust's sessions and the relay.
 const DEFAULT_MAX_STREAMS = 10_000;
+
+// Match moq-tokio so WebSocket readers have the same bandwidth-delay budget.
+const DEFAULT_RECEIVE_WINDOW = 4 << 20;
+const DEFAULT_STREAM_RECEIVE_WINDOW = 1 << 20;
 
 // RESET_STREAM and CONNECTION_CLOSE are separate transport notifications. Give the latter
 // time to surface its authoritative code without letting a reset-only peer stall SETUP forever.
@@ -66,6 +71,12 @@ export interface WebSocketProps {
 	 * Must be a positive integer.
 	 */
 	maxStreams?: number;
+
+	/** Connection receive window in bytes (default: 4 MiB). Must be a positive safe integer. */
+	receiveWindow?: number;
+
+	/** Per-stream receive window in bytes (default: 1 MiB). Must be a positive safe integer. */
+	streamReceiveWindow?: number;
 }
 
 /**
@@ -177,9 +188,11 @@ export function normalizeVersions(props?: {
 		throw new TypeError("webtransport.protocols was removed; set versions instead");
 	if (props?.websocket && "protocols" in props.websocket)
 		throw new TypeError("websocket.protocols was removed; set versions instead");
-	const maxStreams = props?.websocket?.maxStreams;
-	if (maxStreams !== undefined && !(Number.isSafeInteger(maxStreams) && maxStreams > 0))
-		throw new RangeError(`websocket.maxStreams must be a positive integer: ${maxStreams}`);
+	for (const key of ["maxStreams", "receiveWindow", "streamReceiveWindow"] as const) {
+		const value = props?.websocket?.[key];
+		if (value !== undefined && !(Number.isSafeInteger(value) && value > 0))
+			throw new RangeError(`websocket.${key} must be a positive safe integer: ${value}`);
+	}
 	return props?.versions === undefined ? undefined : checkVersions(props.versions);
 }
 
@@ -441,7 +454,14 @@ async function connectInner(
 					// wire-format version.
 					protocols: offered.alpns,
 					versions: Object.fromEntries(offered.alpns.map((alpn) => [alpn, QMUX[alpn] ?? null])),
-					config: { maxStreamsBidi: maxStreams, maxStreamsUni: maxStreams },
+					config: {
+						maxStreamsBidi: maxStreams,
+						maxStreamsUni: maxStreams,
+						receiveWindow: BigInt(props.websocket?.receiveWindow ?? DEFAULT_RECEIVE_WINDOW),
+						streamReceiveWindow: BigInt(
+							props.websocket?.streamReceiveWindow ?? DEFAULT_STREAM_RECEIVE_WINDOW,
+						),
+					},
 				})
 			: undefined;
 
@@ -506,7 +526,7 @@ async function connectTransport(
 	});
 
 	try {
-		return await Promise.race([terminal, negotiate(url, session, wiring, setup)]);
+		return await Promise.race([terminal, inspect(session).then(() => negotiate(url, session, wiring, setup))]);
 	} catch (failure) {
 		// We refused the peer's SETUP and already closed with the code that says why.
 		if (failure instanceof ProtocolViolation) throw failure;

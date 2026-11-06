@@ -907,11 +907,25 @@ impl GroupState {
 			self.pace.shed(shed);
 			let heap = kio::log::Writer::<Entry>::HEAP;
 			let before = self.log.heap().max(heap);
-			self.log.evict(end as u64);
+			self.evict_log(end as u64);
 			freed += charged + (before - self.log.heap().max(heap)) as u64;
 		}
 		self.charge.sub(freed);
 		freed
+	}
+
+	/// Evict the log below `end`, letting go of each frame's canonical content now.
+	///
+	/// The log drops an evicted entry only once epoch reclamation runs, which reads on any
+	/// other thread can hold back, so content billed until its last holder drops would stay
+	/// billed that long, past the eviction that was meant to free it.
+	fn evict_log(&mut self, end: u64) {
+		for index in self.log.base()..end.min(self.log.end()) {
+			let entry = self.log.get(index).expect("committed below the end");
+			let owner = entry.owner.lock().unwrap_or_else(PoisonError::into_inner).take();
+			drop(owner);
+		}
+		self.log.evict(end);
 	}
 
 	/// Shed the oldest committed frames until `extra` more bytes fit the live tail
@@ -1332,7 +1346,7 @@ impl GroupState {
 			flate.release(self.abort.clone().unwrap_or(Error::Dropped), shared);
 		}
 		self.front = VecDeque::new();
-		self.log.evict(self.log.end());
+		self.evict_log(self.log.end());
 		self.partial = None;
 		if let Some(content) = self.content.take() {
 			content.detach(self.abort.clone().unwrap_or(Error::Dropped));
@@ -3678,11 +3692,13 @@ impl Consumer {
 			if self.expired {
 				return res;
 			}
+			let index = self.cursor.index;
 			let Some(recover) = self.carry.as_mut().and_then(|carry| carry.recover.as_mut()) else {
 				return res;
 			};
 			let failed = match &res {
 				Poll::Ready(Ok(Some(_))) => {
+					recover.resumed();
 					// The old copy was dense through this frame, so the replacement must be too.
 					// The refusal stays: a batch that already holds frames swallows one error.
 					if self.adopted {
@@ -3703,42 +3719,32 @@ impl Consumer {
 					return res;
 				}
 				// Content that failed to inflate is the group's under its name, so no copy fixes it.
-				Poll::Ready(Err(_)) if !self.cursor.raw && self.cursor.state.read().malformed() => return res,
+				Poll::Ready(Err(err)) if !self.cursor.raw && self.cursor.state.read().malformed() => {
+					recover.failed(index, err);
+					return res;
+				}
 				Poll::Ready(Err(err)) => Some(err.clone()),
 				Poll::Pending => None,
 			};
 			if !recover.wants(failed.as_ref(), waiter) {
+				if let Some(err) = &failed {
+					recover.failed(index, err);
+				}
 				return res;
 			}
-			// An ordinal FETCH would request different content after an Object ID gap.
-			if self.cursor.state.read().sparse() {
-				return Poll::Ready(Err(Error::Unsupported));
-			}
-			let replacement = match recover.poll(self.cursor.index as u64, failed.as_ref(), waiter) {
-				Poll::Ready(Ok(group)) => group,
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+			recover.recovering(index, failed.as_ref());
+			let replacement = match self.replacement(failed, waiter) {
+				Poll::Ready(Ok(replacement)) => replacement,
+				Poll::Ready(Err(err)) => {
+					if let Some(recover) = self.recover_mut() {
+						recover.failed(index, &err);
+					}
+					return Poll::Ready(Err(err));
+				}
 				Poll::Pending => return Poll::Pending,
 			};
-			// A plain read inflates from frame 0, which a replacement starting later lacks
-			// when the failed route's head was not lent to it.
-			if !self.cursor.raw
-				&& replacement.group.first_frame() > 0
-				&& replacement.group.cursor.state.read().flate.is_some()
-			{
-				return Poll::Ready(Err(failed.unwrap_or(Error::Lagged)));
-			}
-			// A copy that shed the frame read next can't continue it, and recovering onto it
-			// again would only fail the same way. One that starts past it lags only itself.
-			if let Err(err) = replacement
-				.group
-				.cursor
-				.state
-				.read()
-				.check_read(self.cursor.index, self.cursor.raw)
-				&& !matches!(err, Error::Lagged)
-			{
-				return Poll::Ready(Err(failed.unwrap_or(err)));
-			}
+			let recover = (self.carry.as_mut().and_then(|carry| carry.recover.as_mut()))
+				.expect("a replacement comes from recovery");
 			// Same frames by index, so only the channel changes; read progress and the
 			// cap stay this cursor's.
 			let (index, end, raw) = (self.cursor.index, self.cursor.end, self.cursor.raw);
@@ -3753,6 +3759,39 @@ impl Consumer {
 			self.cursor.raw = raw;
 			self.adopted = true;
 		}
+	}
+
+	/// The serving route's copy to continue this group from once its copy `failed`, or
+	/// stalled while a newer route serves, or the error that ends the read instead.
+	fn replacement(&mut self, failed: Option<Error>, waiter: &kio::Waiter) -> Poll<Result<super::resume::Replacement>> {
+		// An ordinal FETCH would request different content after an Object ID gap.
+		if self.cursor.state.read().sparse() {
+			return Poll::Ready(Err(Error::Unsupported));
+		}
+		let index = self.cursor.index as u64;
+		let recover = self.recover_mut().expect("only a recovering group needs a replacement");
+		let replacement = ready!(recover.poll(index, failed.as_ref(), waiter))?;
+		// A plain read inflates from frame 0, which a replacement starting later lacks
+		// when the failed route's head was not lent to it.
+		if !self.cursor.raw
+			&& replacement.group.first_frame() > 0
+			&& replacement.group.cursor.state.read().flate.is_some()
+		{
+			return Poll::Ready(Err(failed.unwrap_or(Error::Lagged)));
+		}
+		// A copy that shed the frame read next can't continue it, and recovering onto it
+		// again would only fail the same way. One that starts past it lags only itself.
+		if let Err(err) = replacement
+			.group
+			.cursor
+			.state
+			.read()
+			.check_read(self.cursor.index, self.cursor.raw)
+			&& !matches!(err, Error::Lagged)
+		{
+			return Poll::Ready(Err(failed.unwrap_or(err)));
+		}
+		Poll::Ready(Ok(replacement))
 	}
 
 	/// Whether the subscription this group was handed out under has given up on it, waking
@@ -4131,6 +4170,10 @@ impl Consumer {
 		self.carry.as_ref()?.recover.as_ref()
 	}
 
+	fn recover_mut(&mut self) -> Option<&mut super::resume::Recover> {
+		self.carry.as_mut()?.recover.as_mut()
+	}
+
 	fn ride_mut(&mut self) -> Option<&mut Ride> {
 		self.carry.as_mut()?.ride.as_mut()
 	}
@@ -4217,6 +4260,7 @@ impl Consumer {
 	/// This is a short read: it returns as soon as anything is ready rather than
 	/// waiting for `out` to fill. A zero count means the group ended when the buffer
 	/// has non-zero capacity.
+	#[cfg(feature = "async")]
 	#[cfg(any(test, feature = "fuzz"))]
 	pub(crate) fn poll_read_frames<const N: usize>(
 		&mut self,
@@ -5562,11 +5606,14 @@ mod test {
 	#[test]
 	fn debt_sheds_the_front_but_not_the_newest_frame() {
 		let mut producer = Info { sequence: 0 }.produce();
-		for frame in mebibytes(4) {
-			producer.write_frame(Timestamp::ZERO, frame).unwrap();
+		// Small frames keep Miri's per-byte cost down; shedding is per frame, not per byte.
+		for index in 0..4u8 {
+			producer
+				.write_frame(Timestamp::ZERO, Bytes::from(vec![index; 1024]))
+				.unwrap();
 		}
 		let freed = producer.handle.shed(u64::MAX, u64::MAX);
-		assert!(freed >= 3 << 20, "freed {freed}");
+		assert!(freed >= 3 * 1024, "freed {freed}");
 		assert_eq!(producer.handle.state.read().held(), 3);
 
 		producer.finish().unwrap();

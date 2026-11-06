@@ -11,7 +11,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Pattern, Patterns, Version, origin};
+use moq_net::{Pattern, Patterns, Version, origin};
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// Long enough, in virtual time, for anything in flight to reach the far side.
@@ -21,7 +21,7 @@ const SERVED: &str = ".dash";
 const REQUESTED: &str = ".dash/nobody";
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -65,13 +65,17 @@ async fn covering(version: Option<&str>) -> Vec<String> {
 	let mut announced = observer.scope(REQUESTED, &everything).unwrap().covering().routes();
 	let mut log = Vec::new();
 
-	let served = publisher.create_broadcast(SERVED).unwrap();
-	served.announce(Default::default()).unwrap();
+	let served = publisher
+		.route(SERVED, moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	served.announce().unwrap();
 	kio::clock::sleep(SETTLE).await;
 	log.push(format!("served: {:?}", drain(&mut announced)));
 
-	let below = publisher.create_broadcast(format!("{REQUESTED}/cam")).unwrap();
-	below.announce(Default::default()).unwrap();
+	let below = publisher
+		.route(format!("{REQUESTED}/cam"), moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	below.announce().unwrap();
 	kio::clock::sleep(SETTLE).await;
 	log.push(format!("below: {:?}", drain(&mut announced)));
 
@@ -129,9 +133,13 @@ async fn relays_route_a_covering_claim_that_listings_omit() {
 	] {
 		let version: Version = version.parse().unwrap();
 		let publisher = produce_origin(1);
-		let claim = publisher.requests("room").unwrap();
-		let listed = publisher.create_broadcast("lobby.chat").unwrap();
-		listed.announce(Default::default()).unwrap();
+		let claim = publisher
+			.route_prefix("room", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		let listed = publisher
+			.route("lobby.chat", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		listed.announce().unwrap();
 
 		let relay = produce_origin(2);
 		let mut options = MockConnectOptions::new(version);
@@ -161,7 +169,7 @@ async fn relays_route_a_covering_claim_that_listings_omit() {
 			.unwrap();
 		let track = broadcast.track("video").unwrap();
 		let _subscribing = kio::clock::sim::spawn(async move { track.subscribe(None).await.map(drop) });
-		let request = kio::clock::timeout(SETTLE, claim.requested_broadcast())
+		let request = kio::clock::timeout(SETTLE, claim.requested())
 			.await
 			.expect("the request crossed both hops")
 			.unwrap();

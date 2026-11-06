@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Shared unsupported CPU error
+
+`e2ee::Error::Unsupported(String)` is now `UnsupportedCpu(cpu::UnsupportedCpu)`. The shared `UnsupportedCpu` type and `check()` move from `provider` to `cpu`, enabled by the new `cpu` feature and by `e2ee` and `provider`. `cpu` needs only rind; `provider` adds rustls.
+
 ### Async wrappers are opt-in
 
 Enable the `async` Cargo feature to keep awaiting `read_frame`, `recv_group`, `recv`,
@@ -60,7 +64,7 @@ A track served on demand is reserved up front with `broadcast::Producer::reserve
 
 The protected path is the opaque broadcast path; the publisher epoch is read from the route's instance instead of a path suffix.
 On wires that do not carry an instance, the session mints one, so the application supplies the epoch.
-Drop `join_epoch` and `split_epoch`: announce the generation's `moq_crypto::e2ee::Epoch` as the route's instance with `Route::default().with_instance(generation.epoch().instance(), 0)`, and read it back from the resolved broadcast with `moq_crypto::e2ee::Epoch::of(&broadcast)`.
+Drop `join_epoch` and `split_epoch`: create the broadcast's route under the generation's `moq_crypto::e2ee::Epoch` as its instance, with `RouteOptions::hidden().with_instance(generation.epoch().instance(), 0)`, and read it back from the resolved broadcast with `moq_crypto::e2ee::Epoch::of(&broadcast)`.
 
 ### Timestamps are optional
 
