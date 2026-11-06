@@ -2775,6 +2775,7 @@ impl Legacy {
 /// Lite-05/06: a name's datagram track carried on the subscription of its stream track, as
 /// one subscription carries both kinds there. A subscriber keeps the kind it asked for.
 struct LegacyDatagrams {
+	demand: bool,
 	consumer: datagram::Consumer,
 	id: u64,
 	priority: i8,
@@ -2802,8 +2803,12 @@ impl LegacyDatagrams {
 			.flatten()
 			.filter(|asked| matches!(asked.poll_info(&kio::Waiter::noop()), Poll::Ready(Ok(_))));
 		let mut consumer = answered.or_else(|| broadcast.datagrams_live(&name))?;
-		consumer.set_priority(priority);
+		let demand = broadcast.has_local_datagrams();
+		if demand {
+			consumer.set_priority(priority);
+		}
 		Some(Self {
+			demand,
 			consumer,
 			id,
 			priority,
@@ -2815,7 +2820,9 @@ impl LegacyDatagrams {
 	/// Move the datagrams to the subscriber's new `priority`.
 	fn steer(&mut self, priority: i8) {
 		self.priority = priority;
-		self.consumer.set_priority(priority);
+		if self.demand {
+			self.consumer.set_priority(priority);
+		}
 		if let Some(send) = &mut self.send {
 			send.steer(priority);
 		}

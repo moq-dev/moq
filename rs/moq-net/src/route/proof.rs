@@ -10,6 +10,7 @@ use rind::signature::{Ed25519KeyPair, PublicKey, verify::ED25519};
 use zeroize::Zeroizing;
 
 /// The label every transport binding exports the session secret under.
+#[cfg(feature = "async")]
 pub(crate) const EXPORTER_LABEL: &[u8] = b"EXPORTER-moq-lite-route-key";
 
 /// Bytes of exported secret a proof signs.
