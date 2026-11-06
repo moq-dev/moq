@@ -2935,7 +2935,7 @@ struct Serving {
 ///
 /// // Fill the catalog before readers can find it.
 /// let route = origin.route("live/alice", RouteOptions::hidden())?;
-/// let _catalog = route.broadcast().create_track("catalog.json", Default::default())?;
+/// let _catalog = route.broadcast().create_track("catalog.json", None)?;
 /// route.announce()?; // visible now, same instance
 /// route.set_cost(5)?; // re-prices in place
 /// route.withdraw(); // hidden; announce() again continues the same stream
