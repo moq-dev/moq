@@ -15,7 +15,3 @@ through the paired path, and delete `criterion_cases`, `compare_criterion`,
 `criterion_cases ... >file` call that hangs under errexit when it fails.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - tunes the thresholds this path uses
