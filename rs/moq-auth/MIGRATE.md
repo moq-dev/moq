@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Shared unsupported CPU error
+
+`Error::UnsupportedCpu` now carries `moq_crypto::cpu::UnsupportedCpu` instead of a `String`. Use its `Display` implementation for the missing feature message. Core builds still need no rustls.
+
 ### `Peer` carries the certificate chain
 
 `Peer` gains `chain`: the SHA-256 of the leaf and of each certificate it provably
