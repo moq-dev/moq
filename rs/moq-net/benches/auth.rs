@@ -16,7 +16,7 @@ mod support;
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::future::join_all;
-use moq_net::{Hop, Session, Version, auth, origin};
+use moq_net::{Session, Version, auth, origin};
 use std::time::Duration;
 use support::{harness, mock::create_mock_session_pair};
 
@@ -126,7 +126,7 @@ async fn publisher(origin: &origin::Producer) -> (Session, Session, auth::Reques
 	client_extensions.auth = false;
 	let mut server_extensions = moq_net::setup::Extensions::default();
 	server_extensions.solicit = false;
-	let (subscribe, driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+	let (subscribe, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 	harness::spawn(driver);
 	let client = async {
 		let (session, driver) = moq_net::Client::new()
@@ -176,7 +176,7 @@ fn renewal(c: &mut Criterion) {
 					|b, &(sessions, routes)| {
 						let _guard = runtime.enter();
 						// No hold, so an iteration times the renewal rather than the origin batching it.
-						let mut config = origin::Config::new(Hop::new(2).unwrap());
+						let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
 						config.update_hold = Duration::ZERO;
 						let (origin, driver) = origin::Producer::new(config);
 						harness::spawn(driver);
@@ -251,11 +251,11 @@ fn waiting(c: &mut Criterion) {
 					&(tokens, paths),
 					|b, &(tokens, paths)| {
 						let _guard = runtime.enter();
-						let mut config = origin::Config::new(Hop::new(2).unwrap());
+						let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
 						config.update_hold = Duration::ZERO;
 						let (publish, driver) = origin::Producer::new(config);
 						harness::spawn(driver);
-						let (receive, driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+						let (receive, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 						harness::spawn(driver);
 						let mut pair = runtime.block_on(pair(
 							version.parse().unwrap(),
@@ -346,7 +346,7 @@ fn shared_requests(c: &mut Criterion) {
 				&(tokens, requests),
 				|b, &(tokens, requests)| {
 					let _guard = runtime.enter();
-					let mut config = origin::Config::new(Hop::new(2).unwrap());
+					let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
 					config.update_hold = Duration::ZERO;
 					let (origin, driver) = origin::Producer::new(config);
 					harness::spawn(driver);

@@ -11,8 +11,9 @@ use std::{
 use anyhow::Context;
 use futures::FutureExt as _;
 use moq_net::origin;
-use moq_net::{Hop, Path, stats::Tier};
+use moq_net::{Path, stats::Tier};
 use reqwest_middleware::ClientWithMiddleware;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::task::Poll;
 
 use crate::critical::Child;
@@ -1361,7 +1362,7 @@ impl Cluster {
 
 	/// The origin ID used by this relay on the wire.
 	pub fn id(&self) -> u64 {
-		self.origin.hop().id()
+		self.origin.hop().get()
 	}
 
 	/// Creates a cluster with one origin, using [`Options`] for identity, cache,
@@ -1390,10 +1391,10 @@ impl Cluster {
 			peer,
 			stats,
 		} = options;
-		let id = match config.id {
-			Some(id) => Hop::new(id).context("--cluster-id must be non-zero")?,
-			None => Hop::random(),
-		};
+		let id = config
+			.id
+			.map(|id| NonZeroU64::new(id).context("--cluster-id must be non-zero"))
+			.transpose()?;
 		let deprecated = config.deprecated();
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 		// Reject a repeated static identity with conflicting policy up front,
@@ -1406,7 +1407,7 @@ impl Cluster {
 		crate::configured_tier(config.tier.clone()).context("invalid --cluster-tier")?;
 		peer.quic.validate()?;
 		let mut work = kio::Tasks::new();
-		let mut origin_config = origin::Config::new(id);
+		let mut origin_config = id.map(origin::Config::new).unwrap_or_default();
 		origin_config.route_key = Some(match &config.route_key {
 			Some(path) => (&moq_crypto::sign::SecretKey::load_or_generate(path)
 				.with_context(|| format!("--cluster-route-key {}", path.display()))?)
@@ -1414,7 +1415,9 @@ impl Cluster {
 			None => origin::RouteKey::generate(),
 		});
 		if let Some(max) = config.max_hops {
-			origin_config.max_hops = origin::HopLimit::new(max).context("--cluster-max-hops must be from 1 to 32")?;
+			origin_config.max_hops = NonZeroUsize::new(max)
+				.filter(|max| max.get() <= 32)
+				.context("--cluster-max-hops must be from 1 to 32")?;
 		}
 		if let Some(cache) = cache {
 			origin_config.pool = cache.pool;
@@ -3364,7 +3367,7 @@ mod tests {
 				..Default::default()
 			})
 			.expect("valid id");
-			assert_eq!(cluster.origin.hop().id(), id);
+			assert_eq!(cluster.origin.hop().get(), id);
 		}
 	}
 
@@ -3395,7 +3398,7 @@ mod tests {
 		.expect("cluster");
 
 		let origin = cluster.origin.clone();
-		assert_eq!(origin.hop().id(), 42);
+		assert_eq!(origin.hop().get(), 42);
 		assert_eq!(origin.config().cache_duration, duration);
 		assert_eq!(origin.config().pool.expiry(), Some(duration));
 
@@ -3921,7 +3924,7 @@ mod tests {
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "from-node");
 		// The dialer marks what the peer forwards: it entered at `node`, not here.
-		assert_eq!(update.route.source(), origin::Source::Peer(node.origin.hop()));
+		assert_eq!(update.route.source(), origin::Source::Peer(node.origin.hop().get()));
 
 		let _from_fp = fingerprint
 			.origin
@@ -3935,7 +3938,7 @@ mod tests {
 				.expect("origin closed");
 			if update.prefix.as_str() == "from-fingerprint" {
 				// The acceptor marks a LAN peer the same way.
-				assert_eq!(update.route.source(), origin::Source::Peer(fingerprint.origin.hop()));
+				assert_eq!(update.route.source(), origin::Source::Peer(fingerprint.origin.hop().get()));
 				break;
 			}
 		}

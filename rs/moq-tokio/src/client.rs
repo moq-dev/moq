@@ -236,9 +236,9 @@ impl Client {
 		self
 	}
 
-	/// Pin the identity a dialed peer's routes are attributed to, for a peer whose
+	/// Pin the hop id a dialed peer's routes are attributed to, for a peer whose
 	/// identity the caller has established; see [`moq_net::Client::with_peer_hop`].
-	pub fn with_peer_hop(mut self, hop: moq_net::Hop) -> Self {
+	pub fn with_peer_hop(mut self, hop: std::num::NonZeroU64) -> Self {
 		self.moq = self.moq.with_peer_hop(hop);
 		self
 	}

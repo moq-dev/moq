@@ -2649,7 +2649,7 @@ impl Publisher {
 			withdrawal: Default::default(),
 			runtime,
 			session,
-			self_origin: origin.hop(),
+			self_origin: crate::Hop::from(origin.hop()),
 			// Serving the peer is not a local reader asking to discover anything.
 			origin: origin.serving(),
 			control,
@@ -8961,7 +8961,7 @@ mod serve_tests {
 
 	/// The same, over `session`.
 	fn serve_session(version: Version, info: crate::track::Info, session: ScriptedSession) -> Serve {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let track = broadcast.broadcast().create_track("video", info).unwrap();
 
@@ -11110,7 +11110,7 @@ mod serve_tests {
 	#[kio::test]
 	async fn track_status_narrowed_while_answering_is_reset() {
 		for version in ALL_VERSIONS {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 			let _track = broadcast.broadcast().create_track("video", None).unwrap();
 			settle().await;
@@ -11970,7 +11970,7 @@ mod serve_tests {
 		};
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for (filter, history) in [(Filter::Unfiltered, 0), (zero, 1)] {
-				let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+				let upstream = crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
 				let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
 				let track = broadcast
 					.broadcast()
@@ -12892,7 +12892,7 @@ mod serve_tests {
 	#[kio::test]
 	async fn a_kept_join_ends_with_its_token_while_publish_done_waits() {
 		for version in JOINING_DRAFTS {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 			let track = broadcast
 				.broadcast()
@@ -13923,7 +13923,7 @@ mod serve_tests {
 	/// The info a relay behind a moq-lite hop with the `ietf` extension learns of a track
 	/// published with `info`.
 	async fn across_a_hop(info: track::Info) -> track::Info {
-		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+		let upstream = crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
 		let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let _track = broadcast.broadcast().create_track("video", info).unwrap();
 		let (downstream, _sessions) = crate::lite::ietf::test_hop(&upstream, "room", [true, true]).await;
@@ -14557,7 +14557,7 @@ mod serve_tests {
 	#[kio::test]
 	async fn a_standalone_fetch_narrowed_while_responding_stops() {
 		for version in FETCH_DRAFTS {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 			let track = broadcast
 				.broadcast()
@@ -14656,7 +14656,7 @@ mod serve_tests {
 					group_id: 0,
 				},
 			] {
-				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+				let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 				let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 				let track = broadcast
 					.broadcast()
@@ -14790,7 +14790,7 @@ mod serve_tests {
 			.map(|end| (version, end))
 		}) {
 			let token = end != JoinEnd::Ended;
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 			let track = broadcast
 				.broadcast()
@@ -15124,7 +15124,7 @@ mod serve_tests {
 	}
 
 	async fn revoked_while(version: Version, parked: Parked) {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let (claim, published) = match parked {
 			Parked::Resolving => (
 				Some(
@@ -15295,7 +15295,7 @@ mod serve_tests {
 	}
 
 	async fn withdrawn_during(version: Version, setup: Setup, kind: request::Kind) {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let session = ScriptedSession::new(Vec::new());
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer::default());
@@ -15824,7 +15824,7 @@ mod serve_tests {
 	/// [`serve_with_auth`] over a given session, such as one that finishes the stream after
 	/// its script.
 	fn serve_on(version: Version, auth: crate::auth::Link, session: ScriptedSession) -> Serve {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let track = broadcast
 			.broadcast()
@@ -17437,7 +17437,7 @@ mod tests {
 	/// the assertions.
 	async fn echo_harness(assigned: crate::Hop) -> (Publisher, origin::Consumer, Vec<crate::model::AnnounceProducer>) {
 		let other = crate::Hop::new(778).unwrap();
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
@@ -17497,7 +17497,7 @@ mod tests {
 	async fn anonymous_chain_is_forwarded_with_zero_and_not_echoed() {
 		let assigned = crate::Hop::new(777).unwrap();
 		let r1 = crate::Hop::new(9).unwrap();
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let publisher = Publisher::new(
 			crate::time::sim(),
@@ -17567,7 +17567,7 @@ mod tests {
 	#[kio::test]
 	async fn a_declared_zero_chain_is_not_advertised_back() {
 		let assigned = crate::Hop::new(777).unwrap();
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		let publisher = Publisher::new(
@@ -17604,7 +17604,7 @@ mod tests {
 	/// leave the peer waiting on a message that never comes.
 	#[kio::test]
 	async fn the_ok_counts_only_what_is_advertised() {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 
 		let session = SinkSession::gated_bi(kio::Producer::new(true).consume());
 		let log = session.log.clone();
@@ -17684,7 +17684,7 @@ mod tests {
 	async fn namespace_follows_route_eligibility_changes() {
 		let assigned = crate::Hop::new(777).unwrap();
 		let clean_publisher = crate::Hop::new(778).unwrap();
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume());
@@ -17791,7 +17791,7 @@ mod tests {
 	async fn a_refusal_that_forbids_retrying_is_not_retried() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _cam = origin
 			.announce("lonely-cam", crate::origin::RouteInfo::default())
 			.unwrap();
@@ -17865,7 +17865,7 @@ mod tests {
 	async fn a_peer_that_declared_nothing_is_told_unsolicited() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _local = origin
 			.announce("local-cam", crate::origin::RouteInfo::default())
 			.unwrap();
@@ -17911,7 +17911,7 @@ mod tests {
 	#[kio::test]
 	async fn publish_namespace_withdraws_by_reset() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let local = origin
 				.announce("local-cam", crate::origin::RouteInfo::default())
 				.unwrap();
@@ -17977,7 +17977,7 @@ mod tests {
 	async fn a_counted_publish_namespace_ok_is_a_violation() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _local = origin
 			.announce("local-cam", crate::origin::RouteInfo::default())
 			.unwrap();
@@ -18070,7 +18070,7 @@ mod tests {
 			hidden,
 			scoped,
 		} = case;
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _cam = origin.announce("cam", crate::origin::RouteInfo::default()).unwrap();
 		let _stats = origin
 			.announce(".stats/node", crate::origin::RouteInfo::default())
@@ -18219,7 +18219,7 @@ mod tests {
 	#[kio::test]
 	async fn a_non_solicit_subscribe_namespace_carries_namespace() {
 		for version in [Version::Draft18] {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let early = origin
 				.announce("early-cam", crate::origin::RouteInfo::default())
 				.unwrap();
@@ -18314,7 +18314,7 @@ mod tests {
 	async fn a_parked_open_still_lets_a_namespace_be_withdrawn() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let first = origin
 			.announce("first-cam", crate::origin::RouteInfo::default())
 			.unwrap();
@@ -18399,7 +18399,7 @@ mod tests {
 	async fn a_namespace_that_stops_being_advertisable_stops_being_deferred() {
 		let assigned = crate::Hop::new(777).unwrap();
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 
 		// A route that already passed through us must never be forwarded: `select`
 		// wants nothing, which is what the peer already holds.
@@ -18441,7 +18441,7 @@ mod tests {
 	async fn a_route_change_still_waits_out_a_refusal() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		// One instance, so the second route re-prices the instance rather than restart it.
 		let instance = crate::Instance::random();
 		let cam = origin
@@ -18545,7 +18545,7 @@ mod tests {
 		// Forward the update at once: the hold is not what this checks.
 		let origin = crate::origin::Config {
 			update_hold: Duration::ZERO,
-			..crate::origin::Config::new(crate::Hop::new(1).unwrap())
+			..crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap())
 		}
 		.produce();
 		// One instance, so the warm route re-prices the instance rather than restart it.
@@ -18627,7 +18627,7 @@ mod tests {
 	async fn a_counted_update_ok_is_a_violation() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let instance = crate::Instance::random();
 		let _cold = origin
 			.announce(
@@ -18712,7 +18712,7 @@ mod tests {
 		// Forward the update at once: the hold is not what this checks.
 		let origin = crate::origin::Config {
 			update_hold: Duration::ZERO,
-			..crate::origin::Config::new(crate::Hop::new(1).unwrap())
+			..crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap())
 		}
 		.produce();
 		let publisher_a = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
@@ -18825,7 +18825,7 @@ mod tests {
 	fn unheld_origin() -> crate::origin::Producer {
 		crate::origin::Config {
 			update_hold: Duration::ZERO,
-			..crate::origin::Config::new(crate::Hop::new(1).unwrap())
+			..crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap())
 		}
 		.produce()
 	}
@@ -19328,7 +19328,7 @@ mod tests {
 		// Forward the restart at once: the hold is not what this checks.
 		let origin = crate::origin::Config {
 			update_hold: Duration::ZERO,
-			..crate::origin::Config::new(crate::Hop::new(1).unwrap())
+			..crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap())
 		}
 		.produce();
 		let _old = origin
@@ -19383,7 +19383,7 @@ mod tests {
 	async fn a_refused_update_is_re_advertised_fresh() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let instance = crate::Instance::random();
 		let _cold = origin
 			.announce(
@@ -19462,7 +19462,7 @@ mod tests {
 	async fn a_silent_answer_still_lets_the_next_namespace_be_advertised() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _first = origin
 			.announce("first-cam", crate::origin::RouteInfo::default())
 			.unwrap();
@@ -19665,7 +19665,7 @@ mod tests {
 	#[kio::test]
 	async fn an_advertisement_without_credit_is_retried_and_spends_no_id() {
 		for version in [Version::Draft18] {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let _cam = origin
 				.announce("lonely-cam", crate::origin::RouteInfo::default())
 				.unwrap();
@@ -19717,7 +19717,7 @@ mod tests {
 	async fn an_advertisement_waiting_for_send_capacity_is_retried_on_its_own() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _cam = origin
 			.announce("lonely-cam", crate::origin::RouteInfo::default())
 			.unwrap();
@@ -19784,7 +19784,7 @@ mod tests {
 	}
 
 	fn harness(version: Version) -> Harness {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
 		let log = session.log.clone();
 

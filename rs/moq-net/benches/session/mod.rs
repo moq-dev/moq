@@ -94,7 +94,7 @@ use criterion::{BenchmarkId, Criterion, Throughput};
 pub(crate) use harness::MockConnectOptions;
 use harness::{MockPair, connect_mock};
 use mock::{MockSession, MockStats};
-use moq_net::{Hop, Timestamp, Version, broadcast, cache, datagram, group, origin, track};
+use moq_net::{Timestamp, Version, broadcast, cache, datagram, group, origin, track};
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> track::Info {
@@ -567,7 +567,7 @@ impl Drop for Pair {
 }
 
 fn make_origin(id: u64, capacity: Option<u64>) -> (origin::Producer, cache::Pool) {
-	let mut config = origin::Config::new(Hop::new(id).unwrap());
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(id).unwrap());
 	let profiling = std::env::var_os("SESSION_EXPIRY_ONLY").is_some();
 	let pool = cache::Pool::new(if capacity.is_none() || profiling {
 		cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)
@@ -1767,7 +1767,7 @@ struct IdleRoom {
 
 impl IdleRoom {
 	async fn new(version: &str, sessions: usize, consumers: usize) -> Self {
-		let (relay, driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+		let (relay, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 		harness::spawn(driver);
 		let mut viewers = Vec::new();
 		for _ in 0..sessions {

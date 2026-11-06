@@ -23,7 +23,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Timestamp, Version};
+use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -36,7 +36,7 @@ const HEAD: [&[u8]; 2] = [b"head-a", b"head-b"];
 const TAIL: [&[u8]; 2] = [b"tail-a", b"tail-b"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
