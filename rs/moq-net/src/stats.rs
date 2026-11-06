@@ -134,14 +134,14 @@ use std::{
 	fmt,
 	sync::{
 		Arc, Mutex, MutexGuard, PoisonError, Weak,
-		atomic::{AtomicU64, AtomicUsize, Ordering, fence},
+		atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence},
 	},
 };
 
 use kio::Lock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{Path, Pattern, Patterns, util::SendCell};
+use crate::{Path, Pattern, Patterns, time::Instant, util::SendCell};
 
 mod outcomes;
 pub use outcomes::{Failure, Failures, RefusalKind, Refusals};
@@ -309,17 +309,17 @@ impl SessionCounters {
 		}
 	}
 
-	/// Read the gauge and whether all its payload meters have ended. Ended is loaded with `Acquire`
-	/// before started with `Relaxed`, the same pairing as [`Counters::snapshot`],
-	/// so the readout never shows `ended > started`.
-	fn snapshot(&self) -> (Presence, bool) {
+	/// Read the gauge, its connected sessions' [`Activity`] at `now`, and whether all its payload
+	/// meters have ended. Ended is loaded with `Acquire` before started with `Relaxed`, the same
+	/// pairing as [`Counters::snapshot`], so the readout never shows `ended > started`.
+	fn snapshot(&self, now: Instant) -> (Presence, Activity, bool) {
 		let sessions_failed = self.sessions_failed.snapshot();
 		let sessions_ended = self.sessions_ended.load(Ordering::Acquire);
 		let sessions_started = self.sessions_started.load(Ordering::Relaxed);
-		let (sent_bytes, received_bytes, empty) = {
+		let (sent_bytes, received_bytes, activity, empty) = {
 			let mut bytes = self.bytes();
-			let (sent, received) = bytes.read();
-			(sent, received, bytes.live.is_empty())
+			let (sent, received, activity) = bytes.read(now);
+			(sent, received, activity, bytes.live.is_empty())
 		};
 		let presence = Presence {
 			sessions_refused: self.sessions_refused.snapshot(),
@@ -334,7 +334,7 @@ impl SessionCounters {
 			announces_peak: self.announces_peak.load(Ordering::Relaxed),
 			subscriptions_peak: self.subscriptions_peak.load(Ordering::Relaxed),
 		};
-		(presence, empty)
+		(presence, activity, empty)
 	}
 
 	fn control(&self, totals: &mut [[u64; 2]; Message::ALL.len()]) {
@@ -367,6 +367,10 @@ struct Arrival {
 	traffic: Arc<SessionTraffic>,
 	sent: u64,
 	received: u64,
+	/// The counters as of the last readout, to notice payload moving between readouts.
+	seen: (u64, u64),
+	/// The first readout that saw the counters move since the one before it.
+	moved: Option<Instant>,
 }
 
 impl SessionBytes {
@@ -384,6 +388,8 @@ impl SessionBytes {
 				traffic,
 				sent,
 				received,
+				seen: (sent, received),
+				moved: None,
 			},
 		);
 	}
@@ -401,11 +407,15 @@ impl SessionBytes {
 		(sent, received)
 	}
 
-	/// The row's `(sent, received)` totals. Folds in each session that no handle can
-	/// write through anymore, since its count is final.
-	fn read(&mut self) -> (u64, u64) {
+	/// The row's `(sent, received)` totals and its connected sessions' [`Activity`] at `now`.
+	/// Folds in each session that no handle can write through anymore, since its count is final.
+	///
+	/// Every readout samples each session, so how precisely a move is dated depends on
+	/// how often the registry is read, by anyone.
+	fn read(&mut self, now: Instant) -> (u64, u64, Activity) {
 		let Self { sent, received, live } = self;
 		let (mut live_sent, mut live_received) = (0, 0);
+		let mut activity = Activity::default();
 		live.retain(|_, arrival| {
 			// No Weak<SessionTraffic> exists, so a unique arrival cannot gain another writer.
 			let ended = Arc::strong_count(&arrival.traffic) == 1;
@@ -414,6 +424,16 @@ impl SessionBytes {
 				fence(Ordering::Acquire);
 			}
 			let (now_sent, now_received) = arrival.traffic.load();
+			if (now_sent, now_received) != arrival.seen {
+				arrival.seen = (now_sent, now_received);
+				arrival.moved = Some(now);
+			}
+			if arrival.traffic.connected.load(Ordering::Relaxed) {
+				match arrival.moved {
+					Some(moved) if now.saturating_duration_since(moved) < Activity::WINDOW => activity.active += 1,
+					_ => activity.idle += 1,
+				}
+			}
 			let (delta_sent, delta_received) = (now_sent - arrival.sent, now_received - arrival.received);
 			if ended {
 				*sent += delta_sent;
@@ -424,7 +444,7 @@ impl SessionBytes {
 			}
 			!ended
 		});
-		(*sent + live_sent, *received + live_received)
+		(*sent + live_sent, *received + live_received, activity)
 	}
 }
 
@@ -795,6 +815,32 @@ impl Presence {
 	}
 }
 
+/// Connected sessions right now, split by whether media payload moved through them
+/// within the last [`Activity::WINDOW`], in either direction.
+///
+/// A gauge, not a counter. A session that only holds announces, or subscriptions
+/// with nothing flowing, is idle: it costs keepalives and control traffic, not
+/// media forwarding. Moves are dated at registry readouts, so a move is seen no
+/// earlier than the readout after it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Activity {
+	/// Connected sessions with no payload moved within the window.
+	pub idle: u64,
+	/// Connected sessions with payload moved within the window.
+	pub active: u64,
+}
+
+impl Activity {
+	/// How recently payload must have moved for a session to count as active.
+	pub const WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+	fn add(&mut self, other: Self) {
+		self.idle += other.idle;
+		self.active += other.active;
+	}
+}
+
 /// Traffic-class label that selects which counter set a session's bumps record
 /// in, so a single [`Registry`] can split customer-facing, cluster-peer, regional,
 /// etc. traffic. Each tracked broadcast keeps a per-tier counter set on both its
@@ -947,6 +993,8 @@ pub struct Snapshot {
 	traffic: HashMap<Tier, [Traffic; 2]>,
 	/// Session presence per tier; read via [`Self::sessions`].
 	sessions: HashMap<Tier, Presence>,
+	/// Connected-session activity per tier; read via [`Self::activity`].
+	activity: HashMap<Tier, Activity>,
 	control: HashMap<Tier, [[u64; 2]; Message::ALL.len()]>,
 }
 
@@ -984,6 +1032,14 @@ impl Snapshot {
 	/// label.
 	pub fn sessions(&self) -> Vec<(Tier, Presence)> {
 		let mut rows: Vec<_> = self.sessions.iter().map(|(tier, s)| (tier.clone(), *s)).collect();
+		rows.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+		rows
+	}
+
+	/// The `(tier, activity)` rows of connected sessions, one per tier with a session row,
+	/// sorted by tier label.
+	pub fn activity(&self) -> Vec<(Tier, Activity)> {
+		let mut rows: Vec<_> = self.activity.iter().map(|(tier, a)| (tier.clone(), *a)).collect();
 		rows.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
 		rows
 	}
@@ -1237,6 +1293,10 @@ impl Registry {
 	/// node lifetime totals (what a `/metrics`-style scrape wants) and never prunes.
 	/// Retired entries remain in these totals after [`Self::report`] prunes them.
 	pub fn snapshot(&self) -> Snapshot {
+		self.snapshot_at(Instant::now())
+	}
+
+	fn snapshot_at(&self, now: Instant) -> Snapshot {
 		self.collect_wire();
 		let Some(shared) = self.shared.as_ref() else {
 			return Snapshot::default();
@@ -1258,8 +1318,11 @@ impl Registry {
 			let sessions = shared.sessions.lock();
 			for (tier, labels) in sessions.iter() {
 				let totals = snap.sessions.entry(tier.clone()).or_default();
+				let activity = snap.activity.entry(tier.clone()).or_default();
 				for counters in labels.values() {
-					totals.add(counters.snapshot().0);
+					let (presence, active, _) = counters.snapshot(now);
+					totals.add(presence);
+					activity.add(active);
 					counters.control(snap.control.entry(tier.clone()).or_default());
 				}
 			}
@@ -1278,6 +1341,10 @@ impl Registry {
 	/// sees traffic again restarts from zero; see the module docs on counter
 	/// resets. Leaves the report empty for a disabled registry.
 	pub fn report(&self, report: &mut Report) {
+		self.report_at(report, Instant::now());
+	}
+
+	fn report_at(&self, report: &mut Report, now: Instant) {
 		self.collect_wire();
 		report.traffic.clear();
 		report.sessions.clear();
@@ -1318,7 +1385,7 @@ impl Registry {
 				// Nothing can join a row only the map holds (that needs the lock held here),
 				// but a meter outliving its session still writes until its last clone drops.
 				let unheld = Arc::strong_count(counters) == 1;
-				let (presence, empty) = counters.snapshot();
+				let (presence, _, empty) = counters.snapshot(now);
 				let closed = unheld && empty;
 				report.sessions.push(SessionEntry {
 					tier: tier.clone(),
@@ -1402,7 +1469,10 @@ impl Handle {
 				}
 			}
 		}
-		let traffic = Arc::new(SessionTraffic::default());
+		let traffic = Arc::new(SessionTraffic {
+			connected: AtomicBool::new(matches!(context, Context::Session)),
+			..Default::default()
+		});
 		if let Some(presence) = &presence {
 			presence.bytes().join(traffic.clone(), (0, 0));
 		}
@@ -1592,6 +1662,8 @@ struct Current {
 struct SessionTraffic {
 	sent: AtomicU64,
 	received: AtomicU64,
+	/// A connected session that has not ended: its [`Activity`] counts. Requests never set it.
+	connected: AtomicBool,
 }
 
 impl SessionTraffic {
@@ -1803,6 +1875,8 @@ impl SessionInner {
 
 impl Drop for SessionInner {
 	fn drop(&mut self) {
+		// Meters may outlive the session; the ended session is neither idle nor active.
+		self.traffic.connected.store(false, Ordering::Relaxed);
 		let current = self.current.get_mut().expect("stats session poisoned");
 		if self.connected
 			&& let Some(presence) = &current.presence
@@ -2273,7 +2347,7 @@ mod tests {
 		stats.shared().sessions.lock().get(tier).and_then(|labels| {
 			labels
 				.get(&crate::Path::try_from(label.to_string()).unwrap())
-				.map(|c| c.snapshot().0)
+				.map(|c| c.snapshot(Instant::ZERO).0)
 		})
 	}
 
@@ -2935,6 +3009,31 @@ mod tests {
 			7,
 			"retired totals keep the bytes"
 		);
+	}
+
+	#[test]
+	fn activity_follows_recent_payload() {
+		let stats = test_stats();
+		let tier = Tier::default();
+		let at = |secs| Instant::ZERO + std::time::Duration::from_secs(secs);
+		let activity = |secs| stats.snapshot_at(at(secs)).activity[&tier];
+		let both = |idle, active| Activity { idle, active };
+
+		let quiet = stats.tier(tier.clone()).session(crate::Path::from_static("acme"));
+		let busy = stats.tier(tier.clone()).session(crate::Path::from_static("acme"));
+		let _request = stats.tier(tier.clone()).request(crate::Path::from_static("acme"));
+		let meter = busy.egress(crate::Path::from_static("acme/live")).meter();
+		let _held = quiet.ingress(crate::Path::from_static("acme/other")).meter();
+		assert_eq!(activity(0), both(2, 0), "connecting moves no payload; requests never count");
+
+		meter.bytes(1);
+		assert_eq!(activity(1), both(1, 1));
+		assert_eq!(activity(10), both(1, 1), "still within the window of the readout that saw it");
+		assert_eq!(activity(11), both(2, 0), "the window ends");
+
+		meter.datagram(1);
+		drop(busy);
+		assert_eq!(activity(12), both(1, 0), "an ended session is neither, even with a live meter");
 	}
 
 	#[test]

@@ -825,6 +825,24 @@ impl Scrape {
 			counter(encoder, name, help, rows)?;
 		}
 
+		// Split by what costs work: a session forwarding media against one that only holds
+		// keepalives, announces, or quiet subscriptions. Regressed against process CPU and
+		// memory, the two give the marginal cost of each.
+		let activity = self.stats.activity();
+		gauge(
+			encoder,
+			"moq_relay_sessions_connected",
+			"Connected sessions; active if media payload moved through them within the last 10 seconds, idle otherwise.",
+			activity.iter().flat_map(|(tier, activity)| {
+				[("idle", activity.idle), ("active", activity.active)].map(|(state, count)| {
+					(
+						[("tier", Label(tier.as_str())), ("state", Label(state))],
+						count,
+					)
+				})
+			}),
+		)?;
+
 		counter(
 			encoder,
 			"moq_relay_sessions_failed",
@@ -1745,6 +1763,10 @@ mod tests {
 			body.contains("moq_relay_sessions_closed_total{tier=\"http\"} 0"),
 			"{body}"
 		);
+		assert!(
+			body.contains("moq_relay_sessions_connected{tier=\"http\",state=\"idle\"} 0"),
+			"{body}"
+		);
 	}
 
 	#[test]
@@ -1771,6 +1793,11 @@ mod tests {
 			};
 			check();
 			check();
+			let body = render_metrics(&registry.snapshot(), &[], &[]);
+			assert!(
+				body.contains(&format!("moq_relay_sessions_connected{{tier=\"{tier}\",state=\"idle\"}} 1")),
+				"transport bytes alone leave a session idle:\n{body}"
+			);
 			drop(guard);
 			drop(session);
 			registry.report(&mut Default::default());
@@ -2083,6 +2110,7 @@ mod tests {
 # TYPE moq_relay_panics_total counter
 # TYPE moq_relay_requests_total counter
 # TYPE moq_relay_sessions_closed_total counter
+# TYPE moq_relay_sessions_connected gauge
 # TYPE moq_relay_sessions_failed_total counter
 # TYPE moq_relay_sessions_opened_total counter
 # TYPE moq_relay_sessions_refused_total counter
@@ -2155,6 +2183,8 @@ counter moq_relay_wire_rx_bytes_total{tier="edge"} 0
 counter moq_relay_wire_tx_bytes_total{tier="edge"} 0
 gauge moq_relay_accept_stalled_seconds{listener="tcp"} 0
 gauge moq_relay_draining_sessions{} 0
+gauge moq_relay_sessions_connected{state="active",tier="edge"} 0
+gauge moq_relay_sessions_connected{state="idle",tier="edge"} 1
 "#;
 
 	#[cfg(all(target_os = "linux", feature = "_uring"))]
