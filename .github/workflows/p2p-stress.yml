@@ -1,0 +1,30 @@
+# TEMPORARY: reproduce the P2P data-channel hang on hosted runners; not for merge.
+name: P2P stress
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/p2p-stress.yml"
+      - "test/p2p/**"
+permissions:
+  contents: read
+jobs:
+  stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      - run: nix develop --command bun install --frozen-lockfile
+        shell: bash -leo pipefail {0}
+      - run: cd test/p2p && nix develop --command bun test ./stress.browser.ts
+        shell: bash -leo pipefail {0}
+        env:
+          N: "100000"
+          P: "1"
+          BUDGET_MS: "1200000"
