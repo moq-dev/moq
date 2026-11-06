@@ -25,7 +25,9 @@ export type Target = {
 	// Maximum desired coded height in pixels.
 	height?: number;
 
-	// Maximum desired bitrate in bits per second.
+	// Maximum desired bitrate in bits per second, a cap rather than a hint: selection picks the
+	// best rendition within it, and `0` picks the lowest rendition with a known bitrate.
+	// Omit it to select from the connection's PROBE estimate instead.
 	bitrate?: number;
 };
 
