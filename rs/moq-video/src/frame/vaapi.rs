@@ -31,43 +31,75 @@ use super::{DmaBuf, DmaBufExport, DmaBufFrame, DmaBufLayout, DmaBufPlane, DrmFor
 use crate::color::{self, Color};
 use crate::{Error, Size};
 
-/// Environment variable naming the render node, such as `/dev/dri/renderD129`, that [`device`] returns.
+/// Environment variable naming the render node, such as `/dev/dri/renderD129`, the VA-API codecs and resize share.
 const DEVICE_ENV: &str = "MOQ_VAAPI_DEVICE";
 
-/// Returns the render node the VA-API encoder, decoder, and resize open, or `None` for each to find its own.
+/// The render node the VA-API encoders, decoders, and resize share.
+struct Shared {
+	node: PathBuf,
+	/// Whether it also encodes and decodes H.265, which not every node that does H.264 can.
+	h265: bool,
+}
+
+/// Returns the node shared by the VA-API codecs and resize, or `None` for each to find its own.
 ///
 /// [`DEVICE_ENV`] names one outright, and a named node is used even when it
 /// fails to open, so a typo is an error rather than a silent fallback.
 /// Otherwise this is the first node whose driver encodes and decodes H.264 and
-/// post-processes video. Sharing one node is what lets a DMA-BUF move from the
-/// decoder through a resize into the encoder without a copy; on a machine with
-/// two GPUs, the first node that decodes need not be one that encodes. Where no
-/// node offers all three, each opens the first node that offers what it needs.
+/// post-processes video, preferring one that also encodes and decodes H.265.
+/// Sharing one node is what lets a DMA-BUF move from the decoder through a
+/// resize into the encoder without a copy; on a machine with two GPUs, the first
+/// node that decodes need not be one that encodes. Where no node offers all
+/// three, each opens the first node that offers what it needs.
 ///
 /// Resolved once per process, since finding it opens every render node.
-pub(crate) fn device() -> Option<&'static Path> {
-	static DEVICE: OnceLock<Option<PathBuf>> = OnceLock::new();
-	DEVICE
+fn shared() -> Option<&'static Shared> {
+	static SHARED: OnceLock<Option<Shared>> = OnceLock::new();
+	SHARED
 		.get_or_init(|| {
 			if let Some(node) = std::env::var_os(DEVICE_ENV) {
 				let node = PathBuf::from(node);
 				tracing::info!(device = %node.display(), "using the VA-API render node {DEVICE_ENV} names");
-				return Some(node);
+				return Some(Shared { node, h265: true });
 			}
-			let node = moq_vaapi::DrmDeviceIterator::default().find(|node| {
-				moq_vaapi::Display::open_drm_display(node).is_ok_and(|display| {
-					moq_vaapi::encode::probe(&display, Codec::H264).is_ok()
-						&& moq_vaapi::decode::probe(&display, Codec::H264).is_ok()
-						&& moq_vaapi::vpp::probe(&display).is_ok()
+			let shared = choose(moq_vaapi::DrmDeviceIterator::default().filter_map(|node| {
+				let display = moq_vaapi::Display::open_drm_display(&node).ok()?;
+				let codes = |codec| {
+					moq_vaapi::encode::probe(&display, codec).is_ok()
+						&& moq_vaapi::decode::probe(&display, codec).is_ok()
+				};
+				let shareable = codes(Codec::H264) && moq_vaapi::vpp::probe(&display).is_ok();
+				shareable.then(|| Shared {
+					h265: codes(Codec::H265),
+					node,
 				})
-			});
-			match &node {
-				Some(node) => tracing::debug!(device = %node.display(), "VA-API render node"),
+			}));
+			match &shared {
+				Some(shared) => tracing::debug!(device = %shared.node.display(), shared.h265, "VA-API render node"),
 				None => tracing::debug!("no VA-API render node encodes, decodes, and scales; each opens its own"),
 			}
-			node
+			shared
 		})
-		.as_deref()
+		.as_ref()
+}
+
+/// Returns the first of `candidates` that does H.265 too, or else the first.
+fn choose(mut candidates: impl Iterator<Item = Shared>) -> Option<Shared> {
+	let first = candidates.next()?;
+	if first.h265 {
+		return Some(first);
+	}
+	Some(candidates.find(|candidate| candidate.h265).unwrap_or(first))
+}
+
+/// Returns the render node a VA-API `codec` encoder or decoder opens, or `None` for it to find its own.
+///
+/// The shared node, unless it does not do H.265: an H.265 codec then opens the
+/// first node that offers it, rather than failing on one that cannot.
+pub(crate) fn device(codec: Codec) -> Option<&'static Path> {
+	shared()
+		.filter(|shared| codec == Codec::H264 || shared.h265)
+		.map(|shared| shared.node.as_path())
 }
 
 /// Describes `buffer` for a VA-API import, returning the producer lease to hold until the import is done with.
@@ -180,8 +212,8 @@ pub(crate) fn resize(buffer: &DmaBuf, size: Size) -> Result<DmaBuf, Error> {
 		// fence wait and a descriptor duplicate on every frame to learn it again.
 		let processor = slot
 			.get_or_insert_with(|| {
-				match device() {
-					Some(node) => Processor::new(node),
+				match shared() {
+					Some(shared) => Processor::new(&shared.node),
 					None => Processor::open(),
 				}
 				.map_err(|e| format!("{e:#}"))
@@ -327,14 +359,35 @@ mod tests {
 			eprintln!("skipping: {DEVICE_ENV} names the node");
 			return;
 		}
-		let Some(node) = device() else {
+		let Some(shared) = shared() else {
 			eprintln!("skipping: no render node encodes, decodes, and scales");
 			return;
 		};
-		let display = moq_vaapi::Display::open_drm_display(node).expect("reopen the shared node");
+		let display = moq_vaapi::Display::open_drm_display(&shared.node).expect("reopen the shared node");
 		moq_vaapi::encode::probe(&display, Codec::H264).expect("the shared node encodes H.264");
 		moq_vaapi::decode::probe(&display, Codec::H264).expect("the shared node decodes H.264");
 		moq_vaapi::vpp::probe(&display).expect("the shared node scales");
+		let h265 = moq_vaapi::encode::probe(&display, Codec::H265).is_ok()
+			&& moq_vaapi::decode::probe(&display, Codec::H265).is_ok();
+		assert_eq!(shared.h265, h265, "whether the shared node does H.265");
+	}
+
+	/// On two GPUs where only the second does H.265, the second is shared, so
+	/// neither codec is pinned to a node that cannot do it.
+	#[test]
+	fn a_node_that_does_h265_too_is_shared_first() {
+		let node = |name: &str, h265| Shared {
+			node: PathBuf::from(name),
+			h265,
+		};
+		let chosen = |nodes: Vec<Shared>| choose(nodes.into_iter()).map(|shared| (shared.node, shared.h265));
+
+		let later = chosen(vec![node("first", false), node("second", true)]);
+		assert_eq!(later, Some((PathBuf::from("second"), true)));
+		// Without one, H.264 still shares the first, and H.265 finds its own.
+		let none = chosen(vec![node("first", false), node("second", false)]);
+		assert_eq!(none, Some((PathBuf::from("first"), false)));
+		assert_eq!(chosen(Vec::new()), None);
 	}
 }
 
@@ -403,8 +456,8 @@ pub(crate) mod testing {
 	pub(crate) fn bgrx_dmabuf(rgba: &[u8], size: Size) -> Option<DmaBuf> {
 		// The same node resize and the encoder open. On two GPUs `Display::open`
 		// can be a different device, and the processor then refuses the import.
-		let display = match super::device() {
-			Some(node) => Display::open_drm_display(node).ok()?,
+		let display = match super::shared() {
+			Some(shared) => Display::open_drm_display(&shared.node).ok()?,
 			None => Display::open()?,
 		};
 		let (width, height) = (size.width, size.height);

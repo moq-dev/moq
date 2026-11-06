@@ -10,8 +10,9 @@
 //! libva-less host, or a present-but-unusable VA stack (no render node, no usable
 //! driver), makes `Encoder::new` return an error; under automatic selection
 //! [`backend::open`](super::open) then moves on to openh264, like the NVENC backend.
-//! The render node is the one the decoder and the GPU resize share, which
-//! `MOQ_VAAPI_DEVICE` can name; see `frame::vaapi::device`.
+//! The render node is the one the decoder and the GPU resize share, unless that
+//! one cannot encode H.265, and `MOQ_VAAPI_DEVICE` can name it; see
+//! `frame::vaapi::device`.
 //!
 //! A [`Surface::DmaBuf`] is encoded without touching the CPU. An NV12 buffer at
 //! the encoder's size (a VA-API decode, or one [`Surface::resize`] already
@@ -84,13 +85,14 @@ impl Vaapi {
 		if color != paired.with_range(color.range) {
 			return Err(Error::Unsupported(format!("VA-API cannot signal {color:?}")));
 		}
+		let codec = match config.codec {
+			Codec::H264 => moq_vaapi::Codec::H264,
+			Codec::H265 => moq_vaapi::Codec::H265,
+		};
 		let vaapi = VaapiConfig {
-			device: vaapi::device().map(Path::to_path_buf),
+			device: vaapi::device(codec).map(Path::to_path_buf),
 			color: vaapi::color(color)?,
-			codec: match config.codec {
-				Codec::H264 => moq_vaapi::Codec::H264,
-				Codec::H265 => moq_vaapi::Codec::H265,
-			},
+			codec,
 			..VaapiConfig::new(
 				config.width,
 				config.height,

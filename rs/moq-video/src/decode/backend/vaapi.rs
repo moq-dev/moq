@@ -16,7 +16,8 @@
 //! that is a refusal of the stream rather than a fault. For H.265, which has no
 //! software decoder behind this one, that refusal is what lets a player pick
 //! another rendition. The render node is the one the encoder and the GPU resize
-//! share, which `MOQ_VAAPI_DEVICE` can name; see `frame::vaapi::device`.
+//! share, unless that one cannot decode H.265, and `MOQ_VAAPI_DEVICE` can name
+//! it; see `frame::vaapi::device`.
 //!
 //! Progressive 8-bit 4:2:0 only, which is everything a browser's `VideoEncoder`,
 //! WebRTC, or this crate's own encoders emit; H.265 is the Main profile. The
@@ -111,14 +112,14 @@ impl Vaapi {
 			other => return Err(Error::Codec(anyhow::anyhow!("VAAPI cannot decode {}", other.label()))),
 		};
 		if let Some((profile, name)) = required
-			&& offered(profile) == Some(false)
+			&& offered(codec, profile) == Some(false)
 		{
 			return Err(Error::UnsupportedCodec(format!("no VA-API driver here decodes {name}")));
 		}
 
 		let vaapi = VaapiConfig {
 			codec,
-			device: vaapi::device().map(Path::to_path_buf),
+			device: vaapi::device(codec).map(Path::to_path_buf),
 		};
 		let decoder = Decoder::new(vaapi).map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI decoder init: {e:?}")))?;
 
@@ -244,14 +245,14 @@ fn va_profile(profile_idc: u8) -> Option<VAProfile::Type> {
 	}
 }
 
-/// Whether a render node the decoder could open offers VLD decode for
+/// Whether a render node a `codec` decoder could open offers VLD decode for
 /// `profile`.
 ///
 /// `Some(false)` only when every node answered and none does. A node that can't
 /// be asked, such as one whose VA driver is missing, leaves the answer unknown,
 /// since a missing driver is a fault rather than the device's refusal.
-fn offered(profile: VAProfile::Type) -> Option<bool> {
-	let nodes: Vec<PathBuf> = match vaapi::device() {
+fn offered(codec: moq_vaapi::Codec, profile: VAProfile::Type) -> Option<bool> {
+	let nodes: Vec<PathBuf> = match vaapi::device(codec) {
 		Some(node) => vec![node.to_path_buf()],
 		None => DrmDeviceIterator::default().collect(),
 	};
