@@ -17,7 +17,7 @@ fastest-reader pacing gives.
 Decided 2026-10-25 with the maintainer (mesh planning interview):
 
 - TCP-level proxying over groups, never IP over datagrams.
-- A forwarded service is one [socket](/quest/m1/socket/README.md) endpoint,
+- A forwarded service is one [socket](/doc/concept/socket.md) endpoint,
   and each TCP connection is one session on it (amended 2026-11-03, below),
   one group each way; each TCP `read()` becomes one frame, because a frame's length must
   be known before it is written and a read has one. It coalesces whatever is
@@ -42,7 +42,7 @@ Decided 2026-10-25 with the maintainer (mesh planning interview):
 Amended 2026-11-01 with the maintainer (socket planning interview),
 2026-11-03 when sockets became endpoints, and 2026-11-04 when the socket's
 `tcp` protocol became one group each way: connection setup is the
-[socket](/quest/m1/socket/README.md) epic's `Endpoint`, `dial_tcp`, and
+[socket](/doc/concept/socket.md) `Endpoint`, `dial_tcp`, and
 `accept_tcp`, which settle the layout (`<prefix>/.socket/<id>`, a
 `tcp/<dialer>/<acceptor>/<session>` track each way). Each TCP connection is one `tcp`
 session, whose halves are a single group each way for the connection's life:

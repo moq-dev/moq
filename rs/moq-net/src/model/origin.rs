@@ -2721,7 +2721,7 @@ impl Producer {
 	/// thing on every hop.
 	///
 	/// A consumer resolving a path under it through this route is handed to
-	/// [`Route::requested`] as a [`Request`]: answer it by serving a broadcast already
+	/// [`Route::poll_requested`] as a [`Request`]: answer it by serving a broadcast already
 	/// held ([`Request::serve`]), under this route's instance, or by creating the path's
 	/// own exact route ([`Request::route`]), under a fresh instance, so restarting one
 	/// job never splices into a copy of the last. This is how a service answers a whole
@@ -6624,7 +6624,7 @@ impl ServeState {
 
 /// A pending request for a broadcast to be served on demand.
 ///
-/// Yielded by [`Route::requested`]. The requester is awaiting inside
+/// Yielded by [`Route::poll_requested`]. The requester is awaiting inside
 /// [`Consumer::request`]. Answer it one of three ways: [`serve`](Self::serve) a
 /// broadcast already held, under the prefix route's instance; create the path's own
 /// exact route with [`route`](Self::route), under a fresh instance; or

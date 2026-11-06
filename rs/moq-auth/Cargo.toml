@@ -18,7 +18,7 @@ async = ["kio/async"]
 client = [
     "async",
     "dep:reqwest",
-    "dep:rind-rustls",
+    "moq-crypto/provider",
     "dep:rustls",
     "dep:rustls-platform-verifier",
     "dep:tokio",
@@ -34,7 +34,7 @@ axum = { workspace = true, optional = true }
 base64 = { workspace = true }
 jsonwebtoken = { workspace = true }
 kio = { workspace = true, features = ["serde"] }
-moq-crypto = { workspace = true, features = ["serde"] }
+moq-crypto = { workspace = true, features = ["serde", "cpu"] }
 moq-pattern = { workspace = true, features = ["serde"] }
 pkcs1 = { workspace = true, features = ["std"] }
 pkcs8 = { workspace = true }
@@ -42,7 +42,6 @@ rand = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["rustls-no-provider", "json"], optional = true }
 rind = { workspace = true }
 rind-jsonwebtoken = { workspace = true }
-rind-rustls = { workspace = true, optional = true }
 rustls = { version = "0.23", default-features = false, optional = true }
 rustls-platform-verifier = { version = "0.7", optional = true }
 serde = { workspace = true }

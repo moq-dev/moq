@@ -221,7 +221,7 @@ standalone build, not incremental workspace savings.
 - The QUIC/UDP, RTMP, V4L2, NVIDIA, VA-API, UniFFI and LibAV forks all have
   current transport, gateway, device, binding or codec consumers. Their
   removal would drop behavior or recreate nontrivial platform code;
-  upstream porting stays with [vendor-sync](/quest/m2/cut-gate/vendor-sync/README.md).
+  upstream porting stays with [vendor-sync](/quest/m3/vendor-sync/README.md).
   OpenH264 and device integrations remain opt-in where already gated.
 - Error/primitive derives remain shared infrastructure: `thiserror` is the
   workspace convention; `derive_more` handles existing enum conversions,

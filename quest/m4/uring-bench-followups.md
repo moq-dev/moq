@@ -17,7 +17,3 @@ The QUIC request-reply benchmark is now part of `worker_turns` in
 the run logs; adding that benchmark is no longer open work here.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - sets the threshold the new series is judged by
