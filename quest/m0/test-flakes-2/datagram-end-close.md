@@ -40,7 +40,8 @@ load the FIN is not read before the abort, so `ended` is still unset and
 the producer aborts. Check the delivery point before choosing between
 waiting on the end's arrival and yielding to the host in the drain.
 
-Reproduce first: run the whole file beside CPU loops, as above, and keep
-the failing output before changing the test or the end path.
+Reproduce first: temporarily remove the case's `test.skip`, then run the
+whole file beside CPU loops, as above. Keep the failing output before making
+other changes to the test or the end path. Restore the skip until the fix.
 
 Public API: none. Wire: none.
