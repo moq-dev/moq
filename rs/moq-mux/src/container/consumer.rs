@@ -4641,7 +4641,11 @@ mod tests {
 				.with_delay(Delay::default().with_max(Duration::from_secs(10)))
 				.with_ranges([moq_net::track::Range::live()]),
 		);
-		assert_eq!(consumer_track.floor(), None, "the relative start waits on a first group");
+		assert_eq!(
+			consumer_track.floor(),
+			None,
+			"the relative start waits on a first group"
+		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 4, &[ts(400_000)]);

@@ -61,10 +61,10 @@ Implementation:
   floor span, keeping `admit()` and the epoch reset ordering from #6549. Keep
   the decoder tests for a reversed head (now released at the floor) and the
   fresh-encoder case.
-- Interplay with [Container reads drop backfill](/quest/m1/read-backfill.md):
-  once the JS consumer drops groups below its cursor, an ascending head
-  arrives above it, so nothing valid is dropped. Whichever lands second
-  re-runs the other's tests.
+- Since PRURL, the JS ordered read starts at the
+  publisher's reported start, waits on each group in sequence, and drops one
+  below its cursor, so `Order` only ever sees an ascending head. That PR left
+  `Order` alone for this quest; rerun its decoder tests against the new read.
 - Update `doc/concept/use-case/ai.md` and the `buffer` docs in
   `js/watch/src/element.ts` and `js/watch/src/sync.ts` in the same PR.
 - Verify against a voice agent on a lite-07 relay, such as a Pipecat pipeline
@@ -81,5 +81,4 @@ keeps waiting on lite-07 for the head-hold simplification.
 
 ## Related
 
-- [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS consumer stops delivering groups below its cursor
 - [Subscribe ranges](/quest/m2/subscribe-ranges/README.md) - owns the wire's `Group Order` and the ordered cursor's floor

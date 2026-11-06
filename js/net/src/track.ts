@@ -3075,8 +3075,9 @@ export class Subscriber {
 	 * reader waits on starts. Undefined when the source declares none and no fill is out.
 	 *
 	 * Where a reader that waits on each group in sequence starts when {@link floor} names none:
-	 * groups arrive newest first, so the first to arrive is not the oldest served. Mirrors the
-	 * Rust `Subscriber::poll_start`.
+	 * groups arrive newest first, so the first to arrive is not the oldest served. A copy says
+	 * only once subscribed upstream, so ask once {@link info} resolves or a group arrives. Mirrors
+	 * the Rust `Subscriber::poll_start`.
 	 */
 	async start(): Promise<bigint | undefined> {
 		for (;;) {

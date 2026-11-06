@@ -82,14 +82,17 @@ head's group 918 and the next frame's group 919, written at +72 and +73 ms,
 reached the listener reordered: 919 at +187 ms and 918 at +192 ms, about 115
 ms in transit against the usual 3 ms. The listener decoded 919 at +191.7 ms.
 Group 918 arrived 0.4 ms later and never reached the decoder, so the utterance
-played from its second frame, 60 ms late. The JS ordered read still delivers a
-group below its cursor as a late backfill
-(`js/hang/src/container/consumer.ts`), so the head was most likely dropped as
-late between the read and the decoder (`js/watch/src/audio/decoder.ts`); pin
-that down first. After a declared end, the next group is known to be the end's
-group plus one. Holding for it within the delay budget would keep the head
-without adding startup latency, but weigh that against the no-window decision
-in [Container reads drop backfill](/quest/m1/read-backfill.md).
+played from its second frame, 60 ms late. Those runs predate
+PRURL, after which the JS ordered read
+(`js/hang/src/container/consumer.ts`) waits on each group in sequence and
+drops one below its cursor, rather than delivering it as a late backfill that
+the decoder (`js/watch/src/audio/decoder.ts`) then dropped as late. Rerun
+first, and pin down whether the read's cursor had already passed 918. After a
+declared end, the next group is known to be the end's group plus one. Holding
+for it within the delay budget would keep the head without adding startup
+latency, but weigh that against the maintainer's 2026-10-15 no-window decision
+([moq-dev/moq#5508](https://github.com/moq-dev/moq/pull/5508) was closed for
+holding every ordered read's first delivery).
 
 The runner fails on a head that is received but never decoded, so the proof
 catches this. A complete set of runs finishes this epic.
@@ -97,7 +100,3 @@ catches this. A complete set of runs finishes this epic.
 ## Required
 
 - [Native playback in the acceptance proof](/quest/m1/push-to-talk/native.md) - `just test push-to-talk` also runs a `moq play` listener, held to the same no-lost-head, comfort-noise, and no-underrun checks
-
-## Related
-
-- [Container reads drop backfill](/quest/m1/read-backfill.md) - changes how the ordered read treats a group below its cursor, where this head was lost

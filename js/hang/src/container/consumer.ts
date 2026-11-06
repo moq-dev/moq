@@ -290,7 +290,7 @@ export class Consumer {
 				if (this.#active === undefined) {
 					const floor = this.#track.floor();
 					const served = await this.#track.start();
-					const start = floor === undefined || served === undefined ? (floor ?? served) : floor > served ? floor : served;
+					const start = served !== undefined && (floor === undefined || served > floor) ? served : floor;
 					this.#active = this.#startAt(start) ?? consumer.sequence;
 				}
 
@@ -854,7 +854,16 @@ export class Consumer {
 					const excluded = next === undefined || next >= head.consumer.sequence;
 					// The groups past the hole already fill the max buffer, so it can hold none of what would arrive into it.
 					const full = this.#full();
-					if (startup || empty || contiguous || skipHole || elapsed || excluded || full || ended !== undefined) {
+					if (
+						startup ||
+						empty ||
+						contiguous ||
+						skipHole ||
+						elapsed ||
+						excluded ||
+						full ||
+						ended !== undefined
+					) {
 						if (!contiguous && !empty) {
 							this.#lost = true;
 							if (!startup) {

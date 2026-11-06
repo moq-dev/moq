@@ -40,6 +40,7 @@ import {
 	SubscribeOk,
 	type SubscribeResponse,
 	SubscribeStart,
+	SubscribeStarted,
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { Minted, Subscriber } from "./subscriber.ts";
@@ -2553,7 +2554,9 @@ test.each([[[]], [[0, 5]]])("a lite-07 SUBSCRIBE_START resolving %j violates the
 	}
 });
 
-test("an empty START remains resolved when its range widens", async () => {
+// An empty START resolves the feed's start, and a range an update adds leaves it pending until its
+// SUBSCRIBE_STARTED says where that range starts, which the feed then starts from.
+test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
@@ -2567,9 +2570,14 @@ test("an empty START remains resolved when its range widens", async () => {
 		expect(hooks.sourceStart(track)).toBe("pending");
 		await respond(request, version, [{ start: new SubscribeStart([undefined]) }]);
 		await drainReactions();
+		expect(hooks.sourceStart(track)).not.toBe("pending");
 		track.update({ ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }] });
 		await drainReactions();
-		expect(hooks.sourceStart(track)).not.toBe("pending");
+		expect(hooks.sourceStart(track)).toBe("pending");
+		// The widened range took the next Range ID.
+		await respond(request, version, [{ started: new SubscribeStarted(1n, 1n) }]);
+		await drainReactions();
+		expect(await track.start()).toBe(1n);
 	} finally {
 		track.close();
 		broadcast.close();

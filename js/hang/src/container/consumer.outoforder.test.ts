@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Micro, Milli, Nano, sleep } from "@moq/clock";
+import { Micro, Milli, Nano, sleep } from "@moq/clock";
 import { type Group, Time, Track, Varint } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
