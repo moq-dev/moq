@@ -57,6 +57,16 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		}
 	}
 
+	/// Change future admission delays without discarding clocks or held frames.
+	pub fn set_delay(&mut self, delay: Duration) {
+		self.active.delay = delay;
+		match self.handoff.as_deref_mut() {
+			Some(Handoff::Pending(pending)) => pending.engine.delay = delay,
+			Some(Handoff::Committed(committed)) => committed.old.delay = delay,
+			None => {}
+		}
+	}
+
 	#[cfg(test)]
 	pub fn replay(mut self) -> Self {
 		self.active = self.active.replay();

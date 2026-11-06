@@ -1677,11 +1677,7 @@ where
 	/// [`Duration::ZERO`], which holds nothing and sends each frame by its decode time.
 	pub fn with_delay(mut self, delay: Duration) -> Self {
 		self.program.delay = delay;
-		self.jitter = jitter::Buffer::new(delay);
-		#[cfg(test)]
-		if self.program.replay {
-			self.jitter = jitter::Buffer::new(delay).replay();
-		}
+		self.jitter.set_delay(delay);
 		self.program.schedule.set_window(delay);
 		self
 	}

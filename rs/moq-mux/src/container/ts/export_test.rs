@@ -12519,11 +12519,13 @@ async fn changing_delay_preserves_the_running_schedule() {
 	for ms in (0..1000).step_by(20) {
 		write_aac(&mut audio, ms);
 	}
-	assert!(export.next().await.unwrap().is_some());
+	let mut all = vec![export.next().await.unwrap().unwrap()];
 	export = export.with_delay(Duration::from_secs(2));
 	audio.finish().unwrap();
 	catalog.finish().unwrap();
 	let (frames, end) = drain_to_end(&mut export).await;
 	end.unwrap();
-	assert!(!frames.is_empty());
+	all.extend(frames);
+	assert_eq!(pes_count(&all), 50);
+	assert_skip_discontinuity(&all, 0);
 }
