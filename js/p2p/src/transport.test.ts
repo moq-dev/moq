@@ -114,6 +114,34 @@ test("an accepted channel whose dialer stays silent still idles out without send
 	}
 });
 
+test("an accepted side that closes before hearing its dialer still closes gracefully at once", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const mock = peers();
+		const client = Transport.connect({ peer: mock.left.asPeer(), protocol });
+		const server = Transport.accept({
+			peer: mock.right.asPeer(),
+			channel: mock.right.incoming.asChannel(),
+			protocol,
+		});
+		// The dialer's records are lost, so the accepting side never hears it.
+		mock.left.channel.stream = false;
+		mock.left.channel.open();
+		mock.right.incoming.open();
+		await server.ready;
+		server.close({ closeCode: 7, reason: "bye" });
+		// No clock advance: the close must not wait out qmux's flush timeout.
+		expect(await client.closed).toEqual({ closeCode: 7, reason: "bye" });
+		expect(await server.closed).toEqual({ closeCode: 7, reason: "bye" });
+		await yieldNow();
+		expect(mock.right.incoming.readyState).toBe("closed");
+		expect(mock.right.incoming.listeners.size).toBe(0);
+	} finally {
+		installed.close();
+	}
+});
+
 test("close before the channel opens settles closed and rejects ready without closing the peer", async () => {
 	const { left } = peers();
 	const transport = Transport.connect({ peer: left.asPeer(), protocol });

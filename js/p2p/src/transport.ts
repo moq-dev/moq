@@ -152,6 +152,7 @@ export class Transport implements WebTransport {
 	close(info: WebTransportCloseInfo = {}) {
 		if (this.#closing) return;
 		if (this.#active) {
+			this.#socket.release();
 			this.#active.close(info);
 			this.#closing = true;
 		} else {

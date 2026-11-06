@@ -31,7 +31,7 @@ export class Channel {
 	#drain?: ReturnType<typeof Promise.withResolvers<void>>;
 	#reader?: ReadableStreamDefaultController<Uint8Array>;
 	#ended = false;
-	// Pending until an accepted channel hears its dialer, then cleared so writes skip it.
+	// Pending until an accepted channel hears its dialer or starts closing, then cleared so writes skip it.
 	#unheard?: ReturnType<typeof Promise.withResolvers<void>>;
 	#readable: ReadableStream<Uint8Array>;
 	#writable: WritableStream<Uint8Array | string>;
@@ -125,8 +125,7 @@ export class Channel {
 			return;
 		}
 		this.#reader?.enqueue(new Uint8Array(event.data));
-		this.#unheard?.resolve();
-		this.#unheard = undefined;
+		this.release();
 	};
 	#onDrain = () => {
 		this.#drain?.resolve();
@@ -176,6 +175,13 @@ export class Channel {
 		this.channel.removeEventListener("close", this.#onClose);
 		this.channel.removeEventListener("error", this.#onError);
 		this.channel.close();
+	}
+
+	/** Stop holding writes for the dialer, so a closing session can flush its close frame. */
+	release() {
+		// A send Chromium drops now loses nothing: the channel closes once the flush settles.
+		this.#unheard?.resolve();
+		this.#unheard = undefined;
 	}
 
 	close() {
