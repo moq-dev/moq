@@ -11971,8 +11971,9 @@ mod serve_tests {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for (filter, history) in [(Filter::Unfiltered, 0), (zero, 1)] {
 				let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
-				let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
+				let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
 				let track = broadcast
+					.broadcast()
 					.create_track("video", crate::track::Info::timed().with_max_age(None))
 					.unwrap();
 				for (sequence, payload) in [(0, b"history"), (1, b"latest!")] {
