@@ -395,7 +395,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 				}
 				Some(Item::Frame(frame)) => {
 					// No open group: attached mid-group, skipped a duplicate, or
-					// recovering from a lag. Wait for the next boundary, unless
+					// recovering from a lost group. Wait for the next boundary, unless
 					// nobody is left to serve it.
 					let Some(output) = &mut current else {
 						if leaving {
@@ -423,9 +423,9 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 						break 'session;
 					}
 				}
-				Some(Item::Lagged) => {
-					// Fell behind the feed: abandon the group and resume at the
-					// next boundary rather than stalling other rungs.
+				Some(Item::Lost) => {
+					// The source lost this group, or this rung fell behind the feed:
+					// abandon it and resume at the next boundary.
 					if let Some(output) = current.take() {
 						output.abort(moq_net::Error::Cancel)?;
 					}

@@ -56,6 +56,8 @@ mod allocation;
 #[cfg(feature = "aac")]
 mod aac;
 mod activity;
+#[cfg(any(feature = "bus", feature = "playback"))]
+mod comfort;
 mod error;
 mod format;
 mod frame;

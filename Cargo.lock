@@ -4566,13 +4566,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-e2ee"
-version = "0.0.11"
-dependencies = [
- "workspace-hack",
-]
-
-[[package]]
 name = "moq-ffi"
 version = "0.4.12"
 dependencies = [

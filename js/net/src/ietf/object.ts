@@ -14,6 +14,11 @@ const MAX_OBJECT_EXTENSIONS = 64 * 1024;
 const GROUP_END = 0x03;
 const END_OF_TRACK = 0x04;
 
+/** Whether `status` is an Object Status the drafts define: Normal, End of Group, or End of Track. */
+export function statusDefined(status: number): boolean {
+	return status === 0 || status === GROUP_END || status === END_OF_TRACK;
+}
+
 // MOQ Object Property ids, shared with draft-ietf-moq-loc-04. An object-scope Timescale
 // (0x08) is never applied: a track's timeline is its TIMESCALE Track Property alone.
 const PROP_TIMESTAMP = 0x10n;
