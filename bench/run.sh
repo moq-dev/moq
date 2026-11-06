@@ -816,7 +816,13 @@ build_workers() {
 # every revision. Takes the current tree's target directory and Cargo profile.
 check_uring() {
     printf 'Checking io_uring support...\n'
-    CARGO_TARGET_DIR=$1 cargo build --locked --quiet --profile "$2" -p moq-uring --no-default-features --features _probe
+    (
+        # Read just this tree's configuration, as build_workers does, so the probe
+        # lands where its workers do.
+        cd /
+        CARGO_TARGET_DIR=$1 cargo --config "$ROOT/.cargo/config.toml" build --manifest-path "$ROOT/Cargo.toml" \
+            --locked --quiet --profile "$2" -p moq-uring --no-default-features --features _probe
+    )
     if ! "$1/$2/moq-uring-probe"; then
         printf 'worker benchmarks need Linux 6.12+ with io_uring permitted by the host\n' >&2
         return 1
@@ -1054,8 +1060,9 @@ run_instructions() {
     LOAD_BIN=$generator/profiling/moq-bench
     HOST_CMD=("$LOAD_BIN" host)
     # A generator pinned before the sampler became `moq-bench host` built it as its
-    # own binary; each revision builds into its own target, so none is stale.
-    if [[ -x $generator/profiling/moq-bench-host ]]; then
+    # own binary. Only a pinned generator's sha-keyed target is free of artifacts
+    # left by an older working tree.
+    if [[ -n $GENERATOR && -x $generator/profiling/moq-bench-host ]]; then
         HOST_CMD=("$generator/profiling/moq-bench-host")
     fi
     if [[ $PROFILE_RUNTIME == io-uring-workers ]]; then

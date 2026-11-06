@@ -228,13 +228,13 @@ args = sys.argv[1:]
 profile = args[args.index('--profile') + 1]
 output = Path(os.environ['CARGO_TARGET_DIR']) / profile
 output.mkdir(parents=True, exist_ok=True)
-if '--manifest-path' in args:
-    checkout = Path(args[args.index('--manifest-path') + 1]).parent
+checkout = Path(args[args.index('--manifest-path') + 1]).parent
+if 'moq-uring' in args:
+    names = ['moq-uring-probe']
+else:
     names = ['moq-relay', 'moq-bench']
     if 'moq-bench-host' in (checkout / 'rs/moq-bench/Cargo.toml').read_text():
         names.append('moq-bench-host')
-else:
-    names = ['moq-uring-probe']
 for name in names:
     (output / name).write_text('#!/bin/sh\\nexit 0\\n')
     (output / name).chmod(0o755)
@@ -289,6 +289,19 @@ for name in names:
                 self.assertIn(f"/revisions/{generator}/profile/profiling/", load)
                 expected = load + "-host" if sampler_binary else load + " host"
                 self.assertEqual(sampler, expected)
+
+    def test_current_tree_ignores_a_stale_standalone_sampler(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, environment = self.harness(directory, sampler_binary=False)
+            # Cargo keeps a binary after its `[[bin]]` leaves the manifest.
+            stale = Path(environment["CARGO_TARGET_DIR"]) / "revisions/current/profile/profiling/moq-bench-host"
+            stale.parent.mkdir(parents=True)
+            stale.write_text("#!/bin/sh\nexit 0\n")
+            stale.chmod(0o755)
+            environment.update(BENCH_PROFILE_MODES="instructions", BENCH_RUNTIME_ROUNDS="1")
+            _, calls = self.calls(checkout, environment)
+            ((_, _, _, load, sampler),) = calls
+            self.assertEqual(sampler, load + " host")
 
 
 class Parse(unittest.TestCase):

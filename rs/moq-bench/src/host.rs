@@ -69,9 +69,11 @@ pub struct Args {
 	threads: bool,
 }
 
-/// `moq-bench host` parsed apart from the load generator, whose parser fills its
-/// fields from `MOQ_*` variables: on a relay host those are the relay's, and the
-/// sampler reads no environment.
+/// Sample the CPU, memory, and sockets of the process under test (Linux only).
+//
+// Parsed apart from the load generator, whose parser fills its fields from
+// `MOQ_*` variables: on a relay host those are the relay's, and the sampler
+// reads no environment.
 #[derive(usage_rs::Cli)]
 #[usage(name = "moq-bench host", version = env!("CARGO_PKG_VERSION"))]
 #[usage(unknown_flags = "error", args_override_self = false)]
