@@ -32,8 +32,8 @@
 //! keeps, so a per-group cost that grows with them shows as a slope over `follow`.
 //! `session_delivery_datagram` writes to a datagram track per broadcast instead of groups:
 //! one datagram per track per round across publisher and viewer axes, then larger payloads
-//! and cadences, on the lite versions (moq-transport carries no datagram tracks). Throughput
-//! counts delivered datagrams, each checked for its sequence and payload, so a lost one fails.
+//! and cadences, on moq-lite and moq-transport-22. Throughput counts delivered datagrams,
+//! each checked for its sequence and payload, so a lost one fails.
 //! Delivery uses expiry-only pools: history expires between rounds outside timing,
 //! so byte pressure cannot shed unread frames during a batch.
 //! `SESSION_EXPIRY_ONLY=1` advances the cache clock by a second instead of the 30s
@@ -209,9 +209,10 @@ impl Shape {
 		self.viewers * self.watch * self.burst
 	}
 
-	/// Whether `version` carries this shape: moq-transport has no datagram tracks.
+	/// Whether `version` carries this shape. Datagram tracks run on moq-lite and on
+	/// moq-transport-22, which maps one to OBJECT_DATAGRAM at object ID 0.
 	fn runs_on(&self, version: &str) -> bool {
-		!self.datagrams || version.parse::<Version>().unwrap().is_lite()
+		!self.datagrams || version.parse::<Version>().unwrap().is_lite() || version == "moq-transport-22"
 	}
 
 	/// The broadcasts viewer `viewer` watches: a contiguous window starting at
@@ -1039,9 +1040,10 @@ impl<B: Backend> Room<B> {
 	/// Line every viewer up on the same next sequence before the strict rounds.
 	///
 	/// A consumer is live once its track's info arrives, but on lite-05/06 the SUBSCRIBE
-	/// that carries the datagrams follows that answer, so a datagram may still miss it. Write
-	/// until every viewer has read one, then a last one each viewer reads through: the memory
-	/// transport keeps a subscription's datagrams in order, so nothing earlier arrives after.
+	/// that carries the datagrams follows that answer, so a datagram may still miss it.
+	/// moq-transport's SUBSCRIBE is that answer. Write until every viewer has read one, then
+	/// a last one each viewer reads through: the memory transport keeps a subscription's
+	/// datagrams in order, so nothing earlier arrives after.
 	async fn sync_datagrams(&mut self) {
 		let waiter = kio::Waiter::noop();
 		let mut reached = vec![false; self.shape.viewers * self.shape.watch];

@@ -19,6 +19,12 @@ How to update your code for each breaking change, newest first.
 | `Client::with_peer_hop(hop)`, `server::Handshake::with_peer_hop(hop)` | take a `NonZeroU64` |
 | `server::Handshake::peer_hop()` returns `Option<Hop>` | returns `Option<NonZeroU64>` |
 
+### Snapshots split connected sessions into idle and active
+
+`stats::Snapshot::activity()` returns each tier's `stats::Activity`: connected sessions with
+media payload moved within `Activity::WINDOW` (10 seconds) and those without. Additive; no
+migration needed.
+
 ### `track::Consumer::unmetered` reads outside any stats session
 
 `track::Consumer::unmetered()` returns the handle with its stats scope cleared, so the
@@ -41,6 +47,14 @@ live, so third-party readers and relay caches see no change.
 
 `origin::Config::route_key` takes an `origin::RouteKey`, which every lite-07 session on the origin proves to its peer in SETUP. Origins sharing a key fail over as one to a peer that scopes them; `None`, the default, proves nothing.
 A proof binds to the session through the new `poll::Session::export_keying_material`, which defaults to `None`: a transport over TLS returns its exporter, and a wrapper around another transport forwards it.
+
+### moq-transport datagram tracks
+
+Datagram tracks now work over moq-transport using SUBSCRIBE and OBJECT\_DATAGRAM.
+The sequence is the group ID and the object ID is zero. One upstream subscription
+serves both kinds of a name, including through relays. Stream and datagram
+consumers keep only their requested kind; nonzero object IDs are dropped by
+datagram consumers. No application API or wire encoding changes are required.
 
 ### Group batch operations and `poll_next_frame` are crate-private ([#7874](https://github.com/moq-dev/moq/pull/7874))
 

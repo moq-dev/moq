@@ -48,6 +48,14 @@ The fallback now grants 4 MiB per connection and 1 MiB per stream, up from
 or retain the old limits. Both accept positive safe integers, like
 `websocket.maxStreams`. `@moq/qmux`'s standalone defaults are unchanged.
 
+### moq-transport datagram tracks
+
+Datagram tracks now work over moq-transport using SUBSCRIBE and OBJECT\_DATAGRAM.
+The sequence is the group ID and the object ID is zero. One upstream subscription
+serves both kinds of a name, including through relays. Stream and datagram
+consumers keep only their requested kind; nonzero object IDs are dropped by
+datagram consumers. No application API or wire encoding changes are required.
+
 ### Datagrams use separate track types ([#7846](https://github.com/moq-dev/moq/pull/7846))
 
 Create a datagram track with `broadcast.createDatagrams(name, info)` and read it with
@@ -68,8 +76,7 @@ stream resume state and does not move to a replacement route.
 Lite-07-wip uses DATAGRAMS on stream type 0x9 and carries no Inflated Size. Lite-05/06
 keep their wire format and carry both kinds of a name on one SUBSCRIBE, without deduplication.
 Create a datagram track before or with its same-name stream track on those versions.
-Lite-01..04 and transports without datagrams refuse datagram requests. moq-transport
-currently refuses them while its separate datagram-track adapter is implemented.
+Lite-01..04 and transports without datagrams refuse datagram requests. moq-transport carries them as OBJECT\_DATAGRAM with object ID zero.
 
 ### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
 

@@ -458,8 +458,8 @@ impl Launch {
 		let datagrams = (session.max_datagram_size() != 0).then(|| Datagrams {
 			session: session.clone(),
 			subscriber: subscriber.clone(),
-			budget: kio::coop::Budget::new(32),
-			charged: false,
+			held: Vec::new(),
+			caught_up: true,
 		});
 		// Keep the session's SUBSCRIBE_NAMESPACE requests open as discovery decides, each on
 		// its own stream; with no subscribe half, ask nothing.
@@ -514,6 +514,15 @@ impl Running {
 		}
 		// Whichever side closed it, read what already arrived.
 		ready!(self.race.unis.poll_drain(waiter));
+		let _ = self.race.tasks.poll(waiter);
+		if let Some(datagrams) = &mut self.race.datagrams {
+			let _ = datagrams.poll(waiter, false);
+			if !datagrams.caught_up {
+				return Poll::Pending;
+			}
+		}
+		self.race.subscriber.datagrams_routed();
+		let _ = self.race.tasks.poll(waiter);
 		let res = self.ending.take().expect("draining an ended session");
 		// Closed cleanly by dropping or draining: readers see what the peer's clean
 		// close would have shown them.
@@ -577,7 +586,7 @@ impl Race {
 		if let Poll::Ready(err) = poll_failed(&mut self.dispatch, |dispatch| dispatch.poll(waiter).map(Err)) {
 			return Poll::Ready(Err(err));
 		}
-		if let Poll::Ready(err) = poll_failed(&mut self.datagrams, |datagrams| datagrams.poll(waiter)) {
+		if let Poll::Ready(err) = poll_failed(&mut self.datagrams, |datagrams| datagrams.poll(waiter, true)) {
 			return Poll::Ready(Err(err));
 		}
 		if let Poll::Ready(err) = poll_failed(&mut self.goaway, |goaway| {
@@ -603,6 +612,12 @@ impl Race {
 		}
 		if let Poll::Ready(err) = poll_failed(&mut self.publish_namespaces, |publish| publish.poll(waiter)) {
 			return Poll::Ready(Err(err));
+		}
+		if let Poll::Ready(err) = poll_failed(&mut self.datagrams, |datagrams| datagrams.poll(waiter, false)) {
+			return Poll::Ready(Err(err));
+		}
+		if self.datagrams.as_ref().is_none_or(|datagrams| datagrams.caught_up) {
+			self.subscriber.datagrams_routed();
 		}
 		Poll::Pending
 	}
@@ -1354,23 +1369,46 @@ fn died_before_header(err: &Error) -> bool {
 struct Datagrams {
 	session: Transport,
 	subscriber: Subscriber,
-	/// A peer keeping datagrams ready must not hold the session's other tasks.
-	budget: kio::coop::Budget,
-	/// This pass of the budget is spent, waiting for the next datagram.
-	charged: bool,
+	/// Unknown aliases held before the source machines run: at most one receive budget.
+	held: Vec<bytes::Bytes>,
+	/// Whether the receive pass read the queue empty rather than yielding to its budget.
+	caught_up: bool,
 }
 
 impl Datagrams {
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		loop {
-			if !self.charged {
-				ready!(self.budget.poll_yield(waiter));
-				self.charged = true;
+	fn poll(&mut self, waiter: &kio::Waiter, hold: bool) -> Poll<Result<(), Error>> {
+		if !hold {
+			for payload in std::mem::take(&mut self.held) {
+				self.route(payload, false)?;
 			}
-			let payload = ready!(self.session.poll_recv_datagram(waiter)).map_err(Error::from_transport)?;
-			self.charged = false;
-			self.subscriber.recv_datagram(payload)?;
 		}
+		let mut budget = kio::coop::Budget::new(32);
+		loop {
+			self.caught_up = false;
+			ready!(budget.poll_yield(waiter));
+			self.caught_up = true;
+			let payload = match ready!(self.session.poll_recv_datagram(waiter)) {
+				Ok(payload) => payload,
+				Err(err) => {
+					for payload in std::mem::take(&mut self.held) {
+						self.route(payload, false)?;
+					}
+					return Poll::Ready(Err(Error::from_transport(err)));
+				}
+			};
+			self.route(payload, hold)?;
+		}
+	}
+
+	fn route(&mut self, payload: bytes::Bytes, hold: bool) -> Result<(), Error> {
+		if let Some(alias) = self.subscriber.recv_datagram(payload.clone())? {
+			if hold {
+				self.held.push(payload);
+			} else {
+				tracing::debug!(alias, "dropping a datagram for an unknown alias");
+			}
+		}
+		Ok(())
 	}
 }
 

@@ -1049,6 +1049,19 @@ test("regressions", async () => {
 			],
 			finish: false,
 		},
+		// A switch's backfill of a group the finished route never had lets the track end.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "up", instance: 1, slot: 2 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "write", instance: 1, slot: 1, group: 11, frames: 1 },
+				{ kind: "write", instance: 1, slot: 2, group: 1, frames: 1 },
+				{ kind: "down", instance: 1, slot: 2 },
+				{ kind: "end", instance: 1, slot: 1 },
+			],
+			finish: false,
+		},
 	];
 	const failures: string[] = [];
 	for (const [i, c] of regressions.entries()) {
