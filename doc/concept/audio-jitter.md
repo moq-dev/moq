@@ -733,3 +733,54 @@ cooldown, fast-mode bypass, linked stereo, passive noise, rejected active
 noise, and 8/44.1/48 kHz seams. Both implementations consume these exact
 vectors; generating expected output from the implementation under test is
 not conformance.
+
+## Comfort noise
+
+A [declared silence](#declared-silence) is not an underrun. A receiver whose
+playback runs dry at a declared end counts no underrun or stall, and fills the
+silence with comfort noise instead of plain silence, so a muted talker's
+background carries on rather than the line going dead. It keeps doing so
+through the refill before the next utterance plays.
+
+The publisher sends nothing while muted, so the level is measured from what the
+receiver itself played since playback last resumed:
+
+```
+played(samples):                  # audio just played, not comfort noise or startup padding
+    if filling: filling = false; quietest = infinity; sum = 0; frames = 0
+    for each frame:
+        sum += every channel's sample squared
+        frames += 1
+        if frames == BLOCK:
+            quietest = min(quietest, sum / (BLOCK * channels))
+            sum = 0; frames = 0
+
+fill(samples):
+    if not filling:
+        filling = true
+        if quietest is finite: level = min(sqrt(quietest), COMFORT_MAX)
+    each sample = uniform(-1, 1) * level * sqrt(3)
+```
+
+`BLOCK` is 20 ms at the output rate, rounded, and blocks count from the first
+frame played after a silence. `COMFORT_MAX` is 0.001 RMS, -60 dBFS: audio that
+never falls quiet, such as music, would otherwise fill a pause with noise as
+loud as itself. `level` starts at 0, so a source that was already silent, such
+as a noise-suppressed microphone, gets none, and a silence after too little
+audio to fill one block keeps the previous level. Uniform noise on `[-a, a]`
+has an RMS of `a / sqrt(3)`, so the noise sits at `level`. Sums are `f64` in
+the order written; the noise itself is not part of conformance.
+
+Decoded audio stops a codec's pre-skip short of the declared end when the
+publisher leaves its encoder's lookahead unflushed, so the browser's ring takes
+the end that early. Natively, `moq play` declares the end on the playback sink
+when it reads the marker, and the stopped encoder's final frames that follow
+the marker still play before the silence.
+
+### Comfort corpus
+
+`audio-jitter/comfort/corpus.json` holds cases of constant runs played, each
+followed by the level the next silence must fill at, within 1e-9. It covers the
+quietest block rather than the last, blocks straddling a level change, a stereo
+mean, the -60 dBFS cap, an already silent source, and a silence that keeps or
+remeasures the level.
