@@ -1460,6 +1460,7 @@ impl Reader {
 			out: Some(out),
 			logical: None,
 			fetch: None,
+			recovering: false,
 		})
 	}
 
@@ -2001,6 +2002,8 @@ pub(super) struct Recover {
 	logical: Option<kio::Consumer<track::TrackState>>,
 	/// A fetch of the rest of the group from the serving route, by its generation.
 	fetch: Option<(u64, Fetch)>,
+	/// A recovery started and has not ended, so its events are logged once each.
+	recovering: bool,
 }
 
 enum Fetch {
@@ -2022,8 +2025,9 @@ impl Clone for Recover {
 			lease: self.lease.clone(),
 			out: self.out.clone(),
 			logical: self.logical.clone(),
-			// A clone reads in parallel, so it asks for itself.
+			// A clone reads in parallel, so it asks and logs for itself.
 			fetch: None,
+			recovering: false,
 		}
 	}
 }
@@ -2050,6 +2054,46 @@ impl Recover {
 			self.generation = route.generation;
 		}
 		false
+	}
+
+	/// Log, once per recovery, that the read at frame `index` looks past its copy: `failed`
+	/// is the copy's error, or `None` for a stall while a newer route serves.
+	pub(super) fn recovering(&mut self, index: usize, failed: Option<&Error>) {
+		if std::mem::replace(&mut self.recovering, true) {
+			return;
+		}
+		tracing::debug!(
+			broadcast = %self.copy.broadcast().path,
+			track = self.copy.name(),
+			group = self.sequence,
+			frame = index,
+			cause = failed.map_or_else(|| "stalled behind a newer route".to_owned(), ToString::to_string),
+			fetch = self.reader.is_none(),
+			read_generation = self.generation,
+			serving_generation = self.route.consumer().read().generation,
+			"group read recovering",
+		);
+	}
+
+	/// The read went on without a replacement: its copy answered after all.
+	pub(super) fn resumed(&mut self) {
+		self.recovering = false;
+	}
+
+	/// Log the error a recovery ended the read with, which may differ from its cause.
+	pub(super) fn failed(&mut self, index: usize, err: &Error) {
+		if std::mem::take(&mut self.recovering) {
+			tracing::debug!(
+				broadcast = %self.copy.broadcast().path,
+				track = self.copy.name(),
+				group = self.sequence,
+				frame = index,
+				%err,
+				read_generation = self.generation,
+				serving_generation = self.route.consumer().read().generation,
+				"group read recovery failed",
+			);
+		}
 	}
 
 	/// Whether the copy being read failed delivering the group rather than judging it, so
@@ -2322,6 +2366,17 @@ impl Recover {
 
 	/// Commit the replacement only once the caller has acquired its cursor or frame.
 	pub(super) fn adopt(&mut self, replacement: &Replacement) {
+		if std::mem::take(&mut self.recovering) {
+			tracing::debug!(
+				broadcast = %self.copy.broadcast().path,
+				track = self.copy.name(),
+				group = self.sequence,
+				frame = replacement.group.index(),
+				read_generation = self.generation,
+				adopted_generation = replacement.generation,
+				"group read recovered",
+			);
+		}
 		self.generation = replacement.generation;
 		// The generation moved without `wants` seeing it ready, so it judges the new one.
 		self.route.reset();
@@ -2516,6 +2571,7 @@ impl kio::Task for Fetching {
 						out: None,
 						logical: Some(self.logical.clone()),
 						fetch: None,
+						recovering: false,
 					})))
 				}
 				// The route failed: ask the next one, unless none will come. Kept as the answer,
@@ -3411,6 +3467,79 @@ mod test {
 				"fails={fails}, abort={abort}: {res:?}"
 			);
 		}
+	}
+
+	/// A recovery logs its cause and route generations once when it starts, however often the
+	/// read parks, then the copy it adopted or the error it ended the read with.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_recovery_logs_its_start_and_outcome() {
+		let events = |message: &str, events: &[String]| {
+			events
+				.iter()
+				.filter(|event| event.contains(&format!("message={message} ")))
+				.cloned()
+				.collect::<Vec<_>>()
+		};
+
+		// A stall while a newer route serves, which the replacement continues.
+		let logs = crate::test_tracing::capture(tracing::Level::DEBUG, || {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(10));
+			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			open.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+			let b = copy();
+			routes.serve(b.consume());
+			for _ in 0..3 {
+				assert!(reading.read_frame().now_or_never().is_none());
+			}
+			let mut whole = b.create_group(group::Info { sequence: 0 }).unwrap();
+			for (ms, frame) in [(0, b"a"), (1, b"b")] {
+				whole.write_frame(ts(ms), frame.as_ref()).unwrap();
+			}
+			assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+		});
+		let [start] = events("group read recovering", &logs).try_into().unwrap();
+		assert!(start.contains("group=0 frame=1 "), "{start}");
+		assert!(start.contains("cause=\"stalled behind a newer route\""), "{start}");
+		assert!(start.contains("read_generation=1 serving_generation=2 "), "{start}");
+		let [end] = events("group read recovered", &logs).try_into().unwrap();
+		assert!(end.contains("read_generation=1 adopted_generation=2 "), "{end}");
+		assert!(events("group read recovery failed", &logs).is_empty());
+
+		// A failed copy whose replacement route then gives the group up.
+		let logs = crate::test_tracing::capture(tracing::Level::DEBUG, || {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(10));
+			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			open.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+			a.clone().abort(Error::Dropped).unwrap();
+
+			let b = copy();
+			routes.serve(b.consume());
+			assert!(reading.read_frame().now_or_never().is_none());
+			b.abort(Error::Stream(StreamError::App(5))).unwrap();
+			assert!(reading.read_frame().now_or_never().unwrap().is_err());
+		});
+		let [start] = events("group read recovering", &logs).try_into().unwrap();
+		assert!(start.contains(&format!("cause=\"{}\"", Error::Dropped)), "{start}");
+		let [end] = events("group read recovery failed", &logs).try_into().unwrap();
+		assert!(
+			end.contains(&format!("err={} ", Error::Stream(StreamError::App(5)))),
+			"{end}"
+		);
+		assert!(events("group read recovered", &logs).is_empty());
 	}
 
 	/// A fetch the serving route already answered continues the group, even when that route
