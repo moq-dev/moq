@@ -172,7 +172,7 @@ impl FlowsState {
 }
 
 impl Flows {
-	/// Route `datagram` from `remote`: a pin wins, otherwise its [`Class`] decides.
+	/// Route `datagram` from `remote`: a pin wins, otherwise its first byte decides.
 	pub fn route(&self, remote: SocketAddr, datagram: &[u8]) -> Route {
 		if self.is_pinned(remote) {
 			return Route::WebRtc;
