@@ -36,6 +36,5 @@ Public API: none expected. Wire: none, unless the decision below picks a receive
 
 ## Related
 
-- [One page-wide getStats sampling ticker](/quest/m2/probe/stats-ticker.md) - shares the `getStats()` sampling this reads
 - [Padding probes](/quest/m2/probe/padding.md) - raises the estimate once one exists
 - [Media stats](/quest/m3/stats/README.md) - its JS stats read PROBE for the downlink
