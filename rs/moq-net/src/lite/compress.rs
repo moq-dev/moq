@@ -99,6 +99,11 @@ impl AnnounceDecoder {
 		Ok((previous, suffix))
 	}
 
+	/// The id the last start or takeover assigned.
+	pub fn last(&self) -> u64 {
+		self.live.next.saturating_sub(1)
+	}
+
 	/// The suffix of the live id an ANNOUNCE_UPDATE or ANNOUNCE_RESTART names, which
 	/// stays live.
 	pub fn get(&self, id: u64) -> Result<Path, Error> {

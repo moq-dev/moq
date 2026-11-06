@@ -619,16 +619,12 @@ impl RouteInfo {
 		self
 	}
 
-	/// The origin node a route-layer route serves; see [`Self::node`].
+	/// The origin node a route-layer route serves, which a request resolved through it
+	/// names to the next hop.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn with_node(mut self, node: Option<u64>) -> Self {
 		self.node = node;
 		self
-	}
-
-	/// The origin node serving this route, when the route layer selected it.
-	pub(crate) fn node(&self) -> Option<u64> {
-		self.node
 	}
 
 	/// Whether this route passed through an anonymous hop.
@@ -831,7 +827,15 @@ type RouteOrder = (Reverse<Preference>, bool, Cost, bool, usize, (u64, u64), Rev
 
 /// The `(hops, cost, source, instance, epoch, auth, node)` metadata an announce cursor delivers
 /// alongside a prefix.
-type RouteMeta = (Hops, Cost, Source, Instance, u64, Option<crate::auth::Credential>, Option<u64>);
+type RouteMeta = (
+	Hops,
+	Cost,
+	Source,
+	Instance,
+	u64,
+	Option<crate::auth::Credential>,
+	Option<u64>,
+);
 
 /// The earlier of two optional deadlines.
 fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
@@ -2241,6 +2245,9 @@ pub struct Producer {
 	// The rank of that link; see [`Self::with_preference`].
 	preference: Preference,
 
+	// Whether the consumers taken from this handle proxy; see [`Self::with_proxy`].
+	proxy: bool,
+
 	// Submission handle to the origin's [`Driver`]: source watchers, fronts, and
 	// serve tasks queued here run when the driver is polled. Closed once the
 	// driver drops, which is what makes later mutations fail with `Closed`.
@@ -2284,6 +2291,7 @@ impl Producer {
 			stats: stats::Session::default(),
 			link: Link::Local,
 			preference: Preference::default(),
+			proxy: false,
 			tasks,
 			timers: timers.clone(),
 			frames: Default::default(),
@@ -2346,6 +2354,14 @@ impl Producer {
 	/// the next.
 	pub fn with_preference(mut self, preference: Preference) -> Self {
 		self.preference = preference;
+		self
+	}
+
+	/// Whether a moq-lite-07 session publishing through a consumer of this handle (and
+	/// of any handle derived from it) carries its peer's traffic to other origins; see
+	/// [`Consumer::with_proxy`], which overrides it for one consumer.
+	pub fn with_proxy(mut self, proxy: bool) -> Self {
+		self.proxy = proxy;
 		self
 	}
 
@@ -2418,6 +2434,7 @@ impl Producer {
 			stats: stats::Session::default(),
 			link: Link::Local,
 			preference: Preference::default(),
+			proxy: false,
 			tasks,
 			timers: Deadlines::new(Instant::ZERO),
 			frames: Default::default(),
@@ -2769,6 +2786,7 @@ impl Producer {
 			stats: self.stats.clone(),
 			link: self.link,
 			preference: self.preference,
+			proxy: self.proxy,
 			tasks: self.tasks.clone(),
 			timers: self.timers.clone(),
 			frames: self.frames.clone(),
@@ -3564,23 +3582,39 @@ impl kio::Task for OwnClaims {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		while let Some(event) = ready!(self.routes.poll_next(waiter)) {
-			match event {
-				RouteEvent::Start(announce)
-				| RouteEvent::Update(announce)
-				| RouteEvent::Restart(announce)
-				| RouteEvent::Takeover { announce, .. } => {
-					let route = announce.route;
-					let claim = route.instance.map(|instance| crate::route::Claim {
-						instance,
-						epoch: route.epoch,
-						cost: route.cost.value(),
-					});
-					self.node.own(announce.prefix, claim);
-				}
-				RouteEvent::End(announce) => self.node.own(announce.prefix, None),
-			}
+			self.apply(event);
 		}
 		Poll::Ready(())
+	}
+}
+
+impl OwnClaims {
+	/// Feed the node the routes the table already holds, so a stream answered before
+	/// the driver next runs sees them.
+	fn new(routes: Routes, node: crate::route::Node) -> Self {
+		let mut own = Self { routes, node };
+		while let Some(event) = own.routes.try_next() {
+			own.apply(event);
+		}
+		own
+	}
+
+	fn apply(&self, event: RouteEvent) {
+		match event {
+			RouteEvent::Start(announce)
+			| RouteEvent::Update(announce)
+			| RouteEvent::Restart(announce)
+			| RouteEvent::Takeover { announce, .. } => {
+				let route = announce.route;
+				let claim = route.instance.map(|instance| crate::route::node::Claim {
+					instance,
+					epoch: route.epoch,
+					cost: route.cost.value(),
+				});
+				self.node.own(announce.prefix, claim);
+			}
+			RouteEvent::End(announce) => self.node.own(announce.prefix, None),
+		}
 	}
 }
 
@@ -7000,6 +7034,10 @@ pub struct Consumer {
 	// for a session serving its peer (see `Self::serving`).
 	interested: bool,
 
+	// Whether a lite-07 session publishing through this handle sends its peer the
+	// routes this node learned from other peers (see `Self::with_proxy`).
+	proxy: bool,
+
 	// The cache policy remote fronts inherit, mirroring what
 	// `route` gives a local front.
 	pool: cache::Pool,
@@ -7031,6 +7069,7 @@ impl Consumer {
 			hidden: Hidden::default(),
 			covering: false,
 			interested: true,
+			proxy: producer.proxy,
 			pool: producer.pool.clone(),
 			cache_duration: producer.cache_duration,
 			tasks: producer.tasks.downgrade(),
@@ -7085,12 +7124,59 @@ impl Consumer {
 			covering: false,
 			..self.clone()
 		}
-		.with_hidden(true);
-		self.tasks.push(OwnClaims {
-			routes: own.routes(),
-			node: node.clone(),
-		});
+		.with_hidden(true)
+		// Feeding the node is no reason to ask any peer about anything.
+		.serving();
+		self.tasks.push(OwnClaims::new(own.routes(), node.clone()));
 		node
+	}
+
+	/// Whether a moq-lite-07 session publishing through this handle (and any handle
+	/// derived from it) carries its peer's traffic to other origins: off, the peer is
+	/// sent only the routes to this node's own claims; on, the routes it learned from
+	/// other peers too.
+	///
+	/// A relay turns it on for every session. An application publishing its own
+	/// broadcasts leaves it off, so a peer never routes through it to reach anyone
+	/// else. Older versions advertise everything either way, since their hop chains
+	/// cannot tell this node's claims from what it forwards.
+	pub fn with_proxy(mut self, proxy: bool) -> Self {
+		self.proxy = proxy;
+		self
+	}
+
+	/// Whether this handle carries its peer's traffic to other origins; see
+	/// [`Self::with_proxy`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn proxy(&self) -> bool {
+		self.proxy
+	}
+
+	/// Whether the reader of this handle is an upstream peer, which is never sent a
+	/// route learned from another upstream.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn upstream(&self) -> bool {
+		self.horizon.upstream
+	}
+
+	/// Whether this handle reaches the absolute `path` as the origin keys it: in its
+	/// scope, and not under a mount, which resolves elsewhere.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn reaches(&self, path: &Path) -> bool {
+		self.scope.mount(path).is_none() && self.scope.permits(path)
+	}
+
+	/// Whether this handle reaches every path at or beneath the absolute `prefix`,
+	/// judged pattern by pattern, so a `false` may be spurious but a `true` never is.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn covers(&self, prefix: &Path) -> bool {
+		let Ok(subtree) = Pattern::subtree(prefix.as_str()) else {
+			return false;
+		};
+		let overlaps = |other: &Path| other.has_prefix(prefix) || prefix.has_prefix(other);
+		self.scope.allowed.contains(&subtree)
+			&& !self.scope.excluded.iter().any(overlaps)
+			&& !self.scope.mounts.iter().any(|mount| overlaps(&mount.at))
 	}
 
 	/// A clone that sees only the routes `node` admits: a request naming an origin

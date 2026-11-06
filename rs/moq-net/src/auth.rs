@@ -1267,6 +1267,12 @@ impl Link {
 		Poll::Ready(link.permit(direction))
 	}
 
+	/// What `direction` allows right now.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn permit(&self, direction: Direction) -> Permit {
+		self.read(|link, _| link.permit(direction))
+	}
+
 	/// The limit once it may have changed since `epoch` last saw it, advancing `epoch`.
 	pub(crate) fn poll_limit(&self, epoch: &mut u64, waiter: &kio::Waiter) -> Poll<Option<Grant>> {
 		let state = ready_or!(self.poll_epoch(*epoch, waiter));

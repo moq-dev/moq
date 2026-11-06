@@ -22,6 +22,7 @@ use kio::Lock;
 
 mod fills;
 use fills::{FillAsk, RangeFills};
+mod routed;
 
 pub(super) struct SubscriberConfig {
 	pub runtime: crate::time::Deadlines,
@@ -503,6 +504,9 @@ impl Subscriber {
 		announce: lite::AnnounceBroadcast,
 		run: &mut PrefixRun,
 	) -> Result<(), Error> {
+		if let Some(routed) = &mut run.routed {
+			return routed.receive(prefix, announce, &mut run.decoder);
+		}
 		match announce {
 			lite::AnnounceBroadcast::Active {
 				suffix,
@@ -622,8 +626,7 @@ impl Subscriber {
 				)?;
 			}
 			lite::AnnounceBroadcast::Skipped | lite::AnnounceBroadcast::Synced => {}
-			// Nothing drives the route layer on this stream yet, so a peer relying on it
-			// cannot be served.
+			// Only lite-07 carries the route layer, which `routed` handles above.
 			lite::AnnounceBroadcast::RouteStart { .. }
 			| lite::AnnounceBroadcast::RouteUpdate { .. }
 			| lite::AnnounceBroadcast::RouteHold { .. }
@@ -2120,6 +2123,8 @@ struct PrefixRun {
 	/// Lite05+: the ANNOUNCE_STARTs of the initial set still to read. Anything else
 	/// before them, or the stream ending, cuts the counted set short.
 	initial: u64,
+	/// Lite-07: the route layer the stream feeds in place of `announced`.
+	routed: Option<routed::Routed>,
 }
 
 #[kio::machine(self.state: PrefixState)]
@@ -2195,7 +2200,18 @@ impl AnnouncePrefix {
 		};
 
 		// Waiting for the link cost (may block on the peer's SETUP).
-		let link_cost = wait!(Cost => self.subscriber.poll_link_cost(waiter));
+		let link_cost: u64 = wait!(Cost => self.subscriber.poll_link_cost(waiter));
+		// Lite-07: a scoped peer's routes file under the route key its SETUP proved, so
+		// that waits for the SETUP. An unscoped peer's identities file as they are.
+		let scoped: bool = version.has_routes()
+			&& (self.subscriber.auth)
+				.permit(crate::auth::Direction::Subscribe)
+				.regions()
+				.is_some();
+		wait!(RouteKey => match scoped {
+			true => self.subscriber.peer_setup.poll_route_key(waiter).map(|_| ()),
+			false => Poll::Ready(()),
+		});
 		let mut run: PrefixRun = PrefixRun {
 			responder_origin,
 			link_cost,
@@ -2203,6 +2219,13 @@ impl AnnouncePrefix {
 			decoder: lite::AnnounceDecoder::default(),
 			auth_epoch: 0,
 			initial,
+			routed: match version.has_routes() {
+				true => {
+					let permit = self.subscriber.auth.permit(crate::auth::Direction::Subscribe);
+					Some(routed::Routed::new(&self.subscriber, &self.prefix, link_cost, &permit)?)
+				}
+				false => None,
+			},
 		};
 
 		// Lite01/02 send the initial set as one ANNOUNCE_INIT message, so they
@@ -2246,6 +2269,9 @@ impl AnnouncePrefix {
 			// since the signal stays set.
 			if self.subscriber.going_away.poll(waiter).is_ready() {
 				run.announced.drain();
+				if let Some(routed) = &mut run.routed {
+					routed.goaway(&self.subscriber);
+				}
 			}
 			// A new limit holds back what the peer may no longer publish to us,
 			// and brings back what it may again. The peer still holds each
@@ -2256,6 +2282,9 @@ impl AnnouncePrefix {
 					.poll_permit(crate::auth::Direction::Subscribe, &mut run.auth_epoch, waiter)
 			{
 				run.announced.limit(&permit, &self.subscriber);
+				if let Some(routed) = &mut run.routed {
+					routed.limit(&self.subscriber, &permit)?;
+				}
 			}
 			// Each announce routes into the origin, so a peer streaming them must not hold
 			// the session's other tasks. A yield has woken the task, and this arm always
@@ -2265,6 +2294,11 @@ impl AnnouncePrefix {
 				match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(waiter) {
 					Poll::Ready(Ok(Some(announce))) => {
 						if matches!(announce, lite::AnnounceBroadcast::Synced) {
+							// What the initial set put in the node is served before the
+							// snapshot lets readers see the origin synced.
+							if let Some(routed) = &mut run.routed {
+								routed.outputs(&self.subscriber);
+							}
 							if self.snapshot.take().is_none() {
 								return Poll::Ready(Err(Error::ProtocolViolation));
 							}
@@ -2304,6 +2338,9 @@ impl AnnouncePrefix {
 			// Serve the routes whose request queue woke, including any attached
 			// above. Each route parks on its own waker, so the rest cost nothing.
 			run.announced.poll_serve(&self.subscriber, waiter);
+			if let Some(routed) = &mut run.routed {
+				routed.poll(&self.subscriber, &mut stream.writer, waiter)?;
+			}
 			Poll::Pending
 		}))
 	}
@@ -2314,6 +2351,8 @@ struct MintedSource {
 	path: Path,
 	/// The instance the route announced, asked for on every request.
 	instance: Option<crate::Instance>,
+	/// The origin node every request names (lite-07), or 0.
+	node: u64,
 	source: crate::model::broadcast::SourceGuard,
 	/// The source's track handler, registered before its requester could ask for a track.
 	dynamic: crate::broadcast::Requests,
@@ -2331,6 +2370,7 @@ struct SourceServe {
 	subscriber: Subscriber,
 	path: Path,
 	instance: Option<crate::Instance>,
+	node: u64,
 	source: crate::model::broadcast::SourceGuard,
 	dynamic: crate::broadcast::Requests,
 	route: kio::Consumer<()>,
@@ -2415,7 +2455,7 @@ impl TracksRecv {
 				stream.writer.buffer(&lite::Tracks {
 					broadcast: source.path.clone(),
 					instance: source.instance.clone(),
-					node: 0,
+					node: source.node,
 				})?;
 				self.stream.insert(stream)
 			}
@@ -2480,6 +2520,7 @@ impl SourceServe {
 			subscriber,
 			path: minted.path,
 			instance: minted.instance,
+			node: minted.node,
 			source: minted.source,
 			datagram_requests: minted.dynamic.datagrams(),
 			dynamic: minted.dynamic,
@@ -2575,7 +2616,7 @@ impl kio::Task for SourceServe {
 				let serve = DatagramServe::new(
 					self.subscriber.clone(),
 					self.path.clone(),
-					self.instance.clone(),
+					(self.instance.clone(), self.node),
 					self.dynamic.validity().clone(),
 					self.source.consume(),
 					request,
@@ -2593,6 +2634,7 @@ impl kio::Task for SourceServe {
 						subscriber: self.subscriber.clone(),
 						path: self.path.clone(),
 						instance: self.instance.clone(),
+						node: self.node,
 						name: request.name().to_string(),
 					};
 					// One machine per track serves its lone subscription and any number
@@ -2644,6 +2686,7 @@ struct DatagramServe {
 	subscriber: Subscriber,
 	path: Path,
 	instance: Option<crate::Instance>,
+	node: u64,
 	validity: crate::model::broadcast::RequestValidity,
 	// A dedicated close-watch handle.
 	closed: Transport,
@@ -2706,7 +2749,7 @@ impl DatagramServe {
 	fn new(
 		subscriber: Subscriber,
 		path: Path,
-		instance: Option<crate::Instance>,
+		(instance, node): (Option<crate::Instance>, u64),
 		validity: crate::model::broadcast::RequestValidity,
 		source: crate::broadcast::Consumer,
 		request: datagram::Request,
@@ -2720,6 +2763,7 @@ impl DatagramServe {
 			subscriber,
 			path,
 			instance,
+			node,
 			validity,
 			id,
 			source: Some(source),
@@ -2819,7 +2863,7 @@ impl DatagramServe {
 						id: self.id,
 						broadcast: self.path.clone(),
 						instance: self.instance.clone(),
-						node: 0,
+						node: self.node,
 						track: request.name().to_string().into(),
 						priority,
 					})?;
@@ -4869,6 +4913,7 @@ mod tests {
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
+				node: 0,
 				name: "video".to_string(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -4933,6 +4978,7 @@ mod tests {
 			subscriber,
 			path: Path::from_static("room"),
 			instance: None,
+			node: 0,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -5039,6 +5085,7 @@ mod tests {
 			subscriber,
 			path: Path::from_static("room"),
 			instance: None,
+			node: 0,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -5111,6 +5158,7 @@ mod tests {
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
+				node: 0,
 				name: "video".to_string(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -5185,6 +5233,7 @@ mod tests {
 			subscriber,
 			path: Path::from_static("room"),
 			instance: None,
+			node: 0,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -5301,6 +5350,7 @@ mod tests {
 			subscriber,
 			path: Path::from_static("room"),
 			instance: None,
+			node: 0,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -5373,6 +5423,7 @@ mod tests {
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
+				node: 0,
 				name: "video".to_string(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -5550,6 +5601,7 @@ mod tests {
 				subscriber: subscriber.clone(),
 				path: Path::from_static("room"),
 				instance: None,
+				node: 0,
 				name: "video".to_string(),
 			},
 			request,
@@ -5622,6 +5674,7 @@ mod tests {
 					subscriber,
 					path: Path::from_static("room"),
 					instance: None,
+					node: 0,
 					name: "video".into(),
 				};
 				let info = track::Info::default().with_timescale(None);
@@ -5696,6 +5749,7 @@ mod tests {
 					subscriber,
 					path: Path::from_static("room"),
 					instance: None,
+					node: 0,
 					name: "video".to_string(),
 				},
 				request,
@@ -5749,6 +5803,7 @@ mod tests {
 			subscriber: subscriber.clone(),
 			path: Path::from_static("room"),
 			instance: None,
+			node: 0,
 			name: "video".to_string(),
 		};
 		(waiting, TrackServeRun::new(serve, request))
@@ -6083,6 +6138,7 @@ mod tests {
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
+				node: 0,
 				name: "video".to_string(),
 			},
 			request,
@@ -6131,6 +6187,7 @@ mod tests {
 			MintedSource {
 				path: Path::from_static("room"),
 				instance: None,
+				node: 0,
 				source: crate::model::broadcast::SourceGuard::new(broadcast),
 				dynamic,
 				route: route.consume(),
@@ -6284,6 +6341,7 @@ mod tests {
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
+				node: 0,
 				name: "video".to_string(),
 			},
 			request,
@@ -6336,6 +6394,7 @@ mod tests {
 			subscriber,
 			path: Path::from_static("room/host"),
 			instance: None,
+			node: 0,
 			name: "catalog.json".to_string(),
 		};
 
@@ -6404,6 +6463,7 @@ mod tests {
 			subscriber,
 			path: Path::from_static("room/host"),
 			instance: None,
+			node: 0,
 			name: "audio".to_string(),
 		};
 
@@ -6480,6 +6540,7 @@ mod tests {
 					subscriber,
 					path: Path::from_static("room/host"),
 					instance: None,
+					node: 0,
 					name: "catalog.json".to_string(),
 				},
 				session,
@@ -6555,6 +6616,7 @@ mod tests {
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
+				node: 0,
 				name: "video".into(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -6628,6 +6690,7 @@ mod tests {
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
+				node: 0,
 				name: "video".into(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -8793,47 +8856,13 @@ impl Announced {
 	/// path, answer the requester with its consumer, and hand the source to the
 	/// driver's serve machines, which own it from then on.
 	fn poll_serve(&mut self, subscriber: &Subscriber, waiter: &kio::Waiter) {
-		let root = subscriber.origin.root();
 		while let Poll::Ready(Ok(path)) = self.ready.poll_pop(waiter) {
 			// A route retired since it woke has nothing left to serve.
 			let Some(Held::Attached(entry)) = self.routes.get_mut(&path) else {
 				continue;
 			};
-			// Cleared before polling, so a request landing mid-pass queues the route again.
-			entry.wake.popped();
-			let cx = std::task::Context::from_waker(&entry.waker);
-			let route_waiter = entry.park.hold(&cx);
-			while let Poll::Ready(Some(request)) = entry.dynamic.poll_requested(route_waiter) {
-				// The request path is absolute; the wire (and our origin handle)
-				// speak paths relative to the session's root.
-				let Some(path) = request.path().strip_prefix(root) else {
-					// Outside our root: nothing we could name on the wire.
-					continue;
-				};
-				let path = path.clone();
-				// A request naming the instance reaches only that stream, so only a source on
-				// a wire that cannot name one must stop once the peer no longer selects what
-				// minted it.
-				let validity = if subscriber.version.has_instance() {
-					Default::default()
-				} else {
-					crate::model::broadcast::RequestValidity::for_source(&entry.dynamic, request.path())
-				};
-				let source = subscriber.origin.create_source(path.clone(), validity);
-				// The handler exists before the requester sees the source, so a track it
-				// asks for before the serve machine first runs queues instead of failing
-				// `NotFound`. Accepted before the push, so the requester holds the source
-				// before its serve machine can see it unheld.
-				let dynamic = source.requests();
-				request.serve(&source);
-				let _ = subscriber.sources.try_push(MintedSource {
-					path,
-					instance: entry.route.instance.clone(),
-					source: crate::model::broadcast::SourceGuard::new(source),
-					dynamic,
-					route: entry.live.consume(),
-				});
-			}
+			// No origin node to name before lite-07.
+			mint_sources(subscriber, entry, 0);
 		}
 	}
 
@@ -8879,10 +8908,54 @@ impl Announced {
 	}
 }
 
+/// Serve the queued requests on a route whose queue woke: mint a source per requested
+/// path, answer the requester with its consumer, and hand the source to the driver's
+/// serve machines. Every request through it names the origin node `node` (lite-07; 0
+/// lets the peer select).
+fn mint_sources<K: Clone + Send + Sync + 'static>(subscriber: &Subscriber, entry: &mut AnnouncedRoute<K>, node: u64) {
+	let root = subscriber.origin.root();
+	// Cleared before polling, so a request landing mid-pass queues the route again.
+	entry.wake.popped();
+	let cx = std::task::Context::from_waker(&entry.waker);
+	let route_waiter = entry.park.hold(&cx);
+	while let Poll::Ready(Some(request)) = entry.dynamic.poll_requested(route_waiter) {
+		// The request path is absolute; the wire (and our origin handle)
+		// speak paths relative to the session's root.
+		let Some(path) = request.path().strip_prefix(root) else {
+			// Outside our root: nothing we could name on the wire.
+			continue;
+		};
+		let path = path.clone();
+		// A request naming the instance reaches only that stream, so only a source on
+		// a wire that cannot name one must stop once the peer no longer selects what
+		// minted it.
+		let validity = if subscriber.version.has_instance() {
+			Default::default()
+		} else {
+			crate::model::broadcast::RequestValidity::for_source(&entry.dynamic, request.path())
+		};
+		let source = subscriber.origin.create_source(path.clone(), validity);
+		// The handler exists before the requester sees the source, so a track it
+		// asks for before the serve machine first runs queues instead of failing
+		// `NotFound`. Accepted before the push, so the requester holds the source
+		// before its serve machine can see it unheld.
+		let dynamic = source.requests();
+		request.serve(&source);
+		let _ = subscriber.sources.try_push(MintedSource {
+			path,
+			instance: entry.route.instance.clone(),
+			node,
+			source: crate::model::broadcast::SourceGuard::new(source),
+			dynamic,
+			route: entry.live.consume(),
+		});
+	}
+}
+
 /// One received announce: the served route announced into the origin (the
 /// advertisement plus its request queue), which mints a source per requested path
 /// beneath it.
-struct AnnouncedRoute {
+struct AnnouncedRoute<K = Path> {
 	/// The route as last announced (post-charge), so a drain can re-price it
 	/// without recomputing the chain.
 	route: crate::origin::RouteInfo,
@@ -8893,17 +8966,17 @@ struct AnnouncedRoute {
 	/// Whether the GOAWAY drain already re-priced this route.
 	drained: bool,
 	/// Queues this route on its prefix's ready set when its request queue wakes.
-	wake: Arc<crate::util::QueueWake<Path>>,
+	wake: Arc<crate::util::QueueWake<K>>,
 	waker: std::task::Waker,
 	/// Keeps this route's registration on its request queue alive between passes.
 	park: kio::Park,
 }
 
-impl AnnouncedRoute {
+impl<K: Clone + Send + Sync + 'static> AnnouncedRoute<K> {
 	fn new(
 		route: crate::origin::RouteInfo,
 		dynamic: crate::origin::Route,
-		wake: Arc<crate::util::QueueWake<Path>>,
+		wake: Arc<crate::util::QueueWake<K>>,
 	) -> Self {
 		Self {
 			route,
@@ -8964,6 +9037,8 @@ struct TrackServe {
 	path: Path,
 	/// The instance to ask for; the peer refuses a request for another.
 	instance: Option<crate::Instance>,
+	/// The origin node to ask for (lite-07), or 0 to let the peer select.
+	node: u64,
 	name: String,
 }
 
@@ -9430,7 +9505,7 @@ impl Establish {
 		))?;
 		let msg = lite::Subscribe {
 			instance: self.serve.instance.clone(),
-			node: 0,
+			node: self.serve.node,
 			id: self.id,
 			broadcast: self.serve.path.clone(),
 			track: self.serve.name.as_str().into(),
@@ -10093,7 +10168,7 @@ impl TrackInfoFetch {
 		stream.writer.buffer(&lite::ControlType::Track)?;
 		stream.writer.buffer(&lite::Track {
 			instance: serve.instance.clone(),
-			node: 0,
+			node: serve.node,
 			broadcast: serve.path.clone(),
 			track: serve.name.as_str().into(),
 		})?;
@@ -11381,7 +11456,7 @@ impl kio::Task for FetchServeRun {
 
 					let msg = lite::Fetch {
 						instance: self.serve.instance.clone(),
-						node: 0,
+						node: self.serve.node,
 						broadcast: self.serve.path.clone(),
 						track: self.serve.name.as_str().into(),
 						priority: request.priority(),

@@ -13,7 +13,7 @@
 
 #![cfg_attr(not(test), allow(dead_code, reason = "the lite-07 session does not drive it yet"))]
 
-mod node;
+pub(crate) mod node;
 mod proof;
 mod view;
 
@@ -30,7 +30,7 @@ use std::{
 
 use crate::Path;
 
-pub(crate) use node::{Claim, Node};
+pub(crate) use node::Node;
 pub use proof::RouteKey;
 pub(crate) use proof::{EXPORTER_LABEL, Proof, Transcript};
 pub(crate) use view::{View, within};
@@ -119,6 +119,22 @@ impl fmt::Debug for Scope {
 			.field("regions", &self.regions)
 			.finish_non_exhaustive()
 	}
+}
+
+/// Qualifies the identities a scoped neighbor names under `key`: a hash of the key and
+/// the identity, collision-resistant at 64 bits, with [`QUALIFIED`] set. Relays proving
+/// the same key for a neighbor file its identities alike.
+pub(crate) fn qualifier(key: [u8; 32]) -> Arc<dyn Fn(Id) -> Id + Send + Sync> {
+	Arc::new(move |id: Id| {
+		let mut ctx = rind::digest::Context::new(&rind::digest::SHA256);
+		ctx.update(b"moq-lite qualified node id");
+		ctx.update(&key);
+		ctx.update(&id.to_le_bytes());
+		let digest = ctx.finish();
+		let mut bytes = [0; 8];
+		bytes.copy_from_slice(&digest.as_ref()[..8]);
+		u64::from_le_bytes(bytes) | QUALIFIED
+	})
 }
 
 /// What a node advertises for one identity.

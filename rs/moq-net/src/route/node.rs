@@ -109,7 +109,10 @@ struct Home {
 impl Node {
 	/// A node declaring a fresh identity, `seed` keying its rotation.
 	pub fn new(id: Id, seed: u64) -> Self {
-		debug_assert!(id != 0 && id & QUALIFIED == 0, "a declared identity is non-zero and unqualified");
+		debug_assert!(
+			id != 0 && id & QUALIFIED == 0,
+			"a declared identity is non-zero and unqualified"
+		);
 		let mut router = Router::new(seed);
 		router.originate(id, 0);
 		Self {
@@ -135,7 +138,10 @@ impl Node {
 
 	/// The identity this node declares, which a rotation replaces.
 	pub fn declared(&self) -> Id {
-		self.lock().router.declared().expect("a node always declares an identity")
+		self.lock()
+			.router
+			.declared()
+			.expect("a node always declares an identity")
 	}
 
 	/// This node's own claim at `path` changed: `None` withdraws it.
@@ -143,7 +149,10 @@ impl Node {
 		let mut state = self.lock();
 		let changed = match claim {
 			Some(claim) => {
-				let current = state.router.declared().and_then(|id| state.router.view(id)?.items.get(&path).cloned());
+				let current = state
+					.router
+					.declared()
+					.and_then(|id| state.router.view(id)?.items.get(&path).cloned());
 				current.as_ref() != Some(&claim) && state.router.announce(path, claim).is_ok()
 			}
 			None => state.router.unannounce(path).is_ok(),
@@ -275,7 +284,14 @@ impl Stream {
 		}
 		home.confirmed = true;
 		for key in std::mem::take(&mut home.leaving) {
-			push(queues, key, Output::Unserve { id, claim: claim.clone() });
+			push(
+				queues,
+				key,
+				Output::Unserve {
+					id,
+					claim: claim.clone(),
+				},
+			);
 		}
 	}
 }
@@ -346,10 +362,7 @@ impl State {
 			gone.remove(&claim);
 			let home = self.homes.entry((id, claim.clone())).or_default();
 			let current = home.key.as_ref().map(|(key, served)| (*key, served.metric));
-			let Some((key, metric)) = selected
-				.and_then(|route| Some((route.next?, route.metric)))
-				.or(current)
-			else {
+			let Some((key, metric)) = selected.and_then(|route| Some((route.next?, route.metric))).or(current) else {
 				continue;
 			};
 			let served = Served {
@@ -386,11 +399,19 @@ impl State {
 				continue;
 			};
 			for key in home.key.map(|(key, _)| key).into_iter().chain(home.leaving) {
-				push(&self.queues, key, Output::Unserve { id, claim: claim.clone() });
+				push(
+					&self.queues,
+					key,
+					Output::Unserve {
+						id,
+						claim: claim.clone(),
+					},
+				);
 			}
 		}
 		// Nothing left to recover: let the identity go.
-		let shows = (self.router.shown().range((id, Path::empty())..).next()).is_some_and(|((shown, _), _)| *shown == id);
+		let shows =
+			(self.router.shown().range((id, Path::empty())..).next()).is_some_and(|((shown, _), _)| *shown == id);
 		if !self.router.holds(id) && !shows {
 			self.router.collect(id);
 		}
@@ -510,7 +531,10 @@ mod tests {
 		pump(&far_answer, &far);
 		pump(&near_answer, &near);
 		assert!(matches!(&served(outputs(&near))[..], [Output::Serve { served, .. }] if served.metric == 1));
-		assert!(served(outputs(&far)).is_empty(), "the old stream serves until the new one does");
+		assert!(
+			served(outputs(&far)).is_empty(),
+			"the old stream serves until the new one does"
+		);
 		near.serving(1, &p("live/x"));
 		assert_eq!(
 			served(outputs(&far)),

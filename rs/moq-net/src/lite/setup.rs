@@ -525,12 +525,18 @@ impl PeerSetup {
 	}
 
 	/// The route key the peer proved, once its SETUP arrived.
-	#[cfg_attr(
-		not(test),
-		expect(dead_code, reason = "session integration files a scoped peer's routes under it")
-	)]
 	pub fn route_key(&self) -> Option<[u8; 32]> {
 		self.0.lock().route_key
+	}
+
+	/// Poll for the route key the peer proved, waiting until its SETUP arrives.
+	/// `None` when it proved none.
+	pub fn poll_route_key(&self, waiter: &kio::Waiter) -> std::task::Poll<Option<[u8; 32]>> {
+		let state = std::task::ready!(self.0.poll(waiter, |state| match state.setup.is_some() {
+			true => std::task::Poll::Ready(()),
+			false => std::task::Poll::Pending,
+		}));
+		std::task::Poll::Ready(state.route_key)
 	}
 
 	/// Claim the Setup Stream before decoding its body, refusing any second stream.

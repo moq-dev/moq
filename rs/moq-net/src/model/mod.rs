@@ -56,12 +56,12 @@ pub use timed::Timed;
 pub mod origin {
 	pub use super::follow::Following;
 	pub(crate) use super::origin_impl::HiddenWithheld;
-	pub(crate) use super::origin_impl::NodeFilter;
 	#[cfg(feature = "async")]
 	pub(crate) use super::origin_impl::HiddenWithholding;
 	#[cfg(feature = "async")]
 	// private: capability gap
 	pub(crate) use super::origin_impl::Lookup;
+	pub(crate) use super::origin_impl::NodeFilter;
 	pub use super::origin_impl::{
 		Config, Consumer, Cost, Driver, HopLimit, Link, Preference, Producer, Request, Requesting, Route, RouteInfo,
 		RouteOptions, Source,

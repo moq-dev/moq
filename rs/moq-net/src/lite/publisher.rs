@@ -27,6 +27,8 @@ use crate::{
 
 use super::Version;
 
+mod routed;
+
 pub(super) struct PublisherConfig {
 	/// The runtime that arms the publisher's timers.
 	pub runtime: crate::time::Deadlines,
@@ -196,6 +198,19 @@ impl Shared {
 	/// SETUP (sent at startup on every lite-05+ session, well before it could
 	/// learn of anything to subscribe to); the result is cached, since the peer
 	/// sends exactly one SETUP per session.
+	/// The routes a request naming the origin node `node` resolves through: that
+	/// node's, this node's own when it names this one, or any for 0.
+	fn node_filter(&self, origin: origin::Consumer, node: u64) -> origin::Consumer {
+		if node == 0 {
+			return origin;
+		}
+		let filter = match origin.route_node().declared() == node {
+			true => origin::NodeFilter::Own,
+			false => origin::NodeFilter::Is(node),
+		};
+		origin.with_node(filter)
+	}
+
 	fn poll_serving_origin(&self, waiter: &kio::Waiter) -> Poll<origin::Consumer> {
 		if let Some(origin) = self.serving.get() {
 			return Poll::Ready(origin.clone());
@@ -947,6 +962,15 @@ impl AnnounceServe {
 		})?;
 		let prefix: crate::Path = interest.prefix.clone();
 		let hidden: bool = interest.hidden;
+		// Lite-07 answers from the origin's route node instead of the route table.
+		let answer: Option<routed::Answer> = self.shared.version.has_routes().then(|| {
+			routed::Answer::new(
+				self.shared.origin.clone(),
+				prefix.clone(),
+				hidden,
+				self.shared.auth.clone(),
+			)
+		});
 
 		// The identity whose routes we filter out. Lite-04/05 carry it per
 		// announce stream; lite-06+ reads the session-wide SETUP Hop
@@ -967,34 +991,56 @@ impl AnnounceServe {
 			Some(hop) => Poll::Ready(*hop),
 			None => self.shared.peer_setup.poll_hop(waiter).map(|hop| hop.unwrap_or(*assigned)),
 		});
-		let (origin, announced, run): (origin::Consumer, origin::Routes, AnnounceRun) =
-			self.start(prefix, exclude_hop, hidden);
+		let (origin, announced, run): (origin::Consumer, origin::Routes, AnnounceRun) = match answer.is_some() {
+			// The route table goes unread.
+			true => {
+				let origin = self.shared.origin.empty();
+				let announced = origin.routes();
+				(
+					origin,
+					announced,
+					AnnounceRun::new(prefix, exclude_hop, self.shared.version),
+				)
+			}
+			false => self.start(prefix, exclude_hop, hidden),
+		};
 
 		// Streaming announce updates.
 		wait!(Run => {
 			let stream = self.stream.as_mut().expect("stream present");
-			if self.shared.withdrawal.poll(waiter).is_ready() {
-				run.withdraw(stream, origin, announced)?;
-			}
-			let res = ready!(run.poll(stream, origin, announced, waiter));
-			if let Err(err) = res {
-				match &err {
-					Error::Cancel
-					| Error::Stream(crate::StreamError::Cancel)
-					| Error::Session(crate::SessionError::Cancel)
-					| Error::Transport(_)
-					| Error::IdleTimeout => {
-						tracing::debug!(prefix = %origin.root(), "announcing cancelled");
+			let withdrawing = self.shared.withdrawal.poll(waiter).is_ready();
+			let res = match answer {
+				Some(answer) => ready!(answer.poll(stream, withdrawing, waiter)),
+				None => {
+					if withdrawing {
+						run.withdraw(stream, origin, announced)?;
 					}
-					err => {
-						tracing::warn!(%err, prefix = %origin.root(), "announcing error");
-					}
+					ready!(run.poll(stream, origin, announced, waiter))
 				}
-				self.stream.take().expect("stream present").writer.abort(&err);
+			};
+			if let Err(err) = res {
+				Self::abort(&mut self.stream, origin.root(), err);
 			}
 			Poll::Ready(())
 		});
 		Poll::Ready(Ok(()))
+	}
+
+	/// End the stream on an error, quietly when the session is only closing.
+	fn abort(stream: &mut Option<Stream<Transport, Version>>, prefix: &crate::Path, err: Error) {
+		match &err {
+			Error::Cancel
+			| Error::Stream(crate::StreamError::Cancel)
+			| Error::Session(crate::SessionError::Cancel)
+			| Error::Transport(_)
+			| Error::IdleTimeout => {
+				tracing::debug!(%prefix, "announcing cancelled");
+			}
+			err => {
+				tracing::warn!(%err, %prefix, "announcing error");
+			}
+		}
+		stream.take().expect("stream present").writer.abort(&err);
 	}
 
 	fn start(
@@ -1695,6 +1741,9 @@ trait Request: Sized {
 	/// The instance the request pins, if any.
 	fn instance(msg: &Self::Message) -> Option<&crate::Instance>;
 
+	/// The origin node the request names (lite-07), or 0 to let this side select.
+	fn node(msg: &Self::Message) -> u64;
+
 	/// Start answering, once the broadcast resolves. `track` is the name [`Request::take_track`]
 	/// moved out of `msg`, which no longer holds it.
 	fn start(
@@ -1963,6 +2012,7 @@ impl<R: Request> RequestServe<R> {
 						// served on demand by the route covering it (an `origin::Route`), or
 						// errors when there is none.
 						let origin = ready!(self.shared.poll_serving_origin(waiter));
+						let origin = self.shared.node_filter(origin, R::node(msg));
 						let path = R::target(msg).0.clone();
 						*requesting = Some(origin.lookup(path, R::instance(msg)).into_inner());
 					}
@@ -2121,6 +2171,10 @@ impl Request for TrackInfoServe {
 		msg.instance.as_ref()
 	}
 
+	fn node(msg: &Self::Message) -> u64 {
+		msg.node
+	}
+
 	fn start(
 		shared: &Shared,
 		_: Self::Message,
@@ -2224,6 +2278,10 @@ impl Request for TracksServe {
 
 	fn instance(msg: &Self::Message) -> Option<&crate::Instance> {
 		msg.instance.as_ref()
+	}
+
+	fn node(msg: &Self::Message) -> u64 {
+		msg.node
 	}
 
 	fn start(shared: &Shared, _: Self::Message, _: &str, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
@@ -2338,6 +2396,10 @@ impl Request for SubscribeServe {
 
 	fn instance(msg: &Self::Message) -> Option<&crate::Instance> {
 		msg.instance.as_ref()
+	}
+
+	fn node(msg: &Self::Message) -> u64 {
+		msg.node
 	}
 
 	fn start(
@@ -2888,6 +2950,10 @@ impl Request for DatagramServe {
 		msg.instance.as_ref()
 	}
 
+	fn node(msg: &Self::Message) -> u64 {
+		msg.node
+	}
+
 	fn start(
 		_: &Shared,
 		msg: Self::Message,
@@ -3038,6 +3104,10 @@ impl Request for FetchServe {
 
 	fn instance(msg: &Self::Message) -> Option<&crate::Instance> {
 		msg.instance.as_ref()
+	}
+
+	fn node(msg: &Self::Message) -> u64 {
+		msg.node
 	}
 
 	fn start(
