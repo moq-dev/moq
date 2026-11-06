@@ -535,6 +535,7 @@ benchmarks.
 - [Announcement availability](/quest/m2/cluster-routing/routes/availability.md) - announcements report availability, and a let-go is offline rather than END, in Rust and JS
 - [js/net route layer](/quest/m2/cluster-routing/routes/js.md) - `js/net` encodes, decodes, and resolves the route layer
 - [Browser tabs prove their route key](/quest/m2/cluster-routing/routes/browser-proof.md) - current Firefox and Chromium tabs open lite-07 sessions with a route-key proof the relay verifies, checked nightly
+- [Playwright bundles the spec exporters](/quest/m2/cluster-routing/routes/playwright-pin.md) - the toolchain's Playwright bundles Chromium 158+ and Firefox 160+, so the browser proof lane asserts both tabs proven
 - [Route layer acceptance](/quest/m2/cluster-routing/routes/acceptance.md) - forwarding fixtures ported and the model deleted, incident fixtures, end-to-end checks, and benchmarks
 
 ## Related
