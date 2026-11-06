@@ -57,7 +57,6 @@ the same reason, gates the cut through the
 - [VAAPI encode and decode](/quest/m1/video-vaapi.md) - H.265 encode and decode, pre-generated bindings, and pooled resize surfaces, including the moq-dev/vaapi release that carries them
 - [Read a texture back without an encoder](/quest/m1/video-readback.md) - moq-video copies a wgpu texture into packed RGBA with no encoder probe, for the studio's Linux virtual camera
 - [The over-limit PUBLISH refusal invites a retry](/quest/m1/retry-interval-overload.md) - `EXCESSIVE_LOAD` sends the may-pass retry interval, not 0
-- [A relay forwards an upstream refusal's retry interval](/quest/m1/retry-interval-forward.md) - a forwarded SUBSCRIBE refusal keeps the upstream's retry interval
 - [Tests run on a mocked clock](/quest/m1/mock-clock-tests/README.md) - about 300 tests stop proving nothing happened by waiting, sleeping to settle, or asserting on elapsed time
 
 ## Related

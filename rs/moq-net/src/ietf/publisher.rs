@@ -1392,13 +1392,16 @@ impl SubscribeRequest {
 	}
 }
 
+/// Why subscribing to a track failed, with the Retry Interval an upstream refusal asked for.
+type Failed = (Error, Option<Duration>);
+
 /// An admitted SUBSCRIBE's serve, which ends however its authority does: dropping it
 /// releases everything it holds upstream.
 struct Serving {
 	resuming: bool,
 	datagrams: Option<crate::datagram::Consumer>,
-	/// Why subscribing to the track failed, with the Retry Interval an upstream refusal asked for.
-	stream_error: Option<(Error, Option<Duration>)>,
+	/// Why subscribing to the track failed.
+	stream_error: Option<Failed>,
 	/// The filter the SUBSCRIBE asked for, which every saved join boundary follows.
 	///
 	/// Draft-22 replaced joining FETCH with subscription fills. Older drafts save the same
@@ -1866,7 +1869,7 @@ impl SubscribeTrack {
 		track: &track::Consumer,
 		msg: &ietf::Subscribe<'_>,
 		lapse: &Lapse,
-	) -> Poll<Option<Result<(TrackServe, LiveEdge), (Error, Option<Duration>)>>> {
+	) -> Poll<Option<Result<(TrackServe, LiveEdge), Failed>>> {
 		let setup = wait!(Setup => publisher.poll_until_withdrawn(
 			stream,
 			super::request_stream::fin_cancels(publisher.version),
