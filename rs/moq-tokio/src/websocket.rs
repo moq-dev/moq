@@ -1161,14 +1161,13 @@ mod timeout_tests {
 	async fn silent_qmux_peer_is_refused_at_the_deadline() {
 		const ALPN: &str = "qmux-01.moq-lite-06";
 		let activity = moq_net::server::Activity::default();
+		let timeout = time::Duration::from_secs(1);
 		let mut options = Options::new(
 			"ws://localhost/".parse().unwrap(),
-			Default::default(),
+			moq_net::Server::new().with_timeout(Some(timeout)),
 			activity.enter().unwrap(),
 		);
 		options.link.alpn = Some(ALPN.into());
-		let timeout = time::Duration::from_secs(1);
-		options.timeout = Some(timeout);
 		let (server, _peer) = tokio::io::duplex(4096);
 		let server =
 			tokio_tungstenite::WebSocketStream::from_raw_socket(server, tungstenite::protocol::Role::Server, None)
