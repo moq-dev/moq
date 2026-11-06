@@ -3316,11 +3316,17 @@ mod tests {
 		// Same `ended`-before-`started` invariant as `Counters::snapshot`, pinned
 		// at the source level so a reordering refactor can't let
 		// `sessions_ended > sessions_started` leak into a readout.
+		// Anchor on the impl's column-0 header, which this test's escaped literal can't match,
+		// so a signature change fails the search instead of finding the test's own strings.
 		let src = include_str!("stats.rs");
-		let body_start = src
-			.find("fn snapshot(&self) -> (Presence, bool)")
-			.expect("SessionCounters::snapshot fn present");
-		let body = &src[body_start..];
+		let impl_start = src
+			.find("\nimpl SessionCounters {")
+			.expect("impl SessionCounters present");
+		let body = &src[impl_start..];
+		let body = &body[..body.find("\n}\n").expect("impl SessionCounters end")];
+		let body = &body[body
+			.find("\tfn snapshot(")
+			.expect("SessionCounters::snapshot fn present")..];
 		let body = &body[..body.find("\n\t}\n").expect("SessionCounters::snapshot fn end")];
 		let ended_pos = body.find("self.sessions_ended.load").expect("sessions_ended load");
 		let started_pos = body.find("self.sessions_started.load").expect("sessions_started load");
