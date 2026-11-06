@@ -46,13 +46,22 @@ uploaded both the `moq-cli` and `moq-relay` closures from its
 
 Use the scheduled and push runs; never dispatch Nightly for this evidence.
 
+Checked 2026-11-06 (/quest-unblock): the next scheduled Smoke,
+[42245927828](https://github.com/moq-dev/moq/actions/runs/42245927828)
+(2026-11-06, started 15:45Z), fetched the deps from `nix.moq.dev` but still
+compiled both binaries. Smoke builds `github:moq-dev/moq#...` unpinned, so it
+built main as of 16:28Z (2916531c19), whose Cache run was cancelled, rather
+than its own head. Any Smoke that starts while main is ahead of its last
+completed Runtime upload misses the same way.
+
 ## Waiting
 
-- moq-dev/moq: the next scheduled Smoke run (08:00 UTC) on
-  [moq-dev/moq#7662](https://github.com/moq-dev/moq/pull/7662)'s merge or
-  later, whose `ubuntu-latest / nix` job copies `moq-relay` and `moq` from
-  `https://nix.moq.dev` instead of compiling them. Check with
-  `gh run list --workflow smoke.yml --event schedule`.
+- moq-dev/moq: a scheduled Smoke run (08:00 UTC) whose `ubuntu-latest / nix`
+  job copies `moq-relay` and `moq` from `https://nix.moq.dev` instead of
+  compiling them. Check with `gh run list --workflow smoke.yml --event schedule`,
+  and confirm the main commit it built had a completed Cache
+  `Runtime (ubuntu-24.04)` upload; a miss on a commit without one says nothing
+  about the cache.
 
 ## Related
 

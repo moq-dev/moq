@@ -12,7 +12,7 @@ the peer goes away, with no visible interruption.
 Publish `@moq/p2p` with its first application consumer in this quest. It is
 currently private and has no release script; the `test/p2p` harness uses its
 workspace source. Before its first workflow publish, a maintainer claims
-`@moq/p2p` on npm and JSR with a placeholder and attaches the `moq-dev/moq`
+`@moq/p2p` on npm with a placeholder and attaches the `moq-dev/moq`
 trusted publisher, as [Claim new npm names](/quest/m3/release/npm-first-publish.md)
 does for the cut's packages.
 
