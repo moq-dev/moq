@@ -4,6 +4,7 @@ use std::{
 	cmp::Reverse,
 	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
 	fmt,
+	num::{NonZeroU64, NonZeroUsize},
 	sync::Arc,
 	sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 	task::{Context, Poll, Wake, Waker, ready},
@@ -32,11 +33,14 @@ use crate::{
 /// origin, and this is the id it stamps into a route's hop chain as an announcement
 /// passes through, so a receiver can spot its own id and reject a loop.
 ///
-/// Local hops are built with [`Hop::new`] or [`Hop::random`], both of which guarantee a
-/// non-zero id so loop detection can work. Remote peers may still send `0`; it is legal
-/// on the wire, names nobody, and marks the chain anonymous for route selection.
+/// A transit fact the origin and the relays fill in: applications pass plain ids
+/// ([`Config::hop`]) and read them back ([`RouteInfo::hops`]).
+///
+/// Local hops come from a [`NonZeroU64`] or [`Hop::random`], so loop detection can work.
+/// Remote peers may still send `0`; it is legal on the wire, names nobody, and marks the
+/// chain anonymous for route selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Hop {
+pub(crate) struct Hop {
 	id: u64,
 }
 
@@ -49,31 +53,21 @@ impl Hop {
 	/// holds one anywhere is anonymous for route selection.
 	pub const UNKNOWN: Self = Self { id: 0 };
 
-	/// Build a hop from a stable id.
-	///
-	/// The id must be non-zero. Wire decode accepts remote id 0
-	/// ([`Self::UNKNOWN`]), but a local hop should not use it because it cannot be
-	/// excluded for loop detection.
-	pub fn new(id: u64) -> Result<Self, InvalidHop> {
-		if id == 0 {
-			return Err(InvalidHop::Range);
-		}
-		Ok(Self { id })
+	/// A local hop from a stable id, or `None` for 0, which cannot be excluded for loop
+	/// detection.
+	#[cfg(any(test, feature = "fuzz"))]
+	pub(crate) fn new(id: u64) -> Option<Self> {
+		NonZeroU64::new(id).map(Self::from)
 	}
 
-	/// Generate a fresh hop with a random non-zero id. Use this for any relay that
-	/// does not need a stable identity across restarts.
-	///
-	/// Older `@moq/lite` clients decode the exclude hop as a JavaScript number
-	/// and reject values above 2^53-1. Keep generated IDs in that range while
-	/// [`Self::new`] accepts any non-zero 64-bit id.
-	pub fn random() -> Self {
-		let id = kio::clock::rng().random_range(1..(1u64 << 53));
-		Self { id }
+	/// Generate a fresh hop with a random non-zero id; see [`random_id`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn random() -> Self {
+		Self::from(random_id())
 	}
 
-	/// Return the origin's wire id.
-	pub fn id(self) -> u64 {
+	/// Return the hop's wire id.
+	pub(crate) fn id(self) -> u64 {
 		self.id
 	}
 
@@ -103,9 +97,9 @@ impl Hop {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Config {
-	/// The origin's wire identity, appended to broadcast hop chains for loop
-	/// detection and shortest-path routing.
-	pub hop: Hop,
+	/// The origin's hop id, appended to broadcast hop chains for loop detection and
+	/// shortest-path routing. Random by default.
+	pub hop: NonZeroU64,
 
 	/// The key this origin proves to every lite-07 peer, which files the routes it sends
 	/// under it when its grant is scoped. Origins sharing a key fail over as one. `None`
@@ -117,8 +111,9 @@ pub struct Config {
 	/// Applies to moq-lite-03+ hop paths and the negotiated MoQ Cluster extension on
 	/// moq-transport. A forwarded path counts this origin's own hop too, including
 	/// when the receiving peer reconstructs that hop from the announce handshake.
-	/// Protocols without a hop path cannot reveal or bound the depth they hide.
-	pub max_hops: HopLimit,
+	/// Protocols without a hop path cannot reveal or bound the depth they hide. No wire
+	/// carries a path longer than 32, so a larger value acts as 32.
+	pub max_hops: NonZeroUsize,
 
 	/// The cache pool broadcasts under this origin charge their groups into. It flows
 	/// down the ownership chain (origin -> broadcast -> track -> group): a track opens
@@ -167,9 +162,9 @@ impl Default for Config {
 	fn default() -> Self {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
 		Self {
-			hop: Hop::random(),
+			hop: random_id(),
 			route_key: None,
-			max_hops: HopLimit::default(),
+			max_hops: MAX_HOP_LIMIT,
 			pool,
 			cache_duration: Duration::MAX,
 			update_hold: DEFAULT_UPDATE_HOLD,
@@ -178,24 +173,26 @@ impl Default for Config {
 }
 
 impl Config {
-	/// Config for the given origin id with no byte target and the default idle expiry.
-	pub fn new(hop: Hop) -> Self {
+	/// Config for the given origin hop id with no byte target and the default idle expiry.
+	pub fn new(hop: NonZeroU64) -> Self {
 		Self { hop, ..Self::default() }
 	}
 }
 
-impl From<Hop> for Config {
-	/// Config for the given origin id with the defaults of [`Config::new`].
-	fn from(hop: Hop) -> Self {
-		Self::new(hop)
-	}
+/// A fresh random hop id, for any origin or peer that needs no stable identity across
+/// restarts.
+///
+/// Older `@moq/lite` clients decode the exclude hop as a JavaScript number and reject
+/// values above 2^53-1, so generated ids stay in that range while [`Config::hop`] accepts
+/// any non-zero 64-bit id.
+pub(crate) fn random_id() -> NonZeroU64 {
+	NonZeroU64::MIN.saturating_add(kio::clock::rng().random_range(0..(1u64 << 53) - 1))
 }
 
-impl TryFrom<u64> for Hop {
-	type Error = InvalidHop;
-
-	fn try_from(id: u64) -> Result<Self, Self::Error> {
-		Self::new(id)
+impl From<NonZeroU64> for Hop {
+	/// A local hop: its non-zero id can be excluded for loop detection.
+	fn from(id: NonZeroU64) -> Self {
+		Self { id: id.get() }
 	}
 }
 
@@ -224,31 +221,8 @@ impl<'a, V> Decode<'a, V> for Hop {
 /// silently truncating.
 pub(super) const MAX_HOPS: usize = 32;
 
-/// The longest advertised hop path an origin accepts or forwards, from 1 to 32.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct HopLimit(usize);
-
-impl HopLimit {
-	/// A hop-path cap from 1 to 32, or `None` outside that range.
-	pub const fn new(max: usize) -> Option<Self> {
-		if max == 0 || max > MAX_HOPS {
-			None
-		} else {
-			Some(Self(max))
-		}
-	}
-
-	/// The maximum number of hops in an advertised path.
-	pub const fn get(self) -> usize {
-		self.0
-	}
-}
-
-impl Default for HopLimit {
-	fn default() -> Self {
-		Self(MAX_HOPS)
-	}
-}
+/// The default and highest [`Config::max_hops`].
+const MAX_HOP_LIMIT: NonZeroUsize = NonZeroUsize::new(MAX_HOPS).unwrap();
 
 /// Bounded, loop-free list of [`Hop`] entries: the hop chain of a broadcast.
 ///
@@ -258,16 +232,11 @@ impl Default for HopLimit {
 /// Construct via [`Hops::new`] + [`Hops::push`], or fall back to the
 /// fallible [`TryFrom<Vec<Hop>>`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Hops(Vec<Hop>);
+pub(crate) struct Hops(Vec<Hop>);
 
-/// Why a [`Hop`] is not usable, on its own or as part of a [`Hops`] chain.
+/// Why a [`Hop`] cannot join a [`Hops`] chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum InvalidHop {
-	/// The id is zero, so it cannot identify a local hop. Only [`Hop::new`] returns
-	/// this; a chain may still hold the reserved [`Hop::UNKNOWN`].
-	Range,
-
+pub(crate) enum InvalidHop {
 	/// The list is already at its hop-count cap, which a real path never reaches and a
 	/// loop does.
 	TooMany,
@@ -281,7 +250,6 @@ pub enum InvalidHop {
 impl fmt::Display for InvalidHop {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			Self::Range => write!(f, "local hop id must be non-zero"),
 			Self::TooMany => write!(f, "too many hops (max {MAX_HOPS})"),
 			Self::Duplicate => write!(f, "hop already in the chain"),
 		}
@@ -294,7 +262,7 @@ impl From<InvalidHop> for DecodeError {
 	fn from(err: InvalidHop) -> Self {
 		match err {
 			InvalidHop::TooMany => DecodeError::BoundsExceeded,
-			InvalidHop::Range | InvalidHop::Duplicate => DecodeError::InvalidValue,
+			InvalidHop::Duplicate => DecodeError::InvalidValue,
 		}
 	}
 }
@@ -344,6 +312,17 @@ impl Hops {
 	/// Borrow the entries as a slice.
 	pub fn as_slice(&self) -> &[Hop] {
 		&self.0
+	}
+
+	/// The entries' ids, in hop order.
+	pub(crate) fn ids(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
+		self.0.iter().map(|hop| hop.id)
+	}
+
+	/// The entries' ids, in hop order, reusing the list's allocation.
+	#[cfg(any(test, feature = "fuzz"))]
+	pub(crate) fn into_ids(self) -> Vec<u64> {
+		self.0.into_iter().map(|hop| hop.id).collect()
 	}
 }
 
@@ -543,9 +522,10 @@ pub enum Source {
 	/// Announced on this origin: by an in-process producer or a client session.
 	#[default]
 	Local,
-	/// Learned from a cluster peer, named by the announcing session's declared or
-	/// assigned identity.
-	Peer(Hop),
+	/// Learned from a cluster peer, named by the hop id the announcing session declared
+	/// or was assigned. 0 when the announcing handle named none: a peer handle in-process,
+	/// or a session whose peer declared no hop and was assigned none.
+	Peer(u64),
 }
 
 impl RouteInfo {
@@ -556,12 +536,12 @@ impl RouteInfo {
 		self.instance.as_ref().expect("a delivered route has an instance")
 	}
 
-	/// The chain of origins the route has traversed, oldest first. Each relay
+	/// The hop ids of the origins the route has traversed, oldest first. Each relay
 	/// appends its own hop when forwarding; used for loop detection and as the
 	/// selection tie-break. A 0 entry is the anonymous mark and travels unchanged;
 	/// see [`Self::is_anonymous`]. A route announced on this origin has none.
-	pub fn hops(&self) -> &Hops {
-		&self.hops
+	pub fn hops(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
+		self.hops.ids()
 	}
 
 	/// What pulling content via this route costs, accumulated per link: lower wins
@@ -1389,7 +1369,7 @@ impl RouteEntry {
 	fn entered(&self) -> Source {
 		match self.link {
 			Link::Local => Source::Local,
-			Link::Peer | Link::Upstream => Source::Peer(self.via),
+			Link::Peer | Link::Upstream => Source::Peer(self.via.id()),
 		}
 	}
 
@@ -1519,7 +1499,7 @@ struct Horizon {
 	/// Hide the routes with no room for our hop under this cap, because this reader
 	/// forwards them ([`Consumer::forwardable`]). Selection then falls back to a
 	/// shorter route instead of withdrawing a prefix an in-cap path still reaches.
-	max_hops: Option<HopLimit>,
+	max_hops: Option<NonZeroUsize>,
 }
 
 impl Horizon {
@@ -2156,8 +2136,8 @@ pub struct Announce {
 pub struct Producer {
 	// Identity for this origin. Appended to route hops when re-announcing so
 	// downstream relays can detect loops and prefer the shortest path.
-	hop: Hop,
-	max_hops: HopLimit,
+	hop: NonZeroU64,
+	max_hops: NonZeroUsize,
 
 	// The absolute patterns this handle may publish under.
 	scope: OriginScope,
@@ -2223,7 +2203,7 @@ impl Producer {
 		let pool = config.pool.clone();
 		let producer = Self {
 			hop: config.hop,
-			max_hops: config.max_hops,
+			max_hops: config.max_hops.min(MAX_HOP_LIMIT),
 			scope: scope.clone(),
 			root: Path::default(),
 			shared: shared.clone(),
@@ -2310,8 +2290,8 @@ impl Producer {
 		}
 	}
 
-	/// This origin's hop identity.
-	pub fn hop(&self) -> Hop {
+	/// This origin's hop id; see [`Config::hop`].
+	pub fn hop(&self) -> NonZeroU64 {
 		self.hop
 	}
 
@@ -2323,7 +2303,7 @@ impl Producer {
 
 	// Sessions enforce the policy configured once on the origin.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn max_hops(&self) -> HopLimit {
+	pub(crate) fn max_hops(&self) -> NonZeroUsize {
 		self.max_hops
 	}
 
@@ -2332,14 +2312,14 @@ impl Producer {
 	/// subscriber issues no ANNOUNCE_PLEASE). Used to fill an unset session half
 	/// so both the publisher and subscriber loops still run.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn empty(hop: Hop) -> Self {
+	pub(crate) fn empty() -> Self {
 		// No allowed prefixes means no broadcast is ever created, so nothing will
 		// ever be queued on the detached submission handle.
 		let (tasks, _) = TaskSet::new();
 		Self {
-			hop,
+			hop: random_id(),
 			scope: OriginScope::empty(),
-			max_hops: HopLimit::default(),
+			max_hops: MAX_HOP_LIMIT,
 			root: Path::default(),
 			shared: SendCell::new(kio::Shared::new(OriginState::new(DEFAULT_UPDATE_HOLD, None))),
 			pool: cache::Pool::default(),
@@ -2413,7 +2393,7 @@ impl Producer {
 		// hidden from cursors and requests until it announces. The entry lives
 		// as long as the route, or until the broadcast closes.
 		let announcing = Announcing {
-			hop: self.hop,
+			hop: Hop::from(self.hop),
 			shared: self.shared.clone(),
 			requested: full.clone(),
 			prefixes: vec![(full.clone(), claim)],
@@ -2594,7 +2574,7 @@ impl Producer {
 	/// thing on every hop.
 	///
 	/// A consumer resolving a path under it through this route is handed to
-	/// [`Route::requested`] as a [`Request`]: answer it by serving a broadcast already
+	/// [`Route::poll_requested`] as a [`Request`]: answer it by serving a broadcast already
 	/// held ([`Request::serve`]), under this route's instance, or by creating the path's
 	/// own exact route ([`Request::route`]), under a fresh instance, so restarting one
 	/// job never splices into a copy of the last. This is how a service answers a whole
@@ -2831,7 +2811,7 @@ impl Announcing {
 			return Err(Error::Unauthorized);
 		}
 		Ok(Self {
-			hop: producer.hop,
+			hop: Hop::from(producer.hop),
 			shared: producer.shared.clone(),
 			requested: requested.clone(),
 			prefixes: vec![(requested, claim)],
@@ -3883,7 +3863,7 @@ impl kio::Task for FrontServeRun {
 					}
 					Poll::Ready(Err(err)) => {
 						// No metadata ever arrived: a lost route cannot answer the request.
-						let err = match super::resume::route_failed(&err) {
+						let err = match err.retryable() {
 							true => io.end.clone(),
 							false => err,
 						};
@@ -6437,7 +6417,7 @@ impl ServeState {
 
 /// A pending request for a broadcast to be served on demand.
 ///
-/// Yielded by [`Route::requested`]. The requester is awaiting inside
+/// Yielded by [`Route::poll_requested`]. The requester is awaiting inside
 /// [`Consumer::request`]. Answer it one of three ways: [`serve`](Self::serve) a
 /// broadcast already held, under the prefix route's instance; create the path's own
 /// exact route with [`route`](Self::route), under a fresh instance; or
@@ -6865,8 +6845,8 @@ impl Consume<track::Consumer> for track::Consumer {
 #[derive(Clone)]
 pub struct Consumer {
 	// Identity of the origin this consumer was derived from.
-	hop: Hop,
-	max_hops: HopLimit,
+	hop: NonZeroU64,
+	max_hops: NonZeroUsize,
 	scope: OriginScope,
 
 	// A prefix that is automatically stripped from all paths.
@@ -6937,8 +6917,8 @@ impl Consumer {
 		}
 	}
 
-	/// This origin's hop identity.
-	pub fn hop(&self) -> Hop {
+	/// This origin's hop id; see [`Config::hop`].
+	pub fn hop(&self) -> NonZeroU64 {
 		self.hop
 	}
 
@@ -8130,7 +8110,15 @@ impl ProduceTest for Config {
 #[cfg(test)]
 impl ProduceTest for Hop {
 	fn produce(self) -> Producer {
-		Config::new(self).produce()
+		Config::from(self).produce()
+	}
+}
+
+/// Test-only: an origin's config for a local hop.
+#[cfg(test)]
+impl From<Hop> for Config {
+	fn from(hop: Hop) -> Self {
+		Self::new(NonZeroU64::new(hop.id).expect("a local hop is non-zero"))
 	}
 }
 
@@ -8186,22 +8174,21 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn hop_limit_refuses_values_outside_the_wire_bound() {
-		for invalid in [0, 33, usize::MAX] {
-			assert_eq!(HopLimit::new(invalid), None);
+	fn max_hops_caps_at_the_wire_bound() {
+		assert_eq!(Config::default().max_hops.get(), MAX_HOPS);
+		for (max, effective) in [(1, 1), (6, 6), (32, 32), (33, 32), (usize::MAX, 32)] {
+			let config = Config {
+				max_hops: NonZeroUsize::new(max).unwrap(),
+				..Default::default()
+			};
+			let (producer, _driver) = Producer::new(config);
+			let scoped = producer.scope("room", &Patterns::from(Pattern::all())).unwrap();
+			assert_eq!(scoped.config().max_hops.get(), effective);
+			assert_eq!(
+				scoped.consume().forwardable().horizon.max_hops.map(NonZeroUsize::get),
+				Some(effective)
+			);
 		}
-		for valid in [1, 6, 32] {
-			assert_eq!(HopLimit::new(valid).unwrap().get(), valid);
-		}
-		assert_eq!(HopLimit::default().get(), 32);
-		let config = Config {
-			max_hops: HopLimit::new(6).unwrap(),
-			..Default::default()
-		};
-		let (producer, _driver) = Producer::new(config);
-		let scoped = producer.scope("room", &Patterns::from(Pattern::all())).unwrap();
-		assert_eq!(scoped.config().max_hops.get(), 6);
-		assert_eq!(scoped.consume().forwardable().horizon.max_hops, HopLimit::new(6));
 	}
 	#[cfg(feature = "async")]
 	use crate::test_tracing::count_drop_warnings;
@@ -8239,7 +8226,7 @@ mod tests {
 	fn an_errored_copy_serves_history_before_its_outcome() {
 		let now = Instant::ZERO;
 		let waiter = kio::Waiter::noop();
-		let (producer, mut driver) = Producer::new(Config::new(origin(1)));
+		let (producer, mut driver) = Producer::new(Config::from(origin(1)));
 		let server = producer
 			.forward("room", RouteInfo::default().with_hops(hops(&[10])), None)
 			.unwrap();
@@ -8330,7 +8317,7 @@ mod tests {
 	#[kio::test]
 	async fn default_config_mints_a_real_hop() {
 		let config = Config::default();
-		assert_ne!(config.hop, Hop::UNKNOWN);
+		assert!(config.hop.get() < 1 << 53, "older JS clients decode it as a number");
 		let (producer, _driver) = Producer::new(config.clone());
 		assert_eq!(producer.hop(), config.hop);
 		assert_eq!(producer.consume().hop(), config.hop);
@@ -8946,7 +8933,7 @@ mod tests {
 	/// A mount reaches only what the handle already reaches, and mounts never nest.
 	#[kio::test]
 	async fn mount_never_widens_a_scope() {
-		let (producer, _driver) = Producer::new(Config::new(origin(1)));
+		let (producer, _driver) = Producer::new(Config::from(origin(1)));
 		let project = producer.scope("", &scopes(&["p1"])).unwrap();
 		assert!(matches!(project.mount("p1/.svc", ".svc/p1"), Err(Error::Unauthorized)));
 
@@ -8974,7 +8961,7 @@ mod tests {
 	/// A mount point no pattern can spell could never be announced or authorized.
 	#[kio::test]
 	async fn mount_refuses_a_wildcard_mount_point() {
-		let (producer, _driver) = Producer::new(Config::new(origin(1)));
+		let (producer, _driver) = Producer::new(Config::from(origin(1)));
 		for at in ["*", "p1/*", "p1/**", "p1/a*"] {
 			assert!(
 				matches!(producer.mount(at, ".svc/p1"), Err(Error::InvalidPath(_))),
@@ -9394,7 +9381,7 @@ mod tests {
 		// Restarts are delivered at once: the hold is not what this checks.
 		let producer = Config {
 			update_hold: Duration::ZERO,
-			..Config::new(origin(1))
+			..Config::from(origin(1))
 		}
 		.produce();
 		let consumer = producer.consume();
@@ -9449,7 +9436,7 @@ mod tests {
 		for (old_hop, new_hop) in [(11, 10), (10, 11)] {
 			let producer = Config {
 				update_hold: Duration::ZERO,
-				..Config::new(origin(1))
+				..Config::from(origin(1))
 			}
 			.produce();
 			let consumer = producer.consume();
@@ -9479,7 +9466,7 @@ mod tests {
 	fn scoped_pool() -> (Producer, impl Fn(&str, &str, u64, u64) -> Route) {
 		let producer = Config {
 			update_hold: Duration::ZERO,
-			..Config::new(origin(1))
+			..Config::from(origin(1))
 		}
 		.produce();
 		let claims = producer.clone();
@@ -11559,7 +11546,7 @@ mod tests {
 		assert_eq!(announced.expect_next_active("gateway").await.source(), Source::Local);
 		assert_eq!(
 			announced.expect_next_active("forwarded").await.source(),
-			Source::Peer(origin(7))
+			Source::Peer(7)
 		);
 
 		// The mark survives narrowing the handle.
@@ -11567,10 +11554,7 @@ mod tests {
 		let _nested = scoped
 			.forward("x", RouteInfo::default().with_via(origin(8)), None)
 			.unwrap();
-		assert_eq!(
-			announced.expect_next_active("room/x").await.source(),
-			Source::Peer(origin(8))
-		);
+		assert_eq!(announced.expect_next_active("room/x").await.source(), Source::Peer(8));
 	}
 
 	/// A caller that only polls with `try_next` still gets a held update once its
@@ -11623,7 +11607,7 @@ mod tests {
 	#[test]
 	fn a_withdrawal_wave_costs_k_log_k_steps() {
 		for k in [64usize, 256, 1024] {
-			let (producer, mut driver) = Producer::new(Config::new(origin(1)));
+			let (producer, mut driver) = Producer::new(Config::from(origin(1)));
 			driver
 				.poll(Instant::ZERO + Duration::from_secs(1), &kio::Waiter::noop())
 				.unwrap();
@@ -11876,10 +11860,7 @@ mod tests {
 			.with_hops(hops(&[7]))
 			.with_via(origin(7));
 		let _forwarded = peer.forward("room", route.clone(), None).unwrap();
-		assert_eq!(
-			announced.expect_next_active("room").await.source(),
-			Source::Peer(origin(7))
-		);
+		assert_eq!(announced.expect_next_active("room").await.source(), Source::Peer(7));
 
 		// The newest identical route wins, so the local twin takes over.
 		let local = producer.forward("room", route, None).unwrap();
@@ -11889,10 +11870,7 @@ mod tests {
 		}
 
 		drop(local);
-		assert_eq!(
-			announced.expect_next_active("room").await.source(),
-			Source::Peer(origin(7))
-		);
+		assert_eq!(announced.expect_next_active("room").await.source(), Source::Peer(7));
 	}
 
 	#[kio::test]
@@ -11972,10 +11950,7 @@ mod tests {
 				None,
 			)
 			.unwrap();
-		assert_eq!(
-			everyone.expect_next_active("core").await.source(),
-			Source::Peer(origin(7))
-		);
+		assert_eq!(everyone.expect_next_active("core").await.source(), Source::Peer(7));
 		toward_core.assert_next_wait();
 
 		let _mesh = peer
@@ -11985,10 +11960,7 @@ mod tests {
 				None,
 			)
 			.unwrap();
-		assert_eq!(
-			toward_core.expect_next_active("mesh").await.source(),
-			Source::Peer(origin(8))
-		);
+		assert_eq!(toward_core.expect_next_active("mesh").await.source(), Source::Peer(8));
 
 		// A path both an upstream and a mesh peer reach: the upstream route is
 		// cheaper, yet the upstream view selects the mesh peer's.
@@ -12009,10 +11981,7 @@ mod tests {
 				None,
 			)
 			.unwrap();
-		assert_eq!(
-			toward_core.expect_next_active("both").await.source(),
-			Source::Peer(origin(8))
-		);
+		assert_eq!(toward_core.expect_next_active("both").await.source(), Source::Peer(8));
 		drop(mesh);
 		toward_core.expect_next_ended("both").await;
 
@@ -12432,7 +12401,7 @@ mod tests {
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn follow_reports_teardown_as_closed() {
-		let (producer, driver) = Producer::new(Config::new(origin(1)));
+		let (producer, driver) = Producer::new(Config::from(origin(1)));
 		let consumer = producer.consume();
 		let _server = producer.forward("room", RouteInfo::default(), None).unwrap();
 
@@ -12666,7 +12635,7 @@ mod tests {
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn teardown_ends_everything() {
-		let (producer, driver) = Producer::new(Config::new(origin(1)));
+		let (producer, driver) = Producer::new(Config::from(origin(1)));
 		let consumer = producer.consume();
 		let _announcement = producer.announce("room", RouteInfo::default()).unwrap();
 		let mut announced = consumer.routes();
@@ -12708,7 +12677,7 @@ mod tests {
 	#[test]
 	#[cfg(feature = "async")]
 	fn teardown_owes_what_a_snapshot_held() {
-		let (producer, driver) = Producer::new(Config::new(origin(1)));
+		let (producer, driver) = Producer::new(Config::from(origin(1)));
 		let snapshot = producer.snapshot("room");
 		let mut announced = producer.consume().routes();
 		let _alice = producer.announce("room/alice", RouteInfo::default()).unwrap();
@@ -12722,7 +12691,7 @@ mod tests {
 
 	#[test]
 	fn internal_route_requests_are_closed_on_teardown() {
-		let (producer, mut driver) = Producer::new(Config::new(origin(1)));
+		let (producer, mut driver) = Producer::new(Config::from(origin(1)));
 		let server = producer.forward("room", RouteInfo::default(), None).unwrap();
 		let _pending = producer.consume().request("room/alice", None);
 		driver.poll(Instant::now(), &kio::Waiter::noop()).unwrap();
@@ -12750,7 +12719,7 @@ mod tests {
 		}
 
 		for teardown in [false, true] {
-			let (producer, mut driver) = Producer::new(Config::new(origin(1)));
+			let (producer, mut driver) = Producer::new(Config::from(origin(1)));
 			let server = producer.forward("room", RouteInfo::default(), None).unwrap();
 			let _pending = producer.consume().request("room/alice", None);
 			driver.poll(Instant::ZERO, &kio::Waiter::noop()).unwrap();
@@ -13383,7 +13352,7 @@ mod tests {
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn driver_resolves_with_live_consumers() {
-		let (producer, driver) = Producer::new(Config::new(origin(1)));
+		let (producer, driver) = Producer::new(Config::from(origin(1)));
 		let consumer = producer.consume();
 		let run = crate::time::run(driver);
 		drop(producer);
@@ -14953,7 +14922,7 @@ mod tests {
 	/// lives, and finish once the last one is gone.
 	#[kio::test]
 	async fn a_published_broadcast_keeps_the_driver_running() {
-		let (producer, mut driver) = Producer::new(Config::new(origin(1)));
+		let (producer, mut driver) = Producer::new(Config::from(origin(1)));
 		let waiter = kio::Waiter::noop();
 		let broadcast = producer.route("room/a", RouteOptions::hidden()).unwrap();
 		drop(producer);
@@ -14970,7 +14939,7 @@ mod tests {
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_dynamic_keeps_the_driver_running() {
-		let (producer, driver) = Producer::new(Config::new(origin(1)));
+		let (producer, driver) = Producer::new(Config::from(origin(1)));
 		let run = kio::clock::sim::spawn(crate::time::run(driver));
 		let consumer = producer.consume();
 		let server = producer.forward("room", RouteInfo::default(), None).unwrap();
@@ -14997,7 +14966,7 @@ mod tests {
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_retracted_reader_never_holds_the_driver() {
-		let (producer, driver) = Producer::new(Config::new(origin(1)));
+		let (producer, driver) = Producer::new(Config::from(origin(1)));
 		let run = kio::clock::sim::spawn(crate::time::run(driver));
 		let consumer = producer.consume();
 		let broadcast = producer.route("room/alice", RouteOptions::default()).unwrap();
@@ -15025,7 +14994,7 @@ mod tests {
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn an_orphaned_front_keeps_the_copy_for_a_pending_subscriber() {
-		let (producer, driver) = Producer::new(Config::new(origin(1)));
+		let (producer, driver) = Producer::new(Config::from(origin(1)));
 		let run = kio::clock::sim::spawn(crate::time::run(driver));
 		let consumer = producer.consume();
 		let broadcast = producer.route("room/alice", RouteOptions::default()).unwrap();
@@ -15214,10 +15183,7 @@ mod tests {
 
 	#[kio::test]
 	async fn a_discarded_front_task_unregisters_its_watch() {
-		let (producer, _driver) = Producer::new(Config {
-			hop: origin(1),
-			..Default::default()
-		});
+		let (producer, _driver) = Producer::new(Config::from(origin(1)));
 		let consumer = producer.consume();
 		let _served = producer.forward("room", RouteInfo::default(), None).unwrap();
 		// A consumer outlives its producer by design, so the task set can refuse

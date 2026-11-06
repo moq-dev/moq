@@ -5,6 +5,7 @@ import { Gate } from "../auth_gate.ts";
 import type { AuthSession } from "../auth_session.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
+import { statsOf } from "../connection/stats.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
 import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
@@ -19,7 +20,7 @@ import {
 	unauthorized,
 } from "../error.ts";
 import type * as group from "../group.ts";
-import { Cost, type Hop, type RouteInfo, routesEqual } from "../hop.ts";
+import { Cost, type Hop, routesEqual, type WireRoute } from "../hop.ts";
 import { finalSequence, hiddenBelow, hooks, insertRun, presented, type Run, runGaps } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -542,6 +543,17 @@ export class Publisher {
 	// A rejected lookup is evicted so a retry can re-probe.
 	#trackInfo = new WeakMap<broadcast.Consumer, Map<string, TrackInfoEntry>>();
 
+	// Lite-05/06: the datagram tracks this session's answered TRACKs hold, read from each
+	// answer on, oldest first. The requester reads TRACK_INFO as the publisher accepting the
+	// name, but the datagrams flow on the SUBSCRIBE it sends alongside, which can arrive later.
+	// That SUBSCRIBE reads from a clone of the hold, keeping its position, rather than from its
+	// own arrival, which would lose what was written in between. The requester keeps its TRACK
+	// open until the SUBSCRIBE has a response, so the hold outlasts its arrival. A hold is
+	// matched by the track it reads, not by name, so one left on a replaced track never stands
+	// in for the current one. It is a passive observer: it keeps a position without adding
+	// demand, which the SUBSCRIBE adds when it reads the track.
+	#heldDatagrams = new Set<datagram.Consumer>();
+
 	/**
 	 * Creates a new Publisher instance.
 	 * @param quic - The WebTransport session to use
@@ -601,7 +613,7 @@ export class Publisher {
 		let nextAnnounceId = 0n;
 		const announceIds = new Map<Path.Valid, bigint>();
 
-		const wireHops = (route: RouteInfo): Hop[] => {
+		const wireHops = (route: WireRoute): Hop[] => {
 			if (hasAnnounceOk(this.version)) return [...route.hops];
 			return [...route.hops, this.hop];
 		};
@@ -609,7 +621,7 @@ export class Publisher {
 		// What the peer decodes for a route: pre-lite-06 wires carry no cost, so a re-price
 		// there must not restart.
 		// moq-lite carries no per-request auth, so a swap alone sends nothing.
-		const onWire = (route: RouteInfo): RouteInfo => ({
+		const onWire = (route: WireRoute): WireRoute => ({
 			...route,
 			cost: hasRouteCost(this.version) ? route.cost : Cost.zero,
 			auth: undefined,
@@ -621,7 +633,7 @@ export class Publisher {
 			!sameInstance(prev, next) ||
 			(hasInstance(this.version) && (prev.route.epoch ?? 0n) !== (next.route.epoch ?? 0n));
 
-		const announce = async (suffix: Path.Valid, route: RouteInfo) => {
+		const announce = async (suffix: Path.Valid, route: WireRoute) => {
 			console.debug(`announce: broadcast=${suffix} active=true instance=${route.instance}`);
 			if (hasAnnounceId(this.version)) announceIds.set(suffix, nextAnnounceId++);
 			await encodeAnnounceBroadcast(
@@ -638,7 +650,7 @@ export class Publisher {
 			);
 		};
 
-		const update = async (suffix: Path.Valid, route: RouteInfo) => {
+		const update = async (suffix: Path.Valid, route: WireRoute) => {
 			if (!hasAnnounceId(this.version)) {
 				await retract(suffix);
 				await announce(suffix, route);
@@ -658,7 +670,7 @@ export class Publisher {
 		};
 
 		// Another instance or epoch: ANNOUNCE_RESTART on lite-07, an end and a start before it.
-		const restart = async (suffix: Path.Valid, route: RouteInfo) => {
+		const restart = async (suffix: Path.Valid, route: WireRoute) => {
 			const id = announceIds.get(suffix);
 			if (id === undefined || !hasAnnounceRestart(this.version)) {
 				await retract(suffix);
@@ -1086,7 +1098,8 @@ export class Publisher {
 			// Serve datagrams concurrently with groups whenever the transport carries them
 			// (the writer exists iff so). No group fallback: otherwise they simply aren't sent.
 			if (this.#datagramWriter && !hasDatagramTracks(this.version)) {
-				legacy = wireOf(front).liveDatagrams(msg.track);
+				const live = wireOf(front).liveDatagrams(msg.track);
+				legacy = live && this.#adopt(live);
 				if (legacy) {
 					if (wireOf(front).localDatagrams) legacy.setPriority(msg.priority);
 					datagrams = this.#runDatagrams(legacy, { sub: msg.id, stamp, priority: legacyPriority })
@@ -1816,6 +1829,7 @@ export class Publisher {
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			let info: TrackInfoMessage;
+			let datagrams: datagram.Consumer | undefined;
 			try {
 				info = await this.#resolveTrackInfo(front, msg.track, hold.signal);
 			} catch (err) {
@@ -1825,13 +1839,21 @@ export class Publisher {
 					toStreamCode(error(err)) !== StreamCode.NotFound
 				)
 					throw err;
-				const datagrams = front.datagrams(msg.track);
+				const asked = front.datagrams(msg.track);
 				try {
-					info = trackInfoMessage(await untilAborted(datagrams.info(), hold.signal), this.version);
-				} finally {
-					datagrams.close();
+					info = trackInfoMessage(await untilAborted(asked.info(), hold.signal), this.version);
+				} catch (err) {
+					asked.close();
+					throw err;
 				}
+				datagrams = asked;
 			}
+			// Lite-05/06: the name's datagram track, read from this answer on, held for the
+			// SUBSCRIBE alongside, beside a stream track too.
+			if (hasDatagrams(this.version) && !hasDatagramTracks(this.version)) {
+				datagrams ??= wireOf(front).liveDatagrams(msg.track);
+			}
+			if (datagrams) this.#holdDatagrams(datagrams, hold.signal);
 			if (watch.revoked()) throw unauthorized(msg.broadcast);
 			await info.encode(stream.writer, this.version);
 			console.debug(`track info: broadcast=${msg.broadcast} track=${msg.track}`);
@@ -1911,6 +1933,32 @@ export class Publisher {
 			tracks?.close();
 			watch.dispose();
 		}
+	}
+
+	// Hold `consumer`'s track from its position for the SUBSCRIBE alongside until `hold`
+	// aborts, as a passive observer in place of `consumer`.
+	#holdDatagrams(consumer: datagram.Consumer, hold: AbortSignal) {
+		const held = hooks.observeDatagramConsumer(consumer);
+		consumer.close();
+		this.#heldDatagrams.add(held);
+		const release = () => {
+			this.#heldDatagrams.delete(held);
+			held.close();
+		};
+		if (hold.aborted) release();
+		else hold.addEventListener("abort", release, { once: true });
+	}
+
+	// `consumer`, or a clone of the oldest hold of the same track, read from that hold's answer on.
+	// Several TRACKs of one track may be open, and the SUBSCRIBE could follow any of them, so it
+	// reads from the earliest answer: a replay only duplicates, a later one would lose.
+	#adopt(consumer: datagram.Consumer): datagram.Consumer {
+		for (const held of this.#heldDatagrams) {
+			if (!hooks.datagramSameTrack(held, consumer)) continue;
+			consumer.close();
+			return held.clone();
+		}
+		return consumer;
 	}
 
 	// Resolve (and cache) a track's immutable TRACK_INFO by asking the application.
@@ -2029,7 +2077,7 @@ export class Publisher {
 		stream: Stream,
 		signal: AbortSignal,
 	): Promise<void> {
-		const track = front.datagrams(msg.track);
+		const track = this.#adopt(front.datagrams(msg.track));
 		track.setPriority(msg.priority);
 		const updates = (async () => {
 			for (;;) {
@@ -2294,11 +2342,8 @@ export class Publisher {
 	 * @internal
 	 */
 	async runProbe(stream: Stream) {
-		// getStats is not yet in the TypeScript WebTransport type definitions.
-		const quic = this.#quic as unknown as {
-			getStats?: () => Promise<{ estimatedSendRate: number | null; smoothedRtt?: number | null }>;
-		};
-		if (!quic.getStats) {
+		const getStats = statsOf(this.#quic);
+		if (!getStats) {
 			// Best-effort: we can't supply bandwidth estimates, so close the
 			// whole bidi (FIN + STOP_SENDING) to let the peer release its end.
 			stream.close();
@@ -2349,7 +2394,7 @@ export class Publisher {
 				// unknown, so a transport exposing only one still has something to
 				// report. Anything this version can't carry is dropped here rather
 				// than by the encoder, so it reads as unknown to every check below.
-				const stats = await quic.getStats();
+				const stats = await getStats();
 				// `smoothedRtt` is a DOMHighResTimeStamp, i.e. a double, but the wire
 				// carries whole milliseconds and the varint encoder throws on a
 				// fractional value. Round before it ever reaches `Probe`.

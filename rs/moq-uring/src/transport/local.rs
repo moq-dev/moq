@@ -114,6 +114,10 @@ impl<S: poll::Session> poll::Session for Local<S> {
 		self.0.receive_window()
 	}
 
+	fn set_limits(&self, limits: moq::Limits) -> Result<(), moq::LimitsError> {
+		self.0.set_limits(limits)
+	}
+
 	fn stream_credit(&self, dir: moq::Dir) -> Option<moq::StreamCredit> {
 		self.0.stream_credit(dir)
 	}

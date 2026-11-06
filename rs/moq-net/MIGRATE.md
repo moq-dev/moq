@@ -4,9 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Send streams report acknowledgement ([#8005](https://github.com/moq-dev/moq/pull/8005))
+### `track::Fill::wanted_changed` waits for a reader to pick up the group served before
 
-`transport::poll::SendStream` gains `acknowledged()`, which returns whether the peer has acknowledged every byte written so far. It defaults to `None`, meaning the transport can't tell, so existing implementations need no change. A transport that tracks acknowledgement returns `Some`, and a wrapper around another stream forwards it.
+`Fill::wanted_changed` (and `poll_wanted_changed`) now yields the next group only once every group the fill accepted reached a reader, which picks it up as it asks for its next group, so a handler writes a batch one group at a time at its fastest reader's pace.
+Serve a fill with `while let Some(sequence) = fill.wanted_changed().await` rather than looping over `Fill::wanted`, which still names the next group owed without waiting: a batch written ahead of its readers lets a bounded cache evict its earlier groups before they are read.
+Serve the fills you take concurrently: each waits on its own readers, so serving them in turn holds every fill behind the readers of the one before.
+Don't block that loop on `group::Producer::ready` while writing a group: a reader reading in another order than the fill's picks the group up but reads none of it until its older groups arrive.
 
 ### Snapshots split connected sessions into idle and active
 

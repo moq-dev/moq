@@ -196,6 +196,10 @@ export default class MoqWatch extends HTMLElement {
 			volume: new Signal(0.5),
 			muted: new Signal(false),
 		},
+		viewer: {
+			// The viewer ceiling in bits per second instead of the catalog's, or 0 to claim none.
+			max: new Signal<number | undefined>(undefined),
+		},
 		text: {
 			// The selected caption track name, or undefined for off (the default; captions are opt-in).
 			target: new Signal<string | undefined>(undefined),
@@ -265,6 +269,7 @@ export default class MoqWatch extends HTMLElement {
 					(muted, volume) => muted || volume === 0,
 				),
 			},
+			viewer: { ...this.controls.viewer, viewers: this.connection.viewers },
 			text: { ...this.controls.text, container: this.#captionsOverlay },
 		});
 		this.signals.cleanup(() => this.player.close());

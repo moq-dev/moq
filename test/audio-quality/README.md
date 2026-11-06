@@ -165,13 +165,15 @@ it: `capture` (worklet delivery and framing, after the media the frame still nee
 `packetization` (that media, placed on the media clock by the newest chunk captured before the
 press), `encode` (codec and container write), `network` (write to arrival, through the relay),
 `decode` (arrival to decoded PCM), `jitter_buffer` (the head's PCM to the first PCM that fills the
-playout delay), `render` (that PCM to the render onset: the worklet hand-off and the context's
-render callback), and `device`, as the stages below name them. `spread` is how far an utterance's frames
+playout delay in effect as it lands, which each press reports as `delay`), `render` (that PCM to the render onset: the worklet hand-off and the context's
+render callback), and `device`, as the stages below name them. The onset is placed on the render
+clock, which a context rendering in large callbacks runs up to one callback ahead of the page, so
+there `render` can be negative and `device` larger by as much. `spread` is how far an utterance's frames
 stray from a steady arrival: the latest arrival relative to its media timestamp minus the earliest,
 which on this ideal path is the capture graph's cadence and what `"auto"`'s jitter estimate measures.
-`latency` and `path` give each one's min, median and max.
+`latency`, `path` and `delay` give each one's min, median and max.
 
-The command prints `latency`, `path`, the completeness counts, and `playback`'s underruns and
+The command prints `latency`, `path`, `delay`, the completeness counts, and `playback`'s underruns and
 stalls, and keeps its run directory even when it passes (set `HARNESS_KEEP=0` to drop it). Nightly runs it and keeps the raw evidence
 alongside the audio quality rows.
 

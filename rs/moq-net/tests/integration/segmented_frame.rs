@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_net::{Hop, Timestamp, Version, frame, origin, track};
+use moq_net::{Timestamp, Version, frame, origin, track};
 
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn, subscribed};
 
@@ -18,7 +18,7 @@ const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"
 const SIZE: usize = 5 * 1024 * 1024 / 2;
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	origin
 }
