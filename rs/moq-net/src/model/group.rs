@@ -4246,6 +4246,7 @@ impl Consumer {
 	/// This is a short read: it returns as soon as anything is ready rather than
 	/// waiting for `out` to fill. A zero count means the group ended when the buffer
 	/// has non-zero capacity.
+	#[cfg(feature = "async")]
 	#[cfg(any(test, feature = "fuzz"))]
 	pub(crate) fn poll_read_frames<const N: usize>(
 		&mut self,
@@ -5591,11 +5592,14 @@ mod test {
 	#[test]
 	fn debt_sheds_the_front_but_not_the_newest_frame() {
 		let mut producer = Info { sequence: 0 }.produce();
-		for frame in mebibytes(4) {
-			producer.write_frame(Timestamp::ZERO, frame).unwrap();
+		// Small frames keep Miri's per-byte cost down; shedding is per frame, not per byte.
+		for index in 0..4u8 {
+			producer
+				.write_frame(Timestamp::ZERO, Bytes::from(vec![index; 1024]))
+				.unwrap();
 		}
 		let freed = producer.handle.shed(u64::MAX, u64::MAX);
-		assert!(freed >= 3 << 20, "freed {freed}");
+		assert!(freed >= 3 * 1024, "freed {freed}");
 		assert_eq!(producer.handle.state.read().held(), 3);
 
 		producer.finish().unwrap();

@@ -157,8 +157,8 @@ def criterion_baseline(directory, discovery, benchmark):
 
 
 # A paired case beyond this change is flagged, and fails the nightly only when its rounds agree.
-# Separate builds of unchanged code measured up to 12% apart in A/A runs, so lowering this
-# waits on fixing that bias (quest/m1/bench-ci.md).
+# Byte-identical builds measured up to 12% apart in A/A runs, so those are not compared, and
+# builds of unchanged source up to 10% apart; see bench/README.md#paired-comparison.
 THRESHOLD_PCT = 10
 # Each alternating round costs seconds per case, so a noisy night confirms only its worst slowdowns.
 CONFIRMATIONS = 20
@@ -203,6 +203,8 @@ def criterion_paired(run):
             target, reason = line.split("\t", 1)
             unavailable.append({"target": target, "reason": reason})
     blocked = {entry["target"] for entry in unavailable}
+    identical_path = run / "paired-identical.txt"
+    identical = set(identical_path.read_text().splitlines()) if identical_path.exists() else set()
     confirmed = {}
     lines = (run / "confirm.tsv").read_text().splitlines() if (run / "confirm.tsv").exists() else []
     for index, line in enumerate(lines, 1):
@@ -225,6 +227,8 @@ def criterion_paired(run):
         case = {"target": target, "id": benchmark, "base_ns": base.get(key), "current_ns": current.get(key)}
         if key not in current:
             case["verdict"] = "removed"
+        elif target in identical:
+            case["verdict"] = "identical"
         elif key not in base:
             case["verdict"] = "unavailable" if target in blocked else "new"
         else:

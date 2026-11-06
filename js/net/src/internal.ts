@@ -12,7 +12,7 @@ import type * as datagram from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
 import { toStreamCode } from "./error.ts";
 import type { Frame, FrameConsumer, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
-import { isAnonymous, type RouteInfo } from "./hop.ts";
+import { isAnonymous, type WireRoute } from "./hop.ts";
 import type * as Instance from "./instance.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -136,12 +136,12 @@ export function presented(
  * candidate supersedes. Supersession is decided among what the reader may see, so a higher epoch
  * it cannot see never hides a route it can.
  */
-export function firstEligible<T extends { readonly route: RouteInfo; readonly prefix?: Path.Valid }>(
+export function firstEligible<T extends { readonly route: WireRoute; readonly prefix?: Path.Valid }>(
 	candidates: readonly T[],
 	admits: (candidate: T) => boolean = () => true,
 ): T | undefined {
 	const admitted = candidates.filter(admits);
-	const byPrefix = new Map<Path.Valid | undefined, RouteInfo[]>();
+	const byPrefix = new Map<Path.Valid | undefined, WireRoute[]>();
 	for (const candidate of admitted) {
 		const routes = byPrefix.get(candidate.prefix);
 		if (routes) routes.push(candidate.route);
@@ -455,8 +455,14 @@ export const hooks: {
 	closeUnusedDatagrams: (producer: datagram.Producer) => boolean;
 	/** Follow this consumer's subscriber priority for transport scheduling. */
 	datagramPriority: (consumer: datagram.Consumer) => Getter<number>;
+	/** Forward data carried by an existing stream without contributing another subscription's demand. */
+	observeDatagrams: (producer: datagram.Producer) => datagram.Consumer;
 	/** Settles once this consumer is closed, the end of whatever request it serves. */
 	datagramClosed: (consumer: datagram.Consumer) => GetPromise<Error | null>;
+	/** Whether two consumers read the same datagram track. */
+	datagramSameTrack: (a: datagram.Consumer, b: datagram.Consumer) => boolean;
+	/** Another consumer at the same position that adds no demand, until its priority is set. */
+	observeDatagramConsumer: (consumer: datagram.Consumer) => datagram.Consumer;
 	/**
 	 * Declare the end a wire subscription received: repeating it is a no-op, and a mid-group
 	 * end may refine the group boundary it falls just before. Throws `ProtocolViolation` on
@@ -604,6 +610,8 @@ export const hooks: {
 	 * Whether a subscriber's track ended and it holds nothing left to read: no group in `[start, end)` that `delivered` lacks.
 	 */
 	spent: (subscriber: Subscriber, start: bigint, end: bigint | undefined, delivered: Delivered) => boolean;
+	/** Whether a subscriber's last read waits on a fill that still owes it a group. Mirrors the Rust `awaits_fill`. */
+	awaitsFill: (subscriber: Subscriber) => boolean;
 	/**
 	 * Mark a wire publisher's reader to park past the end of a bounded window rather than end the
 	 * read there, since its peer reads the end of a stream as the track's. Mirrors the Rust
@@ -770,10 +778,19 @@ export const hooks: {
 	closeUnusedDatagrams: () => {
 		throw new Error("datagram module not loaded");
 	},
+	observeDatagrams: () => {
+		throw new Error("datagram module not loaded");
+	},
 	datagramPriority: () => {
 		throw new Error("datagram module not loaded");
 	},
 	datagramClosed: () => {
+		throw new Error("datagram module not loaded");
+	},
+	datagramSameTrack: () => {
+		throw new Error("datagram module not loaded");
+	},
+	observeDatagramConsumer: () => {
 		throw new Error("datagram module not loaded");
 	},
 	endTrack: () => {
@@ -891,6 +908,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	spent: () => {
+		throw new Error("track.ts not loaded");
+	},
+	awaitsFill: () => {
 		throw new Error("track.ts not loaded");
 	},
 	parked: () => {
@@ -1119,7 +1139,7 @@ export function* coveringPrefixes(path: Path.Valid): Generator<Path.Valid> {
  * a higher epoch at the same prefix. An older incarnation of an instance is never eligible,
  * however cheap, since its publisher was replaced.
  */
-export function superseded(route: RouteInfo, others: Iterable<RouteInfo>): boolean {
+export function superseded(route: WireRoute, others: Iterable<WireRoute>): boolean {
 	return new Epochs(others).supersedes(route);
 }
 
@@ -1131,7 +1151,7 @@ export function superseded(route: RouteInfo, others: Iterable<RouteInfo>): boole
 export class Epochs {
 	readonly #highest = new Map<Instance.Valid | undefined, bigint>();
 
-	constructor(routes: Iterable<RouteInfo>) {
+	constructor(routes: Iterable<WireRoute>) {
 		for (const route of routes) {
 			const epoch = route.epoch ?? 0n;
 			if (epoch === 0n) continue;
@@ -1141,14 +1161,14 @@ export class Epochs {
 	}
 
 	/** Whether a route carries `route`'s instance at a higher epoch. */
-	supersedes(route: RouteInfo): boolean {
+	supersedes(route: WireRoute): boolean {
 		const highest = this.#highest.get(route.instance);
 		return highest !== undefined && highest > (route.epoch ?? 0n);
 	}
 }
 
 /** Prefer identified publishers, then lower static cost. */
-export function compareRoutes(a: RouteInfo, b: RouteInfo): number {
+export function compareRoutes(a: WireRoute, b: WireRoute): number {
 	return Number(isAnonymous(a)) - Number(isAnonymous(b)) || (a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0);
 }
 
@@ -1160,7 +1180,7 @@ export function compareRoutes(a: RouteInfo, b: RouteInfo): number {
  * matching `route_order` in rs/moq-net for routes a node did not get from a cluster peer, which
  * is every route here.
  */
-export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: RouteInfo, b: RouteInfo): number {
+export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): number {
 	const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
 	if (order !== 0 || path === prefix) return order;
 	const ha = spreadHash(path, a.instance ?? "");

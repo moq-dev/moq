@@ -14,7 +14,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Error, Hop, StreamError, Timescale, Timestamp, Version, broadcast, datagram, origin};
+use moq_net::{Error, StreamError, Timescale, Timestamp, Version, broadcast, datagram, origin};
 use support::datagram_priority;
 use support::harness::{MockPair, peer_with_latency};
 
@@ -23,7 +23,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const TRACK: &str = "audio";
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -256,12 +256,18 @@ async fn a_lite07_stream_subscription_never_takes_datagrams() {
 	);
 }
 
-/// Lite-05/06 carry a datagram track as a SUBSCRIBE of its name, keeping only the group
+/// Lite-05/06 and moq-transport carry a datagram track as a SUBSCRIBE of its name, keeping only the group
 /// datagrams. Both ends run this crate, so this covers asking an old publisher for a
 /// datagram track and serving an old subscriber's SUBSCRIBE from one.
 #[kio::test]
-async fn lite05_and_lite06_map_a_datagram_track_onto_a_subscription() {
-	for version in ["moq-lite-05", "moq-lite-06"] {
+async fn legacy_versions_map_a_datagram_track_onto_a_subscription() {
+	for version in [
+		"moq-lite-05",
+		"moq-lite-06",
+		"moq-transport-18",
+		"moq-transport-20",
+		"moq-transport-22",
+	] {
 		let chain = Chain::new(&[version]).await;
 		let mut producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
 		producer.append(millis(1), &b"early"[..]).unwrap();
@@ -290,13 +296,20 @@ async fn lite05_and_lite06_map_a_datagram_track_onto_a_subscription() {
 	}
 }
 
-/// Lite-05/06 carry a name's stream track and datagram track on one subscription, as
-/// moq-transport does, so a name with both delivers each to its own reader, directly and
+/// Lite-05/06 and moq-transport carry a name's stream track and datagram track on one
+/// subscription, so a name with both delivers each to its own reader, directly and
 /// through a relay whose hops are both old. The datagrams ride the subscription, at its
 /// priority.
 #[kio::test]
-async fn lite05_and_lite06_carry_both_kinds_of_a_name() {
-	for hops in [&["moq-lite-05"][..], &["moq-lite-06"], &["moq-lite-06", "moq-lite-06"]] {
+async fn legacy_versions_carry_both_kinds_of_a_name() {
+	for hops in [
+		&["moq-lite-05"][..],
+		&["moq-lite-06"],
+		&["moq-lite-06", "moq-lite-06"],
+		&["moq-transport-18"],
+		&["moq-transport-22"],
+		&["moq-transport-18", "moq-transport-22"],
+	] {
 		let chain = Chain::new(hops).await;
 		let mut track = chain
 			.publication
@@ -523,7 +536,12 @@ async fn an_old_subscriber_keeps_a_stream_track_across_mixed_hops() {
 /// A datagram track can't be asked for over a version or transport without datagrams.
 #[kio::test]
 async fn a_datagram_track_needs_datagrams() {
-	for (version, transport) in [("moq-lite-03", true), ("moq-lite-04", true), ("moq-lite-07-wip", false)] {
+	for (version, transport) in [
+		("moq-lite-03", true),
+		("moq-lite-04", true),
+		("moq-lite-07-wip", false),
+		("moq-transport-22", false),
+	] {
 		let chain = Chain::new(&[version]).await;
 		if !transport {
 			// The second node subscribes through the session it accepted.
@@ -536,35 +554,34 @@ async fn a_datagram_track_needs_datagrams() {
 	}
 }
 
-/// moq-transport carries no datagram tracks: asking for one finds nothing, and the stream
-/// track of the same name is served as usual.
+/// Keeping the broadcast handle across an idle subscription must not leave its datagram
+/// readers attached to the old shared producer or accept stale stream metadata as an answer.
 #[kio::test]
-async fn moq_transport_has_no_datagram_tracks() {
-	let chain = Chain::new(&["moq-transport-22"]).await;
-	let mut track = chain
-		.publication
-		.broadcast()
-		.create_track(TRACK, moq_net::track::Info::default().with_timescale(Timescale::MILLI))
-		.unwrap();
-	let _datagrams = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
+async fn ietf_datagram_readers_rejoin_a_lingering_broadcast() {
+	let chain = Chain::new(&["moq-transport-18", "moq-transport-22"]).await;
+	let mut producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
 	let remote = chain.remote().await;
-	assert!(matches!(remote.datagrams(TRACK), Err(Error::NotFound)));
-
-	let mut subscriber = kio::clock::timeout(TIMEOUT, remote.track(TRACK).unwrap().subscribe(None))
-		.await
-		.expect("subscribe timeout")
-		.expect("subscribe");
-	support::harness::subscribed(&track).await;
-	track.write_frame(millis(1), &b"frame"[..]).unwrap();
-	let mut group = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
-		.await
-		.expect("group timeout")
-		.unwrap()
-		.expect("a group");
-	assert_eq!(
-		&group.read_frame().await.unwrap().expect("a frame").payload[..],
-		b"frame"
-	);
+	for priority in [2, 3] {
+		let mut consumer = remote.datagrams(TRACK).unwrap();
+		consumer.set_priority(priority);
+		kio::clock::timeout(TIMEOUT, datagram_priority(&producer, Some(priority)))
+			.await
+			.expect("the rejoined request never reached the publisher");
+		kio::clock::timeout(TIMEOUT, consumer.info())
+			.await
+			.expect("metadata timeout")
+			.unwrap();
+		producer.append(millis(priority as u64), &b"live"[..]).unwrap();
+		assert_eq!(recv(&mut consumer).await.unwrap().unwrap().payload.as_ref(), b"live");
+		consumer.set_priority(-3);
+		kio::clock::timeout(TIMEOUT, datagram_priority(&producer, Some(-3)))
+			.await
+			.expect("the rejoined reader's lowered priority never arrived");
+		drop(consumer);
+		kio::clock::timeout(TIMEOUT, datagram_priority(&producer, None))
+			.await
+			.expect("the shared subscription stayed wanted");
+	}
 }
 
 /// A publisher that answers a datagram request and writes at once sends the datagram right
@@ -573,7 +590,14 @@ async fn moq_transport_has_no_datagram_tracks() {
 /// datagram, and routes the datagram before it ends the track.
 #[kio::test]
 async fn a_datagram_sent_right_behind_its_answer_arrives() {
-	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
+	for version in [
+		"moq-lite-05",
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-18",
+		"moq-transport-20",
+		"moq-transport-22",
+	] {
 		for finish in [false, true] {
 			let chain = Chain::new(&[version]).await;
 			let requests = chain.publication.broadcast().requests();
@@ -600,7 +624,7 @@ async fn a_datagram_sent_right_behind_its_answer_arrives() {
 			// The second node subscribes through the session it accepted.
 			assert_eq!(
 				chain.pairs[0].server.stats().datagrams_unrouted,
-				Some(0),
+				version.parse::<Version>().unwrap().is_lite().then_some(0),
 				"{version} finish={finish}"
 			);
 		}
@@ -712,5 +736,24 @@ async fn a_track_ended_under_a_datagram_flood_keeps_its_stream() {
 		kio::clock::timeout(TIMEOUT, chain.pairs[0].server.idle())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the track never released its stream"));
+	}
+}
+
+/// Ending a track must preserve its queued datagrams across the receiver's budget.
+#[kio::test]
+async fn an_ietf_datagram_burst_sent_with_its_end_arrives() {
+	for version in ["moq-transport-18", "moq-transport-20", "moq-transport-22"] {
+		let chain = Chain::new(&[version]).await;
+		let mut producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
+		let mut consumer = chain.consume(&producer, 5).await;
+		for i in 0..64 {
+			producer.append(millis(i), bytes::Bytes::from(vec![i as u8])).unwrap();
+		}
+		producer.finish();
+		for i in 0..64 {
+			let datagram = recv(&mut consumer).await.unwrap().expect("queued datagram");
+			assert_eq!(datagram.sequence, i, "{version}");
+		}
+		assert!(recv(&mut consumer).await.unwrap().is_none(), "{version}");
 	}
 }

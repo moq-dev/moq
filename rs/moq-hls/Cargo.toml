@@ -15,7 +15,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 [features]
 default = ["server"]
 # The import and export gateways, which drive HTTP fetches and background watchers as async code.
-async = ["kio/async", "moq-mux/async"]
+async = ["kio/async", "moq-mux/async", "moq-crypto/provider"]
 server = ["async", "dep:axum", "dep:http-body"]
 
 [dependencies]
@@ -27,14 +27,13 @@ http-body = { workspace = true, optional = true }
 humantime = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
 m3u8-rs = "6"
+moq-crypto = { workspace = true, features = ["cpu"] }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 percent-encoding = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-no-provider", "gzip"] }
 rind = { workspace = true }
-# Installed as rustls's process default when the host installed none, since reqwest reads it.
-rind-rustls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

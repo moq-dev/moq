@@ -4348,7 +4348,6 @@ dependencies = [
  "reqwest",
  "rind",
  "rind-jsonwebtoken",
- "rind-rustls",
  "rustls",
  "rustls-platform-verifier",
  "serde",
@@ -4387,7 +4386,7 @@ dependencies = [
 
 [[package]]
 name = "moq-bench"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "humantime",
@@ -4395,7 +4394,6 @@ dependencies = [
  "libc",
  "moq-net",
  "moq-tokio",
- "moq-uring",
  "procfs",
  "rand 0.10.3",
  "serde",
@@ -4425,6 +4423,7 @@ dependencies = [
  "moq-tokio",
  "moq-video",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "usage-rs",
@@ -4566,13 +4565,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-e2ee"
-version = "0.0.11"
-dependencies = [
- "workspace-hack",
-]
-
-[[package]]
 name = "moq-ffi"
 version = "0.4.12"
 dependencies = [
@@ -4638,6 +4630,7 @@ dependencies = [
  "kio",
  "m3u8-rs",
  "moq-archive",
+ "moq-crypto",
  "moq-hls",
  "moq-json",
  "moq-mux",
@@ -4648,7 +4641,6 @@ dependencies = [
  "rand 0.10.3",
  "reqwest",
  "rind",
- "rind-rustls",
  "serde",
  "serde_json",
  "tempfile",
@@ -5008,6 +5000,7 @@ dependencies = [
  "futures",
  "hang",
  "kio",
+ "moq-crypto",
  "moq-mux",
  "moq-net",
  "moq-tokio",

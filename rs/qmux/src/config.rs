@@ -79,6 +79,11 @@ pub struct Config {
 	/// an application is actively sending. Only the record-framed drafts (QMux01+) carry
 	/// `QX_PING`. Default: 1s.
 	pub rtt_interval: Option<Duration>,
+
+	/// Keep `limits.receive_window` for the session's life, for a carrier that sizes its own
+	/// buffers by it, such as a WebRTC data channel: [`Session::set_limits`](crate::Session::set_limits)
+	/// then refuses to change it. Default: false.
+	pub fixed_receive_window: bool,
 }
 
 impl Default for Config {
@@ -93,6 +98,7 @@ impl Default for Config {
 			max_datagram_frame_size: Some(DEFAULT_MAX_RECORD_SIZE),
 			handshake_timeout: Some(Duration::from_secs(10)),
 			rtt_interval: Some(Duration::from_secs(1)),
+			fixed_receive_window: false,
 		}
 	}
 }

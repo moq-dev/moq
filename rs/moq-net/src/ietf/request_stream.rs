@@ -323,14 +323,8 @@ pub(super) fn buffer_error<W: crate::transport::poll::SendStream>(
 	reason: &str,
 	version: Version,
 ) -> Result<(), Error> {
-	writer.buffer_message(
-		super::RequestError::ID,
-		&super::RequestError {
-			error_code: super::error::request::to_code(err, kind, version),
-			reason_phrase: reason.into(),
-			retry_interval: 0,
-		},
-	)
+	let error = super::RequestError::refuse(err, kind, reason, version);
+	writer.buffer_message(super::RequestError::ID, &error)
 }
 
 /// A framed subscription update, preserving omitted preferences.

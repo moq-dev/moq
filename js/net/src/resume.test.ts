@@ -3,7 +3,7 @@ import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
-import { RouteInfo } from "./hop.ts";
+import { WireRoute } from "./hop.ts";
 import type { Session as IetfSession } from "./ietf/session.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
@@ -39,7 +39,7 @@ async function isPending(promise: Promise<unknown>): Promise<boolean> {
 
 /** A stand-in session announcing `path` under the shared instance at `cost`, serving `source`. */
 function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
-	const handle = wireOf(origin).receive(path, RouteInfo.normalize({ instance: INSTANCE, cost }));
+	const handle = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost }));
 	void (async () => {
 		for await (const request of handle.requested()) request.serve(source.consume());
 	})();
@@ -259,6 +259,60 @@ test("a group below the replacement's resume point is backfilled", async () => {
 		await clock.advance(Nano.zero);
 		expect(drain(sub)).toEqual([4n]);
 	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
+// The switch's backfill waits on a fill the finished new route's handler still owes, rather
+// than counting as drained while the fill is out.
+test("a backfill waits on a fill the finished route still owes", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	const requests = tb.producer.requests();
+	const fills: track.Fill[] = [];
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) fills.push(fill);
+	})();
+	tb.write(6n);
+	tb.producer.finish();
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Milli(3_600_000) } });
+	try {
+		await clock.advance(Nano.zero);
+		ta.write(5n);
+		expect(drain(sub)).toEqual([5n]);
+		front.serve(handles[1]);
+		await clock.advance(Nano.zero);
+		expect(drain(sub)).toEqual([6n]);
+		await clock.advance(Nano.zero);
+		expect(fills.length).toBeGreaterThan(0);
+		expect(drain(sub)).toEqual([]);
+		expect(sub.closed.peek()).toBeUndefined();
+		// Only group 2 is in the route's history.
+		for (const fill of fills) {
+			for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
+				if (sequence !== 2n) {
+					fill.dropGroups(sequence, sequence + 1n);
+					continue;
+				}
+				const group = fill.accept(sequence);
+				group.writeFrame({ payload: enc.encode("2.0") });
+				group.finish();
+			}
+			fill.close();
+		}
+		await clock.advance(Nano.zero);
+		expect(drain(sub)).toEqual([2n]);
+	} finally {
+		requests.close();
 		sub.close();
 		front.consumer.close();
 		for (const handle of handles) handle.close();
@@ -1193,7 +1247,7 @@ test("between routes a reader keeps reading the copy it has", async () => {
 	expect(drain(sub)).toEqual([0n]);
 
 	// The next route has not answered when the old one is retracted.
-	const next = wireOf(origin).receive(path, RouteInfo.normalize({ instance: INSTANCE, cost: 1n }));
+	const next = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost: 1n }));
 	const asked = next.requested();
 	disposeA();
 	await settle();
@@ -2082,7 +2136,7 @@ test("a fetched group that fails on the route still serving waits for the next r
 	const b = new BroadcastProducer();
 	const ta = copy(a);
 	const tb = copy(b);
-	// RouteInfo a's request handler holds the refetch of its failed group open, as Rust's tests do
+	// WireRoute a's request handler holds the refetch of its failed group open, as Rust's tests do
 	// with `requests()`: without one, a miss there is NotFound at once.
 	const pending = ta.producer.requests();
 	const failing = ta.write(5n, 1, false);
@@ -2114,7 +2168,7 @@ test("a group handed out already failed with its route still continues on the ne
 	const b = new BroadcastProducer();
 	const ta = copy(a);
 	const tb = copy(b);
-	// RouteInfo a's request handler holds the refetch of its failed group open until the next route.
+	// WireRoute a's request handler holds the refetch of its failed group open until the next route.
 	const pending = ta.producer.requests();
 	front.serve(a.consume());
 	const sub = front.consumer.track("seq").subscribe();

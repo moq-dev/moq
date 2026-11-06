@@ -748,11 +748,11 @@ mod tests {
 	fn golden() -> Vec<crate::fuzz::Announced> {
 		use crate::fuzz::Announced;
 		vec![
-			Announced::Start(Path::from_static("room/a/cam"), hops(&[0x1111, 0x2222])),
-			Announced::Start(Path::from_static("room/a/mic"), hops(&[0x3333, 0x2222])),
-			Announced::Update(0, hops(&[0x4444, 0x2222])),
+			Announced::Start(Path::from_static("room/a/cam"), vec![0x1111, 0x2222]),
+			Announced::Start(Path::from_static("room/a/mic"), vec![0x3333, 0x2222]),
+			Announced::Update(0, vec![0x4444, 0x2222]),
 			Announced::End(1),
-			Announced::Start(Path::from_static("room/b"), hops(&[0x5555, 0x2222])),
+			Announced::Start(Path::from_static("room/b"), vec![0x5555, 0x2222]),
 		]
 	}
 
