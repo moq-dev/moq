@@ -18,6 +18,7 @@ import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
+import { inspect } from "./stats.ts";
 import { credential, fallback, hold, type Presentation } from "./tokens.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
@@ -525,7 +526,7 @@ async function connectTransport(
 	});
 
 	try {
-		return await Promise.race([terminal, negotiate(url, session, wiring, setup)]);
+		return await Promise.race([terminal, inspect(session).then(() => negotiate(url, session, wiring, setup))]);
 	} catch (failure) {
 		// We refused the peer's SETUP and already closed with the code that says why.
 		if (failure instanceof ProtocolViolation) throw failure;

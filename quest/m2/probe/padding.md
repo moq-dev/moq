@@ -84,4 +84,4 @@ Tests, on `@moq/clock`'s `Manual`:
 
 ## Required
 
-- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - shipping Chrome and Safari have no estimate for a probe cluster to pace against or raise until the PROBE estimate feeds the allocator
+- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - a probe cluster needs a browser `getStats()` send estimate to pace against, which shipping Chrome lacks and Safari reports as null

@@ -4,7 +4,7 @@ import { getter, Once, race, Signal } from "@moq/signals";
 import { announcedView } from "./announced.test-util";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
-import { type Cost, HopSchema, RouteInfo } from "./hop.ts";
+import { type Cost, HopSchema, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
 import { chainHash, presented, spreadHash } from "./internal.ts";
 import { SessionBroadcast, textFrame } from "./mock.ts";
@@ -31,7 +31,7 @@ function serve(
 	origin: Producer,
 	prefix: Path.Valid,
 	consume: () => BroadcastConsumer,
-	route: RouteInfo = RouteInfo.default,
+	route: WireRoute = WireRoute.default,
 ) {
 	const handle = wireOf(origin).receive(prefix, route);
 	void (async () => {
@@ -124,7 +124,7 @@ test("a borrowed table exposes dynamic serving and a live scoped broadcast map",
 	const table: Table = origin;
 	const scope = Path.Pattern.parse("room/**");
 	const live = await announcedView(origin, scope);
-	const changes: ReadonlyMap<Path.Valid, RouteInfo>[] = [];
+	const changes: ReadonlyMap<Path.Valid, WireRoute>[] = [];
 	const stop = live.subscribe((value) => changes.push(value));
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().size).toBe(0);
@@ -141,18 +141,18 @@ test("a borrowed table exposes dynamic serving and a live scoped broadcast map",
 	localRoute.announce();
 	await settle();
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(localPath)).toEqual(RouteInfo.normalize({ instance: INSTANCE, cost: 4n }));
+	expect(live.peek().get(localPath)).toEqual(WireRoute.normalize({ instance: INSTANCE, cost: 4n }));
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(changes.some((value) => value.get(localPath)?.cost === 4n)).toBe(true);
 
 	const prefix = Path.from("room");
 	const dynamic = table.routePrefix(prefix, { cost: 2n });
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(prefix)).toEqual(RouteInfo.normalize({ ...wireOf(dynamic).info, cost: 2n }));
+	expect(live.peek().get(prefix)).toEqual(WireRoute.normalize({ ...wireOf(dynamic).info, cost: 2n }));
 	dynamic.setCost(3n);
 	await settle();
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(prefix)).toEqual(RouteInfo.normalize({ ...wireOf(dynamic).info, cost: 3n }));
+	expect(live.peek().get(prefix)).toEqual(WireRoute.normalize({ ...wireOf(dynamic).info, cost: 3n }));
 
 	dynamic.close();
 	local.close();
@@ -171,26 +171,26 @@ test("an announced local path competes with a received route on cost", async () 
 	const remote = wireOf(origin).receive(path, { instance: INSTANCE, hops: [PEER], cost: 5n });
 	const live = await announcedView(consumer);
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(path)).toEqual(RouteInfo.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
+	expect(live.peek().get(path)).toEqual(WireRoute.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
 
 	// Unannounced, it competes for nothing.
 	const localRoute = origin.route(path, { hidden: true, instance: INSTANCE, cost: 9n });
 	const local = localRoute.broadcast;
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(path)).toEqual(RouteInfo.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
+	expect(live.peek().get(path)).toEqual(WireRoute.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
 
 	// Cheaper wins; a tie falls to the local broadcast.
 	localRoute.announce();
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(path)).toEqual(RouteInfo.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
+	expect(live.peek().get(path)).toEqual(WireRoute.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
 	localRoute.setCost(5n);
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(path)).toEqual(RouteInfo.normalize({ instance: INSTANCE, cost: 5n }));
+	expect(live.peek().get(path)).toEqual(WireRoute.normalize({ instance: INSTANCE, cost: 5n }));
 
 	local.close();
 	await settle();
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(live.peek().get(path)).toEqual(RouteInfo.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
+	expect(live.peek().get(path)).toEqual(WireRoute.normalize({ instance: INSTANCE, hops: [PEER], cost: 5n }));
 
 	remote.close();
 	await settle();
@@ -211,7 +211,7 @@ test("a scoped route remains visible when an exact local path is outside the sco
 
 	await new Promise<void>((resolve) => setImmediate(resolve));
 
-	expect((await announcedView(origin)).peek().get(path)).toMatchObject(RouteInfo.default);
+	expect((await announcedView(origin)).peek().get(path)).toMatchObject(WireRoute.default);
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().get(path)).toMatchObject({ cost: 5n });
 
@@ -441,7 +441,7 @@ test("a remote entry resolves by path and retracts on dispose", async () => {
 
 	// Announced streams include remote entries.
 	const announced = consumer.routes();
-	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start", route: RouteInfo.default });
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start", route: WireRoute.default });
 
 	dispose();
 	expect(await announced.next()).toMatchObject({ prefix: path, kind: "end" });
@@ -493,7 +493,7 @@ test("a local publish shadows a remote entry", async () => {
 
 	// One path, one announcement, even though both tables route it.
 	const announced = consumer.routes();
-	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start", route: RouteInfo.default });
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start", route: WireRoute.default });
 
 	// Dropping the local publish falls back to the remote entry without a retraction.
 	local.close();
@@ -722,7 +722,7 @@ test("an identical reconnect restarts without an instance and is quiet with one"
 		const consumer = origin.consume();
 		const path = Path.from("room");
 		const announced = consumer.routes();
-		const route = RouteInfo.normalize({ instance, hops: [PEER] });
+		const route = WireRoute.normalize({ instance, hops: [PEER] });
 
 		const old = wireOf(origin).receive(path, route);
 		expect(await announced.next()).toMatchObject({ prefix: path, kind: "start" });
@@ -1121,7 +1121,7 @@ test("a prefix route can start hidden, withdraw and come back while it keeps yie
 	route.announce();
 	expect(route.announced).toBe(true);
 	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(
-		RouteInfo.normalize({ instance: route.instance, cost: 3n }),
+		WireRoute.normalize({ instance: route.instance, cost: 3n }),
 	);
 	const first = consumer.request(path);
 	const asked = (await requests.next()).value;
@@ -1177,7 +1177,7 @@ test("a request prefers a cheaper received route over an announced local broadca
 		origin,
 		path,
 		provider(upstream),
-		RouteInfo.normalize({ instance: INSTANCE, hops: [PEER], cost: 1n }),
+		WireRoute.normalize({ instance: INSTANCE, hops: [PEER], cost: 1n }),
 	);
 	const localRoute = origin.route(path, { instance: INSTANCE, cost: 3n });
 	const local = localRoute.broadcast;
@@ -1224,13 +1224,13 @@ test("the cheapest received route competes with the local broadcast, not the new
 		origin,
 		path,
 		via("cheap"),
-		RouteInfo.normalize({ instance: INSTANCE, hops: [PEER], cost: 1n }),
+		WireRoute.normalize({ instance: INSTANCE, hops: [PEER], cost: 1n }),
 	);
 	const pricey = serve(
 		origin,
 		path,
 		via("pricey"),
-		RouteInfo.normalize({ instance: INSTANCE, hops: [PEER], cost: 10n }),
+		WireRoute.normalize({ instance: INSTANCE, hops: [PEER], cost: 10n }),
 	);
 	const localRoute = origin.route(path, { instance: INSTANCE, cost: 5n });
 	const local = localRoute.broadcast;
@@ -1238,7 +1238,7 @@ test("the cheapest received route competes with the local broadcast, not the new
 	await new Promise<void>((resolve) => setImmediate(resolve));
 
 	expect((await announcedView(consumer)).peek().get(path)).toEqual(
-		RouteInfo.normalize({ instance: INSTANCE, hops: [PEER], cost: 1n }),
+		WireRoute.normalize({ instance: INSTANCE, hops: [PEER], cost: 1n }),
 	);
 	const request = consumer.request(path);
 	await settle();
@@ -1391,7 +1391,7 @@ test("a peer is offered and served the cheapest originated route", async () => {
 	const pricey = origin.routePrefix(prefix, { instance: INSTANCE, cost: 10n });
 
 	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(
-		RouteInfo.normalize({ instance: INSTANCE, cost: 1n }),
+		WireRoute.normalize({ instance: INSTANCE, cost: 1n }),
 	);
 	const pending = wireOf(consumer).demand(Path.from("live/cam"));
 	const { value: req } = await cheap.requested().next();
@@ -1403,11 +1403,11 @@ test("a peer is offered and served the cheapest originated route", async () => {
 	const localRoute = origin.route(prefix, { instance: INSTANCE, cost: 5n });
 	const local = localRoute.broadcast;
 	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(
-		RouteInfo.normalize({ instance: INSTANCE, cost: 1n }),
+		WireRoute.normalize({ instance: INSTANCE, cost: 1n }),
 	);
 	localRoute.setCost(0n);
 	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(
-		RouteInfo.normalize({ instance: INSTANCE, cost: 0n }),
+		WireRoute.normalize({ instance: INSTANCE, cost: 0n }),
 	);
 
 	local.close();
@@ -1524,7 +1524,7 @@ test("an outranked route keeps serving until its replacement answers", async () 
 
 	const older = new BroadcastProducer();
 	const keepOlder = older.consume();
-	const disposeOlder = serve(origin, path, () => keepOlder.clone(), RouteInfo.normalize({ instance: INSTANCE }));
+	const disposeOlder = serve(origin, path, () => keepOlder.clone(), WireRoute.normalize({ instance: INSTANCE }));
 
 	const request = consumer.request(path);
 	await settle();
@@ -1644,13 +1644,13 @@ test("a request on a replaced instance fails over to another route of it", async
 
 	const primary = new BroadcastProducer();
 	const keepPrimary = primary.consume();
-	const disposePrimary = serve(origin, path, () => keepPrimary.clone(), RouteInfo.normalize({ instance: INSTANCE }));
+	const disposePrimary = serve(origin, path, () => keepPrimary.clone(), WireRoute.normalize({ instance: INSTANCE }));
 	const replica = new BroadcastProducer();
 	const disposeReplica = serve(
 		origin,
 		path,
 		provider(replica),
-		RouteInfo.normalize({ instance: INSTANCE, cost: 5n }),
+		WireRoute.normalize({ instance: INSTANCE, cost: 5n }),
 	);
 	const request = consumer.request(path);
 	await settle();
@@ -1658,7 +1658,7 @@ test("a request on a replaced instance fails over to another route of it", async
 	expect(first).toBeDefined();
 
 	const restarted = new BroadcastProducer();
-	const disposeRestarted = serve(origin, path, provider(restarted), RouteInfo.normalize({ instance: newer }));
+	const disposeRestarted = serve(origin, path, provider(restarted), WireRoute.normalize({ instance: newer }));
 	await settle();
 	expect(request.active.peek()).toBe(first);
 
@@ -1697,7 +1697,7 @@ test("a request on a replaced instance fails over to a local replica of it", asy
 
 	const primary = new BroadcastProducer();
 	const keepPrimary = primary.consume();
-	const disposePrimary = serve(origin, path, () => keepPrimary.clone(), RouteInfo.normalize({ instance: INSTANCE }));
+	const disposePrimary = serve(origin, path, () => keepPrimary.clone(), WireRoute.normalize({ instance: INSTANCE }));
 	const localRoute = origin.route(path, { instance: INSTANCE, cost: 5n });
 	const local = localRoute.broadcast;
 	const request = consumer.request(path);
@@ -1706,7 +1706,7 @@ test("a request on a replaced instance fails over to a local replica of it", asy
 	expect(first).toBeDefined();
 
 	const restarted = new BroadcastProducer();
-	const disposeRestarted = serve(origin, path, provider(restarted), RouteInfo.normalize({ instance: newer }));
+	const disposeRestarted = serve(origin, path, provider(restarted), WireRoute.normalize({ instance: newer }));
 	await settle();
 	expect(request.active.peek()).toBe(first);
 
@@ -1741,7 +1741,7 @@ test("a stale takeover's refusal leaves a request whose source came back", async
 
 	const localRoute = origin.route(path, { instance: INSTANCE, cost: 2n });
 	const local = localRoute.broadcast;
-	const standby = wireOf(origin).receive(path, RouteInfo.normalize({ instance: INSTANCE, cost: 5n }));
+	const standby = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost: 5n }));
 	const asked = standby.requested();
 	const request = consumer.request(path);
 	await settle();
@@ -1754,7 +1754,7 @@ test("a stale takeover's refusal leaves a request whose source came back", async
 		origin,
 		path,
 		provider(restarted),
-		RouteInfo.normalize({ instance: newer, cost: 1n }),
+		WireRoute.normalize({ instance: newer, cost: 1n }),
 	);
 	await settle();
 	expect(request.active.peek()).toBe(first);
@@ -1783,7 +1783,7 @@ test("a request ends when its winning source goes, even with a standby", async (
 	const path = Path.from("standby");
 
 	const standby = new BroadcastProducer();
-	const disposeStandby = serve(origin, path, provider(standby), RouteInfo.normalize({ cost: 5n }));
+	const disposeStandby = serve(origin, path, provider(standby), WireRoute.normalize({ cost: 5n }));
 	const winner = new BroadcastProducer();
 	const keepWinner = winner.consume();
 	const disposeWinner = serve(origin, path, () => keepWinner.clone());
@@ -1841,7 +1841,7 @@ test("a better route's refusal ends a served request", async () => {
 	const consumer = origin.consume();
 	const served = new BroadcastProducer();
 	// One instance, so the narrower route serves the same instance and the request follows it.
-	const disposeWide = serve(origin, Path.from(""), provider(served), RouteInfo.normalize({ instance: INSTANCE }));
+	const disposeWide = serve(origin, Path.from(""), provider(served), WireRoute.normalize({ instance: INSTANCE }));
 
 	const request = consumer.request(Path.from("live/cam"));
 	await settle();
@@ -2679,14 +2679,14 @@ test("re-pricing from the current route keeps the instance", () => {
 	const origin = new Producer();
 	const handle = origin.routePrefix(Path.from("live"), { instance: INSTANCE, cost: 5n });
 	handle.setCost(1n);
-	expect(wireOf(handle).info).toEqual(RouteInfo.normalize({ instance: INSTANCE, cost: 1n }));
+	expect(wireOf(handle).info).toEqual(WireRoute.normalize({ instance: INSTANCE, cost: 1n }));
 
 	const broadcastRoute = origin.route(Path.from("room"), { hidden: true, instance: INSTANCE, cost: 5n });
 	const broadcast = broadcastRoute.broadcast;
 	expect(wireOf(broadcastRoute).info).toBeUndefined();
 	broadcastRoute.announce();
 	broadcastRoute.setCost(1n);
-	expect(wireOf(broadcastRoute).info).toEqual(RouteInfo.normalize({ instance: INSTANCE, cost: 1n }));
+	expect(wireOf(broadcastRoute).info).toEqual(WireRoute.normalize({ instance: INSTANCE, cost: 1n }));
 	broadcastRoute.withdraw();
 	expect(wireOf(broadcastRoute).info).toBeUndefined();
 
@@ -3016,7 +3016,7 @@ test("published names refuse navigation segments", () => {
 			const path = Path.from(name);
 			expect(() => origin.route(path, { hidden: true }).broadcast).toThrow();
 			expect(() => origin.routePrefix(path)).toThrow();
-			expect(() => wireOf(origin).receive(path, RouteInfo.default)).toThrow();
+			expect(() => wireOf(origin).receive(path, WireRoute.default)).toThrow();
 		}
 		const scoped = origin.scope(Path.from("room/.."), new Path.Patterns([Path.Pattern.all()]));
 		expect(() => scoped.route(Path.from("cam"), { hidden: true }).broadcast).toThrow();
