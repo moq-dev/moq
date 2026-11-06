@@ -10337,6 +10337,7 @@ mod tests {
 			max_delay: Duration::ZERO,
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
+			update: 0,
 		}
 	}
 
