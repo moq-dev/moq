@@ -367,6 +367,13 @@ struct Arrival {
 	traffic: Arc<SessionTraffic>,
 	sent: u64,
 	received: u64,
+	sample: Sample,
+}
+
+/// What readouts have seen of one session's payload, carried across a retag so a change of
+/// row neither forgets recent activity nor misses a move made before it.
+#[derive(Clone, Copy, Debug)]
+struct Sample {
 	/// The counters as of the last readout, to notice payload moving between readouts.
 	seen: (u64, u64),
 	/// The first readout that saw the counters move since the one before it.
@@ -380,23 +387,23 @@ impl SessionBytes {
 		Arc::as_ptr(traffic) as usize
 	}
 
-	/// Count `traffic` here from `(sent, received)` on.
-	fn join(&mut self, traffic: Arc<SessionTraffic>, (sent, received): (u64, u64)) {
+	/// Count `traffic` here from `(sent, received)` on, continuing `sample`.
+	fn join(&mut self, traffic: Arc<SessionTraffic>, (sent, received): (u64, u64), sample: Sample) {
 		self.live.insert(
 			Self::key(&traffic),
 			Arrival {
 				traffic,
 				sent,
 				received,
-				seen: (sent, received),
-				moved: None,
+				sample,
 			},
 		);
 	}
 
 	/// Stop counting `traffic` here, keeping what it recorded so far, and return the
-	/// counters at that cut: a concurrent write lands on one side of the single load.
-	fn leave(&mut self, traffic: &Arc<SessionTraffic>) -> (u64, u64) {
+	/// counters at that cut, where a concurrent write lands on one side of the single
+	/// load, with the session's sample for its next row.
+	fn leave(&mut self, traffic: &Arc<SessionTraffic>) -> ((u64, u64), Sample) {
 		let (sent, received) = traffic.load();
 		let arrival = self
 			.live
@@ -404,7 +411,7 @@ impl SessionBytes {
 			.expect("a session is live on its current row");
 		self.sent += sent - arrival.sent;
 		self.received += received - arrival.received;
-		(sent, received)
+		((sent, received), arrival.sample)
 	}
 
 	/// The row's `(sent, received)` totals and its connected sessions' [`Activity`] at `now`.
@@ -424,12 +431,13 @@ impl SessionBytes {
 				fence(Ordering::Acquire);
 			}
 			let (now_sent, now_received) = arrival.traffic.load();
-			if (now_sent, now_received) != arrival.seen {
-				arrival.seen = (now_sent, now_received);
-				arrival.moved = Some(now);
+			let sample = &mut arrival.sample;
+			if (now_sent, now_received) != sample.seen {
+				sample.seen = (now_sent, now_received);
+				sample.moved = Some(now);
 			}
 			if arrival.traffic.connected.load(Ordering::Relaxed) {
-				match arrival.moved {
+				match sample.moved {
 					Some(moved) if now.saturating_duration_since(moved) < Activity::WINDOW => activity.active += 1,
 					_ => activity.idle += 1,
 				}
@@ -1327,6 +1335,10 @@ impl Registry {
 				}
 			}
 		}
+		// A tier whose sessions were all pruned still reports, as zero connected.
+		for tier in snap.sessions.keys() {
+			snap.activity.entry(tier.clone()).or_default();
+		}
 		snap
 	}
 
@@ -1474,7 +1486,11 @@ impl Handle {
 			..Default::default()
 		});
 		if let Some(presence) = &presence {
-			presence.bytes().join(traffic.clone(), (0, 0));
+			let sample = Sample {
+				seen: (0, 0),
+				moved: None,
+			};
+			presence.bytes().join(traffic.clone(), (0, 0), sample);
 		}
 		Session {
 			inner: Some(SendCell::new(Arc::new(SessionInner {
@@ -1744,12 +1760,15 @@ impl Session {
 			});
 		let presence = inner.registry.session_counters(&tier, &label);
 		// Bytes before the cut stay on the old row; later ones, through any meter, go to the new.
-		let cut = match &current.presence {
+		let (cut, sample) = match &current.presence {
 			Some(old) => old.bytes().leave(&inner.traffic),
-			None => inner.traffic.load(),
+			None => {
+				let cut = inner.traffic.load();
+				(cut, Sample { seen: cut, moved: None })
+			}
 		};
 		if let Some(presence) = &presence {
-			presence.bytes().join(inner.traffic.clone(), cut);
+			presence.bytes().join(inner.traffic.clone(), cut, sample);
 		}
 		if inner.connected
 			&& let Some(presence) = &presence
@@ -3039,13 +3058,23 @@ mod tests {
 		);
 		assert_eq!(activity(11), both(2, 0), "the window ends");
 
+		meter.bytes(1);
+		busy.retag(tier.clone(), crate::Path::from_static("other"));
+		assert_eq!(activity(12), both(1, 1), "a move before a retag is still seen after it");
+		busy.retag(tier.clone(), crate::Path::from_static("acme"));
+		assert_eq!(activity(13), both(1, 1), "a retag keeps recent activity");
+
 		meter.datagram(1);
 		drop(busy);
 		assert_eq!(
-			activity(12),
+			activity(14),
 			both(1, 0),
 			"an ended session is neither, even with a live meter"
 		);
+
+		drop((quiet, _held, _request, meter));
+		stats.report_at(&mut Report::default(), at(15));
+		assert_eq!(activity(15), both(0, 0), "a pruned tier still reports zero");
 	}
 
 	#[test]

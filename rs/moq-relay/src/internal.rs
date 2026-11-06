@@ -1800,6 +1800,13 @@ mod tests {
 			drop(session);
 			registry.report(&mut Default::default());
 			check();
+			let body = render_metrics(&registry.snapshot(), &[], &[]);
+			assert!(
+				body.contains(&format!(
+					"moq_relay_sessions_connected{{tier=\"{tier}\",state=\"idle\"}} 0"
+				)),
+				"a pruned tier reports zero rather than vanishing:\n{body}"
+			);
 		}
 	}
 
