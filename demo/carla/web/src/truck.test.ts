@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { applyKeys, REST } from "./input.ts";
-import type { TruckStatus } from "./schemas.ts";
 import { SOCKET } from "./paths.ts";
+import type { TruckStatus } from "./schemas.ts";
 import { shiftGear, Truck } from "./truck.ts";
 
 describe("Truck video demand", () => {

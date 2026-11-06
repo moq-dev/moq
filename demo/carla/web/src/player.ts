@@ -127,7 +127,14 @@ export function mount(root: ShadowRoot, connection: Moq.Connection, origin: Moq.
 				// A restarted simulator keeps its path present, and the watch broadcast
 				// follows it, so only an absence removes the tile.
 				if (entry.kind !== "absent" && !tiles.has(entry.prefix)) {
-					const truck = new Truck({ broadcastId: entry.prefix, connection, origin, driving, focused, hovered });
+					const truck = new Truck({
+						broadcastId: entry.prefix,
+						connection,
+						origin,
+						driving,
+						focused,
+						hovered,
+					});
 					tiles.set(entry.prefix, new TruckTile(truck));
 					vehicles.set(tiles.size);
 					refreshFocusLayout();

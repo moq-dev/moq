@@ -39,12 +39,8 @@ def test_the_lease_belongs_to_one_session_of_a_driver() -> None:
     """A driver id on another session is another driver: it cannot steer while
     the first session holds the lease, nor release it."""
     state = Drive()
-    first = Command(
-        kind="drive", driver_id="abc", session="s1", sequence=1, state=DriveState(throttle=0.5, brake=0.0)
-    )
-    second = Command(
-        kind="drive", driver_id="abc", session="s2", sequence=1, state=DriveState(throttle=1.0, brake=0.0)
-    )
+    first = Command(kind="drive", driver_id="abc", session="s1", sequence=1, state=DriveState(throttle=0.5, brake=0.0))
+    second = Command(kind="drive", driver_id="abc", session="s2", sequence=1, state=DriveState(throttle=1.0, brake=0.0))
     assert state.apply(Command(kind="drive", driver_id="abc", session="s1"))
     assert state.apply(first)
     assert not state.apply(second)

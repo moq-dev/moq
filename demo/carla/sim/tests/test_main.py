@@ -216,6 +216,7 @@ def test_actors_are_destroyed_before_the_relay_session_closes(monkeypatch: pytes
 
     monkeypatch.setattr(main_module.World, "connect", staticmethod(lambda *_args: FakeWorld()))
     monkeypatch.setattr(main_module, "connect_bridge", fake_connect_bridge)
+
     def fake_connect(_url: str, *, versions: tuple[str, ...]) -> FakeConnect:
         # Drivers dial the trucks' endpoints, which only these versions carry.
         assert versions == ("moq-lite-07-wip", "moq-transport-22")
