@@ -93,6 +93,10 @@ in [Container reads drop backfill](/quest/m1/read-backfill.md).
 The runner fails on a head that is received but never decoded, so the proof
 catches this. A complete set of runs finishes this epic.
 
+## Required
+
+- [Native playback in the acceptance proof](/quest/m1/push-to-talk/native.md) - `just test push-to-talk` also runs a `moq play` listener, held to the same no-lost-head, comfort-noise, and no-underrun checks
+
 ## Related
 
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - changes how the ordered read treats a group below its cursor, where this head was lost
