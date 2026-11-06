@@ -90,12 +90,21 @@ test("Player owns the shared pipeline and feeds output policy into decoders", as
 	}
 });
 
-test("Player claims its viewer only while enabled, and an override replaces the catalog's ceiling", async () => {
+test("Player claims its viewer only while it downloads, and an override replaces the catalog's ceiling", async () => {
 	const viewers = new Bandwidth.Viewers();
 	const enabled = new Signal(true);
+	const muted = new Signal(false);
 	const max = new Signal<number | undefined>(1_500_000);
-	const player = new Player({ enabled, viewer: { viewers, max } });
+	const player = new Player({ enabled, audio: { muted }, video: { visible: "never" }, viewer: { viewers, max } });
 	try {
+		await flush();
+		expect(viewers.target.peek()).toBe(1_500_000);
+
+		// The override, too, claims only while something downloads.
+		muted.set(true);
+		await flush();
+		expect(viewers.target.peek()).toBe(0);
+		muted.set(false);
 		await flush();
 		expect(viewers.target.peek()).toBe(1_500_000);
 

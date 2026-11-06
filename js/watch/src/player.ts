@@ -59,7 +59,7 @@ export type PlayerInput = {
 		/**
 		 * The ceiling in bits per second, or absent to follow the catalog: the receive rate that
 		 * selects the best enabled video rendition, plus the selected audio rendition's bitrate.
-		 * `0` claims nothing.
+		 * Either applies only while something downloads, and `0` claims nothing.
 		 */
 		max: Getter<number | undefined>;
 	};
@@ -203,12 +203,14 @@ export class Player {
 
 		// Claim only for the media being downloaded, so a hidden or muted player asks for less.
 		const max = this.#signals.computed((effect) => {
+			const video = effect.get(this.#videoEnabled);
+			const audio = effect.get(this.#audioEnabled);
+			if (!video && !audio) return 0;
 			const override = effect.get(this.in.viewer.max);
-			if (!effect.get(this.in.enabled)) return 0;
 			if (override !== undefined) return override;
 			let max = 0;
-			if (effect.get(this.#videoEnabled)) max += effect.get(videoSource.out.ceiling) ?? 0;
-			if (effect.get(this.#audioEnabled)) max += effect.get(audioSource.out.config)?.bitrate ?? 0;
+			if (video) max += effect.get(videoSource.out.ceiling) ?? 0;
+			if (audio) max += effect.get(audioSource.out.config)?.bitrate ?? 0;
 			return max;
 		});
 		holdViewer(this.#signals, this.in.viewer.viewers, max);

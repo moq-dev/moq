@@ -207,7 +207,7 @@ rendition the `video.target` allows, plus the selected audio rendition's
 bitrate, counting only media being downloaded. A relay that probes raises the
 estimate toward it, so a larger rendition can become affordable. Set
 `viewer.max` (`controls.viewer.max` on `<moq-watch>`) to claim a fixed ceiling
-in bits per second instead, or `0` to claim nothing; omit `viewer.viewers` to
+in bits per second instead while media downloads, or `0` to claim nothing; omit `viewer.viewers` to
 leave the connection's estimate unclaimed.
 
 To chart when each audio frame arrived against when it plays, open an

@@ -578,6 +578,11 @@ describe("Source viewer ceiling", () => {
 			target.set({ bitrate: 3_000_000 });
 			await settle();
 			expect(source.out.ceiling.peek()).toBe(2_400_000);
+
+			// A zero bitrate is explicit too: the lowest rendition, not the estimate's pick.
+			target.set({ bitrate: 0 });
+			await settle();
+			expect(source.out.ceiling.peek()).toBe(800_000);
 		} finally {
 			source.close();
 		}
