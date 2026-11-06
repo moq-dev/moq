@@ -2492,7 +2492,7 @@ mod test {
 		producer.close();
 	}
 
-	fn recv_datagram(consumer: &mut datagram::Consumer) -> Poll<Result<Option<crate::Datagram>, Error>> {
+	fn recv_datagram(consumer: &mut datagram::Consumer) -> Poll<Result<Option<crate::datagram::Datagram>, Error>> {
 		consumer.poll_recv(&kio::Waiter::noop())
 	}
 

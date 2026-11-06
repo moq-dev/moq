@@ -928,11 +928,6 @@ pub struct Dialing<S: Stream> {
 }
 
 impl<S: Stream> Dialing<S> {
-	/// The session's id.
-	pub fn session(&self) -> &str {
-		&self.session
-	}
-
 	/// Poll for the peer to accept; see [`Endpoint::dial_tcp`].
 	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<S, Error>> {
 		let result = self.poll_inner(waiter);

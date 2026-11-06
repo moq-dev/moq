@@ -651,8 +651,7 @@ impl From<Error> for crate::Error {
 	fn from(err: Error) -> Self {
 		match err {
 			Error::TooLong => crate::Error::BoundsExceeded(crate::BoundsExceeded),
-			Error::EmptySegment => crate::Error::EmptySegment,
-			Error::InvalidEscape => crate::Error::InvalidEscape,
+			err => crate::Error::Path(err),
 		}
 	}
 }

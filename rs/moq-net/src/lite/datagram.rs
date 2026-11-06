@@ -9,7 +9,7 @@
 //! On lite-05/06 a body is a single-frame group on a SUBSCRIBE subscription, its sequence
 //! the group's. On lite-07 it is a datagram of a datagram track, subscribed through a
 //! Datagrams Stream ([`Datagrams`]), its sequence the datagram track's own. The model
-//! counterpart is [`crate::Datagram`].
+//! counterpart is [`crate::datagram::Datagram`].
 
 use std::borrow::Cow;
 
