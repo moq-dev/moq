@@ -532,4 +532,15 @@ fn native_surfaces_are_unsupported_off_apple() {
 		unsafe { moq_decode_video(1, 0, &output, Some(ignore_callback), std::ptr::null_mut()) },
 		MOQ_ERROR_UNSUPPORTED
 	);
+	// A surface ignores the CPU layout and size, so an odd size is not the refusal.
+	let odd = moq_video_decoder_output {
+		width: 641,
+		height: 481,
+		format: 999,
+		..output
+	};
+	assert_eq!(
+		unsafe { moq_decode_video(1, 0, &odd, Some(ignore_callback), std::ptr::null_mut()) },
+		MOQ_ERROR_UNSUPPORTED
+	);
 }

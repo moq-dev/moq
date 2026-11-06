@@ -188,7 +188,8 @@ pub struct moq_video_decoder_output {
 	/// Decode to the platform's own surface and hand it out as each frame's `surface`,
 	/// skipping the CPU conversion: `format`, `width`, and `height` are then ignored and
 	/// `data` is NULL. Only Apple platforms have one, an IOSurface-backed NV12
-	/// `CVPixelBufferRef`; elsewhere [`moq_decode_video`] fails with `MOQ_ERROR_UNSUPPORTED`.
+	/// `CVPixelBufferRef` from VideoToolbox, with no software fallback; elsewhere
+	/// [`moq_decode_video`] fails with `MOQ_ERROR_UNSUPPORTED`.
 	pub surface: bool,
 }
 
@@ -1234,8 +1235,14 @@ pub unsafe extern "C" fn moq_decode_video(
 		// Validate the request before resolving anything: a C caller can probe
 		// support without a live track, and a bad request never opens a
 		// subscription it would immediately drop.
-		let format = pixel_format_from_u32(raw.format)?;
-		let size = decoder_size(raw.width, raw.height)?;
+		if raw.surface && !HAS_SURFACE {
+			return Err(Error::Unsupported("no decoder surface on this platform".into()));
+		}
+		// A surface decode converts nothing, so its CPU layout and size go unread.
+		let (format, size) = match raw.surface {
+			true => (moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420, None),
+			false => (pixel_format_from_u32(raw.format)?, decoder_size(raw.width, raw.height)?),
+		};
 		let start = match moq_decode_start::from_u32(raw.start)? {
 			moq_decode_start::MOQ_DECODE_START_OLDEST => moq_video::decode::Start::Oldest,
 			moq_decode_start::MOQ_DECODE_START_LATEST => moq_video::decode::Start::Latest,
@@ -1247,11 +1254,15 @@ pub unsafe extern "C" fn moq_decode_video(
 		options.delay = raw.delay.into();
 		// A caller taking packed pixels lets a backend that can decode straight to the CPU do
 		// that rather than downloading afterwards.
-		options.decoder.output = match (raw.surface, HAS_SURFACE) {
-			(false, _) => moq_video::Output::Cpu,
-			(true, true) => moq_video::Output::Native,
-			(true, false) => return Err(Error::Unsupported("no decoder surface on this platform".into())),
+		options.decoder.output = match raw.surface {
+			false => moq_video::Output::Cpu,
+			true => moq_video::Output::Native,
 		};
+		// Only VideoToolbox decodes into a `CVPixelBuffer`: a software fallback would hand out
+		// CPU pixels with neither `data` nor `surface` to read them by, so fail instead.
+		if raw.surface {
+			options.decoder.kind = moq_video::decode::Kind::Named("videotoolbox".into());
+		}
 		// A backend with a hardware scaler (NVDEC) honors this for free; the
 		// delivery loop still enforces it, since other backends ignore it.
 		options.decoder.scale_hint = size;
