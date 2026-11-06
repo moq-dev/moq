@@ -503,31 +503,33 @@ measure_criterion() {
 
 # One quick run per side can land on noise, so each slowdown the screen flags is
 # re-measured in alternating rounds with the comparison settings before it can fail.
-# Rounds stop starting after CONFIRM_SECONDS, worst slowdown first, so a group of slow
-# cases cannot push the Nightly leg past its timeout; the rest stay unconfirmed.
+# Round sides stop starting after CONFIRM_SECONDS, worst slowdown first, so a group of slow
+# cases cannot push the Nightly leg past its timeout. A case cut off mid-rounds is left out
+# of confirm.tsv, so it and every later case stay unconfirmed.
 CONFIRM_SECONDS=300
 confirm_criterion() {
     local key benchmark round side index=0 deadline=$((SECONDS + CONFIRM_SECONDS))
     python3 "$ROOT/bench/compare.py" --criterion-screen "$RUN" >"$RUN/screen.tsv" || return 1
     : >"$RUN/confirm.tsv"
     while IFS=$'\t' read -r key benchmark; do
-        if ((SECONDS >= deadline)); then
-            printf 'Confirmation budget of %ds spent; later slowdowns stay unconfirmed\n' "$CONFIRM_SECONDS"
-            break
-        fi
-        printf '%s\t%s\n' "$key" "$benchmark" >>"$RUN/confirm.tsv"
         index=$((index + 1))
         for ((round = 1; round <= ROUNDS; round++)); do
             local order=(base current)
             if ((round % 2 == 0)); then order=(current base); fi
             for side in "${order[@]}"; do
+                if ((SECONDS >= deadline)); then
+                    printf 'Confirmation budget of %ds spent; later slowdowns stay unconfirmed\n' "$CONFIRM_SECONDS"
+                    break 3
+                fi
                 if ! criterion_exec "$RUN/criterion-$side.targets" "$RUN/confirm/$index/round-$round/$side" "$key" \
                     "${CRITERION_ARGS[@]}" "$benchmark" --exact; then
                     unavailable "$key" "confirmation failed"
+                    printf '%s\t%s\n' "$key" "$benchmark" >>"$RUN/confirm.tsv"
                     continue 3
                 fi
             done
         done
+        printf '%s\t%s\n' "$key" "$benchmark" >>"$RUN/confirm.tsv"
     done <"$RUN/screen.tsv"
     python3 "$ROOT/bench/compare.py" --criterion-paired "$RUN"
 }
