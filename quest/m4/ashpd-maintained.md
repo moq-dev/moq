@@ -9,9 +9,13 @@ from `deny.toml`; `just rs audit` passes without those exceptions.
 
 ## Plan
 
-ashpd 0.14.0 (2026-11-05) depends on zbus `^6` (checked 2026-11-06,
-/quest-unblock), so the upgrade can start. Don't disable portal capture or add a
-local fork.
+Unblocked 2026-11-06 (/quest-unblock): [ashpd 0.14.0](https://crates.io/crates/ashpd/0.14.0),
+published 2026-11-05, depends on zbus `^6.0.0`, carrying the
+[zbus 6 port](https://github.com/bilelmoussaoui/ashpd/pull/491). Upgrade to it,
+adapt the portal capture client to any 0.14 API changes, drop the three
+exceptions, then run `just rs audit` and, on Linux,
+`cargo check --locked -p moq-video --no-default-features --features pipewire`
+so the portal capture client compiles against the new API.
 
 ## Related
 

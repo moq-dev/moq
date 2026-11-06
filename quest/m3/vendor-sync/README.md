@@ -1,4 +1,4 @@
-# [M] Vendored code has every upstream fix it needs
+# Vendored code has every upstream fix it needs
 
 ## Goal
 
@@ -33,7 +33,8 @@ This README's own work, once every child has merged:
 
 1. Scan the tree for code vendored since the last run: new crates or modules
    whose README, Cargo description, or module doc says forked, vendored, or
-   ported from an upstream, and any new `git` dependency or flake input
+   ported from an upstream, any `LICENSE`, `PATENTS`, or `Copyright` notice
+   carried from another project, and any new `git` dependency or flake input
    pointing at a fork. Each one gets a child in the next run, starting from its
    vendored commit. Code whose upstream is gone or frozen (moq-tokio's
    `quic::web`, from moq-dev/noq) is listed in the README it lives in and
@@ -51,45 +52,32 @@ This README's own work, once every child has merged:
 
 Only `/quest-delete` ends the recurrence.
 
-UniFFI recurrence baseline, checked 2026-11-02: all four upstream default
-branches were checked, and all four public advisory lists were empty. Carry
-these checked heads into the next child:
-
-| Upstream | Head checked |
-|---|---|
-| [mozilla/uniffi-rs](https://github.com/mozilla/uniffi-rs) | [`ef9625b6`](https://github.com/mozilla/uniffi-rs/commit/ef9625b68dd51207f55f024a27649e58edb52b09) |
-| [NordSecurity/uniffi-bindgen-go](https://github.com/NordSecurity/uniffi-bindgen-go) | [`0b7fb4ce`](https://github.com/NordSecurity/uniffi-bindgen-go/commit/0b7fb4ceef12021bd7f790cc516fa9133e001813) |
-| [Uniffi-Dart/uniffi-dart](https://github.com/Uniffi-Dart/uniffi-dart) | [`e644a4ad`](https://github.com/Uniffi-Dart/uniffi-dart/commit/e644a4ad980f72697aba211fd30cb4fbd8fc7324) |
-| [livekit/uniffi-bindgen-cpp](https://github.com/livekit/uniffi-bindgen-cpp) | [`20bef754`](https://github.com/livekit/uniffi-bindgen-cpp/commit/20bef754391023df147267482513c35120dee343) |
-
-MoQ exports no foreign-implementable traits, custom types, dollar-bearing
-defaults, or recursive enum graphs. Recheck these uses before importing the
-related upstream fixes. Upstream's parser, JNI backend, mutable bytes, and
-library-mode removal are redesigns outside this sync. Before changing Dart
-fork CI, read its [coverage record](https://github.com/kixelated/uniffi-dart/blob/moq-0.32/README.md#fork-ci-coverage).
-Until the exporter switch, mirror any generator fixes into rust2's maintenance
-fork too and add them to the exporter quest's carried-over list, so the new
-generators retain them. rust2's fork is maintenance-only since 2026-11-02.
-Drop the UniFFI child once
-[the exporter switch](/quest/m3/ffi-exporter.md) lands.
+The 2026-11-05 scan found two new upstreams, each now a child: WebRTC
+(moq-congestion's GoogCC and moq-audio's NetEq time stretch) and SCReAMv2
+(moq-congestion's `scream`). The NetEq and SCReAMv2 ports recorded no upstream
+commit, so their first runs establish one. moq-congestion's Cubic came from
+quinn and stays with the quinn child.
 
 Out of scope: forks moq no longer consumes (moq-dev/quiche, moq-dev/noq,
-kixelated/cros-codecs, kixelated/openh264-rs, kixelated/fflate) and the
+kixelated/cros-codecs, kixelated/openh264-rs, kixelated/fflate, and
+kixelated/goog_cc, now in-tree as moq-congestion's `gcc`), the
 `@kixelated/libavjs-webcodecs-polyfill` npm fork js/hang uses (maintainer,
-2026-10-30: its upstream has not changed since 2025-07).
+2026-10-30: its upstream has not changed since 2025-07), and `@moq/libav`,
+which builds pinned upstream libav.js, ffmpeg, and opus releases unmodified.
 
 Public API: none expected; a ported fix that changes one says so. Wire: QUIC
 behavior follows quinn's fixes.
 
-VAAPI's completed cycle adopted crates.io `moq-vaapi 0.1.1` after
-[the source fix](https://github.com/moq-dev/vaapi/pull/5) and
-[read-only CI](https://github.com/moq-dev/vaapi/pull/6) merged. When re-creating
-the next cycle, always include moq-dev/vaapi even though it is a crates.io
-dependency outside this tree. Restore its Goal of auditing both ChromeOS
-upstreams and publishing/adopting any needed fixes. Carry checked heads and
-dispositions from [VAAPI's Upstream audit](https://github.com/moq-dev/vaapi/blob/v0.1.1/README.md#upstream),
-which records cros-libva `59384456ac2ae78c0c3e5515f41ef1efd9b802cf` and
-cros-codecs `a050c6cde530e563197ee9e3e72ab01f48a0c41f`.
+## Required
+
+- [moq-quic has every quinn fix it needs](/quest/m3/vendor-sync/quinn.md) - moq-quic, moq-sock's `udp`, moq-tokio's driver, and moq-congestion's Cubic and BBR3 carry quinn's fixes
+- [The WebRTC ports have every upstream fix they need](/quest/m3/vendor-sync/webrtc.md) - moq-congestion's GoogCC and moq-audio's NetEq time stretch follow WebRTC's fixes
+- [moq-congestion's SCReAMv2 follows its draft and reference](/quest/m3/vendor-sync/scream.md) - draft revisions and Ericsson's reference fixes are ported or ruled out
+- [moq-rtmp's rml has every upstream fix it needs](/quest/m3/vendor-sync/rml.md) - rust-media-libs fixes to rml_rtmp and rml_amf0 are ported or ruled out
+- [moq-v4l has every libv4l-rs fix it needs](/quest/m3/vendor-sync/v4l.md) - libv4l-rs fixes are ported or ruled out
+- [moq-nvenc has every upstream fix it needs](/quest/m3/vendor-sync/nvenc.md) - nvidia-video-codec-sdk fixes and NVIDIA SDK releases are ported or ruled out
+- [moq-vaapi has every ChromeOS fix it needs](/quest/m3/vendor-sync/vaapi.md) - cros-libva and cros-codecs fixes are ported, released, and adopted
+- [UniFFI generator forks are current](/quest/m3/vendor-sync/uniffi.md) - the four `kixelated/uniffi-*` forks carry the upstream fixes moq's bindings need
 
 ## Related
 

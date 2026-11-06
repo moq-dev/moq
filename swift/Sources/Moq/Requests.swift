@@ -39,10 +39,12 @@ public final class TrackRequest: Sendable {
 
 /// A run of groups readers miss, for a `TrackRequests` to serve.
 ///
-/// Accept each group you have and drop the rest; `wanted` names what is still owed, in the
-/// fill's order. Releasing the fill names whatever is left as dropped while a reader still
-/// wants it; once nobody does, it is withdrawn, so stop serving it once `wanted` is nil.
-/// Stop serving a single group when `unwanted(sequence:)` returns for it, and move on to `wanted`.
+/// Accept each group you have and drop the rest, one group at a time as `wantedChanged()`
+/// returns them; `wanted` names what is still owed, in the fill's order. Releasing the fill
+/// names whatever is left as dropped while a reader still wants it; once nobody does, it is
+/// withdrawn, so stop serving it once `wanted` is nil. Stop serving a single group when
+/// `unwanted(sequence:)` returns for it, and move on to `wanted`. Serve the fills you take
+/// concurrently: each waits on its own readers.
 public final class Fill: Sendable {
     let ffi: MoqFill
 
@@ -82,12 +84,14 @@ public final class Fill: Sendable {
     }
 
     /// The next group still owed in the fill's order, or nil once every group is answered or
-    /// no reader waits on the fill.
+    /// no reader waits on the fill. It does not wait for the readers; `wantedChanged()` does.
     public var wanted: UInt64? {
         ffi.wanted()
     }
 
-    /// Suspend until `wanted` changes and return it. The first call returns at once.
+    /// Suspend until `wanted` changed and every group this fill accepted reached a reader,
+    /// which picks it up when it next reads, and return it. Nil, once the fill is done, never
+    /// waits; the first call returns at once unless an accepted group has yet to reach a reader.
     public func wantedChanged() async throws -> UInt64? {
         try await ffi.wantedChanged()
     }

@@ -43,6 +43,7 @@ federation) land.
 - [JS announced coalescing](/quest/m3/js-announced-coalesce.md) - `@moq/net`'s `Announced` keeps one pending event per path, like Rust
 - [An audio track's final flush joins its open group](/quest/m3/audio-flush-group.md) - a zero-`delay.max` subscriber gets the tail, not `Old`
 - [Release execution](/quest/m3/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m2
+- [Vendored code has every upstream fix it needs](/quest/m3/vendor-sync/README.md) - the next cycle's vendor sync, which the cut moves under the m2 cut gate
 - [Release pull requests read the R2 Rust cache](/quest/m3/mbx-r2-release-cache.md) - after the cut brings the platform Rust cache to `release`
 - [Binary release publishers run on their tag](/quest/m3/release-tag-publishers.md) - after the cut brings the workflows to `release`
 - [crates.io trusts the workflow](/quest/m3/crates-trusted-publisher.md) - maintainer action: the crates the cut first-publishes by token get a trusted publisher for `release-rs.yml`
