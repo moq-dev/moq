@@ -263,6 +263,10 @@ fn benchmark(axis: &str) {
 		true => vec![Path::Tokio, Path::Uring],
 		false => vec![Path::Tokio],
 	};
+	if axis == "pool" && !paths.contains(&Path::Uring) {
+		println!("# benchmark skipped: io_uring is unavailable; Tokio has no receive pool");
+		return;
+	}
 
 	print_host();
 	println!(
