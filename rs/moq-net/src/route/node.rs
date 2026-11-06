@@ -123,8 +123,11 @@ struct Pending {
 	/// The route was held after that.
 	held: bool,
 	/// The batches since, merged: each claim's last change, and the last floor.
-	batch: Option<(BTreeMap<Path, Option<Claim>>, Option<Rev>)>,
+	batch: Option<(Changes, Option<Rev>)>,
 }
+
+/// Each claim's last change, by path.
+type Changes = BTreeMap<Path, Option<Claim>>;
 
 impl Outbox {
 	fn is_empty(&self) -> bool {
