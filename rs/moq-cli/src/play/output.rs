@@ -44,6 +44,12 @@ pub(super) trait Sink: Send + Sync + 'static {
 
 	/// Play every queued sample before releasing the sink.
 	fn finish(self) -> impl Future<Output = ()> + Send;
+
+	/// The audio written so far is followed by a declared silence.
+	fn end(&mut self);
+
+	/// The next write starts the next utterance after a declared silence.
+	fn next(&mut self);
 }
 
 impl Speaker for moq_audio::playback::Engine {
@@ -69,5 +75,13 @@ impl Sink for moq_audio::playback::Sink {
 
 	fn buffered(&self) -> Duration {
 		moq_audio::playback::Sink::buffered(self)
+	}
+
+	fn end(&mut self) {
+		moq_audio::playback::Sink::end(self);
+	}
+
+	fn next(&mut self) {
+		moq_audio::playback::Sink::next(self);
 	}
 }
