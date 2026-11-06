@@ -405,7 +405,13 @@ for (const [alpn, version] of [
 			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 			const url = new URL("https://localhost/test");
 			const client = new Connection({ url, quic: pair.client, version });
-			const server = new Connection({ url, quic: pair.server, version, publish: origin.consume(), client: false });
+			const server = new Connection({
+				url,
+				quic: pair.server,
+				version,
+				publish: origin.consume(),
+				client: false,
+			});
 			const remote = wireOf(client).consume(Path.from("room"));
 			const track = remote.track("video").subscribe().ordered();
 			let closed = false;
