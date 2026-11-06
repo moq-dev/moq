@@ -280,10 +280,12 @@ for name in names:
                 generator = subprocess.run(
                     ["git", "rev-parse", "HEAD"], cwd=checkout, check=True, capture_output=True, text=True
                 ).stdout.strip()
-                environment.update(BENCH_PROFILE_MODES="instructions", BENCH_GENERATOR=generator, BENCH_RUNTIME_ROUNDS="1")
+                environment.update(
+                    BENCH_PROFILE_MODES="instructions", BENCH_GENERATOR=generator, BENCH_RUNTIME_ROUNDS="1"
+                )
                 _, calls = self.calls(checkout, environment)
                 self.assertEqual([call[0] for call in calls], ["current/round-1/instructions-2"])
-                (_, _, _, load, sampler), = calls
+                ((_, _, _, load, sampler),) = calls
                 self.assertIn(f"/revisions/{generator}/profile/profiling/", load)
                 expected = load + "-host" if sampler_binary else load + " host"
                 self.assertEqual(sampler, expected)

@@ -12,6 +12,12 @@ rust-version.workspace = true
 keywords = ["quic", "io-uring", "networking", "linux"]
 categories = ["asynchronous", "network-programming", "os::linux-apis"]
 
+[[bin]]
+name = "moq-uring-probe"
+path = "src/bin/probe.rs"
+required-features = ["_probe"]
+doc = false
+
 [features]
 default = ["quic"]
 # QUIC and WebTransport on moq-quic, with TLS through rustls.
@@ -82,12 +88,6 @@ rustls = { version = "0.23", default-features = false, features = ["std", "tls12
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tracing = "0.1"
-
-[[bin]]
-name = "moq-uring-probe"
-path = "src/bin/probe.rs"
-required-features = ["_probe"]
-doc = false
 
 [[bench]]
 name = "udp_tokio"
