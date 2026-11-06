@@ -5986,7 +5986,6 @@ async fn datagram_connection(
 
 /// A native datagram-only reader reaches a publisher on the default lite-06 path.
 #[tokio::test]
-#[ignore = "flaky under CI load; tracked in quest/m0/test-flakes-2/ffi-datagram-roundtrip.md"]
 async fn datagrams_cross_a_default_connection() {
 	let (broadcast, remote, session, _server) = datagram_connection("sensor", vec![]).await;
 	let producer = broadcast
@@ -6029,7 +6028,6 @@ async fn datagrams_cross_a_default_connection() {
 /// An on-demand datagram-only track reaches a reader on the default lite-06 path while a
 /// stream handler leaves the name unanswered: the datagram handler's answer serves it.
 #[tokio::test]
-#[ignore = "flaky under CI load; tracked in quest/m0/test-flakes-2/ffi-datagram-roundtrip.md"]
 async fn requested_datagrams_cross_a_default_connection() {
 	requested_datagrams_cross(vec![], "moq-lite-06").await;
 }

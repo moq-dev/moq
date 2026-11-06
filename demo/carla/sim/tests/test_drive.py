@@ -35,25 +35,21 @@ def test_first_driver_keeps_control() -> None:
     assert state.state.throttle == 0.6
 
 
-def test_the_lease_belongs_to_one_run_of_a_driver() -> None:
-    """A driver id announced under another instance is another driver: it cannot
-    steer while the first run holds the lease, nor release it."""
+def test_the_lease_belongs_to_one_session_of_a_driver() -> None:
+    """A driver id on another session is another driver: it cannot steer while
+    the first session holds the lease, nor release it."""
     state = Drive()
-    first = Command(
-        kind="drive", driver_id="abc", instance="run-1", sequence=1, state=DriveState(throttle=0.5, brake=0.0)
-    )
-    second = Command(
-        kind="drive", driver_id="abc", instance="run-2", sequence=1, state=DriveState(throttle=1.0, brake=0.0)
-    )
-    assert state.apply(Command(kind="drive", driver_id="abc", instance="run-1"))
+    first = Command(kind="drive", driver_id="abc", session="s1", sequence=1, state=DriveState(throttle=0.5, brake=0.0))
+    second = Command(kind="drive", driver_id="abc", session="s2", sequence=1, state=DriveState(throttle=1.0, brake=0.0))
+    assert state.apply(Command(kind="drive", driver_id="abc", session="s1"))
     assert state.apply(first)
     assert not state.apply(second)
     assert state.state.throttle == 0.5
-    assert not state.apply(Command(kind="driver_left", driver_id="abc", instance="run-2"))
+    assert not state.apply(Command(kind="driver_left", driver_id="abc", session="s2"))
     assert state.driver == "abc"
 
-    # The first run leaving frees the lease for the second.
-    assert state.apply(Command(kind="driver_left", driver_id="abc", instance="run-1"))
+    # The first session leaving frees the lease for the second.
+    assert state.apply(Command(kind="driver_left", driver_id="abc", session="s1"))
     assert state.driver is None
     assert state.apply(second)
     assert state.holds(second)
@@ -77,7 +73,6 @@ def test_watchdog_stops_and_releases_driver() -> None:
     assert state.apply(drive("driver", 1, 1.0))
     assert state.apply(Command(kind="watchdog_expired"))
     assert state.driver is None
-    assert state.sequence is None
     assert state.state == DriveState.stopped()
 
 
@@ -104,38 +99,22 @@ def test_estop_from_a_bystander_latches_without_transferring_the_lease() -> None
     assert state.estopped
     assert state.estop_by == "second"
 
-    # ...but the lease stays with "first", and the bystander's sequence is not
-    # recorded as the authoritative command.
+    # ...but the lease stays with "first".
     assert state.driver == "first"
-    assert state.sequence == 1
 
-    # The holder heartbeat is acknowledged without replacing the actor that
-    # originally latched the stop.
+    # The holder's own e-stop does not replace the actor that originally
+    # latched the stop.
     assert state.apply(estop("first", 3))
     assert state.estop_by == "second"
-    assert state.sequence == 3
+    assert state.holds(estop("first", 3))
 
-    # Anyone may clear the global latch, but doing so neither transfers the
-    # lease nor records the bystander's sequence as authoritative.
+    # Anyone may clear the global latch, but doing so does not transfer the
+    # lease.
     assert state.apply(reset("second", 4))
     assert not state.estopped
     assert state.estop_by is None
     assert state.driver == "first"
-    assert state.sequence == 3
     assert not state.apply(drive("second", 5, 1.0))
-
-
-def test_estop_from_holder_refreshes_the_acknowledgement_sequence() -> None:
-    state = Drive()
-    assert state.apply(drive("holder", 5, 0.3))
-    assert state.sequence == 5
-
-    # The holder's own e-stop is acknowledged (sequence advances) and it keeps
-    # the lease.
-    assert state.apply(estop("holder", 6))
-    assert state.estopped
-    assert state.sequence == 6
-    assert state.driver == "holder"
 
 
 def test_axes_are_clamped_into_range() -> None:

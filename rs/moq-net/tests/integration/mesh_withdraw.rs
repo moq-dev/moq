@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use futures::channel::mpsc;
 
-use moq_net::{Hop, Version, cache, origin};
+use moq_net::{Version, cache, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock, peer, peer_with_latency};
 use support::{Kind, drain, watch};
 
@@ -25,7 +25,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 /// groups: nothing here carries media, and the expiry sweep would keep a timer
 /// armed forever, so [`kio::clock::sim::idle`] could never see the mesh settle.
 fn produce(hop: u64, hold: Duration) -> origin::Producer {
-	let mut config = origin::Config::new(Hop::new(hop).unwrap());
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	config.pool = cache::Pool::unbounded();
 	config.update_hold = hold;
 	let (producer, driver) = origin::Producer::new(config);
@@ -288,7 +288,7 @@ impl Cluster {
 		let relays: Vec<_> = (1..=n as u64)
 			.map(|id| {
 				let mut config = config.clone();
-				config.hop = Hop::new(id).unwrap();
+				config.hop = std::num::NonZeroU64::new(id).unwrap();
 				let (origin, driver) = origin::Producer::new(config);
 				support::harness::spawn(driver);
 				origin
@@ -536,7 +536,7 @@ async fn residual_late_better_path_restarts_on_lite06() {
 
 async fn assert_capped_withdrawal(edges: &[Link], publisher: usize, watcher: usize) {
 	let mut config = origin::Config::default();
-	config.max_hops = origin::HopLimit::new(diameter(edges) + 2).unwrap();
+	config.max_hops = std::num::NonZeroUsize::new(diameter(edges) + 2).unwrap();
 	let mut cluster = Cluster::new("moq-lite-07-wip", edges, config, publisher, watcher).await;
 	let (broadcast, _) = cluster.publish("room/a").await;
 	let (client, relays) = cluster.close("room/a", broadcast).await;
@@ -639,7 +639,7 @@ async fn withdrawal_counts(capped: bool) -> (usize, usize, usize) {
 		let (edges, publisher) = random_mesh(seed);
 		let mut config = origin::Config::default();
 		if capped {
-			config.max_hops = origin::HopLimit::new(diameter(&edges) + 2).unwrap();
+			config.max_hops = std::num::NonZeroUsize::new(diameter(&edges) + 2).unwrap();
 		}
 		let mut cluster = Cluster::new("moq-lite-07-wip", &edges, config, publisher, 0).await;
 		let (broadcast, _) = cluster.publish("room/a").await;

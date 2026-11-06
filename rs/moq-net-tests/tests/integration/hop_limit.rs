@@ -10,10 +10,11 @@ use crate::support::{
 	watch,
 };
 
-use moq_net::{Hop, cache, origin};
+use moq_net::{cache, origin};
+use std::num::NonZeroUsize;
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let mut config = origin::Config::new(Hop::new(hop).unwrap());
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	config.pool = cache::Pool::unbounded();
 	let (producer, driver) = origin::Producer::new(config);
 	spawn(driver);
@@ -40,8 +41,8 @@ async fn hop_limit_bounds_receive_and_send() {
 	] {
 		let version = name.parse().unwrap();
 		let source = produce_origin(1);
-		let mut config = origin::Config::new(Hop::new(2).unwrap());
-		config.max_hops = origin::HopLimit::new(2).unwrap();
+		let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
+		config.max_hops = NonZeroUsize::new(2).unwrap();
 		config.pool = cache::Pool::unbounded();
 		let (relay, driver) = origin::Producer::new(config);
 		spawn(driver);
@@ -51,14 +52,7 @@ async fn hop_limit_bounds_receive_and_send() {
 		let mut received = watch(relay.consume().routes());
 		let mut sent = watch(sink.consume().routes());
 		kio::clock::sim::idle().await;
-		let route = |count: u64| {
-			moq_net::fuzz::route_info(
-				moq_net::Hops::try_from((100..100 + count).map(|id| Hop::new(id).unwrap()).collect::<Vec<_>>())
-					.unwrap(),
-				0,
-				None,
-			)
-		};
+		let route = |count: u64| moq_net::fuzz::route_info(100..100 + count, 0, None);
 		let _long = forward(&source, "long", route(2));
 		let _boundary = forward(&source, "boundary", route(1));
 		let short = forward(&source, "short", route(0));
@@ -106,8 +100,8 @@ async fn hop_limit_falls_back_to_a_forwardable_route() {
 		let version = name.parse().unwrap();
 		let near = produce_origin(1);
 		let far = produce_origin(4);
-		let mut config = origin::Config::new(Hop::new(2).unwrap());
-		config.max_hops = origin::HopLimit::new(3).unwrap();
+		let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
+		config.max_hops = NonZeroUsize::new(3).unwrap();
 		config.pool = cache::Pool::unbounded();
 		let (relay, driver) = origin::Producer::new(config);
 		spawn(driver);
@@ -118,18 +112,7 @@ async fn hop_limit_falls_back_to_a_forwardable_route() {
 		let mut sent = watch(sink.consume().routes());
 		kio::clock::sim::idle().await;
 
-		let route = |first: u64, count: u64, cost: u64| {
-			moq_net::fuzz::route_info(
-				moq_net::Hops::try_from(
-					(first..first + count)
-						.map(|id| Hop::new(id).unwrap())
-						.collect::<Vec<_>>(),
-				)
-				.unwrap(),
-				cost,
-				None,
-			)
-		};
+		let route = |first: u64, count: u64, cost: u64| moq_net::fuzz::route_info(first..first + count, cost, None);
 		// Three hops at the relay once the sender is appended: in the cap, but full.
 		let _cheap = forward(&far, "room", route(100, 2, 1));
 		// Two hops at the relay, so it has room for the relay's own.
