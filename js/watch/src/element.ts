@@ -347,7 +347,9 @@ export default class MoqWatch extends HTMLElement {
 			const delay = effect.get(this.controls.delay);
 			this.#reflect(effect, "delay", typeof delay === "number" ? formatDuration(delay) : delay);
 		});
-		this.signals.run((effect) => this.#reflect(effect, "lookahead", formatDuration(effect.get(this.controls.lookahead))));
+		this.signals.run((effect) =>
+			this.#reflect(effect, "lookahead", formatDuration(effect.get(this.controls.lookahead))),
+		);
 
 		// Track the element's rendered size and feed it into the rendition picker,
 		// scaled by devicePixelRatio so high-DPI screens still get sharp renditions.
