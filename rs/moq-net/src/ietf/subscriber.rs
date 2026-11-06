@@ -192,6 +192,8 @@ fn retire_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId)
 
 #[derive(Default)]
 struct State {
+	/// Clean ends keep their request streams until the driver drains datagrams received with them.
+	datagram_ends: Option<kio::Producer<()>>,
 	datagram_requests: HashMap<tracks::TrackKey, (std::sync::Arc<()>, crate::datagram::Request)>,
 	// Each active subscription
 	subscribes: HashMap<RequestId, TrackState>,
@@ -224,6 +226,7 @@ impl State {
 	/// Active receive tasks abort their own groups. Abort any head waiting for its
 	/// tail here, along with the track. Ordinary unsubscribe removes its entry.
 	fn abort(&mut self, err: &Error) {
+		let _ = self.datagram_ends.take();
 		for (_, (_, request)) in self.datagram_requests.drain() {
 			request.reject(err.clone());
 		}
@@ -3674,6 +3677,8 @@ enum OnceStep {
 		count: u64,
 		end: Result<(), Error>,
 	},
+	/// The stream tail settled; keep the alias until datagrams received with the end route.
+	Datagrams(kio::Consumer<()>),
 	/// Walking away from it: cancelling the request while the fetches it drives go on.
 	Cancel { cancelling: Cancelling, aborted: bool },
 }
@@ -4066,8 +4071,22 @@ impl SubscribeOnce {
 							Err(err) => fill.abort(err.clone()),
 						}
 					}
+					let datagrams = end.is_ok() && self.shared.is_some();
 					live.publisher_ended(end);
+					if datagrams {
+						let mut state = this.state.lock();
+						self.step =
+							OnceStep::Datagrams(state.datagram_ends.get_or_insert_with(Default::default).consume());
+						continue;
+					}
 					// The publisher already ended the request, so there is nothing to cancel.
+					if let Some(step) = self.finish(this, false) {
+						return step;
+					}
+				}
+				OnceStep::Datagrams(routed) => {
+					let _ = group_fetches.poll(waiter);
+					ready!(routed.poll_closed(waiter));
 					if let Some(step) = self.finish(this, false) {
 						return step;
 					}
@@ -5723,10 +5742,16 @@ impl Subscriber {
 		kio::wait(|waiter| recv.poll(waiter, self, stream)).await
 	}
 
+	/// Release clean ends after the driver read the transport's datagram queue empty.
+	pub(super) fn datagrams_routed(&self) {
+		let _ = self.state.lock().datagram_ends.take();
+	}
+
 	/// Route OBJECT_DATAGRAM to the shared subscription's datagram model half.
 	///
+	/// Return an unknown alias so the driver can try after decoding the answers received with it.
 	/// A malformed datagram is still a protocol error.
-	pub fn recv_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
+	pub fn recv_datagram(&self, payload: bytes::Bytes) -> Result<Option<u64>, Error> {
 		let (datagram, _) = ietf::ObjectDatagram::decode_slice(&payload, self.version)?;
 		if let ietf::DatagramBody::Status(status) = &datagram.body
 			&& !super::object::status_defined(*status)
@@ -5738,11 +5763,10 @@ impl Subscriber {
 			let state = self.state.lock();
 			let aliases = state.aliases.read();
 			let Some(request_id) = aliases.map.get(&datagram.track_alias).and_then(|alias| alias.holder()) else {
-				tracing::debug!(alias = datagram.track_alias, "dropping a datagram for an unknown alias");
-				return Ok(());
+				return Ok(Some(datagram.track_alias));
 			};
 			let Some(track) = state.subscribes.get(&request_id) else {
-				return Ok(());
+				return Ok(None);
 			};
 			match &track.datagram {
 				Some(producer) => (producer.clone(), track.timescale),
@@ -5752,7 +5776,7 @@ impl Subscriber {
 						group = datagram.group_id,
 						"dropping a datagram on a stream track's subscription"
 					);
-					return Ok(());
+					return Ok(None);
 				}
 			}
 		};
@@ -5765,7 +5789,7 @@ impl Subscriber {
 				group = datagram.group_id,
 				"dropping a datagram status"
 			);
-			return Ok(());
+			return Ok(None);
 		};
 		let object_id = datagram.object_id.unwrap_or(0);
 		if object_id != 0 {
@@ -5775,7 +5799,7 @@ impl Subscriber {
 				object_id,
 				"dropping a datagram with a nonzero object id"
 			);
-			return Ok(());
+			return Ok(None);
 		}
 
 		let timestamp = match &datagram.properties {
@@ -5785,7 +5809,7 @@ impl Subscriber {
 					Ok(object) => object.timestamp,
 					Err(err) => {
 						tracing::debug!(%err, "dropping a datagram with unreadable object properties");
-						return Ok(());
+						return Ok(None);
 					}
 				}
 			}
@@ -5797,7 +5821,7 @@ impl Subscriber {
 				group = datagram.group_id,
 				"dropping a datagram without a timestamp on a timed track"
 			);
-			return Ok(());
+			return Ok(None);
 		}
 		if let Err(err) = producer.insert(crate::datagram::Datagram {
 			sequence: datagram.group_id,
@@ -5806,7 +5830,7 @@ impl Subscriber {
 		}) {
 			tracing::debug!(%err, "dropping a datagram the track refused");
 		}
-		Ok(())
+		Ok(None)
 	}
 }
 

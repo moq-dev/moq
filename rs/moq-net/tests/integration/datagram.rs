@@ -573,6 +573,10 @@ async fn ietf_datagram_readers_rejoin_a_lingering_broadcast() {
 			.unwrap();
 		producer.append(millis(priority as u64), &b"live"[..]).unwrap();
 		assert_eq!(recv(&mut consumer).await.unwrap().unwrap().payload.as_ref(), b"live");
+		consumer.set_priority(-3);
+		kio::clock::timeout(TIMEOUT, datagram_priority(&producer, Some(-3)))
+			.await
+			.expect("the rejoined reader's lowered priority never arrived");
 		drop(consumer);
 		kio::clock::timeout(TIMEOUT, datagram_priority(&producer, None))
 			.await
@@ -586,7 +590,14 @@ async fn ietf_datagram_readers_rejoin_a_lingering_broadcast() {
 /// datagram, and routes the datagram before it ends the track.
 #[kio::test]
 async fn a_datagram_sent_right_behind_its_answer_arrives() {
-	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
+	for version in [
+		"moq-lite-05",
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-18",
+		"moq-transport-20",
+		"moq-transport-22",
+	] {
 		for finish in [false, true] {
 			let chain = Chain::new(&[version]).await;
 			let requests = chain.publication.broadcast().requests();
@@ -613,7 +624,7 @@ async fn a_datagram_sent_right_behind_its_answer_arrives() {
 			// The second node subscribes through the session it accepted.
 			assert_eq!(
 				chain.pairs[0].server.stats().datagrams_unrouted,
-				Some(0),
+				version.parse::<Version>().unwrap().is_lite().then_some(0),
 				"{version} finish={finish}"
 			);
 		}
@@ -725,24 +736,6 @@ async fn a_track_ended_under_a_datagram_flood_keeps_its_stream() {
 		kio::clock::timeout(TIMEOUT, chain.pairs[0].server.idle())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the track never released its stream"));
-	}
-}
-
-/// The publisher's answer, first datagram, and end can all reach one receive pass.
-#[kio::test]
-async fn an_ietf_datagram_sent_with_its_answer_and_end_arrives() {
-	for version in ["moq-transport-18", "moq-transport-20", "moq-transport-22"] {
-		let chain = Chain::new(&[version]).await;
-		let mut producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
-		let mut consumer = chain.remote().await.datagrams(TRACK).unwrap();
-		consumer.set_priority(5);
-		datagram_priority(&producer, Some(5)).await;
-		producer.append(millis(1), &b"first"[..]).unwrap();
-		producer.finish();
-		consumer.info().await.unwrap();
-		let datagram = recv(&mut consumer).await.unwrap().expect("first datagram");
-		assert_eq!(&datagram.payload[..], b"first", "{version}");
-		assert!(recv(&mut consumer).await.unwrap().is_none(), "{version}");
 	}
 }
 

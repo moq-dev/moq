@@ -39,6 +39,25 @@ fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	}
 }
 
+/// Resolve the name's datagram half, holding demand only on a local publication.
+fn serving_datagrams(
+	request: &SubscribeRequest,
+	broadcast: &crate::broadcast::Consumer,
+) -> Option<crate::datagram::Consumer> {
+	if request.publisher.session.max_datagram_size() == 0 {
+		return None;
+	}
+	let mut datagrams = if broadcast.has_local_datagrams() {
+		broadcast.datagrams(&request.msg.track_name).ok()
+	} else {
+		broadcast.datagrams_live(&request.msg.track_name)
+	}?;
+	if broadcast.has_local_datagrams() {
+		datagrams.set_priority(super::priority::from_wire(request.msg.subscriber_priority));
+	}
+	Some(datagrams)
+}
+
 /// The Track Properties an answer describing the track carries: SUBSCRIBE_OK,
 /// TRACK_STATUS_OK, and FETCH_OK. Empty when the requester opted out with
 /// INCLUDE_PROPERTIES=0, which keeps the block present but empty.
@@ -1469,19 +1488,7 @@ impl Serving {
 						Err(err) => return Poll::Ready(Ok(refused(err, request.msg.rendezvous, false))),
 						Ok(None) => return Poll::Ready(Ok(Subscribed::Withdrawn)),
 					};
-					let local = broadcast.has_local_datagrams();
-					self.datagrams = (request.publisher.session.max_datagram_size() > 0)
-						.then(|| {
-							if local {
-								broadcast.datagrams(&request.msg.track_name).ok()
-							} else {
-								broadcast.datagrams_live(&request.msg.track_name)
-							}
-						})
-						.flatten();
-					if local && let Some(datagrams) = &mut self.datagrams {
-						datagrams.set_priority(super::priority::from_wire(request.msg.subscriber_priority));
-					}
+					self.datagrams = serving_datagrams(request, &broadcast);
 					let track = broadcast.track(&request.msg.track_name);
 					self.broadcast = Some(broadcast);
 					self.step = ServingStep::Subscribe {
@@ -1506,7 +1513,13 @@ impl Serving {
 							self.stream_error = Some(err);
 							None
 						}
-						Poll::Ready(None) => return Poll::Ready(Ok(Subscribed::Withdrawn)),
+						Poll::Ready(None) => {
+							return Poll::Ready(Ok(if self.resuming {
+								Subscribed::Served(Served::Track(Ok(())), request.opened())
+							} else {
+								Subscribed::Withdrawn
+							}));
+						}
 						Poll::Pending => None,
 					};
 					let broadcast = self.broadcast.as_ref().expect("resolved");
@@ -1684,19 +1697,7 @@ impl Serving {
 					let broadcast = self.broadcast.as_ref().expect("resolved before serving");
 					self.resuming = true;
 					self.stream_error = None;
-					let local = broadcast.has_local_datagrams();
-					self.datagrams = (request.publisher.session.max_datagram_size() > 0)
-						.then(|| {
-							if local {
-								broadcast.datagrams(&request.msg.track_name).ok()
-							} else {
-								broadcast.datagrams_live(&request.msg.track_name)
-							}
-						})
-						.flatten();
-					if local && let Some(datagrams) = &mut self.datagrams {
-						datagrams.set_priority(super::priority::from_wire(request.msg.subscriber_priority));
-					}
+					self.datagrams = serving_datagrams(request, broadcast);
 					self.step = ServingStep::Subscribe {
 						track: broadcast.track(&request.msg.track_name),
 						subscribe: SubscribeTrack::new(),
@@ -6734,6 +6735,14 @@ impl TrackServe {
 		if self.datagram_track.is_some() {
 			self.poll_datagrams(waiter);
 		}
+		let result = self.poll_groups(waiter);
+		if self.datagram_track.is_none() {
+			self.poll_datagrams(waiter);
+		}
+		result
+	}
+
+	fn poll_groups(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		// Before the groups, so one finishing on this poll sees an end declared beside it.
 		if self.terminal.end.get().is_none()
 			&& let Poll::Ready(Ok(end)) = self.track.poll_finished(waiter)
@@ -6819,9 +6828,6 @@ impl TrackServe {
 		}
 		// Newly created group machines start now rather than on the next wake.
 		let _ = self.children.poll(waiter);
-		if self.datagram_track.is_none() {
-			self.poll_datagrams(waiter);
-		}
 		Poll::Pending
 	}
 	/// Send every buffered datagram as an OBJECT_DATAGRAM with object ID 0.
@@ -9971,6 +9977,42 @@ mod serve_tests {
 				assert_eq!(sent(b"paused"), 0, "{version}: served what it missed");
 			}
 		}
+	}
+
+	#[kio::test]
+	async fn datagrams_continue_after_a_stream_range_is_exhausted() {
+		let broadcast = crate::broadcast::Producer::new(Default::default());
+		let track = broadcast.create_track("audio", track::Info::default()).unwrap();
+		let subscriber = track.subscribe(Subscription::default().with_start(0).with_end(1));
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(None, &b"bounded"[..]).unwrap();
+		group.finish().unwrap();
+		let mut datagrams = broadcast.create_datagrams("audio", Default::default()).unwrap();
+		let consumer = broadcast.consume().datagrams("audio").unwrap();
+		let session = ScriptedSession::new(Vec::new()).with_datagrams(1200);
+		let mut serving = TrackServe::new(
+			crate::driver::Transport::new(session.clone()),
+			subscriber,
+			RequestId(0),
+			Version::Draft22,
+			ServeRange {
+				end: Some(EndLocation { group: 0, object: None }),
+				..Default::default()
+			},
+			None,
+		)
+		.with_datagrams(consumer, false, true);
+		let _group = kio::wait(|waiter| serving.track.poll_recv_group(waiter))
+			.await
+			.unwrap()
+			.expect("bounded group");
+		assert!(matches!(
+			serving.track.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
+		datagrams.append(None, &b"live"[..]).unwrap();
+		assert!(serving.poll(&kio::Waiter::noop()).is_pending());
+		assert_eq!(session.log.datagrams.lock().unwrap().len(), 1);
 	}
 
 	/// A datagram-only name resumes through the same kind selection as its first request.
@@ -15774,6 +15816,10 @@ mod serve_tests {
 				.await
 				.unwrap_or_else(|_| panic!("{version}: outlived its withdrawal"))
 				.unwrap();
+			assert!(
+				Wire::read(&h.log, version).publish_done.is_some(),
+				"{version}: missing PUBLISH_DONE"
+			);
 			settle().await;
 			assert!(h.track.subscription().is_none(), "{version}: held its demand");
 		}
