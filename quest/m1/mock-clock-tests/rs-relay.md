@@ -34,13 +34,22 @@ on the real clock: the `runtime_uring.rs` and listing poll loops, `web.rs`'s
 `start.elapsed() >= timeout`, `bitrate_caps.rs`'s `LEAST`, and
 `shutdown_signal.rs`'s drain-window lower bounds.
 
-Public API: none, unless the maintainer picks the dial hook. Wire: none.
+Decided 2026-11-06 (maintainer, on
+[moq-dev/moq#8087](https://github.com/moq-dev/moq/pull/8087)):
 
-## Waiting
+- ✅ **A dial hook on `cluster::Options` that an in-memory link can fill**, so
+  the four tests above run on `kio::clock::sim` and prove convergence with
+  `sim::idle` instead of a quiet window. Not chosen: keeping them as documented
+  real-clock exceptions opted out of the [Rust guard](/quest/m0/clock-guard/rust.md).
 
-- Maintainer: how mesh tests prove convergence. (1) Recommended: give
-  `cluster::Options` a dial hook that an in-memory link can fill, so these tests
-  run on `kio::clock::sim` and end on `sim::idle`; this adds public API whose only
-  consumer is tests. (2) Keep these windows as documented real-clock exceptions
-  and opt them out of the [Rust guard](/quest/m0/clock-guard/rust.md). Check: a
-  recorded pick in this file's Plan.
+Guidance:
+
+- The hook is public API whose only consumer today is these tests; name it by
+  role (how a peer is reached), not by the test transport.
+- The mesh tests build whole relays with `Relay::load` over loopback, so the
+  simulator needs a relay that accepts in-memory links too, as
+  `tests/integration/memory.rs` already does for one relay.
+- `shutdown_signal`'s window waits on a process signal, not a mesh: its relay
+  must also take that signal from a source the simulator can drive.
+
+Public API: a new `cluster::Options` dial hook. Wire: none.
