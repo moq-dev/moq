@@ -970,6 +970,17 @@ mod tests {
 	/// comfort noise, and the next press plays one delay after it arrives.
 	#[tokio::test]
 	async fn a_mute_keeps_the_sink_and_the_next_press_plays_one_delay_out() {
+		mute(false).await;
+	}
+
+	/// A group lost after the mute's marker still leaves the next press its own
+	/// utterance, rather than a hole filled with two seconds of silence.
+	#[tokio::test]
+	async fn a_press_after_a_lost_group_still_plays_one_delay_out() {
+		mute(true).await;
+	}
+
+	async fn mute(lost: bool) {
 		tokio::time::pause();
 		let delay = Duration::from_millis(300);
 		let broadcast = moq_net::broadcast::Info::new().produce();
@@ -1012,6 +1023,10 @@ mod tests {
 			kio::clock::sleep(PACKET_DURATION).await;
 		}
 		producer.discontinuity().unwrap();
+		// One group per packet and one for the marker, so the next press would be group 11.
+		if lost {
+			producer.seek(12).unwrap();
+		}
 		// Two seconds muted, with the timeline running on through it.
 		kio::clock::sleep(Duration::from_secs(2)).await;
 		let pressed = Instant::now();
@@ -1026,7 +1041,13 @@ mod tests {
 		let played = recorder.played();
 		let first = played.iter().find(|part| part.sample == 0.5).unwrap();
 		assert_eq!(first.utterance, 1);
-		assert_eq!(first.from - pressed, delay, "{played:?}");
+		let waited = first.from - pressed;
+		if lost {
+			// The ordered read first waits within its age budget for the lost group.
+			assert!(waited > delay && waited < 2 * delay, "{played:?}");
+		} else {
+			assert_eq!(waited, delay, "{played:?}");
+		}
 		let new: Vec<_> = played.iter().filter(|part| part.sample == 0.5).collect();
 		assert_eq!(
 			new.iter().map(|part| part.to - part.from).sum::<Duration>(),
