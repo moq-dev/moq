@@ -178,7 +178,6 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - confirm the hosted Nightly jobs reuse the previous Nightly, then measure restore time and expiry
 - [Verify the Nix runtime cache](/quest/m0/ci/nix-cache-verify.md) - hosted Cache uploads `main`'s relay and CLI, and Smoke's nix channel substitutes them
 - [Record hosted cargo-hakari evidence](/quest/m0/ci/hakari.md) - compare scheduled macOS and Windows cache hits and estimated compiler work saved before and after the workspace-hack
-- [Drop main from the publish Environment](/quest/m0/ci/publish-release-only.md) - the maintainer narrows `publish` to `release` and release tags once no job naming it runs as `main`
 - [Release tags push to nix.moq.dev, and Cachix stops taking writes](/quest/m0/ci/cachix-retire.md) - backport `release-nix.yml` and its Just module to `release`, drop `cachix.yml`, prove a tag substitutes from nix.moq.dev, then revoke the Cachix token (the cache stays for old tags)
 - [Measure the Linux cache effect of native media exclusions](/quest/m0/ci/hakari-followups.md) - scheduled Linux jobs measure cache reuse after unrelated tests stop compiling PipeWire and libclang
 - [Build two queue entries at once if it helps](/quest/m0/ci/queue-concurrency.md) - a measured trial of `maximumEntriesToBuild: 2` against the serial lane's burst latency

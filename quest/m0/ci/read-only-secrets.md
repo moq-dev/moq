@@ -55,7 +55,7 @@ publish, since jobs that do not name `publish` still read it:
    `R2_SECRET_ACCESS_KEY` and `R2_ACCOUNT_ID`.
    `DISCORD_WEBHOOK` is already in the `alert` Environment, and
    `CACHIX_AUTH_TOKEN` moves nowhere: `main` no longer uses Cachix
-   ([publish off main](/quest/m0/ci/publish-release-only.md)).
+   ([moq-dev/moq#7994](https://github.com/moq-dev/moq/pull/7994)).
 3. Then deletes those repository secrets, the unused ones
    (`GCP_SERVICE_ACCOUNT_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
    `META_MODEL_API_KEY`), and this repository's access to the
