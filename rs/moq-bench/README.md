@@ -1,6 +1,11 @@
 # moq-bench
 
-A load generator for benchmarking a remote MoQ relay.
+A load generator for benchmarking a remote MoQ relay, plus `moq-bench host`, a
+sampler that records what that load costs on the relay's host.
+
+```bash
+cargo install moq-bench
+```
 
 `moq-bench` opens many QUIC connections to a server and drives synthetic media
 through them. Every knob is a `[min, max]` range that is rolled once per
@@ -219,9 +224,9 @@ window is not the combination of these numbers. `latency_interval_max_ms` is
 the highest bucket that gained a sample, so below 60 seconds it is the exact
 millisecond maximum, and 60000 means at least 60 seconds.
 
-## Host-side sampling: moq-bench-host
+## Host-side sampling: moq-bench host
 
-`moq-bench` measures the load it generates; `moq-bench-host` measures what that
+`moq-bench` measures the load it generates; `moq-bench host` measures what that
 load costs. It runs on the host of the process under test, production included:
 it only reads `/proc` (Linux-only), needs no privileges beyond visibility of the
 target process, and never touches the process itself (no ptrace, no perf, no
@@ -229,10 +234,10 @@ signals).
 
 ```bash
 # On the relay host: sample the relay once per second, forever, to stdout.
-moq-bench-host --name moq-relay
+moq-bench host --name moq-relay
 
 # Bounded run to a file, with the per-thread breakdown.
-moq-bench-host --name moq-relay --interval 1s --duration 5m \
+moq-bench host --name moq-relay --interval 1s --duration 5m \
   --threads --output host.jsonl
 ```
 

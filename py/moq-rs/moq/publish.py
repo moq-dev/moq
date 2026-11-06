@@ -208,11 +208,13 @@ class TrackRequest:
 class Fill:
     """A run of groups readers miss, for a :class:`TrackRequests` to serve.
 
-    Call :meth:`accept` for each group you have and :meth:`drop_groups` for the rest;
-    :meth:`wanted` names what is still owed, in the fill's order. Dropping the fill names
+    Call :meth:`accept` for each group you have and :meth:`drop_groups` for the rest, one
+    group at a time as :meth:`wanted_changed` yields them; :meth:`wanted` names what is still
+    owed, in the fill's order. Dropping the fill names
     whatever is left as dropped while a reader still wants it; once nobody does, it is
     withdrawn, so stop serving it once :meth:`wanted` is ``None``. Stop serving a single group
-    when :meth:`unwanted` returns for it, and move on to :meth:`wanted`.
+    when :meth:`unwanted` returns for it, and move on to :meth:`wanted`. Serve the fills you
+    take concurrently: each waits on its own readers.
     """
 
     def __init__(self, inner: MoqFill) -> None:
@@ -251,12 +253,18 @@ class Fill:
     def wanted(self) -> int | None:
         """The next group still owed in the fill's order.
 
-        ``None`` once every group is answered or no reader waits on the fill.
+        ``None`` once every group is answered or no reader waits on the fill. It does not wait
+        for the readers; :meth:`wanted_changed` does.
         """
         return self._inner.wanted()
 
     async def wanted_changed(self) -> int | None:
-        """Wait for ``wanted`` to change and return it. The first call returns at once."""
+        """The next group to serve, once every group this fill accepted reached a reader.
+
+        Returns ``wanted`` once it changed and a reader picked up what was served, as it next
+        reads. ``None``, once the fill is done, never waits; the first call returns at once
+        unless an accepted group has yet to reach a reader.
+        """
         return await self._inner.wanted_changed()
 
     def accept(self, sequence: int) -> GroupProducer:

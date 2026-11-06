@@ -1046,6 +1046,14 @@ impl moq_net::transport::poll::Session for Session {
 	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
 		Some(self.conn.receive_window())
 	}
+	/// The connection's limits, which every WebTransport session on it shares.
+	fn set_limits(&self, limits: moq_net::transport::Limits) -> Result<(), moq_net::transport::LimitsError> {
+		let mut quic = moq_quic::Limits::default();
+		quic.receive_window = limits.receive_window;
+		self.conn
+			.set_limits(quic)
+			.map_err(|err| moq_net::transport::LimitsError::Refused(err.to_string()))
+	}
 	/// The connection's credit, which every WebTransport session on it shares.
 	fn stream_credit(&self, dir: moq_net::transport::Dir) -> Option<moq_net::transport::StreamCredit> {
 		Some(self.conn.stream_credit(dir))

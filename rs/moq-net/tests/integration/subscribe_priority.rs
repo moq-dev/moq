@@ -8,7 +8,7 @@ use crate::support;
 use std::time::Duration;
 
 use moq_net::track::{Info, Subscription};
-use moq_net::{Hop, Timescale, Version, origin};
+use moq_net::{Timescale, Version, origin};
 use support::harness::peer;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -19,7 +19,7 @@ const LOW: i8 = -100;
 const HIGH: i8 = 100;
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }

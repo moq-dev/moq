@@ -6,32 +6,32 @@ Cryptography for [Media over QUIC](https://moq.dev): the `sign` module signs eve
 relays cannot forge it, and the `e2ee` module encrypts groups, datagrams, and track names so
 relays cannot read them. Both wrap `moq-net` and check timestamps with its
 `track::Info::rescale`, so a frame either half accepts is one `moq-net` accepts. The `provider`
-module is the [rind](https://github.com/moq-dev/rind) rustls provider and CPU check that the
-MoQ transport crates share.
+module is the [rind](https://github.com/moq-dev/rind) rustls provider; `cpu` holds the CPU
+check and error that the MoQ crates share.
 
 ## Features
 
 `sign` and `e2ee`, both default, enable the two modules. With default features off, the crate is
 only `sign::PublicKey`, the endpoint ID, with its canonical z-base-32 text: it builds without
-`moq-net` or rind, for crates such as `moq-auth` that name endpoints but sign nothing.
-`serde` adds the key's string serialization. `provider`, off by default, enables the `provider`
-module; it depends only on rind and rustls, never on `moq-net`, so the transport crates can
-use it without a dependency cycle.
+`moq-net` or rind, for crates that only name endpoints.
+`serde` adds the key's string serialization. `cpu`, enabled by `e2ee` and `provider`, adds
+only rind. `provider`, off by default, adds the rustls integration without `moq-net`, so
+transport crates can use it without a dependency cycle.
 
 ## Provider
 
 MoQ runs all of its cryptography on rind. Its primitives panic on a CPU missing a feature rind
-requires, so the `provider` module refuses such a CPU up front. Today that is NEON on aarch64;
+requires, so the `cpu` module refuses such a CPU up front. Today that is NEON on aarch64;
 every `x86_64` CPU and armv7 are supported, and a CPU without AES or other crypto extensions
 runs rind's slower paths rather than being refused:
 
-- `provider::check()` returns `UnsupportedCpu`, naming the missing feature.
+- `cpu::check()` returns `cpu::UnsupportedCpu`, naming the missing feature.
 - `provider::provider()` returns rind's rustls `CryptoProvider`, or that error. It ignores the
   process default, so TLS works whether or not one was installed.
 - `provider::install_default()` installs rind as rustls' process default for libraries such as
   reqwest that read it, leaving a provider the process already installed in place.
 
-moq-quic, moq-tokio, qmux, and moq-uring report the same `UnsupportedCpu`, and
+moq-auth, moq-hls, e2ee, moq-rtmp, and the transports report the same `cpu::UnsupportedCpu`, and
 `moq_tokio::crypto` re-exports this module's API.
 
 ## Signing

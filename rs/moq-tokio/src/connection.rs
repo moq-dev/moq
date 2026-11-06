@@ -372,6 +372,7 @@ impl Goaway {
 	}
 
 	/// The policy these knobs configure, with each unset one at its default.
+	#[cfg(any(feature = "_transport", test))]
 	pub(crate) fn resolve(&self) -> moq_net::reconnect::Goaway {
 		let mut goaway = moq_net::reconnect::Goaway::default();
 		goaway.redirect = self.redirect.into();

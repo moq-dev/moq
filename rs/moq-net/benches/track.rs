@@ -582,12 +582,17 @@ fn bench_evict_fanout(c: &mut Criterion) {
 	for subscribers in FANOUT {
 		for evicted in EVICTED {
 			group.throughput(Throughput::Elements(evicted as u64));
+			// Criterion calls the closure once per sample, so the fixture is built on the first call and kept.
+			let mut fixture = None;
 			group.bench_function(BenchmarkId::new(format!("{subscribers}r"), evicted), |b| {
-				let mut fanout = Fanout::new(subscribers);
-				// Twice what the pool holds, so every write evicts.
-				for _ in 0..2 * CACHE_CAPACITY / PAYLOAD as u64 {
-					fanout.cycle();
-				}
+				let fanout = fixture.get_or_insert_with(|| {
+					let mut fanout = Fanout::new(subscribers);
+					// Twice what the pool holds, so every write evicts.
+					for _ in 0..2 * CACHE_CAPACITY / PAYLOAD as u64 {
+						fanout.cycle();
+					}
+					fanout
+				});
 				// Only the writes and the evictions they cause are timed, not the reads that
 				// judge each written group cached again.
 				b.iter_custom(|iterations| {
@@ -1616,42 +1621,46 @@ fn bench_range_widening(c: &mut Criterion) {
 	bench.throughput(Throughput::Elements(1));
 	for readers in WIDENING_READERS {
 		for cached in WIDENING_CACHED {
+			// Criterion calls the closure once per sample, so the fixture is built on the first call and kept.
+			let mut fixture = None;
 			bench.bench_function(BenchmarkId::new(format!("{readers}r"), cached), |b| {
-				let broadcast = broadcast::Info::default().produce();
-				let track = broadcast
-					.create_track("bench", moq_net::track::Info::default().with_max_age(None))
-					.unwrap();
-				for _ in 0..cached {
-					let mut group = track.append_group().unwrap();
-					group.write_frame(None, Bytes::from_static(b"x")).unwrap();
-					group.finish().unwrap();
-				}
-				let narrow = track::Subscription::default()
-					.with_delay(track::Delay::default().with_max(AGED_BUDGET))
-					.with_range(0..1);
-				let mid = cached / 2;
-				let wide = narrow
-					.clone()
-					.with_ranges([track::Range::groups(0..1), track::Range::groups(mid..mid + WIDENED)]);
-				let waiter = kio::Waiter::noop();
-				let mut readers: Vec<_> = (0..readers)
-					.map(|_| {
-						let mut reader = track.subscribe(narrow.clone());
-						while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
-						reader
-					})
-					.collect();
+				let (readers, _track, _broadcast, narrow, wide, waiter) = fixture.get_or_insert_with(|| {
+					let broadcast = broadcast::Info::default().produce();
+					let track = broadcast
+						.create_track("bench", moq_net::track::Info::default().with_max_age(None))
+						.unwrap();
+					for _ in 0..cached {
+						let mut group = track.append_group().unwrap();
+						group.write_frame(None, Bytes::from_static(b"x")).unwrap();
+						group.finish().unwrap();
+					}
+					let narrow = track::Subscription::default()
+						.with_delay(track::Delay::default().with_max(AGED_BUDGET))
+						.with_range(0..1);
+					let mid = cached / 2;
+					let wide = narrow
+						.clone()
+						.with_ranges([track::Range::groups(0..1), track::Range::groups(mid..mid + WIDENED)]);
+					let waiter = kio::Waiter::noop();
+					let readers: Vec<_> = (0..readers)
+						.map(|_| {
+							let mut reader = track.subscribe(narrow.clone());
+							while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
+							reader
+						})
+						.collect();
+					(readers, track, broadcast, narrow, wide, waiter)
+				});
 				let reader = &mut readers[0];
 				b.iter(|| {
 					reader.update(wide.clone()).unwrap();
-					while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) {
+					while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(waiter) {
 						black_box(group);
 					}
 					reader.update(narrow.clone()).unwrap();
 					// The narrow range is already delivered, so it ends until widened again.
-					assert!(matches!(reader.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+					assert!(matches!(reader.poll_recv_group(waiter), Poll::Ready(Ok(None))));
 				});
-				drop((readers, track, broadcast));
 			});
 		}
 	}
