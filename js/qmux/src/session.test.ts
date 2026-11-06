@@ -919,8 +919,11 @@ describe("Session integration (scripted peer)", () => {
 	});
 
 	test("disabled config uses null and invalid durations fail before opening", () => {
-		for (const idleTimeout of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
-			expect(() => new Session("https://example/test", { config: { idleTimeout } })).toThrow("idleTimeout");
+		for (const value of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+			expect(() => new Session("https://example/test", { config: { idleTimeout: value } })).toThrow("idleTimeout");
+			expect(() => new Session("https://example/test", { config: { handshakeTimeout: value } })).toThrow(
+				"handshakeTimeout",
+			);
 		}
 		expect(() => new Session("https://example/test", { config: { maxDatagramFrameSize: 0n } })).toThrow(
 			"maxDatagramFrameSize",
@@ -2432,6 +2435,28 @@ describe("STREAM frame size", () => {
 
 		expect(await readIncomingUni(session)).toEqual(data);
 		session.close();
+	});
+
+	test("a qmux-00 peer that never sends its parameters fails ready at the handshake deadline", async () => {
+		// qmux-00 has no idle timer, so only the handshake deadline bounds `ready`.
+		const clock = new Manual();
+		const installed = clock.install();
+		try {
+			const { session, peer } = accept({ protocol: "qmux-00", config: { handshakeTimeout: 150 } });
+			await started(peer);
+			const ready = settleTo(session.ready);
+
+			await clock.advance(Nano.fromMilli(Milli(150)));
+			await settle();
+			expect(peer.has("connection_close")).toBe(false);
+			await clock.advance(Nano.fromMilli(Milli(50)));
+
+			const err = await expectSessionFailure(session);
+			expect(err.message).toContain("handshake timeout");
+			expect(await ready).toBeInstanceOf(Error);
+		} finally {
+			installed.close();
+		}
 	});
 
 	test("qmux-00 delivers a frame of exactly max_frame_size", async () => {

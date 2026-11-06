@@ -203,12 +203,14 @@ export class WebSocketStream implements WebSocketStreamLike {
 			cancel: () => ws.close(),
 		});
 
-		// Bytes written to the writable but not yet handed to the socket.
+		// Bytes written to the writable but not yet handed to the socket, and each queued
+		// chunk's size as measured on entry, since a resizable buffer can change it later.
 		let queued = 0;
+		const sizes: number[] = [];
 		const writable = new WritableStream<WebSocketStreamData>(
 			{
 				write: (chunk) => {
-					queued -= byteLength(chunk);
+					queued -= sizes.shift() ?? 0;
 					ws.send(chunk);
 					return drain(ws, () => this.#highWaterMark);
 				},
@@ -225,7 +227,9 @@ export class WebSocketStream implements WebSocketStreamLike {
 				// The DOM typing admits `undefined`, which a WebSocket can't send.
 				size: (chunk) => {
 					if (chunk === undefined) throw new TypeError("WebSocketStream cannot send undefined");
-					queued += byteLength(chunk);
+					const size = byteLength(chunk);
+					sizes.push(size);
+					queued += size;
 					return ws.bufferedAmount + queued > this.#highWaterMark ? 1 : 0;
 				},
 			},

@@ -1100,12 +1100,7 @@ test("when WebTransport and WebSocket open in the same turn, the one not chosen 
 	const originalStream = native.WebSocketStream;
 	native.WebSocketStream = class {
 		url: string;
-		opened = opened.then(() => ({
-			readable: new ReadableStream(),
-			writable: new WritableStream(),
-			protocol: "qmux-01",
-			extensions: "",
-		}));
+		opened = opened.then(qmuxStreams);
 		closed = new Promise(() => {});
 		constructor(url: string) {
 			this.url = url;
