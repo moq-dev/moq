@@ -97,7 +97,11 @@ timeout, one child.
 
 Added 2026-11-05 (maintainer, `/quest-complete` follow-ups): moq-net's
 pool-debt flight test, the Python audio playout-delay test, and the io_uring
-tests' shared locked-memory budget, one child each. On 2026-11-06, moq-ffi's
+tests' shared locked-memory budget, one child each. The pool-debt test
+overshot because shed frames whose payload canonical content owned stayed
+billed until crossbeam-epoch reclamation, which other tests' reads in the same
+process held back; eviction now lets go of that content itself, fixed by
+[moq-dev/moq#8052](https://github.com/moq-dev/moq/pull/8052). On 2026-11-06, moq-ffi's
 concurrent-ready test, quarantined here instead of in the unrelated
 [moq-dev/moq#7981](https://github.com/moq-dev/moq/pull/7981).
 
@@ -110,7 +114,6 @@ Public API: none. Wire: none.
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
 - [Diagnose and re-enable the FFI datagram connection test](/quest/m0/test-flakes-2/ffi-datagram-roundtrip.md) - diagnose the default-connection timeout and re-enable the quarantined test
 - [Test PulseAudio servers stay off the desktop's D-Bus](/quest/m0/test-flakes-2/pulse-dbus.md) - concurrent media runs on one desktop never collide on `org.PulseAudio1`
-- [moq-net's pool-debt flight test holds its bound in parallel runs](/quest/m0/test-flakes-2/pool-debt-flight.md) - `pool_debt_sheds_a_flight_without_its_cached_group` stays under `2 * POOL` when it shares a process with moq-net's other tests
 - [The Python audio playout-delay test reads its frames](/quest/m0/test-flakes-2/audio-playout-delay.md) - `test_audio_consumer_reports_its_playout_delay` stops timing out on its first read in the merge queue
 - [io_uring tests fit the shared locked-memory budget](/quest/m0/test-flakes-2/uring-memlock.md) - concurrent moq-relay and moq-uring test runs stop exhausting the user's `RLIMIT_MEMLOCK`, fixed at the cause rather than by raising the limit
 - [The FFI concurrent-ready test wakes both calls under load](/quest/m0/test-flakes-2/ffi-concurrent-ready.md) - `concurrent_ready_calls_all_wake` stops stalling its reader drain under load and is re-enabled
