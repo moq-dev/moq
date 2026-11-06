@@ -5,7 +5,8 @@ name: Release Nix
 #
 # The signing key and the bucket write key live in the `cache-write`
 # Environment, which only `main` and these tag patterns can
-# deploy from. A tag ruleset limits who can create them; see infra/README.md.
+# deploy from. A tag ruleset limits who can create them; see main's
+# infra/README.md.
 
 on:
   push:

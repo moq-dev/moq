@@ -2,10 +2,11 @@ set fallback
 
 mod apt
 mod rpm
+# `just infra nix push` for Release Nix. Deploy its worker from main, not from
+# here, so a release checkout never rolls nix.moq.dev back.
 mod nix
 
 # Deploy all infra workers.
 deploy:
     just apt deploy
     just rpm deploy
-    just nix deploy
