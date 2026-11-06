@@ -8,7 +8,10 @@ type Step = { play: number[]; frames: number } | { fill: number };
 type Case = { name: string; rate: number; channels: number; steps: Step[] };
 
 // Shared with moq-audio, so neither implementation is graded against the other.
-const corpus = join(dirname(fileURLToPath(import.meta.url)), "../../../../doc/concept/audio-jitter/comfort/corpus.json");
+const corpus = join(
+	dirname(fileURLToPath(import.meta.url)),
+	"../../../../doc/concept/audio-jitter/comfort/corpus.json",
+);
 const cases = JSON.parse(readFileSync(corpus, "utf8")) as Case[];
 
 for (const { name, rate, channels, steps } of cases) {

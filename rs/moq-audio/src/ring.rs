@@ -1071,7 +1071,9 @@ mod tests {
 	}
 
 	fn noise(samples: &[f32]) -> bool {
-		samples.iter().all(|&sample| sample != 0.0 && sample.abs() <= 0.0002 * 3f32.sqrt() * 1.0001)
+		samples
+			.iter()
+			.all(|&sample| sample != 0.0 && sample.abs() <= 0.0002 * 3f32.sqrt() * 1.0001)
 	}
 
 	/// A declared end plays comfort noise once the queue runs dry, and the next

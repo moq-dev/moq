@@ -692,9 +692,12 @@ mod tests {
 		let mut mixer = mixer::Mixer::new(rx, retired, 48_000, Layout::Stereo, shared.observe.clone()).unwrap();
 		registration.attach(&commands);
 		let pcm = |sample: f32, frames: usize| -> Vec<u8> {
-			std::iter::repeat_n(sample.to_le_bytes(), frames * 2).flatten().collect()
+			std::iter::repeat_n(sample.to_le_bytes(), frames * 2)
+				.flatten()
+				.collect()
 		};
-		let rms = |samples: &[f32]| (samples.iter().map(|&s| s as f64 * s as f64).sum::<f64>() / samples.len() as f64).sqrt();
+		let rms =
+			|samples: &[f32]| (samples.iter().map(|&s| s as f64 * s as f64).sum::<f64>() / samples.len() as f64).sqrt();
 		let mut out = [0.0; 960];
 		mixer.fill(&mut out, Duration::ZERO);
 

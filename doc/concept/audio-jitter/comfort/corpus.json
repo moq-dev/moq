@@ -4,14 +4,23 @@
 		"about": "The quietest whole block sets the level, not the last or the mean",
 		"rate": 1000,
 		"channels": 1,
-		"steps": [{ "play": [0.5], "frames": 40 }, { "play": [0.0002], "frames": 20 }, { "play": [0.3], "frames": 20 }, { "fill": 0.0002 }]
+		"steps": [
+			{ "play": [0.5], "frames": 40 },
+			{ "play": [0.0002], "frames": 20 },
+			{ "play": [0.3], "frames": 20 },
+			{ "fill": 0.0002 }
+		]
 	},
 	{
 		"name": "straddle",
 		"about": "Blocks are counted from the first frame played, so a quiet run that straddles two blocks is diluted",
 		"rate": 1000,
 		"channels": 1,
-		"steps": [{ "play": [0.0002], "frames": 15 }, { "play": [0.0004], "frames": 25 }, { "fill": 0.00026457513110645906 }]
+		"steps": [
+			{ "play": [0.0002], "frames": 15 },
+			{ "play": [0.0004], "frames": 25 },
+			{ "fill": 0.00026457513110645906 }
+		]
 	},
 	{
 		"name": "stereo",
