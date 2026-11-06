@@ -485,7 +485,7 @@ export class Publisher {
 		const subscribe = (source: broadcast.Consumer) => {
 			// A range that resolves without the live edge has a fixed start, which is no join:
 			// bound the subscription before subscribing so the refresh ratio never judges it.
-			const fixed = subscribeRange(msg, {}, version);
+			const fixed = filterRange(msg.filter, {});
 			// Parked past a bounded window's end: the peer reads this stream's end as the track's.
 			return hooks.parked(
 				source.track(msg.trackName).subscribe({
@@ -685,7 +685,7 @@ export class Publisher {
 				msg.fill && msg.forward && Filter.isDraft20(version)
 					? fillRange(msg.fill, msg.filter, edge.largest)
 					: undefined;
-			const requested = subscribeRange(msg, edge, version);
+			const requested = filterRange(msg.filter, edge);
 			// A copy, since an update moves the cursor in place and must not move the bounds too.
 			const range = { ...afterFill(requested, fill, edge) };
 			// What the subscriber asked for, which only a narrowing changes: the fill's split
@@ -2869,31 +2869,13 @@ function liveEdge(track: TrackSubscriber): LiveEdge {
 	};
 }
 
-/**
- * Resolve a SUBSCRIBE's Location Filter into the range to serve.
- *
- * Draft-22 is honored whole. Earlier drafts honor only Largest Object, which a joining
- * FETCH pairs with to recover the group's head: their Filter Type tag has absolute forms
- * we never served, and starting to interpret them now would change what an existing peer
- * receives.
- */
-function subscribeRange(msg: Subscribe, edge: LiveEdge, version: IetfVersion): ServeRange {
-	if (!Filter.isDraft20(version) && msg.filter.kind !== "nextObject") {
-		if (msg.filter.kind !== "unfiltered") {
-			console.warn(`filter not supported before draft-22, ignoring: ${msg.filter.kind}`);
-		}
-		return {};
-	}
-
-	return filterRange(msg.filter, edge);
-}
-
 /** The Locations a single Location Filter selects, resolved against the live edge. */
 function filterRange(filter: Filter.Filter, edge: LiveEdge): ServeRange {
 	switch (filter.kind) {
 		// No restriction. moq-lite starts at the beginning of the latest group, which is the
 		// join point it is built around; a subscription passes objects as they are published,
-		// so an absent filter is not a request to replay history.
+		// so an absent filter is not a request to replay history. A subscriber that wants the
+		// track from its start fetches the groups before the live one.
 		case "unfiltered":
 			return {};
 		// `{Largest.Group, Largest.Object + 1}`. Everything below it, including the already
