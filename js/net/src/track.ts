@@ -5,7 +5,7 @@
  */
 
 import { Instant, Milli, Nano, now, sleepUntil } from "@moq/clock";
-import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import { Derived, type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import { Delivered } from "./delivered.ts";
 import {
 	GroupTooLarge,
@@ -476,17 +476,33 @@ export class Request {
 
 	#producer: Producer;
 	#pending: Set<Request>;
+	#lookups?: TrackRequestOptions["lookups"];
+	#wanted?: Getter<boolean>;
 
 	private constructor(options: TrackRequestOptions) {
 		this.name = options.name;
 		this.#producer = options.producer;
 		this.#pending = options.pending;
+		this.#lookups = options.lookups;
 		this.#pending.add(this);
 	}
 
 	static {
 		hooks.makeRequest = (options) => new Request(options);
 		hooks.stageRequest = (request, info) => request.#stage(info);
+		hooks.requestWanted = (request) => {
+			const wanted = request.#producer.demand().wanted;
+			request.#wanted ??= request.#lookups
+				? new Derived(
+						[wanted, request.#lookups.pending],
+						(group, lookups) => group !== undefined || lookups > 0,
+					)
+				: new Derived([wanted], (group) => group !== undefined);
+			return request.#wanted;
+		};
+		hooks.keepRequest = (request) => {
+			if (request.#lookups) request.#lookups.opened = false;
+		};
 	}
 
 	/** Watch the subscribers waiting for this request. */
@@ -534,6 +550,12 @@ export class Request {
 		this.#pending.delete(this);
 		this.#producer.abort(err);
 	}
+}
+
+/** Options for {@link Consumer.info}. */
+export interface InfoOptions {
+	/** Abandons the lookup, rejecting with the signal's reason; aborting after it resolves has no effect. */
+	signal?: AbortSignal;
 }
 
 /** Options for {@link Consumer.fetchGroup}. */
@@ -587,9 +609,19 @@ export class Consumer {
 		return this.#broadcast.subscribe(this.name, options);
 	}
 
-	/** Fetch the track's immutable publisher properties without subscribing. */
-	info(): Promise<Info> {
-		return this.#broadcast.resolveTrackInfo(this.name);
+	/**
+	 * Fetch the track's immutable publisher properties without subscribing. It waits for as long
+	 * as the publisher takes to answer: abort `options.signal` to give up.
+	 */
+	info(options?: InfoOptions): Promise<Info> {
+		const signal = options?.signal;
+		if (!signal) return this.#broadcast.resolveTrackInfo(this.name);
+		if (signal.aborted) return Promise.reject(signal.reason);
+		// Held only until the answer, so the signal abandons the lookup but never keeps the track.
+		const answered = new AbortController();
+		return this.#broadcast
+			.resolveTrackInfo(this.name, AbortSignal.any([signal, answered.signal]))
+			.finally(() => answered.abort());
 	}
 
 	/** Fetch a single group by sequence without holding a live subscription. */
@@ -2898,6 +2930,15 @@ export class Subscriber {
 				},
 			});
 			return subscriber;
+		};
+		hooks.watchSubscriberError = (subscriber, fn) => {
+			if (subscriber.#resume) return subscriber.#resume.watchError(fn);
+			const check = (error: Error | null | undefined) => {
+				if (error instanceof Error) fn(error);
+			};
+			const stop = subscriber.closed.subscribe(check);
+			check(subscriber.closed.peek());
+			return stop;
 		};
 		hooks.latestSequence = (subscriber) =>
 			subscriber.#resume ? subscriber.#resume.latest() : subscriber.#state.latest;

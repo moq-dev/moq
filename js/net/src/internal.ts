@@ -14,6 +14,7 @@ import { toStreamCode } from "./error.ts";
 import type { Frame, FrameConsumer, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type RouteInfo } from "./hop.ts";
 import type * as Instance from "./instance.ts";
+import type { Consumer as OriginConsumer, Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type {
@@ -32,6 +33,9 @@ import { max, min } from "./util/sequence.ts";
 import * as Varint from "./varint.ts";
 import type { Resolved, Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
+
+/** The hidden broadcast segment reserved for socket endpoints. */
+export const SOCKET = ".socket";
 
 /** What a null {@link Delay.max} goes out as: the largest value every peer can read, as Rust sends for `None`. */
 export const NO_MAX_DELAY = Milli(Varint.MAX_U53);
@@ -336,6 +340,8 @@ export interface Land {
  * buffer of its own. Implemented by `resume.ts`, the counterpart of the Rust `Inner::Resume`.
  */
 export interface ResumeSource {
+	/** Observe a serving copy's abort, including delivery failures a resumable reader waits past. */
+	watchError(fn: (error: Error) => void): Dispose;
 	/** Re-evaluate a live-edge join at the serving copy. */
 	join(): void;
 	/**
@@ -403,6 +409,8 @@ export interface TrackRequestOptions {
 	producer: Producer;
 	/** Requests not yet accepted or rejected by the publisher. */
 	pending: Set<Request>;
+	/** Metadata-only readers holding this request, if its broadcast supports them. */
+	lookups?: { pending: Getter<number>; opened: boolean };
 }
 
 /**
@@ -732,6 +740,21 @@ export const hooks: {
 	evictGroup: (group: GroupConsumer) => boolean;
 	/** Call `fn` synchronously when an open broadcast closes, from any handle. */
 	onClosed: (producer: BroadcastProducer, fn: () => void) => Dispose;
+	/** Reserve an on-demand track without listing it or enabling a request handler. */
+	reserveUnlistedTrack: (producer: BroadcastProducer, name: string) => Request;
+	/** Whether a subscriber or a metadata lookup still holds a requested track. */
+	requestWanted: (request: Request) => Getter<boolean>;
+	/** Transfer a metadata-opened request to its session's producer lifetime. */
+	keepRequest: (request: Request) => void;
+	/** Observe the peer's reset without waiting for routed delivery recovery. */
+	watchSubscriberError: (subscriber: Subscriber, fn: (error: Error) => void) => Dispose;
+	/**
+	 * Count a session withholding the origin's hidden broadcasts from its peer, such as a
+	 * moq-lite client before 07, whose peer can't ask for them, until disposed.
+	 */
+	withholdHidden: (origin: OriginConsumer) => Dispose;
+	/** How many sessions withhold the origin's hidden broadcasts from their peer. */
+	hiddenWithheld: (origin: OriginProducer) => Getter<number>;
 	/** Name a broadcast handle by the path an origin created or resolved it at. */
 	stampPath: (target: BroadcastProducer | BroadcastConsumer, path: Path.Valid) => void;
 	/** Name the instance of the route an origin resolved a broadcast handle through. */
@@ -1013,6 +1036,24 @@ export const hooks: {
 	},
 	onClosed: () => {
 		throw new Error("broadcast.ts not loaded");
+	},
+	reserveUnlistedTrack: () => {
+		throw new Error("broadcast.ts not loaded");
+	},
+	requestWanted: () => {
+		throw new Error("track.ts not loaded");
+	},
+	keepRequest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	watchSubscriberError: () => {
+		throw new Error("track.ts not loaded");
+	},
+	withholdHidden: () => {
+		throw new Error("origin.ts not loaded");
+	},
+	hiddenWithheld: () => {
+		throw new Error("origin.ts not loaded");
 	},
 	stampPath: () => {
 		throw new Error("broadcast.ts not loaded");

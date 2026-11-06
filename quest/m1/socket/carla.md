@@ -39,7 +39,3 @@ See the [epic](/quest/m1/socket/README.md) for the convention.
   make that counter moot, add a `MoqBroadcastConsumer::instance()` accessor
   (and its Python wrapper) and key the lease on the real instance. Options
   shown: m0; ✅ m1, in this quest; m2.
-
-## Required
-
-- [JS sockets](/quest/m1/socket/js.md) - the driver's dial

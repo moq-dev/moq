@@ -1,10 +1,10 @@
-import { Milli, Nano, sleep } from "@moq/clock";
+import { type Milli, Nano, sleep } from "@moq/clock";
 import { race } from "@moq/signals";
 import { controlTimeout, error } from "../error.ts";
 import type { Stream } from "../stream.ts";
 import { TimeoutError } from "./timeout.ts";
 
-/** Milliseconds a request may go unanswered once none of its streams waits to open. @internal */
+/** Milliseconds an advertisement may go unanswered while none of its streams waits to open. @internal */
 export const REQUEST_TIMEOUT_MS = 10_000;
 
 /** What a deadline failure resets: a stream, or whatever owns one. @internal */
@@ -13,10 +13,9 @@ export interface Abortable {
 }
 
 /**
- * One fatal deadline for a request, including every stream its setup creates.
- *
- * An open waiting for the peer's stream credit is waiting its turn, not the peer stalling, so
- * the deadline only runs while none of the request's streams waits to open. @internal
+ * Owns a request's setup streams and optionally bounds its answer. Track requests take no
+ * budget: their publisher may hold the answer until demand, cancellation, or the session
+ * ends it. A budget runs only while none of the request's streams waits to open. @internal
  */
 export class Deadline {
 	/** Creates still waiting on credit: a fetch opens its TRACK stream alongside. */
@@ -27,7 +26,10 @@ export class Deadline {
 	#owners: Abortable[] = [];
 	#failure?: Error;
 
-	constructor() {
+	#budget?: Milli;
+
+	constructor(budget?: Milli) {
+		this.#budget = budget;
 		this.#rearm();
 	}
 
@@ -76,11 +78,13 @@ export class Deadline {
 		await write();
 	}
 
-	/** Wait for the first answer under the request's single deadline. */
+	/** Wait for the first answer, within the budget if one was given. */
 	async wait<T>(answer: Promise<T>): Promise<T> {
+		const budget = this.#budget;
+		if (budget === undefined) return answer;
 		const done = new AbortController();
 		try {
-			return (await race([answer, this.#expire(done.signal)])) as T;
+			return (await race([answer, this.#expire(budget, done.signal)])) as T;
 		} catch (cause) {
 			const failure = cause instanceof TimeoutError ? controlTimeout(cause) : error(cause);
 			this.#failure = failure;
@@ -95,8 +99,8 @@ export class Deadline {
 	}
 
 	/** Reject once the request goes the whole budget with none of its streams waiting to open. */
-	async #expire(done: AbortSignal): Promise<never> {
-		const budget = Nano.fromMilli(Milli(REQUEST_TIMEOUT_MS));
+	async #expire(limit: Milli, done: AbortSignal): Promise<never> {
+		const budget = Nano.fromMilli(limit);
 		const answered = new Promise<void>((resolve) =>
 			done.addEventListener("abort", () => resolve(), { once: true }),
 		);
@@ -116,7 +120,7 @@ export class Deadline {
 			// Answered: the waiting is over, and nothing is left to reject.
 			if (why === undefined) return new Promise<never>(() => {});
 			if (why === "expired" && !done.aborted) {
-				throw new TimeoutError(`request timed out after ${REQUEST_TIMEOUT_MS}ms`);
+				throw new TimeoutError(`request timed out after ${this.#budget}ms`);
 			}
 		}
 	}

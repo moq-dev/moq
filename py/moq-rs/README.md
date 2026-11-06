@@ -178,7 +178,7 @@ client = moq.Client(
   - Async iterator yielding `TrackRequest`
 - **`TrackProducer` / `GroupProducer`**. Write raw payloads with no codec parsing.
   - `.write_frame(payload, timestamp=None)` writes a payload with optional capture time.
-  - `await .ready(size)` (`GroupProducer`) waits until a frame of `size` bytes fits a window ahead of the fastest reader. Await it before each write for backpressure; a writer that doesn't sheds the front of the group instead.
+  - `await .ready(size)` (`GroupProducer`) waits until a frame of `size` bytes fits a window ahead of the fastest reader. Await it before each write for backpressure. A writer that doesn't wait sheds the front of the group instead.
   - `.create_group(sequence)` creates a sparse or replayed group at an explicit sequence.
   - `.finish()` ends at the live edge; the handle remains so `.abort(error_code)` can still run.
   - `.finish_at(final_sequence)` declares the first group that will never be produced while leaving lower groups writable.

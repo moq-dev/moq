@@ -280,6 +280,25 @@ test("a reader in sequence order with no delay budget skips headless groups", as
 	expect(group?.sequence).toBe(GROUP + 2n);
 });
 
+for (const version of VERSIONS) {
+	for (const objectId of [0n, 2n]) {
+		test(`draft ${version}: a group-0 reader skips the Largest group's cut tail after object ${objectId}`, async () => {
+			const { subscriber, consumer, answer } = await subscribed(version, {
+				order: "ascending",
+				delay: { max: null },
+				ranges: [{ start: { absolute: 0n } }],
+			});
+			await answer({ groupId: 0n, objectId });
+			// Largest is inclusive, including object 0: its following tail is no whole message.
+			await subscriber.handleGroup(...liveStream(0n, Number(objectId) + 1, ["cut"], version));
+			await subscriber.handleGroup(...liveStream(1n, 0, ["whole"], version));
+			const group = await consumer.ordered().nextGroup();
+			expect(group?.sequence).toBe(1n);
+			expect(await frames(group)).toEqual(["whole"]);
+		});
+	}
+}
+
 test("a tail parked on a refused joining FETCH is dropped", async () => {
 	const { subscriber, consumer, fetching } = await join();
 

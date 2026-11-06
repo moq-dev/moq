@@ -4,6 +4,28 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Track requests wait for their answer instead of timing out
+
+A subscription, `info()`, or `fetchGroup()` the publisher hasn't answered no longer fails
+with `StreamCode.ControlTimeout` after ten seconds, since the publisher's application may
+hold its answer, as Rust allows. It waits until the last subscriber closes, the fetch's
+`signal` aborts, the broadcast or session closes, or the publisher refuses it.
+Waiting for stream credit also lasts until cancellation. To give up sooner, close
+the subscriber or abort the fetch on a timer of your own. `info({ signal })` accepts
+the same cancellation signal. Announcement discovery keeps waiting while it is wanted;
+IETF advertisements retain their answer budget.
+
+### Socket endpoints are available
+
+The additive `socket` namespace exports `Endpoint`, `TcpStream`, and `TrackStream`.
+Use `dialTcp` / `acceptTcp` or `dialTrack` / `acceptTrack` on endpoints sharing a prefix;
+cancel pending operations with an `AbortSignal`, and explicitly close endpoints when done.
+Track readers skip groups that are refused, dropped, or evicted instead of waiting forever.
+TCP readers join their one group live, recovering its head with a joining FETCH or fill
+over moq-transport. The existing wire is unchanged. Every hop must support moq-lite-07 (currently an
+explicit `moq-lite-07-wip` offer) or moq-transport; while the endpoint's own client
+connection is moq-lite before 07, its dials and accepts fail as unsupported.
+
 ### Absolute IETF subscriptions keep their prefix
 
 Explicit group ranges now keep their requested start when the subscription answer
@@ -94,7 +116,7 @@ The route metadata interface `Origin.Route` is now the read-only `Origin.RouteIn
 
 ### Opens wait their turn for stream credit ([#7894](https://github.com/moq-dev/moq/pull/7894))
 
-`NoStreamCredit` is removed: a request no longer fails when the peer grants no more streams. Every open waits for credit, and returning credit goes to the open with the highest `sendOrder`. A request's 10s deadline runs only while none of its streams waits to open.
+`NoStreamCredit` is removed: a request no longer fails when the peer grants no more streams. Every open waits for credit, and returning credit goes to the open with the highest `sendOrder`. Request opens leave the queue when their caller cancels.
 `OpenOptions.timeout` and `OpenOptions.waitUntilAvailable` are removed; drop them. `Writer.tryOpen` still gives up on `cancel`, and its `sendOrder` may be a function, read again while the open waits.
 
 ### Relative group anchors are `bigint`

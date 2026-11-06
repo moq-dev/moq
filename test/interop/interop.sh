@@ -76,6 +76,7 @@ MEDIA_CASES=""
 MEDIA_ENGINES="chromium"
 MEDIA_PUBLISHER="chromium"
 TAIL_ONLY=0
+SOCKET_ONLY=0
 FINISH_ONLY=0
 # The versions the matrix runs on, one pass each. `auto` leaves every client its defaults,
 # except the clients the harness reads a grant from, which offer $AUTH_VERSION alone. Any other
@@ -130,6 +131,11 @@ while [[ $# -gt 0 ]]; do
             TAIL_ONLY=1
             shift
             ;;
+        --sockets)
+            SOCKET_ONLY=1
+            TAIL_ONLY=1
+            shift
+            ;;
         --versions)
             require_value "$@"
             VERSIONS="$2"
@@ -173,6 +179,11 @@ done
 
 if [[ -n "$MEDIA_CASES" && "$MEDIA" -ne 1 ]]; then
     echo "error: --media-cases requires --media" >&2
+    exit 2
+fi
+
+if [[ "$SOCKET_ONLY" -eq 1 && "$VERSIONS" != auto ]]; then
+    echo "error: --sockets pins moq-lite-07-wip; omit --versions" >&2
     exit 2
 fi
 
@@ -455,6 +466,9 @@ media_publisher() {
     esac
 }
 
+# shellcheck source-path=SCRIPTDIR source=socket.sh
+source "$INTEROP_DIR/socket.sh"
+
 # Record every case this run will reach as `not run`, before any build, so one the run
 # never reaches still shows in the report. Mirrors the dispatch at the end of this file.
 plan_cases() {
@@ -465,6 +479,10 @@ plan_cases() {
     fi
     if [[ "$NEGATIVE" -eq 1 ]]; then
         for sub in "${SUB_LIST[@]}"; do record "not run" case="no publisher" publisher=none subscriber="$sub"; done
+        return
+    fi
+    if [[ "$SOCKET_ONLY" -eq 1 ]]; then
+        plan_js_sockets
         return
     fi
     for VERSION in "${VERSION_LIST[@]}"; do plan_pass; done
@@ -528,6 +546,7 @@ plan_pass() {
         fi
     done
     [[ "$VERSION" == auto ]] || return 0
+    plan_js_sockets
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
         for version in "${COMPRESS_VERSIONS[@]}"; do
@@ -634,7 +653,7 @@ build_relay_cli() {
         INTEROP_SUB_MOQ="$HARNESS_RUN/bin/moq-sub"
     fi
     if [[ "$build_examples" -eq 1 && "$MEDIA" -eq 0 ]]; then
-        local example args=() examples=(interop-socket interop-tail interop-catalog interop-audio interop-hls interop-control interop-goaway interop-goaway-client interop-finish)
+        local example args=() examples=(interop-socket interop-tail interop-socket-js interop-catalog interop-audio interop-hls interop-control interop-goaway interop-goaway-client interop-finish)
         for example in "${examples[@]}"; do args+=(--example "$example"); done
         (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli "${args[@]}")
         for example in "${examples[@]}"; do
@@ -2556,6 +2575,7 @@ run_tails() {
     done
     # The compress, compressed catalog, and drop lanes pin their own versions.
     [[ "$VERSION" == auto ]] || return 0
+    run_js_sockets
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
         run_replacement_case "$runtime" websocket
@@ -2599,6 +2619,8 @@ elif [[ "$NEGATIVE" -eq 1 ]]; then
     # no data), proving the harness can actually report failure.
     echo "=== negative control: subscribers expect NO data ==="
     run_round "none" "interop-missing-$$-$RANDOM.hang" "" nothing "$(relay_next_line)"
+elif [[ "$SOCKET_ONLY" -eq 1 ]]; then
+    run_js_sockets
 else
     for VERSION in "${VERSION_LIST[@]}"; do
         LOGS="$HARNESS_RUN"

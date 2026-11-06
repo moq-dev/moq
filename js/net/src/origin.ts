@@ -620,6 +620,9 @@ class OriginState {
 	// retain their old broadcast without participating in routing or same-instance failover.
 	retained = new WeakSet<RequestSlot>();
 
+	// The sessions withholding hidden broadcasts from their peer; see `hooks.withholdHidden`.
+	withheld = new Signal(0);
+
 	// How many sessions are attached, and how many of those support broadcast discovery.
 	// What backs the public `discovery` getter.
 	sessions = new Signal({ total: 0, discovery: 0 });
@@ -1332,6 +1335,7 @@ export class Producer implements Table {
 	#reader = makeConsumer(this.#state, this.#scope);
 
 	static {
+		hooks.hiddenWithheld = (origin) => origin.#state.withheld;
 		exactRoute = (producer, path, options, request) => producer.#exact(path, options, request);
 	}
 
@@ -2022,6 +2026,16 @@ export class Consumer implements Reader {
 
 	static {
 		makeConsumer = (state, scope) => new Consumer(state, scope);
+		hooks.withholdHidden = (origin) => {
+			const withheld = origin.#state.withheld;
+			withheld.update((count) => count + 1);
+			let held = true;
+			return () => {
+				if (!held) return;
+				held = false;
+				withheld.update((count) => count - 1);
+			};
+		};
 	}
 
 	/** Settles once the origin closes; see {@link Producer.closed}. */
