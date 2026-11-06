@@ -101,7 +101,6 @@ This README's own work, once the children land:
 - [Padding probes](/quest/m2/probe/padding.md) - a browser probes with a lowest-priority padding stream on an ALR schedule
 - [JS rung disable](/quest/m2/probe/rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding
 - [Viewer up-switch](/quest/m2/probe/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
-- [Viewer targets are tested end to end and documented in Python](/quest/m2/probe/viewer-followups.md) - three gaps moq-dev/moq#7090 left are closed
 
 ## Related
 
