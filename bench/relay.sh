@@ -309,7 +309,7 @@ run_workload() {
         generator_pid=$LOAD_PID
         local duration=10s
         if [[ $PROFILE == instructions ]]; then duration=19s; fi
-        "$HOST_BIN" --pid "$relay_pid" --pid "$generator_pid" --threads \
+        "${HOST_CMD[@]}" --pid "$relay_pid" --pid "$generator_pid" --threads \
             --interval 500ms --duration "$duration" --output "$host" \
             >"$directory/host.log" 2>&1 &
         HOST_PID=$!

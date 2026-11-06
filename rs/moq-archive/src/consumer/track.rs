@@ -154,17 +154,13 @@ impl Live {
 	}
 }
 
-/// Serve `fill` from the archive, a group at a time in the fill's order, until every group is
-/// answered or nobody waits on it.
-pub(super) async fn serve<S: ObjectStore>(shared: Arc<Shared<S>>, index: Arc<Mutex<Index>>, fill: Fill) {
+/// Serve `fill` from the archive, a group at a time in the fill's order as its readers pick
+/// them up, until every group is answered or nobody waits on it.
+pub(super) async fn serve<S: ObjectStore>(shared: Arc<Shared<S>>, index: Arc<Mutex<Index>>, mut fill: Fill) {
 	if let Some(pts) = fill.time() {
 		return look_up(&shared, &index, &fill, pts).await;
 	}
-	let mut last = None;
-	while let Some(sequence) = fill.wanted()
-		&& last != Some(sequence)
-	{
-		last = Some(sequence);
+	while let Some(sequence) = fill.wanted_changed().await {
 		serve_group(&shared, &index, &fill, sequence).await;
 	}
 }
