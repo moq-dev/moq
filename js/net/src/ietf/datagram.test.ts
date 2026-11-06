@@ -124,7 +124,7 @@ test("a defined object status does not close the session", async () => {
 test("a datagram track round-trips over moq-transport", async () => {
 	const source = new Origin();
 	const path = Path.from("live");
-	const publication = source.createBroadcast(path);
+	const publication = source.route(path, { hidden: true });
 	const datagrams = publication.broadcast.createDatagrams("audio", {
 		timescale: Timescale.MILLI,
 		priority: 3,
@@ -177,7 +177,7 @@ test("a relay shares one IETF subscription across stream and datagram readers", 
 		const source = new Origin();
 		const relay = new Origin();
 		const path = Path.from("shared");
-		const publication = source.createBroadcast(path);
+		const publication = source.route(path, { hidden: true });
 		const track = publication.broadcast.createTrack("audio", { timescale: Timescale.MILLI });
 		const datagrams = publication.broadcast.createDatagrams("audio", { timescale: Timescale.MICRO });
 		publication.announce();
@@ -188,7 +188,7 @@ test("a relay shares one IETF subscription across stream and datagram readers", 
 			accept({ url, transport: upstream.server, publish: source.consume() }),
 		]);
 		const original = wireOf(peers[0]).consume(path);
-		const requests = relay.requestsRoute(path);
+		const requests = relay.routePrefix(path);
 		const cursor = requests.requested();
 		const routing = (async () => {
 			for await (const request of cursor) request.serve(original);

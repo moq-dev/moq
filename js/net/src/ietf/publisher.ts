@@ -324,6 +324,7 @@ export class Publisher {
 		return this.#withdrawal.close();
 	}
 	#quic: WebTransport;
+	#datagramWriter?: ReturnType<typeof DatagramStream.datagramWriter>;
 	#session: Session;
 	#requiresSolicitation: boolean;
 	// What a joining FETCH needs from each draft-18 SUBSCRIBE, by its request ID, while it lasts:
@@ -406,6 +407,7 @@ export class Publisher {
 		ready?: Promise<void>;
 	}) {
 		this.#quic = quic;
+		this.#datagramWriter = DatagramStream.datagramWriter(quic);
 		this.#grant = grant;
 		this.#gate = new Gate(grant);
 		this.#auth = auth;
@@ -421,7 +423,10 @@ export class Publisher {
 	}
 
 	/** The origin owns broadcasts; transport teardown ends this publisher's served requests. @internal */
-	close(): void {}
+	close(): void {
+		this.#datagramWriter?.close();
+		this.#datagramWriter = undefined;
+	}
 
 	/**
 	 * Handles an incoming SUBSCRIBE request on a bidi stream.
@@ -581,6 +586,7 @@ export class Publisher {
 				let resumed: Info;
 				try {
 					resumed = await resolve();
+					datagrams ??= datagramOf();
 					// A resume answers with the live edge, which only a granted subscriber learns.
 					if (!this.#gate.allows(name)) throw unauthorized(name);
 				} catch (err) {
@@ -1174,7 +1180,7 @@ export class Publisher {
 			console.debug(`serving the stream track without datagrams: ${reason(err)}`);
 			return;
 		}
-		const opened = DatagramStream.datagramWriter(this.#quic);
+		const opened = this.#datagramWriter;
 		if (!opened) return;
 		const publisher = info.priority;
 		const timescale = options.timescale;
@@ -1183,6 +1189,7 @@ export class Publisher {
 		const dispose = options.priority.subscribe(() => sender.setPriority(rank()));
 		const version = this.#session.version;
 		const max = DatagramStream.maxDatagramSize(this.#quic);
+		const left = hooks.datagramClosed(datagrams);
 		try {
 			for (;;) {
 				const datagram = await datagrams.recv();
@@ -1212,12 +1219,15 @@ export class Publisher {
 					);
 					continue;
 				}
-				await sender.writer.write(body);
+				// A paused subscription must release its consumer even when transport writes stall.
+				await race([sender.writer.ready, left]);
+				if (left.peek() !== undefined) return;
+				await race([sender.writer.write(body), left]);
+				if (left.peek() !== undefined) return;
 			}
 		} finally {
 			dispose();
-			await sender.close();
-			opened.close();
+			await race([sender.close(), left]);
 		}
 	}
 
