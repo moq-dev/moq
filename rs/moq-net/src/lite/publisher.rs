@@ -2089,13 +2089,13 @@ impl<R: Request> Drop for RequestServe<R> {
 /// The open stream is interest in the track: the query that answered it stays until the
 /// requester closes its side, so demand holds while the requester moves on to SUBSCRIBE.
 enum TrackInfoServe {
-	Track(track::Resolving, Option<Box<Legacy>>),
+	/// The stream track's query, its Lite-05/06 fallback, and once answered, the name's
+	/// datagram track held for the SUBSCRIBE alongside.
+	Track(track::Resolving, Option<Box<Legacy>>, Option<DatagramHold>),
 	/// Lite-05/06: a name no stream track has, answered for its datagram track.
 	Datagrams(datagram::Consumer, crate::broadcast::Consumer),
-	/// Answered, holding the name's datagram track for the SUBSCRIBE alongside on Lite-05/06.
-	Answered {
-		_hold: Option<DatagramHold>,
-	},
+	/// Answered from the datagram track, now held for the SUBSCRIBE alongside.
+	Held(#[expect(dead_code, reason = "held for its drop")] DatagramHold),
 }
 
 impl Request for TrackInfoServe {
@@ -2129,7 +2129,7 @@ impl Request for TrackInfoServe {
 	) -> Result<Self, Error> {
 		let legacy = Legacy::new(shared, &broadcast, track);
 		match broadcast.track(track) {
-			Ok(track) => Ok(Self::Track(track.info().into_inner(), legacy)),
+			Ok(track) => Ok(Self::Track(track.info().into_inner(), legacy, None)),
 			Err(err) => Ok(Self::Datagrams(Legacy::datagrams(legacy, err)?, broadcast)),
 		}
 	}
@@ -2145,7 +2145,7 @@ impl Request for TrackInfoServe {
 		waiter: &kio::Waiter,
 	) -> Poll<Result<ControlFlow<()>, Error>> {
 		let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
-		if let Self::Track(querying, legacy) = self {
+		if let Self::Track(querying, legacy, _) = self {
 			match querying.poll_ok(waiter) {
 				Poll::Ready(Err(err)) => {
 					let broadcast = legacy.as_ref().map(|legacy| legacy.broadcast.clone());
@@ -2161,8 +2161,8 @@ impl Request for TrackInfoServe {
 				}
 			}
 		}
-		let (querying, legacy) = match self {
-			Self::Track(querying, legacy) => (querying, legacy),
+		let (querying, legacy, held) = match self {
+			Self::Track(querying, legacy, held) => (querying, legacy, held),
 			Self::Datagrams(consumer, _) => {
 				let info = ready!(consumer.poll_info(waiter))?;
 				writer.set_priority(crate::coding::TRACK_INFO_SEND_ORDER);
@@ -2178,22 +2178,20 @@ impl Request for TrackInfoServe {
 				if ietf {
 					writer.buffer(&lite::ietf::TrackProperties(Default::default()))?;
 				}
-				let Self::Datagrams(consumer, broadcast) = std::mem::replace(self, Self::Answered { _hold: None })
-				else {
+				let consumer = consumer.clone();
+				let Self::Datagrams(_, broadcast) = &*self else {
 					unreachable!()
 				};
-				*self = Self::Answered {
-					_hold: Some(shared.held_datagrams.hold(&broadcast, consumer)),
-				};
+				*self = Self::Held(shared.held_datagrams.hold(broadcast, consumer));
 				return Poll::Ready(Ok(ControlFlow::Break(())));
 			}
-			Self::Answered { .. } => unreachable!("answered once"),
+			Self::Held(_) => unreachable!("answered once"),
 		};
 		let info = ready!(querying.poll_ok(waiter))?;
 		crate::ietf::flate::egress(&info, shared.version.has_compression())?;
 		// The datagrams beside the stream track, read from this answer on. A pending ask goes,
 		// rather than held as long as the requester keeps the stream open.
-		let hold = legacy.take().and_then(|legacy| {
+		*held = legacy.take().and_then(|legacy| {
 			let broadcast = legacy.broadcast.clone();
 			Some(shared.held_datagrams.hold(&broadcast, legacy.live()?))
 		});
@@ -2205,7 +2203,6 @@ impl Request for TrackInfoServe {
 		if ietf {
 			writer.buffer(&lite::ietf::TrackProperties(info.properties.clone()))?;
 		}
-		*self = Self::Answered { _hold: hold };
 		Poll::Ready(Ok(ControlFlow::Break(())))
 	}
 }
