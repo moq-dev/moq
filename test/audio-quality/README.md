@@ -129,10 +129,10 @@ just test push-to-talk
 ```
 
 This separate, roughly nine-minute run drives the shipped publish and watch elements in one Chromium
-page. A constant tone loops through the fake microphone, encoded as 128 kbit/s Opus with 60 ms
-frames. A release mutes the publisher, which sends nothing until the next press while its rendition
-stays enabled, so the listener keeps its subscription and plays comfort noise in between. The
-listener holds a fixed 300 ms delay. After warmup and a mute, it measures 22 presses,
+page with their defaults: Opus at 20 ms frames, and `delay: "auto"`. A constant tone loops through
+the fake microphone. A release mutes the publisher, which sends nothing until the next press while
+its rendition stays enabled, so the listener keeps its subscription and plays comfort noise in
+between. After warmup and a mute, it measures 22 presses,
 alternating two and three seconds: the first after the warmup's five-second mute, seven with no
 intervening wait, seven after five seconds, and seven after sixty seconds. Both elements reach a
 local relay directly over WebTransport, with no shaping, loss, or queueing, so every millisecond
@@ -165,13 +165,13 @@ it: `capture` (worklet delivery and framing, after the media the frame still nee
 `packetization` (that media, placed on the media clock by the newest chunk captured before the
 press), `encode` (codec and container write), `network` (write to arrival, through the relay),
 `decode` (arrival to decoded PCM), `jitter_buffer` (the head's PCM to the first PCM that fills the
-playout delay), `render` (that PCM to the render onset: the worklet hand-off and the context's
+playout delay in effect as it lands, which each press reports as `delay`), `render` (that PCM to the render onset: the worklet hand-off and the context's
 render callback), and `device`, as the stages below name them. `spread` is how far an utterance's frames
 stray from a steady arrival: the latest arrival relative to its media timestamp minus the earliest,
 which on this ideal path is the capture graph's cadence and what `"auto"`'s jitter estimate measures.
-`latency` and `path` give each one's min, median and max.
+`latency`, `path` and `delay` give each one's min, median and max.
 
-The command prints `latency`, `path`, the completeness counts, and `playback`'s underruns and
+The command prints `latency`, `path`, `delay`, the completeness counts, and `playback`'s underruns and
 stalls, and keeps its run directory even when it passes (set `HARNESS_KEEP=0` to drop it). Nightly runs it and keeps the raw evidence
 alongside the audio quality rows.
 
