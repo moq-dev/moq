@@ -2937,6 +2937,8 @@ function probeTargetHarness(level: ProbeLevel, options?: { failTarget?: boolean;
 	let writes = 0;
 	let stall!: () => void;
 	const stalled = new Promise<void>((resolve) => (stall = resolve));
+	let release!: () => void;
+	const released = new Promise<void>((resolve) => (release = resolve));
 	let reset!: (reason: unknown) => void;
 	const aborted = new Promise<unknown>((resolve) => (reset = resolve));
 	const quic = {
@@ -2947,10 +2949,12 @@ function probeTargetHarness(level: ProbeLevel, options?: { failTarget?: boolean;
 					// Only the stream type precedes the first target.
 					if (writes++ > 0) {
 						if (options?.failTarget) throw new Error("write failed");
-						// A peer that never drains the stream: only a reset ends the write.
-						if (options?.stallTarget) {
+						// A peer that stops draining the stream at the first target: only `release`
+						// or a reset ends that write.
+						if (options?.stallTarget && writes === 2) {
 							stall();
-							await new Promise<void>((_, reject) => {
+							await new Promise<void>((resolve, reject) => {
+								void released.then(resolve);
 								controller.signal.addEventListener("abort", () => {
 									reset(controller.signal.reason);
 									reject(controller.signal.reason);
@@ -2971,6 +2975,7 @@ function probeTargetHarness(level: ProbeLevel, options?: { failTarget?: boolean;
 		sent,
 		version,
 		stalled,
+		release,
 		aborted,
 		finish: () => inbound.close(),
 	};
@@ -3036,6 +3041,34 @@ test("ending the probe resets a stalled PROBE target write", async () => {
 	stop.abort();
 	await running;
 	expect(await aborted).toBeDefined();
+	viewer.close();
+	subscriber.close();
+	viewers.close();
+});
+
+// A peer that stops reading holds one target: the changes made meanwhile queue nothing
+// behind it, and only the latest is sent once the write drains.
+test("a stalled PROBE writer sends only the latest target once it drains", async () => {
+	const { subscriber, sent, version, stalled, release, finish } = probeTargetHarness(ProbeLevel.Increase, {
+		stallTarget: true,
+	});
+	const viewers = new Viewers();
+	const viewer = viewers.watch(1_000_000);
+	const running = subscriber.runProbe(undefined, viewers.target);
+	expect(await sent.u53()).toBe(StreamId.Probe);
+	await stalled;
+
+	for (const rate of [2_000_000, 3_000_000, 4_000_000]) {
+		viewer.update(rate);
+		await drainReactions();
+	}
+	release();
+	expect((await Probe.decode(sent, version)).bitrate).toBe(1_000_000);
+	expect((await Probe.decode(sent, version)).bitrate).toBe(4_000_000);
+
+	finish();
+	await running;
+	expect(await sent.done()).toBe(true);
 	viewer.close();
 	subscriber.close();
 	viewers.close();
