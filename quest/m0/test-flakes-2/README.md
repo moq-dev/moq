@@ -113,3 +113,4 @@ Public API: none. Wire: none.
 - [The Python audio playout-delay test reads its frames](/quest/m0/test-flakes-2/audio-playout-delay.md) - `test_audio_consumer_reports_its_playout_delay` stops timing out on its first read in the merge queue
 - [io_uring tests fit the shared locked-memory budget](/quest/m0/test-flakes-2/uring-memlock.md) - concurrent moq-relay and moq-uring test runs stop exhausting the user's `RLIMIT_MEMLOCK`, fixed at the cause rather than by raising the limit
 - [The FFI concurrent-ready test wakes both calls under load](/quest/m0/test-flakes-2/ffi-concurrent-ready.md) - `concurrent_ready_calls_all_wake` stops stalling its reader drain under load and is re-enabled
+- [OBS TSan runs report no leaked FFI worker thread](/quest/m0/test-flakes-2/obs-tsan-thread-leak.md) - the OBS TSan tests stop flagging a finished `moq-ffi-worker` thread at exit under load

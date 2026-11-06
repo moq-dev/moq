@@ -45,3 +45,4 @@ production stability proven merely because upstream artifacts published.
 - [Runner client bump](/quest/m3/release/runner-client-bump.md) - the upstream interop runner's Rust client moves to the published moq-tokio, so it stops stamping every object
 - [Smoke clients use request and follow](/quest/m3/release/smoke-bindings-rename.md) - condition: a binding release ships the renames; then the native smoke clients move to them
 - [Relay loader adoption](/quest/m3/release/relay-loader-adoption.md) - once their pins carry it, embedding consumers load relay config through `Config::merge` and refuse obsolete spellings
+- [moq.dev's hosted demos run on sockets](/quest/m3/release/demo-sockets-deploy.md) - after the cut, a maintainer deploys lite-07 and the socket grants so the hosted boy and CARLA demos connect

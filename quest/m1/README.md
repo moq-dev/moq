@@ -49,6 +49,8 @@ the same reason, gates the cut through the
 - [Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md) - a buffered `<moq-watch>` asks for the oldest group first, so a voice reply's opening arrives first, and audio's head hold shrinks to the floor
 - [Push-to-talk loses no speech](/quest/m1/push-to-talk/README.md) - an unmute is heard from its first frame with no catalog round trip: mute moves from holding a disabled rendition to suppressed silence with comfort noise, after a route spike; capture delivers frames on a steady cadence
 - [Push-to-talk's press-to-audible latency fits a budget on the defaults](/quest/m1/push-to-talk-latency.md) - press to audible on the browser defaults, excluding device output, stays under a kixtop-measured budget that `just test push-to-talk` enforces
+- [Socket endpoints split into servers and clients](/quest/m1/socket-roles.md) - servers announce `.server/<id>` and clients `.client/<id>`, so plain grants keep a client from posing as a server or reading another client
+- [CARLA's driver ids stay private](/quest/m1/carla-driver-ids.md) - 128-bit driver ids, and `status` shows a handle that isn't the endpoint id
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
