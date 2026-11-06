@@ -2792,10 +2792,12 @@ impl HeldDatagrams {
 		}
 	}
 
-	/// A clone of the newest hold reading the same track as `consumer`, if any.
+	/// A clone of the oldest hold reading the same track as `consumer`, if any. Several
+	/// TRACKs of one track may be open, and the SUBSCRIBE could follow any of them, so it
+	/// reads from the earliest answer: a replay only duplicates, a later one would lose.
 	fn find(&self, consumer: &datagram::Consumer) -> Option<datagram::Consumer> {
 		let state = self.0.lock().unwrap();
-		let (_, held) = state.holds.iter().rev().find(|(_, held)| held.is_clone(consumer))?;
+		let (_, held) = state.holds.iter().find(|(_, held)| held.is_clone(consumer))?;
 		Some(held.clone())
 	}
 }
@@ -9653,6 +9655,32 @@ mod tests {
 			let _track = reserved.accept(crate::track::Info::timed());
 			assert!(!drive(&mut track_info).await, "{version:?}: the TRACK stream is held");
 			datagrams.append(None, b"between".as_slice()).unwrap();
+			assert!(!drive(&mut subscribe).await, "{version:?}: the subscription is live");
+			assert_eq!(log.lock().unwrap().len(), 1, "{version:?}");
+		}
+	}
+
+	/// Lite-05/06: with two TRACKs of one name open, a SUBSCRIBE reads from the older answer,
+	/// so a datagram written between the two still reaches the SUBSCRIBE of the first.
+	#[kio::test]
+	async fn a_subscribe_reads_from_the_oldest_hold() {
+		for version in [Version::Lite05, Version::Lite06] {
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+			let mut datagrams = broadcast
+				.broadcast()
+				.create_datagrams("events", datagram::Info::default())
+				.unwrap();
+			broadcast.announce().unwrap();
+			let (publisher, log) = legacy_publisher(version, &origin);
+
+			let mut older = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
+			assert!(!drive(&mut older).await, "{version:?}: the older TRACK stream is held");
+			datagrams.append(None, b"between".as_slice()).unwrap();
+			let mut newer = legacy_request::<TrackInfoServe>(&publisher, version, &legacy_track()).await;
+			assert!(!drive(&mut newer).await, "{version:?}: the newer TRACK stream is held");
+
+			let mut subscribe = legacy_request::<SubscribeServe>(&publisher, version, &legacy_subscribe(0)).await;
 			assert!(!drive(&mut subscribe).await, "{version:?}: the subscription is live");
 			assert_eq!(log.lock().unwrap().len(), 1, "{version:?}");
 		}

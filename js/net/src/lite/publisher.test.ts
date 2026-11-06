@@ -3478,6 +3478,22 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 		});
 	}
 
+	// With two TRACKs of one name open, a SUBSCRIBE reads from the older answer, so a datagram
+	// written between the two still reaches the SUBSCRIBE of the first.
+	test(`${label}: a SUBSCRIBE reads from the oldest hold`, async () => {
+		const legacy = legacyPublisher(version);
+		try {
+			const datagrams = legacy.broadcast.createDatagrams("events");
+			await legacy.track();
+			datagrams.append(undefined, Uint8Array.of(0xaa));
+			await legacy.track();
+			await legacy.subscribe(0);
+			expect(legacy.sent.length).toBe(1);
+		} finally {
+			legacy.close();
+		}
+	});
+
 	// A hold reads the datagram track that answered its TRACK. Once that track is replaced, a
 	// SUBSCRIBE reads the replacement, even while the older TRACK stays open.
 	test(`${label}: a SUBSCRIBE reads the current datagram track past an older hold`, async () => {

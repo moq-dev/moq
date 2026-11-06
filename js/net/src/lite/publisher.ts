@@ -1948,13 +1948,16 @@ export class Publisher {
 		else hold.addEventListener("abort", release, { once: true });
 	}
 
-	// `consumer`, or a clone of the newest hold of the same track, read from that hold's answer on.
+	// `consumer`, or a clone of the oldest hold of the same track, read from that hold's answer on.
+	// Several TRACKs of one track may be open, and the SUBSCRIBE could follow any of them, so it
+	// reads from the earliest answer: a replay only duplicates, a later one would lose.
 	#adopt(consumer: datagram.Consumer): datagram.Consumer {
-		let newest: datagram.Consumer | undefined;
-		for (const held of this.#heldDatagrams) if (hooks.datagramSameTrack(held, consumer)) newest = held;
-		if (!newest) return consumer;
-		consumer.close();
-		return newest.clone();
+		for (const held of this.#heldDatagrams) {
+			if (!hooks.datagramSameTrack(held, consumer)) continue;
+			consumer.close();
+			return held.clone();
+		}
+		return consumer;
 	}
 
 	// Resolve (and cache) a track's immutable TRACK_INFO by asking the application.
