@@ -74,7 +74,7 @@ import { clamped, type Resolved, type Window } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
 // Stream codes that report the route failing to deliver rather than judging what it carried:
-// another copy may still deliver what it failed. Mirrors the Rust `route_failed`.
+// another copy may still deliver what it failed. Mirrors the Rust `Error::retryable`.
 const ROUTE_FAILURES: ReadonlySet<number> = new Set([
 	StreamCode.Internal,
 	StreamCode.Cancel,
@@ -113,7 +113,7 @@ function closing(err: Error): boolean {
 
 // A source losing its route to the content: only another route continues it, since asking the
 // same one again could only replace the withdrawal's cause with a refusal. Mirrors the Rust
-// `unroutable`.
+// `Error::unroutable`.
 function unroutable(err: Error): boolean {
 	return err instanceof StreamError && err.code === StreamCode.Unroutable;
 }
@@ -794,6 +794,7 @@ class Reader implements ResumeSource {
 					copy.done = copy.sub.closed.peek() ?? null;
 					if (copy.done === null && hooks.subscriberEnd(copy.sub)) this.#settled = true;
 				} else if (recv.kind === "error") copy.done = recv.error;
+				else if (this.#drained(copy, delivered)) copy.done = null;
 				break;
 			}
 		}
@@ -879,6 +880,18 @@ class Reader implements ResumeSource {
 			}
 		}
 		return undefined;
+	}
+
+	// Whether `copy`, bounded where it was replaced, ran out under that bound: its track ended, no
+	// fill still owes it a group, and it holds nothing there unread. Its subscriber would park on a
+	// group past the bound instead, as one past a local cap waits for it to rise, but the reader
+	// moves this bound itself by asking again. Mirrors the Rust arrival cursor ending on a complete
+	// track. Judged right after a read, which records whether it waits on a fill.
+	#drained(copy: Copy, delivered: Delivered): boolean {
+		const end = copyEnd(copy);
+		if (end === undefined || hooks.awaitsFill(copy.sub)) return false;
+		const start = max(this.#shell.cursor.peek().start, copy.floor ?? 0n);
+		return hooks.spent(copy.sub, start, end, delivered);
 	}
 
 	// Whether `copy` may still feed groups: its channel has not run out, and what it holds is

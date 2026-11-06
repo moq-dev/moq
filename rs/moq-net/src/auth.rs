@@ -150,8 +150,9 @@ fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 }
 
 /// How long a token refused for a reason that may pass waits before its session presents it
-/// again, doubling on each refusal up to [`RETRY_MAX`].
-const RETRY_INITIAL: Duration = Duration::from_secs(1);
+/// again, doubling on each refusal up to [`RETRY_MAX`]. A moq-transport refusal that may pass
+/// asks its peer to wait as long.
+pub(crate) const RETRY_INITIAL: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 
 /// Whether a refusal is the acceptor failing to decide rather than its verdict on the

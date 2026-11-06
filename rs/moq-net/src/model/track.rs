@@ -3878,7 +3878,7 @@ impl Producer {
 	}
 
 	/// Evict group `sequence` from the cache, as expiry does.
-	#[cfg(test)]
+	#[cfg(all(test, feature = "async"))]
 	pub(crate) fn evict(&self, sequence: u64) {
 		self.modify().unwrap().evict_group(sequence, Error::Evicted);
 	}
@@ -4919,6 +4919,14 @@ impl Consumer {
 		self
 	}
 
+	/// This handle with its stats scope cleared, so the subscriptions, fetches, and groups
+	/// derived from it count toward no stats session: for reads a consumer makes for itself
+	/// rather than on behalf of whoever its origin is metered for.
+	pub fn unmetered(mut self) -> Self {
+		self.stats = stats::Scope::default();
+		self
+	}
+
 	/// The track name this handle is bound to.
 	pub fn name(&self) -> &str {
 		&self.name
@@ -5738,6 +5746,20 @@ impl kio::Task for Fetching {
 	type Output = Result<group::Consumer>;
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+		let res = ready!(self.poll_answer(waiter));
+		// Picked up, so a batch fill this fetch joined may serve its next group, though the
+		// caller keeps the fetch and its join.
+		if let Some(join) = &self.result {
+			let mut picked = RangeSet::new();
+			picked.insert(self.sequence..self.sequence.saturating_add(1));
+			join.saw(&picked);
+		}
+		Poll::Ready(res)
+	}
+}
+
+impl Fetching {
+	fn poll_answer(&mut self, waiter: &kio::Waiter) -> Poll<Result<group::Consumer>> {
 		// Made before a front took its logical track, which caches nothing: the serving
 		// route answers instead.
 		if self.resume.is_none()
@@ -5879,7 +5901,7 @@ impl kio::Task for Fetching {
 					end: self.frame_end,
 				},
 			);
-			return self.poll(waiter);
+			return self.poll_answer(waiter);
 		}
 		Poll::Ready(Err(err))
 	}
@@ -7699,6 +7721,9 @@ impl Cursor {
 		let drift = ready!(self.poll_drift(&self.servable, waiter))?;
 		self.reoffer(drift.budget);
 		self.probe(self.floor(), &drift, taken, waiter);
+		if let Some(misses) = &mut self.misses {
+			misses.pick_up();
+		}
 		self.poll_recv_with(drift, waiter)
 	}
 
@@ -7998,6 +8023,9 @@ impl Cursor {
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
 		let drift = ready!(self.poll_drift(&self.servable, waiter))?;
 		self.probe(floor, &drift, taken, waiter);
+		if let Some(misses) = &mut self.misses {
+			misses.pick_up();
+		}
 		self.poll_next_with(floor, drift, waiter)
 	}
 
@@ -19943,7 +19971,8 @@ mod test {
 	}
 
 	/// A parked [`Fill::poll_wanted_changed`] wakes on every move of the group owed: a
-	/// reader narrowing past it, an answer, and the last reader leaving, which ends at `None`.
+	/// reader narrowing past it, a reader picking up an answer, and the last reader leaving,
+	/// which ends at `None`.
 	#[test]
 	fn fill_wanted_changed_follows_the_group_owed() {
 		let mut producer = track_producer("test", Info::timed());
@@ -19972,7 +20001,13 @@ mod test {
 		assert!(fill.poll_wanted_changed(&waiter).is_pending());
 
 		write_filled(fill.accept(8, None), 8);
-		assert!(flag.take(), "an answer woke the parked poll");
+		flag.take();
+		assert!(
+			fill.poll_wanted_changed(&waiter).is_pending(),
+			"group 9 waits for the reader to pick up 8"
+		);
+		assert!(matches!(subscriber.poll_recv_group(&noop), Poll::Ready(Ok(Some(_)))));
+		assert!(flag.take(), "the reader picking it up woke the parked poll");
 		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(9)));
 		assert!(fill.poll_wanted_changed(&waiter).is_pending());
 
@@ -20645,13 +20680,23 @@ mod test {
 		};
 		let waiter = kio::Waiter::noop();
 		let mut refilled = 0;
+		let mut fills = Vec::new();
 		let mut serve = || {
 			while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
-				while let Some(sequence) = fill.wanted() {
-					write(fill.accept(sequence, None), sequence);
-					refilled += 1;
-				}
+				fills.push(fill);
 			}
+			fills.retain_mut(|fill| {
+				loop {
+					match fill.poll_wanted_changed(&waiter) {
+						Poll::Ready(Some(sequence)) => {
+							write(fill.accept(sequence, None), sequence);
+							refilled += 1;
+						}
+						Poll::Ready(None) => break false,
+						Poll::Pending => break true,
+					}
+				}
+			});
 		};
 		let (mut read, mut drops) = (Vec::new(), Vec::new());
 		// A wire publisher forwards what the reader gives up as it reads.
@@ -20716,6 +20761,153 @@ mod test {
 		let lost: Vec<u64> = (0..GROUPS).filter(|sequence| !read.contains(sequence)).collect();
 		let named: Vec<u64> = drops.iter().flat_map(|&(start, end)| start..end).collect();
 		assert_eq!(lost, named, "every group lost is named dropped");
+	}
+
+	/// A batch far past the cache, asked by one slow reader: served through `wanted_changed`,
+	/// the fill writes one group at a time as the reader takes them, so nothing it wrote is
+	/// evicted before the reader gets it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_batch_fill_waits_for_its_reader() {
+		let size = 10_000;
+		let (mut producer, _pool) = pooled_producer(4 * size as u64);
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_range(0..).with_order(Order::Ascending));
+		let write = |group: Result<group::Producer>, sequence: u64| {
+			let mut group = group.unwrap();
+			group
+				.write_frame(Timestamp::from_millis(sequence).unwrap(), vec![0u8; size])
+				.unwrap();
+			group.finish().unwrap();
+		};
+		producer.start_at(GROUPS).unwrap();
+		write(producer.create_group(group::Info { sequence: GROUPS }), GROUPS);
+		let waiter = kio::Waiter::noop();
+		assert!(subscriber.poll_next_group(&waiter).is_pending(), "group 0 is a miss");
+		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the reader asked for the batch");
+		};
+		assert_eq!((fill.start().group, fill.end()), (0, GROUPS));
+		let (mut read, mut ahead) = (Vec::new(), 0);
+		loop {
+			let mut served = 0;
+			while let Poll::Ready(Some(sequence)) = fill.poll_wanted_changed(&waiter) {
+				write(fill.accept(sequence, None), sequence);
+				served += 1;
+			}
+			ahead = ahead.max(served);
+			match subscriber.poll_next_group(&waiter) {
+				Poll::Ready(Ok(Some(group))) => read.push(group.sequence),
+				_ => break,
+			}
+		}
+		assert_eq!(read, (0..=GROUPS).collect::<Vec<_>>(), "every group once, in order");
+		assert!(drained_drops(&mut subscriber).is_empty());
+		assert_eq!(ahead, 1, "one group served at a time");
+	}
+
+	/// A reader asking newest first but reading in sequence picks up each group the fill writes
+	/// while it waits on the oldest, so the fill never waits on a group the reader cannot take
+	/// yet.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_fill_against_its_readers_order_still_finishes() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let subscriber = producer.subscribe(replay().with_range(0..).with_order(Order::Descending));
+		let mut ordered = subscriber.ordered();
+		producer.start_at(4).unwrap();
+		write_group(&producer, 4);
+		let waiter = kio::Waiter::noop();
+		assert!(ordered.poll_next_group(&waiter).is_pending(), "group 0 is a miss");
+		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the reader asked for the batch");
+		};
+		assert_eq!(fill.order(), Order::Descending);
+		let (mut served, mut read) = (Vec::new(), Vec::new());
+		while let Poll::Ready(Some(sequence)) = fill.poll_wanted_changed(&waiter) {
+			write_filled(fill.accept(sequence, None), sequence);
+			served.push(sequence);
+			while let Poll::Ready(Ok(Some(group))) = ordered.poll_next_group(&waiter) {
+				read.push(group.sequence);
+			}
+		}
+		assert_eq!(served, [3, 2, 1, 0]);
+		assert_eq!(read, [0, 1, 2, 3, 4]);
+	}
+
+	/// A publisher out of stream credit still forwards drops, whose probe takes in a fill's
+	/// answers: only a read picks a group up, so the fill never runs ahead of a publisher
+	/// that cannot send what it wrote.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_drop_poll_does_not_pick_up_a_filled_group() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_range(0..).with_order(Order::Ascending));
+		producer.start_at(4).unwrap();
+		write_group(&producer, 4);
+		let waiter = kio::Waiter::noop();
+		assert!(subscriber.poll_next_group(&waiter).is_pending(), "group 0 is a miss");
+		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the reader asked for the batch");
+		};
+		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(0)));
+		write_filled(fill.accept(0, None), 0);
+		for _ in 0..3 {
+			assert!(subscriber.poll_drop(&waiter).is_pending());
+			assert!(
+				fill.poll_wanted_changed(&waiter).is_pending(),
+				"group 1 waits for a read"
+			);
+		}
+		assert!(matches!(subscriber.poll_next_group(&waiter), Poll::Ready(Ok(Some(group))) if group.sequence == 0));
+		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(1)));
+	}
+
+	/// A fetch that joined a batch fill picks up its group as it resolves, so the batch moves
+	/// on though the caller keeps the fetch and the reader that asked the batch narrowed past
+	/// that group.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_fetch_picks_up_its_group_in_a_batch_fill() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
+		let mut subscriber = producer.subscribe(ascending(0..));
+		producer.start_at(4).unwrap();
+		write_group(&producer, 4);
+		let waiter = kio::Waiter::noop();
+		assert!(subscriber.poll_recv_group(&waiter).is_ready(), "the live group");
+		assert!(
+			subscriber.poll_recv_group(&waiter).is_pending(),
+			"groups 0..4 are a miss"
+		);
+		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the reader asked for the batch");
+		};
+		assert_eq!((fill.start().group, fill.end()), (0, 4));
+		let mut fetch = producer.consume().fetch_group(2, None);
+		assert!(kio::Task::poll(&mut *fetch, &waiter).is_pending());
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"the fetch joined the batch"
+		);
+
+		subscriber.update(ascending(3..)).unwrap();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		assert_eq!(
+			fill.poll_wanted_changed(&waiter),
+			Poll::Ready(Some(2)),
+			"only the fetch wants 2"
+		);
+		write_filled(fill.accept(2, None), 2);
+		assert!(
+			fill.poll_wanted_changed(&waiter).is_pending(),
+			"3 waits for 2 to be picked up"
+		);
+		assert!(matches!(kio::Task::poll(&mut *fetch, &waiter), Poll::Ready(Ok(_))));
+		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(3)));
 	}
 
 	/// A reader forgets the misses it gave up once its window moves past them, as it forgets
@@ -23347,6 +23539,7 @@ mod test {
 	}
 
 	/// The frame a read takes right now, as its number in [`numbered`].
+	#[cfg(feature = "async")]
 	fn read_numbered(reader: &mut group::Consumer) -> Option<u32> {
 		let frame = reader.read_frame().now_or_never()?;
 		let frame = frame.expect("read failed").expect("the group ended");
@@ -23463,6 +23656,7 @@ mod test {
 	}
 
 	/// The size of `payload` as a frame, for [`group::Producer::poll_ready`].
+	#[cfg(feature = "async")]
 	fn frame_info(payload: &bytes::Bytes) -> frame::Info {
 		frame::Info {
 			size: payload.len() as u64,
@@ -23472,6 +23666,7 @@ mod test {
 
 	/// A live group of `frames` numbered frames past its tail, read along by a live reader,
 	/// on a track with a handler.
+	#[cfg(feature = "async")]
 	fn shed_live_group(frames: u32) -> (Producer, Requests, group::Producer, group::Consumer) {
 		let producer = track_producer("test", Info::default());
 		let requests = producer.requests();
@@ -23485,6 +23680,7 @@ mod test {
 	}
 
 	/// The next fill asked of `requests`, if any.
+	#[cfg(feature = "async")]
 	fn asked(requests: &Requests) -> Option<Fill> {
 		match requests.poll_requested_fill(&kio::Waiter::noop()) {
 			Poll::Ready(fill) => Some(fill.unwrap()),
