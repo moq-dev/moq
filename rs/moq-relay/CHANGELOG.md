@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.14](https://github.com/moq-dev/moq/compare/moq-relay-v0.17.13...moq-relay-v0.17.14) - 2026-11-06
+
+### Other
+
+- update Cargo.lock dependencies
+
 ## [0.17.13](https://github.com/moq-dev/moq/compare/moq-relay-v0.17.12...moq-relay-v0.17.13) - 2026-11-05
 
 ### Fixed
