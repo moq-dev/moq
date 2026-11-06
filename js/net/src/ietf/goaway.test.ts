@@ -13,6 +13,7 @@ import { RequestOk } from "./request.ts";
 import { NativeSession } from "./session.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry } from "./subscribe_namespace.ts";
 import { ALPN, Version } from "./version.ts";
+import { hostTime } from "@moq/clock/test";
 
 // GOAWAY rides the setup stream, with the peer's deadline, and on draft-18 a Request ID. The
 // session keeps serving afterwards so its groups in flight finish while the caller migrates.
@@ -21,6 +22,7 @@ for (const [version, alpn, requestId] of [
 	[Version.DRAFT_22, ALPN.DRAFT_22, undefined],
 ] as const) {
 	test(`a ${alpn} GOAWAY surfaces its URI and deadline without closing the session`, async () => {
+		hostTime();
 		const pair = createMockTransportPair(alpn);
 		const control = await Stream.open(pair.client, { version });
 		const peer = await Stream.accept(pair.server, version);
@@ -56,6 +58,7 @@ for (const [version, alpn, requestId] of [
 }
 
 test("a server rejects a client GOAWAY that names a redirect", async () => {
+	hostTime();
 	const version = Version.DRAFT_18;
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const control = await Stream.open(pair.client, { version });
@@ -261,6 +264,7 @@ for (const [version, alpn] of [
 
 	for (const end of ["FIN", "reset"] as const) {
 		test(`${alpn} an idle advertisement whose answer ends by ${end} is offered again`, async () => {
+			hostTime();
 			const pair = createMockTransportPair(alpn);
 			const control = await Stream.open(pair.server, { version });
 			await Stream.accept(pair.client, version);

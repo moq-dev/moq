@@ -6,6 +6,7 @@ import { Time } from "@moq/net";
 import { Derived, Effect, Signal } from "@moq/signals";
 import { nextMedia, subscribeMedia } from "./media";
 import { Sync } from "./sync";
+import { hostTime } from "@moq/clock/test";
 
 // These count what is still attached rather than the heap: `Bun.gc` scans the stack conservatively,
 // so a stale pointer can pin thousands of dead cells and fail a heap count under load.
@@ -58,6 +59,7 @@ async function pendingListeners(run: () => Promise<void>): Promise<number> {
 // Frames sleep on the clock once each, so a sleep that keeps anything on a clock that never changes
 // piles it up for the life of the player.
 test("waits on a stable clock leave nothing behind", async () => {
+	hostTime();
 	const sync = new Sync({ delay: Milli(10) });
 	const video = sync.track({ target: new Signal<Milli | undefined>(undefined) });
 	// Let the delay effect run before anchoring.

@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { yieldNow } from "@moq/clock";
+import { Milli, Nano, sleep, yieldNow } from "@moq/clock";
 import { accept, connect } from "../connection/index.ts";
 import { ProtocolViolation, SessionCode } from "../error.ts";
 import { createMockTransportPair, type MockTransport } from "../mock.ts";
@@ -12,6 +12,7 @@ import { wireOf } from "../wire.ts";
 import { Connection } from "./connection.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
+import { hostTime } from "@moq/clock/test";
 
 const ALL: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22];
 
@@ -105,6 +106,7 @@ test("an undefined object status closes the session", async () => {
 });
 
 test("a defined object status does not close the session", async () => {
+	hostTime();
 	const { pair, connection, version, writable } = await session();
 	try {
 		const bytes = new ObjectDatagram({
@@ -116,7 +118,7 @@ test("a defined object status does not close the session", async () => {
 		const writer = writable.getWriter();
 		await writer.write(bytes);
 		const open = Symbol("open");
-		const result = await Promise.race([pair.server.closed, Bun.sleep(50).then(() => open)]);
+		const result = await Promise.race([pair.server.closed, sleep(Nano.fromMilli(Milli(50))).then(() => open)]);
 		expect(result).toBe(open);
 	} finally {
 		connection.abort();
@@ -124,6 +126,7 @@ test("a defined object status does not close the session", async () => {
 });
 
 test("a datagram track round-trips over moq-transport", async () => {
+	hostTime();
 	const source = new Origin();
 	const path = Path.from("live");
 	const publication = source.route(path, { hidden: true });
@@ -288,6 +291,7 @@ for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22]) {
 		[100, true],
 	] as const) {
 		test(`${alpn}: a datagram sent right behind its answer arrives (answer ${lag} microtasks late${finish ? ", then the end" : ""})`, async () => {
+			hostTime();
 			const source = new Origin();
 			const publication = source.route(Path.from("live"), { hidden: true });
 			const datagrams = publication.broadcast.createDatagrams("audio");
@@ -328,6 +332,7 @@ for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22]) {
 
 for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22]) {
 	test(`${alpn}: a datagram burst reaches its reader before the end across a receive yield`, async () => {
+		hostTime();
 		const source = new Origin();
 		const publication = source.route(Path.from("live"), { hidden: true });
 		const datagrams = publication.broadcast.createDatagrams("audio");

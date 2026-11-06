@@ -19,6 +19,7 @@ import type { Established } from "./established.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
 import { pumpAnnounced, Redirects, Reload, type ReloadDelay, type ReloadProps } from "./reload.ts";
+import { hostTime } from "@moq/clock/test";
 
 function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
 	return acceptSession({ transport, url, ...props });
@@ -173,6 +174,7 @@ test("a peer that severs immediately keeps escalating the backoff", async () => 
 });
 
 test("an explicitly undefined delay field falls back to its default", async () => {
+	hostTime();
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 	let dials = 0;
@@ -215,6 +217,7 @@ async function waitUntil(pred: () => boolean): Promise<void> {
 }
 
 test("a follower follows the reconnect on the same handle", async () => {
+	hostTime();
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 

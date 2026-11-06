@@ -6,6 +6,7 @@ import {
 	type WebSocketLike,
 	WebSocketStream,
 } from "./web-socket-stream.ts";
+import { hostTime } from "@moq/clock/test";
 
 /** A scriptable WebSocket stand-in implementing the bits the ponyfill uses. */
 class FakeWebSocket implements WebSocketLike {
@@ -95,6 +96,7 @@ describe("WebSocketStream ponyfill", () => {
 	});
 
 	test("writes are sent and backpressure follows bufferedAmount", async () => {
+		hostTime();
 		const wss = new WebSocketStream("wss://x", { webSocket: ctor, highWaterMark: 100 });
 		const ws = FakeWebSocket.last as FakeWebSocket;
 		ws.open();
@@ -122,6 +124,7 @@ describe("WebSocketStream ponyfill", () => {
 	});
 
 	test("setHighWaterMark resizes backpressure live (mid-drain)", async () => {
+		hostTime();
 		const wss = new WebSocketStream("wss://x", { webSocket: ctor, highWaterMark: 100 });
 		const ws = FakeWebSocket.last as FakeWebSocket;
 		ws.open();
@@ -257,6 +260,7 @@ describe("WebSocketStream.adopt", () => {
 	});
 
 	test("backpressure applies to an adopted socket", async () => {
+		hostTime();
 		const ws = accepted();
 		ws.bufferedAmount = 100;
 		const wss = WebSocketStream.adopt(ws, { highWaterMark: 10 });

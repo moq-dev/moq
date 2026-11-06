@@ -37,6 +37,7 @@ import {
 	Version,
 	versionName,
 } from "./version.ts";
+import { hostTime } from "@moq/clock/test";
 
 /** A transport whose `getStats` behaves as described, or is absent entirely. */
 function transport(getStats?: () => Promise<unknown>): WebTransport {
@@ -101,6 +102,7 @@ async function sendGoaway(server: WebTransport, uri: string): Promise<void> {
 }
 
 test("a lite GOAWAY keeps the session open, and a second one closes it", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN_04);
 	const connection = new Connection({
 		url: new URL("https://relay.example/"),

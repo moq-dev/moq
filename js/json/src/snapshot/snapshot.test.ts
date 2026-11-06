@@ -5,6 +5,7 @@ import { hooks } from "../../../net/src/internal.ts";
 import { Consumer } from "./consumer.ts";
 import { Encoder } from "./encoder.ts";
 import { Producer } from "./producer.ts";
+import { hostTime } from "@moq/clock/test";
 
 type Value = Record<string, unknown>;
 
@@ -206,6 +207,7 @@ test("next skips every superseded group, whatever budget another reader asks for
 // group 2 arriving while group 1 is still owed supersedes it at once, whatever budget another
 // reader of the track, such as the caller's own, asks for.
 test("reads skip a group the subscription still owes", async () => {
+	hostTime();
 	for (const max of [Milli.zero, Milli(1_000), null]) {
 		const track = new Track.Producer("test").accept({});
 		hooks.receiveTrack(track);

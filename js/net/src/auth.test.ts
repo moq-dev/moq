@@ -17,6 +17,7 @@ import { Stream, Writer } from "./stream.ts";
 import { abandoned } from "./util/demand.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
+import { hostTime } from "@moq/clock/test";
 
 const url = new URL("https://localhost:4443/test");
 
@@ -353,6 +354,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 	});
 
 	test("a revoked grant withdraws its broadcasts without closing the session", async () => {
+		hostTime();
 		const origin = new OriginProducer();
 		const { client, server, transport } = await connect({ publish: origin, protocol });
 		const requests = server.auth.requests();

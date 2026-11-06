@@ -42,6 +42,7 @@ import { GroupOrder, Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
+import { hostTime } from "@moq/clock/test";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
 	const broadcastRoute = origin.route(path);
@@ -1096,6 +1097,7 @@ test("a group that goes stale while its stream opens writes nothing", async () =
  * namespace unadvertised until something unrelated changed.
  */
 test("a broadcast published mid-advertisement is still announced", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
@@ -1128,6 +1130,7 @@ test("a broadcast published mid-advertisement is still announced", async () => {
  * be offered again for the life of the session.
  */
 test("a declined advertisement is retried on the next change", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
@@ -1362,6 +1365,7 @@ test("a refusal that forbids retrying is not retried", async () => {
  * the replacement for the life of the session.
  */
 test("republishing a path clears a refusal without unannouncing first", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
@@ -1392,6 +1396,7 @@ test("republishing a path clears a refusal without unannouncing first", async ()
  * delivers.
  */
 test("a new instance at the same path clears a refusal", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
@@ -1422,6 +1427,7 @@ test("a new instance at the same path clears a refusal", async () => {
  * by rebuilding the watched entry on re-announce.
  */
 test("re-announcing a path clears a refusal that forbade retrying", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
@@ -3243,6 +3249,7 @@ for (const synchronous of [true, false]) {
 // PUBLISH_DONE MUST wait until every stream the subscription will open is closed, so its
 // Stream Count is final. A group still queued for a stream slot when the track ends is one.
 test("draft-22: PUBLISH_DONE waits for a queued group and counts every stream", async () => {
+	hostTime();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
@@ -4569,6 +4576,7 @@ test("draft-22: narrowing gives up an excluded group's open stream", async () =>
 });
 
 test("draft-22: widening with a fill keeps the open live group", async () => {
+	hostTime();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1);
@@ -4613,6 +4621,7 @@ test("draft-22: widening with a fill keeps the open live group", async () => {
 });
 
 test("draft-22: a fill-only update short of the edge keeps the live join's floor", async () => {
+	hostTime();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1);
@@ -4660,6 +4669,7 @@ test("draft-22: a fill-only update short of the edge keeps the live join's floor
 });
 
 test("draft-22: a fill-only update keeps the subscription's floor", async () => {
+	hostTime();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1);

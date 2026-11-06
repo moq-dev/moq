@@ -14,6 +14,7 @@ import { Timescale, Timestamp } from "../time.ts";
 import type { Fill, Producer, Subscriber, Subscription } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import * as Lite from "./index.ts";
+import { hostTime } from "@moq/clock/test";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -154,6 +155,7 @@ test("copy fill: lite-06 asks nothing below a start resolved from the budget, an
 });
 
 test("copy fill: lite-05 fills below the live edge only what a reader's ranges name", async () => {
+	hostTime();
 	const peer = await peers(Lite.ALPN_05);
 	try {
 		populate(peer.track);

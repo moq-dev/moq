@@ -19,6 +19,7 @@ import { encodeSubscribeResponse, Subscribe, SubscribeStart } from "./subscribe.
 import { Subscriber } from "./subscriber.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { ALPN_05, Version } from "./version.ts";
+import { hostTime } from "@moq/clock/test";
 
 /** Whether `promise` settles within `ms`. */
 async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
@@ -56,6 +57,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	}
 
 	test("a subscription holds its TRACK stream until the SUBSCRIBE is answered", async () => {
+		hostTime();
 		const { subscriber, reader, track, sub } = await subscribing();
 		const fin = track.reader.done();
 		expect(await settlesWithin(fin, 50)).toBe(false);
@@ -68,6 +70,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	});
 
 	test("a subscription that ends unanswered closes its TRACK stream", async () => {
+		hostTime();
 		const { subscriber, reader, track } = await subscribing();
 		const fin = track.reader.done();
 		expect(await settlesWithin(fin, 50)).toBe(false);
@@ -114,6 +117,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	test.each(["FIN", "reset"] as const)(
 		"an answered TRACK stream keeps the track wanted until the requester's %s",
 		async (close) => {
+			hostTime();
 			const pair = createMockTransportPair(ALPN_05);
 			const origin = new OriginProducer();
 			const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
@@ -221,6 +225,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	);
 
 	test("one TRACK stream closing leaves the track wanted while another holds it", async () => {
+		hostTime();
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
@@ -262,6 +267,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	});
 
 	test("a TRACK stream after the cached lookup was let go holds the track again", async () => {
+		hostTime();
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
@@ -369,6 +375,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	});
 
 	test("a TRACK stream after every earlier one left an unanswered lookup holds the track again", async () => {
+		hostTime();
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());

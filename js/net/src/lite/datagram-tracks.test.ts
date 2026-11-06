@@ -10,6 +10,7 @@ import { Timescale, Timestamp } from "../time.ts";
 import { Budget } from "../util/yield.ts";
 import { wireOf } from "../wire.ts";
 import { ALPN_04, ALPN_05, ALPN_06, ALPN_07_WIP } from "./version.ts";
+import { hostTime } from "@moq/clock/test";
 
 const url = new URL("https://localhost/datagrams");
 const path = Path.from("live");
@@ -17,6 +18,7 @@ const path = Path.from("live");
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	for (const streams of [false, true]) {
 		test(`${alpn}: ${streams ? "same-name kinds" : "datagram-only track"} delivery`, async () => {
+			hostTime();
 			const source = new Origin();
 			const publication = source.route(path, { hidden: true });
 			const datagrams = publication.broadcast.createDatagrams("audio", {
@@ -336,6 +338,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		[100, true],
 	] as const) {
 		test(`${alpn}: a datagram sent right behind its answer arrives (answer ${lag} microtasks late${finish ? ", then the end" : ""})`, async () => {
+			hostTime();
 			const source = new Origin();
 			const publication = source.route(path, { hidden: true });
 			const datagrams = publication.broadcast.createDatagrams("audio");
@@ -375,6 +378,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 // of its track's end. The subscriber routes the datagram before it ends the track.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	test(`${alpn}: a datagram sent right before its end arrives`, async () => {
+		hostTime();
 		const source = new Origin();
 		const publication = source.route(path, { hidden: true });
 		const datagrams = publication.broadcast.createDatagrams("audio");
@@ -409,6 +413,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 // with some of it still queued. The end waits for the loop to read the queue empty.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	test(`${alpn}: a burst sent right before its end arrives past a budget yield`, async () => {
+		hostTime();
 		// As many as a datagram track buffers unread, past two receive budgets.
 		const BURST = 64;
 		const source = new Origin();

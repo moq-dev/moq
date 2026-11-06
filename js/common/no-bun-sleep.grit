@@ -1,0 +1,7 @@
+language js
+
+// Bun.sleep arms a host timer behind @moq/clock's back, so the test preload can't see it.
+or {
+	`Bun.sleep`,
+	`Bun.sleepSync`
+} as $sleep where { register_diagnostic(span=$sleep, message="Use sleep() from @moq/clock") }

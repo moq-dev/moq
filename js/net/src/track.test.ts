@@ -9,6 +9,7 @@ import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import { authoredInfo, infoDefaults, rescale, Subscription, Producer as TrackProducer } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
+import { hostTime } from "@moq/clock/test";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -2450,6 +2451,7 @@ test("end is group 0 for an empty track and undefined after an abort", async () 
 });
 
 test("readFrame does not livelock when a sole group finishes before the next arrives", async () => {
+	hostTime();
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe().ordered();
 

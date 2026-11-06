@@ -3,6 +3,7 @@ import { Manual, Micro, Milli, Nano, sleep } from "@moq/clock";
 import { type Group, Time, Track, Varint } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
+import { hostTime } from "@moq/clock/test";
 
 // Standalone from consumer.test.ts so it only pulls the Legacy format, not the CMAF decoder.
 
@@ -54,6 +55,7 @@ async function drain(consumer: Consumer): Promise<[bigint, number | undefined][]
 // audio writes into a timestamp-indexed ring and video drops a late frame at render, and the
 // subscription's own max delay already bounds how far back one can be.
 test("out-of-order groups are delivered rather than dropped", async () => {
+	hostTime();
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
 	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(5000) } }), {
 		format: new LegacyFormat("data"),

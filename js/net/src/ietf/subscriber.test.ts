@@ -26,6 +26,7 @@ import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDon
 import { Subscriber } from "./subscriber.ts";
 import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
+import { hostTime } from "@moq/clock/test";
 
 const VERSION = Version.DRAFT_18;
 
@@ -189,6 +190,7 @@ async function syncInline(stream: Stream, announced: announce.Routes, cluster?: 
  * watcher drops a broadcast that is still being published.
  */
 test("an announcement survives the first of its two sources ending", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
@@ -315,6 +317,7 @@ test("a subscription that dies releases what it advertised", async () => {
  * for the session with nobody left to release it.
  */
 test("an entry buffered past a consumer close does not pin the path", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });

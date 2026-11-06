@@ -8,6 +8,7 @@ import Session, { type Config } from "./session.ts";
 import * as Stream from "./stream.ts";
 import { VarInt } from "./varint.ts";
 import type { WebSocketLike, WebSocketStreamLike } from "./web-socket-stream.ts";
+import { hostTime } from "@moq/clock/test";
 
 // A scripted peer standing in for the `WebSocketStream` transport. The test
 // plays the remote end: it injects frames into the Session's readable and
@@ -543,6 +544,7 @@ describe("Session integration (scripted peer)", () => {
 	});
 
 	test("a RESET_STREAM received first keeps the stream terminal", async () => {
+		hostTime();
 		const { session, peer } = connect();
 		await session.ready;
 		peer.send({ type: "transport_parameters", params: peerParams() });

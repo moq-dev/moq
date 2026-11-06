@@ -9,6 +9,7 @@ import { createMockTransportPair } from "../mock.ts";
 import { Stream } from "../stream.ts";
 import { accept } from "./accept.ts";
 import { type ConnectProps, connect as connectSession } from "./connect.ts";
+import { hostTime } from "@moq/clock/test";
 
 const url = new URL("https://example.com/test");
 
@@ -227,6 +228,7 @@ test("an http:// fingerprint of the wrong length or status is refused", async ()
 });
 
 test("aborting connect aborts a pending http:// fingerprint fetch", async () => {
+	hostTime();
 	// Answer nothing, so only the abort ends the request.
 	const server = fingerprintServer(() => new Promise<Response>(() => {}));
 	const original = globalThis.WebTransport;
@@ -553,6 +555,7 @@ for (const protocol of ["", undefined]) {
 }
 
 test("SETUP refuses a version the client did not name", async () => {
+	hostTime();
 	const pair = createMockTransportPair("");
 	const restore = stubWebTransport(pair.client);
 	try {
@@ -582,6 +585,7 @@ test("a peer without an ALPN is refused when no named version negotiates in SETU
 const IETF_VERSIONS = Object.values(Ietf.Version).map((v) => [Ietf.versionName(v), v] as const);
 
 test.each(IETF_VERSIONS)("a client refuses %s selected in the moql SETUP", async (_, version) => {
+	hostTime();
 	const pair = createMockTransportPair("");
 	const restore = stubWebTransport(pair.client);
 	try {
