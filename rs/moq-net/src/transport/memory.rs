@@ -616,6 +616,16 @@ impl poll::SendStream for SendStream {
 		}
 		closed.map(Err)
 	}
+
+	/// Whether the reader took every message written so far, which stands in for an
+	/// acknowledgement as it does for [`poll_closed`](Self::poll_closed).
+	fn acknowledged(&self) -> Option<bool> {
+		let channel = self.channel.lock();
+		// A reset on a closed session leaves the channel as it was, so only `done` records it.
+		let finished = matches!(channel.end, Some(End::Fin));
+		let open = channel.end.is_none() && !self.done;
+		Some((open || finished) && channel.messages.is_empty())
+	}
 }
 
 impl Drop for SendStream {

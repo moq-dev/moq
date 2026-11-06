@@ -154,6 +154,10 @@ impl<T: poll::SendStream> poll::SendStream for Local<T> {
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 		self.0.poll_closed(waiter)
 	}
+
+	fn acknowledged(&self) -> Option<bool> {
+		self.0.acknowledged()
+	}
 }
 
 impl<T: poll::RecvStream> poll::RecvStream for Local<T> {

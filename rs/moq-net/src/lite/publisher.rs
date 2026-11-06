@@ -5662,7 +5662,7 @@ impl GroupServe {
 				priority: handle.send_order().into(),
 			},
 		};
-		let stream = match ready!(session.poll_open_uni(&mut self.open, waiter, options)) {
+		let stream = match ready!(session.poll_open_group(&mut self.open, waiter, options)) {
 			Ok(stream) => stream,
 			Err(err) => {
 				self.settle_open(false);
