@@ -2890,6 +2890,7 @@ export class Subscriber {
 		hooks.spent = (subscriber, start, end, delivered) =>
 			(subscriber.#state.closed.peek() !== undefined || subscriber.#complete()) &&
 			!hooks.hasUnreadGroup(subscriber, start, end, delivered);
+		hooks.awaitsFill = (subscriber) => subscriber.#fillWait;
 		hooks.staleAt = (subscriber, sequence) => {
 			const held: Superseded = {};
 			return {

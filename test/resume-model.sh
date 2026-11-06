@@ -7,6 +7,6 @@ MOQ_RESUME_SEED=${MOQ_RESUME_SEED:-$(python3 -c 'import secrets; print(secrets.r
 MOQ_RESUME_CASES=${MOQ_RESUME_CASES:-4096}
 export MOQ_RESUME_SEED MOQ_RESUME_CASES
 echo "Resume model: MOQ_RESUME_SEED=$MOQ_RESUME_SEED MOQ_RESUME_CASES=$MOQ_RESUME_CASES"
-just rs test -p moq-net --lib -E 'test(=model::resume_model::readers_match_the_logical_track)'
+just rs test -p moq-net --features async --lib -E 'test(=model::resume_model::readers_match_the_logical_track)'
 bun install --frozen-lockfile
 bun test ./js/net/src/resume.model.test.ts
