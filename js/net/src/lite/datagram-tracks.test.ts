@@ -450,8 +450,12 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 
 // A track's end waits a host task for the datagrams received with it. A session close in
 // between finishes the track rather than cutting it off: the publisher already ended it.
+// Quarantined pending quest/m0/test-flakes-2/datagram-end-close.md: the end can still be the
+// publisher's host task when the microtask chain starts, which starves that task, so the close
+// lands first and legitimately cuts the track off. Lite-06 hits it most often, but lite-05 has
+// too, so every draft waits on the fix.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
-	test(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
+	test.skip(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
 		const source = new Origin();
 		const publication = source.route(path, { hidden: true });
 		const datagrams = publication.broadcast.createDatagrams("audio");
