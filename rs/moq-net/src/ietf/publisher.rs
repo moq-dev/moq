@@ -9981,11 +9981,11 @@ mod serve_tests {
 				let h = serve_session(
 					version,
 					crate::track::Info::timed(),
-					crate::origin::Route::default(),
 					ScriptedSession::new(Vec::new()).with_datagrams(1200),
 				);
 				let mut datagrams = h
 					._broadcast
+					.broadcast()
 					.create_datagrams("audio", crate::datagram::Info::default())
 					.unwrap();
 				let request = h.session.clone();
