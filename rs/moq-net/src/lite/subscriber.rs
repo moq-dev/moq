@@ -6628,9 +6628,9 @@ mod tests {
 
 			let broadcast = crate::broadcast::Info::new().produce();
 			let request = broadcast.reserve_track("audio").unwrap();
-			let mut requester = request.consume().info();
+			let requester = request.consume().info();
 			let mut serving = ServeLoop::new(&serve, request, Default::default());
-			assert!(kio::Task::poll(&mut requester, &kio::Waiter::noop()).is_ready());
+			assert!(requester.poll_ok(&kio::Waiter::noop()).is_ready());
 			let held = Stream::open(&serve.subscriber.session, Version::Lite07).await.unwrap();
 			serving.held = Some(HeldTrack(held));
 			let wire = Wire {
