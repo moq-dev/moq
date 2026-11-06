@@ -211,6 +211,12 @@ writes the same samples a page does, so `analyze.ts` reduces both alike, and the
 and clock checks have nothing to void. Decoding is taken as instant. A replay is deterministic, so
 its budgets are exactly what it measured.
 
+The ring time-stretches live playback as the page's does, but the replay's audio is a constant, so
+every seam admits at the shortest pitch period, 2.5 ms. Accelerate therefore removes less per stretch
+than it would from speech, and expand, which repeats every whole period that fits, adds the most it
+can. `skip_aheads` also reads a sustained accelerate as a skip; `player_skips` counts only the ring's
+own re-anchors.
+
 ```bash
 just test audio-quality-record                        # the three recorded lanes, 35 s each, needs the network
 just test audio-quality-record --lanes relay-bbb
@@ -270,6 +276,9 @@ player's own count, which its stats panel shows, is read alongside:
 - `player_underruns`: `audio.out.stats.underruns`, each time the ring ran dry mid-playback and
   re-stalled to refill, plus each quantum it filled only part-way. The tap files the quanta after a
   run-dry as stalled time, so `underruns` leaves those out and this counts them. Unset natively.
+- `player_skips`: `audio.out.stats.skips`, each jump that dropped buffered audio rather than playing
+  it faster. `skip_aheads` below infers the same events from the playhead, and also reads a time
+  stretch that sustains 40 ms of acceleration as one, so this is the exact count. Unset natively.
 - `underruns`: quanta the ring filled only partly, or not at all, while playing.
 - `short_quanta`: the underruns that were partly filled: the ring ran dry part-way through.
 - `underrun_episodes`: maximal runs of consecutive underruns, one audible gap each.

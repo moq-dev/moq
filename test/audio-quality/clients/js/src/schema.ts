@@ -104,6 +104,13 @@ export const METRICS = {
 		description:
 			"The player's own count, which its stats panel shows: each time the ring ran dry mid-playback and re-stalled to refill, plus each quantum it filled only part-way. `underruns` leaves out the run-dry ones, since the quanta after them render while stalled.",
 	},
+	player_skips: {
+		unit: "count",
+		clock: "render",
+		aggregations: ["total", "per_min"],
+		description:
+			"The player's own count of skips: each jump that dropped buffered audio rather than playing it faster. `skip_aheads` infers them from the playhead, which reads a sustained time stretch as one too.",
+	},
 	skip_aheads: {
 		unit: "count",
 		clock: "viewer",
@@ -382,6 +389,11 @@ export type Sample = {
 	 * Unset natively.
 	 */
 	playerUnderruns?: number;
+	/**
+	 * `audio.out.stats.skips`, cumulative: the player's own count of jumps that dropped buffered audio
+	 * rather than playing it faster. Unset natively.
+	 */
+	playerSkips?: number;
 	/** The current connection PROBE round trip. */
 	rtt?: Ms;
 	/** The selected rendition's advertised jitter at this sample. */

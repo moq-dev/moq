@@ -85,6 +85,8 @@ export interface Quantum {
 	delay: number;
 	/** The ring's cumulative underruns, as the player's stats count them: each run-dry and each short quantum. */
 	underruns: number;
+	/** The ring's cumulative skips, as the player's stats count them: each jump that dropped queued audio. */
+	skips: number;
 }
 
 /** Samples as the milliseconds `AudioBuffer` posts to the worklet. */
@@ -279,6 +281,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 				timestamp: Milli.fromMicro(ring.timestamp),
 				delay,
 				underruns: ring.underruns,
+				skips: ring.skips,
 			};
 		}
 	} finally {

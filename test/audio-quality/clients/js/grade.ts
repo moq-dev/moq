@@ -65,11 +65,12 @@ for (const summary of summaries) {
 /** The columns a reader scans first: what the listener would have noticed, and the delay paid for it. */
 const COLUMNS: [string, string][] = [
 	["player underruns/min", "player_underruns_per_min"],
+	["player skips/min", "player_skips_per_min"],
 	["underruns/min", "underruns_per_min"],
 	["short/min", "short_quanta_per_min"],
 	["episodes/min", "underrun_episodes_per_min"],
 	["gap ms/min", "underrun_ms_per_min"],
-	["skips/min", "skip_aheads_per_min"],
+	["skip-aheads/min", "skip_aheads_per_min"],
 	["discarded ms/min", "discarded_ms_per_min"],
 	["stalled", "stalled_share"],
 	["silence", "silence_share"],

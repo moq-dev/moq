@@ -104,6 +104,12 @@ describe("analyze", () => {
 		expect(analyze(input(clean())).metrics.player_underruns_total).toBeNull();
 	});
 
+	test("the player's own skips are its counter's rise across the window", () => {
+		const samples = clean().map((s, i) => ({ ...s, playerSkips: i < 100 ? 1 : 3 }));
+		expect(analyze(input(samples)).metrics).toMatchObject({ player_skips_total: 2 });
+		expect(analyze(input(clean())).metrics.player_skips_total).toBeNull();
+	});
+
 	test("a gap that is the ring stalling is not an underrun", () => {
 		const samples = clean();
 		samples[100] = {

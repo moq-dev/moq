@@ -71,7 +71,12 @@ impl Stretch {
 		let lag = if operation == Operation::Hold {
 			0
 		} else {
-			pitch(&self.input, self.channels, self.rate, operation == Operation::Fast)
+			pitch(
+				&self.input,
+				self.channels,
+				self.rate,
+				operation != Operation::Accelerate,
+			)
 		};
 		self.position = 0;
 		self.length = frames;
@@ -109,23 +114,29 @@ impl Stretch {
 		self.cooldown = self.rate as usize * 50 / 1000;
 	}
 
+	/// Expand departs from NetEq's preemptive expand, which repeats one period
+	/// per cooldown. A queue below its target is short of the cushion its
+	/// arrivals need, so it expands the way fast accelerate shrinks: every
+	/// window, as many whole periods as fit, at the lower admission threshold.
 	fn decide(&self, buffered: usize, target: usize) -> Operation {
 		let high = target + self.rate as usize * 20 / 1000;
 		if buffered >= high * 4 {
 			Operation::Fast
+		} else if buffered < target {
+			Operation::Expand
 		} else if self.cooldown > 0 {
 			Operation::Hold
 		} else if buffered >= high {
 			Operation::Accelerate
-		} else if buffered < target {
-			Operation::Expand
 		} else {
 			Operation::Hold
 		}
 	}
 }
 
-/// Search the first channel at 4 kHz, then validate the full-rate seam.
+/// Search the first channel at 4 kHz, then validate the full-rate seam. Fast
+/// mode, for fast accelerate and every expand, admits a weaker match and takes
+/// every whole period that fits before the middle.
 fn pitch(input: &[f32], channels: usize, rate: u32, fast: bool) -> usize {
 	// NetEq's 48 kHz Q12 FIR. Sampling its taps at fractional positions also
 	// admits native 44.1/96 kHz devices without altering the search domain.

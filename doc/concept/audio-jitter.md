@@ -614,11 +614,13 @@ the `bun doc/concept/audio-jitter/corpus.ts` command above. It runs in
 
 ## Received-audio time stretch
 
-Native playback adapts received PCM to the target with WebRTC NetEq's
-accelerate and preemptive expand. It never generates replacement audio for a
-missing packet. The estimator above is unchanged. The browser implementation
-must conform to this same algorithm and [PCM corpus](audio-jitter/stretch/corpus.json)
-when it adopts stretching; the browser does not yet stretch on this revision.
+Both players adapt received PCM to the target with WebRTC NetEq's accelerate
+and preemptive expand: native playback in `rs/moq-audio`, and the browser in the
+AudioWorklet's ring in `js/watch`. Neither generates replacement audio for a
+missing packet, so a hole in the media plays as a hole. The estimator above is
+unchanged. Both conform to this same algorithm and
+[PCM corpus](audio-jitter/stretch/corpus.json). The browser stretches only live
+playback: buffered playback plays every sample it holds, as it always has.
 
 The source is WebRTC's
 [`TimeStretch`](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_coding/neteq/time_stretch.cc),
@@ -626,8 +628,8 @@ The source is WebRTC's
 [`PreemptiveExpand`](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_coding/neteq/preemptive_expand.cc),
 [`DspHelper`](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_coding/neteq/dsp_helper.cc),
 and [`DecisionLogic`](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_coding/neteq/decision_logic.cc),
-read on 2026-11-04. The native port retains the BSD license and patent grant in
-`rs/moq-audio/WEBRTC-LICENSE` and `WEBRTC-PATENTS`.
+read on 2026-11-04. Both ports retain the BSD license and patent grant, in
+`WEBRTC-LICENSE` and `WEBRTC-PATENTS` beside `rs/moq-audio` and `js/watch`.
 
 ### PCM and decision state
 
@@ -637,7 +639,10 @@ below are frames at the output device's rate `R`. Duration-to-frame conversion
 uses `floor(R * milliseconds / 1000)`, except a measured pitch rounds to the
 nearest frame, with half rounded upward. A processing window is 30 ms of
 **newly received PCM**. A short window passes unchanged. Startup padding is
-never analysed, and finish drains the remaining input without stretching.
+never analysed, and finish drains the remaining input without stretching. So
+does the tail before a [declared end](#declared-silence): running dry after it
+is silence rather than an underrun, so nothing expands toward a target that no
+arrival will refill.
 
 `buffered` counts unread frames in the ring plus staged output. `target` is
 the current playout target. The state is `cooldown`, initially 60 ms
@@ -646,14 +651,26 @@ by each frame rendered, saturating at zero. At a window boundary, with
 `high = target + 20 ms`, choose in this order:
 
 1. `buffered >= 4 * high`: fast accelerate, even during cooldown.
-2. `cooldown > 0`: hold.
-3. `buffered >= high`: accelerate.
-4. `buffered < target`: preemptive expand.
+2. `buffered < target`: preemptive expand in fast mode, even during cooldown.
+3. `cooldown > 0`: hold.
+4. `buffered >= high`: accelerate.
 5. Otherwise: hold.
 
 A successful stretch sets cooldown to 50 ms (NetEq's five 10 ms ticks).
 A rejected seam leaves it unchanged. This preserves NetEq's 20 ms adjustment
-granularity, 4x fast threshold, and minimum interval. NetEq's extra
+granularity, 4x fast threshold, and minimum interval for accelerate.
+
+Expand departs from NetEq. Its preemptive expand waits out the cooldown and
+repeats one pitch period at the normal threshold, which lengthens a ring by a
+few milliseconds every 50 ms at most. On the `relay-mic-rtt40` replay, Chrome
+at 40 ms of added RTT, that still ran the browser's ring dry 2.1 times a
+minute: its arrival gaps reached 104 to 135 ms behind cushions of 71 to 94 ms.
+A ring below its target is short of the cushion its arrivals need, and running
+dry re-stalls it for a whole target of silence. So expand mirrors fast
+accelerate instead: every window, at the lower admission threshold, as many
+whole periods as fit before the middle, up to 15 ms of every 30 ms. That took
+every replay row to zero player underruns. The cost is a stronger stretch while
+the ring is short, which the listening check judges. NetEq's extra
 packet-history maximum-delay term is not added again: this controller sees the
 already decoded PCM queue and its jitter target rather than an RTP playout
 timestamp and packet-arrival history. There is no concealment state.
@@ -685,8 +702,9 @@ squared energies and `C` their dot product. The signal is passive if
 `(E1+E2)/(2*L) <= 8*75000/(32768*32768)`, NetEq's VAD before a background
 noise model is initialised. No background synthesis or noise model is added.
 Otherwise admit the seam only when `C > threshold * sqrt(E1*E2)`, with
-threshold **14746/16384** normally and **8192/16384** for fast accelerate.
-These are NetEq's original thresholds; none was tuned. Active uncorrelated
+threshold **14746/16384** normally and **8192/16384** for fast accelerate
+and expand. These are NetEq's original thresholds; none was tuned, though
+NetEq applies the lower one to fast accelerate only. Active uncorrelated
 PCM holds unchanged, so zero underruns are not guaranteed for arbitrary input
 or outages. Passive PCM may stretch without correlation.
 
@@ -699,7 +717,8 @@ still needs the listening proof required by the quest.
 
 ### Seam and boundaries
 
-In fast mode replace `L` by `floor(M/L)*L` after admission. For a crossfade of
+In fast mode, for fast accelerate and every expand, replace `L` by
+`floor(M/L)*L` after admission. For a crossfade of
 `L` frames, frame `i` uses `w=(i+1)/(L+1)` and
 `f32(a*(1-w)+b*w)` independently for every channel.
 
@@ -720,7 +739,10 @@ ring and staged output hold the target again. Padding never enters the pitch
 search. Finishing bypasses that wait so a short tail can drain. Trimming is
 emergency recovery at the ring's capacity watermark. The
 CLI's incoming-media trim is reserved for a distance at the fast threshold,
-not ordinary 20 ms drift. These bounds do not promise concealment of missing
+not ordinary 20 ms drift. The browser's ring receives each decoded frame as a
+write, so it re-anchors on its floor there, at the lower of the fast threshold
+and three quarters of its headroom above the floor, and counts each re-anchor
+as a skip in its stats. These bounds do not promise concealment of missing
 media or convergence of a signal whose seams continually fail admission.
 
 ### Stretch corpus
@@ -730,9 +752,12 @@ output PCM, device rate and channels, buffered and target frame counts,
 incoming cooldown, requested decision, and admitted lag (zero means hold).
 Compare output within 1e-6 absolute sample amplitude. It includes hold,
 cooldown, fast-mode bypass, linked stereo, passive noise, rejected active
-noise, and 8/44.1/48 kHz seams. Both implementations consume these exact
-vectors; generating expected output from the implementation under test is
-not conformance.
+noise, and 8/44.1/48 kHz seams, plus expand ignoring the cooldown and
+admitting a seam at the lower threshold. Both implementations consume these
+exact vectors; generating expected output from the implementation under test is
+not conformance. The expand vectors were regenerated from the browser port when
+expand departed from NetEq, and the native port, changed separately, reproduces
+them unchanged.
 
 ## Comfort noise
 
