@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Fill.wanted_changed()` waits for a reader to pick up the group served before
+
+`await fill.wanted_changed()` now returns the next group only once every group the fill accepted reached a reader, which picks it up when it next reads, so a handler writes a batch one group at a time at its fastest reader's pace. Serve a fill by looping on `wanted_changed()` until it returns `None`, accepting one group per call, rather than looping over `wanted()`, which still returns at once: a batch written ahead of its readers lets a bounded cache evict its earlier groups before they are read. Serve the fills you take in their own tasks, since each now waits on its own readers.
+
 ### Socket sessions
 
 moq.socket now exposes TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.

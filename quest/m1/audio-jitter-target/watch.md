@@ -12,8 +12,8 @@ sizes.
 
 The measured rows are the `relay-mic-rtt40` replay row, whose
 `player_underruns_per_min` must reach 0, and a live re-run of the 2026-11-03
-rows below on Chrome and Safari with a real microphone and 40 ms or more of
-added RTT, read from the stats panel's audio Underruns.
+rows below with a real microphone, Chrome's with 40 ms or more of added RTT
+and Safari's on the direct path, read from the stats panel's audio Underruns.
 
 Boundaries: no packet loss concealment, so a frame that never arrives is still
 missing audio; only received audio is stretched. The estimator stays as
@@ -27,6 +27,12 @@ Decided 2026-11-03 (maintainer, on
 stretch into m1 as this quest's fix, keeping `QUANTILE` at 0.95. The options
 were restating the Goal to the measured rate, or raising the quantile. The m2
 Time stretch quest was folded in here.
+
+Decided 2026-11-06 (maintainer, /quest-unblock): drop the Safari row with
+40 ms or more of added RTT. Safari can't be redirected through the RTT relay,
+and shaping it needs Network Link Conditioner or `dnctl`/`pfctl` on the
+laptop, so its rows run on the direct path. Not chosen: a hands-on Safari run
+with shaped RTT.
 
 ### Baseline, 2026-11-03
 
@@ -138,8 +144,8 @@ the replay numbers that justify it.
   budget is tightened to the new measurement. No other replay row regresses,
   and the nightly browser rows are re-measured by the budgets note's rule. A
   listening check confirms that a 2 ms/s drift and the measured expansions are
-  inaudible or close to it. The 2026-11-03 Chrome and Safari +40 ms rows are
-  re-run on real hardware.
+  inaudible or close to it. The 2026-11-03 rows are re-run on real hardware:
+  Chrome's at +40 ms and Safari's on the direct path.
 
 ### Publisher, measured in the same run
 
@@ -164,15 +170,6 @@ in the steady state and drift apart only while a track is congested.
 audio-driven clock for this. Recommendation: measure the gap against the sample
 reaching the output, through `AudioContext.getOutputTimestamp()`, so output
 latency, Bluetooth included, is part of the lip sync.
-
-## Waiting
-
-- Maintainer: Safari with 40 ms or more of added RTT, the baseline row the
-  2026-11-03 run could not shape. On the MacBook Air (`kixtop`), install
-  Network Link Conditioner (Additional Tools for Xcode) or allow
-  `sudo dnctl`/`pfctl`, then play `cdn.moq.dev/anon` in Safari with the stats
-  panel open for two minutes, and record its audio Underruns after 30 s and the
-  latency tab's auto delay.
 
 ## Related
 

@@ -13,8 +13,9 @@
 //!
 //! Delivery is best-effort per hop: a session drops (with a debug log) any datagram whose
 //! encoded body exceeds the transport's datagram size, and sessions that can't carry
-//! datagrams at all (moq-lite before 05, moq-transport for now, or stream-only transports
-//! like WebSocket) never deliver them.
+//! datagrams at all (moq-lite before 05, or stream-only transports like WebSocket) never
+//! deliver them. Moq-transport maps a datagram track onto SUBSCRIBE and OBJECT_DATAGRAM,
+//! with the sequence as the group ID and object ID 0.
 //!
 //! Moq-lite 07 asks for a datagram track on a request of its own. Moq-lite 05 and 06 carry a
 //! name's groups and datagrams on one subscription, as moq-transport does: a session serves
@@ -139,8 +140,8 @@ struct State {
 	end: Option<Result<()>>,
 	// Live producer-side handles: producers and an unanswered request.
 	producers: usize,
-	// Each live consumer's subscriber priority.
-	priorities: slab::Slab<i8>,
+	// Each live consumer's priority, or None for passive forwarding over an existing stream.
+	priorities: slab::Slab<Option<i8>>,
 }
 
 impl State {
@@ -194,7 +195,7 @@ impl State {
 	}
 
 	fn priority(&self) -> Option<i8> {
-		self.priorities.iter().map(|(_, priority)| *priority).max()
+		self.priorities.iter().filter_map(|(_, priority)| *priority).max()
 	}
 }
 
@@ -208,7 +209,12 @@ pub(super) struct Weak {
 impl Weak {
 	/// Join the track as a new consumer, unless it already ended.
 	pub(super) fn try_consume(&self, stats: stats::Scope) -> Option<Consumer> {
-		Consumer::join(self.name.clone(), &self.state, stats)
+		Consumer::join(self.name.clone(), &self.state, stats, Some(DEFAULT_PRIORITY))
+	}
+
+	/// Observe a live track without adding demand; its stream subscription already holds that.
+	pub(super) fn observe(&self, stats: stats::Scope) -> Option<Consumer> {
+		Consumer::join(self.name.clone(), &self.state, stats, None)
 	}
 }
 
@@ -313,8 +319,13 @@ impl Producer {
 
 	/// A new consumer of the track, starting with the next datagram written.
 	pub fn consume(&self) -> Consumer {
-		Consumer::join(self.name.clone(), &self.state, stats::Scope::default())
-			.unwrap_or_else(|| Consumer::ended(self.name.clone(), &self.state))
+		Consumer::join(
+			self.name.clone(),
+			&self.state,
+			stats::Scope::default(),
+			Some(DEFAULT_PRIORITY),
+		)
+		.unwrap_or_else(|| Consumer::ended(self.name.clone(), &self.state))
 	}
 
 	/// End the track cleanly: consumers read `None` once they have read what is buffered.
@@ -476,12 +487,12 @@ pub struct Consumer {
 
 impl Consumer {
 	/// Join a live track, or `None` once it ended.
-	fn join(name: Arc<str>, state: &kio::Shared<State>, stats: stats::Scope) -> Option<Self> {
+	fn join(name: Arc<str>, state: &kio::Shared<State>, stats: stats::Scope, priority: Option<i8>) -> Option<Self> {
 		let mut guard = state.lock();
 		if guard.end.is_some() {
 			return None;
 		}
-		let slot = guard.priorities.insert(DEFAULT_PRIORITY);
+		let slot = guard.priorities.insert(priority);
 		let cursor = guard.offset + guard.buffer.len() as u64;
 		drop(guard);
 		Some(Self {
@@ -564,14 +575,27 @@ impl Consumer {
 	/// This consumer's subscriber priority.
 	pub fn priority(&self) -> i8 {
 		self.slot
-			.and_then(|slot| self.state.read().priorities.get(slot).copied())
+			.and_then(|slot| self.state.read().priorities.get(slot).copied().flatten())
 			.unwrap_or(DEFAULT_PRIORITY)
 	}
 
 	/// Set this consumer's subscriber priority, higher first.
 	pub fn set_priority(&mut self, priority: i8) {
 		if let Some(slot) = self.slot {
-			self.state.lock().priorities[slot] = priority;
+			self.state.lock().priorities[slot] = Some(priority);
+		}
+	}
+
+	/// Another consumer at the same position that adds no demand, until its priority is set.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn observe(&self) -> Self {
+		let slot = self.slot.map(|_| self.state.lock().priorities.insert(None));
+		Self {
+			name: self.name.clone(),
+			state: self.state.clone(),
+			slot,
+			cursor: self.cursor,
+			stats: self.stats.clone(),
 		}
 	}
 
@@ -628,6 +652,31 @@ mod tests {
 		match recv(consumer) {
 			Poll::Ready(Ok(Some(datagram))) => datagram.sequence,
 			other => panic!("expected a datagram, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn passive_forwarding_keeps_the_tail_without_adding_demand() {
+		let mut producer = Info::default().produce("audio");
+		let mut observer = producer.weak().observe(stats::Scope::default()).unwrap();
+		let mut copy = observer.clone();
+		assert_eq!(producer.priority(), None);
+		let mut reader = producer.consume();
+		reader.set_priority(-7);
+		assert_eq!(producer.priority(), Some(-7));
+		drop(reader);
+		assert_eq!(producer.priority(), None);
+		producer.append(None, &b"tail"[..]).unwrap();
+		producer.finish();
+		for consumer in [&mut observer, &mut copy] {
+			let Poll::Ready(Ok(Some(datagram))) = consumer.poll_recv(&kio::Waiter::noop()) else {
+				panic!("tail lost");
+			};
+			assert_eq!(datagram.payload.as_ref(), b"tail");
+			assert!(matches!(
+				consumer.poll_recv(&kio::Waiter::noop()),
+				Poll::Ready(Ok(None))
+			));
 		}
 	}
 

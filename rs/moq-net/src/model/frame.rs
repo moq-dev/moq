@@ -333,6 +333,7 @@ impl<const N: usize> Buffer<N> {
 	}
 
 	/// How many frames a single fill can hold.
+	#[cfg(feature = "async")]
 	pub const fn capacity(&self) -> usize {
 		N
 	}
@@ -343,11 +344,13 @@ impl<const N: usize> Buffer<N> {
 	}
 
 	/// Whether the buffer holds no frames.
+	#[cfg(feature = "async")]
 	pub fn is_empty(&self) -> bool {
 		self.0.is_empty()
 	}
 
 	/// Whether the buffer is at capacity, so [`Self::push`] would refuse.
+	#[cfg(feature = "async")]
 	pub(crate) fn is_full(&self) -> bool {
 		self.0.is_full()
 	}
@@ -380,6 +383,7 @@ impl<const N: usize> Buffer<N> {
 	}
 
 	/// Drop the current batch, leaving the buffer empty.
+	#[cfg(feature = "async")]
 	pub fn clear(&mut self) {
 		self.0.clear();
 	}

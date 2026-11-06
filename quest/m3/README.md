@@ -43,8 +43,10 @@ federation) land.
 - [JS announced coalescing](/quest/m3/js-announced-coalesce.md) - `@moq/net`'s `Announced` keeps one pending event per path, like Rust
 - [An audio track's final flush joins its open group](/quest/m3/audio-flush-group.md) - a zero-`delay.max` subscriber gets the tail, not `Old`
 - [Release execution](/quest/m3/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m2
+- [Vendored code has every upstream fix it needs](/quest/m3/vendor-sync/README.md) - the next cycle's vendor sync, which the cut moves under the m2 cut gate
 - [Release pull requests read the R2 Rust cache](/quest/m3/mbx-r2-release-cache.md) - after the cut brings the platform Rust cache to `release`
 - [Binary release publishers run on their tag](/quest/m3/release-tag-publishers.md) - after the cut brings the workflows to `release`
+- [Relays split horizon per session](/quest/m3/route-split-horizon.md) - a relay never advertises a route back over the session it came from
 - [crates.io trusts the workflow](/quest/m3/crates-trusted-publisher.md) - maintainer action: the crates the cut first-publishes by token get a trusted publisher for `release-rs.yml`
 - [Rust releases publish through OIDC](/quest/m3/release-rs-oidc.md) - release-plz publishes with trusted publishing and `CARGO_REGISTRY_TOKEN` is revoked
 - [One policy for oversized container metadata](/quest/m3/import-metadata-policy.md) - fMP4 and MKV refuse or stream huge metadata by one documented rule
@@ -133,6 +135,7 @@ federation) land.
 - [Compile time audit](/quest/m3/audit-compile-time.md) - build-time hotspots are measured against the m1 baselines, starting with the transport share now that moq-net compiles once, and the worst are removed, made cheaper, or planned
 - [Lint override and deprecation audit](/quest/m3/audit-lints.md) - repeat the suppression and deprecation audit after the release ships, starting with clippy on the macOS and Windows targets
 - [Clean ALSA playback onset](/quest/m3/audio-alsa-onset.md) - no onset restarts or clicks over PulseAudio
+- [Read a bus source's own samples](/quest/m3/audio-strip-tap.md) - a tap reads one source's samples before its delay with their bus-clock positions, for the studio's clap sync
 - [Interop audit](/quest/m3/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down or unsupported
 - [moq-hls exposes each rendition's bound source](/quest/m3/hls-rendition-source.md) - playlists and segments report the source path and instance they read, so a cache can key on the source
 - [The memory bench finishes at 1 MiB frames](/quest/m3/memory-bench-hang.md) - the allocation mode's park at `size=1048576` is root-caused and fixed
@@ -171,3 +174,16 @@ federation) land.
 - [MKV imports ffmpeg's multichannel FLAC](/quest/m3/mkv-flac-channel-mask.md) - a channel-mask-only Vorbis comment is accepted, so default ffmpeg multichannel FLAC needs no remux
 - [The publish support panel lists only codecs publishing accepts](/quest/m3/publish-support-probe.md) - the settings panel runs the publisher's Annex B encoder probe
 - [TLS reload follows symlinked certificate files](/quest/m3/watch-symlink-targets.md) - in-place rewrites of symlink targets in other directories reload roots, served chains, and client certificates
+- [A published capture exposes its bandwidth grant](/quest/m3/video-publish-grant.md) - a moq-video publish shows each track's granted bitrate, not only its target
+- [The test relay can enable stats](/quest/m3/relay-test-stats.md) - `moq_relay::test_relay` starts with stats on when asked
+- [macOS capture listing futures are Send](/quest/m3/capture-shareable-send.md) - ScreenCaptureKit listing and start no longer hold a non-Send block across an await
+- [Denied macOS system audio names its settings pane](/quest/m3/audio-system-denied-hint.md) - a permission error pointing at Screen & System Audio Recording
+- [One encoder follows several connections' estimates](/quest/m3/bandwidth-multi-connection.md) - a track published to two relays tracks both estimates
+- [Bandwidth reservations ignore in-process readers](/quest/m3/reservation-local-readers.md) - a local recorder no longer counts as uplink demand
+- [Container export starts apart from its skip budget](/quest/m3/export-live-start.md) - fMP4 and MP4 export start at the live edge and report sample counts
+- [MP4 export trims exactly at both ends](/quest/m3/mp4-export-window.md) - a presentation window with no lead-in and no presented tail
+- [Audio capture opens a format the mix accepts](/quest/m3/audio-capture-negotiate.md) - multichannel and odd-rate devices capture, with discrete input selection
+- [A mix-minus removes several sources](/quest/m3/bus-minus-several.md) - a guest's return feed drops every copy of their own sound
+- [Bus writes land at a bus position](/quest/m3/bus-positioned-write.md) - callers sync audio to video without copying the bus's private latency
+- [moq-mux imports a regular MP4](/quest/m3/mp4-import.md) - non-fragmented MP4, `moov` first or last
+- [An audio encoder flushes without ending its track](/quest/m3/audio-encode-flush.md) - a clip's last partial frame is heard while the source stays live

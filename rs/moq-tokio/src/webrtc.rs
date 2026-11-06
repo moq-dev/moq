@@ -509,6 +509,8 @@ fn session_config(protocol: &str, max_record_size: u64) -> qmux::Config {
 	config.max_record_size = max_record_size;
 	// Set rather than left to qmux's default, since the read queue is sized from it.
 	config.limits.receive_window = std::num::NonZeroU64::new(RECEIVE_WINDOW);
+	// The channel's read queue is sized by it, so it never widens.
+	config.fixed_receive_window = true;
 	// The binding has no datagrams.
 	config.max_datagram_frame_size = None;
 	config

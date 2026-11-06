@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use moq_net::{
-	Client, Error, Hop, Pattern, Patterns, Server, Session, SessionError, StreamError, Version,
+	Client, Error, Pattern, Patterns, Server, Session, SessionError, StreamError, Version,
 	auth::{self, Grant},
 	origin,
 };
@@ -364,7 +364,7 @@ async fn a_route_auth_renews_its_announce(version: &'static str) {
 
 /// Build an origin producer, spawning its driver on the ambient runtime.
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	producer
 }

@@ -59,8 +59,9 @@ Decided with the maintainer on
   (2026-11-03): "We can't ever expect 300ms latency if it takes more than
   300ms to deliver a packet." No clocked live start or other startup
   machinery. Five ideal runs on 2026-11-04 held it on all 75 separated presses
-  (median 261 ms, max 294 ms). The breakdown and its knobs are in
-  [Push-to-talk latency](/quest/m1/push-to-talk-latency.md).
+  (median 261 ms, max 294 ms) at a fixed 300 ms delay, broken down on
+  [moq-dev/moq#7760](https://github.com/moq-dev/moq/pull/7760). The defaults'
+  breakdown is in [Push-to-talk latency](/quest/m1/push-to-talk-latency.md).
 - ✅ **No encoder recovery on re-enable** (2026-11-03). Asked first why a
   fatal encoder error is expected at all: it is not. No push-to-talk run
   reported one, and no issue reports a publisher encoder failure; the latch
@@ -95,7 +96,7 @@ catches this. A complete set of runs finishes this epic.
 
 ## Required
 
-- [Native playback fills declared silence with comfort noise](/quest/m1/push-to-talk/native-comfort-noise.md) - `moq play` plays comfort noise over declared silence and counts no underrun, matching the browser
+- [Native playback in the acceptance proof](/quest/m1/push-to-talk/native.md) - `just test push-to-talk` also runs a `moq play` listener, held to the same no-lost-head, comfort-noise, and no-underrun checks
 
 ## Related
 

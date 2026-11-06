@@ -30,8 +30,5 @@ padding probes in [lite07-finalize](/quest/m2/lite07-finalize.md).
 
 ## Required
 
-- [IETF datagram tracks](/quest/m1/datagram-tracks/ietf.md) - claim held datagram-tracks
-- [rind CPU error](/quest/m1/rind/cpu-error.md) - claim held rind
-- [Connect policy](/quest/m1/session-policy/connect.md) - claim held session-policy
 - [Release on leave](/quest/m1/stream-credit/release-on-leave.md) - claim held stream-credit
 - [Probe padding](/quest/m2/probe/padding.md) - claim held probe

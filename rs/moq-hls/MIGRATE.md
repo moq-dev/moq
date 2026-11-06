@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Shared unsupported CPU error
+
+`Error::UnsupportedCpu` now carries `moq_crypto::cpu::UnsupportedCpu` instead of a `String`. Use its `Display` implementation for the missing feature message.
+
+### Media indexing counts toward no stats session
+
+A `Broadcaster` subscribes to each rendition's media to index it, and those subscriptions
+are now unmetered: an origin metered with `with_stats` no longer counts the index's
+`bytes`, `frames`, `groups`, subscriptions, or viewer refcount. The catalog subscription
+and the segments and inits clients fetch still count. No code change is needed.
+
 ### The gateways need the `async` feature
 
 The `import` and `export` modules compile only with the new `async` Cargo feature, which the default

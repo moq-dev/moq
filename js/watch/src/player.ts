@@ -8,6 +8,7 @@ import { Broadcast, type CatalogFormat } from "./broadcast";
 import { type Delay, Sync } from "./sync";
 import * as Text from "./text";
 import * as Video from "./video";
+import { holdViewer } from "./viewer";
 
 /** Inputs for a complete broadcast playback pipeline. */
 export type PlayerInput = {
@@ -51,6 +52,17 @@ export type PlayerInput = {
 		/** Silence audio and stop its download. */
 		muted: Getter<boolean>;
 	};
+	/** The claim this player holds on its connection's receive estimate while it downloads. */
+	viewer: {
+		/** Where to claim, normally the connection's `viewers`; absent claims nothing. */
+		viewers: Getter<Pick<Moq.Bandwidth.Viewers, "watch"> | undefined>;
+		/**
+		 * The ceiling in bits per second, or absent to follow the catalog: the receive rate that
+		 * selects the best enabled video rendition, plus the selected audio rendition's bitrate.
+		 * Either applies only while something downloads, and `0` claims nothing.
+		 */
+		max: Getter<number | undefined>;
+	};
 	/** Caption track and overlay. */
 	text: {
 		/** Selected caption track, or undefined for off. */
@@ -64,15 +76,15 @@ export type PlayerInput = {
  * Constructor options for {@link Player}; omitted controls use the element defaults. The inputs of
  * each media kind nest under its own key.
  */
-export type PlayerProps = Inputs<Omit<PlayerInput, "video" | "audio" | "text">> & {
-	[K in "video" | "audio" | "text"]?: Inputs<PlayerInput[K]>;
+export type PlayerProps = Inputs<Omit<PlayerInput, "video" | "audio" | "text" | "viewer">> & {
+	[K in "video" | "audio" | "text" | "viewer"]?: Inputs<PlayerInput[K]>;
 };
 
 /** Owns the broadcast, synchronized media pipelines, and their download policy. */
 export class Player {
 	/** Inputs wired into the pipeline. Pass signals to change them after construction. */
-	readonly in: Readonlys<Omit<PlayerInput, "video" | "audio" | "text">> & {
-		readonly [K in "video" | "audio" | "text"]: Readonlys<PlayerInput[K]>;
+	readonly in: Readonlys<Omit<PlayerInput, "video" | "audio" | "text" | "viewer">> & {
+		readonly [K in "video" | "audio" | "text" | "viewer"]: Readonlys<PlayerInput[K]>;
 	};
 	/** Broadcast subscription and effective catalog. */
 	readonly broadcast: Broadcast;
@@ -121,6 +133,10 @@ export class Player {
 				target: getter<Audio.Target | undefined>(props.audio?.target),
 				volume: getter(props.audio?.volume ?? 0.5),
 				muted: getter(props.audio?.muted ?? false),
+			},
+			viewer: {
+				viewers: getter(props.viewer?.viewers),
+				max: getter<number | undefined>(props.viewer?.max),
 			},
 			text: {
 				target: getter<string | undefined>(props.text?.target),
@@ -184,6 +200,20 @@ export class Player {
 			enabled: this.#captionsEnabled,
 		});
 		this.#signals.cleanup(() => this.textRenderer.close());
+
+		// Claim only for the media being downloaded, so a hidden or muted player asks for less.
+		const max = this.#signals.computed((effect) => {
+			const video = effect.get(this.#videoEnabled);
+			const audio = effect.get(this.#audioEnabled);
+			if (!video && !audio) return 0;
+			const override = effect.get(this.in.viewer.max);
+			if (override !== undefined) return override;
+			let max = 0;
+			if (video) max += effect.get(videoSource.out.ceiling) ?? 0;
+			if (audio) max += effect.get(audioSource.out.config)?.bitrate ?? 0;
+			return max;
+		});
+		holdViewer(this.#signals, this.in.viewer.viewers, max);
 
 		this.#signals.run((effect) => {
 			this.#captionsEnabled.set(effect.get(this.in.enabled) && !effect.get(this.in.paused));

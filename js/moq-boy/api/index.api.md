@@ -6,7 +6,6 @@ import { ZodMiniArray } from "zod/mini";
 import { ZodMiniNumber } from "zod/mini";
 import { ZodMiniObject } from "zod/mini";
 import { ZodMiniOptional } from "zod/mini";
-import { ZodMiniRecord } from "zod/mini";
 import { ZodMiniString } from "zod/mini";
 import { infer } from "zod/mini";
 
@@ -23,16 +22,17 @@ export class Game {
 	readonly expanded: Moq.Signals.Signal<string | undefined>;
 	readonly heldButtons: Set<string>;
 	readonly hovered: Moq.Signals.Signal<boolean>;
+	readonly latency: Moq.Signals.Signal<{
+		label: string;
+		ms: number;
+	}[] | undefined>;
 	sendButtons(): void;
 	sendCommand(cmd: Record<string, unknown>): void;
 	readonly sessionId: string;
 	readonly status: Moq.Signals.Signal<{
 		buttons: string[];
-		latency: Record<string, {
-			label: string;
-			ms: number;
-		}[]>;
 		location?: string | undefined;
+		players: number;
 		stats?: {
 			audio_secs: number;
 			emulation_secs: number;
@@ -45,17 +45,16 @@ export class Game {
 	readonly videoDecoder: Watch.Video.Decoder;
 	readonly videoRenderer: Watch.Video.Renderer;
 	readonly videoSource: Watch.Video.Source;
-	readonly viewerId: Moq.Signals.Signal<string | undefined>;
 	readonly volume: Moq.Signals.Signal<number>;
 }
 
 export interface GameConfig {
 	connection: Moq.Connection;
+	endpoint: Moq.socket.Endpoint;
 	expanded: Moq.Signals.Signal<string | undefined>;
 	gamePrefix: string;
 	origin: Moq.Origin.Producer;
 	sessionId: string;
-	viewerPrefix: string;
 }
 
 export type GameStats = infer<typeof GameStatsSchema>;
@@ -71,11 +70,8 @@ export type GameStatus = infer<typeof GameStatusSchema>;
 
 export const GameStatusSchema: ZodMiniObject<{
 	buttons: ZodMiniArray<ZodMiniString<string>>;
-	latency: ZodMiniRecord<ZodMiniString<string>, ZodMiniArray<ZodMiniObject<{
-		label: ZodMiniString<string>;
-		ms: ZodMiniNumber<number>;
-	}, $strip>>>;
 	location: ZodMiniOptional<ZodMiniString<string>>;
+	players: ZodMiniNumber<number>;
 	stats: ZodMiniOptional<ZodMiniObject<{
 		audio_secs: ZodMiniNumber<number>;
 		emulation_secs: ZodMiniNumber<number>;
@@ -85,6 +81,13 @@ export const GameStatusSchema: ZodMiniObject<{
 }, $strip>;
 
 export const KEY_MAP: Record<string, string>;
+
+export type LatencyEntry = infer<typeof LatencyEntrySchema>;
+
+export const LatencyEntrySchema: ZodMiniObject<{
+	label: ZodMiniString<string>;
+	ms: ZodMiniNumber<number>;
+}, $strip>;
 
 export * as Moq from "@moq/net";
 

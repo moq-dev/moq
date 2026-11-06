@@ -30,8 +30,8 @@ in moq-net, and decided:
   until io_uring dials.
 - ✅ **Fold** the m2 relay-serve-path quest into
   [the io_uring path](/quest/m1/session-policy/uring.md) and the
-  poll-first server-machines quest into
-  [accept policy](/quest/m1/session-policy/accept.md).
+  poll-first server-machines quest into accept policy, which landed in
+  [moq-dev/moq#8003](https://github.com/moq-dev/moq/pull/8003).
 - ✅ **Break moq-net's public API in m1**, before the cut, with MIGRATE notes.
   Not chosen: additive APIs beside the old ones.
 
@@ -65,7 +65,5 @@ Research (2026-11-04, `origin/main` at e6be13d5f8):
 
 ## Required
 
-- [Accept policy in moq-net](/quest/m1/session-policy/accept.md) - one accept deadline, admission bound and window widening for every transport
-- [Connect policy in moq-net](/quest/m1/session-policy/connect.md) - the connect deadline and reconnect as a poll machine
 - [The io_uring relay path uses moq-net's policy](/quest/m1/session-policy/uring.md) - deletes `uring.rs`'s copy
 - [moq-tokio becomes a thin shell](/quest/m1/session-policy/tokio-handoff.md) - sockets, TLS, accept loops and spawning, plus the transport handoffs WebRTC needs

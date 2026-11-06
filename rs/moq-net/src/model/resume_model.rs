@@ -327,7 +327,7 @@ struct Model {
 impl Model {
 	fn new() -> Self {
 		let origin = origin::Config {
-			hop: Hop::new(1).unwrap(),
+			hop: std::num::NonZeroU64::MIN,
 			update_hold: Duration::ZERO,
 			..Default::default()
 		};
@@ -1223,6 +1223,32 @@ fn regressions() {
 				},
 			],
 			finish: true,
+		},
+		// A switch's backfill of a group the finished route never had lets the track end.
+		Case {
+			ops: vec![
+				Op::Up { instance: 1, slot: 1 },
+				Op::Up { instance: 1, slot: 2 },
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 1,
+					slot: 1,
+					group: Some(11),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 1,
+					slot: 2,
+					group: Some(1),
+					frames: 1,
+				},
+				Op::Down { instance: 1, slot: 2 },
+				Op::End { instance: 1, slot: 1 },
+			],
+			finish: false,
 		},
 	];
 	for case in cases {

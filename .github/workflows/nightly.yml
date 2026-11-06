@@ -120,15 +120,12 @@ jobs:
             artifact-path: target/bench/nightly/rust-bench
             benchmark: true
             paired: true
-          # Report-only until quest/m1/bench-ci.md fixes the build bias behind
-          # an A/A false alarm; the site still lists its confirmed regressions.
           - name: Rust shared bench targets
             recipe: gh nightly rust-shared
             artifact: bench-rust-shared
             artifact-path: target/bench/nightly/rust-shared
             benchmark: true
             paired: true
-            report-only: true
           - name: Relay session benchmarks
             recipe: gh nightly rust-relay
             artifact: bench-rust-relay
@@ -238,7 +235,7 @@ jobs:
       # After the upload, so the benchmark site still records tonight's history and
       # publishes the comparison that failed this job before the alert links to it.
       - name: Fail on paired regressions
-        if: ${{ matrix.paired && !matrix.report-only && steps.workload.outcome == 'success' }}
+        if: ${{ matrix.paired && steps.workload.outcome == 'success' }}
         run: nix develop --command just gh benchmark-report gate "${{ matrix.artifact-path }}"
 
   # gh-pages is the one Pages site, and each directory has one writer: this job owns
