@@ -87,8 +87,10 @@ impl Script {
 
 	/// The `end` of session `id`, once it arrives.
 	async fn end_of(&self, id: &str) -> moq_auth::lease::Reason {
-		self.until(&format!("{id} ended"), |script| script.ends().iter().any(|r| r.id == id))
-			.await;
+		self.until(&format!("{id} ended"), |script| {
+			script.ends().iter().any(|r| r.id == id)
+		})
+		.await;
 		let end = self.ends().into_iter().find(|r| r.id == id).unwrap();
 		match end.event {
 			Event::End { reason, .. } => reason,

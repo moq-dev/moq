@@ -1827,7 +1827,11 @@ async fn a_late_decision_within_the_deadline_admits() {
 		let (reason, _) = kio::clock::timeout(TIMEOUT, lease.closed())
 			.await
 			.expect("the lease never ended");
-		assert_eq!(reason, client_closed(), "{timeout:?}: ended after the decision {wait:?} in");
+		assert_eq!(
+			reason,
+			client_closed(),
+			"{timeout:?}: ended after the decision {wait:?} in"
+		);
 
 		trigger.start();
 		kio::clock::timeout(TIMEOUT, running)
