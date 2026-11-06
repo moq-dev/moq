@@ -11,7 +11,7 @@ use crate::support;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use moq_net::{Hop, Instance, Timestamp, Version, announce, broadcast, origin, track};
+use moq_net::{Instance, Timestamp, Version, announce, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -24,7 +24,7 @@ fn timed() -> moq_net::track::Info {
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -187,11 +187,7 @@ impl Worker {
 			moq_net::fuzz::requests_route(
 				&origin,
 				moq_net::Path::from_static("pool"),
-				moq_net::fuzz::route_info(
-					moq_net::Hops::new(),
-					0,
-					Some((format!("worker-{hop}").parse().unwrap(), 0)),
-				),
+				moq_net::fuzz::route_info([], 0, Some((format!("worker-{hop}").parse().unwrap(), 0))),
 			)
 			.unwrap(),
 		);
@@ -316,7 +312,7 @@ struct Claim {
 
 impl Claim {
 	fn new(origin: &origin::Producer, instance: Option<Instance>) -> Self {
-		let route = moq_net::fuzz::route_info(moq_net::Hops::new(), 0, instance.map(|instance| (instance, 0)));
+		let route = moq_net::fuzz::route_info([], 0, instance.map(|instance| (instance, 0)));
 		let dynamic =
 			Rc::new(moq_net::fuzz::requests_route(origin, moq_net::Path::from_static("live"), route).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
@@ -347,14 +343,14 @@ impl Claim {
 
 	/// Move the claim to `instance` in place, keeping the rest of its route.
 	fn update_instance(&self, instance: Instance) {
-		let route = moq_net::fuzz::route_info(moq_net::Hops::new(), self.cost.get(), Some((instance, 0)));
+		let route = moq_net::fuzz::route_info([], self.cost.get(), Some((instance, 0)));
 		moq_net::fuzz::update_route(&self.dynamic, route).unwrap();
 	}
 
 	/// Re-price the claim in place, keeping its instance.
 	fn update_cost(&self, cost: u64) {
 		self.cost.set(cost);
-		let route = moq_net::fuzz::route_info(moq_net::Hops::new(), cost, None);
+		let route = moq_net::fuzz::route_info([], cost, None);
 		moq_net::fuzz::update_route(&self.dynamic, route).unwrap();
 	}
 }
