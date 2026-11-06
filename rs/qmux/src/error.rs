@@ -100,7 +100,7 @@ pub enum Error {
 
 	/// This CPU lacks a feature that rind, MoQ's cryptography, requires.
 	#[error(transparent)]
-	UnsupportedCpu(#[from] moq_crypto::provider::UnsupportedCpu),
+	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
 
 	/// The WebSocket failed.
 	#[cfg(feature = "ws")]

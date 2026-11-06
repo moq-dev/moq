@@ -19,7 +19,7 @@
 //! record-driven playlist window, and the HTTP surface.
 //!
 //! Its cryptography is [rind](https://docs.rs/rind), so every constructor that first needs it
-//! refuses a CPU missing a feature rind requires with [`Error::UnsupportedCpu`].
+//! refuses a CPU missing a feature rind requires with [`Error::UnsupportedCpu`], carrying [`moq_crypto::cpu::UnsupportedCpu`].
 //!
 //! The gateway drives its HTTP fetches and background watchers as async code, so [`import`] and
 //! [`export`] need the `async` feature. The default `server` feature enables it.

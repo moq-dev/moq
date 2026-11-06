@@ -101,7 +101,6 @@ This README's own work, once the children land:
 
 - [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - shipping Chrome and Safari publishers adapt to the relay's PROBE estimate, since they have no `getStats()`
 - [One page-wide getStats sampling ticker](/quest/m2/probe/stats-ticker.md) - a page's connections share one sampling ticker
-- [Players set viewer targets](/quest/m2/probe/players.md) - players hold a viewer handle per watched broadcast at its highest enabled rendition's bitrate
 - [Viewer up-switch](/quest/m2/probe/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
 
 ## Related
