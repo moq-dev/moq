@@ -9013,6 +9013,60 @@ mod tests {
 		assert_eq!(paths, ["p1/.svc/foo"]);
 	}
 
+	/// Reads through an unmetered track handle count toward no session, while the metered
+	/// handle on the same broadcast still counts the same group.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_unmetered_track_counts_nothing() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let producer = origin(1).produce();
+		let route = producer.route("room/alice", RouteOptions::default()).unwrap();
+		let track = route
+			.broadcast()
+			.create_track("video", crate::track::Info::timed())
+			.unwrap();
+		let consumer = producer.consume().with_stats(
+			registry
+				.tier(stats::Tier::default())
+				.session(crate::Path::from_static("viewer")),
+		);
+		let broadcast = consumer.request("room/alice", None).await.expect("resolves");
+		let bytes = || -> u64 {
+			registry
+				.snapshot()
+				.traffic()
+				.into_iter()
+				.map(|(_, _, traffic)| traffic.bytes)
+				.sum()
+		};
+
+		let mut unmetered = broadcast
+			.track("video")
+			.unwrap()
+			.unmetered()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let mut metered = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"frame".as_ref()).unwrap();
+		group.finish().unwrap();
+
+		let mut read = unmetered.recv_group().await.unwrap().expect("a group");
+		assert_eq!(
+			read.read_frame().await.unwrap().expect("a frame").payload.as_ref(),
+			b"frame"
+		);
+		assert_eq!(bytes(), 0, "an unmetered read counts nothing");
+
+		let mut read = metered.recv_group().await.unwrap().expect("a group");
+		assert_eq!(
+			read.read_frame().await.unwrap().expect("a frame").payload.as_ref(),
+			b"frame"
+		);
+		assert_eq!(bytes(), 5, "the metered handle still counts");
+	}
+
 	/// A route that turns up later is filtered the same way as the replay.
 	#[kio::test]
 	async fn hidden_route_announced_later_stays_hidden() {
