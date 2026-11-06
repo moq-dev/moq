@@ -1094,6 +1094,14 @@ fn served(route: &crate::origin::RouteInfo) -> Served {
 	(route.instance.clone(), route.epoch)
 }
 
+/// The hop chain as `version` carries it: lite-07 names a claim's route instead.
+fn chain(version: Version, hops: Hops) -> Hops {
+	match version.has_routes() {
+		true => Hops::new(),
+		false => hops,
+	}
+}
+
 enum AnnouncePhase {
 	/// The version-specific initial burst has not been sent yet.
 	Init,
@@ -1222,19 +1230,18 @@ impl AnnounceRun {
 				tracing::debug!(route = %absolute, "reannounce");
 				advertised.hops = hops.clone();
 				advertised.cost = cost;
+				let hops = chain(self.version, hops);
 				match advertised.id {
-					Some(id) => {
-						let hops = self.encoder.update(id, hops);
-						stream
-							.writer
-							.buffer(&lite::AnnounceBroadcast::Update { id, hops, cost })?
-					}
+					Some(id) => stream
+						.writer
+						.buffer(&lite::AnnounceBroadcast::Update { id, hops, cost })?,
 					// lite-05: a duplicate ANNOUNCE, which assigns no id.
 					None => stream.writer.buffer(&lite::AnnounceBroadcast::Active {
+						route: 0,
 						instance: None,
 						epoch: 0,
 						suffix: lite::PathRef::literal(suffix),
-						hops: lite::HopsRef::literal(hops),
+						hops,
 						cost,
 					})?,
 				}
@@ -1294,7 +1301,8 @@ impl AnnounceRun {
 		// Fixed while the peer holds the advertisement: a new one is a restart.
 		route: Served,
 	) -> Result<(), Error> {
-		let (id, wire, chain) = self.encoder.start(suffix.clone(), hops.clone());
+		let (id, wire) = self.encoder.start(suffix.clone());
+		let wire_hops = chain(self.version, hops.clone());
 		self.live.insert(
 			suffix,
 			Advertised {
@@ -1306,10 +1314,11 @@ impl AnnounceRun {
 		);
 		let (instance, epoch) = route;
 		stream.writer.buffer(&lite::AnnounceBroadcast::Active {
+			route: 0,
 			instance,
 			epoch,
 			suffix: wire,
-			hops: chain,
+			hops: wire_hops,
 			cost,
 		})?;
 		self.sent(stream)?;
@@ -1330,7 +1339,7 @@ impl AnnounceRun {
 		absolute: &crate::Path,
 	) -> Result<(), Error> {
 		tracing::debug!(route = %absolute, predecessor = %predecessor.0, "takeover");
-		let (id, wire, chain) = self.encoder.takeover(predecessor.1, suffix.clone(), hops.clone());
+		let (id, wire) = self.encoder.takeover(predecessor.1, suffix.clone());
 		self.live.insert(
 			suffix,
 			Advertised {
@@ -1344,9 +1353,9 @@ impl AnnounceRun {
 		stream.writer.buffer(&lite::AnnounceBroadcast::Takeover {
 			predecessor: predecessor.1,
 			suffix: wire,
+			route: 0,
 			instance,
 			epoch,
-			hops: chain,
 			cost,
 		})?;
 		self.sent(stream)?;
@@ -1372,18 +1381,16 @@ impl AnnounceRun {
 					suffix,
 					Advertised {
 						id: Some(id),
-						hops: hops.clone(),
+						hops,
 						cost,
 						served: route.clone(),
 					},
 				);
-				let hops = self.encoder.update(id, hops);
 				let (instance, epoch) = route;
 				stream.writer.buffer(&lite::AnnounceBroadcast::Restart {
 					id,
 					instance,
 					epoch,
-					hops,
 					cost,
 				})?;
 				self.sent(stream)?;
@@ -3869,7 +3876,7 @@ mod announce_test {
 		match initial.as_slice() {
 			[lite::AnnounceBroadcast::Active { suffix, hops, cost, .. }] => {
 				assert_eq!(suffix.rest.as_str(), "cam");
-				assert_eq!(hops, &lite::HopsRef::literal(pub_hops()));
+				assert_eq!(hops, &chain(version, pub_hops()));
 				assert_eq!(*cost, crate::origin::Cost::new(7));
 			}
 			other => panic!("expected the initial announce, got {other:?}"),
@@ -3921,7 +3928,7 @@ mod announce_test {
 		settle().await;
 		match h.wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::Update { id: 0, hops, cost }] => {
-				assert_eq!(hops, &lite::HopsRef::literal(pub_hops()));
+				assert_eq!(hops, &pub_hops());
 				assert_eq!(*cost, crate::origin::Cost::new(3));
 			}
 			other => panic!("expected a restart, got {other:?}"),
@@ -9244,6 +9251,7 @@ mod tests {
 				for close in [Close::Fin, Close::Reset] {
 					let track = lite::Track {
 						instance: None,
+						node: 0,
 						broadcast: broadcast.clone(),
 						track: "video".into(),
 					};
@@ -9252,6 +9260,7 @@ mod tests {
 					let subscribe = lite::Subscribe {
 						order: crate::track::Order::Descending,
 						instance: None,
+						node: 0,
 						id: 0,
 						broadcast: broadcast.clone(),
 						track: "video".into(),
@@ -9264,6 +9273,7 @@ mod tests {
 
 					let fetch = lite::Fetch {
 						instance: None,
+						node: 0,
 						broadcast: broadcast.clone(),
 						track: "video".into(),
 						priority: 0,
@@ -9312,6 +9322,7 @@ mod tests {
 			lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
+				node: 0,
 				id: 0,
 				broadcast: crate::Path::from_static("room"),
 				track: "video".into(),
@@ -9377,6 +9388,7 @@ mod tests {
 		let mut script = Vec::new();
 		lite::Track {
 			instance: None,
+			node: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
 		}
@@ -9438,6 +9450,7 @@ mod tests {
 					let mut script = Vec::new();
 					lite::Track {
 						instance: None,
+						node: 0,
 						broadcast: crate::Path::from_static("room"),
 						track: "video".into(),
 					}
@@ -9585,6 +9598,7 @@ mod tests {
 					let msg = lite::Subscribe {
 						order: crate::track::Order::Ascending,
 						instance: None,
+						node: 0,
 						id: 0,
 						broadcast: crate::Path::from_static("room"),
 						track: "video".into(),
@@ -9718,6 +9732,7 @@ mod tests {
 		lite::Subscribe {
 			order: crate::track::Order::Descending,
 			instance: None,
+			node: 0,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
@@ -9847,6 +9862,7 @@ mod tests {
 		lite::Subscribe {
 			order: crate::track::Order::Descending,
 			instance: None,
+			node: 0,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
@@ -10100,6 +10116,7 @@ mod tests {
 			&publisher.shared,
 			lite::Fetch {
 				instance: None,
+				node: 0,
 				broadcast: crate::Path::new("room").unwrap(),
 				track: Default::default(),
 				priority: 0,
@@ -10152,6 +10169,7 @@ mod tests {
 		let mut script = Vec::new();
 		lite::Fetch {
 			instance: None,
+			node: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
 			priority: 0,
@@ -10275,6 +10293,7 @@ mod tests {
 			let request = lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
+				node: 0,
 				id: 0,
 				broadcast: crate::Path::from_static("room"),
 				track: "video".into(),
@@ -10333,6 +10352,7 @@ mod tests {
 		let request = lite::Tracks {
 			broadcast: crate::Path::from_static("room"),
 			instance: None,
+			node: 0,
 		};
 		let request = request.encode_bytes(version).unwrap().to_vec();
 		let session = ScriptedSession::per_stream(vec![request.clone(), request]);
@@ -10387,6 +10407,7 @@ mod tests {
 			let request = lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
+				node: 0,
 				id: 0,
 				broadcast: crate::Path::from_static("room"),
 				track: "video".into(),
@@ -10525,6 +10546,7 @@ mod tests {
 		let msg = lite::Subscribe {
 			order: crate::track::Order::Descending,
 			instance: None,
+			node: 0,
 			id: 0,
 			broadcast: crate::Path::new(broadcast).unwrap(),
 			track: track.into(),

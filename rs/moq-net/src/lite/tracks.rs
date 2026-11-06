@@ -21,6 +21,9 @@ pub struct Tracks {
 	pub broadcast: Path,
 	/// The instance the subscriber expects; see [`crate::origin::RouteInfo::instance`].
 	pub instance: Option<crate::Instance>,
+	/// The Node ID of the origin that serves the request, or 0 for whichever the
+	/// publisher selects.
+	pub node: u64,
 }
 
 impl<'a> Message<'a> for Tracks {
@@ -31,7 +34,12 @@ impl<'a> Message<'a> for Tracks {
 		}
 		let broadcast = Path::decode(r, version)?;
 		let instance = super::instance::decode_pin(r, version)?;
-		Ok(Self { broadcast, instance })
+		let node = super::instance::decode_node(r, version)?;
+		Ok(Self {
+			broadcast,
+			instance,
+			node,
+		})
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -39,7 +47,8 @@ impl<'a> Message<'a> for Tracks {
 			return Err(EncodeError::Version);
 		}
 		self.broadcast.encode(w, version)?;
-		super::instance::encode_pin(w, version, self.instance.as_ref())
+		super::instance::encode_pin(w, version, self.instance.as_ref())?;
+		super::instance::encode_node(w, version, self.node)
 	}
 }
 
@@ -210,11 +219,13 @@ mod test {
 		let msg = Tracks {
 			broadcast: Path::from_static("room/alice"),
 			instance: Some(instance.clone()),
+			node: 0x7a3f,
 		};
 		let buf = msg.encode_bytes(Version::Lite07).unwrap();
 		let (got, _) = Tracks::decode_slice(&buf, Version::Lite07).unwrap();
 		assert_eq!(got.broadcast, Path::from_static("room/alice"));
 		assert_eq!(got.instance, Some(instance));
+		assert_eq!(got.node, 0x7a3f);
 	}
 
 	#[test]
@@ -222,6 +233,7 @@ mod test {
 		let msg = Tracks {
 			broadcast: Path::from_static("room"),
 			instance: None,
+			node: 0,
 		};
 		assert!(msg.encode_bytes(Version::Lite06).is_err());
 		assert!(TracksEvent::Synced.encode_bytes(Version::Lite06).is_err());

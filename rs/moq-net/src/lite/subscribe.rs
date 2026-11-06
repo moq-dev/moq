@@ -18,6 +18,9 @@ pub struct Subscribe<'a> {
 	/// The instance the subscriber expects; see [`crate::origin::RouteInfo::instance`].
 	/// Lite07+ only.
 	pub instance: Option<crate::Instance>,
+	/// The Node ID of the origin that serves the request, or 0 for whichever the
+	/// publisher selects. Lite07+ only.
+	pub node: u64,
 	pub track: Cow<'a, str>,
 	pub priority: i8,
 	pub max_delay: std::time::Duration,
@@ -39,6 +42,7 @@ impl Subscribe<'_> {
 			id: self.id,
 			broadcast: self.broadcast,
 			instance: self.instance,
+			node: self.node,
 			track: Cow::Owned(self.track.into_owned()),
 			priority: self.priority,
 			max_delay: self.max_delay,
@@ -128,6 +132,7 @@ impl<'a> Message<'a> for Subscribe<'a> {
 		let id = r.varint()?;
 		let broadcast = Path::decode(r, version)?;
 		let instance = super::instance::decode_pin(r, version)?;
+		let node = super::instance::decode_node(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
 		let priority = super::priority::from_wire(r.u8()?);
 
@@ -147,6 +152,7 @@ impl<'a> Message<'a> for Subscribe<'a> {
 			id,
 			broadcast,
 			instance,
+			node,
 			track,
 			priority,
 			max_delay,
@@ -160,6 +166,7 @@ impl<'a> Message<'a> for Subscribe<'a> {
 		w.varint(self.id)?;
 		self.broadcast.encode(w, version)?;
 		super::instance::encode_pin(w, version, self.instance.as_ref())?;
+		super::instance::encode_node(w, version, self.node)?;
 		w.string(&self.track)?;
 		w.u8(super::priority::to_wire(self.priority));
 
@@ -1371,6 +1378,7 @@ mod test {
 		Subscribe {
 			order: crate::track::Order::Descending,
 			instance: None,
+			node: 0,
 			id: 1,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
@@ -1398,6 +1406,16 @@ mod test {
 		let mut buf = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)?;
 		Ok(buf)
+	}
+
+	/// Only lite-07 names the origin node; older versions decode as letting the
+	/// publisher select.
+	#[test]
+	fn node_roundtrips_only_on_lite07() {
+		let mut msg = subscribe_sample();
+		msg.node = 0x7a3f;
+		assert_eq!(roundtrip(&msg, Version::Lite07).node, 0x7a3f);
+		assert_eq!(roundtrip(&msg, Version::Lite06).node, 0);
 	}
 
 	/// Lite-06 carries one range's frame bounds; an inclusive `Frame End` on the wire is the

@@ -510,12 +510,13 @@ impl Subscriber {
 				epoch,
 				hops,
 				cost,
+				..
 			} => {
-				let (suffix, hops) = match self.version.has_announce_id() {
+				let suffix = match self.version.has_announce_id() {
 					// Every `active` assigns the next ordinal, even ones we drop locally.
-					true => run.decoder.start(suffix, hops)?,
+					true => run.decoder.start(suffix)?,
 					// Nothing references an announcement here, so there are no bases.
-					false => (suffix.rest, hops.literal),
+					false => suffix.rest,
 				};
 				let path = prefix.join(&suffix)?;
 				if lite::update_supported(self.version)
@@ -563,7 +564,7 @@ impl Subscriber {
 			lite::AnnounceBroadcast::Update { id, hops, cost } => {
 				// Resolve the id; it stays live (the replacement reuses it). An unknown
 				// or retired id is a protocol violation.
-				let (suffix, hops) = run.decoder.update(id, hops)?;
+				let suffix = run.decoder.get(id)?;
 				let path = prefix.join(&suffix)?;
 				self.update_announce(
 					path,
@@ -578,16 +579,16 @@ impl Subscriber {
 				id,
 				instance,
 				epoch,
-				hops,
 				cost,
 			} => {
 				// Resolved like an update: the id stays live.
-				let (suffix, hops) = run.decoder.update(id, hops)?;
+				let suffix = run.decoder.get(id)?;
 				let path = prefix.join(&suffix)?;
 				run.announced.restart(&path, instance.map(|instance| (instance, epoch)));
+				// Lite-07 carries no hop chain; its claims name their route instead.
 				self.restart_announce(
 					path,
-					hops,
+					crate::Hops::new(),
 					cost,
 					run.link_cost,
 					run.responder_origin,
@@ -599,20 +600,21 @@ impl Subscriber {
 				suffix,
 				instance,
 				epoch,
-				hops,
 				cost,
+				..
 			} => {
 				// Resolved like a start against the live predecessor, which it retires when
 				// it takes the predecessor's own suffix. An unknown or retired predecessor is
 				// a protocol violation.
-				let (previous, suffix, hops) = run.decoder.takeover(predecessor, suffix, hops)?;
+				let (previous, suffix) = run.decoder.takeover(predecessor, suffix)?;
 				let previous = prefix.join(&previous)?;
 				let path = prefix.join(&suffix)?;
+				// Lite-07 carries no hop chain; its claims name their route instead.
 				self.takeover_announce(
 					previous,
 					path,
 					instance.map(|instance| (instance, epoch)),
-					hops,
+					crate::Hops::new(),
 					cost,
 					run.link_cost,
 					run.responder_origin,
@@ -2413,6 +2415,7 @@ impl TracksRecv {
 				stream.writer.buffer(&lite::Tracks {
 					broadcast: source.path.clone(),
 					instance: source.instance.clone(),
+					node: 0,
 				})?;
 				self.stream.insert(stream)
 			}
@@ -2816,6 +2819,7 @@ impl DatagramServe {
 						id: self.id,
 						broadcast: self.path.clone(),
 						instance: self.instance.clone(),
+						node: 0,
 						track: request.name().to_string().into(),
 						priority,
 					})?;
@@ -7884,10 +7888,11 @@ mod tests {
 	async fn an_unknown_announce_type_keeps_the_stream() {
 		const VERSION: Version = Version::Lite06;
 		let start = |suffix| lite::AnnounceBroadcast::Active {
+			route: 0,
 			instance: None,
 			epoch: 0,
 			suffix: lite::PathRef::literal(Path::new(suffix).unwrap()),
-			hops: lite::HopsRef::literal(crate::Hops::new()),
+			hops: crate::Hops::new(),
 			cost: crate::origin::Cost::default(),
 		};
 		let mut script = Vec::new();
@@ -7959,10 +7964,11 @@ mod tests {
 	fn announce_start(version: Version, suffix: &'static str) -> impl Fn(&mut crate::coding::Encoder<'_>) {
 		move |w| {
 			lite::AnnounceBroadcast::Active {
+				route: 0,
 				instance: version.has_instance().then(crate::Instance::random),
 				epoch: 0,
 				suffix: lite::PathRef::literal(Path::new(suffix).unwrap()),
-				hops: lite::HopsRef::literal(crate::Hops::new()),
+				hops: crate::Hops::new(),
 				cost: crate::origin::Cost::default(),
 			}
 			.encode(w, version)
@@ -8207,10 +8213,11 @@ mod tests {
 	async fn announces_past_the_cap_close_the_session() {
 		const VERSION: Version = Version::Lite06;
 		let start = |suffix| lite::AnnounceBroadcast::Active {
+			route: 0,
 			instance: None,
 			epoch: 0,
 			suffix: lite::PathRef::literal(Path::new(suffix).unwrap()),
-			hops: lite::HopsRef::literal(crate::Hops::new()),
+			hops: crate::Hops::new(),
 			cost: crate::origin::Cost::default(),
 		};
 		let mut script = Vec::new();
@@ -9423,6 +9430,7 @@ impl Establish {
 		))?;
 		let msg = lite::Subscribe {
 			instance: self.serve.instance.clone(),
+			node: 0,
 			id: self.id,
 			broadcast: self.serve.path.clone(),
 			track: self.serve.name.as_str().into(),
@@ -10085,6 +10093,7 @@ impl TrackInfoFetch {
 		stream.writer.buffer(&lite::ControlType::Track)?;
 		stream.writer.buffer(&lite::Track {
 			instance: serve.instance.clone(),
+			node: 0,
 			broadcast: serve.path.clone(),
 			track: serve.name.as_str().into(),
 		})?;
@@ -11372,6 +11381,7 @@ impl kio::Task for FetchServeRun {
 
 					let msg = lite::Fetch {
 						instance: self.serve.instance.clone(),
+						node: 0,
 						broadcast: self.serve.path.clone(),
 						track: self.serve.name.as_str().into(),
 						priority: request.priority(),
