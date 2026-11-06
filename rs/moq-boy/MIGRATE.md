@@ -8,8 +8,8 @@ How to update your invocation and config for each breaking change, newest first.
 
 moq-boy no longer reads viewer broadcasts. It runs a [socket](https://doc.moq.dev/concept/socket) endpoint at `{prefix-game}/.socket/{name}`, and each viewer dials it from its own endpoint at `{prefix-game}/.socket/viewer-<random>`; `@moq/boy` does this.
 
-- Drop `--prefix-viewer` (`MOQ_PREFIX_VIEWER`).
-- A `--name` starting with `viewer-` is refused: those ids belong to viewers.
+- Drop `--prefix-viewer` (`MOQ_PREFIX_VIEWER`), which now stops startup: viewers dial `{prefix-game}/.socket/viewer-*`, so only `--prefix-game` remains.
+- `--name` is the game's endpoint id, so a name with `/` or `\`, or starting with `viewer-` (ids that belong to viewers), is refused.
 - Sockets need moq-lite-07 or moq-transport on every hop. With no `--connect-version`, moq-boy offers only `moq-lite-07-wip`, so the relay must list it in `listen.version`.
 - Let the relay grant the emulator publish on `{prefix-game}/.socket/{name}` and subscribe on `{prefix-game}/.socket/*`, and anonymous viewers publish on `{prefix-game}/.socket/viewer-*` in place of the old viewer prefix.
 - The `status` track's `latency` map is gone; it carries `players`, the number of open viewer sessions. Each viewer's latency arrives on its own session.

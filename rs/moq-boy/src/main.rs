@@ -66,6 +66,10 @@ pub struct Config {
 	#[usage(long)]
 	pub prefix_game: Option<String>,
 
+	/// Released spelling of the viewer prefix, refused at startup.
+	#[usage(long, env = "MOQ_PREFIX_VIEWER", hide = true)]
+	prefix_viewer: Option<String>,
+
 	/// Location label shown in viewer stats (e.g. "Dallas, TX").
 	#[usage(long)]
 	pub location: Option<String>,
@@ -92,6 +96,13 @@ impl Config {
 	fn check_deprecated(&self) -> Result<()> {
 		let mut deprecated = self.client.deprecated();
 		deprecated.extend(self.quic.deprecated());
+		if self.prefix_viewer.is_some() {
+			deprecated.removed(
+				"--prefix-viewer",
+				Some("MOQ_PREFIX_VIEWER"),
+				"viewers dial the game's socket endpoint under --prefix-game",
+			);
+		}
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 		Ok(())
 	}
@@ -124,8 +135,13 @@ impl Config {
 /// publish, so no viewer can announce a game's endpoint.
 const VIEWER_ID_PREFIX: &str = "viewer-";
 
-/// Refuse a name in the ids viewers may announce, since the name is the game's endpoint id.
+/// Refuse a name that can't be the game's endpoint id: one path segment, outside the ids
+/// viewers may announce.
 fn check_name(name: &str) -> Result<()> {
+	anyhow::ensure!(
+		!name.is_empty() && !name.contains(['/', '\\']),
+		"invalid --name {name:?}: a name is one path segment"
+	);
 	anyhow::ensure!(
 		!name.starts_with(VIEWER_ID_PREFIX),
 		"invalid --name {name:?}: {VIEWER_ID_PREFIX}* ids belong to viewers"
@@ -580,12 +596,14 @@ mod tests {
 		assert!(parse(&["--prefix", "/boy"]).game_prefix().is_err());
 	}
 
-	/// A game's endpoint id is its name, so a name must stay outside the ids viewers may
-	/// announce.
+	/// A game's endpoint id is its name, so a name is one segment outside the ids viewers
+	/// may announce.
 	#[test]
-	fn names_stay_out_of_viewer_ids() {
+	fn names_are_game_endpoint_ids() {
 		check_name("tetris").unwrap();
-		check_name("viewer-1").unwrap_err();
+		for name in ["viewer-1", "", "a/b", "a\\b"] {
+			check_name(name).expect_err(name);
+		}
 	}
 
 	/// Sockets need moq-lite-07, so it is offered unless the command line picks versions.
@@ -630,5 +648,20 @@ mod tests {
 			err.contains("--client-connect / MOQ_CLIENT_CONNECT -> --connect / MOQ_CONNECT"),
 			"{err}"
 		);
+	}
+
+	/// The removed viewer prefix still parses, so startup can say what replaced it.
+	#[test]
+	fn the_removed_viewer_prefix_is_refused() {
+		let config = Config::parse_from(&[
+			std::ffi::OsStr::new("--prefix-viewer"),
+			std::ffi::OsStr::new("boy/viewer"),
+			std::ffi::OsStr::new("--rom"),
+			std::ffi::OsStr::new("rom/big2small.gb"),
+		])
+		.expect("the released spelling still parses");
+
+		let err = config.check_deprecated().expect_err("must refuse").to_string();
+		assert!(err.contains("--prefix-viewer / MOQ_PREFIX_VIEWER -> removed"), "{err}");
 	}
 }

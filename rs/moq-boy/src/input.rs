@@ -150,8 +150,24 @@ async fn read_commands(
 	consumer.control().update(live)?;
 	let mut commands = consumer.ordered();
 	while let Some(mut group) = commands.next_group().await? {
-		let Some(frame) = group.read_frame().await? else {
-			continue;
+		let frame = match group.read_frame().await {
+			Ok(Some(frame)) => frame,
+			Ok(None) => continue,
+			// Judged by stream code, so a group the viewer's side reset is the same loss as
+			// one the delay budget dropped here. A newer command restates the whole state.
+			Err(err)
+				if matches!(
+					moq_net::StreamError::from(&err),
+					moq_net::StreamError::Old
+						| moq_net::StreamError::Evicted
+						| moq_net::StreamError::TooFarBehind
+						| moq_net::StreamError::GroupTooLarge
+				) =>
+			{
+				tracing::debug!(viewer, %err, "command lost");
+				continue;
+			}
+			Err(err) => return Err(err),
 		};
 
 		// A viewer is untrusted: a malformed command is skipped, not fatal.
@@ -260,6 +276,33 @@ mod tests {
 		assert_eq!(timestamps.len(), 1, "{timestamps:?}");
 		assert_eq!(timestamps[0].label, "ok");
 		assert_eq!(timestamps[0].ts, Duration::from_millis(1500));
+	}
+
+	/// A command still in flight when a newer one lands is superseded, not a session
+	/// failure: the newer state reaches the emulator on the same session.
+	#[tokio::test(start_paused = true)]
+	async fn a_superseded_command_is_skipped() {
+		let (_origin, _viewer, mut session, mut rx) = setup().await;
+		let Command::Joined { viewer, .. } = recv(&mut rx).await else {
+			panic!("the session did not join first");
+		};
+
+		// The reader parks on this group's first frame, which never arrives.
+		let _stalled = session.producer.append_group().unwrap();
+		tokio::task::yield_now().await;
+		session
+			.producer
+			.write_frame(None, br#"{"type":"buttons","buttons":["a"]}"#.to_vec())
+			.unwrap();
+
+		let Command::Buttons {
+			viewer: from, buttons, ..
+		} = recv(&mut rx).await
+		else {
+			panic!("the superseded command ended the session");
+		};
+		assert_eq!(from, viewer);
+		assert_eq!(buttons, vec![Button::A]);
 	}
 
 	/// Replies reach the viewer on its own session, and finishing the viewer's half
