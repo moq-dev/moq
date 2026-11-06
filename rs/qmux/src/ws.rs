@@ -532,7 +532,6 @@ impl Server {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use moq_net::transport::poll::Session as _;
 	use tokio::io::AsyncWriteExt;
 
 	/// A frame declaring more than one record is refused at its header rather than

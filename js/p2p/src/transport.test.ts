@@ -103,7 +103,7 @@ test("an accepted channel whose dialer stays silent still idles out without send
 		const server = Transport.accept({ peer: right.asPeer(), channel: right.incoming.asChannel(), protocol });
 		right.incoming.open();
 		// The session starts on open, so its 30 s idle deadline runs while its first write waits.
-		await server.ready;
+		// Its `ready` waits for the silent dialer's parameters; the idle deadline still runs.
 		// The idle check polls every 5 s and skips ticks a single long jump would miss.
 		for (let i = 0; i < 7; i++) await clock.advance(Nano.fromMilli(Milli(5_000)));
 		await expect(server.closed).rejects.toThrow("idle timeout");
@@ -129,7 +129,12 @@ test("an accepted side that closes before hearing its dialer still closes gracef
 		mock.left.channel.stream = false;
 		mock.left.channel.open();
 		mock.right.incoming.open();
-		await server.ready;
+		// Its `ready` waits for the dialer's lost parameters. The datagram writable starts once
+		// the session exists, which then starts on the open channel in pure microtask work.
+		const datagrams = server.datagrams.writable.getWriter();
+		await datagrams.ready;
+		datagrams.releaseLock();
+		for (let i = 0; i < 10; i++) await Promise.resolve();
 		server.close({ closeCode: 7, reason: "bye" });
 		// No clock advance: the close must not wait out qmux's flush timeout.
 		expect(await client.closed).toEqual({ closeCode: 7, reason: "bye" });
