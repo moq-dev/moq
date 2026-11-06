@@ -310,7 +310,7 @@ impl MoqDatagramRequest {
 	}
 
 	/// Reject this request with an application error code.
-	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
+	pub fn reject(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let request = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		request.reject(moq_net::Error::App(error_code));

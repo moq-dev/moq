@@ -174,7 +174,7 @@ class TrackRequest:
 
     Accept it for raw writes, hand it to :class:`~moq.media.Requested` for :meth:`~moq.media.TrackProducer.audio`
     or :meth:`~moq.media.TrackProducer.video` to publish media (the importer
-    accepts it), or abort it to reject the subscriber.
+    accepts it), or reject it to fail the subscriber.
     """
 
     def __init__(self, inner: MoqTrackRequest) -> None:
@@ -200,9 +200,9 @@ class TrackRequest:
         """Create a fetch handler before accepting this requested track."""
         return TrackRequests(self._inner.requests())
 
-    def abort(self, error_code: int) -> None:
+    def reject(self, error_code: int) -> None:
         """Reject the request with an application error code."""
-        self._inner.abort(error_code)
+        self._inner.reject(error_code)
 
 
 class Fill:
@@ -221,19 +221,14 @@ class Fill:
         self._inner = inner
 
     @property
-    def start_group(self) -> int:
-        """The first group to fill."""
-        return self._inner.start_group()
+    def start(self) -> Position:
+        """The first group to fill, and the frame within it to start from."""
+        return self._inner.start()
 
     @property
-    def start_frame(self) -> int:
-        """The frame within the first group to start from."""
-        return self._inner.start_frame()
-
-    @property
-    def end_group(self) -> int:
+    def end(self) -> int:
         """The exclusive end group."""
-        return self._inner.end_group()
+        return self._inner.end()
 
     @property
     def priority(self) -> int:
@@ -270,7 +265,7 @@ class Fill:
     def accept(self, sequence: int) -> GroupProducer:
         """Insert group ``sequence`` and return a producer for it.
 
-        The first group starts at :attr:`start_frame`, so its frames keep their indices.
+        The first group starts at :attr:`start`'s frame, so its frames keep their indices.
         """
         return GroupProducer(self._inner.accept(sequence))
 
