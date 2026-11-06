@@ -62,6 +62,8 @@ pub mod origin {
 	// private: capability gap
 	pub(crate) use super::origin_impl::Lookup;
 	#[cfg(feature = "async")]
+	pub(crate) use super::origin_impl::Mounted;
+	#[cfg(feature = "async")]
 	pub(crate) use super::origin_impl::NodeFilter;
 	pub use super::origin_impl::{
 		Config, Consumer, Cost, Driver, HopLimit, Link, Preference, Producer, Request, Requesting, Route, RouteInfo,

@@ -1920,6 +1920,31 @@ struct Mount {
 	target: Path,
 }
 
+/// A mount as a reader of a prefix sees it through a handle: where the origin holds
+/// what it presents, and how the handle names that.
+#[derive(Clone, Debug)]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+pub(crate) struct Mounted {
+	mount: Mount,
+	/// The absolute, origin-side prefix to read: the target, or beneath it for a
+	/// reader's prefix beneath the mount point.
+	pub interest: Path,
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+impl Mounted {
+	/// How the handle names a claim at the absolute, origin-side `path`, which lies at
+	/// or beneath the interest: at or beneath the mount point.
+	pub fn name(&self, path: &Path) -> Option<Path> {
+		self.mount.name(path)
+	}
+
+	/// Whether the absolute, handle-side `path` lies at or beneath the mount point.
+	pub fn holds(&self, path: &Path) -> bool {
+		path.has_prefix(&self.mount.at)
+	}
+}
+
 impl Mount {
 	/// Where the handle-side absolute `path` resolves, when it is under this mount
 	/// and the result fits the wire limits.
@@ -7186,17 +7211,40 @@ impl Consumer {
 		self.horizon.upstream
 	}
 
-	/// Whether this handle reaches a claim at the absolute `path` as the origin keys
-	/// it: a path at or beneath it may be in its scope, as a covering reader sees, and
-	/// it is not under a mount, which resolves elsewhere, or an excluded subtree.
+	/// Whether this handle reaches a claim at the absolute `path` as it names it: a
+	/// path at or beneath it may be in its scope, as a covering reader sees, and it is
+	/// not in an excluded subtree. Beneath a mount, `path` names the target's claim
+	/// there, never one the origin holds at `path` itself (see [`Self::mounted`]).
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn reaches(&self, path: &Path) -> bool {
 		let Ok(subtree) = Pattern::subtree(path.as_str()) else {
 			return false;
 		};
-		self.scope.mount(path).is_none()
-			&& self.scope.allowed.overlaps(&subtree)
+		self.scope.allowed.overlaps(&subtree)
 			&& !self.scope.excluded.iter().any(|excluded| path.has_prefix(excluded))
+			&& self.scope.mount(path).is_none_or(|mount| mount.resolve(path).is_some())
+	}
+
+	/// Whether the absolute `path` lies beneath one of this handle's mounts, where the
+	/// origin's own claims at that path are hidden from it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn shadows(&self, path: &Path) -> bool {
+		self.scope.mount(path).is_some()
+	}
+
+	/// The mounts a reader of the absolute `prefix` sees through this handle: each one
+	/// at or beneath it, or the one it lies beneath, unless excluded.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn mounted(&self, prefix: &Path) -> Vec<Mounted> {
+		(self.scope.mounts.iter())
+			.filter(|mount| self.scope.holes(Some(mount)).is_some())
+			.filter_map(|mount| {
+				Some(Mounted {
+					interest: mount.translate_head(prefix)?,
+					mount: mount.clone(),
+				})
+			})
+			.collect()
 	}
 
 	/// Whether this handle reaches every path at or beneath the absolute `prefix`,
