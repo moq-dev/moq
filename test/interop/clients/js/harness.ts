@@ -7,6 +7,7 @@
  * @module
  */
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import {
 	type Browser,
@@ -119,20 +120,22 @@ export function launch(args: string[] = [], engine: Engine = "chromium"): Promis
 	// Full Chromium includes WebTransport and WebCodecs; the headless shell does not.
 	if (engine === "chromium")
 		return chromium.launch({ channel: "chromium", headless: true, args, handleSIGTERM: false });
-	if (engine === "firefox")
+	if (engine === "firefox") {
+		const env = { ...process.env };
+		// Only the Nix browser needs Nix's dlopened media libraries. Downloaded Firefox
+		// uses the system libraries installed by Playwright; mixing in Nix's libraries
+		// can require a newer glibc than the host's and prevent the audio backend starting.
+		if (realpathSync(firefox.executablePath()).startsWith("/nix/store/"))
+			env.LD_LIBRARY_PATH = [process.env.PLAYWRIGHT_FIREFOX_LIBRARY_PATH, process.env.LD_LIBRARY_PATH]
+				.filter(Boolean)
+				.join(":");
 		return firefox.launch({
 			headless: true,
 			handleSIGTERM: false,
-			// Firefox dlopens its media libraries. Keep the Nix paths on this child, so other
-			// browsers and native tools retain their own library search paths.
-			env: {
-				...process.env,
-				LD_LIBRARY_PATH: [process.env.PLAYWRIGHT_FIREFOX_LIBRARY_PATH, process.env.LD_LIBRARY_PATH]
-					.filter(Boolean)
-					.join(":"),
-			},
+			env,
 			firefoxUserPrefs: { "media.autoplay.default": 1, "media.autoplay.block-webaudio": true },
 		});
+	}
 	// WebKit's WebCodecs decode through the system GStreamer. The Nix dev shell points GStreamer at
 	// its own newer plugins, which the system core refuses, leaving WebKit with no decoders at all.
 	const env = Object.fromEntries(

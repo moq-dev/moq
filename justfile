@@ -49,6 +49,10 @@ dev:
 bench $BASE="" $TRANSPORTS="quic ws wss tcp tls":
     BENCH_TRANSPORTS="$TRANSPORTS" bench/run.sh "$BASE"
 
+# Run only the relay workloads, with the same paired rounds as `bench`.
+bench-relay $BASE="" $TRANSPORTS="quic ws wss tcp tls":
+    BENCH_TRANSPORTS="$TRANSPORTS" bench/run.sh --relay "$BASE"
+
 # Compare admitted suites across checkouts and worker counts; see bench/README.md.
 [positional-arguments]
 bench-local *args:

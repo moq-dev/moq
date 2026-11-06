@@ -36,8 +36,8 @@ self-hosted `moq-queue` runner with mbx's local store, so it neither reads nor
 writes R2.
 
 Decided 2026-10-27 (maintainer): the cross-job miss report moved to
-[unifying dependency features](/quest/m0/ci/hakari.md), which measures its own
-before and after baseline and no longer waits on this quest.
+the cargo-hakari quest, which recorded its own before and after baseline and
+finished 2026-11-06.
 
 The first scheduled Nightly on mbx 1.28.0,
 [40506938673](https://github.com/moq-dev/moq/actions/runs/40506938673)
