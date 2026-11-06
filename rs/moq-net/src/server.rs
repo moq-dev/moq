@@ -1371,8 +1371,9 @@ fn open_window(server: &Server, paused: &PausedHandshake) -> Result<(), Error> {
 	let Some(window) = server.receive_window else {
 		return Ok(());
 	};
-	let mut limits = crate::transport::Limits::default();
-	limits.receive_window = Some(window);
+	let limits = crate::transport::Limits {
+		receive_window: Some(window),
+	};
 	match paused.transport().0.set_limits(limits) {
 		Ok(()) | Err(crate::transport::LimitsError::Unsupported) => Ok(()),
 		Err(err) => Err(Error::Transport(err.to_string())),
