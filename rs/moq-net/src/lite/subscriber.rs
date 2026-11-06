@@ -599,35 +599,10 @@ impl Subscriber {
 					&mut run.announced,
 				)?;
 			}
-			lite::AnnounceBroadcast::Takeover {
-				predecessor,
-				suffix,
-				instance,
-				epoch,
-				cost,
-				..
-			} => {
-				// Resolved like a start against the live predecessor, which it retires when
-				// it takes the predecessor's own suffix. An unknown or retired predecessor is
-				// a protocol violation.
-				let (previous, suffix) = run.decoder.takeover(predecessor, suffix)?;
-				let previous = prefix.join(&previous)?;
-				let path = prefix.join(&suffix)?;
-				// Lite-07 carries no hop chain; its claims name their route instead.
-				self.takeover_announce(
-					previous,
-					path,
-					instance.map(|instance| (instance, epoch)),
-					crate::Hops::new(),
-					cost,
-					run.link_cost,
-					run.responder_origin,
-					&mut run.announced,
-				)?;
-			}
 			lite::AnnounceBroadcast::Skipped | lite::AnnounceBroadcast::Synced => {}
-			// Only lite-07 carries the route layer, which `routed` handles above.
-			lite::AnnounceBroadcast::RouteStart { .. }
+			// Only lite-07 carries the route layer and takeovers, which `routed` handles above.
+			lite::AnnounceBroadcast::Takeover { .. }
+			| lite::AnnounceBroadcast::RouteStart { .. }
 			| lite::AnnounceBroadcast::RouteUpdate { .. }
 			| lite::AnnounceBroadcast::RouteHold { .. }
 			| lite::AnnounceBroadcast::RouteEnd { .. }
@@ -683,56 +658,7 @@ impl Subscriber {
 		// outside our scope, so don't serve it. Reflections are already
 		// filtered above.
 		let route = self.announced_route(&path, hops, cost, link_cost, responder_origin, announced);
-		Ok(announced.offer(self, path, route, None))
-	}
-
-	/// Handle an ANNOUNCE_TAKEOVER: a new advertisement at `path` continuing what the peer's
-	/// live advertisement at `previous`, at or above it, served beneath it.
-	///
-	/// At `previous` itself it replaces that advertisement like a restart; elsewhere it
-	/// starts one, and the predecessor stays. Either way the new route enters the origin
-	/// before anything leaves, taking over from the route the predecessor attached, if it
-	/// did, so what resolved through that one beneath `path` carries on.
-	#[expect(
-		clippy::too_many_arguments,
-		reason = "private plumbing; a single-use argument struct would only rename the parameters"
-	)]
-	fn takeover_announce(
-		&mut self,
-		previous: Path,
-		path: Path,
-		// See `start_announce`.
-		instance: Option<(crate::Instance, u64)>,
-		hops: crate::Hops,
-		cost: crate::origin::Cost,
-		link_cost: u64,
-		responder_origin: Option<crate::Hop>,
-		announced: &mut Announced,
-	) -> Result<bool, Error> {
-		// The continued route lies beneath its predecessor.
-		if !path.has_prefix(&previous) {
-			return Err(Error::ProtocolViolation);
-		}
-		if path == previous {
-			announced.restart(&path, instance);
-		} else {
-			// Like a start: one current advertisement per prefix.
-			if announced.contains(&path) {
-				return Err(Error::ProtocolViolation);
-			}
-			announced.reserve(path.clone(), instance)?;
-		}
-
-		let Some(hops) = self.chain(&path, hops, responder_origin) else {
-			if path == previous {
-				announced.declined(path);
-			}
-			return Ok(false);
-		};
-
-		tracing::debug!(route = %self.log_path(&path), predecessor = %self.log_path(&previous), "takeover");
-		let route = self.announced_route(&path, hops, cost, link_cost, responder_origin, announced);
-		Ok(announced.offer(self, path, route, Some(&previous)))
+		Ok(announced.offer(self, path, route))
 	}
 
 	/// The route to announce for a prefix this peer advertised, charging our
@@ -818,7 +744,7 @@ impl Subscriber {
 			return Ok(true);
 		}
 
-		Ok(announced.offer(self, path, metadata, None))
+		Ok(announced.offer(self, path, metadata))
 	}
 
 	/// Handle an ANNOUNCE_RESTART: a live advertisement serves another instance, or a
@@ -849,7 +775,7 @@ impl Subscriber {
 		tracing::debug!(route = %self.log_path(&path), hops = hops.len(), "restart");
 		let route = self.announced_route(&path, hops, cost, link_cost, responder_origin, announced);
 		// Held to the limit like a start: a restart outside it is withheld, dropping the old route.
-		Ok(announced.offer(self, path, route, None))
+		Ok(announced.offer(self, path, route))
 	}
 
 	/// The full chain of a new or replacing advertisement, or `None` when it is
@@ -7735,7 +7661,7 @@ mod tests {
 		assert_eq!(hops, vec![crate::Hop::UNKNOWN]);
 	}
 
-	fn restart_subscriber(session: SinkSession) -> (Subscriber, crate::origin::Consumer) {
+	pub(super) fn restart_subscriber(session: SinkSession) -> (Subscriber, crate::origin::Consumer) {
 		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let subscriber = Subscriber::new(SubscriberConfig {
@@ -7751,53 +7677,6 @@ mod tests {
 			auth: crate::auth::Link::new(false),
 		});
 		(subscriber, consumer)
-	}
-
-	/// A takeover in place keeps the sources the predecessor minted open: they serve the
-	/// instance it continues. A restart in place closes them.
-	#[kio::test]
-	async fn a_takeover_in_place_keeps_the_predecessors_sources() {
-		for takeover in [true, false] {
-			let (mut subscriber, _consumer) = restart_subscriber(SinkSession::new(Default::default()));
-			let mut announced = Announced::default();
-			let path = Path::from_static("room/host");
-			let hop = Some(crate::Hop::new(7).unwrap());
-			subscriber
-				.start_announce(
-					path.clone(),
-					None,
-					crate::Hops::new(),
-					crate::origin::Cost::UNKNOWN,
-					0,
-					hop,
-					&mut announced,
-				)
-				.unwrap();
-			let minted = announced.attached(&path).unwrap().live.consume();
-
-			match takeover {
-				true => subscriber.takeover_announce(
-					path.clone(),
-					path.clone(),
-					None,
-					crate::Hops::new(),
-					crate::origin::Cost::UNKNOWN,
-					0,
-					hop,
-					&mut announced,
-				),
-				false => subscriber.restart_announce(
-					path.clone(),
-					crate::Hops::new(),
-					crate::origin::Cost::UNKNOWN,
-					0,
-					hop,
-					&mut announced,
-				),
-			}
-			.unwrap();
-			assert_eq!(minted.is_closed(), !takeover, "takeover: {takeover}");
-		}
 	}
 
 	/// A restart re-prices the announced route in place: consumers observe another
@@ -8778,15 +8657,8 @@ impl Announced {
 
 	/// Put the peer's route into the origin, so paths under it resolve through this
 	/// session on demand, or hold it back when the session's limit does not cover it.
-	/// The route takes over from the one attached at `predecessor`, if any. Returns
-	/// whether it attached.
-	fn offer(
-		&mut self,
-		subscriber: &Subscriber,
-		path: Path,
-		route: crate::origin::RouteInfo,
-		predecessor: Option<&Path>,
-	) -> bool {
+	/// Returns whether it attached.
+	fn offer(&mut self, subscriber: &Subscriber, path: Path, route: crate::origin::RouteInfo) -> bool {
 		if !subscriber
 			.auth
 			.within_limit(crate::auth::Direction::Subscribe, path.as_str())
@@ -8795,23 +8667,10 @@ impl Announced {
 			self.routes.insert(path, Held::Withheld(route));
 			return false;
 		}
-		let in_place = predecessor == Some(&path);
 		// An error means the prefix is outside our origin's scope, so don't serve it.
-		let predecessor = predecessor.and_then(|previous| match self.routes.get(previous)? {
-			Held::Attached(attached) => Some(&attached.dynamic),
-			_ => None,
-		});
-		match subscriber.origin.forward(&path, route.clone(), predecessor) {
+		match subscriber.origin.forward(&path, route.clone(), None) {
 			Ok(dynamic) => {
-				// In place, the successor continues the instance the predecessor's sources
-				// serve: they live on with it rather than closing with the advertisement.
-				let live = in_place
-					.then(|| self.attached(&path).map(|previous| std::mem::take(&mut previous.live)))
-					.flatten();
-				self.attach(path.clone(), route, dynamic);
-				if let (Some(live), Some(attached)) = (live, self.attached(&path)) {
-					attached.live = live;
-				}
+				self.attach(path, route, dynamic);
 				true
 			}
 			Err(_) => {
@@ -8930,7 +8789,7 @@ impl Announced {
 					if subscriber.going_away.is_set() {
 						route.cost = crate::origin::Cost::DRAIN;
 					}
-					self.offer(subscriber, path, route, None);
+					self.offer(subscriber, path, route);
 				}
 				_ => unreachable!("only attached and withheld routes change"),
 			}

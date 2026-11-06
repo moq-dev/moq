@@ -44,8 +44,10 @@ instance rule already covers the claim case and needs no wire message, so
 this quest removes the predecessor machinery and grows to [XL].
 
 - **Removing ANNOUNCE_TAKEOVER.** Delete the 0x5 message and its codec in
-  `rs/moq-net/src/lite/announce.rs`, `compress.rs`, `publisher.rs`,
-  `subscriber.rs` and `replay.rs`; the predecessor tracking in
+  `rs/moq-net/src/lite/announce.rs`, `compress.rs`, `publisher/routed.rs`,
+  `subscriber/routed.rs` and `replay.rs`; the route layer's claim lineage
+  (`Claim::continues` in `rs/moq-net/src/route/node.rs`, fed by `OwnClaims` in
+  `origin.rs`); the predecessor tracking in
   `rs/moq-net/src/model/origin.rs` and `front.rs` (the `seen` stamps in
   `OriginConsumerState` and `PendingFront::via`); relay forwarding in
   `rs/moq-relay`; and `rs/moq-net/tests/integration/announce_takeover.rs`.

@@ -205,14 +205,20 @@ impl Routed {
 				epoch,
 				cost,
 			} => {
-				let (previous, suffix) = decoder.takeover(predecessor, suffix)?;
-				let (previous, path) = (self.path(prefix, &previous)?, self.path(prefix, &suffix)?);
-				// Kept compiling only: lite-07's ANNOUNCE_TAKEOVER is on its way out, so a
-				// claim taking over its predecessor's own path simply replaces it.
-				if previous == path {
+				let (_, suffix) = decoder.takeover(predecessor, suffix)?;
+				let path = self.path(prefix, &suffix)?;
+				// The predecessor is a live claim of the same route covering the new one.
+				let taken = self.claims.get(&predecessor).ok_or(Error::ProtocolViolation)?;
+				if taken.route != route || !path.has_prefix(&taken.path) {
+					return Err(Error::ProtocolViolation);
+				}
+				let continues = (taken.path.clone(), taken.claim.instance.clone());
+				// At its own path it replaces the predecessor.
+				if continues.0 == path {
 					self.end(predecessor)?;
 				}
-				let claim = claim(instance, epoch, cost)?;
+				let mut claim = claim(instance, epoch, cost)?;
+				claim.continues = Some(continues);
 				self.start(decoder.last(), route, path, claim)?;
 			}
 			Msg::Update { id, cost, .. } => {
@@ -403,12 +409,29 @@ impl Routed {
 				return;
 			}
 		}
+		// The route this one takes over, as this stream serves it at the instance it
+		// continues, so what resolved through that one beneath the claim carries on.
+		let taken = (served.claim.continues.as_ref())
+			.and_then(|(taken, instance)| {
+				let entry = self.served.get_mut(&(id, taken.clone()))?;
+				(entry.route.route.instance.as_ref() == Some(instance)).then_some((taken, entry))
+			})
+			.map(|(taken, entry)| match *taken == key.1 {
+				// In place, its sources serve what the new one continues: they live on with
+				// it rather than closing with the old route.
+				true => (&entry.route.dynamic, Some(std::mem::take(&mut entry.route.live))),
+				false => (&entry.route.dynamic, None),
+			});
 		// A new instance or epoch replaces the old route, attached before it goes.
 		tracing::debug!(route = %subscriber.log_path(&path), node = id, "announce");
-		match subscriber.origin.forward(&path, route.clone(), None) {
+		let (predecessor, live) = taken.unzip();
+		match subscriber.origin.forward(&path, route.clone(), predecessor) {
 			Ok(dynamic) => {
 				let wake = crate::util::QueueWake::new(key.clone(), self.ready.clone());
-				let entry = AnnouncedRoute::new(route, dynamic, wake);
+				let mut entry = AnnouncedRoute::new(route, dynamic, wake);
+				if let Some(live) = live.flatten() {
+					entry.live = live;
+				}
 				entry.waker.wake_by_ref();
 				self.served.insert(key.clone(), ServedClaim { named, route: entry });
 				self.stream.serving(id, &key.1);
@@ -457,6 +480,7 @@ fn claim(instance: Option<crate::Instance>, epoch: u64, cost: crate::origin::Cos
 		instance: instance.ok_or(Error::ProtocolViolation)?,
 		epoch,
 		cost: cost.value(),
+		continues: None,
 	})
 }
 
@@ -481,5 +505,83 @@ fn scoped(link: &route::Link, regions: &Option<Vec<Path>>, key: [u8; 32]) -> rou
 			qualify: route::qualifier(key),
 		}),
 		..link.clone()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use crate::lite::{AnnounceBroadcast as Msg, AnnounceDecoder, PathRef, test_transport::SinkSession};
+	use crate::{Instance, Path, origin::Cost, route::Advert};
+
+	/// A takeover in place keeps the sources the predecessor minted open: they serve the
+	/// instance it continues. A restart in place closes them.
+	#[kio::test]
+	async fn a_takeover_in_place_keeps_the_predecessors_sources() {
+		for takeover in [true, false] {
+			let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+			let prefix = Path::empty();
+			let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+			let mut decoder = AnnounceDecoder::default();
+			let path = Path::from_static("room/host");
+			let advert = Advert {
+				seqno: 0,
+				metric: 0,
+				down_only: false,
+			};
+			let start = Msg::Active {
+				suffix: PathRef::literal(path.clone()),
+				route: 0,
+				instance: Some(Instance::random()),
+				epoch: 0,
+				hops: Default::default(),
+				cost: Cost::new(0),
+			};
+			for msg in [Msg::RouteStart { node: 7, advert }, start] {
+				routed.receive(&prefix, msg, &mut decoder).unwrap();
+			}
+			routed
+				.receive(
+					&prefix,
+					Msg::Floor {
+						id: 0,
+						revision: Some(0),
+					},
+					&mut decoder,
+				)
+				.unwrap();
+			routed.outputs(&subscriber);
+			let minted = routed.served[&(7, path.clone())].route.live.consume();
+
+			let instance = Some(Instance::random());
+			let replace = match takeover {
+				true => Msg::Takeover {
+					predecessor: 0,
+					suffix: PathRef::literal(path.clone()),
+					route: 0,
+					instance,
+					epoch: 0,
+					cost: Cost::new(0),
+				},
+				false => Msg::Restart {
+					id: 0,
+					instance,
+					epoch: 0,
+					cost: Cost::new(0),
+				},
+			};
+			routed.receive(&prefix, replace, &mut decoder).unwrap();
+			routed
+				.receive(
+					&prefix,
+					Msg::Floor {
+						id: 0,
+						revision: Some(1),
+					},
+					&mut decoder,
+				)
+				.unwrap();
+			routed.outputs(&subscriber);
+			assert_eq!(minted.is_closed(), !takeover, "takeover: {takeover}");
+		}
 	}
 }

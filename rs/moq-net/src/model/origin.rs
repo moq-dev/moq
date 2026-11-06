@@ -3614,21 +3614,21 @@ impl OwnClaims {
 	}
 
 	fn apply(&self, event: RouteEvent) {
-		match event {
-			RouteEvent::Start(announce)
-			| RouteEvent::Update(announce)
-			| RouteEvent::Restart(announce)
-			| RouteEvent::Takeover { announce, .. } => {
-				let route = announce.route;
-				let claim = route.instance.map(|instance| crate::route::node::Claim {
-					instance,
-					epoch: route.epoch,
-					cost: route.cost.value(),
-				});
-				self.node.own(announce.prefix, claim);
+		let (announce, predecessor) = match event {
+			RouteEvent::Start(announce) | RouteEvent::Update(announce) | RouteEvent::Restart(announce) => {
+				(announce, None)
 			}
-			RouteEvent::End(announce) => self.node.own(announce.prefix, None),
-		}
+			RouteEvent::Takeover { announce, predecessor } => (announce, Some(predecessor)),
+			RouteEvent::End(announce) => return self.node.own(announce.prefix, None, None),
+		};
+		let route = announce.route;
+		let claim = route.instance.map(|instance| crate::route::node::Claim {
+			instance,
+			epoch: route.epoch,
+			cost: route.cost.value(),
+			continues: None,
+		});
+		self.node.own(announce.prefix, claim, predecessor.as_ref());
 	}
 }
 

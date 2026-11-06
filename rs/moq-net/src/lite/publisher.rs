@@ -1371,43 +1371,6 @@ impl AnnounceRun {
 		Ok(())
 	}
 
-	/// Advertise `suffix` as continuing the peer's live `predecessor` (suffix and id):
-	/// ANNOUNCE_TAKEOVER, which retires the predecessor when it held `suffix`.
-	#[expect(clippy::too_many_arguments, reason = "private plumbing mirroring start and restart")]
-	fn takeover(
-		&mut self,
-		stream: &mut Stream<Transport, Version>,
-		predecessor: (crate::Path, u64),
-		suffix: crate::Path,
-		hops: Hops,
-		cost: crate::origin::Cost,
-		route: Served,
-		absolute: &crate::Path,
-	) -> Result<(), Error> {
-		tracing::debug!(route = %absolute, predecessor = %predecessor.0, "takeover");
-		let (id, wire) = self.encoder.takeover(predecessor.1, suffix.clone());
-		self.live.insert(
-			suffix,
-			Advertised {
-				id: Some(id),
-				hops,
-				cost,
-				served: route.clone(),
-			},
-		);
-		let (instance, epoch) = route;
-		stream.writer.buffer(&lite::AnnounceBroadcast::Takeover {
-			predecessor: predecessor.1,
-			suffix: wire,
-			route: 0,
-			instance,
-			epoch,
-			cost,
-		})?;
-		self.sent(stream)?;
-		Ok(())
-	}
-
 	/// Replace the peer's advertisement for `suffix` with another instance or epoch:
 	/// ANNOUNCE_RESTART on lite-07, an end and a fresh start before it.
 	fn restart(
@@ -1662,26 +1625,10 @@ impl AnnounceRun {
 				continue;
 			}
 
-			// A takeover names its predecessor's id, so only one the peer holds. Elsewhere it
+			// Only lite-07 carries a takeover, and it answers from the route layer. Here one
 			// is another instance, in place or not.
-			let taken = predecessor
-				.as_ref()
-				.filter(|_| self.version.has_announce_takeover())
-				.filter(|predecessor| **predecessor == suffix || !self.live.contains_key(&suffix))
-				.and_then(|predecessor| Some((predecessor.clone(), self.live.get(predecessor)?.id?)));
 			let restart = restart || predecessor.as_ref() == Some(&suffix);
 			match self.outgoing(&update.route, &absolute) {
-				Some((hops, cost)) if let Some((predecessor, id)) = taken => {
-					self.takeover(
-						stream,
-						(predecessor, id),
-						suffix,
-						hops,
-						cost,
-						served(&update.route),
-						&absolute,
-					)?;
-				}
 				Some((hops, cost)) if restart && self.live.contains_key(&suffix) => {
 					self.restart(stream, suffix, hops, cost, served(&update.route), &absolute)?;
 				}
