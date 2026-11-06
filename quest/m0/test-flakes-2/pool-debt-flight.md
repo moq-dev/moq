@@ -47,18 +47,21 @@ share one process on parallel threads. Each passed alone, with
 The overshoot is always about 13.7 KB past the 8,388,608-byte bound, less
 than one of the test's frames (8 MiB is about 500 of them).
 
-Lead, unverified: the pool ranks groups for eviction by a coarse 100 ms
-wall-clock access tick (`TICK_MS` in `rs/moq-net/src/model/cache.rs`),
-breaking ties within a tick with small write and read boosts. A thread
-slowed by its neighbours spreads the test's writes across tick boundaries.
-That could change which group pays the flight's debt, leaving one frame
-unpaid. Before trusting this lead, rule out process-wide state shared
-between tests in one binary, since the failures need parallel threads.
+Ruled out (pullfrog on
+[moq-dev/moq#8024](https://github.com/moq-dev/moq/pull/8024#discussion_r4489748136)):
+the pool's 100 ms access tick. `Inner::tick` moves only in `Pool::advance`
+(`rs/moq-net/src/model/cache.rs`), reached from `Pool::poll`, and the test
+builds a bare `Pool::new` that it never polls, so every access stamp is the
+same tick plus its boost however the threads are scheduled.
+
+Lead, unverified: the overshoot is a near-constant 13.7 KB, not a drifting
+amount, so look at the per-write charge and shed path, at what a write
+charges before the flight's debt is paid. Since the failures need parallel
+threads, also rule out process-wide state shared between tests in one
+binary, and any other time source the pool reads (its wall-clock epoch).
 
 Reproduce first: run plain `cargo test -p moq-net --all-features` (not
 nextest) on parallel threads until it fails, and record the frame and bytes
-held. Then fix the cause. If the test depends on wall time, drive the pool's
-clock as the epic's rules say. If the shed logic leaves debt unpaid when the
-writes straddle a tick, fix the shed logic.
+held. Then fix the cause.
 
 Public API: none. Wire: none.
