@@ -49,7 +49,7 @@ import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import * as Cluster from "./cluster.ts";
 import { encodeDatagram } from "./datagram.ts";
-import { type RequestCondition, requestReason } from "./error.ts";
+import { type RequestCondition, requestReason, SubscribeRefused } from "./error.ts";
 import { type Fetch, FetchHeader, FetchOk, type FetchType } from "./fetch.ts";
 import * as Filter from "./filter.ts";
 import { MAX_AGE_PARAMETER } from "./max_age.ts";
@@ -315,6 +315,7 @@ interface RunFill {
 // The condition a request that failed for `err` is refused with, mirroring Rust's `to_code`: a
 // verdict stays one, so the peer is never invited to retry it.
 function refusedAs(err: Error): RequestCondition {
+	if (err instanceof SubscribeRefused) return err.condition;
 	if (err instanceof SessionError) {
 		switch (err.code) {
 			case SessionCode.Unauthorized:
@@ -587,7 +588,12 @@ export class Publisher {
 		try {
 			const info = await resolve().catch(async (err) => {
 				if (left.signal.aborted) request.abort(cancel);
-				else await request.refuse("subscribe", this.#failed(err, rendezvous, true));
+				else {
+					const refusal = this.#failed(err, rendezvous, true);
+					// An upstream's refusal goes on with the Retry Interval it asked for.
+					if (err instanceof SubscribeRefused) refusal.retryInterval = err.retryInterval;
+					await request.refuse("subscribe", refusal);
+				}
 				return undefined;
 			});
 			if (!info) return;

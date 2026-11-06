@@ -27,7 +27,7 @@ import { unwanted } from "../util/demand.ts";
 import { wireOf } from "../wire.ts";
 import type * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
-import { toRequestCode } from "./error.ts";
+import { SubscribeRefused, toRequestCode } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
@@ -453,6 +453,44 @@ test("a TRACK_STATUS refusal that may pass invites a retry", async () => {
 			await answering;
 
 			const wire = status.wire();
+			expect(await wire.u53()).toBe(RequestError.id);
+			const refused = await RequestError.decode(wire, version);
+			expect([refused.errorCode, refused.retryInterval]).toEqual([errorCode, retryInterval]);
+			await requests.return?.();
+			served.close();
+			origin.close();
+		}
+	}
+});
+
+// A relay refuses its reader with the code and Retry Interval its upstream's refusal asked for,
+// where deriving an interval from the code would differ: DOES_NOT_EXIST derives "never retry",
+// and GOING_AWAY derives a retry the upstream declined.
+test("a relay forwards an upstream SUBSCRIBE refusal's retry interval", async () => {
+	for (const version of IETF_VERSIONS) {
+		for (const [errorCode, retryInterval] of [
+			[0x10, 5000n],
+			[0x6, 0n],
+		] as const) {
+			const pair = createMockTransportPair(ALPNS[version]);
+			const session = new NativeSession(pair.server, version, true);
+			const { pub, origin } = publisher(pair.server, { session });
+			const requests = origin.routePrefix(Path.from("room")).requested();
+
+			const reader = requestStream(version);
+			const subscribing = pub.runSubscribe(
+				new Subscribe({ requestId: 7n, trackNamespace: Path.from("room"), trackName: "video", subscriberPriority: 0 }),
+				reader.stream,
+			);
+			const request = (await requests.next()).value;
+			if (!request) throw new Error("no request for room");
+			const served = new BroadcastProducer();
+			const trackRequest = wireOf(served).requested();
+			request.serve(served);
+			(await trackRequest)?.reject(new SubscribeRefused(errorCode, "upstream", retryInterval, version));
+			await subscribing;
+
+			const wire = reader.wire();
 			expect(await wire.u53()).toBe(RequestError.id);
 			const refused = await RequestError.decode(wire, version);
 			expect([refused.errorCode, refused.retryInterval]).toEqual([errorCode, retryInterval]);
