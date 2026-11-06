@@ -108,9 +108,10 @@ const stubs = new WeakSet<WebTransport>();
 
 /**
  * Decide at setup whether `quic`'s `getStats()` measures anything. Safari's is a stub
- * whose `smoothedRtt` and counters are always 0, and QUIC's smoothed RTT starts at
- * 333 ms, so a 0 means nothing was measured: the transport is then treated as having
- * no `getStats()` at all. Only this setup-time call decides, so a real RTT from a
+ * whose `smoothedRtt` and counters are always 0 and whose `estimatedSendRate` is null;
+ * QUIC's smoothed RTT starts at 333 ms, so a 0 RTT with no rate means nothing was
+ * measured: the transport is then treated as having no `getStats()` at all. A rate
+ * alongside a 0 RTT keeps the transport usable. Only this setup-time call decides, so a real RTT from a
  * later WebKit lifts the rule.
  *
  * @internal
@@ -119,7 +120,8 @@ export async function inspect(quic: WebTransport): Promise<void> {
 	const getStats = (quic as { getStats?: () => Promise<TransportStats> }).getStats;
 	if (typeof getStats !== "function") return;
 	try {
-		if ((await getStats.call(quic)).smoothedRtt === 0) stubs.add(quic);
+		const stats = await getStats.call(quic);
+		if (stats.smoothedRtt === 0 && stats.estimatedSendRate == null) stubs.add(quic);
 	} catch {
 		// A transport that can't answer now may later; `transportStats` handles the rejection.
 	}
