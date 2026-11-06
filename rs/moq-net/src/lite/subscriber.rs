@@ -2884,9 +2884,8 @@ impl DatagramServe {
 						None => None,
 					};
 					if let Some(end) = ended {
-						let DatagramState::Live {
-							producer, stream, ..
-						} = std::mem::replace(&mut self.state, DatagramState::Done)
+						let DatagramState::Live { producer, stream, .. } =
+							std::mem::replace(&mut self.state, DatagramState::Done)
 						else {
 							unreachable!()
 						};
@@ -3042,8 +3041,7 @@ impl kio::Task for DatagramServe {
 		if !matches!(
 			self.state,
 			DatagramState::Ending { .. } | DatagramState::Finish { .. } | DatagramState::Done
-		)
-			&& self.gate.poll_denied(waiter).is_ready()
+		) && self.gate.poll_denied(waiter).is_ready()
 			&& self.closed.poll_closed(waiter).is_pending()
 		{
 			tracing::info!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name(), "datagrams no longer authorized");

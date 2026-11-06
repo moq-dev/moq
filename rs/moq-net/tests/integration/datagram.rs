@@ -684,7 +684,9 @@ async fn a_track_ended_under_a_datagram_flood_keeps_its_stream() {
 		// Each names no subscription, so the subscriber reads and drops it. The queue holds 1024.
 		let flood = || {
 			for _ in 0..512 {
-				let _ = chain.pairs[0].client_transport.send_datagram(b"x"[..].into(), Default::default());
+				let _ = chain.pairs[0]
+					.client_transport
+					.send_datagram(b"x"[..].into(), Default::default());
 			}
 		};
 		flood();
