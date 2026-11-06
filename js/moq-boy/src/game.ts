@@ -334,7 +334,10 @@ export class Game {
 			try {
 				open = await this.#endpoint.dialTrack(this.sessionId, undefined, { signal: abort.signal });
 			} catch (err) {
-				if (!abort.signal.aborted) console.warn("Dial failed:", err);
+				if (abort.signal.aborted) return;
+				console.warn("Dial failed:", err);
+				// Redial on the next input rather than dropping commands into no session.
+				this.#feedbackActive.set(false);
 				return;
 			}
 			if (abort.signal.aborted) {

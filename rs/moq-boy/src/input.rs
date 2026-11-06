@@ -143,6 +143,11 @@ async fn read_commands(
 	consumer: moq_net::track::Subscriber,
 	cmd_tx: &tokio::sync::mpsc::Sender<Command>,
 ) -> Result<(), moq_net::Error> {
+	// Each command carries the viewer's whole button state, so a newer one supersedes a
+	// delayed one rather than waiting behind it. A reset can be skipped the same way, only
+	// when a newer command overtakes it in flight.
+	let live = consumer.subscription().with_delay(moq_net::track::Delay::default());
+	consumer.control().update(live)?;
 	let mut commands = consumer.ordered();
 	while let Some(mut group) = commands.next_group().await? {
 		let Some(frame) = group.read_frame().await? else {
