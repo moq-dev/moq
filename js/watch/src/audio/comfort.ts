@@ -24,6 +24,11 @@ export class ComfortNoise {
 		this.#block = Math.max(1, Math.round(rate / 50));
 	}
 
+	/** The RMS of the noise the current or last silence was filled with. */
+	get level(): number {
+		return this.#level;
+	}
+
 	/** Measure `output` from `from` up to `to`, just played. */
 	played(output: Float32Array[], from: number, to: number): void {
 		if (to <= from) return;
