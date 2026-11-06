@@ -1712,7 +1712,10 @@ fn refuse_going_away(stream: Stream<Transport, Version>, id: u64, version: Versi
 		return auth::going_away(stream);
 	}
 	let kind = super::error::request::Kind::Subscribe;
-	Reject::new(stream, ietf::RequestError::refuse(&Error::GoingAway, kind, "going away", version))
+	Reject::new(
+		stream,
+		ietf::RequestError::refuse(&Error::GoingAway, kind, "going away", version),
+	)
 }
 
 /// A control stream cannot end independently of its session, so its own failure is the

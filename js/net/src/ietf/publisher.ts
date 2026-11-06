@@ -2552,7 +2552,8 @@ export class Publisher {
 	#failed(err: unknown, wait = false): Refusal {
 		const e = error(err);
 		const reasonPhrase = reason(e);
-		const missing = e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable);
+		const missing =
+			e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable);
 		if (missing && wait) return { condition: "timeout", reasonPhrase };
 		return { condition: missing ? "does_not_exist" : "internal", reasonPhrase, retryable: routeFailed(e) };
 	}

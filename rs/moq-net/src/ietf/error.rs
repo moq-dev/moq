@@ -327,7 +327,9 @@ pub(crate) mod request {
 						let expected = match err {
 							// The session failing under a request is no verdict on it.
 							Error::GoingAway | Error::Session(_) => retry,
-							Error::Unroutable if matches!(kind, Kind::Subscribe | Kind::Fetch | Kind::TrackStatus) => retry,
+							Error::Unroutable if matches!(kind, Kind::Subscribe | Kind::Fetch | Kind::TrackStatus) => {
+								retry
+							}
 							_ => 0,
 						};
 						assert_eq!(retry_interval(&err, code), expected, "{version:?} {kind:?} {err:?}");

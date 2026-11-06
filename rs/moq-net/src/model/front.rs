@@ -566,9 +566,7 @@ impl Front {
 			// Died mid-serve after delivering from the same instance: normal
 			// failover, re-splice from the serving source at the first missing group.
 			Err(err)
-				if delivered
-					&& err.transient()
-					&& self.serving.is_some_and(|(_, candidate)| candidate.carried) =>
+				if delivered && err.transient() && self.serving.is_some_and(|(_, candidate)| candidate.carried) =>
 			{
 				track.state = TrackState::Idle;
 				self.redispatch(name, actions);

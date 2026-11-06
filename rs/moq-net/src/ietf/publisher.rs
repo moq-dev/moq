@@ -15466,7 +15466,9 @@ mod serve_tests {
 			.await
 			.unwrap();
 		let mut serving: std::pin::Pin<Box<dyn Future<Output = Result<(), Error>>>> = match kind {
-			request::Kind::Subscribe => Box::pin(publisher.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))),
+			request::Kind::Subscribe => {
+				Box::pin(publisher.run_subscribe_stream(stream, subscribe(Filter::NextObject, None)))
+			}
 			request::Kind::Fetch => {
 				let (namespace, track) = (crate::Path::from_static("room"), "video".into());
 				let fetch_type = match version {
@@ -15532,7 +15534,11 @@ mod serve_tests {
 	async fn a_track_refusal_that_may_pass_invites_a_retry() {
 		let retry = crate::auth::RETRY_INITIAL.as_millis() as u64;
 		for version in ALL_VERSIONS {
-			for kind in [request::Kind::Subscribe, request::Kind::Fetch, request::Kind::TrackStatus] {
+			for kind in [
+				request::Kind::Subscribe,
+				request::Kind::Fetch,
+				request::Kind::TrackStatus,
+			] {
 				for (err, expected) in [
 					(Error::GoingAway, (0x6, retry)),
 					(Error::NotFound, (0x10, 0)),
