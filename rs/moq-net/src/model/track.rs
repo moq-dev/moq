@@ -22834,8 +22834,8 @@ mod test {
 	}
 
 	/// Every group a set of ranges names, as a received copy's upstream terms judge them.
-	fn judged(runs: impl IntoIterator<Item = ops::Range<u64>>) -> Option<RangeSet<u64>> {
-		Some(runs.into_iter().collect())
+	fn judged(runs: impl IntoIterator<Item = (u64, u64)>) -> Option<RangeSet<u64>> {
+		Some(runs.into_iter().map(|(start, end)| start..end).collect())
 	}
 
 	/// A stale verdict settles a reader that reads every range the upstream judged it
@@ -22848,7 +22848,7 @@ mod test {
 		let dynamic = producer.requests();
 		let budget = Duration::from_millis(500);
 		// The upstream judged 0..2 and 4..6 under 500ms, and gave up both of them as stale.
-		producer.supersede_stale(judged([0..2, 4..6]));
+		producer.supersede_stale(judged([(0, 2), (4, 6)]));
 		producer.give_up(0..2, Hole::stale(budget));
 		producer.give_up(4..6, Hole::stale(budget));
 		let mut subscriber = producer.subscribe(
@@ -22877,7 +22877,7 @@ mod test {
 		producer.received();
 		let dynamic = producer.requests();
 		let budget = Duration::from_millis(500);
-		producer.supersede_stale(judged([0..2, 4..6]));
+		producer.supersede_stale(judged([(0, 2), (4, 6)]));
 		producer.give_up(0..2, Hole::stale(budget));
 		producer.give_up(4..6, Hole::stale(budget));
 		let reader = |ranges: [Range; 2]| {
@@ -22917,7 +22917,7 @@ mod test {
 		producer.received();
 		let dynamic = producer.requests();
 		let budget = Duration::from_millis(500);
-		producer.supersede_stale(judged([0..2, 4..6]));
+		producer.supersede_stale(judged([(0, 2), (4, 6)]));
 		producer.give_up(0..2, Hole::stale(budget));
 		producer.give_up(4..6, Hole::stale(budget));
 		// Stops at 2, though the upstream judged 0..2 against 4..6 too: the run is unknown to it.
@@ -23298,7 +23298,7 @@ mod test {
 		let mut matching = bounded(Duration::from_millis(500));
 		let waiter = kio::Waiter::noop();
 		// The upstream judged its own range of 0..2 under 500ms.
-		producer.supersede_stale(judged([0..2]));
+		producer.supersede_stale(judged([(0, 2)]));
 		producer.give_up(0..2, Hole::stale(Duration::from_millis(500)));
 		assert!(
 			wider.poll_recv_group(&waiter).is_pending(),
