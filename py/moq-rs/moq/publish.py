@@ -213,7 +213,8 @@ class Fill:
     owed, in the fill's order. Dropping the fill names
     whatever is left as dropped while a reader still wants it; once nobody does, it is
     withdrawn, so stop serving it once :meth:`wanted` is ``None``. Stop serving a single group
-    when :meth:`unwanted` returns for it, and move on to :meth:`wanted`.
+    when :meth:`unwanted` returns for it, and move on to :meth:`wanted`. Serve the fills you
+    take concurrently: each waits on its own readers.
     """
 
     def __init__(self, inner: MoqFill) -> None:
@@ -260,8 +261,9 @@ class Fill:
     async def wanted_changed(self) -> int | None:
         """The next group to serve, once every group this fill accepted reached a reader.
 
-        Returns ``wanted`` once it changed and the readers picked up what was served; the first
-        call returns at once.
+        Returns ``wanted`` once it changed and a reader picked up what was served, as it next
+        reads. ``None``, once the fill is done, never waits; the first call returns at once
+        unless an accepted group has yet to reach a reader.
         """
         return await self._inner.wanted_changed()
 

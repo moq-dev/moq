@@ -561,16 +561,14 @@ async fn fetches(
 fn spawn_fill(
 	tasks: &mut tokio::task::JoinSet<()>,
 	rung: Rung,
-	fill: moq_net::track::Fill,
+	mut fill: moq_net::track::Fill,
 	permit: tokio::sync::OwnedSemaphorePermit,
 ) {
 	tasks.spawn(async move {
 		let _permit = permit;
-		let mut last = None;
-		while let Some(sequence) = fill.wanted()
-			&& last != Some(sequence)
-		{
-			last = Some(sequence);
+		// A group at a time as its readers pick them up, so a wide fetch never evicts its own
+		// earlier groups before they are read.
+		while let Some(sequence) = fill.wanted_changed().await {
 			if let Err(err) = fetch(&rung, &fill, sequence).await {
 				tracing::warn!(%err, sequence, "transcode fetch failed");
 			}

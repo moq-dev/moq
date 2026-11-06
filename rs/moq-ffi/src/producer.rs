@@ -482,7 +482,8 @@ impl MoqTrackRequests {
 /// [`wanted`](Self::wanted) names what is still owed, in the fill's order. Releasing
 /// it names whatever is left as dropped while a reader still wants it; once nobody does, it is
 /// withdrawn, so stop serving it once [`wanted`](Self::wanted) is null. Stop serving a single
-/// group when [`unwanted`](Self::unwanted) resolves for it, and move on to the next.
+/// group when [`unwanted`](Self::unwanted) resolves for it, and move on to the next. Serve the
+/// fills you take concurrently: each waits on its own readers.
 #[derive(uniffi::Object)]
 pub struct MoqFill {
 	inner: moq_net::track::Fill,
@@ -536,9 +537,10 @@ impl MoqFill {
 		self.inner.wanted()
 	}
 
-	/// The next group to serve: `wanted` once every group this fill accepted reached a reader
-	/// and it changed. The first call returns at once. Serve one group per call, so the cache
-	/// never holds a batch the readers have yet to take.
+	/// The next group to serve: `wanted` once it changed and every group this fill accepted
+	/// reached a reader, which picks it up when it next reads. Null, once the fill is done,
+	/// never waits; the first call returns at once unless an accepted group has yet to reach a
+	/// reader. Serve one group per call, so the fill writes no faster than its readers read.
 	pub async fn wanted_changed(&self) -> Result<Option<u64>, MoqError> {
 		// Polled in place: a cancelled call left unfreed must not advance the
 		// watcher and swallow the change the next call waits for.

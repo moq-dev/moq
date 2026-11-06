@@ -356,13 +356,17 @@ impl Join {
 	/// The reader picked up `groups` the fill accepted, so its handler may serve the next one.
 	pub(super) fn saw(&self, groups: &RangeSet<u64>) {
 		let mut fills = self.fills.lock();
-		if let Some(pending) = fills.pending.get_mut(&self.id)
-			&& self.is_ours(pending)
-			&& groups.iter().any(|run| pending.unseen.overlaps(run))
+		// Read first: a mutable borrow wakes every poll parked on the fills.
+		if !fills
+			.pending
+			.get(&self.id)
+			.is_some_and(|pending| self.is_ours(pending) && groups.iter().any(|run| pending.unseen.overlaps(run)))
 		{
-			for run in groups.iter() {
-				pending.unseen.remove(run.clone());
-			}
+			return;
+		}
+		let unseen = &mut fills.pending.get_mut(&self.id).expect("checked above").unseen;
+		for run in groups.iter() {
+			unseen.remove(run.clone());
 		}
 	}
 
@@ -811,8 +815,9 @@ pub(super) fn poll_requested(
 /// [`max_delay`](Self::max_delay), and [`order`](Self::order) follow its readers as they
 /// change, so read them as each group is served. The handler calls [`accept`](Self::accept) for each group
 /// it has and [`drop_groups`](Self::drop_groups) for the rest, one group at a time as
-/// [`wanted_changed`](Self::wanted_changed) yields them, so the cache never holds a batch its
-/// readers have yet to take. Dropping the fill names
+/// [`wanted_changed`](Self::wanted_changed) yields them, so it writes no faster than its
+/// readers read. Serve the fills you take concurrently: each waits on its own readers, so
+/// serving them in turn holds every fill behind the readers of the one before. Dropping the fill names
 /// whatever is left as dropped while a reader still wants it; once nobody does, the fill is
 /// withdrawn and records nothing, so stop serving it once [`wanted`](Self::wanted) is `None`.
 /// A reader narrowing its ranges may leave a single group, so stop serving that one when
@@ -1011,14 +1016,15 @@ impl Fill {
 		}
 	}
 
-	/// The next group to serve: [`wanted`](Self::wanted) once every group this fill accepted
-	/// reached a reader, which picks it up as it asks for its next group, and once it differs
-	/// from what this handle last returned. The first call returns at once.
+	/// The next group to serve: [`wanted`](Self::wanted) once it differs from what this handle
+	/// last returned and every group this fill accepted reached a reader, which picks it up
+	/// when it next reads. `None`, once the fill is withdrawn or answered, never waits. The
+	/// first call returns at once, unless a group already accepted has yet to reach a reader.
 	///
-	/// So `while let Some(sequence) = fill.wanted_changed().await` writes one group at a time,
-	/// at the pace of the fastest reader, and ends once the fill is withdrawn or answered. A
-	/// batch written ahead of its readers would let the cache evict its earlier groups before
-	/// they take them.
+	/// So `while let Some(sequence) = fill.wanted_changed().await` writes one group at a time
+	/// as the fastest reader reads on, rather than a batch the cache may evict before it is
+	/// read. A reader reading in another order than the fill's picks up groups it cannot take
+	/// yet, so those wait in the cache.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		// Arm every input of `wanted` before reading it, so a change in between still wakes:
@@ -1261,6 +1267,19 @@ impl Inner {
 		if self.result.read().resolved.contains(&sequence) {
 			return Err(Error::Duplicate);
 		}
+		// Written for a reader that has yet to pick it up, which the next group waits on.
+		// Recorded before the group is cached, since a reader may take it from the cache and
+		// release it before the answer goes out, which must clear it.
+		let unseen = {
+			let mut fills = self.fills.lock();
+			match fills.pending.get_mut(&self.id) {
+				Some(pending) if pending.wants.contains_key(&sequence) => {
+					pending.unseen.insert(sequence..end);
+					true
+				}
+				_ => false,
+			}
+		};
 		// Cache the group before answering: readers resolve an accept through the cache.
 		let res = TrackState::modify(&self.state).and_then(|mut state| {
 			let res = match self.flight {
@@ -1272,13 +1291,11 @@ impl Inner {
 			deferred.wake();
 			res
 		});
-		// Written for a reader that has yet to pick it up, which the next group waits on.
-		// Recorded before the answer goes out, so a reader picking it up at once clears it.
-		if res.is_ok()
+		if unseen
+			&& res.is_err()
 			&& let Some(pending) = self.fills.lock().pending.get_mut(&self.id)
-			&& pending.wants.contains_key(&sequence)
 		{
-			pending.unseen.insert(sequence..end);
+			pending.unseen.remove(sequence..end);
 		}
 		if let Ok(mut outcome) = self.result.write() {
 			outcome.accept(sequence..end);

@@ -74,6 +74,9 @@ pub(super) struct Misses {
 	wanted: RangeSet<u64>,
 	/// Answered by a fill and cached, not handed out yet.
 	filled: BTreeSet<u64>,
+	/// What each join's fill answered that a drop poll took in, told to the fill only once a
+	/// read picks it up (see [`Self::pick_up`]).
+	picked: BTreeMap<u64, RangeSet<u64>>,
 	/// Never asked again: named dropped to the reader.
 	given_up: RangeSet<u64>,
 	/// What became [`Self::gone`] since the cursor last took it, for its window's parked time
@@ -388,6 +391,7 @@ impl Misses {
 				if join.is_empty() {
 					self.joins.remove(&key);
 					self.parked.remove(&key);
+					self.picked.remove(&key);
 				}
 			}
 		}
@@ -565,9 +569,8 @@ impl Misses {
 				}
 			}
 			drop(state);
-			// Picked up, so its handler may serve the next group.
 			if !seen.is_empty() {
-				self.joins[&key].saw(&seen);
+				self.picked.entry(key).or_default().extend(seen);
 			}
 			self.release(&taken);
 			// Judged again: the same join may have more to answer, or park the waiter now.
@@ -580,6 +583,15 @@ impl Misses {
 			state.read().cache.watch_wall(at, waiter);
 		}
 		retry
+	}
+
+	/// Tell each fill this reader joined that a read picked up what it answered, so its
+	/// handler may serve the next group. Only a read: a drop poll takes in answers too, from
+	/// a publisher that may be unable to send the groups, which must not pace the fill.
+	pub fn pick_up(&mut self) {
+		for (key, groups) in std::mem::take(&mut self.picked) {
+			self.joins[&key].saw(&groups);
+		}
 	}
 
 	/// Judge the holes in `target` the last probe has not, returning the runs to ask a

@@ -322,7 +322,8 @@ func (d *TrackRequests) Cancel() {
 // order. Releasing the fill names whatever is left as dropped
 // while a reader still wants it; once nobody does, it is withdrawn, so stop
 // serving it once Wanted is nil. Stop serving a single group when Unwanted
-// returns for it, and move on to Wanted.
+// returns for it, and move on to Wanted. Serve the fills you take
+// concurrently: each waits on its own readers.
 type Fill struct {
 	inner *ffi.MoqFill
 }
@@ -365,8 +366,10 @@ func (f *Fill) Wanted() *uint64 {
 	return f.inner.Wanted()
 }
 
-// WantedChanged blocks until every group this fill accepted reached a reader
-// and Wanted changed, and returns it. The first call returns at once.
+// WantedChanged blocks until Wanted changed and every group this fill accepted
+// reached a reader, which picks it up when it next reads, and returns it. Nil,
+// once the fill is done, never waits; the first call returns at once unless an
+// accepted group has yet to reach a reader.
 func (f *Fill) WantedChanged(ctx context.Context) (*uint64, error) {
 	return f.inner.WantedChanged(ctx)
 }
