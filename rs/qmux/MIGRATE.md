@@ -4,12 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### WebSocket sessions return once established
-
-`ws::Upgraded::connect` and `accept` are async and, like `ws::Client::connect`, `ws::Server::accept`, `Session::connect` and `Session::accept`, return only once the peer's transport parameters arrive, so its stream and datagram limits are known.
-Await them. Start both ends of an in-process pair together, such as with `tokio::join!`, since each waits for the other's parameters.
-A peer that never sends them fails the call with `Error::HandshakeTimeout`.
-
 ### TLS cryptography uses rind
 
 Default WSS connections build an explicit rind rustls configuration and use native roots, without relying on a process-wide provider.
