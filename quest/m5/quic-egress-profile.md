@@ -86,6 +86,33 @@ Then, only where the profile shows a cost:
     last byte): p50 rose from 36 to 72 µs to 258 to 352 µs. On the small-object
     and audio points, p99 rose from 104 to 705 µs to 606 to 770 µs.
 
+  **End to end, through a QUIC reverse proxy.** The same prototype, measured as
+  one server shard behind a QUIC reverse proxy. Clients connect to the proxy,
+  and the proxy connects to the server over loopback with an 8,192-byte UDP
+  payload. Clients are moq-bench fan-out viewers: audio-rate, then 3 Mbit/s
+  video, 5 min each. The four runs ran in ABBA order (off, on, on, off). Server
+  CPU is in cores, as mean / max.
+
+  | Load (audio / video viewers) | Batching | Audio p50 / p99, lost groups | Audio CPU | Video p99 |
+  |---|---|---|---|---|
+  | 300 / 150 | off | 11 / 38 ms, 6,090 | 0.492 / 0.596 | 21 ms |
+  | 300 / 150 | on | 13 / 54 ms, 9,781 | 0.490 / 0.560 | 26 ms |
+  | 400 / 200 | on | 27 / 110 ms, 150,424 | 0.596 / 0.695 | 79 ms |
+  | 400 / 200 | off | 27 / 212 ms, 325,694 | 0.688 / 0.779 | 31 ms |
+
+  - **Below the server's ceiling, batching saved no CPU and raised p99.** The
+    loopback harness's 8–22% saving did not carry over, and why hasn't been
+    measured.
+  - **Only past the ceiling (400 audio) did it cut CPU, by 13%,** and the losses
+    with it. But the shard was overloaded either way, and video's p99 rose from
+    31 to 79 ms.
+  - **The losses at 300 came from the proxy's client-facing socket buffer**, not
+    the server. With a 1 MiB receive buffer on the proxy, that point loses
+    nothing.
+
+  So on this path the latency cost shows up and the CPU saving doesn't. That
+  argues for keeping batching opt-in and off by default, if it ships.
+
   Its shape:
   - `UdpSocketState::try_send_many` on Linux sends up to 64 transmits, one
     `mmsghdr` each, in one `sendmmsg`, each with its own GSO segment size,
