@@ -2392,6 +2392,7 @@ impl Producer {
 	/// session created the route node: a relay translating this node's claims for a
 	/// lite-06 peer starts their chain with it. `None` while no session has, which
 	/// leaves the node uncreated.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn route_hop(&self) -> Option<Hop> {
 		let node = self.shared.lock().route_node.clone()?;
 		Some(crate::route::node::hop(node.declared()))
