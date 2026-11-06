@@ -27,9 +27,7 @@ cannot move until its PR merges, and an epic moves with its children. These
 breaking epics and quests stay in m1 for now and are listed in m2's
 `Required`, so the cut still waits on them: api-audit, datagram-tracks, drop-set, rind, session-policy, and
 stream-credit. The [re-cut follow-up](/quest/m2/recut-held.md)
-moves what remains of them once their claims merge. release-perf, held for
-the same reason, gates the cut through the
-[cut gate](/quest/m2/cut-gate/README.md).
+moves what remains of them once their claims merge.
 
 ## Required
 

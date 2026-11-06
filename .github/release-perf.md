@@ -402,5 +402,5 @@ live read is accepted, per delivered group through the session (see the
 
 ## Related
 
-- [Performance audit](/quest/m3/audit-perf.md) - compares nightly to nightly; this epic compares main to release
+- [Performance audit](/quest/m3/audit-perf.md) - compares nightly to nightly; this report compares main to release
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - noise floor of the paired nightly-to-nightly comparison on one runner
