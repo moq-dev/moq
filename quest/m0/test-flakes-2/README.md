@@ -95,6 +95,9 @@ test, which failed two merge-queue batches and two loaded local runs.
 Added 2026-11-05 (maintainer, `/quest-audit`): Interop's P2P data-channel
 timeout, one child.
 
+Added 2026-11-06: `js/net`'s lite-06 datagram end/close case, from `Check` on
+[moq-dev/moq#7981](https://github.com/moq-dev/moq/pull/7981).
+
 Public API: none. Wire: none.
 
 ## Required
@@ -107,3 +110,4 @@ Public API: none. Wire: none.
 - [Diagnose and re-enable the FFI datagram connection test](/quest/m0/test-flakes-2/ffi-datagram-roundtrip.md) - diagnose the default-connection timeout and re-enable the quarantined test
 - [Test PulseAudio servers stay off the desktop's D-Bus](/quest/m0/test-flakes-2/pulse-dbus.md) - concurrent media runs on one desktop never collide on `org.PulseAudio1`
 - [The P2P data-channel test transfers its frame](/quest/m0/test-flakes-2/p2p-data-channel.md) - Interop's two-peer data-channel test stops stalling after a failed send
+- [The lite-06 datagram end survives a session close](/quest/m0/test-flakes-2/datagram-end-close.md) - the quarantined lite-06 case passes in loaded runs, re-enabled once its end/close race is fixed
