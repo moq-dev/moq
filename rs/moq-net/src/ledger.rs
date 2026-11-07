@@ -158,6 +158,7 @@ impl Ledger {
 	/// Take `groups` back out of what is accounted for, owed again from `now`: a verdict that
 	/// accounted for them was reversed. The gap they leave opens now, so it is waited for a
 	/// fresh grace, even where it joins an older gap.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn unaccount(&mut self, groups: Range<u64>, now: Instant) {
 		if groups.is_empty() {
 			return;

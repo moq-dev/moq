@@ -22874,6 +22874,7 @@ mod test {
 	}
 
 	/// Every group a set of ranges names, as a received copy's upstream terms judge them.
+	#[cfg(feature = "async")]
 	fn judged(runs: impl IntoIterator<Item = (u64, u64)>) -> Option<RangeSet<u64>> {
 		Some(runs.into_iter().map(|(start, end)| start..end).collect())
 	}
