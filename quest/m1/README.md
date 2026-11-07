@@ -42,7 +42,6 @@ moves what remains of them once their claims merge.
 - [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; time-stretched browser playback without steady-state underruns and a native trace replay remain
 - [Native WebSocketStream keeps datagrams flowing](/quest/m1/websocket-stream-datagrams.md) - on Chromium's native `WebSocketStream`, QMux over WebSocket sheds a datagram only on a real send backlog, proven in headless Chromium
-- [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
 - [Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md) - a buffered `<moq-watch>` asks for the oldest group first, so a voice reply's opening arrives first, and audio's head hold shrinks to the floor
 - [Push-to-talk loses no speech](/quest/m1/push-to-talk/README.md) - an unmute is heard from its first frame with no catalog round trip: mute moves from holding a disabled rendition to suppressed silence with comfort noise, after a route spike; capture delivers frames on a steady cadence
 - [Push-to-talk's press-to-audible latency fits a budget on the defaults](/quest/m1/push-to-talk-latency.md) - press to audible on the browser defaults, excluding device output, stays under a kixtop-measured budget that `just test push-to-talk` enforces
@@ -54,7 +53,6 @@ moves what remains of them once their claims merge.
 - [Vendor and trim the WebRTC stack](/quest/m1/webrtc-vendor.md) - str0m, dimpl, `is`, and sctp-proto live in moq-webrtc with unused code removed, so moq-rtc can take rind
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
 - [VAAPI encode and decode](/quest/m1/video-vaapi.md) - H.265 encode and decode, pre-generated bindings, and pooled resize surfaces, including the moq-dev/vaapi release that carries them
-- [A relay forwards an upstream refusal's retry interval](/quest/m1/retry-interval-forward.md) - a forwarded SUBSCRIBE refusal keeps the upstream's retry interval
 - [Tests run on a mocked clock](/quest/m1/mock-clock-tests/README.md) - about 300 tests stop proving nothing happened by waiting, sleeping to settle, or asserting on elapsed time
 - [moq-mux reads H.265 SPS without scuffle](/quest/m1/h265-sps-reader.md) - moq-mux's own SPS reader replaces scuffle-h265 and scuffle-expgolomb, and the fuzz regressions still pass
 

@@ -33,6 +33,8 @@ export interface Refusal {
 	reasonPhrase: string;
 	/** Whether asking again may pass, which invites the peer to retry. Absent is a verdict. */
 	retryable?: boolean;
+	/** The Retry Interval an upstream refusal asked for, sent in place of one derived here. */
+	retryInterval?: bigint;
 }
 
 async function writeRefusal(w: Writer, version: IetfVersion, kind: RequestKind, refusal: Refusal): Promise<void> {
@@ -43,7 +45,7 @@ async function writeRefusal(w: Writer, version: IetfVersion, kind: RequestKind, 
 	const err = new RequestError({
 		errorCode,
 		reasonPhrase: refusal.reasonPhrase,
-		retryInterval: refusal.retryable && open ? BigInt(RETRY_INITIAL) : 0n,
+		retryInterval: refusal.retryInterval ?? (refusal.retryable && open ? BigInt(RETRY_INITIAL) : 0n),
 	});
 	await Message.write(w, RequestError.id, err, version);
 }

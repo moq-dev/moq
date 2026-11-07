@@ -24,6 +24,11 @@ nightly.yml --branch main --event schedule`), never a dispatch on a branch.
 
 ## Plan
 
+Decided 2026-11-07 (maintainer, /quest-unblock): agents collect the R2
+numbers with this desktop's wrangler login, and the maintainer only picks the
+lifecycle. Baseline that day: 720,249 objects / 1.2 TB, with 18,006,968
+`GetObject` and 4,892,769 `PutObject` requests from 2026-10-16 to 2026-11-07.
+
 Decided 2026-11-05 (maintainer, /quest-audit): ✅ the release pull request
 check moved to [m3](/quest/m3/mbx-r2-release-cache.md) (m2 before the milestone re-cut) behind the cut, since
 `release` gets the platform Rust cache only when the cut merges `main` into
@@ -132,12 +137,16 @@ feature unification, so changed compiler inputs remain a separate cause.
   reuse, restore-plus-build comparison and rebuild-frequency evidence in the
   Goal. Current timings are not a matched-commit comparison, and macOS's
   inherited-prediction misses remain unexplained.
-- Maintainer: from about 2026-11-26, collect R2 bucket size and request counts
-  for the first month and check that the six old oversized manifests expired.
-  R2's account metrics need the maintainer's Cloudflare login, which agents
-  lack. Then decide the lifecycle in `infra/mbx/lifecycle.json`: shorten,
-  keep or lengthen the 30 days. Recommended: keep 30 days unless storage cost
-  or the rebuild count argues otherwise.
+- moq-dev/moq: no earlier than 2026-11-26, an agent on the maintainer's
+  desktop collects `mbx-moq-dev`'s size and request counts for the first
+  month and checks that the six old oversized manifests expired. Size comes
+  from `npx wrangler r2 bucket info mbx-moq-dev`. Request counts come from
+  Cloudflare's GraphQL API (`r2OperationsAdaptiveGroups`, filtered on
+  `bucketName` and grouped by `actionType`), authenticated with the
+  `oauth_token` in `~/.config/.wrangler/config/default.toml`. Then put the
+  lifecycle in `infra/mbx/lifecycle.json` to the maintainer, with the numbers:
+  shorten, keep or lengthen the 30 days. Recommended: keep 30 days unless
+  storage cost or the rebuild count argues otherwise.
 
 ## Related
 

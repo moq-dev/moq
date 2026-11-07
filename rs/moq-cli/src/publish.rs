@@ -1323,9 +1323,10 @@ pub(crate) mod tests {
 	async fn open_export(
 		source: moq_mux::Source,
 		format: CatalogFormat,
+		delay: Duration,
 	) -> moq_mux::Result<Export<moq_mux::catalog::Consumer<tscat::Ext>>> {
 		let catalog = source.catalog::<tscat::Ext>(format).await?;
-		Ok(Export::new(source, catalog))
+		Ok(Export::new(source, catalog, delay))
 	}
 
 	/// Drain an exporter, concatenating every frame's payload until output stops. The
@@ -1431,10 +1432,9 @@ pub(crate) mod tests {
 		// `catalog`, the producers, and `import` stay alive: the exporter subscribes to
 		// the retained tracks.
 		drain(
-			open_export(resolved(&origin, "cli").await, CatalogFormat::Hang)
+			open_export(resolved(&origin, "cli").await, CatalogFormat::Hang, RECORDING_MAX_AGE)
 				.await
-				.unwrap()
-				.with_delay(RECORDING_MAX_AGE),
+				.unwrap(),
 		)
 		.await
 	}
@@ -1500,10 +1500,9 @@ pub(crate) mod tests {
 		// Subscribe side: the same catalog stream `run_ts` selects, re-emitting the
 		// ancillary streams verbatim.
 		let output = drain(
-			open_export(resolved(&origin, "cli").await, format)
+			open_export(resolved(&origin, "cli").await, format, RECORDING_MAX_AGE)
 				.await
-				.unwrap()
-				.with_delay(RECORDING_MAX_AGE),
+				.unwrap(),
 		)
 		.await;
 
@@ -2380,10 +2379,13 @@ pub(crate) mod tests {
 				instance.restart(&republish, restart, &mut log).unwrap();
 			}
 			if follower.is_none() && instance.pending.is_none() {
-				let export = open_export(resolved(&origin, "demo").await, CatalogFormat::Hang)
-					.await
-					.unwrap()
-					.with_delay(Duration::from_secs(1));
+				let export = open_export(
+					resolved(&origin, "demo").await,
+					CatalogFormat::Hang,
+					Duration::from_secs(1),
+				)
+				.await
+				.unwrap();
 				follower = Some(
 					ts::Follower::new(export)
 						.unwrap()
