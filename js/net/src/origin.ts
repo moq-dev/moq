@@ -2658,8 +2658,14 @@ export class Consumer implements Reader {
 				try {
 					for (;;) {
 						signal?.throwIfAborted();
-						// The route may name another instance by the time its handler answers.
-						if (instance !== undefined && entry.route.peek().instance !== instance) throw unroutable();
+						// The route may name another instance by the time its handler answers, as when a
+						// sibling job ending moves a claim on. A job's route still carrying the requested
+						// instance serves it.
+						if (instance !== undefined && entry.route.peek().instance !== instance) {
+							const job = this.#local(path, instance);
+							if (job) return job;
+							throw unroutable();
+						}
 						const served = server.served.get(path);
 						if (served && served.closed.peek() === undefined) return served;
 						const rejected = server.rejected.get(path);

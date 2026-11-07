@@ -902,6 +902,37 @@ test("a peer's pin is served by a local broadcast that loses the path", async ()
 	origin.close();
 });
 
+// A peer pinned to the claim's instance is served by its job's route, even when a sibling job
+// ending moved the claim on before the peer's demand looked again.
+test("a peer's pin reaches its job after a sibling moved the claim on", async () => {
+	const origin = new Producer();
+	const wire = wireOf(origin.consume());
+	const claim = origin.routePrefix(Path.from("room"));
+	const minted = claim.instance;
+	const requests = claim.requested();
+	const reader = origin.request(Path.from("room/alice"));
+	const asked = (await requests.next()).value;
+	if (!asked) throw new Error("expected a request");
+	const alice = asked.route();
+	await settle();
+
+	const bob = Path.from("room/bob");
+	const demanded = wire.demand(bob, minted);
+	const next = (await requests.next()).value;
+	if (!next) throw new Error("expected a request");
+	// Bob answers under the claim's instance, then Alice ends before the demand resumes.
+	const job = next.route();
+	alice.close();
+	expect(claim.instance).not.toBe(minted);
+	expect(job.instance).toBe(minted);
+	expect(await demanded).toBeDefined();
+
+	reader.close();
+	job.close();
+	claim.close();
+	origin.close();
+});
+
 // A job naming no instance continues its claim's minted one: a reader resolved through the claim
 // is handed the job's broadcast under the instance it resolved, once, and keeps reading it.
 test.each(["request", "follow"] as const)("a %s through a claim continues on its job's route", async (method) => {

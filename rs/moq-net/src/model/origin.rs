@@ -12173,6 +12173,30 @@ mod tests {
 		assert_eq!(alice.await.unwrap().info().instance, Some(second));
 	}
 
+	/// A request pinned to the claim's instance resolves through its job's route even when a
+	/// sibling job ending moved the claim on before the request looked again.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_pinned_request_reaches_its_job_after_a_sibling_moves_the_claim() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let claim = producer.route_prefix("room", RouteOptions::default()).unwrap();
+		let lent = claim.instance();
+
+		let reader = consumer.request("room/alice", None);
+		let alice = queued(&claim).await.route(RouteOptions::default()).unwrap();
+		let held = reader.await.unwrap();
+
+		let pinned = consumer.request("room/bob", lent.clone());
+		let bob = queued(&claim).await.route(RouteOptions::default()).unwrap();
+		drop(alice);
+		assert_ne!(claim.instance(), lent);
+		assert_eq!(bob.instance(), lent);
+		let resolved = pinned.await.expect("the job still serves the pinned instance");
+		assert_eq!(resolved.info().instance, Some(lent));
+		drop(held);
+	}
+
 	/// Once a job ends, a request pinned to its instance is refused without asking the
 	/// claim, which serves another stream now, while an unpinned one starts the next job.
 	#[kio::test]
