@@ -10437,7 +10437,13 @@ mod test {
 			}
 			group.finish().unwrap();
 			producer.set_idle();
-			let answered = producer.set_live(Some(Position { group: 2, frame: object }), None);
+			let answered = producer.set_live(
+				Some(Position {
+					group: 2,
+					frame: object,
+				}),
+				None,
+			);
 			assert_eq!(answered.is_ok(), ok, "object {object}");
 		}
 	}
