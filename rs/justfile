@@ -234,10 +234,6 @@ android-test *args:
 audit:
     bash sh/local.sh cargo deny check --show-stats
 
-# Verify relay startup validation without a QUIC backend.
-relay-minimal:
-    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-relay --no-default-features --lib -E 'test(workers_require_a_quic_backend)'
-
 # Outside nextest because the staticlib link alone outlasts its hang budget.
 
 # Compile and run moq-c's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
@@ -261,7 +257,7 @@ features:
     run just rs media-features --all
     run bash sh/local.sh cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
     run bash sh/local.sh cargo check --locked -p moq-relay --no-default-features
-    run just rs relay-minimal
+    run just rs test -p moq-relay --no-default-features
     run bash sh/local.sh cargo check --locked -p moq-cli --no-default-features
     run just rs test -p moq-cli --no-default-features --features capture,websocket -E 'test(capture_window)'
     run just rs test -p moq-cli --no-default-features --features capture,pipewire,websocket -E 'test(capture_window)'
