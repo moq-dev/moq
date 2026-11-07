@@ -1,6 +1,5 @@
 //! Resolves a peer's `.local` candidates over mDNS, one distinct name at a time.
 
-use crate::vendor::str0m;
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::IpAddr;
@@ -156,6 +155,7 @@ mod tests {
 	use std::sync::atomic::{AtomicUsize, Ordering};
 
 	use super::*;
+	use crate::vendor::str0m;
 
 	/// How long the fake takes to answer, on the paused clock.
 	const DELAY: Duration = Duration::from_secs(1);
