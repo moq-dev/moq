@@ -43,7 +43,6 @@ the PR that lands this ([moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8
   the [epic](/quest/m2/cluster-routing/README.md)), so sessions stop
   stamping `Cost::DRAIN` on GOAWAY, including on moq-transport.
 
-
 ## Related
 
 - [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - the contract
