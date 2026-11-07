@@ -247,7 +247,6 @@ export namespace Source {
 		readonly device: Source.Device<"video">;
 		readonly in: Signals.Readonlys<Source.CameraInput>;
 		readonly out: Signals.Readonlys<Source.CameraOutput>;
-		retry(): void;
 	}
 	export type CameraInput = {
 		enabled: Signals.Getter<boolean>;
@@ -312,7 +311,6 @@ export namespace Source {
 		readonly device: Source.Device<"audio">;
 		readonly in: Signals.Readonlys<Source.MicrophoneInput>;
 		readonly out: Signals.Readonlys<Source.MicrophoneOutput>;
-		retry(): void;
 	}
 	export type MicrophoneInput = {
 		enabled: Signals.Getter<boolean>;

@@ -86,7 +86,7 @@ Camera and microphone failures are observable through `el.sources.video`
 and `el.sources.audio`. When those signals hold a `Source.Camera` or
 `Source.Microphone`, read its `out.error` signal. It contains an `Error` (for
 example, a `NotAllowedError` when permission is refused). A refused capture is not retried until permission, device selection,
-constraints, or the source's enabled state changes, or the app calls `retry()`. `<moq-publish-ui>` shows
+constraints, or the source's enabled state changes. `<moq-publish-ui>` shows
 capture failures in its status badge.
 
 ## JavaScript API

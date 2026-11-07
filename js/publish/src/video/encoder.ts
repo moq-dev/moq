@@ -468,7 +468,7 @@ export class Encoder {
 					producer.encode(frame, frame.timestamp as Micro, key);
 					// Including a keyframe the encoder placed on its own, which opened a group too.
 					if (key) answer();
-					if (this.#estimator.write(frame.timestamp, order, key)) {
+					if (!tearingDown && this.#estimator.write(frame.timestamp, order, key)) {
 						this.#estimate.set({ ...this.#estimator.estimate });
 					}
 				},
@@ -590,6 +590,8 @@ export class Encoder {
 			// and shows black instead of a frozen picture.
 			await new Promise((resolve) => effect.abort.addEventListener("abort", resolve, { once: true }));
 			tearingDown = true;
+			// A cosmetic flush must not hold sibling renditions to our stale delay.
+			order.leave(this.#estimator);
 			try {
 				const config = configured;
 				if (
@@ -627,9 +629,6 @@ export class Encoder {
 				}
 			} finally {
 				if (encoder.state !== "closed") encoder.close();
-				// A stopped rendition stops holding the others' delay back. Not a cleanup: the black
-				// keyframe above is written after one would run, and would seat this rendition again.
-				order.leave(this.#estimator);
 				// The broadcast owns this static track across gaps (a disable, or with `onDemand` a demand
 				// gap). Close the current group, marking the break so a later subscriber resumes on the same
 				// track without the pre-gap group reading as live. A fatal encoder error aborts the track instead.

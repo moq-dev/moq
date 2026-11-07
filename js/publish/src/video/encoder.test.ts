@@ -1221,6 +1221,8 @@ for (const stop of ["resume", "close", "detach", "track closed", "track replaced
 			enabled.set(false);
 			await settle();
 			expect(flush).toHaveBeenCalledTimes(1);
+			// Muting releases sibling catalog delay even while the cosmetic flush is pending.
+			expect(leave).toHaveBeenCalled();
 			const before = closed.mock.calls.length;
 			enabled.set(false, true);
 			await settle();

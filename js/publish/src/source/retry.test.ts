@@ -207,11 +207,6 @@ for (const [kind, create] of [
 				expect(media.attempts).toBe(2);
 				expect(published(source.out.source.peek())).toBe(media.latest());
 				expect(source.out.error.peek()).toBeUndefined();
-				const live = source.out.source.peek();
-				source.retry();
-				await settle();
-				expect(media.attempts).toBe(2);
-				expect(source.out.source.peek()).toBe(live);
 			} finally {
 				source.close();
 			}
@@ -344,7 +339,7 @@ for (const [kind, create] of [
 		});
 	}
 
-	test(`${kind} retries a refusal explicitly without changing the enabled setting`, async () => {
+	test(`${kind} retries a refusal after toggling enabled`, async () => {
 		using _time = fakeTime();
 		using media = install(new FakeMediaDevices());
 		media.denied = true;
@@ -354,7 +349,9 @@ for (const [kind, create] of [
 			await settle();
 			expect(source.out.error.peek()?.name).toBe("NotAllowedError");
 			media.denied = false;
-			source.retry();
+			enabled.set(false);
+			await settle();
+			enabled.set(true);
 			await settle();
 			expect(enabled.peek()).toBe(true);
 			expect(source.out.error.peek()).toBeUndefined();
