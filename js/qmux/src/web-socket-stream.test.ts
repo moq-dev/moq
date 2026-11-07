@@ -34,6 +34,7 @@ class FakeWebSocket implements WebSocketLike {
 
 	send(data: string | ArrayBufferLike | ArrayBufferView): void {
 		this.sent.push(data);
+		this.bufferedAmount += typeof data === "string" ? data.length : data.byteLength;
 	}
 	close(code?: number, reason?: string): void {
 		this.closeArgs = { code, reason };
@@ -119,6 +120,27 @@ describe("WebSocketStream ponyfill", () => {
 		ws.bufferedAmount = 0; // drained
 		await pending;
 		expect(settled).toBe(true);
+	});
+
+	test("only a backlog past the mark is backpressure, not a write in flight", async () => {
+		const wss = new WebSocketStream("wss://x", { webSocket: ctor, highWaterMark: 100 });
+		const ws = FakeWebSocket.last as FakeWebSocket;
+		ws.open();
+		const { writable } = await wss.opened;
+		const writer = writable.getWriter();
+
+		// A write in flight under the mark leaves room, so a datagram behind it still goes.
+		const writes = [writer.write(new Uint8Array(40))];
+		expect(writer.desiredSize).toBeGreaterThan(0);
+		// A burst counts the bytes still queued behind it with what the socket buffers.
+		writes.push(writer.write(new Uint8Array(40)));
+		expect(writer.desiredSize).toBeGreaterThan(0);
+		writes.push(writer.write(new Uint8Array(40)));
+		expect(writer.desiredSize).toBe(0);
+
+		ws.bufferedAmount = 0;
+		await Promise.all(writes);
+		expect(writer.desiredSize).toBeGreaterThan(0);
 	});
 
 	test("setHighWaterMark resizes backpressure live (mid-drain)", async () => {

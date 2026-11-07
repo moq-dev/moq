@@ -10,6 +10,7 @@ export interface BidirectionalStream extends WebTransportBidirectionalStream {
 }
 
 export interface Config {
+	handshakeTimeout?: number | null;
 	idleTimeout?: number | null;
 	maxDatagramFrameSize?: bigint | null;
 	maxRecordSize?: bigint;

@@ -70,7 +70,6 @@ deleted.
 - [moq-bench reports sub-millisecond latency](/quest/m4/bench-latency-resolution.md) - steady-window latency resolves finer than 1 ms
 - [Benchmark series stay meaningful](/quest/m4/bench-hygiene.md) - a warm `burst` variant, stale series pruned, and slow-group `bytes` kept out of series names
 - [Re-run the SPS fuzzer on h264-reader](/quest/m4/sps-fuzz-h264-reader.md) - the H.264 SPS overflow is rechecked on the new parser
-- [Drop the H.265 SPS pre-walk once scuffle is fixed](/quest/m4/scuffle-sps-bump.md) - waiting on ScuffleCloud/scuffle#653 and #654 releases, then bump and drop the walk
 - [PCM encodes in one pass](/quest/m4/pcm-bulk-encode.md) - the PCM encoder converts a frame in bulk instead of one sample at a time
 - [moq-quic's internal dev-dependencies are path-only](/quest/m4/quic-dev-dep-path.md) - moq-congestion is a path dev-dependency
 - [moq-mux's AAC config reports SBR](/quest/m4/aac-sbr-config.md) - moq-audio reads backward-compatible SBR from the config

@@ -549,6 +549,10 @@ pub(crate) struct TrackState {
 
 	// The error that caused the track to be aborted, if any.
 	abort: Option<Error>,
+	// How long the upstream refusing the request asked to wait before asking again, kept so
+	// a relay refuses its own readers with the same interval rather than deriving one.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	retry: Option<Duration>,
 
 	// Whether the declared end settled before a write that could reopen it or an abort, or
 	// `closed()` reported it: every group below it was produced and finished then, so the
@@ -3913,6 +3917,17 @@ impl Producer {
 		Ok(())
 	}
 
+	/// Abort the track as an upstream refusal that asked to be tried again after `retry`, so
+	/// a relay refuses the readers still waiting with that interval.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn refuse(self, err: Error, retry: Duration) -> Result<()> {
+		self.alive.unlist(false);
+		let mut state = self.modify()?;
+		state.retry = Some(retry);
+		commit_abort(state, err).abort();
+		Ok(())
+	}
+
 	/// Abort an unwanted track, returning the producer unchanged if consumers remain.
 	///
 	/// Consumer creation and the unwanted check share a lock, so demand returning
@@ -4112,10 +4127,11 @@ impl Producer {
 
 	/// Count `seen` as the aggregate already acted on, so
 	/// [`Self::poll_subscription_changed`] reports only a change from it: the demand a
-	/// subscriber session asked upstream for before accepting the track.
+	/// subscriber session asked upstream for before accepting the track, or `None`
+	/// after abandoning that setup.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn seen_subscription(&mut self, seen: Subscription) {
-		self.prev_subscription = Some(seen);
+	pub(crate) fn seen_subscription(&mut self, seen: Option<Subscription>) {
+		self.prev_subscription = seen;
 	}
 
 	/// How long a subscriber session's tail waits for a late group: `budget`, bounded by how
@@ -5532,6 +5548,12 @@ impl Subscribing {
 		}
 	}
 
+	/// How long the upstream that refused the track asked to wait before asking again.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn retry(&self) -> Option<Duration> {
+		self.state.read().retry
+	}
+
 	/// Poll until the peer confirms the subscription, yielding the [`Subscriber`].
 	/// Errors if the track is aborted or not found.
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<Subscriber>> {
@@ -5596,6 +5618,12 @@ pub struct Resolving {
 }
 
 impl Resolving {
+	/// How long the upstream that refused the track asked to wait before asking again.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn retry(&self) -> Option<Duration> {
+		self.state.read().retry
+	}
+
 	/// A handle on the track instance this resolves, whatever its broadcast serves later.
 	pub fn track(&self) -> Consumer {
 		Consumer {
@@ -8676,8 +8704,11 @@ impl Subscriber {
 	/// resolved: the first group a publisher tells its peer it serves. A feed starting
 	/// below the floor serves the floor's group too, and a fill this cursor waits on starts it
 	/// lower still. `None` when the source declares none and no fill is out.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
+	///
+	/// Where a reader that waits on each group in sequence starts when [`Self::floor`] names
+	/// none: groups arrive newest first, so the first to arrive is not the oldest served.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		let cursor = match &mut self.inner {
 			Inner::Plain(cursor) => cursor,
 			Inner::Resume(resume, _) => return resume.poll_start(waiter),
@@ -9491,6 +9522,15 @@ impl Request {
 	pub fn reject(self, err: Error) {
 		if let Ok(mut state) = self.state.write() {
 			state.abort = Some(err);
+		}
+	}
+
+	/// Reject the request as an upstream refusal that asked to be tried again after `retry`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn refuse(self, err: Error, retry: Duration) {
+		if let Ok(mut state) = self.state.write() {
+			state.abort = Some(err);
+			state.retry = Some(retry);
 		}
 	}
 

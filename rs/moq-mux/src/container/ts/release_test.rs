@@ -182,8 +182,10 @@ fn spawn_release(republished: &Republished) -> tokio::task::JoinHandle<(Vec<(Ins
 	let consumer = republished.consumer.clone();
 	tokio::spawn(async move {
 		let source = crate::source::announced(&consumer).await;
-		let release = Release::new(source, CatalogFormat::Hang).await.unwrap();
-		drain(release.with_delay(Duration::from_millis(500))).await
+		let release = Release::new(source, CatalogFormat::Hang, Duration::from_millis(500))
+			.await
+			.unwrap();
+		drain(release).await
 	})
 }
 
@@ -204,10 +206,9 @@ async fn a_capture_is_released_byte_identical_on_its_own_pcr() {
 	for data in [KYRION, KYRION_H264] {
 		let imported = import(data).await;
 		let source = crate::source::announced(&imported.consumer).await;
-		let release = Release::new(source, CatalogFormat::Hang)
+		let release = Release::new(source, CatalogFormat::Hang, RECORDING)
 			.await
 			.unwrap()
-			.with_delay(RECORDING)
 			.with_replay();
 		let (released, release) = drain(release).await;
 
@@ -250,9 +251,11 @@ async fn a_flagged_jump_crosses_without_holding_the_output() {
 	}
 	let republished = republish(objects.clone(), move |i, _| arrivals[i]);
 	let source = crate::source::announced(&republished.consumer).await;
-	let release = Release::new(source, CatalogFormat::Hang).await.unwrap();
+	let release = Release::new(source, CatalogFormat::Hang, Duration::from_millis(500))
+		.await
+		.unwrap();
 	let delay = Duration::from_millis(500);
-	let (released, release) = drain(release.with_delay(delay)).await;
+	let (released, release) = drain(release).await;
 
 	let out = bytes(released.iter().map(|(_, frame)| &frame.payload));
 	assert!(
@@ -467,7 +470,7 @@ fn pids(data: &[u8]) -> std::collections::BTreeSet<u16> {
 async fn an_msf_catalog_is_refused() {
 	let imported = import(KYRION).await;
 	let source = crate::source::announced(&imported.consumer).await;
-	let Err(err) = Release::new(source, CatalogFormat::Msf).await else {
+	let Err(err) = Release::new(source, CatalogFormat::Msf, std::time::Duration::ZERO).await else {
 		panic!("a release reading the MSF catalog must fail");
 	};
 	assert!(err.to_string().contains("MSF"), "{err}");
@@ -488,10 +491,7 @@ async fn a_backlog_stays_in_the_source_until_due() {
 			Duration::from_micros(object.micros - origin)
 		});
 		let source = crate::source::announced(&republished.consumer).await;
-		let mut release = Release::new(source, CatalogFormat::Hang)
-			.await
-			.unwrap()
-			.with_delay(delay);
+		let mut release = Release::new(source, CatalogFormat::Hang, delay).await.unwrap();
 		let first = release.next().await.unwrap().unwrap();
 		let first = objects
 			.iter()

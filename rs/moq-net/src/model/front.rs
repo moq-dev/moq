@@ -82,6 +82,8 @@ pub(super) enum Event {
 		source: u64,
 		closing: bool,
 		result: Result<track::Info, Error>,
+		/// The Retry Interval an upstream refusal asked for, kept with the refusal.
+		retry: Option<Duration>,
 	},
 	/// The spliced copy of a track ended: completed, or died. `delivered` is
 	/// whether it produced anything since it was spliced in; a copy that died
@@ -141,8 +143,13 @@ pub(super) enum Action {
 	Forget { track: Arc<str> },
 	/// The logical track completed.
 	Finish { track: Arc<str> },
-	/// The logical track failed for good.
-	Abort { track: Arc<str>, err: Error },
+	/// The logical track failed for good, with the Retry Interval of the upstream refusal it
+	/// carries, if any.
+	Abort {
+		track: Arc<str>,
+		err: Error,
+		retry: Option<Duration>,
+	},
 	/// Arm (or clear) the deadline the front wants to be woken at.
 	Arm { at: Option<Instant> },
 	/// Nothing needs the front: close its broadcast unless a consumer took hold of it
@@ -175,8 +182,9 @@ struct Track {
 	/// Sources that refused this track, by id. A refusal is authoritative for
 	/// that source; a source that reattaches has a new id and is asked afresh.
 	refused: HashSet<u64>,
-	/// The most recent refusal, reported when every source has refused.
-	refusal: Option<Error>,
+	/// The most recent refusal, reported when every source has refused, with the Retry
+	/// Interval an upstream refusal asked for.
+	refusal: Option<(Error, Option<Duration>)>,
 	/// Whether anyone reads the track: a copy is only spliced in for a reader.
 	wanted: bool,
 	/// A detached source whose copy still feeds the track until the serving source's
@@ -310,7 +318,8 @@ impl Front {
 				source,
 				closing,
 				result,
-			} => self.track_info(track, source, closing, result, &mut actions),
+				retry,
+			} => self.track_info(track, source, closing, result.map_err(|err| (err, retry)), &mut actions),
 			Event::TrackEnded {
 				track,
 				source,
@@ -489,7 +498,7 @@ impl Front {
 		name: Arc<str>,
 		source: u64,
 		closing: bool,
-		result: Result<track::Info, Error>,
+		result: Result<track::Info, (Error, Option<Duration>)>,
 		actions: &mut Vec<Action>,
 	) {
 		let Some(track) = self.tracks.get_mut(&name) else {
@@ -502,14 +511,14 @@ impl Front {
 			// A copy of the same instance claims identical content, so any difference
 			// in its metadata is refused rather than reinterpreted.
 			Ok(info) => match self.info.get(&name) {
-				Some(expected) if *expected != info => Err(Error::Unsupported),
+				Some(expected) if *expected != info => Err((Error::Unsupported, None)),
 				Some(_) => Ok(()),
 				None => {
 					self.info.insert(name.clone(), info);
 					Ok(())
 				}
 			},
-			Err(err) => Err(err),
+			Err(refusal) => Err(refusal),
 		};
 		match verdict {
 			Ok(()) => {
@@ -520,7 +529,7 @@ impl Front {
 					source,
 				});
 			}
-			Err(err) => self.refuse(name, source, closing, err, actions),
+			Err(refusal) => self.refuse(name, source, closing, refusal, actions),
 		}
 	}
 
@@ -576,16 +585,27 @@ impl Front {
 			Err(err) if delivered => {
 				track.state = TrackState::Idle;
 				track.ended = true;
-				actions.push(Action::Abort { track: name, err });
+				actions.push(Action::Abort {
+					track: name,
+					err,
+					retry: None,
+				});
 			}
 			// Died before producing anything: a refusal.
-			Err(err) => self.refuse(name, source, closing, err, actions),
+			Err(err) => self.refuse(name, source, closing, (err, None), actions),
 		}
 	}
 
 	/// Record that `source` will not serve `name`, then either ask another
 	/// source or, when the serving source itself refused, abort the track.
-	fn refuse(&mut self, name: Arc<str>, source: u64, closing: bool, err: Error, actions: &mut Vec<Action>) {
+	fn refuse(
+		&mut self,
+		name: Arc<str>,
+		source: u64,
+		closing: bool,
+		refusal: (Error, Option<Duration>),
+		actions: &mut Vec<Action>,
+	) {
 		let track = self.tracks.get_mut(&name).expect("refusing a known track");
 		track.state = TrackState::Idle;
 		// A closing source's answer is not a verdict: it is on its way out and
@@ -594,7 +614,7 @@ impl Front {
 			return;
 		}
 		track.refused.insert(source);
-		track.refusal = Some(err);
+		track.refusal = Some(refusal);
 		// A source being replaced still serves it: keep reading that copy, and the
 		// refusal stands once it runs out.
 		if let Some(draining) = track.draining {
@@ -616,9 +636,13 @@ impl Front {
 			return;
 		}
 		if track.refused.contains(&source) {
-			let err = track.refusal.clone().unwrap_or(Error::NotFound);
+			let (err, retry) = track.refusal.clone().unwrap_or((Error::NotFound, None));
 			track.ended = true;
-			actions.push(Action::Abort { track: name, err });
+			actions.push(Action::Abort {
+				track: name,
+				err,
+				retry,
+			});
 			return;
 		}
 		if self.serving_closing {
@@ -808,6 +832,7 @@ mod tests {
 				source,
 				closing: false,
 				result: Ok(info()),
+				retry: None,
 			}),
 			&[Action::Splice {
 				track: name("video"),
@@ -892,6 +917,7 @@ mod tests {
 				source: 100,
 				closing: true,
 				result: Ok(info()),
+				retry: None,
 			}),
 			&[Action::Splice {
 				track: name("video"),
@@ -1070,10 +1096,12 @@ mod tests {
 				source: 100,
 				closing: false,
 				result: Err(Error::NotFound),
+				retry: None,
 			}),
 			&[Action::Abort {
 				track: name("audio"),
 				err: Error::NotFound,
+				retry: None,
 			}],
 		);
 		assert_eq!(front.tracks[&name("video")].state, TrackState::Spliced { source: 100 });
@@ -1093,6 +1121,7 @@ mod tests {
 				source: 100,
 				closing: true,
 				result: Err(Error::NotFound),
+				retry: None,
 			}),
 			&[],
 		);
@@ -1156,6 +1185,7 @@ mod tests {
 					&[Action::Abort {
 						track: name("video"),
 						err,
+						retry: None,
 					}],
 				);
 				assert_actions(front.step(Event::Wanted { track: name("video") }), &[]);
@@ -1187,6 +1217,7 @@ mod tests {
 				&[Action::Abort {
 					track: name("video"),
 					err: Error::App(7),
+					retry: None,
 				}],
 			);
 			// A returning reader is not re-spliced either.
@@ -1208,6 +1239,7 @@ mod tests {
 			&[Action::Abort {
 				track: name("video"),
 				err: Error::Dropped,
+				retry: None,
 			}],
 		);
 	}
@@ -1261,6 +1293,7 @@ mod tests {
 					source: 200,
 					closing: false,
 					result: Ok(other),
+					retry: None,
 				}),
 				&[],
 			);
@@ -1276,6 +1309,7 @@ mod tests {
 				&[Action::Abort {
 					track: name("video"),
 					err: Error::Unsupported,
+					retry: None,
 				}],
 			);
 		}
@@ -1674,6 +1708,7 @@ mod tests {
 						source: 100,
 						closing: false,
 						result: Ok(info()),
+						retry: None,
 					},
 				}
 			};
@@ -1734,12 +1769,14 @@ mod tests {
 				source: 100,
 				closing: false,
 				result: Ok(info()),
+				retry: None,
 			},
 			Event::TrackInfo {
 				track: name("v"),
 				source: 100,
 				closing: false,
 				result: Err(Error::NotFound),
+				retry: None,
 			},
 			Event::TrackEnded {
 				track: name("v"),
@@ -1856,6 +1893,7 @@ mod tests {
 			source: 200,
 			closing: false,
 			result: Err(Error::NotFound),
+			retry: None,
 		});
 		front.step(Event::Selected {
 			best: Some(remote(3)),
@@ -1898,6 +1936,7 @@ mod tests {
 			source: 200,
 			closing: false,
 			result: Err(Error::NotFound),
+			retry: None,
 		});
 		let t0 = Instant::now();
 		assert_actions(
@@ -1924,6 +1963,7 @@ mod tests {
 			source: 300,
 			closing: false,
 			result: Err(Error::NotFound),
+			retry: None,
 		});
 		assert_ne!(
 			front.tracks[&name("video")].state,
