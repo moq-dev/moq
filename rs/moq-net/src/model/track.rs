@@ -312,6 +312,9 @@ enum Feed {
 		/// The newest group cached when the track went idle: what the route's answer is
 		/// judged against, whatever lands before it.
 		newest: Option<u64>,
+		/// The newest object the ended feed left in the cache. Snapshotted, since the next
+		/// feed's groups can land before its answer is judged.
+		held: Option<Position>,
 	},
 	/// The route answered that its feed reaches group `from`, which the cache cannot show
 	/// yet: until it can, the newest group cached would read as the live edge.
@@ -2838,7 +2841,6 @@ impl TrackState {
 			.rev()
 			.find(|(_, slot)| slot.is_shown())
 			.map(|(sequence, _)| *sequence);
-		self.feed = Feed::Idle { newest };
 		// An open group stops because this copy dropped its feed, not because the publisher
 		// gave it up: its stream resets as a cut would, so it leaves the cache first, and the
 		// next feed sends it again.
@@ -2851,6 +2853,19 @@ impl TrackState {
 		for sequence in open {
 			self.displace(sequence);
 		}
+		// Largest names an object, so an empty group holds nothing to judge.
+		let held = self
+			.lookup
+			.iter()
+			.rev()
+			.filter(|(_, slot)| slot.is_shown())
+			.find_map(|(&group, slot)| {
+				Some(Position {
+					group,
+					frame: slot.group.last_object()?,
+				})
+			});
+		self.feed = Feed::Idle { newest, held };
 	}
 
 	/// The route answered with its largest position (`None` for nothing yet): the cache
@@ -2889,28 +2904,13 @@ impl TrackState {
 		self.answered(Some(first), start, true);
 	}
 
-	/// An idle copy's route answered behind what the copy cached from it: no Largest while
-	/// the copy holds frames, or a Largest before the newest frame it holds. Largest names
-	/// an object, so an empty group says nothing. The cache is likely another track, so it
-	/// is dropped rather than served while the copy fails.
+	/// An idle copy's route answered behind what its ended feed left in the cache: no
+	/// Largest while the copy held an object, or a Largest before the newest one it held.
+	/// The cache is likely another track, so it is dropped rather than served while the
+	/// copy fails.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn judge(&mut self, largest: Option<Position>) -> Result<()> {
-		let Feed::Idle { newest: Some(newest) } = self.feed else {
-			return Ok(());
-		};
-		let held = self
-			.lookup
-			.range(..=newest)
-			.rev()
-			.filter(|(_, slot)| slot.is_shown())
-			.find_map(|(&group, slot)| {
-				let frames = slot.group.frame_count() as u64;
-				Some(Position {
-					group,
-					frame: frames.checked_sub(1)?,
-				})
-			});
-		let Some(held) = held else {
+		let Feed::Idle { held: Some(held), .. } = self.feed else {
 			return Ok(());
 		};
 		if largest.is_some_and(|largest| largest >= held) {
@@ -2928,7 +2928,7 @@ impl TrackState {
 	/// survived: the cancel that idled the copy resets the group in flight.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn idle_cached(&self) -> Option<u64> {
-		let Feed::Idle { newest } = self.feed else {
+		let Feed::Idle { newest, .. } = self.feed else {
 			return None;
 		};
 		self.lookup
@@ -3926,7 +3926,7 @@ impl Producer {
 	pub(crate) fn idle_newest(&self) -> Option<u64> {
 		let state = self.state.read();
 		match state.feed {
-			Feed::Idle { newest } => newest,
+			Feed::Idle { newest, .. } => newest,
 			_ => None,
 		}
 	}
@@ -10384,6 +10384,61 @@ mod test {
 			framed(&producer, 3, 0).finish().unwrap();
 			producer.set_idle();
 			assert_eq!(producer.set_live(largest, None).is_ok(), ok, "{largest:?}");
+		}
+	}
+
+	/// The answer is judged against what the ended feed left, not the next feed's groups
+	/// that land before it: a group in flight at idle is sent again, past the answer.
+	#[test]
+	fn an_idle_copy_judges_its_answer_against_the_ended_feed() {
+		let mut producer = track_producer("test", None);
+		framed(&producer, 2, 1).finish().unwrap();
+		let _open = framed(&producer, 3, 1);
+		producer.set_idle();
+
+		let resent = framed(&producer, 3, 3);
+		producer.set_live(Some(Position { group: 3, frame: 0 }), None).unwrap();
+		drop(resent);
+	}
+
+	/// Largest names a moq-transport object by its ID, which a sparse group's frame count
+	/// does not give.
+	#[test]
+	fn an_idle_copy_judges_a_sparse_group_by_object_id() {
+		let wire = group::Wire {
+			sparse: true,
+			first_object: true,
+			first_id: 0,
+			extensions: false,
+			has_end: false,
+			fetchable: true,
+			last: None,
+		};
+		for (object, ok) in [(50, false), (100, true)] {
+			let mut producer = track_producer("test", None);
+			let mut group = producer.create_group(group::Info { sequence: 2 }).unwrap();
+			group.set_wire(wire.clone()).unwrap();
+			for id in [0, 100] {
+				let mut frame = group
+					.create_object(frame::Header {
+						info: frame::Info {
+							size: 1,
+							timestamp: None,
+						},
+						fields: Some(Arc::new(super::super::object::Fields {
+							id,
+							properties: Default::default(),
+						})),
+						inflated: None,
+					})
+					.unwrap();
+				frame.write(&b"x"[..]).unwrap();
+				group = frame.finish().unwrap();
+			}
+			group.finish().unwrap();
+			producer.set_idle();
+			let answered = producer.set_live(Some(Position { group: 2, frame: object }), None);
+			assert_eq!(answered.is_ok(), ok, "object {object}");
 		}
 	}
 
