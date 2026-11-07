@@ -816,6 +816,15 @@ pub mod poll {
 		/// resolves once the FIN is sent.
 		fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>>;
 
+		/// Whether the peer has acknowledged every byte written so far, or `None` when the
+		/// transport cannot tell, as a browser's WebTransport cannot.
+		///
+		/// A transport answers for all of its streams or for none. A stream that was reset, or
+		/// that the peer stopped, is never acknowledged.
+		fn acknowledged(&self) -> Option<bool> {
+			None
+		}
+
 		/// Write some of the buffer, returning how many bytes were accepted.
 		fn write<'a>(&'a mut self, buf: &'a [u8]) -> Write<'a, Self> {
 			Write {
