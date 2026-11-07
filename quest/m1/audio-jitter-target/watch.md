@@ -36,18 +36,17 @@ dry three times in its 175 s window; with it, twice, which the player counts
 as 1.4 underruns a minute, the quantum each ran dry in and its re-stall. Every
 replay row is budgeted at what it measures. The one difference from NetEq left, deciding on the ring's depth
 rather than NetEq's playout delay, is recorded in the shared spec, and the PR
-lists it as a follow-up. What remains is proof outside the replay:
+lists it as a follow-up. What remains is the nightly browser ceilings,
+re-measured by `budgets.json`'s rule from seven scheduled nightlies with the
+stretch. The lag heuristic behind `skip_aheads` and `discarded_ms` reads a
+sustained accelerate as a skip, so those can rise on rows whose target moves;
+`player_skips` counts the ring's real re-anchors beside them.
 
-- The 2026-11-03 rows re-run on real hardware, Chrome's at +40 ms and Safari's
-  on the direct path, under Waiting.
-- A listening check of that run. The native player's 2026-11-05 listening in
-  [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md) still
-  holds: the band only changes when it stretches, not how.
-- The nightly browser ceilings re-measured by `budgets.json`'s rule from seven
-  scheduled nightlies with the stretch. The lag heuristic behind
-  `skip_aheads` and `discarded_ms` reads a sustained accelerate as a skip, so
-  those can rise on rows whose target moves; `player_skips` counts the ring's
-  real re-anchors beside them.
+Decided 2026-11-07 (maintainer, /quest-unblock): listening run on the MacBook
+Air sounds clean. It covered the live Chrome +40 ms RTT and Safari direct
+rows, each with 20 and 100 ms groups. No Underruns or Skips numbers were
+reported. The native player's 2026-11-05 listening in
+[Native stretch](/quest/m1/audio-jitter-target/native-stretch.md) still holds.
 
 Decided 2026-11-06 (maintainer, /quest-complete on
 [moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058)): the Goal was
@@ -121,29 +120,6 @@ replay row: 7.9 player underruns a minute on `main`, 1.4 with the stretch.
 
 ## Waiting
 
-- Maintainer: re-run the 2026-11-03 rows on the MacBook Air and listen to
-  them, since an agent has no microphone, speaker, or Safari. Automation
-  considered: rendering speech through the ring offline, but the repository's
-  only speech clips are 0.4 s, and the live run exercises the same stretch on
-  a real voice. On a checkout of `main` once
-  [moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) merges, or of
-  its branch before:
-  1. `just web serve https://cdn.moq.dev/anon`, and in its publish tab
-     publish the built-in microphone with 20 ms groups, the default.
-  2. For the +40 ms RTT, `cargo run --release -p moq-shaper -- --listen
-     127.0.0.1:443 --target "$(dig +short cdn.moq.dev | head -1):443"
-     --delay 20ms`, then open the watch page in a second Chrome profile:
-     `open -na "Google Chrome" --args --user-data-dir=/tmp/rtt40
-     --host-resolver-rules="MAP cdn.moq.dev 127.0.0.1"`.
-  3. Play the broadcast at the Real-time delay and talk for three minutes.
-     Note the stats panel's audio Underruns and Skips at 30 s and at the end,
-     and listen for warble or pitch wobble.
-  4. Repeat with 100 ms groups, then both group sizes in Safari on the direct
-     path, with no shaper.
-
-  Done when the stretch has no audible glitch in steady state and every row
-  reads zero Skips between 30 s and the end. Record the table of Underruns and
-  Skips per row here, beside the baseline.
 - moq-dev/moq: seven scheduled Nightly runs on `main` with the stretch. Then
   re-measure the chromium ceilings in `test/audio-quality/budgets.json` from
   their `audio-quality-run` artifacts by the note's rule, adding
