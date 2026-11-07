@@ -75,3 +75,7 @@ Rejected in planning:
   language's reserved names.
 - A follow policy enum folding `linger` and `stitch`: one name per meaning
   (the export wait is `--follow`) fixes the confusion more cheaply.
+
+## Required
+
+- [Encoders take a join](/quest/m1/api-audit/join.md) - video's `keyframeInterval`/`Gop`, audio's `groupDuration`, and the C hints become one `join` time in JS, Rust, FFI, and C

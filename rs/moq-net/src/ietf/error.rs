@@ -253,9 +253,10 @@ pub(crate) mod request {
 	/// A refusal asking again may pass invites the backoff a refused token starts from. 0 asks the
 	/// peer never to retry a verdict, which would repeat. The code must leave the request open
 	/// too: a failed session can carry a verdict (UNAUTHORIZED, NOT_SUPPORTED), and UNINTERESTED
-	/// tells an offer to stop.
+	/// tells an offer to stop. EXCESSIVE_LOAD may pass whatever the error, once the load drops.
 	pub(crate) fn retry_interval(err: &Error, code: u64) -> u64 {
-		match err.retryable() && matches!(code, INTERNAL_ERROR | DOES_NOT_EXIST | GOING_AWAY) {
+		match code == EXCESSIVE_LOAD || err.retryable() && matches!(code, INTERNAL_ERROR | DOES_NOT_EXIST | GOING_AWAY)
+		{
 			true => crate::auth::RETRY_INITIAL.as_millis() as u64,
 			false => 0,
 		}
