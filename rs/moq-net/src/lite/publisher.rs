@@ -578,11 +578,11 @@ impl AuthServe {
 					// needs someone to verify it. Tell the presenter explicitly.
 					None if !msg.token.is_empty() => {
 						let mut state = issue.lock();
-						state.outbox.push_back(crate::auth::Reply::Refuse {
+						state.queue(crate::auth::Reply::Refuse {
 							code: crate::SessionError::Unsupported,
 							reason: Error::Unsupported.to_string(),
 						});
-						state.done = true;
+						state.finish();
 						self.unsupported = true;
 					}
 					None => {
@@ -626,24 +626,22 @@ impl AuthServe {
 			if let Some(default) = &mut self.default
 				&& let Poll::Ready(grant) = default.poll(waiter)
 			{
-				issue.lock().outbox.push_back(crate::auth::Reply::Grant(grant));
+				issue.lock().queue(crate::auth::Reply::Grant(grant));
 			}
 
-			let mut state = match issue.poll(waiter, |issue| match issue.outbox.is_empty() && !issue.done {
+			let mut state = match issue.poll(waiter, |issue| match issue.idle() {
 				true => Poll::Pending,
 				false => Poll::Ready(()),
 			}) {
 				Poll::Ready(state) => state,
 				Poll::Pending => return Poll::Pending,
 			};
-			match state.outbox.pop_front() {
+			match state.next() {
 				Some(reply) => {
 					drop(state);
 					if !Self::write(&self.shared, stream, reply)? {
 						self.unsupported = true;
-						let mut state = issue.lock();
-						state.outbox.clear();
-						state.done = true;
+						issue.lock().refused();
 					}
 				}
 				// The app is done with the grant, or refused the token: close our side.

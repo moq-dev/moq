@@ -401,8 +401,14 @@ impl State {
 			if self.configured(id) {
 				continue;
 			}
-			// A refused token has nothing left to keep the grant wide.
-			match self.tokens.get(&id).is_some_and(|entry| entry.ended.is_none()) {
+			// Only a granted token keeps the grant wide; one refused or never answered, such
+			// as one retrying while its backend fails, is withdrawn at once so repeated sets
+			// never pile up retrying streams.
+			let granted = self
+				.tokens
+				.get(&id)
+				.is_some_and(|entry| entry.ended.is_none() && matches!(entry.answered, Some(Ok(Answer::Granted))));
+			match granted {
 				true => self.configured.as_mut().expect("checked configured").retiring.push(id),
 				false => self.withdraw(id),
 			}
@@ -644,6 +650,29 @@ mod tests {
 		session.link.granted(id(&set, "new"), Grant::all());
 		ok(&set);
 		assert!(!presented(&set, old), "the replaced token was never withdrawn");
+	}
+
+	/// A replacement replaced again before its answer added nothing to the grant, so it is
+	/// withdrawn at once: sets while a backend keeps failing never pile up retrying tokens.
+	#[test]
+	fn an_unanswered_replacement_is_withdrawn_when_replaced() {
+		let set = Tokens::new(tokens(&["connection", "old"]));
+		let session = dial(&set, true, false);
+		session.grant_credential();
+		let old = id(&set, "old");
+		session.link.granted(old, Grant::all());
+
+		set.set(tokens(&["connection", "first"]));
+		let first = id(&set, "first");
+		session.refuse(first, SessionError::Internal);
+		set.set(tokens(&["connection", "second"]));
+		assert!(!presented(&set, first), "the unanswered replacement is still presented");
+		assert!(presented(&set, old), "the granted token was withdrawn before an answer");
+		assert_eq!(set.handle.state.read().configured.as_ref().unwrap().retiring, [old]);
+
+		session.link.granted(id(&set, "second"), Grant::all());
+		ok(&set);
+		assert!(!presented(&set, old));
 	}
 
 	/// A replacement is authoritative: its refusal is the answer, and still withdraws what it

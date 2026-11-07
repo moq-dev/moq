@@ -58,7 +58,6 @@ moves what remains of them once their claims merge.
 - [A cancelled dispatch lane stops its phase promptly](/quest/m1/dispatch-cancel-race.md) - a TERM landing just before a lane forks its phase's command still stops that command, instead of waiting out the phase
 - [Lifecycles are explicit state](/quest/m1/explicit-state/README.md) - every lifecycle the 2026-11-07 audit found implicit is one enum or union, fixing the bugs in the 11 lifecycles it redesigns, with review and agent rules against new ones
 - [Copies of one group identity must agree beyond their bytes](/quest/m1/copy-identity.md) - copies that differ in timestamp, object fields, or frame count fail as a protocol violation
-- [Session auth grants and replies stay consistent and bounded](/quest/m1/auth-stream-bounds.md) - an AUTH_ERROR revokes its grant, queued grants and retiring tokens are bounded, and dropping queued requests cannot deadlock
 - [Relay settings and admin input that cannot work are refused](/quest/m1/relay-config-checks.md) - clustered stats without a node name, pin without workers, repeated filter keys, and unknown transports fail loud
 - [Track drop runs are forgotten below the floor](/quest/m1/drop-runs-prune.md) - a track's dropped-group record stays proportional to its window in Rust and JS
 
