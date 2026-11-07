@@ -38,3 +38,5 @@ ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_expo
 
 # Quarantined flakes, re-enabled by the quest that fixes them.
 ignore moq-gst::sink::imp::tests::a_stale_completion_cannot_end_the_next_publication /quest/m0/test-flakes-2/gst-stale-completion.md
+# Need another implementation to speak the route wire; the quest ports it.
+ignore moq-net::test_interop::lite_tracks_interop /quest/m2/cluster-routing/routes/js.md

@@ -18,8 +18,8 @@ test's clock):
   assertions.** Not chosen: only the first two; also the ~530 tests that
   only wait for progress under a timeout, which flake little and would cost
   a much larger migration.
-- ✅ m1, while the [guards](/quest/m0/clock-guard/README.md) that stop new
-  ones are m0.
+- ✅ m1, while the guards that stop new ones (the runtime guards and the
+  `REVIEW.md` rule) landed in m0.
 
 Rules every child keeps:
 
