@@ -50,8 +50,11 @@ Public API: none. Wire: none.
 
 ## Waiting
 
-- moq-dev/moq: after the capture fix lands, verify a green scheduled macOS job
-  on main and inspect the websocket test's results across a week of scheduled
-  runs. Recommendation: land the reviewed capture fix, then retain this quest
-  until the scheduled evidence is available. A branch dispatch can check the
+- moq-dev/moq: inspect the websocket test's results across a week of
+  scheduled macOS runs on main. The capture fix,
+  [moq-dev/moq#7976](https://github.com/moq-dev/moq/pull/7976), merged
+  2026-11-06; the first scheduled run after it,
+  [42236107954](https://github.com/moq-dev/moq/actions/runs/42236107954/job/127954206481),
+  is green, with `broadcast_websocket_uses_newest_version` passing in 0.031 s
+  (1 of 7 runs). A branch dispatch can check the
   fix but cannot establish the required scheduled-main history.
