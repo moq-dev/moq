@@ -62,8 +62,13 @@ Decided 2026-11-07 (maintainer, /quest-plan of the follow-ups from the
 /quest-complete run, after [moq-dev/moq#8123](https://github.com/moq-dev/moq/pull/8123)):
 a grant below the Opus floor holds the encoder at the floor and never
 disables the rendition. This replaces the 2026-10-04 disable-and-re-enable
-rule: players now deselect a disabled rendition, so it would lose its demand
-and could never earn the grant that re-enables it.
+rule. Recovery alone would work: an unwatched reservation still reads the slice
+it would get back (`an_idle_track_claims_nothing` in
+`rs/moq-net/src/model/bandwidth.rs`). The cost is the catalog flip. Players
+now deselect a disabled rendition, so each flip makes every listener drop the
+track and subscribe again, losing what it was playing. That is the
+`enabled`-toggle cost [moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942)
+removed from push-to-talk.
 
 - ✅ Hold the floor, no disable
 - Keep the disable; the Producer keeps reserving at the floor while disabled
