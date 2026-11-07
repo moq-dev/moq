@@ -9,7 +9,7 @@
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -8818,7 +8818,7 @@
+@@ -8817,7 +8817,7 @@ impl Announced {
  		};
  		self.held.pop();
  		if let Held::Attached(entry) = held {
@@ -18,7 +18,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  		}
  	}
  
-@@ -8902,7 +8902,7 @@
+@@ -8901,7 +8901,7 @@ fn mint_sources<K: Clone + Send + Sync + 'static>(subscriber: &Subscriber, entry
  		let validity = if subscriber.version.has_instance() {
  			Default::default()
  		} else {
@@ -27,7 +27,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  		};
  		let source = subscriber.origin.create_source(path.clone(), validity);
  		// The handler exists before the requester sees the source, so a track it
-@@ -8930,7 +8930,8 @@
+@@ -8929,7 +8929,8 @@ struct AnnouncedRoute<K = Path> {
  	/// without recomputing the chain.
  	route: crate::origin::RouteInfo,
  	/// Dropping it retracts the route and rejects its queued requests.
@@ -37,7 +37,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  	/// Closes as the route goes, which closes every source it minted.
  	live: kio::Producer<()>,
  	/// Whether the GOAWAY drain already re-priced this route.
-@@ -8950,7 +8951,7 @@
+@@ -8949,7 +8950,7 @@ impl<K: Clone + Send + Sync + 'static> AnnouncedRoute<K> {
  	) -> Self {
  		Self {
  			route,
@@ -49,14 +49,21 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
 diff --git a/rs/moq-net/src/lite/subscriber/routed.rs b/rs/moq-net/src/lite/subscriber/routed.rs
 --- a/rs/moq-net/src/lite/subscriber/routed.rs
 +++ b/rs/moq-net/src/lite/subscriber/routed.rs
-@@ -470,8 +470,8 @@
- 			.map(|(taken, entry)| match *taken == key.1 {
- 				// In place, its sources serve what the new one continues: they live on with
- 				// it rather than closing with the old route.
--				true => (&entry.route.dynamic, Some(std::mem::take(&mut entry.route.live))),
--				false => (&entry.route.dynamic, None),
-+				true => (&*entry.route.dynamic, Some(std::mem::take(&mut entry.route.live))),
-+				false => (&*entry.route.dynamic, None),
- 			});
- 		// A new instance or epoch replaces the old route, attached before it goes.
- 		tracing::debug!(route = %subscriber.log_path(&path), node = id, "announce");
+@@ -354,7 +354,7 @@ impl Routed {
+ 		self.previous = previous;
+ 		self.outputs(subscriber);
+ 		for (_, served) in std::mem::take(&mut self.previous) {
+-			served.route.dynamic.withdrawn();
++			std::mem::ManuallyDrop::into_inner(served.route.dynamic).withdrawn();
+ 		}
+ 		Ok(())
+ 	}
+@@ -398,7 +398,7 @@ impl Routed {
+ 			} => self.serve(subscriber, id, named, claim, served),
+ 			node::Output::Unserve { id, claim } => {
+ 				if let Some(served) = self.served.remove(&(id, claim)) {
+-					served.route.dynamic.withdrawn();
++					std::mem::ManuallyDrop::into_inner(served.route.dynamic).withdrawn();
+ 				}
+ 			}
+ 			// The ROUTE_END echo goes out as the peer's ROUTE_END is read, and a stream
