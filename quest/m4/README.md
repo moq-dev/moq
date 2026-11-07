@@ -23,6 +23,7 @@ deleted.
 - [Weekly mutation testing on critical modules](/quest/m4/mutants.md) - cargo-mutants runs weekly on moq-auth and moq-net's permission, resume, and expiry code
 - [P2P](/quest/m4/p2p/README.md) - application-selected peer sessions use shared priorities, routing, and same-epoch handover
 - [moq-auth drops the unused peer grant API](/quest/m4/auth-drop-peer-grant.md) - P2P trusts its peers, so `PeerGrant` and its `KeySet` methods go
+- [Challenge proof for certificate credentials](/quest/m4/cert-challenge.md) - a relay can require a signed nonce, so a certificate credential replayed within its time window admits nothing
 - [Benchmark sources](/quest/m4/bench-sources.md) - every measuring nightly benchmark feeds the regression table, and none is a smoke run
 - [HLS and DASH browser playback](/quest/m4/hls-player-test.md) - hls.js and dash.js play, reload, switch, and survive reconfiguration nightly
 - [Cache fair share](/quest/m4/cache-fairness.md) - one tenant cannot crowd another out of the relay's shared group cache
