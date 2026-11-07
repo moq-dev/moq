@@ -1004,6 +1004,7 @@ impl Serve {
 pub struct Mesh {
 	/// The auth server's listener, which serves the owner's API alongside `POST /`:
 	/// `http://` for a TCP `--listen`, or `unix:///path` for a unix socket.
+	/// With `--listen-secret`, put the secret in the URL as its password: `http://owner:SECRET@127.0.0.1:4440`.
 	#[usage(long, default = "http://127.0.0.1:4440")]
 	url: url::Url,
 
@@ -1072,10 +1073,11 @@ impl Mesh {
 			MeshCommand::Devices => client.get(url("/mesh/devices", &[])),
 			MeshCommand::Revoke { endpoint } => client.delete(url("/mesh/devices", &[endpoint])),
 		};
-		let response = request
-			.send()
-			.await
-			.with_context(|| format!("failed to reach {}", self.url))?;
+		let response = request.send().await.with_context(|| {
+			let mut shown = self.url.clone();
+			let _ = shown.set_password(None);
+			format!("failed to reach {shown}")
+		})?;
 		let status = response.status();
 		let body = response.text().await.context("failed to read the reply")?;
 		if status == reqwest::StatusCode::NOT_FOUND {

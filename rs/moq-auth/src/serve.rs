@@ -768,9 +768,19 @@ async fn guard(
 			let colon = decoded.iter().position(|&byte| byte == b':')?;
 			Some(decoded[colon + 1..].to_vec())
 		});
+	// Compare digests so the comparison does not end early on a length mismatch.
+	let digest = |bytes: &[u8]| rind::digest::digest(&rind::digest::SHA256, bytes);
 	match password {
-		Some(password) if rind::constant_time::verify(&password, secret.as_bytes()).is_ok() => next.run(request).await,
-		_ => StatusCode::UNAUTHORIZED.into_response(),
+		Some(password)
+			if rind::constant_time::verify(digest(&password).as_ref(), digest(secret.as_bytes()).as_ref()).is_ok() =>
+		{
+			next.run(request).await
+		}
+		_ => {
+			// A relay reads this 401 as a refusal, so its log alone cannot tell a wrong secret from a denied token.
+			tracing::debug!(path = %request.uri().path(), presented = password.is_some(), "listen secret mismatch");
+			StatusCode::UNAUTHORIZED.into_response()
+		}
 	}
 }
 

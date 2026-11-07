@@ -497,7 +497,8 @@ no state until a proof uses it, so unauthenticated requests cannot crowd out a
 device's; the proxy should still rate-limit each client. The owner's
 commands go to `--listen` (`moq auth mesh --url`, `unix:///path` for a
 socket), which every relay holding `--listen-secret` could reach, so `--mesh-url`
-refuses `--listen-public`. A hosted coordinator implements
+refuses `--listen-public`. With `--listen-secret` set, the owner presents it
+too, as the URL's password: `moq auth mesh --url http://owner:SECRET@127.0.0.1:4440`. A hosted coordinator implements
 the same JSON contract, documented in
 [`moq_auth::mesh`](https://docs.rs/moq-auth/latest/moq_auth/mesh/); it adds
 no token claims.

@@ -32,6 +32,6 @@ listen = "[::]:4443"
 public = "**"
 
 # To exercise JWT + public-pattern auth instead, drop `public` above, run
-# `moq auth serve --key root.jwk --public-subscribe 'anon/**' --public-subscribe 'demo/**' --public-publish 'anon/**' --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer`,
+# `moq auth serve --key root.jwk --allow-unbounded-tokens --public-subscribe 'anon/**' --public-subscribe 'demo/**' --public-publish 'anon/**' --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer`,
 # point the relay at it, and uncomment `listen.tls.root` above:
 # url = "http://127.0.0.1:4440/"
