@@ -319,7 +319,7 @@ impl TlsAcceptor {
 			let session = crate::server::within(deadline, handshake).await?;
 			let incoming = crate::server::Incoming::tcp(&session, Some(&self.tls), remote, local, deadline, active)
 				.with_alpn(alpn);
-			crate::server::accept_stream(&self.server, session, incoming).await
+			crate::server::Request::accept_qmux(&self.server, session, incoming).await
 		})
 		.await
 	}

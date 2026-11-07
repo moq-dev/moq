@@ -131,7 +131,7 @@ just rs bench-udp --sample-size 20 --measurement-time 2 --warm-up-time 1
 just rs bench-echo
 ```
 
-`benchmark_socket_queues` (an ignored integration test, run nightly) attributes
+`benchmark_socket_queues` (ignored integration tests, run nightly) attributes
 UDP loss between a sender and a steered worker group, on this ring and on
 moq-sock's `recvmmsg` under Tokio. It sweeps the kernel queue, the receive pool
 depth, workers, flows and GSO one at a time across worker stalls, CPU
@@ -141,6 +141,10 @@ at a socket (`sk_drops` via `SO_MEMINFO`), dropped on the path, or
 unattributed, beside `rx_enobufs`, peak queued bytes, delay and receive CPU.
 `rx_enobufs` is pool starvation, which leaves datagrams queued in the socket:
 with a 16-buffer pool it fired hundreds of times and dropped nothing.
+Each sweep axis runs as a separate test within nextest's hang budget. Each
+reserves the `io-uring` group's four slots so measurements do not compete.
+All cells still run three rounds by default (`SOCKET_QUEUES_RUNS` overrides
+the count), interleaving cells and receive paths within each axis.
 
 ```bash
 just rs test -p moq-uring --release -E 'test(benchmark_socket_queues)' --run-ignored only --success-output immediate
@@ -151,7 +155,8 @@ just rs test -p moq-uring --release -E 'test(benchmark_socket_queues)' --run-ign
 Locked memory is charged per user across processes, not per nextest run.
 Unit tests use 128 SQ entries and 512 CQ entries instead of the production
 256/2048 geometry. Integration tests still exercise production rings.
-The nextest group allows four ring tests per invocation.
+The nextest group allows four ring tests per invocation. Each socket-queue
+benchmark axis occupies all four slots, excluding other ring tests while measuring.
 
 Other programs draw on the same budget. libuv gives every event loop a
 256-entry ring of 28 KiB, and it creates these without checking
