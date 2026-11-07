@@ -1,0 +1,24 @@
+# [S] WHIP/WHEP builds carry no SCTP
+
+## Goal
+
+The vendored `sctp_proto` and str0m's SCTP glue compile only with
+moq-webrtc's data-channel feature, so a WHIP/WHEP-only build has no SCTP
+code in its tree.
+
+## Plan
+
+Planned 2026-11-07 (maintainer, /quest-complete), a follow-up of
+[moq-dev/moq#8163](https://github.com/moq-dev/moq/pull/8163), which vendors
+the stack but still compiles SCTP into every build. The epic's settled
+decision ("SCTP stays ... but compiles only with the data-channel feature")
+gets this owner. Gate the modules and the str0m paths that reach them,
+and add a check, in the feature matrix `just rs features` runs, that a
+build without the data-channel feature neither compiles nor links
+`sctp_proto`.
+
+Public API: none. Wire: none.
+
+## Required
+
+- [Vendor and trim the stack](/quest/m1/webrtc-vendor.md) - vendors the SCTP modules this gates
