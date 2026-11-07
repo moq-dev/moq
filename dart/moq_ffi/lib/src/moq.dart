@@ -4729,12 +4729,12 @@ class FfiConverterMoqVideoEncoderInput {
 class MoqVideoEncoderOutput {
   final MoqVideoCodec codec;
   final int? bitrate;
-  final MoqVideoGop? gop;
+  final Duration? join;
   final MoqVideoEncoderKind kind;
   MoqVideoEncoderOutput({
     required this.codec,
     this.bitrate = null,
-    this.gop = null,
+    this.join = null,
     required this.kind,
   });
 }
@@ -4756,11 +4756,11 @@ class FfiConverterMoqVideoEncoderOutput {
     );
     final bitrate = bitrate_lifted.value;
     new_offset += bitrate_lifted.bytesRead;
-    final gop_lifted = FfiConverterOptionalMoqVideoGop.read(
+    final join_lifted = FfiConverterOptionalDuration.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final gop = gop_lifted.value;
-    new_offset += gop_lifted.bytesRead;
+    final join = join_lifted.value;
+    new_offset += join_lifted.bytesRead;
     final kind_lifted = FfiConverterMoqVideoEncoderKind.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -4770,7 +4770,7 @@ class FfiConverterMoqVideoEncoderOutput {
       MoqVideoEncoderOutput(
         codec: codec,
         bitrate: bitrate,
-        gop: gop,
+        join: join,
         kind: kind,
       ),
       new_offset - buf.offsetInBytes,
@@ -4781,7 +4781,7 @@ class FfiConverterMoqVideoEncoderOutput {
     final total_length =
         FfiConverterMoqVideoCodec.allocationSize(value.codec) +
         FfiConverterOptionalUInt64.allocationSize(value.bitrate) +
-        FfiConverterOptionalMoqVideoGop.allocationSize(value.gop) +
+        FfiConverterOptionalDuration.allocationSize(value.join) +
         FfiConverterMoqVideoEncoderKind.allocationSize(value.kind) +
         0;
     final buf = Uint8List(total_length);
@@ -4799,8 +4799,8 @@ class FfiConverterMoqVideoEncoderOutput {
       value.bitrate,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterOptionalMoqVideoGop.write(
-      value.gop,
+    new_offset += FfiConverterOptionalDuration.write(
+      value.join,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterMoqVideoEncoderKind.write(
@@ -4813,7 +4813,7 @@ class FfiConverterMoqVideoEncoderOutput {
   static int allocationSize(MoqVideoEncoderOutput value) {
     return FfiConverterMoqVideoCodec.allocationSize(value.codec) +
         FfiConverterOptionalUInt64.allocationSize(value.bitrate) +
-        FfiConverterOptionalMoqVideoGop.allocationSize(value.gop) +
+        FfiConverterOptionalDuration.allocationSize(value.join) +
         FfiConverterMoqVideoEncoderKind.allocationSize(value.kind) +
         0;
   }
@@ -8882,86 +8882,6 @@ class NamedMoqVideoEncoderKind extends MoqVideoEncoderKind {
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
       name,
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    return new_offset;
-  }
-}
-
-abstract class MoqVideoGop {
-  RustBuffer lower();
-  int allocationSize();
-  int write(Uint8List buf);
-}
-
-class FfiConverterMoqVideoGop {
-  static MoqVideoGop lift(RustBuffer buffer) {
-    return FfiConverterMoqVideoGop.read(buffer.asUint8List()).value;
-  }
-
-  static LiftRetVal<MoqVideoGop> read(Uint8List buf) {
-    final index = buf.buffer.asByteData(buf.offsetInBytes).getInt32(0);
-    final subview = Uint8List.view(buf.buffer, buf.offsetInBytes + 4);
-    switch (index) {
-      case 1:
-        final lifted = KeyframeMoqVideoGop.read(subview);
-        return LiftRetVal<MoqVideoGop>(
-          lifted.value,
-          lifted.bytesRead - subview.offsetInBytes + 4,
-        );
-      default:
-        throw UniffiInternalError(
-          UniffiInternalError.unexpectedEnumCase,
-          "Unable to determine enum variant",
-        );
-    }
-  }
-
-  static RustBuffer lower(MoqVideoGop value) {
-    return value.lower();
-  }
-
-  static int allocationSize(MoqVideoGop value) {
-    return value.allocationSize();
-  }
-
-  static int write(MoqVideoGop value, Uint8List buf) {
-    return value.write(buf) - buf.offsetInBytes;
-  }
-}
-
-class KeyframeMoqVideoGop extends MoqVideoGop {
-  final int interval;
-  KeyframeMoqVideoGop(int this.interval);
-  KeyframeMoqVideoGop._(int this.interval);
-  static LiftRetVal<KeyframeMoqVideoGop> read(Uint8List buf) {
-    int new_offset = buf.offsetInBytes;
-    final interval_lifted = FfiConverterUInt32.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final interval = interval_lifted.value;
-    new_offset += interval_lifted.bytesRead;
-    return LiftRetVal(KeyframeMoqVideoGop._(interval), new_offset);
-  }
-
-  @override
-  RustBuffer lower() {
-    final buf = Uint8List(allocationSize());
-    write(buf);
-    return toRustBuffer(buf);
-  }
-
-  @override
-  int allocationSize() {
-    return FfiConverterUInt32.allocationSize(interval) + 4;
-  }
-
-  @override
-  int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 1);
-    int new_offset = buf.offsetInBytes + 4;
-    new_offset += FfiConverterUInt32.write(
-      interval,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
@@ -18901,53 +18821,6 @@ class FfiConverterOptionalMoqTrackInfo {
   }
 }
 
-class FfiConverterOptionalMoqVideoGop {
-  static MoqVideoGop? lift(RustBuffer buf) {
-    return FfiConverterOptionalMoqVideoGop.read(buf.asUint8List()).value;
-  }
-
-  static LiftRetVal<MoqVideoGop?> read(Uint8List buf) {
-    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
-      return LiftRetVal(null, 1);
-    }
-    final result = FfiConverterMoqVideoGop.read(
-      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
-    );
-    return LiftRetVal<MoqVideoGop?>(result.value, result.bytesRead + 1);
-  }
-
-  static int allocationSize([MoqVideoGop? value]) {
-    if (value == null) {
-      return 1;
-    }
-    return FfiConverterMoqVideoGop.allocationSize(value) + 1;
-  }
-
-  static RustBuffer lower(MoqVideoGop? value) {
-    if (value == null) {
-      return toRustBuffer(Uint8List.fromList([0]));
-    }
-    final buf = Uint8List(
-      FfiConverterOptionalMoqVideoGop.allocationSize(value),
-    );
-    FfiConverterOptionalMoqVideoGop.write(value, buf);
-    return toRustBuffer(buf);
-  }
-
-  static int write(MoqVideoGop? value, Uint8List buf) {
-    if (value == null) {
-      buf[0] = 0;
-      return 1;
-    }
-    buf[0] = 1;
-    return FfiConverterMoqVideoGop.write(
-          value,
-          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
-        ) +
-        1;
-  }
-}
-
 class FfiConverterOptionalMoqVideoHint {
   static MoqVideoHint? lift(RustBuffer buf) {
     return FfiConverterOptionalMoqVideoHint.read(buf.asUint8List()).value;
@@ -25010,7 +24883,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqvideoencoder_set_bitrate() != 34315) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqvideoproducer_cut() != 18974) {
+  if (uniffi_moq_ffi_checksum_method_moqvideoproducer_cut() != 56974) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqvideoproducer_demand() != 283) {

@@ -24,7 +24,7 @@ pub struct Encoded {
 	/// Whether this access unit is a keyframe, one a decoder can start from.
 	///
 	/// Set on every keyframe, whether [`Encoder::cut`](super::Encoder::cut) forced
-	/// it or the encoder placed it on its own [`Gop`](super::Gop) cadence.
+	/// it or the encoder placed it on its own [`Config::join`](super::Config::join) cadence.
 	pub keyframe: bool,
 }
 

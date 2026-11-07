@@ -66,6 +66,20 @@ test("a transport with an exporter proves one key per page", async () => {
 	expect(labels).toEqual(["EXPORTER-moq-lite-route-key", "EXPORTER-moq-lite-route-key"]);
 });
 
+test("Firefox's exporter proves nothing", async () => {
+	// neqo derives a secret the draft's peers never match, so a proof would end the session.
+	const exporter = { exportKeyingMaterial: async () => new Uint8Array(32) } as unknown as WebTransport;
+	const userAgent = "Mozilla/5.0 (X11; Linux x86_64; rv:157.0) Gecko/20100101 Firefox/157.0";
+	const own = Object.getOwnPropertyDescriptor(navigator, "userAgent");
+	Object.defineProperty(navigator, "userAgent", { value: userAgent, configurable: true });
+	try {
+		expect(await proveRouteKey(exporter, true)).toBeUndefined();
+	} finally {
+		if (own) Object.defineProperty(navigator, "userAgent", own);
+		else Reflect.deleteProperty(navigator, "userAgent");
+	}
+});
+
 test("unavailable Ed25519 leaves this page unproven across sessions", () => {
 	// A child has its own page capability cache, independent of the successful proof tests.
 	const moduleUrl = new URL("./route_key.ts", import.meta.url).href;

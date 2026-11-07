@@ -7573,6 +7573,12 @@ impl RecvGroupFetch {
 /// properties, never past FETCH_OK's End Location. A group's objects end where the next
 /// group's begin, since a FETCH carries every object of its range in order. Before
 /// draft-22 the stream must also reach an object bound inside the last group.
+///
+/// Once a reader of the track lost a group to eviction, each group after the first waits,
+/// its stream unread, until a reader picked up the one before, so a run wider than the
+/// cache never evicts its own groups ahead of its readers (see [`track::Fill::poll_run_paced`]).
+/// The pause holds receive credit, so it is taken only while the session's paused streams
+/// leave room for it, as within a group.
 struct GroupFetchObjects {
 	version: Version,
 	/// The next Object ID expected in the current group.
@@ -7581,6 +7587,9 @@ struct GroupFetchObjects {
 	first: bool,
 	/// The object whose payload is being read: its group, its Object ID, and where it goes.
 	payload: Option<(u64, u64, FetchPayloadRead)>,
+	/// The first object of the next group and its sequence, read while the run waits for its
+	/// readers to pick up the group before.
+	paced: Option<(FetchedObject, u64)>,
 }
 
 /// Where a fetch object's payload goes.
@@ -7602,6 +7611,7 @@ impl GroupFetchObjects {
 			prior_group: None,
 			first: true,
 			payload: None,
+			paced: None,
 		}
 	}
 
@@ -7630,22 +7640,38 @@ impl GroupFetchObjects {
 				}
 			}
 
-			let Some(object) = ready!(poll_fetch_object(stream, self.first, waiter))? else {
-				break;
-			};
-			self.first = false;
-			if !object.subgroup_ok && !object.datagram {
-				tracing::warn!("subgroup ID is not supported, dropping group fetch");
-				return Poll::Ready(Err(Error::Unsupported));
-			}
+			let (object, sequence) = match self.paced.take() {
+				Some(paced) => paced,
+				None => {
+					let Some(object) = ready!(poll_fetch_object(stream, self.first, waiter))? else {
+						break;
+					};
+					self.first = false;
+					if !object.subgroup_ok && !object.datagram {
+						tracing::warn!("subgroup ID is not supported, dropping group fetch");
+						return Poll::Ready(Err(Error::Unsupported));
+					}
 
-			let group = resolve_fetch_group(self.prior_group, object.group)?;
-			if let Some(group) = group {
-				self.prior_group = Some(group);
-			}
-			// The first object always names its group, so a later one leaving it out stays in it.
-			let sequence = group.or(writer.sequence()).ok_or(Error::ProtocolViolation)?;
+					let group = resolve_fetch_group(self.prior_group, object.group)?;
+					if let Some(group) = group {
+						self.prior_group = Some(group);
+					}
+					// The first object always names its group, so a later one leaving it out stays in it.
+					let sequence = group.or(writer.sequence()).ok_or(Error::ProtocolViolation)?;
+					(object, sequence)
+				}
+			};
 			if writer.sequence() != Some(sequence) {
+				// The group before is whole, so its readers see it end while the stream waits,
+				// unread, for them to pick it up: flow control then holds the publisher back.
+				writer.finish()?;
+				match stream.poll_pace(waiter, writer.fetch.fill.poll_run_paced(waiter)) {
+					Poll::Ready(res) => res?,
+					Poll::Pending => {
+						self.paced = Some((object, sequence));
+						return Poll::Pending;
+					}
+				}
 				self.next = writer.open(sequence, object.datagram)?;
 			} else if object.datagram {
 				// A datagram group has one object, so it never shares one with a stream.
@@ -17160,6 +17186,116 @@ mod stitch_tests {
 		assert!(matches!(receive.await, Err(Error::Evicted)));
 	}
 
+	/// What a slow reader of a FETCH run ten times wider than the cache gets, taking a group
+	/// each time the run's stream is polled, once a reader of the track lost a group to
+	/// eviction or not. An ascending reader reads in sequence, a descending one as groups
+	/// arrive.
+	async fn read_a_fetch_run_slowly(outran: bool, order: track::Order) -> Vec<u64> {
+		const GROUPS: u64 = 40;
+		const SIZE: usize = 10_000;
+		let payload = vec![0u8; SIZE];
+		let mut objects = Vec::new();
+		// The first Group ID is 0, and each later one, a delta, 0 again: the next group.
+		for _ in 0..GROUPS {
+			objects.extend(group_fetch_objects(0, 0, &[&payload[..]]));
+		}
+		// The session grants a stream credit of one group, so a paused stream holds one.
+		let window = crate::transport::ReceiveWindow::new(GROUPS * SIZE as u64, SIZE as u64);
+		let session = ScriptedSession::per_stream_eof(vec![objects]).with_receive_window(window);
+		let mut run = GroupFetchRun::with_session(VERSION, session).await;
+		let pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(4 * SIZE as u64));
+		run.track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info {
+				pool,
+				..Default::default()
+			}),
+			"video",
+			track::Info::default().with_timescale(None).with_max_age(None),
+		);
+		let dynamic = run.track.requests();
+		run.track.start_at(GROUPS).unwrap();
+		let mut live = run.track.create_group(group::Info { sequence: GROUPS }).unwrap();
+		live.write_frame(None, &payload[..]).unwrap();
+		let waiter = kio::Waiter::noop();
+		if outran {
+			// A reader judges the live edge cached and loses it before taking it.
+			let mut lost = run
+				.track
+				.subscribe(
+					track::Subscription::default()
+						.with_ranges([track::Range::groups(0..GROUPS + 1)])
+						.with_delay(track::Delay::default().with_max(None)),
+				)
+				.ordered();
+			assert!(lost.poll_next_group(&waiter).is_pending());
+			run.track.evict(GROUPS);
+		}
+
+		let subscriber = run.track.subscribe(
+			track::Subscription::default()
+				.with_ranges([track::Range::groups(0..GROUPS)])
+				.with_order(order)
+				.with_delay(track::Delay::default().with_max(None)),
+		);
+		type Read = Box<dyn FnMut(&kio::Waiter) -> Poll<crate::Result<Option<group::Consumer>>>>;
+		let mut reader: Read = match order {
+			track::Order::Ascending => {
+				let mut ordered = subscriber.ordered();
+				Box::new(move |waiter| ordered.poll_next_group(waiter))
+			}
+			track::Order::Descending => {
+				let mut subscriber = subscriber;
+				Box::new(move |waiter| subscriber.poll_recv_group(waiter))
+			}
+		};
+		assert!(reader(&waiter).is_pending(), "group 0 is a miss");
+		let fill = dynamic.requested_fill().await.expect("the reader asked for the run");
+		assert_eq!((fill.start().group, fill.end()), (0, GROUPS));
+		let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
+			fill: std::sync::Arc::new(fill),
+			timescale: None,
+			first: 0,
+			last: GROUPS - 1,
+			start: 0,
+			end: None,
+		}));
+		let mut receiving = run.subscriber.clone();
+		let mut receive = std::pin::pin!(receiving.recv_group_fetch(&mut run.stream, slot));
+		let (mut read, mut received) = (Vec::new(), false);
+		for _ in 0..4 * GROUPS {
+			if !received && let Poll::Ready(res) = futures::poll!(&mut receive) {
+				res.expect("the run is received");
+				received = true;
+			}
+			match reader(&waiter) {
+				Poll::Ready(Ok(Some(group))) => read.push(group.sequence),
+				// What it lost is given up, which ends its range.
+				Poll::Ready(Ok(None)) => break,
+				Poll::Ready(Err(err)) => panic!("the reader failed: {err}"),
+				Poll::Pending if received => break,
+				Poll::Pending => {}
+			}
+		}
+		read
+	}
+
+	/// Once a reader of the track lost a group to eviction, a FETCH run writes its next group
+	/// only once a reader picked up the one before, leaving the stream unread meanwhile, so a
+	/// slow reader of a run far wider than the cache gets all of it. Until then the run moves
+	/// at the stream's speed and evicts what the reader has yet to take.
+	#[kio::test]
+	async fn a_fetch_run_waits_for_its_reader_once_one_lost_a_group() {
+		for order in [track::Order::Ascending, track::Order::Descending] {
+			let paced = read_a_fetch_run_slowly(true, order).await;
+			assert_eq!(paced, (0..40).collect::<Vec<_>>(), "{order:?}");
+			let unpaced = read_a_fetch_run_slowly(false, order).await;
+			assert!(
+				unpaced.len() < 40,
+				"the unpaced run outran its {order:?} reader: {unpaced:?}"
+			);
+		}
+	}
+
 	#[kio::test]
 	async fn internal_group_fetch_setup_cancellation_is_cancel() {
 		let mut run = GroupFetchRun::new(VERSION, Vec::new()).await;
@@ -17205,7 +17341,9 @@ mod stitch_tests {
 				tasks.0.clone(),
 				Default::default(),
 			);
-			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
+			// Through the subscriber's transport, so it pauses as a session's stream does where
+			// the session grants a receive window.
+			let stream = Stream::open(&subscriber.session, version).await.unwrap();
 			let track = track::Producer::new(
 				std::sync::Arc::new(crate::broadcast::Info::default()),
 				"video",
@@ -17214,7 +17352,7 @@ mod stitch_tests {
 
 			Self {
 				subscriber,
-				stream: Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+				stream: stream.reader,
 				track,
 				_tasks: tasks,
 			}

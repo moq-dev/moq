@@ -4040,7 +4040,7 @@ async fn video_raw_publish_consume() {
 			output: MoqVideoEncoderOutput {
 				codec: MoqVideoCodec::H264,
 				bitrate: None,
-				gop: None,
+				join: None,
 				// Software so the test is deterministic everywhere: `Auto` would
 				// reach for a hardware backend that CI runners don't have.
 				kind: MoqVideoEncoderKind::Software,
@@ -4166,7 +4166,7 @@ async fn video_decode_frame_ownership() {
 			output: MoqVideoEncoderOutput {
 				codec: MoqVideoCodec::H264,
 				bitrate: None,
-				gop: None,
+				join: None,
 				// Software so the encode is deterministic everywhere.
 				kind: MoqVideoEncoderKind::Software,
 			},
@@ -4317,7 +4317,7 @@ async fn video_decode_start() {
 			output: MoqVideoEncoderOutput {
 				codec: MoqVideoCodec::H264,
 				bitrate: None,
-				gop: None,
+				join: None,
 				kind: MoqVideoEncoderKind::Software,
 			},
 			track: Some("camera".into()),
@@ -4440,7 +4440,7 @@ async fn video_raw_publish_from_many_threads() {
 				// An explicit ceiling so the retunes below stay under the rate the
 				// encoder opened at, which openh264 requires.
 				bitrate: Some(1_000_000),
-				gop: None,
+				join: None,
 				kind: MoqVideoEncoderKind::Software,
 			},
 			track: None,
@@ -4518,7 +4518,7 @@ async fn video_raw_publish_rejects_bad_frames() {
 	let output = || MoqVideoEncoderOutput {
 		codec: MoqVideoCodec::H264,
 		bitrate: None,
-		gop: None,
+		join: None,
 		kind: MoqVideoEncoderKind::Software,
 	};
 
@@ -4535,6 +4535,24 @@ async fn video_raw_publish_rejects_bad_frames() {
 					..input(320, 240)
 				},
 				output: output(),
+				track: None,
+				bandwidth: None,
+				lower: None,
+			}
+		)
+		.is_err()
+	);
+
+	// So is a zero join, which would open no group.
+	assert!(
+		crate::video::MoqVideoProducer::new(
+			&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+			crate::video::MoqVideoProducerOptions {
+				input: input(320, 240),
+				output: MoqVideoEncoderOutput {
+					join: Some(std::time::Duration::ZERO),
+					..output()
+				},
 				track: None,
 				bandwidth: None,
 				lower: None,
@@ -7500,7 +7518,7 @@ async fn video_encoder_follows_a_shrinking_grant() {
 			output: MoqVideoEncoderOutput {
 				codec: MoqVideoCodec::H264,
 				bitrate: Some(4_000_000),
-				gop: None,
+				join: None,
 				kind: MoqVideoEncoderKind::Software,
 			},
 			track: Some("camera".into()),
@@ -7559,7 +7577,7 @@ fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::
 		MoqVideoEncoderOutput {
 			codec: MoqVideoCodec::H264,
 			bitrate: Some(bitrate),
-			gop: None,
+			join: None,
 			kind: MoqVideoEncoderKind::Software,
 		},
 	)
