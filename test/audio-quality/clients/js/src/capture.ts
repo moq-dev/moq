@@ -1,6 +1,6 @@
 /** Capture arrivals before the player's container orders or skips them. @module */
 
-import { Milli } from "@moq/clock";
+import { Milli, Nano, now } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Cmaf from "@moq/hang/cmaf";
 import * as Container from "@moq/hang/container";
@@ -140,7 +140,7 @@ export async function* arrivals(
 	try {
 		for (;;) {
 			const next = await group.readFrame();
-			const at = performance.now();
+			const at = Nano.toMilli(Nano(now()));
 			if (!next) return;
 			for (const frame of decoder.decode(next.payload, next.timestamp)) {
 				if (decoder.end?.(frame) !== undefined) continue;
