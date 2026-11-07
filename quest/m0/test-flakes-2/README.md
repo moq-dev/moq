@@ -154,5 +154,4 @@ Public API: none. Wire: none.
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
 - [The datagram-end close follow-up](/quest/m0/test-flakes-2/datagram-end-close.md) - investigate whether duplicate SETUP can override an accepted lite-06 SUBSCRIBE_END during shutdown
-- [moq-transcode's idle-rung cancel test survives load](/quest/m0/test-flakes-2/transcode-idle-rung-cancel.md) - `cancelling_an_idle_rung_reports_cancel` stops seeing `serve` return before its abort lands
 - [moq-gst's sink-restart pad test survives load](/quest/m0/test-flakes-2/gst-sink-restart-pads.md) - `a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times` keeps its pads under load

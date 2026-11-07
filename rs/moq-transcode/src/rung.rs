@@ -1065,7 +1065,10 @@ mod tests {
 	/// Its subscribers must see that cause, rather than an unfinished producer drop.
 	#[tokio::test(start_paused = true)]
 	async fn cancelling_an_idle_rung_reports_cancel() {
-		let (rung, _source, _retire) = idle_rung();
+		let (rung, source, _retire) = idle_rung();
+		// The subscriber below starts the live path. Without a source track its feed fails
+		// on its own and ends the serve before the abort lands.
+		let _video = source.create_track("video", None).unwrap();
 		let output = moq_net::broadcast::Info::default().produce();
 		let mut dynamic = output.requests();
 		let view = output.consume();
