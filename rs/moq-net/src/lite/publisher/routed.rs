@@ -3,8 +3,9 @@
 //! The node sends the peer its routes and, closed by an ANNOUNCE_FLOOR, each route's
 //! claims under the requested prefix. The stream filters what it puts on the wire:
 //! hidden claims unless the peer asked for them, and anything this handle's scope, the
-//! session's grant, or the upstream horizon leaves out, in which case a floor certifies
-//! nothing, since the peer cannot tell what was left out from what is gone.
+//! session's grant, the upstream horizon, or the proxy preference leaves out, in which
+//! case a floor certifies nothing, since the peer cannot tell what was left out from
+//! what is gone.
 //!
 //! A handle's mounts beneath the prefix are read through a node stream each, at the
 //! target, and what they present is named under the mount point on the same routes.
@@ -61,6 +62,13 @@ enum Phase {
 	Withdrawing,
 	/// Finished: waiting for the peer to read it.
 	Closing,
+}
+
+/// Whether a stream on `link` carries `claim` at all: never an upstream-learned claim
+/// to an upstream, nor one learned from another node to a peer this node does not
+/// proxy for.
+fn sends(link: &route::Link, claim: &node::Claim) -> bool {
+	!(link.upstream && claim.upstream) && (link.proxy || !claim.learned)
 }
 
 /// Answers one lite-07 announce stream.
@@ -396,12 +404,13 @@ impl Answer {
 	/// Send the ANNOUNCE_FLOOR closing a batch for the route to `id`.
 	fn floor(&mut self, stream: &mut Stream<Transport, Version>, id: route::Id) -> Result<(), Error> {
 		let certified = self.certified();
-		let upstream = self.link.upstream;
+		// Like the grant, the upstream horizon and the proxy preference leave claims out
+		// that a floor would certify absent.
+		let hides = (self.routes.get(&id).into_iter())
+			.flat_map(|sent| sent.claims.values())
+			.any(|claim| !sends(&self.link, claim));
 		let sent = self.routes.get_mut(&id).expect("only a held route has a batch");
 		sent.floored = true;
-		// Like the grant, the upstream horizon leaves claims out that a floor would
-		// certify absent.
-		let hides = upstream && sent.claims.values().any(|claim| claim.upstream);
 		let revision = sent.floor.filter(|_| certified && !hides);
 		stream.writer.buffer(&Msg::Floor {
 			id: sent.wire,
@@ -449,7 +458,7 @@ impl Answer {
 	) -> Result<(), Error> {
 		let sent = self.routes.get(&id).expect("only a held route syncs");
 		let wanted = (sent.claims.get(&path))
-			.filter(|claim| self.shows(&path) && !(self.link.upstream && claim.upstream))
+			.filter(|claim| self.shows(&path) && sends(&self.link, claim))
 			.cloned();
 		let wire = sent.wire;
 		let taken = (wanted.as_ref())

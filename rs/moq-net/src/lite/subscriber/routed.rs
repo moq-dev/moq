@@ -542,6 +542,7 @@ fn claim(instance: Option<crate::Instance>, epoch: u64, cost: crate::origin::Cos
 		cost: cost.value(),
 		continues: None,
 		upstream: false,
+		learned: false,
 	})
 }
 

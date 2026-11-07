@@ -3664,6 +3664,8 @@ impl OwnClaims {
 			cost: route.cost.value(),
 			continues: None,
 			upstream: false,
+			// Only a route published here has crossed no node.
+			learned: !route.hops.is_empty(),
 		};
 		self.best.insert(announce.prefix.clone(), claim);
 		self.feed(announce.prefix, predecessor.as_ref());

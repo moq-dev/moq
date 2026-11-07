@@ -45,6 +45,10 @@ pub(crate) struct Claim {
 	/// is never sent to another upstream, so this node never carries traffic between
 	/// two. Always unset on a claim off the wire.
 	pub upstream: bool,
+	/// This node's own claim, served through a route another node announced over an
+	/// older version: sent only to a peer this node proxies for, so a node that does
+	/// not proxy is never transit. Always unset on a claim off the wire.
+	pub learned: bool,
 }
 
 /// A shown claim as the origin serves it through the selected route.
@@ -710,6 +714,7 @@ mod tests {
 			cost,
 			continues: None,
 			upstream: false,
+			learned: false,
 		}
 	}
 

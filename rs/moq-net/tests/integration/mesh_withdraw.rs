@@ -716,3 +716,38 @@ async fn an_upstream_learned_claim_never_reaches_another_upstream() {
 	assert_eq!(seen.get("room/local"), Some(&vec![Kind::Start]), "{seen:?}");
 	assert!(!seen.contains_key("room/learned"), "{seen:?}");
 }
+
+/// A node that does not proxy is never transit, across versions too: a broadcast it
+/// learned over moq-lite-06 enters the route layer as one of its own claims, yet never
+/// reaches a moq-lite-07 peer, while one published there does.
+#[kio::test]
+async fn a_node_that_does_not_proxy_keeps_what_it_learned_over_lite06() {
+	let lite07: Version = "moq-lite-07-wip".parse().unwrap();
+	let lite06: Version = "moq-lite-06".parse().unwrap();
+	let first = produce_origin(1);
+	let app = produce_origin(2);
+	let second = produce_origin(3);
+	let mut pairs = Vec::new();
+	for (version, relay) in [(lite06, &first), (lite07, &second)] {
+		let mut options = MockConnectOptions::new(version);
+		options.client_publish = Some(app.consume());
+		options.client_subscribe = Some(app.clone());
+		options.server_publish = Some(relay.consume().with_hidden(true));
+		options.server_subscribe = Some(relay.clone().with_link(origin::Link::Peer));
+		options.proxy = false;
+		pairs.push(connect_mock(options).await);
+	}
+
+	let mut at_app = watch(app.consume().routes());
+	let mut at_second = watch(second.consume().routes());
+	let learned = first.route("room/learned", origin::RouteOptions::hidden()).unwrap();
+	learned.announce().unwrap();
+	let local = app.route("room/local", origin::RouteOptions::hidden()).unwrap();
+	local.announce().unwrap();
+	kio::clock::sim::idle().await;
+	let seen_by_app = drain(&mut at_app);
+	assert!(seen_by_app.contains_key("room/learned"), "{seen_by_app:?}");
+	let seen = drain(&mut at_second);
+	assert_eq!(seen.get("room/local"), Some(&vec![Kind::Start]), "{seen:?}");
+	assert!(!seen.contains_key("room/learned"), "{seen:?}");
+}
