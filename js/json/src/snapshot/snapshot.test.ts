@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { Milli, Nano, sleep } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { hooks } from "../../../net/src/internal.ts";
 import { Consumer } from "./consumer.ts";
@@ -206,6 +207,7 @@ test("next skips every superseded group, whatever budget another reader asks for
 // group 2 arriving while group 1 is still owed supersedes it at once, whatever budget another
 // reader of the track, such as the caller's own, asks for.
 test("reads skip a group the subscription still owes", async () => {
+	hostTime();
 	for (const max of [Milli.zero, Milli(1_000), null]) {
 		const track = new Track.Producer("test").accept({});
 		hooks.receiveTrack(track);

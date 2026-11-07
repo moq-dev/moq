@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { type Micro, Milli, Nano, sleep } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Time, Track, Varint } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
@@ -23,6 +24,7 @@ function encodeLegacyFrame(timestamp: Micro, payload: Uint8Array): Uint8Array {
 }
 
 test("Consumer waits on a non-sequential hang group because it has no per-frame duration", async () => {
+	hostTime();
 	// The Legacy (hang) container encodes only a timestamp per frame, no duration, so a group's
 	// presentation end is unknown until the next group arrives. With non-sequential group ids we
 	// therefore cannot prove the timeline is unbroken across a jump: a large id gap is

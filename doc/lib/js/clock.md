@@ -78,6 +78,17 @@ handle and call `close()` to cancel it when finished. Sleep accepts an abort
 sleep is pending. Timeout cancels its own timer when the operation settles, but does
 not cancel the operation. An already-ready operation wins a zero timeout.
 
+In this repository, every workspace whose scripts run `bun test` and whose
+workspace dependencies reach `@moq/clock` loads a preload
+(`js/clock/src/preload.ts`) from its `bunfig.toml`, and `bun js/common/deps.ts`
+fails a workspace that doesn't. The preload fails a test when a timer it armed
+through `@moq/clock` fires on the host clock, so a test can't prove that nothing
+happened by waiting in real time; lint bans the native timers in test files. A
+timer already due when armed, such as `sleep(0)`, or a `timeout()` whose
+operation settles first never waits, and a timer firing after its test ended
+fails nothing. A test on real sockets, devices, or processes calls `hostTime()`
+from `@moq/clock/test` first; without the preload it does nothing.
+
 Every `@moq/*` package reads time and arms timers through this package, so
 installing a `Manual` clock also drives their timeouts and retention. See the [source API](https://github.com/moq-dev/moq/tree/main/js/clock/src)
 for the exported functions and conversions.
