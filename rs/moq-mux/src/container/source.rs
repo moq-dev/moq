@@ -559,7 +559,9 @@ impl ExportSource {
 		if let SourceState::Subscribing { pending, instance, .. } = &self.state {
 			let track = match pending.poll_ok(waiter) {
 				Poll::Ready(Ok(track)) => track,
-				Poll::Ready(Err(_)) | Poll::Pending if instance.as_ref().is_some_and(|i| i.poll_closed(waiter).is_ready()) => {
+				Poll::Ready(Err(_)) | Poll::Pending
+					if instance.as_ref().is_some_and(|i| i.poll_closed(waiter).is_ready()) =>
+				{
 					return self.end();
 				}
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),

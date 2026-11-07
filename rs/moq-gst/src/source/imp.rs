@@ -1582,7 +1582,10 @@ impl Follower {
 			return;
 		};
 		for (rendition, entry) in &mut self.renditions {
-			if matches!(entry.reading, Reading::Idle) && only(rendition) && serves(instance, entry.shape.instance.as_ref()) {
+			if matches!(entry.reading, Reading::Idle)
+				&& only(rendition)
+				&& serves(instance, entry.shape.instance.as_ref())
+			{
 				self.next_id += 1;
 				let (cancel, cancelled) = watch::channel(false);
 				let live = Arc::new(AtomicBool::new(false));

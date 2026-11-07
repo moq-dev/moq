@@ -97,7 +97,9 @@ enum Phase {
 	/// An offer awaits its answer, which holds off the [`ESTABLISH_TIMEOUT`].
 	Held,
 	/// ICE has yet to connect; the [`ESTABLISH_TIMEOUT`] runs from `started`.
-	Establishing { started: Instant },
+	Establishing {
+		started: Instant,
+	},
 	Connected,
 	/// The connection ended, for this reason: every later [`Agent::next`] reports it.
 	Failed(Error),
@@ -202,7 +204,9 @@ impl Agent {
 	/// when dropped: transmits are sent, and events wait for [`Agent::next`].
 	pub fn rtc_mut(&mut self) -> RtcMut<'_> {
 		if let Phase::Held = self.phase {
-			self.phase = Phase::Establishing { started: Instant::now() };
+			self.phase = Phase::Establishing {
+				started: Instant::now(),
+			};
 		}
 		self.change()
 	}

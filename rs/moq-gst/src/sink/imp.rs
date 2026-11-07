@@ -2469,8 +2469,14 @@ mod tests {
 		let start = kio::clock::now();
 		let finished = moq_mux::Linger::new([broadcast], track, linger);
 		let lingering = tokio::spawn(linger_task(finished, sink.downgrade(), session));
-		sink.imp().control.lock().unwrap().live.as_mut().expect("live session").drain =
-			Drain::Lingering(lingering.abort_handle());
+		sink.imp()
+			.control
+			.lock()
+			.unwrap()
+			.live
+			.as_mut()
+			.expect("live session")
+			.drain = Drain::Lingering(lingering.abort_handle());
 
 		kio::clock::sleep(linger - Duration::from_secs(1)).await;
 		let mut late = consumer.track("video").unwrap().subscribe(None).await.unwrap();

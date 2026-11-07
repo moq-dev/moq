@@ -843,9 +843,7 @@ impl Pad {
 		let Some(track) = self.track() else {
 			return Ok(());
 		};
-		let timestamp = if matches!(track, Sink::Opaque(_))
-			&& buffer.pts().is_none()
-			&& self.state == PadState::Active
+		let timestamp = if matches!(track, Sink::Opaque(_)) && buffer.pts().is_none() && self.state == PadState::Active
 		{
 			sample
 				.running

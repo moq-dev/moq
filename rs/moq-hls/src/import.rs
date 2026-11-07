@@ -605,7 +605,11 @@ impl TrackState {
 		let resource = resolve_map(url, map.byte_range.as_ref())?;
 
 		// The resolved resource IS the init segment's identity: same bytes, same generation.
-		if self.generation.as_ref().is_some_and(|generation| generation.map == resource) {
+		if self
+			.generation
+			.as_ref()
+			.is_some_and(|generation| generation.map == resource)
+		{
 			return Ok(());
 		}
 

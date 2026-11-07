@@ -409,12 +409,12 @@ impl Producer {
 
 	/// Poll until the window lists a row, ends, fails, or closes.
 	pub fn poll_listed(&self, waiter: &kio::Waiter) -> Poll<()> {
-		match self.state.poll_ref(waiter, |state| {
-			match !state.rows.is_empty() || !state.live() {
+		match self
+			.state
+			.poll_ref(waiter, |state| match !state.rows.is_empty() || !state.live() {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
-			}
-		}) {
+			}) {
 			Poll::Ready(_) => Poll::Ready(()),
 			Poll::Pending => Poll::Pending,
 		}
