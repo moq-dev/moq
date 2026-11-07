@@ -1581,8 +1581,12 @@ mod test {
 	fn a_recreated_track_never_reuses_a_sequence() {
 		let producer = Info::new().produce();
 		let track = producer.create_track("a", None).unwrap();
-		track.append_group().unwrap();
-		track.create_group(crate::group::Info { sequence: 4 }).unwrap();
+		track.append_group().unwrap().finish().unwrap();
+		track
+			.create_group(crate::group::Info { sequence: 4 })
+			.unwrap()
+			.finish()
+			.unwrap();
 		drop(track);
 
 		let track = producer.create_track("a", None).unwrap();
@@ -1595,7 +1599,11 @@ mod test {
 			track.create_group(crate::group::Info { sequence: 2 }),
 			Err(Error::Reused)
 		));
-		track.create_group(crate::group::Info { sequence: 5 }).unwrap();
+		track
+			.create_group(crate::group::Info { sequence: 5 })
+			.unwrap()
+			.finish()
+			.unwrap();
 		assert_eq!(track.append_group().unwrap().sequence, 6);
 		track.abort(Error::Cancel).unwrap();
 

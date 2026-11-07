@@ -1954,6 +1954,7 @@ export class Producer {
 	}
 
 	#createGroup(sequence: bigint, start: number): GroupProducer {
+		checkSequence(sequence);
 		this.#writable(sequence);
 		// A skip says the sequence will never be produced, so it is final. A drop is not: a
 		// publisher may re-create a group it cut or aborted.
