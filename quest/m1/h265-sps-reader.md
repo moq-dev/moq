@@ -40,7 +40,11 @@ walk into the parser:
 - Keep every regression input, including the `scuffle-h265-*` and
   `scuffle-expgolomb` ones moq-video's tests include.
 
-scuffle-av1 stays: it is the same upstream, but no bug in it is known.
+scuffle-av1 stays, though it is the same upstream: its one known bug, a
+UVLC leading-zero count that overflows a `u8`, is guarded at moq-mux's own
+boundary (`validate_timing` in `rs/moq-mux/src/codec/av1/import.rs`, from
+[moq-dev/moq#8042](https://github.com/moq-dev/moq/pull/8042)). Keep that
+guard while scuffle-av1 is a dependency.
 
 Public API: none; moq-mux exports no scuffle type.
 Wire: none.
