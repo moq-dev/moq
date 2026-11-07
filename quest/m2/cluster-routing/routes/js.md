@@ -25,8 +25,8 @@ the cheapest one; fix it with the route-selection rework here.
   so the nightly report stays meaningful. Rejected: leave them red; hold
   #8023 for this quest. Every skip names this quest (`grep -rn routes/js.md
   test rs`): `JS_LITE07_SKIP` in `test/interop/interop.sh` and `socket.sh`
-  (native JS grant printing, claims, track replacement, sockets, the lite-07
-  compress and drop legs, the compressed catalog's lite-07 reader, and
+  (native JS grant printing, claims, track replacement, sockets, the browser
+  route key proof, the lite-07 compress and drop legs, the compressed catalog's lite-07 reader, and
   `--versions moq-lite-07-wip` with JS clients), `lite_tracks_interop` in
   `test/justfile`, and the lite-07 legs of `max_age_relay_javascript` and
   `relay_fill_javascript`.

@@ -69,8 +69,6 @@ pub(crate) enum Output {
 		changes: Vec<(Path, Option<Claim>)>,
 		floor: Option<Rev>,
 	},
-	/// Send ROUTE_REQUEST, naming the identity as the peer advertised it.
-	Request { id: Id, seqno: Seqno },
 	/// Echo the peer's ROUTE_END for the identity it named `id`.
 	Echo { id: Id },
 	/// Serve `claim` of `id` into the origin through this stream, or update how it
@@ -125,6 +123,9 @@ struct Outbox {
 	serving: HashMap<(Id, Path), u64>,
 	/// Each route the reader holds, and the claims it was sent under it.
 	delivered: HashMap<Id, BTreeSet<Path>>,
+	/// ROUTE_REQUESTs to send, by the identity as the peer advertised it. A higher
+	/// seqno subsumes a lower one, so a writer that stalls holds one per identity.
+	requests: BTreeMap<Id, Seqno>,
 }
 
 /// One identity's route changes and claim batches since the reader last took it.
@@ -472,6 +473,17 @@ impl Stream {
 		self.queue.lock().pop()
 	}
 
+	/// The ROUTE_REQUESTs queued since the last call, each identity's highest seqno.
+	/// Take them only once the writer has room, so they keep coalescing meanwhile.
+	pub fn poll_requests(&self, waiter: &kio::Waiter) -> Poll<BTreeMap<Id, Seqno>> {
+		let ready = |outbox: &kio::Ref<'_, Outbox>| match outbox.requests.is_empty() {
+			true => Poll::Pending,
+			false => Poll::Ready(()),
+		};
+		let mut outbox = ready!(self.queue.poll(waiter, ready));
+		Poll::Ready(std::mem::take(&mut outbox.requests))
+	}
+
 	fn with<R>(&self, f: impl FnOnce(&mut Router<Key, Claim>, Key) -> R) -> R {
 		let mut state = self.node.lock();
 		let out = f(&mut state.router, self.key);
@@ -557,7 +569,14 @@ impl State {
 				let (key, output) = match out {
 					Out::Route { to, id, reach } => (to, Output::Route { id, reach }),
 					Out::Batch { to, id, changes, floor } => (to, Output::Batch { id, changes, floor }),
-					Out::Request { to, id, seqno } => (to, Output::Request { id, seqno }),
+					Out::Request { to, id, seqno } => {
+						if let Some(queue) = self.queues.get(&to) {
+							let mut outbox = queue.lock();
+							let want = outbox.requests.entry(id).or_insert(seqno);
+							*want = (*want).max(seqno);
+						}
+						continue;
+					}
 					Out::Echo { to, id } => (to, Output::Echo { id }),
 				};
 				if let Some(id) = push(&self.queues, key, output) {

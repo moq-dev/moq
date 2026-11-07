@@ -35,7 +35,6 @@ moves what remains of them once their claims merge.
 - [Drop set](/quest/m1/drop-set.md) - the drop set's track and cursor runs are billed to the cache pool, so fragmenting drops costs what the pool holds; eviction folds final runs or ends the cursor with `TooFarBehind`
 - [Media fuzz findings](/quest/m1/fuzz-findings/README.md) - the nightly media fuzz targets run clean: mp4-atom, MKV block, TS step, SPS overflow, and catalog encoder bugs they found are fixed
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
-- [moq-relay's tests pass without default features](/quest/m1/relay-no-default-features.md) - QUIC-only tests are gated on `quic`, and the nightly matrix runs the no-default build
 - [moq-webrtc drops the ICE wire counters nothing reads](/quest/m1/ice-wire-counters.md) - the per-packet `Wire` atomics go once #8122 makes the ICE module private
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [A reader on a failed copy continues on the held re-offer](/quest/m1/copy-recover.md) - a live reader keeps a group whose copy fails by continuing on the same track's re-offer at the same frame
@@ -52,7 +51,6 @@ moves what remains of them once their claims merge.
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
 - [VA-API encode is correct on radeonsi](/quest/m1/vaapi-radeonsi.md) - AMD's VA-API H.264 encode decodes, or the node is refused for OpenH264
 - [Tests run on a mocked clock](/quest/m1/mock-clock-tests/README.md) - about 300 tests stop proving nothing happened by waiting, sleeping to settle, or asserting on elapsed time
-- [moq-mux reads H.265 SPS without scuffle](/quest/m1/h265-sps-reader.md) - moq-mux's own SPS reader replaces scuffle-h265 and scuffle-expgolomb, and the fuzz regressions still pass
 - [QMux reads the app-limited flag on big-endian Linux](/quest/m1/qmux-app-limited-endian.md) - the send-rate filter's app-limited mask follows the target's byte order
 - [A cancelled dispatch lane stops its phase promptly](/quest/m1/dispatch-cancel-race.md) - a TERM landing just before a lane forks its phase's command still stops that command, instead of waiting out the phase
 

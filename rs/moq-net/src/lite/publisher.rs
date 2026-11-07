@@ -3662,6 +3662,72 @@ mod announce_test {
 		assert_eq!(wire.take_announces(), [lite::AnnounceBroadcast::Synced]);
 	}
 
+	/// A lite-07 peer that never stops sending ROUTE_REQUEST neither holds the task
+	/// nor keeps a new claim from being announced.
+	#[kio::test]
+	async fn a_lite07_reply_flood_yields_and_announces() {
+		/// A peer whose replies never run out.
+		struct Flood(bytes::Bytes);
+		impl crate::transport::poll::Chunks for Flood {
+			type Error = SinkError;
+			fn poll_read_chunk(
+				&mut self,
+				_: &kio::Waiter,
+				_: usize,
+			) -> std::task::Poll<Result<Option<bytes::Bytes>, SinkError>> {
+				std::task::Poll::Ready(Ok(Some(self.0.clone())))
+			}
+			fn stop(&mut self, _: u32) {}
+		}
+
+		let origin = Hop::new(1).unwrap().produce();
+		let consumer = origin.consume();
+		let mut answer =
+			super::routed::Answer::new(consumer, crate::Path::empty(), true, crate::auth::Link::new(false));
+		let request = lite::AnnounceReply::RouteRequest { node: 7, seqno: 1 };
+		let flood = Flood(crate::coding::Encode::encode_bytes(&request, Version::Lite07).unwrap());
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut stream = Stream::<Transport, Version> {
+			writer: Writer::new(
+				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+				Version::Lite07,
+			),
+			reader: Reader::new(
+				crate::transport::boxed::RecvStream::new(crate::transport::poll::Buffered::new(flood)),
+				Version::Lite07,
+			),
+		};
+		let waiter = kio::Waiter::noop();
+		assert!(
+			answer.poll(&mut stream, false, &waiter).is_pending(),
+			"the flood yields"
+		);
+		wire.take_ok();
+		let announces = wire.take_announces();
+		assert_eq!(
+			announces.last(),
+			Some(&lite::AnnounceBroadcast::Synced),
+			"{announces:?}"
+		);
+
+		let _route = origin.announce("x", origin::RouteInfo::default()).unwrap();
+		// The origin feeds its node from a task.
+		kio::clock::sim::yield_now().await;
+		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
+		let announces = wire.take_announces();
+		assert!(
+			announces
+				.iter()
+				.any(|msg| matches!(msg, lite::AnnounceBroadcast::Active { .. })),
+			"{announces:?}"
+		);
+	}
+
 	#[test]
 	fn synced_survives_a_removed_initial_route_and_live_churn() {
 		let origin = Hop::new(1).unwrap().produce();
