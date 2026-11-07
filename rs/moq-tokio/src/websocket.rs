@@ -181,7 +181,9 @@ where
 		if let Some(stats) = &options.socket_stats {
 			upgraded = upgraded.with_socket_stats(stats.clone());
 		}
-		let session = crate::spawn_qmux(upgraded.accept().map_err(Error::accept)?);
+		// The deadline covers QMux establishment too, which waits for the peer's parameters.
+		let accepted = async { upgraded.accept().await.map_err(Error::accept) };
+		let session = crate::spawn_qmux(crate::server::within(deadline, accepted).await?);
 		crate::server::accept_websocket(session, options, deadline).await
 	})
 	.await
@@ -527,6 +529,7 @@ async fn connect_tls_override(
 		.with_keep_alive(qmux::ws::KeepAlive::default())
 		.with_session_config(session.clone())
 		.connect()
+		.await
 		.map(crate::spawn_qmux)
 		.map_err(Error::connect)
 }
@@ -752,6 +755,7 @@ impl Listener {
 				.with_keep_alive(qmux::ws::KeepAlive::default())
 				.with_session_config(session)
 				.accept()
+				.await
 				.map(crate::spawn_qmux)
 				.map_err(Error::accept)?;
 			Ok((session, url, Accepted { remote: addr, protocol }))
@@ -956,6 +960,8 @@ mod tests {
 			let server_name = tls.get_ref().1.server_name().map(str::to_string);
 			let host = Arc::new(Mutex::new(None));
 			let request_host = host.clone();
+			let protocol = Arc::new(Mutex::new(None));
+			let selected = protocol.clone();
 			#[expect(
 				clippy::result_large_err,
 				reason = "the error type is tungstenite's handshake response, not ours"
@@ -978,12 +984,17 @@ mod tests {
 						http::header::SEC_WEBSOCKET_PROTOCOL,
 						http::HeaderValue::from_str(protocol).unwrap(),
 					);
+					*selected.lock().unwrap() = Some(protocol.to_string());
 				}
 				Ok(response)
 			};
-			let _websocket = tokio_tungstenite::accept_hdr_async(tls, callback).await.unwrap();
+			let websocket = tokio_tungstenite::accept_hdr_async(tls, callback).await.unwrap();
+			let protocol = protocol.lock().unwrap().take().unwrap();
+			// The client returns once QMux is established, so answer with its parameters.
+			let (session, driver) = qmux::ws::Upgraded::new(websocket, &protocol).accept().await.unwrap();
+			tokio::spawn(driver);
 			let host = host.lock().unwrap().take();
-			(server_name, host)
+			(server_name, host, session)
 		});
 
 		let config = Config::default();
@@ -1007,7 +1018,7 @@ mod tests {
 		.await
 		.unwrap();
 		drop(session);
-		let (server_name, host) = accepted.await.unwrap();
+		let (server_name, host, _session) = accepted.await.unwrap();
 		assert_eq!(server_name.as_deref(), expected_sni);
 		assert_eq!(host.as_deref(), Some(expected_host.as_str()));
 	}
@@ -1040,7 +1051,7 @@ mod tests {
 		options.quic = quic.resolve();
 		let server = tokio::spawn(accept(server_ws, options));
 
-		let (session, driver) = qmux::ws::Upgraded::new(client_ws, &alpn).connect().unwrap();
+		let (session, driver) = qmux::ws::Upgraded::new(client_ws, &alpn).connect().await.unwrap();
 		tokio::spawn(driver);
 		// Runs until aborted: its driver sends SETUP, and ending it would cancel the request.
 		let client = tokio::spawn(async move {
@@ -1149,6 +1160,33 @@ mod timeout_tests {
 	use futures::FutureExt;
 	use moq_net::transport::poll::Session as _;
 
+	/// A peer that upgrades but never sends its QMux parameters is refused at the accept's own
+	/// deadline, not QMux's longer handshake timeout.
+	#[tokio::test(start_paused = true)]
+	async fn silent_qmux_peer_is_refused_at_the_deadline() {
+		const ALPN: &str = "qmux-01.moq-lite-06";
+		let activity = moq_net::server::Activity::default();
+		let timeout = time::Duration::from_secs(1);
+		let mut options = Options::new(
+			"ws://localhost/".parse().unwrap(),
+			moq_net::Server::new().with_timeout(Some(timeout)),
+			activity.enter().unwrap(),
+		);
+		options.link.alpn = Some(ALPN.into());
+		let (server, _peer) = tokio::io::duplex(4096);
+		let server =
+			tokio_tungstenite::WebSocketStream::from_raw_socket(server, tungstenite::protocol::Role::Server, None)
+				.await;
+		let start = kio::clock::now();
+		let result = accept(server, options).await;
+		assert!(
+			matches!(result, Err(crate::Error::MoqNet(moq_net::Error::Timeout))),
+			"accept outcome: {:?}",
+			result.map(|_| ())
+		);
+		assert_eq!(start.elapsed(), timeout);
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn the_servers_timeout_bounds_setup() {
 		const ALPN: &str = "qmux-01.moq-lite-06";
@@ -1170,9 +1208,12 @@ mod timeout_tests {
 			let peer =
 				tokio_tungstenite::WebSocketStream::from_raw_socket(peer, tungstenite::protocol::Role::Client, None)
 					.await;
-			let peer = crate::spawn_qmux(qmux::ws::Upgraded::new(peer, ALPN).connect().unwrap());
 			let mut accept = Box::pin(accept(server, options));
-			assert!(accept.as_mut().now_or_never().is_none());
+			// Each end waits for the other's QMux parameters, so the accept runs meanwhile.
+			let peer = tokio::select! {
+				peer = qmux::ws::Upgraded::new(peer, ALPN).connect() => crate::spawn_qmux(peer.unwrap()),
+				result = accept.as_mut() => panic!("accepted before SETUP: {:?}", result.map(|_| ())),
+			};
 			let _stream = moq_net::kio::wait(|waiter| peer.poll_open_bi(waiter, Default::default()))
 				.await
 				.unwrap();

@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { Manual, type Micro, Milli, Nano, sleep } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Format as LocFormat } from "@moq/loc";
 import { type Group, Error as NetError, SessionCode, StreamCode, Time, Track, Varint } from "@moq/net";
 import { decodeInitSegment, type InitSegment } from "../cmaf/decode.ts";
@@ -682,6 +683,7 @@ test("Consumer delivers everything ahead of a decode error", async () => {
 
 // Groups decode in parallel, so a later group's failure must not replace the error the reader ended with.
 test("Consumer keeps the first of several decode errors", async () => {
+	hostTime();
 	const failingFormat: ContainerFormat = {
 		decode(frame: Uint8Array): Frame[] {
 			throw new Error(`malformed ${frame[0]}`);
@@ -904,6 +906,7 @@ test("Consumer does not relax its measurement across a declared silence", async 
 // --- Ordering ---
 
 test("Consumer delivers groups in sequence order regardless of arrival order", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), delay: { max: 500 as Milli } });
 
@@ -923,33 +926,37 @@ test("Consumer delivers groups in sequence order regardless of arrival order", a
 	consumer.close();
 });
 
-test("Consumer delivers a group that arrives below the cursor", async () => {
+// What lies below the cursor is already covered by the gap that moved it, or was never read, so a
+// group arriving there is never delivered and adds no gap. Mirrors Rust's consumer.
+test("Consumer drops a group that arrives below the cursor", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), delay: { max: 500 as Milli } });
 
-	// Group.Producer 5 arrives first (sets active = 5)
+	// Group 5 arrives first, and delivery starts there: the track reports no start.
 	writeGroupWithLegacyFrames(track, 5n, [100_000 as Micro]);
-	await sleep(Nano.fromMilli(Milli(50)));
+	expect((await nextFrame(consumer))?.group).toBe(5n);
 
-	// Group.Producer 3 lands behind it, and Group.Producer 6 ahead of it. Arriving below the
-	// cursor is not what makes content stale: how far behind the live edge a group may be is
-	// the subscription's own max delay, which `replay` deliberately opens wide here. So all
-	// three are handed over, in sequence order, since delivery has not passed any of them yet.
+	// Group 3 lands behind the cursor, and group 6 ahead of it.
 	writeGroupWithLegacyFrames(track, 3n, [0 as Micro]);
 	writeGroupWithLegacyFrames(track, 6n, [200_000 as Micro]);
 	track.finish();
 	track.close();
 
-	await sleep(Nano.fromMilli(Milli(100)));
-
-	const frames = await drainFrames(consumer, 500);
-	expect(frames.map((frame) => frame.group)).toEqual([3n, 5n, 6n]);
+	const reads: string[] = [];
+	for (;;) {
+		const read = await consumer.next();
+		if (!read) break;
+		reads.push(read.kind === "frame" ? `${read.group}` : read.kind);
+	}
+	expect(reads).toEqual(["6"]);
 	consumer.close();
 });
 
 // --- Group.Producer boundary signals ---
 
 test("Consumer next() yields no gap before the first frame", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), delay: { max: 500 as Milli } });
 
@@ -972,6 +979,7 @@ test("Consumer next() yields no gap before the first frame", async () => {
 });
 
 test("Consumer reads nothing after close, even the frame a gap was returned ahead of", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), delay: { max: 0 as Milli } });
 
@@ -991,6 +999,7 @@ test("Consumer reads nothing after close, even the frame a gap was returned ahea
 });
 
 test("Consumer keeps a trailing duration marker internal", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), {
 		format: new LegacyFormat("video"),
@@ -1049,6 +1058,7 @@ test("Consumer reads a leading marker as an end and keeps the first media keyfra
 });
 
 test("Consumer reads an empty LOC payload as the frame's duration", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	writeLoc(track, [
 		[
@@ -1068,6 +1078,7 @@ test("Consumer reads an empty LOC payload as the frame's duration", async () => 
 });
 
 test("Consumer passes over LOC duration markers", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	writeLoc(track, [
 		[
@@ -1128,6 +1139,7 @@ async function nextFrame(consumer: Consumer) {
 const wallClock = () => Time.Timestamp.now();
 
 test("Consumer aborts a group below the previous group start", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), delay: { max: 30_000 as Milli } });
 
@@ -1191,14 +1203,13 @@ test("Consumer checks a whole decoded batch before a skip drops its group", asyn
 	write(0n, [1_000_000]).finish();
 	expect((await nextFrame(consumer))?.frame?.timestamp).toBe(1_000_000 as Micro);
 
-	// The newer group arrives first and stays open, so the older one is the oldest buffered group
-	// and too old to wait for.
-	const newest = write(3n, [3_000_000]);
-	await later;
 	// Its first sample is fine; the second rewinds below the delivered group's start.
 	write(2n, [2_000_000, 0]).finish();
-	// Read only once the skip has dropped it, before the newer group's frame is delivered.
 	await rewound;
+	// The newer group stays open, so the older one is the oldest buffered group and too old to wait
+	// for. Read only once the skip has dropped it, before the newer group's frame is delivered.
+	const newest = write(3n, [3_000_000]);
+	await later;
 	newest.finish();
 	track.finish();
 	track.close();
@@ -1211,6 +1222,7 @@ test("Consumer checks a whole decoded batch before a skip drops its group", asyn
 });
 
 test("Consumer aborts a rewind carried by a later arrival", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), delay: { max: 30_000 as Milli } });
 
@@ -1230,6 +1242,7 @@ test("Consumer aborts a rewind carried by a later arrival", async () => {
 // Decode order dips below presentation order inside every group with B-frames. That is not a
 // rewind, so the detector compares against the previous group's start.
 test("Consumer treats B-frame reordering within a group as continuous", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), delay: { max: 30_000 as Milli } });
 
@@ -1251,6 +1264,7 @@ test("Consumer treats B-frame reordering within a group as continuous", async ()
 });
 
 test("Consumer accepts open-GOP leading pictures above the previous group", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), delay: { max: 30_000 as Milli } });
 
@@ -1267,6 +1281,7 @@ test("Consumer accepts open-GOP leading pictures above the previous group", asyn
 // A delivered group still awaiting its done result holds no unread media, so retiring it for
 // the max delay loses nothing.
 test("Consumer reads no gap when retiring a fully delivered group", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), delay: { max: 150 as Milli } });
 
@@ -1286,6 +1301,7 @@ test("Consumer reads no gap when retiring a fully delivered group", async () => 
 
 // An unread trailing endpoint carries no media, so retiring its group loses nothing.
 test("Consumer reads no gap when retiring a group holding only its endpoint", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("video"), delay: { max: 150 as Milli } });
 
@@ -1311,6 +1327,7 @@ test("Consumer reads no gap when retiring a group holding only its endpoint", as
 // A truncated group lost its tail, so retiring it for the max delay is a gap even when the
 // next group is adjacent.
 test("Consumer reads a gap when retiring a truncated group", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), delay: { max: 150 as Milli } });
 
@@ -1333,6 +1350,7 @@ test("Consumer reads a gap when retiring a truncated group", async () => {
 
 // An open group may still have a tail in flight, so adjacency proves nothing when it is retired.
 test("Consumer reads a gap when retiring an open group", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), delay: { max: 150 as Milli } });
 
@@ -1356,6 +1374,7 @@ test("Consumer reads a gap when retiring an open group", async () => {
 // --- Buffered signal ---
 
 test("Consumer buffered signal updates as frames arrive", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), delay: { max: 500 as Milli } });
 
@@ -1379,6 +1398,7 @@ test("Consumer buffered signal updates as frames arrive", async () => {
 // --- Gap recovery ---
 
 test("Consumer recovers from gap in group sequence numbers", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), delay: { max: 100 as Milli } });
 
@@ -1547,6 +1567,7 @@ test("Consumer duration-skips a stalled group once it is covered", async () => {
 });
 
 test("Consumer does not duration-skip when the gap is not covered", async () => {
+	hostTime();
 	// Format whose frames last only 10ms, short of the 33ms gap to the next group.
 	const shortFormat: ContainerFormat = {
 		decode(frame: Uint8Array): Frame[] {
@@ -1631,6 +1652,7 @@ test("Consumer delivers a PTS-contiguous next group whose sequence jumped (Legac
 // an intermediate group may still be in transit, so we must NOT skip ahead and wreck ordering.
 // Delivery resumes only once the missing, timeline-continuous group arrives.
 test("Consumer waits on a PTS gap instead of skipping to a later buffered group (Legacy)", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	// Large max delay so the gap can't be age-skipped during the test window.
 	const consumer = new Consumer(replay(track), {
@@ -1680,6 +1702,7 @@ test("Consumer waits on a PTS gap instead of skipping to a later buffered group 
 // is where its presentation end has to be recorded. Miss it and the stale end from the group before
 // blocks every later contiguous group.
 test("Consumer delivers a contiguous group after one that completed out of order (Legacy)", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), {
 		format: timedLegacy,
@@ -1753,6 +1776,7 @@ test("Consumer plays the head once a waited-out gap exceeds the budget (Legacy)"
 
 // A gap still inside the budget is waited out: the missing group may yet arrive in time.
 test("Consumer waits on a gap within the budget, then plays the head once it exceeds it (Legacy)", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), {
 		format: timedLegacy,
@@ -1792,6 +1816,7 @@ test("Consumer waits on a gap within the budget, then plays the head once it exc
 // dropped something. Group numbers can't answer that: they aren't required to be sequential, and
 // adjacency doesn't rule out a group the max delay check dropped on the way past.
 test("Consumer yields no gap while nothing is dropped", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), delay: { max: 100 as Milli } });
 
@@ -1809,6 +1834,7 @@ test("Consumer yields no gap while nothing is dropped", async () => {
 });
 
 test("Consumer reads a marker group as an end, not a gap", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), delay: { max: 2_000 as Milli } });
 
@@ -1826,6 +1852,7 @@ test("Consumer reads a marker group as an end, not a gap", async () => {
 });
 
 test("Consumer empty groups mean nothing", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), delay: { max: 2_000 as Milli } });
 
@@ -1842,6 +1869,7 @@ test("Consumer empty groups mean nothing", async () => {
 });
 
 test("Consumer reads a latency skip as one gap", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), delay: { max: 0 as Milli } });
 
@@ -1859,6 +1887,7 @@ test("Consumer reads a latency skip as one gap", async () => {
 });
 
 test("Consumer reads a timestamp hole as a gap", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), delay: { max: 0 as Milli } });
 
@@ -1880,6 +1909,7 @@ test("Consumer reads a timestamp hole as a gap", async () => {
 });
 
 test("Consumer reads a shed marker group as a gap", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), delay: { max: 0 as Milli } });
 
@@ -1927,6 +1957,7 @@ test("Consumer yields no gap across a PTS-contiguous group id jump (Legacy)", as
 });
 
 test("a live video frame is delivered before its duration marker arrives", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), {
 		format: new LegacyFormat("video"),
@@ -1973,6 +2004,7 @@ test("audio discontinuity writes no duration marker", async () => {
 
 for (const code of [StreamCode.Cancel, StreamCode.Internal, StreamCode.Old, StreamCode.Evicted, StreamCode(1234)]) {
 	test(`Consumer preserves frames and continues after group reset ${code}`, async () => {
+		hostTime();
 		const track = new Track.Producer("test");
 		const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), delay: { max: 0 as Milli } });
 		const error = spyOn(console, "error").mockImplementation(() => {});
@@ -2036,6 +2068,7 @@ for (const end of [
 }
 
 test("a group reset does not hide a later container decode failure", async () => {
+	hostTime();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data") });
 	try {
@@ -2063,6 +2096,7 @@ for (const end of [
 	new NetError.Session(SessionCode.ProtocolViolation),
 ]) {
 	test(`Consumer drains a permanent buffered gap after track termination: ${end}`, async () => {
+		hostTime();
 		const track = new Track.Producer("test");
 		const consumer = new Consumer(replay(track), {
 			format: new LegacyFormat("data"),

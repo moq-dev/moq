@@ -29,9 +29,9 @@ Rules every child keeps:
 - Never replace one real wait with a shorter or longer one, or with a
   quiet window.
 - Fix a test and its siblings in other languages together.
-- Each JS child removes the opt-outs the
-  [JS guard](/quest/m0/clock-guard/js.md) added, so the guard covers the
-  converted tests.
+- Each JS child removes the bare `hostTime();` opt-outs in its area, so the
+  `bun test` guard (`js/clock/src/preload.ts`) covers the converted tests. An
+  opt-out with a trailing reason comment is real I/O and stays.
 - Each Rust child removes the `kio::clock::host_time()` calls in the
   tests it converts, so `just rs test`'s host-timer guard covers them. A test
   over a real QUIC endpoint or ICE agent is exempt without one, since those
@@ -45,5 +45,3 @@ before starting, since tests land and move.
 - [js/net tests run on a mocked clock](/quest/m1/mock-clock-tests/js-net.md) - about 120 js/net tests stop waiting on real time, through their shared helpers
 - [Other JS tests run on a mocked clock](/quest/m1/mock-clock-tests/js-rest.md) - hang's `settle(20)`, publish's fanout helpers, and the rest of JS
 - [moq-relay's mesh tests run on a mocked clock](/quest/m1/mock-clock-tests/rs-relay.md) - the relay's multi-relay quiet windows and settle sleeps
-- [Transport crate tests run on a mocked clock](/quest/m1/mock-clock-tests/rs-transport.md) - moq-tokio, moq-quic, moq-sock, and moq-uring
-- [Binding and CLI tests run on a mocked clock](/quest/m1/mock-clock-tests/rs-bindings.md) - moq-ffi, moq-c, moq-cli, and kio

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { Milli, Nano, sleep } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { SessionCode, StreamCode, StreamError } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -21,6 +22,7 @@ for (const [version, alpn, requestId] of [
 	[Version.DRAFT_22, ALPN.DRAFT_22, undefined],
 ] as const) {
 	test(`a ${alpn} GOAWAY surfaces its URI and deadline without closing the session`, async () => {
+		hostTime();
 		const pair = createMockTransportPair(alpn);
 		const control = await Stream.open(pair.client, { version });
 		const peer = await Stream.accept(pair.server, version);
@@ -56,6 +58,7 @@ for (const [version, alpn, requestId] of [
 }
 
 test("a server rejects a client GOAWAY that names a redirect", async () => {
+	hostTime();
 	const version = Version.DRAFT_18;
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const control = await Stream.open(pair.client, { version });
@@ -261,6 +264,7 @@ for (const [version, alpn] of [
 
 	for (const end of ["FIN", "reset"] as const) {
 		test(`${alpn} an idle advertisement whose answer ends by ${end} is offered again`, async () => {
+			hostTime();
 			const pair = createMockTransportPair(alpn);
 			const control = await Stream.open(pair.server, { version });
 			await Stream.accept(pair.client, version);

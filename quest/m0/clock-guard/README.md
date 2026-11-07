@@ -38,7 +38,3 @@ sat in root `AGENTS.md` from #4286 until
 `rs/AGENTS.md` and `rs/moq-net/AGENTS.md` say anything. The rule should say
 what a fix looks like: a mocked clock or an awaited event, never a shorter
 or longer real wait, and the same fix in every language's sibling test.
-
-## Required
-
-- [JS tests fail when a real timer fires](/quest/m0/clock-guard/js.md) - `@moq/clock` fails a test whose real-clock timer fires, with today's offenders opted out

@@ -1,5 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { type Installed, Manual, Milli, Nano, now, Second, sleep, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Computed, type Dispose, Effect, type GetPromise, Once, race, Signal } from "./index.ts";
 
 const NO_SUBSCRIPTION_WARNING = "Effect did not subscribe to any signals; it will never rerun.";
@@ -1192,6 +1193,7 @@ function thenable<T>(): PromiseLike<T> & { reactions: number; resolve: (value: T
 
 describe("race", () => {
 	test("settles with the first value to settle", async () => {
+		hostTime();
 		const slow = sleep(Nano.fromMilli(Milli(20))).then(() => "slow" as const);
 		const fast = sleep(Nano.fromMilli(Milli(1))).then(() => "fast" as const);
 		expect(await race([slow, fast])).toBe("fast");

@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { type Micro, Milli, Nano, now, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Container } from "@moq/hang";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
@@ -58,6 +59,7 @@ async function pendingListeners(run: () => Promise<void>): Promise<number> {
 // Frames sleep on the clock once each, so a sleep that keeps anything on a clock that never changes
 // piles it up for the life of the player.
 test("waits on a stable clock leave nothing behind", async () => {
+	hostTime();
 	const sync = new Sync({ delay: Milli(10) });
 	const video = sync.track({ target: new Signal<Milli | undefined>(undefined) });
 	// Let the delay effect run before anchoring.
@@ -80,6 +82,7 @@ test("waits on a stable clock leave nothing behind", async () => {
 // reads each frame, the shared clock anchors on it, and presentation waits on the clock against
 // the effect's teardown. Retention anywhere along it grows with the frame count.
 test("a long subscription through the player path leaves nothing behind", async () => {
+	hostTime();
 	const broadcast = new Moq.Broadcast.Producer();
 	// The track's cache keeps every group here for its fixed 30s idle window whatever maxAge the
 	// track declares, and holds no reactions or listeners while it does.

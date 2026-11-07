@@ -166,6 +166,11 @@ macos-test:
 capture *args:
     bash sh/local.sh cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@" -- -D warnings
 
+# moq-net without its `async` feature: the lib, its tests, and its docs.
+no-async:
+    bash sh/local.sh cargo clippy --locked -p moq-net --no-default-features --lib --tests -- -D warnings
+    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-net --no-default-features --no-deps
+
 # Lint media tests without the device features the gate's test build enables.
 media-defaults:
     bash sh/local.sh cargo clippy --locked -p moq-audio -p moq-video --tests -- -D warnings
@@ -264,7 +269,7 @@ features:
     run bash sh/local.sh cargo check --locked -p moq-boy --no-default-features
     # Alone, since the workspace's `kio/sim` dev-dependencies would unify `kio/async` back in.
     run bash sh/local.sh cargo check --locked --manifest-path rs/moq-auth/Cargo.toml --lib --all-features
-    run bash sh/local.sh cargo check --locked -p moq-hls -p moq-rtmp -p moq-rtc --no-default-features --all-targets
+    run bash sh/local.sh cargo check --locked -p moq-hls -p moq-rtmp -p moq-webrtc --no-default-features --all-targets
     run bash sh/local.sh cargo clippy --locked --workspace {{ no_fuzz }} --all-targets --all-features -- -D warnings
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --workspace {{ no_fuzz }} --all-features --no-deps
     run bash sh/rs/nextest.sh cargo nextest run --locked --workspace {{ no_fuzz }} --all-targets --all-features
@@ -453,7 +458,7 @@ render-sw:
 
 # Run the ignored mDNS tests, which multicast on the host's network interfaces.
 multicast:
-    just rs test -p moq-tokio --features mdns --lib --run-ignored only -E 'test(=mdns::tests::apps_partition_discovery) | test(/^mdns::tests::daemon_/)'
+    just rs test -p moq-tokio --features mdns --lib --run-ignored only -E 'test(=mdns::tests::same_app_peers_find_each_other) | test(/^mdns::tests::daemon_/)'
     just rs test -p moq-relay --features cluster-lan --run-ignored only -E 'test(/^lan_mesh::/)'
 
 # Run the long TS recovery arms; a failing arm keeps its export and ledgers under $HARNESS_RUNS.

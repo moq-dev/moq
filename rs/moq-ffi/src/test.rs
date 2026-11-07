@@ -3295,24 +3295,29 @@ async fn a_hidden_route_is_invisible_until_announced() {
 		.expect("an unroutable request answers at once");
 	assert!(unroutable.is_err(), "an unannounced broadcast is unroutable");
 
+	// Creating a route updates every cursor at once, so a first poll sees anything it advertised.
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let pending = tokio::spawn(async move { announced.next().await });
+	let mut pending = std::pin::pin!(announced.next());
 	let waiting = consumer.follow("live".into(), None).unwrap();
-	let waited = tokio::spawn(async move { waiting.available().await });
-	kio::clock::sleep(std::time::Duration::from_millis(50)).await;
-	assert!(!pending.is_finished(), "a hidden route must not advertise the path");
-	assert!(!waited.is_finished(), "an unannounced broadcast must not resolve");
+	let mut waited = std::pin::pin!(waiting.available());
+	let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+	assert!(
+		pending.as_mut().poll(&mut cx).is_pending(),
+		"a hidden route must not advertise the path"
+	);
+	assert!(
+		waited.as_mut().poll(&mut cx).is_pending(),
+		"an unannounced broadcast must not resolve"
+	);
 
 	route.announce().unwrap();
 	kio::clock::timeout(TIMEOUT, waited)
 		.await
 		.expect("timed out waiting for the announced broadcast")
-		.expect("task")
 		.expect("the announced broadcast resolves");
 	let update = kio::clock::timeout(TIMEOUT, pending)
 		.await
 		.expect("timed out waiting for announce")
-		.expect("task")
 		.expect("announce reaches the cursor")
 		.expect("the cursor is still open");
 	assert!(
@@ -4022,7 +4027,7 @@ async fn video_raw_publish_consume() {
 			output: MoqVideoEncoderOutput {
 				codec: MoqVideoCodec::H264,
 				bitrate: None,
-				gop: None,
+				join: None,
 				// Software so the test is deterministic everywhere: `Auto` would
 				// reach for a hardware backend that CI runners don't have.
 				kind: MoqVideoEncoderKind::Software,
@@ -4148,7 +4153,7 @@ async fn video_decode_frame_ownership() {
 			output: MoqVideoEncoderOutput {
 				codec: MoqVideoCodec::H264,
 				bitrate: None,
-				gop: None,
+				join: None,
 				// Software so the encode is deterministic everywhere.
 				kind: MoqVideoEncoderKind::Software,
 			},
@@ -4299,7 +4304,7 @@ async fn video_decode_start() {
 			output: MoqVideoEncoderOutput {
 				codec: MoqVideoCodec::H264,
 				bitrate: None,
-				gop: None,
+				join: None,
 				kind: MoqVideoEncoderKind::Software,
 			},
 			track: Some("camera".into()),
@@ -4422,7 +4427,7 @@ async fn video_raw_publish_from_many_threads() {
 				// An explicit ceiling so the retunes below stay under the rate the
 				// encoder opened at, which openh264 requires.
 				bitrate: Some(1_000_000),
-				gop: None,
+				join: None,
 				kind: MoqVideoEncoderKind::Software,
 			},
 			track: None,
@@ -4500,7 +4505,7 @@ async fn video_raw_publish_rejects_bad_frames() {
 	let output = || MoqVideoEncoderOutput {
 		codec: MoqVideoCodec::H264,
 		bitrate: None,
-		gop: None,
+		join: None,
 		kind: MoqVideoEncoderKind::Software,
 	};
 
@@ -4517,6 +4522,24 @@ async fn video_raw_publish_rejects_bad_frames() {
 					..input(320, 240)
 				},
 				output: output(),
+				track: None,
+				bandwidth: None,
+				lower: None,
+			}
+		)
+		.is_err()
+	);
+
+	// So is a zero join, which would open no group.
+	assert!(
+		crate::video::MoqVideoProducer::new(
+			&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+			crate::video::MoqVideoProducerOptions {
+				input: input(320, 240),
+				output: MoqVideoEncoderOutput {
+					join: Some(std::time::Duration::ZERO),
+					..output()
+				},
 				track: None,
 				bandwidth: None,
 				lower: None,
@@ -6169,11 +6192,11 @@ async fn follow_retries_a_dropped_wait() {
 	served.broadcast().unwrap().close().unwrap();
 }
 
-/// Another instance taking over while `available()` resolves is the one it hands out, so the
-/// restart that announced it must not hand it out again while the caller holds it. `dynamic_at`
-/// is where the route the wait first resolves through covers the path: above it, the takeover's
-/// restart lands while resolving; at it, the origin holds that restart for
-/// the default [`moq_net::origin::Config::update_hold`].
+/// Another instance taking over while `available()` resolves is the one it hands out, and
+/// nothing follows it. `dynamic_at` is where the route the wait first resolves through covers
+/// the path: above it, the takeover's restart lands while resolving; at it, the origin holds
+/// that restart. The hold runs on the FFI driver's clock, so moq-net's follow tests prove on a
+/// simulated clock that the held restart never hands it out again.
 async fn follow_hands_out_a_takeover_once(dynamic_at: &str) {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let dynamic = serve(&origin, dynamic_at);
@@ -6193,10 +6216,12 @@ async fn follow_hands_out_a_takeover_once(dynamic_at: &str) {
 		.unwrap()
 		.unwrap();
 
-	let next = tokio::spawn(async move { followed.available().await });
-	kio::clock::sleep(moq_net::origin::Config::default().update_hold * 2).await;
-	assert!(!next.is_finished(), "the takeover was handed out twice");
-	next.abort();
+	let next = std::pin::pin!(followed.available());
+	assert!(
+		next.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+			.is_pending(),
+		"the takeover was handed out twice"
+	);
 	takeover.close().unwrap();
 }
 
@@ -6335,41 +6360,9 @@ async fn an_instance_pins_request_and_follow() {
 	second.broadcast().unwrap().close().unwrap();
 }
 
-/// The route a wait resolves through leaving, and another instance arriving before it resolves,
-/// reach the follower as an end and a start after the wait hands the newcomer out. That start
-/// must not hand it out again.
-#[tokio::test]
-async fn follow_hands_out_a_gap_while_resolving_once() {
-	kio::clock::host_time();
-	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let dynamic = serve(&origin, "");
-	let followed = origin.consume().follow("live".into(), None).unwrap();
-
-	let waiting = followed.clone();
-	let first = tokio::spawn(async move { waiting.available().await });
-	let _unanswered = kio::clock::timeout(TIMEOUT, requested(&dynamic))
-		.await
-		.expect("the wait never asked for the broadcast")
-		.unwrap();
-	dynamic.cancel();
-	kio::clock::sleep(moq_net::origin::Config::default().update_hold * 2).await;
-	let arrival = create_announced(&origin, "live");
-	let _held = kio::clock::timeout(TIMEOUT, first)
-		.await
-		.expect("the arrival never resolved")
-		.unwrap()
-		.unwrap();
-
-	let next = tokio::spawn(async move { followed.available().await });
-	kio::clock::sleep(moq_net::origin::Config::default().update_hold * 2).await;
-	assert!(!next.is_finished(), "the arrival was handed out twice");
-	next.abort();
-	arrival.close().unwrap();
-}
-
 /// Dropping a handed-out handle changes nothing about the path, so the follower hands out
-/// nothing until another instance takes it over. The takeover's restart reached the follower
-/// before its resolution handed the handle out, so no restart is owed.
+/// nothing until another instance takes it over. moq-net's follow tests prove on a simulated
+/// clock that nothing comes past the origin's update hold either.
 #[tokio::test]
 async fn follow_waits_for_another_instance_after_a_dropped_takeover() {
 	kio::clock::host_time();
@@ -6392,14 +6385,17 @@ async fn follow_waits_for_another_instance_after_a_dropped_takeover() {
 			.unwrap(),
 	);
 
-	let hold = moq_net::origin::Config::default().update_hold * 2;
+	let mut available = std::pin::pin!(followed.available());
 	assert!(
-		kio::clock::timeout(hold, followed.available()).await.is_err(),
+		available
+			.as_mut()
+			.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+			.is_pending(),
 		"the dropped takeover was handed out again"
 	);
 
 	let next = create_announced(&origin, "live");
-	kio::clock::timeout(TIMEOUT, followed.available())
+	kio::clock::timeout(TIMEOUT, available)
 		.await
 		.expect("the next instance was never handed out")
 		.unwrap()
@@ -7458,15 +7454,18 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 		.expect("status errored");
 	assert_eq!(status.phase, MoqConnectionPhase::Connected);
 
-	// Give up on a status that isn't coming. The window is generous on purpose:
-	// the abandoned call has to actually reach its await for this to prove
-	// anything, and a spawn that never got there would pass either way.
-	assert!(
-		kio::clock::timeout(Duration::from_millis(200), cs.state_changed(status.revision))
-			.await
-			.is_err(),
-		"no transition was pending, so this must be the caller giving up",
-	);
+	// Give up on a status that isn't coming, once the call has parked on it: a call that
+	// never reached its await would pass either way.
+	let abandoned = {
+		let cs = cs.clone();
+		let revision = status.revision;
+		spawn_parked(async move { cs.state_changed(revision).await }).await
+	};
+	abandoned.abort();
+	match abandoned.await {
+		Err(err) => assert!(err.is_cancelled()),
+		Ok(status) => panic!("no transition was pending, got {status:?}"),
+	}
 
 	// The transition the abandoned call would have eaten.
 	server_session.cancel(0);
@@ -7510,7 +7509,7 @@ async fn video_encoder_follows_a_shrinking_grant() {
 			output: MoqVideoEncoderOutput {
 				codec: MoqVideoCodec::H264,
 				bitrate: Some(4_000_000),
-				gop: None,
+				join: None,
 				kind: MoqVideoEncoderKind::Software,
 			},
 			track: Some("camera".into()),
@@ -7569,7 +7568,7 @@ fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::
 		MoqVideoEncoderOutput {
 			codec: MoqVideoCodec::H264,
 			bitrate: Some(bitrate),
-			gop: None,
+			join: None,
 			kind: MoqVideoEncoderKind::Software,
 		},
 	)
@@ -9389,17 +9388,14 @@ async fn write_ahead_of_a_slow_reader(
 
 /// A writer awaiting `ready` stops a window ahead of a stalled reader instead of running
 /// past the cache, and the reader then takes every frame, as TCP backpressure would.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn ready_paces_a_writer_behind_a_slow_reader() {
-	kio::clock::host_time();
 	const FRAMES: usize = 48;
 	let (written, writer, reader, _broadcast, _track) = write_ahead_of_a_slow_reader(FRAMES, true).await;
 
-	// Let the writer run as far as it can while the reader stalls.
-	for _ in 0..50 {
-		ffi_caught_up().await;
-		kio::clock::sleep(Duration::from_millis(2)).await;
-	}
+	// The writer polls in place on this runtime, whose paused clock moves only once it parks:
+	// it has run as far as it can while the reader stalls.
+	kio::clock::sleep(Duration::from_millis(1)).await;
 	let ahead = written.load(std::sync::atomic::Ordering::SeqCst);
 	assert!(!writer.is_finished(), "the writer never waited");
 	assert!(
@@ -9460,7 +9456,6 @@ async fn ready_after_abort_is_closed() {
 /// Two calls waiting on the same group both wake once the reader drains, though the group
 /// keeps only one writer waker.
 #[tokio::test]
-#[ignore = "flaky under load: the reader can drain every frame before both ready calls finish; see quest/m0/test-flakes-2/ffi-concurrent-ready.md"]
 async fn concurrent_ready_calls_all_wake() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("tcp".into(), None).unwrap();
@@ -9489,9 +9484,8 @@ async fn concurrent_ready_calls_all_wake() {
 	];
 	assert!(waits.iter().all(|wait| !wait.is_finished()), "the window was not full");
 
-	// Every read wakes both calls. Run them before the next read, and read no more than
-	// was written: draining the window faster than the runtime polls a woken call must
-	// not leave this loop waiting on a group nobody writes again.
+	// A read that makes room wakes both calls, which run when this task yields. Read no
+	// more than was written: the group never ends, so a read past its last frame waits forever.
 	for _ in 0..24 {
 		if waits.iter().all(|wait| wait.is_finished()) {
 			break;
@@ -9502,7 +9496,6 @@ async fn concurrent_ready_calls_all_wake() {
 			.unwrap()
 			.expect("the group ended early");
 		tokio::task::yield_now().await;
-		ffi_caught_up().await;
 	}
 	for wait in waits {
 		kio::clock::timeout(TIMEOUT, wait)

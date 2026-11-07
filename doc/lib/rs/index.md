@@ -25,10 +25,9 @@ missing required CPU feature before starting transport cryptography.
 | --- | --- |
 | [moq-net](/lib/rs/moq-net) | The pub/sub layer: sessions, origins, broadcasts, tracks, groups, frames. Transport-agnostic. |
 | [moq-pattern](https://docs.rs/moq-pattern) | Path patterns such as `room/**`. Re-exported by moq-net and moq-auth. |
-| [moq-tokio](https://docs.rs/moq-tokio) | Connects and listens over QUIC, WebTransport, WebSocket, TCP, or Unix sockets, from config or CLI flags, and runs WebRTC data channels that the caller signals (`webrtc` feature). With default features off, `driver` builds a Tokio QUIC stack, with rind cryptography, without MoQ. |
+| [moq-tokio](https://docs.rs/moq-tokio) | Connects and listens over QUIC, WebTransport, WebSocket, TCP, or Unix sockets, from config or CLI flags, and runs MoQ over a qmux session established elsewhere (`qmux` feature). With default features off, `driver` builds a Tokio QUIC stack, with rind cryptography, without MoQ. |
 | [qmux](https://docs.rs/qmux) | QUIC streams, datagrams, and flow control over TCP, TLS, WebSocket, and Unix sockets, on moq-quic's state machine. |
 | [moq-sock](https://docs.rs/moq-sock) | Socket binding and CPU pinning for thread-per-core listeners. |
-| [moq-ice](https://github.com/moq-dev/moq/tree/main/rs/moq-ice) | Internal infrastructure with no stability promise; the ICE agent behind native WebRTC: drives a str0m connection over UDP, with a STUN client. |
 | [moq-uring](https://docs.rs/moq-uring) | Experimental Linux io\_uring server for moq-lite. |
 | [hang](/lib/rs/hang) | The media layer: catalog, containers, ordered frame delivery. |
 | [moq-mux](/lib/rs/moq-mux) | Import and export fMP4/CMAF, MPEG-TS, Matroska, FLV, and Annex-B. |
@@ -44,7 +43,7 @@ missing required CPU feature before starting transport cryptography.
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |
 | [moq-stats](https://docs.rs/moq-stats) | Publish and consume relay traffic counters as tracks. |
 | [kio](/lib/rs/kio) | The async primitives everything polls through, and one clock for time and timers on tokio and a deterministic test simulator. |
-| [moq-hls](https://docs.rs/moq-hls), [moq-rtmp](https://docs.rs/moq-rtmp), [moq-srt](https://docs.rs/moq-srt), [moq-rtsp](https://github.com/moq-dev/moq/tree/main/rs/moq-rtsp), [moq-rtc](https://docs.rs/moq-rtc) | The [gateways](/bin/), as libraries you can embed with your own auth. |
+| [moq-hls](https://docs.rs/moq-hls), [moq-rtmp](https://docs.rs/moq-rtmp), [moq-srt](https://docs.rs/moq-srt), [moq-rtsp](https://github.com/moq-dev/moq/tree/main/rs/moq-rtsp), [moq-webrtc](https://github.com/moq-dev/moq/tree/main/rs/moq-webrtc) | The [gateways](/bin/), as libraries you can embed with your own auth. moq-webrtc's `p2p` feature also runs MoQ over a data channel with a browser peer, signaled by the caller. |
 | [moq-ffi](https://docs.rs/moq-ffi), [moq-c](/lib/c/) | The UniFFI core behind the language bindings, and the C ABI. |
 | [moq-relay](/bin/relay/), [moq-cli](/bin/cli) | The binaries, also usable as crates. |
 | [web-transport](https://github.com/moq-dev/web-transport) | The WebTransport traits and the browser transport, in a sibling repository. |

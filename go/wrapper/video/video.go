@@ -28,14 +28,8 @@ type FrameRate = ffi.MoqVideoFrameRate
 // EncoderInput declares the pixel layout, resolution, and framerate of written frames.
 type EncoderInput = ffi.MoqVideoEncoderInput
 
-// EncoderOutput configures the codec, bitrate, group mode, and backend preference.
+// EncoderOutput configures the codec, bitrate, join, and backend preference; a nil Join keyframes every 2 seconds.
 type EncoderOutput = ffi.MoqVideoEncoderOutput
-
-// Gop is how pictures are split into independently decodable groups; a nil EncoderOutput.Gop keyframes every ~2 seconds.
-type Gop = ffi.MoqVideoGop
-
-// Keyframe starts a group with a keyframe every interval frames.
-func Keyframe(interval uint32) Gop { return ffi.MoqVideoGopKeyframe{Interval: interval} }
 
 // Frame is one raw picture with its presentation timestamp.
 type Frame = ffi.MoqVideoFrame

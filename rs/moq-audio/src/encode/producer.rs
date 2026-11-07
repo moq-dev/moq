@@ -39,10 +39,11 @@ pub struct Options {
 	/// can't at all, and at `hang`'s priorities audio outranks video, so it is only
 	/// ever squeezed on a link that can't carry audio alone.
 	pub bandwidth: moq_net::bandwidth::Allocator,
-	/// The minimum audio carried by each group. The packet that reaches it closes
-	/// the group, and the next packet opens a new one.
+	/// The time between join points: the minimum audio carried by each group. The
+	/// packet that reaches it closes the group, and the next packet opens a new one,
+	/// so a positive join shorter than a packet puts every packet in its own group.
 	///
-	/// Defaults to 20 ms; zero puts every packet in its own group. Each group costs the relay a stream
+	/// Defaults to 20 ms; [`Producer::new`] refuses zero. Each group costs the relay a stream
 	/// and its bookkeeping, so raising this trades per-group overhead for coarser
 	/// loss: a viewer that falls behind skips a whole group, and a lost packet
 	/// stalls the rest of its group until retransmitted. Packets still forward as
@@ -51,7 +52,7 @@ pub struct Options {
 	/// per group, at the cost of encoder latency. An unfinished group remains open
 	/// across a pause or [`Producer::reanchor`] until the next write; use
 	/// [`Producer::discontinuity`] to close it when capture stops.
-	pub group_duration: std::time::Duration,
+	pub join: std::time::Duration,
 }
 
 impl Default for Options {
@@ -60,7 +61,7 @@ impl Default for Options {
 			track: None,
 			config: Config::default(),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
-			group_duration: std::time::Duration::from_millis(20),
+			join: std::time::Duration::from_millis(20),
 		}
 	}
 }
@@ -131,6 +132,9 @@ impl Reserved {
 		catalog: moq_mux::catalog::Producer<E>,
 		options: &Options,
 	) -> Result<Self, Error> {
+		if options.join.is_zero() {
+			return Err(Error::Unsupported("a join of zero opens no group".to_owned()));
+		}
 		let track = match &options.track {
 			// The catalog's info carries the microsecond timescale audio hang frames stamp, so
 			// Lite05 subscribers know what scale to expect and the model layer accepts
@@ -185,7 +189,7 @@ impl Reserved {
 		}
 		self.track.set(catalog)?;
 
-		let group_samples = options.group_duration.as_nanos() * u128::from(encoder.codec_rate());
+		let group_samples = options.join.as_nanos() * u128::from(encoder.codec_rate());
 		let group_samples = u64::try_from(group_samples.div_ceil(1_000_000_000)).unwrap_or(u64::MAX);
 
 		Ok(Registered {
@@ -1199,7 +1203,7 @@ mod tests {
 	/// Terminal Opus lookahead samples survive both exact-frame and partial-frame input.
 	#[tokio::test]
 	async fn finish_publishes_the_opus_lookahead_tail() {
-		for (group_ms, frames) in [(0, 960), (0, 860), (100, 2_880), (100, 2_780)] {
+		for (group_ms, frames) in [(1, 960), (1, 860), (100, 2_880), (100, 2_780)] {
 			let input = Input {
 				format: Format::F32,
 				sample_rate: 48_000,
@@ -1207,7 +1211,7 @@ mod tests {
 			};
 			let options = Options {
 				track: Some("audio".to_string()),
-				group_duration: Duration::from_millis(group_ms),
+				join: Duration::from_millis(group_ms),
 				config: Config {
 					layout: Layout::Mono,
 					bitrate: Some(moq_net::bandwidth::Rate::from_bps(128_000)),
@@ -1622,11 +1626,28 @@ mod tests {
 		pts
 	}
 
-	/// The packet that reaches the group duration closes its group, so a minimum that
-	/// isn't a whole number of packets rounds up.
+	/// A join of zero would open a group per packet, so the producer refuses it
+	/// before advertising a track that would never carry the requested layout.
 	#[tokio::test]
-	async fn group_duration_packs_packets_per_group() {
-		for (group_ms, expected) in [(0, [1, 1]), (30, [2, 2]), (100, [5, 5])] {
+	async fn a_zero_join_is_refused() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let options = Options {
+			join: Duration::ZERO,
+			..Options::default()
+		};
+		let Err(err) = Producer::new(&mut broadcast, catalog.clone(), Input::default(), &options) else {
+			panic!("a zero join cannot open");
+		};
+		assert!(matches!(err, Error::Unsupported(_)), "unexpected error: {err:?}");
+		assert!(catalog.snapshot().audio.renditions.is_empty());
+	}
+
+	/// The packet that reaches the join closes its group, so a join that isn't a
+	/// whole number of packets rounds up, and one shorter than a packet groups each.
+	#[tokio::test]
+	async fn join_packs_packets_per_group() {
+		for (group_ms, expected) in [(1, [1, 1]), (30, [2, 2]), (100, [5, 5])] {
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 			let consumer = broadcast.consume();
@@ -1637,7 +1658,7 @@ mod tests {
 			};
 			let options = Options {
 				track: Some("audio".to_string()),
-				group_duration: Duration::from_millis(group_ms),
+				join: Duration::from_millis(group_ms),
 				..Options::default()
 			};
 			let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
@@ -1717,7 +1738,7 @@ mod tests {
 
 	/// Timeline breaks close a partial group and reset the resumed group's packet count.
 	#[tokio::test]
-	async fn group_duration_restarts_after_a_timeline_break() {
+	async fn join_restarts_after_a_timeline_break() {
 		for deferred in [false, true] {
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -1729,7 +1750,7 @@ mod tests {
 			};
 			let options = Options {
 				track: Some("audio".to_string()),
-				group_duration: Duration::from_millis(100),
+				join: Duration::from_millis(100),
 				..Options::default()
 			};
 			let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();

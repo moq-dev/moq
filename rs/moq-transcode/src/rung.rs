@@ -126,9 +126,9 @@ impl Rung {
 		config.kind = self.encoder.clone();
 		config.color = Some(color);
 		config.resize = Some(self.resize);
-		// Every source group boundary is a cut; the keyframe interval is only a
-		// backstop against pathologically long source groups.
-		config.gop = moq_video::encode::Gop::keyframe_every(std::time::Duration::from_secs(8), framerate);
+		// Every source group boundary is a cut; the join is only a backstop
+		// against pathologically long source groups.
+		config.join = std::time::Duration::from_secs(8);
 		Ok(moq_video::encode::Sink::open(&config).await?)
 	}
 }

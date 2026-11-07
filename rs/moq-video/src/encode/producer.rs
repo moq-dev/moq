@@ -412,10 +412,10 @@ async fn publish_capture_from<E: CatalogExt, S: CaptureSource>(
 		probe_config.kind = options.kind.clone();
 		probe_config.color = camera.color();
 		let rendition = probe_config.probe().await?;
-		// The encoder is built from the same defaults, so the probe's GOP is the one it emits.
-		Ok::<_, Error>((rendition, probe_config.gop.duration(probe_config.framerate), camera))
+		// The encoder is built from the same defaults, so the probe's join is the one it emits.
+		Ok::<_, Error>((rendition, probe_config.effective_join(), camera))
 	};
-	let (rendition, gop, camera) = match rendition.await {
+	let (rendition, join, camera) = match rendition.await {
 		Ok(probed) => probed,
 		Err(err) => {
 			// A track that already ended has nobody left to tell.
@@ -427,7 +427,7 @@ async fn publish_capture_from<E: CatalogExt, S: CaptureSource>(
 	// The importer consumes the track, so keep a handle to abort it if setup fails,
 	// then drop it so it never outlives the importer's.
 	let fallback = track.clone();
-	let mut producer = match Producer::with_track(track, catalog.reserve().with_interval(gop), rendition) {
+	let mut producer = match Producer::with_track(track, catalog.reserve().with_interval(join), rendition) {
 		Ok(producer) => producer,
 		Err(err) => {
 			let _ = fallback.abort(moq_net::Error::Transport(err.to_string()));
@@ -907,7 +907,7 @@ mod tests {
 
 		let mut producer = Producer::new(
 			broadcast,
-			catalog.reserve().with_interval(config.gop.duration(config.framerate)),
+			catalog.reserve().with_interval(config.effective_join()),
 			config.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -980,7 +980,7 @@ mod tests {
 		config.kind = encoder::Kind::Software;
 		let mut producer = Producer::with_track(
 			track,
-			catalog.reserve().with_interval(config.gop.duration(config.framerate)),
+			catalog.reserve().with_interval(config.effective_join()),
 			config.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -1010,7 +1010,7 @@ mod tests {
 		initial.kind = encoder::Kind::Software;
 		let mut producer = Producer::new(
 			broadcast,
-			catalog.reserve().with_interval(initial.gop.duration(initial.framerate)),
+			catalog.reserve().with_interval(initial.effective_join()),
 			initial.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -1083,7 +1083,7 @@ mod tests {
 		config.kind = encoder::Kind::Software;
 		let _producer = Producer::new(
 			broadcast,
-			catalog.reserve().with_interval(config.gop.duration(config.framerate)),
+			catalog.reserve().with_interval(config.effective_join()),
 			config.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -1129,7 +1129,7 @@ mod tests {
 		let mut subscriber = track.subscribe(None);
 		let mut producer = Producer::with_track(
 			track,
-			catalog.reserve().with_interval(config.gop.duration(config.framerate)),
+			catalog.reserve().with_interval(config.effective_join()),
 			config.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -1242,7 +1242,7 @@ mod tests {
 				probe.kind = encoder::Kind::Software;
 				let mut producer = Producer::with_track(
 					track,
-					catalog.reserve().with_interval(probe.gop.duration(probe.framerate)),
+					catalog.reserve().with_interval(probe.effective_join()),
 					probe.probe().await.unwrap(),
 				)
 				.unwrap();
@@ -2002,9 +2002,7 @@ mod tests {
 			rendition.kind = encoder::Kind::Software;
 			let mut producer = Producer::with_track(
 				track,
-				catalog
-					.reserve()
-					.with_interval(rendition.gop.duration(rendition.framerate)),
+				catalog.reserve().with_interval(rendition.effective_join()),
 				rendition.probe().await.unwrap(),
 			)
 			.unwrap();
@@ -2060,9 +2058,7 @@ mod tests {
 			rendition.kind = encoder::Kind::Software;
 			let mut producer = Producer::with_track(
 				track,
-				catalog
-					.reserve()
-					.with_interval(rendition.gop.duration(rendition.framerate)),
+				catalog.reserve().with_interval(rendition.effective_join()),
 				rendition.probe().await.unwrap(),
 			)
 			.unwrap();

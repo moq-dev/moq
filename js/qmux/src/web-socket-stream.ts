@@ -144,7 +144,7 @@ function validCloseCode(code: number | undefined): code is number {
  *  The mark is read live via `highWaterMark()` on every check, so a runtime
  *  resize (see {@link WebSocketStream.setHighWaterMark}) takes effect mid-drain.
  *  Returns `undefined` synchronously when there's already room - no microtask
- *  on the hot path, so `writer.ready` stays resolved when the socket is keeping up. */
+ *  on the hot path. */
 function drain(ws: WebSocketLike, highWaterMark: () => number): Promise<void> | undefined {
 	if (ws.bufferedAmount <= highWaterMark()) return undefined;
 	return (async () => {
@@ -155,6 +155,11 @@ function drain(ws: WebSocketLike, highWaterMark: () => number): Promise<void> | 
 			await sleep(Nano.fromMilli(Milli(10)));
 		}
 	})();
+}
+
+/** The bytes `chunk` adds to `bufferedAmount`. */
+function byteLength(chunk: WebSocketStreamData): number {
+	return typeof chunk === "string" ? new TextEncoder().encode(chunk).byteLength : chunk.byteLength;
 }
 
 /** A `WebSocketStream` implemented over a plain `WebSocket`. */
@@ -198,16 +203,37 @@ export class WebSocketStream implements WebSocketStreamLike {
 			cancel: () => ws.close(),
 		});
 
-		const writable = new WritableStream<WebSocketStreamData>({
-			write: (chunk) => {
-				ws.send(chunk);
-				return drain(ws, () => this.#highWaterMark);
+		// Bytes written to the writable but not yet handed to the socket, and each queued
+		// chunk's size as measured on entry, since a resizable buffer can change it later.
+		let queued = 0;
+		const sizes: number[] = [];
+		const writable = new WritableStream<WebSocketStreamData>(
+			{
+				write: (chunk) => {
+					queued -= sizes.shift() ?? 0;
+					ws.send(chunk);
+					return drain(ws, () => this.#highWaterMark);
+				},
+				// A WebSocket has no half-close, so closing/aborting the writable closes
+				// the whole socket. Without this, `writer.close()` would leave it open.
+				close: () => ws.close(),
+				abort: () => ws.close(),
 			},
-			// A WebSocket has no half-close, so closing/aborting the writable closes
-			// the whole socket. Without this, `writer.close()` would leave it open.
-			close: () => ws.close(),
-			abort: () => ws.close(),
-		});
+			{
+				// A chunk counts only when it takes the backlog past the mark, so `desiredSize`
+				// reaches 0 only once the socket is behind. Counting every chunk would report
+				// backpressure for each write in flight, however small the backlog.
+				highWaterMark: 1,
+				// The DOM typing admits `undefined`, which a WebSocket can't send.
+				size: (chunk) => {
+					if (chunk === undefined) throw new TypeError("WebSocketStream cannot send undefined");
+					const size = byteLength(chunk);
+					sizes.push(size);
+					queued += size;
+					return ws.bufferedAmount + queued > this.#highWaterMark ? 1 : 0;
+				},
+			},
+		);
 
 		ws.onopen = () => {
 			opened.resolve({ readable, writable, extensions: ws.extensions, protocol: ws.protocol });

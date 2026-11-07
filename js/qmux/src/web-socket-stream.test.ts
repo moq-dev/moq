@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Instant, Milli, Nano, now, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import {
 	openWebSocketStream,
 	type WebSocketConstructor,
@@ -34,6 +35,7 @@ class FakeWebSocket implements WebSocketLike {
 
 	send(data: string | ArrayBufferLike | ArrayBufferView): void {
 		this.sent.push(data);
+		this.bufferedAmount += typeof data === "string" ? data.length : data.byteLength;
 	}
 	close(code?: number, reason?: string): void {
 		this.closeArgs = { code, reason };
@@ -95,6 +97,7 @@ describe("WebSocketStream ponyfill", () => {
 	});
 
 	test("writes are sent and backpressure follows bufferedAmount", async () => {
+		hostTime();
 		const wss = new WebSocketStream("wss://x", { webSocket: ctor, highWaterMark: 100 });
 		const ws = FakeWebSocket.last as FakeWebSocket;
 		ws.open();
@@ -121,7 +124,29 @@ describe("WebSocketStream ponyfill", () => {
 		expect(settled).toBe(true);
 	});
 
+	test("only a backlog past the mark is backpressure, not a write in flight", async () => {
+		const wss = new WebSocketStream("wss://x", { webSocket: ctor, highWaterMark: 100 });
+		const ws = FakeWebSocket.last as FakeWebSocket;
+		ws.open();
+		const { writable } = await wss.opened;
+		const writer = writable.getWriter();
+
+		// A write in flight under the mark leaves room, so a datagram behind it still goes.
+		const writes = [writer.write(new Uint8Array(40))];
+		expect(writer.desiredSize).toBeGreaterThan(0);
+		// A burst counts the bytes still queued behind it with what the socket buffers.
+		writes.push(writer.write(new Uint8Array(40)));
+		expect(writer.desiredSize).toBeGreaterThan(0);
+		writes.push(writer.write(new Uint8Array(40)));
+		expect(writer.desiredSize).toBe(0);
+
+		ws.bufferedAmount = 0;
+		await Promise.all(writes);
+		expect(writer.desiredSize).toBeGreaterThan(0);
+	});
+
 	test("setHighWaterMark resizes backpressure live (mid-drain)", async () => {
+		hostTime();
 		const wss = new WebSocketStream("wss://x", { webSocket: ctor, highWaterMark: 100 });
 		const ws = FakeWebSocket.last as FakeWebSocket;
 		ws.open();
@@ -257,6 +282,7 @@ describe("WebSocketStream.adopt", () => {
 	});
 
 	test("backpressure applies to an adopted socket", async () => {
+		hostTime();
 		const ws = accepted();
 		ws.bufferedAmount = 100;
 		const wss = WebSocketStream.adopt(ws, { highWaterMark: 10 });
