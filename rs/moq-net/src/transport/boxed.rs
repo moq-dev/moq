@@ -69,7 +69,7 @@ impl Session {
 		let listed = Arc::new(Listed {
 			state: Mutex::new(ListedState {
 				stream,
-				group: options.group.map(|group| group.priority.clone()),
+				group: options.group.map(|group| group.rank.clone()),
 				priority: options.priority,
 			}),
 		});
@@ -198,14 +198,34 @@ impl super::Error for Error {
 /// A boxed send group. It only ever goes back to the session that opened it.
 pub(crate) struct Group {
 	inner: Box<dyn ErasedGroup>,
-	/// Shared by every clone, like the group itself, so an open ranks by its current priority.
-	priority: Arc<std::sync::atomic::AtomicI64>,
+	/// Shared by every clone, like the group itself, so an open ranks by the group's current
+	/// priority and turn.
+	rank: Arc<GroupRank>,
+}
+
+/// Where a send group ranks against the session's others: its priority, then its turn.
+pub(super) struct GroupRank {
+	priority: std::sync::atomic::AtomicI64,
+	/// When the group last took stream credit, counted by its session's [`open::Lines`].
+	turn: AtomicU64,
+}
+
+impl GroupRank {
+	/// The group's priority and turn.
+	pub(super) fn read(&self) -> (i64, u64) {
+		(self.priority.load(Ordering::Relaxed), self.turn.load(Ordering::Relaxed))
+	}
 }
 
 impl Group {
-	/// The group's current priority.
-	pub(crate) fn priority(&self) -> i64 {
-		self.priority.load(Ordering::Relaxed)
+	/// The group's priority and turn, as its opens rank.
+	pub(super) fn rank(&self) -> (i64, u64) {
+		self.rank.read()
+	}
+
+	/// Mark the group as having just taken stream credit, at `turn`.
+	pub(super) fn take_turn(&self, turn: u64) {
+		self.rank.turn.store(turn, Ordering::Relaxed);
 	}
 }
 
@@ -213,14 +233,14 @@ impl Clone for Group {
 	fn clone(&self) -> Self {
 		Self {
 			inner: self.inner.clone_box(),
-			priority: self.priority.clone(),
+			rank: self.rank.clone(),
 		}
 	}
 }
 
 impl poll::SendGroup for Group {
 	fn set_priority(&mut self, priority: i64) {
-		self.priority.store(priority, Ordering::Relaxed);
+		self.rank.priority.store(priority, Ordering::Relaxed);
 		self.inner.set_priority(priority)
 	}
 }
@@ -291,8 +311,8 @@ pub(super) struct Listed {
 
 struct ListedState {
 	stream: Box<dyn ErasedSend>,
-	/// The priority of the send group the stream is in, shared with the group's handles.
-	group: Option<Arc<std::sync::atomic::AtomicI64>>,
+	/// The rank of the send group the stream is in, shared with the group's handles.
+	group: Option<Arc<GroupRank>>,
 	priority: i64,
 }
 
@@ -305,10 +325,7 @@ impl Listed {
 	pub(super) fn read(&self) -> open::OpenStream {
 		let state = self.lock();
 		open::OpenStream {
-			rank: open::Rank::new(
-				state.group.as_ref().map(|group| group.load(Ordering::Relaxed)),
-				state.priority,
-			),
+			rank: open::Rank::new(state.group.as_ref().map(|group| group.read()), state.priority),
 			acknowledged: state.stream.acknowledged(),
 		}
 	}
@@ -569,7 +586,10 @@ impl<S: poll::Boxable> ErasedSession for S {
 	fn send_group(&self, priority: i64) -> Option<Group> {
 		poll::Session::send_group(self, priority).map(|group| Group {
 			inner: Box::new(group),
-			priority: Arc::new(std::sync::atomic::AtomicI64::new(priority)),
+			rank: Arc::new(GroupRank {
+				priority: priority.into(),
+				turn: AtomicU64::new(0),
+			}),
 		})
 	}
 
@@ -775,7 +795,10 @@ impl poll::Session for Session {
 	}
 
 	fn send_group(&self, priority: i64) -> Option<Group> {
-		self.inner.session.send_group(priority)
+		let group = self.inner.session.send_group(priority)?;
+		// A new group waits its turn behind the groups already waiting, not ahead of them.
+		group.take_turn(self.opens.next_turn());
+		Some(group)
 	}
 
 	fn send_datagram(&self, payload: Bytes, options: SendOptions<'_, Group>) -> Result<(), Error> {
@@ -857,7 +880,7 @@ impl poll::SendStream for SendStream {
 
 	fn set_group(&mut self, group: &Group) {
 		if let Sender::Listed(listing) = &self.0 {
-			listing.listed.lock().group = Some(group.priority.clone());
+			listing.listed.lock().group = Some(group.rank.clone());
 		}
 		self.with(false, |stream| stream.set_group(group))
 	}
@@ -1079,13 +1102,13 @@ mod test {
 			},
 		);
 		let read = |session: &Session| session.open_streams()[0];
-		assert_eq!(read(&session).rank, open::Rank::Grouped { group: 1, stream: 2 });
+		assert!(matches!(read(&session).rank, open::Rank::Grouped { group: 1, stream: 2, .. }));
 		assert_eq!(read(&session).acknowledged, None);
 
 		poll::SendGroup::set_priority(&mut low, 3);
-		assert_eq!(read(&session).rank, open::Rank::Grouped { group: 3, stream: 2 });
+		assert!(matches!(read(&session).rank, open::Rank::Grouped { group: 3, stream: 2, .. }));
 		poll::SendStream::set_group(&mut stream, &high);
-		assert_eq!(read(&session).rank, open::Rank::Grouped { group: 5, stream: 2 });
+		assert!(matches!(read(&session).rank, open::Rank::Grouped { group: 5, stream: 2, .. }));
 	}
 
 	/// A stream accepted while the connection window was held back, such as one buffered
