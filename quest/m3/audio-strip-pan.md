@@ -33,9 +33,11 @@ the studio bumps its pin in
 A `Strip` holds no layout today and meets one only in `Bus::channel`, and
 `Driver::advance` has no error path, so the refusal needs a call that
 returns it. Recommendation, not settled: `Bus::channel` refuses a strip
-already panned off center on a bus that is not stereo, and records on the
-strip that it plays on such a bus, so a later `Strip::set_pan` off center
-returns the error. The driver never sees a refused pan.
+already panned off center on a bus that is not stereo, and the strip keeps
+a count of its open channels on such buses (counted up in `Bus::channel`,
+down when the channel drops), so a later `Strip::set_pan` off center returns
+the error while any is open. A strip outlives its channels, so a flag would
+keep refusing after the last one closes. The driver never sees a refused pan.
 
 Also recommended, not settled: store the pan atomically beside the gain and
 apply both in the same per-frame loop, so a pan change is click-free in the
