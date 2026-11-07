@@ -23,6 +23,13 @@ retries = 0
 # executes them through cargo bench smokes.
 default-filter = "not kind(bench)"
 
+# Each socket axis occupies the whole ring budget, keeping it exclusive with
+# other axes and ring tests while its offered load is measured.
+[[profile.default.overrides]]
+filter = "package(moq-uring) & test(benchmark_socket_queues)"
+test-group = "io-uring"
+threads-required = 4
+
 # Limit ring concurrency within one invocation. Unit-test workers use small
 # rings; integration workers keep production geometry. sh/rs/nextest.sh raises
 # hosted CI's locked-memory limit and uses the host's hard limit locally.

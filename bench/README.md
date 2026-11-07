@@ -846,7 +846,9 @@ The table includes these measurements:
   (`just gh nightly rust-test`) run in release builds, one at a time, under
   nextest's `bench` profile, which keeps each test's output in a JUnit report;
   their series are named by package and test path, such as
-  `rust-test/moq-congestion/gcc/bench/benchmark_per_packet`.
+  `rust-test/moq-congestion/gcc/bench/benchmark_per_packet`. A test with no runnable
+  path prints only `# benchmark skipped: REASON`; the report omits that capability
+  skip while rejecting an empty table or missing measurements.
 - Shipping sizes, in bytes: the release artifacts, minimal FFI build, and JS
   bundles the [size report](../sh/size/README.md) measures, recorded even on a
   night its growth check fails. Release build times stay out.

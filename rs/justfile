@@ -449,7 +449,7 @@ render-sw:
         -E 'test(/^render::renderer::tests::(the_declared_color_space_beats_the_size_guess|cpu_frames_survive_the_round_trip|config_size_overrides_the_frame_size|an_unimportable_gpu_frame_is_refused|the_output_follows_the_device)$/)'
     # Mesa's software driver exports no memory, so this covers the readback route.
     LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
-        just rs test -p moq-video --features render,openh264 --lib --run-ignored only -E 'test(/^render::export::(nv12::)?tests::/)'
+        just rs test -p moq-video --features render,openh264 --lib --run-ignored only -E 'test(/^render::(readback::|export::(nv12::)?)tests::/)'
 
 # Run the ignored mDNS tests, which multicast on the host's network interfaces.
 multicast:

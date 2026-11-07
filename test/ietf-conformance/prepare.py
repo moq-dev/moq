@@ -12,14 +12,19 @@ def prepare(source: str) -> str:
     source = source.replace(
         selection,
         selection
-        + """    # These upstream cases send subgroups other than zero, outside relay support.
+        + """    # Nonzero subgroups and Moxygen's datagram status/property contract are
+    # outside the relay model. Preserve every selected stream case unchanged.
     for argument in "${args[@]}"; do
         case "$argument" in
             --forwarding_preference=1|--forwarding_preference=2)
                 echo "EXCLUDED (nonzero subgroup): $test_name"
                 return 0
                 ;;
-            --forwarding_preference=0|--forwarding_preference=3) ;;
+            --forwarding_preference=0) ;;
+            --forwarding_preference=3)
+                echo "EXCLUDED (datagram delivery): $test_name"
+                return 0
+                ;;
             --forwarding_preference=*)
                 echo "unknown upstream forwarding preference: $argument" >&2
                 exit 1

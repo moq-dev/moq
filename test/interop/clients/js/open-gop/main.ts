@@ -92,7 +92,7 @@ window.runRecovery = async (packets) => {
 		catalog: { video: { renditions: { video: config } } },
 	});
 	const source = new Source({ broadcast, supported: async () => true });
-	const sync = new Sync({ delay: Milli(0), buffer: Milli(10_000) });
+	const sync = new Sync({ delay: Milli(0), lookahead: Milli(10_000) });
 	const decoder = new Decoder({ source, sync });
 	try {
 		await inputDone;
