@@ -68,6 +68,9 @@ pub struct Observation {
 	pub quanta: u64,
 	/// Of those, the quanta under -60 dBFS, whatever the cause.
 	pub quiet: u64,
+	/// Device time filled with comfort noise for a silence the publisher
+	/// declared, since the first audible quantum.
+	pub comfort: Duration,
 	/// Whether nothing is playing: no sink is being written to, or every one
 	/// still waits for its first samples.
 	pub stalled: bool,
@@ -91,6 +94,8 @@ pub(super) struct Shared {
 	latency: AtomicU64,
 	quanta: AtomicU64,
 	quiet: AtomicU64,
+	/// [`Observation::comfort`] in nanoseconds.
+	comfort: AtomicU64,
 	stalled: AtomicBool,
 	/// The reading [`Observer`]'s generation, or 0 with none: events only queue
 	/// while one reads. Each event carries it, so a send racing one observer's
@@ -126,6 +131,7 @@ impl Default for Shared {
 			latency: AtomicU64::new(UNKNOWN),
 			quanta: AtomicU64::new(0),
 			quiet: AtomicU64::new(0),
+			comfort: AtomicU64::new(0),
 			stalled: AtomicBool::new(true),
 			observer: AtomicU64::new(0),
 			generation: AtomicU64::new(0),
@@ -192,6 +198,7 @@ impl Observer {
 			},
 			quanta: shared.quanta.load(Ordering::Relaxed),
 			quiet: shared.quiet.load(Ordering::Relaxed),
+			comfort: Duration::from_nanos(shared.comfort.load(Ordering::Relaxed)),
 			stalled: shared.stalled.load(Ordering::Relaxed),
 			..Default::default()
 		};
@@ -325,8 +332,9 @@ impl Ledger {
 
 	/// Fold one mixed buffer in. `supplied` is how many of its leading frames
 	/// the sinks filled, the rest being zeros they could not; `playing` is
-	/// whether any sink was readable at all.
-	pub(super) fn add(&mut self, mix: &[f32], channels: usize, supplied: usize, playing: bool) {
+	/// whether any sink was readable at all; `comfort` is how many frames a sink
+	/// filled with comfort noise.
+	pub(super) fn add(&mut self, mix: &[f32], channels: usize, supplied: usize, playing: bool, comfort: usize) {
 		let frames = mix.len() / channels;
 		if let Some(observer) = self.finished() {
 			// The measurement is over: report what was open, count nothing after it.
@@ -346,6 +354,11 @@ impl Ledger {
 			self.shared.stalled.store(!playing, Ordering::Relaxed);
 			let at = self.clock(self.frames);
 			self.send(Event::Stall(Stall { at, stalled: !playing }));
+		}
+
+		if self.started && comfort > 0 {
+			let nanos = (comfort as f64 * 1e9 / self.rate).round() as u64;
+			self.shared.comfort.fetch_add(nanos, Ordering::Relaxed);
 		}
 
 		let supplied = if playing { supplied } else { 0 };
@@ -510,7 +523,7 @@ mod tests {
 	}
 
 	fn add(ledger: &mut Ledger, frames: usize, supplied: usize) {
-		ledger.add(&buffer(frames, supplied), 2, supplied, true);
+		ledger.add(&buffer(frames, supplied), 2, supplied, true, 0);
 	}
 
 	fn ms(frames: u64) -> Duration {
@@ -554,7 +567,7 @@ mod tests {
 	fn the_first_fill_landing_mid_quantum_is_not_a_gap() {
 		let (mut ledger, mut observer) = observed();
 		// Nothing readable for 200 frames, then audio from frame 200 on, mid-quantum.
-		ledger.add(&buffer(200, 0), 2, 0, false);
+		ledger.add(&buffer(200, 0), 2, 0, false, 0);
 		add(&mut ledger, 312, 312);
 		let observation = observer.read().unwrap();
 		assert!(observation.gaps.is_empty(), "{observation:?}");
@@ -584,7 +597,7 @@ mod tests {
 	fn stalls_are_stamped_and_play_as_empty_quanta() {
 		let (mut ledger, mut observer) = observed();
 		add(&mut ledger, 128, 128);
-		ledger.add(&buffer(256, 256), 2, 256, false);
+		ledger.add(&buffer(256, 256), 2, 256, false, 0);
 		add(&mut ledger, 128, 128);
 
 		let observation = observer.read().unwrap();
@@ -627,7 +640,7 @@ mod tests {
 		}
 		add(&mut ledger, 128, 128);
 		add(&mut ledger, 128, 0);
-		ledger.add(&buffer(128, 0), 2, 0, false);
+		ledger.add(&buffer(128, 0), 2, 0, false, 0);
 		drop(ledger);
 
 		let observation = observer.read().unwrap();
@@ -750,7 +763,7 @@ mod tests {
 		add(&mut ledger, 480, 480);
 		drop(ledger);
 		let mut ledger = Ledger::new(shared, 44_100);
-		ledger.add(&buffer(441, 441), 2, 441, true);
+		ledger.add(&buffer(441, 441), 2, 441, true, 0);
 		assert_eq!(observer.read().unwrap().clock, ms(480) + Duration::from_millis(10));
 	}
 
@@ -773,7 +786,7 @@ mod tests {
 
 		// The new stream recovers through empty quanta, which count: the engine already started.
 		let mut ledger = Ledger::new(shared, RATE);
-		ledger.add(&[0.0; 256 * 2], 2, 0, true);
+		ledger.add(&[0.0; 256 * 2], 2, 0, true, 0);
 		let observation = observer.read().unwrap();
 		assert!(!observation.stalled);
 		assert_eq!((observation.quanta, observation.quiet), (3, 2));
