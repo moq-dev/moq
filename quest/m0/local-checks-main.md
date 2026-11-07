@@ -24,6 +24,13 @@ Added 2026-11-06 (maintainer, follow-up planning in `/quest-complete`). Several
   reproduced both on unchanged `main`).
 - The CARLA launcher environment assertion
   ([moq-dev/moq#7986](https://github.com/moq-dev/moq/pull/7986)'s agent).
+- `sh/go/publish-wrapper.test.sh` under a global `tag.gpgsign = true`: its `git tag`
+  makes a signed annotated tag, opens the editor for a message, and exits non-zero, so
+  "cut v0.7.0" and "tagged the pushed HEAD" fail and `just check`'s `test gh` with them
+  ([moq-dev/moq#8124](https://github.com/moq-dev/moq/pull/8124) reproduced it on
+  unchanged `main`). Run the test's git with an isolated config, such as
+  `GIT_CONFIG_GLOBAL=/dev/null`, so no host setting reaches it. Added 2026-11-07
+  (maintainer, follow-up planning in moq-dev/rust2's `/quest-complete`).
 
 Reproduce each on a clean `main` first and keep the output; fix each at its
 cause. A failure that only reproduces under load joins

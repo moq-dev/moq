@@ -1,4 +1,15 @@
-import { Instant, type Interval, interval, Milli, MissedTickBehavior, Nano, now, Second, timeout } from "@moq/clock";
+import {
+	Elapsed,
+	Instant,
+	type Interval,
+	interval,
+	Milli,
+	MissedTickBehavior,
+	Nano,
+	now,
+	Second,
+	timeout,
+} from "@moq/clock";
 import { Credit, replenishWindow } from "./credit.ts";
 import { resetCode, SessionError, StreamError, streamCode } from "./error.ts";
 import type { TransportParams, WireFormat } from "./frame.ts";
@@ -37,6 +48,9 @@ export interface Config {
 	streamReceiveWindow?: bigint;
 	/** Idle timeout in milliseconds, or null to disable it; zero is refused. */
 	idleTimeout?: number | null;
+	/** How long `ready` waits for the peer's transport parameters, in milliseconds, or null to wait
+	 *  indefinitely; zero is refused. The session closes when it passes. */
+	handshakeTimeout?: number | null;
 	/** Maximum QMux Record size in bytes (draft-01). */
 	maxRecordSize?: bigint;
 	/** Largest DATAGRAM *frame* (RFC 9221: type + length + payload) we advertise
@@ -54,6 +68,7 @@ const DEFAULT_CONFIG: Required<Config> = {
 	receiveWindow: 1_048_576n,
 	streamReceiveWindow: 262_144n,
 	idleTimeout: 30_000,
+	handshakeTimeout: 10_000,
 	maxRecordSize: Frame.DEFAULT_MAX_RECORD_SIZE,
 	// Fill a full record by default; the record layer bounds the size.
 	maxDatagramFrameSize: Frame.DEFAULT_MAX_RECORD_SIZE,
@@ -72,9 +87,9 @@ function resolveConfig(config?: Config): Required<Config> {
 		if (value !== undefined) Object.assign(resolved, { [key]: value });
 	}
 	for (const [key, value] of Object.entries(resolved)) {
-		if (key === "idleTimeout") {
+		if (key === "idleTimeout" || key === "handshakeTimeout") {
 			if (value !== null && (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0)) {
-				throw new TypeError("idleTimeout must be a positive safe integer or null");
+				throw new TypeError(`${key} must be a positive safe integer or null`);
 			}
 		} else if (key !== "maxDatagramFrameSize" || value !== null) {
 			if (typeof value !== "bigint") throw new TypeError(`${key} must be a bigint`);
@@ -660,7 +675,8 @@ export default class Session implements WebTransport {
 		return this.#protocol;
 	}
 
-	/** Resolves once the WebSocket opens and the session can carry streams. */
+	/** Resolves once the peer's transport parameters arrive, as a WebTransport handshake completes:
+	 *  stream limits and `datagrams.maxDatagramSize` are known from then on. */
 	readonly ready: Promise<void>;
 	#readyResolve: () => void;
 	#readyReject: (err: Error) => void;
@@ -956,11 +972,19 @@ export default class Session implements WebTransport {
 		this.#bidiStreamCredit = new Credit(0n);
 		this.#uniStreamCredit = new Credit(0n);
 		this.#recvDataMax = this.#ourParams.initialMaxData;
-		// Our own deadline applies until the peer's parameters arrive, so a peer
-		// that never sends them can't hold the session open.
+		// Our own idle deadline applies until the peer's parameters arrive.
 		this.#startIdleTimerIfEnabled();
-
-		this.#readyResolve();
+		// The handshake deadline also covers qmux-00 and a disabled idle timeout, so
+		// a peer that never sends its parameters can't hold `ready` forever.
+		const handshake = this.#config.handshakeTimeout;
+		if (handshake !== null) {
+			timeout(Nano.fromMilli(Milli(handshake)), this.ready).catch((err) => {
+				if (!(err instanceof Elapsed)) return;
+				this.#closeReason ??= new Error("handshake timeout");
+				this.#abort(0, "handshake timeout");
+				this.#transportClose();
+			});
+		}
 	}
 
 	#onData(data: Uint8Array) {
@@ -1136,6 +1160,7 @@ export default class Session implements WebTransport {
 
 		// The peer's limit may be shorter than ours.
 		this.#startIdleTimerIfEnabled();
+		this.#readyResolve();
 	}
 
 	/** Effective idle timeout in ms, or 0 if disabled.
