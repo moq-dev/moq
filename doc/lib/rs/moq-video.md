@@ -40,10 +40,10 @@ change bitrate live follow the connection's send estimate while someone
 watches, and return to the configured bitrate while nobody does. Where the platform
 allows it, frames stay on the GPU between capture, decode, encode, and render.
 
-Opt-in features: `capture`, `vaapi` (Intel and AMD on Linux; the build needs
-libclang), `v4l2` (ARM SoC codecs such as a Raspberry Pi's), `pipewire` (Linux
-portal capture and PipeWire cameras; links libpipewire), and `vpx` (links
-libvpx).
+Opt-in features: `capture`, `v4l2` (ARM SoC codecs such as a Raspberry Pi's),
+`pipewire` (Linux portal capture and PipeWire cameras; links libpipewire), and
+`vpx` (links libvpx). `vaapi` (Intel and AMD on Linux) is on by default beside
+`nvidia`, since neither needs anything on the build host.
 
 On Wayland, the `pipewire` feature lets Rust callers request a screen or
 window through the system picker with `capture::Source::Portal`. Keep the

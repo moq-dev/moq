@@ -142,7 +142,7 @@ federation) land.
 - [moq-hls exposes each rendition's bound source](/quest/m3/hls-rendition-source.md) - playlists and segments report the source path and instance they read, so a cache can key on the source
 - [The memory bench finishes at 1 MiB frames](/quest/m3/memory-bench-hang.md) - the allocation mode's park at `size=1048576` is root-caused and fixed
 - [Audio's Latest start reaches back](/quest/m3/audio-latest-reach-back.md) - moq_audio's start covers min plus warmup like other consumers
-- [moq-lite tails count drops](/quest/m3/lite-tail-drop-count.md) - SUBSCRIBE_DROP accounting replaces the session-tail grace from lite-05
+- [moq-lite tails count drops](/quest/m3/lite-tail-drop-count.md) - SUBSCRIBE_SKIP and SUBSCRIBE_DROP accounting replaces the session-tail grace from lite-05
 - [Audio track changes are gapless](/quest/m3/gapless-audio-switch.md) - no silence beyond a frame on audio format or rendition changes, enforced by media QA
 - [We own our WebRTC stack](/quest/m3/webrtc/README.md) - one moq-webrtc crate holds the gateway, its ICE module, the data-channel transport, and a vendored, trimmed str0m/dimpl/is/sctp-proto
 - [PUBLISH_DONE says why](/quest/m3/publish-done-codes.md) - GOING_AWAY, TOO_FAR_BEHIND, and EXPIRED round-trip as stream codes

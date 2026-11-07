@@ -38,13 +38,13 @@ run_socket_pair() {
     mkfifo "$events" "$ack"
     exec 8<>"$events" 9<>"$ack"
     from=$(relay_next_line)
-    # Grant each peer only its own route and the shared socket subtree.
+    # Grant each peer only its own endpoint and the other role's endpoints.
     harness_spawn "$name-accept" "$LOGS/$name-accept.log" run_socket_acceptor "$events" "$ack" "$acceptor" accept \
-        "$(token_url --root "$prefix" --publish '.socket/acceptor' --subscribe '.socket/**')" "$prefix" "$protocol" "$version"
+        "$(token_url --root "$prefix" --publish '.server/acceptor' --subscribe '.client/**')" "$prefix" "$protocol" "$version"
     pid="$HARNESS_PID"
     if IFS= read -r -t "$TIMEOUT" ready <&8 && [[ "$ready" == 'socket ready' ]]; then
         harness_spawn "$name-dial" "$LOGS/$name-dial.log" run_socket_client "$dialer" dial \
-            "$(token_url --root "$prefix" --publish '.socket/dialer' --subscribe '.socket/**')" "$prefix" "$protocol" "$version"
+            "$(token_url --root "$prefix" --publish '.client/dialer' --subscribe '.server/**')" "$prefix" "$protocol" "$version"
         dial_pid="$HARNESS_PID"
         harness_wait "$dial_pid" || true
         if grep -qx "socket verified $protocol dial" "$LOGS/$name-dial.log"; then
