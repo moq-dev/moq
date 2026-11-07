@@ -716,9 +716,6 @@ mod tests {
 		assert_eq!(sps_reorder(&fixtures::SPS[..8]), None);
 	}
 
-	/// hvc1: a length-prefixed access unit with an IDR slice wraps as one keyframe;
-	/// the payload is passed through verbatim. The leading prefix-SEI NAL exercises
-	/// the walk past non-slice NALs.
 	/// A keyframe redefining only an enhancement layer's sets keeps the base layer's in the hvcC.
 	#[test]
 	fn hvc1_keeps_the_base_layer_beside_an_enhancement_update() {
@@ -741,6 +738,9 @@ mod tests {
 		assert_eq!(params.pps, [fixtures::PPS, fixtures::MV_PPS_LAYER1]);
 	}
 
+	/// hvc1: a length-prefixed access unit with an IDR slice wraps as one keyframe;
+	/// the payload is passed through verbatim. The leading prefix-SEI NAL exercises
+	/// the walk past non-slice NALs.
 	#[test]
 	fn hvc1_frame_keyframe() {
 		let sei: &[u8] = &[0x4e, 0x01, 0x05, 0xff]; // PrefixSeiNut (39)
