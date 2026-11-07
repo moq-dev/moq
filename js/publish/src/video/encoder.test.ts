@@ -1220,6 +1220,9 @@ for (const stop of ["resume", "close", "detach"] as const) {
 			await settle();
 			expect(flush).toHaveBeenCalledTimes(1);
 			const before = closed.mock.calls.length;
+			enabled.set(false, true);
+			await settle();
+			expect(closed.mock.calls.length).toBe(before);
 			if (stop === "close") encoder.close();
 			else if (stop === "detach") broadcast.set(undefined);
 			else enabled.set(true);

@@ -174,6 +174,7 @@ export class Camera {
 
 	/** Retry a failed capture after an explicit user action. */
 	retry(): void {
+		if (!this.#retry.spent()) return;
 		this.#out.error.set(undefined);
 		this.#retry.refund();
 	}

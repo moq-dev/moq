@@ -50,7 +50,7 @@ element. `<moq-publish-support>` shows what the browser can encode.
 Capture failures, such as `NotAllowedError` when permission is refused, land in
 `out.error` on the camera or microphone in `el.sources.video` and
 `el.sources.audio`, and `<moq-publish-ui>` shows them. A refused capture waits
-for a permission, device, or settings change instead of prompting again.
+for a permission, device, or settings change, or an explicit `retry()` from the app.
 
 ## Stats and feedback
 

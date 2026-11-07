@@ -602,7 +602,14 @@ export class Encoder {
 					}
 					// A cosmetic frame must never hold the next enable or track close behind a codec
 					// flush. The old codec is closed below even if the browser never settles it.
-					await race([encoder.flush().catch(() => {}), Signal.race(this.in.enabled), effect.closed]);
+					const flushed = encoder.flush().then(
+						() => true,
+						() => true,
+					);
+					do {
+						const done = await race([flushed, Signal.race(this.in.enabled), effect.closed]);
+						if (done !== false) break;
+					} while (!this.in.enabled.peek());
 				}
 			} finally {
 				if (encoder.state !== "closed") encoder.close();

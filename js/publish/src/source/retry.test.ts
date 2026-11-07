@@ -207,6 +207,11 @@ for (const [kind, create] of [
 				expect(media.attempts).toBe(2);
 				expect(published(source.out.source.peek())).toBe(media.latest());
 				expect(source.out.error.peek()).toBeUndefined();
+				const live = source.out.source.peek();
+				source.retry();
+				await settle();
+				expect(media.attempts).toBe(2);
+				expect(source.out.source.peek()).toBe(live);
 			} finally {
 				source.close();
 			}
