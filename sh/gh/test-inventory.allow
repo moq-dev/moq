@@ -37,3 +37,6 @@ ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_expo
 
 # Flaky, disabled until its quest fixes the cause.
 ignore moq-relay::embed::worker_tokio_custom_route_and_quic /quest/m0/test-flakes-2/embed-sockets-outlived.md
+
+# Need another implementation to speak the route wire; the quest ports it.
+ignore moq-net::test_interop::lite_tracks_interop /quest/m2/cluster-routing/routes/js.md

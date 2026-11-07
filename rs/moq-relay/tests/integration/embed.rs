@@ -558,19 +558,19 @@ struct EmbeddedConfig {
 fn embedded_cli_merges_only_relay_settings() {
 	let dir = tempfile::tempdir().unwrap();
 	let path = dir.path().join("relay.toml");
-	std::fs::write(&path, "[cluster]\nid = 7\n[stats]\nenabled = false\n").unwrap();
+	std::fs::write(&path, "[cluster]\nmax_hops = 7\n[stats]\nenabled = false\n").unwrap();
 	let (mut parsed, cli) = EmbeddedConfig::parse_from_with_settings(&[
 		path.as_os_str(),
 		std::ffi::OsStr::new("--worker-name"),
 		std::ffi::OsStr::new("recorder"),
-		std::ffi::OsStr::new("--cluster-id"),
+		std::ffi::OsStr::new("--cluster-max-hops"),
 		std::ffi::OsStr::new("9"),
 	])
 	.expect("parse embedding CLI");
 	parsed.relay.merge(&cli).unwrap();
 	assert_eq!(parsed.worker_name.as_deref(), Some("recorder"));
-	assert_eq!(parsed.relay.cluster.id, Some(9));
-	assert_eq!(parsed.relay.source("cluster.id"), Some("--cluster-id"));
+	assert_eq!(parsed.relay.cluster.max_hops, Some(9));
+	assert_eq!(parsed.relay.source("cluster.max_hops"), Some("--cluster-max-hops"));
 	assert!(!parsed.relay.stats.enabled);
 	assert!(parsed.relay.source("stats.enabled").unwrap().contains("enabled"));
 	// The explicit file value equals the runtime default but still has file provenance.

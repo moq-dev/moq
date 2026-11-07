@@ -158,6 +158,12 @@ skipped the timing report. A TERM landing after a lane forked but before
 hung. The exit trap now waits again, and cancellation reads the job table,
 fixed by [moq-dev/moq#8138](https://github.com/moq-dev/moq/pull/8138).
 
+Added 2026-11-07 (maintainer's standing rule that flakes join this epic):
+`js/net`'s lite-07 empty-window reply test, which fails on main 12/200 under
+`--rerun-each 200`, found in [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670).
+A subscriber FIN during the reply write's budget yield resets the stream. It is
+quarantined with `test.skip` until its child fixes it.
+
 Public API: none. Wire: none.
 
 ## Required
@@ -166,3 +172,4 @@ Public API: none. Wire: none.
 - [The embedded relay's sockets are closed when run returns](/quest/m0/test-flakes-2/embed-sockets-outlived.md) - `embed::worker_tokio_custom_route_and_quic` stops failing with "the owner's sockets outlived `run`"
 - [moq-transcode's idle-rung cancel test survives load](/quest/m0/test-flakes-2/transcode-idle-rung-cancel.md) - `cancelling_an_idle_rung_reports_cancel` stops seeing `serve` return before its abort lands
 - [moq-gst's sink-restart pad test survives load](/quest/m0/test-flakes-2/gst-sink-restart-pads.md) - `a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times` keeps its pads under load
+- [A lite-07 reply FINs instead of resetting when the subscriber FINs mid-write](/quest/m0/test-flakes-2/lite07-reply-fin.md) - `js/net`'s empty-window reply test passes under `--rerun-each 200`, fixed in the publisher
