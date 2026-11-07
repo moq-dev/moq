@@ -874,26 +874,31 @@ mod tests {
 
 	#[tokio::test]
 	async fn tls_host_name_override_dials_url_address() {
+		kio::clock::host_time();
 		check_tls_authority("127.0.0.1", false, Some("relay.example")).await;
 	}
 
 	#[tokio::test]
 	async fn fixed_addresses_keep_tls_name_and_request_host() {
+		kio::clock::host_time();
 		check_tls_authority("relay.example", true, None).await;
 	}
 
 	#[tokio::test]
 	async fn ipv6_literal() {
+		kio::clock::host_time();
 		check_tls_authority("[::1]", false, None).await;
 	}
 
 	#[tokio::test]
 	async fn ipv6_literal_fixed_addresses() {
+		kio::clock::host_time();
 		check_tls_authority("[::1]", true, None).await;
 	}
 
 	#[tokio::test]
 	async fn ipv6_tls_host_name_override() {
+		kio::clock::host_time();
 		check_tls_authority("[::1]", false, Some("::1")).await;
 	}
 

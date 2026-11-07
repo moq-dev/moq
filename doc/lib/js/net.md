@@ -94,8 +94,9 @@ for (let chunk = await reader?.readChunk(); chunk; chunk = await reader?.readChu
 ## Sockets
 
 Use `Moq.Socket.Endpoint` for [point-to-point sessions](/concept/socket), with the same
-origin publishing and consuming through the relay. Each endpoint announces one hidden
-broadcast; accepting verifies that the named peer actually dialed this session.
+origin publishing and consuming through the relay. An endpoint's first dial announces its
+hidden client broadcast and its first accept its hidden server broadcast, so grants decide
+which roles it may take; accepting verifies that the named peer actually dialed this session.
 Every hop needs moq-lite-07 or moq-transport. Lite-07 currently requires explicitly
 offering `moq-lite-07-wip`; older moq-lite hops do not carry these hidden endpoints. While
 the endpoint's own client connection is moq-lite before 07, its dials and accepts fail as

@@ -205,6 +205,12 @@ func (t *TrackProducer) CreateGroup(sequence uint64) (*GroupProducer, error) {
 	return &GroupProducer{inner: inner}, nil
 }
 
+// SkipGroups declares that groups start up to the exclusive end will never be
+// produced, so readers move past them. Creating a group there then fails.
+func (t *TrackProducer) SkipGroups(start, end uint64) error {
+	return t.inner.SkipGroups(start, end)
+}
+
 // WriteFrame writes frame as a single-frame group.
 func (t *TrackProducer) WriteFrame(frame Frame) error {
 	return t.inner.WriteFrame(frame)

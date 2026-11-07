@@ -21,11 +21,11 @@ const DEFAULT_PREFIX = Moq.Path.from("boy");
 // Sockets need moq-lite-07 or moq-transport on every hop, and the relay offers moq-lite-07 only when asked.
 const VERSIONS = ["moq-lite-07-wip"];
 
-// A viewer's endpoint id: random, so no other viewer can claim it, under the prefix the relay lets anonymous
-// viewers publish, so no viewer can claim a game's.
+// A viewer's client endpoint id: random, so no other viewer can claim it. A viewer only dials, so it
+// announces a client endpoint, which can never pose as a game's server endpoint.
 function viewerId(): string {
 	const bytes = crypto.getRandomValues(new Uint8Array(16));
-	return `viewer-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+	return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 const cleanup = new FinalizationRegistry<Moq.Signals.Effect>((signals) => signals.close());
@@ -40,7 +40,7 @@ const cleanup = new FinalizationRegistry<Moq.Signals.Effect>((signals) => signal
  *   - `prefix-game` - Path prefix for game broadcasts and the socket endpoints of games and viewers
  *     (default: `{prefix}/game`)
  *
- * Each viewer runs one socket endpoint with a random id and dials each game it plays.
+ * Each viewer runs one client socket endpoint with a random id and dials each game it plays.
  */
 export default class MoqBoy extends HTMLElement {
 	/** The attributes the browser reports changes to. */

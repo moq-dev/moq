@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { type Installed, Instant, Manual, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
-import { hostTime } from "@moq/clock/test";
 import { SessionError, StreamError } from "./error.ts";
 import * as Frame from "./frame.ts";
 import { DEFAULT_MAX_RECORD_SIZE, type TransportParams } from "./frame.ts";
@@ -264,14 +263,24 @@ function connect(config?: Config): { session: Session; peer: FakePeer } {
 	(globalThis as { WebSocketStream?: unknown }).WebSocketStream = FakePeer;
 	// Idle timer off so a stray interval can't interfere with the test.
 	// Bare version ALPNs are offered by default (requireProtocol defaults to false).
+	// A one-byte send buffer makes one write stuck in the socket a backlog, so
+	// frames behind it stay queued in the session.
 	const session = new Session("https://example/test", {
 		config: { idleTimeout: null, ...config },
+		sendBufferSize: 1,
 	});
 	const peer = FakePeer.last as FakePeer;
 	return { session, peer };
 }
 
 const ORIGINAL_WSS = (globalThis as { WebSocketStream?: unknown }).WebSocketStream;
+
+test("a non-finite sendBufferSize throws instead of parking every write", () => {
+	(globalThis as { WebSocketStream?: unknown }).WebSocketStream = FakePeer;
+	for (const sendBufferSize of [Number.NaN, Number.POSITIVE_INFINITY]) {
+		expect(() => new Session("https://example/test", { sendBufferSize })).toThrow(RangeError);
+	}
+});
 
 describe("Session integration (scripted peer)", () => {
 	afterEach(() => {
@@ -587,7 +596,6 @@ describe("Session integration (scripted peer)", () => {
 	});
 
 	test("a RESET_STREAM received first keeps the stream terminal", async () => {
-		hostTime();
 		const { session, peer } = connect();
 		peer.send({ type: "transport_parameters", params: peerParams() });
 		await session.ready;
@@ -598,12 +606,10 @@ describe("Session integration (scripted peer)", () => {
 		peer.send({ type: "ping_request", sequence: 1n });
 		await waitFor(() => peer.has("ping_response"));
 
+		// The ping answered after the frames ahead of it, so a resurrected stream is already queued.
 		const reader = session.incomingUnidirectionalStreams.getReader();
 		const next = reader.read();
-		const resurrected = await Promise.race([
-			next.then(() => true),
-			sleep(Nano.fromMilli(Milli(50))).then(() => false as const),
-		]);
+		const resurrected = await Promise.race([next.then(() => true), yieldNow().then(() => false as const)]);
 		expect(resurrected).toBe(false);
 		session.close();
 		await next;

@@ -106,7 +106,9 @@ const RELEASED: &[(&str, Option<&str>)] = &[
 	("web-https-listen", Some("MOQ_WEB_HTTPS_LISTEN")),
 	("web-https-root", Some("MOQ_WEB_HTTPS_ROOT")),
 	("web-ws", Some("MOQ_WEB_WS")),
+	#[cfg(feature = "websocket")]
 	("websocket-delay", Some("MOQ_CLIENT_WEBSOCKET_DELAY")),
+	#[cfg(feature = "websocket")]
 	("websocket-enabled", Some("MOQ_CLIENT_WEBSOCKET_ENABLED")),
 ];
 
