@@ -32,6 +32,11 @@ moves what remains of them once their claims merge.
 ## Required
 
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
+- [Only the relay's own stats publisher uses the stats prefix](/quest/m1/stats-prefix.md) - a broad grant can no longer publish unmetered media or spoof node stats under `.stats`
+- [js/net enforces the input checks Rust does](/quest/m1/js-net-input-checks.md) - GOAWAY redirects to loopback spellings, credential logging, ANNOUNCE_INIT size, sequence range, and version pinning match Rust
+- [Rust and JS accept exactly the same tokens and key sets](/quest/m1/token-parse-strict.md) - a null `exp` no longer means never-expiring in Rust, duplicate kids and bad scope roots are refused, and every relay lease is validated
+- [A refused lite SUBSCRIBE_UPDATE ends the subscription](/quest/m1/lite-update-refused.md) - the publisher no longer serves a removed range or reports the wrong start after the model refuses an update
+- [Cluster peers have one identity each and fresh inputs](/quest/m1/cluster-peer-identity.md) - a duplicate cluster id, a self-dial, or a rotated cluster token fails loud instead of partitioning or looping the mesh
 - [Media fuzz findings](/quest/m1/fuzz-findings/README.md) - the nightly media fuzz targets run clean: mp4-atom, MKV block, TS step, SPS overflow, and catalog encoder bugs they found are fixed
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
@@ -54,6 +59,10 @@ moves what remains of them once their claims merge.
 - [Tests run on a mocked clock](/quest/m1/mock-clock-tests/README.md) - about 300 tests stop proving nothing happened by waiting, sleeping to settle, or asserting on elapsed time
 - [moq-mux reads H.265 SPS without scuffle](/quest/m1/h265-sps-reader.md) - moq-mux's own SPS reader replaces scuffle-h265 and scuffle-expgolomb, and the fuzz regressions still pass
 - [QMux reads the app-limited flag on big-endian Linux](/quest/m1/qmux-app-limited-endian.md) - the send-rate filter's app-limited mask follows the target's byte order
+- [Copies of one group identity must agree beyond their bytes](/quest/m1/copy-identity.md) - copies that differ in timestamp, object fields, or frame count fail as a protocol violation
+- [Session auth grants and replies stay consistent and bounded](/quest/m1/auth-stream-bounds.md) - an AUTH_ERROR revokes its grant, queued grants and retiring tokens are bounded, and dropping queued requests cannot deadlock
+- [Relay settings and admin input that cannot work are refused](/quest/m1/relay-config-checks.md) - clustered stats without a node name, pin without workers, repeated filter keys, and unknown transports fail loud
+- [Track drop runs are forgotten below the floor](/quest/m1/drop-runs-prune.md) - a track's dropped-group record stays proportional to its window in Rust and JS
 
 ## Related
 
