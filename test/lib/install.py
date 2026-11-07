@@ -3,8 +3,8 @@
 
 import fcntl
 import hashlib
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 (ROOT / ".tmp").mkdir(exist_ok=True)
