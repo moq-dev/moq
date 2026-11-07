@@ -317,6 +317,7 @@ async fn wait_listed(fixture: &Fixture, n: usize) -> List {
 /// `refused`.
 #[tokio::test]
 async fn push_by_id_refuses_inside_the_cadence() {
+	kio::clock::host_time();
 	let script = Script::new(grant());
 	let fixture = Fixture::tcp(build_auth(script.spawn().await)).await;
 	let session = connect(fixture.path("/room"), "127.0.0.1:0").await;
@@ -445,6 +446,7 @@ async fn empty_filter_reaches_all() {
 /// A retier arrives on the next reply after a push, and the session stays.
 #[tokio::test]
 async fn a_pushed_retier_arrives_on_the_next_reply() {
+	kio::clock::host_time();
 	let script = Script::new(grant());
 	let fixture = Fixture::tcp(build_auth(script.spawn().await)).await;
 	let session = connect(fixture.path("/room"), "127.0.0.1:0").await;

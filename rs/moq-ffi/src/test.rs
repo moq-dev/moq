@@ -3285,6 +3285,7 @@ fn audio_rejects_bad_init_bytes() {
 /// the announcement.
 #[tokio::test]
 async fn a_hidden_route_is_invisible_until_announced() {
+	kio::clock::host_time();
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let route = origin.route("live".into(), hidden()).unwrap();
@@ -6201,11 +6202,13 @@ async fn follow_hands_out_a_takeover_once(dynamic_at: &str) {
 
 #[tokio::test]
 async fn follow_hands_out_a_takeover_once_while_resolving() {
+	kio::clock::host_time();
 	follow_hands_out_a_takeover_once("").await;
 }
 
 #[tokio::test]
 async fn follow_hands_out_a_held_takeover_once() {
+	kio::clock::host_time();
 	follow_hands_out_a_takeover_once("live").await;
 }
 
@@ -6337,6 +6340,7 @@ async fn an_instance_pins_request_and_follow() {
 /// must not hand it out again.
 #[tokio::test]
 async fn follow_hands_out_a_gap_while_resolving_once() {
+	kio::clock::host_time();
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let dynamic = serve(&origin, "");
 	let followed = origin.consume().follow("live".into(), None).unwrap();
@@ -6368,6 +6372,7 @@ async fn follow_hands_out_a_gap_while_resolving_once() {
 /// before its resolution handed the handle out, so no restart is owed.
 #[tokio::test]
 async fn follow_waits_for_another_instance_after_a_dropped_takeover() {
+	kio::clock::host_time();
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let dynamic = serve(&origin, "live");
 	let followed = origin.consume().follow("live".into(), None).unwrap();
@@ -7480,6 +7485,7 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 #[cfg(feature = "video")]
 #[tokio::test]
 async fn video_encoder_follows_a_shrinking_grant() {
+	kio::clock::host_time();
 	use crate::bandwidth::MoqAllocator;
 	use crate::video::*;
 
@@ -9385,6 +9391,7 @@ async fn write_ahead_of_a_slow_reader(
 /// past the cache, and the reader then takes every frame, as TCP backpressure would.
 #[tokio::test]
 async fn ready_paces_a_writer_behind_a_slow_reader() {
+	kio::clock::host_time();
 	const FRAMES: usize = 48;
 	let (written, writer, reader, _broadcast, _track) = write_ahead_of_a_slow_reader(FRAMES, true).await;
 

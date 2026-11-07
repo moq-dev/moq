@@ -32,6 +32,10 @@ Rules every child keeps:
 - Each JS child removes the opt-outs the
   [JS guard](/quest/m0/clock-guard/js.md) added, so the guard covers the
   converted tests.
+- Each Rust child removes the `kio::clock::host_time()` calls in the
+  tests it converts, so `just rs test`'s host-timer guard covers them. A test
+  over a real QUIC endpoint or ICE agent is exempt without one, since those
+  transports allow host timers themselves.
 
 The counts come from a heuristic scan on 2026-11-06; re-scan each area
 before starting, since tests land and move.
