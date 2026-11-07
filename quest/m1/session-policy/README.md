@@ -19,10 +19,10 @@ where moq-webrtc should plug its externally established transport in. The
 maintainer asked what that means for io_uring and how much of moq-tokio belongs
 in moq-net, and decided:
 
-- ✅ **Move the policy first**, then give moq-tokio thin handoffs; the
-  [WebRTC rename](/quest/m2/webrtc-rename.md) waits on
-  [moq-tokio becomes a thin shell](/quest/m1/session-policy/tokio-handoff.md)
-  (#7804 closed unmerged).
+- ✅ **Move the policy first**, then give moq-tokio thin handoffs
+  (`Listener::accept_with`, `Client::connect_with`), which the
+  [WebRTC rename](/quest/m2/webrtc-rename.md) builds on (#7804 closed
+  unmerged).
   Not chosen: a moq-tokio handoff now with the move later; moq-webrtc calling
   moq-net directly with its own policy.
 - ✅ **Reconnect is in scope**: the reconnect, backoff and GOAWAY candidate
@@ -66,4 +66,3 @@ Research (2026-11-04, `origin/main` at e6be13d5f8):
 ## Required
 
 - [The io_uring relay path uses moq-net's policy](/quest/m1/session-policy/uring.md) - deletes `uring.rs`'s copy
-- [moq-tokio becomes a thin shell](/quest/m1/session-policy/tokio-handoff.md) - sockets, TLS, accept loops and spawning, plus the transport handoffs WebRTC needs

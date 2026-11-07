@@ -2227,6 +2227,7 @@ export class Publisher {
 					version: this.version,
 					sendOrder: place.rank,
 					cancel: race([unsubscribed, abandoned]),
+					group: true,
 				});
 			} finally {
 				opened.resolve();

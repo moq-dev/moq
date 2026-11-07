@@ -186,7 +186,6 @@ import * as Watch from "@moq/watch";
 const connection = new Moq.Connection({ url: new URL("https://relay.example.com/anon") });
 const player = new Watch.Player({
     origin: connection.origin,
-    probe: connection.probe,
     name: Moq.Path.from("alice.hang"),
     video: { canvas },
     viewer: { viewers: connection.viewers },
@@ -205,10 +204,14 @@ estimate (see [`connection.viewers`](/lib/js/net)). Its ceiling follows the
 catalog: the rate at which selection would pick the best enabled video
 rendition the `video.target` allows, plus the selected audio rendition's
 bitrate, counting only media being downloaded. A relay that probes raises the
-estimate toward it, so a larger rendition can become affordable. Set
+estimate toward it, and video selects from the claim's grant less that audio, so a viewer on a small
+rendition moves up once the grant reaches the ceiling. Players sharing a connection split its estimate
+instead of each selecting against all of it. Set
 `viewer.max` (`controls.viewer.max` on `<moq-watch>`) to claim a fixed ceiling
-in bits per second instead while media downloads, or `0` to claim nothing; omit `viewer.viewers` to
-leave the connection's estimate unclaimed.
+in bits per second instead while media downloads, which also caps what video selects, or `0` to claim nothing; omit `viewer.viewers` to
+leave the connection's estimate unclaimed. Without a claim, video selects the best rendition its
+`video.target` allows. To stop the relay probing while still adapting, keep the claim and call
+`connection.viewers.setTarget(0)`.
 
 To chart when each audio frame arrived against when it plays, open an
 `arrivals()` handle on the audio decoder. It yields every frame received while it is open, stamped

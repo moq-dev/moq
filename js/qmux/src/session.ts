@@ -367,6 +367,30 @@ export interface StreamCredit {
 	blocked: boolean;
 }
 
+/** What a send stream has sent so far, the shape of W3C WebTransport's `WebTransportSendStreamStats`. */
+export interface SendStreamStats {
+	/** The bytes written to the stream. */
+	bytesWritten: number;
+	/** The bytes handed to the WebSocket. */
+	bytesSent: number;
+	/** The bytes the peer has acknowledged, which are `bytesSent`: QMux acknowledges data once
+	 *  it is passed to the underlying transport. */
+	bytesAcknowledged: number;
+}
+
+/** A stream's send half, with W3C `WebTransportSendStream`'s `sendOrder` and `getStats()`. */
+export interface SendStream extends WritableStream<Uint8Array> {
+	/** Its priority against the session's other streams; higher sends first. */
+	sendOrder: number;
+	/** What the stream has written, sent, and had acknowledged so far. */
+	getStats(): Promise<SendStreamStats>;
+}
+
+/** A bidirectional stream whose send half is a {@link SendStream}. */
+export interface BidirectionalStream extends WebTransportBidirectionalStream {
+	readonly writable: SendStream;
+}
+
 /** Options for opening a QMux Session over WebSocket. */
 export interface SessionOptions extends WebTransportOptions {
 	/** Application-level subprotocols to advertise via `Sec-WebSocket-Protocol`.
@@ -662,8 +686,8 @@ export default class Session implements WebTransport {
 	#closedReject: (err: Error) => void;
 
 	/** Bidirectional streams the peer opens, in arrival order. */
-	readonly incomingBidirectionalStreams: ReadableStream<WebTransportBidirectionalStream>;
-	#incomingBidirectionalQueue: IncomingStreamQueue<WebTransportBidirectionalStream>;
+	readonly incomingBidirectionalStreams: ReadableStream<BidirectionalStream>;
+	#incomingBidirectionalQueue: IncomingStreamQueue<BidirectionalStream>;
 	/** Unidirectional streams the peer opens, in arrival order. */
 	readonly incomingUnidirectionalStreams: ReadableStream<ReadableStream<Uint8Array>>;
 	#incomingUnidirectionalQueue: IncomingStreamQueue<ReadableStream<Uint8Array>>;
@@ -779,7 +803,7 @@ export default class Session implements WebTransport {
 		// observe the rejection.
 		this.closed.catch(() => {});
 
-		this.#incomingBidirectionalQueue = new IncomingStreamQueue<WebTransportBidirectionalStream>();
+		this.#incomingBidirectionalQueue = new IncomingStreamQueue<BidirectionalStream>();
 		this.incomingBidirectionalStreams = this.#incomingBidirectionalQueue.readable;
 
 		this.#incomingUnidirectionalQueue = new IncomingStreamQueue<ReadableStream<Uint8Array>>();
@@ -1726,7 +1750,13 @@ export default class Session implements WebTransport {
 		await scheduler.enqueueStream(streamId, bytes);
 	}
 
-	async #sendStreamDataWithFlowControl(id: Stream.Id, streamId: bigint, data: Uint8Array, signal: AbortSignal) {
+	async #sendStreamDataWithFlowControl(
+		id: Stream.Id,
+		streamId: bigint,
+		data: Uint8Array,
+		signal: AbortSignal,
+		stats: SendStreamStats,
+	) {
 		const flow = this.#streamFlow.get(streamId);
 		if (!flow) throw new Error(`missing flow state for stream ${streamId}`);
 
@@ -1763,13 +1793,16 @@ export default class Session implements WebTransport {
 
 			flow.sendOffset += BigInt(sendable);
 			offset += sendable;
+			stats.bytesSent += sendable;
+			stats.bytesAcknowledged = stats.bytesSent;
 		}
 	}
 
-	async #sendStreamData(id: Stream.Id, data: Uint8Array, signal: AbortSignal) {
+	async #sendStreamData(id: Stream.Id, data: Uint8Array, signal: AbortSignal, stats: SendStreamStats) {
 		const streamId = id.value.value;
 
-		await this.#sendStreamDataWithFlowControl(id, streamId, data, signal);
+		stats.bytesWritten += data.byteLength;
+		await this.#sendStreamDataWithFlowControl(id, streamId, data, signal, stats);
 	}
 
 	/** Send the FIN. Routed through the stream's own queue so it stays ordered
@@ -1861,7 +1894,7 @@ export default class Session implements WebTransport {
 
 	/** Open a bidirectional stream, waiting for the peer to grant stream credit
 	 *  unless `waitUntilAvailable` is false. */
-	async createBidirectionalStream(options?: SendStreamOptions): Promise<WebTransportBidirectionalStream> {
+	async createBidirectionalStream(options?: SendStreamOptions): Promise<BidirectionalStream> {
 		await this.#claimStream(Stream.Dir.Bi, options, "Failed to create bidirectional stream.");
 		// close() may have torn down the session while the claim resumed.
 		if (this.#closed) throw this.#closed;
@@ -1907,7 +1940,7 @@ export default class Session implements WebTransport {
 
 	/** Open a send-only stream, waiting for the peer to grant stream credit
 	 *  unless `waitUntilAvailable` is false. */
-	async createUnidirectionalStream(options?: SendStreamOptions): Promise<WritableStream<Uint8Array>> {
+	async createUnidirectionalStream(options?: SendStreamOptions): Promise<SendStream> {
 		await this.#claimStream(Stream.Dir.Uni, options, "Failed to create send stream.");
 		// close() may have torn down the session while the claim resumed.
 		if (this.#closed) throw this.#closed;
@@ -1931,8 +1964,9 @@ export default class Session implements WebTransport {
 	}
 
 	/** The writable for a stream's send half. */
-	#sendWritable(id: Stream.Id, sendOrder: number): WritableStream<Uint8Array> {
+	#sendWritable(id: Stream.Id, sendOrder: number): SendStream {
 		const streamId = id.value.value;
+		const stats: SendStreamStats = { bytesWritten: 0, bytesSent: 0, bytesAcknowledged: 0 };
 		let signal!: AbortSignal;
 		const reset = (e: unknown) => {
 			this.#scheduler?.dropStream(streamId, e instanceof Error ? e : new Error("stream aborted"));
@@ -1966,7 +2000,7 @@ export default class Session implements WebTransport {
 				);
 			},
 			write: async (chunk, controller) => {
-				await this.#sendStreamData(id, chunk, controller.signal);
+				await this.#sendStreamData(id, chunk, controller.signal, stats);
 			},
 			abort: reset,
 			close: async () => {
@@ -1985,7 +2019,13 @@ export default class Session implements WebTransport {
 			},
 		});
 		this.#attachSendOrder(writable, streamId, sendOrder);
-		return writable;
+		// W3C `WebTransportSendStream.getStats()`, so a caller can tell what the peer has.
+		Object.defineProperty(writable, "getStats", {
+			configurable: true,
+			value: async (): Promise<SendStreamStats> => ({ ...stats }),
+		});
+		// Both properties are defined above.
+		return writable as SendStream;
 	}
 
 	/** Shared teardown for both terminal transitions: tears down streams,

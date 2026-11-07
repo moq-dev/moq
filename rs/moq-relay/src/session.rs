@@ -590,6 +590,8 @@ mod tests {
 
 	#[tokio::test]
 	async fn a_push_wakes_the_registration_once() {
+		use futures::FutureExt;
+
 		let registry = Registry::new();
 		let request = request("abc", "/room", "127.0.0.1:1");
 		let reg = registry.register(request);
@@ -598,11 +600,6 @@ mod tests {
 		kio::clock::timeout(Duration::from_secs(1), reg.nudged())
 			.await
 			.expect("the registration woke");
-		assert!(
-			kio::clock::timeout(std::time::Duration::from_millis(20), reg.nudged())
-				.await
-				.is_err(),
-			"a single push wakes once"
-		);
+		assert!(reg.nudged().now_or_never().is_none(), "a single push wakes once");
 	}
 }

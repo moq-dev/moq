@@ -147,6 +147,11 @@ impl Stream {
 		self.0.priority()
 	}
 
+	/// Whether the peer acknowledged every byte written so far.
+	pub(crate) fn acknowledged(&self) -> bool {
+		self.0.acknowledged()
+	}
+
 	/// Move the stream into a send group, or with `None` back to the ungrouped streams, which
 	/// go before every group.
 	///
@@ -190,6 +195,11 @@ impl Finished {
 	/// The priority of the send stream.
 	pub fn priority(&self) -> i64 {
 		self.0.priority()
+	}
+
+	/// Whether the peer acknowledged every byte written. See [`Stream::acknowledged()`].
+	pub(crate) fn acknowledged(&self) -> bool {
+		self.0.acknowledged()
 	}
 
 	/// Move the stream into a send group. See [`Stream::set_group()`].
@@ -260,6 +270,14 @@ impl Half {
 			.send_stream(self.id)
 			.priority()
 			.unwrap_or_default()
+	}
+
+	/// Whether the peer acknowledged every byte written so far; never once reset or stopped.
+	fn acknowledged(&self) -> bool {
+		let mut conn = self.shared.conn.borrow_mut();
+		let mut stream = conn.send_stream(self.id);
+		let offset = stream.offset();
+		stream.acked(offset).unwrap_or(false)
 	}
 
 	fn set_group(&mut self, group: Option<&Group>) {

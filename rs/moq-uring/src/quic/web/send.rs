@@ -244,6 +244,13 @@ impl moq_net::transport::poll::SendStream for Stream {
 			Err(err) => Err(err),
 		})
 	}
+	fn acknowledged(&self) -> Option<bool> {
+		Some(match &self.state {
+			State::Open(stream) => stream.acknowledged(),
+			State::Finished(stream) => stream.acknowledged(),
+			State::Reset(_) => false,
+		})
+	}
 }
 
 impl moq_net::transport::poll::SendGroup for send::Group {
