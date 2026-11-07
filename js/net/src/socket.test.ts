@@ -47,20 +47,31 @@ async function track() {
 	const remote = await (await incoming).accept();
 	return { ...state, local: await dialing, remote };
 }
-async function broadcast(origin: Origin.Producer, id: string): Promise<BroadcastConsumer> {
-	const request = origin.request(Path.from("room/.socket", id));
-	const active = request.active.peek();
+type Role = ".server" | ".client";
+function announced(origin: Origin.Producer, role: Role, id: string): BroadcastConsumer | undefined {
+	return origin.request(Path.from("room", role, id)).active.peek();
+}
+async function broadcast(origin: Origin.Producer, role: Role, id: string): Promise<BroadcastConsumer> {
+	const active = announced(origin, role, id);
 	if (!active) throw new Error("endpoint not routed locally");
 	return active;
 }
-async function raw(origin: Origin.Producer, id: string, name: string): Promise<Track.Subscriber> {
-	return (await broadcast(origin, id)).track(name).subscribe({ order: "ascending", delay: { max: null } });
+async function raw(origin: Origin.Producer, role: Role, id: string, name: string): Promise<Track.Subscriber> {
+	return (await broadcast(origin, role, id)).track(name).subscribe({ order: "ascending", delay: { max: null } });
 }
 
 test("socket namespace exposes endpoint and both stream roles", () => {
 	expect(socket.Endpoint).toBeFunction();
 	expect(socket.TcpStream).toBeFunction();
 	expect(socket.TrackStream).toBeFunction();
+});
+
+test("an endpoint closes with its origin before it dials or accepts", async () => {
+	const origin = new Origin.Producer();
+	const endpoint = new socket.Endpoint(origin, Path.from("room"), "alice");
+	origin.close();
+	expect(await endpoint.closed).toBeNull();
+	expect(new socket.Endpoint(origin, Path.from("room"), "bob").closed.peek()).toBeNull();
 });
 
 test("TCP carries ordered frames in both directions, with independent FIN", async () => {
@@ -89,7 +100,7 @@ test("a peer route replaced between metadata and opening cannot inherit a socket
 	const routes: { close(): void }[] = [];
 	const tasks: Promise<void>[] = [];
 	const advertise = (front: BroadcastConsumer) => {
-		const route = wireOf(origin).receive(Path.from("room/.socket/remote"));
+		const route = wireOf(origin).receive(Path.from("room/.server/remote"));
 		routes.push(route);
 		tasks.push(
 			(async () => {
@@ -119,7 +130,7 @@ test("a peer route replaced between metadata and opening cannot inherit a socket
 	try {
 		const request = await requested;
 		if (!request) throw new Error("missing dial");
-		returning = await raw(origin, "alice", request.name);
+		returning = await raw(origin, ".client", "alice", request.name);
 		await returning.info();
 		request.accept({ maxAge: null });
 		// Both route changes happen before the info promise's continuation opens the session.
@@ -164,7 +175,7 @@ test("a track session skips dropped groups and keeps the next message", async ()
 	const { local, remote } = await track();
 	const reader = remote.consumer.ordered();
 	const reading = reader.readFrame();
-	hooks.dropTrackGroups(local.producer, 0n, 1n, new NotFound("message unavailable"));
+	hooks.dropTrackGroups(local.producer, 0n, 1n, { error: new NotFound("message unavailable") });
 	const group = local.producer.createGroup(1n);
 	group.writeFrame(bytes(7));
 	group.finish();
@@ -224,7 +235,7 @@ for (const protocol of ["tcp", "track"] as const) {
 		const oldReader = local instanceof socket.TcpStream ? local.consumer : local.consumer.ordered();
 		remote.producer.abort(reset);
 		await expect(oldReader.readFrame()).rejects.toBeInstanceOf(Error);
-		const source = await broadcast(origin, "bob");
+		const source = await broadcast(origin, ".server", "bob");
 		let outcome: unknown;
 		const fetched = source
 			.track(`${protocol}/alice/bob/${local.session}`)
@@ -267,12 +278,29 @@ for (const protocol of ["tcp", "track"] as const) {
 	});
 }
 
-test("a dial-only endpoint refuses incoming requests and answers only its reserved session", async () => {
-	const { origin, a } = setup();
+test("an endpoint announces only the roles it takes, and its client answers only its reserved sessions", async () => {
+	const { origin, a, b } = setup();
 	await expect(a.dialTcp("alice")).rejects.toBeInstanceOf(Error);
-	const unsupported = await raw(origin, "alice", "tcp/bob/alice/not-a-dial");
+	expect(announced(origin, ".client", "alice")).toBeUndefined();
+	const cancel = new AbortController();
+	const dialing = a.dialTcp("bob", { signal: cancel.signal });
+	const failure = dialing.catch((error: unknown) => error);
+	expect(announced(origin, ".client", "alice")).toBeDefined();
+	expect(announced(origin, ".server", "alice")).toBeUndefined();
+	const unsupported = await raw(origin, ".client", "alice", "tcp/bob/alice/not-a-dial");
 	await expect(unsupported.info()).rejects.toBeInstanceOf(NotFound);
 	unsupported.close();
+
+	// Bob has not accepted yet, so the dial waits for him to serve.
+	const clock = time();
+	await clock.advance(Nano.fromSecond(Second(3600)));
+	expect(announced(origin, ".server", "bob")).toBeUndefined();
+	const incoming = b.acceptTcp();
+	expect(announced(origin, ".server", "bob")).toBeDefined();
+	expect(announced(origin, ".client", "bob")).toBeUndefined();
+	expect((await incoming).peer).toBe("alice");
+	cancel.abort();
+	expect(await failure).toBeInstanceOf(Error);
 });
 
 test("unknown and unaccepted protocols reset without entering the other queue", async () => {
@@ -281,7 +309,7 @@ test("unknown and unaccepted protocols reset without entering the other queue", 
 	const incoming = b.acceptTcp({ signal: hold.signal });
 	const rejected = incoming.catch((error: unknown) => error);
 	for (const protocol of ["track", "quic"]) {
-		const subscriber = await raw(origin, "bob", `${protocol}/alice/bob/session-${protocol}`);
+		const subscriber = await raw(origin, ".server", "bob", `${protocol}/alice/bob/session-${protocol}`);
 		await expect(subscriber.info()).rejects.toBeInstanceOf(Error);
 		subscriber.close();
 	}
@@ -340,7 +368,7 @@ test("dial and accept cancellation before announcement release their routing hol
 	cancel.abort();
 	expect(await failure).toBeInstanceOf(Error);
 	const next = b.acceptTcp();
-	const subscriber = await raw(origin, "bob", "tcp/absent/bob/never-announced");
+	const subscriber = await raw(origin, ".server", "bob", "tcp/absent/bob/never-announced");
 	const accepted = (await next).accept();
 	const acceptanceFailure = accepted.catch((error: unknown) => error);
 	await clock.advance(Nano.fromSecond(Second(3600)));
@@ -365,11 +393,11 @@ test("accept waits for a delayed dialer announcement only while its original dia
 	const clock = time();
 	const { origin, b } = setup();
 	const next = b.acceptTrack();
-	const subscriber = await raw(origin, "bob", "track/late/bob/delayed-announcement");
+	const subscriber = await raw(origin, ".server", "bob", "track/late/bob/delayed-announcement");
 	const incoming = await next;
 	const acceptance = incoming.accept();
 	await clock.advance(Nano.fromSecond(Second(3600)));
-	const route = origin.route(Path.from("room/.socket/late"), { hidden: true });
+	const route = origin.route(Path.from("room/.client/late"), { hidden: true });
 	const answer = hooks.reserveUnlistedTrack(route.broadcast, "track/late/bob/delayed-announcement");
 	route.announce();
 	await clock.advance(Nano.zero);
@@ -383,11 +411,13 @@ test("accept waits for a delayed dialer announcement only while its original dia
 
 test("forged and replayed dials cannot pass return routability", async () => {
 	const { origin, a, b } = setup();
+	// Alice dials elsewhere, so her client broadcast is there to refuse bob's check.
+	void a.dialTcp("carol").catch(() => {});
 	for (const name of ["tcp/alice/bob/forged", "tcp/alice/someone-else/replayed"]) {
 		const cancel = new AbortController();
 		const wait = b.acceptTcp({ signal: cancel.signal });
 		void wait.catch(() => {});
-		const subscriber = await raw(origin, "bob", name);
+		const subscriber = await raw(origin, ".server", "bob", name);
 		const refusal = subscriber.info().catch((error: unknown) => error);
 		if (name.includes("/bob/")) await expect((await wait).accept()).rejects.toBeInstanceOf(NotFound);
 		else cancel.abort();
@@ -402,15 +432,19 @@ test("session names are absent from listings while reserved and established", as
 	const next = b.acceptTcp();
 	const dialing = a.dialTcp("bob");
 	const incoming = await next;
-	for (const id of ["alice", "bob"]) {
-		const listing = (await broadcast(origin, id)).tracks();
+	const endpoints = [
+		[".client", "alice"],
+		[".server", "bob"],
+	] as const;
+	for (const [role, id] of endpoints) {
+		const listing = (await broadcast(origin, role, id)).tracks();
 		expect(await listing.next()).toEqual({ kind: "synced" });
 		listing.close();
 	}
 	const remote = await incoming.accept();
 	await dialing;
-	for (const id of ["alice", "bob"]) {
-		const listing = (await broadcast(origin, id)).tracks();
+	for (const [role, id] of endpoints) {
+		const listing = (await broadcast(origin, role, id)).tracks();
 		expect(await listing.next()).toEqual({ kind: "synced" });
 		listing.close();
 	}
@@ -444,11 +478,11 @@ test("track reset and endpoint close fail peers and leave no open accepts", asyn
 test("a second TCP group resets the session even after the first FIN", async () => {
 	for (const initial of [0n, 2n]) {
 		const { origin, b } = setup();
-		const route = origin.route(Path.from("room/.socket/raw"));
+		const route = origin.route(Path.from("room/.client/raw"));
 		const name = `tcp/raw/bob/second-${initial}`;
 		const answer = hooks.reserveUnlistedTrack(route.broadcast, name);
 		const next = b.acceptTcp();
-		const subscriber = await raw(origin, "bob", name);
+		const subscriber = await raw(origin, ".server", "bob", name);
 		const acceptance = (await next).accept();
 		// Drive the accept's return subscription before publishing the first half.
 		const clock = time();
@@ -471,18 +505,18 @@ test("a second TCP group resets the session even after the first FIN", async () 
 for (const dropped of [false, true]) {
 	test(`TCP fails when its only group ${dropped ? "is dropped" : "never arrives"}`, async () => {
 		const { origin, b } = setup();
-		const route = origin.route(Path.from("room/.socket/raw"));
+		const route = origin.route(Path.from("room/.client/raw"));
 		const name = `tcp/raw/bob/missing-${dropped}`;
 		const answer = hooks.reserveUnlistedTrack(route.broadcast, name);
 		const next = b.acceptTcp();
-		const subscriber = await raw(origin, "bob", name);
+		const subscriber = await raw(origin, ".server", "bob", name);
 		const acceptance = (await next).accept();
 		const clock = time();
 		await clock.advance(Nano.zero);
 		const producer = answer.accept();
 		const stream = await acceptance;
 		const reading = stream.consumer.readFrame();
-		if (dropped) hooks.dropTrackGroups(producer, 0n, 1n, new NotFound("TCP group unavailable"));
+		if (dropped) hooks.dropTrackGroups(producer, 0n, 1n, { error: new NotFound("TCP group unavailable") });
 		producer.finish();
 		await expect(reading).rejects.toBeInstanceOf(NotFound);
 		expect(await stream.producer.closed).toBeInstanceOf(NotFound);
@@ -532,7 +566,7 @@ for (const protocol of ["tcp", "track"] as const) {
 		origins.add(ao);
 		origins.add(bo);
 		const a = new socket.Endpoint(ao, Path.from("room"), "alice");
-		const route = bo.route(Path.from("room/.socket/bob"), { hidden: true });
+		const route = bo.route(Path.from("room/.server/bob"), { hidden: true });
 		const requested = wireOf(route.broadcast).requested();
 		route.announce();
 		const pair = createMockTransportPair(alpn);
@@ -543,7 +577,7 @@ for (const protocol of ["tcp", "track"] as const) {
 		]);
 		let returning: Track.Subscriber | undefined;
 		let drained: Promise<void> | undefined;
-		const following = bo.follow(Path.from("room/.socket/alice"));
+		const following = bo.follow(Path.from("room/.client/alice"));
 		try {
 			const dialing = protocol === "tcp" ? a.dialTcp("bob") : a.dialTrack("bob");
 			void dialing.catch(() => {});

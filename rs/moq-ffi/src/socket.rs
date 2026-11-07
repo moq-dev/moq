@@ -9,7 +9,8 @@ use crate::ffi::{Background, Polled};
 use crate::origin::MoqOriginProducer;
 use crate::producer::{MoqGroupProducer, MoqTrackInfo, MoqTrackProducer};
 
-/// An endpoint announcing one hidden broadcast and accepting TCP and track dials separately.
+/// A socket endpoint: its first dial announces it as a client, and its first accept as a
+/// server, which takes TCP and track dials separately.
 #[derive(uniffi::Object)]
 pub struct MoqSocketEndpoint {
 	inner: moq_net::socket::Endpoint,
@@ -18,7 +19,8 @@ pub struct MoqSocketEndpoint {
 
 #[uniffi::export]
 impl MoqSocketEndpoint {
-	/// Announce `id` beneath `prefix`, using `origin` for publishing and finding peers.
+	/// The endpoint `id` beneath `prefix`, using `origin` for publishing and finding peers.
+	/// Nothing is announced until its first dial or accept.
 	#[uniffi::constructor]
 	pub fn new(origin: &MoqOriginProducer, prefix: String, id: String) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
@@ -42,13 +44,13 @@ impl MoqSocketEndpoint {
 		self.inner.prefix().to_string()
 	}
 
-	/// Retract the endpoint and reset its pending dials and sessions.
+	/// Retract the endpoint's broadcasts and reset its pending dials and sessions.
 	pub fn close(&self) {
 		let _guard = crate::ffi::enter();
 		self.inner.close();
 	}
 
-	/// Dial a new `tcp` session; cancelling this call resets only this dial.
+	/// Dial the server `peer` in a new `tcp` session; cancelling this call resets only this dial.
 	pub async fn dial_tcp(&self, peer: String) -> Result<Arc<MoqSocketTcpStream>, MoqError> {
 		self.driver
 			.watch(async {
@@ -73,7 +75,7 @@ impl MoqSocketEndpoint {
 			.await
 	}
 
-	/// Dial a new `track` session; cancelling this call resets only this dial.
+	/// Dial the server `peer` in a new `track` session; cancelling this call resets only this dial.
 	pub async fn dial_track(
 		&self,
 		peer: String,

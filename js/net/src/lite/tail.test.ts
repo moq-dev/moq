@@ -116,6 +116,9 @@ async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boo
 describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (version) => {
 	test("the source start waits for SUBSCRIBE_START where it resolves the start", async () => {
 		const { reader, respond } = await subscribed(version, GRACE, { start: { absolute: 2n } });
+		// The accepted copy registers once the SUBSCRIBE write resolves, which can trail the publisher
+		// reading it, so let that run before asking where the source starts.
+		await settle();
 		expect(hooks.sourceStart(reader)).toBe(resolvesStart(version) ? "pending" : undefined);
 		await respond({ start: new SubscribeStart([3n]) });
 		await settle();

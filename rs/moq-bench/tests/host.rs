@@ -7,6 +7,8 @@ fn host_ignores_the_environment() {
 	let dir = tempfile::tempdir().unwrap();
 	let output = dir.path().join("host.jsonl");
 	let status = std::process::Command::new(env!("CARGO_BIN_EXE_moq-bench"))
+		// The guard on host timers is for tests, not the binaries they run.
+		.env_remove("KIO_DENY_HOST_TIMERS")
 		.args(["host", "--pid", &std::process::id().to_string(), "--duration", "10ms"])
 		.arg("--output")
 		.arg(&output)
