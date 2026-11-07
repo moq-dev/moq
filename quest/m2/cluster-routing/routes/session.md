@@ -31,7 +31,8 @@ node table, and the public API drops what the route layer replaced.
   ✅ now, behind a private chain type that lite-06 and the moq-transport
   cluster extension keep filling (rejected: when lite-06 retires, which ships
   them in the cut and breaks them later; only the `Cost` constants now). The
-  sweep found no reader outside this repository.
+  sweep found no reader outside this repository, and /quest-unblock confirmed
+  ✅ now the same day. It is a breaking change; the PR marks its title with `!`.
   - `Hops`, `RouteInfo::hops`, `RouteInfo::is_anonymous`, and
     `Cost::{MAX, DRAIN}` become `pub(crate)`; `Cost::{new, value}` stay.
     JS `RouteInfo.hops`, moq-ffi's `MoqRouteInfo` hops, and moq-c's route

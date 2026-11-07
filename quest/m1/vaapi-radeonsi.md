@@ -22,19 +22,15 @@ Mesa 26.2.5); on moq-vaapi 0.2.0, 7 fail. That PR's body has the evidence.
 - Chroma: not an offset. Mesa's VPP reads the BT.601 standard as SMPTE 170M
   primaries and gamut-maps; moq-vaapi now names each side explicitly on Mesa.
 
-What remains here: bump `moq-vaapi` in the root `Cargo.toml` to the release
-with #13, refresh `Cargo.lock` with it, and say in the module docs of
+Decided 2026-11-07 (maintainer, /quest-unblock): an agent merged #13 and
+published it as moq-vaapi 0.2.1 (a patch: `cargo semver-checks` against 0.2.0
+needs no bump), tagged `v0.2.1`.
+
+What remains here: bump `moq-vaapi` in the root `Cargo.toml` to 0.2.1, refresh `Cargo.lock` with it, and say in the module docs of
 `rs/moq-video/src/encode/backend/vaapi.rs` that the tests pass on radeonsi.
 Then delete this quest.
 
 Public API: none. Wire: none.
-
-## Waiting
-
-- Maintainer: merge [moq-dev/vaapi#13](https://github.com/moq-dev/vaapi/pull/13)
-  and publish it as moq-vaapi 0.2.1 (a patch: no public API change). Version
-  bumps are a person's call, so an agent does not cut the release. Check that
-  `cargo info moq-vaapi@0.2.1` finds it.
 
 ## Related
 
