@@ -260,6 +260,7 @@ export class Truck {
 			this.estopped.peek() ||
 			!status ||
 			status.estopped ||
+			!this.handle.peek() ||
 			status.driver !== this.handle.peek()
 		) {
 			return false;
