@@ -2024,9 +2024,9 @@ impl OriginScope {
 	}
 
 	/// Whether this view may publish at the absolute `prefix`: a mount is read-only,
-	/// so nothing is published at or beneath one.
+	/// so nothing is published at or beneath one, nor in an excluded subtree.
 	fn publishes(&self, prefix: &Path) -> bool {
-		self.mount(prefix).is_none()
+		self.mount(prefix).is_none() && !self.excluded.iter().any(|excluded| prefix.has_prefix(excluded))
 	}
 
 	/// Whether this view reaches the absolute `path`.
@@ -2811,6 +2811,16 @@ impl Producer {
 			timers: self.timers.clone(),
 			frames: self.frames.clone(),
 		})
+	}
+
+	/// A clone that never reaches the subtree at `prefix`, relative to this root:
+	/// nothing is published or announced at or beneath it, and a consumer derived
+	/// from the result does not see it. [`allowed`](Self::allowed) is unchanged.
+	pub fn exclude(&self, prefix: impl TryInto<Path, Error: Into<Error>>) -> Result<Self, Error> {
+		let prefix = self.root.join(&path::convert(prefix)?)?;
+		let mut producer = self.clone();
+		producer.scope.excluded = self.scope.excluded.iter().cloned().chain([prefix]).collect();
+		Ok(producer)
 	}
 
 	/// Returns a producer that reads the subtree at `at` from `target` instead.

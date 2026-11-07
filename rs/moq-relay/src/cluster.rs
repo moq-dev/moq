@@ -1322,6 +1322,11 @@ pub struct Cluster {
 	/// when the last [`moq_stats::Producer`] clone drops; parking one here means
 	/// serving and publishing end together.
 	pub(crate) stats_producer: moq_stats::Producer,
+
+	/// The prefix the relay's own stats publisher writes under, when enabled.
+	/// Only cluster peers may publish there; client sessions cannot, whatever
+	/// their grant, since the registry leaves that subtree unmetered.
+	stats_prefix: Option<Path>,
 }
 
 /// A gateway or network session admitted with its lease, scoped origins, and stats.
@@ -1431,6 +1436,7 @@ impl Cluster {
 			moq_net::time::run(driver).await;
 		}));
 		// Publish through the same origin cluster peers read from.
+		let stats_prefix = stats.reserved()?;
 		let (stats_producer, publisher) = stats.build(origin.clone())?;
 		work.push(Child::new("stats publisher", publisher.run()));
 		let stats = stats_producer.registry().clone();
@@ -1454,6 +1460,7 @@ impl Cluster {
 			critical: Default::default(),
 			origin,
 			stats,
+			stats_prefix,
 			stats_producer,
 		};
 		Ok((cluster, Driver { work }))
@@ -1619,7 +1626,11 @@ impl Cluster {
 	/// [`origin::Link::Upstream`] when that peer is upstream.
 	/// Nothing is published beneath the grant's mounts.
 	pub fn publisher(&self, token: &auth::Token) -> Option<origin::Producer> {
-		self.mounted(token)?.scope(&token.root, &token.publish).ok()
+		let mut origin = self.mounted(token)?;
+		if let Some(prefix) = self.stats_prefix.as_ref().filter(|_| !(token.peer || token.upstream)) {
+			origin = origin.exclude(prefix).ok()?;
+		}
+		origin.scope(&token.root, &token.publish).ok()
 	}
 
 	/// The origin marked with the grant's link and with its mounts applied,
@@ -2708,6 +2719,53 @@ mod tests {
 		drop(driver);
 		assert!(broadcast.is_closed(), "dropping the driver stopped the publisher");
 		drop(cluster);
+	}
+
+	/// Only cluster peers publish under the stats prefix: a root `**` client grant
+	/// can neither route nor announce there, yet still reads the relay's stats.
+	#[kio::test]
+	async fn only_peers_publish_under_the_stats_prefix() {
+		let (cluster, driver) = Cluster::new(with_stats()).unwrap();
+		let options = || moq_net::origin::RouteOptions::default();
+		for (peer, upstream) in [(false, false), (true, false), (true, true)] {
+			let mut grant = moq_auth::Grant::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
+			grant.peer = peer;
+			grant.upstream = upstream;
+			let token = auth::Lease::new("/", moq_auth::lease::Consumer::fixed(grant)).unwrap();
+			let publisher = cluster.publisher(token.token()).expect("publish grant");
+			assert!(publisher.route("room", options()).is_ok());
+			for path in [".stats", ".stats/node", ".stats/node/evil"] {
+				assert_eq!(
+					publisher.route(path, options()).is_ok(),
+					peer,
+					"route {path}, peer={peer}"
+				);
+				assert_eq!(
+					publisher.route_prefix(path, options()).is_ok(),
+					peer,
+					"route_prefix {path}, peer={peer}"
+				);
+			}
+			assert!(publisher.route(".statsish", options()).is_ok());
+		}
+
+		let grant = moq_auth::Grant::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
+		let token = auth::Lease::new("/", moq_auth::lease::Consumer::fixed(grant)).unwrap();
+		let consumer = cluster.subscriber(token.token()).expect("subscribe grant").consume();
+		let path = Path::from_static(".stats/node");
+		let read = async {
+			consumer
+				.follow(&path, None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap()
+				.unwrap()
+		};
+		let futures::future::Either::Right(_) = futures::future::select(Box::pin(driver.run()), Box::pin(read)).await
+		else {
+			panic!("the driver stopped before publishing stats");
+		};
 	}
 
 	/// The publish task holds only a `Weak` to its producer, so it stops when the

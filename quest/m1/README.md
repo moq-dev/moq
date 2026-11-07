@@ -33,7 +33,6 @@ moves what remains of them once their claims merge.
 
 - [JS cache pool](/quest/m1/js-cache-pool.md) - `js/net` bills cached frames and drop-set runs to a per-broadcast byte pool ported from Rust
 - [Drop set](/quest/m1/drop-set.md) - the drop set's track and cursor runs are billed to the cache pool, so fragmenting drops costs what the pool holds; eviction folds final runs or ends the cursor with `TooFarBehind`
-- [Only the relay's own stats publisher uses the stats prefix](/quest/m1/stats-prefix.md) - a broad grant can no longer publish unmetered media or spoof node stats under `.stats`
 - [js/net enforces the input checks Rust does](/quest/m1/js-net-input-checks.md) - GOAWAY redirects to loopback spellings, credential logging, ANNOUNCE_INIT size, sequence range, and version pinning match Rust
 - [Rust and JS accept exactly the same tokens and key sets](/quest/m1/token-parse-strict.md) - a null `exp` no longer means never-expiring in Rust, duplicate kids and bad scope roots are refused, and every relay lease is validated
 - [A refused lite SUBSCRIBE_UPDATE ends the subscription](/quest/m1/lite-update-refused.md) - the publisher no longer serves a removed range or reports the wrong start after the model refuses an update
