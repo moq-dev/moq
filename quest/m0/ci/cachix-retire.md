@@ -52,18 +52,18 @@ runtime dependencies from `cache.nixos.org`.
 `kixelated.cachix.org` as a read-only substituter; the m2 cut's merge of
 `main` replaces them, so they need no backport.
 
-What remains is the maintainer's:
+Deleted 2026-11-07 (maintainer, /quest-unblock): the `CACHIX_AUTH_TOKEN`
+repository secret. No workflow on `main` or `release` read it, no Environment
+held a copy, and `gh secret list --repo moq-dev/moq` no longer lists it. The
+`kixelated` cache stays readable for old tags.
 
-- Delete `CACHIX_AUTH_TOKEN`. No workflow on `main` or `release` reads it.
-- Record both bucket sizes against the CI bucket's 30-day expiry.
+What remains is the maintainer's: record both bucket sizes against the CI
+bucket's 30-day expiry.
 
 Public API: none. Wire: none.
 
 ## Waiting
 
-- Maintainer: delete the `CACHIX_AUTH_TOKEN` repository secret (Settings,
-  Secrets and variables, Actions), which agents may not delete. Check:
-  `gh secret list --repo moq-dev/moq` no longer lists it.
 - Maintainer: record both bucket sizes no earlier than 2026-11-24, a month
   after the first `cache.yml` push to `nix-ci-moq-dev` on 2026-10-24, against
   the 30-day expiry in `infra/nix/lifecycle.json`. Sizes need a

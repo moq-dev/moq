@@ -179,6 +179,6 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Verify the Nix runtime cache](/quest/m0/ci/nix-cache-verify.md) - hosted Cache uploads `main`'s relay and CLI, and Smoke's nix channel substitutes them
 - [Record hosted cargo-hakari evidence](/quest/m0/ci/hakari.md) - compare scheduled macOS and Windows cache hits and estimated compiler work saved before and after the workspace-hack
 - [Drop main from the publish Environment](/quest/m0/ci/publish-release-only.md) - the maintainer narrows `publish` to `release` and release tags once no job naming it runs as `main`
-- [Release tags push to nix.moq.dev, and Cachix stops taking writes](/quest/m0/ci/cachix-retire.md) - release tags now substitute from nix.moq.dev; revoke the Cachix token (the cache stays for old tags) and record both bucket sizes
+- [Release tags push to nix.moq.dev, and Cachix stops taking writes](/quest/m0/ci/cachix-retire.md) - release tags now substitute from nix.moq.dev and the Cachix token is deleted; record both bucket sizes
 - [Measure the Linux cache effect of native media exclusions](/quest/m0/ci/hakari-followups.md) - scheduled Linux jobs measure cache reuse after unrelated tests stop compiling PipeWire and libclang
 - [Build two queue entries at once if it helps](/quest/m0/ci/queue-concurrency.md) - a measured trial of `maximumEntriesToBuild: 2` against the serial lane's burst latency
