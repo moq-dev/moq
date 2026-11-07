@@ -56,16 +56,17 @@ export class Rendition<Config> {
 	readonly config = new Signal<Config | undefined>(undefined);
 
 	/**
-	 * The longest a video or audio rendition's tracks run between group starts outside a pause, when
-	 * known: a video encoder's keyframe interval, or an audio encoder's group duration. Undefined, or
-	 * not a positive duration, contributes nothing.
+	 * The time between join points the producer holds to, the longest a video or audio rendition's
+	 * tracks run between group starts outside a pause, when known: the effective value of an
+	 * encoder's `join`, after any rounding to whole frames. Undefined, or not a positive duration,
+	 * contributes nothing.
 	 *
 	 * When the broadcast first lists a video or audio rendition in a network broadcast, it declares
 	 * the longest of these as the catalog's `media.join.interval`, rounded up to whole milliseconds,
 	 * so an HLS or DASH export can cut its segments before any media is encoded. That declaration
 	 * is fixed for the network broadcast, so a later change here does not move it.
 	 */
-	readonly joinInterval = new Signal<Milli | undefined>(undefined);
+	readonly join = new Signal<Milli | undefined>(undefined);
 
 	/**
 	 * What the producer has sent under this rendition, written by the producer and reported under

@@ -356,7 +356,7 @@ export class Transcode {
 
 						// Mirror Encoder.serve: default to a 2s GOP unless the rendition overrides it.
 						const settings = this.in.settings.peek();
-						const interval = settings?.keyframeInterval ?? Milli.fromSecond(2 as Second);
+						const interval = settings?.join ?? Milli.fromSecond(2 as Second);
 
 						const timestamp = frame.timestamp as Micro;
 						const keyFrame =

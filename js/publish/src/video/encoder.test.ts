@@ -150,7 +150,7 @@ test("encoding tracks encoder config in its child effect", async () => {
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		joinInterval: new Signal(undefined),
+		join: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -194,7 +194,7 @@ test("an on-demand gap marks a discontinuity and leaves the broadcast-owned trac
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: live,
-		joinInterval: new Signal(undefined),
+		join: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -251,7 +251,7 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		joinInterval: new Signal(undefined),
+		join: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -351,7 +351,7 @@ test("every published config fits a probe for its own codec", async () => {
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		joinInterval: new Signal(undefined),
+		join: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -573,35 +573,37 @@ test("software-only AV1 is refused even when explicitly requested", async () => 
 
 // Regression: only the codec probe and `maxScale` settled the encoder on failure, so a knob that broke
 // resolution later (a negative bitrate) held `<moq-publish>`'s announce forever.
-test("an invalid knob settles the encoder without a config", async () => {
-	using _videoEncoder = installFakeVideoEncoder();
-	const error = spyOn(console, "error").mockImplementation(() => {});
-	const capture = {
-		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
-		out: { display: new Signal({ width: 1920, height: 1080 }) },
-	};
-	const config = new Signal<{ bitrateScale?: number } | undefined>({ bitrateScale: -1 });
-	const probe = spyOn(FakeVideoEncoder, "isConfigSupported");
-	const encoder = new Encoder("video", { enabled: true, capture: capture as never, config });
-	try {
-		await settle();
-		expect(encoder.out.catalog.peek()).toBeUndefined();
-		expect(encoder.settled.peek()).toBe(true);
-		expect(error).toHaveBeenCalled();
-		// Refused before the browser could coerce it into an unsigned bitrate.
-		expect(probe).not.toHaveBeenCalled();
+for (const invalid of [{ bitrateScale: -1 }, { join: Milli(0) }] satisfies Config[]) {
+	test(`an invalid knob settles the encoder without a config: ${JSON.stringify(invalid)}`, async () => {
+		using _videoEncoder = installFakeVideoEncoder();
+		const error = spyOn(console, "error").mockImplementation(() => {});
+		const capture = {
+			in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+			out: { display: new Signal({ width: 1920, height: 1080 }) },
+		};
+		const config = new Signal<Config | undefined>(invalid);
+		const probe = spyOn(FakeVideoEncoder, "isConfigSupported");
+		const encoder = new Encoder("video", { enabled: true, capture: capture as never, config });
+		try {
+			await settle();
+			expect(encoder.out.catalog.peek()).toBeUndefined();
+			expect(encoder.settled.peek()).toBe(true);
+			expect(error).toHaveBeenCalled();
+			// Refused before the browser could coerce it into an unsigned bitrate.
+			expect(probe).not.toHaveBeenCalled();
 
-		// Fixing the knob clears the failure and resolves a config.
-		config.set(undefined);
-		await settle();
-		expect(encoder.out.catalog.peek()).toBeDefined();
-		expect(encoder.settled.peek()).toBe(true);
-	} finally {
-		encoder.close();
-		error.mockRestore();
-		probe.mockRestore();
-	}
-});
+			// Fixing the knob clears the failure and resolves a config.
+			config.set(undefined);
+			await settle();
+			expect(encoder.out.catalog.peek()).toBeDefined();
+			expect(encoder.settled.peek()).toBe(true);
+		} finally {
+			encoder.close();
+			error.mockRestore();
+			probe.mockRestore();
+		}
+	});
+}
 
 test("screen encoders default to logical pixels without scaling an already reduced capture twice", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
@@ -783,7 +785,7 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		joinInterval: new Signal(undefined),
+		join: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -953,7 +955,7 @@ test("the probe encodes with the frame rate and bitrate ceiling", async () => {
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		joinInterval: new Signal(undefined),
+		join: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -1163,7 +1165,7 @@ async function recordKeyframes(
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		joinInterval: new Signal(undefined),
+		join: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -1322,15 +1324,15 @@ test.each([false, true])(
 );
 
 // An HLS export cuts segments on the catalog's join interval and reads the media directly, so an
-// on-demand rendition declares its keyframe interval before anything is encoded and publishes no records.
-test("an on-demand rendition declares its keyframe interval, and a media subscriber starts it", async () => {
+// on-demand rendition declares its join before anything is encoded and publishes no records.
+test("an on-demand rendition declares its join, and a media subscriber starts it", async () => {
 	using recording = await installRecording();
 	const broadcast = new Broadcast({
 		origin: new Moq.Origin.Producer(),
 		name: Moq.Path.from("join.hang"),
 		onDemand: true,
 	});
-	const config = new Signal<Config | undefined>({ keyframeInterval: Milli(3000) });
+	const config = new Signal<Config | undefined>({ join: Milli(3000) });
 	const encoder = new Encoder("video", {
 		enabled: true,
 		broadcast,
@@ -1354,8 +1356,8 @@ test("an on-demand rendition declares its keyframe interval, and a media subscri
 		await settle();
 		expect(encoder.out.active.peek()).toBe(true);
 
-		// A later keyframe interval leaves the declared grid alone for this broadcast.
-		config.set({ keyframeInterval: Milli(5000) });
+		// A later join leaves the declared grid alone for this broadcast.
+		config.set({ join: Milli(5000) });
 		await settle();
 		expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(3000));
 	} finally {
@@ -1365,7 +1367,7 @@ test("an on-demand rendition declares its keyframe interval, and a media subscri
 	}
 });
 
-test("the default keyframe interval is the declared join interval", async () => {
+test("the default join is the declared join interval", async () => {
 	using recording = await installRecording();
 	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("default.hang") });
 	const encoder = new Encoder("video", { enabled: true, broadcast, capture: recording.capture as never });
@@ -1378,7 +1380,7 @@ test("the default keyframe interval is the declared join interval", async () => 
 	}
 });
 
-// The declared join interval is the longest GOP when media is first listed: a 3000ms interval
+// The declared join interval is the longest group when media is first listed: a 3000ms join
 // declares 3000ms, and a live change at 2500ms, after a keyframe at 0, is held to it.
 async function liveInterval(changed: Milli): Promise<{ keys: number[]; interval?: number }> {
 	using recording = await installRecording();
@@ -1387,12 +1389,12 @@ async function liveInterval(changed: Milli): Promise<{ keys: number[]; interval?
 		origin: new Moq.Origin.Producer(),
 		name: Moq.Path.from("interval.hang"),
 	});
-	const config = new Signal<Config | undefined>({ keyframeInterval: Milli(3000) });
+	const config = new Signal<Config | undefined>({ join: Milli(3000) });
 	const encoder = new Encoder("video", { enabled: true, broadcast, capture: recording.capture as never, config });
 	try {
 		await settle();
 		for (let ms = 0; ms < 16000; ms += 100) {
-			if (ms === 2500) config.set({ keyframeInterval: changed });
+			if (ms === 2500) config.set({ join: changed });
 			await recording.send(ms);
 		}
 		return { keys: [...recording.keys], interval: (await readCatalog(broadcast))?.media?.join?.interval };
@@ -1402,7 +1404,7 @@ async function liveInterval(changed: Milli): Promise<{ keys: number[]; interval?
 	}
 }
 
-test("a live keyframe interval raise is capped at the declared join interval", async () => {
+test("a live join raise is capped at the declared join interval", async () => {
 	const capped = { keys: [0, 3000, 6000, 9000, 12000, 15000], interval: 3000 };
 	expect(await liveInterval(Milli(6000))).toEqual(capped);
 	// Infinite is not a valid Milli, but a config is not checked.
@@ -1411,6 +1413,19 @@ test("a live keyframe interval raise is capped at the declared join interval", a
 	const cut = await liveInterval(Milli(1000));
 	expect(cut.interval).toBe(3000);
 	expect(cut.keys.slice(0, 4)).toEqual([0, 2500, 3500, 4500]);
+});
+
+// A join of zero would keyframe every frame, so it refuses the rendition like any invalid knob.
+test("a join that is not a positive duration refuses the rendition", async () => {
+	const error = spyOn(console, "error").mockImplementation(() => {});
+	try {
+		// A live change at 2500ms stops the encoder already running there.
+		for (const join of [0, -1, Number.NaN]) {
+			expect((await liveInterval(join as Milli)).keys).toEqual([0]);
+		}
+	} finally {
+		error.mockRestore();
+	}
 });
 
 test("an unwatched rendition reserves nothing and encodes at its configured bitrate", async () => {
@@ -1676,7 +1691,7 @@ test("a shrinking capture resizes in band below the advertised ceiling", async (
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		joinInterval: new Signal(undefined),
+		join: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -1751,7 +1766,7 @@ test("the catalog bitrate and frame rate only rise", async () => {
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		joinInterval: new Signal(undefined),
+		join: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -1813,7 +1828,7 @@ test("each slot keeps its own ceiling and maxima", async () => {
 			stats: new Signal(undefined),
 			track: new Signal<Moq.Track.Producer | undefined>(undefined),
 			slot,
-			joinInterval: new Signal(undefined),
+			join: new Signal(undefined),
 			close: () => {},
 		});
 		return { video: rendition, order: new Order(), join: new Signal(undefined) };
