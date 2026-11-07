@@ -273,11 +273,8 @@ impl Answer {
 		match output {
 			node::Output::Route { id, reach } => self.route(stream, source, id, reach),
 			node::Output::Batch { id, changes, floor } => self.batch(stream, source, id, changes, floor),
-			// Only a stream this node asked for requests, serves, or echoes.
-			node::Output::Request { .. }
-			| node::Output::Echo { .. }
-			| node::Output::Serve { .. }
-			| node::Output::Unserve { .. } => Ok(()),
+			// Only a stream this node asked for serves or echoes.
+			node::Output::Echo { .. } | node::Output::Serve { .. } | node::Output::Unserve { .. } => Ok(()),
 		}
 	}
 

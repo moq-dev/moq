@@ -85,13 +85,13 @@ pub(super) struct Routed {
 	/// The slots of routes the peer ended, kept until their ROUTE_END echo is flushed,
 	/// so a peer leaving its replies unread holds its routes' slots.
 	echoing: Vec<crate::session::Slot>,
+	/// The ROUTE_END echoes not yet written, each holding a slot in `echoing`.
+	ends: Vec<u64>,
 	served: HashMap<(route::Id, Path), ServedClaim>,
 	/// What the stream served before it filed again, while the new one takes it up.
 	previous: HashMap<(route::Id, Path), ServedClaim>,
 	/// Served claims whose request queue woke since the last pass.
 	ready: kio::Queue<(route::Id, Path)>,
-	/// Messages for the peer, written by the stream's task.
-	replies: Vec<AnnounceReply>,
 	/// The peer sent a GOAWAY: every claim served here ranks last.
 	drained: bool,
 }
@@ -142,10 +142,10 @@ impl Routed {
 			slots: subscriber.announces.clone(),
 			held: Vec::new(),
 			echoing: Vec::new(),
+			ends: Vec::new(),
 			served: HashMap::new(),
 			previous: HashMap::new(),
 			ready: Default::default(),
-			replies: Vec::new(),
 			drained: false,
 		})
 	}
@@ -190,7 +190,7 @@ impl Routed {
 				}
 				self.echoing.extend(self.held.pop());
 				self.stream.route(route.node, None);
-				self.replies.push(AnnounceReply::RouteEnd { id });
+				self.ends.push(id);
 			}
 			Msg::Floor { id, revision } => {
 				let certifies = self.certifies();
@@ -404,7 +404,7 @@ impl Routed {
 	}
 
 	/// Act on everything the node queued for the stream: serve the claims it hands
-	/// over, and queue the replies it asks for.
+	/// over.
 	pub(super) fn outputs(&mut self, subscriber: &Subscriber) {
 		while let Some(output) = self.stream.try_output() {
 			self.output(subscriber, output);
@@ -413,7 +413,6 @@ impl Routed {
 
 	fn output(&mut self, subscriber: &Subscriber, output: node::Output) {
 		match output {
-			node::Output::Request { id, seqno } => self.replies.push(AnnounceReply::RouteRequest { node: id, seqno }),
 			node::Output::Serve {
 				id,
 				named,
@@ -511,13 +510,29 @@ impl Routed {
 		while let Poll::Ready(output) = self.stream.poll_output(waiter) {
 			self.output(subscriber, output);
 		}
-		for reply in self.replies.drain(..) {
-			writer.buffer(&reply)?;
-		}
-		match writer.poll_flush(waiter) {
-			Poll::Ready(Ok(())) => self.echoing.clear(),
-			Poll::Ready(Err(err)) => return Err(err),
-			Poll::Pending => {}
+		// Replies are buffered only once the last ones flushed, so a peer leaving them
+		// unread holds its echoes' slots and one request per identity, nothing more.
+		loop {
+			match writer.poll_flush(waiter) {
+				Poll::Ready(Ok(())) => {}
+				Poll::Ready(Err(err)) => return Err(err),
+				Poll::Pending => break,
+			}
+			// The echoes buffered before went out: keep a slot per echo still queued.
+			self.echoing.truncate(self.ends.len());
+			let requests = match self.stream.poll_requests(waiter) {
+				Poll::Ready(requests) => requests,
+				Poll::Pending => Default::default(),
+			};
+			if self.ends.is_empty() && requests.is_empty() {
+				break;
+			}
+			for id in self.ends.drain(..) {
+				writer.buffer(&AnnounceReply::RouteEnd { id })?;
+			}
+			for (node, seqno) in requests {
+				writer.buffer(&AnnounceReply::RouteRequest { node, seqno })?;
+			}
 		}
 		while let Poll::Ready(Ok(key)) = self.ready.poll_pop(waiter) {
 			let Some(entry) = self.served.get_mut(&key) else {
@@ -739,6 +754,61 @@ mod tests {
 		*budget.write().ok().expect("the budget is open") = usize::MAX;
 		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
 		assert_eq!(subscriber.announces.available(), 2);
+	}
+
+	/// A downstream peer raising its ROUTE_REQUEST seqno while this stream's peer
+	/// leaves its replies unread holds one request for the identity, sent once the
+	/// writer flushes and naming the highest seqno.
+	#[kio::test]
+	async fn a_stalled_writer_holds_one_request_per_identity() {
+		use crate::coding::Decode;
+
+		let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+		let prefix = Path::empty();
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		let budget = kio::Producer::new(0);
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(
+			crate::lite::test_transport::SinkSend::stepped(log.clone(), budget.consume()),
+			crate::lite::Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		let route = Msg::RouteStart {
+			node: 7,
+			advert: ADVERT,
+		};
+		routed.receive(&prefix, route, &mut decoder).unwrap();
+		let downstream = (subscriber.origin.route_node())
+			.answer(
+				crate::route::Link {
+					proxy: true,
+					..Default::default()
+				},
+				Path::empty(),
+			)
+			.unwrap();
+
+		for seqno in 1..=1000 {
+			downstream.request(7, seqno);
+			routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		}
+
+		*budget.write().ok().expect("the budget is open") = usize::MAX;
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		let writes = log.writes.lock().unwrap().clone();
+		let mut buf = writes.as_slice();
+		let mut requests = Vec::new();
+		while !buf.is_empty() {
+			let (reply, size) = crate::lite::AnnounceReply::decode_slice(buf, crate::lite::Version::Lite07).unwrap();
+			buf = &buf[size..];
+			requests.push(reply);
+		}
+		// The first went out before the writer stalled; the rest merged behind it.
+		assert_eq!(
+			requests,
+			[1, 1000].map(|seqno| crate::lite::AnnounceReply::RouteRequest { node: 7, seqno })
+		);
 	}
 
 	/// What the stream keeps between floors is the net change to its committed claims,
