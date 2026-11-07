@@ -520,10 +520,11 @@ report() {
     } >>"$GITHUB_STEP_SUMMARY"
 }
 
-# Stop every running lane, whose process group holds its whole tree.
+# Stop every running lane, whose process group holds its whole tree. The job
+# table also holds a lane a signal interrupted before `running` recorded it.
 cancel() {
     local pid
-    for pid in "${!running[@]}"; do
+    for pid in $(jobs -pr); do
         kill -TERM -- "-$pid" 2>/dev/null || true
     done
 }
@@ -534,7 +535,10 @@ lone=
 next=0
 failed=()
 failed_status=0
-trap 'cancel; wait; report; rm -rf "$logs" "$changed" "$js_changed"' EXIT
+# A trapped signal that lands after `wait -n` returns, before the next builtin
+# runs, makes Bash end the exit trap's first wait at once, though that signal's
+# trap already ran; the next wait blocks until every lane has exited.
+trap 'cancel; until wait; do :; done; report; rm -rf "$logs" "$changed" "$js_changed"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 

@@ -123,13 +123,20 @@ Added 2026-11-06 (maintainer's standing rule that flakes join this epic):
 [moq-dev/moq#7986](https://github.com/moq-dev/moq/pull/7986)'s Check while
 reproducing on unchanged `main`.
 
+`sh/dispatch-query.test.py`'s terminate test was never load-bound. A TERM
+landing just after the dispatcher's `wait -n` returned left Bash marking the
+exit trap's next `wait` as interrupted, so it returned 143 at once and errexit
+skipped the timing report. A TERM landing after a lane forked but before
+`running` recorded it left that lane uncancelled and the exit trap's `wait`
+hung. The exit trap now waits again, and cancellation reads the job table,
+fixed by [moq-dev/moq#8138](https://github.com/moq-dev/moq/pull/8138).
+
 Public API: none. Wire: none.
 
 ## Required
 
 - [Flate's tail-shed test passes under load](/quest/m0/test-flakes-2/flate-tail-shed.md) - `js/net`'s compressed tail-shed cases finish within bun's timeout under load, re-enabled once fixed
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
-- [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
 - [Test PulseAudio servers stay off the desktop's D-Bus](/quest/m0/test-flakes-2/pulse-dbus.md) - concurrent media runs on one desktop never collide on `org.PulseAudio1`
 - [The Python audio playout-delay test reads its frames](/quest/m0/test-flakes-2/audio-playout-delay.md) - `test_audio_consumer_reports_its_playout_delay` stops timing out on its first read in the merge queue
 - [The FFI concurrent-ready test wakes both calls under load](/quest/m0/test-flakes-2/ffi-concurrent-ready.md) - `concurrent_ready_calls_all_wake` stops stalling its reader drain under load and is re-enabled
