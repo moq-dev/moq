@@ -102,6 +102,7 @@ the third, and survives a relay restart.
 - [Byte streams](/quest/m3/stream/README.md) - lossless TCP-level streams over MoQ
 - [Endpoint API](/quest/m3/mesh/endpoint.md) - an iroh-shaped `Endpoint` that connects to an endpoint ID and service and accepts byte streams
 - [Mesh relay node](/quest/m3/mesh/node.md) - a relay node enrolls into a mesh, dials its relays, and admits only enrolled LAN peers
+- [Mesh enrollment is bounded and revocation takes effect](/quest/m3/mesh/device-bounds.md) - a reusable key enrolls a bounded number of devices and a revoked device loses access within a bounded time
 - [Certificate credentials](/quest/m3/mesh/cert-credentials.md) - a certificate chain and a proof signature stand in for a JWT, checked against a trust store the application swaps live
 - [Address hints](/quest/m3/mesh/addr.md) - nodes publish their addresses on mesh tracks and dial each other directly where mDNS cannot find them
 - [Sparse overlay](/quest/m3/mesh/overlay.md) - each node keeps about log N deterministic direct links, forwards for the rest, and falls back to relays across a partition

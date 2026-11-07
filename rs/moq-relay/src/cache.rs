@@ -337,12 +337,12 @@ mod tests {
 	async fn setup_failure_stops_governor() {
 		let before = spawned();
 
-		// `--cluster-id 0` is rejected, so the cache is dropped before it is attached.
+		// `--cluster-max-hops 0` is rejected, so the cache is dropped before it is attached.
 		let cluster = crate::cluster::Config {
-			id: Some(0),
+			max_hops: Some(0),
 			..Default::default()
 		};
-		assert!(attach(&governed(), cluster).is_err(), "cluster id 0 is rejected");
+		assert!(attach(&governed(), cluster).is_err(), "a hop limit of 0 is rejected");
 
 		settle().await;
 		assert_eq!(spawned(), before, "a failed setup should not strand the governor");

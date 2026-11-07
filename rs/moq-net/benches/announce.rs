@@ -9,8 +9,10 @@
 //!
 //! - health: `<pid>/private/channel_N/stream-health-<ts>` from a few origins behind
 //!   a shared pair of relays, the shape that motivated compression.
-//! - unique: random single-segment paths and random two-hop chains, where nothing
-//!   is shared and every START pays the four zero base/keep bytes.
+//! - unique: random single-segment paths and random two-hop chains, where no path
+//!   is shared and every START pays the two zero base/keep bytes.
+//!
+//! The hop chains travel only on lite-06; lite-07 names each claim's route instead.
 //!
 //! The byte counts print once before the timings.
 //!
