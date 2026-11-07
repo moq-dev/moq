@@ -15,6 +15,7 @@ import { Front } from "../resume.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { Subscriber as TrackSubscriber } from "../track.ts";
+import { Budget } from "../util/yield.ts";
 import { wireOf } from "../wire.ts";
 import { type AnnounceBroadcast, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
@@ -1512,6 +1513,63 @@ test("lite draft-07: a final drop replaces an expired stream", async () => {
 	} finally {
 		await sub.close();
 		installed.close();
+	}
+});
+
+// A queued re-offer that a later update drops again as stale counts as given up: the track's end
+// leaves that stale drop standing, rather than replacing it with a final one. Mirrors the Rust
+// `a_redropped_reoffer_stays_stale_at_the_end_on_lite07`.
+test("lite draft-07: a re-offer dropped again before it opens stays stale at the end", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	// A write's budget yields on host CPU time, which could run the publisher's post-update task
+	// before the test writes update 3.
+	const poll = spyOn(Budget.prototype, "poll").mockReturnValue(undefined);
+	// Well inside the cache window, so the expired group is still cached to re-offer.
+	const budget = Milli(1_000);
+	const update = (update: bigint, maxDelay: Milli) =>
+		new SubscribeUpdate({
+			priority: 1,
+			startGroup: 0n,
+			update,
+			maxDelay,
+			...restate(Version.DRAFT_07, update - 1n),
+		}).encode(sub.client.writer, Version.DRAFT_07);
+	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
+	try {
+		sub.serve(0n);
+		expect(await sub.servedSequence()).toBe(0n);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07))).toBe(true);
+		await update(1n, budget);
+		// The restated range resolves at once.
+		expect("started" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07))).toBe(true);
+
+		const reset = sub.stall();
+		sub.serve(1n);
+		expect(await sub.servedHeader()).toBe(1n);
+		await flush();
+		await clock.advance(Nano.fromMilli(Milli(budget * 10)));
+		sub.serve(2n);
+		expect(await sub.servedSequence()).toBe(2n);
+		await clock.advance(Nano.fromMilli(budget));
+		expect(toStreamCode(fromTransport(await reset))).toBe(StreamCode.Old);
+		const first = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
+		if (!("drop" in first)) throw new Error("expected SUBSCRIBE_DROP");
+		expect([first.drop.start, first.drop.end, first.drop.update]).toEqual([1n, 1n, 1n]);
+
+		// Update 2 widens the budget, so group 1 is re-offered. Update 3 restores it within the
+		// task the publisher yields after an update, before that re-offer opens.
+		await update(2n, Milli(budget * 100));
+		await flush();
+		await update(3n, budget);
+		await flush();
+		sub.track.finish();
+		sub.track.close();
+		expect(await holesToEnd(sub.client.reader)).toEqual([["drop", 1n, 1n, 3n]]);
+	} finally {
+		await sub.close();
+		installed.close();
+		poll.mockRestore();
 	}
 });
 

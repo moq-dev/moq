@@ -5231,6 +5231,10 @@ impl TrackRun {
 				writer.buffer(&self.hole(run.start..=run.end - 1, &hole))?;
 				self.expired.insert(run.clone());
 				self.sent_stale(run.clone());
+				// A re-offer an update owed again is given up now, so the end sweep never names it.
+				if let Some(served) = &mut self.served {
+					served.insert(run.clone());
+				}
 			}
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
@@ -8216,6 +8220,47 @@ mod serve_group_test {
 				"narrow={narrow}"
 			);
 		}
+	}
+
+	/// A queued re-offer that a later update drops again as stale counts as given up: the
+	/// track's end leaves that stale drop standing, rather than replacing it with a final one.
+	#[kio::test]
+	async fn a_redropped_reoffer_stays_stale_at_the_end_on_lite07() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let budget = Duration::from_millis(500);
+		let subscriber =
+			track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(budget)));
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 0, 0);
+		write_group(&mut track, 1, 1000);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		write_group(&mut track, 2, 3000);
+		run.ctx.outcomes.dropped.lock().unwrap().push((0, StreamError::Old));
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		// Update 1 widens the budget, so group 0 waits its turn; update 2 restores it first.
+		for (update, max_delay) in [(1, Duration::from_secs(10)), (2, budget)] {
+			run.update(lite::SubscribeUpdate {
+				wanted_group: None,
+				priority: 0,
+				max_delay,
+				min_delay: None,
+				ranges: vec![(0, lite::Range::span(None, 0, None, None))],
+				order: Order::Descending,
+				update,
+			});
+		}
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		track.finish_at(track::Position::group(3), None).unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(
+			drop_updates(&mut writer, &log, Version::Lite07).await,
+			[(0, 0, 0), (0, 0, 2)],
+			"group 0 is dropped again as stale under update 2, and never named again"
+		);
 	}
 
 	/// A drop the cursor gave up as final with OLD, as one relayed from a lite-06 upstream is,

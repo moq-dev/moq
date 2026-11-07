@@ -1577,6 +1577,8 @@ export class Publisher {
 							insertRun(dropped, start, end);
 							insertRun(droppedStale, start, end);
 						}
+						// A re-offer an update owed again is given up now, so the end sweep never names it.
+						if (served) insertRun(served, start, end);
 						const msg = SubscribeDrop.given(start, end - 1n, error, this.version, updateNumber);
 						if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
 							return false;
