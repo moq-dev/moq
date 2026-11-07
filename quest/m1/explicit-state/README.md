@@ -45,8 +45,8 @@ Decided 2026-11-07 (maintainer):
   chosen: m3 after the cut, or small fixes in m1 with the redesigns in m3.
   This replaces the earlier split from the same session (user-visible fixes
   in m1, internal ones in m3).
-- ✅ Guard against new instances in both REVIEW.md and AGENTS.md (see
-  [Review and agent rule](/quest/m1/explicit-state/rule.md)). Not chosen:
+- ✅ Guard against new instances in both REVIEW.md and AGENTS.md (done:
+  REVIEW.md's State check and its AGENTS.md line). Not chosen:
   REVIEW.md only, or no rule change.
 - ✅ `quic::driver::Endpoint::rebind` becomes crate-private, since only
   tests call it (see [Transport close](/quest/m1/explicit-state/transport-close.md)).
@@ -68,7 +68,6 @@ which collapses that state and waits on [Drop set](/quest/m1/drop-set.md).
 
 ## Required
 
-- [Review and agent rule](/quest/m1/explicit-state/rule.md) - REVIEW.md and AGENTS.md ask for one enum per lifecycle, terminal transitions after fallible work, and one lock per value
 - [moq-boy pause state](/quest/m1/explicit-state/boy-pause.md) - a new viewer always wakes a paused emulator
 - [Transport close](/quest/m1/explicit-state/transport-close.md) - connection status ends with its error, and every Rust QUIC backend agrees when a connection is closed
 - [Video codec drains](/quest/m1/explicit-state/video-drain.md) - a hardware codec whose drain fails is ready for input again or terminally failed, never left stuck
