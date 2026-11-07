@@ -41,6 +41,16 @@ mod tenant_matrix;
 mod upstream_links;
 mod wire_stats;
 
+/// A certificate handle for a web stack, which only reads it to publish fingerprints.
+fn certificates() -> moq_tokio::tls::Certificates {
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let cert = rcgen::CertificateParams::new(vec!["localhost".into()])
+		.expect("cert params")
+		.self_signed(&key)
+		.expect("self-signed cert");
+	moq_tokio::tls::Certificates::from_pem(cert.pem().as_bytes()).expect("certificates")
+}
+
 /// Build a cluster and spawn its driver, the way an embedding edge runs one. A
 /// failed driver panics its task.
 fn spawn_cluster(options: moq_relay::cluster::Options) -> moq_relay::cluster::Cluster {
