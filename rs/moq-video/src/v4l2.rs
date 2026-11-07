@@ -875,19 +875,20 @@ impl Queue {
 		Ok(())
 	}
 
-	/// Stop and restart a queue, taking every buffer back from the driver.
-	pub(crate) fn restart(&mut self, device: &Device) -> Result<(), Error> {
+	/// Stop the queue, taking every buffer back from the driver.
+	pub(crate) fn stop(&mut self, device: &Device) -> Result<(), Error> {
 		if self.streaming {
 			device.stream(self.dir, false)?;
 			self.streaming = false;
 		}
 		self.free = (0..self.buffers.len() as u32).collect();
-		self.stream_on(device)
+		Ok(())
 	}
 
-	/// Whether the queue has been started.
-	pub(crate) fn streaming(&self) -> bool {
-		self.streaming
+	/// Stop and restart a queue, taking every buffer back from the driver.
+	pub(crate) fn restart(&mut self, device: &Device) -> Result<(), Error> {
+		self.stop(device)?;
+		self.stream_on(device)
 	}
 
 	/// Buffers currently owned by the driver.
