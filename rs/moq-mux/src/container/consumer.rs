@@ -2714,7 +2714,10 @@ mod tests {
 		write_group(&mut track, 0, &[ts(0)]);
 		write_marker_group(&mut track, 1, ts(60_000));
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(0));
-		assert!(matches!(consumer.read().await.unwrap(), Some(Read::End { group: 1, .. })));
+		assert!(matches!(
+			consumer.read().await.unwrap(),
+			Some(Read::End { group: 1, .. })
+		));
 		write_group(&mut track, 3, &[ts(60_060_000)]);
 		tokio::time::advance(Duration::from_millis(299)).await;
 		assert!(consumer.poll_read(&kio::Waiter::noop()).is_pending());

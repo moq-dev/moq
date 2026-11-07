@@ -265,7 +265,11 @@ test.each([true, false])("the head after a declared end is waited for (arrives: 
 		});
 		group.finish();
 	};
-	const frame = (group: bigint, timestamp: number) => ({ kind: "frame", group, frame: expect.objectContaining({ timestamp }) });
+	const frame = (group: bigint, timestamp: number) => ({
+		kind: "frame" as const,
+		group,
+		frame: expect.objectContaining({ timestamp }),
+	});
 	try {
 		write(0n, 0);
 		write(1n, 60_000, new Uint8Array());
