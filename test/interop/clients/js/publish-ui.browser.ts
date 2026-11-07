@@ -728,8 +728,8 @@ test("a selected camera stays announced while real capture is reopening", async 
 			return { publish };
 		});
 
-		// Muting and hiding only flip each rendition to `enabled: false`: the same tracks stay live and
-		// unmuting reopens nothing.
+		// Hiding only flips video to `enabled: false` and muting keeps audio enabled while it sends
+		// nothing: the same tracks stay live and unmuting reopens nothing.
 		const opened = await captured(publication);
 		await gate.evaluate((gate) => {
 			gate.hold = true;
@@ -741,7 +741,8 @@ test("a selected camera stays announced while real capture is reopening", async 
 		});
 		await page.waitForFunction(
 			({ publish }) =>
-				publish.audio.out.catalog.peek()?.enabled === false &&
+				!!publish.audio.out.catalog.peek() &&
+				publish.audio.out.catalog.peek()?.enabled === undefined &&
 				publish.video.out.catalog.peek()?.enabled === false,
 			publication,
 		);

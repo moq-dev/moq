@@ -35,41 +35,117 @@ JSR's repository OIDC trust while the token is unset. The repository's
 `MBX_R2_*` pair is read-only: a branch's write to `mbx-moq-dev` is refused
 with AccessDenied.
 
-Verified 2026-11-03 during the [landing recheck](https://github.com/moq-dev/moq/blob/17a81d6c64/quest/m0/ci/land.md):
-complete paginated secret metadata lists neither `APP_CLIENT_ID` nor
-`APP_PRIVATE_KEY` at organization or repository scope. The `bot` and
-`publish` Environments each list both names. The App-copy removal is done;
-other write-capable repository secrets below still remain. No secret values
-were read, and the throwaway-branch verification has not run.
+Done in [moq-dev/moq#7202](https://github.com/moq-dev/moq/pull/7202), merged
+into `release` 2026-10-31: the workflow backport, including its legacy Cachix
+publishers and JSR token handling. For those publishers `publish` also admits
+`moq-boy-v*`, `moq-gst-v*`, and `libmoq-v*` tags, and the `release tags`
+ruleset also covers `libmoq-v*`. Verified 2026-11-03 during the
+[landing recheck](https://github.com/moq-dev/moq/blob/17a81d6c64/quest/m0/ci/land.md):
+neither `APP_CLIENT_ID` nor `APP_PRIVATE_KEY` remains at organization or
+repository scope; `bot` and `publish` each hold both.
 
-What remains, in order. Deleting a repository-level secret earlier breaks a
-publish, since jobs that do not name `publish` still read it:
+Done 2026-11-05 (maintainer, /quest-unblock): `publish` holds
+`CARGO_REGISTRY_TOKEN`, `CLOUDFLARE_API_TOKEN`, `DOCKER_USERNAME`,
+`DOCKER_PASSWORD`, `MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`,
+`SIGNING_KEY`, `SIGNING_PASSWORD`, `WINGET_TOKEN`, `R2_ACCESS_KEY_ID`,
+`R2_SECRET_ACCESS_KEY`, and `R2_ACCOUNT_ID` (check by name with
+`gh secret list --repo moq-dev/moq --env publish`). Checked then:
+`SIGNING_KEY`'s fingerprint ends `8FBE8982FDD3FCA2`, the key that signs
+`dev.moq:moq` 0.5.3 and `moq-ffi` 0.4.22 on Maven Central; `WINGET_TOKEN` is
+a fresh classic PAT owned by kixelated with only `public_repo`, which holds
+the microsoft/winget-pkgs fork; the R2 pair lists both `apt-moq-dev` and
+`rpm-moq-dev`. `SIGNING_PASSWORD` was not tested against the key.
 
-1. Backport the workflow changes to `release`. Release pushes and release
-   tags run `release`'s own copies of the workflows, which differ widely from
-   `main`'s.
-2. The maintainer copies each value into the `publish` Environment:
-   `CARGO_REGISTRY_TOKEN`, `CLOUDFLARE_API_TOKEN`, `DOCKER_USERNAME`,
-   `DOCKER_PASSWORD`, `MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`,
-   `SIGNING_KEY`, `SIGNING_PASSWORD`, `WINGET_TOKEN`, `R2_ACCESS_KEY_ID`,
-   `R2_SECRET_ACCESS_KEY` and `R2_ACCOUNT_ID`.
-   `DISCORD_WEBHOOK` is already in the `alert` Environment, and
-   `CACHIX_AUTH_TOKEN` moves nowhere: `main` no longer uses Cachix
-   ([publish off main](/quest/m0/ci/publish-release-only.md)).
-3. Then deletes those repository secrets, the unused ones
-   (`GCP_SERVICE_ACCOUNT_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
-   `META_MODEL_API_KEY`), and this repository's access to the
-   organization's `DISCORD_WEBHOOK`. `MBX_R2_*` stays.
-4. The maintainer names the Environment in each trusted publisher: npm's
-   (`npm`, for every `@moq/*` package), PyPI's (`pypi`, for `moq-rs` and
-   `moq-ffi`) and pub.dev's (`pub.dev`, for `moq` and `moq_ffi`). Until then a
-   branch can still claim their OIDC identity by copying the workflow file.
-5. JSR cannot require an Environment, so the maintainer creates a JSR publish
-   token for the `@moq` scope, adds it as `JSR_TOKEN` in the `npm`
-   Environment, then unlinks the GitHub repository from each JSR package
-   (`@moq/auth`, `clock`, `hang`, `json`, `loc`, `msf`, `net`, `pattern`,
-   `qmux`, `room`, `signals`, `video`) so a branch cannot publish through
-   JSR's OIDC trust. Until the token exists, unlinking pauses JSR
-   publishing.
-6. Verify with the throwaway branch in the Goal, which also confirms each
-   Environment refuses the branch.
+Decided 2026-11-05 (maintainer, /quest-unblock): ✅ delete the repository
+copies only after the next combined patch cut on `release` (release-plz PR
+[moq-dev/moq#7936](https://github.com/moq-dev/moq/pull/7936)) publishes
+through `publish` cleanly. Environment secrets shadow repository ones of the
+same name, so that run proves the release jobs read the Environment's copies,
+and proves `SIGNING_PASSWORD` if a Kotlin, apt, or rpm publish runs. Not
+chosen: deleting them now.
+
+Decided 2026-11-05 (maintainer, /quest-unblock): ✅ retire Cachix instead of
+moving `CACHIX_AUTH_TOKEN`. `release`'s `cachix.yml` still reads it on
+`moq-relay-v*`, `moq-cli-v*`, `moq-boy-v*`, `libmoq-v*`, and `moq-gst-v*`
+tags; that job names `publish`, which lacks it, so it reads the repository
+copy. (`release`'s `cache.yml` also reads it but fires only on pushes to
+`main`, so it never runs there.) The m0 quest [cachix-retire](/quest/m0/ci/cachix-retire.md),
+from [moq-dev/moq#7982](https://github.com/moq-dev/moq/pull/7982), backports
+`release-nix.yml` to `release`, drops `cachix.yml` there, and deletes
+`CACHIX_AUTH_TOKEN` and the `kixelated` cache once a release tag proves
+nix.moq.dev. So the deletions here leave `CACHIX_AUTH_TOKEN` to that quest,
+and the throwaway-branch check waits for it. Not chosen: copying it into
+`publish` now; leaving it at repository scope until the m2 cut.
+
+Done 2026-11-06 (maintainer, /quest-unblock): trusted publishers name
+their Environment. npm: `npm` is set and verified on `@moq/net`, `auth`,
+`boy`, `hang`, `json`, `loc`, `msf`, `pattern`, `publish`, `room`, `watch`,
+and `signals` (the last two by hand, since npm's Cloudflare blocked the
+automated save). `@moq/qmux` is published by
+moq-dev/web-transport, so it is out of scope here; `@moq/clock`, `libav`,
+`ui`, and `video` are not published yet, and
+[npm-first-publish](/quest/m3/release/npm-first-publish.md) claims them with
+the `npm` Environment. PyPI: `moq-rs` already required `pypi`, and `moq-ffi`'s
+any-environment publisher was replaced by one requiring `pypi` (verified on
+its settings page). pub.dev: the maintainer set the required environment
+`pub.dev` on `moq` and `moq_ffi` and reported both pages show it; agents
+cannot view pub.dev admin pages.
+
+Decided 2026-11-06 (maintainer, /quest-unblock): ✅ drop JSR rather than
+create a `JSR_TOKEN`. The m0 quest [jsr-retire](/quest/m0/ci/jsr-retire.md),
+from [moq-dev/moq#8039](https://github.com/moq-dev/moq/pull/8039), owns removing
+JSR publishing and its repository OIDC trust, so this quest no longer
+creates a token or unlinks packages. Not chosen: keeping JSR behind a
+`JSR_TOKEN` in the `npm` Environment.
+
+Checked 2026-11-06: 3 of [moq-dev/moq#7936](https://github.com/moq-dev/moq/pull/7936)'s
+14 tag runs failed on their first attempt. Cachix `moq-relay-v0.17.13`
+([run 42129037703](https://github.com/moq-dev/moq/actions/runs/42129037703)):
+the macOS and aarch64-linux jobs, both started 23:23:25Z, failed with
+"Unable to fetch the information for the environment 'publish' targeted by
+this job", while the ubuntu job in the same run, started 41 seconds later,
+passed through `publish`. `publish`'s deployment policy admits
+`moq-relay-v*` tags (with `main`, `release`, and the `libmoq`, `moq-boy`,
+`moq-cli`, `moq-ffi`, and `moq-gst` tag patterns), so this was a transient
+GitHub API failure, not a policy gap. Cachix `moq-gst-v0.4.23`
+([run 42129724193](https://github.com/moq-dev/moq/actions/runs/42129724193))
+hit a network fetch failure, and moq-gst `moq-gst-v0.4.23`
+([run 42129723974](https://github.com/moq-dev/moq/actions/runs/42129723974))
+timed out in `brew test` on the aarch64-apple-darwin tarball, which skipped
+its Release job. None of the three points at the Environment's secrets.
+
+Done 2026-11-06 (maintainer, /quest-unblock): the three failed tag runs
+were re-run; Cachix for `moq-relay-v0.17.13` and `moq-gst-v0.4.23` passed,
+and the moq-gst macOS `brew test` hang is unrelated to secrets (planned in
+[moq-dev/moq#8076](https://github.com/moq-dev/moq/pull/8076)). After
+checking that every job on `main` and `release` reads them through `publish`
+or gates the step to tags, the maintainer deleted 15 repository secrets: the
+twelve `publish` secrets above, the unreferenced `GCP_SERVICE_ACCOUNT_KEY`,
+and Pullfrog's `CLAUDE_CODE_OAUTH_TOKEN` and `META_MODEL_API_KEY`. The
+repository secrets left are `CACHIX_AUTH_TOKEN` (owned by `cachix-retire`)
+and the read-only `MBX_R2_ACCESS_KEY_ID` and `MBX_R2_SECRET_ACCESS_KEY`.
+
+Decided 2026-11-06 (maintainer, /quest-unblock): ✅ Pullfrog gets no
+provider keys from this repository, so `pullfrog.yml` passes none; its
+model access comes from the Pullfrog console, which the action reaches with
+the job's OIDC token through the `pullfrog` Environment (main only). Not
+chosen: moving the keys into the `pullfrog` Environment.
+
+Decided 2026-11-06 (maintainer, /quest-unblock): ✅ leave the organization
+secret `DISCORD_WEBHOOK` visible to all repositories; this repository's
+`alert` job reads the `alert` Environment's copy. Not chosen: narrowing it to
+selected repositories.
+
+Once `cachix-retire` deletes `CACHIX_AUTH_TOKEN`, an agent runs the
+throwaway-branch check in the Goal, which also confirms each Environment
+refuses the branch, then deletes the branch. The branch may still see
+`MBX_R2_*` and `DISCORD_WEBHOOK`, by the decisions above; any other secret
+fails the check.
+
+## Required
+
+- [Retire Cachix](/quest/m0/ci/cachix-retire.md) - deletes `CACHIX_AUTH_TOKEN`, which the throwaway-branch check needs gone
+
+## Related
+
+- [Stop publishing to JSR](/quest/m0/ci/jsr-retire.md) - removes JSR publishing and its repository OIDC trust, so no `JSR_TOKEN` is created

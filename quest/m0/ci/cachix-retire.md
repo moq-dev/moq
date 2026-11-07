@@ -68,4 +68,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [Verify the Nix runtime cache](/quest/m0/ci/nix-cache-verify.md) - the same cache's `main` evidence
-- [Drop main from the publish Environment](/quest/m0/ci/publish-release-only.md) - the other workflow backport to `release` decided in the 2026-11-05 audit
