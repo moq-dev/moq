@@ -71,7 +71,10 @@ impl Closing {
 
 	/// Whether this side closed the transport.
 	pub(crate) fn is_sent(&self) -> bool {
-		self.sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some()
+		self.sent
+			.lock()
+			.unwrap_or_else(std::sync::PoisonError::into_inner)
+			.is_some()
 	}
 
 	/// Whether the handles closed the transport by dropping or draining.

@@ -506,10 +506,12 @@ impl EndpointInner {
 		let mut state = self.state.lock().unwrap();
 		state.pending_accepts -= 1;
 		let result = match state.inner.finish_accept(accepted, &mut response_buffer) {
-			Ok((handle, conn)) => Ok(state
-				.recv_state
-				.connections
-				.insert(handle, conn, self.slot.clone(), &self.runtime)),
+			Ok((handle, conn)) => {
+				Ok(state
+					.recv_state
+					.connections
+					.insert(handle, conn, self.slot.clone(), &self.runtime))
+			}
 			Err(error) => {
 				if let Some(transmit) = error.response {
 					respond(transmit, &response_buffer, &self.slot);

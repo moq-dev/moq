@@ -2762,7 +2762,10 @@ async fn closed_waits_for_the_close_to_be_sent() {
 		wait_closed(&conn).await,
 		crate::quic::driver::connection::Error::LocallyClosed { .. }
 	));
-	assert!(conn.stats().udp_tx.datagrams > sent, "resolved before the close was sent");
+	assert!(
+		conn.stats().udp_tx.datagrams > sent,
+		"resolved before the close was sent"
+	);
 	assert!(matches!(
 		wait_closed(&server).await,
 		crate::quic::driver::connection::Error::ApplicationClosed(_)
