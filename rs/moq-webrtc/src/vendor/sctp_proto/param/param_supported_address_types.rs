@@ -1,6 +1,6 @@
 use super::{param_header::*, param_type::*, *};
 
-use alloc::vec::Vec;
+use std::vec::Vec;
 use bytes::BufMut;
 
 ///The sender of INIT uses this parameter to list all the address types

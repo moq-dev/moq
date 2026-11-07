@@ -1,10 +1,10 @@
-#![cfg(feature = "rcgen")]
+#![cfg(all())]
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dimpl::certificate::generate_self_signed_certificate;
-use dimpl::{Config, Dtls, Output};
+use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
+use crate::vendor::dimpl::{Config, Dtls, Output};
 
 const UNAUTHENTICATED_INPUT: &[u8] = b"unauthenticated input";
 

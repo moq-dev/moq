@@ -8,9 +8,9 @@ use ccm::aead::KeyInit;
 use ccm::consts::{U8, U12};
 
 use super::{Aad, Cipher, Nonce};
-use crate::buffer::{Buf, TmpBuf};
-use crate::error::bounded_error_len;
-use crate::{CryptoError, CryptoOperation};
+use crate::vendor::dimpl::buffer::{Buf, TmpBuf};
+use crate::vendor::dimpl::error::bounded_error_len;
+use crate::vendor::dimpl::{CryptoError, CryptoOperation};
 
 /// AES-128-CCM with 8-byte tag, 12-byte nonce.
 type Aes128Ccm8 = ccm::Ccm<aes::Aes128, U8, U12>;

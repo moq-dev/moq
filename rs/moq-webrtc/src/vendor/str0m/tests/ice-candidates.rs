@@ -3,12 +3,12 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use str0m::RtcConfig;
-use str0m::RtcError;
-use str0m::ice::IceCreds;
+use crate::vendor::str0m::RtcConfig;
+use crate::vendor::str0m::RtcError;
+use crate::vendor::str0m::ice::IceCreds;
 use tracing::info_span;
 
-mod common;
+use super::common;
 use common::{Peer, TestRtc, init_crypto_default, init_log, progress};
 
 /// Test connection with only host candidates.
@@ -53,7 +53,7 @@ fn ice_candidate_types_host_only() -> Result<(), RtcError> {
 #[test]
 fn ice_trickle_incremental_candidates() -> Result<(), RtcError> {
     use std::net::SocketAddr;
-    use str0m::{Candidate, Output};
+    use crate::vendor::str0m::{Candidate, Output};
 
     init_log();
     init_crypto_default();
@@ -113,7 +113,7 @@ fn ice_trickle_incremental_candidates() -> Result<(), RtcError> {
         .events
         .iter()
         .find_map(|(_, e)| {
-            if let str0m::Event::ChannelOpen(id, _) = e {
+            if let crate::vendor::str0m::Event::ChannelOpen(id, _) = e {
                 Some(*id)
             } else {
                 None
@@ -129,7 +129,7 @@ fn ice_trickle_incremental_candidates() -> Result<(), RtcError> {
         .unwrap();
 
     let mut initial_send_addr: Option<SocketAddr> = None;
-    l.rtc.handle_input(str0m::Input::Timeout(l.last)).unwrap();
+    l.rtc.handle_input(crate::vendor::str0m::Input::Timeout(l.last)).unwrap();
     loop {
         match l.rtc.poll_output() {
             Ok(Output::Transmit(t)) => {
@@ -172,7 +172,7 @@ fn ice_trickle_incremental_candidates() -> Result<(), RtcError> {
         .unwrap();
 
     let mut final_send_addr: Option<SocketAddr> = None;
-    l.rtc.handle_input(str0m::Input::Timeout(l.last)).unwrap();
+    l.rtc.handle_input(crate::vendor::str0m::Input::Timeout(l.last)).unwrap();
     loop {
         match l.rtc.poll_output() {
             Ok(Output::Transmit(t)) => {
@@ -270,7 +270,7 @@ fn ice_custom_credentials() -> Result<(), RtcError> {
 /// Uses a short RTO and verifies retransmissions happen at the expected interval.
 #[test]
 fn ice_stun_timeout_initial_rto() -> Result<(), RtcError> {
-    use str0m::Output;
+    use crate::vendor::str0m::Output;
 
     init_log();
     init_crypto_default();
@@ -308,7 +308,7 @@ fn ice_stun_timeout_initial_rto() -> Result<(), RtcError> {
 
     // Progress L only, capture STUN transmit times
     for _ in 0..30 {
-        l.rtc.handle_input(str0m::Input::Timeout(l.last)).unwrap();
+        l.rtc.handle_input(crate::vendor::str0m::Input::Timeout(l.last)).unwrap();
 
         loop {
             match l.rtc.poll_output()? {
@@ -355,7 +355,7 @@ fn ice_stun_timeout_initial_rto() -> Result<(), RtcError> {
 /// Test set_max_stun_rto() configuration by verifying retransmit intervals are capped.
 #[test]
 fn ice_stun_timeout_max_rto() -> Result<(), RtcError> {
-    use str0m::Output;
+    use crate::vendor::str0m::Output;
 
     init_log();
     init_crypto_default();
@@ -396,7 +396,7 @@ fn ice_stun_timeout_max_rto() -> Result<(), RtcError> {
     let mut transmit_times: Vec<Instant> = Vec::new();
 
     for _ in 0..50 {
-        l.rtc.handle_input(str0m::Input::Timeout(l.last)).unwrap();
+        l.rtc.handle_input(crate::vendor::str0m::Input::Timeout(l.last)).unwrap();
 
         loop {
             match l.rtc.poll_output()? {
@@ -456,7 +456,7 @@ fn ice_stun_timeout_max_rto() -> Result<(), RtcError> {
 /// Test set_max_stun_retransmits() configuration by counting actual retransmissions.
 #[test]
 fn ice_stun_max_retransmits() -> Result<(), RtcError> {
-    use str0m::Output;
+    use crate::vendor::str0m::Output;
 
     init_log();
     init_crypto_default();
@@ -494,7 +494,7 @@ fn ice_stun_max_retransmits() -> Result<(), RtcError> {
     let mut transmit_count = 0;
 
     for _ in 0..100 {
-        l.rtc.handle_input(str0m::Input::Timeout(l.last)).unwrap();
+        l.rtc.handle_input(crate::vendor::str0m::Input::Timeout(l.last)).unwrap();
 
         loop {
             match l.rtc.poll_output()? {

@@ -1,4 +1,4 @@
-use crate::crypto::CryptoError;
+use crate::vendor::str0m::crypto::CryptoError;
 use std::error::Error;
 use std::fmt;
 use std::io;

@@ -1,7 +1,7 @@
 use super::{chunk_header::*, chunk_type::*, *};
-use crate::param::param_supported_extensions::ParamSupportedExtensions;
-use crate::param::{param_header::*, *};
-use crate::util::get_padding_size;
+use crate::vendor::sctp_proto::param::param_supported_extensions::ParamSupportedExtensions;
+use crate::vendor::sctp_proto::param::{param_header::*, *};
+use crate::vendor::sctp_proto::util::get_padding_size;
 
 ///chunkInitCommon represents an SCTP Chunk body of type INIT and INIT ACK
 ///

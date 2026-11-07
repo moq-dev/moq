@@ -1,3 +1,4 @@
+use tracing::trace;
 use std::collections::VecDeque;
 use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};

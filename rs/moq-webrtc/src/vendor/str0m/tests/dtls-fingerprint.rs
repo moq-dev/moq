@@ -1,12 +1,12 @@
 //! The remote certificate fingerprint is verified with the hash function the
 //! remote names (RFC 8122 §5): sha-256 or sha-1.
 #![cfg(any(
-    feature = "aws-lc-rs",
-    feature = "rust-crypto",
-    feature = "openssl",
-    feature = "openssl-dimpl",
-    feature = "wincrypto",
-    feature = "apple-crypto",
+    all(),
+    any(),
+    any(),
+    any(),
+    any(),
+    any(),
 ))]
 
 use std::net::Ipv4Addr;
@@ -14,17 +14,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use str0m::crypto::{CryptoProvider, Fingerprint, Sha1Provider};
-use str0m::{Candidate, RtcConfig, RtcError};
+use crate::vendor::str0m::crypto::{CryptoProvider, Fingerprint, Sha1Provider};
+use crate::vendor::str0m::{Candidate, RtcConfig, RtcError};
 use tracing::info_span;
 
-mod common;
+use super::common;
 use common::{TestRtc, init_crypto_default, init_log, progress};
 
 /// Connects L to R, where L expects R's certificate to have the fingerprint
 /// `expected(R's DER certificate)`. Returns L's error, if any.
 fn connect(expected: impl Fn(&[u8]) -> Fingerprint) -> Result<(), RtcError> {
-    connect_with_provider(expected, str0m::crypto::from_feature_flags())
+    connect_with_provider(expected, crate::vendor::str0m::crypto::from_feature_flags())
 }
 
 fn connect_with_provider(
@@ -88,9 +88,10 @@ fn connect_with_provider(
 }
 
 fn reference_sha1(data: &[u8]) -> [u8; 20] {
-    str0m_rust_crypto::default_provider()
-        .sha1_provider
-        .sha1(data)
+    aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY, data)
+        .as_ref()
+        .try_into()
+        .unwrap()
 }
 
 fn sha1_fingerprint(hash_func: &str, der: &[u8]) -> Fingerprint {
@@ -118,7 +119,7 @@ fn sha1_fingerprint_uses_configured_provider() -> Result<(), RtcError> {
     }
 
     static SHA1: TrackingSha1 = TrackingSha1(AtomicUsize::new(0));
-    let mut provider = str0m::crypto::from_feature_flags();
+    let mut provider = crate::vendor::str0m::crypto::from_feature_flags();
     provider.sha1_provider = &SHA1;
     connect_with_provider(|der| sha1_fingerprint("sha-1", der), provider)?;
     assert_eq!(SHA1.0.load(Ordering::SeqCst), 1);
@@ -163,7 +164,7 @@ fn unsupported_hash_function_is_rejected() {
 fn stronger_fingerprint_mismatch_must_be_rejected() {
     init_log();
     init_crypto_default();
-    let provider = str0m::crypto::from_feature_flags();
+    let provider = crate::vendor::str0m::crypto::from_feature_flags();
     let cert = provider.dtls_provider.generate_certificate().unwrap();
     let weak = Fingerprint {
         hash_func: "sha-1".into(),
@@ -205,7 +206,7 @@ fn stronger_fingerprint_mismatch_must_be_rejected() {
     l.sdp_api()
         .accept_answer(
             pending,
-            str0m::change::SdpAnswer::from_sdp_string(&rewritten).unwrap(),
+            crate::vendor::str0m::change::SdpAnswer::from_sdp_string(&rewritten).unwrap(),
         )
         .unwrap();
     while !(l.is_connected() && r.is_connected()) {

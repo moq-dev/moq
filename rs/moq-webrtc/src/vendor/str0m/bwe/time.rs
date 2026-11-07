@@ -3,8 +3,8 @@ use std::fmt;
 use std::ops::{Add, AddAssign, Div, Neg as _, Sub, SubAssign};
 use std::time::{Duration, Instant};
 
-use crate::bwe::Bitrate;
-use crate::rtp_::DataSize;
+use crate::vendor::str0m::bwe::Bitrate;
+use crate::vendor::str0m::rtp_::DataSize;
 
 /// Wrapper for [`Instant`] that provides additional time points in the past or future.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

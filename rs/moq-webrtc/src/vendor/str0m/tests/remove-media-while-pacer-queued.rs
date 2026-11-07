@@ -1,11 +1,11 @@
 use std::time::Duration;
 
-use str0m::format::Codec;
-use str0m::media::MediaKind;
-use str0m::rtp::{ExtensionValues, RtpWrite, Ssrc};
-use str0m::{Input, RtcError};
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::media::MediaKind;
+use crate::vendor::str0m::rtp::{ExtensionValues, RtpWrite, Ssrc};
+use crate::vendor::str0m::{Input, RtcError};
 
-mod common;
+use super::common;
 use common::{connect_l_r, init_crypto_default, init_log};
 
 /// This test triggers the panic in `Session::poll_packet` where the pacer

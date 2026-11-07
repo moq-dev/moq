@@ -1,19 +1,20 @@
+use tracing::{debug, warn};
 use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use super::queue::{QueueRx, QueueTx};
-use crate::buffer::{Buf, BufferPool, TmpBuf};
-use crate::crypto::{Aad, Iv, Nonce};
-use crate::dtls12::context::{AuthMode, CryptoContext};
-use crate::dtls12::incoming::{Incoming, Record, RecordHandler};
-use crate::dtls12::message::{Body, HashAlgorithm, Header, MessageType, ProtocolVersion, Sequence};
-use crate::dtls12::message::{ContentType, DTLSRecord, Dtls12CipherSuite, Handshake};
-use crate::error::bounded_error_len;
-use crate::timer::{HandshakeTimers, Timeout, deadline};
-use crate::window::ReplayWindow;
-use crate::{Config, Error, InternalError, Output, SeededRng};
+use crate::vendor::dimpl::buffer::{Buf, BufferPool, TmpBuf};
+use crate::vendor::dimpl::crypto::{Aad, Iv, Nonce};
+use crate::vendor::dimpl::dtls12::context::{AuthMode, CryptoContext};
+use crate::vendor::dimpl::dtls12::incoming::{Incoming, Record, RecordHandler};
+use crate::vendor::dimpl::dtls12::message::{Body, HashAlgorithm, Header, MessageType, ProtocolVersion, Sequence};
+use crate::vendor::dimpl::dtls12::message::{ContentType, DTLSRecord, Dtls12CipherSuite, Handshake};
+use crate::vendor::dimpl::error::bounded_error_len;
+use crate::vendor::dimpl::timer::{HandshakeTimers, Timeout, deadline};
+use crate::vendor::dimpl::window::ReplayWindow;
+use crate::vendor::dimpl::{Config, Error, InternalError, Output, SeededRng};
 
 const MAX_DEFRAGMENT_PACKETS: usize = 50;
 
@@ -52,7 +53,7 @@ pub struct Engine {
 
     /// Minimum length of a protected record's encrypted fragment, cached from
     /// the provider suite. See
-    /// [`crate::crypto::SupportedDtls12CipherSuite::min_protected_fragment_len`].
+    /// [`crate::vendor::dimpl::crypto::SupportedDtls12CipherSuite::min_protected_fragment_len`].
     /// For AEAD suites this is `explicit_nonce + tag`; used both to reject
     /// short incoming records and to size outgoing record overhead.
     min_protected_fragment_len: usize,
@@ -201,7 +202,7 @@ impl Engine {
 
     /// Minimum length of a protected record's encrypted fragment for the
     /// negotiated suite. See
-    /// [`crate::crypto::SupportedDtls12CipherSuite::min_protected_fragment_len`].
+    /// [`crate::vendor::dimpl::crypto::SupportedDtls12CipherSuite::min_protected_fragment_len`].
     pub fn min_protected_fragment_len(&self) -> usize {
         self.min_protected_fragment_len
     }
@@ -773,7 +774,7 @@ impl Engine {
     {
         let maybe_suite = if epoch >= 1 {
             Some(self.cipher_suite().ok_or(Error::InvalidState(
-                crate::InvalidStateError::NoCipherSuiteSelected,
+                crate::vendor::dimpl::InvalidStateError::NoCipherSuiteSelected,
             ))?)
         } else {
             None
@@ -845,7 +846,7 @@ impl Engine {
 
             let Some(iv) = iv else {
                 return Err(Error::CryptoError(
-                    crate::CryptoError::WriteIvNotAvailable {
+                    crate::vendor::dimpl::CryptoError::WriteIvNotAvailable {
                         is_client: self.is_client,
                     },
                 ));
@@ -862,7 +863,7 @@ impl Engine {
                 }
                 _ => {
                     return Err(Error::CryptoError(
-                        crate::CryptoError::UnsupportedDtls12RecordIvLen {
+                        crate::vendor::dimpl::CryptoError::UnsupportedDtls12RecordIvLen {
                             len: bounded_error_len(explicit_nonce_len),
                             suite,
                         },
@@ -968,7 +969,7 @@ impl Engine {
         // explicit_nonce + tag). Used to size fragments to fit the MTU.
         let protection_overhead = if epoch >= 1 {
             self.cipher_suite().ok_or(Error::InvalidState(
-                crate::InvalidStateError::NoCipherSuiteSelected,
+                crate::vendor::dimpl::InvalidStateError::NoCipherSuiteSelected,
             ))?;
             self.min_protected_fragment_len()
         } else {
@@ -1247,7 +1248,7 @@ impl Engine {
     pub fn generate_verify_data(&mut self, is_client: bool) -> Result<[u8; 12], Error> {
         let Some(suite) = self.cipher_suite() else {
             return Err(Error::InvalidState(
-                crate::InvalidStateError::NoCipherSuiteSelected,
+                crate::vendor::dimpl::InvalidStateError::NoCipherSuiteSelected,
             ));
         };
         let algorithm = suite.hash_algorithm();
@@ -1270,7 +1271,7 @@ impl Engine {
 
         if verify_data_vec.len() != 12 {
             return Err(Error::CryptoError(
-                crate::CryptoError::InvalidVerifyDataLength,
+                crate::vendor::dimpl::CryptoError::InvalidVerifyDataLength,
             ));
         }
 
@@ -1343,7 +1344,7 @@ impl RecordHandler for Engine {
                 self.push_buffer(record.into_buffer());
 
                 if let Some(description) = fatal_description {
-                    return Err(Error::SecurityError(crate::SecurityError::FatalAlert {
+                    return Err(Error::SecurityError(crate::vendor::dimpl::SecurityError::FatalAlert {
                         description,
                     }));
                 }
@@ -1370,7 +1371,7 @@ impl RecordHandler for Engine {
                 }
 
                 if level == 2 {
-                    return Err(Error::SecurityError(crate::SecurityError::FatalAlert {
+                    return Err(Error::SecurityError(crate::vendor::dimpl::SecurityError::FatalAlert {
                         description,
                     }));
                 }

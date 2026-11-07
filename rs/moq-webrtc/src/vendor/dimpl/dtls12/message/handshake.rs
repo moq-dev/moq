@@ -1,3 +1,4 @@
+use tracing::debug;
 use std::fmt;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,7 +13,7 @@ use super::Finished;
 use super::HelloVerifyRequest;
 use super::ServerHello;
 use super::ServerKeyExchange;
-use crate::buffer::Buf;
+use crate::vendor::dimpl::buffer::Buf;
 use arrayvec::ArrayVec;
 use nom::Err;
 use nom::IResult;
@@ -161,7 +162,7 @@ impl Handshake {
         buffer: &mut Buf,
         cipher_suite: Option<Dtls12CipherSuite>,
         transcript: Option<&mut Buf>,
-    ) -> Result<Handshake, crate::InternalError> {
+    ) -> Result<Handshake, crate::vendor::dimpl::InternalError> {
         buffer.clear();
 
         // Invariant is upheld by the caller.
@@ -173,7 +174,7 @@ impl Handshake {
         let mut handled = ArrayVec::<&Handshake, MAX_DEFRAGMENT_HANDSHAKES>::new();
         handled
             .try_push(first_handshake)
-            .map_err(|_| crate::InternalError::too_many_records())?;
+            .map_err(|_| crate::vendor::dimpl::InternalError::too_many_records())?;
         buffer.extend_from_slice(&first_buffer[range.clone()]);
 
         for (handshake, source_buf) in iter {
@@ -189,14 +190,14 @@ impl Handshake {
 
             handled
                 .try_push(handshake)
-                .map_err(|_| crate::InternalError::too_many_records())?;
+                .map_err(|_| crate::vendor::dimpl::InternalError::too_many_records())?;
 
             buffer.extend_from_slice(&source_buf[range.clone()]);
         }
 
         if buffer.len() != first_handshake.header.length as usize {
             debug!("Defragmentation failed. Fragment length mismatch");
-            return Err(crate::InternalError::parse_incomplete());
+            return Err(crate::vendor::dimpl::InternalError::parse_incomplete());
         }
 
         let (rest, body) =
@@ -216,7 +217,7 @@ impl Handshake {
         {
             debug!("Defragmentation failed. Body::parse() did not consume the entire buffer");
             mark_handled(handled);
-            return Err(crate::InternalError::parse_incomplete());
+            return Err(crate::vendor::dimpl::InternalError::parse_incomplete());
         }
 
         // Parsing boundary: Body::parse and its callees must perform all
@@ -562,13 +563,13 @@ mod tests {
 
     use super::*;
 
-    use crate::buffer::Buf;
-    use crate::dtls12::message::CompressionMethod;
-    use crate::dtls12::message::Cookie;
-    use crate::dtls12::message::Dtls12CipherSuite;
-    use crate::dtls12::message::ProtocolVersion;
-    use crate::dtls12::message::Random;
-    use crate::dtls12::message::SessionId;
+    use crate::vendor::dimpl::buffer::Buf;
+    use crate::vendor::dimpl::dtls12::message::CompressionMethod;
+    use crate::vendor::dimpl::dtls12::message::Cookie;
+    use crate::vendor::dimpl::dtls12::message::Dtls12CipherSuite;
+    use crate::vendor::dimpl::dtls12::message::ProtocolVersion;
+    use crate::vendor::dimpl::dtls12::message::Random;
+    use crate::vendor::dimpl::dtls12::message::SessionId;
 
     const MESSAGE: &[u8] = &[
         0x01, // MessageType::ClientHello

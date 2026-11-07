@@ -1,26 +1,26 @@
 use std::net::Ipv4Addr;
 use std::time::Instant;
 
-mod common;
+use super::common;
 use common::TestRtc;
 use common::init_crypto_default;
 use common::init_log;
 use common::negotiate;
 use common::progress;
 use common::{extract_sctp_init, remove_sctp_init, replace_sctp_init};
-use str0m::Rtc;
-use str0m::change::SdpAnswer;
-use str0m::change::SdpOffer;
-use str0m::format::Codec;
-use str0m::format::CodecSpec;
-use str0m::format::FormatParams;
-use str0m::format::PayloadParams;
-use str0m::media::Direction;
-use str0m::media::Frequency;
-use str0m::media::MediaKind;
-use str0m::media::Pt;
-use str0m::rtp::{Extension, ExtensionMap};
-use str0m::{Event, RtcError};
+use crate::vendor::str0m::Rtc;
+use crate::vendor::str0m::change::SdpAnswer;
+use crate::vendor::str0m::change::SdpOffer;
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::format::CodecSpec;
+use crate::vendor::str0m::format::FormatParams;
+use crate::vendor::str0m::format::PayloadParams;
+use crate::vendor::str0m::media::Direction;
+use crate::vendor::str0m::media::Frequency;
+use crate::vendor::str0m::media::MediaKind;
+use crate::vendor::str0m::media::Pt;
+use crate::vendor::str0m::rtp::{Extension, ExtensionMap};
+use crate::vendor::str0m::{Event, RtcError};
 use tracing::Span;
 use tracing::info_span;
 
@@ -1340,7 +1340,7 @@ fn snap_sdp_renegotiation_missing_sctp_init_rejected() -> Result<(), RtcError> {
     let re_answer = r.rtc.sdp_api().accept_offer(re_offer)?;
     let re_answer_sdp = re_answer.to_sdp_string();
     let tampered = remove_sctp_init(&re_answer_sdp);
-    let tampered_answer = str0m::change::SdpAnswer::from_sdp_string(&tampered).unwrap();
+    let tampered_answer = crate::vendor::str0m::change::SdpAnswer::from_sdp_string(&tampered).unwrap();
 
     let err = l
         .rtc
@@ -1511,7 +1511,7 @@ fn snap_sdp_renegotiation_reverse_direction_changed_sctp_init_rejected() -> Resu
     // Tamper with the answer's sctp-init before R processes it.
     let re_answer_sdp = re_answer.to_sdp_string();
     let tampered = replace_sctp_init(&re_answer_sdp, "AQ==");
-    let tampered_answer = str0m::change::SdpAnswer::from_sdp_string(&tampered).unwrap();
+    let tampered_answer = crate::vendor::str0m::change::SdpAnswer::from_sdp_string(&tampered).unwrap();
 
     let err = r
         .rtc

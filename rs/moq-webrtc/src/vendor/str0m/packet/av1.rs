@@ -28,7 +28,7 @@ pub struct Av1CodecExtra {
     /// containing complete and independent visual information. This frame serves
     /// as a reference point for other frames in the video sequence.
     ///
-    /// [`MediaData`]: crate::media::MediaData
+    /// [`MediaData`]: crate::vendor::str0m::media::MediaData
     pub is_keyframe: bool,
 }
 

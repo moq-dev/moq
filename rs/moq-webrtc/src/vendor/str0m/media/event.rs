@@ -3,13 +3,13 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::packet::MediaKind;
-use crate::rtp_::{Direction, ExtensionValues, MediaTime, Mid, Pt, Rid, SenderInfo, SeqNo, Ssrc};
-use crate::sdp::SimulcastLayer as SdpSimulcastLayer;
-use crate::sdp::{RestrictionId, Simulcast as SdpSimulcast, SimulcastGroups as SdpSimulcastGroups};
+use crate::vendor::str0m::packet::MediaKind;
+use crate::vendor::str0m::rtp_::{Direction, ExtensionValues, MediaTime, Mid, Pt, Rid, SenderInfo, SeqNo, Ssrc};
+use crate::vendor::str0m::sdp::SimulcastLayer as SdpSimulcastLayer;
+use crate::vendor::str0m::sdp::{RestrictionId, Simulcast as SdpSimulcast, SimulcastGroups as SdpSimulcastGroups};
 
 use super::PayloadParams;
-use crate::format::CodecExtra;
+use crate::vendor::str0m::format::CodecExtra;
 
 impl From<&SdpSimulcastLayer> for SimulcastLayer {
     fn from(layer: &SdpSimulcastLayer) -> Self {
@@ -212,7 +212,7 @@ impl Simulcast {
 
 /// Video or audio data from the remote peer.
 ///
-/// This is obtained via [`Event::MediaData`][crate::Event::MediaData].
+/// This is obtained via [`Event::MediaData`][crate::vendor::str0m::Event::MediaData].
 #[derive(PartialEq, Eq)]
 pub struct MediaData {
     /// Identifier of the media in the session this media belongs to.
@@ -240,10 +240,10 @@ pub struct MediaData {
     /// For audio the timebase is often 48kHz for video it is 90kHz.
     pub time: MediaTime,
 
-    /// The time of the [`Input::Receive`][crate::Input::Receive] of the first packet
+    /// The time of the [`Input::Receive`][crate::vendor::str0m::Input::Receive] of the first packet
     /// that caused this MediaData.
     ///
-    /// In simple SFU setups this can be used as wallclock for [`Writer::write`][crate::media::Writer].
+    /// In simple SFU setups this can be used as wallclock for [`Writer::write`][crate::vendor::str0m::media::Writer].
     pub network_time: Instant,
 
     /// The (RTP) sequence numbers that made up this data.
@@ -302,9 +302,9 @@ impl MediaData {
 
 /// Details for an incoming a keyframe request (PLI or FIR).
 ///
-/// This is obtained via the [`Event::KeyframeRequest`][crate::Event::KeyframeRequest].
+/// This is obtained via the [`Event::KeyframeRequest`][crate::vendor::str0m::Event::KeyframeRequest].
 ///
-/// Sending a keyframe request is done via [`Media::request_keyframe()`][crate::media::Media].
+/// Sending a keyframe request is done via [`Media::request_keyframe()`][crate::vendor::str0m::media::Media].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyframeRequest {
     /// The media identifier this keyframe request is for.

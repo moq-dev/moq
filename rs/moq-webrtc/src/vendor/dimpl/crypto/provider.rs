@@ -23,15 +23,15 @@
 //!
 //! # Using a Custom Provider
 //!
-//! To use a custom crypto provider, create one and pass it to the [`Config`](crate::Config):
+//! To use a custom crypto provider, create one and pass it to the [`Config`](crate::vendor::dimpl::Config):
 //!
-//! ```
-//! # #[cfg(all(feature = "aws-lc-rs", feature = "rcgen"))]
+//! ```ignore
+//! # #[cfg(all(all(), all()))]
 //! # fn main() {
 //! use std::sync::Arc;
 //! use std::time::Instant;
-//! use dimpl::{Config, Dtls, certificate};
-//! use dimpl::crypto::aws_lc_rs;
+//! use crate::vendor::dimpl::{Config, Dtls, certificate};
+//! use crate::vendor::dimpl::crypto::aws_lc_rs;
 //!
 //! let cert = certificate::generate_self_signed_certificate().unwrap();
 //! // Use the default aws-lc-rs provider (implicit)
@@ -55,7 +55,7 @@
 //!
 //! let dtls = Dtls::new_12(config, cert, Instant::now());
 //! # }
-//! # #[cfg(not(all(feature = "aws-lc-rs", feature = "rcgen")))]
+//! # #[cfg(not(all(all(), all())))]
 //! # fn main() {}
 //! ```
 //!
@@ -69,11 +69,11 @@
 //!
 //! ## Example: Custom Cipher Suite
 //!
-//! ```
-//! use dimpl::CryptoError;
-//! use dimpl::crypto::{SupportedDtls12CipherSuite, Cipher, Dtls12CipherSuite, HashAlgorithm};
-//! use dimpl::crypto::{Buf, TmpBuf};
-//! use dimpl::crypto::{Aad, Nonce};
+//! ```ignore
+//! use crate::vendor::dimpl::CryptoError;
+//! use crate::vendor::dimpl::crypto::{SupportedDtls12CipherSuite, Cipher, Dtls12CipherSuite, HashAlgorithm};
+//! use crate::vendor::dimpl::crypto::{Buf, TmpBuf};
+//! use crate::vendor::dimpl::crypto::{Aad, Nonce};
 //!
 //! #[derive(Debug)]
 //! struct MyCipher;
@@ -146,19 +146,19 @@ use std::fmt::Debug;
 use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::sync::OnceLock;
 
-use crate::buffer::{Buf, TmpBuf};
-use crate::crypto::{Aad, Nonce};
-use crate::dtls12::message::Dtls12CipherSuite;
-use crate::types::{Dtls13CipherSuite, HashAlgorithm, NamedGroup, SignatureAlgorithm};
-use crate::{CertificateError, CryptoError};
+use crate::vendor::dimpl::buffer::{Buf, TmpBuf};
+use crate::vendor::dimpl::crypto::{Aad, Nonce};
+use crate::vendor::dimpl::dtls12::message::Dtls12CipherSuite;
+use crate::vendor::dimpl::types::{Dtls13CipherSuite, HashAlgorithm, NamedGroup, SignatureAlgorithm};
+use crate::vendor::dimpl::{CertificateError, CryptoError};
 
 /// OID for the P-256 elliptic curve (secp256r1 / prime256v1).
-#[cfg(feature = "_crypto-common")]
+#[cfg(all())]
 pub const OID_P256: spki::ObjectIdentifier =
     spki::ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
 
 /// OID for the P-384 elliptic curve (secp384r1).
-#[cfg(feature = "_crypto-common")]
+#[cfg(all())]
 pub const OID_P384: spki::ObjectIdentifier = spki::ObjectIdentifier::new_unwrap("1.3.132.0.34");
 
 // ============================================================================
@@ -360,9 +360,9 @@ pub fn check_verify_scheme(
 
 /// Extract the EC curve ([`NamedGroup`]) from a DER-encoded X.509 certificate.
 ///
-/// Used by DTLS 1.3 to verify that the [`SignatureScheme`](crate::types::SignatureScheme)
+/// Used by DTLS 1.3 to verify that the [`SignatureScheme`](crate::vendor::dimpl::types::SignatureScheme)
 /// in `CertificateVerify` is consistent with the peer's certificate key.
-#[cfg(feature = "_crypto-common")]
+#[cfg(all())]
 pub fn cert_named_group(cert_der: &[u8]) -> Result<NamedGroup, CertificateError> {
     use der::Decode;
     use spki::ObjectIdentifier;
@@ -498,10 +498,10 @@ pub trait SupportedDtls13CipherSuite: CryptoSafe {
 ///
 /// # Example
 ///
-/// ```
-/// # #[cfg(feature = "aws-lc-rs")]
+/// ```ignore
+/// # #[cfg(all())]
 /// # fn main() {
-/// use dimpl::crypto::{CryptoProvider, aws_lc_rs};
+/// use crate::vendor::dimpl::crypto::{CryptoProvider, aws_lc_rs};
 ///
 /// // Use the default provider
 /// let provider = aws_lc_rs::default_provider();
@@ -521,7 +521,7 @@ pub trait SupportedDtls13CipherSuite: CryptoSafe {
 ///     dtls13_cipher_suites: provider.dtls13_cipher_suites,
 /// };
 /// # }
-/// # #[cfg(not(feature = "aws-lc-rs"))]
+/// # #[cfg(not(all()))]
 /// # fn main() {}
 /// ```
 #[derive(Debug, Clone)]
@@ -577,7 +577,7 @@ impl CryptoProvider {
     /// Install a default crypto provider for the process.
     ///
     /// This sets a global default provider that will be used by
-    /// [`Config::builder()`](crate::Config::builder)
+    /// [`Config::builder()`](crate::vendor::dimpl::Config::builder)
     /// when no explicit provider is specified. This is useful for applications that want
     /// to override the default provider per process.
     ///
@@ -587,15 +587,15 @@ impl CryptoProvider {
     ///
     /// # Example
     ///
-    /// ```
-    /// # #[cfg(feature = "aws-lc-rs")]
+    /// ```ignore
+    /// # #[cfg(all())]
     /// # fn main() {
-    /// use dimpl::crypto::{CryptoProvider, aws_lc_rs};
+    /// use crate::vendor::dimpl::crypto::{CryptoProvider, aws_lc_rs};
     ///
     /// // Install a default provider (can only be called once per process)
     /// CryptoProvider::install_default(aws_lc_rs::default_provider());
     /// # }
-    /// # #[cfg(not(feature = "aws-lc-rs"))]
+    /// # #[cfg(not(all()))]
     /// # fn main() {}
     /// ```
     pub fn install_default(provider: CryptoProvider) {
@@ -609,13 +609,13 @@ impl CryptoProvider {
     /// Returns `Some(&provider)` if a default provider has been installed via
     /// [`Self::install_default()`], or `None` if no default provider is available.
     ///
-    /// This method does not panic. Use [`Config::builder()`](crate::Config::builder) which will handle
+    /// This method does not panic. Use [`Config::builder()`](crate::vendor::dimpl::Config::builder) which will handle
     /// the fallback logic automatically.
     ///
     /// # Example
     ///
-    /// ```
-    /// use dimpl::crypto::CryptoProvider;
+    /// ```ignore
+    /// use crate::vendor::dimpl::crypto::CryptoProvider;
     ///
     /// if let Some(provider) = CryptoProvider::get_default() {
     ///     // Use the installed default provider
@@ -631,7 +631,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn cert_named_group_p256() {
         use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
 
@@ -644,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn cert_named_group_p384() {
         use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P384_SHA384};
 
@@ -657,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn cert_named_group_invalid_der() {
         let result = cert_named_group(&[0x00, 0x01, 0x02]);
         assert!(result.is_err());

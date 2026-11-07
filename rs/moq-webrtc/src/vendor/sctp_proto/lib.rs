@@ -40,20 +40,11 @@
 //! [ex_sctp]: https://github.com/elixir-webrtc/ex_sctp
 //! [rtc-sctp]: https://github.com/webrtc-rs/rtc/tree/master/rtc-sctp
 
-#![no_std]
-#![warn(rust_2018_idioms)]
-#![deny(clippy::std_instead_of_core)]
-#![deny(clippy::std_instead_of_alloc)]
 #![allow(dead_code)]
 #![allow(clippy::bool_to_int_with_if)]
 #![forbid(unsafe_code)]
 
-#[macro_use]
-extern crate alloc;
-
-extern crate std;
-
-use alloc::vec::Vec;
+use std::vec::Vec;
 use bytes::Bytes;
 use core::fmt;
 use core::net::{IpAddr, SocketAddr};
@@ -61,51 +52,51 @@ use core::ops;
 use std::time::Instant;
 
 mod association;
-pub use crate::association::Association;
-pub use crate::association::AssociationError;
-pub use crate::association::Event;
-pub use crate::association::stats::AssociationStats;
-pub use crate::association::stream::{
+pub use crate::vendor::sctp_proto::association::Association;
+pub use crate::vendor::sctp_proto::association::AssociationError;
+pub use crate::vendor::sctp_proto::association::Event;
+pub use crate::vendor::sctp_proto::association::stats::AssociationStats;
+pub use crate::vendor::sctp_proto::association::stream::{
     DataChannelStats, ReliabilityType, Stream, StreamEvent, StreamId, StreamResetError, StreamState,
 };
 
 pub(crate) mod chunk;
-pub use crate::chunk::ErrorCauseCode;
-pub use crate::chunk::chunk_payload_data::{ChunkPayloadData, PayloadProtocolIdentifier};
+pub use crate::vendor::sctp_proto::chunk::ErrorCauseCode;
+pub use crate::vendor::sctp_proto::chunk::chunk_payload_data::{ChunkPayloadData, PayloadProtocolIdentifier};
 
 mod config;
-pub use crate::config::{
+pub use crate::vendor::sctp_proto::config::{
     ClientConfig, DEFAULT_SCTP_PORT, EndpointConfig, MAX_SNAP_INIT_BYTES, ServerConfig,
     TransportConfig, generate_snap_token,
 };
 
 mod endpoint;
-pub use crate::endpoint::{
+pub use crate::vendor::sctp_proto::endpoint::{
     AidCollisionKind, AssociationHandle, ConnectError, DatagramEvent, Endpoint, SnapError, SnapSide,
 };
 
 mod error;
-pub use crate::error::Error;
+pub use crate::vendor::sctp_proto::error::Error;
 
 mod packet;
 
 mod shared;
-pub use crate::shared::{AssociationEvent, AssociationId, EcnCodepoint, EndpointEvent};
+pub use crate::vendor::sctp_proto::shared::{AssociationEvent, AssociationId, EcnCodepoint, EndpointEvent};
 
 pub(crate) mod param;
 
 pub(crate) mod queue;
-pub use crate::queue::reassembly_queue::{Chunk, Chunks};
+pub use crate::vendor::sctp_proto::queue::reassembly_queue::{Chunk, Chunks};
 
 pub(crate) mod util;
 
 /// Fuzz helpers. Not part of the public API.
-#[cfg(feature = "_fuzz")]
+#[cfg(any())]
 pub mod _fuzz {
     use bytes::BytesMut;
 
-    use crate::packet::Packet;
-    use crate::util::generate_packet_checksum;
+    use crate::vendor::sctp_proto::packet::Packet;
+    use crate::vendor::sctp_proto::util::generate_packet_checksum;
 
     /// Feed arbitrary bytes into packet unmarshal.
     ///
@@ -174,7 +165,7 @@ impl ops::Not for Side {
     }
 }
 
-use crate::packet::PartialDecode;
+use crate::vendor::sctp_proto::packet::PartialDecode;
 
 /// Payload in Incoming/outgoing Transmit
 #[derive(Debug)]
@@ -200,7 +191,7 @@ pub struct Transmit {
 
 #[cfg(test)]
 mod test {
-    use alloc::sync::Arc;
+    use std::sync::Arc;
 
     use super::*;
 
@@ -215,4 +206,9 @@ mod test {
         let a = Association::default();
         is_send_sync(a);
     }
+}
+
+#[cfg(test)]
+mod tests {
+	mod partial_reliability;
 }

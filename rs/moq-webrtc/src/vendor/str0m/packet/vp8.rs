@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::rtp_::{extend_u7, extend_u8, extend_u15};
+use crate::vendor::str0m::rtp_::{extend_u7, extend_u8, extend_u15};
 
 use super::{BitRead, CodecExtra, Depacketizer, PacketError, Packetizer};
 
@@ -389,7 +389,7 @@ pub struct Vp8CodecExtra {
     /// containing complete and independent visual information. This frame serves
     /// as a reference point for other frames in the video sequence.
     ///
-    /// [`MediaData`]: crate::media::MediaData
+    /// [`MediaData`]: crate::vendor::str0m::media::MediaData
     pub is_keyframe: bool,
 }
 
@@ -1297,8 +1297,8 @@ mod test {
     }
 
     fn assert_every_frame_emitted(frames: impl IntoIterator<Item = Vec<Vec<u8>>>) {
-        use crate::packet::{CodecDepacketizer, DepacketizingBuffer, RtpMeta};
-        use crate::rtp_::{MediaTime, RtpHeader};
+        use crate::vendor::str0m::packet::{CodecDepacketizer, DepacketizingBuffer, RtpMeta};
+        use crate::vendor::str0m::rtp_::{MediaTime, RtpHeader};
         use std::time::Instant;
 
         let mut buf =

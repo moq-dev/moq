@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::pacer::{QueuePriority, QueueSnapshot};
-use crate::util::not_happening;
+use crate::vendor::str0m::pacer::{QueuePriority, QueueSnapshot};
+use crate::vendor::str0m::util::not_happening;
 
 use super::RtpPacket;
 
@@ -203,8 +203,8 @@ impl TotalQueue {
 
 #[cfg(test)]
 mod test {
-    use crate::rtp_::MediaTime;
-    use crate::rtp_::RtpHeader;
+    use crate::vendor::str0m::rtp_::MediaTime;
+    use crate::vendor::str0m::rtp_::RtpHeader;
 
     use super::*;
 

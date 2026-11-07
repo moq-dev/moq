@@ -1,11 +1,11 @@
 use std::time::{Duration, Instant};
 
-use str0m::bwe::{Bitrate, BweKind};
-use str0m::media::{Direction, MediaKind};
-use str0m::rtp::{ExtensionMap, RawPacket, RtpWrite};
-use str0m::{Event, Rtc, RtcError};
+use crate::vendor::str0m::bwe::{Bitrate, BweKind};
+use crate::vendor::str0m::media::{Direction, MediaKind};
+use crate::vendor::str0m::rtp::{ExtensionMap, RawPacket, RtpWrite};
+use crate::vendor::str0m::{Event, Rtc, RtcError};
 
-mod common;
+use super::common;
 use common::{TestRtc, connect_l_r_with_rtc, init_crypto_default, progress};
 
 #[test]
@@ -111,16 +111,16 @@ fn idle_capacity_collapse_and_recovery() -> Result<(), RtcError> {
     l.direct_api().declare_media("aud".into(), MediaKind::Audio);
     r.direct_api().declare_media("aud".into(), MediaKind::Audio);
     r.set_netem(
-        netem::NetemConfig::new()
-            .link(Bitrate::mbps(2), netem::DataSize::kbytes(10))
+        crate::vendor::netem::NetemConfig::new()
+            .link(Bitrate::mbps(2), crate::vendor::netem::DataSize::kbytes(10))
             .seed(42),
     );
     run(&mut l, &mut r, Duration::from_secs(3))?;
     assert_feedback_and_no_media(&l, &r);
     l.events.clear();
     r.set_netem(
-        netem::NetemConfig::new()
-            .link(Bitrate::kbps(10), netem::DataSize::kbytes(1))
+        crate::vendor::netem::NetemConfig::new()
+            .link(Bitrate::kbps(10), crate::vendor::netem::DataSize::kbytes(1))
             .seed(42),
     );
     run(&mut l, &mut r, Duration::from_secs(15))?;
@@ -130,8 +130,8 @@ fn idle_capacity_collapse_and_recovery() -> Result<(), RtcError> {
     );
     l.events.clear();
     r.set_netem(
-        netem::NetemConfig::new()
-            .link(Bitrate::mbps(2), netem::DataSize::kbytes(10))
+        crate::vendor::netem::NetemConfig::new()
+            .link(Bitrate::mbps(2), crate::vendor::netem::DataSize::kbytes(10))
             .seed(42),
     );
     run(&mut l, &mut r, Duration::from_secs(20))?;
@@ -155,7 +155,7 @@ fn sdp_without_transport_sequence_extension_does_not_probe() -> Result<(), RtcEr
         + "\r\n";
     l.sdp_api().accept_answer(
         pending,
-        str0m::change::SdpAnswer::from_sdp_string(&sdp).unwrap(),
+        crate::vendor::str0m::change::SdpAnswer::from_sdp_string(&sdp).unwrap(),
     )?;
     run(&mut l, &mut r, Duration::from_secs(2))?;
     assert_eq!(probes(&l), 0);
@@ -179,7 +179,7 @@ fn sdp_without_transport_feedback_does_not_probe() -> Result<(), RtcError> {
         + "\r\n";
     l.sdp_api().accept_answer(
         pending,
-        str0m::change::SdpAnswer::from_sdp_string(&sdp).unwrap(),
+        crate::vendor::str0m::change::SdpAnswer::from_sdp_string(&sdp).unwrap(),
     )?;
     run(&mut l, &mut r, Duration::from_secs(2))?;
     assert_eq!(probes(&l), 0);
@@ -303,13 +303,13 @@ fn video_padding_before_srtp_does_not_spin() -> Result<(), RtcError> {
     // Drain immediate work without advancing the supplied clock. There are no
     // SRTP keys yet, so unsendable padding must not keep the deadline at `now`.
     for _ in 0..100 {
-        l.handle_input(str0m::Input::Timeout(now))?;
+        l.handle_input(crate::vendor::str0m::Input::Timeout(now))?;
         match l.poll_output()? {
-            str0m::Output::Timeout(deadline) if deadline > now => return Ok(()),
-            str0m::Output::Event(Event::EgressBitrateEstimate(BweKind::Twcc { .. })) => {
+            crate::vendor::str0m::Output::Timeout(deadline) if deadline > now => return Ok(()),
+            crate::vendor::str0m::Output::Event(Event::EgressBitrateEstimate(BweKind::Twcc { .. })) => {
                 panic!("TWCC estimate before SRTP readiness")
             }
-            str0m::Output::Transmit(_) => panic!("no candidates or keys have been installed"),
+            crate::vendor::str0m::Output::Transmit(_) => panic!("no candidates or keys have been installed"),
             _ => {}
         }
     }
@@ -343,7 +343,7 @@ fn video_without_twcc_does_not_hide_audio_probe_source() -> Result<(), RtcError>
             + "\r\n";
         l.sdp_api().accept_answer(
             pending,
-            str0m::change::SdpAnswer::from_sdp_string(&sdp).unwrap(),
+            crate::vendor::str0m::change::SdpAnswer::from_sdp_string(&sdp).unwrap(),
         )?;
         run(&mut l, &mut r, Duration::from_secs(2))?;
         assert!(

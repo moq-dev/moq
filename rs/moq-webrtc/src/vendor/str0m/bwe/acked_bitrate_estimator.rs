@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
-use crate::Bitrate;
-use crate::rtp_::DataSize;
+use crate::vendor::str0m::Bitrate;
+use crate::vendor::str0m::rtp_::DataSize;
 
 const SMALL_SAMPLE_THRESHOLD: DataSize = DataSize::bytes(2000);
 const SMALL_SAMPLE_UNCERTAINTY: f64 = 25.0;

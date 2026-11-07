@@ -1,13 +1,13 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
-use str0m::Rtc;
-use str0m::format::Codec;
-use str0m::media::{Direction, MediaData, MediaKind};
-use str0m::rtp::RtpWrite;
-use str0m::{Candidate, Event, RtcError};
+use crate::vendor::str0m::Rtc;
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::media::{Direction, MediaData, MediaKind};
+use crate::vendor::str0m::rtp::RtpWrite;
+use crate::vendor::str0m::{Candidate, Event, RtcError};
 use tracing::info_span;
 
-mod common;
+use super::common;
 use common::{Peer, TestRtc, init_crypto_default, init_log, progress};
 
 #[test]

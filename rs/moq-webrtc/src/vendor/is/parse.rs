@@ -1,8 +1,8 @@
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
-use crate::{Candidate, CandidateKind, IceError};
-use str0m_proto::TcpType;
+use crate::vendor::is::{Candidate, CandidateKind, IceError};
+use crate::vendor::str0m_proto::TcpType;
 
 /// Parse a candidate string into a [Candidate].
 ///

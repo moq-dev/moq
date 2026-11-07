@@ -1,5 +1,6 @@
 #![allow(clippy::unusual_byte_groupings)]
 
+use tracing::{trace, warn};
 use super::ext::{ExtensionMap, ExtensionValues, ExtensionsForm};
 use super::{MAX_BLANK_PADDING_PAYLOAD_SIZE, Pt, SeqNo, Ssrc};
 
@@ -331,8 +332,8 @@ impl Default for RtpHeader {
 
 #[cfg(test)]
 mod test {
-    use crate::util::already_happened;
-    use crate::{io::DATAGRAM_MAX_PACKET_SIZE, rtp_::Extension};
+    use crate::vendor::str0m::util::already_happened;
+    use crate::vendor::str0m::{io::DATAGRAM_MAX_PACKET_SIZE, rtp_::Extension};
     use std::time::Duration;
 
     use super::*;

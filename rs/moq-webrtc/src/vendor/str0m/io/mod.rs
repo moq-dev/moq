@@ -8,12 +8,12 @@ use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
 
-pub use is::stun::StunMessage;
+pub use crate::vendor::is::stun::StunMessage;
 
-pub use str0m_proto::DATAGRAM_MTU_TARGET;
-pub use str0m_proto::DATAGRAM_MTU_TARGET_MAX;
-pub use str0m_proto::DATAGRAM_MTU_TARGET_MIN;
-pub use str0m_proto::DATAGRAM_MTU_WARN;
+pub use crate::vendor::str0m_proto::DATAGRAM_MTU_TARGET;
+pub use crate::vendor::str0m_proto::DATAGRAM_MTU_TARGET_MAX;
+pub use crate::vendor::str0m_proto::DATAGRAM_MTU_TARGET_MIN;
+pub use crate::vendor::str0m_proto::DATAGRAM_MTU_WARN;
 
 /// Max UDP packet size
 pub(crate) const DATAGRAM_MAX_PACKET_SIZE: usize = 2000;
@@ -31,7 +31,7 @@ pub use self::error::NetError;
 #[allow(unused_imports)]
 pub use self::error::StunError;
 
-pub use str0m_proto::{DatagramSend, Protocol, TcpType, Transmit};
+pub use crate::vendor::str0m_proto::{DatagramSend, Protocol, TcpType, Transmit};
 
 #[derive(Debug, Serialize, Deserialize)]
 /// Received incoming data.

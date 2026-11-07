@@ -109,7 +109,7 @@ pub struct ChunkPayloadData {
 
     /// Partial-reliability parameters used only by sender
     pub(crate) since: Option<Instant>,
-    pub(crate) reliability: Option<(crate::ReliabilityType, u32)>,
+    pub(crate) reliability: Option<(crate::vendor::sctp_proto::ReliabilityType, u32)>,
     pub(crate) deadline: Option<Instant>,
     /// number of transmission made for this chunk
     pub(crate) nsent: u32,

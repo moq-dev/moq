@@ -1,16 +1,16 @@
-use crate::association::Association;
-use crate::association::state::AssociationState;
-use crate::chunk::chunk_payload_data::{ChunkPayloadData, PayloadProtocolIdentifier};
-use crate::error::{Error, Result};
-use crate::queue::reassembly_queue::{Chunks, ReassemblyQueue};
-use crate::{ErrorCauseCode, Side};
+use crate::vendor::sctp_proto::association::Association;
+use crate::vendor::sctp_proto::association::state::AssociationState;
+use crate::vendor::sctp_proto::chunk::chunk_payload_data::{ChunkPayloadData, PayloadProtocolIdentifier};
+use crate::vendor::sctp_proto::error::{Error, Result};
+use crate::vendor::sctp_proto::queue::reassembly_queue::{Chunks, ReassemblyQueue};
+use crate::vendor::sctp_proto::{ErrorCauseCode, Side};
 
-use crate::util::{ByteSlice, BytesArray, BytesSource};
-use alloc::vec;
-use alloc::vec::Vec;
+use crate::vendor::sctp_proto::util::{ByteSlice, BytesArray, BytesSource};
+use std::vec;
+use std::vec::Vec;
 use bytes::Bytes;
 use core::fmt;
-use log::{debug, error, trace};
+use tracing::{debug, error, trace};
 
 /// Identifier for a stream within a particular association
 pub type StreamId = u16;
@@ -30,7 +30,7 @@ pub type StreamId = u16;
 /// boundary. Use checked conversion for WebIDL's 32-bit message counters.
 /// Pair `generation` with an association identity for a unique report identity;
 /// the numeric stream ID alone can be reused. Retain final snapshots from
-/// [`crate::Event::DataChannelStatsFinal`] for closed-channel reporting.
+/// [`crate::vendor::sctp_proto::Event::DataChannelStatsFinal`] for closed-channel reporting.
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
 pub struct DataChannelStats {
     /// SCTP stream identifier.
@@ -257,7 +257,7 @@ impl<'a> Stream<'a> {
                         .events
                         .iter_mut()
                         .find_map(|event| match event {
-                            crate::Event::DataChannelStatsFinal(stats)
+                            crate::vendor::sctp_proto::Event::DataChannelStatsFinal(stats)
                                 if stats.generation == generation =>
                             {
                                 Some(stats)
@@ -359,7 +359,7 @@ impl<'a> Stream<'a> {
                 trace!("StreamEvent::BufferedAmountHigh");
                 self.association
                     .events
-                    .push_back(crate::association::Event::Stream(
+                    .push_back(crate::vendor::sctp_proto::association::Event::Stream(
                         StreamEvent::BufferedAmountHigh {
                             id: self.stream_identifier,
                         },

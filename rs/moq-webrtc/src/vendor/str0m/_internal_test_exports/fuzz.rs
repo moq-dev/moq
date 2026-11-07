@@ -4,14 +4,14 @@ use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use crate::change::{SdpAnswer, SdpOffer};
-use crate::format::Codec;
-use crate::net::{Protocol, Receive};
-use crate::packet::{CodecDepacketizer, CodecExtra, Depacketizer, DepacketizingBuffer, RtpMeta};
-use crate::rtp_::{Frequency, MediaTime, Rtcp, RtcpFb, RtpHeader};
-use crate::streams::register::ReceiverRegister;
-use crate::streams::rtx_cache_buf::EvictingBuffer;
-use crate::{Input, Output, Rtc};
+use crate::vendor::str0m::change::{SdpAnswer, SdpOffer};
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::net::{Protocol, Receive};
+use crate::vendor::str0m::packet::{CodecDepacketizer, CodecExtra, Depacketizer, DepacketizingBuffer, RtpMeta};
+use crate::vendor::str0m::rtp_::{Frequency, MediaTime, Rtcp, RtcpFb, RtpHeader};
+use crate::vendor::str0m::streams::register::ReceiverRegister;
+use crate::vendor::str0m::streams::rtx_cache_buf::EvictingBuffer;
+use crate::vendor::str0m::{Input, Output, Rtc};
 
 use super::Rng;
 #[allow(unused)]
@@ -201,7 +201,7 @@ pub fn receive(data: &[u8]) -> Option<()> {
 
 /// Fuzz STUN message parsing (the ICE input path).
 pub fn stun(data: &[u8]) -> Option<()> {
-    let _ = is::stun::StunMessage::parse(data);
+    let _ = crate::vendor::is::stun::StunMessage::parse(data);
     Some(())
 }
 

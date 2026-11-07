@@ -1,21 +1,21 @@
 use std::time::Instant;
 
-mod common;
+use super::common;
 use common::TestRtc;
 use common::init_crypto_default;
 use common::init_log;
 use common::negotiate;
-use str0m::Rtc;
-use str0m::change::SdpOffer;
-use str0m::format::Codec;
-use str0m::format::CodecSpec;
-use str0m::format::FormatParams;
-use str0m::format::PayloadParams;
-use str0m::media::Direction;
-use str0m::media::Frequency;
-use str0m::media::MediaKind;
-use str0m::media::Mid;
-use str0m::media::Pt;
+use crate::vendor::str0m::Rtc;
+use crate::vendor::str0m::change::SdpOffer;
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::format::CodecSpec;
+use crate::vendor::str0m::format::FormatParams;
+use crate::vendor::str0m::format::PayloadParams;
+use crate::vendor::str0m::media::Direction;
+use crate::vendor::str0m::media::Frequency;
+use crate::vendor::str0m::media::MediaKind;
+use crate::vendor::str0m::media::Mid;
+use crate::vendor::str0m::media::Pt;
 use tracing::Span;
 use tracing::info_span;
 
@@ -378,7 +378,7 @@ pub fn recycling_in_answer_produces_error() {
     let malformed_answer_sdp =
         rewrite_offer_to_recycle_stopped_slot(&answer_from_r.to_sdp_string(), old_mid);
     let malformed_answer =
-        str0m::change::SdpAnswer::from_sdp_string(&malformed_answer_sdp).expect("parses");
+        crate::vendor::str0m::change::SdpAnswer::from_sdp_string(&malformed_answer_sdp).expect("parses");
 
     let result = l
         .span

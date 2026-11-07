@@ -4,9 +4,9 @@ use std::time::Instant;
 use super::Pacer;
 use super::PaddingRequest;
 use super::QueueState;
-use crate::Reason;
-use crate::pacer::PacerReason;
-use crate::rtp_::{Bitrate, DataSize, MidRid, TwccClusterId};
+use crate::vendor::str0m::Reason;
+use crate::vendor::str0m::pacer::PacerReason;
+use crate::vendor::str0m::rtp_::{Bitrate, DataSize, MidRid, TwccClusterId};
 
 /// A null pacer that doesn't pace.
 #[derive(Debug, Default)]
@@ -71,7 +71,7 @@ impl Pacer for NullPacer {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::pacer::QueueSnapshot;
+    use crate::vendor::str0m::pacer::QueueSnapshot;
 
     fn queue(mid: &str, packet_count: u32, now: Instant) -> QueueState {
         QueueState {

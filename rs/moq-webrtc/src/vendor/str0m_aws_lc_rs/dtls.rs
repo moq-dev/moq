@@ -3,10 +3,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use str0m_proto::crypto::CryptoError;
-use str0m_proto::crypto::DtlsVersion;
-use str0m_proto::crypto::dtls::ProtocolVersion;
-use str0m_proto::crypto::dtls::{DtlsCert, DtlsImplError, DtlsInstance, DtlsOutput, DtlsProvider};
+use crate::vendor::str0m_proto::crypto::CryptoError;
+use crate::vendor::str0m_proto::crypto::DtlsVersion;
+use crate::vendor::str0m_proto::crypto::dtls::ProtocolVersion;
+use crate::vendor::str0m_proto::crypto::dtls::{DtlsCert, DtlsImplError, DtlsInstance, DtlsOutput, DtlsProvider};
 
 // ============================================================================
 // DTLS Provider Implementation
@@ -18,7 +18,7 @@ pub(super) struct AwsLcRsDtlsProvider;
 impl DtlsProvider for AwsLcRsDtlsProvider {
     fn generate_certificate(&self) -> Option<DtlsCert> {
         // Use dimpl's rcgen-based certificate generation (with aws-lc-rs backend)
-        dimpl::certificate::generate_self_signed_certificate()
+        crate::vendor::dimpl::certificate::generate_self_signed_certificate()
             .ok()
             .map(|cert| DtlsCert {
                 certificate: cert.certificate,
@@ -33,14 +33,14 @@ impl DtlsProvider for AwsLcRsDtlsProvider {
         dtls_version: DtlsVersion,
         mtu: Option<usize>,
     ) -> Result<Box<dyn DtlsInstance>, CryptoError> {
-        let dimpl_cert = dimpl::DtlsCertificate {
+        let dimpl_cert = crate::vendor::dimpl::DtlsCertificate {
             certificate: cert.certificate.clone(),
             private_key: cert.private_key.clone(),
         };
 
         // Create a default dimpl Config with AWS-LC-RS crypto provider
         // ICE verifies return routability before DTLS, making server cookies redundant.
-        let mut builder = dimpl::Config::builder().use_server_cookie(false);
+        let mut builder = crate::vendor::dimpl::Config::builder().use_server_cookie(false);
         if let Some(mtu) = mtu {
             builder = builder.mtu(mtu);
         }
@@ -55,9 +55,9 @@ impl DtlsProvider for AwsLcRsDtlsProvider {
 
         let config = Arc::new(config);
         let dtls = match dtls_version {
-            DtlsVersion::Dtls12 => dimpl::Dtls::new_12(config, dimpl_cert, now),
-            DtlsVersion::Dtls13 => dimpl::Dtls::new_13(config, dimpl_cert, now),
-            DtlsVersion::Auto => dimpl::Dtls::new_auto(config, dimpl_cert, now),
+            DtlsVersion::Dtls12 => crate::vendor::dimpl::Dtls::new_12(config, dimpl_cert, now),
+            DtlsVersion::Dtls13 => crate::vendor::dimpl::Dtls::new_13(config, dimpl_cert, now),
+            DtlsVersion::Auto => crate::vendor::dimpl::Dtls::new_auto(config, dimpl_cert, now),
             _ => {
                 return Err(CryptoError::Other(format!(
                     "Unsupported DTLS version: {dtls_version}"
@@ -74,7 +74,7 @@ impl DtlsProvider for AwsLcRsDtlsProvider {
 // ============================================================================
 
 struct AwsLcRsDtlsInstance {
-    dtls: dimpl::Dtls,
+    dtls: crate::vendor::dimpl::Dtls,
 }
 
 impl std::fmt::Debug for AwsLcRsDtlsInstance {

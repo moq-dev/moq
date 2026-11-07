@@ -1,5 +1,5 @@
-use crate::buffer::Buf;
-use crate::types::SignatureScheme;
+use crate::vendor::dimpl::buffer::Buf;
+use crate::vendor::dimpl::types::SignatureScheme;
 use arrayvec::ArrayVec;
 use nom::Err;
 use nom::IResult;

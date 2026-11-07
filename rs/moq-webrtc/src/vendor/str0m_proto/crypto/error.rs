@@ -2,13 +2,13 @@ use std::error::Error;
 use std::fmt;
 use std::io;
 
-use crate::crypto::dtls::DtlsImplError;
+use crate::vendor::str0m_proto::crypto::dtls::DtlsImplError;
 
 /// Errors that can arise in DTLS.
 #[derive(Debug)]
 pub enum CryptoError {
     /// Some error from OpenSSL layer (used for DTLS).
-    #[cfg(feature = "openssl")]
+    #[cfg(any())]
     OpenSsl(openssl::error::ErrorStack),
 
     /// Error from DTLS implementation layer.
@@ -24,7 +24,7 @@ pub enum CryptoError {
 impl fmt::Display for CryptoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            #[cfg(feature = "openssl")]
+            #[cfg(any())]
             CryptoError::OpenSsl(err) => write!(f, "{}", err),
             CryptoError::Io(err) => write!(f, "{}", err),
             CryptoError::DtlsImpl(err) => write!(f, "{}", err),
@@ -36,7 +36,7 @@ impl fmt::Display for CryptoError {
 impl Error for CryptoError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            #[cfg(feature = "openssl")]
+            #[cfg(any())]
             CryptoError::OpenSsl(err) => Some(err),
             CryptoError::Io(err) => Some(err),
             CryptoError::DtlsImpl(err) => Some(err),
@@ -45,7 +45,7 @@ impl Error for CryptoError {
     }
 }
 
-#[cfg(feature = "openssl")]
+#[cfg(any())]
 impl From<openssl::error::ErrorStack> for CryptoError {
     fn from(err: openssl::error::ErrorStack) -> Self {
         CryptoError::OpenSsl(err)

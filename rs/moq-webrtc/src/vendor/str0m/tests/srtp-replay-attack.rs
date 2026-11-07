@@ -1,12 +1,12 @@
 use std::time::{Duration, Instant};
 
-use str0m::format::Codec;
-use str0m::media::MediaKind;
-use str0m::net::Receive;
-use str0m::rtp::{ExtensionValues, RawPacket, RtpWrite, SeqNo, Ssrc};
-use str0m::{Event, Input, Output, Rtc, RtcError};
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::media::MediaKind;
+use crate::vendor::str0m::net::Receive;
+use crate::vendor::str0m::rtp::{ExtensionValues, RawPacket, RtpWrite, SeqNo, Ssrc};
+use crate::vendor::str0m::{Event, Input, Output, Rtc, RtcError};
 
-mod common;
+use super::common;
 use common::{TestRtc, connect_l_r, connect_l_r_with_rtc, init_crypto_default, init_log};
 
 const EXPECTED_PACKETS: usize = 50;

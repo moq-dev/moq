@@ -1,7 +1,8 @@
+use tracing::trace;
 use std::time::{Duration, Instant};
 
 use super::budget::IntervalBudget;
-use crate::rtp_::{Bitrate, DataSize};
+use crate::vendor::str0m::rtp_::{Bitrate, DataSize};
 
 /// Application Limited Region detector.
 ///

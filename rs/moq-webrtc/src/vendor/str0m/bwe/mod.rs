@@ -17,9 +17,9 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use crate::Reason;
-use crate::rtp_::{Bitrate, DataSize, TwccClusterId, TwccSendRecord, TwccSeq};
-use crate::util::Soonest;
+use crate::vendor::str0m::Reason;
+use crate::vendor::str0m::rtp_::{Bitrate, DataSize, TwccClusterId, TwccSendRecord, TwccSeq};
+use crate::vendor::str0m::util::Soonest;
 
 mod acked_bitrate_estimator;
 mod alr_detector;
@@ -46,9 +46,9 @@ pub(crate) use probe::ProbeKind;
 pub(crate) use probe::{BandwidthLimitedCause, ProbeEstimator};
 pub(crate) use probe::{ProbeClusterState, ProbeControl};
 
-#[cfg(feature = "_internal_test_exports")]
+#[cfg(test)]
 pub use probe::ProbeClusterConfig;
-#[cfg(not(feature = "_internal_test_exports"))]
+#[cfg(not(test))]
 pub(crate) use probe::ProbeClusterConfig;
 
 const INITIAL_BITRATE_WINDOW: Duration = Duration::from_millis(500);
@@ -95,7 +95,7 @@ impl Bwe {
 
     pub fn update<'t>(
         &mut self,
-        records: impl Iterator<Item = &'t crate::rtp_::TwccSendRecord>,
+        records: impl Iterator<Item = &'t crate::vendor::str0m::rtp_::TwccSendRecord>,
         now: Instant,
     ) {
         self.bwe.update(records, now);
@@ -507,7 +507,7 @@ impl fmt::Display for BandwidthUsage {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::rtp_::TwccPacketId;
+    use crate::vendor::str0m::rtp_::TwccPacketId;
 
     #[test]
     fn alr_probing_waits_for_nonempty_transport_feedback() {

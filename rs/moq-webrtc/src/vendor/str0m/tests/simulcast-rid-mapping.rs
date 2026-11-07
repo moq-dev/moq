@@ -9,15 +9,15 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use netem::{GilbertElliot, NetemConfig, Probability, RandomLoss};
-use str0m::bwe::Bitrate;
-use str0m::change::{SdpAnswer, SdpOffer};
-use str0m::format::Codec;
-use str0m::media::{Direction, Frequency, MediaKind, MediaTime, Mid, Rid};
-use str0m::media::{Simulcast, SimulcastLayer};
-use str0m::{Event, RtcConfig, RtcError};
+use crate::vendor::netem::{GilbertElliot, NetemConfig, Probability, RandomLoss};
+use crate::vendor::str0m::bwe::Bitrate;
+use crate::vendor::str0m::change::{SdpAnswer, SdpOffer};
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::media::{Direction, Frequency, MediaKind, MediaTime, Mid, Rid};
+use crate::vendor::str0m::media::{Simulcast, SimulcastLayer};
+use crate::vendor::str0m::{Event, RtcConfig, RtcError};
 
-mod common;
+use super::common;
 use common::{Peer, TestRtc, init_crypto_default, init_log, progress};
 
 /// Layer rids with the frame size sent on each.

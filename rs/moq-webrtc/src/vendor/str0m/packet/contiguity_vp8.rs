@@ -62,7 +62,7 @@ mod test {
         let mut contiguity = Vp8Contiguity::new();
 
         for i in 0..100 {
-            let next = &crate::packet::Vp8CodecExtra {
+            let next = &crate::vendor::str0m::packet::Vp8CodecExtra {
                 discardable: false,
                 sync: true,
                 layer_index: L1T3_LAYERS[i as usize % 4] as u8,
@@ -88,7 +88,7 @@ mod test {
                 continue;
             }
 
-            let next = &crate::packet::Vp8CodecExtra {
+            let next = &crate::vendor::str0m::packet::Vp8CodecExtra {
                 discardable: false,
                 sync: i % 8 == 0,
                 layer_index,
@@ -124,7 +124,7 @@ mod test {
                 continue;
             }
 
-            let next = &crate::packet::Vp8CodecExtra {
+            let next = &crate::vendor::str0m::packet::Vp8CodecExtra {
                 discardable: false,
                 sync: i % 8 == 0,
                 layer_index,
@@ -144,7 +144,7 @@ mod test {
         let mut contiguity = Vp8Contiguity::new();
 
         for i in 0..100 {
-            let next = &crate::packet::Vp8CodecExtra {
+            let next = &crate::vendor::str0m::packet::Vp8CodecExtra {
                 discardable: false,
                 sync: true,
                 layer_index: L1T2_LAYERS[i as usize % 4] as u8,
@@ -168,7 +168,7 @@ mod test {
                 continue;
             }
 
-            let next = &crate::packet::Vp8CodecExtra {
+            let next = &crate::vendor::str0m::packet::Vp8CodecExtra {
                 discardable: false,
                 sync: i % 8 == 0,
                 layer_index,

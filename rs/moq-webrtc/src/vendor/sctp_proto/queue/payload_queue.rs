@@ -1,10 +1,10 @@
-use crate::chunk::chunk_payload_data::ChunkPayloadData;
-use crate::chunk::chunk_selective_ack::GapAckBlock;
-use crate::util::*;
+use crate::vendor::sctp_proto::chunk::chunk_payload_data::ChunkPayloadData;
+use crate::vendor::sctp_proto::chunk::chunk_selective_ack::GapAckBlock;
+use crate::vendor::sctp_proto::util::*;
 
-use alloc::collections::VecDeque;
-use alloc::string::String;
-use alloc::vec::Vec;
+use std::collections::VecDeque;
+use std::string::String;
+use std::vec::Vec;
 use std::collections::HashMap;
 
 #[derive(Default, Debug)]

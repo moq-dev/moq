@@ -1,11 +1,11 @@
-//! Ways to change the [`Rtc`][crate::Rtc] session. SDP or Direct.
+//! Ways to change the [`Rtc`][crate::vendor::str0m::Rtc] session. SDP or Direct.
 //!
 //! str0m has two main APIs for changing the WebRTC session.
 //!
 //! 1. SDP API. The common way to talk to browsers using SDP OFFER/ANSWER negotiations.
-//!    [`Rtc::sdp_api()`][crate::Rtc::sdp_api]
+//!    [`Rtc::sdp_api()`][crate::vendor::str0m::Rtc::sdp_api]
 //! 2. Direct API. Makes changes directly to the session without any negotiation.
-//!    [`Rtc::direct_api()`][crate::Rtc::direct_api]
+//!    [`Rtc::direct_api()`][crate::vendor::str0m::Rtc::direct_api]
 //!
 //! ## Direct API
 //!

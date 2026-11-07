@@ -1,5 +1,5 @@
-use crate::buffer::Buf;
-use crate::types::Dtls13CipherSuite;
+use crate::vendor::dimpl::buffer::Buf;
+use crate::vendor::dimpl::types::Dtls13CipherSuite;
 use nom::IResult;
 use nom::bytes::complete::take;
 use std::ops::Range;
@@ -38,7 +38,7 @@ impl Finished {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::buffer::Buf;
+    use crate::vendor::dimpl::buffer::Buf;
 
     #[test]
     fn roundtrip() {

@@ -1,21 +1,22 @@
+use tracing::{debug, trace};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::config_mod::RtcpReportIntervals;
-use crate::media::KeyframeRequestKind;
-use crate::packet::MAX_RED_RECOVERY_DEPTH;
-use crate::rtp_::MidRid;
-use crate::rtp_::SeqNoWindow;
-use crate::rtp_::{Bitrate, DlrrItem, ExtendedReport, extend_u32};
-use crate::rtp_::{Fir, FirEntry, Frequency, MediaTime, Remb};
-use crate::rtp_::{Mid, Pli, Pt, ReceiverReport};
-use crate::rtp_::{ReportBlock, ReportList, Rid, Rrtr, Rtcp};
-use crate::rtp_::{RtcpFb, RtpHeader, SenderInfo, SeqNo};
-use crate::rtp_::{SdesType, Ssrc};
-use crate::stats::{MediaIngressStats, RemoteEgressStats, StatsSnapshot};
-use crate::util::{InstantExt, SystemTimeExt};
-use crate::util::{already_happened, calculate_rtt};
+use crate::vendor::str0m::config_mod::RtcpReportIntervals;
+use crate::vendor::str0m::media::KeyframeRequestKind;
+use crate::vendor::str0m::packet::MAX_RED_RECOVERY_DEPTH;
+use crate::vendor::str0m::rtp_::MidRid;
+use crate::vendor::str0m::rtp_::SeqNoWindow;
+use crate::vendor::str0m::rtp_::{Bitrate, DlrrItem, ExtendedReport, extend_u32};
+use crate::vendor::str0m::rtp_::{Fir, FirEntry, Frequency, MediaTime, Remb};
+use crate::vendor::str0m::rtp_::{Mid, Pli, Pt, ReceiverReport};
+use crate::vendor::str0m::rtp_::{ReportBlock, ReportList, Rid, Rrtr, Rtcp};
+use crate::vendor::str0m::rtp_::{RtcpFb, RtpHeader, SenderInfo, SeqNo};
+use crate::vendor::str0m::rtp_::{SdesType, Ssrc};
+use crate::vendor::str0m::stats::{MediaIngressStats, RemoteEgressStats, StatsSnapshot};
+use crate::vendor::str0m::util::{InstantExt, SystemTimeExt};
+use crate::vendor::str0m::util::{already_happened, calculate_rtt};
 
 use super::RtpPacket;
 use super::StreamPaused;
@@ -29,7 +30,7 @@ const RED_RECENT_PACKETS: usize = 32;
 ///
 /// A stream is a primary SSRC + optional RTX SSRC.
 ///
-/// This is RTP level API. For frame level API see [`Rtc::writer`][crate::Rtc::writer].
+/// This is RTP level API. For frame level API see [`Rtc::writer`][crate::vendor::str0m::Rtc::writer].
 #[derive(Debug)]
 pub struct StreamRx {
     /// Unique idenfier of the remote stream.
@@ -977,7 +978,7 @@ impl StreamRx {
     ///
     /// The ROC is not carried in the RTP header. Obtain it through out-of-band
     /// signaling and call this before handling the first SRTP packet for the stream.
-    /// See [`RtpWrite::new`][crate::rtp::RtpWrite::new] for sender and receiver examples.
+    /// See [`RtpWrite::new`][crate::vendor::str0m::rtp::RtpWrite::new] for sender and receiver examples.
     ///
     /// [RFC3711](https://datatracker.ietf.org/doc/html/rfc3711#section-3.3.1):
     ///
@@ -1111,7 +1112,7 @@ mod tests {
 
     #[test]
     fn dlrr_for_local_ssrc_updates_receive_streams() {
-        let mut streams = crate::streams::Streams::new(false, 1200, Duration::from_millis(1500));
+        let mut streams = crate::vendor::str0m::streams::Streams::new(false, 1200, Duration::from_millis(1500));
         for (ssrc, mid) in [(7, "video"), (8, "audio")] {
             streams.expect_stream_rx(ssrc.into(), None, MidRid(mid.into(), None), false);
         }

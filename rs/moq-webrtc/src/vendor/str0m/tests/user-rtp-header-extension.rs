@@ -1,17 +1,17 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use str0m::Rtc;
-use str0m::change::SdpOffer;
-use str0m::format::Codec;
-use str0m::media::{Direction, MediaKind};
-use str0m::rtp::Extension;
-use str0m::rtp::ExtensionSerializer;
-use str0m::rtp::ExtensionValues;
-use str0m::{Event, RtcError};
+use crate::vendor::str0m::Rtc;
+use crate::vendor::str0m::change::SdpOffer;
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::media::{Direction, MediaKind};
+use crate::vendor::str0m::rtp::Extension;
+use crate::vendor::str0m::rtp::ExtensionSerializer;
+use crate::vendor::str0m::rtp::ExtensionValues;
+use crate::vendor::str0m::{Event, RtcError};
 use tracing::info_span;
 
-mod common;
+use super::common;
 use common::{TestRtc, init_crypto_default, init_log, progress};
 
 #[test]

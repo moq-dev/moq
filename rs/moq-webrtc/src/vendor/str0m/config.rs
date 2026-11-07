@@ -2,25 +2,25 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::Rtc;
-use crate::config::DtlsCert;
-use crate::crypto::CryptoProvider;
-use crate::crypto::dtls::DtlsVersion;
-use crate::format::CodecConfig;
-use crate::format::Vp9PacketizerMode;
-use crate::ice::IceCreds;
-use crate::io::DATAGRAM_MTU_TARGET;
-use crate::io::DATAGRAM_MTU_TARGET_MAX;
-use crate::io::DATAGRAM_MTU_TARGET_MIN;
-use crate::io::DATAGRAM_MTU_WARN;
-use crate::rtp_::{Bitrate, Extension, ExtensionMap};
+use crate::vendor::str0m::Rtc;
+use crate::vendor::str0m::config::DtlsCert;
+use crate::vendor::str0m::crypto::CryptoProvider;
+use crate::vendor::str0m::crypto::dtls::DtlsVersion;
+use crate::vendor::str0m::format::CodecConfig;
+use crate::vendor::str0m::format::Vp9PacketizerMode;
+use crate::vendor::str0m::ice::IceCreds;
+use crate::vendor::str0m::io::DATAGRAM_MTU_TARGET;
+use crate::vendor::str0m::io::DATAGRAM_MTU_TARGET_MAX;
+use crate::vendor::str0m::io::DATAGRAM_MTU_TARGET_MIN;
+use crate::vendor::str0m::io::DATAGRAM_MTU_WARN;
+use crate::vendor::str0m::rtp_::{Bitrate, Extension, ExtensionMap};
 
 /// Customized config for creating an [`Rtc`] instance.
 ///
-/// ```
-/// # #[cfg(feature = "openssl")] {
+/// ```ignore
+/// # #[cfg(any())] {
 /// use std::time::Instant;
-/// use str0m::RtcConfig;
+/// use crate::vendor::str0m::RtcConfig;
 ///
 /// let rtc = RtcConfig::new()
 ///     .set_ice_lite(true)
@@ -99,7 +99,7 @@ impl RtcConfig {
 
     /// Set the crypto provider.
     ///
-    /// This overrides what is set in [`crate::crypto::CryptoProvider::install_process_default()`].
+    /// This overrides what is set in [`crate::vendor::str0m::crypto::CryptoProvider::install_process_default()`].
     pub fn set_crypto_provider(mut self, p: Arc<CryptoProvider>) -> Self {
         self.crypto_provider = Some(p);
         self
@@ -125,9 +125,9 @@ impl RtcConfig {
     /// If not set, a certificate will be generated automatically using
     /// the configured crypto provider.
     ///
-    /// ```
-    /// # use str0m::RtcConfig;
-    /// # use str0m::crypto;
+    /// ```ignore
+    /// # use crate::vendor::str0m::RtcConfig;
+    /// # use crate::vendor::str0m::crypto;
     ///
     /// let provider = crypto::from_feature_flags();
     /// let cert = provider.dtls_provider.generate_certificate().unwrap();
@@ -180,8 +180,8 @@ impl RtcConfig {
 
     /// Get fingerprint verification mode.
     ///
-    /// ```
-    /// # use str0m::Rtc;
+    /// ```ignore
+    /// # use crate::vendor::str0m::Rtc;
     /// let config = Rtc::builder();
     ///
     /// // Defaults to true.
@@ -201,9 +201,9 @@ impl RtcConfig {
 
     /// Tells whether ice lite is enabled.
     ///
-    /// ```
-    /// # #[cfg(feature = "openssl")] {
-    /// # use str0m::Rtc;
+    /// ```ignore
+    /// # #[cfg(any())] {
+    /// # use crate::vendor::str0m::Rtc;
     /// let config = Rtc::builder();
     ///
     /// // Defaults to false.
@@ -221,10 +221,10 @@ impl RtcConfig {
 
     /// Clear all configured codecs.
     ///
-    /// ```
-    /// # #[cfg(feature = "openssl")] {
+    /// ```ignore
+    /// # #[cfg(any())] {
     /// # use std::time::Instant;
-    /// # use str0m::RtcConfig;
+    /// # use crate::vendor::str0m::RtcConfig;
     /// // For the session to use only OPUS and VP8.
     /// let mut rtc = RtcConfig::default()
     ///     .clear_codecs()
@@ -245,7 +245,7 @@ impl RtcConfig {
     /// size. Each audio codec carries its own RED payload type. The redundancy depth is set with
     /// [`Self::set_red_distances`] (default one level, the previous frame), and wrapping can be
     /// toggled at runtime on the send side without renegotiation via
-    /// [`DirectApi::set_red_send`][crate::change::DirectApi::set_red_send].
+    /// [`DirectApi::set_red_send`][crate::vendor::str0m::change::DirectApi::set_red_send].
     pub fn enable_opus(mut self, enabled: bool, use_red: bool) -> Self {
         self.codec_config.enable_opus(enabled, use_red);
         self
@@ -366,8 +366,8 @@ impl RtcConfig {
     ///
     /// The default extension map is
     ///
-    /// ```
-    /// # use str0m::rtp::{Extension, ExtensionMap};
+    /// ```ignore
+    /// # use crate::vendor::str0m::rtp::{Extension, ExtensionMap};
     /// let exts = ExtensionMap::standard();
     ///
     /// assert_eq!(exts.id_of(Extension::AudioLevel), Some(1));
@@ -409,8 +409,8 @@ impl RtcConfig {
     ///
     /// None turns off the stats events.
     ///
-    /// This includes [`MediaEgressStats`][crate::stats::MediaEgressStats],
-    /// [`MediaIngressStats`][crate::stats::MediaIngressStats]
+    /// This includes [`MediaEgressStats`][crate::vendor::str0m::stats::MediaEgressStats],
+    /// [`MediaIngressStats`][crate::vendor::str0m::stats::MediaIngressStats]
     pub fn set_stats_interval(mut self, interval: Option<Duration>) -> Self {
         self.stats_interval = interval;
         self
@@ -420,8 +420,8 @@ impl RtcConfig {
     ///
     /// None means statistics are disabled.
     ///
-    /// ```
-    /// # use str0m::Rtc;
+    /// ```ignore
+    /// # use crate::vendor::str0m::Rtc;
     /// # use std::time::Duration;
     /// let config = Rtc::builder();
     ///
@@ -489,8 +489,8 @@ impl RtcConfig {
 
     /// The initial bitrate as set by [`Self::enable_bwe()`].
     ///
-    /// ```
-    /// # use str0m::Rtc;
+    /// ```ignore
+    /// # use crate::vendor::str0m::Rtc;
     /// let config = Rtc::builder();
     ///
     /// // Defaults to None - BWE off.
@@ -504,7 +504,7 @@ impl RtcConfig {
     ///
     /// Str0m tries to deliver the frames in order. This number determines how many
     /// packets to "wait" before releasing media
-    /// [`contiguous: false`][crate::media::MediaData::contiguous].
+    /// [`contiguous: false`][crate::vendor::str0m::media::MediaData::contiguous].
     ///
     /// This setting is ignored in [RTP mode][`RtcConfig::set_rtp_mode()`] where RTP
     /// packets can arrive out of order.
@@ -516,8 +516,8 @@ impl RtcConfig {
 
     /// Returns the setting for audio reordering size.
     ///
-    /// ```
-    /// # use str0m::Rtc;
+    /// ```ignore
+    /// # use crate::vendor::str0m::Rtc;
     /// let config = Rtc::builder();
     ///
     /// // Defaults to 15.
@@ -574,8 +574,8 @@ impl RtcConfig {
 
     /// Returns the setting for video reordering size.
     ///
-    /// ```
-    /// # use str0m::Rtc;
+    /// ```ignore
+    /// # use crate::vendor::str0m::Rtc;
     /// let config = Rtc::builder();
     ///
     /// // Defaults to 30.
@@ -603,7 +603,7 @@ impl RtcConfig {
     /// Sets the buffer size for outgoing audio packets.
     ///
     /// This must be larger than 0. The value configures an internal ring buffer used as a temporary
-    /// holding space between calling [`Writer::write`][crate::media::Writer::write()] and
+    /// holding space between calling [`Writer::write`][crate::vendor::str0m::media::Writer::write()] and
     /// [`Rtc::poll_output`].
     ///
     /// For audio one call to `write()` typically results in one RTP packet since the entire
@@ -620,8 +620,8 @@ impl RtcConfig {
 
     /// Returns the setting for audio resend size.
     ///
-    /// ```
-    /// # use str0m::Rtc;
+    /// ```ignore
+    /// # use crate::vendor::str0m::Rtc;
     /// let config = Rtc::builder();
     ///
     /// // Defaults to 50.
@@ -635,7 +635,7 @@ impl RtcConfig {
     ///
     /// This must be larger than 0. The value configures an internal ring buffer that is both
     /// used as a temporary holding space between calling
-    /// [`Writer::write`][crate::media::Writer::write()] and [`Rtc::poll_output`] as well as for
+    /// [`Writer::write`][crate::vendor::str0m::media::Writer::write()] and [`Rtc::poll_output`] as well as for
     /// fulfilling resends.
     ///
     /// For video, this buffer is used for more than for audio. First, a call to `write()` often
@@ -651,8 +651,8 @@ impl RtcConfig {
 
     /// Returns the setting for video resend size.
     ///
-    /// ```
-    /// # use str0m::Rtc;
+    /// ```ignore
+    /// # use crate::vendor::str0m::Rtc;
     /// let config = Rtc::builder();
     ///
     /// // Defaults to 1000.
@@ -664,8 +664,8 @@ impl RtcConfig {
 
     /// Sets how many bytes the data channels can buffer for sending, summed over all channels.
     ///
-    /// [`Channel::write()`][crate::channel::Channel::write()] does not accept a message (returns
-    /// `false`) that would take the total [buffered amount][crate::channel::Channel::buffered_amount()]
+    /// [`Channel::write()`][crate::vendor::str0m::channel::Channel::write()] does not accept a message (returns
+    /// `false`) that would take the total [buffered amount][crate::vendor::str0m::channel::Channel::buffered_amount()]
     /// above this limit. A message larger than the limit is never accepted.
     ///
     /// Written data counts as buffered until the remote peer acknowledges it, including after it
@@ -685,8 +685,8 @@ impl RtcConfig {
 
     /// Returns how many bytes the data channels can buffer for sending.
     ///
-    /// ```
-    /// # use str0m::Rtc;
+    /// ```ignore
+    /// # use crate::vendor::str0m::Rtc;
     /// let config = Rtc::builder();
     ///
     /// // Defaults to 128 KiB.
@@ -716,8 +716,8 @@ impl RtcConfig {
 
     /// Returns the maximum data channel message size this peer can receive, in bytes.
     ///
-    /// ```
-    /// # use str0m::RtcConfig;
+    /// ```ignore
+    /// # use crate::vendor::str0m::RtcConfig;
     /// let config = RtcConfig::new().set_sctp_max_message_size(512 * 1024);
     /// assert_eq!(config.sctp_max_message_size(), 512 * 1024);
     /// ```
@@ -727,8 +727,8 @@ impl RtcConfig {
 
     /// Make the entire Rtc be in RTP mode.
     ///
-    /// This means all media, read from [`RtpPacket`][crate::rtp::RtpPacket] and written to
-    /// [`StreamTx::write_rtp`][crate::rtp::StreamTx::write_rtp] are RTP packetized.
+    /// This means all media, read from [`RtpPacket`][crate::vendor::str0m::rtp::RtpPacket] and written to
+    /// [`StreamTx::write_rtp`][crate::vendor::str0m::rtp::StreamTx::write_rtp] are RTP packetized.
     /// It bypasses all internal packetization/depacketization inside str0m.
     ///
     /// WARNING: This is a low level API and is not str0m's primary use case.
@@ -740,8 +740,8 @@ impl RtcConfig {
 
     /// Checks if RTP mode is set.
     ///
-    /// ```
-    /// # use str0m::Rtc;
+    /// ```ignore
+    /// # use crate::vendor::str0m::Rtc;
     /// let config = Rtc::builder();
     ///
     /// // Defaults to false.
@@ -751,7 +751,7 @@ impl RtcConfig {
         self.rtp_mode
     }
 
-    /// Enable the [`Event::RawPacket`][crate::Event::RawPacket] event.
+    /// Enable the [`Event::RawPacket`][crate::vendor::str0m::Event::RawPacket] event.
     ///
     /// This clones data, and is therefore expensive.
     /// Should not be enabled outside of tests and troubleshooting.
@@ -853,9 +853,9 @@ impl RtcConfig {
 
     /// Returns the configured VP9 packetizer mode.
     ///
-    /// ```
-    /// # use str0m::Rtc;
-    /// # use str0m::format::Vp9PacketizerMode;
+    /// ```ignore
+    /// # use crate::vendor::str0m::Rtc;
+    /// # use crate::vendor::str0m::format::Vp9PacketizerMode;
     /// let config = Rtc::builder();
     ///
     /// // Defaults to NonFlexible.
@@ -902,8 +902,8 @@ impl Default for RtcConfig {
             pause_threshold: Duration::from_millis(1500),
             send_buffer_audio: 50,
             send_buffer_video: 1000,
-            sctp_max_buffered_amount: crate::sctp::DEFAULT_MAX_BUFFERED_AMOUNT,
-            sctp_max_message_size: crate::sctp::LOCAL_MAX_MESSAGE_SIZE,
+            sctp_max_buffered_amount: crate::vendor::str0m::sctp::DEFAULT_MAX_BUFFERED_AMOUNT,
+            sctp_max_message_size: crate::vendor::str0m::sctp::LOCAL_MAX_MESSAGE_SIZE,
             rtp_mode: false,
             enable_raw_packets: false,
             dtls_version: DtlsVersion::Dtls12,
@@ -922,7 +922,7 @@ mod tests {
     fn sctp_max_message_size_round_trips() {
         assert_eq!(
             RtcConfig::default().sctp_max_message_size(),
-            crate::sctp::LOCAL_MAX_MESSAGE_SIZE
+            crate::vendor::str0m::sctp::LOCAL_MAX_MESSAGE_SIZE
         );
         for bytes in [0, 32 * 1024, 512 * 1024, u32::MAX] {
             let config = RtcConfig::new().set_sctp_max_message_size(bytes);
@@ -938,7 +938,7 @@ mod tests {
             cfg.codec_config()
                 .params()
                 .iter()
-                .any(|p| p.spec().codec == crate::format::Codec::CN)
+                .any(|p| p.spec().codec == crate::vendor::str0m::format::Codec::CN)
         );
     }
 

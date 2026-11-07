@@ -1,58 +1,58 @@
-use crate::association::state::{AckMode, AckState, AssociationState};
-use crate::association::stats::AssociationStats;
-use crate::chunk::Chunk;
-use crate::chunk::ErrorCauseUnrecognizedChunkType;
-use crate::chunk::USER_INITIATED_ABORT;
-use crate::chunk::chunk_abort::ChunkAbort;
-use crate::chunk::chunk_cookie_ack::ChunkCookieAck;
-use crate::chunk::chunk_cookie_echo::ChunkCookieEcho;
-use crate::chunk::chunk_error::ChunkError;
-use crate::chunk::chunk_forward_tsn::{ChunkForwardTsn, ChunkForwardTsnStream};
-use crate::chunk::chunk_heartbeat::ChunkHeartbeat;
-use crate::chunk::chunk_heartbeat_ack::ChunkHeartbeatAck;
-use crate::chunk::chunk_i_forward_tsn::ChunkIForwardTsn;
-use crate::chunk::chunk_init::{ChunkInit, ChunkInitAck};
-use crate::chunk::chunk_payload_data::{ChunkPayloadData, PayloadProtocolIdentifier};
-use crate::chunk::chunk_reconfig::ChunkReconfig;
-use crate::chunk::chunk_selective_ack::ChunkSelectiveAck;
-use crate::chunk::chunk_shutdown::ChunkShutdown;
-use crate::chunk::chunk_shutdown_ack::ChunkShutdownAck;
-use crate::chunk::chunk_shutdown_complete::ChunkShutdownComplete;
-use crate::chunk::chunk_type::CT_FORWARD_TSN;
-use crate::config::COMMON_HEADER_SIZE;
-use crate::config::DATA_CHUNK_HEADER_SIZE;
-use crate::config::{ServerConfig, TransportConfig};
-use crate::error::{Error, Result};
-use crate::packet::{CommonHeader, Packet};
-use crate::param::Param;
-use crate::param::param_heartbeat_info::ParamHeartbeatInfo;
-use crate::param::param_outgoing_reset_request::ParamOutgoingResetRequest;
-use crate::param::param_reconfig_response::{ParamReconfigResponse, ReconfigResult};
-use crate::param::param_state_cookie::ParamStateCookie;
-use crate::param::param_supported_extensions::ParamSupportedExtensions;
-use crate::queue::outbound_queue::OutboundQueue;
-use crate::queue::payload_queue::PayloadQueue;
-use crate::queue::reassembly_queue::ReassemblyQueue;
-use crate::shared::{AssociationEventInner, AssociationId, EndpointEvent, EndpointEventInner};
-use crate::util::{sna16lt, sna32gt, sna32gte, sna32lt, sna32lte};
-use crate::{AssociationEvent, Payload, Side, Transmit};
+use crate::vendor::sctp_proto::association::state::{AckMode, AckState, AssociationState};
+use crate::vendor::sctp_proto::association::stats::AssociationStats;
+use crate::vendor::sctp_proto::chunk::Chunk;
+use crate::vendor::sctp_proto::chunk::ErrorCauseUnrecognizedChunkType;
+use crate::vendor::sctp_proto::chunk::USER_INITIATED_ABORT;
+use crate::vendor::sctp_proto::chunk::chunk_abort::ChunkAbort;
+use crate::vendor::sctp_proto::chunk::chunk_cookie_ack::ChunkCookieAck;
+use crate::vendor::sctp_proto::chunk::chunk_cookie_echo::ChunkCookieEcho;
+use crate::vendor::sctp_proto::chunk::chunk_error::ChunkError;
+use crate::vendor::sctp_proto::chunk::chunk_forward_tsn::{ChunkForwardTsn, ChunkForwardTsnStream};
+use crate::vendor::sctp_proto::chunk::chunk_heartbeat::ChunkHeartbeat;
+use crate::vendor::sctp_proto::chunk::chunk_heartbeat_ack::ChunkHeartbeatAck;
+use crate::vendor::sctp_proto::chunk::chunk_i_forward_tsn::ChunkIForwardTsn;
+use crate::vendor::sctp_proto::chunk::chunk_init::{ChunkInit, ChunkInitAck};
+use crate::vendor::sctp_proto::chunk::chunk_payload_data::{ChunkPayloadData, PayloadProtocolIdentifier};
+use crate::vendor::sctp_proto::chunk::chunk_reconfig::ChunkReconfig;
+use crate::vendor::sctp_proto::chunk::chunk_selective_ack::ChunkSelectiveAck;
+use crate::vendor::sctp_proto::chunk::chunk_shutdown::ChunkShutdown;
+use crate::vendor::sctp_proto::chunk::chunk_shutdown_ack::ChunkShutdownAck;
+use crate::vendor::sctp_proto::chunk::chunk_shutdown_complete::ChunkShutdownComplete;
+use crate::vendor::sctp_proto::chunk::chunk_type::CT_FORWARD_TSN;
+use crate::vendor::sctp_proto::config::COMMON_HEADER_SIZE;
+use crate::vendor::sctp_proto::config::DATA_CHUNK_HEADER_SIZE;
+use crate::vendor::sctp_proto::config::{ServerConfig, TransportConfig};
+use crate::vendor::sctp_proto::error::{Error, Result};
+use crate::vendor::sctp_proto::packet::{CommonHeader, Packet};
+use crate::vendor::sctp_proto::param::Param;
+use crate::vendor::sctp_proto::param::param_heartbeat_info::ParamHeartbeatInfo;
+use crate::vendor::sctp_proto::param::param_outgoing_reset_request::ParamOutgoingResetRequest;
+use crate::vendor::sctp_proto::param::param_reconfig_response::{ParamReconfigResponse, ReconfigResult};
+use crate::vendor::sctp_proto::param::param_state_cookie::ParamStateCookie;
+use crate::vendor::sctp_proto::param::param_supported_extensions::ParamSupportedExtensions;
+use crate::vendor::sctp_proto::queue::outbound_queue::OutboundQueue;
+use crate::vendor::sctp_proto::queue::payload_queue::PayloadQueue;
+use crate::vendor::sctp_proto::queue::reassembly_queue::ReassemblyQueue;
+use crate::vendor::sctp_proto::shared::{AssociationEventInner, AssociationId, EndpointEvent, EndpointEventInner};
+use crate::vendor::sctp_proto::util::{sna16lt, sna32gt, sna32gte, sna32lt, sna32lte};
+use crate::vendor::sctp_proto::{AssociationEvent, Payload, Side, Transmit};
 use stream::DataChannelStats;
 use stream::{ReliabilityType, Stream, StreamEvent, StreamId, StreamResetError, StreamState};
 use timer::{ACK_INTERVAL, RtoManager, Timer, TimerTable};
 
-use crate::association::stream::RecvSendState;
-use alloc::boxed::Box;
-use alloc::collections::VecDeque;
-use alloc::string::String;
-use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
+use crate::vendor::sctp_proto::association::stream::RecvSendState;
+use std::boxed::Box;
+use std::collections::VecDeque;
+use std::string::String;
+use std::sync::Arc;
+use std::vec;
+use std::vec::Vec;
 use bytes::Bytes;
 use core::net::{IpAddr, SocketAddr};
 use core::num::NonZeroU32;
 use core::str::FromStr;
 use core::time::Duration;
-use log::{debug, error, trace, warn};
+use tracing::{debug, error, trace, warn};
 use rand::random;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
@@ -546,8 +546,8 @@ impl Association {
     /// the ESTABLISHED state.
     ///
     /// **Note:** When using SNAP, **both** peers must call
-    /// [`Endpoint::connect`](crate::Endpoint::connect). There is no
-    /// server-side SNAP via [`Endpoint::handle`](crate::Endpoint::handle).
+    /// [`Endpoint::connect`](crate::vendor::sctp_proto::Endpoint::connect). There is no
+    /// server-side SNAP via [`Endpoint::handle`](crate::vendor::sctp_proto::Endpoint::handle).
     ///
     /// See [draft-hancke-tsvwg-snap-01](https://datatracker.ietf.org/doc/draft-hancke-tsvwg-snap/).
     ///
@@ -857,8 +857,8 @@ impl Association {
     fn abort_receive_capacity(&mut self) {
         let _ = self.close_with_reason(AssociationError::ReceiveBufferExhausted);
         let abort = ChunkAbort {
-            error_causes: vec![crate::chunk::ErrorCause {
-                code: crate::chunk::OUT_OF_RESOURCE,
+            error_causes: vec![crate::vendor::sctp_proto::chunk::ErrorCause {
+                code: crate::vendor::sctp_proto::chunk::OUT_OF_RESOURCE,
                 raw: Bytes::new(),
             }],
         };
@@ -3007,7 +3007,7 @@ impl Association {
         // For the first SACK we take care of this by setting the ackpoint to cumAck - 1
         let first_outstanding_tsn = self.cumulative_tsn_ack_point.wrapping_add(1);
         let mut i = first_outstanding_tsn;
-        //log::debug!("[{}] i={} d={}", self.name, i, d.cumulative_tsn_ack);
+        //tracing::debug!("[{}] i={} d={}", self.name, i, d.cumulative_tsn_ack);
         while sna32lte(i, d.cumulative_tsn_ack) {
             if let Some(c) = self.outbound_queue.pop(i) {
                 newly_acked_data |= !c.acked && c.nsent > 0;
@@ -3839,7 +3839,7 @@ impl Association {
                 self.will_send_forward_tsn = true;
             }
         }
-        /*log::debug!(
+        /*tracing::debug!(
             "[{}] gatherOutboundForwardTSNPackets {}",
             self.name,
             self.will_send_forward_tsn

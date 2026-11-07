@@ -1,15 +1,16 @@
 //! Public error type returned by the high-level DTLS API.
 
+use tracing::debug;
 use std::fmt;
 
-use crate::dtls12::message::Dtls12CipherSuite;
-use crate::types::CompressionMethod;
-use crate::types::Dtls13CipherSuite;
-use crate::types::HashAlgorithm;
-use crate::types::NamedGroup;
-use crate::types::ProtocolVersion;
-use crate::types::SignatureAlgorithm;
-use crate::types::SignatureScheme;
+use crate::vendor::dimpl::dtls12::message::Dtls12CipherSuite;
+use crate::vendor::dimpl::types::CompressionMethod;
+use crate::vendor::dimpl::types::Dtls13CipherSuite;
+use crate::vendor::dimpl::types::HashAlgorithm;
+use crate::vendor::dimpl::types::NamedGroup;
+use crate::vendor::dimpl::types::ProtocolVersion;
+use crate::vendor::dimpl::types::SignatureAlgorithm;
+use crate::vendor::dimpl::types::SignatureScheme;
 
 pub(crate) fn bounded_error_len(len: usize) -> u16 {
     len.min(u16::MAX as usize) as u16

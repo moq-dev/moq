@@ -1,8 +1,8 @@
 use std::time::Duration;
 
-use crate::Bitrate;
-use crate::RtcConfig;
-use crate::rtp::{Extension, ExtensionMap};
+use crate::vendor::str0m::Bitrate;
+use crate::vendor::str0m::RtcConfig;
+use crate::vendor::str0m::rtp::{Extension, ExtensionMap};
 
 use super::Rng;
 

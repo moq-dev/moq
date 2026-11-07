@@ -3,8 +3,8 @@
 use aws_lc_rs::hmac;
 
 use super::super::HmacProvider;
-use crate::CryptoError;
-use crate::types::HashAlgorithm;
+use crate::vendor::dimpl::CryptoError;
+use crate::vendor::dimpl::types::HashAlgorithm;
 
 /// Get HMAC algorithm from hash algorithm.
 fn hmac_algorithm(hash: HashAlgorithm) -> Result<hmac::Algorithm, CryptoError> {

@@ -1,13 +1,13 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use str0m::format::Codec;
-use str0m::media::MediaKind;
-use str0m::net::Receive;
-use str0m::rtp::{RtpWrite, Ssrc};
-use str0m::{Candidate, Event, Input, Output, Rtc, RtcError};
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::media::MediaKind;
+use crate::vendor::str0m::net::Receive;
+use crate::vendor::str0m::rtp::{RtpWrite, Ssrc};
+use crate::vendor::str0m::{Candidate, Event, Input, Output, Rtc, RtcError};
 
-mod common;
+use super::common;
 use common::{Peer, PendingPacket, TestRtc, init_crypto_default, init_log, progress};
 
 fn connect_direct() -> Result<(TestRtc, TestRtc), RtcError> {

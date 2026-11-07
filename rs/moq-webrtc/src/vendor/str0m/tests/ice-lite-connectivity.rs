@@ -1,11 +1,11 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use netem::NetemConfig;
-use str0m::{Event, IceConnectionState, RtcConfig, RtcError};
+use crate::vendor::netem::NetemConfig;
+use crate::vendor::str0m::{Event, IceConnectionState, RtcConfig, RtcError};
 use tracing::info_span;
 
-mod common;
+use super::common;
 use common::{Peer, TestRtc, init_crypto_default, init_log, progress};
 
 #[test]

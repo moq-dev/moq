@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::{Config, SeededRng, TimeoutError};
+use crate::vendor::dimpl::{Config, SeededRng, TimeoutError};
 
 const JITTER_RANGE: f32 = 0.5;
 const IDLE_INTERVAL: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60);

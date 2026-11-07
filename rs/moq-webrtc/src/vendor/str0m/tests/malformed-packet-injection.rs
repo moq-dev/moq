@@ -8,13 +8,13 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::panic::AssertUnwindSafe;
 use std::time::Instant;
 
-use str0m::media::MediaKind;
-use str0m::net::{Protocol, Receive};
-use str0m::rtp::Ssrc;
-use str0m::rtp::rtcp::{Rtcp, Twcc};
-use str0m::{Input, RtcError};
+use crate::vendor::str0m::media::MediaKind;
+use crate::vendor::str0m::net::{Protocol, Receive};
+use crate::vendor::str0m::rtp::Ssrc;
+use crate::vendor::str0m::rtp::rtcp::{Rtcp, Twcc};
+use crate::vendor::str0m::{Input, RtcError};
 
-mod common;
+use super::common;
 use common::{TestRtc, connect_l_r, init_crypto_default, init_log};
 
 const L_ADDR: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 1000);

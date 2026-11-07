@@ -4,12 +4,12 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 use std::time::Instant;
 
-use str0m::format::Codec;
-use str0m::media::{Direction, MediaKind};
-use str0m::rtp::RtpWrite;
-use str0m::{Event, Rtc, RtcError};
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::media::{Direction, MediaKind};
+use crate::vendor::str0m::rtp::RtpWrite;
+use crate::vendor::str0m::{Event, Rtc, RtcError};
 
-mod common;
+use super::common;
 use common::{Peer, TestRtc, init_crypto_default, init_log, negotiate, progress};
 
 /// Test that StreamPaused event is emitted after no packets for ~1.5 seconds.
@@ -293,8 +293,8 @@ fn sparse_audio_resumes_after_packet_loss() -> Result<(), RtcError> {
 fn send_vp8(
     l: &mut TestRtc,
     r: &mut TestRtc,
-    mid: str0m::media::Mid,
-    pt: str0m::media::Pt,
+    mid: crate::vendor::str0m::media::Mid,
+    pt: crate::vendor::str0m::media::Pt,
     seq: u64,
     timestamp: u32,
 ) -> Result<(), RtcError> {

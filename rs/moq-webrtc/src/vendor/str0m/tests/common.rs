@@ -6,19 +6,19 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Once};
 use std::time::{Duration, Instant};
 
-use netem::{Input as NetemInput, Netem, NetemConfig, Output as NetemOutput};
+use crate::vendor::netem::{Input as NetemInput, Netem, NetemConfig, Output as NetemOutput};
 
 use pcap_file::pcap::PcapReader;
-use str0m::Candidate;
-use str0m::change::SdpApi;
-use str0m::crypto::CryptoProvider;
-use str0m::format::Codec;
-use str0m::format::PayloadParams;
-use str0m::net::Protocol;
-use str0m::net::Receive;
-use str0m::rtp::ExtensionMap;
-use str0m::rtp::RtpHeader;
-use str0m::{Event, Input, Output, Rtc, RtcConfig, RtcError};
+use crate::vendor::str0m::Candidate;
+use crate::vendor::str0m::change::SdpApi;
+use crate::vendor::str0m::crypto::CryptoProvider;
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::format::PayloadParams;
+use crate::vendor::str0m::net::Protocol;
+use crate::vendor::str0m::net::Receive;
+use crate::vendor::str0m::rtp::ExtensionMap;
+use crate::vendor::str0m::rtp::RtpHeader;
+use crate::vendor::str0m::{Event, Input, Output, Rtc, RtcConfig, RtcError};
 use tracing::Span;
 use tracing::info_span;
 
@@ -192,13 +192,6 @@ impl TestRtc {
             .unwrap()
     }
 
-    pub fn params_h266(&self) -> PayloadParams {
-        self.rtc
-            .codec_config()
-            .find(|p| p.spec().codec == Codec::H266)
-            .cloned()
-            .unwrap()
-    }
 }
 
 /// Progress time forward by processing the next event.
@@ -443,46 +436,46 @@ pub fn init_log() {
 }
 
 pub fn init_crypto_default() {
-    str0m::crypto::from_feature_flags().install_process_default();
+    crate::vendor::str0m::crypto::from_feature_flags().install_process_default();
 }
 
 /// Create a crypto provider from a string name.
 /// Supported names: "aws-lc-rs", "rust-crypto", "openssl", "wincrypto", "apple-crypto"
 fn get_crypto_provider_by_name(name: &str) -> CryptoProvider {
     match name {
-        #[cfg(feature = "aws-lc-rs")]
-        "aws-lc-rs" | "aws" => str0m_aws_lc_rs::default_provider(),
+        #[cfg(all())]
+        "aws-lc-rs" | "aws" => crate::vendor::str0m_aws_lc_rs::default_provider(),
 
-        #[cfg(feature = "rust-crypto")]
+        #[cfg(any())]
         "rust-crypto" => str0m_rust_crypto::default_provider(),
 
         // If both openssl and openssl-dimpl are declared, only openssl-dimpl is available.
-        #[cfg(all(feature = "openssl", not(feature = "openssl-dimpl")))]
+        #[cfg(all(any(), not(any())))]
         "openssl" => str0m_openssl::default_provider(),
 
-        #[cfg(feature = "openssl-dimpl")]
+        #[cfg(any())]
         "openssl-dimpl" => str0m_openssl::default_provider(),
 
-        #[cfg(all(feature = "wincrypto", target_os = "windows"))]
+        #[cfg(all(any(), target_os = "windows"))]
         "wincrypto" => str0m_wincrypto::default_provider(),
 
-        #[cfg(all(feature = "apple-crypto", target_vendor = "apple"))]
+        #[cfg(all(any(), target_vendor = "apple"))]
         "apple-crypto" => str0m_apple_crypto::default_provider(),
 
         _ => {
             let mut available: Vec<&'static str> = Vec::new();
-            #[cfg(feature = "aws-lc-rs")]
+            #[cfg(all())]
             available.push("aws-lc-rs");
-            #[cfg(feature = "rust-crypto")]
+            #[cfg(any())]
             available.push("rust-crypto");
             // If both openssl and openssl-dimpl are declared, only openssl-dimpl is available.
-            #[cfg(all(feature = "openssl", not(feature = "openssl-dimpl")))]
+            #[cfg(all(any(), not(any())))]
             available.push("openssl");
-            #[cfg(feature = "openssl-dimpl")]
+            #[cfg(any())]
             available.push("openssl-dimpl");
-            #[cfg(all(feature = "wincrypto", target_os = "windows"))]
+            #[cfg(all(any(), target_os = "windows"))]
             available.push("wincrypto");
-            #[cfg(all(feature = "apple-crypto", target_vendor = "apple"))]
+            #[cfg(all(any(), target_vendor = "apple"))]
             available.push("apple-crypto");
 
             panic!(
@@ -579,10 +572,6 @@ pub fn h265_data() -> PcapData {
     load_pcap_data(include_bytes!("data/h265.pcap"))
 }
 
-pub fn h266_data() -> PcapData {
-    load_pcap_data(include_bytes!("data/h266.pcap"))
-}
-
 // ---------------------------------------------------------------------------
 // SNAP (SCTP Negotiation Acceleration Protocol) test helpers
 // ---------------------------------------------------------------------------
@@ -637,9 +626,9 @@ pub fn remove_sctp_init(sdp: &str) -> String {
 /// Generate SNAP init data for out-of-band SCTP negotiation.
 ///
 /// Returns `Some((local_init_bytes, SctpInitData))` when `use_snap` is true, `None` otherwise.
-pub fn snap_init_data(use_snap: bool) -> Option<(Vec<u8>, str0m::channel::SctpInitData)> {
+pub fn snap_init_data(use_snap: bool) -> Option<(Vec<u8>, crate::vendor::str0m::channel::SctpInitData)> {
     if use_snap {
-        let mut data = str0m::channel::SctpInitData::new();
+        let mut data = crate::vendor::str0m::channel::SctpInitData::new();
         let local_init = data
             .local_init_chunk()
             .expect("generate_snap_token should not fail");

@@ -1,16 +1,17 @@
+use tracing::trace;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use super::Pacer;
 use super::PaddingRequest;
 use super::QueueState;
-use crate::Reason;
-use crate::bwe_::ProbeClusterConfig;
-use crate::bwe_::ProbeClusterState;
-use crate::bwe_::{log_pacer_media_debt, log_pacer_padding_debt};
-use crate::pacer::PacerReason;
-use crate::rtp_::{Bitrate, DataSize, MidRid, TwccClusterId};
-use crate::util::Soonest;
+use crate::vendor::str0m::Reason;
+use crate::vendor::str0m::bwe_::ProbeClusterConfig;
+use crate::vendor::str0m::bwe_::ProbeClusterState;
+use crate::vendor::str0m::bwe_::{log_pacer_media_debt, log_pacer_padding_debt};
+use crate::vendor::str0m::pacer::PacerReason;
+use crate::vendor::str0m::rtp_::{Bitrate, DataSize, MidRid, TwccClusterId};
+use crate::vendor::str0m::util::Soonest;
 
 const MAX_BITRATE: Bitrate = Bitrate::gbps(10);
 const MAX_DEBT_IN_TIME: Duration = Duration::from_millis(500);
@@ -484,13 +485,13 @@ impl LeakyBucketPacer {
 mod test {
     use super::super::{QueuePriority, QueueSnapshot};
     use super::*;
-    use crate::rtp_::{DataSize, Mid, RtpHeader};
+    use crate::vendor::str0m::rtp_::{DataSize, Mid, RtpHeader};
     use queue::{PacketKind, Queue, QueuedPacket};
     use std::time::{Duration, Instant};
 
     #[test]
     fn probe_deadline_without_media_or_regular_padding() {
-        use crate::bwe_::ProbeKind;
+        use crate::vendor::str0m::bwe_::ProbeKind;
 
         let now = Instant::now();
         let mut pacer = LeakyBucketPacer::new(Bitrate::kbps(300));
@@ -1253,7 +1254,7 @@ mod test {
         use std::collections::VecDeque;
         use std::time::{Duration, Instant};
 
-        use crate::rtp_::{DataSize, RtpHeader};
+        use crate::vendor::str0m::rtp_::{DataSize, RtpHeader};
 
         use super::*;
 

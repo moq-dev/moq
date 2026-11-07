@@ -4,8 +4,8 @@ use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Sha256, Sha384};
 
 use super::super::HmacProvider;
-use crate::types::HashAlgorithm;
-use crate::{CryptoError, CryptoOperation};
+use crate::vendor::dimpl::types::HashAlgorithm;
+use crate::vendor::dimpl::{CryptoError, CryptoOperation};
 
 /// HMAC provider implementation.
 #[derive(Debug)]

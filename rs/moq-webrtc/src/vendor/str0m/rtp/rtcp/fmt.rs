@@ -1,6 +1,7 @@
 /// Number of _something_ in the RTCP packet.
 ///
 /// PacketType determines how to interpret the count field.
+use tracing::trace;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeedbackMessageType {
     /// When packet type SenderReport or ReceiverReport.

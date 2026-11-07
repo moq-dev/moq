@@ -150,8 +150,8 @@ sdp_ser!(SdpAnswer, "Answer", "answer");
 
 #[cfg(test)]
 mod test {
-    use crate::VERSION;
-    use crate::rtp_::SessionId;
+    use crate::vendor::str0m::VERSION;
+    use crate::vendor::str0m::rtp_::SessionId;
 
     use super::*;
 

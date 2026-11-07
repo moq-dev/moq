@@ -1,11 +1,11 @@
 use std::time::Duration;
 
-use str0m::format::Codec;
-use str0m::media::{MediaKind, Pt};
-use str0m::rtp::{ExtensionValues, RtpWrite, Ssrc, Vp8Descriptor};
-use str0m::{Event, RtcError};
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::media::{MediaKind, Pt};
+use crate::vendor::str0m::rtp::{ExtensionValues, RtpWrite, Ssrc, Vp8Descriptor};
+use crate::vendor::str0m::{Event, RtcError};
 
-mod common;
+use super::common;
 use common::{connect_l_r, init_crypto_default, init_log, progress};
 
 const VP8_PAYLOAD: [u8; 6] = [0x90, 0xf0, 0x01, 0x02, 0xa3, 0x00];

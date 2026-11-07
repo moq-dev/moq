@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fmt;
 use std::io;
 
-pub use is::StunError;
+pub use crate::vendor::is::StunError;
 
 /// Errors from parsing network data.
 #[derive(Debug)]

@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
-use crate::rtp_::MidRid;
-use crate::util::not_happening;
+use crate::vendor::str0m::rtp_::MidRid;
+use crate::vendor::str0m::util::not_happening;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueSnapshot {

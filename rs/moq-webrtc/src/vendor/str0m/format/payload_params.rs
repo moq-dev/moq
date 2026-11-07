@@ -1,11 +1,12 @@
+use tracing::{debug, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::ops::RangeInclusive;
 
-use crate::packet::H264ProfileLevel;
-use crate::packet::H265ProfileTierLevel;
-use crate::packet::H266ProfileTierLevel;
-use crate::rtp_::Pt;
+use crate::vendor::str0m::packet::H264ProfileLevel;
+use crate::vendor::str0m::packet::H265ProfileTierLevel;
+use crate::vendor::str0m::packet::H266ProfileTierLevel;
+use crate::vendor::str0m::rtp_::Pt;
 
 use super::codec::{Codec, CodecSpec};
 use super::format_params::FormatParams;
@@ -185,7 +186,7 @@ impl PayloadParams {
     pub(crate) fn new_probe(pt: Pt) -> Self {
         use super::codec::Codec;
         use super::format_params::FormatParams;
-        use crate::rtp_::Frequency;
+        use crate::vendor::str0m::rtp_::Frequency;
 
         PayloadParams {
             pt,
@@ -878,10 +879,10 @@ impl PayloadParams {
 
 #[cfg(test)]
 mod test {
-    use crate::rtp_::Frequency;
+    use crate::vendor::str0m::rtp_::Frequency;
 
     use super::*;
-    use crate::format::{CodecSpec, FormatParams};
+    use crate::vendor::str0m::format::{CodecSpec, FormatParams};
 
     #[test]
     fn payload_params_red_defaults_none() {
@@ -1118,7 +1119,7 @@ mod test {
 
     mod h265 {
         use super::*;
-        use crate::packet::Packetizer;
+        use crate::vendor::str0m::packet::Packetizer;
 
         fn h265_codec_spec(profile_id: u8, tier_flag: u8, level_id: u8) -> CodecSpec {
             CodecSpec {
@@ -1418,7 +1419,7 @@ mod test {
         /// and that packetizer/depacketizer are correctly initialized with DONL enabled.
         #[test]
         fn test_sprop_max_don_diff_negotiation_enables_donl() {
-            use crate::packet::{CodecDepacketizer, CodecPacketizer};
+            use crate::vendor::str0m::packet::{CodecDepacketizer, CodecPacketizer};
 
             // Local config: no sprop-max-don-diff (default)
             let local_spec = h265_codec_spec(1, 0, 93);
@@ -1467,7 +1468,7 @@ mod test {
 
             let mut pack = CodecPacketizer::new(
                 local_params.spec.codec,
-                crate::format::Vp9PacketizerMode::default(),
+                crate::vendor::str0m::format::Vp9PacketizerMode::default(),
             );
             if let CodecPacketizer::H265(ref mut h265) = pack {
                 h265.with_donl(donl_enabled);
@@ -1490,7 +1491,7 @@ mod test {
             }
 
             // Depacketize the packet — should correctly strip DONL
-            use crate::packet::{CodecExtra, Depacketizer};
+            use crate::vendor::str0m::packet::{CodecExtra, Depacketizer};
             let mut out = Vec::new();
             let mut extra = CodecExtra::None;
             if let CodecDepacketizer::H265(ref mut h265) = depack {
@@ -1538,9 +1539,9 @@ mod test {
 
             // Packetize without DONL — packet should be same size as NAL
             let nalu = vec![0x02, 0x01, 0xAA, 0xBB];
-            let mut pack = crate::packet::CodecPacketizer::new(
+            let mut pack = crate::vendor::str0m::packet::CodecPacketizer::new(
                 local_params.spec.codec,
-                crate::format::Vp9PacketizerMode::default(),
+                crate::vendor::str0m::format::Vp9PacketizerMode::default(),
             );
             // Don't call with_donl(true) since donl_enabled is false
             let packets = pack.packetize(1200, &nalu).unwrap();
@@ -1587,8 +1588,8 @@ mod test {
 
     mod h266 {
         use super::*;
-        use crate::packet::H266ProfileTierLevel;
-        use crate::packet::Packetizer;
+        use crate::vendor::str0m::packet::H266ProfileTierLevel;
+        use crate::vendor::str0m::packet::Packetizer;
 
         fn h266_codec_spec(profile_id: u8, tier_flag: u8, level_id: u8) -> CodecSpec {
             CodecSpec {
@@ -1888,7 +1889,7 @@ mod test {
         /// and that packetizer/depacketizer are correctly initialized with DONL enabled.
         #[test]
         fn test_sprop_max_don_diff_negotiation_enables_donl() {
-            use crate::packet::{CodecDepacketizer, CodecPacketizer};
+            use crate::vendor::str0m::packet::{CodecDepacketizer, CodecPacketizer};
 
             // Local config: no sprop-max-don-diff (default)
             let local_spec = h266_codec_spec(1, 0, 51);
@@ -1937,7 +1938,7 @@ mod test {
 
             let mut pack = CodecPacketizer::new(
                 local_params.spec.codec,
-                crate::format::Vp9PacketizerMode::default(),
+                crate::vendor::str0m::format::Vp9PacketizerMode::default(),
             );
             if let CodecPacketizer::H266(ref mut h266) = pack {
                 h266.with_donl(donl_enabled);
@@ -1960,7 +1961,7 @@ mod test {
             }
 
             // Depacketize the packet — should correctly strip DONL
-            use crate::packet::{CodecExtra, Depacketizer};
+            use crate::vendor::str0m::packet::{CodecExtra, Depacketizer};
             let mut out = Vec::new();
             let mut extra = CodecExtra::None;
             if let CodecDepacketizer::H266(ref mut h266) = depack {
@@ -2041,9 +2042,9 @@ mod test {
 
             // Packetize without DONL — packet should be same size as NAL
             let nalu = vec![0x00, 0x09, 0xAA, 0xBB];
-            let mut pack = crate::packet::CodecPacketizer::new(
+            let mut pack = crate::vendor::str0m::packet::CodecPacketizer::new(
                 local_params.spec.codec,
-                crate::format::Vp9PacketizerMode::default(),
+                crate::vendor::str0m::format::Vp9PacketizerMode::default(),
             );
             // Don't enable DONL since donl_enabled is false
             let packets = pack.packetize(1200, &nalu).unwrap();

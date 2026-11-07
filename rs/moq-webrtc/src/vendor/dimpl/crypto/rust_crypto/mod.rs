@@ -18,13 +18,13 @@
 //! The rust-crypto provider is used automatically as a fallback when aws-lc-rs is not available
 //! or when explicitly specified:
 //!
-//! ```
-//! # #[cfg(feature = "rcgen")]
+//! ```ignore
+//! # #[cfg(all())]
 //! # fn main() {
 //! use std::sync::Arc;
 //! use std::time::Instant;
-//! use dimpl::{Config, Dtls, certificate};
-//! use dimpl::crypto::rust_crypto;
+//! use crate::vendor::dimpl::{Config, Dtls, certificate};
+//! use crate::vendor::dimpl::crypto::rust_crypto;
 //!
 //! let cert = certificate::generate_self_signed_certificate().unwrap();
 //! let config = Arc::new(
@@ -35,7 +35,7 @@
 //! );
 //! let dtls = Dtls::new_12(config, cert, Instant::now());
 //! # }
-//! # #[cfg(not(feature = "rcgen"))]
+//! # #[cfg(not(all()))]
 //! # fn main() {}
 //! ```
 

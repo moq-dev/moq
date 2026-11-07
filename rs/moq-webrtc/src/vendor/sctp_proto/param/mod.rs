@@ -15,21 +15,21 @@ pub(crate) mod param_supported_extensions;
 pub(crate) mod param_type;
 pub(crate) mod param_uknown;
 
-use crate::error::{Error, Result};
-use crate::param::param_chunk_list::ParamChunkList;
-use crate::param::param_forward_tsn_supported::ParamForwardTsnSupported;
-use crate::param::param_heartbeat_info::ParamHeartbeatInfo;
-use crate::param::param_outgoing_reset_request::ParamOutgoingResetRequest;
-use crate::param::param_random::ParamRandom;
-use crate::param::param_reconfig_response::ParamReconfigResponse;
-use crate::param::param_requested_hmac_algorithm::ParamRequestedHmacAlgorithm;
-use crate::param::param_state_cookie::ParamStateCookie;
-use crate::param::param_supported_address_types::ParamSupportedAddressTypes;
-use crate::param::param_supported_extensions::ParamSupportedExtensions;
+use crate::vendor::sctp_proto::error::{Error, Result};
+use crate::vendor::sctp_proto::param::param_chunk_list::ParamChunkList;
+use crate::vendor::sctp_proto::param::param_forward_tsn_supported::ParamForwardTsnSupported;
+use crate::vendor::sctp_proto::param::param_heartbeat_info::ParamHeartbeatInfo;
+use crate::vendor::sctp_proto::param::param_outgoing_reset_request::ParamOutgoingResetRequest;
+use crate::vendor::sctp_proto::param::param_random::ParamRandom;
+use crate::vendor::sctp_proto::param::param_reconfig_response::ParamReconfigResponse;
+use crate::vendor::sctp_proto::param::param_requested_hmac_algorithm::ParamRequestedHmacAlgorithm;
+use crate::vendor::sctp_proto::param::param_state_cookie::ParamStateCookie;
+use crate::vendor::sctp_proto::param::param_supported_address_types::ParamSupportedAddressTypes;
+use crate::vendor::sctp_proto::param::param_supported_extensions::ParamSupportedExtensions;
 use param_header::*;
 use param_type::*;
 
-use alloc::boxed::Box;
+use std::boxed::Box;
 use bytes::{Buf, Bytes, BytesMut};
 use core::{any::Any, fmt};
 

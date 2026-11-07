@@ -7,9 +7,9 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 
-use crate::buffer::Buf;
-use crate::dtls13::incoming::Incoming;
-use crate::types::ContentType;
+use crate::vendor::dimpl::buffer::Buf;
+use crate::vendor::dimpl::dtls13::incoming::Incoming;
+use crate::vendor::dimpl::types::ContentType;
 
 /// Wrapper around the receive queue that provides safe Debug output.
 ///

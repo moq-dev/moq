@@ -1,6 +1,6 @@
 use super::KeyExchangeAlgorithm;
 use super::{CurveType, NamedGroup};
-use crate::buffer::Buf;
+use crate::vendor::dimpl::buffer::Buf;
 use nom::bytes::complete::take;
 use nom::error::Error;
 use nom::number::complete::be_u8;
@@ -144,7 +144,7 @@ impl ClientPskKeys {
 mod test {
     use super::super::KeyExchangeAlgorithm;
     use super::*;
-    use crate::buffer::Buf;
+    use crate::vendor::dimpl::buffer::Buf;
 
     const ECDH_MESSAGE: &[u8] = &[
         0x04, // Public key length

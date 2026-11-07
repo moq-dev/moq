@@ -20,19 +20,19 @@ use std::time::Instant;
 
 use arrayvec::ArrayVec;
 
-use crate::buffer::Buf;
-use crate::crypto::ActiveKeyExchange;
-use crate::dtls12::message::Cookie;
-use crate::dtls13::message::KeyShareClientHello;
-use crate::dtls13::message::KeyShareEntry;
-use crate::dtls13::message::Random;
-use crate::dtls13::message::SignatureAlgorithmsExtension;
-use crate::dtls13::message::SupportedGroupsExtension;
-use crate::dtls13::message::UseSrtpExtension;
-use crate::dtls13::message::{Extension, ExtensionType};
-use crate::timer::HandshakeTimers;
-use crate::types::NamedGroup;
-use crate::{Config, CryptoError, DtlsCertificate, Error, Output, SeededRng, TimeoutError};
+use crate::vendor::dimpl::buffer::Buf;
+use crate::vendor::dimpl::crypto::ActiveKeyExchange;
+use crate::vendor::dimpl::dtls12::message::Cookie;
+use crate::vendor::dimpl::dtls13::message::KeyShareClientHello;
+use crate::vendor::dimpl::dtls13::message::KeyShareEntry;
+use crate::vendor::dimpl::dtls13::message::Random;
+use crate::vendor::dimpl::dtls13::message::SignatureAlgorithmsExtension;
+use crate::vendor::dimpl::dtls13::message::SupportedGroupsExtension;
+use crate::vendor::dimpl::dtls13::message::UseSrtpExtension;
+use crate::vendor::dimpl::dtls13::message::{Extension, ExtensionType};
+use crate::vendor::dimpl::timer::HandshakeTimers;
+use crate::vendor::dimpl::types::NamedGroup;
+use crate::vendor::dimpl::{Config, CryptoError, DtlsCertificate, Error, Output, SeededRng, TimeoutError};
 // Extension type constants
 const EXT_SUPPORTED_GROUPS: u16 = 0x000A;
 const EXT_EC_POINT_FORMATS: u16 = 0x000B;
@@ -538,8 +538,8 @@ fn server_hello_version_inner(packet: &[u8]) -> Option<DetectedVersion> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PskResolver;
-    use crate::dtls12::message::Dtls12CipherSuite;
+    use crate::vendor::dimpl::PskResolver;
+    use crate::vendor::dimpl::dtls12::message::Dtls12CipherSuite;
 
     fn offered_cipher_suites(hybrid: &HybridClientHello) -> Vec<u16> {
         let body = &hybrid.handshake_fragment[12..];

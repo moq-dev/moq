@@ -7,12 +7,12 @@ use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 use chacha20poly1305::ChaCha20Poly1305 as ChaCha20Poly1305Aead;
 
 use super::super::{Cipher, SupportedDtls12CipherSuite, SupportedDtls13CipherSuite};
-use crate::buffer::{Buf, TmpBuf};
-use crate::crypto::{Aad, Nonce};
-use crate::dtls12::message::Dtls12CipherSuite;
-use crate::error::bounded_error_len;
-use crate::types::{Dtls13CipherSuite, HashAlgorithm};
-use crate::{CryptoError, CryptoOperation};
+use crate::vendor::dimpl::buffer::{Buf, TmpBuf};
+use crate::vendor::dimpl::crypto::{Aad, Nonce};
+use crate::vendor::dimpl::dtls12::message::Dtls12CipherSuite;
+use crate::vendor::dimpl::error::bounded_error_len;
+use crate::vendor::dimpl::types::{Dtls13CipherSuite, HashAlgorithm};
+use crate::vendor::dimpl::{CryptoError, CryptoOperation};
 
 /// AES-GCM cipher implementation using RustCrypto.
 enum AesGcm {
@@ -298,7 +298,7 @@ impl SupportedDtls12CipherSuite for PskAes128Ccm8 {
     }
 
     fn create_cipher(&self, key: &[u8]) -> Result<Box<dyn Cipher>, CryptoError> {
-        Ok(Box::new(crate::crypto::ccm_cipher::AesCcm8Cipher::new(
+        Ok(Box::new(crate::vendor::dimpl::crypto::ccm_cipher::AesCcm8Cipher::new(
             key,
         )?))
     }

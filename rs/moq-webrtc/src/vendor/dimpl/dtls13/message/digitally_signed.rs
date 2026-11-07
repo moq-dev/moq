@@ -1,5 +1,5 @@
-use crate::buffer::Buf;
-use crate::types::SignatureScheme;
+use crate::vendor::dimpl::buffer::Buf;
+use crate::vendor::dimpl::types::SignatureScheme;
 use nom::number::complete::be_u16;
 use nom::{IResult, bytes::complete::take};
 use std::ops::Range;
@@ -46,7 +46,7 @@ impl DigitallySigned {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::buffer::Buf;
+    use crate::vendor::dimpl::buffer::Buf;
 
     const MESSAGE: &[u8] = &[
         0x04, 0x03, // SignatureScheme::ECDSA_SECP256R1_SHA256

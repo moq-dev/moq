@@ -1,6 +1,6 @@
 use std::str::from_utf8;
 
-use sctp_proto::ReliabilityType;
+use crate::vendor::sctp_proto::ReliabilityType;
 
 use super::SctpError as Error;
 

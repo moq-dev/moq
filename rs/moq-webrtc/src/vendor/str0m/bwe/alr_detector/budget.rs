@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use crate::rtp_::{Bitrate, DataSize};
+use crate::vendor::str0m::rtp_::{Bitrate, DataSize};
 
 /// Leaky bucket budget tracker over a fixed time window.
 ///

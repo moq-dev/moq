@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::packet::duration_from_units;
+use crate::vendor::str0m::packet::duration_from_units;
 
 use super::{ExtensionValues, Frequency, MediaTime, Pt, Rid, TelephoneEvent, ToPayload};
 

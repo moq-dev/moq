@@ -3,7 +3,7 @@ use super::extension::ExtensionVec;
 use super::extensions::use_srtp::{SrtpProfileId, UseSrtpExtension};
 use super::{CompressionMethod, Dtls12CipherSuite, Extension, ExtensionType};
 use super::{ProtocolVersion, Random, SessionId};
-use crate::buffer::Buf;
+use crate::vendor::dimpl::buffer::Buf;
 use arrayvec::ArrayVec;
 use nom::Err;
 use nom::error::{Error, ErrorKind};
@@ -205,7 +205,7 @@ impl ServerHello {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::buffer::Buf;
+    use crate::vendor::dimpl::buffer::Buf;
 
     const MESSAGE: &[u8] = &[
         0xFE, 0xFD, // ProtocolVersion::DTLS1_2

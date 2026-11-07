@@ -1,21 +1,22 @@
 #![allow(clippy::single_match)]
 
+use tracing::{trace, warn};
 use combine::{EasyParser, Parser};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::{self};
 use std::ops::Deref;
 
-use crate::crypto::Fingerprint;
-use crate::format::Codec;
-use crate::format::CodecSpec;
-use crate::format::FormatParams;
-use crate::format::PayloadParams;
-use crate::packet::H265ProfileTierLevel;
-use crate::packet::H266ProfileTierLevel;
-use crate::rtp_::{Direction, Extension, Frequency, Mid, Pt, Rid, SessionId, Ssrc};
-use crate::{Candidate, IceCreds, VERSION};
-use str0m_proto::Id;
+use crate::vendor::str0m::crypto::Fingerprint;
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::format::CodecSpec;
+use crate::vendor::str0m::format::FormatParams;
+use crate::vendor::str0m::format::PayloadParams;
+use crate::vendor::str0m::packet::H265ProfileTierLevel;
+use crate::vendor::str0m::packet::H266ProfileTierLevel;
+use crate::vendor::str0m::rtp_::{Direction, Extension, Frequency, Mid, Pt, Rid, SessionId, Ssrc};
+use crate::vendor::str0m::{Candidate, IceCreds, VERSION};
+use crate::vendor::str0m_proto::Id;
 
 use super::SdpError;
 use super::parser::sdp_parser;
@@ -1062,10 +1063,10 @@ pub enum FormatParam {
     Tier(u8),
 
     /// H.265/HEVC profile, tier, and level.
-    H265ProfileTierLevel(crate::packet::H265ProfileTierLevel),
+    H265ProfileTierLevel(crate::vendor::str0m::packet::H265ProfileTierLevel),
 
     /// H.266/VVC profile, tier, and level.
-    H266ProfileTierLevel(crate::packet::H266ProfileTierLevel),
+    H266ProfileTierLevel(crate::vendor::str0m::packet::H266ProfileTierLevel),
 
     /// H.265 sprop-max-don-diff parameter (RFC 7798 §7.1).
     /// When > 0, DONL fields are included in RTP packets to support
@@ -1754,16 +1755,16 @@ impl<'a> std::fmt::Display for FingerprintFmt<'a> {
 
 #[cfg(test)]
 mod test {
-    use crate::VERSION;
-    use crate::packet::H265ProfileTierLevel;
-    use crate::rtp_::{Extension, Frequency};
+    use crate::vendor::str0m::VERSION;
+    use crate::vendor::str0m::packet::H265ProfileTierLevel;
+    use crate::vendor::str0m::rtp_::{Extension, Frequency};
 
     use super::*;
 
     /// The captured Chrome offer in `docs/chrome-sdp.json`, as an SDP string.
     fn chrome_offer() -> String {
         let json: serde_json::Value =
-            serde_json::from_str(include_str!("../../docs/chrome-sdp.json")).unwrap();
+            serde_json::from_str(include_str!("../docs/chrome-sdp.json")).unwrap();
         let lines = json["sdp"].as_array().unwrap();
         let sdp: String = lines
             .iter()

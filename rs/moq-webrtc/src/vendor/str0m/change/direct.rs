@@ -1,18 +1,18 @@
 use std::sync::Arc;
 
-use crate::Candidate;
-use crate::IceCreds;
-use crate::Rtc;
-use crate::RtcError;
-use crate::channel::ChannelId;
-use crate::crypto::Fingerprint;
-use crate::crypto::dtls::ProtocolVersion;
-use crate::media::{Media, MediaKind};
-use crate::poll::RtcMut;
-use crate::rtp_::MidRid;
-use crate::rtp_::{Mid, Rid, Ssrc};
-use crate::sctp::{ChannelConfig, SctpInitData};
-use crate::streams::{DEFAULT_RTX_CACHE_DURATION, DEFAULT_RTX_RATIO_CAP, StreamRx, StreamTx};
+use crate::vendor::str0m::Candidate;
+use crate::vendor::str0m::IceCreds;
+use crate::vendor::str0m::Rtc;
+use crate::vendor::str0m::RtcError;
+use crate::vendor::str0m::channel::ChannelId;
+use crate::vendor::str0m::crypto::Fingerprint;
+use crate::vendor::str0m::crypto::dtls::ProtocolVersion;
+use crate::vendor::str0m::media::{Media, MediaKind};
+use crate::vendor::str0m::poll::RtcMut;
+use crate::vendor::str0m::rtp_::MidRid;
+use crate::vendor::str0m::rtp_::{Mid, Rid, Ssrc};
+use crate::vendor::str0m::sctp::{ChannelConfig, SctpInitData};
+use crate::vendor::str0m::streams::{DEFAULT_RTX_CACHE_DURATION, DEFAULT_RTX_RATIO_CAP, StreamRx, StreamTx};
 
 /// Direct change strategy.
 ///
@@ -38,7 +38,7 @@ use crate::streams::{DEFAULT_RTX_CACHE_DURATION, DEFAULT_RTX_RATIO_CAP, StreamRx
 pub struct DirectApi<'a> {
     // `RtcMut` arms the readiness on mutable deref only, so the `&mut self`
     // methods below re-poll the tree while the `&self` readers do not — with no
-    // per-method call to forget. See [`crate::poll`].
+    // per-method call to forget. See [`crate::vendor::str0m::poll`].
     rtc: RtcMut<'a>,
 }
 
@@ -111,7 +111,7 @@ impl<'a> DirectApi<'a> {
 
     /// Returns the negotiated DTLS protocol version.
     ///
-    /// Call this after receiving [`crate::Event::Connected`]
+    /// Call this after receiving [`crate::vendor::str0m::Event::Connected`]
     /// to learn the negotiated DTLS version. Before the handshake completes,
     /// this may return `None`
     pub fn dtls_protocol_version(&self) -> Option<ProtocolVersion> {
@@ -157,7 +157,7 @@ impl<'a> DirectApi<'a> {
     ///
     /// # Example
     /// ```ignore
-    /// use str0m::channel::SctpInitData;
+    /// use crate::vendor::str0m::channel::SctpInitData;
     ///
     /// let mut init_data = SctpInitData::new();
     /// let local_init = init_data.local_init_chunk().unwrap();

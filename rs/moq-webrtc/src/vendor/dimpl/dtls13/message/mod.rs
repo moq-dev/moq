@@ -43,7 +43,7 @@ pub use server_hello::ServerHello;
 pub use wrapped::{Asn1Cert, DistinguishedName};
 
 // Re-export shared types
-pub use crate::types::{
+pub use crate::vendor::dimpl::types::{
     CompressionMethod, ContentType, Dtls13CipherSuite, NamedGroup, ProtocolVersion, Random,
     Sequence, SignatureScheme,
 };

@@ -3,10 +3,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use dimpl::crypto::Dtls12CipherSuite;
-use dimpl::{Config, Dtls, Error, PskResolver};
+use crate::vendor::dimpl::crypto::Dtls12CipherSuite;
+use crate::vendor::dimpl::{Config, Dtls, Error, PskResolver};
 
-use crate::common::{deliver_packets, drain_outputs};
+use crate::vendor::dimpl::tests::dtls12::common::{deliver_packets, drain_outputs};
 
 /// Simple PSK resolver that returns a fixed key for a known identity.
 struct FixedPsk {
@@ -24,7 +24,7 @@ impl PskResolver for FixedPsk {
     }
 }
 
-fn psk_provider(suite: Dtls12CipherSuite) -> dimpl::crypto::CryptoProvider {
+fn psk_provider(suite: Dtls12CipherSuite) -> crate::vendor::dimpl::crypto::CryptoProvider {
     let mut provider = Config::default().crypto_provider().clone();
     let psk_suite = provider
         .cipher_suites
@@ -75,7 +75,6 @@ fn psk_configs() -> (Arc<Config>, Arc<Config>) {
 
 #[test]
 fn dtls12_psk_self_handshake() {
-    let _ = env_logger::try_init();
 
     let (client_config, server_config) = psk_configs();
     let now = Instant::now();
@@ -118,7 +117,6 @@ fn dtls12_psk_self_handshake() {
 
 #[test]
 fn dtls12_psk_application_data_roundtrip() {
-    let _ = env_logger::try_init();
 
     let (client_config, server_config) = psk_configs();
     let now = Instant::now();
@@ -185,7 +183,6 @@ fn dtls12_psk_application_data_roundtrip() {
 
 #[test]
 fn psk_invalid_identity_fails_at_finished() {
-    let _ = env_logger::try_init();
 
     struct FailingResolver;
     impl PskResolver for FailingResolver {
@@ -201,13 +198,13 @@ fn psk_invalid_identity_fails_at_finished() {
         }
     }
 
-    let server_config = dimpl::Config::builder()
+    let server_config = crate::vendor::dimpl::Config::builder()
         .with_psk_server(None, Arc::new(FailingResolver))
         .build()
         .expect("server config should build");
     let mut server = Dtls::new_12_psk(Arc::new(server_config), Instant::now());
 
-    let client_config = dimpl::Config::builder()
+    let client_config = crate::vendor::dimpl::Config::builder()
         .with_psk_client(b"test_identity".to_vec(), Arc::new(PassingResolver))
         .build()
         .expect("client config should build");
@@ -284,7 +281,6 @@ fn psk_mismatched_keys_fail_at_finished_via_mac() {
     // the defense-in-depth flag check is bypassed — any failure here must
     // come from the Finished MAC mismatch itself. Exercises the primary
     // cryptographic guarantee independently of the flag.
-    let _ = env_logger::try_init();
 
     struct ZeroKey;
     impl PskResolver for ZeroKey {
@@ -299,13 +295,13 @@ fn psk_mismatched_keys_fail_at_finished_via_mac() {
         }
     }
 
-    let server_config = dimpl::Config::builder()
+    let server_config = crate::vendor::dimpl::Config::builder()
         .with_psk_server(None, Arc::new(ZeroKey))
         .build()
         .expect("server config should build");
     let mut server = Dtls::new_12_psk(Arc::new(server_config), Instant::now());
 
-    let client_config = dimpl::Config::builder()
+    let client_config = crate::vendor::dimpl::Config::builder()
         .with_psk_client(b"test_identity".to_vec(), Arc::new(OneKey))
         .build()
         .expect("client config should build");
@@ -377,7 +373,6 @@ fn psk_mismatched_keys_fail_at_finished_via_mac() {
 
 #[test]
 fn psk_valid_identity_succeeds() {
-    let _ = env_logger::try_init();
 
     struct AlwaysPassResolver;
     impl PskResolver for AlwaysPassResolver {
@@ -386,13 +381,13 @@ fn psk_valid_identity_succeeds() {
         }
     }
 
-    let server_config = dimpl::Config::builder()
+    let server_config = crate::vendor::dimpl::Config::builder()
         .with_psk_server(None, Arc::new(AlwaysPassResolver))
         .build()
         .expect("server config should build");
     let mut server = Dtls::new_12_psk(Arc::new(server_config), Instant::now());
 
-    let client_config = dimpl::Config::builder()
+    let client_config = crate::vendor::dimpl::Config::builder()
         .with_psk_client(b"test_identity".to_vec(), Arc::new(AlwaysPassResolver))
         .build()
         .expect("client config should build");

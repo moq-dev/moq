@@ -1,7 +1,7 @@
 use super::{chunk_header::*, chunk_type::*, *};
-use crate::param::param_type::ParamType;
-use crate::param::{param_header::*, *};
-use crate::util::get_padding_size;
+use crate::vendor::sctp_proto::param::param_type::ParamType;
+use crate::vendor::sctp_proto::param::{param_header::*, *};
+use crate::vendor::sctp_proto::util::get_padding_size;
 
 ///chunkHeartbeatAck represents an SCTP Chunk of type HEARTBEAT ACK
 ///

@@ -3,18 +3,18 @@
 //! Uses the netem crate to simulate realistic bursty packet loss and verifies
 //! that RTP retransmissions recover all lost packets.
 
-mod common;
+use super::common;
 
 use std::time::Duration;
 
 use common::{connect_l_r, init_crypto_default, progress, vp8_data};
-use netem::{GilbertElliot, LossModel, NetemConfig};
-use str0m::format::Codec;
-use str0m::media::MediaKind;
-use str0m::rtp::{RtpWrite, Ssrc};
-use str0m::{Event, RtcError};
+use crate::vendor::netem::{GilbertElliot, LossModel, NetemConfig};
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::media::MediaKind;
+use crate::vendor::str0m::rtp::{RtpWrite, Ssrc};
+use crate::vendor::str0m::{Event, RtcError};
 
-use crate::common::init_log;
+use crate::vendor::str0m::tests::common::init_log;
 
 /// Run a media transmission test with the given loss model using real VP8 data.
 ///

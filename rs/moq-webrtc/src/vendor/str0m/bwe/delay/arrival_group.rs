@@ -1,7 +1,7 @@
 use std::mem;
 use std::time::{Duration, Instant};
 
-use crate::rtp_::TwccSeq;
+use crate::vendor::str0m::rtp_::TwccSeq;
 
 use super::super::AckedPacket;
 use super::super::time::{TimeDelta, Timestamp};
@@ -212,7 +212,7 @@ pub struct InterGroupDelayDelta {
 mod test {
     use std::time::{Duration, Instant};
 
-    use crate::rtp_::DataSize;
+    use crate::vendor::str0m::rtp_::DataSize;
 
     use super::{AckedPacket, ArrivalGroup, ArrivalGroupAccumulator, Belongs, TimeDelta};
 

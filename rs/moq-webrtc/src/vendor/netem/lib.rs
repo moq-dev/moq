@@ -15,7 +15,7 @@
 //!
 //! # Example
 //!
-//! ```
+//! ```ignore
 //! use std::time::{Duration, Instant};
 //! use str0m_netem::{Netem, NetemConfig, Input, Output, LossModel, RandomLoss, Probability};
 //!

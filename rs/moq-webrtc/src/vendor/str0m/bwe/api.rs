@@ -1,9 +1,9 @@
 //! Bandwidth estimation.
 
-use crate::poll::RtcMut;
-use crate::{Rtc, rtp_::Mid};
+use crate::vendor::str0m::poll::RtcMut;
+use crate::vendor::str0m::{Rtc, rtp_::Mid};
 
-pub use crate::rtp_::Bitrate;
+pub use crate::vendor::str0m::rtp_::Bitrate;
 
 #[derive(Debug, PartialEq)]
 #[non_exhaustive]
@@ -38,7 +38,7 @@ pub enum BweKind {
 
 /// Access to the Bandwidth Estimate subsystem.
 ///
-// The inner `RtcMut` arms the readiness on mutable deref only; see `crate::poll`.
+// The inner `RtcMut` arms the readiness on mutable deref only; see `crate::vendor::str0m::poll`.
 pub struct Bwe<'a>(pub(crate) RtcMut<'a>);
 
 impl<'a> Bwe<'a> {
@@ -59,7 +59,7 @@ impl<'a> Bwe<'a> {
     /// `desired` is the bitrate you would like to eventually send at. BWE tries to
     /// discover this capacity through probing. It is not a hard ceiling: probes
     /// may exceed it, and the network may not sustain it. Allocate media using the
-    /// estimates from [`Event::EgressBitrateEstimate`][crate::Event::EgressBitrateEstimate].
+    /// estimates from [`Event::EgressBitrateEstimate`][crate::vendor::str0m::Event::EgressBitrateEstimate].
     ///
     /// Increasing the desired bitrate above the current estimate can trigger an allocation
     /// probe, whether or not the application is currently sending below its estimated capacity.
@@ -72,13 +72,13 @@ impl<'a> Bwe<'a> {
     /// minimum when sustained traffic is no longer wanted.
     ///
     /// This only has an effect when BWE is enabled via
-    /// [`RtcConfig::enable_bwe`][crate::RtcConfig::enable_bwe]. Both rates are retained
+    /// [`RtcConfig::enable_bwe`][crate::vendor::str0m::RtcConfig::enable_bwe]. Both rates are retained
     /// across [`reset`][Self::reset].
     ///
     /// # Example
     ///
-    /// ```
-    /// # use str0m::{Rtc, bwe::Bitrate};
+    /// ```ignore
+    /// # use crate::vendor::str0m::{Rtc, bwe::Bitrate};
     /// # let mut rtc = Rtc::builder().enable_bwe(Some(Bitrate::kbps(300))).build(std::time::Instant::now());
     /// // Sustain traffic toward the next layer while probing for the preferred rate.
     /// rtc.bwe().set_bitrate(Bitrate::kbps(800), Bitrate::mbps(3));

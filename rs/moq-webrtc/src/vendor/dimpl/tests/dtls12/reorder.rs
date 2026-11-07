@@ -3,23 +3,17 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dimpl::Dtls;
+use crate::vendor::dimpl::Dtls;
 
-use crate::common::*;
+use crate::vendor::dimpl::tests::dtls12::common::*;
 
 #[test]
 fn dtls12_discards_scrambled_datagram_and_accepts_clean_retransmission() {
-    use dimpl::{Config, DtlsCertificate};
+    use crate::vendor::dimpl::Config;
 
-    use crate::ossl_helper::{DtlsCertOptions, OsslDtlsCert};
+    use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
-    let certificate = || {
-        let cert = OsslDtlsCert::new(DtlsCertOptions::default());
-        DtlsCertificate {
-            certificate: cert.x509.to_der().expect("certificate DER"),
-            private_key: cert.pkey.private_key_to_der().expect("private key DER"),
-        }
-    };
+    let certificate = || generate_self_signed_certificate().expect("certificate");
     let config = Arc::new(
         Config::builder()
             .use_server_cookie(false)
@@ -115,11 +109,10 @@ fn dtls12_discards_scrambled_datagram_and_accepts_clean_retransmission() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_handles_duplicate_packets() {
-    use dimpl::certificate::generate_self_signed_certificate;
+    use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
-    let _ = env_logger::try_init();
 
     let client_cert = generate_self_signed_certificate().expect("gen client cert");
     let server_cert = generate_self_signed_certificate().expect("gen server cert");
@@ -181,11 +174,10 @@ fn dtls12_handles_duplicate_packets() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_handles_out_of_order_packets() {
-    use dimpl::certificate::generate_self_signed_certificate;
+    use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
-    let _ = env_logger::try_init();
 
     let client_cert = generate_self_signed_certificate().expect("gen client cert");
     let server_cert = generate_self_signed_certificate().expect("gen server cert");
@@ -244,15 +236,14 @@ fn dtls12_handles_out_of_order_packets() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_replay_window_rejects_old_app_data() {
     //! After handshake, send 100 app data messages from client to server.
     //! Then replay the very first encrypted packet. The replayed packet
     //! should be silently dropped (not delivered as application data again).
 
-    use dimpl::certificate::generate_self_signed_certificate;
+    use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
-    let _ = env_logger::try_init();
 
     let client_cert = generate_self_signed_certificate().expect("gen client cert");
     let server_cert = generate_self_signed_certificate().expect("gen server cert");
@@ -342,14 +333,13 @@ fn dtls12_replay_window_rejects_old_app_data() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_replay_window_rejects_duplicate_app_data() {
     //! After handshake, send one app data message. Deliver it, then deliver
     //! the exact same encrypted packet again. Only one copy should be received.
 
-    use dimpl::certificate::generate_self_signed_certificate;
+    use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
-    let _ = env_logger::try_init();
 
     let client_cert = generate_self_signed_certificate().expect("gen client cert");
     let server_cert = generate_self_signed_certificate().expect("gen server cert");
@@ -424,14 +414,13 @@ fn dtls12_replay_window_rejects_duplicate_app_data() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_handles_delayed_burst_delivery() {
     //! During handshake, hold all packets for 3 rounds of timeouts, then
     //! deliver them all at once in a burst. Verify handshake still completes.
 
-    use dimpl::certificate::generate_self_signed_certificate;
+    use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
-    let _ = env_logger::try_init();
 
     let client_cert = generate_self_signed_certificate().expect("gen client cert");
     let server_cert = generate_self_signed_certificate().expect("gen server cert");

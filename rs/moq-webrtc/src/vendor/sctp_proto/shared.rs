@@ -1,4 +1,4 @@
-use crate::Transmit;
+use crate::vendor::sctp_proto::Transmit;
 
 /// Events sent from an Endpoint to an Association
 #[derive(Debug)]

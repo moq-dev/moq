@@ -2,9 +2,9 @@
 ///
 /// This contains tests run against the installed crypto provider to verify
 /// hash, cipher and signature implementations against known test vectors.
-use str0m::crypto::CryptoProvider;
+use crate::vendor::str0m::crypto::CryptoProvider;
 
-mod common;
+use super::common;
 use common::init_crypto_default;
 
 fn get_provider() -> &'static CryptoProvider {

@@ -1,5 +1,5 @@
 use super::Asn1Cert;
-use crate::buffer::Buf;
+use crate::vendor::dimpl::buffer::Buf;
 use arrayvec::ArrayVec;
 use nom::Err;
 use nom::IResult;
@@ -107,7 +107,7 @@ impl Certificate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::Buf;
+    use crate::vendor::dimpl::buffer::Buf;
 
     const MESSAGE: &[u8] = &[
         0x02, // context length

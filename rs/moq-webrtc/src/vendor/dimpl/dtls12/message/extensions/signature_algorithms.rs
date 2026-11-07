@@ -1,5 +1,5 @@
 use super::super::{SignatureAndHashAlgorithm, SignatureAndHashAlgorithmVec};
-use crate::buffer::Buf;
+use crate::vendor::dimpl::buffer::Buf;
 use nom::Err;
 use nom::IResult;
 use nom::bytes::complete::take;

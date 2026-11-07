@@ -4,16 +4,16 @@ use std::error::Error;
 use std::fmt;
 
 // Re-export all error types for convenience
-pub use crate::crypto::DtlsError;
-pub use crate::io::NetError;
-pub use crate::packet::{PacketError, Vp8DescriptorError, Vp8PatchError};
-pub use crate::rtp_::RtpError;
-pub use crate::sctp::ProtoError;
-pub use crate::sctp::SctpError;
-pub use crate::sdp::SdpError;
-pub use is::IceError;
+pub use crate::vendor::str0m::crypto::DtlsError;
+pub use crate::vendor::str0m::io::NetError;
+pub use crate::vendor::str0m::packet::{PacketError, Vp8DescriptorError, Vp8PatchError};
+pub use crate::vendor::str0m::rtp_::RtpError;
+pub use crate::vendor::str0m::sctp::ProtoError;
+pub use crate::vendor::str0m::sctp::SctpError;
+pub use crate::vendor::str0m::sdp::SdpError;
+pub use crate::vendor::is::IceError;
 
-use crate::{Direction, KeyframeRequestKind, Mid, Pt, Rid};
+use crate::vendor::str0m::{Direction, KeyframeRequestKind, Mid, Pt, Rid};
 
 /// Errors for the whole Rtc engine.
 #[derive(Debug)]
@@ -71,17 +71,17 @@ pub enum RtcError {
     /// SCTP (data channel engine) errors.
     Sctp(SctpError),
 
-    /// [`crate::change::SdpApi`] was not done in a correct order.
+    /// [`crate::vendor::str0m::change::SdpApi`] was not done in a correct order.
     ///
-    /// For [`crate::change::SdpApi`]:
+    /// For [`crate::vendor::str0m::change::SdpApi`]:
     ///
-    /// 1. We created an [`crate::change::SdpOffer`].
-    /// 2. The remote side created an [`crate::change::SdpOffer`] at the same time.
-    /// 3. We applied the remote side [`crate::change::SdpApi::accept_offer`].
-    /// 4. The we used the [`crate::change::SdpPendingOffer`] created in step 1.
+    /// 1. We created an [`crate::vendor::str0m::change::SdpOffer`].
+    /// 2. The remote side created an [`crate::vendor::str0m::change::SdpOffer`] at the same time.
+    /// 3. We applied the remote side [`crate::vendor::str0m::change::SdpApi::accept_offer`].
+    /// 4. The we used the [`crate::vendor::str0m::change::SdpPendingOffer`] created in step 1.
     ChangesOutOfOrder,
 
-    /// The [`crate::media::Writer`] was used twice without doing [`crate::Rtc::poll_output`] in between. This
+    /// The [`crate::vendor::str0m::media::Writer`] was used twice without doing [`crate::vendor::str0m::Rtc::poll_output`] in between. This
     /// is an incorrect usage pattern of the str0m API.
     WriteWithoutPoll,
 }

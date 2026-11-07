@@ -12,9 +12,9 @@ use nom::IResult;
 use nom::bytes::complete::take;
 use nom::number::complete::{be_u8, be_u16};
 
-use crate::SeededRng;
-use crate::buffer::Buf;
-use crate::time_tricks::InstantExt;
+use crate::vendor::dimpl::SeededRng;
+use crate::vendor::dimpl::buffer::Buf;
+use crate::vendor::dimpl::time_tricks::InstantExt;
 
 pub type NamedGroupVec = ArrayVec<NamedGroup, { NamedGroup::supported().len() }>;
 

@@ -3,10 +3,10 @@
 use std::fmt;
 use std::panic::UnwindSafe;
 
-use crate::format::Codec;
-use crate::sdp::MediaType;
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::sdp::MediaType;
 
-use crate::rtp::vla::encode_leb_u63;
+use crate::vendor::str0m::rtp::vla::encode_leb_u63;
 
 mod av1;
 pub use av1::Av1CodecExtra;
@@ -99,8 +99,8 @@ pub enum MediaKind {
     Video,
 }
 
-#[cfg(feature = "drv")]
-crate::drv_identity_copy!(MediaKind);
+#[cfg(any())]
+crate::vendor::str0m::drv_identity_copy!(MediaKind);
 
 impl MediaKind {
     /// Tests if this is `MediaKind::Audio`
@@ -385,7 +385,7 @@ impl CodecPacketizer {
     /// Apply codec-specific configuration derived from the negotiated [`CodecSpec`]. Keeps this
     /// knowledge inside the codec-aware packetizer so the generic [`Payloader`] never has to name
     /// concrete packetizer variants.
-    pub(crate) fn configure_for(&mut self, spec: &crate::format::CodecSpec) {
+    pub(crate) fn configure_for(&mut self, spec: &crate::vendor::str0m::format::CodecSpec) {
         // Enable DONL for H.265 when sprop-max-don-diff > 0 (RFC 7798 §7.1).
         if let CodecPacketizer::H265(h265) = self {
             if spec.format.sprop_max_don_diff.unwrap_or(0) > 0 {
@@ -672,7 +672,7 @@ mod test {
             .depacketize(&payload, &mut output, &mut extra)
             .unwrap();
         assert_eq!(output, payload);
-        let report = TelephoneEvent::parse(&payload, crate::rtp_::Frequency::EIGHT_KHZ).unwrap();
+        let report = TelephoneEvent::parse(&payload, crate::vendor::str0m::rtp_::Frequency::EIGHT_KHZ).unwrap();
         assert_eq!(extra, CodecExtra::Tele(report));
     }
 }

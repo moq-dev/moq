@@ -53,8 +53,8 @@ impl fmt::Display for ChunkType {
 
 #[cfg(test)]
 mod test {
-    use alloc::string::ToString;
-    use alloc::vec;
+    use std::string::ToString;
+    use std::vec;
 
     use super::*;
 

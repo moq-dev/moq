@@ -3,10 +3,10 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use str0m::Rtc;
-use str0m::RtcError;
+use crate::vendor::str0m::Rtc;
+use crate::vendor::str0m::RtcError;
 
-mod common;
+use super::common;
 use common::{Peer, TestRtc, init_crypto_default, init_log, progress};
 
 /// Test certificate fingerprint format and uniqueness.
@@ -122,7 +122,7 @@ fn dtls_pregenerated_certificate() -> Result<(), RtcError> {
     // Generate a certificate using Peer::Left's crypto provider if set
     let provider = Peer::Left
         .crypto_provider()
-        .unwrap_or_else(|| std::sync::Arc::new(str0m::crypto::from_feature_flags()));
+        .unwrap_or_else(|| std::sync::Arc::new(crate::vendor::str0m::crypto::from_feature_flags()));
     let cert = provider.dtls_provider.generate_certificate().unwrap();
 
     // Use the pregenerated certificate with the same crypto provider
@@ -169,7 +169,7 @@ fn dtls_pregenerated_certificate_same_fingerprint() -> Result<(), RtcError> {
     // Generate a certificate using Peer::Left's crypto provider if set
     let provider = Peer::Left
         .crypto_provider()
-        .unwrap_or_else(|| std::sync::Arc::new(str0m::crypto::from_feature_flags()));
+        .unwrap_or_else(|| std::sync::Arc::new(crate::vendor::str0m::crypto::from_feature_flags()));
     let cert = provider.dtls_provider.generate_certificate().unwrap();
     let cert_clone = cert.clone();
 

@@ -24,11 +24,11 @@ pub struct Pii<T>(pub T);
 
 impl<T: fmt::Display> fmt::Display for Pii<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        #[cfg(feature = "pii")]
+        #[cfg(any())]
         {
             write!(f, "{{REDACTED}}")
         }
-        #[cfg(not(feature = "pii"))]
+        #[cfg(not(any()))]
         {
             write!(f, "{}", self.0)
         }
@@ -37,11 +37,11 @@ impl<T: fmt::Display> fmt::Display for Pii<T> {
 
 impl<T: fmt::Debug> fmt::Debug for Pii<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        #[cfg(feature = "pii")]
+        #[cfg(any())]
         {
             write!(f, "{{REDACTED}}")
         }
-        #[cfg(not(feature = "pii"))]
+        #[cfg(not(any()))]
         {
             write!(f, "{:?}", self.0)
         }
@@ -66,10 +66,10 @@ mod tests {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
         let pii_addr = Pii(addr);
 
-        #[cfg(feature = "pii")]
+        #[cfg(any())]
         assert_eq!(pii_addr.to_string(), "{REDACTED}");
 
-        #[cfg(not(feature = "pii"))]
+        #[cfg(not(any()))]
         assert_eq!(pii_addr.to_string(), "127.0.0.1:8080");
     }
 
@@ -78,10 +78,10 @@ mod tests {
         let sensitive = String::from("sensitive data");
         let pii_string = Pii(sensitive);
 
-        #[cfg(feature = "pii")]
+        #[cfg(any())]
         assert_eq!(pii_string.to_string(), "{REDACTED}");
 
-        #[cfg(not(feature = "pii"))]
+        #[cfg(not(any()))]
         assert_eq!(pii_string.to_string(), "sensitive data");
     }
 }

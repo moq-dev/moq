@@ -1,5 +1,5 @@
-use crate::buffer::Buf;
-use crate::types::ProtocolVersion;
+use crate::vendor::dimpl::buffer::Buf;
+use crate::vendor::dimpl::types::ProtocolVersion;
 use arrayvec::ArrayVec;
 use nom::Err;
 use nom::IResult;
@@ -72,7 +72,7 @@ impl SupportedVersionsServerHello {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::Buf;
+    use crate::vendor::dimpl::buffer::Buf;
 
     #[test]
     fn client_hello_roundtrip() {

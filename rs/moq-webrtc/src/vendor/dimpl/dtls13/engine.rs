@@ -1,3 +1,4 @@
+use tracing::{debug, trace, warn};
 use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -6,29 +7,29 @@ use std::time::{Duration, Instant};
 use arrayvec::ArrayVec;
 
 use super::queue::{QueueRx, QueueTx};
-use crate::buffer::{Buf, BufferPool, TmpBuf};
-use crate::crypto::Aad;
-use crate::crypto::Cipher;
-use crate::crypto::HmacProvider;
-use crate::crypto::Nonce;
-use crate::crypto::SigningKey;
-use crate::crypto::SupportedDtls13CipherSuite;
-use crate::crypto::SupportedKxGroup;
-use crate::crypto::prf_hkdf;
-use crate::dtls13::incoming::{Incoming, Record, RecordHandler};
-use crate::dtls13::message::Body;
-use crate::dtls13::message::ContentType;
-use crate::dtls13::message::Dtls13CipherSuite;
-use crate::dtls13::message::Dtls13Record;
-use crate::dtls13::message::Handshake;
-use crate::dtls13::message::Header;
-use crate::dtls13::message::KeyUpdateRequest;
-use crate::dtls13::message::MessageType;
-use crate::dtls13::message::Sequence;
-use crate::timer::{HandshakeTimers, Timeout, deadline};
-use crate::types::{HashAlgorithm, Random};
-use crate::window::ReplayWindow;
-use crate::{Config, DtlsCertificate, Error, InternalError, Output, SeededRng};
+use crate::vendor::dimpl::buffer::{Buf, BufferPool, TmpBuf};
+use crate::vendor::dimpl::crypto::Aad;
+use crate::vendor::dimpl::crypto::Cipher;
+use crate::vendor::dimpl::crypto::HmacProvider;
+use crate::vendor::dimpl::crypto::Nonce;
+use crate::vendor::dimpl::crypto::SigningKey;
+use crate::vendor::dimpl::crypto::SupportedDtls13CipherSuite;
+use crate::vendor::dimpl::crypto::SupportedKxGroup;
+use crate::vendor::dimpl::crypto::prf_hkdf;
+use crate::vendor::dimpl::dtls13::incoming::{Incoming, Record, RecordHandler};
+use crate::vendor::dimpl::dtls13::message::Body;
+use crate::vendor::dimpl::dtls13::message::ContentType;
+use crate::vendor::dimpl::dtls13::message::Dtls13CipherSuite;
+use crate::vendor::dimpl::dtls13::message::Dtls13Record;
+use crate::vendor::dimpl::dtls13::message::Handshake;
+use crate::vendor::dimpl::dtls13::message::Header;
+use crate::vendor::dimpl::dtls13::message::KeyUpdateRequest;
+use crate::vendor::dimpl::dtls13::message::MessageType;
+use crate::vendor::dimpl::dtls13::message::Sequence;
+use crate::vendor::dimpl::timer::{HandshakeTimers, Timeout, deadline};
+use crate::vendor::dimpl::types::{HashAlgorithm, Random};
+use crate::vendor::dimpl::window::ReplayWindow;
+use crate::vendor::dimpl::{Config, DtlsCertificate, Error, InternalError, Output, SeededRng};
 
 const MAX_DEFRAGMENT_PACKETS: usize = 50;
 
@@ -984,7 +985,7 @@ impl Engine {
 
         if self.sequence_epoch_0.sequence_number >= MAX_SEQUENCE_NUMBER {
             return Err(Error::CryptoError(
-                crate::CryptoError::Epoch0SequenceNumberExhausted,
+                crate::vendor::dimpl::CryptoError::Epoch0SequenceNumberExhausted,
             ));
         }
         self.sequence_epoch_0.sequence_number += 1;
@@ -1062,7 +1063,7 @@ impl Engine {
 
         let Some(keys) = keys else {
             return Err(Error::CryptoError(
-                crate::CryptoError::SendKeysNotAvailable { epoch },
+                crate::vendor::dimpl::CryptoError::SendKeysNotAvailable { epoch },
             ));
         };
 
@@ -1141,21 +1142,21 @@ impl Engine {
         if epoch == 2 {
             if self.hs_send_seq >= MAX_SEQUENCE_NUMBER {
                 return Err(Error::CryptoError(
-                    crate::CryptoError::SendSequenceNumberExhausted { epoch },
+                    crate::vendor::dimpl::CryptoError::SendSequenceNumberExhausted { epoch },
                 ));
             }
             self.hs_send_seq += 1;
         } else if self.prev_app_send_keys.is_some() && epoch == self.prev_app_send_epoch {
             if self.prev_app_send_seq >= MAX_SEQUENCE_NUMBER {
                 return Err(Error::CryptoError(
-                    crate::CryptoError::SendSequenceNumberExhausted { epoch },
+                    crate::vendor::dimpl::CryptoError::SendSequenceNumberExhausted { epoch },
                 ));
             }
             self.prev_app_send_seq += 1;
         } else {
             if self.app_send_seq >= MAX_SEQUENCE_NUMBER {
                 return Err(Error::CryptoError(
-                    crate::CryptoError::SendSequenceNumberExhausted { epoch },
+                    crate::vendor::dimpl::CryptoError::SendSequenceNumberExhausted { epoch },
                 ));
             }
             self.app_send_seq += 1;
@@ -1933,7 +1934,7 @@ impl Engine {
     /// Rotate send keys: move current app send keys → prev, derive new ones.
     fn update_send_keys(&mut self) -> Result<(), Error> {
         let current_keys = self.app_send_keys.take().ok_or(Error::InvalidState(
-            crate::InvalidStateError::NoCurrentAppSendKeysForKeyUpdate,
+            crate::vendor::dimpl::InvalidStateError::NoCurrentAppSendKeysForKeyUpdate,
         ))?;
 
         let next_secret = self.derive_next_traffic_secret(&current_keys.traffic_secret)?;
@@ -1964,7 +1965,7 @@ impl Engine {
     pub fn update_recv_keys(&mut self) -> Result<u16, Error> {
         // Find the latest recv epoch entry
         let latest = self.app_recv_keys.last().ok_or(Error::InvalidState(
-            crate::InvalidStateError::NoCurrentAppRecvKeysForKeyUpdate,
+            crate::vendor::dimpl::InvalidStateError::NoCurrentAppRecvKeysForKeyUpdate,
         ))?;
 
         let next_secret = self.derive_next_traffic_secret(&latest.keys.traffic_secret)?;
@@ -2244,7 +2245,7 @@ impl Engine {
 
     pub fn find_kx_group(
         &self,
-        group: crate::types::NamedGroup,
+        group: crate::vendor::dimpl::types::NamedGroup,
     ) -> Option<&'static dyn SupportedKxGroup> {
         self.config.kx_groups().find(|g| g.name() == group)
     }
@@ -2259,7 +2260,7 @@ impl Engine {
         data: &[u8],
         signature: &[u8],
         hash_alg: HashAlgorithm,
-        sig_alg: crate::types::SignatureAlgorithm,
+        sig_alg: crate::vendor::dimpl::types::SignatureAlgorithm,
     ) -> Result<(), Error> {
         self.config
             .crypto_provider()
@@ -2274,8 +2275,8 @@ impl Engine {
 
     pub fn extract_srtp_keying_material(
         &self,
-        profile: crate::crypto::SrtpProfile,
-    ) -> Result<(ArrayVec<u8, 88>, crate::crypto::SrtpProfile), Error> {
+        profile: crate::vendor::dimpl::crypto::SrtpProfile,
+    ) -> Result<(ArrayVec<u8, 88>, crate::vendor::dimpl::crypto::SrtpProfile), Error> {
         let hash = self.hash_algorithm();
         let hash_len = hash.output_len();
         let hmac = self.hmac();
@@ -2284,7 +2285,7 @@ impl Engine {
             .exporter_master_secret
             .as_ref()
             .ok_or(Error::CryptoError(
-                crate::CryptoError::ExporterMasterSecretNotDerived,
+                crate::vendor::dimpl::CryptoError::ExporterMasterSecretNotDerived,
             ))?;
 
         let total_len = profile.keying_material_len();
@@ -2503,7 +2504,7 @@ impl RecordHandler for Engine {
                     }
                     Some(90) => Ok(None),
                     Some(description) => {
-                        Err(Error::SecurityError(crate::SecurityError::FatalAlert {
+                        Err(Error::SecurityError(crate::vendor::dimpl::SecurityError::FatalAlert {
                             description,
                         }))
                     }
@@ -2630,7 +2631,7 @@ impl RecordHandler for Engine {
 
         let Some(keys) = keys else {
             return Err(Error::CryptoError(
-                crate::CryptoError::RecvKeysNotAvailable { epoch: seq.epoch },
+                crate::vendor::dimpl::CryptoError::RecvKeysNotAvailable { epoch: seq.epoch },
             ));
         };
 
@@ -2678,10 +2679,10 @@ impl RecordHandler for Engine {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "rcgen")]
-    use crate::certificate::generate_self_signed_certificate;
+    #[cfg(all())]
+    use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn test_engine() -> Engine {
         let cert = generate_self_signed_certificate().expect("gen cert");
         let config = Arc::new(Config::builder().build().expect("build config"));
@@ -2689,7 +2690,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn timing_resend_queue_failure_is_fatal() {
         let now = Instant::now();
         let certificate = generate_self_signed_certificate().expect("certificate");
@@ -2824,7 +2825,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn premature_datagram_recycles_its_pooled_buffer() {
         let mut engine = test_engine();
         let packet = encrypted_application_data_record(1, b"buffered ciphertext");
@@ -2883,7 +2884,7 @@ mod tests {
     /// to exceed MAX_SEQUENCE_NUMBER (2^48 - 1). This test sets the counter
     /// to MAX and verifies that `create_plaintext_record` returns an error.
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn epoch_0_sequence_number_rejects_overflow() {
         let mut engine = test_engine();
 
@@ -2903,7 +2904,7 @@ mod tests {
     /// alongside the traffic secrets, eliminating the need for a separate
     /// `derive_handshake_secret` method.
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn derive_handshake_secrets_returns_handshake_secret() {
         let mut engine = test_engine();
         engine.set_cipher_suite(Dtls13CipherSuite::AES_128_GCM_SHA256);
@@ -2954,7 +2955,7 @@ mod tests {
     /// via `self.buffers_free.pop()`, reusing pooled allocations instead of
     /// creating a fresh `Buf::new()`.
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn derive_early_secret_uses_buffer_pool() {
         let mut engine = test_engine();
         engine.set_cipher_suite(Dtls13CipherSuite::AES_128_GCM_SHA256);
@@ -2977,7 +2978,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn ack_tracking_full_does_not_panic_on_handshake_replacement() {
         let mut engine = test_engine();
 
@@ -3020,7 +3021,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn ack_tracking_ignores_non_handshake_records_in_coalesced_datagram() {
         let mut engine = test_engine();
 
@@ -3047,7 +3048,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn malformed_ack_record_number_vector_is_ignored() {
         let mut engine = test_engine();
         let fragment = engine.pop_buffer();
@@ -3074,7 +3075,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn protected_test_engine() -> Engine {
         let mut engine = test_engine();
         engine.set_cipher_suite(Dtls13CipherSuite::AES_128_GCM_SHA256);
@@ -3094,7 +3095,7 @@ mod tests {
         engine
     }
 
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn engine_packets(engine: &mut Engine, now: Instant) -> Vec<Vec<u8>> {
         let mut packets = Vec::new();
         let mut buffer = [0; 2048];
@@ -3107,7 +3108,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn ack_for(records: &[(u64, u64)]) -> Vec<u8> {
         let mut ack = Vec::new();
         ack.extend_from_slice(&((records.len() * 16) as u16).to_be_bytes());
@@ -3119,7 +3120,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn ack_matches_mixed_transmissions_and_preserves_selective_retransmission() {
         let now = Instant::now();
         let mut engine = protected_test_engine();
@@ -3176,7 +3177,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn duplicate_key_update_does_not_ack_discarded_new_update() {
         let now = Instant::now();
         let mut sender = protected_test_engine();
@@ -3225,7 +3226,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn key_update_ack_after_retransmission(lost: bool) {
         let now = Instant::now();
         let mut sender = protected_test_engine();
@@ -3312,19 +3313,19 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn key_update_accepts_late_ack_for_original_transmission() {
         key_update_ack_after_retransmission(false);
     }
 
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn key_update_recovers_after_lost_ack() {
         key_update_ack_after_retransmission(true);
     }
 
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn exhausted_transmission_history_preserves_flight_and_accepts_old_ack() {
         let now = Instant::now();
         let mut engine = protected_test_engine();
@@ -3371,7 +3372,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn plaintext_and_ack_retransmissions_do_not_exhaust_history() {
         let now = Instant::now();
         let mut engine = protected_test_engine();

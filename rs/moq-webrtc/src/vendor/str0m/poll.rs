@@ -1,6 +1,6 @@
 //! Readiness signalling threaded through the component tree.
 //!
-//! Everything below [`Rtc`][crate::Rtc] forms a tree, and both events and new
+//! Everything below [`Rtc`][crate::vendor::str0m::Rtc] forms a tree, and both events and new
 //! timeouts bubble up from the leaves. To avoid re-walking a quiescent tree on
 //! every `poll_output`, each path that takes `&mut` access to a sub-component
 //! is handed an armed [`Wake`] guard, threaded down like `&mut` state.
@@ -17,16 +17,16 @@
 //! poll; it can never drop output. No component names another's scope, and
 //! `Rtc` holds no knowledge of which mutation affects what.
 //!
-//! The app-facing API wrappers ([`DirectApi`][crate::change::DirectApi],
-//! [`SdpApi`][crate::change::SdpApi], [`Channel`][crate::channel::Channel],
-//! [`Bwe`][crate::bwe::Bwe]) hold an [`RtcMut`] instead of `&mut Rtc`. It arms
+//! The app-facing API wrappers ([`DirectApi`][crate::vendor::str0m::change::DirectApi],
+//! [`SdpApi`][crate::vendor::str0m::change::SdpApi], [`Channel`][crate::vendor::str0m::channel::Channel],
+//! [`Bwe`][crate::vendor::str0m::bwe::Bwe]) hold an [`RtcMut`] instead of `&mut Rtc`. It arms
 //! the readiness on *mutable* deref only, so a `&mut self` method that mutates
 //! re-polls the tree while a `&self` reader never does — and neither has to
 //! remember to call anything.
 
 use std::ops::{Deref, DerefMut};
 
-use crate::Rtc;
+use crate::vendor::str0m::Rtc;
 
 /// A `&mut Rtc` handle that re-polls the tree when it is used mutably.
 ///
@@ -142,7 +142,7 @@ impl Drop for Mutation<'_> {
     }
 }
 
-/// The accumulated re-poll signal owned by [`Rtc`][crate::Rtc].
+/// The accumulated re-poll signal owned by [`Rtc`][crate::vendor::str0m::Rtc].
 ///
 /// `poll_output` reads it to decide whether to walk the event pipeline and
 /// whether to recompute the next timeout, clearing each half once it has
@@ -236,10 +236,10 @@ impl Readiness {
 mod tests {
     use super::*;
 
-    use crate::bwe::Bitrate;
-    use crate::crypto::dtls::{KeyingMaterial, SrtpProfile};
-    use crate::media::MediaKind;
-    use crate::{Input, Output};
+    use crate::vendor::str0m::bwe::Bitrate;
+    use crate::vendor::str0m::crypto::dtls::{KeyingMaterial, SrtpProfile};
+    use crate::vendor::str0m::media::MediaKind;
+    use crate::vendor::str0m::{Input, Output};
     use std::time::Instant;
 
     fn idle_rtc() -> Rtc {
@@ -250,7 +250,7 @@ mod tests {
         let profile = SrtpProfile::AEAD_AES_128_GCM;
         let mat = KeyingMaterial::new(&vec![0; profile.keying_material_len()]);
         rtc.session
-            .set_keying_material(mat, crate::crypto::test_default_provider(), profile, true);
+            .set_keying_material(mat, crate::vendor::str0m::crypto::test_default_provider(), profile, true);
         rtc.direct_api()
             .declare_media("vid".into(), MediaKind::Video);
         rtc.direct_api()

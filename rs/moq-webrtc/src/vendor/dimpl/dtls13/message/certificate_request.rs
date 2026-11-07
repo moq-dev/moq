@@ -6,7 +6,7 @@ use nom::number::complete::{be_u8, be_u16};
 use nom::{Err, IResult};
 
 use super::{DistinguishedName, Extension, ExtensionType, SignatureAlgorithmsExtension};
-use crate::buffer::Buf;
+use crate::vendor::dimpl::buffer::Buf;
 
 /// Parsed CertificateRequest framing. Context and serialized bytes stay in the input buffer.
 #[derive(Debug, PartialEq, Eq)]

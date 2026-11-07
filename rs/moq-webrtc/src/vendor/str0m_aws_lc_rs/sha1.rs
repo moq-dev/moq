@@ -2,7 +2,7 @@
 
 use aws_lc_rs::{digest, hmac};
 
-use str0m_proto::crypto::{Sha1HmacProvider, Sha1Provider};
+use crate::vendor::str0m_proto::crypto::{Sha1HmacProvider, Sha1Provider};
 
 #[derive(Debug)]
 pub(super) struct AwsLcRsSha1Provider;

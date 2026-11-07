@@ -10,8 +10,8 @@ use nom::error::{Error, ErrorKind};
 use nom::number::complete::{be_u8, be_u16};
 use nom::{Err, IResult};
 
-use crate::buffer::Buf;
-use crate::util::{many0, many1};
+use crate::vendor::dimpl::buffer::Buf;
+use crate::vendor::dimpl::util::{many0, many1};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ClientHello {
@@ -250,8 +250,8 @@ impl ClientHello {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::Buf;
-    use crate::dtls13::message::ExtensionType;
+    use crate::vendor::dimpl::buffer::Buf;
+    use crate::vendor::dimpl::dtls13::message::ExtensionType;
 
     const MESSAGE: &[u8] = &[
         0xFE, 0xFD, // ProtocolVersion::DTLS1_2 (legacy)

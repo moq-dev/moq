@@ -28,10 +28,10 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use str0m::media::{Direction, MediaKind, Mid};
-use str0m::{Output, RtcError};
+use crate::vendor::str0m::media::{Direction, MediaKind, Mid};
+use crate::vendor::str0m::{Output, RtcError};
 
-mod common;
+use super::common;
 use common::{Peer, TestRtc, init_crypto_default, init_log, negotiate, progress};
 
 /// m-line counts to sweep. 2 = a 1:1 call. 30 = a mid-size conference.

@@ -1,14 +1,14 @@
-use crate::error::{Error, Result};
+use crate::vendor::sctp_proto::error::{Error, Result};
 
-use alloc::vec::Vec;
+use std::vec::Vec;
 use bytes::{Bytes, BytesMut};
 
 ///////////////////////////////////////////////////////////////////
 //payload_queue_test
 ///////////////////////////////////////////////////////////////////
 use super::payload_queue::*;
-use crate::chunk::chunk_payload_data::{ChunkPayloadData, PayloadProtocolIdentifier};
-use crate::chunk::chunk_selective_ack::GapAckBlock;
+use crate::vendor::sctp_proto::chunk::chunk_payload_data::{ChunkPayloadData, PayloadProtocolIdentifier};
+use crate::vendor::sctp_proto::chunk::chunk_selective_ack::GapAckBlock;
 
 fn make_payload(tsn: u32, n_bytes: usize) -> ChunkPayloadData {
     ChunkPayloadData {

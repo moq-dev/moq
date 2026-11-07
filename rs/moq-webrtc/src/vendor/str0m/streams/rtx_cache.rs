@@ -1,8 +1,8 @@
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::io::DATAGRAM_MAX_PACKET_SIZE;
-use crate::rtp_::SeqNo;
+use crate::vendor::str0m::io::DATAGRAM_MAX_PACKET_SIZE;
+use crate::vendor::str0m::rtp_::SeqNo;
 
 use super::RtpPacket;
 use super::rtx_cache_buf::EvictingBuffer;
@@ -75,8 +75,8 @@ impl RtxCache {
 
 #[cfg(test)]
 mod test {
-    use crate::rtp_::MediaTime;
-    use crate::rtp_::RtpHeader;
+    use crate::vendor::str0m::rtp_::MediaTime;
+    use crate::vendor::str0m::rtp_::RtpHeader;
 
     use super::*;
 

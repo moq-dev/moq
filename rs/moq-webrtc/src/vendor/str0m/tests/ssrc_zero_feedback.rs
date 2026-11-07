@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
-use str0m::media::{MediaKind, Mid};
-use str0m::{Input, Output, Reason, Rtc, RtcConfig};
+use crate::vendor::str0m::media::{MediaKind, Mid};
+use crate::vendor::str0m::{Input, Output, Reason, Rtc, RtcConfig};
 
 fn next_timeout(rtc: &mut Rtc) -> (Instant, Reason) {
     for _ in 0..32 {

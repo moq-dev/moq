@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
-use is::IceConnectionState;
-use str0m::{Event, Input, Output, Rtc, RtcError};
+use crate::vendor::is::IceConnectionState;
+use crate::vendor::str0m::{Event, Input, Output, Rtc, RtcError};
 
 /// Create an RTC instance, but only update its time, without feeding it any input.
 /// It should not create any output, busy-loop, or error out.

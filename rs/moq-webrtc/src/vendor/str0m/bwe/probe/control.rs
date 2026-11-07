@@ -7,8 +7,8 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use super::{ProbeClusterConfig, ProbeKind};
-use crate::rtp_::{Bitrate, TwccClusterId};
-use crate::util::{already_happened, not_happening};
+use crate::vendor::str0m::rtp_::{Bitrate, TwccClusterId};
+use crate::vendor::str0m::util::{already_happened, not_happening};
 
 // Port notes:
 // This module ports WebRTC's `ProbeController` behavior from:

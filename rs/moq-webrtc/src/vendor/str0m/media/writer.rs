@@ -1,15 +1,16 @@
+use tracing::trace;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::RtcError;
-use crate::format::{CodecConfig, PayloadParams};
-use crate::packet::PacketError;
-use crate::poll::Readiness;
-use crate::rtp_::AbsCaptureTime;
-use crate::rtp_::MidRid;
-use crate::rtp_::VideoOrientation;
-use crate::session::Session;
-use crate::streams::Streams;
+use crate::vendor::str0m::RtcError;
+use crate::vendor::str0m::format::{CodecConfig, PayloadParams};
+use crate::vendor::str0m::packet::PacketError;
+use crate::vendor::str0m::poll::Readiness;
+use crate::vendor::str0m::rtp_::AbsCaptureTime;
+use crate::vendor::str0m::rtp_::MidRid;
+use crate::vendor::str0m::rtp_::VideoOrientation;
+use crate::vendor::str0m::session::Session;
+use crate::vendor::str0m::streams::Streams;
 
 use super::TelephoneEvent;
 use super::tele::{MAX_DURATION, MIN_DURATION, TelephonePackets};
@@ -17,10 +18,10 @@ use super::{ExtensionValues, KeyframeRequestKind, Media, MediaTime, Mid, Pt, Rid
 
 /// Writer of frame level data.
 ///
-/// Obtained via [`Rtc::writer`][crate::Rtc::writer].
+/// Obtained via [`Rtc::writer`][crate::vendor::str0m::Rtc::writer].
 ///
 /// This is the Frame Level API. For RTP level see
-/// [`DirectApi::stream_tx`][crate::change::DirectApi::stream_tx].
+/// [`DirectApi::stream_tx`][crate::vendor::str0m::change::DirectApi::stream_tx].
 pub struct Writer<'a> {
     session: &'a mut Session,
     readiness: &'a mut Readiness,
@@ -162,12 +163,12 @@ impl<'a> Writer<'a> {
     /// the `MediaTime`. For an SFU, this can be hard to know, since RTP packets typically only
     /// contain the media time (RTP time). In the simplest SFU setup, the wallclock could simply
     /// be the arrival time of the incoming RTP data (see
-    /// [`MediaData::network_time`][crate::media::MediaData]). For better synchronization the SFU
+    /// [`MediaData::network_time`][crate::vendor::str0m::media::MediaData]). For better synchronization the SFU
     /// probably needs to weigh in clock drifts and data provided via the statistics.
     ///
     /// If you write media before `IceConnectionState` is `Connected` it will be dropped.
     ///
-    /// Panics if [`RtcConfig::set_rtp_mode()`][crate::RtcConfig::set_rtp_mode] is `true`.
+    /// Panics if [`RtcConfig::set_rtp_mode()`][crate::vendor::str0m::RtcConfig::set_rtp_mode] is `true`.
     pub fn write(
         self,
         pt: Pt,
@@ -286,10 +287,10 @@ impl<'a> Writer<'a> {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```ignore
     /// # use std::time::Instant;
-    /// # use str0m::Rtc;
-    /// # use str0m::media::{Mid, KeyframeRequestKind};
+    /// # use crate::vendor::str0m::Rtc;
+    /// # use crate::vendor::str0m::media::{Mid, KeyframeRequestKind};
     /// let mut rtc = Rtc::new(Instant::now());
     ///
     /// // add candidates, do SDP negotiation

@@ -4,9 +4,9 @@ use aws_lc_rs::agreement::{ECDH_P256, ECDH_P384, UnparsedPublicKey, X25519};
 use aws_lc_rs::agreement::{EphemeralPrivateKey, agree_ephemeral};
 
 use super::super::{ActiveKeyExchange, SupportedKxGroup};
-use crate::buffer::Buf;
-use crate::types::NamedGroup;
-use crate::{CryptoError, CryptoOperation};
+use crate::vendor::dimpl::buffer::Buf;
+use crate::vendor::dimpl::types::NamedGroup;
+use crate::vendor::dimpl::{CryptoError, CryptoOperation};
 
 /// ECDHE key exchange implementation.
 struct EcdhKeyExchange {

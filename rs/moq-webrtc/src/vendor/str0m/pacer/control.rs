@@ -1,4 +1,4 @@
-use crate::rtp_::Bitrate;
+use crate::vendor::str0m::rtp_::Bitrate;
 
 const PACING_FACTOR: f64 = 1.1;
 

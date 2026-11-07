@@ -14,8 +14,8 @@ use std::time::Instant;
 
 use subtle::ConstantTimeEq;
 
-use crate::crypto::dtls::*;
-use crate::crypto::error::CryptoError;
+use crate::vendor::str0m_proto::crypto::dtls::*;
+use crate::vendor::str0m_proto::crypto::error::CryptoError;
 
 // ============================================================================
 // CryptoProvider
@@ -87,7 +87,7 @@ impl fmt::Display for CryptoProvider {
 // Marker Trait
 // ============================================================================
 
-pub use crate::{CryptoSafe, Sha1HmacProvider};
+pub use crate::vendor::str0m_proto::{CryptoSafe, Sha1HmacProvider};
 
 // ============================================================================
 // Main Provider Traits
@@ -168,7 +168,7 @@ pub trait DtlsProvider: CryptoSafe {
 
     /// Whether the provider is used in a test context.
     fn is_test(&self) -> bool {
-        cfg!(feature = "_internal_test_exports")
+        cfg!(test)
     }
 }
 

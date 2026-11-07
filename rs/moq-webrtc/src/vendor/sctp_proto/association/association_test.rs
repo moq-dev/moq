@@ -1,7 +1,7 @@
-use crate::chunk::chunk_i_forward_tsn::ChunkIForwardTsnStream;
-use crate::chunk::{Chunk, chunk_init::ChunkInit};
-use crate::config::DEFAULT_SCTP_PORT;
-use crate::config::generate_snap_token;
+use crate::vendor::sctp_proto::chunk::chunk_i_forward_tsn::ChunkIForwardTsnStream;
+use crate::vendor::sctp_proto::chunk::{Chunk, chunk_init::ChunkInit};
+use crate::vendor::sctp_proto::config::DEFAULT_SCTP_PORT;
+use crate::vendor::sctp_proto::config::generate_snap_token;
 
 use super::*;
 
@@ -4554,10 +4554,10 @@ fn test_out_of_band_with_forward_tsn_support() {
     for param in &local_init.params {
         if let Some(ext) = param
             .as_any()
-            .downcast_ref::<crate::param::param_supported_extensions::ParamSupportedExtensions>(
+            .downcast_ref::<crate::vendor::sctp_proto::param::param_supported_extensions::ParamSupportedExtensions>(
         ) {
             for ct in &ext.chunk_types {
-                if *ct == crate::chunk::chunk_type::CT_FORWARD_TSN {
+                if *ct == crate::vendor::sctp_proto::chunk::chunk_type::CT_FORWARD_TSN {
                     has_forward_tsn = true;
                 }
             }
@@ -4767,7 +4767,7 @@ fn receive_capacity_datagram(a: &mut Association, chunk: ChunkPayloadData) -> Re
             remote: a.remote_addr(),
             ecn: None,
             local_ip: None,
-            payload: Payload::PartialDecode(crate::packet::PartialDecode::unmarshal(&packet)?),
+            payload: Payload::PartialDecode(crate::vendor::sctp_proto::packet::PartialDecode::unmarshal(&packet)?),
         },
     )));
     Ok(())
@@ -4802,12 +4802,12 @@ fn test_receive_capacity_reports_undrainable_message() -> Result<()> {
             )));
             let packets = a.gather_outbound(Instant::now()).0;
             assert_eq!(packets.len(), 1);
-            let packet = crate::packet::PartialDecode::unmarshal(&packets[0])?.finish()?;
+            let packet = crate::vendor::sctp_proto::packet::PartialDecode::unmarshal(&packets[0])?.finish()?;
             let abort = packet.chunks[0]
                 .as_any()
                 .downcast_ref::<ChunkAbort>()
                 .unwrap();
-            assert_eq!(abort.error_causes[0].code, crate::chunk::OUT_OF_RESOURCE);
+            assert_eq!(abort.error_causes[0].code, crate::vendor::sctp_proto::chunk::OUT_OF_RESOURCE);
             // Closing actually releases storage, rather than inventing credit.
             assert_eq!(a.get_my_receiver_window_credit(), 32 * 1024);
         }
@@ -4827,7 +4827,7 @@ fn test_receive_capacity_zero_window_preserves_backpressure() -> Result<()> {
     assert_eq!(a.get_my_receiver_window_credit(), 0);
     a.ack_state = AckState::Immediate;
     let packets = a.gather_outbound_sack_packets(vec![]);
-    let packet = crate::packet::PartialDecode::unmarshal(&packets[0])?.finish()?;
+    let packet = crate::vendor::sctp_proto::packet::PartialDecode::unmarshal(&packets[0])?.finish()?;
     let sack = packet.chunks[0]
         .as_any()
         .downcast_ref::<ChunkSelectiveAck>()
@@ -4996,7 +4996,7 @@ fn test_receive_capacity_reports_exhaustion_after_forward_tsn_gap_closure() -> R
             remote: a.remote_addr(),
             ecn: None,
             local_ip: None,
-            payload: Payload::PartialDecode(crate::packet::PartialDecode::unmarshal(&packet)?),
+            payload: Payload::PartialDecode(crate::vendor::sctp_proto::packet::PartialDecode::unmarshal(&packet)?),
         },
     )));
     assert!(
@@ -5509,7 +5509,7 @@ fn review_fast_abandonment_cancels_pending_fragments_in_same_poll() {
 }
 
 fn check_old_generation_ack_credit(gap_ack: bool) {
-    use crate::chunk::chunk_selective_ack::GapAckBlock;
+    use crate::vendor::sctp_proto::chunk::chunk_selective_ack::GapAckBlock;
     let now = Instant::now();
     let mut a = fragmented_retransmission_fixture(0);
     a.send_next_data_chunk(now).unwrap();
@@ -5598,7 +5598,7 @@ fn gap_ack_after_abandoned_prefix_restarts_outstanding_timer() {
     a.handle_sack(
         &ChunkSelectiveAck {
             cumulative_tsn_ack: 0,
-            gap_ack_blocks: vec![crate::chunk::chunk_selective_ack::GapAckBlock {
+            gap_ack_blocks: vec![crate::vendor::sctp_proto::chunk::chunk_selective_ack::GapAckBlock {
                 start: 4,
                 end: 4,
             }],
@@ -5629,7 +5629,7 @@ fn late_ack_of_abandoned_data_resets_errors_but_duplicates_do_not() {
     );
     let sack = ChunkSelectiveAck {
         cumulative_tsn_ack: 0,
-        gap_ack_blocks: vec![crate::chunk::chunk_selective_ack::GapAckBlock { start: 1, end: 1 }],
+        gap_ack_blocks: vec![crate::vendor::sctp_proto::chunk::chunk_selective_ack::GapAckBlock { start: 1, end: 1 }],
         advertised_receiver_window_credit: 100,
         ..Default::default()
     };
@@ -5668,7 +5668,7 @@ fn forward_only_marker_ack_does_not_reset_peer_errors() {
     a.handle_sack(
         &ChunkSelectiveAck {
             cumulative_tsn_ack: 0,
-            gap_ack_blocks: vec![crate::chunk::chunk_selective_ack::GapAckBlock {
+            gap_ack_blocks: vec![crate::vendor::sctp_proto::chunk::chunk_selective_ack::GapAckBlock {
                 start: 2,
                 end: 2,
             }],

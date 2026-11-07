@@ -27,7 +27,7 @@ pub(crate) use srtp::{SRTCP_OVERHEAD, SRTP_BLOCK_SIZE, SRTP_OVERHEAD};
 mod rtcp;
 pub use rtcp::*;
 
-pub use str0m_proto::{Bitrate, DataSize};
+pub use crate::vendor::str0m_proto::{Bitrate, DataSize};
 
 // Max in the RFC 3550 is 255 bytes, we limit it to be modulus 16 for SRTP and to match libWebRTC
 pub const MAX_BLANK_PADDING_PAYLOAD_SIZE: usize = 240;

@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 
-use crate::rtp_::Pt;
+use crate::vendor::str0m::rtp_::Pt;
 
 use super::PacketError;
 
@@ -204,9 +204,9 @@ pub(crate) fn red_same_pt_blocks<'a>(
 /// carries (`[1]` = one level, the previous packet; `[1, 3, 5]` = three levels for higher loss),
 /// always sorted, distinct and >= 1. `history` keeps the most recent `max(distances)` payloads.
 ///
-/// This is the send-side companion to [`RedDecoder`]: [`Payloader`][crate::packet::Payloader]
+/// This is the send-side companion to [`RedDecoder`]: [`Payloader`][crate::vendor::str0m::packet::Payloader]
 /// stays codec- and RED-agnostic; the `Media` layer owns the `RedSender` and applies it through a
-/// [`RedSink`][crate::packet::RedSink].
+/// [`RedSink`][crate::vendor::str0m::packet::RedSink].
 #[derive(Debug)]
 pub(crate) struct RedSender {
     red_pt: Pt,

@@ -5,7 +5,7 @@
 
 use arrayvec::ArrayVec;
 
-use crate::types::{ContentType, Sequence};
+use crate::vendor::dimpl::types::{ContentType, Sequence};
 
 /// Explicit nonce length for DTLS AEAD records.
 ///

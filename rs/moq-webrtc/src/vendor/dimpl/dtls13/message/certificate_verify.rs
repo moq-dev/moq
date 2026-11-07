@@ -1,5 +1,5 @@
 use super::DigitallySigned;
-use crate::buffer::Buf;
+use crate::vendor::dimpl::buffer::Buf;
 use nom::IResult;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -21,7 +21,7 @@ impl CertificateVerify {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::buffer::Buf;
+    use crate::vendor::dimpl::buffer::Buf;
 
     const MESSAGE: &[u8] = &[
         0x04, 0x03, // SignatureScheme::ECDSA_SECP256R1_SHA256

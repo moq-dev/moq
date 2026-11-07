@@ -6,9 +6,9 @@
 use std::fmt;
 use std::ops::Range;
 
-use crate::buffer::Buf;
-use crate::types::{ContentType, ProtocolVersion, Sequence};
-use crate::util::be_u48;
+use crate::vendor::dimpl::buffer::Buf;
+use crate::vendor::dimpl::types::{ContentType, ProtocolVersion, Sequence};
+use crate::vendor::dimpl::util::be_u48;
 use nom::bytes::complete::take;
 use nom::number::complete::{be_u8, be_u16};
 use nom::{Err, IResult};

@@ -224,7 +224,7 @@ mod test {
 
     #[test]
     fn packetizer_uses_audio_packet_policy() {
-        let pack = crate::packet::CodecPacketizer::from(crate::format::Codec::AmrWb);
+        let pack = crate::vendor::str0m::packet::CodecPacketizer::from(crate::vendor::str0m::format::Codec::AmrWb);
         assert!(pack.marks_talkspurt());
         assert!(!pack.nackable());
     }

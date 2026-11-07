@@ -1,15 +1,16 @@
 //! Data channel related types.
 
+use tracing::{debug, warn};
 use std::{fmt, str, time::Instant};
 
-use crate::poll::{RtcMut, Wake};
-use crate::sctp::RtcSctp;
-use crate::util::already_happened;
-use crate::{Rtc, RtcError};
+use crate::vendor::str0m::poll::{RtcMut, Wake};
+use crate::vendor::str0m::sctp::RtcSctp;
+use crate::vendor::str0m::util::already_happened;
+use crate::vendor::str0m::{Rtc, RtcError};
 
-pub use crate::sctp::ChannelConfig;
-pub use crate::sctp::Reliability;
-pub use crate::sctp::SctpInitData;
+pub use crate::vendor::str0m::sctp::ChannelConfig;
+pub use crate::vendor::str0m::sctp::Reliability;
+pub use crate::vendor::str0m::sctp::SctpInitData;
 
 /// Identifier of a data channel.
 ///
@@ -20,13 +21,13 @@ pub struct ChannelId(usize);
 
 /// Data channel data from remote peer.
 ///
-/// This is obtained via [`Event::ChannelData`][crate::Event::ChannelData].
+/// This is obtained via [`Event::ChannelData`][crate::vendor::str0m::Event::ChannelData].
 #[derive(PartialEq, Eq)]
 pub struct ChannelData {
     /// Identifier of the channel this data was sent on.
     ///
     /// The channel would have been previously announced via
-    /// [`Event::ChannelOpen`][crate::Event::ChannelOpen].
+    /// [`Event::ChannelOpen`][crate::vendor::str0m::Event::ChannelOpen].
     pub id: ChannelId,
 
     /// Tells whether the sender sent this data as binary or text.
@@ -38,10 +39,10 @@ pub struct ChannelData {
 
 /// Channel for sending data to the remote peer.
 ///
-/// Get this handle from [`Rtc::channel()`][crate::Rtc::channel()].
+/// Get this handle from [`Rtc::channel()`][crate::vendor::str0m::Rtc::channel()].
 pub struct Channel<'a> {
     sctp_stream_id: u16,
-    // `RtcMut` arms the readiness on mutable deref only; see [`crate::poll`].
+    // `RtcMut` arms the readiness on mutable deref only; see [`crate::vendor::str0m::poll`].
     rtc: RtcMut<'a>,
 }
 
@@ -88,7 +89,7 @@ impl<'a> Channel<'a> {
     }
 
     /// Set the threshold to emit an
-    /// [`Event::ChannelBufferedAmountLow`][crate::Event::ChannelBufferedAmountLow]
+    /// [`Event::ChannelBufferedAmountLow`][crate::vendor::str0m::Event::ChannelBufferedAmountLow]
     ///
     /// Setting this on a closed or broken channel does not show an error. This is
     /// be similar to the [RTCPeerConnection equivalent][buff]
@@ -109,7 +110,7 @@ impl<'a> Channel<'a> {
     ///
     /// For (regular) in-band negotiation (DCEP, Data Channel Establishment Protocol), this
     /// returns `None` until the DCEP handshake completes. The config is guaranteed to be
-    /// available when [`Event::ChannelOpen`][crate::Event::ChannelOpen] is emitted.
+    /// available when [`Event::ChannelOpen`][crate::vendor::str0m::Event::ChannelOpen] is emitted.
     ///
     /// # Out-of-band negotiation
     ///
@@ -462,13 +463,13 @@ impl ChannelHandler {
 mod tests {
     use super::*;
 
-    use crate::poll::Readiness;
+    use crate::vendor::str0m::poll::Readiness;
 
     #[test]
     fn readiness_channel_timeout_without_work_does_not_wake() {
         let now = Instant::now();
         for initialized in [false, true] {
-            let mut sctp = RtcSctp::new(crate::io::DATAGRAM_MTU_TARGET, 65536);
+            let mut sctp = RtcSctp::new(crate::vendor::str0m::io::DATAGRAM_MTU_TARGET, 65536);
             if initialized {
                 sctp.init(false, now, None, None).unwrap();
             }
@@ -486,7 +487,7 @@ mod tests {
     #[test]
     fn readiness_channel_allocation_only_moves_timeout() {
         let now = Instant::now();
-        let mut sctp = RtcSctp::new(crate::io::DATAGRAM_MTU_TARGET, 65536);
+        let mut sctp = RtcSctp::new(crate::vendor::str0m::io::DATAGRAM_MTU_TARGET, 65536);
         sctp.init(false, now, None, None).unwrap();
         let mut handler = ChannelHandler::default();
         let id = handler.new_channel(&ChannelConfig::default());
@@ -573,7 +574,7 @@ mod tests {
 
     #[test]
     fn negotiated_stream_id_cannot_overlap_held_generation() {
-        let sctp = RtcSctp::new(1200, crate::sctp::LOCAL_MAX_MESSAGE_SIZE);
+        let sctp = RtcSctp::new(1200, crate::vendor::str0m::sctp::LOCAL_MAX_MESSAGE_SIZE);
         let mut handler = ChannelHandler::default();
         let config = ChannelConfig {
             negotiated: Some(4),
@@ -608,7 +609,7 @@ mod tests {
 
     #[test]
     fn negotiated_stream_keeps_config_while_waiting_for_reset() {
-        let mut sctp = RtcSctp::new(1200, crate::sctp::LOCAL_MAX_MESSAGE_SIZE);
+        let mut sctp = RtcSctp::new(1200, crate::vendor::str0m::sctp::LOCAL_MAX_MESSAGE_SIZE);
         let mut handler = ChannelHandler::default();
         let config = ChannelConfig {
             label: "replacement".into(),
@@ -647,7 +648,7 @@ mod tests {
     #[test]
     fn negotiated_stream_waiting_for_reset_does_not_spin_timeout() {
         let now = Instant::now();
-        let mut sctp = RtcSctp::new(1200, crate::sctp::LOCAL_MAX_MESSAGE_SIZE);
+        let mut sctp = RtcSctp::new(1200, crate::vendor::str0m::sctp::LOCAL_MAX_MESSAGE_SIZE);
         sctp.init(true, now, None, None).unwrap();
 
         let mut handler = ChannelHandler::default();
@@ -691,7 +692,7 @@ mod tests {
 
     #[test]
     fn stream_id_remains_held_without_reset_completion() {
-        let sctp = RtcSctp::new(1200, crate::sctp::LOCAL_MAX_MESSAGE_SIZE);
+        let sctp = RtcSctp::new(1200, crate::vendor::str0m::sctp::LOCAL_MAX_MESSAGE_SIZE);
         let mut handler = ChannelHandler::default();
 
         let id = handler.new_channel(&Default::default());
@@ -750,7 +751,7 @@ mod tests {
     /// hanging is not.
     #[test]
     fn stream_id_space_exhausted_by_remote() {
-        let sctp = RtcSctp::new(1200, crate::sctp::LOCAL_MAX_MESSAGE_SIZE);
+        let sctp = RtcSctp::new(1200, crate::vendor::str0m::sctp::LOCAL_MAX_MESSAGE_SIZE);
         let base: u16 = if sctp.is_client() { 0 } else { 1 };
 
         let mut handler = ChannelHandler {

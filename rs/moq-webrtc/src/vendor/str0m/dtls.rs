@@ -1,16 +1,17 @@
+use tracing::{debug, warn};
 use std::collections::VecDeque;
 use std::io;
 use std::ops::RangeInclusive;
 use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::time::Instant;
 
-use crate::crypto::Fingerprint;
-use crate::crypto::Sha256Provider;
-use crate::crypto::dtls::{DtlsCert, DtlsOutput, ProtocolVersion};
-use crate::crypto::dtls::{DtlsInstance, DtlsProvider, DtlsVersion};
-use crate::crypto::{CryptoError, DtlsError};
-use crate::io::DatagramSend;
-use crate::util::{already_happened, not_happening};
+use crate::vendor::str0m::crypto::Fingerprint;
+use crate::vendor::str0m::crypto::Sha256Provider;
+use crate::vendor::str0m::crypto::dtls::{DtlsCert, DtlsOutput, ProtocolVersion};
+use crate::vendor::str0m::crypto::dtls::{DtlsInstance, DtlsProvider, DtlsVersion};
+use crate::vendor::str0m::crypto::{CryptoError, DtlsError};
+use crate::vendor::str0m::io::DatagramSend;
+use crate::vendor::str0m::util::{already_happened, not_happening};
 
 /// Encapsulation of DTLS.
 ///
@@ -213,7 +214,7 @@ mod tests {
     use super::*;
 
     fn new_dtls(now: Instant, version: DtlsVersion) -> Dtls {
-        let provider = crate::crypto::test_default_provider();
+        let provider = crate::vendor::str0m::crypto::test_default_provider();
         let cert = provider.dtls_provider.generate_certificate().unwrap();
         Dtls::new(
             &cert,
@@ -235,11 +236,11 @@ mod tests {
 
     #[test]
     #[cfg(any(
-        feature = "aws-lc-rs",
-        feature = "rust-crypto",
-        feature = "openssl-dimpl",
-        feature = "wincrypto",
-        feature = "apple-crypto",
+        all(),
+        any(),
+        any(),
+        any(),
+        any(),
     ))]
     fn auto_client_retries_unaccepted_application_data() {
         fn exchange(

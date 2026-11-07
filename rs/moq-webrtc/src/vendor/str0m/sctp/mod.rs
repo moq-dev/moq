@@ -1,5 +1,6 @@
 #![allow(clippy::new_without_default)]
 
+use tracing::{debug, trace, warn};
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::net::SocketAddr;
@@ -7,16 +8,16 @@ use std::panic::UnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sctp_proto::{Association, AssociationHandle, DatagramEvent};
-use sctp_proto::{Endpoint, EndpointConfig, Stream, StreamEvent, Transmit};
-use sctp_proto::{Event, Payload, PayloadProtocolIdentifier, ServerConfig};
+use crate::vendor::sctp_proto::{Association, AssociationHandle, DatagramEvent};
+use crate::vendor::sctp_proto::{Endpoint, EndpointConfig, Stream, StreamEvent, Transmit};
+use crate::vendor::sctp_proto::{Event, Payload, PayloadProtocolIdentifier, ServerConfig};
 
 use snap::{b64_encode, webrtc_transport_config};
 
-use crate::poll::Wake;
+use crate::vendor::str0m::poll::Wake;
 
-pub use sctp_proto::Error as ProtoError;
-use sctp_proto::ReliabilityType;
+pub use crate::vendor::sctp_proto::Error as ProtoError;
+use crate::vendor::sctp_proto::ReliabilityType;
 
 mod snap;
 pub use snap::SctpInitData;
@@ -287,7 +288,7 @@ const STREAM_OPEN_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 /// Empirical: SCTP `max_payload_size` of 1200 has produced 1277-byte DTLS-wrapped
 /// datagrams (77 bytes combined SCTP + DTLS overhead).
 const _: () = assert!(
-    crate::io::MAX_DTLS_OVERHEAD + SCTP_OVERHEAD >= 80,
+    crate::vendor::str0m::io::MAX_DTLS_OVERHEAD + SCTP_OVERHEAD >= 80,
     "MAX_DTLS_OVERHEAD + SCTP_OVERHEAD must cover observed 77-byte SCTP-over-DTLS overhead"
 );
 
@@ -295,7 +296,7 @@ impl RtcSctp {
     pub fn new(mtu: usize, local_max_message_size: u32) -> Self {
         let mut config = EndpointConfig::default();
         let max_payload = mtu
-            .saturating_sub(crate::io::MAX_DTLS_OVERHEAD)
+            .saturating_sub(crate::vendor::str0m::io::MAX_DTLS_OVERHEAD)
             .saturating_sub(SCTP_OVERHEAD);
         config.max_payload_size(max_payload as u32);
         #[cfg(test)]
@@ -1401,7 +1402,7 @@ impl From<(ReliabilityType, u32)> for Reliability {
 mod tests {
     use super::*;
 
-    use crate::poll::Readiness;
+    use crate::vendor::str0m::poll::Readiness;
 
     #[test]
     fn readiness_uninitialized_sctp_timeout_does_not_wake() {
@@ -1448,7 +1449,7 @@ mod tests {
         let idx = entry_index(entries, entry.id).expect_err("entry should not already exist");
         entries.insert(idx, entry);
     }
-    use str0m_proto::DATAGRAM_MTU_TARGET;
+    use crate::vendor::str0m_proto::DATAGRAM_MTU_TARGET;
 
     #[test]
     fn partial_snap_init_requires_both_chunks() {
@@ -1736,7 +1737,7 @@ mod tests {
 
         // Past the deadline the open gives up and closes.
         let later = Instant::now() + STREAM_OPEN_TIMEOUT + Duration::from_secs(1);
-        let mut readiness = crate::poll::Readiness::armed();
+        let mut readiness = crate::vendor::str0m::poll::Readiness::armed();
         client.handle_timeout(later, &mut readiness.wake());
         let event = client.do_poll();
 
@@ -1895,7 +1896,7 @@ mod tests {
 
     #[test]
     fn max_payload_size_matches_mtu_minus_overhead() {
-        let overhead = crate::io::MAX_DTLS_OVERHEAD + SCTP_OVERHEAD;
+        let overhead = crate::vendor::str0m::io::MAX_DTLS_OVERHEAD + SCTP_OVERHEAD;
 
         let default_sctp = RtcSctp::new(DATAGRAM_MTU_TARGET, LOCAL_MAX_MESSAGE_SIZE);
         assert_eq!(

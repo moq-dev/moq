@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::packet::MediaKind;
-use crate::rtp_::Frequency;
+use crate::vendor::str0m::packet::MediaKind;
+use crate::vendor::str0m::rtp_::Frequency;
 
 use super::format_params::FormatParams;
 
@@ -76,9 +76,9 @@ pub enum Codec {
     /// Targets libwebrtc-compatible DTMF, defaulting to events `0-16`, not full
     /// RFC 4733 event handling. Only `0-X` SDP ranges are supported.
     ///
-    /// Frame mode uses [`Writer::telephone_event`][crate::media::Writer::telephone_event]
+    /// Frame mode uses [`Writer::telephone_event`][crate::vendor::str0m::media::Writer::telephone_event]
     /// and [`CodecExtra::Tele`][super::CodecExtra::Tele]. For RTP mode, see
-    /// [`TelephoneEvent`][crate::media::TelephoneEvent].
+    /// [`TelephoneEvent`][crate::vendor::str0m::media::TelephoneEvent].
     Tele,
     /// Technically not a codec, but used in places where codecs go
     /// in `a=rtpmap` lines.
@@ -95,8 +95,8 @@ pub enum Codec {
     Unknown,
 }
 
-#[cfg(feature = "drv")]
-crate::drv_identity_copy!(Codec, CodecSpec);
+#[cfg(any())]
+crate::vendor::str0m::drv_identity_copy!(Codec, CodecSpec);
 
 impl Codec {
     /// Tells if codec is audio.
@@ -177,8 +177,8 @@ impl fmt::Display for Codec {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::format::FormatParams;
-    use crate::rtp_::{Frequency, MediaTime};
+    use crate::vendor::str0m::format::FormatParams;
+    use crate::vendor::str0m::rtp_::{Frequency, MediaTime};
 
     fn g722_spec() -> CodecSpec {
         CodecSpec {

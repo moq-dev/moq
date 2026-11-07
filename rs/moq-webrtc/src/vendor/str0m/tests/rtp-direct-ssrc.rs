@@ -1,14 +1,14 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use netem::{NetemConfig, Probability, RandomLoss};
-use str0m::format::Codec;
-use str0m::media::MediaKind;
-use str0m::media::Pt;
-use str0m::rtp::{ExtensionValues, RawPacket, RtpWrite, Ssrc, Vp8Descriptor, Vp8Patch};
-use str0m::{Event, RtcError};
+use crate::vendor::netem::{NetemConfig, Probability, RandomLoss};
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::media::MediaKind;
+use crate::vendor::str0m::media::Pt;
+use crate::vendor::str0m::rtp::{ExtensionValues, RawPacket, RtpWrite, Ssrc, Vp8Descriptor, Vp8Patch};
+use crate::vendor::str0m::{Event, RtcError};
 
-mod common;
+use super::common;
 use common::{connect_l_r, init_crypto_default, init_log, progress};
 
 const VP8_PAYLOAD: [u8; 6] = [0x90, 0xf0, 0x01, 0x02, 0xa3, 0x00];

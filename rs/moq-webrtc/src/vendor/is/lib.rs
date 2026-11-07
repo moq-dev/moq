@@ -27,8 +27,8 @@
 //!
 //! # Quick start
 //!
-//! ```no_run
-//! use is::{IceAgent, IceCreds, Candidate};
+//! ```ignore
+//! use crate::vendor::is::{IceAgent, IceCreds, Candidate};
 //!
 //! // Create an agent with random credentials.
 //! let mut agent = IceAgent::new(IceCreds::new());
@@ -96,9 +96,8 @@
 #![allow(clippy::new_without_default)]
 #![allow(clippy::bool_to_int_with_if)]
 
-#[macro_use]
-extern crate tracing;
 
+use tracing::info_span;
 mod agent;
 pub use agent::{IceAgent, IceAgentEvent, IceConnectionState, IceCreds, LocalPreference};
 
@@ -119,17 +118,17 @@ pub mod stun;
 mod parse;
 
 mod hmac_provider;
-#[cfg(feature = "sha1")]
+#[cfg(test)]
 pub use hmac_provider::DefaultSha1HmacProvider;
-pub use str0m_proto::{Protocol, Sha1HmacProvider};
+pub use crate::vendor::str0m_proto::{Protocol, Sha1HmacProvider};
 
 #[cfg(test)]
 pub(crate) mod test {
-    use crate::agent::IceAgentStats;
-    use crate::stun::{StunMessage, StunPacket};
-    use crate::*;
-    use str0m_proto::Protocol;
-    use str0m_proto::Transmit;
+    use crate::vendor::is::agent::IceAgentStats;
+    use crate::vendor::is::stun::{StunMessage, StunPacket};
+    use crate::vendor::is::*;
+    use crate::vendor::str0m_proto::Protocol;
+    use crate::vendor::str0m_proto::Transmit;
 
     use std::collections::HashMap;
     use std::net::IpAddr;
@@ -1673,7 +1672,7 @@ pub(crate) mod test {
         mappings: &mut HashMap<(SocketAddr, SocketAddr), u16>,
     ) -> u16 {
         let outside_port = loop {
-            let port = str0m_proto::NonCryptographicRng::u16();
+            let port = crate::vendor::str0m_proto::NonCryptographicRng::u16();
 
             if mappings.values().any(|p| *p == port) {
                 continue;

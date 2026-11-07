@@ -1,31 +1,32 @@
 //! Strategy that amends the [`Rtc`] via SDP OFFER/ANSWER negotiation.
 
+use tracing::{debug, warn};
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::slice::Iter;
 
-use crate::Rtc;
-use crate::RtcError;
-use crate::channel::ChannelId;
-use crate::crypto::Fingerprint;
-use crate::format::CodecConfig;
-use crate::format::PayloadParams;
-use crate::media::{Media, Rids, Simulcast};
-use crate::packet::MediaKind;
-use crate::poll::RtcMut;
-use crate::rtp_::MidRid;
-use crate::rtp_::Rid;
-use crate::rtp_::{Direction, Extension, ExtensionMap, Mid, Pt, Ssrc};
-use crate::sctp::ChannelConfig;
-use crate::sctp::RtcSctp;
-use crate::sdp::{self, MediaAttribute, MediaLine, MediaType, Msid, Sdp};
-use crate::sdp::{Proto, SessionAttribute, Setup, SimulcastGroups};
-use crate::session::Session;
-use crate::{Candidate, IceCreds};
-use str0m_proto::Id;
+use crate::vendor::str0m::Rtc;
+use crate::vendor::str0m::RtcError;
+use crate::vendor::str0m::channel::ChannelId;
+use crate::vendor::str0m::crypto::Fingerprint;
+use crate::vendor::str0m::format::CodecConfig;
+use crate::vendor::str0m::format::PayloadParams;
+use crate::vendor::str0m::media::{Media, Rids, Simulcast};
+use crate::vendor::str0m::packet::MediaKind;
+use crate::vendor::str0m::poll::RtcMut;
+use crate::vendor::str0m::rtp_::MidRid;
+use crate::vendor::str0m::rtp_::Rid;
+use crate::vendor::str0m::rtp_::{Direction, Extension, ExtensionMap, Mid, Pt, Ssrc};
+use crate::vendor::str0m::sctp::ChannelConfig;
+use crate::vendor::str0m::sctp::RtcSctp;
+use crate::vendor::str0m::sdp::{self, MediaAttribute, MediaLine, MediaType, Msid, Sdp};
+use crate::vendor::str0m::sdp::{Proto, SessionAttribute, Setup, SimulcastGroups};
+use crate::vendor::str0m::session::Session;
+use crate::vendor::str0m::{Candidate, IceCreds};
+use crate::vendor::str0m_proto::Id;
 
-pub use crate::sdp::{SdpAnswer, SdpOffer};
-use crate::streams::{DEFAULT_RTX_CACHE_DURATION, DEFAULT_RTX_RATIO_CAP, Streams};
+pub use crate::vendor::str0m::sdp::{SdpAnswer, SdpOffer};
+use crate::vendor::str0m::streams::{DEFAULT_RTX_CACHE_DURATION, DEFAULT_RTX_RATIO_CAP, Streams};
 
 /// Changes to the Rtc via SDP Offer/Answer dance.
 ///
@@ -34,7 +35,7 @@ use crate::streams::{DEFAULT_RTX_CACHE_DURATION, DEFAULT_RTX_RATIO_CAP, Streams}
 /// another offer. If an incoming offer interrupts the exchange, recreate the desired local
 /// changes against the updated session after answering that offer.
 pub struct SdpApi<'a> {
-    // `RtcMut` arms the readiness on mutable deref only; see [`crate::poll`].
+    // `RtcMut` arms the readiness on mutable deref only; see [`crate::vendor::str0m::poll`].
     rtc: RtcMut<'a>,
     changes: Changes,
 }
@@ -69,10 +70,10 @@ impl<'a> SdpApi<'a> {
     /// Example of such problems would be an SDP without any m-lines, missing `a=fingerprint`
     /// or if `a=group` doesn't match the number of m-lines.
     ///
-    /// ```no_run
+    /// ```ignore
     /// # use std::time::Instant;
-    /// # use str0m::Rtc;
-    /// # use str0m::change::{SdpOffer};
+    /// # use crate::vendor::str0m::Rtc;
+    /// # use crate::vendor::str0m::change::{SdpOffer};
     /// // obtain offer from remote peer.
     /// let json_offer: &[u8] = todo!();
     /// let offer: SdpOffer = serde_json::from_slice(json_offer).unwrap();
@@ -157,11 +158,11 @@ impl<'a> SdpApi<'a> {
     /// [`SdpApi`][super::SdpApi] before calling this. The same also happens if we use
     /// [`SdpApi::accept_offer()`] before using this pending instance.
     ///
-    /// ```no_run
+    /// ```ignore
     /// # use std::time::Instant;
-    /// # use str0m::Rtc;
-    /// # use str0m::media::{MediaKind, Direction};
-    /// # use str0m::change::SdpAnswer;
+    /// # use crate::vendor::str0m::Rtc;
+    /// # use crate::vendor::str0m::media::{MediaKind, Direction};
+    /// # use crate::vendor::str0m::change::SdpAnswer;
     /// let mut rtc = Rtc::new(Instant::now());
     ///
     /// let mut changes = rtc.sdp_api();
@@ -250,10 +251,10 @@ impl<'a> SdpApi<'a> {
     ///
     /// If changes have been made, nothing happens until we call [`SdpApi::apply()`].
     ///
-    /// ```
-    /// # #[cfg(feature = "openssl")] {
+    /// ```ignore
+    /// # #[cfg(any())] {
     /// # use std::time::Instant;
-    /// # use str0m::{Rtc, media::MediaKind, media::Direction};
+    /// # use crate::vendor::str0m::{Rtc, media::MediaKind, media::Direction};
     /// let mut rtc = Rtc::new(Instant::now());
     ///
     /// let mut changes = rtc.sdp_api();
@@ -272,16 +273,16 @@ impl<'a> SdpApi<'a> {
     /// Each call will result in a new m-line in the offer identified by the [`Mid`].
     ///
     /// The mid is not valid to use until the SDP offer-answer dance is complete and
-    /// the mid been advertised via [`Event::MediaAdded`][crate::Event::MediaAdded].
+    /// the mid been advertised via [`Event::MediaAdded`][crate::vendor::str0m::Event::MediaAdded].
     ///
     /// * `stream_id` is used to synchronize media. It is `a=msid-semantic: WMS <streamId>` line in SDP.
     /// * `track_id` is becomes both the track id in `a=msid <streamId> <trackId>` as well as the
     ///   CNAME in the RTP SDES.
     ///
-    /// ```
-    /// # #[cfg(feature = "openssl")] {
+    /// ```ignore
+    /// # #[cfg(any())] {
     /// # use std::time::Instant;
-    /// # use str0m::{Rtc, media::MediaKind, media::Direction};
+    /// # use crate::vendor::str0m::{Rtc, media::MediaKind, media::Direction};
     /// let mut rtc = Rtc::new(Instant::now());
     ///
     /// let mut changes = rtc.sdp_api();
@@ -295,7 +296,7 @@ impl<'a> SdpApi<'a> {
         dir: Direction,
         stream_id: Option<String>,
         track_id: Option<String>,
-        simulcast: Option<crate::media::Simulcast>,
+        simulcast: Option<crate::vendor::str0m::media::Simulcast>,
     ) -> Mid {
         let mid = self.new_mid();
 
@@ -418,10 +419,10 @@ impl<'a> SdpApi<'a> {
     /// The label is used to identify the data channel to the remote peer. This is mostly
     /// useful when multiple channels are in use at the same time.
     ///
-    /// ```
-    /// # #[cfg(feature = "openssl")] {
+    /// ```ignore
+    /// # #[cfg(any())] {
     /// # use std::time::Instant;
-    /// # use str0m::Rtc;
+    /// # use crate::vendor::str0m::Rtc;
     /// let mut rtc = Rtc::new(Instant::now());
     ///
     /// let mut changes = rtc.sdp_api();
@@ -440,10 +441,10 @@ impl<'a> SdpApi<'a> {
     ///
     /// Refer to `add_channel` for more details.
     ///
-    /// ```
-    /// # #[cfg(feature = "openssl")] {
+    /// ```ignore
+    /// # #[cfg(any())] {
     /// # use std::time::Instant;
-    /// # use str0m::{channel::{ChannelConfig, Reliability}, Rtc};
+    /// # use crate::vendor::str0m::{channel::{ChannelConfig, Reliability}, Rtc};
     /// let mut rtc = Rtc::new(Instant::now());
     ///
     /// let mut changes = rtc.sdp_api();
@@ -507,10 +508,10 @@ impl<'a> SdpApi<'a> {
     /// point using it will raise an error. Using [`SdpApi::accept_offer()`] will also invalidate
     /// the current [`SdpPendingOffer`].
     ///
-    /// ```
-    /// # #[cfg(feature = "openssl")] {
+    /// ```ignore
+    /// # #[cfg(any())] {
     /// # use std::time::Instant;
-    /// # use str0m::Rtc;
+    /// # use crate::vendor::str0m::Rtc;
     /// let mut rtc = Rtc::new(Instant::now());
     ///
     /// let changes = rtc.sdp_api();
@@ -555,11 +556,11 @@ impl<'a> SdpApi<'a> {
 /// before we call [`SdpApi::accept_answer()`], which means that rolling back a
 /// change is as simple as dropping this instance.
 ///
-/// ```no_run
+/// ```ignore
 /// # use std::time::Instant;
-/// # use str0m::Rtc;
-/// # use str0m::media::{MediaKind, Direction};
-/// # use str0m::change::SdpAnswer;
+/// # use crate::vendor::str0m::Rtc;
+/// # use crate::vendor::str0m::media::{MediaKind, Direction};
+/// # use crate::vendor::str0m::change::SdpAnswer;
 /// let mut rtc = Rtc::new(Instant::now());
 ///
 /// let mut changes = rtc.sdp_api();
@@ -1831,9 +1832,9 @@ mod test {
     use sdp::RestrictionId;
     use sdp::SimulcastLayer as SdpSimulcastLayer;
 
-    use crate::format::Codec;
-    use crate::media::{Simulcast, SimulcastLayer};
-    use crate::sdp::RtpMap;
+    use crate::vendor::str0m::format::Codec;
+    use crate::vendor::str0m::media::{Simulcast, SimulcastLayer};
+    use crate::vendor::str0m::sdp::RtpMap;
 
     use super::*;
 
@@ -1859,7 +1860,7 @@ mod test {
     /// RFC 8842 §5.2: an offer MUST use a=setup:actpass regardless of DTLS role.
     #[test]
     fn offer_uses_actpass() {
-        crate::init_crypto_default();
+        crate::vendor::str0m::init_crypto_default();
 
         let now = Instant::now();
         let mut rtc = Rtc::new(now);
@@ -1881,7 +1882,7 @@ mod test {
     /// offerer becomes active (DTLS client). The answerer's SDP must reflect passive.
     #[test]
     fn answer_uses_negotiated_dtls_role() {
-        crate::init_crypto_default();
+        crate::vendor::str0m::init_crypto_default();
 
         let now = Instant::now();
         let mut offerer = Rtc::new(now);
@@ -1930,7 +1931,7 @@ mod test {
 
     #[test]
     fn test_out_of_order_error() {
-        crate::init_crypto_default();
+        crate::vendor::str0m::init_crypto_default();
 
         let now = Instant::now();
         let mut rtc1 = Rtc::new(now);
@@ -1962,7 +1963,7 @@ mod test {
     // returned by as_new_medias().
     #[test]
     fn as_new_medias_contiguous_indices_with_non_media_changes() {
-        crate::init_crypto_default();
+        crate::vendor::str0m::init_crypto_default();
 
         let now = Instant::now();
         let mut rtc = Rtc::new(now);
@@ -2028,7 +2029,7 @@ mod test {
 
     #[test]
     fn twcc_negotiation_uses_first_media_section_for_each_pt() {
-        crate::init_crypto_default();
+        crate::vendor::str0m::init_crypto_default();
         for enabled_audio in [1, 2] {
             let expected_audio = enabled_audio == 1;
             let now = Instant::now();
@@ -2107,7 +2108,7 @@ mod test {
 
     #[test]
     fn test_rtp_payload_priority() {
-        crate::init_crypto_default();
+        crate::vendor::str0m::init_crypto_default();
 
         let now = Instant::now();
         let mut rtc1 = Rtc::builder()
@@ -2155,7 +2156,7 @@ mod test {
 
     #[test]
     fn non_simulcast_rids() {
-        crate::init_crypto_default();
+        crate::vendor::str0m::init_crypto_default();
 
         let now = Instant::now();
         let mut rtc1 = Rtc::new(now);
@@ -2194,7 +2195,7 @@ mod test {
 
     #[test]
     fn simulcast_ssrc_allocation() {
-        crate::init_crypto_default();
+        crate::vendor::str0m::init_crypto_default();
 
         let mut rtc1 = Rtc::new(Instant::now());
 
@@ -2282,7 +2283,7 @@ mod test {
 
     #[test]
     fn simulcast_attributes() {
-        crate::init_crypto_default();
+        crate::vendor::str0m::init_crypto_default();
 
         let mut rtc1 = Rtc::new(Instant::now());
 
@@ -2421,7 +2422,7 @@ mod test {
 
     #[test]
     fn test_local_max_message_size_advertised() {
-        crate::init_crypto_default();
+        crate::vendor::str0m::init_crypto_default();
 
         let now = Instant::now();
         let mut rtc = Rtc::new(now);
@@ -2445,13 +2446,13 @@ mod test {
 
         assert_eq!(
             max_size,
-            crate::sctp::LOCAL_MAX_MESSAGE_SIZE as usize,
+            crate::vendor::str0m::sctp::LOCAL_MAX_MESSAGE_SIZE as usize,
             "max-message-size should match LOCAL_MAX_MESSAGE_SIZE constant"
         );
 
         // Also verify it's in the SDP string output
         let sdp_string = offer.to_sdp_string();
-        let expected_line = format!("a=max-message-size:{}", crate::sctp::LOCAL_MAX_MESSAGE_SIZE);
+        let expected_line = format!("a=max-message-size:{}", crate::vendor::str0m::sctp::LOCAL_MAX_MESSAGE_SIZE);
         assert!(
             sdp_string.contains(&expected_line),
             "SDP should contain max-message-size attribute with LOCAL_MAX_MESSAGE_SIZE value"
@@ -2496,7 +2497,7 @@ mod test {
 
     #[test]
     fn test_remote_max_message_size_applied() {
-        crate::init_crypto_default();
+        crate::vendor::str0m::init_crypto_default();
 
         let now = Instant::now();
         let custom_max_size1 = 98304u32;
@@ -2568,7 +2569,7 @@ mod test {
         // RFC 8841 §6.1: a=max-message-size:0 means the peer can receive a message
         // of any size, so we represent it as u32::MAX rather than passing 0 through
         // (which would reject every non-empty outbound message in sctp-proto).
-        crate::init_crypto_default();
+        crate::vendor::str0m::init_crypto_default();
 
         let now = Instant::now();
         let mut rtc1 = Rtc::new(now);
@@ -2580,7 +2581,7 @@ mod test {
 
         let sdp_string = offer1.to_sdp_string();
         let modified_sdp = sdp_string.replace(
-            &format!("a=max-message-size:{}", crate::sctp::LOCAL_MAX_MESSAGE_SIZE),
+            &format!("a=max-message-size:{}", crate::vendor::str0m::sctp::LOCAL_MAX_MESSAGE_SIZE),
             "a=max-message-size:0",
         );
 
@@ -2598,7 +2599,7 @@ mod test {
 
     #[test]
     fn test_remote_max_message_size_too_large_clamps_to_unbounded() {
-        crate::init_crypto_default();
+        crate::vendor::str0m::init_crypto_default();
 
         let now = Instant::now();
         let mut rtc1 = Rtc::new(now);
@@ -2610,7 +2611,7 @@ mod test {
 
         let sdp_string = offer1.to_sdp_string();
         let modified_sdp = sdp_string.replace(
-            &format!("a=max-message-size:{}", crate::sctp::LOCAL_MAX_MESSAGE_SIZE),
+            &format!("a=max-message-size:{}", crate::vendor::str0m::sctp::LOCAL_MAX_MESSAGE_SIZE),
             "a=max-message-size:4294967296",
         );
 

@@ -3,7 +3,7 @@
 use std::mem;
 use std::time::{Duration, Instant};
 
-use crate::util::already_happened;
+use crate::vendor::str0m::util::already_happened;
 
 /// Fixed size buffer that evicts the oldest entries based on time.
 ///

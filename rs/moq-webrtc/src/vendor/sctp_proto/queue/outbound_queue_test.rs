@@ -339,7 +339,7 @@ fn pending_expiry_deadlines_ssn_wrap_and_exemptions() {
         for c in &mut chunks {
             c.deadline = Some(now);
             if exemption == 0 {
-                c.payload_type = crate::PayloadProtocolIdentifier::Dcep;
+                c.payload_type = crate::vendor::sctp_proto::PayloadProtocolIdentifier::Dcep;
             }
             if exemption == 1 {
                 c.user_data.clear();

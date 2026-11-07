@@ -1,5 +1,5 @@
 use super::Asn1Cert;
-use crate::buffer::Buf;
+use crate::vendor::dimpl::buffer::Buf;
 use arrayvec::ArrayVec;
 use nom::Err;
 use nom::bytes::complete::take;
@@ -60,7 +60,7 @@ impl Certificate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::Buf;
+    use crate::vendor::dimpl::buffer::Buf;
 
     const MESSAGE: &[u8] = &[
         0x00, 0x00, 0x0C, // Total length

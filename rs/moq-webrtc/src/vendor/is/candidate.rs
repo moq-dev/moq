@@ -1,4 +1,4 @@
-use crate::IceError;
+use crate::vendor::is::IceError;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::hash_map::DefaultHasher;
@@ -6,7 +6,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::net::{IpAddr, SocketAddr};
-use str0m_proto::{Protocol, TcpType};
+use crate::vendor::str0m_proto::{Protocol, TcpType};
 
 /// ICE candidates are network addresses used to connect to a peer.
 ///
@@ -125,10 +125,10 @@ impl Candidate {
     ///
     /// # Example
     ///
-    /// ```
-    /// # use is::Candidate;
-    /// # use is::IceError;
-    /// # use str0m_proto::TcpType;
+    /// ```ignore
+    /// # use crate::vendor::is::Candidate;
+    /// # use crate::vendor::is::IceError;
+    /// # use crate::vendor::str0m_proto::TcpType;
     /// # use std::net::SocketAddr;
     ///
     /// let addr: SocketAddr = "192.168.1.1:12345".parse().unwrap();
@@ -322,7 +322,7 @@ impl Candidate {
     /// Expects the format from RFC 5245 section 15.1, e.g.
     /// `candidate:1 1 udp 2113929471 203.0.113.100 10100 typ host`.
     pub fn from_sdp_string(s: &str) -> Result<Self, IceError> {
-        crate::parse::parse_candidate(s)
+        crate::vendor::is::parse::parse_candidate(s)
     }
 
     /// Creates a peer reflexive ICE candidate.

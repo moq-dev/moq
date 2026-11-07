@@ -19,44 +19,45 @@
 //
 // This implementation is a Sans-IO DTLS 1.3 client.
 
+use tracing::{debug, trace};
 use std::collections::VecDeque;
 use std::time::Instant;
 
 use arrayvec::ArrayVec;
 use subtle::ConstantTimeEq;
 
-use crate::auto::HybridClientHello;
-use crate::buffer::Buf;
-use crate::buffer::ToBuf;
-use crate::crypto::{ActiveKeyExchange, SrtpProfile};
-use crate::dtls13::Server;
-use crate::dtls13::engine::Engine;
-use crate::dtls13::message::Asn1Cert;
-use crate::dtls13::message::Body;
-use crate::dtls13::message::Certificate;
-use crate::dtls13::message::CertificateEntry;
-use crate::dtls13::message::ClientHello;
-use crate::dtls13::message::CompressionMethod;
-use crate::dtls13::message::ContentType;
-use crate::dtls13::message::Cookie;
-use crate::dtls13::message::Dtls13CipherSuite;
-use crate::dtls13::message::Extension;
-use crate::dtls13::message::ExtensionType;
-use crate::dtls13::message::KeyShareClientHello;
-use crate::dtls13::message::KeyShareEntry;
-use crate::dtls13::message::KeyUpdateRequest;
-use crate::dtls13::message::MessageType;
-use crate::dtls13::message::NamedGroup;
-use crate::dtls13::message::ProtocolVersion;
-use crate::dtls13::message::Random;
-use crate::dtls13::message::SessionId;
-use crate::dtls13::message::SignatureAlgorithmsExtension;
-use crate::dtls13::message::SignatureScheme;
-use crate::dtls13::message::SupportedGroupsExtension;
-use crate::dtls13::message::SupportedVersionsClientHello;
-use crate::dtls13::message::UseSrtpExtension;
-use crate::timer::HandshakeTimers;
-use crate::{Error, InternalError, KeyingMaterial, Output};
+use crate::vendor::dimpl::auto::HybridClientHello;
+use crate::vendor::dimpl::buffer::Buf;
+use crate::vendor::dimpl::buffer::ToBuf;
+use crate::vendor::dimpl::crypto::{ActiveKeyExchange, SrtpProfile};
+use crate::vendor::dimpl::dtls13::Server;
+use crate::vendor::dimpl::dtls13::engine::Engine;
+use crate::vendor::dimpl::dtls13::message::Asn1Cert;
+use crate::vendor::dimpl::dtls13::message::Body;
+use crate::vendor::dimpl::dtls13::message::Certificate;
+use crate::vendor::dimpl::dtls13::message::CertificateEntry;
+use crate::vendor::dimpl::dtls13::message::ClientHello;
+use crate::vendor::dimpl::dtls13::message::CompressionMethod;
+use crate::vendor::dimpl::dtls13::message::ContentType;
+use crate::vendor::dimpl::dtls13::message::Cookie;
+use crate::vendor::dimpl::dtls13::message::Dtls13CipherSuite;
+use crate::vendor::dimpl::dtls13::message::Extension;
+use crate::vendor::dimpl::dtls13::message::ExtensionType;
+use crate::vendor::dimpl::dtls13::message::KeyShareClientHello;
+use crate::vendor::dimpl::dtls13::message::KeyShareEntry;
+use crate::vendor::dimpl::dtls13::message::KeyUpdateRequest;
+use crate::vendor::dimpl::dtls13::message::MessageType;
+use crate::vendor::dimpl::dtls13::message::NamedGroup;
+use crate::vendor::dimpl::dtls13::message::ProtocolVersion;
+use crate::vendor::dimpl::dtls13::message::Random;
+use crate::vendor::dimpl::dtls13::message::SessionId;
+use crate::vendor::dimpl::dtls13::message::SignatureAlgorithmsExtension;
+use crate::vendor::dimpl::dtls13::message::SignatureScheme;
+use crate::vendor::dimpl::dtls13::message::SupportedGroupsExtension;
+use crate::vendor::dimpl::dtls13::message::SupportedVersionsClientHello;
+use crate::vendor::dimpl::dtls13::message::UseSrtpExtension;
+use crate::vendor::dimpl::timer::HandshakeTimers;
+use crate::vendor::dimpl::{Error, InternalError, KeyingMaterial, Output};
 
 /// DTLS 1.3 client
 pub struct Client {
@@ -175,8 +176,8 @@ impl Client {
     /// enqueued for output.
     pub(crate) fn new_from_hybrid(
         mut hybrid: HybridClientHello,
-        config: std::sync::Arc<crate::Config>,
-        certificate: crate::DtlsCertificate,
+        config: std::sync::Arc<crate::vendor::dimpl::Config>,
+        certificate: crate::vendor::dimpl::DtlsCertificate,
         now: Instant,
         timers: HandshakeTimers,
     ) -> Client {
@@ -433,7 +434,7 @@ impl State {
                 .next()
                 .map(|g| g.name())
                 .ok_or(Error::CryptoError(
-                    crate::CryptoError::NoSupportedKeyExchangeGroups,
+                    crate::vendor::dimpl::CryptoError::NoSupportedKeyExchangeGroups,
                 ))?
         };
 
@@ -441,7 +442,7 @@ impl State {
             .engine
             .find_kx_group(group)
             .ok_or(Error::CryptoError(
-                crate::CryptoError::KeyExchangeGroupNotFound(group),
+                crate::vendor::dimpl::CryptoError::KeyExchangeGroupNotFound(group),
             ))?;
 
         let key_exchange = if let Some(key_exchange) = client.active_key_exchange.take() {
@@ -526,7 +527,7 @@ impl State {
             if client.hello_retry {
                 client.engine.transcript.resize(transcript_len_before, 0);
                 return Err(Error::SecurityError(
-                    crate::SecurityError::UnexpectedSecondHelloRetryRequest,
+                    crate::vendor::dimpl::SecurityError::UnexpectedSecondHelloRetryRequest,
                 )
                 .into());
             }
@@ -553,7 +554,7 @@ impl State {
                 .is_cipher_suite_allowed(server_hello.cipher_suite)
             {
                 return Err((Error::SecurityError(
-                    crate::SecurityError::HrrSelectedDisallowedCipherSuite,
+                    crate::vendor::dimpl::SecurityError::HrrSelectedDisallowedCipherSuite,
                 ))
                 .into());
             }
@@ -563,7 +564,7 @@ impl State {
             let hrr_version_ok = server_hello.selected_version() == Some(ProtocolVersion::DTLS1_3);
             if !hrr_version_ok {
                 return Err(
-                    (Error::SecurityError(crate::SecurityError::HrrDidNotSelectDtls13)).into(),
+                    (Error::SecurityError(crate::vendor::dimpl::SecurityError::HrrDidNotSelectDtls13)).into(),
                 );
             }
 
@@ -591,7 +592,7 @@ impl State {
         // Validate legacy_version (must be DTLS 1.2)
         if server_hello.legacy_version != ProtocolVersion::DTLS1_2 {
             return Err(Error::SecurityError(
-                crate::SecurityError::ServerHelloLegacyVersionNotDtls12,
+                crate::vendor::dimpl::SecurityError::ServerHelloLegacyVersionNotDtls12,
             )
             .into());
         }
@@ -599,7 +600,7 @@ impl State {
         // Validate legacy_compression_method (must be null)
         if server_hello.legacy_compression_method != CompressionMethod::Null {
             return Err((Error::SecurityError(
-                crate::SecurityError::ServerHelloCompressionMustBeNull,
+                crate::vendor::dimpl::SecurityError::ServerHelloCompressionMustBeNull,
             ))
             .into());
         }
@@ -613,14 +614,14 @@ impl State {
         let cs = server_hello.cipher_suite;
         if cs.is_unknown() {
             return Err((Error::SecurityError(
-                crate::SecurityError::ServerSelectedUnknownCipherSuite,
+                crate::vendor::dimpl::SecurityError::ServerSelectedUnknownCipherSuite,
             ))
             .into());
         }
 
         if !client.engine.is_cipher_suite_allowed(cs) {
             return Err(Error::SecurityError(
-                crate::SecurityError::ServerSelectedDisallowedDtls13CipherSuite(cs),
+                crate::vendor::dimpl::SecurityError::ServerSelectedDisallowedDtls13CipherSuite(cs),
             )
             .into());
         }
@@ -633,11 +634,11 @@ impl State {
         }
         if server_hello.selected_version() != Some(ProtocolVersion::DTLS1_3) {
             return Err(
-                Error::SecurityError(crate::SecurityError::ServerDidNotNegotiateDtls13).into(),
+                Error::SecurityError(crate::vendor::dimpl::SecurityError::ServerDidNotNegotiateDtls13).into(),
             );
         }
         let key_share = server_hello.key_share().ok_or(Error::SecurityError(
-            crate::SecurityError::ServerMissingKeyShare,
+            crate::vendor::dimpl::SecurityError::ServerMissingKeyShare,
         ))?;
         let server_group = key_share.entry.group;
 
@@ -646,12 +647,12 @@ impl State {
             .active_key_exchange
             .take()
             .ok_or(Error::InvalidState(
-                crate::InvalidStateError::NoActiveKeyExchange,
+                crate::vendor::dimpl::InvalidStateError::NoActiveKeyExchange,
             ))?;
 
         if key_exchange.group() != server_group {
             return Err(
-                Error::SecurityError(crate::SecurityError::ServerKeyShareGroupMismatch {
+                Error::SecurityError(crate::vendor::dimpl::SecurityError::ServerKeyShareGroupMismatch {
                     expected: key_exchange.group(),
                     actual: server_group,
                 })
@@ -765,14 +766,14 @@ impl State {
 
         if !certificate.context_range.is_empty() {
             return Err(Error::CertificateError(
-                crate::CertificateError::ServerCertificateContextMustBeEmpty,
+                crate::vendor::dimpl::CertificateError::ServerCertificateContextMustBeEmpty,
             )
             .into());
         }
 
         if certificate.certificate_list.is_empty() {
             return Err((Error::CertificateError(
-                crate::CertificateError::NoServerCertificateReceived,
+                crate::vendor::dimpl::CertificateError::NoServerCertificateReceived,
             ))
             .into());
         }
@@ -835,7 +836,7 @@ impl State {
         // is one that was offered in the signature_algorithms extension.
         if !SignatureScheme::supported().contains(&scheme) {
             return Err(
-                Error::SecurityError(crate::SecurityError::SignatureSchemeNotOffered(scheme))
+                Error::SecurityError(crate::vendor::dimpl::SecurityError::SignatureSchemeNotOffered(scheme))
                     .into(),
             );
         }
@@ -851,7 +852,7 @@ impl State {
         let mut signature_copy = ArrayVec::<u8, 512>::new();
         signature_copy
             .try_extend_from_slice(signature)
-            .map_err(|_| Error::SecurityError(crate::SecurityError::SignatureTooLarge))?;
+            .map_err(|_| Error::SecurityError(crate::vendor::dimpl::SecurityError::SignatureTooLarge))?;
 
         drop(maybe);
 
@@ -860,10 +861,10 @@ impl State {
             .server_certificates
             .first()
             .ok_or(Error::CertificateError(
-                crate::CertificateError::NoServerCertificateForVerification,
+                crate::vendor::dimpl::CertificateError::NoServerCertificateForVerification,
             ))?;
 
-        #[cfg(feature = "_crypto-common")]
+        #[cfg(all())]
         verify_scheme_curve(scheme, cert_der)?;
 
         let (hash_alg, sig_alg) = signature_scheme_to_components(scheme)?;
@@ -890,7 +891,7 @@ impl State {
                 .server_hs_traffic_secret
                 .as_ref()
                 .ok_or(Error::InvalidState(
-                    crate::InvalidStateError::NoServerHandshakeTrafficSecret,
+                    crate::vendor::dimpl::InvalidStateError::NoServerHandshakeTrafficSecret,
                 ))?;
         let expected_verify_data = client.engine.compute_verify_data(server_hs_secret)?;
 
@@ -918,7 +919,7 @@ impl State {
         let is_eq: bool = verify_data.ct_eq(&*expected_verify_data).into();
         if !is_eq {
             return Err((Error::SecurityError(
-                crate::SecurityError::ServerFinishedVerificationFailed,
+                crate::vendor::dimpl::SecurityError::ServerFinishedVerificationFailed,
             ))
             .into());
         }
@@ -931,7 +932,7 @@ impl State {
 
         // Derive application secrets from handshake secret + transcript through server Finished
         let handshake_secret = client.handshake_secret.as_ref().ok_or(Error::InvalidState(
-            crate::InvalidStateError::NoHandshakeSecretForApplicationKeyDerivation,
+            crate::vendor::dimpl::InvalidStateError::NoHandshakeSecretForApplicationKeyDerivation,
         ))?;
 
         let (c_ap_traffic, s_ap_traffic) =
@@ -1028,7 +1029,7 @@ impl State {
                 record.first_handshake().map(|handshake| &handshake.header),
             );
             return Err(
-                Error::UnexpectedMessage(crate::UnexpectedMessageError::UnexpectedEpoch).into(),
+                Error::UnexpectedMessage(crate::vendor::dimpl::UnexpectedMessageError::UnexpectedEpoch).into(),
             );
         }
 
@@ -1045,7 +1046,7 @@ impl State {
                 .client_hs_traffic_secret
                 .as_ref()
                 .ok_or(Error::InvalidState(
-                    crate::InvalidStateError::NoClientHandshakeTrafficSecretForFinished,
+                    crate::vendor::dimpl::InvalidStateError::NoClientHandshakeTrafficSecretForFinished,
                 ))?;
         let mut client_hs_secret_copy = Buf::new();
         client_hs_secret_copy.extend_from_slice(client_hs_secret);
@@ -1386,18 +1387,18 @@ pub(crate) fn handshake_create_certificate_verify(
 
     // Determine the SignatureScheme from hash_alg + sig_alg
     let scheme = match (sig_alg, hash_alg) {
-        (crate::types::SignatureAlgorithm::ECDSA, crate::types::HashAlgorithm::SHA256) => {
+        (crate::vendor::dimpl::types::SignatureAlgorithm::ECDSA, crate::vendor::dimpl::types::HashAlgorithm::SHA256) => {
             SignatureScheme::ECDSA_SECP256R1_SHA256
         }
-        (crate::types::SignatureAlgorithm::ECDSA, crate::types::HashAlgorithm::SHA384) => {
+        (crate::vendor::dimpl::types::SignatureAlgorithm::ECDSA, crate::vendor::dimpl::types::HashAlgorithm::SHA384) => {
             SignatureScheme::ECDSA_SECP384R1_SHA384
         }
-        (crate::types::SignatureAlgorithm::RSA, crate::types::HashAlgorithm::SHA256) => {
+        (crate::vendor::dimpl::types::SignatureAlgorithm::RSA, crate::vendor::dimpl::types::HashAlgorithm::SHA256) => {
             SignatureScheme::RSA_PSS_RSAE_SHA256
         }
         _ => {
             return Err(Error::CryptoError(
-                crate::CryptoError::UnsupportedSignaturePair {
+                crate::vendor::dimpl::CryptoError::UnsupportedSignaturePair {
                     signature: sig_alg,
                     hash: hash_alg,
                 },
@@ -1419,12 +1420,12 @@ pub(crate) fn signature_scheme_to_components(
     scheme: SignatureScheme,
 ) -> Result<
     (
-        crate::types::HashAlgorithm,
-        crate::types::SignatureAlgorithm,
+        crate::vendor::dimpl::types::HashAlgorithm,
+        crate::vendor::dimpl::types::SignatureAlgorithm,
     ),
     Error,
 > {
-    use crate::types::{HashAlgorithm, SignatureAlgorithm};
+    use crate::vendor::dimpl::types::{HashAlgorithm, SignatureAlgorithm};
     match scheme {
         SignatureScheme::ECDSA_SECP256R1_SHA256 => {
             Ok((HashAlgorithm::SHA256, SignatureAlgorithm::ECDSA))
@@ -1436,7 +1437,7 @@ pub(crate) fn signature_scheme_to_components(
             Ok((HashAlgorithm::SHA512, SignatureAlgorithm::ECDSA))
         }
         SignatureScheme::ED25519 => Err(Error::SecurityError(
-            crate::SecurityError::UnsupportedSignatureScheme(scheme),
+            crate::vendor::dimpl::SecurityError::UnsupportedSignatureScheme(scheme),
         )),
         SignatureScheme::RSA_PSS_RSAE_SHA256 => {
             Ok((HashAlgorithm::SHA256, SignatureAlgorithm::RSA))
@@ -1453,24 +1454,24 @@ pub(crate) fn signature_scheme_to_components(
         SignatureScheme::RSA_PKCS1_SHA256
         | SignatureScheme::RSA_PKCS1_SHA384
         | SignatureScheme::RSA_PKCS1_SHA512 => Err(Error::SecurityError(
-            crate::SecurityError::UnsupportedSignatureScheme(scheme),
+            crate::vendor::dimpl::SecurityError::UnsupportedSignatureScheme(scheme),
         )),
         _ => Err(Error::SecurityError(
-            crate::SecurityError::UnsupportedSignatureScheme(scheme),
+            crate::vendor::dimpl::SecurityError::UnsupportedSignatureScheme(scheme),
         )),
     }
 }
 
 /// RFC 8446 §4.4.3: For ECDSA schemes, verify the curve in the [`SignatureScheme`]
 /// matches the certificate's public key curve.
-#[cfg(feature = "_crypto-common")]
+#[cfg(all())]
 pub(crate) fn verify_scheme_curve(scheme: SignatureScheme, cert_der: &[u8]) -> Result<(), Error> {
     if let Some(expected_group) = scheme.named_group() {
         let cert_group =
-            crate::crypto::cert_named_group(cert_der).map_err(Error::CertificateError)?;
+            crate::vendor::dimpl::crypto::cert_named_group(cert_der).map_err(Error::CertificateError)?;
         if expected_group != cert_group {
             return Err(Error::SecurityError(
-                crate::SecurityError::SignatureSchemeCertificateCurveMismatch {
+                crate::vendor::dimpl::SecurityError::SignatureSchemeCertificateCurveMismatch {
                     scheme,
                     expected: expected_group,
                     actual: cert_group,
@@ -1505,14 +1506,14 @@ impl LocalEvent {
     }
 }
 
-#[cfg(all(test, feature = "rcgen"))]
+#[cfg(all(test, all()))]
 mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::Config;
-    use crate::certificate::generate_self_signed_certificate;
-    use crate::{CryptoError, SecurityError};
+    use crate::vendor::dimpl::Config;
+    use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
+    use crate::vendor::dimpl::{CryptoError, SecurityError};
 
     #[derive(Debug)]
     struct TestKeyExchange {
@@ -1630,7 +1631,7 @@ mod tests {
                 assert_eq!(packets, 1, "messages must share one datagram");
             }
             assert_eq!(
-                crate::dtls13::incoming::RecordHandler::resolve_epoch(&client.engine, 0),
+                crate::vendor::dimpl::dtls13::incoming::RecordHandler::resolve_epoch(&client.engine, 0),
                 4,
                 "the fresh ticket must advance the sequence so KeyUpdate can be processed"
             );
@@ -1710,7 +1711,7 @@ mod tests {
                 }
             }
             assert_eq!(
-                crate::dtls13::incoming::RecordHandler::resolve_epoch(&client.engine, 0),
+                crate::vendor::dimpl::dtls13::incoming::RecordHandler::resolve_epoch(&client.engine, 0),
                 4
             );
             server
@@ -1788,7 +1789,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            crate::InternalError::Fatal(Error::CertificateError(_))
+            crate::vendor::dimpl::InternalError::Fatal(Error::CertificateError(_))
         ));
     }
 
@@ -1814,7 +1815,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            crate::InternalError::Fatal(Error::SecurityError(
+            crate::vendor::dimpl::InternalError::Fatal(Error::SecurityError(
                 SecurityError::ServerKeyShareGroupMismatch {
                     expected: NamedGroup::X25519,
                     actual: NamedGroup::Secp256r1,

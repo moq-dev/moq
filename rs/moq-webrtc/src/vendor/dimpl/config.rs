@@ -3,11 +3,11 @@ use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::crypto::{CryptoProvider, SupportedDtls12CipherSuite};
-use crate::crypto::{SupportedDtls13CipherSuite, SupportedKxGroup};
-use crate::dtls12::message::Dtls12CipherSuite;
-use crate::types::{Dtls13CipherSuite, NamedGroup};
-use crate::{ConfigError, Error};
+use crate::vendor::dimpl::crypto::{CryptoProvider, SupportedDtls12CipherSuite};
+use crate::vendor::dimpl::crypto::{SupportedDtls13CipherSuite, SupportedKxGroup};
+use crate::vendor::dimpl::dtls12::message::Dtls12CipherSuite;
+use crate::vendor::dimpl::types::{Dtls13CipherSuite, NamedGroup};
+use crate::vendor::dimpl::{ConfigError, Error};
 
 const MAX_TIMING_DURATION: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60);
 
@@ -52,11 +52,11 @@ pub enum Psk {
     },
 }
 
-#[cfg(feature = "aws-lc-rs")]
-use crate::crypto::aws_lc_rs;
+#[cfg(all())]
+use crate::vendor::dimpl::crypto::aws_lc_rs;
 
-#[cfg(feature = "rust-crypto")]
-use crate::crypto::rust_crypto;
+#[cfg(any())]
+use crate::vendor::dimpl::crypto::rust_crypto;
 
 /// DTLS configuration shared by all connections.
 ///
@@ -392,11 +392,11 @@ impl ConfigBuilder {
     /// Set the timeout for the entire handshake, regardless of flights.
     ///
     /// Starts when the client emits its first ClientHello packet through
-    /// [`crate::Output::Packet`], or when the server accepts its first
+    /// [`crate::vendor::dimpl::Output::Packet`], or when the server accepts its first
     /// structurally valid ClientHello fragment, even if its body is later rejected.
     /// A corrected ClientHello shares the same deadline for this peer.
     /// Construction and idle time consume no budget. Uses the logical time
-    /// supplied to [`crate::Dtls::handle_timeout`].
+    /// supplied to [`crate::vendor::dimpl::Dtls::handle_timeout`].
     ///
     /// The absolute deadline survives Auto version selection, cookie exchanges,
     /// later flights, and retransmissions. It is disabled after completion and
@@ -523,10 +523,10 @@ impl ConfigBuilder {
             .crypto_provider
             .or_else(|| CryptoProvider::get_default().cloned());
 
-        #[cfg(feature = "aws-lc-rs")]
+        #[cfg(all())]
         let crypto_provider = crypto_provider.or_else(|| Some(aws_lc_rs::default_provider()));
 
-        #[cfg(feature = "rust-crypto")]
+        #[cfg(any())]
         let crypto_provider = crypto_provider.or_else(|| Some(rust_crypto::default_provider()));
 
         let crypto_provider = crypto_provider.expect(
@@ -1085,7 +1085,7 @@ mod tests {
 
     #[test]
     fn filter_with_explicit_provider() {
-        #[cfg(feature = "aws-lc-rs")]
+        #[cfg(all())]
         {
             let config = Config::builder()
                 .with_crypto_provider(aws_lc_rs::default_provider())

@@ -19,13 +19,13 @@ pub(crate) mod chunk_shutdown_ack;
 pub(crate) mod chunk_shutdown_complete;
 pub(crate) mod chunk_type;
 
-use crate::error::{Error, Result};
+use crate::vendor::sctp_proto::error::{Error, Result};
 use chunk_header::*;
 
-use alloc::boxed::Box;
-use alloc::string::String;
-use alloc::vec;
-use alloc::vec::Vec;
+use std::boxed::Box;
+use std::string::String;
+use std::vec;
+use std::vec::Vec;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use core::{any::Any, fmt};
 

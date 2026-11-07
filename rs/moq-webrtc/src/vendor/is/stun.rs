@@ -1,3 +1,4 @@
+use tracing::{trace, warn};
 use std::fmt;
 use std::fmt::Formatter;
 use std::io::Write;
@@ -672,7 +673,7 @@ impl<'a> Attributes<'a> {
 
 use std::{io, str};
 
-use str0m_proto::NonCryptographicRng;
+use crate::vendor::str0m_proto::NonCryptographicRng;
 
 const PAD: [u8; 4] = [0, 0, 0, 0];
 impl<'a> Attributes<'a> {
@@ -1451,7 +1452,7 @@ impl fmt::Debug for DebugHex<'_> {
 #[derive(Debug)]
 pub struct StunPacket<'a> {
     /// The protocol the socket this received data originated from is using.
-    pub proto: str0m_proto::Protocol,
+    pub proto: crate::vendor::str0m_proto::Protocol,
     /// The socket this received data originated from.
     pub source: SocketAddr,
     /// The destination socket of the datagram.
@@ -1466,13 +1467,13 @@ mod test {
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
     fn sha1_hmac(key: &[u8], payloads: &[&[u8]]) -> [u8; 20] {
-        use hmac::{Hmac, KeyInit, Mac};
-        use sha1_::Sha1;
-        let mut mac = Hmac::<Sha1>::new_from_slice(key).unwrap();
+        use aws_lc_rs::hmac;
+        let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, key);
+        let mut ctx = hmac::Context::with_key(&key);
         for p in payloads {
-            mac.update(p);
+            ctx.update(p);
         }
-        mac.finalize().into_bytes().into()
+        ctx.sign().as_ref().try_into().unwrap()
     }
 
     #[test]

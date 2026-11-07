@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 use super::super::macros::log_rate_control_applied_change;
 use super::super::macros::log_rate_control_observed_bitrate;
 use super::super::macros::log_rate_control_state;
-use crate::rtp_::Bitrate;
-use crate::util::MovingAverage;
+use crate::vendor::str0m::rtp_::Bitrate;
+use crate::vendor::str0m::util::MovingAverage;
 
 use super::super::BandwidthUsage;
 

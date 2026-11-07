@@ -1,4 +1,4 @@
-use crate::rtp::Ssrc;
+use crate::vendor::str0m::rtp::Ssrc;
 
 use super::RtcpType;
 use super::{FeedbackMessageType, PayloadType, RtcpHeader, RtcpPacket};

@@ -1,4 +1,4 @@
-use crate::util::BitPattern;
+use crate::vendor::str0m::util::BitPattern;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct H264ProfileLevel {

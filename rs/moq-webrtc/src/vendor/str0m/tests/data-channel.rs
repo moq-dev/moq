@@ -1,11 +1,11 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use netem::NetemConfig;
-use str0m::channel::{ChannelConfig, ChannelId};
-use str0m::{Event, Input, Output, Rtc, RtcConfig, RtcError};
+use crate::vendor::netem::NetemConfig;
+use crate::vendor::str0m::channel::{ChannelConfig, ChannelId};
+use crate::vendor::str0m::{Event, Input, Output, Rtc, RtcConfig, RtcError};
 
-mod common;
+use super::common;
 use common::{Peer, TestRtc, connect_l_r, connect_l_r_with_rtc};
 use common::{init_crypto_default, init_log, progress};
 

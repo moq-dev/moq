@@ -6,13 +6,13 @@ use std::ops::Deref;
 mod keying;
 
 // Provider traits and implementations
-#[cfg(feature = "aws-lc-rs")]
+#[cfg(all())]
 pub mod aws_lc_rs;
 
-#[cfg(feature = "rust-crypto")]
+#[cfg(any())]
 pub mod rust_crypto;
 
-#[cfg(any(feature = "aws-lc-rs", feature = "rust-crypto"))]
+#[cfg(any(all(), any()))]
 pub(crate) mod ccm_cipher;
 
 mod dtls_aead;
@@ -29,21 +29,21 @@ pub use dtls_aead::{Aad, Nonce};
 pub(crate) use dtls_aead::Iv;
 
 // Re-export buffer types for provider trait implementations
-pub use crate::buffer::{Buf, TmpBuf};
+pub use crate::vendor::dimpl::buffer::{Buf, TmpBuf};
 
 // Re-export all provider traits and types (similar to rustls structure)
-// This allows users to do: use dimpl::crypto::{CryptoProvider, SupportedDtls12CipherSuite, ...};
+// This allows users to do: use crate::vendor::dimpl::crypto::{CryptoProvider, SupportedDtls12CipherSuite, ...};
 pub use provider::{
     ActiveKeyExchange, Cipher, CryptoProvider, CryptoSafe, HashContext, HashProvider, HmacProvider,
     KeyProvider, SecureRandom, SignatureVerifier, SigningKey, SupportedDtls12CipherSuite,
     SupportedDtls13CipherSuite, SupportedKxGroup, check_verify_scheme,
 };
-#[cfg(feature = "_crypto-common")]
+#[cfg(all())]
 pub use provider::{OID_P256, OID_P384, cert_named_group};
 
 // Re-export shared types for provider trait implementations
-pub use crate::dtls12::message::Dtls12CipherSuite;
-pub use crate::types::{
+pub use crate::vendor::dimpl::dtls12::message::Dtls12CipherSuite;
+pub use crate::vendor::dimpl::types::{
     Dtls13CipherSuite, HashAlgorithm, NamedGroup, SignatureAlgorithm, SignatureScheme,
 };
 

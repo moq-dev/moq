@@ -2026,7 +2026,7 @@ mod test {
         }
         #[test]
         fn test_h266_sdp_driven_donl_all_packet_types() -> Result<()> {
-            use crate::format::FormatParams;
+            use crate::vendor::str0m::format::FormatParams;
 
             // SDP fmtp with sprop-max-don-diff > 0 enables DONL.
             let fmtp = FormatParams::parse_line("sprop-max-don-diff=32");

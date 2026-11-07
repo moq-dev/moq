@@ -3,11 +3,11 @@
 use std::net::Ipv4Addr;
 use std::time::Instant;
 
-use str0m::media::{Direction, MediaKind};
-use str0m::rtp::{RtpWrite, Ssrc};
-use str0m::{Event, Rtc, RtcError};
+use crate::vendor::str0m::media::{Direction, MediaKind};
+use crate::vendor::str0m::rtp::{RtpWrite, Ssrc};
+use crate::vendor::str0m::{Event, Rtc, RtcError};
 
-mod common;
+use super::common;
 use common::{Peer, TestRtc, init_log, negotiate, progress};
 use common::{connect_l_r_with_rtc, init_crypto_default};
 

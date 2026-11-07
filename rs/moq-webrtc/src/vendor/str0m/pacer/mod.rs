@@ -1,8 +1,8 @@
 use std::time::Instant;
 
-use crate::Reason;
-use crate::bwe_::ProbeClusterConfig;
-use crate::rtp_::{Bitrate, DataSize, MidRid, TwccClusterId};
+use crate::vendor::str0m::Reason;
+use crate::vendor::str0m::bwe_::ProbeClusterConfig;
+use crate::vendor::str0m::rtp_::{Bitrate, DataSize, MidRid, TwccClusterId};
 
 mod control;
 pub(crate) use control::PacerControl;
@@ -136,7 +136,7 @@ pub trait Pacer {
     fn register_send(&mut self, now: Instant, packet_size: DataSize, from: MidRid);
 }
 
-/// The sub-reason for the [`Reason::Pacer`][crate::Reason::Pacer].
+/// The sub-reason for the [`Reason::Pacer`][crate::vendor::str0m::Reason::Pacer].
 ///
 /// This enum is not considered stable API and may change in minor revisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

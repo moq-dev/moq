@@ -6,8 +6,8 @@ use super::super::{AckedPacket, BandwidthUsage};
 use super::arrival_group::ArrivalGroupAccumulator;
 use super::rate_control::RateControl;
 use super::trendline::TrendlineEstimator;
-use crate::rtp_::Bitrate;
-use crate::util::{MovingAverage, already_happened};
+use crate::vendor::str0m::rtp_::Bitrate;
+use crate::vendor::str0m::util::{MovingAverage, already_happened};
 
 const MAX_RTT_HISTORY_WINDOW: usize = 32;
 const UPDATE_INTERVAL: Duration = Duration::from_millis(25);

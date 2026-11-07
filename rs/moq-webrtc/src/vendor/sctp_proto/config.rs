@@ -1,7 +1,7 @@
-use crate::util::{AssociationIdGenerator, RandomAssociationIdGenerator};
+use crate::vendor::sctp_proto::util::{AssociationIdGenerator, RandomAssociationIdGenerator};
 
-use alloc::boxed::Box;
-use alloc::sync::Arc;
+use std::boxed::Box;
+use std::sync::Arc;
 use bytes::Bytes;
 use core::fmt;
 
@@ -95,7 +95,7 @@ impl TransportConfig {
     ///
     /// Reads deliver complete messages only. If this budget is exhausted with no
     /// readable message and no TSN gaps that can still be filled, the association
-    /// fails with [`crate::AssociationError::ReceiveBufferExhausted`] and sends an
+    /// fails with [`crate::vendor::sctp_proto::AssociationError::ReceiveBufferExhausted`] and sends an
     /// Out Of Resource ABORT. No partial message is delivered. This can happen
     /// when a message exceeds the budget or multiple incomplete messages share it.
     /// Messages retained on stopped read halves also consume this budget until reset.
@@ -183,14 +183,14 @@ impl TransportConfig {
     }
 
     /// Set the SCTP source port used when initiating an association.
-    /// A zero port is rejected by [`crate::Endpoint::connect`].
+    /// A zero port is rejected by [`crate::vendor::sctp_proto::Endpoint::connect`].
     pub fn with_local_port(mut self, value: u16) -> Self {
         self.local_port = value;
         self
     }
 
     /// Set the SCTP destination port used when initiating an association.
-    /// A zero port is rejected by [`crate::Endpoint::connect`].
+    /// A zero port is rejected by [`crate::vendor::sctp_proto::Endpoint::connect`].
     pub fn with_remote_port(mut self, value: u16) -> Self {
         self.remote_port = value;
         self
@@ -401,8 +401,8 @@ impl ClientConfig {
     /// state.
     ///
     /// **Note:** When using SNAP, **both** peers must call
-    /// [`Endpoint::connect`](crate::Endpoint::connect) — there is no
-    /// server-side SNAP via [`Endpoint::handle`](crate::Endpoint::handle).
+    /// [`Endpoint::connect`](crate::vendor::sctp_proto::Endpoint::connect) — there is no
+    /// server-side SNAP via [`Endpoint::handle`](crate::vendor::sctp_proto::Endpoint::handle).
     ///
     /// See [draft-hancke-tsvwg-snap-01](https://datatracker.ietf.org/doc/draft-hancke-tsvwg-snap/).
     pub fn with_snap(mut self, local_sctp_init: Bytes, remote_sctp_init: Bytes) -> Self {
@@ -427,8 +427,8 @@ impl ClientConfig {
 /// Each call generates fresh random values. The caller must hold onto the
 /// returned bytes and pass them to [`ClientConfig::with_snap`] alongside
 /// the remote peer's token.
-pub fn generate_snap_token(config: &TransportConfig) -> Result<Bytes, crate::error::Error> {
-    use crate::chunk::{Chunk, chunk_init::ChunkInit};
+pub fn generate_snap_token(config: &TransportConfig) -> Result<Bytes, crate::vendor::sctp_proto::error::Error> {
+    use crate::vendor::sctp_proto::chunk::{Chunk, chunk_init::ChunkInit};
     use core::num::NonZeroU32;
     use rand::random;
 

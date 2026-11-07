@@ -1,7 +1,7 @@
 //! Secure random number generation using aws-lc-rs.
 
 use super::super::SecureRandom;
-use crate::{CryptoError, CryptoOperation};
+use crate::vendor::dimpl::{CryptoError, CryptoOperation};
 
 /// Secure random number generator implementation.
 #[derive(Debug)]

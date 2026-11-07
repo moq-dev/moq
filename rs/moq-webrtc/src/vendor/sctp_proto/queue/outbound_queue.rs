@@ -1,9 +1,9 @@
-use alloc::vec::Vec;
+use std::vec::Vec;
 use std::time::Instant;
 
 use super::payload_queue::PayloadQueue;
 use super::pending_queue::PendingQueue;
-use crate::chunk::chunk_payload_data::ChunkPayloadData;
+use crate::vendor::sctp_proto::chunk::chunk_payload_data::ChunkPayloadData;
 
 #[cfg(test)]
 #[path = "outbound_queue_test.rs"]
@@ -55,7 +55,7 @@ impl OutboundQueue {
         let chunk = self.pending.peek()?;
         if !chunk.beginning_fragment
             || chunk.user_data.is_empty()
-            || chunk.payload_type == crate::PayloadProtocolIdentifier::Dcep
+            || chunk.payload_type == crate::vendor::sctp_proto::PayloadProtocolIdentifier::Dcep
             || !chunk.deadline.is_some_and(|deadline| now >= deadline)
         {
             return None;
@@ -129,7 +129,7 @@ impl OutboundQueue {
     ) -> Option<(u16, u64, usize)> {
         let chunk = self.pending.peek()?;
         if chunk.beginning_fragment
-            || chunk.payload_type == crate::PayloadProtocolIdentifier::Dcep
+            || chunk.payload_type == crate::vendor::sctp_proto::PayloadProtocolIdentifier::Dcep
             || !chunk.deadline.is_some_and(|deadline| now >= deadline)
         {
             return None;

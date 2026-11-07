@@ -1,9 +1,9 @@
-use str0m::RtcError;
-use str0m::change::{SdpAnswer, SdpApi, SdpOffer};
-use str0m::error::SdpError;
-use str0m::media::{Direction, MediaKind, Mid};
+use crate::vendor::str0m::RtcError;
+use crate::vendor::str0m::change::{SdpAnswer, SdpApi, SdpOffer};
+use crate::vendor::str0m::error::SdpError;
+use crate::vendor::str0m::media::{Direction, MediaKind, Mid};
 
-mod common;
+use super::common;
 use common::{Peer, TestRtc, init_crypto_default, init_log, negotiate};
 
 fn repeat_next_mid() -> Mid {

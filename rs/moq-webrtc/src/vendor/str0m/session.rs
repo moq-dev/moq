@@ -1,47 +1,48 @@
+use tracing::{debug, trace, warn};
 use std::collections::{HashMap, VecDeque};
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::Event;
-use crate::bwe::BweKind;
-use crate::bwe_::Bwe;
-use crate::config::KeyingMaterial;
-use crate::config_mod::RtcpReportIntervals;
-use crate::crypto::CryptoProvider;
-use crate::crypto::dtls::SrtpProfile;
-use crate::format::CodecConfig;
-use crate::format::PayloadParams;
-use crate::format::Vp9PacketizerMode;
-use crate::io::DatagramSend;
-use crate::media::AppSpecificFeedback;
-use crate::media::Media;
-use crate::media::{KeyframeRequestKind, MID_PROBE};
-use crate::media::{MediaAdded, MediaChanged};
-use crate::pacer::PacerControl;
-use crate::pacer::{Pacer, PacerImpl};
-use crate::packet::{RedBlock, RedDecoder, red_same_pt_blocks};
-use crate::poll::Wake;
-use crate::rtp::{Extension, RawPacket};
-use crate::rtp_::Direction;
-use crate::rtp_::ExtensionValues;
-use crate::rtp_::MediaTime;
-use crate::rtp_::MidRid;
-use crate::rtp_::Pli;
-use crate::rtp_::Pt;
-use crate::rtp_::SRTCP_OVERHEAD;
-use crate::rtp_::SeqNo;
-use crate::rtp_::SeqNoWindow;
-use crate::rtp_::{Bitrate, ExtensionMap, Goodbye, Mid, ReportList, Rtcp, RtcpFb};
-use crate::rtp_::{Dlrr, DlrrItem, ExtendedReport, ReportBlock};
-use crate::rtp_::{RtpHeader, SessionId, TwccPacketId, extend_u16};
-use crate::rtp_::{SrtpContext, Ssrc};
-use crate::rtp_::{TwccRecvRegister, TwccSendRegister};
-use crate::stats::StatsSnapshot;
-use crate::streams::{RtpPacket, StreamTimeoutConfig, Streams};
-use crate::util::{Soonest, SystemTimeExt, already_happened, not_happening};
-use crate::{Reason, net};
-use crate::{RtcConfig, RtcError};
+use crate::vendor::str0m::Event;
+use crate::vendor::str0m::bwe::BweKind;
+use crate::vendor::str0m::bwe_::Bwe;
+use crate::vendor::str0m::config::KeyingMaterial;
+use crate::vendor::str0m::config_mod::RtcpReportIntervals;
+use crate::vendor::str0m::crypto::CryptoProvider;
+use crate::vendor::str0m::crypto::dtls::SrtpProfile;
+use crate::vendor::str0m::format::CodecConfig;
+use crate::vendor::str0m::format::PayloadParams;
+use crate::vendor::str0m::format::Vp9PacketizerMode;
+use crate::vendor::str0m::io::DatagramSend;
+use crate::vendor::str0m::media::AppSpecificFeedback;
+use crate::vendor::str0m::media::Media;
+use crate::vendor::str0m::media::{KeyframeRequestKind, MID_PROBE};
+use crate::vendor::str0m::media::{MediaAdded, MediaChanged};
+use crate::vendor::str0m::pacer::PacerControl;
+use crate::vendor::str0m::pacer::{Pacer, PacerImpl};
+use crate::vendor::str0m::packet::{RedBlock, RedDecoder, red_same_pt_blocks};
+use crate::vendor::str0m::poll::Wake;
+use crate::vendor::str0m::rtp::{Extension, RawPacket};
+use crate::vendor::str0m::rtp_::Direction;
+use crate::vendor::str0m::rtp_::ExtensionValues;
+use crate::vendor::str0m::rtp_::MediaTime;
+use crate::vendor::str0m::rtp_::MidRid;
+use crate::vendor::str0m::rtp_::Pli;
+use crate::vendor::str0m::rtp_::Pt;
+use crate::vendor::str0m::rtp_::SRTCP_OVERHEAD;
+use crate::vendor::str0m::rtp_::SeqNo;
+use crate::vendor::str0m::rtp_::SeqNoWindow;
+use crate::vendor::str0m::rtp_::{Bitrate, ExtensionMap, Goodbye, Mid, ReportList, Rtcp, RtcpFb};
+use crate::vendor::str0m::rtp_::{Dlrr, DlrrItem, ExtendedReport, ReportBlock};
+use crate::vendor::str0m::rtp_::{RtpHeader, SessionId, TwccPacketId, extend_u16};
+use crate::vendor::str0m::rtp_::{SrtpContext, Ssrc};
+use crate::vendor::str0m::rtp_::{TwccRecvRegister, TwccSendRegister};
+use crate::vendor::str0m::stats::StatsSnapshot;
+use crate::vendor::str0m::streams::{RtpPacket, StreamTimeoutConfig, Streams};
+use crate::vendor::str0m::util::{Soonest, SystemTimeExt, already_happened, not_happening};
+use crate::vendor::str0m::{Reason, net};
+use crate::vendor::str0m::{RtcConfig, RtcError};
 
 /// Minimum interval between NACK polls. Per-packet retries also wait for RTT.
 /// Keep this high enough to avoid additional problems in very bad network conditions.
@@ -142,8 +143,8 @@ pub(crate) struct Session {
     /// target; oversized outgoing datagrams above the warn threshold log a warning.
     mtu: RangeInclusive<usize>,
 
-    #[cfg(feature = "_internal_test_exports")]
-    pending_probe: Option<crate::bwe_::ProbeClusterConfig>,
+    #[cfg(test)]
+    pending_probe: Option<crate::vendor::str0m::bwe_::ProbeClusterConfig>,
 }
 
 /// Last RRTR (Receiver Reference Time Report, RFC 3611 §4.4) received from a remote SSRC.
@@ -225,7 +226,7 @@ impl Session {
             },
             pending_app_feedback: None,
             mtu: config.mtu.clone(),
-            #[cfg(feature = "_internal_test_exports")]
+            #[cfg(test)]
             pending_probe: None,
         }
     }
@@ -365,7 +366,7 @@ impl Session {
         if let Some(probe_config) = bwe.handle_timeout(now, do_probe) {
             // Only start the probe in the pacer if the estimator accepted it.
             if bwe.start_probe(probe_config, now) {
-                #[cfg(feature = "_internal_test_exports")]
+                #[cfg(test)]
                 {
                     self.pending_probe = Some(probe_config);
                 }
@@ -464,7 +465,7 @@ impl Session {
         media_ssrc: Ssrc,
         payload: impl Into<Arc<[u8]>>,
     ) {
-        use crate::rtp_::AppSpecificFeedback as RtcpAppFeedback;
+        use crate::vendor::str0m::rtp_::AppSpecificFeedback as RtcpAppFeedback;
         let feedback = RtcpAppFeedback {
             sender_ssrc,
             media_ssrc,
@@ -1009,7 +1010,7 @@ impl Session {
     }
 
     pub fn poll_event(&mut self) -> Option<Event> {
-        #[cfg(feature = "_internal_test_exports")]
+        #[cfg(test)]
         {
             if let Some(probe) = self.pending_probe.take() {
                 return Some(Event::Probe(probe));
@@ -1261,11 +1262,11 @@ impl Session {
 
         trace!(payload_size, is_padding, "Poll RTP: {:?}", header);
 
-        #[cfg(feature = "_internal_dont_use_log_stats")]
+        #[cfg(any())]
         {
             let kind = if is_padding { "padding" } else { "media" };
 
-            crate::log_stat!("PACKET_SENT", header.ssrc, payload_size, kind);
+            crate::vendor::str0m::log_stat!("PACKET_SENT", header.ssrc, payload_size, kind);
         }
 
         self.pacer.register_send(now, payload_size.into(), midrid);
@@ -1610,16 +1611,16 @@ fn update_max_seq(map: &mut HashMap<Ssrc, SeqNoWindow>, ssrc: Ssrc, seq_no: SeqN
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RtcConfig;
-    use crate::io::DATAGRAM_MTU_TARGET;
-    use crate::packet::RedEncoder;
+    use crate::vendor::str0m::RtcConfig;
+    use crate::vendor::str0m::io::DATAGRAM_MTU_TARGET;
+    use crate::vendor::str0m::packet::RedEncoder;
 
-    use crate::poll::Readiness;
-    use crate::rtp_::RtcpPacket;
+    use crate::vendor::str0m::poll::Readiness;
+    use crate::vendor::str0m::rtp_::RtcpPacket;
 
     fn keyed_session() -> Session {
         let mut session = Session::new(&RtcConfig::default());
-        let crypto = crate::crypto::test_default_provider();
+        let crypto = crate::vendor::str0m::crypto::test_default_provider();
         let profile = SrtpProfile::AEAD_AES_128_GCM;
         let mat = KeyingMaterial::new(&vec![0; profile.keying_material_len()]);
         session.set_keying_material(mat, crypto, profile, true);
@@ -1690,7 +1691,7 @@ mod tests {
             let now = Instant::now();
             let mut session = keyed_session();
             let before = session.poll_timeout();
-            let feedback = crate::rtp_::AppSpecificFeedback {
+            let feedback = crate::vendor::str0m::rtp_::AppSpecificFeedback {
                 sender_ssrc: 1.into(),
                 media_ssrc: 2.into(),
                 payload: vec![1, 2, 3, 4].into(),

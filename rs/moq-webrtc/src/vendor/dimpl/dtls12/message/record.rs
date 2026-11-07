@@ -1,14 +1,14 @@
 //! DTLS 1.2 record layer types.
 //!
-//! ContentType and Sequence are now in crate::types as they're shared between DTLS versions.
+//! ContentType and Sequence are now in crate::vendor::dimpl::types as they're shared between DTLS versions.
 
 use std::fmt;
 use std::ops::Range;
 
 use super::ProtocolVersion;
-use crate::buffer::Buf;
-use crate::types::{ContentType, Sequence};
-use crate::util::be_u48;
+use crate::vendor::dimpl::buffer::Buf;
+use crate::vendor::dimpl::types::{ContentType, Sequence};
+use crate::vendor::dimpl::util::be_u48;
 use nom::bytes::complete::take;
 use nom::number::complete::be_u16;
 use nom::{Err, IResult};
@@ -153,7 +153,7 @@ impl fmt::Debug for DTLSRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::Buf;
+    use crate::vendor::dimpl::buffer::Buf;
 
     const RECORD: &[u8] = &[
         0x16, // ContentType::Handshake

@@ -2,7 +2,7 @@
 
 use aws_lc_rs::digest;
 
-use str0m_proto::crypto::Sha256Provider;
+use crate::vendor::str0m_proto::crypto::Sha256Provider;
 
 /// AWS-LC-RS-based SHA-256 provider.
 #[derive(Debug)]

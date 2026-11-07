@@ -1,12 +1,12 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use str0m::media::{Direction, MediaKind};
-use str0m::rtp::RawPacket;
-use str0m::{Rtc, RtcError};
+use crate::vendor::str0m::media::{Direction, MediaKind};
+use crate::vendor::str0m::rtp::RawPacket;
+use crate::vendor::str0m::{Rtc, RtcError};
 use tracing::info_span;
 
-mod common;
+use super::common;
 use common::{TestRtc, init_crypto_default, init_log, negotiate, progress};
 
 #[test]
@@ -31,9 +31,9 @@ pub fn no_pre_ice_feedback() -> Result<(), RtcError> {
     // Before ICE is established, introduce a large time delta that spans at least one sender/receiver report
     // interval
     let mut t = l.last;
-    l.handle_input(str0m::Input::Timeout(t))?;
+    l.handle_input(crate::vendor::str0m::Input::Timeout(t))?;
     t += Duration::from_secs(10);
-    l.handle_input(str0m::Input::Timeout(t))?;
+    l.handle_input(crate::vendor::str0m::Input::Timeout(t))?;
 
     loop {
         if l.is_connected() && r.is_connected() {

@@ -1,3 +1,4 @@
+use tracing::{debug, warn};
 use super::CodecExtra;
 use super::contiguity_vp8::Vp8Contiguity;
 use super::contiguity_vp9::Vp9Contiguity;

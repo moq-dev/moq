@@ -6,7 +6,7 @@ use std::fmt::Debug;
 /// - [`Send`] + [`Sync`]: Thread-safe
 /// - [`Debug`]: Support debugging
 ///
-/// Note: We don't require `UnwindSafe` because some error types (like `dimpl::Error`)
+/// Note: We don't require `UnwindSafe` because some error types (like `crate::vendor::dimpl::Error`)
 /// may not implement it, but they're still safe to use in our context.
 pub trait CryptoSafe: Send + Sync + Debug {}
 

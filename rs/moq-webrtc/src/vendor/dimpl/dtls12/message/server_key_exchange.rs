@@ -1,5 +1,5 @@
 use super::{CurveType, DigitallySigned, KeyExchangeAlgorithm, NamedGroup};
-use crate::buffer::Buf;
+use crate::vendor::dimpl::buffer::Buf;
 use nom::Err;
 use nom::error::{Error, ErrorKind};
 use nom::number::complete::be_u8;
@@ -165,7 +165,7 @@ impl PskParams {
 mod test {
     use super::super::{HashAlgorithm, SignatureAlgorithm, SignatureAndHashAlgorithm};
     use super::*;
-    use crate::buffer::Buf;
+    use crate::vendor::dimpl::buffer::Buf;
 
     const MESSAGE_ECDH_PUBKEY: &[u8] = &[
         0x03, // curve_type

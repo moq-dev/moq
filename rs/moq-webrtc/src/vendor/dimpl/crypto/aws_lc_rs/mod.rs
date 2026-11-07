@@ -18,31 +18,31 @@
 //!
 //! The default provider is used automatically when no custom provider is specified:
 //!
-//! ```
-//! # #[cfg(feature = "rcgen")]
+//! ```ignore
+//! # #[cfg(all())]
 //! # fn main() {
 //! use std::sync::Arc;
 //! use std::time::Instant;
-//! use dimpl::{Config, Dtls, certificate};
+//! use crate::vendor::dimpl::{Config, Dtls, certificate};
 //!
 //! let cert = certificate::generate_self_signed_certificate().unwrap();
 //! // Implicitly uses aws-lc-rs default provider
 //! let config = Arc::new(Config::default());
 //! let dtls = Dtls::new_12(config, cert, Instant::now());
 //! # }
-//! # #[cfg(not(feature = "rcgen"))]
+//! # #[cfg(not(all()))]
 //! # fn main() {}
 //! ```
 //!
 //! Or explicitly:
 //!
-//! ```
-//! # #[cfg(feature = "rcgen")]
+//! ```ignore
+//! # #[cfg(all())]
 //! # fn main() {
 //! use std::sync::Arc;
 //! use std::time::Instant;
-//! use dimpl::{Config, Dtls, certificate};
-//! use dimpl::crypto::aws_lc_rs;
+//! use crate::vendor::dimpl::{Config, Dtls, certificate};
+//! use crate::vendor::dimpl::crypto::aws_lc_rs;
 //!
 //! let cert = certificate::generate_self_signed_certificate().unwrap();
 //! let config = Arc::new(
@@ -53,7 +53,7 @@
 //! );
 //! let dtls = Dtls::new_12(config, cert, Instant::now());
 //! # }
-//! # #[cfg(not(feature = "rcgen"))]
+//! # #[cfg(not(all()))]
 //! # fn main() {}
 //! ```
 

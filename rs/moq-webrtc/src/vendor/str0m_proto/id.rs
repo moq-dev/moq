@@ -1,7 +1,7 @@
 use std::fmt;
 use std::str::from_utf8;
 
-use crate::NonCryptographicRng;
+use crate::vendor::str0m_proto::NonCryptographicRng;
 
 // deliberate subset of ice-char, etc that are "safe"
 const CHARS: &[u8] = b"abcdefghijklmnopqrstuvxyzABCDEFGHIJKLMNOPQRSTUVXYZ0123456789";

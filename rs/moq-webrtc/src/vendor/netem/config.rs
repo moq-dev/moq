@@ -1,12 +1,12 @@
 use std::time::Duration;
 
-pub use str0m_proto::{Bitrate, DataSize};
+pub use crate::vendor::str0m_proto::{Bitrate, DataSize};
 
 /// Configuration for the network emulator.
 ///
 /// Use the builder pattern to configure the emulator:
 ///
-/// ```
+/// ```ignore
 /// use std::time::Duration;
 /// use str0m_netem::{NetemConfig, LossModel, GilbertElliot};
 ///
@@ -249,7 +249,7 @@ impl NetemConfig {
     ///
     /// # Example
     ///
-    /// ```
+    /// ```ignore
     /// use std::time::Duration;
     /// use str0m_netem::{NetemConfig, Bitrate, DataSize};
     ///
@@ -346,7 +346,7 @@ pub enum LossModel {
 ///
 /// # Example
 ///
-/// ```
+/// ```ignore
 /// use str0m_netem::{RandomLoss, Probability};
 ///
 /// // 5% loss, independent
@@ -421,7 +421,7 @@ impl RandomLoss {
 ///
 /// # Example
 ///
-/// ```
+/// ```ignore
 /// use str0m_netem::GilbertElliot;
 ///
 /// // Custom: lose ~3 packets every ~50 packets

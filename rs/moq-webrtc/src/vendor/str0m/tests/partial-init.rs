@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use str0m::{Output, Rtc, RtcError};
+use crate::vendor::str0m::{Output, Rtc, RtcError};
 
 /// Regression test for a panic when SCTP was started and attempted to transmit data before DTLS was started.
 #[test]

@@ -53,7 +53,7 @@ impl From<FrameContiguityState> for Vp9Contiguity {
 
 #[cfg(test)]
 mod test {
-    use crate::packet::Vp9CodecExtra;
+    use crate::vendor::str0m::packet::Vp9CodecExtra;
 
     use super::Vp9Contiguity;
 

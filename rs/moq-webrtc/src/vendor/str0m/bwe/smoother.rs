@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::rtp_::Bitrate;
+use crate::vendor::str0m::rtp_::Bitrate;
 
 /// Time window for averaging estimate changes.
 const ESTIMATE_WINDOW: Duration = Duration::from_secs(3);

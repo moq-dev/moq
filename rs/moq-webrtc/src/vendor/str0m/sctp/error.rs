@@ -1,4 +1,4 @@
-use sctp_proto::Error as ProtoError;
+use crate::vendor::sctp_proto::Error as ProtoError;
 use std::error::Error;
 use std::fmt;
 

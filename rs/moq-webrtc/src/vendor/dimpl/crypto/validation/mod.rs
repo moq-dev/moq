@@ -6,9 +6,9 @@
 use arrayvec::ArrayVec;
 
 use super::{Aad, CryptoProvider, Nonce, SupportedDtls12CipherSuite, SupportedKxGroup};
-use crate::buffer::{Buf, TmpBuf};
-use crate::types::{Dtls13CipherSuite, HashAlgorithm, NamedGroup, SignatureAlgorithm};
-use crate::{ConfigError, CryptoProviderValidationError, Error};
+use crate::vendor::dimpl::buffer::{Buf, TmpBuf};
+use crate::vendor::dimpl::types::{Dtls13CipherSuite, HashAlgorithm, NamedGroup, SignatureAlgorithm};
+use crate::vendor::dimpl::{ConfigError, CryptoProviderValidationError, Error};
 
 fn provider_error(error: CryptoProviderValidationError) -> Error {
     Error::ConfigError(ConfigError::CryptoProvider(error))
@@ -661,11 +661,11 @@ const SN_TEST_VECTORS: &[SnTestVector] = &[
 ];
 
 #[cfg(test)]
-#[cfg(feature = "aws-lc-rs")]
+#[cfg(all())]
 mod tests_aws_lc_rs {
     use super::*;
-    use crate::crypto::aws_lc_rs;
-    use crate::dtls12::message::Dtls12CipherSuite;
+    use crate::vendor::dimpl::crypto::aws_lc_rs;
+    use crate::vendor::dimpl::dtls12::message::Dtls12CipherSuite;
 
     #[test]
     fn test_default_provider_validates() {
@@ -711,11 +711,11 @@ mod tests_aws_lc_rs {
 }
 
 #[cfg(test)]
-#[cfg(feature = "rust-crypto")]
+#[cfg(any())]
 mod tests_rust_crypto {
     use super::*;
-    use crate::crypto::rust_crypto;
-    use crate::dtls12::message::Dtls12CipherSuite;
+    use crate::vendor::dimpl::crypto::rust_crypto;
+    use crate::vendor::dimpl::dtls12::message::Dtls12CipherSuite;
 
     #[test]
     fn test_default_provider_validates() {

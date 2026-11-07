@@ -1,14 +1,14 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use str0m::format::{Codec, CodecExtra};
-use str0m::media::{MediaKind, Mid, Pt};
-use str0m::net::Receive;
-use str0m::rtp::rtcp::Rtcp;
-use str0m::rtp::{ExtensionValues, RawPacket, RtpWrite, Ssrc};
-use str0m::{Event, Input, Output, Reason, Rtc, RtcConfig, RtcError};
+use crate::vendor::str0m::format::{Codec, CodecExtra};
+use crate::vendor::str0m::media::{MediaKind, Mid, Pt};
+use crate::vendor::str0m::net::Receive;
+use crate::vendor::str0m::rtp::rtcp::Rtcp;
+use crate::vendor::str0m::rtp::{ExtensionValues, RawPacket, RtpWrite, Ssrc};
+use crate::vendor::str0m::{Event, Input, Output, Reason, Rtc, RtcConfig, RtcError};
 
-mod common;
+use super::common;
 use common::{PendingPacket, connect_l_r_with_rtc, init_crypto_default, init_log, progress};
 
 struct VideoTest {

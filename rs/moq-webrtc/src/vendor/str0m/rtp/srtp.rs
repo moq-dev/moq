@@ -1,12 +1,13 @@
+use tracing::{trace, warn};
 use std::fmt;
 use std::panic::{RefUnwindSafe, UnwindSafe};
 
-use crate::crypto::Aes128CmSha1_80Cipher;
-use crate::crypto::dtls::{KeyingMaterial, SrtpProfile};
-use crate::crypto::{AeadAes128Gcm, AeadAes256Gcm, Aes128CmSha1_80};
-use crate::crypto::{AeadAes128GcmCipher, AeadAes256GcmCipher};
-use crate::crypto::{CryptoProvider, Sha1HmacProvider, SrtpProvider};
-use crate::io::DATAGRAM_MAX_PACKET_SIZE;
+use crate::vendor::str0m::crypto::Aes128CmSha1_80Cipher;
+use crate::vendor::str0m::crypto::dtls::{KeyingMaterial, SrtpProfile};
+use crate::vendor::str0m::crypto::{AeadAes128Gcm, AeadAes256Gcm, Aes128CmSha1_80};
+use crate::vendor::str0m::crypto::{AeadAes128GcmCipher, AeadAes256GcmCipher};
+use crate::vendor::str0m::crypto::{CryptoProvider, Sha1HmacProvider, SrtpProvider};
+use crate::vendor::str0m::io::DATAGRAM_MAX_PACKET_SIZE;
 
 use super::header::RtpHeader;
 
@@ -118,7 +119,7 @@ impl SrtpContext {
         rtcp_salt: [u8; AeadAes128Gcm::SALT_LEN],
         srtcp_index: u32,
     ) -> Self {
-        let provider = crate::crypto::test_default_provider();
+        let provider = crate::vendor::str0m::crypto::test_default_provider();
 
         Self {
             rtp: Derived::AeadAes128Gcm {
@@ -158,7 +159,7 @@ impl SrtpContext {
         rtcp_salt: [u8; AeadAes256Gcm::SALT_LEN],
         srtcp_index: u32,
     ) -> Self {
-        let provider = crate::crypto::test_default_provider();
+        let provider = crate::vendor::str0m::crypto::test_default_provider();
 
         Self {
             rtp: Derived::AeadAes256Gcm {
@@ -1072,12 +1073,12 @@ mod test {
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
-            let crypto = crate::crypto::test_default_provider();
+            let crypto = crate::vendor::str0m::crypto::test_default_provider();
             let mat = KeyingMaterial::new(&vec![0; profile.keying_material_len()]);
             let mut context = SrtpContext::new(crypto, profile, &mat, true);
             let plaintext_rtp = [0x80, 111, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 42];
             let header =
-                RtpHeader::parse(&plaintext_rtp, &crate::rtp_::ExtensionMap::empty()).unwrap();
+                RtpHeader::parse(&plaintext_rtp, &crate::vendor::str0m::rtp_::ExtensionMap::empty()).unwrap();
             let valid_rtp = context.protect_rtp(&plaintext_rtp, &header, 1);
             let plaintext_rtcp = [0x80, 201, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0];
             let valid_rtcp = context.protect_rtcp(&plaintext_rtcp);
@@ -1107,7 +1108,7 @@ mod test {
                 // Changing SSRCs must not create additional warning budgets.
                 rtp[8..12].copy_from_slice(&ssrc.to_be_bytes());
                 rtcp[4..8].copy_from_slice(&ssrc.to_be_bytes());
-                let header = RtpHeader::parse(&rtp, &crate::rtp_::ExtensionMap::empty()).unwrap();
+                let header = RtpHeader::parse(&rtp, &crate::vendor::str0m::rtp_::ExtensionMap::empty()).unwrap();
                 assert!(context.unprotect_rtp(&rtp, &header, 1).is_none());
                 assert!(context.unprotect_rtcp(&rtcp).is_none());
             }
@@ -1186,8 +1187,8 @@ mod test {
 
     #[test]
     fn derive_key() {
-        crate::init_crypto_default();
-        let provider = crate::crypto::from_feature_flags();
+        crate::vendor::str0m::init_crypto_default();
+        let provider = crate::vendor::str0m::crypto::from_feature_flags();
         let crypto = provider.srtp_provider;
 
         // https://tools.ietf.org/html/rfc3711#appendix-B.3
@@ -1281,7 +1282,7 @@ mod test {
         #[test]
         fn unprotect_rtcp() {
             let key_mat = KeyingMaterial::new(&MAT);
-            let crypto = crate::crypto::test_default_provider();
+            let crypto = crate::vendor::str0m::crypto::test_default_provider();
             let mut ctx_rx =
                 SrtpContext::new(crypto, SrtpProfile::AES128_CM_SHA1_80, &key_mat, true);
             ctx_rx.srtcp_index = 1;
@@ -1302,8 +1303,8 @@ mod test {
     }
 
     mod test_aead_aes_128_gcm {
-        use crate::crypto::AeadAes128Gcm;
-        use crate::rtp_::ExtensionMap;
+        use crate::vendor::str0m::crypto::AeadAes128Gcm;
+        use crate::vendor::str0m::rtp_::ExtensionMap;
 
         use super::*;
 
@@ -1505,7 +1506,7 @@ mod test {
         }
 
         fn make_rtp_context() -> SrtpContext {
-            crate::init_crypto_default();
+            crate::vendor::str0m::init_crypto_default();
             SrtpContext::new_aead_aes_128_gcm(
                 rfc7714::KEY,
                 rfc7714::SALT,
@@ -1516,7 +1517,7 @@ mod test {
         }
 
         fn make_rtcp_context() -> SrtpContext {
-            crate::init_crypto_default();
+            crate::vendor::str0m::init_crypto_default();
             SrtpContext::new_aead_aes_128_gcm(
                 rfc7714::KEY,
                 rfc7714::SALT,
@@ -1528,8 +1529,8 @@ mod test {
     }
 
     mod test_aead_aes_256_gcm {
-        use crate::crypto::AeadAes256Gcm;
-        use crate::rtp_::ExtensionMap;
+        use crate::vendor::str0m::crypto::AeadAes256Gcm;
+        use crate::vendor::str0m::rtp_::ExtensionMap;
 
         use super::*;
 
@@ -1733,7 +1734,7 @@ mod test {
         }
 
         fn make_rtp_context() -> SrtpContext {
-            crate::init_crypto_default();
+            crate::vendor::str0m::init_crypto_default();
             SrtpContext::new_aead_aes_256_gcm(
                 rfc7714::KEY,
                 rfc7714::SALT,
@@ -1744,7 +1745,7 @@ mod test {
         }
 
         fn make_rtcp_context() -> SrtpContext {
-            crate::init_crypto_default();
+            crate::vendor::str0m::init_crypto_default();
             SrtpContext::new_aead_aes_256_gcm(
                 rfc7714::KEY,
                 rfc7714::SALT,

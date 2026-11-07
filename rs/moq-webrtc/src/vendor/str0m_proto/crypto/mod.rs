@@ -12,12 +12,12 @@ pub use error::{CryptoError, DtlsError};
 pub mod dtls {
     pub use super::provider::{DtlsInstance, DtlsProvider};
 
-    pub use dimpl::CryptoError as DtlsCryptoError;
-    pub use dimpl::CryptoOperation as DtlsCryptoOperation;
-    pub use dimpl::DtlsCertificate as DtlsCert;
-    pub use dimpl::KeyingMaterial;
-    pub use dimpl::ProtocolVersion;
-    pub use dimpl::SrtpProfile;
-    // Note: dimpl::Error is renamed to DtlsImplError to avoid conflict with str0m's DtlsError
-    pub use dimpl::{Error as DtlsImplError, Output as DtlsOutput};
+    pub use crate::vendor::dimpl::CryptoError as DtlsCryptoError;
+    pub use crate::vendor::dimpl::CryptoOperation as DtlsCryptoOperation;
+    pub use crate::vendor::dimpl::DtlsCertificate as DtlsCert;
+    pub use crate::vendor::dimpl::KeyingMaterial;
+    pub use crate::vendor::dimpl::ProtocolVersion;
+    pub use crate::vendor::dimpl::SrtpProfile;
+    // Note: crate::vendor::dimpl::Error is renamed to DtlsImplError to avoid conflict with str0m's DtlsError
+    pub use crate::vendor::dimpl::{Error as DtlsImplError, Output as DtlsOutput};
 }

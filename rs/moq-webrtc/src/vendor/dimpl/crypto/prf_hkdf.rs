@@ -4,9 +4,9 @@
 //! This module provides generic implementations so that crypto backends only
 //! need to implement [`HmacProvider`] — no separate PRF or HKDF providers.
 
-use crate::CryptoError;
-use crate::buffer::Buf;
-use crate::types::HashAlgorithm;
+use crate::vendor::dimpl::CryptoError;
+use crate::vendor::dimpl::buffer::Buf;
+use crate::vendor::dimpl::types::HashAlgorithm;
 
 use super::HmacProvider;
 
@@ -265,13 +265,13 @@ mod tests {
 
     /// We need a concrete HmacProvider for tests. Use the default feature-gated one.
     fn hmac_provider() -> &'static dyn HmacProvider {
-        #[cfg(feature = "aws-lc-rs")]
+        #[cfg(all())]
         {
-            &crate::crypto::aws_lc_rs::hmac::HMAC_PROVIDER
+            &crate::vendor::dimpl::crypto::aws_lc_rs::hmac::HMAC_PROVIDER
         }
-        #[cfg(all(not(feature = "aws-lc-rs"), feature = "rust-crypto"))]
+        #[cfg(all(not(all()), any()))]
         {
-            &crate::crypto::rust_crypto::hmac::HMAC_PROVIDER
+            &crate::vendor::dimpl::crypto::rust_crypto::hmac::HMAC_PROVIDER
         }
     }
 

@@ -1,4 +1,4 @@
-use crate::buffer::Buf;
+use crate::vendor::dimpl::buffer::Buf;
 use arrayvec::ArrayVec;
 use nom::bytes::complete::take;
 use nom::error::{Error, ErrorKind};
@@ -103,7 +103,7 @@ impl ECPointFormatsExtension {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::Buf;
+    use crate::vendor::dimpl::buffer::Buf;
 
     #[test]
     fn test_ec_point_formats_extension() {

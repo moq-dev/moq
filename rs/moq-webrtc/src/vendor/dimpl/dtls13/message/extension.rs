@@ -1,4 +1,4 @@
-use crate::buffer::Buf;
+use crate::vendor::dimpl::buffer::Buf;
 use nom::{IResult, bytes::complete::take, number::complete::be_u16};
 use std::{fmt, ops::Range};
 
@@ -188,7 +188,7 @@ impl fmt::Debug for ExtensionType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::Buf;
+    use crate::vendor::dimpl::buffer::Buf;
 
     const MESSAGE: &[u8] = &[
         0x00, 0x0A, // ExtensionType::SupportedGroups

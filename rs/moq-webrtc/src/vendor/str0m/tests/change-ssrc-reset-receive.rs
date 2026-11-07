@@ -1,13 +1,13 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use str0m::format::Codec;
-use str0m::media::{Frequency, MediaKind, MediaTime, Mid, Pt, Rid};
-use str0m::rtp::{ExtensionValues, RtpWrite, Ssrc};
-use str0m::{Event, Rtc, RtcError};
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::media::{Frequency, MediaKind, MediaTime, Mid, Pt, Rid};
+use crate::vendor::str0m::rtp::{ExtensionValues, RtpWrite, Ssrc};
+use crate::vendor::str0m::{Event, Rtc, RtcError};
 use tracing::info;
 
-mod common;
+use super::common;
 use common::{TestRtc, connect_l_r, connect_l_r_with_rtc, init_crypto_default, init_log, progress};
 
 fn send_frame(

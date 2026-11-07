@@ -1,27 +1,28 @@
 //! Media (audio/video) related content.
 
+use tracing::debug;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::RtcError;
-use crate::change::AddMedia;
-use crate::format::CodecConfig;
+use crate::vendor::str0m::RtcError;
+use crate::vendor::str0m::change::AddMedia;
+use crate::vendor::str0m::format::CodecConfig;
 
-use crate::packet::{CodecDepacketizer, DepacketizingBuffer, Payloader};
-use crate::packet::{RedSender, RedSink, RtpMeta};
-use crate::rtp_::ExtensionMap;
-use crate::rtp_::MidRid;
-use crate::rtp_::SRTP_BLOCK_SIZE;
-use crate::rtp_::SRTP_OVERHEAD;
-use str0m_proto::Id;
+use crate::vendor::str0m::packet::{CodecDepacketizer, DepacketizingBuffer, Payloader};
+use crate::vendor::str0m::packet::{RedSender, RedSink, RtpMeta};
+use crate::vendor::str0m::rtp_::ExtensionMap;
+use crate::vendor::str0m::rtp_::MidRid;
+use crate::vendor::str0m::rtp_::SRTP_BLOCK_SIZE;
+use crate::vendor::str0m::rtp_::SRTP_OVERHEAD;
+use crate::vendor::str0m_proto::Id;
 
-use crate::format::PayloadParams;
-use crate::format::Vp9PacketizerMode;
-use crate::sdp::Simulcast as SdpSimulcast;
-use crate::sdp::{MediaLine, Msid, is_no_stream};
-use crate::streams::{RtpPacket, Streams};
-use crate::util::already_happened;
+use crate::vendor::str0m::format::PayloadParams;
+use crate::vendor::str0m::format::Vp9PacketizerMode;
+use crate::vendor::str0m::sdp::Simulcast as SdpSimulcast;
+use crate::vendor::str0m::sdp::{MediaLine, Msid, is_no_stream};
+use crate::vendor::str0m::streams::{RtpPacket, Streams};
+use crate::vendor::str0m::util::already_happened;
 
 mod event;
 pub use event::*;
@@ -31,9 +32,9 @@ mod tele;
 mod writer;
 pub use writer::Writer;
 
-pub use crate::packet::MediaKind;
-pub use crate::packet::TelephoneEvent;
-pub use crate::rtp_::{Direction, ExtensionValues, Frequency, MediaTime, Mid, Pt, Rid};
+pub use crate::vendor::str0m::packet::MediaKind;
+pub use crate::vendor::str0m::packet::TelephoneEvent;
+pub use crate::vendor::str0m::rtp_::{Direction, ExtensionValues, Frequency, MediaTime, Mid, Pt, Rid};
 
 /// Mid used for SSRC 0 non-media BWE probes.
 ///
@@ -108,7 +109,7 @@ pub struct Media {
     remote_pts: Vec<Pt>,
 
     /// Set when this m-line has been stopped via
-    /// [`SdpApi::stop_media`](crate::change::SdpApi::stop_media) or
+    /// [`SdpApi::stop_media`](crate::vendor::str0m::change::SdpApi::stop_media) or
     /// rejected by the remote peer. Independent of `remote_pts` so that
     /// an explicit stop preserves the negotiated PT list in SDP output
     /// (the SDP grammar requires at least one fmt on a port=0 m-line).
@@ -234,7 +235,7 @@ impl Media {
     /// Persistent transport-level identifier for an RTP source.
     ///
     /// RTP level property. The value is sent in RTCP reports for `StreamTx`. Incoming
-    /// cnames can be found in [`StreamRx::cname`][crate::rtp::StreamRx::cname].
+    /// cnames can be found in [`StreamRx::cname`][crate::vendor::str0m::rtp::StreamRx::cname].
     pub fn cname(&self) -> &str {
         &self.cname
     }
@@ -296,12 +297,12 @@ impl Media {
     }
 
     /// Current direction. This can be changed using
-    /// [`SdpApi::set_direction()`][crate::SdpApi::set_direction()] followed by an SDP negotiation.
+    /// [`SdpApi::set_direction()`][crate::vendor::str0m::SdpApi::set_direction()] followed by an SDP negotiation.
     ///
     /// To test whether it's possible to send media with the current direction, use
     ///
-    /// ```no_run
-    /// # use str0m::media::Media;
+    /// ```ignore
+    /// # use crate::vendor::str0m::media::Media;
     /// let media: Media = todo!(); // Get hold of media row.
     /// if media.direction().is_sending() {
     ///     // media.write(...);
@@ -316,7 +317,7 @@ impl Media {
     /// Whether this m-line is disabled/rejected (port=0 in SDP).
     ///
     /// An m-line is disabled if it has been stopped (via
-    /// [`SdpApi::stop_media`](crate::change::SdpApi::stop_media) or by the
+    /// [`SdpApi::stop_media`](crate::vendor::str0m::change::SdpApi::stop_media) or by the
     /// remote peer), or if no codecs matched during negotiation.
     ///
     /// SDP level property.
@@ -328,7 +329,7 @@ impl Media {
     ///
     /// Unlike [`disabled`](Self::disabled) this does not include the "no
     /// codecs matched" case - only explicit stop via
-    /// [`SdpApi::stop_media`](crate::change::SdpApi::stop_media) or a
+    /// [`SdpApi::stop_media`](crate::vendor::str0m::change::SdpApi::stop_media) or a
     /// port=0 m-line received from the remote peer. A stopped m-line
     /// cannot be reactivated; its slot can however be recycled by a
     /// subsequent new m-line (RFC 8829 §5.2.2).
@@ -820,8 +821,8 @@ impl Media {
 #[cfg(test)]
 mod receive_timeout_test {
     use super::*;
-    use crate::format::Codec;
-    use crate::rtp_::RtpHeader;
+    use crate::vendor::str0m::format::Codec;
+    use crate::vendor::str0m::rtp_::RtpHeader;
 
     fn blocked_buffer(base: Instant) -> DepacketizingBuffer {
         let mut buffer = DepacketizingBuffer::new(Codec::Vp8.into(), 30);

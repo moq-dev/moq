@@ -13,9 +13,9 @@ use x509_cert::Certificate as X509Certificate;
 use super::super::check_verify_scheme;
 use super::super::{KeyProvider, SignatureVerifier, SigningKey as SigningKeyTrait};
 use super::super::{OID_P256, OID_P384};
-use crate::buffer::Buf;
-use crate::types::{HashAlgorithm, NamedGroup, SignatureAlgorithm};
-use crate::{CryptoError, CryptoOperation};
+use crate::vendor::dimpl::buffer::Buf;
+use crate::vendor::dimpl::types::{HashAlgorithm, NamedGroup, SignatureAlgorithm};
+use crate::vendor::dimpl::{CryptoError, CryptoOperation};
 
 /// ECDSA signing key implementation.
 enum EcdsaSigningKey {
@@ -289,10 +289,10 @@ pub(super) static KEY_PROVIDER: RustCryptoKeyProvider = RustCryptoKeyProvider;
 /// Static instance of the signature verifier.
 pub(super) static SIGNATURE_VERIFIER: RustCryptoSignatureVerifier = RustCryptoSignatureVerifier;
 
-#[cfg(all(test, feature = "rcgen"))]
+#[cfg(all(test, all()))]
 mod tests {
     use super::*;
-    use crate::certificate::generate_self_signed_certificate;
+    use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
     #[test]
     fn invalid_signature_returns_structured_verification_error() {

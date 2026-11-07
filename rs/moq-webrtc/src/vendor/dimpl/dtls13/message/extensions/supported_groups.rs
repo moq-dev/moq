@@ -1,5 +1,5 @@
-use crate::buffer::Buf;
-use crate::types::NamedGroup;
+use crate::vendor::dimpl::buffer::Buf;
+use crate::vendor::dimpl::types::NamedGroup;
 use arrayvec::ArrayVec;
 use nom::Err;
 use nom::IResult;
@@ -56,7 +56,7 @@ impl SupportedGroupsExtension {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::Buf;
+    use crate::vendor::dimpl::buffer::Buf;
 
     #[test]
     fn test_supported_groups_extension() {

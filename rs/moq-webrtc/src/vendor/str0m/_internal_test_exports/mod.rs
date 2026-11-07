@@ -1,13 +1,13 @@
 //! Exported things with feature `_internal_test_exports`.
 
-use crate::Rtc;
-use crate::crypto::CryptoProvider;
-use crate::crypto::dtls::{KeyingMaterial, SrtpProfile};
-use crate::format::PayloadParams;
-use crate::media::Media;
-use crate::media::Mid;
-use crate::rtp::{ExtensionMap, RtpHeader};
-use is::IceCreds;
+use crate::vendor::str0m::Rtc;
+use crate::vendor::str0m::crypto::CryptoProvider;
+use crate::vendor::str0m::crypto::dtls::{KeyingMaterial, SrtpProfile};
+use crate::vendor::str0m::format::PayloadParams;
+use crate::vendor::str0m::media::Media;
+use crate::vendor::str0m::media::Mid;
+use crate::vendor::str0m::rtp::{ExtensionMap, RtpHeader};
+use crate::vendor::is::IceCreds;
 
 pub mod fuzz;
 mod rng;
@@ -53,15 +53,15 @@ impl PayloadParams {
 }
 
 /// UNSTABLE: not public API!
-pub use crate::bwe_::ProbeClusterConfig;
+pub use crate::vendor::str0m::bwe_::ProbeClusterConfig;
 
 /// Construct authenticated RTP packets with controlled headers and payloads in integration tests.
-pub struct TestSrtp(crate::rtp_::SrtpContext);
+pub struct TestSrtp(crate::vendor::str0m::rtp_::SrtpContext);
 
 impl TestSrtp {
     /// Use the same keys and profile as the test receiver's incoming SRTP context.
     pub fn new(crypto: &CryptoProvider, profile: SrtpProfile, mat: &KeyingMaterial) -> Self {
-        Self(crate::rtp_::SrtpContext::new(crypto, profile, mat, true))
+        Self(crate::vendor::str0m::rtp_::SrtpContext::new(crypto, profile, mat, true))
     }
 
     /// Serialize and encrypt a supplied packet, including deliberately malformed payloads.

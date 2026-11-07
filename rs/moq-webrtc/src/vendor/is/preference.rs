@@ -1,5 +1,5 @@
-use crate::Candidate;
-use crate::CandidateKind;
+use crate::vendor::is::Candidate;
+use crate::vendor::is::CandidateKind;
 
 /// Standard local preference calculation for a candidate.
 ///
@@ -80,7 +80,7 @@ pub fn default_local_preference(c: &Candidate, same_kind: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Candidate;
+    use crate::vendor::is::Candidate;
     use std::net::SocketAddr;
 
     fn ipv4_addr(ip: &str) -> SocketAddr {

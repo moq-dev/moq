@@ -2,10 +2,10 @@
 
 use std::time::Instant;
 
-use str0m::media::{KeyframeRequestKind, MediaKind};
-use str0m::{Input, Output, Rtc, RtcError};
+use crate::vendor::str0m::media::{KeyframeRequestKind, MediaKind};
+use crate::vendor::str0m::{Input, Output, Rtc, RtcError};
 
-mod common;
+use super::common;
 use common::init_crypto_default;
 
 #[test]

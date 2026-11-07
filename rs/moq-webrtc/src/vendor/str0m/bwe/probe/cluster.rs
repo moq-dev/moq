@@ -6,8 +6,8 @@
 use std::cmp;
 use std::time::{Duration, Instant};
 
-use crate::rtp_::{Bitrate, DataSize, TwccClusterId};
-use crate::util::{already_happened, not_happening};
+use crate::vendor::str0m::rtp_::{Bitrate, DataSize, TwccClusterId};
+use crate::vendor::str0m::util::{already_happened, not_happening};
 
 const MAX_PADDING_PACKET_SIZE: DataSize = DataSize::bytes(240);
 

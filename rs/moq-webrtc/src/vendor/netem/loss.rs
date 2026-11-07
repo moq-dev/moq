@@ -1,6 +1,6 @@
 use fastrand::Rng;
 
-use crate::config::{GilbertElliot, LossModel, RandomLoss};
+use crate::vendor::netem::config::{GilbertElliot, LossModel, RandomLoss};
 
 /// State for the loss model evaluation.
 #[derive(Debug, Clone)]
@@ -92,7 +92,7 @@ fn evaluate_gilbert_elliot(in_good_state: &mut bool, ge: &GilbertElliot, rng: &m
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Probability;
+    use crate::vendor::netem::config::Probability;
 
     #[test]
     fn test_no_loss() {

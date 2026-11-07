@@ -1,15 +1,14 @@
-#![cfg(feature = "rcgen")]
+#![cfg(all())]
 
 use std::mem;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dimpl::certificate::generate_self_signed_certificate;
-use dimpl::{Config, Dtls, DtlsCertificate, Error, Output, ProtocolVersion, TimeoutError};
+use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
+use crate::vendor::dimpl::{Config, Dtls, DtlsCertificate, Error, Output, ProtocolVersion, TimeoutError};
 
-#[path = "dtls13/common.rs"]
-mod common;
+use super::dtls12::common;
 
 use common::{DrainedOutputs, drain_outputs};
 

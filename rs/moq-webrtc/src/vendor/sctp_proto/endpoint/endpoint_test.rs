@@ -1,41 +1,45 @@
-use alloc::borrow::ToOwned;
-use alloc::vec;
-use alloc::vec::Vec;
+use tracing::debug;
+use std::borrow::ToOwned;
+use std::vec;
+use std::vec::Vec;
 use std::println;
 
 use super::*;
-use crate::association::Event;
-use crate::config::generate_snap_token;
-use crate::error::{Error, Result};
+use crate::vendor::sctp_proto::association::Event;
+use crate::vendor::sctp_proto::config::generate_snap_token;
+use crate::vendor::sctp_proto::error::{Error, Result};
 
-use crate::association::state::{AckMode, AssociationState};
-use crate::association::stream::{ReliabilityType, Stream, StreamEvent, StreamResetError};
-use crate::chunk::chunk_abort::ChunkAbort;
-use crate::chunk::chunk_cookie_echo::ChunkCookieEcho;
-use crate::chunk::chunk_error::ChunkError;
-use crate::chunk::chunk_forward_tsn::ChunkForwardTsn;
-use crate::chunk::chunk_heartbeat::ChunkHeartbeat;
-use crate::chunk::chunk_init::ChunkInit;
-use crate::chunk::chunk_payload_data::{ChunkPayloadData, PayloadProtocolIdentifier};
-use crate::chunk::chunk_reconfig::ChunkReconfig;
-use crate::chunk::chunk_selective_ack::{ChunkSelectiveAck, GapAckBlock};
-use crate::chunk::chunk_shutdown::ChunkShutdown;
-use crate::chunk::chunk_shutdown_ack::ChunkShutdownAck;
-use crate::chunk::chunk_shutdown_complete::ChunkShutdownComplete;
-use crate::chunk::{ErrorCauseProtocolViolation, PROTOCOL_VIOLATION};
-use crate::packet::{CommonHeader, Packet};
-use crate::param::param_outgoing_reset_request::ParamOutgoingResetRequest;
-use crate::param::param_reconfig_response::ParamReconfigResponse;
-use crate::param::param_supported_address_types::ParamSupportedAddressTypes;
-use crate::param::param_type::ParamType;
-use assert_matches::assert_matches;
+use crate::vendor::sctp_proto::association::state::{AckMode, AssociationState};
+use crate::vendor::sctp_proto::association::stream::{ReliabilityType, Stream, StreamEvent, StreamResetError};
+use crate::vendor::sctp_proto::chunk::chunk_abort::ChunkAbort;
+use crate::vendor::sctp_proto::chunk::chunk_cookie_echo::ChunkCookieEcho;
+use crate::vendor::sctp_proto::chunk::chunk_error::ChunkError;
+use crate::vendor::sctp_proto::chunk::chunk_forward_tsn::ChunkForwardTsn;
+use crate::vendor::sctp_proto::chunk::chunk_heartbeat::ChunkHeartbeat;
+use crate::vendor::sctp_proto::chunk::chunk_init::ChunkInit;
+use crate::vendor::sctp_proto::chunk::chunk_payload_data::{ChunkPayloadData, PayloadProtocolIdentifier};
+use crate::vendor::sctp_proto::chunk::chunk_reconfig::ChunkReconfig;
+use crate::vendor::sctp_proto::chunk::chunk_selective_ack::{ChunkSelectiveAck, GapAckBlock};
+use crate::vendor::sctp_proto::chunk::chunk_shutdown::ChunkShutdown;
+use crate::vendor::sctp_proto::chunk::chunk_shutdown_ack::ChunkShutdownAck;
+use crate::vendor::sctp_proto::chunk::chunk_shutdown_complete::ChunkShutdownComplete;
+use crate::vendor::sctp_proto::chunk::{ErrorCauseProtocolViolation, PROTOCOL_VIOLATION};
+use crate::vendor::sctp_proto::packet::{CommonHeader, Packet};
+use crate::vendor::sctp_proto::param::param_outgoing_reset_request::ParamOutgoingResetRequest;
+use crate::vendor::sctp_proto::param::param_reconfig_response::ParamReconfigResponse;
+use crate::vendor::sctp_proto::param::param_supported_address_types::ParamSupportedAddressTypes;
+use crate::vendor::sctp_proto::param::param_type::ParamType;
+macro_rules! assert_matches {
+    ($e:expr, $($p:tt)+) => {
+        assert!(matches!($e, $($p)+))
+    };
+}
 use core::net::Ipv6Addr;
 use core::ops::RangeFrom;
 use core::str::FromStr;
 use core::time::Duration;
 use core::{cmp, mem};
-use log::{info, trace};
-use std::net::UdpSocket;
+use tracing::{info, trace};
 use std::sync::{LazyLock, Mutex};
 use std::time::Instant;
 
@@ -82,7 +86,6 @@ pub fn server_config() -> ServerConfig {
 struct TestEndpoint {
     endpoint: Endpoint,
     addr: SocketAddr,
-    socket: Option<UdpSocket>,
     timeout: Option<Instant>,
     outbound: VecDeque<Transmit>,
     delayed: VecDeque<Transmit>,
@@ -94,15 +97,9 @@ struct TestEndpoint {
 
 impl TestEndpoint {
     fn new(endpoint: Endpoint, addr: SocketAddr) -> Self {
-        let socket = UdpSocket::bind(addr).expect("failed to bind UDP socket");
-        socket
-            .set_read_timeout(Some(Duration::new(0, 10_000_000)))
-            .unwrap();
-
         Self {
             endpoint,
             addr,
-            socket: Some(socket),
             timeout: None,
             outbound: VecDeque::new(),
             delayed: VecDeque::new(),
@@ -114,15 +111,6 @@ impl TestEndpoint {
     }
 
     pub fn drive(&mut self, now: Instant, remote: SocketAddr) {
-        if let Some(ref socket) = self.socket {
-            loop {
-                let mut buf = [0; 8192];
-                if socket.recv_from(&mut buf).is_err() {
-                    break;
-                }
-            }
-        }
-
         while self.inbound.front().is_some_and(|x| x.0 <= now) {
             let (recv_time, ecn, packet) = self.inbound.pop_front().unwrap();
             if let Some((ch, event)) = self.endpoint.handle(recv_time, remote, None, ecn, packet) {
@@ -282,9 +270,6 @@ impl Pair {
         for x in self.client.outbound.drain(..) {
             if let Payload::RawEncode(contents) = x.payload {
                 for content in contents {
-                    if let Some(ref socket) = self.client.socket {
-                        socket.send_to(&content, x.remote).unwrap();
-                    }
                     if self.server.addr == x.remote {
                         self.server
                             .inbound
@@ -300,9 +285,6 @@ impl Pair {
         for x in self.server.outbound.drain(..) {
             if let Payload::RawEncode(contents) = x.payload {
                 for content in contents {
-                    if let Some(ref socket) = self.server.socket {
-                        socket.send_to(&content, x.remote).unwrap();
-                    }
                     if self.client.addr == x.remote {
                         self.client
                             .inbound
@@ -1059,12 +1041,12 @@ fn test_assoc_unreliable_rexmit_ordered_fragment() -> Result<()> {
     )?;
     assert_eq!(sbuf.len(), n, "unexpected length of received data");
 
-    //log::debug!("flush_buffers");
+    //tracing::debug!("flush_buffers");
     pair.drive();
 
     let mut buf = vec![0u8; 2000];
 
-    //log::debug!("read_sctp");
+    //tracing::debug!("read_sctp");
     let chunks = pair.server_stream(server_ch, si)?.read_sctp()?.unwrap();
     let (n, ppi) = (chunks.len(), chunks.ppi);
     chunks.read(&mut buf)?;
@@ -1076,7 +1058,7 @@ fn test_assoc_unreliable_rexmit_ordered_fragment() -> Result<()> {
         "unexpected received data"
     );
 
-    //log::debug!("process");
+    //tracing::debug!("process");
     pair.drive();
 
     {
@@ -1133,12 +1115,12 @@ fn test_assoc_unreliable_rexmit_unordered_no_fragment() -> Result<()> {
     )?;
     assert_eq!(sbuf.len(), n, "unexpected length of received data");
 
-    //log::debug!("flush_buffers");
+    //tracing::debug!("flush_buffers");
     pair.drive();
 
     let mut buf = vec![0u8; 2000];
 
-    //log::debug!("read_sctp");
+    //tracing::debug!("read_sctp");
     let chunks = pair.server_stream(server_ch, si)?.read_sctp()?.unwrap();
     let (n, ppi) = (chunks.len(), chunks.ppi);
     chunks.read(&mut buf)?;
@@ -1150,7 +1132,7 @@ fn test_assoc_unreliable_rexmit_unordered_no_fragment() -> Result<()> {
         "unexpected received data"
     );
 
-    //log::debug!("process");
+    //tracing::debug!("process");
     pair.drive();
 
     {
@@ -1210,7 +1192,7 @@ fn test_assoc_unreliable_rexmit_unordered_fragment() -> Result<()> {
 
     let mut buf = vec![0u8; 2000];
 
-    //log::debug!("read_sctp");
+    //tracing::debug!("read_sctp");
     let chunks = pair.server_stream(server_ch, si)?.read_sctp()?.unwrap();
     let (n, ppi) = (chunks.len(), chunks.ppi);
     chunks.read(&mut buf)?;
@@ -1222,7 +1204,7 @@ fn test_assoc_unreliable_rexmit_unordered_fragment() -> Result<()> {
         "unexpected received data"
     );
 
-    //log::debug!("process");
+    //tracing::debug!("process");
     pair.drive();
 
     {
@@ -2318,7 +2300,7 @@ fn test_stats() -> Result<()> {
             record.args()
         )
     })
-    .filter(None, log::LevelFilter::Trace)
+    .filter(None, tracing::LevelFilter::Trace)
     .init();*/
 
     let conn = Arc::new(FakeEchoConn::new());
@@ -2428,7 +2410,7 @@ fn test_association_shutdown() -> Result<()> {
             record.args()
         )
     })
-    .filter(None, log::LevelFilter::Trace)
+    .filter(None, tracing::LevelFilter::Trace)
     .init();*/
 
     let (a1, a2) = create_assocs().await?;
@@ -2463,7 +2445,7 @@ fn test_association_shutdown() -> Result<()> {
                 assert!(false,"timed out waiting for a2 read loop to close");
             },
             _ = close_loop_ch_rx.recv() => {
-                log::debug!("recv a2.close_loop_ch_rx");
+                tracing::debug!("recv a2.close_loop_ch_rx");
             }
         };
     }
@@ -2519,9 +2501,9 @@ fn test_association_shutdown_during_write() -> Result<()> {
                 }
             }
             _ = writing_done_rx.recv() => {
-                log::debug!("writing_done_rx");
+                tracing::debug!("writing_done_rx");
                 let result = close_loop_ch_rx.recv().await;
-                log::debug!("a1.close_loop_ch_rx.recv: {:?}", result);
+                tracing::debug!("a1.close_loop_ch_rx.recv: {:?}", result);
             },
         };
     }
@@ -2536,7 +2518,7 @@ fn test_association_shutdown_during_write() -> Result<()> {
                 assert!(false,"timed out waiting for a2 read loop to close");
             },
             _ = close_loop_ch_rx.recv() => {
-                log::debug!("recv a2.close_loop_ch_rx");
+                tracing::debug!("recv a2.close_loop_ch_rx");
             }
         };
     }
@@ -3401,7 +3383,7 @@ fn test_snap_rejects_truncated_bytes() {
 
 #[test]
 fn test_snap_rejects_oversized_bytes() {
-    use crate::config::MAX_SNAP_INIT_BYTES;
+    use crate::vendor::sctp_proto::config::MAX_SNAP_INIT_BYTES;
 
     let mut endpoint = Endpoint::new(Arc::new(EndpointConfig::default()), None);
     let remote_addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();
@@ -3604,7 +3586,7 @@ fn test_snap_generate_token_roundtrip_is_valid() {
     let bytes = generate_snap_token(&config).expect("generate token");
 
     assert!(
-        bytes.len() <= crate::config::MAX_SNAP_INIT_BYTES,
+        bytes.len() <= crate::vendor::sctp_proto::config::MAX_SNAP_INIT_BYTES,
         "generated token should be within MAX_SNAP_INIT_BYTES"
     );
 
@@ -3641,8 +3623,8 @@ fn test_snap_generate_token_unique_per_call() {
 
 #[test]
 fn test_snap_rejects_wrong_chunk_type_bytes() {
-    use crate::chunk::Chunk;
-    use crate::chunk::chunk_selective_ack::ChunkSelectiveAck;
+    use crate::vendor::sctp_proto::chunk::Chunk;
+    use crate::vendor::sctp_proto::chunk::chunk_selective_ack::ChunkSelectiveAck;
 
     let mut endpoint = Endpoint::new(Arc::new(EndpointConfig::default()), None);
     let remote_addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();

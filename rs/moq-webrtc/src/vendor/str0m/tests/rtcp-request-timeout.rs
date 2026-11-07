@@ -1,12 +1,12 @@
 use std::net::Ipv4Addr;
 use std::time::Instant;
 
-use str0m::bwe::{Bitrate, BweKind};
-use str0m::media::{Direction, KeyframeRequestKind, MediaKind, Mid};
-use str0m::net::Receive;
-use str0m::{Event, Input, Output, RtcError};
+use crate::vendor::str0m::bwe::{Bitrate, BweKind};
+use crate::vendor::str0m::media::{Direction, KeyframeRequestKind, MediaKind, Mid};
+use crate::vendor::str0m::net::Receive;
+use crate::vendor::str0m::{Event, Input, Output, RtcError};
 
-mod common;
+use super::common;
 use common::{Peer, PendingPacket, TestRtc, init_crypto_default, init_log, negotiate, progress};
 
 /// L sends video to a receive-only R whose stream has NACK suppressed.

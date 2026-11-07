@@ -1,10 +1,10 @@
 use std::net::Ipv4Addr;
 
-use str0m::media::{Direction, MediaKind};
-use str0m::rtp::Ssrc;
-use str0m::{Event, RtcError};
+use crate::vendor::str0m::media::{Direction, MediaKind};
+use crate::vendor::str0m::rtp::Ssrc;
+use crate::vendor::str0m::{Event, RtcError};
 
-mod common;
+use super::common;
 use common::{Peer, TestRtc, connect_l_r, init_crypto_default, init_log, progress};
 
 #[test]

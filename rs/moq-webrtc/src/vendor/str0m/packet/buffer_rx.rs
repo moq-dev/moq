@@ -1,11 +1,12 @@
+use tracing::trace;
 use std::collections::VecDeque;
 use std::fmt;
 use std::ops::{Range, RangeInclusive};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::rtp::vla::VideoLayersAllocation;
-use crate::rtp_::{ExtensionValues, MediaTime, RtpHeader, SenderInfo, SeqNo};
+use crate::vendor::str0m::rtp::vla::VideoLayersAllocation;
+use crate::vendor::str0m::rtp_::{ExtensionValues, MediaTime, RtpHeader, SenderInfo, SeqNo};
 
 use super::contiguity::Contiguity;
 use super::contiguity_vp8::Vp8Contiguity;
@@ -784,10 +785,10 @@ mod test {
     use std::time::{Duration, Instant, SystemTime};
 
     use super::*;
-    use crate::packet::Vp8Depacketizer;
-    use crate::packet::vp9::Vp9Depacketizer;
-    use crate::rtp::UserExtensionValues;
-    use crate::rtp_::{AbsCaptureTime, Frequency, MediaTime, Pt, Ssrc, VideoOrientation};
+    use crate::vendor::str0m::packet::Vp8Depacketizer;
+    use crate::vendor::str0m::packet::vp9::Vp9Depacketizer;
+    use crate::vendor::str0m::rtp::UserExtensionValues;
+    use crate::vendor::str0m::rtp_::{AbsCaptureTime, Frequency, MediaTime, Pt, Ssrc, VideoOrientation};
 
     fn bounded_queue_meta(seq: u64) -> RtpMeta {
         RtpMeta {
@@ -867,7 +868,7 @@ mod test {
         let packed = [report, report].concat();
 
         for len in [0, 1, 2, 3, 5, 6, 7] {
-            let mut buf = DepacketizingBuffer::new(crate::format::Codec::Tele.into(), 0);
+            let mut buf = DepacketizingBuffer::new(crate::vendor::str0m::format::Codec::Tele.into(), 0);
             buf.push(test_meta(base, 1, 1, 0), &packed[..len]);
             assert!(matches!(
                 buf.pop(base, None),
@@ -1394,7 +1395,7 @@ mod test {
     fn segment_cache_preserves_frames_after_depacketization_error() {
         let base = Instant::now();
         let timeout = Some(Duration::from_millis(250));
-        let mut buf = DepacketizingBuffer::new(crate::format::Codec::H264.into(), 3);
+        let mut buf = DepacketizingBuffer::new(crate::vendor::str0m::format::Codec::H264.into(), 3);
         for (seq, payload) in [(1, [0x7e, 0xaa]), (2, [0x61, 0xaa])] {
             let mut meta = test_meta(base, seq, seq, 0);
             meta.header.marker = true;
@@ -1416,7 +1417,7 @@ mod test {
     fn timeout_none_preserves_padding_cleanup_after_emit_and_error() {
         let base = Instant::now();
         for (payload, valid) in [([0x61, 0xaa], true), ([0x7e, 0xaa], false)] {
-            let mut buf = DepacketizingBuffer::new(crate::format::Codec::H264.into(), 3);
+            let mut buf = DepacketizingBuffer::new(crate::vendor::str0m::format::Codec::H264.into(), 3);
             let mut meta = test_meta(base, 1, 1, 0);
             meta.header.marker = true;
             buf.push(meta, payload);

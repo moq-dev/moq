@@ -13,9 +13,9 @@ use serde::{Deserialize, Serialize};
 /// The frequency can be found in the negotiated payload parameters for a
 /// media writer.
 ///
-/// ```no_run
-/// # use str0m::Rtc;
-/// # use str0m::media::{Mid, MediaTime};
+/// ```ignore
+/// # use crate::vendor::str0m::Rtc;
+/// # use crate::vendor::str0m::media::{Mid, MediaTime};
 /// # let rtc: Rtc = todo!();
 /// #
 /// // Obtain mid from Event::MediaAdded
@@ -147,9 +147,9 @@ impl<'de> Deserialize<'de> for Frequency {
 ///
 /// The frequency can be found in the negotiated payload parameters for a media writer.
 ///
-/// ```no_run
-/// # use str0m::Rtc;
-/// # use str0m::media::{Mid, MediaTime};
+/// ```ignore
+/// # use crate::vendor::str0m::Rtc;
+/// # use crate::vendor::str0m::media::{Mid, MediaTime};
 /// # let rtc: Rtc = todo!();
 /// #
 /// // Obtain mid from Event::MediaAdded
@@ -282,8 +282,8 @@ impl MediaTime {
     /// # Examples
     ///
     /// Basic usage:
-    /// ```
-    /// use str0m::media::MediaTime;
+    /// ```ignore
+    /// use crate::vendor::str0m::media::MediaTime;
     ///
     /// assert_eq!(
     ///     MediaTime::from_micros(10).checked_sub(MediaTime::from_micros(5)),
@@ -310,8 +310,8 @@ impl MediaTime {
     /// # Examples
     ///
     /// Basic usage:
-    /// ```
-    /// use str0m::media::MediaTime;
+    /// ```ignore
+    /// use crate::vendor::str0m::media::MediaTime;
     ///
     /// assert_eq!(
     ///     MediaTime::from_micros(10).saturating_sub(MediaTime::from_micros(5)),
@@ -340,8 +340,8 @@ impl PartialEq for MediaTime {
 }
 impl Eq for MediaTime {}
 
-#[cfg(feature = "drv")]
-crate::drv_identity_copy!(Frequency, MediaTime);
+#[cfg(any())]
+crate::vendor::str0m::drv_identity_copy!(Frequency, MediaTime);
 
 impl PartialOrd for MediaTime {
     #[inline(always)]

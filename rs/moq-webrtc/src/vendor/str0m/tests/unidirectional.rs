@@ -1,11 +1,11 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use str0m::format::Codec;
-use str0m::media::{Direction, MediaKind};
-use str0m::{Event, RtcError};
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::media::{Direction, MediaKind};
+use crate::vendor::str0m::{Event, RtcError};
 
-mod common;
+use super::common;
 use common::{Peer, TestRtc, init_crypto_default, init_log, progress};
 
 #[test]

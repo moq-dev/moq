@@ -1,6 +1,7 @@
+use tracing::trace;
 use std::time::{Duration, Instant};
 
-use crate::rtp_::{Nack, ReceptionReport, SeqNo};
+use crate::vendor::str0m::rtp_::{Nack, ReceptionReport, SeqNo};
 
 use super::register_nack::NackRegister;
 
@@ -291,7 +292,7 @@ fn expected(first: SeqNo, last: SeqNo) -> i64 {
 mod test {
     use std::time::{Duration, Instant};
 
-    use crate::streams::register::{ReceiverRegister, expected, packets_lost};
+    use crate::vendor::str0m::streams::register::{ReceiverRegister, expected, packets_lost};
 
     #[test]
     fn clearing_register_resets_nack_timing() {

@@ -31,7 +31,7 @@ impl fmt::Display for CertificateError {
 
 impl std::error::Error for CertificateError {}
 
-pub use crate::DtlsCertificate;
+pub use crate::vendor::dimpl::DtlsCertificate;
 
 /// Generate a self-signed certificate for DTLS
 ///

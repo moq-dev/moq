@@ -1,11 +1,12 @@
+use tracing::debug;
 use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
 
-use crate::packet::H266ProfileTierLevel;
-use crate::packet::MAX_RED_RECOVERY_DEPTH;
-use crate::packet::MediaKind;
-use crate::rtp_::Pt;
-use crate::rtp_::{Direction, Frequency};
+use crate::vendor::str0m::packet::H266ProfileTierLevel;
+use crate::vendor::str0m::packet::MAX_RED_RECOVERY_DEPTH;
+use crate::vendor::str0m::packet::MediaKind;
+use crate::vendor::str0m::rtp_::Pt;
+use crate::vendor::str0m::rtp_::{Direction, Frequency};
 
 use super::codec::{Codec, CodecSpec};
 use super::format_params::FormatParams;
@@ -200,7 +201,7 @@ impl CodecConfig {
         tier_flag: u8,
         level_id: u8,
     ) {
-        use crate::packet::H265ProfileTierLevel;
+        use crate::vendor::str0m::packet::H265ProfileTierLevel;
 
         let ptl = H265ProfileTierLevel::new(profile_id, tier_flag, level_id)
             .unwrap_or(H265ProfileTierLevel::FALLBACK);
@@ -753,13 +754,13 @@ impl CodecSpec {
 
 #[cfg(test)]
 mod test {
-    use crate::io::MultiplexKind;
-    use crate::packet::MediaKind;
-    use crate::rtp_::Direction;
-    use crate::rtp_::Frequency;
+    use crate::vendor::str0m::io::MultiplexKind;
+    use crate::vendor::str0m::packet::MediaKind;
+    use crate::vendor::str0m::rtp_::Direction;
+    use crate::vendor::str0m::rtp_::Frequency;
 
     use super::*;
-    use crate::format::{CodecSpec, FormatParams};
+    use crate::vendor::str0m::format::{CodecSpec, FormatParams};
 
     #[test]
     fn transport_cc_uses_first_section_and_preserves_local_capability() {
@@ -1409,7 +1410,7 @@ mod test {
 
     /// Helper: build a single-element remote PayloadParams for H.265 with full PTL.
     fn h265_remote_ptl(profile_id: u8, tier_flag: u8, level_id: u8) -> Vec<PayloadParams> {
-        use crate::packet::H265ProfileTierLevel;
+        use crate::vendor::str0m::packet::H265ProfileTierLevel;
         vec![PayloadParams::new(
             102.into(),
             Some(103.into()),
@@ -1649,7 +1650,7 @@ mod test {
             None,
             FormatParams {
                 h265_profile_tier_level: Some(
-                    crate::packet::H265ProfileTierLevel::new(1, 0, 180).unwrap(),
+                    crate::vendor::str0m::packet::H265ProfileTierLevel::new(1, 0, 180).unwrap(),
                 ),
                 profile_id: Some(1), // should be cleared after negotiation
                 ..Default::default()

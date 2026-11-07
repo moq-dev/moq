@@ -1,6 +1,6 @@
 //! DTLS 1.2 curve type definitions.
 //!
-//! NamedGroup is now in crate::types as it's shared between DTLS versions.
+//! NamedGroup is now in crate::vendor::dimpl::types as it's shared between DTLS versions.
 //! CurveType is DTLS 1.2 specific (used in ServerKeyExchange).
 
 use nom::IResult;

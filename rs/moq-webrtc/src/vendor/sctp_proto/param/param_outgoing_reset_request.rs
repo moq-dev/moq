@@ -1,6 +1,6 @@
 use super::{param_header::*, param_type::*, *};
 
-use alloc::vec::Vec;
+use std::vec::Vec;
 use bytes::BufMut;
 
 pub(crate) const PARAM_OUTGOING_RESET_REQUEST_STREAM_IDENTIFIERS_OFFSET: usize = 12;

@@ -1,5 +1,5 @@
 use super::{BitRead, CodecExtra, Depacketizer, PacketError, Packetizer};
-use crate::rtp_::{extend_u7, extend_u8, extend_u15};
+use crate::vendor::str0m::rtp_::{extend_u7, extend_u8, extend_u15};
 
 use std::fmt;
 
@@ -55,7 +55,7 @@ pub struct Vp9CodecExtra {
     /// update the [`Vp9CodecExtra::layers_scheme`] on mutating the
     /// [`MediaData::data`].
     ///
-    /// [`MediaData::data`]: crate::media::MediaData::data
+    /// [`MediaData::data`]: crate::vendor::str0m::media::MediaData::data
     ///
     /// ## Example
     ///
@@ -63,8 +63,8 @@ pub struct Vp9CodecExtra {
     /// want to retranslate S1T2 layer. So you need to retranslate the all
     /// spatial and temporal layers <= target layer.
     ///
-    /// ```no_run
-    /// # use str0m::{format::CodecExtra, media::MediaData};
+    /// ```ignore
+    /// # use crate::vendor::str0m::{format::CodecExtra, media::MediaData};
     /// #
     /// // We want to receive S1T2 layer.
     /// let (target_spatial, target_temporal) = (1u8, 2u8);
@@ -112,7 +112,7 @@ pub struct Vp9CodecExtra {
     /// containing complete and independent visual information. This frame serves
     /// as a reference point for other frames in the video sequence.
     ///
-    /// [`MediaData`]: crate::media::MediaData
+    /// [`MediaData`]: crate::vendor::str0m::media::MediaData
     pub is_keyframe: bool,
 }
 
@@ -222,7 +222,7 @@ impl Packetizer for Vp9Packetizer {
             }
             #[cfg(not(test))]
             {
-                use str0m_proto::NonCryptographicRng;
+                use crate::vendor::str0m_proto::NonCryptographicRng;
                 self.picture_id = NonCryptographicRng::u16() & 0x7FFF;
             }
             self.initialized = true;
@@ -1486,8 +1486,8 @@ mod test {
     }
 
     fn assert_every_frame_emitted(frames: impl IntoIterator<Item = Vec<Vec<u8>>>) {
-        use crate::packet::{CodecDepacketizer, DepacketizingBuffer, RtpMeta};
-        use crate::rtp_::{MediaTime, RtpHeader};
+        use crate::vendor::str0m::packet::{CodecDepacketizer, DepacketizingBuffer, RtpMeta};
+        use crate::vendor::str0m::rtp_::{MediaTime, RtpHeader};
         use std::time::Instant;
 
         let mut buf =

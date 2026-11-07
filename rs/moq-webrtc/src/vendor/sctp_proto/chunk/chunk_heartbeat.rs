@@ -1,5 +1,5 @@
 use super::{chunk_header::*, chunk_type::*, *};
-use crate::param::{param_header::*, param_type::*, *};
+use crate::vendor::sctp_proto::param::{param_header::*, param_type::*, *};
 
 ///chunkHeartbeat represents an SCTP Chunk of type HEARTBEAT
 ///

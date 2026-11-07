@@ -1,7 +1,7 @@
 use super::{CertificateTypeVec, ClientCertificateType, DistinguishedName};
 use super::{SignatureAndHashAlgorithm, SignatureAndHashAlgorithmVec};
-use crate::buffer::Buf;
-use crate::util::{many0, many1};
+use crate::vendor::dimpl::buffer::Buf;
+use crate::vendor::dimpl::util::{many0, many1};
 use arrayvec::ArrayVec;
 use nom::Err;
 use nom::error::{Error, ErrorKind};
@@ -116,7 +116,7 @@ impl CertificateRequest {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::buffer::Buf;
+    use crate::vendor::dimpl::buffer::Buf;
 
     // Test message with recognized values:
     // - Certificate type: 0x40 (ECDSA_SIGN)

@@ -3,7 +3,7 @@
 //! A payload is one or more 4-byte event reports and is never split across RTP packets.
 
 use super::{CodecExtra, Depacketizer, PacketError, Packetizer};
-use crate::rtp_::Frequency;
+use crate::vendor::str0m::rtp_::Frequency;
 use std::time::Duration;
 
 const REPORT_LEN: usize = 4;
@@ -12,12 +12,12 @@ const REPORT_LEN: usize = 4;
 ///
 /// Builds and parses the 4-byte data carried in telephone-event RTP payloads.
 /// The wire parsing and serialization methods are unversioned and take the negotiated RTP
-/// clock rate on each call. This type is also available through `str0m::unversioned` when the
+/// clock rate on each call. This type is also available through `crate::vendor::str0m::unversioned` when the
 /// `unversioned` feature is enabled.
 ///
-/// ```
-/// use str0m::media::TelephoneEvent;
-/// use str0m::media::Frequency;
+/// ```ignore
+/// use crate::vendor::str0m::media::TelephoneEvent;
+/// use crate::vendor::str0m::media::Frequency;
 /// use std::time::Duration;
 ///
 /// let report = TelephoneEvent {

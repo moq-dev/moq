@@ -3,11 +3,11 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use str0m::media::{Direction, MediaKind};
-use str0m::{Event, RtcConfig, RtcError};
+use crate::vendor::str0m::media::{Direction, MediaKind};
+use crate::vendor::str0m::{Event, RtcConfig, RtcError};
 use tracing::info_span;
 
-mod common;
+use super::common;
 use common::{Peer, TestRtc, init_crypto_default, init_log, negotiate, progress};
 
 /// Test set_reordering_size_audio() and set_reordering_size_video() with custom sizes.
@@ -368,8 +368,8 @@ fn config_fingerprint_verification_disabled() -> Result<(), RtcError> {
     init_log();
     init_crypto_default();
 
-    use str0m::Candidate;
-    use str0m::crypto::Fingerprint;
+    use crate::vendor::str0m::Candidate;
+    use crate::vendor::str0m::crypto::Fingerprint;
 
     // Create RTCs with fingerprint verification DISABLED
     let rtc_l = RtcConfig::new()

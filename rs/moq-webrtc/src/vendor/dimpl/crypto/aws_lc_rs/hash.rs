@@ -3,8 +3,8 @@
 use aws_lc_rs::digest::{Context, SHA256, SHA384};
 
 use super::super::{HashContext, HashProvider};
-use crate::buffer::Buf;
-use crate::types::HashAlgorithm;
+use crate::vendor::dimpl::buffer::Buf;
+use crate::vendor::dimpl::types::HashAlgorithm;
 
 /// Hash context implementation using aws-lc-rs.
 struct AwsLcHashContext {

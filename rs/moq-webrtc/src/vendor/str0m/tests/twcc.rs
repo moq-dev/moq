@@ -1,13 +1,13 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use str0m::format::Codec;
-use str0m::media::{Direction, MediaKind};
-use str0m::rtp::rtcp::Twcc;
-use str0m::{Rtc, RtcError};
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::media::{Direction, MediaKind};
+use crate::vendor::str0m::rtp::rtcp::Twcc;
+use crate::vendor::str0m::{Rtc, RtcError};
 use tracing::info_span;
 
-mod common;
+use super::common;
 use common::{TestRtc, init_crypto_default, init_log, negotiate, progress};
 
 #[test]
@@ -61,7 +61,7 @@ pub fn twcc() -> Result<(), RtcError> {
     }
 
     let (sent_twcc, received_twcc) = {
-        use str0m::rtp::{RawPacket, rtcp::Rtcp};
+        use crate::vendor::str0m::rtp::{RawPacket, rtcp::Rtcp};
         let r_twcc: Vec<_> = r
             .events
             .iter()

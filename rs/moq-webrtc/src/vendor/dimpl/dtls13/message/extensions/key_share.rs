@@ -1,5 +1,5 @@
-use crate::buffer::Buf;
-use crate::types::NamedGroup;
+use crate::vendor::dimpl::buffer::Buf;
+use crate::vendor::dimpl::types::NamedGroup;
 use arrayvec::ArrayVec;
 use nom::Err;
 use nom::IResult;
@@ -145,7 +145,7 @@ impl KeyShareHelloRetryRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::Buf;
+    use crate::vendor::dimpl::buffer::Buf;
 
     #[test]
     fn key_share_client_hello_roundtrip() {

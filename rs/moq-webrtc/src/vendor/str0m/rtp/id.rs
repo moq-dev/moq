@@ -4,8 +4,8 @@ use std::str::from_utf8;
 
 use serde::{Deserialize, Serialize};
 
-use str0m_proto::Id;
-use str0m_proto::NonCryptographicRng;
+use crate::vendor::str0m_proto::Id;
+use crate::vendor::str0m_proto::NonCryptographicRng;
 
 macro_rules! str_id {
     ($id:ident, $name:literal, $num:tt, $new_len:tt) => {
@@ -131,7 +131,7 @@ str_id!(Mid, "Mid", 16, 3);
 /// The abbreviation means "RTP Stream Id", which is a very confusing name, because
 /// everything in RTP is a stream. People tend to just call it "rid".
 ///
-/// In SDP this is an optional value that will be seen in [`MediaData`][crate::media::MediaData]
+/// In SDP this is an optional value that will be seen in [`MediaData`][crate::vendor::str0m::media::MediaData]
 /// if the remote peer is configured for simulcast.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Rid([u8; 8]);
@@ -181,8 +181,8 @@ num_id!(SessionId, u64);
 ///
 /// To get the RTP u16 value from a `SeqNo`, use `as_u16()` or cast it to u16.
 ///
-/// ```
-/// # use str0m::rtp::SeqNo;
+/// ```ignore
+/// # use crate::vendor::str0m::rtp::SeqNo;
 /// let seq_no: SeqNo = 65_537.into();
 ///
 /// // Use `as_u16()`.
@@ -197,8 +197,8 @@ num_id!(SessionId, u64);
 pub struct SeqNo(u64);
 num_id!(SeqNo, u64);
 
-#[cfg(feature = "drv")]
-crate::drv_identity_copy!(Mid, Rid, Ssrc, Pt, SessionId, SeqNo);
+#[cfg(any())]
+crate::vendor::str0m::drv_identity_copy!(Mid, Rid, Ssrc, Pt, SessionId, SeqNo);
 
 /// TWCC-specific sequence number.
 ///
@@ -243,8 +243,8 @@ impl SeqNo {
     ///
     /// This is the same as discarding the top 48 bits by casting to a u16.
     ///
-    /// ```
-    /// # use str0m::rtp::SeqNo;
+    /// ```ignore
+    /// # use crate::vendor::str0m::rtp::SeqNo;
     /// let seq_no: SeqNo = 65_537.into();
     ///
     /// // Use `as_u16()`.
@@ -259,8 +259,8 @@ impl SeqNo {
 
     /// Get the rollover counter (ROC) value.
     ///
-    /// ```
-    /// # use str0m::rtp::SeqNo;
+    /// ```ignore
+    /// # use crate::vendor::str0m::rtp::SeqNo;
     /// // More than 2^16, thus rolled over.
     /// let seq_no: SeqNo = 95_000.into();
     ///

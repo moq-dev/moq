@@ -4,10 +4,10 @@ use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use crate::Bitrate;
-use crate::rtp::SeqNo;
-use crate::rtp_::{Mid, Rid};
-use crate::{io::Protocol, rtp_::MidRid};
+use crate::vendor::str0m::Bitrate;
+use crate::vendor::str0m::rtp::SeqNo;
+use crate::vendor::str0m::rtp_::{Mid, Rid};
+use crate::vendor::str0m::{io::Protocol, rtp_::MidRid};
 
 pub(crate) struct Stats {
     last_now: Option<Instant>,
@@ -58,7 +58,7 @@ pub(crate) enum StatsEvent {
     MediaIngress(MediaIngressStats),
 }
 
-/// Peer statistics in [`Event::PeerStats`][crate::Event::PeerStats].
+/// Peer statistics in [`Event::PeerStats`][crate::vendor::str0m::Event::PeerStats].
 ///
 /// This event is generated roughly every second
 #[derive(Debug, Clone)]
@@ -129,7 +129,7 @@ pub struct CandidateStats {
     pub addr: SocketAddr,
 }
 
-/// Outgoing media statistics in [`Event::MediaEgressStats`][crate::Event::MediaEgressStats].
+/// Outgoing media statistics in [`Event::MediaEgressStats`][crate::vendor::str0m::Event::MediaEgressStats].
 ///
 /// note: when simulcast is disabled, `rid` is `None`
 #[derive(Debug, Clone)]
@@ -178,7 +178,7 @@ pub struct RemoteIngressStats {
     pub packets_lost: u64,
 }
 
-/// Incoming media statistics in [`Event::MediaIngressStats`][crate::Event::MediaIngressStats].
+/// Incoming media statistics in [`Event::MediaIngressStats`][crate::vendor::str0m::Event::MediaIngressStats].
 ///
 /// note: when simulcast is disabled, `rid` is `None`
 #[derive(Debug, Clone)]

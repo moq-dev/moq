@@ -1,3 +1,4 @@
+use tracing::{debug, trace, warn};
 use std::any::Any;
 use std::any::TypeId;
 use std::collections::HashMap;
@@ -10,12 +11,12 @@ use std::str::from_utf8;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::util::InstantExt;
-use crate::util::SystemTimeExt;
-use crate::util::already_happened;
-use crate::util::epoch_to_beginning;
+use crate::vendor::str0m::util::InstantExt;
+use crate::vendor::str0m::util::SystemTimeExt;
+use crate::vendor::str0m::util::already_happened;
+use crate::vendor::str0m::util::epoch_to_beginning;
 
-use crate::rtp_::Frequency;
+use crate::vendor::str0m::rtp_::Frequency;
 
 use super::mtime::MediaTime;
 use super::{Mid, Rid};
@@ -1017,8 +1018,8 @@ impl UserExtensionValues {
     /// per type. The user should make a wrapper type for the extension they want
     /// to parse/write.
     ///
-    /// ```
-    /// # use str0m::rtp::ExtensionValues;
+    /// ```ignore
+    /// # use crate::vendor::str0m::rtp::ExtensionValues;
     /// let mut exts = ExtensionValues::default();
     ///
     /// #[derive(Debug, PartialEq, Eq)]
@@ -1034,8 +1035,8 @@ impl UserExtensionValues {
     }
 
     /// Get a user extension value (by type).
-    /// ```
-    /// # use str0m::rtp::ExtensionValues;
+    /// ```ignore
+    /// # use crate::vendor::str0m::rtp::ExtensionValues;
     /// let mut exts = ExtensionValues::default();
     ///
     /// #[derive(Debug, PartialEq, Eq)]
@@ -1239,8 +1240,8 @@ pub enum VideoOrientation {
     Deg270 = 1,
 }
 
-#[cfg(feature = "drv")]
-crate::drv_identity_copy!(VideoOrientation);
+#[cfg(any())]
+crate::vendor::str0m::drv_identity_copy!(VideoOrientation);
 
 impl From<u8> for VideoOrientation {
     fn from(value: u8) -> Self {

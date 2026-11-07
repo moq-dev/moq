@@ -5,15 +5,15 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use str0m::channel::{ChannelConfig, ChannelId, Reliability};
-use str0m::config::{DtlsVersion, Fingerprint};
-use str0m::crypto::dtls::ProtocolVersion;
-use str0m::ice::IceCreds;
-use str0m::net::{Protocol, Receive};
-use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig, RtcError};
+use crate::vendor::str0m::channel::{ChannelConfig, ChannelId, Reliability};
+use crate::vendor::str0m::config::{DtlsVersion, Fingerprint};
+use crate::vendor::str0m::crypto::dtls::ProtocolVersion;
+use crate::vendor::str0m::ice::IceCreds;
+use crate::vendor::str0m::net::{Protocol, Receive};
+use crate::vendor::str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig, RtcError};
 use tracing::{Span, info_span};
 
-mod common;
+use super::common;
 use common::{Peer, init_crypto_default, init_log, snap_init_data};
 
 /// Maximum total packets expected when using SNAP.
@@ -77,20 +77,20 @@ pub fn handshake_direct_api_snap() -> Result<(), RtcError> {
 }
 
 /// Returns the name of the default crypto provider based on compile-time feature flags.
-/// Mirrors the priority order in `str0m::crypto::from_feature_flags()`.
+/// Mirrors the priority order in `crate::vendor::str0m::crypto::from_feature_flags()`.
 #[allow(unreachable_code)]
 fn default_crypto_name() -> &'static str {
-    #[cfg(feature = "aws-lc-rs")]
+    #[cfg(all())]
     return "aws-lc-rs";
-    #[cfg(feature = "rust-crypto")]
+    #[cfg(any())]
     return "rust-crypto";
-    #[cfg(feature = "openssl-dimpl")]
+    #[cfg(any())]
     return "openssl-dimpl";
-    #[cfg(feature = "openssl")]
+    #[cfg(any())]
     return "openssl";
-    #[cfg(all(feature = "wincrypto", target_os = "windows"))]
+    #[cfg(all(any(), target_os = "windows"))]
     return "wincrypto";
-    #[cfg(all(feature = "apple-crypto", target_vendor = "apple"))]
+    #[cfg(all(any(), target_vendor = "apple"))]
     return "apple-crypto";
     "unknown"
 }
@@ -457,7 +457,7 @@ fn configure_rtc(
     remote_addr: SocketAddr,
     remote_ice_credentials: IceCreds,
     remote_fingerprint: String,
-    local_init_data: Option<str0m::channel::SctpInitData>,
+    local_init_data: Option<crate::vendor::str0m::channel::SctpInitData>,
     remote_sctp_init: Option<Vec<u8>>,
 ) -> Result<(), RtcError> {
     let remote_candidate = Candidate::host(remote_addr, "udp")?;

@@ -93,20 +93,20 @@
 //!
 //! # Example (Sans‑IO loop)
 //!
-//! ```rust,no_run
-//! # #[cfg(feature = "rcgen")]
+//! ```ignore
+//! # #[cfg(all())]
 //! # {
 //! use std::sync::Arc;
 //! use std::time::Instant;
 //!
-//! use dimpl::{certificate, Config, Dtls, Output};
+//! use crate::vendor::dimpl::{certificate, Config, Dtls, Output};
 //!
 //! // Stub I/O to keep the example focused on the state machine
 //! enum Event { Udp(Vec<u8>, Instant), Timer(Instant) }
 //! fn wait_next_event(_next_wake: Option<Instant>) -> Event { Event::Udp(Vec::new(), Instant::now()) }
 //! fn send_udp(_bytes: &[u8]) {}
 //!
-//! fn example_event_loop(mut dtls: Dtls) -> Result<(), dimpl::Error> {
+//! fn example_event_loop(mut dtls: Dtls) -> Result<(), crate::vendor::dimpl::Error> {
 //!     let mut next_wake: Option<Instant> = None;
 //!     let mut received_packet: Option<Vec<u8>> = None;
 //!     loop {
@@ -171,11 +171,11 @@
 //!
 //! # Example (PSK client)
 //!
-//! ```rust,no_run
+//! ```ignore
 //! use std::sync::Arc;
 //! use std::time::Instant;
 //!
-//! use dimpl::{Config, Dtls, PskResolver};
+//! use crate::vendor::dimpl::{Config, Dtls, PskResolver};
 //!
 //! struct MyPsk;
 //!
@@ -221,14 +221,12 @@
 //! [RFC 7627]: https://www.rfc-editor.org/rfc/rfc7627
 //!
 #![forbid(unsafe_code)]
-#![warn(clippy::all)]
 #![allow(unknown_lints)]
 #![deny(missing_docs)]
 #![deny(missing_debug_implementations)]
 
-#[macro_use]
-extern crate log;
 
+use tracing::debug;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
@@ -267,7 +265,7 @@ pub use error::{
 mod config;
 pub use config::{Config, ConfigBuilder, Psk, PskResolver};
 
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 pub mod certificate;
 
 pub mod crypto;
@@ -362,7 +360,7 @@ fn client_hello_handshake(packet: &[u8]) -> Option<&[u8]> {
 /// minimum a real DTLS 1.2 ClientHello can carry. A header-only fake
 /// or a CH whose declared length cannot fit a valid 1.2 body fails the
 /// check.
-#[cfg(all(test, feature = "rcgen"))]
+#[cfg(all(test, all()))]
 fn looks_like_client_hello(packet: &[u8]) -> bool {
     let Some(record_body) = client_hello_handshake(packet) else {
         return false;
@@ -725,7 +723,7 @@ impl Dtls {
         // while inner is None would leave us unable to poll/timeout.
         if matches!(version, auto::DetectedVersion::Unknown) {
             return Err(Error::UnexpectedMessage(
-                crate::UnexpectedMessageError::UnrecognizedAutoServerResponse,
+                crate::vendor::dimpl::UnexpectedMessageError::UnrecognizedAutoServerResponse,
             ));
         }
 
@@ -964,12 +962,12 @@ impl fmt::Debug for Output<'_> {
 }
 
 #[cfg(test)]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 mod test {
     use std::panic::UnwindSafe;
 
-    use crate::certificate::generate_self_signed_certificate;
-    use crate::crypto::Dtls12CipherSuite;
+    use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
+    use crate::vendor::dimpl::crypto::Dtls12CipherSuite;
 
     use super::*;
 
@@ -1565,3 +1563,6 @@ mod test {
         );
     }
 }
+
+#[cfg(test)]
+mod tests;

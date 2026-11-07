@@ -1,5 +1,6 @@
 //! Resolves a peer's `.local` candidates over mDNS, one distinct name at a time.
 
+use crate::vendor::str0m;
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::IpAddr;

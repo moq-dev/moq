@@ -1,23 +1,24 @@
 //! DTLS 1.2 cryptographic context for a session.
 
+use tracing::trace;
 use std::sync::Arc;
 
 use arrayvec::ArrayVec;
 
-use crate::CryptoError;
-use crate::buffer::{Buf, TmpBuf, ToBuf};
-use crate::crypto;
-use crate::crypto::SrtpProfile;
-use crate::crypto::{Aad, Iv, Nonce};
-use crate::dtls12::message::DigitallySigned;
-use crate::dtls12::message::{Asn1Cert, Certificate};
-use crate::dtls12::message::{CurveType, Dtls12CipherSuite, HashAlgorithm};
-use crate::dtls12::message::{NamedGroup, SignatureAlgorithm};
+use crate::vendor::dimpl::CryptoError;
+use crate::vendor::dimpl::buffer::{Buf, TmpBuf, ToBuf};
+use crate::vendor::dimpl::crypto;
+use crate::vendor::dimpl::crypto::SrtpProfile;
+use crate::vendor::dimpl::crypto::{Aad, Iv, Nonce};
+use crate::vendor::dimpl::dtls12::message::DigitallySigned;
+use crate::vendor::dimpl::dtls12::message::{Asn1Cert, Certificate};
+use crate::vendor::dimpl::dtls12::message::{CurveType, Dtls12CipherSuite, HashAlgorithm};
+use crate::vendor::dimpl::dtls12::message::{NamedGroup, SignatureAlgorithm};
 
 /// DTLS 1.2 crypto context holding negotiated keys and ciphers for a session.
 pub struct CryptoContext {
     /// Configuration (contains crypto provider)
-    config: Arc<crate::Config>,
+    config: Arc<crate::vendor::dimpl::Config>,
 
     /// Key exchange mechanism
     key_exchange: Option<Box<dyn crypto::ActiveKeyExchange>>,
@@ -87,7 +88,7 @@ pub enum AuthMode {
 
 impl CryptoContext {
     /// Create a new crypto context with the given authentication mode.
-    pub fn new(auth: AuthMode, config: Arc<crate::Config>) -> Self {
+    pub fn new(auth: AuthMode, config: Arc<crate::vendor::dimpl::Config>) -> Self {
         CryptoContext {
             config,
             key_exchange: None,
@@ -613,11 +614,11 @@ impl CryptoContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Config;
+    use crate::vendor::dimpl::Config;
 
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn cert_auth_mode(config: &Config) -> AuthMode {
-        let cert = crate::certificate::generate_self_signed_certificate().expect("generate cert");
+        let cert = crate::vendor::dimpl::certificate::generate_self_signed_certificate().expect("generate cert");
         let private_key = config
             .crypto_provider()
             .key_provider
@@ -630,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn certificate_mode_rejects_psk_suites() {
         let config = Arc::new(Config::default());
         let auth = cert_auth_mode(&config);
@@ -648,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn certificate_mode_accepts_ecdhe_suites() {
         let config = Arc::new(Config::default());
         let auth = cert_auth_mode(&config);

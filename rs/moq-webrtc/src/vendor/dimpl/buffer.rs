@@ -202,7 +202,7 @@ impl<'a> AsMut<[u8]> for TmpBuf<'a> {
     }
 }
 
-#[cfg(feature = "rust-crypto")]
+#[cfg(any())]
 impl<'a> aes_gcm::aead::Buffer for TmpBuf<'a> {
     fn extend_from_slice(&mut self, other: &[u8]) -> Result<(), aes_gcm::aead::Error> {
         // Check if there's enough capacity in the underlying slice
@@ -224,7 +224,7 @@ impl<'a> aes_gcm::aead::Buffer for TmpBuf<'a> {
 }
 
 /// Implement the `aead::Buffer` trait for `Buf` to support in-place AEAD operations.
-#[cfg(feature = "rust-crypto")]
+#[cfg(any())]
 impl aes_gcm::aead::Buffer for Buf {
     fn extend_from_slice(&mut self, other: &[u8]) -> Result<(), aes_gcm::aead::Error> {
         self.data.extend_from_slice(other);

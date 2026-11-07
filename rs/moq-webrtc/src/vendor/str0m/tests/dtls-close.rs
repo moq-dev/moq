@@ -1,23 +1,23 @@
 //! Tests for the Rtc shutdown states.
 #![cfg(any(
-    feature = "aws-lc-rs",
-    feature = "rust-crypto",
-    feature = "openssl",
-    feature = "openssl-dimpl",
-    feature = "wincrypto",
-    feature = "apple-crypto",
+    all(),
+    any(),
+    any(),
+    any(),
+    any(),
+    any(),
 ))]
 
 use std::net::Ipv4Addr;
 use std::time::Instant;
 
-use str0m::media::MediaKind;
-use str0m::rtp::rtcp::Rtcp;
-use str0m::rtp::{RawPacket, Ssrc};
-use str0m::{Candidate, Event, Input, Output, Rtc, RtcConfig, RtcError};
+use crate::vendor::str0m::media::MediaKind;
+use crate::vendor::str0m::rtp::rtcp::Rtcp;
+use crate::vendor::str0m::rtp::{RawPacket, Ssrc};
+use crate::vendor::str0m::{Candidate, Event, Input, Output, Rtc, RtcConfig, RtcError};
 use tracing::info_span;
 
-mod common;
+use super::common;
 use common::{TestRtc, init_crypto_default, init_log, progress};
 
 fn direct_pair() -> (TestRtc, TestRtc) {
@@ -80,7 +80,7 @@ fn progress_until(
     panic!("{label} did not complete");
 }
 
-fn next_transmit(rtc: &mut TestRtc) -> str0m::net::Transmit {
+fn next_transmit(rtc: &mut TestRtc) -> crate::vendor::str0m::net::Transmit {
     for _ in 0..100 {
         match rtc.rtc.poll_output().unwrap() {
             Output::Transmit(transmit) => return transmit,
@@ -92,7 +92,7 @@ fn next_transmit(rtc: &mut TestRtc) -> str0m::net::Transmit {
     panic!("expected transmit");
 }
 
-fn deliver(transmit: &str0m::net::Transmit, rtc: &mut TestRtc) -> Result<(), RtcError> {
+fn deliver(transmit: &crate::vendor::str0m::net::Transmit, rtc: &mut TestRtc) -> Result<(), RtcError> {
     rtc.rtc
         .handle_input(Input::Receive(rtc.last, transmit.try_into()?))
 }

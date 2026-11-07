@@ -1,5 +1,5 @@
-use crate::SrtpProfile;
-use crate::buffer::Buf;
+use crate::vendor::dimpl::SrtpProfile;
+use crate::vendor::dimpl::buffer::Buf;
 use arrayvec::ArrayVec;
 use nom::bytes::complete::take;
 use nom::error::{Error, ErrorKind};
@@ -171,7 +171,7 @@ impl UseSrtpExtension {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::Buf;
+    use crate::vendor::dimpl::buffer::Buf;
 
     #[test]
     fn test_use_srtp_extension() {

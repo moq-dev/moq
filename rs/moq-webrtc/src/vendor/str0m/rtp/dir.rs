@@ -15,8 +15,8 @@ pub enum Direction {
     Inactive,
 }
 
-#[cfg(feature = "drv")]
-crate::drv_identity_copy!(Direction);
+#[cfg(any())]
+crate::vendor::str0m::drv_identity_copy!(Direction);
 
 impl Direction {
     /// Change the direction to the opposite.

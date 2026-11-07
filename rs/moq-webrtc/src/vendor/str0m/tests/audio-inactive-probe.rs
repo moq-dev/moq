@@ -1,11 +1,11 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use netem::Bitrate;
-use str0m::media::{Direction, MediaKind};
-use str0m::{Rtc, RtcError};
+use crate::vendor::netem::Bitrate;
+use crate::vendor::str0m::media::{Direction, MediaKind};
+use crate::vendor::str0m::{Rtc, RtcError};
 
-mod common;
+use super::common;
 use common::{Peer, TestRtc, init_crypto_default, init_log, progress};
 
 /// Similar test but with bandwidth estimation enabled to increase probe likelihood

@@ -1,6 +1,6 @@
-use crate::shared::AssociationId;
+use crate::vendor::sctp_proto::shared::AssociationId;
 
-use alloc::borrow::ToOwned;
+use std::borrow::ToOwned;
 use bytes::Bytes;
 use core::time::Duration;
 use crc::{CRC_32_ISCSI, Crc, Table};
@@ -273,7 +273,7 @@ pub(crate) fn sna16eq(i1: u16, i2: u16) -> bool {
 
 #[cfg(test)]
 mod test {
-    use crate::error::Result;
+    use crate::vendor::sctp_proto::error::Result;
 
     use super::*;
 

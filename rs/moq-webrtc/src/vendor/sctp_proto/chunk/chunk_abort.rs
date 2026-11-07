@@ -1,6 +1,6 @@
 use super::{chunk_header::*, chunk_type::*, *};
 
-use alloc::string::ToString;
+use std::string::ToString;
 
 ///Abort represents an SCTP Chunk of type ABORT
 ///

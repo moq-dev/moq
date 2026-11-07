@@ -6,16 +6,16 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use str0m::_internal_test_exports::TestSrtp;
-use str0m::change::SdpOffer;
-use str0m::crypto::dtls::{KeyingMaterial, SrtpProfile};
-use str0m::media::{Direction, MediaKind, Mid, Simulcast, SimulcastLayer};
-use str0m::net::{Protocol, Receive};
-use str0m::rtp::rtcp::Rtcp;
-use str0m::rtp::{ExtensionValues, RawPacket, RtpHeader};
-use str0m::{Event, Input, Output};
+use crate::vendor::str0m::_internal_test_exports::TestSrtp;
+use crate::vendor::str0m::change::SdpOffer;
+use crate::vendor::str0m::crypto::dtls::{KeyingMaterial, SrtpProfile};
+use crate::vendor::str0m::media::{Direction, MediaKind, Mid, Simulcast, SimulcastLayer};
+use crate::vendor::str0m::net::{Protocol, Receive};
+use crate::vendor::str0m::rtp::rtcp::Rtcp;
+use crate::vendor::str0m::rtp::{ExtensionValues, RawPacket, RtpHeader};
+use crate::vendor::str0m::{Event, Input, Output};
 
-mod common;
+use super::common;
 use common::{Peer, TestRtc, init_crypto_default, init_log, progress};
 
 const RTX_SSRC: u32 = 426592647;
@@ -190,7 +190,7 @@ fn main_discovery_preserves_rtx_rollover_and_replay_protection() {
 fn receiver(rtp_mode: bool, profile: SrtpProfile) -> (TestRtc, TestSrtp, Mid) {
     init_log();
     init_crypto_default();
-    let configure = |config: str0m::RtcConfig| {
+    let configure = |config: crate::vendor::str0m::RtcConfig| {
         config
             .clear_codecs()
             .enable_vp8(true)
@@ -236,7 +236,7 @@ fn receiver(rtp_mode: bool, profile: SrtpProfile) -> (TestRtc, TestSrtp, Mid) {
         SrtpProfile::AEAD_AES_256_GCM => 88,
         _ => unreachable!(),
     };
-    let crypto = str0m::crypto::from_feature_flags();
+    let crypto = crate::vendor::str0m::crypto::from_feature_flags();
     let material = KeyingMaterial::new(&vec![42; len]);
     let srtp = TestSrtp::new(&crypto, profile, &material);
     receiver._set_srtp_keys(material, profile, false);

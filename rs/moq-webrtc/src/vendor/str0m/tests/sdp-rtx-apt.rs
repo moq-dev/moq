@@ -1,12 +1,12 @@
 use std::time::Instant;
 
-use str0m::change::{SdpAnswer, SdpOffer};
-use str0m::error::SdpError;
-use str0m::format::Codec;
-use str0m::media::{Direction, MediaKind};
-use str0m::{Rtc, RtcError};
+use crate::vendor::str0m::change::{SdpAnswer, SdpOffer};
+use crate::vendor::str0m::error::SdpError;
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::media::{Direction, MediaKind};
+use crate::vendor::str0m::{Rtc, RtcError};
 
-mod common;
+use super::common;
 use common::init_crypto_default;
 
 fn offer_sdp(direction: &str, fmtp: &str) -> String {

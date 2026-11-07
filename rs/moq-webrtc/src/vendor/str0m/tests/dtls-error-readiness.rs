@@ -1,20 +1,20 @@
 //! DTLS can change its timeout even when processing a packet returns an error.
 #![cfg(any(
-    feature = "aws-lc-rs",
-    feature = "rust-crypto",
-    feature = "openssl-dimpl",
-    feature = "wincrypto",
-    feature = "apple-crypto",
+    all(),
+    any(),
+    any(),
+    any(),
+    any(),
 ))]
 
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use str0m::config::DtlsVersion;
-use str0m::net::{Protocol, Receive};
-use str0m::{Input, Output, Reason, Rtc, RtcError};
+use crate::vendor::str0m::config::DtlsVersion;
+use crate::vendor::str0m::net::{Protocol, Receive};
+use crate::vendor::str0m::{Input, Output, Reason, Rtc, RtcError};
 
-mod common;
+use super::common;
 use common::init_crypto_default;
 
 #[test]

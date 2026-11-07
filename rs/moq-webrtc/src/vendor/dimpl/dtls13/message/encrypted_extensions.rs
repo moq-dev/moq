@@ -1,5 +1,5 @@
 use super::{Extension, ExtensionType, SrtpProfileId, UseSrtpExtension};
-use crate::buffer::Buf;
+use crate::vendor::dimpl::buffer::Buf;
 use arrayvec::ArrayVec;
 use nom::Err;
 use nom::IResult;
@@ -93,7 +93,7 @@ impl EncryptedExtensions {
 mod tests {
     use super::super::ExtensionType;
     use super::*;
-    use crate::buffer::Buf;
+    use crate::vendor::dimpl::buffer::Buf;
 
     const MESSAGE: &[u8] = &[
         0x00, 0x0C, // Extensions length (12)

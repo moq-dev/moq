@@ -3,16 +3,15 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dimpl::Dtls;
+use crate::vendor::dimpl::Dtls;
 
-use crate::common::*;
+use crate::vendor::dimpl::tests::dtls12::common::*;
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_application_data_exchange() {
-    use dimpl::certificate::generate_self_signed_certificate;
+    use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
-    let _ = env_logger::try_init();
 
     let client_cert = generate_self_signed_certificate().expect("gen client cert");
     let server_cert = generate_self_signed_certificate().expect("gen server cert");
@@ -96,11 +95,10 @@ fn dtls12_application_data_exchange() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_multiple_application_data_messages() {
-    use dimpl::certificate::generate_self_signed_certificate;
+    use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
-    let _ = env_logger::try_init();
 
     let client_cert = generate_self_signed_certificate().expect("gen client cert");
     let server_cert = generate_self_signed_certificate().expect("gen server cert");
@@ -187,11 +185,10 @@ fn dtls12_multiple_application_data_messages() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_bidirectional_data_exchange() {
-    use dimpl::certificate::generate_self_signed_certificate;
+    use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
-    let _ = env_logger::try_init();
 
     let client_cert = generate_self_signed_certificate().expect("gen client cert");
     let server_cert = generate_self_signed_certificate().expect("gen server cert");
@@ -279,11 +276,10 @@ fn dtls12_bidirectional_data_exchange() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_many_small_messages() {
-    use dimpl::certificate::generate_self_signed_certificate;
+    use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
-    let _ = env_logger::try_init();
 
     let client_cert = generate_self_signed_certificate().expect("gen client cert");
     let server_cert = generate_self_signed_certificate().expect("gen server cert");
@@ -352,11 +348,10 @@ fn dtls12_many_small_messages() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_large_application_data() {
-    use dimpl::certificate::generate_self_signed_certificate;
+    use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
-    let _ = env_logger::try_init();
 
     let client_cert = generate_self_signed_certificate().expect("gen client cert");
     let server_cert = generate_self_signed_certificate().expect("gen server cert");

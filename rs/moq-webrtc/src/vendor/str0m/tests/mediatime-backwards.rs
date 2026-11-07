@@ -1,13 +1,13 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use str0m::format::Codec;
-use str0m::media::{Direction, MediaKind, MediaTime};
-use str0m::rtp::RawPacket;
-use str0m::{Event, RtcError};
+use crate::vendor::str0m::format::Codec;
+use crate::vendor::str0m::media::{Direction, MediaKind, MediaTime};
+use crate::vendor::str0m::rtp::RawPacket;
+use crate::vendor::str0m::{Event, RtcError};
 use tracing::info;
 
-mod common;
+use super::common;
 use common::{Peer, TestRtc, init_crypto_default, init_log, progress};
 
 #[test]
@@ -19,7 +19,7 @@ pub fn mediatime_backwards() -> Result<(), RtcError> {
     let mut r = TestRtc::new(Peer::Right);
 
     // Enable raw packets to trace the RTP headers
-    r.rtc = str0m::Rtc::builder()
+    r.rtc = crate::vendor::str0m::Rtc::builder()
         .enable_raw_packets(true)
         .build(Instant::now());
 

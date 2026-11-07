@@ -1,6 +1,6 @@
-use crate::chunk::chunk_payload_data::ChunkPayloadData;
+use crate::vendor::sctp_proto::chunk::chunk_payload_data::ChunkPayloadData;
 
-use alloc::collections::VecDeque;
+use std::collections::VecDeque;
 use core::time::Duration;
 use std::time::Instant;
 
@@ -43,11 +43,11 @@ impl PendingQueue {
                 .take_while(|chunk| chunk.message_id >= first_message_id)
             {
                 if chunk.deadline.is_some()
-                    || chunk.payload_type == crate::PayloadProtocolIdentifier::Dcep
+                    || chunk.payload_type == crate::vendor::sctp_proto::PayloadProtocolIdentifier::Dcep
                 {
                     continue;
                 }
-                if let Some((crate::ReliabilityType::Timed, lifetime)) = chunk.reliability {
+                if let Some((crate::vendor::sctp_proto::ReliabilityType::Timed, lifetime)) = chunk.reliability {
                     chunk.deadline = now.checked_add(Duration::from_millis(u64::from(lifetime)));
                 }
             }

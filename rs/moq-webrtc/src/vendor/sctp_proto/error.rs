@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use alloc::string::String;
+use std::string::String;
 
 pub type Result<T> = core::result::Result<T, Error>;
 

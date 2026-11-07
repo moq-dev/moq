@@ -1,12 +1,12 @@
-use alloc::boxed::Box;
+use std::boxed::Box;
 use core::any::Any;
 use core::fmt::{Debug, Display, Formatter};
 
 use bytes::{Bytes, BytesMut};
 
-use crate::param::Param;
-use crate::param::param_header::{PARAM_HEADER_LENGTH, ParamHeader};
-use crate::param::param_type::ParamType;
+use crate::vendor::sctp_proto::param::Param;
+use crate::vendor::sctp_proto::param::param_header::{PARAM_HEADER_LENGTH, ParamHeader};
+use crate::vendor::sctp_proto::param::param_type::ParamType;
 
 /// This type is meant to represent ANY parameter for
 /// un/remarshaling purposes, where we do not have a more specific
@@ -41,7 +41,7 @@ impl Param for ParamUnknown {
         self
     }
 
-    fn unmarshal(raw: &Bytes) -> crate::error::Result<Self>
+    fn unmarshal(raw: &Bytes) -> crate::vendor::sctp_proto::error::Result<Self>
     where
         Self: Sized,
     {
@@ -53,7 +53,7 @@ impl Param for ParamUnknown {
         })
     }
 
-    fn marshal_to(&self, buf: &mut BytesMut) -> crate::error::Result<usize> {
+    fn marshal_to(&self, buf: &mut BytesMut) -> crate::vendor::sctp_proto::error::Result<usize> {
         self.header().marshal_to(buf)?;
         buf.extend(self.value.clone());
         Ok(buf.len())

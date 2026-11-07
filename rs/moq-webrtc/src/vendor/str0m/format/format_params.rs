@@ -1,8 +1,9 @@
+use tracing::debug;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use super::Codec;
-use crate::sdp::FormatParam;
+use crate::vendor::str0m::sdp::FormatParam;
 
 /// Codec specific format parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -93,7 +94,7 @@ pub struct FormatParams {
     /// * level: 3.1, 4.0, 5.0, etc.
     ///
     /// See ITU-T H.265 Annex A for complete definitions.
-    pub h265_profile_tier_level: Option<crate::packet::H265ProfileTierLevel>,
+    pub h265_profile_tier_level: Option<crate::vendor::str0m::packet::H265ProfileTierLevel>,
 
     /// H.266/VVC profile, tier, and level.
     ///
@@ -103,7 +104,7 @@ pub struct FormatParams {
     /// * level: 3.1, 4.0, 5.0, etc.
     ///
     /// See ITU-T H.266 Annex A and RFC 9328 §7.2 for complete definitions.
-    pub h266_profile_tier_level: Option<crate::packet::H266ProfileTierLevel>,
+    pub h266_profile_tier_level: Option<crate::vendor::str0m::packet::H266ProfileTierLevel>,
 
     /// H.265 sprop-max-don-diff parameter (RFC 7798 §7.1).
     /// When > 0, DONL fields are included in H.265 RTP packets to support
@@ -128,8 +129,8 @@ pub struct FormatParams {
     pub mode_set: Option<u16>,
 }
 
-#[cfg(feature = "drv")]
-crate::drv_identity_copy!(FormatParams);
+#[cfg(any())]
+crate::vendor::str0m::drv_identity_copy!(FormatParams);
 
 impl FormatParams {
     pub(crate) const DEFAULT_TELEPHONE_EVENT_MAX: u8 = 16;
@@ -356,7 +357,7 @@ mod test {
 
     #[test]
     fn h265_combined_params_roundtrip() {
-        use crate::packet::H265ProfileTierLevel;
+        use crate::vendor::str0m::packet::H265ProfileTierLevel;
 
         // Test H.265 with both profile/tier/level and sprop-max-don-diff
         let ptl = H265ProfileTierLevel::new(1, 0, 93).unwrap();
@@ -381,7 +382,7 @@ mod test {
 
     #[test]
     fn h266_combined_params_roundtrip() {
-        use crate::packet::H266ProfileTierLevel;
+        use crate::vendor::str0m::packet::H266ProfileTierLevel;
 
         // Test H.266 with both profile/tier/level and sprop-max-don-diff
         let ptl = H266ProfileTierLevel::new(1, 0, 51).unwrap();

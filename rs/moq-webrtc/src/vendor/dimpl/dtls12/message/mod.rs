@@ -45,7 +45,7 @@ pub use named_group::CurveType;
 pub use record::DTLSRecord;
 
 // Re-export shared types for backwards compatibility
-pub use crate::types::{
+pub use crate::vendor::dimpl::types::{
     CompressionMethod, ContentType, HashAlgorithm, NamedGroup, NamedGroupVec, ProtocolVersion,
     Random, Sequence, SignatureAlgorithm,
 };
@@ -305,7 +305,7 @@ impl fmt::Debug for ClientCertificateType {
     }
 }
 
-// SignatureAlgorithm and HashAlgorithm are now in crate::types
+// SignatureAlgorithm and HashAlgorithm are now in crate::vendor::dimpl::types
 
 pub type SignatureAndHashAlgorithmVec =
     ArrayVec<SignatureAndHashAlgorithm, { SignatureAndHashAlgorithm::supported().len() }>;

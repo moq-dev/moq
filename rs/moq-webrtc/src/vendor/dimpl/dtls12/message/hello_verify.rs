@@ -1,6 +1,6 @@
 use super::ProtocolVersion;
 use super::id::Cookie;
-use crate::buffer::Buf;
+use crate::vendor::dimpl::buffer::Buf;
 use nom::IResult;
 use nom::error::{Error, ErrorKind};
 
@@ -45,7 +45,7 @@ impl HelloVerifyRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::Buf;
+    use crate::vendor::dimpl::buffer::Buf;
 
     const MESSAGE: &[u8] = &[
         0xFE, 0xFD, // ProtocolVersion::DTLS1_2

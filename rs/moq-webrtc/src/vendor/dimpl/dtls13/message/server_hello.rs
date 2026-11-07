@@ -2,7 +2,7 @@ use super::{CompressionMethod, Dtls13CipherSuite, Extension};
 use super::{ExtensionType, KeyShareHelloRetryRequest, KeyShareServerHello, NamedGroup};
 use super::{ProtocolVersion, Random, SessionId};
 use super::{SupportedVersionsServerHello, parse_cookie_extension};
-use crate::buffer::Buf;
+use crate::vendor::dimpl::buffer::Buf;
 use arrayvec::ArrayVec;
 use nom::Err;
 use nom::error::{Error, ErrorKind};
@@ -193,7 +193,7 @@ impl ServerHello {
 mod test {
     use super::super::ExtensionType;
     use super::*;
-    use crate::buffer::Buf;
+    use crate::vendor::dimpl::buffer::Buf;
 
     const MESSAGE: &[u8] = &[
         0xFE, 0xFD, // ProtocolVersion::DTLS1_2 (legacy)

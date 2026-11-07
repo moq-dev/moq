@@ -1,3 +1,4 @@
+use tracing::trace;
 use std::fmt;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -5,10 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use arrayvec::ArrayVec;
 use nom::error::ErrorKind;
 
-use crate::buffer::{Buf, TmpBuf};
-use crate::crypto::{Aad, Nonce};
-use crate::dtls12::message::{ContentType, DTLSRecord, Dtls12CipherSuite, Handshake, Sequence};
-use crate::{Error, InternalError};
+use crate::vendor::dimpl::buffer::{Buf, TmpBuf};
+use crate::vendor::dimpl::crypto::{Aad, Nonce};
+use crate::vendor::dimpl::dtls12::message::{ContentType, DTLSRecord, Dtls12CipherSuite, Handshake, Sequence};
+use crate::vendor::dimpl::{Error, InternalError};
 
 /// Holds both the UDP packet and the parsed result of that packet.
 pub struct Incoming {
@@ -496,7 +497,7 @@ impl std::panic::UnwindSafe for Incoming {}
 
 #[cfg(test)]
 mod tests {
-    use crate::buffer::BufferPool;
+    use crate::vendor::dimpl::buffer::BufferPool;
 
     use super::*;
 

@@ -1,10 +1,10 @@
 use std::time::Duration;
 
-use str0m::media::MediaKind;
-use str0m::rtp::Ssrc;
-use str0m::{Event, RtcError};
+use crate::vendor::str0m::media::MediaKind;
+use crate::vendor::str0m::rtp::Ssrc;
+use crate::vendor::str0m::{Event, RtcError};
 
-mod common;
+use super::common;
 use common::{connect_l_r, init_crypto_default, init_log, progress};
 
 /// A PLI sent from one peer via [`DirectApi::send_pli_feedback`] is received by the

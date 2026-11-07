@@ -3,11 +3,11 @@
 use aws_lc_rs::aead::{AES_128_GCM, AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 use aws_lc_rs::cipher::{AES_128, EncryptingKey, EncryptionContext, UnboundCipherKey};
 
-use str0m_proto::crypto::CryptoError;
-use str0m_proto::crypto::{AeadAes128Gcm, AeadAes128GcmCipher, AeadAes256Gcm};
-use str0m_proto::crypto::{AeadAes256GcmCipher, Aes128CmSha1_80Cipher};
-use str0m_proto::crypto::{SrtpProvider, SupportedAeadAes128Gcm};
-use str0m_proto::crypto::{SupportedAeadAes256Gcm, SupportedAes128CmSha1_80};
+use crate::vendor::str0m_proto::crypto::CryptoError;
+use crate::vendor::str0m_proto::crypto::{AeadAes128Gcm, AeadAes128GcmCipher, AeadAes256Gcm};
+use crate::vendor::str0m_proto::crypto::{AeadAes256GcmCipher, Aes128CmSha1_80Cipher};
+use crate::vendor::str0m_proto::crypto::{SrtpProvider, SupportedAeadAes128Gcm};
+use crate::vendor::str0m_proto::crypto::{SupportedAeadAes256Gcm, SupportedAes128CmSha1_80};
 
 // ============================================================================
 // AES-128-CM-SHA1-80 Cipher

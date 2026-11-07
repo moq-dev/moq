@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn app_specific_feedback_write_and_parse_round_trip() {
-        use crate::rtp_::RtcpPacket;
+        use crate::vendor::str0m::rtp_::RtcpPacket;
 
         let fb = AppSpecificFeedback {
             sender_ssrc: 1001.into(),
@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn app_specific_feedback_not_confused_with_remb() {
-        use crate::rtp_::RtcpPacket;
+        use crate::vendor::str0m::rtp_::RtcpPacket;
 
         // A non-REMB FMT=15 payload should parse as AppSpecificFeedback, not Remb
         let fb = AppSpecificFeedback {

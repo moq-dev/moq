@@ -1,5 +1,6 @@
 #![allow(clippy::unusual_byte_groupings)]
 
+use tracing::trace;
 use super::{FeedbackMessageType, PayloadType, TransportType};
 
 pub(crate) const LEN_HEADER: usize = 4;

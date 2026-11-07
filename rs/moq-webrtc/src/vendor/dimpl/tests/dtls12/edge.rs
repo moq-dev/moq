@@ -3,12 +3,12 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[cfg(feature = "rcgen")]
-use dimpl::certificate::generate_self_signed_certificate;
-use dimpl::crypto::Dtls12CipherSuite;
-use dimpl::{Config, Dtls, Output};
+#[cfg(all())]
+use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
+use crate::vendor::dimpl::crypto::Dtls12CipherSuite;
+use crate::vendor::dimpl::{Config, Dtls, Output};
 
-use crate::common::*;
+use crate::vendor::dimpl::tests::dtls12::common::*;
 
 fn dtls12_alert_record(seq: u64, level: u8, description: u8) -> Vec<u8> {
     let mut out = Vec::new();
@@ -33,7 +33,7 @@ fn dtls12_epoch1_record(seq: u64, len: usize) -> Vec<u8> {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn oversized_application_data_reports_buffer_too_small() {
     let now = Instant::now();
     let (mut client, mut server, _now) = setup_connected_12_pair(now);
@@ -98,9 +98,8 @@ fn dtls12_min_protected_fragment_len(suite: Dtls12CipherSuite) -> usize {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_malformed_datagram_is_discarded_without_processing_alerts() {
-    let _ = env_logger::try_init();
 
     let server_cert = generate_self_signed_certificate().expect("gen server cert");
     let config = dtls12_config();
@@ -121,9 +120,8 @@ fn dtls12_malformed_datagram_is_discarded_without_processing_alerts() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_too_many_control_records_are_discarded() {
-    let _ = env_logger::try_init();
 
     let server_cert = generate_self_signed_certificate().expect("gen server cert");
     let config = dtls12_config();
@@ -143,14 +141,13 @@ fn dtls12_too_many_control_records_are_discarded() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_recovers_from_corrupted_packet() {
     //! During handshake, corrupt 2 bytes in one packet before delivery so the
     //! DTLS record header is invalid. The receiver drops the corrupted packet.
     //! After a timeout the sender retransmits, and the handshake completes
     //! normally via the retransmission path.
 
-    let _ = env_logger::try_init();
 
     let client_cert = generate_self_signed_certificate().expect("gen client cert");
     let server_cert = generate_self_signed_certificate().expect("gen server cert");
@@ -258,13 +255,12 @@ fn dtls12_recovers_from_corrupted_packet() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_discards_wrong_epoch_record() {
     //! After a completed handshake (epoch 1), inject a crafted packet with
     //! epoch 0 and content_type handshake (22). Verify it is silently dropped
     //! and application data exchange still works.
 
-    let _ = env_logger::try_init();
     let mut now = Instant::now();
     let (mut client, mut server, now_hs) = setup_connected_12_pair(now);
     now = now_hs;
@@ -303,9 +299,8 @@ fn dtls12_discards_wrong_epoch_record() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_short_encrypted_records_do_not_panic() {
-    let _ = env_logger::try_init();
 
     for suite in [
         Dtls12CipherSuite::ECDHE_ECDSA_AES128_GCM_SHA256,
@@ -352,13 +347,12 @@ fn dtls12_short_encrypted_records_do_not_panic() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_discards_truncated_record() {
     //! Deliver a 3-byte packet (too short to be a valid DTLS 1.2 record header,
     //! which requires 13 bytes). Verify it is silently dropped and the
     //! handshake/connection continues.
 
-    let _ = env_logger::try_init();
 
     let client_cert = generate_self_signed_certificate().expect("gen client cert");
     let server_cert = generate_self_signed_certificate().expect("gen server cert");
@@ -418,14 +412,13 @@ fn dtls12_discards_truncated_record() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_discards_unauthenticated_close_notify() {
     //! After a completed handshake (epoch 1), inject a plaintext close_notify
     //! alert at epoch 0. Since the connection is authenticated, the
     //! unauthenticated alert must be silently discarded and the connection
     //! must remain operational.
 
-    let _ = env_logger::try_init();
     let mut now = Instant::now();
     let (mut client, mut server, now_hs) = setup_connected_12_pair(now);
     now = now_hs;
@@ -469,13 +462,12 @@ fn dtls12_discards_unauthenticated_close_notify() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_rejects_renegotiation() {
     //! After a completed handshake, inject a ClientHello record to simulate
     //! a renegotiation attempt. Verify it is rejected (either silently dropped
     //! or returns `Error::RenegotiationAttempt`).
 
-    let _ = env_logger::try_init();
     let now = Instant::now();
     let (_client, mut server, _now) = setup_connected_12_pair(now);
 
@@ -527,13 +519,12 @@ fn dtls12_rejects_renegotiation() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_mixed_datagram_plaintext_first_then_valid() {
     //! Test that a UDP datagram with bogus plaintext ApplicationData FIRST
     //! followed by a valid encrypted record is handled correctly: the bogus
     //! record is silently discarded and the valid one is still processed.
 
-    let _ = env_logger::try_init();
     let now = Instant::now();
     let (mut client, mut server, now) = setup_connected_12_pair(now);
 
@@ -593,13 +584,12 @@ fn dtls12_mixed_datagram_plaintext_first_then_valid() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_mixed_datagram_valid_first_then_bogus() {
     //! Test that a UDP datagram with a valid encrypted record FIRST followed
     //! by bogus plaintext ApplicationData is handled correctly: the valid
     //! record is processed and the trailing bogus record is discarded.
 
-    let _ = env_logger::try_init();
     let now = Instant::now();
     let (mut client, mut server, now) = setup_connected_12_pair(now);
 
@@ -652,9 +642,8 @@ fn dtls12_mixed_datagram_valid_first_then_bogus() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_bad_encrypted_prefix_does_not_drop_valid_tail() {
-    let _ = env_logger::try_init();
     let now = Instant::now();
     let (mut client, mut server, now) = setup_connected_12_pair(now);
 
@@ -709,9 +698,8 @@ fn dtls12_bad_encrypted_prefix_does_not_drop_valid_tail() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_relabelled_encrypted_handshake_failure_is_not_silently_discarded() {
-    let _ = env_logger::try_init();
 
     let client_cert = generate_self_signed_certificate().expect("gen client cert");
     let server_cert = generate_self_signed_certificate().expect("gen server cert");
@@ -789,20 +777,19 @@ fn dtls12_relabelled_encrypted_handshake_failure_is_not_silently_discarded() {
     assert!(
         matches!(
             observed_error,
-            Some(dimpl::Error::CryptoError(_) | dimpl::Error::SecurityError(_))
+            Some(crate::vendor::dimpl::Error::CryptoError(_) | crate::vendor::dimpl::Error::SecurityError(_))
         ),
         "relabeled encrypted handshake must remain fatal, got {observed_error:?}"
     );
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_app_data_after_close_notify_is_ignored() {
     //! Simulate UDP reordering: the client sends app data, then close_notify,
     //! but the close_notify datagram arrives at the server first. The app data
     //! datagram arriving afterwards must be silently discarded.
 
-    let _ = env_logger::try_init();
     let mut now = Instant::now();
     let (mut client, mut server, now_hs) = setup_connected_12_pair(now);
     now = now_hs;
@@ -848,13 +835,12 @@ fn dtls12_app_data_after_close_notify_is_ignored() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_close_during_handshake_emits_no_packets() {
     //! Call close() on the client while the handshake is in progress.
     //! Per `Dtls::close` API contract, close() during handshake silently
     //! discards state without sending any packets.
 
-    let _ = env_logger::try_init();
 
     let client_cert = generate_self_signed_certificate().expect("gen client cert");
     let server_cert = generate_self_signed_certificate().expect("gen server cert");
@@ -904,14 +890,13 @@ fn dtls12_close_during_handshake_emits_no_packets() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_reciprocal_close_notify_and_no_further_sends() {
     //! When the server receives a close_notify from the client, it must send
     //! a reciprocal close_notify back (RFC 5246 §7.2.1) and transition to
     //! Closed. DTLS 1.2 does not support half-close: subsequent
     //! send_application_data calls on both sides must fail.
 
-    let _ = env_logger::try_init();
     let mut now = Instant::now();
     let (mut client, mut server, now_hs) = setup_connected_12_pair(now);
     now = now_hs;
@@ -986,7 +971,7 @@ fn dtls12_reciprocal_close_notify_and_no_further_sends() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_close_state_matrix() {
     let mut now = Instant::now();
     let (mut client, mut server, now_hs) = setup_connected_12_pair(now);
@@ -1024,13 +1009,12 @@ fn dtls12_close_state_matrix() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_discard_pending_writes_on_close_notify() {
     //! Send application data from the server, then deliver a close_notify from
     //! the client before the server polls. The pending data must be discarded
     //! per RFC 5246 §7.2.1 — only the reciprocal close_notify is emitted.
 
-    let _ = env_logger::try_init();
     let mut now = Instant::now();
     let (mut client, mut server, now_hs) = setup_connected_12_pair(now);
     now = now_hs;
@@ -1077,12 +1061,11 @@ fn dtls12_discard_pending_writes_on_close_notify() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_fatal_alert_during_handshake() {
     //! During the handshake (peer_encryption_enabled == false), an epoch 0
     //! fatal alert (level=2) should be accepted and return a SecurityError.
 
-    let _ = env_logger::try_init();
 
     let client_cert = generate_self_signed_certificate().expect("gen client cert");
     let server_cert = generate_self_signed_certificate().expect("gen server cert");
@@ -1119,17 +1102,16 @@ fn dtls12_fatal_alert_during_handshake() {
     let err = result.unwrap_err();
     assert!(matches!(
         err,
-        dimpl::Error::SecurityError(dimpl::SecurityError::FatalAlert { description: 40 })
+        crate::vendor::dimpl::Error::SecurityError(crate::vendor::dimpl::SecurityError::FatalAlert { description: 40 })
     ));
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_app_data_delivered_before_close_notify() {
     //! When app data and close_notify arrive together, the app data must be
     //! delivered before CloseNotify.
 
-    let _ = env_logger::try_init();
     let mut now = Instant::now();
     let (mut client, mut server, now_hs) = setup_connected_12_pair(now);
     now = now_hs;
@@ -1182,13 +1164,12 @@ fn dtls12_app_data_delivered_before_close_notify() {
 }
 
 #[test]
-#[cfg(feature = "rcgen")]
+#[cfg(all())]
 fn dtls12_close_notify_not_retransmitted() {
     //! After sending close_notify, the alert must not be retransmitted.
     //! RFC 6347 §4.2.7: "Alert messages are not retransmitted at all,
     //! even when they occur in the context of a handshake."
 
-    let _ = env_logger::try_init();
     let mut now = Instant::now();
     let (mut client, _server, now_hs) = setup_connected_12_pair(now);
     now = now_hs;

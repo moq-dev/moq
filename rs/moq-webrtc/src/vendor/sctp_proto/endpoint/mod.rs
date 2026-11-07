@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod endpoint_test;
 
-use alloc::boxed::Box;
-use alloc::collections::VecDeque;
-use alloc::string::{String, ToString};
-use alloc::sync::Arc;
+use std::boxed::Box;
+use std::collections::VecDeque;
+use std::string::{String, ToString};
+use std::sync::Arc;
 use core::fmt;
 use core::iter;
 use core::net::{IpAddr, SocketAddr};
@@ -12,19 +12,19 @@ use core::ops::{Index, IndexMut};
 use std::collections::HashMap;
 use std::time::Instant;
 
-use crate::chunk::{chunk_init::ChunkInit, chunk_type::CT_INIT};
-use crate::config::MAX_SNAP_INIT_BYTES;
-use crate::config::{ClientConfig, EndpointConfig, ServerConfig, TransportConfig};
-use crate::packet::PartialDecode;
-use crate::shared::AssociationEvent;
-use crate::shared::{AssociationEventInner, AssociationId};
-use crate::shared::{EndpointEvent, EndpointEventInner};
-use crate::util::{AssociationIdGenerator, RandomAssociationIdGenerator};
-use crate::{EcnCodepoint, Payload, Transmit};
-use crate::{association::Association, chunk::Chunk};
+use crate::vendor::sctp_proto::chunk::{chunk_init::ChunkInit, chunk_type::CT_INIT};
+use crate::vendor::sctp_proto::config::MAX_SNAP_INIT_BYTES;
+use crate::vendor::sctp_proto::config::{ClientConfig, EndpointConfig, ServerConfig, TransportConfig};
+use crate::vendor::sctp_proto::packet::PartialDecode;
+use crate::vendor::sctp_proto::shared::AssociationEvent;
+use crate::vendor::sctp_proto::shared::{AssociationEventInner, AssociationId};
+use crate::vendor::sctp_proto::shared::{EndpointEvent, EndpointEventInner};
+use crate::vendor::sctp_proto::util::{AssociationIdGenerator, RandomAssociationIdGenerator};
+use crate::vendor::sctp_proto::{EcnCodepoint, Payload, Transmit};
+use crate::vendor::sctp_proto::{association::Association, chunk::Chunk};
 
 use bytes::Bytes;
-use log::{debug, trace, warn};
+use tracing::{debug, trace, warn};
 use rand::{SeedableRng, rngs::StdRng};
 use rustc_hash::FxHashMap;
 use slab::Slab;
@@ -191,7 +191,7 @@ impl Endpoint {
     /// and immediately transition to the ESTABLISHED state.
     ///
     /// Both `local_sctp_init` and `remote_sctp_init` must be provided for SNAP;
-    /// use [`generate_snap_token`](crate::generate_snap_token) to create the
+    /// use [`generate_snap_token`](crate::vendor::sctp_proto::generate_snap_token) to create the
     /// local token.
     ///
     /// If only one side is set (e.g. the peer does not support SNAP), the
@@ -199,7 +199,7 @@ impl Endpoint {
     ///
     /// **Note:** When using SNAP, **both** peers must call [`Endpoint::connect`]
     /// (there is no server-side SNAP via [`Endpoint::handle`]). Each peer
-    /// generates its own token via [`generate_snap_token`](crate::generate_snap_token),
+    /// generates its own token via [`generate_snap_token`](crate::vendor::sctp_proto::generate_snap_token),
     /// exchanges it with the remote peer through a signaling channel (e.g.,
     /// SDP `a=sctp-init`), and then calls `connect` with `with_snap(local, remote)`.
     ///

@@ -18,22 +18,22 @@
 //! The scenario asserted here is specific to dimpl's tx-queue semantics,
 //! so the test is compiled only under dimpl-backed crypto providers.
 #![cfg(any(
-    feature = "aws-lc-rs",
-    feature = "rust-crypto",
-    feature = "openssl-dimpl",
-    feature = "wincrypto",
-    feature = "apple-crypto",
+    all(),
+    any(),
+    any(),
+    any(),
+    any(),
 ))]
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use netem::{NetemConfig, Probability, RandomLoss};
-use str0m::RtcError;
-use str0m::config::DtlsVersion;
-use str0m::{Candidate, Input, Output, Reason, Rtc};
+use crate::vendor::netem::{NetemConfig, Probability, RandomLoss};
+use crate::vendor::str0m::RtcError;
+use crate::vendor::str0m::config::DtlsVersion;
+use crate::vendor::str0m::{Candidate, Input, Output, Reason, Rtc};
 use tracing::info_span;
 
-mod common;
+use super::common;
 use common::{TestRtc, init_crypto_default, progress};
 
 #[test]

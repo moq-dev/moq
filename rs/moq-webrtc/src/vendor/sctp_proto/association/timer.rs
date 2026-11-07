@@ -1,7 +1,7 @@
 use core::time::Duration;
 use std::time::Instant;
 
-use crate::config::{RTO_INITIAL, RTO_MAX, RTO_MIN};
+use crate::vendor::sctp_proto::config::{RTO_INITIAL, RTO_MAX, RTO_MIN};
 
 pub(crate) const ACK_INTERVAL: u64 = 200;
 const TIMER_COUNT: usize = 6;

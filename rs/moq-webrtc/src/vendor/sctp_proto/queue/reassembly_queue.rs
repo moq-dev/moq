@@ -1,10 +1,10 @@
-use crate::StreamId;
-use crate::chunk::chunk_payload_data::{ChunkPayloadData, PayloadProtocolIdentifier};
-use crate::error::{Error, Result};
-use crate::util::*;
+use crate::vendor::sctp_proto::StreamId;
+use crate::vendor::sctp_proto::chunk::chunk_payload_data::{ChunkPayloadData, PayloadProtocolIdentifier};
+use crate::vendor::sctp_proto::error::{Error, Result};
+use crate::vendor::sctp_proto::util::*;
 
-use alloc::collections::VecDeque;
-use alloc::vec::Vec;
+use std::collections::VecDeque;
+use std::vec::Vec;
 use bytes::{Bytes, BytesMut};
 use core::cmp::Ordering;
 

@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use base64ct::{Base64, Encoding};
-use sctp_proto::{ClientConfig, TransportConfig, generate_snap_token};
+use crate::vendor::sctp_proto::{ClientConfig, TransportConfig, generate_snap_token};
 
 use super::{LOCAL_MAX_MESSAGE_SIZE, SctpError as Error};
 
@@ -44,13 +44,13 @@ pub(super) fn webrtc_transport_config(local_max_message_size: u32) -> Arc<Transp
 /// 3. Receive the peer's INIT bytes over signaling.
 /// 4. Call [`Self::set_remote_init_chunk()`].
 /// 5. Pass the populated value to
-///    [`DirectApi::start_sctp_with_snap()`][crate::change::DirectApi::start_sctp_with_snap].
+///    [`DirectApi::start_sctp_with_snap()`][crate::vendor::str0m::change::DirectApi::start_sctp_with_snap].
 ///
 /// The local INIT chunk is lazily generated and cached on first access.
 ///
 /// # Example
-/// ```
-/// use str0m::channel::SctpInitData;
+/// ```ignore
+/// use crate::vendor::str0m::channel::SctpInitData;
 ///
 /// let mut data = SctpInitData::new();
 ///

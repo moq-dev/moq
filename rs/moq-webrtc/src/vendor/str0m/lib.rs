@@ -60,9 +60,9 @@
 //! For passive connections, i.e. where the media and initial OFFER is
 //! made by a remote peer, we need these steps to open the connection.
 //!
-//! ```no_run
+//! ```ignore
 //! # use std::time::Instant;
-//! # use str0m::{Rtc, Candidate};
+//! # use crate::vendor::str0m::{Rtc, Candidate};
 //! // Instantiate a new Rtc instance.
 //! let mut rtc = Rtc::new(Instant::now());
 //!
@@ -86,10 +86,10 @@
 //! Active connections means we are making the inital OFFER and waiting for a
 //! remote ANSWER to start the connection.
 //!
-//! ```no_run
+//! ```ignore
 //! # use std::time::Instant;
-//! # use str0m::{Rtc, Candidate};
-//! # use str0m::media::{MediaKind, Direction};
+//! # use crate::vendor::str0m::{Rtc, Candidate};
+//! # use crate::vendor::str0m::media::{MediaKind, Direction};
 //! // Instantiate a new Rtc instance.
 //! let mut rtc = Rtc::new(Instant::now());
 //!
@@ -164,9 +164,9 @@
 //!    is the engine fully drained.
 //! 6. The returned timeout is what we wait on next — **goto 1**.
 //!
-//! ```no_run
-//! # use str0m::{Rtc, Output, IceConnectionState, Event, Input};
-//! # use str0m::net::{Receive, Protocol};
+//! ```ignore
+//! # use crate::vendor::str0m::{Rtc, Output, IceConnectionState, Event, Input};
+//! # use crate::vendor::str0m::net::{Receive, Protocol};
 //! # use std::io::ErrorKind;
 //! # use std::net::UdpSocket;
 //! # use std::time::{Duration, Instant};
@@ -255,9 +255,9 @@
 //! "payload type" (PT). To send media data we need to figure out which PT
 //! to use when sending.
 //!
-//! ```no_run
-//! # use str0m::Rtc;
-//! # use str0m::media::Mid;
+//! ```ignore
+//! # use crate::vendor::str0m::Rtc;
+//! # use crate::vendor::str0m::media::Mid;
 //! # let rtc: Rtc = todo!();
 //! // Obtain mid from Event::MediaAdded
 //! let mid: Mid = todo!();
@@ -364,7 +364,7 @@
 //! For applications, the easiest is to set a process-wide default at startup.
 //! Note that you can use any backend crate directly without enabling its feature flag:
 //!
-//! ```no_run
+//! ```ignore
 //! // Set process default (will panic if called twice)
 //! // No need to enable the "rust-crypto" feature flag
 //! str0m_rust_crypto::default_provider().install_process_default();
@@ -372,10 +372,10 @@
 //!
 //! ## Crypto provider per Rtc instance
 //!
-//! ```no_run
+//! ```ignore
 //! use std::sync::Arc;
 //! use std::time::Instant;
-//! use str0m::Rtc;
+//! use crate::vendor::str0m::Rtc;
 //!
 //! let rtc = Rtc::builder()
 //!     .set_crypto_provider(Arc::new(str0m_rust_crypto::default_provider()))
@@ -450,9 +450,9 @@
 //!
 //! To enable RTP mode
 //!
-//! ```
+//! ```ignore
 //! # use std::time::Instant;
-//! # use str0m::Rtc;
+//! # use crate::vendor::str0m::Rtc;
 //! let rtc = Rtc::builder()
 //!     // Enable RTP mode for this Rtc instance.
 //!     // This disables `MediaEvent` and the `Writer::write` API.
@@ -680,9 +680,8 @@
 #![deny(clippy::needless_pass_by_ref_mut)]
 #![deny(missing_docs)]
 
-#[macro_use]
-extern crate tracing;
 
+use tracing::{debug, trace, warn};
 use bwe::{Bwe, BweKind};
 use change::{DirectApi, SdpApi};
 use rtp::RawPacket;
@@ -690,7 +689,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
-use str0m_proto::Pii;
+use crate::vendor::str0m_proto::Pii;
 use streams::RtpPacket;
 use streams::StreamPaused;
 use util::InstantExt;
@@ -701,7 +700,7 @@ use util::InstantExt;
 // key inside a `#[drv::memo]` projection; `Static = Self` can. `eq_static`
 // defers to each type's own `PartialEq`. Each module invokes this for its
 // own types.
-#[cfg(feature = "drv")]
+#[cfg(any())]
 macro_rules! drv_identity_copy {
     ($($t:ty),* $(,)?) => {
         $(
@@ -713,7 +712,7 @@ macro_rules! drv_identity_copy {
         )*
     };
 }
-#[cfg(feature = "drv")]
+#[cfg(any())]
 pub(crate) use drv_identity_copy;
 
 /// Cryptographic provider traits and implementations.
@@ -724,14 +723,14 @@ pub mod crypto;
 use crypto::Fingerprint;
 
 mod dtls;
-use crate::crypto::dtls::DtlsOutput;
-use crate::crypto::{CryptoProvider, DtlsError, from_feature_flags};
-use crate::dtls::is_would_block;
+use crate::vendor::str0m::crypto::dtls::DtlsOutput;
+use crate::vendor::str0m::crypto::{CryptoProvider, DtlsError, from_feature_flags};
+use crate::vendor::str0m::dtls::is_would_block;
 use dtls::Dtls;
 
-use is::IceAgent;
-use is::IceAgentEvent;
-pub use is::{Candidate, CandidateBuilder, CandidateKind, IceConnectionState, IceCreds};
+use crate::vendor::is::IceAgent;
+use crate::vendor::is::IceAgentEvent;
+pub use crate::vendor::is::{Candidate, CandidateBuilder, CandidateKind, IceConnectionState, IceCreds};
 
 #[path = "config.rs"]
 mod config_mod;
@@ -758,10 +757,10 @@ pub mod config {
 // reuse str0m's ICE implementation. This is now in the `is` crate.
 #[doc(hidden)]
 pub mod ice {
-    pub use is::IceCreds;
-    pub use is::stun::{StunMessage, StunMessageBuilder, StunPacket, TransId};
-    pub use is::{IceAgent, IceAgentEvent};
-    pub use is::{LocalPreference, default_local_preference};
+    pub use crate::vendor::is::IceCreds;
+    pub use crate::vendor::is::stun::{StunMessage, StunMessageBuilder, StunPacket, TransId};
+    pub use crate::vendor::is::{IceAgent, IceAgentEvent};
+    pub use crate::vendor::is::{LocalPreference, default_local_preference};
 }
 
 mod io;
@@ -777,31 +776,31 @@ use rtp_::{Bitrate, DataSize};
 pub mod rtp {
     /// Feedback for RTP.
     pub mod rtcp {
-        pub use crate::rtp_::AppSpecificFeedback;
-        pub use crate::rtp_::{Descriptions, ExtendedReport, Fir, Goodbye, Nack, Pli};
-        pub use crate::rtp_::{Dlrr, NackEntry, ReceptionReport, ReportBlock};
-        pub use crate::rtp_::{FirEntry, ReceiverReport, SenderInfo, SenderReport, Twcc};
-        pub use crate::rtp_::{ReportList, Rrtr, Rtcp, Sdes, SdesType};
+        pub use crate::vendor::str0m::rtp_::AppSpecificFeedback;
+        pub use crate::vendor::str0m::rtp_::{Descriptions, ExtendedReport, Fir, Goodbye, Nack, Pli};
+        pub use crate::vendor::str0m::rtp_::{Dlrr, NackEntry, ReceptionReport, ReportBlock};
+        pub use crate::vendor::str0m::rtp_::{FirEntry, ReceiverReport, SenderInfo, SenderReport, Twcc};
+        pub use crate::vendor::str0m::rtp_::{ReportList, Rrtr, Rtcp, Sdes, SdesType};
     }
     use self::rtcp::Rtcp;
 
     /// Video Layers Allocation RTP Header Extension
     pub mod vla;
-    pub use crate::rtp_::{AbsCaptureTime, ExtensionValues, UserExtensionValues};
-    pub use crate::rtp_::{Extension, ExtensionMap, ExtensionSerializer};
+    pub use crate::vendor::str0m::rtp_::{AbsCaptureTime, ExtensionValues, UserExtensionValues};
+    pub use crate::vendor::str0m::rtp_::{Extension, ExtensionMap, ExtensionSerializer};
 
-    pub use crate::packet::{
+    pub use crate::vendor::str0m::packet::{
         RedBlock, RedDecoder, RedEncoder, RedundantBlock, Vp8Descriptor, Vp8DescriptorError,
         Vp8Patch, Vp8PatchBuilder, Vp8PatchError,
     };
-    pub use crate::rtp_::{RtpHeader, SeqNo, Ssrc, VideoOrientation};
-    pub use crate::streams::{
+    pub use crate::vendor::str0m::rtp_::{RtpHeader, SeqNo, Ssrc, VideoOrientation};
+    pub use crate::vendor::str0m::streams::{
         RtpPacket, RtpWrite, StreamPaused, StreamRx, StreamTx, StreamTxQueueInfo,
     };
 
     /// Debug output of the unencrypted RTP and RTCP packets.
     ///
-    /// Enable using [`RtcConfig::enable_raw_packets()`][crate::RtcConfig::enable_raw_packets].
+    /// Enable using [`RtcConfig::enable_raw_packets()`][crate::vendor::str0m::RtcConfig::enable_raw_packets].
     /// This clones data, and is therefore expensive.
     /// Should not be enabled outside of tests and troubleshooting.
     #[derive(Debug)]
@@ -824,7 +823,7 @@ pub(crate) mod bwe_;
 
 /// Bandwidth estimation.
 pub mod bwe {
-    pub use crate::bwe_::api::*;
+    pub use crate::vendor::str0m::bwe_::api::*;
 }
 
 mod sctp;
@@ -851,7 +850,7 @@ mod util;
 use util::{Soonest, not_happening};
 
 mod poll;
-use crate::poll::Readiness;
+use crate::vendor::str0m::poll::Readiness;
 
 mod session;
 use session::Session;
@@ -867,10 +866,10 @@ pub mod error;
 
 /// Network related types to get socket data in/out of [`Rtc`].
 pub mod net {
-    pub use crate::io::{DatagramRecv, DatagramSend, Protocol, Receive, TcpType, Transmit};
+    pub use crate::vendor::str0m::io::{DatagramRecv, DatagramSend, Protocol, Receive, TcpType, Transmit};
 }
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+const VERSION: &str = "0.24.1";
 
 pub use error::RtcError;
 
@@ -885,9 +884,9 @@ pub use error::RtcError;
 /// the next mutation.** See the [crate docs](crate#run-loop) for the full
 /// explanation of the single-mutation invariant.
 ///
-/// ```no_run
+/// ```ignore
 /// # use std::time::Instant;
-/// # use str0m::{Rtc, Output, Input};
+/// # use crate::vendor::str0m::{Rtc, Output, Input};
 /// let mut rtc = Rtc::new(Instant::now());
 ///
 /// loop {
@@ -932,7 +931,7 @@ pub struct Rtc {
     peer_bytes_tx: u64,
     change_counter: usize,
     last_timeout_reason: Reason,
-    crypto_provider: Arc<crate::crypto::CryptoProvider>,
+    crypto_provider: Arc<crate::vendor::str0m::crypto::CryptoProvider>,
     fingerprint_verification: bool,
     close_dtls_started: bool,
     // Signals which halves of the tree may need re-polling. Written locally by
@@ -1072,8 +1071,8 @@ pub enum Event {
     /// For internal testing only.
     ///
     /// The probe cluster config when a probe fires.
-    #[cfg(feature = "_internal_test_exports")]
-    Probe(crate::bwe_::ProbeClusterConfig),
+    #[cfg(test)]
+    Probe(crate::vendor::str0m::bwe_::ProbeClusterConfig),
 }
 
 impl Event {
@@ -1113,7 +1112,7 @@ pub enum Output {
     Event(Event),
 }
 
-pub use crate::pacer::PacerReason;
+pub use crate::vendor::str0m::pacer::PacerReason;
 
 /// The reason for the next [`Output::Timeout`].
 ///
@@ -1206,9 +1205,9 @@ impl Rtc {
     ///
     /// To configure the instance, use [`RtcConfig`].
     ///
-    /// ```
+    /// ```ignore
     /// use std::time::Instant;
-    /// use str0m::Rtc;
+    /// use crate::vendor::str0m::Rtc;
     ///
     /// let rtc = Rtc::new(Instant::now());
     /// ```
@@ -1219,9 +1218,9 @@ impl Rtc {
 
     /// Creates a config builder that configures an [`Rtc`] instance.
     ///
-    /// ```
+    /// ```ignore
     /// # use std::time::Instant;
-    /// # use str0m::Rtc;
+    /// # use crate::vendor::str0m::Rtc;
     /// let rtc = Rtc::builder()
     ///     .set_ice_lite(true)
     ///     .build(Instant::now());
@@ -1331,9 +1330,9 @@ impl Rtc {
     /// [`Rtc::writer()`] and [`Rtc::channel()`] are unavailable during that
     /// closing drain.
     ///
-    /// ```
+    /// ```ignore
     /// # use std::time::Instant;
-    /// # use str0m::Rtc;
+    /// # use crate::vendor::str0m::Rtc;
     /// let mut rtc = Rtc::new(Instant::now());
     ///
     /// assert!(rtc.is_alive());
@@ -1350,9 +1349,9 @@ impl Rtc {
     /// This makes [`Rtc::poll_output`] and [`Rtc::handle_input`] go inert and not
     /// produce anymore network output or events.
     ///
-    /// ```
+    /// ```ignore
     /// # use std::time::Instant;
-    /// # use str0m::Rtc;
+    /// # use crate::vendor::str0m::Rtc;
     /// let mut rtc = Rtc::new(Instant::now());
     ///
     /// rtc.disconnect();
@@ -1375,9 +1374,9 @@ impl Rtc {
     /// In WebRTC lingo, the `Rtc` instance is permanently in a mode of [Trickle Ice][1]. It's
     /// however advisable to add at least one local candidate before starting the instance.
     ///
-    /// ```
+    /// ```ignore
     /// # use std::time::Instant;
-    /// # use str0m::{Rtc, Candidate};
+    /// # use crate::vendor::str0m::{Rtc, Candidate};
     /// let mut rtc = Rtc::new(Instant::now());
     ///
     /// let a = "127.0.0.1:5000".parse().unwrap();
@@ -1402,9 +1401,9 @@ impl Rtc {
     /// However for the case of [Trickle Ice][1], this is the way to add remote candidates
     /// that are "trickled" from the other side.
     ///
-    /// ```
+    /// ```ignore
     /// # use std::time::Instant;
-    /// # use str0m::{Rtc, Candidate};
+    /// # use crate::vendor::str0m::{Rtc, Candidate};
     /// let mut rtc = Rtc::new(Instant::now());
     ///
     /// let a = "1.2.3.4:5000".parse().unwrap();
@@ -1429,11 +1428,11 @@ impl Rtc {
 
     /// Make changes to the Rtc session via SDP.
     ///
-    /// ```no_run
+    /// ```ignore
     /// # use std::time::Instant;
-    /// # use str0m::Rtc;
-    /// # use str0m::media::{MediaKind, Direction};
-    /// # use str0m::change::SdpAnswer;
+    /// # use crate::vendor::str0m::Rtc;
+    /// # use crate::vendor::str0m::media::{MediaKind, Direction};
+    /// # use crate::vendor::str0m::change::SdpAnswer;
     /// let mut rtc = Rtc::new(Instant::now());
     ///
     /// let mut changes = rtc.sdp_api();
@@ -1463,11 +1462,11 @@ impl Rtc {
     ///
     /// Returns `None` if the direction isn't sending (`sendrecv` or `sendonly`).
     ///
-    /// ```no_run
+    /// ```ignore
     /// # use std::time::Instant;
-    /// # use str0m::Rtc;
-    /// # use str0m::media::{MediaData, Mid};
-    /// # use str0m::format::PayloadParams;
+    /// # use crate::vendor::str0m::Rtc;
+    /// # use crate::vendor::str0m::media::{MediaData, Mid};
+    /// # use crate::vendor::str0m::format::PayloadParams;
     /// let mut rtc = Rtc::new(Instant::now());
     ///
     /// // add candidates, do SDP negotiation
@@ -1700,7 +1699,7 @@ impl Rtc {
                 }
                 DtlsOutput::KeyingMaterial(km, profile) => {
                     use config::KeyingMaterial;
-                    let km_bytes = km.as_ref().to_vec();
+                    let km_bytes = km.to_vec();
                     debug!("DTLS set SRTP keying material and profile: {}", profile);
                     let active = self.dtls.is_active().expect("DTLS must be inited by now");
                     self.session.set_keying_material(
@@ -1717,14 +1716,14 @@ impl Rtc {
                     // endpoints still announce. sha-256 when there is none to compare with.
                     let provider = &self.crypto_provider;
                     let matching = self.remote_fingerprint.as_ref().and_then(|expected| {
-                        crate::crypto::Fingerprint::of_certificate(
+                        crate::vendor::str0m::crypto::Fingerprint::of_certificate(
                             der,
                             &expected.hash_func,
                             provider,
                         )
                     });
                     let fingerprint = matching.clone().unwrap_or_else(|| {
-                        crate::crypto::Fingerprint::of_certificate(der, "sha-256", provider)
+                        crate::vendor::str0m::crypto::Fingerprint::of_certificate(der, "sha-256", provider)
                             .expect("sha-256 is supported")
                     });
                     self.dtls.set_remote_fingerprint(fingerprint.clone());
@@ -1928,8 +1927,8 @@ impl Rtc {
     /// This is updated when calling [`Rtc::poll_output()`] and the next output
     /// is a timeout.
     ///
-    /// ```
-    /// # use str0m::{Rtc, Reason};
+    /// ```ignore
+    /// # use crate::vendor::str0m::{Rtc, Reason};
     /// # use std::time::Instant;
     /// let rtc = Rtc::new(Instant::now());
     ///
@@ -1952,9 +1951,9 @@ impl Rtc {
     /// In a server setup, the server would try to find an `Rtc` instances using [`Rtc::accepts()`].
     /// The first found instance would be given the input via [`Rtc::handle_input()`].
     ///
-    /// ```no_run
+    /// ```ignore
     /// # use std::time::Instant;
-    /// # use str0m::{Rtc, Input};
+    /// # use crate::vendor::str0m::{Rtc, Input};
     /// // A vec holding the managed rtc instances. One instance per remote peer.
     /// let now = Instant::now();
     /// let mut rtcs = vec![Rtc::new(now), Rtc::new(now), Rtc::new(now)];
@@ -2014,8 +2013,8 @@ impl Rtc {
     /// It's always okay to call [`Rtc::handle_input()`] with a timeout, also before the
     /// time obtained via [`Rtc::poll_output()`].
     ///
-    /// ```no_run
-    /// # use str0m::{Rtc, Input};
+    /// ```ignore
+    /// # use crate::vendor::str0m::{Rtc, Input};
     /// # use std::time::Instant;
     /// let mut rtc = Rtc::new(Instant::now());
     ///
@@ -2185,7 +2184,7 @@ impl Rtc {
 
         match r.contents.inner {
             Stun(stun) => {
-                let packet = is::stun::StunPacket {
+                let packet = crate::vendor::is::stun::StunPacket {
                     proto: r.proto,
                     source: r.source,
                     destination: r.destination,
@@ -2214,9 +2213,9 @@ impl Rtc {
     ///
     /// Incoming channel data is via the [`Event::ChannelData`] event.
     ///
-    /// ```no_run
+    /// ```ignore
     /// # use std::time::Instant;
-    /// # use str0m::{Rtc, channel::ChannelId};
+    /// # use crate::vendor::str0m::{Rtc, channel::ChannelId};
     /// let mut rtc = Rtc::new(Instant::now());
     ///
     /// let cid: ChannelId = todo!(); // obtain channel id from Event::ChannelOpen
@@ -2302,7 +2301,7 @@ impl fmt::Debug for Rtc {
 /// This macro turns into a NO-OP if the `_internal_dont_use_log_stats` feature is not enabled
 macro_rules! log_stat {
     ($name:expr, $($arg:expr),+) => {
-        #[cfg(feature = "_internal_dont_use_log_stats")]
+        #[cfg(any())]
         {
             use std::time::SystemTime;
             use std::io::{self, Write};
@@ -2325,7 +2324,7 @@ pub(crate) use log_stat;
 #[cfg(test)]
 #[doc(hidden)]
 pub fn init_crypto_default() {
-    crate::crypto::from_feature_flags().install_process_default();
+    crate::vendor::str0m::crypto::from_feature_flags().install_process_default();
 }
 
 #[cfg(test)]
@@ -2355,11 +2354,11 @@ mod test {
     }
 }
 
-#[cfg(feature = "_internal_test_exports")]
+#[cfg(test)]
 #[allow(missing_docs)]
 pub mod _internal_test_exports;
 
-#[cfg(feature = "unversioned")]
+#[cfg(any())]
 pub mod unversioned {
     //! This module provides functionality that is not versioned according to semver.
     //! It may change in breaking ways between minor/patch releases, there are no guarantees.
@@ -2372,3 +2371,6 @@ pub mod unversioned {
         Vp8Depacketizer, Vp8Packetizer,
     };
 }
+
+#[cfg(test)]
+mod tests;

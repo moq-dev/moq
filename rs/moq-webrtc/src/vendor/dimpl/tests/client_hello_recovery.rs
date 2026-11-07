@@ -1,14 +1,13 @@
-#![cfg(feature = "rcgen")]
+#![cfg(all())]
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
-use dimpl::certificate::generate_self_signed_certificate;
-use dimpl::{Config, Dtls};
+use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
+use crate::vendor::dimpl::{Config, Dtls};
 
-#[path = "dtls13/common.rs"]
-mod common;
+use super::dtls12::common;
 use common::drain_outputs;
 
 #[test]

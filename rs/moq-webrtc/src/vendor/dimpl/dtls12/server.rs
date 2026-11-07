@@ -12,6 +12,7 @@
 //
 // This implementation mirrors the client structure and ordering for a DTLS server.
 
+use tracing::{debug, trace};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
@@ -19,23 +20,23 @@ use std::time::Instant;
 use arrayvec::ArrayVec;
 use subtle::ConstantTimeEq;
 
-use crate::buffer::{Buf, ToBuf};
-use crate::crypto::SrtpProfile;
-use crate::dtls12::Client;
-use crate::dtls12::client::LocalEvent;
-use crate::dtls12::context::AuthMode;
-use crate::dtls12::engine::Engine;
-use crate::dtls12::message::PskParams;
-use crate::dtls12::message::SignatureAndHashAlgorithm;
-use crate::dtls12::message::{Body, CertificateRequest, CertificateTypeVec, Dtls12CipherSuite};
-use crate::dtls12::message::{ClientCertificateType, CompressionMethod, ContentType};
-use crate::dtls12::message::{Cookie, CurveType, DistinguishedName, ExchangeKeys, ExtensionType};
-use crate::dtls12::message::{HashAlgorithm, HelloVerifyRequest, KeyExchangeAlgorithm};
-use crate::dtls12::message::{MessageType, NamedGroup, NamedGroupVec, ProtocolVersion, Random};
-use crate::dtls12::message::{ServerHello, SessionId, SignatureAlgorithm};
-use crate::dtls12::message::{SignatureAndHashAlgorithmVec, SrtpProfileId};
-use crate::timer::Timeout;
-use crate::{Config, Error, InternalError, Output};
+use crate::vendor::dimpl::buffer::{Buf, ToBuf};
+use crate::vendor::dimpl::crypto::SrtpProfile;
+use crate::vendor::dimpl::dtls12::Client;
+use crate::vendor::dimpl::dtls12::client::LocalEvent;
+use crate::vendor::dimpl::dtls12::context::AuthMode;
+use crate::vendor::dimpl::dtls12::engine::Engine;
+use crate::vendor::dimpl::dtls12::message::PskParams;
+use crate::vendor::dimpl::dtls12::message::SignatureAndHashAlgorithm;
+use crate::vendor::dimpl::dtls12::message::{Body, CertificateRequest, CertificateTypeVec, Dtls12CipherSuite};
+use crate::vendor::dimpl::dtls12::message::{ClientCertificateType, CompressionMethod, ContentType};
+use crate::vendor::dimpl::dtls12::message::{Cookie, CurveType, DistinguishedName, ExchangeKeys, ExtensionType};
+use crate::vendor::dimpl::dtls12::message::{HashAlgorithm, HelloVerifyRequest, KeyExchangeAlgorithm};
+use crate::vendor::dimpl::dtls12::message::{MessageType, NamedGroup, NamedGroupVec, ProtocolVersion, Random};
+use crate::vendor::dimpl::dtls12::message::{ServerHello, SessionId, SignatureAlgorithm};
+use crate::vendor::dimpl::dtls12::message::{SignatureAndHashAlgorithmVec, SrtpProfileId};
+use crate::vendor::dimpl::timer::Timeout;
+use crate::vendor::dimpl::{Config, Error, InternalError, Output};
 
 /// Length of the random dummy PSK used when identity resolution fails.
 /// Fixed so handshake timing does not leak the failure, and long enough
@@ -125,7 +126,7 @@ enum State {
 
 impl Server {
     /// Create a new DTLS server
-    pub fn new(config: Arc<Config>, certificate: crate::DtlsCertificate, now: Instant) -> Server {
+    pub fn new(config: Arc<Config>, certificate: crate::vendor::dimpl::DtlsCertificate, now: Instant) -> Server {
         assert!(
             !certificate.certificate.is_empty(),
             "Server certificate cannot be empty"
@@ -353,7 +354,7 @@ impl State {
         // Enforce DTLS1.2
         if ch.client_version != ProtocolVersion::DTLS1_2 {
             return Err(
-                Error::SecurityError(crate::SecurityError::UnsupportedClientVersion(
+                Error::SecurityError(crate::vendor::dimpl::SecurityError::UnsupportedClientVersion(
                     ch.client_version,
                 ))
                 .into(),
@@ -364,7 +365,7 @@ impl State {
         let has_null = ch.compression_methods.contains(&CompressionMethod::Null);
         if !has_null {
             return Err(
-                Error::SecurityError(crate::SecurityError::UnsupportedClientCompression).into(),
+                Error::SecurityError(crate::vendor::dimpl::SecurityError::UnsupportedClientCompression).into(),
             );
         }
 
@@ -425,7 +426,7 @@ impl State {
 
         let Some(cs) = selected else {
             return Err((Error::SecurityError(
-                crate::SecurityError::NoMutuallyAcceptableCipherSuite,
+                crate::vendor::dimpl::SecurityError::NoMutuallyAcceptableCipherSuite,
             ))
             .into());
         };
@@ -446,7 +447,7 @@ impl State {
         // EMS is mandatory
         if !client_offers_ems {
             return Err(Error::SecurityError(
-                crate::SecurityError::ExtendedMasterSecretNotNegotiated,
+                crate::vendor::dimpl::SecurityError::ExtendedMasterSecretNotNegotiated,
             )
             .into());
         }
@@ -507,7 +508,7 @@ impl State {
             })?;
 
         let cs = server.engine.cipher_suite().ok_or(Error::InvalidState(
-            crate::InvalidStateError::NoCipherSuiteSelected,
+            crate::vendor::dimpl::InvalidStateError::NoCipherSuiteSelected,
         ))?;
 
         // PSK suites skip Certificate
@@ -532,7 +533,7 @@ impl State {
         trace!("Sending ServerKeyExchange");
 
         let cs = server.engine.cipher_suite().ok_or(Error::InvalidState(
-            crate::InvalidStateError::NoCipherSuiteSelected,
+            crate::vendor::dimpl::InvalidStateError::NoCipherSuiteSelected,
         ))?;
 
         if cs.is_psk() {
@@ -540,7 +541,7 @@ impl State {
         }
 
         let client_random = server.client_random.ok_or(Error::InvalidState(
-            crate::InvalidStateError::NoClientRandom,
+            crate::vendor::dimpl::InvalidStateError::NoClientRandom,
         ))?;
         // unwrap: is ok because we set the random in handle_timeout
         let server_random = server.random.unwrap();
@@ -561,9 +562,9 @@ impl State {
         )
         .ok_or_else(|| {
             if server.client_supported_groups.is_some() {
-                Error::SecurityError(crate::SecurityError::NoCommonKeyExchangeGroup)
+                Error::SecurityError(crate::vendor::dimpl::SecurityError::NoCommonKeyExchangeGroup)
             } else {
-                Error::CryptoError(crate::CryptoError::NoDtls12KeyExchangeGroupsConfigured)
+                Error::CryptoError(crate::vendor::dimpl::CryptoError::NoDtls12KeyExchangeGroupsConfigured)
             }
         })?;
 
@@ -663,7 +664,7 @@ impl State {
             .create_handshake(MessageType::ServerHelloDone, |_, _| Ok(()))?;
 
         let cs = server.engine.cipher_suite().ok_or(Error::InvalidState(
-            crate::InvalidStateError::NoCipherSuiteSelected,
+            crate::vendor::dimpl::InvalidStateError::NoCipherSuiteSelected,
         ))?;
 
         // PSK: no client certificates
@@ -712,7 +713,7 @@ impl State {
                 })?;
             server.state = State::Closed;
             return Err(Error::CertificateError(
-                crate::CertificateError::NoClientCertificateReceived,
+                crate::vendor::dimpl::CertificateError::NoClientCertificateReceived,
             )
             .into());
         } else {
@@ -753,7 +754,7 @@ impl State {
         };
 
         let suite = server.engine.cipher_suite().ok_or(Error::InvalidState(
-            crate::InvalidStateError::NoCipherSuiteSelected,
+            crate::vendor::dimpl::InvalidStateError::NoCipherSuiteSelected,
         ))?;
 
         if suite.is_psk() {
@@ -762,7 +763,7 @@ impl State {
                 ExchangeKeys::Psk(keys) => keys.identity_range.clone(),
                 _ => {
                     return Err(Error::UnexpectedMessage(
-                        crate::UnexpectedMessageError::EcdheClientKeyExchangeInPskPath,
+                        crate::vendor::dimpl::UnexpectedMessageError::EcdheClientKeyExchangeInPskPath,
                     )
                     .into());
                 }
@@ -781,7 +782,7 @@ impl State {
                 .engine
                 .config()
                 .psk_resolver()
-                .ok_or(Error::PskError(crate::PskError::NoPskResolverConfigured))?
+                .ok_or(Error::PskError(crate::vendor::dimpl::PskError::NoPskResolverConfigured))?
                 .resolve(identity);
 
             let (psk, psk_valid) = match resolved {
@@ -805,7 +806,7 @@ impl State {
                 ExchangeKeys::Ecdh(keys) => keys.public_key_range.clone(),
                 ExchangeKeys::Psk(_) => {
                     return Err(Error::UnexpectedMessage(
-                        crate::UnexpectedMessageError::PskClientKeyExchangeInEcdhePath,
+                        crate::vendor::dimpl::UnexpectedMessageError::PskClientKeyExchangeInEcdhePath,
                     )
                     .into());
                 }
@@ -848,7 +849,7 @@ impl State {
             .captured_session_hash
             .as_ref()
             .ok_or(Error::InvalidState(
-                crate::InvalidStateError::ExtendedMasterSecretSessionHashMissing,
+                crate::vendor::dimpl::InvalidStateError::ExtendedMasterSecretSessionHashMissing,
             ))?;
 
         let mut out = server.engine.pop_buffer();
@@ -921,13 +922,13 @@ impl State {
 
         if server.client_certificates.is_empty() {
             return Err(Error::CertificateError(
-                crate::CertificateError::NoClientCertificateForVerification,
+                crate::vendor::dimpl::CertificateError::NoClientCertificateForVerification,
             )
             .into());
         }
 
         // Create temp DigitallySigned for verification
-        let temp_signed = crate::dtls12::message::DigitallySigned {
+        let temp_signed = crate::vendor::dimpl::dtls12::message::DigitallySigned {
             algorithm: signature_algorithm,
             signature_range: 0..signature_bytes.len(),
         };
@@ -1002,7 +1003,7 @@ impl State {
         let is_eq: bool = verify_data.ct_eq(expected.as_slice()).into();
         if !is_eq {
             return Err((Error::SecurityError(
-                crate::SecurityError::ClientFinishedVerificationFailed,
+                crate::vendor::dimpl::SecurityError::ClientFinishedVerificationFailed,
             ))
             .into());
         }
@@ -1030,7 +1031,7 @@ impl State {
         // paths reuse a cached master_secret and don't consult the resolver.
         if server.psk_valid == Some(false) {
             return Err((Error::SecurityError(
-                crate::SecurityError::ClientFinishedVerificationFailed,
+                crate::vendor::dimpl::SecurityError::ClientFinishedVerificationFailed,
             ))
             .into());
         }
@@ -1071,7 +1072,7 @@ impl State {
                 record.first_handshake().map(|handshake| &handshake.header),
             );
             return Err(
-                Error::UnexpectedMessage(crate::UnexpectedMessageError::UnexpectedEpoch).into(),
+                Error::UnexpectedMessage(crate::vendor::dimpl::UnexpectedMessageError::UnexpectedEpoch).into(),
             );
         }
 
@@ -1162,7 +1163,7 @@ impl State {
 }
 
 fn compute_cookie(
-    hmac_provider: &dyn crate::crypto::HmacProvider,
+    hmac_provider: &dyn crate::vendor::dimpl::crypto::HmacProvider,
     secret: &[u8],
     client_random: Random,
 ) -> Result<Cookie, Error> {
@@ -1173,15 +1174,15 @@ fn compute_cookie(
         .hmac_sha256(secret, &buf)
         .map_err(Error::CryptoError)?;
     let cookie = Cookie::try_new(&tag).map_err(|_| {
-        Error::CryptoError(crate::CryptoError::OperationFailed(
-            crate::CryptoOperation::ComputeCookie,
+        Error::CryptoError(crate::vendor::dimpl::CryptoError::OperationFailed(
+            crate::vendor::dimpl::CryptoOperation::ComputeCookie,
         ))
     })?;
     Ok(cookie)
 }
 
 fn verify_cookie(
-    hmac_provider: &dyn crate::crypto::HmacProvider,
+    hmac_provider: &dyn crate::vendor::dimpl::crypto::HmacProvider,
     secret: &[u8],
     client_random: Random,
     cookie: Cookie,
@@ -1191,7 +1192,7 @@ fn verify_cookie(
     }
     match compute_cookie(hmac_provider, secret, client_random) {
         // Use constant-time comparison to prevent timing attacks
-        Ok(expected) => expected.as_ref().ct_eq(cookie.as_ref()).into(),
+        Ok(expected) => expected[..].ct_eq(&cookie[..]).into(),
         Err(_) => false,
     }
 }
@@ -1214,7 +1215,7 @@ fn handshake_create_server_hello(
 
     let cs = engine
         .cipher_suite()
-        .ok_or(Error::InvalidState(crate::InvalidStateError::NoCipherSuite))?;
+        .ok_or(Error::InvalidState(crate::vendor::dimpl::InvalidStateError::NoCipherSuite))?;
 
     let srtp_pid = negotiated_srtp_profile.map(|p| match p {
         SrtpProfile::AEAD_AES_256_GCM => SrtpProfileId::SRTP_AEAD_AES_256_GCM,
@@ -1246,7 +1247,7 @@ fn handshake_create_server_key_exchange(
 ) -> Result<(), Error> {
     let Some(cipher_suite) = engine.cipher_suite() else {
         return Err(Error::InvalidState(
-            crate::InvalidStateError::NoCipherSuiteSelected,
+            crate::vendor::dimpl::InvalidStateError::NoCipherSuiteSelected,
         ));
     };
 
@@ -1312,7 +1313,7 @@ fn handshake_create_server_key_exchange(
             Ok(())
         }
         _ => Err(Error::SecurityError(
-            crate::SecurityError::UnsupportedKeyExchangeAlgorithm,
+            crate::vendor::dimpl::SecurityError::UnsupportedKeyExchangeAlgorithm,
         )),
     }
 }

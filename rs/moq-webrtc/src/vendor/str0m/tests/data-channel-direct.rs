@@ -1,11 +1,11 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use str0m::channel::ChannelConfig;
-use str0m::{Candidate, Event, RtcConfig, RtcError};
+use crate::vendor::str0m::channel::ChannelConfig;
+use crate::vendor::str0m::{Candidate, Event, RtcConfig, RtcError};
 use tracing::info_span;
 
-mod common;
+use super::common;
 use common::{Peer, TestRtc, init_crypto_default, init_log, progress};
 
 #[test]
@@ -105,7 +105,7 @@ pub fn data_channel_direct() -> Result<(), RtcError> {
         .events
         .iter()
         .find_map(|(t, e)| match e {
-            Event::IceConnectionStateChange(str0m::IceConnectionState::Completed) => Some(*t),
+            Event::IceConnectionStateChange(crate::vendor::str0m::IceConnectionState::Completed) => Some(*t),
             _ => None,
         })
         .expect("IceConnectionStateChange(Completed) event");

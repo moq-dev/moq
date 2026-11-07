@@ -24,6 +24,7 @@
 //
 // This implementation is a Sans-IO DTLS 1.3 server.
 
+use tracing::{debug, trace};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
@@ -31,40 +32,40 @@ use std::time::Instant;
 use arrayvec::ArrayVec;
 use subtle::ConstantTimeEq;
 
-use crate::buffer::Buf;
-use crate::buffer::ToBuf;
-use crate::crypto::{ActiveKeyExchange, SrtpProfile};
-use crate::dtls13::Client;
-use crate::dtls13::client::LocalEvent;
-use crate::dtls13::client::handshake_create_certificate;
-use crate::dtls13::client::handshake_create_certificate_verify;
-use crate::dtls13::client::signature_scheme_to_components;
-#[cfg(feature = "_crypto-common")]
-use crate::dtls13::client::verify_scheme_curve;
-use crate::dtls13::engine::Engine;
-use crate::dtls13::message::Body;
-use crate::dtls13::message::CompressionMethod;
-use crate::dtls13::message::ContentType;
-use crate::dtls13::message::Dtls13CipherSuite;
-use crate::dtls13::message::Extension;
-use crate::dtls13::message::ExtensionType;
-use crate::dtls13::message::KeyShareEntry;
-use crate::dtls13::message::KeyShareHelloRetryRequest;
-use crate::dtls13::message::KeyShareServerHello;
-use crate::dtls13::message::KeyUpdateRequest;
-use crate::dtls13::message::MessageType;
-use crate::dtls13::message::NamedGroup;
-use crate::dtls13::message::ProtocolVersion;
-use crate::dtls13::message::Random;
-use crate::dtls13::message::ServerHello;
-use crate::dtls13::message::SessionId;
-use crate::dtls13::message::SignatureAlgorithmsExtension;
-use crate::dtls13::message::SignatureScheme;
-use crate::dtls13::message::SupportedVersionsServerHello;
-use crate::dtls13::message::UseSrtpExtension;
-use crate::dtls13::message::parse_cookie_extension;
-use crate::timer::Timeout;
-use crate::{Config, DtlsCertificate, Error, InternalError, Output};
+use crate::vendor::dimpl::buffer::Buf;
+use crate::vendor::dimpl::buffer::ToBuf;
+use crate::vendor::dimpl::crypto::{ActiveKeyExchange, SrtpProfile};
+use crate::vendor::dimpl::dtls13::Client;
+use crate::vendor::dimpl::dtls13::client::LocalEvent;
+use crate::vendor::dimpl::dtls13::client::handshake_create_certificate;
+use crate::vendor::dimpl::dtls13::client::handshake_create_certificate_verify;
+use crate::vendor::dimpl::dtls13::client::signature_scheme_to_components;
+#[cfg(all())]
+use crate::vendor::dimpl::dtls13::client::verify_scheme_curve;
+use crate::vendor::dimpl::dtls13::engine::Engine;
+use crate::vendor::dimpl::dtls13::message::Body;
+use crate::vendor::dimpl::dtls13::message::CompressionMethod;
+use crate::vendor::dimpl::dtls13::message::ContentType;
+use crate::vendor::dimpl::dtls13::message::Dtls13CipherSuite;
+use crate::vendor::dimpl::dtls13::message::Extension;
+use crate::vendor::dimpl::dtls13::message::ExtensionType;
+use crate::vendor::dimpl::dtls13::message::KeyShareEntry;
+use crate::vendor::dimpl::dtls13::message::KeyShareHelloRetryRequest;
+use crate::vendor::dimpl::dtls13::message::KeyShareServerHello;
+use crate::vendor::dimpl::dtls13::message::KeyUpdateRequest;
+use crate::vendor::dimpl::dtls13::message::MessageType;
+use crate::vendor::dimpl::dtls13::message::NamedGroup;
+use crate::vendor::dimpl::dtls13::message::ProtocolVersion;
+use crate::vendor::dimpl::dtls13::message::Random;
+use crate::vendor::dimpl::dtls13::message::ServerHello;
+use crate::vendor::dimpl::dtls13::message::SessionId;
+use crate::vendor::dimpl::dtls13::message::SignatureAlgorithmsExtension;
+use crate::vendor::dimpl::dtls13::message::SignatureScheme;
+use crate::vendor::dimpl::dtls13::message::SupportedVersionsServerHello;
+use crate::vendor::dimpl::dtls13::message::UseSrtpExtension;
+use crate::vendor::dimpl::dtls13::message::parse_cookie_extension;
+use crate::vendor::dimpl::timer::Timeout;
+use crate::vendor::dimpl::{Config, DtlsCertificate, Error, InternalError, Output};
 
 /// Magic random value indicating HelloRetryRequest (RFC 8446 Section 4.1.3).
 const HRR_RANDOM: [u8; 32] = [
@@ -461,7 +462,7 @@ impl State {
 
         if !client_hello.legacy_cookie.is_empty() {
             return Err(Error::SecurityError(
-                crate::SecurityError::InvalidLegacyCookieInClientHello,
+                crate::vendor::dimpl::SecurityError::InvalidLegacyCookieInClientHello,
             )
             .into());
         }
@@ -469,7 +470,7 @@ impl State {
         // Validate legacy_version
         if client_hello.legacy_version != ProtocolVersion::DTLS1_2 {
             return Err(Error::SecurityError(
-                crate::SecurityError::ClientHelloLegacyVersionNotDtls12,
+                crate::vendor::dimpl::SecurityError::ClientHelloLegacyVersionNotDtls12,
             )
             .into());
         }
@@ -480,7 +481,7 @@ impl State {
             .contains(&CompressionMethod::Null);
         if !has_null_compression {
             return Err(Error::SecurityError(
-                crate::SecurityError::ClientHelloMustOfferNullCompression,
+                crate::vendor::dimpl::SecurityError::ClientHelloMustOfferNullCompression,
             )
             .into());
         }
@@ -505,7 +506,7 @@ impl State {
                     parse_cookie_extension(ext.extension_data(&server.defragment_buffer))
                         .map_err(InternalError::from)?;
                 client_cookie_data = Some(ArrayVec::try_from(cookie).map_err(|_| {
-                    Error::SecurityError(crate::SecurityError::InvalidCookieInClientHello)
+                    Error::SecurityError(crate::vendor::dimpl::SecurityError::InvalidCookieInClientHello)
                 })?);
             }
         }
@@ -515,7 +516,7 @@ impl State {
                 return Err((Error::Dtls12Fallback).into());
             }
             return Err(Error::SecurityError(
-                crate::SecurityError::ClientHelloMissingDtls13SupportedVersions,
+                crate::vendor::dimpl::SecurityError::ClientHelloMissingDtls13SupportedVersions,
             )
             .into());
         }
@@ -527,7 +528,7 @@ impl State {
             .find(|cs| server.engine.is_cipher_suite_allowed(**cs))
             .copied()
             .ok_or(Error::SecurityError(
-                crate::SecurityError::NoCommonCipherSuite,
+                crate::vendor::dimpl::SecurityError::NoCommonCipherSuite,
             ))?;
 
         // Save the client random and session_id early so HRR can use them
@@ -571,7 +572,7 @@ impl State {
                 let is_valid: bool = cookie_bytes.as_slice().ct_eq(&expected_cookie).into();
                 if !is_valid {
                     return Err(Error::SecurityError(
-                        crate::SecurityError::InvalidCookieInClientHello,
+                        crate::vendor::dimpl::SecurityError::InvalidCookieInClientHello,
                     )
                     .into());
                 }
@@ -621,7 +622,7 @@ impl State {
             let is_valid: bool = cookie_bytes.as_slice().ct_eq(&expected_cookie).into();
             if !is_valid {
                 return Err((Error::SecurityError(
-                    crate::SecurityError::InvalidCookieInClientHello,
+                    crate::vendor::dimpl::SecurityError::InvalidCookieInClientHello,
                 ))
                 .into());
             }
@@ -645,7 +646,7 @@ impl State {
                 // Need HRR for key exchange
                 if server.hello_retry {
                     return Err(Error::SecurityError(
-                        crate::SecurityError::CannotSendSecondHelloRetryRequest,
+                        crate::vendor::dimpl::SecurityError::CannotSendSecondHelloRetryRequest,
                     )
                     .into());
                 }
@@ -680,7 +681,7 @@ impl State {
 
                 Ok(Self::AwaitClientHello)
             } else {
-                Err(Error::SecurityError(crate::SecurityError::NoCommonKeyExchangeGroup).into())
+                Err(Error::SecurityError(crate::vendor::dimpl::SecurityError::NoCommonKeyExchangeGroup).into())
             };
         };
 
@@ -689,7 +690,7 @@ impl State {
             .engine
             .find_kx_group(selected_group)
             .ok_or(Error::CryptoError(
-                crate::CryptoError::KeyExchangeGroupNotFound(selected_group),
+                crate::vendor::dimpl::CryptoError::KeyExchangeGroupNotFound(selected_group),
             ))?;
 
         let kx_buf = server.engine.pop_buffer();
@@ -810,7 +811,7 @@ impl State {
 
         // Derive handshake secrets
         let shared_secret = server.shared_secret.take().ok_or(Error::InvalidState(
-            crate::InvalidStateError::NoSharedSecretForHandshakeKeyDerivation,
+            crate::vendor::dimpl::InvalidStateError::NoSharedSecretForHandshakeKeyDerivation,
         ))?;
 
         let (c_hs_traffic, s_hs_traffic, handshake_secret) =
@@ -900,7 +901,7 @@ impl State {
                 .server_hs_traffic_secret
                 .as_ref()
                 .ok_or(Error::InvalidState(
-                    crate::InvalidStateError::NoServerHandshakeTrafficSecretForFinished,
+                    crate::vendor::dimpl::InvalidStateError::NoServerHandshakeTrafficSecretForFinished,
                 ))?;
         let mut server_hs_secret_copy = Buf::new();
         server_hs_secret_copy.extend_from_slice(server_hs_secret);
@@ -916,7 +917,7 @@ impl State {
 
         // Derive application secrets from handshake secret + transcript through server Finished
         let handshake_secret = server.handshake_secret.as_ref().ok_or(Error::InvalidState(
-            crate::InvalidStateError::NoHandshakeSecretForApplicationKeyDerivation,
+            crate::vendor::dimpl::InvalidStateError::NoHandshakeSecretForApplicationKeyDerivation,
         ))?;
 
         let (c_ap_traffic, s_ap_traffic) =
@@ -962,7 +963,7 @@ impl State {
                 })?;
             server.state = State::Closed;
             return Err(Error::CertificateError(
-                crate::CertificateError::NoClientCertificateReceived,
+                crate::vendor::dimpl::CertificateError::NoClientCertificateReceived,
             )
             .into());
         }
@@ -1032,7 +1033,7 @@ impl State {
         // the signature_algorithms field of the CertificateRequest message.
         if !SignatureScheme::supported().contains(&scheme) {
             return Err(
-                Error::SecurityError(crate::SecurityError::SignatureSchemeNotOffered(scheme))
+                Error::SecurityError(crate::vendor::dimpl::SecurityError::SignatureSchemeNotOffered(scheme))
                     .into(),
             );
         }
@@ -1048,7 +1049,7 @@ impl State {
         let mut signature_copy = ArrayVec::<u8, 512>::new();
         signature_copy
             .try_extend_from_slice(signature)
-            .map_err(|_| Error::SecurityError(crate::SecurityError::SignatureTooLarge))?;
+            .map_err(|_| Error::SecurityError(crate::vendor::dimpl::SecurityError::SignatureTooLarge))?;
 
         drop(maybe);
 
@@ -1057,10 +1058,10 @@ impl State {
             .client_certificates
             .first()
             .ok_or(Error::CertificateError(
-                crate::CertificateError::NoClientCertificateForVerification,
+                crate::vendor::dimpl::CertificateError::NoClientCertificateForVerification,
             ))?;
 
-        #[cfg(feature = "_crypto-common")]
+        #[cfg(all())]
         verify_scheme_curve(scheme, cert_der)?;
 
         let (hash_alg, sig_alg) = signature_scheme_to_components(scheme)?;
@@ -1087,7 +1088,7 @@ impl State {
                 .client_hs_traffic_secret
                 .as_ref()
                 .ok_or(Error::InvalidState(
-                    crate::InvalidStateError::NoClientHandshakeTrafficSecret,
+                    crate::vendor::dimpl::InvalidStateError::NoClientHandshakeTrafficSecret,
                 ))?;
         let expected_verify_data = server.engine.compute_verify_data(client_hs_secret)?;
 
@@ -1115,7 +1116,7 @@ impl State {
         let is_eq: bool = verify_data.ct_eq(&*expected_verify_data).into();
         if !is_eq {
             return Err((Error::SecurityError(
-                crate::SecurityError::ClientFinishedVerificationFailed,
+                crate::vendor::dimpl::SecurityError::ClientFinishedVerificationFailed,
             ))
             .into());
         }
@@ -1138,7 +1139,7 @@ impl State {
                 record.first_handshake().map(|handshake| &handshake.header),
             );
             return Err(
-                Error::UnexpectedMessage(crate::UnexpectedMessageError::UnexpectedEpoch).into(),
+                Error::UnexpectedMessage(crate::vendor::dimpl::UnexpectedMessageError::UnexpectedEpoch).into(),
             );
         }
 
@@ -1276,7 +1277,7 @@ impl State {
 fn compute_cookie(
     cookie_secret: &[u8; 32],
     client_random: &Random,
-    hmac_provider: &'static dyn crate::crypto::HmacProvider,
+    hmac_provider: &'static dyn crate::vendor::dimpl::crypto::HmacProvider,
 ) -> [u8; 32] {
     // unwrap: HMAC-SHA256 should not fail with valid key/data
     hmac_provider
@@ -1422,7 +1423,7 @@ fn handshake_create_encrypted_extensions(
     // use_srtp extension if negotiated
     if let Some(profile) = negotiated_srtp {
         let srtp_start = ext_buf.len();
-        let profile_id: crate::dtls13::message::SrtpProfileId = profile.into();
+        let profile_id: crate::vendor::dimpl::dtls13::message::SrtpProfileId = profile.into();
         let mut profiles = ArrayVec::new();
         profiles.push(profile_id);
         let use_srtp = UseSrtpExtension::new(profiles, ArrayVec::new());
@@ -1490,7 +1491,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn auto_retains_hello_when_assembly_is_incomplete() {
         // The coverage check sees both bytes, but defragmentation stops at the
         // different message type, leaving both fragments queued for later.
@@ -1503,7 +1504,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn auto_retains_hello_when_fragment_capacity_is_exceeded() {
         let fragments: Vec<_> = (0..51)
             .map(|offset| (MessageType::ClientHello, offset, 1))
@@ -1512,7 +1513,7 @@ mod tests {
         assert_auto_retains_unconsumed_hello(packet, true);
     }
 
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn client_hello_fragments(length: u32, fragments: &[(MessageType, u32, u32)]) -> Vec<u8> {
         let mut packet = Vec::new();
         // Each record holds at most eight parsed handshake fragments.
@@ -1536,10 +1537,10 @@ mod tests {
         packet
     }
 
-    #[cfg(feature = "rcgen")]
+    #[cfg(all())]
     fn assert_auto_retains_unconsumed_hello(packet: Vec<u8>, capacity_error: bool) {
-        use crate::certificate::generate_self_signed_certificate;
-        use crate::error::TransientError;
+        use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
+        use crate::vendor::dimpl::error::TransientError;
 
         let now = Instant::now();
         let certificate = generate_self_signed_certificate().expect("certificate");

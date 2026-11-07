@@ -1,7 +1,7 @@
 use bytes::Bytes;
-use sctp_proto::{Association, AssociationHandle, ClientConfig, DatagramEvent};
-use sctp_proto::{Endpoint, EndpointConfig, Payload, PayloadProtocolIdentifier};
-use sctp_proto::{ReliabilityType, TransportConfig, generate_snap_token};
+use crate::vendor::sctp_proto::{Association, AssociationHandle, ClientConfig, DatagramEvent};
+use crate::vendor::sctp_proto::{Endpoint, EndpointConfig, Payload, PayloadProtocolIdentifier};
+use crate::vendor::sctp_proto::{ReliabilityType, TransportConfig, generate_snap_token};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

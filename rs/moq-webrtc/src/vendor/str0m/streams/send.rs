@@ -1,30 +1,31 @@
+use tracing::{debug, trace, warn};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::config_mod::RtcpReportIntervals;
-use crate::format::CodecConfig;
-use crate::format::PayloadParams;
-use crate::io::DATAGRAM_MAX_PACKET_SIZE;
-use crate::io::MAX_RTP_OVERHEAD;
-use crate::media::KeyframeRequestKind;
-use crate::media::Media;
-use crate::media::MediaKind;
-use crate::pacer::QueuePriority;
-use crate::pacer::QueueSnapshot;
-use crate::pacer::QueueState;
-use crate::packet::Vp8Patch;
-use crate::rtp_::MidRid;
-use crate::rtp_::{Bitrate, Descriptions, Extension, ExtensionMap, ExtensionValues, Frequency};
-use crate::rtp_::{MAX_BLANK_PADDING_PAYLOAD_SIZE, Sdes, SdesType};
-use crate::rtp_::{MediaTime, Mid, NackEntry, ReportList, Rtcp, RtpHeader};
-use crate::rtp_::{Pt, Rid, RtcpFb, SenderInfo, SenderReport, Ssrc};
-use crate::rtp_::{SRTP_BLOCK_SIZE, SeqNo};
-use crate::session::PacketReceipt;
-use crate::stats::StatsSnapshot;
-use crate::util::value_history::ValueHistory;
-use crate::util::{InstantExt, already_happened, not_happening};
+use crate::vendor::str0m::config_mod::RtcpReportIntervals;
+use crate::vendor::str0m::format::CodecConfig;
+use crate::vendor::str0m::format::PayloadParams;
+use crate::vendor::str0m::io::DATAGRAM_MAX_PACKET_SIZE;
+use crate::vendor::str0m::io::MAX_RTP_OVERHEAD;
+use crate::vendor::str0m::media::KeyframeRequestKind;
+use crate::vendor::str0m::media::Media;
+use crate::vendor::str0m::media::MediaKind;
+use crate::vendor::str0m::pacer::QueuePriority;
+use crate::vendor::str0m::pacer::QueueSnapshot;
+use crate::vendor::str0m::pacer::QueueState;
+use crate::vendor::str0m::packet::Vp8Patch;
+use crate::vendor::str0m::rtp_::MidRid;
+use crate::vendor::str0m::rtp_::{Bitrate, Descriptions, Extension, ExtensionMap, ExtensionValues, Frequency};
+use crate::vendor::str0m::rtp_::{MAX_BLANK_PADDING_PAYLOAD_SIZE, Sdes, SdesType};
+use crate::vendor::str0m::rtp_::{MediaTime, Mid, NackEntry, ReportList, Rtcp, RtpHeader};
+use crate::vendor::str0m::rtp_::{Pt, Rid, RtcpFb, SenderInfo, SenderReport, Ssrc};
+use crate::vendor::str0m::rtp_::{SRTP_BLOCK_SIZE, SeqNo};
+use crate::vendor::str0m::session::PacketReceipt;
+use crate::vendor::str0m::stats::StatsSnapshot;
+use crate::vendor::str0m::util::value_history::ValueHistory;
+use crate::vendor::str0m::util::{InstantExt, already_happened, not_happening};
 
 use super::RtpPacket;
 use super::rtx_cache::RtxCache;
@@ -81,7 +82,7 @@ impl StreamTxQueueInfo for QueueSnapshot {
 ///
 /// A stream is a primary SSRC + optional RTX SSRC.
 ///
-/// This is RTP level API. For frame level API see [`Rtc::writer`][crate::Rtc::writer].
+/// This is RTP level API. For frame level API see [`Rtc::writer`][crate::vendor::str0m::Rtc::writer].
 #[derive(Debug)]
 pub struct StreamTx {
     /// Unique identifier of the remote encoded stream.
@@ -208,7 +209,7 @@ impl RtpWrite {
     /// The `payload` argument is expected to be only the RTP payload, not the
     /// RTP packet header.
     ///
-    /// * `pt` Payload type. Declared in the [`Media`][crate::media::Media] this
+    /// * `pt` Payload type. Declared in the [`Media`][crate::vendor::str0m::media::Media] this
     ///        encoded stream belongs to.
     /// * `seq_no` Extended sequence number to use for this packet. Only the low
     ///            16 bits are carried in the RTP header. The upper bits
@@ -247,10 +248,10 @@ impl RtpWrite {
     ///
     /// On the sender, the extended sequence number determines the ROC:
     ///
-    /// ```
+    /// ```ignore
     /// # use std::time::Instant;
-    /// # use str0m::media::Pt;
-    /// # use str0m::rtp::{RtpWrite, SeqNo, StreamTx};
+    /// # use crate::vendor::str0m::media::Pt;
+    /// # use crate::vendor::str0m::rtp::{RtpWrite, SeqNo, StreamTx};
     /// # fn send(stream: &mut StreamTx, pt: Pt, wallclock: Instant, payload: &[u8]) {
     /// let seq_no: SeqNo = 100_000.into();
     /// assert_eq!(seq_no.roc(), 1);
@@ -262,14 +263,14 @@ impl RtpWrite {
     /// # }
     /// ```
     ///
-    /// On a str0m receiver, use [`StreamRx::reset_roc`][crate::rtp::StreamRx::reset_roc]
+    /// On a str0m receiver, use [`StreamRx::reset_roc`][crate::vendor::str0m::rtp::StreamRx::reset_roc]
     /// with the signaled ROC before handling the first SRTP packet. This example
     /// assumes the media identified by `mid` has already been declared:
     ///
-    /// ```
-    /// # use str0m::Rtc;
-    /// # use str0m::media::Mid;
-    /// # use str0m::rtp::Ssrc;
+    /// ```ignore
+    /// # use crate::vendor::str0m::Rtc;
+    /// # use crate::vendor::str0m::media::Mid;
+    /// # use crate::vendor::str0m::rtp::Ssrc;
     /// # fn initialize_receiver(rtc: &mut Rtc, mid: Mid, ssrc: Ssrc, signaled_roc: u64) {
     /// // `ssrc` and `signaled_roc` come from the application's signaling channel.
     /// let mut direct = rtc.direct_api();
@@ -342,7 +343,7 @@ impl RtpWrite {
 
     /// Apply a prevalidated VP8 payload descriptor patch during RTP serialization.
     ///
-    /// Build the patch with [`Vp8Descriptor::patch`][crate::rtp::Vp8Descriptor::patch]
+    /// Build the patch with [`Vp8Descriptor::patch`][crate::vendor::str0m::rtp::Vp8Descriptor::patch]
     /// when the caller already parsed the VP8 payload descriptor before
     /// constructing this write command.
     pub fn vp8_patch(mut self, patch: Vp8Patch) -> Self {
@@ -397,7 +398,7 @@ impl StreamTx {
         let mut stream = Self::new(
             0.into(),
             None,
-            MidRid(crate::media::MID_PROBE, None),
+            MidRid(crate::vendor::str0m::media::MID_PROBE, None),
             false,
             mtu_warn,
         );
@@ -768,7 +769,7 @@ impl StreamTx {
 
         buf.truncate(header_len + body_len);
 
-        #[cfg(feature = "_internal_dont_use_log_stats")]
+        #[cfg(any())]
         {
             let queued_at = match next.kind {
                 NextPacketKind::Regular => Some(pkt.timestamp),
@@ -779,7 +780,7 @@ impl StreamTx {
             };
 
             if let Some(delay) = queued_at.map(|i| now.duration_since(i)) {
-                crate::log_stat!("QUEUE_DELAY", header.ssrc, delay.as_secs_f64() * 1000.0);
+                crate::vendor::str0m::log_stat!("QUEUE_DELAY", header.ssrc, delay.as_secs_f64() * 1000.0);
             }
         }
 
@@ -1393,7 +1394,7 @@ mod test {
 
     #[test]
     fn regular_padding_does_not_search_probe_negotiation() {
-        let mut streams = crate::streams::Streams::new(false, 1200, Duration::from_millis(1500));
+        let mut streams = crate::vendor::str0m::streams::Streams::new(false, 1200, Duration::from_millis(1500));
         let stream =
             streams.declare_stream_tx(42.into(), Some(44.into()), MidRid("vid".into(), None));
         stream.pt_for_padding = Some(96.into());
@@ -1443,7 +1444,7 @@ mod test {
         let codecs = CodecConfig::new_with_defaults();
         let pt = codecs.params()[0].pt();
         let exts = ExtensionMap::standard();
-        let mut streams = crate::streams::Streams::new(false, 1200, Duration::from_millis(1500));
+        let mut streams = crate::vendor::str0m::streams::Streams::new(false, 1200, Duration::from_millis(1500));
         let stream = streams.declare_stream_tx(42.into(), None, MidRid("vid".into(), None));
         let mut buf = vec![];
         let mut now = start;
@@ -1500,9 +1501,9 @@ mod test {
 
     #[test]
     fn probe_stream_rebinding_preserves_srtp_sequence_and_discards_pending_padding() {
-        use crate::media::MID_PROBE;
-        use crate::rtp_::MidRid;
-        use crate::streams::Streams;
+        use crate::vendor::str0m::media::MID_PROBE;
+        use crate::vendor::str0m::rtp_::MidRid;
+        use crate::vendor::str0m::streams::Streams;
 
         let now = Instant::now();
         let mut streams = Streams::new(false, 1200, Duration::from_millis(1500));

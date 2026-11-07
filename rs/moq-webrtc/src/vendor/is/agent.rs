@@ -1,3 +1,4 @@
+use tracing::{debug, trace, warn};
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::net::SocketAddr;
@@ -8,15 +9,15 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::Sha1HmacProvider;
-use crate::preference::default_local_preference;
-use crate::stun::{Class as StunClass, Method as StunMethod, StunTiming};
-use crate::stun::{StunMessage, StunPacket, TransId};
-use str0m_proto::{DATAGRAM_MTU_TARGET, DATAGRAM_MTU_WARN, Id, Transmit};
-use str0m_proto::{NonCryptographicRng, Pii, Protocol};
+use crate::vendor::is::Sha1HmacProvider;
+use crate::vendor::is::preference::default_local_preference;
+use crate::vendor::is::stun::{Class as StunClass, Method as StunMethod, StunTiming};
+use crate::vendor::is::stun::{StunMessage, StunPacket, TransId};
+use crate::vendor::str0m_proto::{DATAGRAM_MTU_TARGET, DATAGRAM_MTU_WARN, Id, Transmit};
+use crate::vendor::str0m_proto::{NonCryptographicRng, Pii, Protocol};
 
-use crate::candidate::{Candidate, CandidateKind};
-use crate::pair::{CandidatePair, CheckState, PairId};
+use crate::vendor::is::candidate::{Candidate, CandidateKind};
+use crate::vendor::is::pair::{CandidatePair, CheckState, PairId};
 
 /// Handles the ICE protocol for a given peer.
 ///
@@ -310,12 +311,10 @@ impl IceCreds {
 }
 
 impl IceAgent {
-    /// Create a new [`IceAgent`] using the default SHA1-HMAC provider.
-    ///
-    /// Available when the `sha1` feature is enabled (on by default).
-    #[cfg(feature = "sha1")]
+    /// Create a new [`IceAgent`] using the test SHA1-HMAC provider.
+    #[cfg(test)]
     pub fn new(local_credentials: IceCreds) -> Self {
-        Self::with_hmac(local_credentials, &crate::DefaultSha1HmacProvider)
+        Self::with_hmac(local_credentials, &crate::vendor::is::DefaultSha1HmacProvider)
     }
 
     /// Create a new [`IceAgent`] with a specific SHA1-HMAC provider.
@@ -2113,7 +2112,7 @@ impl fmt::Debug for LocalPreferenceHolder {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::DefaultSha1HmacProvider;
+    use crate::vendor::is::DefaultSha1HmacProvider;
     use std::{iter, net::SocketAddr};
 
     fn host(s: impl Into<String>, proto: impl TryInto<Protocol>) -> Candidate {

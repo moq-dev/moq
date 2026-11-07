@@ -6,7 +6,7 @@ use super::CryptoProvider;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SrtpProfile {
-    #[cfg(feature = "_internal_test_exports")]
+    #[cfg(test)]
     PassThrough,
     Aes128CmSha1_80,
     AeadAes128Gcm,
@@ -26,7 +26,7 @@ impl SrtpProfile {
     #[rustfmt::skip]
     pub(crate) fn keying_material_len(&self) -> usize {
         match self {
-            #[cfg(feature = "_internal_test_exports")]
+            #[cfg(test)]
             SrtpProfile::PassThrough => 0,
              // MASTER_KEY_LEN * 2 + MASTER_SALT * 2
              // TODO: This is a duplication of info that is held in srtp.rs, because we
@@ -39,48 +39,48 @@ impl SrtpProfile {
 }
 
 pub enum SrtpCrypto {
-    #[cfg(any(feature = "openssl", feature = "openssl-dimpl"))]
+    #[cfg(any(any(), any()))]
     OpenSsl(super::ossl::OsslSrtpCryptoImpl),
-    #[cfg(not(any(feature = "openssl", feature = "openssl-dimpl")))]
+    #[cfg(not(any(any(), any())))]
     OpenSsl(DummySrtpCryptoImpl),
-    #[cfg(all(feature = "wincrypto", target_os = "windows"))]
+    #[cfg(all(any(), target_os = "windows"))]
     WinCrypto(super::wincrypto::WinCryptoSrtpCryptoImpl),
-    #[cfg(not(all(feature = "wincrypto", target_os = "windows")))]
+    #[cfg(not(all(any(), target_os = "windows")))]
     WinCrypto(DummySrtpCryptoImpl),
-    #[cfg(feature = "dimpl")]
+    #[cfg(any())]
     AwsLc(super::aws_lc::AwsLcImpl),
-    #[cfg(not(feature = "dimpl"))]
+    #[cfg(not(any()))]
     AwsLc(DummySrtpCryptoImpl),
 }
 
 #[allow(clippy::unit_arg)]
 impl SrtpCrypto {
-    #[cfg(any(feature = "openssl", feature = "openssl-dimpl"))]
+    #[cfg(any(any(), any()))]
     pub fn new_openssl() -> SrtpCrypto {
         Self::OpenSsl(super::ossl::OsslSrtpCryptoImpl)
     }
 
-    #[cfg(not(any(feature = "openssl", feature = "openssl-dimpl")))]
+    #[cfg(not(any(any(), any())))]
     pub fn new_openssl() -> SrtpCrypto {
         Self::OpenSsl(DummySrtpCryptoImpl(CryptoProvider::OpenSsl))
     }
 
-    #[cfg(all(feature = "wincrypto", target_os = "windows"))]
+    #[cfg(all(any(), target_os = "windows"))]
     pub fn new_wincrypto() -> SrtpCrypto {
         Self::WinCrypto(super::wincrypto::WinCryptoSrtpCryptoImpl)
     }
 
-    #[cfg(not(all(feature = "wincrypto", target_os = "windows")))]
+    #[cfg(not(all(any(), target_os = "windows")))]
     pub fn new_wincrypto() -> SrtpCrypto {
         Self::WinCrypto(DummySrtpCryptoImpl(CryptoProvider::WinCrypto))
     }
 
-    #[cfg(feature = "dimpl")]
+    #[cfg(any())]
     pub fn new_rust_crypto() -> SrtpCrypto {
         Self::AwsLc(super::aws_lc::AwsLcImpl)
     }
 
-    #[cfg(not(feature = "dimpl"))]
+    #[cfg(not(any()))]
     pub fn new_rust_crypto() -> SrtpCrypto {
         Self::AwsLc(DummySrtpCryptoImpl(CryptoProvider::Dimpl))
     }
@@ -177,7 +177,7 @@ pub mod aes_128_cm_sha1_80 {
 
     use subtle::ConstantTimeEq;
 
-    use crate::crypto::CryptoError;
+    use crate::vendor::str0m::crypto::CryptoError;
 
     pub const KEY_LEN: usize = 16;
     pub const SALT_LEN: usize = 14;
@@ -209,13 +209,13 @@ pub mod aes_128_cm_sha1_80 {
 
     pub fn rtp_hmac(key: &[u8], buf: &mut [u8], srtp_index: u64, hmac_start: usize) {
         let roc = (srtp_index >> 16) as u32;
-        let tag = crate::crypto::sha1_hmac(key, &[&buf[..hmac_start], &roc.to_be_bytes()]);
+        let tag = crate::vendor::str0m::crypto::sha1_hmac(key, &[&buf[..hmac_start], &roc.to_be_bytes()]);
         buf[hmac_start..(hmac_start + HMAC_TAG_LEN)].copy_from_slice(&tag[0..HMAC_TAG_LEN]);
     }
 
     pub fn rtp_verify(key: &[u8], buf: &[u8], srtp_index: u64, cmp: &[u8]) -> bool {
         let roc = (srtp_index >> 16) as u32;
-        let tag = crate::crypto::sha1_hmac(key, &[buf, &roc.to_be_bytes()]);
+        let tag = crate::vendor::str0m::crypto::sha1_hmac(key, &[buf, &roc.to_be_bytes()]);
 
         tag[0..HMAC_TAG_LEN].ct_eq(cmp).into()
     }
@@ -235,13 +235,13 @@ pub mod aes_128_cm_sha1_80 {
     }
 
     pub fn rtcp_hmac(key: &[u8], buf: &mut [u8], hmac_index: usize) {
-        let tag = crate::crypto::sha1_hmac(key, &[&buf[0..hmac_index]]);
+        let tag = crate::vendor::str0m::crypto::sha1_hmac(key, &[&buf[0..hmac_index]]);
 
         buf[hmac_index..(hmac_index + HMAC_TAG_LEN)].copy_from_slice(&tag[0..HMAC_TAG_LEN]);
     }
 
     pub fn rtcp_verify(key: &[u8], buf: &[u8], cmp: &[u8]) -> bool {
-        let tag = crate::crypto::sha1_hmac(key, &[buf]);
+        let tag = crate::vendor::str0m::crypto::sha1_hmac(key, &[buf]);
 
         tag[0..HMAC_TAG_LEN].ct_eq(cmp).into()
     }
@@ -250,7 +250,7 @@ pub mod aes_128_cm_sha1_80 {
 pub mod aead_aes_128_gcm {
     use std::panic::UnwindSafe;
 
-    use crate::crypto::CryptoError;
+    use crate::vendor::str0m::crypto::CryptoError;
 
     pub const KEY_LEN: usize = 16;
     pub const SALT_LEN: usize = 12;
@@ -328,7 +328,7 @@ pub mod aead_aes_128_gcm {
 pub mod aead_aes_256_gcm {
     use std::panic::UnwindSafe;
 
-    use crate::crypto::CryptoError;
+    use crate::vendor::str0m::crypto::CryptoError;
 
     pub const KEY_LEN: usize = 32;
     pub const SALT_LEN: usize = 12;
@@ -406,7 +406,7 @@ pub mod aead_aes_256_gcm {
 impl fmt::Display for SrtpProfile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            #[cfg(feature = "_internal_test_exports")]
+            #[cfg(test)]
             SrtpProfile::PassThrough => write!(f, "PassThrough"),
             SrtpProfile::Aes128CmSha1_80 => write!(f, "SRTP_AES128_CM_SHA1_80"),
             SrtpProfile::AeadAes128Gcm => write!(f, "SRTP_AEAD_AES_128_GCM"),

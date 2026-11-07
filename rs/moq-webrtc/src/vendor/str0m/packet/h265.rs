@@ -12,7 +12,7 @@ pub struct H265CodecExtra {
     /// containing complete and independent visual information. This frame serves
     /// as a reference point for other frames in the video sequence.
     ///
-    /// [`MediaData`]: crate::media::MediaData
+    /// [`MediaData`]: crate::vendor::str0m::media::MediaData
     pub is_keyframe: bool,
 }
 
@@ -4473,7 +4473,7 @@ mod test {
         /// packetize/depacketize round-trip for Single NAL, AP, and FU packet types.
         #[test]
         fn test_h265_sdp_driven_donl_all_packet_types() -> Result<()> {
-            use crate::format::FormatParams;
+            use crate::vendor::str0m::format::FormatParams;
 
             // Step 1: Parse SDP fmtp line with sprop-max-don-diff > 0
             let fmtp = FormatParams::parse_line("sprop-max-don-diff=32");

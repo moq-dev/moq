@@ -1,5 +1,5 @@
 use super::{chunk_forward_tsn::NEW_CUMULATIVE_TSN_LENGTH, chunk_header::*, chunk_type::*, *};
-use alloc::string::ToString;
+use std::string::ToString;
 
 /// I-FORWARD-TSN chunk (RFC 8260).
 ///
