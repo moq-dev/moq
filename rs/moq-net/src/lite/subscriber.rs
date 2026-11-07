@@ -5270,6 +5270,7 @@ mod tests {
 			subscriber,
 			path: Path::from_static("room"),
 			instance: None,
+			node: 0,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
