@@ -402,6 +402,11 @@ class Reader implements ResumeSource {
 	#delivered = new Delivered();
 	/** Runs the serving copy gave up and the reader has yet to report; see {@link #tryDrop}. */
 	#drops: DropRun[] = [];
+	/**
+	 * The stale runs reported since the last {@link reofferStale}, whichever copy gave them up: an
+	 * update reopens each, and the copy that reported it may no longer serve.
+	 */
+	#reportedStale: Run[] = [];
 	/** A copy that declared the track's end ran out cleanly at it, even if since let go. */
 	#settled = false;
 	/** Whether groups were ever asked for; until then the reader keeps no replaced copy. */
@@ -713,6 +718,36 @@ class Reader implements ResumeSource {
 		return holding;
 	}
 
+	/**
+	 * Fresh reads of the groups in `[start, end)` the serving copy still caches and judges fresh,
+	 * handed out as any group of that copy is, and the runs still given up: all of them while no
+	 * copy serves. Mirrors the Rust `Reader::reoffer_groups`.
+	 */
+	reofferGroups(start: bigint, end: bigint): { groups: GroupConsumer[]; givenUp: Run[] } {
+		const serving = this.#serving();
+		if (!serving) return { groups: [], givenUp: [{ start, end }] };
+		const { groups, givenUp } = hooks.reofferGroups(serving.sub, start, end);
+		return { groups: groups.map((group) => this.#handOut(serving, group)), givenUp };
+	}
+
+	/**
+	 * Take back every stale run: those queued here, those this reader reported, and those the
+	 * serving copy reported, which its cursor owes again. What this reader reported counts
+	 * whichever copy gave it up, since a route change since leaves the serving copy knowing
+	 * nothing of it, though the update reopened it. Only the serving copy is judged again: a
+	 * replaced copy may no longer deliver, so what it gave up is the new route's to deliver or
+	 * give up. Mirrors the Rust `Reader::reoffer_stale`.
+	 */
+	reofferStale(): Run[] {
+		const taken = this.#reportedStale;
+		this.#reportedStale = [];
+		for (const run of this.#drops) if (run.stale !== undefined) insertRun(taken, run.start, run.end);
+		this.#drops = this.#drops.filter((run) => run.stale === undefined);
+		const serving = this.#serving();
+		if (serving) for (const run of hooks.reofferStale(serving.sub)) insertRun(taken, run.start, run.end);
+		return taken;
+	}
+
 	cachedGroup(sequence: bigint, from = 0): GroupConsumer | undefined {
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
@@ -853,11 +888,22 @@ class Reader implements ResumeSource {
 		if (this.#closed) return undefined;
 		const serving = this.#serving();
 		if (serving) {
+			// A received stale run queued here that new terms superseded since is unknown again: the
+			// copy no longer holds it, and its upstream re-offers or drops it again.
+			for (const run of this.#drops) {
+				if (!run.received) continue;
+				const held = hooks.staleHeld(serving.sub, run.start, run.end);
+				for (const gap of runGaps(held, run.start, run.end))
+					this.#drops = removeRun(this.#drops, gap.start, gap.end);
+			}
 			for (let dropped = hooks.tryDrop(serving.sub); dropped; dropped = hooks.tryDrop(serving.sub)) {
 				// A route failing is no verdict: another route may still deliver the group, and
 				// one it failed while buffered is handed out to continue through its recovery.
 				if (routeFailed(dropped.error)) continue;
-				this.#drops = insertDrop(this.#drops, dropped.start, dropped.end, dropped.error);
+				// A stale run the copy holds came from its upstream, which new terms may supersede.
+				const received =
+					dropped.stale !== undefined && hooks.staleHeld(serving.sub, dropped.start, dropped.end).length > 0;
+				this.#drops = insertDrop(this.#drops, dropped.start, dropped.end, { ...dropped, received });
 			}
 		}
 		this.#drops = this.#drops.filter((run) => !delivered.covers(run.start, run.end));
@@ -875,7 +921,10 @@ class Reader implements ResumeSource {
 				if (open) {
 					// Report once without marking it delivered: a late fill may still land.
 					this.#drops = removeRun(this.#drops, open.start, open.end);
-					return { kind: "drop", ...open, error: run.error };
+					if (run.stale !== undefined) insertRun(this.#reportedStale, open.start, open.end);
+					// A skip or final drop is final, so no update reopens a stale report it replaced.
+					else this.#reportedStale = removeRun(this.#reportedStale, open.start, open.end);
+					return { kind: "drop", ...open, error: run.error, skip: run.skip, stale: run.stale };
 				}
 			}
 		}
@@ -1178,6 +1227,11 @@ class Reader implements ResumeSource {
 
 	#handOut(copy: Copy, group: GroupConsumer): GroupConsumer {
 		this.#newest = max(this.#newest ?? 0n, group.sequence);
+		// The group won over any stale report on it, whichever copy made it, so no update reopens
+		// it.
+		if (this.#reportedStale.length > 0) {
+			this.#reportedStale = removeRun(this.#reportedStale, group.sequence, group.sequence + 1n);
+		}
 		// Another copy holding the group, now or once it lands there, is where a failure continues
 		// it, so it stays while the group is read; see #backs. Recorded even with one copy, since a
 		// later route's copy may come to hold it.

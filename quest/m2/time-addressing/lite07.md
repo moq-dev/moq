@@ -20,8 +20,8 @@ Decided 2026-10-25 (maintainer), from the spike:
   instead of resetting it, which changes the draft's reset rule for those
   groups (around line 760).
 - SUBSCRIBE and SUBSCRIBE_UPDATE bounds, SUBSCRIBE_OK's largest and its Range
-  Starts, SUBSCRIBE_STARTED, SUBSCRIBE_FINISH, and SUBSCRIBE_DROP address by
-  start. Datagrams keep their own sequence (maintainer, 2026-11-01). Drops
+  Starts, SUBSCRIBE_STARTED, SUBSCRIBE_FINISH, SUBSCRIBE_SKIP, and SUBSCRIBE_DROP
+  address by start. Datagrams keep their own sequence (maintainer, 2026-11-01). Drops
   name time spans with no group to deliver, not sequence ranges. `Relative(n)`
   stays a group count.
 - Positions stay (start, frame index), preserving transport frame offsets.
@@ -55,7 +55,8 @@ SUBSCRIBE anchors).
 
 Public API: none beyond [the model](/quest/m2/time-addressing/model.md).
 Wire: lite-07-wip GROUP, GROUP_END, SUBSCRIBE, SUBSCRIBE_UPDATE,
-SUBSCRIBE_OK, SUBSCRIBE_STARTED, SUBSCRIBE_FINISH, and SUBSCRIBE_DROP change.
+SUBSCRIBE_OK, SUBSCRIBE_STARTED, SUBSCRIBE_FINISH, SUBSCRIBE_SKIP, and
+SUBSCRIBE_DROP change.
 
 ## Required
 

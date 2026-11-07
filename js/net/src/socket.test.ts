@@ -164,7 +164,7 @@ test("a track session skips dropped groups and keeps the next message", async ()
 	const { local, remote } = await track();
 	const reader = remote.consumer.ordered();
 	const reading = reader.readFrame();
-	hooks.dropTrackGroups(local.producer, 0n, 1n, new NotFound("message unavailable"));
+	hooks.dropTrackGroups(local.producer, 0n, 1n, { error: new NotFound("message unavailable") });
 	const group = local.producer.createGroup(1n);
 	group.writeFrame(bytes(7));
 	group.finish();
@@ -482,7 +482,7 @@ for (const dropped of [false, true]) {
 		const producer = answer.accept();
 		const stream = await acceptance;
 		const reading = stream.consumer.readFrame();
-		if (dropped) hooks.dropTrackGroups(producer, 0n, 1n, new NotFound("TCP group unavailable"));
+		if (dropped) hooks.dropTrackGroups(producer, 0n, 1n, { error: new NotFound("TCP group unavailable") });
 		producer.finish();
 		await expect(reading).rejects.toBeInstanceOf(NotFound);
 		expect(await stream.producer.closed).toBeInstanceOf(NotFound);

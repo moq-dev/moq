@@ -124,9 +124,10 @@ Added 2026-11-06: `js/net`'s flate tail-shed test, which timed out in a
 merge-queue batch, one child.
 
 Added 2026-11-06 (maintainer's standing rule that flakes join this epic):
-`js/net`'s datagram-end close case, which failed
-[moq-dev/moq#7986](https://github.com/moq-dev/moq/pull/7986)'s Check while
-reproducing on unchanged `main`.
+`js/net`'s datagram end-before-close case, one child. It failed
+[moq-dev/moq#7986](https://github.com/moq-dev/moq/pull/7986)'s and
+[moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670)'s checks and
+reproduces on unchanged `main`; both quarantined it.
 
 Public API: none. Wire: none.
 
@@ -135,5 +136,5 @@ Public API: none. Wire: none.
 - [Flate's tail-shed test passes under load](/quest/m0/test-flakes-2/flate-tail-shed.md) - `js/net`'s compressed tail-shed cases finish within bun's timeout under load, re-enabled once fixed
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
+- [datagram-tracks' end-before-close case passes under load](/quest/m0/test-flakes-2/datagram-end-close.md) - every draft's end survives the session close that follows it in loaded multi-file runs, and the quarantine comes off
 - [The Python audio playout-delay test reads its frames](/quest/m0/test-flakes-2/audio-playout-delay.md) - `test_audio_consumer_reports_its_playout_delay` stops timing out on its first read in the merge queue
-- [The datagram-end close test survives load](/quest/m0/test-flakes-2/datagram-end-close.md) - `a session close right after a datagram track's end keeps the end` stops aborting the track under load and is re-enabled
