@@ -198,7 +198,10 @@ impl Lines {
 			.iter()
 			.filter_map(|(key, stream)| Some((*key, stream.upgrade()?)))
 			.collect();
-		let mut open: Vec<_> = listed.into_iter().map(|(key, stream)| (stream.read().rank, key, stream)).collect();
+		let mut open: Vec<_> = listed
+			.into_iter()
+			.map(|(key, stream)| (stream.read().rank, key, stream))
+			.collect();
 		// Sorted highest first, so the lowest pops off the end.
 		open.sort_by_key(|(rank, key, _)| Reverse((*rank, *key)));
 		for rank in owed {

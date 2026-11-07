@@ -7677,15 +7677,12 @@ impl GroupServe {
 		}
 		// The current rank, so a move while parked applies to the stream as it opens.
 		let _ = self.rank.poll_moved(waiter);
-		let stream = match ready!(
-			self.session
-				.poll_open_group(
-					&mut self.open,
-					waiter,
-					self.rank.options(),
-					self.version.encode_stream_code(&StreamError::TooFarBehind),
-				)
-		) {
+		let stream = match ready!(self.session.poll_open_group(
+			&mut self.open,
+			waiter,
+			self.rank.options(),
+			self.version.encode_stream_code(&StreamError::TooFarBehind),
+		)) {
 			Ok(stream) => stream,
 			Err(err) => {
 				self.state = GroupState::Done;
