@@ -8,7 +8,6 @@ import {
 	type Getter,
 	getter,
 	type Inputs,
-	Once,
 	type Readonlys,
 	race,
 	readonlys,
@@ -601,17 +600,9 @@ export class Encoder {
 					} finally {
 						frame.close();
 					}
-					// A cosmetic frame must never hold the next enable or final close behind a codec
+					// A cosmetic frame must never hold the next enable or track close behind a codec
 					// flush. The old codec is closed below even if the browser never settles it.
-					const resumed = new Once<true>();
-					const unwatch = this.in.enabled.subscribe((enabled) => {
-						if (enabled && resumed.peek() === undefined) resumed.set(true);
-					});
-					try {
-						await race([encoder.flush().catch(() => {}), resumed, this.#signals.closed]);
-					} finally {
-						unwatch();
-					}
+					await race([encoder.flush().catch(() => {}), Signal.race(this.in.enabled), effect.closed]);
 				}
 			} finally {
 				if (encoder.state !== "closed") encoder.close();

@@ -1186,7 +1186,7 @@ async function installRecording() {
 	};
 }
 
-for (const stop of ["resume", "close"] as const) {
+for (const stop of ["resume", "close", "detach"] as const) {
 	test(`a stalled final black frame cannot block ${stop}`, async () => {
 		using recording = await installRecording();
 		const enabled = new Signal(true);
@@ -1199,10 +1199,15 @@ for (const stop of ["resume", "close"] as const) {
 			join: new Signal(undefined),
 			close: () => {},
 		};
+		const broadcast = new Signal<Broadcast | undefined>({
+			video: () => rendition,
+			order: new Order(),
+			join: new Signal(undefined),
+		} as never);
 		const encoder = new Encoder("video", {
 			enabled,
 			capture: recording.capture as never,
-			broadcast: { video: () => rendition, order: new Order(), join: new Signal(undefined) } as never,
+			broadcast,
 		});
 		const pending = Promise.withResolvers<void>();
 		const closed = spyOn(RecordingVideoEncoder.prototype, "close");
@@ -1216,6 +1221,7 @@ for (const stop of ["resume", "close"] as const) {
 			expect(flush).toHaveBeenCalledTimes(1);
 			const before = closed.mock.calls.length;
 			if (stop === "close") encoder.close();
+			else if (stop === "detach") broadcast.set(undefined);
 			else enabled.set(true);
 			await settle();
 			expect(closed.mock.calls.length).toBeGreaterThan(before);
