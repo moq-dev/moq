@@ -148,6 +148,23 @@ test("Cluster: the setup options round trip", async () => {
 	expect(Cluster.fromSetup(new SetupOptions(), VERSION)).toBeUndefined();
 });
 
+test("Cluster: a 64-bit Hop ID reads as unknown", () => {
+	// The draft allows the full vi64 range and peers pick one at random; one past 62 bits
+	// still negotiates, just without an identity.
+	for (const wide of [1n << 62n, (1n << 64n) - 1n]) {
+		const params = new SetupOptions();
+		params.setVarint(SetupOption.HopId, wide);
+		expect(Cluster.fromSetup(params, VERSION)).toBe(UNKNOWN_HOP);
+	}
+});
+
+test("Cluster: a 64-bit HOP_PATH entry reads as unknown", () => {
+	// Hand-built, since our encoder stops at 62 bits: 0xff then 8 bytes of 2^63.
+	const params = new Parameters();
+	params.hopPath = new Uint8Array([0x07, 0xff, 0x80, 0, 0, 0, 0, 0, 0, 0, 0x09]);
+	expect(Cluster.fromParams(params).hops).toEqual([origin(7n), UNKNOWN_HOP, origin(9n)]);
+});
+
 test("Cluster: HOP_ID is a bare varint", async () => {
 	// The key sits at delta 0x40b54 from the start of the block and the value follows it
 	// directly: a length byte here would make us unreadable to every -01 peer.
