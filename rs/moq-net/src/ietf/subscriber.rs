@@ -4593,15 +4593,20 @@ impl SubscribeOnce {
 			// An absolute feed starts where it asked, whatever the answer's Largest; a
 			// live join's starts there.
 			let from = live.sent_bounds.0.filter(|_| !self.live);
-			match largest {
+			let answered = match largest {
 				// A feed ending before the answer's Largest never shows it, so the
 				// answer alone makes the copy current. A live join's feed is open.
 				Some(largest) if !self.live && live.sent_bounds.1.is_some_and(|end| end <= largest.group) => {
 					track.set_live_ahead(largest, from)
 				}
 				largest => track.set_live(largest, from),
-			}
+			};
 			live.resuming = None;
+			// An answer behind the copy's cache fails it.
+			if let Err(err) = answered {
+				tracing::warn!(%err, "subscribe ok behind the cache");
+				return Poll::Ready(ServeEnd::Invalid(err));
+			}
 		}
 		// The last subscriber left: the upstream subscription goes with it, as on
 		// lite, and the copy lingers for fetches and a returning subscriber.
