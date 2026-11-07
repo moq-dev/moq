@@ -336,7 +336,7 @@ impl Producer {
 	}
 
 	/// Whether the window still lists new rows: it has not ended, failed, or been cut.
-	pub fn lists(&self) -> bool {
+	pub(crate) fn lists(&self) -> bool {
 		self.state.read().live()
 	}
 
