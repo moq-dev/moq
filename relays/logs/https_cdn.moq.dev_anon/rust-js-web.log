@@ -1,17 +1,15 @@
 [page] negotiated protocol: moq-lite-06
 [page] announced: prefix=
+[page] announce: prefix=
+[page] announced: broadcast=alluno/comms/4defd109-b88c-4900-8c00-e409f1cb7e6e/b767c775-2ef2-492f-b8b6-d0827cce48d3/~fc8zzgihu6i0 active=true
+[page] announced: broadcast=alluno/host/4defd109-b88c-4900-8c00-e409f1cb7e6e active=true
 [page] announced: broadcast=blume-town-sp-node active=true
 [page] announced: broadcast=lcb-6853991-d2ee.hang active=true
-[page] announced: broadcast=sightline/dk-f101a0ffda55cc18/accord-f56h/camera.hang active=true
-[page] announced: broadcast=sightline/dk-f101a0ffda55cc18/frostdemon98-nesg/camera.hang active=true
-[page] announced: broadcast=sightline/dk-f101a0ffda55cc18/riot-e32d/camera.hang active=true
-[page] announced: broadcast=sightline/dk-f101a0ffda55cc18/riot-kn46/camera.hang active=true
-[page] announced: broadcast=sightline/dk-f101a0ffda55cc18/satanclaus-70c0/camera.hang active=true
-[page] announced: broadcast=smoke-rust-5042-32120.hang active=true
-[page] subscribe start: id=0 broadcast=smoke-rust-5042-32120.hang track=catalog.json
-[page] announce: prefix=
-[page] subscribe ok: id=0 broadcast=smoke-rust-5042-32120.hang track=catalog.json
-[page] received catalog hang smoke-rust-5042-32120.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=1 broadcast=smoke-rust-5042-32120.hang track=0.avc3
-[page] subscribe ok: id=1 broadcast=smoke-rust-5042-32120.hang track=0.avc3
-decoded 8 frames from smoke-rust-5042-32120.hang (vite)
+[page] announced: broadcast=smoke-rust-4952-12222.hang active=true
+[page] subscribe start: id=0 broadcast=smoke-rust-4952-12222.hang track=catalog.json
+[page] subscribe ok: id=0 broadcast=smoke-rust-4952-12222.hang track=catalog.json
+[page] received catalog hang smoke-rust-4952-12222.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=1 broadcast=smoke-rust-4952-12222.hang track=0.avc3
+[page] subscribe ok: id=1 broadcast=smoke-rust-4952-12222.hang track=0.avc3
+[page] skipping slow groups: track=0.avc3 0 -> 1 count=1
+decoded 24 frames from smoke-rust-4952-12222.hang (vite)
