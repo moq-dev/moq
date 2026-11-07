@@ -6,7 +6,11 @@ import { type Delay, Sync } from "./sync";
 // Effects in @moq/signals flush on a microtask, so let pending updates drain before asserting.
 const flush = () => yieldNow();
 
-describe("delay and buffer", () => {
+describe("delay and lookahead", () => {
+	it("refuses the renamed buffer input", () => {
+		expect(() => new Sync({ buffer: 1000 } as never)).toThrow("`buffer` was renamed to `lookahead`");
+	});
+
 	it("holds no lookahead by default", async () => {
 		const sync = new Sync();
 		await flush();
@@ -14,7 +18,7 @@ describe("delay and buffer", () => {
 		sync.close();
 	});
 
-	it("caps maxDelay at the delay when no buffer is configured", async () => {
+	it("caps maxDelay at the delay when no lookahead is configured", async () => {
 		const sync = new Sync({ delay: 100 as Milli });
 		await flush();
 		expect(sync.out.buffered.peek()).toBe(false);
@@ -23,39 +27,39 @@ describe("delay and buffer", () => {
 		sync.close();
 	});
 
-	it("adds the buffer on top of the delay", async () => {
-		// The buffer is measured from the live edge, so it does not swallow the delay: a frame may
-		// sit `delay + buffer` ahead of the playhead before playback skips forward.
-		const sync = new Sync({ delay: 100 as Milli, buffer: 30_000 as Milli });
+	it("adds the lookahead on top of the delay", async () => {
+		// The lookahead is measured from the live edge, so it does not swallow the delay: a frame may
+		// sit `delay + lookahead` ahead of the playhead before playback skips forward.
+		const sync = new Sync({ delay: 100 as Milli, lookahead: 30_000 as Milli });
 		await flush();
 		expect(sync.out.buffered.peek()).toBe(true);
 		expect(sync.out.maxDelay.peek()).toBe(30_100 as Milli);
 		sync.close();
 	});
 
-	it("stays unbuffered for a zero buffer", async () => {
-		const sync = new Sync({ delay: 200 as Milli, buffer: 0 as Milli });
+	it("stays unbuffered for a zero lookahead", async () => {
+		const sync = new Sync({ delay: 200 as Milli, lookahead: 0 as Milli });
 		await flush();
 		expect(sync.out.buffered.peek()).toBe(false);
 		expect(sync.out.maxDelay.peek()).toBe(200 as Milli);
 		sync.close();
 	});
 
-	it("reacts to a buffer set after construction", async () => {
-		const buffer = new Signal<Milli>(0 as Milli);
-		const sync = new Sync({ delay: 100 as Milli, buffer });
+	it("reacts to a lookahead set after construction", async () => {
+		const lookahead = new Signal<Milli>(0 as Milli);
+		const sync = new Sync({ delay: 100 as Milli, lookahead });
 		await flush();
 		expect(sync.out.buffered.peek()).toBe(false);
 
-		buffer.set(30_000 as Milli);
+		lookahead.set(30_000 as Milli);
 		await flush();
 		expect(sync.out.buffered.peek()).toBe(true);
 		expect(sync.out.maxDelay.peek()).toBe(30_100 as Milli);
 		sync.close();
 	});
 
-	it("holds nothing when instant, whatever the buffer says", async () => {
-		const sync = new Sync({ delay: "instant", buffer: 30_000 as Milli });
+	it("holds nothing when instant, whatever the lookahead says", async () => {
+		const sync = new Sync({ delay: "instant", lookahead: 30_000 as Milli });
 		await flush();
 		expect(sync.out.instant.peek()).toBe(true);
 		expect(sync.out.buffered.peek()).toBe(false);
@@ -189,7 +193,7 @@ describe("wait", () => {
 		await flush();
 		expect(Bun.peek.status(parked)).toBe("pending");
 
-		// A frame 10s newer, with no buffer, skips the playhead past the parked one.
+		// A frame 10s newer, with no lookahead, skips the playhead past the parked one.
 		video.received(Milli(timestamp + 10_000));
 		expect(await parked).toBe(false);
 		expect(await video.wait(timestamp)).toBe(false);
@@ -280,7 +284,7 @@ describe("skip floor", () => {
 		video.received(Milli(1000), Milli(5000));
 		expect(video.presentable(Milli(0))).toBe(true);
 
-		// A startup burst with no buffer: audio 50ms newer skips the playhead to 950ms.
+		// A startup burst with no lookahead: audio 50ms newer skips the playhead to 950ms.
 		video.received(Milli(1050), Milli(5000));
 		expect(video.presentable(Milli(1000))).toBe(true);
 		expect(video.presentable(Milli(949))).toBe(false);
@@ -345,7 +349,7 @@ describe("buffered startup", () => {
 		it(`waits for both spans when ${first} fills first`, async () => {
 			const clock = new Manual();
 			const installed = clock.install();
-			const sync = new Sync({ delay: Milli(100), buffer: Milli(1000) });
+			const sync = new Sync({ delay: Milli(100), lookahead: Milli(1000) });
 			const spans = {
 				audio: new Signal<{ start: Milli; end: Milli } | null>(null),
 				video: new Signal<{ start: Milli; end: Milli } | null>(null),
@@ -384,7 +388,7 @@ describe("buffered startup", () => {
 	it("releases startup waits on abort, reset, and close without starting playback", async () => {
 		const clock = new Manual();
 		const installed = clock.install();
-		const sync = new Sync({ delay: Milli(100), buffer: Milli(1000) });
+		const sync = new Sync({ delay: Milli(100), lookahead: Milli(1000) });
 		const video = sync.track({ target: new Signal(Milli(100)), startup: new Signal(null) });
 		try {
 			await clock.advance(Nano.zero);
@@ -410,8 +414,8 @@ describe("buffered startup", () => {
 	it("removes a disabled track from the floor and leaves live pacing unchanged", async () => {
 		const clock = new Manual();
 		const installed = clock.install();
-		const buffer = new Signal(Milli(1000));
-		const sync = new Sync({ delay: Milli(100), buffer });
+		const lookahead = new Signal(Milli(1000));
+		const sync = new Sync({ delay: Milli(100), lookahead });
 		const absent = new Signal<{ start: Milli; end: Milli } | null | undefined>(null);
 		const remove = sync.track({ target: new Signal(Milli(100)), startup: absent });
 		const video = sync.track({
@@ -426,7 +430,7 @@ describe("buffered startup", () => {
 			absent.set(undefined);
 			await clock.advance(Nano.zero);
 			expect(await video.wait(Milli(0))).toBe(true);
-			buffer.set(Milli.zero);
+			lookahead.set(Milli.zero);
 			sync.reset();
 			absent.set(null);
 			await clock.advance(Nano.zero);
@@ -541,7 +545,7 @@ describe("tracks", () => {
 	});
 
 	it("keeps the playhead where buffered startup put it when the owner leaves", async () => {
-		const sync = new Sync({ delay: Milli(100), buffer: Milli(1000) });
+		const sync = new Sync({ delay: Milli(100), lookahead: Milli(1000) });
 		const audioSpan = new Signal<{ start: Milli; end: Milli } | null>(null);
 		const videoSpan = new Signal<{ start: Milli; end: Milli } | null>(null);
 		const audio = sync.track({ target: target(), startup: audioSpan });
