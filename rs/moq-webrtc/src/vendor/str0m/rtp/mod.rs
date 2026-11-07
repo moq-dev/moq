@@ -1,6 +1,6 @@
 mod id;
 pub(crate) use id::MidRid;
-pub use id::{Mid, Pt, Rid, SeqNo, SessionId, Ssrc, TwccClusterId, TwccSeq};
+pub use id::{Mid, Pt, Rid, SeqNo, SessionId, Ssrc, TwccSeq};
 
 mod seq_no_window;
 pub(crate) use seq_no_window::SeqNoWindow;
@@ -28,9 +28,6 @@ mod rtcp;
 pub use rtcp::*;
 
 pub use crate::vendor::str0m_proto::{Bitrate, DataSize};
-
-// Max in the RFC 3550 is 255 bytes, we limit it to be modulus 16 for SRTP and to match libWebRTC
-pub const MAX_BLANK_PADDING_PAYLOAD_SIZE: usize = 240;
 
 /// Errors that can arise in RTP.
 mod error;

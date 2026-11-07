@@ -41,7 +41,6 @@ pub struct RtcConfig {
 	pub(crate) codec_config: CodecConfig,
 	pub(crate) exts: ExtensionMap,
 	pub(crate) intervals: RtcpReportIntervals,
-	pub(crate) bwe_config: Option<BweConfig>,
 	pub(crate) reordering_size_audio: usize,
 	pub(crate) reordering_size_video: usize,
 	pub(crate) reordering_timeout_audio: Option<Duration>,
@@ -55,11 +54,6 @@ pub struct RtcConfig {
 	pub(crate) vp9_packetizer_mode: Vp9PacketizerMode,
 	pub(crate) snap_enabled: bool,
 	pub(crate) mtu: RangeInclusive<usize>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct BweConfig {
-	pub(crate) initial_bitrate: Bitrate,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -438,38 +432,6 @@ impl RtcConfig {
 		self.intervals.video
 	}
 
-	/// Enables estimation of available bandwidth (BWE).
-	///
-	/// None disables the BWE. This is an estimation of the send bandwidth, not receive.
-	///
-	/// This includes setting the initial estimate to start with.
-	pub fn enable_bwe(mut self, initial_estimate: Option<Bitrate>) -> Self {
-		match initial_estimate {
-			Some(b) => {
-				let conf = self.bwe_config.get_or_insert(BweConfig::new(b));
-				conf.initial_bitrate = b;
-			}
-			None => {
-				self.bwe_config = None;
-			}
-		}
-
-		self
-	}
-
-	/// The initial bitrate as set by [`Self::enable_bwe()`].
-	///
-	/// ```ignore
-	/// # use crate::vendor::str0m::Rtc;
-	/// let config = Rtc::builder();
-	///
-	/// // Defaults to None - BWE off.
-	/// assert_eq!(config.bwe_initial_bitrate(), None);
-	/// ```
-	pub fn bwe_initial_bitrate(&self) -> Option<Bitrate> {
-		self.bwe_config.as_ref().map(|c| c.initial_bitrate)
-	}
-
 	/// Sets the number of packets held back for reordering audio packets.
 	///
 	/// Str0m tries to deliver the frames in order. This number determines how many
@@ -611,9 +573,7 @@ impl RtcConfig {
 	/// For video, this buffer is used for more than for audio. First, a call to `write()` often
 	/// results in multiple RTP packets since large frames don't fit in one payload. That means
 	/// the buffer must be at least as large to hold all those packets. Second, when the remote
-	/// requests resends (NACK), those are fulfilled from this buffer. Third, for Bandwidth
-	/// Estimation (BWE), when probing for available bandwidth, packets from this buffer are used
-	/// to do "spurious resends", i.e. we do resends for packets that were not asked for.
+	/// requests resends (NACK), those are fulfilled from this buffer.
 	pub fn set_send_buffer_video(mut self, size: usize) -> Self {
 		self.send_buffer_video = size;
 		self
@@ -823,12 +783,6 @@ impl RtcConfig {
 	}
 }
 
-impl BweConfig {
-	fn new(initial_bitrate: Bitrate) -> Self {
-		Self { initial_bitrate }
-	}
-}
-
 impl Default for RtcConfig {
 	fn default() -> Self {
 		Self {
@@ -846,7 +800,6 @@ impl Default for RtcConfig {
 				audio: Duration::from_secs(5),
 				video: Duration::from_secs(1),
 			},
-			bwe_config: None,
 			reordering_size_audio: 15,
 			reordering_size_video: 30,
 			reordering_timeout_audio: Some(Duration::from_secs(1)),

@@ -10,9 +10,6 @@ mod time_tricks;
 pub(crate) use time_tricks::{InstantExt, SystemTimeExt, not_happening};
 pub(crate) use time_tricks::{already_happened, epoch_to_beginning};
 
-mod average;
-pub(crate) use average::MovingAverage;
-
 pub(crate) trait Soonest {
 	fn soonest(self, other: Self) -> Self;
 }

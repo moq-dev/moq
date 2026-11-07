@@ -320,26 +320,6 @@ impl Default for SeqNo {
 	}
 }
 
-/// Probe cluster identifier for bandwidth estimation.
-///
-/// Used to tag TWCC packets as belonging to a specific probe cluster,
-/// enabling analysis of probe results when feedback arrives.
-///
-/// Uses u64 to avoid wrap-around in long-running connections.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub struct TwccClusterId(u64);
-num_id!(TwccClusterId, u64);
-
-impl TwccClusterId {
-	/// Increase (mutate) this cluster ID and return the previous value.
-	#[inline(always)]
-	pub fn inc(&mut self) -> TwccClusterId {
-		let n = TwccClusterId(self.0);
-		self.0 = self.0.wrapping_add(1);
-		n
-	}
-}
-
 impl Pt {
 	/// Create a PT with a specific value.
 	///

@@ -33,11 +33,6 @@ mod send_stats;
 
 pub(crate) use send::{DEFAULT_RTX_CACHE_DURATION, DEFAULT_RTX_RATIO_CAP};
 
-pub(crate) struct StreamTimeoutConfig<'a> {
-	pub(crate) codecs: &'a CodecConfig,
-	pub(crate) intervals: RtcpReportIntervals,
-}
-
 /// Packet of RTP data.
 ///
 /// As emitted by [`Event::RtpPacket`][crate::vendor::str0m::Event::RtpPacket] when using rtp mode.
@@ -97,27 +92,6 @@ pub struct StreamPaused {
 	pub paused: bool,
 }
 
-/// 255 is out of range for a real PT, which is 7 bit.
-const BLANK_PACKET_DEFAULT_PT: Pt = Pt::new_with_value(255);
-
-impl RtpPacket {
-	fn blank() -> RtpPacket {
-		RtpPacket {
-			seq_no: 0.into(),
-			time: MediaTime::from_90khz(0),
-			header: RtpHeader {
-				payload_type: BLANK_PACKET_DEFAULT_PT,
-				..Default::default()
-			},
-			payload: Arc::default(), // This payload is never used. See RtpHeader::create_padding_packet
-			vp8_patch: None,
-			nackable: false,
-			last_sender_info: None,
-			timestamp: already_happened(),
-		}
-	}
-}
-
 /// Holder of incoming/outgoing encoded streams.
 ///
 /// Each encoded stream is uniquely identified by an SSRC. The concept of mid/rid sits on the Media
@@ -137,10 +111,6 @@ pub(crate) struct Streams {
 	/// All outgoing encoded streams.
 	streams_tx: HashMap<Ssrc, StreamTx>,
 
-	/// Non-media padding source. Its sequence counter survives media changes.
-	probe_tx: StreamTx,
-	probe_media: Option<(Mid, Pt)>,
-
 	/// Local SSRC used before we got any StreamTx. This is used for RTCP if we don't
 	/// have any reasonable value to use.
 	default_ssrc_tx: Ssrc,
@@ -149,12 +119,6 @@ pub(crate) struct Streams {
 	/// list that we don't want to allocate on every handle_timeout.
 	mids_to_report: Vec<Mid>,
 
-	/// Whether periodic statistics reports are expected to be generated. This informs us on
-	/// whether we should be holding onto data needed for those reports or not.
-
-	/// Threshold above which an outgoing RTP packet triggers an MTU warning. Used as a
-	/// hard cap when selecting RTX cache entries for spurious padding.
-	mtu_warn: usize,
 	pause_threshold: Duration,
 }
 
@@ -172,17 +136,14 @@ struct RxLookup {
 }
 
 impl Streams {
-	pub(crate) fn new(mtu_warn: usize, pause_threshold: Duration) -> Self {
+	pub(crate) fn new(pause_threshold: Duration) -> Self {
 		Self {
 			streams_rx: Default::default(),
 			rx_lookup: Default::default(),
 			last_rx_lookup_cleanup: already_happened(),
 			streams_tx: Default::default(),
-			probe_tx: StreamTx::new_probe(mtu_warn),
-			probe_media: None,
 			default_ssrc_tx: 0.into(), // this will be changed
 			mids_to_report: Vec::with_capacity(10),
-			mtu_warn,
 			pause_threshold,
 		}
 	}
@@ -324,7 +285,7 @@ impl Streams {
 	pub fn declare_stream_tx(&mut self, ssrc: Ssrc, rtx: Option<Ssrc>, midrid: MidRid) -> &mut StreamTx {
 		self.streams_tx
 			.entry(ssrc)
-			.or_insert_with(|| StreamTx::new(ssrc, rtx, midrid, self.mtu_warn))
+			.or_insert_with(|| StreamTx::new(ssrc, rtx, midrid))
 	}
 
 	pub fn remove_stream_tx(&mut self, ssrc: Ssrc) -> bool {
@@ -417,11 +378,9 @@ impl Streams {
 		sender_ssrc: Ssrc,
 		do_nack: bool,
 		medias: &[Media],
-		config: StreamTimeoutConfig<'_>,
+		intervals: RtcpReportIntervals,
 		feedback: &mut VecDeque<Rtcp>,
 	) {
-		let StreamTimeoutConfig { codecs, intervals } = config;
-
 		self.mids_to_report.clear(); // Clear for checking StreamRx.
 		for stream in self.streams_rx.values() {
 			if stream.need_rr(now, intervals) {
@@ -460,10 +419,9 @@ impl Streams {
 				stream.create_sr_and_update(now, feedback);
 			}
 
-			// Finding the first (main) PT that also has RTX for the Media is expensive,
-			// this closure is run only when needed.
+			// Finding the Media is only needed on the first timeout.
 			// The unwrap is okay because we cannot have StreamTx with a Mid without the corresponding Media.
-			let get_media = move || (medias.iter().find(|m| m.mid() == mid).unwrap(), codecs);
+			let get_media = move || medias.iter().find(|m| m.mid() == mid).unwrap();
 
 			stream.handle_timeout(now, get_media);
 		}
@@ -591,55 +549,11 @@ impl Streams {
 		}
 	}
 
-	/// Bind the probe source only while a cluster is authorized. Changing the
-	/// binding drops queued padding but preserves the SSRC's SRTP sequence.
-	pub(crate) fn set_probe_media(&mut self, media: Option<(Mid, Pt)>) {
-		if media == self.probe_media {
-			return;
-		}
-		self.probe_tx.reset_buffers();
-		if let Some((mid, pt)) = media {
-			self.probe_tx.set_probe_media(mid, pt);
-		}
-		self.probe_media = media;
-	}
-
-	pub(crate) fn send_queue_states(
-		&mut self,
-		now: Instant,
-		mut can_probe: impl FnMut(Mid, Pt) -> bool,
-	) -> impl Iterator<Item = QueueState> {
-		// Snapshot each stream once, preferring media/RTX padding over the
-		// fallback. No extra stream or retransmission-queue scan is needed.
-		let mut media_padding = false;
-		let mut probe_queue = self.probe_media.map(|_| {
-			let mut queue = self.probe_tx.queue_state(now);
-			queue.midrid = MidRid(MID_PROBE, None);
-			queue
-		});
-		let mut streams = self.streams_tx.values_mut();
-		std::iter::from_fn(move || {
-			if let Some(stream) = streams.next() {
-				let mut queue = stream.queue_state(now);
-				if probe_queue.is_some() && queue.use_for_padding {
-					// Only negotiated feedback sources can provide probe padding.
-					// Ordinary padding keeps its existing eligibility.
-					queue.use_for_padding = stream.padding_pt().is_some_and(|pt| can_probe(stream.mid(), pt));
-				}
-				media_padding |= queue.use_for_padding;
-				return Some(queue);
-			}
-			let mut queue = probe_queue.take()?;
-			queue.use_for_padding = !media_padding;
-			Some(queue)
-		})
+	pub(crate) fn send_queue_states(&mut self, now: Instant) -> impl Iterator<Item = QueueState> {
+		self.streams_tx.values_mut().map(move |stream| stream.queue_state(now))
 	}
 
 	pub(crate) fn stream_tx_by_midrid(&mut self, midrid: MidRid) -> Option<&mut StreamTx> {
-		if midrid == MidRid(MID_PROBE, None) {
-			self.probe_media?;
-			return Some(&mut self.probe_tx);
-		}
 		self.streams_tx.values_mut().find(|s| s.is_midrid(midrid))
 	}
 

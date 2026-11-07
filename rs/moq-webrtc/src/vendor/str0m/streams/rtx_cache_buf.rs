@@ -224,15 +224,6 @@ impl<T> EvictingBuffer<T> {
 		}
 	}
 
-	pub fn contains(&self, position: u64) -> bool {
-		if self.is_inert() {
-			return false;
-		}
-
-		let index = self.index_for_position(position);
-		self.buf[index].is_some()
-	}
-
 	pub fn last_position(&self) -> Option<u64> {
 		if self.is_inert() {
 			return None;

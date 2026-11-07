@@ -35,7 +35,7 @@ mod fir;
 pub use fir::{Fir, FirEntry};
 
 mod twcc;
-pub use twcc::{Twcc, TwccPacketId, TwccRecvRegister, TwccSendRecord, TwccSendRegister};
+pub use twcc::{Twcc, TwccRecvRegister};
 
 mod rtcpfb;
 pub use rtcpfb::RtcpFb;

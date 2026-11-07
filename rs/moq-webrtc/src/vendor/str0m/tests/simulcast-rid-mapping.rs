@@ -10,7 +10,6 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use crate::vendor::netem::{GilbertElliot, NetemConfig, Probability, RandomLoss};
-use crate::vendor::str0m::bwe::Bitrate;
 use crate::vendor::str0m::change::{SdpAnswer, SdpOffer};
 use crate::vendor::str0m::format::Codec;
 use crate::vendor::str0m::media::{Direction, Frequency, MediaKind, MediaTime, Mid, Rid};
@@ -23,8 +22,8 @@ use common::{Peer, TestRtc, init_crypto_default, init_log, progress};
 /// Layer rids with the frame size sent on each.
 const LAYERS: [(&str, usize); 3] = [("l", 300), ("m", 1_500), ("h", 6_000)];
 
-/// (RTX negotiated, BWE enabled on the sender).
-const PEER_CONFIGS: [(bool, bool); 4] = [(true, false), (false, false), (true, true), (false, true)];
+/// Whether RTX is negotiated.
+const PEER_CONFIGS: [bool; 2] = [true, false];
 
 const SIGNALLING: [Signalling; 3] = [
 	Signalling::MediaInFirstOffer,
@@ -130,9 +129,9 @@ fn simulcast_send_as_answerer() -> Result<(), RtcError> {
 
 #[test]
 fn simulcast_rid_mapping_loopback() -> Result<(), RtcError> {
-	for (rtx, bwe) in PEER_CONFIGS {
+	for rtx in PEER_CONFIGS {
 		for signalling in SIGNALLING {
-			assert_all_rids_mapped(Duration::ZERO, NetemConfig::new(), rtx, bwe, signalling)?;
+			assert_all_rids_mapped(Duration::ZERO, NetemConfig::new(), rtx, signalling)?;
 		}
 	}
 	Ok(())
@@ -140,10 +139,10 @@ fn simulcast_rid_mapping_loopback() -> Result<(), RtcError> {
 
 #[test]
 fn simulcast_rid_mapping_latency() -> Result<(), RtcError> {
-	for (rtx, bwe) in PEER_CONFIGS {
+	for rtx in PEER_CONFIGS {
 		for signalling in SIGNALLING {
 			let latency = Duration::from_millis(25);
-			assert_all_rids_mapped(latency, NetemConfig::new(), rtx, bwe, signalling)?;
+			assert_all_rids_mapped(latency, NetemConfig::new(), rtx, signalling)?;
 		}
 	}
 	Ok(())
@@ -152,7 +151,7 @@ fn simulcast_rid_mapping_latency() -> Result<(), RtcError> {
 #[test]
 fn simulcast_rid_mapping_sweep() -> Result<(), RtcError> {
 	for seed in 0..10 {
-		for (rtx, bwe) in PEER_CONFIGS {
+		for rtx in PEER_CONFIGS {
 			for signalling in SIGNALLING {
 				let impairments = [
 					NetemConfig::new().jitter(Duration::from_millis(10)).seed(seed),
@@ -168,7 +167,7 @@ fn simulcast_rid_mapping_sweep() -> Result<(), RtcError> {
 				];
 				for impairment in impairments {
 					let latency = Duration::from_millis(30);
-					assert_all_rids_mapped(latency, impairment, rtx, bwe, signalling)?;
+					assert_all_rids_mapped(latency, impairment, rtx, signalling)?;
 				}
 			}
 		}
@@ -237,21 +236,13 @@ fn assert_all_rids_mapped(
 	latency: Duration,
 	impairment: NetemConfig,
 	rtx: bool,
-	bwe: bool,
 	signalling: Signalling,
 ) -> Result<(), RtcError> {
 	let netem = impairment.latency(latency);
 	init_log();
 	init_crypto_default();
 
-	let mut l = TestRtc::new_with_config(Peer::Left, |c| {
-		let c = vp8_only(c, rtx);
-		if bwe {
-			c.enable_bwe(Some(Bitrate::kbps(2_500)))
-		} else {
-			c
-		}
-	});
+	let mut l = TestRtc::new_with_config(Peer::Left, |c| vp8_only(c, rtx));
 	let mut r = TestRtc::new_with_config(Peer::Right, |c| vp8_only(c, rtx));
 
 	l.add_host_candidate((Ipv4Addr::new(1, 1, 1, 1), 1000).into());
@@ -286,7 +277,7 @@ fn assert_all_rids_mapped(
 
 	send_frames(&mut l, &mut r, mid, &all, Duration::from_secs(5))?;
 
-	let context = format!("rtx: {rtx}, bwe: {bwe}, {signalling:?}, netem: {netem:?}");
+	let context = format!("rtx: {rtx}, {signalling:?}, netem: {netem:?}");
 	assert_rids_delivered(&mut r, mid, &all, 0, &context);
 
 	Ok(())

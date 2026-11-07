@@ -32,8 +32,6 @@ pub struct QueueSnapshot {
 pub enum QueuePriority {
 	// Highest, priority for a queue that contains media.
 	Media = 0,
-	// Priority for a queue that only contains padding.
-	Padding = 1,
 	// Priority for an empty queue.
 	#[default]
 	Empty = 2,
@@ -71,18 +69,7 @@ impl Default for QueueSnapshot {
 #[derive(Debug, Clone, Copy)]
 pub struct QueueState {
 	pub midrid: MidRid,
-	pub unpaced: bool,
-	pub use_for_padding: bool,
 	pub snapshot: QueueSnapshot,
-}
-
-/// A request to generate a specific amount of padding.
-#[derive(Debug, Clone, Copy)]
-pub struct PaddingRequest {
-	/// The Mid that should generate and queue the padding.
-	pub midrid: MidRid,
-	/// The amount of padding in bytes to generate.
-	pub padding: usize,
 }
 
 impl QueueSnapshot {

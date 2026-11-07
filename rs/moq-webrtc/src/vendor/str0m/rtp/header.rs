@@ -1,7 +1,7 @@
 #![allow(clippy::unusual_byte_groupings)]
 
 use super::ext::{ExtensionMap, ExtensionValues, ExtensionsForm};
-use super::{MAX_BLANK_PADDING_PAYLOAD_SIZE, Pt, SeqNo, Ssrc};
+use super::{Pt, SeqNo, Ssrc};
 use tracing::{trace, warn};
 
 /// Parsed header from an RTP packet.
@@ -77,38 +77,6 @@ impl RtpHeader {
 		buf[ext_start + 2..ext_start + 4].copy_from_slice(&bede_len.to_be_bytes());
 
 		ext_start + 4 + ext_len
-	}
-
-	fn do_pad(buf: &mut [u8], from: usize, pad: usize) {
-		assert!(pad <= 255);
-
-		// set the padding bit
-		buf[0] |= 0b00_1_0_0000;
-
-		for i in 0..pad {
-			buf[from + i] = 0;
-		}
-
-		buf[from + pad - 1] = pad as u8;
-	}
-
-	/// Write a packet consisting entirely of padding and write.
-	pub fn create_padding_packet(buf: &mut [u8], header_len: usize, pad_len: u8, block_size: usize) -> usize {
-		if pad_len == 0 {
-			warn!("Not generating padding packet with zero length");
-			return 0;
-		}
-
-		let rounded_len = if (pad_len as usize).is_multiple_of(block_size) {
-			pad_len as usize
-		} else {
-			((pad_len as usize / block_size) + 1) * block_size
-		}
-		.min(MAX_BLANK_PADDING_PAYLOAD_SIZE);
-
-		Self::do_pad(buf, header_len, rounded_len);
-
-		rounded_len
 	}
 
 	/// Returns `buf` with any trailing SRTP padding removed, or `None` if the
@@ -405,27 +373,6 @@ mod test {
 		let expected = u64::MAX - (max - seq);
 		assert_eq!(extend_u15(Some(0), seq as u16), expected);
 	}
-
-	#[test]
-	fn test_generate_one_length_padding_packet() {
-		let mut buf = vec![6; 255];
-		RtpHeader::create_padding_packet(&mut buf, 10, 1, 16);
-
-		let mut expected = vec![0; 16];
-		expected[15] = 16;
-		assert_eq!(&buf[10..26], &expected);
-	}
-
-	// version: 2,
-	// has_padding: false,
-	// has_extension: true,
-	// marker: false,
-	// payload_type: 1.into(),
-	// sequence_number: 0,
-	// timestamp: 0,
-	// ssrc: 0.into(),
-	// ext_vals: ExtensionValues::default(),
-	// header_len: 16,
 
 	#[test]
 	fn test_write_rtp_headers() {

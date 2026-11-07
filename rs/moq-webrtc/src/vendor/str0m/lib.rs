@@ -289,8 +289,7 @@
 //! Some calls in str0m, such as `Rtc::handle_input` takes a `now` argument
 //! that is a `std::time::Instant`. These calls "drive the time forward" in
 //! the internal state. This is used for everything like deciding when
-//! to produce various feedback reports (RTCP) to remote peers, to
-//! bandwidth estimation (BWE) and statistics.
+//! to produce various feedback reports (RTCP) to remote peers.
 //!
 //! Str0m has _no internal clock_ calls. I.e. str0m never calls
 //! `Instant::now()` itself. All time is external input. That means it's
@@ -575,7 +574,7 @@
 //! | Data Channels            | :white_check_mark: | :white_check_mark: |
 //! | Send/Recv Reports        | :white_check_mark: | :white_check_mark: |
 //! | Transport Wide CC        | :white_check_mark: | :white_check_mark: |
-//! | Bandwidth Estimation     | :white_check_mark: | :white_check_mark: |
+//! | Bandwidth Estimation     | :x:                | :white_check_mark: |
 //! | Simulcast                | :white_check_mark: | :white_check_mark: |
 //! | NACK                     | :white_check_mark: | :white_check_mark: |
 //! | Packetize                | :white_check_mark: | :white_check_mark: |
@@ -681,7 +680,7 @@
 #![deny(missing_docs)]
 
 use crate::vendor::str0m_proto::Pii;
-use bwe::{Bwe, BweKind};
+use bwe::BweKind;
 use change::{DirectApi, SdpApi};
 use rtp::RawPacket;
 use std::fmt;
@@ -814,12 +813,23 @@ pub mod rtp {
 
 pub(crate) mod pacer;
 
-#[path = "bwe/mod.rs"]
-pub(crate) mod bwe_;
-
-/// Bandwidth estimation.
+/// Bitrates the remote peer asks for.
 pub mod bwe {
-	pub use crate::vendor::str0m::bwe_::api::*;
+	pub use crate::vendor::str0m::rtp_::Bitrate;
+	use crate::vendor::str0m::rtp_::Mid;
+
+	/// Bandwidth estimation kind.
+	#[derive(Debug, PartialEq)]
+	#[non_exhaustive]
+	pub enum BweKind {
+		/// REMB (Receiver Estimated Maximum Bitrate)
+		Remb {
+			/// Bitrate reported by the remote receiver.
+			estimate: Bitrate,
+			/// Media section associated with the report.
+			mid: Mid,
+		},
+	}
 }
 
 mod sctp;
@@ -1003,7 +1013,7 @@ pub enum Event {
 
     // =================== BWE related events ===================
 
-    /// A new estimate from the bandwidth estimation subsystem.
+    /// A bitrate the remote peer asked for.
     EgressBitrateEstimate(BweKind),
 
     // =================== RTP related events ===================
@@ -1037,12 +1047,6 @@ pub enum Event {
     /// This clones data, and is therefore expensive.
     /// Should not be enabled outside of tests and troubleshooting.
     RawPacket(Box<RawPacket>),
-
-    /// For internal testing only.
-    ///
-    /// The probe cluster config when a probe fires.
-    #[cfg(test)]
-    Probe(crate::vendor::str0m::bwe_::ProbeClusterConfig),
 }
 
 impl Event {
@@ -1154,15 +1158,6 @@ pub enum Reason {
 
 	/// Pacer doing things.
 	Pacer(PacerReason),
-
-	/// The delay controller of the BWE subsystem.
-	BweDelayControl,
-
-	/// The probe controller of the BWE subsystem.
-	BweProbeControl,
-
-	/// The probe estimator of the BWE subsystem.
-	BweProbeEstimator,
 }
 
 impl Rtc {
@@ -2132,13 +2127,6 @@ impl Rtc {
 		}
 
 		Some(Channel::new(sctp_stream_id, self))
-	}
-
-	/// Configure the Bandwidth Estimate (BWE) subsystem.
-	///
-	/// Only relevant if BWE was enabled in the [`RtcConfig::enable_bwe()`]
-	pub fn bwe(&mut self) -> Bwe {
-		Bwe::new(self)
 	}
 
 	fn is_correct_change_id(&self, change_id: usize) -> bool {

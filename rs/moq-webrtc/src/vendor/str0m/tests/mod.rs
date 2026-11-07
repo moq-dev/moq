@@ -4,8 +4,6 @@
 mod abs_capture_time;
 #[path = "api-errors.rs"]
 mod api_errors;
-#[path = "audio-inactive-probe.rs"]
-mod audio_inactive_probe;
 mod bidirectional;
 #[path = "change-ssrc-reset-receive.rs"]
 mod change_ssrc_reset_receive;
@@ -104,8 +102,6 @@ mod simulcast_rid_mapping;
 #[path = "srtp-replay-attack.rs"]
 mod srtp_replay_attack;
 mod ssrc_zero_feedback;
-#[path = "ssrc-zero-probe.rs"]
-mod ssrc_zero_probe;
 #[path = "stale-network-time-after-pause.rs"]
 mod stale_network_time_after_pause;
 #[path = "stream-lifecycle.rs"]

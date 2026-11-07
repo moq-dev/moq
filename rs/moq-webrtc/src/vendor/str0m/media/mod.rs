@@ -677,15 +677,6 @@ impl Media {
 		self.remote_created
 	}
 
-	pub(crate) fn first_pt_with_rtx(&self, config: &CodecConfig) -> Option<Pt> {
-		config
-			.all_for_kind(self.kind, false)
-			// Only consider negotiated PTs
-			.filter(|p| self.remote_pts.contains(&p.pt))
-			// Map to the first PT found in payload params with RTX
-			.find_map(|p| p.resend().map(|_| p.pt))
-	}
-
 	pub(crate) fn reset_depayloaders_for_rid(&mut self, rid: Option<Rid>) {
 		// A replacement SSRC can use any negotiated payload type for this RID.
 		self.depayloaders.retain(|(_, existing_rid), _| *existing_rid != rid);

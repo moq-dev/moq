@@ -1,14 +1,12 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use super::Pacer;
-use super::PaddingRequest;
 use super::QueueState;
 use crate::vendor::str0m::Reason;
 use crate::vendor::str0m::pacer::PacerReason;
-use crate::vendor::str0m::rtp_::{Bitrate, DataSize, MidRid, TwccClusterId};
+use crate::vendor::str0m::rtp_::{DataSize, MidRid};
 
-/// A null pacer that doesn't pace.
+/// A pacer that doesn't pace: it drains every queue, least recently sent first.
 #[derive(Debug, Default)]
 pub struct NullPacer {
 	last_sends: HashMap<MidRid, Instant>,
@@ -20,30 +18,24 @@ pub struct NullPacer {
 	unsent_since: Option<Instant>,
 }
 
-impl Pacer for NullPacer {
-	fn set_pacing_rate(&mut self, _padding_bitrate: Bitrate) {
-		// We don't care
-	}
-
-	fn set_padding_rate(&mut self, _padding_bitrate: Bitrate) {
-		// We don't care
-	}
-	fn poll_timeout(&self) -> (Option<Instant>, Reason) {
+impl NullPacer {
+	/// Poll for a timeout.
+	pub fn poll_timeout(&self) -> (Option<Instant>, Reason) {
 		// Only a poll that sent nothing needs a fresh snapshot: other queued packets go
 		// out on the next poll. New media requests a timeout, and receiving a NACK
 		// refreshes the snapshot through Rtc::handle_input before polling resumes.
 		(self.unsent_since, Reason::Pacer(PacerReason::Handle))
 	}
 
-	fn handle_timeout(&mut self, _now: Instant, iter: impl Iterator<Item = QueueState>) -> Option<PaddingRequest> {
+	/// Take fresh snapshots of the send queues, as asked for by [`Self::poll_timeout`].
+	pub fn handle_timeout(&mut self, _now: Instant, iter: impl Iterator<Item = QueueState>) {
 		self.unsent_since = None;
 		self.queue_states.clear();
 		self.queue_states.extend(iter);
-
-		None
 	}
 
-	fn poll_queue(&mut self) -> Option<(MidRid, Option<TwccClusterId>)> {
+	/// Determines which queue to poll, if any.
+	pub fn poll_queue(&mut self) -> Option<MidRid> {
 		// Pick a queue using round robin, prioritize the least recently sent on queue.
 		let queue = self
 			.queue_states
@@ -54,10 +46,13 @@ impl Pacer for NullPacer {
 		queue.snapshot.packet_count -= 1;
 		self.unsent_since = Some(queue.snapshot.created_at);
 
-		Some((queue.midrid, None))
+		Some(queue.midrid)
 	}
 
-	fn register_send(&mut self, now: Instant, _packet_size: DataSize, from: MidRid) {
+	/// Register a packet having been sent.
+	///
+	/// **MUST** be called each time [`Self::poll_queue`] produces a mid.
+	pub fn register_send(&mut self, now: Instant, _packet_size: DataSize, from: MidRid) {
 		self.unsent_since = None;
 		let e = self.last_sends.entry(from).or_insert(now);
 		*e = now;
@@ -72,8 +67,6 @@ mod test {
 	fn queue(mid: &str, packet_count: u32, now: Instant) -> QueueState {
 		QueueState {
 			midrid: MidRid(mid.into(), None),
-			unpaced: true,
-			use_for_padding: false,
 			snapshot: QueueSnapshot {
 				created_at: now,
 				packet_count,
@@ -91,7 +84,7 @@ mod test {
 
 		let mut sent = vec![];
 		for _ in 0..3 {
-			let (midrid, _) = pacer.poll_queue().expect("queued packet");
+			let midrid = pacer.poll_queue().expect("queued packet");
 			pacer.register_send(now, DataSize::bytes(100), midrid);
 			assert_eq!(pacer.poll_timeout().0, None, "no timeout between sends");
 			sent.push(midrid.mid().to_string());
@@ -113,7 +106,7 @@ mod test {
 
 		pacer.handle_timeout(now, [queue("b", 1, now)].into_iter());
 		assert_eq!(pacer.poll_timeout().0, None);
-		let (midrid, _) = pacer.poll_queue().expect("remaining packet");
+		let midrid = pacer.poll_queue().expect("remaining packet");
 		assert_eq!(midrid, MidRid("b".into(), None));
 		pacer.register_send(now, DataSize::bytes(100), midrid);
 		assert_eq!(pacer.poll_queue(), None);
@@ -129,6 +122,6 @@ mod test {
 		pacer.register_send(later, DataSize::bytes(100), MidRid("b".into(), None));
 		pacer.handle_timeout(later, [queue("a", 1, later), queue("b", 1, later)].into_iter());
 
-		assert_eq!(pacer.poll_queue(), Some((MidRid("a".into(), None), None)));
+		assert_eq!(pacer.poll_queue(), Some(MidRid("a".into(), None)));
 	}
 }

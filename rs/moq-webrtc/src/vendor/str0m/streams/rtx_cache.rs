@@ -1,40 +1,27 @@
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::vendor::str0m::io::DATAGRAM_MAX_PACKET_SIZE;
 use crate::vendor::str0m::rtp_::SeqNo;
 
 use super::RtpPacket;
 use super::rtx_cache_buf::EvictingBuffer;
 
-const RTX_CACHE_SIZE_QUANTIZER: usize = 25;
-const RTX_CACHE_QUANTIZE_SLOTS: usize = DATAGRAM_MAX_PACKET_SIZE / RTX_CACHE_SIZE_QUANTIZER;
-
 #[derive(Debug)]
 pub(crate) struct RtxCache {
 	// Data, new additions here probably need to be cleared in [`clear`].
 	packet_by_seq_no: EvictingBuffer<RtpPacket>,
-
-	// Technically we want [Option<SeqNo>; X] to indicate the absence of
-	// a SeqNo. However We can half the storage space by using the sentinel
-	// values SeqNo::MAX to indicate None
-	seq_no_by_quantized_size: [SeqNo; RTX_CACHE_QUANTIZE_SLOTS],
 }
 
 impl RtxCache {
 	pub fn new(max_packet_count: usize, max_packet_age: Duration) -> Self {
 		Self {
 			packet_by_seq_no: EvictingBuffer::new(10, max_packet_age, max_packet_count),
-			seq_no_by_quantized_size: [SeqNo::MAX; RTX_CACHE_QUANTIZE_SLOTS],
 		}
 	}
 
 	pub fn cache_sent_packet(&mut self, packet: RtpPacket, now: Instant) {
 		assert!(packet.nackable);
-		let seq_no = packet.seq_no;
-		let quantized_size = packet.payload.len() / RTX_CACHE_SIZE_QUANTIZER;
-		self.packet_by_seq_no.push(*seq_no, now, packet);
-		self.seq_no_by_quantized_size[quantized_size] = seq_no;
+		self.packet_by_seq_no.push(*packet.seq_no, now, packet);
 		self.remove_old_packets(now);
 	}
 
@@ -44,18 +31,6 @@ impl RtxCache {
 
 	pub fn get_cached_packet_by_seq_no(&mut self, seq_no: SeqNo) -> Option<&mut RtpPacket> {
 		self.packet_by_seq_no.get_mut(*seq_no)
-	}
-
-	pub fn get_cached_packet_smaller_than(&mut self, max_size: usize) -> Option<&mut RtpPacket> {
-		let quantized_size = max_size / RTX_CACHE_SIZE_QUANTIZER;
-
-		let seq_no = self.seq_no_by_quantized_size[..quantized_size]
-			.iter()
-			.rev()
-			.filter(|seq_no| !seq_no.is_max())
-			.find(|seq_no| self.packet_by_seq_no.contains(***seq_no))?;
-
-		self.get_cached_packet_by_seq_no(*seq_no)
 	}
 
 	fn remove_old_packets(&mut self, now: Instant) {
@@ -69,7 +44,6 @@ impl RtxCache {
 
 	pub(crate) fn clear(&mut self) {
 		self.packet_by_seq_no.clear();
-		self.seq_no_by_quantized_size = [SeqNo::MAX; RTX_CACHE_QUANTIZE_SLOTS];
 	}
 }
 
@@ -106,10 +80,6 @@ mod test {
 			Some(&mut packet(now, 1, 10)),
 			rtx_cache.get_cached_packet_by_seq_no(1.into())
 		);
-		assert_eq!(
-			Some(&mut packet(now, 1, 10)),
-			rtx_cache.get_cached_packet_smaller_than(1000)
-		);
 	}
 
 	#[test]
@@ -118,7 +88,6 @@ mod test {
 		let mut rtx_cache = RtxCache::new(10, Duration::from_secs(0));
 		rtx_cache.cache_sent_packet(packet(now, 1, 10), after(now, 10));
 		assert_eq!(None, rtx_cache.get_cached_packet_by_seq_no(1.into()));
-		assert_eq!(None, rtx_cache.get_cached_packet_smaller_than(1000));
 	}
 
 	#[test]
@@ -130,15 +99,6 @@ mod test {
 			Some(&mut packet(now, 1, 10)),
 			rtx_cache.get_cached_packet_by_seq_no(1.into())
 		);
-		assert_eq!(
-			Some(&mut packet(now, 1, 10)),
-			rtx_cache.get_cached_packet_smaller_than(1000)
-		);
-		assert_eq!(
-			Some(&mut packet(now, 1, 10)),
-			rtx_cache.get_cached_packet_smaller_than(25)
-		);
-		assert_eq!(None, rtx_cache.get_cached_packet_smaller_than(24));
 		rtx_cache.cache_sent_packet(packet(now, 2, 20), after(now, 20));
 		assert_eq!(
 			Some(&mut packet(now, 2, 20)),

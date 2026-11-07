@@ -18,8 +18,8 @@
 //! `Rtc` holds no knowledge of which mutation affects what.
 //!
 //! The app-facing API wrappers ([`DirectApi`][crate::vendor::str0m::change::DirectApi],
-//! [`SdpApi`][crate::vendor::str0m::change::SdpApi], [`Channel`][crate::vendor::str0m::channel::Channel],
-//! [`Bwe`][crate::vendor::str0m::bwe::Bwe]) hold an [`RtcMut`] instead of `&mut Rtc`. It arms
+//! [`SdpApi`][crate::vendor::str0m::change::SdpApi], [`Channel`][crate::vendor::str0m::channel::Channel])
+//! hold an [`RtcMut`] instead of `&mut Rtc`. It arms
 //! the readiness on *mutable* deref only, so a `&mut self` method that mutates
 //! re-polls the tree while a `&self` reader never does — and neither has to
 //! remember to call anything.
@@ -235,60 +235,6 @@ impl Readiness {
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	use crate::vendor::str0m::bwe::Bitrate;
-	use crate::vendor::str0m::crypto::dtls::{KeyingMaterial, SrtpProfile};
-	use crate::vendor::str0m::media::MediaKind;
-	use crate::vendor::str0m::{Input, Output};
-	use std::time::Instant;
-
-	fn idle_rtc() -> Rtc {
-		let now = Instant::now();
-		let mut rtc = Rtc::builder().enable_bwe(Some(Bitrate::kbps(300))).build(now);
-		let profile = SrtpProfile::AEAD_AES_128_GCM;
-		let mat = KeyingMaterial::new(&vec![0; profile.keying_material_len()]);
-		rtc.session.set_keying_material(
-			mat,
-			crate::vendor::str0m::crypto::test_default_provider(),
-			profile,
-			true,
-		);
-		rtc.direct_api().declare_media("vid".into(), MediaKind::Video);
-		rtc.direct_api().declare_stream_tx(42.into(), None, "vid".into(), None);
-		rtc.handle_input(Input::Timeout(now)).unwrap();
-		while !matches!(rtc.poll_output().unwrap(), Output::Timeout(_)) {}
-		assert!(!rtc.readiness.wants_events());
-		assert!(!rtc.readiness.wants_timeout());
-		rtc
-	}
-
-	#[test]
-	fn readiness_bwe_set_bitrate_only_wakes_timeout() {
-		let mut rtc = idle_rtc();
-		rtc.bwe().set_bitrate(Bitrate::kbps(100), Bitrate::mbps(2));
-		assert!(!rtc.readiness.wants_events());
-		assert!(rtc.readiness.wants_timeout());
-		assert!(
-			rtc.session.poll_event().is_none(),
-			"no hidden event behind the narrowed flag"
-		);
-		let expected = rtc.poll_timeout();
-		assert!(matches!(rtc.poll_output().unwrap(), Output::Timeout(at) if at == expected));
-	}
-
-	#[test]
-	fn readiness_bwe_reset_only_wakes_timeout() {
-		let mut rtc = idle_rtc();
-		rtc.bwe().reset(Bitrate::kbps(900));
-		assert!(!rtc.readiness.wants_events());
-		assert!(rtc.readiness.wants_timeout());
-		assert!(
-			rtc.session.poll_event().is_none(),
-			"reset produces estimates on a later timeout"
-		);
-		let expected = rtc.poll_timeout();
-		assert!(matches!(rtc.poll_output().unwrap(), Output::Timeout(at) if at == expected));
-	}
 
 	#[test]
 	fn narrowing_preserves_other_operations() {

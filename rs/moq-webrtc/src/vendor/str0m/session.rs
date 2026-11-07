@@ -6,7 +6,6 @@ use tracing::{debug, trace, warn};
 
 use crate::vendor::str0m::Event;
 use crate::vendor::str0m::bwe::BweKind;
-use crate::vendor::str0m::bwe_::Bwe;
 use crate::vendor::str0m::config::KeyingMaterial;
 use crate::vendor::str0m::config_mod::RtcpReportIntervals;
 use crate::vendor::str0m::crypto::CryptoProvider;
@@ -18,8 +17,7 @@ use crate::vendor::str0m::io::DatagramSend;
 use crate::vendor::str0m::media::Media;
 use crate::vendor::str0m::media::{KeyframeRequestKind, MID_PROBE};
 use crate::vendor::str0m::media::{MediaAdded, MediaChanged};
-use crate::vendor::str0m::pacer::PacerControl;
-use crate::vendor::str0m::pacer::{Pacer, PacerImpl};
+use crate::vendor::str0m::pacer::NullPacer;
 use crate::vendor::str0m::packet::{RedBlock, RedDecoder, red_same_pt_blocks};
 use crate::vendor::str0m::poll::Wake;
 use crate::vendor::str0m::rtp::{Extension, RawPacket};
@@ -32,11 +30,11 @@ use crate::vendor::str0m::rtp_::Pt;
 use crate::vendor::str0m::rtp_::SRTCP_OVERHEAD;
 use crate::vendor::str0m::rtp_::SeqNo;
 use crate::vendor::str0m::rtp_::SeqNoWindow;
+use crate::vendor::str0m::rtp_::TwccRecvRegister;
 use crate::vendor::str0m::rtp_::{Bitrate, ExtensionMap, Goodbye, Mid, ReportList, Rtcp, RtcpFb};
-use crate::vendor::str0m::rtp_::{RtpHeader, SessionId, TwccPacketId, extend_u16};
+use crate::vendor::str0m::rtp_::{RtpHeader, SessionId, extend_u16};
 use crate::vendor::str0m::rtp_::{SrtpContext, Ssrc};
-use crate::vendor::str0m::rtp_::{TwccRecvRegister, TwccSendRegister};
-use crate::vendor::str0m::streams::{RtpPacket, StreamTimeoutConfig, Streams};
+use crate::vendor::str0m::streams::{RtpPacket, Streams};
 use crate::vendor::str0m::util::{Soonest, SystemTimeExt, already_happened, not_happening};
 use crate::vendor::str0m::{Reason, net};
 use crate::vendor::str0m::{RtcConfig, RtcError};
@@ -86,17 +84,12 @@ pub(crate) struct Session {
 	last_twcc: Instant,
 	twcc: u64,
 	twcc_rx_register: TwccRecvRegister,
-	twcc_tx_register: TwccSendRegister,
 	max_rx_seq_lookup: HashMap<Ssrc, SeqNoWindow>,
-
-	bwe: Option<Bwe>,
-	bwe_last_event: Option<(Bitrate, bool)>,
 
 	enable_twcc_feedback: bool,
 
-	/// A pacer for sending RTP at specific rate.
-	pacer: PacerImpl,
-	pacer_control: PacerControl,
+	/// Picks which send queue to poll next.
+	pacer: NullPacer,
 
 	// temporary buffer when getting the next (unencrypted) RTP packet from Media line.
 	poll_packet_buf: Vec<u8>,
@@ -122,9 +115,6 @@ pub(crate) struct Session {
 	/// Target MTU (start) and warn threshold (end). Buffer sizing uses the
 	/// target; oversized outgoing datagrams above the warn threshold log a warning.
 	mtu: RangeInclusive<usize>,
-
-	#[cfg(test)]
-	pending_probe: Option<crate::vendor::str0m::bwe_::ProbeClusterConfig>,
 }
 
 impl Session {
@@ -135,19 +125,10 @@ impl Session {
 		while *id > MAX_ID {
 			id = (*id >> 1).into();
 		}
-		let (pacer, bwe) = if let Some(config) = &config.bwe_config {
-			let rate = config.initial_bitrate;
-			let pacer = PacerImpl::leaky_bucket(rate * 2.0);
-			let bwe = Bwe::new(rate);
-			(pacer, Some(bwe))
-		} else {
-			(PacerImpl::null(), None)
-		};
-
 		Session {
 			id,
 			medias: vec![],
-			streams: Streams::new(*config.mtu.end(), config.pause_threshold),
+			streams: Streams::new(config.pause_threshold),
 			app: None,
 			reordering_size_audio: config.reordering_size_audio,
 			reordering_size_video: config.reordering_size_video,
@@ -168,13 +149,9 @@ impl Session {
 			last_twcc: already_happened(),
 			twcc: 0,
 			twcc_rx_register: TwccRecvRegister::new(100),
-			twcc_tx_register: TwccSendRegister::new(1000),
 			max_rx_seq_lookup: HashMap::new(),
-			bwe,
-			bwe_last_event: None,
 			enable_twcc_feedback: false,
-			pacer,
-			pacer_control: PacerControl::new(),
+			pacer: NullPacer::default(),
 			poll_packet_buf: vec![0; 2000],
 			pending_packet: None,
 			ice_lite: config.ice_lite,
@@ -189,8 +166,6 @@ impl Session {
 				None
 			},
 			mtu: config.mtu.clone(),
-			#[cfg(test)]
-			pending_probe: None,
 		}
 	}
 
@@ -260,10 +235,7 @@ impl Session {
 			sender_ssrc,
 			do_nack,
 			&self.medias,
-			StreamTimeoutConfig {
-				codecs: &self.codec_config,
-				intervals: self.intervals,
-			},
+			self.intervals,
 			&mut self.feedback_tx,
 		);
 
@@ -271,8 +243,7 @@ impl Session {
 			self.last_nack = now;
 		}
 
-		let probe_media = self.handle_timeout_bwe(now);
-		self.update_queue_state(now, probe_media);
+		self.update_queue_state(now);
 
 		if let Some(twcc_at) = self.twcc_at() {
 			if now >= twcc_at {
@@ -283,93 +254,15 @@ impl Session {
 		Ok(())
 	}
 
-	fn handle_timeout_bwe(&mut self, now: Instant) -> Option<(Mid, Pt)> {
-		self.bwe.as_ref()?;
-
-		// We can request probes once SRTP keys are available and a non-stopped,
-		// sending media section has both a transport sequence extension and a
-		// payload type supporting TWCC feedback. No prior media packet or RTX
-		// stream is required. The Direct API uses its configured capabilities.
-		let probe_media = self.srtp_tx.as_ref().and_then(|_| self.probe_media());
-		let do_probe = probe_media.is_some();
-		let bwe = self.bwe.as_mut()?;
-
-		if let Some(probe_config) = bwe.handle_timeout(now, do_probe) {
-			// Only start the probe in the pacer if the estimator accepted it.
-			if bwe.start_probe(probe_config, now) {
-				#[cfg(test)]
-				{
-					self.pending_probe = Some(probe_config);
-				}
-				self.pacer.start_probe(probe_config);
-			}
-		}
-
-		// Check if active probe just completed
-		if let Some(cluster_id) = self.pacer.check_probe_complete(now) {
-			bwe.end_probe(now, cluster_id);
-			self.streams.set_probe_media(None);
-		}
-		probe_media
-	}
-
-	fn update_queue_state(&mut self, now: Instant, probe_media: Option<(Mid, Pt)>) {
-		// Do not make unsendable media/padding ready before DTLS supplies keys.
+	fn update_queue_state(&mut self, now: Instant) {
+		// Do not make unsendable media ready before DTLS supplies keys.
 		// Otherwise an immediate pacer deadline can starve the application's I/O.
 		if self.srtp_tx.is_none() {
 			return;
 		}
 
-		let probe_media = probe_media.filter(|_| self.pacer.active_cluster().is_some());
-		self.streams.set_probe_media(probe_media);
-		let medias = &self.medias;
-		let codecs = &self.codec_config;
-		let iter = self.streams.send_queue_states(now, |mid, pt| {
-			// Reuse the already-validated fallback binding when it matches.
-			probe_media == Some((mid, pt))
-				|| medias
-					.iter()
-					.find(|m| m.mid() == mid)
-					.is_some_and(|media| Self::probe_pt(media, codecs, Some(pt)).is_some())
-		});
-
-		let Some(padding_request) = self.pacer.handle_timeout(now, iter) else {
-			return;
-		};
-
-		let stream = self
-			.streams
-			.stream_tx_by_midrid(padding_request.midrid)
-			.expect("pacer to use an existing stream");
-
-		stream.generate_padding(padding_request.padding);
-	}
-
-	// Use a negotiated PT and MID so browser transports can route the packet to
-	// their receive-side congestion controller before discarding the empty payload.
-	fn probe_media(&self) -> Option<(Mid, Pt)> {
-		self.medias
-			.iter()
-			.find_map(|media| Self::probe_pt(media, &self.codec_config, None).map(|pt| (media.mid(), pt)))
-	}
-
-	// A regular padding source needs feedback for its actual payload type;
-	// the SSRC 0 fallback can use any eligible payload type on this media.
-	fn probe_pt(media: &Media, codecs: &CodecConfig, padding_pt: Option<Pt>) -> Option<Pt> {
-		if media.stopped() || !media.direction().is_sending() {
-			return None;
-		}
-		media.remote_extmap().id_of(Extension::TransportSequenceNumber)?;
-		codecs
-			.params()
-			.iter()
-			.find(|p| {
-				padding_pt.is_none_or(|pt| p.pt() == pt)
-					&& p.fb_transport_cc()
-					&& p.spec().codec.is_audio() == media.kind().is_audio()
-					&& (media.remote_pts().is_empty() || media.remote_pts().contains(&p.pt()))
-			})
-			.map(|p| p.pt())
+		let iter = self.streams.send_queue_states(now);
+		self.pacer.handle_timeout(now, iter);
 	}
 
 	fn create_twcc_feedback(&mut self, sender_ssrc: Ssrc, now: Instant) -> Option<()> {
@@ -814,7 +707,6 @@ impl Session {
 		let unprotected = srtp.unprotect_rtcp(buf)?;
 
 		Rtcp::read_packet(&unprotected, &mut self.feedback_rx);
-		let mut need_configure_pacer = false;
 		let mut may_move_timeout = false;
 
 		if let Some(raw_packets) = &mut self.raw_packets {
@@ -827,17 +719,8 @@ impl Session {
 			may_move_timeout = true;
 
 			if let RtcpFb::Twcc(twcc) = fb {
-				trace!("Handle TWCC: {:?}", twcc);
-				let maybe_records = self.twcc_tx_register.apply_report(twcc, now);
-
-				if let (Some(maybe_records), Some(bwe)) = (maybe_records, &mut self.bwe) {
-					bwe.update(maybe_records, now);
-				}
-				need_configure_pacer = true;
-
-				// The funky thing about TWCC reports is that they are never stapled
-				// together with other RTCP packet. If they were though, we want to
-				// handle more packets.
+				// Without a bandwidth estimator, transport feedback has no consumer.
+				trace!("Ignore TWCC: {:?}", twcc);
 				continue;
 			}
 
@@ -854,12 +737,6 @@ impl Session {
 			}
 		}
 
-		// Not in the above if due to lifetime issues, still okay because the method
-		// doesn't do anything when BWE isn't configured.
-		if need_configure_pacer {
-			self.configure_pacer();
-		}
-
 		if !may_move_timeout {
 			// Also covers empty reports; raw-packet capture only queues events.
 			wake.no_timeout();
@@ -869,30 +746,6 @@ impl Session {
 	}
 
 	pub fn poll_event(&mut self) -> Option<Event> {
-		#[cfg(test)]
-		{
-			if let Some(probe) = self.pending_probe.take() {
-				return Some(Event::Probe(probe));
-			}
-		}
-
-		let can_probe = self.bwe.is_some() && self.srtp_tx.is_some() && self.probe_media().is_some();
-		if let Some(bwe) = &mut self.bwe {
-			// Drain estimates even while unavailable so they cannot be delivered later.
-			let estimate = bwe.poll_estimate();
-			let estimate = match (can_probe, self.bwe_last_event) {
-				(false, Some((last, true))) => Some(last),
-				(false, _) => None,
-				(true, Some((_, true))) => estimate,
-				(true, _) => bwe.last_estimate(),
-			};
-			if let Some(estimate) = estimate {
-				self.bwe_last_event = Some((estimate, can_probe));
-				let kind = BweKind::Twcc { estimate, can_probe };
-				return Some(Event::EgressBitrateEstimate(kind));
-			}
-		}
-
 		// If we're not ready to flow media, don't send any events.
 		if !self.ready_for_srtp() {
 			return None;
@@ -1074,16 +927,13 @@ impl Session {
 		let srtp_tx = self.srtp_tx.as_mut()?;
 
 		// Figure out which, if any, queue to poll
-		// The cluster_id is captured by the pacer at poll time, before register_send() might clear it
-		let (midrid, cluster_id) = self.pacer.poll_queue()?;
+		let midrid = self.pacer.poll_queue()?;
 		let stream = self.streams.stream_tx_by_midrid(midrid)?;
 		let Some(media) = self.medias.iter().find(|m| m.mid() == stream.mid()) else {
 			trace!("Pacer pointed to mid {} which has no media", midrid.mid());
 			return None;
 		};
 		let buf = &mut self.poll_packet_buf;
-		let twcc_seq = self.twcc;
-
 		let params = &self.codec_config;
 		let exts = media.remote_extmap();
 
@@ -1097,18 +947,10 @@ impl Session {
 		let PacketReceipt {
 			header,
 			seq_no,
-			is_padding,
 			payload_size,
 		} = receipt;
 
-		trace!(payload_size, is_padding, "Poll RTP: {:?}", header);
-
-		#[cfg(any())]
-		{
-			let kind = if is_padding { "padding" } else { "media" };
-
-			crate::vendor::str0m::log_stat!("PACKET_SENT", header.ssrc, payload_size, kind);
-		}
+		trace!(payload_size, "Poll RTP: {:?}", header);
 
 		self.pacer.register_send(now, payload_size.into(), midrid);
 
@@ -1117,20 +959,6 @@ impl Session {
 		}
 
 		let protected = srtp_tx.protect_rtp(buf, &header, *seq_no);
-
-		if twcc_enabled {
-			let packet_id = if let Some(cluster) = cluster_id {
-				TwccPacketId::with_cluster(twcc_seq, cluster)
-			} else {
-				TwccPacketId::new(twcc_seq)
-			};
-			self.twcc_tx_register.register_seq(packet_id, now, payload_size);
-		}
-
-		// Update BWE subsystem
-		if let Some(bwe) = self.bwe.as_mut() {
-			bwe.on_media_sent(payload_size.into(), is_padding, now);
-		}
 
 		Some(protected.into())
 	}
@@ -1159,14 +987,6 @@ impl Session {
 		let send_stream_at = self.streams.send_stream();
 		let request_at = self.streams.pending_request();
 
-		// Gives us built-in reason
-		let bwe_at = self
-			.bwe
-			.as_ref()
-			.map(|bwe| bwe.poll_timeout())
-			// We should never see this reason.
-			.unwrap_or((None, Reason::BweDelayControl));
-
 		(feedback_at, Reason::Feedback)
 			.soonest((request_at, Reason::Feedback))
 			.soonest((nack_at, Reason::Nack))
@@ -1176,7 +996,6 @@ impl Session {
 			.soonest((packetize_at, Reason::Packetize))
 			.soonest((paused_at, Reason::PauseCheck))
 			.soonest((send_stream_at, Reason::SendStream))
-			.soonest(bwe_at)
 	}
 
 	pub fn has_mid(&self, mid: Mid) -> bool {
@@ -1218,20 +1037,6 @@ impl Session {
 		}
 	}
 
-	pub fn set_bwe_bitrate(&mut self, minimum: Bitrate, desired: Bitrate) {
-		if let Some(bwe) = self.bwe.as_mut() {
-			bwe.set_bitrate(minimum, desired);
-			self.configure_pacer();
-		}
-	}
-
-	pub fn reset_bwe(&mut self, init_bitrate: Bitrate) {
-		if let Some(bwe) = self.bwe.as_mut() {
-			bwe.reset(init_bitrate);
-			self.configure_pacer();
-		}
-	}
-
 	#[allow(dead_code)]
 	pub fn line_count(&self) -> usize {
 		self.medias.len() + if self.app.is_some() { 1 } else { 0 }
@@ -1248,36 +1053,6 @@ impl Session {
 	pub fn remove_media(&mut self, mid: Mid) {
 		self.medias.retain(|media| media.mid() != mid);
 		self.streams.remove_streams_by_mid(mid);
-	}
-
-	fn configure_pacer(&mut self) {
-		let Some(bwe) = self.bwe.as_mut() else {
-			return;
-		};
-
-		let Some(current_estimate) = bwe.last_estimate() else {
-			// No estimate yet, no padding
-			return;
-		};
-		let is_overuse = bwe.is_overusing();
-		let minimum = bwe.minimum_bitrate();
-
-		let has_active_media = self.has_active_outgoing_media();
-
-		// Calculate pacing and padding rates
-		let result = self
-			.pacer_control
-			.calculate(has_active_media, current_estimate, is_overuse, minimum);
-
-		self.pacer.set_padding_rate(result.padding_rate);
-		self.pacer.set_pacing_rate(result.pacing_rate);
-	}
-
-	fn has_active_outgoing_media(&self) -> bool {
-		// Direct API media has no SDP remote payload list, so Media::disabled()
-		// is not an availability check here. Use the same negotiated/configured
-		// sending capabilities as probing, including TWCC feedback.
-		self.probe_media().is_some()
 	}
 
 	pub fn media_by_mid(&self, mid: Mid) -> Option<&Media> {
@@ -1371,7 +1146,6 @@ impl Session {
 pub struct PacketReceipt {
 	pub header: RtpHeader,
 	pub seq_no: SeqNo,
-	pub is_padding: bool,
 	pub payload_size: usize,
 }
 
