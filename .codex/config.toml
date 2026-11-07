@@ -1,2 +1,0 @@
-[shell_environment_policy.set]
-BASH_ENV = '$HOME/.codex/bash-env.sh'
