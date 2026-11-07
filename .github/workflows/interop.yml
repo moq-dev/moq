@@ -115,6 +115,8 @@ jobs:
           # it, for the report below.
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
           HARNESS_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
+          # A release PR fails, rather than skips, a browser that cannot prove its route key yet.
+          CI_STRICT: ${{ github.event_name == 'pull_request' && '1' || '' }}
 
       # The same matrix with every client pinned to one moq-transport draft per pass. A release
       # PR runs the oldest and newest even draft between Rust and native JS; nightly and manual

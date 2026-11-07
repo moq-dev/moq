@@ -1,6 +1,7 @@
 // Role logic for the browser client: read ?role= and wire up a publisher, the real
 // <moq-watch-ui> player, or a refused session. The Playwright drivers (driver.ts for the interop
-// matrix, media.ts for the media-output and lifecycle checks, close.ts for the close code) poll the
+// matrix, media.ts for the media-output and lifecycle checks, close.ts for the close code,
+// route-key.ts for the route key proof) poll the
 // state each role reports over the console or mirrors onto the DOM.
 import type MoqPublish from "@moq/publish/element";
 import type MoqWatch from "@moq/watch/element";
@@ -18,6 +19,7 @@ import {
 import { finish } from "./finish";
 import { Fixture } from "./fixture";
 import { attach, watchResources } from "./probe";
+import { routeKey } from "./route-key";
 
 const params = new URLSearchParams(location.search);
 const role = params.get("role");
@@ -204,6 +206,9 @@ if (role === "finish-publish" || role === "finish-subscribe") {
 	document.body.dataset.interopClose = JSON.stringify(
 		await (params.get("transport") === "websocket" ? refusedWebSocket(url) : refused(url)),
 	);
+} else if (role === "route-key") {
+	// Mirror why the session ended for route-key.ts, which fails on it: the session has to stay open.
+	document.body.dataset.interopRouteKey = await routeKey(url, params.get("implementation") ?? "").catch(String);
 } else {
-	throw new Error("missing ?role=publish|fixture|subscribe|close");
+	throw new Error("missing ?role=publish|fixture|subscribe|close|route-key");
 }
