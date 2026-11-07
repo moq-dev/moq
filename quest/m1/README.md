@@ -57,6 +57,7 @@ moves what remains of them once their claims merge.
 - [The over-limit PUBLISH refusal invites a retry](/quest/m1/retry-interval-overload.md) - `EXCESSIVE_LOAD` sends the may-pass retry interval, not 0
 - [A relay forwards an upstream refusal's retry interval](/quest/m1/retry-interval-forward.md) - a forwarded SUBSCRIBE refusal keeps the upstream's retry interval
 - [Tests run on a mocked clock](/quest/m1/mock-clock-tests/README.md) - about 300 tests stop proving nothing happened by waiting, sleeping to settle, or asserting on elapsed time
+- [moq-mux reads H.265 SPS without scuffle](/quest/m1/h265-sps-reader.md) - moq-mux's own SPS reader replaces scuffle-h265 and scuffle-expgolomb, and the fuzz regressions still pass
 
 ## Related
 
