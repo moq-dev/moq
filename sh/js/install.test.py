@@ -61,7 +61,7 @@ else:
             self.addCleanup(lambda: os.killpg(recipe.pid, signal.SIGKILL) if recipe.poll() is None else None)
             self.assertEqual(recipe.stdout.readline(), "ready\n")
             test = subprocess.Popen(
-                ["just", "--quiet", "--justfile", "test/justfile", "media"],
+                ["just", "--justfile", "test/justfile", "media"],
                 cwd=root,
                 env=env,
                 stderr=subprocess.PIPE,
@@ -72,6 +72,7 @@ else:
             self.addCleanup(test.stderr.close)
             self.addCleanup(test.stdout.close)
             self.addCleanup(lambda: os.killpg(test.pid, signal.SIGKILL) if test.poll() is None else None)
+            self.assertIn("install.py frozen", test.stderr.readline())
             self.assertEqual(test.stderr.readline(), "waiting for another workspace dependency install\n")
             with (root / "continue").open("w"):
                 pass
@@ -79,7 +80,7 @@ else:
             self.assertEqual(test.wait(), 0)
             self.assertEqual((root / "calls").read_text(), "install\n")
             # Frozen readers reuse the post-update fingerprint as well.
-            subprocess.run(["just", "--quiet", "--justfile", "test/justfile", "media"], cwd=root, env=env, check=True)
+            subprocess.run(["just", "--justfile", "test/justfile", "media"], cwd=root, env=env, check=True)
             self.assertEqual((root / "calls").read_text(), "install\n")
 
 
