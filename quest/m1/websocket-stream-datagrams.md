@@ -9,7 +9,7 @@ socket and proves every one arrives, and qmux is fixed if they don't.
 
 ## Plan
 
-Planned 2026-11-07 (maintainer, /quest-complete) as the follow-up of
+Planned 2026-11-07 (maintainer, /quest-plan of the follow-ups from the /quest-complete run) as the follow-up of
 [moq-dev/moq#8054](https://github.com/moq-dev/moq/pull/8054). Decision prompts:
 
 - ✅ Plan it, goal as stated
