@@ -15,3 +15,7 @@
 Found by the 2026-11-07 invariant audit (qmux-1 to qmux-5); qmux-1 and qmux-2 are reproduced as tests before the redesign.
 
 Decided 2026-11-07 (maintainer, invariant-audit root causes): fix the cause, the hand-rolled flow accounting, rather than patching each early return. Mirror Rust's state shapes and port its credit tests (`credit_returns_for_unread_and_stopped_streams` in `rs/moq-quic/src/connection/mux/tests.rs` among them) so both implementations pin the same invariants. A single implementation for both languages is the longer-term route, planned in [Evaluate WASM-to-JS for @moq/net](/quest/m5/rs2ts-wasm2js.md); this does not wait for it.
+
+## Related
+
+- [js/qmux close](/quest/m1/explicit-state/qmux-close.md) - the session close phase and `recv.ts` stream-end sweep; land the per-stream state machine so both share one stream state
