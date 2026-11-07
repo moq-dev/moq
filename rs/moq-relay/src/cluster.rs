@@ -586,12 +586,11 @@ struct Dialers {
 	stop: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
-struct DialersPhase {
-	/// `None` once closed, which refuses any further dial.
-	open: Option<DialersState>,
-	/// The shutdown the first close started, which every close awaits, so none
-	/// returns before it is done.
-	closing: Option<futures::future::Shared<futures::future::BoxFuture<'static, ()>>>,
+enum DialersPhase {
+	Open(DialersState),
+	/// Closed, which refuses any further dial. The shutdown the first close
+	/// started, which every close awaits, so none returns before it is done.
+	Closing(futures::future::Shared<futures::future::BoxFuture<'static, ()>>),
 }
 
 struct DialersState {
@@ -602,17 +601,20 @@ struct DialersState {
 	closing: kio::Tasks<Child<()>>,
 }
 
+impl DialersState {
+	fn new() -> Self {
+		Self {
+			clients: HashMap::new(),
+			next: 0,
+			closing: kio::Tasks::new(),
+		}
+	}
+}
+
 impl Dialers {
 	fn new() -> Self {
 		Self {
-			state: Arc::new(Mutex::new(DialersPhase {
-				open: Some(DialersState {
-					clients: HashMap::new(),
-					next: 0,
-					closing: kio::Tasks::new(),
-				}),
-				closing: None,
-			})),
+			state: Arc::new(Mutex::new(DialersPhase::Open(DialersState::new()))),
 			stop: Arc::new(tokio::sync::watch::Sender::new(false)),
 		}
 	}
@@ -624,7 +626,9 @@ impl Dialers {
 	/// Keep `client` until [`Self::close`].
 	fn insert(&self, client: &moq_tokio::Client) -> anyhow::Result<u64> {
 		let mut phase = self.lock();
-		let state = phase.open.as_mut().context("cluster closed")?;
+		let DialersPhase::Open(state) = &mut *phase else {
+			anyhow::bail!("cluster closed");
+		};
 		let id = state.next;
 		state.next += 1;
 		state.clients.insert(id, client.clone());
@@ -654,7 +658,7 @@ impl Dialers {
 	/// Advance the closes of clients whose guard dropped. Never resolves the dials'
 	/// lifetime: an empty set is only drained for now.
 	fn poll_closing(&self, waiter: &kio::Waiter) {
-		if let Some(state) = self.lock().open.as_mut() {
+		if let DialersPhase::Open(state) = &mut *self.lock() {
 			let _ = state.closing.poll_each(waiter, |_, res| {
 				if let Err(err) = res {
 					tracing::warn!(%err, "cluster client close failed");
@@ -668,14 +672,15 @@ impl Dialers {
 	async fn close(&self) {
 		let closing = {
 			let mut phase = self.lock();
-			let phase = &mut *phase;
-			phase
-				.closing
-				.get_or_insert_with(|| {
-					let state = phase.open.take().expect("open until the first close");
-					Self::shutdown(state, self.stop.clone()).boxed().shared()
-				})
-				.clone()
+			match &mut *phase {
+				DialersPhase::Closing(closing) => closing.clone(),
+				DialersPhase::Open(state) => {
+					let state = std::mem::replace(state, DialersState::new());
+					let closing = Self::shutdown(state, self.stop.clone()).boxed().shared();
+					*phase = DialersPhase::Closing(closing.clone());
+					closing
+				}
+			}
 		};
 		closing.await;
 	}
@@ -702,7 +707,7 @@ impl Drop for Held {
 	fn drop(&mut self) {
 		let mut phase = self.dialers.lock();
 		// Already taken by `Dialers::close`, which closes the client itself.
-		let Some(state) = phase.open.as_mut() else {
+		let DialersPhase::Open(state) = &mut *phase else {
 			return;
 		};
 		let Some(client) = state.clients.remove(&self.id) else {
@@ -4005,7 +4010,10 @@ mod tests {
 		assert!(format!("{err:#}").contains("cluster token"), "{err:#}");
 		std::fs::write(&token, "secret").expect("write token");
 		let _started = cluster.clone().start().await.expect("a corrected start binds the port");
-		let registered = cluster.dialers.lock().open.as_ref().expect("open").clients.len();
+		let registered = match &*cluster.dialers.lock() {
+			DialersPhase::Open(state) => state.clients.len(),
+			DialersPhase::Closing(_) => panic!("closed"),
+		};
 		assert_eq!(registered, 0, "a start registers its client only once it runs");
 	}
 
@@ -4165,20 +4173,17 @@ mod tests {
 		let dialers = Dialers::new();
 		// Stands in for a dropped guard's close, which holds the shutdown open.
 		let (background, closed) = tokio::sync::oneshot::channel::<()>();
-		dialers
-			.lock()
-			.open
-			.as_mut()
-			.expect("open")
-			.closing
-			.push(Child::new("held close", async move {
+		match &mut *dialers.lock() {
+			DialersPhase::Open(state) => state.closing.push(Child::new("held close", async move {
 				let _ = closed.await;
-			}));
+			})),
+			DialersPhase::Closing(_) => panic!("closed"),
+		}
 		let first = tokio::spawn({
 			let dialers = dialers.clone();
 			async move { dialers.close().await }
 		});
-		while dialers.lock().open.is_some() {
+		while matches!(*dialers.lock(), DialersPhase::Open(_)) {
 			tokio::task::yield_now().await;
 		}
 
