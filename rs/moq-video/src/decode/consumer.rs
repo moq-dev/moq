@@ -487,9 +487,7 @@ mod tests {
 			..EncodeConfig::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		};
 		let rendition = config.probe().await.unwrap();
-		let reserved = source_catalog
-			.reserve()
-			.with_interval(config.effective_join());
+		let reserved = source_catalog.reserve().with_interval(config.effective_join());
 		let mut producer = EncodeProducer::new(source_broadcast, reserved, rendition).unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];

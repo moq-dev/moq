@@ -691,10 +691,7 @@ impl Video {
 		encoder: moq_video::encode::Sink,
 		lower: Option<Id>,
 	) -> Result<Id, Error> {
-		let reserved = target
-			.catalog
-			.reserve()
-			.with_interval(config.effective_join());
+		let reserved = target.catalog.reserve().with_interval(config.effective_join());
 		let ceiling = video_ceiling(config, &rendition);
 		let (lower, priority) = match lower {
 			Some(lower) => {

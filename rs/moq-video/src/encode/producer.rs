@@ -1970,9 +1970,7 @@ mod tests {
 			rendition.kind = encoder::Kind::Software;
 			let mut producer = Producer::with_track(
 				track,
-				catalog
-					.reserve()
-					.with_interval(rendition.effective_join()),
+				catalog.reserve().with_interval(rendition.effective_join()),
 				rendition.probe().await.unwrap(),
 			)
 			.unwrap();
@@ -2028,9 +2026,7 @@ mod tests {
 			rendition.kind = encoder::Kind::Software;
 			let mut producer = Producer::with_track(
 				track,
-				catalog
-					.reserve()
-					.with_interval(rendition.effective_join()),
+				catalog.reserve().with_interval(rendition.effective_join()),
 				rendition.probe().await.unwrap(),
 			)
 			.unwrap();

@@ -228,7 +228,9 @@ fn join(present: bool, us: u64) -> Result<Option<std::time::Duration>, Error> {
 		return Ok(None);
 	}
 	if us == 0 || us > MAX_JOIN_US {
-		return Err(Error::InvalidConfig(format!("join_us must be 1..={MAX_JOIN_US}, got {us}")));
+		return Err(Error::InvalidConfig(format!(
+			"join_us must be 1..={MAX_JOIN_US}, got {us}"
+		)));
 	}
 	Ok(Some(std::time::Duration::from_micros(us)))
 }
