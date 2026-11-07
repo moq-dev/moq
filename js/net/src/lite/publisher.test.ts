@@ -1057,7 +1057,9 @@ test("lite-07 refuses an update retiring an unknown Range ID", async () => {
 // A bounded window that resolves empty has no group to answer it, so the publisher answers it
 // at once. The stream stays open for an update until the subscriber FINs, and the publisher
 // FINs in reply.
-test("lite-07 answers a bounded window that resolves empty and FINs in reply", async () => {
+// Quarantined: a subscriber FIN during the reply write's budget yield resets the stream.
+// Investigation: quest/m0/test-flakes-2/lite07-reply-fin.md.
+test.skip("lite-07 answers a bounded window that resolves empty and FINs in reply", async () => {
 	const version = Version.DRAFT_07;
 	const sub = await servedSubscription({
 		version,

@@ -1,0 +1,38 @@
+name: Cache refresh
+
+# nix.moq.dev's CI bucket expires objects 30 days after upload, and Cache's
+# `nix copy` never re-uploads a path the bucket already has. Restart the age of
+# the newest cached commit's closures daily, so Smoke's pinned commit always
+# substitutes in full, even when nothing merges for weeks.
+permissions:
+  contents: read
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    name: Refresh
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: cache-write
+    permissions:
+      contents: read
+      # Finds the newest successful Cache push run.
+      actions: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      - uses: ./.github/actions/just
+      - name: Refresh the newest cached commit's closures
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.NIX_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.NIX_R2_SECRET_ACCESS_KEY }}
+        run: just gh cache-refresh
