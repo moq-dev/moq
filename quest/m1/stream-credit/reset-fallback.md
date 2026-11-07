@@ -22,11 +22,13 @@ RTT from WebTransport's `getStats()` when it reports one, else `Probe.rtt`
 (as `js/net/src/connection/stats.ts` already falls back), and before any
 sample the maintainer's original 100 ms.
 
+Choose from the session's open group streams: Rust's
+`transport::open::Lines::open_streams` (opened through
+`boxed::Session::poll_open_group`) and JS's `lines(quic).streams`, each lowest
+ranked first with whether the peer has acknowledged it. They report rank and
+acknowledgement only; add the handle that reaches the stream's writer here.
+
 Tests: a cap with no acknowledged stream resets exactly one stream per
 waiting open, and the higher-priority group starts once credit returns.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Open streams](/quest/m1/stream-credit/open-streams.md) - the session's open-stream list to choose the lowest-priority stream from

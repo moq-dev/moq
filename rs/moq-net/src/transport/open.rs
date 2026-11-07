@@ -9,38 +9,59 @@
 //! An open can also wait on something other than credit, such as a WebTransport stream's
 //! header, so the line asks the transport's [`StreamCredit`] whether the peer is what it waits
 //! for.
+//!
+//! The session also lists the group streams it has open, each with its rank and whether the
+//! peer has acknowledged everything written to it, so an open waiting for credit can choose
+//! a lower-ranked stream to make room with.
 
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::Poll;
 
 use super::boxed::{self, Transport};
 use super::poll::SendOptions;
 use super::{Dir, StreamCredit};
 
-/// Where an open ranks for credit: the order the transport will send its stream in.
+/// Where an open or an open stream ranks: the order the transport sends its stream in.
 ///
 /// Mirrors the transport's send scheduling: streams outside every group go before all of
 /// them, then a higher group priority, then a higher priority within the group.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Rank {
+pub(crate) enum Rank {
 	Grouped { group: i64, stream: i64 },
 	Ungrouped { stream: i64 },
 }
 
 impl Rank {
-	fn of(options: &SendOptions<'_, super::boxed::Group>) -> Self {
-		match options.group {
-			Some(group) => Self::Grouped {
-				group: group.priority(),
-				stream: options.priority,
-			},
-			None => Self::Ungrouped {
-				stream: options.priority,
-			},
+	/// The rank of a stream at `stream` priority, in a group at `group` priority if any.
+	pub(super) fn new(group: Option<i64>, stream: i64) -> Self {
+		match group {
+			Some(group) => Self::Grouped { group, stream },
+			None => Self::Ungrouped { stream },
 		}
 	}
+
+	fn of(options: &SendOptions<'_, super::boxed::Group>) -> Self {
+		Self::new(options.group.map(super::boxed::Group::priority), options.priority)
+	}
+}
+
+/// One of a session's open group streams, as its list read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OpenStream {
+	/// Where the stream ranks now.
+	pub rank: Rank,
+	/// Whether the peer has acknowledged every byte written to it, or `None` when the
+	/// transport cannot tell.
+	pub acknowledged: Option<bool>,
+}
+
+/// The group streams a session has open, keyed so each can leave.
+#[derive(Default)]
+struct Listing {
+	streams: HashMap<u64, Weak<boxed::Listed>>,
+	next: u64,
 }
 
 /// A place in line: the highest rank first, then the earliest arrival.
@@ -63,16 +84,31 @@ impl Line {
 	}
 
 	/// Say why the line starts waiting: the peer's stream credit, unless the transport reports
-	/// otherwise.
-	fn start(credit: Option<StreamCredit>) {
+	/// otherwise, and what the session's open group streams could make room with.
+	fn start(credit: Option<StreamCredit>, lines: &Lines) {
+		if !tracing::enabled!(tracing::Level::DEBUG) {
+			return;
+		}
+		let open = lines.open_streams();
+		let open_streams = open.len();
+		let acknowledged = open.iter().filter(|stream| stream.acknowledged == Some(true)).count();
+		let lowest = open.first().map(|stream| stream.rank);
 		match credit {
 			Some(credit) if !credit.blocked => {
 				tracing::debug!(
 					available = credit.available,
+					open_streams,
+					acknowledged,
+					?lowest,
 					"opens wait in priority order for the transport"
 				)
 			}
-			_ => tracing::debug!("out of the peer's stream credit: opens wait in priority order"),
+			_ => tracing::debug!(
+				open_streams,
+				acknowledged,
+				?lowest,
+				"out of the peer's stream credit: opens wait in priority order"
+			),
 		}
 	}
 
@@ -105,10 +141,12 @@ impl Line {
 	}
 }
 
-/// The lines of one session's opens, shared by every task opening on it.
+/// The lines of one session's opens, and the group streams it has open, shared by every task
+/// opening on it.
 pub(crate) struct Lines {
 	uni: Mutex<Line>,
 	bi: Mutex<Line>,
+	listing: Mutex<Listing>,
 	/// Whose stream credit the opens wait for.
 	pub(super) transport: Transport,
 }
@@ -118,8 +156,38 @@ impl Lines {
 		Self {
 			uni: Default::default(),
 			bi: Default::default(),
+			listing: Default::default(),
 			transport,
 		}
+	}
+
+	/// List an open group stream, returning the key it leaves with.
+	pub(super) fn list(&self, stream: &Arc<boxed::Listed>) -> u64 {
+		let mut listing = self.listing();
+		let key = listing.next;
+		listing.next += 1;
+		listing.streams.insert(key, Arc::downgrade(stream));
+		key
+	}
+
+	/// Remove the group stream listed under `key`.
+	pub(super) fn unlist(&self, key: u64) {
+		self.listing().streams.remove(&key);
+	}
+
+	/// The session's open group streams, the lowest ranked first.
+	///
+	/// A stream is open from when it opens until it is finished, reset, or dropped.
+	pub(crate) fn open_streams(&self) -> Vec<OpenStream> {
+		// Read each stream outside the listing's lock, which its owner takes to leave.
+		let streams: Vec<_> = self.listing().streams.values().filter_map(Weak::upgrade).collect();
+		let mut open: Vec<_> = streams.iter().map(|stream| stream.read()).collect();
+		open.sort_by_key(|stream| stream.rank);
+		open
+	}
+
+	fn listing(&self) -> std::sync::MutexGuard<'_, Listing> {
+		self.listing.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 	}
 
 	fn line(&self, dir: Dir) -> std::sync::MutexGuard<'_, Line> {
@@ -159,7 +227,7 @@ impl Open {
 				if let Poll::Ready(res) = open(waiter) {
 					return Poll::Ready(res);
 				}
-				Line::start(boxed::stream_credit(&lines.transport, dir));
+				Line::start(boxed::stream_credit(&lines.transport, dir), lines);
 				let key = line.join(rank);
 				line.waiting.get_mut(&key).expect("just joined").register(waiter);
 				self.place = Some((lines.clone(), dir, key));

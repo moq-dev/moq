@@ -3,7 +3,6 @@ package moq_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -204,20 +203,6 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		for i := 0; ; i++ {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			_ = track.WriteFrame(moq.Frame{Payload: fmt.Appendf(nil, "frame-%d", i), Timestamp: ts(0)})
-			time.Sleep(10 * time.Millisecond)
-		}
-	}()
-
 	// Subscriber: finds the broadcast and reads a frame before the restart, so
 	// the post-restart read proves delivery resumed rather than never started.
 	subscriber := dialWorker(t, ctx, url)
@@ -241,6 +226,10 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	}
 	defer trackConsumer.Cancel()
 
+	// Each write starts a new group, which a live subscription receives as the latest.
+	if err := track.WriteFrame(moq.Frame{Payload: []byte("before"), Timestamp: ts(0)}); err != nil {
+		t.Fatal(err)
+	}
 	if frame, err := trackConsumer.ReadFrame(ctx); err != nil || frame == nil {
 		t.Fatalf("frame before restart: frame=%+v err=%v", frame, err)
 	}
@@ -280,6 +269,9 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	}
 	defer resumed.Cancel()
 
+	if err := track.WriteFrame(moq.Frame{Payload: []byte("after"), Timestamp: ts(1)}); err != nil {
+		t.Fatal(err)
+	}
 	frame, err := resumed.ReadFrame(ctx)
 	if err != nil {
 		t.Fatalf("frame after restart: %v", err)

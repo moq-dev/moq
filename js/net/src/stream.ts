@@ -2,7 +2,7 @@ import { fromTransport, StreamCode, toStreamCode, toTransport } from "./error.ts
 import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version as Lite, type Version as LiteVersion } from "./lite/version.ts";
-import { lines, type Rank } from "./open.ts";
+import { lines, type OpenStream, type OpenStreams, type Rank } from "./open.ts";
 import { decodeError } from "./util/decode_error.ts";
 import { POW32, toBigInt, toNumber, U64 } from "./util/u64.ts";
 import { decodeUtf8 } from "./util/utf8.ts";
@@ -151,7 +151,13 @@ export interface TryOpenOptions extends Omit<OpenOptions, "sendOrder"> {
 
 	/** Give up once this resolves. */
 	cancel: Promise<void>;
+
+	/** List the stream among the session's open group streams until it is closed or reset. */
+	group?: boolean;
 }
+
+/** A send stream that reports what it sent, as W3C WebTransport's `WebTransportSendStream.getStats()` does. */
+type Stats = WritableStream<Uint8Array> & { getStats(): Promise<{ bytesAcknowledged: number }> };
 
 export class Stream {
 	reader: Reader;
@@ -690,10 +696,20 @@ const U62 = (c: Cursor) => c.u62();
 const VARINT = (c: Cursor) => c.varint();
 
 // Writer wraps a stream and writes chunks of data
-export class Writer {
+export class Writer implements OpenStream {
 	#writer: WritableStreamDefaultWriter<Uint8Array>;
 	#stream: WritableStream<Uint8Array>;
 	#closed?: Promise<void>;
+
+	/** The bytes handed to the stream so far. */
+	#written = 0;
+	#sendOrder = 0;
+	/** Whether the transport reports acknowledgements, as the session's open streams say. */
+	#acknowledges = false;
+	/** Reset by this side, or failed or stopped by the peer, so never acknowledged. */
+	#aborted = false;
+	/** The session's open group streams, while this one is among them. */
+	#listed?: OpenStreams;
 
 	// Scratch buffer for each primitive write, sized for the longest (a 9-byte leading-ones varint).
 	#scratch: ArrayBuffer;
@@ -705,6 +721,19 @@ export class Writer {
 		this.#scratch = new ArrayBuffer(9);
 		this.#writer = this.#stream.getWriter();
 		this.version = version;
+		// The stream ends once it is finished, or with a failure: a reset, a stop, or the session closing.
+		this.#writer.closed.then(
+			() => this.#unlist(),
+			() => {
+				this.#aborted = true;
+				this.#unlist();
+			},
+		);
+	}
+
+	/** The send order the stream has now, where HIGHER values are sent first. */
+	get sendOrder(): number {
+		return this.#sendOrder;
 	}
 
 	/**
@@ -718,7 +747,20 @@ export class Writer {
 	 * ignored property, the same way an ignored `sendOrder` option does at {@link open}.
 	 */
 	setPriority(sendOrder: number) {
+		this.#sendOrder = sendOrder;
 		(this.#stream as SendStream).sendOrder = sendOrder;
+	}
+
+	/**
+	 * Whether the peer has acknowledged every byte written so far, or undefined when the
+	 * transport cannot tell, as a browser's WebTransport cannot.
+	 */
+	async acknowledged(): Promise<boolean | undefined> {
+		if (!this.#acknowledges) return undefined;
+		if (this.#aborted) return false;
+		const written = this.#written;
+		const stats = await (this.#stream as Stats).getStats();
+		return !this.#aborted && stats.bytesAcknowledged >= written;
 	}
 
 	async bool(v: boolean) {
@@ -767,6 +809,7 @@ export class Writer {
 	}
 
 	async write(v: Uint8Array) {
+		this.#written += v.byteLength;
 		// Mirrors Reader.#fill: every write funnels through here, so a STOP_SENDING from the
 		// peer surfaces as a typed code rather than the transport's own error shape.
 		await this.#writer.write(v).catch((err: unknown) => {
@@ -783,6 +826,7 @@ export class Writer {
 	}
 
 	close() {
+		this.#unlist();
 		this.#writer.close().catch(() => void 0);
 	}
 
@@ -796,7 +840,14 @@ export class Writer {
 	}
 
 	reset(reason: unknown) {
+		this.#aborted = true;
+		this.#unlist();
 		this.#writer.abort(withCode(reason, this.version)).catch(() => void 0);
+	}
+
+	#unlist() {
+		this.#listed?.delete(this);
+		this.#listed = undefined;
 	}
 
 	/** Run `f` against a Writer that buffers in memory, returning everything it wrote as one chunk. */
@@ -824,8 +875,9 @@ export class Writer {
 	 */
 	/** Open a send-only stream, waiting its turn for the peer's stream credit. */
 	static async open(quic: WebTransport, options: OpenOptions): Promise<Writer> {
-		const writable = await lines(quic).uni.open(options.sendOrder ?? 0);
-		return new Writer(writable, options.version);
+		const session = lines(quic);
+		const writable = await session.uni.open(options.sendOrder ?? 0);
+		return Writer.#opened(writable, options.version, options.sendOrder ?? 0, session.streams);
 	}
 
 	/**
@@ -834,8 +886,26 @@ export class Writer {
 	 * to the next open in line. A transport failure, or a rejected `cancel`, still throws.
 	 */
 	static async tryOpen(quic: WebTransport, options: TryOpenOptions): Promise<Writer | undefined> {
-		const writable = await lines(quic).uni.open(options.sendOrder ?? 0, options.cancel);
-		return writable && new Writer(writable, options.version);
+		const session = lines(quic);
+		const rank = options.sendOrder ?? 0;
+		// The line ranks the stream it hands out by its last read, which can differ from a read now.
+		let sendOrder = typeof rank === "number" ? rank : 0;
+		const read = typeof rank === "number" ? rank : () => (sendOrder = rank());
+		const writable = await session.uni.open(read, options.cancel);
+		if (!writable) return undefined;
+		const writer = Writer.#opened(writable, options.version, sendOrder, session.streams);
+		if (options.group) {
+			writer.#listed = session.streams;
+			session.streams.add(writer);
+		}
+		return writer;
+	}
+
+	static #opened(writable: SendStream, version: StreamVersion, sendOrder: number, streams: OpenStreams): Writer {
+		const writer = new Writer(writable, version);
+		writer.#sendOrder = sendOrder;
+		writer.#acknowledges = streams.acknowledges;
+		return writer;
 	}
 }
 
