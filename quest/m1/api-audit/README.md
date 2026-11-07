@@ -1,4 +1,4 @@
-# A smaller, safer API than release
+# [M] A smaller, safer API than release
 
 ## Goal
 
