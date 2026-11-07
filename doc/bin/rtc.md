@@ -44,4 +44,4 @@ player or `export rtc --connect` must reconnect to reach the replacement.
 `--connect` runs until its session ends.
 
 Built on [str0m](https://crates.io/crates/str0m); the library is
-[`moq-rtc`](https://docs.rs/moq-rtc).
+[`moq-webrtc`](https://docs.rs/moq-webrtc).

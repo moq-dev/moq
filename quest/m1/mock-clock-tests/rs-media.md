@@ -16,7 +16,7 @@ As of 2026-11-06:
   `src/capture/wgc.rs`, and `src/frame/cuda_test.rs`.
 - moq-hls, 8: `src/export/mod.rs` 7 and `src/import.rs`.
 - moq-mux, 5: `src/rate.rs`.
-- moq-rtc 3 (`src/lib.rs`, `src/server/whep.rs`), moq-rtsp 3
+- moq-webrtc 3 (`src/lib.rs`, `src/server/whep.rs`), moq-rtsp 3
   (`src/client.rs`), moq-srt 1 (`src/server.rs`), and moq-transcode 1
   (`src/lib.rs`).
 

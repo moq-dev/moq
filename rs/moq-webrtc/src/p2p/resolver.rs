@@ -9,7 +9,6 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use super::{Command, Error, candidate_address, with_address};
-use crate::abort::AbortOnDrop;
 
 /// How long to wait for a `.local` name to resolve: mdns-sd's first query plus its
 /// retransmissions at one and two seconds (RFC 6762 section 5.2).
@@ -27,7 +26,7 @@ pub(super) trait Lookup: Send + Sync + 'static {
 /// already sent, and its signaling waits behind its own slow names.
 pub(super) struct Resolver {
 	batches: mpsc::Sender<Vec<String>>,
-	_task: AbortOnDrop,
+	task: tokio::task::JoinHandle<()>,
 }
 
 impl Resolver {
@@ -35,16 +34,13 @@ impl Resolver {
 	pub fn spawn(commands: mpsc::Sender<Command>, lookup: impl Lookup) -> Self {
 		let (batches, rx) = mpsc::channel(1);
 		use tracing::Instrument;
-		let task = crate::runtime::spawn(
+		let task = tokio::spawn(
 			async move {
-				crate::panic::isolate(run(rx, commands, lookup)).await;
+				moq_tokio::panic::isolate(run(rx, commands, lookup)).await;
 			}
 			.instrument(tracing::Span::current()),
 		);
-		Self {
-			batches,
-			_task: AbortOnDrop::new(task),
-		}
+		Self { batches, task }
 	}
 
 	/// Queue `.local` candidate lines, waiting while the resolver is behind.
@@ -53,6 +49,12 @@ impl Resolver {
 			return Ok(());
 		}
 		self.batches.send(lines).await.map_err(|_| Error::Closed)
+	}
+}
+
+impl Drop for Resolver {
+	fn drop(&mut self) {
+		self.task.abort();
 	}
 }
 

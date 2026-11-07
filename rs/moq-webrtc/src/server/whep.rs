@@ -165,7 +165,7 @@ pub async fn accept(
 
 	let answer = rtc.sdp_api().accept_offer(offer).map_err(Error::rtc)?;
 	let resource_id = sdp::new_resource_id();
-	let socket = moq_ice::Socket::new(mux.socket(), mux.candidates().to_vec(), inbound)?;
+	let socket = crate::ice::Socket::new(mux.socket(), mux.candidates().to_vec(), inbound)?;
 	let session = session::Session::egress(rtc, socket, source)?;
 
 	// Register before returning so a DELETE that races startup still finds the

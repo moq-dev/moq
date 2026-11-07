@@ -8,11 +8,11 @@
 //! remote peer, and feed its replies back.
 //!
 //! The [`Offerer`] opens the data channel, labelled `moq` and carrying the agreed
-//! MoQ ALPN as its protocol, and runs the MoQ client over it with
-//! [`crate::Client::connect_webrtc`]. The [`Answerer`] adopts that channel and
-//! runs the MoQ server with [`crate::Listener::accept_webrtc`]. This matches
-//! `@moq/p2p`, where `Transport.connect` creates the channel and
-//! `Transport.accept` adopts it.
+//! MoQ ALPN as its protocol, and runs a [`moq_tokio::Client`] over it with
+//! [`Offerer::connect`]. The [`Answerer`] adopts that channel and hands it to a
+//! [`moq_tokio::Listener`] with [`Answerer::accept`]. This matches `@moq/p2p`,
+//! where `Transport.connect` creates the channel and `Transport.accept` adopts it.
+//! moq-net's session policy runs over the channel as over any other transport.
 //!
 //! The channel carries qmux-01, one record per SCTP message, capped at 16 KiB and
 //! the peer's SCTP message limit. Ordered delivery means one lost chunk stalls
@@ -21,6 +21,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use str0m::Rtc;
@@ -58,7 +59,7 @@ const READ_SLACK: u64 = 16 * RECORD_SIZE;
 
 /// The connection-level receive window a data channel session grants, the `[quic]` default
 /// every qmux session takes.
-const RECEIVE_WINDOW: u64 = crate::quic::DEFAULT_RECEIVE_WINDOW;
+const RECEIVE_WINDOW: u64 = moq_tokio::quic::DEFAULT_RECEIVE_WINDOW;
 
 /// The default STUN port (RFC 8489 section 18.10).
 const STUN_PORT: u16 = 3478;
@@ -75,9 +76,9 @@ pub enum Error {
 	#[error("peer connection closed")]
 	Closed,
 
-	/// ICE never connected before the establishment deadline, or before the DTLS
-	/// handshake gave up waiting for it.
-	#[error("ICE did not connect in time")]
+	/// The connection and its data channel did not come up within [`Config::timeout`],
+	/// or ICE gave up first.
+	#[error("the peer connection did not come up in time")]
 	Timeout,
 
 	/// The WebRTC stack failed (DTLS, SCTP, or ICE state).
@@ -119,29 +120,51 @@ pub enum Error {
 	/// The qmux handshake over the channel failed.
 	#[error("qmux handshake failed: {0}")]
 	Qmux(String),
+
+	/// The MoQ session over the channel failed.
+	#[error(transparent)]
+	Session(#[from] moq_tokio::Error),
 }
 
-crate::error::from_message!(qmux::Error => Qmux);
+impl From<qmux::Error> for Error {
+	fn from(err: qmux::Error) -> Self {
+		Self::Qmux(err.to_string())
+	}
+}
 
 impl Error {
-	/// Adopt the agent's error. Not a `From` impl, which would put moq-ice in this crate's API.
-	fn ice(err: moq_ice::Error) -> Self {
+	/// Adopt the agent's error. Not a `From` impl, which would name the private agent in this API.
+	fn ice(err: crate::ice::Error) -> Self {
 		match err {
-			moq_ice::Error::Closed => Self::Closed,
-			moq_ice::Error::Timeout => Self::Timeout,
-			moq_ice::Error::Rtc(err) => Self::Rtc(err),
-			err => Self::Rtc(err.to_string()),
+			crate::ice::Error::Closed => Self::Closed,
+			crate::ice::Error::Timeout => Self::Timeout,
+			crate::ice::Error::Rtc(err) => Self::Rtc(err),
 		}
 	}
 }
 
-/// How an [`Offerer`] or [`Answerer`] gathers its local candidates.
-#[derive(Clone, Debug, Default)]
+/// The longest [`Config::timeout`] waits by default, matching the ICE agent's own backstop.
+const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How an [`Offerer`] or [`Answerer`] gathers its local candidates and bounds its connection.
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Config {
 	/// STUN servers asked for this host's public address. Empty means LAN only:
 	/// host candidates and nothing else.
 	pub stun: Vec<Stun>,
+	/// How long [`Offerer::connect`] and [`Answerer::accept`] wait for ICE, DTLS, and the
+	/// data channel to come up, and qmux to start over it. 30 seconds by default.
+	pub timeout: Duration,
+}
+
+impl Default for Config {
+	fn default() -> Self {
+		Self {
+			stun: Vec::new(),
+			timeout: TIMEOUT,
+		}
+	}
 }
 
 /// A STUN server, written the way an `RTCIceServer` URL names one: `stun:host[:port]`.
@@ -249,7 +272,7 @@ text!(Answer);
 text!(Candidate);
 
 /// The offering side of a WebRTC peer connection, which opens the MoQ data channel
-/// and runs the MoQ client over it with [`crate::Client::connect_webrtc`].
+/// and runs the MoQ client over it with [`Offerer::connect`].
 ///
 /// A background task drives the connection from creation, so ICE checks and STUN
 /// replies are answered while signaling is still in progress. It runs until both
@@ -258,15 +281,14 @@ text!(Candidate);
 /// leaves a running session alone.
 pub struct Offerer {
 	peer: Peer,
-	/// The MoQ ALPN the channel carries.
-	protocol: String,
+	timeout: Duration,
 }
 
 impl Offerer {
 	/// Start a peer connection with a data channel for MoQ `protocol`, the ALPN the
 	/// peers agreed through signaling, returning the offer to send.
 	pub async fn new(config: &Config, protocol: &str) -> Result<(Self, Offer), Error> {
-		crate::runtime::scope(Self::with_hosts(config, protocol, hosts()?)).await
+		Self::with_hosts(config, protocol, hosts()?).await
 	}
 
 	async fn with_hosts(config: &Config, protocol: &str, hosts: Vec<IpAddr>) -> Result<(Self, Offer), Error> {
@@ -280,7 +302,7 @@ impl Offerer {
 			ordered: true,
 			reliability: Reliability::Reliable,
 			negotiated: None,
-			protocol: protocol.to_string(),
+			protocol,
 		});
 		let (offer, pending) = api.apply().expect("adding a channel is an SDP change");
 
@@ -289,7 +311,10 @@ impl Offerer {
 			pending: Some(pending),
 		};
 		let peer = Peer::spawn(config, rtc, socket, role, None).await?;
-		let offerer = Self { peer, protocol };
+		let offerer = Self {
+			peer,
+			timeout: config.timeout,
+		};
 		Ok((offerer, Offer(offer.to_sdp_string())))
 	}
 
@@ -324,19 +349,36 @@ impl Offerer {
 		self.peer.add_candidate(candidate).await
 	}
 
-	/// The MoQ ALPN this peer's data channel carries.
-	pub(crate) fn protocol(&self) -> &str {
-		&self.protocol
+	/// Run `client`'s MoQ session over the data channel once it opens.
+	///
+	/// [`Config::timeout`] bounds ICE and the channel coming up, then the client's connect
+	/// timeout bounds the MoQ handshake. A peer link cannot be redialed, so there is no
+	/// reconnect: the session ends with the peer connection. Only one session may take
+	/// the channel.
+	pub async fn connect(&self, client: &moq_tokio::Client) -> Result<moq_net::Session, Error> {
+		let establish = async {
+			let opened = self.peer.channel().await?;
+			let (session, driver) = qmux::Session::connect(opened.channel, opened.config).await?;
+			tokio::spawn(driver);
+			Ok::<_, Error>(session)
+		};
+		let session = kio::clock::timeout(self.timeout, establish)
+			.await
+			.map_err(|_| Error::Timeout)??;
+		let session = client.connect_with(session).await?;
+		tracing::info!(version = %session.version(), transport = %moq_tokio::Transport::WebRtc, "connected");
+		Ok(session)
 	}
 
 	/// Wait for the data channel to open, and take it.
-	pub(crate) async fn channel(&self) -> Result<Opened, Error> {
+	#[cfg(test)]
+	async fn channel(&self) -> Result<Opened, Error> {
 		self.peer.channel().await
 	}
 }
 
 /// The answering side of a WebRTC peer connection, which adopts the remote peer's
-/// MoQ data channel and serves it with [`crate::Listener::accept_webrtc`].
+/// MoQ data channel and serves it with [`Answerer::accept`].
 ///
 /// Like [`Offerer`], a background task drives the connection until both this
 /// handle and any session over its data channel are gone.
@@ -344,13 +386,14 @@ pub struct Answerer {
 	peer: Peer,
 	/// The MoQ ALPN the remote peer's channel must carry.
 	protocol: String,
+	timeout: Duration,
 }
 
 impl Answerer {
 	/// Start a peer connection for the remote peer's offer and MoQ `protocol`, the
 	/// ALPN the peers agreed through signaling, returning the answer to send.
 	pub async fn new(config: &Config, offer: &Offer, protocol: &str) -> Result<(Self, Answer), Error> {
-		crate::runtime::scope(Self::with_hosts(config, offer, protocol, hosts()?)).await
+		Self::with_hosts(config, offer, protocol, hosts()?).await
 	}
 
 	async fn with_hosts(
@@ -373,7 +416,12 @@ impl Answerer {
 
 		let peer = Peer::spawn(config, rtc, socket, Role::Answerer, Some(max_message)).await?;
 		peer.resolver.add(mdns).await?;
-		Ok((Self { peer, protocol }, Answer(answer.to_sdp_string())))
+		let answerer = Self {
+			peer,
+			protocol,
+			timeout: config.timeout,
+		};
+		Ok((answerer, Answer(answer.to_sdp_string())))
 	}
 
 	/// The next local candidate to send the remote peer, or `None` once gathering is done.
@@ -395,13 +443,38 @@ impl Answerer {
 		self.peer.add_candidate(candidate).await
 	}
 
-	/// The MoQ ALPN the remote peer's data channel must carry.
-	pub(crate) fn protocol(&self) -> &str {
-		&self.protocol
+	/// Read the MoQ SETUP from the data channel the remote peer opens, leaving admission
+	/// to the returned [`moq_tokio::server::Request`].
+	///
+	/// [`Config::timeout`] bounds ICE and the channel coming up, then `listener`'s
+	/// handshake timeout bounds the MoQ handshake. A drain of `listener` waits for the
+	/// connection meanwhile. The channel must carry the protocol signaling agreed. Only
+	/// one session may take the channel.
+	pub async fn accept(&self, listener: &moq_tokio::Listener) -> Result<moq_tokio::server::Request, Error> {
+		// Held until `accept_with` takes its own, so a drain that starts meanwhile waits.
+		let _establishing = listener.activity().enter().ok_or(moq_tokio::Error::Stopped)?;
+		let establish = async {
+			let opened = self.peer.channel().await?;
+			if opened.protocol != self.protocol {
+				return Err(Error::Protocol(opened.protocol));
+			}
+			let (session, driver) = qmux::Session::accept(opened.channel, opened.config).await?;
+			tokio::spawn(driver);
+			Ok((session, opened.protocol))
+		};
+		let (session, protocol) = kio::clock::timeout(self.timeout, establish)
+			.await
+			.map_err(|_| Error::Timeout)??;
+		let mut link = moq_tokio::server::Link::default();
+		link.alpn = Some(protocol);
+		Ok(listener
+			.accept_with(moq_tokio::Transport::WebRtc, session, link)
+			.await?)
 	}
 
 	/// Wait for the remote peer's data channel to open, and take it.
-	pub(crate) async fn channel(&self) -> Result<Opened, Error> {
+	#[cfg(test)]
+	async fn channel(&self) -> Result<Opened, Error> {
 		self.peer.channel().await
 	}
 }
@@ -430,12 +503,12 @@ impl Peer {
 	async fn spawn(
 		config: &Config,
 		rtc: Rtc,
-		socket: moq_ice::Socket,
+		socket: crate::ice::Socket,
 		role: Role,
 		max_message: Option<u64>,
 	) -> Result<Self, Error> {
 		let stun = resolve_stun(&config.stun).await;
-		let mut agent = moq_ice::Agent::new(rtc, socket)?.with_stun(&stun);
+		let mut agent = crate::ice::Agent::new(rtc, socket)?.with_stun(&stun);
 		if let Role::Offerer { .. } = role {
 			// The answer applies through `rtc_mut`, which starts the deadline.
 			agent = agent.awaiting_answer();
@@ -454,7 +527,7 @@ impl Peer {
 			taken: false,
 		};
 		use tracing::Instrument;
-		crate::runtime::spawn(crate::panic::isolate(driver.run()).instrument(tracing::Span::current()));
+		tokio::spawn(moq_tokio::panic::isolate(driver.run()).instrument(tracing::Span::current()));
 
 		let resolver = Resolver::spawn(commands.clone(), resolver::Mdns);
 		Ok(Self {
@@ -492,7 +565,7 @@ impl Peer {
 }
 
 /// A data channel that opened, ready to carry qmux.
-pub(crate) struct Opened {
+struct Opened {
 	pub channel: channel::Channel,
 	/// The MoQ ALPN the channel carries.
 	pub protocol: String,
@@ -503,7 +576,10 @@ pub(crate) struct Opened {
 /// The qmux session settings for a channel carrying `protocol`, advertising
 /// `max_record_size`: 16 KiB, capped by the peer's SCTP message limit.
 fn session_config(protocol: &str, max_record_size: u64) -> qmux::Config {
-	let mut config = crate::qmux_default();
+	// The `[quic]` limits every qmux session takes: moq-lite holds a stream open per
+	// subscription, past qmux's default stream count.
+	let mut config = qmux::Config::default();
+	config.limits = moq_tokio::quic::Resolved::default().limits();
 	config.version = qmux::Version::QMux01;
 	config.protocol = qmux::Protocol::Negotiated(protocol.to_string());
 	config.max_record_size = max_record_size;
@@ -516,7 +592,7 @@ fn session_config(protocol: &str, max_record_size: u64) -> qmux::Config {
 	config
 }
 
-pub(crate) enum Command {
+enum Command {
 	Answer(SdpAnswer, u64, oneshot::Sender<Result<(), Error>>),
 	Candidate(str0m::Candidate),
 	Channel(oneshot::Sender<Result<Opened, Error>>),
@@ -545,7 +621,7 @@ struct Open {
 
 /// Owns the connection and runs it on its own task.
 struct Driver {
-	agent: moq_ice::Agent,
+	agent: crate::ice::Agent,
 	commands: mpsc::Receiver<Command>,
 	/// Dropped once gathering finishes, ending [`Offerer::candidate`] and [`Answerer::candidate`].
 	candidates: Option<mpsc::UnboundedSender<Candidate>>,
@@ -669,20 +745,19 @@ impl Driver {
 		}
 	}
 
-	fn event(&mut self, event: moq_ice::Event) -> Result<(), Error> {
+	fn event(&mut self, event: crate::ice::Event) -> Result<(), Error> {
 		let event = match event {
-			moq_ice::Event::Candidate(candidate) => {
+			crate::ice::Event::Candidate(candidate) => {
 				if let Some(candidates) = &self.candidates {
 					let _ = candidates.send(Candidate(candidate.to_sdp_string()));
 				}
 				return Ok(());
 			}
-			moq_ice::Event::Gathered => {
+			crate::ice::Event::Gathered => {
 				self.candidates = None;
 				return Ok(());
 			}
-			moq_ice::Event::Rtc(event) => event,
-			_ => return Ok(()),
+			crate::ice::Event::Rtc(event) => event,
 		};
 
 		match event {
@@ -837,12 +912,13 @@ fn hosts() -> Result<Vec<IpAddr>, Error> {
 
 /// Bind a dual-stack socket on an ephemeral port, pairing it with each host
 /// address, and start reading it.
-fn bind(hosts: &[IpAddr]) -> Result<moq_ice::Socket, Error> {
-	let socket = crate::bind::udp(crate::bind::Udp::new("[::]:0".parse().unwrap()))
-		.or_else(|_| crate::bind::udp(crate::bind::Udp::new("0.0.0.0:0".parse().unwrap())))?;
+fn bind(hosts: &[IpAddr]) -> Result<crate::ice::Socket, Error> {
+	use moq_tokio::bind;
+	let socket = bind::udp(bind::Udp::new("[::]:0".parse().unwrap()))
+		.or_else(|_| bind::udp(bind::Udp::new("0.0.0.0:0".parse().unwrap())))?;
 	socket.set_nonblocking(true)?;
 	// A `[::]` socket that stayed v6-only can't send to IPv4 candidates.
-	let ipv4 = socket.local_addr()?.is_ipv4() || crate::bind::udp_is_dual_stack(&socket);
+	let ipv4 = socket.local_addr()?.is_ipv4() || bind::udp_is_dual_stack(&socket);
 	let socket = UdpSocket::from_std(socket)?;
 	let local = socket.local_addr()?;
 
@@ -855,7 +931,7 @@ fn bind(hosts: &[IpAddr]) -> Result<moq_ice::Socket, Error> {
 		return Err(Error::NoHost);
 	}
 	let udp = Arc::new(socket);
-	Ok(moq_ice::Socket::new(udp.clone(), locals, moq_ice::reader(udp))?)
+	Ok(crate::ice::Socket::new(udp.clone(), locals, crate::ice::reader(udp))?)
 }
 
 /// Look up each STUN server. One that does not resolve is skipped, since a missing

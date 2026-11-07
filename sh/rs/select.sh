@@ -201,8 +201,8 @@ case "$action" in
             features+=(moq-video/capture moq-audio/capture moq-audio/playback)
         fi
         if wants moq-cli; then features+=(moq-cli/play moq-cli/openh264); fi
-        # The WebRTC module's hostile-input tests, such as mDNS backpressure.
-        if wants moq-tokio; then features+=(moq-tokio/webrtc); fi
+        # The WebRTC data channel's hostile-input tests, such as mDNS backpressure.
+        if wants moq-webrtc; then features+=(moq-webrtc/p2p); fi
         # The relay's io_uring listener, Linux-only. A moq-uring change selects
         # the relay too, as its dependent.
         if [[ "$(uname -s)" == Linux ]] && wants moq-relay; then features+=(moq-relay/io-uring); fi

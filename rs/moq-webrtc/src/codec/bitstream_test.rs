@@ -3,7 +3,7 @@
 //! The H.264 Annex-B -> AVCC conversion is provided by `moq_mux::codec::h264`,
 //! but the WHIP path depends on the importer parsing the SPS for the catalog
 //! and accepting Annex-B input via the bridge. These tests guard against
-//! regressions in the contract the moq-rtc bridge depends on.
+//! regressions in the contract the moq-webrtc bridge depends on.
 //!
 //! Inline (rather than under `tests/`) because they exercise the crate-private
 //! `codec` module directly.
@@ -170,7 +170,7 @@ async fn vp9_keyframe_publishes_dimensions_and_starts_group() {
 // - H.264 with avc3 storage (inline SPS/PPS): passthrough.
 // - H.264 with avc1 storage: length-prefix -> start-code with SPS+PPS
 //   prefixed on every keyframe (regression in moq-mux already covers this;
-//   this test confirms moq-rtc's wrapper plumbs through correctly).
+//   this test confirms moq-webrtc's wrapper plumbs through correctly).
 
 #[tokio::test(start_paused = true)]
 async fn egress_opus_passthrough() {

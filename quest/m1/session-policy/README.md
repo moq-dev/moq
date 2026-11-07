@@ -20,9 +20,8 @@ maintainer asked what that means for io_uring and how much of moq-tokio belongs
 in moq-net, and decided:
 
 - ✅ **Move the policy first**, then give moq-tokio thin handoffs
-  (`Listener::accept_with`, `Client::connect_with`), which the
-  [WebRTC rename](/quest/m2/webrtc-rename.md) builds on (#7804 closed
-  unmerged).
+  (`Listener::accept_with`, `Client::connect_with`), which moq-webrtc's
+  data channel transport builds on (#7804 closed unmerged).
   Not chosen: a moq-tokio handoff now with the move later; moq-webrtc calling
   moq-net directly with its own policy.
 - ✅ **Reconnect is in scope**: the reconnect, backoff and GOAWAY candidate
