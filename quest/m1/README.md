@@ -57,6 +57,7 @@ moves what remains of them once their claims merge.
 - [VAAPI encode and decode](/quest/m1/video-vaapi.md) - H.265 encode and decode, pre-generated bindings, and pooled resize surfaces, including the moq-dev/vaapi release that carries them
 - [A relay forwards an upstream refusal's retry interval](/quest/m1/retry-interval-forward.md) - a forwarded SUBSCRIBE refusal keeps the upstream's retry interval
 - [Tests run on a mocked clock](/quest/m1/mock-clock-tests/README.md) - about 300 tests stop proving nothing happened by waiting, sleeping to settle, or asserting on elapsed time
+- [QMux reads the app-limited flag on big-endian Linux](/quest/m1/qmux-app-limited-endian.md) - the send-rate filter's app-limited mask follows the target's byte order
 
 ## Related
 
