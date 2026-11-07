@@ -79,7 +79,7 @@ which collapses that state and waits on [Drop set](/quest/m1/drop-set.md).
 - [A failed finish is final](/quest/m1/explicit-state/finish-final.md) - producers and importers are never half-finished, and refuse input after finish
 - [Track and group end-of-life](/quest/m1/explicit-state/track-end.md) - moq-net's track and group outcomes are one enum each, in Rust and JS
 - [moq-net phase data](/quest/m1/explicit-state/net-phases.md) - moq-net's session and subscription state machines keep each phase's data in its variant
-- [moq-mux and moq-gst lifecycles](/quest/m1/explicit-state/mux-gst.md) - export sources, TS and fMP4 export tracks, and gst pads are explicit state
+- [TS and fMP4 export lifecycles](/quest/m1/explicit-state/mux-gst.md) - the TS export program and tracks and the fMP4 export track are explicit state
 
 ## Related
 
