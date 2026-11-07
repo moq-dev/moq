@@ -42,8 +42,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     # The matrix runs in real time (ffmpeg -re pacing + per-subscriber timeouts);
     # this is just a safety net against a hung relay/client. The nix channel
-    # gets longer for a cold build when Cache has not finished publishing
-    # HEAD's packages yet; compiling them has taken 43 minutes.
+    # gets longer for a cold build when the pinned commit's closure misses
+    # nix.moq.dev (e.g. objects past the bucket's 30-day expiry); compiling it
+    # has taken 43 minutes.
     timeout-minutes: ${{ matrix.channel == 'nix' && 75 || 45 }}
 
     # smoke.sh resolves the latest libmoq release via the GitHub API. Without a
@@ -206,12 +207,17 @@ jobs:
         # resolve a commit whose upload is still running (or was cancelled), and
         # the relay and CLI could even resolve different commits.
         # --print-build-logs is off, so a "building ...moq-relay" line here means
-        # a cache miss on a commit that was uploaded.
+        # a cache miss on a commit that was uploaded: check the bucket's 30-day
+        # object expiry (infra/nix/lifecycle.json) before calling it a cache bug.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           rev=$(gh run list --repo moq-dev/moq --workflow cache.yml --branch main --event push \
-            --status success --limit 1 --json headSha --jq '.[0].headSha')
+            --status success --limit 1 --json headSha --jq '.[0].headSha // empty')
+          if [ -z "$rev" ]; then
+            echo "::error::no successful Cache run found on main"
+            exit 1
+          fi
           echo "Building github:moq-dev/moq/$rev (newest main commit with a successful Cache run)"
           relay=$(nix build --no-link --print-out-paths "github:moq-dev/moq/$rev#moq-relay")
           cli=$(nix build --no-link --print-out-paths "github:moq-dev/moq/$rev#moq")

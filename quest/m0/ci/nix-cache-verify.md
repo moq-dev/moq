@@ -70,7 +70,8 @@ direct test: any `building '...moq-relay-...drv'` line in that step is a real mi
   `https://nix.moq.dev` instead of compiling them. Check with
   `gh run list --workflow smoke.yml --event schedule`: its "Build moq from the
   flake" step names the pinned commit, which already had a successful Cache run,
-  so a `building` line for either binary is a cache bug.
+  so a `building` line for either binary is a cache miss: rule out the bucket's
+  30-day object expiry before calling it a cache bug.
 
 ## Related
 
