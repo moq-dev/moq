@@ -47,6 +47,17 @@ three wire generations of "start".
   `active.start == active.requested` gate (`lite/subscriber.rs`,
   `apply_response`).
 
+- The start state must make it impossible to resolve without settling what
+  was given up before the start. Today there are two paths. `resolve()`
+  drains `skipped`, while the shortcut that answers a start past the live
+  edge at once (the "start past everything" branch in `TrackRun`'s poll) only
+  sets `self.start`. So any drop collected while unresolved is never sent,
+  and the subscriber waits out its grace for those groups. Reproduce this
+  first. Found by the 2026-11-07 audit of implicit state machines (see
+  [Lifecycles are explicit state](/quest/m1/explicit-state/README.md)).
+  Recommended: `enum Start { Legacy, Unresolved { skipped, first },
+  Resolved { start, served } }`, with `skipped` moved out at the transition.
+
 Public API: none expected. Wire: lite-07 (unpublished) may send a START per
 update; published versions are unchanged.
 
