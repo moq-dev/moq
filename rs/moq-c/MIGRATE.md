@@ -39,7 +39,7 @@ A route handle replaces the publication, the prepared answer, and the request ha
 - `moq_publication_announce(publication, route)` is `moq_route_announce(route)`, and re-pricing is `moq_route_set_cost(route, cost)`. `moq_publication_unannounce` is `moq_route_withdraw`, and `moq_publication_free` is `moq_route_free`.
 - `moq_origin_requests(origin, prefix, len, on_request, user_data)` is `moq_origin_route_prefix(origin, prefix, len, options, on_request, user_data)`, and `moq_origin_requests_cancel` is `moq_route_free`.
 - `moq_broadcast_request_prepare(request, &broadcast)` then `moq_broadcast_prepared_publish` is `moq_broadcast_request_route(request, options)`: create it hidden to fill it first, then `moq_route_announce`. `moq_broadcast_prepared_free` is `moq_route_free`.
-- `moq_route_instance(route, &dst)` reads the instance the route serves now, borrowed until the next `moq_route_instance` on that route or `moq_route_free`. An exact route mints it at creation and keeps it across withdraw and announce; a job takes its prefix route's.
+- `moq_route_instance(route, &dst)` reads the stream's instance, minted at creation and kept across withdraw and announce.
 
 `moq_announce_route` is `moq_route_options`, given once at creation, and gains a trailing `hidden`. A zeroed or NULL `moq_route_options` is visible at once, so set `hidden` and call `moq_route_announce` after filling the catalog to keep the old create-then-announce order. A stable `instance` is fixed for the route's lifetime: announcing another one is a new route.
 
