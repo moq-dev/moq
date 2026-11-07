@@ -104,17 +104,17 @@ use super::CryptoProvider;
 ///
 /// Uses `SystemRandom` from aws-lc-rs for cryptographically secure random number generation.
 pub fn default_provider() -> CryptoProvider {
-    CryptoProvider {
-        // Shared components
-        kx_groups: kx_group::ALL_KX_GROUPS,
-        signature_verification: &sign::SIGNATURE_VERIFIER,
-        key_provider: &sign::KEY_PROVIDER,
-        secure_random: &random::SECURE_RANDOM,
-        hash_provider: &hash::HASH_PROVIDER,
-        hmac_provider: &hmac::HMAC_PROVIDER,
-        // DTLS 1.2 components
-        cipher_suites: cipher_suite::ALL_CIPHER_SUITES,
-        // DTLS 1.3 components
-        dtls13_cipher_suites: cipher_suite::ALL_DTLS13_CIPHER_SUITES,
-    }
+	CryptoProvider {
+		// Shared components
+		kx_groups: kx_group::ALL_KX_GROUPS,
+		signature_verification: &sign::SIGNATURE_VERIFIER,
+		key_provider: &sign::KEY_PROVIDER,
+		secure_random: &random::SECURE_RANDOM,
+		hash_provider: &hash::HASH_PROVIDER,
+		hmac_provider: &hmac::HMAC_PROVIDER,
+		// DTLS 1.2 components
+		cipher_suites: cipher_suite::ALL_CIPHER_SUITES,
+		// DTLS 1.3 components
+		dtls13_cipher_suites: cipher_suite::ALL_DTLS13_CIPHER_SUITES,
+	}
 }

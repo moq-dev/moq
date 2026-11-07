@@ -680,8 +680,7 @@
 #![deny(clippy::needless_pass_by_ref_mut)]
 #![deny(missing_docs)]
 
-
-use tracing::{debug, trace, warn};
+use crate::vendor::str0m_proto::Pii;
 use bwe::{Bwe, BweKind};
 use change::{DirectApi, SdpApi};
 use rtp::RawPacket;
@@ -689,9 +688,9 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
-use crate::vendor::str0m_proto::Pii;
 use streams::RtpPacket;
 use streams::StreamPaused;
+use tracing::{debug, trace, warn};
 use util::InstantExt;
 
 // Identity `drv::ToStatic` (`Static = Self`) for the `Copy` identity types.
@@ -747,8 +746,8 @@ pub use io::DATAGRAM_MTU_WARN;
 
 /// Additional configuration.
 pub mod config {
-    pub use super::crypto::dtls::{DtlsCert, DtlsVersion, KeyingMaterial};
-    pub use super::crypto::{CryptoProvider, Fingerprint};
+	pub use super::crypto::dtls::{DtlsCert, DtlsVersion, KeyingMaterial};
+	pub use super::crypto::{CryptoProvider, Fingerprint};
 }
 
 /// Low level ICE access.
@@ -757,10 +756,10 @@ pub mod config {
 // reuse str0m's ICE implementation. This is now in the `is` crate.
 #[doc(hidden)]
 pub mod ice {
-    pub use crate::vendor::is::IceCreds;
-    pub use crate::vendor::is::stun::{StunMessage, StunMessageBuilder, StunPacket, TransId};
-    pub use crate::vendor::is::{IceAgent, IceAgentEvent};
-    pub use crate::vendor::is::{LocalPreference, default_local_preference};
+	pub use crate::vendor::is::IceCreds;
+	pub use crate::vendor::is::stun::{StunMessage, StunMessageBuilder, StunPacket, TransId};
+	pub use crate::vendor::is::{IceAgent, IceAgentEvent};
+	pub use crate::vendor::is::{LocalPreference, default_local_preference};
 }
 
 mod io;
@@ -774,46 +773,44 @@ use rtp_::{Bitrate, DataSize};
 
 /// Low level RTP access.
 pub mod rtp {
-    /// Feedback for RTP.
-    pub mod rtcp {
-        pub use crate::vendor::str0m::rtp_::AppSpecificFeedback;
-        pub use crate::vendor::str0m::rtp_::{Descriptions, ExtendedReport, Fir, Goodbye, Nack, Pli};
-        pub use crate::vendor::str0m::rtp_::{Dlrr, NackEntry, ReceptionReport, ReportBlock};
-        pub use crate::vendor::str0m::rtp_::{FirEntry, ReceiverReport, SenderInfo, SenderReport, Twcc};
-        pub use crate::vendor::str0m::rtp_::{ReportList, Rrtr, Rtcp, Sdes, SdesType};
-    }
-    use self::rtcp::Rtcp;
+	/// Feedback for RTP.
+	pub mod rtcp {
+		pub use crate::vendor::str0m::rtp_::AppSpecificFeedback;
+		pub use crate::vendor::str0m::rtp_::{Descriptions, ExtendedReport, Fir, Goodbye, Nack, Pli};
+		pub use crate::vendor::str0m::rtp_::{Dlrr, NackEntry, ReceptionReport, ReportBlock};
+		pub use crate::vendor::str0m::rtp_::{FirEntry, ReceiverReport, SenderInfo, SenderReport, Twcc};
+		pub use crate::vendor::str0m::rtp_::{ReportList, Rrtr, Rtcp, Sdes, SdesType};
+	}
+	use self::rtcp::Rtcp;
 
-    /// Video Layers Allocation RTP Header Extension
-    pub mod vla;
-    pub use crate::vendor::str0m::rtp_::{AbsCaptureTime, ExtensionValues, UserExtensionValues};
-    pub use crate::vendor::str0m::rtp_::{Extension, ExtensionMap, ExtensionSerializer};
+	/// Video Layers Allocation RTP Header Extension
+	pub mod vla;
+	pub use crate::vendor::str0m::rtp_::{AbsCaptureTime, ExtensionValues, UserExtensionValues};
+	pub use crate::vendor::str0m::rtp_::{Extension, ExtensionMap, ExtensionSerializer};
 
-    pub use crate::vendor::str0m::packet::{
-        RedBlock, RedDecoder, RedEncoder, RedundantBlock, Vp8Descriptor, Vp8DescriptorError,
-        Vp8Patch, Vp8PatchBuilder, Vp8PatchError,
-    };
-    pub use crate::vendor::str0m::rtp_::{RtpHeader, SeqNo, Ssrc, VideoOrientation};
-    pub use crate::vendor::str0m::streams::{
-        RtpPacket, RtpWrite, StreamPaused, StreamRx, StreamTx, StreamTxQueueInfo,
-    };
+	pub use crate::vendor::str0m::packet::{
+		RedBlock, RedDecoder, RedEncoder, RedundantBlock, Vp8Descriptor, Vp8DescriptorError, Vp8Patch, Vp8PatchBuilder,
+		Vp8PatchError,
+	};
+	pub use crate::vendor::str0m::rtp_::{RtpHeader, SeqNo, Ssrc, VideoOrientation};
+	pub use crate::vendor::str0m::streams::{RtpPacket, RtpWrite, StreamPaused, StreamRx, StreamTx, StreamTxQueueInfo};
 
-    /// Debug output of the unencrypted RTP and RTCP packets.
-    ///
-    /// Enable using [`RtcConfig::enable_raw_packets()`][crate::vendor::str0m::RtcConfig::enable_raw_packets].
-    /// This clones data, and is therefore expensive.
-    /// Should not be enabled outside of tests and troubleshooting.
-    #[derive(Debug)]
-    pub enum RawPacket {
-        /// Sent RTCP.
-        RtcpTx(Rtcp),
-        /// Incoming RTCP.
-        RtcpRx(Rtcp),
-        /// Sent RTP.
-        RtpTx(RtpHeader, Vec<u8>),
-        /// Incoming RTP.
-        RtpRx(RtpHeader, Vec<u8>),
-    }
+	/// Debug output of the unencrypted RTP and RTCP packets.
+	///
+	/// Enable using [`RtcConfig::enable_raw_packets()`][crate::vendor::str0m::RtcConfig::enable_raw_packets].
+	/// This clones data, and is therefore expensive.
+	/// Should not be enabled outside of tests and troubleshooting.
+	#[derive(Debug)]
+	pub enum RawPacket {
+		/// Sent RTCP.
+		RtcpTx(Rtcp),
+		/// Incoming RTCP.
+		RtcpRx(Rtcp),
+		/// Sent RTP.
+		RtpTx(RtpHeader, Vec<u8>),
+		/// Incoming RTP.
+		RtpRx(RtpHeader, Vec<u8>),
+	}
 }
 
 pub(crate) mod pacer;
@@ -823,7 +820,7 @@ pub(crate) mod bwe_;
 
 /// Bandwidth estimation.
 pub mod bwe {
-    pub use crate::vendor::str0m::bwe_::api::*;
+	pub use crate::vendor::str0m::bwe_::api::*;
 }
 
 mod sctp;
@@ -866,7 +863,7 @@ pub mod error;
 
 /// Network related types to get socket data in/out of [`Rtc`].
 pub mod net {
-    pub use crate::vendor::str0m::io::{DatagramRecv, DatagramSend, Protocol, Receive, TcpType, Transmit};
+	pub use crate::vendor::str0m::io::{DatagramRecv, DatagramSend, Protocol, Receive, TcpType, Transmit};
 }
 
 const VERSION: &str = "0.24.1";
@@ -912,48 +909,48 @@ pub use error::RtcError;
 /// }
 /// ```
 pub struct Rtc {
-    state: RtcState,
-    ice: IceAgent,
-    dtls: Dtls,
-    dtls_connected: bool,
-    dtls_buf: Vec<u8>,
-    next_dtls_timeout: Option<Instant>,
-    sctp: RtcSctp,
-    chan: ChannelHandler,
-    stats: Option<Stats>,
-    session: Session,
-    remote_fingerprint: Option<Fingerprint>,
-    remote_addrs: Vec<SocketAddr>,
-    send_addr: Option<SendAddr>,
-    need_init_time: bool,
-    last_now: Instant,
-    peer_bytes_rx: u64,
-    peer_bytes_tx: u64,
-    change_counter: usize,
-    last_timeout_reason: Reason,
-    crypto_provider: Arc<crate::vendor::str0m::crypto::CryptoProvider>,
-    fingerprint_verification: bool,
-    close_dtls_started: bool,
-    // Signals which halves of the tree may need re-polling. Written locally by
-    // the components that mutate, via the `Wake` guard handed down the tree;
-    // read (and cleared) by `poll_output`. See the `poll` module.
-    readiness: Readiness,
-    // Last timeout returned by `poll_output`, reused while the readiness says
-    // the timeout is still valid.
-    cached_timeout: Instant,
+	state: RtcState,
+	ice: IceAgent,
+	dtls: Dtls,
+	dtls_connected: bool,
+	dtls_buf: Vec<u8>,
+	next_dtls_timeout: Option<Instant>,
+	sctp: RtcSctp,
+	chan: ChannelHandler,
+	stats: Option<Stats>,
+	session: Session,
+	remote_fingerprint: Option<Fingerprint>,
+	remote_addrs: Vec<SocketAddr>,
+	send_addr: Option<SendAddr>,
+	need_init_time: bool,
+	last_now: Instant,
+	peer_bytes_rx: u64,
+	peer_bytes_tx: u64,
+	change_counter: usize,
+	last_timeout_reason: Reason,
+	crypto_provider: Arc<crate::vendor::str0m::crypto::CryptoProvider>,
+	fingerprint_verification: bool,
+	close_dtls_started: bool,
+	// Signals which halves of the tree may need re-polling. Written locally by
+	// the components that mutate, via the `Wake` guard handed down the tree;
+	// read (and cleared) by `poll_output`. See the `poll` module.
+	readiness: Readiness,
+	// Last timeout returned by `poll_output`, reused while the readiness says
+	// the timeout is still valid.
+	cached_timeout: Instant,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RtcState {
-    Alive,
-    Closing,
-    Closed,
+	Alive,
+	Closing,
+	Closed,
 }
 
 struct SendAddr {
-    proto: net::Protocol,
-    source: SocketAddr,
-    destination: SocketAddr,
+	proto: net::Protocol,
+	source: SocketAddr,
+	destination: SocketAddr,
 }
 
 /// Events produced by [`Rtc::poll_output()`].
@@ -1076,40 +1073,40 @@ pub enum Event {
 }
 
 impl Event {
-    /// Reference to the [`RawPacket`] if this is indeed an `Event::RawPacket`.
-    pub fn as_raw_packet(&self) -> Option<&RawPacket> {
-        if let Self::RawPacket(boxed) = &self {
-            Some(&**boxed)
-        } else {
-            None
-        }
-    }
+	/// Reference to the [`RawPacket`] if this is indeed an `Event::RawPacket`.
+	pub fn as_raw_packet(&self) -> Option<&RawPacket> {
+		if let Self::RawPacket(boxed) = &self {
+			Some(&**boxed)
+		} else {
+			None
+		}
+	}
 }
 
 /// Input as expected by [`Rtc::handle_input()`]. Either network data or a timeout.
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)] // We purposely don't want to allocate.
 pub enum Input<'a> {
-    /// A timeout without any network input.
-    Timeout(Instant),
-    /// Network input. The [`Instant`] is the time the packet was received from the socket -
-    /// not necessarily "now" (e.g. when UDP demultiplexing runs on a separate thread). It
-    /// drives time forward when more recent than the last "now" the instance has seen.
-    Receive(Instant, net::Receive<'a>),
+	/// A timeout without any network input.
+	Timeout(Instant),
+	/// Network input. The [`Instant`] is the time the packet was received from the socket -
+	/// not necessarily "now" (e.g. when UDP demultiplexing runs on a separate thread). It
+	/// drives time forward when more recent than the last "now" the instance has seen.
+	Receive(Instant, net::Receive<'a>),
 }
 
 /// Output produced by [`Rtc::poll_output()`]
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Output {
-    /// When the [`Rtc`] instance expects an [`Input::Timeout`].
-    Timeout(Instant),
+	/// When the [`Rtc`] instance expects an [`Input::Timeout`].
+	Timeout(Instant),
 
-    /// Network data that is to be sent.
-    Transmit(net::Transmit),
+	/// Network data that is to be sent.
+	Transmit(net::Transmit),
 
-    /// Some event such as media data arriving from the remote peer or connection events.
-    Event(Event),
+	/// Some event such as media data arriving from the remote peer or connection events.
+	Event(Event),
 }
 
 pub use crate::vendor::str0m::pacer::PacerReason;
@@ -1120,1175 +1117,1158 @@ pub use crate::vendor::str0m::pacer::PacerReason;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum Reason {
-    /// No timeout scheduled.
-    ///
-    /// The timeout value is in the distant future.
-    #[default]
-    NotHappening,
+	/// No timeout scheduled.
+	///
+	/// The timeout value is in the distant future.
+	#[default]
+	NotHappening,
 
-    /// The DTLS subsystem.
-    ///
-    /// Only relevant during handshaking.
-    DTLS,
+	/// The DTLS subsystem.
+	///
+	/// Only relevant during handshaking.
+	DTLS,
 
-    /// The ICE agent.
-    ///
-    /// Includes checking candidate pairs and various cleanups.
-    Ice,
+	/// The ICE agent.
+	///
+	/// Includes checking candidate pairs and various cleanups.
+	Ice,
 
-    /// The SCTP subsystem.
-    ///
-    /// Things like handling retransmissions and keep-alive checks.
-    Sctp,
+	/// The SCTP subsystem.
+	///
+	/// Things like handling retransmissions and keep-alive checks.
+	Sctp,
 
-    /// Data channels.
-    ///
-    /// Scheduled when we need to open allocations using SCTP.
-    Channel,
+	/// Data channels.
+	///
+	/// Scheduled when we need to open allocations using SCTP.
+	Channel,
 
-    /// Stats gathering (if enabled).
-    ///
-    /// Periodic gathering of statistics.
-    Stats,
+	/// Stats gathering (if enabled).
+	///
+	/// Periodic gathering of statistics.
+	Stats,
 
-    /// Regular RTP feedback.
-    ///
-    /// Receiver reports (RR) and sender reports (SR).
-    Feedback,
+	/// Regular RTP feedback.
+	///
+	/// Receiver reports (RR) and sender reports (SR).
+	Feedback,
 
-    /// Sending of RTP NACK.
-    ///
-    /// When missing packets are discovered, a NACK is scheduled.
-    /// Retries for each packet wait for the receive-stream RTT plus 5 ms,
-    /// using a 100 ms RTT until a measurement is available.
-    Nack,
+	/// Sending of RTP NACK.
+	///
+	/// When missing packets are discovered, a NACK is scheduled.
+	/// Retries for each packet wait for the receive-stream RTT plus 5 ms,
+	/// using a 100 ms RTT until a measurement is available.
+	Nack,
 
-    /// Reporting of TWCC (if enabled).
-    ///
-    /// All incoming RTP packets are reported using TWCC. Enabled via SDP if both
-    /// sides support it.
-    Twcc,
+	/// Reporting of TWCC (if enabled).
+	///
+	/// All incoming RTP packets are reported using TWCC. Enabled via SDP if both
+	/// sides support it.
+	Twcc,
 
-    /// RTP streams not receiving data goes into a paused state.
-    ///
-    /// Whenever an RTP receive stream receives data, a new timeout is scheduled.
-    PauseCheck,
+	/// RTP streams not receiving data goes into a paused state.
+	///
+	/// Whenever an RTP receive stream receives data, a new timeout is scheduled.
+	PauseCheck,
 
-    /// Preprocessing of RTP packets to be sent.
-    ///
-    /// Housekeeping task in RTP send streams.
-    SendStream,
+	/// Preprocessing of RTP packets to be sent.
+	///
+	/// Housekeeping task in RTP send streams.
+	SendStream,
 
-    /// Packetizing of media into RTP data (if used).
-    ///
-    /// Written media data needs packetizing. This is not used in RTP mode.
-    Packetize,
+	/// Packetizing of media into RTP data (if used).
+	///
+	/// Written media data needs packetizing. This is not used in RTP mode.
+	Packetize,
 
-    /// A complete video frame is waiting for missing earlier packets or its timeout.
-    ReceiveReorder,
+	/// A complete video frame is waiting for missing earlier packets or its timeout.
+	ReceiveReorder,
 
-    /// Pacer doing things.
-    Pacer(PacerReason),
+	/// Pacer doing things.
+	Pacer(PacerReason),
 
-    /// The delay controller of the BWE subsystem.
-    BweDelayControl,
+	/// The delay controller of the BWE subsystem.
+	BweDelayControl,
 
-    /// The probe controller of the BWE subsystem.
-    BweProbeControl,
+	/// The probe controller of the BWE subsystem.
+	BweProbeControl,
 
-    /// The probe estimator of the BWE subsystem.
-    BweProbeEstimator,
+	/// The probe estimator of the BWE subsystem.
+	BweProbeEstimator,
 }
 
 impl Rtc {
-    /// Creates a new instance with default settings.
-    ///
-    /// To configure the instance, use [`RtcConfig`].
-    ///
-    /// ```ignore
-    /// use std::time::Instant;
-    /// use crate::vendor::str0m::Rtc;
-    ///
-    /// let rtc = Rtc::new(Instant::now());
-    /// ```
-    pub fn new(start: Instant) -> Self {
-        let config = RtcConfig::default();
-        Self::new_from_config(config, start).expect("Failed to create Rtc from default config")
-    }
+	/// Creates a new instance with default settings.
+	///
+	/// To configure the instance, use [`RtcConfig`].
+	///
+	/// ```ignore
+	/// use std::time::Instant;
+	/// use crate::vendor::str0m::Rtc;
+	///
+	/// let rtc = Rtc::new(Instant::now());
+	/// ```
+	pub fn new(start: Instant) -> Self {
+		let config = RtcConfig::default();
+		Self::new_from_config(config, start).expect("Failed to create Rtc from default config")
+	}
 
-    /// Creates a config builder that configures an [`Rtc`] instance.
-    ///
-    /// ```ignore
-    /// # use std::time::Instant;
-    /// # use crate::vendor::str0m::Rtc;
-    /// let rtc = Rtc::builder()
-    ///     .set_ice_lite(true)
-    ///     .build(Instant::now());
-    /// ```
-    pub fn builder() -> RtcConfig {
-        RtcConfig::new()
-    }
+	/// Creates a config builder that configures an [`Rtc`] instance.
+	///
+	/// ```ignore
+	/// # use std::time::Instant;
+	/// # use crate::vendor::str0m::Rtc;
+	/// let rtc = Rtc::builder()
+	///     .set_ice_lite(true)
+	///     .build(Instant::now());
+	/// ```
+	pub fn builder() -> RtcConfig {
+		RtcConfig::new()
+	}
 
-    pub(crate) fn new_from_config(config: RtcConfig, start: Instant) -> Result<Self, RtcError> {
-        let crypto_provider = config
-            .crypto_provider
-            .clone()
-            // If crypto_provider is not set in config, check process default
-            .or_else(|| CryptoProvider::get_default().cloned().map(Arc::new))
-            // Or fall back on feature flags
-            .or_else(|| Some(Arc::new(from_feature_flags())))
-            // from_feature_flags panics already, so we should never see
-            // this expect message.
-            .expect("a crash earlier if no crypto provider was set");
+	pub(crate) fn new_from_config(config: RtcConfig, start: Instant) -> Result<Self, RtcError> {
+		let crypto_provider = config
+			.crypto_provider
+			.clone()
+			// If crypto_provider is not set in config, check process default
+			.or_else(|| CryptoProvider::get_default().cloned().map(Arc::new))
+			// Or fall back on feature flags
+			.or_else(|| Some(Arc::new(from_feature_flags())))
+			// from_feature_flags panics already, so we should never see
+			// this expect message.
+			.expect("a crash earlier if no crypto provider was set");
 
-        let session = Session::new(&config);
+		let session = Session::new(&config);
 
-        // Capture before any partial moves of `config` below.
-        let mtu = config.mtu.clone();
+		// Capture before any partial moves of `config` below.
+		let mtu = config.mtu.clone();
 
-        let local_creds = config.local_ice_credentials.unwrap_or_else(IceCreds::new);
-        let mut ice = IceAgent::with_hmac(local_creds, crypto_provider.sha1_hmac_provider);
-        if config.ice_lite {
-            ice.set_ice_lite(config.ice_lite);
-        }
+		let local_creds = config.local_ice_credentials.unwrap_or_else(IceCreds::new);
+		let mut ice = IceAgent::with_hmac(local_creds, crypto_provider.sha1_hmac_provider);
+		if config.ice_lite {
+			ice.set_ice_lite(config.ice_lite);
+		}
 
-        if let Some(initial_stun_rto) = config.initial_stun_rto {
-            ice.set_initial_stun_rto(initial_stun_rto);
-        }
+		if let Some(initial_stun_rto) = config.initial_stun_rto {
+			ice.set_initial_stun_rto(initial_stun_rto);
+		}
 
-        if let Some(max_stun_rto) = config.max_stun_rto {
-            ice.set_max_stun_rto(max_stun_rto);
-        }
+		if let Some(max_stun_rto) = config.max_stun_rto {
+			ice.set_max_stun_rto(max_stun_rto);
+		}
 
-        if let Some(max_stun_retransmits) = config.max_stun_retransmits {
-            ice.set_max_stun_retransmits(max_stun_retransmits);
-        }
+		if let Some(max_stun_retransmits) = config.max_stun_retransmits {
+			ice.set_max_stun_retransmits(max_stun_retransmits);
+		}
 
-        ice.set_mtu(mtu.clone());
+		ice.set_mtu(mtu.clone());
 
-        let dtls_cert = config
-            .dtls_cert
-            .or_else(|| crypto_provider.dtls_provider.generate_certificate())
-            .expect(
-                "No DTLS certificate provided and the crypto provider cannot generate one. \
+		let dtls_cert = config
+			.dtls_cert
+			.or_else(|| crypto_provider.dtls_provider.generate_certificate())
+			.expect(
+				"No DTLS certificate provided and the crypto provider cannot generate one. \
              Either provide a certificate via RtcConfig::set_dtls_cert or use a \
              crypto provider that supports certificate generation.",
-            );
-
-        let mut sctp = RtcSctp::new(*mtu.start(), config.sctp_max_message_size);
-        if config.snap_enabled {
-            sctp.enable_snap();
-        }
-        sctp.set_max_buffered_amount(config.sctp_max_buffered_amount);
-
-        Ok(Rtc {
-            state: RtcState::Alive,
-            ice,
-            dtls: Dtls::new(
-                &dtls_cert,
-                crypto_provider.dtls_provider,
-                crypto_provider.sha256_provider,
-                start,
-                config.dtls_version,
-                mtu,
-            )
-            .expect("DTLS to init without problem"),
-            dtls_connected: false,
-            dtls_buf: vec![0; 2000],
-            next_dtls_timeout: None,
-            session,
-            sctp,
-            chan: ChannelHandler::default(),
-            stats: config.stats_interval.map(Stats::new),
-            remote_fingerprint: None,
-            remote_addrs: vec![],
-            send_addr: None,
-            need_init_time: true,
-            last_now: start,
-            peer_bytes_rx: 0,
-            peer_bytes_tx: 0,
-            change_counter: 0,
-            last_timeout_reason: Reason::NotHappening,
-            crypto_provider,
-            fingerprint_verification: config.fingerprint_verification,
-            close_dtls_started: false,
-            readiness: Readiness::armed(),
-            cached_timeout: start,
-        })
-    }
-
-    /// Tests if this instance is still working.
-    ///
-    /// Certain events will straight away disconnect the `Rtc` instance, such as
-    /// the DTLS fingerprint from the setup not matching that of the TLS negotiation
-    /// (since that would potentially indicate a MITM attack!).
-    ///
-    /// The instance can be manually disconnected using [`Rtc::disconnect()`].
-    ///
-    /// During shutdown, this remains `true` until [`Rtc::poll_output()`]
-    /// has drained pending local close output. App-facing operations such as
-    /// [`Rtc::writer()`] and [`Rtc::channel()`] are unavailable during that
-    /// closing drain.
-    ///
-    /// ```ignore
-    /// # use std::time::Instant;
-    /// # use crate::vendor::str0m::Rtc;
-    /// let mut rtc = Rtc::new(Instant::now());
-    ///
-    /// assert!(rtc.is_alive());
-    ///
-    /// rtc.disconnect();
-    /// assert!(!rtc.is_alive());
-    /// ```
-    pub fn is_alive(&self) -> bool {
-        self.state != RtcState::Closed
-    }
-
-    /// Force disconnects the instance making [`Rtc::is_alive()`] return `false`.
-    ///
-    /// This makes [`Rtc::poll_output`] and [`Rtc::handle_input`] go inert and not
-    /// produce anymore network output or events.
-    ///
-    /// ```ignore
-    /// # use std::time::Instant;
-    /// # use crate::vendor::str0m::Rtc;
-    /// let mut rtc = Rtc::new(Instant::now());
-    ///
-    /// rtc.disconnect();
-    /// assert!(!rtc.is_alive());
-    /// ```
-    pub fn disconnect(&mut self) {
-        self.state = RtcState::Closed;
-    }
-
-    /// Add a local ICE candidate. Local candidates are socket addresses the `Rtc` instance
-    /// use for communicating with the peer.
-    ///
-    /// If the candidate is accepted by the `Rtc` instance, it will return `Some` with a reference
-    /// to it. You should then signal this candidate to the remote peer.
-    ///
-    /// This library has no built-in discovery of local network addresses on the host
-    /// or NATed addresses via a STUN server or TURN server. The user of the library
-    /// is expected to add new local candidates as they are discovered.
-    ///
-    /// In WebRTC lingo, the `Rtc` instance is permanently in a mode of [Trickle Ice][1]. It's
-    /// however advisable to add at least one local candidate before starting the instance.
-    ///
-    /// ```ignore
-    /// # use std::time::Instant;
-    /// # use crate::vendor::str0m::{Rtc, Candidate};
-    /// let mut rtc = Rtc::new(Instant::now());
-    ///
-    /// let a = "127.0.0.1:5000".parse().unwrap();
-    /// let c = Candidate::host(a, "udp").unwrap();
-    ///
-    /// rtc.add_local_candidate(c);
-    /// ```
-    ///
-    /// [1]: https://www.rfc-editor.org/rfc/rfc8838.txt
-    pub fn add_local_candidate(&mut self, c: Candidate) -> Option<&Candidate> {
-        // ICE is an external crate and can't take a `Wake`; adding a candidate
-        // can start connectivity checks (transmits) and arm timers.
-        self.wake_all();
-        self.ice.add_local_candidate(c)
-    }
-
-    /// Add a remote ICE candidate. Remote candidates are addresses of the peer.
-    ///
-    /// For [`SdpApi`]: Remote candidates are typically added via
-    /// receiving a remote [`SdpOffer`][change::SdpOffer] or [`SdpAnswer`][change::SdpAnswer].
-    ///
-    /// However for the case of [Trickle Ice][1], this is the way to add remote candidates
-    /// that are "trickled" from the other side.
-    ///
-    /// ```ignore
-    /// # use std::time::Instant;
-    /// # use crate::vendor::str0m::{Rtc, Candidate};
-    /// let mut rtc = Rtc::new(Instant::now());
-    ///
-    /// let a = "1.2.3.4:5000".parse().unwrap();
-    /// let c = Candidate::host(a, "udp").unwrap();
-    ///
-    /// rtc.add_remote_candidate(c);
-    /// ```
-    ///
-    /// [1]: https://www.rfc-editor.org/rfc/rfc8838.txt
-    pub fn add_remote_candidate(&mut self, c: Candidate) {
-        // ICE is an external crate and can't take a `Wake`; see above.
-        self.wake_all();
-        self.ice.add_remote_candidate(c);
-    }
-
-    /// Checks if we are connected.
-    ///
-    /// This tests if we have ICE connection, DTLS and the SRTP crypto derived contexts are up.
-    pub fn is_connected(&self) -> bool {
-        self.ice.state().is_connected() && self.dtls_connected && self.session.is_connected()
-    }
-
-    /// Make changes to the Rtc session via SDP.
-    ///
-    /// ```ignore
-    /// # use std::time::Instant;
-    /// # use crate::vendor::str0m::Rtc;
-    /// # use crate::vendor::str0m::media::{MediaKind, Direction};
-    /// # use crate::vendor::str0m::change::SdpAnswer;
-    /// let mut rtc = Rtc::new(Instant::now());
-    ///
-    /// let mut changes = rtc.sdp_api();
-    /// let mid_audio = changes.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
-    /// let mid_video = changes.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
-    ///
-    /// let (offer, pending) = changes.apply().unwrap();
-    /// let json = serde_json::to_vec(&offer).unwrap();
-    ///
-    /// // Send json OFFER to remote peer. Receive an answer back.
-    /// let answer: SdpAnswer = todo!();
-    ///
-    /// rtc.sdp_api().accept_answer(pending, answer).unwrap();
-    /// ```
-    pub fn sdp_api(&mut self) -> SdpApi {
-        SdpApi::new(self)
-    }
-
-    /// Makes direct changes to the Rtc session.
-    ///
-    /// This is a low level API. For "normal" use via SDP, see [`Rtc::sdp_api()`].
-    pub fn direct_api(&mut self) -> DirectApi {
-        DirectApi::new(self)
-    }
-
-    /// Send outgoing media data (frames) or request keyframes.
-    ///
-    /// Returns `None` if the direction isn't sending (`sendrecv` or `sendonly`).
-    ///
-    /// ```ignore
-    /// # use std::time::Instant;
-    /// # use crate::vendor::str0m::Rtc;
-    /// # use crate::vendor::str0m::media::{MediaData, Mid};
-    /// # use crate::vendor::str0m::format::PayloadParams;
-    /// let mut rtc = Rtc::new(Instant::now());
-    ///
-    /// // add candidates, do SDP negotiation
-    /// let mid: Mid = todo!(); // obtain mid from Event::MediaAdded.
-    ///
-    /// // Writer for this mid.
-    /// let writer = rtc.writer(mid).unwrap();
-    ///
-    /// // Get incoming media data from another peer
-    /// let data: MediaData = todo!();
-    ///
-    /// // Match incoming PT to an outgoing PT.
-    /// let pt = writer.match_params(data.params).unwrap();
-    ///
-    /// writer.write(pt, data.network_time, data.time, data.data).unwrap();
-    /// ```
-    ///
-    /// This is a frame level API: For RTP level see [`DirectApi::stream_tx()`]
-    /// and [`DirectApi::stream_rx()`].
-    ///
-    pub fn writer(&mut self, mid: Mid) -> Option<Writer> {
-        if self.session.rtp_mode {
-            panic!("In rtp_mode use direct_api().stream_tx().write_rtp()");
-        }
-
-        if self.state != RtcState::Alive {
-            return None;
-        }
-
-        // Disjoint borrows let the writer arm readiness within each mutation.
-        let Rtc {
-            session, readiness, ..
-        } = self;
-
-        // This does not catch potential RIDs required to send simulcast, but
-        // it's a good start. An error might arise later on RID mismatch.
-        session.media_by_mid(mid)?;
-
-        Some(Writer::new(session, readiness, mid))
-    }
-
-    /// Currently configured media.
-    ///
-    /// Read only access. Changes are made via [`Rtc::sdp_api()`] or [`Rtc::direct_api()`].
-    pub fn media(&self, mid: Mid) -> Option<&Media> {
-        self.session.media_by_mid(mid)
-    }
-
-    fn init_dtls(&mut self, active: bool) -> Result<(), RtcError> {
-        if self.dtls.is_inited() {
-            return Ok(());
-        }
-
-        debug!("DTLS setup is: {:?}", active);
-        self.dtls.set_active(active);
-
-        // Initialize the DTLS state (client or server) before any operations
-        // This ensures internal state like random (client) or last_now (server) is initialized
-        self.dtls.handle_timeout(self.last_now)?;
-
-        if active {
-            // Drive handshake by sending an empty packet to trigger ClientHello
-            let _ = self.dtls.handle_receive(&[]);
-        }
-
-        Ok(())
-    }
-
-    fn try_init_sctp(
-        &mut self,
-        client: bool,
-        sctp_init_data: Option<SctpInitData>,
-        remote_max_message_size: Option<u32>,
-    ) -> Result<(), RtcError> {
-        // If we got an m=application line, ensure we have negotiated the
-        // SCTP association with the other side.
-        if self.sctp.is_inited() {
-            return Ok(());
-        }
-
-        self.sctp.init(
-            client,
-            self.last_now,
-            sctp_init_data,
-            remote_max_message_size,
-        )?;
-        Ok(())
-    }
-
-    /// Creates a new Mid that is not in the session already.
-    pub(crate) fn new_mid(&self) -> Mid {
-        loop {
-            let mid = Mid::new();
-            if !self.session.has_mid(mid) {
-                break mid;
-            }
-        }
-    }
-
-    /// Poll the `Rtc` instance for output. Output can be three things, something to _Transmit_
-    /// via a UDP socket (maybe via a TURN server). An _Event_, such as receiving media data,
-    /// or a _Timeout_.
-    ///
-    /// The user of the library is expected to continuously call this function and deal with
-    /// the output until it encounters an [`Output::Timeout`] at which point no further output
-    /// is produced (if polled again, it will result in just another timeout).
-    ///
-    /// After exhausting the `poll_output`, the function will only produce more output again
-    /// when one of two things happen:
-    ///
-    /// 1. The polled timeout is reached.
-    /// 2. New network input.
-    ///
-    /// See [`Rtc`] instance documentation for how this is expected to be used in a loop.
-    pub fn poll_output(&mut self) -> Result<Output, RtcError> {
-        // SCTP packets fed into DTLS require another pass. Loop here so a large
-        // batch does not grow the stack with one recursive call per packet.
-        let o = loop {
-            if let Some(o) = self.do_poll_output()? {
-                break o;
-            }
-        };
-
-        match &o {
-            Output::Event(e) => match e {
-                Event::ChannelData(_)
-                | Event::MediaData(_)
-                | Event::RtpPacket(_)
-                | Event::SenderFeedback(_)
-                | Event::MediaEgressStats(_)
-                | Event::MediaIngressStats(_)
-                | Event::PeerStats(_)
-                | Event::ChannelBufferedAmountLow(_)
-                | Event::EgressBitrateEstimate(_)
-                | Event::KeyframeRequest(_) => {
-                    trace!("{:?}", e)
-                }
-                _ => debug!("{:?}", e),
-            },
-            Output::Transmit(t) => {
-                self.peer_bytes_tx += t.contents.len() as u64;
-                trace!("OUT {:?}", t)
-            }
-            Output::Timeout(_t) => {}
-        }
-
-        Ok(o)
-    }
-
-    /// Conservatively re-poll the whole tree.
-    fn wake_all(&mut self) {
-        drop(self.readiness.wake());
-    }
-
-    // Returns None when polling must restart after handling an SCTP packet.
-    fn do_poll_output(&mut self) -> Result<Option<Output>, RtcError> {
-        if self.state == RtcState::Closed {
-            self.last_timeout_reason = Reason::NotHappening;
-            return Ok(Some(Output::Timeout(not_happening())));
-        }
-
-        if !self.readiness.wants_events() {
-            return Ok(Some(Output::Timeout(self.poll_timeout())));
-        }
-
-        while let Some(e) = self.ice.poll_event() {
-            match e {
-                IceAgentEvent::IceRestart(_) => {
-                    //
-                }
-                IceAgentEvent::IceConnectionStateChange(v) => {
-                    return Ok(Some(Output::Event(Event::IceConnectionStateChange(v))));
-                }
-                IceAgentEvent::DiscoveredRecv { proto, source } => {
-                    debug!("ICE remote address: {:?}/{:?}", Pii(source), proto);
-                    self.remote_addrs.push(source);
-                    while self.remote_addrs.len() > 20 {
-                        self.remote_addrs.remove(0);
-                    }
-                }
-                IceAgentEvent::NominatedSend {
-                    proto,
-                    source,
-                    destination,
-                } => {
-                    debug!(
-                        "ICE nominated send from: {:?} to: {:?} with protocol {:?}",
-                        Pii(source),
-                        Pii(destination),
-                        proto,
-                    );
-                    self.send_addr = Some(SendAddr {
-                        proto,
-                        source,
-                        destination,
-                    });
-                }
-            }
-        }
-
-        // Handle DTLS timeout before polling output so any retransmit packets
-        // queued by dimpl and the re-armed flight timer are picked up by the
-        // poll loop below in the same iteration.
-        if let Some(timeout) = self.next_dtls_timeout {
-            if timeout <= self.last_now {
-                self.next_dtls_timeout = None;
-
-                if let Err(error) = self.dtls.handle_timeout(self.last_now) {
-                    // A failed timer transition leaves DTLS unrecoverable. Close the
-                    // RTC so continued polling cannot expose the same due timeout again.
-                    self.disconnect();
-                    return Err(error.into());
-                }
-            }
-        }
-
-        // Poll DTLS output - collect packets, handle events
-        let mut just_connected = false;
-        loop {
-            match self.dtls.poll_output(&mut self.dtls_buf) {
-                DtlsOutput::Packet(_) => {
-                    unreachable!("We don't expect DTLS packets here since we use poll_packet");
-                }
-                DtlsOutput::Connected => {
-                    if !self.dtls_connected {
-                        debug!("DTLS connected");
-                        self.dtls_connected = true;
-                        just_connected = true;
-                    }
-                }
-                DtlsOutput::KeyingMaterial(km, profile) => {
-                    use config::KeyingMaterial;
-                    let km_bytes = km.to_vec();
-                    debug!("DTLS set SRTP keying material and profile: {}", profile);
-                    let active = self.dtls.is_active().expect("DTLS must be inited by now");
-                    self.session.set_keying_material(
-                        KeyingMaterial::new(&km_bytes),
-                        &self.crypto_provider,
-                        profile,
-                        active,
-                    );
-                }
-                DtlsOutput::PeerCert(der) => {
-                    debug!("DTLS verify remote fingerprint");
-                    // Compute the fingerprint of the peer's DER certificate with the hash
-                    // function of the expected one (RFC 8122 §5): sha-256, or sha-1 as some
-                    // endpoints still announce. sha-256 when there is none to compare with.
-                    let provider = &self.crypto_provider;
-                    let matching = self.remote_fingerprint.as_ref().and_then(|expected| {
-                        crate::vendor::str0m::crypto::Fingerprint::of_certificate(
-                            der,
-                            &expected.hash_func,
-                            provider,
-                        )
-                    });
-                    let fingerprint = matching.clone().unwrap_or_else(|| {
-                        crate::vendor::str0m::crypto::Fingerprint::of_certificate(der, "sha-256", provider)
-                            .expect("sha-256 is supported")
-                    });
-                    self.dtls.set_remote_fingerprint(fingerprint.clone());
-                    if let Some(expected) = &self.remote_fingerprint {
-                        if !self.fingerprint_verification {
-                            debug!("DTLS fingerprint verification disabled");
-                        } else if matching.is_none() {
-                            let message = format!(
-                                "unsupported fingerprint hash function: {}",
-                                expected.hash_func
-                            );
-                            self.disconnect();
-                            return Err(RtcError::RemoteSdp(message));
-                        } else if fingerprint != *expected {
-                            self.disconnect();
-                            return Err(RtcError::RemoteSdp("remote fingerprint no match".into()));
-                        }
-                    } else {
-                        self.disconnect();
-                        return Err(RtcError::RemoteSdp("no a=fingerprint before dtls".into()));
-                    }
-                }
-                DtlsOutput::ApplicationData(data) => {
-                    self.sctp.handle_input(self.last_now, data);
-                }
-                DtlsOutput::Timeout(t) => {
-                    self.next_dtls_timeout = Some(t);
-                    break;
-                }
-                DtlsOutput::CloseNotify => {
-                    self.start_close()?;
-                    return Ok(Some(Output::Event(Event::Closed)));
-                }
-                other => {
-                    return Err(RtcError::Dtls(DtlsError::Io(std::io::Error::other(
-                        format!("Unexpected DTLS output: {other:?}"),
-                    ))));
-                }
-            }
-        }
-
-        if just_connected {
-            return Ok(Some(Output::Event(Event::Connected)));
-        }
-
-        while let Some(e) = self.sctp.poll() {
-            match e {
-                SctpEvent::Transmit { mut packets } => {
-                    if let Some(v) = packets.front() {
-                        if let Err(e) = self.dtls.handle_input(v) {
-                            if is_would_block(&e) {
-                                self.sctp.push_back_transmit(packets);
-                                break;
-                            } else if self.state == RtcState::Closing {
-                                debug!(
-                                    "Dropping SCTP transmit while closing after DTLS error: {e}"
-                                );
-                                packets.pop_front();
-                                if !packets.is_empty() {
-                                    self.sctp.push_back_transmit(packets);
-                                }
-                                return Ok(None);
-                            } else {
-                                return Err(e.into());
-                            }
-                        }
-
-                        packets.pop_front();
-                        // If there are still packets, they are sent on next
-                        // poll_output()
-                        if !packets.is_empty() {
-                            self.sctp.push_back_transmit(packets);
-                        }
-
-                        // Run again since this would feed the DTLS subsystem
-                        // to produce a packet now.
-                        return Ok(None);
-                    }
-                }
-                SctpEvent::Open { id, label } => {
-                    self.chan.ensure_channel_id_for(id);
-                    let id = self.chan.channel_id_by_stream_id(id).unwrap();
-                    return Ok(Some(Output::Event(Event::ChannelOpen(id, label))));
-                }
-                SctpEvent::Close {
-                    id: stream_id,
-                    reset_pending,
-                } => {
-                    let Some(channel_id) = self.chan.channel_id_by_stream_id(stream_id) else {
-                        warn!("Drop ChannelClose event for id: {:?}", stream_id);
-                        continue;
-                    };
-                    // When a reset is outstanding, remove_channel holds the stream id
-                    // back from reallocation until the handshake completes.
-                    self.chan.remove_channel(channel_id, reset_pending);
-                    return Ok(Some(Output::Event(Event::ChannelClose(channel_id))));
-                }
-                SctpEvent::StreamResetComplete { id } => {
-                    // The reset handshake completed, the stream id can be used again.
-                    self.chan.stream_reset_complete(id);
-                    continue;
-                }
-                SctpEvent::AssociationLost => {
-                    self.chan.association_lost();
-                    self.start_close()?;
-                    return Ok(Some(Output::Event(Event::Closed)));
-                }
-                SctpEvent::Data { id, binary, data } => {
-                    let Some(id) = self.chan.channel_id_by_stream_id(id) else {
-                        warn!("Drop ChannelData event for id: {:?}", id);
-                        continue;
-                    };
-                    let cd = ChannelData { id, binary, data };
-                    return Ok(Some(Output::Event(Event::ChannelData(cd))));
-                }
-                SctpEvent::BufferedAmountLow { id } => {
-                    let Some(id) = self.chan.channel_id_by_stream_id(id) else {
-                        warn!("Drop BufferedAmountLow for id: {:?}", id);
-                        continue;
-                    };
-                    return Ok(Some(Output::Event(Event::ChannelBufferedAmountLow(id))));
-                }
-            }
-        }
-
-        if let Some(ev) = self.session.poll_event() {
-            return Ok(Some(Output::Event(ev)));
-        }
-
-        // Some polling needs to bubble up errors.
-        if let Some(ev) = self.session.poll_event_fallible(self.last_now)? {
-            return Ok(Some(Output::Event(ev)));
-        }
-
-        if let Some(e) = self.stats.as_mut().and_then(|s| s.poll_output()) {
-            return Ok(Some(match e {
-                StatsEvent::Peer(s) => Output::Event(Event::PeerStats(s)),
-                StatsEvent::MediaIngress(s) => Output::Event(Event::MediaIngressStats(s)),
-                StatsEvent::MediaEgress(s) => Output::Event(Event::MediaEgressStats(s)),
-            }));
-        }
-
-        if let Some(v) = self.ice.poll_transmit() {
-            return Ok(Some(Output::Transmit(v)));
-        }
-
-        if let Some(send) = &self.send_addr {
-            // These can only be sent after we got an ICE connection.
-            let datagram = None
-                .or_else(|| self.dtls.poll_packet())
-                .or_else(|| self.session.poll_datagram(self.last_now));
-
-            if let Some(contents) = datagram {
-                let t = net::Transmit {
-                    proto: send.proto,
-                    source: send.source,
-                    destination: send.destination,
-                    contents,
-                };
-                return Ok(Some(Output::Transmit(t)));
-            }
-        } else {
-            // Don't allow accumulated feedback to build up indefinitely
-            self.session.clear_feedback();
-        }
-
-        self.readiness.clear_events();
-
-        Ok(Some(Output::Timeout(self.poll_timeout())))
-    }
-
-    // Called only after the output pipeline has drained.
-    fn poll_timeout(&mut self) -> Instant {
-        if self.readiness.wants_timeout() {
-            let stats_timeout = self.stats.as_mut().and_then(|s| s.poll_timeout());
-            // ICE has no clock until its first timeout and asks for none, yet a remote
-            // candidate gives it checks to run: drive it at once, since a passive peer
-            // may have no other timer that would.
-            let ice_timeout = self
-                .ice
-                .poll_timeout()
-                .or_else(|| self.ice.remote_candidates().next().map(|_| self.last_now));
-            let time_and_reason = (None, Reason::NotHappening)
-                .soonest((self.next_dtls_timeout, Reason::DTLS))
-                .soonest((ice_timeout, Reason::Ice))
-                .soonest(self.session.poll_timeout())
-                .soonest((self.sctp.poll_timeout(), Reason::Sctp))
-                .soonest((self.chan.poll_timeout(&self.sctp), Reason::Channel))
-                .soonest((stats_timeout, Reason::Stats));
-
-            let time = time_and_reason.0.unwrap_or_else(not_happening);
-            self.cached_timeout = time.max(self.last_now);
-            self.last_timeout_reason = time_and_reason.1;
-            self.readiness.clear_timeout();
-        }
-
-        if self.state == RtcState::Closing && self.close_drain_complete() {
-            self.state = RtcState::Closed;
-            self.last_timeout_reason = Reason::NotHappening;
-            return not_happening();
-        }
-
-        self.cached_timeout
-    }
-
-    /// The reason for the last [`Output::Timeout`]
-    ///
-    /// This is updated when calling [`Rtc::poll_output()`] and the next output
-    /// is a timeout.
-    ///
-    /// ```ignore
-    /// # use crate::vendor::str0m::{Rtc, Reason};
-    /// # use std::time::Instant;
-    /// let rtc = Rtc::new(Instant::now());
-    ///
-    /// // Before any call to poll_output(), the reason is the default.
-    /// assert_eq!(rtc.last_timeout_reason(), Reason::NotHappening);
-    /// ```
-    pub fn last_timeout_reason(&self) -> Reason {
-        self.last_timeout_reason
-    }
-
-    /// Check if this `Rtc` instance accepts the given input. This is used for demultiplexing
-    /// several `Rtc` instances over the same UDP server socket.
-    ///
-    /// [`Input::Timeout`] is always accepted. [`Input::Receive`] is tested against the nominated
-    /// ICE candidate. If that doesn't match and the incoming data is a STUN packet, the accept call
-    /// is delegated to the ICE agent which recognizes the remote peer from `a=ufrag`/`a=password`
-    /// credentials negotiated in the SDP. If that also doesn't match, all remote ICE candidates are
-    /// checked for a match.
-    ///
-    /// In a server setup, the server would try to find an `Rtc` instances using [`Rtc::accepts()`].
-    /// The first found instance would be given the input via [`Rtc::handle_input()`].
-    ///
-    /// ```ignore
-    /// # use std::time::Instant;
-    /// # use crate::vendor::str0m::{Rtc, Input};
-    /// // A vec holding the managed rtc instances. One instance per remote peer.
-    /// let now = Instant::now();
-    /// let mut rtcs = vec![Rtc::new(now), Rtc::new(now), Rtc::new(now)];
-    ///
-    /// // Configure instances with local ice candidates etc.
-    ///
-    /// loop {
-    ///     // TODO poll_timeout() and handle the output.
-    ///
-    ///     let input: Input = todo!(); // read network data from socket.
-    ///     for rtc in &mut rtcs {
-    ///         if rtc.accepts(&input) {
-    ///             rtc.handle_input(input).unwrap();
-    ///         }
-    ///     }
-    /// }
-    /// ```
-    pub fn accepts(&self, input: &Input) -> bool {
-        let Input::Receive(_, r) = input else {
-            // always accept the Input::Timeout.
-            return true;
-        };
-
-        // Fast path: DTLS, RTP, and RTCP traffic coming in from the same socket address
-        // we've nominated for sending via the ICE agent. This is the typical case
-        if let Some(send_addr) = &self.send_addr {
-            if r.source == send_addr.destination {
-                return true;
-            }
-        }
-
-        // STUN can use the ufrag/password to identify that a message belongs
-        // to this Rtc instance.
-        if let DatagramRecvInner::Stun(v) = &r.contents.inner {
-            return self.ice.accepts_message(v);
-        }
-
-        // Slow path: Occasionally, traffic comes in on a socket address corresponding
-        // to a successful candidate pair other than the one we've currently nominated.
-        // This typically happens at the beginning of the connection
-        if self.ice.has_viable_remote_candidate(r.source) {
-            return true;
-        }
-
-        false
-    }
-
-    /// Provide input to this `Rtc` instance. Input is either a [`Input::Timeout`] for some
-    /// time that was previously obtained from [`Rtc::poll_output()`], or [`Input::Receive`]
-    /// for network data.
-    ///
-    /// Both the timeout and the network data contains a [`std::time::Instant`] which drives
-    /// time forward in the instance. For network data, the intention is to record the time
-    /// of receiving the network data as precise as possible. This time is used to calculate
-    /// things like jitter and bandwidth.
-    ///
-    /// It's always okay to call [`Rtc::handle_input()`] with a timeout, also before the
-    /// time obtained via [`Rtc::poll_output()`].
-    ///
-    /// ```ignore
-    /// # use crate::vendor::str0m::{Rtc, Input};
-    /// # use std::time::Instant;
-    /// let mut rtc = Rtc::new(Instant::now());
-    ///
-    /// loop {
-    ///     let timeout: Instant = todo!(); // rtc.poll_output() until we get a timeout.
-    ///
-    ///     let input: Input = todo!(); // wait for network data or timeout.
-    ///     rtc.handle_input(input);
-    /// }
-    /// ```
-    pub fn handle_input(&mut self, input: Input) -> Result<(), RtcError> {
-        if self.state == RtcState::Closed {
-            return Ok(());
-        }
-
-        // The handlers below each arm their own `Wake`; nothing to do here.
-        match input {
-            Input::Timeout(now) => self.do_handle_timeout(now)?,
-            Input::Receive(recv_time, r) => {
-                self.do_handle_receive(recv_time, r)?;
-                self.do_handle_timeout(recv_time)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Starts local shutdown.
-    ///
-    /// The `Rtc` instance schedules RTCP BYE, requests SCTP shutdown, and sends
-    /// DTLS close_notify without waiting for remote replies. It enters a closing
-    /// drain state where app-facing operations stop, but [`Rtc::poll_output()`]
-    /// continues polling until pending local close output has drained. Once the
-    /// drain is complete, [`Rtc::is_alive()`] returns `false`.
-    pub fn close(&mut self) -> Result<(), RtcError> {
-        self.start_close()
-    }
-
-    fn start_close(&mut self) -> Result<(), RtcError> {
-        if self.state == RtcState::Closed {
-            return Ok(());
-        }
-
-        // Closing queues RTCP BYE and a DTLS close_notify that must be drained
-        // from the pipeline, so re-poll the whole tree.
-        self.wake_all();
-
-        if self.state != RtcState::Closing {
-            self.session.close_rtp();
-            self.sctp.close()?;
-            self.state = RtcState::Closing;
-        }
-
-        self.start_dtls_close()
-    }
-
-    fn start_dtls_close(&mut self) -> Result<(), RtcError> {
-        if !self.close_dtls_started {
-            self.dtls.close()?;
-            self.close_dtls_started = true;
-        }
-
-        Ok(())
-    }
-
-    fn close_drain_complete(&self) -> bool {
-        self.close_dtls_started && self.dtls.is_closed() && self.session.is_rtp_closed()
-    }
-
-    fn init_time(&mut self, now: Instant) {
-        // The operation is somewhat expensive, hence we only do it once.
-        if !self.need_init_time {
-            return;
-        }
-
-        // We assume this first "now" is a time 0 start point for calculating ntp/unix time offsets.
-        // This initializes the conversion of Instant -> NTP/Unix time.
-        let _ = now.to_unix_duration();
-
-        self.need_init_time = false;
-    }
-
-    fn do_handle_timeout(&mut self, now: Instant) -> Result<(), RtcError> {
-        self.init_time(now);
-
-        // Prevent time from going backwards.
-        if now < self.last_now {
-            return Ok(());
-        }
-
-        self.last_now = now;
-
-        // Disjoint borrows so each subsystem gets its own armed `Wake` and
-        // makes its own re-poll decision; the guards fold into `readiness`
-        // independently as each statement ends.
-        let Rtc {
-            ice,
-            sctp,
-            chan,
-            session,
-            stats,
-            send_addr,
-            peer_bytes_rx,
-            peer_bytes_tx,
-            readiness,
-            ..
-        } = self;
-
-        // ICE is an external crate and can't be handed a `Wake`. Driving it can
-        // transmit and re-arm timers, so arm both on its behalf at the boundary.
-        ice.handle_timeout(now);
-        drop(readiness.wake());
-
-        sctp.handle_timeout(now, &mut readiness.wake());
-        chan.handle_timeout(now, sctp, &mut readiness.wake());
-        session.handle_timeout(now, &mut readiness.wake())?;
-
-        if let Some(stats) = stats {
-            if stats.wants_timeout(now) {
-                let mut snapshot = StatsSnapshot::new(now);
-                snapshot.peer_rx = *peer_bytes_rx;
-                snapshot.peer_tx = *peer_bytes_tx;
-                let current_round_trip_time = ice.nominated_pair_rtt();
-                let total_round_trip_time = ice.nominated_pair_total_rtt().unwrap_or_default();
-                let responses_received = ice.nominated_pair_responses_received().unwrap_or(0);
-                snapshot.selected_candidate_pair = send_addr.as_ref().map(|s| CandidatePairStats {
-                    protocol: s.proto,
-                    local: CandidateStats { addr: s.source },
-                    remote: CandidateStats {
-                        addr: s.destination,
-                    },
-                    current_round_trip_time,
-                    total_round_trip_time,
-                    responses_received,
-                });
-                session.visit_stats(now, &mut snapshot);
-
-                // A stats snapshot surfaces as an event and re-arms the stats
-                // timer.
-                drop(readiness.wake());
-                stats.do_handle_timeout(&mut snapshot);
-            }
-        }
-
-        Ok(())
-    }
-
-    fn do_handle_receive(&mut self, recv_time: Instant, r: net::Receive) -> Result<(), RtcError> {
-        trace!("IN {:?}", r);
-        use DatagramRecvInner::*;
-
-        let bytes_rx = match r.contents.inner {
-            // TODO: stun is already parsed (depacketized) here
-            Stun(_) => 0,
-            Dtls(v) | Rtp(v) | Rtcp(v) => v.len(),
-        };
-
-        self.peer_bytes_rx += bytes_rx as u64;
-
-        // Disjoint borrows so each subsystem gets its own armed `Wake`.
-        let Rtc {
-            ice,
-            dtls,
-            session,
-            readiness,
-            ..
-        } = self;
-
-        match r.contents.inner {
-            Stun(stun) => {
-                let packet = crate::vendor::is::stun::StunPacket {
-                    proto: r.proto,
-                    source: r.source,
-                    destination: r.destination,
-                    message: stun,
-                };
-                // ICE is an external crate; arm both on its behalf.
-                ice.handle_packet(recv_time, packet);
-                drop(readiness.wake());
-            }
-            Dtls(dtls_packet) => {
-                // A failed receive can still change DTLS state and timers.
-                let _wake = readiness.wake();
-                dtls.handle_receive(dtls_packet)?;
-            }
-            Rtp(rtp) => session.handle_rtp_receive(recv_time, rtp, &mut readiness.wake()),
-            Rtcp(rtcp) => session.handle_rtcp_receive(recv_time, rtcp, &mut readiness.wake()),
-        }
-
-        Ok(())
-    }
-
-    /// Obtain handle for writing to a data channel.
-    ///
-    /// This is first available when a [`ChannelId`] is advertised via [`Event::ChannelOpen`].
-    /// The function returns `None` also for IDs from [`SdpApi::add_channel()`].
-    ///
-    /// Incoming channel data is via the [`Event::ChannelData`] event.
-    ///
-    /// ```ignore
-    /// # use std::time::Instant;
-    /// # use crate::vendor::str0m::{Rtc, channel::ChannelId};
-    /// let mut rtc = Rtc::new(Instant::now());
-    ///
-    /// let cid: ChannelId = todo!(); // obtain channel id from Event::ChannelOpen
-    /// let channel = rtc.channel(cid).unwrap();
-    /// // TODO write data channel data.
-    /// ```
-    pub fn channel(&mut self, id: ChannelId) -> Option<Channel<'_>> {
-        if self.state != RtcState::Alive {
-            return None;
-        }
-
-        let sctp_stream_id = self.chan.stream_id_by_channel_id(id)?;
-
-        if !self.sctp.is_open(sctp_stream_id) {
-            return None;
-        }
-
-        Some(Channel::new(sctp_stream_id, self))
-    }
-
-    /// Configure the Bandwidth Estimate (BWE) subsystem.
-    ///
-    /// Only relevant if BWE was enabled in the [`RtcConfig::enable_bwe()`]
-    pub fn bwe(&mut self) -> Bwe {
-        Bwe::new(self)
-    }
-
-    fn is_correct_change_id(&self, change_id: usize) -> bool {
-        self.change_counter == change_id + 1
-    }
-
-    fn next_change_id(&mut self) -> usize {
-        let n = self.change_counter;
-        self.change_counter += 1;
-        n
-    }
-
-    /// The codec configs for sending/receiving data.
-    ///
-    /// The configurations can be set with [`RtcConfig`] before setting up the session, and they
-    /// might be further updated by SDP negotiation.
-    pub fn codec_config(&self) -> &CodecConfig {
-        &self.session.codec_config
-    }
+			);
+
+		let mut sctp = RtcSctp::new(*mtu.start(), config.sctp_max_message_size);
+		if config.snap_enabled {
+			sctp.enable_snap();
+		}
+		sctp.set_max_buffered_amount(config.sctp_max_buffered_amount);
+
+		Ok(Rtc {
+			state: RtcState::Alive,
+			ice,
+			dtls: Dtls::new(
+				&dtls_cert,
+				crypto_provider.dtls_provider,
+				crypto_provider.sha256_provider,
+				start,
+				config.dtls_version,
+				mtu,
+			)
+			.expect("DTLS to init without problem"),
+			dtls_connected: false,
+			dtls_buf: vec![0; 2000],
+			next_dtls_timeout: None,
+			session,
+			sctp,
+			chan: ChannelHandler::default(),
+			stats: config.stats_interval.map(Stats::new),
+			remote_fingerprint: None,
+			remote_addrs: vec![],
+			send_addr: None,
+			need_init_time: true,
+			last_now: start,
+			peer_bytes_rx: 0,
+			peer_bytes_tx: 0,
+			change_counter: 0,
+			last_timeout_reason: Reason::NotHappening,
+			crypto_provider,
+			fingerprint_verification: config.fingerprint_verification,
+			close_dtls_started: false,
+			readiness: Readiness::armed(),
+			cached_timeout: start,
+		})
+	}
+
+	/// Tests if this instance is still working.
+	///
+	/// Certain events will straight away disconnect the `Rtc` instance, such as
+	/// the DTLS fingerprint from the setup not matching that of the TLS negotiation
+	/// (since that would potentially indicate a MITM attack!).
+	///
+	/// The instance can be manually disconnected using [`Rtc::disconnect()`].
+	///
+	/// During shutdown, this remains `true` until [`Rtc::poll_output()`]
+	/// has drained pending local close output. App-facing operations such as
+	/// [`Rtc::writer()`] and [`Rtc::channel()`] are unavailable during that
+	/// closing drain.
+	///
+	/// ```ignore
+	/// # use std::time::Instant;
+	/// # use crate::vendor::str0m::Rtc;
+	/// let mut rtc = Rtc::new(Instant::now());
+	///
+	/// assert!(rtc.is_alive());
+	///
+	/// rtc.disconnect();
+	/// assert!(!rtc.is_alive());
+	/// ```
+	pub fn is_alive(&self) -> bool {
+		self.state != RtcState::Closed
+	}
+
+	/// Force disconnects the instance making [`Rtc::is_alive()`] return `false`.
+	///
+	/// This makes [`Rtc::poll_output`] and [`Rtc::handle_input`] go inert and not
+	/// produce anymore network output or events.
+	///
+	/// ```ignore
+	/// # use std::time::Instant;
+	/// # use crate::vendor::str0m::Rtc;
+	/// let mut rtc = Rtc::new(Instant::now());
+	///
+	/// rtc.disconnect();
+	/// assert!(!rtc.is_alive());
+	/// ```
+	pub fn disconnect(&mut self) {
+		self.state = RtcState::Closed;
+	}
+
+	/// Add a local ICE candidate. Local candidates are socket addresses the `Rtc` instance
+	/// use for communicating with the peer.
+	///
+	/// If the candidate is accepted by the `Rtc` instance, it will return `Some` with a reference
+	/// to it. You should then signal this candidate to the remote peer.
+	///
+	/// This library has no built-in discovery of local network addresses on the host
+	/// or NATed addresses via a STUN server or TURN server. The user of the library
+	/// is expected to add new local candidates as they are discovered.
+	///
+	/// In WebRTC lingo, the `Rtc` instance is permanently in a mode of [Trickle Ice][1]. It's
+	/// however advisable to add at least one local candidate before starting the instance.
+	///
+	/// ```ignore
+	/// # use std::time::Instant;
+	/// # use crate::vendor::str0m::{Rtc, Candidate};
+	/// let mut rtc = Rtc::new(Instant::now());
+	///
+	/// let a = "127.0.0.1:5000".parse().unwrap();
+	/// let c = Candidate::host(a, "udp").unwrap();
+	///
+	/// rtc.add_local_candidate(c);
+	/// ```
+	///
+	/// [1]: https://www.rfc-editor.org/rfc/rfc8838.txt
+	pub fn add_local_candidate(&mut self, c: Candidate) -> Option<&Candidate> {
+		// ICE is an external crate and can't take a `Wake`; adding a candidate
+		// can start connectivity checks (transmits) and arm timers.
+		self.wake_all();
+		self.ice.add_local_candidate(c)
+	}
+
+	/// Add a remote ICE candidate. Remote candidates are addresses of the peer.
+	///
+	/// For [`SdpApi`]: Remote candidates are typically added via
+	/// receiving a remote [`SdpOffer`][change::SdpOffer] or [`SdpAnswer`][change::SdpAnswer].
+	///
+	/// However for the case of [Trickle Ice][1], this is the way to add remote candidates
+	/// that are "trickled" from the other side.
+	///
+	/// ```ignore
+	/// # use std::time::Instant;
+	/// # use crate::vendor::str0m::{Rtc, Candidate};
+	/// let mut rtc = Rtc::new(Instant::now());
+	///
+	/// let a = "1.2.3.4:5000".parse().unwrap();
+	/// let c = Candidate::host(a, "udp").unwrap();
+	///
+	/// rtc.add_remote_candidate(c);
+	/// ```
+	///
+	/// [1]: https://www.rfc-editor.org/rfc/rfc8838.txt
+	pub fn add_remote_candidate(&mut self, c: Candidate) {
+		// ICE is an external crate and can't take a `Wake`; see above.
+		self.wake_all();
+		self.ice.add_remote_candidate(c);
+	}
+
+	/// Checks if we are connected.
+	///
+	/// This tests if we have ICE connection, DTLS and the SRTP crypto derived contexts are up.
+	pub fn is_connected(&self) -> bool {
+		self.ice.state().is_connected() && self.dtls_connected && self.session.is_connected()
+	}
+
+	/// Make changes to the Rtc session via SDP.
+	///
+	/// ```ignore
+	/// # use std::time::Instant;
+	/// # use crate::vendor::str0m::Rtc;
+	/// # use crate::vendor::str0m::media::{MediaKind, Direction};
+	/// # use crate::vendor::str0m::change::SdpAnswer;
+	/// let mut rtc = Rtc::new(Instant::now());
+	///
+	/// let mut changes = rtc.sdp_api();
+	/// let mid_audio = changes.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
+	/// let mid_video = changes.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
+	///
+	/// let (offer, pending) = changes.apply().unwrap();
+	/// let json = serde_json::to_vec(&offer).unwrap();
+	///
+	/// // Send json OFFER to remote peer. Receive an answer back.
+	/// let answer: SdpAnswer = todo!();
+	///
+	/// rtc.sdp_api().accept_answer(pending, answer).unwrap();
+	/// ```
+	pub fn sdp_api(&mut self) -> SdpApi {
+		SdpApi::new(self)
+	}
+
+	/// Makes direct changes to the Rtc session.
+	///
+	/// This is a low level API. For "normal" use via SDP, see [`Rtc::sdp_api()`].
+	pub fn direct_api(&mut self) -> DirectApi {
+		DirectApi::new(self)
+	}
+
+	/// Send outgoing media data (frames) or request keyframes.
+	///
+	/// Returns `None` if the direction isn't sending (`sendrecv` or `sendonly`).
+	///
+	/// ```ignore
+	/// # use std::time::Instant;
+	/// # use crate::vendor::str0m::Rtc;
+	/// # use crate::vendor::str0m::media::{MediaData, Mid};
+	/// # use crate::vendor::str0m::format::PayloadParams;
+	/// let mut rtc = Rtc::new(Instant::now());
+	///
+	/// // add candidates, do SDP negotiation
+	/// let mid: Mid = todo!(); // obtain mid from Event::MediaAdded.
+	///
+	/// // Writer for this mid.
+	/// let writer = rtc.writer(mid).unwrap();
+	///
+	/// // Get incoming media data from another peer
+	/// let data: MediaData = todo!();
+	///
+	/// // Match incoming PT to an outgoing PT.
+	/// let pt = writer.match_params(data.params).unwrap();
+	///
+	/// writer.write(pt, data.network_time, data.time, data.data).unwrap();
+	/// ```
+	///
+	/// This is a frame level API: For RTP level see [`DirectApi::stream_tx()`]
+	/// and [`DirectApi::stream_rx()`].
+	///
+	pub fn writer(&mut self, mid: Mid) -> Option<Writer> {
+		if self.session.rtp_mode {
+			panic!("In rtp_mode use direct_api().stream_tx().write_rtp()");
+		}
+
+		if self.state != RtcState::Alive {
+			return None;
+		}
+
+		// Disjoint borrows let the writer arm readiness within each mutation.
+		let Rtc { session, readiness, .. } = self;
+
+		// This does not catch potential RIDs required to send simulcast, but
+		// it's a good start. An error might arise later on RID mismatch.
+		session.media_by_mid(mid)?;
+
+		Some(Writer::new(session, readiness, mid))
+	}
+
+	/// Currently configured media.
+	///
+	/// Read only access. Changes are made via [`Rtc::sdp_api()`] or [`Rtc::direct_api()`].
+	pub fn media(&self, mid: Mid) -> Option<&Media> {
+		self.session.media_by_mid(mid)
+	}
+
+	fn init_dtls(&mut self, active: bool) -> Result<(), RtcError> {
+		if self.dtls.is_inited() {
+			return Ok(());
+		}
+
+		debug!("DTLS setup is: {:?}", active);
+		self.dtls.set_active(active);
+
+		// Initialize the DTLS state (client or server) before any operations
+		// This ensures internal state like random (client) or last_now (server) is initialized
+		self.dtls.handle_timeout(self.last_now)?;
+
+		if active {
+			// Drive handshake by sending an empty packet to trigger ClientHello
+			let _ = self.dtls.handle_receive(&[]);
+		}
+
+		Ok(())
+	}
+
+	fn try_init_sctp(
+		&mut self,
+		client: bool,
+		sctp_init_data: Option<SctpInitData>,
+		remote_max_message_size: Option<u32>,
+	) -> Result<(), RtcError> {
+		// If we got an m=application line, ensure we have negotiated the
+		// SCTP association with the other side.
+		if self.sctp.is_inited() {
+			return Ok(());
+		}
+
+		self.sctp
+			.init(client, self.last_now, sctp_init_data, remote_max_message_size)?;
+		Ok(())
+	}
+
+	/// Creates a new Mid that is not in the session already.
+	pub(crate) fn new_mid(&self) -> Mid {
+		loop {
+			let mid = Mid::new();
+			if !self.session.has_mid(mid) {
+				break mid;
+			}
+		}
+	}
+
+	/// Poll the `Rtc` instance for output. Output can be three things, something to _Transmit_
+	/// via a UDP socket (maybe via a TURN server). An _Event_, such as receiving media data,
+	/// or a _Timeout_.
+	///
+	/// The user of the library is expected to continuously call this function and deal with
+	/// the output until it encounters an [`Output::Timeout`] at which point no further output
+	/// is produced (if polled again, it will result in just another timeout).
+	///
+	/// After exhausting the `poll_output`, the function will only produce more output again
+	/// when one of two things happen:
+	///
+	/// 1. The polled timeout is reached.
+	/// 2. New network input.
+	///
+	/// See [`Rtc`] instance documentation for how this is expected to be used in a loop.
+	pub fn poll_output(&mut self) -> Result<Output, RtcError> {
+		// SCTP packets fed into DTLS require another pass. Loop here so a large
+		// batch does not grow the stack with one recursive call per packet.
+		let o = loop {
+			if let Some(o) = self.do_poll_output()? {
+				break o;
+			}
+		};
+
+		match &o {
+			Output::Event(e) => match e {
+				Event::ChannelData(_)
+				| Event::MediaData(_)
+				| Event::RtpPacket(_)
+				| Event::SenderFeedback(_)
+				| Event::MediaEgressStats(_)
+				| Event::MediaIngressStats(_)
+				| Event::PeerStats(_)
+				| Event::ChannelBufferedAmountLow(_)
+				| Event::EgressBitrateEstimate(_)
+				| Event::KeyframeRequest(_) => {
+					trace!("{:?}", e)
+				}
+				_ => debug!("{:?}", e),
+			},
+			Output::Transmit(t) => {
+				self.peer_bytes_tx += t.contents.len() as u64;
+				trace!("OUT {:?}", t)
+			}
+			Output::Timeout(_t) => {}
+		}
+
+		Ok(o)
+	}
+
+	/// Conservatively re-poll the whole tree.
+	fn wake_all(&mut self) {
+		drop(self.readiness.wake());
+	}
+
+	// Returns None when polling must restart after handling an SCTP packet.
+	fn do_poll_output(&mut self) -> Result<Option<Output>, RtcError> {
+		if self.state == RtcState::Closed {
+			self.last_timeout_reason = Reason::NotHappening;
+			return Ok(Some(Output::Timeout(not_happening())));
+		}
+
+		if !self.readiness.wants_events() {
+			return Ok(Some(Output::Timeout(self.poll_timeout())));
+		}
+
+		while let Some(e) = self.ice.poll_event() {
+			match e {
+				IceAgentEvent::IceRestart(_) => {
+					//
+				}
+				IceAgentEvent::IceConnectionStateChange(v) => {
+					return Ok(Some(Output::Event(Event::IceConnectionStateChange(v))));
+				}
+				IceAgentEvent::DiscoveredRecv { proto, source } => {
+					debug!("ICE remote address: {:?}/{:?}", Pii(source), proto);
+					self.remote_addrs.push(source);
+					while self.remote_addrs.len() > 20 {
+						self.remote_addrs.remove(0);
+					}
+				}
+				IceAgentEvent::NominatedSend {
+					proto,
+					source,
+					destination,
+				} => {
+					debug!(
+						"ICE nominated send from: {:?} to: {:?} with protocol {:?}",
+						Pii(source),
+						Pii(destination),
+						proto,
+					);
+					self.send_addr = Some(SendAddr {
+						proto,
+						source,
+						destination,
+					});
+				}
+			}
+		}
+
+		// Handle DTLS timeout before polling output so any retransmit packets
+		// queued by dimpl and the re-armed flight timer are picked up by the
+		// poll loop below in the same iteration.
+		if let Some(timeout) = self.next_dtls_timeout {
+			if timeout <= self.last_now {
+				self.next_dtls_timeout = None;
+
+				if let Err(error) = self.dtls.handle_timeout(self.last_now) {
+					// A failed timer transition leaves DTLS unrecoverable. Close the
+					// RTC so continued polling cannot expose the same due timeout again.
+					self.disconnect();
+					return Err(error.into());
+				}
+			}
+		}
+
+		// Poll DTLS output - collect packets, handle events
+		let mut just_connected = false;
+		loop {
+			match self.dtls.poll_output(&mut self.dtls_buf) {
+				DtlsOutput::Packet(_) => {
+					unreachable!("We don't expect DTLS packets here since we use poll_packet");
+				}
+				DtlsOutput::Connected => {
+					if !self.dtls_connected {
+						debug!("DTLS connected");
+						self.dtls_connected = true;
+						just_connected = true;
+					}
+				}
+				DtlsOutput::KeyingMaterial(km, profile) => {
+					use config::KeyingMaterial;
+					let km_bytes = km.to_vec();
+					debug!("DTLS set SRTP keying material and profile: {}", profile);
+					let active = self.dtls.is_active().expect("DTLS must be inited by now");
+					self.session.set_keying_material(
+						KeyingMaterial::new(&km_bytes),
+						&self.crypto_provider,
+						profile,
+						active,
+					);
+				}
+				DtlsOutput::PeerCert(der) => {
+					debug!("DTLS verify remote fingerprint");
+					// Compute the fingerprint of the peer's DER certificate with the hash
+					// function of the expected one (RFC 8122 §5): sha-256, or sha-1 as some
+					// endpoints still announce. sha-256 when there is none to compare with.
+					let provider = &self.crypto_provider;
+					let matching = self.remote_fingerprint.as_ref().and_then(|expected| {
+						crate::vendor::str0m::crypto::Fingerprint::of_certificate(der, &expected.hash_func, provider)
+					});
+					let fingerprint = matching.clone().unwrap_or_else(|| {
+						crate::vendor::str0m::crypto::Fingerprint::of_certificate(der, "sha-256", provider)
+							.expect("sha-256 is supported")
+					});
+					self.dtls.set_remote_fingerprint(fingerprint.clone());
+					if let Some(expected) = &self.remote_fingerprint {
+						if !self.fingerprint_verification {
+							debug!("DTLS fingerprint verification disabled");
+						} else if matching.is_none() {
+							let message = format!("unsupported fingerprint hash function: {}", expected.hash_func);
+							self.disconnect();
+							return Err(RtcError::RemoteSdp(message));
+						} else if fingerprint != *expected {
+							self.disconnect();
+							return Err(RtcError::RemoteSdp("remote fingerprint no match".into()));
+						}
+					} else {
+						self.disconnect();
+						return Err(RtcError::RemoteSdp("no a=fingerprint before dtls".into()));
+					}
+				}
+				DtlsOutput::ApplicationData(data) => {
+					self.sctp.handle_input(self.last_now, data);
+				}
+				DtlsOutput::Timeout(t) => {
+					self.next_dtls_timeout = Some(t);
+					break;
+				}
+				DtlsOutput::CloseNotify => {
+					self.start_close()?;
+					return Ok(Some(Output::Event(Event::Closed)));
+				}
+				other => {
+					return Err(RtcError::Dtls(DtlsError::Io(std::io::Error::other(format!(
+						"Unexpected DTLS output: {other:?}"
+					)))));
+				}
+			}
+		}
+
+		if just_connected {
+			return Ok(Some(Output::Event(Event::Connected)));
+		}
+
+		while let Some(e) = self.sctp.poll() {
+			match e {
+				SctpEvent::Transmit { mut packets } => {
+					if let Some(v) = packets.front() {
+						if let Err(e) = self.dtls.handle_input(v) {
+							if is_would_block(&e) {
+								self.sctp.push_back_transmit(packets);
+								break;
+							} else if self.state == RtcState::Closing {
+								debug!("Dropping SCTP transmit while closing after DTLS error: {e}");
+								packets.pop_front();
+								if !packets.is_empty() {
+									self.sctp.push_back_transmit(packets);
+								}
+								return Ok(None);
+							} else {
+								return Err(e.into());
+							}
+						}
+
+						packets.pop_front();
+						// If there are still packets, they are sent on next
+						// poll_output()
+						if !packets.is_empty() {
+							self.sctp.push_back_transmit(packets);
+						}
+
+						// Run again since this would feed the DTLS subsystem
+						// to produce a packet now.
+						return Ok(None);
+					}
+				}
+				SctpEvent::Open { id, label } => {
+					self.chan.ensure_channel_id_for(id);
+					let id = self.chan.channel_id_by_stream_id(id).unwrap();
+					return Ok(Some(Output::Event(Event::ChannelOpen(id, label))));
+				}
+				SctpEvent::Close {
+					id: stream_id,
+					reset_pending,
+				} => {
+					let Some(channel_id) = self.chan.channel_id_by_stream_id(stream_id) else {
+						warn!("Drop ChannelClose event for id: {:?}", stream_id);
+						continue;
+					};
+					// When a reset is outstanding, remove_channel holds the stream id
+					// back from reallocation until the handshake completes.
+					self.chan.remove_channel(channel_id, reset_pending);
+					return Ok(Some(Output::Event(Event::ChannelClose(channel_id))));
+				}
+				SctpEvent::StreamResetComplete { id } => {
+					// The reset handshake completed, the stream id can be used again.
+					self.chan.stream_reset_complete(id);
+					continue;
+				}
+				SctpEvent::AssociationLost => {
+					self.chan.association_lost();
+					self.start_close()?;
+					return Ok(Some(Output::Event(Event::Closed)));
+				}
+				SctpEvent::Data { id, binary, data } => {
+					let Some(id) = self.chan.channel_id_by_stream_id(id) else {
+						warn!("Drop ChannelData event for id: {:?}", id);
+						continue;
+					};
+					let cd = ChannelData { id, binary, data };
+					return Ok(Some(Output::Event(Event::ChannelData(cd))));
+				}
+				SctpEvent::BufferedAmountLow { id } => {
+					let Some(id) = self.chan.channel_id_by_stream_id(id) else {
+						warn!("Drop BufferedAmountLow for id: {:?}", id);
+						continue;
+					};
+					return Ok(Some(Output::Event(Event::ChannelBufferedAmountLow(id))));
+				}
+			}
+		}
+
+		if let Some(ev) = self.session.poll_event() {
+			return Ok(Some(Output::Event(ev)));
+		}
+
+		// Some polling needs to bubble up errors.
+		if let Some(ev) = self.session.poll_event_fallible(self.last_now)? {
+			return Ok(Some(Output::Event(ev)));
+		}
+
+		if let Some(e) = self.stats.as_mut().and_then(|s| s.poll_output()) {
+			return Ok(Some(match e {
+				StatsEvent::Peer(s) => Output::Event(Event::PeerStats(s)),
+				StatsEvent::MediaIngress(s) => Output::Event(Event::MediaIngressStats(s)),
+				StatsEvent::MediaEgress(s) => Output::Event(Event::MediaEgressStats(s)),
+			}));
+		}
+
+		if let Some(v) = self.ice.poll_transmit() {
+			return Ok(Some(Output::Transmit(v)));
+		}
+
+		if let Some(send) = &self.send_addr {
+			// These can only be sent after we got an ICE connection.
+			let datagram = None
+				.or_else(|| self.dtls.poll_packet())
+				.or_else(|| self.session.poll_datagram(self.last_now));
+
+			if let Some(contents) = datagram {
+				let t = net::Transmit {
+					proto: send.proto,
+					source: send.source,
+					destination: send.destination,
+					contents,
+				};
+				return Ok(Some(Output::Transmit(t)));
+			}
+		} else {
+			// Don't allow accumulated feedback to build up indefinitely
+			self.session.clear_feedback();
+		}
+
+		self.readiness.clear_events();
+
+		Ok(Some(Output::Timeout(self.poll_timeout())))
+	}
+
+	// Called only after the output pipeline has drained.
+	fn poll_timeout(&mut self) -> Instant {
+		if self.readiness.wants_timeout() {
+			let stats_timeout = self.stats.as_mut().and_then(|s| s.poll_timeout());
+			// ICE has no clock until its first timeout and asks for none, yet a remote
+			// candidate gives it checks to run: drive it at once, since a passive peer
+			// may have no other timer that would.
+			let ice_timeout = self
+				.ice
+				.poll_timeout()
+				.or_else(|| self.ice.remote_candidates().next().map(|_| self.last_now));
+			let time_and_reason = (None, Reason::NotHappening)
+				.soonest((self.next_dtls_timeout, Reason::DTLS))
+				.soonest((ice_timeout, Reason::Ice))
+				.soonest(self.session.poll_timeout())
+				.soonest((self.sctp.poll_timeout(), Reason::Sctp))
+				.soonest((self.chan.poll_timeout(&self.sctp), Reason::Channel))
+				.soonest((stats_timeout, Reason::Stats));
+
+			let time = time_and_reason.0.unwrap_or_else(not_happening);
+			self.cached_timeout = time.max(self.last_now);
+			self.last_timeout_reason = time_and_reason.1;
+			self.readiness.clear_timeout();
+		}
+
+		if self.state == RtcState::Closing && self.close_drain_complete() {
+			self.state = RtcState::Closed;
+			self.last_timeout_reason = Reason::NotHappening;
+			return not_happening();
+		}
+
+		self.cached_timeout
+	}
+
+	/// The reason for the last [`Output::Timeout`]
+	///
+	/// This is updated when calling [`Rtc::poll_output()`] and the next output
+	/// is a timeout.
+	///
+	/// ```ignore
+	/// # use crate::vendor::str0m::{Rtc, Reason};
+	/// # use std::time::Instant;
+	/// let rtc = Rtc::new(Instant::now());
+	///
+	/// // Before any call to poll_output(), the reason is the default.
+	/// assert_eq!(rtc.last_timeout_reason(), Reason::NotHappening);
+	/// ```
+	pub fn last_timeout_reason(&self) -> Reason {
+		self.last_timeout_reason
+	}
+
+	/// Check if this `Rtc` instance accepts the given input. This is used for demultiplexing
+	/// several `Rtc` instances over the same UDP server socket.
+	///
+	/// [`Input::Timeout`] is always accepted. [`Input::Receive`] is tested against the nominated
+	/// ICE candidate. If that doesn't match and the incoming data is a STUN packet, the accept call
+	/// is delegated to the ICE agent which recognizes the remote peer from `a=ufrag`/`a=password`
+	/// credentials negotiated in the SDP. If that also doesn't match, all remote ICE candidates are
+	/// checked for a match.
+	///
+	/// In a server setup, the server would try to find an `Rtc` instances using [`Rtc::accepts()`].
+	/// The first found instance would be given the input via [`Rtc::handle_input()`].
+	///
+	/// ```ignore
+	/// # use std::time::Instant;
+	/// # use crate::vendor::str0m::{Rtc, Input};
+	/// // A vec holding the managed rtc instances. One instance per remote peer.
+	/// let now = Instant::now();
+	/// let mut rtcs = vec![Rtc::new(now), Rtc::new(now), Rtc::new(now)];
+	///
+	/// // Configure instances with local ice candidates etc.
+	///
+	/// loop {
+	///     // TODO poll_timeout() and handle the output.
+	///
+	///     let input: Input = todo!(); // read network data from socket.
+	///     for rtc in &mut rtcs {
+	///         if rtc.accepts(&input) {
+	///             rtc.handle_input(input).unwrap();
+	///         }
+	///     }
+	/// }
+	/// ```
+	pub fn accepts(&self, input: &Input) -> bool {
+		let Input::Receive(_, r) = input else {
+			// always accept the Input::Timeout.
+			return true;
+		};
+
+		// Fast path: DTLS, RTP, and RTCP traffic coming in from the same socket address
+		// we've nominated for sending via the ICE agent. This is the typical case
+		if let Some(send_addr) = &self.send_addr {
+			if r.source == send_addr.destination {
+				return true;
+			}
+		}
+
+		// STUN can use the ufrag/password to identify that a message belongs
+		// to this Rtc instance.
+		if let DatagramRecvInner::Stun(v) = &r.contents.inner {
+			return self.ice.accepts_message(v);
+		}
+
+		// Slow path: Occasionally, traffic comes in on a socket address corresponding
+		// to a successful candidate pair other than the one we've currently nominated.
+		// This typically happens at the beginning of the connection
+		if self.ice.has_viable_remote_candidate(r.source) {
+			return true;
+		}
+
+		false
+	}
+
+	/// Provide input to this `Rtc` instance. Input is either a [`Input::Timeout`] for some
+	/// time that was previously obtained from [`Rtc::poll_output()`], or [`Input::Receive`]
+	/// for network data.
+	///
+	/// Both the timeout and the network data contains a [`std::time::Instant`] which drives
+	/// time forward in the instance. For network data, the intention is to record the time
+	/// of receiving the network data as precise as possible. This time is used to calculate
+	/// things like jitter and bandwidth.
+	///
+	/// It's always okay to call [`Rtc::handle_input()`] with a timeout, also before the
+	/// time obtained via [`Rtc::poll_output()`].
+	///
+	/// ```ignore
+	/// # use crate::vendor::str0m::{Rtc, Input};
+	/// # use std::time::Instant;
+	/// let mut rtc = Rtc::new(Instant::now());
+	///
+	/// loop {
+	///     let timeout: Instant = todo!(); // rtc.poll_output() until we get a timeout.
+	///
+	///     let input: Input = todo!(); // wait for network data or timeout.
+	///     rtc.handle_input(input);
+	/// }
+	/// ```
+	pub fn handle_input(&mut self, input: Input) -> Result<(), RtcError> {
+		if self.state == RtcState::Closed {
+			return Ok(());
+		}
+
+		// The handlers below each arm their own `Wake`; nothing to do here.
+		match input {
+			Input::Timeout(now) => self.do_handle_timeout(now)?,
+			Input::Receive(recv_time, r) => {
+				self.do_handle_receive(recv_time, r)?;
+				self.do_handle_timeout(recv_time)?;
+			}
+		}
+		Ok(())
+	}
+
+	/// Starts local shutdown.
+	///
+	/// The `Rtc` instance schedules RTCP BYE, requests SCTP shutdown, and sends
+	/// DTLS close_notify without waiting for remote replies. It enters a closing
+	/// drain state where app-facing operations stop, but [`Rtc::poll_output()`]
+	/// continues polling until pending local close output has drained. Once the
+	/// drain is complete, [`Rtc::is_alive()`] returns `false`.
+	pub fn close(&mut self) -> Result<(), RtcError> {
+		self.start_close()
+	}
+
+	fn start_close(&mut self) -> Result<(), RtcError> {
+		if self.state == RtcState::Closed {
+			return Ok(());
+		}
+
+		// Closing queues RTCP BYE and a DTLS close_notify that must be drained
+		// from the pipeline, so re-poll the whole tree.
+		self.wake_all();
+
+		if self.state != RtcState::Closing {
+			self.session.close_rtp();
+			self.sctp.close()?;
+			self.state = RtcState::Closing;
+		}
+
+		self.start_dtls_close()
+	}
+
+	fn start_dtls_close(&mut self) -> Result<(), RtcError> {
+		if !self.close_dtls_started {
+			self.dtls.close()?;
+			self.close_dtls_started = true;
+		}
+
+		Ok(())
+	}
+
+	fn close_drain_complete(&self) -> bool {
+		self.close_dtls_started && self.dtls.is_closed() && self.session.is_rtp_closed()
+	}
+
+	fn init_time(&mut self, now: Instant) {
+		// The operation is somewhat expensive, hence we only do it once.
+		if !self.need_init_time {
+			return;
+		}
+
+		// We assume this first "now" is a time 0 start point for calculating ntp/unix time offsets.
+		// This initializes the conversion of Instant -> NTP/Unix time.
+		let _ = now.to_unix_duration();
+
+		self.need_init_time = false;
+	}
+
+	fn do_handle_timeout(&mut self, now: Instant) -> Result<(), RtcError> {
+		self.init_time(now);
+
+		// Prevent time from going backwards.
+		if now < self.last_now {
+			return Ok(());
+		}
+
+		self.last_now = now;
+
+		// Disjoint borrows so each subsystem gets its own armed `Wake` and
+		// makes its own re-poll decision; the guards fold into `readiness`
+		// independently as each statement ends.
+		let Rtc {
+			ice,
+			sctp,
+			chan,
+			session,
+			stats,
+			send_addr,
+			peer_bytes_rx,
+			peer_bytes_tx,
+			readiness,
+			..
+		} = self;
+
+		// ICE is an external crate and can't be handed a `Wake`. Driving it can
+		// transmit and re-arm timers, so arm both on its behalf at the boundary.
+		ice.handle_timeout(now);
+		drop(readiness.wake());
+
+		sctp.handle_timeout(now, &mut readiness.wake());
+		chan.handle_timeout(now, sctp, &mut readiness.wake());
+		session.handle_timeout(now, &mut readiness.wake())?;
+
+		if let Some(stats) = stats {
+			if stats.wants_timeout(now) {
+				let mut snapshot = StatsSnapshot::new(now);
+				snapshot.peer_rx = *peer_bytes_rx;
+				snapshot.peer_tx = *peer_bytes_tx;
+				let current_round_trip_time = ice.nominated_pair_rtt();
+				let total_round_trip_time = ice.nominated_pair_total_rtt().unwrap_or_default();
+				let responses_received = ice.nominated_pair_responses_received().unwrap_or(0);
+				snapshot.selected_candidate_pair = send_addr.as_ref().map(|s| CandidatePairStats {
+					protocol: s.proto,
+					local: CandidateStats { addr: s.source },
+					remote: CandidateStats { addr: s.destination },
+					current_round_trip_time,
+					total_round_trip_time,
+					responses_received,
+				});
+				session.visit_stats(now, &mut snapshot);
+
+				// A stats snapshot surfaces as an event and re-arms the stats
+				// timer.
+				drop(readiness.wake());
+				stats.do_handle_timeout(&mut snapshot);
+			}
+		}
+
+		Ok(())
+	}
+
+	fn do_handle_receive(&mut self, recv_time: Instant, r: net::Receive) -> Result<(), RtcError> {
+		trace!("IN {:?}", r);
+		use DatagramRecvInner::*;
+
+		let bytes_rx = match r.contents.inner {
+			// TODO: stun is already parsed (depacketized) here
+			Stun(_) => 0,
+			Dtls(v) | Rtp(v) | Rtcp(v) => v.len(),
+		};
+
+		self.peer_bytes_rx += bytes_rx as u64;
+
+		// Disjoint borrows so each subsystem gets its own armed `Wake`.
+		let Rtc {
+			ice,
+			dtls,
+			session,
+			readiness,
+			..
+		} = self;
+
+		match r.contents.inner {
+			Stun(stun) => {
+				let packet = crate::vendor::is::stun::StunPacket {
+					proto: r.proto,
+					source: r.source,
+					destination: r.destination,
+					message: stun,
+				};
+				// ICE is an external crate; arm both on its behalf.
+				ice.handle_packet(recv_time, packet);
+				drop(readiness.wake());
+			}
+			Dtls(dtls_packet) => {
+				// A failed receive can still change DTLS state and timers.
+				let _wake = readiness.wake();
+				dtls.handle_receive(dtls_packet)?;
+			}
+			Rtp(rtp) => session.handle_rtp_receive(recv_time, rtp, &mut readiness.wake()),
+			Rtcp(rtcp) => session.handle_rtcp_receive(recv_time, rtcp, &mut readiness.wake()),
+		}
+
+		Ok(())
+	}
+
+	/// Obtain handle for writing to a data channel.
+	///
+	/// This is first available when a [`ChannelId`] is advertised via [`Event::ChannelOpen`].
+	/// The function returns `None` also for IDs from [`SdpApi::add_channel()`].
+	///
+	/// Incoming channel data is via the [`Event::ChannelData`] event.
+	///
+	/// ```ignore
+	/// # use std::time::Instant;
+	/// # use crate::vendor::str0m::{Rtc, channel::ChannelId};
+	/// let mut rtc = Rtc::new(Instant::now());
+	///
+	/// let cid: ChannelId = todo!(); // obtain channel id from Event::ChannelOpen
+	/// let channel = rtc.channel(cid).unwrap();
+	/// // TODO write data channel data.
+	/// ```
+	pub fn channel(&mut self, id: ChannelId) -> Option<Channel<'_>> {
+		if self.state != RtcState::Alive {
+			return None;
+		}
+
+		let sctp_stream_id = self.chan.stream_id_by_channel_id(id)?;
+
+		if !self.sctp.is_open(sctp_stream_id) {
+			return None;
+		}
+
+		Some(Channel::new(sctp_stream_id, self))
+	}
+
+	/// Configure the Bandwidth Estimate (BWE) subsystem.
+	///
+	/// Only relevant if BWE was enabled in the [`RtcConfig::enable_bwe()`]
+	pub fn bwe(&mut self) -> Bwe {
+		Bwe::new(self)
+	}
+
+	fn is_correct_change_id(&self, change_id: usize) -> bool {
+		self.change_counter == change_id + 1
+	}
+
+	fn next_change_id(&mut self) -> usize {
+		let n = self.change_counter;
+		self.change_counter += 1;
+		n
+	}
+
+	/// The codec configs for sending/receiving data.
+	///
+	/// The configurations can be set with [`RtcConfig`] before setting up the session, and they
+	/// might be further updated by SDP negotiation.
+	pub fn codec_config(&self) -> &CodecConfig {
+		&self.session.codec_config
+	}
 }
 
 impl PartialEq for Event {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::IceConnectionStateChange(l0), Self::IceConnectionStateChange(r0)) => l0 == r0,
-            (Self::MediaAdded(m0), Self::MediaAdded(m1)) => m0 == m1,
-            (Self::MediaData(m1), Self::MediaData(m2)) => m1 == m2,
-            (Self::ChannelOpen(l0, l1), Self::ChannelOpen(r0, r1)) => l0 == r0 && l1 == r1,
-            (Self::ChannelData(l0), Self::ChannelData(r0)) => l0 == r0,
-            (Self::ChannelClose(l0), Self::ChannelClose(r0)) => l0 == r0,
-            _ => false,
-        }
-    }
+	fn eq(&self, other: &Self) -> bool {
+		match (self, other) {
+			(Self::IceConnectionStateChange(l0), Self::IceConnectionStateChange(r0)) => l0 == r0,
+			(Self::MediaAdded(m0), Self::MediaAdded(m1)) => m0 == m1,
+			(Self::MediaData(m1), Self::MediaData(m2)) => m1 == m2,
+			(Self::ChannelOpen(l0, l1), Self::ChannelOpen(r0, r1)) => l0 == r0 && l1 == r1,
+			(Self::ChannelData(l0), Self::ChannelData(r0)) => l0 == r0,
+			(Self::ChannelClose(l0), Self::ChannelClose(r0)) => l0 == r0,
+			_ => false,
+		}
+	}
 }
 
 impl Eq for Event {}
 
 impl fmt::Debug for Rtc {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Rtc").finish()
-    }
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("Rtc").finish()
+	}
 }
 
 /// Log a CSV like stat to stdout.
@@ -2331,76 +2311,76 @@ pub(crate) use log_stat;
 #[cfg(test)]
 #[doc(hidden)]
 pub fn init_crypto_default() {
-    crate::vendor::str0m::crypto::from_feature_flags().install_process_default();
+	crate::vendor::str0m::crypto::from_feature_flags().install_process_default();
 }
 
 #[cfg(test)]
 mod test {
-    use std::panic::UnwindSafe;
-    use std::time::Duration;
+	use std::panic::UnwindSafe;
+	use std::time::Duration;
 
-    use super::*;
+	use super::*;
 
-    #[test]
-    fn rtc_is_send() {
-        fn is_send<T: Send>(_t: T) {}
-        fn is_sync<T: Sync>(_t: T) {}
-        is_send(Rtc::new(Instant::now()));
-        is_sync(Rtc::new(Instant::now()));
-    }
+	#[test]
+	fn rtc_is_send() {
+		fn is_send<T: Send>(_t: T) {}
+		fn is_sync<T: Sync>(_t: T) {}
+		is_send(Rtc::new(Instant::now()));
+		is_sync(Rtc::new(Instant::now()));
+	}
 
-    #[test]
-    fn rtc_is_unwind_safe() {
-        fn is_unwind_safe<T: UnwindSafe>(_t: T) {}
-        is_unwind_safe(Rtc::new(Instant::now()));
-    }
+	#[test]
+	fn rtc_is_unwind_safe() {
+		fn is_unwind_safe<T: UnwindSafe>(_t: T) {}
+		is_unwind_safe(Rtc::new(Instant::now()));
+	}
 
-    #[test]
-    fn event_is_reasonably_sized() {
-        let n = std::mem::size_of::<Event>();
-        assert!(n < 530);
-    }
+	#[test]
+	fn event_is_reasonably_sized() {
+		let n = std::mem::size_of::<Event>();
+		assert!(n < 530);
+	}
 
-    /// A passive answerer has no DTLS or SCTP timer before the peer speaks, so a
-    /// trickled candidate must still start its checks when driven only on the
-    /// timeouts it asks for.
-    #[test]
-    fn idle_answerer_checks_a_trickled_candidate() {
-        crate::vendor::str0m::init_crypto_default();
-        let start = Instant::now();
+	/// A passive answerer has no DTLS or SCTP timer before the peer speaks, so a
+	/// trickled candidate must still start its checks when driven only on the
+	/// timeouts it asks for.
+	#[test]
+	fn idle_answerer_checks_a_trickled_candidate() {
+		crate::vendor::str0m::init_crypto_default();
+		let start = Instant::now();
 
-        let mut offerer = Rtc::new(start);
-        let mut change = offerer.sdp_api();
-        change.add_channel("data".into());
-        let (offer, _pending) = change.apply().unwrap();
+		let mut offerer = Rtc::new(start);
+		let mut change = offerer.sdp_api();
+		change.add_channel("data".into());
+		let (offer, _pending) = change.apply().unwrap();
 
-        let mut answerer = Rtc::new(start);
-        let local = Candidate::host("127.0.0.1:2000".parse().unwrap(), "udp").unwrap();
-        answerer.add_local_candidate(local);
-        answerer.sdp_api().accept_offer(offer).unwrap();
-        let remote = Candidate::host("127.0.0.1:1000".parse().unwrap(), "udp").unwrap();
-        answerer.add_remote_candidate(remote);
+		let mut answerer = Rtc::new(start);
+		let local = Candidate::host("127.0.0.1:2000".parse().unwrap(), "udp").unwrap();
+		answerer.add_local_candidate(local);
+		answerer.sdp_api().accept_offer(offer).unwrap();
+		let remote = Candidate::host("127.0.0.1:1000".parse().unwrap(), "udp").unwrap();
+		answerer.add_remote_candidate(remote);
 
-        let mut now = start;
-        loop {
-            match answerer.poll_output().unwrap() {
-                Output::Transmit(transmit) => {
-                    assert_eq!(transmit.destination, "127.0.0.1:1000".parse().unwrap());
-                    return;
-                }
-                Output::Timeout(at) => {
-                    assert!(
-                        at < start + Duration::from_secs(1),
-                        "the answerer waits until {:?} to check its candidate",
-                        at - start
-                    );
-                    now = now.max(at);
-                    answerer.handle_input(Input::Timeout(now)).unwrap();
-                }
-                Output::Event(_) => {}
-            }
-        }
-    }
+		let mut now = start;
+		loop {
+			match answerer.poll_output().unwrap() {
+				Output::Transmit(transmit) => {
+					assert_eq!(transmit.destination, "127.0.0.1:1000".parse().unwrap());
+					return;
+				}
+				Output::Timeout(at) => {
+					assert!(
+						at < start + Duration::from_secs(1),
+						"the answerer waits until {:?} to check its candidate",
+						at - start
+					);
+					now = now.max(at);
+					answerer.handle_input(Input::Timeout(now)).unwrap();
+				}
+				Output::Event(_) => {}
+			}
+		}
+	}
 }
 
 #[cfg(test)]
@@ -2409,16 +2389,16 @@ pub mod _internal_test_exports;
 
 #[cfg(any())]
 pub mod unversioned {
-    //! This module provides functionality that is not versioned according to semver.
-    //! It may change in breaking ways between minor/patch releases, there are no guarantees.
-    //! USE AT YOUR OWN RISK.
-    //!
-    //! To use this module, enable the `unversioned` feature flag in your Cargo.toml.
+	//! This module provides functionality that is not versioned according to semver.
+	//! It may change in breaking ways between minor/patch releases, there are no guarantees.
+	//! USE AT YOUR OWN RISK.
+	//!
+	//! To use this module, enable the `unversioned` feature flag in your Cargo.toml.
 
-    pub use super::packet::{
-        Depacketizer, H264Depacketizer, H264Packetizer, OpusPacketizer, Packetizer, TelephoneEvent,
-        Vp8Depacketizer, Vp8Packetizer,
-    };
+	pub use super::packet::{
+		Depacketizer, H264Depacketizer, H264Packetizer, OpusPacketizer, Packetizer, TelephoneEvent, Vp8Depacketizer,
+		Vp8Packetizer,
+	};
 }
 
 #[cfg(test)]

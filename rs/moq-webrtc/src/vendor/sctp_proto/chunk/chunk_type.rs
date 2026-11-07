@@ -25,70 +25,70 @@ pub(crate) const CT_FORWARD_TSN: ChunkType = ChunkType(192);
 pub(crate) const CT_I_FORWARD_TSN: ChunkType = ChunkType(194);
 
 impl fmt::Display for ChunkType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let others = format!("Unknown ChunkType: {}", self.0);
-        let s = match *self {
-            CT_PAYLOAD_DATA => "DATA",
-            CT_INIT => "INIT",
-            CT_INIT_ACK => "INIT-ACK",
-            CT_SACK => "SACK",
-            CT_HEARTBEAT => "HEARTBEAT",
-            CT_HEARTBEAT_ACK => "HEARTBEAT-ACK",
-            CT_ABORT => "ABORT",
-            CT_SHUTDOWN => "SHUTDOWN",
-            CT_SHUTDOWN_ACK => "SHUTDOWN-ACK",
-            CT_ERROR => "ERROR",
-            CT_COOKIE_ECHO => "COOKIE-ECHO",
-            CT_COOKIE_ACK => "COOKIE-ACK",
-            CT_CWR => "ECNE", // Explicit Congestion Notification Echo
-            CT_SHUTDOWN_COMPLETE => "SHUTDOWN-COMPLETE",
-            CT_RECONFIG => "RECONFIG", // Re-configuration
-            CT_FORWARD_TSN => "FORWARD-TSN",
-            CT_I_FORWARD_TSN => "I-FORWARD-TSN",
-            _ => others.as_str(),
-        };
-        write!(f, "{}", s)
-    }
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		let others = format!("Unknown ChunkType: {}", self.0);
+		let s = match *self {
+			CT_PAYLOAD_DATA => "DATA",
+			CT_INIT => "INIT",
+			CT_INIT_ACK => "INIT-ACK",
+			CT_SACK => "SACK",
+			CT_HEARTBEAT => "HEARTBEAT",
+			CT_HEARTBEAT_ACK => "HEARTBEAT-ACK",
+			CT_ABORT => "ABORT",
+			CT_SHUTDOWN => "SHUTDOWN",
+			CT_SHUTDOWN_ACK => "SHUTDOWN-ACK",
+			CT_ERROR => "ERROR",
+			CT_COOKIE_ECHO => "COOKIE-ECHO",
+			CT_COOKIE_ACK => "COOKIE-ACK",
+			CT_CWR => "ECNE", // Explicit Congestion Notification Echo
+			CT_SHUTDOWN_COMPLETE => "SHUTDOWN-COMPLETE",
+			CT_RECONFIG => "RECONFIG", // Re-configuration
+			CT_FORWARD_TSN => "FORWARD-TSN",
+			CT_I_FORWARD_TSN => "I-FORWARD-TSN",
+			_ => others.as_str(),
+		};
+		write!(f, "{}", s)
+	}
 }
 
 #[cfg(test)]
 mod test {
-    use std::string::ToString;
-    use std::vec;
+	use std::string::ToString;
+	use std::vec;
 
-    use super::*;
+	use super::*;
 
-    #[test]
-    fn test_chunk_type_string() {
-        let tests = vec![
-            (CT_PAYLOAD_DATA, "DATA"),
-            (CT_INIT, "INIT"),
-            (CT_INIT_ACK, "INIT-ACK"),
-            (CT_SACK, "SACK"),
-            (CT_HEARTBEAT, "HEARTBEAT"),
-            (CT_HEARTBEAT_ACK, "HEARTBEAT-ACK"),
-            (CT_ABORT, "ABORT"),
-            (CT_SHUTDOWN, "SHUTDOWN"),
-            (CT_SHUTDOWN_ACK, "SHUTDOWN-ACK"),
-            (CT_ERROR, "ERROR"),
-            (CT_COOKIE_ECHO, "COOKIE-ECHO"),
-            (CT_COOKIE_ACK, "COOKIE-ACK"),
-            (CT_CWR, "ECNE"),
-            (CT_SHUTDOWN_COMPLETE, "SHUTDOWN-COMPLETE"),
-            (CT_RECONFIG, "RECONFIG"),
-            (CT_FORWARD_TSN, "FORWARD-TSN"),
-            (CT_I_FORWARD_TSN, "I-FORWARD-TSN"),
-            (ChunkType(255), "Unknown ChunkType: 255"),
-        ];
+	#[test]
+	fn test_chunk_type_string() {
+		let tests = vec![
+			(CT_PAYLOAD_DATA, "DATA"),
+			(CT_INIT, "INIT"),
+			(CT_INIT_ACK, "INIT-ACK"),
+			(CT_SACK, "SACK"),
+			(CT_HEARTBEAT, "HEARTBEAT"),
+			(CT_HEARTBEAT_ACK, "HEARTBEAT-ACK"),
+			(CT_ABORT, "ABORT"),
+			(CT_SHUTDOWN, "SHUTDOWN"),
+			(CT_SHUTDOWN_ACK, "SHUTDOWN-ACK"),
+			(CT_ERROR, "ERROR"),
+			(CT_COOKIE_ECHO, "COOKIE-ECHO"),
+			(CT_COOKIE_ACK, "COOKIE-ACK"),
+			(CT_CWR, "ECNE"),
+			(CT_SHUTDOWN_COMPLETE, "SHUTDOWN-COMPLETE"),
+			(CT_RECONFIG, "RECONFIG"),
+			(CT_FORWARD_TSN, "FORWARD-TSN"),
+			(CT_I_FORWARD_TSN, "I-FORWARD-TSN"),
+			(ChunkType(255), "Unknown ChunkType: 255"),
+		];
 
-        for (ct, expected) in tests {
-            assert_eq!(
-                ct.to_string(),
-                expected,
-                "failed to stringify chunkType {}, expected {}",
-                ct,
-                expected
-            );
-        }
-    }
+		for (ct, expected) in tests {
+			assert_eq!(
+				ct.to_string(),
+				expected,
+				"failed to stringify chunkType {}, expected {}",
+				ct,
+				expected
+			);
+		}
+	}
 }

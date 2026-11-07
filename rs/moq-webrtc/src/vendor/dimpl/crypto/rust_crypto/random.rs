@@ -8,12 +8,12 @@ use crate::vendor::dimpl::{CryptoError, CryptoOperation};
 pub(super) struct RustCryptoSecureRandom;
 
 impl SecureRandom for RustCryptoSecureRandom {
-    fn fill(&self, buf: &mut [u8]) -> Result<(), CryptoError> {
-        use rand::{TryRng, rngs::SysRng};
-        SysRng
-            .try_fill_bytes(buf)
-            .map_err(|_| CryptoError::OperationFailed(CryptoOperation::FillRandom))
-    }
+	fn fill(&self, buf: &mut [u8]) -> Result<(), CryptoError> {
+		use rand::{TryRng, rngs::SysRng};
+		SysRng
+			.try_fill_bytes(buf)
+			.map_err(|_| CryptoError::OperationFailed(CryptoOperation::FillRandom))
+	}
 }
 
 /// Static instance of the secure random generator.

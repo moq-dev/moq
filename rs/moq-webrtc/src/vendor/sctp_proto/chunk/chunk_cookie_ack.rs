@@ -12,44 +12,44 @@ pub(crate) struct ChunkCookieAck;
 
 /// makes ChunkCookieAck printable
 impl fmt::Display for ChunkCookieAck {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.header())
-    }
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "{}", self.header())
+	}
 }
 
 impl Chunk for ChunkCookieAck {
-    fn header(&self) -> ChunkHeader {
-        ChunkHeader {
-            typ: CT_COOKIE_ACK,
-            flags: 0,
-            value_length: self.value_length() as u16,
-        }
-    }
+	fn header(&self) -> ChunkHeader {
+		ChunkHeader {
+			typ: CT_COOKIE_ACK,
+			flags: 0,
+			value_length: self.value_length() as u16,
+		}
+	}
 
-    fn unmarshal(raw: &Bytes) -> Result<Self> {
-        let header = ChunkHeader::unmarshal(raw)?;
+	fn unmarshal(raw: &Bytes) -> Result<Self> {
+		let header = ChunkHeader::unmarshal(raw)?;
 
-        if header.typ != CT_COOKIE_ACK {
-            return Err(Error::ErrChunkTypeNotCookieAck);
-        }
+		if header.typ != CT_COOKIE_ACK {
+			return Err(Error::ErrChunkTypeNotCookieAck);
+		}
 
-        Ok(ChunkCookieAck {})
-    }
+		Ok(ChunkCookieAck {})
+	}
 
-    fn marshal_to(&self, buf: &mut BytesMut) -> Result<usize> {
-        self.header().marshal_to(buf)?;
-        Ok(buf.len())
-    }
+	fn marshal_to(&self, buf: &mut BytesMut) -> Result<usize> {
+		self.header().marshal_to(buf)?;
+		Ok(buf.len())
+	}
 
-    fn check(&self) -> Result<()> {
-        Ok(())
-    }
+	fn check(&self) -> Result<()> {
+		Ok(())
+	}
 
-    fn value_length(&self) -> usize {
-        0
-    }
+	fn value_length(&self) -> usize {
+		0
+	}
 
-    fn as_any(&self) -> &(dyn Any + Send + Sync) {
-        self
-    }
+	fn as_any(&self) -> &(dyn Any + Send + Sync) {
+		self
+	}
 }

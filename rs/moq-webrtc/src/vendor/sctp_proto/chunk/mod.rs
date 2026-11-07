@@ -22,29 +22,29 @@ pub(crate) mod chunk_type;
 use crate::vendor::sctp_proto::error::{Error, Result};
 use chunk_header::*;
 
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use core::{any::Any, fmt};
 use std::boxed::Box;
 use std::string::String;
 use std::vec;
 use std::vec::Vec;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use core::{any::Any, fmt};
 
 pub(crate) trait Chunk: fmt::Display + fmt::Debug {
-    fn header(&self) -> ChunkHeader;
-    fn unmarshal(raw: &Bytes) -> Result<Self>
-    where
-        Self: Sized;
-    fn marshal_to(&self, buf: &mut BytesMut) -> Result<usize>;
-    fn check(&self) -> Result<()>;
-    fn value_length(&self) -> usize;
-    fn as_any(&self) -> &(dyn Any + Send + Sync);
+	fn header(&self) -> ChunkHeader;
+	fn unmarshal(raw: &Bytes) -> Result<Self>
+	where
+		Self: Sized;
+	fn marshal_to(&self, buf: &mut BytesMut) -> Result<usize>;
+	fn check(&self) -> Result<()>;
+	fn value_length(&self) -> usize;
+	fn as_any(&self) -> &(dyn Any + Send + Sync);
 
-    fn marshal(&self) -> Result<Bytes> {
-        let capacity = CHUNK_HEADER_SIZE + self.value_length();
-        let mut buf = BytesMut::with_capacity(capacity);
-        self.marshal_to(&mut buf)?;
-        Ok(buf.freeze())
-    }
+	fn marshal(&self) -> Result<Bytes> {
+		let capacity = CHUNK_HEADER_SIZE + self.value_length();
+		let mut buf = BytesMut::with_capacity(capacity);
+		self.marshal_to(&mut buf)?;
+		Ok(buf.freeze())
+	}
 }
 
 /// ErrorCauseCode is a cause code that appears in either a ERROR or ABORT chunk
@@ -66,41 +66,39 @@ pub(crate) const USER_INITIATED_ABORT: ErrorCauseCode = ErrorCauseCode(12);
 pub(crate) const PROTOCOL_VIOLATION: ErrorCauseCode = ErrorCauseCode(13);
 
 impl fmt::Display for ErrorCauseCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let others = format!("Unknown CauseCode: {}", self.0);
-        let s = match *self {
-            INVALID_STREAM_IDENTIFIER => "Invalid Stream Identifier",
-            MISSING_MANDATORY_PARAMETER => "Missing Mandatory Parameter",
-            STALE_COOKIE_ERROR => "Stale Cookie Error",
-            OUT_OF_RESOURCE => "Out Of Resource",
-            UNRESOLVABLE_ADDRESS => "Unresolvable IP",
-            UNRECOGNIZED_CHUNK_TYPE => "Unrecognized Chunk Type",
-            INVALID_MANDATORY_PARAMETER => "Invalid Mandatory Parameter",
-            UNRECOGNIZED_PARAMETERS => "Unrecognized Parameters",
-            NO_USER_DATA => "No User Data",
-            COOKIE_RECEIVED_WHILE_SHUTTING_DOWN => "Cookie Received While Shutting Down",
-            RESTART_OF_AN_ASSOCIATION_WITH_NEW_ADDRESSES => {
-                "Restart Of An Association With New Addresses"
-            }
-            USER_INITIATED_ABORT => "User Initiated Abort",
-            PROTOCOL_VIOLATION => "Protocol Violation",
-            _ => others.as_str(),
-        };
-        write!(f, "{}", s)
-    }
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		let others = format!("Unknown CauseCode: {}", self.0);
+		let s = match *self {
+			INVALID_STREAM_IDENTIFIER => "Invalid Stream Identifier",
+			MISSING_MANDATORY_PARAMETER => "Missing Mandatory Parameter",
+			STALE_COOKIE_ERROR => "Stale Cookie Error",
+			OUT_OF_RESOURCE => "Out Of Resource",
+			UNRESOLVABLE_ADDRESS => "Unresolvable IP",
+			UNRECOGNIZED_CHUNK_TYPE => "Unrecognized Chunk Type",
+			INVALID_MANDATORY_PARAMETER => "Invalid Mandatory Parameter",
+			UNRECOGNIZED_PARAMETERS => "Unrecognized Parameters",
+			NO_USER_DATA => "No User Data",
+			COOKIE_RECEIVED_WHILE_SHUTTING_DOWN => "Cookie Received While Shutting Down",
+			RESTART_OF_AN_ASSOCIATION_WITH_NEW_ADDRESSES => "Restart Of An Association With New Addresses",
+			USER_INITIATED_ABORT => "User Initiated Abort",
+			PROTOCOL_VIOLATION => "Protocol Violation",
+			_ => others.as_str(),
+		};
+		write!(f, "{}", s)
+	}
 }
 
 impl From<u16> for ErrorCauseCode {
-    fn from(v: u16) -> Self {
-        ErrorCauseCode(v)
-    }
+	fn from(v: u16) -> Self {
+		ErrorCauseCode(v)
+	}
 }
 
 /// ErrorCauseHeader represents the shared header that is shared by all error causes
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ErrorCause {
-    pub(crate) code: ErrorCauseCode,
-    pub(crate) raw: Bytes,
+	pub(crate) code: ErrorCauseCode,
+	pub(crate) raw: Bytes,
 }
 
 /// ErrorCauseInvalidMandatoryParameter represents an SCTP error cause
@@ -131,54 +129,54 @@ pub(crate) const ERROR_CAUSE_HEADER_LENGTH: usize = 4;
 
 /// makes ErrorCauseHeader printable
 impl fmt::Display for ErrorCause {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.code)
-    }
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "{}", self.code)
+	}
 }
 
 impl ErrorCause {
-    pub(crate) fn unmarshal(buf: &Bytes) -> Result<Self> {
-        if buf.len() < ERROR_CAUSE_HEADER_LENGTH {
-            return Err(Error::ErrErrorCauseTooSmall);
-        }
+	pub(crate) fn unmarshal(buf: &Bytes) -> Result<Self> {
+		if buf.len() < ERROR_CAUSE_HEADER_LENGTH {
+			return Err(Error::ErrErrorCauseTooSmall);
+		}
 
-        let reader = &mut buf.clone();
+		let reader = &mut buf.clone();
 
-        let code = ErrorCauseCode(reader.get_u16());
-        let len = reader.get_u16();
+		let code = ErrorCauseCode(reader.get_u16());
+		let len = reader.get_u16();
 
-        if len < ERROR_CAUSE_HEADER_LENGTH as u16 {
-            return Err(Error::ErrErrorCauseTooSmall);
-        }
+		if len < ERROR_CAUSE_HEADER_LENGTH as u16 {
+			return Err(Error::ErrErrorCauseTooSmall);
+		}
 
-        let value_length = len as usize - ERROR_CAUSE_HEADER_LENGTH;
-        if buf.len() < ERROR_CAUSE_HEADER_LENGTH + value_length {
-            return Err(Error::ErrErrorCauseTooSmall);
-        }
-        let raw = buf.slice(ERROR_CAUSE_HEADER_LENGTH..ERROR_CAUSE_HEADER_LENGTH + value_length);
+		let value_length = len as usize - ERROR_CAUSE_HEADER_LENGTH;
+		if buf.len() < ERROR_CAUSE_HEADER_LENGTH + value_length {
+			return Err(Error::ErrErrorCauseTooSmall);
+		}
+		let raw = buf.slice(ERROR_CAUSE_HEADER_LENGTH..ERROR_CAUSE_HEADER_LENGTH + value_length);
 
-        Ok(ErrorCause { code, raw })
-    }
+		Ok(ErrorCause { code, raw })
+	}
 
-    pub(crate) fn marshal(&self) -> Bytes {
-        let mut buf = BytesMut::with_capacity(self.length());
-        let _ = self.marshal_to(&mut buf);
-        buf.freeze()
-    }
+	pub(crate) fn marshal(&self) -> Bytes {
+		let mut buf = BytesMut::with_capacity(self.length());
+		let _ = self.marshal_to(&mut buf);
+		buf.freeze()
+	}
 
-    pub(crate) fn marshal_to(&self, writer: &mut BytesMut) -> usize {
-        let len = self.raw.len() + ERROR_CAUSE_HEADER_LENGTH;
-        writer.put_u16(self.code.0);
-        writer.put_u16(len as u16);
-        writer.extend(self.raw.clone());
-        writer.len()
-    }
+	pub(crate) fn marshal_to(&self, writer: &mut BytesMut) -> usize {
+		let len = self.raw.len() + ERROR_CAUSE_HEADER_LENGTH;
+		writer.put_u16(self.code.0);
+		writer.put_u16(len as u16);
+		writer.extend(self.raw.clone());
+		writer.len()
+	}
 
-    pub(crate) fn length(&self) -> usize {
-        self.raw.len() + ERROR_CAUSE_HEADER_LENGTH
-    }
+	pub(crate) fn length(&self) -> usize {
+		self.raw.len() + ERROR_CAUSE_HEADER_LENGTH
+	}
 
-    pub(crate) fn error_cause_code(&self) -> ErrorCauseCode {
-        self.code
-    }
+	pub(crate) fn error_cause_code(&self) -> ErrorCauseCode {
+		self.code
+	}
 }

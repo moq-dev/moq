@@ -15,6 +15,6 @@ impl<T: Send + Sync + Debug> CryptoSafe for T {}
 
 /// SHA1 HMAC provider for STUN message integrity.
 pub trait Sha1HmacProvider: CryptoSafe {
-    /// Compute HMAC-SHA1(key, payloads) and return the result.
-    fn sha1_hmac(&self, key: &[u8], payloads: &[&[u8]]) -> [u8; 20];
+	/// Compute HMAC-SHA1(key, payloads) and return the result.
+	fn sha1_hmac(&self, key: &[u8], payloads: &[&[u8]]) -> [u8; 20];
 }

@@ -12,38 +12,38 @@ use super::{param_header::*, param_type::*, *};
 pub(crate) struct ParamForwardTsnSupported;
 
 impl fmt::Display for ParamForwardTsnSupported {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.header())
-    }
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "{}", self.header())
+	}
 }
 
 impl Param for ParamForwardTsnSupported {
-    fn header(&self) -> ParamHeader {
-        ParamHeader {
-            typ: ParamType::ForwardTsnSupp,
-            value_length: self.value_length() as u16,
-        }
-    }
+	fn header(&self) -> ParamHeader {
+		ParamHeader {
+			typ: ParamType::ForwardTsnSupp,
+			value_length: self.value_length() as u16,
+		}
+	}
 
-    fn unmarshal(raw: &Bytes) -> Result<Self> {
-        let _ = ParamHeader::unmarshal(raw)?;
-        Ok(ParamForwardTsnSupported {})
-    }
+	fn unmarshal(raw: &Bytes) -> Result<Self> {
+		let _ = ParamHeader::unmarshal(raw)?;
+		Ok(ParamForwardTsnSupported {})
+	}
 
-    fn marshal_to(&self, buf: &mut BytesMut) -> Result<usize> {
-        self.header().marshal_to(buf)?;
-        Ok(buf.len())
-    }
+	fn marshal_to(&self, buf: &mut BytesMut) -> Result<usize> {
+		self.header().marshal_to(buf)?;
+		Ok(buf.len())
+	}
 
-    fn value_length(&self) -> usize {
-        0
-    }
+	fn value_length(&self) -> usize {
+		0
+	}
 
-    fn clone_to(&self) -> Box<dyn Param + Send + Sync> {
-        Box::new(self.clone())
-    }
+	fn clone_to(&self) -> Box<dyn Param + Send + Sync> {
+		Box::new(self.clone())
+	}
 
-    fn as_any(&self) -> &(dyn Any + Send + Sync) {
-        self
-    }
+	fn as_any(&self) -> &(dyn Any + Send + Sync) {
+		self
+	}
 }

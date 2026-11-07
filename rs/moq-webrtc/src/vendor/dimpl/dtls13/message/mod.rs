@@ -26,14 +26,10 @@ pub use digitally_signed::DigitallySigned;
 pub use encrypted_extensions::EncryptedExtensions;
 pub use extension::{Extension, ExtensionType};
 pub(crate) use extensions::cookie::parse_cookie_extension;
-pub use extensions::key_share::{
-    KeyShareClientHello, KeyShareEntry, KeyShareHelloRetryRequest, KeyShareServerHello,
-};
+pub use extensions::key_share::{KeyShareClientHello, KeyShareEntry, KeyShareHelloRetryRequest, KeyShareServerHello};
 pub use extensions::signature_algorithms::SignatureAlgorithmsExtension;
 pub use extensions::supported_groups::SupportedGroupsExtension;
-pub use extensions::supported_versions::{
-    SupportedVersionsClientHello, SupportedVersionsServerHello,
-};
+pub use extensions::supported_versions::{SupportedVersionsClientHello, SupportedVersionsServerHello};
 pub use extensions::use_srtp::{SrtpProfileId, UseSrtpExtension};
 pub use finished::Finished;
 pub use handshake::{Body, Handshake, Header, KeyUpdateRequest, MessageType};
@@ -44,6 +40,5 @@ pub use wrapped::{Asn1Cert, DistinguishedName};
 
 // Re-export shared types
 pub use crate::vendor::dimpl::types::{
-    CompressionMethod, ContentType, Dtls13CipherSuite, NamedGroup, ProtocolVersion, Random,
-    Sequence, SignatureScheme,
+	CompressionMethod, ContentType, Dtls13CipherSuite, NamedGroup, ProtocolVersion, Random, Sequence, SignatureScheme,
 };

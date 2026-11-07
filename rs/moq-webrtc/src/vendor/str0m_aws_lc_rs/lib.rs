@@ -9,11 +9,11 @@ mod sha1;
 mod sha256;
 mod srtp;
 
+use crate::vendor::str0m_proto::crypto::CryptoProvider;
 use dtls::AwsLcRsDtlsProvider;
 use sha1::{AwsLcRsSha1HmacProvider, AwsLcRsSha1Provider};
 use sha256::AwsLcRsSha256Provider;
 use srtp::AwsLcRsSrtpProvider;
-use crate::vendor::str0m_proto::crypto::CryptoProvider;
 
 /// Create the default AWS-LC-RS crypto provider.
 ///
@@ -29,19 +29,19 @@ use crate::vendor::str0m_proto::crypto::CryptoProvider;
 /// - `SRTP_AEAD_AES_128_GCM`
 /// - `SRTP_AEAD_AES_256_GCM`
 pub fn default_provider() -> CryptoProvider {
-    static SRTP: AwsLcRsSrtpProvider = AwsLcRsSrtpProvider;
-    static SHA1_HMAC: AwsLcRsSha1HmacProvider = AwsLcRsSha1HmacProvider;
-    static SHA1: AwsLcRsSha1Provider = AwsLcRsSha1Provider;
-    static SHA256: AwsLcRsSha256Provider = AwsLcRsSha256Provider;
-    static DTLS: AwsLcRsDtlsProvider = AwsLcRsDtlsProvider;
+	static SRTP: AwsLcRsSrtpProvider = AwsLcRsSrtpProvider;
+	static SHA1_HMAC: AwsLcRsSha1HmacProvider = AwsLcRsSha1HmacProvider;
+	static SHA1: AwsLcRsSha1Provider = AwsLcRsSha1Provider;
+	static SHA256: AwsLcRsSha256Provider = AwsLcRsSha256Provider;
+	static DTLS: AwsLcRsDtlsProvider = AwsLcRsDtlsProvider;
 
-    CryptoProvider {
-        srtp_provider: &SRTP,
-        sha1_hmac_provider: &SHA1_HMAC,
-        sha1_provider: &SHA1,
-        sha256_provider: &SHA256,
-        dtls_provider: &DTLS,
-    }
+	CryptoProvider {
+		srtp_provider: &SRTP,
+		sha1_hmac_provider: &SHA1_HMAC,
+		sha1_provider: &SHA1,
+		sha256_provider: &SHA256,
+		dtls_provider: &DTLS,
+	}
 }
 
 /// Create the AWS-LC-RS crypto provider used by the Dimpl DTLS backend.
@@ -49,16 +49,16 @@ pub fn default_provider() -> CryptoProvider {
 /// This allows callers that need non-default Dimpl configuration to construct
 /// `crate::vendor::dimpl::Config` directly while retaining the AWS-LC-RS implementation.
 pub fn dimpl_crypto_provider() -> crate::vendor::dimpl::crypto::CryptoProvider {
-    crate::vendor::dimpl::crypto::aws_lc_rs::default_provider()
+	crate::vendor::dimpl::crypto::aws_lc_rs::default_provider()
 }
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn exposed_dimpl_provider_builds_config() {
-        crate::vendor::dimpl::Config::builder()
-            .with_crypto_provider(super::dimpl_crypto_provider())
-            .build()
-            .expect("AWS-LC-RS Dimpl provider should build a valid config");
-    }
+	#[test]
+	fn exposed_dimpl_provider_builds_config() {
+		crate::vendor::dimpl::Config::builder()
+			.with_crypto_provider(super::dimpl_crypto_provider())
+			.build()
+			.expect("AWS-LC-RS Dimpl provider should build a valid config");
+	}
 }

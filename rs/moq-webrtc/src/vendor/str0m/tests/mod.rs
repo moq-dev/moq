@@ -1,6 +1,5 @@
 //! str0m's integration tests, run against the vendored module.
 
-mod common;
 #[path = "abs-capture-time.rs"]
 mod abs_capture_time;
 #[path = "api-errors.rs"]
@@ -10,15 +9,16 @@ mod audio_inactive_probe;
 mod bidirectional;
 #[path = "change-ssrc-reset-receive.rs"]
 mod change_ssrc_reset_receive;
+mod common;
 #[path = "config-validation.rs"]
 mod config_validation;
 mod contiguous;
 #[path = "crypto-compliance.rs"]
 mod crypto_compliance;
-#[path = "data-channel-direct.rs"]
-mod data_channel_direct;
 #[path = "data-channel.rs"]
 mod data_channel;
+#[path = "data-channel-direct.rs"]
+mod data_channel_direct;
 #[path = "dtls-close.rs"]
 mod dtls_close;
 #[path = "dtls-error-readiness.rs"]
@@ -76,10 +76,10 @@ mod repeated;
 mod rtcp_request_timeout;
 #[path = "rtp-direct-csrc.rs"]
 mod rtp_direct_csrc;
-#[path = "rtp-direct-mid-rid.rs"]
-mod rtp_direct_mid_rid;
 #[path = "rtp-direct-mid.rs"]
 mod rtp_direct_mid;
+#[path = "rtp-direct-mid-rid.rs"]
+mod rtp_direct_mid_rid;
 #[path = "rtp-direct-reset-ssrc.rs"]
 mod rtp_direct_reset_ssrc;
 #[path = "rtp-direct-ssrc.rs"]
@@ -103,17 +103,17 @@ mod sdp_unique_mids;
 mod simulcast_rid_mapping;
 #[path = "srtp-replay-attack.rs"]
 mod srtp_replay_attack;
+mod ssrc_zero_feedback;
 #[path = "ssrc-zero-probe.rs"]
 mod ssrc_zero_probe;
-mod ssrc_zero_feedback;
 #[path = "stale-network-time-after-pause.rs"]
 mod stale_network_time_after_pause;
 #[path = "stream-lifecycle.rs"]
 mod stream_lifecycle;
 mod twcc;
+mod unidirectional;
 #[path = "unidirectional-r-create-media.rs"]
 mod unidirectional_r_create_media;
-mod unidirectional;
 #[path = "user-rtp-header-extension.rs"]
 mod user_rtp_header_extension;
 #[path = "writer-borrow.rs"]

@@ -8,25 +8,25 @@ use crate::vendor::dimpl::types::HashAlgorithm;
 
 /// Hash context implementation using aws-lc-rs.
 struct AwsLcHashContext {
-    context: Context,
+	context: Context,
 }
 
 impl std::fmt::Debug for AwsLcHashContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AwsLcHashContext").finish_non_exhaustive()
-    }
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("AwsLcHashContext").finish_non_exhaustive()
+	}
 }
 
 impl HashContext for AwsLcHashContext {
-    fn update(&mut self, data: &[u8]) {
-        self.context.update(data);
-    }
+	fn update(&mut self, data: &[u8]) {
+		self.context.update(data);
+	}
 
-    fn clone_and_finalize(&self, out: &mut Buf) {
-        let digest = self.context.clone().finish();
-        out.clear();
-        out.extend_from_slice(digest.as_ref());
-    }
+	fn clone_and_finalize(&self, out: &mut Buf) {
+		let digest = self.context.clone().finish();
+		out.clear();
+		out.extend_from_slice(digest.as_ref());
+	}
 }
 
 /// Hash provider implementation.
@@ -34,14 +34,14 @@ impl HashContext for AwsLcHashContext {
 pub(super) struct AwsLcHashProvider;
 
 impl HashProvider for AwsLcHashProvider {
-    fn create_hash(&self, algorithm: HashAlgorithm) -> Box<dyn HashContext> {
-        let context = match algorithm {
-            HashAlgorithm::SHA256 => Context::new(&SHA256),
-            HashAlgorithm::SHA384 => Context::new(&SHA384),
-            _ => panic!("Unsupported hash algorithm: {:?}", algorithm),
-        };
-        Box::new(AwsLcHashContext { context })
-    }
+	fn create_hash(&self, algorithm: HashAlgorithm) -> Box<dyn HashContext> {
+		let context = match algorithm {
+			HashAlgorithm::SHA256 => Context::new(&SHA256),
+			HashAlgorithm::SHA384 => Context::new(&SHA384),
+			_ => panic!("Unsupported hash algorithm: {:?}", algorithm),
+		};
+		Box::new(AwsLcHashContext { context })
+	}
 }
 
 /// Static instance of the hash provider.

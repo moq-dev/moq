@@ -29,65 +29,64 @@ use crate::vendor::sctp_proto::param::{param_header::*, param_type::*, *};
 ///heartbeat Info                       Mandatory   1
 #[derive(Default, Debug)]
 pub(crate) struct ChunkHeartbeat {
-    pub(crate) params: Vec<Box<dyn Param + Send + Sync>>,
+	pub(crate) params: Vec<Box<dyn Param + Send + Sync>>,
 }
 
 /// makes ChunkHeartbeat printable
 impl fmt::Display for ChunkHeartbeat {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.header())
-    }
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "{}", self.header())
+	}
 }
 
 impl Chunk for ChunkHeartbeat {
-    fn header(&self) -> ChunkHeader {
-        ChunkHeader {
-            typ: CT_HEARTBEAT,
-            flags: 0,
-            value_length: self.value_length() as u16,
-        }
-    }
+	fn header(&self) -> ChunkHeader {
+		ChunkHeader {
+			typ: CT_HEARTBEAT,
+			flags: 0,
+			value_length: self.value_length() as u16,
+		}
+	}
 
-    fn unmarshal(raw: &Bytes) -> Result<Self> {
-        let header = ChunkHeader::unmarshal(raw)?;
+	fn unmarshal(raw: &Bytes) -> Result<Self> {
+		let header = ChunkHeader::unmarshal(raw)?;
 
-        if header.typ != CT_HEARTBEAT {
-            return Err(Error::ErrChunkTypeNotHeartbeat);
-        }
+		if header.typ != CT_HEARTBEAT {
+			return Err(Error::ErrChunkTypeNotHeartbeat);
+		}
 
-        if header.value_length() < PARAM_HEADER_LENGTH {
-            return Err(Error::ErrHeartbeatNotLongEnoughInfo);
-        }
+		if header.value_length() < PARAM_HEADER_LENGTH {
+			return Err(Error::ErrHeartbeatNotLongEnoughInfo);
+		}
 
-        let p =
-            build_param(&raw.slice(CHUNK_HEADER_SIZE..CHUNK_HEADER_SIZE + header.value_length()))?;
-        if p.header().typ != ParamType::HeartbeatInfo {
-            return Err(Error::ErrHeartbeatParam);
-        }
-        let params = vec![p];
+		let p = build_param(&raw.slice(CHUNK_HEADER_SIZE..CHUNK_HEADER_SIZE + header.value_length()))?;
+		if p.header().typ != ParamType::HeartbeatInfo {
+			return Err(Error::ErrHeartbeatParam);
+		}
+		let params = vec![p];
 
-        Ok(ChunkHeartbeat { params })
-    }
+		Ok(ChunkHeartbeat { params })
+	}
 
-    fn marshal_to(&self, buf: &mut BytesMut) -> Result<usize> {
-        self.header().marshal_to(buf)?;
-        for p in &self.params {
-            buf.extend(p.marshal()?);
-        }
-        Ok(buf.len())
-    }
+	fn marshal_to(&self, buf: &mut BytesMut) -> Result<usize> {
+		self.header().marshal_to(buf)?;
+		for p in &self.params {
+			buf.extend(p.marshal()?);
+		}
+		Ok(buf.len())
+	}
 
-    fn check(&self) -> Result<()> {
-        Ok(())
-    }
+	fn check(&self) -> Result<()> {
+		Ok(())
+	}
 
-    fn value_length(&self) -> usize {
-        self.params.iter().fold(0, |length, p| {
-            length + PARAM_HEADER_LENGTH + p.value_length()
-        })
-    }
+	fn value_length(&self) -> usize {
+		self.params
+			.iter()
+			.fold(0, |length, p| length + PARAM_HEADER_LENGTH + p.value_length())
+	}
 
-    fn as_any(&self) -> &(dyn Any + Send + Sync) {
-        self
-    }
+	fn as_any(&self) -> &(dyn Any + Send + Sync) {
+		self
+	}
 }

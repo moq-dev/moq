@@ -8,110 +8,110 @@ use crate::vendor::str0m_proto::Id;
 use crate::vendor::str0m_proto::NonCryptographicRng;
 
 macro_rules! str_id {
-    ($id:ident, $name:literal, $num:tt, $new_len:tt) => {
-        impl $id {
-            /// Creates a new random id.
-            pub fn new() -> $id {
-                let mut arr = Id::<$num>::random().into_array();
-                for i in $new_len..$num {
-                    arr[i] = b' ';
-                }
-                $id(arr)
-            }
+	($id:ident, $name:literal, $num:tt, $new_len:tt) => {
+		impl $id {
+			/// Creates a new random id.
+			pub fn new() -> $id {
+				let mut arr = Id::<$num>::random().into_array();
+				for i in $new_len..$num {
+					arr[i] = b' ';
+				}
+				$id(arr)
+			}
 
-            /// Converts an array of bytes to an id.
-            pub const fn from_array(a: [u8; $num]) -> $id {
-                $id(a)
-            }
-        }
+			/// Converts an array of bytes to an id.
+			pub const fn from_array(a: [u8; $num]) -> $id {
+				$id(a)
+			}
+		}
 
-        impl fmt::Display for $id {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                let s: &str = self;
-                write!(f, "{}", s)
-            }
-        }
+		impl fmt::Display for $id {
+			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+				let s: &str = self;
+				write!(f, "{}", s)
+			}
+		}
 
-        impl fmt::Debug for $id {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                let s: &str = self;
-                write!(f, "{}({})", $name, s)
-            }
-        }
+		impl fmt::Debug for $id {
+			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+				let s: &str = self;
+				write!(f, "{}({})", $name, s)
+			}
+		}
 
-        impl Deref for $id {
-            type Target = str;
+		impl Deref for $id {
+			type Target = str;
 
-            fn deref(&self) -> &Self::Target {
-                from_utf8(&self.0).expect("ascii id").trim()
-            }
-        }
+			fn deref(&self) -> &Self::Target {
+				from_utf8(&self.0).expect("ascii id").trim()
+			}
+		}
 
-        impl<'a> From<&'a str> for $id {
-            fn from(v: &'a str) -> Self {
-                let v = v
-                    .chars()
-                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-                    .collect::<String>();
+		impl<'a> From<&'a str> for $id {
+			fn from(v: &'a str) -> Self {
+				let v = v
+					.chars()
+					.map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+					.collect::<String>();
 
-                let bytes = v.as_bytes();
-                let bytes = &bytes[0..$num.min(bytes.len())];
+				let bytes = v.as_bytes();
+				let bytes = &bytes[0..$num.min(bytes.len())];
 
-                // pad with space.
-                let mut array = [b' '; $num];
+				// pad with space.
+				let mut array = [b' '; $num];
 
-                let max = bytes.len().min(array.len());
-                (&mut array[0..max]).copy_from_slice(bytes);
+				let max = bytes.len().min(array.len());
+				(&mut array[0..max]).copy_from_slice(bytes);
 
-                $id(array)
-            }
-        }
+				$id(array)
+			}
+		}
 
-        impl Default for $id {
-            fn default() -> Self {
-                $id::new()
-            }
-        }
-    };
+		impl Default for $id {
+			fn default() -> Self {
+				$id::new()
+			}
+		}
+	};
 }
 
 macro_rules! num_id {
-    ($id:ident, $t:tt) => {
-        impl $id {
-            /// Creates a new random id.
-            pub fn new() -> Self {
-                loop {
-                    let v = NonCryptographicRng::$t();
-                    // At least Ssrc assigns special meaning to 0,
-                    // but it's fine to avoid for the other numeric
-                    // ids as well.
-                    if v != 0 {
-                        return $id(v);
-                    }
-                }
-            }
-        }
+	($id:ident, $t:tt) => {
+		impl $id {
+			/// Creates a new random id.
+			pub fn new() -> Self {
+				loop {
+					let v = NonCryptographicRng::$t();
+					// At least Ssrc assigns special meaning to 0,
+					// but it's fine to avoid for the other numeric
+					// ids as well.
+					if v != 0 {
+						return $id(v);
+					}
+				}
+			}
+		}
 
-        impl Deref for $id {
-            type Target = $t;
+		impl Deref for $id {
+			type Target = $t;
 
-            fn deref(&self) -> &Self::Target {
-                &self.0
-            }
-        }
+			fn deref(&self) -> &Self::Target {
+				&self.0
+			}
+		}
 
-        impl From<$t> for $id {
-            fn from(v: $t) -> Self {
-                $id(v)
-            }
-        }
+		impl From<$t> for $id {
+			fn from(v: $t) -> Self {
+				$id(v)
+			}
+		}
 
-        impl fmt::Display for $id {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{}", self.0)
-            }
-        }
-    };
+		impl fmt::Display for $id {
+			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+				write!(f, "{}", self.0)
+			}
+		}
+	};
 }
 
 /// Media identifier.
@@ -147,13 +147,13 @@ pub struct Ssrc(u32);
 num_id!(Ssrc, u32);
 
 impl Ssrc {
-    /// Returns true if this is the probe SSRC (0).
-    ///
-    /// libwebrtc uses SSRC 0 for bandwidth estimation probes sent before
-    /// video media starts. These probes require special handling.
-    pub fn is_probe(&self) -> bool {
-        self.0 == 0
-    }
+	/// Returns true if this is the probe SSRC (0).
+	///
+	/// libwebrtc uses SSRC 0 for bandwidth estimation probes sent before
+	/// video media starts. These probes require special handling.
+	pub fn is_probe(&self) -> bool {
+		self.0 == 0
+	}
 }
 
 /// Payload type.
@@ -208,118 +208,116 @@ crate::vendor::str0m::drv_identity_copy!(Mid, Rid, Ssrc, Pt, SessionId, SeqNo);
 ///
 /// TWCC sequences are also u64 internally (tracking rollovers), though the
 /// wire format uses u16.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default)]
 pub struct TwccSeq(u64);
 num_id!(TwccSeq, u64);
 
 impl SeqNo {
-    pub(crate) const MAX: SeqNo = SeqNo(u64::MAX);
+	pub(crate) const MAX: SeqNo = SeqNo(u64::MAX);
 
-    /// Check if the `other` sequence number is directly following this.
-    #[inline(always)]
-    pub fn is_next(&self, other: SeqNo) -> bool {
-        if **self >= *other {
-            return false;
-        }
-        *other - **self == 1
-    }
+	/// Check if the `other` sequence number is directly following this.
+	#[inline(always)]
+	pub fn is_next(&self, other: SeqNo) -> bool {
+		if **self >= *other {
+			return false;
+		}
+		*other - **self == 1
+	}
 
-    /// Increase (mutate) this sequence number and return the previous value.
-    #[inline(always)]
-    pub fn inc(&mut self) -> SeqNo {
-        let n = SeqNo(self.0);
-        self.0 += 1;
-        n
-    }
+	/// Increase (mutate) this sequence number and return the previous value.
+	#[inline(always)]
+	pub fn inc(&mut self) -> SeqNo {
+		let n = SeqNo(self.0);
+		self.0 += 1;
+		n
+	}
 
-    #[inline(always)]
-    pub(crate) fn is_max(&self) -> bool {
-        self.0 == Self::MAX.0
-    }
+	#[inline(always)]
+	pub(crate) fn is_max(&self) -> bool {
+		self.0 == Self::MAX.0
+	}
 
-    /// The RTP header value (discarding the ROC).
-    ///
-    /// This is the same as discarding the top 48 bits by casting to a u16.
-    ///
-    /// ```ignore
-    /// # use crate::vendor::str0m::rtp::SeqNo;
-    /// let seq_no: SeqNo = 65_537.into();
-    ///
-    /// // Use `as_u16()`.
-    /// let a = seq_no.as_u16();
-    ///
-    /// assert_eq!(a, 1);
-    /// ```
-    #[inline(always)]
-    pub fn as_u16(&self) -> u16 {
-        self.0 as u16
-    }
+	/// The RTP header value (discarding the ROC).
+	///
+	/// This is the same as discarding the top 48 bits by casting to a u16.
+	///
+	/// ```ignore
+	/// # use crate::vendor::str0m::rtp::SeqNo;
+	/// let seq_no: SeqNo = 65_537.into();
+	///
+	/// // Use `as_u16()`.
+	/// let a = seq_no.as_u16();
+	///
+	/// assert_eq!(a, 1);
+	/// ```
+	#[inline(always)]
+	pub fn as_u16(&self) -> u16 {
+		self.0 as u16
+	}
 
-    /// Get the rollover counter (ROC) value.
-    ///
-    /// ```ignore
-    /// # use crate::vendor::str0m::rtp::SeqNo;
-    /// // More than 2^16, thus rolled over.
-    /// let seq_no: SeqNo = 95_000.into();
-    ///
-    /// assert_eq!(seq_no.roc(), 1);
-    ///
-    /// // Is the same as shifting 16 bits.
-    /// assert_eq!(seq_no.roc(), 95_000 >> 16);
-    /// ```
-    #[inline(always)]
-    pub fn roc(&self) -> u64 {
-        self.0 >> 16
-    }
+	/// Get the rollover counter (ROC) value.
+	///
+	/// ```ignore
+	/// # use crate::vendor::str0m::rtp::SeqNo;
+	/// // More than 2^16, thus rolled over.
+	/// let seq_no: SeqNo = 95_000.into();
+	///
+	/// assert_eq!(seq_no.roc(), 1);
+	///
+	/// // Is the same as shifting 16 bits.
+	/// assert_eq!(seq_no.roc(), 95_000 >> 16);
+	/// ```
+	#[inline(always)]
+	pub fn roc(&self) -> u64 {
+		self.0 >> 16
+	}
 }
 
 impl TwccSeq {
-    /// Check if the `other` sequence number is directly following this.
-    #[inline(always)]
-    pub fn is_next(&self, other: TwccSeq) -> bool {
-        if **self >= *other {
-            return false;
-        }
-        *other - **self == 1
-    }
+	/// Check if the `other` sequence number is directly following this.
+	#[inline(always)]
+	pub fn is_next(&self, other: TwccSeq) -> bool {
+		if **self >= *other {
+			return false;
+		}
+		*other - **self == 1
+	}
 
-    /// Increase (mutate) this sequence number and return the previous value.
-    #[inline(always)]
-    pub fn inc(&mut self) -> TwccSeq {
-        let n = TwccSeq(self.0);
-        self.0 += 1;
-        n
-    }
+	/// Increase (mutate) this sequence number and return the previous value.
+	#[inline(always)]
+	pub fn inc(&mut self) -> TwccSeq {
+		let n = TwccSeq(self.0);
+		self.0 += 1;
+		n
+	}
 
-    /// The TWCC wire format value (discarding the ROC).
-    ///
-    /// This is the same as discarding the top 48 bits by casting to a u16.
-    #[inline(always)]
-    pub fn as_u16(&self) -> u16 {
-        self.0 as u16
-    }
+	/// The TWCC wire format value (discarding the ROC).
+	///
+	/// This is the same as discarding the top 48 bits by casting to a u16.
+	#[inline(always)]
+	pub fn as_u16(&self) -> u16 {
+		self.0 as u16
+	}
 
-    /// Get the rollover counter (ROC) value.
-    #[inline(always)]
-    pub fn roc(&self) -> u64 {
-        self.0 >> 16
-    }
+	/// Get the rollover counter (ROC) value.
+	#[inline(always)]
+	pub fn roc(&self) -> u64 {
+		self.0 >> 16
+	}
 }
 
 impl Default for SeqNo {
-    fn default() -> Self {
-        // https://www.rfc-editor.org/rfc/rfc3550#page-13
-        // The initial value of the sequence number SHOULD be random (unpredictable)
-        // to make known-plaintext attacks on encryption more difficult
-        // Upper half of range is avoided in order to prevent SRTP wraparound issues
-        // during startup.
-        // Sequence number 0 is avoided for historical reasons, presumably to avoid
-        // debugability or test usage conflicts.
-        // i.e the range is (1, 2^15-1)
-        Self((NonCryptographicRng::u16() % 32767 + 1) as u64)
-    }
+	fn default() -> Self {
+		// https://www.rfc-editor.org/rfc/rfc3550#page-13
+		// The initial value of the sequence number SHOULD be random (unpredictable)
+		// to make known-plaintext attacks on encryption more difficult
+		// Upper half of range is avoided in order to prevent SRTP wraparound issues
+		// during startup.
+		// Sequence number 0 is avoided for historical reasons, presumably to avoid
+		// debugability or test usage conflicts.
+		// i.e the range is (1, 2^15-1)
+		Self((NonCryptographicRng::u16() % 32767 + 1) as u64)
+	}
 }
 
 /// Probe cluster identifier for bandwidth estimation.
@@ -333,22 +331,22 @@ pub struct TwccClusterId(u64);
 num_id!(TwccClusterId, u64);
 
 impl TwccClusterId {
-    /// Increase (mutate) this cluster ID and return the previous value.
-    #[inline(always)]
-    pub fn inc(&mut self) -> TwccClusterId {
-        let n = TwccClusterId(self.0);
-        self.0 = self.0.wrapping_add(1);
-        n
-    }
+	/// Increase (mutate) this cluster ID and return the previous value.
+	#[inline(always)]
+	pub fn inc(&mut self) -> TwccClusterId {
+		let n = TwccClusterId(self.0);
+		self.0 = self.0.wrapping_add(1);
+		n
+	}
 }
 
 impl Pt {
-    /// Create a PT with a specific value.
-    ///
-    /// PTs are 7 bit. Values with 8 bits are not valid in RTP headers.
-    pub const fn new_with_value(v: u8) -> Pt {
-        Pt(v)
-    }
+	/// Create a PT with a specific value.
+	///
+	/// PTs are 7 bit. Values with 8 bits are not valid in RTP headers.
+	pub const fn new_with_value(v: u8) -> Pt {
+		Pt(v)
+	}
 }
 
 /// A combination of Mid/Rid
@@ -358,17 +356,17 @@ impl Pt {
 pub(crate) struct MidRid(pub Mid, pub Option<Rid>);
 
 impl MidRid {
-    #[inline(always)]
-    pub fn mid(&self) -> Mid {
-        self.0
-    }
+	#[inline(always)]
+	pub fn mid(&self) -> Mid {
+		self.0
+	}
 
-    #[inline(always)]
-    pub fn rid(&self) -> Option<Rid> {
-        self.1
-    }
+	#[inline(always)]
+	pub fn rid(&self) -> Option<Rid> {
+		self.1
+	}
 
-    pub fn special_equals(&self, other: &MidRid) -> bool {
-        self.0 == other.0 && (self.1.is_none() || self.1 == other.1)
-    }
+	pub fn special_equals(&self, other: &MidRid) -> bool {
+		self.0 == other.0 && (self.1.is_none() || self.1 == other.1)
+	}
 }

@@ -11,141 +11,141 @@ use common::{Peer, PendingPacket, TestRtc, init_crypto_default, init_log, negoti
 
 /// L sends video to a receive-only R whose stream has NACK suppressed.
 fn setup() -> Result<(TestRtc, TestRtc, Mid, Instant), RtcError> {
-    init_log();
-    init_crypto_default();
+	init_log();
+	init_crypto_default();
 
-    let mut l = TestRtc::new(Peer::Left);
-    let mut r = TestRtc::new(Peer::Right);
+	let mut l = TestRtc::new(Peer::Left);
+	let mut r = TestRtc::new(Peer::Right);
 
-    l.add_host_candidate((Ipv4Addr::new(1, 1, 1, 1), 1000).into());
-    r.add_host_candidate((Ipv4Addr::new(2, 2, 2, 2), 2000).into());
+	l.add_host_candidate((Ipv4Addr::new(1, 1, 1, 1), 1000).into());
+	r.add_host_candidate((Ipv4Addr::new(2, 2, 2, 2), 2000).into());
 
-    let mid = negotiate(&mut l, &mut r, |change| {
-        change.add_media(MediaKind::Video, Direction::SendOnly, None, None, None)
-    });
+	let mid = negotiate(&mut l, &mut r, |change| {
+		change.add_media(MediaKind::Video, Direction::SendOnly, None, None, None)
+	});
 
-    while !l.is_connected() || !r.is_connected() {
-        progress(&mut l, &mut r)?;
-    }
+	while !l.is_connected() || !r.is_connected() {
+		progress(&mut l, &mut r)?;
+	}
 
-    // Without NACK, no 33ms NACK timer wakes the session.
-    r.direct_api()
-        .stream_rx_by_mid(mid, None)
-        .expect("stream rx")
-        .suppress_nack(true);
+	// Without NACK, no 33ms NACK timer wakes the session.
+	r.direct_api()
+		.stream_rx_by_mid(mid, None)
+		.expect("stream rx")
+		.suppress_nack(true);
 
-    let pt = l.params_vp8().pt();
-    for i in 0..20 {
-        let wallclock = l.start + l.duration();
-        let time = l.duration().into();
-        l.writer(mid)
-            .unwrap()
-            .write(pt, wallclock, time, vec![0x10, 0x00, 0x00, i as u8])?;
-        progress(&mut l, &mut r)?;
-    }
+	let pt = l.params_vp8().pt();
+	for i in 0..20 {
+		let wallclock = l.start + l.duration();
+		let time = l.duration().into();
+		l.writer(mid)
+			.unwrap()
+			.write(pt, wallclock, time, vec![0x10, 0x00, 0x00, i as u8])?;
+		progress(&mut l, &mut r)?;
+	}
 
-    let now = l.last.max(r.last);
-    drain(&mut l, now)?;
-    drain(&mut r, now)?;
+	let now = l.last.max(r.last);
+	drain(&mut l, now)?;
+	drain(&mut r, now)?;
 
-    Ok((l, r, mid, now))
+	Ok((l, r, mid, now))
 }
 
 /// Polls without handling any input. Returns transmits and the next timeout.
 fn poll(rtc: &mut TestRtc) -> Result<(Vec<PendingPacket>, Instant), RtcError> {
-    let mut packets = Vec::new();
+	let mut packets = Vec::new();
 
-    loop {
-        match rtc.rtc.poll_output()? {
-            Output::Timeout(t) => return Ok((packets, t)),
-            Output::Transmit(t) => packets.push(PendingPacket {
-                proto: t.proto,
-                source: t.source,
-                destination: t.destination,
-                contents: t.contents.to_vec(),
-            }),
-            Output::Event(e) => rtc.events.push((rtc.last, e)),
-        }
-    }
+	loop {
+		match rtc.rtc.poll_output()? {
+			Output::Timeout(t) => return Ok((packets, t)),
+			Output::Transmit(t) => packets.push(PendingPacket {
+				proto: t.proto,
+				source: t.source,
+				destination: t.destination,
+				contents: t.contents.to_vec(),
+			}),
+			Output::Event(e) => rtc.events.push((rtc.last, e)),
+		}
+	}
 }
 
 fn drain(rtc: &mut TestRtc, now: Instant) -> Result<(Vec<PendingPacket>, Instant), RtcError> {
-    rtc.rtc.handle_input(Input::Timeout(now))?;
-    poll(rtc)
+	rtc.rtc.handle_input(Input::Timeout(now))?;
+	poll(rtc)
 }
 
 fn deliver(rtc: &mut TestRtc, now: Instant, packets: Vec<PendingPacket>) -> Result<(), RtcError> {
-    for p in packets {
-        let input = Input::Receive(
-            now,
-            Receive {
-                proto: p.proto,
-                source: p.source,
-                destination: p.destination,
-                contents: (&p.contents[..]).try_into()?,
-            },
-        );
-        rtc.rtc.handle_input(input)?;
-        poll(rtc)?;
-    }
-    Ok(())
+	for p in packets {
+		let input = Input::Receive(
+			now,
+			Receive {
+				proto: p.proto,
+				source: p.source,
+				destination: p.destination,
+				contents: (&p.contents[..]).try_into()?,
+			},
+		);
+		rtc.rtc.handle_input(input)?;
+		poll(rtc)?;
+	}
+	Ok(())
 }
 
 /// The request must go out on the next tick without time advancing, after which the
 /// timeout is no longer immediate.
 fn assert_sent_immediately(
-    request: impl FnOnce(&mut TestRtc, Mid),
-    received: impl Fn(&Event) -> bool,
+	request: impl FnOnce(&mut TestRtc, Mid),
+	received: impl Fn(&Event) -> bool,
 ) -> Result<(), RtcError> {
-    let (mut l, mut r, mid, now) = setup()?;
+	let (mut l, mut r, mid, now) = setup()?;
 
-    request(&mut r, mid);
-    assert_eq!(poll(&mut r)?.1, now);
+	request(&mut r, mid);
+	assert_eq!(poll(&mut r)?.1, now);
 
-    let (packets, next) = drain(&mut r, now)?;
-    assert!(next > now);
+	let (packets, next) = drain(&mut r, now)?;
+	assert!(next > now);
 
-    deliver(&mut l, now, packets)?;
-    assert!(l.events.iter().any(|(_, e)| received(e)));
+	deliver(&mut l, now, packets)?;
+	assert!(l.events.iter().any(|(_, e)| received(e)));
 
-    Ok(())
+	Ok(())
 }
 
 #[test]
 fn keyframe_request_writer_is_immediate() -> Result<(), RtcError> {
-    assert_sent_immediately(
-        |r, mid| {
-            r.writer(mid)
-                .unwrap()
-                .request_keyframe(None, KeyframeRequestKind::Pli)
-                .unwrap()
-        },
-        |e| matches!(e, Event::KeyframeRequest(r) if r.kind == KeyframeRequestKind::Pli),
-    )
+	assert_sent_immediately(
+		|r, mid| {
+			r.writer(mid)
+				.unwrap()
+				.request_keyframe(None, KeyframeRequestKind::Pli)
+				.unwrap()
+		},
+		|e| matches!(e, Event::KeyframeRequest(r) if r.kind == KeyframeRequestKind::Pli),
+	)
 }
 
 #[test]
 fn keyframe_request_direct_api_is_immediate() -> Result<(), RtcError> {
-    assert_sent_immediately(
-        |r, mid| {
-            r.direct_api()
-                .stream_rx_by_mid(mid, None)
-                .unwrap()
-                .request_keyframe(KeyframeRequestKind::Fir)
-        },
-        |e| matches!(e, Event::KeyframeRequest(r) if r.kind == KeyframeRequestKind::Fir),
-    )
+	assert_sent_immediately(
+		|r, mid| {
+			r.direct_api()
+				.stream_rx_by_mid(mid, None)
+				.unwrap()
+				.request_keyframe(KeyframeRequestKind::Fir)
+		},
+		|e| matches!(e, Event::KeyframeRequest(r) if r.kind == KeyframeRequestKind::Fir),
+	)
 }
 
 #[test]
 fn remb_request_is_immediate() -> Result<(), RtcError> {
-    assert_sent_immediately(
-        |r, mid| {
-            r.direct_api()
-                .stream_rx_by_mid(mid, None)
-                .unwrap()
-                .request_remb(Bitrate::bps(123_456))
-        },
-        |e| matches!(e, Event::EgressBitrateEstimate(BweKind::Remb { .. })),
-    )
+	assert_sent_immediately(
+		|r, mid| {
+			r.direct_api()
+				.stream_rx_by_mid(mid, None)
+				.unwrap()
+				.request_remb(Bitrate::bps(123_456))
+		},
+		|e| matches!(e, Event::EgressBitrateEstimate(BweKind::Remb { .. })),
+	)
 }

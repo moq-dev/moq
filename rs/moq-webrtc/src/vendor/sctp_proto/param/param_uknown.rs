@@ -1,6 +1,6 @@
-use std::boxed::Box;
 use core::any::Any;
 use core::fmt::{Debug, Display, Formatter};
+use std::boxed::Box;
 
 use bytes::{Bytes, BytesMut};
 
@@ -17,53 +17,51 @@ use crate::vendor::sctp_proto::param::param_type::ParamType;
 /// to report some unrecognized params back to the sender.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParamUnknown {
-    typ: u16,
-    value: Bytes,
+	typ: u16,
+	value: Bytes,
 }
 
 impl Display for ParamUnknown {
-    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "ParamUnknown( {} {:?} )", self.header(), self.value)
-    }
+	fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+		write!(f, "ParamUnknown( {} {:?} )", self.header(), self.value)
+	}
 }
 
 impl Param for ParamUnknown {
-    fn header(&self) -> ParamHeader {
-        ParamHeader {
-            typ: ParamType::Unknown {
-                param_type: self.typ,
-            },
-            value_length: self.value.len() as u16,
-        }
-    }
+	fn header(&self) -> ParamHeader {
+		ParamHeader {
+			typ: ParamType::Unknown { param_type: self.typ },
+			value_length: self.value.len() as u16,
+		}
+	}
 
-    fn as_any(&self) -> &(dyn Any + Send + Sync) {
-        self
-    }
+	fn as_any(&self) -> &(dyn Any + Send + Sync) {
+		self
+	}
 
-    fn unmarshal(raw: &Bytes) -> crate::vendor::sctp_proto::error::Result<Self>
-    where
-        Self: Sized,
-    {
-        let header = ParamHeader::unmarshal(raw)?;
-        let value = raw.slice(PARAM_HEADER_LENGTH..PARAM_HEADER_LENGTH + header.value_length());
-        Ok(Self {
-            typ: header.typ.into(),
-            value,
-        })
-    }
+	fn unmarshal(raw: &Bytes) -> crate::vendor::sctp_proto::error::Result<Self>
+	where
+		Self: Sized,
+	{
+		let header = ParamHeader::unmarshal(raw)?;
+		let value = raw.slice(PARAM_HEADER_LENGTH..PARAM_HEADER_LENGTH + header.value_length());
+		Ok(Self {
+			typ: header.typ.into(),
+			value,
+		})
+	}
 
-    fn marshal_to(&self, buf: &mut BytesMut) -> crate::vendor::sctp_proto::error::Result<usize> {
-        self.header().marshal_to(buf)?;
-        buf.extend(self.value.clone());
-        Ok(buf.len())
-    }
+	fn marshal_to(&self, buf: &mut BytesMut) -> crate::vendor::sctp_proto::error::Result<usize> {
+		self.header().marshal_to(buf)?;
+		buf.extend(self.value.clone());
+		Ok(buf.len())
+	}
 
-    fn value_length(&self) -> usize {
-        self.value.len()
-    }
+	fn value_length(&self) -> usize {
+		self.value.len()
+	}
 
-    fn clone_to(&self) -> Box<dyn Param + Send + Sync> {
-        Box::new(self.clone())
-    }
+	fn clone_to(&self) -> Box<dyn Param + Send + Sync> {
+		Box::new(self.clone())
+	}
 }

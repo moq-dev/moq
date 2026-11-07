@@ -8,23 +8,23 @@ pub use provider::{SupportedAeadAes256Gcm, SupportedAes128CmSha1_80};
 
 /// DTLS related types and traits.
 pub mod dtls {
-    pub use super::provider::dtls::{DtlsInstance, DtlsProvider};
+	pub use super::provider::dtls::{DtlsInstance, DtlsProvider};
 
-    pub use crate::vendor::dimpl::DtlsCertificate as DtlsCert;
-    pub use crate::vendor::dimpl::KeyingMaterial;
-    pub use crate::vendor::dimpl::ProtocolVersion;
-    pub use crate::vendor::dimpl::SrtpProfile;
-    // Note: crate::vendor::dimpl::Error is renamed to DtlsImplError to avoid conflict with str0m's DtlsError
-    pub use super::provider::DtlsVersion;
-    pub use crate::vendor::dimpl::{Error as DtlsImplError, Output as DtlsOutput};
+	pub use crate::vendor::dimpl::DtlsCertificate as DtlsCert;
+	pub use crate::vendor::dimpl::KeyingMaterial;
+	pub use crate::vendor::dimpl::ProtocolVersion;
+	pub use crate::vendor::dimpl::SrtpProfile;
+	// Note: crate::vendor::dimpl::Error is renamed to DtlsImplError to avoid conflict with str0m's DtlsError
+	pub use super::provider::DtlsVersion;
+	pub use crate::vendor::dimpl::{Error as DtlsImplError, Output as DtlsOutput};
 }
 
 #[cfg(any(test, test))]
 #[allow(unused)]
 pub(crate) fn test_default_provider() -> &'static CryptoProvider {
-    use std::sync::OnceLock;
-    static TEST_PROVIDER: OnceLock<CryptoProvider> = OnceLock::new();
-    TEST_PROVIDER.get_or_init(from_feature_flags)
+	use std::sync::OnceLock;
+	static TEST_PROVIDER: OnceLock<CryptoProvider> = OnceLock::new();
+	TEST_PROVIDER.get_or_init(from_feature_flags)
 }
 
 /// Create a crypto provider based on enabled feature flags.
@@ -35,26 +35,26 @@ pub(crate) fn test_default_provider() -> &'static CryptoProvider {
 /// and call `str0m_apple_crypto::default_provider()` directly.
 #[allow(unreachable_code, clippy::needless_return)]
 pub fn from_feature_flags() -> CryptoProvider {
-    #[cfg(all())]
-    return crate::vendor::str0m_aws_lc_rs::default_provider();
+	#[cfg(all())]
+	return crate::vendor::str0m_aws_lc_rs::default_provider();
 
-    #[cfg(any())]
-    return str0m_rust_crypto::default_provider();
+	#[cfg(any())]
+	return str0m_rust_crypto::default_provider();
 
-    #[cfg(any(any(), any()))]
-    return str0m_openssl::default_provider();
+	#[cfg(any(any(), any()))]
+	return str0m_openssl::default_provider();
 
-    #[cfg(all(any(), target_vendor = "apple"))]
-    return str0m_apple_crypto::default_provider();
+	#[cfg(all(any(), target_vendor = "apple"))]
+	return str0m_apple_crypto::default_provider();
 
-    #[cfg(all(any(), target_os = "windows"))]
-    return str0m_wincrypto::default_provider();
+	#[cfg(all(any(), target_os = "windows"))]
+	return str0m_wincrypto::default_provider();
 
-    panic!(
-        "No crypto provider available. Enable one of: aws-lc-rs, 
+	panic!(
+		"No crypto provider available. Enable one of: aws-lc-rs, 
              rust-crypto, openssl, openssl-dimpl, wincrypto (Windows only)
              or use str0m-apple-crypto crate"
-    );
+	);
 }
 
 mod finger;

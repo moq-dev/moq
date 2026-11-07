@@ -31,92 +31,91 @@ use crate::vendor::sctp_proto::util::get_padding_size;
 ///Heartbeat Info                       Mandatory   1
 #[derive(Default, Debug)]
 pub(crate) struct ChunkHeartbeatAck {
-    pub(crate) params: Vec<Box<dyn Param + Send + Sync>>,
+	pub(crate) params: Vec<Box<dyn Param + Send + Sync>>,
 }
 
 /// makes ChunkHeartbeatAck printable
 impl fmt::Display for ChunkHeartbeatAck {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.header())
-    }
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "{}", self.header())
+	}
 }
 
 impl Chunk for ChunkHeartbeatAck {
-    fn header(&self) -> ChunkHeader {
-        ChunkHeader {
-            typ: CT_HEARTBEAT_ACK,
-            flags: 0,
-            value_length: self.value_length() as u16,
-        }
-    }
+	fn header(&self) -> ChunkHeader {
+		ChunkHeader {
+			typ: CT_HEARTBEAT_ACK,
+			flags: 0,
+			value_length: self.value_length() as u16,
+		}
+	}
 
-    fn unmarshal(raw: &Bytes) -> Result<Self> {
-        let header = ChunkHeader::unmarshal(raw)?;
+	fn unmarshal(raw: &Bytes) -> Result<Self> {
+		let header = ChunkHeader::unmarshal(raw)?;
 
-        if header.typ != CT_HEARTBEAT_ACK {
-            return Err(Error::ErrChunkTypeNotHeartbeatAck);
-        }
+		if header.typ != CT_HEARTBEAT_ACK {
+			return Err(Error::ErrChunkTypeNotHeartbeatAck);
+		}
 
-        if header.value_length() < PARAM_HEADER_LENGTH {
-            return Err(Error::ErrHeartbeatNotLongEnoughInfo);
-        }
+		if header.value_length() < PARAM_HEADER_LENGTH {
+			return Err(Error::ErrHeartbeatNotLongEnoughInfo);
+		}
 
-        let p =
-            build_param(&raw.slice(CHUNK_HEADER_SIZE..CHUNK_HEADER_SIZE + header.value_length()))?;
-        if p.header().typ != ParamType::HeartbeatInfo {
-            return Err(Error::ErrHeartbeatParam);
-        }
-        let params = vec![p];
+		let p = build_param(&raw.slice(CHUNK_HEADER_SIZE..CHUNK_HEADER_SIZE + header.value_length()))?;
+		if p.header().typ != ParamType::HeartbeatInfo {
+			return Err(Error::ErrHeartbeatParam);
+		}
+		let params = vec![p];
 
-        Ok(ChunkHeartbeatAck { params })
-    }
+		Ok(ChunkHeartbeatAck { params })
+	}
 
-    fn marshal_to(&self, buf: &mut BytesMut) -> Result<usize> {
-        if self.params.len() != 1 {
-            return Err(Error::ErrHeartbeatAckParams);
-        }
-        if self.params[0].header().typ != ParamType::HeartbeatInfo {
-            return Err(Error::ErrHeartbeatAckNotHeartbeatInfo);
-        }
+	fn marshal_to(&self, buf: &mut BytesMut) -> Result<usize> {
+		if self.params.len() != 1 {
+			return Err(Error::ErrHeartbeatAckParams);
+		}
+		if self.params[0].header().typ != ParamType::HeartbeatInfo {
+			return Err(Error::ErrHeartbeatAckNotHeartbeatInfo);
+		}
 
-        self.header().marshal_to(buf)?;
-        for (idx, p) in self.params.iter().enumerate() {
-            let pp = p.marshal()?;
-            let pp_len = pp.len();
-            buf.extend(pp);
+		self.header().marshal_to(buf)?;
+		for (idx, p) in self.params.iter().enumerate() {
+			let pp = p.marshal()?;
+			let pp_len = pp.len();
+			buf.extend(pp);
 
-            // Chunks (including Type, Length, and Value fields) are padded out
-            // by the sender with all zero bytes to be a multiple of 4 bytes
-            // long.  This PADDING MUST NOT be more than 3 bytes in total.  The
-            // Chunk Length value does not include terminating PADDING of the
-            // chunk.  *However, it does include PADDING of any variable-length
-            // parameter except the last parameter in the chunk.*  The receiver
-            // MUST ignore the PADDING.
-            if idx != self.params.len() - 1 {
-                let cnt = get_padding_size(pp_len);
-                buf.extend(vec![0u8; cnt]);
-            }
-        }
-        Ok(buf.len())
-    }
+			// Chunks (including Type, Length, and Value fields) are padded out
+			// by the sender with all zero bytes to be a multiple of 4 bytes
+			// long.  This PADDING MUST NOT be more than 3 bytes in total.  The
+			// Chunk Length value does not include terminating PADDING of the
+			// chunk.  *However, it does include PADDING of any variable-length
+			// parameter except the last parameter in the chunk.*  The receiver
+			// MUST ignore the PADDING.
+			if idx != self.params.len() - 1 {
+				let cnt = get_padding_size(pp_len);
+				buf.extend(vec![0u8; cnt]);
+			}
+		}
+		Ok(buf.len())
+	}
 
-    fn check(&self) -> Result<()> {
-        Ok(())
-    }
+	fn check(&self) -> Result<()> {
+		Ok(())
+	}
 
-    fn value_length(&self) -> usize {
-        let mut l = 0;
-        for (idx, p) in self.params.iter().enumerate() {
-            let p_len = PARAM_HEADER_LENGTH + p.value_length();
-            l += p_len;
-            if idx != self.params.len() - 1 {
-                l += get_padding_size(p_len);
-            }
-        }
-        l
-    }
+	fn value_length(&self) -> usize {
+		let mut l = 0;
+		for (idx, p) in self.params.iter().enumerate() {
+			let p_len = PARAM_HEADER_LENGTH + p.value_length();
+			l += p_len;
+			if idx != self.params.len() - 1 {
+				l += get_padding_size(p_len);
+			}
+		}
+		l
+	}
 
-    fn as_any(&self) -> &(dyn Any + Send + Sync) {
-        self
-    }
+	fn as_any(&self) -> &(dyn Any + Send + Sync) {
+		self
+	}
 }

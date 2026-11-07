@@ -11,60 +11,60 @@ use super::{chunk_header::*, chunk_type::*, *};
 ///+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 #[derive(Default, Debug, Clone)]
 pub(crate) struct ChunkShutdown {
-    pub(crate) cumulative_tsn_ack: u32,
+	pub(crate) cumulative_tsn_ack: u32,
 }
 
 pub(crate) const CUMULATIVE_TSN_ACK_LENGTH: usize = 4;
 
 /// makes chunkShutdown printable
 impl fmt::Display for ChunkShutdown {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.header())
-    }
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "{}", self.header())
+	}
 }
 
 impl Chunk for ChunkShutdown {
-    fn header(&self) -> ChunkHeader {
-        ChunkHeader {
-            typ: CT_SHUTDOWN,
-            flags: 0,
-            value_length: self.value_length() as u16,
-        }
-    }
+	fn header(&self) -> ChunkHeader {
+		ChunkHeader {
+			typ: CT_SHUTDOWN,
+			flags: 0,
+			value_length: self.value_length() as u16,
+		}
+	}
 
-    fn unmarshal(raw: &Bytes) -> Result<Self> {
-        let header = ChunkHeader::unmarshal(raw)?;
+	fn unmarshal(raw: &Bytes) -> Result<Self> {
+		let header = ChunkHeader::unmarshal(raw)?;
 
-        if header.typ != CT_SHUTDOWN {
-            return Err(Error::ErrChunkTypeNotShutdown);
-        }
+		if header.typ != CT_SHUTDOWN {
+			return Err(Error::ErrChunkTypeNotShutdown);
+		}
 
-        if header.value_length() != CUMULATIVE_TSN_ACK_LENGTH {
-            return Err(Error::ErrInvalidChunkSize);
-        }
+		if header.value_length() != CUMULATIVE_TSN_ACK_LENGTH {
+			return Err(Error::ErrInvalidChunkSize);
+		}
 
-        let reader = &mut raw.slice(CHUNK_HEADER_SIZE..CHUNK_HEADER_SIZE + header.value_length());
+		let reader = &mut raw.slice(CHUNK_HEADER_SIZE..CHUNK_HEADER_SIZE + header.value_length());
 
-        let cumulative_tsn_ack = reader.get_u32();
+		let cumulative_tsn_ack = reader.get_u32();
 
-        Ok(ChunkShutdown { cumulative_tsn_ack })
-    }
+		Ok(ChunkShutdown { cumulative_tsn_ack })
+	}
 
-    fn marshal_to(&self, writer: &mut BytesMut) -> Result<usize> {
-        self.header().marshal_to(writer)?;
-        writer.put_u32(self.cumulative_tsn_ack);
-        Ok(writer.len())
-    }
+	fn marshal_to(&self, writer: &mut BytesMut) -> Result<usize> {
+		self.header().marshal_to(writer)?;
+		writer.put_u32(self.cumulative_tsn_ack);
+		Ok(writer.len())
+	}
 
-    fn check(&self) -> Result<()> {
-        Ok(())
-    }
+	fn check(&self) -> Result<()> {
+		Ok(())
+	}
 
-    fn value_length(&self) -> usize {
-        CUMULATIVE_TSN_ACK_LENGTH
-    }
+	fn value_length(&self) -> usize {
+		CUMULATIVE_TSN_ACK_LENGTH
+	}
 
-    fn as_any(&self) -> &(dyn Any + Send + Sync) {
-        self
-    }
+	fn as_any(&self) -> &(dyn Any + Send + Sync) {
+		self
+	}
 }

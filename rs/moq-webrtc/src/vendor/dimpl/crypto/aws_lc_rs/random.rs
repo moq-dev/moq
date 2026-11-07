@@ -8,12 +8,12 @@ use crate::vendor::dimpl::{CryptoError, CryptoOperation};
 pub(super) struct AwsLcSecureRandom;
 
 impl SecureRandom for AwsLcSecureRandom {
-    fn fill(&self, buf: &mut [u8]) -> Result<(), CryptoError> {
-        use aws_lc_rs::rand::SecureRandom as _;
-        let rng = aws_lc_rs::rand::SystemRandom::new();
-        rng.fill(buf)
-            .map_err(|_| CryptoError::OperationFailed(CryptoOperation::FillRandom))
-    }
+	fn fill(&self, buf: &mut [u8]) -> Result<(), CryptoError> {
+		use aws_lc_rs::rand::SecureRandom as _;
+		let rng = aws_lc_rs::rand::SystemRandom::new();
+		rng.fill(buf)
+			.map_err(|_| CryptoError::OperationFailed(CryptoOperation::FillRandom))
+	}
 }
 
 /// Static instance of the secure random generator.

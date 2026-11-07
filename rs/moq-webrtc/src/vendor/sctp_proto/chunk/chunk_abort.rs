@@ -23,69 +23,67 @@ use std::string::ToString;
 ///+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 #[derive(Default, Debug, Clone)]
 pub(crate) struct ChunkAbort {
-    pub(crate) error_causes: Vec<ErrorCause>,
+	pub(crate) error_causes: Vec<ErrorCause>,
 }
 
 /// String makes chunkAbort printable
 impl fmt::Display for ChunkAbort {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut res = vec![self.header().to_string()];
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		let mut res = vec![self.header().to_string()];
 
-        for cause in &self.error_causes {
-            res.push(format!(" - {}", cause));
-        }
+		for cause in &self.error_causes {
+			res.push(format!(" - {}", cause));
+		}
 
-        write!(f, "{}", res.join("\n"))
-    }
+		write!(f, "{}", res.join("\n"))
+	}
 }
 
 impl Chunk for ChunkAbort {
-    fn header(&self) -> ChunkHeader {
-        ChunkHeader {
-            typ: CT_ABORT,
-            flags: 0,
-            value_length: self.value_length() as u16,
-        }
-    }
+	fn header(&self) -> ChunkHeader {
+		ChunkHeader {
+			typ: CT_ABORT,
+			flags: 0,
+			value_length: self.value_length() as u16,
+		}
+	}
 
-    fn unmarshal(raw: &Bytes) -> Result<Self> {
-        let header = ChunkHeader::unmarshal(raw)?;
+	fn unmarshal(raw: &Bytes) -> Result<Self> {
+		let header = ChunkHeader::unmarshal(raw)?;
 
-        if header.typ != CT_ABORT {
-            return Err(Error::ErrChunkTypeNotAbort);
-        }
+		if header.typ != CT_ABORT {
+			return Err(Error::ErrChunkTypeNotAbort);
+		}
 
-        let value_end = CHUNK_HEADER_SIZE + header.value_length();
-        let mut error_causes = vec![];
-        let mut offset = CHUNK_HEADER_SIZE;
-        while offset + ERROR_CAUSE_HEADER_LENGTH <= value_end {
-            let e = ErrorCause::unmarshal(&raw.slice(offset..value_end))?;
-            offset += e.length();
-            error_causes.push(e);
-        }
+		let value_end = CHUNK_HEADER_SIZE + header.value_length();
+		let mut error_causes = vec![];
+		let mut offset = CHUNK_HEADER_SIZE;
+		while offset + ERROR_CAUSE_HEADER_LENGTH <= value_end {
+			let e = ErrorCause::unmarshal(&raw.slice(offset..value_end))?;
+			offset += e.length();
+			error_causes.push(e);
+		}
 
-        Ok(ChunkAbort { error_causes })
-    }
+		Ok(ChunkAbort { error_causes })
+	}
 
-    fn marshal_to(&self, buf: &mut BytesMut) -> Result<usize> {
-        self.header().marshal_to(buf)?;
-        for ec in &self.error_causes {
-            buf.extend(ec.marshal());
-        }
-        Ok(buf.len())
-    }
+	fn marshal_to(&self, buf: &mut BytesMut) -> Result<usize> {
+		self.header().marshal_to(buf)?;
+		for ec in &self.error_causes {
+			buf.extend(ec.marshal());
+		}
+		Ok(buf.len())
+	}
 
-    fn check(&self) -> Result<()> {
-        Ok(())
-    }
+	fn check(&self) -> Result<()> {
+		Ok(())
+	}
 
-    fn value_length(&self) -> usize {
-        self.error_causes
-            .iter()
-            .fold(0, |length, ec| length + ec.length())
-    }
+	fn value_length(&self) -> usize {
+		self.error_causes.iter().fold(0, |length, ec| length + ec.length())
+	}
 
-    fn as_any(&self) -> &(dyn Any + Send + Sync) {
-        self
-    }
+	fn as_any(&self) -> &(dyn Any + Send + Sync) {
+		self
+	}
 }

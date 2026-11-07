@@ -12,44 +12,44 @@ pub(crate) struct ChunkShutdownComplete;
 
 /// makes chunkShutdownComplete printable
 impl fmt::Display for ChunkShutdownComplete {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.header())
-    }
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "{}", self.header())
+	}
 }
 
 impl Chunk for ChunkShutdownComplete {
-    fn header(&self) -> ChunkHeader {
-        ChunkHeader {
-            typ: CT_SHUTDOWN_COMPLETE,
-            flags: 0,
-            value_length: self.value_length() as u16,
-        }
-    }
+	fn header(&self) -> ChunkHeader {
+		ChunkHeader {
+			typ: CT_SHUTDOWN_COMPLETE,
+			flags: 0,
+			value_length: self.value_length() as u16,
+		}
+	}
 
-    fn unmarshal(raw: &Bytes) -> Result<Self> {
-        let header = ChunkHeader::unmarshal(raw)?;
+	fn unmarshal(raw: &Bytes) -> Result<Self> {
+		let header = ChunkHeader::unmarshal(raw)?;
 
-        if header.typ != CT_SHUTDOWN_COMPLETE {
-            return Err(Error::ErrChunkTypeNotShutdownComplete);
-        }
+		if header.typ != CT_SHUTDOWN_COMPLETE {
+			return Err(Error::ErrChunkTypeNotShutdownComplete);
+		}
 
-        Ok(ChunkShutdownComplete {})
-    }
+		Ok(ChunkShutdownComplete {})
+	}
 
-    fn marshal_to(&self, writer: &mut BytesMut) -> Result<usize> {
-        self.header().marshal_to(writer)?;
-        Ok(writer.len())
-    }
+	fn marshal_to(&self, writer: &mut BytesMut) -> Result<usize> {
+		self.header().marshal_to(writer)?;
+		Ok(writer.len())
+	}
 
-    fn check(&self) -> Result<()> {
-        Ok(())
-    }
+	fn check(&self) -> Result<()> {
+		Ok(())
+	}
 
-    fn value_length(&self) -> usize {
-        0
-    }
+	fn value_length(&self) -> usize {
+		0
+	}
 
-    fn as_any(&self) -> &(dyn Any + Send + Sync) {
-        self
-    }
+	fn as_any(&self) -> &(dyn Any + Send + Sync) {
+		self
+	}
 }
