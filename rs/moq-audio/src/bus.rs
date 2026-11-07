@@ -150,10 +150,42 @@ struct Source {
 	applied: f32,
 	/// Pan actually applied, ramping toward the strip's pan across a block.
 	panned: f32,
+	/// Balanced channels, then mono ones a stereo bus pans with constant power.
+	/// Each class is delayed apart, so a pan change reaches audio already held
+	/// back by the sync delay.
+	lanes: [Lane; 2],
+	/// This source's share of the current block, after its delay, pan, and gain.
+	block: Vec<f32>,
+}
+
+/// A source's channels that share a pan law, summed and then delayed.
+#[derive(Default)]
+struct Lane {
+	block: Vec<f32>,
 	/// Samples held back for the strip's sync delay.
 	delay: VecDeque<f32>,
-	/// This source's share of the current block, after its delay and gain.
-	block: Vec<f32>,
+	/// A channel was read into `block` this advance.
+	fed: bool,
+}
+
+impl Lane {
+	/// Hold `block` back by exactly `held` samples. A change inserts silence or
+	/// skips ahead once, which a calibration rarely makes.
+	fn delay(&mut self, held: usize, samples: usize) {
+		if held == 0 && self.delay.is_empty() {
+			return;
+		}
+		while self.delay.len() < held {
+			self.delay.push_front(0.0);
+		}
+		if self.delay.len() > held {
+			self.delay.drain(..self.delay.len() - held);
+		}
+		self.delay.extend(self.block.iter().copied());
+		for (out, sample) in self.block.iter_mut().zip(self.delay.drain(..samples)) {
+			*out = sample;
+		}
+	}
 }
 
 struct Routed {
@@ -323,7 +355,7 @@ impl Bus {
 				channels: Vec::new(),
 				applied: strip.target(),
 				panned: strip.pan(),
-				delay: VecDeque::new(),
+				lanes: Default::default(),
 				block: Vec::new(),
 			})
 			.channels
@@ -490,44 +522,57 @@ impl Source {
 	///
 	/// Only a `stereo` bus pans; any other holds every strip on it at center.
 	fn advance(&mut self, samples: usize, channels: usize, stereo: bool, sample_rate: u64, scratch: &mut Vec<f32>) {
-		self.block.clear();
-		self.block.resize(samples, 0.0);
-		let pan = self.strip.pan();
-		let mut feeds = self.channels.iter_mut();
-		if let Some(first) = feeds.next() {
-			first.ring.read(&mut self.block);
-			if stereo {
-				apply_pan(&mut self.block, self.panned, pan, first.mono);
+		for lane in &mut self.lanes {
+			lane.fed = false;
+		}
+		for feed in &mut self.channels {
+			let lane = &mut self.lanes[usize::from(stereo && feed.mono)];
+			if lane.fed {
+				scratch.resize(samples, 0.0);
+				feed.ring.read(scratch);
+				for (out, sample) in lane.block.iter_mut().zip(scratch.iter()) {
+					*out += *sample;
+				}
+			} else {
+				lane.block.clear();
+				lane.block.resize(samples, 0.0);
+				feed.ring.read(&mut lane.block);
+				lane.fed = true;
 			}
 		}
-		for feed in feeds {
-			scratch.resize(samples, 0.0);
-			feed.ring.read(scratch);
-			if stereo {
-				apply_pan(scratch, self.panned, pan, feed.mono);
-			}
-			for (out, sample) in self.block.iter_mut().zip(scratch.iter()) {
-				*out += *sample;
-			}
-		}
-		self.panned = pan;
 
-		// The sync delay: hold back exactly this many samples. A change inserts
-		// silence or skips ahead once, which a calibration rarely makes.
+		// Delay, then pan, so a pan change applies from this block on.
 		let delay = self.strip.delay();
 		let held = (u128::from(sample_rate) * delay.as_nanos() / 1_000_000_000) as usize * channels;
-		if held > 0 || !self.delay.is_empty() {
-			while self.delay.len() < held {
-				self.delay.push_front(0.0);
+		let pan = self.strip.pan();
+		let mut first = true;
+		for (mono, lane) in [false, true].into_iter().zip(&mut self.lanes) {
+			if !lane.fed {
+				// Nothing new, but audio held back from a closed channel plays out.
+				if lane.delay.is_empty() {
+					continue;
+				}
+				lane.block.clear();
+				lane.block.resize(samples, 0.0);
 			}
-			if self.delay.len() > held {
-				self.delay.drain(..self.delay.len() - held);
+			lane.delay(held, samples);
+			if stereo {
+				apply_pan(&mut lane.block, self.panned, pan, mono);
 			}
-			self.delay.extend(self.block.iter().copied());
-			for (out, sample) in self.block.iter_mut().zip(self.delay.drain(..samples)) {
-				*out = sample;
+			if first {
+				std::mem::swap(&mut self.block, &mut lane.block);
+				first = false;
+			} else {
+				for (out, sample) in self.block.iter_mut().zip(&lane.block) {
+					*out += *sample;
+				}
 			}
 		}
+		if first {
+			self.block.clear();
+			self.block.resize(samples, 0.0);
+		}
+		self.panned = pan;
 
 		// Ramp across the block rather than stepping, so a fader move or a mute
 		// never clicks.
@@ -1657,6 +1702,27 @@ mod tests {
 		for frame in frames {
 			let power = frame[0] * frame[0] + frame[1] * frame[1];
 			assert!((power - 0.25).abs() < 1e-4, "constant power: {frame:?}");
+		}
+	}
+
+	/// A pan change reaches audio the sync delay already holds back, as gain
+	/// does, rather than waiting out the delay.
+	#[test]
+	fn pan_applies_after_the_sync_delay() {
+		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
+		let strip = Strip::default();
+		let mut channel = bus.channel(input(48_000, Layout::Mono), strip.clone()).unwrap();
+		strip.set_delay(Duration::from_millis(100));
+		strip.set_pan(-1.0).unwrap();
+		let program = bus.mix();
+		program.route(&strip);
+		let mut reader = program.reader();
+		feed(&mut driver, &mut [(&mut channel, 0.5)], &mut [&mut reader], 30);
+
+		strip.set_pan(1.0).unwrap();
+		let last = feed(&mut driver, &mut [(&mut channel, 0.5)], &mut [&mut reader], 2);
+		for frame in last[0].data.as_chunks::<2>().0 {
+			assert!(frame[0].abs() < 1e-4 && (frame[1] - 0.5).abs() < 1e-4, "{frame:?}");
 		}
 	}
 
