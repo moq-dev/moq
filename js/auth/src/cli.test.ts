@@ -79,16 +79,24 @@ describe("sign", () => {
 		return JSON.parse(Buffer.from(payload, "base64url").toString()).exp;
 	}
 
+	/** The `exp` `args` write, with the wall seconds bracketing the subprocess that wrote it. */
+	function bracketed(...args: string[]) {
+		const before = Math.floor(wall() / 1000);
+		const value = exp(...args) ?? 0;
+		const after = Math.floor(wall() / 1000);
+		return { before, value, after };
+	}
+
 	test("writes an hour of exp by default", () => {
-		const now = Math.floor(wall() / 1000);
-		const value = exp() ?? 0;
-		expect(value).toBeGreaterThanOrEqual(now + 3600);
-		expect(value).toBeLessThanOrEqual(now + 3602);
+		const { before, value, after } = bracketed();
+		expect(value).toBeGreaterThanOrEqual(before + 3600);
+		expect(value).toBeLessThanOrEqual(after + 3600);
 	});
 
 	test("--ttl, --expires, and --unbounded pick the exp", () => {
-		const now = Math.floor(wall() / 1000);
-		expect(exp("--ttl", "1d")).toBeGreaterThanOrEqual(now + 86400);
+		const { before, value, after } = bracketed("--ttl", "1d");
+		expect(value).toBeGreaterThanOrEqual(before + 86400);
+		expect(value).toBeLessThanOrEqual(after + 86400);
 		expect(exp("--expires", "4102444800")).toBe(4102444800);
 		expect(exp("--unbounded")).toBeUndefined();
 		const conflict = Bun.spawnSync(["bun", CLI, "sign", "--key", key, "--unbounded", "--ttl", "1d"]);
